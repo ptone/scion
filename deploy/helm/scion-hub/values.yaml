@@ -14,10 +14,25 @@
 
 # Default values for scion-hub.
 #
-# This chart is being built incrementally. Only the values below are understood
-# today; values.schema.json rejects anything else, so an unknown key is an error
-# rather than a silent no-op. Cloud SQL, Filestore and Ingress are added by
-# later changes and bring their own values.
+# Only the values below are understood; values.schema.json rejects anything
+# else, so an unknown key is an error rather than a silent no-op.
+#
+# What the chart renders today:
+#   - one Deployment running the hub, its web UI and an in-process runtime
+#     broker, behind a ClusterIP Service (image, hub, probes, service);
+#   - the ServiceAccount, and a Role/RoleBinding (or ClusterRole/Binding) that
+#     lets the broker manage agent pods (serviceAccount, rbac, runtime, agents);
+#   - settings.yaml in a Secret, or an existing Secret you supply (config);
+#   - the database: SQLite in the pod's emptyDir by default, or Postgres on
+#     Cloud SQL through a Cloud SQL Auth Proxy sidecar (database, cloudsql);
+#   - the hub's blob store, local or GCS (storage), and its secrets backend,
+#     local or GCP Secret Manager (secrets);
+#   - authentication through IAP or OAuth, with agent transport auth, and the
+#     session secret (auth).
+#
+# What it does not render: an Ingress or load balancer (bring your own, or use
+# deploy/terraform/configurations/hub-gke, which creates one), and the Filestore
+# workspace share for agents (server.workspace_storage).
 
 nameOverride: ""
 fullnameOverride: ""
