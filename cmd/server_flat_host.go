@@ -516,9 +516,36 @@ func flatOwnershipPreflight(ctx context.Context, c brokerhost.Candidate) error {
 			"drain or recreate them through the Runtime Broker that created them before activating this instance",
 			len(unresolved), strings.Join(unresolved, ", "))
 	}
+	// Per-launch child objects carrying this instance's owner label are
+	// recovered on their own (a crash after a child was created but before
+	// its handle was recorded, with or without a main object). A listing
+	// failure refuses: it is never read as absence.
+	if lister, ok := c.Runtime.(runtime.OwnedResourceLister); ok {
+		children, err := lister.ListOwnedResources(ctx, c.Identity.RuntimeBrokerID)
+		if err != nil {
+			return fmt.Errorf("cannot read this instance's child objects to establish ownership: %w", err)
+		}
+		var unresolvedChildren []string
+		for _, ch := range children {
+			if err := records.ReconstructChild(ch.Labels, ch.Handle); err != nil {
+				unresolvedChildren = append(unresolvedChildren, fmt.Sprintf("%s %s/%s (%v)", ch.Handle.Kind, ch.Handle.Namespace, ch.Handle.Name, err))
+			}
+		}
+		if len(unresolvedChildren) > 0 {
+			sort.Strings(unresolvedChildren)
+			return fmt.Errorf("%d child object(s) of this instance have unresolved ownership: %s; drain or recreate them through the Runtime Broker that created them before activating this instance",
+				len(unresolvedChildren), strings.Join(unresolvedChildren, ", "))
+		}
+	}
 	// The listing above was complete (a failed read refused before this),
-	// so recorded main objects it does not show are confirmed gone.
-	if _, err := records.ReconcileAbsent(objects); err != nil {
+	// so recorded main objects it does not show are confirmed gone; other
+	// recorded objects are confirmed gone only by the runtime's exact
+	// absence check, and what that allows is finished.
+	var absent func(api.ResourceHandle) (bool, error)
+	if checker, ok := c.Runtime.(runtime.ResourceAbsenceChecker); ok {
+		absent = func(h api.ResourceHandle) (bool, error) { return checker.ResourceAbsent(ctx, h) }
+	}
+	if _, err := records.ReconcileAbsent(objects, absent, slog.Warn); err != nil {
 		return fmt.Errorf("ownership records cannot be reconciled with the execution scope: %w", err)
 	}
 	problems, err := records.RepairSlugIndex()

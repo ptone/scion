@@ -307,3 +307,123 @@ func TestFlatOwnershipPreflight_UnfinishedDeleteDoesNotRefuse(t *testing.T) {
 		})
 	}
 }
+
+// childScopeRuntime is a scope with main objects (List), owned child
+// objects (ListOwnedResources) and an exact absence check.
+type childScopeRuntime struct {
+	*runtime.MockRuntime
+	children    []runtime.OwnedResource
+	childrenErr error
+	absent      func(api.ResourceHandle) (bool, error)
+}
+
+func (r *childScopeRuntime) ListOwnedResources(context.Context, string) ([]runtime.OwnedResource, error) {
+	return r.children, r.childrenErr
+}
+
+func (r *childScopeRuntime) ResourceAbsent(_ context.Context, h api.ResourceHandle) (bool, error) {
+	return r.absent(h)
+}
+
+func childLabels(agentID string) map[string]string {
+	l := map[string]string{api.LabelRuntimeBrokerID: "rb-a", "scion.project_id": "proj-1", "scion.name": "worker", api.LabelRunID: "run-1"}
+	if agentID != "" {
+		l[api.LabelAgentID] = agentID
+	}
+	return l
+}
+
+// TestFlatOwnershipPreflight_ChildRecovery: the start-up preflight
+// recovers a fully identified child object of this instance on its own (a
+// crash after the child was created but before its handle was recorded,
+// with no main object), refuses an incomplete (historical) one and a child
+// listing failure, and keeps recorded children whose absence cannot be
+// established (a read failure, or a child still terminating) while
+// marking a confirmed-gone one absent.
+func TestFlatOwnershipPreflight_ChildRecovery(t *testing.T) {
+	ctx := context.Background()
+	secret := func(name, uid string) api.ResourceHandle {
+		return api.ResourceHandle{Kind: api.ResourceKindSecret, Namespace: "agents", Name: name, UID: uid}
+	}
+	candidate := func(rt runtime.Runtime) brokerhost.Candidate {
+		return brokerhost.Candidate{
+			Instance: config.V1RuntimeBrokerInstanceConfig{Key: "k8s-a", Name: "a", RuntimeTarget: &config.V1RuntimeTargetConfig{Type: "kubernetes"}},
+			Identity: &brokeridentity.Identity{InstanceKey: "k8s-a", RuntimeBrokerID: "rb-a"},
+			Runtime:  rt,
+		}
+	}
+	noObjects := &runtime.MockRuntime{ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) { return nil, nil }}
+	store := func(t *testing.T) *runtimebroker.OwnershipStore {
+		dir, err := runtimebroker.DefaultStateDir("rb-a")
+		require.NoError(t, err)
+		return runtimebroker.NewOwnershipStore(dir, "rb-a")
+	}
+
+	t.Run("child-only crash window", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		st := store(t)
+		require.NoError(t, st.BeginRun("proj-1", "agent-1", "worker", "run-1")) // recorded before any create
+		rt := &childScopeRuntime{MockRuntime: noObjects,
+			children: []runtime.OwnedResource{{Handle: secret("scion-auth-worker", "uid-child"), Labels: childLabels("agent-1")}},
+			absent:   func(api.ResourceHandle) (bool, error) { return false, nil }}
+		require.NoError(t, flatOwnershipPreflight(ctx, candidate(rt)))
+		rec, ok, err := st.Get("proj-1", "agent-1")
+		require.NoError(t, err)
+		require.True(t, ok)
+		assert.True(t, rec.OwnsUID("uid-child"), "the orphaned child is recovered into its run")
+	})
+
+	t.Run("child with no record at all", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		rt := &childScopeRuntime{MockRuntime: noObjects,
+			children: []runtime.OwnedResource{{Handle: secret("scion-auth-worker", "uid-child"), Labels: childLabels("agent-1")}},
+			absent:   func(api.ResourceHandle) (bool, error) { return false, nil }}
+		require.NoError(t, flatOwnershipPreflight(ctx, candidate(rt)))
+		rec, ok, err := store(t).Get("proj-1", "agent-1")
+		require.NoError(t, err)
+		require.True(t, ok, "the record is rebuilt from the child's complete labels")
+		assert.True(t, rec.OwnsUID("uid-child"))
+	})
+
+	t.Run("historical child without agent ID", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		rt := &childScopeRuntime{MockRuntime: noObjects,
+			children: []runtime.OwnedResource{{Handle: secret("scion-auth-old", "uid-old"), Labels: childLabels("")}},
+			absent:   func(api.ResourceHandle) (bool, error) { return false, nil }}
+		err := flatOwnershipPreflight(ctx, candidate(rt))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "scion-auth-old")
+	})
+
+	t.Run("child listing failure", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		rt := &childScopeRuntime{MockRuntime: noObjects, childrenErr: errors.New("forbidden"),
+			absent: func(api.ResourceHandle) (bool, error) { return false, nil }}
+		err := flatOwnershipPreflight(ctx, candidate(rt))
+		require.Error(t, err, "a per-kind read failure refuses; it is never read as absence")
+	})
+
+	t.Run("recorded children: read failure, terminating, gone", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		st := store(t)
+		require.NoError(t, st.BeginRun("proj-1", "agent-1", "worker", "run-1"))
+		for _, uid := range []string{"uid-unreadable", "uid-terminating", "uid-gone"} {
+			require.NoError(t, st.AddResource("proj-1", "agent-1", "run-1", secret("s-"+uid, uid)))
+		}
+		rt := &childScopeRuntime{MockRuntime: noObjects, absent: func(h api.ResourceHandle) (bool, error) {
+			switch h.UID {
+			case "uid-unreadable":
+				return false, errors.New("timeout")
+			case "uid-terminating":
+				return false, nil
+			}
+			return true, nil
+		}}
+		require.NoError(t, flatOwnershipPreflight(ctx, candidate(rt)))
+		rec, _, err := st.Get("proj-1", "agent-1")
+		require.NoError(t, err)
+		assert.True(t, rec.OwnsUID("uid-unreadable"), "a read failure keeps the child recorded")
+		assert.True(t, rec.OwnsUID("uid-terminating"), "a terminating child stays recorded")
+		assert.False(t, rec.OwnsUID("uid-gone"), "a confirmed-gone child is marked absent")
+	})
+}

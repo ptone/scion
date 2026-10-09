@@ -28,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 // Durable ownership records of a flat Runtime Broker instance
@@ -96,6 +97,10 @@ type OwnershipRecord struct {
 	State           string     `json:"state"`
 	Runs            []OwnedRun `json:"runs"`
 	UpdatedAt       time.Time  `json:"updatedAt"`
+	// FilesRemoved is set once a whole-agent delete removed the agent's
+	// files (the runtime delete and file removal succeeded); only then may
+	// the start-up reconciliation finish the record and release the slug.
+	FilesRemoved bool `json:"filesRemoved,omitempty"`
 }
 
 // Run returns the run with this ID, or nil.
@@ -106,6 +111,19 @@ func (r *OwnershipRecord) Run(runID string) *OwnedRun {
 		}
 	}
 	return nil
+}
+
+// OwnsUIDAny reports whether any run recorded the object with this UID and
+// its absence has not been established, whatever the record's state.
+func (r *OwnershipRecord) OwnsUIDAny(uid string) bool {
+	for _, run := range r.Runs {
+		for _, res := range run.Resources {
+			if res.UID == uid && res.State == OwnedResourceRecorded {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // OwnsUID reports whether a run of an active record recorded the object with
@@ -132,6 +150,9 @@ var (
 	ErrOwnershipStateOrder  = errors.New("ownership state cannot move backwards")
 	ErrOwnershipUnreadable  = errors.New("ownership record unreadable")
 	ErrOwnershipConflict    = errors.New("ownership is claimed by more than one configured Runtime Broker instance")
+	// ErrOwnershipSlugPending is a slug still reserved by an agent whose
+	// delete has not yet confirmed that all its objects are gone.
+	ErrOwnershipSlugPending = errors.New("agent slug is still reserved by an earlier delete whose cleanup is unconfirmed")
 )
 
 // OwnershipAgentKey and OwnershipSlugKey are the ownership keys compared
@@ -363,6 +384,10 @@ func (s *OwnershipStore) BeginRun(projectID, agentID, slug, runID string) error 
 		return err
 	}
 	if holder != "" && holder != agentID {
+		if held, found, _ := s.readFile(projectID, holder); found && held.State != OwnershipStateActive {
+			return fmt.Errorf("%w: slug %q in project %q on Runtime Broker instance %s: the delete of agent %s has not yet confirmed that all its objects are gone",
+				ErrOwnershipSlugPending, slug, projectID, s.brokerID, holder)
+		}
 		return fmt.Errorf("%w: slug %q in project %q is held by agent %s", ErrOwnershipSlugHeld, slug, projectID, holder)
 	}
 	if !ok {
@@ -461,6 +486,16 @@ func (s *OwnershipStore) SetRecordState(projectID, agentID, state string) error 
 				r.Runs[i].State = OwnershipStateDeleted
 			}
 		}
+		return nil
+	})
+	return err
+}
+
+// MarkFilesRemoved records that a whole-agent delete removed the agent's
+// files.
+func (s *OwnershipStore) MarkFilesRemoved(projectID, agentID string) error {
+	_, err := s.mutate(projectID, agentID, func(r *OwnershipRecord) error {
+		r.FilesRemoved = true
 		return nil
 	})
 	return err
@@ -1049,20 +1084,52 @@ func (s *Server) finishCleanedRun(k ownedRunKey, handles []api.ResourceHandle) {
 	if s.ownership == nil || k.runID == "" {
 		return
 	}
-	for _, h := range handles {
-		if h.UID == "" {
-			continue
-		}
-		if err := s.ownership.MarkAbsent(k.projectID, k.agentID, h.UID); err != nil {
-			return
-		}
-	}
 	if err := s.ownership.SetRunState(k.projectID, k.agentID, k.runID, OwnershipStateDeleting); err != nil {
+		return
+	}
+	// A delete request is not absence: the run is finished only when every
+	// object is confirmed gone; otherwise it stays deleting with the
+	// unconfirmed objects recorded, for the next delete or reconciliation.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	if !s.markConfirmedAbsent(ctx, k.projectID, k.agentID, handles) {
 		return
 	}
 	if err := s.ownership.SetRunState(k.projectID, k.agentID, k.runID, OwnershipStateDeleted); err != nil {
 		s.agentLifecycleLog.Warn("A cleaned-up run was not marked deleted", "run_id", k.runID, "error", err)
 	}
+}
+
+// markConfirmedAbsent checks each handle with the runtime's exact absence
+// check and marks the confirmed ones absent. It reports whether every
+// handle is confirmed gone. Without the capability, or on a check error or
+// an object still present (terminating included), that handle stays
+// recorded.
+func (s *Server) markConfirmedAbsent(ctx context.Context, projectID, agentID string, handles []api.ResourceHandle) bool {
+	checker, _ := s.currentRuntime().(scionrt.ResourceAbsenceChecker)
+	all := true
+	for _, h := range handles {
+		if h.UID == "" {
+			continue
+		}
+		absent := false
+		if checker != nil {
+			gone, err := checker.ResourceAbsent(ctx, h)
+			if err != nil {
+				s.agentLifecycleLog.Warn("Could not establish whether an object is gone; it stays recorded and is checked again by the next delete or start-up",
+					"agent_id", agentID, "project_id", projectID, "kind", h.Kind, "namespace", h.Namespace, "name", h.Name, "uid", h.UID, "error", err)
+			}
+			absent = err == nil && gone
+		}
+		if !absent {
+			all = false
+			continue
+		}
+		if err := s.ownership.MarkAbsent(projectID, agentID, h.UID); err != nil {
+			return false
+		}
+	}
+	return all
 }
 
 // Reconstruct ensures the record of a runtime object that carries this
@@ -1155,23 +1222,30 @@ func reconstructedHandle(o api.AgentInfo, uid string) api.ResourceHandle {
 	return h
 }
 
-// ReconcileAbsent records what a COMPLETE read of the instance's execution
-// scope (every scion agent object, present) proves gone; the caller must
-// not call it after a failed or partial read (an inspection failure is
-// never absence). For every live or deleting record of this instance (not
-// conflicting):
+// ReconcileAbsent records what the start-up read of the instance's
+// execution scope proves gone and finishes what that allows. present is a
+// COMPLETE read of every scion agent object (the caller must not call it
+// after a failed or partial read: an inspection failure is never absence);
+// absent, when set, is the runtime's exact absence check by immutable
+// identity (runtime.ResourceAbsenceChecker); warn receives check failures.
+// For every live or deleting record of this instance (not conflicting):
 //   - a recorded main object (container or pod) that no listed object
 //     matches is marked absent. Matching is deliberately loose (any of the
 //     object's IDs, by prefix, or its name): a doubtful match keeps the
-//     object recorded rather than marking a live one absent. Child objects
-//     (secrets, volumes) are not in the listing and stay recorded.
+//     object recorded rather than marking a live one absent.
+//   - any other recorded object (children, and main objects of a deleting
+//     run or record) is checked with absent; only a confirmed absence marks
+//     it, and a check failure keeps it recorded (retried next time).
+//   - a deleting run whose objects are all absent is finished as deleted;
+//     a deleting record whose files were removed and whose objects are all
+//     absent is finished as deleted and its slug released.
 //   - an older provisioning run (not the record's latest run) that
 //     recorded no object still present is finished as deleted: its start
 //     ended without completing. The latest run is kept, since it may be a
 //     created agent that has not started yet.
 //
-// It returns the number of objects marked absent and runs finished.
-func (s *OwnershipStore) ReconcileAbsent(present []api.AgentInfo) (int, error) {
+// It returns the number of changes it made.
+func (s *OwnershipStore) ReconcileAbsent(present []api.AgentInfo, absent func(api.ResourceHandle) (bool, error), warn func(msg string, args ...any)) (int, error) {
 	recs, err := s.List()
 	if err != nil {
 		return 0, err
@@ -1181,33 +1255,117 @@ func (s *OwnershipStore) ReconcileAbsent(present []api.AgentInfo) (int, error) {
 		if r.State == OwnershipStateDeleted || s.agentConflict(r.ProjectID, r.AgentID) != nil {
 			continue
 		}
-		for i, run := range r.Runs {
+		for _, run := range r.Runs {
 			for _, res := range run.Resources {
-				if res.State != OwnedResourceRecorded || (res.Kind != api.ResourceKindContainer && res.Kind != api.ResourceKindPod) {
+				if res.State != OwnedResourceRecorded {
 					continue
 				}
-				if objectListed(res, present) {
+				main := res.Kind == api.ResourceKindContainer || res.Kind == api.ResourceKindPod
+				if main && !objectListed(res, present) {
+					if err := s.MarkAbsent(r.ProjectID, r.AgentID, res.UID); err != nil {
+						return changed, err
+					}
+					changed++
 					continue
 				}
-				if err := s.MarkAbsent(r.ProjectID, r.AgentID, res.UID); err != nil {
+				if absent == nil || (main && r.State == OwnershipStateActive && runStateOrder[run.State] < runStateOrder[OwnershipStateDeleting]) {
+					continue // a listed main object of a live run is present
+				}
+				h := api.ResourceHandle{Kind: res.Kind, Namespace: res.Namespace, Name: res.Name, UID: res.UID}
+				gone, err := absent(h)
+				if err != nil {
+					if warn != nil {
+						warn("Could not establish whether a recorded object is gone; it stays recorded", "agent_id", r.AgentID, "project_id", r.ProjectID,
+							"kind", res.Kind, "namespace", res.Namespace, "name", res.Name, "uid", res.UID, "error", err)
+					}
+					continue
+				}
+				if gone {
+					if err := s.MarkAbsent(r.ProjectID, r.AgentID, res.UID); err != nil {
+						return changed, err
+					}
+					changed++
+				}
+			}
+		}
+		cur, ok, err := s.Get(r.ProjectID, r.AgentID)
+		if err != nil {
+			return changed, err
+		}
+		if !ok {
+			continue
+		}
+		for i, run := range cur.Runs {
+			switch {
+			case run.State == OwnershipStateDeleting && !runHasRecordedObject(&cur.Runs[i]):
+				if err := s.SetRunState(r.ProjectID, r.AgentID, run.RunID, OwnershipStateDeleted); err != nil {
 					return changed, err
 				}
 				changed++
-			}
-			if i == len(r.Runs)-1 || run.State != OwnershipStateProvisioning {
-				continue
-			}
-			if cur, ok, err := s.Get(r.ProjectID, r.AgentID); err != nil {
-				return changed, err
-			} else if ok && !runHasRecordedObject(cur.Run(run.RunID)) {
+			case run.State == OwnershipStateProvisioning && i != len(cur.Runs)-1 && !runHasRecordedObject(&cur.Runs[i]):
 				if err := s.SetRunState(r.ProjectID, r.AgentID, run.RunID, OwnershipStateDeleted); err != nil {
 					return changed, err
 				}
 				changed++
 			}
 		}
+		if cur.State == OwnershipStateDeleting && cur.FilesRemoved && allResourcesAbsent(cur) {
+			if err := s.SetRecordState(r.ProjectID, r.AgentID, OwnershipStateDeleted); err != nil {
+				return changed, err
+			}
+			if err := s.ReleaseSlug(r.ProjectID, r.AgentID); err != nil {
+				return changed, err
+			}
+			changed++
+		}
 	}
 	return changed, nil
+}
+
+// ReconstructChild records a launch child object (found by the instance's
+// owner label) whose labels identify it completely: owner, project ID,
+// agent ID, slug and run, plus its kind, namespace, name and UID. It covers
+// a crash after the child was created but before its handle was recorded,
+// with or without a main object. A child of a deleting record or run is
+// known and pending deletion; a child of a finished run, or one whose labels
+// are incomplete or contradict the record, is unresolved (an error).
+func (s *OwnershipStore) ReconstructChild(labels map[string]string, h api.ResourceHandle) error {
+	if labels[api.LabelRuntimeBrokerID] != s.brokerID {
+		return fmt.Errorf("object %s is not labelled for this instance", h.Name)
+	}
+	projectID, agentID := labels["scion.project_id"], labels[api.LabelAgentID]
+	slug, runID := labels["scion.name"], labels[api.LabelRunID]
+	if projectID == "" || agentID == "" || slug == "" || runID == "" || h.UID == "" || h.Name == "" || h.Kind == "" {
+		return fmt.Errorf("child %s %s/%s: labels are incomplete (project, agent, name and run are all required)", h.Kind, h.Namespace, h.Name)
+	}
+	rec, ok, err := s.Get(projectID, agentID)
+	if err != nil {
+		return err
+	}
+	if ok {
+		if rec.AgentSlug != slug {
+			return fmt.Errorf("record names slug %q, the child %q", rec.AgentSlug, slug)
+		}
+		if rec.State == OwnershipStateDeleting {
+			return nil
+		}
+		if run := rec.Run(runID); run != nil {
+			if run.State == OwnershipStateDeleting {
+				return nil
+			}
+			if runStateOrder[run.State] >= runStateOrder[OwnershipStateDeleted] {
+				return fmt.Errorf("child %s of run %s, which is %s", h.Name, runID, run.State)
+			}
+			if rec.OwnsUID(h.UID) {
+				return nil
+			}
+			return s.AddResource(projectID, agentID, runID, h)
+		}
+	}
+	if err := s.BeginRun(projectID, agentID, slug, runID); err != nil {
+		return err
+	}
+	return s.AddResource(projectID, agentID, runID, h)
 }
 
 // objectListed reports whether any listed object may be the recorded one.
@@ -1302,6 +1460,25 @@ func (s *Server) ownedDeleteTarget(projectID, slug string, hasObject bool) (*Own
 		return nil, nil
 	}
 	return rec, nil
+}
+
+// finishPendingOwnedDelete retries the finish of an earlier whole-agent
+// delete of the agent holding slug whose objects were not yet all
+// confirmed gone (its record is deleting). It does nothing for a legacy
+// Runtime Broker or when no such record holds the slug.
+func (s *Server) finishPendingOwnedDelete(ctx context.Context, projectID, slug string) {
+	if s.ownership == nil || projectID == "" {
+		return
+	}
+	agentID, err := s.ownership.SlugHolder(projectID, slug)
+	if err != nil || agentID == "" {
+		return
+	}
+	rec, ok, err := s.ownership.Get(projectID, agentID)
+	if err != nil || !ok || rec.State != OwnershipStateDeleting || !rec.FilesRemoved {
+		return
+	}
+	s.finishOwnedDelete(ctx, s.currentManager(), &ownedDelete{projectID: projectID, agentID: agentID, wholeRecord: true})
 }
 
 // leftoverCleanupAllowed reports whether a name-scoped leftover cleanup may
@@ -1410,19 +1587,28 @@ func (s *Server) finishOwnedDelete(ctx context.Context, mgr agent.Manager, od *o
 			}
 		}
 	}
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+	defer cancel()
 	if len(handles) > 0 && mgr != nil {
-		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
-		defer cancel()
 		if err := mgr.CleanupLaunch(cctx, handles); err != nil {
-			s.agentLifecycleLog.Warn("Agent delete: could not confirm every recorded object is gone; ownership record kept deleting",
+			s.agentLifecycleLog.Warn("Agent delete: could not remove every recorded object; ownership record kept deleting",
 				"agent_id", od.agentID, "project_id", od.projectID, "run_id", od.runID, "error", err)
 			return
 		}
 	}
-	for _, h := range handles {
-		if err := s.ownership.MarkAbsent(od.projectID, od.agentID, h.UID); err != nil {
+	if od.wholeRecord {
+		// The runtime delete and the file removal succeeded before this.
+		if err := s.ownership.MarkFilesRemoved(od.projectID, od.agentID); err != nil {
 			return
 		}
+	}
+	// A delete request is not absence (a deletion may still be pending):
+	// only objects confirmed gone are marked absent, and the run or record
+	// is finished only when every one is.
+	if !s.markConfirmedAbsent(cctx, od.projectID, od.agentID, handles) {
+		s.agentLifecycleLog.Info("Agent delete: not every recorded object is confirmed gone yet; ownership record kept deleting",
+			"agent_id", od.agentID, "project_id", od.projectID, "run_id", od.runID)
+		return
 	}
 	if !od.wholeRecord {
 		if err := s.ownership.SetRunState(od.projectID, od.agentID, od.runID, OwnershipStateDeleted); err != nil {

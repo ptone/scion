@@ -27,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 // Ownership-negative coverage for a flat instance (ptone/scion#3274, P2.3
@@ -323,6 +324,7 @@ func TestFlatOwnership_DeleteTransitionsRecord(t *testing.T) {
 			if cleanupFails {
 				f.mgr.cleanupLaunchErr = errors.New("cannot confirm")
 			}
+			confirmAbsence(f, func(api.ResourceHandle) (bool, error) { return true, nil })
 			w := serveFlat(f.srv, http.MethodDelete, "/api/v1/agents/del-agent?projectId="+flatTestProjectID+"&deleteFiles=true", "")
 			if w.Code >= 400 {
 				t.Fatalf("delete: %d %s", w.Code, w.Body.String())
@@ -417,6 +419,7 @@ func TestFlatOwnership_FailedStartFinishesOnlyItsRun(t *testing.T) {
 			f.seedOwnedAgent(t)
 			f.mgr.createHandles = launchHandles()
 			f.mgr.startErrAfterCreate = errors.New("container exited immediately")
+			confirmAbsence(f, func(api.ResourceHandle) (bool, error) { return true, nil })
 			if cleanupFails {
 				f.mgr.cleanupLaunchErr = errors.New("delete refused")
 			}
@@ -476,6 +479,7 @@ func TestFlatOwnership_AsyncLaunchCleanupFinishesOnlyItsRun(t *testing.T) {
 	if err := st.AddResource(flatTestProjectID, flatTestAgentID, "run-async", h); err != nil {
 		t.Fatal(err)
 	}
+	confirmAbsence(f, func(api.ResourceHandle) (bool, error) { return true, nil })
 	rec := &launchRecord{ID: "launch-1", RunID: "run-async", Handles: []agent.ResourceHandle{h},
 		ownedRun: ownedRunKey{projectID: flatTestProjectID, agentID: flatTestAgentID, runID: "run-async"}}
 	f.srv.cleanupLaunchResources(f.mgr, rec)
@@ -524,4 +528,9 @@ func TestFlatOwnership_ProvisionOnlyCreateReleasesMirror(t *testing.T) {
 	if _, ok, err := f.srv.ownership.Get(flatTestProjectID, "agent-id-prov-agent"); err != nil || !ok {
 		t.Fatalf("the created agent's record: %v %v", ok, err)
 	}
+}
+
+// confirmAbsence sets the flat instance runtime's exact absence check.
+func confirmAbsence(f *flatInstanceFixture, fn func(api.ResourceHandle) (bool, error)) {
+	f.srv.currentRuntime().(*runtime.MockRuntime).ResourceAbsentFunc = func(_ context.Context, h api.ResourceHandle) (bool, error) { return fn(h) }
 }

@@ -473,6 +473,14 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 			srv.stateDir = dir
 		}
 	}
+	if fi := srv.flatInstance(); fi != nil {
+		// Fail closed: without an exact absence check a deleted agent's
+		// record and slug could never be finished (architecture ruling r10).
+		if _, ok := rt.(scionrt.ResourceAbsenceChecker); !ok {
+			srv.ownershipSetupErr = fmt.Errorf("flat Runtime Broker %s: its runtime (%T) cannot confirm that a deleted object is gone, so it cannot serve as a flat instance", fi.Identity.RuntimeBrokerID, rt)
+			slog.Error("Flat Runtime Broker instance will not serve", "error", srv.ownershipSetupErr)
+		}
+	}
 	if fi := srv.flatInstance(); fi != nil && srv.stateDir == "" {
 		// Fail closed: without a state root there are no ownership records.
 		srv.ownershipSetupErr = fmt.Errorf("flat Runtime Broker %s: no state directory for its ownership records", fi.Identity.RuntimeBrokerID)

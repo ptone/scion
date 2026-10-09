@@ -47,6 +47,11 @@ type sharedDaemon struct {
 	calls   []string // "stop:<id>", "delete:<id>", "logs:<id>", "exec:<id>", "deleteResource:<uid>"
 	// ownedCleanupErr, when set, fails every owner-scoped leftover cleanup.
 	ownedCleanupErr error
+	// absentErr, when set, fails every exact absence check.
+	absentErr error
+	// keepOnDelete leaves deleted objects in place (a deletion still
+	// pending, e.g. a terminating pod).
+	keepOnDelete bool
 }
 
 func (d *sharedDaemon) add(o api.AgentInfo) {
@@ -106,7 +111,39 @@ type daemonRuntime struct {
 
 func (r *daemonRuntime) DeleteResource(_ context.Context, h api.ResourceHandle) error {
 	r.d.record("deleteResource:" + h.UID)
+	r.d.remove(h.UID)
 	return nil
+}
+
+// ResourceAbsent is the daemon's exact absence check: an object is gone
+// once no object with that ID remains (absentErr, when set, fails it).
+func (r *daemonRuntime) ResourceAbsent(_ context.Context, h api.ResourceHandle) (bool, error) {
+	r.d.mu.Lock()
+	defer r.d.mu.Unlock()
+	if r.d.absentErr != nil {
+		return false, r.d.absentErr
+	}
+	for _, o := range r.d.objects {
+		if o.ContainerID == h.UID || o.ID == h.UID {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func (d *sharedDaemon) remove(id string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.keepOnDelete {
+		return
+	}
+	kept := d.objects[:0]
+	for _, o := range d.objects {
+		if o.ContainerID != id && o.ID != id {
+			kept = append(kept, o)
+		}
+	}
+	d.objects = kept
 }
 
 // CleanupAgentResources is the runtime's name+project leftover cleanup
@@ -137,6 +174,7 @@ func newDaemonRuntime(d *sharedDaemon) *daemonRuntime {
 		},
 		DeleteFunc: func(_ context.Context, ref runtime.RunRef) error {
 			d.record("delete:" + ref.ID)
+			d.remove(ref.ID)
 			return nil
 		},
 		GetLogsFunc: func(_ context.Context, id string) (string, error) {

@@ -2411,6 +2411,9 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 				s.writeRuntimeOpError(w, ctx, "delete agent", cleanErr, "agent_id", id, "project_id", projectID)
 				return
 			}
+			// A flat instance's earlier delete of this agent may still be
+			// waiting for its objects to be confirmed gone: retry that.
+			s.finishPendingOwnedDelete(ctx, projectID, api.Slugify(id))
 			s.agentLifecycleLog.Info("Agent delete: no matching agent in project",
 				"agent_id", id, "project_id", projectID)
 			NotFound(w, "Agent")

@@ -406,7 +406,7 @@ func TestOwnershipStore_ReconstructPodWithUID(t *testing.T) {
 	require.Len(t, res, 1)
 	assert.Equal(t, OwnedResource{Kind: api.ResourceKindPod, Namespace: "agents", Name: "proj-1--worker", UID: "pod-uid-1", State: OwnedResourceRecorded}, res[0])
 
-	n, err := s.ReconcileAbsent([]api.AgentInfo{pod})
+	n, err := s.ReconcileAbsent([]api.AgentInfo{pod}, nil, nil)
 	require.NoError(t, err)
 	assert.Zero(t, n)
 	rec, _, _ = s.Get("proj-1", "agent-1")

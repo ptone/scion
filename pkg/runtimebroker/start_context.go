@@ -242,7 +242,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 		if err := s.beginOwnedRun(in.ProjectID, agentID, slug, in.RunID, in.Operation == opCreate); err != nil {
 			span.SetStatus(codes.Error, err.Error())
-			return nil, &startContextError{Status: http.StatusConflict, Message: "The agent's ownership cannot be recorded by this Runtime Broker instance", OriginalErr: err}
+			msg := "The agent's ownership cannot be recorded by this Runtime Broker instance"
+			if errors.Is(err, ErrOwnershipSlugPending) {
+				msg = fmt.Sprintf("Agent slug %q is still reserved on Runtime Broker instance %s: the cleanup of an earlier delete of this slug is not yet confirmed", slug, s.ownership.RuntimeBrokerID())
+			}
+			return nil, &startContextError{Status: http.StatusConflict, Message: msg, OriginalErr: err}
 		}
 		ownedProjectID, ownedAgentID = in.ProjectID, agentID
 	}
