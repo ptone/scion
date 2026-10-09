@@ -2900,6 +2900,14 @@ func extractAction(r *http.Request, prefix string) (id, action string) {
 	return
 }
 
+// HubConnectionCount returns the number of Hub connections the server has
+// (the connections its control channel and heartbeat run on).
+func (s *Server) HubConnectionCount() int {
+	s.hubMu.RLock()
+	defer s.hubMu.RUnlock()
+	return len(s.hubConnections)
+}
+
 // IsControlChannelConnected reports whether the broker has at least one live
 // control-channel WebSocket. Returns true when no control channel is configured
 // (e.g. Cloud Run stateless brokers) so callers can treat "no channel" as healthy.

@@ -40,6 +40,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"sort"
 	"strings"
@@ -155,6 +156,9 @@ type Config struct {
 	BuildServer ServerBuilder
 	Listener    ListenerConfig
 	Logger      *slog.Logger
+	// ShutdownTimeout bounds the whole shutdown; zero means
+	// runtimebroker.ShutdownDeadline (30s, as for a single Runtime Broker).
+	ShutdownTimeout time.Duration
 }
 
 // InstanceStatus is the reported state of one configured instance.
@@ -186,6 +190,7 @@ type Host struct {
 	instances []*instance
 	prepared  bool
 	httpSrv   *http.Server
+	addr      string
 }
 
 // New validates cfg and returns a Host. Invalid instance configuration
@@ -248,7 +253,10 @@ func (h *Host) Prepare(ctx context.Context) error {
 	h.mu.Unlock()
 
 	// Pass 1: runtime, scope and identity for every candidate. No Hub
-	// registration, heartbeat or control channel.
+	// registration, heartbeat or control channel. Prepare runs on one
+	// goroutine and the Host is not shared until it returns, so the
+	// per-candidate fields below are written without h.mu; state changes
+	// visible through Status take it.
 	var candidates []*instance
 	for _, in := range h.instances {
 		rt, err := h.cfg.NewRuntime(ctx, in.cfg)
@@ -569,8 +577,13 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 // Run starts every active instance's services and the process-wide
-// listener, and blocks until ctx is done (then shuts everything down) or the
-// listener fails. Prepare must have run.
+// listener, and blocks until ctx is done (then shuts everything down within
+// the shutdown bound) or the listener fails. Prepare must have run.
+//
+// An instance whose services fail to start, or (with more than one instance
+// configured) that ends up with no Hub connection, is marked stopped and
+// reported refused: with several instances it is reachable only over its
+// own control channel, so without one it is not ready.
 func (h *Host) Run(ctx context.Context) error {
 	h.mu.RLock()
 	prepared := h.prepared
@@ -579,35 +592,71 @@ func (h *Host) Run(ctx context.Context) error {
 		return errors.New("brokerhost: Run before Prepare")
 	}
 	for _, a := range h.Active() {
-		if err := a.Server.StartServices(ctx); err != nil {
+		err := a.Server.StartServices(ctx)
+		if err == nil && h.MultiInstance() && a.Server.HubConnectionCount() == 0 {
+			err = fmt.Errorf("flat Runtime Broker instance %q has no Hub connection; with several instances configured it is reachable only over its control channel", a.Context.Instance.Key)
+		}
+		if err != nil {
 			h.markStopped(a.Context.Identity.RuntimeBrokerID, err)
-			a.Context.Logger.Error("Runtime Broker instance services failed to start", "error", err)
+			a.Context.Logger.Error("Runtime Broker instance not serving", "error", err)
+			h.cfg.Activator.Refused(a.Context.Instance, err)
+			// Stop whatever the instance did start (hub connections).
+			sctx, cancel := context.WithTimeout(context.Background(), h.shutdownTimeout())
+			_ = a.Server.Shutdown(sctx)
+			cancel()
 		}
 	}
+	ln, err := net.Listen("tcp", fmt.Sprintf("%s:%d", h.cfg.Listener.Host, h.cfg.Listener.Port))
+	if err != nil {
+		h.shutdownInstances(ctx)
+		return err
+	}
+	handler := h.Handler()
 	h.mu.Lock()
 	h.httpSrv = &http.Server{
-		Addr:         fmt.Sprintf("%s:%d", h.cfg.Listener.Host, h.cfg.Listener.Port),
-		Handler:      h.Handler(),
+		Handler:      handler,
 		ReadTimeout:  h.cfg.Listener.ReadTimeout,
 		WriteTimeout: h.cfg.Listener.WriteTimeout,
 	}
+	h.addr = ln.Addr().String()
 	srv := h.httpSrv
 	h.mu.Unlock()
 
 	errCh := make(chan error, 1)
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
 		close(errCh)
 	}()
 	select {
-	case err := <-errCh:
-		h.shutdownInstances(context.Background())
+	case err, ok := <-errCh:
+		sctx, cancel := context.WithTimeout(context.Background(), h.shutdownTimeout())
+		defer cancel()
+		h.shutdownInstances(sctx)
+		if !ok {
+			return nil
+		}
 		return err
 	case <-ctx.Done():
 		return h.Shutdown(context.Background())
 	}
+}
+
+// Addr is the listener's address once Run has started it ("" before).
+func (h *Host) Addr() string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.addr
+}
+
+// shutdownTimeout is the bound on the whole shutdown (instances and the
+// listener drain): runtimebroker.ShutdownDeadline unless configured.
+func (h *Host) shutdownTimeout() time.Duration {
+	if h.cfg.ShutdownTimeout > 0 {
+		return h.cfg.ShutdownTimeout
+	}
+	return runtimebroker.ShutdownDeadline
 }
 
 func (h *Host) markStopped(runtimeBrokerID string, err error) {
@@ -621,8 +670,15 @@ func (h *Host) markStopped(runtimeBrokerID string, err error) {
 }
 
 // Shutdown stops every active instance (each drains its own starts in
-// flight), then the listener.
+// flight), then drains the listener. One deadline bounds both: ctx's, or
+// the shutdown bound when ctx has none, so one open request can never keep
+// the process from exiting.
 func (h *Host) Shutdown(ctx context.Context) error {
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, h.shutdownTimeout())
+		defer cancel()
+	}
 	h.shutdownInstances(ctx)
 	h.mu.RLock()
 	srv := h.httpSrv
@@ -630,7 +686,11 @@ func (h *Host) Shutdown(ctx context.Context) error {
 	if srv == nil {
 		return nil
 	}
-	return srv.Shutdown(ctx)
+	if err := srv.Shutdown(ctx); err != nil {
+		_ = srv.Close()
+		return err
+	}
+	return nil
 }
 
 func (h *Host) shutdownInstances(ctx context.Context) {
