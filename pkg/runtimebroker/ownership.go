@@ -156,6 +156,9 @@ type OwnershipStore struct {
 	// conflicting are keys another configured instance claims too; every
 	// operation on them is refused (set once, before the store is used).
 	conflicting map[string]bool
+	// addResourceFault, set only by tests, fails AddResource for a handle
+	// before anything is written.
+	addResourceFault func(api.ResourceHandle) error
 }
 
 // SetConflicting marks ownership keys (OwnershipAgentKey,
@@ -397,6 +400,11 @@ func (s *OwnershipStore) BeginRun(projectID, agentID, slug, runID string) error 
 func (s *OwnershipStore) AddResource(projectID, agentID, runID string, h api.ResourceHandle) error {
 	if h.UID == "" {
 		return errors.New("ownership: a resource UID is required")
+	}
+	if s.addResourceFault != nil {
+		if err := s.addResourceFault(h); err != nil {
+			return err
+		}
 	}
 	_, err := s.mutate(projectID, agentID, func(r *OwnershipRecord) error {
 		run := r.Run(runID)

@@ -201,6 +201,39 @@ func TestFlatOwnership_FinalResourcePersistFailureUndoesStart(t *testing.T) {
 	}
 }
 
+// TestFlatOwnership_LastResourceMirrorFailureUndoesStart: only recording
+// the LAST created object fails (the record stays writable, so marking the
+// run created would succeed): the start is still undone, through the
+// latched error checked after the runtime returned, and the run is never
+// marked created.
+func TestFlatOwnership_LastResourceMirrorFailureUndoesStart(t *testing.T) {
+	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
+	f.mgr.createHandles = launchHandles()
+	f.srv.ownership.addResourceFault = func(h api.ResourceHandle) error {
+		if h.UID == "uid-container" {
+			return errors.New("injected: recording the last object failed")
+		}
+		return nil
+	}
+	w := flatCreateAccepted(f, "last-agent")
+	if w.Code < 500 {
+		t.Fatalf("status = %d, want a server error: %s", w.Code, w.Body.String())
+	}
+	f.mgr.mu.Lock()
+	calls, handles := f.mgr.cleanupLaunchCalls, f.mgr.lastCleanupLaunchHandles
+	f.mgr.mu.Unlock()
+	if calls != 1 || len(handles) != 2 || handles[0].UID != "uid-secret" || handles[1].UID != "uid-container" {
+		t.Fatalf("cleanup calls=%d handles=%+v, want one cleanup of exactly both journaled objects", calls, handles)
+	}
+	rec, ok, err := f.srv.ownership.Get(flatTestProjectID, "agent-id-last-agent")
+	if err != nil || !ok {
+		t.Fatalf("record: %v %v", ok, err)
+	}
+	if rec.Runs[0].State == OwnershipStateCreated {
+		t.Fatalf("the run was marked created although its last object was not recorded: %+v", rec.Runs[0])
+	}
+}
+
 // TestFlatOwnership_PersistFailureStopsFurtherCreates: once mirroring an
 // object fails, the next resource-creating call is refused.
 func TestFlatOwnership_PersistFailureStopsFurtherCreates(t *testing.T) {
