@@ -83,3 +83,21 @@ func TestEmbeddedFlatInstances_SingleInstanceKeepsP1Semantics(t *testing.T) {
 	assert.Equal(t, err.Error(), f.embeddedBrokerSnapshot().regErr, "a single refusal is reported verbatim")
 	assert.False(t, f.embeddedBrokerSnapshot().pending)
 }
+
+// TestEmbeddedFlatInstances_FailureAfterActivationIsNotEmbedded: an
+// instance recorded as embedded and then reported failed (its services did
+// not start) is no longer embedded, and health shows the failure.
+func TestEmbeddedFlatInstances_FailureAfterActivationIsNotEmbedded(t *testing.T) {
+	s := &Server{}
+	s.mu.Lock()
+	s.recordEmbeddedFlatActivatedLocked("docker-a", "id-a")
+	s.mu.Unlock()
+	require.True(t, s.isEmbeddedBroker("id-a"))
+
+	s.EmbeddedFlatInstanceFailed("docker-a", errors.New("services failed to start"))
+	assert.False(t, s.isEmbeddedBroker("id-a"))
+	assert.Empty(t, s.GetEmbeddedBrokerIDs())
+	checks := map[string]string{}
+	s.checkColocatedBrokerHealth(checks)
+	assert.Equal(t, "unhealthy: registration failed", checks["colocated_broker"])
+}

@@ -1363,6 +1363,7 @@ type Server struct {
 	// instance keys startup expects an outcome for before releasing
 	// waiters (ExpectEmbeddedFlatInstances).
 	embeddedFlatIDs      map[string]bool
+	embeddedFlatByKey    map[string]string // instance key -> activated Runtime Broker ID
 	embeddedFlatFailures map[string]string
 	embeddedFlatOutcomes map[string]bool
 	embeddedFlatExpected []string
@@ -2992,19 +2993,28 @@ func (s *Server) ExpectEmbeddedFlatInstances(keys []string) {
 func (s *Server) recordEmbeddedFlatActivatedLocked(key, brokerID string) {
 	if s.embeddedFlatIDs == nil {
 		s.embeddedFlatIDs = map[string]bool{}
+		s.embeddedFlatByKey = map[string]string{}
 	}
 	s.embeddedFlatIDs[brokerID] = true
+	s.embeddedFlatByKey[key] = brokerID
+	delete(s.embeddedFlatFailures, key)
 	s.markEmbeddedFlatOutcomeLocked(key)
 }
 
 // EmbeddedFlatInstanceFailed records that the co-located flat instance key
-// was not activated (any refusal: configuration, identity, scope conflict,
-// registration or acknowledgement). Every recorded refusal is reported
-// through the co-located registration failure (health and admin summary),
-// so one refused instance is visible even when its siblings activated.
+// was not activated, or stopped serving after activation (any refusal:
+// configuration, identity, scope conflict, registration, acknowledgement,
+// or its services failing to start). An instance recorded as embedded
+// stops being embedded. Every recorded refusal is reported through the
+// co-located registration failure (health and admin summary), so one
+// refused instance is visible even when its siblings activated.
 func (s *Server) EmbeddedFlatInstanceFailed(key string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if id, ok := s.embeddedFlatByKey[key]; ok {
+		delete(s.embeddedFlatIDs, id)
+		delete(s.embeddedFlatByKey, key)
+	}
 	if s.embeddedFlatFailures == nil {
 		s.embeddedFlatFailures = map[string]string{}
 	}
