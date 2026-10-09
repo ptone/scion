@@ -44,11 +44,17 @@ type partitionDaemon struct {
 	mu      sync.Mutex
 	objects []api.AgentInfo
 	deletes []string
+	// name is the runtime name ("docker" when empty).
+	name string
 }
 
 func (d *partitionDaemon) runtime() runtime.Runtime {
+	name := d.name
+	if name == "" {
+		name = "docker"
+	}
 	return &runtime.MockRuntime{
-		NameFunc: func() string { return "docker" },
+		NameFunc: func() string { return name },
 		ListFunc: func(_ context.Context, filter map[string]string) ([]api.AgentInfo, error) {
 			d.mu.Lock()
 			defer d.mu.Unlock()
@@ -99,9 +105,26 @@ func preparePartitionHost(t *testing.T, globalDir string, d *partitionDaemon, ke
 // one daemon ID share an execution scope.
 func preparePartitionHostOn(t *testing.T, globalDir string, daemons map[string]*partitionDaemon, scopes map[string]string) *brokerhost.Host {
 	t.Helper()
+	return preparePartitionHostScoped(t, globalDir, daemons, &config.V1RuntimeTargetConfig{Type: "docker"},
+		func(key string) brokeridentity.ExecutionScope {
+			id := scopes[key]
+			if id == "" {
+				id = "shared-daemon"
+			}
+			return brokeridentity.ExecutionScope{Type: "docker", Docker: &brokeridentity.DockerScope{DaemonID: id}}
+		})
+}
+
+// preparePartitionHostScoped prepares a host whose instances (one per
+// daemons key) have the runtime target target and the execution scope
+// scopeOf(key), with the production ownership preflight and keys.
+func preparePartitionHostScoped(t *testing.T, globalDir string, daemons map[string]*partitionDaemon, target *config.V1RuntimeTargetConfig,
+	scopeOf func(key string) brokeridentity.ExecutionScope) *brokerhost.Host {
+	t.Helper()
 	var instances []config.V1RuntimeBrokerInstanceConfig
 	for key := range daemons {
-		instances = append(instances, config.V1RuntimeBrokerInstanceConfig{Key: key, Name: key, RuntimeTarget: &config.V1RuntimeTargetConfig{Type: "docker"}})
+		tc := *target
+		instances = append(instances, config.V1RuntimeBrokerInstanceConfig{Key: key, Name: key, RuntimeTarget: &tc})
 	}
 	sort.Slice(instances, func(i, j int) bool { return instances[i].Key < instances[j].Key })
 	h, err := brokerhost.New(brokerhost.Config{
@@ -112,11 +135,7 @@ func preparePartitionHostOn(t *testing.T, globalDir string, daemons map[string]*
 			return daemons[in.Key].runtime(), nil
 		},
 		ProbeScope: func(_ context.Context, in config.V1RuntimeBrokerInstanceConfig, _ runtime.Runtime) (brokeridentity.ExecutionScope, error) {
-			id := scopes[in.Key]
-			if id == "" {
-				id = "shared-daemon"
-			}
-			return brokeridentity.ExecutionScope{Type: "docker", Docker: &brokeridentity.DockerScope{DaemonID: id}}, nil
+			return scopeOf(in.Key), nil
 		},
 		Activator: &recordingFlatActivator{},
 		BuildServer: func(ic brokerhost.InstanceContext) (*runtimebroker.Server, error) {
