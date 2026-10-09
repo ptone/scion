@@ -3003,10 +3003,10 @@ func (s *Server) recordEmbeddedFlatActivatedLocked(key, brokerID string) {
 
 // EmbeddedFlatInstanceFailed records that the co-located flat instance key
 // was not activated, or stopped serving after activation (any refusal:
-// configuration, identity, scope conflict, registration, acknowledgement,
-// or its services failing to start). An instance recorded as embedded
-// stops being embedded. Every recorded refusal is reported through the
-// co-located registration failure (health and admin summary), so one
+// configuration, identity, unresolved ownership, registration,
+// acknowledgement, or its services failing to start). An instance recorded as
+// embedded stops being embedded. Every recorded refusal is reported through
+// the co-located registration failure (health and admin summary), so one
 // refused instance is visible even when its siblings activated.
 func (s *Server) EmbeddedFlatInstanceFailed(key string, err error) {
 	s.mu.Lock()
