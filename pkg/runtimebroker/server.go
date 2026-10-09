@@ -316,6 +316,10 @@ type Server struct {
 	// ownedStarts maps a run ID to its in-flight ownership mirror
 	// (installOwnedStart / completeOwnedStart).
 	ownedStarts sync.Map
+	// unmirroredUIDs are object UIDs from the journals of this instance's
+	// launches whose ownership recording failed; launch cleanup may delete
+	// them although the record may lack them (launchHandleOwned).
+	unmirroredUIDs sync.Map
 
 	// auxiliaryRuntimes holds runtime+manager pairs for non-default runtimes
 	// created via profile resolution (e.g. kubernetes when default is docker).
@@ -463,7 +467,7 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 		if am, ok := mgr.(*agent.AgentManager); ok {
 			am.SetOwner(agent.OwnerScope{RuntimeBrokerID: fi.Identity.RuntimeBrokerID,
 				FileAgentOwned: srv.fileAgentOwned, EntryUnresolved: srv.ownership.ConflictingLabels,
-				EntryPathTrusted: trustedEntryProjectPath})
+				EntryPathTrusted: trustedEntryProjectPath, LaunchHandleOwned: srv.launchHandleOwned})
 		}
 	}
 	if srv.stateDir != "" {

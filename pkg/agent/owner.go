@@ -52,6 +52,11 @@ type OwnerScope struct {
 	// convergence of agent-info.json). Nil means no label-derived path is
 	// written.
 	EntryPathTrusted func(projectPath, projectID string) bool
+	// LaunchHandleOwned reports whether CleanupLaunch may delete the object
+	// a launch handle names: the instance recorded it, or it is in the
+	// journal of one of the instance's own launches whose recording
+	// failed. Nil means no handle is owned.
+	LaunchHandleOwned func(h api.ResourceHandle) bool
 }
 
 // SetOwner restricts the manager to one instance's objects. Call it once,
@@ -98,6 +103,15 @@ func (m *AgentManager) mayWriteEntryPath(a api.AgentInfo) bool {
 		return true
 	}
 	return m.owner.EntryPathTrusted != nil && m.owner.EntryPathTrusted(a.ProjectPath, a.Labels["scion.project_id"])
+}
+
+// ownsLaunchHandle reports whether CleanupLaunch may delete the object a
+// handle names: always for a legacy manager.
+func (m *AgentManager) ownsLaunchHandle(h api.ResourceHandle) bool {
+	if m.owner == nil {
+		return true
+	}
+	return m.owner.LaunchHandleOwned != nil && m.owner.LaunchHandleOwned(h)
 }
 
 // listRuntime lists runtime entries, keeping only owned ones for an owned

@@ -232,3 +232,26 @@ func TestOwner_StartVerifiesOnlyItsOwnProjectsAgent(t *testing.T) {
 		})
 	}
 }
+
+// TestOwner_CleanupLaunchDeletesOnlyOwnedHandles: an owned manager deletes
+// (with the UID precondition) only the handles its instance owns; others
+// are reported as not owned and never reach the runtime.
+func TestOwner_CleanupLaunchDeletesOnlyOwnedHandles(t *testing.T) {
+	rt := &uidPreconditionFakeRuntime{Runtime: &runtime.MockRuntime{}}
+	m := &AgentManager{Runtime: rt}
+	m.SetOwner(OwnerScope{RuntimeBrokerID: "broker-a", LaunchHandleOwned: func(h api.ResourceHandle) bool { return h.UID == "uid-mine" }})
+	err := m.CleanupLaunch(context.Background(), []ResourceHandle{
+		{Kind: "pod", Namespace: "ns", Name: "worker", UID: "uid-mine"},
+		{Kind: "pod", Namespace: "ns", Name: "worker", UID: "uid-other"},
+	})
+	require.ErrorIs(t, err, ErrNotOwned)
+	require.Len(t, rt.deleted, 1)
+	assert.Equal(t, "uid-mine", rt.deleted[0].UID)
+	assert.Empty(t, rt.plainDeletes)
+
+	none := &uidPreconditionFakeRuntime{Runtime: &runtime.MockRuntime{}}
+	m = &AgentManager{Runtime: none}
+	m.SetOwner(OwnerScope{RuntimeBrokerID: "broker-a"})
+	require.ErrorIs(t, m.CleanupLaunch(context.Background(), []ResourceHandle{{Kind: "pod", Name: "worker", UID: "uid-mine"}}), ErrNotOwned)
+	assert.Empty(t, none.deleted, "no ownership callback: nothing is deleted")
+}

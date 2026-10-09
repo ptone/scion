@@ -680,6 +680,52 @@ func syncDir(dir string) {
 	}
 }
 
+// RecordsResource reports whether a live or deleting record of this
+// instance recorded the object with this UID and its absence has not been
+// established. Records of conflicting keys never count. An unreadable
+// record is an error.
+func (s *OwnershipStore) RecordsResource(uid string) (bool, error) {
+	if uid == "" {
+		return false, nil
+	}
+	recs, err := s.List()
+	if err != nil {
+		return false, err
+	}
+	for _, r := range recs {
+		if r.State == OwnershipStateDeleted || s.agentConflict(r.ProjectID, r.AgentID) != nil {
+			continue
+		}
+		for _, run := range r.Runs {
+			for _, res := range run.Resources {
+				if res.UID == uid && res.State == OwnedResourceRecorded {
+					return true, nil
+				}
+			}
+		}
+	}
+	return false, nil
+}
+
+// launchHandleOwned is a flat instance's CleanupLaunch ownership check: the
+// object is in its records, or in the journal of one of its own launches
+// whose recording failed (unmirroredUIDs, registered by
+// completeOwnedStart). Anything else is not deleted.
+func (s *Server) launchHandleOwned(h api.ResourceHandle) bool {
+	if s.ownership == nil || h.UID == "" {
+		return false
+	}
+	if _, ok := s.unmirroredUIDs.Load(h.UID); ok {
+		return true
+	}
+	ok, err := s.ownership.RecordsResource(h.UID)
+	if err != nil {
+		s.agentLifecycleLog.Warn("Launch cleanup: ownership records unreadable; not deleting the object", "uid", h.UID, "name", h.Name, "error", err)
+		return false
+	}
+	return ok
+}
+
 // fileAgentOwned reports whether this flat instance's durable record claims
 // the agent holding slug in the project (the authority for file-only
 // agents). Missing, unreadable or deleted records are not owned.
@@ -813,6 +859,15 @@ func (s *Server) completeOwnedStart(ctx context.Context, mgr agent.Manager, runI
 		return startErr
 	}
 	o := v.(*ownedStart)
+	if o.latched() != nil {
+		// Recording failed, so the record may lack some of these objects;
+		// the launch's own journal makes them this instance's to clean up.
+		for _, h := range o.snapshot() {
+			if h.UID != "" {
+				s.unmirroredUIDs.Store(h.UID, struct{}{})
+			}
+		}
+	}
 	if startErr != nil {
 		return startErr
 	}

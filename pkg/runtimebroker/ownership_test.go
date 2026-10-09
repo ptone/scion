@@ -15,8 +15,10 @@
 package runtimebroker
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -288,4 +290,39 @@ func TestOwnershipStore_ConflictingKeysRefused(t *testing.T) {
 		s.ConflictingLabels(map[string]string{"scion.project_id": "proj", "agent_id": "agent-2", "scion.name": "two"}) {
 		t.Fatal("ConflictingLabels does not match the conflicting keys")
 	}
+}
+
+// TestLaunchHandleOwned: launch cleanup on a flat instance may delete an
+// object its records hold (live or deleting), or one from the journal of
+// its own launch whose recording failed; never an unknown, absent,
+// deleted-record or conflicting-key object.
+func TestLaunchHandleOwned(t *testing.T) {
+	s := &Server{ownership: NewOwnershipStore(t.TempDir(), "rb-a"), agentLifecycleLog: slog.Default()}
+	st := s.ownership
+	for _, a := range []string{"agent-1", "agent-2", "agent-3"} {
+		require.NoError(t, st.BeginRun("proj", a, "slug-"+a, "run-1"))
+		require.NoError(t, st.AddResource("proj", a, "run-1", handle("uid-"+a)))
+	}
+	require.NoError(t, st.SetRecordState("proj", "agent-2", OwnershipStateDeleting))
+	require.NoError(t, st.SetRecordState("proj", "agent-3", OwnershipStateDeleting))
+	require.NoError(t, st.MarkAbsent("proj", "agent-3", "uid-agent-3"))
+
+	assert.True(t, s.launchHandleOwned(handle("uid-agent-1")), "recorded by a live record")
+	assert.True(t, s.launchHandleOwned(handle("uid-agent-2")), "recorded by a deleting record")
+	assert.False(t, s.launchHandleOwned(handle("uid-agent-3")), "confirmed absent")
+	assert.False(t, s.launchHandleOwned(handle("uid-unknown")), "never recorded")
+	assert.False(t, s.launchHandleOwned(api.ResourceHandle{Name: "no-uid"}), "no UID")
+
+	// A launch whose recording failed: its journal's objects become this
+	// instance's to clean up.
+	o := &ownedStart{store: st, projectID: "proj", agentID: "agent-1", runID: "run-2"}
+	o.handles = []api.ResourceHandle{handle("uid-unmirrored")}
+	o.err = errors.New("disk full")
+	s.ownedStarts.Store("run-2", o)
+	assert.False(t, s.launchHandleOwned(handle("uid-unmirrored")))
+	require.Error(t, s.completeOwnedStart(context.Background(), nil, "run-2", errors.New("start failed"), false))
+	assert.True(t, s.launchHandleOwned(handle("uid-unmirrored")), "journal of a launch whose recording failed")
+
+	st.SetConflicting(map[string]bool{OwnershipAgentKey("proj", "agent-1"): true})
+	assert.False(t, s.launchHandleOwned(handle("uid-agent-1")), "a conflicting key's object is not cleaned up")
 }
