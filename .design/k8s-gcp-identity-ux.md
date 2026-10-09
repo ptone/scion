@@ -1,7 +1,7 @@
 # Kubernetes GCP identity UX: GSA/KSA lifecycle (spec)
 
 Issue: ptone/scion#4004. Mechanics: ptone/scion#3329 (phases 2-5). Related: #3935, #3947, #4005, #3942, #2328, #1801, #3430, epic #1956.
-Status: draft for product-owner questions (section 9). Baseline: `main` at 2849295. Based on code reading; nothing here was reproduced live.
+Status: draft for product-owner questions (section 9). Q4 and Q6 are decided by the lead as design-level choices; Q1, Q2, Q3 and Q5 are open with the product owner. Baseline: `main` at 2849295. Based on code reading; nothing here was reproduced live.
 
 ## 1. Problem in one paragraph
 
@@ -153,7 +153,7 @@ Q3. **Deleting a referenced account.**
 
 **Recommendation: (b).** Minted accounts stay retained in GCP; the response says so.
 
-Q4. **Same email registered at project and hub scope.**
+Q4. **Same email registered at project and hub scope.** *Decided by lead (design authority, 2026-10-09): (a).*
 - (a) the project-scoped account wins;
 - (b) ambiguity error.
 
@@ -165,7 +165,7 @@ Q5. **Hub-scope bring-your-own registration.** It is enabled in the hub but docu
 
 **Recommendation: (a)** if hub-scoped accounts are meant for shared broker identities. Otherwise (b).
 
-Q6. **Where agent identity shows in the CLI.**
+Q6. **Where agent identity shows in the CLI.** *Decided by lead (design authority, 2026-10-09): (a) plus the list column.*
 - (a) a header line in `scion look`;
 - (b) a `scion list` column only;
 - (c) a new `scion agent info` command.
