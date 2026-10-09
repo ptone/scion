@@ -302,6 +302,15 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// directory; it is not a project root to initialize, so it skips this
 	// block (see ProjectPathFromContainer).
 	if in.ProjectPath != "" && !in.ProjectPathFromContainer && (in.ProjectSlug != "" || in.ProjectID != "") {
+		// The project's identity files and directories are written under
+		// the process-wide workspace lock on the project (P2.3 S2), so two
+		// Runtime Broker instances never write them concurrently. It is
+		// released at the end of this block, before worktree provisioning
+		// takes it again.
+		unlockProjectMeta, err := s.locks().Lock(ctx, in.ProjectPath)
+		if err != nil {
+			return nil, fmt.Errorf("project workspace lock: %w", err)
+		}
 		// A broker copy of a hub workspace (~/.scion/projects/<slug>)
 		// records the hub project ID as its identity; see
 		// recordHubProjectIdentity. Done before the checks below, which
@@ -412,6 +421,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 				}
 			}
 		}
+		unlockProjectMeta()
 	}
 
 	// --- GCP identity mode: resolve and reject "block" on Kubernetes before

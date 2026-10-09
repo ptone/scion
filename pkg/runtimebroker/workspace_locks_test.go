@@ -28,6 +28,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
@@ -390,4 +391,51 @@ func TestWorkspaceLocks_AgentDeleteWaitsForProvisioning(t *testing.T) {
 		t.Fatal("the agent delete did not proceed after provisioning finished")
 	}
 	assert.Contains(t, d.recorded(), "delete:cid-a4")
+}
+
+// TestWorkspaceLocks_WorkspaceDownloadWaitsForProjectLock: materializing a
+// hub project's workspace waits while another instance holds the project
+// (a removal or provisioning) and runs after it is released.
+func TestWorkspaceLocks_WorkspaceDownloadWaitsForProjectLock(t *testing.T) {
+	setupTestScionEnv(t)
+	locks := NewWorkspaceLocks()
+	newSrv := func() *Server {
+		cfg := DefaultServerConfig()
+		cfg.StateDir = t.TempDir()
+		cfg.WorkspaceLocks = locks
+		return New(cfg, &mockManager{}, nil)
+	}
+	a, b := newSrv(), newSrv()
+	var downloads atomic.Int32
+	a.SetWorkspaceDownloader(func(context.Context, string, string, string) error {
+		downloads.Add(1)
+		return nil
+	})
+	globalDir, err := config.GetGlobalDir()
+	require.NoError(t, err)
+	projectDir := filepath.Join(globalDir, "projects", "dl-proj")
+
+	unlock, err := b.lockProjectWorkspace(context.Background(), filepath.Join(projectDir, "workspace"), projectDir)
+	require.NoError(t, err)
+	done := make(chan error, 1)
+	go func() {
+		_, _, _, err := a.downloadWorkspaceFromGCS(context.Background(), CreateAgentRequest{
+			ID: "agent-dl", Name: "agent-dl", ProjectID: "proj-dl", ProjectSlug: "dl-proj",
+			WorkspaceStoragePath: "uploads/dl", WorkspaceStorageBucket: "bucket"}, api.StartOptions{})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("the workspace was materialized (%v) while another instance holds the project", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	assert.Zero(t, downloads.Load())
+	unlock()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the download did not proceed after the release")
+	}
+	assert.Equal(t, int32(1), downloads.Load())
 }

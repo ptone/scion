@@ -902,8 +902,15 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			req.workspaceAbsentAtAdmission = true
 		}
 		// Record the hub project ID for a broker copy of a hub workspace
-		// before any project settings are read.
+		// before any project settings are read, under the process-wide
+		// workspace lock on the project (P2.3 S2).
+		unlockProject, lockErr := s.locks().Lock(ctx, req.ProjectPath)
+		if lockErr != nil {
+			s.writeRuntimeOpError(w, ctx, "create agent", lockErr, "agent_id", req.ID, "project_id", req.ProjectID)
+			return
+		}
 		s.alignHubManagedProjectIdentity(ctx, req.ID, req.ProjectPath, req.ProjectSlug, req.ProjectID)
+		unlockProject()
 	}
 
 	// Shared-workspace dispatch verifies the project identity before loading
@@ -1808,6 +1815,17 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 		return opts, "storage bucket not configured", workspaceStorageUnconfiguredMessage,
 			errWorkspaceStorageUnconfigured
 	}
+
+	// The download and the records written with it run under the
+	// process-wide workspace lock on the directory (P2.3 S2): two Runtime
+	// Broker instances never materialize one project concurrently, and a
+	// project removal never runs meanwhile.
+	unlockWorkspace, lockErr := s.locks().Lock(ctx, workspaceDir)
+	if lockErr != nil {
+		attemptMsg, httpMessage, err = s.workspaceBootstrapFailed(req, opCreateWorkspaceDir, lockErr)
+		return opts, attemptMsg, httpMessage, err
+	}
+	defer unlockWorkspace()
 
 	if mkErr := os.MkdirAll(workspaceDir, 0755); mkErr != nil {
 		attemptMsg, httpMessage, err = s.workspaceBootstrapFailed(req, opCreateWorkspaceDir, mkErr)
