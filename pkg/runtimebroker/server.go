@@ -1457,6 +1457,25 @@ func (s *Server) discoverAuxiliaryRuntimes() {
 	s.discoverAuxiliaryRuntimesForProjects(projectPaths)
 }
 
+// logUnresolvedAuxiliaryProfile reports a settings profile whose runtime
+// could not be built during auxiliary runtime discovery
+// (ptone/scion#3605). For the active profile that is a warning. Any other
+// profile (for example a Kubernetes profile on a host without cluster
+// access) is reported at Info with a hint: it only matters if agents use it.
+func logUnresolvedAuxiliaryProfile(profileName, activeProfile string, resolved scionrt.Runtime) {
+	var cause error
+	if er, ok := resolved.(*scionrt.ErrorRuntime); ok {
+		cause = er.Err
+	}
+	if profileName == activeProfile {
+		slog.Warn("Failed to resolve the runtime of the active profile", "profile", profileName, "error", cause)
+		return
+	}
+	slog.Info("Runtime of a non-active profile is not available on this broker; agents that use it are not found until it resolves",
+		"profile", profileName, "error", cause,
+		"hint", "fix the profile's runtime configuration if agents use it, or remove the profile")
+}
+
 // discoverAuxiliaryRuntimesForProjects scans the given project settings
 // directories for runtime profiles that resolve to a runtime different from
 // the broker's default, and registers each distinct resolved runtime once.
@@ -1511,7 +1530,7 @@ func (s *Server) discoverAuxiliaryRuntimesForProjects(projectPaths []string) {
 
 			resolved := s.resolveAuxiliaryRuntime(gp, "", profileName)
 			if resolved.Name() == "error" {
-				slog.Warn("Failed to resolve auxiliary runtime", "profile", profileName)
+				logUnresolvedAuxiliaryProfile(profileName, vs.ActiveProfile, resolved)
 				continue
 			}
 

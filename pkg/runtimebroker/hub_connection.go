@@ -117,7 +117,7 @@ func (hc *HubConnection) Start(ctx context.Context, server *Server) error {
 	// Start heartbeat service if enabled.
 	if server.config.HeartbeatEnabled && hc.HubClient != nil && hc.BrokerID != "" {
 		if !hasValidCredentials {
-			slog.Warn("Skipping heartbeat for connection: no valid credentials", "name", hc.Name)
+			slog.Warn("Not registered with the Hub; heartbeats are off for this connection. Run scion broker register", "name", hc.Name)
 		} else {
 			interval := server.config.HeartbeatInterval
 			if interval <= 0 {
