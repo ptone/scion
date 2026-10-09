@@ -1424,6 +1424,9 @@ type ownedDelete struct {
 	// runID, when wholeRecord is false, is the only run the delete acts on.
 	runID       string
 	wholeRecord bool
+	// filesRemoved is set by the caller once the runtime delete succeeded
+	// and the agent's files were removed (or there were none to remove).
+	filesRemoved bool
 }
 
 // ownedDeleteTarget returns the live record of the agent holding slug in
@@ -1464,8 +1467,12 @@ func (s *Server) ownedDeleteTarget(projectID, slug string, hasObject bool) (*Own
 
 // finishPendingOwnedDelete retries the finish of an earlier whole-agent
 // delete of the agent holding slug whose objects were not yet all
-// confirmed gone (its record is deleting). It does nothing for a legacy
-// Runtime Broker or when no such record holds the slug.
+// confirmed gone (its record is deleting). Its caller found neither a
+// runtime entry nor files for the agent, which proves the files are gone,
+// so it records that, cleans up the still-recorded objects again (UID
+// preconditions) and finishes the record once they are confirmed gone. It
+// does nothing for a legacy Runtime Broker or when no such record holds the
+// slug.
 func (s *Server) finishPendingOwnedDelete(ctx context.Context, projectID, slug string) {
 	if s.ownership == nil || projectID == "" {
 		return
@@ -1475,10 +1482,10 @@ func (s *Server) finishPendingOwnedDelete(ctx context.Context, projectID, slug s
 		return
 	}
 	rec, ok, err := s.ownership.Get(projectID, agentID)
-	if err != nil || !ok || rec.State != OwnershipStateDeleting || !rec.FilesRemoved {
+	if err != nil || !ok || rec.State != OwnershipStateDeleting {
 		return
 	}
-	s.finishOwnedDelete(ctx, s.currentManager(), &ownedDelete{projectID: projectID, agentID: agentID, wholeRecord: true})
+	s.finishOwnedDelete(ctx, s.currentManager(), &ownedDelete{projectID: projectID, agentID: agentID, wholeRecord: true, filesRemoved: true})
 }
 
 // leftoverCleanupAllowed reports whether a name-scoped leftover cleanup may
@@ -1587,18 +1594,20 @@ func (s *Server) finishOwnedDelete(ctx context.Context, mgr agent.Manager, od *o
 			}
 		}
 	}
+	// Recorded first: the files are gone whatever happens to the cleanup
+	// below, so a retry or start-up can finish the record once its objects
+	// are confirmed gone.
+	if od.wholeRecord && od.filesRemoved && !rec.FilesRemoved {
+		if err := s.ownership.MarkFilesRemoved(od.projectID, od.agentID); err != nil {
+			return
+		}
+	}
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
 	defer cancel()
 	if len(handles) > 0 && mgr != nil {
 		if err := mgr.CleanupLaunch(cctx, handles); err != nil {
 			s.agentLifecycleLog.Warn("Agent delete: could not remove every recorded object; ownership record kept deleting",
 				"agent_id", od.agentID, "project_id", od.projectID, "run_id", od.runID, "error", err)
-			return
-		}
-	}
-	if od.wholeRecord {
-		// The runtime delete and the file removal succeeded before this.
-		if err := s.ownership.MarkFilesRemoved(od.projectID, od.agentID); err != nil {
 			return
 		}
 	}

@@ -2639,6 +2639,11 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 		}
 	}
 
+	if ownedDel != nil {
+		// The runtime delete succeeded; the files were removed, or there
+		// were none this broker could find (no project path).
+		ownedDel.filesRemoved = filesToDelete || projectPath == ""
+	}
 	s.finishOwnedDelete(ctx, target.mgr, ownedDel)
 
 	if softDelete {

@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -156,5 +157,79 @@ func TestFlatAbsence_SlugReservedByUnconfirmedDeleteNamesIt(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("conflict message %q lacks %q", body, want)
 		}
+	}
+}
+
+// failOnceDeleteRuntime fails the first UID-conditioned delete (a transient
+// API error), then behaves like the shared daemon.
+type failOnceDeleteRuntime struct {
+	*daemonRuntime
+	failed bool
+}
+
+func (r *failOnceDeleteRuntime) DeleteResource(ctx context.Context, h api.ResourceHandle) error {
+	if !r.failed {
+		r.failed = true
+		return errors.New("transient: the API server returned 500")
+	}
+	return r.daemonRuntime.DeleteResource(ctx, h)
+}
+
+// TestFlatAbsence_TransientCleanupFailureDoesNotWedgeTheSlug: when the
+// runtime delete succeeded but the UID-conditioned cleanup failed once,
+// the files are still recorded as removed, and the retry (which finds
+// nothing left) finishes the record and releases the slug.
+func TestFlatAbsence_TransientCleanupFailureDoesNotWedgeTheSlug(t *testing.T) {
+	f := newPartitionFixture(t)
+	f.a.mgr.Runtime = &failOnceDeleteRuntime{daemonRuntime: f.a.rt}
+	serveFlat(f.a.srv, http.MethodDelete, absenceDeleteURL, "")
+	rec, _, _ := f.a.srv.ownership.Get("proj-1", "agent-a1")
+	if rec.State != OwnershipStateDeleting || !rec.FilesRemoved {
+		t.Fatalf("after the failed cleanup: state=%s filesRemoved=%v, want deleting with the files recorded as removed", rec.State, rec.FilesRemoved)
+	}
+	if w := serveFlat(f.a.srv, http.MethodDelete, absenceDeleteURL, ""); w.Code != http.StatusNotFound {
+		t.Fatalf("retry: %d %s", w.Code, w.Body.String())
+	}
+	assertDeletedAndReleased(t, f)
+}
+
+// TestFlatAbsence_CrashBeforeMarkerFinishedByNotFoundRetry: a record left
+// deleting without the files marker (a crash right after the runtime
+// delete) is finished by a retry that finds neither a runtime entry nor
+// files, once its objects are confirmed gone.
+func TestFlatAbsence_CrashBeforeMarkerFinishedByNotFoundRetry(t *testing.T) {
+	f := newPartitionFixture(t)
+	if err := f.a.srv.ownership.SetRecordState("proj-1", "agent-a1", OwnershipStateDeleting); err != nil {
+		t.Fatal(err)
+	}
+	f.d.remove("cid-a1")
+	if w := serveFlat(f.a.srv, http.MethodDelete, absenceDeleteURL, ""); w.Code != http.StatusNotFound {
+		t.Fatalf("retry: %d %s", w.Code, w.Body.String())
+	}
+	assertDeletedAndReleased(t, f)
+}
+
+// TestFlatAbsence_FilesMarkerOnlyWhenFilesRemoved: a whole-agent delete
+// that removed no files (local only, without file deletion) does not
+// record the files as removed.
+func TestFlatAbsence_FilesMarkerOnlyWhenFilesRemoved(t *testing.T) {
+	f := newPartitionFixture(t)
+	dir := hubProjectDir(t, "marker-proj", "proj-1")
+	f.d.mu.Lock()
+	for i := range f.d.objects {
+		if f.d.objects[i].ContainerID == "cid-a1" {
+			f.d.objects[i].ProjectPath = filepath.Join(dir, ".scion")
+			f.d.objects[i].Labels["scion.project_path"] = filepath.Join(dir, ".scion")
+		}
+	}
+	f.d.mu.Unlock()
+	f.d.keepOnDelete = true // stays deleting, so the marker is observable
+	serveFlat(f.a.srv, http.MethodDelete, "/api/v1/agents/worker?projectId=proj-1&localOnly=true", "")
+	rec, _, _ := f.a.srv.ownership.Get("proj-1", "agent-a1")
+	if rec.State != OwnershipStateDeleting {
+		t.Fatalf("state = %s", rec.State)
+	}
+	if rec.FilesRemoved {
+		t.Fatal("the files were recorded as removed although none were removed")
 	}
 }
