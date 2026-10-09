@@ -31,9 +31,18 @@ import (
 // WorkspaceLocks coordinates operations on shared local paths (project
 // directories, the shared worktree base, NFS workspace paths, agent
 // directories) across every Runtime Broker server of one process
-// (ptone/scion#3274, P2.3 S2). The flat host creates one and injects it into
-// every instance (ServerConfig.WorkspaceLocks); a server without one gets
-// its own, so a single Runtime Broker behaves as before.
+// (ptone/scion#3274). The flat host creates one and injects it into every
+// instance (ServerConfig.WorkspaceLocks); a server without one gets its own.
+// A CLI or a Runtime Broker in another process is coordinated only through
+// the existing cross-process provisioning lock.
+//
+// A single Runtime Broker coordinates only with itself, but it takes these
+// locks too, so some of its operations that used to overlap now run one at
+// a time: an agent delete that touches files holds the agent's file paths
+// (agentFileLockPaths) for the whole delete, a project delete holds the
+// project directory, and the file cleanup after a failed start is skipped,
+// leaving the files, when the agent's file lock is not free within 60
+// seconds.
 //
 // Keys are canonical paths (CanonicalWorkspacePath): absolute, cleaned and
 // with symlinks resolved, also for paths that do not exist yet, so two
@@ -177,6 +186,19 @@ func (l *WorkspaceLocks) slugHeldByOthers(self *Server, projectID, slug string) 
 			return &slugReservedElsewhereError{projectID: projectID, slug: slug, instance: u.instance, holder: holder, pending: pending}
 		}
 	}
+	return nil
+}
+
+// withWorkspaceLock runs fn holding the workspace lock on paths, released
+// when fn returns or panics. An error means the lock was not taken (the
+// context ended) and fn did not run.
+func (s *Server) withWorkspaceLock(ctx context.Context, fn func(), paths ...string) error {
+	unlock, err := s.locks().Lock(ctx, paths...)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	fn()
 	return nil
 }
 

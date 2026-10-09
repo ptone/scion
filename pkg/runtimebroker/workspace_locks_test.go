@@ -155,6 +155,21 @@ func TestWorkspaceLocks_ContextEndsWaitHoldingNothing(t *testing.T) {
 	release()
 }
 
+// TestWorkspaceLocks_WithWorkspaceLockReleasesOnPanic: a panic while the
+// lock is held releases it, so the path is not locked for the life of the
+// process.
+func TestWorkspaceLocks_WithWorkspaceLockReleasesOnPanic(t *testing.T) {
+	s := &Server{}
+	project := filepath.Join(t.TempDir(), "project")
+	func() {
+		defer func() { _ = recover() }()
+		_ = s.withWorkspaceLock(context.Background(), func() { panic("boom") }, project)
+	}()
+	r, ok := lockedWithin(s.locks(), time.Second, project)
+	require.True(t, ok, "the lock is still held after the panic")
+	r()
+}
+
 // TestWorkspaceLocks_MultiPathNoDeadlockAndMutualExclusion: operations
 // taking overlapping path sets in opposite orders never deadlock, and no two
 // holders of overlapping paths run at once.

@@ -909,14 +909,13 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		}
 		// Record the hub project ID for a broker copy of a hub workspace
 		// before any project settings are read, under the process-wide
-		// workspace lock on the project (P2.3 S2).
-		unlockProject, lockErr := s.locks().Lock(ctx, req.ProjectPath)
-		if lockErr != nil {
+		// workspace lock on the project.
+		if lockErr := s.withWorkspaceLock(ctx, func() {
+			s.alignHubManagedProjectIdentity(ctx, req.ID, req.ProjectPath, req.ProjectSlug, req.ProjectID)
+		}, req.ProjectPath); lockErr != nil {
 			s.writeRuntimeOpError(w, ctx, "create agent", lockErr, "agent_id", req.ID, "project_id", req.ProjectID)
 			return
 		}
-		s.alignHubManagedProjectIdentity(ctx, req.ID, req.ProjectPath, req.ProjectSlug, req.ProjectID)
-		unlockProject()
 	}
 
 	// Shared-workspace dispatch verifies the project identity before loading
@@ -1626,37 +1625,34 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// not the hub's agent record.
 		// The files must also still be this run's (ptone/scion#2675): a
 		// newer run recorded in agent-info.json owns them otherwise.
-		var unlockFiles func()
 		if opts.ProjectPath != "" {
 			// The ownership checks and the removal run under the
-			// process-wide workspace lock on the agent's files (P2.3 S2).
-			lockCtx, cancelLock := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
-			if unlock, lockErr := s.lockAgentFiles(lockCtx, opts.ProjectPath, opts.Name); lockErr == nil {
-				unlockFiles = unlock
-			}
-			cancelLock()
-		}
-		if opts.ProjectPath != "" && unlockFiles == nil {
-			s.agentLifecycleLog.Warn("Skipped agent file cleanup after start failure: the agent's workspace lock is unavailable",
-				"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name)
-		} else if opts.ProjectPath != "" && !ss.ownsName() {
-			s.agentLifecycleLog.Info("Skipped agent file cleanup after start failure: the agent name is now owned by a newer start",
-				"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name)
-		} else if opts.ProjectPath != "" {
-			if owner := agentFilesRunOwner(opts.Name, opts.ProjectPath, opts.RunID); owner != "" {
-				s.agentLifecycleLog.Info("Skipped agent file cleanup after start failure: the agent's files belong to another run",
-					"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name,
-					"run_id", opts.RunID, "files_run_id", owner)
-			} else if _, cleanupErr := agent.DeleteAgentFiles(opts.Name, opts.ProjectPath, true); cleanupErr != nil {
-				s.agentLifecycleLog.Warn("Failed to clean up agent files after start failure",
-					"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name, "error", cleanupErr)
-			} else {
-				s.agentLifecycleLog.Info("Cleaned up provisioned agent files after start failure",
-					"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name)
-			}
-		}
-		if unlockFiles != nil {
-			unlockFiles()
+			// process-wide workspace lock on the agent's files.
+			func() {
+				lockCtx, cancelLock := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
+				unlockFiles, lockErr := s.lockAgentFiles(lockCtx, opts.ProjectPath, opts.Name)
+				cancelLock()
+				if lockErr != nil {
+					s.agentLifecycleLog.Warn("Skipped agent file cleanup after start failure: the agent's workspace lock is unavailable",
+						"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name)
+					return
+				}
+				defer unlockFiles()
+				if !ss.ownsName() {
+					s.agentLifecycleLog.Info("Skipped agent file cleanup after start failure: the agent name is now owned by a newer start",
+						"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name)
+				} else if owner := agentFilesRunOwner(opts.Name, opts.ProjectPath, opts.RunID); owner != "" {
+					s.agentLifecycleLog.Info("Skipped agent file cleanup after start failure: the agent's files belong to another run",
+						"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name,
+						"run_id", opts.RunID, "files_run_id", owner)
+				} else if _, cleanupErr := agent.DeleteAgentFiles(opts.Name, opts.ProjectPath, true); cleanupErr != nil {
+					s.agentLifecycleLog.Warn("Failed to clean up agent files after start failure",
+						"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name, "error", cleanupErr)
+				} else {
+					s.agentLifecycleLog.Info("Cleaned up provisioned agent files after start failure",
+						"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name)
+				}
+			}()
 		}
 		span.SetStatus(codes.Error, err.Error())
 		switch {
