@@ -16,6 +16,8 @@ package runtimebroker
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -260,5 +262,75 @@ func TestFlatOwnership_WorkspacePathNeverPicksAmongSeveral(t *testing.T) {
 	f.mgr.mu.Unlock()
 	if _, err := f.srv.getAgentWorkspacePath(context.Background(), "twin"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
 		t.Fatalf("err = %v, want an ambiguity refusal", err)
+	}
+}
+
+// TestFlatOwnership_DeleteTransitionsRecord: a whole-agent delete of an
+// owned agent removes or confirms gone every recorded object, marks the
+// record deleted (tombstone kept) and releases the slug; a failure to
+// confirm absence keeps the record deleting and the slug reserved.
+func TestFlatOwnership_DeleteTransitionsRecord(t *testing.T) {
+	for _, cleanupFails := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cleanupFails=%v", cleanupFails), func(t *testing.T) {
+			f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
+			f.mgr.createHandles = launchHandles()
+			if w := flatCreateAccepted(f, "del-agent"); w.Code != http.StatusCreated {
+				t.Fatalf("create: %d %s", w.Code, w.Body.String())
+			}
+			// The runtime lists the created container with its project.
+			f.mgr.mu.Lock()
+			for i := range f.mgr.agents {
+				if f.mgr.agents[i].Name == "del-agent" {
+					f.mgr.agents[i].ContainerID = "uid-container"
+					f.mgr.agents[i].Labels = map[string]string{"scion.project_id": flatTestProjectID, "scion.name": "del-agent"}
+				}
+			}
+			f.mgr.mu.Unlock()
+			if cleanupFails {
+				f.mgr.cleanupLaunchErr = errors.New("cannot confirm")
+			}
+			w := serveFlat(f.srv, http.MethodDelete, "/api/v1/agents/del-agent?projectId="+flatTestProjectID+"&deleteFiles=true", "")
+			if w.Code >= 400 {
+				t.Fatalf("delete: %d %s", w.Code, w.Body.String())
+			}
+			rec, ok, err := f.srv.ownership.Get(flatTestProjectID, "agent-id-del-agent")
+			if err != nil || !ok {
+				t.Fatalf("record: %v %v", ok, err)
+			}
+			holder, _ := f.srv.ownership.SlugHolder(flatTestProjectID, "del-agent")
+			if cleanupFails {
+				if rec.State != OwnershipStateDeleting || holder != "agent-id-del-agent" {
+					t.Fatalf("state=%s holder=%q, want deleting and the slug still reserved", rec.State, holder)
+				}
+				return
+			}
+			if rec.State != OwnershipStateDeleted || holder != "" {
+				t.Fatalf("state=%s holder=%q, want deleted with the slug released", rec.State, holder)
+			}
+			f.mgr.mu.Lock()
+			handles := f.mgr.lastCleanupLaunchHandles
+			f.mgr.mu.Unlock()
+			if len(handles) != 2 {
+				t.Fatalf("absence confirmed through %d handles, want both recorded objects", len(handles))
+			}
+		})
+	}
+}
+
+// TestFlatOwnership_FileOnlyDeleteNeedsRecord: a file-only agent without
+// this instance's record is not deleted.
+func TestFlatOwnership_FileOnlyDeleteNeedsRecord(t *testing.T) {
+	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
+	f.mgr.mu.Lock()
+	f.mgr.agents = append(f.mgr.agents, api.AgentInfo{Name: "orphan", Phase: "created", Labels: map[string]string{"scion.project_id": flatTestProjectID}})
+	f.mgr.mu.Unlock()
+	w := serveFlat(f.srv, http.MethodDelete, "/api/v1/agents/orphan?projectId="+flatTestProjectID+"&deleteFiles=true", "")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (not owned): %s", w.Code, w.Body.String())
+	}
+	f.mgr.mu.Lock()
+	defer f.mgr.mu.Unlock()
+	if f.mgr.deleteCalls != 0 {
+		t.Fatalf("a file-only agent without a record was deleted")
 	}
 }

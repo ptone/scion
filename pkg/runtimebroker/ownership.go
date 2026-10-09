@@ -811,3 +811,98 @@ func reconstructedKind(o api.AgentInfo) string {
 	}
 	return api.ResourceKindContainer
 }
+
+// ownedDelete is a flat instance's whole-agent delete of an owned agent.
+type ownedDelete struct {
+	projectID, agentID string
+}
+
+// beginOwnedDelete decides whether a flat instance may delete the agent
+// holding slug in the project and, for a whole-agent delete, moves its
+// record to deleting before anything is removed. A legacy Runtime Broker
+// (no store) is always allowed. A file-only agent (no runtime object) is
+// deleted only when this instance's record owns it; an agent with a runtime
+// object was found through this instance's owner-filtered list, so its
+// label already establishes ownership even when its record is missing (the
+// next start-up reconstructs it).
+func (s *Server) beginOwnedDelete(projectID, slug string, hasObject, wholeAgent bool) (*ownedDelete, error) {
+	if s.ownership == nil {
+		return nil, nil
+	}
+	agentID := ""
+	if projectID != "" {
+		holder, err := s.ownership.SlugHolder(projectID, slug)
+		if err != nil {
+			return nil, err
+		}
+		agentID = holder
+	}
+	var rec *OwnershipRecord
+	if agentID != "" {
+		r, ok, err := s.ownership.Get(projectID, agentID)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			rec = r
+		}
+	}
+	if rec == nil || rec.State == OwnershipStateDeleted {
+		if !hasObject {
+			return nil, fmt.Errorf("%w: file-only agent %q in project %q", ErrOwnershipNotRecorded, slug, projectID)
+		}
+		return nil, nil
+	}
+	if !wholeAgent {
+		return nil, nil
+	}
+	if err := s.ownership.SetRecordState(projectID, agentID, OwnershipStateDeleting); err != nil {
+		return nil, err
+	}
+	return &ownedDelete{projectID: projectID, agentID: agentID}, nil
+}
+
+// finishOwnedDelete completes a whole-agent delete's record after the
+// runtime delete succeeded: every recorded object is removed or confirmed
+// gone through the UID-precondition cleanup (an object already gone, or a
+// name now held by another UID, is confirmed absent), then the record is
+// marked deleted (its tombstone stays) and the slug is released. If absence
+// cannot be established the record stays deleting and the slug stays
+// reserved, so nothing reuses it early.
+func (s *Server) finishOwnedDelete(ctx context.Context, mgr agent.Manager, od *ownedDelete) {
+	if od == nil || s.ownership == nil {
+		return
+	}
+	rec, ok, err := s.ownership.Get(od.projectID, od.agentID)
+	if err != nil || !ok {
+		return
+	}
+	var handles []api.ResourceHandle
+	for _, run := range rec.Runs {
+		for _, res := range run.Resources {
+			if res.State == OwnedResourceRecorded {
+				handles = append(handles, api.ResourceHandle{Kind: res.Kind, Namespace: res.Namespace, Name: res.Name, UID: res.UID})
+			}
+		}
+	}
+	if len(handles) > 0 && mgr != nil {
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+		defer cancel()
+		if err := mgr.CleanupLaunch(cctx, handles); err != nil {
+			s.agentLifecycleLog.Warn("Agent delete: could not confirm every recorded object is gone; ownership record kept deleting",
+				"agent_id", od.agentID, "project_id", od.projectID, "error", err)
+			return
+		}
+	}
+	for _, h := range handles {
+		if err := s.ownership.MarkAbsent(od.projectID, od.agentID, h.UID); err != nil {
+			return
+		}
+	}
+	if err := s.ownership.SetRecordState(od.projectID, od.agentID, OwnershipStateDeleted); err != nil {
+		return
+	}
+	if err := s.ownership.ReleaseSlug(od.projectID, od.agentID); err != nil {
+		s.agentLifecycleLog.Warn("Agent delete: slug not released", "agent_id", od.agentID, "project_id", od.projectID, "error", err)
+	}
+}

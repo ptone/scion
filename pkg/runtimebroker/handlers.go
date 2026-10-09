@@ -2384,6 +2384,22 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	projectPath := target.projectPath
 	agentProjectID := target.projectID
 
+	// A flat instance deletes only what it owns: a file-only agent needs
+	// its ownership record; a whole-agent delete moves the record to
+	// deleting before acting (ptone/scion#3274).
+	ownedProject := agentProjectID
+	if ownedProject == "" {
+		ownedProject = projectID
+	}
+	ownedDel, ownErr := s.beginOwnedDelete(ownedProject, target.name, target.containerID != "", (deleteFiles && !softDelete) || localOnly)
+	if ownErr != nil {
+		span.SetStatus(codes.Error, ownErr.Error())
+		s.agentLifecycleLog.Info("Agent delete: not owned by this Runtime Broker instance; nothing deleted",
+			"agent_id", id, "project_id", ownedProject, "error", ownErr)
+		NotFound(w, "Agent")
+		return
+	}
+
 	// Wake any local launch waiting on this agent (design §3.8.1): purely a
 	// local optimisation (the Hub's answer to the launch's next report is
 	// what actually ends it), so a key that doesn't match an in-flight
@@ -2535,6 +2551,8 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 			}
 		}
 	}
+
+	s.finishOwnedDelete(ctx, target.mgr, ownedDel)
 
 	if softDelete {
 		s.agentLifecycleLog.Info("Agent soft-deleted",
