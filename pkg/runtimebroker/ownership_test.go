@@ -388,3 +388,27 @@ func TestOwnershipStore_ReconstructPodAndNewUID(t *testing.T) {
 	assert.True(t, rec.OwnsUID("cid-new"), "the new object is recorded separately")
 	assert.Len(t, rec.Run("run-1").Resources, 2)
 }
+
+// TestOwnershipStore_ReconstructPodWithUID: a pod listed with its metadata
+// UID and namespace (the Kubernetes runtime's List) is recorded as a pod
+// handle carrying that UID, namespace and pod name; and a later complete
+// read that lists the same pod by UID keeps it recorded.
+func TestOwnershipStore_ReconstructPodWithUID(t *testing.T) {
+	s := NewOwnershipStore(t.TempDir(), "broker-a")
+	pod := api.AgentInfo{Name: "worker", ContainerID: "proj-1--worker", Runtime: "kubernetes",
+		Kubernetes: &api.AgentK8sMetadata{Namespace: "agents", PodName: "proj-1--worker", UID: "pod-uid-1"},
+		Labels: map[string]string{api.LabelRuntimeBrokerID: "broker-a", "scion.project_id": "proj-1", "agent_id": "agent-1",
+			"scion.name": "worker", api.LabelRunID: "run-1"}}
+	require.NoError(t, s.Reconstruct(pod))
+	rec, _, err := s.Get("proj-1", "agent-1")
+	require.NoError(t, err)
+	res := rec.Run("run-1").Resources
+	require.Len(t, res, 1)
+	assert.Equal(t, OwnedResource{Kind: api.ResourceKindPod, Namespace: "agents", Name: "proj-1--worker", UID: "pod-uid-1", State: OwnedResourceRecorded}, res[0])
+
+	n, err := s.ReconcileAbsent([]api.AgentInfo{pod})
+	require.NoError(t, err)
+	assert.Zero(t, n)
+	rec, _, _ = s.Get("proj-1", "agent-1")
+	assert.True(t, rec.OwnsUID("pod-uid-1"))
+}

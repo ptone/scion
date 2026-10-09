@@ -1079,6 +1079,9 @@ func (s *OwnershipStore) Reconstruct(o api.AgentInfo) error {
 	if uid == "" {
 		uid = o.ID
 	}
+	if reconstructedKind(o) == api.ResourceKindPod && o.Kubernetes != nil && o.Kubernetes.UID != "" {
+		uid = o.Kubernetes.UID
+	}
 	if projectID == "" || agentID == "" || slug == "" || runID == "" || uid == "" {
 		return fmt.Errorf("labels are incomplete (project, agent, name, run and object ID are all required)")
 	}
@@ -1106,14 +1109,14 @@ func (s *OwnershipStore) Reconstruct(o api.AgentInfo) error {
 			if rec.OwnsUID(uid) || !reconstructsHandle(o) {
 				return nil
 			}
-			return s.AddResource(projectID, agentID, runID, api.ResourceHandle{Kind: reconstructedKind(o), Name: o.Name, UID: uid})
+			return s.AddResource(projectID, agentID, runID, reconstructedHandle(o, uid))
 		}
 	}
 	if err := s.BeginRun(projectID, agentID, slug, runID); err != nil {
 		return err
 	}
 	if reconstructsHandle(o) {
-		if err := s.AddResource(projectID, agentID, runID, api.ResourceHandle{Kind: reconstructedKind(o), Name: o.Name, UID: uid}); err != nil {
+		if err := s.AddResource(projectID, agentID, runID, reconstructedHandle(o, uid)); err != nil {
 			return err
 		}
 	}
@@ -1122,13 +1125,30 @@ func (s *OwnershipStore) Reconstruct(o api.AgentInfo) error {
 
 // reconstructsHandle reports whether a listed object identifies itself well
 // enough to be recorded as a cleanup handle. A container's ID is its
-// identity. A Kubernetes listing gives the pod's name, not its immutable
-// UID or namespace, and a handle built from the name would let a UID
-// precondition delete report the pod gone without checking it; such an
-// object only re-establishes the record and run (the pod is still found
-// through the owner-filtered list and deleted by the agent delete).
+// identity. A pod is recorded only with both its immutable UID and its
+// namespace (api.AgentInfo.Kubernetes, set by the Kubernetes runtime's
+// List); a handle built from the pod
+// name would let a UID precondition delete report the pod gone without
+// checking it, so without them the object only re-establishes the record
+// and run (the pod is still found through the owner-filtered list and
+// deleted by the agent delete).
 func reconstructsHandle(o api.AgentInfo) bool {
-	return reconstructedKind(o) != api.ResourceKindPod
+	if reconstructedKind(o) == api.ResourceKindPod {
+		return o.Kubernetes != nil && o.Kubernetes.UID != "" && o.Kubernetes.Namespace != ""
+	}
+	return true
+}
+
+// reconstructedHandle is the cleanup handle of a listed object.
+func reconstructedHandle(o api.AgentInfo, uid string) api.ResourceHandle {
+	h := api.ResourceHandle{Kind: reconstructedKind(o), Name: o.Name, UID: uid}
+	if h.Kind == api.ResourceKindPod && o.Kubernetes != nil {
+		h.Name, h.Namespace = o.ContainerID, o.Kubernetes.Namespace
+		if o.Kubernetes.PodName != "" {
+			h.Name = o.Kubernetes.PodName
+		}
+	}
+	return h
 }
 
 // ReconcileAbsent records what a COMPLETE read of the instance's execution
@@ -1198,7 +1218,11 @@ func objectListed(res OwnedResource, present []api.AgentInfo) bool {
 		return a == b
 	}
 	for _, o := range present {
-		for _, id := range []string{o.ID, o.ContainerID, o.Labels["scion.container.id"]} {
+		ids := []string{o.ID, o.ContainerID, o.Labels["scion.container.id"]}
+		if o.Kubernetes != nil {
+			ids = append(ids, o.Kubernetes.UID, o.Kubernetes.PodName)
+		}
+		for _, id := range ids {
 			if sameID(res.UID, id) || (res.Name != "" && res.Name == id) {
 				return true
 			}
