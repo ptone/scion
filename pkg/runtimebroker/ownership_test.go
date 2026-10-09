@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -499,6 +500,40 @@ func TestOwnershipStore_BeginDeleteVersusConcurrentStart(t *testing.T) {
 		require.NoError(t, err)
 		if rec.State == OwnershipStateDeleting && rec.Run("run-new") != nil {
 			t.Fatalf("iteration %d: the whole record is deleting with a just-begun run: %+v", i, rec.Runs)
+		}
+	}
+}
+
+// TestOwnershipStore_BeginDeleteVersusQueuedStart orders the race: the
+// delete reaches the record's lock first and a new run's BeginRun queues
+// right behind it. The test then puts the lock into sync.Mutex starvation
+// mode (it releases and at once retakes the lock, so the woken first waiter,
+// already waiting over a millisecond, finds it held). In that mode the lock
+// is handed to waiters in arrival order. A delete that read the record in
+// one locked step and transitioned it in another would therefore let the
+// queued BeginRun in between, every round. The delete must decide and
+// transition in one step: never a deleting record with the new run.
+func TestOwnershipStore_BeginDeleteVersusQueuedStart(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		s := NewOwnershipStore(t.TempDir(), "rb-a")
+		require.NoError(t, s.BeginRun("p", "a", "worker", "run-old"))
+		l := s.keyLock("p", "a")
+		l.Lock()
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); _, _ = s.BeginDelete("p", "a", "run-old", true) }()
+		time.Sleep(5 * time.Millisecond)
+		go func() { defer wg.Done(); _ = s.BeginRun("p", "a", "worker", "run-new") }()
+		time.Sleep(5 * time.Millisecond)
+		l.Unlock()
+		l.Lock()
+		time.Sleep(5 * time.Millisecond)
+		l.Unlock()
+		wg.Wait()
+		rec, _, err := s.Get("p", "a")
+		require.NoError(t, err)
+		if rec.State == OwnershipStateDeleting && rec.Run("run-new") != nil {
+			t.Fatalf("round %d: the whole record is deleting with a just-begun run: %+v", i, rec.Runs)
 		}
 	}
 }
