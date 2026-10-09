@@ -25,6 +25,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
@@ -401,5 +402,88 @@ func TestFlatOwnership_ConflictingKeyRefusedOthersServed(t *testing.T) {
 		map[string]interface{}{"expectedRuntimeTargetId": f.identity.RuntimeTarget.ID, "config": map[string]interface{}{"template": "claude"}}))
 	if w.Code != http.StatusCreated {
 		t.Fatalf("an unrelated agent is refused: status = %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestFlatOwnership_FailedStartFinishesOnlyItsRun: a synchronous start that
+// fails after creating objects has exactly those objects removed (UID
+// preconditions) and only its run finished as deleted, with the objects
+// confirmed absent; the record and the agent's other runs are untouched.
+// When the removal fails, the run stays deleting with its objects recorded.
+func TestFlatOwnership_FailedStartFinishesOnlyItsRun(t *testing.T) {
+	for _, cleanupFails := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cleanupFails=%v", cleanupFails), func(t *testing.T) {
+			f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
+			f.seedOwnedAgent(t)
+			f.mgr.createHandles = launchHandles()
+			f.mgr.startErrAfterCreate = errors.New("container exited immediately")
+			if cleanupFails {
+				f.mgr.cleanupLaunchErr = errors.New("delete refused")
+			}
+			w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents/test-agent-1/start"+flatStartQuery,
+				`{"expectedRuntimeTargetId":"`+f.identity.RuntimeTarget.ID+`",`+flatAgentEnv+`}`)
+			if w.Code < 400 {
+				t.Fatalf("status %d, want a failed start: %s", w.Code, w.Body.String())
+			}
+			rec, ok, err := f.srv.ownership.Get(flatTestProjectID, flatTestAgentID)
+			if err != nil || !ok {
+				t.Fatalf("record: %v %v", ok, err)
+			}
+			if rec.State != OwnershipStateActive {
+				t.Fatalf("record = %s, want active", rec.State)
+			}
+			if seed := rec.Run("seed-run"); seed == nil || seed.State != OwnershipStateCreated {
+				t.Fatalf("the agent's other run changed: %+v", seed)
+			}
+			var failed *OwnedRun
+			for i := range rec.Runs {
+				if rec.Runs[i].RunID != "seed-run" {
+					failed = &rec.Runs[i]
+				}
+			}
+			if failed == nil {
+				t.Fatalf("no failed run recorded: %+v", rec.Runs)
+			}
+			want, wantRes := OwnershipStateDeleted, OwnedResourceAbsent
+			if cleanupFails {
+				want, wantRes = OwnershipStateDeleting, OwnedResourceRecorded
+			}
+			if failed.State != want {
+				t.Errorf("failed run = %s, want %s", failed.State, want)
+			}
+			for _, res := range failed.Resources {
+				if res.State != wantRes {
+					t.Errorf("object %s = %s, want %s", res.UID, res.State, wantRes)
+				}
+			}
+			if len(failed.Resources) != 2 {
+				t.Errorf("failed run recorded %d objects, want 2", len(failed.Resources))
+			}
+		})
+	}
+}
+
+// TestFlatOwnership_AsyncLaunchCleanupFinishesOnlyItsRun: an async launch's
+// successful cleanup finishes only that launch's run.
+func TestFlatOwnership_AsyncLaunchCleanupFinishesOnlyItsRun(t *testing.T) {
+	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
+	f.seedOwnedAgent(t)
+	st := f.srv.ownership
+	if err := st.BeginRun(flatTestProjectID, flatTestAgentID, "test-agent-1", "run-async"); err != nil {
+		t.Fatal(err)
+	}
+	h := api.ResourceHandle{Kind: api.ResourceKindContainer, Name: "test-agent-1", UID: "uid-async"}
+	if err := st.AddResource(flatTestProjectID, flatTestAgentID, "run-async", h); err != nil {
+		t.Fatal(err)
+	}
+	rec := &launchRecord{ID: "launch-1", RunID: "run-async", Handles: []agent.ResourceHandle{h},
+		ownedRun: ownedRunKey{projectID: flatTestProjectID, agentID: flatTestAgentID, runID: "run-async"}}
+	f.srv.cleanupLaunchResources(f.mgr, rec)
+	got, _, _ := st.Get(flatTestProjectID, flatTestAgentID)
+	if r := got.Run("run-async"); r == nil || r.State != OwnershipStateDeleted || got.OwnsUID("uid-async") {
+		t.Fatalf("async run after cleanup = %+v", r)
+	}
+	if seed := got.Run("seed-run"); seed.State != OwnershipStateCreated || got.State != OwnershipStateActive {
+		t.Fatalf("other run or record changed: %+v / %s", seed, got.State)
 	}
 }

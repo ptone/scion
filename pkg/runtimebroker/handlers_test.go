@@ -58,8 +58,11 @@ type mockManager struct {
 	mu sync.Mutex
 	// createHandles are launch resources Start reports creating (each after
 	// a checkpoint); beforeCreate, when set, runs before the i-th one.
-	createHandles          []api.ResourceHandle
-	beforeCreate           func(i int)
+	createHandles []api.ResourceHandle
+	beforeCreate  func(i int)
+	// startErrAfterCreate, when set, fails Start after createHandles were
+	// created.
+	startErrAfterCreate    error
 	agents                 []api.AgentInfo
 	startCalls             int
 	stopCalls              int
@@ -158,6 +161,12 @@ func (m *mockManager) Start(ctx context.Context, opts api.StartOptions) (*api.Ag
 		if opts.ObserveResourceCreated != nil {
 			opts.ObserveResourceCreated(h)
 		}
+	}
+	m.mu.Lock()
+	errAfter := m.startErrAfterCreate
+	m.mu.Unlock()
+	if errAfter != nil {
+		return nil, errAfter
 	}
 	agent := &api.AgentInfo{
 		ID:    "test-container-id",

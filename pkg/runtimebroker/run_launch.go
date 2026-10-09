@@ -305,6 +305,10 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 	}
 	startCh := make(chan startResult, 1)
 	go func() {
+		ownedKey := s.ownedRunKeyFor(lc.opts.RunID)
+		rec.ownedRunMu.Lock()
+		rec.ownedRun = ownedKey
+		rec.ownedRunMu.Unlock()
 		info, err := lc.mgr.Start(ctx, lc.opts)
 		// The async failure path cleans up the launch's journaled handles.
 		err = s.completeOwnedStart(ctx, lc.mgr, lc.opts.RunID, err, false)
@@ -519,10 +523,17 @@ func (s *Server) cleanupAbortedLaunch(mgr agent.Manager, rec *launchRecord, lc l
 func (s *Server) cleanupLaunchResources(mgr agent.Manager, rec *launchRecord) {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	if err := mgr.CleanupLaunch(cleanupCtx, rec.HandlesSnapshot()); err != nil {
+	handles := rec.HandlesSnapshot()
+	if err := mgr.CleanupLaunch(cleanupCtx, handles); err != nil {
 		s.agentLifecycleLog.Warn("runLaunch: failed to clean up launch resources",
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "error", err)
+		return
 	}
+	// A flat instance finishes only this launch's run in its records.
+	rec.ownedRunMu.Lock()
+	key := rec.ownedRun
+	rec.ownedRunMu.Unlock()
+	s.finishCleanedRun(key, handles)
 }
 
 // terminalContext returns a fresh context bounded at deadline + 10 min

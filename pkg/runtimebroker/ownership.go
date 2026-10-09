@@ -894,6 +894,12 @@ func (s *Server) completeOwnedStart(ctx context.Context, mgr agent.Manager, runI
 		}
 	}
 	if startErr != nil {
+		// A failed synchronous start: the runtime cleaned up after itself;
+		// confirm exactly the journaled objects are gone and finish only
+		// this run. The async path finishes it after its own cleanup.
+		if cleanup {
+			s.cleanupOwnedRun(ctx, mgr, o.projectID, o.agentID, o.runID, o.snapshot())
+		}
 		return startErr
 	}
 	err := o.latched()
@@ -903,15 +909,73 @@ func (s *Server) completeOwnedStart(ctx context.Context, mgr agent.Manager, runI
 	if err == nil {
 		return nil
 	}
-	if cleanup && mgr != nil {
-		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
-		defer cancel()
-		if cerr := mgr.CleanupLaunch(cctx, o.snapshot()); cerr != nil {
-			s.agentLifecycleLog.Error("Undoing a start whose ownership could not be recorded failed; its objects stay labelled for reconciliation",
-				"run_id", runID, "error", cerr)
-		}
+	if cleanup {
+		s.cleanupOwnedRun(ctx, mgr, o.projectID, o.agentID, o.runID, o.snapshot())
 	}
 	return fmt.Errorf("flat Runtime Broker: the agent's runtime objects could not be recorded, so the start was undone: %w", err)
+}
+
+// ownedRunKey identifies a flat instance's run in its ownership records.
+type ownedRunKey struct {
+	projectID, agentID, runID string
+}
+
+// ownedRunKeyFor returns the ownership key of an in-flight owned start (the
+// zero key when the run has none, e.g. a legacy Runtime Broker).
+func (s *Server) ownedRunKeyFor(runID string) ownedRunKey {
+	if v, ok := s.ownedStarts.Load(runID); ok {
+		o := v.(*ownedStart)
+		return ownedRunKey{projectID: o.projectID, agentID: o.agentID, runID: o.runID}
+	}
+	return ownedRunKey{}
+}
+
+// cleanupOwnedRun removes a failed run's journaled objects with their UID
+// preconditions (an object already gone counts as removed) and then
+// finishes that run only (finishCleanedRun); the record and every other run
+// stay as they are. If the removal fails, the run is left deleting with its
+// objects recorded, for the next delete or reconciliation.
+func (s *Server) cleanupOwnedRun(ctx context.Context, mgr agent.Manager, projectID, agentID, runID string, handles []api.ResourceHandle) {
+	if s.ownership == nil {
+		return
+	}
+	if len(handles) > 0 {
+		if mgr == nil {
+			_ = s.ownership.SetRunState(projectID, agentID, runID, OwnershipStateDeleting)
+			return
+		}
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+		defer cancel()
+		if err := mgr.CleanupLaunch(cctx, handles); err != nil {
+			s.agentLifecycleLog.Error("Cleaning up a failed run failed; its objects stay recorded and labelled for reconciliation",
+				"run_id", runID, "error", err)
+			_ = s.ownership.SetRunState(projectID, agentID, runID, OwnershipStateDeleting)
+			return
+		}
+	}
+	s.finishCleanedRun(ownedRunKey{projectID: projectID, agentID: agentID, runID: runID}, handles)
+}
+
+// finishCleanedRun records that a run's objects were removed (each handle
+// confirmed absent) and moves only that run to deleting and deleted.
+func (s *Server) finishCleanedRun(k ownedRunKey, handles []api.ResourceHandle) {
+	if s.ownership == nil || k.runID == "" {
+		return
+	}
+	for _, h := range handles {
+		if h.UID == "" {
+			continue
+		}
+		if err := s.ownership.MarkAbsent(k.projectID, k.agentID, h.UID); err != nil {
+			return
+		}
+	}
+	if err := s.ownership.SetRunState(k.projectID, k.agentID, k.runID, OwnershipStateDeleting); err != nil {
+		return
+	}
+	if err := s.ownership.SetRunState(k.projectID, k.agentID, k.runID, OwnershipStateDeleted); err != nil {
+		s.agentLifecycleLog.Warn("A cleaned-up run was not marked deleted", "run_id", k.runID, "error", err)
+	}
 }
 
 // Reconstruct ensures the record of a runtime object that carries this
