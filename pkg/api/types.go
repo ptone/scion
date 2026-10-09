@@ -1331,6 +1331,11 @@ const LabelRunID = "scion.run_id"
 // caller, template or agent labels never set or replace it.
 const LabelRuntimeBrokerID = "scion.runtime_broker_id"
 
+// LabelAgentID is the runtime label carrying an agent's immutable Hub agent
+// ID. A start sets it on the main object, and the Kubernetes runtime copies
+// it from the run labels onto every per-launch child object.
+const LabelAgentID = "agent_id"
+
 // Error-detail keys a runtime broker sets on a start or restart failure
 // that happened inside Manager.Start (ptone/scion#2550). By then the broker
 // has acted: Start may already have removed the previous same-name entry

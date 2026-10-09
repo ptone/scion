@@ -1073,14 +1073,7 @@ func (r *KubernetesRuntime) createAgentSecretWithHooks(ctx context.Context, name
 	}
 
 	// Build labels for cleanup
-	secretLabels := map[string]string{
-		"scion.agent": agentName,
-	}
-	for k, v := range labels {
-		if strings.HasPrefix(k, "scion.") {
-			secretLabels[k] = v
-		}
-	}
+	secretLabels := launchChildLabels(agentName, labels)
 
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1260,14 +1253,7 @@ func (r *KubernetesRuntime) createSecretProviderClassWithHooks(ctx context.Conte
 	}
 
 	// Build labels
-	spcLabels := map[string]string{
-		"scion.agent": agentName,
-	}
-	for k, v := range labels {
-		if strings.HasPrefix(k, "scion.") {
-			spcLabels[k] = v
-		}
-	}
+	spcLabels := launchChildLabels(agentName, labels)
 
 	// GKE's managed Secret Manager add-on registers its provider as "gke",
 	// whereas the upstream open-source CSI driver uses "gcp".
@@ -1642,14 +1628,7 @@ func (r *KubernetesRuntime) createAuthFileSecretWithHooks(ctx context.Context, n
 		data[keyName] = content
 	}
 
-	secretLabels := map[string]string{
-		"scion.agent": agentName,
-	}
-	for k, v := range labels {
-		if strings.HasPrefix(k, "scion.") {
-			secretLabels[k] = v
-		}
-	}
+	secretLabels := launchChildLabels(agentName, labels)
 
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
