@@ -120,6 +120,9 @@ func (m *mockManager) Preflight(ctx context.Context, opts api.StartOptions) erro
 	return m.preflightErr
 }
 
+// SetOwner accepts a flat instance's owner scope (the mock filters nothing).
+func (m *mockManager) SetOwner(agent.OwnerScope) {}
+
 func (m *mockManager) CleanupLaunch(ctx context.Context, handles []agent.ResourceHandle) error {
 	m.cleanupLaunchCalls++
 	m.lastCleanupLaunchHandles = handles

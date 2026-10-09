@@ -983,6 +983,12 @@ func (s *Server) completeOwnedStart(ctx context.Context, mgr agent.Manager, runI
 	return fmt.Errorf("flat Runtime Broker: the agent's runtime objects could not be recorded, so the start was undone: %w", err)
 }
 
+// ownerScopedManager is a manager a flat instance can restrict to its own
+// objects (agent.AgentManager).
+type ownerScopedManager interface {
+	SetOwner(agent.OwnerScope)
+}
+
 // ownedRunKey identifies a flat instance's run in its ownership records.
 type ownedRunKey struct {
 	projectID, agentID, runID string

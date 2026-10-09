@@ -326,6 +326,9 @@ type Server struct {
 	// launches whose ownership recording failed; launch cleanup may delete
 	// them although the record may lack them (launchHandleOwned).
 	unmirroredUIDs sync.Map
+	// ownershipSetupErr refuses a flat instance whose manager could not be
+	// owner-scoped (startServices).
+	ownershipSetupErr error
 
 	// auxiliaryRuntimes holds runtime+manager pairs for non-default runtimes
 	// created via profile resolution (e.g. kubernetes when default is docker).
@@ -469,13 +472,23 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 			srv.stateDir = dir
 		}
 	}
+	if fi := srv.flatInstance(); fi != nil && srv.stateDir == "" {
+		// Fail closed: without a state root there are no ownership records.
+		srv.ownershipSetupErr = fmt.Errorf("flat Runtime Broker %s: no state directory for its ownership records", fi.Identity.RuntimeBrokerID)
+		slog.Error("Flat Runtime Broker instance will not serve", "error", srv.ownershipSetupErr)
+	}
 	if fi := srv.flatInstance(); fi != nil && srv.stateDir != "" {
 		// A flat instance owns only what its records and its reserved
 		// label say it owns (ptone/scion#3274).
 		srv.ownership = NewOwnershipStore(srv.stateDir, fi.Identity.RuntimeBrokerID)
 		srv.ownership.SetConflicting(fi.ConflictingOwnershipKeys)
 		srv.workspaceLocks.registerProjectUser(srv, srv.ownership.HasLiveAgents)
-		if am, ok := mgr.(*agent.AgentManager); ok {
+		if am, ok := mgr.(ownerScopedManager); !ok {
+			// Fail closed: a manager that cannot be restricted to this
+			// instance's objects would serve every instance's agents.
+			srv.ownershipSetupErr = fmt.Errorf("flat Runtime Broker %s: its agent manager (%T) cannot be restricted to this instance's objects", fi.Identity.RuntimeBrokerID, mgr)
+			slog.Error("Flat Runtime Broker instance will not serve", "error", srv.ownershipSetupErr)
+		} else {
 			am.SetOwner(agent.OwnerScope{RuntimeBrokerID: fi.Identity.RuntimeBrokerID,
 				FileAgentOwned: srv.fileAgentOwned, EntryUnresolved: srv.ownership.ConflictingLabels,
 				EntryPathTrusted: trustedEntryProjectPath, LaunchHandleOwned: srv.launchHandleOwned})
@@ -1212,6 +1225,9 @@ func (s *Server) startServices(ctx context.Context, withListener bool) error {
 	// serving, connecting or accepting any dispatch.
 	if err := s.flatHostingError(); err != nil {
 		return err
+	}
+	if s.ownershipSetupErr != nil {
+		return s.ownershipSetupErr
 	}
 
 	s.mu.Lock()

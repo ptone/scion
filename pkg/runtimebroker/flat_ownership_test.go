@@ -487,3 +487,20 @@ func TestFlatOwnership_AsyncLaunchCleanupFinishesOnlyItsRun(t *testing.T) {
 		t.Fatalf("other run or record changed: %+v / %s", seed, got.State)
 	}
 }
+
+// plainManager is an agent.Manager that cannot be owner-scoped.
+type plainManager struct{ agent.Manager }
+
+// TestFlatInstance_UnscopableManagerFailsClosed: a flat instance whose
+// manager cannot be restricted to its own objects refuses to start its
+// services instead of serving every instance's agents unfiltered.
+func TestFlatInstance_UnscopableManagerFailsClosed(t *testing.T) {
+	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
+	cfg := f.srv.config
+	srv := New(cfg, plainManager{f.mgr}, f.srv.runtime)
+	err := srv.StartServices(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "cannot be restricted") {
+		t.Fatalf("StartServices = %v, want the fail-closed refusal", err)
+	}
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+}

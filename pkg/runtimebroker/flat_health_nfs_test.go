@@ -20,6 +20,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokeridentity"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
@@ -37,7 +38,11 @@ func TestFlatInstanceHealth_NFSCodesOnly(t *testing.T) {
 			cfg.BrokerID = "rb-flat"
 			cfg.FlatInstance = &FlatInstanceConfig{Identity: &brokeridentity.Identity{RuntimeBrokerID: "rb-flat"}, HubInProcess: true}
 		}
-		srv := New(cfg, nil, &runtime.MockRuntime{NameFunc: func() string { return "mock" }})
+		var mgr agent.Manager
+		if flat {
+			mgr = &mockManager{} // a flat instance needs an owner-scoped manager
+		}
+		srv := New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "mock" }})
 		startTestBroker(t, srv)
 		waitClosed(t, srv.nfsStartupReconcileDone, "first reconcile pass")
 
