@@ -204,6 +204,12 @@ type ServerConfig struct {
 	// no instance competes to own the host's mounts.
 	NFSVerifyOnlyReason string
 
+	// WorkspaceLocks coordinates operations on shared local paths with
+	// every other Runtime Broker server of the process (P2.3 S2). The flat
+	// host passes one service to all its instances; nil gives this server
+	// its own.
+	WorkspaceLocks *WorkspaceLocks
+
 	// FlatInstance, when set, makes this server host exactly one flat Runtime
 	// Broker instance bound to one runtime target (see FlatInstanceConfig).
 	// Nil keeps the legacy, profile-resolving Runtime Broker.
@@ -355,11 +361,11 @@ type Server struct {
 	agentOwnRuntimes     sync.Map
 	agentOwnRuntimeGroup singleflight.Group
 
-	// projectProvisionMu serializes worktree provisioning per project on this
-	// node. Without this, concurrent agent creations for the same project could
-	// race inside ProvisionShared (double-clone / corrupt .git state).
-	// Key: ProjectID (or ProjectPath if ID is empty).
-	projectProvisionMu sync.Map
+	// workspaceLocks serializes operations on shared local paths (worktree
+	// provisioning, project and agent file cleanup) with every server of
+	// the process that shares it (workspace_locks.go).
+	workspaceLocks     *WorkspaceLocks
+	workspaceLocksOnce sync.Once
 
 	// NFS mount reconciler (nil when backend != "nfs")
 	nfsMountReconciler *NFSMountReconciler
@@ -451,6 +457,10 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 		srv.envSecretLog = srv.envSecretLog.With(attrs...)
 	}
 
+	srv.workspaceLocks = cfg.WorkspaceLocks
+	if srv.workspaceLocks == nil {
+		srv.workspaceLocks = NewWorkspaceLocks()
+	}
 	srv.stateDir = cfg.StateDir
 	if srv.stateDir == "" {
 		if dir, err := DefaultStateDir(cfg.BrokerID); err != nil {
@@ -464,6 +474,7 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 		// label say it owns (ptone/scion#3274).
 		srv.ownership = NewOwnershipStore(srv.stateDir, fi.Identity.RuntimeBrokerID)
 		srv.ownership.SetConflicting(fi.ConflictingOwnershipKeys)
+		srv.workspaceLocks.registerProjectUser(srv, srv.ownership.HasLiveAgents)
 		if am, ok := mgr.(*agent.AgentManager); ok {
 			am.SetOwner(agent.OwnerScope{RuntimeBrokerID: fi.Identity.RuntimeBrokerID,
 				FileAgentOwned: srv.fileAgentOwned, EntryUnresolved: srv.ownership.ConflictingLabels,

@@ -150,6 +150,13 @@ const partitionDaemonID = "shared-daemon"
 // on the shared daemon.
 func newPartitionInstance(t *testing.T, d *sharedDaemon, key, stateDir string) *partitionInstance {
 	t.Helper()
+	return newPartitionInstanceWithLocks(t, d, key, stateDir, nil)
+}
+
+// newPartitionInstanceWithLocks is newPartitionInstance sharing a host's
+// workspace lock service (nil: the server's own).
+func newPartitionInstanceWithLocks(t *testing.T, d *sharedDaemon, key, stateDir string, locks *WorkspaceLocks) *partitionInstance {
+	t.Helper()
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		t.Fatal(err)
@@ -171,6 +178,7 @@ func newPartitionInstance(t *testing.T, d *sharedDaemon, key, stateDir string) *
 	cfg.FlatInstance = &FlatInstanceConfig{Identity: id, HubInProcess: true,
 		Instance: config.V1RuntimeBrokerInstanceConfig{Key: key, Name: key, RuntimeTarget: &config.V1RuntimeTargetConfig{Type: "docker"}}}
 	cfg.InMemoryCredentials = &brokercredentials.BrokerCredentials{BrokerID: id.RuntimeBrokerID, SecretKey: "c2VjcmV0", HubEndpoint: cfg.HubEndpoint}
+	cfg.WorkspaceLocks = locks
 	srv := New(cfg, mgr, rt)
 	return &partitionInstance{key: key, identity: id, stateDir: stateDir, mgr: mgr, rt: rt, srv: srv}
 }

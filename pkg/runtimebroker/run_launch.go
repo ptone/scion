@@ -485,6 +485,17 @@ func (s *Server) cleanupAbortedLaunch(mgr agent.Manager, rec *launchRecord, lc l
 	if rec.Kind != store.LaunchKindCreate || lc.opts.ProjectPath == "" {
 		return
 	}
+	// The ownership checks and the removal run under the process-wide
+	// workspace lock on the agent's files (P2.3 S2).
+	lockCtx, cancelLock := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancelLock()
+	unlock, err := s.lockAgentFiles(lockCtx, lc.opts.ProjectPath, lc.opts.Name)
+	if err != nil {
+		s.agentLifecycleLog.Warn("runLaunch: skipped agent file cleanup: the agent's workspace lock is unavailable",
+			"agent_id", rec.AgentID, "launch_id", rec.ID, "error", err)
+		return
+	}
+	defer unlock()
 	if !launchMarkerMatches(lc.opts.ProjectPath, lc.sharedWorkspace, lc.key.Slug, rec.ID) {
 		// A newer launch's marker write means this one's files are no
 		// longer this launch's to delete (design §3.8.4).

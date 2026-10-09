@@ -25,6 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/brokerhost"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokeridentity"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 )
 
 // TestFlatInstanceServerConfig covers the production per-instance server
@@ -76,5 +77,18 @@ func TestFlatInstanceServerConfig(t *testing.T) {
 			assert.True(t, c.BrokerAuthStrictMode)
 			assert.Nil(t, c.DefaultProfile, "a flat instance reports no Runtime Broker Profile")
 		})
+	}
+}
+
+// TestFlatInstanceServerConfig_SharesOneWorkspaceLockService: every
+// instance of a host gets the same process-wide workspace lock service.
+func TestFlatInstanceServerConfig_SharesOneWorkspaceLockService(t *testing.T) {
+	locks := runtimebroker.NewWorkspaceLocks()
+	sh := flatServerShared{cfg: &config.GlobalConfig{}, mode: brokerhost.ModeRemote, multiInstance: true, workspaceLocks: locks}
+	for _, key := range []string{"docker-a", "docker-b"} {
+		id := &brokeridentity.Identity{InstanceKey: key, RuntimeBrokerID: "rb-" + key}
+		inst := config.V1RuntimeBrokerInstanceConfig{Key: key, Name: key, RuntimeTarget: &config.V1RuntimeTargetConfig{Type: "docker"}}
+		c := flatInstanceServerConfig(sh, brokerhost.InstanceContext{Instance: inst, Identity: id, Activation: &brokerhost.Activation{}})
+		assert.Same(t, locks, c.WorkspaceLocks, key)
 	}
 }

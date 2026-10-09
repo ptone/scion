@@ -475,9 +475,11 @@ func (s *OwnershipStore) MarkAbsent(projectID, agentID, uid string) error {
 }
 
 // ReleaseSlug releases a deleted agent's slug reservation once every
-// recorded object is confirmed absent; the caller holds the shared path
-// lock (S2) and has confirmed the agent's files are gone. The record stays
-// as a tombstone. Anything else is refused.
+// recorded object is confirmed absent. Its caller (finishOwnedDelete, from
+// deleteAgentFenced) holds the process-wide workspace lock on the agent's
+// files (lockAgentFiles, P2.3 S2) for the whole delete, so no provisioning
+// or other removal of those paths runs before the slug is free. The record
+// stays as a tombstone. Anything else is refused.
 func (s *OwnershipStore) ReleaseSlug(projectID, agentID string) error {
 	l := s.keyLock(projectID, agentID)
 	l.Lock()
@@ -678,6 +680,21 @@ func syncDir(dir string) {
 		_ = d.Sync()
 		_ = d.Close()
 	}
+}
+
+// HasLiveAgents reports whether a live or deleting record of this instance
+// is in the project. An unreadable record is an error.
+func (s *OwnershipStore) HasLiveAgents(projectID string) (bool, error) {
+	recs, err := s.List()
+	if err != nil {
+		return false, err
+	}
+	for _, r := range recs {
+		if r.ProjectID == projectID && r.State != OwnershipStateDeleted {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // RecordsResource reports whether a live or deleting record of this

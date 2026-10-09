@@ -384,6 +384,7 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 		devAuthToken:            p.devAuthToken,
 		nfs:                     brokerNFS,
 		workspaceStorageBackend: workspaceStorageBackend,
+		workspaceLocks:          runtimebroker.NewWorkspaceLocks(),
 	}
 	buildServer := func(ic brokerhost.InstanceContext) (*runtimebroker.Server, error) {
 		rhCfg := flatInstanceServerConfig(shared, ic)
@@ -546,6 +547,9 @@ type flatServerShared struct {
 	devAuthToken            string
 	nfs                     *config.V1NFSConfig
 	workspaceStorageBackend string
+	// workspaceLocks is the one process-wide workspace lock service every
+	// instance shares (P2.3 S2).
+	workspaceLocks *runtimebroker.WorkspaceLocks
 }
 
 // flatInstanceServerConfig is one activated flat instance's Runtime Broker
@@ -576,6 +580,7 @@ func flatInstanceServerConfig(sh flatServerShared, ic brokerhost.InstanceContext
 		NFSConfig:                     sh.nfs,
 		StorageBucket:                 brokerStorageBucket(cfg.Storage),
 		WorkspaceStorageBackend:       sh.workspaceStorageBackend,
+		WorkspaceLocks:                sh.workspaceLocks,
 		Debug:                         enableDebug,
 		SlowRequestThreshold:          cfg.SlowRequestThreshold,
 

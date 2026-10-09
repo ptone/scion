@@ -1602,7 +1602,20 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// not the hub's agent record.
 		// The files must also still be this run's (ptone/scion#2675): a
 		// newer run recorded in agent-info.json owns them otherwise.
-		if opts.ProjectPath != "" && !ss.ownsName() {
+		var unlockFiles func()
+		if opts.ProjectPath != "" {
+			// The ownership checks and the removal run under the
+			// process-wide workspace lock on the agent's files (P2.3 S2).
+			lockCtx, cancelLock := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
+			if unlock, lockErr := s.lockAgentFiles(lockCtx, opts.ProjectPath, opts.Name); lockErr == nil {
+				unlockFiles = unlock
+			}
+			cancelLock()
+		}
+		if opts.ProjectPath != "" && unlockFiles == nil {
+			s.agentLifecycleLog.Warn("Skipped agent file cleanup after start failure: the agent's workspace lock is unavailable",
+				"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name)
+		} else if opts.ProjectPath != "" && !ss.ownsName() {
 			s.agentLifecycleLog.Info("Skipped agent file cleanup after start failure: the agent name is now owned by a newer start",
 				"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name)
 		} else if opts.ProjectPath != "" {
@@ -1617,6 +1630,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				s.agentLifecycleLog.Info("Cleaned up provisioned agent files after start failure",
 					"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name)
 			}
+		}
+		if unlockFiles != nil {
+			unlockFiles()
 		}
 		span.SetStatus(codes.Error, err.Error())
 		switch {
@@ -2383,6 +2399,21 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	}
 	projectPath := target.projectPath
 	agentProjectID := target.projectID
+
+	// A delete that touches the agent's files (or its delete marks, or its
+	// ownership record's slug) holds the process-wide workspace lock on
+	// them from the file-ownership checks below through the last cleanup,
+	// so another Runtime Broker instance (or another request) never
+	// provisions or removes the same paths meanwhile (P2.3 S2).
+	if projectPath != "" && (deleteFiles || softDelete || localOnly) {
+		unlock, lockErr := s.lockAgentFiles(ctx, projectPath, target.name)
+		if lockErr != nil {
+			span.SetStatus(codes.Error, lockErr.Error())
+			s.writeRuntimeOpError(w, ctx, "delete agent", lockErr, "agent_id", id, "project_id", projectID)
+			return
+		}
+		defer unlock()
+	}
 
 	// A flat instance deletes only what it owns: a file-only agent needs
 	// its ownership record; a whole-agent delete moves the record to
@@ -6242,9 +6273,33 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 		return
 	}
 
+	// The removal holds the process-wide workspace lock on the project from
+	// the checks below through the last removal, so no Runtime Broker
+	// instance of this host provisions in or removes from the project
+	// meanwhile (P2.3 S2).
+	unlock, err := s.locks().Lock(r.Context(), projectPath)
+	if err != nil {
+		s.writeRuntimeOpError(w, r.Context(), opRemoveProjectDir, err, "project_slug", slug, "path", projectPath)
+		return
+	}
+	defer unlock()
+
 	if _, err := os.Stat(projectPath); os.IsNotExist(err) {
 		// Already gone — idempotent success
 		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	// Another Runtime Broker instance of this host that still has agents in
+	// the project keeps its workspace: nothing is removed.
+	inUseID := r.URL.Query().Get("project_id")
+	if inUseID == "" {
+		inUseID = projectIDAtPath(projectPath)
+	}
+	if inUseID != "" && s.locks().projectInUseByOthers(s, inUseID) {
+		s.agentLifecycleLog.Info("Project directory kept: another Runtime Broker instance of this host still has agents in it",
+			"slug", slug, "project_id", inUseID)
+		Conflict(w, "the project is still in use by another Runtime Broker instance on this host")
 		return
 	}
 

@@ -25,7 +25,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -1663,11 +1662,15 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 		branch = in.AgentID
 	}
 
-	// Serialize same-project provisioning on this node to prevent concurrent
-	// ProvisionShared calls from racing on the shared base clone.
-	mu := s.projectProvisionMutex(in.ProjectID, in.ProjectPath)
-	mu.Lock()
-	defer mu.Unlock()
+	// Serialize same-project provisioning with every Runtime Broker server
+	// of this process (one host may run several instances) so concurrent
+	// ProvisionShared calls never race on the shared base clone. The lock
+	// is held through the partial-worktree cleanup below.
+	unlock, err := s.lockProjectWorkspace(ctx, result.ProjectRoot, in.ProjectPath)
+	if err != nil {
+		return false, "", fmt.Errorf("worktree-per-agent: %w", err)
+	}
+	defer unlock()
 
 	// The shared "worktrees" directory must be a real directory, not a
 	// symlink, before any provisioning is attempted against it: git (and
@@ -1869,15 +1872,14 @@ func resolveActualWorkspace(repoRoot, branch, fallbackWorktreePath, agentID stri
 	return regPath
 }
 
-// projectProvisionMutex returns the per-project mutex for serializing worktree
-// provisioning. Uses ProjectID as key, falling back to ProjectPath if empty.
-func (s *Server) projectProvisionMutex(projectID, projectPath string) *sync.Mutex {
-	key := projectID
-	if key == "" {
-		key = projectPath
+// lockProjectWorkspace takes the process-wide workspace lock on a project's
+// shared provisioning root (the worktree base and its base clone) and its
+// project path, by canonical path (WorkspaceLocks).
+func (s *Server) lockProjectWorkspace(ctx context.Context, projectRoot, projectPath string) (func(), error) {
+	if projectRoot == "" && projectPath == "" {
+		return func() {}, nil
 	}
-	actual, _ := s.projectProvisionMu.LoadOrStore(key, &sync.Mutex{})
-	return actual.(*sync.Mutex)
+	return s.locks().Lock(ctx, projectRoot, projectPath)
 }
 
 // worktreeProvisionInput holds the fields needed to decide whether to
