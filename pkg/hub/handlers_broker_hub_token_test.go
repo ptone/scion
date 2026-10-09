@@ -483,7 +483,8 @@ func TestBrokerHubToken_OwnerTokenCannotRotate(t *testing.T) {
 // ----------------------------------------------------------------------------
 
 // brokerLookupSwapStore wraps a store and runs onLookup, once, on the first
-// GetRuntimeBrokerByName call issued by the registration service's own
+// by-name lookup (GetRuntimeBrokerByName or GetLegacyRuntimeBrokerByName)
+// issued by the registration service's own
 // lookup (its context carries the marker set by createBrokerRegistration).
 // The handler's authorization lookup carries no marker and reaches the
 // wrapped store, however many lookups either side performs.
@@ -505,6 +506,22 @@ func (w *brokerLookupSwapStore) GetRuntimeBrokerByName(ctx context.Context, name
 		return w.onLookup(ctx, name)
 	}
 	return w.Store.GetRuntimeBrokerByName(ctx, name)
+}
+
+// GetLegacyRuntimeBrokerByName is the by-name lookup the registration
+// service uses (it never matches a flat row by name); it carries the same
+// hook.
+func (w *brokerLookupSwapStore) GetLegacyRuntimeBrokerByName(ctx context.Context, name string) (*store.RuntimeBroker, error) {
+	w.mu.Lock()
+	hook := !w.fired && w.onLookup != nil && isBrokerRegistrationLookup(ctx)
+	if hook {
+		w.fired = true
+	}
+	w.mu.Unlock()
+	if hook {
+		return w.onLookup(ctx, name)
+	}
+	return w.Store.GetLegacyRuntimeBrokerByName(ctx, name)
 }
 
 // hookFired reports whether onLookup ran on the service's lookup.

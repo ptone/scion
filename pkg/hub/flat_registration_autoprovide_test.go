@@ -37,6 +37,12 @@ import (
 // PreserveSettings leaves the row's settings (a new row off); and the
 // decision is pinned at the write.
 
+// targetFor is a runtime target of its own for the flat row id (target IDs
+// are unique per row).
+func (f *flatRegFixture) targetFor(id string) *api.RuntimeTargetDescriptor {
+	return &api.RuntimeTargetDescriptor{ID: tid("target-" + id), Type: "docker", DisplayName: "Local Docker"}
+}
+
 func (f *flatRegFixture) flatRow(t *testing.T, id string) *store.RuntimeBroker {
 	t.Helper()
 	b, err := f.s.GetRuntimeBroker(context.Background(), id)
@@ -51,21 +57,21 @@ func (f *flatRegFixture) flatRow(t *testing.T, id string) *store.RuntimeBroker {
 func TestFlatRegistration_AutoProvideNeedsTheHubPermission(t *testing.T) {
 	f := newFlatRegFixture(t, true)
 	newID := tid("flat-ap-new")
-	rec := f.register(t, f.operator, CreateBrokerRegistrationRequest{BrokerID: newID, Name: "flat-ap-new", RuntimeTarget: f.target, AutoProvide: true})
+	rec := f.register(t, f.operator, CreateBrokerRegistrationRequest{BrokerID: newID, Name: "flat-ap-new", RuntimeTarget: f.targetFor(newID), AutoProvide: true})
 	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
 	_, err := f.s.GetRuntimeBroker(context.Background(), newID)
 	assert.ErrorIs(t, err, store.ErrNotFound, "no row is created for a refused auto-provide registration")
 
 	id := tid("flat-ap-off")
-	rec = f.register(t, f.operator, CreateBrokerRegistrationRequest{BrokerID: id, Name: "flat-ap-off", RuntimeTarget: f.target})
+	rec = f.register(t, f.operator, CreateBrokerRegistrationRequest{BrokerID: id, Name: "flat-ap-off", RuntimeTarget: f.targetFor(id)})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
-	rec = f.register(t, f.operator, CreateBrokerRegistrationRequest{BrokerID: id, Name: "flat-ap-off", RuntimeTarget: f.target, AutoProvide: true})
+	rec = f.register(t, f.operator, CreateBrokerRegistrationRequest{BrokerID: id, Name: "flat-ap-off", RuntimeTarget: f.targetFor(id), AutoProvide: true})
 	assert.Equal(t, http.StatusForbidden, rec.Code, "turning auto-provide on needs broker.auto_provide: %s", rec.Body.String())
 	assert.False(t, f.flatRow(t, id).AutoProvide, "the refused request changes nothing")
 
 	admin := newSuperAdminUser(t, f.s, "flat-ap-admin")
 	adminID := tid("flat-ap-admin-row")
-	rec = f.register(t, admin, CreateBrokerRegistrationRequest{BrokerID: adminID, Name: "flat-ap-admin", RuntimeTarget: f.target, AutoProvide: true})
+	rec = f.register(t, admin, CreateBrokerRegistrationRequest{BrokerID: adminID, Name: "flat-ap-admin", RuntimeTarget: f.targetFor(adminID), AutoProvide: true})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 	assert.True(t, f.flatRow(t, adminID).AutoProvide)
 }
@@ -77,22 +83,22 @@ func TestFlatRegistration_AutoProvideNeedsTheHubPermission(t *testing.T) {
 func TestFlatRegistration_KeepOrTurnOffAutoProvideNeedsNothingExtra(t *testing.T) {
 	f := newFlatRegFixture(t, true)
 	id := tid("flat-ap-keep")
-	rec := f.register(t, f.operator, CreateBrokerRegistrationRequest{BrokerID: id, Name: "flat-ap-keep", RuntimeTarget: f.target})
+	rec := f.register(t, f.operator, CreateBrokerRegistrationRequest{BrokerID: id, Name: "flat-ap-keep", RuntimeTarget: f.targetFor(id)})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 	row := f.flatRow(t, id)
 	row.AutoProvide = true // enabled earlier by someone holding broker.auto_provide
 	require.NoError(t, f.s.UpdateRuntimeBroker(context.Background(), row))
 
-	rec = f.register(t, f.operator, CreateBrokerRegistrationRequest{BrokerID: id, Name: "flat-ap-keep", RuntimeTarget: f.target, AutoProvide: true})
+	rec = f.register(t, f.operator, CreateBrokerRegistrationRequest{BrokerID: id, Name: "flat-ap-keep", RuntimeTarget: f.targetFor(id), AutoProvide: true})
 	require.Equal(t, http.StatusCreated, rec.Code, "keeping auto-provide on: %s", rec.Body.String())
 	assert.True(t, f.flatRow(t, id).AutoProvide)
 
-	rec = f.register(t, f.operator, CreateBrokerRegistrationRequest{BrokerID: id, Name: "flat-ap-keep", RuntimeTarget: f.target})
+	rec = f.register(t, f.operator, CreateBrokerRegistrationRequest{BrokerID: id, Name: "flat-ap-keep", RuntimeTarget: f.targetFor(id)})
 	require.Equal(t, http.StatusCreated, rec.Code, "turning auto-provide off: %s", rec.Body.String())
 	assert.False(t, f.flatRow(t, id).AutoProvide)
 
 	preserveID := tid("flat-ap-preserve-new")
-	rec = f.register(t, f.operator, CreateBrokerRegistrationRequest{BrokerID: preserveID, Name: "flat-ap-preserve-new", RuntimeTarget: f.target,
+	rec = f.register(t, f.operator, CreateBrokerRegistrationRequest{BrokerID: preserveID, Name: "flat-ap-preserve-new", RuntimeTarget: f.targetFor(preserveID),
 		PreserveSettings: true, AutoProvide: true})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 	assert.False(t, f.flatRow(t, preserveID).AutoProvide, "PreserveSettings creates a new row with auto-provide off")
@@ -104,7 +110,7 @@ func TestFlatRegistration_KeepOrTurnOffAutoProvideNeedsNothingExtra(t *testing.T
 func TestFlatRegistration_StaleAutoProvideDecisionRefused(t *testing.T) {
 	f := newFlatRegFixture(t, true)
 	id := tid("flat-ap-stale")
-	rec := f.register(t, f.operator, CreateBrokerRegistrationRequest{BrokerID: id, Name: "flat-ap-stale", RuntimeTarget: f.target,
+	rec := f.register(t, f.operator, CreateBrokerRegistrationRequest{BrokerID: id, Name: "flat-ap-stale", RuntimeTarget: f.targetFor(id),
 		Labels: map[string]string{"team": "a"}})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 	authorizedAgainst := f.flatRow(t, id)
@@ -112,7 +118,7 @@ func TestFlatRegistration_StaleAutoProvideDecisionRefused(t *testing.T) {
 
 	applied := false
 	_, _, err := f.srv.registerFlatRuntimeBroker(context.Background(), flatRegistration{
-		BrokerID: id, Name: "flat-ap-stale", Target: *f.target, CreatedBy: f.operator.ID, Existing: authorizedAgainst,
+		BrokerID: id, Name: "flat-ap-stale", Target: *f.targetFor(id), CreatedBy: f.operator.ID, Existing: authorizedAgainst,
 		GateAutoProvide: true, RequestedAutoProvide: true, AutoProvideAuthorized: false,
 		Apply: func(b *store.RuntimeBroker, _ bool) { applied = true; b.AutoProvide = true; b.Labels["team"] = "b" },
 	})
