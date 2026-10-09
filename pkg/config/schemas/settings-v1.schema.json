@@ -1363,9 +1363,8 @@
         "cors": { "$ref": "#/$defs/corsConfig" },
         "instances": {
           "type": ["array", "null"],
-          "maxItems": 1,
           "items": { "$ref": "#/$defs/runtimeBrokerInstance" },
-          "description": "Flat (single-target) Runtime Broker instances hosted by this process. Empty or absent means legacy hosting. This release accepts one docker entry and requires the Hub in the same process. Read from the global settings file only."
+          "description": "Flat (single-target) Runtime Broker instances hosted by this process, each with a unique key. Empty or absent means legacy hosting. This release accepts docker entries. Read from the global settings file only."
         }
       }
     },

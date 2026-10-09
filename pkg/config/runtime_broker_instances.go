@@ -42,10 +42,6 @@ const (
 	RuntimeTargetTypeKubernetes = "kubernetes"
 )
 
-// MaxRuntimeBrokerInstances is the number of instances one process may host
-// in this release (P2 lifts it).
-const MaxRuntimeBrokerInstances = 1
-
 // ErrRuntimeBrokerInstancesInServerYAML is returned by LoadGlobalConfig when a
 // legacy server.yaml configures runtimeBroker.instances.
 var ErrRuntimeBrokerInstancesInServerYAML = errors.New(
@@ -69,16 +65,11 @@ func (e *RuntimeBrokerHostingError) Error() string {
 }
 
 // ValidateRuntimeBrokerInstances checks server.broker.instances and returns
-// one ValidationError per problem, each naming its settings path. Duplicate
-// keys are reported even when the count rule also fails.
+// one ValidationError per problem, each naming its settings path. There is
+// no policy limit on the number of instances (P2.1); each key must be
+// unique.
 func ValidateRuntimeBrokerInstances(instances []V1RuntimeBrokerInstanceConfig) []ValidationError {
 	var errs []ValidationError
-	if len(instances) > MaxRuntimeBrokerInstances {
-		errs = append(errs, ValidationError{
-			Path:    "server.broker.instances",
-			Message: fmt.Sprintf("only %d Runtime Broker instance is supported in this release", MaxRuntimeBrokerInstances),
-		})
-	}
 	firstIndex := map[string]int{}
 	for i, inst := range instances {
 		p := fmt.Sprintf("server.broker.instances[%d]", i)
@@ -86,8 +77,7 @@ func ValidateRuntimeBrokerInstances(instances []V1RuntimeBrokerInstanceConfig) [
 			errs = append(errs, ValidationError{Path: p + ".key",
 				Message: fmt.Sprintf("invalid instance key %q (must match %s)", inst.Key, RuntimeBrokerInstanceKeyPattern)})
 		} else if j, dup := firstIndex[inst.Key]; dup {
-			errs = append(errs, ValidationError{Path: p + ".key",
-				Message: fmt.Sprintf("duplicate instance key %q (also at index %d)", inst.Key, j)})
+			errs = append(errs, duplicateInstanceKeyError(i, j, inst.Key))
 		} else {
 			firstIndex[inst.Key] = i
 		}
@@ -118,6 +108,28 @@ func ValidateRuntimeBrokerInstances(instances []V1RuntimeBrokerInstanceConfig) [
 		}
 	}
 	sort.SliceStable(errs, func(a, b int) bool { return errs[a].Path < errs[b].Path })
+	return errs
+}
+
+func duplicateInstanceKeyError(i, j int, key string) ValidationError {
+	return ValidationError{Path: fmt.Sprintf("server.broker.instances[%d].key", i),
+		Message: fmt.Sprintf("duplicate instance key %q (also at index %d)", key, j)}
+}
+
+// RuntimeBrokerInstanceDuplicateKeys reports every repeated instance key.
+// The JSON schema cannot express key uniqueness, so scion config validate
+// (ValidateSettings) runs this after the schema pass, keeping the schema and
+// ValidateRuntimeBrokerInstances in agreement.
+func RuntimeBrokerInstanceDuplicateKeys(instances []V1RuntimeBrokerInstanceConfig) []ValidationError {
+	var errs []ValidationError
+	firstIndex := map[string]int{}
+	for i, inst := range instances {
+		if j, dup := firstIndex[inst.Key]; dup {
+			errs = append(errs, duplicateInstanceKeyError(i, j, inst.Key))
+		} else {
+			firstIndex[inst.Key] = i
+		}
+	}
 	return errs
 }
 

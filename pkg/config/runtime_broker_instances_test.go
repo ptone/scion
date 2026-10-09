@@ -291,15 +291,17 @@ func TestRuntimeBrokerInstances_DuplicateKeyRejected(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("duplicate key must be reported even with the count rule: %v", errs)
+		t.Fatalf("duplicate key must be reported: %v", errs)
 	}
 }
 
-func TestRuntimeBrokerInstances_MultipleEntriesRejected(t *testing.T) {
-	errs := ValidateRuntimeBrokerInstances([]V1RuntimeBrokerInstanceConfig{dockerInstance("a", "x"), dockerInstance("b", "y")})
-	expectValidationPaths(t, errs, "server.broker.instances")
-	if !strings.Contains(errs[0].Message, "only 1 Runtime Broker instance") {
-		t.Fatalf("got %v", errs)
+// TestRuntimeBrokerInstances_MultipleEntriesAccepted: P2.1 removes the
+// one-instance limit; distinct valid entries are accepted (duplicate keys
+// are still rejected, see DuplicateKeyRejected).
+func TestRuntimeBrokerInstances_MultipleEntriesAccepted(t *testing.T) {
+	errs := ValidateRuntimeBrokerInstances([]V1RuntimeBrokerInstanceConfig{dockerInstance("a", "x"), dockerInstance("b", "y"), dockerInstance("c", "z")})
+	if len(errs) != 0 {
+		t.Fatalf("distinct valid entries must be accepted: %v", errs)
 	}
 }
 
@@ -352,7 +354,7 @@ func TestRuntimeBrokerInstances_SchemaMatchesValidator(t *testing.T) {
 	}{
 		"one docker":        {oneDockerInstanceYAML, true},
 		"empty list":        {"schema_version: \"1\"\nserver:\n  broker:\n    instances: []\n", true},
-		"two entries":       {instancesYAML("- {key: a, name: x, runtime_target: {type: docker}}\n      - {key: b, name: y, runtime_target: {type: docker}}"), false},
+		"two entries":       {instancesYAML("- {key: a, name: x, runtime_target: {type: docker}}\n      - {key: b, name: y, runtime_target: {type: docker}}"), true},
 		"duplicate key":     {instancesYAML("- {key: a, name: x, runtime_target: {type: docker}}\n      - {key: a, name: y, runtime_target: {type: docker}}"), false},
 		"bad key":           {instancesYAML("- {key: Bad, name: x, runtime_target: {type: docker}}"), false},
 		"missing name":      {instancesYAML("- {key: a, runtime_target: {type: docker}}"), false},
