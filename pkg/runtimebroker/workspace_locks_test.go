@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -450,7 +451,10 @@ func TestWorkspaceLocks_AgentFileLockPaths(t *testing.T) {
 	assert.Contains(t, paths, dir)
 	globalAgents, err := config.GetGlobalAgentsDir()
 	require.NoError(t, err)
-	assert.Contains(t, paths, filepath.Join(globalAgents, "worker"))
+	for _, p := range paths {
+		assert.False(t, p == globalAgents || strings.HasPrefix(p, globalAgents+string(filepath.Separator)),
+			"another project's lock set includes the global project's agent entry %s", p)
+	}
 
 	s := New(DefaultServerConfig(), &mockManager{}, nil)
 	unlock, err := s.lockProjectWorkspace(context.Background(), filepath.Join(dir, "workspace"), dir)
@@ -467,6 +471,7 @@ func TestWorkspaceLocks_AgentFileLockPaths(t *testing.T) {
 		assert.NotEqual(t, filepath.Dir(globalDir), p)
 	}
 	assert.Contains(t, globalPaths, filepath.Join(globalDir, "agents", "worker"))
+	assert.Contains(t, globalPaths, filepath.Join(globalDir, "workspace", "worker"))
 }
 
 // TestWorkspaceLocks_AgentDeleteWaitsForProvisioning: an agent delete that

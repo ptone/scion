@@ -386,10 +386,12 @@ func (l *WorkspaceLocks) release(keys []string) {
 // agentFileLockPaths are the shared paths an agent's file operations
 // (provisioning cleanup, DeleteAgentFiles, delete marks) touch: the
 // project root, which holds the shared base clone, its worktrees and the
-// agent directories, and the enclosing repository when it differs; the
-// agent's external directory (split storage); and the global agents
-// directory entry DeleteAgentFiles also removes. For the global project only
+// agent directories, and the enclosing repository when it differs; and the
+// agent's external directory (split storage). For the global project only
 // the agent's own entries are taken, never the global directory itself.
+// DeleteAgentFiles touches the global project's agent entries only when the
+// global project is its target, so no other project's lock set includes
+// them.
 func agentFileLockPaths(projectPath, agentName string) []string {
 	projectDir, err := config.GetResolvedProjectDir(projectPath)
 	if err != nil || projectDir == "" {
@@ -410,9 +412,6 @@ func agentFileLockPaths(projectPath, agentName string) []string {
 		if ext, err := config.GetGitProjectExternalAgentsDir(projectDir); err == nil && ext != "" {
 			paths = append(paths, filepath.Join(ext, agentName))
 		}
-	}
-	if globalAgents, err := config.GetGlobalAgentsDir(); err == nil && globalAgents != "" {
-		paths = append(paths, filepath.Join(globalAgents, agentName))
 	}
 	return paths
 }
