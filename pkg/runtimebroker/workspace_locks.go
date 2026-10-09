@@ -266,9 +266,12 @@ type lockWaiter struct{ keys []string }
 // overlaps it, and then takes them all; it returns ctx's error (holding
 // nothing) if ctx ends first. Overlapping requests are admitted in arrival
 // order, so a broad request (a project directory) is not passed
-// indefinitely by a stream of narrower ones inside it. Nested Lock calls by
-// one holder on overlapping paths deadlock, as with sync.Mutex: take every
-// path an operation needs in one call.
+// indefinitely by a stream of narrower ones inside it. A holder must not
+// call Lock again before it releases, even for paths disjoint from those it
+// holds: a request that overlaps both may be queued between them, and the
+// second call then waits behind it while it waits for the holder (a nested
+// call on overlapping paths deadlocks outright, as with sync.Mutex). Take
+// every path an operation needs in one call.
 func (l *WorkspaceLocks) Lock(ctx context.Context, paths ...string) (func(), error) {
 	keys, err := canonicalKeys(paths)
 	if err != nil {
