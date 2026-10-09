@@ -227,8 +227,8 @@ func (c *Client) Verify() error {
 	// credential source that file selects: no Application Default
 	// Credentials substitution.
 	if c.explicitFile {
-		return fmt.Errorf("the exec credential plugin of the explicit kubeconfig failed; fix the plugin or its environment "+
-			"(no other credential source is used for this kubeconfig): %w", err)
+		return fmt.Errorf("the exec credential plugin of the explicit kubeconfig failed (no other credential source is used for this kubeconfig). %s — underlying error: %w",
+			credentialPluginHint(errMsg), err)
 	}
 
 	// On GCE, transparently fall back to Application Default Credentials
@@ -243,6 +243,12 @@ func (c *Client) Verify() error {
 		return nil
 	}
 
+	return fmt.Errorf("%s — underlying error: %w", credentialPluginHint(errMsg), err)
+}
+
+// credentialPluginHint is the operator hint for a failed exec credential
+// plugin.
+func credentialPluginHint(errMsg string) string {
 	hint := "Kubernetes credential plugin failed. "
 	if strings.Contains(errMsg, "gke-gcloud-auth-plugin") {
 		hint += "The gke-gcloud-auth-plugin could not obtain credentials. " +
@@ -254,7 +260,7 @@ func (c *Client) Verify() error {
 		hint += "Ensure the credential plugin is installed and the process environment " +
 			"includes the necessary variables (HOME, PATH, cloud SDK config)."
 	}
-	return fmt.Errorf("%s — underlying error: %w", hint, err)
+	return hint
 }
 
 // gceFallbackAuthScopes are the OAuth2 scopes requested from Application

@@ -180,6 +180,9 @@ current-context: ctx
 	if !strings.Contains(err.Error(), "no other credential source is used") {
 		t.Errorf("want the explicit-file refusal, got: %v", err)
 	}
+	if !strings.Contains(err.Error(), "Ensure the credential plugin is installed") {
+		t.Errorf("want the operator hint, got: %v", err)
+	}
 	if strings.Contains(err.Error(), "Application Default Credentials (ADC) auth fallback") {
 		t.Errorf("the ADC fallback was attempted: %v", err)
 	}
