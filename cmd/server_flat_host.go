@@ -516,6 +516,11 @@ func flatOwnershipPreflight(ctx context.Context, c brokerhost.Candidate) error {
 			"drain or recreate them through the Runtime Broker that created them before activating this instance",
 			len(unresolved), strings.Join(unresolved, ", "))
 	}
+	// The listing above was complete (a failed read refused before this),
+	// so recorded main objects it does not show are confirmed gone.
+	if _, err := records.ReconcileAbsent(objects); err != nil {
+		return fmt.Errorf("ownership records cannot be reconciled with the execution scope: %w", err)
+	}
 	problems, err := records.RepairSlugIndex()
 	if err != nil {
 		return fmt.Errorf("ownership records cannot be read: %w", err)

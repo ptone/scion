@@ -214,3 +214,49 @@ func TestFlatOwnership_MultiInstanceConflictingClaimsBothRefuse(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, ok, "docker-a's unrelated agent is unaffected")
 }
+
+// TestFlatOwnershipPreflight_DeniedVersusAbsent: a scope that cannot be
+// read refuses and leaves the records untouched; a complete read marks a
+// recorded main object it does not show as absent, keeps a listed one and
+// every child object recorded, and finishes an older empty provisioning
+// run (never the latest run).
+func TestFlatOwnershipPreflight_DeniedVersusAbsent(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ctx := context.Background()
+	dir, err := runtimebroker.DefaultStateDir("rb-a")
+	require.NoError(t, err)
+	st := runtimebroker.NewOwnershipStore(dir, "rb-a")
+	require.NoError(t, st.BeginRun("proj-1", "agent-gone", "gone", "run-1"))
+	require.NoError(t, st.AddResource("proj-1", "agent-gone", "run-1", api.ResourceHandle{Kind: api.ResourceKindContainer, Name: "gone", UID: "cid-gone-0123456789"}))
+	require.NoError(t, st.AddResource("proj-1", "agent-gone", "run-1", api.ResourceHandle{Kind: api.ResourceKindSecret, Name: "scion-auth-gone", UID: "uid-secret"}))
+	require.NoError(t, st.BeginRun("proj-1", "agent-live", "live", "run-old")) // crashed start, nothing created
+	require.NoError(t, st.BeginRun("proj-1", "agent-live", "live", "run-2"))
+	require.NoError(t, st.AddResource("proj-1", "agent-live", "run-2", api.ResourceHandle{Kind: api.ResourceKindContainer, Name: "live", UID: "cid-live-0123456789"}))
+	require.NoError(t, st.SetRunState("proj-1", "agent-live", "run-2", runtimebroker.OwnershipStateCreated))
+	require.NoError(t, st.BeginRun("proj-1", "agent-new", "fresh", "run-only")) // created, not started
+
+	denied := func(context.Context, map[string]string) ([]api.AgentInfo, error) {
+		return nil, errors.New("permission denied")
+	}
+	require.Error(t, flatOwnershipPreflight(ctx, preflightCandidate(denied)))
+	rec, _, err := st.Get("proj-1", "agent-gone")
+	require.NoError(t, err)
+	assert.True(t, rec.OwnsUID("cid-gone-0123456789"), "a denied read never marks an object absent")
+
+	live := func(context.Context, map[string]string) ([]api.AgentInfo, error) {
+		return []api.AgentInfo{{Name: "live", ID: "cid-live-0123", ContainerID: "cid-live-0123", Labels: map[string]string{
+			api.LabelRuntimeBrokerID: "rb-a", "scion.project_id": "proj-1", "agent_id": "agent-live", "scion.name": "live", api.LabelRunID: "run-2"}}}, nil
+	}
+	require.NoError(t, flatOwnershipPreflight(ctx, preflightCandidate(live)))
+	rec, _, err = st.Get("proj-1", "agent-gone")
+	require.NoError(t, err)
+	assert.False(t, rec.OwnsUID("cid-gone-0123456789"), "a complete read that does not show the object marks it absent")
+	assert.True(t, rec.OwnsUID("uid-secret"), "child objects are not in the listing and stay recorded")
+	rec, _, err = st.Get("proj-1", "agent-live")
+	require.NoError(t, err)
+	assert.True(t, rec.OwnsUID("cid-live-0123456789"), "a listed object (short ID) stays recorded")
+	assert.Equal(t, runtimebroker.OwnershipStateDeleted, rec.Run("run-old").State, "an older empty provisioning run is finished")
+	rec, _, err = st.Get("proj-1", "agent-new")
+	require.NoError(t, err)
+	assert.Equal(t, runtimebroker.OwnershipStateProvisioning, rec.Run("run-only").State, "the latest run is kept")
+}

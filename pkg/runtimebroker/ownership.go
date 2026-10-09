@@ -962,6 +962,97 @@ func (s *OwnershipStore) Reconstruct(o api.AgentInfo) error {
 	return s.SetRunState(projectID, agentID, runID, OwnershipStateCreated)
 }
 
+// ReconcileAbsent records what a COMPLETE read of the instance's execution
+// scope (every scion agent object, present) proves gone; the caller must
+// not call it after a failed or partial read (an inspection failure is
+// never absence). For every live or deleting record of this instance (not
+// conflicting):
+//   - a recorded main object (container or pod) that no listed object
+//     matches is marked absent. Matching is deliberately loose (any of the
+//     object's IDs, by prefix, or its name): a doubtful match keeps the
+//     object recorded rather than marking a live one absent. Child objects
+//     (secrets, volumes) are not in the listing and stay recorded.
+//   - an older provisioning run (not the record's latest run) that
+//     recorded no object still present is finished as deleted: its start
+//     ended without completing. The latest run is kept, since it may be a
+//     created agent that has not started yet.
+//
+// It returns the number of objects marked absent and runs finished.
+func (s *OwnershipStore) ReconcileAbsent(present []api.AgentInfo) (int, error) {
+	recs, err := s.List()
+	if err != nil {
+		return 0, err
+	}
+	changed := 0
+	for _, r := range recs {
+		if r.State == OwnershipStateDeleted || s.agentConflict(r.ProjectID, r.AgentID) != nil {
+			continue
+		}
+		for i, run := range r.Runs {
+			for _, res := range run.Resources {
+				if res.State != OwnedResourceRecorded || (res.Kind != api.ResourceKindContainer && res.Kind != api.ResourceKindPod) {
+					continue
+				}
+				if objectListed(res, present) {
+					continue
+				}
+				if err := s.MarkAbsent(r.ProjectID, r.AgentID, res.UID); err != nil {
+					return changed, err
+				}
+				changed++
+			}
+			if i == len(r.Runs)-1 || run.State != OwnershipStateProvisioning {
+				continue
+			}
+			if cur, ok, err := s.Get(r.ProjectID, r.AgentID); err != nil {
+				return changed, err
+			} else if ok && !runHasRecordedObject(cur.Run(run.RunID)) {
+				if err := s.SetRunState(r.ProjectID, r.AgentID, run.RunID, OwnershipStateDeleted); err != nil {
+					return changed, err
+				}
+				changed++
+			}
+		}
+	}
+	return changed, nil
+}
+
+// objectListed reports whether any listed object may be the recorded one.
+func objectListed(res OwnedResource, present []api.AgentInfo) bool {
+	sameID := func(a, b string) bool {
+		if a == "" || b == "" {
+			return false
+		}
+		if len(a) >= 12 && len(b) >= 12 {
+			return strings.HasPrefix(a, b) || strings.HasPrefix(b, a)
+		}
+		return a == b
+	}
+	for _, o := range present {
+		for _, id := range []string{o.ID, o.ContainerID, o.Labels["scion.container.id"]} {
+			if sameID(res.UID, id) || (res.Name != "" && res.Name == id) {
+				return true
+			}
+		}
+		if res.Name != "" && res.Name == o.Name {
+			return true
+		}
+	}
+	return false
+}
+
+func runHasRecordedObject(run *OwnedRun) bool {
+	if run == nil {
+		return true
+	}
+	for _, res := range run.Resources {
+		if res.State == OwnedResourceRecorded {
+			return true
+		}
+	}
+	return false
+}
+
 // reconstructedKind is the resource kind of a listed agent object.
 func reconstructedKind(o api.AgentInfo) string {
 	if o.Runtime == "kubernetes" {
