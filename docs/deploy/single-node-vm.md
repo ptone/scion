@@ -6,6 +6,10 @@ Cloud Run IAP reverse proxy — no container builds, no GCS, no external databas
 
 > Part of the Single-Node-VM deploy tier (ptone/scion#1575).
 
+> **Running test or UAT hubs?** See
+> [Single-Node VM Test Hubs](single-node-vm-test-hubs.md) for the pinned-version,
+> private-IP direct-token pattern and the teardown order for hub pairs.
+
 > **Adding a GKE target for shared-dir storage?** See the
 > [Hybrid Deployment Tier](hybrid-tier.md) page — it extends this same VM with
 > a second, Kubernetes-based place to run agents, sharing project scratchpads
