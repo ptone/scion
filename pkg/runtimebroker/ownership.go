@@ -1103,7 +1103,7 @@ func (s *OwnershipStore) Reconstruct(o api.AgentInfo) error {
 			if runStateOrder[run.State] >= runStateOrder[OwnershipStateDeleting] {
 				return fmt.Errorf("run %s is %s and cannot be revived", runID, run.State)
 			}
-			if rec.OwnsUID(uid) {
+			if rec.OwnsUID(uid) || !reconstructsHandle(o) {
 				return nil
 			}
 			return s.AddResource(projectID, agentID, runID, api.ResourceHandle{Kind: reconstructedKind(o), Name: o.Name, UID: uid})
@@ -1112,10 +1112,23 @@ func (s *OwnershipStore) Reconstruct(o api.AgentInfo) error {
 	if err := s.BeginRun(projectID, agentID, slug, runID); err != nil {
 		return err
 	}
-	if err := s.AddResource(projectID, agentID, runID, api.ResourceHandle{Kind: reconstructedKind(o), Name: o.Name, UID: uid}); err != nil {
-		return err
+	if reconstructsHandle(o) {
+		if err := s.AddResource(projectID, agentID, runID, api.ResourceHandle{Kind: reconstructedKind(o), Name: o.Name, UID: uid}); err != nil {
+			return err
+		}
 	}
 	return s.SetRunState(projectID, agentID, runID, OwnershipStateCreated)
+}
+
+// reconstructsHandle reports whether a listed object identifies itself well
+// enough to be recorded as a cleanup handle. A container's ID is its
+// identity. A Kubernetes listing gives the pod's name, not its immutable
+// UID or namespace, and a handle built from the name would let a UID
+// precondition delete report the pod gone without checking it; such an
+// object only re-establishes the record and run (the pod is still found
+// through the owner-filtered list and deleted by the agent delete).
+func reconstructsHandle(o api.AgentInfo) bool {
+	return reconstructedKind(o) != api.ResourceKindPod
 }
 
 // ReconcileAbsent records what a COMPLETE read of the instance's execution

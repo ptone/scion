@@ -360,3 +360,31 @@ func TestOwnershipStore_RepairSlugIndexReadsEntries(t *testing.T) {
 	holder, _ = s.SlugHolder("proj-1", "ghost")
 	assert.Equal(t, "agent-ghost", holder, "left as found for the operator")
 }
+
+// TestOwnershipStore_ReconstructPodAndNewUID: a Kubernetes object (listed
+// by pod name, without its UID) re-establishes the record and run but no
+// handle; a container with a new ID under the same name and run of a live
+// record is recorded as a separate object and the old one is kept.
+func TestOwnershipStore_ReconstructPodAndNewUID(t *testing.T) {
+	s := NewOwnershipStore(t.TempDir(), "broker-a")
+	labels := map[string]string{api.LabelRuntimeBrokerID: "broker-a", "scion.project_id": "proj-1", "agent_id": "agent-1",
+		"scion.name": "worker", api.LabelRunID: "run-1"}
+	pod := api.AgentInfo{Name: "worker", ContainerID: "proj-1--worker", Runtime: "kubernetes", Labels: labels}
+	require.NoError(t, s.Reconstruct(pod))
+	rec, ok, err := s.Get("proj-1", "agent-1")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NotNil(t, rec.Run("run-1"))
+	assert.Equal(t, OwnershipStateCreated, rec.Run("run-1").State)
+	assert.Empty(t, rec.Run("run-1").Resources, "no handle from a pod name")
+	require.NoError(t, s.Reconstruct(pod), "repeating is a no-op")
+
+	labels2 := map[string]string{api.LabelRuntimeBrokerID: "broker-a", "scion.project_id": "proj-1", "agent_id": "agent-2",
+		"scion.name": "helper", api.LabelRunID: "run-1"}
+	require.NoError(t, s.Reconstruct(api.AgentInfo{Name: "helper", ContainerID: "cid-old", Labels: labels2}))
+	require.NoError(t, s.Reconstruct(api.AgentInfo{Name: "helper", ContainerID: "cid-new", Labels: labels2}))
+	rec, _, _ = s.Get("proj-1", "agent-2")
+	assert.True(t, rec.OwnsUID("cid-old"), "the old object is kept until its absence is established")
+	assert.True(t, rec.OwnsUID("cid-new"), "the new object is recorded separately")
+	assert.Len(t, rec.Run("run-1").Resources, 2)
+}
