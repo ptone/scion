@@ -252,6 +252,13 @@ func TestFlatKubernetesIdentity_InstancesKeepTheirOwnPolicy(t *testing.T) {
 // TestFlatKubernetesIdentity_LateSelectionIsTheInstance: the late
 // resolution on start/restart returns the same instance selection, so the
 // consistency checks compare equal, and it is never a settings key.
+//
+// Unit evidence only: on a running flat instance the runtime is fixed and
+// the selection is the instance itself, so the start/restart 409s
+// (rejectKubernetesAssignRuntimeChange, rejectKubernetesBlockRuntimeChange,
+// rejectRuntimeClassificationMismatch) cannot be provoked live; this test
+// and the classification check below exercise them in process on the
+// production code.
 func TestFlatKubernetesIdentity_LateSelectionIsTheInstance(t *testing.T) {
 	srv := newFlatKubernetesStartServer(t, config.V1RuntimeTargetConfig{})
 	newTestGlobalSettings(t, globalPolicyThatMustNotApply)
