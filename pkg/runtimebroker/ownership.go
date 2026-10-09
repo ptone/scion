@@ -983,6 +983,15 @@ func (s *Server) completeOwnedStart(ctx context.Context, mgr agent.Manager, runI
 	return fmt.Errorf("flat Runtime Broker: the agent's runtime objects could not be recorded, so the start was undone: %w", err)
 }
 
+// releaseOwnedStart drops a run's ownership mirror that no Start consumed
+// (a provision-only create, or a request that ended between building the
+// start context and starting). The run's record is left as it is.
+func (s *Server) releaseOwnedStart(runID string) {
+	if runID != "" {
+		s.ownedStarts.Delete(runID)
+	}
+}
+
 // ownerScopedManager is a manager a flat instance can restrict to its own
 // objects (agent.AgentManager).
 type ownerScopedManager interface {

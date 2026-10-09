@@ -1254,6 +1254,16 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// enforceHarnessConfigPolicy pre-check above is an early, side-effect-free
 	// refusal only, and when the two disagree the hook's refusal stands.
 	ctx = s.withHarnessConfigPolicy(ctx)
+	// A flat instance's ownership mirror installed by buildStartContext is
+	// released when this request ends unless Start consumed it or the async
+	// launch took it over (ptone/scion#3274).
+	var sc *startContext
+	ownedHandoff := false
+	defer func() {
+		if sc != nil && !ownedHandoff {
+			s.releaseOwnedStart(sc.Opts.RunID)
+		}
+	}()
 	sc, err := s.buildStartContext(ctx, startContextInputs{
 		Name:               req.Name,
 		AgentID:            req.ID,
@@ -1363,6 +1373,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			s.agentLifecycleLog.Warn("async launch requested for a runtime that does not support async launch; falling back to synchronous create",
 				"agent_id", req.ID, "name", req.Name, "runtime", sc.RuntimeType)
 		default:
+			ownedHandoff = true // runLaunch completes the ownership mirror
 			s.beginAsyncLaunch(w, r, ctx, req, opts, sc.Manager, attempt, markAttemptFailed, span, createStart)
 			return
 		}
@@ -2888,6 +2899,16 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		}
 	}
 
+	// A flat instance's ownership mirror installed by buildStartContext is
+	// released when this request ends unless Start consumed it or the async
+	// launch took it over (ptone/scion#3274).
+	var sc *startContext
+	ownedHandoff := false
+	defer func() {
+		if sc != nil && !ownedHandoff {
+			s.releaseOwnedStart(sc.Opts.RunID)
+		}
+	}()
 	sc, err := s.buildStartContext(ctx, startContextInputs{
 		Name:                     id,
 		AgentID:                  startAgentID,
@@ -3815,6 +3836,16 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		projectPath = match.entry.ProjectPath
 	}
 
+	// A flat instance's ownership mirror installed by buildStartContext is
+	// released when this request ends unless Start consumed it or the async
+	// launch took it over (ptone/scion#3274).
+	var sc *startContext
+	ownedHandoff := false
+	defer func() {
+		if sc != nil && !ownedHandoff {
+			s.releaseOwnedStart(sc.Opts.RunID)
+		}
+	}()
 	sc, err := s.buildStartContext(ctx, startContextInputs{
 		Name:                     agentName,
 		ProjectPath:              projectPath,

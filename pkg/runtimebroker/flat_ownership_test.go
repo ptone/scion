@@ -504,3 +504,24 @@ func TestFlatInstance_UnscopableManagerFailsClosed(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 }
+
+// TestFlatOwnership_ProvisionOnlyCreateReleasesMirror: a create that never
+// starts (provision only) leaves no ownership mirror behind, while its
+// record (the created, not started agent) stays.
+func TestFlatOwnership_ProvisionOnlyCreateReleasesMirror(t *testing.T) {
+	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
+	w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents", flatCreateBody("req-prov", "prov-agent",
+		map[string]interface{}{"expectedRuntimeTargetId": f.identity.RuntimeTarget.ID, "provisionOnly": true,
+			"config": map[string]interface{}{"template": "claude"}}))
+	if w.Code >= 300 {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	n := 0
+	f.srv.ownedStarts.Range(func(any, any) bool { n++; return true })
+	if n != 0 {
+		t.Fatalf("%d ownership mirror(s) left after a provision-only create", n)
+	}
+	if _, ok, err := f.srv.ownership.Get(flatTestProjectID, "agent-id-prov-agent"); err != nil || !ok {
+		t.Fatalf("the created agent's record: %v %v", ok, err)
+	}
+}
