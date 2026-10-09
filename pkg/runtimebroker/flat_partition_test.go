@@ -20,7 +20,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -336,6 +335,8 @@ func TestFlatPartition_OperationsNeverTouchAnotherInstancesAgent(t *testing.T) {
 			op{http.MethodDelete, base + name + query, ""},
 			op{http.MethodGet, base + name + "/logs" + query, ""},
 			op{http.MethodPost, base + name + "/exec" + query, `{"command":["true"]}`},
+			op{http.MethodPost, base + name + "/restart" + query,
+				`{"expectedRuntimeTargetId":"` + f.a.identity.RuntimeTarget.ID + `","resolvedEnv":{"SCION_AGENT_ID":"agent-b2"}}`},
 		)
 	}
 	ops = append(ops, op{http.MethodPost, "/api/v1/agents/worker/stop?projectId=proj-2", ""},
@@ -345,6 +346,7 @@ func TestFlatPartition_OperationsNeverTouchAnotherInstancesAgent(t *testing.T) {
 		// A stop or delete of an agent this instance does not list is
 		// idempotent (accepted / not found) and never reaches the daemon
 		// (asserted below); a read or exec must not succeed.
+		// A restart is refused (no ownership record of this instance).
 		if w.Code >= 200 && w.Code < 300 && o.method != http.MethodDelete && !strings.HasSuffix(splitPath(o.path), "/stop") {
 			t.Errorf("A %s %s succeeded (%d): %s", o.method, o.path, w.Code, w.Body.String())
 		}
@@ -452,7 +454,8 @@ func TestFlatPartition_OldLaunchCleanupNeverDeletesAnotherInstancesObject(t *tes
 
 // TestFlatPartition_RestartKeepsPartition: rebuilding A (same key, same
 // state root) after a restart keeps its identity, its records and its
-// partition; its state root is its own (per Runtime Broker ID).
+// partition (the production state root is covered by
+// TestFlatPartition_StateRootIsPerRuntimeBrokerID).
 func TestFlatPartition_RestartKeepsPartition(t *testing.T) {
 	f := newPartitionFixture(t)
 	a2 := newPartitionInstance(t, f.d, "docker-a", f.a.stateDir)
@@ -465,16 +468,8 @@ func TestFlatPartition_RestartKeepsPartition(t *testing.T) {
 	if got := listedContainers(t, a2, ""); len(got) != 1 || got[0] != "cid-a1" {
 		t.Fatalf("A lists %v after restart", got)
 	}
-	da, err := DefaultStateDir(f.a.identity.RuntimeBrokerID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	db, err := DefaultStateDir(f.b.identity.RuntimeBrokerID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if da == db || filepath.Dir(da) != filepath.Dir(db) {
-		t.Fatalf("state roots %q and %q: want one per Runtime Broker ID", da, db)
+	if a2.srv.stateDir != f.a.stateDir {
+		t.Fatalf("restart state root %q, want %q", a2.srv.stateDir, f.a.stateDir)
 	}
 	assertCalls(t, f.d)
 }
