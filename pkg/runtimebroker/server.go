@@ -322,9 +322,10 @@ type Server struct {
 	// ownedStarts maps a run ID to its in-flight ownership mirror
 	// (installOwnedStart / completeOwnedStart).
 	ownedStarts sync.Map
-	// unmirroredUIDs are object UIDs from the journals of this instance's
-	// launches whose ownership recording failed; launch cleanup may delete
-	// them although the record may lack them (launchHandleOwned).
+	// unmirroredUIDs maps object UIDs from the journals of this instance's
+	// launches whose ownership recording failed to the run (project, agent,
+	// run) that created them; launch cleanup may delete them although the
+	// record may lack them (launchHandleOwned).
 	unmirroredUIDs sync.Map
 	// ownershipSetupErr refuses a flat instance whose manager could not be
 	// owner-scoped (startServices).

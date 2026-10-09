@@ -151,7 +151,8 @@ type OwnershipStore struct {
 
 	locksMu sync.Mutex
 	locks   map[string]*sync.Mutex
-	// slugMu serializes slug index changes within a project.
+	// slugMu serializes slug index changes (one mutex for the whole store,
+	// every project).
 	slugMu sync.Mutex
 	// conflicting are keys another configured instance claims too; every
 	// operation on them is refused (set once, before the store is used).
@@ -776,7 +777,9 @@ func (s *OwnershipStore) HasLiveAgents(projectID string) (bool, error) {
 // RecordsResource reports whether a live or deleting record of this
 // instance recorded the object with this UID and its absence has not been
 // established. Records of conflicting keys never count. An unreadable
-// record is an error.
+// record is an error. It reads every record on each call (one call per
+// cleanup handle), which is fine at today's per-instance scale; an index
+// by UID is the change to make if cleanup volume grows (S5 load note).
 func (s *OwnershipStore) RecordsResource(uid string) (bool, error) {
 	if uid == "" {
 		return false, nil
@@ -955,9 +958,10 @@ func (s *Server) completeOwnedStart(ctx context.Context, mgr agent.Manager, runI
 	if o.latched() != nil {
 		// Recording failed, so the record may lack some of these objects;
 		// the launch's own journal makes them this instance's to clean up.
+		// Each UID stays bound to its project, agent and run.
 		for _, h := range o.snapshot() {
 			if h.UID != "" {
-				s.unmirroredUIDs.Store(h.UID, struct{}{})
+				s.unmirroredUIDs.Store(h.UID, ownedRunKey{projectID: o.projectID, agentID: o.agentID, runID: o.runID})
 			}
 		}
 	}
