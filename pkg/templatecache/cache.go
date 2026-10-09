@@ -56,44 +56,6 @@ type Cache struct {
 	maxSize  int64
 	index    *CacheIndex
 	mu       sync.RWMutex
-
-	// pins counts the readers of an entry (Acquire); a pinned entry is
-	// never evicted.
-	pins map[string]int
-	// minEvictAge, when set, keeps an entry used more recently than this
-	// from being evicted: a path returned by Get or Put is read after the
-	// call returns (hydration copies the template later in a start), so a
-	// recently used entry is treated as in use. Eviction then lets the
-	// cache exceed maxSize rather than remove an entry in use.
-	minEvictAge time.Duration
-	now         func() time.Time
-}
-
-// SetMinEvictAge keeps entries used within d from being evicted (see
-// Cache.minEvictAge). Call it before the cache is shared.
-func (c *Cache) SetMinEvictAge(d time.Duration) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.minEvictAge = d
-}
-
-// Acquire is Get that also pins the entry until release is called: a
-// pinned entry is never evicted. release is safe to call more than once.
-func (c *Cache) Acquire(contentHash string) (string, func(), bool) {
-	path, ok := c.get(contentHash, true)
-	if !ok {
-		return "", func() {}, false
-	}
-	var once sync.Once
-	return path, func() {
-		once.Do(func() {
-			c.mu.Lock()
-			defer c.mu.Unlock()
-			if c.pins[contentHash]--; c.pins[contentHash] <= 0 {
-				delete(c.pins, contentHash)
-			}
-		})
-	}, true
 }
 
 // CacheIndex tracks all cached templates and their metadata.
@@ -133,8 +95,6 @@ func New(basePath string, maxSize int64) (*Cache, error) {
 		basePath: basePath,
 		maxSize:  maxSize,
 		index:    newIndex(maxSize),
-		pins:     map[string]int{},
-		now:      time.Now,
 	}
 
 	// Load existing index if present; start fresh on error.
@@ -156,10 +116,6 @@ func newIndex(maxSize int64) *CacheIndex {
 // Get retrieves a cached template by content hash. It returns the path to the
 // cached directory and true if the content is present on disk.
 func (c *Cache) Get(contentHash string) (string, bool) {
-	return c.get(contentHash, false)
-}
-
-func (c *Cache) get(contentHash string, pin bool) (string, bool) {
 	if validateEntryName(contentHash) != nil {
 		return "", false
 	}
@@ -187,10 +143,7 @@ func (c *Cache) get(contentHash string, pin bool) (string, bool) {
 		return "", false
 	}
 
-	entry.LastUsed = c.now()
-	if pin {
-		c.pins[contentHash]++
-	}
+	entry.LastUsed = time.Now()
 	_ = c.saveIndex()
 
 	return templatePath, true
@@ -240,7 +193,7 @@ func (c *Cache) Put(contentHash string, files map[string][]byte) (string, error)
 			c.index.Entries[contentHash] = &CacheEntry{}
 			c.index.TotalSize += totalSize
 		}
-		c.index.Entries[contentHash].LastUsed = c.now()
+		c.index.Entries[contentHash].LastUsed = time.Now()
 		c.index.Entries[contentHash].Size = totalSize
 		_ = c.saveIndex()
 		return templatePath, nil
@@ -270,7 +223,7 @@ func (c *Cache) Put(contentHash string, files map[string][]byte) (string, error)
 	}
 
 	c.index.Entries[contentHash] = &CacheEntry{
-		LastUsed: c.now(),
+		LastUsed: time.Now(),
 		Size:     totalSize,
 	}
 	c.index.TotalSize += totalSize
@@ -323,15 +276,9 @@ func (c *Cache) evictIfNeeded(root *os.Root, newSize int64) error {
 	})
 
 	targetSize := c.maxSize - newSize
-	now := c.now()
 	for _, e := range entries {
 		if c.index.TotalSize <= targetSize {
 			break
-		}
-		// An entry in use (pinned, or used within minEvictAge) is kept;
-		// the cache then exceeds maxSize until it is no longer in use.
-		if c.pins[e.Hash] > 0 || (c.minEvictAge > 0 && now.Sub(e.Entry.LastUsed) < c.minEvictAge) {
-			continue
 		}
 		if validateEntryName(e.Hash) == nil {
 			if err := root.RemoveAll(e.Hash); err != nil {

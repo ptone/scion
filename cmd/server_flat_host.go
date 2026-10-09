@@ -393,7 +393,8 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 		shared.nfsMounter = runtimebroker.NewHostNFSMounter(nil, logging.Subsystem("broker.nfs-mount"))
 		hostServices = append(hostServices, shared.nfsMounter)
 	}
-	// One cache object per cache directory for every instance (P2.3 S4).
+	// The host's caches: one object per cache directory, the file caches
+	// partitioned per instance.
 	caches, err := runtimebroker.NewSharedCaches(templateCacheDir, templateCacheMax)
 	if err != nil {
 		return fmt.Errorf("opening the host's broker caches: %w", err)
