@@ -390,6 +390,10 @@ type Server struct {
 	workspaceLocks     *WorkspaceLocks
 	workspaceLocksOnce sync.Once
 
+	// flatK8sIdentity is a flat instance's own Kubernetes GCP identity
+	// policy, snapshotted when the server is built (flat_k8s_identity.go).
+	flatK8sIdentity flatKubernetesIdentityPolicy
+
 	// NFS mount reconciler (nil when backend != "nfs")
 	nfsMountReconciler *NFSMountReconciler
 	// nfsHostOwned is set when nfsMountReconciler is the host mounter's:
@@ -497,6 +501,9 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 		} else {
 			srv.stateDir = dir
 		}
+	}
+	if fi := srv.flatInstance(); fi != nil {
+		srv.flatK8sIdentity = newFlatKubernetesIdentityPolicy(fi)
 	}
 	if fi := srv.flatInstance(); fi != nil {
 		// Fail closed: without an exact absence check a deleted agent's

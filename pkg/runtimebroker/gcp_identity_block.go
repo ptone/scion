@@ -68,14 +68,22 @@ func (s *Server) resolveKubernetesBlockIdentity(in startContextInputs, isKuberne
 		}
 	}
 
-	vs, _, err := config.LoadGlobalSettingsWithOverlay()
-	if err != nil {
-		return kubernetesBlockIdentity{}, &startContextError{
-			Status:  http.StatusInternalServerError,
-			Message: "loading the broker's global settings for the Kubernetes block ServiceAccount: " + err.Error(),
+	var ksaName string
+	var configured bool
+	if s.isFlat() {
+		// A flat instance's block ServiceAccount is its own (the instance
+		// snapshot); omitted means the namespace's default ServiceAccount.
+		ksaName, configured = s.flatK8sIdentity.blockAccount()
+	} else {
+		vs, _, err := config.LoadGlobalSettingsWithOverlay()
+		if err != nil {
+			return kubernetesBlockIdentity{}, &startContextError{
+				Status:  http.StatusInternalServerError,
+				Message: "loading the broker's global settings for the Kubernetes block ServiceAccount: " + err.Error(),
+			}
 		}
+		ksaName, configured = vs.ResolveKubernetesBlockServiceAccountForSelection(sel.ProfileName, sel.RuntimeEntryName)
 	}
-	ksaName, configured := vs.ResolveKubernetesBlockServiceAccountForSelection(sel.ProfileName, sel.RuntimeEntryName)
 	if configured {
 		// settings.yaml can be hand-edited without the schema validator.
 		if err := config.ValidateKubernetesBlockServiceAccount(ksaName); err != nil {

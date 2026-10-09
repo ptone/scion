@@ -42,6 +42,12 @@ type dispatchProfileSelection struct {
 	// the mapping and namespace for such a broker are read from the
 	// runtimes: entry keyed by that type name.
 	RuntimeEntryName string
+	// InstanceKey and RuntimeTargetID identify a flat instance's selection
+	// (flatDispatchSelection): its instance and persisted runtime target.
+	// They are empty for a legacy selection, and ProfileName and
+	// RuntimeEntryName are empty for a flat one.
+	InstanceKey     string
+	RuntimeTargetID string
 }
 
 // resolveDispatchProfileSelection returns the profile and runtime entry
@@ -62,9 +68,10 @@ func (s *Server) resolveDispatchProfileSelection(opts api.StartOptions) dispatch
 // resolveDispatchProfileSelectionWithError is resolveDispatchProfileSelection
 // returning the project settings load error instead of logging it.
 func (s *Server) resolveDispatchProfileSelectionWithError(opts api.StartOptions) (dispatchProfileSelection, error) {
-	// A flat instance selects no profile and no settings runtime entry.
+	// A flat instance selects no profile and no settings runtime entry:
+	// its selection is its own instance.
 	if s.isFlat() {
-		return dispatchProfileSelection{}, nil
+		return s.flatDispatchSelection(), nil
 	}
 	if _, forced := s.forcedRuntime(); forced {
 		return dispatchProfileSelection{RuntimeEntryName: s.config.ForceRuntime}, nil
@@ -157,6 +164,10 @@ func (s *Server) resolveKubernetesAssignIdentity(in startContextInputs, isKubern
 		}
 	}
 
+	if s.isFlat() {
+		return s.resolveFlatKubernetesAssignIdentity(in, saEmail, projectID, sel)
+	}
+
 	// ProjectSettingsHasKubernetesServiceAccountMappings reads the project's
 	// settings.yaml on its own, without the global layer underneath, so a
 	// mapping inherited from global settings is not mistaken for one the
@@ -239,6 +250,53 @@ func (s *Server) resolveKubernetesAssignIdentity(in startContextInputs, isKubern
 		ProjectID: projectID,
 		Selection: sel,
 	}, nil
+}
+
+// resolveFlatKubernetesAssignIdentity is resolveKubernetesAssignIdentity
+// for a flat instance: the GSA-to-KSA mapping is the instance's own
+// (flatKubernetesIdentityPolicy) and the namespace is the instance's
+// activated namespace. No profile, runtime entry, Hub overlay or project
+// setting is read. The refusals are the legacy path's: an unmapped or
+// invalid entry, an explicit ServiceAccount that differs from the mapped
+// one, and an explicit namespace other than the instance's.
+func (s *Server) resolveFlatKubernetesAssignIdentity(in startContextInputs, saEmail, projectID string, sel dispatchProfileSelection) (kubernetesAssignIdentity, *startContextError) {
+	ksaName, mapped := s.flatK8sIdentity.mappedServiceAccount(saEmail)
+	if !mapped {
+		return kubernetesAssignIdentity{}, &startContextError{
+			Status: http.StatusBadRequest,
+			Message: fmt.Sprintf(
+				"GCP identity mode %q on the Kubernetes runtime has no Kubernetes ServiceAccount mapped for %q; add it to kubernetes_service_account_mappings in this flat Runtime Broker instance's runtime_target",
+				store.GCPMetadataModeAssign, saEmail),
+			Code:    ErrCodeIdentityNotMapped,
+			Details: s.identityMappingErrorDetails(saEmail, sel),
+		}
+	}
+	if err := config.ValidateKubernetesServiceAccountMappings(map[string]string{saEmail: ksaName}); err != nil {
+		return kubernetesAssignIdentity{}, &startContextError{Status: http.StatusBadRequest, Message: err.Error()}
+	}
+	explicitKSA, explicitNamespace := explicitKubernetesIdentity(in)
+	if explicitKSA != "" && explicitKSA != ksaName {
+		details := s.identityMappingErrorDetails(saEmail, sel)
+		details[api.BrokerErrDetailRequestedKSA] = explicitKSA
+		details[api.BrokerErrDetailMappedKSA] = ksaName
+		return kubernetesAssignIdentity{}, &startContextError{
+			Status: http.StatusBadRequest,
+			Message: fmt.Sprintf(
+				"explicit Kubernetes ServiceAccount %q does not match the ServiceAccount %q mapped to %q; remove the explicit serviceAccountName or update this instance's kubernetes_service_account_mappings",
+				explicitKSA, ksaName, saEmail),
+			Code:    ErrCodeIdentityKSAMismatch,
+			Details: details,
+		}
+	}
+	if ns := s.flatInstanceNamespace(); explicitNamespace != "" && explicitNamespace != ns {
+		return kubernetesAssignIdentity{}, &startContextError{
+			Status: http.StatusBadRequest,
+			Message: fmt.Sprintf(
+				"explicit Kubernetes namespace %q does not match this flat Runtime Broker instance's namespace %q for GCP identity mode %q; remove the explicit namespace",
+				explicitNamespace, ns, store.GCPMetadataModeAssign),
+		}
+	}
+	return kubernetesAssignIdentity{KSAName: ksaName, SAEmail: saEmail, ProjectID: projectID, Selection: sel}, nil
 }
 
 // identityMappingErrorDetails returns the error details of an
