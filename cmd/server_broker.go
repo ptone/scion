@@ -154,11 +154,11 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 			AutoProvide:                autoProvide,
 			GCPHostServiceAccountEmail: detectedSAEmail,
 			GCPHostProjectID:           detectedProjectID,
-			Capabilities: storeBrokerCapabilities(runtimebroker.StaticCapabilities(rt)),
-			Profiles:         profiles,
-			DefaultProfile:   defaultProfile,
-			WorkspaceStorage: workspaceStorage,
-			Labels:           brokerLabels,
+			Capabilities:               storeBrokerCapabilities(runtimebroker.StaticCapabilities(rt)),
+			Profiles:                   profiles,
+			DefaultProfile:             defaultProfile,
+			WorkspaceStorage:           workspaceStorage,
+			Labels:                     brokerLabels,
 		}
 
 		if err := s.CreateRuntimeBroker(ctx, broker); err != nil {

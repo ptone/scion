@@ -212,7 +212,7 @@ func newRegistrationHub(t *testing.T) *registrationHub {
 				"expiresAt": "2026-10-09T05:00:00Z", "runtimeTarget": body["runtimeTarget"]})
 		case "/api/v1/brokers/join":
 			_ = json.NewEncoder(w).Encode(map[string]any{"brokerId": body["brokerId"],
-				"secretKey": base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")),
+				"secretKey":   base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")),
 				"hubEndpoint": "http://" + r.Host, "runtimeTarget": body["runtimeTarget"]})
 		default:
 			http.NotFound(w, r)
