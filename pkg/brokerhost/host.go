@@ -168,7 +168,14 @@ type InstanceStatus struct {
 	RuntimeBrokerID string `json:"runtimeBrokerId,omitempty"`
 	RuntimeTargetID string `json:"runtimeTargetId,omitempty"`
 	State           State  `json:"state"`
-	Error           string `json:"error,omitempty"`
+	// Reason is a stable reason code for a refused or stopped instance
+	// (for example scope_conflict, not_registered, runtime_target_ack_missing,
+	// scope_unidentified). It is what health responses show.
+	Reason string `json:"reason,omitempty"`
+	// Error is the full refusal text for in-process callers and logs. It
+	// can carry local detail (paths, endpoints, store errors), so it is
+	// never serialized into a health response.
+	Error string `json:"-"`
 }
 
 type instance struct {
@@ -261,7 +268,7 @@ func (h *Host) Prepare(ctx context.Context) error {
 	for _, in := range h.instances {
 		rt, err := h.cfg.NewRuntime(ctx, in.cfg)
 		if err != nil {
-			h.refuse(in, fmt.Errorf("flat Runtime Broker instance %q: building its runtime: %w", in.cfg.Key, err))
+			h.refuse(in, &runtimeBuildError{err: fmt.Errorf("flat Runtime Broker instance %q: building its runtime: %w", in.cfg.Key, err)})
 			continue
 		}
 		scope, err := h.cfg.ProbeScope(ctx, in.cfg, rt)
@@ -381,6 +388,7 @@ func (h *Host) Status() []InstanceStatus {
 		}
 		if in.err != nil {
 			st.Error = in.err.Error()
+			st.Reason = ReasonCode(in.err)
 		}
 		out = append(out, st)
 	}
@@ -597,6 +605,7 @@ func (h *Host) Run(ctx context.Context) error {
 			err = fmt.Errorf("flat Runtime Broker instance %q has no Hub connection; with several instances configured it is reachable only over its control channel", a.Context.Instance.Key)
 		}
 		if err != nil {
+			err = WithReason("not_serving", err)
 			h.markStopped(a.Context.Identity.RuntimeBrokerID, err)
 			a.Context.Logger.Error("Runtime Broker instance not serving", "error", err)
 			h.cfg.Activator.Refused(a.Context.Instance, err)
@@ -712,4 +721,67 @@ func (h *Host) shutdownInstances(ctx context.Context) {
 		}
 	}
 	h.mu.Unlock()
+}
+
+// ReasonError attaches a stable reason code to a refusal (see
+// InstanceStatus.Reason).
+type ReasonError struct {
+	Reason string
+	Err    error
+}
+
+func (e *ReasonError) Error() string { return e.Err.Error() }
+func (e *ReasonError) Unwrap() error { return e.Err }
+
+// WithReason wraps err with a stable reason code.
+func WithReason(reason string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &ReasonError{Reason: reason, Err: err}
+}
+
+type runtimeBuildError struct{ err error }
+
+func (e *runtimeBuildError) Error() string { return e.err.Error() }
+func (e *runtimeBuildError) Unwrap() error { return e.err }
+
+// ReasonCode classifies a refusal into a stable reason code for health
+// responses; the full error text stays in logs and Status().Error.
+func ReasonCode(err error) string {
+	if err == nil {
+		return ""
+	}
+	var re *ReasonError
+	if errors.As(err, &re) && re.Reason != "" {
+		return re.Reason
+	}
+	var sc *ScopeConflictError
+	if errors.As(err, &sc) {
+		return "scope_conflict"
+	}
+	var ack *brokeridentity.AckError
+	if errors.As(err, &ack) && ack.Code != "" {
+		return ack.Code
+	}
+	var coded interface{ Code() string }
+	if errors.As(err, &coded) && coded.Code() != "" {
+		return coded.Code()
+	}
+	switch {
+	case errors.Is(err, brokeridentity.ErrExecutionScopeUnidentified):
+		return "scope_unidentified"
+	case errors.Is(err, brokeridentity.ErrExecutionScopeChanged):
+		return "scope_changed"
+	case errors.Is(err, brokeridentity.ErrRuntimeTargetTypeChanged):
+		return "runtime_target_type_changed"
+	case errors.Is(err, brokeridentity.ErrIdentityMissing), errors.Is(err, brokeridentity.ErrIdentityCorrupt),
+		errors.Is(err, brokeridentity.ErrIdentityKeyMismatch), errors.Is(err, brokeridentity.ErrIdentityCollidesWithLegacy):
+		return "identity_error"
+	}
+	var rb *runtimeBuildError
+	if errors.As(err, &rb) {
+		return "runtime_build_failed"
+	}
+	return "refused"
 }

@@ -597,3 +597,18 @@ func TestFlatHost_ControlChannelStaleSessionFenced(t *testing.T) {
 	assert.Contains(t, body, idB)
 	t.Cleanup(func() { _ = newA.Shutdown(context.Background()) })
 }
+
+// TestFlatHostHealth_NoRefusalText: the broker health shown on the Hub's
+// public /healthz carries reason codes, never refusal text.
+func TestFlatHostHealth_NoRefusalText(t *testing.T) {
+	clearK8sEnv(t)
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "private", "missing.kubeconfig")
+	h, _ := prepareK8sHost(t, t.TempDir(), k8sInstance("k8s-a", missing, "agents"), k8sInstance("k8s-b", missing, "other"))
+	data, err := json.Marshal(flatHostHealth(context.Background(), h))
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), missing, "no kubeconfig path in public health")
+	assert.NotContains(t, string(data), `"error"`)
+	assert.Contains(t, string(data), `"reason":"runtime_build_failed"`)
+	assert.Contains(t, statusOf(h, "k8s-a").Error, "missing.kubeconfig", "in-process callers keep the full text")
+}

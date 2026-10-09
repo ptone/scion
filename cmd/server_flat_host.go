@@ -200,7 +200,15 @@ func (a *colocatedFlatActivator) Activate(ctx context.Context, c brokerhost.Cand
 		}
 		a.reported[c.Instance.Key] = true
 		a.reportedMu.Unlock()
-		return nil, err
+		var refusal *hub.RuntimeTargetRefusal
+		if errors.As(err, &refusal) {
+			return nil, brokerhost.WithReason(refusal.Code, err)
+		}
+		var ack *brokeridentity.AckError
+		if errors.As(err, &ack) {
+			return nil, err
+		}
+		return nil, brokerhost.WithReason("registration_failed", err)
 	}
 	act := &brokerhost.Activation{}
 	authSvc := a.hubSrv.GetBrokerAuthService()
@@ -442,14 +450,7 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 	}
 
 	if p.webSrv != nil {
-		p.webSrv.SetBrokerHealthProvider(func(ctx context.Context) interface{} {
-			if !host.MultiInstance() {
-				if a := host.Active(); len(a) == 1 {
-					return a[0].Server.GetHealthInfo(ctx)
-				}
-			}
-			return map[string]interface{}{"ready": host.Ready(), "instances": host.Status()}
-		})
+		p.webSrv.SetBrokerHealthProvider(func(ctx context.Context) interface{} { return flatHostHealth(ctx, host) })
 	}
 
 	log.Printf("Starting Runtime Broker API server on %s:%d", cfg.RuntimeBroker.Host, cfg.RuntimeBroker.Port)
@@ -531,6 +532,19 @@ func flatInstanceServerConfig(sh flatServerShared, ic brokerhost.InstanceContext
 		rhCfg.NFSVerifyOnlyReason = "several Runtime Broker instances share this host, so no instance mounts it"
 	}
 	return rhCfg
+}
+
+// flatHostHealth is the broker health the Hub's public /healthz shows for a
+// flat host: the single configured instance's own health while it is
+// active, otherwise readiness plus each instance's state and reason code
+// (never the refusal text, which stays in the logs).
+func flatHostHealth(ctx context.Context, host *brokerhost.Host) interface{} {
+	if !host.MultiInstance() {
+		if a := host.Active(); len(a) == 1 {
+			return a[0].Server.GetHealthInfo(ctx)
+		}
+	}
+	return map[string]interface{}{"ready": host.Ready(), "instances": host.Status()}
 }
 
 // installColocatedSettingsOverlay installs the global settings overlay for a

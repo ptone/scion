@@ -34,7 +34,7 @@ import (
 
 // runHost starts h.Run on port 0 and returns its address and a function
 // that cancels it and returns Run's result and duration.
-func runHost(t *testing.T, h *Host) (string, func() (error, time.Duration)) {
+func runHost(t *testing.T, h *Host) (string, func() (time.Duration, error)) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -47,15 +47,15 @@ func runHost(t *testing.T, h *Host) (string, func() (error, time.Duration)) {
 		}
 		return h.Addr() != ""
 	}, 20*time.Second, 10*time.Millisecond)
-	stop := func() (error, time.Duration) {
+	stop := func() (time.Duration, error) {
 		start := time.Now()
 		cancel()
 		select {
 		case err := <-done:
-			return err, time.Since(start)
+			return time.Since(start), err
 		case <-time.After(30 * time.Second):
 			t.Fatal("Run did not return")
-			return nil, 0
+			return 0, nil
 		}
 	}
 	t.Cleanup(func() { cancel() })
@@ -85,7 +85,7 @@ func TestHost_RunServesAndShutsDown(t *testing.T) {
 	assert.Equal(t, http.StatusOK, getStatus(t, base+"/readyz"), "both instances serving (each has a Hub connection)")
 	assert.Equal(t, http.StatusOK, getStatus(t, base+"/healthz"))
 
-	err, took := stop()
+	took, err := stop()
 	require.NoError(t, err)
 	assert.Less(t, took, 10*time.Second)
 	for _, st := range h.Status() {
@@ -136,7 +136,7 @@ func TestHost_ShutdownDrainIsBounded(t *testing.T) {
 		t.Fatal("the request never reached the instance")
 	}
 
-	_, took := stop()
+	took, _ := stop()
 	assert.Less(t, took, 5*time.Second, "the drain is bounded by the shutdown timeout")
 }
 
@@ -196,7 +196,7 @@ func TestHost_RunInstanceNotServingIsStopped(t *testing.T) {
 	_ = resp.Body.Close()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
-	err, _ = stop()
+	_, err = stop()
 	require.NoError(t, err)
 }
 
