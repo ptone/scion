@@ -463,6 +463,8 @@ type ccTestRig struct {
 	ctx    context.Context
 	hubURL string
 	ids    [2]string
+	// stateDirs maps each instance's Runtime Broker ID to its state root.
+	stateDirs map[string]string
 }
 
 func newCCTestRig(t *testing.T) *ccTestRig {
@@ -474,10 +476,12 @@ func newCCTestRig(t *testing.T) *ccTestRig {
 	hubTS := httptest.NewServer(srv.Handler())
 	t.Cleanup(hubTS.Close)
 	globalDir := t.TempDir()
+	stateDirs := map[string]string{}
 	build := func(ic brokerhost.InstanceContext) *runtimebroker.Server {
 		cfg := runtimebroker.DefaultServerConfig()
 		cfg.BrokerID = ic.Identity.RuntimeBrokerID
-		cfg.StateDir = t.TempDir()
+		cfg.StateDir = filepath.Join(globalDir, "state", ic.Identity.RuntimeBrokerID)
+		stateDirs[ic.Identity.RuntimeBrokerID] = cfg.StateDir
 		cfg.HubEnabled = true
 		cfg.HubEndpoint = hubTS.URL
 		cfg.ControlChannelEnabled = true
@@ -508,7 +512,7 @@ func newCCTestRig(t *testing.T) *ccTestRig {
 	for _, a := range active {
 		require.NoError(t, a.Server.StartServices(ctx))
 	}
-	r := &ccTestRig{s: s, mgr: srv.GetControlChannelManager(), active: active, build: build, ctx: ctx, hubURL: hubTS.URL,
+	r := &ccTestRig{s: s, mgr: srv.GetControlChannelManager(), active: active, build: build, ctx: ctx, hubURL: hubTS.URL, stateDirs: stateDirs,
 		ids: [2]string{active[0].Context.Identity.RuntimeBrokerID, active[1].Context.Identity.RuntimeBrokerID}}
 	require.Eventually(t, func() bool { return r.mgr.IsConnected(r.ids[0]) && r.mgr.IsConnected(r.ids[1]) }, 10*time.Second, 50*time.Millisecond)
 	return r
