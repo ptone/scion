@@ -69,6 +69,13 @@ type Options struct {
 	// TransportMode and TransportAudience are saved with the credentials.
 	TransportMode     string
 	TransportAudience string
+	// HubEndpoint is the Hub endpoint the client reached the Hub on. It is
+	// saved with the credentials, so the instance keeps using it, as the
+	// legacy join does. The Hub's own endpoint in the join response is used
+	// only when it is empty: a Hub without a configured public endpoint
+	// reports one that a remote broker may not be able to reach (for
+	// example http://localhost:<port>).
+	HubEndpoint string
 }
 
 // Option sets an Options field.
@@ -188,7 +195,7 @@ func RegisterInstance(ctx context.Context, client hubclient.Client, inst config.
 		Name:              hubName,
 		BrokerID:          id.RuntimeBrokerID,
 		SecretKey:         joinResp.SecretKey,
-		HubEndpoint:       joinResp.HubEndpoint,
+		HubEndpoint:       savedHubEndpoint(o.HubEndpoint, joinResp.HubEndpoint),
 		AuthMode:          brokercredentials.AuthModeHMAC,
 		RegisteredAt:      time.Now().UTC(),
 		TransportMode:     o.TransportMode,
@@ -198,6 +205,15 @@ func RegisterInstance(ctx context.Context, client hubclient.Client, inst config.
 		return nil, fmt.Errorf("flat Runtime Broker %s registered, but saving its credentials failed: %w", id.RuntimeBrokerID, err)
 	}
 	return creds, nil
+}
+
+// savedHubEndpoint is the Hub endpoint saved with the credentials: the one
+// the client used, else the Hub's self-reported one.
+func savedHubEndpoint(used, reported string) string {
+	if used != "" {
+		return used
+	}
+	return reported
 }
 
 // descriptorFor is the registration descriptor: the identity's target ID and

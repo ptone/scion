@@ -129,6 +129,7 @@ func runBrokerRegisterInstance(cmd *cobra.Command, key string) error {
 		WorkspaceStorage:  loadBrokerRegistrationWorkspaceStorage(),
 		TransportMode:     transportMode,
 		TransportAudience: transportAudience,
+		HubEndpoint:       endpoint,
 	})
 	if err != nil {
 		return err
