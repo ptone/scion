@@ -26,9 +26,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
-// A delete request is not confirmed absence (architecture ruling r10,
-// ptone/scion#3274): a flat instance finishes a deleted agent's record, and
-// releases its slug, only once every recorded object is confirmed gone.
+// A delete request is not confirmed absence (ptone/scion#3274): a flat
+// instance finishes a deleted agent's record, and releases its slug, only
+// once every recorded object is confirmed gone.
 
 func assertDeletingAndReserved(t *testing.T, f *partitionFixture, why string) {
 	t.Helper()

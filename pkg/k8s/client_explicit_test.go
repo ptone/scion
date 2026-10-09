@@ -339,7 +339,7 @@ func TestExplicitFileClientConfig_IsDirectWithNoInClusterLeg(t *testing.T) {
 // TestNewClientFromKubeconfigFile_UsesTheDirectConfigAtTheCallSite: the
 // explicit-file constructor builds its configuration through the direct
 // (no in-cluster leg) constructor, and the configuration it gets is the
-// direct kind; a loader built inline at the call site would bypass it.
+// direct kind; a loader built inline at the call site would not use it.
 func TestNewClientFromKubeconfigFile_UsesTheDirectConfigAtTheCallSite(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "a.kubeconfig")

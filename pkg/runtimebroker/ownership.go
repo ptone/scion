@@ -519,11 +519,19 @@ func (s *OwnershipStore) MarkAbsent(projectID, agentID, uid string) error {
 }
 
 // ReleaseSlug releases a deleted agent's slug reservation once every
-// recorded object is confirmed absent. Its caller (finishOwnedDelete, from
-// deleteAgentFenced) holds the process-wide workspace lock on the agent's
-// files (lockAgentFiles, P2.3 S2) for the whole delete, so no provisioning
-// or other removal of those paths runs before the slug is free. The record
-// stays as a tombstone. Anything else is refused.
+// recorded object is confirmed absent. The record stays as a tombstone.
+// Anything else is refused.
+//
+// Callers and the workspace lock:
+//   - finishOwnedDelete from deleteAgentFenced holds the process-wide
+//     workspace lock on the agent's files (lockAgentFiles) for the whole
+//     delete, so no provisioning or other removal of those paths runs
+//     before the slug is free.
+//   - finishOwnedDelete from finishPendingOwnedDelete runs without that
+//     lock. Its caller found neither a runtime entry nor files for the
+//     agent, and while the record is deleting no new run can take the slug.
+//   - ReconcileAbsent runs without that lock, from the instance's ownership
+//     preflight, before the instance serves any request.
 func (s *OwnershipStore) ReleaseSlug(projectID, agentID string) error {
 	l := s.keyLock(projectID, agentID)
 	l.Lock()
