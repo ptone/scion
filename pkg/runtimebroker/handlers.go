@@ -117,7 +117,13 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 	// overall status only when the broker owns the mounts and a dispatch
 	// would be refused: see nfsHealthDegradesStatus.
 	if s.nfsMountReconciler != nil {
-		checks["nfs_mounts"] = s.nfsMountReconciler.HealthCheckString()
+		if s.flatInstance() != nil {
+			// A flat instance's health (its unauthenticated instance
+			// route) carries codes only, never mount messages.
+			checks["nfs_mounts"] = s.nfsMountReconciler.HealthCheckCodes()
+		} else {
+			checks["nfs_mounts"] = s.nfsMountReconciler.HealthCheckString()
+		}
 		if s.nfsHealthDegradesStatus() {
 			status = degradeHealthStatus(status)
 		}
