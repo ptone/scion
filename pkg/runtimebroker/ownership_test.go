@@ -412,3 +412,33 @@ func TestOwnershipStore_ReconstructPodWithUID(t *testing.T) {
 	rec, _, _ = s.Get("proj-1", "agent-1")
 	assert.True(t, rec.OwnsUID("pod-uid-1"))
 }
+
+// TestOwnershipStore_ReconcileAbsentUsesExactCheckForUnlistedPods: a
+// recorded pod in a namespace the listing does not cover is not marked
+// absent from the listing alone; only the exact check decides.
+func TestOwnershipStore_ReconcileAbsentUsesExactCheckForUnlistedPods(t *testing.T) {
+	s := NewOwnershipStore(t.TempDir(), "rb-a")
+	require.NoError(t, s.BeginRun("proj", "agent-1", "worker", "run-1"))
+	pod := api.ResourceHandle{Kind: api.ResourceKindPod, Namespace: "team-ns", Name: "proj--worker", UID: "pod-uid"}
+	require.NoError(t, s.AddResource("proj", "agent-1", "run-1", pod))
+	require.NoError(t, s.SetRunState("proj", "agent-1", "run-1", OwnershipStateCreated))
+
+	// The listing (default namespace only) does not show the pod; the pod
+	// still exists.
+	_, err := s.ReconcileAbsent(nil, func(api.ResourceHandle) (bool, error) { return false, nil }, nil)
+	require.NoError(t, err)
+	rec, _, _ := s.Get("proj", "agent-1")
+	assert.True(t, rec.OwnsUID("pod-uid"), "an unlisted live pod stays recorded")
+
+	// The exact check fails: still recorded.
+	_, err = s.ReconcileAbsent(nil, func(api.ResourceHandle) (bool, error) { return false, errors.New("forbidden") }, nil)
+	require.NoError(t, err)
+	rec, _, _ = s.Get("proj", "agent-1")
+	assert.True(t, rec.OwnsUID("pod-uid"), "a failed check never counts as absence")
+
+	// Confirmed gone.
+	_, err = s.ReconcileAbsent(nil, func(api.ResourceHandle) (bool, error) { return true, nil }, nil)
+	require.NoError(t, err)
+	rec, _, _ = s.Get("proj", "agent-1")
+	assert.False(t, rec.OwnsUID("pod-uid"))
+}

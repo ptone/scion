@@ -1229,10 +1229,12 @@ func reconstructedHandle(o api.AgentInfo, uid string) api.ResourceHandle {
 // absent, when set, is the runtime's exact absence check by immutable
 // identity (runtime.ResourceAbsenceChecker); warn receives check failures.
 // For every live or deleting record of this instance (not conflicting):
-//   - a recorded main object (container or pod) that no listed object
-//     matches is marked absent. Matching is deliberately loose (any of the
-//     object's IDs, by prefix, or its name): a doubtful match keeps the
-//     object recorded rather than marking a live one absent.
+//   - a recorded main object (container or pod) that a listed object
+//     matches is present (matching is deliberately loose: any of the
+//     object's IDs, by prefix, or its name). One that no listed object
+//     matches is marked absent only when absent confirms it, since the
+//     listing may not cover every namespace a pod was created in; without
+//     absent the listing alone decides.
 //   - any other recorded object (children, and main objects of a deleting
 //     run or record) is checked with absent; only a confirmed absence marks
 //     it, and a check failure keeps it recorded (retried next time).
@@ -1261,16 +1263,22 @@ func (s *OwnershipStore) ReconcileAbsent(present []api.AgentInfo, absent func(ap
 					continue
 				}
 				main := res.Kind == api.ResourceKindContainer || res.Kind == api.ResourceKindPod
-				if main && !objectListed(res, present) {
+				listed := main && objectListed(res, present)
+				if main && !listed && absent == nil {
+					// No exact check: the listing alone decides (callers
+					// without a runtime check; a flat instance always has one).
 					if err := s.MarkAbsent(r.ProjectID, r.AgentID, res.UID); err != nil {
 						return changed, err
 					}
 					changed++
 					continue
 				}
-				if absent == nil || (main && r.State == OwnershipStateActive && runStateOrder[run.State] < runStateOrder[OwnershipStateDeleting]) {
+				if absent == nil || (listed && r.State == OwnershipStateActive && runStateOrder[run.State] < runStateOrder[OwnershipStateDeleting]) {
 					continue // a listed main object of a live run is present
 				}
+				// Every other object, an unlisted main object included, is
+				// confirmed gone only by the exact check: a listing may not
+				// cover every namespace this instance creates objects in.
 				h := api.ResourceHandle{Kind: res.Kind, Namespace: res.Namespace, Name: res.Name, UID: res.UID}
 				gone, err := absent(h)
 				if err != nil {

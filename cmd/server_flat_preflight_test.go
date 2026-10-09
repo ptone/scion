@@ -247,7 +247,12 @@ func TestFlatOwnershipPreflight_DeniedVersusAbsent(t *testing.T) {
 		return []api.AgentInfo{{Name: "live", ID: "cid-live-0123", ContainerID: "cid-live-0123", Labels: map[string]string{
 			api.LabelRuntimeBrokerID: "rb-a", "scion.project_id": "proj-1", "agent_id": "agent-live", "scion.name": "live", api.LabelRunID: "run-2"}}}, nil
 	}
-	require.NoError(t, flatOwnershipPreflight(ctx, preflightCandidate(live)))
+	liveCand := preflightCandidate(live)
+	// The exact check confirms the unlisted object is gone.
+	liveCand.Runtime.(*runtime.MockRuntime).ResourceAbsentFunc = func(_ context.Context, h api.ResourceHandle) (bool, error) {
+		return h.UID == "cid-gone-0123456789", nil
+	}
+	require.NoError(t, flatOwnershipPreflight(ctx, liveCand))
 	rec, _, err = st.Get("proj-1", "agent-gone")
 	require.NoError(t, err)
 	assert.False(t, rec.OwnsUID("cid-gone-0123456789"), "a complete read that does not show the object marks it absent")
