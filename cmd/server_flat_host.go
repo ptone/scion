@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 
@@ -385,13 +386,13 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 		nfs:                     brokerNFS,
 		workspaceStorageBackend: workspaceStorageBackend,
 		workspaceLocks:          runtimebroker.NewWorkspaceLocks(),
+		containerHub:            containerHub,
+	}
+	if p.hubSrv != nil {
+		shared.colocatedStorage = p.hubSrv.GetStorage()
 	}
 	buildServer := func(ic brokerhost.InstanceContext) (*runtimebroker.Server, error) {
 		rhCfg := flatInstanceServerConfig(shared, ic)
-		containerHub(ic.Runtime.Name()).applyTo(&rhCfg)
-		if ic.Activation.InMemoryCredentials != nil && p.hubSrv != nil {
-			rhCfg.ColocatedStorage = p.hubSrv.GetStorage()
-		}
 		srv := runtimebroker.New(rhCfg, ic.Manager, ic.Runtime)
 		if p.requestLogger != nil {
 			srv.SetRequestLogger(p.requestLogger)
@@ -550,6 +551,12 @@ type flatServerShared struct {
 	// workspaceLocks is the one process-wide workspace lock service every
 	// instance shares (P2.3 S2).
 	workspaceLocks *runtimebroker.WorkspaceLocks
+	// containerHub resolves an instance runtime's container Hub settings
+	// (nil: none).
+	containerHub func(rtName string) containerHubEndpointResult
+	// colocatedStorage is the co-located Hub's storage (nil without one);
+	// only a co-located (in-memory credentials) instance uses it.
+	colocatedStorage storage.Storage
 }
 
 // flatInstanceServerConfig is one activated flat instance's Runtime Broker
@@ -604,6 +611,12 @@ func flatInstanceServerConfig(sh flatServerShared, ic brokerhost.InstanceContext
 
 			ConflictingOwnershipKeys: ic.ConflictingKeys,
 		},
+	}
+	if sh.containerHub != nil && ic.Runtime != nil {
+		sh.containerHub(ic.Runtime.Name()).applyTo(&rhCfg)
+	}
+	if ic.Activation.InMemoryCredentials != nil && sh.colocatedStorage != nil {
+		rhCfg.ColocatedStorage = sh.colocatedStorage
 	}
 	if sh.multiInstance {
 		// Configured cardinality, not the active count: with more than

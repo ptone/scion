@@ -19,13 +19,16 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokerhost"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokeridentity"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 )
 
 // TestFlatInstanceServerConfig covers the production per-instance server
@@ -91,4 +94,34 @@ func TestFlatInstanceServerConfig_SharesOneWorkspaceLockService(t *testing.T) {
 		c := flatInstanceServerConfig(sh, brokerhost.InstanceContext{Instance: inst, Identity: id, Activation: &brokerhost.Activation{}})
 		assert.Same(t, locks, c.WorkspaceLocks, key)
 	}
+}
+
+// TestFlatInstanceServerConfig_ContainerHubAndColocatedStorage: an
+// instance's container Hub settings come from its own runtime, and only a
+// co-located instance (in-memory credentials) gets the co-located Hub's
+// storage.
+func TestFlatInstanceServerConfig_ContainerHubAndColocatedStorage(t *testing.T) {
+	st, err := storage.NewLocal(storage.Config{LocalPath: t.TempDir()})
+	require.NoError(t, err)
+	var asked []string
+	sh := flatServerShared{cfg: &config.GlobalConfig{}, mode: brokerhost.ModeColocated, colocatedStorage: st,
+		containerHub: func(rtName string) containerHubEndpointResult {
+			asked = append(asked, rtName)
+			return containerHubEndpointResult{Endpoint: "http://hub-for-" + rtName, ColocatedPublicHubEndpoint: "https://public", HubListenPort: 8080}
+		}}
+	id := &brokeridentity.Identity{InstanceKey: "docker-a", RuntimeBrokerID: "rb-a"}
+	inst := config.V1RuntimeBrokerInstanceConfig{Key: "docker-a", Name: "a", RuntimeTarget: &config.V1RuntimeTargetConfig{Type: "docker"}}
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+
+	colocated := flatInstanceServerConfig(sh, brokerhost.InstanceContext{Instance: inst, Identity: id, Runtime: rt,
+		Activation: &brokerhost.Activation{InMemoryCredentials: &brokercredentials.BrokerCredentials{BrokerID: "rb-a"}}})
+	assert.Equal(t, []string{"docker"}, asked, "the container Hub is resolved for the instance's own runtime")
+	assert.Equal(t, "http://hub-for-docker", colocated.ContainerHubEndpoint)
+	assert.Equal(t, "https://public", colocated.ColocatedPublicHubEndpoint)
+	assert.Equal(t, 8080, colocated.HubListenPort)
+	assert.Same(t, st, colocated.ColocatedStorage)
+
+	remote := flatInstanceServerConfig(sh, brokerhost.InstanceContext{Instance: inst, Identity: id, Runtime: rt,
+		Activation: &brokerhost.Activation{RemoteCredentials: []brokercredentials.BrokerCredentials{{BrokerID: "rb-a"}}}})
+	assert.Nil(t, remote.ColocatedStorage, "a remote instance never uses the co-located Hub's storage")
 }

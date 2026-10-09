@@ -16,7 +16,6 @@ package brokerhost
 
 import (
 	"context"
-	"encoding/base64"
 	"net/http"
 	"testing"
 	"time"
@@ -199,5 +198,3 @@ func TestHost_RunInstanceNotServingIsStopped(t *testing.T) {
 	_, err = stop()
 	require.NoError(t, err)
 }
-
-var _ = base64.StdEncoding
