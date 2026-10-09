@@ -147,6 +147,11 @@ Examples:
   # Register with auto-provide enabled
   scion runtime-broker register --auto-provide
 
+  # Register the configured flat Runtime Broker instance "local-docker"
+  # (server.broker.instances); its credentials are saved under
+  # ~/.scion/runtime-brokers/local-docker/hub-credentials/
+  scion runtime-broker register --instance local-docker
+
   # Register a broker on a non-default port. Not needed when the broker
   # was started with 'scion runtime-broker start --port 19800': the port
   # used by the last start is the default.
@@ -380,6 +385,7 @@ func init() {
 	brokerRegisterCmd.Flags().StringVar(&brokerHubName, "name", "", "Name for this hub connection (derived from endpoint if not specified)")
 	brokerRegisterCmd.Flags().StringVar(&brokerTransportMode, "transport-mode", "", "Transport auth mode: 'iap' or 'cloudrun_invoker' (overrides SCION_TRANSPORT_MODE)")
 	brokerRegisterCmd.Flags().StringVar(&brokerTransportAudience, "transport-audience", "", "Transport auth OIDC audience (overrides SCION_TRANSPORT_AUDIENCE)")
+	brokerRegisterCmd.Flags().StringVar(&brokerRegisterInstance, "instance", "", "Register the configured flat Runtime Broker instance with this key (server.broker.instances)")
 
 	// Deregister flags
 	brokerDeregisterCmd.Flags().BoolVar(&brokerDeregisterBrokerOnly, "broker-only", false, "Only remove broker record, not project providers")
@@ -409,6 +415,9 @@ func init() {
 }
 
 func runBrokerRegister(cmd *cobra.Command, args []string) error {
+	if brokerRegisterInstance != "" {
+		return runBrokerRegisterInstance(cmd, brokerRegisterInstance)
+	}
 	// Resolve project path to find project settings (needed for Hub endpoint config)
 	gp := projectPath
 	if gp == "" && globalMode {

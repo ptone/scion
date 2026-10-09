@@ -30,7 +30,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokeridentity"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -148,49 +147,6 @@ func warnUnhostedFlatIdentities(globalDir string) {
 		slog.Warn("Flat Runtime Broker identities exist but server.broker.instances is not configured; they are NOT hosted by this process and their agents cannot start until the instance is configured again",
 			"instances", strings.Join(unhosted, ", "))
 	}
-}
-
-// flatInstanceStartup is a flat instance that passed every startup check and
-// the embedded registration's bound-result validation.
-type flatInstanceStartup struct {
-	runtime  *runtime.DockerRuntime
-	identity *brokeridentity.Identity
-	instance config.V1RuntimeBrokerInstanceConfig
-	row      *store.RuntimeBroker
-}
-
-// prepareFlatInstance takes the instance's Docker runtime (constructed from
-// its explicit configuration), probes and verifies its execution scope, loads or
-// creates its identity, and registers it through the Hub's embedded flat
-// registration. Any refusal is reported through
-// EmbeddedBrokerRegistrationFailed and returned; the caller then does not
-// activate the instance (no Runtime Broker server, control channel,
-// heartbeat or dispatch), and nothing falls back to the legacy identity.
-func prepareFlatInstance(ctx context.Context, hubSrv *hub.Server, dr *runtime.DockerRuntime, inst config.V1RuntimeBrokerInstanceConfig, legacyIDs []string, globalDir string, opts hub.EmbeddedFlatRegistrationOptions, probe func(context.Context, string) (brokeridentity.ExecutionScope, error)) (*flatInstanceStartup, error) {
-	fail := func(err error) (*flatInstanceStartup, error) {
-		hubSrv.EmbeddedBrokerRegistrationFailed(err)
-		return nil, err
-	}
-	if inst.RuntimeTarget == nil || inst.RuntimeTarget.Type != brokeridentity.TargetTypeDocker {
-		return fail(fmt.Errorf("flat Runtime Broker instance %q: only runtime_target.type docker is supported in this release", inst.Key))
-	}
-	if probe == nil {
-		probe = probeDockerExecutionScope
-	}
-	scope, err := probe(ctx, dr.Command)
-	if err != nil {
-		return fail(fmt.Errorf("flat Runtime Broker instance %q: %w", inst.Key, err))
-	}
-	id, err := brokeridentity.LoadOrCreate(brokeridentity.InstanceDir(globalDir, inst.Key), inst.Key, inst.RuntimeTarget.Type, scope, legacyIDs)
-	if err != nil {
-		return fail(fmt.Errorf("flat Runtime Broker instance %q: %w", inst.Key, err))
-	}
-	// RegisterEmbeddedFlatRuntimeBroker reports its own refusals.
-	row, err := hubSrv.RegisterEmbeddedFlatRuntimeBroker(ctx, id, inst, opts)
-	if err != nil {
-		return nil, err
-	}
-	return &flatInstanceStartup{runtime: dr, identity: id, instance: inst, row: row}, nil
 }
 
 // flatInstanceCapabilities are the embedded flat instance's capabilities on

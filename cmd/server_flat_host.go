@@ -1,0 +1,432 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package cmd
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"log/slog"
+	"sync"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
+	"github.com/GoogleCloudPlatform/scion/pkg/brokerhost"
+	"github.com/GoogleCloudPlatform/scion/pkg/brokeridentity"
+	"github.com/GoogleCloudPlatform/scion/pkg/brokerregistration"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+)
+
+// Multi-instance flat Runtime Broker hosting (ptone/scion#3272). A process
+// with server.broker.instances hosts every configured instance through a
+// brokerhost.Host: one runtime, identity, credentials and Runtime Broker
+// server per instance, one process-wide listener. It never hosts the legacy
+// identity, never loads legacy Runtime Broker credentials and never runs the
+// legacy embedded registration or orphan reassignment.
+
+// flatHostMode is how this process activates flat instances. Co-located
+// exactly when the legacy embedded registration would run
+// (colocatedBrokerRegisters); otherwise remote, including
+// --simulate-remote-broker with a Hub in the process: a remote instance
+// activates only with its instance-scoped credentials after the remote
+// activation validation, never through the embedded registration.
+func flatHostMode(cfg *config.GlobalConfig, s store.Store) brokerhost.Mode {
+	if colocatedBrokerRegisters(cfg, s) {
+		return brokerhost.ModeColocated
+	}
+	return brokerhost.ModeRemote
+}
+
+// newFlatInstanceRuntime builds an instance's runtime from its own explicit
+// configuration, never from Runtime Broker Profile resolution. Docker is
+// the only target type in this release (Kubernetes arrives with its scope
+// probe; validation already refuses it).
+func newFlatInstanceRuntime(_ context.Context, inst config.V1RuntimeBrokerInstanceConfig) (runtime.Runtime, error) {
+	if inst.RuntimeTarget == nil {
+		return nil, errors.New("runtime_target is required")
+	}
+	switch inst.RuntimeTarget.Type {
+	case brokeridentity.TargetTypeDocker:
+		return runtime.NewDockerRuntime(), nil
+	default:
+		return nil, fmt.Errorf("runtime target type %q is not supported in this release", inst.RuntimeTarget.Type)
+	}
+}
+
+// flatScopeProber probes an instance's execution scope for the host and for
+// 'scion broker register --instance'; a variable so command tests can stand
+// in for the Docker daemon.
+var flatScopeProber brokerhost.ScopeProber = probeFlatInstanceScope
+
+// probeFlatInstanceScope probes an instance runtime's execution scope.
+func probeFlatInstanceScope(ctx context.Context, inst config.V1RuntimeBrokerInstanceConfig, rt runtime.Runtime) (brokeridentity.ExecutionScope, error) {
+	switch r := rt.(type) {
+	case *runtime.DockerRuntime:
+		return probeDockerExecutionScope(ctx, r.Command)
+	default:
+		return brokeridentity.ExecutionScope{}, fmt.Errorf("%w: no scope probe for runtime %q", brokeridentity.ErrExecutionScopeUnidentified, rt.Name())
+	}
+}
+
+// colocatedFlatActivator activates an instance through the Hub's embedded
+// flat registration (R1-R8, bound result required) and the in-memory
+// credentials of the co-located control channel.
+type colocatedFlatActivator struct {
+	hubSrv      *hub.Server
+	endpoint    string
+	autoProvide bool
+	hubEndpoint string
+}
+
+func (a *colocatedFlatActivator) Activate(ctx context.Context, c brokerhost.Candidate) (*brokerhost.Activation, error) {
+	// RegisterEmbeddedFlatRuntimeBroker reports its own refusals per
+	// instance.
+	row, err := a.hubSrv.RegisterEmbeddedFlatRuntimeBroker(ctx, c.Identity, c.Instance, hub.EmbeddedFlatRegistrationOptions{
+		Endpoint:         a.endpoint,
+		AutoProvide:      a.autoProvide,
+		Capabilities:     flatInstanceCapabilities(c.Runtime),
+		WorkspaceStorage: loadBrokerRegistrationWorkspaceStorage(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	act := &brokerhost.Activation{}
+	authSvc := a.hubSrv.GetBrokerAuthService()
+	if authSvc == nil {
+		log.Printf("Warning: BrokerAuthService not available, skipping credentials for flat Runtime Broker instance %q", c.Instance.Key)
+		return act, nil
+	}
+	secretKeyB64, err := authSvc.GenerateAndStoreSecret(ctx, row.ID)
+	if err != nil {
+		log.Printf("Warning: failed to generate/retrieve secret for flat Runtime Broker instance %q: %v", c.Instance.Key, err)
+		return act, nil
+	}
+	act.InMemoryCredentials = &brokercredentials.BrokerCredentials{
+		Name:         "local",
+		BrokerID:     row.ID,
+		SecretKey:    secretKeyB64,
+		HubEndpoint:  a.hubEndpoint,
+		RegisteredAt: time.Now(),
+	}
+	return act, nil
+}
+
+func (a *colocatedFlatActivator) Refused(inst config.V1RuntimeBrokerInstanceConfig, err error) {
+	a.hubSrv.EmbeddedFlatInstanceFailed(inst.Key, err)
+}
+
+// remoteFlatActivator activates an instance with its instance-scoped
+// credentials, each validated by brokerregistration.ValidateActivation on
+// every start (carrier (a): the HMAC self-read of the instance's own row).
+// Legacy credentials are never read and nothing falls back to them.
+type remoteFlatActivator struct {
+	globalDir string
+	newClient func(*brokercredentials.BrokerCredentials) (hubclient.Client, error)
+}
+
+func (a *remoteFlatActivator) Activate(ctx context.Context, c brokerhost.Candidate) (*brokerhost.Activation, error) {
+	list, err := brokerregistration.LoadInstanceCredentials(a.globalDir, c.Identity)
+	if err != nil {
+		return nil, err
+	}
+	newClient := a.newClient
+	if newClient == nil {
+		newClient = runtimebroker.HubClientForCredentials
+	}
+	var validated []brokercredentials.BrokerCredentials
+	var errs []error
+	for i := range list {
+		creds := list[i]
+		client, err := newClient(&creds)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("hub %q: %w", creds.Name, err))
+			continue
+		}
+		if err := brokerregistration.ValidateActivation(ctx, client, c.Identity, &creds); err != nil {
+			errs = append(errs, fmt.Errorf("hub %q: %w", creds.Name, err))
+			continue
+		}
+		validated = append(validated, creds)
+	}
+	if len(validated) == 0 {
+		return nil, errors.Join(errs...)
+	}
+	for _, e := range errs {
+		slog.Error("Flat Runtime Broker instance not connected to a Hub whose binding failed validation",
+			"instance", c.Instance.Key, "error", e)
+	}
+	return &brokerhost.Activation{RemoteCredentials: validated}, nil
+}
+
+func (a *remoteFlatActivator) Refused(config.V1RuntimeBrokerInstanceConfig, error) {}
+
+// flatHostParams are the process-wide inputs of the flat host.
+type flatHostParams struct {
+	cfg            *config.GlobalConfig
+	hubSrv         *hub.Server
+	webSrv         *hub.WebServer
+	store          store.Store
+	instances      []config.V1RuntimeBrokerInstanceConfig
+	hubEndpoint    string
+	hubEndpointSrc hubEndpointSource
+	devAuthToken   string
+	settings       *config.Settings
+	globalDir      string
+	autoProvide    bool
+	requestLogger  *slog.Logger
+	messageLogger  *slog.Logger
+	wg             *sync.WaitGroup
+	errCh          chan error
+}
+
+// startFlatRuntimeBrokerHost hosts the configured flat instances. A
+// configuration error refuses the process; a per-instance refusal leaves
+// that instance unactivated and its siblings running.
+func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
+	cfg := p.cfg
+	mode := flatHostMode(cfg, p.store)
+	if mode == brokerhost.ModeColocated && p.hubSrv == nil {
+		return errors.New("flat Runtime Broker host: co-located mode requires the Hub")
+	}
+
+	versionedSettings, _, vsErr := config.LoadEffectiveSettings("")
+	var vsBroker *config.V1BrokerConfig
+	if vsErr == nil && versionedSettings != nil && versionedSettings.Server != nil {
+		vsBroker = versionedSettings.Server.Broker
+	}
+	hubEndpointForRH := resolveHubEndpointForBroker(cfg, p.settings)
+
+	rhEndpoint := fmt.Sprintf("http://%s:%d", cfg.RuntimeBroker.Host, cfg.RuntimeBroker.Port)
+	if cfg.RuntimeBroker.Host == "0.0.0.0" {
+		rhEndpoint = fmt.Sprintf("http://localhost:%d", cfg.RuntimeBroker.Port)
+	}
+
+	chRes := brokerContainerHubConfig(cfg, brokerContainerHubParams{
+		RuntimeName:             "docker",
+		BrokerHubEndpoint:       hubEndpointForRH,
+		PublicHubEndpoint:       p.hubEndpoint,
+		PublicHubEndpointSource: p.hubEndpointSrc,
+		HostGatewayProbe:        func() bool { return runtime.DockerSupportsHostGateway(ctx, "") },
+	}, log.Printf)
+
+	var brokerNFS *config.V1NFSConfig
+	var workspaceStorageBackend string
+	if globalVS, _, gErr := config.LoadGlobalSettings(); gErr != nil {
+		log.Printf("WARNING: NFS mount checks disabled: loading global settings: %v", gErr)
+	} else {
+		workspaceStorageBackend = brokerWorkspaceStorageBackend(globalVS)
+		var nfsWarning string
+		brokerNFS, nfsWarning = brokerNFSConfig(globalVS)
+		if nfsWarning != "" {
+			log.Printf("WARNING: %s", nfsWarning)
+		}
+		if warning := brokerWorkspaceStorageWarning(globalVS); warning != "" {
+			log.Printf("WARNING: %s", warning)
+		}
+	}
+
+	var activator brokerhost.Activator
+	if mode == brokerhost.ModeColocated {
+		activator = &colocatedFlatActivator{hubSrv: p.hubSrv, endpoint: rhEndpoint, autoProvide: p.autoProvide, hubEndpoint: hubEndpointForRH}
+		keys := make([]string, 0, len(p.instances))
+		for _, inst := range p.instances {
+			keys = append(keys, inst.Key)
+		}
+		p.hubSrv.ExpectEmbeddedFlatInstances(keys)
+	} else {
+		activator = &remoteFlatActivator{globalDir: p.globalDir}
+	}
+
+	multi := len(p.instances) > 1
+	buildServer := func(ic brokerhost.InstanceContext) (*runtimebroker.Server, error) {
+		remote := len(ic.Activation.RemoteCredentials) > 0
+		rhCfg := runtimebroker.ServerConfig{
+			Port:                          cfg.RuntimeBroker.Port,
+			Host:                          cfg.RuntimeBroker.Host,
+			ReadTimeout:                   cfg.RuntimeBroker.ReadTimeout,
+			WriteTimeout:                  cfg.RuntimeBroker.WriteTimeout,
+			HubEndpoint:                   hubEndpointForRH,
+			BrokerID:                      ic.Identity.RuntimeBrokerID,
+			BrokerName:                    ic.Instance.Name,
+			CORSEnabled:                   cfg.RuntimeBroker.CORSEnabled,
+			CORSAllowedOrigins:            cfg.RuntimeBroker.CORSAllowedOrigins,
+			CORSAllowedMethods:            cfg.RuntimeBroker.CORSAllowedMethods,
+			CORSAllowedHeaders:            cfg.RuntimeBroker.CORSAllowedHeaders,
+			CORSMaxAge:                    cfg.RuntimeBroker.CORSMaxAge,
+			AllowContainerScriptHarnesses: cfg.RuntimeBroker.AllowContainerScriptHarnesses,
+			NFSConfig:                     brokerNFS,
+			StorageBucket:                 brokerStorageBucket(cfg.Storage),
+			WorkspaceStorageBackend:       workspaceStorageBackend,
+			Debug:                         enableDebug,
+			SlowRequestThreshold:          cfg.SlowRequestThreshold,
+
+			HubEnabled:           hubEndpointForRH != "" || remote,
+			HubToken:             p.devAuthToken,
+			TemplateCacheDir:     templateCacheDir,
+			TemplateCacheMaxSize: templateCacheMax,
+
+			ControlChannelEnabled: hubEndpointForRH != "" || remote,
+			HeartbeatEnabled:      hubEndpointForRH != "" || remote,
+
+			InMemoryCredentials:  ic.Activation.InMemoryCredentials,
+			BrokerAuthEnabled:    true,
+			BrokerAuthStrictMode: true,
+
+			FlatInstance: &runtimebroker.FlatInstanceConfig{
+				Identity:          ic.Identity,
+				Instance:          ic.Instance,
+				HubInProcess:      mode == brokerhost.ModeColocated,
+				RemoteCredentials: ic.Activation.RemoteCredentials,
+			},
+		}
+		if multi {
+			// Configured cardinality, not the active count: with more
+			// than one instance configured no instance owns the host's
+			// mounts.
+			rhCfg.NFSVerifyOnlyReason = "several Runtime Broker instances share this host, so no instance mounts it"
+		}
+		chRes.applyTo(&rhCfg)
+		if ic.Activation.InMemoryCredentials != nil && p.hubSrv != nil {
+			rhCfg.ColocatedStorage = p.hubSrv.GetStorage()
+		}
+		srv := runtimebroker.New(rhCfg, ic.Manager, ic.Runtime)
+		if p.requestLogger != nil {
+			srv.SetRequestLogger(p.requestLogger)
+		}
+		if p.messageLogger != nil {
+			srv.SetMessageLogger(p.messageLogger)
+		}
+		return srv, nil
+	}
+
+	host, err := brokerhost.New(brokerhost.Config{
+		GlobalDir:   p.globalDir,
+		Instances:   p.instances,
+		Mode:        mode,
+		LegacyIDs:   legacyRuntimeBrokerIDs(cfg, p.settings, vsBroker, p.globalDir),
+		NewRuntime:  newFlatInstanceRuntime,
+		ProbeScope:  flatScopeProber,
+		Activator:   activator,
+		BuildServer: buildServer,
+		Listener: brokerhost.ListenerConfig{
+			Host:         cfg.RuntimeBroker.Host,
+			Port:         cfg.RuntimeBroker.Port,
+			ReadTimeout:  cfg.RuntimeBroker.ReadTimeout,
+			WriteTimeout: cfg.RuntimeBroker.WriteTimeout,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	log.Printf("Runtime broker hosting %d flat Runtime Broker instance(s) (%s); the legacy Runtime Broker identity is not hosted by this process",
+		len(p.instances), mode)
+
+	installColocatedSettingsOverlay(cfg, p.hubSrv)
+
+	if err := host.Prepare(ctx); err != nil {
+		return err
+	}
+	for _, st := range host.Status() {
+		if st.State == brokerhost.StateActive {
+			log.Printf("Flat Runtime Broker instance %q activated: Runtime Broker %s (%s), runtime target %s",
+				st.Key, st.RuntimeBrokerID, st.Name, st.RuntimeTargetID)
+		}
+	}
+
+	active := host.Active()
+	if mode == brokerhost.ModeColocated && len(active) > 0 {
+		// The Hub's local image checker uses the host's Docker CLI, not
+		// whichever instance happened to start last.
+		p.hubSrv.SetLocalImageChecker(runtime.NewDockerRuntime())
+		for _, a := range active {
+			startFlatColocatedHeartbeat(ctx, p.wg, p.store, a.Server, a.Context.Identity.RuntimeBrokerID, a.Context.Instance.Name)
+		}
+	}
+
+	if p.webSrv != nil {
+		p.webSrv.SetBrokerHealthProvider(func(ctx context.Context) interface{} {
+			if !host.MultiInstance() {
+				if a := host.Active(); len(a) == 1 {
+					return a[0].Server.GetHealthInfo(ctx)
+				}
+			}
+			return map[string]interface{}{"ready": host.Ready(), "instances": host.Status()}
+		})
+	}
+
+	log.Printf("Starting Runtime Broker API server on %s:%d", cfg.RuntimeBroker.Host, cfg.RuntimeBroker.Port)
+	p.wg.Add(1)
+	go func() {
+		defer p.wg.Done()
+		if err := host.Run(ctx); err != nil {
+			p.errCh <- fmt.Errorf("runtime broker server error: %w", err)
+		}
+	}()
+	return nil
+}
+
+// installColocatedSettingsOverlay installs the global settings overlay for a
+// co-located Hub with a Postgres database, as startRuntimeBroker does for
+// the legacy broker. Flat instances never read profiles or runtimes from it.
+func installColocatedSettingsOverlay(cfg *config.GlobalConfig, hubSrv *hub.Server) {
+	if hubSrv == nil || cfg.Database.Driver != "postgres" {
+		return
+	}
+	overlay := config.NewSettingsOverlay()
+	config.SetGlobalSettingsOverlay(overlay)
+	if ops := hubSrv.GetOperationalSettings(); ops != nil {
+		snap := ops.Snapshot()
+		overlay.Update(snap.Runtimes, snap.Profiles, snap.HarnessConfigs, snap.ImageRegistry)
+	}
+}
+
+// startFlatColocatedHeartbeat runs the co-located internal heartbeat for one
+// active instance: every 30s it writes the instance's status from its own
+// control channel state.
+func startFlatColocatedHeartbeat(ctx context.Context, wg *sync.WaitGroup, s store.Store, srv *runtimebroker.Server, brokerID, brokerName string) {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		prevOnline := srv.IsControlChannelConnected()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				ccUp := srv.IsControlChannelConnected()
+				status := store.BrokerStatusOnline
+				if !ccUp {
+					status = store.BrokerStatusOffline
+				}
+				if ccUp != prevOnline {
+					log.Printf("Co-located heartbeat: control channel %s for flat Runtime Broker %s (%s)",
+						map[bool]string{true: "restored", false: "down"}[ccUp], brokerName, brokerID)
+					prevOnline = ccUp
+				}
+				if err := s.UpdateRuntimeBrokerHeartbeat(ctx, brokerID, status); err != nil {
+					log.Printf("Warning: failed to update internal heartbeat for %s: %v", brokerName, err)
+				}
+			}
+		}
+	}()
+}
