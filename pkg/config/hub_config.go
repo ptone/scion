@@ -547,6 +547,7 @@ type RuntimeTargetConfig struct {
 	DisplayName string `json:"displayName,omitempty" yaml:"displayName,omitempty" koanf:"displayName"`
 	Context     string `json:"context,omitempty" yaml:"context,omitempty" koanf:"context"`
 	Namespace   string `json:"namespace,omitempty" yaml:"namespace,omitempty" koanf:"namespace"`
+	Kubeconfig  string `json:"kubeconfig,omitempty" yaml:"kubeconfig,omitempty" koanf:"kubeconfig"`
 }
 
 // DatabaseConfig holds database connection settings.

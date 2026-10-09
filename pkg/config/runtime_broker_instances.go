@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 
 	yamlv3 "gopkg.in/yaml.v3"
 
@@ -91,24 +92,31 @@ func ValidateRuntimeBrokerInstances(instances []V1RuntimeBrokerInstanceConfig) [
 		}
 		switch t.Type {
 		case RuntimeTargetTypeDocker:
-			if t.Context != "" {
-				errs = append(errs, ValidationError{Path: p + ".runtime_target.context",
-					Message: "field not valid for runtime target type docker"})
-			}
-			if t.Namespace != "" {
-				errs = append(errs, ValidationError{Path: p + ".runtime_target.namespace",
-					Message: "field not valid for runtime target type docker"})
+			for field, v := range map[string]string{"context": t.Context, "namespace": t.Namespace, "kubeconfig": t.Kubeconfig} {
+				if v != "" {
+					errs = append(errs, ValidationError{Path: p + ".runtime_target." + field,
+						Message: "field not valid for runtime target type docker"})
+				}
 			}
 		case RuntimeTargetTypeKubernetes:
-			errs = append(errs, ValidationError{Path: p + ".runtime_target.type",
-				Message: "Kubernetes Runtime Broker instances are not implemented yet"})
+			if t.Kubeconfig != "" && !validInstanceKubeconfigPath(t.Kubeconfig) {
+				errs = append(errs, ValidationError{Path: p + ".runtime_target.kubeconfig",
+					Message: fmt.Sprintf("kubeconfig must be one absolute local file path (no ~, environment variables or path list): %q", t.Kubeconfig)})
+			}
 		default:
 			errs = append(errs, ValidationError{Path: p + ".runtime_target.type",
-				Message: fmt.Sprintf("unsupported runtime target type %q (supported: docker)", t.Type)})
+				Message: fmt.Sprintf("unsupported runtime target type %q (supported: docker, kubernetes)", t.Type)})
 		}
 	}
 	sort.SliceStable(errs, func(a, b int) bool { return errs[a].Path < errs[b].Path })
 	return errs
+}
+
+// validInstanceKubeconfigPath reports whether p is one absolute local file
+// path. It is never expanded (~, environment variables) and never a path
+// list; the file itself is checked when the instance's runtime is built.
+func validInstanceKubeconfigPath(p string) bool {
+	return strings.HasPrefix(p, "/") && !strings.ContainsRune(p, filepath.ListSeparator) && strings.Trim(p, "/") != ""
 }
 
 func duplicateInstanceKeyError(i, j int, key string) ValidationError {
@@ -299,6 +307,7 @@ func v1InstancesToGlobal(in []V1RuntimeBrokerInstanceConfig) []RuntimeBrokerInst
 				DisplayName: i.RuntimeTarget.DisplayName,
 				Context:     i.RuntimeTarget.Context,
 				Namespace:   i.RuntimeTarget.Namespace,
+				Kubeconfig:  i.RuntimeTarget.Kubeconfig,
 			}
 		}
 		out = append(out, o)
@@ -320,6 +329,7 @@ func globalInstancesToV1(in []RuntimeBrokerInstanceConfig) []V1RuntimeBrokerInst
 				DisplayName: i.RuntimeTarget.DisplayName,
 				Context:     i.RuntimeTarget.Context,
 				Namespace:   i.RuntimeTarget.Namespace,
+				Kubeconfig:  i.RuntimeTarget.Kubeconfig,
 			}
 		}
 		out = append(out, o)

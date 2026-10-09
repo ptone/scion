@@ -324,11 +324,66 @@ func TestRuntimeBrokerInstances_TargetTypeRequired(t *testing.T) {
 	expectValidationPaths(t, ValidateRuntimeBrokerInstances([]V1RuntimeBrokerInstanceConfig{{Key: "a", Name: "n", RuntimeTarget: &V1RuntimeTargetConfig{}}}), "[0].runtime_target.type")
 }
 
-func TestRuntimeBrokerInstances_KubernetesNotImplemented(t *testing.T) {
-	errs := ValidateRuntimeBrokerInstances([]V1RuntimeBrokerInstanceConfig{{Key: "a", Name: "n",
-		RuntimeTarget: &V1RuntimeTargetConfig{Type: "kubernetes", Context: "c", Namespace: "ns"}}})
-	if len(errs) != 1 || !strings.Contains(errs[0].Message, "not implemented yet") {
-		t.Fatalf("got %v", errs)
+// TestRuntimeBrokerInstances_KubernetesAccepted: P2.1-K implements the
+// kubernetes target (contract amendment K1/K2): context, namespace and an
+// absolute kubeconfig path are optional; a kubeconfig that is not one
+// absolute local path is rejected.
+func TestRuntimeBrokerInstances_KubernetesAccepted(t *testing.T) {
+	for name, target := range map[string]*V1RuntimeTargetConfig{
+		"bare":             {Type: "kubernetes"},
+		"context":          {Type: "kubernetes", Context: "c"},
+		"namespace":        {Type: "kubernetes", Namespace: "ns"},
+		"all":              {Type: "kubernetes", Context: "c", Namespace: "ns", Kubeconfig: "/etc/scion/cluster-a.kubeconfig"},
+		"empty kubeconfig": {Type: "kubernetes", Kubeconfig: ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if errs := ValidateRuntimeBrokerInstances([]V1RuntimeBrokerInstanceConfig{{Key: "a", Name: "n", RuntimeTarget: target}}); len(errs) != 0 {
+				t.Fatalf("got %v", errs)
+			}
+		})
+	}
+	for name, kc := range map[string]string{
+		"relative":  "cluster.kubeconfig",
+		"tilde":     "~/.kube/config",
+		"env":       "$HOME/.kube/config",
+		"path list": "/a/config:/b/config",
+		"root":      "/",
+	} {
+		t.Run("rejects "+name, func(t *testing.T) {
+			errs := ValidateRuntimeBrokerInstances([]V1RuntimeBrokerInstanceConfig{{Key: "a", Name: "n",
+				RuntimeTarget: &V1RuntimeTargetConfig{Type: "kubernetes", Kubeconfig: kc}}})
+			expectValidationPaths(t, errs, "runtime_target.kubeconfig")
+		})
+	}
+}
+
+// TestRuntimeBrokerInstances_KubeconfigRoundTrip: both conversions, the
+// strict loader and the startup mapping preserve kubeconfig.
+func TestRuntimeBrokerInstances_KubeconfigRoundTrip(t *testing.T) {
+	global := flatTestHome(t)
+	writeFlatTestFile(t, filepath.Join(global, "settings.yaml"), instancesYAML(
+		"- {key: k8s-a, name: a, runtime_target: {type: kubernetes, context: c, namespace: ns, kubeconfig: /etc/scion/a.kubeconfig}}"))
+	strict, err := LoadRuntimeBrokerInstances("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []V1RuntimeBrokerInstanceConfig{{Key: "k8s-a", Name: "a",
+		RuntimeTarget: &V1RuntimeTargetConfig{Type: "kubernetes", Context: "c", Namespace: "ns", Kubeconfig: "/etc/scion/a.kubeconfig"}}}
+	if !reflect.DeepEqual(strict, want) {
+		t.Fatalf("strict: got %+v", strict)
+	}
+	gc, err := LoadGlobalConfig("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := gc.RuntimeBroker.Instances; len(got) != 1 || got[0].RuntimeTarget == nil || got[0].RuntimeTarget.Kubeconfig != "/etc/scion/a.kubeconfig" {
+		t.Fatalf("GlobalConfig instances: %+v", got)
+	}
+	if !reflect.DeepEqual(RuntimeBrokerInstancesToGlobal(strict), gc.RuntimeBroker.Instances) {
+		t.Fatal("startup comparison mapping must equal the GlobalConfig conversion")
+	}
+	if v1 := ConvertGlobalToV1ServerConfig(gc); !reflect.DeepEqual(v1.Broker.Instances, strict) {
+		t.Fatalf("back-conversion differs: %+v", v1.Broker.Instances)
 	}
 }
 
@@ -341,8 +396,8 @@ func TestRuntimeBrokerInstances_UnsupportedTypeRejected(t *testing.T) {
 
 func TestRuntimeBrokerInstances_DockerRejectsKubernetesFields(t *testing.T) {
 	errs := ValidateRuntimeBrokerInstances([]V1RuntimeBrokerInstanceConfig{{Key: "a", Name: "n",
-		RuntimeTarget: &V1RuntimeTargetConfig{Type: "docker", Context: "c", Namespace: "ns"}}})
-	expectValidationPaths(t, errs, "runtime_target.context", "runtime_target.namespace")
+		RuntimeTarget: &V1RuntimeTargetConfig{Type: "docker", Context: "c", Namespace: "ns", Kubeconfig: "/etc/kubeconfig"}}})
+	expectValidationPaths(t, errs, "runtime_target.context", "runtime_target.kubeconfig", "runtime_target.namespace")
 }
 
 // TestRuntimeBrokerInstances_SchemaMatchesValidator: scion config validate
@@ -359,7 +414,12 @@ func TestRuntimeBrokerInstances_SchemaMatchesValidator(t *testing.T) {
 		"bad key":           {instancesYAML("- {key: Bad, name: x, runtime_target: {type: docker}}"), false},
 		"missing name":      {instancesYAML("- {key: a, runtime_target: {type: docker}}"), false},
 		"missing target":    {instancesYAML("- {key: a, name: x}"), false},
-		"kubernetes":        {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, context: c, namespace: n}}"), false},
+		"kubernetes":        {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, context: c, namespace: n}}"), true},
+		"k8s kubeconfig":    {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, kubeconfig: /etc/scion/a.kubeconfig}}"), true},
+		"k8s rel config":    {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, kubeconfig: a.kubeconfig}}"), false},
+		"k8s tilde config":  {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, kubeconfig: ~/.kube/config}}"), false},
+		"k8s config list":   {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, kubeconfig: \"/a:/b\"}}"), false},
+		"docker kubeconfig": {instancesYAML("- {key: a, name: x, runtime_target: {type: docker, kubeconfig: /etc/kc}}"), false},
 		"unsupported type":  {instancesYAML("- {key: a, name: x, runtime_target: {type: podman}}"), false},
 		"docker with ns":    {instancesYAML("- {key: a, name: x, runtime_target: {type: docker, namespace: n}}"), false},
 		"unknown entry key": {instancesYAML("- {key: a, name: x, profile: p, runtime_target: {type: docker}}"), false},

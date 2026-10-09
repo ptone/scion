@@ -1529,12 +1529,15 @@ type V1RuntimeBrokerInstanceConfig struct {
 }
 
 // V1RuntimeTargetConfig declares a flat Runtime Broker's runtime target.
-// Context and Namespace are Kubernetes-only (defined, not implemented).
+// Context, Namespace and Kubeconfig are Kubernetes-only. Kubeconfig is an
+// optional absolute path to this instance's own kubeconfig file; it stays
+// local (never sent to the Hub, never identity).
 type V1RuntimeTargetConfig struct {
 	Type        string `json:"type" yaml:"type" koanf:"type"`
 	DisplayName string `json:"display_name,omitempty" yaml:"display_name,omitempty" koanf:"display_name"`
 	Context     string `json:"context,omitempty" yaml:"context,omitempty" koanf:"context"`
 	Namespace   string `json:"namespace,omitempty" yaml:"namespace,omitempty" koanf:"namespace"`
+	Kubeconfig  string `json:"kubeconfig,omitempty" yaml:"kubeconfig,omitempty" koanf:"kubeconfig"`
 }
 
 // V1DatabaseConfig holds database settings.
