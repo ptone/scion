@@ -36,7 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 )
 
-// P2.3 S5 (ptone/scion#3274): restart and singleton replacement on one
+// Partition validation (ptone/scion#3274): restart and singleton replacement on one
 // daemon, through the production pass-1 preflight and ownership keys.
 
 type partitionDaemon struct {

@@ -15,7 +15,6 @@
 package cmd
 
 import (
-	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -45,25 +44,21 @@ func TestFlatInstanceServerConfig(t *testing.T) {
 
 	for _, tc := range []struct {
 		mode        brokerhost.Mode
-		multi       bool
 		hubEndpoint string
 		act         brokerhost.Activation
 	}{
-		{brokerhost.ModeColocated, false, "http://localhost:8080", brokerhost.Activation{InMemoryCredentials: inMemory}},
-		{brokerhost.ModeColocated, true, "http://localhost:8080", brokerhost.Activation{InMemoryCredentials: inMemory}},
-		{brokerhost.ModeRemote, false, "", brokerhost.Activation{RemoteCredentials: remote}},
-		{brokerhost.ModeRemote, true, "", brokerhost.Activation{RemoteCredentials: remote}},
+		{brokerhost.ModeColocated, "http://localhost:8080", brokerhost.Activation{InMemoryCredentials: inMemory}},
+		{brokerhost.ModeRemote, "", brokerhost.Activation{RemoteCredentials: remote}},
 	} {
-		t.Run(fmt.Sprintf("%s multi=%v", tc.mode, tc.multi), func(t *testing.T) {
+		t.Run(string(tc.mode), func(t *testing.T) {
 			act := tc.act
 			sh := flatServerShared{cfg: &config.GlobalConfig{RuntimeBroker: config.RuntimeBrokerConfig{Host: "127.0.0.1", Port: 9800}},
-				mode: tc.mode, multiInstance: tc.multi, hubEndpoint: tc.hubEndpoint, nfsMounter: runtimebroker.NewHostNFSMounter(nil, nil)}
+				mode: tc.mode, hubEndpoint: tc.hubEndpoint, nfsMounter: runtimebroker.NewHostNFSMounter(nil, nil)}
 			c := flatInstanceServerConfig(sh, brokerhost.InstanceContext{Instance: inst, Identity: id, Activation: &act})
 
 			assert.Equal(t, "rb-a", c.BrokerID)
 			assert.Equal(t, "a", c.BrokerName)
 			assert.Same(t, sh.nfsMounter, c.NFSHostMounter, "every instance uses the host's single NFS mount owner")
-			assert.Empty(t, c.NFSVerifyOnlyReason, "the interim verify-only rule is replaced by the host mounter")
 			if assert.NotNil(t, c.FlatInstance) {
 				assert.Same(t, id, c.FlatInstance.Identity)
 				assert.Equal(t, tc.mode == brokerhost.ModeColocated, c.FlatInstance.HubInProcess)
@@ -85,7 +80,7 @@ func TestFlatInstanceServerConfig(t *testing.T) {
 func TestFlatInstanceServerConfig_SharesOneWorkspaceLockService(t *testing.T) {
 	locks := runtimebroker.NewWorkspaceLocks()
 	caches := &runtimebroker.SharedCaches{}
-	sh := flatServerShared{cfg: &config.GlobalConfig{}, mode: brokerhost.ModeRemote, multiInstance: true, workspaceLocks: locks, sharedCaches: caches}
+	sh := flatServerShared{cfg: &config.GlobalConfig{}, mode: brokerhost.ModeRemote, workspaceLocks: locks, sharedCaches: caches}
 	for _, key := range []string{"docker-a", "docker-b"} {
 		id := &brokeridentity.Identity{InstanceKey: key, RuntimeBrokerID: "rb-" + key}
 		inst := config.V1RuntimeBrokerInstanceConfig{Key: key, Name: key, RuntimeTarget: &config.V1RuntimeTargetConfig{Type: "docker"}}

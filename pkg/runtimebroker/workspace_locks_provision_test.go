@@ -32,7 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// P2.3 S2 (ptone/scion#3274): two Runtime Broker instances of one host
+// ptone/scion#3274: two Runtime Broker instances of one host
 // provisioning worktrees for the same shared project serialize on the
 // host's workspace lock.
 

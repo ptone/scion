@@ -168,7 +168,7 @@ func TestFlatOwnership_MultiInstanceConflictingClaimsBothRefuse(t *testing.T) {
 	}
 
 	sh := flatServerShared{cfg: &config.GlobalConfig{RuntimeBroker: config.RuntimeBrokerConfig{Host: "127.0.0.1", Port: 9800}},
-		mode: brokerhost.ModeRemote, multiInstance: true}
+		mode: brokerhost.ModeRemote}
 	conflicting := map[string]map[string]bool{}
 	act := &recordingFlatActivator{}
 	h, err := brokerhost.New(brokerhost.Config{

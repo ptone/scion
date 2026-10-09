@@ -198,14 +198,8 @@ type ServerConfig struct {
 	// Nil selects ExecMountChecker (mount(8)/umount(8)); tests set a fake.
 	NFSMountChecker MountChecker
 
-	// NFSVerifyOnlyReason, when non-empty, puts the NFS reconciler in
-	// verify-only mode: this server checks the shares but never mounts them.
-	// A host that runs several Runtime Broker instances sets it on each, so
-	// no instance competes to own the host's mounts.
-	NFSVerifyOnlyReason string
-
-	// NFSHostMounter, when set, is the host's single NFS mount owner (P2.3
-	// S3): a host-bind instance registers its requirement with it and uses
+	// NFSHostMounter, when set, is the host's single NFS mount owner: a
+	// host-bind instance registers its requirement with it and uses
 	// its shared reconciler instead of building and running its own; a
 	// Kubernetes or Cloud Run instance keeps its own verify-only check.
 	NFSHostMounter *HostNFSMounter
@@ -217,7 +211,7 @@ type ServerConfig struct {
 	SharedCaches *SharedCaches
 
 	// WorkspaceLocks coordinates operations on shared local paths with
-	// every other Runtime Broker server of the process (P2.3 S2). The flat
+	// every other Runtime Broker server of the process. The flat
 	// host passes one service to all its instances; nil gives this server
 	// its own.
 	WorkspaceLocks *WorkspaceLocks
@@ -580,8 +574,6 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 		if rt != nil && NFSWarnOnlyRuntime(rt.Name()) {
 			srv.nfsMountReconciler.SetVerifyOnly(fmt.Sprintf(
 				"the broker's default runtime is %s, so the broker does not mount it", rt.Name()))
-		} else if cfg.NFSVerifyOnlyReason != "" {
-			srv.nfsMountReconciler.SetVerifyOnly(cfg.NFSVerifyOnlyReason)
 		}
 		srv.nfsStartupReconcileDone = make(chan struct{})
 		srv.nfsReconcileStopped = make(chan struct{})

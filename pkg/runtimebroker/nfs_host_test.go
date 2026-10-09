@@ -29,7 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
-// P2.3 S3 (ptone/scion#3274): one host-owned NFS mounter for every
+// ptone/scion#3274: one host-owned NFS mounter for every
 // instance of a host.
 
 func hostNFSConfig(autoMount bool, shares ...config.V1NFSShare) *config.V1NFSConfig {

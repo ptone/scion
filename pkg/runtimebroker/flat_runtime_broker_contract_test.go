@@ -174,7 +174,7 @@ func newFlatInstanceTestServer(t *testing.T, opts flatInstanceOpts) *flatInstanc
 	return &flatInstanceFixture{srv: srv, mgr: mgr, identity: id, instances: instances, globalDir: globalDir}
 }
 
-// Flat ownership arrangement (P2.3 amendment to the frozen fixtures): the
+// Flat ownership arrangement (an amendment to the frozen fixtures): the
 // real Hub dispatch carries the project ID (projectId) and the immutable
 // agent ID (create body id; start/restart resolved env SCION_AGENT_ID).
 const (

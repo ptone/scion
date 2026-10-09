@@ -1830,7 +1830,7 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 	}
 
 	// The download and the records written with it run under the
-	// process-wide workspace lock on the directory (P2.3 S2): two Runtime
+	// process-wide workspace lock on the directory: two Runtime
 	// Broker instances never materialize one project concurrently, and a
 	// project removal never runs meanwhile.
 	unlockWorkspace, lockErr := s.locks().Lock(ctx, workspaceDir)
@@ -2441,7 +2441,7 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	// ownership record's slug) holds the process-wide workspace lock on
 	// them from the file-ownership checks below through the last cleanup,
 	// so another Runtime Broker instance (or another request) never
-	// provisions or removes the same paths meanwhile (P2.3 S2).
+	// provisions or removes the same paths meanwhile.
 	if projectPath != "" && (deleteFiles || softDelete || localOnly) {
 		unlock, lockErr := s.lockAgentFiles(ctx, projectPath, target.name)
 		if lockErr != nil {
@@ -6353,7 +6353,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 	// The removal holds the process-wide workspace lock on the project from
 	// the checks below through the last removal, so no Runtime Broker
 	// instance of this host provisions in or removes from the project
-	// meanwhile (P2.3 S2).
+	// meanwhile.
 	unlock, err := s.locks().Lock(r.Context(), projectPath)
 	if err != nil {
 		s.writeRuntimeOpError(w, r.Context(), opRemoveProjectDir, err, "project_slug", slug, "path", projectPath)

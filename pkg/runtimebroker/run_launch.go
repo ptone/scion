@@ -490,7 +490,7 @@ func (s *Server) cleanupAbortedLaunch(mgr agent.Manager, rec *launchRecord, lc l
 		return
 	}
 	// The ownership checks and the removal run under the process-wide
-	// workspace lock on the agent's files (P2.3 S2).
+	// workspace lock on the agent's files.
 	lockCtx, cancelLock := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancelLock()
 	unlock, err := s.lockAgentFiles(lockCtx, lc.opts.ProjectPath, lc.opts.Name)

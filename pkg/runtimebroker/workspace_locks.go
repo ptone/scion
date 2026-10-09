@@ -57,7 +57,7 @@ import (
 // through its cleanup (the release function is called last).
 //
 // Locks coordinate operations; they do not establish ownership. Who may
-// act on an agent or a path is decided by the ownership records (S1).
+// act on an agent or a path is decided by the ownership records.
 type WorkspaceLocks struct {
 	mu      sync.Mutex
 	held    map[string]int // canonical key -> holders (always 1 while held)

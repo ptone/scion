@@ -27,7 +27,7 @@ import (
 )
 
 // HostNFSMounter is the single NFS mount owner of a host that runs several
-// Runtime Broker instances (ptone/scion#3274, P2.3 S3). It replaces each
+// Runtime Broker instances (ptone/scion#3274). It replaces each
 // instance mounting the host's shares itself:
 //
 //   - One reconciler and one loop: the instances that bind host paths into

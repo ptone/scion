@@ -32,7 +32,7 @@ import (
 )
 
 // Durable ownership records of a flat Runtime Broker instance
-// (ptone/scion#3274, P2.3 note section 2a). Each instance keeps them in its
+// (ptone/scion#3274). Each instance keeps them in its
 // own broker state root, never in an agent home. They are the authority for
 // which agents (including file-only agents with no runtime object) the
 // instance may operate on; the reserved runtime label
@@ -839,7 +839,7 @@ func (s *OwnershipStore) HasLiveAgents(projectID string) (bool, error) {
 // established. Records of conflicting keys never count. An unreadable
 // record is an error. It reads every record on each call (one call per
 // cleanup handle), which is fine at today's per-instance scale; an index
-// by UID is the change to make if cleanup volume grows (S5 load note).
+// by UID is the change to make if cleanup volume grows.
 func (s *OwnershipStore) RecordsResource(uid string) (bool, error) {
 	if uid == "" {
 		return false, nil

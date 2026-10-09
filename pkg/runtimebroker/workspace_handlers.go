@@ -252,7 +252,7 @@ func (s *Server) handleWorkspaceApply(w http.ResponseWriter, r *http.Request) {
 
 	// The apply writes into the workspace (for a shared-workspace agent,
 	// the project's shared checkout) under the process-wide workspace lock
-	// on that path (P2.3 S2), through the permission changes below.
+	// on that path, through the permission changes below.
 	unlockWorkspace, err := s.locks().Lock(ctx, workspacePath)
 	if err != nil {
 		s.writeRuntimeOpError(w, ctx, opDownloadWorkspace, err, "agent_slug", req.Slug)
