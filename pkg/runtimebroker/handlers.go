@@ -909,14 +909,13 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		}
 		// Record the hub project ID for a broker copy of a hub workspace
 		// before any project settings are read, under the process-wide
-		// workspace lock on the project (P2.3 S2).
-		unlockProject, lockErr := s.locks().Lock(ctx, req.ProjectPath)
-		if lockErr != nil {
+		// workspace lock on the project.
+		if lockErr := s.withWorkspaceLock(ctx, func() {
+			s.alignHubManagedProjectIdentity(ctx, req.ID, req.ProjectPath, req.ProjectSlug, req.ProjectID)
+		}, req.ProjectPath); lockErr != nil {
 			s.writeRuntimeOpError(w, ctx, "create agent", lockErr, "agent_id", req.ID, "project_id", req.ProjectID)
 			return
 		}
-		s.alignHubManagedProjectIdentity(ctx, req.ID, req.ProjectPath, req.ProjectSlug, req.ProjectID)
-		unlockProject()
 	}
 
 	// Shared-workspace dispatch verifies the project identity before loading
@@ -1626,37 +1625,34 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// not the hub's agent record.
 		// The files must also still be this run's (ptone/scion#2675): a
 		// newer run recorded in agent-info.json owns them otherwise.
-		var unlockFiles func()
 		if opts.ProjectPath != "" {
 			// The ownership checks and the removal run under the
-			// process-wide workspace lock on the agent's files (P2.3 S2).
-			lockCtx, cancelLock := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
-			if unlock, lockErr := s.lockAgentFiles(lockCtx, opts.ProjectPath, opts.Name); lockErr == nil {
-				unlockFiles = unlock
-			}
-			cancelLock()
-		}
-		if opts.ProjectPath != "" && unlockFiles == nil {
-			s.agentLifecycleLog.Warn("Skipped agent file cleanup after start failure: the agent's workspace lock is unavailable",
-				"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name)
-		} else if opts.ProjectPath != "" && !ss.ownsName() {
-			s.agentLifecycleLog.Info("Skipped agent file cleanup after start failure: the agent name is now owned by a newer start",
-				"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name)
-		} else if opts.ProjectPath != "" {
-			if owner := agentFilesRunOwner(opts.Name, opts.ProjectPath, opts.RunID); owner != "" {
-				s.agentLifecycleLog.Info("Skipped agent file cleanup after start failure: the agent's files belong to another run",
-					"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name,
-					"run_id", opts.RunID, "files_run_id", owner)
-			} else if _, cleanupErr := agent.DeleteAgentFiles(opts.Name, opts.ProjectPath, true); cleanupErr != nil {
-				s.agentLifecycleLog.Warn("Failed to clean up agent files after start failure",
-					"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name, "error", cleanupErr)
-			} else {
-				s.agentLifecycleLog.Info("Cleaned up provisioned agent files after start failure",
-					"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name)
-			}
-		}
-		if unlockFiles != nil {
-			unlockFiles()
+			// process-wide workspace lock on the agent's files.
+			func() {
+				lockCtx, cancelLock := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
+				unlockFiles, lockErr := s.lockAgentFiles(lockCtx, opts.ProjectPath, opts.Name)
+				cancelLock()
+				if lockErr != nil {
+					s.agentLifecycleLog.Warn("Skipped agent file cleanup after start failure: the agent's workspace lock is unavailable",
+						"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name)
+					return
+				}
+				defer unlockFiles()
+				if !ss.ownsName() {
+					s.agentLifecycleLog.Info("Skipped agent file cleanup after start failure: the agent name is now owned by a newer start",
+						"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name)
+				} else if owner := agentFilesRunOwner(opts.Name, opts.ProjectPath, opts.RunID); owner != "" {
+					s.agentLifecycleLog.Info("Skipped agent file cleanup after start failure: the agent's files belong to another run",
+						"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name,
+						"run_id", opts.RunID, "files_run_id", owner)
+				} else if _, cleanupErr := agent.DeleteAgentFiles(opts.Name, opts.ProjectPath, true); cleanupErr != nil {
+					s.agentLifecycleLog.Warn("Failed to clean up agent files after start failure",
+						"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name, "error", cleanupErr)
+				} else {
+					s.agentLifecycleLog.Info("Cleaned up provisioned agent files after start failure",
+						"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name)
+				}
+			}()
 		}
 		span.SetStatus(codes.Error, err.Error())
 		switch {
@@ -1834,7 +1830,7 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 	}
 
 	// The download and the records written with it run under the
-	// process-wide workspace lock on the directory (P2.3 S2): two Runtime
+	// process-wide workspace lock on the directory: two Runtime
 	// Broker instances never materialize one project concurrently, and a
 	// project removal never runs meanwhile.
 	unlockWorkspace, lockErr := s.locks().Lock(ctx, workspaceDir)
@@ -2445,7 +2441,7 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	// ownership record's slug) holds the process-wide workspace lock on
 	// them from the file-ownership checks below through the last cleanup,
 	// so another Runtime Broker instance (or another request) never
-	// provisions or removes the same paths meanwhile (P2.3 S2).
+	// provisions or removes the same paths meanwhile.
 	if projectPath != "" && (deleteFiles || softDelete || localOnly) {
 		unlock, lockErr := s.lockAgentFiles(ctx, projectPath, target.name)
 		if lockErr != nil {
@@ -6357,7 +6353,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 	// The removal holds the process-wide workspace lock on the project from
 	// the checks below through the last removal, so no Runtime Broker
 	// instance of this host provisions in or removes from the project
-	// meanwhile (P2.3 S2).
+	// meanwhile.
 	unlock, err := s.locks().Lock(r.Context(), projectPath)
 	if err != nil {
 		s.writeRuntimeOpError(w, r.Context(), opRemoveProjectDir, err, "project_slug", slug, "path", projectPath)

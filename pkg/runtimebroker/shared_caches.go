@@ -20,91 +20,147 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"time"
+	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 )
 
-// SharedCaches are a host's broker caches, opened once and shared by every
-// Runtime Broker instance of the host, whatever its runtime scope
-// (ptone/scion#3274, P2.3 S4). Two cache objects on one directory would
-// keep separate indexes and evict each other's files; one object per
-// directory serializes every index and file change under that object's
-// own lock. The choice per cache:
-//
-//   - templates and harness-configs (templatecache): one shared object per
-//     directory. A resolved path is read after the resolver returns (a
-//     start copies the template later), so the shared objects keep every
-//     entry used within SharedCacheMinEvictAge from eviction (the cache
-//     exceeds its size rather than remove an entry in use), and Acquire
-//     pins an entry for a caller that releases it.
-//   - skills (templatecache): one shared object, same eviction rule; the
-//     skill install additionally verifies the copied content's hash and
-//     re-downloads on a mismatch.
-//   - GitHub resolution (agent.GitHubResolutionCache, metadata only): one
-//     shared object; its own locks serialize reads, refreshes and the
-//     delayed write of its file. The host closes it once, after every
-//     instance has shut down (it is a brokerhost.Service).
-type SharedCaches struct {
-	Templates      *templatecache.Cache
-	HarnessConfigs *templatecache.Cache
-	Skills         *templatecache.Cache
-	GitHub         *agent.GitHubResolutionCache // nil when it cannot be opened (resolution runs uncached)
-}
-
-// SharedCacheMinEvictAge is how long a shared cache entry stays in use
-// after its last Get or Put (see templatecache.Cache.SetMinEvictAge).
-const SharedCacheMinEvictAge = 30 * time.Minute
-
-// skillCacheMaxSize is the skill cache's size bound (as a single Runtime
-// Broker uses).
+// skillCacheMaxSize is the skill cache's size bound.
 const skillCacheMaxSize = int64(500 * 1024 * 1024)
 
-// NewSharedCaches opens the host's caches in the directories a single
-// Runtime Broker uses: templateDir (default ~/.scion/cache/templates) and its
-// siblings harness-configs and skills, and the GitHub resolution cache.
-func NewSharedCaches(templateDir string, maxSize int64) (*SharedCaches, error) {
-	if templateDir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get home directory: %w", err)
-		}
-		templateDir = filepath.Join(home, ".scion", "cache", "templates")
+// fileCaches are a Runtime Broker's content-addressed file caches.
+type fileCaches struct {
+	templates, harnessConfigs, skills *templatecache.Cache
+}
+
+// defaultTemplateCacheDir is the template cache directory a Runtime Broker
+// uses when none is configured: ~/.scion/cache/templates.
+func defaultTemplateCacheDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get home directory: %w", err)
 	}
+	return filepath.Join(home, ".scion", "cache", "templates"), nil
+}
+
+// openFileCaches opens the template cache in templateDir and the
+// harness-config and skill caches in its sibling directories harness-configs
+// and skills. A maxSize of zero or less means templatecache.DefaultMaxSize.
+func openFileCaches(templateDir string, maxSize int64) (fileCaches, error) {
 	if maxSize <= 0 {
 		maxSize = templatecache.DefaultMaxSize
 	}
-	open := func(dir string, size int64) (*templatecache.Cache, error) {
-		c, err := templatecache.New(dir, size)
-		if err != nil {
-			return nil, err
-		}
-		c.SetMinEvictAge(SharedCacheMinEvictAge)
-		return c, nil
-	}
-	var sc SharedCaches
+	var fc fileCaches
 	var err error
-	if sc.Templates, err = open(templateDir, maxSize); err != nil {
-		return nil, fmt.Errorf("failed to initialize template cache: %w", err)
+	if fc.templates, err = templatecache.New(templateDir, maxSize); err != nil {
+		return fileCaches{}, fmt.Errorf("failed to initialize template cache: %w", err)
 	}
-	if sc.HarnessConfigs, err = open(filepath.Join(filepath.Dir(templateDir), "harness-configs"), maxSize); err != nil {
-		return nil, fmt.Errorf("failed to initialize harness-config cache: %w", err)
+	if fc.harnessConfigs, err = templatecache.New(filepath.Join(filepath.Dir(templateDir), "harness-configs"), maxSize); err != nil {
+		return fileCaches{}, fmt.Errorf("failed to initialize harness-config cache: %w", err)
 	}
-	if sc.Skills, err = open(filepath.Join(filepath.Dir(templateDir), "skills"), skillCacheMaxSize); err != nil {
-		return nil, fmt.Errorf("failed to initialize skill cache: %w", err)
+	if fc.skills, err = templatecache.New(filepath.Join(filepath.Dir(templateDir), "skills"), skillCacheMaxSize); err != nil {
+		return fileCaches{}, fmt.Errorf("failed to initialize skill cache: %w", err)
 	}
-	if dir, err := agent.GitHubResolutionCacheDir(); err != nil {
-		slog.Warn("github resolution cache: cannot determine cache dir", "error", err)
-	} else if gh, err := agent.NewGitHubResolutionCache(dir, agent.DefaultResolutionCacheTTL); err != nil {
-		slog.Warn("github resolution cache: init failed (running uncached)", "error", err)
-	} else {
-		sc.GitHub = gh
-	}
-	return &sc, nil
+	return fc, nil
 }
 
-// Start implements brokerhost.Service (the caches are already open).
+// openGitHubResolutionCache opens the GitHub resolution cache, or returns
+// nil (resolution then runs uncached) when it cannot be opened.
+func openGitHubResolutionCache() *agent.GitHubResolutionCache {
+	dir, err := agent.GitHubResolutionCacheDir()
+	if err != nil {
+		slog.Warn("github resolution cache: cannot determine cache dir", "error", err)
+		return nil
+	}
+	gh, err := agent.NewGitHubResolutionCache(dir, agent.DefaultResolutionCacheTTL)
+	if err != nil {
+		slog.Warn("github resolution cache: init failed (running uncached)", "error", err)
+		return nil
+	}
+	slog.Info("GitHub resolution cache initialized", "dir", dir, "ttl", agent.DefaultResolutionCacheTTL)
+	return gh
+}
+
+// SharedCaches are a flat host's broker caches (ptone/scion#3274). Two
+// cache objects on one directory would keep separate indexes and evict
+// each other's files, so every directory has exactly one object. The choice
+// per cache:
+//
+//   - templates, harness-configs and skills (templatecache): partitioned
+//     per instance. Each instance has its own object on its own
+//     directories, <cache root>/instances/<broker ID>/{templates,
+//     harness-configs,skills}. A path these caches return is read after
+//     the call returns (a start copies a template later), so a shared
+//     object would let another instance's insert evict a path a start is
+//     about to read. Partitioned, eviction in an object only races the
+//     same instance's own starts, as for a single Runtime Broker. The cost
+//     is that instances do not share downloads and each partition has the
+//     full size bound.
+//   - GitHub resolution (agent.GitHubResolutionCache, metadata only): one
+//     object shared by every instance; its own locks serialize reads,
+//     refreshes and the delayed write of its file. The host closes it once,
+//     after every instance has shut down (SharedCaches is a
+//     brokerhost.Service).
+type SharedCaches struct {
+	root    string // the cache root: the parent of a single broker's template directory
+	maxSize int64
+	GitHub  *agent.GitHubResolutionCache // nil when it cannot be opened (resolution runs uncached)
+
+	mu        sync.Mutex
+	instances map[string]fileCaches // by broker ID
+}
+
+// NewSharedCaches prepares a flat host's caches. templateDir is the
+// template directory a single Runtime Broker would use (default
+// ~/.scion/cache/templates); the per-instance partitions go under its
+// parent. It opens the shared GitHub resolution cache.
+func NewSharedCaches(templateDir string, maxSize int64) (*SharedCaches, error) {
+	if templateDir == "" {
+		var err error
+		if templateDir, err = defaultTemplateCacheDir(); err != nil {
+			return nil, err
+		}
+	}
+	return &SharedCaches{
+		root:      filepath.Dir(templateDir),
+		maxSize:   maxSize,
+		GitHub:    openGitHubResolutionCache(),
+		instances: map[string]fileCaches{},
+	}, nil
+}
+
+// instanceTemplateDir is the template directory of the instance's
+// partition.
+func (c *SharedCaches) instanceTemplateDir(brokerID string) (string, error) {
+	if brokerID == "" || brokerID == "." || brokerID == ".." || filepath.Base(brokerID) != brokerID {
+		return "", fmt.Errorf("broker ID %q is not a single path element", brokerID)
+	}
+	return filepath.Join(c.root, "instances", brokerID, "templates"), nil
+}
+
+// forInstance returns the file caches of the instance's partition, opening
+// them on first use. Every call for one broker ID returns the same objects.
+func (c *SharedCaches) forInstance(brokerID string) (fileCaches, error) {
+	dir, err := c.instanceTemplateDir(brokerID)
+	if err != nil {
+		return fileCaches{}, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if fc, ok := c.instances[brokerID]; ok {
+		return fc, nil
+	}
+	fc, err := openFileCaches(dir, c.maxSize)
+	if err != nil {
+		return fileCaches{}, err
+	}
+	c.instances[brokerID] = fc
+	slog.Info("Broker caches initialized", "cache", dir, "broker_id", brokerID)
+	return fc, nil
+}
+
+// Start implements brokerhost.Service (the shared cache is already open).
 func (c *SharedCaches) Start(context.Context) error { return nil }
 
 // Stop closes the GitHub resolution cache once, after every instance has

@@ -34,7 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
-// P2.3 S5 partition validation (ptone/scion#3274): two flat Runtime Broker
+// Partition validation (ptone/scion#3274): two flat Runtime Broker
 // instances whose real, owner-filtered agent managers share one container
 // daemon never report or act on each other's agents, nor on unlabeled
 // historical objects.

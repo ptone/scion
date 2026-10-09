@@ -50,8 +50,8 @@ type FlatInstanceConfig struct {
 	RemoteCredentials []brokercredentials.BrokerCredentials
 	// ConflictingOwnershipKeys are ownership keys (OwnershipAgentKey,
 	// OwnershipSlugKey) another configured instance of the host also
-	// claims. The instance refuses every operation on them (P2.3
-	// conflicting ownership); its other agents are unaffected.
+	// claims. The instance refuses every operation on them; its other
+	// agents are unaffected.
 	ConflictingOwnershipKeys map[string]bool
 }
 

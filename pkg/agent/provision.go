@@ -1389,7 +1389,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		// Case 2: Git Repository (and no explicit workspace)
 		// A flat Runtime Broker instance serializes the repository's
 		// worktree and sharer changes with every instance of its host (the
-		// host's workspace lock, P2.3 S2), through the rest of provisioning.
+		// host's workspace lock), through the rest of provisioning.
 		if repoRoot, rootErr := util.RepoRootDir(projectDir); rootErr == nil && repoRoot != "" {
 			unlockRepo, lockErr := lockWorkspace(ctx, repoRoot)
 			if lockErr != nil {

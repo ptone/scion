@@ -155,6 +155,120 @@ func TestWorkspaceLocks_ContextEndsWaitHoldingNothing(t *testing.T) {
 	release()
 }
 
+// waitQueued waits until n requests are waiting on l.
+func waitQueued(t *testing.T, l *WorkspaceLocks, n int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		l.mu.Lock()
+		got := len(l.waiters)
+		l.mu.Unlock()
+		if got >= n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d requests waiting, want %d", got, n)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestWorkspaceLocks_BroadWaiterIsNotPassedByNarrowerOnes: while a narrow
+// path inside a project is held and a project-wide request waits, a new
+// request for another narrow path inside the project waits behind the
+// project-wide one instead of passing it; it runs after the project-wide
+// holder releases.
+func TestWorkspaceLocks_BroadWaiterIsNotPassedByNarrowerOnes(t *testing.T) {
+	l := NewWorkspaceLocks()
+	project := filepath.Join(t.TempDir(), "project")
+	a, b := filepath.Join(project, "a"), filepath.Join(project, "b")
+	releaseA, err := l.Lock(context.Background(), a)
+	require.NoError(t, err)
+
+	broadHeld := make(chan func(), 1)
+	go func() {
+		r, err := l.Lock(context.Background(), project)
+		if err == nil {
+			broadHeld <- r
+		}
+	}()
+	waitQueued(t, l, 1)
+
+	if r, ok := lockedWithin(l, 30*time.Millisecond, b); ok {
+		r()
+		t.Fatal("a narrower request passed the waiting project-wide request")
+	}
+	releaseA()
+	var releaseBroad func()
+	select {
+	case releaseBroad = <-broadHeld:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the project-wide request did not get the lock")
+	}
+	if r, ok := lockedWithin(l, 30*time.Millisecond, b); ok {
+		r()
+		t.Fatal("a narrower request ran while the project-wide one holds the lock")
+	}
+	releaseBroad()
+	r, ok := lockedWithin(l, time.Second, b)
+	require.True(t, ok)
+	r()
+}
+
+// TestWorkspaceLocks_CancelledWaiterLeavesTheQueue: a waiting request whose
+// context ends leaves the queue, and a request queued behind it that no
+// held key blocks then proceeds.
+func TestWorkspaceLocks_CancelledWaiterLeavesTheQueue(t *testing.T) {
+	l := NewWorkspaceLocks()
+	project := filepath.Join(t.TempDir(), "project")
+	a, b := filepath.Join(project, "a"), filepath.Join(project, "b")
+	releaseA, err := l.Lock(context.Background(), a)
+	require.NoError(t, err)
+	defer releaseA()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	broadDone := make(chan error, 1)
+	go func() {
+		_, err := l.Lock(ctx, project)
+		broadDone <- err
+	}()
+	waitQueued(t, l, 1)
+	narrowHeld := make(chan func(), 1)
+	go func() {
+		r, err := l.Lock(context.Background(), b)
+		if err == nil {
+			narrowHeld <- r
+		}
+	}()
+	waitQueued(t, l, 2)
+	cancel()
+	require.ErrorIs(t, <-broadDone, context.Canceled)
+	select {
+	case r := <-narrowHeld:
+		r()
+	case <-time.After(5 * time.Second):
+		t.Fatal("the request behind a cancelled waiter never got the lock")
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	assert.Empty(t, l.waiters)
+}
+
+// TestWorkspaceLocks_WithWorkspaceLockReleasesOnPanic: a panic while the
+// lock is held releases it, so the path is not locked for the life of the
+// process.
+func TestWorkspaceLocks_WithWorkspaceLockReleasesOnPanic(t *testing.T) {
+	s := &Server{}
+	project := filepath.Join(t.TempDir(), "project")
+	func() {
+		defer func() { _ = recover() }()
+		_ = s.withWorkspaceLock(context.Background(), func() { panic("boom") }, project)
+	}()
+	r, ok := lockedWithin(s.locks(), time.Second, project)
+	require.True(t, ok, "the lock is still held after the panic")
+	r()
+}
+
 // TestWorkspaceLocks_MultiPathNoDeadlockAndMutualExclusion: operations
 // taking overlapping path sets in opposite orders never deadlock, and no two
 // holders of overlapping paths run at once.

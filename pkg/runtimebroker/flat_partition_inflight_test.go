@@ -25,7 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// P2.3 S5 (ptone/scion#3274): starts in flight, async launches and their
+// Partition validation (ptone/scion#3274): starts in flight, async launches and their
 // recovery stay per instance on a shared daemon.
 
 // TestFlatPartition_StartsInFlightAndLaunchesStayPerInstance: instance B

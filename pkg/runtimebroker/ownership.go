@@ -32,7 +32,7 @@ import (
 )
 
 // Durable ownership records of a flat Runtime Broker instance
-// (ptone/scion#3274, P2.3 note section 2a). Each instance keeps them in its
+// (ptone/scion#3274). Each instance keeps them in its
 // own broker state root, never in an agent home. They are the authority for
 // which agents (including file-only agents with no runtime object) the
 // instance may operate on; the reserved runtime label
@@ -318,6 +318,23 @@ func (s *OwnershipStore) SlugHolder(projectID, slug string) (string, error) {
 	return s.slugHolder(projectID, slug)
 }
 
+// SlugReservation reports the agent holding slug in the project and
+// whether that agent's record is no longer live (its delete has not yet
+// confirmed that all its objects are gone). A slug index entry whose record
+// is missing counts as held and live. An unreadable or conflicting entry
+// is an error.
+func (s *OwnershipStore) SlugReservation(projectID, slug string) (holder string, pending bool, err error) {
+	holder, err = s.SlugHolder(projectID, slug)
+	if err != nil || holder == "" {
+		return holder, false, err
+	}
+	rec, found, err := s.readFile(projectID, holder)
+	if err != nil {
+		return "", false, err
+	}
+	return holder, found && rec.State != OwnershipStateActive, nil
+}
+
 func (s *OwnershipStore) slugHolder(projectID, slug string) (string, error) {
 	p, err := s.slugPath(projectID, slug)
 	if err != nil {
@@ -519,11 +536,19 @@ func (s *OwnershipStore) MarkAbsent(projectID, agentID, uid string) error {
 }
 
 // ReleaseSlug releases a deleted agent's slug reservation once every
-// recorded object is confirmed absent. Its caller (finishOwnedDelete, from
-// deleteAgentFenced) holds the process-wide workspace lock on the agent's
-// files (lockAgentFiles, P2.3 S2) for the whole delete, so no provisioning
-// or other removal of those paths runs before the slug is free. The record
-// stays as a tombstone. Anything else is refused.
+// recorded object is confirmed absent. The record stays as a tombstone.
+// Anything else is refused.
+//
+// Callers and the workspace lock:
+//   - finishOwnedDelete from deleteAgentFenced holds the process-wide
+//     workspace lock on the agent's files (lockAgentFiles) for the whole
+//     delete, so no provisioning or other removal of those paths runs
+//     before the slug is free.
+//   - finishOwnedDelete from finishPendingOwnedDelete runs without that
+//     lock. Its caller found neither a runtime entry nor files for the
+//     agent, and while the record is deleting no new run can take the slug.
+//   - ReconcileAbsent runs without that lock, from the instance's ownership
+//     preflight, before the instance serves any request.
 func (s *OwnershipStore) ReleaseSlug(projectID, agentID string) error {
 	l := s.keyLock(projectID, agentID)
 	l.Lock()
@@ -814,7 +839,7 @@ func (s *OwnershipStore) HasLiveAgents(projectID string) (bool, error) {
 // established. Records of conflicting keys never count. An unreadable
 // record is an error. It reads every record on each call (one call per
 // cleanup handle), which is fine at today's per-instance scale; an index
-// by UID is the change to make if cleanup volume grows (S5 load note).
+// by UID is the change to make if cleanup volume grows.
 func (s *OwnershipStore) RecordsResource(uid string) (bool, error) {
 	if uid == "" {
 		return false, nil
@@ -877,8 +902,9 @@ func (s *Server) fileAgentOwned(projectID, slug string) bool {
 // A create may start a new record; any other operation (start, restart of
 // an existing agent) requires the agent's existing live record, so an agent
 // whose ownership is not established is never adopted by starting it. A
-// missing project or agent ID, a slug held by another agent, or a write
-// failure refuses the operation before any side effect.
+// missing project or agent ID, a slug held by another agent (of this
+// instance or of another instance of the host), or a write failure refuses
+// the operation before any side effect.
 func (s *Server) beginOwnedRun(projectID, agentID, slug, runID string, create bool) error {
 	if s.ownership == nil {
 		return nil
@@ -895,7 +921,11 @@ func (s *Server) beginOwnedRun(projectID, agentID, slug, runID string, create bo
 			return fmt.Errorf("%w: agent %s in project %s has no live ownership record of this Runtime Broker instance", ErrOwnershipNotRecorded, agentID, projectID)
 		}
 	}
-	return s.ownership.BeginRun(projectID, agentID, slug, runID)
+	// The slug must also be free on every other instance sharing this
+	// host's project directories.
+	return s.locks().reserveSlug(s, projectID, slug, func() error {
+		return s.ownership.BeginRun(projectID, agentID, slug, runID)
+	})
 }
 
 // ownedStart is one flat start's ownership journal mirror: it records every

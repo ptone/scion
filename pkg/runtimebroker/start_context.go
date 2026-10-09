@@ -243,8 +243,16 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		if err := s.beginOwnedRun(in.ProjectID, agentID, slug, in.RunID, in.Operation == opCreate); err != nil {
 			span.SetStatus(codes.Error, err.Error())
 			msg := "The agent's ownership cannot be recorded by this Runtime Broker instance"
-			if errors.Is(err, ErrOwnershipSlugPending) {
-				msg = fmt.Sprintf("Agent slug %q is still reserved on Runtime Broker instance %s: the cleanup of an earlier delete of this slug is not yet confirmed", slug, s.ownership.RuntimeBrokerID())
+			instance := s.ownership.RuntimeBrokerID()
+			var elsewhere *slugReservedElsewhereError
+			if errors.As(err, &elsewhere) {
+				instance = elsewhere.instance
+			}
+			switch {
+			case errors.Is(err, ErrOwnershipSlugPending):
+				msg = fmt.Sprintf("Agent slug %q is still reserved on Runtime Broker instance %s: the cleanup of an earlier delete of this slug is not yet confirmed", slug, instance)
+			case elsewhere != nil:
+				msg = fmt.Sprintf("Agent slug %q is reserved in this project by Runtime Broker instance %s of the same host", slug, instance)
 			}
 			return nil, &startContextError{Status: http.StatusConflict, Message: msg, OriginalErr: err}
 		}
@@ -307,125 +315,12 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// block (see ProjectPathFromContainer).
 	if in.ProjectPath != "" && !in.ProjectPathFromContainer && (in.ProjectSlug != "" || in.ProjectID != "") {
 		// The project's identity files and directories are written under
-		// the process-wide workspace lock on the project (P2.3 S2), so two
-		// Runtime Broker instances never write them concurrently. It is
-		// released at the end of this block, before worktree provisioning
-		// takes it again.
-		unlockProjectMeta, err := s.locks().Lock(ctx, in.ProjectPath)
-		if err != nil {
+		// the process-wide workspace lock on the project, so two Runtime
+		// Broker instances never write them concurrently. It is released
+		// before worktree provisioning takes it again.
+		if err := s.withWorkspaceLock(ctx, func() { s.recordHubProjectFiles(ctx, in) }, in.ProjectPath); err != nil {
 			return nil, fmt.Errorf("project workspace lock: %w", err)
 		}
-		// A broker copy of a hub workspace (~/.scion/projects/<slug>)
-		// records the hub project ID as its identity; see
-		// recordHubProjectIdentity. Done before the checks below, which
-		// then find it matching.
-		s.alignHubManagedProjectIdentity(ctx, in.AgentID, in.ProjectPath, in.ProjectSlug, in.ProjectID)
-
-		scionPath := filepath.Join(in.ProjectPath, config.DotScion)
-
-		if config.IsProjectMarkerFile(scionPath) {
-			// .scion is a marker file — project-id is already recorded.
-			if marker, err := config.ReadProjectMarker(scionPath); err == nil && marker.ProjectID != "" {
-				// Detect stale marker: hub's project ID differs and the old
-				// external config dir was cleaned up (project was deleted and
-				// recreated with the same name — miller79/scion#28).
-				// The global marker is only rewritten for the global project
-				// itself (see globalDirProjectConflict above).
-				if in.ProjectID != "" && marker.ProjectID != in.ProjectID && canRewriteProjectMarker(in.ProjectPath, in.ProjectID, in.HubGlobalProject) {
-					extPath, _ := marker.ExternalProjectPath()
-					if isStaleExternalDir(extPath) {
-						slug := marker.ProjectSlug
-						if in.ProjectSlug != "" {
-							slug = in.ProjectSlug
-						}
-						updated := &config.ProjectMarker{
-							ProjectID:   in.ProjectID,
-							ProjectName: slug,
-							ProjectSlug: slug,
-						}
-						if wErr := config.WriteProjectMarker(scionPath, updated); wErr != nil {
-							s.agentLifecycleLog.Warn("Failed to update stale .scion marker",
-								"agent_id", in.AgentID, "old_id", marker.ProjectID, "new_id", in.ProjectID, "error", wErr)
-						} else {
-							s.agentLifecycleLog.Info("Updated stale .scion marker with current project ID",
-								"agent_id", in.AgentID, "old_id", marker.ProjectID, "new_id", in.ProjectID, "path", scionPath)
-							marker = updated
-						}
-					}
-				}
-				// Ensure external split storage directories exist.
-				if extPath, err := marker.ExternalProjectPath(); err == nil && extPath != "" {
-					_ = os.MkdirAll(extPath, 0755)
-					_ = os.MkdirAll(filepath.Join(extPath, "agents"), 0755)
-				}
-				if s.config.Debug {
-					s.agentLifecycleLog.Debug("Hub-managed project has marker with split storage",
-						"agent_id", in.AgentID, "slug", in.ProjectSlug, "project_id", marker.ProjectID, "path", scionPath)
-				}
-			}
-		} else if info, statErr := os.Stat(scionPath); statErr == nil && info.IsDir() {
-			// .scion is a directory (git project) — use file-based project-id
-			if in.ProjectID != "" {
-				existingID, readErr := config.ReadProjectID(scionPath)
-				shouldWrite := readErr != nil || existingID == ""
-				if !shouldWrite && existingID != in.ProjectID {
-					// Existing ID differs from hub's — overwrite only if the old
-					// external config dir was cleaned up (project deleted and
-					// recreated — miller79/scion#28). When the dir still exists
-					// this is a first-link scenario; preserve the local ID.
-					extDir, extErr := config.GetGitProjectExternalConfigDir(scionPath)
-					shouldWrite = extErr != nil || extDir == "" || isStaleExternalDir(extDir)
-				}
-				if shouldWrite {
-					oldID := existingID
-					if wErr := config.WriteProjectID(scionPath, in.ProjectID); wErr != nil {
-						s.agentLifecycleLog.Warn("Failed to write project-id for hub-managed project",
-							"agent_id", in.AgentID, "project_id", in.ProjectID, "error", wErr)
-					} else {
-						if oldID != "" && oldID != in.ProjectID {
-							s.agentLifecycleLog.Info("Updated stale project-id with current project ID",
-								"agent_id", in.AgentID, "old_id", oldID, "new_id", in.ProjectID, "path", scionPath)
-						}
-						if extAgents, err := config.GetGitProjectExternalAgentsDir(scionPath); err == nil && extAgents != "" {
-							_ = os.MkdirAll(extAgents, 0755)
-						}
-						if extConfig, err := config.GetGitProjectExternalConfigDir(scionPath); err == nil && extConfig != "" {
-							_ = os.MkdirAll(extConfig, 0755)
-						}
-						if s.config.Debug {
-							s.agentLifecycleLog.Debug("Initialized git project with split storage",
-								"agent_id", in.AgentID, "slug", in.ProjectSlug, "project_id", in.ProjectID, "path", scionPath)
-						}
-					}
-				}
-			}
-		} else if in.ProjectID != "" {
-			// .scion doesn't exist — create project dir and write a marker file
-			if err := os.MkdirAll(in.ProjectPath, 0755); err != nil {
-				s.agentLifecycleLog.Warn("Failed to create project dir for hub-managed project",
-					"agent_id", in.AgentID, "slug", in.ProjectSlug, "path", in.ProjectPath, "error", err)
-			} else {
-				marker := &config.ProjectMarker{
-					ProjectID:   in.ProjectID,
-					ProjectName: in.ProjectSlug,
-					ProjectSlug: in.ProjectSlug,
-				}
-				if wErr := config.WriteProjectMarker(scionPath, marker); wErr != nil {
-					s.agentLifecycleLog.Warn("Failed to write .scion marker for hub-managed project",
-						"agent_id", in.AgentID, "project_id", in.ProjectID, "error", wErr)
-				} else {
-					if extPath, err := marker.ExternalProjectPath(); err == nil && extPath != "" {
-						_ = os.MkdirAll(extPath, 0755)
-						_ = os.MkdirAll(filepath.Join(extPath, "agents"), 0755)
-					}
-					if s.config.Debug {
-						s.agentLifecycleLog.Debug("Initialized hub-managed project with split storage",
-							"agent_id", in.AgentID, "slug", in.ProjectSlug, "project_id", in.ProjectID, "path", scionPath)
-					}
-				}
-			}
-		}
-		unlockProjectMeta()
 	}
 
 	// --- GCP identity mode: resolve and reject "block" on Kubernetes before
@@ -2232,4 +2127,120 @@ func ambiguousNonGitWorkspace(in startContextInputs, worktreeProvisioned bool) s
 	}
 	return "ambiguous workspace for hub-managed project " + in.ProjectSlug +
 		": the request has no workspace mode, workspace path or git clone; refusing to fall back to the shared project directory"
+}
+
+// recordHubProjectFiles records the hub project's identity in a hub-managed
+// project directory and creates its split storage directories. The caller
+// holds the workspace lock on in.ProjectPath.
+func (s *Server) recordHubProjectFiles(ctx context.Context, in startContextInputs) {
+	// A broker copy of a hub workspace (~/.scion/projects/<slug>)
+	// records the hub project ID as its identity; see
+	// recordHubProjectIdentity. Done before the checks below, which
+	// then find it matching.
+	s.alignHubManagedProjectIdentity(ctx, in.AgentID, in.ProjectPath, in.ProjectSlug, in.ProjectID)
+
+	scionPath := filepath.Join(in.ProjectPath, config.DotScion)
+
+	if config.IsProjectMarkerFile(scionPath) {
+		// .scion is a marker file — project-id is already recorded.
+		if marker, err := config.ReadProjectMarker(scionPath); err == nil && marker.ProjectID != "" {
+			// Detect stale marker: hub's project ID differs and the old
+			// external config dir was cleaned up (project was deleted and
+			// recreated with the same name — miller79/scion#28).
+			// The global marker is only rewritten for the global project
+			// itself (see globalDirProjectConflict above).
+			if in.ProjectID != "" && marker.ProjectID != in.ProjectID && canRewriteProjectMarker(in.ProjectPath, in.ProjectID, in.HubGlobalProject) {
+				extPath, _ := marker.ExternalProjectPath()
+				if isStaleExternalDir(extPath) {
+					slug := marker.ProjectSlug
+					if in.ProjectSlug != "" {
+						slug = in.ProjectSlug
+					}
+					updated := &config.ProjectMarker{
+						ProjectID:   in.ProjectID,
+						ProjectName: slug,
+						ProjectSlug: slug,
+					}
+					if wErr := config.WriteProjectMarker(scionPath, updated); wErr != nil {
+						s.agentLifecycleLog.Warn("Failed to update stale .scion marker",
+							"agent_id", in.AgentID, "old_id", marker.ProjectID, "new_id", in.ProjectID, "error", wErr)
+					} else {
+						s.agentLifecycleLog.Info("Updated stale .scion marker with current project ID",
+							"agent_id", in.AgentID, "old_id", marker.ProjectID, "new_id", in.ProjectID, "path", scionPath)
+						marker = updated
+					}
+				}
+			}
+			// Ensure external split storage directories exist.
+			if extPath, err := marker.ExternalProjectPath(); err == nil && extPath != "" {
+				_ = os.MkdirAll(extPath, 0755)
+				_ = os.MkdirAll(filepath.Join(extPath, "agents"), 0755)
+			}
+			if s.config.Debug {
+				s.agentLifecycleLog.Debug("Hub-managed project has marker with split storage",
+					"agent_id", in.AgentID, "slug", in.ProjectSlug, "project_id", marker.ProjectID, "path", scionPath)
+			}
+		}
+	} else if info, statErr := os.Stat(scionPath); statErr == nil && info.IsDir() {
+		// .scion is a directory (git project) — use file-based project-id
+		if in.ProjectID != "" {
+			existingID, readErr := config.ReadProjectID(scionPath)
+			shouldWrite := readErr != nil || existingID == ""
+			if !shouldWrite && existingID != in.ProjectID {
+				// Existing ID differs from hub's — overwrite only if the old
+				// external config dir was cleaned up (project deleted and
+				// recreated — miller79/scion#28). When the dir still exists
+				// this is a first-link scenario; preserve the local ID.
+				extDir, extErr := config.GetGitProjectExternalConfigDir(scionPath)
+				shouldWrite = extErr != nil || extDir == "" || isStaleExternalDir(extDir)
+			}
+			if shouldWrite {
+				oldID := existingID
+				if wErr := config.WriteProjectID(scionPath, in.ProjectID); wErr != nil {
+					s.agentLifecycleLog.Warn("Failed to write project-id for hub-managed project",
+						"agent_id", in.AgentID, "project_id", in.ProjectID, "error", wErr)
+				} else {
+					if oldID != "" && oldID != in.ProjectID {
+						s.agentLifecycleLog.Info("Updated stale project-id with current project ID",
+							"agent_id", in.AgentID, "old_id", oldID, "new_id", in.ProjectID, "path", scionPath)
+					}
+					if extAgents, err := config.GetGitProjectExternalAgentsDir(scionPath); err == nil && extAgents != "" {
+						_ = os.MkdirAll(extAgents, 0755)
+					}
+					if extConfig, err := config.GetGitProjectExternalConfigDir(scionPath); err == nil && extConfig != "" {
+						_ = os.MkdirAll(extConfig, 0755)
+					}
+					if s.config.Debug {
+						s.agentLifecycleLog.Debug("Initialized git project with split storage",
+							"agent_id", in.AgentID, "slug", in.ProjectSlug, "project_id", in.ProjectID, "path", scionPath)
+					}
+				}
+			}
+		}
+	} else if in.ProjectID != "" {
+		// .scion doesn't exist — create project dir and write a marker file
+		if err := os.MkdirAll(in.ProjectPath, 0755); err != nil {
+			s.agentLifecycleLog.Warn("Failed to create project dir for hub-managed project",
+				"agent_id", in.AgentID, "slug", in.ProjectSlug, "path", in.ProjectPath, "error", err)
+		} else {
+			marker := &config.ProjectMarker{
+				ProjectID:   in.ProjectID,
+				ProjectName: in.ProjectSlug,
+				ProjectSlug: in.ProjectSlug,
+			}
+			if wErr := config.WriteProjectMarker(scionPath, marker); wErr != nil {
+				s.agentLifecycleLog.Warn("Failed to write .scion marker for hub-managed project",
+					"agent_id", in.AgentID, "project_id", in.ProjectID, "error", wErr)
+			} else {
+				if extPath, err := marker.ExternalProjectPath(); err == nil && extPath != "" {
+					_ = os.MkdirAll(extPath, 0755)
+					_ = os.MkdirAll(filepath.Join(extPath, "agents"), 0755)
+				}
+				if s.config.Debug {
+					s.agentLifecycleLog.Debug("Initialized hub-managed project with split storage",
+						"agent_id", in.AgentID, "slug", in.ProjectSlug, "project_id", in.ProjectID, "path", scionPath)
+				}
+			}
+		}
+	}
 }

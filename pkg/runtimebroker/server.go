@@ -198,25 +198,20 @@ type ServerConfig struct {
 	// Nil selects ExecMountChecker (mount(8)/umount(8)); tests set a fake.
 	NFSMountChecker MountChecker
 
-	// NFSVerifyOnlyReason, when non-empty, puts the NFS reconciler in
-	// verify-only mode: this server checks the shares but never mounts them.
-	// A host that runs several Runtime Broker instances sets it on each, so
-	// no instance competes to own the host's mounts.
-	NFSVerifyOnlyReason string
-
-	// NFSHostMounter, when set, is the host's single NFS mount owner (P2.3
-	// S3): a host-bind instance registers its requirement with it and uses
+	// NFSHostMounter, when set, is the host's single NFS mount owner: a
+	// host-bind instance registers its requirement with it and uses
 	// its shared reconciler instead of building and running its own; a
 	// Kubernetes or Cloud Run instance keeps its own verify-only check.
 	NFSHostMounter *HostNFSMounter
 
-	// SharedCaches, when set, are the host's caches shared by every
-	// instance (P2.3 S4): the server uses them instead of opening its own,
-	// and never closes them (the host does).
+	// SharedCaches, when set, are a flat host's caches: the server uses
+	// its own partition of the file caches and the host's GitHub
+	// resolution cache instead of opening its own, and never closes the
+	// shared one (the host does).
 	SharedCaches *SharedCaches
 
 	// WorkspaceLocks coordinates operations on shared local paths with
-	// every other Runtime Broker server of the process (P2.3 S2). The flat
+	// every other Runtime Broker server of the process. The flat
 	// host passes one service to all its instances; nil gives this server
 	// its own.
 	WorkspaceLocks *WorkspaceLocks
@@ -513,7 +508,11 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 		// label say it owns (ptone/scion#3274).
 		srv.ownership = NewOwnershipStore(srv.stateDir, fi.Identity.RuntimeBrokerID)
 		srv.ownership.SetConflicting(fi.ConflictingOwnershipKeys)
-		srv.workspaceLocks.registerProjectUser(srv, srv.ownership.HasLiveAgents)
+		srv.workspaceLocks.registerWorkspaceUser(srv, &workspaceUser{
+			instance:        fi.Identity.RuntimeBrokerID,
+			projectInUse:    srv.ownership.HasLiveAgents,
+			slugReservation: srv.ownership.SlugReservation,
+		})
 		if am, ok := mgr.(ownerScopedManager); !ok {
 			// Fail closed: a manager that cannot be restricted to this
 			// instance's objects would serve every instance's agents.
@@ -537,7 +536,13 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 	// mounter); everything else builds its own below.
 	hostNFS := cfg.NFSHostMounter != nil && cfg.NFSConfig != nil && len(cfg.NFSConfig.Shares) > 0 &&
 		rt != nil && !NFSWarnOnlyRuntime(rt.Name())
-	if hostNFS {
+	if hostNFS && srv.ownershipSetupErr != nil {
+		// The instance refuses at StartServices, after the host mounter
+		// has started; its requirement must not reach the union, which
+		// cannot shrink once the mounter runs. It builds no reconciler
+		// either.
+		slog.Warn("Runtime Broker instance cannot serve; its NFS mount requirement is not registered", "error", srv.ownershipSetupErr)
+	} else if hostNFS {
 		key := cfg.BrokerID
 		if fi := srv.flatInstance(); fi != nil {
 			key = fi.Instance.Key
@@ -569,8 +574,6 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 		if rt != nil && NFSWarnOnlyRuntime(rt.Name()) {
 			srv.nfsMountReconciler.SetVerifyOnly(fmt.Sprintf(
 				"the broker's default runtime is %s, so the broker does not mount it", rt.Name()))
-		} else if cfg.NFSVerifyOnlyReason != "" {
-			srv.nfsMountReconciler.SetVerifyOnly(cfg.NFSVerifyOnlyReason)
 		}
 		srv.nfsStartupReconcileDone = make(chan struct{})
 		srv.nfsReconcileStopped = make(chan struct{})
@@ -681,70 +684,40 @@ func (s *Server) SwapRuntime(rt scionrt.Runtime) {
 	)
 }
 
-// initHubIntegration initializes the shared template cache and hub connections.
+// initHubIntegration opens the broker caches and the hub connections.
 func (s *Server) initHubIntegration() error {
 	if sc := s.config.SharedCaches; sc != nil {
-		// The host's caches, one object per directory for every instance.
-		s.cache, s.hcCache, s.skCache, s.ghResolutionCache = sc.Templates, sc.HarnessConfigs, sc.Skills, sc.GitHub
+		// A flat host's instance: its own partition of the file caches and
+		// the host's shared GitHub resolution cache.
+		fc, err := sc.forInstance(s.config.BrokerID)
+		if err != nil {
+			return fmt.Errorf("failed to open the instance's broker caches: %w", err)
+		}
+		s.cache, s.hcCache, s.skCache, s.ghResolutionCache = fc.templates, fc.harnessConfigs, fc.skills, sc.GitHub
 		return s.initHubConnections()
 	}
-	// 1. Initialize shared template cache
 	cacheDir := s.config.TemplateCacheDir
 	if cacheDir == "" {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return fmt.Errorf("failed to get home directory: %w", err)
+		var err error
+		if cacheDir, err = defaultTemplateCacheDir(); err != nil {
+			return err
 		}
-		cacheDir = filepath.Join(homeDir, ".scion", "cache", "templates")
 	}
+	// The template cache, and the harness-config and skill caches in
+	// sibling directories so the content-addressed stores stay independent.
+	fc, err := openFileCaches(cacheDir, s.config.TemplateCacheMaxSize)
+	if err != nil {
+		return err
+	}
+	s.cache, s.hcCache, s.skCache = fc.templates, fc.harnessConfigs, fc.skills
+	// The GitHub resolution cache holds resolution metadata, not file
+	// content; nil is safe (resolution then runs uncached).
+	s.ghResolutionCache = openGitHubResolutionCache()
 
 	maxSize := s.config.TemplateCacheMaxSize
 	if maxSize <= 0 {
 		maxSize = templatecache.DefaultMaxSize
 	}
-
-	cache, err := templatecache.New(cacheDir, maxSize)
-	if err != nil {
-		return fmt.Errorf("failed to initialize template cache: %w", err)
-	}
-	s.cache = cache
-
-	// 1b. Initialize the harness-config cache alongside the template cache,
-	// under a sibling directory so the two content-addressed stores stay
-	// independent.
-	hcCacheDir := filepath.Join(filepath.Dir(cacheDir), "harness-configs")
-	hcCache, err := templatecache.New(hcCacheDir, maxSize)
-	if err != nil {
-		return fmt.Errorf("failed to initialize harness-config cache: %w", err)
-	}
-	s.hcCache = hcCache
-
-	// 1c. Initialize the skill cache for broker-side caching of resolved
-	// skill content, keyed by content hash.
-	skCacheDir := filepath.Join(filepath.Dir(cacheDir), "skills")
-	skCacheMaxSize := int64(500 * 1024 * 1024) // 500MB default
-	skCache, err := templatecache.New(skCacheDir, skCacheMaxSize)
-	if err != nil {
-		return fmt.Errorf("failed to initialize skill cache: %w", err)
-	}
-	s.skCache = skCache
-
-	// 1d. Initialize the GitHub resolution cache for broker-side caching of
-	// GitHub skill resolution metadata (not file content).
-	ghResDir, err := agent.GitHubResolutionCacheDir()
-	if err != nil {
-		slog.Warn("github resolution cache: cannot determine cache dir", "error", err)
-	} else {
-		ghCache, err := agent.NewGitHubResolutionCache(ghResDir, agent.DefaultResolutionCacheTTL)
-		if err != nil {
-			slog.Warn("github resolution cache: init failed (running uncached)", "error", err)
-			// nil cache is safe — resolver falls through to API call
-		} else {
-			s.ghResolutionCache = ghCache
-			slog.Info("GitHub resolution cache initialized", "dir", ghResDir, "ttl", agent.DefaultResolutionCacheTTL)
-		}
-	}
-
 	slog.Info("Broker caches initialized", "cache", cacheDir, "max_size_mb", maxSize/(1024*1024))
 	return s.initHubConnections()
 }

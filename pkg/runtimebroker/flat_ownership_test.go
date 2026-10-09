@@ -30,8 +30,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
-// Ownership-negative coverage for a flat instance (ptone/scion#3274, P2.3
-// amendment): each refusal happens before any runtime call or ownership
+// Ownership-negative coverage for a flat instance (ptone/scion#3274):
+// each refusal happens before any runtime call or ownership
 // record is created, and the frozen target checks still come first.
 
 func noOwnedRecord(t *testing.T, f *flatInstanceFixture, agentID string) {

@@ -29,7 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
-// P2.3 S5 (ptone/scion#3274): a start in flight on one flat instance never
+// Partition validation (ptone/scion#3274): a start in flight on one flat instance never
 // removes another instance's (or an unlabeled) object on the shared
 // daemon, even one with the same name in the same project; a legacy
 // manager's pre-start cleanup is unchanged.

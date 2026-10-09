@@ -380,7 +380,6 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 	shared := flatServerShared{
 		cfg:                     cfg,
 		mode:                    mode,
-		multiInstance:           len(p.instances) > 1,
 		hubEndpoint:             hubEndpointForRH,
 		devAuthToken:            p.devAuthToken,
 		nfs:                     brokerNFS,
@@ -393,7 +392,8 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 		shared.nfsMounter = runtimebroker.NewHostNFSMounter(nil, logging.Subsystem("broker.nfs-mount"))
 		hostServices = append(hostServices, shared.nfsMounter)
 	}
-	// One cache object per cache directory for every instance (P2.3 S4).
+	// The host's caches: one object per cache directory, the file caches
+	// partitioned per instance.
 	caches, err := runtimebroker.NewSharedCaches(templateCacheDir, templateCacheMax)
 	if err != nil {
 		return fmt.Errorf("opening the host's broker caches: %w", err)
@@ -484,7 +484,7 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 }
 
 // flatOwnershipPreflight is the pass-1 ownership check of a flat instance
-// (P2.3 section 2a): before any Hub activation it reads every scion agent
+// (ptone/scion#3274): before any Hub activation it reads every scion agent
 // object on the instance's scope and refuses when any carries no owner
 // label (an unlabeled object belongs to no instance, even for a single
 // instance; an operator drains or recreates such agents through the version
@@ -598,13 +598,12 @@ func candidateStateDir(c brokerhost.Candidate) (string, error) {
 type flatServerShared struct {
 	cfg                     *config.GlobalConfig
 	mode                    brokerhost.Mode
-	multiInstance           bool // more than one instance CONFIGURED
 	hubEndpoint             string
 	devAuthToken            string
 	nfs                     *config.V1NFSConfig
 	workspaceStorageBackend string
 	// workspaceLocks is the one process-wide workspace lock service every
-	// instance shares (P2.3 S2).
+	// instance shares.
 	workspaceLocks *runtimebroker.WorkspaceLocks
 	// nfsMounter is the host's single NFS mount owner (nil without NFS).
 	nfsMounter *runtimebroker.HostNFSMounter
@@ -678,7 +677,7 @@ func flatInstanceServerConfig(sh flatServerShared, ic brokerhost.InstanceContext
 	if ic.Activation.InMemoryCredentials != nil && sh.colocatedStorage != nil {
 		rhCfg.ColocatedStorage = sh.colocatedStorage
 	}
-	// The host's single NFS mount owner (P2.3 S3): host-bind instances
+	// The host's single NFS mount owner: host-bind instances
 	// register with it instead of mounting themselves.
 	rhCfg.NFSHostMounter = sh.nfsMounter
 	rhCfg.SharedCaches = sh.sharedCaches
