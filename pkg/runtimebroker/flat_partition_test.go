@@ -108,6 +108,13 @@ func (r *daemonRuntime) DeleteResource(_ context.Context, h api.ResourceHandle) 
 	return nil
 }
 
+// CleanupAgentResources is the runtime's name+project leftover cleanup
+// (runtime.AgentResourceCleaner).
+func (r *daemonRuntime) CleanupAgentResources(_ context.Context, agentName, projectID string) error {
+	r.d.record("cleanupAgentResources:" + projectID + "/" + agentName)
+	return nil
+}
+
 func newDaemonRuntime(d *sharedDaemon) *daemonRuntime {
 	return &daemonRuntime{d: d, MockRuntime: &runtime.MockRuntime{
 		NameFunc: func() string { return "mock" },

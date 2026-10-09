@@ -962,39 +962,41 @@ func reconstructedKind(o api.AgentInfo) string {
 	return api.ResourceKindContainer
 }
 
-// ownedDelete is a flat instance's whole-agent delete of an owned agent.
+// ownedDelete is a flat instance's delete of an owned agent: either the
+// whole record (every run; the slug is released at the end) or exactly one
+// run (that run's objects only; the record and the other runs untouched).
 type ownedDelete struct {
 	projectID, agentID string
+	// runID, when wholeRecord is false, is the only run the delete acts on.
+	runID       string
+	wholeRecord bool
 }
 
-// beginOwnedDelete decides whether a flat instance may delete the agent
-// holding slug in the project and, for a whole-agent delete, moves its
-// record to deleting before anything is removed. A legacy Runtime Broker
-// (no store) is always allowed. A file-only agent (no runtime object) is
-// deleted only when this instance's record owns it; an agent with a runtime
-// object was found through this instance's owner-filtered list, so its
-// label already establishes ownership even when its record is missing (the
-// next start-up reconstructs it).
-func (s *Server) beginOwnedDelete(projectID, slug string, hasObject, wholeAgent bool) (*ownedDelete, error) {
+// ownedDeleteTarget returns the live record of the agent holding slug in
+// the project (nil when there is none or it is a tombstone) and refuses a
+// file-only agent (no runtime object) this instance's record does not own.
+// A legacy Runtime Broker (no store) is always allowed. An agent with a
+// runtime object was found through this instance's owner-filtered list, so
+// its label already establishes ownership even when its record is missing
+// (the next start-up reconstructs it).
+func (s *Server) ownedDeleteTarget(projectID, slug string, hasObject bool) (*OwnershipRecord, error) {
 	if s.ownership == nil {
 		return nil, nil
 	}
-	agentID := ""
-	if projectID != "" {
-		holder, err := s.ownership.SlugHolder(projectID, slug)
-		if err != nil {
-			return nil, err
-		}
-		agentID = holder
-	}
 	var rec *OwnershipRecord
-	if agentID != "" {
-		r, ok, err := s.ownership.Get(projectID, agentID)
+	if projectID != "" {
+		agentID, err := s.ownership.SlugHolder(projectID, slug)
 		if err != nil {
 			return nil, err
 		}
-		if ok {
-			rec = r
+		if agentID != "" {
+			r, ok, err := s.ownership.Get(projectID, agentID)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				rec = r
+			}
 		}
 	}
 	if rec == nil || rec.State == OwnershipStateDeleted {
@@ -1003,22 +1005,96 @@ func (s *Server) beginOwnedDelete(projectID, slug string, hasObject, wholeAgent 
 		}
 		return nil, nil
 	}
+	return rec, nil
+}
+
+// leftoverCleanupAllowed reports whether a name-scoped leftover cleanup may
+// run for the agent holding slug in the project: always for a legacy
+// Runtime Broker; for a flat instance only when its record (live or
+// deleting) holds the slug and, for a delete fenced to runID, no other run
+// of the agent is live.
+func (s *Server) leftoverCleanupAllowed(projectID, slug, runID string) bool {
+	if s.ownership == nil {
+		return true
+	}
+	agentID, err := s.ownership.SlugHolder(projectID, slug)
+	if err != nil || agentID == "" {
+		return false
+	}
+	rec, ok, err := s.ownership.Get(projectID, agentID)
+	if err != nil || !ok || rec.State == OwnershipStateDeleted {
+		return false
+	}
+	return runID == "" || !liveRunsOtherThan(rec, runID)
+}
+
+// checkOwnedDelete is the ownership check a delete passes before any side
+// effect; it changes nothing.
+func (s *Server) checkOwnedDelete(projectID, slug string, hasObject bool) error {
+	_, err := s.ownedDeleteTarget(projectID, slug, hasObject)
+	return err
+}
+
+// liveRunsOtherThan reports whether the record has a live (provisioning or
+// created) run other than runID.
+func liveRunsOtherThan(rec *OwnershipRecord, runID string) bool {
+	for _, r := range rec.Runs {
+		if r.RunID != runID && runStateOrder[r.State] < runStateOrder[OwnershipStateDeleting] {
+			return true
+		}
+	}
+	return false
+}
+
+// beginOwnedDelete moves the record or run a delete acts on to deleting
+// before anything is removed, and returns what finishOwnedDelete completes.
+//
+// A delete fenced to a run (runID) never acts on another run: it moves only
+// that run to deleting when another run is live or the delete is not a
+// whole-agent delete, and does nothing to the record when it names a run
+// the record does not have while another run is live. Only a whole-agent
+// delete with no other live run (or an unfenced whole-agent delete, which
+// means the agent itself) moves the whole record to deleting. A record that
+// is already deleting (a retried delete) continues as a whole-record delete.
+func (s *Server) beginOwnedDelete(projectID, slug, runID string, hasObject, wholeAgent bool) (*ownedDelete, error) {
+	rec, err := s.ownedDeleteTarget(projectID, slug, hasObject)
+	if err != nil || rec == nil {
+		return nil, err
+	}
+	if rec.State == OwnershipStateActive && runID != "" {
+		otherLive := liveRunsOtherThan(rec, runID)
+		run := rec.Run(runID)
+		if run == nil {
+			if otherLive || !wholeAgent {
+				return nil, nil
+			}
+		} else if otherLive || !wholeAgent {
+			if runStateOrder[run.State] >= runStateOrder[OwnershipStateDeleted] {
+				return nil, nil
+			}
+			if err := s.ownership.SetRunState(projectID, rec.AgentID, runID, OwnershipStateDeleting); err != nil {
+				return nil, err
+			}
+			return &ownedDelete{projectID: projectID, agentID: rec.AgentID, runID: runID}, nil
+		}
+	}
 	if !wholeAgent {
 		return nil, nil
 	}
-	if err := s.ownership.SetRecordState(projectID, agentID, OwnershipStateDeleting); err != nil {
+	if err := s.ownership.SetRecordState(projectID, rec.AgentID, OwnershipStateDeleting); err != nil {
 		return nil, err
 	}
-	return &ownedDelete{projectID: projectID, agentID: agentID}, nil
+	return &ownedDelete{projectID: projectID, agentID: rec.AgentID, wholeRecord: true}, nil
 }
 
-// finishOwnedDelete completes a whole-agent delete's record after the
-// runtime delete succeeded: every recorded object is removed or confirmed
-// gone through the UID-precondition cleanup (an object already gone, or a
-// name now held by another UID, is confirmed absent), then the record is
-// marked deleted (its tombstone stays) and the slug is released. If absence
-// cannot be established the record stays deleting and the slug stays
-// reserved, so nothing reuses it early.
+// finishOwnedDelete completes a delete after the runtime delete succeeded.
+// The objects in scope (every run's for a whole-record delete, the one
+// run's otherwise) are removed or confirmed gone through the UID-precondition
+// cleanup (an object already gone, or a name now held by another UID, is
+// confirmed absent). Then a run delete marks that run deleted; a whole-record
+// delete marks the record deleted (its tombstone stays) and releases the
+// slug. If absence cannot be established the record or run stays deleting
+// and the slug stays reserved, so nothing reuses it early.
 func (s *Server) finishOwnedDelete(ctx context.Context, mgr agent.Manager, od *ownedDelete) {
 	if od == nil || s.ownership == nil {
 		return
@@ -1029,6 +1105,9 @@ func (s *Server) finishOwnedDelete(ctx context.Context, mgr agent.Manager, od *o
 	}
 	var handles []api.ResourceHandle
 	for _, run := range rec.Runs {
+		if !od.wholeRecord && run.RunID != od.runID {
+			continue
+		}
 		for _, res := range run.Resources {
 			if res.State == OwnedResourceRecorded {
 				handles = append(handles, api.ResourceHandle{Kind: res.Kind, Namespace: res.Namespace, Name: res.Name, UID: res.UID})
@@ -1040,7 +1119,7 @@ func (s *Server) finishOwnedDelete(ctx context.Context, mgr agent.Manager, od *o
 		defer cancel()
 		if err := mgr.CleanupLaunch(cctx, handles); err != nil {
 			s.agentLifecycleLog.Warn("Agent delete: could not confirm every recorded object is gone; ownership record kept deleting",
-				"agent_id", od.agentID, "project_id", od.projectID, "error", err)
+				"agent_id", od.agentID, "project_id", od.projectID, "run_id", od.runID, "error", err)
 			return
 		}
 	}
@@ -1048,6 +1127,12 @@ func (s *Server) finishOwnedDelete(ctx context.Context, mgr agent.Manager, od *o
 		if err := s.ownership.MarkAbsent(od.projectID, od.agentID, h.UID); err != nil {
 			return
 		}
+	}
+	if !od.wholeRecord {
+		if err := s.ownership.SetRunState(od.projectID, od.agentID, od.runID, OwnershipStateDeleted); err != nil {
+			s.agentLifecycleLog.Warn("Agent delete: run not marked deleted", "agent_id", od.agentID, "project_id", od.projectID, "run_id", od.runID, "error", err)
+		}
+		return
 	}
 	if err := s.ownership.SetRecordState(od.projectID, od.agentID, OwnershipStateDeleted); err != nil {
 		return

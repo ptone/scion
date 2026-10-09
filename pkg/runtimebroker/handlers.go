@@ -2390,7 +2390,7 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 				NotFound(w, "Agent")
 				return
 			}
-			s.cleanupLeftoverAgentResources(ctx, id, projectID)
+			s.cleanupLeftoverAgentResources(ctx, id, projectID, runID)
 			s.agentLifecycleLog.Info("Agent delete: no matching agent in project",
 				"agent_id", id, "project_id", projectID)
 			NotFound(w, "Agent")
@@ -2434,14 +2434,14 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	}
 
 	// A flat instance deletes only what it owns: a file-only agent needs
-	// its ownership record; a whole-agent delete moves the record to
-	// deleting before acting (ptone/scion#3274).
+	// its ownership record (ptone/scion#3274). The record or run the delete
+	// acts on is moved to deleting further below, once it is known whether
+	// the files are another run's.
 	ownedProject := agentProjectID
 	if ownedProject == "" {
 		ownedProject = projectID
 	}
-	ownedDel, ownErr := s.beginOwnedDelete(ownedProject, target.name, target.containerID != "", (deleteFiles && !softDelete) || localOnly)
-	if ownErr != nil {
+	if ownErr := s.checkOwnedDelete(ownedProject, target.name, target.containerID != ""); ownErr != nil {
 		span.SetStatus(codes.Error, ownErr.Error())
 		s.agentLifecycleLog.Info("Agent delete: not owned by this Runtime Broker instance; nothing deleted",
 			"agent_id", id, "project_id", ownedProject, "error", ownErr)
@@ -2529,6 +2529,18 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 		}
 	}
 
+	// Move what this delete acts on to deleting before anything is removed:
+	// a delete fenced to a run never transitions the record, another run,
+	// or the slug while another run is live, nor when the files are another
+	// run's (ptone/scion#3274).
+	ownedDel, ownErr := s.beginOwnedDelete(ownedProject, target.name, runID, target.containerID != "",
+		((deleteFiles && !softDelete) || localOnly) && !filesOfOtherRun)
+	if ownErr != nil {
+		span.SetStatus(codes.Error, ownErr.Error())
+		s.writeRuntimeOpError(w, ctx, "delete agent", ownErr, "agent_id", id, "project_id", projectID)
+		return
+	}
+
 	// If this is a soft-delete, mark agent-info.json with deleted status
 	// before cleanup -- unless that file is another run's. The state before
 	// the mark is kept so a runtime run mismatch or runtime delete failure
@@ -2583,7 +2595,7 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 		// The container was already gone, so DeleteTarget made no runtime
 		// call and the runtime never removed the objects it created with
 		// the container.
-		s.cleanupLeftoverAgentResources(ctx, target.name, projectID)
+		s.cleanupLeftoverAgentResources(ctx, target.name, projectID, runID)
 	}
 
 	// On the NFS workspace, the agent's worktree (worktree-per-agent) or
@@ -6999,11 +7011,21 @@ type agentResourceCleaner interface {
 // nothing without one. It is best effort: a failure is logged and does not
 // fail the delete, matching the cleanup that runtime Delete does when the
 // container still exists.
-func (s *Server) cleanupLeftoverAgentResources(ctx context.Context, agentName, projectID string) {
+//
+// On a flat instance the cleanup runs only for an agent whose ownership
+// record this instance holds, and never, for a delete fenced to a run, while
+// another run of the agent is live: leftover objects are found by name, so
+// they may be that newer run's (ptone/scion#3274).
+func (s *Server) cleanupLeftoverAgentResources(ctx context.Context, agentName, projectID, runID string) {
 	if projectID == "" {
 		return
 	}
 	slug := api.Slugify(agentName)
+	if !s.leftoverCleanupAllowed(projectID, slug, runID) {
+		s.agentLifecycleLog.Info("Agent delete: leftover runtime objects left in place (not this instance's to remove, or another run is live)",
+			"agent_id", agentName, "project_id", projectID, "run_id", runID)
+		return
+	}
 	for _, mgr := range s.allManagers(ctx) {
 		c, ok := mgr.(agentResourceCleaner)
 		if !ok {
