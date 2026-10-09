@@ -462,7 +462,8 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 		srv.ownership.SetConflicting(fi.ConflictingOwnershipKeys)
 		if am, ok := mgr.(*agent.AgentManager); ok {
 			am.SetOwner(agent.OwnerScope{RuntimeBrokerID: fi.Identity.RuntimeBrokerID,
-				FileAgentOwned: srv.fileAgentOwned, EntryUnresolved: srv.ownership.ConflictingLabels})
+				FileAgentOwned: srv.fileAgentOwned, EntryUnresolved: srv.ownership.ConflictingLabels,
+				EntryPathTrusted: trustedEntryProjectPath})
 		}
 	}
 	if srv.stateDir != "" {

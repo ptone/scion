@@ -1315,15 +1315,23 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 	}
 
 	var agent *api.AgentInfo
+	matches := 0
 	for _, a := range agents {
 		if matchesAgentID(a, agentID) {
-			agent = &a
-			break
+			matches++
+			if agent == nil {
+				agent = &a
+			}
 		}
 	}
 
 	if agent == nil {
 		return errNoRunningContainer(agentID)
+	}
+	// An owned (flat instance) manager never picks among several agents of
+	// that name in different projects.
+	if m.owner != nil && projectID == "" && matches > 1 {
+		return fmt.Errorf("agent %q is ambiguous without a project: %d agents of this Runtime Broker instance have that name", agentID, matches)
 	}
 
 	// Serialize against a concurrent SendKeys call (or another concurrent

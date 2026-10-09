@@ -2274,7 +2274,13 @@ authDone:
 	allAgents, err := m.listRuntime(ctx, map[string]string{"scion.name": slug})
 	if err == nil {
 		for _, a := range allAgents {
-			if a.ContainerID == id || strings.EqualFold(a.Name, opts.Name) {
+			matched := a.ContainerID == id || strings.EqualFold(a.Name, opts.Name)
+			// An owned (flat instance) manager matches by name only within
+			// the agent's project, never another project's same-named agent.
+			if matched && m.owner != nil && a.ContainerID != id && !matchAgentProject(a, projectName, projectID) {
+				matched = false
+			}
+			if matched {
 				// Check if the container has already exited
 				if a.Phase == string(state.PhaseStopped) || a.Phase == string(state.PhaseError) {
 					// Try to get logs for diagnosis

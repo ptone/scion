@@ -5574,6 +5574,13 @@ func hasAgentInProjectOrUnlabeled(agents []api.AgentInfo, projectID string) bool
 // resolveAgentRuntimeTarget finds the manager/runtime pair that contains an
 // existing agent. Keeping the pair together prevents manager-based and direct
 // runtime operations from drifting to different backends.
+//
+// A flat instance has a single manager/runtime pair and no auxiliary
+// runtimes, so every path here, the fallbacks included, returns that pair.
+// Its manager is owner-filtered (agent.OwnerScope): a List error or a miss
+// never widens the search to unowned objects or bare names. The caller's
+// operation then runs through the same owner-filtered manager and reports
+// the agent as not found or unavailable.
 func (s *Server) resolveAgentRuntimeTarget(ctx context.Context, id, projectID string) (agent.Manager, scionrt.Runtime) {
 	if mgr, rt, found := s.findAgentRuntimeTarget(ctx, id, projectID); found {
 		return mgr, rt

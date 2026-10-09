@@ -47,6 +47,11 @@ type OwnerScope struct {
 	// slug is claimed by another configured instance too). Such an object
 	// is not owned.
 	EntryUnresolved func(labels map[string]string) bool
+	// EntryPathTrusted reports whether the project path an owned runtime
+	// object's labels name may be written (List's terminal-state
+	// convergence of agent-info.json). Nil means no label-derived path is
+	// written.
+	EntryPathTrusted func(projectPath, projectID string) bool
 }
 
 // SetOwner restricts the manager to one instance's objects. Call it once,
@@ -83,6 +88,16 @@ func (m *AgentManager) ownsFileAgent(projectID, slug string) bool {
 		return true
 	}
 	return m.owner.FileAgentOwned != nil && m.owner.FileAgentOwned(projectID, slug)
+}
+
+// mayWriteEntryPath reports whether List may write agent files under the
+// project path a runtime entry's labels name: always for a legacy manager;
+// for an owned manager only when its EntryPathTrusted accepts the path.
+func (m *AgentManager) mayWriteEntryPath(a api.AgentInfo) bool {
+	if m.owner == nil {
+		return true
+	}
+	return m.owner.EntryPathTrusted != nil && m.owner.EntryPathTrusted(a.ProjectPath, a.Labels["scion.project_id"])
 }
 
 // listRuntime lists runtime entries, keeping only owned ones for an owned

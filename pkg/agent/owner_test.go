@@ -17,12 +17,17 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -108,4 +113,122 @@ func TestOwner_UnresolvedLabelledObjectIsNotOwned(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, owned, 1, "an object of a conflicting key is not owned even with this instance's label")
 	assert.Equal(t, "c-2", owned[0].ContainerID)
+}
+
+// TestOwner_ListWritesOnlyUnderTrustedEntryPath: an owned manager's List
+// converges agent-info.json to the runtime's terminal phase only under a
+// project path its EntryPathTrusted accepts.
+func TestOwner_ListWritesOnlyUnderTrustedEntryPath(t *testing.T) {
+	for _, trusted := range []bool{false, true} {
+		t.Run(fmt.Sprintf("trusted=%v", trusted), func(t *testing.T) {
+			projectPath := filepath.Join(t.TempDir(), ".scion")
+			agentHome := filepath.Join(projectPath, "agents", "worker", "home")
+			require.NoError(t, os.MkdirAll(agentHome, 0o755))
+			infoPath := filepath.Join(agentHome, "agent-info.json")
+			require.NoError(t, os.WriteFile(infoPath, []byte(`{"name":"worker","phase":"running","activity":"thinking"}`), 0o644))
+			zero := 0
+			rt := &runtime.MockRuntime{ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) {
+				return []api.AgentInfo{{Name: "worker", ProjectPath: projectPath, Phase: "stopped", ExitCode: &zero,
+					ContainerStatus: "Exited (0) 1 minute ago",
+					Labels:          map[string]string{"scion.name": "worker", "scion.project_id": "proj-1", api.LabelRuntimeBrokerID: "broker-a"}}}, nil
+			}}
+			m := NewManager(rt).(*AgentManager)
+			var gotPath, gotProject string
+			m.SetOwner(OwnerScope{RuntimeBrokerID: "broker-a", EntryPathTrusted: func(p, id string) bool {
+				gotPath, gotProject = p, id
+				return trusted
+			}})
+			_, err := m.List(context.Background(), map[string]string{"scion.name": "worker"})
+			require.NoError(t, err)
+			assert.Equal(t, projectPath, gotPath)
+			assert.Equal(t, "proj-1", gotProject)
+			data, err := os.ReadFile(infoPath)
+			require.NoError(t, err)
+			assert.Equal(t, trusted, strings.Contains(string(data), `"phase": "stopped"`), "agent-info.json written: %s", data)
+		})
+	}
+}
+
+// TestOwner_DeliverWithoutProjectNeverPicksAmongSeveral: an owned manager
+// refuses to deliver to a name that matches several of its agents when no
+// project is given; with a project, or for a legacy manager, delivery is
+// unchanged.
+func TestOwner_DeliverWithoutProjectNeverPicksAmongSeveral(t *testing.T) {
+	var execs []string
+	rt := &runtime.MockRuntime{
+		ListFunc: func(_ context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			all := []api.AgentInfo{
+				{ContainerID: "c-1", Name: "worker", ContainerStatus: "Up 1 minute", Labels: map[string]string{"scion.name": "worker", "scion.project_id": "proj-1", api.LabelRuntimeBrokerID: "broker-a"}},
+				{ContainerID: "c-2", Name: "worker", ContainerStatus: "Up 1 minute", Labels: map[string]string{"scion.name": "worker", "scion.project_id": "proj-2", api.LabelRuntimeBrokerID: "broker-a"}},
+			}
+			var out []api.AgentInfo
+			for _, a := range all {
+				if p := filter["scion.project_id"]; p == "" || a.Labels["scion.project_id"] == p {
+					out = append(out, a)
+				}
+			}
+			return out, nil
+		},
+		ExecFunc: func(_ context.Context, id string, _ []string) (string, error) {
+			execs = append(execs, id)
+			return "", nil
+		},
+	}
+	m := NewManager(rt).(*AgentManager)
+	m.SetOwner(OwnerScope{RuntimeBrokerID: "broker-a"})
+	err := m.deliverImmediate(context.Background(), "worker", "", "hello", true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ambiguous")
+	assert.Empty(t, execs, "nothing delivered to an ambiguous name")
+
+	require.NoError(t, m.deliverImmediate(context.Background(), "worker", "proj-2", "hello", true))
+	require.NotEmpty(t, execs)
+	for _, id := range execs {
+		assert.Equal(t, "c-2", id)
+	}
+}
+
+// TestOwner_StartVerifiesOnlyItsOwnProjectsAgent: after the runtime creates
+// the container, an owned manager's verification never matches another
+// project's stopped agent of the same name (which would delete the new
+// container and fail the start); a legacy manager's name match is unchanged.
+func TestOwner_StartVerifiesOnlyItsOwnProjectsAgent(t *testing.T) {
+	mockRuntimeForTest(t)
+	tmpDir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	t.Setenv("HOME", tmpDir)
+	require.NoError(t, config.InitMachine(getTestHarnesses()))
+	root := filepath.Join(tmpDir, "project")
+	require.NoError(t, config.InitProject(filepath.Join(root, ".scion"), getTestHarnesses()))
+	require.NoError(t, os.Chdir(root))
+
+	for _, owned := range []bool{false, true} {
+		t.Run(fmt.Sprintf("owned=%v", owned), func(t *testing.T) {
+			var deleted []string
+			rt := &runtime.MockRuntime{
+				ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) {
+					return []api.AgentInfo{{ContainerID: "other-id", Name: "worker", Phase: "stopped", ContainerStatus: "Exited (0)",
+						Labels: map[string]string{"scion.name": "worker", "scion.project_id": "proj-2", api.LabelRuntimeBrokerID: "broker-a"}}}, nil
+				},
+				RunFunc: func(context.Context, runtime.RunConfig) (string, error) { return "new-id", nil },
+				DeleteFunc: func(_ context.Context, ref runtime.RunRef) error {
+					deleted = append(deleted, ref.ID)
+					return nil
+				},
+			}
+			m := NewManager(rt).(*AgentManager)
+			if owned {
+				m.SetOwner(OwnerScope{RuntimeBrokerID: "broker-a"})
+			}
+			_, err := m.Start(context.Background(), api.StartOptions{Name: "worker", ProjectPath: root, HarnessConfig: "claude", NoAuth: true,
+				Env: map[string]string{"SCION_PROJECT_ID": "proj-1", "SCION_AGENT_ID": "agent-1"}})
+			if owned {
+				require.NoError(t, err)
+				assert.NotContains(t, deleted, "new-id", "the new container is kept")
+			} else {
+				require.Error(t, err, "legacy behaviour: the name match reports an immediate exit")
+			}
+		})
+	}
 }
