@@ -166,10 +166,10 @@ func TestHost_InvalidConfigurationRefusesWholeProcess(t *testing.T) {
 	assert.Empty(t, f.built, "no instance is built")
 }
 
-// TestHost_DuplicateScopeRefusedBeforeServingWork: two instances on one
-// Docker daemon are both refused in pass 1, before any Hub activation; an
-// instance on its own scope still activates.
-func TestHost_DuplicateScopeRefusedBeforeServingWork(t *testing.T) {
+// TestHost_SharedScopeActivatesEveryInstance: instances on one Docker
+// daemon all activate (inventory and host resources are partitioned by
+// instance); an instance on its own scope activates too.
+func TestHost_SharedScopeActivatesEveryInstance(t *testing.T) {
 	f := newFixture(t)
 	f.daemons["docker-a"] = "shared-daemon"
 	f.daemons["docker-b"] = "shared-daemon"
@@ -178,21 +178,60 @@ func TestHost_DuplicateScopeRefusedBeforeServingWork(t *testing.T) {
 	require.NoError(t, h.Prepare(context.Background()))
 
 	st := statusByKey(h)
-	assert.Equal(t, StateRefused, st["docker-a"].State)
-	assert.Equal(t, StateRefused, st["docker-b"].State)
-	assert.Equal(t, StateActive, st["docker-c"].State)
-	assert.Equal(t, []string{"docker-c"}, f.activator.activated, "a conflict-refused instance is never activated with the Hub")
-	assert.Equal(t, []string{"docker-c"}, f.built)
-	for _, k := range []string{"docker-a", "docker-b"} {
-		var sc *ScopeConflictError
-		require.True(t, errors.As(f.activator.refused[k], &sc), "refusal reported for %s", k)
-		assert.Equal(t, []string{"docker-a", "docker-b"}, sc.Instances)
-		assert.Contains(t, st[k].Error, "shared-daemon")
+	for _, k := range []string{"docker-a", "docker-b", "docker-c"} {
+		assert.Equal(t, StateActive, st[k].State, k)
 	}
-	assert.False(t, h.Ready())
+	assert.ElementsMatch(t, []string{"docker-a", "docker-b", "docker-c"}, f.activator.activated)
+	assert.NotEqual(t, st["docker-a"].RuntimeBrokerID, st["docker-b"].RuntimeBrokerID, "one identity per instance")
+	assert.True(t, h.Ready())
+}
+
+// TestHost_UnresolvedOwnershipRefusesTheWholeScopeGroup: unresolved
+// ownership found by one instance's preflight refuses every configured
+// instance on that execution scope before any of them activates; an
+// instance on another scope still activates.
+func TestHost_UnresolvedOwnershipRefusesTheWholeScopeGroup(t *testing.T) {
+	f := newFixture(t)
+	f.daemons["docker-a"] = "shared-daemon"
+	f.daemons["docker-b"] = "shared-daemon"
+	cfg := f.config(t, dockerInstance("docker-a", "a"), dockerInstance("docker-b", "b"), dockerInstance("docker-c", "c"))
+	cfg.OwnershipPreflight = func(_ context.Context, c Candidate) error {
+		if c.Instance.Key == "docker-b" {
+			return errors.New("1 agent object on this execution scope has unresolved ownership: old-agent")
+		}
+		return nil
+	}
+	h, err := New(cfg)
+	require.NoError(t, err)
+	require.NoError(t, h.Prepare(context.Background()))
+
+	st := statusByKey(h)
+	for _, k := range []string{"docker-a", "docker-b"} {
+		assert.Equal(t, StateRefused, st[k].State, k)
+		assert.Equal(t, "ownership_unresolved", st[k].Reason, k)
+	}
+	assert.Contains(t, st["docker-a"].Error, "docker-b", "the sibling's refusal names the instance whose ownership is unresolved")
+	assert.Equal(t, StateActive, st["docker-c"].State, "another scope is unaffected")
+	assert.Equal(t, []string{"docker-c"}, f.activator.activated, "no instance of the affected scope is activated")
+	assert.Equal(t, []string{"docker-c"}, f.built)
 	// Refused instances keep their local identities (no cleanup).
 	_, err = os.Stat(filepath.Join(brokeridentity.InstanceDir(f.globalDir, "docker-a"), brokeridentity.IdentityFileName))
 	assert.NoError(t, err)
+}
+
+// TestHost_ScopeProbeFailureRefusesOnlyThatInstance: a failed scope
+// identification refuses only its own instance (it has no scope group).
+func TestHost_ScopeProbeFailureRefusesOnlyThatInstance(t *testing.T) {
+	f := newFixture(t)
+	f.daemons["docker-a"] = "shared-daemon"
+	f.daemons["docker-b"] = "shared-daemon"
+	f.probeErr["docker-b"] = brokeridentity.ErrExecutionScopeUnidentified
+	h, err := New(f.config(t, dockerInstance("docker-a", "a"), dockerInstance("docker-b", "b")))
+	require.NoError(t, err)
+	require.NoError(t, h.Prepare(context.Background()))
+	st := statusByKey(h)
+	assert.Equal(t, StateActive, st["docker-a"].State)
+	assert.Equal(t, StateRefused, st["docker-b"].State)
 }
 
 func TestHost_RefusalRejectsOnlyThatInstance(t *testing.T) {

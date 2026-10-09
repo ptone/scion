@@ -232,7 +232,7 @@ func readScope(t *testing.T, globalDir, key string) brokeridentity.ExecutionScop
 	return id.ExecutionScope
 }
 
-func TestFlatKubernetes_SameClusterAndNamespaceIsAConflictGroup(t *testing.T) {
+func TestFlatKubernetes_SameClusterAndNamespaceActivatesEveryInstance(t *testing.T) {
 	clearK8sEnv(t)
 	dir := t.TempDir()
 	c := newFakeKubeCluster(t, "uid-shared")
@@ -240,14 +240,11 @@ func TestFlatKubernetes_SameClusterAndNamespaceIsAConflictGroup(t *testing.T) {
 	kc2 := writeTestKubeconfigFile(t, dir, "two.kubeconfig", c.URL)
 
 	h, act := prepareK8sHost(t, t.TempDir(), k8sInstance("k8s-a", kc1, "agents"), k8sInstance("k8s-b", kc2, "agents"), k8sInstance("k8s-c", kc1, "other"))
-	assert.Equal(t, brokerhost.StateRefused, statusOf(h, "k8s-a").State)
-	assert.Equal(t, brokerhost.StateRefused, statusOf(h, "k8s-b").State)
-	assert.Equal(t, brokerhost.StateActive, statusOf(h, "k8s-c").State, "another namespace is another scope")
-	var sc *brokerhost.ScopeConflictError
-	require.True(t, errors.As(act.refused["k8s-a"], &sc))
-	assert.Equal(t, []string{"k8s-a", "k8s-b"}, sc.Instances)
-	assert.NotContains(t, act.activated, "k8s-a")
-	assert.NotContains(t, act.activated, "k8s-b")
+	for _, k := range []string{"k8s-a", "k8s-b", "k8s-c"} {
+		assert.Equal(t, brokerhost.StateActive, statusOf(h, k).State, k)
+		assert.Contains(t, act.activated, k)
+	}
+	assert.NotEqual(t, act.activated["k8s-a"].RuntimeBrokerID, act.activated["k8s-b"].RuntimeBrokerID, "one identity per instance")
 }
 
 func TestFlatKubernetes_UnidentifiedScopeRefusesOnlyThatInstance(t *testing.T) {

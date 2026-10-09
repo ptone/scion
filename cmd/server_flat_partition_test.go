@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"sync"
 	"testing"
 
@@ -89,15 +90,35 @@ func partitionObject(owner, agentID, slug, id string) api.AgentInfo {
 // owner-filtered manager.
 func preparePartitionHost(t *testing.T, globalDir string, d *partitionDaemon, key string) *brokerhost.Host {
 	t.Helper()
+	return preparePartitionHostOn(t, globalDir, map[string]*partitionDaemon{key: d}, nil)
+}
+
+// preparePartitionHostOn prepares a host with one instance per key, each
+// on its daemon, with the production preflight and ownership keys. scopes
+// gives an instance's daemon ID (default "shared-daemon"); instances with
+// one daemon ID share an execution scope.
+func preparePartitionHostOn(t *testing.T, globalDir string, daemons map[string]*partitionDaemon, scopes map[string]string) *brokerhost.Host {
+	t.Helper()
+	var instances []config.V1RuntimeBrokerInstanceConfig
+	for key := range daemons {
+		instances = append(instances, config.V1RuntimeBrokerInstanceConfig{Key: key, Name: key, RuntimeTarget: &config.V1RuntimeTargetConfig{Type: "docker"}})
+	}
+	sort.Slice(instances, func(i, j int) bool { return instances[i].Key < instances[j].Key })
 	h, err := brokerhost.New(brokerhost.Config{
 		GlobalDir: globalDir,
-		Instances: []config.V1RuntimeBrokerInstanceConfig{{Key: key, Name: key, RuntimeTarget: &config.V1RuntimeTargetConfig{Type: "docker"}}},
+		Instances: instances,
 		Mode:      brokerhost.ModeColocated,
-		NewRuntime: func(context.Context, config.V1RuntimeBrokerInstanceConfig) (runtime.Runtime, error) {
-			return d.runtime(), nil
+		NewRuntime: func(_ context.Context, in config.V1RuntimeBrokerInstanceConfig) (runtime.Runtime, error) {
+			return daemons[in.Key].runtime(), nil
 		},
-		ProbeScope: fakeScopeProber("shared-daemon"),
-		Activator:  &recordingFlatActivator{},
+		ProbeScope: func(_ context.Context, in config.V1RuntimeBrokerInstanceConfig, _ runtime.Runtime) (brokeridentity.ExecutionScope, error) {
+			id := scopes[in.Key]
+			if id == "" {
+				id = "shared-daemon"
+			}
+			return brokeridentity.ExecutionScope{Type: "docker", Docker: &brokeridentity.DockerScope{DaemonID: id}}, nil
+		},
+		Activator: &recordingFlatActivator{},
 		BuildServer: func(ic brokerhost.InstanceContext) (*runtimebroker.Server, error) {
 			cfg := runtimebroker.DefaultServerConfig()
 			cfg.BrokerID = ic.Identity.RuntimeBrokerID

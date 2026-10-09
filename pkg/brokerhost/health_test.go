@@ -65,7 +65,6 @@ func TestHostHealth_ReasonCodesOnly(t *testing.T) {
 
 func TestReasonCode(t *testing.T) {
 	for want, err := range map[string]error{
-		"scope_conflict":                          &ScopeConflictError{InstanceKey: "a"},
 		api.ErrCodeRuntimeTargetAckMissing:        fmt.Errorf("x: %w", &brokeridentity.AckError{Code: api.ErrCodeRuntimeTargetAckMissing}),
 		"scope_unidentified":                      fmt.Errorf("x: %w", brokeridentity.ErrExecutionScopeUnidentified),
 		"scope_changed":                           fmt.Errorf("x: %w", brokeridentity.ErrExecutionScopeChanged),

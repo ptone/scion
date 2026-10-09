@@ -205,7 +205,7 @@ type InstanceStatus struct {
 	RuntimeTargetID string `json:"runtimeTargetId,omitempty"`
 	State           State  `json:"state"`
 	// Reason is a stable reason code for a refused or stopped instance
-	// (for example scope_conflict, not_registered, runtime_target_ack_missing,
+	// (for example ownership_unresolved, not_registered, runtime_target_ack_missing,
 	// scope_unidentified). It is what health responses show.
 	Reason string `json:"reason,omitempty"`
 	// Error is the full refusal text for in-process callers and logs. It
@@ -307,6 +307,9 @@ func (h *Host) Prepare(ctx context.Context) error {
 	// per-candidate fields below are written without h.mu; state changes
 	// visible through Status take it.
 	var candidates []*instance
+	// unresolvedScopes maps an execution scope to the instances whose
+	// ownership on it is unresolved.
+	unresolvedScopes := map[string][]string{}
 	for _, in := range h.instances {
 		rt, err := h.cfg.NewRuntime(ctx, in.cfg)
 		if err != nil {
@@ -331,6 +334,7 @@ func (h *Host) Prepare(ctx context.Context) error {
 		if h.cfg.OwnershipPreflight != nil {
 			if err := h.cfg.OwnershipPreflight(ctx, Candidate{Instance: in.cfg, Identity: id, Runtime: rt, StateDir: stateDir}); err != nil {
 				h.refuse(in, WithReason("ownership_unresolved", fmt.Errorf("flat Runtime Broker instance %q: %w", in.cfg.Key, err)))
+				unresolvedScopes[ScopeKey(scope)] = append(unresolvedScopes[ScopeKey(scope)], in.cfg.Key)
 				continue
 			}
 		}
@@ -338,6 +342,7 @@ func (h *Host) Prepare(ctx context.Context) error {
 		if h.cfg.OwnershipKeys != nil {
 			if ownKeys, err = h.cfg.OwnershipKeys(ctx, Candidate{Instance: in.cfg, Identity: id, Runtime: rt, StateDir: stateDir}); err != nil {
 				h.refuse(in, WithReason("ownership_unresolved", fmt.Errorf("flat Runtime Broker instance %q: reading its ownership records: %w", in.cfg.Key, err)))
+				unresolvedScopes[ScopeKey(scope)] = append(unresolvedScopes[ScopeKey(scope)], in.cfg.Key)
 				continue
 			}
 		}
@@ -345,37 +350,29 @@ func (h *Host) Prepare(ctx context.Context) error {
 		candidates = append(candidates, in)
 	}
 
-	// Conflict groups: every member of a group sharing one execution scope
-	// is refused; no order-based winner.
-	groups := map[string][]*instance{}
-	var order []string
-	for _, in := range candidates {
-		k := ScopeKey(in.scope)
-		if _, seen := groups[k]; !seen {
-			order = append(order, k)
-		}
-		groups[k] = append(groups[k], in)
-	}
+	// Instances may share an execution scope: runtime inventory, workspaces,
+	// mounts and caches are partitioned or coordinated by instance. Unresolved
+	// ownership on a scope (an unlabeled or incompletely labelled object, or
+	// unreadable records, of any instance) refuses EVERY configured instance
+	// on that scope, decided here, before any instance activates; instances
+	// on other scopes are unaffected. A failed scope probe refuses only its
+	// own instance (it has no scope).
 	var eligible []*instance
-	for _, k := range order {
-		members := groups[k]
-		if len(members) == 1 {
-			eligible = append(eligible, members[0])
+	for _, in := range candidates {
+		if blocked := unresolvedScopes[ScopeKey(in.scope)]; len(blocked) > 0 {
+			sort.Strings(blocked)
+			h.refuse(in, WithReason("ownership_unresolved", fmt.Errorf(
+				"flat Runtime Broker instance %q not activated: ownership on its execution scope %s is unresolved (instances %s); "+
+					"drain or recreate the unresolved agents through the Runtime Broker that created them",
+				in.cfg.Key, ScopeKey(in.scope), strings.Join(blocked, ", "))))
 			continue
 		}
-		keys := make([]string, 0, len(members))
-		for _, m := range members {
-			keys = append(keys, m.cfg.Key)
-		}
-		sort.Strings(keys)
-		for _, m := range members {
-			h.refuse(m, &ScopeConflictError{InstanceKey: m.cfg.Key, Scope: k, Instances: keys})
-		}
+		eligible = append(eligible, in)
 	}
 
 	// Ownership keys claimed by more than one instance that passed pass 1
-	// (including members of a refused scope-conflict group, whose records
-	// still exist) are conflicting for every claimant.
+	// (including instances refused for their scope's unresolved ownership,
+	// whose records still exist) are conflicting for every claimant.
 	conflicts := map[string]map[string]bool{} // instance key -> conflicting ownership keys
 	{
 		claims := map[string][]string{}
@@ -432,21 +429,6 @@ func (h *Host) Prepare(ctx context.Context) error {
 		ic.Logger.Info("Runtime Broker instance activated", "runtimeTarget", in.identity.RuntimeTarget.ID)
 	}
 	return nil
-}
-
-// ScopeConflictError refuses an instance whose execution scope is shared by
-// another configured instance. It is temporary: it is lifted once runtime
-// inventory and the shared host resources are partitioned by instance.
-type ScopeConflictError struct {
-	InstanceKey string
-	Scope       string
-	Instances   []string
-}
-
-func (e *ScopeConflictError) Error() string {
-	return fmt.Sprintf("flat Runtime Broker instance %q not activated: its execution scope %s is shared by instances %s; "+
-		"instances on one execution scope cannot be hosted together in this release. Configure each instance on its own scope",
-		e.InstanceKey, e.Scope, strings.Join(e.Instances, ", "))
 }
 
 // ScopeKey is the identity part of an execution scope (contract section 5):
@@ -863,10 +845,6 @@ func ReasonCode(err error) string {
 	var re *ReasonError
 	if errors.As(err, &re) && re.Reason != "" {
 		return re.Reason
-	}
-	var sc *ScopeConflictError
-	if errors.As(err, &sc) {
-		return "scope_conflict"
 	}
 	var ack *brokeridentity.AckError
 	if errors.As(err, &ack) && ack.Code != "" {
