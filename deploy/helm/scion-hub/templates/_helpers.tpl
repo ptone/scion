@@ -603,8 +603,9 @@ database.driver is postgres (Cloud SQL).
   renders a Cloud SQL database URL, and MigrateWithSchemaLock takes
   pg_advisory_lock before migrating. A second pod starting while the first holds
   the lock waits behind it, and that wait is unbounded in the way a lock is
-  unbounded. Under sqlite no lock is taken: pkg/provision/provision.go's Locker
-  is documented as "on SQLite it's a no-op (single-writer serializes already)".
+  unbounded. Under sqlite no lock is taken: MigrateWithSchemaLock
+  (pkg/store/entadapter/migrate_lock.go:35-39) calls Migrate directly for every
+  dialect that is not postgres, because SQLite is single-writer.
 
 SO WHAT IS THE 300 ITSELF? A MARGIN, NOT A MEASUREMENT, and it says so rather than
 being left to look like one. Nothing in this tree derives 300s from a timed
