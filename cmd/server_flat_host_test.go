@@ -469,6 +469,7 @@ type ccTestRig struct {
 
 func newCCTestRig(t *testing.T) *ccTestRig {
 	t.Helper()
+	isolateAgentFiles(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	s := newTestStore(t)

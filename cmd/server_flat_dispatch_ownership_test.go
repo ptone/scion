@@ -20,6 +20,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -43,6 +44,7 @@ import (
 // immutable Hub agent ID, which the instance records as the ownership key
 // (ptone/scion#3274). The slug is never the key.
 func TestFlatOwnership_RealHubDispatchCarriesBothIDs(t *testing.T) {
+	isolateAgentFiles(t)
 	ctx := context.Background()
 	s := newTestStore(t)
 	srv := flatAuthTestHub(t, s)
@@ -165,4 +167,16 @@ func TestFlatOwnership_RealControlChannelDispatchCarriesBothIDs(t *testing.T) {
 	_, ok, err := runtimebroker.NewOwnershipStore(r.stateDirs[other.RuntimeBrokerID], other.RuntimeBrokerID).Get(project.ID, agent.ID)
 	require.NoError(t, err)
 	assert.False(t, ok)
+}
+
+// isolateAgentFiles points HOME and the working directory at temporary
+// directories, so an agent the test provisions through a real manager never
+// lands in the repository's own .scion.
+func isolateAgentFiles(t *testing.T) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	wd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(t.TempDir()))
+	t.Cleanup(func() { _ = os.Chdir(wd) })
 }
