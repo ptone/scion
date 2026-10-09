@@ -18,11 +18,15 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // Run fencing of a flat instance's delete and cleanup paths
@@ -126,9 +130,14 @@ func TestFlatRunFence_OldRunDeleteSparesNewerRun(t *testing.T) {
 // TestFlatRunFence_NoDeleteOrCleanupPathActsOnNewerRun is the invariant:
 // every delete and cleanup path of the operation matrix (deleteAgentFenced
 // in each mode, the leftover cleanup on both of its branches, the sync
-// start undo, the async launch cleanup and the delete record transition),
-// fenced to the old run, leaves the newer run, its objects, the record and
-// the slug alone. A new delete or cleanup path belongs in this table.
+// start undo, the async launch cleanup, the aborted launch's file cleanup
+// and the delete record transition), fenced to the old run, leaves the
+// newer run, its objects, its files, the record and the slug alone. The
+// sync create's start-failure file cleanup applies the same run-owner check
+// inside the create handler and is covered there
+// (TestSyncCreateFailure_RemovesOnlyItsOwnRunsFiles in
+// delete_run_files_test.go). A new delete or cleanup path belongs in this
+// table.
 func TestFlatRunFence_NoDeleteOrCleanupPathActsOnNewerRun(t *testing.T) {
 	deleteURL := "/api/v1/agents/worker?projectId=proj-1&runId=" + fenceOldRun
 	rows := []struct {
@@ -164,6 +173,29 @@ func TestFlatRunFence_NoDeleteOrCleanupPathActsOnNewerRun(t *testing.T) {
 			rec := &launchRecord{ID: "launch-old", AgentID: "agent-a1", RunID: fenceOldRun,
 				Handles: []agent.ResourceHandle{{Kind: api.ResourceKindContainer, Name: "worker", UID: "cid-a1"}}}
 			f.a.srv.cleanupLaunchResources(f.a.mgr, rec)
+		}},
+		{"aborted launch file cleanup of the old launch", false, func(t *testing.T, f *partitionFixture) {
+			// The agent's files are the newer run's; the old launch's marker
+			// still matches it, so only the run-owner check protects them.
+			projectDir := t.TempDir()
+			agentDir := filepath.Join(projectDir, "agents", "worker")
+			if err := os.MkdirAll(agentDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			recordRun(t, projectDir, "worker", fenceNewRun)
+			if err := writeLaunchMarker(projectDir, false, "worker", "launch-old"); err != nil {
+				t.Fatal(err)
+			}
+			rec := newLaunchRecord("launch-old", "agent-a1", store.LaunchKindCreate, "", time.Now().Add(time.Minute), func() {})
+			rec.RunID = fenceOldRun
+			f.a.srv.cleanupAbortedLaunch(f.a.mgr, rec, launchCtx{
+				opts: api.StartOptions{Name: "worker", ProjectPath: projectDir, RunID: fenceOldRun},
+				mgr:  f.a.mgr,
+				key:  launchKey{ProjectID: "proj-1", Slug: "worker"},
+			})
+			if _, err := os.Stat(agentDir); err != nil {
+				t.Errorf("the old launch's cleanup removed the newer run's files: %v", err)
+			}
 		}},
 		{"delete record transition", false, func(t *testing.T, f *partitionFixture) {
 			od, err := f.a.srv.beginOwnedDelete("proj-1", "worker", fenceOldRun, true, true)
