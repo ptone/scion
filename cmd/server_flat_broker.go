@@ -30,7 +30,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokeridentity"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -150,16 +152,28 @@ func warnUnhostedFlatIdentities(globalDir string) {
 }
 
 // flatInstanceCapabilities are the embedded flat instance's capabilities on
-// its Docker runtime (the same set the legacy embedded registration
-// reports for its runtime).
+// its runtime: the same static set its heartbeat reports
+// (runtimebroker.StaticCapabilities), so registration and heartbeat never
+// disagree.
 func flatInstanceCapabilities(rt runtime.Runtime) *store.BrokerCapabilities {
+	return storeBrokerCapabilities(runtimebroker.StaticCapabilities(rt))
+}
+
+// storeBrokerCapabilities converts the broker's reported capabilities to
+// the stored form, field for field.
+func storeBrokerCapabilities(c *hubclient.BrokerCapabilities) *store.BrokerCapabilities {
+	if c == nil {
+		return nil
+	}
 	return &store.BrokerCapabilities{
-		WebPTY:                 false,
-		Sync:                   true,
-		Attach:                 runtime.HasAttachSupport(rt),
-		Reprovision:            true,
-		AsyncLaunch:            true,
-		EmptyPerAgentWorkspace: runtime.HasEmptyPerAgentSupport(rt),
-		AgentMove:              false,
+		WebPTY:                   c.WebPTY,
+		Sync:                     c.Sync,
+		Attach:                   c.Attach,
+		Reprovision:              c.Reprovision,
+		AsyncLaunch:              c.AsyncLaunch,
+		EmptyPerAgentWorkspace:   c.EmptyPerAgentWorkspace,
+		AgentMove:                c.AgentMove,
+		ReprovisionEmptyPerAgent: c.ReprovisionEmptyPerAgent,
+		StartsInFlight:           c.StartsInFlight,
 	}
 }
