@@ -62,6 +62,7 @@ type WorkspaceLocks struct {
 	mu      sync.Mutex
 	held    map[string]int // canonical key -> holders (always 1 while held)
 	changed chan struct{}  // closed and replaced on every release
+	waiters []*lockWaiter  // waiting requests, in arrival order
 
 	// users report, per server, what it uses in shared project
 	// directories (a flat instance: its ownership records), so a project
@@ -256,35 +257,85 @@ func overlaps(a, b string) bool {
 	return strings.HasPrefix(a, strings.TrimSuffix(b, sep)+sep) || strings.HasPrefix(b, strings.TrimSuffix(a, sep)+sep)
 }
 
+// lockWaiter is a Lock request waiting for its keys.
+type lockWaiter struct{ keys []string }
+
 // Lock acquires every path (empty paths are ignored) and returns the
 // release function, which is safe to call more than once. It waits until
-// no held key overlaps any requested key and then takes them all; it
-// returns ctx's error (holding nothing) if ctx ends first. Nested Lock calls
-// by one holder on overlapping paths deadlock, as with sync.Mutex: take
-// every path an operation needs in one call.
+// no held key overlaps any requested key and no earlier waiting request
+// overlaps it, and then takes them all; it returns ctx's error (holding
+// nothing) if ctx ends first. Overlapping requests are admitted in arrival
+// order, so a broad request (a project directory) is not passed
+// indefinitely by a stream of narrower ones inside it. Nested Lock calls by
+// one holder on overlapping paths deadlock, as with sync.Mutex: take every
+// path an operation needs in one call.
 func (l *WorkspaceLocks) Lock(ctx context.Context, paths ...string) (func(), error) {
 	keys, err := canonicalKeys(paths)
 	if err != nil {
 		return nil, err
 	}
+	var me *lockWaiter
 	for {
 		l.mu.Lock()
-		if !l.conflictsLocked(keys) {
+		if !l.conflictsLocked(keys) && !l.overlapsEarlierWaiterLocked(me, keys) {
 			for _, k := range keys {
 				l.held[k]++
 			}
+			l.dequeueLocked(me)
 			l.mu.Unlock()
 			var once sync.Once
 			return func() { once.Do(func() { l.release(keys) }) }, nil
+		}
+		if me == nil {
+			me = &lockWaiter{keys: keys}
+			l.waiters = append(l.waiters, me)
 		}
 		wait := l.changed
 		l.mu.Unlock()
 		select {
 		case <-wait:
 		case <-ctx.Done():
+			// Leaving the queue may admit the requests behind this one.
+			l.mu.Lock()
+			l.dequeueLocked(me)
+			l.broadcastLocked()
+			l.mu.Unlock()
 			return nil, fmt.Errorf("workspace lock on %s: %w", strings.Join(keys, ", "), ctx.Err())
 		}
 	}
+}
+
+// overlapsEarlierWaiterLocked reports whether a request waiting ahead of me
+// (every waiting request when me has not queued yet) overlaps keys.
+func (l *WorkspaceLocks) overlapsEarlierWaiterLocked(me *lockWaiter, keys []string) bool {
+	for _, w := range l.waiters {
+		if w == me {
+			return false
+		}
+		for _, a := range w.keys {
+			for _, b := range keys {
+				if overlaps(a, b) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func (l *WorkspaceLocks) dequeueLocked(me *lockWaiter) {
+	for i, w := range l.waiters {
+		if w == me {
+			l.waiters = append(l.waiters[:i], l.waiters[i+1:]...)
+			return
+		}
+	}
+}
+
+// broadcastLocked wakes every waiting request to try again.
+func (l *WorkspaceLocks) broadcastLocked() {
+	close(l.changed)
+	l.changed = make(chan struct{})
 }
 
 func canonicalKeys(paths []string) ([]string, error) {
@@ -326,8 +377,7 @@ func (l *WorkspaceLocks) release(keys []string) {
 			delete(l.held, k)
 		}
 	}
-	close(l.changed)
-	l.changed = make(chan struct{})
+	l.broadcastLocked()
 }
 
 // agentFileLockPaths are the shared paths an agent's file operations
