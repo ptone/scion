@@ -15,10 +15,12 @@
 package runtimebroker
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -222,5 +224,41 @@ func TestFlatOwnership_PersistFailureStopsFurtherCreates(t *testing.T) {
 	// checkpoint before the second refused it, so no third.
 	if len(created) != 2 {
 		t.Fatalf("create attempts = %v, want the second refused at its checkpoint", created)
+	}
+}
+
+// TestFlatOwnership_NoBareNameFallbacks: a flat instance never passes an
+// unresolved name to its runtime: a stop of an agent it cannot find is not
+// a runtime call, and logs of an agent without a container are 404.
+func TestFlatOwnership_NoBareNameFallbacks(t *testing.T) {
+	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
+	_ = serveFlat(f.srv, http.MethodPost, "/api/v1/agents/ghost-agent/stop", "")
+	if stops, _ := mgrCalls(f); stops != 0 {
+		t.Fatalf("the bare name reached the runtime: %d stops", stops)
+	}
+
+	// A file-only (no container) owned entry: no logs fallback to its name.
+	f.mgr.mu.Lock()
+	f.mgr.agents = append(f.mgr.agents, api.AgentInfo{Name: "files-only", Phase: "created"})
+	f.mgr.mu.Unlock()
+	w := serveFlat(f.srv, http.MethodGet, "/api/v1/agents/files-only/logs", "")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("logs of an agent without a container: status = %d, want 404: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestFlatOwnership_WorkspacePathNeverPicksAmongSeveral: the workspace
+// lookup (no project scope in its request) refuses a name several owned
+// agents match instead of taking the first.
+func TestFlatOwnership_WorkspacePathNeverPicksAmongSeveral(t *testing.T) {
+	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
+	f.mgr.mu.Lock()
+	f.mgr.agents = []api.AgentInfo{
+		{Name: "twin", ContainerID: "c-1", ProjectPath: "/p1"},
+		{Name: "twin", ContainerID: "c-2", ProjectPath: "/p2"},
+	}
+	f.mgr.mu.Unlock()
+	if _, err := f.srv.getAgentWorkspacePath(context.Background(), "twin"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("err = %v, want an ambiguity refusal", err)
 	}
 }

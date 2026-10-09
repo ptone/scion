@@ -309,13 +309,25 @@ func (s *Server) getAgentWorkspacePath(ctx context.Context, agentID string) (str
 	var projectPath string
 	var agentName string
 
+	matches := 0
 	for _, agent := range agents {
 		if agent.Name == agentID || agent.ContainerID == agentID || agent.Slug == agentID || strings.EqualFold(agent.Name, agentID) {
+			matches++
+			if matches > 1 {
+				continue
+			}
 			containerID = agent.ContainerID
 			projectPath = agent.ProjectPath
 			agentName = agent.Name
-			break
+			if !s.isFlat() {
+				break
+			}
 		}
+	}
+	// A flat instance never picks one of several owned agents matching the
+	// name (the request carries no project scope here).
+	if s.isFlat() && matches > 1 {
+		return "", fmt.Errorf("agent %q is ambiguous: %d owned agents match", agentID, matches)
 	}
 
 	if containerID == "" {
