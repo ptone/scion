@@ -580,13 +580,11 @@ stops the reader thinking: an operator lowering periodSeconds for faster
 readiness detection reads "at least 60", sees failureThreshold: 60 untouched, and
 has cut the first-boot budget by 80% with nothing to tell them.
 
-WHY 300 SECONDS. THE HARM HAS TWO HALVES AND ONLY ONE OF THEM IS PRESENT-TENSE ON
-THIS CHART. Each is written in its own tense, because an earlier version of this
-paragraph gave the Cloud SQL half as the live justification and the round-4
-axis-(d) sweep caught it: the number was being defended by a mechanism this chart
-never reaches.
+WHY 300 SECONDS. THE HARM HAS TWO HALVES, ONE PER DATABASE DRIVER. The ordered
+sequence below applies to both drivers; the blocking lock applies only when
+database.driver is postgres (Cloud SQL).
 
-  PRESENT TENSE, ON THIS CHART, TODAY - THE ORDERED SEQUENCE. First boot runs a
+  BOTH DRIVERS - THE ORDERED SEQUENCE. First boot runs a
   sequence of schema and data migration steps before the listener binds, and a
   kill lands BETWEEN two of them. "Partially applied" is not an inference from the
   word migration: CompositeStore.Migrate (pkg/store/entadapter/composite.go)
@@ -594,33 +592,28 @@ never reaches.
   data migration, a verification-status backfill and a seed, with in-source
   comments on its backfill and dedup steps stating that the order matters and why. The
   retry then starts from a different state than the attempt before it, and the
-  failure stops being reproducible. THIS HALF RUNS ON SQLITE: migrateStore
-  (cmd/server_foreground.go) delegates to CompositeStore.MigrateWithSchemaLock
-  (pkg/store/entadapter/migrate_lock.go), which calls Migrate directly for every
-  dialect that is not postgres, and this chart's driver IS sqlite - it renders no
-  --db, so the sqlite default in DefaultGlobalConfig (pkg/config/hub_config.go)
-  stands.
+  failure stops being reproducible. migrateStore (cmd/server_foreground.go)
+  delegates to CompositeStore.MigrateWithSchemaLock
+  (pkg/store/entadapter/migrate_lock.go), which runs Migrate under either driver:
+  directly for sqlite (the default - the chart then renders no database URL, so
+  the sqlite default in DefaultGlobalConfig, pkg/config/hub_config.go, stands),
+  and inside the lock below for postgres.
 
-  THE CLOUD SQL PHASE, NOT THIS ONE - THE BLOCKING LOCK. pg_advisory_lock is not
-  taken here and cannot be. The postgres branch of MigrateWithSchemaLock is its only
-  caller, pkg/provision/provision.go's Locker is documented as "on SQLite it's a
-  no-op (single-writer serializes already)", and MigrateWithSchemaLock's own doc
-  comment says the same thing from the other side. When the Cloud SQL values land the lock becomes
-  real, the wait becomes unbounded in the way a lock is unbounded, and 300s stops
-  being a margin and starts being a bound. RE-DERIVE IT THERE.
-
-  This is the same treatment updateStrategyType gets below, for the same reason: a
-  harm that arrives with a later phase is written in that phase's tense, or it is
-  read as a present-tense claim and audited as false.
+  POSTGRES ONLY - THE BLOCKING LOCK. With database.driver: postgres the chart
+  renders a Cloud SQL database URL, and MigrateWithSchemaLock takes
+  pg_advisory_lock before migrating. A second pod starting while the first holds
+  the lock waits behind it, and that wait is unbounded in the way a lock is
+  unbounded. Under sqlite no lock is taken: pkg/provision/provision.go's Locker
+  is documented as "on SQLite it's a no-op (single-writer serializes already)".
 
 SO WHAT IS THE 300 ITSELF? A MARGIN, NOT A MEASUREMENT, and it says so rather than
-being left to look like one. Nothing in this tree derives 300s from a timed SQLite
+being left to look like one. Nothing in this tree derives 300s from a timed
 migration, and on an empty SQLite database the sequence above is fast. The number
-is sized for the case the chart is being built toward - a first boot against a
-cold Cloud SQL instance, behind that lock - and it costs the SQLite case nothing,
-because a healthy hub passes the startup probe on the first or second check and
-never approaches the budget. What the guard buys today is that nobody shrinks the
-budget quietly while the phases that will need it are still being added.
+is sized for a first boot against a cold Cloud SQL instance, behind that lock,
+and it costs the SQLite case nothing, because a healthy hub passes the startup
+probe on the first or second check and never approaches the budget. Under
+postgres the guard keeps the budget from being shrunk below that margin; it has
+not been re-derived from a measured Cloud SQL first boot.
 
 DISABLING THE STARTUP PROBE IS PERMITTED ONLY WHILE THE LIVENESS PROBE IS OFF,
 which is a real distinction and not a loophole. A startup probe's job is to hold

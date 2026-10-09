@@ -84,9 +84,12 @@ updateStrategy:
   # argument for not telling an operator that the choice is free of data
   # consequences, because it is not.
   #
-  # It changes again when the Cloud SQL and Filestore values arrive - a shared
-  # database and a shared volume are exactly what they add - and the hub
-  # coordinates concurrent instances through Postgres advisory locks when they do.
+  # It is different with database.driver: postgres. The database is then the
+  # shared Cloud SQL instance rather than a per-pod file, so both pods in the
+  # RollingUpdate window read and write the same state, and the hub coordinates
+  # concurrent instances through Postgres advisory locks. The chart mounts no
+  # shared volume in either case; the Filestore workspace share is not rendered
+  # by this chart.
   #
   # THE HOSTED HA PREFLIGHT IS A SEPARATE QUESTION AND IT DOES RUN. This
   # paragraph used to end "and the hub's hosted HA preflight does not run at any
@@ -667,7 +670,7 @@ cloudsql:
 storage:
   # The hub's blob store: task artifacts, uploads, agent output. This is NOT the
   # workspace share that agent pods mount - that is a separate subsystem, on
-  # Filestore, added by a later change.
+  # Filestore, and this chart does not render it (server.workspace_storage).
   #
   # local keeps blobs in the hub's home directory, which no other replica can
   # read. gcs is required for a multi-replica or hosted deployment and is
