@@ -133,7 +133,8 @@ func TestFlatRegistration_StaleAutoProvideDecisionRefused(t *testing.T) {
 
 // TestFlatRegistration_EmbeddedAutoProvideComesFromOperatorConfig: the
 // co-located registration stores the in-process operator configuration's
-// auto-provide without a caller permission check, and links nothing.
+// auto-provide without a caller permission check, and links nothing (no
+// project gets the flat row as a provider).
 func TestFlatRegistration_EmbeddedAutoProvideComesFromOperatorConfig(t *testing.T) {
 	f := newFlatRegFixture(t, true)
 	id := &brokeridentity.Identity{
@@ -150,4 +151,14 @@ func TestFlatRegistration_EmbeddedAutoProvideComesFromOperatorConfig(t *testing.
 		EmbeddedFlatRegistrationOptions{Endpoint: "http://localhost:9800", AutoProvide: true})
 	require.NoError(t, err)
 	assert.True(t, row.AutoProvide)
+	// It links nothing: no project has the flat row as a provider.
+	projects, err := f.s.ListProjects(context.Background(), store.ProjectFilter{}, store.ListOptions{})
+	require.NoError(t, err)
+	for _, p := range projects.Items {
+		providers, err := f.s.GetProjectProviders(context.Background(), p.ID)
+		require.NoError(t, err)
+		for _, pr := range providers {
+			assert.NotEqual(t, row.ID, pr.BrokerID, "project %s got a provider link to the flat row", p.Slug)
+		}
+	}
 }
