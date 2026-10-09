@@ -84,12 +84,14 @@ func TestFlatInstanceServerConfig(t *testing.T) {
 // instance of a host gets the same process-wide workspace lock service.
 func TestFlatInstanceServerConfig_SharesOneWorkspaceLockService(t *testing.T) {
 	locks := runtimebroker.NewWorkspaceLocks()
-	sh := flatServerShared{cfg: &config.GlobalConfig{}, mode: brokerhost.ModeRemote, multiInstance: true, workspaceLocks: locks}
+	caches := &runtimebroker.SharedCaches{}
+	sh := flatServerShared{cfg: &config.GlobalConfig{}, mode: brokerhost.ModeRemote, multiInstance: true, workspaceLocks: locks, sharedCaches: caches}
 	for _, key := range []string{"docker-a", "docker-b"} {
 		id := &brokeridentity.Identity{InstanceKey: key, RuntimeBrokerID: "rb-" + key}
 		inst := config.V1RuntimeBrokerInstanceConfig{Key: key, Name: key, RuntimeTarget: &config.V1RuntimeTargetConfig{Type: "docker"}}
 		c := flatInstanceServerConfig(sh, brokerhost.InstanceContext{Instance: inst, Identity: id, Activation: &brokerhost.Activation{}})
 		assert.Same(t, locks, c.WorkspaceLocks, key)
+		assert.Same(t, caches, c.SharedCaches, "every instance uses the host's caches: %s", key)
 	}
 }
 

@@ -210,6 +210,11 @@ type ServerConfig struct {
 	// Kubernetes or Cloud Run instance keeps its own verify-only check.
 	NFSHostMounter *HostNFSMounter
 
+	// SharedCaches, when set, are the host's caches shared by every
+	// instance (P2.3 S4): the server uses them instead of opening its own,
+	// and never closes them (the host does).
+	SharedCaches *SharedCaches
+
 	// WorkspaceLocks coordinates operations on shared local paths with
 	// every other Runtime Broker server of the process (P2.3 S2). The flat
 	// host passes one service to all its instances; nil gives this server
@@ -675,6 +680,11 @@ func (s *Server) SwapRuntime(rt scionrt.Runtime) {
 
 // initHubIntegration initializes the shared template cache and hub connections.
 func (s *Server) initHubIntegration() error {
+	if sc := s.config.SharedCaches; sc != nil {
+		// The host's caches, one object per directory for every instance.
+		s.cache, s.hcCache, s.skCache, s.ghResolutionCache = sc.Templates, sc.HarnessConfigs, sc.Skills, sc.GitHub
+		return s.initHubConnections()
+	}
 	// 1. Initialize shared template cache
 	cacheDir := s.config.TemplateCacheDir
 	if cacheDir == "" {
@@ -732,6 +742,12 @@ func (s *Server) initHubIntegration() error {
 		}
 	}
 
+	slog.Info("Broker caches initialized", "cache", cacheDir, "max_size_mb", maxSize/(1024*1024))
+	return s.initHubConnections()
+}
+
+// initHubConnections sets up the hub connections (after the caches).
+func (s *Server) initHubConnections() error {
 	// 2. Initialize hub connections map (already done in New)
 
 	// 3. Handle InMemoryCredentials -> "local" connection (co-located mode)
@@ -858,8 +874,7 @@ func (s *Server) initHubIntegration() error {
 
 	slog.Info("Hub integration initialized",
 		"connections", len(s.hubConnections),
-		"cache", cacheDir,
-		"max_size_mb", maxSize/(1024*1024),
+		"shared_caches", s.config.SharedCaches != nil,
 	)
 
 	return nil
@@ -1433,8 +1448,8 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// bound derived from it would already be cancelled here.
 	parentCtx := ctx
 	defer func() {
-		if s.ghResolutionCache == nil {
-			return
+		if s.ghResolutionCache == nil || s.config.SharedCaches != nil {
+			return // none, or the host's, which the host closes
 		}
 		closeCtx, cancel := context.WithTimeout(parentCtx, ghResolutionCacheCloseTimeout)
 		defer cancel()

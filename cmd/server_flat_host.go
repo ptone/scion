@@ -393,6 +393,13 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 		shared.nfsMounter = runtimebroker.NewHostNFSMounter(nil, logging.Subsystem("broker.nfs-mount"))
 		hostServices = append(hostServices, shared.nfsMounter)
 	}
+	// One cache object per cache directory for every instance (P2.3 S4).
+	caches, err := runtimebroker.NewSharedCaches(templateCacheDir, templateCacheMax)
+	if err != nil {
+		return fmt.Errorf("opening the host's broker caches: %w", err)
+	}
+	shared.sharedCaches = caches
+	hostServices = append(hostServices, caches)
 	if p.hubSrv != nil {
 		shared.colocatedStorage = p.hubSrv.GetStorage()
 	}
@@ -601,6 +608,8 @@ type flatServerShared struct {
 	workspaceLocks *runtimebroker.WorkspaceLocks
 	// nfsMounter is the host's single NFS mount owner (nil without NFS).
 	nfsMounter *runtimebroker.HostNFSMounter
+	// sharedCaches are the host's caches, one object per directory.
+	sharedCaches *runtimebroker.SharedCaches
 	// containerHub resolves an instance runtime's container Hub settings
 	// (nil: none).
 	containerHub func(rtName string) containerHubEndpointResult
@@ -672,6 +681,7 @@ func flatInstanceServerConfig(sh flatServerShared, ic brokerhost.InstanceContext
 	// The host's single NFS mount owner (P2.3 S3): host-bind instances
 	// register with it instead of mounting themselves.
 	rhCfg.NFSHostMounter = sh.nfsMounter
+	rhCfg.SharedCaches = sh.sharedCaches
 	return rhCfg
 }
 
