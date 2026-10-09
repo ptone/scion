@@ -21,6 +21,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,18 +29,25 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/knadh/koanf/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokerhost"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokeridentity"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokerregistration"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 )
 
 func TestFlatHostMode_SimulatedRemoteTakesRemotePath(t *testing.T) {
@@ -273,4 +281,261 @@ func TestBrokerRegisterInstance_UnknownKeyRefused(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `no Runtime Broker instance with key "not-configured"`)
 	assert.Empty(t, hub.bodies, "nothing is sent to the Hub")
+}
+
+// colocatedTestHost prepares a co-located host over hubSrv for instances,
+// each on its own fake Docker daemon.
+func colocatedTestHost(t *testing.T, hubSrv *hub.Server, globalDir string, insts ...config.V1RuntimeBrokerInstanceConfig) *brokerhost.Host {
+	t.Helper()
+	h, err := brokerhost.New(brokerhost.Config{
+		GlobalDir:  globalDir,
+		Instances:  insts,
+		Mode:       brokerhost.ModeColocated,
+		NewRuntime: newFlatInstanceRuntime,
+		ProbeScope: func(_ context.Context, inst config.V1RuntimeBrokerInstanceConfig, _ runtime.Runtime) (brokeridentity.ExecutionScope, error) {
+			return brokeridentity.ExecutionScope{Type: "docker", Docker: &brokeridentity.DockerScope{DaemonID: "daemon-" + inst.Key}}, nil
+		},
+		Activator: &colocatedFlatActivator{hubSrv: hubSrv, endpoint: "http://localhost:9800/"},
+		BuildServer: func(ic brokerhost.InstanceContext) (*runtimebroker.Server, error) {
+			cfg := runtimebroker.DefaultServerConfig()
+			cfg.BrokerID = ic.Identity.RuntimeBrokerID
+			cfg.StateDir = filepath.Join(globalDir, "state", ic.Identity.RuntimeBrokerID)
+			cfg.FlatInstance = &runtimebroker.FlatInstanceConfig{Identity: ic.Identity, Instance: ic.Instance, HubInProcess: true}
+			return runtimebroker.New(cfg, ic.Manager, ic.Runtime), nil
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, h.Prepare(context.Background()))
+	return h
+}
+
+// TestFlatHost_RegisteredEndpointIsPrefixedAndStable: every co-located flat
+// instance, a singleton included, registers its instance-qualified
+// endpoint, and it stays the same when siblings are added and removed.
+func TestFlatHost_RegisteredEndpointIsPrefixedAndStable(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	srv := flatTestHub(t, s, true)
+	globalDir := t.TempDir()
+	a := config.V1RuntimeBrokerInstanceConfig{Key: "docker-a", Name: "a", RuntimeTarget: &config.V1RuntimeTargetConfig{Type: "docker"}}
+	b := config.V1RuntimeBrokerInstanceConfig{Key: "docker-b", Name: "b", RuntimeTarget: &config.V1RuntimeTargetConfig{Type: "docker"}}
+
+	endpointOf := func(h *brokerhost.Host, key string) string {
+		t.Helper()
+		for _, st := range h.Status() {
+			if st.Key == key {
+				require.Equal(t, brokerhost.StateActive, st.State, st.Error)
+				row, err := s.GetRuntimeBroker(ctx, st.RuntimeBrokerID)
+				require.NoError(t, err)
+				return row.Endpoint
+			}
+		}
+		t.Fatalf("no instance %s", key)
+		return ""
+	}
+
+	h := colocatedTestHost(t, srv, globalDir, a)
+	idA := h.Status()[0].RuntimeBrokerID
+	want := "http://localhost:9800/instances/" + idA
+	assert.Equal(t, want, endpointOf(h, "docker-a"), "a singleton registers its prefixed endpoint")
+
+	h = colocatedTestHost(t, srv, globalDir, a, b)
+	assert.Equal(t, want, endpointOf(h, "docker-a"), "unchanged when a sibling is added")
+	assert.Equal(t, "http://localhost:9800/instances/"+statusByKeyCmd(h)["docker-b"].RuntimeBrokerID, endpointOf(h, "docker-b"))
+
+	h = colocatedTestHost(t, srv, globalDir, a)
+	assert.Equal(t, want, endpointOf(h, "docker-a"), "unchanged when the sibling is removed")
+}
+
+func statusByKeyCmd(h *brokerhost.Host) map[string]brokerhost.InstanceStatus {
+	out := map[string]brokerhost.InstanceStatus{}
+	for _, st := range h.Status() {
+		out[st.Key] = st
+	}
+	return out
+}
+
+// TestFlatHost_HubTransportReachesPrefixedInstance proves the whole HTTP
+// chain: the Hub's authenticated broker client appends its routes to each
+// instance's registered (prefixed) endpoint and signs the full path with
+// that instance's secret; the host routes to exactly that instance, which
+// verifies the signature once and answers as it does over the control
+// channel (same status and body for an existing-agent error).
+func TestFlatHost_HubTransportReachesPrefixedInstance(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	srv := flatAuthTestHub(t, s)
+	globalDir := t.TempDir()
+	insts := []config.V1RuntimeBrokerInstanceConfig{
+		{Key: "docker-a", Name: "a", RuntimeTarget: &config.V1RuntimeTargetConfig{Type: "docker"}},
+		{Key: "docker-b", Name: "b", RuntimeTarget: &config.V1RuntimeTargetConfig{Type: "docker"}},
+	}
+	h, err := brokerhost.New(brokerhost.Config{
+		GlobalDir: globalDir,
+		Instances: insts,
+		Mode:      brokerhost.ModeColocated,
+		NewRuntime: func(context.Context, config.V1RuntimeBrokerInstanceConfig) (runtime.Runtime, error) { // a stand-in daemon, so the answer is deterministic
+			return &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, nil
+		},
+		ProbeScope: func(_ context.Context, inst config.V1RuntimeBrokerInstanceConfig, _ runtime.Runtime) (brokeridentity.ExecutionScope, error) {
+			return brokeridentity.ExecutionScope{Type: "docker", Docker: &brokeridentity.DockerScope{DaemonID: "daemon-" + inst.Key}}, nil
+		},
+		Activator: &colocatedFlatActivator{hubSrv: srv, endpoint: "http://localhost:9800"},
+		BuildServer: func(ic brokerhost.InstanceContext) (*runtimebroker.Server, error) {
+			cfg := runtimebroker.DefaultServerConfig()
+			cfg.BrokerID = ic.Identity.RuntimeBrokerID
+			cfg.StateDir = filepath.Join(globalDir, "state", ic.Identity.RuntimeBrokerID)
+			cfg.HubEnabled = true
+			cfg.HubEndpoint = "http://127.0.0.1:1"
+			cfg.InMemoryCredentials = ic.Activation.InMemoryCredentials
+			cfg.FlatInstance = &runtimebroker.FlatInstanceConfig{Identity: ic.Identity, Instance: ic.Instance, HubInProcess: true}
+			return runtimebroker.New(cfg, ic.Manager, ic.Runtime), nil
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, h.Prepare(ctx))
+	require.Len(t, h.Active(), 2)
+	listener := httptest.NewServer(h.Handler())
+	t.Cleanup(listener.Close)
+	client := hub.NewAuthenticatedBrokerClient(s, false)
+
+	for _, a := range h.Active() {
+		id := a.Context.Identity.RuntimeBrokerID
+		row, err := s.GetRuntimeBroker(ctx, id)
+		require.NoError(t, err)
+		require.True(t, strings.HasSuffix(row.Endpoint, "/instances/"+id), row.Endpoint)
+		endpoint := listener.URL + "/instances/" + id
+
+		_, httpErr := client.GetAgentLogs(ctx, id, endpoint, "no-such-agent", "", 0)
+		require.Error(t, httpErr)
+
+		// The same request as the control channel delivers it: unprefixed,
+		// signed by the Hub for that path, to the instance's own handler.
+		secret, err := s.GetBrokerSecret(ctx, id)
+		require.NoError(t, err)
+		ccReq := httptest.NewRequest(http.MethodGet, "/api/v1/agents/no-such-agent/logs", nil)
+		require.NoError(t, (&apiclient.HMACAuth{BrokerID: id, SecretKey: secret.SecretKey}).ApplyAuth(ccReq))
+		rec := httptest.NewRecorder()
+		a.Server.Handler().ServeHTTP(rec, ccReq)
+		assert.Contains(t, httpErr.Error(), strconvItoa(rec.Code), "same status over HTTP and the control channel")
+		assert.Contains(t, httpErr.Error(), strings.TrimSpace(rec.Body.String()), "same body over HTTP and the control channel")
+		assert.NotContains(t, httpErr.Error(), "401", "signature over the prefixed path verified")
+	}
+
+	// One instance's identity on the other's route: refused, not executed.
+	act := h.Active()
+	idA, idB := act[0].Context.Identity.RuntimeBrokerID, act[1].Context.Identity.RuntimeBrokerID
+	_, err = client.GetAgentLogs(ctx, idA, listener.URL+"/instances/"+idB, "no-such-agent", "", 0)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "404")
+}
+
+func strconvItoa(n int) string { return fmt.Sprintf("%d", n) }
+
+// flatAuthTestHub is a Hub with broker HMAC authentication (the default
+// config) and hub.flat_runtime_brokers on.
+func flatAuthTestHub(t *testing.T, s store.Store) *hub.Server {
+	t.Helper()
+	ctx := context.Background()
+	_, err := s.UpsertHubSetting(ctx, "experiments",
+		json.RawMessage(fmt.Sprintf(`{"overrides":{%q:true}}`, experiments.FlatRuntimeBrokers)), "test", -1, "managed")
+	require.NoError(t, err)
+	hubCfg := hub.DefaultServerConfig()
+	hubCfg.DisableCloudLogQuery = true
+	require.True(t, hubCfg.BrokerAuthConfig.Enabled, "the default Hub config signs broker requests")
+	srv, err := hub.New(hubCfg, s)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+	ops := hub.NewOperationalSettings(s, koanf.New("."), koanf.New("."))
+	_, err = ops.Refresh(ctx)
+	require.NoError(t, err)
+	srv.SetOperationalSettings(ops)
+	return srv
+}
+
+// TestFlatHost_ControlChannelTwoInstancesDistinct: two co-located flat
+// instances in one process each hold their own control channel to the Hub;
+// a request tunnelled to one is served by that instance only, and closing
+// one instance's channel leaves the other connected and serving.
+func TestFlatHost_ControlChannelTwoInstancesDistinct(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := newTestStore(t)
+	srv := flatAuthTestHub(t, s)
+	hubTS := httptest.NewServer(srv.Handler())
+	t.Cleanup(hubTS.Close)
+	globalDir := t.TempDir()
+
+	h, err := brokerhost.New(brokerhost.Config{
+		GlobalDir: globalDir,
+		Instances: []config.V1RuntimeBrokerInstanceConfig{
+			{Key: "docker-a", Name: "a", RuntimeTarget: &config.V1RuntimeTargetConfig{Type: "docker"}},
+			{Key: "docker-b", Name: "b", RuntimeTarget: &config.V1RuntimeTargetConfig{Type: "docker"}},
+		},
+		Mode: brokerhost.ModeColocated,
+		NewRuntime: func(context.Context, config.V1RuntimeBrokerInstanceConfig) (runtime.Runtime, error) {
+			return &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, nil
+		},
+		ProbeScope: func(_ context.Context, inst config.V1RuntimeBrokerInstanceConfig, _ runtime.Runtime) (brokeridentity.ExecutionScope, error) {
+			return brokeridentity.ExecutionScope{Type: "docker", Docker: &brokeridentity.DockerScope{DaemonID: "daemon-" + inst.Key}}, nil
+		},
+		Activator: &colocatedFlatActivator{hubSrv: srv, endpoint: "http://localhost:9800", hubEndpoint: hubTS.URL},
+		BuildServer: func(ic brokerhost.InstanceContext) (*runtimebroker.Server, error) {
+			cfg := runtimebroker.DefaultServerConfig()
+			cfg.BrokerID = ic.Identity.RuntimeBrokerID
+			cfg.StateDir = filepath.Join(globalDir, "state", ic.Identity.RuntimeBrokerID)
+			cfg.HubEnabled = true
+			cfg.HubEndpoint = hubTS.URL
+			cfg.ControlChannelEnabled = true
+			cfg.InMemoryCredentials = ic.Activation.InMemoryCredentials
+			cfg.FlatInstance = &runtimebroker.FlatInstanceConfig{Identity: ic.Identity, Instance: ic.Instance, HubInProcess: true}
+			return runtimebroker.New(cfg, ic.Manager, ic.Runtime), nil
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, h.Prepare(ctx))
+	active := h.Active()
+	require.Len(t, active, 2)
+	for _, a := range active {
+		require.NoError(t, a.Server.StartServices(ctx))
+	}
+	mgr := srv.GetControlChannelManager()
+	idA, idB := active[0].Context.Identity.RuntimeBrokerID, active[1].Context.Identity.RuntimeBrokerID
+	require.Eventually(t, func() bool { return mgr.IsConnected(idA) && mgr.IsConnected(idB) }, 10*time.Second, 50*time.Millisecond)
+
+	info := func(id string) (int, string, error) {
+		secret, err := s.GetBrokerSecret(ctx, id)
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodGet, "http://runtime-broker/api/v1/info", nil)
+		require.NoError(t, (&apiclient.HMACAuth{BrokerID: id, SecretKey: secret.SecretKey}).ApplyAuth(req))
+		headers := map[string]string{}
+		for k := range req.Header {
+			headers[k] = req.Header.Get(k)
+		}
+		tctx, tcancel := context.WithTimeout(ctx, 5*time.Second)
+		defer tcancel()
+		resp, err := mgr.TunnelRequest(tctx, id, wsprotocol.NewRequestEnvelope("req-"+id, http.MethodGet, "/api/v1/info", "", headers, nil))
+		if err != nil {
+			return 0, "", err
+		}
+		return resp.StatusCode, string(resp.Body), nil
+	}
+	for _, pair := range [][2]string{{idA, idB}, {idB, idA}} {
+		code, body, err := info(pair[0])
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, code, body)
+		assert.Contains(t, body, pair[0], "served by the addressed instance")
+		assert.NotContains(t, body, pair[1])
+	}
+
+	// Closing B's services removes only B's channel.
+	require.NoError(t, active[1].Server.Shutdown(context.Background()))
+	require.Eventually(t, func() bool { return !mgr.IsConnected(idB) }, 10*time.Second, 50*time.Millisecond)
+	assert.True(t, mgr.IsConnected(idA))
+	code, body, err := info(idA)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, code)
+	assert.Contains(t, body, idA)
+	_, _, err = info(idB)
+	assert.Error(t, err, "a request for B is never served by A")
 }

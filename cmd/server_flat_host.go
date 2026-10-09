@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -152,7 +153,11 @@ func probeKubernetesExecutionScope(ctx context.Context, rt *runtime.KubernetesRu
 // flat registration (R1-R8, bound result required) and the in-memory
 // credentials of the co-located control channel.
 type colocatedFlatActivator struct {
-	hubSrv      *hub.Server
+	hubSrv *hub.Server
+	// endpoint is the shared listener's base URL. Every flat instance,
+	// including a single one, registers <endpoint>/instances/<id>, its
+	// instance-qualified route, so its advertised endpoint does not change
+	// when siblings are added or removed.
 	endpoint    string
 	autoProvide bool
 	hubEndpoint string
@@ -161,8 +166,9 @@ type colocatedFlatActivator struct {
 func (a *colocatedFlatActivator) Activate(ctx context.Context, c brokerhost.Candidate) (*brokerhost.Activation, error) {
 	// RegisterEmbeddedFlatRuntimeBroker reports its own refusals per
 	// instance.
+	endpoint := strings.TrimSuffix(a.endpoint, "/") + brokerhost.InstancePrefix(c.Identity.RuntimeBrokerID)
 	row, err := a.hubSrv.RegisterEmbeddedFlatRuntimeBroker(ctx, c.Identity, c.Instance, hub.EmbeddedFlatRegistrationOptions{
-		Endpoint:         a.endpoint,
+		Endpoint:         endpoint,
 		AutoProvide:      a.autoProvide,
 		Capabilities:     flatInstanceCapabilities(c.Runtime),
 		WorkspaceStorage: loadBrokerRegistrationWorkspaceStorage(),
