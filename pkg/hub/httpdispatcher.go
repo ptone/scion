@@ -3304,12 +3304,14 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		attribute.String("scion.broker.id", agent.RuntimeBrokerID),
 	)
 
-	// Flat placement backstop, before the launch guard, credential mint and
-	// beginRun: a stale pin is refused here for every caller.
+	// Flat placement backstop, before the standing guard, the launch guard,
+	// credential mint and beginRun: a stale pin is refused here for every
+	// caller.
 	if _, err := checkAgentPinnedPlacement(ctx, d.store, agent); err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
+
 	// Standing guard (ptone/scion#3433): no broker call for an agent that
 	// is held or not in good standing. Fails closed, separately from the
 	// launch guard below.
@@ -3576,11 +3578,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentStop(ctx context.Context, agent *stor
 // It generates a fresh auth token so the restarted container has valid
 // Hub credentials, preventing auth loss across container restarts.
 func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *store.Agent) error {
-	// Flat placement backstop (see DispatchAgentStart), then the standing
-	// guard (ptone/scion#3433), then the start guard.
+	// Flat placement backstop (see DispatchAgentStart).
 	if _, err := checkAgentPinnedPlacement(ctx, d.store, agent); err != nil {
 		return err
 	}
+	// Standing guard (ptone/scion#3433), then the start guard.
 	if err := d.dispatchStandingError(ctx, agent); err != nil {
 		return err
 	}

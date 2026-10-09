@@ -483,11 +483,13 @@ func TestBrokerHubToken_OwnerTokenCannotRotate(t *testing.T) {
 // ----------------------------------------------------------------------------
 
 // brokerLookupSwapStore wraps a store and runs onLookup, once, on the first
-// by-name lookup (GetRuntimeBrokerByName or GetLegacyRuntimeBrokerByName)
-// issued by the registration service's own
-// lookup (its context carries the marker set by createBrokerRegistration).
-// The handler's authorization lookup carries no marker and reaches the
-// wrapped store, however many lookups either side performs.
+// by-name broker lookup issued by the registration service's own lookup
+// (its context carries the marker set by createBrokerRegistration). The
+// service's name match is GetLegacyRuntimeBrokerByName (a flat row is never
+// matched by name); GetRuntimeBrokerByName is hooked too, so the wrapper
+// does not depend on which by-name read the service uses. The handler's
+// authorization lookup carries no marker and reaches the wrapped store,
+// however many lookups either side performs.
 type brokerLookupSwapStore struct {
 	store.Store
 	mu       sync.Mutex
@@ -495,30 +497,26 @@ type brokerLookupSwapStore struct {
 	onLookup func(ctx context.Context, name string) (*store.RuntimeBroker, error)
 }
 
-func (w *brokerLookupSwapStore) GetRuntimeBrokerByName(ctx context.Context, name string) (*store.RuntimeBroker, error) {
+// takeHook reports whether this call is the service lookup that runs onLookup.
+func (w *brokerLookupSwapStore) takeHook(ctx context.Context) bool {
 	w.mu.Lock()
+	defer w.mu.Unlock()
 	hook := !w.fired && w.onLookup != nil && isBrokerRegistrationLookup(ctx)
 	if hook {
 		w.fired = true
 	}
-	w.mu.Unlock()
-	if hook {
+	return hook
+}
+
+func (w *brokerLookupSwapStore) GetRuntimeBrokerByName(ctx context.Context, name string) (*store.RuntimeBroker, error) {
+	if w.takeHook(ctx) {
 		return w.onLookup(ctx, name)
 	}
 	return w.Store.GetRuntimeBrokerByName(ctx, name)
 }
 
-// GetLegacyRuntimeBrokerByName is the by-name lookup the registration
-// service uses (it never matches a flat row by name); it carries the same
-// hook.
 func (w *brokerLookupSwapStore) GetLegacyRuntimeBrokerByName(ctx context.Context, name string) (*store.RuntimeBroker, error) {
-	w.mu.Lock()
-	hook := !w.fired && w.onLookup != nil && isBrokerRegistrationLookup(ctx)
-	if hook {
-		w.fired = true
-	}
-	w.mu.Unlock()
-	if hook {
+	if w.takeHook(ctx) {
 		return w.onLookup(ctx, name)
 	}
 	return w.Store.GetLegacyRuntimeBrokerByName(ctx, name)

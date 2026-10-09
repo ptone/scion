@@ -300,7 +300,9 @@ func startExtrasWireKey(extras StartExtras, key string) string {
 	return v
 }
 
-// countingTokenGen counts agent credential mints.
+// countingTokenGen counts agent credential mints: a mint is a
+// SignAgentToken call (AuthorizeAgentToken only computes the grant and has
+// no side effects).
 type countingTokenGen struct {
 	inner AgentTokenGenerator
 	mints int
@@ -310,7 +312,6 @@ func (c *countingTokenGen) AuthorizeAgentToken(ctx context.Context, agent *store
 	return c.inner.AuthorizeAgentToken(ctx, agent)
 }
 
-// SignAgentToken is the mint: it signs a token for a run.
 func (c *countingTokenGen) SignAgentToken(grant AgentTokenGrant, runID string) (string, *store.AgentCredential, error) {
 	c.mints++
 	return c.inner.SignAgentToken(grant, runID)
@@ -1326,7 +1327,7 @@ func fireScheduledCreate(t *testing.T, srv *Server, s store.Store, projectID, ag
 	payload, err := json.Marshal(DispatchAgentEventPayload{AgentName: agentName, Task: "scheduled"})
 	require.NoError(t, err)
 	// The event carries the recorded authorization revision a session
-	// create by its author writes (schedule authority is checked at fire).
+	// create by the dev user writes (a fire refuses an event without one).
 	return srv.dispatchAgentEventHandler()(ctx, withSessionRevision(store.ScheduledEvent{
 		ID: tid("sched-" + agentName + "-" + t.Name()), ProjectID: projectID, EventType: "dispatch_agent",
 		Payload: string(payload), CreatedBy: DevUserID,

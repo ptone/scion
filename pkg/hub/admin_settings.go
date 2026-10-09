@@ -640,12 +640,13 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// server.broker.instances is kept unless the body set it explicitly.
-	storedInstances := storedBrokerInstances(raw)
 	// Apply updates by marshaling the request fields and merging. The raw
 	// server object tells the merge which server fields were sent.
+	// server.broker.instances is kept unless the body set it explicitly.
+	storedInstances := storedBrokerInstances(raw)
 	rawServer := rawServerObject(rawBody)
 	applySettingsUpdatesFromBody(raw, &req, rawServer)
+	carryOverBrokerInstances(raw, storedInstances, instancesPresent, instances)
 	// default_thinking_level is cleared by an explicit null, which the typed
 	// decode leaves as a nil pointer (indistinguishable from an omitted key).
 	if top, err := parseFieldPresence(rawBody); err == nil {
@@ -653,8 +654,6 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 			delete(raw, "default_thinking_level")
 		}
 	}
-
-	carryOverBrokerInstances(raw, storedInstances, instancesPresent, instances)
 
 	// The server section is deep-merged, so a section the request changes
 	// only in part is validated again as merged with the stored fields.
