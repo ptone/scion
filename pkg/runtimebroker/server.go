@@ -449,15 +449,10 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 
 	srv.stateDir = cfg.StateDir
 	if srv.stateDir == "" {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
+		if dir, err := DefaultStateDir(cfg.BrokerID); err != nil {
 			slog.Warn("Failed to resolve user home directory for state dir", "error", err)
 		} else {
-			brokerDir := cfg.BrokerID
-			if brokerDir == "" {
-				brokerDir = "default"
-			}
-			srv.stateDir = filepath.Join(homeDir, ".scion", "runtime-broker-state", brokerDir)
+			srv.stateDir = dir
 		}
 	}
 	if fi := srv.flatInstance(); fi != nil && srv.stateDir != "" {
@@ -518,6 +513,20 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 	srv.registerRoutes()
 
 	return srv
+}
+
+// DefaultStateDir is a Runtime Broker's state root when ServerConfig.StateDir
+// is not set: ~/.scion/runtime-broker-state/<brokerID> ("default" when the
+// ID is empty).
+func DefaultStateDir(brokerID string) (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	if brokerID == "" {
+		brokerID = "default"
+	}
+	return filepath.Join(homeDir, ".scion", "runtime-broker-state", brokerID), nil
 }
 
 // RuntimeName returns the name of the currently active container runtime.

@@ -154,8 +154,15 @@ type Config struct {
 	ProbeScope  ScopeProber
 	Activator   Activator
 	BuildServer ServerBuilder
-	Listener    ListenerConfig
-	Logger      *slog.Logger
+	// OwnershipPreflight, when set, runs in pass 1 for every candidate
+	// after its scope and identity are established and before any Hub
+	// activation: it inspects the instance's scope and refuses (returns an
+	// error) when ownership there is unresolved, for example unlabeled
+	// agent objects, or when the scope cannot be inspected. A refused
+	// candidate is never activated.
+	OwnershipPreflight func(ctx context.Context, c Candidate) error
+	Listener           ListenerConfig
+	Logger             *slog.Logger
 	// ShutdownTimeout bounds the whole shutdown; zero means
 	// runtimebroker.ShutdownDeadline (30s, as for a single Runtime Broker).
 	ShutdownTimeout time.Duration
@@ -280,6 +287,12 @@ func (h *Host) Prepare(ctx context.Context) error {
 		if err != nil {
 			h.refuse(in, fmt.Errorf("flat Runtime Broker instance %q: %w", in.cfg.Key, err))
 			continue
+		}
+		if h.cfg.OwnershipPreflight != nil {
+			if err := h.cfg.OwnershipPreflight(ctx, Candidate{Instance: in.cfg, Identity: id, Runtime: rt}); err != nil {
+				h.refuse(in, WithReason("ownership_unresolved", fmt.Errorf("flat Runtime Broker instance %q: %w", in.cfg.Key, err)))
+				continue
+			}
 		}
 		in.rt, in.scope, in.identity = rt, scope, id
 		candidates = append(candidates, in)

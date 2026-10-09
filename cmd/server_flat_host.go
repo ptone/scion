@@ -20,10 +20,12 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokerhost"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokeridentity"
@@ -400,14 +402,15 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 	}
 
 	host, err := brokerhost.New(brokerhost.Config{
-		GlobalDir:   p.globalDir,
-		Instances:   p.instances,
-		Mode:        mode,
-		LegacyIDs:   legacyRuntimeBrokerIDs(cfg, p.settings, vsBroker, p.globalDir),
-		NewRuntime:  newFlatInstanceRuntime,
-		ProbeScope:  flatScopeProber,
-		Activator:   activator,
-		BuildServer: buildServer,
+		GlobalDir:          p.globalDir,
+		Instances:          p.instances,
+		Mode:               mode,
+		LegacyIDs:          legacyRuntimeBrokerIDs(cfg, p.settings, vsBroker, p.globalDir),
+		NewRuntime:         newFlatInstanceRuntime,
+		ProbeScope:         flatScopeProber,
+		Activator:          activator,
+		BuildServer:        buildServer,
+		OwnershipPreflight: flatOwnershipPreflight,
 		Listener: brokerhost.ListenerConfig{
 			Host:         cfg.RuntimeBroker.Host,
 			Port:         cfg.RuntimeBroker.Port,
@@ -461,6 +464,50 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 			p.errCh <- fmt.Errorf("runtime broker server error: %w", err)
 		}
 	}()
+	return nil
+}
+
+// flatOwnershipPreflight is the pass-1 ownership check of a flat instance
+// (P2.3 section 2a): before any Hub activation it reads every scion agent
+// object on the instance's scope and refuses when any carries no owner
+// label (an unlabeled object belongs to no instance, even for a single
+// instance; an operator drains or recreates such agents through the version
+// that created them), when the scope cannot be read completely, or when the
+// instance's ownership records and slug index contradict each other. Labels
+// naming another instance are that instance's and do not refuse this one.
+func flatOwnershipPreflight(ctx context.Context, c brokerhost.Candidate) error {
+	objects, err := c.Runtime.List(ctx, map[string]string{"scion.agent": "true"})
+	if err != nil {
+		return fmt.Errorf("cannot read the execution scope to establish ownership: %w", err)
+	}
+	var unresolved []string
+	for _, o := range objects {
+		if o.Labels[api.LabelRuntimeBrokerID] != "" {
+			continue
+		}
+		name := o.Name
+		if p := o.Labels["scion.project_id"]; p != "" {
+			name = p + "/" + name
+		}
+		unresolved = append(unresolved, name)
+	}
+	if len(unresolved) > 0 {
+		sort.Strings(unresolved)
+		return fmt.Errorf("%d agent object(s) on this execution scope have no Runtime Broker owner and cannot be attributed: %s; "+
+			"drain or recreate them through the Runtime Broker that created them before activating this instance",
+			len(unresolved), strings.Join(unresolved, ", "))
+	}
+	dir, err := runtimebroker.DefaultStateDir(c.Identity.RuntimeBrokerID)
+	if err != nil {
+		return err
+	}
+	problems, err := runtimebroker.NewOwnershipStore(dir, c.Identity.RuntimeBrokerID).RepairSlugIndex()
+	if err != nil {
+		return fmt.Errorf("ownership records cannot be read: %w", err)
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("ownership records are inconsistent: %s", strings.Join(problems, "; "))
+	}
 	return nil
 }
 
