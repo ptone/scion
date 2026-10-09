@@ -205,9 +205,15 @@ func TestFlatSharedScope_ConcurrentOperationsStayPartitioned(t *testing.T) {
 			}
 			assert.Equal(t, idA.RuntimeBrokerID, statusOf(h2, "inst-a").RuntimeBrokerID, "inst-a keeps its identity")
 			assert.Equal(t, idB.RuntimeBrokerID, statusOf(h2, "inst-b").RuntimeBrokerID, "inst-b keeps its identity")
-			for key, own := range map[string]string{"inst-a": "cid-a", "inst-b": "cid-b"} {
-				for _, id := range listedOn(t, serverOf(t, h2, key)) {
-					assert.True(t, strings.HasPrefix(id, own), "after restart %s lists %s", key, id)
+			// Each instance still lists its own agent that no delete targeted,
+			// and nothing of the other instance's.
+			for key, want := range map[string]struct{ prefix, kept string }{
+				"inst-a": {"cid-a", "cid-a2"}, "inst-b": {"cid-b", "cid-b2"},
+			} {
+				ids := listedOn(t, serverOf(t, h2, key))
+				assert.Contains(t, ids, want.kept, "after restart %s still lists its own %s", key, want.kept)
+				for _, id := range ids {
+					assert.True(t, strings.HasPrefix(id, want.prefix), "after restart %s lists %s", key, id)
 				}
 			}
 		})
@@ -295,6 +301,7 @@ func TestFlatSharedScope_ExperimentOffRefusesEveryInstance(t *testing.T) {
 	for _, key := range []string{"docker-a", "docker-b"} {
 		st := statusOf(h, key)
 		assert.Equal(t, brokerhost.StateRefused, st.State, key)
+		assert.Equal(t, hub.ErrCodeExperimentDisabled, st.Reason, key)
 		assert.Contains(t, st.Error, hub.ErrCodeExperimentDisabled, key)
 		require.NotEmpty(t, st.RuntimeBrokerID, "%s: identity loaded in pass 1", key)
 		_, getErr := s.GetRuntimeBroker(ctx, st.RuntimeBrokerID)
