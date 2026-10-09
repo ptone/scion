@@ -61,7 +61,7 @@ func TestCleanupOwnedAgentResources_RemovesOnlyOwnObjects(t *testing.T) {
 	seedLabelledSecret(t, rt, "scion-auth-proj1--agent", withOwner(base, "rb-b")) // another instance's
 	seedLabelledSecret(t, rt, "scion-env-proj1--agent", base)                     // unlabelled (no owner)
 
-	if err := rt.CleanupOwnedAgentResources(context.Background(), "agent", "p1", "rb-a"); err != nil {
+	if err := rt.CleanupOwnedAgentResources(context.Background(), "agent", "p1", "rb-a", ""); err != nil {
 		t.Fatal(err)
 	}
 	if secretExists(t, rt, "default", "scion-agent-proj1--agent") {
@@ -81,7 +81,7 @@ func TestCleanupOwnedAgentResources_EmptyOrInvalidIDDeletesNothing(t *testing.T)
 		seedLabelledSecret(t, rt, "scion-agent-proj1--agent", withOwner(productionAgentLabels("agent", "p1"), "rb-a"))
 		seedLabelledSecret(t, rt, "scion-auth-proj1--agent", productionAgentLabels("agent", "p1"))
 		clientset.ClearActions()
-		if err := rt.CleanupOwnedAgentResources(context.Background(), "agent", "p1", id); err == nil {
+		if err := rt.CleanupOwnedAgentResources(context.Background(), "agent", "p1", id, ""); err == nil {
 			t.Errorf("id %q: want an error", id)
 		}
 		for _, a := range clientset.Actions() {
@@ -112,13 +112,13 @@ func TestCleanupAgentResources_SelectorUnchanged(t *testing.T) {
 		return got
 	}
 	legacy := selectors(func(rt *KubernetesRuntime) error {
-		return rt.CleanupAgentResources(context.Background(), "agent", "p1")
+		return rt.CleanupAgentResources(context.Background(), "agent", "p1", "")
 	})
 	if want := "scion.name=agent," + projectkeys.LabelProjectID + "=p1"; len(legacy) != 1 || legacy[0] != want {
 		t.Fatalf("legacy selector = %v, want [%s]", legacy, want)
 	}
 	owned := selectors(func(rt *KubernetesRuntime) error {
-		return rt.CleanupOwnedAgentResources(context.Background(), "agent", "p1", "rb-a")
+		return rt.CleanupOwnedAgentResources(context.Background(), "agent", "p1", "rb-a", "")
 	})
 	if want := "scion.name=agent," + projectkeys.LabelProjectID + "=p1," + api.LabelRuntimeBrokerID + "=rb-a"; len(owned) != 1 || owned[0] != want {
 		t.Fatalf("owned selector = %v, want [%s]", owned, want)
@@ -160,5 +160,87 @@ func TestK8sRun_ChildSecretsCarryOwnerLabel(t *testing.T) {
 		if l[api.LabelRuntimeBrokerID] != "rb-a" {
 			t.Errorf("a Run-created Secret lacks the owner label: %v", l)
 		}
+	}
+}
+
+// seedOwnedAgentObjectsForRun is seedAgentObjectsForRun with every object
+// also carrying the owner label of the flat instance owner.
+func seedOwnedAgentObjectsForRun(t *testing.T, rt *KubernetesRuntime, runID, owner string) {
+	t.Helper()
+	seedAgentObjectsForRun(t, rt, runID)
+	for _, name := range []string{"scion-agent-proj1--agent", "scion-auth-proj1--agent"} {
+		s, err := rt.Client.Clientset.CoreV1().Secrets("default").Get(context.Background(), name, metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.Labels = withOwner(s.Labels, owner)
+		if _, err := rt.Client.Clientset.CoreV1().Secrets("default").Update(context.Background(), s, metav1.UpdateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// The owned cleanup scopes by run exactly as the unscoped one
+// (TestCleanupAgentResources_RunScoped): a stale run leaves a newer run's
+// objects, its own run's and legacy run-less objects are removed, and an
+// empty runID removes by name, project and owner, as before.
+func TestCleanupOwnedAgentResources_RunScoped(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		objectsRun string
+		cleanupRun string
+		wantKept   bool
+	}{
+		{"stale run leaves a newer run's objects", "run-b", "run-a", true},
+		{"own run's objects are removed", "run-a", "run-a", false},
+		{"legacy run-less objects are removed", "", "run-a", false},
+		{"no run removes by name, as on the unscoped path", "run-b", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt, _, _ := newNonGKECleanupTestRuntime(t)
+			seedOwnedAgentObjectsForRun(t, rt, tc.objectsRun, "rb-a")
+			if err := rt.CleanupOwnedAgentResources(context.Background(), "agent", "p1", "rb-a", tc.cleanupRun); err != nil {
+				t.Fatalf("CleanupOwnedAgentResources: %v", err)
+			}
+			for _, name := range []string{"scion-agent-proj1--agent", "scion-auth-proj1--agent"} {
+				if got := secretExists(t, rt, "default", name); got != tc.wantKept {
+					t.Errorf("Secret %s exists = %v, want %v", name, got, tc.wantKept)
+				}
+			}
+		})
+	}
+}
+
+// TestCleanupOwnedAgentResources_RunScopedSparesAnotherInstance: an object
+// of another instance carrying the named run is never removed.
+func TestCleanupOwnedAgentResources_RunScopedSparesAnotherInstance(t *testing.T) {
+	rt, _, _ := newNonGKECleanupTestRuntime(t)
+	seedOwnedAgentObjectsForRun(t, rt, "run-a", "rb-b")
+	if err := rt.CleanupOwnedAgentResources(context.Background(), "agent", "p1", "rb-a", "run-a"); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"scion-agent-proj1--agent", "scion-auth-proj1--agent"} {
+		if !secretExists(t, rt, "default", name) {
+			t.Errorf("another instance's %s was removed", name)
+		}
+	}
+}
+
+// TestCleanupOwnedAgentResources_InvalidRunID: an invalid run ID is refused
+// on the owned path before anything is listed or deleted.
+func TestCleanupOwnedAgentResources_InvalidRunID(t *testing.T) {
+	rt, clientset, _ := newNonGKECleanupTestRuntime(t)
+	seedOwnedAgentObjectsForRun(t, rt, "", "rb-a")
+	clientset.ClearActions()
+	if err := rt.CleanupOwnedAgentResources(context.Background(), "agent", "p1", "rb-a", "run-a,!x"); err == nil {
+		t.Fatal("expected an error for an invalid run ID")
+	}
+	for _, a := range clientset.Actions() {
+		if a.GetVerb() == "delete" || a.GetVerb() == "list" {
+			t.Errorf("%s %s issued for an invalid run ID", a.GetVerb(), a.GetResource().Resource)
+		}
+	}
+	if !secretExists(t, rt, "default", "scion-agent-proj1--agent") {
+		t.Error("an invalid run ID removed an object")
 	}
 }

@@ -180,24 +180,17 @@ type RunConfig struct {
 	// that clones/provisions the workspace before the main container starts.
 	GitCloneForInit *api.GitCloneConfig
 
-	// Locker provides the per-project advisory lock for NFS workspace
-	// provisioning (N2-2b, design §7, risk RN1). When set and backend=nfs,
-	// the K8s runtime acquires the lock before building the pod to determine
-	// whether this pod should clone (lock winner) or wait for the sentinel
-	// (lock loser). This prevents concurrent first-clone corruption when
-	// two pods for the same project are scheduled on different nodes.
+	// Locker provides the per-agent start lock of an NFS-home agent
+	// (acquireHomeStartLock): it keeps two starts of the same agent from
+	// running at once across brokers. On Postgres-backed deployments it
+	// would come from the store's AdvisoryLocker capability.
 	//
-	// May be nil — when absent, all pods get the cloning init container
-	// (sentinel-only guard, correct for single-node but unsafe for
-	// multi-node). On Postgres-backed deployments this is wired from
-	// the store's AdvisoryLocker capability.
+	// May be nil — no production caller sets it today, and without it the
+	// NFS-home start is guarded by the termination wait only. The
+	// Kubernetes runtime's NFS workspace provisioning does not use it:
+	// sciontool provision serializes provisioners with a file lock on the
+	// export.
 	Locker store.AdvisoryLocker
-
-	// nfsProvisionLockLost is set internally by Run() after a failed
-	// advisory lock acquisition attempt. When true, buildPod injects a
-	// wait-for-sentinel init container instead of the cloning one.
-	// Callers should not set this field.
-	nfsProvisionLockLost bool
 
 	// Checkpoint and OnResourceCreated are an async launch's runtime hooks
 	// (design t1-async-create-v11.md §3.8.3, §3.8.4), copied from
@@ -227,6 +220,14 @@ type RunConfig struct {
 	// Apple container and Kubernetes; other runtimes (Cloud Run,
 	// substrate) do not report created resources.
 	ObserveResourceCreated func(api.ResourceHandle)
+	// KubernetesBlockIdentity marks a pod whose GCP identity mode is
+	// "block" (ptone/scion#4034). The Kubernetes runtime then sets
+	// automountServiceAccountToken false and adds the Workload Identity node
+	// selector (KubernetesWorkloadIdentityNodeLabel). The ServiceAccount
+	// itself comes from Kubernetes.ServiceAccountName, which the agent
+	// manager has already set to the block ServiceAccount or cleared.
+	// Ignored by other runtimes.
+	KubernetesBlockIdentity bool
 }
 
 // Checkpoint step names a runtime passes to RunConfig.Checkpoint (design
@@ -247,6 +248,10 @@ type launchHooks struct {
 	checkpointFn func(ctx context.Context, step string) error
 	createdFn    func(api.ResourceHandle)
 	observedFn   func(api.ResourceHandle)
+	// recordFn, when set, also receives every created handle. Unlike
+	// createdFn it does not make the hooks active: the Kubernetes runtime
+	// uses it to remember the objects a start created (verifyStartObjects).
+	recordFn func(api.ResourceHandle)
 }
 
 // launchHooks returns config's async-launch hooks.
@@ -278,6 +283,9 @@ func (h launchHooks) active() bool {
 
 // created is called after a true create of a launch-owned resource.
 func (h launchHooks) created(handle api.ResourceHandle) {
+	if h.recordFn != nil {
+		h.recordFn(handle)
+	}
 	if h.createdFn != nil {
 		h.createdFn(handle)
 	}
@@ -351,6 +359,19 @@ func (r *SharedDirRealization) Serves(name string) bool {
 		return false
 	}
 	return !r.LocalDirs[name]
+}
+
+// SharedDirClaimChecker is implemented by a runtime whose local shared-dir
+// storage can be a claim it looks up by name: on Kubernetes, the project's
+// shared-dir PersistentVolumeClaim. The start check that follows a shared
+// dir backend change back to local uses it to tell whether the local
+// storage exists. It never reads the claim's content.
+type SharedDirClaimChecker interface {
+	// SharedDirUsesClaim reports whether running cfg gives the shared dir
+	// dirName a claim of its own, created or reused by name.
+	SharedDirUsesClaim(cfg RunConfig, dirName string) bool
+	// SharedDirClaimExists reports whether that claim exists.
+	SharedDirClaimExists(ctx context.Context, cfg RunConfig, dirName string) (bool, error)
 }
 
 // RunRef identifies the runtime entry a Stop or Delete targets. ID is the

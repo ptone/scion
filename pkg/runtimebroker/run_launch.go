@@ -512,7 +512,7 @@ func (s *Server) cleanupAbortedLaunch(mgr agent.Manager, rec *launchRecord, lc l
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "run_id", lc.opts.RunID, "files_run_id", owner)
 		return
 	}
-	if _, err := agent.DeleteAgentFiles(lc.opts.Name, lc.opts.ProjectPath, true); err != nil {
+	if _, err := agent.DeleteAgentFiles(lc.opts.Name, lc.opts.ProjectPath, true); err != nil && !errors.Is(err, agent.ErrAgentProjectUnresolved) {
 		s.agentLifecycleLog.Warn("runLaunch: failed to clean up agent files",
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "error", err)
 	}
@@ -585,7 +585,7 @@ func classifyStartError(ctx context.Context, err error, templateSlug string) (co
 		// paths: a wrapped error can carry runtime detail (container name,
 		// backend message) the client has no entitlement to see.
 		return "name_in_use", agent.ErrContainerNameInUse.Error()
-	case errors.Is(err, scionrt.ErrRunConflict):
+	case isRunNameConflict(err):
 		// Another live run holds the agent name, and the runtime deleted
 		// nothing of it (ptone/scion#2550). Fixed text: the wrapped error
 		// names the namespace, object and the other run's ID.

@@ -262,15 +262,15 @@ type leftoverCleanerRuntime struct {
 	calls []string
 }
 
-func (c *leftoverCleanerRuntime) CleanupAgentResources(_ context.Context, name, projectID string) error {
+func (c *leftoverCleanerRuntime) CleanupAgentResources(_ context.Context, name, projectID, _ string) error {
 	c.calls = append(c.calls, "unscoped:"+projectID+"/"+name)
 	return nil
 }
 
 type ownedLeftoverCleanerRuntime struct{ *leftoverCleanerRuntime }
 
-func (c ownedLeftoverCleanerRuntime) CleanupOwnedAgentResources(_ context.Context, name, projectID, brokerID string) error {
-	c.calls = append(c.calls, "owned:"+projectID+"/"+name+"/"+brokerID)
+func (c ownedLeftoverCleanerRuntime) CleanupOwnedAgentResources(_ context.Context, name, projectID, brokerID, runID string) error {
+	c.calls = append(c.calls, "owned:"+projectID+"/"+name+"/"+brokerID+"@"+runID)
 	return nil
 }
 
@@ -280,18 +280,20 @@ func (c ownedLeftoverCleanerRuntime) CleanupOwnedAgentResources(_ context.Contex
 func TestOwner_LeftoverCleanupIsOwnerScoped(t *testing.T) {
 	base := &leftoverCleanerRuntime{Runtime: &runtime.MockRuntime{}}
 	legacy := &AgentManager{Runtime: base}
-	require.NoError(t, legacy.CleanupAgentResources(context.Background(), "worker", "p1"))
+	require.NoError(t, legacy.CleanupAgentResources(context.Background(), "worker", "p1", ""))
 	assert.Equal(t, []string{"unscoped:p1/worker"}, base.calls)
 
 	plain := &leftoverCleanerRuntime{Runtime: &runtime.MockRuntime{}}
 	m := &AgentManager{Runtime: plain}
 	m.SetOwner(OwnerScope{RuntimeBrokerID: "broker-a"})
-	require.NoError(t, m.CleanupAgentResources(context.Background(), "worker", "p1"))
+	require.NoError(t, m.CleanupAgentResources(context.Background(), "worker", "p1", "run-2"))
 	assert.Empty(t, plain.calls, "no unscoped cleanup for an owned manager")
 
 	inner := &leftoverCleanerRuntime{Runtime: &runtime.MockRuntime{}}
 	m = &AgentManager{Runtime: ownedLeftoverCleanerRuntime{inner}}
 	m.SetOwner(OwnerScope{RuntimeBrokerID: "broker-a"})
-	require.NoError(t, m.CleanupAgentResources(context.Background(), "worker", "p1"))
-	assert.Equal(t, []string{"owned:p1/worker/broker-a"}, inner.calls)
+	require.NoError(t, m.CleanupAgentResources(context.Background(), "worker", "p1", ""))
+	require.NoError(t, m.CleanupAgentResources(context.Background(), "worker", "p1", "run-2"))
+	assert.Equal(t, []string{"owned:p1/worker/broker-a@", "owned:p1/worker/broker-a@run-2"}, inner.calls,
+		"the owned cleanup receives the delete's run unchanged")
 }

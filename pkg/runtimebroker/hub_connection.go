@@ -334,6 +334,7 @@ func (s *Server) newHeartbeatService(client hubclient.RuntimeBrokerService, brok
 	)
 	hb.auxiliaryManagers = s.getAuxiliaryManagers
 	hb.workspaceStorage = s.workspaceStorageDescriptor
+	hb.health = s.heartbeatHealthReport
 	hb.profileAttach = s.heartbeatProfileAttach
 	hb.profileSAMappings = s.heartbeatProfileSAMappings
 	hb.startsInFlight = s.startsInFlightSnapshot

@@ -148,15 +148,18 @@ func (d *sharedDaemon) remove(id string) {
 
 // CleanupAgentResources is the runtime's name+project leftover cleanup
 // (runtime.AgentResourceCleaner).
-func (r *daemonRuntime) CleanupAgentResources(_ context.Context, agentName, projectID string) error {
+func (r *daemonRuntime) CleanupAgentResources(_ context.Context, agentName, projectID, _ string) error {
 	r.d.record("cleanupAgentResources:" + projectID + "/" + agentName)
 	return nil
 }
 
 // CleanupOwnedAgentResources is the owner-scoped leftover cleanup
 // (runtime.OwnedAgentResourceCleaner); ownedCleanupErr makes it fail.
-func (r *daemonRuntime) CleanupOwnedAgentResources(_ context.Context, agentName, projectID, runtimeBrokerID string) error {
+func (r *daemonRuntime) CleanupOwnedAgentResources(_ context.Context, agentName, projectID, runtimeBrokerID, runID string) error {
 	r.d.record("cleanupOwned:" + projectID + "/" + agentName + "/" + runtimeBrokerID)
+	if runID != "" {
+		r.d.record("cleanupOwnedRun:" + projectID + "/" + agentName + "/" + runID)
+	}
 	r.d.mu.Lock()
 	defer r.d.mu.Unlock()
 	return r.d.ownedCleanupErr

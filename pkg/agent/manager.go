@@ -503,6 +503,12 @@ func (m *AgentManager) deleteResolved(ctx context.Context, agentName string, ref
 		util.Debugf("delete: starting filesystem cleanup for agent %s", agentName)
 		branchDeleted, err := DeleteAgentFiles(agentName, projectPath, removeBranch)
 		util.Debugf("delete: filesystem cleanup completed for agent %s", agentName)
+		if errors.Is(err, ErrAgentProjectUnresolved) {
+			// No project directory: none of the agent's files remain
+			// there, so the delete has nothing more to do.
+			util.Debugf("delete: no project directory for agent %s; no files to remove", agentName)
+			return false, nil
+		}
 		return branchDeleted, err
 	}
 	return false, nil
@@ -512,25 +518,26 @@ func (m *AgentManager) deleteResolved(ctx context.Context, agentName string, ref
 // created beside its container (for example Kubernetes Secrets) when the
 // container itself is already gone, so deleteResolved never reaches
 // Runtime.Delete. It is a no-op for a runtime that does not implement
-// runtime.AgentResourceCleaner. See that interface for the scoping rules.
+// runtime.AgentResourceCleaner. See that interface for the scoping rules,
+// including runID's.
 //
 // An owned (flat instance) manager removes only objects carrying its
-// instance's owner label (runtime.OwnedAgentResourceCleaner); on a runtime
-// without that variant it removes nothing (never the unscoped cleanup) and
-// logs a warning.
-func (m *AgentManager) CleanupAgentResources(ctx context.Context, agentName, projectID string) error {
+// instance's owner label (runtime.OwnedAgentResourceCleaner), with the same
+// runID scoping; on a runtime without that variant it removes nothing (never
+// the unscoped cleanup) and logs a warning.
+func (m *AgentManager) CleanupAgentResources(ctx context.Context, agentName, projectID, runID string) error {
 	if m.owner != nil {
 		if c, ok := m.Runtime.(runtime.OwnedAgentResourceCleaner); ok {
-			return c.CleanupOwnedAgentResources(ctx, agentName, projectID, m.owner.RuntimeBrokerID)
+			return c.CleanupOwnedAgentResources(ctx, agentName, projectID, m.owner.RuntimeBrokerID, runID)
 		}
 		if _, ok := m.Runtime.(runtime.AgentResourceCleaner); ok {
 			slog.Warn("Leftover agent objects not removed: the runtime cannot limit the cleanup to this Runtime Broker instance's objects",
-				"agent", agentName, "project_id", projectID, "runtime_broker_id", m.owner.RuntimeBrokerID, "runtime", m.Runtime.Name())
+				"agent", agentName, "project_id", projectID, "run_id", runID, "runtime_broker_id", m.owner.RuntimeBrokerID, "runtime", m.Runtime.Name())
 		}
 		return nil
 	}
 	if c, ok := m.Runtime.(runtime.AgentResourceCleaner); ok {
-		return c.CleanupAgentResources(ctx, agentName, projectID)
+		return c.CleanupAgentResources(ctx, agentName, projectID, runID)
 	}
 	return nil
 }

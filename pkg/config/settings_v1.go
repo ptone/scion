@@ -658,6 +658,74 @@ func (vs *VersionedSettings) ProfileKubernetesSAMappings(profileName string) (gs
 	}
 }
 
+// ResolveKubernetesBlockServiceAccountForSelection returns the Kubernetes
+// ServiceAccount a GCP identity "block" pod runs as for an explicit runtime
+// selection, and whether one is configured. profileName (if non-empty) is
+// checked first, then runtimeEntryName (the `runtimes:` map key), the same
+// order as ResolveKubernetesServiceAccountMappingForSelection. An empty
+// value is treated as unset. When this returns false, the pod runs as the
+// namespace's default ServiceAccount.
+func (vs *VersionedSettings) ResolveKubernetesBlockServiceAccountForSelection(profileName, runtimeEntryName string) (string, bool) {
+	if vs == nil {
+		return "", false
+	}
+	if profileName != "" {
+		if profile, ok := vs.Profiles[profileName]; ok && profile.KubernetesBlockServiceAccount != "" {
+			return profile.KubernetesBlockServiceAccount, true
+		}
+	}
+	if runtimeEntryName != "" {
+		if rtConfig, ok := vs.Runtimes[runtimeEntryName]; ok && rtConfig.KubernetesBlockServiceAccount != "" {
+			return rtConfig.KubernetesBlockServiceAccount, true
+		}
+	}
+	return "", false
+}
+
+// KubernetesProfilesWithoutBlockServiceAccount returns, sorted, the names of
+// the profiles whose runtime entry is Kubernetes and for which
+// ResolveKubernetesBlockServiceAccountForSelection finds no block
+// ServiceAccount. A GCP identity "block" pod under such a profile runs as
+// the namespace's default ServiceAccount. The runtime type is the entry's
+// Type, or the entry key when Type is unset, as in
+// ProfileKubernetesSAMappings.
+func (vs *VersionedSettings) KubernetesProfilesWithoutBlockServiceAccount() []string {
+	if vs == nil {
+		return nil
+	}
+	var out []string
+	for name, profile := range vs.Profiles {
+		if profile.Runtime == "" {
+			continue
+		}
+		runtimeType := profile.Runtime
+		if rt, ok := vs.Runtimes[profile.Runtime]; ok && rt.Type != "" {
+			runtimeType = rt.Type
+		}
+		switch runtimeType {
+		case "kubernetes", "k8s", "remote":
+		default:
+			continue
+		}
+		if _, ok := vs.ResolveKubernetesBlockServiceAccountForSelection(name, profile.Runtime); !ok {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ValidateKubernetesBlockServiceAccount checks that name is a valid
+// Kubernetes ServiceAccount name (a DNS-1123 subdomain). The schema enforces
+// the same pattern; this is the point-of-use check for settings that did not
+// pass through the schema validator, such as a hand-edited settings.yaml.
+func ValidateKubernetesBlockServiceAccount(name string) error {
+	if errs := validation.IsDNS1123Subdomain(name); len(errs) > 0 {
+		return fmt.Errorf("kubernetes_block_service_account: %q is not a valid Kubernetes ServiceAccount name: %s", name, strings.Join(errs, "; "))
+	}
+	return nil
+}
+
 // ResolveKubernetesNamespace returns the namespace configured on the
 // runtimeEntryName entry of the runtimes: map, and whether one is set.
 // Profiles carry no namespace of their own: a profile that needs a
@@ -880,6 +948,28 @@ func (vs *VersionedSettings) ResolveSafeToEvictWithSource(profileName string) (v
 		return &v, "runtimes." + profile.Runtime + ".safe_to_evict"
 	}
 	return nil, ""
+}
+
+// ResolveCloneDepthWithSource returns the profile's clone_depth and the
+// settings key it came from ("profiles.NAME.clone_depth"). If profileName
+// is empty, ActiveProfile is used. An unknown profile, or a profile
+// without clone_depth, yields an empty value and source.
+//
+// This is a default only: a template's or agent's clone_depth wins over
+// it. The value is returned as written; callers validate it with
+// api.CloneDepth.GitDepth so the error can name its source.
+func (vs *VersionedSettings) ResolveCloneDepthWithSource(profileName string) (value api.CloneDepth, source string) {
+	if vs == nil {
+		return "", ""
+	}
+	if profileName == "" {
+		profileName = vs.ActiveProfile
+	}
+	profile, ok := vs.Profiles[profileName]
+	if !ok || profile.CloneDepth == "" {
+		return "", ""
+	}
+	return profile.CloneDepth, "profiles." + profileName + ".clone_depth"
 }
 
 // ApplySafeToEvictDefault returns base with SafeToEvict filled from the
@@ -1121,6 +1211,13 @@ type VersionedSettings struct {
 
 	// AgentSecrets controls hub-level policy for secrets written by agents.
 	AgentSecrets *AgentSecretsSettings `json:"agent_secrets,omitempty" yaml:"agent_secrets,omitempty" koanf:"agent_secrets"`
+
+	// ProjectID is the top-level project ID of a migrated legacy settings
+	// file, kept verbatim. hub.project_id is the canonical v1 key and takes
+	// precedence when set.
+	ProjectID string `json:"project_id,omitempty" yaml:"project_id,omitempty" koanf:"project_id"`
+	// HubConnections holds named Hub connections for a Runtime Broker.
+	HubConnections map[string]V1HubConnectionConfig `json:"hub_connections,omitempty" yaml:"hub_connections,omitempty" koanf:"hub_connections"`
 }
 
 // AutoExposePortsSettings holds the auto-expose ports configuration.
@@ -1436,6 +1533,8 @@ type V1ServerHubConfig struct {
 	DisableLegacyStorageFallback *bool `json:"disable_legacy_storage_fallback,omitempty" yaml:"disable_legacy_storage_fallback,omitempty" koanf:"disable_legacy_storage_fallback"`
 	// AsyncAgentLaunch is the non-blocking agent create kill switch.
 	AsyncAgentLaunch *bool `json:"async_agent_launch,omitempty" yaml:"async_agent_launch,omitempty" koanf:"async_agent_launch"`
+	// PerfTrace turns on per-request performance tracing. Off by default.
+	PerfTrace *bool `json:"perf_trace,omitempty" yaml:"perf_trace,omitempty" koanf:"perf_trace"`
 	// LaunchTimeout is the whole-launch budget for an opted-in launch (e.g., "5m").
 	LaunchTimeout string `json:"launch_timeout,omitempty" yaml:"launch_timeout,omitempty" koanf:"launch_timeout"`
 	// LaunchKeepaliveSeconds is the broker keepalive interval, in seconds.
@@ -1485,6 +1584,26 @@ type V1ServerHubConduitConfig struct {
 	// live hub processes (default: POD_NAME, else the host name plus a
 	// random per-process suffix).
 	InstanceID string `json:"instance_id,omitempty" yaml:"instance_id,omitempty" koanf:"instance_id"`
+	// AuthzRecheckInterval is the period of the re-check sweep of open
+	// user streams (e.g. "60s"; default "60s", 1s-10m).
+	AuthzRecheckInterval string `json:"authz_recheck_interval,omitempty" yaml:"authz_recheck_interval,omitempty" koanf:"authz_recheck_interval"`
+	// LifetimeCap is the platform lifetime cap of a conduit session
+	// (e.g. "3500s"; default "3500s", 90s-24h). The relay sends GoAway
+	// 60s before it.
+	LifetimeCap string `json:"lifetime_cap,omitempty" yaml:"lifetime_cap,omitempty" koanf:"lifetime_cap"`
+	// StreamAuthzMax is the authorization interval of open streams per
+	// originating principal kind: when a stream reaches it, the hub
+	// re-checks the principal and renews or closes the stream (defaults
+	// "8h" for user, "24h" for broker and agent; each 1m-168h).
+	StreamAuthzMax *V1ServerHubConduitStreamAuthzMax `json:"stream_authz_max,omitempty" yaml:"stream_authz_max,omitempty" koanf:"stream_authz_max"`
+}
+
+// V1ServerHubConduitStreamAuthzMax holds
+// server.hub.conduit.stream_authz_max.
+type V1ServerHubConduitStreamAuthzMax struct {
+	User   string `json:"user,omitempty" yaml:"user,omitempty" koanf:"user"`
+	Broker string `json:"broker,omitempty" yaml:"broker,omitempty" koanf:"broker"`
+	Agent  string `json:"agent,omitempty" yaml:"agent,omitempty" koanf:"agent"`
 }
 
 // V1BrokerConfig holds Runtime Broker configuration.
@@ -1552,20 +1671,30 @@ type V1DatabaseConfig struct {
 
 // V1AuthConfig holds authentication settings.
 type V1AuthConfig struct {
-	// Mode selects the exclusive human auth mode: "oauth" (default), "proxy", or "dev".
-	// In proxy mode, OAuth handlers are disabled; in dev mode, dev token auth is used.
-	Mode              string             `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
-	DevMode           bool               `json:"dev_mode,omitempty" yaml:"dev_mode,omitempty" koanf:"dev_mode"`
-	DevToken          string             `json:"dev_token,omitempty" yaml:"dev_token,omitempty" koanf:"dev_token"`
-	DevTokenFile      string             `json:"dev_token_file,omitempty" yaml:"dev_token_file,omitempty" koanf:"dev_token_file"`
-	AuthorizedDomains []string           `json:"authorized_domains,omitempty" yaml:"authorized_domains,omitempty" koanf:"authorized_domains"`
-	UserAccessMode    string             `json:"user_access_mode,omitempty" yaml:"user_access_mode,omitempty" koanf:"user_access_mode"`
-	DefaultUserRole   string             `json:"default_user_role,omitempty" yaml:"default_user_role,omitempty" koanf:"default_user_role"`
-	Proxy             *V1ProxyConfig     `json:"proxy,omitempty" yaml:"proxy,omitempty" koanf:"proxy"`
-	Transport         *V1TransportConfig `json:"transport,omitempty" yaml:"transport,omitempty" koanf:"transport"`
-	Username          string             `json:"username,omitempty" yaml:"username,omitempty" koanf:"username"`
-	DisplayName       string             `json:"display_name,omitempty" yaml:"display_name,omitempty" koanf:"display_name"`
-	Email             string             `json:"email,omitempty" yaml:"email,omitempty" koanf:"email"`
+	// Mode selects the human auth mode. "proxy" is the only value the code
+	// checks: the server then uses the proxy authenticator configured under
+	// Proxy and offers no OAuth providers. Any other value, including ""
+	// (the default), "oauth" and "dev", leaves the hub handling
+	// authentication itself. Dev auth is enabled by the --dev-auth flag or
+	// the server.auth.dev_mode setting (DevMode), not by Mode.
+	Mode              string   `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
+	DevMode           bool     `json:"dev_mode,omitempty" yaml:"dev_mode,omitempty" koanf:"dev_mode"`
+	DevToken          string   `json:"dev_token,omitempty" yaml:"dev_token,omitempty" koanf:"dev_token"`
+	DevTokenFile      string   `json:"dev_token_file,omitempty" yaml:"dev_token_file,omitempty" koanf:"dev_token_file"`
+	AuthorizedDomains []string `json:"authorized_domains,omitempty" yaml:"authorized_domains,omitempty" koanf:"authorized_domains"`
+	UserAccessMode    string   `json:"user_access_mode,omitempty" yaml:"user_access_mode,omitempty" koanf:"user_access_mode"`
+	DefaultUserRole   string   `json:"default_user_role,omitempty" yaml:"default_user_role,omitempty" koanf:"default_user_role"`
+	// AgentRunScope selects how the hub treats the run an agent token was
+	// issued for: "off" (default) or "observe".
+	AgentRunScope string `json:"agent_run_scope,omitempty" yaml:"agent_run_scope,omitempty" koanf:"agent_run_scope"`
+	// AgentRunScopeLegacyUntil (RFC 3339) is when tokens issued without a
+	// run stop being accepted by run-scope checks.
+	AgentRunScopeLegacyUntil string             `json:"agent_run_scope_legacy_until,omitempty" yaml:"agent_run_scope_legacy_until,omitempty" koanf:"agent_run_scope_legacy_until"`
+	Proxy                    *V1ProxyConfig     `json:"proxy,omitempty" yaml:"proxy,omitempty" koanf:"proxy"`
+	Transport                *V1TransportConfig `json:"transport,omitempty" yaml:"transport,omitempty" koanf:"transport"`
+	Username                 string             `json:"username,omitempty" yaml:"username,omitempty" koanf:"username"`
+	DisplayName              string             `json:"display_name,omitempty" yaml:"display_name,omitempty" koanf:"display_name"`
+	Email                    string             `json:"email,omitempty" yaml:"email,omitempty" koanf:"email"`
 }
 
 // V1TransportConfig holds transport-layer auth settings for agent outbound requests.
@@ -2107,12 +2236,29 @@ type V1HubClientConfig struct {
 	Endpoint  string `json:"endpoint,omitempty" yaml:"endpoint,omitempty" koanf:"endpoint"`
 	ProjectID string `json:"project_id,omitempty" yaml:"project_id,omitempty" koanf:"project_id"`
 	LocalOnly *bool  `json:"local_only,omitempty" yaml:"local_only,omitempty" koanf:"local_only"`
+	// Transport is the transport-layer auth for reaching a Hub behind a
+	// platform guard (IAP, Cloud Run invoker IAM).
+	Transport *V1HubTransportConfig `json:"transport,omitempty" yaml:"transport,omitempty" koanf:"transport"`
+}
+
+// V1HubTransportConfig is hub.transport in versioned settings (the legacy
+// HubTransportConfig).
+type V1HubTransportConfig struct {
+	Mode     string `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
+	Audience string `json:"audience,omitempty" yaml:"audience,omitempty" koanf:"audience"`
+}
+
+// V1HubConnectionConfig is one entry of hub_connections in versioned
+// settings (the legacy HubConnectionConfig).
+type V1HubConnectionConfig struct {
+	Endpoint string `json:"endpoint,omitempty" yaml:"endpoint,omitempty" koanf:"endpoint"`
 }
 
 // V1CLIConfig defines CLI behavior settings for versioned config.
 type V1CLIConfig struct {
-	AutoHelp            *bool `json:"autohelp,omitempty" yaml:"autohelp,omitempty" koanf:"autohelp"`
-	InteractiveDisabled *bool `json:"interactive_disabled,omitempty" yaml:"interactive_disabled,omitempty" koanf:"interactive_disabled"`
+	AutoHelp            *bool  `json:"autohelp,omitempty" yaml:"autohelp,omitempty" koanf:"autohelp"`
+	InteractiveDisabled *bool  `json:"interactive_disabled,omitempty" yaml:"interactive_disabled,omitempty" koanf:"interactive_disabled"`
+	Mode                string `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
 }
 
 // V1TelemetryConfig holds telemetry/observability settings.
@@ -2397,6 +2543,15 @@ type V1RuntimeConfig struct {
 	// KubernetesServiceAccountMappings overrides this one; see
 	// VersionedSettings.ResolveKubernetesServiceAccountMapping.
 	KubernetesServiceAccountMappings map[string]string `json:"kubernetes_service_account_mappings,omitempty" yaml:"kubernetes_service_account_mappings,omitempty" koanf:"kubernetes_service_account_mappings"`
+	// KubernetesBlockServiceAccount names the Kubernetes ServiceAccount a
+	// pod runs as when its GCP identity mode resolves to "block" on the
+	// Kubernetes runtime (ptone/scion#4034). It must be a dedicated KSA the
+	// operator provisions, with no Workload Identity annotation and no IAM
+	// grants, so it is zero-privilege. Scion never creates or checks it.
+	// When unset, a block pod runs as the namespace's default
+	// ServiceAccount. A profile's own value wins over this one; see
+	// VersionedSettings.ResolveKubernetesBlockServiceAccountForSelection.
+	KubernetesBlockServiceAccount string `json:"kubernetes_block_service_account,omitempty" yaml:"kubernetes_block_service_account,omitempty" koanf:"kubernetes_block_service_account"`
 }
 
 // V1RuntimeDefaultsConfig holds runtime-wide behaviour that is not specific to
@@ -2606,6 +2761,11 @@ type V1ProfileConfig struct {
 	// loses to a template's or agent's kubernetes.safeToEvict. Only false
 	// has an effect. See ResolveSafeToEvict.
 	SafeToEvict *bool `json:"safe_to_evict,omitempty" yaml:"safe_to_evict,omitempty" koanf:"safe_to_evict"`
+	// CloneDepth is the git clone depth for agents using this profile:
+	// "full" or a positive integer. A template's or agent's clone_depth
+	// wins over it. Empty keeps the default shallow clone. See
+	// ResolveCloneDepthWithSource.
+	CloneDepth api.CloneDepth `json:"clone_depth,omitempty" yaml:"clone_depth,omitempty" koanf:"clone_depth"`
 	// SharedDirStorageBackend overrides server.shared_dir_storage.backend
 	// ("local" or "nfs") for agents using this profile. It wins over the
 	// same key on the profile's runtime entry. The nfs details always come
@@ -2632,6 +2792,10 @@ type V1ProfileConfig struct {
 	// VersionedSettings.ResolveKubernetesServiceAccountMapping for the
 	// precedence and full contract.
 	KubernetesServiceAccountMappings map[string]string `json:"kubernetes_service_account_mappings,omitempty" yaml:"kubernetes_service_account_mappings,omitempty" koanf:"kubernetes_service_account_mappings"`
+	// KubernetesBlockServiceAccount overrides the runtime entry's value of
+	// the same name for agents created under this profile. See
+	// V1RuntimeConfig.KubernetesBlockServiceAccount.
+	KubernetesBlockServiceAccount string `json:"kubernetes_block_service_account,omitempty" yaml:"kubernetes_block_service_account,omitempty" koanf:"kubernetes_block_service_account"`
 }
 
 // resolveEffectiveProjectPath resolves the effective project path for settings loading.
@@ -2716,9 +2880,10 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 
 	// 4. Load environment variables (SCION_ prefix)
 	_ = k.Load(env.ProviderWithValue("SCION_", ".", func(key, value string) (string, interface{}) {
-		// An empty plaintext switch is unset, not a request to disable TLS.
-		// Skip it before koanf maps the empty value onto tls.enabled.
-		if key == "SCION_OTEL_INSECURE" && value == "" {
+		// An exported but empty variable is treated as unset, so it never
+		// blanks a value from the settings files. This also keeps an empty
+		// SCION_OTEL_INSECURE from being mapped onto tls.enabled.
+		if value == "" {
 			return "", nil
 		}
 		return versionedEnvKeyMapper(key), value
@@ -2755,7 +2920,7 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 		Profiles:       make(map[string]V1ProfileConfig),
 	}
 
-	if err := k.Unmarshal("", settings); err != nil {
+	if err := unmarshalVersionedSettings(k, settings); err != nil {
 		return nil, err
 	}
 	if settings.Telemetry != nil && settings.Telemetry.Cloud != nil && settings.Telemetry.Cloud.TLS != nil {
@@ -2766,6 +2931,32 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 	}
 
 	return settings, nil
+}
+
+// unmarshalVersionedSettings decodes k into settings after normalizing
+// every profiles.NAME.clone_depth value with api.CloneDepthFromValue. The
+// koanf decoder is weakly typed and would turn clone_depth: true into "1";
+// normalizing first gives the settings loader the same value the schema
+// validator and the template loader see (true stays "true", 5.0 is "5").
+func unmarshalVersionedSettings(k *koanf.Koanf, settings *VersionedSettings) error {
+	normalized := map[string]interface{}{}
+	for _, key := range k.Keys() {
+		parts := strings.Split(key, ".")
+		if len(parts) != 3 || parts[0] != "profiles" || parts[2] != "clone_depth" {
+			continue
+		}
+		cd, err := api.CloneDepthFromValue(k.Get(key))
+		if err != nil {
+			return fmt.Errorf("%s: %w", key, err)
+		}
+		normalized[key] = string(cd)
+	}
+	if len(normalized) > 0 {
+		if err := k.Load(confmap.Provider(normalized, "."), nil); err != nil {
+			return err
+		}
+	}
+	return k.Unmarshal("", settings)
 }
 
 // settingsExcludedEnvVars lists SCION_* variables that are never settings
@@ -2813,16 +3004,16 @@ func versionedEnvKeyMapper(s string) string {
 		// set (e.g. a broker started inside an agent container, which the
 		// hub sets it in). Returning "" makes the env provider drop the
 		// variable entirely, the same idiom used below for a removed
-		// legacy env var and for SCION_OTEL_INSECURE's empty-value case.
+		// legacy env var and by the env callback for an empty value.
 		return ""
 	}
 	if isRemovedLegacyEnv(s) {
 		// SCION_HUB_GROVE_ID is no longer read, not even via the generic
 		// "hub_" mapping below, which would otherwise land on the
 		// unrecognised key hub.grove_id. Returning "" makes the env
-		// provider drop the variable entirely, the same idiom used for
-		// SCION_OTEL_INSECURE above. WarnRemovedLegacyEnv reports it
-		// separately.
+		// provider drop the variable entirely, the same idiom the env
+		// callback uses for an empty value. WarnRemovedLegacyEnv reports
+		// it separately.
 		return ""
 	}
 	key := strings.ToLower(strings.TrimPrefix(s, "SCION_"))
@@ -2868,7 +3059,9 @@ var knownCompoundFields = []string{
 	"require_trusted_proxy_ip",
 	"soft_delete_retain_files",
 	"start_unconfirmed_hold",
+	"authz_recheck_interval",
 	"start_claim_lease_ttl",
+	"stream_authz_max",
 	"soft_delete_retention",
 	"peer_service_accounts",
 	"grant_key_activation",
@@ -2880,6 +3073,7 @@ var knownCompoundFields = []string{
 	"reconnect_window",
 	"internal_listen",
 	"peer_audience",
+	"lifetime_cap",
 	"instance_id",
 	"peer_auth",
 	"authorized_domains",
@@ -3180,6 +3374,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.AsyncAgentLaunch != nil {
 			gc.Hub.AsyncAgentLaunch = *v1.Hub.AsyncAgentLaunch
 		}
+		if v1.Hub.PerfTrace != nil {
+			gc.Hub.PerfTrace = *v1.Hub.PerfTrace
+		}
 		if v1.Hub.LaunchTimeout != "" {
 			if d, err := time.ParseDuration(v1.Hub.LaunchTimeout); err == nil {
 				gc.Hub.LaunchTimeout = d
@@ -3214,15 +3411,20 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		}
 		if c := v1.Hub.Conduit; c != nil {
 			gc.Hub.Conduit = HubConduitConfig{
-				GrantKeyActivation:  c.GrantKeyActivation,
-				TCPAllowedPorts:     append([]int(nil), c.TCPAllowedPorts...),
-				InternalListen:      c.InternalListen,
-				InternalAdvertise:   c.InternalAdvertise,
-				PeerAuth:            c.PeerAuth,
-				PeerServiceAccounts: append([]string(nil), c.PeerServiceAccounts...),
-				PeerAudience:        c.PeerAudience,
-				ReconnectWindow:     c.ReconnectWindow,
-				InstanceID:          c.InstanceID,
+				GrantKeyActivation:   c.GrantKeyActivation,
+				TCPAllowedPorts:      append([]int(nil), c.TCPAllowedPorts...),
+				InternalListen:       c.InternalListen,
+				InternalAdvertise:    c.InternalAdvertise,
+				PeerAuth:             c.PeerAuth,
+				PeerServiceAccounts:  append([]string(nil), c.PeerServiceAccounts...),
+				PeerAudience:         c.PeerAudience,
+				ReconnectWindow:      c.ReconnectWindow,
+				InstanceID:           c.InstanceID,
+				AuthzRecheckInterval: c.AuthzRecheckInterval,
+				LifetimeCap:          c.LifetimeCap,
+			}
+			if m := c.StreamAuthzMax; m != nil {
+				gc.Hub.Conduit.StreamAuthzMax = HubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
 			}
 		}
 	}
@@ -3355,6 +3557,8 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				}
 			}
 		}
+		gc.Auth.AgentRunScope = v1.Auth.AgentRunScope
+		gc.Auth.AgentRunScopeLegacyUntil = v1.Auth.AgentRunScopeLegacyUntil
 		if v1.Auth.Transport != nil {
 			gc.Auth.Transport = &TransportAuthConfig{
 				Mode:           v1.Auth.Transport.Mode,
@@ -3550,15 +3754,20 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 	if c := gc.Hub.Conduit; !c.IsZero() {
 		v1Hub.Conduit = &V1ServerHubConduitConfig{
-			GrantKeyActivation:  c.GrantKeyActivation,
-			TCPAllowedPorts:     append([]int(nil), c.TCPAllowedPorts...),
-			InternalListen:      c.InternalListen,
-			InternalAdvertise:   c.InternalAdvertise,
-			PeerAuth:            c.PeerAuth,
-			PeerServiceAccounts: append([]string(nil), c.PeerServiceAccounts...),
-			PeerAudience:        c.PeerAudience,
-			ReconnectWindow:     c.ReconnectWindow,
-			InstanceID:          c.InstanceID,
+			GrantKeyActivation:   c.GrantKeyActivation,
+			TCPAllowedPorts:      append([]int(nil), c.TCPAllowedPorts...),
+			InternalListen:       c.InternalListen,
+			InternalAdvertise:    c.InternalAdvertise,
+			PeerAuth:             c.PeerAuth,
+			PeerServiceAccounts:  append([]string(nil), c.PeerServiceAccounts...),
+			PeerAudience:         c.PeerAudience,
+			ReconnectWindow:      c.ReconnectWindow,
+			InstanceID:           c.InstanceID,
+			AuthzRecheckInterval: c.AuthzRecheckInterval,
+			LifetimeCap:          c.LifetimeCap,
+		}
+		if m := c.StreamAuthzMax; !m.IsZero() {
+			v1Hub.Conduit.StreamAuthzMax = &V1ServerHubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
 		}
 	}
 	if gc.Hub.StartClaimLeaseTTL > 0 {
@@ -3584,6 +3793,10 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	if gc.Hub.AsyncAgentLaunch {
 		asyncLaunch := true
 		v1Hub.AsyncAgentLaunch = &asyncLaunch
+	}
+	if gc.Hub.PerfTrace {
+		perfTrace := true
+		v1Hub.PerfTrace = &perfTrace
 	}
 	if gc.Hub.LaunchTimeout > 0 {
 		v1Hub.LaunchTimeout = gc.Hub.LaunchTimeout.String()
@@ -3671,6 +3884,8 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			}
 		}
 	}
+	v1.Auth.AgentRunScope = gc.Auth.AgentRunScope
+	v1.Auth.AgentRunScopeLegacyUntil = gc.Auth.AgentRunScopeLegacyUntil
 	if gc.Auth.Transport != nil {
 		v1.Auth.Transport = &V1TransportConfig{
 			Mode:           gc.Auth.Transport.Mode,
@@ -3783,6 +3998,14 @@ func AdaptLegacySettings(legacy *Settings) (*VersionedSettings, []string) {
 		SchemaVersion:   "1",
 		ActiveProfile:   legacy.ActiveProfile,
 		DefaultTemplate: legacy.DefaultTemplate,
+		WorkspacePath:   legacy.WorkspacePath,
+		ProjectID:       legacy.ProjectID,
+	}
+	if legacy.HubConnections != nil {
+		vs.HubConnections = make(map[string]V1HubConnectionConfig, len(legacy.HubConnections))
+		for name, hc := range legacy.HubConnections {
+			vs.HubConnections[name] = V1HubConnectionConfig(hc)
+		}
 	}
 
 	// Adapt Hub config
@@ -3793,6 +4016,12 @@ func AdaptLegacySettings(legacy *Settings) (*VersionedSettings, []string) {
 			Endpoint:  legacy.Hub.Endpoint,
 			ProjectID: legacy.Hub.ProjectID,
 			LocalOnly: legacy.Hub.LocalOnly,
+		}
+		if legacy.Hub.Transport != nil {
+			vs.Hub.Transport = &V1HubTransportConfig{
+				Mode:     legacy.Hub.Transport.Mode,
+				Audience: legacy.Hub.Transport.Audience,
+			}
 		}
 		if legacy.Hub.Token != "" {
 			warnings = append(warnings, "hub.token is deprecated; use server.auth.dev_token for dev mode authentication")
@@ -3829,6 +4058,7 @@ func AdaptLegacySettings(legacy *Settings) (*VersionedSettings, []string) {
 	if legacy.CLI != nil {
 		vs.CLI = &V1CLIConfig{
 			AutoHelp: legacy.CLI.AutoHelp,
+			Mode:     legacy.CLI.Mode,
 		}
 	}
 
@@ -5359,8 +5589,9 @@ func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
 	result.Warnings = warnings
 
 	// 4a. Top-level keys the legacy struct does not decode (v1-only keys
-	// such as server and image_registry) are carried through unchanged
-	// (ptone/scion#3497).
+	// such as server and image_registry, ptone/scion#3497) are carried
+	// through unchanged. Legacy keys are not: AdaptLegacySettings maps each
+	// of them once (ptone/scion#3885).
 	carried, err := legacyCarriedTopLevelKeys(data, result.WasJSON)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse settings: %w", err)
