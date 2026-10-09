@@ -567,7 +567,75 @@ func (s *OwnershipStore) RepairSlugIndex() ([]string, error) {
 			problems = append(problems, fmt.Sprintf("slug %q in project %q is indexed to agent %s but live agent %s records it", r.AgentSlug, r.ProjectID, holder, r.AgentID))
 		}
 	}
+	// Every index entry must name this slug's record. An entry whose
+	// record is deleted with every object confirmed absent is released (the
+	// ReleaseSlug rule: a crash between the tombstone and the release left
+	// it); one naming a missing, unreadable or differently-slugged record is
+	// reported, never reassigned.
+	projects, err := os.ReadDir(s.dir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	for _, p := range projects {
+		if !p.IsDir() {
+			continue
+		}
+		entries, err := os.ReadDir(filepath.Join(s.dir, p.Name(), "by-slug"))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			problems = append(problems, fmt.Sprintf("slug index of project %q unreadable: %v", p.Name(), err))
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+				continue
+			}
+			slug := e.Name()
+			if _, claimed := live[p.Name()+"\x00"+slug]; claimed {
+				continue // checked against its live record above
+			}
+			holder, err := s.slugHolder(p.Name(), slug)
+			if err != nil {
+				problems = append(problems, err.Error())
+				continue
+			}
+			if !validOwnershipElement(holder) {
+				problems = append(problems, fmt.Sprintf("slug %q in project %q is indexed to an invalid agent ID %q", slug, p.Name(), holder))
+				continue
+			}
+			rec, found, err := s.readFile(p.Name(), holder)
+			switch {
+			case err != nil:
+				problems = append(problems, err.Error())
+			case !found:
+				problems = append(problems, fmt.Sprintf("slug %q in project %q is indexed to agent %s, which has no record", slug, p.Name(), holder))
+			case rec.AgentSlug != slug:
+				problems = append(problems, fmt.Sprintf("slug %q in project %q is indexed to agent %s, whose record names slug %q", slug, p.Name(), holder, rec.AgentSlug))
+			case rec.State == OwnershipStateDeleted && allResourcesAbsent(rec):
+				sp, _ := s.slugPath(p.Name(), slug)
+				if err := os.Remove(sp); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return nil, err
+				}
+				syncDir(filepath.Dir(sp))
+			}
+		}
+	}
 	return problems, nil
+}
+
+// allResourcesAbsent reports whether every object the record lists is
+// confirmed absent.
+func allResourcesAbsent(r *OwnershipRecord) bool {
+	for _, run := range r.Runs {
+		for _, res := range run.Resources {
+			if res.State != OwnedResourceAbsent {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // List returns every record (tombstones included), sorted by key. An

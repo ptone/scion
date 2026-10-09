@@ -326,3 +326,37 @@ func TestLaunchHandleOwned(t *testing.T) {
 	st.SetConflicting(map[string]bool{OwnershipAgentKey("proj", "agent-1"): true})
 	assert.False(t, s.launchHandleOwned(handle("uid-agent-1")), "a conflicting key's object is not cleaned up")
 }
+
+// TestOwnershipStore_RepairSlugIndexReadsEntries: an index entry left for a
+// tombstone whose objects are all confirmed absent (a crash between marking
+// deleted and releasing) is released, so a new agent can take the slug; an
+// entry naming a missing record or a tombstone with an object not yet
+// confirmed absent is reported or kept, never reassigned.
+func TestOwnershipStore_RepairSlugIndexReadsEntries(t *testing.T) {
+	dir := t.TempDir()
+	s := NewOwnershipStore(dir, "broker-a")
+	// A tombstone whose release was lost.
+	require.NoError(t, s.BeginRun("proj-1", "agent-old", "worker", "run-1"))
+	require.NoError(t, s.AddResource("proj-1", "agent-old", "run-1", handle("uid-1")))
+	require.NoError(t, s.MarkAbsent("proj-1", "agent-old", "uid-1"))
+	require.NoError(t, s.SetRecordState("proj-1", "agent-old", OwnershipStateDeleted))
+	// A tombstone with an object still recorded keeps its reservation.
+	require.NoError(t, s.BeginRun("proj-1", "agent-busy", "busy", "run-1"))
+	require.NoError(t, s.AddResource("proj-1", "agent-busy", "run-1", handle("uid-2")))
+	require.NoError(t, s.SetRecordState("proj-1", "agent-busy", OwnershipStateDeleted))
+	// An index entry naming an agent with no record.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "ownership", "proj-1", "by-slug", "ghost"), []byte("agent-ghost\n"), 0o600))
+
+	problems, err := s.RepairSlugIndex()
+	require.NoError(t, err)
+	require.Len(t, problems, 1)
+	assert.Contains(t, problems[0], "agent-ghost")
+
+	holder, _ := s.SlugHolder("proj-1", "worker")
+	assert.Empty(t, holder, "the tombstone's slug is released")
+	require.NoError(t, s.BeginRun("proj-1", "agent-new", "worker", "run-2"), "a new agent can take the released slug")
+	holder, _ = s.SlugHolder("proj-1", "busy")
+	assert.Equal(t, "agent-busy", holder, "not released while an object is not confirmed absent")
+	holder, _ = s.SlugHolder("proj-1", "ghost")
+	assert.Equal(t, "agent-ghost", holder, "left as found for the operator")
+}
