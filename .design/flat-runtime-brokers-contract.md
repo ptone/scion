@@ -62,13 +62,13 @@ P1.1 only adds to those. It does not edit `cmd/server_foreground.go`, `cmd/serve
 |---|---|---|---|
 | Settings file (`pkg/config/settings_v1.go`) | `V1BrokerConfig.Instances` | `[]V1RuntimeBrokerInstanceConfig` | `instances` (json/yaml/koanf, omitempty) |
 | | `V1RuntimeBrokerInstanceConfig` | `Key string`, `Name string`, `RuntimeTarget *V1RuntimeTargetConfig` | `key`, `name`, `runtime_target` |
-| | `V1RuntimeTargetConfig` | `Type`, `DisplayName`, `Context`, `Namespace` (string) | `type`, `display_name`, `context`, `namespace` |
+| | `V1RuntimeTargetConfig` | `Type`, `DisplayName`, `Context`, `Namespace`, `Kubeconfig` (string; Kubeconfig added in P2.1-K) | `type`, `display_name`, `context`, `namespace`, `kubeconfig` |
 | Server config (`pkg/config/hub_config.go`) | `RuntimeBrokerConfig.Instances` | `[]RuntimeBrokerInstanceConfig` | `instances` (camelCase family; json, yaml **and** koanf tags, like the rest of `RuntimeBrokerConfig`) |
 | | `RuntimeBrokerInstanceConfig` | `Key`, `Name`, `RuntimeTarget *RuntimeTargetConfig` | `key`, `name`, `runtimeTarget` (json/yaml/koanf) |
-| | `RuntimeTargetConfig` | `Type`, `DisplayName`, `Context`, `Namespace` | `type`, `displayName`, `context`, `namespace` (json/yaml/koanf) |
+| | `RuntimeTargetConfig` | `Type`, `DisplayName`, `Context`, `Namespace`, `Kubeconfig` (Kubeconfig added in P2.1-K) | `type`, `displayName`, `context`, `namespace`, `kubeconfig` (json/yaml/koanf) |
 
 - `ConvertV1ServerToGlobalConfig` copies `V1BrokerConfig.Instances` into `RuntimeBrokerConfig.Instances`, and `ConvertGlobalToV1ServerConfig` copies them back. Both are deep copies, field for field.
-- `context` and `namespace` are Kubernetes-only. They are defined but not implemented in P1.
+- `context`, `namespace` and the P2.1-K `kubeconfig` field are Kubernetes-only. Context and namespace were defined but not implemented in P1. P2.1-K implements them; optional `kubeconfig` selects one absolute local file path (section 5).
 
 ### Where it is read
 
@@ -113,7 +113,7 @@ server:
 
 - `key` is required. It is the immutable local instance key (section 3).
 - `name` is **required in P1**. It is the Runtime Broker name registered with the Hub: a mutable label, not identity. Requiring it avoids a default that changes silently when `key` changes (see section 3).
-- `runtime_target.type` is required. P1 accepts `docker` only. `kubernetes` is defined and rejected as not implemented yet. Any other value is unsupported.
+- `runtime_target.type` is required. P1 accepted `docker` only. P2.1-K accepts `docker` and `kubernetes`; any other value is unsupported.
 - `display_name` is optional, non-sensitive, and shown in the UI. It defaults to the type.
 - There are no per-instance `agent_defaults` in P1. P3.1 adds them additively.
 
@@ -128,9 +128,10 @@ server:
 | `key` missing or not matching `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$` | invalid instance key |
 | `name` empty | name is required |
 | `runtime_target` missing or `type` empty | runtime_target.type is required |
-| `type: kubernetes` | Kubernetes Runtime Broker instances are not implemented yet |
-| Any other `type` | unsupported runtime target type "x" (supported: docker) |
-| Docker entry with `context`/`namespace` | field not valid for runtime target type docker |
+| `type: kubernetes` | P1 rejected as not implemented; P2.1-K accepts, subject to the field validation below |
+| Any other `type` | unsupported runtime target type "x" (P2.1-K supported: docker, kubernetes) |
+| Docker entry with non-empty `context`/`namespace`/`kubeconfig` | field not valid for runtime target type docker |
+| Non-empty Kubernetes `kubeconfig` that is not an absolute local file path | kubeconfig must be an absolute local file path; no tilde or environment expansion |
 
 Other rules:
 - `server.broker.broker_id` (and every other legacy ID source) keeps its current meaning: the legacy Runtime Broker identity. It never seeds a flat ID.
@@ -230,13 +231,17 @@ Target identity is the runtime target ID **bound to a normalized execution-scope
   - different `daemonId` (another node or a reinstalled daemon): `ErrExecutionScopeChanged`, naming both values. The instance neither starts nor registers, and existing placement is not re-pointed.
 - Docker has no credentials to rotate.
 
-### Kubernetes (defined, not implemented)
+### Kubernetes (implemented in P2.1-K; P1 defined the record only)
 
 - Record: `{ "type": "kubernetes", "kubernetes": { "clusterUid": <kube-system namespace metadata.uid>, "namespace": <resolved namespace>, "apiServer": <normalized URL, informational> } }`.
 - **Identity fields: `clusterUid` + `namespace`.**
 - Context name, kubeconfig path, user/auth entries and tokens are excluded. Rotating credentials or renaming a context keeps the target. Pointing the alias at another cluster or namespace is refused like a daemon change.
 - An `apiServer` change with the same `clusterUid` is accepted and logged.
 - P1.1 freezes the record shape and ships a normalization/compare unit test only.
+- **P2.1-K activation:** construct the real client from this instance's local configuration, probe kube-system using that client, and use the same resolved namespace for the runtime and scope. A 403/404, empty UID or failed probe yields `ErrExecutionScopeUnidentified` and refuses only that instance before registration/heartbeat/control-channel startup, including on restart. A changed identified scope retains `ErrExecutionScopeChanged`. Unknown scope is not allowed. A 403 diagnostic identifies the needed `get` permission on the Namespace object named `kube-system`; a 404 reports the missing object. No automatic RBAC grants or legacy runtime policy changes.
+- **P2.1-K local client selection:** optional `runtime_target.kubeconfig` (Go `Kubeconfig` in both config families; json/yaml/koanf `kubeconfig`) is one absolute local file path, never target identity or remote Hub metadata. Preserve it in conversions, strict loading, startup mapping and schema. No tilde/environment expansion or explicit path list. Explicit-file load/context failures refuse only that instance, with no fallback to defaults or in-cluster credentials. Omitted/empty uses normal process default kubeconfig loading, including KUBECONFIG path lists; never mutate process environment, cwd or current-context. Context is optional; explicit namespace wins, otherwise preserve the runtime namespace fallback chain. Normal credential refresh remains supported; no proactive credential polling is introduced.
+- **P2.1-K binding amendment and acceptance criteria:** `flat-runtime-brokers/p2-kubernetes-amendment.md` records K1/K2/K3, exact loading/fallback semantics, the required namespace-read permission, real-constructor and isolation tests, schema/conversion parity, and exclusion of kubeconfig paths/credentials from registration, heartbeat, inventory, saved placement and identity. The real Kubernetes slice remains a prerequisite of the P2 gate.
+
 
 A scope change always means a new target. That requires a new identity, either a new instance key or the directory removed (section 4), and therefore a new Runtime Broker ID.
 
@@ -673,9 +678,9 @@ Group F tests are the dispatch half:
 - `TestRuntimeBrokerInstances_InvalidKeyRejected`
 - `TestRuntimeBrokerInstances_NameRequired`
 - `TestRuntimeBrokerInstances_TargetTypeRequired`
-- `TestRuntimeBrokerInstances_KubernetesNotImplemented`
+- `TestRuntimeBrokerInstances_KubernetesAccepted` (P2.1-K replacement for P1 `TestRuntimeBrokerInstances_KubernetesNotImplemented`): optional context/namespace and omitted or absolute local kubeconfig accepted; unsupported types and invalid paths still rejected
 - `TestRuntimeBrokerInstances_UnsupportedTypeRejected`
-- `TestRuntimeBrokerInstances_DockerRejectsKubernetesFields`
+- `TestRuntimeBrokerInstances_DockerRejectsKubernetesFields`: P2.1-K includes non-empty kubeconfig as well as context and namespace
 - `TestRuntimeBrokerInstances_SchemaMatchesValidator`: from P2.1, the "two entries" case is valid in both schema and validator. Remove the instances-array schema `maxItems: 1`; preserve duplicate-key rejection in the validator and every other validation rule
 - `TestRuntimeBrokerInstances_OverlayDoesNotTouchInstances`
 - `TestRuntimeBrokerInstances_LegacyConfigUnchanged`
@@ -918,6 +923,8 @@ If dispatch authorization fails, its error is returned and no flat check is eval
 **Forward rule.** ptone/scion#3340 phase 1 changes dispatch authorization in one place, the body of `canDispatchToBroker` (or a successor that `checkBrokerDispatchAccess` and the resolver's selection filter call in its place), and changes link creation in the explicit link paths. The flat checks, their order after authorization, and their codes need no change. **The co-located auto-link convenience in ptone/scion#3340 does not apply to flat rows.** Its link paths must exclude every row with a stored runtime target, including the embedded flat instance that R7 records with `SetEmbeddedBrokerID`. They must not key the convenience on the embedded-Runtime Broker identity alone.
 
 ## Change log
+
+- **P2.1-K Kubernetes amendment (2026-10-09; approved by the architecture consultant):** implement the defined Kubernetes target; supersede its P1 not-implemented validation/test expectation with acceptance, add optional node-local `kubeconfig` to both config shapes, and retain clusterUid + namespace identity with fatal per-instance probe refusal when unidentified. Sections 2, 5 and 15 amended; detailed normative decisions and acceptance criteria are in `flat-runtime-brokers/p2-kubernetes-amendment.md`. This is not permission to skip scope verification, change legacy Kubernetes behavior, expose local credentials, or skip the P2.3 isolation prerequisites. Include this amendment with the schema/conversion/test and real-constructor changes in delivery review.
 
 - **P2.1 count-cap amendment (2026-10-09; approved by the architecture consultant):** this narrow amendment supersedes the P1-only count limit in section 2 and the affected frozen test expectation in section 15. `ValidateRuntimeBrokerInstances` no longer rejects a list solely because its length exceeds one; remove the instances-array schema `maxItems: 1`. Replace `TestRuntimeBrokerInstances_MultipleEntriesRejected` with `TestRuntimeBrokerInstances_MultipleEntriesAccepted` (two distinct valid Docker entries, no validation errors), and make the schema/validator parity test's "two entries" case valid. Duplicate keys remain invalid at every list size, and all other strict field/runtime validation stays. There is no new fixed count ceiling and no capacity guarantee. This approves only the named contract/test changes; historical P1 behavior is unchanged. Configuration acceptance is separate from activation: the P2 host contract r4 two-pass preflight still refuses every member of a conflicting scope group before activation, until the full P2.3 ownership and shared-resource prerequisites are implemented and tested. Empty-list legacy behavior, target binding and identity invariants are unchanged. See `design/p2-host-contract.md`, Q1/Q3. The delivery review must include this amendment alongside the schema, validator and test changes.
 
