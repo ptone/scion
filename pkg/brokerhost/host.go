@@ -47,6 +47,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokeridentity"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -421,22 +422,98 @@ func (h *Host) Instance(runtimeBrokerID string) (*runtimebroker.Server, bool) {
 	return nil, false
 }
 
-// Handler is the process-wide listener's handler. With exactly one instance
-// configured and active it is that instance's handler (the P1 route). In
-// every other case (one configured but inactive, or more than one
-// configured, whatever activated) it serves host health only and answers
-// 404 for everything else, never routing to a surviving instance.
+// InstancePathPrefix is the instance-qualified route prefix
+// (ptone/scion#3273): "/instances/<runtimeBrokerID>" followed by the
+// instance's own route. A host registers "<base>/instances/<id>" as an
+// instance's endpoint when several instances are configured.
+const InstancePathPrefix = "/instances/"
+
+// InstancePrefix returns the route prefix of the instance with this Runtime
+// Broker ID.
+func InstancePrefix(runtimeBrokerID string) string { return InstancePathPrefix + runtimeBrokerID }
+
+// Handler is the process-wide listener's handler.
+//
+//   - "/instances/<id>/...": the active instance with exactly that Runtime
+//     Broker ID. Its prefixed handler verifies the signature with only that
+//     instance's credentials over the full, prefixed path, then strips the
+//     prefix. An unknown, refused or stopped ID is 404, and so is a request
+//     whose Runtime Broker ID header names another broker; there is never a
+//     fallback to another instance. The path is matched as sent: a
+//     non-canonical path (encoded separators, dot segments, repeated
+//     slashes) under the namespace is 404, never cleaned or redirected into
+//     another route.
+//   - Root routes follow the CONFIGURED cardinality: with exactly one
+//     instance configured and active, the root serves that instance as an
+//     unadvertised P1 compatibility alias, under the same Runtime Broker ID
+//     binding; otherwise the root serves host health only and answers 404
+//     for everything else, whatever activated.
 func (h *Host) Handler() http.Handler {
+	prefixed := map[string]http.Handler{}
+	for _, a := range h.Active() {
+		id := a.Context.Identity.RuntimeBrokerID
+		prefixed[id] = a.Server.PrefixedHandler(InstancePrefix(id))
+	}
+	var root http.Handler
 	if !h.MultiInstance() {
 		if active := h.Active(); len(active) == 1 {
-			return active[0].Server.Handler()
+			root = bindBrokerID(active[0].Context.Identity.RuntimeBrokerID, active[0].Server.Handler())
 		}
 	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", h.handleHealthz)
-	mux.HandleFunc("/readyz", h.handleReadyz)
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) })
-	return mux
+	if root == nil {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/healthz", h.handleHealthz)
+		mux.HandleFunc("/readyz", h.handleReadyz)
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) })
+		root = mux
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, InstancePathPrefix) && r.URL.Path != strings.TrimSuffix(InstancePathPrefix, "/") {
+			root.ServeHTTP(w, r)
+			return
+		}
+		if !canonicalInstancePath(r) {
+			http.NotFound(w, r)
+			return
+		}
+		id, _, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, InstancePathPrefix), "/")
+		target, ok := prefixed[id]
+		if id == "" || !ok {
+			http.NotFound(w, r)
+			return
+		}
+		bindBrokerID(id, target).ServeHTTP(w, r)
+	})
+}
+
+// bindBrokerID refuses (404) a request whose Runtime Broker ID header names
+// a broker other than id, before any handler of id runs. A request without
+// the header goes on to id's own authentication.
+func bindBrokerID(id string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if signed := r.Header.Get(apiclient.HeaderBrokerID); signed != "" && signed != id {
+			http.NotFound(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// canonicalInstancePath reports whether a request path under the instance
+// namespace is exactly as a client builds it: no percent-encoded
+// characters in the path, no empty, "." or ".." segments.
+func canonicalInstancePath(r *http.Request) bool {
+	if r.URL.RawPath != "" && r.URL.RawPath != r.URL.Path {
+		return false
+	}
+	segments := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+	for i, seg := range segments {
+		last := i == len(segments)-1
+		if seg == "." || seg == ".." || (seg == "" && !last) {
+			return false
+		}
+	}
+	return true
 }
 
 type healthResponse struct {
