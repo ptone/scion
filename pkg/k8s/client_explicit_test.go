@@ -28,6 +28,7 @@ import (
 
 	"golang.org/x/oauth2"
 	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
 const explicitTestKubeconfig = `apiVersion: v1
@@ -332,5 +333,35 @@ func TestExplicitFileClientConfig_IsDirectWithNoInClusterLeg(t *testing.T) {
 	}
 	if _, ok := cc.(*clientcmd.DeferredLoadingClientConfig); ok {
 		t.Fatal("explicit file config is the deferred loader")
+	}
+}
+
+// TestNewClientFromKubeconfigFile_UsesTheDirectConfigAtTheCallSite: the
+// explicit-file constructor builds its configuration through the direct
+// (no in-cluster leg) constructor, and the configuration it gets is the
+// direct kind; a loader built inline at the call site would bypass it.
+func TestNewClientFromKubeconfigFile_UsesTheDirectConfigAtTheCallSite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "a.kubeconfig")
+	if err := os.WriteFile(path, []byte(explicitTestKubeconfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeTestCA(t, dir)
+	orig := newExplicitClientConfig
+	t.Cleanup(func() { newExplicitClientConfig = orig })
+	var built []clientcmd.ClientConfig
+	newExplicitClientConfig = func(cfg *clientcmdapi.Config, contextName string) clientcmd.ClientConfig {
+		cc := orig(cfg, contextName)
+		built = append(built, cc)
+		return cc
+	}
+	if _, err := NewClientFromKubeconfigFile(path, "ctx-b"); err != nil {
+		t.Fatal(err)
+	}
+	if len(built) != 1 {
+		t.Fatalf("the direct configuration constructor was used %d time(s), want once", len(built))
+	}
+	if _, ok := built[0].(*clientcmd.DirectClientConfig); !ok {
+		t.Fatalf("configuration is %T, want *clientcmd.DirectClientConfig", built[0])
 	}
 }

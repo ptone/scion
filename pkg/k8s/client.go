@@ -100,7 +100,7 @@ func NewClientFromKubeconfigFile(path, contextName string) (*Client, error) {
 	if err := clientcmd.ResolveLocalPaths(cfg); err != nil {
 		return nil, fmt.Errorf("failed to load kubeconfig: %w", err)
 	}
-	restCfg, err := explicitFileClientConfig(cfg, contextName).ClientConfig()
+	restCfg, err := newExplicitClientConfig(cfg, contextName).ClientConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load kubeconfig: %w", err)
 	}
@@ -117,6 +117,11 @@ func NewClientFromKubeconfigFile(path, contextName string) (*Client, error) {
 	c.explicitFile = true
 	return c, nil
 }
+
+// newExplicitClientConfig is the configuration constructor
+// NewClientFromKubeconfigFile uses (explicitFileClientConfig); a variable
+// so a test can observe that the explicit path goes through it.
+var newExplicitClientConfig = explicitFileClientConfig
 
 // explicitFileClientConfig is the client configuration of one loaded
 // kubeconfig file: a direct configuration with no loading rules and no
