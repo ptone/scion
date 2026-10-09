@@ -77,8 +77,9 @@ func writeGCPSAAmbiguous(w http.ResponseWriter, err error) bool {
 //   - A UUID matches the account id. The account is returned whatever its
 //     scope; the caller's ReachableFromProject check decides admissibility,
 //     exactly as before this resolver existed.
-//   - A value containing "@" matches the email. The project's own accounts
-//     are searched first and win over hub-scoped ones (narrowest scope wins).
+//   - A value containing "@" matches the email, ignoring case. The
+//     project's own accounts are searched first and win over hub-scoped
+//     ones (narrowest scope wins).
 //   - Anything else matches the display name, across the project's accounts
 //     and the hub-scoped ones together: a display name is not unique, so two
 //     matches are always ambiguous, whatever their scopes.
@@ -104,11 +105,11 @@ func (s *Server) resolveGCPServiceAccountRef(ctx context.Context, projectID, ref
 		IncludeHubScoped: true,
 	}
 	byEmail := strings.Contains(ref, "@")
-	if byEmail {
-		filter.Email = ref
-	}
 	// One query for both scopes: the filter documents why the two halves
-	// must not be read separately.
+	// must not be read separately. The email is compared here rather than
+	// through filter.Email, whose match is exact: registration does not
+	// normalize case, and an address typed in a different case must still
+	// match rather than read as "not available".
 	all, err := s.store.ListGCPServiceAccounts(ctx, filter)
 	if err != nil {
 		return nil, err
@@ -120,7 +121,7 @@ func (s *Server) resolveGCPServiceAccountRef(ctx context.Context, projectID, ref
 			continue
 		}
 		if byEmail {
-			if sa.Email != ref {
+			if !strings.EqualFold(sa.Email, ref) {
 				continue
 			}
 		} else if sa.DisplayName != ref {

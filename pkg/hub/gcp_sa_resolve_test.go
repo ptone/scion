@@ -22,6 +22,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -391,4 +393,138 @@ func TestGCPSAResolve_EachSiteNotFoundIsOneAnswer(t *testing.T) {
 			}
 		})
 	}
+}
+
+// An email typed in a different case still matches; a display name stays
+// exact.
+func TestResolveGCPServiceAccountRef_EmailIgnoresCase(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+	const proj = "resolve-case-proj"
+	sa := seedResolveSA(t, s, store.ScopeProject, proj, "Mixed.Case-Agent@Example.com", "Case Name", "u")
+
+	for _, ref := range []string{"mixed.case-agent@example.com", "MIXED.CASE-AGENT@EXAMPLE.COM", sa.Email} {
+		got, err := srv.resolveGCPServiceAccountRef(ctx, proj, ref)
+		require.NoError(t, err, "ref %q", ref)
+		assert.Equal(t, sa.ID, got.ID, "ref %q", ref)
+	}
+	_, err := srv.resolveGCPServiceAccountRef(ctx, proj, "case name")
+	assert.True(t, errors.Is(err, store.ErrNotFound), "display names match exactly: %v", err)
+
+	// Case-folding does not weaken precedence: a hub-scoped account whose
+	// email differs only in case still loses to the project's own.
+	seedResolveSA(t, s, store.ScopeHub, "some-hub", "mixed.case-agent@example.com", "hub copy", "u")
+	got, err := srv.resolveGCPServiceAccountRef(ctx, proj, "MIXED.case-agent@example.com")
+	require.NoError(t, err)
+	assert.Equal(t, sa.ID, got.ID)
+}
+
+func TestGCPSAResolve_EachSiteMatchesEmailIgnoringCase(t *testing.T) {
+	for _, site := range resolveSites() {
+		t.Run(site.name, func(t *testing.T) {
+			projectID, s, createdBy, run := site.setup(t)
+			sa := seedResolveSA(t, s, store.ScopeProject, projectID, uniqueSAEmail("case"), "case-account", createdBy)
+			code, body, assigned := run(t, strings.ToUpper(sa.Email))
+			require.Less(t, code, 300, body)
+			assert.Equal(t, sa.ID, assigned)
+		})
+	}
+}
+
+// The assign gate runs on the resolved account whatever form named it: a
+// caller refused for an account by id gets the same 403, byte for byte, when
+// naming it by email or display name. Each case varies one layer of the
+// gate: hub-scope mode coupling, the GCP actAs check, and Hub permission.
+func TestGCPSAResolve_AssignGateRunsForEveryForm(t *testing.T) {
+	forms := func(sa *store.GCPServiceAccount) []string {
+		return []string{sa.ID, sa.Email, sa.DisplayName}
+	}
+	requireSame403 := func(t *testing.T, run func(t *testing.T, ref string) (int, string), sa *store.GCPServiceAccount) {
+		t.Helper()
+		var first oracleProbe
+		for i, ref := range forms(sa) {
+			code, body := run(t, ref)
+			require.Equal(t, http.StatusForbidden, code, "ref %q: %s", ref, body)
+			if i == 0 {
+				first = oracleProbe{status: code, body: body}
+				continue
+			}
+			assert.Equal(t, first.body, body, "ref %q must be refused exactly as the id is", ref)
+		}
+	}
+
+	type bypassSite struct {
+		name string
+		run  func(f *bypassAgentsFixture) func(t *testing.T, ref string) (int, string)
+	}
+	bypassSites := []bypassSite{
+		{"create", func(f *bypassAgentsFixture) func(*testing.T, string) (int, string) {
+			n := 0
+			return func(t *testing.T, ref string) (int, string) {
+				n++
+				rec := createAgentAsOwner(t, f, CreateAgentRequest{
+					Name: fmt.Sprintf("resolve-gate-create-%d", n),
+					GCPIdentity: &GCPIdentityAssignment{
+						MetadataMode:     store.GCPMetadataModeAssign,
+						ServiceAccountID: ref,
+					},
+				})
+				return rec.Code, rec.Body.String()
+			}
+		}},
+		{"patch", func(f *bypassAgentsFixture) func(*testing.T, string) (int, string) {
+			n := 0
+			return func(t *testing.T, ref string) (int, string) {
+				n++
+				a := pendingAgentForPatch(t, f, fmt.Sprintf("resolve-gate-patch-%d", n))
+				rec := patchAgentSAAsOwner(t, f, a.ID, ref)
+				return rec.Code, rec.Body.String()
+			}
+		}},
+	}
+
+	for _, site := range bypassSites {
+		t.Run(site.name+"/hub-scoped account while hub-scope assign is off", func(t *testing.T) {
+			f := bypassAgentsSetup(t)
+			ensureHubMembership(context.Background(), f.store, f.owner.ID)
+			setMode(f.srv, SAAssignCheckOff)
+			sa := seedResolveSA(t, f.store, store.ScopeHub, "some-hub", uniqueSAEmail("gate-hub"), "gate hub account", f.owner.ID)
+			run := site.run(f)
+			requireSame403(t, run, sa)
+			_, body := run(t, sa.Email)
+			assert.Contains(t, body, "gcpIamCheckMode=enforce")
+		})
+
+		t.Run(site.name+"/caller without actAs", func(t *testing.T) {
+			f := bypassAgentsSetup(t)
+			sa := seedResolveSA(t, f.store, store.ScopeProject, f.proj.ID, uniqueSAEmail("gate-actas"), "gate actas account", f.owner.ID)
+			enforceSAAssign(f.srv, store.NewFakeCallerPermissionChecker().DenyTarget(sa.Email, "no actAs grant"))
+			requireSame403(t, site.run(f), sa)
+		})
+	}
+
+	t.Run("reincarnate/caller without permission on the account", func(t *testing.T) {
+		disp := newReincarnateTestDispatcher()
+		srv, s, project, broker := setupReincarnateTestServer(t, disp)
+		user := newReincarnateAuthzUser(t, s, "resolve-gate")
+		grantAgentLifecycleAtProject(t, s, user.ID, project.ID)
+		grantAgentDelegationAtProject(t, s, user.ID, project.ID)
+		grantPermissionViaRoleBinding(t, s, user.ID, "agent.update", store.RoleScopeProject, project.ID)
+		// Created by someone else; nothing grants this user read on it.
+		sa := seedResolveSA(t, s, store.ScopeProject, project.ID, uniqueSAEmail("gate-reinc"), "gate reincarnate account", "someone-else")
+		identity := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "web")
+		n := 0
+		run := func(t *testing.T, ref string) (int, string) {
+			n++
+			agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+				a.ID = uuid.New().String()
+				a.Slug = fmt.Sprintf("resolve-gate-reinc-%d", n)
+			})
+			req := reincarnateRequest(t, agent.ID, identity, ReincarnateAgentRequest{ServiceAccount: ref})
+			rec := httptest.NewRecorder()
+			srv.handleReincarnateAgent(rec, req, agent.ID)
+			return rec.Code, rec.Body.String()
+		}
+		requireSame403(t, run, sa)
+	})
 }
