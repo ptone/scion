@@ -219,6 +219,36 @@ func TestHost_UnresolvedOwnershipRefusesTheWholeScopeGroup(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+// TestHost_UnreadableOwnershipRecordsRefuseTheWholeScopeGroup: ownership
+// records that one instance cannot read refuse every instance on its
+// execution scope before any of them activates; another scope is
+// unaffected.
+func TestHost_UnreadableOwnershipRecordsRefuseTheWholeScopeGroup(t *testing.T) {
+	f := newFixture(t)
+	f.daemons["docker-a"] = "shared-daemon"
+	f.daemons["docker-b"] = "shared-daemon"
+	cfg := f.config(t, dockerInstance("docker-a", "a"), dockerInstance("docker-b", "b"), dockerInstance("docker-c", "c"))
+	cfg.OwnershipKeys = func(_ context.Context, c Candidate) ([]string, error) {
+		if c.Instance.Key == "docker-b" {
+			return nil, errors.New("ownership record unreadable: permission denied")
+		}
+		return nil, nil
+	}
+	h, err := New(cfg)
+	require.NoError(t, err)
+	require.NoError(t, h.Prepare(context.Background()))
+
+	st := statusByKey(h)
+	for _, k := range []string{"docker-a", "docker-b"} {
+		assert.Equal(t, StateRefused, st[k].State, k)
+		assert.Equal(t, "ownership_unresolved", st[k].Reason, k)
+	}
+	assert.Contains(t, st["docker-a"].Error, "docker-b", "the sibling's refusal names the instance whose records are unreadable")
+	assert.Equal(t, StateActive, st["docker-c"].State, "another scope is unaffected")
+	assert.Equal(t, []string{"docker-c"}, f.activator.activated, "no instance of the affected scope is activated")
+	assert.Equal(t, []string{"docker-c"}, f.built)
+}
+
 // TestHost_ScopeProbeFailureRefusesOnlyThatInstance: a failed scope
 // identification refuses only its own instance (it has no scope group).
 func TestHost_ScopeProbeFailureRefusesOnlyThatInstance(t *testing.T) {

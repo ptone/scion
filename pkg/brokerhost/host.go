@@ -19,14 +19,20 @@
 //
 // Activation is two-pass. Pass 1 builds every configured instance's runtime,
 // probes its execution scope and loads or creates its identity, with no Hub
-// registration, heartbeat or control-channel side effect. It then refuses
-// every instance whose execution scope conflicts with another's (until
-// per-instance ownership of runtime inventory and the shared host resources
-// exists, two instances on one scope must not both serve). Pass 2 activates
-// the eligible instances: the Activator validates the Hub binding (the
-// embedded registration when the Hub runs in the process, otherwise the
-// remote activation validation), and only a bound result builds and starts
-// the instance's Runtime Broker server.
+// registration, heartbeat or control-channel side effect. Instances may share
+// an execution scope (one Docker daemon, one Kubernetes cluster and
+// namespace); each acts only on the runtime objects it owns. Unresolved
+// ownership found by any instance's pass-1 check (its ownership preflight, or
+// ownership records that cannot be read) refuses every instance on that
+// scope before pass 2. Pass 2 activates the eligible instances: the Activator
+// validates the Hub binding (the embedded registration when the Hub runs in
+// the process, otherwise the remote activation validation), and only a bound
+// result builds and starts the instance's Runtime Broker server.
+//
+// Flat instances stay within the hub.flat_runtime_brokers experiment, which
+// the Hub enforces for every flat instance: a new flat instance's first
+// registration and every create on a flat Runtime Broker are refused while it
+// is off. A flat instance whose row already exists re-registers with it off.
 //
 // The host owns the process-wide HTTP listener. Its routing follows the
 // CONFIGURED cardinality: with exactly one instance configured, the listener
@@ -101,7 +107,7 @@ type Activation struct {
 }
 
 // Candidate is an instance that passed pass 1 (runtime built, scope probed,
-// identity loaded, no scope conflict).
+// identity loaded, ownership resolved on its scope).
 type Candidate struct {
 	Instance config.V1RuntimeBrokerInstanceConfig
 	Identity *brokeridentity.Identity
