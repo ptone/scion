@@ -358,8 +358,9 @@ spec:
           THE SAME HAZARD ONE LEVEL UP, FOR WHOEVER WRAPS THIS FILE: this is the
           only call site, so anything that stops rendering the Deployment also
           stops running the assertion - silently, with a manifest that reads as
-          correct. bootstrap.deferHub is exactly that change. If you gate this
-          file, the assertion has to be hoisted somewhere that still evaluates.
+          correct. A value that skips the Deployment (for example a switch that
+          defers the hub) is exactly that change. If you gate this file, the
+          assertion has to be hoisted somewhere that still evaluates.
           */}}
           {{- include "scion-hub.assertStartupBudget" . }}
           {{- if .Values.probes.startup.enabled }}

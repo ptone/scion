@@ -40,17 +40,27 @@ Numbering follows the design document's whole-chart acceptance list (§18, items
 
 ### 14. Two-step install under `auth.mode: proxy` (IAP)
 
-Run the two-step install from `NOTES.txt` (that runbook arrives with the ingress
-change; it is not in `NOTES.txt` yet): `helm install` with
-`bootstrap.deferHub=true`, wait for the Ingress to get an address, read the
-backend-service ID, then `helm upgrade` with `auth.proxy.iap.audience` set to
-`/projects/<number>/global/backendServices/<id>`.
+The chart has no switch that defers the hub. The first step is an ordinary
+`helm install` with a placeholder audience, and the second is a `helm upgrade`
+with the real one:
+
+1. `helm install` with `auth.proxy.iap.audience` set to a placeholder with an
+   all-zero backend-service ID, such as
+   `/projects/000000000000/global/backendServices/0`. The hub starts (on an HA
+   shape it logs a warning that the audience looks like a bootstrap
+   placeholder), and IAP logins fail until step 3.
+2. The chart renders no Ingress. Wait for the load balancer in front of the
+   ClusterIP Service (your own Ingress or Gateway, or the one Terraform creates)
+   to reconcile, and read its backend-service ID.
+3. `helm upgrade` with `auth.proxy.iap.audience` set to
+   `/projects/<number>/global/backendServices/<id>`. The change alters the
+   `checksum/settings` pod annotation, so the pods restart with it.
 
 The chart refuses any `auth.mode: proxy` render with no audience, because the hub
-refuses one at startup, so the first `helm install` needs a placeholder audience
-(an all-zero backend-service ID, which the hub accepts with a warning). An HA
-shape (postgres, gcs, or `K_SERVICE`) also needs `auth.transport.mode: iap`,
-`auth.transport.oidcAudience` and `auth.transport.platformAuthSa`. The chart
+refuses one at startup; that is why step 1 needs the placeholder rather than an
+empty value. An HA shape (postgres, gcs, or `K_SERVICE`) also needs
+`auth.transport.mode: iap`, `auth.transport.oidcAudience` and
+`auth.transport.platformAuthSa`. The chart
 checks the audience's shape and the transport values against the hub's preflight
 at render time. It cannot check that they name a real backend service, OAuth
 client or service account; this step is where that gets checked.
@@ -70,7 +80,7 @@ check is not hitting an auth-exempt endpoint.
 Only possible once the hosted-mode preflight split has landed; until then the
 pod fails preflight at startup whatever the chart renders.
 
-Pass: one `helm install`, no backend-service ID, no `bootstrap.deferHub`, and a
+Pass: one `helm install`, no backend-service ID, no placeholder audience, and a
 signed-in user gets a session with no IAP in the request path.
 
 ### 16. `hub_id` is identical across replicas and stable across upgrade
