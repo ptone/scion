@@ -1285,6 +1285,12 @@ type StartOptions struct {
 	// leaves the reported resources to the caller. Set both hooks together.
 	OnResourceCreated func(ResourceHandle)
 
+	// ObserveResourceCreated, when set, is also called after each true
+	// create of a launch resource (on the synchronous path as well). It
+	// only observes: unlike OnResourceCreated it never changes who cleans
+	// up a failed start. See runtime.RunConfig.ObserveResourceCreated.
+	ObserveResourceCreated func(ResourceHandle)
+
 	// RunID is the per-run identity minted by the hub for this create/start
 	// dispatch (ptone/scion#2550). It is applied to the runtime entry as the
 	// LabelRunID label. When empty (local/CLI mode, or an older hub) the

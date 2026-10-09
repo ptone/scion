@@ -213,6 +213,20 @@ type RunConfig struct {
 	// Checkpoint is set. Callers set both hooks together.
 	Checkpoint        func(ctx context.Context, step string) error
 	OnResourceCreated func(api.ResourceHandle)
+
+	// ObserveResourceCreated, when set, is called after each true create of
+	// a launch resource, after OnResourceCreated, on both the synchronous
+	// and the async path. It only observes: setting it never changes who
+	// cleans up a failed start (see launchHooks.active). It runs
+	// synchronously on the launch path, so it must be fast and
+	// non-blocking and must not call back into the runtime; it has no
+	// error return, so an observer's own failure must never fail or slow
+	// the start (a flat instance latches it for its Checkpoint). It also
+	// fires for resources created before a later failure. Honoured by the
+	// runtimes that create resources through launchHooks: Docker, Podman,
+	// Apple container and Kubernetes; other runtimes (Cloud Run,
+	// substrate) do not report created resources.
+	ObserveResourceCreated func(api.ResourceHandle)
 }
 
 // Checkpoint step names a runtime passes to RunConfig.Checkpoint (design
@@ -232,11 +246,12 @@ const (
 type launchHooks struct {
 	checkpointFn func(ctx context.Context, step string) error
 	createdFn    func(api.ResourceHandle)
+	observedFn   func(api.ResourceHandle)
 }
 
 // launchHooks returns config's async-launch hooks.
 func (config *RunConfig) launchHooks() launchHooks {
-	return launchHooks{checkpointFn: config.Checkpoint, createdFn: config.OnResourceCreated}
+	return launchHooks{checkpointFn: config.Checkpoint, createdFn: config.OnResourceCreated, observedFn: config.ObserveResourceCreated}
 }
 
 // checkpoint is called immediately before a resource-creating call. A
@@ -255,15 +270,20 @@ func (h launchHooks) checkpoint(ctx context.Context, step string) error {
 // RunConfig.OnResourceCreated), and only a caller that records handles can
 // clean up what the runtime leaves.
 func (h launchHooks) active() bool {
+	// Keyed on createdFn only, never observedFn: an observer records
+	// handles but does not take over cleanup, so a synchronous start with
+	// only an observer keeps the runtime's own cleanup.
 	return h.createdFn != nil
 }
 
 // created is called after a true create of a launch-owned resource.
 func (h launchHooks) created(handle api.ResourceHandle) {
-	if h.createdFn == nil {
-		return
+	if h.createdFn != nil {
+		h.createdFn(handle)
 	}
-	h.createdFn(handle)
+	if h.observedFn != nil {
+		h.observedFn(handle)
+	}
 }
 
 // HomeStorageRealization describes the NFS agent home of one start: the
