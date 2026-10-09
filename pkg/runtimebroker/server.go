@@ -514,7 +514,11 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 		// label say it owns (ptone/scion#3274).
 		srv.ownership = NewOwnershipStore(srv.stateDir, fi.Identity.RuntimeBrokerID)
 		srv.ownership.SetConflicting(fi.ConflictingOwnershipKeys)
-		srv.workspaceLocks.registerProjectUser(srv, srv.ownership.HasLiveAgents)
+		srv.workspaceLocks.registerWorkspaceUser(srv, &workspaceUser{
+			instance:        fi.Identity.RuntimeBrokerID,
+			projectInUse:    srv.ownership.HasLiveAgents,
+			slugReservation: srv.ownership.SlugReservation,
+		})
 		if am, ok := mgr.(ownerScopedManager); !ok {
 			// Fail closed: a manager that cannot be restricted to this
 			// instance's objects would serve every instance's agents.

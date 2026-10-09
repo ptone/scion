@@ -54,11 +54,27 @@ type WorkspaceLocks struct {
 	held    map[string]int // canonical key -> holders (always 1 while held)
 	changed chan struct{}  // closed and replaced on every release
 
-	// users report, per server, whether it has live agents in a project
-	// (a flat instance: its ownership records), so a project removal by one
-	// server never removes a workspace another server still uses.
+	// users report, per server, what it uses in shared project
+	// directories (a flat instance: its ownership records), so a project
+	// removal by one server never removes a workspace another server still
+	// uses, and no server reserves a slug another server holds.
 	usersMu sync.Mutex
-	users   map[*Server]func(projectID string) (bool, error)
+	users   map[*Server]workspaceUser
+
+	// reserveMu serializes slug reservations across servers (reserveSlug).
+	reserveMu sync.Mutex
+}
+
+// workspaceUser is how a server reports what it uses in shared project
+// directories.
+type workspaceUser struct {
+	// instance names the server in errors (its Runtime Broker ID).
+	instance string
+	// projectInUse reports whether the server has live agents in a project.
+	projectInUse func(projectID string) (bool, error)
+	// slugReservation reports the agent holding a slug in a project and
+	// whether that agent's delete is unfinished (OwnershipStore.SlugReservation).
+	slugReservation func(projectID, slug string) (holder string, pending bool, err error)
 }
 
 // NewWorkspaceLocks returns an empty lock service.
@@ -66,19 +82,19 @@ func NewWorkspaceLocks() *WorkspaceLocks {
 	return &WorkspaceLocks{held: map[string]int{}, changed: make(chan struct{})}
 }
 
-// registerProjectUser records how server reports its live agents in a
-// project; nil removes it.
-func (l *WorkspaceLocks) registerProjectUser(s *Server, inUse func(projectID string) (bool, error)) {
+// registerWorkspaceUser records how server reports what it uses; nil
+// removes it.
+func (l *WorkspaceLocks) registerWorkspaceUser(s *Server, u *workspaceUser) {
 	l.usersMu.Lock()
 	defer l.usersMu.Unlock()
 	if l.users == nil {
-		l.users = map[*Server]func(string) (bool, error){}
+		l.users = map[*Server]workspaceUser{}
 	}
-	if inUse == nil {
+	if u == nil {
 		delete(l.users, s)
 		return
 	}
-	l.users[s] = inUse
+	l.users[s] = *u
 }
 
 // projectInUseByOthers reports whether a server other than self sharing this
@@ -87,15 +103,81 @@ func (l *WorkspaceLocks) registerProjectUser(s *Server, inUse func(projectID str
 func (l *WorkspaceLocks) projectInUseByOthers(self *Server, projectID string) bool {
 	l.usersMu.Lock()
 	defer l.usersMu.Unlock()
-	for s, inUse := range l.users {
-		if s == self {
+	for s, u := range l.users {
+		if s == self || u.projectInUse == nil {
 			continue
 		}
-		if used, err := inUse(projectID); err != nil || used {
+		if used, err := u.projectInUse(projectID); err != nil || used {
 			return true
 		}
 	}
 	return false
+}
+
+// ErrOwnershipSlugReservedElsewhere is a slug another Runtime Broker
+// instance of the host holds in the same project.
+var ErrOwnershipSlugReservedElsewhere = errors.New("agent slug is reserved by another Runtime Broker instance of this host")
+
+// slugReservedElsewhereError is a slug another server sharing the service
+// holds in the project. It matches ErrOwnershipSlugReservedElsewhere and,
+// when the holder's delete is unfinished, ErrOwnershipSlugPending.
+type slugReservedElsewhereError struct {
+	projectID, slug, instance, holder string
+	pending                           bool
+	readErr                           error // the reservation could not be read
+}
+
+func (e *slugReservedElsewhereError) Error() string {
+	switch {
+	case e.readErr != nil:
+		return fmt.Sprintf("%v: slug %q in project %q: the reservations of Runtime Broker instance %s cannot be read: %v", ErrOwnershipSlugReservedElsewhere, e.slug, e.projectID, e.instance, e.readErr)
+	case e.pending:
+		return fmt.Sprintf("%v: slug %q in project %q on Runtime Broker instance %s: %v (agent %s)", ErrOwnershipSlugReservedElsewhere, e.slug, e.projectID, e.instance, ErrOwnershipSlugPending, e.holder)
+	default:
+		return fmt.Sprintf("%v: slug %q in project %q is held by agent %s on Runtime Broker instance %s", ErrOwnershipSlugReservedElsewhere, e.slug, e.projectID, e.holder, e.instance)
+	}
+}
+
+func (e *slugReservedElsewhereError) Unwrap() []error {
+	if e.pending {
+		return []error{ErrOwnershipSlugReservedElsewhere, ErrOwnershipSlugPending}
+	}
+	return []error{ErrOwnershipSlugReservedElsewhere}
+}
+
+// reserveSlug runs reserve, which reserves slug in self's own records, only
+// when no other server sharing this service holds the slug in the project:
+// two servers sharing a project directory would otherwise use the same
+// agent directory. Every server's reservation runs under one lock, so two
+// servers cannot reserve the same slug at once. A reservation that cannot
+// be read counts as held. A slug is held from its agent's first run until
+// that agent's delete confirms all its objects are gone (the slug release
+// needs no lock: it only frees the slug).
+func (l *WorkspaceLocks) reserveSlug(self *Server, projectID, slug string, reserve func() error) error {
+	l.reserveMu.Lock()
+	defer l.reserveMu.Unlock()
+	if err := l.slugHeldByOthers(self, projectID, slug); err != nil {
+		return err
+	}
+	return reserve()
+}
+
+func (l *WorkspaceLocks) slugHeldByOthers(self *Server, projectID, slug string) error {
+	l.usersMu.Lock()
+	defer l.usersMu.Unlock()
+	for s, u := range l.users {
+		if s == self || u.slugReservation == nil {
+			continue
+		}
+		holder, pending, err := u.slugReservation(projectID, slug)
+		if err != nil {
+			return &slugReservedElsewhereError{projectID: projectID, slug: slug, instance: u.instance, readErr: err}
+		}
+		if holder != "" {
+			return &slugReservedElsewhereError{projectID: projectID, slug: slug, instance: u.instance, holder: holder, pending: pending}
+		}
+	}
+	return nil
 }
 
 // locks returns the server's workspace lock service, creating a private one

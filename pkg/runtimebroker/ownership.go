@@ -318,6 +318,23 @@ func (s *OwnershipStore) SlugHolder(projectID, slug string) (string, error) {
 	return s.slugHolder(projectID, slug)
 }
 
+// SlugReservation reports the agent holding slug in the project and
+// whether that agent's record is no longer live (its delete has not yet
+// confirmed that all its objects are gone). A slug index entry whose record
+// is missing counts as held and live. An unreadable or conflicting entry
+// is an error.
+func (s *OwnershipStore) SlugReservation(projectID, slug string) (holder string, pending bool, err error) {
+	holder, err = s.SlugHolder(projectID, slug)
+	if err != nil || holder == "" {
+		return holder, false, err
+	}
+	rec, found, err := s.readFile(projectID, holder)
+	if err != nil {
+		return "", false, err
+	}
+	return holder, found && rec.State != OwnershipStateActive, nil
+}
+
 func (s *OwnershipStore) slugHolder(projectID, slug string) (string, error) {
 	p, err := s.slugPath(projectID, slug)
 	if err != nil {
@@ -885,8 +902,9 @@ func (s *Server) fileAgentOwned(projectID, slug string) bool {
 // A create may start a new record; any other operation (start, restart of
 // an existing agent) requires the agent's existing live record, so an agent
 // whose ownership is not established is never adopted by starting it. A
-// missing project or agent ID, a slug held by another agent, or a write
-// failure refuses the operation before any side effect.
+// missing project or agent ID, a slug held by another agent (of this
+// instance or of another instance of the host), or a write failure refuses
+// the operation before any side effect.
 func (s *Server) beginOwnedRun(projectID, agentID, slug, runID string, create bool) error {
 	if s.ownership == nil {
 		return nil
@@ -903,7 +921,11 @@ func (s *Server) beginOwnedRun(projectID, agentID, slug, runID string, create bo
 			return fmt.Errorf("%w: agent %s in project %s has no live ownership record of this Runtime Broker instance", ErrOwnershipNotRecorded, agentID, projectID)
 		}
 	}
-	return s.ownership.BeginRun(projectID, agentID, slug, runID)
+	// The slug must also be free on every other instance sharing this
+	// host's project directories.
+	return s.locks().reserveSlug(s, projectID, slug, func() error {
+		return s.ownership.BeginRun(projectID, agentID, slug, runID)
+	})
 }
 
 // ownedStart is one flat start's ownership journal mirror: it records every
