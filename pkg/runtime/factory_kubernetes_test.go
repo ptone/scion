@@ -32,7 +32,7 @@ func fakeKubeAPIServer(t *testing.T) *httptest.Server {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/version" {
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"major":"1","minor":"30","gitVersion":"v1.30.0"}`)
+			_, _ = fmt.Fprint(w, `{"major":"1","minor":"30","gitVersion":"v1.30.0"}`)
 			return
 		}
 		http.NotFound(w, r)

@@ -33,6 +33,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // Multi-instance flat Runtime Broker hosting (ptone/scion#3272). A process
@@ -56,16 +59,31 @@ func flatHostMode(cfg *config.GlobalConfig, s store.Store) brokerhost.Mode {
 }
 
 // newFlatInstanceRuntime builds an instance's runtime from its own explicit
-// configuration, never from Runtime Broker Profile resolution. Docker is
-// the only target type in this release (Kubernetes arrives with its scope
-// probe; validation already refuses it).
+// configuration, never from Runtime Broker Profile resolution or a change to
+// process-wide settings (KUBECONFIG, HOME, cwd, current context).
+//
+// Kubernetes: with runtime_target.kubeconfig set, that file is the only
+// source (a missing, unreadable or malformed file, or a context it does not
+// define, refuses the instance; there is no fallback to the default or
+// in-cluster configuration). Without it, the process's normal loading rules
+// apply (KUBECONFIG, including path lists, then ~/.kube/config, then
+// in-cluster when no context is named). The namespace is the explicit one,
+// else the runtime's usual chain.
 func newFlatInstanceRuntime(_ context.Context, inst config.V1RuntimeBrokerInstanceConfig) (runtime.Runtime, error) {
 	if inst.RuntimeTarget == nil {
 		return nil, errors.New("runtime_target is required")
 	}
-	switch inst.RuntimeTarget.Type {
+	t := inst.RuntimeTarget
+	switch t.Type {
 	case brokeridentity.TargetTypeDocker:
 		return runtime.NewDockerRuntime(), nil
+	case brokeridentity.TargetTypeKubernetes:
+		rt, err := runtime.NewKubernetesRuntimeFromConfig(t.Kubeconfig, config.V1RuntimeConfig{
+			Type: "kubernetes", Context: t.Context, Namespace: t.Namespace})
+		if err != nil {
+			return nil, err
+		}
+		return rt, nil
 	default:
 		return nil, fmt.Errorf("runtime target type %q is not supported in this release", inst.RuntimeTarget.Type)
 	}
@@ -81,9 +99,53 @@ func probeFlatInstanceScope(ctx context.Context, inst config.V1RuntimeBrokerInst
 	switch r := rt.(type) {
 	case *runtime.DockerRuntime:
 		return probeDockerExecutionScope(ctx, r.Command)
+	case *runtime.KubernetesRuntime:
+		return probeKubernetesExecutionScope(ctx, r)
 	default:
 		return brokeridentity.ExecutionScope{}, fmt.Errorf("%w: no scope probe for runtime %q", brokeridentity.ErrExecutionScopeUnidentified, rt.Name())
 	}
+}
+
+// probeKubernetesExecutionScope identifies a Kubernetes instance's scope
+// with the instance's own client (contract section 5, amendment K3): the
+// kube-system Namespace object's UID plus the runtime's resolved namespace;
+// the API server is informational. Any failure to identify the cluster
+// refuses the instance (ErrExecutionScopeUnidentified); there is no fallback
+// identity. Messages never include credentials or kubeconfig contents.
+func probeKubernetesExecutionScope(ctx context.Context, rt *runtime.KubernetesRuntime) (brokeridentity.ExecutionScope, error) {
+	if rt.Client == nil || rt.Client.Clientset == nil {
+		return brokeridentity.ExecutionScope{}, fmt.Errorf("%w: the Kubernetes runtime has no client", brokeridentity.ErrExecutionScopeUnidentified)
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	ns, err := rt.Client.Clientset.CoreV1().Namespaces().Get(probeCtx, "kube-system", metav1.GetOptions{})
+	switch {
+	case apierrors.IsForbidden(err):
+		return brokeridentity.ExecutionScope{}, fmt.Errorf("%w: Cannot identify Kubernetes execution scope: access denied reading Namespace kube-system; "+
+			"this flat Runtime Broker instance requires get permission on namespaces/kube-system. "+
+			"Ask the cluster operator to grant this read permission; the instance was not activated", brokeridentity.ErrExecutionScopeUnidentified)
+	case apierrors.IsNotFound(err):
+		return brokeridentity.ExecutionScope{}, fmt.Errorf("%w: Cannot identify Kubernetes execution scope: the Namespace object kube-system does not exist in this cluster; "+
+			"the instance was not activated", brokeridentity.ErrExecutionScopeUnidentified)
+	case err != nil:
+		return brokeridentity.ExecutionScope{}, fmt.Errorf("%w: Cannot identify Kubernetes execution scope: reading Namespace kube-system failed (API server unreachable or request failed); "+
+			"the instance was not activated: %v", brokeridentity.ErrExecutionScopeUnidentified, err)
+	case ns == nil || string(ns.UID) == "":
+		return brokeridentity.ExecutionScope{}, fmt.Errorf("%w: Cannot identify Kubernetes execution scope: Namespace kube-system has no UID; the instance was not activated",
+			brokeridentity.ErrExecutionScopeUnidentified)
+	}
+	apiServer := ""
+	if rt.Client.Config != nil {
+		apiServer = brokeridentity.NormalizeKubernetesAPIServer(rt.Client.Config.Host)
+	}
+	return brokeridentity.ExecutionScope{
+		Type: brokeridentity.TargetTypeKubernetes,
+		Kubernetes: &brokeridentity.KubernetesScope{
+			ClusterUID: string(ns.UID),
+			Namespace:  rt.DefaultNamespace,
+			APIServer:  apiServer,
+		},
+	}, nil
 }
 
 // colocatedFlatActivator activates an instance through the Hub's embedded
@@ -219,13 +281,23 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 		rhEndpoint = fmt.Sprintf("http://localhost:%d", cfg.RuntimeBroker.Port)
 	}
 
-	chRes := brokerContainerHubConfig(cfg, brokerContainerHubParams{
-		RuntimeName:             "docker",
-		BrokerHubEndpoint:       hubEndpointForRH,
-		PublicHubEndpoint:       p.hubEndpoint,
-		PublicHubEndpointSource: p.hubEndpointSrc,
-		HostGatewayProbe:        func() bool { return runtime.DockerSupportsHostGateway(ctx, "") },
-	}, log.Printf)
+	// The container Hub endpoint depends on the instance's runtime type, so
+	// it is computed per instance (once per type).
+	chResByRuntime := map[string]containerHubEndpointResult{}
+	containerHub := func(rtName string) containerHubEndpointResult {
+		if r, ok := chResByRuntime[rtName]; ok {
+			return r
+		}
+		r := brokerContainerHubConfig(cfg, brokerContainerHubParams{
+			RuntimeName:             rtName,
+			BrokerHubEndpoint:       hubEndpointForRH,
+			PublicHubEndpoint:       p.hubEndpoint,
+			PublicHubEndpointSource: p.hubEndpointSrc,
+			HostGatewayProbe:        func() bool { return runtime.DockerSupportsHostGateway(ctx, "") },
+		}, log.Printf)
+		chResByRuntime[rtName] = r
+		return r
+	}
 
 	var brokerNFS *config.V1NFSConfig
 	var workspaceStorageBackend string
@@ -303,7 +375,7 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 			// mounts.
 			rhCfg.NFSVerifyOnlyReason = "several Runtime Broker instances share this host, so no instance mounts it"
 		}
-		chRes.applyTo(&rhCfg)
+		containerHub(ic.Runtime.Name()).applyTo(&rhCfg)
 		if ic.Activation.InMemoryCredentials != nil && p.hubSrv != nil {
 			rhCfg.ColocatedStorage = p.hubSrv.GetStorage()
 		}
@@ -354,8 +426,14 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 	active := host.Active()
 	if mode == brokerhost.ModeColocated && len(active) > 0 {
 		// The Hub's local image checker uses the host's Docker CLI, not
-		// whichever instance happened to start last.
-		p.hubSrv.SetLocalImageChecker(runtime.NewDockerRuntime())
+		// whichever instance happened to start last, and only when a Docker
+		// instance is active.
+		for _, a := range active {
+			if _, ok := a.Context.Runtime.(*runtime.DockerRuntime); ok {
+				p.hubSrv.SetLocalImageChecker(runtime.NewDockerRuntime())
+				break
+			}
+		}
 		for _, a := range active {
 			startFlatColocatedHeartbeat(ctx, p.wg, p.store, a.Server, a.Context.Identity.RuntimeBrokerID, a.Context.Instance.Name)
 		}
