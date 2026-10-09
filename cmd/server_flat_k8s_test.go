@@ -430,3 +430,49 @@ func TestFlatKubernetes_RegistrationCarriesNoKubeconfig(t *testing.T) {
 	target := hub.bodies["/api/v1/brokers"]["runtimeTarget"].(map[string]any)
 	assert.Equal(t, "kubernetes", target["type"])
 }
+
+// TestFlatKubernetes_ExplicitFileExecFailureRefusesOnlyThatInstance: an
+// instance whose explicit kubeconfig's exec credential plugin fails is
+// refused (no ADC substitution, even on GCE) while a healthy sibling
+// activates.
+func TestFlatKubernetes_ExplicitFileExecFailureRefusesOnlyThatInstance(t *testing.T) {
+	clearK8sEnv(t)
+	t.Setenv("GCE_METADATA_HOST", "127.0.0.1:1") // on GCE: the legacy path would try ADC
+	dir := t.TempDir()
+	// The exec plugin is used for a TLS server (client-go sends exec
+	// credentials only over TLS).
+	bad := httptest.NewTLSServer(http.NotFoundHandler())
+	t.Cleanup(bad.Close)
+	good := newFakeKubeCluster(t, "uid-good")
+	kcBad := filepath.Join(dir, "exec.kubeconfig")
+	require.NoError(t, os.WriteFile(kcBad, []byte(fmt.Sprintf(`apiVersion: v1
+kind: Config
+clusters:
+- name: c
+  cluster:
+    server: %s
+    insecure-skip-tls-verify: true
+users:
+- name: u
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1beta1
+      command: /bin/false
+      interactiveMode: Never
+contexts:
+- name: shared
+  context:
+    cluster: c
+    user: u
+current-context: shared
+`, bad.URL)), 0o600))
+	kcGood := writeTestKubeconfigFile(t, dir, "good.kubeconfig", good.URL)
+
+	h, act := prepareK8sHost(t, t.TempDir(), k8sInstance("k8s-exec", kcBad, "agents"), k8sInstance("k8s-good", kcGood, "agents"))
+	st := statusOf(h, "k8s-exec")
+	assert.Equal(t, brokerhost.StateRefused, st.State)
+	assert.True(t, errors.Is(act.refused["k8s-exec"], brokeridentity.ErrExecutionScopeUnidentified), "%v", act.refused["k8s-exec"])
+	assert.Contains(t, st.Error, "no other credential source is used for this kubeconfig")
+	assert.NotContains(t, act.activated, "k8s-exec")
+	assert.Equal(t, brokerhost.StateActive, statusOf(h, "k8s-good").State, "a healthy sibling activates")
+}
