@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -154,6 +155,10 @@ func probeKubernetesExecutionScope(ctx context.Context, rt *runtime.KubernetesRu
 // credentials of the co-located control channel.
 type colocatedFlatActivator struct {
 	hubSrv *hub.Server
+	// reported holds the instance keys whose refusal the embedded
+	// registration already reported to the Hub.
+	reportedMu sync.Mutex
+	reported   map[string]bool
 	// endpoint is the shared listener's base URL. Every flat instance,
 	// including a single one, registers <endpoint>/instances/<id>, its
 	// instance-qualified route, so its advertised endpoint does not change
@@ -174,6 +179,12 @@ func (a *colocatedFlatActivator) Activate(ctx context.Context, c brokerhost.Cand
 		WorkspaceStorage: loadBrokerRegistrationWorkspaceStorage(),
 	})
 	if err != nil {
+		a.reportedMu.Lock()
+		if a.reported == nil {
+			a.reported = map[string]bool{}
+		}
+		a.reported[c.Instance.Key] = true
+		a.reportedMu.Unlock()
 		return nil, err
 	}
 	act := &brokerhost.Activation{}
@@ -198,6 +209,13 @@ func (a *colocatedFlatActivator) Activate(ctx context.Context, c brokerhost.Cand
 }
 
 func (a *colocatedFlatActivator) Refused(inst config.V1RuntimeBrokerInstanceConfig, err error) {
+	a.reportedMu.Lock()
+	already := a.reported[inst.Key]
+	delete(a.reported, inst.Key)
+	a.reportedMu.Unlock()
+	if already {
+		return // the embedded registration reported this refusal itself
+	}
 	a.hubSrv.EmbeddedFlatInstanceFailed(inst.Key, err)
 }
 
@@ -239,7 +257,7 @@ func (a *remoteFlatActivator) Activate(ctx context.Context, c brokerhost.Candida
 	}
 	for _, e := range errs {
 		slog.Error("Flat Runtime Broker instance not connected to a Hub whose binding failed validation",
-			"instance", c.Instance.Key, "error", e)
+			"instance", c.Instance.Key, logging.AttrBrokerID, c.Identity.RuntimeBrokerID, "error", e)
 	}
 	return &brokerhost.Activation{RemoteCredentials: validated}, nil
 }
@@ -333,54 +351,17 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 		activator = &remoteFlatActivator{globalDir: p.globalDir}
 	}
 
-	multi := len(p.instances) > 1
+	shared := flatServerShared{
+		cfg:                     cfg,
+		mode:                    mode,
+		multiInstance:           len(p.instances) > 1,
+		hubEndpoint:             hubEndpointForRH,
+		devAuthToken:            p.devAuthToken,
+		nfs:                     brokerNFS,
+		workspaceStorageBackend: workspaceStorageBackend,
+	}
 	buildServer := func(ic brokerhost.InstanceContext) (*runtimebroker.Server, error) {
-		remote := len(ic.Activation.RemoteCredentials) > 0
-		rhCfg := runtimebroker.ServerConfig{
-			Port:                          cfg.RuntimeBroker.Port,
-			Host:                          cfg.RuntimeBroker.Host,
-			ReadTimeout:                   cfg.RuntimeBroker.ReadTimeout,
-			WriteTimeout:                  cfg.RuntimeBroker.WriteTimeout,
-			HubEndpoint:                   hubEndpointForRH,
-			BrokerID:                      ic.Identity.RuntimeBrokerID,
-			BrokerName:                    ic.Instance.Name,
-			CORSEnabled:                   cfg.RuntimeBroker.CORSEnabled,
-			CORSAllowedOrigins:            cfg.RuntimeBroker.CORSAllowedOrigins,
-			CORSAllowedMethods:            cfg.RuntimeBroker.CORSAllowedMethods,
-			CORSAllowedHeaders:            cfg.RuntimeBroker.CORSAllowedHeaders,
-			CORSMaxAge:                    cfg.RuntimeBroker.CORSMaxAge,
-			AllowContainerScriptHarnesses: cfg.RuntimeBroker.AllowContainerScriptHarnesses,
-			NFSConfig:                     brokerNFS,
-			StorageBucket:                 brokerStorageBucket(cfg.Storage),
-			WorkspaceStorageBackend:       workspaceStorageBackend,
-			Debug:                         enableDebug,
-			SlowRequestThreshold:          cfg.SlowRequestThreshold,
-
-			HubEnabled:           hubEndpointForRH != "" || remote,
-			HubToken:             p.devAuthToken,
-			TemplateCacheDir:     templateCacheDir,
-			TemplateCacheMaxSize: templateCacheMax,
-
-			ControlChannelEnabled: hubEndpointForRH != "" || remote,
-			HeartbeatEnabled:      hubEndpointForRH != "" || remote,
-
-			InMemoryCredentials:  ic.Activation.InMemoryCredentials,
-			BrokerAuthEnabled:    true,
-			BrokerAuthStrictMode: true,
-
-			FlatInstance: &runtimebroker.FlatInstanceConfig{
-				Identity:          ic.Identity,
-				Instance:          ic.Instance,
-				HubInProcess:      mode == brokerhost.ModeColocated,
-				RemoteCredentials: ic.Activation.RemoteCredentials,
-			},
-		}
-		if multi {
-			// Configured cardinality, not the active count: with more
-			// than one instance configured no instance owns the host's
-			// mounts.
-			rhCfg.NFSVerifyOnlyReason = "several Runtime Broker instances share this host, so no instance mounts it"
-		}
+		rhCfg := flatInstanceServerConfig(shared, ic)
 		containerHub(ic.Runtime.Name()).applyTo(&rhCfg)
 		if ic.Activation.InMemoryCredentials != nil && p.hubSrv != nil {
 			rhCfg.ColocatedStorage = p.hubSrv.GetStorage()
@@ -465,6 +446,76 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 		}
 	}()
 	return nil
+}
+
+// flatServerShared are the process-wide inputs of every flat instance's
+// Runtime Broker server configuration.
+type flatServerShared struct {
+	cfg                     *config.GlobalConfig
+	mode                    brokerhost.Mode
+	multiInstance           bool // more than one instance CONFIGURED
+	hubEndpoint             string
+	devAuthToken            string
+	nfs                     *config.V1NFSConfig
+	workspaceStorageBackend string
+}
+
+// flatInstanceServerConfig is one activated flat instance's Runtime Broker
+// server configuration (without the container Hub endpoint and co-located
+// storage, which the caller adds). Co-located instances are HubInProcess
+// with in-memory credentials; remote instances carry their validated
+// instance credentials, which also enable the Hub integration, control
+// channel and heartbeat. With more than one instance configured (never the
+// active count), every instance's NFS reconciler is verify-only.
+func flatInstanceServerConfig(sh flatServerShared, ic brokerhost.InstanceContext) runtimebroker.ServerConfig {
+	cfg := sh.cfg
+	remote := len(ic.Activation.RemoteCredentials) > 0
+	hubOn := sh.hubEndpoint != "" || remote
+	rhCfg := runtimebroker.ServerConfig{
+		Port:                          cfg.RuntimeBroker.Port,
+		Host:                          cfg.RuntimeBroker.Host,
+		ReadTimeout:                   cfg.RuntimeBroker.ReadTimeout,
+		WriteTimeout:                  cfg.RuntimeBroker.WriteTimeout,
+		HubEndpoint:                   sh.hubEndpoint,
+		BrokerID:                      ic.Identity.RuntimeBrokerID,
+		BrokerName:                    ic.Instance.Name,
+		CORSEnabled:                   cfg.RuntimeBroker.CORSEnabled,
+		CORSAllowedOrigins:            cfg.RuntimeBroker.CORSAllowedOrigins,
+		CORSAllowedMethods:            cfg.RuntimeBroker.CORSAllowedMethods,
+		CORSAllowedHeaders:            cfg.RuntimeBroker.CORSAllowedHeaders,
+		CORSMaxAge:                    cfg.RuntimeBroker.CORSMaxAge,
+		AllowContainerScriptHarnesses: cfg.RuntimeBroker.AllowContainerScriptHarnesses,
+		NFSConfig:                     sh.nfs,
+		StorageBucket:                 brokerStorageBucket(cfg.Storage),
+		WorkspaceStorageBackend:       sh.workspaceStorageBackend,
+		Debug:                         enableDebug,
+		SlowRequestThreshold:          cfg.SlowRequestThreshold,
+
+		HubEnabled:           hubOn,
+		HubToken:             sh.devAuthToken,
+		TemplateCacheDir:     templateCacheDir,
+		TemplateCacheMaxSize: templateCacheMax,
+
+		ControlChannelEnabled: hubOn,
+		HeartbeatEnabled:      hubOn,
+
+		InMemoryCredentials:  ic.Activation.InMemoryCredentials,
+		BrokerAuthEnabled:    true,
+		BrokerAuthStrictMode: true,
+
+		FlatInstance: &runtimebroker.FlatInstanceConfig{
+			Identity:          ic.Identity,
+			Instance:          ic.Instance,
+			HubInProcess:      sh.mode == brokerhost.ModeColocated,
+			RemoteCredentials: ic.Activation.RemoteCredentials,
+		},
+	}
+	if sh.multiInstance {
+		// Configured cardinality, not the active count: with more than
+		// one instance configured no instance owns the host's mounts.
+		rhCfg.NFSVerifyOnlyReason = "several Runtime Broker instances share this host, so no instance mounts it"
+	}
+	return rhCfg
 }
 
 // installColocatedSettingsOverlay installs the global settings overlay for a

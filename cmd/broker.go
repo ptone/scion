@@ -385,7 +385,7 @@ func init() {
 	brokerRegisterCmd.Flags().StringVar(&brokerHubName, "name", "", "Name for this hub connection (derived from endpoint if not specified)")
 	brokerRegisterCmd.Flags().StringVar(&brokerTransportMode, "transport-mode", "", "Transport auth mode: 'iap' or 'cloudrun_invoker' (overrides SCION_TRANSPORT_MODE)")
 	brokerRegisterCmd.Flags().StringVar(&brokerTransportAudience, "transport-audience", "", "Transport auth OIDC audience (overrides SCION_TRANSPORT_AUDIENCE)")
-	brokerRegisterCmd.Flags().StringVar(&brokerRegisterInstance, "instance", "", "Register the configured flat Runtime Broker instance with this key (server.broker.instances)")
+	brokerRegisterCmd.Flags().StringVar(&brokerRegisterInstance, "instance", "", "Register the configured flat Runtime Broker instance with this key (server.broker.instances in the global settings.yaml)")
 
 	// Deregister flags
 	brokerDeregisterCmd.Flags().BoolVar(&brokerDeregisterBrokerOnly, "broker-only", false, "Only remove broker record, not project providers")
