@@ -71,8 +71,8 @@ func TestNewClientFromKubeconfigFile(t *testing.T) {
 	if c.CurrentContext != "ctx-a" {
 		t.Errorf("empty context: got %q, want the file's current-context ctx-a", c.CurrentContext)
 	}
-	if want := filepath.Join(dir, "certs", "ca.crt"); c.Config.TLSClientConfig.CAFile != want {
-		t.Errorf("relative CA path: got %q, want %q (resolved against the file's directory)", c.Config.TLSClientConfig.CAFile, want)
+	if want := filepath.Join(dir, "certs", "ca.crt"); c.Config.CAFile != want {
+		t.Errorf("relative CA path: got %q, want %q (resolved against the file's directory)", c.Config.CAFile, want)
 	}
 	if c.Config.Host != "https://cluster.example:6443" {
 		t.Errorf("host = %q", c.Config.Host)
