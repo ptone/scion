@@ -23,6 +23,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/brokeridentity"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
@@ -65,6 +67,31 @@ func TestHostNFSMounter_UnionOfHostBindRequirements(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, r, "a Kubernetes instance registers nothing")
 	assert.Equal(t, []string{"ws1", "ws2"}, m.ShareIDs(), "Kubernetes requirements never reach the host mounter")
+}
+
+// unscopedManager is a manager that cannot be restricted to one
+// instance's objects (no SetOwner).
+type unscopedManager struct{ agent.Manager }
+
+// TestHostNFSMounter_InstanceThatCannotServeDoesNotRegister: a flat
+// instance whose setup already failed when it is built (here: an agent
+// manager that cannot be restricted to the instance's objects) adds nothing
+// to the union and builds no reconciler of its own.
+func TestHostNFSMounter_InstanceThatCannotServeDoesNotRegister(t *testing.T) {
+	m := NewHostNFSMounter(newSyncMountChecker(), nil)
+	cfg := ServerConfig{Host: "127.0.0.1", Port: 0, BrokerID: "rb-x", StateDir: t.TempDir(),
+		NFSConfig: hostNFSConfig(true, shareWS1), NFSMountChecker: newSyncMountChecker(), NFSHostMounter: m,
+		FlatInstance: &FlatInstanceConfig{Identity: &brokeridentity.Identity{RuntimeBrokerID: "rb-x"},
+			Instance: config.V1RuntimeBrokerInstanceConfig{Key: "docker-x"}}}
+	srv := New(cfg, unscopedManager{&mockManager{}}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+	require.Error(t, srv.ownershipSetupErr)
+	assert.Empty(t, m.ShareIDs(), "an instance that cannot serve registered its shares")
+	assert.Nil(t, srv.nfsMountReconciler)
+
+	ok := newHostNFSServer(t, m, "rb-y", "docker", hostNFSConfig(true, shareWS2), newSyncMountChecker())
+	assert.Equal(t, []string{"ws2"}, m.ShareIDs())
+	assert.NotNil(t, ok.nfsMountReconciler)
 }
 
 func TestHostNFSMounter_IncompatibleRequirementsRefused(t *testing.T) {

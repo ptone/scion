@@ -51,6 +51,11 @@ import (
 //     mounted from a source no registered requirement asks for.
 //   - Ordering: the host starts the loop before any instance's services
 //     and stops it after every instance has shut down (brokerhost.Service).
+//   - An instance whose setup already failed when it is built does not
+//     register. An instance that stops serving later (its services fail
+//     to start, after the loop started) keeps its requirement in the
+//     union until the process exits: the union cannot change once the
+//     loop runs, and its mounts would stay anyway.
 type HostNFSMounter struct {
 	checker  MountChecker
 	log      *slog.Logger

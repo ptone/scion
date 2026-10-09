@@ -542,7 +542,13 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 	// mounter); everything else builds its own below.
 	hostNFS := cfg.NFSHostMounter != nil && cfg.NFSConfig != nil && len(cfg.NFSConfig.Shares) > 0 &&
 		rt != nil && !NFSWarnOnlyRuntime(rt.Name())
-	if hostNFS {
+	if hostNFS && srv.ownershipSetupErr != nil {
+		// The instance refuses at StartServices, after the host mounter
+		// has started; its requirement must not reach the union, which
+		// cannot shrink once the mounter runs. It builds no reconciler
+		// either.
+		slog.Warn("Runtime Broker instance cannot serve; its NFS mount requirement is not registered", "error", srv.ownershipSetupErr)
+	} else if hostNFS {
 		key := cfg.BrokerID
 		if fi := srv.flatInstance(); fi != nil {
 			key = fi.Instance.Key
