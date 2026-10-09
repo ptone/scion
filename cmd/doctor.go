@@ -645,7 +645,8 @@ func checkDoctorSAMappings(hubEP string, hubConnected bool, client hubclient.Cli
 }
 
 // checkDoctorKubernetesBlockServiceAccount performs D10: it reports, as
-// information, the Kubernetes profiles in vs that have no
+// information, the Kubernetes profiles in vs (the local broker's global
+// settings file; the Hub database overlay is not read) that have no
 // kubernetes_block_service_account (ptone/scion#4034). A GCP identity
 // "block" pod under such a profile runs as the namespace's default
 // ServiceAccount, so its zero privilege depends on the namespace admin. It
@@ -658,13 +659,13 @@ func checkDoctorKubernetesBlockServiceAccount(vs *config.VersionedSettings) scio
 		return scionruntime.CheckResult{
 			Name:    name,
 			Status:  "pass",
-			Message: "Every Kubernetes profile names a block ServiceAccount, or none is defined",
+			Message: "Every Kubernetes profile in the local broker settings names a block ServiceAccount, or none is defined",
 		}
 	}
 	return scionruntime.CheckResult{
 		Name:   name,
 		Status: "info",
-		Message: fmt.Sprintf("%d Kubernetes profile(s) with no kubernetes_block_service_account; GCP identity \"block\" agents on them run as the namespace's default ServiceAccount: %s",
+		Message: fmt.Sprintf("%d Kubernetes profile(s) with no kubernetes_block_service_account in the local broker settings (~/.scion/settings.yaml; a Hub database overlay is not read); GCP identity \"block\" agents on them run as the namespace's default ServiceAccount: %s",
 			len(missing), strings.Join(missing, ", ")),
 		Remediation: "Optional: provision a dedicated Kubernetes ServiceAccount with no Workload Identity annotation and no IAM grants, and set kubernetes_block_service_account on the profile or its runtime entry",
 	}

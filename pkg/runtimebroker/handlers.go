@@ -2897,9 +2897,10 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	// here (recheckHubDefaultPassthrough), and so do the Kubernetes "assign"
 	// and "block" consistency checks (rejectKubernetesAssignRuntimeChange,
 	// rejectKubernetesBlockRuntimeChange): a saved profile buildStartContext
-	// could not see may resolve to Kubernetes only at this later point. This runs before any side effect
-	// below (applyInlineConfigUpdate's scion-agent.json write), so a
-	// rejection here does not leave a partial update applied.
+	// could not see may resolve to Kubernetes only at this later point.
+	// This runs before any side effect below (applyInlineConfigUpdate's
+	// scion-agent.json write), so a rejection here does not leave a partial
+	// update applied.
 	if opts.ProjectPath != "" {
 		opts.Profile = agent.GetSavedProfile(id, opts.ProjectPath)
 	}

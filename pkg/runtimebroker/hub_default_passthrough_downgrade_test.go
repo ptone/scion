@@ -806,10 +806,10 @@ func TestRestartAgent_HubDefaultPassthroughKeptWhenSavedProfileResolvesToKuberne
 
 // newTestServerForLateCheckOrdering builds a server for pinning that the
 // start/restart handlers' later, authoritative resolution — not just
-// buildStartContext's own earlier one — is what the Kubernetes/block
-// rejection runs against. Unlike newTestServerForSavedProfileRemap, this
-// fixture deliberately makes the two resolutions see different saved
-// profiles:
+// buildStartContext's own earlier one — is what the Kubernetes consistency
+// checks (rejectKubernetesBlockRuntimeChange and friends) run against.
+// Unlike newTestServerForSavedProfileRemap, this fixture deliberately makes
+// the two resolutions see different saved profiles:
 //
 //   - The project's active profile ("other") resolves to docker; "local"
 //     resolves to remapRuntimeName (Kubernetes).
@@ -823,17 +823,17 @@ func TestRestartAgent_HubDefaultPassthroughKeptWhenSavedProfileResolvesToKuberne
 // record by its scion.name label and passes its Name (agentName) to
 // buildStartContext, whose early resolution reads the saved profile under
 // that Name — finding nothing, so it falls back to the active profile
-// (docker) and does not reject. The handler's later, authoritative
-// resolution reads the saved profile under the URL id itself
-// (agent.GetSavedProfile(id, ...), handlers.go) — urlID — and finds
-// Kubernetes.
+// (docker). The handler's later, authoritative resolution reads the saved
+// profile under the URL id itself (agent.GetSavedProfile(id, ...),
+// handlers.go) — urlID — and finds Kubernetes, so a "block" resolved for
+// docker is refused there, before the stop.
 //
 // On start, buildStartContext's Name input is the URL id on both reads, and
 // startAgent recovers the project path from the record before
 // buildStartContext runs, so the early resolution already finds the
-// Kubernetes profile saved under urlID and rejects there. The start test
-// therefore pins that the rejection comes before Start and before the
-// inline config is written, whichever resolution raises it.
+// Kubernetes profile saved under urlID. Both resolutions then agree, and a
+// "block" start runs with the Kubernetes block identity
+// (TestStartAgent_KubernetesBlockSavedProfileReachesRunConfig).
 func newTestServerForLateCheckOrdering(t *testing.T, agentName, urlID, remapRuntimeName string) (*Server, *mockManager, *runtime.MockRuntime) {
 	t.Helper()
 	// Isolate HOME and every ambient SCION_* variable, as

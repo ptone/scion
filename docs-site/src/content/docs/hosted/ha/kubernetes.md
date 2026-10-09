@@ -435,7 +435,7 @@ profiles:
     kubernetes_block_service_account: team-block
 ```
 
-`scion doctor` lists, as information, the Kubernetes profiles in the host's global settings that have no block KSA configured. Leaving it unset is supported: the namespace admin then decides what the namespace's `default` KSA may do.
+`scion doctor` lists, as information, the Kubernetes profiles in the local broker settings (`~/.scion/settings.yaml` on the host where it runs; a Hub database overlay is not read) that have no block KSA configured. Leaving it unset is supported: the namespace admin then decides what the namespace's `default` KSA may do.
 
 **IAM preconditions for zero privilege.** Scion does not create, annotate, or check the block KSA or the namespace's `default` KSA, and cannot verify these conditions. The operator, or the namespace admin when no block KSA is configured, must keep them true:
 

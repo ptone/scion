@@ -40,8 +40,11 @@ func TestCheckDoctorKubernetesBlockServiceAccount(t *testing.T) {
 	if res.Status != "info" {
 		t.Fatalf("Status = %q, want info", res.Status)
 	}
-	if !strings.Contains(res.Message, "other") || strings.Contains(res.Message, "team") || strings.Contains(res.Message, "local") {
+	if listed := res.Message[strings.LastIndex(res.Message, ": ")+2:]; listed != "other" {
 		t.Errorf("expected only profile 'other' to be listed, got %q", res.Message)
+	}
+	if !strings.Contains(res.Message, "local broker settings") {
+		t.Errorf("expected the message to say it reflects the local broker settings, got %q", res.Message)
 	}
 
 	vs.Runtimes["gke"] = config.V1RuntimeConfig{Type: "kubernetes", KubernetesBlockServiceAccount: "entry-block"}

@@ -2585,7 +2585,8 @@ func TestBuildStartContext_KubernetesBlockConfiguredServiceAccount(t *testing.T)
 
 // TestBuildStartContext_KubernetesBlockProfileOverridesRuntimeEntry covers
 // the precedence: a profile's kubernetes_block_service_account wins over its
-// runtime entry's, and a project's own settings cannot set it.
+// runtime entry's. See TestBuildStartContext_KubernetesBlockProjectSettingIgnored
+// for a project's own settings.
 func TestBuildStartContext_KubernetesBlockProfileOverridesRuntimeEntry(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
@@ -2623,6 +2624,31 @@ runtimes:
 	if sc.BlockSelection == nil || *sc.BlockSelection != want {
 		t.Errorf("BlockSelection = %+v, want %+v", sc.BlockSelection, want)
 	}
+}
+
+// TestBuildStartContext_KubernetesBlockProjectSettingIgnored pins that a
+// kubernetes_block_service_account set only in a project's own
+// settings.yaml is never used: the setting decides the pod's identity, so it
+// is read only from the broker's global settings. With none there, the pod
+// runs as the namespace's default ServiceAccount.
+func TestBuildStartContext_KubernetesBlockProjectSettingIgnored(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
+	projectDir := newTestProjectSettings(t, testKubernetesBlockGlobalSettingsYAML)
+	newTestGlobalSettings(t, testKubernetesProjectSettingsYAML)
+
+	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:        "agent-k8s-block-project-setting",
+		ProjectPath: projectDir,
+		Config:      &CreateAgentConfig{GCPIdentity: &GCPIdentityConfig{MetadataMode: "block"}},
+		HTTPRequest: httptest.NewRequest("POST", "/api/v1/agents", nil),
+		Operation:   opCreate,
+	})
+	if err != nil {
+		t.Fatalf("buildStartContext: %v", err)
+	}
+	assertKubernetesBlockContext(t, sc, "")
 }
 
 // TestBuildStartContext_KubernetesBlockInvalidServiceAccountRefused covers a
