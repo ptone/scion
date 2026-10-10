@@ -1,8 +1,10 @@
 # P2 amendment: instance Kubernetes identity policy and registration parity
 
-Status: architecture decision, revision 4, 2026-10-09; block semantics confirmed by the GCP identity feature owner; post-merge evidence substitution recorded below. Revision 4 changes wording only. Delivery timing belongs to the delivery lead. This document changes the P2 contract only; it does not reopen the deferred flat dispatch-policy proposal.
+Status: architecture decision, revision 6, 2026-10-10; block semantics confirmed by the GCP identity feature owner; post-merge evidence substitution recorded below. Revision 5 retained instance-mapping-only assign behavior after upstream added namespace annotation discovery. Revision 6 explicitly preserves omission of per-profile ServiceAccount reports for flat instances. Delivery timing belongs to the delivery lead. This document changes the P2 contract only; it does not reopen the deferred flat dispatch-policy proposal.
 
 Reference surfaces: upstream `75e87c07b`, P2 configuration at `67d7055ba`, and the P1 saved-profile guard at `6b626f1d`. The implementation must be reviewed at its eventual merged revision.
+
+Revision 5 also inspected upstream `89178630c7fd5d022ea818f86d4288bb36e877b5`, whose legacy assign path can discover a Kubernetes ServiceAccount by annotation when no explicit mapping exists. That discovery is not adopted for flat instances in P2. Earlier references to upstream-equivalent missing-mapping behavior meant the original reference revision, not automatic adoption of subsequent resolution sources.
 
 ## Problem and goals
 
@@ -16,6 +18,7 @@ Success means one instance supplies its own identity policy and activated namesp
 - No new profile resolution, dynamic policy reload, or transfer of Kubernetes credentials to the Hub.
 - No new broker-self dispatch permission or automatic provider link.
 - No change to legacy Kubernetes identity resolution.
+- No namespace ServiceAccount annotation discovery for flat assign in P2.
 
 ## Configuration amendment
 
@@ -38,7 +41,11 @@ Configuration source remains section 2's strict `LoadRuntimeBrokerInstances` fil
 
 A flat resolver reads only its own instance policy. It does not read project settings, profiles, or a global runtime entry to supply missing identity policy. Namespace and context come from the activated target and its actual client/runtime, using the existing target scope verification rules.
 
-For assign mode, resolve the requested GCP service account through the instance mapping. Missing or invalid mapping refuses with upstream-equivalent behavior. Preserve request-level ServiceAccount conflict checks. Explicit namespace selection must agree with the activated instance namespace; it must not select another execution scope.
+For assign mode, resolve the requested GCP service account through the instance mapping only. A missing mapping or missing entry for the requested GCP service account returns the existing 400 `identity_not_mapped` refusal, even when the activated namespace has exactly one ServiceAccount with a matching `iam.gke.io/gcp-service-account` annotation. The remedy names the instance's `runtime_target.kubernetes_service_account_mappings` setting. Invalid mapping configuration remains a validation refusal; it never triggers discovery. A valid instance mapping remains authoritative when namespace annotations differ. Preserve request-level ServiceAccount conflict checks. Explicit namespace selection must agree with the activated instance namespace; it must not select another execution scope.
+
+The flat assign resolver does not call `discoverAssignKSA` or list namespace ServiceAccounts to choose a missing mapping. This does not change startup execution-scope probes, normal pod operations, or legacy annotation discovery. No new ServiceAccount-list permission is required by flat assign under this amendment. This is a bounded P2 policy choice: discovery could be designed later, but would need an explicit decision on annotation authority, permission requirements, ambiguous results, and how each launch records its resolved identity. It is not introduced through merge conflict resolution.
+
+**ServiceAccount reporting:** P2 flat instances send no per-profile ServiceAccount report or report hash, and do not invoke the profile report producer. Keep the existing flat heartbeat exclusion for `ProfileSAMappings` and `ProfileSAMappingsHashes`; do not create a synthetic profile to advertise instance mappings. Missing reporting means unknown coverage for the Hub precheck and picker, not a claim that an account is mapped or definitively unmapped. The broker's assign resolver remains authoritative. This also prevents legacy report discovery from advertising annotation-only assignments that a flat instance refuses. A future instance-aware report would require an explicit Hub-supported target binding and complete reporting from the instance mapping snapshot only, with no annotation-discovery entries; it is outside this amendment.
 
 For block mode, use the configured instance block ServiceAccount. Intentional omission retains upstream behavior: use the namespace default ServiceAccount, disable API token mounting, and apply the required Workload Identity node selector. A configuration error is not omission. Preserve upstream rejection of conflicting request-level ServiceAccount names and upstream handling of template-only values. Do not describe default-ServiceAccount behavior as a guarantee about that account's cloud permissions; those remain an operator responsibility under the upstream contract.
 
@@ -72,6 +79,7 @@ Embedded registration continues to take AutoProvide from trusted in-process Hub/
 2. Skip all Kubernetes identity consistency checks on flat instances. Rejected: fixed placement removes profile selection, but identity material must still match the actual runtime and instance namespace.
 3. Permanently require an explicit block ServiceAccount. Rejected for this amendment: upstream intentionally supports namespace-default behavior; introducing a stricter flat-only policy is unnecessary to integrate the feature.
 4. Require a new AutoProvide grant on every registration preserving true. Rejected: it differs from upstream's preserved-value semantics and stale-decision check.
+5. Automatically adopt upstream's new namespace annotation discovery for flat assign. Rejected for P2: it adds a live identity-policy source and permission dependency beyond the agreed instance snapshot. Keeping explicit mappings preserves the current implementation and operator contract. This does not rule out a separately designed discovery mode later.
 
 ## Implementation and verification sequence
 
@@ -97,6 +105,8 @@ The disposable environment lacks the cloud IAM setup needed to pass the Hub's re
 - Strict loading, schema, validation, and both config-family round trips agree on the new fields; Docker rejects populated fields.
 - Two flat Kubernetes instances can use different mappings and block accounts without consulting each other's or project/global profile settings.
 - Assign selects the instance mapping and activated namespace; missing mapping and conflicting explicit identity/namespace requests refuse with no launch.
+- A matching namespace annotation cannot satisfy a missing flat mapping: verify 400 `identity_not_mapped` and no discovery-client call. A valid flat mapping remains authoritative despite conflicting annotations. Retain a positive legacy discovery test so the flat restriction does not disable upstream discovery. These cases use the existing accepted unit/live evidence split; they do not add a live cloud-IAM requirement.
+- Flat heartbeat evidence proves both per-profile ServiceAccount reports and their hashes are omitted, even when a configured report producer could return annotation-only candidates; the producer must not be called. Retain legacy report behavior. Verify that absent reporting does not cause a Hub report-based refusal for a profile-free flat dispatch, and that broker-side missing-mapping refusal remains effective.
 - Block produces the configured ServiceAccount, API token automount disabled, and required node selector; omission produces upstream namespace-default behavior with the same token and node restrictions.
 - Every supported block-mode source retains `SCION_METADATA_MODE=block` with no assign-mode identity environment additions; cover request, project/Hub default, and saved start/restart sources. Invalid configured names and conflicting explicit accounts return the upstream refusal.
 - Flat identity policy does not change when unrelated global runtime/profile or database-overlay identity settings change; the instance snapshot remains authoritative. Legacy overlay behavior is unchanged.
