@@ -214,7 +214,7 @@ switch to a two-phase apply (NEG Service first, then everything else).
   on the hub GSA. The hub reaches Secret Manager (`gcpsm`), Cloud SQL (through
   the proxy sidecar) and GCS as the hub GSA.
 - The proxy connects over the instance's private IP. If its log says
-  "instance does not have IP of type PUBLIC", `cloudsql.privateIp` isn't set.
+  "instance does not have IP of type PUBLIC", `cloudsql.privateIp` isn't true.
 - The release depends on those grants existing (`boot_prerequisites`), but IAM
   takes time to propagate. If the first pod starts before it has, expect
   restarts until it settles. There is no sleep for it.
