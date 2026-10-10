@@ -12,10 +12,8 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // The agent home is bind-mounted into the agent container, and the files
@@ -101,35 +99,23 @@ type agentHomeOwner struct {
 	uid, gid int
 }
 
-// advertisedAgentHomeOwner returns the agentHomeOwner for this start: the
-// workspace backend Start selects later from the same settings and sharing
-// mode, and the ids the container runtime advertises for it.
-func advertisedAgentHomeOwner(settings *config.VersionedSettings, opts api.StartOptions, emptyPerAgent bool) agentHomeOwner {
+// advertisedAgentHomeOwner returns the agentHomeOwner for this start. The
+// nfs workspace backend is selected for every sharing mode Start uses
+// whenever workspace_storage.backend is "nfs" (runtime.SelectWorkspaceBackend),
+// so the backend is read from that setting directly; any other backend
+// advertises the agent runtime's own ids.
+func advertisedAgentHomeOwner(settings *config.VersionedSettings) agentHomeOwner {
 	backend := ""
 	nfsUID, nfsGID := 0, 0
 	if settings != nil && settings.Server != nil && settings.Server.WorkspaceStorage != nil {
 		ws := settings.Server.WorkspaceStorage
-		backend = runtime.SelectWorkspaceBackend(ws, workspaceSharingModeFor(opts, emptyPerAgent)).Name()
+		backend = ws.Backend
 		if ws.NFS != nil {
 			nfsUID, nfsGID = ws.NFS.UID, ws.NFS.GID
 		}
 	}
 	uid, gid := runtime.AdvertisedHostOwnerIDs(backend, nfsUID, nfsGID)
 	return agentHomeOwner{backend: backend, uid: uid, gid: gid}
-}
-
-// workspaceSharingModeFor is the workspace sharing mode Start selects the
-// workspace backend for: empty-per-agent (no shared checkout), shared-plain
-// for a shared workspace or a clone, worktree-per-agent otherwise.
-func workspaceSharingModeFor(opts api.StartOptions, emptyPerAgent bool) store.WorkspaceSharingMode {
-	switch {
-	case emptyPerAgent:
-		return store.SharingModeEmptyPerAgent
-	case opts.SharedWorkspace || opts.GitClone != nil:
-		return store.SharingModeSharedPlain
-	default:
-		return store.SharingModeWorktreePerAgent
-	}
 }
 
 // errAgentHomeRepairNotAllowed is the repair error when the advertised
@@ -221,8 +207,10 @@ func writeAgentHome(ctx context.Context, write func() error) error {
 	if r == nil {
 		return newAgentHomeOwnershipError(err, errors.New("no ownership repair available at this point of the start"))
 	}
+	found := newAgentHomeOwnershipError(err, nil)
 	slog.Warn("Agent home write failed with a permission error; repairing ownership and retrying once",
-		"home", r.home, "error", err)
+		"home", r.home, "dir", found.Dir, "dir_uid", found.DirUID, "dir_gid", found.DirGID,
+		"runtime_uid", found.RuntimeUID, "error", err)
 	if repairErr := r.repair(ctx); repairErr != nil {
 		return newAgentHomeOwnershipError(err, repairErr)
 	}

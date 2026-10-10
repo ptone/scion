@@ -380,37 +380,105 @@ func TestWriteAgentHome(t *testing.T) {
 }
 
 // The repair target is the owner the container runtime advertises for the
-// backend Start selects from the same settings: the agent runtime's own
-// ids, or the stable NFS ids on the nfs backend.
+// configured workspace backend: the agent runtime's own ids, or the stable
+// NFS ids on the nfs backend.
 func TestAdvertisedAgentHomeOwner(t *testing.T) {
-	nfs := func(uid, gid int) *config.VersionedSettings {
-		return &config.VersionedSettings{Server: &config.V1ServerConfig{WorkspaceStorage: &config.V1WorkspaceStorageConfig{
-			Backend: "nfs", NFS: &config.V1NFSConfig{UID: uid, GID: gid},
-		}}}
+	ws := func(w *config.V1WorkspaceStorageConfig) *config.VersionedSettings {
+		return &config.VersionedSettings{Server: &config.V1ServerConfig{WorkspaceStorage: w}}
+	}
+	self := func(backend string) agentHomeOwner {
+		return agentHomeOwner{backend: backend, uid: os.Getuid(), gid: os.Getgid()}
 	}
 	for _, tc := range []struct {
 		name     string
 		settings *config.VersionedSettings
-		opts     api.StartOptions
-		empty    bool
 		want     agentHomeOwner
 	}{
-		{"no settings", nil, api.StartOptions{}, false, agentHomeOwner{uid: os.Getuid(), gid: os.Getgid()}},
-		{"no workspace storage", &config.VersionedSettings{Server: &config.V1ServerConfig{}}, api.StartOptions{}, false, agentHomeOwner{uid: os.Getuid(), gid: os.Getgid()}},
-		{"local backend", &config.VersionedSettings{Server: &config.V1ServerConfig{WorkspaceStorage: &config.V1WorkspaceStorageConfig{Backend: "local"}}}, api.StartOptions{}, false,
-			agentHomeOwner{backend: "local", uid: os.Getuid(), gid: os.Getgid()}},
-		{"nfs default ids", nfs(0, 0), api.StartOptions{}, false, agentHomeOwner{backend: "nfs", uid: 1000, gid: 1000}},
-		{"nfs configured ids, shared workspace", nfs(2001, 2002), api.StartOptions{SharedWorkspace: true}, false, agentHomeOwner{backend: "nfs", uid: 2001, gid: 2002}},
-		{"nfs, empty per agent", nfs(0, 0), api.StartOptions{}, true, agentHomeOwner{backend: "nfs", uid: 1000, gid: 1000}},
+		{"no settings", nil, self("")},
+		{"no workspace storage", &config.VersionedSettings{Server: &config.V1ServerConfig{}}, self("")},
+		{"local backend", ws(&config.V1WorkspaceStorageConfig{Backend: "local"}), self("local")},
+		{"local backend ignores nfs ids", ws(&config.V1WorkspaceStorageConfig{Backend: "local", NFS: &config.V1NFSConfig{UID: 2001, GID: 2002}}), self("local")},
+		{"nfs default ids", ws(&config.V1WorkspaceStorageConfig{Backend: "nfs"}), agentHomeOwner{backend: "nfs", uid: 1000, gid: 1000}},
+		{"nfs configured ids", ws(&config.V1WorkspaceStorageConfig{Backend: "nfs", NFS: &config.V1NFSConfig{UID: 2001, GID: 2002}}), agentHomeOwner{backend: "nfs", uid: 2001, gid: 2002}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := advertisedAgentHomeOwner(tc.settings, tc.opts, tc.empty)
-			if got.uid != tc.want.uid || got.gid != tc.want.gid || (tc.want.backend != "" && got.backend != tc.want.backend) {
+			if got := advertisedAgentHomeOwner(tc.settings); got != tc.want {
 				t.Errorf("owner = %+v, want %+v", got, tc.want)
 			}
-			if tc.want.backend == "nfs" && got.backend != "nfs" {
-				t.Errorf("backend = %q, want nfs", got.backend)
-			}
 		})
+	}
+}
+
+// foreignOwnDir makes only dir unwritable by the test process, simulating
+// one directory of the agent home owned by another uid.
+func foreignOwnDir(t *testing.T, home, dir string) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions; the uid mismatch cannot be simulated")
+	}
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = restoreHomeOwnership(home) })
+}
+
+// With no stale wrapper to remove, a foreign-owned pre-start.d still fails
+// the project hook restage unless that write is repaired too.
+func TestStart_RestageProjectHookInForeignOwnedPreStartDir(t *testing.T) {
+	e := newPolicyTestEnv(t)
+	e.projectHC(t, "hc-decl", policyTestDecl)
+	opts := api.StartOptions{Name: "own-hook", ProjectPath: e.scion, HarnessConfig: "hc-decl", NoAuth: true}
+	if _, err := policyTestManager(nil).Start(context.Background(), opts); err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	home := config.GetAgentHomePath(e.scion, "own-hook")
+	preStart := filepath.Join(home, ".scion", "hooks", "pre-start.d")
+	if err := os.MkdirAll(preStart, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if harness.HarnessProvisionHookStaged(home) {
+		t.Fatal("fixture: a declarative harness-config stages no wrapper")
+	}
+	foreignOwnDir(t, home, preStart)
+
+	rt := newRepairingRuntime(nil)
+	opts.ProjectPreStartHookScript = "#!/bin/sh\necho project hook\n"
+	if _, err := NewManager(rt).Start(context.Background(), opts); err != nil {
+		t.Fatalf("restart with a foreign-owned pre-start.d: %v", err)
+	}
+	if len(rt.repairs) != 1 {
+		t.Fatalf("ownership repairs = %d, want exactly 1", len(rt.repairs))
+	}
+	entries, err := os.ReadDir(preStart)
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("project pre-start hook not restaged (entries=%v, err=%v)", entries, err)
+	}
+}
+
+// With the staged provisioning already cleared, a foreign-owned .scion
+// still fails the container-script restage of the control-plane inputs
+// unless that write is repaired too.
+func TestStart_RestageContainerScriptInputsInForeignOwnedScionDir(t *testing.T) {
+	e := newPolicyTestEnv(t)
+	e.projectHC(t, "hc-scripted", policyTestScripted)
+	opts := api.StartOptions{Name: "own-inputs", ProjectPath: e.scion, HarnessConfig: "hc-scripted", NoAuth: true}
+	if _, err := policyTestManager(nil).Start(context.Background(), opts); err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	home := config.GetAgentHomePath(e.scion, "own-inputs")
+	if err := harness.ClearStagedProvisioning(home); err != nil {
+		t.Fatal(err)
+	}
+	foreignOwnDir(t, home, filepath.Join(home, ".scion"))
+
+	rt := newRepairingRuntime(nil)
+	if _, err := NewManager(rt).Start(context.Background(), opts); err != nil {
+		t.Fatalf("restart with a foreign-owned .scion: %v", err)
+	}
+	if len(rt.repairs) != 1 {
+		t.Fatalf("ownership repairs = %d, want exactly 1", len(rt.repairs))
+	}
+	if !harness.HarnessProvisionHookStaged(home) {
+		t.Error("the container-script wrapper was not restaged")
 	}
 }

@@ -2317,10 +2317,11 @@ func setupHostUser(requirePrivilegeDrop bool) (int, int, bool) {
 // and egid when targetUID is 0 and so no privilege drop happens) differ
 // from the SCION_HOST_UID and SCION_HOST_GID the agent runtime passed, or
 // "" when they match or there is nothing to compare (no ids passed, or a
-// rootless container, where the user namespace maps the ids). With a mismatch, the files the harness writes
-// in the agent home are not owned by the uid the agent runtime expects,
-// and the runtime has to repair their ownership before it can restart or
-// resume the agent (ptone/scion#4330).
+// rootless container, where the user namespace maps the ids). With a
+// mismatch, the files the harness writes in the agent home are not owned
+// by the uid the agent runtime expects, and the runtime has to repair
+// their ownership before it can restart or resume the agent
+// (ptone/scion#4330).
 func hostUIDMismatchWarning(hostUID, hostGID string, targetUID, targetGID int, rootless bool, euid, egid int) string {
 	if hostUID == "" || hostGID == "" || rootless {
 		return ""

@@ -767,7 +767,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// Start-time writes into an existing agent's home (writeAgentHome)
 	// repair the home's ownership through the runtime, from this image, on
 	// a permission error (ptone/scion#4330).
-	homeOwner := advertisedAgentHomeOwner(settings, opts, emptyPerAgent)
+	homeOwner := advertisedAgentHomeOwner(settings)
 	warnAgentHomeOwnerMismatch(opts.Name, agentHome, homeOwner)
 	ctx = contextWithAgentHomeRepair(ctx, m.Runtime, agentHome, resolvedImage, homeOwner)
 	if runIDNeedsHomeRepair {
@@ -935,13 +935,18 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		// resolved skills) recorded at provisioning, so inputs/ holds only
 		// control-plane content.
 		if cs, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
-			if err := restoreControlPlaneInputs(agentDir, agentHome); err != nil {
+			if err := writeAgentHome(ctx, func() error { return restoreControlPlaneInputs(agentDir, agentHome) }); err != nil {
 				return nil, fmt.Errorf("restage harness inputs: %w", err)
 			}
 			// Restore exactly the secret files the control plane recorded;
 			// ApplyAuthSettings considers only these besides the secrets
 			// staged from this start's resolution.
-			restored, err := restoreSecretsRecord(agentDir, agentHome, agentID, hcIdentity)
+			var restored []string
+			err := writeAgentHome(ctx, func() error {
+				var restoreErr error
+				restored, restoreErr = restoreSecretsRecord(agentDir, agentHome, agentID, hcIdentity)
+				return restoreErr
+			})
 			if err != nil {
 				return nil, fmt.Errorf("restage harness secrets: %w", err)
 			}
@@ -950,7 +955,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		// Restage the capture-auth assets a non-container-script harness
 		// keeps in the bundle, as ProvisionAgent stages them.
 		if _, isContainerScript := h.(*harness.ContainerScriptHarness); !isContainerScript && resolvedHCDir != nil && resolvedHCDir.Path != "" {
-			if err := harness.StageCaptureAuthAssets(agentHome, resolvedHCDir.Path, resolvedHCDir.Config.Auth); err != nil {
+			if err := writeAgentHome(ctx, func() error {
+				return harness.StageCaptureAuthAssets(agentHome, resolvedHCDir.Path, resolvedHCDir.Config.Auth)
+			}); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: capture-auth asset staging failed: %v\n", err)
 			}
 		}
@@ -961,7 +968,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// starts from a cleared bundle (resetStagedProvisioning), so a staging
 	// failure fails the launch: no provisioner wrapper or bundle from an
 	// earlier launch remains to run instead.
-	if err := h.Provision(ctx, opts.Name, agentDir, agentHome, agentWorkspace); err != nil {
+	// Like every start-time write into the agent home, a permission error
+	// repairs the home's ownership and retries once (writeAgentHome).
+	if err := writeAgentHome(ctx, func() error { return h.Provision(ctx, opts.Name, agentDir, agentHome, agentWorkspace) }); err != nil {
 		if _, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
 			return nil, fmt.Errorf("stage harness bundle: %w", err)
 		}
@@ -975,7 +984,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// will not fire, so the hook would silently not run — worse than aborting.
 	// Called unconditionally: with an empty script the helper clears any file
 	// staged by an earlier occupant of this agent home.
-	if err := harness.WriteProjectPreStartHook(agentHome, opts.ProjectPreStartHookScript); err != nil {
+	if err := writeAgentHome(ctx, func() error { return harness.WriteProjectPreStartHook(agentHome, opts.ProjectPreStartHookScript) }); err != nil {
 		return nil, fmt.Errorf("re-stage project pre-start hook: %w", err)
 	}
 
@@ -1858,13 +1867,18 @@ authDone:
 
 	preBackendWorkspace := effectiveWorkspace
 	if settings != nil && settings.Server != nil && settings.Server.WorkspaceStorage != nil {
-		sharingMode := workspaceSharingModeFor(opts, emptyPerAgent)
-		// Empty-per-agent without NFS storage is node-local (or pod-local
-		// EmptyDir on Kubernetes). With NFS storage it gets its own agent
-		// directory on the export (design #2703 P3), which only the
-		// Kubernetes runtime can mount: see nfsEmptyAgentDirSelection.
+		sharingMode := store.SharingModeWorktreePerAgent
+		if opts.SharedWorkspace || opts.GitClone != nil {
+			sharingMode = store.SharingModeSharedPlain
+		}
+		// Empty-per-agent never takes the WorktreePerAgent default above: it
+		// has no shared checkout. Without NFS storage it is node-local (or
+		// pod-local EmptyDir on Kubernetes). With NFS storage it gets its
+		// own agent directory on the export (design #2703 P3), which only
+		// the Kubernetes runtime can mount: see nfsEmptyAgentDirSelection.
 		var emptyAgentDirName string
 		if emptyPerAgent {
+			sharingMode = store.SharingModeEmptyPerAgent
 			var selErr error
 			emptyAgentDirName, selErr = nfsEmptyAgentDirSelection(m.Runtime.Name(), settings.Server.WorkspaceStorage, opts.Name)
 			if selErr != nil {

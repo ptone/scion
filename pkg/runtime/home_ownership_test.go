@@ -12,6 +12,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -20,14 +21,19 @@ var (
 	_ AgentHomeOwnershipRepairer = (*PodmanRuntime)(nil)
 )
 
-// writeArgRecorder writes a fake runtime binary that records its argv, one
-// argument per line, and exits with exitCode.
-func writeArgRecorder(t *testing.T, exitCode int) (bin, argsFile string) {
+// rootfulDockerSecurityOptions is `docker info` SecurityOptions output of
+// a rootful daemon without user-namespace remapping.
+const rootfulDockerSecurityOptions = `["name=apparmor","name=seccomp,profile=builtin","name=cgroupns"]`
+
+// writeArgRecorder writes a fake runtime binary that answers `info` with
+// securityOptions and otherwise records its argv, one argument per line,
+// and exits with exitCode.
+func writeArgRecorder(t *testing.T, exitCode int, securityOptions string) (bin, argsFile string) {
 	t.Helper()
 	dir := t.TempDir()
 	argsFile = filepath.Join(dir, "args")
 	bin = filepath.Join(dir, "fake-runtime")
-	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\necho helper-output\nexit %d\n", argsFile, exitCode)
+	script := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = info ]; then printf '%%s\\n' %q; exit 0; fi\nprintf '%%s\\n' \"$@\" > %q\necho helper-output\nexit %d\n", securityOptions, argsFile, exitCode)
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -50,8 +56,8 @@ func TestAgentHomeRepairArgs(t *testing.T) {
 	}
 	for _, want := range []string{
 		"run", "--rm", "--pull=never", "--network=none", "--user=0:0",
-		"--cap-drop=ALL", "--cap-add=CHOWN", "--cap-add=DAC_READ_SEARCH",
-		"--security-opt=no-new-privileges", "--read-only",
+		"--cap-drop=ALL", "--cap-add=CHOWN", "--cap-add=DAC_OVERRIDE",
+		"--security-opt=no-new-privileges", "--read-only", "--pids-limit=64",
 		"/srv/agents/a1/home:" + agentHomeRepairMount,
 		"img:1", "-xdev", "1002:1003",
 	} {
@@ -66,9 +72,26 @@ func TestAgentHomeRepairArgs(t *testing.T) {
 	if i := slices.Index(args, "chown"); i < 0 || args[i+1] != "-h" {
 		t.Errorf("chown does not use -h: %q", args)
 	}
-	// Only the agent home is mounted.
-	if n := strings.Count(strings.Join(args, " "), "--volume"); n != 1 {
+	// Only the agent home is mounted, and nothing widens the helper's
+	// privileges beyond a normal start's: in particular no
+	// DAC_READ_SEARCH (open_by_handle_at).
+	joined := strings.Join(args, " ")
+	if n := strings.Count(joined, "--volume"); n != 1 {
 		t.Errorf("helper mounts %d volumes, want 1", n)
+	}
+	for _, forbidden := range []string{"DAC_READ_SEARCH", "SYS_ADMIN", "--privileged", "unconfined", "--mount", "--device", "-v ", "--cap-add=ALL", "--userns", "--pid=host", "--network=host"} {
+		if strings.Contains(joined, forbidden) {
+			t.Errorf("helper args contain forbidden %q: %q", forbidden, args)
+		}
+	}
+	var capAdds []string
+	for _, a := range args {
+		if strings.HasPrefix(a, "--cap-add") {
+			capAdds = append(capAdds, a)
+		}
+	}
+	if !slices.Equal(capAdds, []string{"--cap-add=CHOWN", "--cap-add=DAC_OVERRIDE"}) {
+		t.Errorf("helper capabilities = %q, want only CHOWN and DAC_OVERRIDE", capAdds)
 	}
 
 	for _, tc := range []struct {
@@ -82,6 +105,7 @@ func TestAgentHomeRepairArgs(t *testing.T) {
 		{"colon", AgentHomeOwnershipRepair{HomeDir: "/a:b", Image: "img"}, 1},
 		{"comma", AgentHomeOwnershipRepair{HomeDir: "/a,b", Image: "img"}, 1},
 		{"no image", AgentHomeOwnershipRepair{HomeDir: "/a"}, 1},
+		{"option-like image", AgentHomeOwnershipRepair{HomeDir: "/a", Image: "--privileged"}, 1},
 		{"negative uid", AgentHomeOwnershipRepair{HomeDir: "/a", Image: "img"}, -1},
 	} {
 		tc.req.UID, tc.req.GID = tc.uid, 1
@@ -118,6 +142,9 @@ func TestAgentHomeRepairArgs_FindSelection(t *testing.T) {
 	if err := os.Symlink("/etc/passwd", filepath.Join(home, "symlink")); err != nil {
 		t.Fatal(err)
 	}
+	if err := syscall.Mkfifo(filepath.Join(home, "fifo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	uid, gid := os.Getuid(), os.Getgid()
 	args, err := agentHomeRepairArgs(AgentHomeOwnershipRepair{HomeDir: home, Image: "img", UID: uid, GID: gid})
@@ -150,7 +177,7 @@ func TestAgentHomeRepairArgs_FindSelection(t *testing.T) {
 }
 
 func TestDockerRuntime_RepairAgentHomeOwnership(t *testing.T) {
-	bin, argsFile := writeArgRecorder(t, 0)
+	bin, argsFile := writeArgRecorder(t, 0, rootfulDockerSecurityOptions)
 	req := AgentHomeOwnershipRepair{HomeDir: t.TempDir(), Image: "scion-claude:latest", UID: 1002, GID: 1003}
 	r := &DockerRuntime{Command: bin}
 	if err := r.RepairAgentHomeOwnership(context.Background(), req); err != nil {
@@ -197,7 +224,7 @@ func TestAdvertisedHostOwnerIDs_MatchesRunArgs(t *testing.T) {
 }
 
 func TestDockerRuntime_RepairAgentHomeOwnershipFailure(t *testing.T) {
-	bin, _ := writeArgRecorder(t, 3)
+	bin, _ := writeArgRecorder(t, 3, rootfulDockerSecurityOptions)
 	r := &DockerRuntime{Command: bin}
 	err := r.RepairAgentHomeOwnership(context.Background(), AgentHomeOwnershipRepair{HomeDir: t.TempDir(), Image: "img"})
 	if err == nil || !strings.Contains(err.Error(), "helper-output") {
@@ -207,7 +234,7 @@ func TestDockerRuntime_RepairAgentHomeOwnershipFailure(t *testing.T) {
 
 func TestPodmanRuntime_RepairAgentHomeOwnership(t *testing.T) {
 	t.Run("rootful shares the docker helper", func(t *testing.T) {
-		bin, argsFile := writeArgRecorder(t, 0)
+		bin, argsFile := writeArgRecorder(t, 0, rootfulDockerSecurityOptions)
 		req := AgentHomeOwnershipRepair{HomeDir: t.TempDir(), Image: "img", UID: 1002, GID: 1003}
 		r := &PodmanRuntime{Command: bin}
 		if err := r.RepairAgentHomeOwnership(context.Background(), req); err != nil {
@@ -219,7 +246,7 @@ func TestPodmanRuntime_RepairAgentHomeOwnership(t *testing.T) {
 		}
 	})
 	t.Run("rootless is unsupported", func(t *testing.T) {
-		bin, argsFile := writeArgRecorder(t, 0)
+		bin, argsFile := writeArgRecorder(t, 0, rootfulDockerSecurityOptions)
 		r := &PodmanRuntime{Command: bin, Rootless: true}
 		err := r.RepairAgentHomeOwnership(context.Background(), AgentHomeOwnershipRepair{HomeDir: t.TempDir(), Image: "img"})
 		if !errors.Is(err, ErrAgentHomeRepairUnsupported) {
@@ -229,4 +256,42 @@ func TestPodmanRuntime_RepairAgentHomeOwnership(t *testing.T) {
 			t.Error("rootless podman ran the helper")
 		}
 	})
+}
+
+// Rootless Docker and Docker with user-namespace remapping map container
+// uids to other host uids, so the repair is refused there without running
+// the helper.
+func TestDockerRuntime_RepairAgentHomeOwnershipUnsupportedModes(t *testing.T) {
+	for _, tc := range []struct{ opts, mode string }{
+		{`["name=seccomp,profile=builtin","name=rootless","name=cgroupns"]`, "(rootless docker)"},
+		{`["name=apparmor","name=seccomp,profile=builtin","name=userns"]`, "(docker userns-remap)"},
+	} {
+		bin, argsFile := writeArgRecorder(t, 0, tc.opts)
+		r := &DockerRuntime{Command: bin}
+		err := r.RepairAgentHomeOwnership(context.Background(), AgentHomeOwnershipRepair{HomeDir: t.TempDir(), Image: "img", UID: 1, GID: 1})
+		if !errors.Is(err, ErrAgentHomeRepairUnsupported) || !strings.Contains(err.Error(), tc.mode) {
+			t.Errorf("security options %s: err = %v, want ErrAgentHomeRepairUnsupported naming %s", tc.opts, err, tc.mode)
+		}
+		if _, statErr := os.Stat(argsFile); statErr == nil {
+			t.Errorf("security options %s: the helper ran", tc.opts)
+		}
+	}
+}
+
+// When the daemon's mode cannot be determined, the repair is not run.
+func TestDockerRuntime_RepairAgentHomeOwnershipModeDetectionFails(t *testing.T) {
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args")
+	bin := filepath.Join(dir, "fake-runtime")
+	script := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = info ]; then echo daemon down >&2; exit 1; fi\ntouch %q\n", argsFile)
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err := (&DockerRuntime{Command: bin}).RepairAgentHomeOwnership(context.Background(), AgentHomeOwnershipRepair{HomeDir: t.TempDir(), Image: "img", UID: 1, GID: 1})
+	if err == nil || !strings.Contains(err.Error(), "detect docker security options") {
+		t.Fatalf("err = %v, want a detection error", err)
+	}
+	if _, statErr := os.Stat(argsFile); statErr == nil {
+		t.Error("the helper ran")
+	}
 }
