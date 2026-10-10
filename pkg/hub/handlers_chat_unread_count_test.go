@@ -446,7 +446,7 @@ func TestChatUnreadCount_BadgeEqualsRail(t *testing.T) {
 	require.NoError(t, s.DeleteAgent(ctx, gone)) // hard-deleted agent: left out
 	soft := newAgent("soft")
 	f.dmWith(me, "agent", soft)
-	softDeleteAgent(t, s, soft) // soft-deleted agent: left out
+	softDeleteChatPeerAgent(t, s, soft) // soft-deleted agent: left out
 	mutedDM, _ := f.dm(me)
 	require.NoError(t, wcs.SetMuted(ctx, me, mutedDM, true))
 	readDM, readDMMsg := f.dmWith(me, "agent", newAgent("a2"))
@@ -461,147 +461,8 @@ func TestChatUnreadCount_BadgeEqualsRail(t *testing.T) {
 	assert.Equal(t, got.Threads+got.DMs, got.Conversations)
 }
 
-// railUnreadDMs counts the DMs the rail's Unread DMs list shows: the
-// entries of GET /api/v1/chat/dms with hasUnread set that are neither muted
-// nor with a deleted agent (isBadgeUnreadDM on the web).
-func railUnreadDMs(t *testing.T, srv *Server) int {
-	t.Helper()
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/dms", nil)
-	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
-	var resp chatDMListResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	n := 0
-	for _, dm := range resp.DMs {
-		if dm.HasUnread && !dm.Muted && !dm.PeerDeleted {
-			n++
-		}
-	}
-	return n
-}
-
-// The badge total equals what the rail shows as unread: the space unread
-// rollups plus the Unread DMs list. Covers threads the caller is not a
-// participant of, threads in another member project, in a template project
-// and in a readable project the caller is not a member of, and DMs with a
-// user, with an agent in another project and with a hard- and a
-// soft-deleted agent, along with muted and read conversations of each kind.
-func TestChatUnreadCount_BadgeEqualsRail(t *testing.T) {
-	srv, s, wcs, proj := setupSharedChatTest(t)
-	ctx := context.Background()
-	me := DevUserID
-	bindProjectMember(t, s, proj.ID, me)
-
-	f := &unreadFixture{t: t, s: s, wcs: wcs, proj: proj}
-	f.thread("member", me, true, true)
-	f.thread("non-member", me, false, true)
-	mutedThread, _ := f.thread("muted", me, true, true)
-	require.NoError(t, wcs.SetMuted(ctx, me, mutedThread, true))
-	readThread, readThreadMsg := f.thread("read", me, false, true)
-	require.NoError(t, wcs.SetReadState(ctx, me, readThread, readThreadMsg))
-
-	other := &store.Project{ID: api.NewUUID(), Name: "other", Slug: "other", Created: time.Now(), Updated: time.Now()}
-	require.NoError(t, s.CreateProject(ctx, other))
-	bindProjectMember(t, s, other.ID, me)
-	of := &unreadFixture{t: t, s: s, wcs: wcs, proj: other}
-	of.thread("elsewhere", me, false, true)
-
-	// A project the caller (a hub admin) can read but is not a member of.
-	foreign := &store.Project{ID: api.NewUUID(), Name: "foreign", Slug: "foreign", Created: time.Now(), Updated: time.Now()}
-	require.NoError(t, s.CreateProject(ctx, foreign))
-	ff := &unreadFixture{t: t, s: s, wcs: wcs, proj: foreign}
-	ff.thread("not-mine", me, true, true)
-
-	tmpl := &store.Project{
-		ID: api.NewUUID(), Name: "tmpl", Slug: "tmpl",
-		Labels:  map[string]string{store.LabelTemplate: "true"},
-		Created: time.Now(), Updated: time.Now(),
-	}
-	require.NoError(t, s.CreateProject(ctx, tmpl))
-	tf := &unreadFixture{t: t, s: s, wcs: wcs, proj: tmpl}
-	tf.thread("in-template", me, true, true)
-
-	newAgent := func(slug string) string {
-		id := api.NewUUID()
-		require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-			ID: id, Slug: slug, Name: slug, ProjectID: other.ID, Phase: "stopped",
-			CreatedBy: me, OwnerID: me,
-		}))
-		return id
-	}
-	f.dm(me)                              // user peer
-	f.dmWith(me, "agent", newAgent("a1")) // agent in another project
-	gone := newAgent("gone")
-	f.dmWith(me, "agent", gone)
-	require.NoError(t, s.DeleteAgent(ctx, gone)) // hard-deleted agent: left out
-	soft := newAgent("soft")
-	f.dmWith(me, "agent", soft)
-	softDeleteAgent(t, s, soft) // soft-deleted agent: left out
-	mutedDM, _ := f.dm(me)
-	require.NoError(t, wcs.SetMuted(ctx, me, mutedDM, true))
-	readDM, readDMMsg := f.dmWith(me, "agent", newAgent("a2"))
-	require.NoError(t, wcs.SetReadState(ctx, me, readDM, readDMMsg))
-
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/unread-count", nil)
-	got := getUnreadCount(t, rec)
-	assert.Equal(t, chatUnreadCountResponse{Conversations: 5, Threads: 3, DMs: 2}, got,
-		"threads: member, non-member, elsewhere; DMs: the user and the live agent")
-	assert.Equal(t, spacesUnreadTotal(t, srv), got.Threads, "threads must equal the space rollups")
-	assert.Equal(t, railUnreadDMs(t, srv), got.DMs, "DMs must equal the Unread DMs list")
-	assert.Equal(t, got.Threads+got.DMs, got.Conversations)
-}
-
-// A DM with an agent that has since been deleted stays usable from the
-// rail's Unread DMs list: it is listed (with no peer name, so the rail
-// labels it), its history loads, and reading it clears it from both the
-// list and the badge.
-func TestChatUnreadCount_DeletedAgentDMOpensAndReads(t *testing.T) {
-	srv, s, wcs, proj := setupSharedChatTest(t)
-	ctx := context.Background()
-	me := DevUserID
-	f := &unreadFixture{t: t, s: s, wcs: wcs, proj: proj}
-
-	agentID := api.NewUUID()
-	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: agentID, Slug: "gone", Name: "gone", ProjectID: proj.ID, Phase: "stopped",
-		CreatedBy: me, OwnerID: me,
-	}))
-	key, msgID := f.dmWith(me, "agent", agentID)
-	require.NoError(t, s.DeleteAgent(ctx, agentID))
-
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/dms", nil)
-	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
-	var dms chatDMListResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &dms))
-	require.Len(t, dms.DMs, 1)
-	assert.Equal(t, key, dms.DMs[0].ConversationKey)
-	assert.Equal(t, agentID, dms.DMs[0].PeerID)
-	assert.Equal(t, "agent", dms.DMs[0].PeerKind)
-	assert.Empty(t, dms.DMs[0].PeerName, "a hard-deleted agent has no name to show")
-	assert.True(t, dms.DMs[0].HasUnread)
-	assert.Equal(t, 1, getUnreadCount(t, doRequest(t, srv, http.MethodGet, "/api/v1/chat/unread-count", nil)).DMs)
-
-	rec = doRequest(t, srv, http.MethodGet, "/api/v1/chat/conversations/"+key+"/messages", nil)
-	require.Equal(t, http.StatusOK, rec.Code, "history: %s", rec.Body.String())
-	var hist struct {
-		Messages []struct {
-			ID string `json:"id"`
-		} `json:"messages"`
-	}
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &hist))
-	require.Len(t, hist.Messages, 1)
-	assert.Equal(t, msgID, hist.Messages[0].ID)
-
-	rec = doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+key+"/read",
-		map[string]string{"messageId": msgID})
-	require.Equal(t, http.StatusOK, rec.Code, "read: %s", rec.Body.String())
-
-	assert.Equal(t, 0, railUnreadDMs(t, srv))
-	assert.Equal(t, chatUnreadCountResponse{}, getUnreadCount(t,
-		doRequest(t, srv, http.MethodGet, "/api/v1/chat/unread-count", nil)))
-}
-
-// softDeleteAgent marks agentID soft-deleted.
-func softDeleteAgent(t *testing.T, s store.Store, agentID string) {
+// softDeleteChatPeerAgent marks agentID soft-deleted.
+func softDeleteChatPeerAgent(t *testing.T, s store.Store, agentID string) {
 	t.Helper()
 	ctx := context.Background()
 	a, err := s.GetAgent(ctx, agentID)
@@ -637,7 +498,7 @@ func TestChatUnreadCount_DeletedAgentDMExcluded(t *testing.T) {
 			if mode == "hard" {
 				require.NoError(t, s.DeleteAgent(ctx, agentID))
 			} else {
-				softDeleteAgent(t, s, agentID)
+				softDeleteChatPeerAgent(t, s, agentID)
 			}
 
 			rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/dms", nil)
