@@ -597,3 +597,28 @@ func TestValidateActivation_AuthenticationFailureNotActivated(t *testing.T) {
 	assert.False(t, errors.As(err, &ack), "an authentication failure is reported as the Hub's auth error")
 	assert.Contains(t, err.Error(), "not activated")
 }
+
+// TestRegisterInstance_SavesTheEndpointTheClientUsed: a Hub without a public
+// endpoint reports its own (for example http://localhost:<port>) in the join
+// response. The saved credentials keep the endpoint the registration reached
+// the Hub on, as the legacy join does, so a remote instance activates
+// against a Hub it can reach.
+func TestRegisterInstance_SavesTheEndpointTheClientUsed(t *testing.T) {
+	ti := newTestInstance(t)
+	hub := newFakeReplica(t)
+	hub.register = capableRegister
+	hub.join = func(body map[string]any) any {
+		resp := capableJoin(body).(map[string]any)
+		resp["hubEndpoint"] = "http://localhost:19811"
+		return resp
+	}
+	client, err := hubclient.New(hub.URL, hubclient.WithBearerToken("user-token"))
+	require.NoError(t, err)
+	creds, err := RegisterInstance(context.Background(), client, ti.inst, ti.id, testHubName, ti.credDir,
+		WithOptions(Options{HubEndpoint: hub.URL}))
+	require.NoError(t, err)
+	assert.Equal(t, hub.URL, creds.HubEndpoint)
+	loaded, err := brokercredentials.NewMultiStore(ti.credDir).Load(testHubName)
+	require.NoError(t, err)
+	assert.Equal(t, hub.URL, loaded.HubEndpoint, "the saved endpoint is the one the client used, not the Hub's self-report")
+}

@@ -2463,8 +2463,11 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 				return
 			}
 			// A flat instance's earlier delete of this agent may still be
-			// waiting for its objects to be confirmed gone: retry that.
-			s.finishPendingOwnedDelete(ctx, projectID, api.Slugify(id))
+			// waiting for its objects to be confirmed gone: retry that. A
+			// whole-agent delete also retires a record whose every run
+			// already ended (a failed create the Hub is rolling back), so
+			// its slug is not left reserved.
+			s.finishPendingOwnedDelete(ctx, projectID, api.Slugify(id), (deleteFiles && !softDelete) || localOnly)
 			s.agentLifecycleLog.Info("Agent delete: no matching agent in project",
 				"agent_id", id, "project_id", projectID)
 			NotFound(w, "Agent")
