@@ -38,8 +38,18 @@ sudo ./testlogin mint \
 | `--timeout` | Overall timeout. Default 30s. |
 
 On success the tool prints only non-secret facts: the user id, the email, the
-role, the token expiry time and the token file path. Use the token as
-`Authorization: Bearer $(cat "$dir/token")`.
+role, the token expiry time and the token file path.
+
+Send the token without putting it on a command line, where other local
+users can read it from the process list. For example, build a header file
+with shell built-ins and `cat`, then pass the file to curl:
+
+```sh
+(umask 077; { printf 'Authorization: Bearer '; cat "$dir/token"; } > "$dir/auth.hdr")
+curl -sS -H @"$dir/auth.hdr" http://127.0.0.1:8080/api/v1/auth/me
+```
+
+Test code can also read the token file directly.
 
 There is no flag to choose the role. The tool always requests `member`.
 
@@ -59,23 +69,27 @@ There is no flag to choose the role. The tool always requests `member`.
    role `member`, an email `<prefix>-<16 hex>@scion-test.invalid` and display
    name `<prefix> <16 hex>`. A 401 here means the secret file does not hold
    the secret the hub signs with. The tool does not retry with other sources.
-5. Checks the result before writing anything:
+5. Checks the result before writing anything, in this order:
+   - `GET /api/v1/users/<uid>` shows that the account was created during
+     this run (`created` falls within the run, allowing 5 seconds, and
+     `lastLogin` is within 5 seconds of `created`). test-login updates an
+     existing user that has the same email, so an account that already
+     existed is always rejected. This check runs first, so
+     any later failure knows whether the account is one this run created;
    - the response and the token's claims say role `member` and the expected
      email;
    - the token is an access token and its `exp - iat` is 30 minutes or less
      (the hub issues 15 minutes);
    - `GET /api/v1/auth/me` with the token returns the same uid, role
      `member` and the expected email;
-   - `GET /api/v1/users/<uid>` shows that the account was created during
-     this run (`created` falls within the run, allowing 5 seconds, and
-     `lastLogin` is within 5 seconds of `created`). test-login updates an
-     existing user that has the same email, so an account that already
-     existed is always rejected;
    - `GET /api/v1/admin/server-config` returns 403.
 6. Only then writes the access token to the file.
 
 If any step fails, the tool removes the token file and exits non-zero. If a
-user was returned, its id is printed so an admin can delete it.
+user was returned, its id is printed with advice:
+- delete it, when the account is confirmed to have been created by this run;
+- review it (do not delete it blindly), when it was an existing account or
+  the run could not confirm that it created it.
 
 The refresh token in the test-login response is never stored. The response
 type has no field for it, and the raw response is cleared after decoding. The
@@ -86,12 +100,17 @@ prints, logs or writes the secret, the derived key or any token.
 
 ```sh
 sudo ./testlogin cleanup --hub-url http://127.0.0.1:8080 --token-file "$dir/token"
+rm -f "$dir/auth.hdr"   # if you made a header file
 rmdir "$dir"
 ```
 
-`cleanup` reads the token's user id. It asks `/auth/me` whether the token is
-still live and has role `member`, then deletes the file and confirms that it
-is gone. It exits non-zero if the hub reports anything other than a member
+`cleanup` first checks that `--token-file` holds an access token of the kind
+`mint` writes: a JWT for role `member`, an email in `scion-test.invalid`
+and a lifetime of 30 minutes or less. If it does not, `cleanup` exits
+non-zero without sending anything and leaves the file in place, so the
+wrong file cannot be sent to the hub as a credential. It then reads the
+token's user id, asks `/auth/me` whether the token is still live and has
+role `member`, then deletes the file and confirms that it is gone. It exits non-zero if the hub reports anything other than a member
 for that user, but it still removes the file.
 
 The tool does **not** delete the user. Deleting a user needs an admin

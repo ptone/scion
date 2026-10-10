@@ -63,6 +63,7 @@ type fakeHub struct {
 	uid           string
 	access        string
 	refresh       string
+	issued        []string // every token the fake has handed out
 	loginAt       time.Time
 }
 
@@ -171,6 +172,7 @@ func (f *fakeHub) testLogin(w http.ResponseWriter, r *http.Request) {
 	f.loginAt = time.Now()
 	f.access = f.mintToken("access", f.tokenLife)
 	f.refresh = f.mintToken("refresh", 7*24*time.Hour)
+	f.issued = append(f.issued, f.access, f.refresh)
 	http.SetCookie(w, &http.Cookie{Name: "scion_sess", Value: f.refresh})
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"user":         map[string]string{"id": f.uid, "email": f.email, "displayName": f.displayName, "role": f.respRole},
@@ -181,15 +183,28 @@ func (f *fakeHub) testLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (f *fakeHub) mintToken(typ string, life time.Duration) string {
+	return f.mintCustom(map[string]any{"type": typ, "exp": time.Now().Add(life).Unix()})
+}
+
+// mintCustom signs a token with the fake's key, starting from a valid
+// testlogin access-token claim set and applying overrides.
+func (f *fakeHub) mintCustom(overrides map[string]any) string {
 	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.HS256, Key: f.key}, nil)
 	if err != nil {
 		f.t.Fatal(err)
 	}
 	now := time.Now()
+	uid, email := f.uid, f.email
+	if uid == "" {
+		uid, email = "uid-"+randHex(f.t, 8), "test-fixture-"+randHex(f.t, 8)+"@"+EmailDomain
+	}
 	claims := map[string]any{
-		"iss": "scion-hub", "aud": "scion-hub-api", "sub": f.uid, "uid": f.uid,
-		"email": f.email, "role": f.respRole, "type": typ, "client": "web",
-		"iat": now.Unix(), "nbf": now.Unix(), "exp": now.Add(life).Unix(), "jti": randHex(f.t, 8),
+		"iss": "scion-hub", "aud": "scion-hub-api", "sub": uid, "uid": uid,
+		"email": email, "role": f.respRole, "type": "access", "client": "web",
+		"iat": now.Unix(), "nbf": now.Unix(), "exp": now.Add(f.tokenLife).Unix(), "jti": randHex(f.t, 8),
+	}
+	for k, v := range overrides {
+		claims[k] = v
 	}
 	s, err := jwt.Signed(signer).Claims(claims).Serialize()
 	if err != nil {
@@ -231,13 +246,24 @@ func newEnv(t *testing.T) *env {
 	return &env{secret: secret, secretFile: sf, dir: dir, out: filepath.Join(dir, "token"), hub: hub, srv: srv}
 }
 
-func (e *env) mint(t *testing.T, extra ...string) (int, string, string) {
+// run is the only place the tests invoke Run (TestEveryRunIsChecked
+// enforces this), so the secret-absence check covers every run.
+func (e *env) run(t *testing.T, args ...string) (int, string, string) {
 	t.Helper()
-	args := append([]string{"mint", "--hub-url", e.srv.URL, "--secret-file", e.secretFile, "--out", e.out}, extra...)
 	var stdout, stderr bytes.Buffer
 	code := Run(context.Background(), args, &stdout, &stderr, Options{})
 	e.assertNoSecrets(t, stdout.String()+stderr.String())
 	return code, stdout.String(), stderr.String()
+}
+
+func (e *env) mint(t *testing.T, extra ...string) (int, string, string) {
+	t.Helper()
+	return e.run(t, append([]string{"mint", "--hub-url", e.srv.URL, "--secret-file", e.secretFile, "--out", e.out}, extra...)...)
+}
+
+func (e *env) cleanup(t *testing.T, tokenFile string) (int, string, string) {
+	t.Helper()
+	return e.run(t, "cleanup", "--hub-url", e.srv.URL, "--token-file", tokenFile)
 }
 
 // assertNoSecrets fails if any secret material appears in output: the
@@ -252,13 +278,11 @@ func (e *env) assertNoSecrets(t *testing.T, output string) {
 		"key base64url":  base64.RawURLEncoding.EncodeToString(key),
 	}
 	e.hub.mu.Lock()
-	if e.hub.access != "" {
-		forbidden["access token"] = e.hub.access
-		forbidden["access token signature"] = e.hub.access[strings.LastIndex(e.hub.access, ".")+1:]
-	}
-	if e.hub.refresh != "" {
-		forbidden["refresh token"] = e.hub.refresh
-		forbidden["refresh token signature"] = e.hub.refresh[strings.LastIndex(e.hub.refresh, ".")+1:]
+	for i, tok := range e.hub.issued {
+		forbidden["issued token "+string(rune('0'+i))] = tok
+		if sig := tok[strings.LastIndex(tok, ".")+1:]; len(sig) >= 16 {
+			forbidden["issued token signature "+string(rune('0'+i))] = sig
+		}
 	}
 	e.hub.mu.Unlock()
 	for name, v := range forbidden {
@@ -362,6 +386,37 @@ func TestMintFailuresRemoveTokenFile(t *testing.T) {
 	}
 }
 
+// TestMintFailureAdvice checks that deletion is advised only for an account
+// this run is confirmed to have created.
+func TestMintFailureAdvice(t *testing.T) {
+	cases := []struct {
+		name      string
+		bend      func(*fakeHub)
+		want      string
+		forbidden string
+	}{
+		{"confirmed new, later check fails", func(f *fakeHub) { f.adminStatus = http.StatusOK }, "this run created user", "do not delete"},
+		{"existing account", func(f *fakeHub) { f.createdOffset = -time.Hour }, "existing account", "admin must delete"},
+		{"freshness unconfirmed", func(f *fakeHub) { f.userStatus = http.StatusForbidden }, "could not confirm", "admin must delete"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t)
+			tc.bend(e.hub)
+			code, _, stderr := e.mint(t)
+			if code == 0 {
+				t.Fatal("expected failure")
+			}
+			if !strings.Contains(stderr, tc.want) || !strings.Contains(stderr, e.hub.uid) {
+				t.Errorf("stderr missing %q or the uid:\n%s", tc.want, stderr)
+			}
+			if strings.Contains(stderr, tc.forbidden) {
+				t.Errorf("stderr contains %q:\n%s", tc.forbidden, stderr)
+			}
+		})
+	}
+}
+
 func TestMintDisabledCreatesNothing(t *testing.T) {
 	e := newEnv(t)
 	e.hub.enabled = false
@@ -379,8 +434,11 @@ func TestPreflightCreatesNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := &minter{base: u, client: httpClient(nil), stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}}
-	if err := m.preflight(context.Background()); err != nil {
+	var stdout, stderr bytes.Buffer
+	m := &minter{base: u, client: httpClient(nil), stdout: &stdout, stderr: &stderr}
+	err = m.preflight(context.Background())
+	e.assertNoSecrets(t, stdout.String()+stderr.String())
+	if err != nil {
 		t.Fatalf("preflight: %v", err)
 	}
 	if e.hub.requests != 1 || e.hub.authedLogins != 0 || e.hub.createdUsers != 0 {
@@ -456,16 +514,20 @@ func TestMintHasNoRoleFlag(t *testing.T) {
 }
 
 func TestMintUsageErrors(t *testing.T) {
-	var out, errOut bytes.Buffer
-	if code := Run(context.Background(), nil, &out, &errOut, Options{}); code != 2 {
+	e := newEnv(t)
+	if code, _, _ := e.run(t); code != 2 {
 		t.Errorf("no args: exit %d", code)
 	}
-	if code := Run(context.Background(), []string{"mint"}, &out, &errOut, Options{}); code != 2 {
+	if code, _, _ := e.run(t, "mint"); code != 2 {
 		t.Errorf("missing flags: exit %d", code)
 	}
-	if code := Run(context.Background(), []string{"mint", "--hub-url", "http://127.0.0.1:1", "--secret-file", "x", "--out", "y", "--name-prefix", "Bad Prefix"}, &out, &errOut, Options{}); code != 2 {
+	if code, _, _ := e.mint(t, "--name-prefix", "Bad Prefix"); code != 2 {
 		t.Errorf("bad prefix: exit %d", code)
 	}
+	if e.hub.requests != 0 {
+		t.Error("hub contacted despite usage errors")
+	}
+	assertGone(t, e.out)
 }
 
 func TestParseHubURL(t *testing.T) {
@@ -487,15 +549,13 @@ func TestCleanup(t *testing.T) {
 		if code, _, stderr := e.mint(t); code != 0 {
 			t.Fatalf("mint: %s", stderr)
 		}
-		var stdout, stderr bytes.Buffer
-		code := Run(context.Background(), []string{"cleanup", "--hub-url", e.srv.URL, "--token-file", e.out}, &stdout, &stderr, Options{})
-		e.assertNoSecrets(t, stdout.String()+stderr.String())
+		code, stdout, stderr := e.cleanup(t, e.out)
 		if code != 0 {
-			t.Fatalf("exit %d: %s", code, stderr.String())
+			t.Fatalf("exit %d: %s", code, stderr)
 		}
 		assertGone(t, e.out)
-		if !strings.Contains(stdout.String(), e.hub.uid) || !strings.Contains(stdout.String(), "admin must delete") {
-			t.Errorf("stdout:\n%s", stdout.String())
+		if !strings.Contains(stdout, e.hub.uid) || !strings.Contains(stdout, "admin must delete") {
+			t.Errorf("stdout:\n%s", stdout)
 		}
 	})
 	t.Run("token no longer accepted", func(t *testing.T) {
@@ -504,10 +564,12 @@ func TestCleanup(t *testing.T) {
 			t.Fatalf("mint: %s", stderr)
 		}
 		e.hub.access = "" // the hub now rejects the token
-		var stdout, stderr bytes.Buffer
-		code := Run(context.Background(), []string{"cleanup", "--hub-url", e.srv.URL, "--token-file", e.out}, &stdout, &stderr, Options{})
+		code, stdout, stderr := e.cleanup(t, e.out)
 		if code != 0 {
-			t.Fatalf("exit %d: %s", code, stderr.String())
+			t.Fatalf("exit %d: %s", code, stderr)
+		}
+		if strings.Contains(stdout, "((") || !strings.Contains(stdout, "no longer accepts the token (user_not_found)") {
+			t.Errorf("stdout:\n%s", stdout)
 		}
 		assertGone(t, e.out)
 	})
@@ -517,21 +579,74 @@ func TestCleanup(t *testing.T) {
 			t.Fatalf("mint: %s", stderr)
 		}
 		e.hub.meRole = "admin"
-		var stdout, stderr bytes.Buffer
-		code := Run(context.Background(), []string{"cleanup", "--hub-url", e.srv.URL, "--token-file", e.out}, &stdout, &stderr, Options{})
-		e.assertNoSecrets(t, stdout.String()+stderr.String())
-		if code == 0 {
+		if code, _, _ := e.cleanup(t, e.out); code == 0 {
 			t.Fatal("expected a non-zero exit")
 		}
 		assertGone(t, e.out)
 	})
 	t.Run("missing file", func(t *testing.T) {
 		e := newEnv(t)
-		var stdout, stderr bytes.Buffer
-		if code := Run(context.Background(), []string{"cleanup", "--hub-url", e.srv.URL, "--token-file", e.out}, &stdout, &stderr, Options{}); code == 0 {
+		if code, _, _ := e.cleanup(t, e.out); code == 0 {
 			t.Fatal("expected failure")
 		}
 	})
+}
+
+// TestCleanupRefusesNonTokenFiles checks that cleanup sends nothing and
+// leaves the file in place unless it holds a token shaped like the ones
+// mint writes.
+func TestCleanupRefusesNonTokenFiles(t *testing.T) {
+	cases := []struct {
+		name    string
+		content func(e *env) string
+	}{
+		{"session secret file", func(e *env) string { return "SESSION_SECRET=" + string(e.secret) + "\n" }},
+		{"bare secret", func(e *env) string { return string(e.secret) }},
+		{"empty", func(*env) string { return "" }},
+		{"three dotted words", func(*env) string { return "a.b.c" }},
+		{"refresh token", func(e *env) string { return e.hub.mintToken("refresh", 7*24*time.Hour) }},
+		{"admin role", func(e *env) string { return e.hub.mintCustom(map[string]any{"role": "admin"}) }},
+		{"real email domain", func(e *env) string { return e.hub.mintCustom(map[string]any{"email": "person@example.com"}) }},
+		{"long lifetime", func(e *env) string {
+			return e.hub.mintCustom(map[string]any{"exp": time.Now().Add(30 * 24 * time.Hour).Unix()})
+		}},
+		{"no subject", func(e *env) string { return e.hub.mintCustom(map[string]any{"sub": "", "uid": ""}) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t)
+			content := tc.content(e)
+			e.hub.issued = append(e.hub.issued, content) // must never be echoed either
+			if err := os.WriteFile(e.out, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			code, _, stderr := e.cleanup(t, e.out)
+			if code == 0 {
+				t.Fatal("expected a non-zero exit")
+			}
+			if !strings.Contains(stderr, "nothing was sent and the file was left in place") {
+				t.Errorf("stderr:\n%s", stderr)
+			}
+			if e.hub.requests != 0 {
+				t.Errorf("hub received %d requests", e.hub.requests)
+			}
+			if data, err := os.ReadFile(e.out); err != nil || string(data) != content {
+				t.Error("file was modified or removed")
+			}
+		})
+	}
+}
+
+// TestEveryRunIsChecked keeps the secret-absence check on every run: the
+// tests may call Run only through env.run.
+func TestEveryRunIsChecked(t *testing.T) {
+	data, err := os.ReadFile("testlogin_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(data), "Run("+"context."); n != 1 {
+		t.Errorf("found %d direct calls of Run; call it only through env.run", n)
+	}
 }
 
 func TestReadSecretFile(t *testing.T) {

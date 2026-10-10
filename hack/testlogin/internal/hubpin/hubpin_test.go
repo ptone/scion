@@ -20,12 +20,17 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -83,9 +88,48 @@ func TestChallengeAcceptedByHubTokenService(t *testing.T) {
 // testHub is an in-process hub (hub API mounted on the web server, as in
 // combined mode) backed by a fresh SQLite database.
 type testHub struct {
-	srv   *hub.Server
-	url   string
-	store store.Store
+	srv    *hub.Server
+	url    string
+	store  store.Store
+	secret string
+
+	mu       sync.Mutex
+	requests int      // requests the hub received
+	issued   []string // every access and refresh token test-login returned
+}
+
+// record wraps the hub handler and keeps every token the test-login
+// endpoint returns, so tests can assert that none of them is ever printed.
+func (h *testHub) record(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.mu.Lock()
+		h.requests++
+		h.mu.Unlock()
+		if r.URL.Path != "/api/v1/auth/test-login" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		rec := httptest.NewRecorder()
+		next.ServeHTTP(rec, r)
+		var body struct {
+			AccessToken  string `json:"accessToken"`
+			RefreshToken string `json:"refreshToken"`
+		}
+		if json.Unmarshal(rec.Body.Bytes(), &body) == nil {
+			h.mu.Lock()
+			for _, tok := range []string{body.AccessToken, body.RefreshToken} {
+				if tok != "" {
+					h.issued = append(h.issued, tok)
+				}
+			}
+			h.mu.Unlock()
+		}
+		for k, v := range rec.Header() {
+			w.Header()[k] = v
+		}
+		w.WriteHeader(rec.Code)
+		_, _ = w.Write(rec.Body.Bytes())
+	})
 }
 
 func startHub(t *testing.T, secret string, enableTestLogin bool) *testHub {
@@ -119,9 +163,11 @@ func startHub(t *testing.T, secret string, enableTestLogin bool) *testHub {
 	ws.SetAuthzService(srv.GetAuthzService())
 	ws.MountHubAPI(srv.Handler(), func(context.Context) error { return nil })
 
-	hs := httptest.NewServer(ws.Handler())
+	h := &testHub{srv: srv, store: srv.GetStore(), secret: secret}
+	hs := httptest.NewServer(h.record(ws.Handler()))
 	t.Cleanup(hs.Close)
-	return &testHub{srv: srv, url: hs.URL, store: srv.GetStore()}
+	h.url = hs.URL
+	return h
 }
 
 // TestDerivationMatchesHub pins DeriveUserSigningKey to the hub's own
@@ -145,11 +191,37 @@ type run struct {
 	stdout, stderr string
 }
 
-func runTool(t *testing.T, opts testlogin.Options, args ...string) run {
+// runTool is the only place these tests invoke the tool
+// (TestEveryRunIsChecked enforces this). Every run is checked for the hub's
+// secret, the secret in the file given to the tool (fileSecret, which
+// differs in the wrong-secret test), keys derived from either, and every
+// token the hub has issued.
+func runTool(t *testing.T, h *testHub, fileSecret string, opts testlogin.Options, args ...string) run {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
 	code := testlogin.Run(context.Background(), args, &stdout, &stderr, opts)
-	return run{code, stdout.String(), stderr.String()}
+	r := run{code, stdout.String(), stderr.String()}
+	output := r.stdout + r.stderr
+	forbidden := map[string]string{}
+	for j, sec := range []string{h.secret, fileSecret} {
+		key := challenge.DeriveUserSigningKey([]byte(sec))
+		forbidden[fmt.Sprintf("secret %d", j)] = sec
+		forbidden[fmt.Sprintf("key hex %d", j)] = hex.EncodeToString(key)
+		forbidden[fmt.Sprintf("key base64 %d", j)] = base64.StdEncoding.EncodeToString(key)
+		forbidden[fmt.Sprintf("key base64url %d", j)] = base64.RawURLEncoding.EncodeToString(key)
+	}
+	h.mu.Lock()
+	for i, tok := range h.issued {
+		forbidden[fmt.Sprintf("issued token %d", i)] = tok
+		forbidden[fmt.Sprintf("issued token signature %d", i)] = tok[strings.LastIndex(tok, ".")+1:]
+	}
+	h.mu.Unlock()
+	for name, v := range forbidden {
+		if v != "" && strings.Contains(output, v) {
+			t.Errorf("%s appears in output", name)
+		}
+	}
+	return r
 }
 
 func writeSecretFile(t *testing.T, dir, secret string) string {
@@ -159,17 +231,6 @@ func writeSecretFile(t *testing.T, dir, secret string) string {
 		t.Fatal(err)
 	}
 	return p
-}
-
-func assertNoSecret(t *testing.T, secret string, r run) {
-	t.Helper()
-	if strings.Contains(r.stdout+r.stderr, secret) {
-		t.Error("session secret appears in output")
-	}
-	key := challenge.DeriveUserSigningKey([]byte(secret))
-	if strings.Contains(r.stdout+r.stderr, hex.EncodeToString(key)) {
-		t.Error("derived key appears in output")
-	}
 }
 
 // TestMintAndCleanupAgainstHub runs the whole tool against the real
@@ -182,8 +243,7 @@ func TestMintAndCleanupAgainstHub(t *testing.T) {
 	out := filepath.Join(dir, "token")
 	email := "pin-" + hex.EncodeToString([]byte(randomSecret(t))[:6]) + "@" + testlogin.EmailDomain
 
-	r := runTool(t, testlogin.Options{Email: email}, "mint", "--hub-url", h.url, "--secret-file", sf, "--out", out)
-	assertNoSecret(t, secret, r)
+	r := runTool(t, h, secret, testlogin.Options{Email: email}, "mint", "--hub-url", h.url, "--secret-file", sf, "--out", out)
 	if r.code != 0 {
 		t.Fatalf("mint exit %d\nstdout:\n%s\nstderr:\n%s", r.code, r.stdout, r.stderr)
 	}
@@ -197,9 +257,6 @@ func TestMintAndCleanupAgainstHub(t *testing.T) {
 	tok, err := os.ReadFile(out)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if strings.Contains(r.stdout+r.stderr, string(tok)) {
-		t.Error("access token appears in output")
 	}
 	claims, err := h.srv.GetUserTokenService().ValidateUserToken(string(tok))
 	if err != nil {
@@ -216,7 +273,7 @@ func TestMintAndCleanupAgainstHub(t *testing.T) {
 		t.Errorf("stored role %q; stdout:\n%s", u.Role, r.stdout)
 	}
 
-	r = runTool(t, testlogin.Options{}, "cleanup", "--hub-url", h.url, "--token-file", out)
+	r = runTool(t, h, secret, testlogin.Options{}, "cleanup", "--hub-url", h.url, "--token-file", out)
 	if r.code != 0 {
 		t.Fatalf("cleanup exit %d\nstdout:\n%s\nstderr:\n%s", r.code, r.stdout, r.stderr)
 	}
@@ -243,12 +300,11 @@ func TestRefusesExistingAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := runTool(t, testlogin.Options{Email: email}, "mint", "--hub-url", h.url, "--secret-file", sf, "--out", out)
-	assertNoSecret(t, secret, r)
+	r := runTool(t, h, secret, testlogin.Options{Email: email}, "mint", "--hub-url", h.url, "--secret-file", sf, "--out", out)
 	if r.code == 0 {
 		t.Fatal("mint accepted a pre-existing account")
 	}
-	if !strings.Contains(r.stderr, "existing account") {
+	if !strings.Contains(r.stderr, "existing account") || strings.Contains(r.stderr, "admin must delete") {
 		t.Errorf("stderr:\n%s", r.stderr)
 	}
 	if _, err := os.Lstat(out); !os.IsNotExist(err) {
@@ -262,7 +318,7 @@ func TestRefusesWhenTestLoginDisabled(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "token")
 	email := "disabled@" + testlogin.EmailDomain
-	r := runTool(t, testlogin.Options{Email: email}, "mint", "--hub-url", h.url, "--secret-file", writeSecretFile(t, dir, secret), "--out", out)
+	r := runTool(t, h, secret, testlogin.Options{Email: email}, "mint", "--hub-url", h.url, "--secret-file", writeSecretFile(t, dir, secret), "--out", out)
 	if r.code == 0 || !strings.Contains(r.stderr, "not enabled") {
 		t.Fatalf("exit %d, stderr:\n%s", r.code, r.stderr)
 	}
@@ -277,8 +333,7 @@ func TestWrongSecretCreatesNothing(t *testing.T) {
 	out := filepath.Join(dir, "token")
 	email := "wrong@" + testlogin.EmailDomain
 	other := randomSecret(t)
-	r := runTool(t, testlogin.Options{Email: email}, "mint", "--hub-url", h.url, "--secret-file", writeSecretFile(t, dir, other), "--out", out)
-	assertNoSecret(t, other, r)
+	r := runTool(t, h, other, testlogin.Options{Email: email}, "mint", "--hub-url", h.url, "--secret-file", writeSecretFile(t, dir, other), "--out", out)
 	if r.code == 0 || !strings.Contains(r.stderr, "401") {
 		t.Fatalf("exit %d, stderr:\n%s", r.code, r.stderr)
 	}
@@ -287,5 +342,39 @@ func TestWrongSecretCreatesNothing(t *testing.T) {
 	}
 	if _, err := os.Lstat(out); !os.IsNotExist(err) {
 		t.Error("token file left behind")
+	}
+}
+
+// TestCleanupRefusesSecretFile checks that cleanup pointed at the hub's
+// secret file sends nothing and leaves the file in place.
+func TestCleanupRefusesSecretFile(t *testing.T) {
+	secret := randomSecret(t)
+	h := startHub(t, secret, true)
+	sf := writeSecretFile(t, t.TempDir(), secret)
+	before, err := os.ReadFile(sf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := runTool(t, h, secret, testlogin.Options{}, "cleanup", "--hub-url", h.url, "--token-file", sf)
+	if r.code == 0 {
+		t.Fatal("cleanup accepted a secret file")
+	}
+	if h.requests != 0 {
+		t.Errorf("hub received %d requests", h.requests)
+	}
+	if after, err := os.ReadFile(sf); err != nil || !bytes.Equal(before, after) {
+		t.Error("secret file was modified or removed")
+	}
+}
+
+// TestEveryRunIsChecked keeps the output check on every run: the tests may
+// invoke the tool only through runTool.
+func TestEveryRunIsChecked(t *testing.T) {
+	data, err := os.ReadFile("hubpin_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(data), "testlogin."+"Run("); n != 1 {
+		t.Errorf("found %d direct calls of testlogin.Run; call it only through runTool", n)
 	}
 }

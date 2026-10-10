@@ -157,9 +157,11 @@ func runMint(ctx context.Context, args []string, stdout, stderr io.Writer, opts 
 		errorf(stderr, "%v", err)
 		switch {
 		case m.preexisting:
-			errorf(stderr, "the generated email belonged to an existing account (uid %s); test-login may have changed its role to %s, so an admin must review that account", m.createdUID, role)
+			errorf(stderr, "review: uid %s is an existing account (the generated email was already registered), and test-login may have changed its role to %s; do not delete it blindly, an admin must review it", m.createdUID, role)
+		case m.fresh:
+			errorf(stderr, "this run created user uid %s; an admin must delete it", m.createdUID)
 		case m.createdUID != "":
-			errorf(stderr, "the hub returned user uid %s for this run; an admin must delete it", m.createdUID)
+			errorf(stderr, "review: the hub returned uid %s, but this run could not confirm that it created that account; do not delete it blindly, an admin must review it", m.createdUID)
 		}
 		return 1
 	}
@@ -175,6 +177,8 @@ type minter struct {
 	// preexisting is set when the user returned by test-login was not
 	// created by this run.
 	preexisting bool
+	// fresh is set once the user is confirmed to have been created by this run.
+	fresh bool
 }
 
 type userJSON struct {
@@ -256,6 +260,13 @@ func (m *minter) run(ctx context.Context, secretFile, secretVar, out, prefix, em
 	token := resp.AccessToken
 	u := resp.User
 
+	// Freshness first, so that any later failure knows whether the account
+	// is one this run created (and may be deleted) or not.
+	if err := m.checkFresh(ctx, token, u.ID, start); err != nil {
+		return err
+	}
+	m.fresh = true
+
 	if u.Role != role {
 		return fmt.Errorf("hub returned role %q for the new user, want %q", u.Role, role)
 	}
@@ -272,9 +283,6 @@ func (m *minter) run(ctx context.Context, secretFile, secretVar, out, prefix, em
 	}
 
 	if err := m.checkMe(ctx, token, u.ID, email); err != nil {
-		return err
-	}
-	if err := m.checkFresh(ctx, token, u.ID, start); err != nil {
 		return err
 	}
 	if err := m.checkNotAdmin(ctx, token); err != nil {
@@ -469,20 +477,22 @@ func runCleanup(ctx context.Context, args []string, stdout, stderr io.Writer, op
 	token := strings.TrimSpace(string(raw))
 	challenge.Zero(raw)
 
-	ok := true
-	uid := ""
-	if c, err := decodeClaims(token); err != nil {
-		errorf(stderr, "token file does not hold a readable token: %v", err)
-		ok = false
-	} else {
-		uid = c.UID
-		if uid == "" {
-			uid = c.Sub
-		}
-		_, _ = fmt.Fprintf(stdout, "uid:     %s\nemail:   %s\nexpires: %s\n", uid, c.Email, time.Unix(c.Exp, 0).UTC().Format(time.RFC3339))
+	// Refuse anything that is not a token written by mint before sending
+	// it anywhere or deleting the file: --token-file could name the wrong
+	// file, and its content must not be sent to the hub as a credential.
+	c, err := decodeClaims(token)
+	if err == nil {
+		err = c.testloginShape()
 	}
+	if err != nil {
+		errorf(stderr, "%s does not hold an access token written by testlogin mint (%v); refusing: nothing was sent and the file was left in place", *tokenFile, err)
+		return 1
+	}
+	uid := c.Sub
+	_, _ = fmt.Fprintf(stdout, "uid:     %s\nemail:   %s\nexpires: %s\n", uid, c.Email, time.Unix(c.Exp, 0).UTC().Format(time.RFC3339))
 
-	if token != "" {
+	ok := true
+	{
 		status, body, err := m.do(ctx, http.MethodGet, pathAuthMe, token, nil)
 		switch {
 		case err != nil:
@@ -493,14 +503,14 @@ func runCleanup(ctx context.Context, args []string, stdout, stderr io.Writer, op
 			if jerr := json.Unmarshal(body, &me); jerr != nil {
 				errorf(stderr, "decode /auth/me: %v", jerr)
 				ok = false
-			} else if me.Role != role || (uid != "" && me.ID != uid) {
+			} else if me.Role != role || me.ID != uid {
 				errorf(stderr, "/auth/me returned uid %q role %q; want uid %q role %q", me.ID, me.Role, uid, role)
 				ok = false
 			} else {
 				_, _ = fmt.Fprintf(stdout, "verified: token is live for uid %s with role %s\n", me.ID, me.Role)
 			}
 		case status == http.StatusUnauthorized:
-			_, _ = fmt.Fprintf(stdout, "verified: hub no longer accepts the token (%s)\n", errorCode(body))
+			_, _ = fmt.Fprintf(stdout, "verified: hub no longer accepts the token %s\n", errorCode(body))
 		default:
 			errorf(stderr, "/auth/me returned HTTP %d %s", status, errorCode(body))
 			ok = false
@@ -516,7 +526,7 @@ func runCleanup(ctx context.Context, args []string, stdout, stderr io.Writer, op
 		return 1
 	}
 	_, _ = fmt.Fprintf(stdout, "removed:  %s\n", *tokenFile)
-	if uid != "" {
+	{
 		_, _ = fmt.Fprintf(stdout, "next:     an admin must delete user %s (after its agents and projects are deleted); this tool does not delete users\n", uid)
 	}
 	if !ok {
@@ -640,37 +650,60 @@ type tokenClaims struct {
 func decodeClaims(token string) (*tokenClaims, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
-		return nil, errors.New("access token is not a JWT")
+		return nil, errors.New("not a JWT")
+	}
+	for _, p := range parts {
+		if p == "" || strings.Trim(p, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_") != "" {
+			return nil, errors.New("not a JWT")
+		}
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return nil, errors.New("access token payload is not base64url")
+		return nil, errors.New("JWT payload is not base64url")
 	}
 	var c tokenClaims
 	if err := json.Unmarshal(payload, &c); err != nil {
-		return nil, errors.New("access token payload is not JSON")
+		return nil, errors.New("JWT payload is not JSON")
 	}
 	return &c, nil
 }
 
-func (c *tokenClaims) check(uid, email string) error {
-	if c.Sub != uid || (c.UID != "" && c.UID != uid) {
-		return fmt.Errorf("access token subject %q does not match uid %q", c.Sub, uid)
+// testloginShape checks the claims every token written by mint has: an
+// access token for a member with a generated test email and a short
+// lifetime. Errors name the failing claim but never echo claim values, since
+// cleanup applies this to a file that may hold something else.
+func (c *tokenClaims) testloginShape() error {
+	if c.Sub == "" || (c.UID != "" && c.UID != c.Sub) {
+		return errors.New("missing or inconsistent subject")
+	}
+	if c.Type != "access" {
+		return errors.New("not an access token")
 	}
 	if c.Role != role {
-		return fmt.Errorf("access token role %q, want %q", c.Role, role)
+		return fmt.Errorf("role is not %s", role)
+	}
+	if !strings.HasSuffix(strings.ToLower(c.Email), "@"+EmailDomain) {
+		return fmt.Errorf("email is not in %s", EmailDomain)
+	}
+	if c.Iat == 0 || c.Exp <= c.Iat {
+		return errors.New("missing or invalid iat/exp")
+	}
+	if life := time.Duration(c.Exp-c.Iat) * time.Second; life > maxTokenLifetime {
+		return fmt.Errorf("lifetime exceeds %s", maxTokenLifetime)
+	}
+	return nil
+}
+
+// check verifies a token the hub just issued in mint.
+func (c *tokenClaims) check(uid, email string) error {
+	if err := c.testloginShape(); err != nil {
+		return fmt.Errorf("access token: %w", err)
+	}
+	if c.Sub != uid {
+		return fmt.Errorf("access token subject %q does not match uid %q", c.Sub, uid)
 	}
 	if !strings.EqualFold(c.Email, email) {
 		return fmt.Errorf("access token email %q, want %q", c.Email, email)
-	}
-	if c.Type != "" && c.Type != "access" {
-		return fmt.Errorf("access token type %q, want \"access\"", c.Type)
-	}
-	if c.Iat == 0 || c.Exp <= c.Iat {
-		return errors.New("access token has missing or invalid iat/exp")
-	}
-	if life := time.Duration(c.Exp-c.Iat) * time.Second; life > maxTokenLifetime {
-		return fmt.Errorf("access token lifetime %s exceeds %s", life, maxTokenLifetime)
 	}
 	if time.Unix(c.Exp, 0).Before(time.Now()) {
 		return errors.New("access token is already expired")
