@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 )
@@ -20,9 +19,8 @@ import (
 // (for example, removing a stale provisioner hook).
 type AgentHomeOwnershipRepairer interface {
 	// RepairAgentHomeOwnership changes the ownership of every entry under
-	// req.HomeDir (the directory itself included) to the agent runtime
-	// process's uid and gid, through a one-shot privileged helper run from
-	// req.Image. It returns ErrAgentHomeRepairUnsupported when this runtime
+	// req.HomeDir (the directory itself included) to req.UID and req.GID,
+	// through a one-shot privileged helper run from req.Image. It returns ErrAgentHomeRepairUnsupported when this runtime
 	// cannot do so in its current mode.
 	RepairAgentHomeOwnership(ctx context.Context, req AgentHomeOwnershipRepair) error
 }
@@ -34,6 +32,10 @@ type AgentHomeOwnershipRepair struct {
 	// Image is the agent's image. It must already be present locally; the
 	// helper never pulls.
 	Image string
+	// UID and GID are the new owner: the ids the runtime advertises to the
+	// agent container (AdvertisedHostOwnerIDs), which are also the agent
+	// runtime process's own ids whenever a repair is allowed.
+	UID, GID int
 }
 
 // ErrAgentHomeRepairUnsupported is returned (wrapped) when the runtime
@@ -53,7 +55,8 @@ const agentHomeRepairMount = "/scion-agent-home"
 // their targets), does not cross into other filesystems, and leaves
 // regular files with more than one hard link unchanged, since such a link
 // may share its inode with a file outside the agent home.
-func agentHomeRepairArgs(req AgentHomeOwnershipRepair, uid, gid int) ([]string, error) {
+func agentHomeRepairArgs(req AgentHomeOwnershipRepair) ([]string, error) {
+	uid, gid := req.UID, req.GID
 	home := filepath.Clean(req.HomeDir)
 	if req.HomeDir == "" || !filepath.IsAbs(home) || home == "/" {
 		return nil, fmt.Errorf("agent home ownership repair: invalid agent home path %q", req.HomeDir)
@@ -89,16 +92,14 @@ func agentHomeRepairArgs(req AgentHomeOwnershipRepair, uid, gid int) ([]string, 
 	}, nil
 }
 
-// repairAgentHomeOwnership runs the helper with command (docker or podman)
-// as the current process's uid and gid.
+// repairAgentHomeOwnership runs the helper with command (docker or podman).
 func repairAgentHomeOwnership(ctx context.Context, command string, req AgentHomeOwnershipRepair) error {
-	uid, gid := os.Getuid(), os.Getgid()
-	args, err := agentHomeRepairArgs(req, uid, gid)
+	args, err := agentHomeRepairArgs(req)
 	if err != nil {
 		return err
 	}
 	runtimeLog.Info("Repairing agent home ownership with a one-shot helper",
-		"home", req.HomeDir, "uid", uid, "gid", gid, "image", req.Image)
+		"home", req.HomeDir, "uid", req.UID, "gid", req.GID, "image", req.Image)
 	out, err := runSimpleCommand(ctx, command, args...)
 	if err != nil {
 		if trimmed := strings.TrimSpace(out); trimmed != "" {

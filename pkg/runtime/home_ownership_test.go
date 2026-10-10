@@ -44,7 +44,7 @@ func readRecordedArgs(t *testing.T, argsFile string) []string {
 }
 
 func TestAgentHomeRepairArgs(t *testing.T) {
-	args, err := agentHomeRepairArgs(AgentHomeOwnershipRepair{HomeDir: "/srv/agents/a1/home/", Image: "img:1"}, 1002, 1003)
+	args, err := agentHomeRepairArgs(AgentHomeOwnershipRepair{HomeDir: "/srv/agents/a1/home/", Image: "img:1", UID: 1002, GID: 1003})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,8 @@ func TestAgentHomeRepairArgs(t *testing.T) {
 		{"no image", AgentHomeOwnershipRepair{HomeDir: "/a"}, 1},
 		{"negative uid", AgentHomeOwnershipRepair{HomeDir: "/a", Image: "img"}, -1},
 	} {
-		if _, err := agentHomeRepairArgs(tc.req, tc.uid, 1); err == nil {
+		tc.req.UID, tc.req.GID = tc.uid, 1
+		if _, err := agentHomeRepairArgs(tc.req); err == nil {
 			t.Errorf("%s: expected an error", tc.name)
 		}
 	}
@@ -119,7 +120,7 @@ func TestAgentHomeRepairArgs_FindSelection(t *testing.T) {
 	}
 
 	uid, gid := os.Getuid(), os.Getgid()
-	args, err := agentHomeRepairArgs(AgentHomeOwnershipRepair{HomeDir: home, Image: "img"}, uid, gid)
+	args, err := agentHomeRepairArgs(AgentHomeOwnershipRepair{HomeDir: home, Image: "img", UID: uid, GID: gid})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,15 +151,48 @@ func TestAgentHomeRepairArgs_FindSelection(t *testing.T) {
 
 func TestDockerRuntime_RepairAgentHomeOwnership(t *testing.T) {
 	bin, argsFile := writeArgRecorder(t, 0)
-	home := t.TempDir()
+	req := AgentHomeOwnershipRepair{HomeDir: t.TempDir(), Image: "scion-claude:latest", UID: 1002, GID: 1003}
 	r := &DockerRuntime{Command: bin}
-	if err := r.RepairAgentHomeOwnership(context.Background(), AgentHomeOwnershipRepair{HomeDir: home, Image: "scion-claude:latest"}); err != nil {
+	if err := r.RepairAgentHomeOwnership(context.Background(), req); err != nil {
 		t.Fatal(err)
 	}
 	args := readRecordedArgs(t, argsFile)
-	want, _ := agentHomeRepairArgs(AgentHomeOwnershipRepair{HomeDir: home, Image: "scion-claude:latest"}, os.Getuid(), os.Getgid())
+	want, _ := agentHomeRepairArgs(req)
 	if !slices.Equal(args, want) {
 		t.Errorf("docker args = %q, want %q", args, want)
+	}
+	// The helper chowns to the requested owner, not to the test process.
+	if !slices.Contains(args, "1002:1003") {
+		t.Errorf("docker args %q do not chown to the requested 1002:1003", args)
+	}
+}
+
+// The repair target and SCION_HOST_UID/GID come from the same function:
+// for every backend, the ids buildCommonRunArgs advertises are
+// AdvertisedHostOwnerIDs'.
+func TestAdvertisedHostOwnerIDs_MatchesRunArgs(t *testing.T) {
+	for _, tc := range []struct {
+		backend          string
+		nfsUID, nfsGID   int
+		wantUID, wantGID int
+	}{
+		{"", 0, 0, os.Getuid(), os.Getgid()},
+		{"local", 2000, 2000, os.Getuid(), os.Getgid()},
+		{"nfs", 0, 0, 1000, 1000},
+		{"nfs", 2001, 2002, 2001, 2002},
+	} {
+		uid, gid := AdvertisedHostOwnerIDs(tc.backend, tc.nfsUID, tc.nfsGID)
+		if uid != tc.wantUID || gid != tc.wantGID {
+			t.Errorf("AdvertisedHostOwnerIDs(%q, %d, %d) = %d:%d, want %d:%d", tc.backend, tc.nfsUID, tc.nfsGID, uid, gid, tc.wantUID, tc.wantGID)
+		}
+		cfg := minimalRunConfig()
+		cfg.WorkspaceBackendName, cfg.NFSUID, cfg.NFSGID = tc.backend, tc.nfsUID, tc.nfsGID
+		args, err := buildCommonRunArgs(cfg)
+		if err != nil {
+			t.Fatalf("buildCommonRunArgs(%q): %v", tc.backend, err)
+		}
+		assertEnvInArgs(t, args, fmt.Sprintf("SCION_HOST_UID=%d", uid), "advertised uid")
+		assertEnvInArgs(t, args, fmt.Sprintf("SCION_HOST_GID=%d", gid), "advertised gid")
 	}
 }
 
@@ -174,12 +208,12 @@ func TestDockerRuntime_RepairAgentHomeOwnershipFailure(t *testing.T) {
 func TestPodmanRuntime_RepairAgentHomeOwnership(t *testing.T) {
 	t.Run("rootful shares the docker helper", func(t *testing.T) {
 		bin, argsFile := writeArgRecorder(t, 0)
-		home := t.TempDir()
+		req := AgentHomeOwnershipRepair{HomeDir: t.TempDir(), Image: "img", UID: 1002, GID: 1003}
 		r := &PodmanRuntime{Command: bin}
-		if err := r.RepairAgentHomeOwnership(context.Background(), AgentHomeOwnershipRepair{HomeDir: home, Image: "img"}); err != nil {
+		if err := r.RepairAgentHomeOwnership(context.Background(), req); err != nil {
 			t.Fatal(err)
 		}
-		want, _ := agentHomeRepairArgs(AgentHomeOwnershipRepair{HomeDir: home, Image: "img"}, os.Getuid(), os.Getgid())
+		want, _ := agentHomeRepairArgs(req)
 		if got := readRecordedArgs(t, argsFile); !slices.Equal(got, want) {
 			t.Errorf("podman args = %q, want %q", got, want)
 		}

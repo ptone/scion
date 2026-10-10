@@ -12,7 +12,10 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // The agent home is bind-mounted into the agent container, and the files
@@ -89,11 +92,56 @@ func pathOwner(path string) (uid, gid int, ok bool) {
 	return int(st.Uid), int(st.Gid), true
 }
 
+// agentHomeOwner is the owner the runtime advertises to the agent
+// container as SCION_HOST_UID and SCION_HOST_GID
+// (runtime.AdvertisedHostOwnerIDs), for the workspace backend this start
+// uses.
+type agentHomeOwner struct {
+	backend  string
+	uid, gid int
+}
+
+// advertisedAgentHomeOwner returns the agentHomeOwner for this start: the
+// workspace backend Start selects later from the same settings and sharing
+// mode, and the ids the container runtime advertises for it.
+func advertisedAgentHomeOwner(settings *config.VersionedSettings, opts api.StartOptions, emptyPerAgent bool) agentHomeOwner {
+	backend := ""
+	nfsUID, nfsGID := 0, 0
+	if settings != nil && settings.Server != nil && settings.Server.WorkspaceStorage != nil {
+		ws := settings.Server.WorkspaceStorage
+		backend = runtime.SelectWorkspaceBackend(ws, workspaceSharingModeFor(opts, emptyPerAgent)).Name()
+		if ws.NFS != nil {
+			nfsUID, nfsGID = ws.NFS.UID, ws.NFS.GID
+		}
+	}
+	uid, gid := runtime.AdvertisedHostOwnerIDs(backend, nfsUID, nfsGID)
+	return agentHomeOwner{backend: backend, uid: uid, gid: gid}
+}
+
+// workspaceSharingModeFor is the workspace sharing mode Start selects the
+// workspace backend for: empty-per-agent (no shared checkout), shared-plain
+// for a shared workspace or a clone, worktree-per-agent otherwise.
+func workspaceSharingModeFor(opts api.StartOptions, emptyPerAgent bool) store.WorkspaceSharingMode {
+	switch {
+	case emptyPerAgent:
+		return store.SharingModeEmptyPerAgent
+	case opts.SharedWorkspace || opts.GitClone != nil:
+		return store.SharingModeSharedPlain
+	default:
+		return store.SharingModeWorktreePerAgent
+	}
+}
+
+// errAgentHomeRepairNotAllowed is the repair error when the advertised
+// owner is not the agent runtime itself.
+var errAgentHomeRepairNotAllowed = errors.New("agent home ownership repair not allowed")
+
 // agentHomeRepair repairs ownership of one agent home, at most once.
 type agentHomeRepair struct {
 	rt    runtime.Runtime
 	home  string
 	image string
+	owner agentHomeOwner
 
 	attempted bool
 	err       error
@@ -103,11 +151,11 @@ type agentHomeRepairKey struct{}
 
 // contextWithAgentHomeRepair attaches the repair for agentHome to ctx, for
 // writeAgentHome. Start attaches it once the agent's image is resolved.
-func contextWithAgentHomeRepair(ctx context.Context, rt runtime.Runtime, agentHome, image string) context.Context {
+func contextWithAgentHomeRepair(ctx context.Context, rt runtime.Runtime, agentHome, image string, owner agentHomeOwner) context.Context {
 	if agentHome == "" {
 		return ctx
 	}
-	return context.WithValue(ctx, agentHomeRepairKey{}, &agentHomeRepair{rt: rt, home: agentHome, image: image})
+	return context.WithValue(ctx, agentHomeRepairKey{}, &agentHomeRepair{rt: rt, home: agentHome, image: image, owner: owner})
 }
 
 // repair runs the ownership repair the first time it is called and returns
@@ -121,12 +169,21 @@ func (r *agentHomeRepair) repair(ctx context.Context) error {
 	if r.err != nil {
 		slog.Error("Agent home ownership repair failed", "home", r.home, "error", r.err)
 	} else {
-		slog.Info("Repaired agent home ownership", "home", r.home, "uid", os.Getuid(), "gid", os.Getgid())
+		slog.Info("Repaired agent home ownership", "home", r.home, "uid", r.owner.uid, "gid", r.owner.gid)
 	}
 	return r.err
 }
 
 func (r *agentHomeRepair) run(ctx context.Context) error {
+	// The repair only gives the home back to the agent runtime when that is
+	// also the owner the container realigns its user to. On the nfs
+	// backend the owner is a stable, node-independent uid and gid set once
+	// for the export; changing it on a restart would undo that, so the
+	// agent runtime must be able to write the home as it is.
+	if r.owner.backend == "nfs" || r.owner.uid != os.Getuid() {
+		return fmt.Errorf("%w: the agent runtime (uid %d, gid %d) must be able to write the agent home as the workspace owner uid %d (gid %d), or through that group, for the %q workspace backend; moving the agent runtime's own state out of the agent home is tracked in ptone/scion#4402",
+			errAgentHomeRepairNotAllowed, os.Getuid(), os.Getgid(), r.owner.uid, r.owner.gid, r.owner.backend)
+	}
 	repairer, ok := r.rt.(runtime.AgentHomeOwnershipRepairer)
 	if !ok {
 		return fmt.Errorf("%w (%s)", runtime.ErrAgentHomeRepairUnsupported, r.rt.Name())
@@ -143,7 +200,9 @@ func (r *agentHomeRepair) run(ctx context.Context) error {
 			return fmt.Errorf("pull image %q for the ownership repair helper: %w", r.image, err)
 		}
 	}
-	return repairer.RepairAgentHomeOwnership(ctx, runtime.AgentHomeOwnershipRepair{HomeDir: r.home, Image: r.image})
+	return repairer.RepairAgentHomeOwnership(ctx, runtime.AgentHomeOwnershipRepair{
+		HomeDir: r.home, Image: r.image, UID: r.owner.uid, GID: r.owner.gid,
+	})
 }
 
 // writeAgentHome runs write, a write into the agent home. On a permission
@@ -180,7 +239,7 @@ func writeAgentHome(ctx context.Context, write func() error) error {
 // the agent runtime's uid: the harness ran as a different uid than the
 // runtime, so the runtime may be unable to update its state in the home.
 // It reports only; writeAgentHome does the repair.
-func warnAgentHomeOwnerMismatch(agentName, agentHome string) {
+func warnAgentHomeOwnerMismatch(agentName, agentHome string, owner agentHomeOwner) {
 	uid, gid, ok := pathOwner(agentHome)
 	if !ok {
 		return
@@ -188,6 +247,7 @@ func warnAgentHomeOwnerMismatch(agentName, agentHome string) {
 	if runtimeUID := os.Getuid(); uid != runtimeUID {
 		slog.Warn("Agent home is owned by a different uid than the agent runtime; the harness in the container ran as a uid that does not match the agent runtime's, so start-time writes to the agent home may need an ownership repair",
 			"agent", agentName, "home", agentHome, "home_uid", uid, "home_gid", gid,
-			"runtime_uid", runtimeUID, "runtime_gid", os.Getgid())
+			"runtime_uid", runtimeUID, "runtime_gid", os.Getgid(),
+			"advertised_uid", owner.uid, "advertised_gid", owner.gid, "workspace_backend", owner.backend)
 	}
 }

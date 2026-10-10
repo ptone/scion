@@ -160,8 +160,9 @@ func TestStart_RestartRepairsForeignOwnedAgentHome(t *testing.T) {
 	if len(rt.repairs) != 1 {
 		t.Fatalf("ownership repairs = %d, want exactly 1", len(rt.repairs))
 	}
-	if got := rt.repairs[0]; got.HomeDir != home || got.Image != "scion-base:test" {
-		t.Errorf("repair request = %+v, want home %q and the agent image", got, home)
+	// Local backend: the advertised owner is the agent runtime itself.
+	if got := rt.repairs[0]; got.HomeDir != home || got.Image != "scion-base:test" || got.UID != os.Getuid() || got.GID != os.Getgid() {
+		t.Errorf("repair request = %+v, want home %q, the agent image and owner %d:%d", got, home, os.Getuid(), os.Getgid())
 	}
 	if runs != 1 {
 		t.Errorf("runtime Run calls = %d, want 1", runs)
@@ -274,8 +275,9 @@ func TestStart_RestartWithWritableHomeDoesNotRepair(t *testing.T) {
 
 func TestWriteAgentHome(t *testing.T) {
 	permErr := &fs.PathError{Op: "remove", Path: "/nonexistent/home/x", Err: fs.ErrPermission}
+	localOwner := agentHomeOwner{uid: os.Getuid(), gid: os.Getgid()}
 	newCtx := func(rt runtime.Runtime) context.Context {
-		return contextWithAgentHomeRepair(context.Background(), rt, t.TempDir(), "img:1")
+		return contextWithAgentHomeRepair(context.Background(), rt, t.TempDir(), "img:1", localOwner)
 	}
 
 	t.Run("other errors are returned unchanged without a repair", func(t *testing.T) {
@@ -325,7 +327,7 @@ func TestWriteAgentHome(t *testing.T) {
 
 	t.Run("a missing image fails the repair", func(t *testing.T) {
 		rt := newRepairingRuntime(nil)
-		ctx := contextWithAgentHomeRepair(context.Background(), rt, t.TempDir(), "")
+		ctx := contextWithAgentHomeRepair(context.Background(), rt, t.TempDir(), "", localOwner)
 		err := writeAgentHome(ctx, func() error { return permErr })
 		var ownErr *AgentHomeOwnershipError
 		if !errors.As(err, &ownErr) || ownErr.RepairErr == nil || len(rt.repairs) != 0 {
@@ -350,4 +352,65 @@ func TestWriteAgentHome(t *testing.T) {
 			t.Fatalf("err=%v pulled=%q repairs=%d", err, pulled, len(rt.repairs))
 		}
 	})
+
+	t.Run("no repair when the advertised owner is not the agent runtime", func(t *testing.T) {
+		for _, owner := range []agentHomeOwner{
+			{backend: "nfs", uid: 1000, gid: 1000},
+			{backend: "nfs", uid: os.Getuid(), gid: os.Getgid()},
+			{backend: "", uid: os.Getuid() + 1, gid: os.Getgid()},
+		} {
+			rt := newRepairingRuntime(nil)
+			ctx := contextWithAgentHomeRepair(context.Background(), rt, t.TempDir(), "img:1", owner)
+			calls := 0
+			err := writeAgentHome(ctx, func() error { calls++; return permErr })
+			var ownErr *AgentHomeOwnershipError
+			if !errors.As(err, &ownErr) || !errors.Is(ownErr.RepairErr, errAgentHomeRepairNotAllowed) {
+				t.Fatalf("owner %+v: err = %v, want a not-allowed repair error", owner, err)
+			}
+			if len(rt.repairs) != 0 || calls != 1 {
+				t.Errorf("owner %+v: repairs=%d calls=%d, want no repair and no retry", owner, len(rt.repairs), calls)
+			}
+			for _, want := range []string{"must be able to write the agent home", "ptone/scion#4402", strconv.Itoa(owner.uid)} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("owner %+v: error %q lacks %q", owner, err, want)
+				}
+			}
+		}
+	})
+}
+
+// The repair target is the owner the container runtime advertises for the
+// backend Start selects from the same settings: the agent runtime's own
+// ids, or the stable NFS ids on the nfs backend.
+func TestAdvertisedAgentHomeOwner(t *testing.T) {
+	nfs := func(uid, gid int) *config.VersionedSettings {
+		return &config.VersionedSettings{Server: &config.V1ServerConfig{WorkspaceStorage: &config.V1WorkspaceStorageConfig{
+			Backend: "nfs", NFS: &config.V1NFSConfig{UID: uid, GID: gid},
+		}}}
+	}
+	for _, tc := range []struct {
+		name     string
+		settings *config.VersionedSettings
+		opts     api.StartOptions
+		empty    bool
+		want     agentHomeOwner
+	}{
+		{"no settings", nil, api.StartOptions{}, false, agentHomeOwner{uid: os.Getuid(), gid: os.Getgid()}},
+		{"no workspace storage", &config.VersionedSettings{Server: &config.V1ServerConfig{}}, api.StartOptions{}, false, agentHomeOwner{uid: os.Getuid(), gid: os.Getgid()}},
+		{"local backend", &config.VersionedSettings{Server: &config.V1ServerConfig{WorkspaceStorage: &config.V1WorkspaceStorageConfig{Backend: "local"}}}, api.StartOptions{}, false,
+			agentHomeOwner{backend: "local", uid: os.Getuid(), gid: os.Getgid()}},
+		{"nfs default ids", nfs(0, 0), api.StartOptions{}, false, agentHomeOwner{backend: "nfs", uid: 1000, gid: 1000}},
+		{"nfs configured ids, shared workspace", nfs(2001, 2002), api.StartOptions{SharedWorkspace: true}, false, agentHomeOwner{backend: "nfs", uid: 2001, gid: 2002}},
+		{"nfs, empty per agent", nfs(0, 0), api.StartOptions{}, true, agentHomeOwner{backend: "nfs", uid: 1000, gid: 1000}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := advertisedAgentHomeOwner(tc.settings, tc.opts, tc.empty)
+			if got.uid != tc.want.uid || got.gid != tc.want.gid || (tc.want.backend != "" && got.backend != tc.want.backend) {
+				t.Errorf("owner = %+v, want %+v", got, tc.want)
+			}
+			if tc.want.backend == "nfs" && got.backend != "nfs" {
+				t.Errorf("backend = %q, want nfs", got.backend)
+			}
+		})
+	}
 }

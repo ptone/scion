@@ -767,8 +767,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// Start-time writes into an existing agent's home (writeAgentHome)
 	// repair the home's ownership through the runtime, from this image, on
 	// a permission error (ptone/scion#4330).
-	warnAgentHomeOwnerMismatch(opts.Name, agentHome)
-	ctx = contextWithAgentHomeRepair(ctx, m.Runtime, agentHome, resolvedImage)
+	homeOwner := advertisedAgentHomeOwner(settings, opts, emptyPerAgent)
+	warnAgentHomeOwnerMismatch(opts.Name, agentHome, homeOwner)
+	ctx = contextWithAgentHomeRepair(ctx, m.Runtime, agentHome, resolvedImage, homeOwner)
 	if runIDNeedsHomeRepair {
 		if err := writeAgentHome(ctx, func() error { return SetSavedRunID(opts.Name, opts.ProjectPath, opts.RunID) }); err != nil {
 			slog.Warn("Start: failed to record the run ID in agent-info.json; a delete for this run may leave the agent's files behind",
@@ -1857,18 +1858,13 @@ authDone:
 
 	preBackendWorkspace := effectiveWorkspace
 	if settings != nil && settings.Server != nil && settings.Server.WorkspaceStorage != nil {
-		sharingMode := store.SharingModeWorktreePerAgent
-		if opts.SharedWorkspace || opts.GitClone != nil {
-			sharingMode = store.SharingModeSharedPlain
-		}
-		// Empty-per-agent never takes the WorktreePerAgent default above: it
-		// has no shared checkout. Without NFS storage it is node-local (or
-		// pod-local EmptyDir on Kubernetes). With NFS storage it gets its
-		// own agent directory on the export (design #2703 P3), which only
-		// the Kubernetes runtime can mount: see nfsEmptyAgentDirSelection.
+		sharingMode := workspaceSharingModeFor(opts, emptyPerAgent)
+		// Empty-per-agent without NFS storage is node-local (or pod-local
+		// EmptyDir on Kubernetes). With NFS storage it gets its own agent
+		// directory on the export (design #2703 P3), which only the
+		// Kubernetes runtime can mount: see nfsEmptyAgentDirSelection.
 		var emptyAgentDirName string
 		if emptyPerAgent {
-			sharingMode = store.SharingModeEmptyPerAgent
 			var selErr error
 			emptyAgentDirName, selErr = nfsEmptyAgentDirSelection(m.Runtime.Name(), settings.Server.WorkspaceStorage, opts.Name)
 			if selErr != nil {
