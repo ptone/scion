@@ -106,6 +106,11 @@ type HubConnection struct {
 	// clearing ControlChannel. Without this, Reinitialize can race with the
 	// previous Connect goroutine and leak goroutines across reconnects.
 	ccWg sync.WaitGroup
+	// ccCancel cancels the context the control channel's Connect runs
+	// under. Stop calls it before Close: Close alone does nothing when the
+	// Connect goroutine has not started yet, which would leave it
+	// retrying and Stop waiting on ccWg. Guarded by hc.mu.
+	ccCancel context.CancelFunc
 
 	// conduitCancel stops the conduit dialer started in Start, and
 	// conduitWg tracks its goroutine. The conduit session runs alongside
@@ -173,7 +178,7 @@ func (hc *HubConnection) start(ctx context.Context, server *Server) error {
 	// Stop anything a previous start left running, so that its control
 	// channel, conduit and heartbeat are not overwritten and orphaned.
 	hc.mu.RLock()
-	running := hc.ControlChannel != nil || hc.Heartbeat != nil || hc.conduitCancel != nil
+	running := hc.ControlChannel != nil || hc.ccCancel != nil || hc.Heartbeat != nil || hc.conduitCancel != nil
 	hc.mu.RUnlock()
 	if running {
 		hc.stop()
@@ -235,16 +240,18 @@ func (hc *HubConnection) start(ctx context.Context, server *Server) error {
 			}
 
 			cc := NewControlChannelClient(ccConfig, server.Handler(), server, hc.Name, logging.Subsystem("broker.control-channel"))
+			ccCtx, ccCancel := context.WithCancel(ctx)
 			hc.mu.Lock()
 			hc.ControlChannel = cc
+			hc.ccCancel = ccCancel
 			hc.mu.Unlock()
 			// Capture cc locally so the goroutine doesn't race with Stop()
 			// nil-ing hc.ControlChannel out from under it.
 			hc.ccWg.Add(1)
 			go func() {
 				defer hc.ccWg.Done()
-				if err := cc.Connect(ctx); err != nil {
-					if ctx.Err() != nil {
+				if err := cc.Connect(ccCtx); err != nil {
+					if ccCtx.Err() != nil {
 						slog.Info("Control channel stopped", "name", hc.Name)
 					} else {
 						slog.Error("Control channel error", "name", hc.Name, "error", err)
@@ -275,10 +282,15 @@ func (hc *HubConnection) stop() {
 	hc.mu.Lock()
 	cc := hc.ControlChannel
 	hc.ControlChannel = nil
+	ccCancel := hc.ccCancel
+	hc.ccCancel = nil
 	hb := hc.Heartbeat
 	hc.Heartbeat = nil
 	hc.mu.Unlock()
 
+	if ccCancel != nil {
+		ccCancel()
+	}
 	if cc != nil {
 		slog.Info("Stopping control channel for connection", "name", hc.Name)
 		_ = cc.Close()
