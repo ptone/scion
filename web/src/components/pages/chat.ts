@@ -2647,7 +2647,14 @@ export class ScionPageChat extends LitElement {
     const eventData: ReadStateData | undefined = detail?.data ?? detail;
     const key = eventData?.conversationKey || '';
     const userId = this.pageData?.user?.id;
-    if (!key || !userId || eventData?.userId !== userId || eventData?.unread !== true) return;
+    if (!key || !userId || eventData?.userId !== userId) return;
+    if (eventData?.unread !== true) {
+      // The user read a DM elsewhere (another tab or device): the badge
+      // drops on this event, so the rail's Unread DMs list must follow.
+      // A fresh /chat/dms load; the badge source's refresh joins it.
+      if (key.startsWith('dm:')) void this.loadUnreadDMPeers();
+      return;
+    }
 
     if (key.startsWith('dm:')) {
       const parts = key.split(':');

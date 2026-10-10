@@ -635,6 +635,25 @@ describe('ChatUnreadCounter cost control', () => {
     });
   });
 
+  it('drops a refresh still in flight across stop() and a new start()', async () => {
+    const resolvers: Array<(n: number) => void> = [];
+    apiFetch.mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolvers.push((n) =>
+            resolve(new Response(JSON.stringify({ conversations: n }), { status: 200 }))
+          );
+        })
+    );
+    const c = counter();
+    c.start({ immediate: true, userId: 'u1' });
+    c.stop();
+    c.start({ userId: 'u2' });
+    resolvers[0](8);
+    await settle();
+    expect(c.count).toBe(0);
+  });
+
   it('abandons a hung count request, keeps the count, and asks again later', async () => {
     serveCount(3);
     const c = counter();

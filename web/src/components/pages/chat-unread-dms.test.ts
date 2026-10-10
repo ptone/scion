@@ -185,6 +185,38 @@ describe('chat page Unread DMs wiring', () => {
     expect(page.v2DMList.find((d: any) => d.conversationKey === GONE_KEY).hasUnread).toBe(true);
   });
 
+  it('drops a DM read elsewhere from the list on the own read event', async () => {
+    dmsBody = { dms: [DMS[0]] };
+    const page = createPage();
+    await page.loadUnreadDMPeers();
+    expect(page.v2DMList[0].hasUnread).toBe(true);
+    dmsBody = { dms: [{ ...DMS[0], hasUnread: false }] };
+
+    page._handleOwnReadStateSSE(
+      new CustomEvent('chat-read-state-updated', {
+        detail: { data: { conversationKey: AGENT_KEY, userId: ME } },
+      })
+    );
+    await vi.waitFor(() => expect(page.v2DMList[0].hasUnread).toBe(false));
+  });
+
+  it("ignores another user's read and thread reads", async () => {
+    const page = createPage();
+    await page.loadUnreadDMPeers();
+    const before = dmsCalls();
+    page._handleOwnReadStateSSE(
+      new CustomEvent('chat-read-state-updated', {
+        detail: { data: { conversationKey: AGENT_KEY, userId: 'someone-else' } },
+      })
+    );
+    page._handleOwnReadStateSSE(
+      new CustomEvent('chat-read-state-updated', {
+        detail: { data: { conversationKey: 'topic-1', userId: ME } },
+      })
+    );
+    expect(dmsCalls()).toBe(before);
+  });
+
   it('counts the badge from the rail lists while up', async () => {
     const page = createPage();
     spacesBody = { spaces: [{ unreadCount: 2 }, { unreadCount: 0 }] };

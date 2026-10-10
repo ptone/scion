@@ -150,7 +150,16 @@ function readSharedAnswer(userId: string): SharedAnswer | null {
   }
 }
 
-/** A `chatLoadClock` instant as wall-clock time. */
+/**
+ * A `chatLoadClock` instant as wall-clock time.
+ *
+ * Assumes the two clocks advance together. Where performance.now() pauses
+ * during system sleep but Date.now() does not, an instant from before a
+ * sleep converts too late, so an answer whose request spanned the sleep
+ * looks newer than it is. That window is bounded: a request held across a
+ * sleep longer than UNREAD_ASK_TIMEOUT_MS is abandoned rather than shared,
+ * and the next event asks again.
+ */
 function perfToWall(at: number): number {
   return Date.now() - Math.max(0, chatLoadClock() - at);
 }
@@ -290,6 +299,9 @@ export class ChatUnreadCounter {
     this.listening = false;
     this.stopped = true;
     this.queued = false;
+    // A refresh still in flight belongs to the stopped session: a later
+    // start() must not let it publish or share its answer.
+    this.refreshId++;
     this.cancelPending();
     this.cancelInitialRefresh();
     this.publish(0);
