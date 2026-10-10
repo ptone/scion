@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_3
+
 /*
 Copyright 2026 Google LLC
 
