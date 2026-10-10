@@ -96,8 +96,9 @@ type DeletionPriorState struct {
 
 // DeletionRequestInfo is the JSON stored in Agent.DeletionRequest: the
 // parameters of the request that started the current delete attempt; a
-// finalizing re-claim keeps it (ptone/scion#4183); if it is missing, the
-// re-claim stores one derived from the current retention setting.
+// finalizing re-claim keeps it (ptone/scion#4183); if it is missing or
+// unreadable, the re-claim stores one derived from the current
+// configuration (retention; an incomplete create is always hard).
 type DeletionRequestInfo struct {
 	DeleteFiles  bool   `json:"deleteFiles,omitempty"`
 	RemoveBranch bool   `json:"removeBranch,omitempty"`
