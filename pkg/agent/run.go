@@ -1072,6 +1072,15 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 				if err := recordSecrets(agentDir, agentHome, cs.StagedSecretNames(), hcIdentity); err != nil {
 					return nil, fmt.Errorf("record harness secrets: %w", err)
 				}
+				// On the broker, fail the start here, before any container
+				// is created, when the staged auth candidates cannot satisfy
+				// the harness; otherwise the in-container provisioner exits 1
+				// in the pre-start hook with a far less useful error.
+				if opts.BrokerMode {
+					if err := cs.CheckStagedAuth(agentHome, opts.Env); err != nil {
+						return nil, err
+					}
+				}
 			}
 			util.Debugf("auth: applied harness-specific settings for %q", harnessName)
 		}
