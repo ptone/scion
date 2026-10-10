@@ -569,3 +569,30 @@ func TestChatUnreadCount_RollupReadFailureFails(t *testing.T) {
 		})
 	}
 }
+
+// The unread count costs a constant number of store reads however many
+// projects the hub has: one summary project list, one read decision per
+// project, one batched topic read and one batched read-state read (the
+// caller has no DMs here, so the DM read states cost nothing). This pins
+// the shared rollup against a regression to per-project reads.
+func TestChatUnreadCount_ConstantStoreCalls(t *testing.T) {
+	f, counting, fault := newSpacesPerfFixtureWithCounting(t)
+	fault.Arm()
+	emitter := &parityRecordingAuditEmitter{}
+	f.srv.authzService.SetDecisionAuditEmitter(emitter)
+	f.srv.authzService.DecisionAuditSampleRate = 1.0
+
+	rec := doRequestAsUser(t, f.srv, f.admin, http.MethodGet, "/api/v1/chat/unread-count", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var resp chatUnreadCountResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, chatUnreadCountResponse{Conversations: 2, Threads: 2}, resp,
+		"the unread thread in projects[0] and the one in projects[1]")
+
+	assert.Equal(t, len(f.projects), countProjectDecisions(emitter.snapshot()), "one read decision per project")
+	assert.Equal(t, 1, counting.summaries, "one summary project list")
+	assert.Equal(t, 0, counting.list, "no enriched project list")
+	assert.Equal(t, 0, f.wcs.listTopics, "no per-project topic reads")
+	assert.Equal(t, 1, f.wcs.topicsBatch, "one batched topic read")
+	assert.Equal(t, 1, f.wcs.getReadStates, "one batched read-state read")
+}

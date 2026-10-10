@@ -147,6 +147,10 @@ func (s *Server) handleChatSpaces(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// chatVisibleSpacesMaxProjects bounds how many projects the chat rail and
+// the unread count consider.
+const chatVisibleSpacesMaxProjects = 1000
+
 // chatVisibleSpaces returns the projects the chat rail lists for identity:
 // every non-template project identity can read. GET /api/v1/chat/spaces and
 // GET /api/v1/chat/unread-count both use it, so the badge counts threads in
@@ -159,9 +163,15 @@ func (s *Server) chatVisibleSpaces(ctx context.Context, identity Identity) ([]*s
 	// so no client lists them in the rail.
 	allProjects, err := s.store.ListProjectSummaries(ctx, store.ProjectFilter{
 		IsTemplate: new(bool), // exclude templates
-	}, store.ListOptions{Limit: 1000})
+	}, store.ListOptions{Limit: chatVisibleSpacesMaxProjects})
 	if err != nil {
 		return nil, fmt.Errorf("list projects: %w", err)
+	}
+	if len(allProjects.Items) >= chatVisibleSpacesMaxProjects {
+		// The rail and the unread count both stop here, so they still
+		// agree, but spaces past the bound are missing from both.
+		slog.Warn("chat spaces: project list hit the bound; spaces past it are not listed",
+			"bound", chatVisibleSpacesMaxProjects)
 	}
 
 	// Decide ActionRead only: it is the one capability the rail reads, and

@@ -439,3 +439,53 @@ func TestChatUnreadCount_BadgeEqualsRail(t *testing.T) {
 	assert.Equal(t, railUnreadDMs(t, srv), got.DMs, "DMs must equal the Unread DMs list")
 	assert.Equal(t, got.Threads+got.DMs, got.Conversations)
 }
+
+// A DM with an agent that has since been deleted stays usable from the
+// rail's Unread DMs list: it is listed (with no peer name, so the rail
+// labels it), its history loads, and reading it clears it from both the
+// list and the badge.
+func TestChatUnreadCount_DeletedAgentDMOpensAndReads(t *testing.T) {
+	srv, s, wcs, proj := setupSharedChatTest(t)
+	ctx := context.Background()
+	me := DevUserID
+	f := &unreadFixture{t: t, s: s, wcs: wcs, proj: proj}
+
+	agentID := api.NewUUID()
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: agentID, Slug: "gone", Name: "gone", ProjectID: proj.ID, Phase: "stopped",
+		CreatedBy: me, OwnerID: me,
+	}))
+	key, msgID := f.dmWith(me, "agent", agentID)
+	require.NoError(t, s.DeleteAgent(ctx, agentID))
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/dms", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var dms chatDMListResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &dms))
+	require.Len(t, dms.DMs, 1)
+	assert.Equal(t, key, dms.DMs[0].ConversationKey)
+	assert.Equal(t, agentID, dms.DMs[0].PeerID)
+	assert.Equal(t, "agent", dms.DMs[0].PeerKind)
+	assert.Empty(t, dms.DMs[0].PeerName, "a hard-deleted agent has no name to show")
+	assert.True(t, dms.DMs[0].HasUnread)
+	assert.Equal(t, 1, getUnreadCount(t, doRequest(t, srv, http.MethodGet, "/api/v1/chat/unread-count", nil)).DMs)
+
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/chat/conversations/"+key+"/messages", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "history: %s", rec.Body.String())
+	var hist struct {
+		Messages []struct {
+			ID string `json:"id"`
+		} `json:"messages"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &hist))
+	require.Len(t, hist.Messages, 1)
+	assert.Equal(t, msgID, hist.Messages[0].ID)
+
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+key+"/read",
+		map[string]string{"messageId": msgID})
+	require.Equal(t, http.StatusOK, rec.Code, "read: %s", rec.Body.String())
+
+	assert.Equal(t, 0, railUnreadDMs(t, srv))
+	assert.Equal(t, chatUnreadCountResponse{}, getUnreadCount(t,
+		doRequest(t, srv, http.MethodGet, "/api/v1/chat/unread-count", nil)))
+}
