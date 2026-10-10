@@ -181,6 +181,18 @@ type flatRegistration struct {
 	// created or re-registered (auto-provide, labels, endpoint,
 	// capabilities). It never sets the target, name, slug or profiles.
 	Apply func(b *store.RuntimeBroker, created bool)
+	// GateAutoProvide applies the registration's auto-provide authorization
+	// at the write, as the legacy registration does: a request turning
+	// auto-provide on (RequestedAutoProvide) for a row that does not have
+	// it needs AutoProvideAuthorized (broker.auto_provide, checked by the
+	// caller); keeping it on, or turning it off, needs nothing extra. When
+	// the row's auto-provide changed since that check, the write is refused
+	// (ErrBrokerRegistrationAuthorizationStale) before anything is
+	// written. The embedded registration does not set it: its auto-provide
+	// comes from the co-located process's operator configuration.
+	GateAutoProvide       bool
+	RequestedAutoProvide  bool
+	AutoProvideAuthorized bool
 }
 
 // registerFlatRuntimeBroker is the single Hub implementation of flat
@@ -198,6 +210,9 @@ func (s *Server) registerFlatRuntimeBroker(ctx context.Context, reg flatRegistra
 		return nil, false, fmt.Errorf("failed to read Runtime Broker %s: %w", reg.BrokerID, err)
 	}
 	if (reg.Existing == nil) != (current == nil) || (current != nil && current.ID != reg.Existing.ID) {
+		return nil, false, ErrBrokerRegistrationAuthorizationStale
+	}
+	if reg.GateAutoProvide && reg.RequestedAutoProvide && !reg.AutoProvideAuthorized && (current == nil || !current.AutoProvide) {
 		return nil, false, ErrBrokerRegistrationAuthorizationStale
 	}
 
@@ -316,10 +331,12 @@ const embeddedGlobalProjectSlug = "global"
 func (s *Server) RegisterEmbeddedFlatRuntimeBroker(ctx context.Context, id *brokeridentity.Identity, inst config.V1RuntimeBrokerInstanceConfig, opts ...EmbeddedFlatRegistrationOptions) (*store.RuntimeBroker, error) {
 	row, err := s.registerEmbeddedFlat(ctx, id, inst, opts...)
 	if err != nil {
-		s.EmbeddedBrokerRegistrationFailed(err)
+		s.EmbeddedFlatInstanceFailed(inst.Key, err)
 		return nil, err
 	}
-	s.SetEmbeddedBrokerID(row.ID)
+	s.mu.Lock()
+	s.recordEmbeddedFlatActivatedLocked(inst.Key, row.ID)
+	s.mu.Unlock()
 	return row, nil
 }
 

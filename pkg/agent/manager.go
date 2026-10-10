@@ -161,6 +161,10 @@ type AgentManager struct {
 	// tmuxVersionCacheKey's doc comment for why the key is not ContainerID
 	// alone.
 	tmuxVersionOK sync.Map
+
+	// owner, when set, restricts the manager to one flat Runtime Broker
+	// instance's objects (SetOwner, owner.go).
+	owner *OwnerScope
 }
 
 // defaultBufferDelay is the debounce window for message delivery.
@@ -363,7 +367,7 @@ func (m *AgentManager) Stop(ctx context.Context, agentID, projectPath, runID str
 	// not support lookup-by-name (e.g. Apple's `container` CLI) receive
 	// the actual container ID.  This mirrors the resolution logic in Delete().
 	slug := api.Slugify(agentID)
-	agents, err := m.Runtime.List(ctx, map[string]string{"scion.name": slug})
+	agents, err := m.listRuntime(ctx, map[string]string{"scion.name": slug})
 	if runID != "" {
 		// A run-scoped stop never falls back to the bare name: the name may
 		// now belong to an agent recreated under a different run.
@@ -397,7 +401,14 @@ func (m *AgentManager) Stop(ctx context.Context, agentID, projectPath, runID str
 		}
 	}
 	// Fallback: agentID may already be a container ID, or the list
-	// failed — pass it through directly.
+	// failed — pass it through directly. An owned manager never passes an
+	// unresolved name or ID to the runtime.
+	if m.owner != nil {
+		if err != nil {
+			return fmt.Errorf("failed to list agents for stop of %q: %w", agentID, err)
+		}
+		return fmt.Errorf("stop %q: %w", agentID, ErrNotOwned)
+	}
 	return m.Runtime.Stop(ctx, runtime.RunRef{ID: agentID})
 }
 
@@ -434,7 +445,7 @@ func (m *AgentManager) Delete(ctx context.Context, agentID string, deleteFiles b
 	util.Debugf("delete: listing containers in mgr.Delete for %s", agentID)
 	listStart := time.Now()
 	slug := api.Slugify(agentID)
-	agents, err := m.Runtime.List(ctx, map[string]string{"scion.name": slug})
+	agents, err := m.listRuntime(ctx, map[string]string{"scion.name": slug})
 	util.Debugf("delete: mgr.Delete container list completed in %v", time.Since(listStart))
 	var target runtime.RunRef
 	if err == nil {
@@ -509,7 +520,22 @@ func (m *AgentManager) deleteResolved(ctx context.Context, agentName string, ref
 // Runtime.Delete. It is a no-op for a runtime that does not implement
 // runtime.AgentResourceCleaner. See that interface for the scoping rules,
 // including runID's.
+//
+// An owned (flat instance) manager removes only objects carrying its
+// instance's owner label (runtime.OwnedAgentResourceCleaner), with the same
+// runID scoping; on a runtime without that variant it removes nothing (never
+// the unscoped cleanup) and logs a warning.
 func (m *AgentManager) CleanupAgentResources(ctx context.Context, agentName, projectID, runID string) error {
+	if m.owner != nil {
+		if c, ok := m.Runtime.(runtime.OwnedAgentResourceCleaner); ok {
+			return c.CleanupOwnedAgentResources(ctx, agentName, projectID, m.owner.RuntimeBrokerID, runID)
+		}
+		if _, ok := m.Runtime.(runtime.AgentResourceCleaner); ok {
+			slog.Warn("Leftover agent objects not removed: the runtime cannot limit the cleanup to this Runtime Broker instance's objects",
+				"agent", agentName, "project_id", projectID, "run_id", runID, "runtime_broker_id", m.owner.RuntimeBrokerID, "runtime", m.Runtime.Name())
+		}
+		return nil
+	}
 	if c, ok := m.Runtime.(runtime.AgentResourceCleaner); ok {
 		return c.CleanupAgentResources(ctx, agentName, projectID, runID)
 	}
@@ -576,7 +602,7 @@ func (m *AgentManager) checkDeliveryTarget(ctx context.Context, agentID, project
 	if projectID != "" {
 		filter["scion.project_id"] = projectID
 	}
-	agents, err := m.Runtime.List(ctx, filter)
+	agents, err := m.listRuntime(ctx, filter)
 	if err != nil {
 		slog.Warn("message target lookup failed; using buffered delivery",
 			"agent", agentID, "project_id", projectID, "error", err)
@@ -1311,15 +1337,23 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 	}
 
 	var agent *api.AgentInfo
+	matches := 0
 	for _, a := range agents {
 		if matchesAgentID(a, agentID) {
-			agent = &a
-			break
+			matches++
+			if agent == nil {
+				agent = &a
+			}
 		}
 	}
 
 	if agent == nil {
 		return errNoRunningContainer(agentID)
+	}
+	// An owned (flat instance) manager never picks among several agents of
+	// that name in different projects.
+	if m.owner != nil && projectID == "" && matches > 1 {
+		return fmt.Errorf("agent %q is ambiguous without a project: %d agents of this Runtime Broker instance have that name", agentID, matches)
 	}
 
 	// Serialize against a concurrent SendKeys call (or another concurrent

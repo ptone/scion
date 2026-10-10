@@ -190,7 +190,9 @@ func TestServerConfigPut_FileModePreservesRuntimeBrokerInstances(t *testing.T) {
 		path := flatSettingsHome(t, flatInstanceSettingsYAML)
 		before, _ := os.ReadFile(path)
 		for _, body := range []string{
-			`{"server":{"broker":{"instances":[{"key":"a","name":"x","runtime_target":{"type":"kubernetes"}}]}}}`,
+			`{"server":{"broker":{"instances":[{"key":"a","name":"x","runtime_target":{"type":"kubernetes","kubeconfig":"relative.kubeconfig"}}]}}}`,
+			`{"server":{"broker":{"instances":[{"key":"a","name":"x","runtime_target":{"type":"docker","kubernetes_block_service_account":"zero-priv"}}]}}}`,
+			`{"server":{"broker":{"instances":[{"key":"a","name":"x","runtime_target":{"type":"podman"}}]}}}`,
 			`{"server":{"broker":{"instances":[{"key":"a","name":"x","profile":"p","runtime_target":{"type":"docker"}}]}}}`,
 		} {
 			rr := putFlatFileModeServerConfig(t, body)

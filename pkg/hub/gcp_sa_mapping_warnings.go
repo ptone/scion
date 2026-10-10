@@ -105,14 +105,14 @@ func (s *Server) projectKubernetesProfileMappings(ctx context.Context, projectID
 		return nil
 	}
 	var out []kubernetesProfileMappings
-	embeddedID := s.embeddedBrokerSnapshot().id
+	embeddedState := s.embeddedBrokerSnapshot()
 	for _, provider := range providers {
 		broker, err := s.store.GetRuntimeBroker(ctx, provider.BrokerID)
 		if err != nil || broker == nil {
 			slog.Debug("SA mapping warning: provider broker unavailable", "project_id", projectID, "broker", provider.BrokerID, "error", err)
 			continue
 		}
-		embedded := embeddedID != "" && broker.ID == embeddedID
+		embedded := embeddedState.has(broker.ID)
 		// The embedded broker's live settings, loaded at most once and only
 		// when a profile that could be Kubernetes is reached.
 		var live *config.VersionedSettings
