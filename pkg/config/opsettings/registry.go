@@ -112,9 +112,6 @@ func init() {
 			Name:       "access",
 			KoanfPaths: []string{"server.hub.admin_emails", "server.auth.user_access_mode", "server.auth.default_user_role", "server.auth.authorized_domains"},
 			New:        func() any { return &AccessSettings{} },
-			// authorized_domains is read into the server config at
-			// startup only; ApplySnapshot does not change it.
-			RestartRequired: []string{"server.auth.authorized_domains"},
 		},
 		{
 			Name:       "lifecycle",
@@ -216,6 +213,9 @@ func init() {
 				"server.github_app.private_key_path",
 			},
 			New: func() any { return &GitHubAppSettings{} },
+			// The agent dispatcher sets up its GitHub App token minter at
+			// startup, and only when an app_id is configured then.
+			RestartRequired: []string{"server.github_app.app_id"},
 		},
 		{
 			Name:       "notifications",

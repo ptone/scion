@@ -256,8 +256,7 @@ func layer1LiveProbes(t *testing.T) map[string]layer1LiveProbe {
 			observe: observeLocked(func(s *Server) any { return s.config.MonitoringDashboardURL })},
 
 		// github_app
-		"server.github_app":                  {section: "github_app", doc: `{"app_id":42}`, observe: observeGitHubApp},
-		"server.github_app.app_id":           {section: "github_app", doc: `{"app_id":42}`, observe: observeGitHubApp},
+		"server.github_app":                  {section: "github_app", base: ghBase + `}`, doc: ghBase + `,"api_base_url":"https://ghe.example.com/api/v3"}`, observe: observeGitHubApp},
 		"server.github_app.api_base_url":     {section: "github_app", base: ghBase + `}`, doc: ghBase + `,"api_base_url":"https://ghe.example.com/api/v3"}`, observe: observeGitHubApp},
 		"server.github_app.webhooks_enabled": {section: "github_app", base: ghBase + `}`, doc: ghBase + `,"webhooks_enabled":true}`, observe: observeGitHubApp},
 		"server.github_app.installation_url": {section: "github_app", base: ghBase + `}`, doc: ghBase + `,"installation_url":"https://github.com/apps/probe/installations/new"}`, observe: observeGitHubApp},

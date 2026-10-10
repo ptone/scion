@@ -31,6 +31,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/knadh/koanf/parsers/yaml"
+	"github.com/knadh/koanf/providers/rawbytes"
+	"github.com/knadh/koanf/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -258,6 +261,33 @@ func TestTelemetry_ClearRevertsToStartupValue(t *testing.T) {
 	assert.Equal(t, map[string]string{"boot": "yes"}, srv.config.TelemetryConfig.Resource)
 }
 
+// Clearing auto_expose_ports.enabled returns to the startup value.
+func TestAutoExposePorts_ClearRevertsToStartupValue(t *testing.T) {
+	ctx := context.Background()
+	st := newFakeHubSettingStore()
+	ops := NewOperationalSettings(st, emptyKoanf(), emptyKoanf())
+	srv := &Server{maintenance: NewMaintenanceState(false, "")}
+	on := true
+	srv.config.AutoExposePortsDefault = &on
+	srv.recordStartupLayer1Values()
+	srv.SetOperationalSettings(ops)
+
+	_, err := ops.Update(ctx, "auto_expose_ports", json.RawMessage(`{"enabled":false}`), "admin", -1, "managed")
+	require.NoError(t, err)
+	ApplySnapshot(srv, ops.Snapshot())
+	got := srv.autoExposePortsDefault()
+	require.NotNil(t, got)
+	assert.False(t, *got, "the saved value applies")
+
+	_, err = ops.Update(ctx, "auto_expose_ports", json.RawMessage(`{}`), "admin", -1, "managed")
+	require.NoError(t, err)
+	res := ApplySnapshot(srv, ops.Snapshot())
+	assert.Contains(t, res["applied"], "auto_expose_ports_default")
+	got = srv.autoExposePortsDefault()
+	require.NotNil(t, got)
+	assert.True(t, *got, "a cleared value returns to the startup value")
+}
+
 // The save response lists the changed keys applied to the running hub and
 // the changed keys pending a restart.
 func TestPutServerConfigDB_ReportsAppliedAndPendingRestartKeys(t *testing.T) {
@@ -319,6 +349,19 @@ func TestTelemetry_DottedMapKeysRoundTrip(t *testing.T) {
 	defer srv.mu.RUnlock()
 	require.NotNil(t, srv.config.TelemetryConfig)
 	assert.Equal(t, "team-a", srv.config.TelemetryConfig.Resource["service.namespace"])
+}
+
+// ptone/scion#4108: with no stored telemetry row, the bootstrap value from
+// settings.yaml keeps its dotted map keys in the snapshot.
+func TestTelemetry_BootstrapDottedMapKeys(t *testing.T) {
+	boot := koanf.New(".")
+	require.NoError(t, boot.Load(rawbytes.Provider([]byte("telemetry:\n  resource:\n    service.namespace: team-b\n")), yaml.Parser()))
+	ops := NewOperationalSettings(newFakeHubSettingStore(), boot, emptyKoanf())
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
+	snap := ops.Snapshot()
+	require.NotNil(t, snap.TelemetryConfig)
+	assert.Equal(t, map[string]string{"service.namespace": "team-b"}, snap.TelemetryConfig.Resource)
 }
 
 // ptone/scion#4108: a telemetry document that does not decode is logged

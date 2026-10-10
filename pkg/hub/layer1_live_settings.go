@@ -33,11 +33,12 @@ import (
 // New records them from ServerConfig before any snapshot is applied. A
 // Server built without New (tests) has zero startup values.
 type startupLayer1Values struct {
-	SoftDeleteRetention   time.Duration
-	SoftDeleteRetainFiles bool
-	ImageRegistry         string
-	TelemetryDefault      *bool
-	TelemetryConfig       *api.TelemetryConfig
+	SoftDeleteRetention    time.Duration
+	SoftDeleteRetainFiles  bool
+	ImageRegistry          string
+	TelemetryDefault       *bool
+	AutoExposePortsDefault *bool
+	TelemetryConfig        *api.TelemetryConfig
 	// GitHubApp holds the non-secret GitHub App fields only. The private
 	// key and webhook secret are never part of a snapshot.
 	GitHubApp githubAppPublicConfig
@@ -81,12 +82,13 @@ func (s *Server) setGitHubAppPublicLocked(g githubAppPublicConfig) bool {
 // reverts to. Called once by New, before any snapshot is applied.
 func (s *Server) recordStartupLayer1Values() {
 	s.startupLayer1 = startupLayer1Values{
-		SoftDeleteRetention:   s.config.SoftDeleteRetention,
-		SoftDeleteRetainFiles: s.config.SoftDeleteRetainFiles,
-		ImageRegistry:         s.config.MaintenanceConfig.ImageRegistry,
-		TelemetryDefault:      copyBoolPtr(s.config.TelemetryDefault),
-		TelemetryConfig:       s.config.TelemetryConfig,
-		GitHubApp:             githubAppPublicFrom(s.config.GitHubAppConfig),
+		SoftDeleteRetention:    s.config.SoftDeleteRetention,
+		SoftDeleteRetainFiles:  s.config.SoftDeleteRetainFiles,
+		ImageRegistry:          s.config.MaintenanceConfig.ImageRegistry,
+		TelemetryDefault:       copyBoolPtr(s.config.TelemetryDefault),
+		AutoExposePortsDefault: copyBoolPtr(s.config.AutoExposePortsDefault),
+		TelemetryConfig:        s.config.TelemetryConfig,
+		GitHubApp:              githubAppPublicFrom(s.config.GitHubAppConfig),
 	}
 }
 

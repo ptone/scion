@@ -16,6 +16,8 @@ package opsettings
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -87,7 +89,8 @@ func TestLoadSectionsIntoKoanf_DottedRuntimeNameStaysWhole(t *testing.T) {
 func TestIsRestartRequired(t *testing.T) {
 	cases := map[string]bool{
 		"server.hub.public_url":            true,
-		"server.auth.authorized_domains":   true,
+		"server.github_app.app_id":         true,
+		"server.github_app.api_base_url":   false,
 		"server.hub.hub_name":              false,
 		"image_registry":                   false,
 		"server.hub.soft_delete_retention": false,
@@ -111,4 +114,63 @@ func TestSchemaInfo_ListsRestartRequiredKeys(t *testing.T) {
 	if got := info["lifecycle"].RestartRequired; len(got) != 0 {
 		t.Errorf("lifecycle restart_required = %v, want none", got)
 	}
+}
+
+// ptone/scion#4108: dotted map keys from settings.yaml survive the bootstrap
+// load, the startup seeding extract (ExtractSectionFromKoanf) and the load
+// of the seeded document back into koanf.
+func TestBootstrapTelemetry_DottedMapKeysFromSettingsYAML(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	scionDir := filepath.Join(home, ".scion")
+	if err := os.MkdirAll(scionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	yaml := `schema_version: "1"
+telemetry:
+  enabled: true
+  resource:
+    service.namespace: team-a
+  filter:
+    sampling:
+      rates:
+        agent.tool.call: 0.5
+`
+	if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	k := config.LoadBootstrapKoanf()
+	seeded, err := ExtractSectionFromKoanf(k, "telemetry")
+	if err != nil {
+		t.Fatalf("ExtractSectionFromKoanf: %v", err)
+	}
+	if errs := Validate("telemetry", seeded); len(errs) > 0 {
+		t.Fatalf("seeded telemetry document does not validate: %v (%s)", errs, seeded)
+	}
+
+	check := func(name string, data []byte) {
+		t.Helper()
+		var tc config.V1TelemetryConfig
+		if err := json.Unmarshal(data, &tc); err != nil {
+			t.Fatalf("%s: telemetry does not decode: %v (%s)", name, err, data)
+		}
+		if tc.Resource["service.namespace"] != "team-a" {
+			t.Errorf("%s: resource = %v, want the service.namespace key intact", name, tc.Resource)
+		}
+		if tc.Filter == nil || tc.Filter.Sampling == nil || tc.Filter.Sampling.Rates["agent.tool.call"] != 0.5 {
+			t.Errorf("%s: sampling rates lost the dotted key: %s", name, data)
+		}
+	}
+	check("seeded document", seeded)
+
+	reloaded, err := LoadSectionsIntoKoanf(map[string]json.RawMessage{"telemetry": seeded})
+	if err != nil {
+		t.Fatalf("LoadSectionsIntoKoanf: %v", err)
+	}
+	data, err := json.Marshal(reloaded.Cut("telemetry").Raw())
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("reloaded document", data)
 }

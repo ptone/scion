@@ -1170,14 +1170,16 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	}
 	s.config.TelemetryConfig = telemetryConfig
 
-	// Auto-expose ports
-	if snap.AutoExposePortsEnabled != nil {
-		oldVal := s.config.AutoExposePortsDefault
-		s.config.AutoExposePortsDefault = snap.AutoExposePortsEnabled
-		if oldVal == nil || *oldVal != *snap.AutoExposePortsEnabled {
-			applied = append(applied, "auto_expose_ports_default")
-		}
+	// Auto-expose ports. An unset value (cleared, or the section removed)
+	// returns to the startup value (ptone/scion#3904).
+	autoExpose := copyBoolPtr(snap.AutoExposePortsEnabled)
+	if autoExpose == nil {
+		autoExpose = copyBoolPtr(s.startupLayer1.AutoExposePortsDefault)
 	}
+	if !boolPtrEqual(s.config.AutoExposePortsDefault, autoExpose) {
+		applied = append(applied, "auto_expose_ports_default")
+	}
+	s.config.AutoExposePortsDefault = autoExpose
 
 	// Project defaults
 	if snap.DefaultScratchpad != nil {
