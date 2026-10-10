@@ -178,7 +178,7 @@ func TestCheckStagedAuthNoTypesNeverFails(t *testing.T) {
 func TestCheckStagedAuthErrorHasNoValues(t *testing.T) {
 	home := stageCandidates(t, map[string]interface{}{"explicit_type": "auth-file",
 		"env_vars": []string{"EXAMPLE_API_KEY"}})
-	err := CheckStagedAuth("example", failfastAuthMeta(), nil, AuthCheckInputs{AgentHome: home, Env: map[string]string{"OTHER": "placeholder-secret-value"}})
+	err := CheckStagedAuth("example", failfastAuthMeta(), nil, AuthCheckInputs{AgentHome: home, HomeIsAgentHome: true, Env: map[string]string{"OTHER": "placeholder-secret-value"}})
 	if err == nil {
 		t.Fatal("want an error")
 	}
