@@ -17,13 +17,15 @@
 /**
  * The rail's Unread DMs list: every DM the unread badge counts, so each one
  * can be found and opened from the rail, whichever space its peer belongs
- * to and even when the peer agent has been deleted.
+ * to.
  *
  * The input is `GET /api/v1/chat/dms`. A DM is unread exactly when the
- * badge (`GET /api/v1/chat/unread-count`) counts it: `hasUnread` is set and
- * it is not muted. Both come from the same server rule (latest message past
- * the caller's read watermark), so the list length and the badge's `dms`
- * field agree.
+ * badge (`GET /api/v1/chat/unread-count`) counts it: `hasUnread` is set, it
+ * is not muted, and its peer is not a deleted agent (`peerDeleted`); a DM
+ * with a deleted agent is left out of both, and its data is kept. Unread
+ * comes from the same server rule on both sides (latest message past the
+ * caller's read watermark), so the list length and the badge's `dms` field
+ * agree.
  */
 
 /** One entry of `GET /api/v1/chat/dms`, as far as the rail is concerned. */
@@ -35,6 +37,8 @@ export interface ChatDMListEntry {
   peerSlug?: string;
   hasUnread?: boolean;
   muted?: boolean;
+  /** The peer is an agent that has been deleted (soft or hard). */
+  peerDeleted?: boolean;
 }
 
 /** A row of the rail's Unread DMs list. */
@@ -47,15 +51,17 @@ export interface ChatRailDM {
   unread: boolean;
 }
 
-/** Whether the unread badge counts dm. */
+/**
+ * Whether the unread badge counts dm: unread, not muted, and not with a
+ * deleted agent. The hub's count applies the same rule.
+ */
 export function isBadgeUnreadDM(dm: ChatDMListEntry): boolean {
-  return dm.hasUnread === true && dm.muted !== true;
+  return dm.hasUnread === true && dm.muted !== true && dm.peerDeleted !== true;
 }
 
 /**
- * The name to show for a DM peer. A deleted agent keeps its name (the hub
- * resolves deleted agents too); a peer the hub cannot resolve at all still
- * gets a row, so the DM stays reachable.
+ * The name to show for a DM peer. A peer the hub cannot name (an unknown
+ * user, or the open DM of an agent with no row) still gets a label.
  */
 export function dmPeerDisplayName(dm: ChatDMListEntry): string {
   const name = dm.peerName?.trim() || dm.peerSlug?.trim();

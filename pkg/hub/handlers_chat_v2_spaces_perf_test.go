@@ -233,6 +233,12 @@ func newSpacesPerfFixtureOn(t *testing.T, srv *Server, s store.Store, owner, mem
 		f.projects = append(f.projects, op.ID)
 	}
 
+	// The admin is an explicit member of every project, so its rollups
+	// count unread everywhere (unread is tracked only in member projects).
+	for _, id := range f.projects {
+		bindProjectMember(t, s, id, admin.ID)
+	}
+
 	// Threads: f.projects[0] gets read, unread, muted-unread and never-read
 	// threads; [1] gets one unread thread; [2] one thread with no messages;
 	// [3] and [4] none.
@@ -292,6 +298,10 @@ func TestChatSpaces_BatchedMatchesLegacy(t *testing.T) {
 
 			stripped := make([]chatSpaceEntry, len(got.Spaces))
 			for i, sp := range got.Spaces {
+				// The legacy rollup predates unread tracking; every space
+				// here is a member project of the user, so all are tracked.
+				assert.True(t, sp.UnreadTracked, "space %s", sp.ProjectSlug)
+				sp.UnreadTracked = false
 				sp.LastActivityAt = nil
 				stripped[i] = sp
 			}

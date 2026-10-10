@@ -16,9 +16,10 @@
 
 /**
  * The rail's Unread DMs section: under the Unread filter it lists every DM
- * the unread badge counts — including DMs with agents in other spaces and
- * with deleted agents — so the badge's number can always be found in the
- * rail, and clicking a row asks the page to open that DM.
+ * the unread badge counts — including DMs with agents in other spaces, but
+ * not DMs with deleted agents, which the badge leaves out too — so the
+ * badge's number can always be found in the rail, and clicking a row asks
+ * the page to open that DM.
  */
 
 // @vitest-environment happy-dom
@@ -61,9 +62,12 @@ function dm(overrides: Partial<ChatDMListEntry>): ChatDMListEntry {
 const DMS: ChatDMListEntry[] = [
   dm({ conversationKey: 'dm:u', peerId: 'u1', peerKind: 'user', peerName: 'Alice' }),
   dm({ conversationKey: 'dm:other', peerId: 'a1', peerName: 'other-space-agent' }),
+  // An agent the hub cannot name, not flagged deleted: listed as unknown.
   dm({ conversationKey: 'dm:gone', peerId: 'a2', peerName: '', peerSlug: '' }),
   dm({ conversationKey: 'dm:muted', peerId: 'a3', muted: true }),
   dm({ conversationKey: 'dm:read', peerId: 'a4', hasUnread: false }),
+  // A deleted agent: kept by the hub, flagged, and not listed as unread.
+  dm({ conversationKey: 'dm:deleted', peerId: 'a5', peerName: 'old-agent', peerDeleted: true }),
 ];
 
 async function mount(spaces: ChatSpace[], dms: ChatDMListEntry[]): Promise<any> {
@@ -183,5 +187,57 @@ describe('chat-space-rail Unread DMs section', () => {
     rows[1].dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }));
     rows[2].dispatchEvent(new KeyboardEvent('keydown', { key: 'a', bubbles: true }));
     expect(seen).toEqual(['dm:u', 'dm:other']);
+  });
+
+  it('leaves out DMs with deleted agents', async () => {
+    const el = await mount([SPACE], DMS);
+    el.spaceFilter = 'unread';
+    await el.updateComplete;
+    expect(dmRows(el).map((r) => r.dataset.dmKey)).not.toContain('dm:deleted');
+  });
+});
+
+describe('chat-space-rail spaces without unread tracking', () => {
+  const thread = {
+    id: 'topic-x',
+    name: 'thread-x',
+    isGeneral: false,
+    pinned: false,
+    muted: false,
+    hasUnread: false,
+    hasUnreadMention: false,
+    lastMessageId: 'm1',
+  };
+
+  async function mountUntracked(tracked: boolean): Promise<any> {
+    const el = document.createElement('scion-chat-space-rail') as any;
+    document.body.appendChild(el);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    el.spaces = [{ ...SPACE, unreadCount: 0, unreadTracked: tracked }];
+    el.threadsBySpace = new Map([[SPACE.projectId, [thread]]]);
+    el.collapsedSpaces = new Set<string>();
+    el.loading = false;
+    await el.updateComplete;
+    return el;
+  }
+
+  it('does not mark a thread unread locally, nor offer Mark unread', async () => {
+    const el = await mountUntracked(false);
+    el.markThreadUnread('topic-x');
+    await el.updateComplete;
+    expect(el.threadsBySpace.get(SPACE.projectId)[0].hasUnread).toBe(false);
+    expect(el.spaces[0].unreadCount).toBe(0);
+    const ids = el.threadMenuActions(thread, SPACE.projectId).map((a: any) => a.id);
+    expect(ids).not.toContain('mark-unread');
+  });
+
+  it('still does both in a tracked space', async () => {
+    const el = await mountUntracked(true);
+    const ids = el.threadMenuActions(thread, SPACE.projectId).map((a: any) => a.id);
+    expect(ids).toContain('mark-unread');
+    el.markThreadUnread('topic-x');
+    await el.updateComplete;
+    expect(el.threadsBySpace.get(SPACE.projectId)[0].hasUnread).toBe(true);
+    expect(el.spaces[0].unreadCount).toBe(1);
   });
 });

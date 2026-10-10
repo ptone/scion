@@ -38,9 +38,10 @@ describe('railUnreadDMs', () => {
     const dms = [
       dm({ conversationKey: 'a', peerKind: 'user', peerName: 'Alice' }),
       dm({ conversationKey: 'b', peerName: 'other-project-agent' }),
-      dm({ conversationKey: 'c', peerName: 'deleted-agent' }),
+      dm({ conversationKey: 'c', peerName: '' }),
       dm({ conversationKey: 'd', muted: true }),
       dm({ conversationKey: 'e', hasUnread: false }),
+      dm({ conversationKey: 'f', peerName: 'deleted-agent', peerDeleted: true }),
     ];
     const rows = railUnreadDMs(dms);
     expect(rows.map((r) => r.conversationKey)).toEqual(['a', 'b', 'c']);
@@ -81,7 +82,15 @@ describe('badgeCountFromLists', () => {
     expect(
       badgeCountFromLists(
         { spaces: [{ unreadCount: 2 }, { unreadCount: 0 }, { unreadCount: 1 }] },
-        { dms: [dm({}), dm({ muted: true }), dm({ hasUnread: false }), dm({})] }
+        {
+          dms: [
+            dm({}),
+            dm({ muted: true }),
+            dm({ hasUnread: false }),
+            dm({}),
+            dm({ peerDeleted: true }),
+          ],
+        }
       )
     ).toBe(5);
   });
@@ -98,5 +107,17 @@ describe('badgeCountFromLists', () => {
   it('cannot answer without both lists', () => {
     expect(badgeCountFromLists(null, { dms: [] })).toBeNull();
     expect(badgeCountFromLists({ spaces: [] }, null)).toBeNull();
+  });
+});
+
+describe('deleted-agent DMs', () => {
+  it('are left out of the badge and the list, but the open one stays shown', () => {
+    const gone = dm({ conversationKey: 'gone', peerDeleted: true });
+    expect(isBadgeUnreadDM(gone)).toBe(false);
+    expect(railUnreadDMs([gone])).toEqual([]);
+    expect(railUnreadDMs([gone], 'gone')).toEqual([
+      expect.objectContaining({ conversationKey: 'gone', unread: false }),
+    ]);
+    expect(badgeCountFromLists({ spaces: [] }, { dms: [gone] })).toBe(0);
   });
 });

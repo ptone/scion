@@ -74,6 +74,14 @@ export interface ChatSpace {
   unreadCount: number;
   hasUnreadMention: boolean;
   /**
+   * Whether unread is counted in this space: false when the user can read
+   * the project but is not an explicit member of it. The server then sends
+   * unreadCount 0 and no unread threads (a mention of the user still
+   * shows), and the unread badge leaves the space out. Absent from older
+   * servers, meaning tracked.
+   */
+  unreadTracked?: boolean;
+  /**
    * Newest visible-thread activity in the space, when the server sends it
    * (omitted for a space with no threads). Lets activity sort order spaces
    * without loading every space's thread list.
@@ -2673,6 +2681,14 @@ export class ScionChatSpaceRail extends LitElement {
     void this.reload();
   }
 
+  /**
+   * Whether the space counts unread: its project is one the user is an
+   * explicit member of. A server that predates the flag tracks every space.
+   */
+  private isUnreadTracked(projectId: string): boolean {
+    return this.spaces.find((s) => s.projectId === projectId)?.unreadTracked !== false;
+  }
+
   /** Nudge a space's unread badge, floored at zero. */
   private adjustSpaceUnread(projectId: string, delta: number): void {
     this.spaces = this.spaces.map((s) =>
@@ -2721,6 +2737,9 @@ export class ScionChatSpaceRail extends LitElement {
     for (const [projectId, threads] of this.threadsBySpace) {
       const target = threads.find((t) => t.id === threadId);
       if (!target || target.hasUnread) continue;
+      // Where unread is not tracked the server reports no unread, and the
+      // badge leaves the space out: a local dot would disagree with both.
+      if (!this.isUnreadTracked(projectId)) return;
       this.updateThread(projectId, threadId, { hasUnread: true });
       if (!target.muted) this.adjustSpaceUnread(projectId, 1);
       return;
@@ -3875,7 +3894,9 @@ export class ScionChatSpaceRail extends LitElement {
         run: () => void this.handleMarkRead(thread, projectId),
       },
     ];
-    if (!thread.hasUnread && thread.lastMessageId) {
+    // Unread is not tracked in a space whose project the user is not a
+    // member of, so there is nothing to mark unread there.
+    if (!thread.hasUnread && thread.lastMessageId && this.isUnreadTracked(projectId)) {
       actions.push({
         id: 'mark-unread',
         label: 'Mark unread',

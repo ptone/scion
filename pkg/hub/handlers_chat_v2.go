@@ -112,18 +112,29 @@ func (s *Server) handleChatSpaces(w http.ResponseWriter, r *http.Request) {
 	// Get user prefs.
 	prefs, _ := wcs.GetUserPrefs(ctx, user.ID())
 
-	rollups := chatSpaceRollups(ctx, wcs, user.ID(), visible, s.chatSpacesBatch)
+	// Unread is tracked only in the projects the caller is a member of. A
+	// failed lookup tracks none, as a degraded rail shows no unread rather
+	// than every readable project's.
+	members, err := s.chatMemberProjectIDs(ctx, user.ID())
+	if err != nil {
+		slog.Warn("chat spaces: member project lookup failed; no unread tracked",
+			"user_id", user.ID(), "error", err)
+		members = map[string]bool{}
+	}
+
+	rollups := chatSpaceRollups(ctx, wcs, user.ID(), visible, members, s.chatSpacesBatch)
 
 	spaces := make([]chatSpaceEntry, 0, len(visible))
 	for _, p := range visible {
 		ru := rollups[p.ID]
 		entry := chatSpaceEntry{
-			ProjectID:   p.ID,
-			ProjectName: p.Name,
-			ProjectSlug: p.Slug,
-			Emoji:       p.Annotations[spaceEmojiAnnotationKey],
-			ThreadCount: ru.threadCount,
-			UnreadCount: ru.unreadCount,
+			ProjectID:     p.ID,
+			ProjectName:   p.Name,
+			ProjectSlug:   p.Slug,
+			Emoji:         p.Annotations[spaceEmojiAnnotationKey],
+			ThreadCount:   ru.threadCount,
+			UnreadCount:   ru.unreadCount,
+			UnreadTracked: members[p.ID],
 		}
 		// last_activity_at is unset until a thread's first message, so a
 		// space whose threads have no messages has no activity to report.
@@ -258,22 +269,24 @@ type chatSpaceRollup struct {
 // lookups this replaces did: a failed topic read leaves its projects with
 // no threads, and a failed read-state read leaves its threads with no
 // read state. batch sets the batch sizes; zero fields take the defaults.
-func chatSpaceRollups(ctx context.Context, wcs WebChatStore, userID string, projects []*store.Project, batch chatSpacesBatchSizes) map[string]chatSpaceRollup {
-	out, _ := chatSpaceRollupsMode(ctx, wcs, userID, projects, batch, false)
+func chatSpaceRollups(ctx context.Context, wcs WebChatStore, userID string, projects []*store.Project, tracked map[string]bool, batch chatSpacesBatchSizes) map[string]chatSpaceRollup {
+	out, _ := chatSpaceRollupsMode(ctx, wcs, userID, projects, tracked, batch, false)
 	return out
 }
 
 // chatSpaceRollupsStrict is chatSpaceRollups, except that a failed batch
 // read fails the whole computation instead of degrading. The unread count
 // uses it: a guessed count is worse than keeping the last one.
-func chatSpaceRollupsStrict(ctx context.Context, wcs WebChatStore, userID string, projects []*store.Project, batch chatSpacesBatchSizes) (map[string]chatSpaceRollup, error) {
-	return chatSpaceRollupsMode(ctx, wcs, userID, projects, batch, true)
+func chatSpaceRollupsStrict(ctx context.Context, wcs WebChatStore, userID string, projects []*store.Project, tracked map[string]bool, batch chatSpacesBatchSizes) (map[string]chatSpaceRollup, error) {
+	return chatSpaceRollupsMode(ctx, wcs, userID, projects, tracked, batch, true)
 }
 
 // chatSpaceRollupsMode implements chatSpaceRollups and
 // chatSpaceRollupsStrict. With strict set, the first failed batch read is
-// returned as an error.
-func chatSpaceRollupsMode(ctx context.Context, wcs WebChatStore, userID string, projects []*store.Project, batch chatSpacesBatchSizes, strict bool) (map[string]chatSpaceRollup, error) {
+// returned as an error. Unread is counted only in the projects in tracked
+// (the caller's member projects); other projects get thread counts and
+// activity but no unread, and their read states are not read.
+func chatSpaceRollupsMode(ctx context.Context, wcs WebChatStore, userID string, projects []*store.Project, tracked map[string]bool, batch chatSpacesBatchSizes, strict bool) (map[string]chatSpaceRollup, error) {
 	batch = batch.withDefaults()
 	out := make(map[string]chatSpaceRollup, len(projects))
 	if len(projects) == 0 {
@@ -302,13 +315,16 @@ func chatSpaceRollupsMode(ctx context.Context, wcs WebChatStore, userID string, 
 		return out, nil
 	}
 
-	readMap := make(map[string]WebChatReadState, len(topics))
-	for start := 0; start < len(topics); start += batch.readStates {
-		end := min(start+batch.readStates, len(topics))
-		keys := make([]string, 0, end-start)
-		for _, t := range topics[start:end] {
-			keys = append(keys, t.ID)
+	var trackedKeys []string
+	for _, t := range topics {
+		if tracked[t.ProjectID] {
+			trackedKeys = append(trackedKeys, t.ID)
 		}
+	}
+	readMap := make(map[string]WebChatReadState, len(trackedKeys))
+	for start := 0; start < len(trackedKeys); start += batch.readStates {
+		end := min(start+batch.readStates, len(trackedKeys))
+		keys := trackedKeys[start:end]
 		states, err := wcs.GetReadStates(ctx, userID, keys)
 		if err != nil {
 			if strict {
@@ -328,6 +344,10 @@ func chatSpaceRollupsMode(ctx context.Context, wcs WebChatStore, userID string, 
 		ru.threadCount++
 		if t.LastActivityAt.After(ru.lastActivityAt) {
 			ru.lastActivityAt = t.LastActivityAt
+		}
+		if !tracked[t.ProjectID] {
+			out[t.ProjectID] = ru
+			continue
 		}
 		rs, ok := readMap[t.ID]
 		// A muted thread is silent all the way up: it contributes nothing
@@ -545,6 +565,16 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request, proje
 		readMap[rs.ConversationKey] = rs
 	}
 
+	// Unread is tracked only in projects the caller is a member of; in
+	// others threads report no unread, but a mention of the caller still
+	// shows. A failed lookup tracks nothing, as the spaces list does.
+	membership := s.CheckEffectiveMembership(r.Context(), user.ID(), projectID)
+	if membership.Err != nil {
+		slog.Warn("chat threads: membership lookup failed; no unread tracked",
+			"project_id", projectID, "error", membership.Err)
+	}
+	unreadTracked := membership.Err == nil && membership.IsMember
+
 	// One batched query over the same listed topic keys: which of them hold
 	// a mention of the caller after the caller's own read watermark. Only
 	// the caller's own mention and read-state rows are read. A watermark
@@ -571,16 +601,18 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request, proje
 			LastMessageID:  t.LastMessageID,
 			LastActivityAt: t.LastActivityAt,
 		}
+		unread := t.LastMessageID != ""
 		if rs, ok := readMap[t.ID]; ok {
 			entry.LastReadMessageID = rs.LastReadMessageID
 			entry.Pinned = rs.Pinned
 			entry.Muted = rs.Muted
-			entry.HasUnread = t.LastMessageID != "" && t.LastMessageID != rs.LastReadMessageID
-		} else {
-			entry.HasUnread = t.LastMessageID != ""
+			unread = t.LastMessageID != "" && t.LastMessageID != rs.LastReadMessageID
 		}
-		// A mention never outlives the unread state it decorates.
-		entry.HasUnreadMention = entry.HasUnread && mentionKeys[t.ID]
+		entry.HasUnread = unread && unreadTracked
+		// A mention never outlives the unread state it decorates. It shows
+		// even where unread is not tracked: a direct mention of the caller
+		// in a project they can read but are not a member of still counts.
+		entry.HasUnreadMention = unread && mentionKeys[t.ID]
 		entries = append(entries, entry)
 	}
 
@@ -4156,11 +4188,13 @@ func (s *Server) handleChatDMs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var peerAgents map[string]*store.Agent
+	peerAgentsOK := true
 	if len(agentPeerIDs) > 0 {
 		var err error
 		// Including soft-deleted agents, as GetAgent does: a DM with a
 		// deleted agent keeps showing that agent's name.
 		if peerAgents, err = s.store.GetAgentsByIDsIncludingDeleted(ctx, agentPeerIDs); err != nil {
+			peerAgentsOK = false
 			slog.Warn("chat dms: batched peer-agent read failed",
 				"agents", len(agentPeerIDs), "error", err)
 		}
@@ -4205,6 +4239,9 @@ func (s *Server) handleChatDMs(w http.ResponseWriter, r *http.Request) {
 				entry.PeerName = peerAgent.Name
 				entry.PeerSlug = peerAgent.Slug
 			}
+			// Only a lookup that succeeded can say the agent is gone: a
+			// failed one flags nothing.
+			entry.PeerDeleted = peerAgentsOK && agentPeerDeleted(peerAgents[dm.PeerID])
 		}
 
 		if rs, ok := readStates[dm.ConversationKey]; ok {
@@ -5356,6 +5393,13 @@ type chatSpaceEntry struct {
 	Emoji       string `json:"emoji,omitempty"`
 	ThreadCount int    `json:"threadCount"`
 	UnreadCount int    `json:"unreadCount"`
+
+	// UnreadTracked is true when the caller is an explicit member of the
+	// project. Unread is counted only then: in other spaces UnreadCount is
+	// 0 and threads report no unread (mentions still do), and the badge
+	// leaves them out.
+	UnreadTracked bool `json:"unreadTracked"`
+
 	// LastActivityAt is the newest lastActivityAt across the space's
 	// threads, in the same format as a thread's lastActivityAt. Omitted
 	// when the space has no threads or none of them has a message yet.
@@ -5456,6 +5500,12 @@ type chatDMEntry struct {
 	Muted              bool      `json:"muted"`
 	LastMessagePreview string    `json:"lastMessagePreview,omitempty"`
 	LastMessageSender  string    `json:"lastMessageSender,omitempty"`
+
+	// PeerDeleted is true when the peer is an agent that has been deleted
+	// (soft-deleted, or no longer has an agent row). Such a DM is kept
+	// and listed, but not counted on the unread badge nor shown in the
+	// rail's Unread DMs list.
+	PeerDeleted bool `json:"peerDeleted,omitempty"`
 }
 
 type chatMembersResponse struct {

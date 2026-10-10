@@ -220,7 +220,13 @@ describe('chat page Unread DMs wiring', () => {
   it('counts the badge from the rail lists while up', async () => {
     const page = createPage();
     spacesBody = { spaces: [{ unreadCount: 2 }, { unreadCount: 0 }] };
-    dmsBody = { dms: [DMS[0], { ...DMS[1], hasUnread: true, muted: true }] };
+    dmsBody = {
+      dms: [
+        DMS[0],
+        { ...DMS[1], hasUnread: true, muted: true },
+        { ...DMS[1], conversationKey: 'dm:deleted', hasUnread: true, peerDeleted: true },
+      ],
+    };
     expect(await page._unreadCountSource(-Infinity)).toEqual({
       count: 3,
       startedAt: expect.any(Number),

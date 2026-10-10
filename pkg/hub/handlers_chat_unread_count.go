@@ -25,10 +25,11 @@ type chatUnreadCountResponse struct {
 	// Conversations is Threads + DMs: the number to show on the badge.
 	Conversations int `json:"conversations"`
 	// Threads counts the unmuted threads with an unread latest message in
-	// every space the rail lists: the sum of the unreadCount values GET
-	// /api/v1/chat/spaces reports.
+	// the spaces the rail lists whose project the caller is a member of:
+	// the sum of the unreadCount values GET /api/v1/chat/spaces reports.
 	Threads int `json:"threads"`
-	// DMs counts the caller's unmuted DMs with an unread latest message.
+	// DMs counts the caller's unmuted DMs with an unread latest message,
+	// leaving out DMs with deleted agents.
 	DMs int `json:"dms"`
 }
 
@@ -36,14 +37,17 @@ type chatUnreadCountResponse struct {
 // conversations with unread messages, as the chat rail shows them.
 //
 // Threads are counted by the rollup GET /api/v1/chat/spaces uses
-// (chatVisibleSpaces and chatSpaceRollups), so the badge's thread count is
-// the sum of the rail's space badges: every unmuted thread with an unread
-// latest message in a non-template project the caller can read, whether or
-// not the caller is a member of it.
+// (chatVisibleSpaces, chatMemberProjectIDs and chatSpaceRollups), so the
+// badge's thread count is the sum of the rail's space badges: every
+// unmuted thread with an unread latest message in a non-template project
+// the caller can read and is an explicit member of (chatMemberProjectIDs;
+// admin rights alone are not membership), whether or not the caller is a
+// participant of the thread.
 //
-// A DM counts when the caller is one of its parties (webchat_dm), has not
-// muted it, and its latest message is not the caller's read watermark: the
-// DMs the rail's Unread DMs list shows, from GET /api/v1/chat/dms.
+// A DM counts when the caller is one of its parties (webchat_dm), its peer
+// is not a deleted agent, the caller has not muted it, and its latest
+// message is not the caller's read watermark: the DMs the rail's Unread
+// DMs list shows, from GET /api/v1/chat/dms.
 //
 // The cost is a constant number of batched queries however many
 // conversations the caller has; it never fans out per project.
@@ -83,7 +87,11 @@ func (s *Server) chatUnreadCount(ctx context.Context, identity Identity, userID 
 	if err != nil {
 		return resp, err
 	}
-	rollups, err := chatSpaceRollupsStrict(ctx, wcs, userID, spaces, s.chatSpacesBatch)
+	members, err := s.chatMemberProjectIDs(ctx, userID)
+	if err != nil {
+		return resp, fmt.Errorf("member projects: %w", err)
+	}
+	rollups, err := chatSpaceRollupsStrict(ctx, wcs, userID, spaces, members, s.chatSpacesBatch)
 	if err != nil {
 		return resp, fmt.Errorf("space rollups: %w", err)
 	}
@@ -95,8 +103,17 @@ func (s *Server) chatUnreadCount(ctx context.Context, identity Identity, userID 
 	if err != nil {
 		return resp, fmt.Errorf("list DMs: %w", err)
 	}
+	// A DM with a deleted agent is not counted (the rail does not list it
+	// as unread either); /chat/dms flags it as peerDeleted by the same rule.
+	deletedPeers, err := s.chatDeletedAgentPeers(ctx, dms)
+	if err != nil {
+		return resp, err
+	}
 	dmKeys := make([]string, 0, len(dms))
 	for _, dm := range dms {
+		if dm.PeerKind == "agent" && deletedPeers[dm.PeerID] {
+			continue
+		}
 		dmKeys = append(dmKeys, dm.ConversationKey)
 	}
 	// The DM list derives unread from the latest message, not from the

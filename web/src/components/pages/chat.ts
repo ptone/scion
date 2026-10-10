@@ -433,6 +433,7 @@ function dmListSignature(dms: readonly ChatDMListEntry[]): string {
         d.peerSlug ?? '',
         !!d.hasUnread,
         !!d.muted,
+        !!d.peerDeleted,
       ].join('\u0000')
     )
     .join('\u0001');
@@ -3553,6 +3554,7 @@ export class ScionPageChat extends LitElement {
           peerSlug?: string;
           hasUnread: boolean;
           muted?: boolean;
+          peerDeleted?: boolean;
           lastMessageId?: string;
         }>;
       };
