@@ -123,6 +123,7 @@ type pinCase struct {
 	// in supplies the Go side's view of the same container files: mount
 	// targets, or files in the agent home (agentHomeFiles).
 	mounts         []string
+	fileTargets    []string
 	agentHomeFiles []string
 }
 
@@ -369,7 +370,7 @@ func TestCheckStagedAuthPinnedToProvisioner(t *testing.T) {
 			goRejects := 0
 			for i, c := range cases {
 				home := writeCandidates(t, c.Candidates)
-				err := harness.CheckStagedAuth(entry.Harness, entry.Auth, c.noAuth, harness.AuthCheckInputs{AgentHome: home})
+				err := harness.CheckStagedAuth(entry.Harness, entry.Auth, c.noAuth, harness.AuthCheckInputs{AgentHome: home, HomeIsAgentHome: true})
 				if err == nil {
 					continue
 				}
@@ -396,8 +397,10 @@ func TestCheckStagedAuthPinnedToProvisioner(t *testing.T) {
 // matrix cannot: a credential file that exists in the container at a file
 // method's target, with nothing staged. The provisioner accepts it; the Go
 // check must too when it sees the same file as a volume mounted at the
-// target, as a volume mounted at the parent directory, or as a file in the
-// agent home (which is mounted over the container home).
+// target, as a volume mounted at the parent directory, as a file-type
+// secret at the target, or as a file in the agent home (which Docker, Podman
+// and Apple container mount over the container home). HomeIsAgentHome is
+// true throughout, the strictest setting.
 func TestCheckStagedAuthPinnedWithContainerFile(t *testing.T) {
 	python := requirePythonPin(t)
 	fileMethods := 0
@@ -423,16 +426,17 @@ func TestCheckStagedAuthPinnedWithContainerFile(t *testing.T) {
 					}
 					base := pinCase{Candidates: cand, HarnessConfig: hc, HomeFiles: []string{m.Path}}
 					for _, v := range []struct {
-						label          string
-						mounts, agentF []string
+						label                 string
+						mounts, files, agentF []string
 					}{
-						{"volume at target", []string{m.Path}, nil},
-						{"volume at parent dir", []string{parent}, nil},
-						{"file in agent home", nil, []string{m.Path}},
+						{"volume at target", []string{m.Path}, nil, nil},
+						{"volume at parent dir", []string{parent}, nil, nil},
+						{"file secret at target", nil, []string{m.Path}, nil},
+						{"file in agent home", nil, nil, []string{m.Path}},
 					} {
 						c := base
 						c.label = "no_auth removed, explicit=" + explicit + ", " + m.Path + " via " + v.label
-						c.mounts, c.agentHomeFiles = v.mounts, v.agentF
+						c.mounts, c.fileTargets, c.agentHomeFiles = v.mounts, v.files, v.agentF
 						cases = append(cases, c)
 					}
 				}
@@ -456,7 +460,8 @@ func TestCheckStagedAuthPinnedWithContainerFile(t *testing.T) {
 					}
 				}
 				err := harness.CheckStagedAuth(entry.Harness, entry.Auth, nil,
-					harness.AuthCheckInputs{AgentHome: home, ContainerHome: "/home/scion", MountTargets: c.mounts})
+					harness.AuthCheckInputs{AgentHome: home, ContainerHome: "/home/scion", MountTargets: c.mounts,
+						FileTargets: c.fileTargets, HomeIsAgentHome: true})
 				if err != nil {
 					t.Errorf("%s: provisioner selects %q but the Go check rejects: %v", c.label, results[i].Method, err)
 				}

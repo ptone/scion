@@ -76,7 +76,8 @@ func TestCheckStagedAuth(t *testing.T) {
 		env     map[string]string
 		preFile string // home-relative file created before the check
 		mounts  []string
-		wantErr string // substring; "" means no error
+		fileTgt []string // file-secret targets
+		wantErr string   // substring; "" means no error
 	}{
 		{name: "explicit unsatisfied", staged: map[string]interface{}{"explicit_type": "api-key"},
 			noAuth: dropToShell, wantErr: `auth type "api-key" is selected`},
@@ -114,6 +115,15 @@ func TestCheckStagedAuth(t *testing.T) {
 			wantErr: `auth type "auth-file" is selected`},
 		{name: "volume does not satisfy an env-only type", staged: map[string]interface{}{"explicit_type": "api-key"},
 			mounts: []string{"~/.example/auth.json"}, wantErr: `auth type "api-key" is selected`},
+		{name: "explicit satisfied by file secret at target", staged: map[string]interface{}{"explicit_type": "auth-file"},
+			fileTgt: []string{"~/.example/auth.json"}},
+		{name: "explicit satisfied by absolute file secret under container home", staged: map[string]interface{}{"explicit_type": "auth-file"},
+			fileTgt: []string{"/home/scion/.example/auth.json"}},
+		{name: "explicit satisfied by unresolvable file secret target (fail open)", staged: map[string]interface{}{"explicit_type": "auth-file"},
+			fileTgt: []string{""}},
+		{name: "file secret elsewhere does not satisfy", staged: map[string]interface{}{"explicit_type": "auth-file"},
+			fileTgt: []string{"~/.example", "~/.example/auth.json.bak", "/etc/example/auth.json", "/home/scion2/.example/auth.json"},
+			wantErr: `auth type "auth-file" is selected`},
 		{name: "explicit type unknown to Go is allowed", staged: map[string]interface{}{"explicit_type": "custom"}},
 		{name: "no explicit, no_auth allows", noAuth: dropToShell},
 		{name: "no explicit, no_auth forbids, nothing staged",
@@ -137,7 +147,8 @@ func TestCheckStagedAuth(t *testing.T) {
 				}
 			}
 			err := CheckStagedAuth("example", failfastAuthMeta(), tc.noAuth,
-				AuthCheckInputs{AgentHome: home, Env: tc.env, ContainerHome: "/home/scion", MountTargets: tc.mounts})
+				AuthCheckInputs{AgentHome: home, Env: tc.env, ContainerHome: "/home/scion", MountTargets: tc.mounts,
+					FileTargets: tc.fileTgt, HomeIsAgentHome: true})
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Fatalf("CheckStagedAuth = %v, want nil", err)
@@ -202,6 +213,70 @@ func TestMountCoversTarget(t *testing.T) {
 	for _, tc := range cases {
 		if got := mountCoversTarget(tc.mount, target, tc.home); got != tc.want {
 			t.Errorf("mountCoversTarget(%q, %q, %q) = %t, want %t", tc.mount, target, tc.home, got, tc.want)
+		}
+	}
+}
+
+// On a runtime that does not bind-mount the agent home over the container
+// home, every type with required files counts as satisfied; env-only types
+// are still checked.
+func TestCheckStagedAuthOtherRuntimes(t *testing.T) {
+	in := func(home string) AuthCheckInputs {
+		return AuthCheckInputs{AgentHome: home, ContainerHome: "/home/scion", HomeIsAgentHome: false}
+	}
+	home := stageCandidates(t, map[string]interface{}{"explicit_type": "auth-file"})
+	if err := CheckStagedAuth("example", failfastAuthMeta(), nil, in(home)); err != nil {
+		t.Errorf("explicit file type off the allowlist: %v, want nil", err)
+	}
+	home = stageCandidates(t, map[string]interface{}{"explicit_type": "vertex-ai"})
+	if err := CheckStagedAuth("example", failfastAuthMeta(), nil, in(home)); err != nil {
+		t.Errorf("explicit type with an ADC file requirement off the allowlist: %v, want nil", err)
+	}
+	home = stageCandidates(t, nil)
+	if err := CheckStagedAuth("example", failfastAuthMeta(), nil, in(home)); err != nil {
+		t.Errorf("no explicit type, no no_auth, a file type declared, off the allowlist: %v, want nil", err)
+	}
+	home = stageCandidates(t, map[string]interface{}{"explicit_type": "api-key"})
+	if err := CheckStagedAuth("example", failfastAuthMeta(), nil, in(home)); !errors.Is(err, ErrNoAuthSatisfied) {
+		t.Errorf("explicit env-only type off the allowlist: %v, want ErrNoAuthSatisfied", err)
+	}
+	envOnly := &config.HarnessAuthMetadata{Types: map[string]api.HarnessAuthTypeMetadata{
+		"api-key": failfastAuthMeta().Types["api-key"],
+	}}
+	if err := CheckStagedAuth("example", envOnly, nil, in(stageCandidates(t, nil))); !errors.Is(err, ErrNoAuthSatisfied) {
+		t.Errorf("env-only harness without no_auth off the allowlist: %v, want ErrNoAuthSatisfied", err)
+	}
+}
+
+func TestHomeIsAgentHomeRuntime(t *testing.T) {
+	for name, want := range map[string]bool{
+		"docker": true, "podman": true, "container": true,
+		"kubernetes": false, "cloudrun": false, "cloudrun-sandbox": false, "substrate": false, "mock": false, "": false,
+	} {
+		if got := HomeIsAgentHomeRuntime(name); got != want {
+			t.Errorf("HomeIsAgentHomeRuntime(%q) = %t, want %t", name, got, want)
+		}
+	}
+}
+
+func TestFileTargetIs(t *testing.T) {
+	const target = "/.example/auth.json"
+	cases := []struct {
+		file, home string
+		want       bool
+	}{
+		{"~/.example/auth.json", "/home/scion", true},
+		{"/home/scion/.example/auth.json", "/home/scion", true},
+		{"~/.example", "/home/scion", false}, // a file, not a directory
+		{"~/.example/auth.json.bak", "/home/scion", false},
+		{"/home/scion2/.example/auth.json", "/home/scion", false},
+		{"/home/scion/.example/auth.json", "", true}, // home unknown: fail open
+		{"$HOME/.example/auth.json", "/home/scion", true},
+		{"", "/home/scion", true},
+	}
+	for _, tc := range cases {
+		if got := fileTargetIs(tc.file, target, tc.home); got != tc.want {
+			t.Errorf("fileTargetIs(%q, %q, %q) = %t, want %t", tc.file, target, tc.home, got, tc.want)
 		}
 	}
 }

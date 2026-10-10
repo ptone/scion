@@ -59,6 +59,25 @@ type AuthCheckInputs struct {
 	// MountTargets are the targets of the volumes mounted into the
 	// container, as configured ("~/..." or absolute).
 	MountTargets []string
+	// FileTargets are the targets of the file-type secrets written into the
+	// container before the pre-start hooks run, as configured.
+	FileTargets []string
+	// HomeIsAgentHome reports that the runtime bind-mounts AgentHome over
+	// the container home (Docker, Podman, Apple container). Otherwise the
+	// container home can hold files the broker cannot see (an image home on
+	// Kubernetes, a persistent NFS home), so every type with required files
+	// counts as satisfied.
+	HomeIsAgentHome bool
+}
+
+// HomeIsAgentHomeRuntime reports whether the named runtime bind-mounts the
+// broker-side agent home over the container home.
+func HomeIsAgentHomeRuntime(runtimeName string) bool {
+	switch runtimeName {
+	case "docker", "podman", "container":
+		return true
+	}
+	return false
 }
 
 // CheckStagedAuth reports, before a container is started, a start that the
@@ -72,13 +91,20 @@ type AuthCheckInputs struct {
 // staged candidates and secret files: the provisioner runs with a minimal
 // environment (HOME, PATH, LANG, TZ and SCION_*), so env_fallback sees no
 // credential env. File selection also accepts a file that exists in the
-// container at the method's target path. The agent home is bind-mounted
-// over the container home, so such a file is either in the agent home or
-// supplied by a volume mounted at the target or at one of its ancestor
-// directories. The check looks at both, and fails open for a mount target it
-// cannot resolve. harnesses/auth_failfast_pin_test.go pins the check against
-// the real Python selection for every shipped harness: every Go rejection
-// must be a provisioner failure.
+// container at the method's target path, which can come from:
+//   - a file-type secret written to its target before the pre-start hooks
+//     (counted through FileTargets, on every runtime);
+//   - a volume mounted at the target or at an ancestor directory (counted
+//     through MountTargets);
+//   - the container home itself. On Docker, Podman and Apple container the
+//     agent home is bind-mounted over it, so the check looks in AgentHome.
+//     On any other runtime the home can hold files the broker cannot see,
+//     so every type with required files counts as satisfied there and only
+//     env-only types can be rejected.
+//
+// Unresolvable targets fail open. harnesses/auth_failfast_pin_test.go pins
+// the check against the real Python selection for every shipped harness:
+// every Go rejection must be a provisioner failure.
 //
 // It returns an error only when the harness declares auth types and either:
 //
@@ -93,9 +119,11 @@ type AuthCheckInputs struct {
 //   - an env key in env_vars or env_secret_files, or set in the start env;
 //   - a required file staged as a file secret, staged as an env secret of
 //     the same name, or mapped to its target;
+//   - a file-type secret whose target is the file's target;
+//   - a volume mounted at its target or at an ancestor directory;
 //   - a file already present in the agent home at its target (for example,
-//     written by an earlier provision before a restart);
-//   - a volume mounted at its target or at an ancestor directory.
+//     written by an earlier provision before a restart), on runtimes where
+//     HomeIsAgentHome; on other runtimes any type with required files.
 //
 // This is more permissive than both the harness-config auth.types and the
 // provisioner, so where they differ the start is allowed.
@@ -167,6 +195,9 @@ func stagedSatisfiesType(t api.HarnessAuthTypeMetadata, staged stagedAuthCandida
 	if len(t.RequiredEnv) == 0 && len(t.RequiredFiles) == 0 {
 		return true
 	}
+	if len(t.RequiredFiles) > 0 && !in.HomeIsAgentHome {
+		return true
+	}
 	hasEnv := func(k string) bool {
 		if k == "" {
 			return false
@@ -218,42 +249,66 @@ func stagedSatisfiesType(t api.HarnessAuthTypeMetadata, staged stagedAuthCandida
 					return true
 				}
 			}
+			for _, ft := range in.FileTargets {
+				if fileTargetIs(ft, target, in.ContainerHome) {
+					return true
+				}
+			}
 		}
 	}
 	return false
 }
 
+// homeRel resolves a configured container path to a home-relative path with
+// a leading "/" ("/" is the home itself). ok is false for a path outside the
+// home. failOpen is true for a path it cannot resolve: one with variables
+// (the runtime expands those against the broker's environment, not the
+// container's, so they are not resolved here), a relative or empty one, or
+// an absolute one when the container home is unknown.
+func homeRel(p, containerHome string) (rel string, ok, failOpen bool) {
+	p = strings.TrimSpace(p)
+	switch {
+	case p == "" || strings.Contains(p, "$"):
+		return "", false, true
+	case p == "~":
+		return "/", true, false
+	case strings.HasPrefix(p, "~/"):
+		return path.Clean(p[1:]), true, false
+	case strings.HasPrefix(p, "/"):
+		if containerHome == "" {
+			return "", false, true
+		}
+		home := path.Clean(containerHome)
+		p = path.Clean(p)
+		if p != home && !strings.HasPrefix(p, home+"/") {
+			return "", false, false
+		}
+		return path.Clean("/" + strings.TrimPrefix(p, home)), true, false
+	}
+	return "", false, true
+}
+
 // mountCoversTarget reports whether a volume mounted at mountTarget may
 // supply the home-relative path target (leading "/"): the mount is at target
 // or at one of its ancestor directories, up to the home itself. It fails open
-// (true) for a mount target it cannot resolve: one with variables, a relative
-// one, or an absolute one when the container home is unknown.
+// for a mount target it cannot resolve (see homeRel).
 func mountCoversTarget(mountTarget, target, containerHome string) bool {
-	mt := strings.TrimSpace(mountTarget)
-	var rel string
-	switch {
-	case mt == "" || strings.Contains(mt, "$"):
-		return true
-	case mt == "~":
-		rel = "/"
-	case strings.HasPrefix(mt, "~/"):
-		rel = mt[1:]
-	case strings.HasPrefix(mt, "/"):
-		if containerHome == "" {
-			return true
-		}
-		home := path.Clean(containerHome)
-		mt = path.Clean(mt)
-		if mt != home && !strings.HasPrefix(mt, home+"/") {
-			return false
-		}
-		rel = "/" + strings.TrimPrefix(mt, home)
-	default:
+	rel, ok, failOpen := homeRel(mountTarget, containerHome)
+	if failOpen {
 		return true
 	}
-	rel = path.Clean(rel)
+	if !ok {
+		return false
+	}
 	target = path.Clean(target)
 	return rel == "/" || rel == target || strings.HasPrefix(target, rel+"/")
+}
+
+// fileTargetIs reports whether a file secret written at fileTarget is the
+// home-relative path target. It fails open for a target it cannot resolve.
+func fileTargetIs(fileTarget, target, containerHome string) bool {
+	rel, ok, failOpen := homeRel(fileTarget, containerHome)
+	return failOpen || (ok && rel == path.Clean(target))
 }
 
 // requiredFileTargets returns the home-relative paths (with a leading "/")

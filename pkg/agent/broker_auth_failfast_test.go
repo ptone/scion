@@ -14,6 +14,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 // Synthetic placeholder credentials; never real values.
@@ -40,6 +41,24 @@ func stripNoAuth(t *testing.T, hcDir string) {
 	if err := os.WriteFile(path, out, 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// failfastManager is policyTestManager with a named mock runtime: the file
+// part of the check depends on whether the runtime bind-mounts the agent
+// home over the container home.
+func failfastManager(runs *int, runtimeName string) Manager {
+	return NewManager(&runtime.MockRuntime{
+		NameFunc: func() string { return runtimeName },
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+			if runs != nil {
+				*runs++
+			}
+			return "mock-id", nil
+		},
+	})
 }
 
 func brokerStart(t *testing.T, scion, name string) api.StartOptions {
@@ -78,7 +97,7 @@ func TestStart_BrokerFailsFastWhenExplicitAuthTypeUnsatisfied(t *testing.T) {
 	opts := brokerStart(t, e.scion, "ff-explicit")
 	opts.HarnessAuth = "api-key"
 	opts.Env = map[string]string{"GOOGLE_CLOUD_LOCATION": "us-east5"} // ambient only
-	_, err := policyTestManager(&runs).Start(context.Background(), opts)
+	_, err := failfastManager(&runs, "docker").Start(context.Background(), opts)
 	assertNoAuthSatisfied(t, err, runs, "claude", `"api-key"`, "ANTHROPIC_API_KEY", "api-key, auth-file, oauth-token, vertex-ai")
 }
 
@@ -88,7 +107,7 @@ func TestStart_BrokerFailsFastWhenNoAuthForbidden(t *testing.T) {
 	e, hcDir := newClaudeRestartEnv(t)
 	stripNoAuth(t, hcDir)
 	runs := 0
-	_, err := policyTestManager(&runs).Start(context.Background(), brokerStart(t, e.scion, "ff-forbidden"))
+	_, err := failfastManager(&runs, "docker").Start(context.Background(), brokerStart(t, e.scion, "ff-forbidden"))
 	assertNoAuthSatisfied(t, err, runs, "claude", "does not allow starting without credentials", "api-key, auth-file, oauth-token, vertex-ai")
 }
 
@@ -121,7 +140,7 @@ func TestStart_BrokerStartsWithEachSatisfyingCredential(t *testing.T) {
 			opts.HarnessAuth = tc.explicit
 			opts.Env = tc.env
 			opts.ResolvedSecrets = tc.secrets
-			if _, err := policyTestManager(&runs).Start(context.Background(), opts); err != nil {
+			if _, err := failfastManager(&runs, "docker").Start(context.Background(), opts); err != nil {
 				t.Fatalf("Start: %v", err)
 			}
 			if runs != 1 {
@@ -135,7 +154,7 @@ func TestStart_BrokerStartsWithEachSatisfyingCredential(t *testing.T) {
 func TestStart_BrokerStartsWithoutCredentialsWhenNoAuthAllowed(t *testing.T) {
 	e, _ := newClaudeRestartEnv(t) // claude ships no_auth: drop-to-shell
 	runs := 0
-	if _, err := policyTestManager(&runs).Start(context.Background(), brokerStart(t, e.scion, "ff-noauth")); err != nil {
+	if _, err := failfastManager(&runs, "docker").Start(context.Background(), brokerStart(t, e.scion, "ff-noauth")); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if runs != 1 {
@@ -147,7 +166,7 @@ func TestStart_BrokerStartsWithoutCredentialsWhenNoAuthAllowed(t *testing.T) {
 // provision) satisfies an explicit file auth type on restart.
 func TestStart_BrokerRestartWithExistingCredentialFile(t *testing.T) {
 	e, _ := newClaudeRestartEnv(t)
-	mgr := policyTestManager(nil)
+	mgr := failfastManager(nil, "docker")
 	opts := brokerStart(t, e.scion, "ff-file")
 	if _, err := mgr.Start(context.Background(), opts); err != nil {
 		t.Fatalf("first Start: %v", err)
@@ -168,7 +187,7 @@ func TestStart_BrokerRestartWithExistingCredentialFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	runs := 0
-	if _, err := policyTestManager(&runs).Start(context.Background(), restart); err != nil {
+	if _, err := failfastManager(&runs, "docker").Start(context.Background(), restart); err != nil {
 		t.Fatalf("restart with the credential file present: %v", err)
 	}
 	if runs != 1 {
@@ -182,7 +201,7 @@ func TestStart_BrokerRestartWithExistingCredentialFile(t *testing.T) {
 func TestStart_BrokerRestartOfStoppedAgentKeepsRecordedCredential(t *testing.T) {
 	e, hcDir := newClaudeRestartEnv(t)
 	stripNoAuth(t, hcDir)
-	mgr := policyTestManager(nil)
+	mgr := failfastManager(nil, "docker")
 	opts := brokerStart(t, e.scion, "ff-restart")
 	opts.Env = map[string]string{"ANTHROPIC_API_KEY": failfastAPIKey, "GOOGLE_CLOUD_LOCATION": "us-east5"}
 	if _, err := mgr.Start(context.Background(), opts); err != nil {
@@ -191,7 +210,7 @@ func TestStart_BrokerRestartOfStoppedAgentKeepsRecordedCredential(t *testing.T) 
 	restart := opts
 	restart.Env = map[string]string{"GOOGLE_CLOUD_LOCATION": "us-east5"}
 	runs := 0
-	if _, err := policyTestManager(&runs).Start(context.Background(), restart); err != nil {
+	if _, err := failfastManager(&runs, "docker").Start(context.Background(), restart); err != nil {
 		t.Fatalf("restart: %v", err)
 	}
 	if runs != 1 {
@@ -204,7 +223,7 @@ func TestStart_LocalModeDoesNotFailFast(t *testing.T) {
 	e, _ := newClaudeRestartEnv(t)
 	runs := 0
 	opts := api.StartOptions{Name: "ff-local", ProjectPath: e.scion, HarnessConfig: "claude", HarnessAuth: "api-key"}
-	if _, err := policyTestManager(&runs).Start(context.Background(), opts); err != nil {
+	if _, err := failfastManager(&runs, "docker").Start(context.Background(), opts); err != nil {
 		t.Fatalf("local Start: %v", err)
 	}
 	if runs != 1 {
@@ -247,7 +266,7 @@ func TestStart_BrokerCredentialFileFromVolume(t *testing.T) {
 			opts := brokerStart(t, e.scion, "ff-volume")
 			opts.HarnessAuth = "auth-file"
 			opts.InlineConfig = &api.ScionConfig{Volumes: []api.VolumeMount{{Source: src, Target: tc.target, ReadOnly: true}}}
-			_, err := policyTestManager(&runs).Start(context.Background(), opts)
+			_, err := failfastManager(&runs, "docker").Start(context.Background(), opts)
 			if tc.wantErr {
 				assertNoAuthSatisfied(t, err, runs, "claude", `"auth-file"`)
 				return
@@ -260,4 +279,86 @@ func TestStart_BrokerCredentialFileFromVolume(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A file-type secret whose target is the auth file's target satisfies an
+// explicit file auth type even when its name and target make it no auth
+// candidate (copilot's ~/.copilot/config.json is not one of the target
+// suffixes OverlayFileSecrets recognises): sciontool writes it to its target
+// before the provisioner runs. A file secret elsewhere does not.
+func TestStart_BrokerCredentialFileFromFileSecret(t *testing.T) {
+	for _, tc := range []struct {
+		name, target string
+		wantErr      bool
+	}{
+		{name: "file secret at target", target: "~/.copilot/config.json"},
+		{name: "absolute file secret at target", target: "/home/scion/.copilot/config.json"},
+		{name: "file secret elsewhere", target: "~/.copilot/other.json", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, k := range []string{"COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"} {
+				t.Setenv(k, "")
+			}
+			e, _ := newClaudeRestartEnv(t)
+			src, err := filepath.Abs(filepath.Join("..", "..", "harnesses", "copilot"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.CopyFS(filepath.Join(e.scion, "harness-configs", "copilot"), os.DirFS(src)); err != nil {
+				t.Fatalf("copy copilot harness-config: %v", err)
+			}
+			runs := 0
+			opts := api.StartOptions{Name: "ff-filesecret", ProjectPath: e.scion, HarnessConfig: "copilot", BrokerMode: true,
+				HarnessAuth: "auth-file",
+				ResolvedSecrets: []api.ResolvedSecret{{
+					Name: "copilot-settings", Type: "file", Target: tc.target, Value: `{"placeholder":true}`, Source: "user",
+				}}}
+			_, err = failfastManager(&runs, "docker").Start(context.Background(), opts)
+			if tc.wantErr {
+				assertNoAuthSatisfied(t, err, runs, "copilot", `"auth-file"`)
+				return
+			}
+			if err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if runs != 1 {
+				t.Errorf("container ran %d times, want 1", runs)
+			}
+		})
+	}
+}
+
+// On a runtime that does not bind-mount the agent home over the container
+// home (Kubernetes here), the container home can hold credential files the
+// broker cannot see, so an explicit file auth type is not rejected. An
+// env-only auth type still is.
+func TestStart_BrokerOtherRuntimeFailsOpenForFileTypes(t *testing.T) {
+	t.Run("explicit file type starts", func(t *testing.T) {
+		e, _ := newClaudeRestartEnv(t)
+		runs := 0
+		opts := brokerStart(t, e.scion, "ff-k8s-file")
+		opts.HarnessAuth = "auth-file"
+		if _, err := failfastManager(&runs, "kubernetes").Start(context.Background(), opts); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		if runs != 1 {
+			t.Errorf("container ran %d times, want 1", runs)
+		}
+	})
+	t.Run("same start on docker fails", func(t *testing.T) {
+		e, _ := newClaudeRestartEnv(t)
+		runs := 0
+		opts := brokerStart(t, e.scion, "ff-docker-file")
+		opts.HarnessAuth = "auth-file"
+		_, err := failfastManager(&runs, "docker").Start(context.Background(), opts)
+		assertNoAuthSatisfied(t, err, runs, "claude", `"auth-file"`)
+	})
+	t.Run("explicit env-only type still fails", func(t *testing.T) {
+		e, _ := newClaudeRestartEnv(t)
+		runs := 0
+		opts := brokerStart(t, e.scion, "ff-k8s-env")
+		opts.HarnessAuth = "api-key"
+		_, err := failfastManager(&runs, "kubernetes").Start(context.Background(), opts)
+		assertNoAuthSatisfied(t, err, runs, "claude", `"api-key"`)
+	})
 }
