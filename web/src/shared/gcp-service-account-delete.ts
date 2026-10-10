@@ -81,7 +81,10 @@ export async function deleteGCPServiceAccount(
     }
   }
   if (!res.ok) {
-    return { status: 'failed', message: await errorMessage(res, 'Failed to delete (HTTP ' + res.status + ')') };
+    return {
+      status: 'failed',
+      message: await errorMessage(res, 'Failed to delete (HTTP ' + res.status + ')'),
+    };
   }
   return { status: 'deleted' };
 }

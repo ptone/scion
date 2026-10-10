@@ -24,7 +24,7 @@ function json(status: number, body: unknown): Response {
   });
 }
 
-const inUse = (clearable: boolean) =>
+const inUse = (clearable: boolean): Response =>
   json(409, {
     error: {
       code: 'sa_in_use',
@@ -37,13 +37,17 @@ describe('deleteGCPServiceAccount', () => {
   it('deletes without asking when nothing references the account', async () => {
     const doDelete = vi.fn().mockResolvedValue(json(200, { deleted: true }));
     const confirm = vi.fn();
-    expect(await deleteGCPServiceAccount('/sa/1', doDelete, confirm)).toEqual({ status: 'deleted' });
+    expect(await deleteGCPServiceAccount('/sa/1', doDelete, confirm)).toEqual({
+      status: 'deleted',
+    });
     expect(confirm).not.toHaveBeenCalled();
   });
 
   it('accepts a 204 from an older hub', async () => {
     const doDelete = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
-    expect(await deleteGCPServiceAccount('/sa/1', doDelete, vi.fn())).toEqual({ status: 'deleted' });
+    expect(await deleteGCPServiceAccount('/sa/1', doDelete, vi.fn())).toEqual({
+      status: 'deleted',
+    });
   });
 
   it('asks, then retries with force when every default is clearable', async () => {
@@ -52,7 +56,9 @@ describe('deleteGCPServiceAccount', () => {
       .mockResolvedValueOnce(inUse(true))
       .mockResolvedValueOnce(json(200, { deleted: true }));
     const confirm = vi.fn().mockResolvedValue(true);
-    expect(await deleteGCPServiceAccount('/sa/1', doDelete, confirm)).toEqual({ status: 'deleted' });
+    expect(await deleteGCPServiceAccount('/sa/1', doDelete, confirm)).toEqual({
+      status: 'deleted',
+    });
     expect(confirm).toHaveBeenCalledOnce();
     expect(doDelete).toHaveBeenLastCalledWith('/sa/1?force=true');
   });
@@ -60,7 +66,9 @@ describe('deleteGCPServiceAccount', () => {
   it('stops when the user declines', async () => {
     const doDelete = vi.fn().mockResolvedValueOnce(inUse(true));
     const confirm = vi.fn().mockResolvedValue(false);
-    expect(await deleteGCPServiceAccount('/sa/1', doDelete, confirm)).toEqual({ status: 'cancelled' });
+    expect(await deleteGCPServiceAccount('/sa/1', doDelete, confirm)).toEqual({
+      status: 'cancelled',
+    });
     expect(doDelete).toHaveBeenCalledOnce();
   });
 
@@ -73,7 +81,9 @@ describe('deleteGCPServiceAccount', () => {
   });
 
   it('surfaces other errors', async () => {
-    const doDelete = vi.fn().mockResolvedValue(json(403, { error: { code: 'forbidden', message: 'nope' } }));
+    const doDelete = vi
+      .fn()
+      .mockResolvedValue(json(403, { error: { code: 'forbidden', message: 'nope' } }));
     expect(await deleteGCPServiceAccount('/sa/1', doDelete, vi.fn())).toEqual({
       status: 'failed',
       message: 'nope',
