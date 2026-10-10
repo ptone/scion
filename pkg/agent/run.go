@@ -1079,7 +1079,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 				// secrets can supply credential files under the home, so
 				// their targets count. Shared directories mount outside the
 				// home (/scion-volumes/<name>, <workspace>/.scion-volumes/),
-				// so they could never count and are not passed.
+				// so they are not passed as mounts; a symlink in the agent
+				// home that points into one makes the check fail open.
 				if opts.BrokerMode {
 					in := harness.AuthCheckInputs{
 						AgentHome:       agentHome,

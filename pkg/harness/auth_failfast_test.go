@@ -288,3 +288,74 @@ func TestFileTargetIs(t *testing.T) {
 		}
 	}
 }
+
+// A symlink at the target, or at an ancestor directory, in the agent home
+// resolves inside the container (for example into a shared directory), so
+// the check fails open even when the link target is missing on the broker.
+func TestCheckStagedAuthSymlinkInAgentHome(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "not-on-broker", "scion-volumes", "creds")
+	cases := []struct {
+		name, link string // home-relative link path
+		wantErr    bool
+	}{
+		{name: "leaf symlink", link: ".example/auth.json"},
+		{name: "ancestor directory symlink", link: ".example"},
+		{name: "symlink elsewhere", link: ".other", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := stageCandidates(t, map[string]interface{}{"explicit_type": "auth-file"})
+			p := filepath.Join(home, tc.link)
+			if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(missing, "auth.json"), p); err != nil {
+				t.Fatal(err)
+			}
+			err := CheckStagedAuth("example", failfastAuthMeta(), nil,
+				AuthCheckInputs{AgentHome: home, ContainerHome: "/home/scion", HomeIsAgentHome: true})
+			if tc.wantErr {
+				if !errors.Is(err, ErrNoAuthSatisfied) {
+					t.Fatalf("CheckStagedAuth = %v, want ErrNoAuthSatisfied", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("CheckStagedAuth = %v, want nil", err)
+			}
+		})
+	}
+}
+
+func TestAgentHomeMayHoldFile(t *testing.T) {
+	home := t.TempDir()
+	mk := func(rel string, dir bool) {
+		p := filepath.Join(home, rel)
+		if dir {
+			if err := os.MkdirAll(p, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk(".a/file.json", false)
+	mk(".b/dir.json", true)
+	mk(".c", false)
+	for target, want := range map[string]bool{
+		"/.a/file.json":    true,
+		"/.b/dir.json":     false, // a directory at the target
+		"/.a/missing.json": false,
+		"/.c/file.json":    false, // a file where a directory is needed
+		"/.d/file.json":    false,
+	} {
+		if got := agentHomeMayHoldFile(home, target); got != want {
+			t.Errorf("agentHomeMayHoldFile(%q) = %t, want %t", target, got, want)
+		}
+	}
+}

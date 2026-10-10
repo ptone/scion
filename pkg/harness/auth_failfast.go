@@ -97,7 +97,11 @@ func HomeIsAgentHomeRuntime(runtimeName string) bool {
 //   - a volume mounted at the target or at an ancestor directory (counted
 //     through MountTargets);
 //   - the container home itself. On Docker, Podman and Apple container the
-//     agent home is bind-mounted over it, so the check looks in AgentHome.
+//     agent home is bind-mounted over it, so the check looks in AgentHome. A
+//     symlink anywhere on the target's path there fails open: it resolves in
+//     the container (for example into a shared directory), not on the
+//     broker. Shared directories are otherwise outside the home and are not
+//     passed as mounts.
 //     On any other runtime the home can hold files the broker cannot see,
 //     so every type with required files counts as satisfied there and only
 //     env-only types can be rejected.
@@ -122,8 +126,9 @@ func HomeIsAgentHomeRuntime(runtimeName string) bool {
 //   - a file-type secret whose target is the file's target;
 //   - a volume mounted at its target or at an ancestor directory;
 //   - a file already present in the agent home at its target (for example,
-//     written by an earlier provision before a restart), on runtimes where
-//     HomeIsAgentHome; on other runtimes any type with required files.
+//     written by an earlier provision before a restart), or a symlink on
+//     its path there, on runtimes where HomeIsAgentHome; on other runtimes
+//     any type with required files.
 //
 // This is more permissive than both the harness-config auth.types and the
 // provisioner, so where they differ the start is allowed.
@@ -239,10 +244,8 @@ func stagedSatisfiesType(t api.HarnessAuthTypeMetadata, staged stagedAuthCandida
 					return true
 				}
 			}
-			if in.AgentHome != "" {
-				if info, err := os.Stat(filepath.Join(in.AgentHome, filepath.FromSlash(target))); err == nil && !info.IsDir() {
-					return true
-				}
+			if in.AgentHome != "" && agentHomeMayHoldFile(in.AgentHome, target) {
+				return true
 			}
 			for _, mt := range in.MountTargets {
 				if mountCoversTarget(mt, target, in.ContainerHome) {
@@ -292,6 +295,36 @@ func homeRel(p, containerHome string) (rel string, ok, failOpen bool) {
 		return path.Clean("/" + strings.TrimPrefix(p, home)), true, false
 	}
 	return "", false, true
+}
+
+// agentHomeMayHoldFile reports whether the agent home holds a file at the
+// home-relative path target. It walks the path's components with Lstat and
+// fails open (true) on any symlink: the link resolves inside the container
+// (for example into a shared directory), not on the broker. Otherwise an
+// existing non-directory leaf counts.
+func agentHomeMayHoldFile(agentHome, target string) bool {
+	parts := strings.Split(strings.Trim(path.Clean(target), "/"), "/")
+	cur := agentHome
+	for i, part := range parts {
+		if part == "" {
+			return false
+		}
+		cur = filepath.Join(cur, part)
+		info, err := os.Lstat(cur)
+		if err != nil {
+			return false
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return true
+		}
+		if i == len(parts)-1 {
+			return !info.IsDir()
+		}
+		if !info.IsDir() {
+			return false
+		}
+	}
+	return false
 }
 
 // mountCoversTarget reports whether a volume mounted at mountTarget may

@@ -365,3 +365,38 @@ func TestStart_BrokerOtherRuntimeFailsOpenForFileTypes(t *testing.T) {
 		assertNoAuthSatisfied(t, err, runs, "claude", `"api-key"`)
 	})
 }
+
+// A credential symlink left in the agent home (for example pointing into a
+// shared directory) satisfies an explicit file auth type on restart, even
+// though its target does not exist on the broker: it resolves in the
+// container.
+func TestStart_BrokerRestartWithCredentialSymlink(t *testing.T) {
+	e, _ := newClaudeRestartEnv(t)
+	mgr := failfastManager(nil, "docker")
+	opts := brokerStart(t, e.scion, "ff-symlink")
+	if _, err := mgr.Start(context.Background(), opts); err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	home := config.GetAgentHomePath(e.scion, "ff-symlink")
+
+	restart := opts
+	restart.HarnessAuth = "auth-file"
+	if _, err := mgr.Start(context.Background(), restart); !errors.Is(err, harness.ErrNoAuthSatisfied) {
+		t.Fatalf("fixture: restart without the symlink = %v, want ErrNoAuthSatisfied", err)
+	}
+
+	link := filepath.Join(home, ".claude", ".credentials.json")
+	if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(t.TempDir(), "absent", "scion-volumes", "creds", "claude.json"), link); err != nil {
+		t.Fatal(err)
+	}
+	runs := 0
+	if _, err := failfastManager(&runs, "docker").Start(context.Background(), restart); err != nil {
+		t.Fatalf("restart with the credential symlink present: %v", err)
+	}
+	if runs != 1 {
+		t.Errorf("container ran %d times, want 1", runs)
+	}
+}
