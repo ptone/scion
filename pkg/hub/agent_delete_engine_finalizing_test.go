@@ -20,8 +20,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -123,6 +126,41 @@ func requireHardDeleted(t *testing.T, s store.Store, id string, rec *httptest.Re
 	assert.True(t, agentGone(t, s, id), "hard-deleted")
 }
 
+// fallbackWarning is the claim's log message for a finalizing row with no
+// usable stored request.
+const fallbackWarning = "finalizing row has no stored request"
+
+// captureLifecycleLog sends the server's lifecycle log to a buffer.
+func captureLifecycleLog(srv *Server) *syncBuffer {
+	logs := &syncBuffer{}
+	srv.agentLifecycleLog = slog.New(slog.NewTextHandler(logs, nil))
+	return logs
+}
+
+// fallbackWarnings returns the logged fallback warning lines.
+func fallbackWarnings(logs *syncBuffer) []string {
+	var out []string
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(line, fallbackWarning) {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// emptyStoredRequest blanks the stored request of a's finalizing row,
+// pinned to its claim.
+func emptyStoredRequest(t *testing.T, s store.Store, a *store.Agent) {
+	t.Helper()
+	claim := a.DeletionClaim
+	empty := ""
+	n, err := s.UpdateAgentDeletion(context.Background(), a.ID,
+		store.DeletionPredicate{Claim: &claim, States: []string{store.DeletionStateFinalizing}},
+		store.DeletionFields{Request: &empty})
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+}
+
 // A soft delete that failed its revoke, retried with force, still ends soft.
 func TestAgentDeleteFinalizingRetry_ForceKeepsSoft(t *testing.T) {
 	f := newFinalizingFixture(t, "fin-force", time.Hour)
@@ -197,11 +235,13 @@ func TestAgentDeleteFinalizingRetry_ClaimUsesStoredRequest(t *testing.T) {
 			require.True(t, stored.Soft)
 			require.NotEqual(t, "retrier", stored.RequestedBy)
 
+			logs := captureLifecycleLog(f.srv)
 			plan, err := f.srv.claimAgentDeletion(context.Background(), f.agent.ID, tc.params)
 			require.NoError(t, err)
 			require.NotNil(t, plan, "the lapsed finalizing row is re-claimed")
 			assert.True(t, plan.skipDispatch)
 			assert.Equal(t, stored, plan.req, "the plan carries the stored request")
+			assert.Empty(t, fallbackWarnings(logs), "a stored request is no fallback")
 
 			after := mustGetAgent(t, f.s, f.agent.ID)
 			assert.Equal(t, before.DeletionClaim+1, after.DeletionClaim)
@@ -228,17 +268,17 @@ func TestAgentDeleteFinalizingRetry_ClaimFallbackIgnoresRetryParams(t *testing.T
 			f := newFinalizingFixture(t, "fin-claimfb-"+string(rune('a'+i)), tc.retention)
 			got := f.revokeFailed(t, "")
 			claim := got.DeletionClaim
-			empty := ""
-			n, err := f.s.UpdateAgentDeletion(context.Background(), f.agent.ID,
-				store.DeletionPredicate{Claim: &claim, States: []string{store.DeletionStateFinalizing}},
-				store.DeletionFields{Request: &empty})
-			require.NoError(t, err)
-			require.Equal(t, 1, n)
+			emptyStoredRequest(t, f.s, got)
 
+			logs := captureLifecycleLog(f.srv)
 			plan, err := f.srv.claimAgentDeletion(context.Background(), f.agent.ID,
 				agentDeleteParams{deleteFiles: true, removeBranch: true, force: true, requestedBy: "retrier"})
 			require.NoError(t, err)
 			require.NotNil(t, plan, "the lapsed finalizing row is re-claimed")
+			warnings := fallbackWarnings(logs)
+			if assert.Len(t, warnings, 1, "one fallback warning per confirmed claim") {
+				assert.Contains(t, warnings[0], fmt.Sprintf("claim=%d", claim+1))
+			}
 			assert.True(t, plan.skipDispatch)
 			want := store.DeletionRequestInfo{Soft: tc.wantSoft, RequestedBy: "retrier"}
 			assert.Equal(t, want, plan.req, "the plan carries the fallback request")
@@ -250,6 +290,38 @@ func TestAgentDeleteFinalizingRetry_ClaimFallbackIgnoresRetryParams(t *testing.T
 			assert.Equal(t, string(wantJSON), after.DeletionRequest, "the fallback request is stored")
 		})
 	}
+}
+
+// The fallback warning is logged only for a confirmed claim: when another
+// claim takes the row between this claim's write and its re-read, the claim
+// is lost and nothing is logged.
+func TestAgentDeleteFinalizingRetry_FallbackNotLoggedForLostClaim(t *testing.T) {
+	f := newFinalizingFixture(t, "fin-lostlog", time.Hour)
+	got := f.revokeFailed(t, "")
+	emptyStoredRequest(t, f.s, got)
+
+	// Right after the claim's write, a newer claim takes the row.
+	var once sync.Once
+	f.hooks.afterDeletionWrite = func(_ store.DeletionPredicate, n int) {
+		if n != 1 {
+			return
+		}
+		once.Do(func() {
+			mine := got.DeletionClaim + 1
+			bumped, err := f.s.UpdateAgentDeletion(context.Background(), f.agent.ID,
+				store.DeletionPredicate{Claim: &mine}, store.DeletionFields{BumpClaim: true})
+			require.NoError(t, err)
+			require.Equal(t, 1, bumped)
+		})
+	}
+
+	logs := captureLifecycleLog(f.srv)
+	plan, err := f.srv.claimAgentDeletion(context.Background(), f.agent.ID,
+		agentDeleteParams{force: true, requestedBy: "retrier"})
+	require.NoError(t, err)
+	require.Nil(t, plan, "the claim was lost")
+	assert.Equal(t, got.DeletionClaim+2, mustGetAgent(t, f.s, f.agent.ID).DeletionClaim)
+	assert.Empty(t, fallbackWarnings(logs), "a lost claim logs no fallback warning")
 }
 
 // A finalizing row with no usable stored request falls back to the current
