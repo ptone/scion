@@ -55,7 +55,11 @@ import type { ScionApp } from './app-shell.js';
 import type { ScionLoginPage } from './pages/login.js';
 
 const OFF: TestInfraStatus = { testIdentities: false, testHubAdmin: false, testSuperAdmin: false };
-const MEMBER: TestInfraStatus = { testIdentities: true, testHubAdmin: false, testSuperAdmin: false };
+const MEMBER: TestInfraStatus = {
+  testIdentities: true,
+  testHubAdmin: false,
+  testSuperAdmin: false,
+};
 const ADMIN: TestInfraStatus = { testIdentities: true, testHubAdmin: true, testSuperAdmin: false };
 const SUPER: TestInfraStatus = { testIdentities: true, testHubAdmin: true, testSuperAdmin: true };
 
@@ -294,9 +298,9 @@ describe('app shell', () => {
 
       const shell = await mountShell();
       await vi.waitFor(() =>
-        expect(
-          fetchMock.mock.calls.some(([u]) => String(u).endsWith(TEST_INFRA_STATUS_URL))
-        ).toBe(true)
+        expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith(TEST_INFRA_STATUS_URL))).toBe(
+          true
+        )
       );
       await new Promise((r) => setTimeout(r, 0));
       await shell.updateComplete;

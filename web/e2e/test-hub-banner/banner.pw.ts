@@ -44,7 +44,9 @@ async function expectBanner(page: Page, text: string, icon: string): Promise<voi
   const b = banner(page);
   await expect(b).toHaveCount(1);
   await expect(b).toBeVisible();
-  await expect(b).toHaveText(text);
+  // The slotted message: sl-alert's own shadow DOM adds hidden text of its
+  // own (the auto-hide countdown), which a host-level text match would see.
+  await expect(b.locator(':scope > strong')).toHaveText(text);
   await expect(b).toHaveAttribute('variant', 'warning');
   await expect(b).toHaveAttribute('open', '');
   await expect(b).not.toHaveAttribute('closable', /.*/);
