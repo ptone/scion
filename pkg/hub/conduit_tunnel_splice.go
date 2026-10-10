@@ -63,12 +63,14 @@ func (t *conduitTunnel) deadline() time.Time {
 }
 
 // closeBoth is the re-check's Close: both legs end with code and reason.
-// The code is recorded first, so the splice passes the same code to both
-// legs whichever leg closes first. It never blocks the caller.
+// The code is recorded first (the first recorded close wins), so the
+// splice passes the same code to both legs whichever leg closes first. It
+// never blocks the caller.
 func (t *conduitTunnel) closeBoth(code uint32, reason string) {
 	t.closing.CompareAndSwap(nil, &conduit.CloseError{Code: code, Reason: reason})
-	go func() { _ = t.user.CloseWithCode(code, reason) }()
-	go func() { _ = t.target.CloseWithCode(code, reason) }()
+	c := t.closing.Load()
+	go func() { _ = t.user.CloseWithCode(c.Code, c.Reason) }()
+	go func() { _ = t.target.CloseWithCode(c.Code, c.Reason) }()
 }
 
 // run copies framed data both ways until both directions end, forwarding
