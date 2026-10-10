@@ -23,6 +23,13 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
+import {
+  TestHubBannerController,
+  renderTestHubBanner,
+  testHubBannerContent,
+  testHubBannerStyles,
+} from '../shared/test-hub-banner.js';
+
 /**
  * OAuth provider configuration
  */
@@ -71,7 +78,12 @@ export class ScionLoginPage extends LitElement {
   @state()
   private _loading = false;
 
+  /** The test-hub banner's status (shared/test-hub-banner.ts). */
+  private _testHubBanner = new TestHubBannerController(this);
+
   static override styles = css`
+    ${testHubBannerStyles}
+
     :host {
       display: flex;
       align-items: center;
@@ -79,6 +91,20 @@ export class ScionLoginPage extends LitElement {
       min-height: 100vh;
       background: var(--scion-bg, #f8fafc);
       padding: 1rem;
+    }
+
+    /* The test-hub banner spans the top of the page, above the centred
+       card, and the page keeps clear of it. */
+    sl-alert.test-hub-banner {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 20;
+    }
+
+    :host([test-hub]) {
+      padding-top: 4.5rem;
     }
 
     .login-container {
@@ -361,7 +387,15 @@ export class ScionLoginPage extends LitElement {
     }
   }
 
+  override updated(): void {
+    this.toggleAttribute('test-hub', testHubBannerContent(this._testHubBanner.status) !== null);
+  }
+
   override render() {
+    return html`${renderTestHubBanner(this._testHubBanner.status)}${this.renderPage()}`;
+  }
+
+  private renderPage() {
     if (this._providersLoading) {
       return this.renderLoading();
     }

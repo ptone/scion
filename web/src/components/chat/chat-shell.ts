@@ -30,6 +30,7 @@
  */
 
 import { LitElement, html, css } from 'lit';
+import { keyed } from 'lit/directives/keyed.js';
 import { customElement, property } from 'lit/decorators.js';
 
 import '../shared/header.js';
@@ -42,6 +43,11 @@ import type { PageTitleDetail } from '../../client/page-title.js';
 import { enterAppFrame, exitAppFrame } from '../shared/app-frame.js';
 import { deepActiveElement } from '../shared/deep-active-element.js';
 import { FOCUS_MOVED_EVENT } from '../shared/focus-moved.js';
+import {
+  TestHubBannerController,
+  renderTestHubBanner,
+  testHubBannerStyles,
+} from '../shared/test-hub-banner.js';
 
 /** Whether `el` takes typed text, and so brings up the on-screen keyboard. */
 function isTextField(el: Element | null): boolean {
@@ -113,7 +119,12 @@ export class ScionChatShell extends LitElement {
   /** Watches the top bar's height while it is visible. */
   private _topBarObserver: ResizeObserver | null = null;
 
+  /** The test-hub banner's status (shared/test-hub-banner.ts). */
+  private _testHubBanner = new TestHubBannerController(this);
+
   static override styles = css`
+    ${testHubBannerStyles}
+
     :host {
       display: flex;
       height: var(--scion-app-height, 100dvh);
@@ -276,6 +287,7 @@ export class ScionChatShell extends LitElement {
   override updated(changedProperties: Map<string, unknown>): void {
     if (changedProperties.has('currentPath')) {
       this.updateDocumentTitle();
+      this._testHubBanner.ensure();
     }
   }
 
@@ -313,6 +325,7 @@ export class ScionChatShell extends LitElement {
   override render() {
     return html`
       <main class="main">
+        ${keyed(this.currentPath, renderTestHubBanner(this._testHubBanner.status))}
         <scion-header
           .user=${this.user}
           .currentPath=${this.currentPath}
