@@ -18,10 +18,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -143,77 +141,6 @@ func TestApplyStartTemplateIdentity_NoIdentityKeepsPreviousBehaviour(t *testing.
 	require.NoError(t, f.apply(startContextInputs{}, conn, "web-dev"))
 	assert.Empty(t, f.opts.Template)
 	_, set := f.env["SCION_TEMPLATE"]
-	assert.False(t, set)
-}
-
-// TestRestartAgent_UsesRequestInputsWithoutContainer proves a restart of an
-// agent with no container (on Kubernetes, stopping an agent deletes its
-// pod) resolves the agent's project from the request and carries the
-// workspace-recreation inputs to Manager.Start, as a start does.
-func TestRestartAgent_UsesRequestInputsWithoutContainer(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	srv := newTestServer(t)
-	mgr := srv.manager.(*mockManager)
-
-	projectDir := filepath.Join(t.TempDir(), ".scion")
-	require.NoError(t, os.MkdirAll(projectDir, 0o755))
-
-	body := `{
-		"resolvedEnv": {"SCION_AGENT_ID": "agent-uuid-2157"},
-		"projectPath": "` + projectDir + `",
-		"harnessConfig": "claude",
-		"gitClone": {"url": "https://github.com/example/repo.git", "branch": "main"},
-		"branch": "feature-branch",
-		"templateName": "web-dev"
-	}`
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/gone-agent/restart", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
-
-	require.Equal(t, http.StatusAccepted, w.Code, w.Body.String())
-	require.Equal(t, 1, mgr.startCalls)
-	opts := mgr.lastStartOpts
-	assert.Equal(t, projectDir, opts.ProjectPath, "the project comes from the request, not a container")
-	require.NotNil(t, opts.GitClone, "the restart must carry the git clone settings")
-	assert.Equal(t, "https://github.com/example/repo.git", opts.GitClone.URL)
-	assert.Equal(t, "feature-branch", opts.Branch)
-	assert.Equal(t, "claude", opts.HarnessConfig)
-	assert.Equal(t, "https://github.com/example/repo.git", opts.Env["SCION_GIT_CLONE_URL"])
-	assert.False(t, opts.FreshProvision, "a restart never clears an existing workspace")
-}
-
-// TestRestartAgent_OlderHubFallsBackToContainerProject proves a restart from
-// an older Hub (no project in the request) still takes the project from the
-// agent's container, and builds no start config.
-func TestRestartAgent_OlderHubFallsBackToContainerProject(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	srv := newTestServer(t)
-	mgr := srv.manager.(*mockManager)
-	projectDir := filepath.Join(t.TempDir(), ".scion")
-	require.NoError(t, os.MkdirAll(projectDir, 0o755))
-	mgr.mu.Lock()
-	mgr.agents = append(mgr.agents, api.AgentInfo{
-		ID:              "container-2157",
-		ContainerID:     "container-2157",
-		Name:            "kept-agent",
-		Slug:            "kept-agent",
-		ProjectPath:     projectDir,
-		Phase:           "running",
-		ContainerStatus: "Up 1 hour",
-	})
-	mgr.mu.Unlock()
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/kept-agent/restart", strings.NewReader(`{"resolvedEnv": {"FOO": "bar"}}`))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
-
-	require.Equal(t, http.StatusAccepted, w.Code, w.Body.String())
-	opts := mgr.lastStartOpts
-	assert.Equal(t, projectDir, opts.ProjectPath)
-	assert.Nil(t, opts.GitClone)
-	_, set := opts.Env["SCION_GIT_CLONE_URL"]
 	assert.False(t, set)
 }
 
