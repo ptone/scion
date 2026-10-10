@@ -223,8 +223,7 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 					f.Request = &rs
 				}
 			}
-			switch {
-			case cur.DeletionState == store.DeletionStateFinalizing:
+			if cur.DeletionState == store.DeletionStateFinalizing {
 				if stored, ok := storedDeletionRequest(cur); ok {
 					// Teardown ran under the stored request, so the
 					// finish keeps its soft/hard decision (and the whole
@@ -246,7 +245,7 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 					}
 					writeRequest()
 				}
-			default:
+			} else {
 				// Soft unless force, no retention, or an incomplete async
 				// create (T1 §0c, evaluated on the post-claim row): those
 				// are always hard-deleted so the name can be reused.
