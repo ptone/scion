@@ -309,6 +309,105 @@ describe('app shell', () => {
   });
 });
 
+describe('chat and profile shells', () => {
+  beforeAll(async () => {
+    await import('./chat/chat-shell.js');
+    await import('./profile/profile-shell.js');
+  }, 30_000);
+
+  it.each([
+    ['scion-chat-shell', '/chat', '/chat/agent-1'],
+    ['scion-profile-shell', '/profile/settings', '/profile/tokens'],
+  ] as const)(
+    '%s: banner first in main, back after removal and a path change',
+    async (tag, first, second) => {
+      stubHub(MEMBER);
+      const shell = document.createElement(tag) as HTMLElement & {
+        currentPath: string;
+        updateComplete: Promise<boolean>;
+      };
+      shell.currentPath = first;
+      document.body.appendChild(shell);
+      await shell.updateComplete;
+      await vi.waitFor(() => expect(bannerIn(shell.shadowRoot)).not.toBeNull());
+
+      const banner = bannerIn(shell.shadowRoot)!;
+      expect(banner.textContent?.trim()).toBe(TEST_HUB_MEMBER_TEXT);
+      expect(banner.hasAttribute('closable')).toBe(false);
+      expect(shell.shadowRoot!.querySelector('main')!.firstElementChild).toBe(banner);
+
+      banner.remove();
+      shell.currentPath = second;
+      await shell.updateComplete;
+      const again = bannerIn(shell.shadowRoot);
+      expect(again).not.toBeNull();
+      expect(again).not.toBe(banner);
+    }
+  );
+
+  it('scion-chat-shell: no banner element when every gate is off', async () => {
+    const fetchMock = stubHub(OFF);
+    const shell = document.createElement('scion-chat-shell');
+    document.body.appendChild(shell);
+    await shell.updateComplete;
+    await vi.waitFor(() =>
+      expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith(TEST_INFRA_STATUS_URL))).toBe(
+        true
+      )
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    await shell.updateComplete;
+    expect(shell.shadowRoot!.querySelector('sl-alert')).toBeNull();
+  });
+});
+
+describe('invite and onboarding pages', () => {
+  beforeAll(async () => {
+    await import('./pages/invite.js');
+    await import('./pages/onboarding.js');
+  }, 30_000);
+
+  it.each(['scion-page-invite', 'scion-page-onboarding'] as const)(
+    '%s shows the banner first, in normal flow, without signing in',
+    async (tag) => {
+      stubHub(SUPER);
+      const page = document.createElement(tag) as HTMLElement & {
+        updateComplete: Promise<boolean>;
+      };
+      document.body.appendChild(page);
+      await page.updateComplete;
+      await vi.waitFor(() => expect(bannerIn(page.shadowRoot)).not.toBeNull());
+      const banner = bannerIn(page.shadowRoot)!;
+      expect(banner.textContent?.trim()).toBe(TEST_HUB_SUPER_ADMIN_TEXT);
+      expect(banner.hasAttribute('closable')).toBe(false);
+      await vi.waitFor(() => expect(page.hasAttribute('test-hub')).toBe(true));
+      // First element of the page, so it sits above the content.
+      expect(page.shadowRoot!.firstElementChild).toBe(banner);
+    }
+  );
+
+  it.each(['scion-page-invite', 'scion-page-onboarding'] as const)(
+    '%s renders no banner element when every gate is off',
+    async (tag) => {
+      const fetchMock = stubHub(OFF);
+      const page = document.createElement(tag) as HTMLElement & {
+        updateComplete: Promise<boolean>;
+      };
+      document.body.appendChild(page);
+      await page.updateComplete;
+      await vi.waitFor(() =>
+        expect(
+          fetchMock.mock.calls.some(([u]) => String(u).endsWith(TEST_INFRA_STATUS_URL))
+        ).toBe(true)
+      );
+      await new Promise((r) => setTimeout(r, 0));
+      await page.updateComplete;
+      expect(page.shadowRoot!.querySelector('sl-alert')).toBeNull();
+      expect(page.hasAttribute('test-hub')).toBe(false);
+    }
+  );
+});
+
 describe('login page', () => {
   beforeAll(async () => {
     await import('./pages/login.js');
@@ -331,7 +430,35 @@ describe('login page', () => {
     const banner = bannerIn(page.shadowRoot)!;
     expect(banner.textContent?.trim()).toBe(text);
     expect(banner.hasAttribute('closable')).toBe(false);
-    expect(page.hasAttribute('test-hub')).toBe(true);
+    await vi.waitFor(() => expect(page.hasAttribute('test-hub')).toBe(true));
+    // In normal flow, first in the page, not fixed over the card.
+    expect(page.shadowRoot!.firstElementChild).toBe(banner);
+    expect(getComputedStyle(banner).position).not.toBe('fixed');
+  });
+
+  it('retries a failed status fetch when the page updates', async () => {
+    let fail = true;
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url.endsWith(TEST_INFRA_STATUS_URL) && fail) {
+        return Promise.resolve(new Response('unavailable', { status: 503 }));
+      }
+      const body = url.endsWith(TEST_INFRA_STATUS_URL) ? MEMBER : {};
+      return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const statusCalls = (): number =>
+      fetchMock.mock.calls.filter(([u]) => String(u).endsWith(TEST_INFRA_STATUS_URL)).length;
+
+    const page = await mountLogin();
+    await vi.waitFor(() => expect(statusCalls()).toBeGreaterThan(0));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(bannerIn(page.shadowRoot)).toBeNull();
+
+    fail = false;
+    page.requestUpdate();
+    await vi.waitFor(() => expect(bannerIn(page.shadowRoot)).not.toBeNull());
+    expect(bannerIn(page.shadowRoot)!.textContent?.trim()).toBe(TEST_HUB_MEMBER_TEXT);
   });
 
   it('renders no banner element when every gate is off', async () => {

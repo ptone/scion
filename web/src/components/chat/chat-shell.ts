@@ -162,6 +162,15 @@ export class ScionChatShell extends LitElement {
       display: var(--scion-kb-short-display, grid);
     }
 
+    /* The test-hub banner hides with the header while the on-screen
+       keyboard leaves a short frame, so the composer keeps its room; it is
+       back as soon as the keyboard closes. It is not counted in
+       --scion-chat-top-bar-h: whenever it shows, the frame is not short
+       and the column simply starts below it. */
+    :host([text-entry]) sl-alert.test-hub-banner {
+      display: var(--scion-kb-short-display, block);
+    }
+
     /* The top bar's height (--scion-chat-top-bar-h, written on the host
        while the bar is visible) and whether it is hidden (1 or unset),
        so the thread can count the bar as if it were shown when it sizes

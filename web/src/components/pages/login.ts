@@ -26,7 +26,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import {
   TestHubBannerController,
   renderTestHubBanner,
-  testHubBannerContent,
+  standaloneTestHubBannerStyles,
   testHubBannerStyles,
 } from '../shared/test-hub-banner.js';
 
@@ -79,10 +79,11 @@ export class ScionLoginPage extends LitElement {
   private _loading = false;
 
   /** The test-hub banner's status (shared/test-hub-banner.ts). */
-  private _testHubBanner = new TestHubBannerController(this);
+  private _testHubBanner = new TestHubBannerController(this, { standalone: true });
 
   static override styles = css`
     ${testHubBannerStyles}
+    ${standaloneTestHubBannerStyles}
 
     :host {
       display: flex;
@@ -93,18 +94,14 @@ export class ScionLoginPage extends LitElement {
       padding: 1rem;
     }
 
-    /* The test-hub banner spans the top of the page, above the centred
-       card, and the page keeps clear of it. */
-    sl-alert.test-hub-banner {
-      position: fixed;
-      top: 0;
-      left: 0;
-      right: 0;
-      z-index: 20;
+    /* The test-hub banner runs edge to edge across the top of the page
+       (cancelling the host's padding), in normal flow above the card. */
+    :host([test-hub]) {
+      padding-top: 0;
     }
 
-    :host([test-hub]) {
-      padding-top: 4.5rem;
+    :host([test-hub]) > sl-alert.test-hub-banner {
+      margin: 0 -1rem 1rem;
     }
 
     .login-container {
@@ -385,10 +382,6 @@ export class ScionLoginPage extends LitElement {
     } finally {
       this._providersLoading = false;
     }
-  }
-
-  override updated(): void {
-    this.toggleAttribute('test-hub', testHubBannerContent(this._testHubBanner.status) !== null);
   }
 
   override render() {

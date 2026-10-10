@@ -92,6 +92,32 @@ describe('loadTestInfraStatus', () => {
     expect(seen).toEqual([a]);
   });
 
+  it('retries once at once after a 401 (a stale session the web layer clears)', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({ error: { code: 'session_expired' } }, 401)
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ testIdentities: true, testHubAdmin: false, testSuperAdmin: false })
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    expect(await loadTestInfraStatus()).toEqual({
+      testIdentities: true,
+      testHubAdmin: false,
+      testSuperAdmin: false,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries a 401 only once per call', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse({}, 401)));
+    vi.stubGlobal('fetch', fetchMock);
+    expect(await loadTestInfraStatus()).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it('does not cache a failure, so the next call retries', async () => {
     const fetchMock = vi
       .fn()

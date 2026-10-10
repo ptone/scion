@@ -71,7 +71,15 @@ export function loadTestInfraStatus(): Promise<TestInfraStatus | null> {
   if (inflight) return inflight;
   inflight = (async (): Promise<TestInfraStatus | null> => {
     try {
-      const res = await fetch(TEST_INFRA_STATUS_URL, { credentials: 'include' });
+      // Credentials are included: a hub behind an authenticating proxy
+      // needs the proxy's cookie on every request. The route itself is
+      // public, but the web layer answers 401 (session_expired) for a stale
+      // session cookie, and clears that cookie as it does, so one immediate
+      // retry gets the status.
+      let res = await fetch(TEST_INFRA_STATUS_URL, { credentials: 'include' });
+      if (res.status === 401) {
+        res = await fetch(TEST_INFRA_STATUS_URL, { credentials: 'include' });
+      }
       if (!res.ok) return null;
       const status = parseTestInfraStatus(await res.json());
       if (status) {

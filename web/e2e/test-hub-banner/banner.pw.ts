@@ -17,8 +17,8 @@
 /**
  * The test-hub banner in a real browser (ptone/scion#4240, phase W): the
  * member and super-admin variants on the dashboard, a project page, an admin
- * page and the login page, for a viewer, a member and an admin user; no
- * banner when every gate is off; no close control; and the shell bringing
+ * page, for a viewer, a member and an admin user, and on the login, invite
+ * and onboarding pages signed out; no banner when every gate is off; no close control; and the shell bringing
  * the banner back after it is removed in devtools.
  */
 
@@ -69,6 +69,26 @@ const pages: Array<{ name: string; path: string; ready: string; roles: Role[] }>
   },
 ];
 
+/** Pages rendered without a shell; each renders the banner itself. */
+const standalonePages: Array<{ name: string; path: string; tag: string }> = [
+  { name: 'login page', path: '/login', tag: 'scion-login-page' },
+  { name: 'invite page', path: '/invite', tag: 'scion-page-invite' },
+  { name: 'onboarding page', path: '/onboarding', tag: 'scion-page-onboarding' },
+];
+
+/**
+ * Loads `path` and waits until the status response has arrived and the page
+ * has had a frame to apply it, so a following negative check is meaningful.
+ */
+async function gotoAndSettleStatus(page: Page, path: string): Promise<void> {
+  const status = page.waitForResponse('**/api/v1/test-infra/status');
+  await page.goto(path, { waitUntil: 'domcontentloaded' });
+  await status;
+  await page.evaluate(
+    () => new Promise((resolve) => requestAnimationFrame(() => resolve(null)))
+  );
+}
+
 const variants: Array<[string, TestInfraStatus, string, string]> = [
   ['member tier', MEMBER_TIER, MEMBER_TEXT, 'exclamation-triangle'],
   ['super-admin tier', SUPER_ADMIN_TIER, SUPER_ADMIN_TEXT, 'exclamation-octagon'],
@@ -87,34 +107,37 @@ for (const [variant, status, text, icon] of variants) {
       }
     }
 
-    test('login page, signed out', async ({ page }) => {
-      const hub = await setupHub(page, { status, role: null });
-      await page.goto('/login', { waitUntil: 'domcontentloaded' });
-      await expect(page.locator('scion-login-page')).toHaveCount(1);
-      await expectBanner(page, text, icon);
-      expect(hub.statusRequests()).toBeGreaterThan(0);
-    });
+    for (const p of standalonePages) {
+      test(`${p.name}, signed out`, async ({ page }) => {
+        const hub = await setupHub(page, { status, role: null });
+        await page.goto(p.path, { waitUntil: 'domcontentloaded' });
+        await expect(page.locator(p.tag)).toHaveCount(1);
+        await expectBanner(page, text, icon);
+        expect(hub.statusRequests()).toBeGreaterThan(0);
+      });
+    }
   });
 }
 
 test.describe('every gate off', () => {
   for (const p of pages) {
     test(`no banner element on the ${p.name}`, async ({ page }) => {
-      const hub = await setupHub(page, { status: OFF, role: 'admin' });
-      await page.goto(p.path, { waitUntil: 'domcontentloaded' });
+      await setupHub(page, { status: OFF, role: 'admin' });
+      await gotoAndSettleStatus(page, p.path);
       await expect(page.locator(p.ready)).toHaveCount(1);
-      await expect.poll(() => hub.statusRequests()).toBeGreaterThan(0);
-      await expect(page.locator('sl-alert')).toHaveCount(0);
+      // Not retried: the status has been applied, so this is the final state.
+      expect(await page.locator('sl-alert.test-hub-banner').count()).toBe(0);
     });
   }
 
-  test('no banner element on the login page', async ({ page }) => {
-    const hub = await setupHub(page, { status: OFF, role: null });
-    await page.goto('/login', { waitUntil: 'domcontentloaded' });
-    await expect(page.locator('scion-login-page')).toHaveCount(1);
-    await expect.poll(() => hub.statusRequests()).toBeGreaterThan(0);
-    await expect(page.locator('sl-alert')).toHaveCount(0);
-  });
+  for (const p of standalonePages) {
+    test(`no banner element on the ${p.name}`, async ({ page }) => {
+      await setupHub(page, { status: OFF, role: null });
+      await gotoAndSettleStatus(page, p.path);
+      await expect(page.locator(p.tag)).toHaveCount(1);
+      expect(await page.locator('sl-alert.test-hub-banner').count()).toBe(0);
+    });
+  }
 });
 
 test('removing the banner in devtools, then navigating, brings it back', async ({ page }) => {

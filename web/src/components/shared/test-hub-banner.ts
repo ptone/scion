@@ -93,16 +93,54 @@ export const testHubBannerStyles = css`
 `;
 
 /**
+ * Layout for a standalone page (login, invite, onboarding) whose host is a
+ * centred flex box: while the banner shows (the host carries `test-hub`, see
+ * TestHubBannerController's `standalone` option), the host becomes a column,
+ * the banner spans the top in normal flow, and the page content stays
+ * centred in the space below it. Nothing is reserved at a fixed height, so a
+ * banner that wraps to several lines pushes the content down instead of
+ * covering it.
+ */
+export const standaloneTestHubBannerStyles = css`
+  :host([test-hub]) {
+    flex-direction: column;
+    justify-content: flex-start;
+  }
+  :host([test-hub]) > sl-alert.test-hub-banner {
+    align-self: stretch;
+    width: auto;
+  }
+  :host([test-hub]) > :not(.test-hub-banner) {
+    margin-block: auto;
+  }
+`;
+
+export interface TestHubBannerControllerOptions {
+  /**
+   * For a standalone page: reflect whether the banner shows as the host's
+   * `test-hub` attribute (standaloneTestHubBannerStyles), and retry a failed
+   * status fetch after each update, since a standalone page has no
+   * navigation of its own to retry on.
+   */
+  standalone?: boolean;
+}
+
+/**
  * Keeps a host's view of the status current: fetches it on connect (once per
  * page load; client/test-infra-status.ts shares the request) and re-renders
  * the host when it arrives.
  */
 export class TestHubBannerController implements ReactiveController {
-  private readonly host: ReactiveControllerHost;
+  private readonly host: ReactiveControllerHost & Partial<Element>;
+  private readonly standalone: boolean;
   private readonly onStatus = (): void => this.host.requestUpdate();
 
-  constructor(host: ReactiveControllerHost) {
+  constructor(
+    host: ReactiveControllerHost & Partial<Element>,
+    options: TestHubBannerControllerOptions = {}
+  ) {
     this.host = host;
+    this.standalone = options.standalone === true;
     host.addController(this);
   }
 
@@ -118,6 +156,12 @@ export class TestHubBannerController implements ReactiveController {
 
   hostDisconnected(): void {
     window.removeEventListener(TEST_INFRA_STATUS_EVENT, this.onStatus);
+  }
+
+  hostUpdated(): void {
+    if (!this.standalone) return;
+    this.host.toggleAttribute?.('test-hub', testHubBannerContent(this.status) !== null);
+    this.ensure();
   }
 
   /** Fetches the status if it is not known yet (a no-op once it is). */
