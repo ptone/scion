@@ -2631,13 +2631,17 @@ export class ScionPageChat extends LitElement {
 
   /**
    * A read-state change arrived over the SSE 'chat-read-state-updated'
-   * event. Only the caller's OWN watermark moving via mark-unread is this
-   * handler's concern — a DM peer's "seen" receipt (a different userId) is
-   * chat-thread's. The `unread` field, not the userId match, is what
-   * identifies a mark-unread event: userId alone would also match a future
-   * self-notifying /read, which must NOT re-mark the conversation unread.
-   * Mirrors _handleReadStateUpdated's DM-peer-ID resolution, but marks the
-   * thread/DM unread rather than read.
+   * event. Only the caller's OWN watermark is this handler's concern — a DM
+   * peer's "seen" receipt (a different userId) is chat-thread's.
+   *
+   * The `unread` field, not the userId match, is what identifies a
+   * mark-unread event: the hub also tells the caller's sessions about
+   * their own reads and mutes, and those must NOT re-mark the conversation
+   * unread. For a mark-unread, this mirrors _handleReadStateUpdated's
+   * DM-peer-ID resolution but marks the thread/DM unread rather than read.
+   * For any other own event on a DM key (a read or mute in another tab, or
+   * this tab's own echo), it reloads the DM list so the rail's Unread DMs
+   * list follows the badge.
    */
   private _handleOwnReadStateSSE(e: Event): void {
     type ReadStateData = { conversationKey?: string; userId?: string; unread?: boolean };
