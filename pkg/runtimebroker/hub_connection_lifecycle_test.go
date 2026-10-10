@@ -100,7 +100,16 @@ func TestHubConnection_OverlappingStartAndReinitialize(t *testing.T) {
 		}(w)
 	}
 	close(begin)
-	wg.Wait()
+	workersDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(workersDone)
+	}()
+	select {
+	case <-workersDone:
+	case <-time.After(30 * time.Second):
+		t.Fatal("Start/Reinitialize calls did not finish: a Stop inside one of them is waiting on a control channel it could not stop")
+	}
 
 	// Stop waits for every control channel goroutine Start launched. One
 	// whose client was overwritten by a later Start is never closed, so
