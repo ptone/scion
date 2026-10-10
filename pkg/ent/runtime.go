@@ -39,6 +39,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/group"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/harnessconfig"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubinstance"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubsetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationconfig"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationupdate"
@@ -1192,6 +1193,24 @@ func init() {
 	harnessconfigDescID := harnessconfigFields[0].Descriptor()
 	// harnessconfig.DefaultID holds the default value on creation for the id field.
 	harnessconfig.DefaultID = harnessconfigDescID.Default.(func() uuid.UUID)
+	hubinstanceFields := schema.HubInstance{}.Fields()
+	_ = hubinstanceFields
+	// hubinstanceDescLabel is the schema descriptor for label field.
+	hubinstanceDescLabel := hubinstanceFields[1].Descriptor()
+	// hubinstance.DefaultLabel holds the default value on creation for the label field.
+	hubinstance.DefaultLabel = hubinstanceDescLabel.Default.(string)
+	// hubinstanceDescVersion is the schema descriptor for version field.
+	hubinstanceDescVersion := hubinstanceFields[2].Descriptor()
+	// hubinstance.DefaultVersion holds the default value on creation for the version field.
+	hubinstance.DefaultVersion = hubinstanceDescVersion.Default.(string)
+	// hubinstanceDescStatus is the schema descriptor for status field.
+	hubinstanceDescStatus := hubinstanceFields[6].Descriptor()
+	// hubinstance.DefaultStatus holds the default value on creation for the status field.
+	hubinstance.DefaultStatus = hubinstanceDescStatus.Default.(string)
+	// hubinstanceDescID is the schema descriptor for id field.
+	hubinstanceDescID := hubinstanceFields[0].Descriptor()
+	// hubinstance.IDValidator is a validator for the "id" field. It is called by the builders before save.
+	hubinstance.IDValidator = hubinstanceDescID.Validators[0].(func(string) error)
 	hubsettingFields := schema.HubSetting{}.Fields()
 	_ = hubsettingFields
 	// hubsettingDescSection is the schema descriptor for section field.
@@ -2131,15 +2150,15 @@ func init() {
 	// template.SlugValidator is a validator for the "slug" field. It is called by the builders before save.
 	template.SlugValidator = templateDescSlug.Validators[0].(func(string) error)
 	// templateDescScope is the schema descriptor for scope field.
-	templateDescScope := templateFields[10].Descriptor()
+	templateDescScope := templateFields[11].Descriptor()
 	// template.DefaultScope holds the default value on creation for the scope field.
 	template.DefaultScope = templateDescScope.Default.(string)
 	// templateDescCreated is the schema descriptor for created field.
-	templateDescCreated := templateFields[23].Descriptor()
+	templateDescCreated := templateFields[24].Descriptor()
 	// template.DefaultCreated holds the default value on creation for the created field.
 	template.DefaultCreated = templateDescCreated.Default.(func() time.Time)
 	// templateDescUpdated is the schema descriptor for updated field.
-	templateDescUpdated := templateFields[24].Descriptor()
+	templateDescUpdated := templateFields[25].Descriptor()
 	// template.DefaultUpdated holds the default value on creation for the updated field.
 	template.DefaultUpdated = templateDescUpdated.Default.(func() time.Time)
 	// template.UpdateDefaultUpdated holds the default value on update for the updated field.

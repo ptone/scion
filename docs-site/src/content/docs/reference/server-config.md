@@ -54,6 +54,7 @@ Controls the central Hub API server.
 | `host` | string | `"0.0.0.0"` | Network interface to bind to. |
 | `public_url` | string | | The externally accessible URL of the Hub (used for callbacks). |
 | `agent_endpoint` | string | | Optional override of `public_url` used **only** for the Hub URL injected into agents (`SCION_HUB_ENDPOINT`). Use when agents reach the Hub on a different address than users — e.g. an internal VPC URL — while invite links, chat-bridge links, the OIDC issuer default, and the `cloudrun_invoker` audience default keep using `public_url`. Must be `scheme://host[:port]` only: `http` or `https`, an IP literal or a hostname of letters, digits, `_`, `-`, and `.`, no path, query, fragment, or credentials (a trailing `/` is stripped); the Hub fails to start otherwise. When unset, agents receive the Hub's regular endpoint (`public_url`, or the endpoint the Hub resolves when `public_url` is unset). **Scope:** injected into agents on every broker attached to this Hub, including remote brokers — see [Splitting the agent endpoint from the public URL](#splitting-the-agent-endpoint-from-the-public-url). **Security:** an `http://` value sends agent bearer tokens and fetched secrets unencrypted; prefer `https://` unless the network is trusted and isolated. |
+| `monitoring_dashboard_url` | string | | Optional link to an external monitoring dashboard for this Hub, such as a Cloud Monitoring or Grafana dashboard. Must be an absolute `http` or `https` URL with a host, at most 2048 characters, with no user credentials, a port (if any) from 1 to 65535, and no whitespace (including Unicode spaces such as U+00A0), control characters (C0, DEL or C1), bidirectional formatting characters, invisible format characters (U+00AD, U+180E, U+200B to U+200D, U+2060, U+FEFF) or U+FFFD; a path, query and fragment are allowed. Any other value is rejected with `422` when saved through the admin API. When set, the Health page header shows **Open monitoring dashboard**, which opens the URL in a new tab; when unset, no link is shown. Editable in **Server Config** and applied without a restart. Only callers with `hub.health.read` receive it (as `links.monitoring_dashboard` in the health summary); it is not part of `/api/v1/settings/public`. Env: `SCION_SERVER_HUB_MONITORINGDASHBOARDURL` (seed: `SCION_SEED_SERVER_HUB_MONITORINGDASHBOARDURL`). |
 | `gcp_project_id` | string | | GCP project ID used for minting GCP Service Accounts. Auto-detected if running on GCE/Cloud Run. |
 | `gcp_iam_check_mode` | string | `"off"` | Controls whether IAM `actAs` permission is checked when binding a GCP service account to an agent. Supported values: `"off"` (no check; default) or `"enforce"` (uses Policy Troubleshooter to enforce `iam.serviceAccounts.actAs`). `"enforce"` is strongly recommended for any Hub where agents receive GCP identities; see the caution under [GCP IAM Check Mode](#gcp-iam-check-mode) for what `"off"` permits. See the security/permissions reference for details on roles and caches. |
 | `gcp_iam_deny_unknown_policy` | string | `"fail-open"` | Behavior when Policy Troubleshooter cannot evaluate deny policies (e.g. if the Hub lacks org-level reviewer roles). Supported values: `"fail-open"` (allow if no explicit deny is found; default) or `"fail-closed"` (treat as indeterminate and deny). |
@@ -71,6 +72,7 @@ Controls the central Hub API server.
 | `start_unconfirmed_hold` | duration | `"13m"` | Longest time a start whose outcome is unknown (for example a dispatch timeout) keeps other starts of the agent waiting, until the runtime shows whether it created anything. Minimum `12m40s` (the broker's whole start budget plus a minute). Hot-reloaded. Env: `SCION_SERVER_HUB_STARTUNCONFIRMEDHOLD`. |
 | `start_create_unconfirmed_hold` | duration | `"5m"` | `start_unconfirmed_hold` for a new agent's create-and-start. Allowed `3m` up to `start_unconfirmed_hold`. Hot-reloaded. Env: `SCION_SERVER_HUB_STARTCREATEUNCONFIRMEDHOLD`. |
 | `perf_trace` | bool | `false` | Turns on per-request performance tracing for diagnosis. Observe only. See [Request performance tracing](#request-performance-tracing) and the [developer guide](/scion/contributing/perf-tracing/). Startup-only: restart required to change. Env: `SCION_SERVER_HUB_PERFTRACE`. |
+| `membership_sweep_report_only` | bool | `false` | Puts the membership-standing sweep in report-only mode: it logs and audits (`agent_hold_would_set`) each agent it would hold and stop, and holds and stops none. Off by default (the sweep enforces). Holds from membership changes made while it is on still apply. Set it on every replica: the sweep runs on whichever replica takes its lock, and a replica left enforcing holds the listed agents at its next sweep. For the first boot after an upgrade; see [Upgrading: report-only first boot](/scion/reference/agent-suspension/#upgrading-report-only-first-boot). Startup-only: restart required to change. Env: `SCION_SERVER_HUB_MEMBERSHIPSWEEPREPORTONLY`. |
 | `cors` | object | | CORS configuration (see below). |
 | `conduit` | object | | Conduit relay settings (see [Conduit](#conduit-serverhubconduit)). |
 
@@ -205,6 +207,12 @@ Direct maintenance callers include:
 - `server migrate`: `entc.AutoMigrate` on the PostgreSQL destination only; the SQLite source is read-only and unaffected. Source decision-audit rows are not copied, as in the existing migration behavior.
 
 These direct calls run outside the Hub's advisory schema lock. Mixed old replicas may report degraded legacy health as well as write failures after the drop. Rolling back to an old binary can recreate an empty table but cannot restore the deleted data.
+:::
+
+:::caution[Session metrics: one row per session segment on upgrade]
+The Hub keeps one `agent_session_metrics` row per agent, session ID and segment start (`started_at`), enforced by a unique index. Older Hubs stored every report, so a database can hold repeated rows for one segment. When the Hub starts (`CompositeStore.Migrate`), it removes those repeats before creating the index, keeping the earliest stored row. Rows for separate segments of a resumed session are kept.
+
+`server backfill` and `server migrate-dm-keys` call `entc.AutoMigrate` directly and skip that cleanup. On a database with repeated rows, their index creation fails with a unique-constraint error. No data is changed. Start the Hub on the new version once, so it removes the repeats, and then rerun the command. `server migrate` is unaffected: it does not copy `agent_session_metrics`.
 :::
 
 :::caution[Postgres: `broker_dispatch` index on upgrade]
@@ -807,7 +815,7 @@ There are two exceptions to the pattern:
 - The broker's listener settings under `server.broker` use the `RUNTIMEBROKER` segment, for example `server.broker.port` -> `SCION_SERVER_RUNTIMEBROKER_PORT`.
 - The broker identity keys keep their underscores: `server.broker.broker_id` -> `SCION_SERVER_BROKER_BROKER_ID`, and likewise `BROKER_BROKER_NAME`, `BROKER_BROKER_NICKNAME`, `BROKER_BROKER_TOKEN` and `BROKER_AUTO_PROVIDE`.
 
-`server.log_format` and `server.env` have no environment variable. Neither is read by the Hub: both are accepted so existing settings files still load. The log output format is chosen at startup; set `SCION_LOG_GCP=true` for Cloud Logging JSON. There is no boot-time override for `server.log_level`. `SCION_SERVER_LOGLEVEL` only affects the level applied when a file-mode admin server-config save or reload re-reads the config. At startup, use `--debug` or `SCION_LOG_LEVEL=debug`.
+`server.log_format` and `server.env` have no environment variable. Neither is read by the Hub: both are accepted so existing settings files still load. The log output format is chosen at startup; set `SCION_LOG_GCP=true` for Cloud Logging JSON. `server.log_level` (or `SCION_SERVER_LOGLEVEL`) is applied when the server starts, and again when a file-mode admin server-config save or reload re-reads the config; clearing it reverts to `info`. `--debug` and `SCION_LOG_LEVEL` take precedence over it (see [Precedence](/scion/hosted/single-node/observability/#precedence)). Upgrade note: a Hub whose settings still contain `server.log_level: debug` from an earlier change now starts at `debug`, because earlier releases ignored the setting at startup.
 
 **Examples:**
 - `server.hub.port` -> `SCION_SERVER_HUB_PORT`
@@ -816,6 +824,7 @@ There are two exceptions to the pattern:
 - `server.hub.gcp_iam_deny_unknown_policy` -> `SCION_SERVER_HUB_GCPIAMDENYUNKNOWNPOLICY`
 - `server.hub.admin_emails` -> `SCION_SERVER_HUB_ADMINEMAILS`
 - `server.hub.stalled_threshold` -> `SCION_SERVER_HUB_STALLEDTHRESHOLD`
+- `server.hub.monitoring_dashboard_url` -> `SCION_SERVER_HUB_MONITORINGDASHBOARDURL`
 - `server.auth.user_access_mode` -> `SCION_SERVER_AUTH_USERACCESSMODE`
 - `server.broker.enabled` -> `SCION_SERVER_RUNTIMEBROKER_ENABLED`
 - `server.broker.container_hub_endpoint` -> `SCION_SERVER_RUNTIMEBROKER_CONTAINERHUBENDPOINT`
@@ -837,7 +846,7 @@ These environment variables control server-side logging behavior. They are not p
 | :--- | :--- | :--- |
 | `SCION_LOG_GCP` | Enable GCP Cloud Logging JSON format on stdout | `false` |
 | `SCION_LOG_LEVEL` | Log level: `debug`, `info`, `warn` or `error`, optionally followed by per-component levels such as `info,hub.auth=debug`. See [Controlling the Log Level](/scion/hosted/single-node/observability/#controlling-the-log-level). | `info` |
-| `SCION_DEBUG` | Deprecated alias for `SCION_LOG_LEVEL=debug`. Any non-empty value enables it, and a warning is printed to stderr once. `SCION_LOG_LEVEL` wins if both are set. | - |
+| `SCION_DEBUG` | Deprecated alias for `SCION_LOG_LEVEL=debug`. Any non-empty value enables it, and a warning is printed to stderr once. `SCION_LOG_LEVEL` wins if both are set. Ignored (no warning) by `scion` commands in agent CLI mode; see [Debugging an agent](/scion/hosted/single-node/observability/#debugging-an-agent). | - |
 | `SCION_CLOUD_LOGGING` | Send logs directly to Cloud Logging via client library | `false` |
 | `SCION_CLOUD_LOGGING_LOG_ID` | Log name in Cloud Logging for application logs | `scion` |
 | `SCION_GCP_PROJECT_ID` | GCP project ID for Cloud Logging (priority 1) | auto-detect |
@@ -1062,11 +1071,12 @@ Settings required before the database connection exists, or that are restart-bou
 | Auth stack | `auth.mode`, `auth.dev_mode`, `auth.dev_token`, `auth.dev_token_file`, `auth.proxy.*`, `auth.transport.*`, `oauth.*`, `oidc_login.*` |
 | Secrets/storage | `secrets.*`, `storage.*`, `workspace_storage.*`, `shared_dir_storage.*` |
 | Identity/mode | `mode`, `env`, `hub.hub_id`, `hub.gcp_project_id` |
-| Logging | `log_level`, `log_format` (accepted but ignored) |
+| Logging | `log_level`, `log_format` (`log_format` is accepted but ignored) |
 | CORS | `hub.cors.*`, `broker.cors` |
 | Messaging/plugins | `message_broker.*`, `plugins.*` |
 | Async agent create | `hub.async_agent_launch`, `hub.launch_timeout`, `hub.launch_keepalive_seconds` |
 | Diagnostics | `hub.perf_trace` |
+| Membership standing | `hub.membership_sweep_report_only` |
 | Heartbeat reconcile | `hub.missing_agent_grace` |
 | Conduit relay | `hub.conduit.*` |
 
@@ -1082,7 +1092,7 @@ Settings that can be changed at runtime and are shared across all replicas. Stor
 | `telemetry` | Full `telemetry.*` subtree (enabled, cloud, hub, local, filter, resource) |
 | `agent_defaults` | `default_template`, `default_harness_config`, `default_max_turns`, `default_max_model_calls`, `default_max_duration`, `default_resources`, `default_model`, `default_thinking_level`, `default_max_agent_role`, `default_agent_role`, `default_runtime_broker`, `default_timezone`, `default_gcp_identity_mode`, `default_gcp_identity_service_account_id` |
 | `federation` | `enabled`, `trusted_issuers[]`, `algorithms`, `refresh_interval`, `debounce_interval` |
-| `endpoints` | `hub.public_url`, `hub.hub_name`, `image_registry` |
+| `endpoints` | `hub.public_url`, `hub.hub_name`, `hub.monitoring_dashboard_url`, `image_registry` |
 | `github_app` | `app_id`, `api_base_url`, `webhooks_enabled`, `installation_url`, `private_key_path` |
 | `notifications` | `notification_channels[]` |
 | `project_defaults` | `default_scratchpad` |
@@ -1109,7 +1119,7 @@ A `SCION_SERVER_*` variable on a Layer-1 key therefore does not override a row a
 
 - **Every start**: the replica that takes the seed advisory lock syncs `hub_settings` (Layer-1 sections only) from its bootstrap merge: `SCION_SEED_*`, `settings.yaml`, then `SCION_SERVER_*`. A missing section is created, a section no admin has edited (seeded) is re-synced when its content differs, and an edited (managed) section is not touched. A replica that finds the lock held skips the sync.
 - **DB wins**: once a section is seeded/written to DB, the DB row fully owns that section. Omitted fields within the section fall to compiled defaults, not to the file.
-- **Rollback safety**: older builds ignore the `hub_settings` table entirely and read files — rolling back reverts to pre-change behavior.
+- **Rollback safety**: older builds ignore the `hub_settings` table entirely and read files — rolling back reverts to pre-change behavior. This covers operational settings only: other stored data is rewritten one way, so a binary rollback after a newer build has started is unsupported. See [Hub Upgrade and Binary Rollback](/scion/reference/hub-upgrade-rollback/).
 
 ### Environment Override Warnings
 
@@ -1125,7 +1135,7 @@ Because env overrides on Layer-1 keys reintroduce per-node drift, the system war
 
 **Revision CAS**: The request body may include `expected_revisions` — a map of section name to expected revision number. On mismatch, the response is `409 Conflict` with the conflicting sections and their current revisions. Omitted sections use last-writer-wins semantics. The `access` section is the exception: it is merged onto the current row, and a concurrent change to that row between read and write returns 409 even without `expected_revisions`. Sections are written in alphabetical order for deterministic partial-apply behavior.
 
-**Presence-aware clearing**: The PUT handler distinguishes **omitted** fields (preserve current DB value) from **explicitly-sent empty values** (`""`, `[]`, `null`) which **clear** the field. This enables clearing admin_emails, user_access_mode, authorized_domains, default_user_role, notification_channels, and public_url without sending every field.
+**Presence-aware clearing**: The PUT handler distinguishes **omitted** fields (preserve current DB value) from **explicitly-sent empty values** (`""`, `[]`, `null`) which **clear** the field. This enables clearing admin_emails, user_access_mode, authorized_domains, default_user_role, notification_channels, public_url, and monitoring_dashboard_url without sending every field.
 
 **Masked secrets**: `GET /api/v1/admin/server-config` masks secrets (OAuth client secrets, GitHub App keys, notification channel parameters, and other credentials). A PUT may send a masked placeholder back only inside a block that exactly matches the stored block once masked; the Hub then keeps the stored secret. The block is the structure the secret sits in (for example one OAuth provider, the GitHub App, or one notification channel). To change any field of such a block, send every secret in that block in clear. Any other placeholder is rejected with `400`, so it is never stored over a real value. The admin web UI leaves unedited masked blocks out of its saves.
 

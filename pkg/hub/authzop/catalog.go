@@ -217,8 +217,7 @@ var EntryPointExemptions = []EntryPointExemption{
 	{Pattern: "/api/v1/metrics/session/", Kind: ExemptionAuthenticationOnly, Reason: "Session metrics, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/users/me/groups", Kind: ExemptionAuthenticationOnly, Reason: "List own group memberships, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/principals/", Kind: ExemptionAuthenticationOnly, Reason: "Resolve principal display name, self-service", Owner: "route_metadata.go"},
-	{Pattern: "/api/v1/users/me/injected-skills", Kind: ExemptionAuthenticationOnly, Reason: "Manage own injected skills, self-service", Owner: "route_metadata.go"},
-	{Pattern: "/api/v1/users/me/injected-skills/", Kind: ExemptionAuthenticationOnly, Reason: "Manage own injected skill by ID, self-service", Owner: "route_metadata.go"},
+	{Pattern: "GET /api/v1/users/me/injected-skills", Kind: ExemptionAuthenticationOnly, Reason: "List own injected skills, self-service; the writes are catalogued as user.skillinjection.update", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/users/me/templates", Kind: ExemptionAuthenticationOnly, Reason: "Manage own templates, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/users/me/templates/", Kind: ExemptionAuthenticationOnly, Reason: "Manage own template by ID, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/gcs/object", Kind: ExemptionAuthenticationOnly, Reason: "gs:// link fetch, inline message-visibility-based authorization", Owner: "route_metadata.go"},
@@ -457,12 +456,12 @@ var MutationClassifications = []MutationClassification{
 	// -----------------------------------------------------------------------
 	// pkg/hub/agent_delete_engine.go — agent delete engine (ptone/scion#2483)
 	// -----------------------------------------------------------------------
-	{File: "pkg/hub/agent_delete_engine.go", Function: "finalizeAgentDeletion", Symbol: "FinalizeAgentDeletion", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Delete engine's terminal soft or hard delete. The engine only runs under a claim taken by performAgentDelete, which authorizes agent.delete on the target agent (authorizeAgentTargetAction) for both the agent and the project-scoped DELETE routes; the write is CAS-guarded by that claim", Scope: "pkg/hub/agent_delete_engine.go"}},
+	{File: "pkg/hub/agent_delete_engine.go", Function: "finalizeAgentDeletion", Symbol: "FinalizeAgentDeletion", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Delete engine's terminal soft or hard delete. The engine only runs under a claim taken by performAgentDelete, which authorizes agent.delete on the target agent (authorizeAgentTargetAction) for both the agent and the project-scoped DELETE routes; the write is CAS-guarded by that claim. The reconcile drain and the engine's in_doubt recheck may re-claim a failed in_doubt delete (reclaimInDoubtDeletion, ptone/scion#2882), pinned by CAS to the claim the authorized DELETE took and keeping its stored request, so the finalize still acts only on a delete performAgentDelete authorized", Scope: "pkg/hub/agent_delete_engine.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/handlers_agent_create_helpers.go
 	// -----------------------------------------------------------------------
-	{File: "pkg/hub/handlers_agent_create_helpers.go", Function: "handleExistingAgent", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Existing agent cleanup during create, route-guarded by agent.create path", Scope: "pkg/hub/handlers_agent_create_helpers.go"}},
+	{File: "pkg/hub/handlers_agent_create_helpers.go", Function: "handleExistingAgent", Symbol: "FinalizeAgentDeletion", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Env-gather recreate: conditionally hard-deletes the existing provisioning agent row in one transaction (predicate DeletedAtNull and the in-transaction held check createRowHeldCheck, ptone/scion#4075), deactivating its edges and writing the agent_hard_delete audit (hardDeleteAgentTx); when a delete holds the row (a live deleting claim or finalizing, per deletedOrDeleteHeld) or it is gone or soft-deleted, the transaction rolls back and the row and its quotas are left to that delete. Route-guarded by the agent.create path: reached only from createAgentInProject via handleExistingAgent, after authorizeAgentCreate and the existing-agent lifecycle authorization", Scope: "pkg/hub/handlers_agent_create_helpers.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/handlers_agent_lifecycle.go

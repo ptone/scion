@@ -111,6 +111,23 @@ type AgentConfig struct {
 	Model         string            `json:"model,omitempty"`
 	Profile       string            `json:"profile,omitempty"`
 	Task          string            `json:"task,omitempty"`
+	// GCPIdentity is the GCP identity the Hub applied to the agent. Nil when
+	// the Hub recorded none or predates the field.
+	GCPIdentity *GCPIdentity `json:"gcpIdentity,omitempty"`
+}
+
+// GCPIdentity is the GCP identity applied to an agent, as recorded in its
+// applied config (appliedConfig.gcpIdentity).
+type GCPIdentity struct {
+	// MetadataMode is "block", "passthrough" or "assign".
+	MetadataMode string `json:"metadataMode"`
+	// ServiceAccountID is the registered service account, set for "assign".
+	ServiceAccountID string `json:"serviceAccountId,omitempty"`
+	// ServiceAccountEmail is the service account email, set for "assign".
+	ServiceAccountEmail string `json:"serviceAccountEmail,omitempty"`
+	// ProjectID is the GCP project the service account lives in. It is not
+	// a Scion project ID.
+	ProjectID string `json:"projectId,omitempty"`
 }
 
 // DirectConnect contains direct connection info.
@@ -390,11 +407,19 @@ type BrokerProfile struct {
 	// Kubernetes ServiceAccount, and whether the list was reported at all.
 	ServiceAccountMappings []BrokerProfileSAMapping `json:"serviceAccountMappings,omitempty"`
 	MappingsReported       bool                     `json:"mappingsReported,omitempty"`
+	// The remaining report fields mirror store.BrokerProfile.
+	MappingsComplete         bool       `json:"mappingsComplete,omitempty"`
+	MappingsIncompleteReason string     `json:"mappingsIncompleteReason,omitempty"`
+	AmbiguousGSAs            []string   `json:"ambiguousGSAs,omitempty"`
+	MappingsReportedAt       *time.Time `json:"mappingsReportedAt,omitempty"`
 }
 
 // BrokerProfileSAMapping mirrors store.BrokerProfileSAMapping.
 type BrokerProfileSAMapping struct {
-	GSA string `json:"gsa"`
+	GSA       string `json:"gsa"`
+	KSA       string `json:"ksa,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
+	Source    string `json:"source,omitempty"`
 }
 
 // BrokerProjectInfo describes a project from a broker's perspective.

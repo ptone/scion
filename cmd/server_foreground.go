@@ -67,6 +67,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth/adcsource"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/asyncwrite"
 	gcputil "github.com/GoogleCloudPlatform/scion/pkg/util/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/GoogleCloudPlatform/scion/web"
@@ -145,6 +146,11 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	// Apply server.log_level (settings or SCION_SERVER_LOGLEVEL) at setting
+	// precedence. The level filter and the cloud, request and message
+	// handlers built by initServerLogging follow the shared level state, so
+	// this takes effect for every later record.
+	applyServerLogLevelSetting(cfg.LogLevel)
 	if enableHub {
 		if err := validateHubWorkspaceStorage(cfg); err != nil {
 			return err
@@ -365,6 +371,21 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		exit := &hubExitSequence{}
 		defer exit.run()
 
+		// Close the decision-log audit writer on EVERY return from here on
+		// (architect ruling R5), including the startup-failure returns in
+		// steps 11-13 that can happen after the Hub API (step 11) or the
+		// web server (step 12) is already serving. Bounded by the writer's
+		// own drain timeout; idempotent with the step-16 close in
+		// awaitServerExit and with Server.Shutdown's close. Defers run LIFO:
+		// this runs before exit.run (registered just above, so telemetry
+		// flushes after the writer's final counts) and before the log
+		// cleanups deferred at step 1.
+		defer func() {
+			closeCtx, cancelClose := context.WithTimeout(context.Background(), asyncwrite.DefaultDrainTimeout)
+			defer cancelClose()
+			_ = hubSrv.CloseAuditWriter(closeCtx)
+		}()
+
 		// The co-located broker registers (startRuntimeBroker, step 13)
 		// only after the Hub API is serving. Mark it as expected now, under
 		// the same condition startRuntimeBroker registers it, so gates that
@@ -467,7 +488,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			go func() {
 				defer wg.Done()
 				<-ctx.Done()
-				_ = hubSrv.CleanupResources(context.Background())
+				// Background teardown only: the audit writer closes
+				// after every server has drained (awaitServerExit).
+				_ = hubSrv.CleanupBackgroundResources(context.Background())
 			}()
 		}
 	}
@@ -797,12 +820,35 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	}
 
 	// 16. Wait for either an error or context cancellation
+	var closeAudit func(context.Context) error
+	if hubSrv != nil {
+		closeAudit = hubSrv.CloseAuditWriter
+	}
+	return awaitServerExit(ctx, errCh, cancel, wg.Wait, closeAudit)
+}
+
+// awaitServerExit is step 16 of runServerStart. On cancellation it calls
+// wait (production: the server WaitGroup's Wait; each server's Start
+// returns only after its shutdown and HTTP drain), then closes the hub
+// audit writer, so records
+// emitted by draining requests are written; this runs before
+// runServerStart's deferred log cleanups. On a server error it cancels and
+// closes the writer without waiting: requests still draining then have
+// their audit records counted as closed. closeAudit may be nil (no hub);
+// the close is bounded by the writer's own drain timeout.
+func awaitServerExit(ctx context.Context, errCh <-chan error, cancel context.CancelFunc, wait func(), closeAudit func(context.Context) error) error {
 	select {
 	case err := <-errCh:
 		cancel()
+		if closeAudit != nil {
+			_ = closeAudit(context.Background())
+		}
 		return err
 	case <-ctx.Done():
-		wg.Wait()
+		wait()
+		if closeAudit != nil {
+			_ = closeAudit(context.Background())
+		}
 		return nil
 	}
 }
@@ -890,7 +936,7 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *sl
 	}
 	var cloudHandler slog.Handler
 	if cloudLoggingEnabled {
-		logLevel := logging.ResolveLogLevel(enableDebug)
+		logLevel := logging.ResolveLogLeveler(enableDebug)
 		logCfg := logging.CloudLoggingConfig{
 			Component: component,
 			HubName:   hubName,
@@ -921,7 +967,7 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *sl
 		HubID:      hubID,
 		UseGCP:     useGCP,
 		Foreground: serverStartForeground,
-		Level:      logging.ResolveLogLevel(enableDebug),
+		Level:      logging.ResolveLogLeveler(enableDebug),
 	}
 	if ch, ok := cloudHandler.(*logging.ResilientCloudHandler); ok && ch != nil {
 		reqLogCfg.CloudClient = ch.Client()
@@ -943,7 +989,7 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *sl
 		HubName:   hubName,
 		HubID:     hubID,
 		UseGCP:    useGCP,
-		Level:     logging.ResolveLogLevel(enableDebug),
+		Level:     logging.ResolveLogLeveler(enableDebug),
 	}
 	if ch, ok := cloudHandler.(*logging.ResilientCloudHandler); ok && ch != nil {
 		msgLogCfg.CloudClient = ch.Client()
@@ -959,6 +1005,15 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *sl
 	}
 
 	return cleanups, requestLogger, messageLogger, nil
+}
+
+// applyServerLogLevelSetting applies the server.log_level setting to the
+// shared level state and logs the resolved level and its source. Precedence
+// is the --debug flag, then SCION_LOG_LEVEL (or SCION_DEBUG), then
+// server.log_level, then the default (info).
+func applyServerLogLevelSetting(level string) {
+	logging.ApplyLogLevelSetting("server.log_level", level)
+	logging.LogResolvedLevel(slog.Default())
 }
 
 // validateHubWorkspaceStorage fails hub startup when server.workspace_storage
@@ -1001,6 +1056,10 @@ func loadAndReconcileConfig(cmd *cobra.Command) (*config.GlobalConfig, error) {
 		if cfg.Mode == "hosted" || cfg.Mode == "production" {
 			hostedMode = true
 		}
+	}
+
+	if err := validateDebugEndpoints(hostedMode, enableDebugEndpoints); err != nil {
+		return nil, err
 	}
 
 	// Apply workstation defaults
@@ -1103,6 +1162,15 @@ func isHADeployment(cfg *config.GlobalConfig) bool {
 		return true
 	}
 	return false
+}
+
+// validateDebugEndpoints refuses --enable-debug-endpoints in hosted mode.
+// Diagnostic endpoints are for local development only.
+func validateDebugEndpoints(hosted, enabled bool) error {
+	if hosted && enabled {
+		return fmt.Errorf("--enable-debug-endpoints is not allowed in hosted mode; diagnostic endpoints are for local development only")
+	}
+	return nil
 }
 
 // validateHostedBasic runs lightweight checks that apply to all --hosted
@@ -1922,6 +1990,7 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		SoftDeleteRetainFiles:        cfg.Hub.SoftDeleteRetainFiles,
 		AsyncAgentLaunch:             cfg.Hub.AsyncAgentLaunch,
 		PerfTrace:                    cfg.Hub.PerfTrace,
+		MembershipSweepReportOnly:    cfg.Hub.MembershipSweepReportOnly,
 		LaunchTimeout:                cfg.Hub.LaunchTimeout,
 		LaunchKeepaliveSeconds:       cfg.Hub.LaunchKeepaliveSeconds,
 		ConduitTCPAllowedPorts:       append([]int(nil), cfg.Hub.Conduit.TCPAllowedPorts...),
@@ -1995,6 +2064,9 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		GCPIAMCheckMode:         cfg.Hub.GCPIAMCheckMode,
 		GCPIAMDenyUnknownPolicy: cfg.Hub.GCPIAMDenyUnknownPolicy,
 		GCPProjectID:            cfg.Hub.GCPProjectID,
+		// Startup value for a hub without OperationalSettings; with them,
+		// ApplySnapshot replaces it from the endpoints section.
+		MonitoringDashboardURL: config.MonitoringDashboardURLOrEmpty(cfg.Hub.MonitoringDashboardURL),
 		// Derive the agent/user JWT signing keys from the same shared session
 		// secret the web cookie store uses, so every replica behind the load
 		// balancer agrees on the signing key regardless of its host-derived
@@ -2075,6 +2147,19 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		log.Printf("WARNING: hub agent run-scope metrics disabled: %v", runScopeErr)
 	} else {
 		hubSrv.SetAgentRunScopeMetrics(runScopeRec)
+	}
+
+	// Decision logging (remaining-audit P1): the audit writer's
+	// scion.logging.* series and the decision-log disposition counter.
+	if writeRec, err := logging.NewWriteMetrics(mp); err != nil {
+		log.Printf("WARNING: hub audit log writer metrics disabled: %v", err)
+	} else {
+		hubSrv.SetAuditWriterMetrics(writeRec)
+	}
+	if decisionRec, err := hub.NewOTelDecisionAuditMetrics(mp); err != nil {
+		log.Printf("WARNING: hub decision audit metrics disabled: %v", err)
+	} else {
+		hubSrv.SetDecisionAuditMetrics(decisionRec)
 	}
 
 	return hubDBRec
@@ -2779,7 +2864,6 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		Port:                 webPort,
 		Host:                 webHost,
 		AssetsDir:            webAssetsDir,
-		Debug:                enableDebug,
 		SessionSecret:        sessionSecret,
 		BaseURL:              baseURL,
 		DevAuthToken:         devAuthToken,
@@ -2787,10 +2871,14 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		AdminMode:            adminMode,
 		MaintenanceMessage:   maintenanceMessage,
 		EnableTestLogin:      enableTestLogin,
+		EnableDebugEndpoints: enableDebugEndpoints,
 		ProxyAuthenticator:   webProxyAuth,
 		PlatformAuthSA:       webPlatformAuthSA,
 		SlowRequestThreshold: cfg.SlowRequestThreshold,
 		PerfTrace:            cfg.Hub.PerfTrace,
+	}
+	if enableDebugEndpoints {
+		slog.Warn("Diagnostic endpoints are enabled (--enable-debug-endpoints). Use for local development only.")
 	}
 	if enableTestLogin {
 		slog.Warn("Test login endpoint is enabled (--enable-test-login). This allows bypass of authentication and MUST NOT be used in production!")
@@ -2817,7 +2905,7 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		webSrv.SetMaintenanceState(hubSrv.GetMaintenanceState())
 		webSrv.SetDemotionSafe(hubSrv.GetDemotionSafe())
 		webSrv.SetAuthzService(hubSrv.GetAuthzService())
-		webSrv.MountHubAPI(hubSrv.Handler(), hubSrv.CleanupResources)
+		webSrv.MountHubAPI(hubSrv.Handler(), hubSrv.CleanupBackgroundResources)
 
 		localHubSrv := hubSrv
 		webSrv.SetHubHealthProvider(func(ctx context.Context) interface{} {
@@ -3176,7 +3264,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 			rhEndpoint = fmt.Sprintf("http://localhost:%d", cfg.RuntimeBroker.Port)
 		}
 
-		effectiveID, regErr := registerGlobalProjectAndBroker(ctx, s, brokerID, brokerName, rhEndpoint, rt, serverAutoProvide, brokerSettings, loadBrokerRegistrationWorkspaceStorage())
+		effectiveID, regErr := registerGlobalProjectAndBroker(ctx, s, brokerID, brokerName, rhEndpoint, rt, serverAutoProvide, brokerSettings, loadBrokerRegistrationWorkspaceStorage(), loadBrokerProfileTypeSettings())
 		if regErr != nil {
 			// ERROR, not a warning: the co-located broker is how this process
 			// runs agents. Losing it silently left the Hub reporting healthy

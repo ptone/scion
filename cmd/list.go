@@ -364,6 +364,12 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 	// Client-side enrichment: fetch broker/project names if not provided by Hub
 	enrichAgentsClientSide(ctx, hubCtx.Client, agents)
 
+	// The table has no identity column, so only JSON output pays for the
+	// service account lookups that supply display names.
+	if outputFormat == "json" {
+		fillGCPIdentityDisplayNames(ctx, hubCtx.Client, agents)
+	}
+
 	return displayAgents(agents, listAll, true)
 }
 
@@ -439,7 +445,7 @@ func resolveOwnerID(ctx context.Context, client hubclient.Client, ownerRef strin
 // A bare flag infers the reference (ptone/scion#2146 Q2):
 //   - Agent mode: the calling agent, via SCION_AGENT_ID (the same env var
 //     `scion whoami` treats as canonical) — returned as agentRef.
-//   - Human or assistant mode: the calling user, resolved via the Hub's
+//   - Human mode: the calling user, resolved via the Hub's
 //     current-session identity (`client.Auth().Me()`) — returned as userID.
 //     There is no error case for "no calling principal" here: outside an
 //     agent container the CLI is always driven by some authenticated user.
@@ -763,6 +769,8 @@ func hubAgentToAgentInfo(a hubclient.Agent) api.AgentInfo {
 	if info.HarnessAuth == "" && a.AppliedConfig != nil && a.AppliedConfig.HarnessAuth != "" {
 		info.HarnessAuth = a.AppliedConfig.HarnessAuth
 	}
+
+	info.GCPIdentity = agentGCPIdentity(a)
 
 	// Convert Kubernetes info if present
 	if a.Kubernetes != nil {

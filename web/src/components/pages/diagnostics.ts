@@ -211,10 +211,11 @@ export class ScionPageDiagnostics extends LitElement {
     }
   `;
 
+  // eslint-disable-next-line @typescript-eslint/no-misused-promises, @typescript-eslint/require-await -- async override of a void lifecycle method without an await, kept as is; per-site decision tracked in ptone/scion#4126.
   override async connectedCallback(): Promise<void> {
     super.connectedCallback();
-    this.fetchHealth();
-    this.checkCloudLogging();
+    void this.fetchHealth();
+    void this.checkCloudLogging();
   }
 
   private async fetchHealth(): Promise<void> {

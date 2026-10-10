@@ -19,10 +19,14 @@
  *
  * Owns fetching, polling and state for GET /api/v1/admin/health/summary,
  * and lays out the section modules (design 5.1, 5.7):
- * - Header: overall status pill, "as of" time, the serving hub instance
+ * - Header: overall status pill, "as of" time, the serving hub instance,
+ *   and the operator's monitoring dashboard link when one is configured
  * - Needs attention (health-attention.ts), full width and first
- * - Hub (health-hub-card.ts, database and the service account check
- *   diagnostic folded in) | Dispatch (health-dispatch-card.ts)
+ * - Hub (health-hub-card.ts, the service account check diagnostic folded
+ *   in) | Dispatch (health-dispatch-card.ts)
+ * - Hub instances (health-hub-instances.ts, with each instance's failing
+ *   checks and database pool; hidden when the summary has no hub_instances
+ *   field, i.e. an older hub replica served it)
  * - Runtime brokers (compact table, health-broker-table.ts)
  * - Integrations (chat plugins, health-integrations.ts)
  * - Agents (phase counts and problem groups, health-agents-card.ts)
@@ -35,14 +39,12 @@ import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { formatInstant, formatInstantWithZone } from '../../utils/time.js';
+import { isHttpUrl } from '../../utils/http-url.js';
 import type { HealthAttentionItem } from './health-attention.js';
 import './health-attention.js';
-import type {
-  HealthSummaryHub,
-  HealthSummaryDatabase,
-  HealthSummaryServiceAccountCheck,
-} from './health-hub-card.js';
+import type { HealthSummaryHub, HealthSummaryServiceAccountCheck } from './health-hub-card.js';
 import './health-hub-card.js';
+import { hubInstanceLabels, type HealthSummaryHubInstances } from './health-hub-instances.js';
 import type { HealthSummaryBrokerList } from './health-broker-table.js';
 import './health-broker-table.js';
 import type { HealthSummaryAgents } from './health-agents-card.js';
@@ -68,7 +70,6 @@ export interface HealthSummary {
   /** Ranked attention items; see deriveHealthSummaryStatus on the server. */
   attention: HealthAttentionItem[];
   hub: HealthSummaryHub;
-  database: HealthSummaryDatabase;
   runtime_brokers: HealthSummaryBrokerList;
   /**
    * Chat and messaging plugins; empty when none are configured, or when the
@@ -87,6 +88,19 @@ export interface HealthSummary {
    * because the hub's identity lacks the access it needs.
    */
   service_account_check?: HealthSummaryServiceAccountCheck;
+  /**
+   * Hub instances from the hub-instance registry. Absent when an older hub
+   * replica served the summary (the table is then hidden); null when the
+   * registry could not be read.
+   */
+  hub_instances?: HealthSummaryHubInstances | null;
+  /** Operator-configured links; absent when none is configured. */
+  links?: HealthSummaryLinks;
+}
+
+export interface HealthSummaryLinks {
+  /** server.hub.monitoring_dashboard_url; absent when unset. */
+  monitoring_dashboard?: string;
 }
 
 @customElement('scion-page-health-dashboard')
@@ -224,6 +238,19 @@ export class ScionPageHealthDashboard extends LitElement {
         background: var(--scion-bg-subtle);
       }
 
+      .monitoring-link {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.25rem;
+        font-size: 0.8125rem;
+        color: var(--scion-primary);
+        text-decoration: none;
+      }
+
+      .monitoring-link:hover {
+        text-decoration: underline;
+      }
+
       .toggle-label {
         display: flex;
         align-items: center;
@@ -300,11 +327,19 @@ export class ScionPageHealthDashboard extends LitElement {
       <div class="grid-2" data-role="hub-dispatch">
         <scion-health-hub-card
           .hub=${d.hub ?? null}
-          .database=${d.database ?? null}
           .serviceAccountCheck=${d.service_account_check ?? null}
         ></scion-health-hub-card>
         <scion-health-dispatch-card .dispatch=${d.dispatch ?? null}></scion-health-dispatch-card>
       </div>
+
+      ${d.hub_instances !== undefined
+        ? html`<div class="grid-full">
+            <scion-health-hub-instances
+              .instances=${d.hub_instances}
+              .generatedAt=${d.generated_at ?? ''}
+            ></scion-health-hub-instances>
+          </div>`
+        : nothing}
 
       <div class="grid-full">
         <scion-health-broker-table .brokers=${d.runtime_brokers}></scion-health-broker-table>
@@ -320,6 +355,7 @@ export class ScionPageHealthDashboard extends LitElement {
               .integrations=${d.integrations ?? []}
               .detail=${d.integrations_detail === true}
               .counts=${d.integration_counts ?? null}
+              .instanceLabels=${hubInstanceLabels(d.hub_instances)}
             ></scion-health-integrations>
           </div>`
         : nothing}
@@ -328,6 +364,24 @@ export class ScionPageHealthDashboard extends LitElement {
         <scion-health-agents-card .agents=${d.agents ?? null}></scion-health-agents-card>
       </div>
     `;
+  }
+
+  /**
+   * The "Open monitoring dashboard" link, only when the summary carries an
+   * http(s) links.monitoring_dashboard. The hub validates the URL when it
+   * is saved; any other value is not rendered here either.
+   */
+  private renderMonitoringLink(d: HealthSummary) {
+    const url = d.links?.monitoring_dashboard;
+    if (!isHttpUrl(url)) return nothing;
+    return html`<a
+      class="monitoring-link"
+      data-role="monitoring-dashboard"
+      href=${url}
+      target="_blank"
+      rel="noopener noreferrer"
+      >Open monitoring dashboard<sl-icon name="box-arrow-up-right" aria-hidden="true"></sl-icon
+    ></a>`;
   }
 
   private renderHeader(d: HealthSummary) {
@@ -358,6 +412,7 @@ export class ScionPageHealthDashboard extends LitElement {
             : nothing}
         </div>
         <div class="header-right">
+          ${this.renderMonitoringLink(d)}
           <label class="toggle-label">
             <input
               type="checkbox"

@@ -1369,7 +1369,7 @@ export class ScionPageAdminMaintenance extends LitElement {
           <button
             class="toggle-track ${this.maintenanceEnabled ? 'active' : ''}"
             @click=${() => {
-              this.toggleMaintenance();
+              void this.toggleMaintenance();
             }}
             aria-label="Toggle maintenance mode"
           >

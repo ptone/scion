@@ -626,6 +626,26 @@ func (vs *VersionedSettings) KubernetesServiceAccountMappingGSAs(profileName, ru
 	return out
 }
 
+// ProfileRuntimeType returns the runtime entry key profileName references
+// and that entry's resolved runtime type: the entry's explicit Type, else
+// the key itself (the same rule as ResolveRuntime, but a key with no
+// matching entry still resolves to the key rather than failing). ok is
+// false when the profile is not in these settings or names no runtime.
+func (vs *VersionedSettings) ProfileRuntimeType(profileName string) (runtimeKey, runtimeType string, ok bool) {
+	if vs == nil {
+		return "", "", false
+	}
+	profile, found := vs.Profiles[profileName]
+	if !found || profile.Runtime == "" {
+		return "", "", false
+	}
+	runtimeType = profile.Runtime
+	if rt, found := vs.Runtimes[profile.Runtime]; found && rt.Type != "" {
+		runtimeType = rt.Type
+	}
+	return profile.Runtime, runtimeType, true
+}
+
 // ProfileKubernetesSAMappings describes profileName for the GSA-mapping
 // early warning (ptone/scion#3329 phase 2): the GSAs it maps to a KSA
 // (KubernetesServiceAccountMappingGSAs over the profile and the runtime
@@ -1494,11 +1514,15 @@ type V1ServerHubConfig struct {
 	// audience default). Must be scheme://host[:port] only when set — see
 	// config.ValidateAgentEndpoint for the exact rules and the normalized
 	// form this field should hold.
-	AgentEndpoint string        `json:"agent_endpoint,omitempty" yaml:"agent_endpoint,omitempty" koanf:"agent_endpoint"`
-	ReadTimeout   string        `json:"read_timeout,omitempty" yaml:"read_timeout,omitempty" koanf:"read_timeout"`
-	WriteTimeout  string        `json:"write_timeout,omitempty" yaml:"write_timeout,omitempty" koanf:"write_timeout"`
-	CORS          *V1CORSConfig `json:"cors,omitempty" yaml:"cors,omitempty" koanf:"cors"`
-	AdminEmails   []string      `json:"admin_emails,omitempty" yaml:"admin_emails,omitempty" koanf:"admin_emails"`
+	AgentEndpoint string `json:"agent_endpoint,omitempty" yaml:"agent_endpoint,omitempty" koanf:"agent_endpoint"`
+	// MonitoringDashboardURL is an optional absolute http(s) URL of an
+	// external monitoring dashboard; the Health page links to it when set.
+	// See ValidateMonitoringDashboardURL.
+	MonitoringDashboardURL string        `json:"monitoring_dashboard_url,omitempty" yaml:"monitoring_dashboard_url,omitempty" koanf:"monitoring_dashboard_url"`
+	ReadTimeout            string        `json:"read_timeout,omitempty" yaml:"read_timeout,omitempty" koanf:"read_timeout"`
+	WriteTimeout           string        `json:"write_timeout,omitempty" yaml:"write_timeout,omitempty" koanf:"write_timeout"`
+	CORS                   *V1CORSConfig `json:"cors,omitempty" yaml:"cors,omitempty" koanf:"cors"`
+	AdminEmails            []string      `json:"admin_emails,omitempty" yaml:"admin_emails,omitempty" koanf:"admin_emails"`
 
 	// SoftDeleteRetention is how long soft-deleted agents are retained (e.g., "72h").
 	SoftDeleteRetention string `json:"soft_delete_retention,omitempty" yaml:"soft_delete_retention,omitempty" koanf:"soft_delete_retention"`
@@ -1537,6 +1561,10 @@ type V1ServerHubConfig struct {
 	AsyncAgentLaunch *bool `json:"async_agent_launch,omitempty" yaml:"async_agent_launch,omitempty" koanf:"async_agent_launch"`
 	// PerfTrace turns on per-request performance tracing. Off by default.
 	PerfTrace *bool `json:"perf_trace,omitempty" yaml:"perf_trace,omitempty" koanf:"perf_trace"`
+	// MembershipSweepReportOnly makes the membership-standing sweep log and
+	// audit the agents it would hold, without holding or stopping them.
+	// Off by default.
+	MembershipSweepReportOnly *bool `json:"membership_sweep_report_only,omitempty" yaml:"membership_sweep_report_only,omitempty" koanf:"membership_sweep_report_only"`
 	// LaunchTimeout is the whole-launch budget for an opted-in launch (e.g., "5m").
 	LaunchTimeout string `json:"launch_timeout,omitempty" yaml:"launch_timeout,omitempty" koanf:"launch_timeout"`
 	// LaunchKeepaliveSeconds is the broker keepalive interval, in seconds.
@@ -3331,6 +3359,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.AgentEndpoint != "" {
 			gc.Hub.AgentEndpoint = v1.Hub.AgentEndpoint
 		}
+		if v1.Hub.MonitoringDashboardURL != "" {
+			gc.Hub.MonitoringDashboardURL = v1.Hub.MonitoringDashboardURL
+		}
 		if v1.Hub.ReadTimeout != "" {
 			if d, err := time.ParseDuration(v1.Hub.ReadTimeout); err == nil {
 				gc.Hub.ReadTimeout = d
@@ -3386,6 +3417,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		}
 		if v1.Hub.PerfTrace != nil {
 			gc.Hub.PerfTrace = *v1.Hub.PerfTrace
+		}
+		if v1.Hub.MembershipSweepReportOnly != nil {
+			gc.Hub.MembershipSweepReportOnly = *v1.Hub.MembershipSweepReportOnly
 		}
 		if v1.Hub.LaunchTimeout != "" {
 			if d, err := time.ParseDuration(v1.Hub.LaunchTimeout); err == nil {
@@ -3735,15 +3769,16 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 
 	// Hub server config
 	v1Hub := &V1ServerHubConfig{
-		Port:          gc.Hub.Port,
-		Host:          gc.Hub.Host,
-		HubID:         gc.Hub.HubID,
-		HubName:       gc.Hub.HubName,
-		PublicURL:     gc.Hub.Endpoint,
-		AgentEndpoint: gc.Hub.AgentEndpoint,
-		ReadTimeout:   gc.Hub.ReadTimeout.String(),
-		WriteTimeout:  gc.Hub.WriteTimeout.String(),
-		AdminEmails:   gc.Hub.AdminEmails,
+		Port:                   gc.Hub.Port,
+		Host:                   gc.Hub.Host,
+		HubID:                  gc.Hub.HubID,
+		HubName:                gc.Hub.HubName,
+		PublicURL:              gc.Hub.Endpoint,
+		AgentEndpoint:          gc.Hub.AgentEndpoint,
+		MonitoringDashboardURL: gc.Hub.MonitoringDashboardURL,
+		ReadTimeout:            gc.Hub.ReadTimeout.String(),
+		WriteTimeout:           gc.Hub.WriteTimeout.String(),
+		AdminEmails:            gc.Hub.AdminEmails,
 		CORS: &V1CORSConfig{
 			Enabled:        gc.Hub.CORSEnabled,
 			AllowedOrigins: gc.Hub.CORSAllowedOrigins,
@@ -3806,6 +3841,10 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	if gc.Hub.PerfTrace {
 		perfTrace := true
 		v1Hub.PerfTrace = &perfTrace
+	}
+	if gc.Hub.MembershipSweepReportOnly {
+		reportOnly := true
+		v1Hub.MembershipSweepReportOnly = &reportOnly
 	}
 	if gc.Hub.LaunchTimeout > 0 {
 		v1Hub.LaunchTimeout = gc.Hub.LaunchTimeout.String()

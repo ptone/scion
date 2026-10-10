@@ -523,6 +523,11 @@ var (
 				Unique:  false,
 				Columns: []*schema.Column{AgentSessionMetricsColumns[4]},
 			},
+			{
+				Name:    "agentsessionmetrics_agent_id_session_id_started_at",
+				Unique:  true,
+				Columns: []*schema.Column{AgentSessionMetricsColumns[1], AgentSessionMetricsColumns[3], AgentSessionMetricsColumns[4]},
+			},
 		},
 	}
 	// AllowListColumns holds the columns for the "allow_list" table.
@@ -1315,6 +1320,24 @@ var (
 				Columns: []*schema.Column{HarnessConfigsColumns[7]},
 			},
 		},
+	}
+	// HubInstancesColumns holds the columns for the "hub_instances" table.
+	HubInstancesColumns = []*schema.Column{
+		{Name: "instance_id", Type: field.TypeString},
+		{Name: "label", Type: field.TypeString, Default: ""},
+		{Name: "version", Type: field.TypeString, Default: ""},
+		{Name: "started_at", Type: field.TypeTime},
+		{Name: "last_seen", Type: field.TypeTime},
+		{Name: "stopped_at", Type: field.TypeTime, Nullable: true},
+		{Name: "status", Type: field.TypeString, Default: ""},
+		{Name: "checks", Type: field.TypeJSON, Nullable: true},
+		{Name: "stats", Type: field.TypeJSON, Nullable: true},
+	}
+	// HubInstancesTable holds the schema information for the "hub_instances" table.
+	HubInstancesTable = &schema.Table{
+		Name:       "hub_instances",
+		Columns:    HubInstancesColumns,
+		PrimaryKey: []*schema.Column{HubInstancesColumns[0]},
 	}
 	// HubSettingsColumns holds the columns for the "hub_settings" table.
 	HubSettingsColumns = []*schema.Column{
@@ -2450,6 +2473,7 @@ var (
 		{Name: "default_harness_config", Type: field.TypeString, Nullable: true},
 		{Name: "image", Type: field.TypeString, Nullable: true},
 		{Name: "config", Type: field.TypeString, Nullable: true},
+		{Name: "agent_config", Type: field.TypeString, Nullable: true},
 		{Name: "content_hash", Type: field.TypeString, Nullable: true},
 		{Name: "scope", Type: field.TypeString, Default: "global"},
 		{Name: "scope_id", Type: field.TypeString, Nullable: true},
@@ -2476,7 +2500,7 @@ var (
 			{
 				Name:    "template_slug_scope_scope_id",
 				Unique:  true,
-				Columns: []*schema.Column{TemplatesColumns[2], TemplatesColumns[10], TemplatesColumns[11]},
+				Columns: []*schema.Column{TemplatesColumns[2], TemplatesColumns[11], TemplatesColumns[12]},
 			},
 			{
 				Name:    "template_harness",
@@ -2486,12 +2510,12 @@ var (
 			{
 				Name:    "template_status",
 				Unique:  false,
-				Columns: []*schema.Column{TemplatesColumns[18]},
+				Columns: []*schema.Column{TemplatesColumns[19]},
 			},
 			{
 				Name:    "template_content_hash",
 				Unique:  false,
-				Columns: []*schema.Column{TemplatesColumns[9]},
+				Columns: []*schema.Column{TemplatesColumns[10]},
 			},
 		},
 	}
@@ -2689,6 +2713,7 @@ var (
 		GroupsTable,
 		GroupMembershipsTable,
 		HarnessConfigsTable,
+		HubInstancesTable,
 		HubSettingsTable,
 		IntegrationConfigsTable,
 		IntegrationUpdatesTable,
@@ -2802,6 +2827,9 @@ func init() {
 	GroupMembershipsTable.ForeignKeys[2].RefTable = AgentsTable
 	HarnessConfigsTable.Annotation = &entsql.Annotation{
 		Table: "harness_configs",
+	}
+	HubInstancesTable.Annotation = &entsql.Annotation{
+		Table: "hub_instances",
 	}
 	HubSettingsTable.Annotation = &entsql.Annotation{
 		Table: "hub_settings",

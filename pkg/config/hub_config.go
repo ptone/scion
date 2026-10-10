@@ -91,6 +91,11 @@ type HubServerConfig struct {
 	// Defaults to os.Hostname() if not set.
 	HubName string `json:"hubName,omitempty" yaml:"hubName,omitempty" koanf:"hubName"`
 
+	// MonitoringDashboardURL is an optional absolute http(s) URL of an
+	// external monitoring dashboard for this hub. The Health page links to
+	// it when set. See ValidateMonitoringDashboardURL.
+	MonitoringDashboardURL string `json:"monitoringDashboardUrl,omitempty" yaml:"monitoringDashboardUrl,omitempty" koanf:"monitoringDashboardUrl"`
+
 	// GCPProjectID is the GCP project ID used for minting service accounts.
 	// If empty, auto-detected from the metadata server when running on GCE/Cloud Run.
 	GCPProjectID string `json:"gcpProjectId,omitempty" yaml:"gcpProjectId,omitempty" koanf:"gcpProjectId"`
@@ -159,6 +164,12 @@ type HubServerConfig struct {
 	// authorization store-call and decision-audit counts, DB pool waits).
 	// Off by default; observe only; read at startup.
 	PerfTrace bool `json:"perfTrace" yaml:"perfTrace" koanf:"perfTrace"`
+
+	// MembershipSweepReportOnly puts the membership-standing sweep in
+	// report-only mode: it logs and audits the agents it would hold and
+	// stop, and holds and stops none of them. Off by default (the sweep
+	// enforces); read at startup. Meant for the first boot after an upgrade.
+	MembershipSweepReportOnly bool `json:"membershipSweepReportOnly" yaml:"membershipSweepReportOnly" koanf:"membershipSweepReportOnly"`
 
 	// LaunchTimeout is the whole-launch budget from BeginLaunch (design
 	// §3.10). Default 5 minutes. The Hub reaper ends every in-flight launch
@@ -1510,6 +1521,8 @@ var snakeCaseFields = map[string]string{
 	"installationurl":            "installation_url",
 	"maxsize":                    "max_size",
 	"missingagentgrace":          "missing_agent_grace",
+	"membershipsweepreportonly":  "membership_sweep_report_only",
+	"monitoringdashboardurl":     "monitoring_dashboard_url",
 	"grantkeyactivation":         "grant_key_activation",
 	"tcpallowedports":            "tcp_allowed_ports",
 	"internallisten":             "internal_listen",
@@ -1589,6 +1602,7 @@ var camelCaseFields = map[string]string{
 	"appid":                         "appId",
 	"asyncagentlaunch":              "asyncAgentLaunch",
 	"perftrace":                     "perfTrace",
+	"membershipsweepreportonly":     "membershipSweepReportOnly",
 	"authorizeddomains":             "authorizedDomains",
 	"autosuspendstalled":            "autoSuspendStalled",
 	"brokerid":                      "brokerId",
@@ -1621,6 +1635,7 @@ var camelCaseFields = map[string]string{
 	"launchkeepaliveseconds":        "launchKeepaliveSeconds",
 	"launchtimeout":                 "launchTimeout",
 	"localpath":                     "localPath",
+	"monitoringdashboardurl":        "monitoringDashboardUrl",
 	"loglevel":                      "logLevel",
 	"maintenancemessage":            "maintenanceMessage",
 	"missingagentgrace":             "missingAgentGrace",

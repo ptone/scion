@@ -122,6 +122,7 @@ type CompositeStore struct {
 	*ExternalIdentityStore
 	*AgentReincarnationStore
 	*UserTerminalWorkspaceStore
+	*HubInstanceStore
 
 	client *ent.Client
 	inTx   bool // true when this CompositeStore wraps a transaction
@@ -248,6 +249,7 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		ExternalIdentityStore:      NewExternalIdentityStore(client),
 		AgentReincarnationStore:    NewAgentReincarnationStore(client),
 		UserTerminalWorkspaceStore: NewUserTerminalWorkspaceStore(client),
+		HubInstanceStore:           NewHubInstanceStore(client),
 		client:                     client,
 	}
 }
@@ -644,6 +646,13 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 	// have duplicate active edges that would violate the new constraint.
 	if err := c.deduplicateDelegationEdges(ctx); err != nil {
 		return fmt.Errorf("pre-migration delegation edge dedup: %w", err)
+	}
+
+	// Deduplicate agent_session_metrics before migration adds the unique
+	// (agent_id, session_id, started_at) index. Before it, a repeated
+	// report of a session segment was stored again.
+	if err := c.deduplicateAgentSessionMetrics(ctx); err != nil {
+		return fmt.Errorf("pre-migration agent session metrics dedup: %w", err)
 	}
 
 	if err := entc.AutoMigrate(ctx, c.client); err != nil {

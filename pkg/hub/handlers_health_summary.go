@@ -16,7 +16,6 @@ package hub
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -50,7 +49,6 @@ type HealthSummaryResponse struct {
 	// deriveHealthSummaryStatus.
 	Attention []HealthAttentionItem `json:"attention"`
 	Hub       HealthSummaryHub      `json:"hub"`
-	Database  HealthSummaryDB       `json:"database"`
 	Brokers   HealthSummaryBrokers  `json:"runtime_brokers"`
 	Agents    *HealthSummaryAgents  `json:"agents"` // nil when the agent aggregate is unavailable
 	// Dispatch is nil when a dispatch store count failed.
@@ -71,6 +69,23 @@ type HealthSummaryResponse struct {
 	// ServiceAccountCheck is set while the service account assignment check
 	// cannot run because the hub's identity lacks the access it needs.
 	ServiceAccountCheck *HealthSummarySACheck `json:"service_account_check,omitempty"`
+	// HubInstances lists the hub instances (processes) from the
+	// hub-instance registry, read from the database only. Nil when the
+	// registry could not be read ("not reported"). See
+	// health_summary_hub_instances.go.
+	HubInstances *HealthSummaryHubInstances `json:"hub_instances"`
+
+	// Links holds operator-configured links for the Health page. It is
+	// omitted when no link is configured. The route requires
+	// hub.health.read, so only those callers receive it.
+	Links *HealthSummaryLinks `json:"links,omitempty"`
+}
+
+// HealthSummaryLinks holds the operator-configured Health page links.
+type HealthSummaryLinks struct {
+	// MonitoringDashboard is server.hub.monitoring_dashboard_url, an
+	// absolute http(s) URL; omitted when unset.
+	MonitoringDashboard string `json:"monitoring_dashboard,omitempty"`
 }
 
 // HealthSummaryHub contains hub-level health information.
@@ -91,21 +106,6 @@ type HealthSummaryHub struct {
 	// UnhealthyChecks lists the non-healthy checks as "key: value", sorted,
 	// so a dashboard can show the cause without interpreting the map.
 	UnhealthyChecks []string `json:"unhealthy_checks,omitempty"`
-}
-
-// HealthSummaryDB contains database health information.
-// Fields are sourced from Go's sql.DBStats (runtime pool counters) rather than
-// the OTel-based metrics described in the design doc. sql.DBStats provides
-// accurate, zero-latency pool stats without depending on the metrics pipeline,
-// which may itself be the thing that is unhealthy.
-type HealthSummaryDB struct {
-	Status     string `json:"status"`
-	PoolActive int64  `json:"pool_active"`
-	PoolMax    int64  `json:"pool_max"`
-	PoolIdle   int64  `json:"pool_idle"`
-	// PoolWaitCountTotal is the cumulative number of times a caller had to wait
-	// for a DB connection (monotonically increasing counter from sql.DBStats.WaitCount).
-	PoolWaitCountTotal int64 `json:"pool_wait_count_total"`
 }
 
 // HealthSummaryBrokers is the runtime broker section of the health
@@ -279,26 +279,10 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 		hubSummary.Projects = healthInfo.Stats.Projects
 	}
 
-	// Build database section
-	dbSummary := HealthSummaryDB{
-		Status: "healthy",
-	}
-	if healthInfo.Checks != nil {
-		if dbStatus, ok := healthInfo.Checks["database"]; ok {
-			dbSummary.Status = dbStatus
-		}
-	}
-	// Get pool stats from sql.DB if available
-	if dbp, ok := s.store.(interface{ DB() *sql.DB }); ok {
-		db := dbp.DB()
-		if db != nil {
-			stats := db.Stats()
-			dbSummary.PoolActive = int64(stats.InUse)
-			dbSummary.PoolIdle = int64(stats.Idle)
-			dbSummary.PoolWaitCountTotal = stats.WaitCount
-			dbSummary.PoolMax = int64(stats.MaxOpenConnections)
-		}
-	}
+	// The database connection pool is per instance: each hub instance
+	// writes its own pool counters to its registry row, and they reach
+	// this response under hub_instances[].database. The handler reads no
+	// pool counters itself.
 
 	// Use aggregate queries instead of fetching full agent records.
 	// This avoids deserialising up to 10 000 structs on every 30 s poll.
@@ -327,12 +311,23 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 		slog.Error("health summary: failed to count dispatch health", "error", err)
 	}
 
-	integrations := s.healthSummaryIntegrations(ctx, pluginRecordNames)
+	// Hub instances, from the registry table only. A failed read leaves
+	// the section nil ("not reported"). The same rows give the
+	// integrations section: every hub instance, this one included,
+	// reports its plugins' health through its own row, so the summary
+	// makes no plugin call.
+	var hubInstances *HealthSummaryHubInstances
+	instanceRows, storeNow, err := s.store.ListHubInstances(ctx, hubInstanceDisplayWindow)
+	if err != nil {
+		slog.Error("health summary: failed to list hub instances", "error", err)
+	} else {
+		hubInstances = buildHealthSummaryHubInstances(instanceRows, storeNow, s.InstanceID())
+	}
+	integrations := mergeHealthSummaryIntegrations(instanceRows, storeNow, err == nil, pluginRecordNames)
 
 	resp := HealthSummaryResponse{
 		GeneratedAt:        now,
 		Hub:                hubSummary,
-		Database:           dbSummary,
 		Brokers:            brokerList,
 		Agents:             agentsSummary,
 		Dispatch:           dispatchSummary,
@@ -341,6 +336,8 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 		IntegrationCounts:  healthSummaryIntegrationCounts(integrations),
 
 		ServiceAccountCheck: s.healthSummarySACheck(),
+		HubInstances:        hubInstances,
+		Links:               s.healthSummaryLinks(),
 	}
 	// The policy sees the full integration list, so the status does not
 	// depend on who asks. Identity is removed afterwards for callers

@@ -307,6 +307,9 @@ type Store interface {
 
 	// Agent Reincarnation operations (agent-reincarnate, ptone/scion#1821)
 	AgentReincarnationStore
+
+	// Hub-instance registry operations (health dashboard F3)
+	HubInstanceStore
 }
 
 // AgentStore defines agent-related persistence operations.
@@ -869,6 +872,16 @@ type AgentFilter struct {
 	// AppliedConfig.HarnessConfig on every write, rather than parsing or
 	// pattern-matching AppliedConfig's JSON at query time (ptone/scion#2146).
 	HarnessConfig string
+
+	// GCPServiceAccountID, when non-empty, restricts results to agents whose
+	// applied GCP identity (AppliedConfig.GCPIdentity.ServiceAccountID) names
+	// this registered service account. Always ANDed with every other filter.
+	// It backs the per-account "agents using it" view (ptone/scion#4018).
+	// Unlike HarnessConfig there is no shadow column: the predicate reads the
+	// applied_config JSON, which is acceptable for a read-only view that is
+	// always combined with a project filter. omitempty keeps list cursor
+	// bindings unchanged when it is unset.
+	GCPServiceAccountID string `json:",omitempty"`
 
 	// IDs, when non-nil, restricts results to agents whose ID is in this set.
 	// Always combined with every other filter (including AuthorizedProjectIDs)
@@ -2743,7 +2756,11 @@ type BrokerSettingStore interface {
 
 // AgentSessionMetricsStore defines operations for agent session metrics.
 type AgentSessionMetricsStore interface {
-	// CreateAgentSessionMetrics creates a new session metrics record.
+	// CreateAgentSessionMetrics creates a new session metrics record. The
+	// store keeps one record per agent, session ID and StartedAt (one
+	// segment of a session; a session resumed with the same ID starts a new
+	// segment): when one exists, it is left unchanged, m.ID and m.CreatedAt
+	// are set from it, and ErrAlreadyExists is returned.
 	CreateAgentSessionMetrics(ctx context.Context, m *AgentSessionMetrics) error
 
 	// GetAgentSessionMetrics retrieves a session metrics record by ID.

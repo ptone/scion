@@ -140,9 +140,15 @@ const Artifacts = "hub.artifacts"
 // the delivery sweeper, which holds pending messages while it is off.
 const ChatScheduledSend = "web.chat_scheduled_send"
 
-// AuthorizationDecisionAuditV2 identifies the default-off decision-audit slice.
-// Registration alone never grants production admission.
+// AuthorizationDecisionAuditV2 gates decision logging (remaining-audit P1).
+// It is the only activation control and stays default-off; turning it on
+// needs explicit owner approval.
 const AuthorizationDecisionAuditV2 = "hub.authorization_decision_audit_v2"
+
+// AgentEdit gates the web Edit agent page (/agents/{id}/edit) and the Edit
+// button on the agent page. It is web-only for now: the hub's config PATCH
+// accepts edits of agents with no container whether or not it is on.
+const AgentEdit = "web.agent_edit"
 
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
@@ -151,7 +157,7 @@ var compiled = []Experiment{
 	{
 		Name:        AuthorizationDecisionAuditV2,
 		Title:       "Authorization decision audit v2",
-		Description: "Routes admitted authorization decisions to the typed structured log sink; decisions are not persisted when admission, freshness or logging health fails.",
+		Description: "Records authorization decisions in the existing project/agent audit domain to the configured structured logger, asynchronously; losses are counted, not retried.",
 		Default:     false,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,
@@ -235,6 +241,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#3666",
 		Owner:       "native-chat",
 		ReviewBy:    "2027-01-31",
+	},
+	{
+		Name:        AgentEdit,
+		Title:       "Edit agent",
+		Description: "Adds an Edit button on the agent page and the Edit page at /agents/{id}/edit, which edits a created, stopped, failed or suspended agent's model and limits, and shows for every field whether it applies at the next start or resume, needs a reincarnation, or is fixed.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#3952",
+		Owner:       "web",
+		ReviewBy:    "2027-01-07",
 	},
 }
 

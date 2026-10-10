@@ -59,7 +59,13 @@ const SCHEMA_RESPONSE = {
         'server.hub.soft_delete_retain_files',
       ],
     },
-    endpoints: { koanf_paths: ['server.hub.public_url', 'image_registry'] },
+    endpoints: {
+      koanf_paths: [
+        'server.hub.public_url',
+        'image_registry',
+        'server.hub.monitoring_dashboard_url',
+      ],
+    },
     agent_defaults: {
       koanf_paths: [
         'default_template',
@@ -823,6 +829,101 @@ describe('scion-page-admin-server-config', () => {
       expect(server.auth?.dev_mode).toBeUndefined();
       expect(server.storage?.provider).toBeUndefined();
       expect(server.hub?.host).toBeUndefined();
+    });
+
+    // The DB-backed save keeps a key the body omits (ptone/scion#3720), so
+    // every Layer-1 field the page shows must be sent explicitly when it is
+    // cleared: "" / [] / null / false, never left out.
+    it('a hosted save sends every cleared Layer-1 field explicitly', async () => {
+      // Every Layer-1 key the page edits, so none is read-only.
+      const sections = SCHEMA_RESPONSE.sections as Record<string, { koanf_paths: string[] }>;
+      const schema = {
+        sections: {
+          ...sections,
+          lifecycle: {
+            koanf_paths: [...sections.lifecycle.koanf_paths, 'server.hub.stalled_threshold'],
+          },
+          agent_defaults: {
+            koanf_paths: [
+              ...sections.agent_defaults.koanf_paths,
+              'default_model',
+              'default_thinking_level',
+              'default_runtime_broker',
+            ],
+          },
+          telemetry: {
+            koanf_paths: [...sections.telemetry.koanf_paths, 'telemetry.cloud.gcp_project_id'],
+          },
+          auto_expose_ports: { koanf_paths: ['auto_expose_ports.enabled'] },
+          quotas: { koanf_paths: ['quotas.enforce_broker_quotas'] },
+        },
+      };
+      let captured: Record<string, unknown> | null = null;
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'db' }), {
+          schemaResponse: schema,
+          putHandler: (body) => {
+            captured = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+      const el = element as any;
+      el.defaultTemplate = '';
+      el.imageRegistry = '';
+      el.defaultMaxDuration = '';
+      el.defaultModelSelection = '';
+      el.defaultRuntimeBroker = '';
+      el.defaultTimezone = '';
+      el.defaultThinkingLevel = null;
+      el.hubPublicUrl = '';
+      el.hubAdminEmails = '';
+      el.hubSoftDeleteRetention = '';
+      el.hubSoftDeleteRetainFiles = false;
+      el.hubAutoSuspendStalled = false;
+      el.hubStalledThreshold = '';
+      el.authUserAccessMode = '';
+      el.authDefaultUserRole = '';
+      el.authAuthorizedDomains = '';
+      el.autoExposePortsEnabled = false;
+      el.enforceBrokerQuotas = false;
+      el.agentSecretsUserScopeOnly = false;
+      const saveBtn = queryAll(element, 'sl-button[variant="primary"]').find(
+        (b) => b.textContent?.trim() === 'Save & Reload'
+      );
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(captured).not.toBeNull();
+      const payload = captured! as Record<string, unknown>;
+      expect(payload).toMatchObject({
+        default_template: '',
+        image_registry: '',
+        default_max_duration: '',
+        default_model: '',
+        default_runtime_broker: '',
+        default_timezone: '',
+        default_thinking_level: null,
+        default_resources: null,
+        auto_expose_ports: { enabled: false },
+        quotas: { enforce_broker_quotas: false },
+        agent_secrets: { user_scope_only: false },
+      });
+      const server = payload.server as Record<string, Record<string, unknown>>;
+      expect(server.hub).toMatchObject({
+        public_url: '',
+        admin_emails: [],
+        soft_delete_retention: '',
+        soft_delete_retain_files: false,
+        auto_suspend_stalled: false,
+        stalled_threshold: '',
+      });
+      expect(server.auth).toMatchObject({
+        user_access_mode: '',
+        default_user_role: '',
+        authorized_domains: [],
+      });
+      const telemetry = payload.telemetry as Record<string, Record<string, unknown>>;
+      expect(telemetry.cloud).toHaveProperty('gcp_project_id', null);
     });
   });
 
@@ -2943,6 +3044,115 @@ describe('scion-page-admin-server-config', () => {
       const server = (element as any).buildFilePayload().server as Record<string, unknown>;
       expect(server.notification_channels).toEqual(plain.notification_channels);
       expect(server.oauth).toEqual(plain.oauth);
+    });
+  });
+  describe('Monitoring Dashboard URL field (ptone/scion#3597)', () => {
+    const URL_A = 'https://console.cloud.google.com/monitoring/dashboards/builder/hub?project=p';
+
+    function field(el: HTMLElement): Element {
+      const label = queryAll(el, 'label').find(
+        (l) => l.textContent?.trim() === 'Monitoring Dashboard URL'
+      );
+      expect(label).toBeTruthy();
+      return label!.closest('.form-field')!;
+    }
+
+    function type(el: HTMLElement, value: string): void {
+      const input = field(el).querySelector('sl-input') as HTMLInputElement;
+      input.value = value;
+      input.dispatchEvent(new Event('sl-input'));
+    }
+
+    async function savePayload(
+      config: Record<string, unknown>,
+      edit: (el: HTMLElement) => void | Promise<void>
+    ): Promise<Record<string, unknown>> {
+      let captured: Record<string, unknown> | null = null;
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: (body) => {
+            captured = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+      await edit(element);
+      await (element as any).updateComplete;
+      const saveBtn = queryAll(element, 'sl-button[variant="primary"]').find(
+        (b) => b.textContent?.trim() === 'Save & Reload'
+      );
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(captured).not.toBeNull();
+      return captured!;
+    }
+
+    function hubOf(payload: Record<string, unknown>): Record<string, unknown> {
+      return ((payload.server as Record<string, unknown> | undefined)?.hub ?? {}) as Record<
+        string,
+        unknown
+      >;
+    }
+
+    function withUrl(tier: string, url?: string, extra: Record<string, unknown> = {}) {
+      const base = makeBaseConfig({ settings_tier: tier, ...extra }) as any;
+      if (url !== undefined) base.server.hub.monitoring_dashboard_url = url;
+      return base;
+    }
+
+    it('shows the loaded value in an editable field', async () => {
+      element = await createComponent(createFetchHandler(withUrl('db', URL_A)));
+      expect(field(element).querySelector('sl-input')?.getAttribute('value')).toBe(URL_A);
+      expect(field(element).querySelector('.env-badge')).toBeNull();
+    });
+
+    it('shows the env badge when the key is overridden by environment', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          withUrl('db', URL_A, { env_overrides: ['server.hub.monitoring_dashboard_url'] })
+        )
+      );
+      expect(field(element).querySelector('.env-badge')).not.toBeNull();
+    });
+
+    it.each(['db', 'file'])('an untouched form does not send the key (%s mode)', async (tier) => {
+      const payload = await savePayload(withUrl(tier, URL_A), () => {});
+      expect(hubOf(payload)).not.toHaveProperty('monitoring_dashboard_url');
+    });
+
+    it.each(['db', 'file'])('an unset key is not materialised on save (%s mode)', async (tier) => {
+      const payload = await savePayload(withUrl(tier), (el) => {
+        (el as any).hubPublicUrl = 'https://other.example.com';
+      });
+      expect(hubOf(payload)).not.toHaveProperty('monitoring_dashboard_url');
+    });
+
+    it.each(['db', 'file'])('an edited value is sent, trimmed (%s mode)', async (tier) => {
+      const payload = await savePayload(withUrl(tier), (el) => type(el, `  ${URL_A}  `));
+      expect(hubOf(payload).monitoring_dashboard_url).toBe(URL_A);
+    });
+
+    it('a cleared field is sent as "" so the setting is cleared', async () => {
+      const payload = await savePayload(withUrl('db', URL_A), (el) => type(el, ''));
+      expect(hubOf(payload)).toHaveProperty('monitoring_dashboard_url', '');
+    });
+
+    it('an edit back to the loaded value is not sent', async () => {
+      const payload = await savePayload(withUrl('db', URL_A), (el) => {
+        type(el, 'https://x.example.com');
+        type(el, URL_A);
+      });
+      expect(hubOf(payload)).not.toHaveProperty('monitoring_dashboard_url');
+    });
+
+    it('hints when the value is not an http(s) URL', async () => {
+      element = await createComponent(createFetchHandler(withUrl('db')));
+      type(element, 'javascript:alert(1)');
+      await (element as any).updateComplete;
+      expect(field(element).querySelector('.monitoring-url-invalid')).not.toBeNull();
+      type(element, URL_A);
+      await (element as any).updateComplete;
+      expect(field(element).querySelector('.monitoring-url-invalid')).toBeNull();
     });
   });
 });
