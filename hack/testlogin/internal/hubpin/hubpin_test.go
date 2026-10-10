@@ -29,6 +29,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/GoogleCloudPlatform/scion/hack/testlogin/internal/challenge"
 	"github.com/GoogleCloudPlatform/scion/hack/testlogin/internal/testlogin"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
@@ -235,7 +237,7 @@ func TestRefusesExistingAccount(t *testing.T) {
 	email := "existing@" + testlogin.EmailDomain
 	created := time.Now().Add(-time.Hour)
 	if err := h.store.CreateUser(context.Background(), &store.User{
-		ID: "pre-existing-user", Email: email, DisplayName: "existing", Role: "viewer",
+		ID: uuid.NewString(), Email: email, DisplayName: "existing", Role: "viewer",
 		Status: "active", Created: created, LastLogin: created,
 	}); err != nil {
 		t.Fatal(err)
