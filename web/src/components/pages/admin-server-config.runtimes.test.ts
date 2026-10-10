@@ -6,7 +6,7 @@
  * workers; shared helpers live in ./__fixtures__/admin-server-config.ts.
  */
 
-import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, afterEach } from 'vitest';
 import {
   makeBaseConfig,
   SCHEMA_RESPONSE,
@@ -94,6 +94,16 @@ describe('scion-page-admin-server-config', () => {
   // ── Experiments tab (ptone/scion#2217) ──
 
   describe('Experiments tab', () => {
+    // The tests here that only read the default-config page share this one
+    // mount instead of mounting the page for each test.
+    let defaultMount: HTMLElement;
+    beforeAll(async () => {
+      defaultMount = await createComponent(createFetchHandler(makeBaseConfig()));
+    });
+    afterAll(() => {
+      defaultMount.remove();
+    });
+
     function showTab(el: HTMLElement, name: string): void {
       const tabGroup = query(el, 'sl-tab-group');
       tabGroup?.dispatchEvent(new CustomEvent('sl-tab-show', { detail: { name } }));
@@ -108,8 +118,8 @@ describe('scion-page-admin-server-config', () => {
       return Array.from(candidates).find((c) => c.parentNode === el.shadowRoot) ?? null;
     }
 
-    it('appears last in the tab nav', async () => {
-      element = await createComponent(createFetchHandler(makeBaseConfig()));
+    it('appears last in the tab nav', () => {
+      const element = defaultMount;
       // Scope to the outer tab group's direct children — the Runtimes &
       // Profiles panel nests its own sl-tab-group for agent-defaults, whose
       // tabs also carry slot="nav" but belong to a different tab group.
@@ -118,8 +128,8 @@ describe('scion-page-admin-server-config', () => {
       expect(tabs[tabs.length - 1].getAttribute('panel')).toBe('experiments');
     });
 
-    it('renders <scion-admin-experiments> in its panel', async () => {
-      element = await createComponent(createFetchHandler(makeBaseConfig()));
+    it('renders <scion-admin-experiments> in its panel', () => {
+      const element = defaultMount;
       expect(
         query(element, 'sl-tab-panel[name="experiments"] scion-admin-experiments')
       ).not.toBeNull();

@@ -6,7 +6,7 @@
  * workers; shared helpers live in ./__fixtures__/admin-server-config.ts.
  */
 
-import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, afterEach } from 'vitest';
 import {
   makeBaseConfig,
   createFetchHandler,
@@ -605,12 +605,22 @@ describe('scion-page-admin-server-config', () => {
   // ── Default User Role help text (default_user_role, design §5.F) ──
 
   describe('Default User Role help text', () => {
+    // The tests here that only read the default-config page share this one
+    // mount instead of mounting the page for each test.
+    let defaultMount: HTMLElement;
+    beforeAll(async () => {
+      defaultMount = await createComponent(createFetchHandler(makeBaseConfig()));
+    });
+    afterAll(() => {
+      defaultMount.remove();
+    });
+
     function helpText(el: HTMLElement): string {
       return (query(el, '.default-user-role-help')?.textContent ?? '').replace(/\s+/g, ' ').trim();
     }
 
-    it('renders the final explanation of the setting', async () => {
-      element = await createComponent(createFetchHandler(makeBaseConfig()));
+    it('renders the final explanation of the setting', () => {
+      const element = defaultMount;
 
       const text = helpText(element);
       expect(text).toContain('Default role for new users.');
@@ -634,14 +644,14 @@ describe('scion-page-admin-server-config', () => {
       expect(text).toContain("Change an individual user's role on Admin > Users.");
     });
 
-    it('links to Admin > Users', async () => {
-      element = await createComponent(createFetchHandler(makeBaseConfig()));
+    it('links to Admin > Users', () => {
+      const element = defaultMount;
 
       expect(query(element, '.default-user-role-help a[href="/admin/users"]')).not.toBeNull();
     });
 
-    it('no longer shows the old one-line hint', async () => {
-      element = await createComponent(createFetchHandler(makeBaseConfig()));
+    it('no longer shows the old one-line hint', () => {
+      const element = defaultMount;
 
       expect(shadowText(element)).not.toContain(
         'Role assigned to new users who are not in the admin emails list.'
@@ -652,14 +662,24 @@ describe('scion-page-admin-server-config', () => {
   // ── Agent Secrets card (design ptone/scion#2291 §8, §10 test 10) ──
 
   describe('Agent Secrets card', () => {
+    // The tests here that only read the default-config page share this one
+    // mount instead of mounting the page for each test.
+    let defaultMount: HTMLElement;
+    beforeAll(async () => {
+      defaultMount = await createComponent(createFetchHandler(makeBaseConfig()));
+    });
+    afterAll(() => {
+      defaultMount.remove();
+    });
+
     function agentSecretsSwitch(el: HTMLElement): HTMLElement | undefined {
       return queryAll(el, 'sl-switch').find((s) =>
         (s.textContent ?? '').includes('Restrict agent-written secrets to profile scope')
       ) as HTMLElement | undefined;
     }
 
-    it('shows the card with its explanatory hint', async () => {
-      element = await createComponent(createFetchHandler(makeBaseConfig()));
+    it('shows the card with its explanatory hint', () => {
+      const element = defaultMount;
 
       expect(shadowText(element)).toContain('Agent Secrets');
       expect(shadowText(element)).toContain(
@@ -668,8 +688,8 @@ describe('scion-page-admin-server-config', () => {
       expect(shadowText(element)).toContain('not removed. Users can still manage project secrets.');
     });
 
-    it('switch loads unchecked when agent_secrets is absent', async () => {
-      element = await createComponent(createFetchHandler(makeBaseConfig()));
+    it('switch loads unchecked when agent_secrets is absent', () => {
+      const element = defaultMount;
 
       const sw = agentSecretsSwitch(element);
       expect(sw).not.toBeUndefined();
