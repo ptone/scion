@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -202,7 +203,7 @@ func TestConduitTunnel_FirstRecordedCloseWins(t *testing.T) {
 	tun, done := startTunnel(user, target)
 
 	tun.closeBoth(spliceAuthzClose.Code, spliceAuthzClose.Reason)
-	tun.closeBoth(4404, "target_not_found")
+	tun.closeBoth(relay.CloseTargetNotFound, relay.ReasonTargetNotFound)
 	waitRun(t, done)
 	waitCalls(t, user, 4)
 	waitCalls(t, target, 4)
