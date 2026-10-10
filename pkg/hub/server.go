@@ -217,6 +217,13 @@ type ServerConfig struct {
 	// returned in X-Scion-Perf-* headers to admin requests that opt in. Off by
 	// default; observe only. See perftrace.go.
 	PerfTrace bool
+	// MembershipSweepReportOnly (server.hub.membership_sweep_report_only)
+	// puts the membership-standing sweep in report-only mode: it logs and
+	// audits each agent it would hold (mutation type
+	// agent_hold_would_set) and places no hold, revokes no credential and
+	// dispatches no stop. Off by default: the sweep enforces. Event-driven
+	// membership loss checks still enforce. See membership_loss.go.
+	MembershipSweepReportOnly bool
 	// LaunchTimeout is the whole-launch budget for an opted-in launch
 	// (design §3.10). Default 5 minutes. Below minLaunchTimeout the broker's
 	// fixed 20s abort margin (§3.10) would leave no time for a launch to
@@ -1417,6 +1424,10 @@ type Server struct {
 	// open) logs later failures at Debug. Cleared on success.
 	generalTopicWarned sync.Map
 
+	// nfsCleanupWG tracks background NFS project tree removals started by
+	// project delete (startHubNFSProjectTreeCleanup), so tests can wait.
+	nfsCleanupWG sync.WaitGroup
+
 	config ServerConfig
 	// startupHubName is the name resolved at startup (ServerConfig.HubName,
 	// from LoadGlobalConfig(serverConfigPath), else the hostname).
@@ -1440,6 +1451,10 @@ type Server struct {
 	// chatSpacesBatch sets the GET /chat/spaces rollup batch sizes; the
 	// zero value uses the defaults (handlers_chat_v2.go).
 	chatSpacesBatch chatSpacesBatchSizes
+
+	// chatMemberFanout bounds the thread member fan-out; the zero value
+	// uses the defaults (chat_member_fanout.go).
+	chatMemberFanout chatMemberFanoutLimits
 
 	// Conduit stream grant key ring cache (conduit_grants.go); created on
 	// first use behind the hub.conduit experiment.
@@ -1514,6 +1529,11 @@ type Server struct {
 	ctx         context.Context    // Server-lifetime context; cancelled on Shutdown
 	ctxCancel   context.CancelFunc // Cancels ctx
 
+	// hubInstanceRegistryStop stops this process's hub-instance registry
+	// loop and records its clean stop; set by startHubInstanceRegistry,
+	// taken (and cleared) by stopHubInstanceRegistry. Guarded by mu.
+	hubInstanceRegistryStop *hubInstanceRegistryStop
+
 	// userScopedDataSweepDone is closed when the startup sweep of deleted
 	// users' user-scope data ends (startUserScopedDataSweep).
 	userScopedDataSweepDone <-chan struct{}
@@ -1558,9 +1578,6 @@ type Server struct {
 	// artifactBlobSweeper keeps the blob sweep's position between passes
 	// of the artifact maintenance loop (its only user).
 	artifactBlobSweeper artifacts.BlobSweeper
-
-	// Chat notifier for human mention + DM received notifications (W6). Nil-safe.
-	chatNotifier *ChatNotifier
 
 	// Attachment file store for chat attachments (W7). Nil = attachments disabled.
 	// HA limitation: LocalDiskAttachmentStore is single-node only; see attachments.go.
@@ -3348,18 +3365,11 @@ func (s *Server) GetMessageBrokerProxy() *MessageBrokerProxy {
 }
 
 // SetWebChatStore sets the webchat store for thread prefs and chat threads API.
-// It also initializes the ChatNotifier for human-mention and DM notifications (W6).
 func (s *Server) SetWebChatStore(wcs WebChatStore) {
 	s.mu.Lock()
 	s.webChatStore = wcs
-	// Initialize ChatNotifier with the store. Presence is resolved lazily
-	// through the server (see serverPresenceChecker): the presence manager is
-	// created by InitPresenceManager, which runs after this on the current
-	// startup path, and a snapshot taken here would pin a nil checker.
-	s.chatNotifier = NewChatNotifier(s.store, s.events, wcs, serverPresenceChecker{s}, s.messageLog)
 	// Wire into existing broker proxy if already started (startup order varies).
 	if s.messageBrokerProxy != nil {
-		s.messageBrokerProxy.chatNotifier = s.chatNotifier
 		s.messageBrokerProxy.webChatStore = wcs
 	}
 	s.mu.Unlock()
@@ -3370,35 +3380,6 @@ func (s *Server) SetAttachmentStore(as AttachmentStore) {
 	s.mu.Lock()
 	s.attachmentStore = as
 	s.mu.Unlock()
-}
-
-// getChatNotifier returns the chat notifier, or nil if not initialized.
-func (s *Server) getChatNotifier() *ChatNotifier {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.chatNotifier
-}
-
-// serverPresenceChecker adapts the server's presence manager to the
-// PresenceChecker interface, resolving it at call time rather than at
-// construction time. Startup wires the webchat store (and with it the
-// ChatNotifier) before InitPresenceManager runs, so a checker captured up
-// front would be permanently absent-reporting — the defect this replaces.
-type serverPresenceChecker struct {
-	srv *Server
-}
-
-// IsUserActive reports whether the user is currently present, or false while
-// no presence manager exists (before InitPresenceManager, or in deployments
-// that never start one).
-func (c serverPresenceChecker) IsUserActive(userID string) bool {
-	if c.srv == nil {
-		return false
-	}
-	c.srv.mu.RLock()
-	pm := c.srv.presenceManager
-	c.srv.mu.RUnlock()
-	return pm.IsUserActive(userID)
 }
 
 // InitPresenceManager creates and starts the presence manager for real-time
@@ -4002,8 +3983,8 @@ func (s *Server) StartMessageBroker(b eventbus.EventBus) {
 
 	proxy := NewMessageBrokerProxy(b, s.store, s.events, s.GetDispatcher, logging.Subsystem("hub.broker"))
 	proxy.messageLog = s.dedicatedMessageLog
-	proxy.chatNotifier = s.chatNotifier // W6: wire DM notification trigger
 	proxy.webChatStore = s.webChatStore // DM watermark stamping after persist
+	proxy.memberFanout = s.fanOutThreadMessageToMembersAsync
 	proxy.writeDenyEnabled = func() bool {
 		ops := s.GetOperationalSettings()
 		return ops != nil && ops.ConversationEnvelopeSwitch()
@@ -5469,6 +5450,8 @@ func (s *Server) registerSchedulerHandlers() {
 	s.scheduler.RegisterRecurringSingleton("exposed-ports-sweep", 5, store.LockExposedPortsSweep, s.exposedPortsSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("notification-dispatch-sweep", 5, store.LockNotificationDispatchSweep, s.notificationDispatchSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("notification-orphan-gc", 60, store.LockNotificationOrphanGC, s.notificationOrphanGCHandler())
+	// Hourly: delete hub-instance registry rows 24 h after their last write.
+	s.registerHubInstancePrune(s.scheduler)
 	// Reconcile stale max_agents_per_broker reservations (ptone/scion#1963):
 	// runs immediately at tick 0 (startup) and then hourly, fixing rows left
 	// with released_at IS NULL by the pre-fix stop/suspend paths (or any
@@ -5657,8 +5640,8 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	if registryCtx == nil {
 		registryCtx = ctx
 	}
-	// The returned done channel is not joined yet: nothing runs after the
-	// loop on shutdown until a clean-stop write is added.
+	// startHubInstanceRegistry records the loop's stop handle on s;
+	// CleanupResources uses it to join the loop and mark the row stopped.
 	_ = s.startHubInstanceRegistry(registryCtx)
 }
 
@@ -5788,6 +5771,12 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		// server context are still up: the relay row goes draining, every
 		// session gets GoAway and the relay deletes its rows (bounded by ctx).
 		s.shutdownConduitRelay(ctx)
+
+		// Stop the hub-instance registry loop, join it, then mark this
+		// instance's row stopped (bounded by hubInstanceStopBudget), so the
+		// health summary shows a clean stop as stopped rather than stale.
+		// Runs while the store is still open.
+		s.stopHubInstanceRegistry(ctx)
 
 		// Stop the DB pool-stats sampler. Safe to call more than once: it
 		// wraps either a context.CancelFunc or a no-op from
@@ -6248,6 +6237,7 @@ func (s *Server) registerRoutes() {
 		s.mux.HandleFunc("/api/v1/chat/conversations/", s.guarded("/api/v1/chat/conversations/", s.handleChatConversationRoutes))
 		s.mux.HandleFunc("/api/v1/chat/topics/", s.guarded("/api/v1/chat/topics/", s.handleChatTopicRoutes))
 		s.mux.HandleFunc("/api/v1/chat/dms", s.guarded("/api/v1/chat/dms", s.handleChatDMs))
+		s.mux.HandleFunc("/api/v1/chat/unread-count", s.guarded("/api/v1/chat/unread-count", s.handleChatUnreadCount))
 		s.mux.HandleFunc("/api/v1/chat/user-prefs", s.guarded("/api/v1/chat/user-prefs", s.handleChatUserPrefs))
 		s.mux.HandleFunc("/api/v1/chat/presence", s.guarded("/api/v1/chat/presence", s.handleChatPresence))
 		s.mux.HandleFunc("/api/v1/chat/search", s.guarded("/api/v1/chat/search", s.handleChatSearch))
@@ -6663,49 +6653,19 @@ func (s *Server) handleRuntimeBrokerConnect(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Get broker identity from context (set by BrokerAuthMiddleware)
-	broker := GetBrokerIdentityFromContext(r.Context())
-	if broker == nil {
-		// Try to get broker ID from header if not authenticated yet
-		brokerID := r.Header.Get("X-Scion-Broker-ID")
-		if brokerID == "" {
-			writeError(w, 401, ErrCodeUnauthorized, "Broker authentication required", nil)
-			return
-		}
-
-		// Validate broker exists and is authorized
-		if s.brokerAuthService == nil {
-			writeError(w, 401, ErrCodeUnauthorized, "Broker authentication not enabled", nil)
-			return
-		}
-
-		// For WebSocket, we need to verify HMAC on the upgrade request
-		_, err := s.brokerAuthService.ValidateBrokerSignature(r.Context(), r)
-		if err != nil {
-			slog.Error("HMAC validation failed for broker", "brokerID", brokerID, "error", err)
-			writeError(w, 401, ErrCodeBrokerAuthFailed, "Invalid broker signature", nil)
-			return
-		}
-
-		// Use the broker ID from header
-		sessionID, err := s.controlChannel.HandleUpgrade(w, r, brokerID)
-		if err != nil {
-			slog.Error("Upgrade failed for broker", "brokerID", brokerID, "error", err)
-			// Error already written by upgrader
-			return
-		}
-		s.markBrokerOnline(brokerID, sessionID)
+	// One broker authentication step, shared with the conduit endpoint
+	// (conduit_broker_admit.go).
+	brokerID, ok := s.authenticateBrokerUpgrade(w, r)
+	if !ok {
 		return
 	}
-
-	// Use authenticated broker identity
-	sessionID, err := s.controlChannel.HandleUpgrade(w, r, broker.ID())
+	sessionID, err := s.controlChannel.HandleUpgrade(w, r, brokerID)
 	if err != nil {
-		slog.Error("Upgrade failed for broker", "brokerID", broker.ID(), "error", err)
+		slog.Error("Upgrade failed for broker", "brokerID", brokerID, "error", err)
 		// Error already written by upgrader
 		return
 	}
-	s.markBrokerOnline(broker.ID(), sessionID)
+	s.markBrokerOnline(brokerID, sessionID)
 }
 
 // stampProvidersOnline sets status=online on every project-provider row linked

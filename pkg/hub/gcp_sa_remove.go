@@ -304,8 +304,8 @@ func allDefaultsBlocked(defaults []GCPServiceAccountImpactDefault) bool {
 // that project's agents, defaults and provider brokers are scanned. Any other
 // scope (hub, user) is scanned hub-wide.
 //
-// Agents are found by scanning the agent list for an applied identity that
-// names the account; there is no store filter on the service account ID yet.
+// Agents are found with the store's AgentFilter.GCPServiceAccountID filter
+// (the applied identity naming the account).
 func (s *Server) gcpServiceAccountImpact(ctx context.Context, sa *store.GCPServiceAccount) (GCPServiceAccountImpact, error) {
 	impact := GCPServiceAccountImpact{
 		ServiceAccountID:  sa.ID,
@@ -320,7 +320,9 @@ func (s *Server) gcpServiceAccountImpact(ctx context.Context, sa *store.GCPServi
 	// Agents. Names are listed only for agents the caller may read.
 	identity := GetIdentityFromContext(ctx)
 	hiddenByProject := map[string]int{}
-	agentFilter := store.AgentFilter{}
+	// GCPServiceAccountID narrows the scan in the store; the per-row check
+	// below stays as a guard.
+	agentFilter := store.AgentFilter{GCPServiceAccountID: sa.ID}
 	if projectScoped {
 		agentFilter.ProjectID = sa.ScopeID
 	}
