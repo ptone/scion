@@ -64,7 +64,7 @@ func saRemovePath(projectID, saID string) string {
 	return fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/%s", projectID, saID)
 }
 
-func setProjectAnnotations(t *testing.T, s store.Store, projectID string, kv map[string]string) {
+func setSARemoveProjectAnnotations(t *testing.T, s store.Store, projectID string, kv map[string]string) {
 	t.Helper()
 	ctx := context.Background()
 	p, err := s.GetProject(ctx, projectID)
@@ -98,7 +98,7 @@ func TestGCPSARemove_RefusedWhileProjectDefaultsReferenceIt(t *testing.T) {
 	audit := &recordingSAAuditLogger{}
 	srv.SetAuditLogger(audit)
 	sa := mkSA(t, s, "sa-rm-refused", "rm-refused@example.com", store.ScopeProject, project.ID, owner.ID)
-	setProjectAnnotations(t, s, project.ID, map[string]string{
+	setSARemoveProjectAnnotations(t, s, project.ID, map[string]string{
 		projectSettingDefaultGCPIdentityMode:          store.GCPMetadataModeAssign,
 		projectSettingDefaultGCPIdentitySAID:          sa.ID,
 		projectSettingDefaultGCPIdentitySAIDByProfile: fmt.Sprintf(`{"k8s":%q}`, sa.ID),
@@ -131,7 +131,7 @@ func TestGCPSARemove_ForceClearsDefaultsThenDeletes(t *testing.T) {
 	srv.SetAuditLogger(audit)
 	sa := mkSA(t, s, "sa-rm-force", "rm-force@example.com", store.ScopeProject, project.ID, owner.ID)
 	other := mkSA(t, s, "sa-rm-force-other", "rm-force-other@example.com", store.ScopeProject, project.ID, owner.ID)
-	setProjectAnnotations(t, s, project.ID, map[string]string{
+	setSARemoveProjectAnnotations(t, s, project.ID, map[string]string{
 		projectSettingDefaultGCPIdentityMode:          store.GCPMetadataModeAssign,
 		projectSettingDefaultGCPIdentitySAID:          sa.ID,
 		projectSettingDefaultGCPIdentitySAIDByProfile: fmt.Sprintf(`{"k8s":%q,"gke":%q}`, sa.ID, other.ID),
@@ -200,7 +200,7 @@ func TestGCPSARemove_AgentsDoNotBlock(t *testing.T) {
 func TestGCPSARemove_HubDefaultBlocksEvenWithForce(t *testing.T) {
 	srv, s, _, member, _, project := setupGCPAuthzTest(t)
 	sa := mkSA(t, s, "sa-rm-hubdef", "rm-hubdef@example.com", store.ScopeHub, "hub-instance-1", member.ID)
-	setProjectAnnotations(t, s, project.ID, map[string]string{
+	setSARemoveProjectAnnotations(t, s, project.ID, map[string]string{
 		projectSettingDefaultGCPIdentityMode: store.GCPMetadataModeAssign,
 		projectSettingDefaultGCPIdentitySAID: sa.ID,
 	})
