@@ -104,7 +104,7 @@ var testIdentityOperations = []OperationSpec{
 	{
 		ID:          "testidentity.delete",
 		Domain:      "testidentity",
-		Description: "Delete a test identity (its role bindings, group memberships and user-scope data go with it), for its issuer, an unscoped platform admin session, or a holder of user.delete; refused with 409 while it owns agents or is a project's last owner",
+		Description: "Delete a test identity (its role bindings, group memberships and user-scope data go with it), for its issuer, an unscoped platform admin session, or a holder of test_identity.issue and user.delete; refused with 409 while it owns agents or is a project's last owner",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/test-identities/{id}", Method: "DELETE"},
 		},

@@ -20,12 +20,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -358,4 +360,94 @@ func TestTestIdentity_DeleteFlagOff(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 	_, err = s.GetUser(ctx, fx.ID)
 	require.NoError(t, err)
+}
+
+// tiMemberWithSystemRole creates a non-admin human member bound to a custom
+// hub-scope role holding perms, and returns the user.
+func tiMemberWithSystemRole(t *testing.T, s store.Store, name string, perms ...string) *store.User {
+	t.Helper()
+	ctx := context.Background()
+	id := tid(name)
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: id, Email: id + "@example.com", DisplayName: name,
+		Role: store.UserRoleMember, Status: store.UserStatusActive,
+	}))
+	ensureHubMembership(ctx, s, id)
+	rd, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		ID: api.NewUUID(), Name: name + "-role", Description: "test role",
+		ScopeType: store.RoleScopeSystem, Permissions: perms,
+	})
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: id,
+		ScopeType: store.RoleScopeSystem, CreatedBy: "test",
+	})
+	require.NoError(t, err)
+	u, err := s.GetUser(ctx, id)
+	require.NoError(t, err)
+	return u
+}
+
+// The test_identity.issue plus user.delete branch of canDeleteTestIdentity:
+// a non-admin member C holding both (through a custom hub-scope role)
+// deletes issuer A's fixture. A member D holding only user.delete is
+// refused by the test_identity.issue guard (403), and a member E holding
+// only test_identity.issue, not the issuer, gets 404 on A's fixture.
+func TestTestIdentity_DeleteViaUserDelete(t *testing.T) {
+	srv, s := newTestIdentityServer(t, true)
+	ctx := context.Background()
+	_, aTok := tiIssuer(t, srv, s, "ti-del-ud-issuer-a")
+	fx := tiIssue(t, srv, aTok, nil)
+
+	c := tiMemberWithSystemRole(t, s, "ti-del-ud-c", permissionTestIdentityIssue, "user.delete")
+	d := tiMemberWithSystemRole(t, s, "ti-del-ud-d", "user.delete")
+	e := tiMemberWithSystemRole(t, s, "ti-del-ud-e", permissionTestIdentityIssue)
+	for _, u := range []*store.User{c, d, e} {
+		require.False(t, IsUnscopedLocalPlatformAdmin(NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, "web")), "%s is not an admin", u.ID)
+	}
+	path := "/api/v1/test-identities/" + fx.Identity.ID
+
+	// D: user.delete alone does not pass the test_identity.issue guard.
+	rec := doRequestAsUser(t, srv, d, http.MethodDelete, path, nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	// E: test_identity.issue alone, not the issuer: 404.
+	rec = doRequestAsUser(t, srv, e, http.MethodDelete, path, nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	_, err := s.GetUser(ctx, fx.Identity.ID)
+	require.NoError(t, err, "D and E delete nothing")
+	assert.Empty(t, tiDeleteAudits(t, s, fx.Identity.ID))
+
+	// C: test_identity.issue plus user.delete: 204, audited as C.
+	rec = doRequestAsUser(t, srv, c, http.MethodDelete, path, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	_, err = s.GetUser(ctx, fx.Identity.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	audits := tiDeleteAudits(t, s, fx.Identity.ID)
+	require.Len(t, audits, 1)
+	assert.Equal(t, c.ID, audits[0].ActorPrincipalID)
+
+	// C still cannot delete a human user on this route.
+	rec = doRequestAsUser(t, srv, c, http.MethodDelete, "/api/v1/test-identities/"+d.ID, nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	_, err = s.GetUser(ctx, d.ID)
+	require.NoError(t, err)
+}
+
+// A transient store conflict during the delete answers 429 with
+// Retry-After and details.reason issuance_busy (the reason shared with
+// issuance, testIdentityReasonBusy); nothing is deleted.
+func TestTestIdentity_DeleteTransientConflict(t *testing.T) {
+	srv, s := newTestIdentityServer(t, true)
+	_, issuerTok := tiIssuer(t, srv, s, "ti-del-busy-issuer")
+	fx := tiIssue(t, srv, issuerTok, nil)
+	srv.testIdentities.hooks.writeAudit = func(context.Context, store.Store, *store.MutationAuditRecord) error {
+		return fmt.Errorf("write audit: %w", store.ErrTransient)
+	}
+	rec := tiDelete(t, srv, issuerTok, fx.Identity.ID)
+	assert.Equal(t, http.StatusTooManyRequests, rec.Code, rec.Body.String())
+	assert.Equal(t, "1", rec.Header().Get("Retry-After"))
+	assert.Contains(t, rec.Body.String(), testIdentityReasonBusy)
+	_, err := s.GetUser(context.Background(), fx.Identity.ID)
+	require.NoError(t, err, "a transient conflict deletes nothing")
+	assert.Equal(t, http.StatusOK, tiAuthMe(t, srv, fx.AccessToken).Code)
 }

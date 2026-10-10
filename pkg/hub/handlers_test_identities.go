@@ -40,9 +40,10 @@ import (
 // or viewer user (kind=test_fixture, email in store.TestFixtureEmailDomain)
 // and returns one access token for it. POST /api/v1/test-identities/{id}/token
 // re-issues a token for a live identity, GET /api/v1/test-identities lists
-// identities, and DELETE /api/v1/test-identities/{id} deletes one. The feature is off unless the hub starts with
-// --enable-test-identities; while it is off the routes return 404 and the
-// auth middleware refuses every test-fixture row (testFixtureRejection).
+// identities, and DELETE /api/v1/test-identities/{id} deletes one. The
+// feature is off unless the hub starts with --enable-test-identities; while
+// it is off the routes return 404 and the auth middleware refuses every
+// test-fixture row (testFixtureRejection).
 //
 // The caller needs test_identity.issue at hub scope (an admin session, a
 // role binding, or a hub-boundary user access token carrying the
@@ -100,7 +101,9 @@ const (
 	testIdentityReasonRateLimited = "rate_limited"
 	testIdentityReasonExpired     = "test_identity_expired"
 	testIdentityReasonFixtureCall = "test_identity_cannot_issue"
-	testIdentityReasonBusy        = "issuance_busy"
+	// testIdentityReasonBusy answers a transient store conflict on
+	// issuance and on delete (shared; the value predates delete).
+	testIdentityReasonBusy = "issuance_busy"
 )
 
 // isTransientIssuanceConflict reports whether err is a store conflict that
