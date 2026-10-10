@@ -77,7 +77,11 @@ func TestAgentHomeRepairArgs(t *testing.T) {
 	// DAC_READ_SEARCH (open_by_handle_at).
 	joined := strings.Join(args, " ")
 	if n := strings.Count(joined, "--volume"); n != 1 {
-		t.Errorf("helper mounts %d volumes, want 1", n)
+		t.Errorf("helper mounts %d volumes, want exactly 1", n)
+	}
+	// The one mount is the agent home, read-write, from the path given.
+	if i := slices.Index(args, "--volume"); i < 0 || args[i+1] != "/srv/agents/a1/home:"+agentHomeRepairMount {
+		t.Errorf("helper's only mount is not the agent home: %q", args)
 	}
 	for _, forbidden := range []string{"DAC_READ_SEARCH", "SYS_ADMIN", "--privileged", "unconfined", "--mount", "--device", "-v ", "--cap-add=ALL", "--userns", "--pid=host", "--network=host"} {
 		if strings.Contains(joined, forbidden) {
