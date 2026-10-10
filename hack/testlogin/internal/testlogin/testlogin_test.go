@@ -20,6 +20,10 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -426,6 +430,7 @@ func TestMintDisabledCreatesNothing(t *testing.T) {
 	if e.hub.authedLogins != 0 || e.hub.createdUsers != 0 {
 		t.Errorf("authed logins %d, users %d; want 0 and 0", e.hub.authedLogins, e.hub.createdUsers)
 	}
+	assertGone(t, e.out)
 }
 
 func TestPreflightCreatesNothing(t *testing.T) {
@@ -594,23 +599,39 @@ func TestCleanup(t *testing.T) {
 
 // TestCleanupRefusesNonTokenFiles checks that cleanup sends nothing and
 // leaves the file in place unless it holds a token shaped like the ones
-// mint writes.
+// mint writes. Each token case breaks exactly one shape check (the rest of
+// its claims are valid, lifetime included), and reason pins which check
+// rejected it.
 func TestCleanupRefusesNonTokenFiles(t *testing.T) {
+	now := time.Now().Unix()
 	cases := []struct {
 		name    string
 		content func(e *env) string
+		reason  string
 	}{
-		{"session secret file", func(e *env) string { return "SESSION_SECRET=" + string(e.secret) + "\n" }},
-		{"bare secret", func(e *env) string { return string(e.secret) }},
-		{"empty", func(*env) string { return "" }},
-		{"three dotted words", func(*env) string { return "a.b.c" }},
-		{"refresh token", func(e *env) string { return e.hub.mintToken("refresh", 7*24*time.Hour) }},
-		{"admin role", func(e *env) string { return e.hub.mintCustom(map[string]any{"role": "admin"}) }},
-		{"real email domain", func(e *env) string { return e.hub.mintCustom(map[string]any{"email": "person@example.com"}) }},
+		{"session secret file", func(e *env) string { return "SESSION_SECRET=" + string(e.secret) + "\n" }, "not a JWT"},
+		{"bare secret", func(e *env) string { return string(e.secret) }, "not a JWT"},
+		{"empty", func(*env) string { return "" }, "not a JWT"},
+		{"three dotted words", func(*env) string { return "a.b.c" }, "not base64url"},
+		{"refresh token", func(e *env) string { return e.hub.mintToken("refresh", 7*24*time.Hour) }, "not an access token"},
+		{"refresh type, valid lifetime", func(e *env) string { return e.hub.mintCustom(map[string]any{"type": "refresh"}) }, "not an access token"},
+		{"no type", func(e *env) string { return e.hub.mintCustom(map[string]any{"type": nil}) }, "not an access token"},
+		{"admin role", func(e *env) string { return e.hub.mintCustom(map[string]any{"role": "admin"}) }, "role is not member"},
+		{"real email domain", func(e *env) string { return e.hub.mintCustom(map[string]any{"email": "person@example.com"}) }, "email is not in"},
+		{"no subject", func(e *env) string { return e.hub.mintCustom(map[string]any{"sub": "", "uid": ""}) }, "subject"},
+		{"uid differs from sub", func(e *env) string { return e.hub.mintCustom(map[string]any{"uid": "uid-other"}) }, "inconsistent subject"},
+		{"missing iat", func(e *env) string { return e.hub.mintCustom(map[string]any{"iat": nil}) }, "invalid iat"},
+		{"negative iat", func(e *env) string { return e.hub.mintCustom(map[string]any{"iat": -60, "exp": 840}) }, "invalid iat"},
+		{"exp before iat", func(e *env) string { return e.hub.mintCustom(map[string]any{"exp": now - 60}) }, "exp is not after iat"},
 		{"long lifetime", func(e *env) string {
 			return e.hub.mintCustom(map[string]any{"exp": time.Now().Add(30 * 24 * time.Hour).Unix()})
-		}},
-		{"no subject", func(e *env) string { return e.hub.mintCustom(map[string]any{"sub": "", "uid": ""}) }},
+		}, "lifetime exceeds"},
+		{"lifetime that overflows a Duration", func(e *env) string {
+			return e.hub.mintCustom(map[string]any{"iat": 1, "exp": int64(maxClaimTime)})
+		}, "lifetime exceeds"},
+		{"exp out of range", func(e *env) string {
+			return e.hub.mintCustom(map[string]any{"iat": int64(math.MaxInt64 - 900), "exp": int64(math.MaxInt64)})
+		}, "exp is out of range"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -624,8 +645,8 @@ func TestCleanupRefusesNonTokenFiles(t *testing.T) {
 			if code == 0 {
 				t.Fatal("expected a non-zero exit")
 			}
-			if !strings.Contains(stderr, "nothing was sent and the file was left in place") {
-				t.Errorf("stderr:\n%s", stderr)
+			if !strings.Contains(stderr, "nothing was sent and the file was left in place") || !strings.Contains(stderr, tc.reason) {
+				t.Errorf("stderr missing refusal or reason %q:\n%s", tc.reason, stderr)
 			}
 			if e.hub.requests != 0 {
 				t.Errorf("hub received %d requests", e.hub.requests)
@@ -637,15 +658,95 @@ func TestCleanupRefusesNonTokenFiles(t *testing.T) {
 	}
 }
 
+// TestTestloginShape checks each shape rule on its own, starting from a
+// valid claim set and breaking one claim per case.
+func TestTestloginShape(t *testing.T) {
+	now := time.Now().Unix()
+	valid := func() tokenClaims {
+		return tokenClaims{Sub: "u1", UID: "u1", Email: "x@" + EmailDomain, Role: "member", Type: "access", Iat: now, Exp: now + 900}
+	}
+	if c := valid(); c.testloginShape() != nil {
+		t.Fatal("valid claims rejected")
+	}
+	if c := valid(); func() bool { c.UID = ""; return c.testloginShape() != nil }() {
+		t.Error("claims without uid rejected")
+	}
+	if c := valid(); func() bool { c.Exp = c.Iat + maxTokenLifetimeSeconds; return c.testloginShape() != nil }() {
+		t.Error("lifetime of exactly 30 minutes rejected")
+	}
+	cases := []struct {
+		name   string
+		mutate func(*tokenClaims)
+		reason string
+	}{
+		{"no sub", func(c *tokenClaims) { c.Sub = "" }, "subject"},
+		{"uid differs", func(c *tokenClaims) { c.UID = "u2" }, "inconsistent subject"},
+		{"type refresh", func(c *tokenClaims) { c.Type = "refresh" }, "not an access token"},
+		{"type empty", func(c *tokenClaims) { c.Type = "" }, "not an access token"},
+		{"role admin", func(c *tokenClaims) { c.Role = "admin" }, "role is not member"},
+		{"email domain", func(c *tokenClaims) { c.Email = "x@example.com" }, "email is not in"},
+		{"iat zero", func(c *tokenClaims) { c.Iat = 0 }, "invalid iat"},
+		{"iat negative", func(c *tokenClaims) { c.Iat, c.Exp = -900, 0 }, "invalid iat"},
+		{"iat most negative", func(c *tokenClaims) { c.Iat = math.MinInt64 }, "invalid iat"},
+		{"exp equals iat", func(c *tokenClaims) { c.Exp = c.Iat }, "exp is not after iat"},
+		{"lifetime 1801s", func(c *tokenClaims) { c.Exp = c.Iat + maxTokenLifetimeSeconds + 1 }, "lifetime exceeds"},
+		{"lifetime overflowing a Duration", func(c *tokenClaims) { c.Iat, c.Exp = 1, maxClaimTime }, "lifetime exceeds"},
+		{"exp max int64", func(c *tokenClaims) { c.Iat, c.Exp = math.MaxInt64-900, math.MaxInt64 }, "exp is out of range"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := valid()
+			tc.mutate(&c)
+			err := c.testloginShape()
+			if err == nil || !strings.Contains(err.Error(), tc.reason) {
+				t.Errorf("err = %v, want one containing %q", err, tc.reason)
+			}
+		})
+	}
+}
+
 // TestEveryRunIsChecked keeps the secret-absence check on every run: the
-// tests may call Run only through env.run.
+// test files may refer to Run only inside env.run. It scans the syntax
+// tree, so any call form (or taking Run as a value) is caught.
 func TestEveryRunIsChecked(t *testing.T) {
-	data, err := os.ReadFile("testlogin_test.go")
+	files, err := filepath.Glob("*_test.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := strings.Count(string(data), "Run("+"context."); n != 1 {
-		t.Errorf("found %d direct calls of Run; call it only through env.run", n)
+	fset := token.NewFileSet()
+	inHelper, outside := 0, 0
+	for _, name := range files {
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		selectors := map[*ast.Ident]bool{}
+		ast.Inspect(f, func(n ast.Node) bool {
+			if sel, ok := n.(*ast.SelectorExpr); ok {
+				selectors[sel.Sel] = true // x.Run (such as t.Run) is a different Run
+			}
+			return true
+		})
+		for _, decl := range f.Decls {
+			fd, isFunc := decl.(*ast.FuncDecl)
+			helper := isFunc && fd.Name.Name == "run" && fd.Recv != nil
+			ast.Inspect(decl, func(n ast.Node) bool {
+				id, ok := n.(*ast.Ident)
+				if !ok || id.Name != "Run" || selectors[id] {
+					return true
+				}
+				if helper {
+					inHelper++
+				} else {
+					outside++
+					t.Errorf("%s: Run used outside env.run", fset.Position(id.Pos()))
+				}
+				return true
+			})
+		}
+	}
+	if inHelper != 1 || outside != 0 {
+		t.Errorf("Run references: %d in env.run (want 1), %d elsewhere (want 0)", inHelper, outside)
 	}
 }
 

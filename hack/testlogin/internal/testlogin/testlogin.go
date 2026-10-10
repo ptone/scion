@@ -50,7 +50,11 @@ const (
 	EmailDomain = "scion-test.invalid"
 
 	// maxTokenLifetime bounds exp-iat of the access token the hub returns.
-	maxTokenLifetime = 30 * time.Minute
+	maxTokenLifetime        = 30 * time.Minute
+	maxTokenLifetimeSeconds = int64(maxTokenLifetime / time.Second)
+
+	// maxClaimTime rejects absurd exp values (after 9999-12-31T23:59:59Z).
+	maxClaimTime = 253402300799
 
 	// freshnessSkew is the clock and timestamp-precision allowance used when
 	// checking that the hub created the user during this run.
@@ -492,29 +496,27 @@ func runCleanup(ctx context.Context, args []string, stdout, stderr io.Writer, op
 	_, _ = fmt.Fprintf(stdout, "uid:     %s\nemail:   %s\nexpires: %s\n", uid, c.Email, time.Unix(c.Exp, 0).UTC().Format(time.RFC3339))
 
 	ok := true
-	{
-		status, body, err := m.do(ctx, http.MethodGet, pathAuthMe, token, nil)
-		switch {
-		case err != nil:
-			errorf(stderr, "/auth/me: %v", err)
+	status, body, err := m.do(ctx, http.MethodGet, pathAuthMe, token, nil)
+	switch {
+	case err != nil:
+		errorf(stderr, "/auth/me: %v", err)
+		ok = false
+	case status == http.StatusOK:
+		var me userJSON
+		if jerr := json.Unmarshal(body, &me); jerr != nil {
+			errorf(stderr, "decode /auth/me: %v", jerr)
 			ok = false
-		case status == http.StatusOK:
-			var me userJSON
-			if jerr := json.Unmarshal(body, &me); jerr != nil {
-				errorf(stderr, "decode /auth/me: %v", jerr)
-				ok = false
-			} else if me.Role != role || me.ID != uid {
-				errorf(stderr, "/auth/me returned uid %q role %q; want uid %q role %q", me.ID, me.Role, uid, role)
-				ok = false
-			} else {
-				_, _ = fmt.Fprintf(stdout, "verified: token is live for uid %s with role %s\n", me.ID, me.Role)
-			}
-		case status == http.StatusUnauthorized:
-			_, _ = fmt.Fprintf(stdout, "verified: hub no longer accepts the token %s\n", errorCode(body))
-		default:
-			errorf(stderr, "/auth/me returned HTTP %d %s", status, errorCode(body))
+		} else if me.Role != role || me.ID != uid {
+			errorf(stderr, "/auth/me returned uid %q role %q; want uid %q role %q", me.ID, me.Role, uid, role)
 			ok = false
+		} else {
+			_, _ = fmt.Fprintf(stdout, "verified: token is live for uid %s with role %s\n", me.ID, me.Role)
 		}
+	case status == http.StatusUnauthorized:
+		_, _ = fmt.Fprintf(stdout, "verified: hub no longer accepts the token %s\n", errorCode(body))
+	default:
+		errorf(stderr, "/auth/me returned HTTP %d %s", status, errorCode(body))
+		ok = false
 	}
 
 	if err := os.Remove(*tokenFile); err != nil {
@@ -526,9 +528,7 @@ func runCleanup(ctx context.Context, args []string, stdout, stderr io.Writer, op
 		return 1
 	}
 	_, _ = fmt.Fprintf(stdout, "removed:  %s\n", *tokenFile)
-	{
-		_, _ = fmt.Fprintf(stdout, "next:     an admin must delete user %s (after its agents and projects are deleted); this tool does not delete users\n", uid)
-	}
+	_, _ = fmt.Fprintf(stdout, "next:     an admin must delete user %s (after its agents and projects are deleted); this tool does not delete users\n", uid)
 	if !ok {
 		return 1
 	}
@@ -685,10 +685,18 @@ func (c *tokenClaims) testloginShape() error {
 	if !strings.HasSuffix(strings.ToLower(c.Email), "@"+EmailDomain) {
 		return fmt.Errorf("email is not in %s", EmailDomain)
 	}
-	if c.Iat == 0 || c.Exp <= c.Iat {
-		return errors.New("missing or invalid iat/exp")
+	// Integer seconds throughout: with iat > 0 and exp > iat, exp - iat
+	// cannot overflow, and no time.Duration multiplication is involved.
+	if c.Iat <= 0 {
+		return errors.New("missing or invalid iat")
 	}
-	if life := time.Duration(c.Exp-c.Iat) * time.Second; life > maxTokenLifetime {
+	if c.Exp <= c.Iat {
+		return errors.New("exp is not after iat")
+	}
+	if c.Exp > maxClaimTime {
+		return errors.New("exp is out of range")
+	}
+	if c.Exp-c.Iat > maxTokenLifetimeSeconds {
 		return fmt.Errorf("lifetime exceeds %s", maxTokenLifetime)
 	}
 	return nil

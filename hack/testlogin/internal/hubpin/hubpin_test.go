@@ -25,6 +25,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -329,6 +332,9 @@ func TestRefusesWhenTestLoginDisabled(t *testing.T) {
 	if r.code == 0 || !strings.Contains(r.stderr, "not enabled") {
 		t.Fatalf("exit %d, stderr:\n%s", r.code, r.stderr)
 	}
+	if _, err := os.Lstat(out); !os.IsNotExist(err) {
+		t.Error("token file left behind")
+	}
 	if _, err := h.store.GetUserByEmail(context.Background(), email); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("user lookup err = %v, want not found", err)
 	}
@@ -374,14 +380,48 @@ func TestCleanupRefusesSecretFile(t *testing.T) {
 	}
 }
 
-// TestEveryRunIsChecked keeps the output check on every run: the tests may
-// invoke the tool only through runTool.
+// TestEveryRunIsChecked keeps the output check on every run: the test files
+// may refer to testlogin.Run only inside runTool. It scans the syntax tree,
+// so any call form (or taking testlogin.Run as a value) is caught.
 func TestEveryRunIsChecked(t *testing.T) {
-	data, err := os.ReadFile("hubpin_test.go")
+	files, err := filepath.Glob("*_test.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := strings.Count(string(data), "testlogin."+"Run("); n != 1 {
-		t.Errorf("found %d direct calls of testlogin.Run; call it only through runTool", n)
+	fset := token.NewFileSet()
+	inHelper, outside := 0, 0
+	for _, name := range files {
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, imp := range f.Imports {
+			if strings.HasSuffix(imp.Path.Value, `/internal/testlogin"`) && imp.Name != nil {
+				t.Errorf("%s: import the testlogin package without a rename, so this check can see its uses", fset.Position(imp.Pos()))
+			}
+		}
+		for _, decl := range f.Decls {
+			fd, isFunc := decl.(*ast.FuncDecl)
+			helper := isFunc && fd.Name.Name == "runTool" && fd.Recv == nil
+			ast.Inspect(decl, func(n ast.Node) bool {
+				sel, ok := n.(*ast.SelectorExpr)
+				if !ok || sel.Sel.Name != "Run" {
+					return true
+				}
+				if x, ok := sel.X.(*ast.Ident); !ok || x.Name != "testlogin" {
+					return true
+				}
+				if helper {
+					inHelper++
+				} else {
+					outside++
+					t.Errorf("%s: testlogin.Run used outside runTool", fset.Position(sel.Pos()))
+				}
+				return true
+			})
+		}
+	}
+	if inHelper != 1 || outside != 0 {
+		t.Errorf("testlogin.Run references: %d in runTool (want 1), %d elsewhere (want 0)", inHelper, outside)
 	}
 }
