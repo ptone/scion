@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -206,6 +207,47 @@ func TestAgentDeleteFinalizingRetry_ClaimUsesStoredRequest(t *testing.T) {
 			assert.Equal(t, before.DeletionClaim+1, after.DeletionClaim)
 			assert.Equal(t, store.DeletionStateFinalizing, after.DeletionState)
 			assert.Equal(t, before.DeletionRequest, after.DeletionRequest, "the stored column is untouched")
+		})
+	}
+}
+
+// The claim itself, with no usable stored request: the plan and the stored
+// column carry only the current retention decision and the retrier, never
+// the retry's force, deleteFiles or removeBranch.
+func TestAgentDeleteFinalizingRetry_ClaimFallbackIgnoresRetryParams(t *testing.T) {
+	cases := []struct {
+		name      string
+		retention time.Duration
+		wantSoft  bool
+	}{
+		{"retention on", time.Hour, true},
+		{"retention off", 0, false},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFinalizingFixture(t, "fin-claimfb-"+string(rune('a'+i)), tc.retention)
+			got := f.revokeFailed(t, "")
+			claim := got.DeletionClaim
+			empty := ""
+			n, err := f.s.UpdateAgentDeletion(context.Background(), f.agent.ID,
+				store.DeletionPredicate{Claim: &claim, States: []string{store.DeletionStateFinalizing}},
+				store.DeletionFields{Request: &empty})
+			require.NoError(t, err)
+			require.Equal(t, 1, n)
+
+			plan, err := f.srv.claimAgentDeletion(context.Background(), f.agent.ID,
+				agentDeleteParams{deleteFiles: true, removeBranch: true, force: true, requestedBy: "retrier"})
+			require.NoError(t, err)
+			require.NotNil(t, plan, "the lapsed finalizing row is re-claimed")
+			assert.True(t, plan.skipDispatch)
+			want := store.DeletionRequestInfo{Soft: tc.wantSoft, RequestedBy: "retrier"}
+			assert.Equal(t, want, plan.req, "the plan carries the fallback request")
+
+			wantJSON, err := json.Marshal(want)
+			require.NoError(t, err)
+			after := mustGetAgent(t, f.s, f.agent.ID)
+			assert.Equal(t, claim+1, after.DeletionClaim)
+			assert.Equal(t, string(wantJSON), after.DeletionRequest, "the fallback request is stored")
 		})
 	}
 }
