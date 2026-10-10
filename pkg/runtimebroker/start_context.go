@@ -162,6 +162,13 @@ type startContextInputs struct {
 	// never to locate or load a template; a create's Config.Template slug
 	// takes precedence. A content hash is ignored.
 	TemplateName string
+	// TemplateID and TemplateHash are the agent's Hub template identity as
+	// sent on start and restart (ptone/scion#2157). They are used only when
+	// the agent has to be provisioned again because its broker-side state
+	// did not survive the stop: the template is then hydrated from them,
+	// as create hydrates it. See applyStartTemplateIdentity.
+	TemplateID   string
+	TemplateHash string
 
 	// HTTP request (for hub connection resolution)
 	HTTPRequest *http.Request
@@ -993,6 +1000,14 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	}
 	if templateSlug != "" {
 		opts.TemplateName = templateSlug
+	}
+
+	// --- Template identity on start and restart ---
+	if in.Operation != opCreate && opts.Template == "" {
+		if err := s.applyStartTemplateIdentity(ctx, in, &opts, hubConn, templateSlug, env, classifyBrokerEnv); err != nil {
+			span.SetStatus(codes.Error, err.Error())
+			return nil, err
+		}
 	}
 
 	// --- Shared workspace mode (git-workspace hybrid) ---
@@ -2183,4 +2198,64 @@ func ambiguousNonGitWorkspace(in startContextInputs, worktreeProvisioned bool) s
 	}
 	return "ambiguous workspace for hub-managed project " + in.ProjectSlug +
 		": the request has no workspace mode, workspace path or git clone; refusing to fall back to the shared project directory"
+}
+
+// applyStartTemplateIdentity applies the agent's template identity on a start
+// or restart (ptone/scion#2157).
+//
+// When the agent's broker-side state survived the stop, the agent starts
+// from that state exactly as before: nothing is hydrated, opts.Template stays
+// unset (an explicit template path would change how an existing agent's
+// image and harness-config are resolved), and only SCION_TEMPLATE is set to
+// the template name.
+//
+// When the agent has to be provisioned again (its state directory is gone,
+// as on a runtime or broker that keeps nothing across a stop) and the Hub
+// sent the template identity, the template is hydrated the way create
+// hydrates it, and opts.Template is set to the hydrated path, so the
+// recreated agent gets its own template instead of the default one. A
+// hydration failure fails the start with the same error create returns.
+// Without a template identity, or without a Hub connection, the start is
+// left as before.
+func (s *Server) applyStartTemplateIdentity(ctx context.Context, in startContextInputs, opts *api.StartOptions, hubConn *HubConnection, templateSlug string, env map[string]string, classify func(string, api.EnvKind)) error {
+	hasIdentity := in.TemplateID != "" || in.TemplateHash != ""
+	if templateSlug == "" && !hasIdentity {
+		return nil
+	}
+	needsProvision, err := agent.AgentNeedsProvision(ctx, *opts)
+	if err != nil {
+		// Unknown: start from whatever state exists, as before.
+		s.agentLifecycleLog.Debug("Start: could not tell whether the agent needs provisioning; template identity not applied",
+			"agent_id", in.AgentID, "error", err)
+		return nil
+	}
+	if !needsProvision {
+		if templateSlug != "" {
+			env["SCION_TEMPLATE"] = templateSlug
+			classify("SCION_TEMPLATE", api.EnvKindPlain)
+		}
+		return nil
+	}
+	if !hasIdentity || hubConn == nil {
+		return nil
+	}
+	templatePath, err := s.hydrateTemplate(ctx, &CreateAgentConfig{
+		Template:     templateSlug,
+		TemplateID:   in.TemplateID,
+		TemplateHash: in.TemplateHash,
+	}, hubConn)
+	if err != nil {
+		return &startContextError{
+			Status:      http.StatusInternalServerError,
+			Message:     "Failed to hydrate template: " + err.Error(),
+			IsHubError:  true,
+			OriginalErr: err,
+		}
+	}
+	if templatePath != "" {
+		opts.Template = templatePath
+		s.agentLifecycleLog.Info("Start: agent state missing, provisioning from the agent's Hub template",
+			"agent_id", in.AgentID, "template", templateSlug)
+	}
+	return nil
 }
