@@ -17,8 +17,8 @@
 /**
  * The test-hub banner in a real browser (ptone/scion#4240, phase W): the
  * member and super-admin variants on the dashboard, a project page, an admin
- * page, for a viewer, a member and an admin user, and on the login, invite
- * and onboarding pages signed out; no banner when every gate is off; no close control; and the shell bringing
+ * page, for a viewer, a member and an admin user, on the login and invite
+ * pages signed out, and on the onboarding page as an admin; no banner when every gate is off; no close control; and the shell bringing
  * the banner back after it is removed in devtools.
  */
 
@@ -70,10 +70,12 @@ const pages: Array<{ name: string; path: string; ready: string; roles: Role[] }>
 ];
 
 /** Pages rendered without a shell; each renders the banner itself. */
-const standalonePages: Array<{ name: string; path: string; tag: string }> = [
-  { name: 'login page', path: '/login', tag: 'scion-login-page' },
-  { name: 'invite page', path: '/invite', tag: 'scion-page-invite' },
-  { name: 'onboarding page', path: '/onboarding', tag: 'scion-page-onboarding' },
+const standalonePages: Array<{ name: string; path: string; tag: string; role: Role | null }> = [
+  { name: 'login page', path: '/login', tag: 'scion-login-page', role: null },
+  { name: 'invite page', path: '/invite', tag: 'scion-page-invite', role: null },
+  // The first-run wizard is for a signed-in admin; signed out, the app
+  // sends it to the login page.
+  { name: 'onboarding page', path: '/onboarding', tag: 'scion-page-onboarding', role: 'admin' },
 ];
 
 /**
@@ -84,9 +86,7 @@ async function gotoAndSettleStatus(page: Page, path: string): Promise<void> {
   const status = page.waitForResponse('**/api/v1/test-infra/status');
   await page.goto(path, { waitUntil: 'domcontentloaded' });
   await status;
-  await page.evaluate(
-    () => new Promise((resolve) => requestAnimationFrame(() => resolve(null)))
-  );
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => resolve(null))));
 }
 
 const variants: Array<[string, TestInfraStatus, string, string]> = [
@@ -108,8 +108,8 @@ for (const [variant, status, text, icon] of variants) {
     }
 
     for (const p of standalonePages) {
-      test(`${p.name}, signed out`, async ({ page }) => {
-        const hub = await setupHub(page, { status, role: null });
+      test(`${p.name}, ${p.role ? `as ${p.role}` : 'signed out'}`, async ({ page }) => {
+        const hub = await setupHub(page, { status, role: p.role });
         await page.goto(p.path, { waitUntil: 'domcontentloaded' });
         await expect(page.locator(p.tag)).toHaveCount(1);
         await expectBanner(page, text, icon);
@@ -132,7 +132,7 @@ test.describe('every gate off', () => {
 
   for (const p of standalonePages) {
     test(`no banner element on the ${p.name}`, async ({ page }) => {
-      await setupHub(page, { status: OFF, role: null });
+      await setupHub(page, { status: OFF, role: p.role });
       await gotoAndSettleStatus(page, p.path);
       await expect(page.locator(p.tag)).toHaveCount(1);
       expect(await page.locator('sl-alert.test-hub-banner').count()).toBe(0);

@@ -46,7 +46,11 @@ vi.mock('@xterm/xterm', () => ({
     attachCustomKeyEventHandler = vi.fn();
   },
 }));
-vi.mock('@xterm/addon-fit', () => ({ FitAddon: class { fit = vi.fn(); } }));
+vi.mock('@xterm/addon-fit', () => ({
+  FitAddon: class {
+    fit = vi.fn();
+  },
+}));
 vi.mock('@xterm/addon-web-links', () => ({ WebLinksAddon: class {} }));
 vi.mock('@xterm/xterm/css/xterm.css?inline', () => ({ default: '' }));
 
@@ -92,7 +96,7 @@ describe('terminal workspace test-hub banner', () => {
     const first = banner()!;
     expect(first.textContent?.trim()).toBe(TEST_HUB_MEMBER_TEXT);
     expect(first.hasAttribute('closable')).toBe(false);
-    const container = root.element.firstElementChild!;
+    const container = root.element.querySelector(':scope > .terminal-test-hub-banner')!;
     expect(container.contains(first)).toBe(true);
     expect(container.nextElementSibling?.tagName.toLowerCase()).toBe('scion-header');
 
@@ -102,11 +106,17 @@ describe('terminal workspace test-hub banner', () => {
     const second = banner();
     expect(second).not.toBeNull();
     expect(second).not.toBe(first);
-    expect(root.element.firstElementChild!.contains(second)).toBe(true);
+    const restored = root.element.querySelector(':scope > .terminal-test-hub-banner')!;
+    expect(restored.contains(second)).toBe(true);
+    expect(restored.nextElementSibling?.tagName.toLowerCase()).toBe('scion-header');
   });
 
   it('renders no banner element when every gate is off', async () => {
-    const fetchMock = stubStatus({ testIdentities: false, testHubAdmin: false, testSuperAdmin: false });
+    const fetchMock = stubStatus({
+      testIdentities: false,
+      testHubAdmin: false,
+      testSuperAdmin: false,
+    });
     root = new WorkspaceRoot(null);
     document.body.appendChild(root.element);
     await vi.waitFor(() =>

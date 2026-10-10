@@ -396,9 +396,9 @@ describe('invite and onboarding pages', () => {
       document.body.appendChild(page);
       await page.updateComplete;
       await vi.waitFor(() =>
-        expect(
-          fetchMock.mock.calls.some(([u]) => String(u).endsWith(TEST_INFRA_STATUS_URL))
-        ).toBe(true)
+        expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith(TEST_INFRA_STATUS_URL))).toBe(
+          true
+        )
       );
       await new Promise((r) => setTimeout(r, 0));
       await page.updateComplete;

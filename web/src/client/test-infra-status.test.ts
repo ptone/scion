@@ -95,9 +95,7 @@ describe('loadTestInfraStatus', () => {
   it('retries once at once after a 401 (a stale session the web layer clears)', async () => {
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(
-        jsonResponse({ error: { code: 'session_expired' } }, 401)
-      )
+      .mockResolvedValueOnce(jsonResponse({ error: { code: 'session_expired' } }, 401))
       .mockResolvedValueOnce(
         jsonResponse({ testIdentities: true, testHubAdmin: false, testSuperAdmin: false })
       );
