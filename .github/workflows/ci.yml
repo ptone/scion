@@ -779,9 +779,11 @@ jobs:
 
       # End-to-end check of the workstation hub path with the default build
       # tags (SQLite on; `make test-fast` uses no_sqlite): in a temp HOME and
-      # a temp git repo, `scion hub link` starts the local server and links,
-      # `scion hub status` shows the link, `scion list` answers through the
-      # hub, and `scion server stop` stops it. No container runtime needed.
+      # a temp git repo, `scion hub link` with no hub fails with the
+      # not-configured error, `scion server start` starts the local hub,
+      # `scion hub link` links without a prompt, `scion hub status` shows the
+      # link, `scion list` answers through the hub, and `scion server stop`
+      # stops it.
       - name: Run workstation smoke test
         run: ./hack/workstation-smoke.sh
 

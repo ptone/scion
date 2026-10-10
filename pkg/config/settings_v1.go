@@ -2263,9 +2263,6 @@ type V1HubClientConfig struct {
 	Endpoint  string `json:"endpoint,omitempty" yaml:"endpoint,omitempty" koanf:"endpoint"`
 	ProjectID string `json:"project_id,omitempty" yaml:"project_id,omitempty" koanf:"project_id"`
 	LocalOnly *bool  `json:"local_only,omitempty" yaml:"local_only,omitempty" koanf:"local_only"`
-	// AutoStart is hub.auto_start: whether the CLI may start the local
-	// workstation server when no Hub endpoint is configured (unset = true).
-	AutoStart *bool `json:"auto_start,omitempty" yaml:"auto_start,omitempty" koanf:"auto_start"`
 	// Transport is the transport-layer auth for reaching a Hub behind a
 	// platform guard (IAP, Cloud Run invoker IAM).
 	Transport *V1HubTransportConfig `json:"transport,omitempty" yaml:"transport,omitempty" koanf:"transport"`
@@ -3004,16 +3001,10 @@ func unmarshalVersionedSettings(k *koanf.Koanf, settings *VersionedSettings) err
 // key "hub" as a string and collides with the struct-typed hub settings.
 // Hub settings come from the SCION_HUB_* variables (e.g.
 // SCION_HUB_ENDPOINT), which are unaffected.
-//
-// SCION_HUB_AUTO_START overrides hub.auto_start, but the CLI reads it
-// directly (it accepts yes/no/on/off and treats an unknown value as off).
-// Mapped here, a value koanf cannot decode as a boolean would make every
-// settings load fail.
 var settingsExcludedEnvVars = []string{
 	"SCION_AUTO_EXPOSE_PORTS",
 	"SCION_AUTO_EXPOSE_PORTS_LIST",
 	"SCION_HUB",
-	"SCION_HUB_AUTO_START",
 }
 
 // isSettingsExcludedEnv reports whether name is in settingsExcludedEnvVars.
@@ -4062,7 +4053,6 @@ func AdaptLegacySettings(legacy *Settings) (*VersionedSettings, []string) {
 			Endpoint:  legacy.Hub.Endpoint,
 			ProjectID: legacy.Hub.ProjectID,
 			LocalOnly: legacy.Hub.LocalOnly,
-			AutoStart: legacy.Hub.AutoStart,
 		}
 		if legacy.Hub.Transport != nil {
 			vs.Hub.Transport = &V1HubTransportConfig{
@@ -4200,7 +4190,6 @@ func convertVersionedToLegacy(vs *VersionedSettings) *Settings {
 			Endpoint:  vs.Hub.Endpoint,
 			ProjectID: vs.Hub.ProjectID,
 			LocalOnly: vs.Hub.LocalOnly,
-			AutoStart: vs.Hub.AutoStart,
 		}
 	}
 
@@ -4774,7 +4763,6 @@ var versionedSettingKeys = map[string]versionedSettingKey{
 	"hub.linked":               {path: []string{"hub", "linked"}, isBool: true},
 	"hub.endpoint":             {path: []string{"hub", "endpoint"}},
 	"hub.local_only":           {path: []string{"hub", "local_only"}, isBool: true},
-	"hub.auto_start":           {path: []string{"hub", "auto_start"}, isBool: true},
 	"hub.brokerId":             {path: []string{"server", "broker", "broker_id"}},
 	"hub.brokerToken":          {path: []string{"server", "broker", "broker_token"}},
 	"hub.brokerNickname":       {path: []string{"server", "broker", "broker_nickname"}},
@@ -5134,12 +5122,6 @@ func updateVersionedSettingStruct(dir string, key string, value string) error {
 		}
 		localOnly := value == "true"
 		vs.Hub.LocalOnly = &localOnly
-	case "hub.auto_start":
-		if vs.Hub == nil {
-			vs.Hub = &V1HubClientConfig{}
-		}
-		autoStart := value == "true"
-		vs.Hub.AutoStart = &autoStart
 
 	// --- Broker identity: legacy hub.broker* → v1 server.broker.* ---
 	case "hub.brokerId":
@@ -5267,14 +5249,6 @@ func GetVersionedSettingValue(vs *VersionedSettings, key string) (string, error)
 	case "hub.local_only":
 		if vs.Hub != nil && vs.Hub.LocalOnly != nil {
 			if *vs.Hub.LocalOnly {
-				return "true", nil
-			}
-			return "false", nil
-		}
-		return "", nil
-	case "hub.auto_start":
-		if vs.Hub != nil && vs.Hub.AutoStart != nil {
-			if *vs.Hub.AutoStart {
 				return "true", nil
 			}
 			return "false", nil

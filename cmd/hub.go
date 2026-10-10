@@ -264,9 +264,10 @@ This command associates your local project with the Hub, enabling:
 The project will be created on the Hub if it doesn't exist, or linked
 to an existing project with a matching name or git remote.
 
-If no Hub endpoint is configured, the local scion server is started first
-(as 'scion server start' does) and the project is linked to it. Turn this
-off with the hub.auto_start setting or SCION_HUB_AUTO_START=0.
+With no Hub endpoint configured, start the local hub first with
+'scion server start', or set a remote one with
+'scion config set hub.endpoint <url>'. On the local hub the project is
+linked without a confirmation prompt.
 
 Examples:
   # Link the current project
@@ -2391,26 +2392,8 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	}
 
 	endpoint := GetHubEndpoint(settings)
-	if endpoint == "" && !noHub {
-		// No hub configured: start the local workstation server, which
-		// writes hub.endpoint to the global settings, and link to it.
-		allowed, reason := autoStartAllowed(settings)
-		if !allowed {
-			return fmt.Errorf("%w\n\nThe local scion server was not started automatically: %s.\n"+
-				"To use another hub, set SCION_HUB_ENDPOINT, hub.endpoint in settings.yaml, or use the --hub flag.",
-				errHubNotConfigured, reason)
-		}
-		if _, err := ensureLocalServerFn(); err != nil {
-			return err
-		}
-		settings, err = config.LoadSettings(resolvedPath)
-		if err != nil {
-			return fmt.Errorf("failed to reload settings: %w", err)
-		}
-		endpoint = GetHubEndpoint(settings)
-	}
 	if endpoint == "" {
-		return fmt.Errorf("hub endpoint not configured: set SCION_HUB_ENDPOINT, hub.endpoint in settings.yaml, or use --hub flag")
+		return errHubLinkNoEndpoint
 	}
 
 	// Get project name for display
@@ -2623,9 +2606,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Enable Hub integration and mark as linked for this project.
-	// hub.enabled is still written here while the CLI has a local-only
-	// mode to fall back to; hub.linked records the explicit link.
+	// Enable Hub integration and mark as linked for this project
 	if err := config.UpdateSetting(resolvedPath, "hub.enabled", "true", isGlobal); err != nil {
 		return fmt.Errorf("failed to enable hub: %w", err)
 	}

@@ -16,15 +16,16 @@
 # workstation-smoke.sh - end-to-end check of the workstation hub path.
 #
 # In a temporary HOME and a temporary git repo, with no hub configured:
-#   1. scion init                  creates the project (only where a container
-#                                  runtime is installed; else the global
-#                                  project is used)
-#   2. scion hub link              starts the local server automatically and links
-#   3. scion hub status            reports the project as linked
-#   4. scion list                  returns an empty list through the hub
-#   5. scion server stop           stops the server
-# Also checks that SCION_HUB_AUTO_START=0 makes 'hub link' fail without
-# starting anything. No container runtime is needed.
+#   1. scion hub link              fails with the one-line "No hub configured"
+#                                  error and starts no server
+#   2. scion server start          starts the local workstation server
+#   3. scion hub link              links to the local hub without a prompt
+#   4. scion hub status            reports the project as linked
+#   5. scion list                  returns an empty list through the hub
+#   6. scion server stop           stops the server
+# Before step 1, 'scion init' creates the project where a container runtime
+# is installed; without one, the global project is used (--global). No
+# container runtime is needed otherwise.
 #
 # Usage: hack/workstation-smoke.sh [path-to-scion-binary]
 # Without an argument it builds ./cmd/scion with the default build tags
@@ -104,29 +105,45 @@ else
   TARGET=(--global)
 fi
 
-log "SCION_HUB_AUTO_START=0 scion hub link fails and starts nothing"
-if SCION_HUB_AUTO_START=0 "$SCION" ${TARGET[@]+"${TARGET[@]}"} -y hub link >"$WORK/off.out" 2>&1; then
-  cat "$WORK/off.out" >&2
-  fail "hub link succeeded with auto-start off and no endpoint"
+log "1. with no hub endpoint, scion hub link fails and starts nothing"
+if "$SCION" ${TARGET[@]+"${TARGET[@]}"} -y hub link >"$WORK/noep.out" 2>&1; then
+  cat "$WORK/noep.out" >&2
+  fail "hub link succeeded with no hub endpoint"
 fi
-grep -q "this command needs a hub" "$WORK/off.out" || { cat "$WORK/off.out" >&2; fail "missing not-configured error"; }
-if "$SCION" server status 2>/dev/null | grep -qi "running" && ! "$SCION" server status 2>/dev/null | grep -qi "not running"; then
-  fail "a server is running after hub link with auto-start off"
+grep -qF "No hub configured. Start the local hub with 'scion server start' (first run opens setup), or set a remote one with 'scion config set hub.endpoint <url>'." "$WORK/noep.out" || {
+  cat "$WORK/noep.out" >&2; fail "missing the not-configured error"; }
+if [ -e "$HOME/.scion/server.pid" ] || grep -q "Starting server" "$WORK/noep.out"; then
+  cat "$WORK/noep.out" >&2; fail "hub link started a server"
 fi
 
-log "scion hub link (auto-starts the local server)"
-"$SCION" ${TARGET[@]+"${TARGET[@]}"} -y hub link >"$WORK/link.out" 2>&1 || { cat "$WORK/link.out" >&2; fail "scion hub link"; }
+log "2. scion server start"
+"$SCION" server start >"$WORK/start.out" 2>&1 || { cat "$WORK/start.out" >&2; fail "scion server start"; }
+grep -q "Configured hub endpoint: http://127.0.0.1:" "$WORK/start.out" || {
+  cat "$WORK/start.out" >&2; fail "server start did not configure the hub endpoint"; }
+ENDPOINT="$(sed -n 's/^Configured hub endpoint: \(http:[^ ]*\).*/\1/p' "$WORK/start.out" | head -n 1)"
+ready=0
+for _ in $(seq 1 60); do
+  if curl -fsS "$ENDPOINT/healthz" >/dev/null 2>&1; then ready=1; break; fi
+  sleep 1
+done
+[ "$ready" = 1 ] || { cat "$WORK/start.out" >&2; fail "the local server did not answer /healthz"; }
+
+log "3. scion hub link links to the local hub without a prompt"
+# No -y and no terminal: a confirmation prompt would decline.
+"$SCION" ${TARGET[@]+"${TARGET[@]}"} hub link </dev/null >"$WORK/link.out" 2>&1 || {
+  cat "$WORK/link.out" >&2; fail "scion hub link"; }
 cat "$WORK/link.out"
-grep -q "starting the local scion server" "$WORK/link.out" || fail "hub link did not start the local server"
+grep -q "Linking project '.*' to the local hub at http://127.0.0.1:" "$WORK/link.out" || fail "hub link did not report the local link"
+if grep -q "Continue with linking?" "$WORK/link.out"; then fail "hub link asked for confirmation on the local hub"; fi
 grep -q "is now linked to the Hub" "$WORK/link.out" || fail "hub link did not link the project"
 
-log "scion hub status shows the project linked"
+log "4. scion hub status shows the project linked"
 "$SCION" ${TARGET[@]+"${TARGET[@]}"} hub status --format json >"$WORK/status.json" 2>"$WORK/status.err" || {
   cat "$WORK/status.json" "$WORK/status.err" >&2; fail "scion hub status"; }
 grep -Eq '"linked"[[:space:]]*:[[:space:]]*true' "$WORK/status.json" || {
   cat "$WORK/status.json" >&2; fail "hub status does not report the project as linked"; }
 
-log "scion list returns an empty list through the hub"
+log "5. scion list returns an empty list through the hub"
 "$SCION" ${TARGET[@]+"${TARGET[@]}"} list >"$WORK/list.out" 2>"$WORK/list.err" || {
   cat "$WORK/list.out" "$WORK/list.err" >&2; fail "scion list"; }
 grep -q "Using hub: http://127.0.0.1:" "$WORK/list.err" || {
@@ -136,7 +153,7 @@ grep -q "Using hub: http://127.0.0.1:" "$WORK/list.err" || {
 tr -d '[:space:]' <"$WORK/list.json" | grep -Eq '^(\[\]|null)$' || {
   cat "$WORK/list.json" "$WORK/list.err" >&2; fail "scion list did not return an empty list"; }
 
-log "scion server stop"
+log "6. scion server stop"
 "$SCION" server stop >"$WORK/stop.out" 2>&1 || { cat "$WORK/stop.out" >&2; fail "scion server stop"; }
 
 log "workstation smoke test passed"

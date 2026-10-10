@@ -15,7 +15,6 @@
 package cmd
 
 import (
-	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -32,14 +31,6 @@ import (
 func TestMain(m *testing.M) {
 	pinProcessUTC = func() {}
 	clearAmbientScionEnv()
-	// os.Executable() is the test binary here: never let a test start a
-	// server through it. Tests that cover auto-start install their own stub.
-	ensureLocalServerFn = func() (string, error) {
-		return "", errors.New("starting the local server is disabled in cmd tests")
-	}
-	runLocalServerCommand = func(...string) error {
-		return errors.New("running 'scion server' is disabled in cmd tests")
-	}
 	os.Exit(m.Run())
 }
 

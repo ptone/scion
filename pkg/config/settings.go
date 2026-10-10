@@ -104,10 +104,6 @@ type HubClientConfig struct {
 	// This is different from Enabled=false: LocalOnly=true means Hub IS configured
 	// but the user has explicitly opted out of sync requirements for this project.
 	LocalOnly *bool `json:"local_only,omitempty" yaml:"local_only,omitempty" koanf:"local_only"`
-	// AutoStart controls whether the CLI may start the local workstation
-	// server when no Hub endpoint is configured. Unset means true. The
-	// SCION_HUB_AUTO_START env var overrides it.
-	AutoStart *bool `json:"auto_start,omitempty" yaml:"auto_start,omitempty" koanf:"auto_start"`
 	// Endpoint is the Hub API endpoint URL
 	Endpoint string `json:"endpoint,omitempty" yaml:"endpoint,omitempty" koanf:"endpoint"`
 	// Token is a bearer token for authentication
@@ -679,14 +675,6 @@ func GetSettingValue(s *Settings, key string) (string, error) {
 			return "false", nil
 		}
 		return "", nil
-	case "hub.auto_start":
-		if s.Hub != nil && s.Hub.AutoStart != nil {
-			if *s.Hub.AutoStart {
-				return "true", nil
-			}
-			return "false", nil
-		}
-		return "", nil
 	case "hub.lastSyncedAt":
 		if s.Hub != nil {
 			return s.Hub.LastSyncedAt, nil
@@ -763,13 +751,6 @@ func GetSettingsMap(s *Settings) map[string]string {
 				m["hub.local_only"] = "true"
 			} else {
 				m["hub.local_only"] = "false"
-			}
-		}
-		if s.Hub.AutoStart != nil {
-			if *s.Hub.AutoStart {
-				m["hub.auto_start"] = "true"
-			} else {
-				m["hub.auto_start"] = "false"
 			}
 		}
 		m["hub.endpoint"] = s.Hub.Endpoint
@@ -865,17 +846,6 @@ func (s *Settings) IsHubLinked() bool {
 // Returns false if not configured (nil) or enabled.
 func (s *Settings) IsHubExplicitlyDisabled() bool {
 	return s.Hub != nil && s.Hub.Enabled != nil && !*s.Hub.Enabled
-}
-
-// IsHubAutoStartEnabled reports the hub.auto_start setting: whether the CLI
-// may start the local workstation server when no Hub endpoint is configured.
-// It defaults to true when unset. It does not read SCION_HUB_AUTO_START
-// directly or check for an agent container; the CLI combines those.
-func (s *Settings) IsHubAutoStartEnabled() bool {
-	if s == nil || s.Hub == nil || s.Hub.AutoStart == nil {
-		return true
-	}
-	return *s.Hub.AutoStart
 }
 
 // IsHubLocalOnly returns true if the project is configured for local-only mode.
