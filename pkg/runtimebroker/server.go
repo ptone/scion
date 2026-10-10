@@ -286,9 +286,9 @@ type Server struct {
 	// Caches GitHub API resolution results to avoid redundant API calls.
 	ghResolutionCache *agent.GitHubResolutionCache
 
-	// Multi-key auth middleware. authMiddlewareMu guards
-	// brokerAuthMiddleware and serializes buildAuthMiddleware. Lock
-	// order: authMiddlewareMu, then hubMu, then a connection's mu.
+	// Multi-key auth middleware. authMiddlewareMu guards the field below
+	// and serializes buildAuthMiddleware. Lock order: authMiddlewareMu,
+	// then hubMu, then a connection's mu.
 	authMiddlewareMu     sync.Mutex
 	brokerAuthMiddleware *MultiKeyBrokerAuthMiddleware
 
@@ -940,9 +940,9 @@ func (s *Server) tryLegacyCredentials() {
 // buildAuthMiddleware creates or rebuilds the multi-key auth middleware
 // from all hub connections' secret keys.
 func (s *Server) buildAuthMiddleware() {
-	// Rebuilds run from the credential watcher and from reinitialize
-	// goroutines; run them one at a time, each from a fresh read of the
-	// keys, so an older read cannot overwrite a newer one.
+	// Runs from the credential watcher and from reinitialize goroutines;
+	// one at a time, each from a fresh read, so an older read cannot
+	// overwrite a newer one.
 	s.authMiddlewareMu.Lock()
 	defer s.authMiddlewareMu.Unlock()
 
@@ -2419,21 +2419,20 @@ func (s *Server) checkAndReloadCredentials(ctx context.Context) error {
 		go func(conn *HubConnection) {
 			applied, err := conn.applyRequestedReinitialize(ctx, s)
 			if err != nil {
-				// Leave the request checks as they are rather than
-				// rebuild them from a partly applied credential set.
+				// Do not apply a partly applied credential set further.
 				slog.Error("Failed to reinitialize hub connection", "name", conn.Name, "error", err)
 				return
 			}
 			if applied {
-				// The connection holds the new key only now, so rebuild
-				// the request checks here, not when the reload returns.
+				// The new credentials are in place only now, so a
+				// credential change takes effect here, after reinitialize.
 				s.buildAuthMiddleware()
 			}
 		}(conn)
 	}
 
 	// Rebuild for added and removed connections. Reinitialized connections
-	// rebuild again once their new key is in place (above).
+	// rebuild again once their reinitialize has finished (above).
 	s.buildAuthMiddleware()
 
 	return nil

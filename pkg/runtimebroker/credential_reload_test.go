@@ -33,8 +33,8 @@ import (
 
 // TestCredentialReload_TakesEffectAfterReinitialize changes a connection's
 // credential file and checks that, once the connection has been
-// reinitialized with it, requests signed with the new credential are
-// accepted and requests signed with the old one are not. The
+// reinitialized with it, the new credential is in effect and the old one
+// no longer is. The
 // reinitialize is held in Stop until the reload has returned, which is
 // the usual order in a running broker (Stop waits for the control
 // channel and conduit to close).
@@ -84,7 +84,7 @@ func TestCredentialReload_TakesEffectAfterReinitialize(t *testing.T) {
 	srv.buildAuthMiddleware()
 	mw := srv.brokerAuthMiddleware
 	if mw == nil {
-		t.Fatal("expected request checks to be set up")
+		t.Fatal("expected the credential set to be in use")
 	}
 
 	// Hold the conduit dialer goroutine at its end until released, so the
@@ -127,13 +127,13 @@ func TestCredentialReload_TakesEffectAfterReinitialize(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("after the credential change: reinitialized=%v, request with the new credential got %d, want %d",
+			t.Fatalf("after the credential change: reinitialized=%v, new credential got %d, want %d",
 				reinitialized, status(newKey), http.StatusOK)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	if got := status(oldKey); got != http.StatusUnauthorized {
-		t.Errorf("request with the old credential got %d, want %d", got, http.StatusUnauthorized)
+		t.Errorf("old credential got %d, want %d", got, http.StatusUnauthorized)
 	}
 }
 
