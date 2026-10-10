@@ -182,6 +182,11 @@ func TestTestIdentity_DeleteOwnsAgentsAndLastOwner(t *testing.T) {
 	// The agent goes; the project the fixture solely owns still blocks.
 	rec = doRequestWithToken(t, srv, tok, http.MethodDelete, "/api/v1/agents/"+agentID, nil)
 	require.True(t, rec.Code >= 200 && rec.Code < 300, "delete agent: %d %s", rec.Code, rec.Body.String())
+	// Finish the delete in the store too, whatever phase the dispatcher
+	// left the agent in.
+	if err := s.DeleteAgent(ctx, agentID); err != nil {
+		require.ErrorIs(t, err, store.ErrNotFound)
+	}
 	rec = tiDelete(t, srv, issuerTok, fx.Identity.ID)
 	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 	resp.Error.Details.Agents = nil
