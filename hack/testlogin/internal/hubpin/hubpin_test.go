@@ -273,6 +273,13 @@ func TestMintAndCleanupAgainstHub(t *testing.T) {
 		t.Errorf("stored role %q; stdout:\n%s", u.Role, r.stdout)
 	}
 
+	h.mu.Lock()
+	issued := len(h.issued)
+	h.mu.Unlock()
+	if issued != 2 {
+		t.Fatalf("recorded %d issued tokens, want 2 (access and refresh); the output check would be vacuous", issued)
+	}
+
 	r = runTool(t, h, secret, testlogin.Options{}, "cleanup", "--hub-url", h.url, "--token-file", out)
 	if r.code != 0 {
 		t.Fatalf("cleanup exit %d\nstdout:\n%s\nstderr:\n%s", r.code, r.stdout, r.stderr)
