@@ -16,7 +16,7 @@
 # workstation-smoke.sh - end-to-end check of the workstation hub path.
 #
 # In a temporary HOME and a temporary git repo, with no hub configured:
-#   1. scion init                  creates the project
+#   1. scion init --machine, init  creates the global dir and the project
 #   2. scion hub link              starts the local server automatically and links
 #   3. scion hub status            reports the project as linked
 #   4. scion list                  returns an empty list through the hub
@@ -79,8 +79,12 @@ cd "$REPO"
 git init -q
 git commit -q --allow-empty -m "initial commit"
 
+# --format json skips the interactive image-registry question.
+log "scion init --machine"
+"$SCION" init --machine --format json >"$WORK/init-machine.out" 2>&1 || {
+  cat "$WORK/init-machine.out" >&2; fail "scion init --machine"; }
 log "scion init"
-"$SCION" init -y >"$WORK/init.out" 2>&1 || { cat "$WORK/init.out" >&2; fail "scion init"; }
+"$SCION" init --format json >"$WORK/init.out" 2>&1 || { cat "$WORK/init.out" >&2; fail "scion init"; }
 
 log "SCION_HUB_AUTO_START=0 scion hub link fails and starts nothing"
 if SCION_HUB_AUTO_START=0 "$SCION" -y hub link >"$WORK/off.out" 2>&1; then
