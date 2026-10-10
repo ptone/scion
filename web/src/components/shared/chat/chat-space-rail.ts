@@ -38,6 +38,11 @@ import { apiFetch } from '../../../client/api.js';
 import { chatNotifications } from '../../../client/chat-notifications.js';
 import { chatUnread } from '../../../client/chat-unread.js';
 import {
+  railUnreadDMs,
+  type ChatDMListEntry,
+  type ChatRailDM,
+} from '../../../client/chat-unread-dms.js';
+import {
   CHAT_STARTUP_REUSE_MS,
   chatLoadClock,
   chatSpacesLoad,
@@ -316,6 +321,14 @@ const BACKGROUND_THREAD_LOADS = 2;
 const THREAD_LOAD_AUTO_RETRIES = 1;
 
 /** Event detail for thread selection. */
+/** Detail of the rail's `dm-select` event: open the DM with this peer. */
+export interface DMSelectDetail {
+  conversationKey: string;
+  peerId: string;
+  peerKind: 'user' | 'agent';
+  displayName: string;
+}
+
 export interface ThreadSelectDetail {
   conversationKey: string;
   projectId: string;
@@ -347,6 +360,14 @@ export class ScionChatSpaceRail extends LitElement {
    */
   @property()
   selectedProjectId = '';
+
+  /**
+   * The caller's DMs (`GET /api/v1/chat/dms`). Under the Unread filter the
+   * rail lists every unread one, from any space, so each DM the unread
+   * badge counts can be found here.
+   */
+  @property({ attribute: false })
+  dms: ChatDMListEntry[] = [];
 
   @state() private spaces: ChatSpace[] = [];
   @state() private threadsBySpace = new Map<string, ChatSpaceThread[]>();
@@ -633,6 +654,18 @@ export class ScionChatSpaceRail extends LitElement {
 
     .thread-item .thread-name.unread {
       font-weight: 700;
+    }
+
+    /* Unread DMs section (Unread filter): same rows as threads, with a
+       person or robot icon in place of the hash, and no drag or menu. */
+    .dm-header {
+      cursor: default;
+    }
+
+    .thread-item .dm-icon {
+      color: var(--scion-text-muted, #64748b);
+      font-size: var(--chat-fs-base);
+      flex-shrink: 0;
     }
 
     .thread-item .unread-dot {
@@ -3309,17 +3342,77 @@ export class ScionChatSpaceRail extends LitElement {
 
   private renderSpaces() {
     const filtered = this.getFilteredSpaces();
-    if (filtered.length === 0) {
-      if (this.spaceFilter === 'unread') {
+    if (this.spaceFilter === 'unread') {
+      const dmRows = railUnreadDMs(this.dms, this.selectedKey);
+      if (filtered.length === 0 && dmRows.length === 0) {
         return html`<div class="loading-state" style="font-size: var(--chat-fs-md)">
           All caught up!
         </div>`;
       }
+      return html`${this.renderUnreadDMs(dmRows)}${filtered.map((space) => this.renderSpace(space))}`;
+    }
+    if (filtered.length === 0) {
       return html`<div class="loading-state" style="font-size: var(--chat-fs-md)">
         No spaces available
       </div>`;
     }
     return filtered.map((space) => this.renderSpace(space));
+  }
+
+  /**
+   * The Unread DMs section, shown under the Unread filter: every DM the
+   * unread badge counts, whatever space its peer is in (or none, for a
+   * deleted agent), plus the open DM. The badge's number is the space
+   * badges plus this section's count.
+   */
+  private renderUnreadDMs(rows: ChatRailDM[]) {
+    if (rows.length === 0) return nothing;
+    const unread = rows.filter((r) => r.unread).length;
+    return html`
+      <div class="space-section dm-section">
+        <div class="space-header dm-header">
+          <span class="space-name">Direct messages</span>
+          <div class="space-actions">
+            ${unread > 0 ? html`<span class="unread-badge">${unread}</span>` : nothing}
+          </div>
+        </div>
+        <div class="thread-list">
+          ${rows.map(
+            (dm) => html`
+              <div
+                class="thread-item dm-item ${dm.conversationKey === this.selectedKey
+                  ? 'selected'
+                  : ''}"
+                data-dm-key=${dm.conversationKey}
+                @click=${() => this.handleDMClick(dm)}
+              >
+                <sl-icon
+                  class="dm-icon"
+                  name=${dm.peerKind === 'agent' ? 'robot' : 'person'}
+                ></sl-icon>
+                <span class="thread-name ${dm.unread ? 'unread' : ''}">${dm.displayName}</span>
+                ${dm.unread ? html`<span class="unread-dot"></span>` : nothing}
+              </div>
+            `
+          )}
+        </div>
+      </div>
+    `;
+  }
+
+  private handleDMClick(dm: ChatRailDM): void {
+    this.dispatchEvent(
+      new CustomEvent<DMSelectDetail>('dm-select', {
+        detail: {
+          conversationKey: dm.conversationKey,
+          peerId: dm.peerId,
+          peerKind: dm.peerKind,
+          displayName: dm.displayName,
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
   }
 
   private renderSpace(space: ChatSpace) {
