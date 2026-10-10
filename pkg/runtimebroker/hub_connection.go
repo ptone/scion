@@ -313,6 +313,12 @@ func (hc *HubConnection) stop() {
 // and the credential watcher read them from other goroutines (via snapshot).
 // hc.mu is a leaf lock: it is never held across Stop, Start or any other
 // blocking call.
+//
+// Reinitialize does not update the requested-credential generation
+// (reinitCreds/reinitGen). Production code must go through
+// requestReinitialize and applyRequestedReinitialize, as the credential
+// watcher does, so the latest requested set wins; today only tests call
+// Reinitialize directly.
 func (hc *HubConnection) Reinitialize(ctx context.Context, server *Server, creds *brokercredentials.BrokerCredentials) error {
 	hc.lifecycleMu.Lock()
 	defer hc.lifecycleMu.Unlock()

@@ -289,6 +289,9 @@ type Server struct {
 	// Multi-key auth middleware. authMiddlewareMu guards the field below
 	// and serializes buildAuthMiddleware. Lock order: a connection's
 	// lifecycleMu, then authMiddlewareMu, then hubMu, then a connection's mu.
+	// Server.Start holds s.mu across applyMiddleware (s.mu before
+	// authMiddlewareMu). HubConnection.start also takes hubMu directly,
+	// via the heartbeat's project filter (lifecycleMu before hubMu).
 	authMiddlewareMu     sync.Mutex
 	brokerAuthMiddleware *MultiKeyBrokerAuthMiddleware
 
