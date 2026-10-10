@@ -48,6 +48,10 @@ type conduitTunnel struct {
 	target  conduit.Stream
 	untrack func()
 	tracked atomic.Pointer[conduitUserStream]
+	// closing is the close code and reason the authorization re-check
+	// gave the tunnel (nil: none). Once set, every close the splice makes
+	// on either leg carries it.
+	closing atomic.Pointer[conduit.CloseError]
 }
 
 // deadline returns the tunnel's authorization deadline, if tracked.
@@ -59,8 +63,10 @@ func (t *conduitTunnel) deadline() time.Time {
 }
 
 // closeBoth is the re-check's Close: both legs end with code and reason.
-// It never blocks the caller.
+// The code is recorded first, so the splice passes the same code to both
+// legs whichever leg closes first. It never blocks the caller.
 func (t *conduitTunnel) closeBoth(code uint32, reason string) {
+	t.closing.CompareAndSwap(nil, &conduit.CloseError{Code: code, Reason: reason})
 	go func() { _ = t.user.CloseWithCode(code, reason) }()
 	go func() { _ = t.target.CloseWithCode(code, reason) }()
 }
@@ -70,8 +76,8 @@ func (t *conduitTunnel) closeBoth(code uint32, reason string) {
 func (t *conduitTunnel) run(ts *conduitTunnelSession) {
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); conduitTunnelPump(t.target, t.user) }()
-	go func() { defer wg.Done(); conduitTunnelPump(t.user, t.target) }()
+	go func() { defer wg.Done(); t.pump(t.target, t.user) }()
+	go func() { defer wg.Done(); t.pump(t.user, t.target) }()
 	if t.kind == grant.StreamKindPTY {
 		if rz, ok := t.user.(conduit.Resizable); ok {
 			go func() {
@@ -85,24 +91,26 @@ func (t *conduitTunnel) run(ts *conduitTunnelSession) {
 		}
 	}
 	wg.Wait()
-	_ = t.user.Close()
-	_ = t.target.Close()
+	code, reason := t.closeFor(io.EOF)
+	_ = t.user.CloseWithCode(code, reason)
+	_ = t.target.CloseWithCode(code, reason)
 	if t.untrack != nil {
 		t.untrack()
 	}
 	ts.remove(t.key)
 }
 
-// conduitTunnelPump copies src to dst. A half-close (fin) half-closes dst;
-// a close of src, with any code, closes dst with the same code; a failed
-// write closes src with the code dst ended with.
-func conduitTunnelPump(dst, src conduit.Stream) {
+// pump copies src to dst. A half-close (fin) half-closes dst; a close of
+// src, with any code, closes dst with the same code; a failed write closes
+// src with the code dst ended with. Once the tunnel has a recorded close
+// (closing), every close here carries that code instead.
+func (t *conduitTunnel) pump(dst, src conduit.Stream) {
 	buf := make([]byte, conduitTunnelCopyBuffer)
 	for {
 		n, err := src.Read(buf)
 		if n > 0 {
 			if _, werr := dst.Write(buf[:n]); werr != nil {
-				code, reason := conduitTunnelCloseFor(werr)
+				code, reason := t.closeFor(werr)
 				_ = src.CloseWithCode(code, reason)
 				return
 			}
@@ -110,16 +118,26 @@ func conduitTunnelPump(dst, src conduit.Stream) {
 		if err == nil {
 			continue
 		}
-		if errors.Is(err, io.EOF) && !conduitStreamEnded(src) {
+		if errors.Is(err, io.EOF) && t.closing.Load() == nil && !conduitStreamEnded(src) {
 			if cw, ok := dst.(interface{ CloseWrite() error }); ok {
 				_ = cw.CloseWrite()
 				return
 			}
 		}
-		code, reason := conduitTunnelCloseFor(err)
+		code, reason := t.closeFor(err)
 		_ = dst.CloseWithCode(code, reason)
 		return
 	}
+}
+
+// closeFor returns the close code and reason that pass the end of one leg
+// on to the other: the tunnel's recorded close if it has one, else the
+// code the leg ended with.
+func (t *conduitTunnel) closeFor(err error) (uint32, string) {
+	if c := t.closing.Load(); c != nil {
+		return c.Code, c.Reason
+	}
+	return conduitTunnelCloseFor(err)
 }
 
 // conduitTunnelCloseFor returns the close code and reason that pass the
