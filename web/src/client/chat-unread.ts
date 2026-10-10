@@ -43,9 +43,12 @@
  * - At most one request is in flight; events during it fold into a single
  *   trailing refresh.
  * - Tabs share answers. A refresh runs under a Web Lock and records its
- *   answer, with when it was asked, in localStorage; a tab whose triggering
- *   event came before another tab's request started adopts that answer
- *   instead of asking again. N tabs reacting to one event send one request.
+ *   answer, with the user it is for and when the oldest request behind it
+ *   started, in localStorage; a tab of the same user whose triggering event
+ *   came before that adopts the answer instead of asking again. N tabs
+ *   reacting to one event send one request.
+ * - Every answer is bounded (UNREAD_ASK_TIMEOUT_MS): a hung request is
+ *   abandoned as a failure, releasing the lock and the single flight.
  * - The chat page installs a source (`setSource`) that derives the count
  *   from the shared `/chat/spaces` and `/chat/dms` loads the rail and page
  *   already make for the same event, so on the chat page a message costs
@@ -100,29 +103,83 @@ export const UNREAD_SHARE_KEY = 'scion-chat-unread-share';
 export const UNREAD_LOCK_WAIT_MS = 10_000;
 
 /**
+ * How long one answer may take. A request past it is abandoned (the
+ * endpoint's is aborted) and counts as a failure, keeping the last count,
+ * so a hung request can neither freeze this tab's badge nor hold the
+ * cross-tab lock.
+ */
+export const UNREAD_ASK_TIMEOUT_MS = 15_000;
+
+/** One answer from a count source. */
+export interface UnreadCountAnswer {
+  count: number;
+  /**
+   * When the oldest request behind the answer was started, on the
+   * `chatLoadClock` clock. Shared with other tabs as the answer's age, so
+   * an answer built on a joined, older request is not taken for a newer one.
+   */
+  startedAt: number;
+}
+
+/**
  * A count source other than the endpoint. `startedAfter` is on the
  * `chatLoadClock` clock: an answer from a request started after it reflects
  * every event the refresh is for. Resolves to null when it cannot answer.
  */
-export type UnreadCountSource = (startedAfter: number) => Promise<number | null>;
+export type UnreadCountSource = (startedAfter: number) => Promise<UnreadCountAnswer | null>;
 
 /** The answer one tab got, as shared through localStorage. */
 interface SharedAnswer {
+  /** Whose count it is: a tab only adopts its own user's answers. */
+  userId: string;
   count: number;
-  /** Wall-clock time (Date.now) the request behind it was started. */
+  /** Wall-clock time (Date.now) the oldest request behind it was started. */
   askedAt: number;
 }
 
-function readSharedAnswer(): SharedAnswer | null {
+function readSharedAnswer(userId: string): SharedAnswer | null {
   try {
     const raw = localStorage.getItem(UNREAD_SHARE_KEY);
     if (!raw) return null;
     const v = JSON.parse(raw) as Partial<SharedAnswer>;
     if (typeof v.count !== 'number' || typeof v.askedAt !== 'number') return null;
-    return { count: v.count, askedAt: v.askedAt };
+    if (v.userId !== userId) return null;
+    return { userId, count: v.count, askedAt: v.askedAt };
   } catch {
     return null;
   }
+}
+
+/** A `chatLoadClock` instant as wall-clock time. */
+function perfToWall(at: number): number {
+  return Date.now() - Math.max(0, chatLoadClock() - at);
+}
+
+/**
+ * `promise`, or null once `ms` pass first; `onTimeout` runs then. A
+ * rejection is null too.
+ */
+function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  onTimeout?: () => void
+): Promise<T | null> {
+  return new Promise<T | null>((resolve) => {
+    const timer = setTimeout(() => {
+      onTimeout?.();
+      resolve(null);
+    }, ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(null);
+      }
+    );
+  });
 }
 
 function writeSharedAnswer(answer: SharedAnswer): void {
@@ -198,6 +255,8 @@ export class ChatUnreadCounter {
   private pendingWall = -Infinity;
   /** See setSource. */
   private source: UnreadCountSource | null = null;
+  /** The signed-in user; without one, answers are not shared across tabs. */
+  private userId = '';
   private readonly boundSchedule = (e: Event): void =>
     this.scheduleRefresh(e.timeStamp > 0 ? e.timeStamp : undefined);
 
@@ -211,8 +270,9 @@ export class ChatUnreadCounter {
    * first idle period, so it stays off the critical path of the page's own
    * requests. With `immediate` it is sent now.
    */
-  start(options: { immediate?: boolean } = {}): void {
+  start(options: { immediate?: boolean; userId?: string } = {}): void {
     if (this.listening) return;
+    this.userId = options.userId ?? '';
     // Anything that can create or clear an unread conversation.
     stateManager.addEventListener('chat-message-received', this.boundSchedule);
     stateManager.addEventListener('chat-read-state-updated', this.boundSchedule);
@@ -291,7 +351,7 @@ export class ChatUnreadCounter {
   private noteTrigger(eventAt?: number): void {
     const at = eventAt ?? chatLoadClock();
     // An event delivered at `at` (perf clock) happened this long ago.
-    const wall = Date.now() - Math.max(0, chatLoadClock() - at);
+    const wall = perfToWall(at);
     this.pendingAfter = Math.max(this.pendingAfter, at);
     this.pendingWall = Math.max(this.pendingWall, wall);
   }
@@ -318,30 +378,36 @@ export class ChatUnreadCounter {
    */
   private async askShared(after: number, wall: number): Promise<number | null> {
     const locks = webLocks();
-    if (!locks) return this.ask(after);
+    const userId = this.userId;
+    if (!locks || !userId) return (await this.ask(after))?.count ?? null;
     const signal =
       typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
         ? AbortSignal.timeout(UNREAD_LOCK_WAIT_MS)
         : undefined;
     try {
       return await locks.request(UNREAD_LOCK_NAME, signal ? { signal } : {}, async () => {
-        const shared = readSharedAnswer();
+        const shared = readSharedAnswer(userId);
         if (shared && shared.askedAt > wall) return shared.count;
-        const askedAt = Date.now();
-        const count = await this.ask(after);
-        if (count !== null) writeSharedAnswer({ count, askedAt });
-        return count;
+        const answer = await this.ask(after);
+        if (!answer) return null;
+        writeSharedAnswer({ userId, count: answer.count, askedAt: perfToWall(answer.startedAt) });
+        return answer.count;
       });
     } catch {
-      return this.ask(after);
+      return (await this.ask(after))?.count ?? null;
     }
   }
 
-  /** One answer from the installed source, or the endpoint. */
-  private ask(after: number): Promise<number | null> {
+  /**
+   * One answer from the installed source, or the endpoint, bounded by
+   * UNREAD_ASK_TIMEOUT_MS.
+   */
+  private async ask(after: number): Promise<UnreadCountAnswer | null> {
     const source = this.source;
-    if (source) return source(after).catch(() => null);
-    return this.fetchCount();
+    if (source) return withTimeout(source(after), UNREAD_ASK_TIMEOUT_MS);
+    const startedAt = chatLoadClock();
+    const count = await this.fetchCount();
+    return count === null ? null : { count, startedAt };
   }
 
   private scheduleInitialRefresh(): void {
@@ -387,14 +453,15 @@ export class ChatUnreadCounter {
     }
   }
 
+  /** The endpoint's count, aborted after UNREAD_ASK_TIMEOUT_MS. */
   private async fetchCount(): Promise<number | null> {
-    try {
-      const res = await apiFetch(CHAT_UNREAD_COUNT_URL);
+    const abort = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const request = (async (): Promise<number | null> => {
+      const res = await apiFetch(CHAT_UNREAD_COUNT_URL, abort ? { signal: abort.signal } : {});
       if (!res.ok) return null;
       return unreadConversations(await res.json());
-    } catch {
-      return null;
-    }
+    })();
+    return withTimeout(request, UNREAD_ASK_TIMEOUT_MS, () => abort?.abort());
   }
 }
 
@@ -410,10 +477,11 @@ export function startChatUnreadIfEligible(
   counter: Pick<ChatUnreadCounter, 'start'>,
   signedIn: boolean,
   chatEnabled: boolean,
-  onChatRoute: boolean
+  onChatRoute: boolean,
+  userId?: string
 ): boolean {
   if (!signedIn || !chatEnabled) return false;
-  counter.start({ immediate: onChatRoute });
+  counter.start(userId ? { immediate: onChatRoute, userId } : { immediate: onChatRoute });
   return true;
 }
 

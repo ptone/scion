@@ -33,6 +33,7 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite
 import { render } from 'lit';
 import { apiFetch } from '../../client/api.js';
 import { chatDMsLoad, chatSpacesLoad } from '../../client/chat-list-cache.js';
+import { chatUnread } from '../../client/chat-unread.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -188,6 +189,45 @@ describe('chat page Unread DMs wiring', () => {
     const page = createPage();
     spacesBody = { spaces: [{ unreadCount: 2 }, { unreadCount: 0 }] };
     dmsBody = { dms: [DMS[0], { ...DMS[1], hasUnread: true, muted: true }] };
-    expect(await page._unreadCountSource(-Infinity)).toBe(3);
+    expect(await page._unreadCountSource(-Infinity)).toEqual({
+      count: 3,
+      startedAt: expect.any(Number),
+    });
+  });
+
+  it('dates the answer by the older of the requests it joined', async () => {
+    const page = createPage();
+    // A /chat/dms request already in flight, started before the spaces one.
+    const dmsJoined = chatDMsLoad.load();
+    const dmsAt = chatDMsLoad.startedAt() as number;
+    await new Promise((r) => setTimeout(r, 5));
+    const answer = await page._unreadCountSource(dmsAt - 1);
+    await dmsJoined;
+    expect(answer.startedAt).toBe(dmsAt);
+    expect(chatSpacesLoad.startedAt()).toBeGreaterThan(dmsAt);
+  });
+
+  it('installs the badge source while connected and removes it on disconnect', () => {
+    // connectedCallback starts the page's live updates; happy-dom has no
+    // EventSource.
+    vi.stubGlobal(
+      'EventSource',
+      class {
+        addEventListener(): void {}
+        removeEventListener(): void {}
+        close(): void {}
+      }
+    );
+    const page = createPage();
+    const setSource = vi.spyOn(chatUnread, 'setSource');
+    try {
+      page.connectedCallback();
+      expect(setSource).toHaveBeenLastCalledWith(page._unreadCountSource);
+      page.disconnectedCallback();
+      expect(setSource).toHaveBeenLastCalledWith(null);
+    } finally {
+      setSource.mockRestore();
+      vi.unstubAllGlobals();
+    }
   });
 });

@@ -53,7 +53,7 @@ import type { SeedEpochToken } from '../../client/state.js';
 import { dispatchPageTitle, PAGE_TITLE_EVENT } from '../../client/page-title.js';
 import type { PageTitleDetail } from '../../client/page-title.js';
 import { chatNotifications } from '../../client/chat-notifications.js';
-import { chatUnread } from '../../client/chat-unread.js';
+import { chatUnread, type UnreadCountAnswer } from '../../client/chat-unread.js';
 import { badgeCountFromLists, type ChatDMListEntry } from '../../client/chat-unread-dms.js';
 // Type-only: the rail module itself is loaded lazily (loadSpaceRail).
 import type { DMSelectDetail } from '../shared/chat/chat-space-rail.js';
@@ -1642,12 +1642,19 @@ export class ScionPageChat extends LitElement {
    * `/chat/spaces` and `/chat/dms` loads, joined with any request another
    * owner (the rail's reload, loadUnreadDMPeers) started after the event.
    */
-  private readonly _unreadCountSource = async (startedAfter: number): Promise<number | null> => {
-    const [spaces, dms] = await Promise.all([
-      chatSpacesLoad.load({ startedAfter }),
-      chatDMsLoad.load({ startedAfter }),
-    ]);
-    return badgeCountFromLists(spaces, dms);
+  private readonly _unreadCountSource = async (
+    startedAfter: number
+  ): Promise<UnreadCountAnswer | null> => {
+    // Each load either joins a request or starts one; read when that request
+    // started right away, before a newer one can replace it. The answer is
+    // as old as the older of the two.
+    const spacesLoad = chatSpacesLoad.load({ startedAfter });
+    const spacesAt = chatSpacesLoad.startedAt() ?? chatLoadClock();
+    const dmsLoad = chatDMsLoad.load({ startedAfter });
+    const dmsAt = chatDMsLoad.startedAt() ?? chatLoadClock();
+    const [spaces, dms] = await Promise.all([spacesLoad, dmsLoad]);
+    const count = badgeCountFromLists(spaces, dms);
+    return count === null ? null : { count, startedAt: Math.min(spacesAt, dmsAt) };
   };
 
   override disconnectedCallback(): void {
