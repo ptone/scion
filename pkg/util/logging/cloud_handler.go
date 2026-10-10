@@ -124,6 +124,11 @@ func NewCloudHandler(ctx context.Context, config CloudLoggingConfig, level slog.
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating Cloud Logging client: %w", err)
 	}
+	// Count client-reported errors under writer=cloud before any other
+	// client method is called (gcplog requires OnError to be set first).
+	// The hook keeps the client's default log line unchanged.
+	stats := CloudWriter()
+	client.OnError = cloudClientOnError(stats, defaultCloudClientOnError)
 
 	// Apply a bounded buffer to prevent unbounded memory growth when
 	// Cloud Logging is temporarily unavailable.
@@ -149,6 +154,7 @@ func NewCloudHandler(ctx context.Context, config CloudLoggingConfig, level slog.
 
 	cleanup := func() {
 		if err := logger.Flush(); err != nil {
+			stats.RecordFailure(CloudReasonFlushError)
 			fmt.Fprintf(os.Stderr, "error flushing Cloud Logging: %v\n", err)
 		}
 		if err := client.Close(); err != nil {
