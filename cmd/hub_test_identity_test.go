@@ -39,9 +39,6 @@ import (
 
 const tiCLIFakeToken = "synthetic-fixture-token-DO-NOT-PRINT-7f3a9c"
 
-var tiCLIExpires = time.Date(2026, 10, 10, 18, 0, 0, 0, time.UTC)
-var tiCLITokenExpires = time.Date(2026, 10, 10, 17, 30, 0, 0, time.UTC)
-
 // tiCLIHub is a mock hub for the test identity routes. It records request
 // bodies and query strings.
 type tiCLIHub struct {
