@@ -400,6 +400,11 @@ interface HarnessConfigEntry {
 interface ReloadResult {
   applied?: string[];
   requires_restart?: string[];
+  // DB-backed saves: the changed Layer-1 keys (koanf paths), split into
+  // those applied to the running hub and those that take effect only after
+  // a hub restart (registry restart_required flag).
+  applied_keys?: string[];
+  pending_restart?: string[];
   error?: string;
 }
 
@@ -3171,6 +3176,14 @@ export class ScionPageAdminServerConfig extends LitElement {
       <div class="reload-info">
         ${r.applied && r.applied.length > 0
           ? html`<div class="applied">Reloaded: ${r.applied.join(', ')}</div>`
+          : nothing}
+        ${r.applied_keys && r.applied_keys.length > 0
+          ? html`<div class="applied applied-keys">Applied now: ${r.applied_keys.join(', ')}</div>`
+          : nothing}
+        ${r.pending_restart && r.pending_restart.length > 0
+          ? html`<div class="restart pending-restart">
+              Saved; applies after restart: ${r.pending_restart.join(', ')}
+            </div>`
           : nothing}
         ${r.requires_restart && r.requires_restart.length > 0
           ? html`<div class="restart">Requires restart: ${r.requires_restart.join(', ')}</div>`
