@@ -215,7 +215,8 @@ run "fresh_gke_hub_plans_clean" {
     condition = (
       output.chart_values.database.name == "tfha_gke_h3" &&
       output.chart_values.database.user == "tfha-gke-h3" &&
-      output.chart_values.cloudsql.instanceConnectionName == "tfha-test-project:us-central1:tfha-pg"
+      output.chart_values.cloudsql.instanceConnectionName == "tfha-test-project:us-central1:tfha-pg" &&
+      output.chart_values.cloudsql.privateIp == true
     )
     error_message = "database name/user and the Cloud SQL connection must come from cloudsql-database and shared-lookup."
   }
