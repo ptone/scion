@@ -173,14 +173,6 @@ func TestHubTestIdentityIssue_JSONHasNoToken(t *testing.T) {
 	assert.ElementsMatch(t, []string{"identity", "tokenFile", "tokenExpiresAt"}, mapKeys(got))
 }
 
-func mapKeys(m map[string]interface{}) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	return keys
-}
-
 // An existing file, a symlink to an existing file, and a dangling symlink
 // are all refused before any request is sent; the existing file and the
 // symlink target are untouched.
