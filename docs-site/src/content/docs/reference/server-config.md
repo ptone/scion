@@ -863,7 +863,7 @@ Server logging is best effort. Losses are counted, never retried, and there is n
 
 **Paths.**
 
-- **stdout** (plain JSON, or Cloud Logging JSON with `SCION_LOG_GCP=true`): written synchronously by the logging call. On Cloud Run, GKE and most VM setups, the platform's log agent ships stdout to Cloud Logging; that shipping is outside the Hub.
+- **stdout** (plain JSON, or Cloud Logging JSON with `SCION_LOG_GCP=true`): written synchronously by the logging call. On Cloud Run and GKE the platform ships stdout to Cloud Logging; on other hosts that depends on the host's log agent (for example the Ops Agent on Compute Engine). That shipping is outside the Hub.
 - **Direct Cloud Logging** (`SCION_CLOUD_LOGGING=true`): the client library buffers and sends entries asynchronously. A circuit breaker probes the client by flushing it every 30 seconds; after 3 consecutive failed flushes it opens and the Hub stops feeding the Cloud path (local logging continues). It probes again after 60 seconds and closes when a probe succeeds. The request log (`scion_request_log`) and message log (`scion-messages`) share the same client and circuit.
 - **Decision-log audit records** (`scion.audit`, only when the `hub.authorization_decision_audit_v2` experiment is on): queued on a bounded asynchronous writer (2,048 records, 2 MiB) with one worker, a 2-second write budget per record and a 5-second drain at shutdown. The worker writes to the same handler chain as other logs, so the stdout and Cloud rules above apply after it.
 
@@ -881,7 +881,7 @@ Server logging is best effort. Losses are counted, never retried, and there is n
 | `cloud` | `error` | The Cloud Logging client reported an error (a failed batch send, an invalid or oversized entry). One count per reported error, not per record. Under an error storm the client skips some reports, so this undercounts. |
 | `cloud` | `queue_full` | The client's buffer was full and it dropped the entry. |
 | `cloud` | `circuit_open` | The record was dropped from the Cloud path because the circuit breaker was open or probing. Local logging still wrote it. |
-| `cloud` | `flush_error` | A periodic, probe or shutdown flush failed or timed out. A failed flush usually reports errors the client already counted as `error`, so the two can count the same incident. |
+| `cloud` | `flush_error` | A periodic, probe or shutdown flush failed, timed out, or was skipped because an earlier flush was still running. A failed flush usually reports errors the client already counted as `error`, so the two can count the same incident. |
 
 `scion.logging.write.records{writer="audit"}` counts records the audit writer's handler accepted. There is no `records` series for `writer="cloud"`, because a client buffer accept is not ingestion. When a Cloud Logging client error is reported, the Hub still prints the client's own `logging client: ...` line, as before.
 
@@ -897,7 +897,7 @@ Both health keys are non-critical: they can make `/healthz` report `degraded`, n
 
 **Shutdown.** On a clean shutdown (Ctrl+C / `SIGINT`) the Hub drains its servers, closes the audit writer (up to 5 seconds), flushes and shuts down metrics and traces, then flushes the message and request logs, stops the circuit breaker, and flushes and closes the Cloud Logging client. Because the metric exporter has already shut down, failures counted during these final log flushes are never exported; a failed final flush of the main Cloud log still prints `error flushing Cloud Logging: ...` to stderr. The server handles only `SIGINT`. Other signals, including `SIGTERM` (what systemd, Kubernetes and Cloud Run send to stop a process), end the process without these steps: queued audit records and buffered Cloud Logging entries are lost and not counted. A fatal startup error after logging starts (`Hub server failed to start`) also exits without flushing.
 
-**Duplicates.** When direct Cloud Logging is on and the `K_SERVICE` environment variable is set (Cloud Run), the Hub leaves out the stdout handler for application logs and the message log, so each record reaches Cloud Logging once. Without `K_SERVICE` (GKE, Compute Engine, other hosts) both paths stay on. If that platform also ships stdout to Cloud Logging, each record can appear twice, once per path. This follows from the code; it has not been observed on a deployment. To avoid it there, turn off one of the two paths: direct Cloud Logging, or the platform's stdout collection.
+**Duplicates.** When direct Cloud Logging is on and the `K_SERVICE` environment variable is set (Cloud Run), the Hub leaves out the stdout handler for application logs and the message log, so it sends each of those records on one path only (the direct client) and does not itself create a duplicate. Without `K_SERVICE` (GKE, Compute Engine, other hosts) both paths stay on. If that platform also ships stdout to Cloud Logging, each record can appear twice, once per path. This follows from the code; it has not been observed on a deployment. To avoid it there, turn off one of the two paths: direct Cloud Logging, or the platform's stdout collection.
 
 ### Boolean Environment Variable Parsing (`parseBoolEnv`)
 
