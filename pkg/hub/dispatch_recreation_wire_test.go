@@ -243,3 +243,33 @@ func TestDispatchAgentRestart_WireSecretResolutionErrorMatchesStart(t *testing.T
 		assert.False(t, has, "%s must send no resolved secrets after a resolution error", op)
 	}
 }
+
+// TestDispatchAgentRestart_WirePicksUpSecretChange: a restart resolves the
+// secrets at dispatch time, so a secret changed between two restarts reaches
+// the second restart with its new value (fake values only).
+func TestDispatchAgentRestart_WirePicksUpSecretChange(t *testing.T) {
+	d, agent, rb := newWireRecreationDispatcher(t, "")
+	backend := &mockSecretBackend{secrets: []secret.SecretWithValue{fakeFileSecret}}
+	d.SetSecretBackend(backend)
+
+	secretValue := func() string {
+		t.Helper()
+		list, ok := rb.body(t, "restart")["resolvedSecrets"].([]interface{})
+		require.True(t, ok, "the restart must send resolvedSecrets")
+		require.Len(t, list, 1)
+		entry, ok := list[0].(map[string]interface{})
+		require.True(t, ok)
+		value, _ := entry["value"].(string)
+		return value
+	}
+
+	require.NoError(t, d.DispatchAgentRestart(context.Background(), agent))
+	assert.Equal(t, "fake-secret-value", secretValue())
+
+	changed := fakeFileSecret
+	changed.Value = "fake-secret-value-rotated"
+	backend.secrets = []secret.SecretWithValue{changed}
+
+	require.NoError(t, d.DispatchAgentRestart(context.Background(), agent))
+	assert.Equal(t, "fake-secret-value-rotated", secretValue(), "the second restart must carry the new value")
+}
