@@ -16,7 +16,9 @@
 # workstation-smoke.sh - end-to-end check of the workstation hub path.
 #
 # In a temporary HOME and a temporary git repo, with no hub configured:
-#   1. scion init --machine, init  creates the global dir and the project
+#   1. scion init                  creates the project (only where a container
+#                                  runtime is installed; else the global
+#                                  project is used)
 #   2. scion hub link              starts the local server automatically and links
 #   3. scion hub status            reports the project as linked
 #   4. scion list                  returns an empty list through the hub
@@ -79,12 +81,18 @@ cd "$REPO"
 git init -q
 git commit -q --allow-empty -m "initial commit"
 
-# --format json skips the interactive image-registry question.
-log "scion init --machine"
-"$SCION" init --machine --format json >"$WORK/init-machine.out" 2>&1 || {
-  cat "$WORK/init-machine.out" >&2; fail "scion init --machine"; }
-log "scion init"
-"$SCION" init --format json >"$WORK/init.out" 2>&1 || { cat "$WORK/init.out" >&2; fail "scion init"; }
+# 'scion init' needs a container runtime (it probes podman/docker). Where
+# one is available, link the repo's own project; otherwise skip init, and
+# hub link uses the global project. --format json skips the interactive
+# image-registry question.
+if command -v docker >/dev/null 2>&1 || command -v podman >/dev/null 2>&1; then
+  log "scion init --machine && scion init"
+  "$SCION" init --machine --format json >"$WORK/init-machine.out" 2>&1 || {
+    cat "$WORK/init-machine.out" >&2; fail "scion init --machine"; }
+  "$SCION" init --format json >"$WORK/init.out" 2>&1 || { cat "$WORK/init.out" >&2; fail "scion init"; }
+else
+  log "no container runtime found: skipping scion init (the global project is linked)"
+fi
 
 log "SCION_HUB_AUTO_START=0 scion hub link fails and starts nothing"
 if SCION_HUB_AUTO_START=0 "$SCION" -y hub link >"$WORK/off.out" 2>&1; then
