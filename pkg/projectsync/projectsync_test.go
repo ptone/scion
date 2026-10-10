@@ -103,7 +103,7 @@ func TestSync_ValidationErrors(t *testing.T) {
 func TestDefaultExcludePatterns(t *testing.T) {
 	// Verify the default exclude patterns match what the hub WebDAV endpoint excludes
 	expected := []string{
-		".git/**",
+		"/.git/**",
 		"/.git",
 		".scion/**",
 		"/.scion",
@@ -145,6 +145,11 @@ func TestDefaultExcludeRules_Matching(t *testing.T) {
 		// A nested bare .git file is synced: "/.git" is anchored to the root,
 		// mirroring the hub, which hides only a top-level .git entry.
 		{"a/.git", true},
+		{".git/config", false}, // contents of the top-level .git directory
+		// Contents of a nested .git directory are synced: "/.git/**" is
+		// anchored to the root, mirroring the hub.
+		{"a/.git/config", true},
+		{"a/b/.git/objects/ab/cdef", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.remote, func(t *testing.T) {
@@ -152,7 +157,8 @@ func TestDefaultExcludeRules_Matching(t *testing.T) {
 		})
 	}
 
-	// rclone must not descend into a .scion or .git directory at all.
+	// rclone must not descend into a .scion or top-level .git directory at
+	// all, but does descend into a nested .git directory.
 	includeDir := fi.IncludeDirectory(context.Background(), nil)
 	dirTests := []struct {
 		dir      string
@@ -160,6 +166,7 @@ func TestDefaultExcludeRules_Matching(t *testing.T) {
 	}{
 		{".scion", false},
 		{".git", false},
+		{"a/.git", true},
 		{".github", true},
 		{"sub", true},
 	}
