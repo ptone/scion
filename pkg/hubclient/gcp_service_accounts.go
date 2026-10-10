@@ -526,12 +526,15 @@ type GCPServiceAccountImpactAgent struct {
 }
 
 // GCPServiceAccountImpactDefault is one default that points at the account.
-// Tier is "project", "profile" or "hub".
+// Tier is "project", "profile" or "hub". Clearable reports whether Force,
+// sent by this caller, would clear it. Redacted marks a default in a project
+// the caller may not read; ProjectID and Profile are then empty.
 type GCPServiceAccountImpactDefault struct {
 	Tier      string `json:"tier"`
 	ProjectID string `json:"projectId,omitempty"`
 	Profile   string `json:"profile,omitempty"`
 	Clearable bool   `json:"clearable"`
+	Redacted  bool   `json:"redacted,omitempty"`
 }
 
 // GCPServiceAccountImpactMapping is a broker profile that maps the account.
@@ -542,15 +545,20 @@ type GCPServiceAccountImpactMapping struct {
 }
 
 // GCPServiceAccountImpact is the Hub's impact report for removing an
-// account. Wire shape of pkg/hub.GCPServiceAccountImpact.
+// account. Wire shape of pkg/hub.GCPServiceAccountImpact. Agents lists only
+// agents the caller may read (VisibleAgentCount in all); the others are
+// HiddenAgentCounts, one unnamed count per project. AgentCount is the total.
 type GCPServiceAccountImpact struct {
-	ServiceAccountID string                           `json:"serviceAccountId"`
-	Agents           []GCPServiceAccountImpactAgent   `json:"agents"`
-	AgentCount       int                              `json:"agentCount"`
-	Defaults         []GCPServiceAccountImpactDefault `json:"defaults"`
-	BrokerMappings   []GCPServiceAccountImpactMapping `json:"brokerMappings"`
-	Managed          bool                             `json:"managed"`
-	ManualCleanup    []string                         `json:"manualCleanup"`
+	ServiceAccountID   string                           `json:"serviceAccountId"`
+	Agents             []GCPServiceAccountImpactAgent   `json:"agents"`
+	AgentCount         int                              `json:"agentCount"`
+	VisibleAgentCount  int                              `json:"visibleAgentCount"`
+	HiddenAgentCounts  []int                            `json:"hiddenAgentCounts"`
+	Defaults           []GCPServiceAccountImpactDefault `json:"defaults"`
+	HiddenDefaultCount int                              `json:"hiddenDefaultCount"`
+	BrokerMappings     []GCPServiceAccountImpactMapping `json:"brokerMappings"`
+	Managed            bool                             `json:"managed"`
+	ManualCleanup      []string                         `json:"manualCleanup"`
 }
 
 // DeleteGCPServiceAccountResult is the body of a successful delete.

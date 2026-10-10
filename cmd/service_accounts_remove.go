@@ -44,8 +44,12 @@ func removeServiceAccount(ctx context.Context, client hubclient.Client, ref hubc
 			} else {
 				printSAInUse(os.Stdout, saID, impact, force)
 			}
-			if hubDefaultBlocks(impact) {
+			hub, other := blockingDefaults(impact)
+			switch {
+			case hub:
 				return fmt.Errorf("service account %s is the hub default; a hub admin must change the hub default before it can be removed", saID)
+			case other:
+				return fmt.Errorf("service account %s is a default in projects you cannot change; an admin of those projects must change them before it can be removed", saID)
 			}
 			return fmt.Errorf("service account %s is in use by defaults; re-run with --force to clear them and remove it", saID)
 		}
@@ -61,19 +65,32 @@ func removeServiceAccount(ctx context.Context, client hubclient.Client, ref hubc
 	return nil
 }
 
-func hubDefaultBlocks(impact *hubclient.GCPServiceAccountImpact) bool {
+// blockingDefaults reports whether a default --force cannot clear for this
+// caller is the hub default, or one in a project the caller cannot change.
+func blockingDefaults(impact *hubclient.GCPServiceAccountImpact) (hub, other bool) {
 	for _, d := range impact.Defaults {
-		if !d.Clearable {
-			return true
+		if d.Clearable {
+			continue
+		}
+		if d.Tier == "hub" {
+			hub = true
+		} else {
+			other = true
 		}
 	}
-	return false
+	return hub, other
 }
 
 func describeSADefault(d hubclient.GCPServiceAccountImpactDefault) string {
-	switch d.Tier {
-	case "hub":
+	switch {
+	case d.Tier == "hub":
 		return "hub default"
+	case d.Redacted && d.Tier == "profile":
+		return "a per-profile default in another project"
+	case d.Redacted:
+		return "a project default in another project"
+	}
+	switch d.Tier {
 	case "profile":
 		return fmt.Sprintf("project %s, profile %q default", d.ProjectID, d.Profile)
 	default:
@@ -87,15 +104,26 @@ func printSAInUse(w io.Writer, saID string, impact *hubclient.GCPServiceAccountI
 	_, _ = fmt.Fprintln(w, "Defaults:")
 	for _, d := range impact.Defaults {
 		note := ""
-		if !d.Clearable {
+		switch {
+		case d.Clearable:
+		case d.Tier == "hub":
 			note = " (not cleared by --force; a hub admin must change it)"
+		default:
+			note = " (not cleared by --force; an admin of that project must change it)"
 		}
 		_, _ = fmt.Fprintf(w, "  - %s%s\n", describeSADefault(d), note)
 	}
 	printSAImpactCommon(w, impact)
+	hub, other := blockingDefaults(impact)
 	switch {
-	case hubDefaultBlocks(impact):
-		_, _ = fmt.Fprintln(w, "Ask a hub admin to change the hub default, then retry.")
+	case hub || other:
+		if hub {
+			_, _ = fmt.Fprintln(w, "Ask a hub admin to change the hub default.")
+		}
+		if other {
+			_, _ = fmt.Fprintln(w, "Ask an admin of the other projects to change their defaults.")
+		}
+		_, _ = fmt.Fprintln(w, "Then retry.")
 	case !force:
 		_, _ = fmt.Fprintln(w, "Re-run with --force to clear these defaults and remove the account.")
 		_, _ = fmt.Fprintln(w, "A cleared 'assign' default becomes 'block': new agents get no GCP identity until a new default is set.")
@@ -126,8 +154,11 @@ func printSAImpactCommon(w io.Writer, impact *hubclient.GCPServiceAccountImpact)
 		for _, a := range impact.Agents {
 			_, _ = fmt.Fprintf(w, "  - %s (%s) in project %s\n", a.Name, a.ID, a.ProjectID)
 		}
-		if len(impact.Agents) < impact.AgentCount {
-			_, _ = fmt.Fprintf(w, "  ... and %d more\n", impact.AgentCount-len(impact.Agents))
+		if len(impact.Agents) < impact.VisibleAgentCount {
+			_, _ = fmt.Fprintf(w, "  ... and %d more\n", impact.VisibleAgentCount-len(impact.Agents))
+		}
+		if hidden := sumInts(impact.HiddenAgentCounts); hidden > 0 {
+			_, _ = fmt.Fprintf(w, "  %d agent(s) you cannot see, in %d project(s)\n", hidden, len(impact.HiddenAgentCounts))
 		}
 	}
 	if len(impact.BrokerMappings) > 0 {
@@ -140,4 +171,12 @@ func printSAImpactCommon(w io.Writer, impact *hubclient.GCPServiceAccountImpact)
 			_, _ = fmt.Fprintf(w, "  - %s/%s\n", name, m.Profile)
 		}
 	}
+}
+
+func sumInts(xs []int) int {
+	n := 0
+	for _, x := range xs {
+		n += x
+	}
+	return n
 }

@@ -29,7 +29,7 @@ import (
 // (ptone/scion#4022).
 
 const saInUseBody = `{"error":{"code":"sa_in_use","message":"in use","details":{"impact":{
-  "serviceAccountId":"sa-1","agentCount":1,
+  "serviceAccountId":"sa-1","agentCount":1,"visibleAgentCount":1,"hiddenAgentCounts":[],
   "agents":[{"id":"agent-1","name":"worker","projectId":"proj-1"}],
   "defaults":[{"tier":"project","projectId":"proj-1","clearable":true},
               {"tier":"profile","projectId":"proj-1","profile":"k8s","clearable":true}],
@@ -112,4 +112,22 @@ func TestPrintSAInUse_HubDefaultNamesAdminStep(t *testing.T) {
 	assert.Contains(t, stdout, "hub default (not cleared by --force")
 	assert.Contains(t, stdout, "Ask a hub admin")
 	assert.NotContains(t, stdout, "Re-run with --force")
+}
+
+func TestPrintSAInUse_RedactedDefaultsAndHiddenAgents(t *testing.T) {
+	impact := &hubclient.GCPServiceAccountImpact{
+		AgentCount:         3,
+		HiddenAgentCounts:  []int{2, 1},
+		HiddenDefaultCount: 1,
+		Defaults: []hubclient.GCPServiceAccountImpactDefault{
+			{Tier: "profile", Clearable: false, Redacted: true},
+		},
+	}
+	var buf bytes.Buffer
+	printSAInUse(&buf, "sa-1", impact, true)
+	out := buf.String()
+	assert.Contains(t, out, "a per-profile default in another project (not cleared by --force; an admin of that project must change it)")
+	assert.Contains(t, out, "3 agent(s) you cannot see, in 2 project(s)")
+	assert.Contains(t, out, "Ask an admin of the other projects")
+	assert.NotContains(t, out, "Re-run with --force")
 }

@@ -36,7 +36,7 @@ import (
 //     per-profile, hub) and broker profiles that map it.
 //   - A default that points at the account BLOCKS the delete (409 sa_in_use,
 //     report attached). ?force=true clears project and per-profile defaults
-//     and then deletes.
+//     the caller may clear and then deletes.
 //   - --force NEVER clears the hub default. Whoever may delete an account (for
 //     a hub-scoped account that includes its creator, who need not be an
 //     admin) must not thereby rewrite hub-wide settings, so a hub default
@@ -48,6 +48,13 @@ import (
 //   - Agents referencing the account never block. They keep the reference
 //     and fail at their next start with the existing "no longer available"
 //     message.
+//   - The report discloses nothing the caller could not otherwise see. Agents
+//     are named only when the caller may read them (the agent-list rule);
+//     the rest are counted per project, unnamed. A default in a project the
+//     caller may not read is redacted to its tier and counted.
+//   - Force clears only defaults in projects the caller may update (the
+//     project settings permission). Any other referencing default keeps the
+//     delete a 409 that says an admin of those projects must change it.
 //   - The response lists the cleanup the hub cannot do: the broker mapping,
 //     the Kubernetes ServiceAccount, the IAM bindings, and for a minted
 //     account the account itself, which stays in GCP.
@@ -79,13 +86,24 @@ type GCPServiceAccountImpactAgent struct {
 }
 
 // GCPServiceAccountImpactDefault is one default that points at the account.
+//
+// A default in a project the caller may not read is REDACTED: Tier and
+// Clearable stay, ProjectID and Profile are dropped and Redacted is set, so
+// the report never names a project the caller could not otherwise see.
 type GCPServiceAccountImpactDefault struct {
 	Tier      string `json:"tier"`
 	ProjectID string `json:"projectId,omitempty"`
 	Profile   string `json:"profile,omitempty"`
-	// Clearable reports whether ?force=true clears this default. False only
-	// for the hub default.
+	// Clearable reports whether ?force=true, sent by this caller, clears
+	// this default: true for a project or per-profile default in a project
+	// the caller may update, false otherwise and always false for the hub
+	// default.
 	Clearable bool `json:"clearable"`
+	Redacted  bool `json:"redacted,omitempty"`
+
+	// project is the owning project's ID, kept server-side even when the
+	// entry is redacted so a forced delete can clear it.
+	project string
 }
 
 // GCPServiceAccountImpactMapping is a broker profile that maps the account
@@ -99,12 +117,21 @@ type GCPServiceAccountImpactMapping struct {
 // GCPServiceAccountImpact is the impact report for removing one account.
 type GCPServiceAccountImpact struct {
 	ServiceAccountID string `json:"serviceAccountId"`
-	// Agents lists at most gcpSAImpactAgentLimit agents; AgentCount is the
-	// total.
-	Agents         []GCPServiceAccountImpactAgent   `json:"agents"`
-	AgentCount     int                              `json:"agentCount"`
-	Defaults       []GCPServiceAccountImpactDefault `json:"defaults"`
-	BrokerMappings []GCPServiceAccountImpactMapping `json:"brokerMappings"`
+	// AgentCount is the total number of agents referencing the account.
+	// Agents names at most gcpSAImpactAgentLimit of them, and only agents
+	// the caller may read (the agent-list rule); VisibleAgentCount is how
+	// many readable agents there are in all. The rest are reported only as
+	// HiddenAgentCounts: one count per project, largest first, with no
+	// project or agent names, so the report discloses nothing the caller
+	// could not otherwise see.
+	Agents            []GCPServiceAccountImpactAgent   `json:"agents"`
+	AgentCount        int                              `json:"agentCount"`
+	VisibleAgentCount int                              `json:"visibleAgentCount"`
+	HiddenAgentCounts []int                            `json:"hiddenAgentCounts"`
+	Defaults          []GCPServiceAccountImpactDefault `json:"defaults"`
+	// HiddenDefaultCount is how many entries of Defaults are redacted.
+	HiddenDefaultCount int                              `json:"hiddenDefaultCount"`
+	BrokerMappings     []GCPServiceAccountImpactMapping `json:"brokerMappings"`
 	// Managed is true for an account the hub minted. Removing the
 	// registration does not delete it in GCP.
 	Managed bool `json:"managed"`
@@ -153,6 +180,7 @@ func (s *Server) removeGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 	var cleared []GCPServiceAccountImpactDefault
 	if force && len(impact.Defaults) > 0 {
 		cleared, err = s.clearGCPServiceAccountDefaults(ctx, sa.ID, impact.Defaults)
+		s.applyCallerViewToDefaults(ctx, cleared)
 		if err != nil {
 			s.logGCPServiceAccountAudit(ctx, GCPSAAuditDelete, sa, false, gcpSAAuditOutcomeDeleteFailed,
 				map[string]string{"force": "true", "defaults_cleared": strconv.Itoa(len(cleared))})
@@ -197,24 +225,41 @@ func allDefaultsClearable(defaults []GCPServiceAccountImpactDefault) bool {
 
 // gcpSAInUseMessage is the human-readable refusal. The structured report is
 // in the error details; this text is what a client without a renderer shows.
+// Redacted defaults are only counted, never named.
 func gcpSAInUseMessage(impact GCPServiceAccountImpact, force bool) string {
 	var parts []string
+	hubBlocks, otherBlocks := false, false
 	for _, d := range impact.Defaults {
-		switch d.Tier {
-		case GCPSADefaultTierHub:
+		if d.Tier == GCPSADefaultTierHub {
+			hubBlocks = true
 			parts = append(parts, "the hub default")
-		case GCPSADefaultTierProfile:
+			continue
+		}
+		if !d.Clearable {
+			otherBlocks = true
+		}
+		switch {
+		case d.Redacted:
+			// Counted below, never named.
+		case d.Tier == GCPSADefaultTierProfile:
 			parts = append(parts, fmt.Sprintf("the default for profile %q in project %s", d.Profile, d.ProjectID))
 		default:
 			parts = append(parts, fmt.Sprintf("the default of project %s", d.ProjectID))
 		}
 	}
+	if impact.HiddenDefaultCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d default(s) in other projects", impact.HiddenDefaultCount))
+	}
 	msg := "service account is in use by " + strings.Join(parts, ", ") + "."
-	hubBlocks := !allDefaultsClearable(impact.Defaults)
-	switch {
-	case hubBlocks:
+	if hubBlocks {
 		msg += " The hub default is never cleared by force: a hub admin must change it first."
-		if !force && len(impact.Defaults) > 1 {
+	}
+	if otherBlocks {
+		msg += " Some defaults are in projects you cannot change: an admin of those projects must change them first."
+	}
+	switch {
+	case hubBlocks || otherBlocks:
+		if !force && !allDefaultsBlocked(impact.Defaults) {
 			msg += " Then retry with force to clear the remaining defaults."
 		}
 	default:
@@ -227,6 +272,15 @@ func gcpSAInUseMessage(impact GCPServiceAccountImpact, force bool) string {
 	return msg
 }
 
+func allDefaultsBlocked(defaults []GCPServiceAccountImpactDefault) bool {
+	for _, d := range defaults {
+		if d.Clearable {
+			return false
+		}
+	}
+	return true
+}
+
 // gcpServiceAccountImpact computes the impact report for removing sa.
 //
 // A project-scoped account is reachable only from its own project, so only
@@ -237,15 +291,18 @@ func gcpSAInUseMessage(impact GCPServiceAccountImpact, force bool) string {
 // names the account; there is no store filter on the service account ID yet.
 func (s *Server) gcpServiceAccountImpact(ctx context.Context, sa *store.GCPServiceAccount) (GCPServiceAccountImpact, error) {
 	impact := GCPServiceAccountImpact{
-		ServiceAccountID: sa.ID,
-		Agents:           []GCPServiceAccountImpactAgent{},
-		Defaults:         []GCPServiceAccountImpactDefault{},
-		BrokerMappings:   []GCPServiceAccountImpactMapping{},
-		Managed:          sa.Managed,
+		ServiceAccountID:  sa.ID,
+		Agents:            []GCPServiceAccountImpactAgent{},
+		HiddenAgentCounts: []int{},
+		Defaults:          []GCPServiceAccountImpactDefault{},
+		BrokerMappings:    []GCPServiceAccountImpactMapping{},
+		Managed:           sa.Managed,
 	}
 	projectScoped := sa.Scope == store.ScopeProject
 
-	// Agents.
+	// Agents. Names are listed only for agents the caller may read.
+	identity := GetIdentityFromContext(ctx)
+	hiddenByProject := map[string]int{}
 	agentFilter := store.AgentFilter{}
 	if projectScoped {
 		agentFilter.ProjectID = sa.ScopeID
@@ -258,17 +315,39 @@ func (s *Server) gcpServiceAccountImpact(ctx context.Context, sa *store.GCPServi
 		if err != nil {
 			return impact, fmt.Errorf("listing agents for the impact report: %w", err)
 		}
+		var matched []store.Agent
 		for i := range page.Items {
 			a := &page.Items[i]
 			if a.AppliedConfig == nil || a.AppliedConfig.GCPIdentity == nil ||
 				a.AppliedConfig.GCPIdentity.ServiceAccountID != sa.ID {
 				continue
 			}
-			impact.AgentCount++
-			if len(impact.Agents) < gcpSAImpactAgentLimit {
-				impact.Agents = append(impact.Agents, GCPServiceAccountImpactAgent{
-					ID: a.ID, Name: a.Name, ProjectID: a.ProjectID,
-				})
+			matched = append(matched, *a)
+		}
+		if len(matched) > 0 {
+			readable := map[string]bool{}
+			if identity != nil {
+				rows, err := s.readableAgentRows(ctx, identity, matched)
+				if err != nil {
+					return impact, fmt.Errorf("authorizing agents for the impact report: %w", err)
+				}
+				for i := range rows {
+					readable[rows[i].ID] = true
+				}
+			}
+			for i := range matched {
+				a := &matched[i]
+				impact.AgentCount++
+				if !readable[a.ID] {
+					hiddenByProject[a.ProjectID]++
+					continue
+				}
+				impact.VisibleAgentCount++
+				if len(impact.Agents) < gcpSAImpactAgentLimit {
+					impact.Agents = append(impact.Agents, GCPServiceAccountImpactAgent{
+						ID: a.ID, Name: a.Name, ProjectID: a.ProjectID,
+					})
+				}
 			}
 		}
 		if page.NextCursor == "" || page.NextCursor == cursor {
@@ -276,6 +355,11 @@ func (s *Server) gcpServiceAccountImpact(ctx context.Context, sa *store.GCPServi
 		}
 		cursor = page.NextCursor
 	}
+
+	for _, n := range hiddenByProject {
+		impact.HiddenAgentCounts = append(impact.HiddenAgentCounts, n)
+	}
+	sort.Sort(sort.Reverse(sort.IntSlice(impact.HiddenAgentCounts)))
 
 	// Project and per-profile defaults.
 	if projectScoped {
@@ -311,6 +395,7 @@ func (s *Server) gcpServiceAccountImpact(ctx context.Context, sa *store.GCPServi
 	if s.hubAgentDefaults().DefaultGCPIdentityServiceAccountID == sa.ID {
 		impact.Defaults = append(impact.Defaults, GCPServiceAccountImpactDefault{Tier: GCPSADefaultTierHub})
 	}
+	impact.HiddenDefaultCount = s.applyCallerViewToDefaults(ctx, impact.Defaults)
 
 	// Broker profiles mapping the account, from the brokers' last report.
 	brokers, err := s.gcpSAImpactBrokers(ctx, sa)
@@ -391,7 +476,7 @@ func projectDefaultsReferencing(project *store.Project, saID string) []GCPServic
 	var out []GCPServiceAccountImpactDefault
 	if project.Annotations[projectSettingDefaultGCPIdentitySAID] == saID {
 		out = append(out, GCPServiceAccountImpactDefault{
-			Tier: GCPSADefaultTierProject, ProjectID: project.ID, Clearable: true,
+			Tier: GCPSADefaultTierProject, ProjectID: project.ID, project: project.ID,
 		})
 	}
 	byProfile := profileDefaultSAIDsFromAnnotations(project.Annotations)
@@ -404,10 +489,56 @@ func projectDefaultsReferencing(project *store.Project, saID string) []GCPServic
 	sort.Strings(profiles)
 	for _, profile := range profiles {
 		out = append(out, GCPServiceAccountImpactDefault{
-			Tier: GCPSADefaultTierProfile, ProjectID: project.ID, Profile: profile, Clearable: true,
+			Tier: GCPSADefaultTierProfile, ProjectID: project.ID, Profile: profile, project: project.ID,
 		})
 	}
 	return out
+}
+
+// applyCallerViewToDefaults decides, for the caller in ctx, which project
+// and per-profile defaults it may clear and which it may see, in place. A
+// default is clearable when the caller may update its project (the
+// permission the project settings PUT requires) and redacted when the caller
+// may not read its project. The hub default is never clearable. Only a user
+// caller is granted either. It returns the number of redacted entries.
+func (s *Server) applyCallerViewToDefaults(ctx context.Context, defaults []GCPServiceAccountImpactDefault) int {
+	user, _ := GetIdentityFromContext(ctx).(UserIdentity)
+	type access struct{ read, update bool }
+	cache := map[string]access{}
+	projectAccess := func(projectID string) access {
+		if a, ok := cache[projectID]; ok {
+			return a
+		}
+		var a access
+		if user != nil && s.authzService != nil {
+			res := Resource{Type: "project", ID: projectID}
+			if p, err := s.store.GetProject(ctx, projectID); err == nil && p != nil {
+				res.OwnerID = p.OwnerID
+			}
+			a.update = s.authzService.CheckAccess(ctx, user, res, ActionUpdate).Allowed
+			a.read = a.update || s.authzService.CheckAccess(ctx, user, res, ActionRead).Allowed
+		}
+		cache[projectID] = a
+		return a
+	}
+
+	hidden := 0
+	for i := range defaults {
+		d := &defaults[i]
+		if d.Tier == GCPSADefaultTierHub || d.project == "" {
+			d.Clearable = false
+			continue
+		}
+		a := projectAccess(d.project)
+		d.Clearable = a.update
+		if !a.read {
+			d.ProjectID = ""
+			d.Profile = ""
+			d.Redacted = true
+			hidden++
+		}
+	}
+	return hidden
 }
 
 // clearGCPServiceAccountDefaults clears the clearable defaults in defaults
@@ -418,11 +549,11 @@ func (s *Server) clearGCPServiceAccountDefaults(ctx context.Context, saID string
 	var projectIDs []string
 	seen := map[string]bool{}
 	for _, d := range defaults {
-		if !d.Clearable || d.ProjectID == "" || seen[d.ProjectID] {
+		if !d.Clearable || d.project == "" || seen[d.project] {
 			continue
 		}
-		seen[d.ProjectID] = true
-		projectIDs = append(projectIDs, d.ProjectID)
+		seen[d.project] = true
+		projectIDs = append(projectIDs, d.project)
 	}
 
 	var cleared []GCPServiceAccountImpactDefault

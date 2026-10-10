@@ -187,6 +187,8 @@ func TestGCPSARemove_AgentsDoNotBlock(t *testing.T) {
 	var resp DeleteGCPServiceAccountResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, 1, resp.Impact.AgentCount)
+	assert.Equal(t, 1, resp.Impact.VisibleAgentCount)
+	assert.Empty(t, resp.Impact.HiddenAgentCounts)
 	require.Len(t, resp.Impact.Agents, 1)
 	assert.Equal(t, agent.ID, resp.Impact.Agents[0].ID)
 	assert.Empty(t, resp.ClearedDefaults)
@@ -198,8 +200,10 @@ func TestGCPSARemove_AgentsDoNotBlock(t *testing.T) {
 }
 
 func TestGCPSARemove_HubDefaultBlocksEvenWithForce(t *testing.T) {
-	srv, s, _, member, _, project := setupGCPAuthzTest(t)
-	sa := mkSA(t, s, "sa-rm-hubdef", "rm-hubdef@example.com", store.ScopeHub, "hub-instance-1", member.ID)
+	// The caller is the project owner and the account's creator, so the
+	// project default is clearable and visible; only the hub default blocks.
+	srv, s, owner, _, _, project := setupGCPAuthzTest(t)
+	sa := mkSA(t, s, "sa-rm-hubdef", "rm-hubdef@example.com", store.ScopeHub, "hub-instance-1", owner.ID)
 	setSARemoveProjectAnnotations(t, s, project.ID, map[string]string{
 		projectSettingDefaultGCPIdentityMode: store.GCPMetadataModeAssign,
 		projectSettingDefaultGCPIdentitySAID: sa.ID,
@@ -209,12 +213,13 @@ func TestGCPSARemove_HubDefaultBlocksEvenWithForce(t *testing.T) {
 	srv.config.AgentDefaults.DefaultGCPIdentityServiceAccountID = sa.ID
 	srv.mu.Unlock()
 
-	rec := doRequestAsUser(t, srv, member, http.MethodDelete, flatSAPath+sa.ID+"?force=true", nil)
+	rec := doRequestAsUser(t, srv, owner, http.MethodDelete, flatSAPath+sa.ID+"?force=true", nil)
 	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 
 	code, msg, impact := decodeInUseImpact(t, rec.Body.Bytes())
 	assert.Equal(t, ErrCodeSAInUse, code)
 	assert.Contains(t, msg, "hub admin")
+	assert.Zero(t, impact.HiddenDefaultCount)
 	assert.Contains(t, impact.Defaults, GCPServiceAccountImpactDefault{Tier: GCPSADefaultTierHub, Clearable: false})
 	assert.Contains(t, impact.Defaults, GCPServiceAccountImpactDefault{
 		Tier: GCPSADefaultTierProject, ProjectID: project.ID, Clearable: true,
@@ -330,4 +335,57 @@ func TestGCPSAAudit_RegisterAndVerifyCarryNoEmail(t *testing.T) {
 		assert.False(t, e.Timestamp.IsZero())
 		assert.WithinDuration(t, time.Now(), e.Timestamp, time.Minute)
 	}
+}
+
+// A caller who cannot see another project learns only counts about it: no
+// agent names or ids, no project id, no profile name. A default there is not
+// clearable by this caller, so even a forced delete stays a 409.
+func TestGCPSARemove_ReportRedactsWhatTheCallerCannotSee(t *testing.T) {
+	srv, s, owner, _, outsider, project := setupGCPAuthzTest(t)
+	ctx := context.Background()
+	sa := mkSA(t, s, "sa-rm-redact", "rm-redact@example.com", store.ScopeHub, "hub-instance-1", outsider.ID)
+	setSARemoveProjectAnnotations(t, s, project.ID, map[string]string{
+		projectSettingDefaultGCPIdentitySAIDByProfile: fmt.Sprintf(`{"secret-profile":%q}`, sa.ID),
+	})
+	hidden := &store.Agent{
+		ID: tid("agent-rm-hidden"), Slug: "agent-rm-hidden-slug", Name: "agent-rm-hidden-name",
+		ProjectID: project.ID, CreatedBy: owner.ID, OwnerID: owner.ID,
+		AppliedConfig: &store.AgentAppliedConfig{GCPIdentity: &store.GCPIdentityConfig{
+			MetadataMode: store.GCPMetadataModeAssign, ServiceAccountID: sa.ID,
+		}},
+	}
+	require.NoError(t, s.CreateAgent(ctx, hidden))
+
+	// Precondition: the outsider cannot read the agent through the API.
+	get := doRequestAsUser(t, srv, outsider, http.MethodGet,
+		fmt.Sprintf("/api/v1/projects/%s/agents/%s", project.ID, hidden.ID), nil)
+	require.NotEqual(t, http.StatusOK, get.Code, "fixture: the outsider must not be able to read the agent")
+
+	for _, path := range []string{flatSAPath + sa.ID, flatSAPath + sa.ID + "?force=true"} {
+		rec := doRequestAsUser(t, srv, outsider, http.MethodDelete, path, nil)
+		require.Equal(t, http.StatusConflict, rec.Code, "%s: %s", path, rec.Body.String())
+		body := rec.Body.String()
+		for _, secret := range []string{project.ID, hidden.ID, hidden.Name, hidden.Slug, "secret-profile"} {
+			assert.NotContains(t, body, secret, "%s: the report must not disclose %q", path, secret)
+		}
+
+		code, msg, impact := decodeInUseImpact(t, rec.Body.Bytes())
+		assert.Equal(t, ErrCodeSAInUse, code)
+		assert.Contains(t, msg, "1 default(s) in other projects")
+		assert.Contains(t, msg, "an admin of those projects must change them")
+		assert.Equal(t, []GCPServiceAccountImpactDefault{
+			{Tier: GCPSADefaultTierProfile, Clearable: false, Redacted: true},
+		}, impact.Defaults)
+		assert.Equal(t, 1, impact.HiddenDefaultCount)
+		assert.Empty(t, impact.Agents)
+		assert.Equal(t, 1, impact.AgentCount)
+		assert.Zero(t, impact.VisibleAgentCount)
+		assert.Equal(t, []int{1}, impact.HiddenAgentCounts)
+	}
+
+	assert.True(t, saExists(t, s, sa.ID))
+	p, err := s.GetProject(ctx, project.ID)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"secret-profile": sa.ID}, profileDefaultSAIDsFromAnnotations(p.Annotations),
+		"a default the caller may not change is never cleared")
 }
