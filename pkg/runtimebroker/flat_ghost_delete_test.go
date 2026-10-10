@@ -18,6 +18,8 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // A create whose provisioning failed leaves an active record whose only
@@ -129,6 +131,7 @@ func TestFlatDelete_GhostRetirementControls(t *testing.T) {
 		query  string
 	}{
 		{"live provisioning run", false, "&deleteFiles=true&runId=other-run"},
+		{"unfenced delete, live provisioning run", false, "&deleteFiles=true"},
 		{"soft delete", true, "&deleteFiles=true&softDelete=true"},
 		{"no file delete", true, ""},
 	}
@@ -141,5 +144,35 @@ func TestFlatDelete_GhostRetirementControls(t *testing.T) {
 				t.Fatalf("state=%s holder=%q, want active with the slug still reserved", state, holder)
 			}
 		})
+	}
+}
+
+// TestFlatDelete_GhostWithUnconfirmedObjectStaysDeleting: an ended record
+// whose run still records an object not confirmed absent (its failure
+// cleanup could not confirm it) is retired to deleting by the rollback
+// delete, but not finished: the slug stays reserved until absence is
+// confirmed.
+func TestFlatDelete_GhostWithUnconfirmedObjectStaysDeleting(t *testing.T) {
+	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
+	st := f.srv.ownership
+	if err := st.BeginRun(flatTestProjectID, ghostAgentID, ghostSlug, ghostRun); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddResource(flatTestProjectID, ghostAgentID, ghostRun,
+		api.ResourceHandle{Kind: api.ResourceKindContainer, Name: "c-ghost", UID: "uid-ghost"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetRunState(flatTestProjectID, ghostAgentID, ghostRun, OwnershipStateDeleting); err != nil {
+		t.Fatal(err)
+	}
+	confirmAbsence(f, func(api.ResourceHandle) (bool, error) { return false, nil })
+
+	deleteGhost(t, f, "&deleteFiles=true&runId="+ghostRun)
+	if state, holder := ghostState(t, f); state != OwnershipStateDeleting || holder != ghostAgentID {
+		t.Fatalf("state=%s holder=%q, want deleting with the slug still reserved", state, holder)
+	}
+	rec, _, _ := st.Get(flatTestProjectID, ghostAgentID)
+	if res := rec.Runs[0].Resources; len(res) != 1 || res[0].State != OwnedResourceRecorded {
+		t.Fatalf("the unconfirmed object is no longer recorded: %+v", res)
 	}
 }
