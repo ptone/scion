@@ -286,7 +286,10 @@ type Server struct {
 	// Caches GitHub API resolution results to avoid redundant API calls.
 	ghResolutionCache *agent.GitHubResolutionCache
 
-	// Multi-key auth middleware
+	// Multi-key auth middleware. authMiddlewareMu guards the field below
+	// and serializes buildAuthMiddleware. Lock order: authMiddlewareMu,
+	// then hubMu, then a connection's mu.
+	authMiddlewareMu     sync.Mutex
 	brokerAuthMiddleware *MultiKeyBrokerAuthMiddleware
 
 	// Credential watching (watches MultiStore directory)
@@ -937,6 +940,12 @@ func (s *Server) tryLegacyCredentials() {
 // buildAuthMiddleware creates or rebuilds the multi-key auth middleware
 // from all hub connections' secret keys.
 func (s *Server) buildAuthMiddleware() {
+	// Runs from the credential watcher and from reinitialize goroutines;
+	// one at a time, each from a fresh read, so an older read cannot
+	// overwrite a newer one.
+	s.authMiddlewareMu.Lock()
+	defer s.authMiddlewareMu.Unlock()
+
 	s.hubMu.RLock()
 	var keys []secretKeyEntry
 	for _, conn := range s.hubConnections {
@@ -2408,13 +2417,22 @@ func (s *Server) checkAndReloadCredentials(ctx context.Context) error {
 	}
 	for _, conn := range reinit {
 		go func(conn *HubConnection) {
-			if _, err := conn.applyRequestedReinitialize(ctx, s); err != nil {
+			applied, err := conn.applyRequestedReinitialize(ctx, s)
+			if err != nil {
+				// Do not apply a partly applied credential set further.
 				slog.Error("Failed to reinitialize hub connection", "name", conn.Name, "error", err)
+				return
+			}
+			if applied {
+				// The new credentials are in place only now, so a
+				// credential change takes effect here, after reinitialize.
+				s.buildAuthMiddleware()
 			}
 		}(conn)
 	}
 
-	// Rebuild auth middleware with updated keys
+	// Rebuild for added and removed connections. Reinitialized connections
+	// rebuild again once their reinitialize has finished (above).
 	s.buildAuthMiddleware()
 
 	return nil
@@ -2667,8 +2685,11 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 		h = s.corsMiddleware(h)
 	}
 	// Apply broker auth middleware if configured
-	if s.brokerAuthMiddleware != nil {
-		h = s.brokerAuthMiddleware.Middleware(h)
+	s.authMiddlewareMu.Lock()
+	mw := s.brokerAuthMiddleware
+	s.authMiddlewareMu.Unlock()
+	if mw != nil {
+		h = mw.Middleware(h)
 	}
 
 	// OTel HTTP tracing (outermost - wraps all middleware for full request lifecycle)
