@@ -2426,8 +2426,12 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Show confirmation prompt
-	if !hubsync.ShowProjectLinkPrompt(projectName, endpoint, autoConfirm) {
+	// Show confirmation prompt. On the local workstation hub the link is
+	// not visible to anyone else, so it needs no confirmation (the same rule
+	// as the auto-link in hubsync.EnsureHubReady); remote hubs keep it.
+	if isLocalWorkstationEndpoint(endpoint) {
+		fmt.Fprintf(os.Stderr, "Linking project '%s' to the local hub at %s\n", projectName, endpoint)
+	} else if !hubsync.ShowProjectLinkPrompt(projectName, endpoint, autoConfirm) {
 		return fmt.Errorf("linking cancelled")
 	}
 

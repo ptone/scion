@@ -106,51 +106,83 @@ func autoStartAllowedFor(settings *config.Settings, getenv func(string) string) 
 // ensureLocalServerFn is a seam so tests never spawn a server.
 var ensureLocalServerFn = ensureLocalServer
 
+// runLocalServerCommand runs `<this binary> server <args...>` with its
+// output on stderr, so that stdout stays clean for --format json. It is a
+// seam for tests.
+var runLocalServerCommand = func(args ...string) error {
+	executable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to find the scion executable: %w", err)
+	}
+	c := exec.Command(executable, append([]string{"server"}, args...)...)
+	c.Stdout = os.Stderr
+	c.Stderr = os.Stderr
+	// Starting a server for the user must not open a browser.
+	c.Env = append(os.Environ(), "SCION_NO_BROWSER=1")
+	return c.Run()
+}
+
+// waitForLocalServerReady is waitForServerReady; a seam for tests.
+var waitForLocalServerReady = waitForServerReady
+
+// globalHubEndpoint reads hub.endpoint from the global settings file only.
+func globalHubEndpoint(globalDir string) string {
+	if vs, err := config.LoadSingleFileVersioned(globalDir); err == nil {
+		return vs.GetHubEndpoint()
+	}
+	return ""
+}
+
 // ensureLocalServer starts the local workstation server as a daemon by
 // running `<this binary> server start`, waits until it answers, and returns
 // the hub endpoint that the server start wrote to the global settings.
-// It does not retry or kill anything: errors from the server start (a port
-// conflict, a stale PID file) are shown as the server reports them.
+// It does not retry or kill anything before the start: errors from the
+// server start (a port conflict, a stale PID file) are shown as the server
+// reports them. If the start succeeds but the server never becomes ready,
+// it rolls back what the start did, so that a retry starts cleanly: it
+// stops the daemon (best effort) and clears the hub.endpoint the start
+// wrote.
 func ensureLocalServer() (string, error) {
-	executable, err := os.Executable()
-	if err != nil {
-		return "", fmt.Errorf("failed to find the scion executable: %w", err)
-	}
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		return "", fmt.Errorf("failed to get global directory: %w", err)
 	}
+	endpointBefore := globalHubEndpoint(globalDir)
 
 	fmt.Fprintln(os.Stderr, "No hub configured; starting the local scion server...")
-	start := exec.Command(executable, "server", "start")
-	// Its output goes to stderr so that stdout stays clean for --format json.
-	start.Stdout = os.Stderr
-	start.Stderr = os.Stderr
-	// Starting a server for the user must not open a browser.
-	start.Env = append(os.Environ(), "SCION_NO_BROWSER=1")
-	if err := start.Run(); err != nil {
+	if err := runLocalServerCommand("start"); err != nil {
 		return "", fmt.Errorf("failed to start the local scion server (see the output above): %w", err)
+	}
+
+	// rollback undoes the start after a later failure.
+	rollback := func(cause error) error {
+		if stopErr := runLocalServerCommand("stop"); stopErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to stop the local scion server: %v\n", stopErr)
+		}
+		if endpointBefore == "" && globalHubEndpoint(globalDir) != "" {
+			if err := config.UpdateVersionedSetting(globalDir, "hub.endpoint", ""); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to clear hub.endpoint: %v\n", err)
+			}
+		}
+		return cause
 	}
 
 	// The server start writes hub.endpoint to the global settings when it
 	// is not set yet (printWorkstationQuickstart).
-	endpoint := ""
-	if vs, err := config.LoadSingleFileVersioned(globalDir); err == nil {
-		endpoint = vs.GetHubEndpoint()
-	}
+	endpoint := globalHubEndpoint(globalDir)
 	if endpoint == "" {
-		return "", fmt.Errorf("the local scion server started but no hub endpoint was configured; check 'scion server status' and set one with 'scion config set --global hub.endpoint <url>'")
+		return "", rollback(fmt.Errorf("the local scion server started but no hub endpoint was configured; check 'scion server status' and set one with 'scion config set --global hub.endpoint <url>'"))
 	}
 
 	host, port, err := endpointHostPort(endpoint)
 	if err != nil {
-		return "", fmt.Errorf("invalid hub endpoint %q: %w", endpoint, err)
+		return "", rollback(fmt.Errorf("invalid hub endpoint %q: %w", endpoint, err))
 	}
-	ready, health := waitForServerReady(host, port, localServerReadyTimeout)
+	ready, health := waitForLocalServerReady(host, port, localServerReadyTimeout)
 	msg, _ := quickstartReadyMessage(ready, health)
 	if !ready {
-		return "", fmt.Errorf("the local scion server at %s did not become ready:%s\nCheck the log at %s",
-			endpoint, msg, daemon.GetLogPathComponent(serverDaemonComponent, globalDir))
+		return "", rollback(fmt.Errorf("the local scion server at %s did not become ready:%s\nCheck the log at %s",
+			endpoint, msg, daemon.GetLogPathComponent(serverDaemonComponent, globalDir)))
 	}
 	if msg != "" {
 		fmt.Fprintln(os.Stderr, msg)

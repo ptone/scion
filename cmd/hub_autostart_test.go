@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/stretchr/testify/assert"
@@ -154,6 +155,74 @@ func TestRunHubLink_NoEndpointAutoStartFailureIsReturned(t *testing.T) {
 	assert.Contains(t, err.Error(), "port conflict")
 }
 
+// fakeLinkHub is a minimal hub where nothing is registered and no project
+// matches by name. It reports whether a project was registered.
+func fakeLinkHub(t *testing.T) (*httptest.Server, *bool) {
+	t.Helper()
+	registered := new(bool)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		case r.URL.Path == "/api/v1/projects/register" && r.Method == http.MethodPost:
+			*registered = true
+			var body map[string]interface{}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"project": map[string]interface{}{"id": body["id"], "name": body["name"], "slug": body["name"]},
+				"created": true,
+			})
+		case r.URL.Path == "/api/v1/projects" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"projects": []interface{}{}})
+		case r.URL.Path == "/api/v1/runtime-brokers":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"brokers": []interface{}{}})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": map[string]interface{}{"code": "not_found", "message": "not found"},
+			})
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server, registered
+}
+
+// TestRunHubLink_LocalHubSkipsLinkPrompt: without -y and without a
+// terminal, the link confirmation would decline. On the local workstation
+// hub it is skipped, so the link succeeds; with a non-dev credential the
+// same loopback hub is not a local workstation hub and keeps the prompt.
+func TestRunHubLink_LocalHubSkipsLinkPrompt(t *testing.T) {
+	tests := []struct {
+		name     string
+		hubToken string
+		wantErr  string
+	}{
+		{name: "local workstation hub: no prompt"},
+		{name: "loopback hub with a non-dev credential: prompt kept", hubToken: "bearer-xyz", wantErr: "linking cancelled"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			globalDir := setupNoEndpointLink(t)
+			autoConfirm = false
+			server, registered := fakeLinkHub(t)
+			require.NoError(t, config.UpdateVersionedSetting(globalDir, "hub.endpoint", server.URL))
+			t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
+			t.Setenv("SCION_HUB_TOKEN", tc.hubToken)
+
+			err := runHubLink(hubLinkCmd, nil)
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+				assert.False(t, *registered)
+				return
+			}
+			require.NoError(t, err)
+			assert.True(t, *registered)
+		})
+	}
+}
+
 // TestRunHubLink_NoEndpointAutoStarts covers the vertical slice: with no
 // endpoint, hub link starts the local server (stubbed: it writes the
 // endpoint and dev token the way 'scion server start' does) and links.
@@ -210,4 +279,94 @@ func TestRunHubLink_NoEndpointAutoStarts(t *testing.T) {
 	assert.True(t, s.Hub.Enabled != nil && *s.Hub.Enabled, "hub.enabled still written in this phase")
 	assert.True(t, strings.HasPrefix(server.URL, "http://127.0.0.1:"))
 	assert.True(t, isLocalWorkstationEndpoint(server.URL), "the started hub is a local workstation endpoint")
+}
+
+// withLocalServerSeams replaces the server runner and readiness probe for
+// ensureLocalServer. startWrites is the endpoint the fake 'server start'
+// writes to the global settings ("" writes nothing); startErr fails it.
+// It returns the recorded server subcommands.
+func withLocalServerSeams(t *testing.T, globalDir, startWrites string, startErr error, ready bool) *[]string {
+	t.Helper()
+	origRun, origWait := runLocalServerCommand, waitForLocalServerReady
+	t.Cleanup(func() { runLocalServerCommand, waitForLocalServerReady = origRun, origWait })
+	var calls []string
+	runLocalServerCommand = func(args ...string) error {
+		calls = append(calls, strings.Join(args, " "))
+		if len(args) > 0 && args[0] == "start" {
+			if startErr != nil {
+				return startErr
+			}
+			if startWrites != "" {
+				return config.UpdateVersionedSetting(globalDir, "hub.endpoint", startWrites)
+			}
+		}
+		return nil
+	}
+	waitForLocalServerReady = func(string, int, time.Duration) (bool, healthProbeResponse) {
+		return ready, healthProbeResponse{}
+	}
+	return &calls
+}
+
+func TestEnsureLocalServer_Rollback(t *testing.T) {
+	const ep = "http://127.0.0.1:18080"
+	tests := []struct {
+		name         string
+		before       string // global hub.endpoint before the start
+		startWrites  string
+		startErr     error
+		ready        bool
+		wantErr      string
+		wantCalls    []string
+		wantEndpoint string // global hub.endpoint afterwards
+	}{
+		{name: "ready", startWrites: ep, ready: true, wantCalls: []string{"start"}, wantEndpoint: ep},
+		{name: "start fails: nothing to roll back", startErr: errors.New("port conflict"), wantErr: "port conflict",
+			wantCalls: []string{"start"}},
+		{name: "not ready: stop and clear the endpoint", startWrites: ep, wantErr: "did not become ready",
+			wantCalls: []string{"start", "stop"}},
+		{name: "no endpoint written: stop", wantErr: "no hub endpoint was configured",
+			wantCalls: []string{"start", "stop"}},
+		{name: "endpoint set before the start is kept", before: ep, wantErr: "did not become ready",
+			wantCalls: []string{"start", "stop"}, wantEndpoint: ep},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			globalDir := setupNoEndpointLink(t)
+			if tc.before != "" {
+				require.NoError(t, config.UpdateVersionedSetting(globalDir, "hub.endpoint", tc.before))
+			}
+			calls := withLocalServerSeams(t, globalDir, tc.startWrites, tc.startErr, tc.ready)
+
+			got, err := ensureLocalServer()
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+				assert.Empty(t, got)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tc.wantEndpoint, got)
+			}
+			assert.Equal(t, tc.wantCalls, *calls, "server subcommands run")
+			assert.Equal(t, tc.wantEndpoint, globalHubEndpoint(globalDir), "global hub.endpoint afterwards")
+		})
+	}
+}
+
+// TestRunHubLink_FailedAutoStartAllowsRetry: after an auto-start that
+// never became ready, the endpoint is cleared, so the next 'hub link'
+// tries the auto-start again instead of failing as unreachable.
+func TestRunHubLink_FailedAutoStartAllowsRetry(t *testing.T) {
+	globalDir := setupNoEndpointLink(t)
+	calls := withLocalServerSeams(t, globalDir, "http://127.0.0.1:18081", nil, false)
+	ensureLocalServerFn = ensureLocalServer
+
+	err := runHubLink(hubLinkCmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "did not become ready")
+	err = runHubLink(hubLinkCmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "did not become ready")
+	assert.Equal(t, []string{"start", "stop", "start", "stop"}, *calls)
+	assert.Empty(t, globalHubEndpoint(globalDir))
 }

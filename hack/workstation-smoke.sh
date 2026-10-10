@@ -40,9 +40,13 @@ SCION="${1:-}"
 log() { printf '==> %s\n' "$*"; }
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
+# Set once HOME points at the temporary home, so cleanup never runs
+# 'server stop' against the caller's real HOME.
+ISOLATED=0
+
 cleanup() {
   local rc=$?
-  if [ -n "${SCION:-}" ] && [ -x "$SCION" ]; then
+  if [ "$ISOLATED" = 1 ] && [ -n "${SCION:-}" ] && [ -x "$SCION" ]; then
     "$SCION" server stop >/dev/null 2>&1 || true
   fi
   if [ $rc -ne 0 ] && [ -f "$WORK/home/.scion/server.log" ]; then
@@ -68,6 +72,7 @@ while IFS='=' read -r name _; do
   case "$name" in SCION_*) unset "$name" ;; esac
 done < <(env)
 export HOME="$WORK/home"
+ISOLATED=1
 mkdir -p "$HOME"
 export SCION_NO_BROWSER=1
 # The workstation broker refuses to start without an image registry. No
@@ -100,7 +105,7 @@ else
 fi
 
 log "SCION_HUB_AUTO_START=0 scion hub link fails and starts nothing"
-if SCION_HUB_AUTO_START=0 "$SCION" "${TARGET[@]}" -y hub link >"$WORK/off.out" 2>&1; then
+if SCION_HUB_AUTO_START=0 "$SCION" ${TARGET[@]+"${TARGET[@]}"} -y hub link >"$WORK/off.out" 2>&1; then
   cat "$WORK/off.out" >&2
   fail "hub link succeeded with auto-start off and no endpoint"
 fi
@@ -110,23 +115,23 @@ if "$SCION" server status 2>/dev/null | grep -qi "running" && ! "$SCION" server 
 fi
 
 log "scion hub link (auto-starts the local server)"
-"$SCION" "${TARGET[@]}" -y hub link >"$WORK/link.out" 2>&1 || { cat "$WORK/link.out" >&2; fail "scion hub link"; }
+"$SCION" ${TARGET[@]+"${TARGET[@]}"} -y hub link >"$WORK/link.out" 2>&1 || { cat "$WORK/link.out" >&2; fail "scion hub link"; }
 cat "$WORK/link.out"
 grep -q "starting the local scion server" "$WORK/link.out" || fail "hub link did not start the local server"
 grep -q "is now linked to the Hub" "$WORK/link.out" || fail "hub link did not link the project"
 
 log "scion hub status shows the project linked"
-"$SCION" "${TARGET[@]}" hub status --format json >"$WORK/status.json" 2>"$WORK/status.err" || {
+"$SCION" ${TARGET[@]+"${TARGET[@]}"} hub status --format json >"$WORK/status.json" 2>"$WORK/status.err" || {
   cat "$WORK/status.json" "$WORK/status.err" >&2; fail "scion hub status"; }
 grep -Eq '"linked"[[:space:]]*:[[:space:]]*true' "$WORK/status.json" || {
   cat "$WORK/status.json" >&2; fail "hub status does not report the project as linked"; }
 
 log "scion list returns an empty list through the hub"
-"$SCION" "${TARGET[@]}" list >"$WORK/list.out" 2>"$WORK/list.err" || {
+"$SCION" ${TARGET[@]+"${TARGET[@]}"} list >"$WORK/list.out" 2>"$WORK/list.err" || {
   cat "$WORK/list.out" "$WORK/list.err" >&2; fail "scion list"; }
 grep -q "Using hub: http://127.0.0.1:" "$WORK/list.err" || {
   cat "$WORK/list.out" "$WORK/list.err" >&2; fail "scion list did not go through the local hub"; }
-"$SCION" "${TARGET[@]}" list --format json >"$WORK/list.json" 2>"$WORK/list.err" || {
+"$SCION" ${TARGET[@]+"${TARGET[@]}"} list --format json >"$WORK/list.json" 2>"$WORK/list.err" || {
   cat "$WORK/list.json" "$WORK/list.err" >&2; fail "scion list --format json"; }
 tr -d '[:space:]' <"$WORK/list.json" | grep -Eq '^(\[\]|null)$' || {
   cat "$WORK/list.json" "$WORK/list.err" >&2; fail "scion list did not return an empty list"; }
