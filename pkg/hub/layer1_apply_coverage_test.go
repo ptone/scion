@@ -61,6 +61,11 @@ var layer1NotWritableKeys = map[string]string{
 	"default_agent_role":     "accepted only as an unchanged echo of GET (dbUnwrittenLayer1Paths)",
 }
 
+// layer1ExemptKeys are Layer-1 koanf paths left out of this check.
+var layer1ExemptKeys = map[string]string{
+	"server.auth.authorized_domains": "handled in a separate change",
+}
+
 func observeLocked[T any](f func(s *Server) T) func(s *Server, _ *OperationalSettings) any {
 	return func(s *Server, _ *OperationalSettings) any {
 		s.mu.RLock()
@@ -331,6 +336,12 @@ func TestLayer1Keys_AppliedLiveOrRestartRequired(t *testing.T) {
 		_, live := probes[key]
 		restart := opsettings.IsRestartRequired(key)
 		_, exempt := layer1NotWritableKeys[key]
+		if _, skip := layer1ExemptKeys[key]; skip {
+			if live || restart || exempt {
+				t.Errorf("%s is exempt from this check but also has a probe, the restart_required flag or a not-writable entry", key)
+			}
+			continue
+		}
 		switch {
 		case live && restart:
 			t.Errorf("%s has a live-apply probe and is flagged restart_required; it must be one or the other", key)
