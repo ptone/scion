@@ -233,7 +233,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	// broker start (step 13). The broker cannot be started in place later,
 	// so the fix is a restart.
 	if !hostedMode {
-		disableBroker, err := workstationBrokerRegistryDegrade(hostedMode, cfg.RuntimeBroker.Enabled, enableHub || enableWeb, requireImageRegistryForBroker)
+		disableBroker, err := workstationBrokerRegistryDegrade(cfg.RuntimeBroker.Enabled, enableHub || enableWeb, requireImageRegistryForBroker)
 		if err != nil {
 			return err
 		}

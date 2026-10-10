@@ -72,7 +72,7 @@ func stubQuickstartProbes(t *testing.T, ready bool, status onboardingStatusResul
 
 func TestFetchOnboardingStatus(t *testing.T) {
 	var gotAuth, gotPath string
-	body := `{"complete":false,"embeddedBrokerID":"","imageRegistry":"ghcr.io/x"}`
+	body := `{"complete":false,"embeddedBrokerID":""}`
 	code := http.StatusOK
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
@@ -87,7 +87,7 @@ func TestFetchOnboardingStatus(t *testing.T) {
 		got, err := fetchOnboardingStatus(client, srv.URL, "tok")
 		require.NoError(t, err)
 		assert.False(t, got.Complete)
-		assert.Equal(t, "ghcr.io/x", got.ImageRegistry)
+		assert.Empty(t, got.EmbeddedBrokerID)
 		assert.Equal(t, "Bearer tok", gotAuth)
 		assert.Equal(t, onboardingStatusPath, gotPath)
 	})
@@ -159,9 +159,12 @@ func TestBrokerSkippedForRegistry(t *testing.T) {
 		want          bool
 	}{
 		{"broker disabled", false, onboardingStatusResult{}, nil, missing, false},
-		{"hub: no broker, no registry", true, onboardingStatusResult{}, nil, present, true},
+		{"hub: no broker, registry check fails", true, onboardingStatusResult{}, nil, missing, true},
+		// e.g. the registry comes from SCION_MAINTENANCE_IMAGE_REGISTRY or
+		// project settings, which the hub's status does not report, and the
+		// broker had not registered by the readiness deadline.
+		{"hub: no broker yet, registry check passes", true, onboardingStatusResult{}, nil, present, false},
 		{"hub: broker running", true, onboardingStatusResult{EmbeddedBrokerID: "b1"}, nil, missing, false},
-		{"hub: registry set", true, onboardingStatusResult{ImageRegistry: "ghcr.io/x"}, nil, missing, false},
 		{"no hub answer: local check fails", true, onboardingStatusResult{}, statusErr, missing, true},
 		{"no hub answer: local check passes", true, onboardingStatusResult{}, statusErr, present, false},
 	}
@@ -179,23 +182,21 @@ func TestWorkstationBrokerRegistryDegrade(t *testing.T) {
 	notCalled := func() error { t.Fatal("registry check must not run when the broker is disabled"); return nil }
 	tests := []struct {
 		name        string
-		hosted      bool
 		broker      bool
 		hubOrWeb    bool
 		check       func() error
 		wantDisable bool
 		wantErr     bool
 	}{
-		{"broker disabled", false, false, true, notCalled, false, false},
-		{"workstation, registry set", false, true, true, present, false, false},
-		{"workstation, registry missing: degrade", false, true, true, missing, true, false},
-		{"workstation broker-only, registry missing: fail fast", false, true, false, missing, false, true},
-		{"hosted, registry missing: fail fast", true, true, true, missing, false, true},
-		{"hosted, registry set", true, true, true, present, false, false},
+		{"broker disabled", false, true, notCalled, false, false},
+		{"registry set", true, true, present, false, false},
+		{"registry missing: degrade", true, true, missing, true, false},
+		{"broker-only, registry missing: fail fast", true, false, missing, false, true},
+		{"broker-only, registry set", true, false, present, false, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			disable, err := workstationBrokerRegistryDegrade(tt.hosted, tt.broker, tt.hubOrWeb, tt.check)
+			disable, err := workstationBrokerRegistryDegrade(tt.broker, tt.hubOrWeb, tt.check)
 			assert.Equal(t, tt.wantDisable, disable)
 			if tt.wantErr {
 				assert.ErrorIs(t, err, regErr)
@@ -288,8 +289,20 @@ func TestPrintWorkstationQuickstart_BrowserRule(t *testing.T) {
 	})
 }
 
+// unsetImageRegistry makes requireImageRegistryForBroker fail: no registry
+// env vars and an empty HOME and working directory.
+func unsetImageRegistry(t *testing.T) {
+	t.Helper()
+	t.Setenv("SCION_IMAGE_REGISTRY", "")
+	t.Setenv("SCION_MAINTENANCE_IMAGE_REGISTRY", "")
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	t.Chdir(tmpHome)
+}
+
 func TestPrintWorkstationQuickstart_BrokerSkippedNotice(t *testing.T) {
-	t.Run("hub reports no broker and no registry: notice printed", func(t *testing.T) {
+	t.Run("no broker and no registry: notice printed", func(t *testing.T) {
+		unsetImageRegistry(t)
 		stubQuickstartProbes(t, true, onboardingStatusResult{}, nil)
 		out := captureStdout(t, func() {
 			printWorkstationQuickstart(false, t.TempDir(), "127.0.0.1", 8080, true, false, true, true)
@@ -300,7 +313,18 @@ func TestPrintWorkstationQuickstart_BrokerSkippedNotice(t *testing.T) {
 		assert.Contains(t, out, "scion server restart")
 	})
 
+	t.Run("no broker yet but a registry is configured: no notice", func(t *testing.T) {
+		t.Setenv("SCION_IMAGE_REGISTRY", "")
+		t.Setenv("SCION_MAINTENANCE_IMAGE_REGISTRY", "ghcr.io/maint")
+		stubQuickstartProbes(t, true, onboardingStatusResult{}, nil)
+		out := captureStdout(t, func() {
+			printWorkstationQuickstart(false, t.TempDir(), "127.0.0.1", 8080, true, false, true, true)
+		})
+		assert.NotContains(t, out, "Runtime broker not started")
+	})
+
 	t.Run("broker running: no notice", func(t *testing.T) {
+		unsetImageRegistry(t)
 		stubQuickstartProbes(t, true, onboardingStatusResult{EmbeddedBrokerID: "b1"}, nil)
 		out := captureStdout(t, func() {
 			printWorkstationQuickstart(false, t.TempDir(), "127.0.0.1", 8080, true, false, true, true)
@@ -309,6 +333,7 @@ func TestPrintWorkstationQuickstart_BrokerSkippedNotice(t *testing.T) {
 	})
 
 	t.Run("broker disabled by flag: no notice", func(t *testing.T) {
+		unsetImageRegistry(t)
 		stubQuickstartProbes(t, true, onboardingStatusResult{}, nil)
 		out := captureStdout(t, func() {
 			printWorkstationQuickstart(false, t.TempDir(), "127.0.0.1", 8080, true, false, true, false)

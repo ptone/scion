@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -1008,7 +1009,7 @@ func printWorkstationQuickstart(settingsMissingBeforeStart bool, globalDir strin
 			status, statusErr = quickstartOnboardingStatus(baseURL, readDevTokenFile(globalDir))
 		}
 		if statusErr != nil {
-			logOnboardingStatusFallback(statusErr)
+			slog.Debug("Onboarding status unavailable; using the settings-file signal", "error", statusErr)
 		}
 
 		url := baseURL + quickstartWebPath(status, statusErr, settingsMissingBeforeStart)

@@ -40,6 +40,7 @@ interface OnboardingStatus {
   imagesPresent: boolean;
   hasWorkspace: boolean;
   complete: boolean;
+  embeddedBrokerID?: string;
   imageRegistry?: string;
   gitVersion?: string;
   gitVersionOK?: boolean;
@@ -1419,18 +1420,28 @@ export class ScionPageOnboarding extends LitElement {
    * needs a restart to start it. A failed status read leaves the hint unset.
    */
   private async checkBrokerAfterRegistrySave(): Promise<void> {
+    const brokerID = await this.fetchEmbeddedBrokerID();
+    if (brokerID === null) return;
+    if (brokerID) {
+      this.wsEmbeddedBrokerID = brokerID;
+      this.brokerRestartNeeded = false;
+    } else {
+      this.brokerRestartNeeded = true;
+    }
+  }
+
+  /**
+   * Reads the server's embedded broker ID from the system status: '' when the
+   * server has no embedded broker, null when the status could not be read.
+   */
+  private async fetchEmbeddedBrokerID(): Promise<string | null> {
     try {
       const res = await apiFetch('/api/v1/system/status');
-      if (!res.ok) return;
-      const data = (await res.json()) as { embeddedBrokerID?: string };
-      if (data.embeddedBrokerID) {
-        this.wsEmbeddedBrokerID = data.embeddedBrokerID;
-        this.brokerRestartNeeded = false;
-      } else {
-        this.brokerRestartNeeded = true;
-      }
+      if (!res.ok) return null;
+      const data = (await res.json()) as OnboardingStatus;
+      return data.embeddedBrokerID ?? '';
     } catch {
-      /* ignore */
+      return null;
     }
   }
 
@@ -1693,14 +1704,8 @@ export class ScionPageOnboarding extends LitElement {
 
   private async loadWsBrokerID(): Promise<void> {
     if (this.wsEmbeddedBrokerID) return;
-    try {
-      const res = await apiFetch('/api/v1/system/status');
-      if (!res.ok) return;
-      const data = (await res.json()) as { embeddedBrokerID?: string };
-      if (data.embeddedBrokerID) this.wsEmbeddedBrokerID = data.embeddedBrokerID;
-    } catch {
-      /* ignore */
-    }
+    const brokerID = await this.fetchEmbeddedBrokerID();
+    if (brokerID) this.wsEmbeddedBrokerID = brokerID;
   }
 
   private async wsValidatePath(path: string): Promise<void> {

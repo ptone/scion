@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"os"
 	"time"
@@ -43,7 +42,6 @@ var errOnboardingStatusNotAsked = errors.New("onboarding status not requested: s
 type onboardingStatusResult struct {
 	Complete         bool   `json:"complete"`
 	EmbeddedBrokerID string `json:"embeddedBrokerID,omitempty"`
-	ImageRegistry    string `json:"imageRegistry,omitempty"`
 }
 
 // fetchOnboardingStatus asks the hub at baseURL (no trailing slash) for its
@@ -102,15 +100,16 @@ func quickstartWebPath(status onboardingStatusResult, statusErr error, settingsM
 // brokerSkippedForRegistry reports whether a workstation server that was
 // asked to run its co-located broker started without it because no
 // image_registry is configured (see workstationBrokerRegistryDegrade). It
-// uses the hub's own view when the hub answered: no embedded broker and no
-// resolved registry. If the hub did not answer, it runs the same registry
-// check the server runs (localCheck).
+// uses the server's own registry predicate (localCheck, i.e.
+// requireImageRegistryForBroker), which covers every source the server
+// checks. When the hub answered and reports an embedded broker, the broker
+// is running and there is nothing to report.
 func brokerSkippedForRegistry(brokerEnabled bool, status onboardingStatusResult, statusErr error, localCheck func() error) bool {
 	if !brokerEnabled {
 		return false
 	}
-	if statusErr == nil {
-		return status.EmbeddedBrokerID == "" && status.ImageRegistry == ""
+	if statusErr == nil && status.EmbeddedBrokerID != "" {
+		return false
 	}
 	return localCheck() != nil
 }
@@ -126,17 +125,18 @@ const brokerSkippedNotice = "Runtime broker not started: image_registry is not c
 	"    export SCION_IMAGE_REGISTRY=<your-registry>\n" +
 	"  then run 'scion server restart' to start the broker."
 
-// workstationBrokerRegistryDegrade decides what the server does when its
-// co-located broker is enabled but registryCheck (requireImageRegistryForBroker)
-// fails:
-//   - workstation mode with the hub or web enabled: return disableBroker=true
-//     and no error; the hub and web still start so the onboarding wizard can
-//     set the registry, and the broker is not started.
-//   - hosted mode, or a broker-only workstation server (nothing else would be
-//     left running): return the error; the server fails fast as before.
+// workstationBrokerRegistryDegrade decides what a workstation server does
+// when its co-located broker is enabled but registryCheck
+// (requireImageRegistryForBroker) fails. The caller runs it in workstation
+// mode only; hosted mode keeps its fail-fast at broker start.
+//   - hub or web enabled: return disableBroker=true and no error; the hub and
+//     web still start so the onboarding wizard can set the registry, and the
+//     broker is not started.
+//   - broker-only (nothing else would be left running): return the error;
+//     the server fails fast as before.
 //
 // It is a no-op when the broker is not enabled or the check passes.
-func workstationBrokerRegistryDegrade(hosted, brokerEnabled, hubOrWebEnabled bool, registryCheck func() error) (disableBroker bool, err error) {
+func workstationBrokerRegistryDegrade(brokerEnabled, hubOrWebEnabled bool, registryCheck func() error) (disableBroker bool, err error) {
 	if !brokerEnabled {
 		return false, nil
 	}
@@ -144,7 +144,7 @@ func workstationBrokerRegistryDegrade(hosted, brokerEnabled, hubOrWebEnabled boo
 	if checkErr == nil {
 		return false, nil
 	}
-	if hosted || !hubOrWebEnabled {
+	if !hubOrWebEnabled {
 		return false, checkErr
 	}
 	return true, nil
@@ -174,8 +174,3 @@ var (
 	quickstartBrowserAllowed = browserAutoOpenAllowed
 	quickstartOpenBrowser    = util.OpenBrowser
 )
-
-// logOnboardingStatusFallback records why the onboarding status was not used.
-func logOnboardingStatusFallback(err error) {
-	slog.Debug("Onboarding status unavailable; using the settings-file signal", "error", err)
-}

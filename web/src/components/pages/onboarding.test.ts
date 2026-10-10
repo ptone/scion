@@ -43,6 +43,7 @@ interface OnboardingPage extends HTMLElement {
   registryInput: string;
   brokerRestartNeeded: boolean;
   handleSaveRegistry(): Promise<void>;
+  updateComplete: Promise<boolean>;
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -185,6 +186,28 @@ describe('onboarding harness step: gcloud ADC preference', () => {
 });
 
 describe('onboarding registry step: broker restart hint', () => {
+  /**
+   * Connects the page, lets its own initialize() finish (its status and
+   * identity reads answer 404), and returns the text of the rendered
+   * warning banners.
+   */
+  async function renderedWarnings(el: OnboardingPage): Promise<string[]> {
+    vi.mocked(apiFetch).mockResolvedValue(jsonResponse({}, 404));
+    document.body.appendChild(el);
+    try {
+      await vi.waitFor(() => {
+        expect(el.shadowRoot?.querySelector('.loading-state')).toBeNull();
+        expect(el.shadowRoot?.querySelector('.wizard')).not.toBeNull();
+      });
+      await el.updateComplete;
+      return Array.from(el.shadowRoot?.querySelectorAll('.warning-banner') ?? []).map(
+        (b) => b.textContent ?? ''
+      );
+    } finally {
+      el.remove();
+    }
+  }
+
   function createRegistryPage(): OnboardingPage {
     const el = createPage();
     el.currentStep = 3;
@@ -204,6 +227,8 @@ describe('onboarding registry step: broker restart hint', () => {
     expect(calls[1][0]).toBe('/api/v1/system/status');
     expect(el.brokerRestartNeeded).toBe(true);
     expect(el.error).toBeNull();
+
+    expect(await renderedWarnings(el)).toContainEqual(expect.stringContaining(BROKER_RESTART_HINT));
   });
 
   it('no hint when the embedded broker is running', async () => {
@@ -214,6 +239,10 @@ describe('onboarding registry step: broker restart hint', () => {
 
     expect(el.brokerRestartNeeded).toBe(false);
     expect(el.wsEmbeddedBrokerID).toBe('b-1');
+
+    expect(await renderedWarnings(el)).not.toContainEqual(
+      expect.stringContaining(BROKER_RESTART_HINT)
+    );
   });
 
   it('a failed save does not check the broker', async () => {
