@@ -48,7 +48,7 @@ func TestCloudLoggingHealth_P2_5_FollowsProviderState(t *testing.T) {
 
 	stats := &logging.CloudWriteStats{}
 	var open atomic.Bool
-	stats.SetCircuitSource(open.Load)
+	stats.RegisterCircuitSource(open.Load)
 	now := time.Now()
 	srv.SetCloudLoggingHealth(func() string { return stats.HealthStatus(now) })
 

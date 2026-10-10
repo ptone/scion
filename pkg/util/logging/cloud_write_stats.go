@@ -166,26 +166,14 @@ func (s *CloudWriteStats) LastFailure() time.Time {
 	return time.Time{}
 }
 
-// SetCircuitSource registers the circuit-breaker state read by the
-// scion.logging.writer.circuit_open gauge and by Health. nil unregisters.
-// NewResilientCloudHandler registers itself; a Cloud handler counts as
-// configured while a source is registered.
-func (s *CloudWriteStats) SetCircuitSource(open func() bool) {
-	if s == nil {
-		return
-	}
-	if open == nil {
-		s.circuit.Store(nil)
-		return
-	}
-	s.circuit.Store(&open)
-}
-
-// registerCircuitSource registers open like SetCircuitSource and returns a
-// func that unregisters it only if it is still the registered source, so a
-// stopped handler never leaves its state behind and never removes a later
-// handler's registration.
-func (s *CloudWriteStats) registerCircuitSource(open func() bool) (unregister func()) {
+// RegisterCircuitSource registers the circuit-breaker state read by the
+// scion.logging.writer.circuit_open gauge and by Health; a Cloud handler
+// counts as configured while a source is registered. NewResilientCloudHandler
+// registers itself and calls the returned unregister from its cleanup.
+// unregister removes the source only if it is still the registered one, so
+// a stopped handler never leaves its state behind and never removes a later
+// registration. A nil open, or a nil receiver, registers nothing.
+func (s *CloudWriteStats) RegisterCircuitSource(open func() bool) (unregister func()) {
 	if s == nil || open == nil {
 		return func() {}
 	}

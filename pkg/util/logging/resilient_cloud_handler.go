@@ -174,7 +174,7 @@ func NewResilientCloudHandler(inner *CloudHandler, cfg ResilientCloudHandlerConf
 	h.flushFn = func() error { return h.logger.Flush() }
 	// Publish the circuit state for the circuit_open gauge and the
 	// cloud_logging health key; cleanup withdraws it if still ours.
-	unregister := h.writeStats().registerCircuitSource(h.CircuitOpen)
+	unregister := h.writeStats().RegisterCircuitSource(h.CircuitOpen)
 
 	h.wg.Add(1)
 	go h.healthCheckLoop()

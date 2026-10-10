@@ -55,7 +55,7 @@ func TestWireHubCoreMetrics_CloudWriterSeries(t *testing.T) {
 	cs.RecordFailure(logging.CloudReasonCircuitOpen)
 	var open atomic.Bool
 	open.Store(true)
-	cs.SetCircuitSource(open.Load)
+	cs.RegisterCircuitSource(open.Load)
 
 	srv, err := hub.New(hub.ServerConfig{}, newTestStore(t))
 	require.NoError(t, err)
@@ -134,7 +134,7 @@ func TestWireCloudLoggingHealth_OnlyWhenConfigured(t *testing.T) {
 	require.False(t, present, "cloud_logging wired without a Cloud handler")
 
 	var open atomic.Bool
-	cs.SetCircuitSource(open.Load)
+	cs.RegisterCircuitSource(open.Load)
 	wireCloudLoggingHealth(srv, cs)
 	require.Equal(t, "healthy", srv.GetHealthInfo(ctx).Checks["cloud_logging"])
 	open.Store(true)

@@ -66,7 +66,7 @@ func exportLoggingThroughFakeAPI(t *testing.T) map[string]exportedMetric {
 	wm.Observe(loggingWriterSource{})
 	cloud := &logging.CloudWriteStats{}
 	cloud.RecordFailure(logging.CloudReasonCircuitOpen)
-	cloud.SetCircuitSource(func() bool { return true })
+	cloud.RegisterCircuitSource(func() bool { return true })
 	wm.ObserveCloud(cloud)
 	if err := mp.ForceFlush(ctx); err != nil {
 		t.Fatalf("ForceFlush: %v", err)

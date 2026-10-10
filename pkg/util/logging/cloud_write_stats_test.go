@@ -175,7 +175,7 @@ func TestCloudWriteStats_Health(t *testing.T) {
 		t.Fatal("configured without a circuit source")
 	}
 	var open atomic.Bool
-	s.SetCircuitSource(open.Load)
+	unregister := s.RegisterCircuitSource(open.Load)
 	if !s.Configured() {
 		t.Fatal("not configured with a circuit source")
 	}
@@ -198,7 +198,7 @@ func TestCloudWriteStats_Health(t *testing.T) {
 	if got := s.HealthStatus(now.Add(asyncwrite.DefaultFailureWindow)); got != "healthy" {
 		t.Fatalf("after window = %q", got)
 	}
-	s.SetCircuitSource(nil)
+	unregister()
 	if s.Configured() {
 		t.Fatal("still configured after unregister")
 	}
@@ -230,11 +230,11 @@ func (m *manualTimers) fireLast() {
 // A handler's cleanup withdraws only its own circuit registration.
 func TestCloudWriteStats_RegisterCircuitSourceUnregistersOnlyItself(t *testing.T) {
 	s := newCloudWriteStats(nil)
-	unA := s.registerCircuitSource(func() bool { return true })
+	unA := s.RegisterCircuitSource(func() bool { return true })
 	if open, ok := s.CircuitOpen(); !ok || !open {
 		t.Fatalf("A: open=%v ok=%v", open, ok)
 	}
-	unB := s.registerCircuitSource(func() bool { return false })
+	unB := s.RegisterCircuitSource(func() bool { return false })
 	unA() // stale: B stays registered
 	if open, ok := s.CircuitOpen(); !ok || open {
 		t.Fatalf("after unregistering A: open=%v ok=%v, want B (false, true)", open, ok)
@@ -244,9 +244,9 @@ func TestCloudWriteStats_RegisterCircuitSourceUnregistersOnlyItself(t *testing.T
 		t.Fatal("still configured after unregistering B")
 	}
 	unB() // idempotent
-	s.registerCircuitSource(nil)()
+	s.RegisterCircuitSource(nil)()
 	var nilStats *CloudWriteStats
-	nilStats.registerCircuitSource(func() bool { return true })()
+	nilStats.RegisterCircuitSource(func() bool { return true })()
 }
 
 // newObservedResilient builds a ResilientCloudHandler whose inner
@@ -273,7 +273,7 @@ func newObservedResilient(t *testing.T, cfg ResilientCloudHandlerConfig) (*Resil
 		done:   make(chan struct{}),
 		stats:  stats,
 	}
-	stats.SetCircuitSource(h.CircuitOpen)
+	stats.RegisterCircuitSource(h.CircuitOpen)
 	return h, stats, sent
 }
 
@@ -595,7 +595,7 @@ func TestWriteMetrics_CumulativeConservationAcrossAttachAndTwoReaders(t *testing
 	cloud.RecordFailure(CloudReasonCircuitOpen)
 	var open atomic.Bool
 	open.Store(true)
-	cloud.SetCircuitSource(open.Load)
+	cloud.RegisterCircuitSource(open.Load)
 
 	// Attach with two readers on one provider.
 	r1, r2 := sdkmetric.NewManualReader(), sdkmetric.NewManualReader()
