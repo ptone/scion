@@ -90,6 +90,12 @@ func (Template) Fields() []ent.Field {
 			Optional(),
 		field.String("source_url").
 			Optional(),
+		// telemetry_source records where config's telemetry block came from:
+		// "agent-config" when it was filled from the template's
+		// scion-agent.yaml, empty when it was set through the API (or is
+		// unset). Uploads use it to clear only file-sourced telemetry.
+		field.String("telemetry_source").
+			Optional(),
 		field.Time("created").
 			Default(time.Now).
 			Immutable(),

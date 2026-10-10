@@ -84,6 +84,7 @@ func entTemplateRowToStore(e *ent.Template) *store.Template {
 		Harness:              e.Harness,
 		DefaultHarnessConfig: e.DefaultHarnessConfig,
 		Image:                e.Image,
+		TelemetrySource:      e.TelemetrySource,
 		ContentHash:          e.ContentHash,
 		Scope:                e.Scope,
 		ScopeID:              e.ScopeID,
@@ -130,6 +131,7 @@ func (s *TemplateStore) CreateTemplate(ctx context.Context, template *store.Temp
 		SetDefaultHarnessConfig(template.DefaultHarnessConfig).
 		SetImage(template.Image).
 		SetConfig(marshalJSONString(template.Config)).
+		SetTelemetrySource(template.TelemetrySource).
 		SetContentHash(template.ContentHash).
 		SetScope(template.Scope).
 		SetScopeID(template.ScopeID).
@@ -210,6 +212,7 @@ func (s *TemplateStore) UpdateTemplate(ctx context.Context, template *store.Temp
 		SetDefaultHarnessConfig(template.DefaultHarnessConfig).
 		SetImage(template.Image).
 		SetConfig(marshalJSONString(template.Config)).
+		SetTelemetrySource(template.TelemetrySource).
 		SetContentHash(template.ContentHash).
 		SetScope(template.Scope).
 		SetScopeID(template.ScopeID).

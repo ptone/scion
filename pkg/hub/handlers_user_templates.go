@@ -295,6 +295,7 @@ func (s *Server) updateUserTemplate(w http.ResponseWriter, r *http.Request, id s
 	template.Files = existing.Files
 	template.ContentHash = existing.ContentHash
 	template.Status = existing.Status
+	preserveTelemetrySource(existing, &template)
 	if template.Slug != "" {
 		template.Slug = api.Slugify(template.Slug)
 	}

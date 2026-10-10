@@ -419,3 +419,46 @@ func TestListHarnessConfigsPaginationAndFilter(t *testing.T) {
 	require.Len(t, gemini.Items, 1)
 	assert.Equal(t, "gemini", gemini.Items[0].Harness)
 }
+
+// TelemetrySource is persisted through create, update and list, and reads as
+// empty when it was never set (ptone/scion#4125).
+func TestTemplateTelemetrySourceRoundTrip(t *testing.T) {
+	ts := newTestTemplateStore(t)
+	ctx := context.Background()
+
+	unmarked := &store.Template{ID: uuid.New().String(), Name: "plain", Slug: "plain", Harness: "claude", Scope: store.TemplateScopeGlobal}
+	require.NoError(t, ts.CreateTemplate(ctx, unmarked))
+	got, err := ts.GetTemplate(ctx, unmarked.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got.TelemetrySource)
+
+	tmpl := &store.Template{
+		ID:              uuid.New().String(),
+		Name:            "marked",
+		Slug:            "marked",
+		Harness:         "claude",
+		Scope:           store.TemplateScopeGlobal,
+		TelemetrySource: store.TemplateTelemetrySourceAgentConfig,
+	}
+	require.NoError(t, ts.CreateTemplate(ctx, tmpl))
+	got, err = ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TemplateTelemetrySourceAgentConfig, got.TelemetrySource)
+
+	got.TelemetrySource = ""
+	require.NoError(t, ts.UpdateTemplate(ctx, got))
+	got, err = ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got.TelemetrySource, "update clears the marker")
+
+	got.TelemetrySource = store.TemplateTelemetrySourceAgentConfig
+	require.NoError(t, ts.UpdateTemplate(ctx, got))
+	list, err := ts.ListTemplates(ctx, store.TemplateFilter{}, store.ListOptions{})
+	require.NoError(t, err)
+	sources := map[string]string{}
+	for _, item := range list.Items {
+		sources[item.ID] = item.TelemetrySource
+	}
+	assert.Equal(t, store.TemplateTelemetrySourceAgentConfig, sources[tmpl.ID], "update sets the marker")
+	assert.Empty(t, sources[unmarked.ID])
+}

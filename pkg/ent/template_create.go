@@ -308,6 +308,20 @@ func (_c *TemplateCreate) SetNillableSourceURL(v *string) *TemplateCreate {
 	return _c
 }
 
+// SetTelemetrySource sets the "telemetry_source" field.
+func (_c *TemplateCreate) SetTelemetrySource(v string) *TemplateCreate {
+	_c.mutation.SetTelemetrySource(v)
+	return _c
+}
+
+// SetNillableTelemetrySource sets the "telemetry_source" field if the given value is not nil.
+func (_c *TemplateCreate) SetNillableTelemetrySource(v *string) *TemplateCreate {
+	if v != nil {
+		_c.SetTelemetrySource(*v)
+	}
+	return _c
+}
+
 // SetCreated sets the "created" field.
 func (_c *TemplateCreate) SetCreated(v time.Time) *TemplateCreate {
 	_c.mutation.SetCreated(v)
@@ -568,6 +582,10 @@ func (_c *TemplateCreate) createSpec() (*Template, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.SourceURL(); ok {
 		_spec.SetField(template.FieldSourceURL, field.TypeString, value)
 		_node.SourceURL = value
+	}
+	if value, ok := _c.mutation.TelemetrySource(); ok {
+		_spec.SetField(template.FieldTelemetrySource, field.TypeString, value)
+		_node.TelemetrySource = value
 	}
 	if value, ok := _c.mutation.Created(); ok {
 		_spec.SetField(template.FieldCreated, field.TypeTime, value)
@@ -992,6 +1010,24 @@ func (u *TemplateUpsert) UpdateSourceURL() *TemplateUpsert {
 // ClearSourceURL clears the value of the "source_url" field.
 func (u *TemplateUpsert) ClearSourceURL() *TemplateUpsert {
 	u.SetNull(template.FieldSourceURL)
+	return u
+}
+
+// SetTelemetrySource sets the "telemetry_source" field.
+func (u *TemplateUpsert) SetTelemetrySource(v string) *TemplateUpsert {
+	u.Set(template.FieldTelemetrySource, v)
+	return u
+}
+
+// UpdateTelemetrySource sets the "telemetry_source" field to the value that was provided on create.
+func (u *TemplateUpsert) UpdateTelemetrySource() *TemplateUpsert {
+	u.SetExcluded(template.FieldTelemetrySource)
+	return u
+}
+
+// ClearTelemetrySource clears the value of the "telemetry_source" field.
+func (u *TemplateUpsert) ClearTelemetrySource() *TemplateUpsert {
+	u.SetNull(template.FieldTelemetrySource)
 	return u
 }
 
@@ -1482,6 +1518,27 @@ func (u *TemplateUpsertOne) UpdateSourceURL() *TemplateUpsertOne {
 func (u *TemplateUpsertOne) ClearSourceURL() *TemplateUpsertOne {
 	return u.Update(func(s *TemplateUpsert) {
 		s.ClearSourceURL()
+	})
+}
+
+// SetTelemetrySource sets the "telemetry_source" field.
+func (u *TemplateUpsertOne) SetTelemetrySource(v string) *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetTelemetrySource(v)
+	})
+}
+
+// UpdateTelemetrySource sets the "telemetry_source" field to the value that was provided on create.
+func (u *TemplateUpsertOne) UpdateTelemetrySource() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateTelemetrySource()
+	})
+}
+
+// ClearTelemetrySource clears the value of the "telemetry_source" field.
+func (u *TemplateUpsertOne) ClearTelemetrySource() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearTelemetrySource()
 	})
 }
 
@@ -2141,6 +2198,27 @@ func (u *TemplateUpsertBulk) UpdateSourceURL() *TemplateUpsertBulk {
 func (u *TemplateUpsertBulk) ClearSourceURL() *TemplateUpsertBulk {
 	return u.Update(func(s *TemplateUpsert) {
 		s.ClearSourceURL()
+	})
+}
+
+// SetTelemetrySource sets the "telemetry_source" field.
+func (u *TemplateUpsertBulk) SetTelemetrySource(v string) *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetTelemetrySource(v)
+	})
+}
+
+// UpdateTelemetrySource sets the "telemetry_source" field to the value that was provided on create.
+func (u *TemplateUpsertBulk) UpdateTelemetrySource() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateTelemetrySource()
+	})
+}
+
+// ClearTelemetrySource clears the value of the "telemetry_source" field.
+func (u *TemplateUpsertBulk) ClearTelemetrySource() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearTelemetrySource()
 	})
 }
 

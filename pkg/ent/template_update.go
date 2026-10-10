@@ -438,6 +438,26 @@ func (_u *TemplateUpdate) ClearSourceURL() *TemplateUpdate {
 	return _u
 }
 
+// SetTelemetrySource sets the "telemetry_source" field.
+func (_u *TemplateUpdate) SetTelemetrySource(v string) *TemplateUpdate {
+	_u.mutation.SetTelemetrySource(v)
+	return _u
+}
+
+// SetNillableTelemetrySource sets the "telemetry_source" field if the given value is not nil.
+func (_u *TemplateUpdate) SetNillableTelemetrySource(v *string) *TemplateUpdate {
+	if v != nil {
+		_u.SetTelemetrySource(*v)
+	}
+	return _u
+}
+
+// ClearTelemetrySource clears the value of the "telemetry_source" field.
+func (_u *TemplateUpdate) ClearTelemetrySource() *TemplateUpdate {
+	_u.mutation.ClearTelemetrySource()
+	return _u
+}
+
 // SetUpdated sets the "updated" field.
 func (_u *TemplateUpdate) SetUpdated(v time.Time) *TemplateUpdate {
 	_u.mutation.SetUpdated(v)
@@ -633,6 +653,12 @@ func (_u *TemplateUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.SourceURLCleared() {
 		_spec.ClearField(template.FieldSourceURL, field.TypeString)
+	}
+	if value, ok := _u.mutation.TelemetrySource(); ok {
+		_spec.SetField(template.FieldTelemetrySource, field.TypeString, value)
+	}
+	if _u.mutation.TelemetrySourceCleared() {
+		_spec.ClearField(template.FieldTelemetrySource, field.TypeString)
 	}
 	if value, ok := _u.mutation.Updated(); ok {
 		_spec.SetField(template.FieldUpdated, field.TypeTime, value)
@@ -1067,6 +1093,26 @@ func (_u *TemplateUpdateOne) ClearSourceURL() *TemplateUpdateOne {
 	return _u
 }
 
+// SetTelemetrySource sets the "telemetry_source" field.
+func (_u *TemplateUpdateOne) SetTelemetrySource(v string) *TemplateUpdateOne {
+	_u.mutation.SetTelemetrySource(v)
+	return _u
+}
+
+// SetNillableTelemetrySource sets the "telemetry_source" field if the given value is not nil.
+func (_u *TemplateUpdateOne) SetNillableTelemetrySource(v *string) *TemplateUpdateOne {
+	if v != nil {
+		_u.SetTelemetrySource(*v)
+	}
+	return _u
+}
+
+// ClearTelemetrySource clears the value of the "telemetry_source" field.
+func (_u *TemplateUpdateOne) ClearTelemetrySource() *TemplateUpdateOne {
+	_u.mutation.ClearTelemetrySource()
+	return _u
+}
+
 // SetUpdated sets the "updated" field.
 func (_u *TemplateUpdateOne) SetUpdated(v time.Time) *TemplateUpdateOne {
 	_u.mutation.SetUpdated(v)
@@ -1292,6 +1338,12 @@ func (_u *TemplateUpdateOne) sqlSave(ctx context.Context) (_node *Template, err 
 	}
 	if _u.mutation.SourceURLCleared() {
 		_spec.ClearField(template.FieldSourceURL, field.TypeString)
+	}
+	if value, ok := _u.mutation.TelemetrySource(); ok {
+		_spec.SetField(template.FieldTelemetrySource, field.TypeString, value)
+	}
+	if _u.mutation.TelemetrySourceCleared() {
+		_spec.ClearField(template.FieldTelemetrySource, field.TypeString)
 	}
 	if value, ok := _u.mutation.Updated(); ok {
 		_spec.SetField(template.FieldUpdated, field.TypeTime, value)

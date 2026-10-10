@@ -160,6 +160,11 @@ func SourceURL(v string) predicate.Template {
 	return predicate.Template(sql.FieldEQ(FieldSourceURL, v))
 }
 
+// TelemetrySource applies equality check predicate on the "telemetry_source" field. It's identical to TelemetrySourceEQ.
+func TelemetrySource(v string) predicate.Template {
+	return predicate.Template(sql.FieldEQ(FieldTelemetrySource, v))
+}
+
 // Created applies equality check predicate on the "created" field. It's identical to CreatedEQ.
 func Created(v time.Time) predicate.Template {
 	return predicate.Template(sql.FieldEQ(FieldCreated, v))
@@ -1723,6 +1728,81 @@ func SourceURLEqualFold(v string) predicate.Template {
 // SourceURLContainsFold applies the ContainsFold predicate on the "source_url" field.
 func SourceURLContainsFold(v string) predicate.Template {
 	return predicate.Template(sql.FieldContainsFold(FieldSourceURL, v))
+}
+
+// TelemetrySourceEQ applies the EQ predicate on the "telemetry_source" field.
+func TelemetrySourceEQ(v string) predicate.Template {
+	return predicate.Template(sql.FieldEQ(FieldTelemetrySource, v))
+}
+
+// TelemetrySourceNEQ applies the NEQ predicate on the "telemetry_source" field.
+func TelemetrySourceNEQ(v string) predicate.Template {
+	return predicate.Template(sql.FieldNEQ(FieldTelemetrySource, v))
+}
+
+// TelemetrySourceIn applies the In predicate on the "telemetry_source" field.
+func TelemetrySourceIn(vs ...string) predicate.Template {
+	return predicate.Template(sql.FieldIn(FieldTelemetrySource, vs...))
+}
+
+// TelemetrySourceNotIn applies the NotIn predicate on the "telemetry_source" field.
+func TelemetrySourceNotIn(vs ...string) predicate.Template {
+	return predicate.Template(sql.FieldNotIn(FieldTelemetrySource, vs...))
+}
+
+// TelemetrySourceGT applies the GT predicate on the "telemetry_source" field.
+func TelemetrySourceGT(v string) predicate.Template {
+	return predicate.Template(sql.FieldGT(FieldTelemetrySource, v))
+}
+
+// TelemetrySourceGTE applies the GTE predicate on the "telemetry_source" field.
+func TelemetrySourceGTE(v string) predicate.Template {
+	return predicate.Template(sql.FieldGTE(FieldTelemetrySource, v))
+}
+
+// TelemetrySourceLT applies the LT predicate on the "telemetry_source" field.
+func TelemetrySourceLT(v string) predicate.Template {
+	return predicate.Template(sql.FieldLT(FieldTelemetrySource, v))
+}
+
+// TelemetrySourceLTE applies the LTE predicate on the "telemetry_source" field.
+func TelemetrySourceLTE(v string) predicate.Template {
+	return predicate.Template(sql.FieldLTE(FieldTelemetrySource, v))
+}
+
+// TelemetrySourceContains applies the Contains predicate on the "telemetry_source" field.
+func TelemetrySourceContains(v string) predicate.Template {
+	return predicate.Template(sql.FieldContains(FieldTelemetrySource, v))
+}
+
+// TelemetrySourceHasPrefix applies the HasPrefix predicate on the "telemetry_source" field.
+func TelemetrySourceHasPrefix(v string) predicate.Template {
+	return predicate.Template(sql.FieldHasPrefix(FieldTelemetrySource, v))
+}
+
+// TelemetrySourceHasSuffix applies the HasSuffix predicate on the "telemetry_source" field.
+func TelemetrySourceHasSuffix(v string) predicate.Template {
+	return predicate.Template(sql.FieldHasSuffix(FieldTelemetrySource, v))
+}
+
+// TelemetrySourceIsNil applies the IsNil predicate on the "telemetry_source" field.
+func TelemetrySourceIsNil() predicate.Template {
+	return predicate.Template(sql.FieldIsNull(FieldTelemetrySource))
+}
+
+// TelemetrySourceNotNil applies the NotNil predicate on the "telemetry_source" field.
+func TelemetrySourceNotNil() predicate.Template {
+	return predicate.Template(sql.FieldNotNull(FieldTelemetrySource))
+}
+
+// TelemetrySourceEqualFold applies the EqualFold predicate on the "telemetry_source" field.
+func TelemetrySourceEqualFold(v string) predicate.Template {
+	return predicate.Template(sql.FieldEqualFold(FieldTelemetrySource, v))
+}
+
+// TelemetrySourceContainsFold applies the ContainsFold predicate on the "telemetry_source" field.
+func TelemetrySourceContainsFold(v string) predicate.Template {
+	return predicate.Template(sql.FieldContainsFold(FieldTelemetrySource, v))
 }
 
 // CreatedEQ applies the EQ predicate on the "created" field.

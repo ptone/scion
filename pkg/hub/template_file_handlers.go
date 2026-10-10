@@ -147,24 +147,22 @@ func agentConfigTelemetry(data []byte) (telemetry *api.TelemetryConfig, ok bool)
 	return raw.Telemetry, true
 }
 
-// storedAgentConfigTelemetry reads the telemetry block of the template's
-// current scion-agent.yaml in storage, before an upload replaces it. It
-// returns nil when the file is missing or unreadable.
-func storedAgentConfigTelemetry(ctx context.Context, stor storage.Storage, template *store.Template) *api.TelemetryConfig {
+// readStoredAgentConfig reads the template's scion-agent.yaml from storage.
+// ok is false when the file is missing, unreadable or too large.
+func readStoredAgentConfig(ctx context.Context, stor storage.Storage, template *store.Template) (data []byte, ok bool) {
 	if template.StoragePath == "" {
-		return nil
+		return nil, false
 	}
 	reader, _, err := stor.Download(ctx, template.StoragePath+"/"+scionAgentConfigFile)
 	if err != nil || reader == nil {
-		return nil
+		return nil, false
 	}
 	defer func() { _ = reader.Close() }()
-	data, err := io.ReadAll(io.LimitReader(reader, maxTemplateFileSize+1))
+	data, err = io.ReadAll(io.LimitReader(reader, maxTemplateFileSize+1))
 	if err != nil || int64(len(data)) > maxTemplateFileSize {
-		return nil
+		return nil, false
 	}
-	telemetry, _ := agentConfigTelemetry(data)
-	return telemetry
+	return data, true
 }
 
 // sameTelemetry compares two telemetry configs by their JSON form, the form
@@ -178,42 +176,97 @@ func sameTelemetry(a, b *api.TelemetryConfig) bool {
 	return errA == nil && errB == nil && bytes.Equal(ja, jb)
 }
 
-// applyAgentConfigUpload updates the template fields derived from a newly
-// uploaded scion-agent.yaml: the harness type and default harness-config,
-// and Config.Telemetry (ptone/scion#2093). prevTelemetry is the telemetry of
-// the scion-agent.yaml being replaced (storedAgentConfigTelemetry).
+// applyAgentConfigTelemetry applies the telemetry block of the template's
+// scion-agent.yaml (next; nil when the file has none or is absent) to
+// Config.Telemetry (ptone/scion#2093, ptone/scion#4125).
 //
 // Telemetry from the file only fills an unset Config.Telemetry; a value set
-// through the JSON API wins. The model records no provenance, so the stored
-// value counts as file-sourced when it equals the replaced file's telemetry.
-// File-sourced telemetry follows the file: it is replaced when the new file
-// has a telemetry block and cleared when the new file has none.
-//
-// This covers the file-handler upload paths only. Template finalize (the CLI
-// push path) does not apply it yet, and finalize cannot read the replaced
-// file because it is already overwritten; see ptone/scion#4125.
-func applyAgentConfigUpload(template *store.Template, data []byte, prevTelemetry *api.TelemetryConfig) {
-	cfgInfo := detectHarnessFromContent(data, template.Name)
-	template.Harness = cfgInfo.Harness
-	template.DefaultHarnessConfig = cfgInfo.DefaultHarnessConfig
-
-	next, ok := agentConfigTelemetry(data)
-	if !ok {
-		return
-	}
+// through the API wins. File-sourced telemetry, recorded by TelemetrySource,
+// follows the file: it is replaced when the file has a telemetry block and
+// cleared when it has none.
+func applyAgentConfigTelemetry(template *store.Template, next *api.TelemetryConfig) {
 	var current *api.TelemetryConfig
 	if template.Config != nil {
 		current = template.Config.Telemetry
 	}
-	fileSourced := current != nil && sameTelemetry(current, prevTelemetry)
+	if current == nil {
+		template.TelemetrySource = ""
+	}
+	fileSourced := current != nil && template.TelemetrySource == store.TemplateTelemetrySourceAgentConfig
 	switch {
 	case next != nil && (current == nil || fileSourced):
 		if template.Config == nil {
 			template.Config = &store.TemplateConfig{}
 		}
 		template.Config.Telemetry = next
+		template.TelemetrySource = store.TemplateTelemetrySourceAgentConfig
 	case next == nil && fileSourced:
 		template.Config.Telemetry = nil
+		template.TelemetrySource = ""
+	}
+}
+
+// applyAgentConfigUpload updates the template fields derived from a newly
+// uploaded scion-agent.yaml: the harness type and default harness-config,
+// and Config.Telemetry (applyAgentConfigTelemetry). Content that does not
+// parse leaves the stored telemetry alone.
+func applyAgentConfigUpload(template *store.Template, data []byte) {
+	cfgInfo := detectHarnessFromContent(data, template.Name)
+	template.Harness = cfgInfo.Harness
+	template.DefaultHarnessConfig = cfgInfo.DefaultHarnessConfig
+
+	if next, ok := agentConfigTelemetry(data); ok {
+		applyAgentConfigTelemetry(template, next)
+	}
+}
+
+// applyFinalizedAgentConfig applies the telemetry rules of
+// applyAgentConfigTelemetry on template finalize, the CLI push path
+// (ptone/scion#4125). The files are already in storage by then, so the
+// stored scion-agent.yaml is the new one. A manifest without
+// scion-agent.yaml counts as a file with no telemetry block. When the file
+// cannot be read or parsed the stored telemetry is left alone.
+func applyFinalizedAgentConfig(ctx context.Context, stor storage.Storage, template *store.Template) {
+	listed := false
+	for _, f := range template.Files {
+		if f.Path == scionAgentConfigFile {
+			listed = true
+			break
+		}
+	}
+	if !listed {
+		applyAgentConfigTelemetry(template, nil)
+		return
+	}
+	data, ok := readStoredAgentConfig(ctx, stor, template)
+	if !ok {
+		slog.Warn("template finalize: could not read scion-agent.yaml; telemetry left unchanged", "template_id", template.ID)
+		return
+	}
+	next, ok := agentConfigTelemetry(data)
+	if !ok {
+		return
+	}
+	applyAgentConfigTelemetry(template, next)
+}
+
+// preserveTelemetrySource sets the telemetry source of a template replaced
+// through the API (PUT). The marker is never taken from the request body. A
+// body that repeats the existing telemetry unchanged keeps the existing
+// marker, so saving a form that echoes the config does not turn file-sourced
+// telemetry into API-set telemetry; any other telemetry in the body is
+// API-set.
+func preserveTelemetrySource(existing, updated *store.Template) {
+	var before, after *api.TelemetryConfig
+	if existing.Config != nil {
+		before = existing.Config.Telemetry
+	}
+	if updated.Config != nil {
+		after = updated.Config.Telemetry
+	}
+	updated.TelemetrySource = ""
+	if after != nil && sameTelemetry(before, after) {
+		updated.TelemetrySource = existing.TelemetrySource
 	}
 }
 
@@ -444,11 +497,6 @@ func (s *Server) handleTemplateFileWrite(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
-	var prevTelemetry *api.TelemetryConfig
-	if filePath == scionAgentConfigFile {
-		prevTelemetry = storedAgentConfigTelemetry(ctx, stor, template)
-	}
-
 	// Upload content to storage
 	objectPath := template.StoragePath + "/" + filePath
 	content := []byte(req.Content)
@@ -489,7 +537,7 @@ func (s *Server) handleTemplateFileWrite(w http.ResponseWriter, r *http.Request,
 
 	// Re-detect harness type and default harness config when the config file changes
 	if filePath == scionAgentConfigFile {
-		applyAgentConfigUpload(template, content, prevTelemetry)
+		applyAgentConfigUpload(template, content)
 	}
 
 	if err := s.store.UpdateTemplate(ctx, template); err != nil {
@@ -521,11 +569,6 @@ func (s *Server) handleTemplateFileWriteRaw(w http.ResponseWriter, r *http.Reque
 	if int64(len(data)) > maxUploadFileSize {
 		BadRequest(w, fmt.Sprintf("File %q exceeds 50MB limit", filePath))
 		return
-	}
-
-	var prevTelemetry *api.TelemetryConfig
-	if filePath == scionAgentConfigFile {
-		prevTelemetry = storedAgentConfigTelemetry(ctx, stor, template)
 	}
 
 	// Upload to storage
@@ -566,7 +609,7 @@ func (s *Server) handleTemplateFileWriteRaw(w http.ResponseWriter, r *http.Reque
 
 	// Re-detect harness type and default harness config when the config file changes
 	if filePath == scionAgentConfigFile {
-		applyAgentConfigUpload(template, data, prevTelemetry)
+		applyAgentConfigUpload(template, data)
 	}
 
 	if err := s.store.UpdateTemplate(ctx, template); err != nil {
@@ -633,11 +676,6 @@ func (s *Server) handleTemplateFileUpload(w http.ResponseWriter, r *http.Request
 				return
 			}
 
-			var prevTelemetry *api.TelemetryConfig
-			if relPath == scionAgentConfigFile {
-				prevTelemetry = storedAgentConfigTelemetry(ctx, stor, template)
-			}
-
 			// Upload to storage
 			objectPath := template.StoragePath + "/" + relPath
 			_, err = stor.Upload(ctx, objectPath, bytes.NewReader(data), storage.UploadOptions{
@@ -673,7 +711,7 @@ func (s *Server) handleTemplateFileUpload(w http.ResponseWriter, r *http.Request
 
 			// Re-detect harness type and default harness config when the config file changes
 			if relPath == scionAgentConfigFile {
-				applyAgentConfigUpload(template, data, prevTelemetry)
+				applyAgentConfigUpload(template, data)
 			}
 
 			uploaded = append(uploaded, TemplateFileEntry{
@@ -738,6 +776,8 @@ func (s *Server) handleTemplateFileDelete(w http.ResponseWriter, r *http.Request
 	// Re-detect harness type when the config file is removed
 	if filePath == scionAgentConfigFile {
 		template.Harness = inferHarnessFromName(template.Name)
+		// Removing the file removes its telemetry block too.
+		applyAgentConfigTelemetry(template, nil)
 	}
 
 	if err := s.store.UpdateTemplate(ctx, template); err != nil {

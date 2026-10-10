@@ -1166,6 +1166,12 @@ type Template struct {
 	DefaultHarnessConfig string          `json:"defaultHarnessConfig,omitempty"` // default_harness_config name from template config (e.g. "claude-web")
 	Image                string          `json:"image"`                          // Default container image
 	Config               *TemplateConfig `json:"config,omitempty"`
+	// TelemetrySource records where Config.Telemetry came from:
+	// TemplateTelemetrySourceAgentConfig when it was filled from the
+	// template's scion-agent.yaml, empty when it was set through the API (or
+	// is unset). Server-managed: the API reports it but never takes it from a
+	// request body (ptone/scion#4125).
+	TelemetrySource string `json:"telemetrySource,omitempty"`
 
 	// Content tracking
 	ContentHash string `json:"contentHash,omitempty"` // SHA-256 hash of template contents
@@ -1198,6 +1204,10 @@ type Template struct {
 	Created time.Time `json:"created"`
 	Updated time.Time `json:"updated"`
 }
+
+// TemplateTelemetrySourceAgentConfig marks Template.Config.Telemetry as
+// filled from the template's scion-agent.yaml.
+const TemplateTelemetrySourceAgentConfig = "agent-config"
 
 // TemplateFile represents a file within a template.
 type TemplateFile struct {

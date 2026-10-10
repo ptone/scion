@@ -555,6 +555,7 @@ func (s *Server) updateTemplateV2(w http.ResponseWriter, r *http.Request, id str
 	template.Status = existing.Status
 	template.BaseTemplate = existing.BaseTemplate
 	template.SourceURL = existing.SourceURL
+	preserveTelemetrySource(existing, &template)
 	// Group 3 — audit trail: derived from the authenticated caller,
 	// not trusted from the request body. The deref is safe: authorize
 	// (line 497) returns false on nil identity, so reaching here
@@ -803,6 +804,7 @@ func (s *Server) handleTemplateFinalize(w http.ResponseWriter, r *http.Request, 
 	template.Files = req.Manifest.Files
 	template.ContentHash = contentHash
 	template.Status = store.TemplateStatusActive
+	applyFinalizedAgentConfig(ctx, stor, template)
 
 	if err := s.store.UpdateTemplate(ctx, template); err != nil {
 		writeErrorFromErr(w, err, "")
@@ -1030,6 +1032,9 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		ProjectID:    scopeID,
 		BaseTemplate: source.ID, // Track the source template
 		Status:       store.TemplateStatusPending,
+		// The clone copies the source files, so file-sourced telemetry
+		// stays file-sourced.
+		TelemetrySource: source.TelemetrySource,
 	}
 
 	// For user-scoped clones, set the owner from the authenticated user

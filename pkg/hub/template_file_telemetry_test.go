@@ -31,7 +31,8 @@ import (
 // Tests for ptone/scion#2093: a template upload reads the telemetry block of
 // scion-agent.yaml into Config.Telemetry when it is unset, a value set
 // through the JSON API wins, and telemetry that came from a previous upload
-// is cleared when a later scion-agent.yaml drops it.
+// is cleared when a later scion-agent.yaml drops it. Template.TelemetrySource
+// records which telemetry came from the file (ptone/scion#4125).
 
 const (
 	yamlTelemetryOff = "harness_config: claude\ntelemetry:\n  enabled: false\n  cloud:\n    endpoint: otel.example.com:4317\n"
@@ -86,6 +87,15 @@ func storedTemplateTelemetry(t *testing.T, s store.Store, id string) *api.Teleme
 	return got.Config.Telemetry
 }
 
+func storedTelemetrySource(t *testing.T, s store.Store, id string) string {
+	t.Helper()
+	got, err := s.GetTemplate(context.Background(), id)
+	if err != nil {
+		t.Fatalf("get template: %v", err)
+	}
+	return got.TelemetrySource
+}
+
 // setJSONTelemetry stores telemetry on the template the way the JSON API
 // does (a direct Config update, independent of any file).
 func setJSONTelemetry(t *testing.T, s store.Store, tmpl *store.Template, enabled bool) {
@@ -95,6 +105,7 @@ func setJSONTelemetry(t *testing.T, s store.Store, tmpl *store.Template, enabled
 		t.Fatal(err)
 	}
 	got.Config = &store.TemplateConfig{Model: "opus", Telemetry: &api.TelemetryConfig{Enabled: &enabled}}
+	got.TelemetrySource = ""
 	if err := s.UpdateTemplate(context.Background(), got); err != nil {
 		t.Fatal(err)
 	}
@@ -114,6 +125,9 @@ func TestTemplateUpload_YAMLFillsUnsetTelemetry(t *testing.T) {
 			}
 			if got.Cloud == nil || got.Cloud.Endpoint != "otel.example.com:4317" {
 				t.Errorf("expected cloud endpoint from the YAML, got %+v", got.Cloud)
+			}
+			if src := storedTelemetrySource(t, s, tmpl.ID); src != store.TemplateTelemetrySourceAgentConfig {
+				t.Errorf("expected the marker %q, got %q", store.TemplateTelemetrySourceAgentConfig, src)
 			}
 		})
 	}
@@ -186,11 +200,9 @@ func TestTemplateUpload_LaterUploadKeepsJSONTelemetry(t *testing.T) {
 	}
 }
 
-// Known limit, pinned: a JSON-set value equal to the replaced file's
-// telemetry block cannot be told apart from a file-sourced one, so it
-// follows the file and is cleared when the new file drops the block. Only
-// the file-handler upload paths are covered; finalize is ptone/scion#4125.
-func TestTemplateUpload_JSONTelemetryEqualToFileFollowsFile(t *testing.T) {
+// A JSON-set value that happens to equal the replaced file's telemetry block
+// is still JSON-set: it is kept when the new file drops the block.
+func TestTemplateUpload_JSONTelemetryEqualToFileKept(t *testing.T) {
 	for name, upload := range templateUploadPaths {
 		t.Run(name, func(t *testing.T) {
 			srv, s, stor := testTemplateFileServer(t)
@@ -200,20 +212,70 @@ func TestTemplateUpload_JSONTelemetryEqualToFileFollowsFile(t *testing.T) {
 
 			upload(t, srv, tmpl.ID, yamlNoTelemetry)
 
-			if got := storedTemplateTelemetry(t, s, tmpl.ID); got != nil {
-				t.Errorf("expected the value equal to the replaced file to be cleared, got %+v", got)
+			if got := storedTemplateTelemetry(t, s, tmpl.ID); got == nil || got.Enabled == nil || !*got.Enabled {
+				t.Errorf("expected the JSON-set telemetry to survive, got %+v", got)
 			}
 		})
 	}
+}
+
+// Deleting scion-agent.yaml clears telemetry that came from it and keeps
+// JSON-set telemetry.
+func TestTemplateFileDelete_AgentConfigTelemetry(t *testing.T) {
+	deleteConfig := func(t *testing.T, srv *Server, tmplID string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodDelete, "/api/v1/templates/"+tmplID+"/files/scion-agent.yaml", nil)
+		req.Header.Set("Authorization", "Bearer "+testDevToken)
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+		if w.Code != http.StatusNoContent {
+			t.Fatalf("delete: expected 204, got %d: %s", w.Code, w.Body.String())
+		}
+	}
+
+	t.Run("file-sourced is cleared", func(t *testing.T) {
+		srv, s, stor := testTemplateFileServer(t)
+		tmpl := createTestTemplate(t, s, stor, map[string]string{"scion-agent.yaml": yamlNoTelemetry})
+		templateUploadPaths["raw write"](t, srv, tmpl.ID, yamlTelemetryOff)
+
+		deleteConfig(t, srv, tmpl.ID)
+
+		full, err := s.GetTemplate(context.Background(), tmpl.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if full.Config != nil && full.Config.Telemetry != nil {
+			t.Errorf("expected file-sourced telemetry to be cleared, got %+v", full.Config.Telemetry)
+		}
+		if full.TelemetrySource != "" {
+			t.Errorf("expected the marker to be cleared, got %q", full.TelemetrySource)
+		}
+	})
+
+	t.Run("JSON-set is kept", func(t *testing.T) {
+		srv, s, stor := testTemplateFileServer(t)
+		tmpl := createTestTemplate(t, s, stor, map[string]string{"scion-agent.yaml": yamlTelemetryOn})
+		setJSONTelemetry(t, s, tmpl, true)
+
+		deleteConfig(t, srv, tmpl.ID)
+
+		if got := storedTemplateTelemetry(t, s, tmpl.ID); got == nil || got.Enabled == nil || !*got.Enabled {
+			t.Errorf("expected the JSON-set telemetry to survive, got %+v", got)
+		}
+	})
 }
 
 // Content that does not parse leaves the stored telemetry alone.
 func TestApplyAgentConfigUpload_UnparseableKeepsTelemetry(t *testing.T) {
 	enabled := false
 	prev := &api.TelemetryConfig{Enabled: &enabled}
-	tmpl := &store.Template{Name: "t", Config: &store.TemplateConfig{Telemetry: prev}}
-	applyAgentConfigUpload(tmpl, []byte("telemetry: [unclosed"), prev)
-	if tmpl.Config.Telemetry != prev {
+	tmpl := &store.Template{
+		Name:            "t",
+		Config:          &store.TemplateConfig{Telemetry: prev},
+		TelemetrySource: store.TemplateTelemetrySourceAgentConfig,
+	}
+	applyAgentConfigUpload(tmpl, []byte("telemetry: [unclosed"))
+	if tmpl.Config.Telemetry != prev || tmpl.TelemetrySource != store.TemplateTelemetrySourceAgentConfig {
 		t.Errorf("expected telemetry to be kept, got %+v", tmpl.Config.Telemetry)
 	}
 }

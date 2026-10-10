@@ -59,6 +59,8 @@ const (
 	FieldUpdatedBy = "updated_by"
 	// FieldSourceURL holds the string denoting the source_url field in the database.
 	FieldSourceURL = "source_url"
+	// FieldTelemetrySource holds the string denoting the telemetry_source field in the database.
+	FieldTelemetrySource = "telemetry_source"
 	// FieldCreated holds the string denoting the created field in the database.
 	FieldCreated = "created"
 	// FieldUpdated holds the string denoting the updated field in the database.
@@ -92,6 +94,7 @@ var Columns = []string{
 	FieldCreatedBy,
 	FieldUpdatedBy,
 	FieldSourceURL,
+	FieldTelemetrySource,
 	FieldCreated,
 	FieldUpdated,
 }
@@ -266,6 +269,11 @@ func ByUpdatedBy(opts ...sql.OrderTermOption) OrderOption {
 // BySourceURL orders the results by the source_url field.
 func BySourceURL(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldSourceURL, opts...).ToFunc()
+}
+
+// ByTelemetrySource orders the results by the telemetry_source field.
+func ByTelemetrySource(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldTelemetrySource, opts...).ToFunc()
 }
 
 // ByCreated orders the results by the created field.
