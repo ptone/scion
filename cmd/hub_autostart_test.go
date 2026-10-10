@@ -211,3 +211,26 @@ func TestRunHubLink_NoEndpointAutoStarts(t *testing.T) {
 	assert.True(t, strings.HasPrefix(server.URL, "http://127.0.0.1:"))
 	assert.True(t, isLocalWorkstationEndpoint(server.URL), "the started hub is a local workstation endpoint")
 }
+
+// TestEnsureLocalServer_NoImageRegistryFailsBeforeSpawning checks the
+// preflight: with no image registry, ensureLocalServer returns the broker's
+// registry error and starts nothing. (Were it to spawn, os.Executable()
+// would be this test binary.)
+func TestEnsureLocalServer_NoImageRegistryFailsBeforeSpawning(t *testing.T) {
+	t.Setenv("SCION_IMAGE_REGISTRY", "")
+	t.Setenv("SCION_MAINTENANCE_IMAGE_REGISTRY", "")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(home)
+	// Guard: only call the real function when the preflight will fail.
+	require.Error(t, requireImageRegistryForBroker(), "test environment unexpectedly has an image registry")
+
+	endpoint, err := ensureLocalServer()
+	require.Error(t, err)
+	assert.Empty(t, endpoint)
+	assert.Contains(t, err.Error(), "cannot start the local scion server")
+	assert.Contains(t, err.Error(), "image_registry is not configured")
+	assert.Contains(t, err.Error(), "SCION_IMAGE_REGISTRY")
+	_, statErr := os.Stat(filepath.Join(home, ".scion", "server.pid"))
+	assert.True(t, os.IsNotExist(statErr), "no daemon PID file may be written")
+}

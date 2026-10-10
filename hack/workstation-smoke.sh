@@ -23,8 +23,8 @@
 #   3. scion hub status            reports the project as linked
 #   4. scion list                  returns an empty list through the hub
 #   5. scion server stop           stops the server
-# Also checks that SCION_HUB_AUTO_START=0 makes 'hub link' fail without
-# starting anything. No container runtime is needed.
+# Also checks that SCION_HUB_AUTO_START=0, and a missing image registry, make
+# 'hub link' fail without starting anything. No container runtime is needed.
 #
 # Usage: hack/workstation-smoke.sh [path-to-scion-binary]
 # Without an argument it builds ./cmd/scion with the default build tags
@@ -107,6 +107,16 @@ fi
 grep -q "this command needs a hub" "$WORK/off.out" || { cat "$WORK/off.out" >&2; fail "missing not-configured error"; }
 if "$SCION" server status 2>/dev/null | grep -qi "running" && ! "$SCION" server status 2>/dev/null | grep -qi "not running"; then
   fail "a server is running after hub link with auto-start off"
+fi
+
+log "with no image registry, scion hub link fails before starting anything"
+if env -u SCION_IMAGE_REGISTRY "$SCION" "${TARGET[@]}" -y hub link >"$WORK/noreg.out" 2>&1; then
+  cat "$WORK/noreg.out" >&2
+  fail "hub link succeeded with no image registry"
+fi
+grep -q "image_registry is not configured" "$WORK/noreg.out" || { cat "$WORK/noreg.out" >&2; fail "missing image registry error"; }
+if grep -q "Starting server as daemon" "$WORK/noreg.out" || [ -e "$HOME/.scion/server.pid" ]; then
+  cat "$WORK/noreg.out" >&2; fail "hub link started a server with no image registry"
 fi
 
 log "scion hub link (auto-starts the local server)"

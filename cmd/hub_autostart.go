@@ -109,9 +109,19 @@ var ensureLocalServerFn = ensureLocalServer
 // ensureLocalServer starts the local workstation server as a daemon by
 // running `<this binary> server start`, waits until it answers, and returns
 // the hub endpoint that the server start wrote to the global settings.
-// It does not retry or kill anything: errors from the server start (a port
-// conflict, a stale PID file) are shown as the server reports them.
+// It first checks that an image registry is configured, and fails without
+// starting anything if not. It does not retry or kill anything: errors from
+// the server start (a port conflict, a stale PID file) are shown as the
+// server reports them.
 func ensureLocalServer() (string, error) {
+	// The workstation server's co-located broker refuses to start without
+	// an image registry. Check it first, with the same sources and message
+	// as the broker, so that nothing is spawned and no daemon is left
+	// behind when it is missing.
+	if err := requireImageRegistryForBroker(); err != nil {
+		return "", fmt.Errorf("cannot start the local scion server: %w", err)
+	}
+
 	executable, err := os.Executable()
 	if err != nil {
 		return "", fmt.Errorf("failed to find the scion executable: %w", err)
