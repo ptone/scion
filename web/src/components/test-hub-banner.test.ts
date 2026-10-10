@@ -64,6 +64,14 @@ const ADMIN: TestInfraStatus = { testIdentities: true, testHubAdmin: true, testS
 const SUPER: TestInfraStatus = { testIdentities: true, testHubAdmin: true, testSuperAdmin: true };
 
 /** Stubs fetch: the status endpoint answers `status`, everything else `{}`. */
+
+/** The URL a fetch mock was called with, whatever form it took. */
+function urlOf(input: unknown): string {
+  if (typeof input === 'string') return input;
+  if (input instanceof URL) return input.href;
+  if (input instanceof Request) return input.url;
+  return '';
+}
 function stubHub(status: TestInfraStatus): ReturnType<typeof vi.fn> {
   const fetchMock = vi.fn((input: RequestInfo | URL) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
@@ -190,7 +198,7 @@ describe('app shell', () => {
     expect(main.firstElementChild).toBe(banner);
     expect(banner.nextElementSibling?.tagName.toLowerCase()).toBe('scion-header');
     expect(
-      fetchMock.mock.calls.filter(([u]) => String(u).endsWith(TEST_INFRA_STATUS_URL))
+      fetchMock.mock.calls.filter(([u]) => urlOf(u).endsWith(TEST_INFRA_STATUS_URL))
     ).toHaveLength(1);
   });
 
@@ -211,7 +219,7 @@ describe('app shell', () => {
     const fetchMock = stubHub(OFF);
     const shell = await mountShell();
     await vi.waitFor(() =>
-      expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith(TEST_INFRA_STATUS_URL))).toBe(
+      expect(fetchMock.mock.calls.some(([u]) => urlOf(u).endsWith(TEST_INFRA_STATUS_URL))).toBe(
         true
       )
     );
@@ -298,7 +306,7 @@ describe('app shell', () => {
 
       const shell = await mountShell();
       await vi.waitFor(() =>
-        expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith(TEST_INFRA_STATUS_URL))).toBe(
+        expect(fetchMock.mock.calls.some(([u]) => urlOf(u).endsWith(TEST_INFRA_STATUS_URL))).toBe(
           true
         )
       );
@@ -351,7 +359,7 @@ describe('chat and profile shells', () => {
     document.body.appendChild(shell);
     await shell.updateComplete;
     await vi.waitFor(() =>
-      expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith(TEST_INFRA_STATUS_URL))).toBe(
+      expect(fetchMock.mock.calls.some(([u]) => urlOf(u).endsWith(TEST_INFRA_STATUS_URL))).toBe(
         true
       )
     );
@@ -396,7 +404,7 @@ describe('invite and onboarding pages', () => {
       document.body.appendChild(page);
       await page.updateComplete;
       await vi.waitFor(() =>
-        expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith(TEST_INFRA_STATUS_URL))).toBe(
+        expect(fetchMock.mock.calls.some(([u]) => urlOf(u).endsWith(TEST_INFRA_STATUS_URL))).toBe(
           true
         )
       );
@@ -448,7 +456,7 @@ describe('login page', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
     const statusCalls = (): number =>
-      fetchMock.mock.calls.filter(([u]) => String(u).endsWith(TEST_INFRA_STATUS_URL)).length;
+      fetchMock.mock.calls.filter(([u]) => urlOf(u).endsWith(TEST_INFRA_STATUS_URL)).length;
 
     const page = await mountLogin();
     await vi.waitFor(() => expect(statusCalls()).toBeGreaterThan(0));
@@ -465,7 +473,7 @@ describe('login page', () => {
     const fetchMock = stubHub(OFF);
     const page = await mountLogin();
     await vi.waitFor(() =>
-      expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith(TEST_INFRA_STATUS_URL))).toBe(
+      expect(fetchMock.mock.calls.some(([u]) => urlOf(u).endsWith(TEST_INFRA_STATUS_URL))).toBe(
         true
       )
     );

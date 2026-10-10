@@ -54,10 +54,7 @@ type TestInfraStatusResponse struct {
 // test-hub banner on every page, the login page included, for every user.
 // On a hub without test identities it returns all false.
 func (s *Server) handleTestInfraStatus(w http.ResponseWriter, _ *http.Request) {
-	g := s.testInfraGates()
-	writeJSON(w, http.StatusOK, TestInfraStatusResponse{
-		TestIdentities: g.TestIdentities,
-		TestHubAdmin:   g.TestHubAdmin,
-		TestSuperAdmin: g.TestSuperAdmin,
-	})
+	// A conversion, so the two types must keep the same fields in the
+	// same order; a field added to either one stops this compiling.
+	writeJSON(w, http.StatusOK, TestInfraStatusResponse(s.testInfraGates()))
 }

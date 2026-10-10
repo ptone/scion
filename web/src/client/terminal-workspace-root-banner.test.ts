@@ -69,6 +69,14 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+
+/** The URL a fetch mock was called with, whatever form it took. */
+function urlOf(input: unknown): string {
+  if (typeof input === 'string') return input;
+  if (input instanceof URL) return input.href;
+  if (input instanceof Request) return input.url;
+  return '';
+}
 function stubStatus(body: unknown): ReturnType<typeof vi.fn> {
   const fetchMock = vi.fn((input: RequestInfo | URL) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
@@ -120,7 +128,7 @@ describe('terminal workspace test-hub banner', () => {
     root = new WorkspaceRoot(null);
     document.body.appendChild(root.element);
     await vi.waitFor(() =>
-      expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith(TEST_INFRA_STATUS_URL))).toBe(
+      expect(fetchMock.mock.calls.some(([u]) => urlOf(u).endsWith(TEST_INFRA_STATUS_URL))).toBe(
         true
       )
     );
