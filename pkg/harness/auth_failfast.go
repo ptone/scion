@@ -261,7 +261,8 @@ func stagedSatisfiesType(t api.HarnessAuthTypeMetadata, staged stagedAuthCandida
 
 // homeRel resolves a configured container path to a home-relative path with
 // a leading "/" ("/" is the home itself). ok is false for a path outside the
-// home. failOpen is true for a path it cannot resolve: one with variables
+// home. failOpen is true for a path it cannot resolve: a "~/" path that
+// climbs out of the home with "..", one with variables
 // (the runtime expands those against the broker's environment, not the
 // container's, so they are not resolved here), a relative or empty one, or
 // an absolute one when the container home is unknown.
@@ -273,6 +274,11 @@ func homeRel(p, containerHome string) (rel string, ok, failOpen bool) {
 	case p == "~":
 		return "/", true, false
 	case strings.HasPrefix(p, "~/"):
+		// The runtime joins the rest onto the home, so "~/../<user>/x" can
+		// land back inside it; resolving that needs the user, so fail open.
+		if rest := path.Clean(p[2:]); rest == ".." || strings.HasPrefix(rest, "../") {
+			return "", false, true
+		}
 		return path.Clean(p[1:]), true, false
 	case strings.HasPrefix(p, "/"):
 		if containerHome == "" {

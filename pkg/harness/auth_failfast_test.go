@@ -209,6 +209,10 @@ func TestMountCoversTarget(t *testing.T) {
 		{"${HOME}/.example", "/home/scion", true},
 		{"relative/dir", "/home/scion", true},
 		{"", "/home/scion", true},
+		{"~/../scion/.example", "/home/scion", true}, // climbs out of the home: fail open
+		{"~/../other/.example-other", "/home/scion", true},
+		{"~/.example-other/../.example", "/home/scion", true},
+		{"~/.example/../.example-other", "/home/scion", false},
 	}
 	for _, tc := range cases {
 		if got := mountCoversTarget(tc.mount, target, tc.home); got != tc.want {
@@ -273,6 +277,10 @@ func TestFileTargetIs(t *testing.T) {
 		{"/home/scion/.example/auth.json", "", true}, // home unknown: fail open
 		{"$HOME/.example/auth.json", "/home/scion", true},
 		{"", "/home/scion", true},
+		{"~/../scion/.example/auth.json", "/home/scion", true}, // climbs out of the home: fail open
+		{"~/..", "/home/scion", true},
+		{"~/.example/../.example/auth.json", "/home/scion", true}, // stays inside the home
+		{"~/.example/../other.json", "/home/scion", false},
 	}
 	for _, tc := range cases {
 		if got := fileTargetIs(tc.file, target, tc.home); got != tc.want {
