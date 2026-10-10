@@ -43,21 +43,31 @@ func TestDispatch_FlatProfileFreeAssignSkipsHubPrecheck(t *testing.T) {
 			})
 			// The flat row is created with its runtime target; the
 			// target is fixed at creation and never updated.
+			// It also brings a complete, fresh Kubernetes profile report
+			// (and default profile) that omits the GSA: a profile dispatch
+			// naming it would be refused, a profile-free one is not.
 			broker := &store.RuntimeBroker{
 				ID: tid("flat-k8s"), Name: "flat-k8s", Slug: "flat-k8s", Endpoint: "http://localhost:9801",
-				Status:        store.BrokerStatusOnline,
-				RuntimeTarget: &api.RuntimeTargetDescriptor{ID: "flat-k8s-target", Type: "kubernetes"},
+				Status:         store.BrokerStatusOnline,
+				Profiles:       []store.BrokerProfile{precheckProfile(time.Now())},
+				DefaultProfile: "gke",
+				RuntimeTarget:  &api.RuntimeTargetDescriptor{ID: "flat-k8s-target", Type: "kubernetes"},
 			}
+			require.NotNil(t, kubernetesIdentityNotMapped(broker, "gke", a.AppliedConfig.GCPIdentity, time.Now()),
+				"control: the report refuses a dispatch naming its profile")
+			require.Nil(t, kubernetesIdentityNotMapped(broker, "", a.AppliedConfig.GCPIdentity, time.Now()),
+				"a profile-free dispatch is not judged against the report, nor the default profile")
 			require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+			stored, err := s.GetRuntimeBroker(ctx, broker.ID)
+			require.NoError(t, err)
+			require.Empty(t, stored.Profiles, "a flat row stores no profiles")
 			a.RuntimeBrokerID = broker.ID
 			// A valid pin: pinned to the Runtime Broker the agent is assigned to.
 			a.PinnedRuntimeBrokerID = broker.ID
 			a.PinnedRuntimeTargetID, a.PinnedRuntimeTargetType = broker.RuntimeTarget.ID, broker.RuntimeTarget.Type
 			require.True(t, a.PinValid())
-			require.Nil(t, kubernetesIdentityNotMapped(broker, a.AppliedConfig.Profile, a.AppliedConfig.GCPIdentity, time.Now()),
-				"no Hub-side refusal for a profile-free dispatch")
 
-			err := op.run(d, a)
+			err = op.run(d, a)
 			_, isIdentity := identityMappingDispatchError(err)
 			assert.False(t, isIdentity, "no Hub identity refusal: %v", err)
 			assert.True(t, op.called(m), "the broker is called and decides")

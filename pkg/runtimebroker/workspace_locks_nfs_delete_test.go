@@ -65,3 +65,35 @@ func TestWorkspaceLocks_ProjectDeleteInUseStartsNoNFSCleanup(t *testing.T) {
 	assertGone(t, tree)
 	require.NoDirExists(t, dir)
 }
+
+// TestWorkspaceLocks_ProjectDeleteInUseLocalDirGoneStartsNoNFSCleanup: the
+// in-use refusal runs before the local-directory check, so a removal whose
+// local project directory is already gone is still refused while another
+// instance of the host has agents in the project, and the NFS workspace
+// tree cleanup does not start.
+func TestWorkspaceLocks_ProjectDeleteInUseLocalDirGoneStartsNoNFSCleanup(t *testing.T) {
+	setupTestScionEnv(t)
+	d := &sharedDaemon{}
+	locks := NewWorkspaceLocks()
+	a := newPartitionInstanceWithLocks(t, d, "docker-a", t.TempDir(), locks)
+	b := newPartitionInstanceWithLocks(t, d, "docker-b", t.TempDir(), locks)
+	mountRoot := filepath.Join(t.TempDir(), "mnt")
+	a.srv.config.NFSConfig = &config.V1NFSConfig{
+		MountRoot:   mountRoot,
+		SubPathRoot: "projects",
+		Shares:      []config.V1NFSShare{{ID: "share1", Server: "10.0.0.2", Export: "/ws"}},
+	}
+	subRoot := filepath.Join(mountRoot, "share1", "projects")
+	require.NoError(t, os.MkdirAll(subRoot, 0o755))
+	dir := hubProjectDir(t, "shared-proj", scopeProjA)
+	require.NoError(t, os.RemoveAll(dir))
+	tree := seedNFSProjectTree(t, subRoot, scopeProjA)
+	attempts := setBrokerAttemptHook(t, nil)
+	b.own(t, d, scopeProjA, "agent-b1", "worker", "cid-b1")
+
+	w := serveFlat(a.srv, http.MethodDelete, "/api/v1/projects/shared-proj?project_id="+scopeProjA, "")
+	require.Equal(t, http.StatusConflict, w.Code, w.Body.String())
+	a.srv.nfsCleanupWG.Wait()
+	require.Empty(t, *attempts, "no NFS tree cleanup started")
+	assertPresent(t, filepath.Join(tree, "workspace", "README.md"))
+}
