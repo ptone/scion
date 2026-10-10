@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -29,6 +30,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -188,4 +190,56 @@ func TestDispatchAgentRestart_WireHubNativeProjectSendsSlug(t *testing.T) {
 	assert.Equal(t, "wire-project", restart["projectSlug"])
 	_, hasPath := restart["projectPath"]
 	assert.False(t, hasPath)
+}
+
+// failingResolveBackend is a fake secret backend whose Resolve always fails.
+type failingResolveBackend struct {
+	mockSecretBackend
+}
+
+func (b *failingResolveBackend) Resolve(context.Context, string, string, string, *secret.ResolveOpts) ([]secret.SecretWithValue, error) {
+	return nil, errors.New("fake secret backend unavailable")
+}
+
+// fakeFileSecret is a file-type secret with a fake value. File secrets do
+// not travel in resolvedEnv, so before ptone/scion#2157 a restart dropped
+// them.
+var fakeFileSecret = secret.SecretWithValue{
+	SecretMeta: secret.SecretMeta{Name: "FAKE_CREDS", SecretType: "file", Target: "~/.fake/creds.json", Scope: secret.ScopeUser},
+	Value:      "fake-secret-value",
+}
+
+// TestDispatchAgentRestart_WireSendsResolvedSecretsLikeStart: a restart
+// sends the resolved secrets a start sends for the same agent, resolved by
+// the same buildStartEnv call at dispatch time.
+func TestDispatchAgentRestart_WireSendsResolvedSecretsLikeStart(t *testing.T) {
+	d, agent, rb := newWireRecreationDispatcher(t, "")
+	d.SetSecretBackend(&mockSecretBackend{secrets: []secret.SecretWithValue{fakeFileSecret}})
+
+	require.NoError(t, d.DispatchAgentStart(context.Background(), agent, "", false))
+	require.NoError(t, d.DispatchAgentRestart(context.Background(), agent))
+
+	start := rb.body(t, "start")
+	restart := rb.body(t, "restart")
+	require.Contains(t, start, "resolvedSecrets")
+	require.Contains(t, restart, "resolvedSecrets", "a restart must send the resolved secrets")
+	assert.Equal(t, start["resolvedSecrets"], restart["resolvedSecrets"], "restart must get exactly what start gets")
+}
+
+// TestDispatchAgentRestart_WireSecretResolutionErrorMatchesStart pins the
+// behaviour on a secret resolution error: start and restart both proceed
+// and send no resolved secrets (the error is logged, as on start).
+func TestDispatchAgentRestart_WireSecretResolutionErrorMatchesStart(t *testing.T) {
+	d, agent, rb := newWireRecreationDispatcher(t, "")
+	d.SetSecretBackend(&failingResolveBackend{})
+
+	startErr := d.DispatchAgentStart(context.Background(), agent, "", false)
+	restartErr := d.DispatchAgentRestart(context.Background(), agent)
+	assert.NoError(t, startErr)
+	assert.NoError(t, restartErr, "restart must handle a resolution error as start does")
+
+	for _, op := range []string{"start", "restart"} {
+		_, has := rb.body(t, op)["resolvedSecrets"]
+		assert.False(t, has, "%s must send no resolved secrets after a resolution error", op)
+	}
 }

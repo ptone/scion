@@ -3673,8 +3673,14 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	// StartAgent parameters (project path and slug, harness config, shared
 	// dirs) and the same workspace-recreation inputs, so the broker can
 	// resolve the agent's project and recreate its workspace without
-	// finding a live container (ptone/scion#2157). The task, resume flag,
-	// resolved secrets and inline config are not sent on restart.
+	// finding a live container (ptone/scion#2157). The task, resume flag
+	// and inline config are not sent on restart.
+	//
+	// ResolvedSecrets are the secrets buildStartEnv resolved for this
+	// restart, the single resolution start and reincarnate's start leg use,
+	// so a restart picks up secret changes and gets exactly what a start
+	// would. A resolution error is handled there as on start: it is logged
+	// and the restart proceeds without injected secrets.
 	projectInfo := startEnv.projectInfo
 	extras := StartExtras{
 		HubEndpoint:          d.effectiveAgentHubEndpoint(),
@@ -3688,6 +3694,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		ProjectPath:          projectInfo.projectPath,
 		ProjectSlug:          projectInfo.projectSlug,
 		SharedDirs:           projectInfo.sharedDirs,
+		ResolvedSecrets:      startEnv.secrets,
 	}
 	extras.TemplateID, extras.TemplateHash = dispatchTemplateIdentity(agent)
 	if agent.AppliedConfig != nil {

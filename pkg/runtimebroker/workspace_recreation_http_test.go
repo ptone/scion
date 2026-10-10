@@ -174,3 +174,27 @@ func TestRestartAgent_OlderHubFallsBackToContainerProject(t *testing.T) {
 	_, set := opts.Env["SCION_GIT_CLONE_URL"]
 	assert.False(t, set)
 }
+
+// TestRestartAgent_PassesResolvedSecretsLikeStart: the resolved secrets a
+// restart request carries reach Manager.Start the same way a start
+// request's do (fake values only).
+func TestRestartAgent_PassesResolvedSecretsLikeStart(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	body := `{
+		"resolvedEnv": {"FOO": "bar"},
+		"resolvedSecrets": [{"name": "FAKE_CREDS", "type": "file", "target": "~/.fake/creds.json", "value": "fake-secret-value", "source": "user"}]
+	}`
+	got := map[string][]api.ResolvedSecret{}
+	for _, op := range []string{"start", "restart"} {
+		srv := newTestServer(t)
+		mgr := srv.manager.(*mockManager)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent-1/"+op, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+		require.Equal(t, http.StatusAccepted, w.Code, "%s: %s", op, w.Body.String())
+		got[op] = mgr.lastStartOpts.ResolvedSecrets
+	}
+	require.Len(t, got["start"], 1)
+	assert.Equal(t, got["start"], got["restart"], "restart must hand Manager.Start the secrets start does")
+}

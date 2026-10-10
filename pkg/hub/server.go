@@ -645,10 +645,11 @@ type WorkspaceDispatchSpec struct {
 // across the stop) recreates it from the same git source and template.
 //
 // ProjectPath, ProjectSlug, HarnessConfig, HarnessConfigID,
-// HarnessConfigHash and SharedDirs are set on a restart only: the start
-// request already carries them as its own StartAgent parameters. With them
-// the broker's restart handler no longer depends on finding a live
-// container to learn the agent's project (ptone/scion#2157).
+// HarnessConfigHash, SharedDirs and ResolvedSecrets are set on a restart
+// only: the start request already carries them as its own StartAgent
+// parameters. With them the broker's restart handler no longer depends on
+// finding a live container to learn the agent's project, and a restart gets
+// the same freshly resolved secrets a start gets (ptone/scion#2157).
 //
 // Zero value is valid and simply carries nothing extra, matching pre-#1960
 // behavior for callers (e.g. local/file-mode dispatch) that have none of this.
@@ -698,6 +699,10 @@ type StartExtras struct {
 	HarnessConfigID   string
 	HarnessConfigHash string
 	SharedDirs        []api.SharedDir
+	// ResolvedSecrets are the type-aware secrets buildStartEnv resolved for
+	// this restart, the same set DispatchAgentStart sends as its
+	// resolvedSecrets parameter. Values are never logged.
+	ResolvedSecrets []ResolvedSecret
 }
 
 // applyStartExtras writes extras onto payload as flat top-level wire keys.
@@ -771,6 +776,9 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if len(extras.SharedDirs) > 0 {
 		payload["sharedDirs"] = extras.SharedDirs
+	}
+	if len(extras.ResolvedSecrets) > 0 {
+		payload["resolvedSecrets"] = extras.ResolvedSecrets
 	}
 }
 

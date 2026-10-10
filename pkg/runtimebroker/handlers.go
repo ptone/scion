@@ -3782,6 +3782,10 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		WorkspaceMode        string              `json:"workspaceMode,omitempty"`
 		TemplateID           string              `json:"templateId,omitempty"`
 		TemplateHash         string              `json:"templateHash,omitempty"`
+		// ResolvedSecrets mirrors the start path's field: the type-aware
+		// secrets the Hub resolved for this restart, handled exactly as on
+		// start (buildStartContext). An older Hub sends none.
+		ResolvedSecrets []api.ResolvedSecret `json:"resolvedSecrets,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&restartReq); err != nil {
@@ -3911,6 +3915,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		HubEndpoint:              restartReq.HubEndpoint,
 		ResolvedEnv:              restartReq.ResolvedEnv,
 		EnvClassifications:       restartReq.EnvClassifications,
+		ResolvedSecrets:          restartReq.ResolvedSecrets,
 		RunID:                    restartReq.RunID,
 		SharedWorkspace:          restartReq.SharedWorkspace,
 		TemplateName:             restartReq.TemplateName,
