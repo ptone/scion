@@ -36,6 +36,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/hack/testlogin/internal/challenge"
@@ -120,7 +121,10 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, opts Opti
 }
 
 // printableWriter replaces control characters (C0 other than tab and
-// newline, DEL, and C1) and invalid UTF-8 with '?'.
+// newline, DEL, and C1), Unicode format characters (category Cf: bidi
+// controls, zero-width characters and the like), the line and paragraph
+// separators U+2028 and U+2029, and invalid UTF-8 with '?', so that nothing
+// printed can drive the terminal or change how a line displays.
 type printableWriter struct{ w io.Writer }
 
 func (p printableWriter) Write(b []byte) (int, error) {
@@ -129,9 +133,7 @@ func (p printableWriter) Write(b []byte) (int, error) {
 	for len(b) > 0 {
 		r, size := utf8.DecodeRune(b)
 		switch {
-		case r == utf8.RuneError && size <= 1,
-			r < 0x20 && r != '\n' && r != '\t',
-			r >= 0x7f && r <= 0x9f:
+		case r == utf8.RuneError && size <= 1, unprintable(r):
 			clean = append(clean, '?')
 		default:
 			clean = append(clean, b[:size]...)
@@ -142,6 +144,14 @@ func (p printableWriter) Write(b []byte) (int, error) {
 		return 0, err
 	}
 	return n, nil
+}
+
+// unprintable reports whether printableWriter replaces r.
+func unprintable(r rune) bool {
+	return (r < 0x20 && r != '\n' && r != '\t') ||
+		(r >= 0x7f && r <= 0x9f) ||
+		r == '\u2028' || r == '\u2029' ||
+		unicode.Is(unicode.Cf, r)
 }
 
 func errorf(w io.Writer, format string, a ...any) {

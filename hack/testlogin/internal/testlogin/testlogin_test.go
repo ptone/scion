@@ -32,6 +32,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
@@ -61,6 +62,7 @@ type fakeHub struct {
 	forceCreated  *bool  // if set, report this "created" value regardless
 	rateLimitFrom int    // answer test-login call number N and later with 429 (0: off)
 	retryAfter    string // Retry-After sent with 429
+	uidSuffix     string // appended to generated user ids
 
 	// Fields below change while the fake serves requests; mu guards them.
 	mu            sync.Mutex
@@ -203,7 +205,7 @@ func (f *fakeHub) testLogin(w http.ResponseWriter, r *http.Request) {
 	if created {
 		f.createdUsers++
 	}
-	f.uid = "uid-" + randHex(f.t, 8)
+	f.uid = "uid-" + randHex(f.t, 8) + f.uidSuffix
 	f.loginAt = time.Now()
 	f.access = f.mintToken("access", f.tokenLife)
 	f.refresh = f.mintToken("refresh", 7*24*time.Hour)
@@ -590,7 +592,8 @@ func TestMintMalformedRetryAfterIsNotEchoed(t *testing.T) {
 func assertPrintable(t *testing.T, s string) {
 	t.Helper()
 	for _, r := range s {
-		if (r < 0x20 && r != '\n' && r != '\t') || (r >= 0x7f && r <= 0x9f) {
+		if (r < 0x20 && r != '\n' && r != '\t') || (r >= 0x7f && r <= 0x9f) ||
+			r == '\u2028' || r == '\u2029' || unicode.Is(unicode.Cf, r) {
 			t.Errorf("output contains control character %U:\n%q", r, s)
 			return
 		}
@@ -607,6 +610,49 @@ func TestPrintableWriter(t *testing.T) {
 	if want := "ok\tline\n?[31mred? ? ? caf\u00e9\n"; buf.String() != want {
 		t.Errorf("got %q, want %q", buf.String(), want)
 	}
+
+	// Unicode format characters and line separators that can change how a
+	// line displays: bidi embeddings, overrides and isolates, zero-width
+	// characters, the BOM, the soft hyphen, and U+2028/U+2029.
+	for _, r := range []rune{
+		'\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
+		'\u2066', '\u2067', '\u2068', '\u2069',
+		'\u200b', '\u200c', '\u200d', '\u200e', '\u200f', '\u2060', '\ufeff', '\u00ad',
+		'\u2028', '\u2029',
+	} {
+		buf.Reset()
+		in := "uid-1" + string(r) + "x"
+		if _, err := (printableWriter{&buf}).Write([]byte(in)); err != nil {
+			t.Fatal(err)
+		}
+		if buf.String() != "uid-1?x" {
+			t.Errorf("%U: got %q, want %q", r, buf.String(), "uid-1?x")
+		}
+	}
+
+	// Ordinary non-ASCII text is kept.
+	buf.Reset()
+	in = "Gr\u00fc\u00dfe \u65e5\u672c \u0645\u0631\u062d\u0628\u0627"
+	if _, err := (printableWriter{&buf}).Write([]byte(in)); err != nil || buf.String() != in {
+		t.Errorf("got %q, %v; want %q unchanged", buf.String(), err, in)
+	}
+}
+
+// TestHubTextCannotSpoofOutput checks the end-to-end path: a user id from
+// the hub carrying a bidi override is printed unquoted in the failure
+// advice, and must reach the output only with the override replaced.
+func TestHubTextCannotSpoofOutput(t *testing.T) {
+	e := newEnv(t)
+	e.hub.uidSuffix = "\u202eeteled-ton-od"
+	e.hub.adminStatus = http.StatusOK // fail after the user is confirmed new
+	code, stdout, stderr := e.mint(t)
+	if code == 0 {
+		t.Fatal("expected failure")
+	}
+	if !strings.Contains(stderr, "this run created user uid") {
+		t.Fatalf("advice line missing:\n%s", stderr)
+	}
+	assertPrintable(t, stdout+stderr)
 }
 
 func TestMintDisabledCreatesNothing(t *testing.T) {
