@@ -368,6 +368,40 @@ for (const host of hosts) {
   });
 }
 
+test('same-named agents in different projects show their project slugs, and match on them', async ({
+  page,
+}) => {
+  const twinA = uuid(40);
+  const twinB = uuid(41);
+  const twins: Record<string, AgentFixture> = {
+    [twinA]: { ...fixture(twinA, 'twin', [USER]), projectId: 'p-alpha', project: 'Alpha Project' },
+    [twinB]: { ...fixture(twinB, 'twin', [USER]), projectId: 'p-beta', project: 'Beta Project' },
+  };
+  await setupGraph(page, {}, twins);
+  await page.route(/\/api\/v1\/projects\?/, (route) =>
+    route.fulfill({
+      json: {
+        projects: [
+          { id: 'p-alpha', name: 'Alpha Project', slug: 'alpha-proj' },
+          { id: 'p-beta', name: 'Beta Project', slug: 'beta-proj' },
+        ],
+        totalCount: 2,
+      },
+    })
+  );
+  await page.goto('/agents/graph');
+  await expect(graphNode(page, twinB)).toBeVisible();
+
+  await page.keyboard.press('Control+k');
+  const secondary = page.locator('scion-quick-palette .palette-option .palette-secondary');
+  await expect(secondary).toHaveText(['alpha-proj', 'beta-proj']);
+
+  await page.locator('scion-quick-palette #palette-query-input').fill('beta-proj');
+  await expect(secondary).toHaveText(['beta-proj']);
+  await page.locator('scion-quick-palette #palette-query-input').fill('Alpha Project');
+  await expect(secondary).toHaveText(['alpha-proj']);
+});
+
 /**
  * After `open`, types `gam` without waiting for the palette and checks it all
  * became the query: the input has focus right after the open, and the

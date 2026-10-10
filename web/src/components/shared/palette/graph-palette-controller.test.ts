@@ -26,10 +26,16 @@ import {
   GRAPH_PALETTE_OPEN_REQUEST_EVENT,
   isGraphPaletteAvailable,
 } from '../../../client/graph-palette-events.js';
+import { ProjectSlugIndex, type ProjectSlugSource } from '../../../client/project-slugs.js';
 
 function agent(id: string, name: string, project = 'Project'): Agent {
   return { id, name, slug: id, project, projectId: 'p1', phase: 'running' } as Agent;
 }
+
+/** The project slug index the page under test reads, and the projects the page holds. */
+let slugs: ProjectSlugIndex;
+let fetchProjects: ReturnType<typeof vi.fn<() => Promise<ProjectSlugSource[]>>>;
+let knownProjects: ProjectSlugSource[];
 
 const revealAgent = vi.fn<(id: string) => boolean>();
 const focusAgentNode = vi.fn<(id: string) => boolean>();
@@ -72,6 +78,8 @@ class TestGraphPage extends LitElement {
   readonly palette = new GraphPaletteController(this, {
     treeView: (): ScionAgentTreeView | null =>
       this.renderRoot.querySelector('test-tree-view') as unknown as ScionAgentTreeView | null,
+    knownProjects: () => knownProjects,
+    projectSlugs: slugs,
   });
 
   override render(): unknown {
@@ -148,6 +156,9 @@ function nextTask(): Promise<void> {
 }
 
 beforeEach(async () => {
+  fetchProjects = vi.fn<() => Promise<ProjectSlugSource[]>>().mockResolvedValue([]);
+  slugs = new ProjectSlugIndex(fetchProjects);
+  knownProjects = [{ id: 'p1', slug: 'proj-one' }];
   revealAgent.mockReset().mockReturnValue(true);
   focusAgentNode.mockReset().mockReturnValue(true);
   page = document.createElement('test-graph-page') as TestGraphPage;
@@ -176,6 +187,69 @@ describe('buildGraphAgentCandidates', () => {
   it('skips an agent without an id', () => {
     const rows = buildGraphAgentCandidates([agent('', 'Nameless'), agent('a', 'Alpha')]);
     expect(rows.map((r) => r.id)).toEqual([JSON.stringify(['agent', 'a'])]);
+  });
+});
+
+describe('GraphPaletteController project slugs', () => {
+  function twins(): Agent[] {
+    return [
+      { ...agent('a1', 'Twin', 'Alpha Project'), projectId: 'p1' },
+      { ...agent('a2', 'Twin', 'Beta Project'), projectId: 'p2' },
+    ];
+  }
+
+  function secondary(palette: ScionQuickPalette): string[] {
+    return (palette.groups.agents?.candidates ?? []).map((c) => c.secondaryLabel ?? '');
+  }
+
+  it('names each project by the slug of a project the page holds, with no project request', async () => {
+    knownProjects = [
+      { id: 'p1', slug: 'alpha-proj' },
+      { id: 'p2', slug: 'beta-proj' },
+    ];
+    page.agents = twins();
+    await page.updateComplete;
+
+    pressShortcut();
+    const palette = await waitForOpenPalette();
+
+    expect(secondary(palette)).toEqual(['alpha-proj', 'beta-proj']);
+    expect(palette.groups.agents?.candidates[0].searchFields).toEqual(
+      expect.arrayContaining(['alpha-proj', 'Alpha Project'])
+    );
+    expect(fetchProjects).not.toHaveBeenCalled();
+  });
+
+  it('lists projects for an unknown slug and updates the open rows when it arrives', async () => {
+    knownProjects = [{ id: 'p1', slug: 'alpha-proj' }];
+    let resolveWalk!: (projects: ProjectSlugSource[]) => void;
+    fetchProjects.mockReturnValue(
+      new Promise((resolve) => {
+        resolveWalk = resolve;
+      })
+    );
+    page.agents = twins();
+    await page.updateComplete;
+
+    pressShortcut();
+    const palette = await waitForOpenPalette();
+    expect(secondary(palette)).toEqual(['alpha-proj', 'Beta Project']);
+    expect(fetchProjects).toHaveBeenCalledTimes(1);
+
+    resolveWalk([{ id: 'p2', slug: 'beta-proj' }]);
+    await vi.waitFor(() => expect(secondary(palette)).toEqual(['alpha-proj', 'beta-proj']));
+    expect(palette.open).toBe(true);
+  });
+
+  it('stops hearing slug changes on disconnect', () => {
+    const unsubscribe = vi.fn();
+    const subscribe = vi.spyOn(slugs, 'subscribe').mockReturnValue(unsubscribe);
+    page.remove();
+    document.body.append(page);
+    expect(subscribe).toHaveBeenCalledTimes(1);
+
+    page.remove();
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
   });
 });
 

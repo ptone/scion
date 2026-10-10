@@ -21,7 +21,11 @@
  *
  * - Candidates are exactly the agents the rendered tree view shows (its
  *   `agents`, which the page has already filtered), kept current while the
- *   palette is open. Nothing is fetched and no filter is changed.
+ *   palette is open. No filter is changed.
+ * - A row names its agent's project by slug. Slugs come from the projects
+ *   the page already holds, then from the shared project slug index, which
+ *   lists projects only when one of the shown agents' slugs is unknown. An
+ *   open palette's rows update when a slug becomes known.
  * - The palette is available only while the page renders a tree view with
  *   at least one agent, outside any hidden subtree. A page that is loading,
  *   failed, empty, or showing another view does not offer it, and becoming
@@ -39,7 +43,13 @@
 import type { ReactiveController, ReactiveControllerHost } from 'lit';
 import type { Agent } from '../../../shared/types.js';
 import type { PaletteCandidate } from '../../../client/palette-types.js';
-import { buildAgentCandidate } from '../../../client/agent-palette-candidate.js';
+import {
+  buildAgentCandidate,
+  type ProjectSlugLookup,
+} from '../../../client/agent-palette-candidate.js';
+import { projectSlugs, type ProjectSlugIndex } from '../../../client/project-slugs.js';
+import type { ProjectSlugSource } from '../../../client/project-slugs.js';
+import { stateManager } from '../../../client/state.js';
 import {
   GRAPH_PALETTE_OPEN_REQUEST_EVENT,
   setGraphPaletteAvailable,
@@ -50,11 +60,18 @@ import { QuickPaletteHost, isQuickPaletteShortcut } from './quick-palette-host.j
 export interface GraphPaletteControllerOptions {
   /** The page's tree view, if it is rendered. */
   treeView: () => ScionAgentTreeView | null;
+  /** The projects the page already holds. Defaults to the state manager's. */
+  knownProjects?: () => Iterable<ProjectSlugSource>;
+  /** The project slug index. Defaults to the one shared by the page. */
+  projectSlugs?: Pick<ProjectSlugIndex, 'lookup' | 'seed' | 'ensure' | 'subscribe'>;
 }
 
 /** One Agents-group row per agent, in the given order. */
-export function buildGraphAgentCandidates(agents: readonly Agent[]): PaletteCandidate[] {
-  return agents.filter((agent) => agent.id).map((agent) => buildAgentCandidate(agent));
+export function buildGraphAgentCandidates(
+  agents: readonly Agent[],
+  projectSlug?: ProjectSlugLookup
+): PaletteCandidate[] {
+  return agents.filter((agent) => agent.id).map((agent) => buildAgentCandidate(agent, projectSlug));
 }
 
 type Host = ReactiveControllerHost & HTMLElement;
@@ -79,10 +96,13 @@ export class GraphPaletteController implements ReactiveController {
   private candidateAgents: readonly Agent[] | null = null;
   /** Watches for an ancestor being hidden (e.g. the router hiding the page). */
   private hiddenObserver: MutationObserver | null = null;
+  private readonly slugs: NonNullable<GraphPaletteControllerOptions['projectSlugs']>;
+  private unsubscribeSlugs: (() => void) | null = null;
 
   constructor(host: Host, options: GraphPaletteControllerOptions) {
     this.host = host;
     this.options = options;
+    this.slugs = options.projectSlugs ?? projectSlugs;
     host.addController(this);
   }
 
@@ -102,8 +122,11 @@ export class GraphPaletteController implements ReactiveController {
       label: 'Jump to agent',
       placeholder: 'Search agents…',
       load: (): Promise<PaletteCandidate[]> => {
-        this.candidateAgents = this.shownAgents();
-        return Promise.resolve(buildGraphAgentCandidates(this.candidateAgents));
+        const agents = this.shownAgents();
+        this.candidateAgents = agents;
+        this.slugs.seed((this.options.knownProjects ?? (() => stateManager.getProjects()))());
+        void this.slugs.ensure(agents.map((agent) => agent.projectId ?? ''));
+        return Promise.resolve(buildGraphAgentCandidates(agents, this.slugs.lookup));
       },
       onSelect: (target): void => {
         const revealed = this.options.treeView()?.revealAgent(target.agentId) ?? false;
@@ -117,6 +140,7 @@ export class GraphPaletteController implements ReactiveController {
     });
     document.addEventListener('keydown', this.handleKeydown);
     document.addEventListener(GRAPH_PALETTE_OPEN_REQUEST_EVENT, this.handleOpenRequest);
+    this.unsubscribeSlugs = this.slugs.subscribe(this.handleSlugsChange);
     this.hiddenObserver = new MutationObserver(() => this.sync());
     this.hiddenObserver.observe(document.documentElement, {
       attributes: true,
@@ -133,6 +157,8 @@ export class GraphPaletteController implements ReactiveController {
   hostDisconnected(): void {
     document.removeEventListener('keydown', this.handleKeydown);
     document.removeEventListener(GRAPH_PALETTE_OPEN_REQUEST_EVENT, this.handleOpenRequest);
+    this.unsubscribeSlugs?.();
+    this.unsubscribeSlugs = null;
     this.hiddenObserver?.disconnect();
     this.hiddenObserver = null;
     this.palette?.dispose();
@@ -163,7 +189,8 @@ export class GraphPaletteController implements ReactiveController {
       this.palette?.hide();
     } else if (this.palette?.isOpen && !sameAgents(agents, this.candidateAgents)) {
       this.candidateAgents = agents;
-      this.palette.setCandidates(buildGraphAgentCandidates(agents));
+      void this.slugs.ensure(agents.map((agent) => agent.projectId ?? ''));
+      this.palette.setCandidates(buildGraphAgentCandidates(agents, this.slugs.lookup));
     }
     this.setAvailable(available);
   }
@@ -185,6 +212,12 @@ export class GraphPaletteController implements ReactiveController {
     if (this.palette.hasUnrelatedModalOpen()) return;
     e.preventDefault();
     this.open();
+  };
+
+  /** Rebuilds the open palette's rows, so a row whose project slug just became known shows it. */
+  private readonly handleSlugsChange = (): void => {
+    if (!this.palette?.isOpen || !this.candidateAgents) return;
+    this.palette.setCandidates(buildGraphAgentCandidates(this.candidateAgents, this.slugs.lookup));
   };
 
   private readonly handleOpenRequest = (): void => {
