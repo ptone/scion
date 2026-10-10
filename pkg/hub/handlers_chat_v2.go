@@ -102,38 +102,14 @@ func (s *Server) handleChatSpaces(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// List every project as a summary: the rail needs only identity, naming,
-	// the emoji annotation and the authorization inputs, not the agent,
-	// contributor and broker counts ListProjects computes per project.
-	// Project templates are blueprints, not chat spaces: exclude them here
-	// so no client lists them in the rail.
-	allProjects, err := s.store.ListProjectSummaries(ctx, store.ProjectFilter{
-		IsTemplate: new(bool), // exclude templates
-	}, store.ListOptions{Limit: 1000})
+	visible, err := s.chatVisibleSpaces(ctx, GetIdentityFromContext(ctx))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list projects", nil)
 		return
 	}
 
-	// Decide ActionRead only: it is the one capability this handler reads,
-	// and ComputeCapabilitiesForActions runs the same decision path
-	// ComputeCapabilitiesBatch does for that action.
-	identity := GetIdentityFromContext(ctx)
-	resources := make([]Resource, len(allProjects.Items))
-	for i := range allProjects.Items {
-		resources[i] = projectResource(&allProjects.Items[i])
-	}
-	caps := s.authzService.ComputeCapabilitiesForActions(ctx, identity, resources, []Action{ActionRead})
-
 	// Get user prefs.
 	prefs, _ := wcs.GetUserPrefs(ctx, user.ID())
-
-	visible := make([]*store.Project, 0, len(allProjects.Items))
-	for i := range allProjects.Items {
-		if capabilityAllows(caps[i], ActionRead) {
-			visible = append(visible, &allProjects.Items[i])
-		}
-	}
 
 	rollups := chatSpaceRollups(ctx, wcs, user.ID(), visible, s.chatSpacesBatch)
 
@@ -169,6 +145,41 @@ func (s *Server) handleChatSpaces(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// chatVisibleSpaces returns the projects the chat rail lists for identity:
+// every non-template project identity can read. GET /api/v1/chat/spaces and
+// GET /api/v1/chat/unread-count both use it, so the badge counts threads in
+// exactly the spaces the rail shows.
+func (s *Server) chatVisibleSpaces(ctx context.Context, identity Identity) ([]*store.Project, error) {
+	// List every project as a summary: the rail needs only identity, naming,
+	// the emoji annotation and the authorization inputs, not the agent,
+	// contributor and broker counts ListProjects computes per project.
+	// Project templates are blueprints, not chat spaces: exclude them here
+	// so no client lists them in the rail.
+	allProjects, err := s.store.ListProjectSummaries(ctx, store.ProjectFilter{
+		IsTemplate: new(bool), // exclude templates
+	}, store.ListOptions{Limit: 1000})
+	if err != nil {
+		return nil, fmt.Errorf("list projects: %w", err)
+	}
+
+	// Decide ActionRead only: it is the one capability the rail reads, and
+	// ComputeCapabilitiesForActions runs the same decision path
+	// ComputeCapabilitiesBatch does for that action.
+	resources := make([]Resource, len(allProjects.Items))
+	for i := range allProjects.Items {
+		resources[i] = projectResource(&allProjects.Items[i])
+	}
+	caps := s.authzService.ComputeCapabilitiesForActions(ctx, identity, resources, []Action{ActionRead})
+
+	visible := make([]*store.Project, 0, len(allProjects.Items))
+	for i := range allProjects.Items {
+		if capabilityAllows(caps[i], ActionRead) {
+			visible = append(visible, &allProjects.Items[i])
+		}
+	}
+	return visible, nil
 }
 
 // Default batch sizes for the spaces-list rollup queries. They bound the
@@ -214,10 +225,25 @@ type chatSpaceRollup struct {
 // no threads, and a failed read-state read leaves its threads with no
 // read state. batch sets the batch sizes; zero fields take the defaults.
 func chatSpaceRollups(ctx context.Context, wcs WebChatStore, userID string, projects []*store.Project, batch chatSpacesBatchSizes) map[string]chatSpaceRollup {
+	out, _ := chatSpaceRollupsMode(ctx, wcs, userID, projects, batch, false)
+	return out
+}
+
+// chatSpaceRollupsStrict is chatSpaceRollups, except that a failed batch
+// read fails the whole computation instead of degrading. The unread count
+// uses it: a guessed count is worse than keeping the last one.
+func chatSpaceRollupsStrict(ctx context.Context, wcs WebChatStore, userID string, projects []*store.Project, batch chatSpacesBatchSizes) (map[string]chatSpaceRollup, error) {
+	return chatSpaceRollupsMode(ctx, wcs, userID, projects, batch, true)
+}
+
+// chatSpaceRollupsMode implements chatSpaceRollups and
+// chatSpaceRollupsStrict. With strict set, the first failed batch read is
+// returned as an error.
+func chatSpaceRollupsMode(ctx context.Context, wcs WebChatStore, userID string, projects []*store.Project, batch chatSpacesBatchSizes, strict bool) (map[string]chatSpaceRollup, error) {
 	batch = batch.withDefaults()
 	out := make(map[string]chatSpaceRollup, len(projects))
 	if len(projects) == 0 {
-		return out
+		return out, nil
 	}
 
 	var topics []WebChatTopic
@@ -229,6 +255,9 @@ func chatSpaceRollups(ctx context.Context, wcs WebChatStore, userID string, proj
 		}
 		page, err := wcs.ListTopicsByProjects(ctx, ids)
 		if err != nil {
+			if strict {
+				return nil, fmt.Errorf("list topics: %w", err)
+			}
 			slog.Warn("chat spaces: batched topic read failed",
 				"projects", len(ids), "error", err)
 			continue
@@ -236,7 +265,7 @@ func chatSpaceRollups(ctx context.Context, wcs WebChatStore, userID string, proj
 		topics = append(topics, page...)
 	}
 	if len(topics) == 0 {
-		return out
+		return out, nil
 	}
 
 	readMap := make(map[string]WebChatReadState, len(topics))
@@ -248,6 +277,9 @@ func chatSpaceRollups(ctx context.Context, wcs WebChatStore, userID string, proj
 		}
 		states, err := wcs.GetReadStates(ctx, userID, keys)
 		if err != nil {
+			if strict {
+				return nil, fmt.Errorf("read states: %w", err)
+			}
 			slog.Warn("chat spaces: batched read-state read failed",
 				"threads", len(keys), "error", err)
 			continue
@@ -277,7 +309,7 @@ func chatSpaceRollups(ctx context.Context, wcs WebChatStore, userID string, proj
 		}
 		out[t.ProjectID] = ru
 	}
-	return out
+	return out, nil
 }
 
 // handleChatSpaceRoutes dispatches sub-routes under /api/v1/chat/spaces/.

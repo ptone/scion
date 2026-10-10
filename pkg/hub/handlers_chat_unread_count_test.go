@@ -71,15 +71,22 @@ func (f *unreadFixture) thread(name, userID string, member, lastMsg bool) (topic
 // from the peer, and returns its key and that message's ID.
 func (f *unreadFixture) dm(userID string) (key, msgID string) {
 	f.t.Helper()
+	return f.dmWith(userID, "user", api.NewUUID())
+}
+
+// dmWith registers a DM between userID and the peer of peerKind ("user" or
+// "agent") and peerID, with one message from the peer, and returns its key
+// and that message's ID.
+func (f *unreadFixture) dmWith(userID, peerKind, peer string) (key, msgID string) {
+	f.t.Helper()
 	ctx := context.Background()
-	peer := api.NewUUID()
-	key, err := messages.DMConversationKey("user", peer, "user", userID)
+	key, err := messages.DMConversationKey(peerKind, peer, "user", userID)
 	require.NoError(f.t, err)
 	convID := seedConversation(f.t, f.s, "native", key, "direct")
 	registerDMParticipants(ctx, f.wcs, key)
 	f.seq++
 	m := &store.Message{
-		ID: api.NewUUID(), ProjectID: f.proj.ID, Sender: "user:peer", SenderID: peer,
+		ID: api.NewUUID(), ProjectID: f.proj.ID, Sender: peerKind + ":peer", SenderID: peer,
 		Recipient: "user:me", RecipientID: userID, Msg: "hello",
 		Type: messages.TypeInstruction, Channel: "web", ThreadID: key, ConversationID: convID,
 		CreatedAt: time.Now().UTC().Add(time.Duration(f.seq) * time.Second),
@@ -96,9 +103,10 @@ func getUnreadCount(t *testing.T, rec *httptest.ResponseRecorder) chatUnreadCoun
 	return resp
 }
 
-// The count includes only unmuted member threads and DMs whose latest
-// message is past the read watermark.
-func TestChatUnreadCount_MemberThreadsAndDMs(t *testing.T) {
+// The count includes every unmuted thread in a readable space, member or
+// not, and every unmuted DM, whose latest message is past the read
+// watermark.
+func TestChatUnreadCount_ThreadsAndDMs(t *testing.T) {
 	srv, s, wcs, proj := setupSharedChatTest(t)
 	ctx := context.Background()
 	f := &unreadFixture{t: t, s: s, wcs: wcs, proj: proj}
@@ -108,7 +116,7 @@ func TestChatUnreadCount_MemberThreadsAndDMs(t *testing.T) {
 	assert.Equal(t, chatUnreadCountResponse{}, getUnreadCount(t, rec), "empty to start")
 
 	f.thread("member-unread", me, true, true)            // counts
-	f.thread("non-member-unread", me, false, true)       // not a member
+	f.thread("non-member-unread", me, false, true)       // counts: the rail shows it
 	muted, _ := f.thread("member-muted", me, true, true) // muted
 	require.NoError(t, wcs.SetMuted(ctx, me, muted, true))
 	read, readMsg := f.thread("member-read", me, true, true) // read to latest
@@ -124,19 +132,19 @@ func TestChatUnreadCount_MemberThreadsAndDMs(t *testing.T) {
 	require.NoError(t, wcs.SetReadState(ctx, me, readDM, readDMMsg))
 
 	rec = doRequest(t, srv, http.MethodGet, "/api/v1/chat/unread-count", nil)
-	assert.Equal(t, chatUnreadCountResponse{Conversations: 3, Threads: 2, DMs: 1}, getUnreadCount(t, rec))
+	assert.Equal(t, chatUnreadCountResponse{Conversations: 4, Threads: 3, DMs: 1}, getUnreadCount(t, rec))
 
-	// Leaving a thread drops it from the count.
+	// Leaving a thread does not hide it from the rail, so it still counts.
 	convs, err := s.GetConversationsForPrincipal(ctx, "user", me)
 	require.NoError(t, err)
 	for _, c := range convs {
 		require.NoError(t, s.RemoveParticipant(ctx, c.ID, "user", me))
 	}
 	rec = doRequest(t, srv, http.MethodGet, "/api/v1/chat/unread-count", nil)
-	assert.Equal(t, chatUnreadCountResponse{Conversations: 1, Threads: 0, DMs: 1}, getUnreadCount(t, rec))
+	assert.Equal(t, chatUnreadCountResponse{Conversations: 4, Threads: 3, DMs: 1}, getUnreadCount(t, rec))
 }
 
-// A deleted thread does not count, even with a participant row.
+// A deleted thread does not count.
 func TestChatUnreadCount_DeletedThreadExcluded(t *testing.T) {
 	srv, s, wcs, proj := setupSharedChatTest(t)
 	f := &unreadFixture{t: t, s: s, wcs: wcs, proj: proj}
@@ -151,8 +159,8 @@ func TestChatUnreadCount_DeletedThreadExcluded(t *testing.T) {
 	assert.Equal(t, 0, getUnreadCount(t, rec).Threads)
 }
 
-// Each caller sees only their own membership and read state, and a
-// participant row does not count without project read access: the row is a
+// Each caller sees only their own read state, and a thread does not count
+// without project read access, even with a participant row: the row is a
 // listing index, not authorization.
 func TestChatUnreadCount_CallerScopedAndReadGated(t *testing.T) {
 	srv, s, alice, bob, proj := setupDemoPolicyTest(t)
@@ -164,22 +172,24 @@ func TestChatUnreadCount_CallerScopedAndReadGated(t *testing.T) {
 	srv.SetWebChatStore(wcs)
 	f := &unreadFixture{t: t, s: s, wcs: wcs, proj: proj}
 
-	// alice (project member) is a member of an unread thread; bob (not a
-	// project member) holds a stale participant row on another thread.
+	// alice (project member) can read both threads; bob (not a project
+	// member) holds a stale participant row on one of them.
 	f.thread("alice-thread", alice.ID, true, true)
-	bobThread, _ := f.thread("bob-thread", bob.ID, true, true)
+	bobThread, bobMsg := f.thread("bob-thread", bob.ID, true, true)
 	f.dm(bob.ID)
 
 	rec := doRequestAsUser(t, srv, alice, http.MethodGet, "/api/v1/chat/unread-count", nil)
-	assert.Equal(t, chatUnreadCountResponse{Conversations: 1, Threads: 1, DMs: 0}, getUnreadCount(t, rec),
-		"alice sees only her own thread")
+	assert.Equal(t, chatUnreadCountResponse{Conversations: 2, Threads: 2, DMs: 0}, getUnreadCount(t, rec),
+		"alice sees both threads in the project she reads, and none of bob's DMs")
 
 	rec = doRequestAsUser(t, srv, bob, http.MethodGet, "/api/v1/chat/unread-count", nil)
 	assert.Equal(t, chatUnreadCountResponse{Conversations: 1, Threads: 0, DMs: 1}, getUnreadCount(t, rec),
 		"bob's thread is in a project he cannot read; only his DM counts")
 
-	// alice reading bob's thread changes nothing for bob.
-	require.NoError(t, wcs.SetReadState(ctx, alice.ID, bobThread, "anything"))
+	// alice reading a thread changes her count and nothing for bob.
+	require.NoError(t, wcs.SetReadState(ctx, alice.ID, bobThread, bobMsg))
+	rec = doRequestAsUser(t, srv, alice, http.MethodGet, "/api/v1/chat/unread-count", nil)
+	assert.Equal(t, 1, getUnreadCount(t, rec).Threads)
 	rec = doRequestAsUser(t, srv, bob, http.MethodGet, "/api/v1/chat/unread-count", nil)
 	assert.Equal(t, 1, getUnreadCount(t, rec).Conversations)
 }
@@ -207,7 +217,8 @@ func TestChatUnreadCount_BatchesReadStates(t *testing.T) {
 }
 
 // A user who is not a project member gains no thread membership when
-// mentioned by email, so the thread never reaches their count.
+// mentioned by email, and cannot read the project, so the thread never
+// reaches their count.
 func TestChatUnreadCount_NonMemberMentionedByEmail(t *testing.T) {
 	srv, s, alice, bob, proj := setupDemoPolicyTest(t)
 	dbProvider, ok := s.(interface{ DB() *sql.DB })
@@ -287,8 +298,7 @@ func TestChatUnreadCount_DMReadErrorFails(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 }
 
-// Member threads in several projects are counted the same however the
-// store orders them: project IDs are sorted before batching.
+// Threads in several projects are counted the same at any batch size.
 func TestChatUnreadCount_ProjectOrderDeterministic(t *testing.T) {
 	srv, s, wcs, proj := setupSharedChatTest(t)
 	srv.chatSpacesBatch = chatSpacesBatchSizes{topics: 1, readStates: 1}
@@ -323,10 +333,9 @@ func spacesUnreadTotal(t *testing.T, srv *Server) int {
 	return total
 }
 
-// A member thread in a template project is not counted: the spaces
-// endpoint leaves templates out of the rail, so the badge would count a
-// thread the user cannot find. With every thread a member thread, the
-// badge's thread count equals the rail's unread rollup.
+// A thread in a template project is not counted: the spaces endpoint
+// leaves templates out of the rail, so the badge would count a thread the
+// user cannot find. The badge's thread count equals the rail's rollup.
 func TestChatUnreadCount_TemplateProjectExcludedAgreesWithSpaces(t *testing.T) {
 	srv, s, wcs, proj := setupSharedChatTest(t)
 	ctx := context.Background()
@@ -334,6 +343,7 @@ func TestChatUnreadCount_TemplateProjectExcludedAgreesWithSpaces(t *testing.T) {
 
 	f := &unreadFixture{t: t, s: s, wcs: wcs, proj: proj}
 	f.thread("unread", me, true, true)
+	f.thread("unread-non-member", me, false, true)
 	muted, _ := f.thread("muted", me, true, true)
 	require.NoError(t, wcs.SetMuted(ctx, me, muted, true))
 	read, readMsg := f.thread("read", me, true, true)
@@ -350,7 +360,82 @@ func TestChatUnreadCount_TemplateProjectExcludedAgreesWithSpaces(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/unread-count", nil)
 	got := getUnreadCount(t, rec)
-	assert.Equal(t, chatUnreadCountResponse{Conversations: 1, Threads: 1}, got)
+	assert.Equal(t, chatUnreadCountResponse{Conversations: 2, Threads: 2}, got)
 	assert.Equal(t, spacesUnreadTotal(t, srv), got.Threads,
 		"badge threads must equal the rail's unread rollup")
+}
+
+// railUnreadDMs counts the DMs the rail's Unread DMs list shows: the
+// entries of GET /api/v1/chat/dms with hasUnread set that are not muted.
+func railUnreadDMs(t *testing.T, srv *Server) int {
+	t.Helper()
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/dms", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var resp chatDMListResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	n := 0
+	for _, dm := range resp.DMs {
+		if dm.HasUnread && !dm.Muted {
+			n++
+		}
+	}
+	return n
+}
+
+// The badge total equals what the rail shows as unread: the space unread
+// rollups plus the Unread DMs list. Covers threads the caller is not a
+// member of, threads in another project and in a template project, and DMs
+// with a user, with an agent in another project and with a deleted agent,
+// along with muted and read conversations of each kind.
+func TestChatUnreadCount_BadgeEqualsRail(t *testing.T) {
+	srv, s, wcs, proj := setupSharedChatTest(t)
+	ctx := context.Background()
+	me := DevUserID
+
+	f := &unreadFixture{t: t, s: s, wcs: wcs, proj: proj}
+	f.thread("member", me, true, true)
+	f.thread("non-member", me, false, true)
+	mutedThread, _ := f.thread("muted", me, true, true)
+	require.NoError(t, wcs.SetMuted(ctx, me, mutedThread, true))
+	readThread, readThreadMsg := f.thread("read", me, false, true)
+	require.NoError(t, wcs.SetReadState(ctx, me, readThread, readThreadMsg))
+
+	other := &store.Project{ID: api.NewUUID(), Name: "other", Slug: "other", Created: time.Now(), Updated: time.Now()}
+	require.NoError(t, s.CreateProject(ctx, other))
+	of := &unreadFixture{t: t, s: s, wcs: wcs, proj: other}
+	of.thread("elsewhere", me, false, true)
+
+	tmpl := &store.Project{
+		ID: api.NewUUID(), Name: "tmpl", Slug: "tmpl",
+		Labels:  map[string]string{store.LabelTemplate: "true"},
+		Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, tmpl))
+	tf := &unreadFixture{t: t, s: s, wcs: wcs, proj: tmpl}
+	tf.thread("in-template", me, true, true)
+
+	newAgent := func(slug string) string {
+		id := api.NewUUID()
+		require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+			ID: id, Slug: slug, Name: slug, ProjectID: other.ID, Phase: "stopped",
+			CreatedBy: me, OwnerID: me,
+		}))
+		return id
+	}
+	f.dm(me)                              // user peer
+	f.dmWith(me, "agent", newAgent("a1")) // agent in another project
+	gone := newAgent("gone")
+	f.dmWith(me, "agent", gone)
+	require.NoError(t, s.DeleteAgent(ctx, gone)) // deleted agent
+	mutedDM, _ := f.dm(me)
+	require.NoError(t, wcs.SetMuted(ctx, me, mutedDM, true))
+	readDM, readDMMsg := f.dmWith(me, "agent", newAgent("a2"))
+	require.NoError(t, wcs.SetReadState(ctx, me, readDM, readDMMsg))
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/unread-count", nil)
+	got := getUnreadCount(t, rec)
+	assert.Equal(t, chatUnreadCountResponse{Conversations: 6, Threads: 3, DMs: 3}, got)
+	assert.Equal(t, spacesUnreadTotal(t, srv), got.Threads, "threads must equal the space rollups")
+	assert.Equal(t, railUnreadDMs(t, srv), got.DMs, "DMs must equal the Unread DMs list")
+	assert.Equal(t, got.Threads+got.DMs, got.Conversations)
 }

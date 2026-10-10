@@ -549,3 +549,23 @@ func TestChatSpaces_BatchReadFailureIsLogged(t *testing.T) {
 		assert.Contains(t, logs.String(), "injected read states failure")
 	})
 }
+
+// The unread count reads the same rollup strictly: a failed batch read
+// fails the request, so the badge keeps its last count instead of showing
+// a guess.
+func TestChatUnreadCount_RollupReadFailureFails(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		arm  func(*spacesPerfFixture)
+	}{
+		{"topics", func(f *spacesPerfFixture) { f.wcs.failTopicsBatch = true }},
+		{"read states", func(f *spacesPerfFixture) { f.wcs.failReadStates = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSpacesPerfFixture(t)
+			tc.arm(f)
+			rec := doRequestAsUser(t, f.srv, f.admin, http.MethodGet, "/api/v1/chat/unread-count", nil)
+			assert.Equal(t, http.StatusInternalServerError, rec.Code, "body: %s", rec.Body.String())
+		})
+	}
+}
