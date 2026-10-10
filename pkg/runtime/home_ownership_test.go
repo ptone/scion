@@ -299,3 +299,57 @@ func TestDockerRuntime_RepairAgentHomeOwnershipModeDetectionFails(t *testing.T) 
 		t.Error("the helper ran")
 	}
 }
+
+// The runtime validates the helper's argv against a fail-closed allow-list
+// before running it: the built command passes, and any change that adds,
+// removes, repeats or alters a flag, the mount, the image or the command
+// is refused.
+func TestValidateAgentHomeRepairArgs(t *testing.T) {
+	req := AgentHomeOwnershipRepair{HomeDir: "/srv/agents/a1/home", Image: "img:1", UID: 1002, GID: 1003}
+	args, err := agentHomeRepairArgs(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateAgentHomeRepairArgs(args, req); err != nil {
+		t.Fatalf("the built helper command is refused: %v", err)
+	}
+	imageAt := slices.Index(args, "img:1")
+	insertBeforeImage := func(extra ...string) []string {
+		out := slices.Clone(args[:imageAt])
+		out = append(out, extra...)
+		return append(out, args[imageAt:]...)
+	}
+	replace := func(old, new string) []string {
+		out := slices.Clone(args)
+		out[slices.Index(out, old)] = new
+		return out
+	}
+	without := func(flag string) []string {
+		out := slices.Clone(args)
+		return slices.Delete(out, slices.Index(out, flag), slices.Index(out, flag)+1)
+	}
+	for name, bad := range map[string][]string{
+		"privileged":          insertBeforeImage("--privileged"),
+		"SYS_ADMIN":           insertBeforeImage("--cap-add=SYS_ADMIN"),
+		"DAC_READ_SEARCH":     replace("--cap-add=DAC_OVERRIDE", "--cap-add=DAC_READ_SEARCH"),
+		"seccomp unconfined":  insertBeforeImage("--security-opt=seccomp=unconfined"),
+		"apparmor unconfined": insertBeforeImage("--security-opt", "apparmor=unconfined"),
+		"second mount":        insertBeforeImage("--volume", "/:/host"),
+		"--mount":             insertBeforeImage("--mount", "type=bind,src=/,dst=/host"),
+		"host network":        replace("--network=none", "--network=host"),
+		"no cap-drop":         without("--cap-drop=ALL"),
+		"no network flag":     without("--network=none"),
+		"repeated cap":        insertBeforeImage("--cap-add=CHOWN"),
+		"other entrypoint":    replace("find", "sh"),
+		"other home":          replace("/srv/agents/a1/home:"+agentHomeRepairMount, "/srv:"+agentHomeRepairMount),
+		"read-only home":      replace("/srv/agents/a1/home:"+agentHomeRepairMount, "/srv/agents/a1/home:"+agentHomeRepairMount+":ro"),
+		"other image":         replace("img:1", "img:2"),
+		"other owner":         replace("1002:1003", "0:0"),
+		"extra command":       append(slices.Clone(args), "-delete"),
+		"not run":             replace("run", "exec"),
+	} {
+		if err := validateAgentHomeRepairArgs(bad, req); err == nil {
+			t.Errorf("%s: helper command %q was not refused", name, bad)
+		}
+	}
+}

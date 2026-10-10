@@ -114,10 +114,103 @@ func agentHomeRepairArgs(req AgentHomeOwnershipRepair) ([]string, error) {
 	}, nil
 }
 
-// repairAgentHomeOwnership runs the helper with command (docker or podman).
+// agentHomeRepairFlags is the allow-list of the helper's flags (before the
+// image): each flag with the exact value it must have, or "" for a flag
+// that takes none. Every one of them must be present exactly once.
+var agentHomeRepairFlags = []struct{ flag, value string }{
+	{"--rm", ""},
+	{"--pull=never", ""},
+	{"--network=none", ""},
+	{"--user=0:0", ""},
+	{"--cap-drop=ALL", ""},
+	{"--cap-add=CHOWN", ""},
+	{"--cap-add=DAC_OVERRIDE", ""},
+	{"--security-opt=no-new-privileges", ""},
+	{"--read-only", ""},
+	{"--pids-limit=64", ""},
+	{"--label", "scion.helper=agent-home-ownership"},
+	{"--volume", ""}, // value checked against the request below
+	{"--entrypoint", "find"},
+}
+
+// validateAgentHomeRepairArgs checks args, fail-closed, against the exact
+// helper command for req before it is run: "run", then exactly the flags
+// in agentHomeRepairFlags (each once, with its exact value; the only mount
+// is the agent home), then the image, then exactly the expected find
+// expression. Anything unknown, missing, repeated or extra refuses the
+// launch, so a change that widens the helper's privileges (another
+// capability, --privileged, an unconfined profile, another mount, host
+// network) cannot reach the runtime.
+func validateAgentHomeRepairArgs(args []string, req AgentHomeOwnershipRepair) error {
+	refuse := func(format string, a ...any) error {
+		return fmt.Errorf("agent home ownership repair: refusing helper command: "+format, a...)
+	}
+	if len(args) == 0 || args[0] != "run" {
+		return refuse("does not start with run")
+	}
+	wantVolume := filepath.Clean(req.HomeDir) + ":" + agentHomeRepairMount
+	seen := make(map[string]bool, len(agentHomeRepairFlags))
+	i := 1
+	for ; i < len(args) && strings.HasPrefix(args[i], "-"); i++ {
+		flag := args[i]
+		allowed := false
+		for _, f := range agentHomeRepairFlags {
+			if f.flag != flag {
+				continue
+			}
+			allowed = true
+			if seen[flag] {
+				return refuse("flag %q repeated", flag)
+			}
+			seen[flag] = true
+			want := f.value
+			if flag == "--volume" {
+				want = wantVolume
+			}
+			if want != "" {
+				if i+1 >= len(args) || args[i+1] != want {
+					return refuse("flag %q must have the value %q", flag, want)
+				}
+				i++
+			}
+		}
+		if !allowed {
+			return refuse("flag %q is not allowed", flag)
+		}
+	}
+	for _, f := range agentHomeRepairFlags {
+		if !seen[f.flag] {
+			return refuse("required flag %q missing", f.flag)
+		}
+	}
+	if i >= len(args) || args[i] != req.Image {
+		return refuse("image is not %q", req.Image)
+	}
+	wantTail := []string{
+		agentHomeRepairMount, "-xdev",
+		"(", "-type", "d", "-o", "-type", "l", "-o", "(", "-type", "f", "-links", "1", ")", ")",
+		"-exec", "chown", "-h", fmt.Sprintf("%d:%d", req.UID, req.GID), "{}", "+",
+	}
+	tail := args[i+1:]
+	if len(tail) != len(wantTail) {
+		return refuse("unexpected command after the image")
+	}
+	for j := range tail {
+		if tail[j] != wantTail[j] {
+			return refuse("unexpected command after the image")
+		}
+	}
+	return nil
+}
+
+// repairAgentHomeOwnership runs the helper with command (docker or podman),
+// after validating its argv against the allow-list.
 func repairAgentHomeOwnership(ctx context.Context, command string, req AgentHomeOwnershipRepair) error {
 	args, err := agentHomeRepairArgs(req)
 	if err != nil {
+		return err
+	}
+	if err := validateAgentHomeRepairArgs(args, req); err != nil {
 		return err
 	}
 	runtimeLog.Warn("Repairing agent home ownership with a one-shot helper",
