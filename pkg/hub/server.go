@@ -4282,6 +4282,10 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 		stopRunID := agent.RunID
 		if agent.RuntimeBrokerID != "" {
 			s.syncWorkspaceOnStop(ctx, agent)
+			// As for suspend, record work in an ephemeral workspace that
+			// the suspend discards, so the next start reports it. There is
+			// no response to carry a warning (ptone/scion#4387).
+			s.checkEphemeralWorkspaceBeforeStop(ctx, dispatcher, agent, false)
 			// As for stop and suspend, the dispatch is bounded by
 			// syncDispatch (ptone/scion#4247).
 			if err := syncDispatch(ctx, func(dctx context.Context) error {
@@ -4290,6 +4294,9 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 				s.logStopRunMismatch(agent, "auto-suspend", err)
 				slog.Error("Scheduler: auto-suspend dispatch failed",
 					"agent_id", agent.ID, "agent_name", agent.Name, "error", err)
+				// As for suspend: the agent may still be running, so the
+				// record no longer describes a stopped workspace.
+				s.clearWorkspaceAtStop(ctx, agent)
 				// This stop was the system's, not the user's: if it
 				// replaced a running intent, put that back unless something
 				// newer replaced it. A prior stopped intent (for example a
