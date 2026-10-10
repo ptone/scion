@@ -44,9 +44,11 @@ type chatUnreadCountResponse struct {
 //
 // A thread counts when the caller has an active user row in
 // conversation_participants for the thread's conversation, can read the
-// thread's project, has not muted the thread, and the thread's latest
-// message is not the caller's read watermark. Participant rows are a
-// listing index only, so the project read gate still applies. A DM counts
+// thread's project, the project is not a template, the caller has not
+// muted the thread, and the thread's latest message is not the caller's
+// read watermark. Participant rows are a listing index only, so the
+// project read gate still applies. Template projects are left out because
+// GET /api/v1/chat/spaces leaves them out of the rail. A DM counts
 // when the caller is one of its parties (webchat_dm), has not muted it,
 // and its latest message is not the caller's read watermark.
 //
@@ -149,7 +151,8 @@ func chatConversationUnread(lastMessageID string, readMap map[string]WebChatRead
 }
 
 // memberThreads returns the non-deleted topics whose conversation userID is
-// an active participant of and whose project identity can read.
+// an active participant of and whose non-template project identity can
+// read.
 func (s *Server) memberThreads(ctx context.Context, wcs WebChatStore, identity Identity, userID string) ([]WebChatTopic, error) {
 	convs, err := s.store.GetConversationsForPrincipal(ctx, "user", userID)
 	if err != nil {
@@ -183,8 +186,11 @@ func (s *Server) memberThreads(ctx context.Context, wcs WebChatStore, identity I
 	}
 
 	// Project read gate: participant rows are a listing index, not authz.
+	// Templates are excluded as GET /api/v1/chat/spaces excludes them: the
+	// rail never lists a template project, so a thread in one could be
+	// counted on the badge but never found.
 	projects, err := s.store.ListProjectSummaries(ctx,
-		store.ProjectFilter{MemberProjectIDs: projectIDs},
+		store.ProjectFilter{MemberProjectIDs: projectIDs, IsTemplate: new(bool)},
 		store.ListOptions{Limit: chatUnreadCountMaxProjects})
 	if err != nil {
 		return nil, fmt.Errorf("list member projects: %w", err)

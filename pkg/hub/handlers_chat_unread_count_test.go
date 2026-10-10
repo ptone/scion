@@ -307,3 +307,50 @@ func TestChatUnreadCount_ProjectOrderDeterministic(t *testing.T) {
 		assert.Equal(t, chatUnreadCountResponse{Conversations: 4, Threads: 4}, getUnreadCount(t, rec))
 	}
 }
+
+// spacesUnreadTotal sums the unread rollup GET /api/v1/chat/spaces reports
+// across every space: what the rail's Unread filter shows.
+func spacesUnreadTotal(t *testing.T, srv *Server) int {
+	t.Helper()
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/spaces", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var resp chatSpacesResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	total := 0
+	for _, sp := range resp.Spaces {
+		total += sp.UnreadCount
+	}
+	return total
+}
+
+// A member thread in a template project is not counted: the spaces
+// endpoint leaves templates out of the rail, so the badge would count a
+// thread the user cannot find. With every thread a member thread, the
+// badge's thread count equals the rail's unread rollup.
+func TestChatUnreadCount_TemplateProjectExcludedAgreesWithSpaces(t *testing.T) {
+	srv, s, wcs, proj := setupSharedChatTest(t)
+	ctx := context.Background()
+	me := DevUserID
+
+	f := &unreadFixture{t: t, s: s, wcs: wcs, proj: proj}
+	f.thread("unread", me, true, true)
+	muted, _ := f.thread("muted", me, true, true)
+	require.NoError(t, wcs.SetMuted(ctx, me, muted, true))
+	read, readMsg := f.thread("read", me, true, true)
+	require.NoError(t, wcs.SetReadState(ctx, me, read, readMsg))
+
+	tmpl := &store.Project{
+		ID: api.NewUUID(), Name: "tmpl", Slug: "tmpl",
+		Labels:  map[string]string{store.LabelTemplate: "true"},
+		Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, tmpl))
+	tf := &unreadFixture{t: t, s: s, wcs: wcs, proj: tmpl}
+	tf.thread("in-template", me, true, true)
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/unread-count", nil)
+	got := getUnreadCount(t, rec)
+	assert.Equal(t, chatUnreadCountResponse{Conversations: 1, Threads: 1}, got)
+	assert.Equal(t, spacesUnreadTotal(t, srv), got.Threads,
+		"badge threads must equal the rail's unread rollup")
+}
