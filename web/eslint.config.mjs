@@ -82,6 +82,16 @@ const componentTests = [
   'src/components/pages/agent-detail-placement.test.ts',
 ];
 
+// Shared helpers moved out of test files when a slow suite was split into
+// parallel parts (ptone/scion#4289). They are test code and keep the
+// test-file rule set the suites had before the split.
+const splitSuiteFixtures = [
+  'src/components/pages/__fixtures__/admin-server-config.ts',
+  'src/components/pages/__fixtures__/agent-graph-scope.ts',
+  'src/components/pages/__fixtures__/agents-agent-window.ts',
+  'src/components/pages/__fixtures__/project-detail-agent-window.ts',
+];
+
 /** Points the given files at their own TypeScript project. */
 const project = (files, path) => ({
   files,
@@ -160,7 +170,7 @@ export default defineConfig([
   // no-unnecessary-type-assertion are off (ptone/scion#2944, option A).
   // The curated lint-clean test files keep the full rule set.
   {
-    files: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
+    files: ['src/**/*.test.ts', 'src/**/*.test.tsx', ...splitSuiteFixtures],
     ignores: [...terminalTests, ...clientTests, ...componentTests],
     rules: {
       '@typescript-eslint/no-unsafe-member-access': 'off',
@@ -185,6 +195,7 @@ export default defineConfig([
     // from main.ts; the chat lane migrates these files later.
     ignores: [
       'src/components/**/*.test.ts',
+      ...splitSuiteFixtures,
       'src/components/pages/chat*.ts',
       'src/components/shared/chat/**',
     ],
