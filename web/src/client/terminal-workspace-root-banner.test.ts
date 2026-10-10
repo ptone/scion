@@ -69,7 +69,6 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-
 /** The URL a fetch mock was called with, whatever form it took. */
 function urlOf(input: unknown): string {
   if (typeof input === 'string') return input;
