@@ -257,6 +257,37 @@ test('a dismiss refocuses the footer button that opened the palette', async ({ p
     .toBe(true);
 });
 
+test('same-named agents in different projects show their project slugs, and match on them', async ({
+  page,
+}) => {
+  await setup(page, {
+    [agentA]: { ...fixture(agentA, 'Twin'), projectId: 'p-alpha', project: 'Alpha Project' },
+    [agentB]: { ...fixture(agentB, 'Twin'), projectId: 'p-beta', project: 'Beta Project' },
+  });
+  await page.route(/\/api\/v1\/projects\?/, (route) =>
+    route.fulfill({
+      json: {
+        projects: [
+          { id: 'p-alpha', name: 'Alpha Project', slug: 'alpha-proj' },
+          { id: 'p-beta', name: 'Beta Project', slug: 'beta-proj' },
+        ],
+        totalCount: 2,
+      },
+    })
+  );
+  await page.goto(`/terminals/${agentA}`);
+  await expect(page.locator('.xterm-helper-textarea').first()).toBeAttached();
+
+  await paletteButton(page).click();
+  const secondary = page.locator('scion-quick-palette .palette-option .palette-secondary');
+  await expect(secondary).toHaveText(['alpha-proj', 'beta-proj']);
+
+  await page.locator('scion-quick-palette #palette-query-input').fill('beta-proj');
+  await expect(secondary).toHaveText(['beta-proj']);
+  await page.locator('scion-quick-palette #palette-query-input').fill('Alpha Project');
+  await expect(secondary).toHaveText(['alpha-proj']);
+});
+
 test('the palette uses the same type scale as the chat palette', async ({ page }) => {
   await setup(page, { [agentA]: { ...fixture(agentA, 'Alice-bot'), project: 'Fixture Project' } });
   await page.goto(`/terminals/${agentA}`);

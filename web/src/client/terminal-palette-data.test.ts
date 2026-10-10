@@ -21,7 +21,7 @@
  * retain over the shared agent store's hub entry.
  */
 
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 
 vi.mock('./api.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./api.js')>();
@@ -44,6 +44,7 @@ import type { PaletteCandidate, RawPaletteAgent } from './palette-types.js';
 import type { Agent, AgentActivity } from '../shared/types.js';
 import { createHarness, settle, type Harness } from './__fixtures__/agent-store-harness.js';
 import { AGENT_PROBE_INTERVAL_MS } from './agent-store.js';
+import { ProjectSlugIndex, type ProjectSlugSource } from './project-slugs.js';
 
 const apiFetchMock = vi.mocked(apiFetch);
 
@@ -68,6 +69,14 @@ function agent(
 }
 
 let harness: Harness | null = null;
+/** The project slug index the loads under test read; lists no projects unless a test says so. */
+let slugs: ProjectSlugIndex;
+let fetchProjects: ReturnType<typeof vi.fn<() => Promise<ProjectSlugSource[]>>>;
+
+beforeEach(() => {
+  fetchProjects = vi.fn<() => Promise<ProjectSlugSource[]>>().mockResolvedValue([]);
+  slugs = new ProjectSlugIndex(fetchProjects);
+});
 
 afterEach(() => {
   harness?.store.destroy();
@@ -222,7 +231,8 @@ function load(
       isCurrent: overrides.isCurrent ?? ((): boolean => true),
       ...(overrides.onProgress ? { onProgress: overrides.onProgress } : {}),
     },
-    h.store
+    h.store,
+    slugs
   );
   return { controller, promise };
 }
@@ -398,6 +408,92 @@ describe('selectTerminalPaletteCandidates', () => {
     expect(selectTerminalPaletteCandidates({ ...snapshot, agents: [...snapshot.agents] })).not.toBe(
       candidates
     );
+  });
+});
+
+describe('project slugs', () => {
+  function secondary(candidates: readonly PaletteCandidate[]): string[] {
+    return candidates.map((c) => c.secondaryLabel ?? '');
+  }
+
+  it('names each project by slug where the lookup knows it, keeping slug and name searchable', () => {
+    const lookup = (id: string): string | undefined => (id === 'p1' ? 'alpha-proj' : undefined);
+    const candidates = buildTerminalAgentCandidates(
+      [
+        agent({ id: 'a1', name: 'Twin', projectId: 'p1', project: 'Alpha Project' }),
+        agent({ id: 'a2', name: 'Twin', projectId: 'p2', project: 'Beta Project' }),
+      ],
+      lookup
+    );
+
+    expect(secondary(candidates)).toEqual(['alpha-proj', 'Beta Project']);
+    expect(candidates[0].searchFields).toEqual(['Twin', 'alpha-proj', 'Alpha Project']);
+  });
+
+  it('a load shows a known slug at once, with no project request', async () => {
+    slugs.seed([{ id: 'p1', slug: 'alpha-proj' }]);
+    const h = storeWith([row('a1', { name: 'Twin', project: 'Alpha Project' })]);
+
+    const { promise } = load(h);
+    await h.connect();
+
+    expect(secondary(await promise)).toEqual(['alpha-proj']);
+    expect(fetchProjects).not.toHaveBeenCalled();
+  });
+
+  it('a load lists projects for an unknown slug, and the retained listener hears the rows with it', async () => {
+    fetchProjects.mockResolvedValue([
+      { id: 'p1', slug: 'alpha-proj' },
+      { id: 'p2', slug: 'beta-proj' },
+    ]);
+    const h = storeWith([
+      row('a1', { name: 'Twin', projectId: 'p1', project: 'Alpha Project' }),
+      row('a2', { name: 'Twin', projectId: 'p2', project: 'Beta Project' }),
+    ]);
+    const heard: string[][] = [];
+    const release = retainTerminalPaletteAgents((c) => heard.push(secondary(c)), h.store, slugs);
+
+    const { promise } = load(h);
+    await h.connect();
+    expect(secondary(await promise)).toEqual(['Alpha Project', 'Beta Project']);
+    await settle();
+
+    expect(fetchProjects).toHaveBeenCalledTimes(1);
+    expect(heard.at(-1)).toEqual(['alpha-proj', 'beta-proj']);
+    release();
+  });
+
+  it('a released listener does not hear a slug that becomes known', async () => {
+    const h = storeWith([row('a1', { name: 'Twin', project: 'Alpha Project' })]);
+    const heard: string[][] = [];
+    const release = retainTerminalPaletteAgents((c) => heard.push(secondary(c)), h.store, slugs);
+    const keepAlive = h.store.retain({ scope: 'hub' }, () => {});
+    const first = load(h).promise;
+    await h.connect();
+    await first;
+    heard.length = 0;
+
+    release();
+    slugs.seed([{ id: 'p1', slug: 'alpha-proj' }]);
+
+    expect(heard).toEqual([]);
+    keepAlive();
+  });
+
+  it('the selection is rebuilt when the slug index changes', async () => {
+    const h = storeWith([row('a1', { name: 'Twin', project: 'Alpha Project' })]);
+    const first = load(h).promise;
+    await h.connect();
+    await first;
+    const snapshot = h.store.peek({ scope: 'hub' })!;
+    const before = selectTerminalPaletteCandidates(snapshot, slugs);
+
+    slugs.seed([{ id: 'p1', slug: 'alpha-proj' }]);
+    const after = selectTerminalPaletteCandidates(snapshot, slugs);
+
+    expect(after).not.toBe(before);
+    expect(secondary(after)).toEqual(['alpha-proj']);
+    expect(selectTerminalPaletteCandidates(snapshot, slugs)).toBe(after);
   });
 });
 

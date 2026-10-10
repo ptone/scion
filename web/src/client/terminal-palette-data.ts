@@ -32,12 +32,20 @@
 
 import { agentStore } from './agent-store.js';
 import type { AgentListSnapshot, AgentStore } from './agent-store.js';
-import { buildAgentCandidate } from './agent-palette-candidate.js';
+import { buildAgentCandidate, type ProjectSlugLookup } from './agent-palette-candidate.js';
+import { projectSlugs as sharedProjectSlugs } from './project-slugs.js';
+import type { ProjectSlugIndex } from './project-slugs.js';
 import type { PaletteCandidate, RawPaletteAgent } from './palette-types.js';
 import { can, isTerminalAvailable } from '../shared/types.js';
 
 /** The part of the agent store the terminal palette reads. */
-export type TerminalPaletteAgentSource = Pick<AgentStore, 'ensure' | 'retain'>;
+export type TerminalPaletteAgentSource = Pick<AgentStore, 'ensure' | 'retain' | 'peek'>;
+
+/** The part of the project slug index the terminal palette reads. */
+export type TerminalPaletteSlugSource = Pick<
+  ProjectSlugIndex,
+  'lookup' | 'version' | 'ensure' | 'subscribe'
+>;
 
 /** The store entry behind the terminal palette: every agent across every project. */
 export const TERMINAL_PALETTE_AGENT_QUERY = { scope: 'hub' } as const;
@@ -56,34 +64,47 @@ export function isTerminalPaletteAgentViable(agent: RawPaletteAgent): boolean {
 
 /**
  * Build Agents-group palette candidates for the terminal view: one
- * {@link buildAgentCandidate} row per viable agent.
+ * {@link buildAgentCandidate} row per viable agent, naming its project by
+ * slug where `projectSlug` knows it.
  */
 export function buildTerminalAgentCandidates(
-  agents: readonly RawPaletteAgent[]
+  agents: readonly RawPaletteAgent[],
+  projectSlug?: ProjectSlugLookup
 ): PaletteCandidate[] {
   const candidates: PaletteCandidate[] = [];
   for (const agent of agents) {
     if (!agent.id || !isTerminalPaletteAgentViable(agent)) continue;
-    candidates.push(buildAgentCandidate(agent));
+    candidates.push(buildAgentCandidate(agent, projectSlug));
   }
   return candidates;
 }
 
 /** Candidates per row array, so a list no store holds any more is not kept alive here. */
-const selected = new WeakMap<readonly RawPaletteAgent[], PaletteCandidate[]>();
+const selected = new WeakMap<
+  readonly RawPaletteAgent[],
+  { slugs: TerminalPaletteSlugSource; version: number; candidates: PaletteCandidate[] }
+>();
 
 /**
  * The terminal palette's candidates for a store snapshot. Memoised on the
  * snapshot's row array, which the store replaces only when membership or a
- * row changes, so republishing an unchanged list returns the same array.
+ * row changes, and on the slug index's version, so republishing an
+ * unchanged list returns the same array.
  */
-export function selectTerminalPaletteCandidates(snapshot: AgentListSnapshot): PaletteCandidate[] {
-  let candidates = selected.get(snapshot.agents);
-  if (!candidates) {
-    candidates = buildTerminalAgentCandidates(snapshot.agents);
-    selected.set(snapshot.agents, candidates);
-  }
+export function selectTerminalPaletteCandidates(
+  snapshot: AgentListSnapshot,
+  slugs: TerminalPaletteSlugSource = sharedProjectSlugs
+): PaletteCandidate[] {
+  const memo = selected.get(snapshot.agents);
+  if (memo && memo.slugs === slugs && memo.version === slugs.version) return memo.candidates;
+  const candidates = buildTerminalAgentCandidates(snapshot.agents, slugs.lookup);
+  selected.set(snapshot.agents, { slugs, version: slugs.version, candidates });
   return candidates;
+}
+
+/** The project IDs of `agents`, for {@link ProjectSlugIndex.ensure}. */
+function projectIdsOf(agents: readonly RawPaletteAgent[]): string[] {
+  return [...new Set(agents.map((agent) => agent.projectId ?? '').filter((id) => id))];
 }
 
 /** Options for {@link loadTerminalPaletteAgents}. */
@@ -114,7 +135,8 @@ function abortError(): DOMException {
  */
 export async function loadTerminalPaletteAgents(
   { controller, isCurrent, onProgress }: TerminalPaletteAgentsLoadOptions,
-  agents: TerminalPaletteAgentSource = agentStore
+  agents: TerminalPaletteAgentSource = agentStore,
+  slugs: TerminalPaletteSlugSource = sharedProjectSlugs
 ): Promise<PaletteCandidate[]> {
   let snapshot: AgentListSnapshot;
   try {
@@ -124,7 +146,7 @@ export async function loadTerminalPaletteAgents(
         // The store stops calling an aborted caller, so only a load
         // superseded without an abort needs this check.
         onProgress: (progress: AgentListSnapshot): void => {
-          if (isCurrent()) onProgress(buildTerminalAgentCandidates(progress.agents));
+          if (isCurrent()) onProgress(buildTerminalAgentCandidates(progress.agents, slugs.lookup));
         },
       }),
     });
@@ -139,20 +161,33 @@ export async function loadTerminalPaletteAgents(
   // The store rejects an aborted caller, so only a load superseded without
   // an abort needs this check; the host checks its own abort as well.
   if (!isCurrent()) throw abortError();
-  return selectTerminalPaletteCandidates(snapshot);
+  // Rows name a project by its display name until its slug is known; the
+  // retained listener republishes them when it arrives.
+  void slugs.ensure(projectIdsOf(snapshot.agents));
+  return selectTerminalPaletteCandidates(snapshot, slugs);
 }
 
 /**
  * Keep the store's hub entry live for the terminal workspace and hear its
- * candidates on every ready snapshot (an SSE change, a revalidation).
- * Loading and error snapshots are left to the load that asked for them.
- * Does not fetch by itself. Returns the release function.
+ * candidates on every ready snapshot (an SSE change, a revalidation), and
+ * whenever a project slug becomes known. Loading and error snapshots are
+ * left to the load that asked for them. Does not fetch by itself. Returns
+ * the release function.
  */
 export function retainTerminalPaletteAgents(
   listener: (candidates: PaletteCandidate[]) => void,
-  agents: TerminalPaletteAgentSource = agentStore
+  agents: TerminalPaletteAgentSource = agentStore,
+  slugs: TerminalPaletteSlugSource = sharedProjectSlugs
 ): () => void {
-  return agents.retain(TERMINAL_PALETTE_AGENT_QUERY, (snapshot) => {
-    if (snapshot.status === 'ready') listener(selectTerminalPaletteCandidates(snapshot));
+  const release = agents.retain(TERMINAL_PALETTE_AGENT_QUERY, (snapshot) => {
+    if (snapshot.status === 'ready') listener(selectTerminalPaletteCandidates(snapshot, slugs));
   });
+  const unsubscribe = slugs.subscribe(() => {
+    const snapshot = agents.peek(TERMINAL_PALETTE_AGENT_QUERY);
+    if (snapshot?.status === 'ready') listener(selectTerminalPaletteCandidates(snapshot, slugs));
+  });
+  return () => {
+    unsubscribe();
+    release();
+  };
 }

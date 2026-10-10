@@ -26,6 +26,7 @@ import type { ScionTerminalPane } from '../components/terminal/terminal-pane.js'
 import type { TerminalPaletteAgentsLoadOptions } from './terminal-palette-data.js';
 import type { PaletteCandidate } from './palette-types.js';
 import { AgentStore } from './agent-store.js';
+import { ProjectSlugIndex } from './project-slugs.js';
 import { FakeEventSource } from './__fixtures__/agent-store-harness.js';
 import { TOUCH_PRIMARY_QUERY } from '../utils/input-modality.js';
 import { requestUrl } from './__fixtures__/request-url.js';
@@ -75,6 +76,8 @@ const paletteLoad = vi.hoisted(() => ({
   store: null as AgentStore | null,
   /** Replaces the hub entry's retain once, when set (cleared after use). */
   retainOverride: null as null | (() => () => void),
+  /** This test's project slug index, standing in for the singleton. */
+  slugs: null as ProjectSlugIndex | null,
 }));
 function paletteStore(): AgentStore {
   if (!paletteLoad.store) throw new Error('no agent store for this test');
@@ -112,7 +115,22 @@ vi.mock('./agent-store.js', async (importOriginal) => {
   return { ...actual, agentStore };
 });
 
+/** The slug index singleton, as the palette data module sees it: this test's index. */
+vi.mock('./project-slugs.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./project-slugs.js')>();
+  const projectSlugs = new Proxy({} as ProjectSlugIndex, {
+    get: (_target, key): unknown => {
+      const index = paletteLoad.slugs;
+      if (!index) throw new Error('no project slug index for this test');
+      const value: unknown = Reflect.get(index, key);
+      return typeof value === 'function' ? (value as () => unknown).bind(index) : value;
+    },
+  });
+  return { ...actual, projectSlugs };
+});
+
 beforeEach(() => {
+  paletteLoad.slugs = new ProjectSlugIndex();
   // The feed's stream never opens here: walks start once the (zero)
   // connect wait is over, and a ready list revalidates on every load.
   vi.stubGlobal('EventSource', FakeEventSource);
@@ -127,6 +145,7 @@ beforeEach(() => {
 afterEach(() => {
   paletteLoad.store?.destroy();
   paletteLoad.store = null;
+  paletteLoad.slugs = null;
 });
 
 let WorkspaceRoot: typeof TerminalWorkspaceRoot;
@@ -3137,6 +3156,62 @@ describe('"Jump to agent" palette: the agent store\'s hub entry', () => {
     await vi.waitFor(() => expect(labels(palette)).toEqual(['Alice-bot']));
     expect(palette.groups.agents?.status).toBe('ready');
     expect(listRequests).toHaveLength(1);
+  });
+
+  it("the open palette's rows name each project by slug once the project list arrives", async () => {
+    let finishProjects: () => void = () => {};
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        const path = String(url).replace(/^https?:\/\/[^/]+/, '');
+        if (path.startsWith('/api/v1/agents?')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                agents: [
+                  { id: AGENT_A, projectId: 'p1', project: 'Alpha Project' },
+                  { id: AGENT_B, projectId: 'p2', project: 'Beta Project' },
+                ].map((a) => ({
+                  ...a,
+                  name: 'Twin',
+                  phase: 'running',
+                  _capabilities: { actions: ['attach'] },
+                })),
+              }),
+              { status: 200 }
+            )
+          );
+        }
+        if (path.startsWith('/api/v1/projects?')) {
+          return new Promise<Response>((resolve) => {
+            finishProjects = (): void =>
+              resolve(
+                new Response(
+                  JSON.stringify({
+                    projects: [
+                      { id: 'p1', slug: 'alpha-proj' },
+                      { id: 'p2', slug: 'beta-proj' },
+                    ],
+                  }),
+                  { status: 200 }
+                )
+              );
+          });
+        }
+        return Promise.resolve(new Response('{}', { status: 200 }));
+      })
+    );
+    const secondary = (palette: ScionQuickPalette): string[] =>
+      (palette.groups.agents?.candidates ?? []).map((c) => c.secondaryLabel ?? '');
+    root.show(true);
+    await connectFeed();
+    const palette = await openLoadedPalette(root);
+    expect(secondary(palette)).toEqual(['Alpha Project', 'Beta Project']);
+
+    finishProjects();
+
+    await vi.waitFor(() => expect(secondary(palette)).toEqual(['alpha-proj', 'beta-proj']));
+    expect(palette.open).toBe(true);
   });
 
   it('a change while the palette is closed is not published until the next open', async () => {
