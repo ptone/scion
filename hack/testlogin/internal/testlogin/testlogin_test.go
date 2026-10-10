@@ -60,13 +60,14 @@ type fakeHub struct {
 	exists        bool   // the requested email already belongs to a user
 	forceCreated  *bool  // if set, report this "created" value regardless
 	rateLimitFrom int    // answer test-login call number N and later with 429 (0: off)
-	loginCalls    int    // test-login calls received, preflight included
-	userLookups   int    // GET /api/v1/users/<id> calls
 	retryAfter    string // Retry-After sent with 429
-	createOnly    bool   // createOnly in the last authenticated request
 
+	// Fields below change while the fake serves requests; mu guards them.
 	mu            sync.Mutex
 	requests      int
+	loginCalls    int  // test-login calls received, preflight included
+	userLookups   int  // GET /api/v1/users/<id> calls
+	createOnly    bool // createOnly in the last authenticated request
 	authedLogins  int
 	createdUsers  int
 	requestedRole string
@@ -523,6 +524,9 @@ func TestMintRateLimited(t *testing.T) {
 		{"at login", 2, "7", "Retry-After: 7s"},
 		{"no Retry-After", 2, "", "Retry-After: not given"},
 		{"HTTP date", 2, "Sat, 10 Oct 2026 21:00:00 GMT", "Retry-After: Sat, 10 Oct 2026 21:00:00 GMT"},
+		{"oversized", 2, strings.Repeat("9", 41), "Retry-After: not given"},
+		{"non-ASCII", 2, "5\u00e9", "Retry-After: not given"},
+		{"non-ASCII date", 2, "Sat, 10 Oct 2026 21:00:00 GMT\u202e", "Retry-After: not given"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -543,6 +547,65 @@ func TestMintRateLimited(t *testing.T) {
 			}
 			assertGone(t, e.out)
 		})
+	}
+}
+
+// TestRateLimitedCleansRetryAfter covers values Go's HTTP client would
+// deliver only from a lenient transport: control characters must never be
+// echoed.
+func TestRateLimitedCleansRetryAfter(t *testing.T) {
+	for _, v := range []string{"5\x01", "\x1b[2J5", "5\x7f", "5\u0085", "5\n6", strings.Repeat("1", 41), "7\u00e9"} {
+		m := &minter{retryAfter: v}
+		got := m.rateLimited().Error()
+		if !strings.Contains(got, "Retry-After: not given") {
+			t.Errorf("Retry-After %q printed as %q", v, got)
+		}
+	}
+	for v, want := range map[string]string{"7": "Retry-After: 7s", " 12 ": "Retry-After: 12s", "Sat, 10 Oct 2026 21:00:00 GMT": "Retry-After: Sat, 10 Oct 2026 21:00:00 GMT"} {
+		if got := (&minter{retryAfter: v}).rateLimited().Error(); !strings.Contains(got, want) {
+			t.Errorf("Retry-After %q printed as %q, want %q", v, got, want)
+		}
+	}
+}
+
+// TestMintMalformedRetryAfterIsNotEchoed checks that a 429 whose Retry-After
+// carries control characters (which Go's client rejects, quoting the line
+// in its error) fails without retrying and prints no control characters.
+func TestMintMalformedRetryAfterIsNotEchoed(t *testing.T) {
+	for _, v := range []string{"5\x01", "\x1b[2J5"} {
+		e := newEnv(t)
+		e.hub.rateLimitFrom, e.hub.retryAfter = 2, v
+		code, stdout, stderr := e.mint(t)
+		if code == 0 {
+			t.Fatal("expected failure")
+		}
+		assertPrintable(t, stdout+stderr)
+		if e.hub.loginCalls != 2 {
+			t.Errorf("test-login calls %d, want 2 (no retry)", e.hub.loginCalls)
+		}
+		assertGone(t, e.out)
+	}
+}
+
+func assertPrintable(t *testing.T, s string) {
+	t.Helper()
+	for _, r := range s {
+		if (r < 0x20 && r != '\n' && r != '\t') || (r >= 0x7f && r <= 0x9f) {
+			t.Errorf("output contains control character %U:\n%q", r, s)
+			return
+		}
+	}
+}
+
+func TestPrintableWriter(t *testing.T) {
+	var buf bytes.Buffer
+	in := "ok\tline\n\x1b[31mred\x07 \u0085 \xff caf\u00e9\n"
+	n, err := printableWriter{&buf}.Write([]byte(in))
+	if err != nil || n != len(in) {
+		t.Fatalf("Write = %d, %v; want %d, nil", n, err, len(in))
+	}
+	if want := "ok\tline\n?[31mred? ? ? caf\u00e9\n"; buf.String() != want {
+		t.Errorf("got %q, want %q", buf.String(), want)
 	}
 }
 

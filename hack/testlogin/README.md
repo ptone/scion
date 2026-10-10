@@ -145,6 +145,9 @@ session. To remove the user completely:
 - The only file written is the access token: mode 0600, created
   exclusively, at a path the operator chose.
 - The access token lives 15 minutes. The challenge lives 5 minutes.
+- Everything the tool prints passes through a filter that replaces control
+  characters, so text from the hub or the HTTP client cannot drive the
+  terminal.
 - Generated emails use the reserved `.invalid` domain. They are random, so
   they do not collide with real accounts. On hubs with `createOnly`, an
   existing account is refused before anything changes. On older hubs the

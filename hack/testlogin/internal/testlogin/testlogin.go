@@ -36,6 +36,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/hack/testlogin/internal/challenge"
 )
@@ -96,6 +97,10 @@ cleanup: checks the token in --token-file, then deletes the file. The user
 // Run executes the command with args (excluding the program name) and
 // returns the process exit code.
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer, opts Options) int {
+	// Messages can include text from the hub or from Go's HTTP client
+	// (which quotes malformed response lines); strip control characters so
+	// nothing printed can drive the terminal.
+	stdout, stderr = printableWriter{stdout}, printableWriter{stderr}
 	if len(args) == 0 {
 		_, _ = fmt.Fprint(stderr, usage)
 		return 2
@@ -112,6 +117,31 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, opts Opti
 		_, _ = fmt.Fprintf(stderr, "testlogin: unknown subcommand %q\n\n%s", args[0], usage)
 		return 2
 	}
+}
+
+// printableWriter replaces control characters (C0 other than tab and
+// newline, DEL, and C1) and invalid UTF-8 with '?'.
+type printableWriter struct{ w io.Writer }
+
+func (p printableWriter) Write(b []byte) (int, error) {
+	n := len(b)
+	clean := make([]byte, 0, n)
+	for len(b) > 0 {
+		r, size := utf8.DecodeRune(b)
+		switch {
+		case r == utf8.RuneError && size <= 1,
+			r < 0x20 && r != '\n' && r != '\t',
+			r >= 0x7f && r <= 0x9f:
+			clean = append(clean, '?')
+		default:
+			clean = append(clean, b[:size]...)
+		}
+		b = b[size:]
+	}
+	if _, err := p.w.Write(clean); err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 func errorf(w io.Writer, format string, a ...any) {
@@ -351,7 +381,7 @@ func (m *minter) preflight(ctx context.Context) error {
 
 // rateLimited reports a 429 from test-login. The tool does not retry.
 func (m *minter) rateLimited() error {
-	after := strings.TrimSpace(m.retryAfter)
+	after := strings.Trim(m.retryAfter, " \t")
 	switch {
 	case after == "" || len(after) > 40 || strings.ContainsFunc(after, func(r rune) bool { return r < ' ' || r > '~' }):
 		after = "not given"
