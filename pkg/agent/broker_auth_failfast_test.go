@@ -283,40 +283,42 @@ func TestStart_BrokerCredentialFileFromVolume(t *testing.T) {
 
 // A file-type secret whose target is the auth file's target satisfies an
 // explicit file auth type even when its name and target make it no auth
-// candidate (copilot's ~/.copilot/config.json is not one of the target
+// candidate (grok-build's ~/.grok/auth.json is not one of the target
 // suffixes OverlayFileSecrets recognises): sciontool writes it to its target
-// before the provisioner runs. A file secret elsewhere does not.
+// before the provisioner runs. A file secret elsewhere does not. grok-build's
+// home template ships no file at that target (copilot's does, so it cannot
+// show a rejection).
 func TestStart_BrokerCredentialFileFromFileSecret(t *testing.T) {
 	for _, tc := range []struct {
 		name, target string
 		wantErr      bool
 	}{
-		{name: "file secret at target", target: "~/.copilot/config.json"},
-		{name: "absolute file secret at target", target: "/home/scion/.copilot/config.json"},
-		{name: "file secret elsewhere", target: "~/.copilot/other.json", wantErr: true},
+		{name: "file secret at target", target: "~/.grok/auth.json"},
+		{name: "absolute file secret at target", target: "/home/scion/.grok/auth.json"},
+		{name: "file secret elsewhere", target: "~/.grok/other.json", wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			for _, k := range []string{"COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"} {
+			for _, k := range []string{"XAI_API_KEY", "SCION_METADATA_PROJECT_ID"} {
 				t.Setenv(k, "")
 			}
 			// Resolve before newClaudeRestartEnv changes the working directory.
-			src, err := filepath.Abs(filepath.Join("..", "..", "harnesses", "copilot"))
+			src, err := filepath.Abs(filepath.Join("..", "..", "harnesses", "grok-build"))
 			if err != nil {
 				t.Fatal(err)
 			}
 			e, _ := newClaudeRestartEnv(t)
-			if err := os.CopyFS(filepath.Join(e.scion, "harness-configs", "copilot"), os.DirFS(src)); err != nil {
-				t.Fatalf("copy copilot harness-config: %v", err)
+			if err := os.CopyFS(filepath.Join(e.scion, "harness-configs", "grok-build"), os.DirFS(src)); err != nil {
+				t.Fatalf("copy grok-build harness-config: %v", err)
 			}
 			runs := 0
-			opts := api.StartOptions{Name: "ff-filesecret", ProjectPath: e.scion, HarnessConfig: "copilot", BrokerMode: true,
+			opts := api.StartOptions{Name: "ff-filesecret", ProjectPath: e.scion, HarnessConfig: "grok-build", BrokerMode: true,
 				HarnessAuth: "auth-file",
 				ResolvedSecrets: []api.ResolvedSecret{{
-					Name: "copilot-settings", Type: "file", Target: tc.target, Value: `{"placeholder":true}`, Source: "user",
+					Name: "grok-settings", Type: "file", Target: tc.target, Value: `{"placeholder":true}`, Source: "user",
 				}}}
 			_, err = failfastManager(&runs, "docker").Start(context.Background(), opts)
 			if tc.wantErr {
-				assertNoAuthSatisfied(t, err, runs, "copilot", `"auth-file"`)
+				assertNoAuthSatisfied(t, err, runs, "grok", `"auth-file"`)
 				return
 			}
 			if err != nil {
