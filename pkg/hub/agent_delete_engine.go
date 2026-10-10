@@ -216,27 +216,34 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 					post.Phase = stopping
 				}
 			}
-			if cur.DeletionState == store.DeletionStateFinalizing {
+			// writeRequest stores a newly derived request.
+			writeRequest := func() {
+				if b, err := json.Marshal(req); err == nil {
+					rs := string(b)
+					f.Request = &rs
+				}
+			}
+			stored, haveStored := storedDeletionRequest(cur)
+			switch {
+			case cur.DeletionState == store.DeletionStateFinalizing && haveStored:
 				// Teardown ran under the stored request, so the finish
 				// keeps its soft/hard decision (and the whole request),
 				// whatever this retry asked for and whatever retention
 				// says now (ptone/scion#4183), as the in_doubt re-claim
 				// does. The column is left untouched.
-				if stored, ok := storedDeletionRequest(cur); ok {
-					req = stored
-					f.Request = nil
-					return
-				}
+				req = stored
+			case cur.DeletionState == store.DeletionStateFinalizing:
 				// No usable stored request: decide from the current
 				// configuration only, never from this retry's force,
 				// deleteFiles or removeBranch (the dispatch is skipped).
 				s.agentLifecycleLog.Warn("delete claim: finalizing row has no stored request; using the current retention setting",
-					"agent_id", cur.ID, "claim", cur.DeletionClaim+1)
+					"agent_id", cur.ID, "claim", claim)
 				req = store.DeletionRequestInfo{
 					RequestedBy: p.requestedBy,
 					Soft:        s.config.SoftDeleteRetention > 0 && !post.IsIncompleteCreate(),
 				}
-			} else {
+				writeRequest()
+			default:
 				// Soft unless force, no retention, or an incomplete async
 				// create (T1 §0c, evaluated on the post-claim row): those
 				// are always hard-deleted so the name can be reused.
@@ -250,10 +257,7 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 				if req.Soft && s.config.SoftDeleteRetainFiles {
 					req.DeleteFiles = false
 				}
-			}
-			if b, err := json.Marshal(req); err == nil {
-				rs := string(b)
-				f.Request = &rs
+				writeRequest()
 			}
 		},
 	}
