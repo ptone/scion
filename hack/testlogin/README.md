@@ -66,16 +66,25 @@ There is no flag to choose the role. The tool always requests `member`.
    Nothing is created. The tool continues only on 401.
 4. Signs a five-minute challenge (audience `scion-test-login`). This
    challenge cannot be used as an access token. It then calls test-login with
-   role `member`, an email `<prefix>-<16 hex>@scion-test.invalid` and display
-   name `<prefix> <16 hex>`. A 401 here means the secret file does not hold
-   the secret the hub signs with. The tool does not retry with other sources.
+   role `member`, `createOnly: true`, an email
+   `<prefix>-<16 hex>@scion-test.invalid` and display name
+   `<prefix> <16 hex>`. Possible refusals:
+   - 401: the secret file does not hold the secret the hub signs with. The
+     tool does not retry with other sources.
+   - 409: an account with that email already exists. With `createOnly` the
+     hub changed nothing, so there is nothing to clean up.
+   - 429: the hub rate-limits test-login per source address. The tool
+     prints the `Retry-After` value and exits; it does not retry.
 5. Checks the result before writing anything, in this order:
-   - `GET /api/v1/users/<uid>` shows that the account was created during
-     this run (`created` falls within the run, allowing 5 seconds, and
-     `lastLogin` is within 5 seconds of `created`). test-login updates an
-     existing user that has the same email, so an account that already
-     existed is always rejected. This check runs first, so
-     any later failure knows whether the account is one this run created;
+   - the account was created by this run. If the response has `created`,
+     it must be `true`. Hubs without `createOnly` support omit `created` and
+     ignore `createOnly`; with those, the tool prints one note and falls back
+     to `GET /api/v1/users/<uid>`: `created` must fall within the run
+     (allowing 5 seconds) and `lastLogin` must be within 5 seconds of
+     `created`. On such hubs test-login updates an existing user that has
+     the same email, so an existing account is always rejected. This check
+     runs first, so any later failure knows whether the account is one this
+     run created;
    - the response and the token's claims say role `member` and the expected
      email;
    - the token is an access token and its `exp - iat` is 30 minutes or less
@@ -137,8 +146,9 @@ session. To remove the user completely:
   exclusively, at a path the operator chose.
 - The access token lives 15 minutes. The challenge lives 5 minutes.
 - Generated emails use the reserved `.invalid` domain. They are random, so
-  they do not collide with real accounts, and the freshness check rejects
-  an existing account anyway.
+  they do not collide with real accounts. On hubs with `createOnly`, an
+  existing account is refused before anything changes. On older hubs the
+  freshness check rejects it after the fact.
 
 ## Tests
 
@@ -146,4 +156,5 @@ session. To remove the user completely:
   `httptest` fake hub. These are fast and do not link `pkg/hub`.
 - `internal/hubpin`: links `pkg/hub`. It pins the key derivation and the
   challenge format to the hub, and runs `mint` and `cleanup` against an
-  in-process hub backed by SQLite.
+  in-process hub backed by SQLite. That hub supports `createOnly`; the
+  fallback path for older hubs is covered by the fake-hub tests.

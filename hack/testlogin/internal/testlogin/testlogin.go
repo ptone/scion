@@ -177,6 +177,7 @@ type minter struct {
 	client     *http.Client
 	stdout     io.Writer
 	stderr     io.Writer
+	retryAfter string // Retry-After of the last response, if any
 	createdUID string
 	// preexisting is set when the user returned by test-login was not
 	// created by this run.
@@ -199,6 +200,9 @@ type userJSON struct {
 type testLoginResponse struct {
 	User        *userJSON `json:"user"`
 	AccessToken string    `json:"accessToken"`
+	// Created reports whether this call created the user. Hubs without
+	// createOnly support omit it (nil).
+	Created *bool `json:"created"`
 }
 
 func (m *minter) run(ctx context.Context, secretFile, secretVar, out, prefix, email string) (err error) {
@@ -264,10 +268,20 @@ func (m *minter) run(ctx context.Context, secretFile, secretVar, out, prefix, em
 	token := resp.AccessToken
 	u := resp.User
 
-	// Freshness first, so that any later failure knows whether the account
-	// is one this run created (and may be deleted) or not.
-	if err := m.checkFresh(ctx, token, u.ID, start); err != nil {
-		return err
+	// Establish first whether this run created the account, so that any
+	// later failure knows whether it may be deleted. A hub that reports
+	// "created" is authoritative; for older hubs fall back to checking the
+	// user's timestamps.
+	switch {
+	case resp.Created != nil && *resp.Created:
+	case resp.Created != nil:
+		m.preexisting = true
+		return fmt.Errorf("hub reports that user %s already existed (created=false)", u.ID)
+	default:
+		_, _ = fmt.Fprintln(m.stderr, "testlogin: note: this hub does not support createOnly (no \"created\" in the response); checking the user's timestamps instead")
+		if err := m.checkFresh(ctx, token, u.ID, start); err != nil {
+			return err
+		}
 	}
 	m.fresh = true
 
@@ -326,6 +340,8 @@ func (m *minter) preflight(ctx context.Context) error {
 	switch status {
 	case http.StatusUnauthorized:
 		return nil
+	case http.StatusTooManyRequests:
+		return m.rateLimited()
 	case http.StatusForbidden:
 		return fmt.Errorf("test-login is not enabled on this hub (preflight returned 403 %s); refusing to continue", errorCode(body))
 	default:
@@ -333,11 +349,26 @@ func (m *minter) preflight(ctx context.Context) error {
 	}
 }
 
+// rateLimited reports a 429 from test-login. The tool does not retry.
+func (m *minter) rateLimited() error {
+	after := strings.TrimSpace(m.retryAfter)
+	switch {
+	case after == "" || len(after) > 40 || strings.ContainsFunc(after, func(r rune) bool { return r < ' ' || r > '~' }):
+		after = "not given"
+	case strings.Trim(after, "0123456789") == "":
+		after += "s" // delay in seconds; otherwise an HTTP date, shown as sent
+	}
+	return fmt.Errorf("hub rate-limited test-login (429, Retry-After: %s); not retrying, run again later", after)
+}
+
 func (m *minter) testLogin(ctx context.Context, chal, email, displayName string) (*testLoginResponse, error) {
-	reqBody, err := json.Marshal(map[string]string{
+	// createOnly makes a hub that supports it answer 409 without changing
+	// anything if the email already exists. Older hubs ignore the field.
+	reqBody, err := json.Marshal(map[string]any{
 		"email":       email,
 		"role":        role,
 		"displayName": displayName,
+		"createOnly":  true,
 	})
 	if err != nil {
 		return nil, err
@@ -351,6 +382,10 @@ func (m *minter) testLogin(ctx context.Context, chal, email, displayName string)
 	case http.StatusOK:
 	case http.StatusUnauthorized:
 		return nil, errors.New("hub rejected the test-login challenge (401): the session secret in --secret-file is not the one this hub signs with")
+	case http.StatusConflict:
+		return nil, fmt.Errorf("an account with email %s already exists (409 %s); with createOnly the hub changed nothing, so there is nothing to clean up", email, errorCode(body))
+	case http.StatusTooManyRequests:
+		return nil, m.rateLimited()
 	default:
 		return nil, fmt.Errorf("test-login returned HTTP %d %s", status, errorCode(body))
 	}
@@ -561,6 +596,7 @@ func (m *minter) do(ctx context.Context, method, path, bearer string, body []byt
 		return 0, nil, scrubURLError(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	m.retryAfter = resp.Header.Get("Retry-After")
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		return 0, nil, err

@@ -250,6 +250,9 @@ func TestMintAndCleanupAgainstHub(t *testing.T) {
 	if r.code != 0 {
 		t.Fatalf("mint exit %d\nstdout:\n%s\nstderr:\n%s", r.code, r.stdout, r.stderr)
 	}
+	if strings.Contains(r.stderr, "does not support createOnly") {
+		t.Errorf("this hub reports created, but the tool used the fallback:\n%s", r.stderr)
+	}
 	st, err := os.Stat(out)
 	if err != nil {
 		t.Fatal(err)
@@ -292,9 +295,9 @@ func TestMintAndCleanupAgainstHub(t *testing.T) {
 	}
 }
 
-// TestRefusesExistingAccount checks the fail-closed rule: test-login updates
-// an existing user with the requested email, and the tool must reject that
-// account and remove the token file.
+// TestRefusesExistingAccount checks the fail-closed rule against a hub with
+// createOnly: test-login answers 409 for an existing email, the existing
+// user is left unchanged, and no token file is left.
 func TestRefusesExistingAccount(t *testing.T) {
 	secret := randomSecret(t)
 	h := startHub(t, secret, true)
@@ -314,11 +317,18 @@ func TestRefusesExistingAccount(t *testing.T) {
 	if r.code == 0 {
 		t.Fatal("mint accepted a pre-existing account")
 	}
-	if !strings.Contains(r.stderr, "existing account") || strings.Contains(r.stderr, "admin must delete") {
+	if !strings.Contains(r.stderr, "already exists (409") || strings.Contains(r.stderr, "admin must") || strings.Contains(r.stderr, "review:") {
 		t.Errorf("stderr:\n%s", r.stderr)
 	}
 	if _, err := os.Lstat(out); !os.IsNotExist(err) {
 		t.Error("token file left behind")
+	}
+	u, err := h.store.GetUserByEmail(context.Background(), email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Role != "viewer" || u.LastLogin.Sub(created).Abs() > time.Second {
+		t.Errorf("existing user was changed: role %q lastLogin %s", u.Role, u.LastLogin)
 	}
 }
 

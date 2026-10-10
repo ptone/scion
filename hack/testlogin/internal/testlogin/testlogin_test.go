@@ -56,6 +56,14 @@ type fakeHub struct {
 	lastLoginOff  time.Duration // lastLogin = login time + offset
 	tokenLife     time.Duration
 	userStatus    int
+	legacy        bool   // an older hub: ignores createOnly, omits "created"
+	exists        bool   // the requested email already belongs to a user
+	forceCreated  *bool  // if set, report this "created" value regardless
+	rateLimitFrom int    // answer test-login call number N and later with 429 (0: off)
+	loginCalls    int    // test-login calls received, preflight included
+	userLookups   int    // GET /api/v1/users/<id> calls
+	retryAfter    string // Retry-After sent with 429
+	createOnly    bool   // createOnly in the last authenticated request
 
 	mu            sync.Mutex
 	requests      int
@@ -116,6 +124,7 @@ func (f *fakeHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]string{"id": f.uid, "email": email, "role": f.meRole})
 	case strings.HasPrefix(r.URL.Path, pathUsers):
+		f.userLookups++
 		if f.bearer(r) != f.access {
 			writeErr(w, http.StatusUnauthorized, "unauthorized")
 			return
@@ -145,6 +154,14 @@ func (f *fakeHub) testLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, "forbidden")
 		return
 	}
+	f.loginCalls++
+	if f.rateLimitFrom > 0 && f.loginCalls >= f.rateLimitFrom {
+		if f.retryAfter != "" {
+			w.Header().Set("Retry-After", f.retryAfter)
+		}
+		writeErr(w, http.StatusTooManyRequests, "rate_limited")
+		return
+	}
 	parts := strings.Fields(r.Header.Get("Authorization"))
 	if len(parts) != 2 || !strings.EqualFold(parts[0], "bearer") {
 		writeErr(w, http.StatusUnauthorized, "unauthorized")
@@ -165,25 +182,42 @@ func (f *fakeHub) testLogin(w http.ResponseWriter, r *http.Request) {
 		f.t.Errorf("challenge lifetime %v exceeds 5m", life)
 	}
 	f.authedLogins++
-	var req struct{ Email, Role, DisplayName string }
+	var req struct {
+		Email, Role, DisplayName string
+		CreateOnly               bool `json:"createOnly"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_request")
 		return
 	}
-	f.requestedRole, f.email, f.displayName = req.Role, req.Email, req.DisplayName
-	f.createdUsers++
+	f.requestedRole, f.email, f.displayName, f.createOnly = req.Role, req.Email, req.DisplayName, req.CreateOnly
+	if f.exists && req.CreateOnly && !f.legacy {
+		writeErr(w, http.StatusConflict, "conflict")
+		return
+	}
+	created := !f.exists
+	if f.forceCreated != nil {
+		created = *f.forceCreated
+	}
+	if created {
+		f.createdUsers++
+	}
 	f.uid = "uid-" + randHex(f.t, 8)
 	f.loginAt = time.Now()
 	f.access = f.mintToken("access", f.tokenLife)
 	f.refresh = f.mintToken("refresh", 7*24*time.Hour)
 	f.issued = append(f.issued, f.access, f.refresh)
 	http.SetCookie(w, &http.Cookie{Name: "scion_sess", Value: f.refresh})
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	resp := map[string]any{
 		"user":         map[string]string{"id": f.uid, "email": f.email, "displayName": f.displayName, "role": f.respRole},
 		"accessToken":  f.access,
 		"refreshToken": f.refresh,
 		"expiresIn":    int64(f.tokenLife.Seconds()),
-	})
+	}
+	if !f.legacy {
+		resp["created"] = created
+	}
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (f *fakeHub) mintToken(typ string, life time.Duration) string {
@@ -367,10 +401,13 @@ func TestMintFailuresRemoveTokenFile(t *testing.T) {
 		{"auth me other email", func(f *fakeHub) { f.meEmail = "someone@example.com" }, "/auth/me returned email"},
 		{"admin endpoint allowed", func(f *fakeHub) { f.adminStatus = http.StatusOK }, "want 403"},
 		{"admin endpoint not found", func(f *fakeHub) { f.adminStatus = http.StatusNotFound }, "want 403"},
-		{"pre-existing user", func(f *fakeHub) { f.createdOffset = -time.Hour }, "existing account"},
-		{"created in the future", func(f *fakeHub) { f.createdOffset = time.Hour; f.lastLoginOff = time.Hour }, "not created by this run"},
-		{"lastLogin far from created", func(f *fakeHub) { f.lastLoginOff = time.Minute }, "not a newly created user"},
-		{"user lookup forbidden", func(f *fakeHub) { f.userStatus = http.StatusForbidden }, "cannot confirm the user is new"},
+		{"created false", func(f *fakeHub) { f.forceCreated = new(bool) }, "created=false"},
+		{"legacy hub, pre-existing user", func(f *fakeHub) { f.legacy = true; f.createdOffset = -time.Hour }, "existing account"},
+		{"legacy hub, created in the future", func(f *fakeHub) { f.legacy = true; f.createdOffset = time.Hour; f.lastLoginOff = time.Hour }, "not created by this run"},
+		{"legacy hub, lastLogin far from created", func(f *fakeHub) { f.legacy = true; f.lastLoginOff = time.Minute }, "not a newly created user"},
+		{"legacy hub, user lookup forbidden", func(f *fakeHub) { f.legacy = true; f.userStatus = http.StatusForbidden }, "cannot confirm the user is new"},
+		{"email exists (409)", func(f *fakeHub) { f.exists = true }, "already exists (409"},
+		{"rate limited", func(f *fakeHub) { f.rateLimitFrom = 2; f.retryAfter = "7" }, "Retry-After: 7s"},
 		{"token lifetime too long", func(f *fakeHub) { f.tokenLife = 31 * time.Minute }, "exceeds 30m"},
 		{"test-login disabled", func(f *fakeHub) { f.enabled = false }, "not enabled"},
 	}
@@ -400,8 +437,9 @@ func TestMintFailureAdvice(t *testing.T) {
 		forbidden string
 	}{
 		{"confirmed new, later check fails", func(f *fakeHub) { f.adminStatus = http.StatusOK }, "this run created user", "do not delete"},
-		{"existing account", func(f *fakeHub) { f.createdOffset = -time.Hour }, "existing account", "admin must delete"},
-		{"freshness unconfirmed", func(f *fakeHub) { f.userStatus = http.StatusForbidden }, "could not confirm", "admin must delete"},
+		{"hub reports created false", func(f *fakeHub) { f.forceCreated = new(bool) }, "existing account", "admin must delete"},
+		{"legacy hub, existing account", func(f *fakeHub) { f.legacy = true; f.createdOffset = -time.Hour }, "existing account", "admin must delete"},
+		{"legacy hub, freshness unconfirmed", func(f *fakeHub) { f.legacy = true; f.userStatus = http.StatusForbidden }, "could not confirm", "admin must delete"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -417,6 +455,93 @@ func TestMintFailureAdvice(t *testing.T) {
 			if strings.Contains(stderr, tc.forbidden) {
 				t.Errorf("stderr contains %q:\n%s", tc.forbidden, stderr)
 			}
+		})
+	}
+}
+
+func TestMintCreateOnly(t *testing.T) {
+	e := newEnv(t)
+	code, _, stderr := e.mint(t)
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	if !e.hub.createOnly {
+		t.Error("request did not set createOnly")
+	}
+	if e.hub.userLookups != 0 {
+		t.Errorf("user lookups %d; with created=true the timestamp fallback must not run", e.hub.userLookups)
+	}
+	if strings.Contains(stderr, "does not support createOnly") {
+		t.Errorf("fallback note printed for a hub that reports created:\n%s", stderr)
+	}
+}
+
+func TestMintLegacyHubFallback(t *testing.T) {
+	e := newEnv(t)
+	e.hub.legacy = true
+	code, _, stderr := e.mint(t)
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	if n := strings.Count(stderr, "does not support createOnly"); n != 1 {
+		t.Errorf("fallback note printed %d times, want 1:\n%s", n, stderr)
+	}
+	if e.hub.userLookups != 1 {
+		t.Errorf("user lookups %d, want 1 (timestamp fallback)", e.hub.userLookups)
+	}
+}
+
+func TestMintConflictWritesNothing(t *testing.T) {
+	e := newEnv(t)
+	e.hub.exists = true
+	code, _, stderr := e.mint(t)
+	if code == 0 {
+		t.Fatal("expected failure")
+	}
+	if !strings.Contains(stderr, "already exists (409") || !strings.Contains(stderr, "nothing to clean up") {
+		t.Errorf("stderr:\n%s", stderr)
+	}
+	for _, advice := range []string{"admin must", "review:"} {
+		if strings.Contains(stderr, advice) {
+			t.Errorf("stderr gives cleanup advice %q after a 409:\n%s", advice, stderr)
+		}
+	}
+	if e.hub.createdUsers != 0 {
+		t.Errorf("created %d users", e.hub.createdUsers)
+	}
+	assertGone(t, e.out)
+}
+
+func TestMintRateLimited(t *testing.T) {
+	cases := []struct {
+		name       string
+		from       int
+		retryAfter string
+		want       string
+	}{
+		{"at preflight", 1, "3", "Retry-After: 3s"},
+		{"at login", 2, "7", "Retry-After: 7s"},
+		{"no Retry-After", 2, "", "Retry-After: not given"},
+		{"HTTP date", 2, "Sat, 10 Oct 2026 21:00:00 GMT", "Retry-After: Sat, 10 Oct 2026 21:00:00 GMT"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t)
+			e.hub.rateLimitFrom, e.hub.retryAfter = tc.from, tc.retryAfter
+			code, _, stderr := e.mint(t)
+			if code == 0 {
+				t.Fatal("expected failure")
+			}
+			if !strings.Contains(stderr, "429") || !strings.Contains(stderr, tc.want) || !strings.Contains(stderr, "not retrying") {
+				t.Errorf("stderr missing %q:\n%s", tc.want, stderr)
+			}
+			if e.hub.loginCalls != tc.from {
+				t.Errorf("test-login calls %d, want %d (no retry)", e.hub.loginCalls, tc.from)
+			}
+			if e.hub.createdUsers != 0 {
+				t.Errorf("created %d users", e.hub.createdUsers)
+			}
+			assertGone(t, e.out)
 		})
 	}
 }
