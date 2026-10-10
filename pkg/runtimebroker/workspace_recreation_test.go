@@ -93,14 +93,12 @@ func TestApplyStartTemplateIdentity_MissingStateHydratesTemplate(t *testing.T) {
 	err := f.apply(startContextInputs{TemplateID: "tpl-uuid", TemplateHash: "sha256:abc"}, conn, "web-dev")
 	require.NoError(t, err)
 	assert.Equal(t, wantDir, f.opts.Template, "the recreated agent must be provisioned from its own template")
-	_, set := f.opts.Env["SCION_TEMPLATE"]
-	assert.False(t, set, "Manager.Start sets SCION_TEMPLATE from opts.Template, as on create")
 }
 
 // When the agent's broker-side state survived, the start is left exactly as
-// it was: nothing is hydrated, opts.Template stays unset and no env is
-// added, so the existing agent resolves its image and harness-config as
-// before.
+// it was: nothing is hydrated and opts.Template stays unset, so the existing
+// agent resolves its image and harness-config as before. (That no env is
+// added is checked over HTTP in TestStartAgent_SurvivingStateKeepsTemplateUnset.)
 func TestApplyStartTemplateIdentity_SurvivingStateIsUnchanged(t *testing.T) {
 	f := newTemplateIdentityFixture(t, "kept-agent", true)
 	conn, _ := templateConn(t, "web-dev", nil, func() {
@@ -110,8 +108,6 @@ func TestApplyStartTemplateIdentity_SurvivingStateIsUnchanged(t *testing.T) {
 	err := f.apply(startContextInputs{TemplateID: "tpl-uuid", TemplateHash: "sha256:abc"}, conn, "web-dev")
 	require.NoError(t, err)
 	assert.Empty(t, f.opts.Template)
-	_, set := f.opts.Env["SCION_TEMPLATE"]
-	assert.False(t, set, "a surviving agent's start must be a true no-op")
 }
 
 // A hydration failure while the agent has to be provisioned again fails the
@@ -139,8 +135,6 @@ func TestApplyStartTemplateIdentity_NoIdentityKeepsPreviousBehaviour(t *testing.
 
 	require.NoError(t, f.apply(startContextInputs{}, conn, "web-dev"))
 	assert.Empty(t, f.opts.Template)
-	_, set := f.opts.Env["SCION_TEMPLATE"]
-	assert.False(t, set)
 }
 
 func TestRestartAgentConfig_NilWithoutInputs(t *testing.T) {

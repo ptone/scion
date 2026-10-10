@@ -167,7 +167,11 @@ func TestRestartAgent_LiveContainerAndSurvivingStateUnchanged(t *testing.T) {
 	projectDir := filepath.Join(t.TempDir(), ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0o755))
 	writeProvisionedAgent(t, projectDir, "live-agent")
-	addLiveContainer(mgr, "live-agent", projectDir)
+	// The container records a different project path, so the assertion
+	// below tells which one the start uses.
+	containerDir := filepath.Join(t.TempDir(), ".scion")
+	require.NoError(t, os.MkdirAll(containerDir, 0o755))
+	addLiveContainer(mgr, "live-agent", containerDir)
 
 	postRecreationRestart(t, srv, "live-agent", `{
 		"resolvedEnv": {"SCION_AGENT_ID": "agent-uuid-live"},
@@ -180,7 +184,7 @@ func TestRestartAgent_LiveContainerAndSurvivingStateUnchanged(t *testing.T) {
 	require.Equal(t, 1, mgr.startCalls)
 	require.Equal(t, 1, mgr.stopCalls, "the live container is stopped first")
 	opts := mgr.lastStartOpts
-	assert.Equal(t, projectDir, opts.ProjectPath)
+	assert.Equal(t, projectDir, opts.ProjectPath, "the request's project wins over the container's recorded path")
 	assert.False(t, opts.FreshProvision)
 	assert.Empty(t, opts.Template)
 	assert.Zero(t, lookups.Load(), "the template must not be hydrated")
