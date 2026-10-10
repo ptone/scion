@@ -586,6 +586,7 @@ func TestChatUnreadCount_ExplicitMemberProjectsOnly(t *testing.T) {
 	// A real message mentioning the caller: the mention lookup joins on it.
 	mentionMsg := &store.Message{
 		ID: api.NewUUID(), ProjectID: foreign.ID, Sender: "user:someone", SenderID: api.NewUUID(),
+		Recipient: "user:me", RecipientID: me,
 		Msg: "hi @me", Type: messages.TypeInstruction, Channel: "web", ThreadID: mentioned,
 		ConversationID: topicConversationID(t, wcs, mentioned), CreatedAt: time.Now().UTC(),
 	}
