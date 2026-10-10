@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -340,6 +341,24 @@ func TestResilientCloudHandler_CountsCircuitDropsAndFlushErrors(t *testing.T) {
 		t.Fatalf("closed: failures %v circuit %v", f, c)
 	}
 
+	// waitFlushIdle waits until the previous flush goroutine has cleared
+	// flushInFlight. flushOnce clears it in a deferred store that runs after
+	// the result is sent, so receiving the result does not order it; without
+	// this wait the next flush could be rejected as "still in progress"
+	// without calling the test's flushFn. The loop always ends (the store is
+	// unconditional); the deadline only turns a bug into a failure, it is
+	// not a timing assertion.
+	waitFlushIdle := func() {
+		t.Helper()
+		deadline := time.Now().Add(30 * time.Second)
+		for h.flushInFlight.Load() {
+			if time.Now().After(deadline) {
+				t.Fatal("previous flush never cleared flushInFlight")
+			}
+			runtime.Gosched()
+		}
+	}
+
 	// Two failed periodic flushes open the circuit: flush_error 2.
 	h.flushFn = func() error { return errors.New("flush failed") }
 	h.runHealthCheck()
@@ -385,6 +404,7 @@ func TestResilientCloudHandler_CountsCircuitDropsAndFlushErrors(t *testing.T) {
 		h.cb.mu.Unlock()
 	}
 	// Failed probe: flush_error +1, still open.
+	waitFlushIdle()
 	backdate()
 	h.runHealthCheck()
 	if stats.Failures(CloudReasonFlushError) != 3 || !h.CircuitOpen() {
@@ -394,6 +414,7 @@ func TestResilientCloudHandler_CountsCircuitDropsAndFlushErrors(t *testing.T) {
 	// Half-open: the probe's flush blocks until the test releases it.
 	entered := make(chan struct{})
 	release := make(chan error)
+	waitFlushIdle()
 	h.flushFn = func() error {
 		close(entered)
 		return <-release
@@ -434,6 +455,7 @@ func TestResilientCloudHandler_CountsCircuitDropsAndFlushErrors(t *testing.T) {
 	}
 
 	// A successful periodic flush adds nothing.
+	waitFlushIdle()
 	h.flushFn = func() error { return nil }
 	h.runHealthCheck()
 	if stats.Failures(CloudReasonFlushError) != 3 {

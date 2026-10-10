@@ -150,7 +150,7 @@ func TestWriteMetrics_NilProviderAndNilReceiver(t *testing.T) {
 	wm.Observe(&fakeWriterSource{})
 }
 
-// A real writer drives the recorder end to end.
+// A real writer's cumulative counters are exported end to end.
 func TestWriteMetrics_WithRealWriter(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
