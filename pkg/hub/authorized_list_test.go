@@ -1,3 +1,5 @@
+//go:build !hubshard || hubshard_4
+
 package hub
 
 import (
