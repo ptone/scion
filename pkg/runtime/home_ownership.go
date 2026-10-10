@@ -5,10 +5,12 @@ package runtime
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -72,11 +74,13 @@ const agentHomeRepairNamePrefix = "scion-home-repair-"
 var agentHomeRepairNameRE = regexp.MustCompile(`^scion-home-repair-[0-9a-f]{16}$`)
 
 // agentHomeRepairHelper is one planned helper run: the request (its
-// HomeDir already validated and resolved), the container's name, and
-// whether the runtime must ask for the host user namespace explicitly.
+// HomeDir already validated and resolved), the container's name, the key
+// of the home in its label, and whether the runtime must ask for the host
+// user namespace explicitly.
 type agentHomeRepairHelper struct {
 	req        AgentHomeOwnershipRepair
 	name       string
+	homeKey    string
 	userNSHost bool
 }
 
@@ -160,23 +164,64 @@ func agentHomeRepairArgs(h agentHomeRepairHelper) ([]string, error) {
 	if !agentHomeRepairNameRE.MatchString(h.name) {
 		return nil, fmt.Errorf("agent home ownership repair: invalid helper name %q", h.name)
 	}
-	args := []string{"run"}
-	for _, f := range agentHomeRepairFlags(h) {
-		args = append(args, f.flag)
-		if f.value != "" {
-			args = append(args, f.value)
-		}
+	if !agentHomeRepairKeyRE.MatchString(h.homeKey) {
+		return nil, fmt.Errorf("agent home ownership repair: invalid helper home key %q", h.homeKey)
 	}
-	args = append(args, req.Image)
-	return append(args, agentHomeRepairCommand(req)...), nil
+	// A literal argv: validateAgentHomeRepairArgs checks it against its own,
+	// separately written allow-list, so a change here that is not also made
+	// there refuses the launch.
+	args := []string{
+		"run", "--rm",
+		"--name", h.name,
+		"--pull=never",
+		"--network=none",
+		"--user=0:0",
+		"--cap-drop=ALL",
+		"--cap-add=CHOWN",
+		"--cap-add=DAC_OVERRIDE",
+		"--security-opt=no-new-privileges",
+		"--read-only",
+		"--pids-limit=64",
+		"--memory=256m",
+		"--cpus=1",
+	}
+	if h.userNSHost {
+		args = append(args, "--userns=host")
+	}
+	return append(args,
+		"--label", agentHomeRepairLabel(h.homeKey),
+		"--volume", req.HomeDir+":"+agentHomeRepairMount,
+		"--entrypoint", "find",
+		req.Image,
+		agentHomeRepairMount, "-xdev",
+		"(", "-type", "d", "-o", "-type", "l", "-o", "(", "-type", "f", "-links", "1", ")", ")",
+		"-exec", "chown", "-h", fmt.Sprintf("%d:%d", req.UID, req.GID), "{}", "+",
+	), nil
+}
+
+// agentHomeRepairLabel is the label of every helper for the agent home
+// with key homeKey (agentHomeRepairKey), so leftover helpers for that home
+// can be found and removed.
+func agentHomeRepairLabel(homeKey string) string {
+	return "scion.helper=agent-home-ownership-" + homeKey
+}
+
+var agentHomeRepairKeyRE = regexp.MustCompile(`^[0-9a-f]{16}$`)
+
+// agentHomeRepairKey identifies a resolved agent home in helper labels.
+func agentHomeRepairKey(resolvedHome string) string {
+	sum := sha256.Sum256([]byte(resolvedHome))
+	return hex.EncodeToString(sum[:8])
 }
 
 type agentHomeRepairFlag struct{ flag, value string }
 
-// agentHomeRepairFlags is the allow-list of the helper's flags (before the
-// image) for h: each flag with the exact value it must have, or "" for a
-// flag that takes none. Every one of them must be present exactly once.
-func agentHomeRepairFlags(h agentHomeRepairHelper) []agentHomeRepairFlag {
+// agentHomeRepairAllowedFlags is the allow-list of the helper's flags
+// (before the image) for h, written independently of agentHomeRepairArgs:
+// each flag with the exact value it must have, or "" for a flag that takes
+// none. Every one of them must be present exactly once. Do not derive one
+// from the other.
+func agentHomeRepairAllowedFlags(h agentHomeRepairHelper) []agentHomeRepairFlag {
 	flags := []agentHomeRepairFlag{
 		{"--rm", ""},
 		{"--name", h.name},
@@ -191,29 +236,19 @@ func agentHomeRepairFlags(h agentHomeRepairHelper) []agentHomeRepairFlag {
 		{"--pids-limit=64", ""},
 		{"--memory=256m", ""},
 		{"--cpus=1", ""},
+		{"--label", "scion.helper=agent-home-ownership-" + h.homeKey},
+		{"--volume", h.req.HomeDir + ":" + agentHomeRepairMount},
+		{"--entrypoint", "find"},
 	}
 	if h.userNSHost {
 		flags = append(flags, agentHomeRepairFlag{"--userns=host", ""})
 	}
-	return append(flags,
-		agentHomeRepairFlag{"--label", "scion.helper=agent-home-ownership"},
-		agentHomeRepairFlag{"--volume", h.req.HomeDir + ":" + agentHomeRepairMount},
-		agentHomeRepairFlag{"--entrypoint", "find"},
-	)
-}
-
-// agentHomeRepairCommand is the helper's command after the image.
-func agentHomeRepairCommand(req AgentHomeOwnershipRepair) []string {
-	return []string{
-		agentHomeRepairMount, "-xdev",
-		"(", "-type", "d", "-o", "-type", "l", "-o", "(", "-type", "f", "-links", "1", ")", ")",
-		"-exec", "chown", "-h", fmt.Sprintf("%d:%d", req.UID, req.GID), "{}", "+",
-	}
+	return flags
 }
 
 // validateAgentHomeRepairArgs checks args, fail-closed, against the exact
 // helper command for h before it is run: "run", then exactly the flags in
-// agentHomeRepairFlags(h) (each once, with its exact value; the only mount
+// agentHomeRepairAllowedFlags(h) (each once, with its exact value; the only mount
 // is the resolved agent home; the name has the helper's prefix and shape),
 // then the image, then exactly the expected find expression. Anything
 // unknown, missing, repeated or extra refuses the launch, so a change that
@@ -227,10 +262,13 @@ func validateAgentHomeRepairArgs(args []string, h agentHomeRepairHelper) error {
 	if !agentHomeRepairNameRE.MatchString(h.name) {
 		return refuse("invalid helper name %q", h.name)
 	}
+	if !agentHomeRepairKeyRE.MatchString(h.homeKey) {
+		return refuse("invalid helper home key %q", h.homeKey)
+	}
 	if len(args) == 0 || args[0] != "run" {
 		return refuse("does not start with run")
 	}
-	allowed := agentHomeRepairFlags(h)
+	allowed := agentHomeRepairAllowedFlags(h)
 	seen := make(map[string]bool, len(allowed))
 	i := 1
 	for ; i < len(args) && strings.HasPrefix(args[i], "-"); i++ {
@@ -264,7 +302,11 @@ func validateAgentHomeRepairArgs(args []string, h agentHomeRepairHelper) error {
 	if i >= len(args) || args[i] != h.req.Image {
 		return refuse("image is not %q", h.req.Image)
 	}
-	wantTail := agentHomeRepairCommand(h.req)
+	wantTail := []string{
+		agentHomeRepairMount, "-xdev",
+		"(", "-type", "d", "-o", "-type", "l", "-o", "(", "-type", "f", "-links", "1", ")", ")",
+		"-exec", "chown", "-h", strconv.Itoa(h.req.UID) + ":" + strconv.Itoa(h.req.GID), "{}", "+",
+	}
 	tail := args[i+1:]
 	if len(tail) != len(wantTail) {
 		return refuse("unexpected command after the image")
@@ -292,7 +334,7 @@ func repairAgentHomeOwnership(ctx context.Context, command string, req AgentHome
 	if err != nil {
 		return err
 	}
-	h := agentHomeRepairHelper{req: req, name: name, userNSHost: userNSHost}
+	h := agentHomeRepairHelper{req: req, name: name, homeKey: agentHomeRepairKey(resolved), userNSHost: userNSHost}
 	args, err := agentHomeRepairArgs(h)
 	if err != nil {
 		return err
@@ -300,6 +342,9 @@ func repairAgentHomeOwnership(ctx context.Context, command string, req AgentHome
 	if err := validateAgentHomeRepairArgs(args, h); err != nil {
 		return err
 	}
+	// A helper left behind for this home (the agent runtime died while it
+	// ran) is removed before a new one starts.
+	removeLeftoverAgentHomeRepairHelpers(ctx, command, h.homeKey)
 	runtimeLog.Warn("Repairing agent home ownership with a one-shot helper",
 		"home", req.HomeDir, "uid", req.UID, "gid", req.GID, "image", req.Image, "helper", name)
 	runCtx, cancel := context.WithTimeout(ctx, agentHomeRepairTimeout)
@@ -310,27 +355,62 @@ func repairAgentHomeOwnership(ctx context.Context, command string, req AgentHome
 	}
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), agentHomeRepairCleanupTimeout)
 	defer cleanupCancel()
+	removal := "was removed"
 	if _, rmErr := runSimpleCommand(cleanupCtx, command, "rm", "-f", name); rmErr != nil {
 		runtimeLog.Warn("Could not remove the agent home ownership repair helper", "helper", name, "error", rmErr)
+		removal = fmt.Sprintf("its removal failed (%v)", rmErr)
 	}
 	if ctxErr := runCtx.Err(); ctxErr != nil {
 		if errors.Is(ctxErr, context.DeadlineExceeded) && ctx.Err() == nil {
-			return fmt.Errorf("ownership repair helper %s timed out after %s and was removed: %w", name, agentHomeRepairTimeout, ctxErr)
+			return fmt.Errorf("ownership repair helper %s timed out after %s and %s: %w", name, agentHomeRepairTimeout, removal, ctxErr)
 		}
-		return fmt.Errorf("ownership repair helper %s was cancelled and removed: %w", name, ctxErr)
+		return fmt.Errorf("ownership repair helper %s was cancelled and %s: %w", name, removal, ctxErr)
 	}
 	if trimmed := strings.TrimSpace(out); trimmed != "" {
-		return fmt.Errorf("ownership repair helper failed: %w: %s", runErr, trimmed)
+		return fmt.Errorf("ownership repair helper %s failed and %s: %w: %s", name, removal, runErr, trimmed)
 	}
-	return fmt.Errorf("ownership repair helper failed: %w", runErr)
+	return fmt.Errorf("ownership repair helper %s failed and %s: %w", name, removal, runErr)
 }
+
+var containerIDRE = regexp.MustCompile(`^[0-9a-f]{12,64}$`)
+
+// removeLeftoverAgentHomeRepairHelpers force-removes every helper container
+// labelled for the home with key homeKey. It is cleanup only: a failure is
+// logged and the repair goes on.
+func removeLeftoverAgentHomeRepairHelpers(ctx context.Context, command, homeKey string) {
+	sweepCtx, cancel := context.WithTimeout(ctx, agentHomeRepairCleanupTimeout)
+	defer cancel()
+	out, err := runSimpleCommand(sweepCtx, command, "ps", "-aq", "--no-trunc", "--filter", "label="+agentHomeRepairLabel(homeKey))
+	if err != nil {
+		runtimeLog.Warn("Could not list leftover agent home ownership repair helpers", "error", err)
+		return
+	}
+	var ids []string
+	for _, id := range strings.Fields(out) {
+		if containerIDRE.MatchString(id) {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	runtimeLog.Warn("Removing leftover agent home ownership repair helpers", "count", len(ids))
+	if _, err := runSimpleCommand(sweepCtx, command, append([]string{"rm", "-f"}, ids...)...); err != nil {
+		runtimeLog.Warn("Could not remove leftover agent home ownership repair helpers", "error", err)
+	}
+}
+
+// agentHomeRepairProbeTimeout bounds a runtime mode probe.
+const agentHomeRepairProbeTimeout = 30 * time.Second
 
 // dockerUnsupportedRepairMode returns a non-empty mode name when the
 // Docker daemon runs rootless or with user-namespace remapping. In both,
 // container uids map to other host uids, so a chown inside the helper
 // would not give the agent runtime's host uid ownership.
 func dockerUnsupportedRepairMode(ctx context.Context, command string) (string, error) {
-	out, err := runSimpleCommand(ctx, command, "info", "--format", "{{json .SecurityOptions}}")
+	probeCtx, cancel := context.WithTimeout(ctx, agentHomeRepairProbeTimeout)
+	defer cancel()
+	out, err := runSimpleCommand(probeCtx, command, "info", "--format", "{{json .SecurityOptions}}")
 	if err != nil {
 		return "", fmt.Errorf("detect docker security options: %w", err)
 	}
@@ -368,7 +448,9 @@ func (r *PodmanRuntime) RepairAgentHomeOwnership(ctx context.Context, req AgentH
 	if r.Rootless {
 		return fmt.Errorf("%w (rootless podman)", ErrAgentHomeRepairUnsupported)
 	}
-	out, err := runSimpleCommand(ctx, r.Command, "info", "--format", "{{.Host.Security.Rootless}}")
+	probeCtx, cancel := context.WithTimeout(ctx, agentHomeRepairProbeTimeout)
+	defer cancel()
+	out, err := runSimpleCommand(probeCtx, r.Command, "info", "--format", "{{.Host.Security.Rootless}}")
 	if err != nil {
 		return fmt.Errorf("%w (podman mode undetectable): %w", ErrAgentHomeRepairUnsupported, err)
 	}
