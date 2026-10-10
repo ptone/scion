@@ -16,8 +16,10 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -66,14 +68,29 @@ func readAgentConfig(t *testing.T, agentDir string) string {
 	return string(data)
 }
 
-// assertNoSettingsTelemetry fails if any value from hubTierSettingsTelemetry
-// appears in the persisted agent config.
-func assertNoSettingsTelemetry(t *testing.T, cfg string, settingsValues ...string) {
+// templateTelemetry is the telemetry block of the "tel-tpl" template.
+const templateTelemetry = `{"cloud": {"endpoint": "template:4317"}}`
+
+// assertPersistedTelemetry fails unless the telemetry persisted in
+// scion-agent.json is exactly the agent's own (template) telemetry:
+// absent when templateEndpoint is "", otherwise only
+// cloud.endpoint = templateEndpoint. Any settings (or hub) telemetry field
+// that leaked into the file makes the comparison fail.
+func assertPersistedTelemetry(t *testing.T, agentDir, templateEndpoint string) {
 	t.Helper()
-	for _, v := range settingsValues {
-		if strings.Contains(cfg, v) {
-			t.Errorf("settings telemetry value %q persisted to scion-agent.json:\n%s", v, cfg)
-		}
+	raw := readAgentConfig(t, agentDir)
+	var cfg api.ScionConfig
+	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+		t.Fatalf("unmarshal scion-agent.json: %v\n%s", err, raw)
+	}
+	var want *api.TelemetryConfig
+	if templateEndpoint != "" {
+		want = &api.TelemetryConfig{Cloud: &api.TelemetryCloudConfig{Endpoint: templateEndpoint}}
+	}
+	if !reflect.DeepEqual(cfg.Telemetry, want) {
+		got, _ := json.Marshal(cfg.Telemetry)
+		wantJSON, _ := json.Marshal(want)
+		t.Errorf("persisted telemetry = %s, want %s (only the agent's own telemetry)\n%s", got, wantJSON, raw)
 	}
 }
 
@@ -101,22 +118,14 @@ func TestProvision_SettingsTelemetryNotPersisted(t *testing.T) {
 		project := hubTelemetryFixture(t, hubTierSettingsTelemetry)
 		agentDir := provisionSettingsTelemetryAgent(t, project, "fresh", "default")
 
-		cfg := readAgentConfig(t, agentDir)
-		assertNoSettingsTelemetry(t, cfg, "settings:4317", `"http"`, "9s")
-		if strings.Contains(cfg, `"telemetry"`) {
-			t.Errorf("scion-agent.json has a telemetry block with no template telemetry:\n%s", cfg)
-		}
+		assertPersistedTelemetry(t, agentDir, "")
 	})
 	t.Run("template telemetry kept", func(t *testing.T) {
 		project := hubTelemetryFixture(t, hubTierSettingsTelemetry)
-		writeTelemetryTemplate(t, "tel-tpl", `{"cloud": {"endpoint": "template:4317"}}`)
+		writeTelemetryTemplate(t, "tel-tpl", templateTelemetry)
 		agentDir := provisionSettingsTelemetryAgent(t, project, "fresh-tpl", "tel-tpl")
 
-		cfg := readAgentConfig(t, agentDir)
-		if !strings.Contains(cfg, "template:4317") {
-			t.Errorf("template telemetry missing from scion-agent.json:\n%s", cfg)
-		}
-		assertNoSettingsTelemetry(t, cfg, "settings:4317", `"http"`, "9s")
+		assertPersistedTelemetry(t, agentDir, "template:4317")
 	})
 }
 
@@ -126,7 +135,7 @@ func TestProvision_SettingsTelemetryNotPersisted(t *testing.T) {
 // default; a provision-time bake would make the settings value win.
 func TestProvisionThenStart_SettingsBelowHubBelowTemplate(t *testing.T) {
 	project := hubTelemetryFixture(t, hubTierSettingsTelemetry)
-	writeTelemetryTemplate(t, "tel-tpl", `{"cloud": {"endpoint": "template:4317"}}`)
+	writeTelemetryTemplate(t, "tel-tpl", templateTelemetry)
 	provisionSettingsTelemetryAgent(t, project, "order", "tel-tpl")
 
 	env, _ := startWithHubTelemetry(t, project, "order", hubTelemetryDefault("hub:4317"), nil)
@@ -140,7 +149,7 @@ func TestProvisionThenStart_SettingsBelowHubBelowTemplate(t *testing.T) {
 
 // Acceptance 3: a restart after a settings telemetry change sees the new
 // value, including when Start rewrites scion-agent.json (HarnessAuth), with
-// and without a hub default.
+// and without a hub default. Each rewrite must persist no settings telemetry.
 func TestProvisionThenStart_RestartSeesSettingsChange(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -163,12 +172,10 @@ func TestProvisionThenStart_RestartSeesSettingsChange(t *testing.T) {
 			if !tc.hub {
 				assertEnv(t, env, "SCION_OTEL_ENDPOINT", "settings:4317")
 			}
-
-			cfg := readAgentConfig(t, agentDir)
-			if !strings.Contains(cfg, "vertex-ai") {
+			if cfg := readAgentConfig(t, agentDir); !strings.Contains(cfg, "vertex-ai") {
 				t.Fatalf("test precondition: Start did not rewrite scion-agent.json:\n%s", cfg)
 			}
-			assertNoSettingsTelemetry(t, cfg, "settings:4317", `"http"`, "9s")
+			assertPersistedTelemetry(t, agentDir, "")
 
 			setSettingsTelemetry(t, `telemetry:
   cloud:
@@ -182,7 +189,7 @@ func TestProvisionThenStart_RestartSeesSettingsChange(t *testing.T) {
 			if !tc.hub {
 				assertEnv(t, env, "SCION_OTEL_ENDPOINT", "settings-b:4317")
 			}
-			assertNoSettingsTelemetry(t, readAgentConfig(t, agentDir), "settings-b:4317", "7s")
+			assertPersistedTelemetry(t, agentDir, "")
 		})
 	}
 }
