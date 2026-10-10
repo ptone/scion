@@ -112,10 +112,11 @@ func TestCloudFailureReason_ClosedSet(t *testing.T) {
 }
 
 // P2-1: the named OnError hook classifies overflow as queue_full and
-// anything else as error, passes the error to the fallback (production:
-// the client's default log line, unchanged) and logs nothing through slog
-// itself.
-func TestCloudClientOnError_ClassifiesAndNeverLogsThroughSlog(t *testing.T) {
+// anything else as error and passes the error to its fallback. The hook
+// itself writes nothing to slog. (In production the fallback is the
+// client's previous OnError, gcplog's default log.Printf line, which does
+// reach slog through the std-log bridge, unchanged from base; R6-Q4 held.)
+func TestCloudClientOnError_HookCountsAndDelegates(t *testing.T) {
 	slogged := captureSlogDefault(t)
 	clk := &fakeClock{now: time.Unix(1_800_000_000, 0)}
 	s := newCloudWriteStats(clk.Now)
@@ -201,6 +202,51 @@ func TestCloudWriteStats_Health(t *testing.T) {
 	if s.Configured() {
 		t.Fatal("still configured after unregister")
 	}
+}
+
+// manualTimers is an asyncwrite.AfterFunc that records each callback for
+// the test to fire instead of scheduling it.
+type manualTimers struct {
+	mu  sync.Mutex
+	fns []func()
+}
+
+func (m *manualTimers) after(_ time.Duration, f func()) asyncwrite.Timer {
+	m.mu.Lock()
+	m.fns = append(m.fns, f)
+	m.mu.Unlock()
+	return neverTimer{}
+}
+
+// fireLast runs the most recently registered callback: while a write is
+// inside the handler, that is its write-budget timer.
+func (m *manualTimers) fireLast() {
+	m.mu.Lock()
+	f := m.fns[len(m.fns)-1]
+	m.mu.Unlock()
+	f()
+}
+
+// A handler's cleanup withdraws only its own circuit registration.
+func TestCloudWriteStats_RegisterCircuitSourceUnregistersOnlyItself(t *testing.T) {
+	s := newCloudWriteStats(nil)
+	unA := s.registerCircuitSource(func() bool { return true })
+	if open, ok := s.CircuitOpen(); !ok || !open {
+		t.Fatalf("A: open=%v ok=%v", open, ok)
+	}
+	unB := s.registerCircuitSource(func() bool { return false })
+	unA() // stale: B stays registered
+	if open, ok := s.CircuitOpen(); !ok || open {
+		t.Fatalf("after unregistering A: open=%v ok=%v, want B (false, true)", open, ok)
+	}
+	unB()
+	if s.Configured() {
+		t.Fatal("still configured after unregistering B")
+	}
+	unB() // idempotent
+	s.registerCircuitSource(nil)()
+	var nilStats *CloudWriteStats
+	nilStats.registerCircuitSource(func() bool { return true })()
 }
 
 // newObservedResilient builds a ResilientCloudHandler whose inner
@@ -501,23 +547,47 @@ func sumByAttrs(t *testing.T, reader *sdkmetric.ManualReader) map[string]int64 {
 // attribute sets and kinds are pinned as well.
 func TestWriteMetrics_CumulativeConservationAcrossAttachAndTwoReaders(t *testing.T) {
 	ctx := context.Background()
-	// Audit writer: one written record, then closed rejections, all before
-	// any MeterProvider exists.
-	w, err := NewAsyncWriter(asyncwrite.Config{Name: "audit", AfterFunc: neverAfterFunc})
+	// Audit writer with test-fired write-budget timers and a gated inner
+	// handler, so the test decides when a write times out and when it
+	// returns (a late return), without sleeps.
+	timers := &manualTimers{}
+	w, err := NewAsyncWriter(asyncwrite.Config{Name: "audit", AfterFunc: timers.after})
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := newCaptureInner(nil)
+	gate := make(chan struct{})
+	c := newCaptureInner(gate)
 	h := NewAsyncHandler(c.handler(), w)
-	if err := h.Handle(ctx, rec("scion.audit")); err != nil {
-		t.Fatal(err)
+	handle := func() {
+		t.Helper()
+		if err := h.Handle(ctx, rec("scion.audit")); err != nil {
+			t.Fatal(err)
+		}
 	}
+	// lateReturn makes the write now inside the handler time out, then
+	// return: one timeout plus one late return.
+	lateReturn := func() {
+		t.Helper()
+		timers.fireLast()
+		gate <- struct{}{}
+		<-c.out
+	}
+
+	// Before any MeterProvider exists: record 1 written, record 2 timed out
+	// and returned late. Record 3 entering the handler proves the single
+	// worker finished accounting record 2.
+	handle()
+	<-c.entered
+	gate <- struct{}{}
 	<-c.out
-	if err := w.Close(ctx); err != nil {
-		t.Fatal(err)
+	handle()
+	<-c.entered
+	lateReturn()
+	handle()
+	<-c.entered
+	if s := w.Snapshot(); s.Written != 1 || s.WriteTimeouts != 1 || s.LateReturns != 1 {
+		t.Fatalf("pre-attach audit snapshot = %+v", s)
 	}
-	_ = h.Handle(ctx, rec("scion.audit"))
-	_ = h.Handle(ctx, rec("scion.audit"))
 
 	cloud := newCloudWriteStats(nil)
 	cloud.RecordFailure(CloudReasonError)
@@ -533,18 +603,44 @@ func TestWriteMetrics_CumulativeConservationAcrossAttachAndTwoReaders(t *testing
 	wm.Observe(w)
 	wm.ObserveCloud(cloud)
 
-	// More counts after attach.
-	_ = h.Handle(ctx, rec("scion.audit"))
+	// First collection on both readers: every pre-attach count is exported.
+	for i, reader := range []*sdkmetric.ManualReader{r1, r2} {
+		got := sumByAttrs(t, reader)
+		for k, v := range map[string]int64{
+			MetricWriteRecords + "|audit|":              1,
+			MetricWriteFailures + "|audit|timeout":      1,
+			MetricWriteLateReturns + "|audit|":          1,
+			MetricWriteFailures + "|cloud|error":        1,
+			MetricWriteFailures + "|cloud|circuit_open": 2,
+		} {
+			if got[k] != v {
+				t.Fatalf("pre-attach export, reader %d: %s = %d, want %d (all %v)", i+1, k, got[k], v, got)
+			}
+		}
+	}
+
+	// More counts after attach: record 3 also times out and returns late;
+	// Close drains the (now empty) queue cooperatively; three closed
+	// rejections follow. Close's drain timer is captured, never fired.
+	lateReturn()
+	if err := w.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		_ = h.Handle(ctx, rec("scion.audit"))
+	}
 	cloud.RecordFailure(CloudReasonQueueFull)
 	cloud.RecordFailure(CloudReasonFlushError)
 	cloud.RecordFailure(CloudReasonCircuitOpen)
 
 	snap := w.Snapshot()
-	if snap.Written != 1 || snap.DroppedClosed != 3 {
+	if snap.Written != 1 || snap.WriteTimeouts != 2 || snap.LateReturns != 2 || snap.DroppedClosed != 3 {
 		t.Fatalf("audit snapshot = %+v", snap)
 	}
 	want := map[string]int64{
 		MetricWriteRecords + "|audit|":              int64(snap.Written),
+		MetricWriteLateReturns + "|audit|":          int64(snap.LateReturns),
+		MetricWriteFailures + "|audit|timeout":      int64(snap.WriteTimeouts),
 		MetricWriteFailures + "|audit|closed":       int64(snap.DroppedClosed),
 		MetricQueueDepth + "|audit|":                0,
 		MetricWriterStalled + "|audit|":             0,
@@ -554,8 +650,9 @@ func TestWriteMetrics_CumulativeConservationAcrossAttachAndTwoReaders(t *testing
 		MetricWriteFailures + "|cloud|flush_error":  int64(cloud.Failures(CloudReasonFlushError)),
 		MetricWriterCircuitOpen + "|cloud|":         1,
 	}
-	if want[MetricWriteFailures+"|cloud|circuit_open"] != 3 {
-		t.Fatalf("cloud circuit_open atomic = %d", cloud.Failures(CloudReasonCircuitOpen))
+	if want[MetricWriteFailures+"|cloud|circuit_open"] != 3 || want[MetricWriteLateReturns+"|audit|"] != 2 {
+		t.Fatalf("atomics: cloud circuit_open %d, audit late returns %d",
+			cloud.Failures(CloudReasonCircuitOpen), snap.LateReturns)
 	}
 	for round := 1; round <= 2; round++ {
 		for i, reader := range []*sdkmetric.ManualReader{r1, r2} {
@@ -592,6 +689,7 @@ func TestWriteMetrics_CumulativeConservationAcrossAttachAndTwoReaders(t *testing
 	for name, want := range map[string]string{
 		MetricWriteFailures:     "cumulative_monotonic_sum_int64",
 		MetricWriteRecords:      "cumulative_monotonic_sum_int64",
+		MetricWriteLateReturns:  "cumulative_monotonic_sum_int64",
 		MetricQueueDepth:        "gauge_int64",
 		MetricWriterStalled:     "gauge_int64",
 		MetricWriterCircuitOpen: "gauge_int64",
