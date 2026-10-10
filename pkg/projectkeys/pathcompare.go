@@ -87,3 +87,5 @@ func ResolvedPathHasPrefix(path, prefix string) bool {
 		resolvedPath[len(resolvedPrefix)] == filepath.Separator &&
 		resolvedPath[:len(resolvedPrefix)] == resolvedPrefix
 }
+
+// CI path-gate validation only; do not merge.
