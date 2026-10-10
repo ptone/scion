@@ -173,6 +173,9 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 		claim    int64
 		oldState string
 		req      store.DeletionRequestInfo
+		// fallback: req was derived because a finalizing row had no
+		// usable stored request (logged once the claim is confirmed).
+		fallback bool
 	)
 	set := store.DeletionFields{
 		State:         &deleting,
@@ -185,6 +188,7 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 		Derive: func(cur *store.Agent, f *store.DeletionFields) {
 			claim = cur.DeletionClaim + 1
 			oldState = cur.DeletionState
+			fallback = false
 			// Capture prior once per delete attempt: a re-claim of an
 			// abandoned row keeps the original prior.
 			if cur.DeletionState == store.DeletionStateNone || cur.DeletionState == store.DeletionStateFailed {
@@ -237,8 +241,7 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 					// configuration only, never from this retry's force,
 					// deleteFiles or removeBranch (the dispatch is
 					// skipped).
-					s.agentLifecycleLog.Warn("delete claim: finalizing row has no stored request; using the current retention setting",
-						"agent_id", cur.ID, "claim", claim)
+					fallback = true
 					req = store.DeletionRequestInfo{
 						RequestedBy: p.requestedBy,
 						Soft:        s.config.SoftDeleteRetention > 0 && !post.IsIncompleteCreate(),
@@ -284,6 +287,10 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 			// Re-claimed by someone else already (only possible after our
 			// lease expired); treat as not claimed.
 			return nil, nil
+		}
+		if fallback {
+			s.agentLifecycleLog.Warn("delete claim: finalizing row has no stored request; using the current retention setting",
+				"agent_id", agentID, "claim", claim)
 		}
 		return &agentDeletionPlan{
 			claim:        claim,
