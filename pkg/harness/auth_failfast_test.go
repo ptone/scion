@@ -75,6 +75,7 @@ func TestCheckStagedAuth(t *testing.T) {
 		noAuth  *config.HarnessNoAuthConfig
 		env     map[string]string
 		preFile string // home-relative file created before the check
+		mounts  []string
 		wantErr string // substring; "" means no error
 	}{
 		{name: "explicit unsatisfied", staged: map[string]interface{}{"explicit_type": "api-key"},
@@ -98,6 +99,21 @@ func TestCheckStagedAuth(t *testing.T) {
 			"files": []map[string]string{{"container_path": "~/.config/gcloud/application_default_credentials.json"}}}},
 		{name: "explicit vertex-ai satisfied by project alone (permissive)", staged: map[string]interface{}{"explicit_type": "vertex-ai",
 			"env_vars": []string{"GOOGLE_CLOUD_PROJECT"}}},
+		{name: "explicit satisfied by volume at target", staged: map[string]interface{}{"explicit_type": "auth-file"},
+			mounts: []string{"~/.example/auth.json"}},
+		{name: "explicit satisfied by volume at ancestor dir", staged: map[string]interface{}{"explicit_type": "auth-file"},
+			mounts: []string{"~/.example"}},
+		{name: "explicit satisfied by absolute volume under container home", staged: map[string]interface{}{"explicit_type": "auth-file"},
+			mounts: []string{"/home/scion/.example/"}},
+		{name: "explicit satisfied by volume at ADC path", staged: map[string]interface{}{"explicit_type": "vertex-ai"},
+			mounts: []string{"~/.config/gcloud"}},
+		{name: "explicit satisfied by unresolvable volume target (fail open)", staged: map[string]interface{}{"explicit_type": "auth-file"},
+			mounts: []string{"$CREDS_DIR/auth.json"}},
+		{name: "volume elsewhere does not satisfy", staged: map[string]interface{}{"explicit_type": "auth-file"},
+			mounts:  []string{"~/.example-other", "~/.example/auth.json.bak", "/workspace/.example", "/home/scion2/.example", "/scion-volumes/scratchpad"},
+			wantErr: `auth type "auth-file" is selected`},
+		{name: "volume does not satisfy an env-only type", staged: map[string]interface{}{"explicit_type": "api-key"},
+			mounts: []string{"~/.example/auth.json"}, wantErr: `auth type "api-key" is selected`},
 		{name: "explicit type unknown to Go is allowed", staged: map[string]interface{}{"explicit_type": "custom"}},
 		{name: "no explicit, no_auth allows", noAuth: dropToShell},
 		{name: "no explicit, no_auth forbids, nothing staged",
@@ -120,7 +136,8 @@ func TestCheckStagedAuth(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			err := CheckStagedAuth("example", failfastAuthMeta(), tc.noAuth, home, tc.env)
+			err := CheckStagedAuth("example", failfastAuthMeta(), tc.noAuth,
+				AuthCheckInputs{AgentHome: home, Env: tc.env, ContainerHome: "/home/scion", MountTargets: tc.mounts})
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Fatalf("CheckStagedAuth = %v, want nil", err)
@@ -139,10 +156,10 @@ func TestCheckStagedAuth(t *testing.T) {
 
 func TestCheckStagedAuthNoTypesNeverFails(t *testing.T) {
 	home := stageCandidates(t, map[string]interface{}{"explicit_type": "api-key"})
-	if err := CheckStagedAuth("example", nil, nil, home, nil); err != nil {
+	if err := CheckStagedAuth("example", nil, nil, AuthCheckInputs{AgentHome: home}); err != nil {
 		t.Errorf("nil auth metadata: %v", err)
 	}
-	if err := CheckStagedAuth("example", &config.HarnessAuthMetadata{}, nil, home, nil); err != nil {
+	if err := CheckStagedAuth("example", &config.HarnessAuthMetadata{}, nil, AuthCheckInputs{AgentHome: home}); err != nil {
 		t.Errorf("no auth types: %v", err)
 	}
 }
@@ -150,11 +167,41 @@ func TestCheckStagedAuthNoTypesNeverFails(t *testing.T) {
 func TestCheckStagedAuthErrorHasNoValues(t *testing.T) {
 	home := stageCandidates(t, map[string]interface{}{"explicit_type": "auth-file",
 		"env_vars": []string{"EXAMPLE_API_KEY"}})
-	err := CheckStagedAuth("example", failfastAuthMeta(), nil, home, map[string]string{"OTHER": "placeholder-secret-value"})
+	err := CheckStagedAuth("example", failfastAuthMeta(), nil, AuthCheckInputs{AgentHome: home, Env: map[string]string{"OTHER": "placeholder-secret-value"}})
 	if err == nil {
 		t.Fatal("want an error")
 	}
 	if strings.Contains(err.Error(), "placeholder-secret-value") {
 		t.Errorf("error leaks an env value: %q", err)
+	}
+}
+
+func TestMountCoversTarget(t *testing.T) {
+	const target = "/.example/auth.json"
+	cases := []struct {
+		mount, home string
+		want        bool
+	}{
+		{"~/.example/auth.json", "/home/scion", true},
+		{"~/.example", "/home/scion", true},
+		{"~/.example/", "/home/scion", true},
+		{"~", "/home/scion", true},
+		{"/home/scion", "/home/scion", true},
+		{"/home/scion/.example", "/home/scion", true},
+		{"/root/.example", "/root", true},
+		{"~/.example-other", "/home/scion", false},
+		{"~/.example/auth.json.bak", "/home/scion", false},
+		{"~/.example/auth.json/sub", "/home/scion", false},
+		{"/home/scion2/.example", "/home/scion", false},
+		{"/workspace", "/home/scion", false},
+		{"/home/scion/.example", "", true}, // home unknown: fail open
+		{"${HOME}/.example", "/home/scion", true},
+		{"relative/dir", "/home/scion", true},
+		{"", "/home/scion", true},
+	}
+	for _, tc := range cases {
+		if got := mountCoversTarget(tc.mount, target, tc.home); got != tc.want {
+			t.Errorf("mountCoversTarget(%q, %q, %q) = %t, want %t", tc.mount, target, tc.home, got, tc.want)
+		}
 	}
 }

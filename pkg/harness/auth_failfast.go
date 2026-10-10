@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -43,43 +44,69 @@ type stagedAuthCandidates struct {
 	} `json:"files"`
 }
 
+// AuthCheckInputs is what CheckStagedAuth knows about the container besides
+// the staged auth-candidates.json.
+type AuthCheckInputs struct {
+	// AgentHome is the broker-side agent home: it holds the staged
+	// auth-candidates.json and is bind-mounted over the container home.
+	AgentHome string
+	// Env is the start env. Counting it only makes the check more
+	// permissive; the provisioner itself does not read it (see below).
+	Env map[string]string
+	// ContainerHome is the container user's home (e.g. /home/scion), used
+	// to resolve absolute mount targets. Empty: absolute targets fail open.
+	ContainerHome string
+	// MountTargets are the targets of the volumes mounted into the
+	// container, as configured ("~/..." or absolute).
+	MountTargets []string
+}
+
 // CheckStagedAuth reports, before a container is started, a start that the
 // container-side provisioner is certain to reject because no auth method is
-// satisfied. It reads the auth-candidates.json staged in agentHome, the same
-// file the provisioner reads.
+// satisfied. It reads the auth-candidates.json staged in the agent home, the
+// same file the provisioner reads.
 //
 // The provisioner's rule lives in Python (harnesses/scion_harness.py,
 // ProvisionContext.select_auth, with each harness's AuthSpec in its
-// provision.py) and also reads inputs the broker cannot see, such as the
-// container's environment and files already present in the container. So
-// this check is deliberately one-sided: it returns an error only where the
-// provisioner fails whatever those inputs are, and it allows every start
-// the provisioner might accept. harnesses/auth_failfast_pin_test.go pins
-// that against the real Python selection for every shipped harness.
+// provision.py), so the two cannot share code. Env selection reads only the
+// staged candidates and secret files: the provisioner runs with a minimal
+// environment (HOME, PATH, LANG, TZ and SCION_*), so env_fallback sees no
+// credential env. File selection also accepts a file that exists in the
+// container at the method's target path. The agent home is bind-mounted
+// over the container home, so such a file is either in the agent home or
+// supplied by a volume mounted at the target or at one of its ancestor
+// directories. The check looks at both, and fails open for a mount target it
+// cannot resolve. harnesses/auth_failfast_pin_test.go pins the check against
+// the real Python selection for every shipped harness: every Go rejection
+// must be a provisioner failure.
 //
 // It returns an error only when the harness declares auth types and either:
 //
-//  1. an explicit auth type is staged, Go knows that type, and nothing staged
+//  1. an explicit auth type is staged, Go knows that type, and nothing
 //     satisfies it (the provisioner never falls back to no-auth for an
 //     explicit type); or
 //  2. no explicit type is staged, the harness has no no_auth behaviour, and
-//     nothing staged satisfies any declared type.
+//     nothing satisfies any declared type. All shipped harnesses declare
+//     no_auth, so this branch applies only to custom harness-configs.
 //
-// A type counts as satisfied when any credential it names is available: an
-// env key in env_vars or env_secret_files, or set in env (the provisioner may
-// fall back to the container environment); a required file staged as a file
-// secret, staged as an env secret of the same name, or mapped to its target; or a file already present in agentHome at
-// its target (for example, written by an earlier provision before a
-// restart). This is more permissive than both the harness-config auth.types
-// and the provisioner, so where they differ the start is allowed.
+// A type counts as satisfied when any credential it names is available:
+//   - an env key in env_vars or env_secret_files, or set in the start env;
+//   - a required file staged as a file secret, staged as an env secret of
+//     the same name, or mapped to its target;
+//   - a file already present in the agent home at its target (for example,
+//     written by an earlier provision before a restart);
+//   - a volume mounted at its target or at an ancestor directory.
+//
+// This is more permissive than both the harness-config auth.types and the
+// provisioner, so where they differ the start is allowed.
 //
 // The error names the harness, the auth types it accepts and the credential
 // names it looks for. It never includes values.
-func CheckStagedAuth(harnessName string, authMeta *config.HarnessAuthMetadata, noAuth *config.HarnessNoAuthConfig, agentHome string, env map[string]string) error {
+func CheckStagedAuth(harnessName string, authMeta *config.HarnessAuthMetadata, noAuth *config.HarnessNoAuthConfig, in AuthCheckInputs) error {
 	if authMeta == nil || len(authMeta.Types) == 0 {
 		return nil
 	}
-	staged, err := readStagedAuthCandidates(agentHome)
+	staged, err := readStagedAuthCandidates(in.AgentHome)
 	if err != nil {
 		// An unreadable candidates file is not this check's concern; the
 		// provisioner reports it with its own error.
@@ -87,7 +114,7 @@ func CheckStagedAuth(harnessName string, authMeta *config.HarnessAuthMetadata, n
 	}
 
 	available := func(t api.HarnessAuthTypeMetadata) bool {
-		return stagedSatisfiesType(t, staged, agentHome, env)
+		return stagedSatisfiesType(t, staged, in)
 	}
 
 	explicit := strings.TrimSpace(staged.ExplicitType)
@@ -114,8 +141,8 @@ func CheckStagedAuth(harnessName string, authMeta *config.HarnessAuthMetadata, n
 
 // CheckStagedAuth applies the package-level CheckStagedAuth to this
 // harness-config's auth metadata and no_auth behaviour.
-func (c *ContainerScriptHarness) CheckStagedAuth(agentHome string, env map[string]string) error {
-	return CheckStagedAuth(c.entry.Harness, c.entry.Auth, c.entry.NoAuthConfig, agentHome, env)
+func (c *ContainerScriptHarness) CheckStagedAuth(in AuthCheckInputs) error {
+	return CheckStagedAuth(c.entry.Harness, c.entry.Auth, c.entry.NoAuthConfig, in)
 }
 
 func readStagedAuthCandidates(agentHome string) (stagedAuthCandidates, error) {
@@ -136,7 +163,7 @@ func readStagedAuthCandidates(agentHome string) (stagedAuthCandidates, error) {
 // stagedSatisfiesType reports whether any credential type t names is
 // available to the container. See CheckStagedAuth for why this is broader
 // than the provisioner's own matching.
-func stagedSatisfiesType(t api.HarnessAuthTypeMetadata, staged stagedAuthCandidates, agentHome string, env map[string]string) bool {
+func stagedSatisfiesType(t api.HarnessAuthTypeMetadata, staged stagedAuthCandidates, in AuthCheckInputs) bool {
 	if len(t.RequiredEnv) == 0 && len(t.RequiredFiles) == 0 {
 		return true
 	}
@@ -152,7 +179,7 @@ func stagedSatisfiesType(t api.HarnessAuthTypeMetadata, staged stagedAuthCandida
 				return true
 			}
 		}
-		return env[k] != ""
+		return in.Env[k] != ""
 	}
 	for _, group := range t.RequiredEnv {
 		for _, k := range group.AnyOf {
@@ -181,14 +208,52 @@ func stagedSatisfiesType(t api.HarnessAuthTypeMetadata, staged stagedAuthCandida
 					return true
 				}
 			}
-			if agentHome != "" {
-				if info, err := os.Stat(filepath.Join(agentHome, filepath.FromSlash(target))); err == nil && !info.IsDir() {
+			if in.AgentHome != "" {
+				if info, err := os.Stat(filepath.Join(in.AgentHome, filepath.FromSlash(target))); err == nil && !info.IsDir() {
+					return true
+				}
+			}
+			for _, mt := range in.MountTargets {
+				if mountCoversTarget(mt, target, in.ContainerHome) {
 					return true
 				}
 			}
 		}
 	}
 	return false
+}
+
+// mountCoversTarget reports whether a volume mounted at mountTarget may
+// supply the home-relative path target (leading "/"): the mount is at target
+// or at one of its ancestor directories, up to the home itself. It fails open
+// (true) for a mount target it cannot resolve: one with variables, a relative
+// one, or an absolute one when the container home is unknown.
+func mountCoversTarget(mountTarget, target, containerHome string) bool {
+	mt := strings.TrimSpace(mountTarget)
+	var rel string
+	switch {
+	case mt == "" || strings.Contains(mt, "$"):
+		return true
+	case mt == "~":
+		rel = "/"
+	case strings.HasPrefix(mt, "~/"):
+		rel = mt[1:]
+	case strings.HasPrefix(mt, "/"):
+		if containerHome == "" {
+			return true
+		}
+		home := path.Clean(containerHome)
+		mt = path.Clean(mt)
+		if mt != home && !strings.HasPrefix(mt, home+"/") {
+			return false
+		}
+		rel = "/" + strings.TrimPrefix(mt, home)
+	default:
+		return true
+	}
+	rel = path.Clean(rel)
+	target = path.Clean(target)
+	return rel == "/" || rel == target || strings.HasPrefix(target, rel+"/")
 }
 
 // requiredFileTargets returns the home-relative paths (with a leading "/")

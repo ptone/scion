@@ -211,3 +211,53 @@ func TestStart_LocalModeDoesNotFailFast(t *testing.T) {
 		t.Errorf("container ran %d times, want 1", runs)
 	}
 }
+
+// A credential file supplied by a volume mounted at the file's target, or at
+// an ancestor directory, satisfies an explicit file auth type: the
+// provisioner sees the file in the container. A volume elsewhere does not.
+func TestStart_BrokerCredentialFileFromVolume(t *testing.T) {
+	cases := []struct {
+		name    string
+		target  string
+		dir     bool
+		wantErr bool
+	}{
+		{name: "file volume at target", target: "~/.claude/.credentials.json"},
+		{name: "dir volume at ancestor", target: "~/.claude", dir: true},
+		{name: "absolute dir volume under container home", target: "/home/scion/.claude", dir: true},
+		{name: "volume elsewhere", target: "~/.claude-other", dir: true, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e, _ := newClaudeRestartEnv(t)
+			src := filepath.Join(t.TempDir(), "creds")
+			if tc.dir {
+				if err := os.MkdirAll(src, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				src = filepath.Join(src, ".credentials.json")
+			}
+			if err := os.WriteFile(src, []byte(`{"placeholder":true}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if tc.dir {
+				src = filepath.Dir(src)
+			}
+			runs := 0
+			opts := brokerStart(t, e.scion, "ff-volume")
+			opts.HarnessAuth = "auth-file"
+			opts.InlineConfig = &api.ScionConfig{Volumes: []api.VolumeMount{{Source: src, Target: tc.target, ReadOnly: true}}}
+			_, err := policyTestManager(&runs).Start(context.Background(), opts)
+			if tc.wantErr {
+				assertNoAuthSatisfied(t, err, runs, "claude", `"auth-file"`)
+				return
+			}
+			if err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if runs != 1 {
+				t.Errorf("container ran %d times, want 1", runs)
+			}
+		})
+	}
+}

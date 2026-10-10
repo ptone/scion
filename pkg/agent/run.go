@@ -1073,11 +1073,20 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 					return nil, fmt.Errorf("record harness secrets: %w", err)
 				}
 				// On the broker, fail the start here, before any container
-				// is created, when the staged auth candidates cannot satisfy
-				// the harness; otherwise the in-container provisioner exits 1
-				// in the pre-start hook with a far less useful error.
+				// is created, when no auth method can be satisfied; otherwise
+				// the in-container provisioner exits 1 in the pre-start hook
+				// with a far less useful error. Volume mounts can supply
+				// credential files under the home, so their targets count.
+				// Shared directories mount outside the home and are not
+				// resolved yet, so they are not passed.
 				if opts.BrokerMode {
-					if err := cs.CheckStagedAuth(agentHome, opts.Env); err != nil {
+					in := harness.AuthCheckInputs{AgentHome: agentHome, Env: opts.Env, ContainerHome: util.GetHomeDir(unixUsername)}
+					if finalScionCfg != nil {
+						for _, v := range finalScionCfg.Volumes {
+							in.MountTargets = append(in.MountTargets, v.Target)
+						}
+					}
+					if err := cs.CheckStagedAuth(in); err != nil {
 						return nil, err
 					}
 				}
