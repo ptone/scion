@@ -673,8 +673,11 @@ func decodeClaims(token string) (*tokenClaims, error) {
 // lifetime. Errors name the failing claim but never echo claim values, since
 // cleanup applies this to a file that may hold something else.
 func (c *tokenClaims) testloginShape() error {
-	if c.Sub == "" || (c.UID != "" && c.UID != c.Sub) {
-		return errors.New("missing or inconsistent subject")
+	if c.Sub == "" {
+		return errors.New("missing subject")
+	}
+	if c.UID != "" && c.UID != c.Sub {
+		return errors.New("uid does not match subject")
 	}
 	if c.Type != "access" {
 		return errors.New("not an access token")

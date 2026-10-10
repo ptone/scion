@@ -618,8 +618,8 @@ func TestCleanupRefusesNonTokenFiles(t *testing.T) {
 		{"no type", func(e *env) string { return e.hub.mintCustom(map[string]any{"type": nil}) }, "not an access token"},
 		{"admin role", func(e *env) string { return e.hub.mintCustom(map[string]any{"role": "admin"}) }, "role is not member"},
 		{"real email domain", func(e *env) string { return e.hub.mintCustom(map[string]any{"email": "person@example.com"}) }, "email is not in"},
-		{"no subject", func(e *env) string { return e.hub.mintCustom(map[string]any{"sub": "", "uid": ""}) }, "subject"},
-		{"uid differs from sub", func(e *env) string { return e.hub.mintCustom(map[string]any{"uid": "uid-other"}) }, "inconsistent subject"},
+		{"no subject", func(e *env) string { return e.hub.mintCustom(map[string]any{"sub": "", "uid": ""}) }, "missing subject"},
+		{"uid differs from sub", func(e *env) string { return e.hub.mintCustom(map[string]any{"uid": "uid-other"}) }, "uid does not match subject"},
 		{"missing iat", func(e *env) string { return e.hub.mintCustom(map[string]any{"iat": nil}) }, "invalid iat"},
 		{"negative iat", func(e *env) string { return e.hub.mintCustom(map[string]any{"iat": -60, "exp": 840}) }, "invalid iat"},
 		{"exp before iat", func(e *env) string { return e.hub.mintCustom(map[string]any{"exp": now - 60}) }, "exp is not after iat"},
@@ -679,8 +679,8 @@ func TestTestloginShape(t *testing.T) {
 		mutate func(*tokenClaims)
 		reason string
 	}{
-		{"no sub", func(c *tokenClaims) { c.Sub = "" }, "subject"},
-		{"uid differs", func(c *tokenClaims) { c.UID = "u2" }, "inconsistent subject"},
+		{"no sub", func(c *tokenClaims) { c.Sub, c.UID = "", "" }, "missing subject"},
+		{"uid differs", func(c *tokenClaims) { c.UID = "u2" }, "uid does not match subject"},
 		{"type refresh", func(c *tokenClaims) { c.Type = "refresh" }, "not an access token"},
 		{"type empty", func(c *tokenClaims) { c.Type = "" }, "not an access token"},
 		{"role admin", func(c *tokenClaims) { c.Role = "admin" }, "role is not member"},
@@ -706,8 +706,10 @@ func TestTestloginShape(t *testing.T) {
 }
 
 // TestEveryRunIsChecked keeps the secret-absence check on every run: the
-// test files may refer to Run only inside env.run. It scans the syntax
-// tree, so any call form (or taking Run as a value) is caught.
+// test files may refer to Run only inside the (*env).run method. It scans
+// the syntax tree of every test file in the directory, so any call form (or
+// taking Run as a value) is caught, and it rejects an external test package,
+// whose qualified testlogin.Run uses this scan does not track.
 func TestEveryRunIsChecked(t *testing.T) {
 	files, err := filepath.Glob("*_test.go")
 	if err != nil {
@@ -720,6 +722,10 @@ func TestEveryRunIsChecked(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if f.Name.Name != "testlogin" {
+			t.Errorf("%s: package %s; tests here must be in package testlogin so this check covers them", name, f.Name.Name)
+			continue
+		}
 		selectors := map[*ast.Ident]bool{}
 		ast.Inspect(f, func(n ast.Node) bool {
 			if sel, ok := n.(*ast.SelectorExpr); ok {
@@ -729,7 +735,7 @@ func TestEveryRunIsChecked(t *testing.T) {
 		})
 		for _, decl := range f.Decls {
 			fd, isFunc := decl.(*ast.FuncDecl)
-			helper := isFunc && fd.Name.Name == "run" && fd.Recv != nil
+			helper := isFunc && fd.Name.Name == "run" && isEnvPointerRecv(fd)
 			ast.Inspect(decl, func(n ast.Node) bool {
 				id, ok := n.(*ast.Ident)
 				if !ok || id.Name != "Run" || selectors[id] {
@@ -748,6 +754,19 @@ func TestEveryRunIsChecked(t *testing.T) {
 	if inHelper != 1 || outside != 0 {
 		t.Errorf("Run references: %d in env.run (want 1), %d elsewhere (want 0)", inHelper, outside)
 	}
+}
+
+// isEnvPointerRecv reports whether fd is a method with receiver type *env.
+func isEnvPointerRecv(fd *ast.FuncDecl) bool {
+	if fd.Recv == nil || len(fd.Recv.List) != 1 {
+		return false
+	}
+	star, ok := fd.Recv.List[0].Type.(*ast.StarExpr)
+	if !ok {
+		return false
+	}
+	id, ok := star.X.(*ast.Ident)
+	return ok && id.Name == "env"
 }
 
 func TestReadSecretFile(t *testing.T) {
