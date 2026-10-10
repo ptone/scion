@@ -417,23 +417,33 @@ func (e *projectUpdatedSpy) updated() []string {
 	return append([]string(nil), e.ids...)
 }
 
-// failingSADeleteStore fails every service account delete.
-type failingSADeleteStore struct{ store.Store }
+// failingSADeleteStore fails service account deletes once its switch is
+// armed (installStoreFault).
+type failingSADeleteStore struct {
+	store.Store
+	fault *storeFaultSwitch
+}
 
-func (failingSADeleteStore) DeleteGCPServiceAccount(context.Context, string) error {
+func (f *failingSADeleteStore) DeleteGCPServiceAccount(ctx context.Context, id string) error {
+	if !f.fault.Active() {
+		return f.Store.DeleteGCPServiceAccount(ctx, id)
+	}
 	return errors.New("injected delete failure")
 }
 
 // Clearing and deleting are not atomic: when the delete fails after a forced
 // clear, the caller is told which defaults are already cleared.
 func TestGCPSARemove_ForceThenDeleteFailsReportsClearedDefaults(t *testing.T) {
-	srv, s, owner, _, _, project := setupGCPAuthzTest(t)
+	srv, s, _, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *failingSADeleteStore {
+		return &failingSADeleteStore{Store: inner, fault: f}
+	})
+	owner, _, _, project := setupGCPAuthzFixture(t, srv, s)
 	sa := mkSA(t, s, "sa-rm-delfail", "rm-delfail@example.com", store.ScopeProject, project.ID, owner.ID)
 	setSARemoveProjectAnnotations(t, s, project.ID, map[string]string{
 		projectSettingDefaultGCPIdentityMode: store.GCPMetadataModeAssign,
 		projectSettingDefaultGCPIdentitySAID: sa.ID,
 	})
-	srv.store = failingSADeleteStore{Store: s}
+	fault.Arm()
 
 	rec := doRequestAsUser(t, srv, owner, http.MethodDelete, saRemovePath(project.ID, sa.ID)+"?force=true", nil)
 	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())

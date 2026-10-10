@@ -907,8 +907,16 @@ func TestMintGCPServiceAccount_NoRetryOnNonConsistencyError(t *testing.T) {
 // Returns the server, store, users, and project.
 func setupGCPAuthzTest(t *testing.T) (*Server, store.Store, *store.User, *store.User, *store.User, *store.Project) {
 	t.Helper()
-
 	srv, s := testServer(t)
+	owner, member, outsider, project := setupGCPAuthzFixture(t, srv, s)
+	return srv, s, owner, member, outsider, project
+}
+
+// setupGCPAuthzFixture is setupGCPAuthzTest on a server the caller built,
+// for tests that must install a store fault (installStoreFault) before this
+// audited setup runs.
+func setupGCPAuthzFixture(t *testing.T, srv *Server, s store.Store) (*store.User, *store.User, *store.User, *store.Project) {
+	t.Helper()
 	ctx := context.Background()
 
 	owner := &store.User{
@@ -964,7 +972,7 @@ func setupGCPAuthzTest(t *testing.T) (*Server, store.Store, *store.User, *store.
 		Role:       store.GroupMemberRoleMember,
 	}))
 
-	return srv, s, owner, member, outsider, project
+	return owner, member, outsider, project
 }
 
 func TestGCPSA_Create_ProjectOwnerAllowed(t *testing.T) {
