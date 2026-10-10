@@ -148,7 +148,7 @@ func addLiveContainer(mgr *mockManager, agentName, projectPath string) {
 	})
 }
 
-func postRestart(t *testing.T, srv *Server, agentName, body string) {
+func postRecreationRestart(t *testing.T, srv *Server, agentName, body string) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agentName+"/restart", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -169,7 +169,7 @@ func TestRestartAgent_LiveContainerAndSurvivingStateUnchanged(t *testing.T) {
 	writeProvisionedAgent(t, projectDir, "live-agent")
 	addLiveContainer(mgr, "live-agent", projectDir)
 
-	postRestart(t, srv, "live-agent", `{
+	postRecreationRestart(t, srv, "live-agent", `{
 		"resolvedEnv": {"SCION_AGENT_ID": "agent-uuid-live"},
 		"projectPath": "`+projectDir+`",
 		"gitClone": {"url": "https://github.com/example/repo.git", "branch": "main"},
@@ -199,7 +199,7 @@ func TestRestartAgent_LiveContainerAndSurvivingStateUnchanged_HubNative(t *testi
 	require.NoError(t, err)
 	addLiveContainer(mgr, "native-agent", resolved)
 
-	postRestart(t, srv, "native-agent", `{
+	postRecreationRestart(t, srv, "native-agent", `{
 		"resolvedEnv": {"SCION_AGENT_ID": "agent-uuid-native"},
 		"projectSlug": "native-proj",
 		"gitClone": {"url": "https://github.com/example/repo.git", "branch": "main"},
