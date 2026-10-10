@@ -16,10 +16,11 @@
 
 /**
  * The test-hub banner in a real browser (ptone/scion#4240, phase W): the
- * member and super-admin variants on the dashboard, a project page, an admin
- * page, for a viewer, a member and an admin user, on the login and invite
- * pages signed out, and on the onboarding page as an admin; no banner when every gate is off; no close control; and the shell bringing
- * the banner back after it is removed in devtools.
+ * member and super-admin variants on the dashboard, a project page and an
+ * admin page, for a viewer, a member and an admin user, on the login and
+ * invite pages signed out, and on the onboarding page as an admin; no banner
+ * when every gate is off; no close control; and the shell bringing the
+ * banner back after it is removed in devtools.
  */
 
 import { test, expect, type Page } from '@playwright/test';
