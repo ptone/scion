@@ -63,8 +63,6 @@ const MEMBER: TestInfraStatus = {
 const ADMIN: TestInfraStatus = { testIdentities: true, testHubAdmin: true, testSuperAdmin: false };
 const SUPER: TestInfraStatus = { testIdentities: true, testHubAdmin: true, testSuperAdmin: true };
 
-/** Stubs fetch: the status endpoint answers `status`, everything else `{}`. */
-
 /** The URL a fetch mock was called with, whatever form it took. */
 function urlOf(input: unknown): string {
   if (typeof input === 'string') return input;
@@ -72,6 +70,8 @@ function urlOf(input: unknown): string {
   if (input instanceof Request) return input.url;
   return '';
 }
+
+/** Stubs fetch: the status endpoint answers `status`, everything else `{}`. */
 function stubHub(status: TestInfraStatus): ReturnType<typeof vi.fn> {
   const fetchMock = vi.fn((input: RequestInfo | URL) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;

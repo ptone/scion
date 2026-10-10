@@ -76,6 +76,8 @@ function urlOf(input: unknown): string {
   if (input instanceof Request) return input.url;
   return '';
 }
+
+/** Stubs fetch: the status endpoint answers `body`, everything else `{}`. */
 function stubStatus(body: unknown): ReturnType<typeof vi.fn> {
   const fetchMock = vi.fn((input: RequestInfo | URL) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
