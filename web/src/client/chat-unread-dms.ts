@@ -84,3 +84,26 @@ export function railUnreadDMs(dms: readonly ChatDMListEntry[], selectedKey = '')
   }
   return rows;
 }
+
+/**
+ * The unread badge's number from the rail's own lists: the sum of the
+ * spaces' unread rollups (`GET /api/v1/chat/spaces`) plus the DMs the badge
+ * counts (`GET /api/v1/chat/dms`). It equals `conversations` from `GET
+ * /api/v1/chat/unread-count`, which the hub computes from the same rollup
+ * and DM rule. Returns null when either body is missing.
+ */
+export function badgeCountFromLists(
+  spaces: { spaces?: unknown[] } | null,
+  dms: { dms?: unknown[] } | null
+): number | null {
+  if (!spaces || !dms) return null;
+  let n = 0;
+  for (const sp of spaces.spaces ?? []) {
+    const c = (sp as { unreadCount?: unknown } | null)?.unreadCount;
+    if (typeof c === 'number' && Number.isFinite(c) && c > 0) n += Math.floor(c);
+  }
+  for (const dm of dms.dms ?? []) {
+    if (dm && isBadgeUnreadDM(dm as ChatDMListEntry)) n++;
+  }
+  return n;
+}

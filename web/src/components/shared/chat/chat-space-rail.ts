@@ -320,7 +320,12 @@ const BACKGROUND_THREAD_LOADS = 2;
 /** Automatic retries of a failed thread load, per space and reload. */
 const THREAD_LOAD_AUTO_RETRIES = 1;
 
-/** Event detail for thread selection. */
+/** The accessible name of an Unread DMs row. */
+export function dmRowLabel(dm: ChatRailDM): string {
+  const who = dm.peerKind === 'agent' ? 'agent' : 'user';
+  return `Direct message with ${who} ${dm.displayName}${dm.unread ? ', unread' : ''}`;
+}
+
 /** Detail of the rail's `dm-select` event: open the DM with this peer. */
 export interface DMSelectDetail {
   conversationKey: string;
@@ -329,6 +334,7 @@ export interface DMSelectDetail {
   displayName: string;
 }
 
+/** Event detail for thread selection. */
 export interface ThreadSelectDetail {
   conversationKey: string;
   projectId: string;
@@ -660,6 +666,16 @@ export class ScionChatSpaceRail extends LitElement {
        person or robot icon in place of the hash, and no drag or menu. */
     .dm-header {
       cursor: default;
+    }
+
+    /* Not a control: no hover change, unlike the clickable space headers. */
+    .dm-header:hover {
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .dm-item:focus-visible {
+      outline: 2px solid var(--scion-primary, #3b82f6);
+      outline-offset: -2px;
     }
 
     .thread-item .dm-icon {
@@ -3383,8 +3399,13 @@ export class ScionChatSpaceRail extends LitElement {
                 class="thread-item dm-item ${dm.conversationKey === this.selectedKey
                   ? 'selected'
                   : ''}"
+                role="button"
+                tabindex="0"
+                aria-label=${dmRowLabel(dm)}
+                aria-current=${dm.conversationKey === this.selectedKey ? 'true' : nothing}
                 data-dm-key=${dm.conversationKey}
                 @click=${() => this.handleDMClick(dm)}
+                @keydown=${(e: KeyboardEvent) => this.handleDMKeydown(e, dm)}
               >
                 <sl-icon
                   class="dm-icon"
@@ -3398,6 +3419,13 @@ export class ScionChatSpaceRail extends LitElement {
         </div>
       </div>
     `;
+  }
+
+  /** Enter or Space on a focused DM row opens it, as a click does. */
+  private handleDMKeydown(e: KeyboardEvent, dm: ChatRailDM): void {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    this.handleDMClick(dm);
   }
 
   private handleDMClick(dm: ChatRailDM): void {

@@ -16,6 +16,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  badgeCountFromLists,
   dmPeerDisplayName,
   isBadgeUnreadDM,
   railUnreadDMs,
@@ -72,5 +73,30 @@ describe('dmPeerDisplayName', () => {
     expect(dmPeerDisplayName({ conversationKey: 'k', peerId: 'p', peerKind: 'user' })).toBe(
       'Unknown user'
     );
+  });
+});
+
+describe('badgeCountFromLists', () => {
+  it('sums the space rollups and the badge-counted DMs', () => {
+    expect(
+      badgeCountFromLists(
+        { spaces: [{ unreadCount: 2 }, { unreadCount: 0 }, { unreadCount: 1 }] },
+        { dms: [dm({}), dm({ muted: true }), dm({ hasUnread: false }), dm({})] }
+      )
+    ).toBe(5);
+  });
+
+  it('ignores malformed entries', () => {
+    expect(
+      badgeCountFromLists(
+        { spaces: [{ unreadCount: 'x' }, null, { unreadCount: -3 }, {}] },
+        { dms: [null] }
+      )
+    ).toBe(0);
+  });
+
+  it('cannot answer without both lists', () => {
+    expect(badgeCountFromLists(null, { dms: [] })).toBeNull();
+    expect(badgeCountFromLists({ spaces: [] }, null)).toBeNull();
   });
 });

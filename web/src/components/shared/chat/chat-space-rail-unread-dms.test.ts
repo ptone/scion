@@ -159,4 +159,29 @@ describe('chat-space-rail Unread DMs section', () => {
       { conversationKey: 'dm:gone', peerId: 'a2', peerKind: 'agent', displayName: 'Unknown agent' },
     ]);
   });
+
+  it('makes rows keyboard-reachable buttons with an accessible name', async () => {
+    const el = await mount([SPACE], DMS);
+    el.spaceFilter = 'unread';
+    await el.updateComplete;
+    const rows = dmRows(el);
+    expect(rows.map((r) => [r.getAttribute('role'), r.getAttribute('tabindex')])).toEqual([
+      ['button', '0'],
+      ['button', '0'],
+      ['button', '0'],
+    ]);
+    expect(rows.map((r) => r.getAttribute('aria-label'))).toEqual([
+      'Direct message with user Alice, unread',
+      'Direct message with agent other-space-agent, unread',
+      'Direct message with agent Unknown agent, unread',
+    ]);
+    const seen: string[] = [];
+    el.addEventListener('dm-select', (e: Event) =>
+      seen.push((e as CustomEvent<DMSelectDetail>).detail.conversationKey)
+    );
+    rows[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    rows[1].dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }));
+    rows[2].dispatchEvent(new KeyboardEvent('keydown', { key: 'a', bubbles: true }));
+    expect(seen).toEqual(['dm:u', 'dm:other']);
+  });
 });

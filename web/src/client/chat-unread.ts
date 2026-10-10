@@ -36,9 +36,25 @@
  *
  * A failed request (an error status included) keeps the last count and is
  * not retried; the next event asks again.
+ *
+ * Cost control. The count is as heavy as the rail's space list (it is the
+ * same rollup), so the counter avoids asking more than it must:
+ *
+ * - At most one request is in flight; events during it fold into a single
+ *   trailing refresh.
+ * - Tabs share answers. A refresh runs under a Web Lock and records its
+ *   answer, with when it was asked, in localStorage; a tab whose triggering
+ *   event came before another tab's request started adopts that answer
+ *   instead of asking again. N tabs reacting to one event send one request.
+ * - The chat page installs a source (`setSource`) that derives the count
+ *   from the shared `/chat/spaces` and `/chat/dms` loads the rail and page
+ *   already make for the same event, so on the chat page a message costs
+ *   no extra rollup. The hub pins `unread-count` to exactly that sum
+ *   (TestChatUnreadCount_BadgeEqualsRail).
  */
 
 import { apiFetch } from './api.js';
+import { chatLoadClock } from './chat-list-cache.js';
 import { setUnreadBadge } from './page-title.js';
 import { stateManager } from './state.js';
 
@@ -69,6 +85,60 @@ export const UNREAD_REFRESH_DEBOUNCE_MS = 500;
  * wait for the forced run, not a guaranteed maximum.
  */
 export const INITIAL_REFRESH_MAX_DELAY_MS = 3000;
+
+/** The Web Lock that serializes count requests across this origin's tabs. */
+export const UNREAD_LOCK_NAME = 'scion-chat-unread-count';
+
+/** The localStorage key holding the latest answer any tab got. */
+export const UNREAD_SHARE_KEY = 'scion-chat-unread-share';
+
+/**
+ * How long a tab waits for the cross-tab lock before asking on its own. A
+ * tab that holds the lock behind a hung request must not freeze the badge
+ * everywhere else.
+ */
+export const UNREAD_LOCK_WAIT_MS = 10_000;
+
+/**
+ * A count source other than the endpoint. `startedAfter` is on the
+ * `chatLoadClock` clock: an answer from a request started after it reflects
+ * every event the refresh is for. Resolves to null when it cannot answer.
+ */
+export type UnreadCountSource = (startedAfter: number) => Promise<number | null>;
+
+/** The answer one tab got, as shared through localStorage. */
+interface SharedAnswer {
+  count: number;
+  /** Wall-clock time (Date.now) the request behind it was started. */
+  askedAt: number;
+}
+
+function readSharedAnswer(): SharedAnswer | null {
+  try {
+    const raw = localStorage.getItem(UNREAD_SHARE_KEY);
+    if (!raw) return null;
+    const v = JSON.parse(raw) as Partial<SharedAnswer>;
+    if (typeof v.count !== 'number' || typeof v.askedAt !== 'number') return null;
+    return { count: v.count, askedAt: v.askedAt };
+  } catch {
+    return null;
+  }
+}
+
+function writeSharedAnswer(answer: SharedAnswer): void {
+  try {
+    localStorage.setItem(UNREAD_SHARE_KEY, JSON.stringify(answer));
+  } catch {
+    // Storage full or disabled: tabs just ask on their own.
+  }
+}
+
+/** The Web Locks API, or null where the browser (or test DOM) lacks it. */
+function webLocks(): LockManager | null {
+  if (typeof navigator === 'undefined') return null;
+  const locks = (navigator as Navigator & { locks?: LockManager }).locks;
+  return locks && typeof locks.request === 'function' ? locks : null;
+}
 
 type InitialHandle =
   | { kind: 'idle'; id: number }
@@ -118,7 +188,18 @@ export class ChatUnreadCounter {
   private refreshId = 0;
   /** The pending first refresh, until it runs or is superseded. */
   private initial: InitialHandle | null = null;
-  private readonly boundSchedule = (): void => this.scheduleRefresh();
+  /** The running refresh, if any. */
+  private inFlight: Promise<void> | null = null;
+  /** A refresh was asked for while one was running: run once more after it. */
+  private queued = false;
+  /** Newest trigger not yet answered, on the chatLoadClock clock. */
+  private pendingAfter = -Infinity;
+  /** The same trigger on the wall clock, for comparing with other tabs. */
+  private pendingWall = -Infinity;
+  /** See setSource. */
+  private source: UnreadCountSource | null = null;
+  private readonly boundSchedule = (e: Event): void =>
+    this.scheduleRefresh(e.timeStamp > 0 ? e.timeStamp : undefined);
 
   /** The latest known unread conversation count. */
   get count(): number {
@@ -148,14 +229,28 @@ export class ChatUnreadCounter {
     stateManager.removeEventListener('chat-read-state-updated', this.boundSchedule);
     this.listening = false;
     this.stopped = true;
+    this.queued = false;
     this.cancelPending();
     this.cancelInitialRefresh();
     this.publish(0);
   }
 
-  /** Coalesces a burst of events into a single refresh. */
-  scheduleRefresh(): void {
+  /**
+   * Replaces where the count comes from: a source while the chat page is
+   * open (see the module comment), the endpoint again with null.
+   */
+  setSource(source: UnreadCountSource | null): void {
+    this.source = source;
+  }
+
+  /**
+   * Coalesces a burst of events into a single refresh. `eventAt` is when
+   * the triggering event was delivered (an Event's timeStamp); without it,
+   * now.
+   */
+  scheduleRefresh(eventAt?: number): void {
     if (!this.listening) return;
+    this.noteTrigger(eventAt);
     // This refresh supersedes a pending first refresh.
     this.cancelInitialRefresh();
     if (this.timer) clearTimeout(this.timer);
@@ -165,16 +260,88 @@ export class ChatUnreadCounter {
     }, UNREAD_REFRESH_DEBOUNCE_MS);
   }
 
-  /** Fetches the count now. */
-  async refresh(): Promise<void> {
+  /**
+   * Fetches the count now. While a refresh is running, a call folds into
+   * one trailing refresh after it and resolves when that one is done.
+   */
+  refresh(): Promise<void> {
     this.cancelInitialRefresh();
+    // A debounced refresh answers the triggers scheduleRefresh recorded,
+    // from when their events were delivered; a direct call is for now.
+    if (this.pendingAfter === -Infinity) this.noteTrigger();
+    if (this.inFlight) {
+      this.queued = true;
+      return this.inFlight;
+    }
+    const run = async (): Promise<void> => {
+      try {
+        do {
+          this.queued = false;
+          await this.refreshOnce();
+        } while (this.queued && !this.stopped);
+      } finally {
+        this.inFlight = null;
+      }
+    };
+    this.inFlight = run();
+    return this.inFlight;
+  }
+
+  /** Records a trigger the next refresh must answer. */
+  private noteTrigger(eventAt?: number): void {
+    const at = eventAt ?? chatLoadClock();
+    // An event delivered at `at` (perf clock) happened this long ago.
+    const wall = Date.now() - Math.max(0, chatLoadClock() - at);
+    this.pendingAfter = Math.max(this.pendingAfter, at);
+    this.pendingWall = Math.max(this.pendingWall, wall);
+  }
+
+  private async refreshOnce(): Promise<void> {
     const localId = ++this.refreshId;
-    const count = await this.fetchCount();
+    const after = this.pendingAfter;
+    const wall = this.pendingWall;
+    this.pendingAfter = -Infinity;
+    this.pendingWall = -Infinity;
+    const count = await this.askShared(after, wall);
     // Discard stale results: a newer refresh was started while we awaited.
     if (this.stopped || localId !== this.refreshId) return;
     // A failed load (offline, chat disabled) keeps the last known count
     // rather than flashing the badge to zero.
     if (count !== null) this.publish(count);
+  }
+
+  /**
+   * Answers a refresh for triggers up to `after` (perf clock) / `wall`
+   * (wall clock): adopts another tab's answer whose request started after
+   * the trigger, or asks and shares the answer. Without Web Locks, or if
+   * the lock does not come in time, it just asks.
+   */
+  private async askShared(after: number, wall: number): Promise<number | null> {
+    const locks = webLocks();
+    if (!locks) return this.ask(after);
+    const signal =
+      typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+        ? AbortSignal.timeout(UNREAD_LOCK_WAIT_MS)
+        : undefined;
+    try {
+      return await locks.request(UNREAD_LOCK_NAME, signal ? { signal } : {}, async () => {
+        const shared = readSharedAnswer();
+        if (shared && shared.askedAt > wall) return shared.count;
+        const askedAt = Date.now();
+        const count = await this.ask(after);
+        if (count !== null) writeSharedAnswer({ count, askedAt });
+        return count;
+      });
+    } catch {
+      return this.ask(after);
+    }
+  }
+
+  /** One answer from the installed source, or the endpoint. */
+  private ask(after: number): Promise<number | null> {
+    const source = this.source;
+    if (source) return source(after).catch(() => null);
+    return this.fetchCount();
   }
 
   private scheduleInitialRefresh(): void {
