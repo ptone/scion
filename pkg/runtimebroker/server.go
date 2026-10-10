@@ -247,6 +247,10 @@ type Server struct {
 	mu         sync.RWMutex
 	startTime  time.Time
 
+	// nfsCleanupWG tracks background NFS project tree removals started by
+	// project delete (startNFSProjectTreeCleanup), so tests can wait for them.
+	nfsCleanupWG sync.WaitGroup
+
 	// workspaceDownload replaces gcp.SyncFromGCS for the GCS workspace
 	// bootstrap (create-time and handleWorkspaceApply) when set (see
 	// SetWorkspaceDownloader).
@@ -2534,8 +2538,10 @@ func (s *Server) logHubConnections() {
 			attrs = append(attrs, slog.Bool("colocated", true))
 		}
 
+		conn.mu.RLock()
 		hasHeartbeat := conn.Heartbeat != nil
 		hasControlChannel := conn.ControlChannel != nil
+		conn.mu.RUnlock()
 		attrs = append(attrs,
 			slog.Bool("heartbeat", hasHeartbeat),
 			slog.Bool("control_channel", hasControlChannel),
