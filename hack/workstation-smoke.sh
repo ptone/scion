@@ -129,8 +129,14 @@ done
 [ "$ready" = 1 ] || { cat "$WORK/start.out" >&2; fail "the local server did not answer /healthz"; }
 
 log "3. scion hub link links to the local hub without a prompt"
-# No -y and no terminal: a confirmation prompt would decline.
-"$SCION" ${TARGET[@]+"${TARGET[@]}"} hub link </dev/null >"$WORK/link.out" 2>&1 || {
+# No terminal, and no -y for a project: a confirmation prompt would decline.
+# The hub seeds a project named "Global", so linking the global project
+# meets the separate "matching projects" choice, which this phase leaves
+# as is; -y answers only that choice there (the check below still fails
+# if the link confirmation appears).
+LINK_FLAGS=()
+if [ ${#TARGET[@]} -gt 0 ]; then LINK_FLAGS=(-y); fi
+"$SCION" ${TARGET[@]+"${TARGET[@]}"} ${LINK_FLAGS[@]+"${LINK_FLAGS[@]}"} hub link </dev/null >"$WORK/link.out" 2>&1 || {
   cat "$WORK/link.out" >&2; fail "scion hub link"; }
 cat "$WORK/link.out"
 grep -q "Linking project '.*' to the local hub at http://127.0.0.1:" "$WORK/link.out" || fail "hub link did not report the local link"
