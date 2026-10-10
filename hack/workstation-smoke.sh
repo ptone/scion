@@ -82,20 +82,22 @@ git init -q
 git commit -q --allow-empty -m "initial commit"
 
 # 'scion init' needs a container runtime (it probes podman/docker). Where
-# one is available, link the repo's own project; otherwise skip init, and
-# hub link uses the global project. --format json skips the interactive
-# image-registry question.
+# one is available, link the repo's own project; otherwise skip init and
+# target the global project with --global (commands run outside a project
+# require it). --format json skips the interactive image-registry question.
+TARGET=()
 if command -v docker >/dev/null 2>&1 || command -v podman >/dev/null 2>&1; then
   log "scion init --machine && scion init"
   "$SCION" init --machine --format json >"$WORK/init-machine.out" 2>&1 || {
     cat "$WORK/init-machine.out" >&2; fail "scion init --machine"; }
   "$SCION" init --format json >"$WORK/init.out" 2>&1 || { cat "$WORK/init.out" >&2; fail "scion init"; }
 else
-  log "no container runtime found: skipping scion init (the global project is linked)"
+  log "no container runtime found: skipping scion init, using the global project"
+  TARGET=(--global)
 fi
 
 log "SCION_HUB_AUTO_START=0 scion hub link fails and starts nothing"
-if SCION_HUB_AUTO_START=0 "$SCION" -y hub link >"$WORK/off.out" 2>&1; then
+if SCION_HUB_AUTO_START=0 "$SCION" "${TARGET[@]}" -y hub link >"$WORK/off.out" 2>&1; then
   cat "$WORK/off.out" >&2
   fail "hub link succeeded with auto-start off and no endpoint"
 fi
@@ -105,23 +107,23 @@ if "$SCION" server status 2>/dev/null | grep -qi "running" && ! "$SCION" server 
 fi
 
 log "scion hub link (auto-starts the local server)"
-"$SCION" -y hub link >"$WORK/link.out" 2>&1 || { cat "$WORK/link.out" >&2; fail "scion hub link"; }
+"$SCION" "${TARGET[@]}" -y hub link >"$WORK/link.out" 2>&1 || { cat "$WORK/link.out" >&2; fail "scion hub link"; }
 cat "$WORK/link.out"
 grep -q "starting the local scion server" "$WORK/link.out" || fail "hub link did not start the local server"
 grep -q "is now linked to the Hub" "$WORK/link.out" || fail "hub link did not link the project"
 
 log "scion hub status shows the project linked"
-"$SCION" hub status --format json >"$WORK/status.json" 2>"$WORK/status.err" || {
+"$SCION" "${TARGET[@]}" hub status --format json >"$WORK/status.json" 2>"$WORK/status.err" || {
   cat "$WORK/status.json" "$WORK/status.err" >&2; fail "scion hub status"; }
 grep -Eq '"linked"[[:space:]]*:[[:space:]]*true' "$WORK/status.json" || {
   cat "$WORK/status.json" >&2; fail "hub status does not report the project as linked"; }
 
 log "scion list returns an empty list through the hub"
-"$SCION" list >"$WORK/list.out" 2>"$WORK/list.err" || {
+"$SCION" "${TARGET[@]}" list >"$WORK/list.out" 2>"$WORK/list.err" || {
   cat "$WORK/list.out" "$WORK/list.err" >&2; fail "scion list"; }
 grep -q "Using hub: http://127.0.0.1:" "$WORK/list.err" || {
   cat "$WORK/list.out" "$WORK/list.err" >&2; fail "scion list did not go through the local hub"; }
-"$SCION" list --format json >"$WORK/list.json" 2>"$WORK/list.err" || {
+"$SCION" "${TARGET[@]}" list --format json >"$WORK/list.json" 2>"$WORK/list.err" || {
   cat "$WORK/list.json" "$WORK/list.err" >&2; fail "scion list --format json"; }
 tr -d '[:space:]' <"$WORK/list.json" | grep -Eq '^(\[\]|null)$' || {
   cat "$WORK/list.json" "$WORK/list.err" >&2; fail "scion list did not return an empty list"; }
