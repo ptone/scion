@@ -50,7 +50,10 @@ func TestDispatch_FlatProfileFreeAssignSkipsHubPrecheck(t *testing.T) {
 			}
 			require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 			a.RuntimeBrokerID = broker.ID
+			// A valid pin: pinned to the Runtime Broker the agent is assigned to.
+			a.PinnedRuntimeBrokerID = broker.ID
 			a.PinnedRuntimeTargetID, a.PinnedRuntimeTargetType = broker.RuntimeTarget.ID, broker.RuntimeTarget.Type
+			require.True(t, a.PinValid())
 			require.Nil(t, kubernetesIdentityNotMapped(broker, a.AppliedConfig.Profile, a.AppliedConfig.GCPIdentity, time.Now()),
 				"no Hub-side refusal for a profile-free dispatch")
 
