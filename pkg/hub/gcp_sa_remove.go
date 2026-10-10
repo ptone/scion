@@ -184,7 +184,7 @@ func (s *Server) removeGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 		if err != nil {
 			s.logGCPServiceAccountAudit(ctx, GCPSAAuditDelete, sa, false, gcpSAAuditOutcomeDeleteFailed,
 				map[string]string{"force": "true", "defaults_cleared": strconv.Itoa(len(cleared))})
-			writeErrorFromErr(w, err, "")
+			writeGCPSARemoveFailure(w, err, cleared)
 			return
 		}
 	}
@@ -192,7 +192,7 @@ func (s *Server) removeGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 	if err := s.store.DeleteGCPServiceAccount(ctx, sa.ID); err != nil {
 		s.logGCPServiceAccountAudit(ctx, GCPSAAuditDelete, sa, false, gcpSAAuditOutcomeDeleteFailed,
 			map[string]string{"force": strconv.FormatBool(force), "defaults_cleared": strconv.Itoa(len(cleared))})
-		writeErrorFromErr(w, err, "")
+		writeGCPSARemoveFailure(w, err, cleared)
 		return
 	}
 
@@ -212,6 +212,23 @@ func (s *Server) removeGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 		ClearedDefaults: cleared,
 		Impact:          impact,
 	})
+}
+
+// writeGCPSARemoveFailure answers a delete that failed. Clearing and
+// deleting are NOT atomic: a forced delete clears defaults first, so when it
+// fails afterwards (a later project update, or the delete itself) the
+// defaults it already cleared stay cleared. That state is safe (assign became
+// block, and a retry is idempotent), but the caller must be told, so the
+// cleared defaults (redacted for the caller) travel in the error details.
+// With nothing cleared the error is written as before.
+func writeGCPSARemoveFailure(w http.ResponseWriter, err error, cleared []GCPServiceAccountImpactDefault) {
+	if len(cleared) == 0 {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+		fmt.Sprintf("removing the service account failed after %d default(s) were cleared; they stay cleared. Retry the delete.", len(cleared)),
+		map[string]interface{}{"clearedDefaults": cleared})
 }
 
 func allDefaultsClearable(defaults []GCPServiceAccountImpactDefault) bool {
@@ -325,8 +342,13 @@ func (s *Server) gcpServiceAccountImpact(ctx context.Context, sa *store.GCPServi
 			matched = append(matched, *a)
 		}
 		if len(matched) > 0 {
+			// Names only for a USER caller, the same rule
+			// applyCallerViewToDefaults applies to defaults.
+			// readableAgentRows passes every row through for an agent
+			// caller (its sibling-listing behaviour), which must not
+			// turn into hub-wide agent names here.
 			readable := map[string]bool{}
-			if identity != nil {
+			if _, isUser := identity.(UserIdentity); isUser {
 				rows, err := s.readableAgentRows(ctx, identity, matched)
 				if err != nil {
 					return impact, fmt.Errorf("authorizing agents for the impact report: %w", err)
@@ -569,10 +591,20 @@ func (s *Server) clearGCPServiceAccountDefaults(ctx context.Context, saID string
 		if len(current) == 0 {
 			continue
 		}
+		// RACE, ACCEPTED: this is a read-modify-write of the whole project
+		// row with no version check, the same pattern as the settings PUT.
+		// A settings write that interleaves can lose its change, and one
+		// that lands after the impact scan can point a default at the
+		// account just before it is deleted. Either way the outcome is the
+		// existing "no longer available" error at the next agent start, so
+		// force does not guarantee zero dangling defaults.
 		clearProjectDefaultsReferencing(project, saID)
 		if err := s.store.UpdateProject(ctx, project); err != nil {
 			return cleared, fmt.Errorf("clearing defaults of project %s: %w", projectID, err)
 		}
+		// Same event a settings PUT publishes, so open settings views and
+		// other subscribers drop the stale default.
+		s.events.PublishProjectUpdated(ctx, project)
 		cleared = append(cleared, current...)
 	}
 	return cleared, nil

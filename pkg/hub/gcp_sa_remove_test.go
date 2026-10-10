@@ -135,7 +135,10 @@ func TestGCPSARemove_ForceClearsDefaultsThenDeletes(t *testing.T) {
 		projectSettingDefaultGCPIdentityMode:          store.GCPMetadataModeAssign,
 		projectSettingDefaultGCPIdentitySAID:          sa.ID,
 		projectSettingDefaultGCPIdentitySAIDByProfile: fmt.Sprintf(`{"k8s":%q,"gke":%q}`, sa.ID, other.ID),
+		projectSettingDefaultTemplate:                 "unrelated-template",
 	})
+	events := &projectUpdatedSpy{}
+	srv.SetEventPublisher(events)
 
 	rec := doRequestAsUser(t, srv, owner, http.MethodDelete, saRemovePath(project.ID, sa.ID)+"?force=true", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -156,6 +159,9 @@ func TestGCPSARemove_ForceClearsDefaultsThenDeletes(t *testing.T) {
 		"a cleared assign default becomes block, never unset (which could fall through to a broader default)")
 	assert.Equal(t, map[string]string{"gke": other.ID}, profileDefaultSAIDsFromAnnotations(p.Annotations),
 		"only the per-profile entries naming the account are removed")
+	assert.Equal(t, "unrelated-template", p.Annotations[projectSettingDefaultTemplate],
+		"a forced clear keeps every unrelated project setting (#3942)")
+	assert.Equal(t, []string{project.ID}, events.updated(), "a forced clear publishes the project-updated event")
 
 	events := audit.ofType(GCPSAAuditDelete)
 	require.Len(t, events, 1)
@@ -388,4 +394,96 @@ func TestGCPSARemove_ReportRedactsWhatTheCallerCannotSee(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"secret-profile": sa.ID}, profileDefaultSAIDsFromAnnotations(p.Annotations),
 		"a default the caller may not change is never cleared")
+}
+
+// projectUpdatedSpy records PublishProjectUpdated calls.
+type projectUpdatedSpy struct {
+	noopEventPublisher
+	mu  sync.Mutex
+	ids []string
+}
+
+func (e *projectUpdatedSpy) PublishProjectUpdated(_ context.Context, p *store.Project) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.ids = append(e.ids, p.ID)
+}
+
+func (e *projectUpdatedSpy) updated() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.ids...)
+}
+
+// failingSADeleteStore fails every service account delete.
+type failingSADeleteStore struct{ store.Store }
+
+func (failingSADeleteStore) DeleteGCPServiceAccount(context.Context, string) error {
+	return errors.New("injected delete failure")
+}
+
+// Clearing and deleting are not atomic: when the delete fails after a forced
+// clear, the caller is told which defaults are already cleared.
+func TestGCPSARemove_ForceThenDeleteFailsReportsClearedDefaults(t *testing.T) {
+	srv, s, owner, _, _, project := setupGCPAuthzTest(t)
+	sa := mkSA(t, s, "sa-rm-delfail", "rm-delfail@example.com", store.ScopeProject, project.ID, owner.ID)
+	setSARemoveProjectAnnotations(t, s, project.ID, map[string]string{
+		projectSettingDefaultGCPIdentityMode: store.GCPMetadataModeAssign,
+		projectSettingDefaultGCPIdentitySAID: sa.ID,
+	})
+	srv.store = failingSADeleteStore{Store: s}
+
+	rec := doRequestAsUser(t, srv, owner, http.MethodDelete, saRemovePath(project.ID, sa.ID)+"?force=true", nil)
+	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+
+	var resp struct {
+		Error struct {
+			Message string `json:"message"`
+			Details struct {
+				ClearedDefaults []GCPServiceAccountImpactDefault `json:"clearedDefaults"`
+			} `json:"details"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Contains(t, resp.Error.Message, "stay cleared")
+	assert.Equal(t, []GCPServiceAccountImpactDefault{
+		{Tier: GCPSADefaultTierProject, ProjectID: project.ID, Clearable: true},
+	}, resp.Error.Details.ClearedDefaults)
+
+	assert.True(t, saExists(t, s, sa.ID), "the account is still registered")
+	p, err := s.GetProject(context.Background(), project.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.GCPMetadataModeBlock, p.Annotations[projectSettingDefaultGCPIdentityMode],
+		"the default cleared before the failure stays cleared")
+}
+
+// Agents are named only for a user caller, the same rule as defaults: an
+// agent identity (which readableAgentRows would pass every row for) gets
+// counts only.
+func TestGCPSAImpact_AgentCallerGetsNoAgentNames(t *testing.T) {
+	srv, s, owner, _, _, project := setupGCPAuthzTest(t)
+	ctx := context.Background()
+	sa := mkSA(t, s, "sa-rm-agentcaller", "rm-agentcaller@example.com", store.ScopeProject, project.ID, owner.ID)
+	ref := &store.Agent{
+		ID: tid("agent-rm-agentcaller"), Slug: "agent-rm-agentcaller", Name: "agent-rm-agentcaller",
+		ProjectID: project.ID, CreatedBy: owner.ID, OwnerID: owner.ID,
+		AppliedConfig: &store.AgentAppliedConfig{GCPIdentity: &store.GCPIdentityConfig{
+			MetadataMode: store.GCPMetadataModeAssign, ServiceAccountID: sa.ID,
+		}},
+	}
+	require.NoError(t, s.CreateAgent(ctx, ref))
+
+	agentCtx := contextWithIdentity(ctx, newAgentIdentityFromStore(ref))
+	impact, err := srv.gcpServiceAccountImpact(agentCtx, sa)
+	require.NoError(t, err)
+	assert.Empty(t, impact.Agents)
+	assert.Equal(t, 1, impact.AgentCount)
+	assert.Zero(t, impact.VisibleAgentCount)
+	assert.Equal(t, []int{1}, impact.HiddenAgentCounts)
+
+	userCtx := contextWithIdentity(ctx, NewAuthenticatedUser(owner.ID, owner.Email, owner.DisplayName, owner.Role, ClientTypeWeb))
+	impact, err = srv.gcpServiceAccountImpact(userCtx, sa)
+	require.NoError(t, err)
+	require.Len(t, impact.Agents, 1, "the project owner, a user who may read the agent, sees its name")
+	assert.Equal(t, ref.ID, impact.Agents[0].ID)
 }

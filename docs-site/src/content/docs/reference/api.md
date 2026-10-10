@@ -131,6 +131,9 @@ A project's own accounts live under `/api/v1/projects/:id/gcp-service-accounts` 
   - `force=true` clears the project and per-profile defaults the caller may clear, then deletes. If any referencing default is not clearable by the caller, the delete stays `409`, and the message says an admin of those projects must change them. A cleared project default whose mode was `assign` becomes `block`, not unset, so new agents get no GCP identity rather than falling through to a broader hub or runtime default.
   - `force=true` never clears the hub default. While the hub default points at the account (`clearable: false`), the delete stays `409` until a hub admin changes the hub default.
   - Agents that reference the account do not block the delete. They keep the reference and fail at their next start with the existing "no longer available" error.
+  - Clearing and deleting are not atomic. If a forced delete fails after it cleared defaults, those defaults stay cleared. The error carries them in `error.details.clearedDefaults`, redacted the same way, and retrying the delete is safe.
+  - A settings write that runs at the same time as a forced delete is not serialized with it. It can still leave a default pointing at the removed account. Agents created from that default then fail at start with the existing "no longer available" error.
+  - Each project a forced delete changes publishes the same project-updated event as a settings save.
   - On success the response is `200` with `{"deleted": true, "clearedDefaults": [...], "impact": {...}}`. Earlier Hubs returned `204` with no body.
 
 #### Runtime Brokers (`/api/v1/brokers`)
