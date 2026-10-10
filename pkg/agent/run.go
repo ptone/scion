@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -218,9 +219,15 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// none on a fresh provision) and record this run only after a
 	// successful create, which proves the name was free.
 	recordAfterCreate := listErr != nil
+	runIDNeedsHomeRepair := false
 	if listErr == nil {
 		ctx = api.ContextWithRunID(ctx, opts.RunID)
-		if err := SetSavedRunID(opts.Name, opts.ProjectPath, opts.RunID); err != nil {
+		if err := SetSavedRunID(opts.Name, opts.ProjectPath, opts.RunID); errors.Is(err, fs.ErrPermission) {
+			// The agent home is not writable by the agent runtime
+			// (ptone/scion#4330); retried after an ownership repair once
+			// the agent's image is resolved, below.
+			runIDNeedsHomeRepair = true
+		} else if err != nil {
 			slog.Warn("Start: failed to record the run ID in agent-info.json; a delete for this run may leave the agent's files behind",
 				"agent", opts.Name, "run_id", opts.RunID, "error", err)
 		}
@@ -757,6 +764,18 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 
 	util.Debugf("image resolution: final image=%s", resolvedImage)
 
+	// Start-time writes into an existing agent's home (writeAgentHome)
+	// repair the home's ownership through the runtime, from this image, on
+	// a permission error (ptone/scion#4330).
+	warnAgentHomeOwnerMismatch(opts.Name, agentHome)
+	ctx = contextWithAgentHomeRepair(ctx, m.Runtime, agentHome, resolvedImage)
+	if runIDNeedsHomeRepair {
+		if err := writeAgentHome(ctx, func() error { return SetSavedRunID(opts.Name, opts.ProjectPath, opts.RunID) }); err != nil {
+			slog.Warn("Start: failed to record the run ID in agent-info.json; a delete for this run may leave the agent's files behind",
+				"agent", opts.Name, "run_id", opts.RunID, "error", err)
+		}
+	}
+
 	// Resolve the harness implementation. When we have a harness-config name,
 	// route through harness.Resolve so container-script provisioners (and
 	// future declarative-only harnesses) are honored. Otherwise fall back to
@@ -906,7 +925,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		} else if err := ensureControlPlaneInputsRecord(agentDir); err != nil {
 			return nil, fmt.Errorf("record harness inputs: %w", err)
 		}
-		if err := resetStagedProvisioning(agentHome); err != nil {
+		// Never skipped: on a permission error the home's ownership is
+		// repaired and the clear retried, or the start fails.
+		if err := writeAgentHome(ctx, func() error { return resetStagedProvisioning(agentHome) }); err != nil {
 			return nil, err
 		}
 		// Restage the control-plane inputs (instructions, system prompt,
