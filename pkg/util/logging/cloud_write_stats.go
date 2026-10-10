@@ -16,7 +16,6 @@ package logging
 
 import (
 	"errors"
-	"log"
 	"sync/atomic"
 	"time"
 
@@ -182,6 +181,19 @@ func (s *CloudWriteStats) SetCircuitSource(open func() bool) {
 	s.circuit.Store(&open)
 }
 
+// registerCircuitSource registers open like SetCircuitSource and returns a
+// func that unregisters it only if it is still the registered source, so a
+// stopped handler never leaves its state behind and never removes a later
+// handler's registration.
+func (s *CloudWriteStats) registerCircuitSource(open func() bool) (unregister func()) {
+	if s == nil || open == nil {
+		return func() {}
+	}
+	p := &open
+	s.circuit.Store(p)
+	return func() { s.circuit.CompareAndSwap(p, nil) }
+}
+
 // CircuitOpen reports the registered circuit state; ok is false when no
 // source is registered.
 func (s *CloudWriteStats) CircuitOpen() (open, ok bool) {
@@ -234,27 +246,20 @@ func classifyCloudError(err error) CloudFailureReason {
 }
 
 // cloudClientOnError returns the Cloud Logging client's OnError hook. It
-// counts the error under writer=cloud, then calls fallback, which in
-// production is defaultCloudClientOnError: the same
-// log.Printf("logging client: %v", err) call gcplog's own default hook
-// makes, so what is logged and where it goes is unchanged. Error text never
-// reaches a metric label. gcplog never calls OnError concurrently and feeds
-// it from a small buffered channel, so under an error storm some errors skip
-// the hook and reason=error undercounts.
-func cloudClientOnError(stats *CloudWriteStats, fallback func(error)) func(error) {
+// counts the error under writer=cloud, then calls prev, the client's
+// previous OnError (gcplog's default, log.Printf("logging client: %v", e)),
+// unchanged, so what is logged and where it goes stay as before. Error text
+// never reaches a metric label. gcplog never calls OnError concurrently and
+// feeds it from a small buffered channel, so under an error storm some
+// errors skip the hook and reason=error undercounts.
+func cloudClientOnError(stats *CloudWriteStats, prev func(error)) func(error) {
 	return func(err error) {
 		if err == nil {
 			return
 		}
 		stats.RecordFailure(classifyCloudError(err))
-		if fallback != nil {
-			fallback(err)
+		if prev != nil {
+			prev(err)
 		}
 	}
-}
-
-// defaultCloudClientOnError reproduces gcplog.NewClient's default OnError
-// (cloud.google.com/go/logging v1.13.2: log.Printf("logging client: %v", e)).
-func defaultCloudClientOnError(err error) {
-	log.Printf("logging client: %v", err)
 }
