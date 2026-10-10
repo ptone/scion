@@ -157,6 +157,13 @@
           "x-env-var": "SCION_HUB_LOCAL_ONLY",
           "x-since": "1"
         },
+        "auto_start": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether the CLI may start the local workstation server ('scion server start') when no Hub endpoint is configured. Never applies inside an agent container.",
+          "x-env-var": "SCION_HUB_AUTO_START",
+          "x-since": "1"
+        },
         "transport": {
           "type": "object",
           "description": "Transport-layer auth for reaching a Hub behind a platform guard (IAP, Cloud Run invoker IAM). Kept when a legacy settings file is migrated.",

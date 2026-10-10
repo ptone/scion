@@ -394,7 +394,7 @@ func TestUpdateVersionedSetting_EdgeCases(t *testing.T) {
 var updateVersionedSettingKeys = []string{
 	"active_profile", "default_template", "default_harness_config", "workspace_path",
 	"image_registry", "cli.autohelp", "hub.enabled", "hub.linked", "hub.endpoint",
-	"hub.local_only", "hub.brokerId", "hub.brokerToken", "hub.brokerNickname",
+	"hub.local_only", "hub.auto_start", "hub.brokerId", "hub.brokerToken", "hub.brokerNickname",
 	"server.auth.display_name", "server.auth.email", "server.auth.username",
 	"project_id", "hub.project_id",
 	"hub.token", "hub.apiKey", "hub.lastSyncedAt",

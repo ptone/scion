@@ -46,6 +46,7 @@ hub:
   enabled: true
   linked: true
   local_only: false
+  auto_start: false
   endpoint: https://hub.example.com
   token: legacy-token
   apiKey: legacy-api-key
@@ -143,6 +144,7 @@ var legacyKeyChecks = map[string]legacyKeyCheck{
 	"hub.enabled":        convertedTo(true, "hub", "enabled"),
 	"hub.linked":         convertedTo(true, "hub", "linked"),
 	"hub.local_only":     convertedTo(false, "hub", "local_only"),
+	"hub.auto_start":     convertedTo(false, "hub", "auto_start"),
 	"hub.endpoint":       convertedTo("https://hub.example.com", "hub", "endpoint"),
 	"hub.token":          absent("hub", "token"),
 	"hub.apiKey":         absent("hub", "apiKey"),

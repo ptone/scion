@@ -86,6 +86,7 @@ var legacySubKeyHandling = map[string]map[string]legacyKeyHandling{
 		"enabled":        legacyKeyConverted,
 		"linked":         legacyKeyConverted,
 		"local_only":     legacyKeyConverted,
+		"auto_start":     legacyKeyConverted,
 		"endpoint":       legacyKeyConverted,
 		"token":          legacyKeyDropped,
 		"apiKey":         legacyKeyDropped,

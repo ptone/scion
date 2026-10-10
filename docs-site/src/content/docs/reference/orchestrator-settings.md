@@ -77,6 +77,7 @@ hub:
 | `endpoint` | string | The Hub API endpoint URL. Can be overridden per-agent in `scion-agent.yaml`. |
 | `project_id` | string | The unique identifier for this project on the Hub. |
 | `local_only` | bool | If `true`, forces local-only operation even if the Hub is configured. |
+| `auto_start` | bool | Whether `scion hub link` may start the local workstation server (`scion server start`) when no Hub endpoint is configured. Default: `true`. Set `SCION_HUB_AUTO_START=0` to turn it off for one invocation. Never applies inside an agent container. |
 
 :::caution[Moved Fields]
 Legacy fields like `token`, `apiKey`, and broker identity fields (`brokerId`) have been removed. 

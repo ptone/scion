@@ -1223,6 +1223,7 @@ func TestVersionedEnvKeyMapper(t *testing.T) {
 		{"SCION_HUB_GROVE_ID", ""},
 		{"SCION_HUB_LOCAL_ONLY", "hub.local_only"},
 		{"SCION_HUB_ENABLED", "hub.enabled"},
+		{"SCION_HUB_AUTO_START", ""},
 		{"SCION_CLI_AUTOHELP", "cli.autohelp"},
 		{"SCION_CLI_INTERACTIVE_DISABLED", "cli.interactive_disabled"},
 		{"SCION_SERVER_ENV", "server.env"},
