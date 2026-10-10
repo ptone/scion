@@ -299,11 +299,12 @@ func TestStart_BrokerCredentialFileFromFileSecret(t *testing.T) {
 			for _, k := range []string{"COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"} {
 				t.Setenv(k, "")
 			}
-			e, _ := newClaudeRestartEnv(t)
+			// Resolve before newClaudeRestartEnv changes the working directory.
 			src, err := filepath.Abs(filepath.Join("..", "..", "harnesses", "copilot"))
 			if err != nil {
 				t.Fatal(err)
 			}
+			e, _ := newClaudeRestartEnv(t)
 			if err := os.CopyFS(filepath.Join(e.scion, "harness-configs", "copilot"), os.DirFS(src)); err != nil {
 				t.Fatalf("copy copilot harness-config: %v", err)
 			}
