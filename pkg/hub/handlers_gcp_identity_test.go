@@ -1014,7 +1014,7 @@ func TestGCPSA_Delete_ProjectOwnerAllowed(t *testing.T) {
 
 	rec := doRequestAsUser(t, srv, owner, http.MethodDelete,
 		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/%s", project.ID, sa.ID), nil)
-	require.Equal(t, http.StatusNoContent, rec.Code,
+	require.Equal(t, http.StatusOK, rec.Code,
 		"project owner should be able to delete SA; got: %s", rec.Body.String())
 }
 

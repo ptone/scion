@@ -48,6 +48,7 @@ import { customElement, state } from 'lit/decorators.js';
 import type { GCPServiceAccount, GCPVerificationStatus } from '../../shared/types.js';
 import { can } from '../../shared/types.js';
 import { saRef, saVerifyUrl } from '../../shared/gcp-service-account-urls.js';
+import { deleteGCPServiceAccount } from '../../shared/gcp-service-account-delete.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import '../shared/detail-header.js';
@@ -182,12 +183,14 @@ export class ScionPageGCPServiceAccountDetail extends LitElement {
     this.actionError = null;
 
     try {
-      const response = await apiFetch(saRef(this.account), { method: 'DELETE' });
-      if (!response.ok && response.status !== 204) {
-        this.actionError = await extractApiError(
-          response,
-          `Failed to delete (HTTP ${response.status})`
-        );
+      const outcome = await deleteGCPServiceAccount(
+        saRef(this.account),
+        (url) => apiFetch(url, { method: 'DELETE' }),
+        (message) => Promise.resolve(confirm(message))
+      );
+      if (outcome.status === 'cancelled') return;
+      if (outcome.status === 'failed') {
+        this.actionError = outcome.message;
         return;
       }
       window.location.href = '/settings?tab=service-accounts';

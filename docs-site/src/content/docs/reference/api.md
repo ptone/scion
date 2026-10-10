@@ -120,6 +120,17 @@ The legacy `/api/v1/groves` aliases have been removed. Requests to `/api/v1/grov
 - `POST /:id/transfer-ownership`: Body `{"newOwnerId": "<user ID or email>"}`. Grants the new owner `project-owner`, downgrades the caller to member, and moves the project's `ownerId` to the new owner in one transaction. Errors: `400 not_found` if the new owner does not exist and `400 principal_ineligible` if they are not active (both also checked inside the transaction), and `409 last_owner` if no other usable owner would remain (for example when the new owner's existing binding is expired and no other usable owner exists).
 - `POST /:id/clone`: Deep-copy settings, labels, env vars, skills, hooks, harness configs, and templates to a new project with rollback protection. Supports an optional `gitRemote` field in the request body to override the source project's git repository (carrying configurations over while using a different repository).
 
+#### GCP Service Accounts
+
+A project's own accounts live under `/api/v1/projects/:id/gcp-service-accounts` (`GET`, `POST`, `POST /mint`, and per account `GET /:saId`, `DELETE /:saId`, `POST /:saId/verify`). Hub-scoped accounts use the flat routes `/api/v1/gcp-service-accounts?scope=hub` and `/api/v1/gcp-service-accounts/:saId`. Register, verify and delete each write an audit event with the actor, the account's scope and the account ID; the event never carries the account email.
+
+- `DELETE .../gcp-service-accounts/:saId[?force=true]`: Remove a registration. The account is never deleted in GCP; a minted account is retained there. Before deleting, the Hub computes an impact report: `agents` (agents whose applied identity references the account, at most 50, with the total in `agentCount`), `defaults` (each project default, per-profile default and hub default that points at it, with `tier` `project`, `profile` or `hub`, and `clearable`), `brokerMappings` (broker profiles whose last report maps it), `managed`, and `manualCleanup` (the steps the Hub cannot do: remove the broker's `kubernetes_service_account_mappings` entry, the Kubernetes ServiceAccount, the Workload Identity binding and the Hub's token-creator grant, and for a minted account the account in GCP).
+  - While any default points at the account, the delete returns `409` with code `sa_in_use` and the report in `error.details.impact`.
+  - `force=true` clears project and per-profile defaults, then deletes. A cleared project default whose mode was `assign` becomes `block`, not unset, so new agents get no GCP identity rather than falling through to a broader hub or runtime default.
+  - `force=true` never clears the hub default. While the hub default points at the account (`clearable: false`), the delete stays `409` until a hub admin changes the hub default.
+  - Agents that reference the account do not block the delete. They keep the reference and fail at their next start with the existing "no longer available" error.
+  - On success the response is `200` with `{"deleted": true, "clearedDefaults": [...], "impact": {...}}`. Earlier Hubs returned `204` with no body.
+
 #### Runtime Brokers (`/api/v1/brokers`)
 - `GET /`: List registered runtime brokers.
 - `POST /`: Register a new compute node, or re-mint its join token. Requires `broker.create` (see [Broker Registration Permission](/scion/hosted/ha/runtime-broker/#broker-registration-permission)). The caller becomes the broker's owner. Re-registering an existing broker requires ownership (see [Broker Ownership](/scion/hosted/ha/runtime-broker/#broker-ownership)).
