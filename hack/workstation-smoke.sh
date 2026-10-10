@@ -70,6 +70,9 @@ done < <(env)
 export HOME="$WORK/home"
 mkdir -p "$HOME"
 export SCION_NO_BROWSER=1
+# The workstation broker refuses to start without an image registry. No
+# image is pulled here, so a placeholder is enough.
+export SCION_IMAGE_REGISTRY=registry.invalid/scion-smoke
 export GIT_CONFIG_NOSYSTEM=1
 git config --global user.name "Scion Smoke"
 git config --global user.email "smoke@example.com"
