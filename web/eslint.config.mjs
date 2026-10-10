@@ -87,7 +87,6 @@ const componentTests = [
 // test-file rule set the suites had before the split.
 const splitSuiteFixtures = [
   'src/components/pages/__fixtures__/admin-server-config.ts',
-  'src/components/pages/__fixtures__/agent-graph-scope.ts',
   'src/components/pages/__fixtures__/agents-agent-window.ts',
   'src/components/pages/__fixtures__/project-detail-agent-window.ts',
 ];
