@@ -125,6 +125,13 @@ var runLocalServerCommand = func(args ...string) error {
 // waitForLocalServerReady is waitForServerReady; a seam for tests.
 var waitForLocalServerReady = waitForServerReady
 
+// localServerRunning reports whether the server daemon is running; a seam
+// for tests.
+var localServerRunning = func(globalDir string) bool {
+	running, _, _ := daemon.StatusComponent(serverDaemonComponent, globalDir)
+	return running
+}
+
 // globalHubEndpoint reads hub.endpoint from the global settings file only.
 func globalHubEndpoint(globalDir string) string {
 	if vs, err := config.LoadSingleFileVersioned(globalDir); err == nil {
@@ -156,8 +163,12 @@ func ensureLocalServer() (string, error) {
 
 	// rollback undoes the start after a later failure.
 	rollback := func(cause error) error {
-		if stopErr := runLocalServerCommand("stop"); stopErr != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to stop the local scion server: %v\n", stopErr)
+		// A server that already exited (e.g. a broker precondition
+		// failed) needs no stop.
+		if localServerRunning(globalDir) {
+			if stopErr := runLocalServerCommand("stop"); stopErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to stop the local scion server: %v\n", stopErr)
+			}
 		}
 		if endpointBefore == "" && globalHubEndpoint(globalDir) != "" {
 			if err := config.UpdateVersionedSetting(globalDir, "hub.endpoint", ""); err != nil {

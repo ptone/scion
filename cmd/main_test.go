@@ -37,6 +37,9 @@ func TestMain(m *testing.M) {
 	ensureLocalServerFn = func() (string, error) {
 		return "", errors.New("starting the local server is disabled in cmd tests")
 	}
+	runLocalServerCommand = func(...string) error {
+		return errors.New("running 'scion server' is disabled in cmd tests")
+	}
 	os.Exit(m.Run())
 }
 

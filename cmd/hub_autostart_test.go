@@ -287,15 +287,22 @@ func TestRunHubLink_NoEndpointAutoStarts(t *testing.T) {
 // It returns the recorded server subcommands.
 func withLocalServerSeams(t *testing.T, globalDir, startWrites string, startErr error, ready bool) *[]string {
 	t.Helper()
-	origRun, origWait := runLocalServerCommand, waitForLocalServerReady
-	t.Cleanup(func() { runLocalServerCommand, waitForLocalServerReady = origRun, origWait })
+	origRun, origWait, origRunning := runLocalServerCommand, waitForLocalServerReady, localServerRunning
+	t.Cleanup(func() {
+		runLocalServerCommand, waitForLocalServerReady, localServerRunning = origRun, origWait, origRunning
+	})
+	running := false
 	var calls []string
 	runLocalServerCommand = func(args ...string) error {
 		calls = append(calls, strings.Join(args, " "))
+		if len(args) > 0 && args[0] == "stop" {
+			running = false
+		}
 		if len(args) > 0 && args[0] == "start" {
 			if startErr != nil {
 				return startErr
 			}
+			running = true
 			if startWrites != "" {
 				return config.UpdateVersionedSetting(globalDir, "hub.endpoint", startWrites)
 			}
@@ -305,6 +312,7 @@ func withLocalServerSeams(t *testing.T, globalDir, startWrites string, startErr 
 	waitForLocalServerReady = func(string, int, time.Duration) (bool, healthProbeResponse) {
 		return ready, healthProbeResponse{}
 	}
+	localServerRunning = func(string) bool { return running }
 	return &calls
 }
 
@@ -319,6 +327,7 @@ func TestEnsureLocalServer_Rollback(t *testing.T) {
 		wantErr      string
 		wantCalls    []string
 		wantEndpoint string // global hub.endpoint afterwards
+		exited       bool   // the daemon has exited by the time of the rollback
 	}{
 		{name: "ready", startWrites: ep, ready: true, wantCalls: []string{"start"}, wantEndpoint: ep},
 		{name: "start fails: nothing to roll back", startErr: errors.New("port conflict"), wantErr: "port conflict",
@@ -327,6 +336,8 @@ func TestEnsureLocalServer_Rollback(t *testing.T) {
 			wantCalls: []string{"start", "stop"}},
 		{name: "no endpoint written: stop", wantErr: "no hub endpoint was configured",
 			wantCalls: []string{"start", "stop"}},
+		{name: "server already exited: no stop, endpoint cleared", startWrites: ep, exited: true, wantErr: "did not become ready",
+			wantCalls: []string{"start"}},
 		{name: "endpoint set before the start is kept", before: ep, wantErr: "did not become ready",
 			wantCalls: []string{"start", "stop"}, wantEndpoint: ep},
 	}
@@ -337,6 +348,9 @@ func TestEnsureLocalServer_Rollback(t *testing.T) {
 				require.NoError(t, config.UpdateVersionedSetting(globalDir, "hub.endpoint", tc.before))
 			}
 			calls := withLocalServerSeams(t, globalDir, tc.startWrites, tc.startErr, tc.ready)
+			if tc.exited {
+				localServerRunning = func(string) bool { return false }
+			}
 
 			got, err := ensureLocalServer()
 			if tc.wantErr != "" {
