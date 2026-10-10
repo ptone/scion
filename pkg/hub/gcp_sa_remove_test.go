@@ -137,8 +137,8 @@ func TestGCPSARemove_ForceClearsDefaultsThenDeletes(t *testing.T) {
 		projectSettingDefaultGCPIdentitySAIDByProfile: fmt.Sprintf(`{"k8s":%q,"gke":%q}`, sa.ID, other.ID),
 		projectSettingDefaultTemplate:                 "unrelated-template",
 	})
-	events := &projectUpdatedSpy{}
-	srv.SetEventPublisher(events)
+	evSpy := &projectUpdatedSpy{}
+	srv.SetEventPublisher(evSpy)
 
 	rec := doRequestAsUser(t, srv, owner, http.MethodDelete, saRemovePath(project.ID, sa.ID)+"?force=true", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -161,7 +161,7 @@ func TestGCPSARemove_ForceClearsDefaultsThenDeletes(t *testing.T) {
 		"only the per-profile entries naming the account are removed")
 	assert.Equal(t, "unrelated-template", p.Annotations[projectSettingDefaultTemplate],
 		"a forced clear keeps every unrelated project setting (#3942)")
-	assert.Equal(t, []string{project.ID}, events.updated(), "a forced clear publishes the project-updated event")
+	assert.Equal(t, []string{project.ID}, evSpy.updated(), "a forced clear publishes the project-updated event")
 
 	events := audit.ofType(GCPSAAuditDelete)
 	require.Len(t, events, 1)
@@ -481,7 +481,7 @@ func TestGCPSAImpact_AgentCallerGetsNoAgentNames(t *testing.T) {
 	assert.Zero(t, impact.VisibleAgentCount)
 	assert.Equal(t, []int{1}, impact.HiddenAgentCounts)
 
-	userCtx := contextWithIdentity(ctx, NewAuthenticatedUser(owner.ID, owner.Email, owner.DisplayName, owner.Role, ClientTypeWeb))
+	userCtx := contextWithIdentity(ctx, NewAuthenticatedUser(owner.ID, owner.Email, owner.DisplayName, owner.Role, string(ClientTypeWeb)))
 	impact, err = srv.gcpServiceAccountImpact(userCtx, sa)
 	require.NoError(t, err)
 	require.Len(t, impact.Agents, 1, "the project owner, a user who may read the agent, sees its name")
