@@ -3047,10 +3047,14 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 
 // restartAgentConfig builds the restart's CreateAgentConfig from the inputs
 // a restart carries, the same subset startAgent builds from its request
-// (ptone/scion#2157). It returns nil when the restart carries none of them
-// (an older Hub), so buildStartContext runs exactly as it did before.
-func restartAgentConfig(harnessConfig, harnessConfigID, harnessConfigHash string, sharedDirs []api.SharedDir, sharedWorkspace bool, sharedWorkspaceClone, gitClone *api.GitCloneConfig, branch string) *CreateAgentConfig {
-	if harnessConfig == "" && harnessConfigID == "" && harnessConfigHash == "" && len(sharedDirs) == 0 && sharedWorkspaceClone == nil && gitClone == nil && branch == "" {
+// (ptone/scion#2157). namesProject is set when the request names the
+// agent's project (projectPath or projectSlug), which only a Hub that sends
+// the start inputs on restart does; the config is then always built, with
+// sharedWorkspace, exactly as start builds it. It returns nil for a request
+// from an older Hub, which carries none of these inputs, so buildStartContext
+// runs exactly as it did before.
+func restartAgentConfig(namesProject bool, harnessConfig, harnessConfigID, harnessConfigHash string, sharedDirs []api.SharedDir, sharedWorkspace bool, sharedWorkspaceClone, gitClone *api.GitCloneConfig, branch string) *CreateAgentConfig {
+	if !namesProject && harnessConfig == "" && harnessConfigID == "" && harnessConfigHash == "" && len(sharedDirs) == 0 && sharedWorkspaceClone == nil && gitClone == nil && branch == "" {
 		return nil
 	}
 	return &CreateAgentConfig{
@@ -3879,9 +3883,10 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	projectPathFromContainer := projectPath != ""
 	restartProjectSlug, restartHubGlobalProject := splitHubGlobalSlug(restartReq.ProjectPath, restartReq.ProjectSlug)
 	if restartReq.ProjectPath != "" || restartProjectSlug != "" {
-		// A named project root reaches the same filesystem paths as on
-		// start (the project-marker block and worktree provisioning), so
-		// the project ID gets start's check.
+		// Only when the request names a project: a non-empty project ID
+		// must then be a single path element, the check startAgent applies
+		// to every request. A restart that names no project (an older Hub)
+		// is not checked here, as before.
 		if projectID != "" && !isSingleCleanPathElement(projectID) {
 			BadRequest(w, "invalid projectId")
 			return
@@ -3889,7 +3894,8 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		projectPath = restartReq.ProjectPath
 		projectPathFromContainer = false
 	}
-	restartCfg := restartAgentConfig(restartReq.HarnessConfig, restartReq.HarnessConfigID, restartReq.HarnessConfigHash,
+	restartCfg := restartAgentConfig(restartReq.ProjectPath != "" || restartReq.ProjectSlug != "",
+		restartReq.HarnessConfig, restartReq.HarnessConfigID, restartReq.HarnessConfigHash,
 		restartReq.SharedDirs, restartReq.SharedWorkspace, restartReq.SharedWorkspaceClone, restartReq.GitClone, restartReq.Branch)
 	// The runtime the stop below acts on. Without a saved profile the start
 	// is pinned to it rather than to the project's active profile, so a

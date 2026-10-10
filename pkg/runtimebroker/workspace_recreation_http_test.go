@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -47,26 +48,28 @@ func (c *recreationHubClient) Skills() hubclient.SkillService { return nil }
 func (c *recreationHubClient) SkillRegistries() hubclient.SkillRegistryService { return nil }
 
 // startWithTemplateHub returns a test server with one Hub connection whose
-// local storage holds the global template "web-dev", and that template's
-// on-disk directory.
-func startWithTemplateHub(t *testing.T) (*Server, *mockManager, string) {
+// local storage holds the global template "web-dev", that template's on-disk
+// directory, and a counter of the Hub template lookups (a hydration).
+func startWithTemplateHub(t *testing.T) (*Server, *mockManager, string, *atomic.Int32) {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 	srv := newTestServer(t)
 	stor, dir := newLocalStorageWithTemplate(t, "web-dev", true)
+	lookups := &atomic.Int32{}
 	srv.hubMu.Lock()
 	srv.hubConnections["hub-1"] = &HubConnection{
 		Name:         "hub-1",
 		LocalStorage: stor,
 		HubClient: &recreationHubClient{stubHubClient{templates: &stubTemplateService{
 			getFunc: func(ctx context.Context, ref string) (*hubclient.Template, error) {
+				lookups.Add(1)
 				return &hubclient.Template{ID: "tpl-uuid", Slug: "web-dev", Scope: "global"}, nil
 			},
 		}}},
 		Hydrator: newTestHydrator(t),
 	}
 	srv.hubMu.Unlock()
-	return srv, srv.manager.(*mockManager), dir
+	return srv, srv.manager.(*mockManager), dir, lookups
 }
 
 func postStart(t *testing.T, srv *Server, agentName, projectDir string) {
@@ -88,7 +91,7 @@ func postStart(t *testing.T, srv *Server, agentName, projectDir string) {
 // longer has the agent's state, a start carrying the template identity
 // provisions the agent from its own (hydrated) template, not the default.
 func TestStartAgent_MissingStateProvisionsFromHubTemplate(t *testing.T) {
-	srv, mgr, templateDir := startWithTemplateHub(t)
+	srv, mgr, templateDir, _ := startWithTemplateHub(t)
 	projectDir := filepath.Join(t.TempDir(), ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0o755))
 
@@ -99,10 +102,11 @@ func TestStartAgent_MissingStateProvisionsFromHubTemplate(t *testing.T) {
 }
 
 // TestStartAgent_SurvivingStateKeepsTemplateUnset: when the agent's state
-// survived, the start does not set a template path (the agent starts from
-// its own state as before) and SCION_TEMPLATE names the template.
+// survived, the template identity changes nothing: no hydration, no
+// template path and no SCION_TEMPLATE (the agent starts from its own state
+// as before).
 func TestStartAgent_SurvivingStateKeepsTemplateUnset(t *testing.T) {
-	srv, mgr, _ := startWithTemplateHub(t)
+	srv, mgr, _, lookups := startWithTemplateHub(t)
 	projectDir := filepath.Join(t.TempDir(), ".scion")
 	agentDir := config.GetAgentDir(projectDir, "kept-agent", false)
 	require.NoError(t, os.MkdirAll(filepath.Join(agentDir, "home"), 0o755))
@@ -111,7 +115,104 @@ func TestStartAgent_SurvivingStateKeepsTemplateUnset(t *testing.T) {
 	postStart(t, srv, "kept-agent", projectDir)
 	require.Equal(t, 1, mgr.startCalls)
 	assert.Empty(t, mgr.lastStartOpts.Template)
-	assert.Equal(t, "web-dev", mgr.lastStartOpts.Env["SCION_TEMPLATE"])
+	_, set := mgr.lastStartOpts.Env["SCION_TEMPLATE"]
+	assert.False(t, set)
+	assert.Zero(t, lookups.Load(), "the template must not be hydrated")
+}
+
+// writeProvisionedAgent writes a provisioned agent state directory (one with
+// scion-agent.json) for agentName in the project at projectPath, resolved
+// the way the broker resolves it.
+func writeProvisionedAgent(t *testing.T, projectPath, agentName string) {
+	t.Helper()
+	projectDir, err := config.GetResolvedProjectDir(projectPath)
+	require.NoError(t, err)
+	agentDir := config.GetAgentDir(projectDir, agentName, false)
+	require.NoError(t, os.MkdirAll(filepath.Join(agentDir, "home"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{"harness":"claude"}`), 0o644))
+}
+
+// addLiveContainer lists a running container for agentName, recorded in the
+// project at projectPath, on the mock manager.
+func addLiveContainer(mgr *mockManager, agentName, projectPath string) {
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	mgr.agents = append(mgr.agents, api.AgentInfo{
+		ID:              "container-" + agentName,
+		ContainerID:     "container-" + agentName,
+		Name:            agentName,
+		Slug:            agentName,
+		ProjectPath:     projectPath,
+		Phase:           "running",
+		ContainerStatus: "Up 1 hour",
+	})
+}
+
+func postRestart(t *testing.T, srv *Server, agentName, body string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agentName+"/restart", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	require.Equal(t, http.StatusAccepted, w.Code, w.Body.String())
+}
+
+// TestRestartAgent_LiveContainerAndSurvivingStateUnchanged covers the common
+// restart: the agent's container is running and its broker-side state
+// exists, and a new Hub names the same project with the recreation inputs.
+// The project comes from the request, nothing is cleared (FreshProvision
+// stays false), no template path is set and nothing is hydrated.
+func TestRestartAgent_LiveContainerAndSurvivingStateUnchanged(t *testing.T) {
+	srv, mgr, _, lookups := startWithTemplateHub(t)
+	projectDir := filepath.Join(t.TempDir(), ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0o755))
+	writeProvisionedAgent(t, projectDir, "live-agent")
+	addLiveContainer(mgr, "live-agent", projectDir)
+
+	postRestart(t, srv, "live-agent", `{
+		"resolvedEnv": {"SCION_AGENT_ID": "agent-uuid-live"},
+		"projectPath": "`+projectDir+`",
+		"gitClone": {"url": "https://github.com/example/repo.git", "branch": "main"},
+		"templateName": "web-dev",
+		"templateId": "tpl-uuid",
+		"templateHash": "sha256:abc"
+	}`)
+	require.Equal(t, 1, mgr.startCalls)
+	require.Equal(t, 1, mgr.stopCalls, "the live container is stopped first")
+	opts := mgr.lastStartOpts
+	assert.Equal(t, projectDir, opts.ProjectPath)
+	assert.False(t, opts.FreshProvision)
+	assert.Empty(t, opts.Template)
+	assert.Zero(t, lookups.Load(), "the template must not be hydrated")
+}
+
+// TestRestartAgent_LiveContainerAndSurvivingStateUnchanged_HubNative is the
+// hub-native variant: the request names the project by slug only.
+func TestRestartAgent_LiveContainerAndSurvivingStateUnchanged_HubNative(t *testing.T) {
+	srv, mgr, _, lookups := startWithTemplateHub(t)
+	globalDir, err := config.GetGlobalDir()
+	require.NoError(t, err)
+	projectPath := filepath.Join(globalDir, "projects", "native-proj")
+	require.NoError(t, os.MkdirAll(filepath.Join(projectPath, ".scion"), 0o755))
+	writeProvisionedAgent(t, projectPath, "native-agent")
+	resolved, err := config.GetResolvedProjectDir(projectPath)
+	require.NoError(t, err)
+	addLiveContainer(mgr, "native-agent", resolved)
+
+	postRestart(t, srv, "native-agent", `{
+		"resolvedEnv": {"SCION_AGENT_ID": "agent-uuid-native"},
+		"projectSlug": "native-proj",
+		"gitClone": {"url": "https://github.com/example/repo.git", "branch": "main"},
+		"templateName": "web-dev",
+		"templateId": "tpl-uuid",
+		"templateHash": "sha256:abc"
+	}`)
+	require.Equal(t, 1, mgr.startCalls)
+	opts := mgr.lastStartOpts
+	assert.Equal(t, projectPath, opts.ProjectPath, "the project is resolved from the slug")
+	assert.False(t, opts.FreshProvision)
+	assert.Empty(t, opts.Template)
+	assert.Zero(t, lookups.Load(), "the template must not be hydrated")
 }
 
 // TestRestartAgent_UsesRequestInputsWithoutContainer proves a restart of an

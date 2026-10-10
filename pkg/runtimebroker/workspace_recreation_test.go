@@ -37,7 +37,6 @@ type templateIdentityFixture struct {
 	srv        *Server
 	projectDir string
 	opts       api.StartOptions
-	env        map[string]string
 }
 
 func newTemplateIdentityFixture(t *testing.T, agentName string, provisioned bool) *templateIdentityFixture {
@@ -54,12 +53,11 @@ func newTemplateIdentityFixture(t *testing.T, agentName string, provisioned bool
 		srv:        newTestServer(t),
 		projectDir: projectDir,
 		opts:       api.StartOptions{Name: agentName, ProjectPath: projectDir, BrokerMode: true},
-		env:        map[string]string{},
 	}
 }
 
 func (f *templateIdentityFixture) apply(in startContextInputs, conn *HubConnection, slug string) error {
-	return f.srv.applyStartTemplateIdentity(context.Background(), in, &f.opts, conn, slug, f.env, func(string, api.EnvKind) {})
+	return f.srv.applyStartTemplateIdentity(context.Background(), in, &f.opts, conn, slug)
 }
 
 // templateConn is a co-located Hub connection whose local storage holds the
@@ -95,14 +93,14 @@ func TestApplyStartTemplateIdentity_MissingStateHydratesTemplate(t *testing.T) {
 	err := f.apply(startContextInputs{TemplateID: "tpl-uuid", TemplateHash: "sha256:abc"}, conn, "web-dev")
 	require.NoError(t, err)
 	assert.Equal(t, wantDir, f.opts.Template, "the recreated agent must be provisioned from its own template")
-	_, set := f.env["SCION_TEMPLATE"]
+	_, set := f.opts.Env["SCION_TEMPLATE"]
 	assert.False(t, set, "Manager.Start sets SCION_TEMPLATE from opts.Template, as on create")
 }
 
-// When the agent's broker-side state survived, the start is left as it was:
-// nothing is hydrated and opts.Template stays unset, so the existing agent
-// resolves its image and harness-config exactly as before. Only
-// SCION_TEMPLATE names the template.
+// When the agent's broker-side state survived, the start is left exactly as
+// it was: nothing is hydrated, opts.Template stays unset and no env is
+// added, so the existing agent resolves its image and harness-config as
+// before.
 func TestApplyStartTemplateIdentity_SurvivingStateIsUnchanged(t *testing.T) {
 	f := newTemplateIdentityFixture(t, "kept-agent", true)
 	conn, _ := templateConn(t, "web-dev", nil, func() {
@@ -112,7 +110,8 @@ func TestApplyStartTemplateIdentity_SurvivingStateIsUnchanged(t *testing.T) {
 	err := f.apply(startContextInputs{TemplateID: "tpl-uuid", TemplateHash: "sha256:abc"}, conn, "web-dev")
 	require.NoError(t, err)
 	assert.Empty(t, f.opts.Template)
-	assert.Equal(t, "web-dev", f.env["SCION_TEMPLATE"])
+	_, set := f.opts.Env["SCION_TEMPLATE"]
+	assert.False(t, set, "a surviving agent's start must be a true no-op")
 }
 
 // A hydration failure while the agent has to be provisioned again fails the
@@ -130,8 +129,8 @@ func TestApplyStartTemplateIdentity_HydrationFailureFailsStart(t *testing.T) {
 	assert.Empty(t, f.opts.Template)
 }
 
-// An older Hub sends no template identity: a start that has to provision
-// the agent again behaves as before (no hydration, no template path).
+// An older Hub sends no template identity: the start behaves as before (no
+// hydration, no template path), and the Hub is never asked for a template.
 func TestApplyStartTemplateIdentity_NoIdentityKeepsPreviousBehaviour(t *testing.T) {
 	f := newTemplateIdentityFixture(t, "gone-agent", false)
 	conn, _ := templateConn(t, "web-dev", nil, func() {
@@ -140,14 +139,20 @@ func TestApplyStartTemplateIdentity_NoIdentityKeepsPreviousBehaviour(t *testing.
 
 	require.NoError(t, f.apply(startContextInputs{}, conn, "web-dev"))
 	assert.Empty(t, f.opts.Template)
-	_, set := f.env["SCION_TEMPLATE"]
+	_, set := f.opts.Env["SCION_TEMPLATE"]
 	assert.False(t, set)
 }
 
 func TestRestartAgentConfig_NilWithoutInputs(t *testing.T) {
-	assert.Nil(t, restartAgentConfig("", "", "", nil, true, nil, nil, ""),
-		"an older Hub's restart (sharedWorkspace alone) builds no config")
-	cfg := restartAgentConfig("claude", "", "", nil, false, nil, nil, "")
+	assert.Nil(t, restartAgentConfig(false, "", "", "", nil, true, nil, nil, ""),
+		"an older Hub's restart (sharedWorkspace alone, no project named) builds no config")
+	cfg := restartAgentConfig(false, "claude", "", "", nil, false, nil, nil, "")
 	require.NotNil(t, cfg)
 	assert.Equal(t, "claude", cfg.HarnessConfig)
+
+	// A request that names its project always builds the config, with
+	// sharedWorkspace, as start does.
+	cfg = restartAgentConfig(true, "", "", "", nil, true, nil, nil, "")
+	require.NotNil(t, cfg)
+	assert.True(t, cfg.SharedWorkspace)
 }
