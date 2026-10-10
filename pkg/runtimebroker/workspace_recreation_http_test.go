@@ -36,6 +36,16 @@ import (
 // behaviour, so they also run unchanged against code that predates the
 // change.
 
+// recreationHubClient is stubHubClient plus the skill services the start
+// handler's skill-resolver setup reads; they are never called by these tests.
+type recreationHubClient struct {
+	stubHubClient
+}
+
+func (c *recreationHubClient) Skills() hubclient.SkillService { return nil }
+
+func (c *recreationHubClient) SkillRegistries() hubclient.SkillRegistryService { return nil }
+
 // startWithTemplateHub returns a test server with one Hub connection whose
 // local storage holds the global template "web-dev", and that template's
 // on-disk directory.
@@ -48,11 +58,11 @@ func startWithTemplateHub(t *testing.T) (*Server, *mockManager, string) {
 	srv.hubConnections["hub-1"] = &HubConnection{
 		Name:         "hub-1",
 		LocalStorage: stor,
-		HubClient: &stubHubClient{templates: &stubTemplateService{
+		HubClient: &recreationHubClient{stubHubClient{templates: &stubTemplateService{
 			getFunc: func(ctx context.Context, ref string) (*hubclient.Template, error) {
 				return &hubclient.Template{ID: "tpl-uuid", Slug: "web-dev", Scope: "global"}, nil
 			},
-		}},
+		}}},
 		Hydrator: newTestHydrator(t),
 	}
 	srv.hubMu.Unlock()
