@@ -287,8 +287,8 @@ type Server struct {
 	ghResolutionCache *agent.GitHubResolutionCache
 
 	// Multi-key auth middleware. authMiddlewareMu guards the field below
-	// and serializes buildAuthMiddleware. Lock order: authMiddlewareMu,
-	// then hubMu, then a connection's mu.
+	// and serializes buildAuthMiddleware. Lock order: a connection's
+	// lifecycleMu, then authMiddlewareMu, then hubMu, then a connection's mu.
 	authMiddlewareMu     sync.Mutex
 	brokerAuthMiddleware *MultiKeyBrokerAuthMiddleware
 
@@ -2419,13 +2419,13 @@ func (s *Server) checkAndReloadCredentials(ctx context.Context) error {
 		go func(conn *HubConnection) {
 			applied, err := conn.applyRequestedReinitialize(ctx, s)
 			if err != nil {
-				// Do not apply a partly applied credential set further.
 				slog.Error("Failed to reinitialize hub connection", "name", conn.Name, "error", err)
-				return
 			}
 			if applied {
 				// The new credentials are in place only now, so a
 				// credential change takes effect here, after reinitialize.
+				// Rebuild even if a later step of the reinitialize failed,
+				// so what is in effect matches what the connection holds.
 				s.buildAuthMiddleware()
 			}
 		}(conn)

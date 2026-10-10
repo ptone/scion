@@ -92,7 +92,6 @@ func TestCredentialReload_TakesEffectAfterReinitialize(t *testing.T) {
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 	releaseAll := func() { releaseOnce.Do(func() { close(release) }) }
-	defer releaseAll()
 	conn.conduitExitHook = func() { <-release }
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -101,6 +100,9 @@ func TestCredentialReload_TakesEffectAfterReinitialize(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Stop()
+	// Registered after conn.Stop so it runs first: Stop waits for the held
+	// conduit dialer, so a failure before the release below must not hang.
+	defer releaseAll()
 
 	srv.credLastScan = time.Time{}
 	writeCreds(&newCreds)
@@ -144,4 +146,88 @@ func decodeTestKey(t *testing.T, encoded string) []byte {
 		t.Fatal(err)
 	}
 	return key
+}
+
+// TestCredentialReload_InEffectMatchesConnectionAfterFailedStep changes a
+// connection's credential file to a set whose reinitialize fails after the
+// new credential is stored on the connection (a transport mode without an
+// audience). What is in effect must still match what the connection holds.
+func TestCredentialReload_InEffectMatchesConnectionAfterFailedStep(t *testing.T) {
+	t.Setenv(transportauth.EnvTransportMode, "")
+	t.Setenv(transportauth.EnvTransportAudience, "")
+
+	const name = "hub-partial"
+	oldCreds := makeTestCreds(name, "broker-1", "http://hub1.example.com")
+	newCreds := *oldCreds
+	newCreds.SecretKey = makeTestCreds(name+"-rotated", "broker-1", "http://hub1.example.com").SecretKey
+	newCreds.TransportMode = "iap"
+
+	credDir := filepath.Join(t.TempDir(), "hub-credentials")
+	if err := os.MkdirAll(credDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCreds := func(c *brokercredentials.BrokerCredentials) {
+		t.Helper()
+		data, err := json.Marshal(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(credDir, name+".json"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeCreds(oldCreds)
+
+	cfg := DefaultServerConfig()
+	cfg.BrokerID = "broker-1"
+	cfg.BrokerName = "test-host"
+	cfg.HeartbeatEnabled = false
+	cfg.ControlChannelEnabled = false
+	cfg.BrokerAuthEnabled = true
+	cfg.BrokerAuthStrictMode = true
+	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	srv.multiCredStore = brokercredentials.NewMultiStore(credDir)
+
+	conn, err := srv.createHubConnection(name, oldCreds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.hubMu.Lock()
+	srv.hubConnections[name] = conn
+	srv.hubMu.Unlock()
+	srv.buildAuthMiddleware()
+	mw := srv.brokerAuthMiddleware
+	if mw == nil {
+		t.Fatal("expected the credential set to be in use")
+	}
+
+	srv.credLastScan = time.Time{}
+	writeCreds(&newCreds)
+	if err := srv.checkAndReloadCredentials(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	newKey := decodeTestKey(t, newCreds.SecretKey)
+	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	status := func(key []byte) int {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/test", nil)
+		signRequest(req, "broker-1", key)
+		rr := httptest.NewRecorder()
+		mw.Middleware(ok).ServeHTTP(rr, req)
+		return rr.Code
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		failed := conn.GetStatus() == ConnectionStatusError
+		holdsNew := string(conn.snapshot().SecretKey) == string(newKey)
+		if failed && holdsNew && status(newKey) == http.StatusOK {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after a failed reinitialize: failed=%v connection holds new credential=%v, new credential got %d, want %d",
+				failed, holdsNew, status(newKey), http.StatusOK)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
