@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -97,6 +98,47 @@ func TestReadOptionalStdin(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, w.Close())
 		assert.Nil(t, readOptionalStdin(r, time.Second))
+	})
+
+	t.Run("partial value on a pipe left open is bounded", func(t *testing.T) {
+		setTestLogPath(t, filepath.Join(t.TempDir(), "agent.log"))
+		r, w, err := os.Pipe()
+		require.NoError(t, err)
+		defer r.Close()
+		defer w.Close()
+		_, err = w.WriteString(`{"a":1`)
+		require.NoError(t, err)
+		start := time.Now()
+		assert.Nil(t, readOptionalStdin(r, 100*time.Millisecond))
+		assert.Less(t, time.Since(start), 2*time.Second)
+	})
+
+	t.Run("oversized payload is ignored", func(t *testing.T) {
+		setTestLogPath(t, filepath.Join(t.TempDir(), "agent.log"))
+		r, w, err := os.Pipe()
+		require.NoError(t, err)
+		defer r.Close()
+		// One JSON object larger than maxPositionalStdinBytes, written
+		// concurrently because it exceeds the pipe buffer. The writer is
+		// left open: the size cap, not EOF, must end the read.
+		big := []byte(`{"a":"` + strings.Repeat("x", maxPositionalStdinBytes+1024) + `"}`)
+		go func() {
+			_, _ = w.Write(big)
+		}()
+		defer w.Close()
+		assert.Nil(t, readOptionalStdin(r, 10*time.Second))
+	})
+
+	t.Run("trailing bytes after the value are ignored", func(t *testing.T) {
+		r, w, err := os.Pipe()
+		require.NoError(t, err)
+		defer r.Close()
+		defer w.Close()
+		_, err = w.WriteString(`{"a":1} junk`)
+		require.NoError(t, err)
+		start := time.Now()
+		assert.Equal(t, `{"a":1}`, string(readOptionalStdin(r, 5*time.Second)))
+		assert.Less(t, time.Since(start), 2*time.Second)
 	})
 
 	t.Run("whitespace only", func(t *testing.T) {
