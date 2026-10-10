@@ -104,7 +104,7 @@ func newPair(t *testing.T, dcfg, rcfg Config) *pair {
 	if rcfg.Clock == nil {
 		rcfg.Clock = clk
 	}
-	l := transport.NewMemoryListener(transport.MemoryOptions{Buffer: 64})
+	dc, rcn := testPipe(t, transport.MemoryOptions{Buffer: 64})
 	adm := &testAdmitter{}
 	type res struct {
 		s   Session
@@ -112,15 +112,10 @@ func newPair(t *testing.T, dcfg, rcfg Config) *pair {
 	}
 	rc := make(chan res, 1)
 	go func() {
-		c, err := l.Accept(context.Background())
-		if err != nil {
-			rc <- res{err: err}
-			return
-		}
-		s, err := Accept(context.Background(), c, rcfg, adm)
+		s, err := Accept(context.Background(), rcn, rcfg, adm)
 		rc <- res{s, err}
 	}()
-	ds, _, err := Dial(context.Background(), l, dcfg, testHello())
+	ds, _, err := Dial(context.Background(), transport.DialerFunc(func(context.Context) (transport.Conn, error) { return dc, nil }), dcfg, testHello())
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -202,7 +197,7 @@ func (r *rawPeer) recvType(typ string) *conduitv1.Frame {
 // rawPeer that has completed the handshake.
 func dialAgainstRaw(t *testing.T, cfg Config, opts transport.MemoryOptions) (*session, *rawPeer) {
 	t.Helper()
-	a, b := transport.Pipe(opts)
+	a, b := testPipe(t, opts)
 	raw := &rawPeer{t: t, conn: b}
 	done := make(chan struct{})
 	go func() {
@@ -227,7 +222,7 @@ func dialAgainstRaw(t *testing.T, cfg Config, opts transport.MemoryOptions) (*se
 // rawPeer that has completed the handshake.
 func acceptAgainstRaw(t *testing.T, cfg Config, opts transport.MemoryOptions) (*session, *rawPeer) {
 	t.Helper()
-	a, b := transport.Pipe(opts)
+	a, b := testPipe(t, opts)
 	raw := &rawPeer{t: t, conn: b}
 	type res struct {
 		s   Session

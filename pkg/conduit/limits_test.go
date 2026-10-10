@@ -517,7 +517,7 @@ func (c *blockingCloseConn) Close() error {
 // TestFailDoesNotWaitForTransportClose: streams fail as soon as the
 // session ends, even if closing the transport blocks (1a-r1-F10).
 func TestFailDoesNotWaitForTransportClose(t *testing.T) {
-	a, b := transport.Pipe(transport.MemoryOptions{Buffer: 64})
+	a, b := testPipe(t, transport.MemoryOptions{Buffer: 64})
 	conn := &blockingCloseConn{Conn: a, release: make(chan struct{})}
 	defer close(conn.release)
 	raw := &rawPeer{t: t, conn: b}

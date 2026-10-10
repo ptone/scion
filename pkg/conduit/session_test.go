@@ -40,20 +40,19 @@ func TestHandshakeInfo(t *testing.T) {
 		if info.EndpointIncarnation != "inc-1" || info.ExecScope != "scope-1" {
 			t.Errorf("%s: capabilities not reflected: %+v", name, info)
 		}
-		if info.Transport != transport.Memory || !info.ConnectedAt.Equal(t0) || info.Draining {
+		if info.Transport != testTransport() || !info.ConnectedAt.Equal(t0) || info.Draining {
 			t.Errorf("%s: info = %+v", name, info)
 		}
 	}
 }
 
 func TestHandshakeWelcomeDefaults(t *testing.T) {
-	l := transport.NewMemoryListener(transport.MemoryOptions{Buffer: 8})
+	dc, rc := testPipe(t, transport.MemoryOptions{Buffer: 8})
 	clk := clock.NewFake(t0)
 	go func() {
-		c, _ := l.Accept(context.Background())
-		_, _ = Accept(context.Background(), c, Config{Clock: clk, PingInterval: 20 * time.Second}, &testAdmitter{})
+		_, _ = Accept(context.Background(), rc, Config{Clock: clk, PingInterval: 20 * time.Second}, &testAdmitter{})
 	}()
-	s, w, err := Dial(context.Background(), l, Config{Clock: clk}, testHello())
+	s, w, err := Dial(context.Background(), transport.DialerFunc(func(context.Context) (transport.Conn, error) { return dc, nil }), Config{Clock: clk}, testHello())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,12 +78,11 @@ func TestHandshakeRejected(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			l := transport.NewMemoryListener(transport.MemoryOptions{Buffer: 8})
+			dc, rc := testPipe(t, transport.MemoryOptions{Buffer: 8})
 			go func() {
-				c, _ := l.Accept(context.Background())
-				_, _ = Accept(context.Background(), c, Config{}, &testAdmitter{admitErr: tc.admitErr})
+				_, _ = Accept(context.Background(), rc, Config{}, &testAdmitter{admitErr: tc.admitErr})
 			}()
-			_, _, err := Dial(context.Background(), l, Config{}, tc.hello)
+			_, _, err := Dial(context.Background(), transport.DialerFunc(func(context.Context) (transport.Conn, error) { return dc, nil }), Config{}, tc.hello)
 			if code, ok := closeCode(err); !ok || code != tc.wantCode {
 				t.Fatalf("Dial err = %v, want code %d", err, tc.wantCode)
 			}
@@ -97,7 +95,7 @@ func TestHandshakeRejectsUnspecifiedPrincipal(t *testing.T) {
 		t.Fatal("Dial with unspecified principal kind succeeded")
 	}
 	// A raw dialer that sends one anyway is refused with 4400.
-	a, b := transport.Pipe(transport.MemoryOptions{Buffer: 8})
+	a, b := testPipe(t, transport.MemoryOptions{Buffer: 8})
 	raw := &rawPeer{t: t, conn: b}
 	errc := make(chan error, 1)
 	go func() {
@@ -115,7 +113,7 @@ func TestHandshakeRejectsUnspecifiedPrincipal(t *testing.T) {
 
 func TestHandshakeTimeout(t *testing.T) {
 	clk := clock.NewFake(t0)
-	a, _ := transport.Pipe(transport.MemoryOptions{Buffer: 8})
+	a, _ := testPipe(t, transport.MemoryOptions{Buffer: 8})
 	errc := make(chan error, 1)
 	go func() {
 		_, err := Accept(context.Background(), a, Config{Clock: clk}, &testAdmitter{})

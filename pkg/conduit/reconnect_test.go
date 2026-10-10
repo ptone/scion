@@ -128,7 +128,7 @@ func newReconnectHarnessWith(t *testing.T, configure func(*Reconnector)) *reconn
 		if err != nil {
 			return nil, err
 		}
-		a, b := transport.Pipe(transport.MemoryOptions{Buffer: 64})
+		a, b := testPipe(t, transport.MemoryOptions{Buffer: 64})
 		rcfg := cfg
 		rcfg.StreamHandler = acceptAll(make(chan Stream, 16))
 		go func() {

@@ -124,7 +124,7 @@ type acceptRun struct {
 // relay's end of the pipe.
 func startAccept(t *testing.T, ctx context.Context, cfg Config, adm Admitter, wrap func(transport.Conn) transport.Conn) *acceptRun {
 	t.Helper()
-	a, b := transport.Pipe(transport.MemoryOptions{Buffer: 8})
+	a, b := testPipe(t, transport.MemoryOptions{Buffer: 8})
 	relayEnd := transport.Conn(a)
 	if wrap != nil {
 		relayEnd = wrap(a)
@@ -256,7 +256,7 @@ func TestReconnectorBacksOffOnAdmitTimeout(t *testing.T) {
 	clk := clock.NewFake(t0)
 	adm := newSlowAdmitter(true)
 	dialer := transport.DialerFunc(func(context.Context) (transport.Conn, error) {
-		a, b := transport.Pipe(transport.MemoryOptions{Buffer: 8})
+		a, b := testPipe(t, transport.MemoryOptions{Buffer: 8})
 		go func() { _, _ = Accept(context.Background(), b, Config{Clock: clk}, adm) }()
 		return a, nil
 	})
