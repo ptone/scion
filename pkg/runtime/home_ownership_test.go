@@ -14,6 +14,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 var (
@@ -25,40 +26,107 @@ var (
 // a rootful daemon without user-namespace remapping.
 const rootfulDockerSecurityOptions = `["name=apparmor","name=seccomp,profile=builtin","name=cgroupns"]`
 
-// writeArgRecorder writes a fake runtime binary that answers `info` with
-// securityOptions and otherwise records its argv, one argument per line,
-// and exits with exitCode.
-func writeArgRecorder(t *testing.T, exitCode int, securityOptions string) (bin, argsFile string) {
-	t.Helper()
-	dir := t.TempDir()
-	argsFile = filepath.Join(dir, "args")
-	bin = filepath.Join(dir, "fake-runtime")
-	script := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = info ]; then printf '%%s\\n' %q; exit 0; fi\nprintf '%%s\\n' \"$@\" > %q\necho helper-output\nexit %d\n", securityOptions, argsFile, exitCode)
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	return bin, argsFile
+const testRepairName = "scion-home-repair-0123456789abcdef"
+
+// fakeRepairRuntime is a fake docker/podman binary for the repair helper.
+type fakeRepairRuntime struct {
+	bin, runArgs, rmArgs string
 }
 
-func readRecordedArgs(t *testing.T, argsFile string) []string {
+// newFakeRepairRuntime writes a fake runtime binary that answers `info`
+// with infoOut (or fails when infoFails), records the argv of `run` (one
+// argument per line) and then sleeps runSleep seconds (when > 0) or exits
+// with runExit, and records the argv of `rm`.
+func newFakeRepairRuntime(t *testing.T, infoOut string, infoFails bool, runExit, runSleep int) *fakeRepairRuntime {
 	t.Helper()
-	data, err := os.ReadFile(argsFile)
+	dir := t.TempDir()
+	f := &fakeRepairRuntime{
+		bin:     filepath.Join(dir, "fake-runtime"),
+		runArgs: filepath.Join(dir, "run-args"),
+		rmArgs:  filepath.Join(dir, "rm-args"),
+	}
+	info := fmt.Sprintf("printf '%%s\\n' %q; exit 0", infoOut)
+	if infoFails {
+		info = "echo daemon down >&2; exit 1"
+	}
+	// A sleeping run execs sleep, so killing the process on a timeout also
+	// closes its output, as the real CLI does.
+	runTail := fmt.Sprintf("exit %d", runExit)
+	if runSleep > 0 {
+		runTail = fmt.Sprintf("exec sleep %d", runSleep)
+	}
+	script := fmt.Sprintf(`#!/bin/sh
+case "$1" in
+info) %s ;;
+rm) printf '%%s\n' "$@" > %q; exit 0 ;;
+run) printf '%%s\n' "$@" > %q; echo helper-output; %s ;;
+esac
+exit 99
+`, info, f.rmArgs, f.runArgs, runTail)
+	if err := os.WriteFile(f.bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+func readLines(t *testing.T, path string) []string {
+	t.Helper()
+	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("runtime binary not invoked: %v", err)
+		t.Fatalf("not recorded: %v", err)
 	}
 	return strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
 }
 
+func (f *fakeRepairRuntime) ran() bool {
+	_, err := os.Stat(f.runArgs)
+	return err == nil
+}
+
+// helperName returns the --name the recorded run used.
+func (f *fakeRepairRuntime) helperName(t *testing.T) string {
+	t.Helper()
+	args := readLines(t, f.runArgs)
+	i := slices.Index(args, "--name")
+	if i < 0 || i+1 >= len(args) {
+		t.Fatalf("run has no --name: %q", args)
+	}
+	return args[i+1]
+}
+
+// newRepairHome creates an agent home outside ~/.scion that passes the
+// agent-home checks, and returns its resolved path.
+func newRepairHome(t *testing.T) string {
+	t.Helper()
+	home := filepath.Join(t.TempDir(), "agents", "a1", "home")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := ValidateAgentHomeSource(home, "")
+	if err != nil {
+		t.Fatalf("fixture home refused: %v", err)
+	}
+	return resolved
+}
+
+func testRepairHelper(userNSHost bool) agentHomeRepairHelper {
+	return agentHomeRepairHelper{
+		req:        AgentHomeOwnershipRepair{HomeDir: "/srv/agents/a1/home", Image: "img:1", UID: 1002, GID: 1003},
+		name:       testRepairName,
+		userNSHost: userNSHost,
+	}
+}
+
 func TestAgentHomeRepairArgs(t *testing.T) {
-	args, err := agentHomeRepairArgs(AgentHomeOwnershipRepair{HomeDir: "/srv/agents/a1/home/", Image: "img:1", UID: 1002, GID: 1003})
+	args, err := agentHomeRepairArgs(testRepairHelper(false))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"run", "--rm", "--pull=never", "--network=none", "--user=0:0",
+		"run", "--rm", testRepairName, "--pull=never", "--network=none", "--user=0:0",
 		"--cap-drop=ALL", "--cap-add=CHOWN", "--cap-add=DAC_OVERRIDE",
 		"--security-opt=no-new-privileges", "--read-only", "--pids-limit=64",
-		"/srv/agents/a1/home:" + agentHomeRepairMount,
+		"--memory=256m", "--cpus=1",
 		"img:1", "-xdev", "1002:1003",
 	} {
 		if !slices.Contains(args, want) {
@@ -79,7 +147,6 @@ func TestAgentHomeRepairArgs(t *testing.T) {
 	if n := strings.Count(joined, "--volume"); n != 1 {
 		t.Errorf("helper mounts %d volumes, want exactly 1", n)
 	}
-	// The one mount is the agent home, read-write, from the path given.
 	if i := slices.Index(args, "--volume"); i < 0 || args[i+1] != "/srv/agents/a1/home:"+agentHomeRepairMount {
 		t.Errorf("helper's only mount is not the agent home: %q", args)
 	}
@@ -98,22 +165,33 @@ func TestAgentHomeRepairArgs(t *testing.T) {
 		t.Errorf("helper capabilities = %q, want only CHOWN and DAC_OVERRIDE", capAdds)
 	}
 
+	// Podman asks for the host user namespace explicitly; nothing else
+	// changes.
+	podmanArgs, err := agentHomeRepairArgs(testRepairHelper(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(podmanArgs, "--userns=host") || len(podmanArgs) != len(args)+1 {
+		t.Errorf("podman helper args %q: want the docker args plus --userns=host", podmanArgs)
+	}
+
 	for _, tc := range []struct {
 		name string
-		req  AgentHomeOwnershipRepair
-		uid  int
+		mut  func(*agentHomeRepairHelper)
 	}{
-		{"empty home", AgentHomeOwnershipRepair{Image: "img"}, 1},
-		{"relative home", AgentHomeOwnershipRepair{HomeDir: "home", Image: "img"}, 1},
-		{"root", AgentHomeOwnershipRepair{HomeDir: "/", Image: "img"}, 1},
-		{"colon", AgentHomeOwnershipRepair{HomeDir: "/a:b", Image: "img"}, 1},
-		{"comma", AgentHomeOwnershipRepair{HomeDir: "/a,b", Image: "img"}, 1},
-		{"no image", AgentHomeOwnershipRepair{HomeDir: "/a"}, 1},
-		{"option-like image", AgentHomeOwnershipRepair{HomeDir: "/a", Image: "--privileged"}, 1},
-		{"negative uid", AgentHomeOwnershipRepair{HomeDir: "/a", Image: "img"}, -1},
+		{"empty home", func(h *agentHomeRepairHelper) { h.req.HomeDir = "" }},
+		{"relative home", func(h *agentHomeRepairHelper) { h.req.HomeDir = "home" }},
+		{"root", func(h *agentHomeRepairHelper) { h.req.HomeDir = "/" }},
+		{"colon", func(h *agentHomeRepairHelper) { h.req.HomeDir = "/a:b" }},
+		{"comma", func(h *agentHomeRepairHelper) { h.req.HomeDir = "/a,b" }},
+		{"no image", func(h *agentHomeRepairHelper) { h.req.Image = "" }},
+		{"option-like image", func(h *agentHomeRepairHelper) { h.req.Image = "--privileged" }},
+		{"negative uid", func(h *agentHomeRepairHelper) { h.req.UID = -1 }},
+		{"bad name", func(h *agentHomeRepairHelper) { h.name = "agent-x" }},
 	} {
-		tc.req.UID, tc.req.GID = tc.uid, 1
-		if _, err := agentHomeRepairArgs(tc.req); err == nil {
+		h := testRepairHelper(false)
+		tc.mut(&h)
+		if _, err := agentHomeRepairArgs(h); err == nil {
 			t.Errorf("%s: expected an error", tc.name)
 		}
 	}
@@ -121,7 +199,7 @@ func TestAgentHomeRepairArgs(t *testing.T) {
 
 // The helper's find expression, run directly on a tree, selects
 // directories, symlinks and singly-linked files, and skips a regular file
-// with a second hard link.
+// with a second hard link and a FIFO.
 func TestAgentHomeRepairArgs_FindSelection(t *testing.T) {
 	if _, err := exec.LookPath("find"); err != nil {
 		t.Skip("find not available")
@@ -150,8 +228,9 @@ func TestAgentHomeRepairArgs_FindSelection(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	uid, gid := os.Getuid(), os.Getgid()
-	args, err := agentHomeRepairArgs(AgentHomeOwnershipRepair{HomeDir: home, Image: "img", UID: uid, GID: gid})
+	h := testRepairHelper(false)
+	h.req = AgentHomeOwnershipRepair{HomeDir: home, Image: "img", UID: os.Getuid(), GID: os.Getgid()}
+	args, err := agentHomeRepairArgs(h)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,21 +259,269 @@ func TestAgentHomeRepairArgs_FindSelection(t *testing.T) {
 	}
 }
 
+// The runtime validates the helper's argv against a fail-closed allow-list
+// before running it: the built command passes, and any change that adds,
+// removes, repeats or alters a flag, the name, the mount, the image or the
+// command is refused.
+func TestValidateAgentHomeRepairArgs(t *testing.T) {
+	for _, userNSHost := range []bool{false, true} {
+		h := testRepairHelper(userNSHost)
+		args, err := agentHomeRepairArgs(h)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := validateAgentHomeRepairArgs(args, h); err != nil {
+			t.Fatalf("userNSHost=%v: the built helper command is refused: %v", userNSHost, err)
+		}
+		imageAt := slices.Index(args, "img:1")
+		insertBeforeImage := func(extra ...string) []string {
+			out := slices.Clone(args[:imageAt])
+			out = append(out, extra...)
+			return append(out, args[imageAt:]...)
+		}
+		replace := func(old, new string) []string {
+			out := slices.Clone(args)
+			out[slices.Index(out, old)] = new
+			return out
+		}
+		without := func(flag string) []string {
+			out := slices.Clone(args)
+			i := slices.Index(out, flag)
+			return slices.Delete(out, i, i+1)
+		}
+		cases := map[string][]string{
+			"privileged":          insertBeforeImage("--privileged"),
+			"SYS_ADMIN":           insertBeforeImage("--cap-add=SYS_ADMIN"),
+			"DAC_READ_SEARCH":     replace("--cap-add=DAC_OVERRIDE", "--cap-add=DAC_READ_SEARCH"),
+			"seccomp unconfined":  insertBeforeImage("--security-opt=seccomp=unconfined"),
+			"apparmor unconfined": insertBeforeImage("--security-opt", "apparmor=unconfined"),
+			"second mount":        insertBeforeImage("--volume", "/:/host"),
+			"--mount":             insertBeforeImage("--mount", "type=bind,src=/,dst=/host"),
+			"host network":        replace("--network=none", "--network=host"),
+			"no cap-drop":         without("--cap-drop=ALL"),
+			"no network flag":     without("--network=none"),
+			"no memory limit":     without("--memory=256m"),
+			"no cpu limit":        without("--cpus=1"),
+			"other memory limit":  replace("--memory=256m", "--memory=0"),
+			"repeated cap":        insertBeforeImage("--cap-add=CHOWN"),
+			"other name":          replace(testRepairName, "scion-home-repair-ffffffffffffffff"),
+			"other entrypoint":    replace("find", "sh"),
+			"other home":          replace("/srv/agents/a1/home:"+agentHomeRepairMount, "/srv:"+agentHomeRepairMount),
+			"read-only home":      replace("/srv/agents/a1/home:"+agentHomeRepairMount, "/srv/agents/a1/home:"+agentHomeRepairMount+":ro"),
+			"other image":         replace("img:1", "img:2"),
+			"other owner":         replace("1002:1003", "0:0"),
+			"extra command":       append(slices.Clone(args), "-delete"),
+			"not run":             replace("run", "exec"),
+			"stop-timeout":        insertBeforeImage("--stop-timeout=0"),
+		}
+		if userNSHost {
+			cases["no userns"] = without("--userns=host")
+		} else {
+			cases["userns on docker"] = insertBeforeImage("--userns=host")
+		}
+		for name, bad := range cases {
+			if err := validateAgentHomeRepairArgs(bad, h); err == nil {
+				t.Errorf("userNSHost=%v, %s: helper command %q was not refused", userNSHost, name, bad)
+			}
+		}
+	}
+	h := testRepairHelper(false)
+	args, _ := agentHomeRepairArgs(h)
+	h.name = "not-a-helper"
+	if err := validateAgentHomeRepairArgs(args, h); err == nil {
+		t.Error("a helper name without the prefix and shape was not refused")
+	}
+}
+
 func TestDockerRuntime_RepairAgentHomeOwnership(t *testing.T) {
-	bin, argsFile := writeArgRecorder(t, 0, rootfulDockerSecurityOptions)
-	req := AgentHomeOwnershipRepair{HomeDir: t.TempDir(), Image: "scion-claude:latest", UID: 1002, GID: 1003}
-	r := &DockerRuntime{Command: bin}
-	if err := r.RepairAgentHomeOwnership(context.Background(), req); err != nil {
+	f := newFakeRepairRuntime(t, rootfulDockerSecurityOptions, false, 0, 0)
+	home := newRepairHome(t)
+	req := AgentHomeOwnershipRepair{HomeDir: home, Image: "scion-claude:latest", UID: 1002, GID: 1003}
+	if err := (&DockerRuntime{Command: f.bin}).RepairAgentHomeOwnership(context.Background(), req); err != nil {
 		t.Fatal(err)
 	}
-	args := readRecordedArgs(t, argsFile)
-	want, _ := agentHomeRepairArgs(req)
-	if !slices.Equal(args, want) {
-		t.Errorf("docker args = %q, want %q", args, want)
+	h := agentHomeRepairHelper{req: req, name: f.helperName(t)}
+	if !agentHomeRepairNameRE.MatchString(h.name) {
+		t.Errorf("helper name %q does not have the helper's shape", h.name)
 	}
-	// The helper chowns to the requested owner, not to the test process.
-	if !slices.Contains(args, "1002:1003") {
-		t.Errorf("docker args %q do not chown to the requested 1002:1003", args)
+	want, _ := agentHomeRepairArgs(h)
+	if got := readLines(t, f.runArgs); !slices.Equal(got, want) {
+		t.Errorf("docker args = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(f.rmArgs); err == nil {
+		t.Error("a successful helper was removed by name; --rm already removes it")
+	}
+}
+
+// Rootful Podman runs the same validated helper, in the host user
+// namespace.
+func TestPodmanRuntime_RepairAgentHomeOwnership(t *testing.T) {
+	f := newFakeRepairRuntime(t, "false", false, 0, 0)
+	home := newRepairHome(t)
+	req := AgentHomeOwnershipRepair{HomeDir: home, Image: "img", UID: 1002, GID: 1003}
+	if err := (&PodmanRuntime{Command: f.bin}).RepairAgentHomeOwnership(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	h := agentHomeRepairHelper{req: req, name: f.helperName(t), userNSHost: true}
+	got := readLines(t, f.runArgs)
+	want, _ := agentHomeRepairArgs(h)
+	if !slices.Equal(got, want) {
+		t.Errorf("podman args = %q, want %q", got, want)
+	}
+	// The allow-list holds on the Podman path too.
+	if err := validateAgentHomeRepairArgs(got, h); err != nil {
+		t.Errorf("podman helper command fails the allow-list: %v", err)
+	}
+}
+
+// Rootless Podman, and a Podman whose mode cannot be determined at repair
+// time, refuse without running the helper.
+func TestPodmanRuntime_RepairAgentHomeOwnershipUnsupportedModes(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		rootless  bool
+		info      string
+		infoFails bool
+		want      string
+	}{
+		{"rootless at construction", true, "false", false, "(rootless podman)"},
+		{"rootless at repair time", false, "true", false, "(rootless podman)"},
+		{"detection fails", false, "", true, "podman mode undetectable"},
+		{"empty answer", false, "", false, "podman mode undetectable"},
+		{"unexpected answer", false, "maybe", false, "podman mode undetectable"},
+	} {
+		f := newFakeRepairRuntime(t, tc.info, tc.infoFails, 0, 0)
+		r := &PodmanRuntime{Command: f.bin, Rootless: tc.rootless}
+		err := r.RepairAgentHomeOwnership(context.Background(), AgentHomeOwnershipRepair{HomeDir: newRepairHome(t), Image: "img", UID: 1, GID: 1})
+		if !errors.Is(err, ErrAgentHomeRepairUnsupported) || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want ErrAgentHomeRepairUnsupported naming %s", tc.name, err, tc.want)
+		}
+		if f.ran() {
+			t.Errorf("%s: the helper ran", tc.name)
+		}
+	}
+}
+
+// Rootless Docker, Docker with user-namespace remapping and a Docker whose
+// mode cannot be determined refuse without running the helper.
+func TestDockerRuntime_RepairAgentHomeOwnershipUnsupportedModes(t *testing.T) {
+	for _, tc := range []struct {
+		info      string
+		infoFails bool
+		want      string
+	}{
+		{`["name=seccomp,profile=builtin","name=rootless","name=cgroupns"]`, false, "(rootless docker)"},
+		{`["name=apparmor","name=seccomp,profile=builtin","name=userns"]`, false, "(docker userns-remap)"},
+		{"", true, "docker mode undetectable"},
+	} {
+		f := newFakeRepairRuntime(t, tc.info, tc.infoFails, 0, 0)
+		err := (&DockerRuntime{Command: f.bin}).RepairAgentHomeOwnership(context.Background(), AgentHomeOwnershipRepair{HomeDir: newRepairHome(t), Image: "img", UID: 1, GID: 1})
+		if !errors.Is(err, ErrAgentHomeRepairUnsupported) || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("info %q: err = %v, want ErrAgentHomeRepairUnsupported naming %s", tc.info, err, tc.want)
+		}
+		if f.ran() {
+			t.Errorf("info %q: the helper ran", tc.info)
+		}
+	}
+}
+
+// A failed helper run is removed by name and reported with its output.
+func TestDockerRuntime_RepairAgentHomeOwnershipFailureRemovesHelper(t *testing.T) {
+	f := newFakeRepairRuntime(t, rootfulDockerSecurityOptions, false, 3, 0)
+	err := (&DockerRuntime{Command: f.bin}).RepairAgentHomeOwnership(context.Background(), AgentHomeOwnershipRepair{HomeDir: newRepairHome(t), Image: "img", UID: 1, GID: 1})
+	if err == nil || !strings.Contains(err.Error(), "helper-output") {
+		t.Fatalf("expected the helper failure with its output, got %v", err)
+	}
+	if got, want := readLines(t, f.rmArgs), []string{"rm", "-f", f.helperName(t)}; !slices.Equal(got, want) {
+		t.Errorf("cleanup = %q, want %q", got, want)
+	}
+}
+
+// A helper that outlives the timeout is removed by name: killing the CLI
+// alone would leave the container running.
+func TestDockerRuntime_RepairAgentHomeOwnershipTimeoutRemovesHelper(t *testing.T) {
+	old := agentHomeRepairTimeout
+	agentHomeRepairTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { agentHomeRepairTimeout = old })
+	f := newFakeRepairRuntime(t, rootfulDockerSecurityOptions, false, 0, 10)
+	start := time.Now()
+	err := (&DockerRuntime{Command: f.bin}).RepairAgentHomeOwnership(context.Background(), AgentHomeOwnershipRepair{HomeDir: newRepairHome(t), Image: "img", UID: 1, GID: 1})
+	if err == nil || !strings.Contains(err.Error(), "timed out") || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want a timeout error", err)
+	}
+	if elapsed := time.Since(start); elapsed > 8*time.Second {
+		t.Errorf("repair returned after %s, want shortly after the timeout", elapsed)
+	}
+	name := f.helperName(t)
+	if got, want := readLines(t, f.rmArgs), []string{"rm", "-f", name}; !slices.Equal(got, want) {
+		t.Errorf("cleanup = %q, want %q", got, want)
+	}
+	if !strings.Contains(err.Error(), name) {
+		t.Errorf("error %q does not name the helper %s", err, name)
+	}
+}
+
+// The helper's agent home goes through the agent-home and recursive-chown
+// root checks before anything runs: a system path, $HOME, a non-home path
+// under ~/.scion, and a symlink to one, are refused without running the
+// helper; real agent-home shapes pass, and the helper mounts the resolved
+// path.
+func TestRepairAgentHomeOwnership_ValidatesHome(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	nonHome := filepath.Join(tmpHome, ".scion", "projects", "p")
+	if err := os.MkdirAll(nonHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "agents", "a1", "home")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(nonHome, link); err != nil {
+		t.Fatal(err)
+	}
+	for name, home := range map[string]string{
+		"/etc":                       "/etc",
+		"$HOME":                      tmpHome,
+		"non-home path under .scion": nonHome,
+		"symlink to it":              link,
+	} {
+		f := newFakeRepairRuntime(t, rootfulDockerSecurityOptions, false, 0, 0)
+		err := (&DockerRuntime{Command: f.bin}).RepairAgentHomeOwnership(context.Background(), AgentHomeOwnershipRepair{HomeDir: home, Image: "img", UID: 1, GID: 1})
+		if err == nil {
+			t.Errorf("%s: repair of %q was not refused", name, home)
+		}
+		if f.ran() {
+			t.Errorf("%s: the helper ran", name)
+		}
+	}
+
+	for _, rel := range [][]string{
+		{".scion", "agents", "a", "home"},
+		{".scion", "projects", "p", ".scion", "agents", "a", "home"},
+		{".scion", "project-configs", "d__1", ".scion", "agents", "a", "home"},
+	} {
+		home := filepath.Join(append([]string{tmpHome}, rel...)...)
+		if err := os.MkdirAll(home, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// Reach it through a symlinked parent: the helper mounts the
+		// resolved path.
+		alias := filepath.Join(t.TempDir(), "alias")
+		if err := os.Symlink(filepath.Dir(home), alias); err != nil {
+			t.Fatal(err)
+		}
+		f := newFakeRepairRuntime(t, rootfulDockerSecurityOptions, false, 0, 0)
+		err := (&DockerRuntime{Command: f.bin}).RepairAgentHomeOwnership(context.Background(), AgentHomeOwnershipRepair{HomeDir: filepath.Join(alias, "home"), Image: "img", UID: 1, GID: 1})
+		if err != nil {
+			t.Errorf("%s: real agent home refused: %v", home, err)
+			continue
+		}
+		resolved, _ := filepath.EvalSymlinks(home)
+		args := readLines(t, f.runArgs)
+		if i := slices.Index(args, "--volume"); i < 0 || args[i+1] != resolved+":"+agentHomeRepairMount {
+			t.Errorf("%s: helper does not mount the resolved home: %q", home, args)
+		}
 	}
 }
 
@@ -224,132 +551,5 @@ func TestAdvertisedHostOwnerIDs_MatchesRunArgs(t *testing.T) {
 		}
 		assertEnvInArgs(t, args, fmt.Sprintf("SCION_HOST_UID=%d", uid), "advertised uid")
 		assertEnvInArgs(t, args, fmt.Sprintf("SCION_HOST_GID=%d", gid), "advertised gid")
-	}
-}
-
-func TestDockerRuntime_RepairAgentHomeOwnershipFailure(t *testing.T) {
-	bin, _ := writeArgRecorder(t, 3, rootfulDockerSecurityOptions)
-	r := &DockerRuntime{Command: bin}
-	err := r.RepairAgentHomeOwnership(context.Background(), AgentHomeOwnershipRepair{HomeDir: t.TempDir(), Image: "img"})
-	if err == nil || !strings.Contains(err.Error(), "helper-output") {
-		t.Fatalf("expected the helper failure with its output, got %v", err)
-	}
-}
-
-func TestPodmanRuntime_RepairAgentHomeOwnership(t *testing.T) {
-	t.Run("rootful shares the docker helper", func(t *testing.T) {
-		bin, argsFile := writeArgRecorder(t, 0, rootfulDockerSecurityOptions)
-		req := AgentHomeOwnershipRepair{HomeDir: t.TempDir(), Image: "img", UID: 1002, GID: 1003}
-		r := &PodmanRuntime{Command: bin}
-		if err := r.RepairAgentHomeOwnership(context.Background(), req); err != nil {
-			t.Fatal(err)
-		}
-		want, _ := agentHomeRepairArgs(req)
-		if got := readRecordedArgs(t, argsFile); !slices.Equal(got, want) {
-			t.Errorf("podman args = %q, want %q", got, want)
-		}
-	})
-	t.Run("rootless is unsupported", func(t *testing.T) {
-		bin, argsFile := writeArgRecorder(t, 0, rootfulDockerSecurityOptions)
-		r := &PodmanRuntime{Command: bin, Rootless: true}
-		err := r.RepairAgentHomeOwnership(context.Background(), AgentHomeOwnershipRepair{HomeDir: t.TempDir(), Image: "img"})
-		if !errors.Is(err, ErrAgentHomeRepairUnsupported) {
-			t.Fatalf("err = %v, want ErrAgentHomeRepairUnsupported", err)
-		}
-		if _, statErr := os.Stat(argsFile); statErr == nil {
-			t.Error("rootless podman ran the helper")
-		}
-	})
-}
-
-// Rootless Docker and Docker with user-namespace remapping map container
-// uids to other host uids, so the repair is refused there without running
-// the helper.
-func TestDockerRuntime_RepairAgentHomeOwnershipUnsupportedModes(t *testing.T) {
-	for _, tc := range []struct{ opts, mode string }{
-		{`["name=seccomp,profile=builtin","name=rootless","name=cgroupns"]`, "(rootless docker)"},
-		{`["name=apparmor","name=seccomp,profile=builtin","name=userns"]`, "(docker userns-remap)"},
-	} {
-		bin, argsFile := writeArgRecorder(t, 0, tc.opts)
-		r := &DockerRuntime{Command: bin}
-		err := r.RepairAgentHomeOwnership(context.Background(), AgentHomeOwnershipRepair{HomeDir: t.TempDir(), Image: "img", UID: 1, GID: 1})
-		if !errors.Is(err, ErrAgentHomeRepairUnsupported) || !strings.Contains(err.Error(), tc.mode) {
-			t.Errorf("security options %s: err = %v, want ErrAgentHomeRepairUnsupported naming %s", tc.opts, err, tc.mode)
-		}
-		if _, statErr := os.Stat(argsFile); statErr == nil {
-			t.Errorf("security options %s: the helper ran", tc.opts)
-		}
-	}
-}
-
-// When the daemon's mode cannot be determined, the repair is not run.
-func TestDockerRuntime_RepairAgentHomeOwnershipModeDetectionFails(t *testing.T) {
-	dir := t.TempDir()
-	argsFile := filepath.Join(dir, "args")
-	bin := filepath.Join(dir, "fake-runtime")
-	script := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = info ]; then echo daemon down >&2; exit 1; fi\ntouch %q\n", argsFile)
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	err := (&DockerRuntime{Command: bin}).RepairAgentHomeOwnership(context.Background(), AgentHomeOwnershipRepair{HomeDir: t.TempDir(), Image: "img", UID: 1, GID: 1})
-	if err == nil || !strings.Contains(err.Error(), "detect docker security options") {
-		t.Fatalf("err = %v, want a detection error", err)
-	}
-	if _, statErr := os.Stat(argsFile); statErr == nil {
-		t.Error("the helper ran")
-	}
-}
-
-// The runtime validates the helper's argv against a fail-closed allow-list
-// before running it: the built command passes, and any change that adds,
-// removes, repeats or alters a flag, the mount, the image or the command
-// is refused.
-func TestValidateAgentHomeRepairArgs(t *testing.T) {
-	req := AgentHomeOwnershipRepair{HomeDir: "/srv/agents/a1/home", Image: "img:1", UID: 1002, GID: 1003}
-	args, err := agentHomeRepairArgs(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := validateAgentHomeRepairArgs(args, req); err != nil {
-		t.Fatalf("the built helper command is refused: %v", err)
-	}
-	imageAt := slices.Index(args, "img:1")
-	insertBeforeImage := func(extra ...string) []string {
-		out := slices.Clone(args[:imageAt])
-		out = append(out, extra...)
-		return append(out, args[imageAt:]...)
-	}
-	replace := func(old, new string) []string {
-		out := slices.Clone(args)
-		out[slices.Index(out, old)] = new
-		return out
-	}
-	without := func(flag string) []string {
-		out := slices.Clone(args)
-		return slices.Delete(out, slices.Index(out, flag), slices.Index(out, flag)+1)
-	}
-	for name, bad := range map[string][]string{
-		"privileged":          insertBeforeImage("--privileged"),
-		"SYS_ADMIN":           insertBeforeImage("--cap-add=SYS_ADMIN"),
-		"DAC_READ_SEARCH":     replace("--cap-add=DAC_OVERRIDE", "--cap-add=DAC_READ_SEARCH"),
-		"seccomp unconfined":  insertBeforeImage("--security-opt=seccomp=unconfined"),
-		"apparmor unconfined": insertBeforeImage("--security-opt", "apparmor=unconfined"),
-		"second mount":        insertBeforeImage("--volume", "/:/host"),
-		"--mount":             insertBeforeImage("--mount", "type=bind,src=/,dst=/host"),
-		"host network":        replace("--network=none", "--network=host"),
-		"no cap-drop":         without("--cap-drop=ALL"),
-		"no network flag":     without("--network=none"),
-		"repeated cap":        insertBeforeImage("--cap-add=CHOWN"),
-		"other entrypoint":    replace("find", "sh"),
-		"other home":          replace("/srv/agents/a1/home:"+agentHomeRepairMount, "/srv:"+agentHomeRepairMount),
-		"read-only home":      replace("/srv/agents/a1/home:"+agentHomeRepairMount, "/srv/agents/a1/home:"+agentHomeRepairMount+":ro"),
-		"other image":         replace("img:1", "img:2"),
-		"other owner":         replace("1002:1003", "0:0"),
-		"extra command":       append(slices.Clone(args), "-delete"),
-		"not run":             replace("run", "exec"),
-	} {
-		if err := validateAgentHomeRepairArgs(bad, req); err == nil {
-			t.Errorf("%s: helper command %q was not refused", name, bad)
-		}
 	}
 }
