@@ -54,6 +54,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -151,6 +152,28 @@ func (s *Server) handleChatSpaces(w http.ResponseWriter, r *http.Request) {
 // the unread count consider.
 const chatVisibleSpacesMaxProjects = 1000
 
+// chatSpacesBoundWarn rate-limits the warning that the bound was hit.
+var chatSpacesBoundWarn = &logRateLimit{every: time.Hour}
+
+// logRateLimit allows one log line per interval, process-wide.
+type logRateLimit struct {
+	every time.Duration
+	last  atomic.Int64 // unix nanoseconds of the last allowed line; 0 for none
+}
+
+// allow reports whether a line may be logged at now, and if so records it.
+func (l *logRateLimit) allow(now time.Time) bool {
+	for {
+		last := l.last.Load()
+		if last != 0 && now.Sub(time.Unix(0, last)) < l.every {
+			return false
+		}
+		if l.last.CompareAndSwap(last, now.UnixNano()) {
+			return true
+		}
+	}
+}
+
 // chatVisibleSpaces returns the projects the chat rail lists for identity:
 // every non-template project identity can read. GET /api/v1/chat/spaces and
 // GET /api/v1/chat/unread-count both use it, so the badge counts threads in
@@ -167,9 +190,10 @@ func (s *Server) chatVisibleSpaces(ctx context.Context, identity Identity) ([]*s
 	if err != nil {
 		return nil, fmt.Errorf("list projects: %w", err)
 	}
-	if len(allProjects.Items) >= chatVisibleSpacesMaxProjects {
+	if len(allProjects.Items) >= chatVisibleSpacesMaxProjects && chatSpacesBoundWarn.allow(time.Now()) {
 		// The rail and the unread count both stop here, so they still
-		// agree, but spaces past the bound are missing from both.
+		// agree, but spaces past the bound are missing from both. Every
+		// chat event reaches this, so the warning is rate-limited.
 		slog.Warn("chat spaces: project list hit the bound; spaces past it are not listed",
 			"bound", chatVisibleSpacesMaxProjects)
 	}

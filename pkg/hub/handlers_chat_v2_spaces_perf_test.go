@@ -596,3 +596,13 @@ func TestChatUnreadCount_ConstantStoreCalls(t *testing.T) {
 	assert.Equal(t, 1, f.wcs.topicsBatch, "one batched topic read")
 	assert.Equal(t, 1, f.wcs.getReadStates, "one batched read-state read")
 }
+
+// The bound warning is allowed once per interval.
+func TestLogRateLimit(t *testing.T) {
+	l := &logRateLimit{every: time.Hour}
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	assert.True(t, l.allow(t0), "first line")
+	assert.False(t, l.allow(t0.Add(time.Minute)), "inside the interval")
+	assert.True(t, l.allow(t0.Add(time.Hour)), "after the interval")
+	assert.False(t, l.allow(t0.Add(time.Hour+time.Second)))
+}
