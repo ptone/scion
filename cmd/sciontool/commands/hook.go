@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -173,11 +174,13 @@ func runHookWithEvent(eventName string) {
 // hook. A variable only so tests can shorten it.
 var positionalStdinWait = 500 * time.Millisecond
 
-// readOptionalStdin returns the data on in, or nil when there is none: in is
-// a terminal (or another character device such as /dev/null), it is empty,
-// reading it fails, or no EOF arrives within wait. It never blocks for
-// longer than wait. On a timeout the reading goroutine is abandoned; the
-// hook process exits shortly after.
+// readOptionalStdin returns the first JSON value on in, or nil when there is
+// none: in is a terminal (or another character device such as /dev/null),
+// it is empty, it does not hold valid JSON, or no complete value arrives
+// within wait. It returns as soon as one complete value has been read, so a
+// harness that writes its payload and keeps stdin open does not lose it.
+// It never blocks for longer than wait. On a timeout the reading goroutine
+// is abandoned; the hook process exits shortly after.
 func readOptionalStdin(in *os.File, wait time.Duration) []byte {
 	if in == nil {
 		return nil
@@ -192,24 +195,26 @@ func readOptionalStdin(in *os.File, wait time.Duration) []byte {
 	}
 	done := make(chan result, 1)
 	go func() {
-		data, err := io.ReadAll(io.LimitReader(in, maxPositionalStdinBytes+1))
-		done <- result{data, err}
+		// Decode one value rather than read to EOF: the decoder returns
+		// once the value is complete, whether or not stdin is closed.
+		var raw json.RawMessage
+		err := json.NewDecoder(io.LimitReader(in, maxPositionalStdinBytes+1)).Decode(&raw)
+		done <- result{raw, err}
 	}()
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	select {
 	case r := <-done:
-		if r.err != nil {
-			log.Error("Hook: cannot read stdin payload, ignoring it: %v", r.err)
-			return nil
+		if errors.Is(r.err, io.EOF) {
+			return nil // empty (or whitespace-only) stdin: no payload
 		}
-		if len(r.data) > maxPositionalStdinBytes {
-			log.Error("Hook: stdin payload larger than %d bytes, ignoring it", maxPositionalStdinBytes)
+		if r.err != nil {
+			log.Error("Hook: stdin payload is not valid JSON (or exceeds %d bytes), ignoring it: %v", maxPositionalStdinBytes, r.err)
 			return nil
 		}
 		return r.data
 	case <-timer.C:
-		log.Debug("Hook: no stdin payload within %s, processing the event without one", wait)
+		log.Warn("Hook: no complete stdin payload within %s, processing the event without it", wait)
 		return nil
 	}
 }

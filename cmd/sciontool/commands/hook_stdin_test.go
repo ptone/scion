@@ -76,6 +76,39 @@ func TestReadOptionalStdin(t *testing.T) {
 		assert.Equal(t, copilotPostToolUse, string(readOptionalStdin(r, time.Second)))
 	})
 
+	t.Run("payload on a pipe left open", func(t *testing.T) {
+		r, w, err := os.Pipe()
+		require.NoError(t, err)
+		defer r.Close()
+		defer w.Close()
+		_, err = w.WriteString(copilotPostToolUse)
+		require.NoError(t, err)
+		start := time.Now()
+		assert.Equal(t, copilotPostToolUse, string(readOptionalStdin(r, 5*time.Second)))
+		assert.Less(t, time.Since(start), 2*time.Second, "a complete object must not wait for EOF")
+	})
+
+	t.Run("malformed payload is ignored", func(t *testing.T) {
+		setTestLogPath(t, filepath.Join(t.TempDir(), "agent.log"))
+		r, w, err := os.Pipe()
+		require.NoError(t, err)
+		defer r.Close()
+		_, err = w.WriteString(`{not json`)
+		require.NoError(t, err)
+		require.NoError(t, w.Close())
+		assert.Nil(t, readOptionalStdin(r, time.Second))
+	})
+
+	t.Run("whitespace only", func(t *testing.T) {
+		r, w, err := os.Pipe()
+		require.NoError(t, err)
+		defer r.Close()
+		_, err = w.WriteString(" \n ")
+		require.NoError(t, err)
+		require.NoError(t, w.Close())
+		assert.Nil(t, readOptionalStdin(r, time.Second))
+	})
+
 	t.Run("closed empty pipe", func(t *testing.T) {
 		r, w, err := os.Pipe()
 		require.NoError(t, err)
@@ -152,7 +185,10 @@ func TestCopilotDialect_CamelCasePayloads(t *testing.T) {
 		return ev
 	}
 
-	t.Run("failed tool", func(t *testing.T) {
+	t.Run("non-success resultType string is not success", func(t *testing.T) {
+		// Guard on the success string rule, not a documented Copilot payload:
+		// the docs list only resultType "success" on postToolUse (failed
+		// tools arrive on postToolUseFailure, which is not registered here).
 		ev := parse("postToolUse", `{"sessionId":"s1","toolName":"bash","toolResult":{"resultType":"failure","textResultForLlm":"exit 1"}}`)
 		assert.Equal(t, "bash", ev.Data.ToolName)
 		assert.False(t, ev.Data.Success)
