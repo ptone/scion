@@ -185,6 +185,10 @@ type HTTPAgentDispatcher struct {
 	// imageRegistry is the configured image registry prefix for rewriting
 	// bare image names before dispatching to brokers.
 	imageRegistry string
+	// imageRegistryProvider, when set, returns the registry prefix at each
+	// dispatch and takes precedence over imageRegistry, so a saved
+	// image_registry change (or its clear) applies to the next agent.
+	imageRegistryProvider func() string
 
 	// Resource hash repair callbacks sync a resource's DB manifest from GCS
 	// when a hash mismatch is detected during dispatch. Nil = no repair.
@@ -450,9 +454,19 @@ func (d *HTTPAgentDispatcher) SetImageRegistry(registry string) {
 	d.imageRegistry = registry
 }
 
+// SetImageRegistryProvider registers the accessor for the image registry
+// prefix. It is read at each dispatch and takes precedence over
+// SetImageRegistry.
+func (d *HTTPAgentDispatcher) SetImageRegistryProvider(fn func() string) {
+	d.imageRegistryProvider = fn
+}
+
 // ImageRegistry returns the registry prefix this dispatcher rewrites bare
 // image names to at send time ("" = no rewrite).
 func (d *HTTPAgentDispatcher) ImageRegistry() string {
+	if d.imageRegistryProvider != nil {
+		return d.imageRegistryProvider()
+	}
 	return d.imageRegistry
 }
 

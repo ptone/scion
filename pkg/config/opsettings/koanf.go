@@ -352,21 +352,21 @@ func loadSectionIntoKoanf(k *koanf.Koanf, sectionName string, doc json.RawMessag
 	}
 }
 
+// loadPrefixed loads a section document under prefix as a nested map.
+//
+// The document is not flattened into "." delimited paths: koanf splits such
+// paths on every ".", so a free-form map key that contains a dot (for
+// example the telemetry.resource key "service.namespace", or an event name
+// in telemetry.filter.sampling.rates) would turn into nested maps and no
+// longer decode into its map[string]string field (ptone/scion#4108).
+// Loading the nested map with an empty delimiter keeps each key whole;
+// koanf still indexes every leaf path, so lookups such as
+// "telemetry.cloud.endpoint" work as before.
 func loadPrefixed(k *koanf.Koanf, prefix string, raw map[string]interface{}) error {
-	flat := make(map[string]interface{})
-	flattenMap(prefix, raw, flat)
-	return k.Load(confmap.Provider(flat, "."), nil)
-}
-
-func flattenMap(prefix string, m map[string]interface{}, out map[string]interface{}) {
-	for key, val := range m {
-		fullKey := prefix + "." + key
-		if sub, ok := val.(map[string]interface{}); ok {
-			flattenMap(fullKey, sub, out)
-		} else {
-			out[fullKey] = val
-		}
+	if raw == nil {
+		raw = map[string]interface{}{}
 	}
+	return k.Load(confmap.Provider(map[string]interface{}{prefix: raw}, ""), nil)
 }
 
 func loadMappedSection(k *koanf.Koanf, sectionName string, raw map[string]interface{}) error {

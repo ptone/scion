@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"maps"
 	"math/rand"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -94,10 +95,12 @@ type Layer1Snapshot struct {
 	AuthorizedDomains []string
 
 	// Lifecycle
-	AutoSuspendStalled    bool
-	StalledThreshold      string // DB-backed snapshots only (see type comment)
-	SoftDeleteRetention   string // DB-backed snapshots only (see type comment)
-	SoftDeleteRetainFiles bool   // DB-backed snapshots only (see type comment)
+	AutoSuspendStalled  bool
+	StalledThreshold    string // DB-backed snapshots only (see type comment)
+	SoftDeleteRetention string // DB-backed snapshots only (see type comment); "" = startup value
+	// SoftDeleteRetainFiles is nil when unset; ApplySnapshot then uses the
+	// startup value. DB-backed snapshots only (see type comment).
+	SoftDeleteRetainFiles *bool
 
 	// Start claim timing (durations as strings; empty keeps the startup value)
 	StartClaimLeaseTTL         string
@@ -175,6 +178,12 @@ type Layer1Snapshot struct {
 
 	// Notifications
 	NotificationChannels []config.V1NotificationChannelConfig
+	// NotificationChannelsSet reports that NotificationChannels is the
+	// complete configured list, so ApplySnapshot rebuilds the channel
+	// registry from it (an empty list removes every channel). DB-backed
+	// snapshots set it; a snapshot built from the file does not carry the
+	// channels, and ApplySnapshot then leaves the registry as it is.
+	NotificationChannelsSet bool
 
 	// Federation
 	FederationConfig *config.FederationConfig // nil when federation section not present
@@ -394,14 +403,21 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 		// Extract this section from the file fallback and load it.
 		doc, err := opsettings.ExtractSectionFromKoanf(o.bootstrapKoanf, sec.Name)
 		if err != nil {
+			slog.Error("operational settings: cannot read bootstrap section", "section", sec.Name, "error", err)
 			continue
 		}
-		_ = loadSectionDocIntoKoanf(merged, sec.Name, doc)
+		if err := loadSectionDocIntoKoanf(merged, sec.Name, doc); err != nil {
+			slog.Error("operational settings: cannot load bootstrap section", "section", sec.Name, "error", err)
+		}
 	}
 
 	// Layer: DB sections (highest precedence — DB wins over bootstrap).
+	// A section that cannot be loaded is logged; its keys stay unset
+	// (ptone/scion#4108).
 	for name, doc := range dbSections {
-		_ = loadSectionDocIntoKoanf(merged, name, doc)
+		if err := loadSectionDocIntoKoanf(merged, name, doc); err != nil {
+			slog.Error("operational settings: cannot load section document", "section", name, "error", err)
+		}
 	}
 
 	snap := buildSnapshotFromKoanf(merged)
@@ -860,7 +876,10 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	snap.AutoSuspendStalled = k.Bool("server.hub.auto_suspend_stalled")
 	snap.StalledThreshold = k.String("server.hub.stalled_threshold")
 	snap.SoftDeleteRetention = k.String("server.hub.soft_delete_retention")
-	snap.SoftDeleteRetainFiles = k.Bool("server.hub.soft_delete_retain_files")
+	if k.Exists("server.hub.soft_delete_retain_files") {
+		v := k.Bool("server.hub.soft_delete_retain_files")
+		snap.SoftDeleteRetainFiles = &v
+	}
 	snap.StartClaimLeaseTTL = k.String("server.hub.start_claim_lease_ttl")
 	snap.StartMaxDuration = k.String("server.hub.start_max_duration")
 	snap.StartUnconfirmedHold = k.String("server.hub.start_unconfirmed_hold")
@@ -901,10 +920,17 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	}
 	teleSub := k.Cut("telemetry")
 	if teleSub != nil && len(teleSub.Keys()) > 0 {
+		// A decode failure is logged rather than dropped silently: it
+		// leaves the telemetry config unset, which GET and the running
+		// hub both show (ptone/scion#4108).
 		data, err := json.Marshal(teleSub.Raw())
-		if err == nil {
+		if err != nil {
+			slog.Error("operational settings: cannot encode telemetry settings", "error", err)
+		} else {
 			var tc config.V1TelemetryConfig
-			if json.Unmarshal(data, &tc) == nil {
+			if err := json.Unmarshal(data, &tc); err != nil {
+				slog.Error("operational settings: cannot decode telemetry settings; telemetry config left unset", "error", err)
+			} else {
 				snap.TelemetryConfig = &tc
 			}
 		}
@@ -952,13 +978,18 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	if k.Exists("server.notification_channels") {
 		raw := k.Get("server.notification_channels")
 		data, err := json.Marshal(raw)
-		if err == nil {
+		if err != nil {
+			slog.Error("operational settings: cannot encode notification channels", "error", err)
+		} else {
 			var channels []config.V1NotificationChannelConfig
-			if json.Unmarshal(data, &channels) == nil {
+			if err := json.Unmarshal(data, &channels); err != nil {
+				slog.Error("operational settings: cannot decode notification channels; no channels applied", "error", err)
+			} else {
 				snap.NotificationChannels = channels
 			}
 		}
 	}
+	snap.NotificationChannelsSet = true
 
 	// Federation
 	if k.Exists("server.federation.enabled") || k.Exists("server.federation.trusted_issuers") {
@@ -1119,18 +1150,25 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 
 	s.mu.Lock()
 
-	// Telemetry
-	if snap.TelemetryEnabled != nil {
-		oldVal := s.config.TelemetryDefault
-		s.config.TelemetryDefault = snap.TelemetryEnabled
-		if oldVal == nil || *oldVal != *snap.TelemetryEnabled {
-			applied = append(applied, "telemetry_default")
-		}
+	// Telemetry. An unset value (cleared, or the section removed) returns
+	// to the startup value rather than keeping the last applied one
+	// (ptone/scion#3904).
+	telemetryDefault := copyBoolPtr(snap.TelemetryEnabled)
+	if telemetryDefault == nil {
+		telemetryDefault = copyBoolPtr(s.startupLayer1.TelemetryDefault)
 	}
+	if !boolPtrEqual(s.config.TelemetryDefault, telemetryDefault) {
+		applied = append(applied, "telemetry_default")
+	}
+	s.config.TelemetryDefault = telemetryDefault
+	telemetryConfig := s.startupLayer1.TelemetryConfig
 	if snap.TelemetryConfig != nil {
-		s.config.TelemetryConfig = config.ConvertV1TelemetryToAPI(snap.TelemetryConfig)
+		telemetryConfig = config.ConvertV1TelemetryToAPI(snap.TelemetryConfig)
+	}
+	if !reflect.DeepEqual(s.config.TelemetryConfig, telemetryConfig) {
 		applied = append(applied, "telemetry_config")
 	}
+	s.config.TelemetryConfig = telemetryConfig
 
 	// Auto-expose ports
 	if snap.AutoExposePortsEnabled != nil {
@@ -1262,16 +1300,22 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		applied = append(applied, "default_user_role")
 	}
 
-	// GitHub App non-sensitive config
+	// GitHub App non-sensitive config. Without an app_id the startup
+	// values are used, so clearing the section reverts to them rather than
+	// keeping the last applied app (ptone/scion#3904). An unset
+	// private_key_path keeps the startup path. The in-memory private key
+	// and webhook secret are kept as-is (loaded from the secrets backend).
+	gh := s.startupLayer1.GitHubApp
 	if snap.GitHubAppID != 0 {
-		s.config.GitHubAppConfig.AppID = snap.GitHubAppID
-		s.config.GitHubAppConfig.APIBaseURL = snap.GitHubAPIBaseURL
-		s.config.GitHubAppConfig.WebhooksEnabled = snap.GitHubWebhooksEnabled
-		s.config.GitHubAppConfig.InstallationURL = snap.GitHubInstallationURL
+		gh.AppID = snap.GitHubAppID
+		gh.APIBaseURL = snap.GitHubAPIBaseURL
+		gh.WebhooksEnabled = snap.GitHubWebhooksEnabled
+		gh.InstallationURL = snap.GitHubInstallationURL
 		if snap.GitHubPrivateKeyPath != "" {
-			s.config.GitHubAppConfig.PrivateKeyPath = snap.GitHubPrivateKeyPath
+			gh.PrivateKeyPath = snap.GitHubPrivateKeyPath
 		}
-		// In-memory private key and webhook secret are kept as-is (loaded from secrets backend)
+	}
+	if s.setGitHubAppPublicLocked(gh) {
 		applied = append(applied, "github_app")
 	}
 
@@ -1304,12 +1348,40 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 
 	// Image registry (#985) — wire DB value to the consumption path.
 	// resolveImageRegistry() reads s.config.MaintenanceConfig.ImageRegistry.
-	if snap.ImageRegistry != "" {
-		old := s.config.MaintenanceConfig.ImageRegistry
-		s.config.MaintenanceConfig.ImageRegistry = snap.ImageRegistry
-		if old != snap.ImageRegistry {
-			applied = append(applied, "image_registry")
+	// An unset value returns to the startup registry (ptone/scion#3904).
+	imageRegistry := snap.ImageRegistry
+	if imageRegistry == "" {
+		imageRegistry = s.startupLayer1.ImageRegistry
+	}
+	if s.config.MaintenanceConfig.ImageRegistry != imageRegistry {
+		s.config.MaintenanceConfig.ImageRegistry = imageRegistry
+		applied = append(applied, "image_registry")
+	}
+
+	// Soft-delete retention and retain-files. Consumers read them through
+	// softDeleteSettings, so a change applies to the next delete and the
+	// next purge. An unset value returns to the startup value; an invalid
+	// retention keeps the running one (ptone/scion#3904).
+	retention := s.startupLayer1.SoftDeleteRetention
+	if snap.SoftDeleteRetention != "" {
+		if d, err := time.ParseDuration(snap.SoftDeleteRetention); err != nil || d < 0 {
+			slog.Warn("invalid soft_delete_retention duration, keeping current value", "value", snap.SoftDeleteRetention, "error", err)
+			retention = s.config.SoftDeleteRetention
+		} else {
+			retention = d
 		}
+	}
+	if s.config.SoftDeleteRetention != retention {
+		s.config.SoftDeleteRetention = retention
+		applied = append(applied, "soft_delete_retention")
+	}
+	retainFiles := s.startupLayer1.SoftDeleteRetainFiles
+	if snap.SoftDeleteRetainFiles != nil {
+		retainFiles = *snap.SoftDeleteRetainFiles
+	}
+	if s.config.SoftDeleteRetainFiles != retainFiles {
+		s.config.SoftDeleteRetainFiles = retainFiles
+		applied = append(applied, "soft_delete_retain_files")
 	}
 
 	// Agent defaults (hub operational agent_defaults section).
@@ -1356,6 +1428,14 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 
 	if iamChanged {
 		s.invalidateCallerPermissionCaches()
+	}
+
+	// Notification channels: the new registry is built outside s.mu and
+	// then swapped in whole. A registry is never changed after it is
+	// built, so a dispatch already holding the old one finishes on it
+	// (ptone/scion#3904).
+	if snap.NotificationChannelsSet && s.applyNotificationChannels(snap.NotificationChannels) {
+		applied = append(applied, "notification_channels")
 	}
 
 	// Propagate hub_name to the GCP secret backend so new secrets get the

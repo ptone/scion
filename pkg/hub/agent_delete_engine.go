@@ -219,14 +219,17 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 			// Soft unless force, no retention, or an incomplete async create
 			// (T1 §0c, evaluated on the post-claim row): those are always
 			// hard-deleted so the name can be reused.
+			// The soft-delete settings are read per delete, so a saved
+			// change applies to the next delete (ptone/scion#3904).
+			retention, retainFiles := s.softDeleteSettings()
 			req = store.DeletionRequestInfo{
 				DeleteFiles:  p.deleteFiles,
 				RemoveBranch: p.removeBranch,
 				Force:        p.force,
 				RequestedBy:  p.requestedBy,
-				Soft:         s.config.SoftDeleteRetention > 0 && !p.force && !post.IsIncompleteCreate(),
+				Soft:         retention > 0 && !p.force && !post.IsIncompleteCreate(),
 			}
-			if req.Soft && s.config.SoftDeleteRetainFiles {
+			if req.Soft && retainFiles {
 				req.DeleteFiles = false
 			}
 			if b, err := json.Marshal(req); err == nil {

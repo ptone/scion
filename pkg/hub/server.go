@@ -1428,6 +1428,13 @@ type Server struct {
 	// project delete (startHubNFSProjectTreeCleanup), so tests can wait.
 	nfsCleanupWG sync.WaitGroup
 
+	// startupLayer1 holds the startup values ApplySnapshot reverts to when
+	// a saved Layer-1 setting is cleared (recordStartupLayer1Values).
+	startupLayer1 startupLayer1Values
+	// notificationApply serializes notification channel registry rebuilds
+	// (applyNotificationChannels) and guards the channels last applied.
+	notificationApply notificationChannelsApplyState
+
 	config ServerConfig
 	// startupHubName is the name resolved at startup (ServerConfig.HubName,
 	// from LoadGlobalConfig(serverConfigPath), else the hostname).
@@ -2041,6 +2048,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// The startup-resolved hub name, which ApplySnapshot returns to when
 	// the configured hub_name is unset.
 	srv.startupHubName = cfg.HubName
+	srv.recordStartupLayer1Values()
 	srv.setStartClaimSettings(cfg.StartClaim)
 	// Every start trigger runs under a start claim.
 	srv.startClaimsOn = true
@@ -3920,7 +3928,7 @@ func (s *Server) StartNotificationDispatcher() {
 
 	nd := NewNotificationDispatcher(s.store, s.events, s.GetDispatcher, logging.Subsystem("hub.notifications"))
 	nd.messageLog = s.dedicatedMessageLog
-	nd.channelRegistry = s.channelRegistry
+	nd.channelRegistryFn = s.currentChannelRegistry
 	nd.writeDenyEnabled = func() bool {
 		ops := s.GetOperationalSettings()
 		return ops != nil && ops.ConversationEnvelopeSwitch()
@@ -4156,8 +4164,10 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	dispatcher.SetAutoExposePortsDefaultProvider(s.autoExposePortsDefault)
 	dispatcher.SetDispatchExperimentsProvider(s.dispatchExperiments)
 
-	// Set image registry so bare image names are rewritten before dispatch
-	dispatcher.SetImageRegistry(s.resolveImageRegistry())
+	// Set image registry so bare image names are rewritten before dispatch.
+	// It is read per dispatch, so a saved image_registry applies to the
+	// next agent (ptone/scion#3904).
+	dispatcher.SetImageRegistryProvider(s.resolveImageRegistry)
 
 	return dispatcher
 }
@@ -4346,12 +4356,17 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 func (s *Server) purgeHandler() func(ctx context.Context) {
 	return func(ctx context.Context) {
 		// Purge soft-deleted agents
-		cutoff := time.Now().Add(-s.config.SoftDeleteRetention)
-		purged, err := s.store.PurgeDeletedAgents(ctx, cutoff)
-		if err != nil {
-			slog.Error("Scheduler: agent purge failed", "error", err)
-		} else if purged > 0 {
-			slog.Info("Scheduler: purged soft-deleted agents", "count", purged, "cutoff", cutoff)
+		// The retention is read per tick, so a saved change applies to the
+		// next purge without a restart. With no retention there are no
+		// soft-deleted agents to purge on a time basis: a delete is hard.
+		if retention, _ := s.softDeleteSettings(); retention > 0 {
+			cutoff := time.Now().Add(-retention)
+			purged, err := s.store.PurgeDeletedAgents(ctx, cutoff)
+			if err != nil {
+				slog.Error("Scheduler: agent purge failed", "error", err)
+			} else if purged > 0 {
+				slog.Info("Scheduler: purged soft-deleted agents", "count", purged, "cutoff", cutoff)
+			}
 		}
 
 		// Purge old scheduled events (non-pending, older than 7 days)
@@ -5430,9 +5445,9 @@ func (s *Server) registerSchedulerHandlers() {
 
 	s.scheduler.RegisterRecurringSingleton("agent-heartbeat-timeout", 5, store.LockAgentHeartbeatTimeout, s.agentHeartbeatTimeoutHandler())
 	s.scheduler.RegisterRecurringSingleton("agent-stalled-detection", 5, store.LockAgentStalledDetection, s.agentStalledDetectionHandler())
-	if s.config.SoftDeleteRetention > 0 {
-		s.scheduler.RegisterRecurringSingleton("soft-delete-purge", 60, store.LockSoftDeletePurge, s.purgeHandler())
-	}
+	// Registered whatever the startup retention: soft_delete_retention is
+	// applied live, and the handler skips the agent purge while it is 0.
+	s.scheduler.RegisterRecurringSingleton("soft-delete-purge", 60, store.LockSoftDeletePurge, s.purgeHandler())
 	s.scheduler.RegisterEventHandler("message", s.messageEventHandler())
 	s.scheduler.RegisterEventHandler("dispatch_agent", s.dispatchAgentEventHandler())
 	s.scheduler.RegisterRecurringSingleton("schedule-evaluator", 1, store.LockScheduleEvaluator, s.evaluateSchedulesHandler())

@@ -48,6 +48,12 @@ type NotificationDispatcher struct {
 	stopCh           chan struct{}
 	stopOnce         sync.Once
 	wg               sync.WaitGroup
+
+	// channelRegistryFn, when set, returns the registry in use and takes
+	// precedence over channelRegistry. The Server sets it so a registry
+	// rebuilt from saved settings is used without restarting the
+	// dispatcher (ptone/scion#3904).
+	channelRegistryFn func() *ChannelRegistry
 }
 
 // NewNotificationDispatcher creates a new NotificationDispatcher.
@@ -501,7 +507,8 @@ func notificationMessageType(status string) string {
 // channels. This is fire-and-forget; errors are logged but do not affect the
 // notification pipeline.
 func (nd *NotificationDispatcher) dispatchToChannels(ctx context.Context, sub *store.NotificationSubscription, notif *store.Notification, watchedAgentID, watchedSlug string) {
-	if nd.channelRegistry == nil || nd.channelRegistry.Len() == 0 {
+	cr := nd.currentChannelRegistry()
+	if cr == nil || cr.Len() == 0 {
 		return
 	}
 
@@ -516,7 +523,16 @@ func (nd *NotificationDispatcher) dispatchToChannels(ctx context.Context, sub *s
 	structuredMsg.RecipientID = sub.SubscriberID
 	structuredMsg.Status = strings.ToUpper(notif.Status)
 
-	nd.channelRegistry.Dispatch(ctx, structuredMsg)
+	cr.Dispatch(ctx, structuredMsg)
+}
+
+// currentChannelRegistry returns the notification channel registry to
+// dispatch to, or nil.
+func (nd *NotificationDispatcher) currentChannelRegistry() *ChannelRegistry {
+	if nd.channelRegistryFn != nil {
+		return nd.channelRegistryFn()
+	}
+	return nd.channelRegistry
 }
 
 // persistsViaInbox reports whether the notifier itself must write the inbox

@@ -279,7 +279,7 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 	resp.Server.Hub.StartMaxDuration = snap.StartMaxDuration
 	resp.Server.Hub.StartUnconfirmedHold = snap.StartUnconfirmedHold
 	resp.Server.Hub.StartCreateUnconfirmedHold = snap.StartCreateUnconfirmedHold
-	b2 := snap.SoftDeleteRetainFiles
+	b2 := snap.SoftDeleteRetainFiles != nil && *snap.SoftDeleteRetainFiles
 	resp.Server.Hub.SoftDeleteRetainFiles = &b2
 
 	// Endpoints
@@ -1196,6 +1196,15 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// Write sections in sorted order for deterministic partial-apply and CAS
 	// behavior: if a conflict occurs partway, exactly the alphabetically-first
 	// sections are applied, giving clients predictable retry semantics.
+	// Each section's effective document before the write, for the
+	// key-level save report (reportSavedKeys).
+	beforeDocs := make(map[string]json.RawMessage, len(sectionDocs))
+	for secName := range sectionDocs {
+		if doc, ok := ops.rawSection(secName); ok {
+			beforeDocs[secName] = doc
+		}
+	}
+
 	applied := make(map[string]int64)
 	var unchanged []string // sections whose write was skipped (unchangedManagedRow)
 	var conflicted []map[string]interface{}
@@ -1300,6 +1309,14 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	appliedKeys := mapKeys(written)
 	requiresRestart := []string{}
 
+	// Key-level report: every changed Layer-1 key is either applied to the
+	// running hub or pending a restart (opsettings Section.RestartRequired).
+	writtenDocs := make(map[string]json.RawMessage, len(written))
+	for sec := range written {
+		writtenDocs[sec] = sectionDocs[sec]
+	}
+	keyReport := reportSavedKeys(beforeDocs, writtenDocs)
+
 	var fileChanged []string
 	if fileTxn != nil {
 		changed, err := fileTxn.commit()
@@ -1326,6 +1343,10 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		"reload": map[string]interface{}{
 			"applied":          appliedKeys,
 			"requires_restart": requiresRestart,
+			// applied_keys and pending_restart list the changed Layer-1
+			// keys (koanf paths) by whether they took effect on save.
+			"applied_keys":    keyReport.Applied,
+			"pending_restart": keyReport.PendingRestart,
 		},
 	}
 	if len(unchanged) > 0 {
