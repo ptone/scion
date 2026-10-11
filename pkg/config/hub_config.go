@@ -187,6 +187,10 @@ type HubServerConfig struct {
 	// Conduit holds the conduit relay and grant settings (validated by
 	// HubConduitConfig.Validate at startup).
 	Conduit HubConduitConfig `json:"conduit" yaml:"conduit" koanf:"conduit"`
+
+	// PortProxy holds the agent port proxy settings (validated by
+	// HubPortProxyConfig.Validate at startup).
+	PortProxy HubPortProxyConfig `json:"portProxy" yaml:"portProxy" koanf:"portProxy"`
 }
 
 // DefaultHubID generates a deterministic hub instance ID from the machine hostname.
@@ -1533,6 +1537,8 @@ var snakeCaseFields = map[string]string{
 	"lifetimecap":                "lifetime_cap",
 	"proxysessionmaxage":         "proxy_session_max_age",
 	"streamauthzmax":             "stream_authz_max",
+	"portproxy":                  "port_proxy",
+	"responseheadertimeout":      "response_header_timeout",
 	"instanceid":                 "instance_id",
 	"notificationchannels":       "notification_channels",
 	"privatekeypath":             "private_key_path",
@@ -1648,6 +1654,8 @@ var camelCaseFields = map[string]string{
 	"lifetimecap":                   "lifetimeCap",
 	"proxysessionmaxage":            "proxySessionMaxAge",
 	"streamauthzmax":                "streamAuthzMax",
+	"portproxy":                     "portProxy",
+	"responseheadertimeout":         "responseHeaderTimeout",
 	"instanceid":                    "instanceId",
 	"startclaimleasettl":            "startClaimLeaseTtl",
 	"startmaxduration":              "startMaxDuration",

@@ -1715,7 +1715,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	if opts.OnPersisted != nil {
 		opts.OnPersisted(storeMsg.ID)
 	}
-	s.recordMessageArtifacts(ctx, storeMsg.ID, artifactRefs)
+	recordedRefs := s.recordMessageArtifacts(ctx, storeMsg.ID, artifactRefs)
 
 	// Attachment files are copied to the agent's scratchpad only now: every
 	// check that can refuse the send (authorization, validation, wake,
@@ -1802,7 +1802,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		}
 	}
 
-	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
+	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs, recordedRefs)
 
 	// Thread membership, then the member fan-out, in one background job:
 	// the sender and the human project members they @mentioned become
@@ -1819,7 +1819,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		if chatV2ConvResult != nil && chatV2ConvResult.Kind == "group" {
 			m.ConversationID = chatV2ConvResult.ConversationID
 		}
-		s.recordThreadMembersThenFanOutAsync(ctx, m, storeMsg, attachmentRefs)
+		s.recordThreadMembersThenFanOutAsync(ctx, m, storeMsg, attachmentRefs, recordedRefs)
 	}
 
 	// Phase 9b(ii): render the delivery envelope from the persisted message
@@ -2001,7 +2001,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 							"user_id", user.ID(), "agent_id", mentionAgent.ID, "error", err)
 					}
 				}
-				s.events.PublishUserMessage(ctx, mentionStoreMsg, attachmentRefs)
+				s.events.PublishUserMessage(ctx, mentionStoreMsg, attachmentRefs, nil)
 			}
 
 			// Phase 9b(ii): render the delivery envelope for the mention.
@@ -2349,7 +2349,7 @@ func (s *Server) sendHumanToHuman(ctx context.Context, key, projectID string, us
 	// Publish SSE event. For the unreachable-default override, this carries
 	// the row's actual failed state so other open tabs see "Agent
 	// unreachable" too, not a false "Delivered".
-	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
+	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs, nil)
 
 	// Thread membership, then the member fan-out, in one background job, so
 	// new members (the sender, mentioned humans) receive the message.
@@ -2365,7 +2365,7 @@ func (s *Server) sendHumanToHuman(ctx context.Context, key, projectID string, us
 			ConversationID:   storeMsg.ConversationID,
 			UserID:           user.ID(),
 			MentionedUserIDs: mentionedHumans,
-		}, storeMsg, attachmentRefs)
+		}, storeMsg, attachmentRefs, nil)
 	}
 
 	resp := chatMessageResponse{
@@ -2947,7 +2947,11 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 
 	// Artifact references, resolved for this viewer under their own
 	// credential: an unreadable one carries no title, version or owner.
+	// When the recorded references cannot be read, no message carries
+	// any and every queried message is listed as unavailable instead, so
+	// the client does not show them as having none (ptone/scion#4295).
 	var messageArtifacts map[string][]chatArtifactRef
+	var messageArtifactsUnavailable []string
 	if len(result.Items) > 0 {
 		msgIDs := make([]string, 0, len(result.Items))
 		for _, msg := range result.Items {
@@ -2955,17 +2959,22 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 				msgIDs = append(msgIDs, msg.ID)
 			}
 		}
-		messageArtifacts = s.messageArtifactViews(ctx, msgIDs)
+		var unavailable bool
+		messageArtifacts, unavailable = s.messageArtifactViews(ctx, msgIDs)
+		if unavailable {
+			messageArtifactsUnavailable = msgIDs
+		}
 	}
 
 	writeJSON(w, http.StatusOK, chatHistoryResponse{
-		Messages:           result.Items,
-		NextCursor:         result.NextCursor,
-		TotalCount:         result.TotalCount,
-		MessageAttachments: messageAttachments,
-		MessageArtifacts:   messageArtifacts,
-		MessageExtensions:  messageExtensions,
-		ReplyPreviews:      replyPreviews,
+		Messages:                    result.Items,
+		NextCursor:                  result.NextCursor,
+		TotalCount:                  result.TotalCount,
+		MessageAttachments:          messageAttachments,
+		MessageArtifacts:            messageArtifacts,
+		MessageArtifactsUnavailable: messageArtifactsUnavailable,
+		MessageExtensions:           messageExtensions,
+		ReplyPreviews:               replyPreviews,
 	})
 }
 
@@ -4370,6 +4379,9 @@ func (s *Server) handleChatUserPrefs(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, prefs)
 
 	case http.MethodPut:
+		if !requireProfileWriter(w, r) {
+			return
+		}
 		r.Body = http.MaxBytesReader(w, r.Body, 1048576)
 		var body struct {
 			SpaceSortMode  string `json:"spaceSortMode"`
@@ -4541,6 +4553,9 @@ func (s *Server) handleChatPresence(w http.ResponseWriter, r *http.Request) {
 	user := GetUserIdentityFromContext(r.Context())
 	if user == nil {
 		Forbidden(w)
+		return
+	}
+	if !requireProfileWriter(w, r) {
 		return
 	}
 
@@ -5359,9 +5374,14 @@ type chatHistoryResponse struct {
 	MessageAttachments map[string][]AttachmentRef `json:"messageAttachments,omitempty"` // W7: keyed by message ID
 	// MessageArtifacts are artifact references keyed by message ID, as the
 	// viewer sees them (ptone/scion#3224).
-	MessageArtifacts  map[string][]chatArtifactRef  `json:"messageArtifacts,omitempty"`
-	MessageExtensions map[string]*WebChatMessageExt `json:"messageExtensions,omitempty"` // Phase-3: keyed by message ID
-	ReplyPreviews     map[string]chatReplyPreview   `json:"replyPreviews,omitempty"`     // Phase-3: keyed by reply-to message ID
+	MessageArtifacts map[string][]chatArtifactRef `json:"messageArtifacts,omitempty"`
+	// MessageArtifactsUnavailable lists the IDs of messages whose artifact
+	// references could not be loaded (ptone/scion#4295). They carry no
+	// entry in MessageArtifacts, which then does not mean "no references".
+	// Omitted when every reference list was read.
+	MessageArtifactsUnavailable []string                      `json:"messageArtifactsUnavailable,omitempty"`
+	MessageExtensions           map[string]*WebChatMessageExt `json:"messageExtensions,omitempty"` // Phase-3: keyed by message ID
+	ReplyPreviews               map[string]chatReplyPreview   `json:"replyPreviews,omitempty"`     // Phase-3: keyed by reply-to message ID
 }
 
 // chatReplyPreview provides a truncated preview of the message being replied to.
@@ -5502,8 +5522,8 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Authorize: user must have read access to the project (same as sending
-	// messages). A project-less upload has nothing to authorize against beyond
-	// the authenticated identity the handler already established.
+	// messages). A project-less upload is a profile write: it needs no
+	// project access, and it is refused to a federated caller.
 	if projectID != "" {
 		project, err := s.store.GetProject(ctx, projectID)
 		if err != nil {
@@ -5513,6 +5533,8 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 		if !s.authorize(w, r, projectResource(project), ActionRead) {
 			return
 		}
+	} else if !requireProfileWriter(w, r) {
+		return
 	}
 
 	// Parse multipart form (limit total to MaxAttachmentSize * MaxAttachmentsPerMessage).
