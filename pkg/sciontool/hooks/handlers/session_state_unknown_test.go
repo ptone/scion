@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
@@ -150,7 +151,8 @@ func TestSessionStateUnknownKeys_OnlyUnknownKeysNotRemoved(t *testing.T) {
 }
 
 // The init daemon's writer (writeStateFileInPlace) keeps unknown keys on
-// every write: the shutdown tombstone, the confirmation of its report, and
+// every write: native usage added to the open session, the shutdown
+// tombstone, the confirmation of its report, and
 // the removal of the tombstone at the next start, which leaves only the
 // unknown keys (and would otherwise remove the file).
 func TestSessionStateUnknownKeys_InitDaemonWriter(t *testing.T) {
@@ -158,12 +160,24 @@ func TestSessionStateUnknownKeys_InitDaemonWriter(t *testing.T) {
 	openSession(t, store)
 	addFutureKeys(t, store)
 
+	// Native usage added to the open session; a known field changes.
+	added, err := store.AddUsage(telemetry.SessionUsage{Calls: 2, TokensInput: 100, TokensOutput: 7})
+	if err != nil || !added {
+		t.Fatalf("AddUsage = %v, %v", added, err)
+	}
+	assertFutureKeys(t, store, "usage added")
+	f := readStateFile(t, store)
+	if f.Closed || f.Aggregator.SessionID != "s1" || !f.Aggregator.Open || f.Aggregator.APICallCount != 2 ||
+		f.Aggregator.TokensInput != 100 || f.Aggregator.TokensOutput != 7 || f.Aggregator.ToolCalls["Bash"].Calls != 1 {
+		t.Errorf("after usage added: state = %+v", f)
+	}
+
 	s, ok, err := store.CloseOpenSession("")
 	if err != nil || !ok {
 		t.Fatalf("CloseOpenSession = %v, %v", ok, err)
 	}
 	assertFutureKeys(t, store, "tombstone")
-	f := readStateFile(t, store)
+	f = readStateFile(t, store)
 	if !f.Closed || f.Aggregator.SessionID != "s1" || f.Aggregator.Open || len(f.Pending) != 1 {
 		t.Errorf("after tombstone: state = %+v", f)
 	}
@@ -262,5 +276,67 @@ func TestEncodeSessionState_KnownFieldsWin(t *testing.T) {
 	}
 	if !bytes.Equal(data, want) {
 		t.Errorf("without unknown keys:\n got %s\nwant %s", data, want)
+	}
+}
+
+// encoding/json matches field names case-insensitively, so a key such as
+// "Pending" or "Closed" is decoded into the known field. It must not also be
+// kept as an unknown key: once the field is cleared, the stale value would
+// come back on the next write and be decoded again, re-creating confirmed
+// reports or a tombstone that is never cleared.
+func TestSessionStateUnknownKeys_MiscasedKnownKeysNotKept(t *testing.T) {
+	data := []byte(`{"VERSION":1,"Closed":true,` +
+		`"Aggregator":{"session_id":"old"},` +
+		`"Pending":[{"summary":{"session_id":"old"}}],` +
+		`"future_scalar":42}`)
+	file, err := decodeSessionState(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.Version != sessionStateVersion || !file.Closed || len(file.Pending) != 1 ||
+		file.Aggregator.SessionID != "old" {
+		t.Fatalf("decoded = %+v", file)
+	}
+	if len(file.extra) != 1 || string(file.extra["future_scalar"]) != `42` {
+		t.Errorf("extra = %v, want only future_scalar", file.extra)
+	}
+
+	// The tombstone is cleared and the pending report confirmed.
+	file.Closed = false
+	file.Pending = nil
+	file.Aggregator = telemetry.AggregatorState{}
+	data, err = encodeSessionState(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := decodeSessionState(data)
+	if err != nil {
+		t.Fatalf("decoding %s: %v", data, err)
+	}
+	if again.Closed || len(again.Pending) != 0 || again.Aggregator.SessionID != "" {
+		t.Errorf("cleared fields came back: %s", data)
+	}
+	if len(again.extra) != 1 || string(again.extra["future_scalar"]) != `42` {
+		t.Errorf("extra after round-trip = %v, want only future_scalar", again.extra)
+	}
+
+	// The same through a real write path: clearing the tombstone at start.
+	store := NewFileSessionState(t.TempDir())
+	mustMkdir(t, filepath.Dir(store.Path))
+	mustWrite(t, store.Path+".lock", "")
+	mustWrite(t, store.Path, `{"version":1,"Closed":true,"aggregator":{"session_id":"old"},"future_scalar":42}`)
+	cleared, err := store.ClearSessionTombstone()
+	if err != nil || !cleared {
+		t.Fatalf("ClearSessionTombstone = %v, %v", cleared, err)
+	}
+	raw := readRawState(t, store)
+	if _, ok := raw["Closed"]; ok {
+		t.Errorf("miscased Closed key kept: %v", raw)
+	}
+	if f := readStateFile(t, store); f.Closed || f.Aggregator.SessionID != "" {
+		t.Errorf("tombstone came back: %+v", f)
+	}
+	if string(raw["future_scalar"]) != `42` {
+		t.Errorf("future_scalar = %s, want 42", raw["future_scalar"])
 	}
 }

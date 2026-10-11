@@ -21,6 +21,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
@@ -94,12 +95,21 @@ type sessionStateFile struct {
 }
 
 // sessionStateKnownKeys are the top-level keys of sessionStateFile's
-// exported fields. Any other key is kept in extra.
+// exported fields, in lower case. Any other key is kept in extra.
 var sessionStateKnownKeys = map[string]bool{
 	"version":    true,
 	"aggregator": true,
 	"closed":     true,
 	"pending":    true,
+}
+
+// isKnownSessionStateKey reports whether k names one of sessionStateFile's
+// exported fields. Like encoding/json's field matching, it ignores case: a
+// key such as "Pending" is decoded into the known field, so it must not
+// also be kept in extra, or it would bring the field's old value back after
+// the field is cleared.
+func isKnownSessionStateKey(k string) bool {
+	return sessionStateKnownKeys[strings.ToLower(k)]
 }
 
 // FileSessionState is a SessionStateStore backed by a JSON file. A sibling
@@ -295,7 +305,7 @@ func decodeSessionState(data []byte) (sessionStateFile, error) {
 		return sessionStateFile{}, fmt.Errorf("is corrupt: %v", err)
 	}
 	for k, v := range all {
-		if sessionStateKnownKeys[k] {
+		if isKnownSessionStateKey(k) {
 			continue
 		}
 		if file.extra == nil {
@@ -322,7 +332,7 @@ func encodeSessionState(file sessionStateFile) ([]byte, error) {
 		return nil, err
 	}
 	for k, v := range file.extra {
-		if sessionStateKnownKeys[k] {
+		if isKnownSessionStateKey(k) {
 			continue
 		}
 		if _, ok := all[k]; !ok {
