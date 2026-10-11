@@ -1658,7 +1658,10 @@ export class ScionChatSpaceRail extends LitElement {
         if (pending.kind === 'read') this.markThreadRead(thread.id);
         else this.markThreadUnread(thread.id);
       } else if (listIsOlder) {
-        // The badge already reflects it; only the row is behind.
+        // The badge already reflects it; only the row is behind. Where
+        // unread is not tracked there is no unread dot to restore, as in
+        // markThreadUnread.
+        if (pending.kind === 'unread' && !this.isUnreadTracked(projectId)) continue;
         this.updateThread(
           projectId,
           thread.id,

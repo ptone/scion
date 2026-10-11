@@ -231,6 +231,20 @@ describe('chat-space-rail spaces without unread tracking', () => {
     expect(ids).not.toContain('mark-unread');
   });
 
+  it('does not restore an unread dot from a pending change whose rollup already has it', async () => {
+    for (const tracked of [false, true]) {
+      const el = await mountUntracked(tracked);
+      // The list predates the change, the spaces rollup does not.
+      el._spacesStartedAt = 100;
+      el._pendingReadState.set('topic-x', { kind: 'unread', at: 50 });
+      el.applyPendingReadState(SPACE.projectId, [thread], 10);
+      await el.updateComplete;
+      expect(el.threadsBySpace.get(SPACE.projectId)[0].hasUnread).toBe(tracked);
+      expect(el.spaces[0].unreadCount).toBe(0);
+      document.body.innerHTML = '';
+    }
+  });
+
   it('still does both in a tracked space', async () => {
     const el = await mountUntracked(true);
     const ids = el.threadMenuActions(thread, SPACE.projectId).map((a: any) => a.id);

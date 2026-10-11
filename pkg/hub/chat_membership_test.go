@@ -127,12 +127,21 @@ func TestChatMemberProjectIDs_MatchesCheckEffectiveMembership(t *testing.T) {
 	// A group-bound owner role, which both functions ignore, cannot exist:
 	// the store rejects project-owner for a group principal. Pin that, as
 	// the parity table has no case for it.
-	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: owner,
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: owner,
 		PrincipalType: store.RoleBindingPrincipalGroup, PrincipalID: grp,
 		ScopeType: store.RoleScopeProject, ScopeID: f.project("group-owner"), CreatedBy: "test"})
 	require.Error(t, err, "the store must reject a group-bound project-owner binding")
 	expired := f.project("expired")
 	f.bind(member, store.RoleBindingPrincipalUser, u.ID, expired, nil, &past)
+	expiredGroup := f.project("expired-group")
+	f.bind(member, store.RoleBindingPrincipalGroup, grp, expiredGroup, nil, &past)
+	// A custom project role confers membership, as a built-in one does.
+	custom, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name: "chat-parity-custom", ScopeType: store.RoleScopeProject, Permissions: []string{"project.read"},
+	})
+	require.NoError(t, err)
+	customRole := f.project("custom-role")
+	f.bind(custom.ID, store.RoleBindingPrincipalUser, u.ID, customRole, nil, nil)
 	notYet := f.project("not-yet")
 	f.bind(member, store.RoleBindingPrincipalUser, u.ID, notYet, &later, nil)
 	missingDirect := f.project("missing-direct")
@@ -160,6 +169,8 @@ func TestChatMemberProjectIDs_MatchesCheckEffectiveMembership(t *testing.T) {
 		{"group member", viaGroup, true},
 		{"nested group member", nested, true},
 		{"expired direct binding", expired, false},
+		{"expired group binding", expiredGroup, false},
+		{"custom project role", customRole, true},
 		{"not yet active binding", notYet, false},
 		{"missing role definition, direct", missingDirect, false},
 		{"missing role definition, group", missingGroup, false},
@@ -243,11 +254,14 @@ func TestChatSpaces_MembershipLookupFailureTracksNothing(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 	var threads chatTopicListResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &threads))
+	var foundThread bool
 	for _, th := range threads.Threads {
 		if th.ID == topicID {
+			foundThread = true
 			assert.False(t, th.HasUnread)
 		}
 	}
+	require.True(t, foundThread, "the thread is listed")
 
 	rec = doRequest(t, srv, http.MethodGet, "/api/v1/chat/unread-count", nil)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
