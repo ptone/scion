@@ -553,6 +553,8 @@ func TestDockerRuntime_RepairAgentHomeOwnershipUnsupportedModes(t *testing.T) {
 		// An empty name, with or without options, is unexpected.
 		{`["name=,x"]`, false, "docker mode undetectable"},
 		{`["name="]`, false, "docker mode undetectable"},
+		// One oversized entry not of the form name=... is quoted truncated.
+		{`["` + strings.Repeat("e", 5000) + `"]`, false, "(5000 bytes total)"},
 	} {
 		f := newFakeRepairRuntime(t, fakeRepairOpts{info: tc.info, infoFails: tc.infoFails})
 		err := (&DockerRuntime{Command: f.bin}).RepairAgentHomeOwnership(context.Background(), AgentHomeOwnershipRepair{HomeDir: newRepairHome(t), Image: "img", UID: 1, GID: 1})
@@ -757,6 +759,7 @@ func TestDockerRuntime_RepairAgentHomeOwnershipSweepFailures(t *testing.T) {
 	}{
 		{"listing fails", func(o *fakeRepairOpts) { o.psFails = true }, nil, "Could not list leftover"},
 		{"invalid id", func(o *fakeRepairOpts) { o.psOut = "not-an-id" }, nil, "Ignoring unexpected leftover"},
+		{"overlong invalid id", func(o *fakeRepairOpts) { o.psOut = strings.Repeat("z", 64) + "TAILTAIL" }, nil, "(72 bytes total)"},
 		{"invalid ids mixed with a valid one", func(o *fakeRepairOpts) { o.psOut = "bad1\n0123456789ab\nbad2\nbad3\nbad4" }, []string{"rm -f 0123456789ab"}, "count=4"},
 		{"removal fails", func(o *fakeRepairOpts) { o.psOut = "0123456789ab"; o.rmFails = true }, []string{"rm -f 0123456789ab"}, "Could not remove leftover"},
 	} {
@@ -781,6 +784,9 @@ func TestDockerRuntime_RepairAgentHomeOwnershipSweepFailures(t *testing.T) {
 			// them quoted.
 			if n := strings.Count(logs.String(), "Ignoring unexpected leftover"); n > 1 {
 				t.Errorf("rejected ids logged in %d warnings, want 1: %s", n, logs.String())
+			}
+			if strings.Contains(logs.String(), "TAILTAIL") {
+				t.Errorf("log quotes the tail of an overlong rejected id: %s", logs.String())
 			}
 			if strings.Contains(logs.String(), "bad4") {
 				t.Errorf("log quotes more than the first three rejected ids: %s", logs.String())
@@ -818,6 +824,12 @@ func TestRepairAgentHomeOwnership_OversizedProbeAnswerTruncated(t *testing.T) {
 func TestTruncateForMessage(t *testing.T) {
 	if got := truncateForMessage("short", 10); got != "short" {
 		t.Errorf("short input changed: %q", got)
+	}
+	if got := truncateForMessage("abcd", 4); got != "abcd" {
+		t.Errorf("input at the limit changed: %q", got)
+	}
+	if got := truncateForMessage("", 4); got != "" {
+		t.Errorf("empty input changed: %q", got)
 	}
 	if got := truncateForMessage("abcdefghijkl", 4); got != "abcd... (12 bytes total)" {
 		t.Errorf("truncated = %q", got)
