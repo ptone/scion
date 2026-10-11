@@ -109,7 +109,11 @@ func TestSecretResolutionError_ProvisionedStartReturnsToRest(t *testing.T) {
 // with the fixed message, after the stop leg ran; the claim is released.
 func TestSecretResolutionError_RestartIs503(t *testing.T) {
 	f, d, _ := newClaimFixture(t)
-	a := f.addAgent("restarting", "running", "working", func(a *store.Agent) { a.RunID = "run-before-restart" })
+	a := f.addAgent("restarting", "running", "working")
+	// The agent has a run, as every dispatched agent does: a failed
+	// restart records the stopped state only against the current run.
+	_, err := f.s.SetAgentRunID(context.Background(), a.ID, "run-before-restart", nil)
+	require.NoError(t, err)
 	d.start = func(context.Context, *store.Agent) error { return fakeSecretResolutionErr("started") }
 
 	status, body := lifecycle(t, f, a.ID, "restart")
@@ -190,36 +194,20 @@ func TestCrossNodeLifecycle_SecretResolutionError(t *testing.T) {
 
 // Through the lifecycle API: a start whose owning node fails secret
 // resolution answers 503 unavailable with the fixed message and releases
-// the claim; a restart (stop, then a queued start leg) does the same and
-// leaves the agent stopped.
+// the claim. A user restart's start leg is this same queued start; the
+// restart's stopped state is covered by TestSecretResolutionError_RestartIs503
+// (this fixture's owner publishes no stop status, so a cross-node stop leg
+// would only wait out its timeout), and the queued restart op by
+// TestCrossNodeLifecycle_SecretResolutionError.
 func TestCrossNodeHandler_SecretResolutionErrorIs503(t *testing.T) {
-	t.Run("start", func(t *testing.T) {
-		srv, agent := crossNodeHandlerServer(t, fakeSecretResolutionErr("started"), state.PhaseStopped)
-		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/"+string(api.AgentActionStart), nil)
-		require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
-		code, _ := errorBody(t, rec)
-		assert.Equal(t, ErrCodeUnavailable, code)
-		assert.Contains(t, rec.Body.String(), "agent secrets could not be resolved; the agent was not started")
-		assertNoSecretResolutionDetail(t, rec.Body.String(), "the API body")
-		got := getAgent(t, srv.store, agent.ID)
-		assert.Empty(t, got.StartClaimID, "the start did not happen: the claim is released")
-		assertNoSecretResolutionDetail(t, got.Message, "the agent message")
-	})
-	t.Run("restart", func(t *testing.T) {
-		srv, agent, ownerDisp := crossNodeHandlerServerWithOwner(t, nil, state.PhaseRunning)
-		ownerDisp.startErr = fakeSecretResolutionErr("started")
-		cur := getAgent(t, srv.store, agent.ID)
-		cur.RunID = "run-before-restart"
-		require.NoError(t, srv.store.UpdateAgent(context.Background(), cur))
-
-		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/"+string(api.AgentActionRestart), nil)
-		require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
-		code, _ := errorBody(t, rec)
-		assert.Equal(t, ErrCodeUnavailable, code)
-		assertNoSecretResolutionDetail(t, rec.Body.String(), "the API body")
-		got := getAgent(t, srv.store, agent.ID)
-		assert.Empty(t, got.StartClaimID)
-		assert.Equal(t, "stopped", got.Phase)
-		assertNoSecretResolutionDetail(t, got.Message, "the agent message")
-	})
+	srv, agent := crossNodeHandlerServer(t, fakeSecretResolutionErr("started"), state.PhaseStopped)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/"+string(api.AgentActionStart), nil)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	code, _ := errorBody(t, rec)
+	assert.Equal(t, ErrCodeUnavailable, code)
+	assert.Contains(t, rec.Body.String(), "agent secrets could not be resolved; the agent was not started")
+	assertNoSecretResolutionDetail(t, rec.Body.String(), "the API body")
+	got := getAgent(t, srv.store, agent.ID)
+	assert.Empty(t, got.StartClaimID, "the start did not happen: the claim is released")
+	assertNoSecretResolutionDetail(t, got.Message, "the agent message")
 }
