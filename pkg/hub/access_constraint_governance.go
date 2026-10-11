@@ -1085,6 +1085,12 @@ func (gs *GovernanceService) isConstraintAdmin(ctx context.Context, userID strin
 	if err != nil {
 		return false, err
 	}
+	// Unclamped read: apply the test-identity grant clamp, so a test
+	// identity is never a constraint admin through a system-scoped grant.
+	bindings, err = clampTestFixtureBindings(ctx, gs.store, principals, bindings)
+	if err != nil {
+		return false, err
+	}
 
 	for _, b := range bindings {
 		rd, err := gs.store.GetRoleDefinition(ctx, b.RoleDefinitionID)

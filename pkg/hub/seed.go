@@ -1604,6 +1604,11 @@ func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails
 				return false, err
 			}
 			for i := range users.Items {
+				// A hub test identity is never promoted (pass 2 skips it),
+				// so it never counts toward the intended admin set.
+				if users.Items[i].IsTestFixture() {
+					continue
+				}
 				if adminSet[strings.ToLower(users.Items[i].Email)] {
 					intendedAdminCount++
 					continue
