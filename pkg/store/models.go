@@ -1152,6 +1152,11 @@ type BrokerProfile struct {
 	// every few minutes). One timestamp for all entries: the report is
 	// always sent whole. Nil when never reported.
 	MappingsReportedAt *time.Time `json:"mappingsReportedAt,omitempty"`
+	// MappingsReportVersion is the broker's report version
+	// (api.BrokerSAReportVersion); zero from a broker that predates it.
+	// The Hub refuses a dispatch from the report only at that version or
+	// later (ptone/scion#3329 phase 4b).
+	MappingsReportVersion int `json:"mappingsReportVersion,omitempty"`
 }
 
 // BrokerProfileSAMapping is one GCP service account a broker profile can
@@ -1215,6 +1220,14 @@ type Template struct {
 	StorageBucket string `json:"storageBucket,omitempty"` // Bucket name
 	StoragePath   string `json:"storagePath,omitempty"`   // Path within bucket
 
+	// Layout is the storage layout of the template's files
+	// (ptone/scion#4221): "" (legacy) stores each file at
+	// <StoragePath>/<path>; TemplateLayoutBlobs stores each file once, by
+	// content, at <StoragePath>.blobs/<sha256 hex>. Only the hub's template
+	// commit path changes it; CreateTemplate and UpdateTemplateContent
+	// write it and UpdateTemplate never does.
+	Layout string `json:"layout,omitempty"`
+
 	// File manifest
 	Files []TemplateFile `json:"files,omitempty"` // Manifest of template files
 
@@ -1233,6 +1246,12 @@ type Template struct {
 	Created time.Time `json:"created"`
 	Updated time.Time `json:"updated"`
 }
+
+// TemplateLayoutBlobs is the content-addressed template storage layout
+// (Template.Layout): every file is stored once at
+// <StoragePath>.blobs/<sha256 hex>, and objects are never overwritten with
+// different content (ptone/scion#4221).
+const TemplateLayoutBlobs = "blobs"
 
 // TemplateFile represents a file within a template.
 type TemplateFile struct {
