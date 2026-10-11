@@ -213,10 +213,6 @@ class ResolveProtocolOsEnvTest(BaseTelemetryTest):
         self.assertEqual(provision._resolve_protocol(env), "grpc")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class CopilotConfigFileAuthTest(BaseTelemetryTest):
     """auth-file selection when ~/.copilot/config.json is also a settings file.
 
@@ -365,3 +361,7 @@ class ConfigFileMayHoldCredentialTest(unittest.TestCase):
     def test_unreadable_fails_open(self) -> None:
         self.assertTrue(provision._config_file_may_hold_credential(
             os.path.join(tempfile.mkdtemp(), "missing.json")))
+
+
+if __name__ == "__main__":
+    unittest.main()

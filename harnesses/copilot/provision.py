@@ -52,7 +52,11 @@ assert scion_harness.INTERFACE_VERSION >= 2, (
 COPILOT_CONFIG_FILE = "~/.copilot/config.json"
 
 # Top-level config.json keys scion writes itself (see _ensure_settings).
-# They are settings, not sign-in state.
+# They are settings, not sign-in state. The match is exact (camelCase
+# trustedFolders only): ANY other top-level key counts as possible sign-in,
+# including settings or first-run keys copilot itself writes once it has run
+# in that home. When that happens the start behaves as it did before this
+# check existed (auth-file is selected).
 _SCION_MANAGED_CONFIG_KEYS = frozenset({"trustedFolders"})
 
 
