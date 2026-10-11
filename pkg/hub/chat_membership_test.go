@@ -108,7 +108,7 @@ func TestChatMemberProjectIDs_MatchesCheckEffectiveMembership(t *testing.T) {
 	f := &membershipFixture{t: t, s: s, ctx: ctx}
 	u := addHumanMember(t, s, f.project("home"), "parity@example.com", "Parity")
 
-	member, admin := f.role(store.ProjectRoleMember), f.role(store.ProjectRoleAdmin)
+	member, admin, owner := f.role(store.ProjectRoleMember), f.role(store.ProjectRoleAdmin), f.role(store.ProjectRoleOwner)
 	past, later := time.Now().Add(-time.Hour), time.Now().Add(time.Hour)
 
 	grp := f.group("parity-group")
@@ -124,8 +124,13 @@ func TestChatMemberProjectIDs_MatchesCheckEffectiveMembership(t *testing.T) {
 	f.bind(member, store.RoleBindingPrincipalGroup, grp, viaGroup, nil, nil)
 	nested := f.project("nested")
 	f.bind(member, store.RoleBindingPrincipalGroup, outer, nested, nil, nil)
-	// A group-bound owner role (which both functions ignore) cannot be
-	// created: the store refuses project-owner for a group principal.
+	// A group-bound owner role, which both functions ignore, cannot exist:
+	// the store rejects project-owner for a group principal. Pin that, as
+	// the parity table has no case for it.
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: owner,
+		PrincipalType: store.RoleBindingPrincipalGroup, PrincipalID: grp,
+		ScopeType: store.RoleScopeProject, ScopeID: f.project("group-owner"), CreatedBy: "test"})
+	require.Error(t, err, "the store must reject a group-bound project-owner binding")
 	expired := f.project("expired")
 	f.bind(member, store.RoleBindingPrincipalUser, u.ID, expired, nil, &past)
 	notYet := f.project("not-yet")
