@@ -182,6 +182,17 @@ func stillIn(p *pkgInfo, names, origins []string) []string {
 	return out
 }
 
+// notPlanned returns the names not in planned, keeping their order.
+func notPlanned(names []string, planned map[string]bool) []string {
+	var out []string
+	for _, n := range names {
+		if !planned[n] {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 // bulkStats summarises a bulk run.
 type bulkStats struct {
 	iterations int // rounds in which something moved
@@ -216,6 +227,10 @@ func runBulkOn(dir, glob, by string, dry bool, maxIter int, w io.Writer) (*bulkS
 			return st, nil
 		}
 		movedBefore := st.moved
+		// Keys planned by earlier families of this round. A real run sees
+		// them gone from their origins (stillIn); a dry run writes nothing,
+		// so it drops them here to print the same plan.
+		planned := map[string]bool{}
 		for i, fam := range fams {
 			if i > 0 {
 				// Every apply rewrites files, so plan each family on a fresh load.
@@ -227,6 +242,7 @@ func runBulkOn(dir, glob, by string, dry bool, maxIter int, w io.Writer) (*bulkS
 				// still declared in this family's origins, so nothing is
 				// pulled back out of another helper file.
 				fam.names = stillIn(p, fam.names, origins[i])
+				fam.names = notPlanned(fam.names, planned)
 				if len(fam.names) == 0 {
 					continue
 				}
@@ -251,6 +267,7 @@ func runBulkOn(dir, glob, by string, dry bool, maxIter int, w io.Writer) (*bulkS
 			st.moved += len(res.moves)
 			for _, m := range res.moves {
 				st.origins[m.d.file.name] = true
+				planned[m.d.key] = true
 			}
 			if dry {
 				continue

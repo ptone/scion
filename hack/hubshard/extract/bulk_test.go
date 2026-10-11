@@ -225,7 +225,12 @@ func TestBulkDest(t *testing.T) {
 	}
 }
 
-func TestBulkSharedClosureMovesOnce(t *testing.T) {
+func TestBulkSharedClosureMovesOnce(t *testing.T) { testBulkSharedClosure(t, false) }
+
+// The dry run (-n) must print the same plan as the real run: each key once.
+func TestBulkSharedClosureMovesOnceDryRun(t *testing.T) { testBulkSharedClosure(t, true) }
+
+func testBulkSharedClosure(t *testing.T, dry bool) {
 	// hA (area a) uses dA, declared in area b's origin and used by nothing
 	// else, so the a family takes dA as its closure. dA is also cross-file
 	// used (by hA), so the b family lists it too; it must not pull dA back
@@ -238,7 +243,7 @@ func TestBulkSharedClosureMovesOnce(t *testing.T) {
 		"z_test.go":         hdr + "package p\n\nvar _ = hA() + hB()\n",
 	})
 	before := copyDir(t, dir)
-	_, out := bulk(t, dir, "", false)
+	_, out := bulk(t, dir, "", dry)
 	counts := map[string]int{}
 	for _, l := range strings.Split(out, "\n") {
 		if f := strings.Fields(l); len(f) > 1 && f[0] == "move" {
@@ -252,6 +257,12 @@ func TestBulkSharedClosureMovesOnce(t *testing.T) {
 	}
 	if counts["e"] != 0 || !strings.Contains(read(t, dir, "h_helpers_test.go"), "func e()") {
 		t.Errorf("e must stay in h_helpers_test.go\n%s", out)
+	}
+	if dry {
+		if !strings.Contains(out, "move dA") || !strings.Contains(out, "-> a_helpers_test.go (dependency of hA)") {
+			t.Errorf("dry run should plan dA as hA's closure\n%s", out)
+		}
+		return
 	}
 	if !strings.Contains(read(t, dir, "a_helpers_test.go"), "func dA()") {
 		t.Errorf("dA should be in a_helpers_test.go (closure of hA)\n%s", out)
