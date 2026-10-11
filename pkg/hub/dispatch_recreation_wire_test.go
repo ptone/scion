@@ -288,8 +288,9 @@ func TestDispatchAgentRestart_WireSecretResolutionErrorMatchesStart(t *testing.T
 // TestDispatchAgentStart_WireNoSecretsStillStarts: absence is not an error.
 // With no secret backend, or a backend with no secrets, start and restart
 // still reach the broker; the empty-marker env passthrough still takes a
-// hub-stored value; and with no gcloud-adc secret configured the hub raises
-// nothing (auto_inject_gcloud_adc itself is applied by the broker).
+// hub-stored value. The hub has no gcloud-adc logic of its own:
+// auto_inject_gcloud_adc is applied by the broker, so an agent with no
+// gcloud-adc secret reaches the broker like any agent with no secrets.
 func TestDispatchAgentStart_WireNoSecretsStillStarts(t *testing.T) {
 	backends := []struct {
 		name string

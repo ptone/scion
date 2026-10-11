@@ -25,6 +25,10 @@ import (
 // error). The dispatch stops before anything is sent to the broker and
 // before any token is minted, so the start did not happen.
 //
+// On a cross-node dispatch only a marker travels on the failed row
+// (dispatchFailureEnvelope.SecretResolution); the requesting node rebuilds
+// the error with a nil Err.
+//
 // Error() is a fixed message that names no secret, value or backend
 // detail: it is what reaches the API caller and the agent's status
 // message. The backend error is kept in Err for errors.Is/As and for the
@@ -40,6 +44,16 @@ func (e *secretResolutionError) Error() string {
 }
 
 func (e *secretResolutionError) Unwrap() error { return e.Err }
+
+// secretResolutionVerb is the Verb for a dispatch op: "restarted" for a
+// restart, "started" for anything else (a start, and a restart's start leg,
+// which dispatches as a start).
+func secretResolutionVerb(op string) string {
+	if op == "restart" {
+		return "restarted"
+	}
+	return "started"
+}
 
 // isSecretResolutionError reports whether err is or wraps a
 // *secretResolutionError.

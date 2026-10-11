@@ -63,6 +63,8 @@ type ownerErrDispatcher struct {
 	createResult *CreateDispatchResult
 	// finalizeErr, when set, is what finalize_env returns instead of err.
 	finalizeErr error
+	// startErr, when set, is what start returns instead of err.
+	startErr error
 }
 
 func (d *ownerErrDispatcher) DispatchAgentStart(ctx context.Context, a *store.Agent, task string, resume bool) error {
@@ -70,6 +72,9 @@ func (d *ownerErrDispatcher) DispatchAgentStart(ctx context.Context, a *store.Ag
 		d.beforeStart()
 	}
 	_ = d.lifecycleTestDispatcher.DispatchAgentStart(ctx, a, task, resume)
+	if d.startErr != nil {
+		return d.startErr
+	}
 	return d.err
 }
 func (d *ownerErrDispatcher) DispatchAgentStop(ctx context.Context, a *store.Agent) error {

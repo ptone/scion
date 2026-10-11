@@ -27,6 +27,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -107,7 +109,7 @@ func TestSecretResolutionError_ProvisionedStartReturnsToRest(t *testing.T) {
 // with the fixed message, after the stop leg ran; the claim is released.
 func TestSecretResolutionError_RestartIs503(t *testing.T) {
 	f, d, _ := newClaimFixture(t)
-	a := f.addAgent("restarting", "running", "working")
+	a := f.addAgent("restarting", "running", "working", func(a *store.Agent) { a.RunID = "run-before-restart" })
 	d.start = func(context.Context, *store.Agent) error { return fakeSecretResolutionErr("started") }
 
 	status, body := lifecycle(t, f, a.ID, "restart")
@@ -119,6 +121,105 @@ func TestSecretResolutionError_RestartIs503(t *testing.T) {
 	assert.Equal(t, int32(1), d.stops.Load(), "the stop leg ran")
 
 	got := getAgent(t, f.s, a.ID)
+	assert.Equal(t, "stopped", got.Phase, "the stop leg ran and the start leg did not: the agent ends stopped")
 	assert.Empty(t, got.StartClaimID)
 	assertNoSecretResolutionDetail(t, got.Message, "the agent message")
+}
+
+// The secret-resolution marker round-trips on a failed dispatch row: the
+// requesting node rebuilds the typed error with the verb of the row's op,
+// and neither the row nor the rebuilt error carries the backend error or
+// the secret name. A row without the marker rebuilds no such error.
+func TestDispatchFailureResult_SecretResolution(t *testing.T) {
+	for _, tc := range []struct{ op, verb string }{{"start", "started"}, {"restart", "restarted"}} {
+		t.Run(tc.op, func(t *testing.T) {
+			execErr := fmt.Errorf("dispatch %s: %w", tc.op, fakeSecretResolutionErr(tc.verb))
+			result := dispatchFailureResult(execErr)
+			env := decodeDispatchFailure(result)
+			require.NotNil(t, env)
+			assert.True(t, env.SecretResolution)
+			assert.Nil(t, env.BrokerError)
+			assertNoSecretResolutionDetail(t, result, "the row result")
+			assertNoSecretResolutionDetail(t, execErr.Error(), "the row error text")
+
+			rebuilt := dispatchFailureError(&store.BrokerDispatch{Op: tc.op, Error: execErr.Error(), Result: result})
+			var got *secretResolutionError
+			require.ErrorAs(t, rebuilt, &got)
+			assert.Equal(t, tc.verb, got.Verb)
+			assert.Equal(t, "dispatch "+tc.op+" failed: agent secrets could not be resolved; the agent was not "+tc.verb, rebuilt.Error())
+			assertNoSecretResolutionDetail(t, rebuilt.Error(), "the rebuilt error")
+			assert.True(t, isConfirmedStartNotActedOnError(rebuilt))
+			assert.Equal(t, startReleased, startOutcomeOf(rebuilt))
+			assert.True(t, reincarnationStartLeftNoContainer(rebuilt))
+		})
+	}
+
+	other := dispatchFailureResult(fmt.Errorf("x: %w", store.ErrDeleteInProgress))
+	assert.NotContains(t, other, "secretResolution")
+	assert.False(t, isSecretResolutionError(dispatchFailureError(&store.BrokerDispatch{Op: "start", Result: other})))
+	assert.Empty(t, dispatchFailureResult(errors.New("plain")), "an unclassified error still records no envelope")
+}
+
+// A queued start and a queued restart whose owning node fails secret
+// resolution reach the requesting node as the typed error, ending its wait
+// on the row's failure.
+func TestCrossNodeLifecycle_SecretResolutionError(t *testing.T) {
+	cases := []struct {
+		name, verb string
+		call       func(ctx context.Context, f *crossNodeFixture) error
+	}{
+		{"start", "started", func(ctx context.Context, f *crossNodeFixture) error {
+			return f.requester.DispatchAgentStart(ctx, f.agent, "", false)
+		}},
+		{"restart", "restarted", func(ctx context.Context, f *crossNodeFixture) error {
+			return f.requester.DispatchAgentRestart(ctx, f.agent)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newCrossNodeFixture(t, fakeSecretResolutionErr(tc.verb), true)
+			err := tc.call(crossNodeCtx(t), f)
+			var got *secretResolutionError
+			require.ErrorAs(t, err, &got)
+			assert.Equal(t, tc.verb, got.Verb)
+			assertNoSecretResolutionDetail(t, err.Error(), "the requester's error")
+			assert.Equal(t, startReleased, startOutcomeOf(err))
+		})
+	}
+}
+
+// Through the lifecycle API: a start whose owning node fails secret
+// resolution answers 503 unavailable with the fixed message and releases
+// the claim; a restart (stop, then a queued start leg) does the same and
+// leaves the agent stopped.
+func TestCrossNodeHandler_SecretResolutionErrorIs503(t *testing.T) {
+	t.Run("start", func(t *testing.T) {
+		srv, agent := crossNodeHandlerServer(t, fakeSecretResolutionErr("started"), state.PhaseStopped)
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/"+string(api.AgentActionStart), nil)
+		require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+		code, _ := errorBody(t, rec)
+		assert.Equal(t, ErrCodeUnavailable, code)
+		assert.Contains(t, rec.Body.String(), "agent secrets could not be resolved; the agent was not started")
+		assertNoSecretResolutionDetail(t, rec.Body.String(), "the API body")
+		got := getAgent(t, srv.store, agent.ID)
+		assert.Empty(t, got.StartClaimID, "the start did not happen: the claim is released")
+		assertNoSecretResolutionDetail(t, got.Message, "the agent message")
+	})
+	t.Run("restart", func(t *testing.T) {
+		srv, agent, ownerDisp := crossNodeHandlerServerWithOwner(t, nil, state.PhaseRunning)
+		ownerDisp.startErr = fakeSecretResolutionErr("started")
+		cur := getAgent(t, srv.store, agent.ID)
+		cur.RunID = "run-before-restart"
+		require.NoError(t, srv.store.UpdateAgent(context.Background(), cur))
+
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/"+string(api.AgentActionRestart), nil)
+		require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+		code, _ := errorBody(t, rec)
+		assert.Equal(t, ErrCodeUnavailable, code)
+		assertNoSecretResolutionDetail(t, rec.Body.String(), "the API body")
+		got := getAgent(t, srv.store, agent.ID)
+		assert.Empty(t, got.StartClaimID)
+		assert.Equal(t, "stopped", got.Phase)
+		assertNoSecretResolutionDetail(t, got.Message, "the agent message")
+	})
 }
