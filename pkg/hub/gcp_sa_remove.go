@@ -589,6 +589,10 @@ func (s *Server) clearGCPServiceAccountDefaults(ctx context.Context, saID string
 			}
 			return cleared, fmt.Errorf("reading project %s to clear its defaults: %w", projectID, err)
 		}
+		if project == nil {
+			// Defensive: a store returning (nil, nil) has nothing to clear.
+			continue
+		}
 		current := projectDefaultsReferencing(project, saID)
 		if len(current) == 0 {
 			continue
@@ -616,7 +620,7 @@ func (s *Server) clearGCPServiceAccountDefaults(ctx context.Context, saID string
 // place. A project default in mode "assign" becomes "block" (least
 // privilege; agent creation already treats assign-without-account as block).
 func clearProjectDefaultsReferencing(project *store.Project, saID string) {
-	if project.Annotations == nil {
+	if project == nil || project.Annotations == nil {
 		return
 	}
 	if project.Annotations[projectSettingDefaultGCPIdentitySAID] == saID {

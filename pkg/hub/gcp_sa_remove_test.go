@@ -286,6 +286,11 @@ func TestGCPSARemove_InvalidForceRejected(t *testing.T) {
 	assert.True(t, saExists(t, s, sa.ID))
 }
 
+func TestClearProjectDefaultsReferencing_NilProjectIsANoop(t *testing.T) {
+	assert.NotPanics(t, func() { clearProjectDefaultsReferencing(nil, "sa-1") })
+	assert.NotPanics(t, func() { clearProjectDefaultsReferencing(&store.Project{ID: "p1"}, "sa-1") })
+}
+
 func TestClearProjectDefaultsReferencing_NonAssignModeKept(t *testing.T) {
 	p := &store.Project{ID: "p1", Annotations: map[string]string{
 		projectSettingDefaultGCPIdentityMode: store.GCPMetadataModePassthrough,
