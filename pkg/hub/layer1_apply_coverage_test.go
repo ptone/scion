@@ -215,9 +215,9 @@ func layer1LiveProbes(t *testing.T) map[string]layer1LiveProbe {
 			observe: func(s *Server, _ *OperationalSettings) any { r, _ := s.softDeleteSettings(); return r }},
 		"server.hub.soft_delete_retain_files": {section: "lifecycle", doc: `{"soft_delete_retain_files":true}`,
 			observe: func(s *Server, _ *OperationalSettings) any { _, f := s.softDeleteSettings(); return f }},
-		"server.hub.start_claim_lease_ttl":         {section: "lifecycle", doc: `{"start_claim_lease_ttl":"7m"}`, observe: observeStartClaim},
+		"server.hub.start_claim_lease_ttl":         {section: "lifecycle", doc: `{"start_claim_lease_ttl":"2m"}`, observe: observeStartClaim},
 		"server.hub.start_max_duration":            {section: "lifecycle", doc: `{"start_max_duration":"41m"}`, observe: observeStartClaim},
-		"server.hub.start_unconfirmed_hold":        {section: "lifecycle", doc: `{"start_unconfirmed_hold":"3m"}`, observe: observeStartClaim},
+		"server.hub.start_unconfirmed_hold":        {section: "lifecycle", doc: `{"start_unconfirmed_hold":"20m"}`, observe: observeStartClaim},
 		"server.hub.start_create_unconfirmed_hold": {section: "lifecycle", doc: `{"start_create_unconfirmed_hold":"3m"}`, observe: observeStartClaim},
 
 		// auto_expose_ports, quotas, agent_secrets, project_defaults
@@ -292,7 +292,7 @@ func layer1LiveProbes(t *testing.T) map[string]layer1LiveProbe {
 		// Sections with no koanf paths, read through getters.
 		"maintenance": {section: "maintenance", doc: `{"admin_mode":true,"maintenance_message":"probe"}`,
 			observe: func(s *Server, _ *OperationalSettings) any { on, msg := s.maintenance.State(); return []any{on, msg} }},
-		"messaging": {section: "messaging", doc: `{"conversation_envelope_switch":true}`,
+		"messaging": {section: "messaging", doc: `{"conversation_envelope_switch":false}`,
 			observe: func(_ *Server, o *OperationalSettings) any { return o.ConversationEnvelopeSwitch() }},
 		"experiments": {section: "experiments", doc: `{"overrides":{"web.gcs_links":true}}`,
 			observe: func(_ *Server, o *OperationalSettings) any { return o.ExperimentsSnapshot().Overrides }},
@@ -389,6 +389,10 @@ func TestLayer1LiveProbes_SaveChangesRunningValue(t *testing.T) {
 			ops := NewOperationalSettings(st, emptyKoanf(), emptyKoanf())
 			srv := &Server{maintenance: NewMaintenanceState(false, "")}
 			srv.config.OIDCConfig.IssuerURL = "https://hub.example.com"
+			// The federation probes use a local http issuer, which only a
+			// dev-mode hub accepts.
+			srv.config.Mode = "dev"
+			srv.config.Workstation = true
 			srv.federationClient = &http.Client{Timeout: 5 * time.Second}
 			srv.SetOperationalSettings(ops)
 
