@@ -86,7 +86,7 @@ func TestWireHubCoreMetrics_CloudWriterSeries(t *testing.T) {
 					attrs := map[string]string{}
 					var keys []string
 					for _, kv := range dp.Attributes.ToSlice() {
-						attrs[string(kv.Key)] = kv.Value.Emit()
+						attrs[string(kv.Key)] = kv.Value.String()
 						keys = append(keys, string(kv.Key))
 					}
 					sort.Strings(keys)
@@ -102,7 +102,7 @@ func TestWireHubCoreMetrics_CloudWriterSeries(t *testing.T) {
 				for _, dp := range d.DataPoints {
 					attrs := map[string]string{}
 					for _, kv := range dp.Attributes.ToSlice() {
-						attrs[string(kv.Key)] = kv.Value.Emit()
+						attrs[string(kv.Key)] = kv.Value.String()
 					}
 					require.Equal(t, map[string]string{"writer": "cloud"}, attrs)
 					circuit = append(circuit, dp.Value)
