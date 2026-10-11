@@ -51,30 +51,52 @@ run `move` again, and run `verify`; do not hand-rebase moved code.
 
 ## Bulk extraction
 
-`bulk` moves **every** declaration that another test file uses, grouped by
-origin: the cross-file declarations of `x_test.go` go to `x_helpers_test.go`,
-which gets `x_test.go`'s own build constraint. No family file is needed, so to
-regenerate on a newer `main`, just run it again and `verify`.
+`bulk` moves **every** declaration that another test file uses into helper
+files. No family file is needed: to regenerate on a newer `main`, run it again
+and `verify`.
 
 ```sh
-/tmp/extract bulk -dir pkg/hub                         # all origins
+/tmp/extract bulk -dir pkg/hub                         # all origins, -by area
+/tmp/extract bulk -dir pkg/hub -by origin              # one helper file per origin
 /tmp/extract bulk -dir pkg/hub -origins '[a-g]*'       # origins matching a glob
 #   -n  dry run: print the first round's plan, write nothing
 ```
 
+Where the declarations go (each helper file has exactly one build constraint,
+its origins' own):
+
+- `-by area` (the default): the area is the origin's file name up to its
+  first `_` (`handlers_agent_test.go` -> `handlers`). Declarations go to
+  `<area>_helpers_test.go` from unconstrained origins,
+  `<area>_sqlite_helpers_test.go` from `!no_sqlite` origins, and
+  `<area>_<tag>_helpers_test.go` for any other constraint (`<tag>` is the
+  constraint's letters and digits, `!` spelled `not`).
+- `-by origin`: `x_test.go` -> `x_helpers_test.go`.
+
+How it works:
+
 - A declaration counts as cross-file used when a declaration in a different
   `_test.go` file refers to it (the same syntactic references `move` uses).
-  Each round makes one `move` per origin, with the cross-file names as the
-  requested names, so the same closure, method and constraint rules apply.
+- Each round makes **one `move` per dest file**: the requested names are the
+  cross-file declarations of all of that dest's origins, so the usual closure,
+  method and constraint rules apply. Each family is planned on a fresh load,
+  and asks only for names still declared in its origins (an earlier family of
+  the round may have taken one as its closure). So every declaration moves
+  once.
+- In bulk, the closure is local: it takes a dependency only from a non-helper
+  test file with the dest's own constraint. It never empties another helper
+  file into this one, and a dependency with a different constraint stays
+  where it is (same package, still visible) instead of failing the family.
 - A grouped `var (...)`/`const (...)`/`type (...)` block moves whole.
 - It repeats until no origin has a cross-file declaration left. A moved helper
   that uses a declaration its origin keeps makes that declaration cross-file
-  used in the next round.
+  used in the next round. Only rounds that move something are counted.
 - It never takes declarations from `*_helpers_test.go` files. Some declarations
   are reported (`note ...`) and left in place: test entry points
   (`Test*`/`Benchmark*`/...), and names declared more than once (per-platform
-  files). If `move` refuses an origin's family, the origin is reported
-  (`skip ...`) and left alone for the rest of the run.
+  files).
+- If `move` refuses a dest's family, **every origin of that dest** is reported
+  (`skip <dest> (from <origins>)`) and left alone for the rest of the run.
 
 ## What `move` does
 

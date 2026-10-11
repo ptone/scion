@@ -51,6 +51,12 @@ type family struct {
 	// build is the //go:build expression for a new dest file ("" = none).
 	// If set, an existing dest must already carry exactly this constraint.
 	build string
+	// localClosure restricts the closure (used by bulk): a dependency is
+	// taken only from a non-helper test file with the dest's constraint, so
+	// another helper file is never emptied into this one, and a dependency
+	// with a different constraint stays where it is instead of failing the
+	// whole family. Requested names are not affected.
+	localClosure bool
 }
 
 // move is one declaration selected for moving.
@@ -101,6 +107,12 @@ func plan(p *pkgInfo, fam family) (*result, error) {
 		add(d, "requested")
 	}
 
+	// The constraint the dest will have, for localClosure.
+	closureConstraint := fam.build
+	if destFile != nil {
+		closureConstraint = destFile.constraint
+	}
+
 	// Closure: methods of moved types, and test-file declarations used only
 	// by moved declarations.
 	users := p.users()
@@ -122,6 +134,9 @@ func plan(p *pkgInfo, fam family) (*result, error) {
 			for _, r := range sortedKeys(p.refs(d)) {
 				ds := p.byKey[r]
 				if len(ds) != 1 || selected[ds[0]] || !ds[0].file.isTest || ds[0].file == destFile {
+					continue
+				}
+				if fam.localClosure && (strings.HasSuffix(ds[0].file.name, "_helpers_test.go") || ds[0].file.constraint != closureConstraint) {
 					continue
 				}
 				only := true

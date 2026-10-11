@@ -131,7 +131,7 @@ func bulkFamilies(p *pkgInfo, glob, by string, skip map[string]bool) (fams []fam
 		if !ok {
 			i = len(fams)
 			index[dest] = i
-			fams = append(fams, family{dest: dest, build: f.constraint})
+			fams = append(fams, family{dest: dest, build: f.constraint, localClosure: true})
 			origins = append(origins, nil)
 		}
 		fams[i].names = append(fams[i].names, names...)
@@ -166,9 +166,25 @@ func groupMates(p *pkgInfo, d *declInfo) []*declInfo {
 	return out
 }
 
+// stillIn returns the names that are still declared (once) in one of the
+// files origins, keeping their order.
+func stillIn(p *pkgInfo, names, origins []string) []string {
+	in := map[string]bool{}
+	for _, o := range origins {
+		in[o] = true
+	}
+	var out []string
+	for _, n := range names {
+		if ds := p.byKey[n]; len(ds) == 1 && in[ds[0].file.name] {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 // bulkStats summarises a bulk run.
 type bulkStats struct {
-	iterations int
+	iterations int // rounds in which something moved
 	moved      int // declarations moved, closure and methods included
 	origins    map[string]bool
 	skipped    map[string]string // origin -> reason it was dropped
@@ -179,13 +195,12 @@ type bulkStats struct {
 // left: a moved helper that uses a declaration its origin keeps makes that
 // declaration cross-file used in the next round. If a helper file's family
 // cannot be moved, its origins are dropped (reported) for the rest of the
-// run. With dry set, only the first
-// round is planned and nothing is written.
+// run. With dry set, only the first round is planned and nothing is written.
 func runBulkOn(dir, glob, by string, dry bool, maxIter int, w io.Writer) (*bulkStats, error) {
 	st := &bulkStats{origins: map[string]bool{}, skipped: map[string]string{}}
 	skip := map[string]bool{}
 	reported := map[string]bool{}
-	for st.iterations < maxIter {
+	for round := 0; round < maxIter; round++ {
 		p, err := loadPackage(dir)
 		if err != nil {
 			return st, err
@@ -200,12 +215,20 @@ func runBulkOn(dir, glob, by string, dry bool, maxIter int, w io.Writer) (*bulkS
 		if len(fams) == 0 {
 			return st, nil
 		}
-		st.iterations++
+		movedBefore := st.moved
 		for i, fam := range fams {
 			if i > 0 {
 				// Every apply rewrites files, so plan each family on a fresh load.
 				if p, err = loadPackage(dir); err != nil {
 					return st, err
+				}
+				// An earlier family of this round may already have taken some
+				// of these names (as its own closure); request only the ones
+				// still declared in this family's origins, so nothing is
+				// pulled back out of another helper file.
+				fam.names = stillIn(p, fam.names, origins[i])
+				if len(fam.names) == 0 {
+					continue
 				}
 			}
 			res, err := plan(p, fam)
@@ -236,8 +259,14 @@ func runBulkOn(dir, glob, by string, dry bool, maxIter int, w io.Writer) (*bulkS
 				return st, err
 			}
 		}
+		if st.moved > movedBefore {
+			st.iterations++
+		}
 		if dry {
 			return st, nil
+		}
+		if st.moved == movedBefore {
+			return st, nil // nothing movable is left (the rest was skipped)
 		}
 	}
 	return st, fmt.Errorf("no fixpoint after %d rounds", maxIter)

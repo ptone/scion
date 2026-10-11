@@ -224,3 +224,71 @@ func TestBulkDest(t *testing.T) {
 		}
 	}
 }
+
+func TestBulkSharedClosureMovesOnce(t *testing.T) {
+	// hA (area a) uses dA, declared in area b's origin and used by nothing
+	// else, so the a family takes dA as its closure. dA is also cross-file
+	// used (by hA), so the b family lists it too; it must not pull dA back
+	// out of a_helpers_test.go. e lives in an existing helper file and is
+	// used only by hB: the closure must leave it there.
+	dir := writePkg(t, map[string]string{
+		"a_x_test.go":       hdr + "package p\n\nfunc hA() int { return dA() }\n",
+		"b_y_test.go":       hdr + "package p\n\nfunc dA() int { return 1 }\n\nfunc hB() int { return e() }\n",
+		"h_helpers_test.go": hdr + "package p\n\nfunc e() int { return 2 }\n",
+		"z_test.go":         hdr + "package p\n\nvar _ = hA() + hB()\n",
+	})
+	before := copyDir(t, dir)
+	_, out := bulk(t, dir, "", false)
+	counts := map[string]int{}
+	for _, l := range strings.Split(out, "\n") {
+		if f := strings.Fields(l); len(f) > 1 && f[0] == "move" {
+			counts[f[1]]++
+		}
+	}
+	for _, k := range []string{"hA", "dA", "hB"} {
+		if counts[k] != 1 {
+			t.Errorf("%s moved %d times, want 1\n%s", k, counts[k], out)
+		}
+	}
+	if counts["e"] != 0 || !strings.Contains(read(t, dir, "h_helpers_test.go"), "func e()") {
+		t.Errorf("e must stay in h_helpers_test.go\n%s", out)
+	}
+	if !strings.Contains(read(t, dir, "a_helpers_test.go"), "func dA()") {
+		t.Errorf("dA should be in a_helpers_test.go (closure of hA)\n%s", out)
+	}
+	mustVerify(t, before, dir)
+}
+
+func TestBulkClosureKeepsOtherConstraint(t *testing.T) {
+	// h (!no_sqlite) uses d, declared in an unconstrained file and used only
+	// by h. Moving d into the !no_sqlite helper file would narrow it, so the
+	// closure leaves it in place instead of failing the whole family.
+	dir := writePkg(t, map[string]string{
+		"a_test.go": hdr + "//go:build !no_sqlite\n\npackage p\n\nfunc h() int { return d() }\n",
+		"c_test.go": hdr + "package p\n\nfunc d() int { return 1 }\n\nvar _ = 0\n",
+		"z_test.go": hdr + "//go:build !no_sqlite\n\npackage p\n\nvar _ = h()\n",
+	})
+	before := copyDir(t, dir)
+	st, out := bulk(t, dir, "", false)
+	if len(st.skipped) != 0 {
+		t.Fatalf("nothing should be skipped:\n%s", out)
+	}
+	if !strings.Contains(read(t, dir, "a_sqlite_helpers_test.go"), "func h()") {
+		t.Errorf("h should move\n%s", out)
+	}
+	mustVerify(t, before, dir)
+}
+
+func TestBulkCountsOnlyRoundsThatMove(t *testing.T) {
+	// The only family is refused (free-floating comment in its dest), so no
+	// round moves anything.
+	dir := writePkg(t, map[string]string{
+		"a_test.go":         hdr + "package p\n\nfunc ha() int { return 1 }\n",
+		"a_helpers_test.go": hdr + "package p\n\n// banner\n\nfunc old() {}\n",
+		"b_test.go":         hdr + "package p\n\nvar _ = ha()\n",
+	})
+	st, out := bulk(t, dir, "", false)
+	if st.iterations != 0 || st.moved != 0 {
+		t.Errorf("rounds=%d moved=%d, want 0 and 0\n%s", st.iterations, st.moved, out)
+	}
+}
