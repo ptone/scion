@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -387,9 +388,11 @@ func removeLeftoverAgentHomeRepairHelpers(ctx context.Context, command, homeKey 
 	}
 	var ids []string
 	for _, id := range strings.Fields(out) {
-		if containerIDRE.MatchString(id) {
-			ids = append(ids, id)
+		if !containerIDRE.MatchString(id) {
+			runtimeLog.Warn("Ignoring an unexpected leftover agent home ownership repair helper id", "id", id)
+			continue
 		}
+		ids = append(ids, id)
 	}
 	if len(ids) == 0 {
 		return
@@ -406,7 +409,9 @@ const agentHomeRepairProbeTimeout = 30 * time.Second
 // dockerUnsupportedRepairMode returns a non-empty mode name when the
 // Docker daemon runs rootless or with user-namespace remapping. In both,
 // container uids map to other host uids, so a chown inside the helper
-// would not give the agent runtime's host uid ownership.
+// would not give the agent runtime's host uid ownership. The probe output
+// is parsed strictly, fail-closed: anything but a non-empty JSON array of
+// "name=..." security options is an error.
 func dockerUnsupportedRepairMode(ctx context.Context, command string) (string, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, agentHomeRepairProbeTimeout)
 	defer cancel()
@@ -414,13 +419,30 @@ func dockerUnsupportedRepairMode(ctx context.Context, command string) (string, e
 	if err != nil {
 		return "", fmt.Errorf("detect docker security options: %w", err)
 	}
-	switch {
-	case strings.Contains(out, "name=rootless"):
-		return "rootless docker", nil
-	case strings.Contains(out, "name=userns"):
-		return "docker userns-remap", nil
+	var opts []string
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &opts); err != nil {
+		return "", fmt.Errorf("detect docker security options: unparseable answer %q: %w", out, err)
 	}
-	return "", nil
+	if len(opts) == 0 {
+		return "", fmt.Errorf("detect docker security options: no security options reported")
+	}
+	mode := ""
+	for _, opt := range opts {
+		name, ok := strings.CutPrefix(opt, "name=")
+		if !ok || name == "" {
+			return "", fmt.Errorf("detect docker security options: unexpected entry %q", opt)
+		}
+		name, _, _ = strings.Cut(name, ",")
+		switch name {
+		case "rootless":
+			mode = "rootless docker"
+		case "userns":
+			if mode == "" {
+				mode = "docker userns-remap"
+			}
+		}
+	}
+	return mode, nil
 }
 
 // RepairAgentHomeOwnership implements AgentHomeOwnershipRepairer. Rootless

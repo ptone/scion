@@ -3,9 +3,11 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -43,6 +45,7 @@ type fakeRepairOpts struct {
 	runExit   int
 	runSleep  int    // seconds; when > 0 the run sleeps instead of exiting
 	psOut     string // `ps` output (leftover helper ids)
+	psFails   bool
 	rmFails   bool
 }
 
@@ -73,15 +76,19 @@ func newFakeRepairRuntime(t *testing.T, o fakeRepairOpts) *fakeRepairRuntime {
 	if o.rmFails {
 		rmExit = 1
 	}
+	psExit := 0
+	if o.psFails {
+		psExit = 1
+	}
 	script := fmt.Sprintf(`#!/bin/sh
 case "$1" in
 info) %s ;;
-ps) printf '%%s\n' "$@" > %q; printf '%%b\n' %q; exit 0 ;;
+ps) printf '%%s\n' "$@" > %q; printf '%%b\n' %q; exit %d ;;
 rm) echo "$*" >> %q; exit %d ;;
 run) printf '%%s\n' "$@" > %q; echo helper-output; %s ;;
 esac
 exit 99
-`, info, f.psArgs, o.psOut, f.rmCalls, rmExit, f.runArgs, runTail)
+`, info, f.psArgs, o.psOut, psExit, f.rmCalls, rmExit, f.runArgs, runTail)
 	if err := os.WriteFile(f.bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -531,6 +538,15 @@ func TestDockerRuntime_RepairAgentHomeOwnershipUnsupportedModes(t *testing.T) {
 		{`["name=seccomp,profile=builtin","name=rootless","name=cgroupns"]`, false, "(rootless docker)"},
 		{`["name=apparmor","name=seccomp,profile=builtin","name=userns"]`, false, "(docker userns-remap)"},
 		{"", true, "docker mode undetectable"},
+		// The probe answer is parsed strictly: anything but a non-empty
+		// JSON array of name=... entries refuses.
+		{"", false, "docker mode undetectable"},
+		{"not json", false, "docker mode undetectable"},
+		{`["name=seccomp,profile=builtin"`, false, "docker mode undetectable"},
+		{`[]`, false, "docker mode undetectable"},
+		{`null`, false, "docker mode undetectable"},
+		{`["seccomp"]`, false, "docker mode undetectable"},
+		{`{"name":"rootless"}`, false, "docker mode undetectable"},
 	} {
 		f := newFakeRepairRuntime(t, fakeRepairOpts{info: tc.info, infoFails: tc.infoFails})
 		err := (&DockerRuntime{Command: f.bin}).RepairAgentHomeOwnership(context.Background(), AgentHomeOwnershipRepair{HomeDir: newRepairHome(t), Image: "img", UID: 1, GID: 1})
@@ -710,5 +726,50 @@ func TestAdvertisedHostOwnerIDs_MatchesRunArgs(t *testing.T) {
 		}
 		assertEnvInArgs(t, args, fmt.Sprintf("SCION_HOST_UID=%d", uid), "advertised uid")
 		assertEnvInArgs(t, args, fmt.Sprintf("SCION_HOST_GID=%d", gid), "advertised gid")
+	}
+}
+
+// captureRuntimeLog sends runtimeLog to a buffer for the rest of the test.
+func captureRuntimeLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var logs bytes.Buffer
+	prev := runtimeLog
+	runtimeLog = slog.New(slog.NewTextHandler(&logs, nil))
+	t.Cleanup(func() { runtimeLog = prev })
+	return &logs
+}
+
+// The leftover sweep is cleanup only: when listing fails, an id is not a
+// container id, or removing leftovers fails, it logs and the repair still
+// runs.
+func TestDockerRuntime_RepairAgentHomeOwnershipSweepFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		mut     func(*fakeRepairOpts)
+		wantRm  []string
+		wantLog string
+	}{
+		{"listing fails", func(o *fakeRepairOpts) { o.psFails = true }, nil, "Could not list leftover"},
+		{"invalid id", func(o *fakeRepairOpts) { o.psOut = "not-an-id" }, nil, "Ignoring an unexpected leftover"},
+		{"removal fails", func(o *fakeRepairOpts) { o.psOut = "0123456789ab"; o.rmFails = true }, []string{"rm -f 0123456789ab"}, "Could not remove leftover"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := captureRuntimeLog(t)
+			o := rootfulDocker()
+			tc.mut(&o)
+			f := newFakeRepairRuntime(t, o)
+			if err := (&DockerRuntime{Command: f.bin}).RepairAgentHomeOwnership(context.Background(), AgentHomeOwnershipRepair{HomeDir: newRepairHome(t), Image: "img", UID: 1, GID: 1}); err != nil {
+				t.Fatalf("repair failed: %v", err)
+			}
+			if !f.ran() {
+				t.Error("the helper did not run")
+			}
+			if got := f.rmLines(t); !slices.Equal(got, tc.wantRm) {
+				t.Errorf("rm calls = %q, want %q", got, tc.wantRm)
+			}
+			if !strings.Contains(logs.String(), tc.wantLog) {
+				t.Errorf("log %q lacks %q", logs.String(), tc.wantLog)
+			}
+		})
 	}
 }
