@@ -104,11 +104,17 @@ test("rows show the agent row's project slug before the space rail loads, with n
   // Hold the space rail's list for the whole test, so the slugs can only
   // come from the agent rows.
   await page.route('**/api/v1/chat/spaces', () => new Promise<void>(() => {}));
+  await page.goto('/e2e/chat-palette/fixture.html', { waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => !!document.querySelector('scion-page-chat'));
+  // A project list or single-project read from palette open on.
   const projectRequests: string[] = [];
   page.on('request', (request) => {
-    if (new URL(request.url()).pathname === '/api/v1/projects') projectRequests.push(request.url());
+    if (/^\/api\/v1\/projects(\/[^/]+)?$/.test(new URL(request.url()).pathname))
+      projectRequests.push(request.url());
   });
-  await openPaletteWithQuery(page, 'coordinator');
+  await page.keyboard.press('Control+k');
+  await expect(paletteInput(page)).toBeFocused();
+  await paletteInput(page).fill('coordinator');
 
   await expect(agentSecondaryLines(page)).toHaveText([
     SPACE_ALPHA.projectSlug,

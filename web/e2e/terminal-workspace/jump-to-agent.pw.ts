@@ -275,13 +275,15 @@ test('same-named agents in different projects show their project slugs, with no 
       projectSlug: 'beta-proj',
     },
   });
-  const projectRequests: string[] = [];
-  page.on('request', (request) => {
-    if (new URL(request.url()).pathname === '/api/v1/projects') projectRequests.push(request.url());
-  });
   await page.goto(`/terminals/${agentA}`);
   await expect(page.locator('.xterm-helper-textarea').first()).toBeAttached();
 
+  // A project list or single-project read from palette open on.
+  const projectRequests: string[] = [];
+  page.on('request', (request) => {
+    if (/^\/api\/v1\/projects(\/[^/]+)?$/.test(new URL(request.url()).pathname))
+      projectRequests.push(request.url());
+  });
   await paletteButton(page).click();
   const secondary = page.locator('scion-quick-palette .palette-option .palette-secondary');
   await expect(secondary).toHaveText(['alpha-proj', 'beta-proj']);
