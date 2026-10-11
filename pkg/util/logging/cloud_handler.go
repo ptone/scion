@@ -126,10 +126,10 @@ func NewCloudHandler(ctx context.Context, config CloudLoggingConfig, level slog.
 	}
 	// Count client-reported errors under writer=cloud before any other
 	// client method is called (gcplog requires OnError to be set first).
-	// The hook then calls the client's previous (default) OnError, so its
-	// log line is unchanged.
+	// The hook prints the client's line directly to stderr, not through
+	// slog or the Cloud handler (owner-approved, ptone 17dd4ceb).
 	stats := CloudWriter()
-	client.OnError = cloudClientOnError(stats, client.OnError)
+	client.OnError = cloudClientOnError(stats, os.Stderr)
 
 	// Apply a bounded buffer to prevent unbounded memory growth when
 	// Cloud Logging is temporarily unavailable.

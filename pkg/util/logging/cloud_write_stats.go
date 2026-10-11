@@ -16,6 +16,8 @@ package logging
 
 import (
 	"errors"
+	"fmt"
+	"io"
 	"sync/atomic"
 	"time"
 
@@ -234,20 +236,26 @@ func classifyCloudError(err error) CloudFailureReason {
 }
 
 // cloudClientOnError returns the Cloud Logging client's OnError hook. It
-// counts the error under writer=cloud, then calls prev, the client's
-// previous OnError (gcplog's default, log.Printf("logging client: %v", e)),
-// unchanged, so what is logged and where it goes stay as before. Error text
-// never reaches a metric label. gcplog never calls OnError concurrently and
+// counts the error under writer=cloud (queue_full for gcplog.ErrOverflow,
+// error otherwise), then writes "logging client: <err>" plus a newline to w,
+// the same text as gcplog's default hook. Production passes os.Stderr.
+//
+// The line deliberately bypasses slog, the std log package, OTel and the
+// Cloud handler, so a failing Cloud Logging pipeline is never fed its own
+// errors (owner-approved, ptone 17dd4ceb; architect ruling R8). Error text
+// goes only to w, never into metric labels. A write error from w is ignored.
+// A nil error is a no-op. The hook uses only atomics and one Fprintf, so it
+// is safe for concurrent calls. gcplog never calls OnError concurrently and
 // feeds it from a small buffered channel, so under an error storm some
-// errors skip the hook and reason=error undercounts.
-func cloudClientOnError(stats *CloudWriteStats, prev func(error)) func(error) {
+// errors skip the hook and the count is low.
+func cloudClientOnError(stats *CloudWriteStats, w io.Writer) func(error) {
 	return func(err error) {
 		if err == nil {
 			return
 		}
 		stats.RecordFailure(classifyCloudError(err))
-		if prev != nil {
-			prev(err)
+		if w != nil {
+			_, _ = fmt.Fprintf(w, "logging client: %v\n", err)
 		}
 	}
 }

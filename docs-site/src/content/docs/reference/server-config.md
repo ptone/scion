@@ -883,7 +883,7 @@ Server logging is best effort. Losses in the modes below are counted, never retr
 | `cloud` | `circuit_open` | The record was dropped from the Cloud path because the circuit breaker was open or probing. Application and message logs still go to stdout, except on Cloud Run, where the Hub leaves out their stdout handler (see **Duplicates**). The request log has no stdout copy while Cloud Logging is on (unless `SCION_SERVER_REQUEST_LOG_PATH` is set). In those cases the dropped record is lost. |
 | `cloud` | `flush_error` | A periodic, probe or shutdown flush failed, timed out, or was skipped because an earlier flush was still running. A failed flush usually reports errors the client already counted as `error`, so the two can count the same incident. |
 
-`scion.logging.write.records{writer="audit"}` counts records the audit writer's handler accepted. There is no `records` series for `writer="cloud"`, because a client buffer accept is not ingestion. When a Cloud Logging client error is reported, the Hub still prints the client's own `logging client: ...` line, as before.
+`scion.logging.write.records{writer="audit"}` counts records the audit writer's handler accepted. There is no `records` series for `writer="cloud"`, because a client buffer accept is not ingestion. Cloud Logging client errors are counted in `scion.logging.write.failures{writer=cloud,reason=error|queue_full}` and printed once to stderr as `logging client: <error>`. They are deliberately not sent through the structured logger (stdout JSON, OTel or Cloud Logging), to avoid feeding errors back into a failing Cloud Logging pipeline. Under an error storm the client drops some errors before the hook, so the count may be low.
 
 **State signals.**
 

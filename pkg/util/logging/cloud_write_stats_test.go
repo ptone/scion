@@ -15,11 +15,14 @@
 package logging
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -112,45 +115,115 @@ func TestCloudFailureReason_ClosedSet(t *testing.T) {
 	}
 }
 
-// P2-1: the named OnError hook classifies overflow as queue_full and
-// anything else as error and passes the error to its fallback. The hook
-// itself writes nothing to slog. (In production the fallback is the
-// client's previous OnError, gcplog's default log.Printf line, which does
-// reach slog through the std-log bridge, unchanged from base; R6-Q4 held.)
-func TestCloudClientOnError_HookCountsAndDelegates(t *testing.T) {
+// P2-1 / R8 T1, T2, T3, T5: the named OnError hook counts first (error, or
+// queue_full for a wrapped gcplog.ErrOverflow), then writes exactly
+// "logging client: <err>\n" once per error to the injected writer, and
+// sends nothing through slog (so nothing reaches stdout JSON, OTel or the
+// Cloud handler). A nil error is a no-op.
+func TestCloudClientOnError_CountsThenWritesStderrOnly(t *testing.T) {
+	// T3: capture the slog default; as in production, slog.SetDefault also
+	// routes the std log package into it.
 	slogged := captureSlogDefault(t)
 	clk := &fakeClock{now: time.Unix(1_800_000_000, 0)}
 	s := newCloudWriteStats(clk.Now)
-	var fallback []error
-	hook := cloudClientOnError(s, func(err error) { fallback = append(fallback, err) })
+	var w bytes.Buffer
+	hook := cloudClientOnError(s, &w)
 
-	overflow := gcplog.ErrOverflow
-	wrapped := fmt.Errorf("bundler: %w", gcplog.ErrOverflow)
+	// T1: one plain error.
 	other := errors.New("rpc error: code = Unavailable desc = secret-ish text")
-	hook(overflow)
-	hook(wrapped)
 	hook(other)
-	hook(gcplog.ErrOversizedEntry)
-	hook(nil) // ignored
-
-	got := cloudCounts(s)
-	if got["queue_full"] != 2 || got["error"] != 2 || got["circuit_open"] != 0 || got["flush_error"] != 0 {
-		t.Fatalf("counts = %v", got)
+	if got, want := w.String(), "logging client: "+other.Error()+"\n"; got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
 	}
-	if len(fallback) != 4 || fallback[0] != overflow || fallback[2] != other {
-		t.Fatalf("fallback calls = %v", fallback)
+	if got := cloudCounts(s); got["error"] != 1 || got["queue_full"] != 0 {
+		t.Fatalf("counts after T1 = %v", got)
 	}
 	if !s.LastFailure().Equal(clk.Now()) {
 		t.Fatalf("LastFailure = %v, want %v", s.LastFailure(), clk.Now())
 	}
-	if n := slogged.Load(); n != 0 {
-		t.Fatalf("hook wrote %d slog records", n)
+
+	// T2: a wrapped overflow is queue_full, same line format.
+	w.Reset()
+	wrapped := fmt.Errorf("bundler: %w", gcplog.ErrOverflow)
+	hook(wrapped)
+	if got, want := w.String(), "logging client: "+wrapped.Error()+"\n"; got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+	if got := cloudCounts(s); got["queue_full"] != 1 || got["error"] != 1 {
+		t.Fatalf("counts after T2 = %v", got)
 	}
 
-	// A nil fallback only counts.
+	// Oversized entry is an error; one line per error.
+	w.Reset()
+	hook(gcplog.ErrOversizedEntry)
+	hook(other)
+	if got, want := w.String(), "logging client: "+gcplog.ErrOversizedEntry.Error()+"\nlogging client: "+other.Error()+"\n"; got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+
+	// T5: nil is a no-op: no count, no write.
+	w.Reset()
+	before := cloudCounts(s)
+	hook(nil)
+	if w.Len() != 0 {
+		t.Fatalf("nil error wrote %q", w.String())
+	}
+	after := cloudCounts(s)
+	for k, v := range before {
+		if after[k] != v {
+			t.Fatalf("nil error changed %s: %d -> %d", k, v, after[k])
+		}
+	}
+	if got := cloudCounts(s); got["error"] != 3 || got["queue_full"] != 1 || got["circuit_open"] != 0 || got["flush_error"] != 0 {
+		t.Fatalf("final counts = %v", got)
+	}
+
+	// T3: nothing reached slog (or std log through it).
+	if n := slogged.Load(); n != 0 {
+		t.Fatalf("hook produced %d slog records", n)
+	}
+
+	// A nil writer only counts and does not panic.
 	cloudClientOnError(s, nil)(other)
-	if s.Failures(CloudReasonError) != 3 {
-		t.Fatalf("error = %d after nil-fallback call", s.Failures(CloudReasonError))
+	if s.Failures(CloudReasonError) != 4 {
+		t.Fatalf("error = %d after nil-writer call", s.Failures(CloudReasonError))
+	}
+}
+
+// R8 T4: errors counted by the hook export with exactly {writer, reason}
+// and closed reason values; no error text leaks into attributes.
+func TestCloudClientOnError_NoErrorTextInLabels(t *testing.T) {
+	s := newCloudWriteStats(nil)
+	hook := cloudClientOnError(s, io.Discard)
+	const secret = "secret-ish text 12345"
+	hook(errors.New(secret))
+	hook(fmt.Errorf("%s: %w", secret, gcplog.ErrOverflow))
+	reader := sdkmetric.NewManualReader()
+	wm := newManualWriteMetrics(t, reader)
+	wm.ObserveCloud(s)
+	seen := map[string]int64{}
+	for name, pts := range collectPoints(t, reader) {
+		for _, p := range pts {
+			if name != MetricWriteFailures {
+				continue
+			}
+			keys := attrKeys(p)
+			if len(keys) != 2 || keys[0] != "reason" || keys[1] != "writer" {
+				t.Fatalf("attrs = %v", p.attrs)
+			}
+			for _, v := range p.attrs {
+				if strings.Contains(v, "secret") {
+					t.Fatalf("error text in labels: %v", p.attrs)
+				}
+			}
+			if p.attrs["writer"] != CloudWriterName {
+				t.Fatalf("writer = %q", p.attrs["writer"])
+			}
+			seen[p.attrs["reason"]] = p.value
+		}
+	}
+	if len(seen) != 2 || seen["error"] != 1 || seen["queue_full"] != 1 {
+		t.Fatalf("exported failures = %v", seen)
 	}
 }
 
