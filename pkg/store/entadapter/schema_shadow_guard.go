@@ -25,8 +25,8 @@ import (
 
 // schemaShadowMarkerTables are the tables whose presence marks a Postgres
 // schema as holding a hub table set. Both are core hub tables that every Ent
-// schema has created since the first one, in the same Schema.Create
-// transaction, so a real hub install always has both. Requiring two
+// schema has had since the Postgres backend was added, created in the same
+// Schema.Create transaction, so every Postgres hub install has both. Requiring two
 // hub-specific names keeps an unrelated application's table (a lone "agents",
 // say) from counting as a hub install.
 var schemaShadowMarkerTables = [2]string{"agents", "runtime_brokers"}
@@ -70,7 +70,7 @@ type SchemaShadowError struct {
 func (e *SchemaShadowError) Error() string {
 	return fmt.Sprintf("refusing to start: PostgreSQL current schema %q has no hub tables, but schema %q later on the search_path does. "+
 		"Migrating now would create a new, empty hub table set in %q that hides the existing data in %q. "+
-		"Fix the connection's search_path (for example put %q first, or drop the empty %q schema), "+
+		"Fix the connection's search_path (for example put %q first, or drop the %q schema if nothing else uses it), "+
 		"or set server.database.allow_shadowed_schema: true (SCION_SERVER_DATABASE_ALLOWSHADOWEDSCHEMA=true) "+
 		"to create the new table set in %q anyway",
 		e.CurrentSchema, e.ShadowedSchema, e.CurrentSchema, e.ShadowedSchema,

@@ -69,6 +69,8 @@ func TestSchemaShadowError_Text(t *testing.T) {
 	assert.Contains(t, msg, `schema "public" later on the search_path does`)
 	assert.Contains(t, msg, "server.database.allow_shadowed_schema: true")
 	assert.Contains(t, msg, "SCION_SERVER_DATABASE_ALLOWSHADOWEDSCHEMA=true")
+	assert.Contains(t, msg, `drop the "custom" schema if nothing else uses it`)
+	assert.NotContains(t, msg, "drop the empty", "the guard does not know the schema is empty")
 }
 
 // TestSchemaShadowMarkerTables pins the marker: both tables are required, so
