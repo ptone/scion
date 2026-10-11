@@ -495,14 +495,14 @@ func TestJSONFieldNames_PanicsOnUnsupportedFields(t *testing.T) {
 		Inner
 		A int `json:"a"`
 	}
-	type invalidTag struct {
-		A int `json:"a\\b"`
-	}
-	type quoteTag struct {
-		A int `json:"a'b"`
-	}
-	// Built at run time: go vet rejects a repeated json tag in a literal
-	// struct type.
+	// The malformed and repeated tags are built at run time: go vet and
+	// staticcheck reject them in a literal struct type.
+	invalidTag := reflect.StructOf([]reflect.StructField{
+		{Name: "A", Type: reflect.TypeOf(0), Tag: reflect.StructTag(`json:"a\\b"`)},
+	})
+	quoteTag := reflect.StructOf([]reflect.StructField{
+		{Name: "A", Type: reflect.TypeOf(0), Tag: reflect.StructTag(`json:"a'b"`)},
+	})
 	duplicate := reflect.StructOf([]reflect.StructField{
 		{Name: "A", Type: reflect.TypeOf(0), Tag: `json:"same"`},
 		{Name: "B", Type: reflect.TypeOf(0), Tag: `json:"same"`},
@@ -521,8 +521,8 @@ func TestJSONFieldNames_PanicsOnUnsupportedFields(t *testing.T) {
 		want string
 	}{
 		{"embedded", reflect.TypeOf(embedded{}), "embedded field Inner"},
-		{"backslash tag", reflect.TypeOf(invalidTag{}), "encoding/json rejects"},
-		{"quote tag", reflect.TypeOf(quoteTag{}), "encoding/json rejects"},
+		{"backslash tag", invalidTag, "encoding/json rejects"},
+		{"quote tag", quoteTag, "encoding/json rejects"},
 		{"duplicate", duplicate, `duplicates "same"`},
 		{"fold duplicate", reflect.TypeOf(foldDuplicate{}), `duplicates "closed"`},
 		{"tag duplicates field name", reflect.TypeOf(tagDuplicatesFieldName{}), `duplicates "Name"`},
