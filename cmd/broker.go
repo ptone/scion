@@ -2655,15 +2655,21 @@ func removeBrokerRecordOnSIGTERM(globalDir string, owned []string) (stop func())
 // serverShutdown is published strictly after the server subscribes to
 // SIGINT/SIGTERM, so every interleaving gives exactly one shutdown:
 //
-//   - The server was subscribed when SIGTERM arrived: both its handler and
-//     this one call the run-once shutdown, which runs once.
+//   - The server was subscribed when SIGTERM arrived and the shutdown was
+//     published by the load here: both its handler and this one call the
+//     run-once shutdown, which runs once.
+//   - The server was subscribed when SIGTERM arrived, but not yet published
+//     at the load: the server's handler runs the shutdown from the SIGTERM;
+//     the SIGINT sent here is a second signal on that subscription and is
+//     swallowed.
 //   - SIGTERM arrived before the server subscribed, but the shutdown was
 //     published before the load here: the direct call runs it.
-//   - Nothing published at the load, server subscribed since: the SIGINT is
-//     that subscription's first signal, so the shutdown runs once (as
-//     early as step 7).
-//   - Nothing published, server not subscribed: the SIGINT's default action
-//     ends the process, as before the server handled SIGTERM.
+//   - SIGTERM arrived before the server subscribed and nothing was
+//     published at the load, server subscribed before the SIGINT: the
+//     SIGINT is that subscription's first signal, so the shutdown runs once
+//     (as early as step 7).
+//   - Nothing published, server not subscribed when the SIGINT arrives: its
+//     default action ends the process, as before the server handled SIGTERM.
 func handleBrokerSIGTERM(globalDir string, owned []string) {
 	removeBrokerRecordOnSignal(globalDir, owned)
 	if shutdown := serverShutdown.Load(); shutdown != nil {

@@ -513,12 +513,28 @@ func TestBrokerStartForeground_SIGTERMSingleShutdown(t *testing.T) {
 			cancel()
 			<-signalsDone
 		}()
+		// Join the broker handler goroutine: wrap the published shutdown so
+		// its last action closes brokerDone. Only handleBrokerSIGTERM calls
+		// the published pointer (the server goroutine calls its own local
+		// shutdown), so brokerDone closing proves the broker took the
+		// published path and finished before cleanup restores the real
+		// interruptSelf and clears serverShutdown.
+		published := serverShutdown.Load()
+		require.NotNil(t, published)
+		brokerDone := make(chan struct{})
+		joined := func(sig os.Signal) {
+			(*published)(sig)
+			close(brokerDone)
+		}
+		serverShutdown.Store(&joined)
+
 		p, err := os.FindProcess(os.Getpid())
 		require.NoError(t, err)
 		require.NoError(t, p.Signal(syscall.SIGTERM))
 		<-removed
 		_, afterSignal = os.Stat(argsFilePath(globalDir))
 		<-cancelled
+		<-brokerDone
 		return nil
 	})
 	captureStdout(t, func() { require.NoError(t, runBrokerStart(brokerStartCmd, nil)) })
@@ -527,7 +543,7 @@ func TestBrokerStartForeground_SIGTERMSingleShutdown(t *testing.T) {
 	assert.Equal(t, int32(1), removals.Load(), "the SIGTERM handler removes the record exactly once")
 	assert.Equal(t, int32(1), cancels.Load(), "exactly one server shutdown")
 	assert.Equal(t, int32(1), runs.Load(), "the server run returns exactly once")
-	assert.Equal(t, int32(0), interrupts.Load(), "no interrupt once the server handles SIGTERM itself")
+	assert.Equal(t, int32(0), interrupts.Load(), "no interrupt once the server handles SIGTERM itself (the broker took the published path)")
 	_, err := os.Stat(argsFilePath(globalDir))
 	assert.True(t, os.IsNotExist(err), "the record stays removed after exit")
 }

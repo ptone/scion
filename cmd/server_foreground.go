@@ -856,7 +856,9 @@ var serverShutdown atomic.Pointer[func(os.Signal)]
 // The signal goroutine also exits when ctx is done (runServerStart cancels
 // ctx on every return), unless it is inside the shutdown's synchronous log
 // line, in which case it exits when that write returns. A signal arriving
-// after that is still swallowed by the subscription, without a log line.
+// after that is still swallowed by the subscription, without a log line,
+// unless the foreground broker's SIGTERM handler calls the published
+// shutdown, which then logs once (and cancels a no-op), as on base.
 // The returned done channel is closed as the goroutine's last action; it
 // exists for tests, and production must not wait on it.
 //
