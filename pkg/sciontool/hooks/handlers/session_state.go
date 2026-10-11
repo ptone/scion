@@ -15,12 +15,14 @@
 package handlers
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
@@ -68,7 +70,9 @@ const (
 	sessionStateLockPoll    = 10 * time.Millisecond
 )
 
-// sessionStateFile is the on-disk form of the state.
+// sessionStateFile is the on-disk form of the state. The JSON names of its
+// exported fields are the known top-level keys (sessionStateKnownKeys is
+// derived from the tags); every other top-level key is kept in extra.
 type sessionStateFile struct {
 	Version    int                       `json:"version"`
 	Aggregator telemetry.AggregatorState `json:"aggregator"`
@@ -95,8 +99,38 @@ type sessionStateFile struct {
 }
 
 // sessionStateKnownKeys are the JSON names of sessionStateFile's exported
-// fields. Any other top-level key is kept in extra.
-var sessionStateKnownKeys = []string{"version", "aggregator", "closed", "pending"}
+// fields. Any other top-level key is kept in extra. It is derived from the
+// struct, so a field added later is known without a second list to update.
+var sessionStateKnownKeys = jsonFieldNames(reflect.TypeOf(sessionStateFile{}))
+
+// jsonFieldNames returns the top-level JSON names that encoding/json uses
+// for struct type t: for each exported field, the tag's name before the
+// first comma, or the field name when the tag gives none. Fields tagged
+// "-" are skipped, as are unexported ones. It does not handle embedded
+// structs, whose fields encoding/json promotes; it panics on one, so adding
+// one to sessionStateFile fails at once rather than quietly.
+func jsonFieldNames(t reflect.Type) []string {
+	var names []string
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if f.Anonymous {
+			panic(fmt.Sprintf("jsonFieldNames: embedded field %s in %s is not supported", f.Name, t))
+		}
+		if !f.IsExported() {
+			continue
+		}
+		tag := f.Tag.Get("json")
+		if tag == "-" {
+			continue
+		}
+		name, _, _ := strings.Cut(tag, ",")
+		if name == "" {
+			name = f.Name
+		}
+		names = append(names, name)
+	}
+	return names
+}
 
 // isKnownSessionStateKey reports whether k names one of sessionStateFile's
 // exported fields. It uses the same case folding as encoding/json's field
@@ -322,6 +356,12 @@ func decodeSessionState(data []byte) (sessionStateFile, error) {
 // over an unknown key of the same name. Without unknown keys the result is
 // exactly the struct's encoding. Both writers (save and
 // writeStateFileInPlace) encode through it.
+//
+// With unknown keys, the top-level object is re-encoded without HTML
+// escaping, so an unknown value comes back as it was read (apart from
+// whitespace) rather than growing six bytes per <, > or &, which could push
+// a file near sessionStateMaxBytes over the limit. Known fields were
+// already encoded, with escaping, by the struct encoding.
 func encodeSessionState(file sessionStateFile) ([]byte, error) {
 	file.Version = sessionStateVersion
 	data, err := json.Marshal(file)
@@ -340,7 +380,13 @@ func encodeSessionState(file sessionStateFile) ([]byte, error) {
 			all[k] = v
 		}
 	}
-	return json.Marshal(all)
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(all); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }
 
 // save writes file to a 0600 temp file in the same directory and renames it

@@ -19,6 +19,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
@@ -340,5 +342,148 @@ func TestSessionStateUnknownKeys_MiscasedKnownKeysNotKept(t *testing.T) {
 	}
 	if string(raw["future_scalar"]) != `42` {
 		t.Errorf("future_scalar = %s, want 42", raw["future_scalar"])
+	}
+}
+
+// The known keys come from sessionStateFile's json tags. If the derivation
+// breaks, this fails loudly; when a field is added, update the list here.
+func TestSessionStateKnownKeys_DerivedFromTags(t *testing.T) {
+	want := []string{"version", "aggregator", "closed", "pending"}
+	if !reflect.DeepEqual(sessionStateKnownKeys, want) {
+		t.Errorf("sessionStateKnownKeys = %q, want %q", sessionStateKnownKeys, want)
+	}
+	if tags := jsonFieldNames(reflect.TypeOf(sessionStateFile{})); !reflect.DeepEqual(sessionStateKnownKeys, tags) {
+		t.Errorf("sessionStateKnownKeys = %q, but the struct's json names are %q", sessionStateKnownKeys, tags)
+	}
+}
+
+// jsonFieldNames follows encoding/json's rules for top-level names.
+func TestJSONFieldNames(t *testing.T) {
+	type probe struct {
+		Tagged    int    `json:"tagged"`
+		OmitEmpty bool   `json:"omit,omitempty"`
+		NoName    string `json:",omitempty"`
+		Untagged  string
+		Skipped   int `json:"-"`
+		unexp     int
+	}
+	_ = probe{}.unexp
+	got := jsonFieldNames(reflect.TypeOf(probe{}))
+	want := []string{"tagged", "omit", "NoName", "Untagged"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("jsonFieldNames = %q, want %q", got, want)
+	}
+
+	// The same names encoding/json writes for a value with every field set.
+	data, err := json.Marshal(probe{Tagged: 1, OmitEmpty: true, NoName: "x", Untagged: "y", Skipped: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var all map[string]json.RawMessage
+	if err := json.Unmarshal(data, &all); err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != len(want) {
+		t.Errorf("encoding/json wrote %s, want keys %q", data, want)
+	}
+	for _, k := range want {
+		if _, ok := all[k]; !ok {
+			t.Errorf("encoding/json wrote %s, missing %q", data, k)
+		}
+	}
+}
+
+// Every field's JSON name, whatever fields the struct has now or gains later
+// (taken from the struct itself, not from sessionStateKnownKeys), is
+// decoded into its field and not kept as an unknown key, in its exact case
+// and in upper case. So after the fields are cleared, none of the seeded keys
+// comes back on the next write: the output holds only the struct's own
+// encoding plus the genuinely unknown key.
+func TestSessionStateUnknownKeys_EveryKnownKeyNotKept(t *testing.T) {
+	seed := map[string]json.RawMessage{
+		"version":       json.RawMessage(`1`),
+		"future_scalar": json.RawMessage(`42`),
+	}
+	for _, k := range jsonFieldNames(reflect.TypeOf(sessionStateFile{})) {
+		if k == "version" {
+			continue
+		}
+		// null decodes into a field of any type, leaving it zero.
+		seed[k] = json.RawMessage(`null`)
+		seed[strings.ToUpper(k)] = json.RawMessage(`null`)
+	}
+	data, err := json.Marshal(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := decodeSessionState(data)
+	if err != nil {
+		t.Fatalf("decoding %s: %v", data, err)
+	}
+	if len(file.extra) != 1 || string(file.extra["future_scalar"]) != `42` {
+		t.Errorf("extra = %v, want only future_scalar", file.extra)
+	}
+
+	cleared := sessionStateFile{extra: file.extra}
+	out, err := encodeSessionState(cleared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	plain, err := json.Marshal(sessionStateFile{Version: sessionStateVersion})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want map[string]json.RawMessage
+	if err := json.Unmarshal(plain, &want); err != nil {
+		t.Fatal(err)
+	}
+	want["future_scalar"] = json.RawMessage(`42`)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("after clearing:\n got %s\nwant the struct's encoding plus future_scalar", out)
+	}
+}
+
+// Unknown values are written back without HTML escaping, so a value with
+// <, > or & round-trips as read and the file does not grow.
+func TestEncodeSessionState_UnknownValuesNotHTMLEscaped(t *testing.T) {
+	const value = `{"html":"<a href=\"x\">&amp;</a>","op":"a<b && c>d"}`
+	in := []byte(`{"version":1,"aggregator":{"session_id":"s1"},"future":` + value + `}`)
+	file, err := decodeSessionState(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := encodeSessionState(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var all map[string]json.RawMessage
+	if err := json.Unmarshal(out, &all); err != nil {
+		t.Fatalf("decoding %s: %v", out, err)
+	}
+	if string(all["future"]) != value {
+		t.Errorf("future = %s, want %s", all["future"], value)
+	}
+	if bytes.Contains(out, []byte(`\u003c`)) || bytes.Contains(out, []byte(`\u0026`)) {
+		t.Errorf("unknown value HTML-escaped: %s", out)
+	}
+	if bytes.HasSuffix(out, []byte("\n")) {
+		t.Errorf("trailing newline in %q", out)
+	}
+
+	// A second write of the same file gives the same bytes: nothing grows.
+	again, err := decodeSessionState(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out2, err := encodeSessionState(again)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(out, out2) {
+		t.Errorf("second write differs:\n%s\n%s", out, out2)
 	}
 }
