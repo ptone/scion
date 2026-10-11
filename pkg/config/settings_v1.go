@@ -1707,6 +1707,10 @@ type V1DatabaseConfig struct {
 	MaxIdleConns    int    `json:"max_idle_conns,omitempty" yaml:"max_idle_conns,omitempty" koanf:"max_idle_conns"`
 	ConnMaxLifetime string `json:"conn_max_lifetime,omitempty" yaml:"conn_max_lifetime,omitempty" koanf:"conn_max_lifetime"`
 	ConnMaxIdleTime string `json:"conn_max_idle_time,omitempty" yaml:"conn_max_idle_time,omitempty" koanf:"conn_max_idle_time"`
+	// AllowShadowedSchema lets the hub start on PostgreSQL when its startup
+	// migration would create a new table set that hides existing hub tables
+	// later on the search_path. See DatabaseConfig.AllowShadowedSchema.
+	AllowShadowedSchema bool `json:"allow_shadowed_schema,omitempty" yaml:"allow_shadowed_schema,omitempty" koanf:"allow_shadowed_schema"`
 }
 
 // V1AuthConfig holds authentication settings.
@@ -3557,6 +3561,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Database.ConnMaxIdleTime != "" {
 			gc.Database.ConnMaxIdleTime = v1.Database.ConnMaxIdleTime
 		}
+		gc.Database.AllowShadowedSchema = v1.Database.AllowShadowedSchema
 	}
 
 	// Auth config
@@ -3895,6 +3900,8 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		MaxIdleConns:    gc.Database.MaxIdleConns,
 		ConnMaxLifetime: gc.Database.ConnMaxLifetime,
 		ConnMaxIdleTime: gc.Database.ConnMaxIdleTime,
+
+		AllowShadowedSchema: gc.Database.AllowShadowedSchema,
 	}
 
 	// Auth config
