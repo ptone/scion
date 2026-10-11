@@ -32,6 +32,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	policytroubleshooteriam "cloud.google.com/go/policytroubleshooter/iam/apiv3"
@@ -127,13 +128,20 @@ func chdirHomeIfAtFilesystemRoot() {
 // by this comment.
 var pinProcessUTC = util.PinProcessUTC
 
+// Seams for tests that drive runServerStart up to a failed hub
+// initialization. Production uses the real functions.
+var (
+	initServerLoggingFn = initServerLogging
+	initHubServerFn     = initHubServer
+)
+
 func runServerStart(cmd *cobra.Command, args []string) error {
 	// Pin the process to UTC before anything else runs (log timestamps, cron
 	// parsing, ent's Default(time.Now), etc. all read time.Local).
 	pinProcessUTC()
 
 	// 1. Initialize logging
-	logCleanups, requestLogger, messageLogger, err := initServerLogging(cmd)
+	logCleanups, requestLogger, messageLogger, err := initServerLoggingFn(cmd)
 	if err != nil {
 		return err
 	}
@@ -257,14 +265,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt)
-
-	go func() {
-		sig := <-sigCh
-		log.Printf("Received signal %v, shutting down...", sig)
-		cancel()
-	}()
+	installServerShutdownSignals(signal.Notify, cancel)
 
 	var wg sync.WaitGroup
 	errCh := make(chan error, 3)
@@ -362,9 +363,14 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if enableHub {
 
 		var hubInitErr error
-		hubSrv, hubInitErr = initHubServer(ctx, cfg, s, entClient, hubEndpoint, devAuthToken, adminEmailList, adminMode, maintenanceMessage, requestLogger, messageLogger, globalDir, pluginMgr, secretBackend)
+		hubSrv, hubInitErr = initHubServerFn(ctx, cfg, s, entClient, hubEndpoint, devAuthToken, adminEmailList, adminMode, maintenanceMessage, requestLogger, messageLogger, globalDir, pluginMgr, secretBackend)
 		if hubInitErr != nil {
-			log.Fatalf("Hub server failed to start: %v", hubInitErr)
+			// Return rather than log.Fatalf so the deferred cleanups (store
+			// close, plugin shutdown, log flush including Cloud Logging) run.
+			// Startup stays fail-closed: nothing is serving yet. The exit
+			// status is still 1 (exitCodeFor).
+			log.Printf("Hub server failed to start: %v", hubInitErr)
+			return fmt.Errorf("hub server failed to start: %w", hubInitErr)
 		}
 
 		// Flush telemetry providers before the store closes on exit.
@@ -825,6 +831,24 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		closeAudit = hubSrv.CloseAuditWriter
 	}
 	return awaitServerExit(ctx, errCh, cancel, wg.Wait, closeAudit)
+}
+
+// installServerShutdownSignals is step 7 of runServerStart: SIGINT
+// (Ctrl+C) and SIGTERM (systemd, Kubernetes, container stop) both start the
+// graceful shutdown by calling cancel, once. Only the first signal is acted
+// on; the handler stays subscribed, so a second signal is ignored rather
+// than killing the process mid-drain. Orchestrators that escalate to SIGKILL
+// after their grace period still terminate the process immediately. notify
+// is signal.Notify in production and injectable in tests.
+func installServerShutdownSignals(notify func(chan<- os.Signal, ...os.Signal), cancel context.CancelFunc) {
+	sigCh := make(chan os.Signal, 1)
+	notify(sigCh, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		sig := <-sigCh
+		log.Printf("Received signal %v, shutting down...", sig)
+		cancel()
+	}()
 }
 
 // awaitServerExit is step 16 of runServerStart. On cancellation it calls
@@ -2435,7 +2459,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	// traffic, because a DB-persisted admin_mode=true would be invisible to this
 	// process. Retry with exponential backoff to tolerate transient DB issues,
 	// then fail the hub startup if all attempts are exhausted.
-	// NOTE: this call and its error-return-to-log.Fatalf chain is what makes
+	// NOTE: this call and its error-return chain (up to runServerStart) is what makes
 	// settings init fail-closed. Do NOT revert to the old log-and-continue
 	// pattern — that would let the server accept traffic without authoritative
 	// settings, silently bypassing a DB-persisted admin_mode=true.

@@ -16,17 +16,17 @@ package cmd
 
 import (
 	"encoding/json"
-	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"syscall"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/daemon"
@@ -449,30 +449,73 @@ func TestBrokerStartForeground_OnlyRemovesOwnRecord(t *testing.T) {
 	assert.Equal(t, other, got)
 }
 
-// TestBrokerStartForeground_SIGTERMRemovesRecord: SIGTERM (systemctl stop)
-// removes the record and is turned into the Ctrl+C shutdown.
-func TestBrokerStartForeground_SIGTERMRemovesRecord(t *testing.T) {
+// TestBrokerStartForeground_SIGTERMSingleShutdown: in foreground broker
+// mode SIGTERM (systemctl stop) reaches two in-process subscribers, the
+// broker's record handler and the server's shutdown handler. The record is
+// removed once, before shutdown completes; the server shuts down once; no
+// interrupt is sent to the process (the handler used to re-signal itself
+// with os.Interrupt, which would have been a second shutdown signal).
+// A real signal is used because only that exercises both real
+// signal.Notify subscribers together.
+func TestBrokerStartForeground_SIGTERMSingleShutdown(t *testing.T) {
 	_, globalDir := brokerTestHome(t)
-	interrupted := make(chan struct{}, 1)
-	savedInterrupt := interruptSelf
-	t.Cleanup(func() { interruptSelf = savedInterrupt })
-	interruptSelf = func() { interrupted <- struct{}{} }
 
+	interrupts := make(chan os.Signal, 1)
+	signal.Notify(interrupts, os.Interrupt)
+	t.Cleanup(func() { signal.Stop(interrupts) })
+
+	var removals atomic.Int32
+	removed := make(chan struct{}, 1)
+	savedRemove := removeBrokerRecordOnSignal
+	t.Cleanup(func() { removeBrokerRecordOnSignal = savedRemove })
+	removeBrokerRecordOnSignal = func(dir string, owned []string) {
+		savedRemove(dir, owned)
+		removals.Add(1)
+		removed <- struct{}{}
+	}
+
+	var cancels, runs atomic.Int32
+	cancelled := make(chan struct{}, 1)
+	var serverSigCh chan<- os.Signal
+	t.Cleanup(func() {
+		if serverSigCh != nil {
+			signal.Stop(serverSigCh)
+		}
+	})
 	var afterSignal error
 	setForegroundStartForTest(t, unusedPort(t), func([]string) error {
+		defer runs.Add(1)
+		// The broker handler is installed by runBrokerStart before it calls
+		// this run; install the server's handler with the real
+		// signal.Notify (keeping its channel for cleanup) before signalling.
+		installServerShutdownSignals(func(c chan<- os.Signal, sigs ...os.Signal) {
+			serverSigCh = c
+			signal.Notify(c, sigs...)
+		}, func() {
+			cancels.Add(1)
+			cancelled <- struct{}{}
+		})
 		p, err := os.FindProcess(os.Getpid())
 		require.NoError(t, err)
 		require.NoError(t, p.Signal(syscall.SIGTERM))
-		select {
-		case <-interrupted:
-		case <-time.After(5 * time.Second):
-			return errors.New("SIGTERM was not turned into an interrupt")
-		}
+		<-removed
 		_, afterSignal = os.Stat(argsFilePath(globalDir))
+		<-cancelled
 		return nil
 	})
 	captureStdout(t, func() { require.NoError(t, runBrokerStart(brokerStartCmd, nil)) })
+
 	assert.True(t, os.IsNotExist(afterSignal), "SIGTERM should remove the record before shutdown")
+	assert.Equal(t, int32(1), removals.Load(), "the SIGTERM handler removes the record exactly once")
+	assert.Equal(t, int32(1), cancels.Load(), "exactly one server shutdown")
+	assert.Equal(t, int32(1), runs.Load(), "the server run returns exactly once")
+	select {
+	case sig := <-interrupts:
+		t.Fatalf("SIGTERM must not be turned into a second signal, got %v", sig)
+	default:
+	}
+	_, err := os.Stat(argsFilePath(globalDir))
+	assert.True(t, os.IsNotExist(err), "the record stays removed after exit")
 }
 
 // TestBrokerStartDaemon_FailureKeepsExistingRecord: a failed daemon start

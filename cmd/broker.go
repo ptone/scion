@@ -2568,7 +2568,7 @@ func removeBrokerArgs(globalDir string) {
 }
 
 // Seams for tests: launching the daemon, running the foreground server and
-// interrupting this process.
+// removing the record on SIGTERM.
 var (
 	startBrokerDaemon      = daemon.Start
 	brokerStartVerifyDelay = 500 * time.Millisecond
@@ -2583,12 +2583,12 @@ var (
 		return serverStartCmd.RunE(serverStartCmd, []string{})
 	}
 
-	// interruptSelf asks this process to shut down the way Ctrl+C does.
-	interruptSelf = func() {
-		if p, err := os.FindProcess(os.Getpid()); err == nil {
-			_ = p.Signal(os.Interrupt)
-		}
-	}
+	// removeBrokerRecordOnSignal is what the SIGTERM handler in
+	// removeBrokerRecordOnSIGTERM calls to remove the record. Only that
+	// handler calls through this var; runBrokerStart's deferred removal
+	// calls removeBrokerArgsIfOwned directly, so a test that wraps this var
+	// counts exactly the handler's removals.
+	removeBrokerRecordOnSignal = removeBrokerArgsIfOwned
 )
 
 // claimForegroundBrokerRecord returns the record a foreground broker on
@@ -2616,9 +2616,11 @@ func removeBrokerArgsIfOwned(globalDir string, owned []string) {
 }
 
 // removeBrokerRecordOnSIGTERM makes SIGTERM (systemd's stop signal) remove
-// this foreground broker's record and then shut the server down like Ctrl+C
-// (the server traps only os.Interrupt, so SIGTERM would otherwise kill the
-// process before deferred cleanup runs). The returned func stops handling.
+// this foreground broker's record as soon as the signal arrives. It does not
+// shut anything down itself: the in-process server subscribes to SIGTERM
+// too (installServerShutdownSignals) and runs its single graceful shutdown,
+// after which the caller's deferred removal runs as on every other exit.
+// The returned func stops handling.
 func removeBrokerRecordOnSIGTERM(globalDir string, owned []string) (stop func()) {
 	ch := make(chan os.Signal, 1)
 	done := make(chan struct{})
@@ -2626,8 +2628,7 @@ func removeBrokerRecordOnSIGTERM(globalDir string, owned []string) (stop func())
 	go func() {
 		select {
 		case <-ch:
-			removeBrokerArgsIfOwned(globalDir, owned)
-			interruptSelf()
+			removeBrokerRecordOnSignal(globalDir, owned)
 		case <-done:
 		}
 	}()
