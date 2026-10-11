@@ -70,7 +70,7 @@ func TestReadOptionalStdin(t *testing.T) {
 	t.Run("pipe with payload", func(t *testing.T) {
 		r, w, err := os.Pipe()
 		require.NoError(t, err)
-		defer r.Close()
+		defer func() { _ = r.Close() }()
 		_, err = w.WriteString(copilotPostToolUse)
 		require.NoError(t, err)
 		require.NoError(t, w.Close())
@@ -80,8 +80,8 @@ func TestReadOptionalStdin(t *testing.T) {
 	t.Run("payload on a pipe left open", func(t *testing.T) {
 		r, w, err := os.Pipe()
 		require.NoError(t, err)
-		defer r.Close()
-		defer w.Close()
+		defer func() { _ = r.Close() }()
+		defer func() { _ = w.Close() }()
 		_, err = w.WriteString(copilotPostToolUse)
 		require.NoError(t, err)
 		start := time.Now()
@@ -93,7 +93,7 @@ func TestReadOptionalStdin(t *testing.T) {
 		setTestLogPath(t, filepath.Join(t.TempDir(), "agent.log"))
 		r, w, err := os.Pipe()
 		require.NoError(t, err)
-		defer r.Close()
+		defer func() { _ = r.Close() }()
 		_, err = w.WriteString(`{not json`)
 		require.NoError(t, err)
 		require.NoError(t, w.Close())
@@ -104,8 +104,8 @@ func TestReadOptionalStdin(t *testing.T) {
 		setTestLogPath(t, filepath.Join(t.TempDir(), "agent.log"))
 		r, w, err := os.Pipe()
 		require.NoError(t, err)
-		defer r.Close()
-		defer w.Close()
+		defer func() { _ = r.Close() }()
+		defer func() { _ = w.Close() }()
 		_, err = w.WriteString(`{"a":1`)
 		require.NoError(t, err)
 		start := time.Now()
@@ -117,7 +117,7 @@ func TestReadOptionalStdin(t *testing.T) {
 		setTestLogPath(t, filepath.Join(t.TempDir(), "agent.log"))
 		r, w, err := os.Pipe()
 		require.NoError(t, err)
-		defer r.Close()
+		defer func() { _ = r.Close() }()
 		// One JSON object larger than maxPositionalStdinBytes, written
 		// concurrently because it exceeds the pipe buffer. The writer is
 		// left open: the size cap, not EOF, must end the read.
@@ -125,15 +125,15 @@ func TestReadOptionalStdin(t *testing.T) {
 		go func() {
 			_, _ = w.Write(big)
 		}()
-		defer w.Close()
+		defer func() { _ = w.Close() }()
 		assert.Nil(t, readOptionalStdin(r, 10*time.Second))
 	})
 
 	t.Run("trailing bytes after the value are ignored", func(t *testing.T) {
 		r, w, err := os.Pipe()
 		require.NoError(t, err)
-		defer r.Close()
-		defer w.Close()
+		defer func() { _ = r.Close() }()
+		defer func() { _ = w.Close() }()
 		_, err = w.WriteString(`{"a":1} junk`)
 		require.NoError(t, err)
 		start := time.Now()
@@ -144,7 +144,7 @@ func TestReadOptionalStdin(t *testing.T) {
 	t.Run("whitespace only", func(t *testing.T) {
 		r, w, err := os.Pipe()
 		require.NoError(t, err)
-		defer r.Close()
+		defer func() { _ = r.Close() }()
 		_, err = w.WriteString(" \n ")
 		require.NoError(t, err)
 		require.NoError(t, w.Close())
@@ -154,7 +154,7 @@ func TestReadOptionalStdin(t *testing.T) {
 	t.Run("closed empty pipe", func(t *testing.T) {
 		r, w, err := os.Pipe()
 		require.NoError(t, err)
-		defer r.Close()
+		defer func() { _ = r.Close() }()
 		require.NoError(t, w.Close())
 		assert.Empty(t, readOptionalStdin(r, time.Second))
 	})
@@ -162,8 +162,8 @@ func TestReadOptionalStdin(t *testing.T) {
 	t.Run("open pipe without data does not block", func(t *testing.T) {
 		r, w, err := os.Pipe()
 		require.NoError(t, err)
-		defer r.Close()
-		defer w.Close()
+		defer func() { _ = r.Close() }()
+		defer func() { _ = w.Close() }()
 		start := time.Now()
 		assert.Nil(t, readOptionalStdin(r, 50*time.Millisecond))
 		assert.Less(t, time.Since(start), 2*time.Second)
@@ -172,7 +172,7 @@ func TestReadOptionalStdin(t *testing.T) {
 	t.Run("character device is skipped", func(t *testing.T) {
 		devNull, err := os.Open(os.DevNull)
 		require.NoError(t, err)
-		defer devNull.Close()
+		defer func() { _ = devNull.Close() }()
 		assert.Nil(t, readOptionalStdin(devNull, time.Second))
 	})
 
@@ -196,7 +196,7 @@ func TestCopilotPostToolUse_StdinThroughDialect(t *testing.T) {
 
 	r, w, err := os.Pipe()
 	require.NoError(t, err)
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 	_, err = w.WriteString(copilotPostToolUse)
 	require.NoError(t, err)
 	require.NoError(t, w.Close())
