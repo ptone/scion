@@ -443,6 +443,11 @@ func TestAgentDelegation_AuditFailureLeavesNoRows(t *testing.T) {
 	token := f.agentJWT(t, f.agentA)
 
 	fault := f.faults
+	// Only writes made after the fault is armed must have rolled back; the
+	// grant issued above is legitimately stored.
+	fault.mu.Lock()
+	grantsBefore, credsBefore := len(fault.grantIDs), len(fault.credentialHashes)
+	fault.mu.Unlock()
 	fault.inject(t, adtFaults{audit: errors.New("audit write failed")})
 
 	rec := f.issue(t, session, f.agentA.ID, map[string]interface{}{
@@ -452,13 +457,17 @@ func TestAgentDelegation_AuditFailureLeavesNoRows(t *testing.T) {
 	rec = f.exchange(t, token, f.agentA.ID, grant.ID, map[string]interface{}{"audience": f.srv.agentDelegationAudience()})
 	adtAssertAPIError(t, rec, http.StatusInternalServerError, errCodeAuditFailed)
 
-	require.NotEmpty(t, fault.grantIDs, "issuance reached the grant insert")
-	require.NotEmpty(t, fault.credentialHashes, "exchange reached the credential insert")
-	for _, id := range fault.grantIDs {
+	fault.mu.Lock()
+	newGrants := append([]string(nil), fault.grantIDs[grantsBefore:]...)
+	newCreds := append([]string(nil), fault.credentialHashes[credsBefore:]...)
+	fault.mu.Unlock()
+	require.NotEmpty(t, newGrants, "issuance reached the grant insert")
+	require.NotEmpty(t, newCreds, "exchange reached the credential insert")
+	for _, id := range newGrants {
 		_, err := f.store.GetAgentDelegationGrant(context.Background(), id)
 		assert.ErrorIs(t, err, store.ErrNotFound, "grant %s rolled back", id)
 	}
-	for _, h := range fault.credentialHashes {
+	for _, h := range newCreds {
 		_, err := f.store.GetAgentDelegatedCredentialByKeyHash(context.Background(), h)
 		assert.ErrorIs(t, err, store.ErrNotFound, "credential rolled back")
 	}
