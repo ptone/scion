@@ -37,9 +37,10 @@ import (
 //
 // Invariant: the clamp recognizes a test identity only by a USER principal
 // present in the same list (it reads that principal's kind whenever the
-// list holds a system-scoped binding, before classifying any role). A caller that evaluates a group's bindings in a
-// list without the member user, and then merges the result into a user's
-// authority outside the clamp, bypasses it. Callers must resolve a user's
+// list holds a system-scoped binding, before classifying any role). A
+// caller that evaluates a group's bindings in a list without the member
+// user, and then merges the result into a user's authority outside the
+// clamp, bypasses it. Callers must resolve a user's
 // authority with the user principal and its groups in one list (as the
 // authorization service does), never by merging group-only results.
 //
@@ -120,18 +121,12 @@ func (c *testFixtureGrantClamp) isFixture(ctx context.Context, userID string) (b
 	return v, nil
 }
 
-// lookupUserIsTestFixture is the one place authorization reads whether a
-// user is a hub test identity. It fails closed: a store error other than a
-// missing user returns the error, and callers must treat that as "clamp or
-// deny", never as an ordinary user. A missing or malformed user ID has no
-// row and so no grants to clamp; it reports false.
-func lookupUserIsTestFixture(ctx context.Context, users store.UserStore, userID string) (bool, error) {
-	v, _, err := lookupUserKind(ctx, users, userID)
-	return v, err
-}
-
-// lookupUserKind is lookupUserIsTestFixture that also reports whether the
-// user row exists, so callers can cache only successful reads.
+// lookupUserKind is the one place authorization reads whether a user is a
+// hub test identity, and whether the user row exists (so callers cache only
+// successful reads). It fails closed: a store error other than a missing
+// user returns the error, and callers must treat that as "clamp or deny",
+// never as an ordinary user. A missing or malformed user ID has no row and
+// so no grants to clamp; it reports isFixture=false, found=false.
 func lookupUserKind(ctx context.Context, users store.UserStore, userID string) (isFixture, found bool, err error) {
 	u, err := users.GetUser(ctx, userID)
 	if err != nil {
@@ -249,4 +244,25 @@ func (c *testFixtureGrantClamp) ListRoleBindingsForPrincipal(ctx context.Context
 		return bindings, err
 	}
 	return c.clamp(ctx, []store.PrincipalRef{{Type: principalType, ID: principalID}}, bindings)
+}
+
+// clampTestFixtureBindings applies the test-identity grant clamp to bindings
+// that were read through a store handle other than the authorization
+// service's (for example a governance check reading inside its own
+// transaction). principals must be the list the bindings were read for. It
+// fails closed exactly like the clamp: a kind-read error is returned.
+func clampTestFixtureBindings(ctx context.Context, st store.Store, principals []store.PrincipalRef, bindings []*store.RoleBinding) ([]*store.RoleBinding, error) {
+	c := &testFixtureGrantClamp{Store: st, cache: &testFixtureClampCache{}}
+	return c.clamp(ctx, principals, bindings)
+}
+
+// isTestFixtureUser reports whether userID is a hub test identity, reading
+// through st. It is for code outside the authorization service that counts
+// or targets privileged holders (lockout and last-admin guards, admin
+// recipients): such code must not count a test identity, which can never
+// hold system-scoped authority beyond member. A missing user is not a test
+// identity; a read error is returned so the caller fails closed.
+func isTestFixtureUser(ctx context.Context, st store.UserStore, userID string) (bool, error) {
+	isFx, _, err := lookupUserKind(ctx, st, userID)
+	return isFx, err
 }
