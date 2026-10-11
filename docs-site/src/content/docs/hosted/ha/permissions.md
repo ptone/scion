@@ -154,7 +154,7 @@ For Policy Troubleshooter to evaluate a caller's IAM permission across the organ
 
 The Hub's identity needs access to run the Policy Troubleshooter check against the project or organization that holds each target service account. Until it has that access, service account assignment is denied.
 
-If the check cannot run because of the Hub's identity, the admin health summary (`GET /api/v1/admin/health/summary`) reports it in a `service_account_check` section.
+If the check cannot run because of the Hub's identity, that Hub instance reports the check `sa_assign_check` as `degraded` in its health row, and the admin health summary (`GET /api/v1/admin/health/summary`) reports it in a `service_account_check` section that lists the instances reporting it. Every Hub replica returns the same section.
 
 ### Start-Time Admissibility Check
 
@@ -171,6 +171,8 @@ If the Hub cannot save the result of a service account verification (on registra
 ### Hub-Scoped Service Accounts
 
 Hub-scoped service accounts are defined globally at the Hub level rather than being restricted to a single project. This allows Platform Ops to make shared service accounts available for selection across multiple project-level workspaces.
+
+Any current hub member may register an existing (bring-your-own) account at hub scope, with `scion service-accounts add <email> --gcp-project <gcp-project> --global` or the API. Registering does not make the account assignable on its own: assignment goes through the gates below.
 
 To prevent unauthorized assignment of global resources, Scion applies specialized security logic:
 - **Enforcement Mode Dependency**: Assignment of a hub-scoped service account is **unconditionally denied** if `gcp_iam_check_mode` is set to `off`. Because "off" mode disables the GCP IAM validation layer, letting users assign global service accounts without an `actAs` check would create a massive security risk. Hub-scoped service accounts require `gcp_iam_check_mode: enforce` to be assigned.

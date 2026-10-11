@@ -75,6 +75,7 @@ Controls the central Hub API server.
 | `membership_sweep_report_only` | bool | `false` | Puts the membership-standing sweep in report-only mode: it logs and audits (`agent_hold_would_set`) each agent it would hold and stop, and holds and stops none. Off by default (the sweep enforces). Holds from membership changes made while it is on still apply. Set it on every replica: the sweep runs on whichever replica takes its lock, and a replica left enforcing holds the listed agents at its next sweep. For the first boot after an upgrade; see [Upgrading: report-only first boot](/scion/reference/agent-suspension/#upgrading-report-only-first-boot). Startup-only: restart required to change. Env: `SCION_SERVER_HUB_MEMBERSHIPSWEEPREPORTONLY`. |
 | `cors` | object | | CORS configuration (see below). |
 | `conduit` | object | | Conduit relay settings (see [Conduit](#conduit-serverhubconduit)). |
+| `port_proxy` | object | | Agent port proxy settings (see [Port proxy](#port-proxy-serverhubport_proxy)). |
 
 #### CORS (`server.hub.cors`)
 
@@ -114,6 +115,14 @@ Settings for the in-process conduit relay and its stream grants. They take effec
 - the relay is not addressable at its internal endpoint, or answers its self-check as another instance.
 
 Outside HA, a relay that cannot start is logged and the hub serves without it.
+
+#### Port proxy (`server.hub.port_proxy`)
+
+Settings for the agent port proxy (`/api/v1/agents/{id}/ports/{port}/...`) when it runs over the agent's Conduit session (the `hub.conduit` [experiment](/scion/reference/experiments/)). Read at startup, so a change needs a restart. An invalid value is a startup error.
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `response_header_timeout` | duration | `"60s"` | How long the proxy waits for the service on the agent port to send its response headers, counted from when the request has been sent. This includes the WebSocket handshake. If the headers do not arrive in time, the proxy cancels the upstream request, answers `504` (code `runtime_error`; a browser gets the proxy error page) and counts it in `scion.hub.port_proxy.upstream_timeout`. The response body has no time limit: server-sent events, downloads, chunked responses and upgraded WebSockets keep flowing once the headers have arrived. Between `"5s"` and `"10m"`; `0` is not accepted. Env: `SCION_SERVER_HUB_PORTPROXY_RESPONSEHEADERTIMEOUT`. |
 
 #### Asynchronous agent create
 
@@ -209,10 +218,15 @@ Direct maintenance callers include:
 These direct calls run outside the Hub's advisory schema lock. Mixed old replicas may report degraded legacy health as well as write failures after the drop. Rolling back to an old binary can recreate an empty table but cannot restore the deleted data.
 :::
 
-:::caution[Session metrics: one row per session segment on upgrade]
-The Hub keeps one `agent_session_metrics` row per agent, session ID and segment start (`started_at`), enforced by a unique index. Older Hubs stored every report, so a database can hold repeated rows for one segment. When the Hub starts (`CompositeStore.Migrate`), it removes those repeats before creating the index, keeping the earliest stored row. Rows for separate segments of a resumed session are kept.
+:::caution[Duplicate rows removed before schema migration]
+Three tables get a unique index that older Hubs did not enforce, so an existing database can hold rows the index rejects. Before the schema migration, every migrate entry point runs the same pre-migration steps (`entadapter.PreMigrate`), in this order:
 
-`server backfill` and `server migrate-dm-keys` call `entc.AutoMigrate` directly and skip that cleanup. On a database with repeated rows, their index creation fails with a unique-constraint error. No data is changed. Start the Hub on the new version once, so it removes the repeats, and then rerun the command. `server migrate` is unaffected: it does not copy `agent_session_metrics`.
+1. `access_policies`: a NULL `scope_id` becomes an empty string, so the next step also finds those duplicates.
+2. `access_policies`: one row is kept per (`name`, `scope_type`, `scope_id`), the oldest by `created`.
+3. `delegation_edges`: one active edge is kept per (`delegate_type`, `delegate_id`, `scope_type`, `scope_id`), the oldest by `created`. Inactive edges are kept.
+4. `agent_session_metrics`: one row is kept per agent, session ID and segment start (`started_at`), the earliest stored. Older Hubs stored every report, so a database can hold repeated rows for one segment. Rows for separate segments of a resumed session are kept.
+
+The steps are idempotent and do nothing on a fresh database. They run on Hub start (`CompositeStore.Migrate`, which `server recover-authz`, `hub secret migrate-names` and `hub secret migrate` also use), and in `server backfill`, `server migrate-dm-keys` and `server migrate` (on the PostgreSQL destination) before those commands call `entc.AutoMigrate`. `server backfill` and `server migrate-dm-keys` run them only with `--execute`, so their default dry run removes no rows (it still applies the schema migration); on a database holding such duplicates the dry run therefore fails with a unique-constraint error. Rerun with `--execute`, or start the Hub once on the new version, to remove them. `server migrate` opens its SQLite source read-only and does not de-duplicate it, so duplicate `access_policies` rows in an older source still fail the copy; start the Hub on the source database with the new version first (or run `server backfill --execute` against it), then copy. The read-only `server attribution-report` runs no migration and no pre-migration steps.
 :::
 
 :::caution[Postgres: `broker_dispatch` index on upgrade]
@@ -1079,6 +1093,7 @@ Settings required before the database connection exists, or that are restart-bou
 | Membership standing | `hub.membership_sweep_report_only` |
 | Heartbeat reconcile | `hub.missing_agent_grace` |
 | Conduit relay | `hub.conduit.*` |
+| Port proxy | `hub.port_proxy.*` |
 
 ### Layer 1 — Operational (`hub_settings` table)
 
