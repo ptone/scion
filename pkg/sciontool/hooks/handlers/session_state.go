@@ -94,22 +94,23 @@ type sessionStateFile struct {
 	extra map[string]json.RawMessage
 }
 
-// sessionStateKnownKeys are the top-level keys of sessionStateFile's
-// exported fields, in lower case. Any other key is kept in extra.
-var sessionStateKnownKeys = map[string]bool{
-	"version":    true,
-	"aggregator": true,
-	"closed":     true,
-	"pending":    true,
-}
+// sessionStateKnownKeys are the JSON names of sessionStateFile's exported
+// fields. Any other top-level key is kept in extra.
+var sessionStateKnownKeys = []string{"version", "aggregator", "closed", "pending"}
 
 // isKnownSessionStateKey reports whether k names one of sessionStateFile's
-// exported fields. Like encoding/json's field matching, it ignores case: a
-// key such as "Pending" is decoded into the known field, so it must not
-// also be kept in extra, or it would bring the field's old value back after
-// the field is cleared.
+// exported fields. It uses the same case folding as encoding/json's field
+// matching (strings.EqualFold, so "Pending", and even "cloſed" with a long
+// s, match): such a key is decoded into the known field, so it must not also
+// be kept in extra, or it would bring the field's old value back after the
+// field is cleared.
 func isKnownSessionStateKey(k string) bool {
-	return sessionStateKnownKeys[strings.ToLower(k)]
+	for _, known := range sessionStateKnownKeys {
+		if strings.EqualFold(k, known) {
+			return true
+		}
+	}
+	return false
 }
 
 // FileSessionState is a SessionStateStore backed by a JSON file. A sibling

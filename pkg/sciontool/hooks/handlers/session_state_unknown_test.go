@@ -283,9 +283,11 @@ func TestEncodeSessionState_KnownFieldsWin(t *testing.T) {
 // "Pending" or "Closed" is decoded into the known field. It must not also be
 // kept as an unknown key: once the field is cleared, the stale value would
 // come back on the next write and be decoded again, re-creating confirmed
-// reports or a tombstone that is never cleared.
+// reports or a tombstone that is never cleared. The match follows
+// encoding/json's case folding, which goes beyond lower-casing.
 func TestSessionStateUnknownKeys_MiscasedKnownKeysNotKept(t *testing.T) {
-	data := []byte(`{"VERSION":1,"Closed":true,` +
+	// "cloſed" has a long s (U+017F), which encoding/json folds to "s".
+	data := []byte(`{"VERSION":1,"cloſed":true,` +
 		`"Aggregator":{"session_id":"old"},` +
 		`"Pending":[{"summary":{"session_id":"old"}}],` +
 		`"future_scalar":42}`)
