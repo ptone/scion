@@ -1533,6 +1533,10 @@ type Server struct {
 	ctx         context.Context    // Server-lifetime context; cancelled on Shutdown
 	ctxCancel   context.CancelFunc // Cancels ctx
 
+	// autoSuspend is the auto-suspend worker the stalled-detection tick
+	// hands stalled agents to (auto_suspend_worker.go).
+	autoSuspend autoSuspendWorker
+
 	// hubInstanceRegistryStop stops this process's hub-instance registry
 	// loop and records its clean stop; set by startHubInstanceRegistry,
 	// taken (and cleared) by stopHubInstanceRegistry. Guarded by mu.
@@ -4201,14 +4205,15 @@ func (s *Server) agentHeartbeatTimeoutHandler() func(ctx context.Context) {
 // but they still have a recent heartbeat (process alive but hung).
 // It publishes status events for each affected agent so SSE subscribers and the
 // notification system are informed.
-// When AutoSuspendStalled is enabled, stalled agents are additionally suspended
-// (container stopped, phase set to "suspended").
+// When AutoSuspendStalled is enabled, stalled agents are additionally handed
+// to the auto-suspend worker (enqueueAutoSuspend), which suspends them
+// (container stopped, phase set to "suspended") after the tick returns.
 func (s *Server) agentStalledDetectionHandler() func(ctx context.Context) {
 	return func(ctx context.Context) {
 		// Tight timeout: fail fast if DB connections are saturated rather than
 		// holding a connection while waiting, which worsens the thundering herd.
-		// It bounds the tick's own store work only; each auto-suspend below
-		// has its own bound (ptone/scion#4387).
+		// It bounds the whole tick: the auto-suspends run on the
+		// auto-suspend worker, not here (ptone/scion#4387).
 		tickCtx, cancel := context.WithTimeout(ctx, stalledDetectionTimeout)
 		defer cancel()
 
@@ -4236,14 +4241,14 @@ func (s *Server) agentStalledDetectionHandler() func(ctx context.Context) {
 		s.mu.RUnlock()
 
 		if autoSuspend && len(agents) > 0 {
-			s.autoSuspendStalledAgents(ctx, agents)
+			s.enqueueAutoSuspend(agents)
 		}
 	}
 }
 
-// stalledDetectionTimeout bounds the stalled-detection tick's own store work
-// (marking the stalled agents and publishing their status). A variable so
-// tests can shorten it.
+// stalledDetectionTimeout bounds the stalled-detection tick: marking the
+// stalled agents, publishing their status and handing them to the
+// auto-suspend worker. A variable so tests can shorten it.
 var stalledDetectionTimeout = 15 * time.Second
 
 // autoSuspendStartWindow is how long after a batch of auto-suspends begins
@@ -4254,18 +4259,19 @@ var stalledDetectionTimeout = 15 * time.Second
 // tests can change it.
 var autoSuspendStartWindow = stopWriteBudget
 
-// autoSuspendStalledAgents suspends agents that were just marked stalled,
-// one after another (autoSuspendStalledAgent). Each agent's auto-suspend
+// autoSuspendStalledAgents suspends a batch of agents that were marked
+// stalled, one after another (autoSuspendStalledAgent). The auto-suspend
+// worker calls it with the server-lifetime ctx. Each agent's auto-suspend
 // is bounded on its own, so a slow agent does not cut the ones after it;
 // new agents are started only within autoSuspendStartWindow, and not once
-// ctx is cancelled (scheduler shutdown).
+// ctx is done (server shutdown).
 func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Agent) {
 	dispatcher := s.GetDispatcher()
 	suspended := 0
 	windowEnd := time.Now().Add(autoSuspendStartWindow())
 
 	for i := range agents {
-		if errors.Is(ctx.Err(), context.Canceled) || !time.Now().Before(windowEnd) {
+		if ctx.Err() != nil || !time.Now().Before(windowEnd) {
 			slog.Warn("Scheduler: auto-suspend batch stopped; remaining stalled agents left running",
 				"remaining", len(agents)-i, "window", autoSuspendStartWindow(), "error", ctx.Err())
 			break
@@ -4280,12 +4286,32 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 	}
 }
 
-// autoSuspendStalledAgent suspends one agent that was just marked stalled
-// and reports whether the suspension was recorded. It stops the container
-// via the dispatcher and transitions the phase to suspended, under its own
-// stopWriteBudget detached from ctx. Agents whose harness does not support
-// resume are skipped.
-func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDispatcher, agent *store.Agent) bool {
+// autoSuspendStalledAgent suspends one agent that was marked stalled and
+// reports whether the suspension was recorded. It stops the container via
+// the dispatcher and transitions the phase to suspended, under its own
+// stopWriteBudget detached from ctx. snapshot is the agent as it was marked
+// stalled; the agent is read again first and skipped unless it is still
+// running and stalled, in the same run, so an agent that recovered while it
+// waited is left alone. Agents whose harness does not support resume are
+// skipped.
+func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDispatcher, snapshot *store.Agent) bool {
+	// The agent's own bound, detached from the tick and from the agents
+	// before it (ptone/scion#4387): the stop budget, as for a single suspend.
+	ctx, cancel := detachStopFromClient(ctx, stopWriteBudget())
+	defer cancel()
+
+	agent, err := s.store.GetAgent(ctx, snapshot.ID)
+	if err != nil {
+		slog.Error("Scheduler: auto-suspend could not re-read agent",
+			"agent_id", snapshot.ID, "agent_name", snapshot.Name, "error", err)
+		return false
+	}
+	if agent.Phase != string(state.PhaseRunning) || agent.Activity != string(state.ActivityStalled) || agent.RunID != snapshot.RunID {
+		slog.Info("Scheduler: skipping auto-suspend; agent no longer stalled in the same run",
+			"agent_id", agent.ID, "agent_name", agent.Name, "phase", agent.Phase, "activity", agent.Activity)
+		return false
+	}
+
 	// Skip agents whose harness does not support resume — suspending
 	// them would imply resumability that doesn't exist.
 	if agent.AppliedConfig != nil && agent.AppliedConfig.HarnessConfig != "" {
@@ -4296,11 +4322,6 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 			return false
 		}
 	}
-
-	// The agent's own bound, detached from the tick and from the agents
-	// before it (ptone/scion#4387): the stop budget, as for a single suspend.
-	ctx, cancel := detachStopFromClient(ctx, stopWriteBudget())
-	defer cancel()
 
 	// The container is stopped before phase=suspended is written; see
 	// beginLifecycleOp.
@@ -5856,6 +5877,10 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		// Let a scheduled chat message being delivered finish (bounded)
 		// while the stores and event publisher are still open.
 		s.stopScheduledSendSweeper(ctx)
+
+		// Likewise for an auto-suspend in flight; the cancelled ctx above
+		// already stops new ones from starting.
+		s.stopAutoSuspendWorker(ctx)
 
 		// Wait for in-flight audit goroutines.
 		if cc != nil {

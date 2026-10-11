@@ -37,6 +37,7 @@ func TestAutoSuspend_EphemeralWorkspaceRecorded(t *testing.T) {
 	disp := &workspaceCheckDispatcher{execOutput: workAt23}
 	srv, s, broker, project := newWorkspaceCheckServer(t, disp)
 	a := newWorkspaceAgent(t, s, broker, project, "ws-autosuspend", "kubernetes", api.WorkspacePlacementLocal, state.PhaseRunning)
+	markAgentStalled(t, s, a.ID)
 	loaded, err := s.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
 
@@ -64,6 +65,7 @@ func TestAutoSuspend_EphemeralWorkspaceFailedStopClearsRecord(t *testing.T) {
 	a := newWorkspaceAgent(t, s, broker, project, "ws-autosuspend-failed", "kubernetes", api.WorkspacePlacementLocal, state.PhaseRunning)
 	_, err := s.SetRunIntent(ctx, a.ID, store.RunIntentRunning)
 	require.NoError(t, err)
+	markAgentStalled(t, s, a.ID)
 	loaded, err := s.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
 

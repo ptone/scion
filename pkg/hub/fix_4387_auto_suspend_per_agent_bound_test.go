@@ -56,11 +56,22 @@ func makeStalled(t *testing.T, s store.Store, agentID string) {
 	require.NoError(t, err)
 }
 
-// ptone/scion#4387 item 2: each agent's auto-suspend has its own bound,
-// detached from the stalled-detection tick and from the agents before it.
-// The first agent's sync-back download runs until its own bound cuts it,
-// well past the tick's bound; the second agent in the batch is still
-// suspended, with a full sync-back of its own.
+// markAgentStalled sets agent's activity to stalled, as the stalled-detection
+// tick does, so the auto-suspend's re-read finds it still stalled.
+func markAgentStalled(t *testing.T, s store.Store, agentID string) {
+	t.Helper()
+	db := s.(*entadapter.CompositeStore).DB()
+	_, err := db.ExecContext(context.Background(),
+		"UPDATE agents SET activity = ? WHERE id = ?", string(state.ActivityStalled), agentID)
+	require.NoError(t, err)
+}
+
+// ptone/scion#4387 item 2: the stalled-detection tick hands the agents to
+// the auto-suspend worker and returns, and each agent's auto-suspend has
+// its own bound, detached from the tick and from the agents before it. The
+// first agent's sync-back download runs until its own bound cuts it, well
+// past the tick's bound; the second agent in the batch is still suspended,
+// with a sync-back bound of its own.
 func TestAutoSuspend_SlowSyncBackDoesNotCutNextAgent(t *testing.T) {
 	const (
 		tickBound = 250 * time.Millisecond
@@ -115,6 +126,8 @@ func TestAutoSuspend_SlowSyncBackDoesNotCutNextAgent(t *testing.T) {
 
 	start := time.Now()
 	srv.agentStalledDetectionHandler()(context.Background())
+	tickTook := time.Since(start)
+	srv.waitAutoSuspendIdle()
 	elapsed := time.Since(start)
 
 	require.Len(t, uploaded, 2, "fixture check: both sync-backs were tunneled to the broker")
@@ -123,7 +136,10 @@ func TestAutoSuspend_SlowSyncBackDoesNotCutNextAgent(t *testing.T) {
 	require.Len(t, downloadErrs, 2, "fixture check: both sync-backs downloaded")
 	require.ErrorIs(t, downloadErrs[0], context.DeadlineExceeded, "the first download is cut at its own bound")
 	assert.NoError(t, downloadErrs[1], "the second agent's sync-back is not cut")
-	assert.Greater(t, remaining[1], syncBound/2, "the second sync-back has a full bound of its own")
+	// Under one deadline shared by the batch, the second sync-back would
+	// have had less than the tick's bound left, or nothing at all.
+	assert.Greater(t, remaining[1], tickBound, "the second sync-back has a bound of its own")
+	assert.Less(t, tickTook, syncBound, "the tick returns without waiting for the auto-suspends")
 	assert.Greater(t, elapsed, tickBound, "fixture check: the batch outlasted the tick's bound")
 
 	for _, id := range []string{a.ID, b.ID} {
@@ -142,6 +158,7 @@ func TestAutoSuspend_StartWindowBoundsBatch(t *testing.T) {
 	_, _, agent := setupOnlineBrokerAgent(t, s, "as-window")
 	_, err := s.SetRunIntent(ctx, agent.ID, store.RunIntentRunning)
 	require.NoError(t, err)
+	markAgentStalled(t, s, agent.ID)
 	loaded, err := s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
 
@@ -153,12 +170,13 @@ func TestAutoSuspend_StartWindowBoundsBatch(t *testing.T) {
 	assert.Equal(t, string(state.PhaseRunning), got.Phase)
 }
 
-// A cancelled scheduler ctx (shutdown) starts no new auto-suspend.
+// A done ctx (server shutdown) starts no new auto-suspend.
 func TestAutoSuspend_CancelledSchedulerStartsNone(t *testing.T) {
 	srv, s := testServer(t)
 	disp := &runIntentDispatcher{}
 	srv.SetDispatcher(disp)
 	_, _, agent := setupOnlineBrokerAgent(t, s, "as-cancel")
+	markAgentStalled(t, s, agent.ID)
 	loaded, err := s.GetAgent(context.Background(), agent.ID)
 	require.NoError(t, err)
 
@@ -167,4 +185,201 @@ func TestAutoSuspend_CancelledSchedulerStartsNone(t *testing.T) {
 	srv.autoSuspendStalledAgents(ctx, []store.Agent{*loaded})
 
 	assert.Zero(t, disp.stops.Load(), "no auto-suspend starts after shutdown")
+}
+
+// gatedStopDispatcher records each stop dispatch and holds it until release
+// is closed (or its ctx ends).
+type gatedStopDispatcher struct {
+	createAgentDispatcher
+	mu      sync.Mutex
+	stops   []string
+	started chan string
+	release chan struct{}
+}
+
+func newGatedStopDispatcher() *gatedStopDispatcher {
+	return &gatedStopDispatcher{started: make(chan string, 16), release: make(chan struct{})}
+}
+
+func (d *gatedStopDispatcher) DispatchAgentStop(ctx context.Context, agent *store.Agent) error {
+	d.mu.Lock()
+	d.stops = append(d.stops, agent.ID)
+	d.mu.Unlock()
+	d.started <- agent.ID
+	select {
+	case <-d.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (d *gatedStopDispatcher) stopped() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.stops...)
+}
+
+// awaitStopStarted waits for the next stop dispatch to begin.
+func awaitStopStarted(t *testing.T, d *gatedStopDispatcher) string {
+	t.Helper()
+	select {
+	case id := <-d.started:
+		return id
+	case <-time.After(5 * time.Second):
+		t.Fatal("no stop dispatch started")
+		return ""
+	}
+}
+
+// newStalledBrokerAgent creates a running agent on an online broker with
+// intent running, marked stalled, and returns it as loaded.
+func newStalledBrokerAgent(t *testing.T, s store.Store, name string) *store.Agent {
+	t.Helper()
+	ctx := context.Background()
+	_, _, agent := setupOnlineBrokerAgent(t, s, name)
+	_, err := s.SetRunIntent(ctx, agent.ID, store.RunIntentRunning)
+	require.NoError(t, err)
+	markAgentStalled(t, s, agent.ID)
+	loaded, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	return loaded
+}
+
+// ptone/scion#4387 round 1 (R1): the auto-suspends run on the server-owned
+// worker, on the server-lifetime ctx, not on the scheduler's handler ctx.
+// The tick returns while the first auto-suspend is still in flight; the
+// handler ctx then expires and its parent is cancelled, which does not
+// matter to the worker; the server shuts down, and no further
+// auto-suspend starts. Shutdown waits for the one in flight, which
+// completes under its own bound.
+func TestAutoSuspend_WorkerStopsOnShutdownAfterHandlerCtxEnds(t *testing.T) {
+	srv, s := testServer(t)
+	disp := newGatedStopDispatcher()
+	srv.SetDispatcher(disp)
+	srv.config.AutoSuspendStalled = true
+	a := newStalledBrokerAgent(t, s, "as-shutdown-a")
+	b := newStalledBrokerAgent(t, s, "as-shutdown-b")
+	// Unmark them so the tick marks them again and hands them off.
+	for _, id := range []string{a.ID, b.ID} {
+		db := s.(*entadapter.CompositeStore).DB()
+		_, err := db.ExecContext(context.Background(), "UPDATE agents SET activity = '' WHERE id = ?", id)
+		require.NoError(t, err)
+		makeStalled(t, s, id)
+	}
+
+	parent, cancelParent := context.WithCancel(context.Background())
+	handlerCtx, cancelHandler := context.WithTimeout(parent, 5*time.Second)
+	defer cancelHandler()
+	srv.agentStalledDetectionHandler()(handlerCtx)
+
+	first := awaitStopStarted(t, disp)
+	// The scheduler's handler ctx ends (deadline, then its parent): the
+	// worker does not depend on it.
+	cancelHandler()
+	cancelParent()
+
+	// Shut down while the first auto-suspend is in flight, then let its
+	// dispatch finish.
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		close(disp.release)
+	}()
+	require.NoError(t, srv.CleanupBackgroundResources(context.Background()))
+
+	assert.Equal(t, []string{first}, disp.stopped(), "no auto-suspend starts after shutdown")
+	second := a.ID
+	if first == a.ID {
+		second = b.ID
+	}
+	got := requireRunIntent(t, s, first, store.RunIntentStopped)
+	assert.Equal(t, string(state.PhaseSuspended), got.Phase, "the auto-suspend in flight completes")
+	got = requireRunIntent(t, s, second, store.RunIntentRunning)
+	assert.Equal(t, string(state.PhaseRunning), got.Phase, "the agent not reached is left running")
+
+	// A hand-off after shutdown is dropped.
+	srv.enqueueAutoSuspend([]store.Agent{*got})
+	srv.waitAutoSuspendIdle()
+	assert.Len(t, disp.stopped(), 1)
+}
+
+// Overlapping hand-offs (ticks) do not process an agent twice: an agent
+// already waiting, or in the batch being processed, is not added again. A
+// batch handed off while the worker is busy is processed after it.
+func TestAutoSuspend_WorkerDeduplicatesHandOffs(t *testing.T) {
+	srv, s := testServer(t)
+	disp := newGatedStopDispatcher()
+	srv.SetDispatcher(disp)
+	a := newStalledBrokerAgent(t, s, "as-dedup-a")
+	b := newStalledBrokerAgent(t, s, "as-dedup-b")
+
+	srv.enqueueAutoSuspend([]store.Agent{*a})
+	require.Equal(t, a.ID, awaitStopStarted(t, disp))
+	// While a is in flight: a again (in progress), b twice (waiting).
+	srv.enqueueAutoSuspend([]store.Agent{*a, *b})
+	srv.enqueueAutoSuspend([]store.Agent{*b})
+	close(disp.release)
+	srv.waitAutoSuspendIdle()
+
+	assert.Equal(t, []string{a.ID, b.ID}, disp.stopped(), "each agent is dispatched once, in hand-off order")
+	for _, id := range []string{a.ID, b.ID} {
+		got := requireRunIntent(t, s, id, store.RunIntentStopped)
+		assert.Equal(t, string(state.PhaseSuspended), got.Phase)
+	}
+}
+
+// The hand-off is bounded: agents beyond autoSuspendQueueLimit are dropped
+// and stay stalled.
+func TestAutoSuspend_WorkerQueueBounded(t *testing.T) {
+	prev := autoSuspendQueueLimit
+	autoSuspendQueueLimit = 1
+	t.Cleanup(func() { autoSuspendQueueLimit = prev })
+	srv, s := testServer(t)
+	disp := newGatedStopDispatcher()
+	close(disp.release)
+	srv.SetDispatcher(disp)
+	a := newStalledBrokerAgent(t, s, "as-bound-q-a")
+	b := newStalledBrokerAgent(t, s, "as-bound-q-b")
+
+	srv.enqueueAutoSuspend([]store.Agent{*a, *b})
+	srv.waitAutoSuspendIdle()
+
+	assert.Equal(t, []string{a.ID}, disp.stopped(), "only the agents within the limit are processed")
+	got := requireRunIntent(t, s, b.ID, store.RunIntentRunning)
+	assert.Equal(t, string(state.ActivityStalled), got.Activity, "a dropped agent stays stalled")
+}
+
+// ptone/scion#4387 round 1 (R2): the auto-suspend reads the agent again
+// and skips it unless it is still running and stalled in the same run, so
+// an agent that recovered after it was marked stalled is not suspended.
+func TestAutoSuspend_SkipsAgentThatRecovered(t *testing.T) {
+	for name, change := range map[string]string{
+		"activity recovered": "UPDATE agents SET activity = 'working' WHERE id = ?",
+		"phase changed":      "UPDATE agents SET phase = 'stopped' WHERE id = ?",
+		"new run":            "UPDATE agents SET run_id = 'run-newer' WHERE id = ?",
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv, s := testServer(t)
+			disp := &runIntentDispatcher{}
+			srv.SetDispatcher(disp)
+			snapshot := newStalledBrokerAgent(t, s, "as-recovered")
+			db := s.(*entadapter.CompositeStore).DB()
+			_, err := db.ExecContext(context.Background(), change, snapshot.ID)
+			require.NoError(t, err)
+
+			srv.autoSuspendStalledAgents(context.Background(), []store.Agent{*snapshot})
+
+			assert.Zero(t, disp.stops.Load(), "no stop is dispatched")
+			got := requireRunIntent(t, s, snapshot.ID, store.RunIntentRunning)
+			assert.NotEqual(t, string(state.PhaseSuspended), got.Phase)
+		})
+	}
+
+	// Control: unchanged, the same agent is suspended.
+	srv, s := testServer(t)
+	disp := &runIntentDispatcher{}
+	srv.SetDispatcher(disp)
+	snapshot := newStalledBrokerAgent(t, s, "as-recovered-control")
+	srv.autoSuspendStalledAgents(context.Background(), []store.Agent{*snapshot})
+	assert.Equal(t, int32(1), disp.stops.Load())
 }
