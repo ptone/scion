@@ -116,6 +116,7 @@ func TestPrintSAStatus_MappingDetails(t *testing.T) {
     {"brokerId":"b1","brokerName":"b","profile":"gke-6","state":"unknown","unknownReason":"report_stale","reportedAt":"2026-10-10T11:00:00Z"},
     {"brokerId":"b1","brokerName":"b","profile":"gke-7","state":"unknown","unknownReason":"report_old_version"},
     {"brokerId":"b1","brokerName":"b","profile":"gke-8","state":"unknown","unknownReason":"report_missing"},
+    {"brokerId":"b1","brokerName":"b","profile":"gke-9","state":"unknown","unknownReason":"report_incomplete"},
     {"brokerId":"b1","brokerName":"b","profile":"gke-4","state":"not_mapped","ambiguous":true},
     {"brokerId":"b1","brokerName":"b","profile":"gke-5","state":"mapped"}
   ],
@@ -137,6 +138,8 @@ func TestPrintSAStatus_MappingDetails(t *testing.T) {
 		"b/gke-6                         unknown; report stale; reported 1h ago\n",
 		"b/gke-7                         unknown; the broker's report is too old a version to tell\n",
 		"b/gke-8                         unknown; no stored report from the broker\n",
+		// Incomplete without a named reason still says so.
+		"b/gke-9                         unknown; report incomplete: unknown reason\n",
 		"b/gke-4                         not mapped; ambiguous: more than one Kubernetes service account is annotated with it\n",
 		// An older broker's entry names only the state.
 		"b/gke-5                         mapped\n",
