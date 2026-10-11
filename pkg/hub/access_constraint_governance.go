@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -1073,12 +1074,16 @@ func (gs *GovernanceService) isConstraintAdmin(ctx context.Context, userID strin
 	// Get role bindings for this user.
 	principals := []store.PrincipalRef{{Type: "user", ID: userID}}
 
-	// Also include group-expanded bindings.
+	// Also include group-expanded bindings. A group-resolution failure is
+	// returned rather than ignored: evaluating only the direct bindings
+	// would understate (or, with the test-identity clamp, misjudge) the
+	// user's authority. A user with no groups is not an error.
 	groups, err := gs.store.GetEffectiveGroups(ctx, userID)
-	if err == nil {
-		for _, gid := range groups {
-			principals = append(principals, store.PrincipalRef{Type: "group", ID: gid})
-		}
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return false, fmt.Errorf("resolve groups for constraint-admin check: %w", err)
+	}
+	for _, gid := range groups {
+		principals = append(principals, store.PrincipalRef{Type: "group", ID: gid})
 	}
 
 	bindings, err := gs.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)

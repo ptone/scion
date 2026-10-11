@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"testing"
 	"time"
@@ -166,4 +167,45 @@ func TestTestIdentity_NoHubRoleBindingAuthorityThroughGroup(t *testing.T) {
 
 	_, err = srv.membershipService.actorHasHubRoleBindingAuthorityTx(ctx, kindErrStore{Store: s}, human, MembershipOpAdd)
 	assert.Error(t, err, "an unreadable kind fails closed")
+}
+
+// The preview's base permissions apply the test-identity clamp: a test
+// identity in an admin-granting group does not show the group's
+// system-scoped grants; a human member of the same group does.
+func TestTestIdentity_PreviewBasePermissionsClamped(t *testing.T) {
+	ps, _, s := previewTestSetup(t)
+	ctx := context.Background()
+	_, group, fixture, _ := tiConstraintAdminSetup(t, s, "ti-preview-base")
+	human := pvSeedUser(t, s, "ti-preview-base-human")
+	tiAddToGroup(t, s, group.ID, human, store.GroupMemberRoleMember)
+
+	perms := func(userID string) []string {
+		groups, err := s.GetEffectiveGroups(ctx, userID)
+		require.NoError(t, err)
+		got, err := ps.getBasePermissions(ctx, resolvedPrincipal{principalType: "user", principalID: userID, groupIDs: groups},
+			store.RoleScopeSystem, "", time.Now())
+		require.NoError(t, err)
+		return got
+	}
+	assert.NotContains(t, perms(fixture.ID), PermissionConstraintAdmin, "a test identity's group-derived system grant is clamped")
+	assert.Contains(t, perms(human), PermissionConstraintAdmin, "control: a human member keeps the group's grant")
+}
+
+// groupsErrStore fails group resolution.
+type groupsErrStore struct{ store.Store }
+
+func (groupsErrStore) GetEffectiveGroups(context.Context, string) ([]string, error) {
+	return nil, errors.New("groups unavailable")
+}
+
+// isConstraintAdmin returns a group-resolution error instead of judging
+// the user on direct bindings alone.
+func TestTestIdentity_ConstraintAdminGroupErrorReturned(t *testing.T) {
+	_, ps, authz, s := govTestSetup(t)
+	human := pvSeedUser(t, s, "ti-gov-grouperr")
+	gs := NewGovernanceService(groupsErrStore{Store: s}, ps, authz, slog.Default())
+	_, err := gs.isConstraintAdmin(context.Background(), human)
+	assert.Error(t, err)
+	_, err = gs.CheckUserSuspension(context.Background(), human)
+	assert.Error(t, err)
 }
