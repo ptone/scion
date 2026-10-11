@@ -230,6 +230,11 @@ run "fresh_gke_hub_plans_clean" {
     error_message = "KSA, namespaces and agent image registry are not as designed."
   }
 
+  assert {
+    condition     = output.chart_values.config.extra.server.workspace_storage.nfs.shares[0].pv_name == module.agent_runtime_k8s.pvc_name
+    error_message = "workspace_storage must name the agent-runtime NFS claim; otherwise the runtime creates per-directory RWX claims the default class can't provide."
+  }
+
   # RBAC is owned by the chart, not agent-runtime-k8s.
   assert {
     condition     = output.hub_rbac_created_by_terraform == false

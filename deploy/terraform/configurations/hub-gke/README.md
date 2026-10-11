@@ -218,6 +218,10 @@ switch to a two-phase apply (NEG Service first, then everything else).
   restarts until it settles. There is no sleep for it.
 - The chart renders its own Role/RoleBinding in the agent namespace `<hub>` for
   its KSA, so `agent-runtime-k8s` runs with `create_hub_rbac = false`.
+- If agent create times out and a `scion-shared-*` claim in `<hub>` shows
+  `ProvisioningFailed`, the hub isn't getting `workspace_storage`: check
+  `chart_values.config.extra.server.workspace_storage` and the rendered
+  settings.yaml.
 
 ## Rotating the DB password
 

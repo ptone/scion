@@ -26,6 +26,12 @@ variables {
   sql_connection_name = "tfha-test-project:us-central1:tfha-pg"
   iap_oauth_client_id = "123456789-abc.apps.googleusercontent.com"
   neg_zones           = ["us-central1-a", "us-central1-b", "us-central1-c"]
+
+  nfs = {
+    server  = "10.0.0.2"
+    export  = "/scion/tfha-gke-h3"
+    pv_name = "tfha-gke-h3-nfs"
+  }
 }
 
 run "client_id_set_installs_the_hub" {
@@ -101,6 +107,15 @@ run "client_id_set_installs_the_hub" {
       output.chart_values.runtime.namespace == "tfha-gke-h3"
     )
     error_message = "gcpsm/gcs/cloudsql/serviceAccount/rbac/runtime values are not as designed."
+  }
+
+  assert {
+    condition = (
+      output.chart_values.config.extra.server.workspace_storage.backend == "nfs" &&
+      output.chart_values.config.extra.server.workspace_storage.nfs.shares[0].pv_name == "tfha-gke-h3-nfs" &&
+      output.chart_values.config.extra.server.workspace_storage.nfs.subpath_root == "projects"
+    )
+    error_message = "config.extra must render server.workspace_storage with backend nfs, the hub's NFS claim as shares[0].pv_name and subpath_root projects."
   }
 
   assert {

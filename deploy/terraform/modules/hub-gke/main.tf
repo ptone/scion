@@ -129,6 +129,40 @@ locals {
       }
       existingSecret = local.session_secret_name
     }
+
+    # settings.yaml server.workspace_storage, through config.extra because the
+    # chart does not model it (the chart's post-merge guards still apply).
+    # Same fields as hub-cloudrun's settings.yaml. With backend nfs and
+    # shares[0].pv_name set, the Kubernetes runtime mounts agent workspaces
+    # and shared dirs by subPath from this hub's NFS claim and creates no
+    # per-directory claims.
+    #   - The hub pod does not mount the export.
+    #   - The node creates the subPaths when the agent pod starts, which needs
+    #     an export that lets root create directories (the Filestore default).
+    #   - auto_mount is left unset.
+    config = {
+      extra = {
+        server = {
+          workspace_storage = {
+            backend = "nfs"
+            nfs = {
+              mount_root   = var.nfs_mount_root
+              uid          = var.nfs_uid
+              gid          = var.nfs_gid
+              subpath_root = var.nfs_subpath_root
+              shares = [
+                {
+                  id      = var.hub_name
+                  server  = var.nfs.server
+                  export  = var.nfs.export
+                  pv_name = var.nfs.pv_name
+                },
+              ]
+            }
+          }
+        }
+      }
+    }
   }
 
   session_secret_name = "${var.hub_name}-session"

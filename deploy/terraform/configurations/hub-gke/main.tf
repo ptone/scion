@@ -206,6 +206,17 @@ module "hub_gke" {
   db_password_rotation = var.db_password_rotation
   sql_connection_name  = module.shared_lookup.shared.sql.connection_name
 
+  # The same NFS share, claim and ownership agent_runtime_k8s sets up, so
+  # workspace_storage names the claim that exists.
+  nfs = {
+    server  = module.shared_lookup.shared.nfs.server
+    export  = module.agent_runtime_k8s.nfs_export
+    pv_name = module.agent_runtime_k8s.pv_name
+  }
+  nfs_uid          = var.nfs_uid
+  nfs_gid          = var.nfs_gid
+  nfs_subpath_root = var.nfs_subpath_root
+
   # Real resource attributes only (see hub-gke's variable). The hub pod
   # reaches Secret Manager, Cloud SQL and GCS as the hub GSA through
   # Workload Identity, so the release waits for those grants to exist.

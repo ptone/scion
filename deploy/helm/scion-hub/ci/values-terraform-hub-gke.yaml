@@ -95,3 +95,20 @@ auth:
   # Terraform creates this Secret (kubernetes_secret_v1.session) in the
   # release namespace; the chart only references it.
   existingSecret: tfha-gke-h3-session
+
+# settings.yaml server.workspace_storage, which the chart does not model.
+config:
+  extra:
+    server:
+      workspace_storage:
+        backend: nfs
+        nfs:
+          mount_root: /mnt/scion-nfs
+          uid: 1000
+          gid: 1000
+          subpath_root: projects
+          shares:
+            - id: tfha-gke-h3
+              server: 10.0.0.2
+              export: /scion/tfha-gke-h3
+              pv_name: tfha-gke-h3-nfs

@@ -109,6 +109,45 @@ variable "runtime_namespace" {
   type        = string
 }
 
+# --- Workspace storage (NFS) ---
+#
+# Rendered as settings.yaml server.workspace_storage, the same block
+# hub-cloudrun renders. Single-source these with the agent-runtime-k8s module
+# in the calling configuration.
+
+variable "nfs" {
+  description = "This hub's NFS share: { server, export, pv_name }. server is the Filestore server IP (shared.nfs.server); export is this hub's NFS export path, e.g. \"/scion/<hub_name>\" (agent-runtime-k8s output nfs_export); pv_name is the PersistentVolume/claim name for this hub's workspace share (agent-runtime-k8s output pv_name), embedded as workspace_storage.nfs.shares[0].pv_name."
+  type = object({
+    server  = string
+    export  = string
+    pv_name = string
+  })
+}
+
+variable "nfs_uid" {
+  description = "uid the settings.yaml workspace_storage.nfs block advertises. Single-sourced with agent-runtime-k8s's nfs_uid in the hub root."
+  type        = number
+  default     = 1000
+}
+
+variable "nfs_gid" {
+  description = "gid the settings.yaml workspace_storage.nfs block advertises. Single-sourced with agent-runtime-k8s's nfs_gid in the hub root."
+  type        = number
+  default     = 1000
+}
+
+variable "nfs_subpath_root" {
+  description = "subpath_root the settings.yaml workspace_storage.nfs block advertises. Single-sourced with agent-runtime-k8s's subpath_root in the hub root."
+  type        = string
+  default     = "projects"
+}
+
+variable "nfs_mount_root" {
+  description = "mount_root the settings.yaml workspace_storage.nfs block advertises. The hub pod does not mount the export, so this is not a path that exists in the pod."
+  type        = string
+  default     = "/mnt/scion-nfs"
+}
+
 variable "port" {
   description = "Hub container port (the chart's hub.webPort). The NEG Service exposes this port, so NEG endpoints are pod IP:port."
   type        = number
