@@ -568,12 +568,13 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request, proje
 	// Unread is tracked only in projects the caller is a member of; in
 	// others threads report no unread, but a mention of the caller still
 	// shows. A failed lookup tracks nothing, as the spaces list does.
-	membership := s.CheckEffectiveMembership(r.Context(), user.ID(), projectID)
-	if membership.Err != nil {
+	// The same function decides as for the spaces list and the badge.
+	members, err := s.chatMemberProjectIDs(r.Context(), user.ID())
+	if err != nil {
 		slog.Warn("chat threads: membership lookup failed; no unread tracked",
-			"project_id", projectID, "error", membership.Err)
+			"project_id", projectID, "error", err)
 	}
-	unreadTracked := membership.Err == nil && membership.IsMember
+	unreadTracked := err == nil && members[projectID]
 
 	// One batched query over the same listed topic keys: which of them hold
 	// a mention of the caller after the caller's own read watermark. Only
@@ -4240,8 +4241,10 @@ func (s *Server) handleChatDMs(w http.ResponseWriter, r *http.Request) {
 				entry.PeerSlug = peerAgent.Slug
 			}
 			// Only a lookup that succeeded can say the agent is gone: a
-			// failed one flags nothing.
-			entry.PeerDeleted = peerAgentsOK && agentPeerDeleted(peerAgents[dm.PeerID])
+			// failed one flags nothing. A DM with no peer ID was never looked
+			// up, so it is not flagged either (the count keeps it too; see
+			// chatDeletedAgentPeers).
+			entry.PeerDeleted = peerAgentsOK && dm.PeerID != "" && agentPeerDeleted(peerAgents[dm.PeerID])
 		}
 
 		if rs, ok := readStates[dm.ConversationKey]; ok {

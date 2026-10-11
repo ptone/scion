@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -26,65 +27,103 @@ import (
 // member of, for chat's unread state: the badge, the spaces rollup and the
 // thread list's unread dots count only these projects.
 //
-// Membership is CheckEffectiveMembership's, computed for every project at
+// For every project p, chatMemberProjectIDs(ctx, u)[p] equals
+// CheckEffectiveMembership(ctx, u, p).IsMember, computed for all projects at
 // once: an active project-scoped role binding held directly, or through an
 // effective group (a group-bound owner role confers nothing). Hub-admin
 // status, public visibility and generic read grants are not membership, so
 // an admin's unread state covers only the projects they belong to, not all
 // the projects they can read.
+//
+// As in CheckEffectiveMembership, a project with an active binding whose
+// role definition is missing is not a member: that check fails for the
+// project, and chat treats a failed check as no membership. Other store
+// errors are returned.
 func (s *Server) chatMemberProjectIDs(ctx context.Context, userID string) (map[string]bool, error) {
 	now := time.Now()
-	out := make(map[string]bool)
+	members := make(map[string]bool)
+	// Projects whose check CheckEffectiveMembership would fail: a binding
+	// scoped to them names a missing role definition.
+	failed := make(map[string]bool)
+	roleNames := make(map[string]string)
+	roleMissing := make(map[string]bool)
+	// roleName resolves a role definition's name, reporting whether the
+	// definition exists.
+	roleName := func(id string) (string, bool, error) {
+		if roleMissing[id] {
+			return "", false, nil
+		}
+		if name, ok := roleNames[id]; ok {
+			return name, true, nil
+		}
+		rd, err := s.store.GetRoleDefinition(ctx, id)
+		if errors.Is(err, store.ErrNotFound) || (err == nil && rd == nil) {
+			roleMissing[id] = true
+			return "", false, nil
+		}
+		if err != nil {
+			return "", false, fmt.Errorf("get role definition %s: %w", id, err)
+		}
+		roleNames[id] = rd.Name
+		return rd.Name, true, nil
+	}
 
 	direct, err := s.store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
 	if err != nil {
 		return nil, fmt.Errorf("list direct bindings: %w", err)
 	}
 	for _, rb := range direct {
-		if rb.ScopeType == store.RoleScopeProject && rb.ScopeID != "" && isBindingActive(rb, now) {
-			out[rb.ScopeID] = true
+		if rb.ScopeType != store.RoleScopeProject || rb.ScopeID == "" || !isBindingActive(rb, now) {
+			continue
 		}
+		_, ok, err := roleName(rb.RoleDefinitionID)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			failed[rb.ScopeID] = true
+			continue
+		}
+		members[rb.ScopeID] = true
 	}
 
 	groupIDs, err := s.store.GetEffectiveGroups(ctx, userID)
 	if err != nil {
 		return nil, fmt.Errorf("get effective groups: %w", err)
 	}
-	if len(groupIDs) == 0 {
-		return out, nil
-	}
-	principals := make([]store.PrincipalRef, 0, len(groupIDs))
-	for _, gid := range groupIDs {
-		principals = append(principals, store.PrincipalRef{Type: store.RoleBindingPrincipalGroup, ID: gid})
-	}
-	bindings, err := s.store.ListRoleBindingsForPrincipals(ctx, principals, []string{store.RoleScopeProject}, nil)
-	if err != nil {
-		return nil, fmt.Errorf("list group bindings: %w", err)
-	}
-	roleNames := make(map[string]string)
-	for _, rb := range bindings {
-		if rb.ScopeType != store.RoleScopeProject || rb.ScopeID == "" || out[rb.ScopeID] || !isBindingActive(rb, now) {
-			continue
+	if len(groupIDs) > 0 {
+		principals := make([]store.PrincipalRef, 0, len(groupIDs))
+		for _, gid := range groupIDs {
+			principals = append(principals, store.PrincipalRef{Type: store.RoleBindingPrincipalGroup, ID: gid})
 		}
-		name, ok := roleNames[rb.RoleDefinitionID]
-		if !ok {
-			rd, err := s.store.GetRoleDefinition(ctx, rb.RoleDefinitionID)
+		bindings, err := s.store.ListRoleBindingsForPrincipals(ctx, principals, []string{store.RoleScopeProject}, nil)
+		if err != nil {
+			return nil, fmt.Errorf("list group bindings: %w", err)
+		}
+		for _, rb := range bindings {
+			if rb.ScopeType != store.RoleScopeProject || rb.ScopeID == "" || !isBindingActive(rb, now) {
+				continue
+			}
+			name, ok, err := roleName(rb.RoleDefinitionID)
 			if err != nil {
-				return nil, fmt.Errorf("get role definition %s: %w", rb.RoleDefinitionID, err)
+				return nil, err
 			}
-			if rd != nil {
-				name = rd.Name
+			if !ok {
+				failed[rb.ScopeID] = true
+				continue
 			}
-			roleNames[rb.RoleDefinitionID] = name
+			// Groups never confer owner; such a binding is ignored.
+			if name == store.ProjectRoleOwner {
+				continue
+			}
+			members[rb.ScopeID] = true
 		}
-		// Groups never confer owner; such a binding is ignored, as in
-		// CheckEffectiveMembership.
-		if name == store.ProjectRoleOwner {
-			continue
-		}
-		out[rb.ScopeID] = true
 	}
-	return out, nil
+
+	for id := range failed {
+		delete(members, id)
+	}
+	return members, nil
 }
 
 // chatDeletedAgentPeers returns the agent peers of dms that are deleted:

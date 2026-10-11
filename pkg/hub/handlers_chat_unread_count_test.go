@@ -632,3 +632,26 @@ func TestChatUnreadCount_ExplicitMemberProjectsOnly(t *testing.T) {
 	assert.Equal(t, chatUnreadCountResponse{Conversations: 3, Threads: 3}, getUnreadCount(t, rec))
 	assert.Equal(t, spacesUnreadTotal(t, srv), 3)
 }
+
+// An agent DM row with no peer ID is never looked up, so it is not taken
+// for a deleted agent: the list does not flag it and both the badge and
+// the rail's Unread DMs list count it.
+func TestChatUnreadCount_AgentDMWithoutPeerIDCounted(t *testing.T) {
+	srv, s, wcs, proj := setupSharedChatTest(t)
+	ctx := context.Background()
+	me := DevUserID
+	f := &unreadFixture{t: t, s: s, wcs: wcs, proj: proj}
+	key, _ := f.dmWith(me, "agent", api.NewUUID())
+	require.NoError(t, wcs.UpsertDM(ctx, WebChatDM{ConversationKey: key, ParticipantID: me, PeerKind: "agent"}))
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/dms", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var dms chatDMListResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &dms))
+	require.Len(t, dms.DMs, 1)
+	assert.Empty(t, dms.DMs[0].PeerID)
+	assert.False(t, dms.DMs[0].PeerDeleted)
+	assert.Equal(t, 1, railUnreadDMs(t, srv))
+	assert.Equal(t, chatUnreadCountResponse{Conversations: 1, DMs: 1},
+		getUnreadCount(t, doRequest(t, srv, http.MethodGet, "/api/v1/chat/unread-count", nil)))
+}
