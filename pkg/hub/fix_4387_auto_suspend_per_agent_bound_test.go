@@ -247,6 +247,16 @@ func awaitStopStarted(t *testing.T, d *gatedStopDispatcher) string {
 	}
 }
 
+// releaseOneStop lets one held stop dispatch finish.
+func releaseOneStop(t *testing.T, d *gatedStopDispatcher) {
+	t.Helper()
+	select {
+	case d.release <- struct{}{}:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no held stop dispatch to release")
+	}
+}
+
 // newStalledBrokerAgent creates a running agent on an online broker with
 // intent running, marked stalled, and returns it as loaded.
 func newStalledBrokerAgent(t *testing.T, s store.Store, name string) *store.Agent {
@@ -304,9 +314,9 @@ func TestAutoSuspend_WorkerStopsOnShutdownAfterHandlerCtxEnds(t *testing.T) {
 	require.ErrorIs(t, handlerCtx.Err(), context.DeadlineExceeded, "fixture check: the handler ctx passed its deadline")
 	cancelParent()
 
-	disp.release <- struct{}{}
+	releaseOneStop(t, disp)
 	second := awaitStopStarted(t, disp) // the server is up: the worker goes on.
-	disp.release <- struct{}{}
+	releaseOneStop(t, disp)
 	third := awaitStopStarted(t, disp)
 
 	cleaned := make(chan struct{})
@@ -314,8 +324,13 @@ func TestAutoSuspend_WorkerStopsOnShutdownAfterHandlerCtxEnds(t *testing.T) {
 		_ = srv.CleanupBackgroundResources(context.Background())
 		close(cleaned)
 	}()
-	<-srv.ctx.Done() // shutdown has begun while the third is in flight.
-	disp.release <- struct{}{}
+	// Shutdown has begun while the third is in flight.
+	select {
+	case <-srv.ctx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown did not cancel the server ctx")
+	}
+	releaseOneStop(t, disp)
 	select {
 	case <-cleaned:
 	case <-time.After(10 * time.Second):
