@@ -547,6 +547,12 @@ func TestDockerRuntime_RepairAgentHomeOwnershipUnsupportedModes(t *testing.T) {
 		{`null`, false, "docker mode undetectable"},
 		{`["seccomp"]`, false, "docker mode undetectable"},
 		{`{"name":"rootless"}`, false, "docker mode undetectable"},
+		// Options after a comma do not hide the mode.
+		{`["name=seccomp,profile=builtin","name=userns,foo=bar"]`, false, "(docker userns-remap)"},
+		{`["name=rootless,x=y"]`, false, "(rootless docker)"},
+		// An empty name, with or without options, is unexpected.
+		{`["name=,x"]`, false, "docker mode undetectable"},
+		{`["name="]`, false, "docker mode undetectable"},
 	} {
 		f := newFakeRepairRuntime(t, fakeRepairOpts{info: tc.info, infoFails: tc.infoFails})
 		err := (&DockerRuntime{Command: f.bin}).RepairAgentHomeOwnership(context.Background(), AgentHomeOwnershipRepair{HomeDir: newRepairHome(t), Image: "img", UID: 1, GID: 1})
@@ -750,7 +756,8 @@ func TestDockerRuntime_RepairAgentHomeOwnershipSweepFailures(t *testing.T) {
 		wantLog string
 	}{
 		{"listing fails", func(o *fakeRepairOpts) { o.psFails = true }, nil, "Could not list leftover"},
-		{"invalid id", func(o *fakeRepairOpts) { o.psOut = "not-an-id" }, nil, "Ignoring an unexpected leftover"},
+		{"invalid id", func(o *fakeRepairOpts) { o.psOut = "not-an-id" }, nil, "Ignoring unexpected leftover"},
+		{"invalid ids mixed with a valid one", func(o *fakeRepairOpts) { o.psOut = "bad1\n0123456789ab\nbad2\nbad3\nbad4" }, []string{"rm -f 0123456789ab"}, "count=4"},
 		{"removal fails", func(o *fakeRepairOpts) { o.psOut = "0123456789ab"; o.rmFails = true }, []string{"rm -f 0123456789ab"}, "Could not remove leftover"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -770,6 +777,49 @@ func TestDockerRuntime_RepairAgentHomeOwnershipSweepFailures(t *testing.T) {
 			if !strings.Contains(logs.String(), tc.wantLog) {
 				t.Errorf("log %q lacks %q", logs.String(), tc.wantLog)
 			}
+			// Rejected ids are reported in one warning, at most three of
+			// them quoted.
+			if n := strings.Count(logs.String(), "Ignoring unexpected leftover"); n > 1 {
+				t.Errorf("rejected ids logged in %d warnings, want 1: %s", n, logs.String())
+			}
+			if strings.Contains(logs.String(), "bad4") {
+				t.Errorf("log quotes more than the first three rejected ids: %s", logs.String())
+			}
 		})
+	}
+}
+
+// An oversized probe answer is quoted truncated, with its total size, by
+// both runtimes' refusals.
+func TestRepairAgentHomeOwnership_OversizedProbeAnswerTruncated(t *testing.T) {
+	big := strings.Repeat("x", 5000)
+	for name, repair := range map[string]func(bin string) error{
+		"docker": func(bin string) error {
+			return (&DockerRuntime{Command: bin}).RepairAgentHomeOwnership(context.Background(), AgentHomeOwnershipRepair{HomeDir: newRepairHome(t), Image: "img", UID: 1, GID: 1})
+		},
+		"podman": func(bin string) error {
+			return (&PodmanRuntime{Command: bin}).RepairAgentHomeOwnership(context.Background(), AgentHomeOwnershipRepair{HomeDir: newRepairHome(t), Image: "img", UID: 1, GID: 1})
+		},
+	} {
+		f := newFakeRepairRuntime(t, fakeRepairOpts{info: big})
+		err := repair(f.bin)
+		if !errors.Is(err, ErrAgentHomeRepairUnsupported) || !strings.Contains(err.Error(), "mode undetectable") {
+			t.Fatalf("%s: err = %v, want an undetectable-mode refusal", name, err)
+		}
+		if !strings.Contains(err.Error(), "(5000 bytes total)") || len(err.Error()) > 1000 {
+			t.Errorf("%s: error not truncated with the total size (%d bytes): %.300s", name, len(err.Error()), err)
+		}
+		if f.ran() {
+			t.Errorf("%s: the helper ran", name)
+		}
+	}
+}
+
+func TestTruncateForMessage(t *testing.T) {
+	if got := truncateForMessage("short", 10); got != "short" {
+		t.Errorf("short input changed: %q", got)
+	}
+	if got := truncateForMessage("abcdefghijkl", 4); got != "abcd... (12 bytes total)" {
+		t.Errorf("truncated = %q", got)
 	}
 }

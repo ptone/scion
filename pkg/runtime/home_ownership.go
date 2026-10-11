@@ -386,13 +386,22 @@ func removeLeftoverAgentHomeRepairHelpers(ctx context.Context, command, homeKey 
 		runtimeLog.Warn("Could not list leftover agent home ownership repair helpers", "error", err)
 		return
 	}
-	var ids []string
+	var ids, rejected []string
 	for _, id := range strings.Fields(out) {
 		if !containerIDRE.MatchString(id) {
-			runtimeLog.Warn("Ignoring an unexpected leftover agent home ownership repair helper id", "id", id)
+			rejected = append(rejected, id)
 			continue
 		}
 		ids = append(ids, id)
+	}
+	if len(rejected) > 0 {
+		first := rejected[:min(len(rejected), 3)]
+		quoted := make([]string, len(first))
+		for i, tok := range first {
+			quoted[i] = truncateForMessage(tok, 64)
+		}
+		runtimeLog.Warn("Ignoring unexpected leftover agent home ownership repair helper ids",
+			"count", len(rejected), "first", quoted)
 	}
 	if len(ids) == 0 {
 		return
@@ -405,6 +414,19 @@ func removeLeftoverAgentHomeRepairHelpers(ctx context.Context, command, homeKey 
 
 // agentHomeRepairProbeTimeout bounds a runtime mode probe.
 const agentHomeRepairProbeTimeout = 30 * time.Second
+
+// probeOutputLimit bounds how much of a probe's output an error quotes.
+const probeOutputLimit = 256
+
+// truncateForMessage returns s, or its first limit bytes followed by a
+// marker with the total size when it is longer, for quoting in errors and
+// logs.
+func truncateForMessage(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	return fmt.Sprintf("%s... (%d bytes total)", s[:limit], len(s))
+}
 
 // dockerUnsupportedRepairMode returns a non-empty mode name when the
 // Docker daemon runs rootless or with user-namespace remapping. In both,
@@ -421,7 +443,7 @@ func dockerUnsupportedRepairMode(ctx context.Context, command string) (string, e
 	}
 	var opts []string
 	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &opts); err != nil {
-		return "", fmt.Errorf("detect docker security options: unparseable answer %q: %w", out, err)
+		return "", fmt.Errorf("detect docker security options: unparseable answer %q: %w", truncateForMessage(out, probeOutputLimit), err)
 	}
 	if len(opts) == 0 {
 		return "", fmt.Errorf("detect docker security options: no security options reported")
@@ -429,10 +451,10 @@ func dockerUnsupportedRepairMode(ctx context.Context, command string) (string, e
 	mode := ""
 	for _, opt := range opts {
 		name, ok := strings.CutPrefix(opt, "name=")
-		if !ok || name == "" {
-			return "", fmt.Errorf("detect docker security options: unexpected entry %q", opt)
-		}
 		name, _, _ = strings.Cut(name, ",")
+		if !ok || name == "" {
+			return "", fmt.Errorf("detect docker security options: unexpected entry %q", truncateForMessage(opt, probeOutputLimit))
+		}
 		switch name {
 		case "rootless":
 			mode = "rootless docker"
@@ -482,6 +504,6 @@ func (r *PodmanRuntime) RepairAgentHomeOwnership(ctx context.Context, req AgentH
 	case "true":
 		return fmt.Errorf("%w (rootless podman)", ErrAgentHomeRepairUnsupported)
 	default:
-		return fmt.Errorf("%w (podman mode undetectable: %q)", ErrAgentHomeRepairUnsupported, strings.TrimSpace(out))
+		return fmt.Errorf("%w (podman mode undetectable: %q)", ErrAgentHomeRepairUnsupported, truncateForMessage(strings.TrimSpace(out), probeOutputLimit))
 	}
 }
