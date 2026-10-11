@@ -732,6 +732,12 @@ export class ScionPageAgentCreate extends LitElement {
    */
   private gcpAssignSeq = 0;
 
+  /**
+   * The gcpAssignSeq of the last refresh whose fetched accounts were applied.
+   * Equal to gcpAssignSeq when the newest refresh has already landed.
+   */
+  private gcpAssignAppliedSeq = 0;
+
   /** The key of the target the current accounts' mapping state was asked for. */
   private gcpAssignTargetKey = '';
 
@@ -777,7 +783,12 @@ export class ScionPageAgentCreate extends LitElement {
     }
     const accounts = await this.fetchGCPServiceAccounts(projectId, target);
     if (isStale()) return;
-    this.gcp.setAccounts(accounts ?? withoutAssignStatus(this.gcp.gcpServiceAccounts));
+    if (accounts) {
+      this.gcpAssignAppliedSeq = seq;
+      this.gcp.setAccounts(accounts);
+    } else {
+      this.gcp.setAccounts(withoutAssignStatus(this.gcp.gcpServiceAccounts));
+    }
   }
 
   private async loadGCPServiceAccounts(): Promise<void> {
@@ -805,13 +816,19 @@ export class ScionPageAgentCreate extends LitElement {
       if (isStale()) return;
     }
     // Non-critical: a failed fetch leaves the picker without accounts.
-    let accounts = fetched ?? [];
-    // The target changed while this load was in flight: this load's labels
-    // are for the old target, so drop them and ask again for the current one.
-    const targetChanged = assignSeq !== this.gcpAssignSeq;
-    if (targetChanged) accounts = withoutAssignStatus(accounts);
-    this.gcp.setAccounts(accounts);
-    if (targetChanged) void this.refreshGCPAssignStatus();
+    const accounts = fetched ?? [];
+    // The target changed while this load was in flight, and willUpdate has
+    // started a refresh for the new one. If that refresh has already landed,
+    // its accounts are the current ones: keep them. Otherwise show this
+    // load's accounts without its old-target labels; the refresh fills them
+    // in when it lands. Either way no further request is needed.
+    if (assignSeq !== this.gcpAssignSeq) {
+      if (this.gcpAssignAppliedSeq !== this.gcpAssignSeq) {
+        this.gcp.setAccounts(withoutAssignStatus(accounts));
+      }
+    } else {
+      this.gcp.setAccounts(accounts);
+    }
 
     // The project's default identity: applied to the displayed value only
     // when the user has not already picked while the fetches were in flight.

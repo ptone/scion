@@ -126,8 +126,7 @@ export function withoutAssignStatus(accounts: GCPServiceAccount[]): GCPServiceAc
   if (!accounts.some((sa) => sa.assignStatus)) return accounts;
   return accounts.map((sa) => {
     if (!sa.assignStatus) return sa;
-    const copy = { ...sa };
-    delete copy.assignStatus;
-    return copy;
+    const { assignStatus, ...rest } = sa;
+    return rest;
   });
 }

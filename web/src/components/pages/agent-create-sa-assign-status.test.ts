@@ -335,7 +335,7 @@ describe('Create Agent: service-account mapping state for the Kubernetes target'
         { name: 'k8s-b', type: 'kubernetes', available: false },
       ],
     };
-    const { hold, held } = stubFetch({ broker });
+    const { hold, held, listUrls } = stubFetch({ broker });
     hold.on = true;
     const el = await mountAgentCreate();
     await waitUntil(el, () => held.length === 1);
@@ -347,16 +347,49 @@ describe('Create Agent: service-account mapping state for the Kubernetes target'
     // The newer request completes first, then the first load's older one.
     await release(el, held, 'k8s-b');
     await release(el, held, 'k8s-a');
-    // Whatever is still asked about must be the current target only.
-    expect(held.every((h) => h.profile === 'k8s-b')).toBe(true);
-    while (held.length > 0) await release(el, held, 'k8s-b');
     await waitUntil(el, () => statusHint(el) !== '');
+    // The refresh already answered for the current target: nothing more is asked.
+    expect(held).toEqual([]);
+    expect(listUrls).toHaveLength(2);
 
     const opts = options(el);
     expect(opts.map(([id]) => id)).toEqual(['sa-a', 'sa-c', 'sa-b']);
     expect(opts[0][1]).toContain('— mapped');
     expect(opts[1][1]).toContain('— no mapping needed');
     expect(opts[2][1]).toContain('— not mapped on this profile');
+    expect(statusHint(el)).toBe('Mapped: test message A2.');
+  });
+
+  it('fills in the current target when the first load lands before the refresh', async () => {
+    const broker = {
+      ...BROKER,
+      profiles: [
+        { name: 'k8s-a', type: 'kubernetes', available: true },
+        { name: 'k8s-b', type: 'kubernetes', available: false },
+      ],
+    };
+    const { hold, held, listUrls } = stubFetch({ broker });
+    hold.on = true;
+    const el = await mountAgentCreate();
+    await waitUntil(el, () => held.length === 1);
+
+    await setProfile(el, 'k8s-b');
+    expect(held.map((h) => h.profile)).toEqual(['k8s-a', 'k8s-b']);
+
+    // The first load's older response lands first: its labels are not shown.
+    await release(el, held, 'k8s-a');
+    await waitUntil(el, () => formField(el, 'Service Account') !== null);
+    expect(options(el)).toEqual([
+      ['sa-a', 'sa-a@example.com'],
+      ['sa-b', 'sa-b@example.com'],
+      ['sa-c', 'sa-c@example.com'],
+    ]);
+
+    // Then the refresh for the current target lands and labels them.
+    await release(el, held, 'k8s-b');
+    expect(held).toEqual([]);
+    expect(listUrls).toHaveLength(2);
+    expect(options(el).map(([id]) => id)).toEqual(['sa-a', 'sa-c', 'sa-b']);
     expect(statusHint(el)).toBe('Mapped: test message A2.');
   });
 
