@@ -869,6 +869,12 @@ These environment variables control server-side logging behavior. They are not p
 
 See the [Local Development Logging guide](/scion/contributing/logging/) for details on log formats, request log fields, and Cloud Logging integration.
 
+### Shutdown and Signals
+
+`scion server start` shuts down gracefully on either `SIGINT` (Ctrl+C) or `SIGTERM` (`systemctl stop`, Kubernetes, container stop): it drains in-flight requests, closes the audit writer, then flushes and closes its logs. Only the first signal is acted on; a second signal is ignored rather than cutting the drain short. An orchestrator that escalates to `SIGKILL` after its grace period still terminates the process immediately.
+
+If the Hub fails to start (for example, when operational settings cannot be loaded), the server logs `Hub server failed to start: <error>`, flushes its logs, and exits with status 1.
+
 ### Boolean Environment Variable Parsing (`parseBoolEnv`)
 
 For server and infrastructure configurations, Scion parses several boolean environment variables using a robust, operator-friendly `parseBoolEnv` parser:
