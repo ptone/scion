@@ -99,16 +99,16 @@ func (f *membershipFixture) bind(roleID, principalType, principalID, projectID s
 
 // chatMemberProjectIDs is CheckEffectiveMembership for every project at
 // once: for each case, the batched answer equals the single-project check
-// (and the expected value), including group membership, nested groups, a
-// group-bound owner role (ignored), inactive bindings and a binding whose
-// role definition is missing (the check fails, so no membership).
+// (and the expected value), including group membership, nested groups,
+// inactive bindings and a binding whose role definition is missing (the
+// check fails, so no membership).
 func TestChatMemberProjectIDs_MatchesCheckEffectiveMembership(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 	f := &membershipFixture{t: t, s: s, ctx: ctx}
 	u := addHumanMember(t, s, f.project("home"), "parity@example.com", "Parity")
 
-	member, admin, owner := f.role(store.ProjectRoleMember), f.role(store.ProjectRoleAdmin), f.role(store.ProjectRoleOwner)
+	member, admin := f.role(store.ProjectRoleMember), f.role(store.ProjectRoleAdmin)
 	past, later := time.Now().Add(-time.Hour), time.Now().Add(time.Hour)
 
 	grp := f.group("parity-group")
@@ -124,8 +124,8 @@ func TestChatMemberProjectIDs_MatchesCheckEffectiveMembership(t *testing.T) {
 	f.bind(member, store.RoleBindingPrincipalGroup, grp, viaGroup, nil, nil)
 	nested := f.project("nested")
 	f.bind(member, store.RoleBindingPrincipalGroup, outer, nested, nil, nil)
-	groupOwner := f.project("group-owner")
-	f.bind(owner, store.RoleBindingPrincipalGroup, grp, groupOwner, nil, nil)
+	// A group-bound owner role (which both functions ignore) cannot be
+	// created: the store refuses project-owner for a group principal.
 	expired := f.project("expired")
 	f.bind(member, store.RoleBindingPrincipalUser, u.ID, expired, nil, &past)
 	notYet := f.project("not-yet")
@@ -154,7 +154,6 @@ func TestChatMemberProjectIDs_MatchesCheckEffectiveMembership(t *testing.T) {
 		{"direct member", direct, true},
 		{"group member", viaGroup, true},
 		{"nested group member", nested, true},
-		{"group-bound owner only", groupOwner, false},
 		{"expired direct binding", expired, false},
 		{"not yet active binding", notYet, false},
 		{"missing role definition, direct", missingDirect, false},
