@@ -45,19 +45,23 @@ func tiConstraintAdminSetup(t *testing.T, s store.Store, name string) (realAdmin
 	return realAdmin, group, fixture, adminRD
 }
 
-// A constraint that removes constraint-admin from the only real admin is
-// a lockout, even though a test identity in an admin-granting group holds
-// a (clamped) constraint-admin grant. Control: with a real admin in the
-// group, the same change is safe.
+// A constraint that removes constraint-admin from every real admin (here
+// the dev super-admin and a direct constraint admin, targeted through one
+// group) is a lockout, even though a test identity in an admin-granting
+// group holds a (clamped) constraint-admin grant and is not targeted.
+// Control: with an untargeted real admin in the admin group, the same
+// change is safe.
 func TestTestIdentity_ConstraintLockoutIgnoresTestIdentities(t *testing.T) {
 	ps, _, s := previewTestSetup(t)
 	ctx := context.Background()
 	realAdmin, group, fixture, _ := tiConstraintAdminSetup(t, s, "ti-lockout")
+	targets := tiGroupWithSystemRole(t, s, "ti-lockout-targets", "", DevUserID)
+	tiAddToGroup(t, s, targets.ID, DevUserID, store.GroupMemberRoleMember)
+	tiAddToGroup(t, s, targets.ID, realAdmin, store.GroupMemberRoleMember)
 
 	draft := func(name string) *store.AccessConstraint {
 		return &store.AccessConstraint{
-			Name: name, SubjectKind: store.ConstraintSubjectPrincipal,
-			SubjectPrincipalType: pvStrPtr("user"), SubjectPrincipalID: pvStrPtr(realAdmin),
+			Name: name, SubjectKind: store.ConstraintSubjectGroupClosure, SubjectGroupID: pvStrPtr(targets.ID),
 			ScopeType: store.RoleScopeSystem, MaximumPermissions: []string{"agent.read"},
 			Purpose: "test identity lockout",
 		}
@@ -72,16 +76,16 @@ func TestTestIdentity_ConstraintLockoutIgnoresTestIdentities(t *testing.T) {
 	res, err := ps.GeneratePreview(ctx, PreviewRequest{Operation: "create", Draft: draft("ti-lockout-1"), Actor: pvTestActor(realAdmin)})
 	require.NoError(t, err)
 	require.NotNil(t, res.Lockout.Safe)
-	assert.False(t, *res.Lockout.Safe, "blocking the only real admin is a lockout")
+	assert.False(t, *res.Lockout.Safe, "blocking every real admin is a lockout")
 	assert.NotNil(t, res.CommitBlocked)
 
-	// Control: a real admin in the same group survives.
+	// Control: an untargeted real admin in the admin group survives.
 	other := pvSeedUser(t, s, "ti-lockout-real-admin-2")
 	tiAddToGroup(t, s, group.ID, other, store.GroupMemberRoleMember)
 	res, err = ps.GeneratePreview(ctx, PreviewRequest{Operation: "create", Draft: draft("ti-lockout-2"), Actor: pvTestActor(realAdmin)})
 	require.NoError(t, err)
 	require.NotNil(t, res.Lockout.Safe)
-	assert.True(t, *res.Lockout.Safe, "control: a real admin in the group survives")
+	assert.True(t, *res.Lockout.Safe, "control: an untargeted real admin survives")
 }
 
 // isConstraintAdmin (suspension review) does not treat a test identity in
