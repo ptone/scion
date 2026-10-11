@@ -122,7 +122,7 @@ grep -q "Configured hub endpoint: http://127.0.0.1:" "$WORK/start.out" || {
   cat "$WORK/start.out" >&2; fail "server start did not configure the hub endpoint"; }
 ENDPOINT="$(sed -n 's/^Configured hub endpoint: \(http:[^ ]*\).*/\1/p' "$WORK/start.out" | head -n 1)"
 ready=0
-for _ in $(seq 1 60); do
+for ((i = 1; i <= 60; i++)); do
   if curl -fsS "$ENDPOINT/healthz" >/dev/null 2>&1; then ready=1; break; fi
   sleep 1
 done
