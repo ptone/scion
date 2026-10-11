@@ -20,7 +20,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -98,14 +97,21 @@ func TestHTTPHubClient_ListTemplatesWithoutProject(t *testing.T) {
 }
 
 func TestHandleThread_ReportsFailedProjectTemplateRead(t *testing.T) {
+	// Each hub body carries distinctive text that must not reach the user.
 	tests := []struct {
 		name     string
 		status   int
 		body     string
+		hubText  string
 		wantNote string
 	}{
-		{"denied", http.StatusForbidden, deniedBody("list", "template"), projectTemplatesDeniedNote},
-		{"server error", http.StatusInternalServerError, serverErrorBody, projectTemplatesFailedNote},
+		{"forbidden", http.StatusForbidden,
+			`{"error":{"code":"forbidden","message":"hub-text-forbidden","details":{"denied_action":"list","resource_type":"template"}}}`,
+			"hub-text-forbidden", projectTemplatesDeniedNote},
+		{"unauthorized", http.StatusUnauthorized,
+			`{"error":{"code":"unauthorized","message":"hub-text-unauthorized"}}`,
+			"hub-text-unauthorized", projectTemplatesDeniedNote},
+		{"server error", http.StatusInternalServerError, serverErrorBody, "boom", projectTemplatesFailedNote},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -120,8 +126,8 @@ func TestHandleThread_ReportsFailedProjectTemplateRead(t *testing.T) {
 
 			bodies := e.discord.allBodies()
 			assert.Contains(t, bodies, "Template **proj-tmpl** not found")
-			assert.Contains(t, bodies, strings.Trim(jsonText(t, tt.wantNote), `"`))
-			assert.NotContains(t, bodies, "boom", "hub error text is not shown")
+			assert.Contains(t, bodies, jsonText(t, tt.wantNote))
+			assert.NotContains(t, bodies, tt.hubText, "hub error text is not shown")
 			assert.Empty(t, e.hub.callsTo(http.MethodPost, luAgentsPath), "no agent is created")
 		})
 	}
