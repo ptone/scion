@@ -25,6 +25,7 @@ import (
 	"reflect"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
@@ -106,9 +107,17 @@ var sessionStateKnownKeys = jsonFieldNames(reflect.TypeOf(sessionStateFile{}))
 // jsonFieldNames returns the top-level JSON names that encoding/json uses
 // for struct type t: for each exported field, the tag's name before the
 // first comma, or the field name when the tag gives none. Fields tagged
-// "-" are skipped, as are unexported ones. It does not handle embedded
-// structs, whose fields encoding/json promotes; it panics on one, so adding
-// one to sessionStateFile fails at once rather than quietly.
+// "-" are skipped, as are unexported ones.
+//
+// It panics where its answer could differ from encoding/json's, or where
+// the names would be ambiguous, so a field added to sessionStateFile that
+// hits one of these fails at package init (and so in every test) rather
+// than quietly misclassifying keys:
+//   - an embedded field, whose fields encoding/json promotes;
+//   - a tag name encoding/json rejects (see isValidJSONTagName), for which
+//     it would use the field name instead;
+//   - two fields with the same name, or names equal under case folding
+//     (strings.EqualFold), which encoding/json resolves by its own rules.
 func jsonFieldNames(t reflect.Type) []string {
 	var names []string
 	for i := 0; i < t.NumField(); i++ {
@@ -124,12 +133,37 @@ func jsonFieldNames(t reflect.Type) []string {
 			continue
 		}
 		name, _, _ := strings.Cut(tag, ",")
+		if name != "" && !isValidJSONTagName(name) {
+			panic(fmt.Sprintf("jsonFieldNames: field %s in %s has a json tag name %q that encoding/json rejects", f.Name, t, name))
+		}
 		if name == "" {
 			name = f.Name
+		}
+		for _, prev := range names {
+			if strings.EqualFold(prev, name) {
+				panic(fmt.Sprintf("jsonFieldNames: field %s in %s has json name %q, which duplicates %q", f.Name, t, name, prev))
+			}
 		}
 		names = append(names, name)
 	}
 	return names
+}
+
+// isValidJSONTagName is a copy of encoding/json's isValidTag: the tag names
+// it accepts. Backslash and quote characters are reserved, but any other
+// punctuation is allowed.
+func isValidJSONTagName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		switch {
+		case strings.ContainsRune("!#$%&()*+-./:;<=>?@[]^_{|}~ ", c):
+		case !unicode.IsLetter(c) && !unicode.IsDigit(c):
+			return false
+		}
+	}
+	return true
 }
 
 // isKnownSessionStateKey reports whether k names one of sessionStateFile's

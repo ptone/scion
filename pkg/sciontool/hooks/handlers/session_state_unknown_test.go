@@ -352,9 +352,6 @@ func TestSessionStateKnownKeys_DerivedFromTags(t *testing.T) {
 	if !reflect.DeepEqual(sessionStateKnownKeys, want) {
 		t.Errorf("sessionStateKnownKeys = %q, want %q", sessionStateKnownKeys, want)
 	}
-	if tags := jsonFieldNames(reflect.TypeOf(sessionStateFile{})); !reflect.DeepEqual(sessionStateKnownKeys, tags) {
-		t.Errorf("sessionStateKnownKeys = %q, but the struct's json names are %q", sessionStateKnownKeys, tags)
-	}
 }
 
 // jsonFieldNames follows encoding/json's rules for top-level names.
@@ -485,5 +482,92 @@ func TestEncodeSessionState_UnknownValuesNotHTMLEscaped(t *testing.T) {
 	}
 	if !bytes.Equal(out, out2) {
 		t.Errorf("second write differs:\n%s\n%s", out, out2)
+	}
+}
+
+// jsonFieldNames panics where its names could differ from encoding/json's
+// or would be ambiguous, so such a field in sessionStateFile fails at init.
+func TestJSONFieldNames_PanicsOnUnsupportedFields(t *testing.T) {
+	type Inner struct {
+		X int `json:"x"`
+	}
+	type embedded struct {
+		Inner
+		A int `json:"a"`
+	}
+	type invalidTag struct {
+		A int `json:"a\\b"`
+	}
+	type quoteTag struct {
+		A int `json:"a'b"`
+	}
+	// Built at run time: go vet rejects a repeated json tag in a literal
+	// struct type.
+	duplicate := reflect.StructOf([]reflect.StructField{
+		{Name: "A", Type: reflect.TypeOf(0), Tag: `json:"same"`},
+		{Name: "B", Type: reflect.TypeOf(0), Tag: `json:"same"`},
+	})
+	type foldDuplicate struct {
+		A int `json:"closed"`
+		B int `json:"Cloſed"`
+	}
+	type tagDuplicatesFieldName struct {
+		Name string
+		B    int `json:"name"`
+	}
+	for _, tc := range []struct {
+		name string
+		typ  reflect.Type
+		want string
+	}{
+		{"embedded", reflect.TypeOf(embedded{}), "embedded field Inner"},
+		{"backslash tag", reflect.TypeOf(invalidTag{}), "encoding/json rejects"},
+		{"quote tag", reflect.TypeOf(quoteTag{}), "encoding/json rejects"},
+		{"duplicate", duplicate, `duplicates "same"`},
+		{"fold duplicate", reflect.TypeOf(foldDuplicate{}), `duplicates "closed"`},
+		{"tag duplicates field name", reflect.TypeOf(tagDuplicatesFieldName{}), `duplicates "Name"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				r := recover()
+				if r == nil {
+					t.Fatalf("jsonFieldNames(%s) did not panic", tc.typ)
+				}
+				if msg, _ := r.(string); !strings.Contains(msg, tc.want) {
+					t.Errorf("panic = %v, want it to contain %q", r, tc.want)
+				}
+			}()
+			got := jsonFieldNames(tc.typ)
+			t.Errorf("jsonFieldNames(%s) = %q", tc.typ, got)
+		})
+	}
+}
+
+// isValidJSONTagName agrees with encoding/json: a tag name it rejects is
+// ignored by encoding/json, which uses the field name instead.
+func TestIsValidJSONTagName_MatchesEncodingJSON(t *testing.T) {
+	for _, name := range []string{"a", "a-b", "a_b", "a.b", "a b", "ä1", "a\\b", "a'b", "a`b", "a\"b", "a,b"} {
+		// Build the struct type at run time, with this tag name.
+		typ := reflect.StructOf([]reflect.StructField{{
+			Name: "Field",
+			Type: reflect.TypeOf(0),
+			Tag:  reflect.StructTag(`json:"` + strings.ReplaceAll(strings.ReplaceAll(name, `\`, `\\`), `"`, `\"`) + `"`),
+		}})
+		v := reflect.New(typ).Elem()
+		v.Field(0).SetInt(1)
+		data, err := json.Marshal(v.Interface())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var all map[string]json.RawMessage
+		if err := json.Unmarshal(data, &all); err != nil {
+			t.Fatal(err)
+		}
+		tagName, _, _ := strings.Cut(typ.Field(0).Tag.Get("json"), ",")
+		valid := isValidJSONTagName(tagName)
+		_, usedTag := all[tagName]
+		if usedTag != valid {
+			t.Errorf("tag name %q: isValidJSONTagName = %v, but encoding/json wrote %s", tagName, valid, data)
+		}
 	}
 }
