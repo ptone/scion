@@ -940,10 +940,10 @@ func (s *Server) buildAuthMiddleware() {
 	s.hubMu.RLock()
 	var keys []secretKeyEntry
 	for _, conn := range s.hubConnections {
-		if len(conn.SecretKey) > 0 {
+		if secretKey := conn.snapshot().SecretKey; len(secretKey) > 0 {
 			keys = append(keys, secretKeyEntry{
 				hubName:   conn.Name,
-				secretKey: conn.SecretKey,
+				secretKey: secretKey,
 			})
 		}
 	}
@@ -984,7 +984,7 @@ func (s *Server) authKeyCount() int {
 	defer s.hubMu.RUnlock()
 	count := 0
 	for _, conn := range s.hubConnections {
-		if len(conn.SecretKey) > 0 {
+		if len(conn.snapshot().SecretKey) > 0 {
 			count++
 		}
 	}
@@ -2367,10 +2367,13 @@ func (s *Server) checkAndReloadCredentials(ctx context.Context) error {
 			}(conn)
 		} else {
 			// Check if credentials changed
-			if existingConn.Credentials == nil ||
-				existingConn.Credentials.BrokerID != c.BrokerID ||
-				existingConn.Credentials.SecretKey != c.SecretKey ||
-				existingConn.Credentials.HubEndpoint != c.HubEndpoint {
+			// A Reinitialize from an earlier reload may still be writing
+			// this connection, so read Credentials under conn.mu.
+			existingCreds := existingConn.snapshot().Credentials
+			if existingCreds == nil ||
+				existingCreds.BrokerID != c.BrokerID ||
+				existingCreds.SecretKey != c.SecretKey ||
+				existingCreds.HubEndpoint != c.HubEndpoint {
 
 				slog.Info("Reinitializing hub connection", "name", name)
 				go func(conn *HubConnection, creds *brokercredentials.BrokerCredentials) {
@@ -2542,7 +2545,7 @@ func (s *Server) resolveHubEndpointFromRequest(r *http.Request) string {
 	conn, ok := s.hubConnections[connName]
 	s.hubMu.RUnlock()
 	if ok {
-		return conn.HubEndpoint
+		return conn.snapshot().HubEndpoint
 	}
 	return ""
 }
@@ -2559,24 +2562,27 @@ func (s *Server) logHubConnections() {
 	}
 
 	for _, conn := range s.hubConnections {
+		// Reinitialize writes these fields under conn.mu.
+		snap := conn.snapshot()
+		endpoint := snap.HubEndpoint
+		authMode := snap.AuthMode
+		hasHeartbeat := snap.Heartbeat != nil
+		hasControlChannel := snap.HasControlChannel
+
 		attrs := []slog.Attr{
 			slog.String("name", conn.Name),
-			slog.String("endpoint", conn.HubEndpoint),
+			slog.String("endpoint", endpoint),
 			slog.String("status", string(conn.GetStatus())),
 		}
 
-		if conn.AuthMode != "" {
-			attrs = append(attrs, slog.String("auth", string(conn.AuthMode)))
+		if authMode != "" {
+			attrs = append(attrs, slog.String("auth", string(authMode)))
 		}
 
 		if conn.IsColocated {
 			attrs = append(attrs, slog.Bool("colocated", true))
 		}
 
-		conn.mu.RLock()
-		hasHeartbeat := conn.Heartbeat != nil
-		hasControlChannel := conn.ControlChannel != nil
-		conn.mu.RUnlock()
 		attrs = append(attrs,
 			slog.Bool("heartbeat", hasHeartbeat),
 			slog.Bool("control_channel", hasControlChannel),
