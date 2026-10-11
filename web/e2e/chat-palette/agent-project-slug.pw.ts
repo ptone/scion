@@ -91,6 +91,34 @@ test('a row shows the project name until the slug is known, then the slug', asyn
   ]);
 });
 
+test("rows show the agent row's project slug before the space rail loads, with no project request", async ({
+  page,
+}) => {
+  await setupApiMocks(page, {
+    spaces: [SPACE_ALPHA, SPACE_BETA],
+    agents: [
+      { ...COORDINATOR_ALPHA, projectSlug: SPACE_ALPHA.projectSlug },
+      { ...COORDINATOR_BETA, projectSlug: SPACE_BETA.projectSlug },
+    ],
+  });
+  // Hold the space rail's list for the whole test, so the slugs can only
+  // come from the agent rows.
+  await page.route('**/api/v1/chat/spaces', () => new Promise<void>(() => {}));
+  const projectRequests: string[] = [];
+  page.on('request', (request) => {
+    if (new URL(request.url()).pathname === '/api/v1/projects') projectRequests.push(request.url());
+  });
+  await openPaletteWithQuery(page, 'coordinator');
+
+  await expect(agentSecondaryLines(page)).toHaveText([
+    SPACE_ALPHA.projectSlug,
+    SPACE_BETA.projectSlug,
+  ]);
+  await paletteInput(page).fill(SPACE_ALPHA.projectName);
+  await expect(agentSecondaryLines(page)).toHaveText([SPACE_ALPHA.projectSlug]);
+  expect(projectRequests).toEqual([]);
+});
+
 test('the project slug is matchable by the query', async ({ page }) => {
   await setupApiMocks(page, {
     spaces: [SPACE_ALPHA, SPACE_BETA],

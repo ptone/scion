@@ -114,6 +114,7 @@ export interface PaletteFixtureOverrides {
     slug: string;
     projectId?: string;
     project?: string;
+    projectSlug?: string;
   }>;
   spaces?: Array<{ projectId: string; projectName: string; projectSlug: string }>;
   threadsByProjectId?: Record<
