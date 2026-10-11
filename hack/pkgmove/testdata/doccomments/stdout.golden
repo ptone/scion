@@ -6,7 +6,7 @@ Files (1):
 Renames (8):
   type   job -> Job  (hub/move.go:20)
   const  maxRetries -> MaxRetries  (hub/move.go:15)
-  func   newJob -> NewJob  (hub/move.go:34)
+  func   newJob -> NewJob  (hub/move.go:35)
   func   run -> Run  (hub/move.go:10)
   func   writeError -> WriteError  (hub/move.go:7)
   method handler.handle -> Handle  (hub/stay.go:8)
@@ -39,9 +39,9 @@ Comment rewrites (renamed identifiers) (19):
   hub/move.go:25: handle -> Handle
   hub/move.go:26: writeError -> WriteError
   hub/move.go:30: writeError -> WriteError
-  hub/move.go:33: newJob -> NewJob
-  hub/move.go:33: newJob -> NewJob
-  hub/move.go:33: newJob -> NewJob
+  hub/move.go:34: newJob -> NewJob
+  hub/move.go:34: newJob -> NewJob
+  hub/move.go:34: newJob -> NewJob
   hub/stay.go:7: handle -> Handle
   hub/stay.go:13: handle -> Handle
   hub/stay.go:14: handle -> Handle
@@ -63,7 +63,7 @@ ERROR/HIGH/WARN item below before merging.
   hub/stay.go:15: stayJob.handle -> Handle: check dynamic interface assertions that could now match; types in other packages that embed stayJob are not checked for shadowing or newly promoted methods
 
 == WARN: func name seen through its value changes (runtime.FuncForPC, stack traces) ==
-  hub/move.go:31: example.com/fx/hub.Helper is now example.com/fx/hub/sub.Helper for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+  hub/move.go:32: example.com/fx/hub.Helper is now example.com/fx/hub/sub.Helper for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
 
 == WARN: go:generate directive ==
   hub/move.go:28: //go:generate echo writeError (runs in the new directory)

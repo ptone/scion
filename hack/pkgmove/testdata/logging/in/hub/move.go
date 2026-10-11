@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"log/slog"
@@ -28,6 +29,25 @@ var onError = func(err error) { slog.Error("failed", "err", err) }
 
 var plain = os.Getpid
 
+// logf logs from wherever it is called: a func value of log.Printf.
+var logf = log.Printf
+
+// buildOnly only builds attributes and loggers: no record is emitted, so no WARN.
+func buildOnly() *slog.Logger {
+	attr := slog.String("k", "v")
+	l := slog.New(slog.NewTextHandler(os.Stderr, nil)).With(attr).WithGroup("g")
+	_ = l.Enabled(context.Background(), slog.LevelInfo)
+	_ = l.Handler()
+	_ = log.Default().Writer()
+	return slog.Default().With(slog.Int("n", 1))
+}
+
+// valueOf passes emitting funcs and a method value along.
+func valueOf(l *slog.Logger) []func(string, ...any) {
+	f := slog.Error
+	return []func(string, ...any){f, l.Info}
+}
+
 // Wire uses every function so the fixture compiles.
 func Wire() {
 	s := &service{logger: slog.Default()}
@@ -39,4 +59,7 @@ func Wire() {
 	closure()()
 	onError(nil)
 	_ = plain
+	logf("x")
+	_ = buildOnly()
+	_ = valueOf(slog.Default())
 }

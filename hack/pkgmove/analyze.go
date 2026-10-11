@@ -219,15 +219,15 @@ func (a *analysis) checkRenameOverrides() {
 	for _, r := range a.plan.Renames {
 		used[r.Old] = true
 	}
-	var unused []string
-	for old, n := range a.cfg.RenameOverrides {
-		if !used[old] {
-			unused = append(unused, old+"="+n)
-		}
+	var olds []string
+	for old := range a.cfg.RenameOverrides {
+		olds = append(olds, old)
 	}
-	sort.Strings(unused)
-	for _, u := range unused {
-		a.plan.errorf("-rename %s: the move exports no package-level name or member called %s", u, u[:strings.Index(u, "=")])
+	sort.Strings(olds)
+	for _, old := range olds {
+		if !used[old] {
+			a.plan.errorf("-rename %s=%s: the move exports no package-level name or member called %s", old, a.cfg.RenameOverrides[old], old)
+		}
 	}
 }
 

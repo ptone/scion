@@ -289,6 +289,42 @@ func plainWord(name string) bool {
 	return true
 }
 
+// otherPkgNames returns the names under which f imports packages other than
+// the source and target packages: a comment word qualified by one of them
+// (http.serve) names something in that package, not a renamed identifier.
+func (a *analysis) otherPkgNames(f *srcFile) map[string]bool {
+	out := map[string]bool{}
+	for _, spec := range f.AST.Imports {
+		p := importPath(spec)
+		if p == a.mod.ImportPath || p == a.dstImport {
+			continue
+		}
+		if n := importName(spec); n != "_" && n != "." {
+			out[n] = true
+		}
+	}
+	delete(out, a.srcName)
+	delete(out, a.cfg.PkgName)
+	return out
+}
+
+// qualifierBefore returns the identifier before a '.' that directly precedes
+// text[i:], or "".
+func qualifierBefore(text string, i int) string {
+	if i == 0 || text[i-1] != '.' {
+		return ""
+	}
+	k := i - 1
+	for k > 0 {
+		r, size := utf8.DecodeLastRuneInString(text[:k])
+		if !isIdentRune(r) {
+			break
+		}
+		k -= size
+	}
+	return text[k : i-1]
+}
+
 // codeContext reports whether the word at text[i:j] is spelled like code:
 // next to '.', '(', '[', ']' or a backquote.
 func codeContext(text string, i, j int) bool {
@@ -320,6 +356,7 @@ func (a *analysis) rewriteComment(f *srcFile, c *ast.Comment, names map[string]s
 		_, leadAt = leadingWord(text)
 	}
 	base := a.offset(c.Pos())
+	others := a.otherPkgNames(f)
 	for i := 2; i < len(text); {
 		r, size := utf8.DecodeRuneInString(text[i:])
 		if !isIdentRune(r) {
@@ -336,9 +373,13 @@ func (a *analysis) rewriteComment(f *srcFile, c *ast.Comment, names map[string]s
 		}
 		word := text[i:j]
 		n, ok := names[word]
-		if i == leadAt {
+		switch {
+		case i == leadAt:
 			n, ok = lead.new, true
-		} else if ok && plainWord(word) && !codeContext(text, i, j) {
+		case !ok:
+		case others[qualifierBefore(text, i)]:
+			ok = false // pkg.name of another package: not the renamed identifier
+		case plainWord(word) && !codeContext(text, i, j):
 			ok = false
 		}
 		if ok {

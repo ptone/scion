@@ -9,5 +9,6 @@ import (
 
 func TestWire(t *testing.T) {
 	stdlog.Print("wire")
+	_ = stdlog.Default() // builds a value only: not reported
 	sub.Wire()
 }

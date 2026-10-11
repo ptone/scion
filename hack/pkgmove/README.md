@@ -233,6 +233,9 @@ Comments are rewritten so that they keep naming the code after the renames:
   rewritten only where it is spelled like code: the first word of its own doc
   comment, or right after `.`, `[` or a backquote, or right before `(`, `]` or
   a backquote. Prose such as "do not run it twice" is left alone.
+- **Other packages' names:** a word qualified by a package that the file
+  imports, other than the source and target packages (`fmt.writeError`,
+  `http.serve`), names something in that package and is not rewritten.
 - **Never touched:** string literals (they are not comments), directives
   (`//go:generate`, `//go:build`, `//line`, `//export`, `//nolint:`, ...) and
   files that are neither moved nor hold a renamed declaration.
@@ -396,7 +399,7 @@ severity:
 | WARN | every moved named type: `%T`, reflect `Type.String`/`PkgPath`, gob names and messages that print type names change from `src.X` to `target.X` for **all** users, including staying files and importers |
 | WARN | methods exported to new names: they may newly satisfy interfaces. Types in **other packages** that embed the moved type are not checked for shadowing or newly promoted members; the WARN says so |
 | WARN | a renamed method's old or new name in a template string (`{{.Name}}`), in a `MethodByName`/`FieldByName` call, or in a non-Go file of the source directory or any of its subdirectories (for example `templates/*.tmpl`). Exported methods become visible to text/template, html/template, reflect and RPC-style dispatch |
-| WARN | a moved function (or package-level var initialiser) that calls a package-level function of `log` or `log/slog`, or a method of `log.Logger` or `slog.Logger` (moved external tests: by import name only). The logged source location (file and function, as in Cloud Logging `sourceLocation`) and the stack traces of ERROR entries now name the target package and file, so log-based metrics, alert filters and Error Reporting groups keyed on them change. One line per function, listing the calls |
+| WARN | a moved function (or package-level var initialiser) that calls, or uses as a func value (`f := slog.Error`, `var logf = log.Printf`, `l.Info` passed along), a record-emitting function of `log` or `log/slog` or such a method of `log.Logger` or `slog.Logger`: `slog` `Debug`/`Info`/`Warn`/`Error` (and their `Context` forms), `Log`, `LogAttrs`; `log` `Print*`, `Fatal*`, `Panic*`, `Output`. Constructors, `With`/`WithGroup`, `Handler`, `Enabled`, `Default` and attribute constructors only build values and are not reported. Moved external tests are matched by import name only. The logged source location (file and function, as in Cloud Logging `sourceLocation`) and the stack traces of ERROR entries now name the target package and file, so log-based metrics, alert filters and Error Reporting groups keyed on them change. One line per function, listing the calls |
 | WARN | `debug.Stack` or `runtime.Stack` in moved files: captured stacks and panic traces show the new package path |
 | WARN | `%T`, `reflect.TypeOf`, `gob.Register`, `runtime.Caller` or `FuncForPC` in moved files: type and function names now print as `target.X` |
 | WARN | the package doc comment moving |
@@ -668,10 +671,17 @@ Each is phrased as a check for the reviewer of a generated PR.
   PR that none exist. Error Reporting groups ERROR entries by stack trace, so
   existing groups (and their mute or resolve states) may restart under new
   groups after the move.
+- **Helpers that record their caller:** the WARN only sees direct uses of
+  `log`/`slog` emitters. A helper that records its caller's PC (for example
+  `pkg/hub/auditevent` `SlogSink.Emit`, through `runtime.Callers(2)`), or any
+  other logging wrapper with `AddSource`-style caller lookup, records a
+  different source location when its callers move, and the tool does not
+  report those callers. For each moved file, check whether it calls such
+  helpers and apply the logging check above to them.
 - **Comment rewrites by name:** comment rewriting is syntactic. Check the
   "Comment rewrites" list in the plan for a rewritten word that names
   something else (another type's member of the same name, or a qualified
-  `pkg.name` of another package), and for comments in staying files that
+  `pkg.name` of a package the file does not import), and for comments in staying files that
   describe moved code under its old name (they are not rewritten).
 - **Hand-written forwarding funcs and vars:** only type and const aliases are
   resolved wherever they are; wrappers and func vars only in generated alias
@@ -785,8 +795,8 @@ pkgmove itself from an earlier move.
 | `intoexistingtestmaindeps` | the target's TestMain has the same text as the source's, but the `setup()` helper it calls differs: HIGH, and the moved test fails after the move |
 | `intoexistingtestmaintags` | the source has `!integration` and `integration` TestMains, the target only the first: HIGH naming the variants; under `-tags integration` the moved test fails after the move |
 | `intoexistinghelpertags` | refused: a staying helper with build-tag variants (`limit_unix_test.go`, `limit_other_test.go`) whose analysed variant matches the target's but whose other variant does not |
-| `doccomments` | doc comments of renamed package-level declarations and of a method rename group (moved and staying files, interface spec included), whole-word rewrites in moved comments (code-like mentions of a plain-word name such as `run()` and `[run]`, block comments), and what is left alone: partial words, prose, string literals, a `//go:generate` directive, staying comments that are not docs of renamed declarations |
+| `doccomments` | doc comments of renamed package-level declarations and of a method rename group (moved and staying files, interface spec included), whole-word rewrites in moved comments (code-like mentions of a plain-word name such as `run()` and `[run]`, block comments), and what is left alone: partial words, prose, a name qualified by another imported package, string literals, a `//go:generate` directive, staying comments that are not docs of renamed declarations |
 | `renameoverride` | `-rename` for a func, a type and a method group (the interface and both implementers), next to a mechanically exported name; comments follow the overrides |
 | `renamereject` | refused: an override colliding with an exported name, an override to a dynamic method name (`String`), and an override that matches nothing |
-| `logging` | the log/slog WARN: package-level `log` and `slog` calls, `*slog.Logger` and `*log.Logger` methods, a closure, a var initialiser, and a moved external test (by import name); a function without logging and a staying function that logs are not reported |
+| `logging` | the log/slog WARN: package-level `log` and `slog` calls, `*slog.Logger` and `*log.Logger` methods, a closure, a var initialiser, emitters used as func values (a var, a local, a method value), and a moved external test (by import name); a function without logging, a function that only builds attributes and loggers, and a staying function that logs are not reported |
 | `intoexistingreject` | refused: a test name collision, a staying helper whose target copy differs, import cycles (directly and through an alias target), and an alias whose bare target name a local shadows |

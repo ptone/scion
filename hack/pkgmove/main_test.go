@@ -902,6 +902,11 @@ func TestCommentHelpers(t *testing.T) {
 			t.Errorf("leadingWord(%q) = %q, want %q", text, got, want)
 		}
 	}
+	for text, want := range map[string]string{"see fmt.run": "fmt", "s.run": "s", "run": "", ".run": "", "a .run": ""} {
+		if got := qualifierBefore(text, strings.LastIndex(text, "run")); got != want {
+			t.Errorf("qualifierBefore(%q) = %q, want %q", text, got, want)
+		}
+	}
 	for _, tc := range []struct {
 		text string
 		want bool

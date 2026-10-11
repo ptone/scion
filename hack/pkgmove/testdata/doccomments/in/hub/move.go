@@ -27,7 +27,8 @@ func (j *job) handle() string { return j.name + defaultName } /* handle and writ
 
 //go:generate echo writeError
 
-// Helper uses writeError but is not renamed itself.
+// Helper uses writeError (fmt.writeError would name another package) but is
+// not renamed itself.
 func Helper() string { return writeError("helper") }
 
 // newJob returns a job named name; see [newJob] and newJob's tests.
