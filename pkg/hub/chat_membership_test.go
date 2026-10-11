@@ -127,7 +127,7 @@ func TestChatMemberProjectIDs_MatchesCheckEffectiveMembership(t *testing.T) {
 	// A group-bound owner role, which both functions ignore, cannot exist:
 	// the store rejects project-owner for a group principal. Pin that, as
 	// the parity table has no case for it.
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: owner,
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: owner,
 		PrincipalType: store.RoleBindingPrincipalGroup, PrincipalID: grp,
 		ScopeType: store.RoleScopeProject, ScopeID: f.project("group-owner"), CreatedBy: "test"})
 	require.Error(t, err, "the store must reject a group-bound project-owner binding")
