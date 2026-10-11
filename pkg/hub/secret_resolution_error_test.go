@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"testing"
 
@@ -106,26 +107,73 @@ func TestSecretResolutionError_ProvisionedStartReturnsToRest(t *testing.T) {
 }
 
 // A restart whose start leg fails on a secret resolution error is a 503
-// with the fixed message, after the stop leg ran; the claim is released.
+// with the fixed message, after the stop leg ran; the claim is released and
+// the agent ends stopped. The error comes either straight from a local
+// dispatch or rebuilt from a failed cross-node row (wrapped, with a nil Err).
 func TestSecretResolutionError_RestartIs503(t *testing.T) {
-	f, d, _ := newClaimFixture(t)
-	a := f.addAgent("restarting", "running", "working")
-	// The agent has a run, as every dispatched agent does: a failed
-	// restart records the stopped state only against the current run.
-	_, err := f.s.SetAgentRunID(context.Background(), a.ID, "run-before-restart", nil)
+	cases := []struct {
+		name string
+		err  func() error
+	}{
+		{"local", func() error { return fakeSecretResolutionErr("started") }},
+		{"rebuilt from a cross-node row", func() error {
+			return dispatchFailureError(&store.BrokerDispatch{
+				Op:     "start",
+				Error:  "dispatch start: agent secrets could not be resolved; the agent was not started",
+				Result: `{"secretResolution":true}`,
+			})
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f, d, _ := newClaimFixture(t)
+			a := f.addAgent("restarting", "running", "working")
+			// The agent has a run, as every dispatched agent does: a failed
+			// restart records the stopped state only against the current run.
+			_, err := f.s.SetAgentRunID(context.Background(), a.ID, "run-before-restart", nil)
+			require.NoError(t, err)
+			d.start = func(context.Context, *store.Agent) error { return tc.err() }
+
+			status, body := lifecycle(t, f, a.ID, "restart")
+			require.Equal(t, http.StatusServiceUnavailable, status, "%v", body)
+			code, message, raw := lifecycleErrorBody(t, body)
+			assert.Equal(t, ErrCodeUnavailable, code)
+			assert.Equal(t, "agent secrets could not be resolved; the agent was not started", message)
+			assertNoSecretResolutionDetail(t, raw, "the API body")
+			assert.Equal(t, int32(1), d.stops.Load(), "the stop leg ran")
+
+			got := getAgent(t, f.s, a.ID)
+			assert.Equal(t, "stopped", got.Phase, "the stop leg ran and the start leg did not: the agent ends stopped")
+			assert.Empty(t, got.StartClaimID)
+			assertNoSecretResolutionDetail(t, got.Message, "the agent message")
+		})
+	}
+}
+
+// Waking a suspended agent for a DM through the real dispatcher, whose
+// secret backend fails to resolve: 503 unavailable with the fixed message,
+// no broker call, and the agent back at rest with its claim released.
+func TestWakeAgentForDM_SecretResolutionError_503(t *testing.T) {
+	srv, s := testServer(t)
+	broker, project := newQuotaTestBrokerAndProject(t, s, "wake-secrets")
+	agent := newQuotaTestAgent(t, s, broker, project, "wake-secrets", state.PhaseSuspended)
+
+	client := &mockRuntimeBrokerClient{}
+	d := NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default())
+	d.SetSecretBackend(&failingResolveBackend{})
+	srv.SetDispatcher(d)
+
+	_, dmErr := srv.wakeAgentForDM(context.Background(), agent)
+	require.NotNil(t, dmErr)
+	assert.Equal(t, http.StatusServiceUnavailable, dmErr.HTTPStatus, dmErr.Message)
+	assert.Equal(t, ErrCodeUnavailable, dmErr.Code)
+	assert.Equal(t, "agent secrets could not be resolved; the agent was not started", dmErr.Message)
+	assertNoSecretResolutionDetail(t, dmErr.Message, "the DM error")
+	assert.False(t, client.startCalled || client.createCalled, "broker must not be called")
+
+	got, err := s.GetAgent(context.Background(), agent.ID)
 	require.NoError(t, err)
-	d.start = func(context.Context, *store.Agent) error { return fakeSecretResolutionErr("started") }
-
-	status, body := lifecycle(t, f, a.ID, "restart")
-	require.Equal(t, http.StatusServiceUnavailable, status, "%v", body)
-	code, message, raw := lifecycleErrorBody(t, body)
-	assert.Equal(t, ErrCodeUnavailable, code)
-	assert.Equal(t, "agent secrets could not be resolved; the agent was not started", message)
-	assertNoSecretResolutionDetail(t, raw, "the API body")
-	assert.Equal(t, int32(1), d.stops.Load(), "the stop leg ran")
-
-	got := getAgent(t, f.s, a.ID)
-	assert.Equal(t, "stopped", got.Phase, "the stop leg ran and the start leg did not: the agent ends stopped")
+	assert.Equal(t, string(state.PhaseSuspended), got.Phase, "the agent is back at rest")
 	assert.Empty(t, got.StartClaimID)
 	assertNoSecretResolutionDetail(t, got.Message, "the agent message")
 }

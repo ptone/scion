@@ -53,7 +53,7 @@ type dispatchBrokerError struct {
 //     it is rebuilt alongside HubErrors;
 //   - SecretResolution reports a start or restart the executing node
 //     stopped because the agent's secrets could not be resolved
-//     (*secretResolutionError); it is rebuilt before the others.
+//     (*secretResolutionError).
 //
 // They are rebuilt in that order of precedence, after SecretResolution.
 type dispatchFailureEnvelope struct {
