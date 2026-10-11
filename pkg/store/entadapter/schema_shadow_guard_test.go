@@ -78,7 +78,7 @@ func TestSchemaShadowMarkerTables(t *testing.T) {
 	assert.Contains(t, schemaShadowQuery, "current_schemas(false)")
 	assert.Contains(t, schemaShadowQuery, "n.nspname = p.nspname AND c.relname = $1")
 	assert.Contains(t, schemaShadowQuery, "n.nspname = p.nspname AND c.relname = $2")
-	assert.Contains(t, schemaShadowQuery, ") AND EXISTS (")
+	assert.Contains(t, schemaShadowQuery, "))\n\tAND EXISTS (SELECT 1", "both marker tables are required")
 }
 
 // TestCheckSchemaShadowing_DialectGate checks that only Postgres queries the
