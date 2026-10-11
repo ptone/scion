@@ -246,11 +246,12 @@ func TestTestIdentity_ClampFailsClosedOnKindLookupError(t *testing.T) {
 	require.Error(t, err, "an unreadable kind must not resolve to an ordinary user")
 	assert.False(t, authz.IsHubAdmin(ctx, human.ID), "fails closed")
 
-	_, err = lookupUserIsTestFixture(ctx, kindErrStore{Store: s}, human.ID)
+	_, _, err = lookupUserKind(ctx, kindErrStore{Store: s}, human.ID)
 	assert.Error(t, err)
-	isFx, err := lookupUserIsTestFixture(ctx, s, generateID())
+	isFx, found, err := lookupUserKind(ctx, s, generateID())
 	require.NoError(t, err)
 	assert.False(t, isFx, "a missing user has no row and no grants")
+	assert.False(t, found)
 
 	// The same lookup through the working store: not a fixture, grants kept.
 	assert.True(t, srv.authzService.IsHubAdmin(ctx, human.ID))
@@ -300,15 +301,23 @@ func TestTestIdentity_ClampCachesShared(t *testing.T) {
 	counting := &countingKindStore{Store: s}
 	main := NewAuthzService(counting, srv.authzService.logger)
 	require.True(t, main.IsHubAdmin(ctx, human.ID))
-	require.Equal(t, 1, counting.getUser, "a privileged binding loads the kind once")
-	roleReads := counting.roleByIDs
+	require.Equal(t, 1, counting.getUser, "a system binding loads the kind once")
+	assert.Equal(t, 0, counting.roleByIDs, "an ordinary principal causes no role-definition read")
 
 	// A transaction-bound service (as Server.authzFor builds) shares the cache.
 	tx := NewAuthzService(counting, srv.authzService.logger)
 	shareTestFixtureClampCache(tx.store, main.store)
 	require.True(t, tx.IsHubAdmin(ctx, human.ID))
 	assert.Equal(t, 1, counting.getUser, "the shared cache avoids a second kind read")
-	assert.Equal(t, roleReads, counting.roleByIDs, "role classes are cached and shared too")
+
+	// Role classes are cached and shared too: the fixture's first read
+	// through main classifies its roles, and the tx-bound service reuses
+	// that classification without another role-definition read.
+	require.False(t, main.IsHubAdmin(ctx, fixture.ID))
+	roleReads := counting.roleByIDs
+	require.Positive(t, roleReads, "a fixture's roles are classified")
+	require.False(t, tx.IsHubAdmin(ctx, fixture.ID))
+	assert.Equal(t, roleReads, counting.roleByIDs, "the shared role-class cache avoids a second read")
 	srvTx := srv.authzFor(&countingKindStore{Store: s})
 	assert.Same(t, srv.authzService.store.(*testFixtureGrantClamp).cache, srvTx.store.(*testFixtureGrantClamp).cache)
 
@@ -353,4 +362,73 @@ func TestTestIdentity_EffectiveAccessViewClamped(t *testing.T) {
 	}
 	fixtureCount, humanCount := count(fx.Identity.ID), count(human.ID)
 	assert.Equal(t, humanCount-1, fixtureCount, "the fixture's inherited hub-admin binding is not shown")
+}
+
+// A non-fixture principal with system-scoped bindings (hub-member via the
+// hub-members group, hub-admin via a group) causes no role-definition read
+// from the clamp, and a missing user's kind is not cached.
+func TestTestIdentity_ClampNoRoleReadForNonFixtures(t *testing.T) {
+	srv, s := newTestIdentityServer(t, true)
+	ctx := context.Background()
+	group := tiGroupWithSystemRole(t, s, "ti-norole-hubadmin", store.SystemRoleHubAdmin, DevUserID)
+	human := &store.User{ID: tid("ti-norole-human"), Email: "ti-norole@test.com", DisplayName: "h", Role: store.UserRoleMember, Status: store.UserStatusActive}
+	require.NoError(t, s.CreateUser(ctx, human))
+	ensureHubMembership(ctx, s, human.ID)
+	tiAddToGroup(t, s, group.ID, human.ID, store.GroupMemberRoleMember)
+
+	counting := &countingKindStore{Store: s}
+	clamped := wrapAuthzStoreWithTestFixtureClamp(counting)
+	groups, err := s.GetEffectiveGroups(ctx, human.ID)
+	require.NoError(t, err)
+	principals := []store.PrincipalRef{{Type: store.RoleBindingPrincipalUser, ID: human.ID}}
+	for _, g := range groups {
+		principals = append(principals, store.PrincipalRef{Type: store.RoleBindingPrincipalGroup, ID: g})
+	}
+	for i := 0; i < 3; i++ {
+		got, err := clamped.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
+		require.NoError(t, err)
+		raw, err := s.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
+		require.NoError(t, err)
+		assert.Len(t, got, len(raw), "a non-fixture's bindings are unchanged")
+	}
+	assert.Equal(t, 0, counting.roleByIDs, "the clamp reads no role definitions for a non-fixture")
+	assert.Equal(t, 1, counting.getUser, "the kind is read once and cached")
+
+	// A missing user is not a fixture and is not cached.
+	missing := generateID()
+	_, err = clamped.ListRoleBindingsForPrincipals(ctx, []store.PrincipalRef{{Type: store.RoleBindingPrincipalUser, ID: missing}, {Type: store.RoleBindingPrincipalGroup, ID: group.ID}}, nil, nil)
+	require.NoError(t, err)
+	c := clamped.(*testFixtureGrantClamp)
+	_, cached := c.cache.fixture[missing]
+	assert.False(t, cached)
+	_ = srv
+}
+
+// The last-super-admin guard reads system bindings unclamped, so it must
+// not count a test identity holding a (stored) super-admin binding as a
+// surviving admin: removing the last real super-admin is still refused
+// (errLastSuperAdmin, answered 409 by the user and role-binding handlers).
+func TestTestIdentity_NotCountedAsSurvivingSuperAdmin(t *testing.T) {
+	srv, s := newTestIdentityServer(t, true)
+	ctx := context.Background()
+	superRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	bindSuper := func(userID string) {
+		_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: superRD.ID, PrincipalType: store.RoleBindingPrincipalUser,
+			PrincipalID: userID, ScopeType: store.RoleScopeSystem, CreatedBy: store.SystemReconcileCreatedBy})
+		require.NoError(t, err)
+	}
+
+	// A test identity with a stored super-admin binding (only a direct
+	// store write can create one) does not keep the dev user removable.
+	fixture := tiStoreFixture(t, s, generateID(), time.Now().Add(time.Hour))
+	bindSuper(fixture.ID)
+	err = srv.checkLastSuperAdminTx(ctx, s, DevUserID, superRD)
+	assert.ErrorIs(t, err, errLastSuperAdmin, "a test identity is not a surviving super-admin")
+
+	// Control: a real active super-admin does count.
+	realAdmin := &store.User{ID: tid("ti-lastadmin-real"), Email: "ti-lastadmin@test.com", DisplayName: "r", Role: store.UserRoleAdmin, Status: store.UserStatusActive}
+	require.NoError(t, s.CreateUser(ctx, realAdmin))
+	bindSuper(realAdmin.ID)
+	assert.NoError(t, srv.checkLastSuperAdminTx(ctx, s, DevUserID, superRD))
 }
