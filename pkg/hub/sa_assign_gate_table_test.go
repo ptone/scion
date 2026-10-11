@@ -19,6 +19,8 @@ package hub
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -30,11 +32,12 @@ import (
 
 // gateTableOutcome is what one evaluateSAAssignment call produced, reduced to
 // the parts a caller can observe: allow, or the denial's rendering kind, its
-// message and its adoption-details cause, plus how many times the actAs
-// checker was consulted.
+// error code (validation denials only), its message and its adoption-details
+// cause, plus how many times the actAs checker was consulted.
 type gateTableOutcome struct {
 	Allowed    bool
 	Kind       saAssignDenialKind
+	Code       string
 	Msg        string
 	Cause      DenyCause
 	CheckCalls int
@@ -100,8 +103,27 @@ func TestSAAssignGate_BeforeAfterTable(t *testing.T) {
 
 	actAsDeniedMsg := func(email string) string {
 		return "You don't have permission to use this GCP service account (" +
-			store.PermissionActAs + " is required on " + email + ")"
+			store.PermissionActAs + " is required on " + email + "). " +
+			"An IAM admin of the account's GCP project grants it, for example with " +
+			"roles/iam.serviceAccountUser on the account."
 	}
+	// The ordinary policy denial for a project-scoped account. It names no
+	// account: the caller may not be a member of the account's project.
+	const projectPolicyDeniedMsg = scaGenericDenyMsg + ": it requires gcp_service_account.assign in the " +
+		"account's project, which the project-owner, project-admin and project-member roles carry. " +
+		"A project owner or admin grants it by adding you to the project. " +
+		"A user access token must also carry the gcp_service_account:assign scope."
+	const hubModeDeniedMsg = "Hub-scoped service account assignment requires gcpIamCheckMode=enforce. " +
+		"A hub admin must set gcpIamCheckMode to enforce in the hub settings. " +
+		"Or assign a project-scoped service account instead."
+
+	// Accounts the callers refuse before the gate, which the gate refuses
+	// too, with the callers' answers.
+	unverifiedSA := wiringSA(t, s, store.ScopeProject, f.project.ID, "gate-table-unverified@proj.iam.gserviceaccount.com")
+	unverifiedSA.Verified = false
+	unverifiedSA.VerificationStatus = ""
+	require.NoError(t, s.UpdateGCPServiceAccount(ctx, unverifiedSA))
+	otherProjectSA := wiringSA(t, s, store.ScopeProject, tid("gate-table-other-project"), "gate-table-other@proj.iam.gserviceaccount.com")
 
 	rows := []struct {
 		name     string
@@ -125,9 +147,9 @@ func TestSAAssignGate_BeforeAfterTable(t *testing.T) {
 			want: gateTableOutcome{Kind: saAssignDenyForbidden,
 				Msg: "GCP permission checking is not available on this Hub; service-account assignment is refused until it is configured"}},
 		{name: "06 project SA, mode off, non-member", sa: projectSA, mode: modeOff, identity: outsiderID,
-			want: gateTableOutcome{Kind: saAssignDenyForbiddenStructured, Msg: scaGenericDenyMsg}},
+			want: gateTableOutcome{Kind: saAssignDenyForbiddenStructured, Msg: projectPolicyDeniedMsg}},
 		{name: "07 hub SA, mode off, admin", sa: hubSA, mode: modeOff, identity: admin,
-			want: gateTableOutcome{Kind: saAssignDenyForbidden, Msg: "Hub-scoped service account assignment requires gcpIamCheckMode=enforce"}},
+			want: gateTableOutcome{Kind: saAssignDenyForbidden, Msg: hubModeDeniedMsg}},
 		{name: "08 hub SA, enforce, admin, actAs allowed", sa: hubSA, mode: modeEnforce, identity: admin, actAs: actAllow,
 			want: gateTableOutcome{Allowed: true, CheckCalls: 1}},
 		{name: "09 hub SA, enforce, hub member, actAs allowed", sa: hubSA, mode: modeEnforce, identity: member, actAs: actAllow,
@@ -139,7 +161,7 @@ func TestSAAssignGate_BeforeAfterTable(t *testing.T) {
 					"(the user or agent that created it, or one of their creators) does not exist. " +
 					"Ask an admin to recreate the agent under a current user."}},
 		{name: "11 hub SA, mode off, member", sa: hubSA, mode: modeOff, identity: member,
-			want: gateTableOutcome{Kind: saAssignDenyForbidden, Msg: "Hub-scoped service account assignment requires gcpIamCheckMode=enforce"}},
+			want: gateTableOutcome{Kind: saAssignDenyForbidden, Msg: hubModeDeniedMsg}},
 		{name: "12 project SA, mode off, no identity", sa: projectSA, mode: modeOff, identity: nil,
 			want: gateTableOutcome{Kind: saAssignDenyUnauthorized}},
 		{name: "13 project SA, mode off, no authz service", sa: projectSA, mode: modeOff, identity: member, nilAuthz: true,
@@ -153,6 +175,13 @@ func TestSAAssignGate_BeforeAfterTable(t *testing.T) {
 		{name: "16 project SA, enforce, user without email", sa: projectSA, mode: modeEnforce, identity: memberNoEmail, actAs: actAllow,
 			want: gateTableOutcome{Kind: saAssignDenyForbidden,
 				Msg: "Your identity cannot be granted permission to use this GCP service account"}},
+		{name: "17 unverified project SA, enforce, member", sa: unverifiedSA, mode: modeEnforce, identity: member, actAs: actAllow,
+			want: gateTableOutcome{Kind: saAssignDenyValidation, Code: ErrCodeIdentityNotVerified,
+				Msg: "GCP service account \"gate-table-unverified@proj.iam.gserviceaccount.com\" is not verified: " +
+					"the hub cannot obtain tokens for it. A project admin must grant the hub's service account " +
+					"roles/iam.serviceAccountTokenCreator on it, then verify it (scion service-accounts verify <id>)."}},
+		{name: "18 other project's SA, enforce, member", sa: otherProjectSA, mode: modeEnforce, identity: member, actAs: actAllow,
+			want: gateTableOutcome{Kind: saAssignDenyValidation, Msg: msgSANotAvailableInProject}},
 	}
 
 	for _, row := range rows {
@@ -194,11 +223,35 @@ func TestSAAssignGate_BeforeAfterTable(t *testing.T) {
 
 			got := gateTableOutcome{Allowed: denial == nil, CheckCalls: checker.CallCount()}
 			if denial != nil {
-				got.Kind, got.Msg, got.Cause = denial.kind, denial.msg, denial.cause
+				got.Kind, got.Code, got.Msg, got.Cause = denial.kind, denial.code, denial.msg, denial.cause
 			}
 			assert.Equal(t, row.want, got)
 		})
 	}
+}
+
+// TestSAAssignGate_ValidationDenialWrite pins the HTTP rendering of the
+// gate's 400 refusals: an unverified account answers identity_not_verified
+// with the account named, as the callers' own check does, and an unreachable
+// one answers validation_error with the not-available text, which names no
+// account.
+func TestSAAssignGate_ValidationDenialWrite(t *testing.T) {
+	sa := &store.GCPServiceAccount{Scope: store.ScopeProject, ScopeID: "p1",
+		Email: "gate-write-unverified@proj.iam.gserviceaccount.com"}
+	rec := httptest.NewRecorder()
+	(&saAssignDenial{kind: saAssignDenyValidation, code: ErrCodeIdentityNotVerified,
+		msg: identityNotVerifiedMessage(sa)}).write(rec)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	apiErr := decodeTargetAPIError(t, rec)
+	assert.Equal(t, ErrCodeIdentityNotVerified, apiErr.Code)
+	assert.Equal(t, identityNotVerifiedMessage(sa), apiErr.Message)
+
+	rec = httptest.NewRecorder()
+	(&saAssignDenial{kind: saAssignDenyValidation, msg: msgSANotAvailableInProject}).write(rec)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	apiErr = decodeTargetAPIError(t, rec)
+	assert.Equal(t, ErrCodeValidationError, apiErr.Code)
+	assert.Equal(t, msgSANotAvailableInProject, apiErr.Message)
 }
 
 // TestSAAssignGate_DefaultLadderBeforeAfterTable pins the default ladder's
@@ -223,18 +276,26 @@ func TestSAAssignGate_DefaultLadderBeforeAfterTable(t *testing.T) {
 
 	_, err := f.srv.resolveDefaultSAAssignmentCore(ctx, nil, f.project.ID, otherProjectSA.ID, SurfaceProjectDefault, defaultTierProject)
 	require.Error(t, err)
-	assert.Equal(t, "project default GCP service account is not available in this project; update the project's default GCP identity setting", err.Error())
+	const projectDefaultFix = "defaultGCPIdentityServiceAccountID in the project settings " +
+		"(PUT /api/v1/projects/<project>/settings, or the project's settings page)"
+	assert.Equal(t, "project default GCP service account is not available in this project; "+
+		"update the project's default GCP identity setting: a project admin must change or clear "+projectDefaultFix+".", err.Error())
 
 	_, err = f.srv.resolveDefaultSAAssignmentCore(ctx, nil, f.project.ID, unverified.ID, SurfaceProjectDefault, defaultTierProject)
 	require.Error(t, err)
-	assert.Equal(t, "project default GCP service account is not verified; verify it before it can be assigned to agents", err.Error())
+	assert.Equal(t, "project default GCP service account is not verified: the hub cannot obtain tokens for "+
+		"gate-ladder-unverified@proj.iam.gserviceaccount.com. A project admin must grant the hub's service account "+
+		"roles/iam.serviceAccountTokenCreator on it, then verify it (scion service-accounts verify <id>). "+
+		"Or a project admin can point "+projectDefaultFix+" at a verified account.", err.Error())
 
 	_, err = f.srv.resolveDefaultSAAssignmentCore(ctx, nil, f.project.ID, hubSA.ID, SurfaceHubDefault, defaultTierHub)
 	require.Error(t, err)
 	var denial *saAssignDenial
 	require.ErrorAs(t, err, &denial)
 	assert.Equal(t, saAssignDenyForbidden, denial.kind)
-	assert.Equal(t, "Hub-scoped service account assignment requires gcpIamCheckMode=enforce", denial.msg)
+	assert.Equal(t, "Hub-scoped service account assignment requires gcpIamCheckMode=enforce. "+
+		"A hub admin must set gcpIamCheckMode to enforce in the hub settings. "+
+		"Or assign a project-scoped service account instead.", denial.msg)
 
 	cfg, err := f.srv.resolveDefaultSAAssignmentCore(ctx, nil, f.project.ID,
 		wiringSA(t, s, store.ScopeProject, f.project.ID, "gate-ladder-ok@proj.iam.gserviceaccount.com").ID,
