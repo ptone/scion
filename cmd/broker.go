@@ -2567,8 +2567,8 @@ func removeBrokerArgs(globalDir string) {
 	}
 }
 
-// Seams for tests: launching the daemon, running the foreground server and
-// removing the record on SIGTERM.
+// Seams for tests: launching the daemon, running the foreground server,
+// removing the record on SIGTERM and interrupting this process.
 var (
 	startBrokerDaemon      = daemon.Start
 	brokerStartVerifyDelay = 500 * time.Millisecond
@@ -2583,12 +2583,19 @@ var (
 		return serverStartCmd.RunE(serverStartCmd, []string{})
 	}
 
-	// removeBrokerRecordOnSignal is what the SIGTERM handler in
-	// removeBrokerRecordOnSIGTERM calls to remove the record. Only that
+	// removeBrokerRecordOnSignal is what the SIGTERM handler
+	// (handleBrokerSIGTERM) calls to remove the record. Only that
 	// handler calls through this var; runBrokerStart's deferred removal
 	// calls removeBrokerArgsIfOwned directly, so a test that wraps this var
 	// counts exactly the handler's removals.
 	removeBrokerRecordOnSignal = removeBrokerArgsIfOwned
+
+	// interruptSelf asks this process to shut down the way Ctrl+C does.
+	interruptSelf = func() {
+		if p, err := os.FindProcess(os.Getpid()); err == nil {
+			_ = p.Signal(os.Interrupt)
+		}
+	}
 )
 
 // claimForegroundBrokerRecord returns the record a foreground broker on
@@ -2616,10 +2623,8 @@ func removeBrokerArgsIfOwned(globalDir string, owned []string) {
 }
 
 // removeBrokerRecordOnSIGTERM makes SIGTERM (systemd's stop signal) remove
-// this foreground broker's record as soon as the signal arrives. It does not
-// shut anything down itself: the in-process server subscribes to SIGTERM
-// too (installServerShutdownSignals) and runs its single graceful shutdown,
-// after which the caller's deferred removal runs as on every other exit.
+// this foreground broker's record as soon as the signal arrives and then
+// make sure the in-process server shuts down once (handleBrokerSIGTERM).
 // The returned func stops handling.
 func removeBrokerRecordOnSIGTERM(globalDir string, owned []string) (stop func()) {
 	ch := make(chan os.Signal, 1)
@@ -2628,7 +2633,7 @@ func removeBrokerRecordOnSIGTERM(globalDir string, owned []string) (stop func())
 	go func() {
 		select {
 		case <-ch:
-			removeBrokerRecordOnSignal(globalDir, owned)
+			handleBrokerSIGTERM(globalDir, owned)
 		case <-done:
 		}
 	}()
@@ -2639,6 +2644,33 @@ func removeBrokerRecordOnSIGTERM(globalDir string, owned []string) (stop func())
 			close(done)
 		})
 	}
+}
+
+// handleBrokerSIGTERM removes the foreground broker's record, then starts
+// the in-process server's single graceful shutdown: directly, through the
+// run-once shutdown the server publishes at step 7 (serverShutdown), or, if
+// none is published yet, by interrupting the process. The pointer is loaded
+// after the removal; a later load can only see "published".
+//
+// serverShutdown is published strictly after the server subscribes to
+// SIGINT/SIGTERM, so every interleaving gives exactly one shutdown:
+//
+//   - The server was subscribed when SIGTERM arrived: both its handler and
+//     this one call the run-once shutdown, which runs once.
+//   - SIGTERM arrived before the server subscribed, but the shutdown was
+//     published before the load here: the direct call runs it.
+//   - Nothing published at the load, server subscribed since: the SIGINT is
+//     that subscription's first signal, so the shutdown runs once (as
+//     early as step 7).
+//   - Nothing published, server not subscribed: the SIGINT's default action
+//     ends the process, as before the server handled SIGTERM.
+func handleBrokerSIGTERM(globalDir string, owned []string) {
+	removeBrokerRecordOnSignal(globalDir, owned)
+	if shutdown := serverShutdown.Load(); shutdown != nil {
+		(*shutdown)(syscall.SIGTERM)
+		return
+	}
+	interruptSelf()
 }
 
 // loadBrokerArgs returns the saved broker launch args, or nil when there

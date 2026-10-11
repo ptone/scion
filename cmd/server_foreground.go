@@ -32,6 +32,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -265,7 +266,11 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	installServerShutdownSignals(signal.Notify, cancel)
+	// The returned done channel is for tests only: do not wait on it here
+	// (architect ruling R11b). The goroutine may be inside the shutdown's
+	// synchronous log write, and joining it would make this return depend
+	// on the logger.
+	_ = installServerShutdownSignals(ctx, signal.Notify, cancel)
 
 	var wg sync.WaitGroup
 	errCh := make(chan error, 3)
@@ -833,22 +838,57 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	return awaitServerExit(ctx, errCh, cancel, wg.Wait, closeAudit)
 }
 
+// serverShutdown is the run-once graceful shutdown that
+// installServerShutdownSignals publishes once the process is subscribed to
+// SIGINT and SIGTERM (runServerStart step 7). Nil until then. The foreground
+// broker's SIGTERM handler calls it directly (see handleBrokerSIGTERM).
+var serverShutdown atomic.Pointer[func(os.Signal)]
+
 // installServerShutdownSignals is step 7 of runServerStart: SIGINT
 // (Ctrl+C) and SIGTERM (systemd, Kubernetes, container stop) both start the
-// graceful shutdown by calling cancel, once. Only the first signal is acted
-// on; the handler stays subscribed, so a second signal is ignored rather
-// than killing the process mid-drain. Orchestrators that escalate to SIGKILL
-// after their grace period still terminate the process immediately. notify
-// is signal.Notify in production and injectable in tests.
-func installServerShutdownSignals(notify func(chan<- os.Signal, ...os.Signal), cancel context.CancelFunc) {
+// graceful shutdown, which logs "Received signal ..." and calls cancel, once.
+// Only the first signal is acted on; the subscription is never stopped, so a
+// second signal is ignored rather than killing the process mid-drain.
+// Orchestrators that escalate to SIGKILL after their grace period still
+// terminate the process immediately. notify is signal.Notify in production
+// and injectable in tests.
+//
+// The signal goroutine also exits when ctx is done (runServerStart cancels
+// ctx on every return), unless it is inside the shutdown's synchronous log
+// line, in which case it exits when that write returns. A signal arriving
+// after that is still swallowed by the subscription, without a log line.
+// The returned done channel is closed as the goroutine's last action; it
+// exists for tests, and production must not wait on it.
+//
+// The run-once shutdown is published in serverShutdown strictly after
+// notify returns, so a caller that finds it unpublished knows the server
+// may not be subscribed yet.
+func installServerShutdownSignals(ctx context.Context, notify func(chan<- os.Signal, ...os.Signal), cancel context.CancelFunc) (done <-chan struct{}) {
+	var once sync.Once
+	shutdown := func(sig os.Signal) {
+		once.Do(func() {
+			log.Printf("Received signal %v, shutting down...", sig)
+			cancel()
+		})
+	}
+
 	sigCh := make(chan os.Signal, 1)
 	notify(sigCh, os.Interrupt, syscall.SIGTERM)
 
+	exited := make(chan struct{})
 	go func() {
-		sig := <-sigCh
-		log.Printf("Received signal %v, shutting down...", sig)
-		cancel()
+		defer close(exited)
+		select {
+		case sig := <-sigCh:
+			if ctx.Err() == nil {
+				shutdown(sig)
+			}
+		case <-ctx.Done():
+		}
 	}()
+
+	serverShutdown.Store(&shutdown)
+	return exited
 }
 
 // awaitServerExit is step 16 of runServerStart. On cancellation it calls

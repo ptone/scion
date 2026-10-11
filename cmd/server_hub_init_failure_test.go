@@ -70,9 +70,13 @@ func TestRunServerStart_HubInitFailureReturnsAndRunsDeferredCleanups(t *testing.
 	t.Cleanup(func() { pinProcessUTC, initServerLoggingFn, initHubServerFn = savedPin, savedLogging, savedHub })
 	pinProcessUTC = func() {}
 	// runServerStart's step 7 subscribes the process to SIGINT and SIGTERM
-	// with the real signal.Notify; restore default handling afterwards so
-	// the subscription does not outlive this test.
+	// with the real signal.Notify and never unsubscribes (that is what makes
+	// a second signal be ignored); restore default handling afterwards so
+	// the subscription does not outlive this test. The step-7 signal
+	// goroutine itself exits when runServerStart's deferred cancel runs
+	// (see the N3 tests in server_shutdown_signals_test.go).
 	t.Cleanup(func() { signal.Reset(os.Interrupt, syscall.SIGTERM) })
+	resetServerShutdownForTest(t)
 
 	resetServerFlags()
 	savedGlobal, savedDebugEndpoints := globalMode, enableDebugEndpoints
@@ -128,14 +132,22 @@ func TestRunServerStart_HubInitFailureReturnsAndRunsDeferredCleanups(t *testing.
 	assert.True(t, logCleanupRan, "deferred log cleanups run (log.Fatalf would have skipped them)")
 	assert.Contains(t, logs.String(), "Hub server failed to start: "+initErr.Error())
 
-	// Nothing started serving: the hub port was never bound.
+	// Start was never reached. The proof is structural: the injected
+	// constructor returns (nil, err) and runServerStart returns at the
+	// hub-init error site, before step 11's Start. The free port below is
+	// supporting evidence only (a server that started and shut down would
+	// also have freed it).
 	l, lerr := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 	require.NoError(t, lerr, "the hub port must still be free")
 	require.NoError(t, l.Close())
 
-	// Exit status 1, as with log.Fatalf; no usage block for this runtime
-	// failure (root's hook sets SilenceUsage on the executing subcommand).
+	// Exit status 1, as with log.Fatalf.
 	assert.Equal(t, 1, exitCodeFor(err))
+	// No usage block: the error is a plain runtime error, not a usageError
+	// (asserted directly). The command tree below only models what root's
+	// PersistentPreRunE does in Execute (it sets SilenceUsage on the
+	// executing subcommand before RunE); it does not run that hook.
+	assert.False(t, isUsageError(err), "a hub startup failure is not a usage error")
 	parent := &cobra.Command{Use: "server"}
 	sub := &cobra.Command{Use: "start", SilenceUsage: true}
 	parent.AddCommand(sub)
