@@ -87,7 +87,10 @@ func TestAgentProjectSlug_HTTP(t *testing.T) {
 		"/api/v1/agents?projectId=" + project.ID,
 		"/api/v1/agents?sort=updated&limit=10",
 		"/api/v1/agents?sort=updated&limit=10&view=compact",
+		"/api/v1/agents?view=compact",
 		"/api/v1/projects/" + project.ID + "/agents",
+		"/api/v1/projects/" + project.ID + "/agents?view=compact",
+		"/api/v1/projects/" + project.ID + "/agents?sort=updated&fit=500&view=compact",
 	} {
 		rec = doRequest(t, srv, http.MethodGet, path, nil)
 		require.Equal(t, http.StatusOK, rec.Code, "%s: %s", path, rec.Body.String())
@@ -103,5 +106,26 @@ func TestAgentProjectSlug_HTTP(t *testing.T) {
 			}
 		}
 		assert.True(t, found, "%s: agent missing from the list", path)
+	}
+}
+
+// The project agent list read with an agent token carries projectSlug.
+func TestAgentProjectSlug_AgentJWTList(t *testing.T) {
+	f := sortedListSetup(t)
+	self := f.createAgent(t, "slug-jwt", string(state.PhaseRunning), nil)
+	tok := f.agentJWTFor(t, self.ID)
+
+	for _, query := range []string{"sort=updated&fit=500", "sort=updated&fit=500&view=compact"} {
+		rec := doRequestWithAgentToken(t, f.srv, http.MethodGet, f.listPath(query), nil, tok)
+		require.Equal(t, http.StatusOK, rec.Code, "%s: %s", query, rec.Body.String())
+		var list struct {
+			Agents []struct {
+				ID          string `json:"id"`
+				ProjectSlug string `json:"projectSlug"`
+			} `json:"agents"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &list), query)
+		require.Len(t, list.Agents, 1, query)
+		assert.Equal(t, f.project.Slug, list.Agents[0].ProjectSlug, query)
 	}
 }
