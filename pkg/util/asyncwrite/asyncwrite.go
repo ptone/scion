@@ -138,19 +138,6 @@ func (r Result) String() string {
 	}
 }
 
-// IsFailure reports whether the result is counted as a write failure
-// (scion.logging.write.failures). Rejections and the terminal failure
-// outcomes are failures; written and late_return are not.
-func (r Result) IsFailure() bool {
-	switch r {
-	case ResultError, ResultTimeout, ResultShutdown, ResultQueueFull,
-		ResultOversize, ResultUnsupported, ResultClosed:
-		return true
-	default:
-		return false
-	}
-}
-
 // Timer is the subset of *time.Timer the writer needs.
 type Timer interface {
 	Stop() bool

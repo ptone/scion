@@ -189,19 +189,8 @@ func (wm *WriteMetrics) observe(_ context.Context, o metric.Observer) error {
 		snap := src.Snapshot()
 		observeCount(wm.records, snap.Written, writer)
 		observeCount(wm.late, snap.LateReturns, writer)
-		for _, f := range []struct {
-			r asyncwrite.Result
-			n uint64
-		}{
-			{asyncwrite.ResultError, snap.WriteErrors},
-			{asyncwrite.ResultTimeout, snap.WriteTimeouts},
-			{asyncwrite.ResultShutdown, snap.DroppedShutdown},
-			{asyncwrite.ResultQueueFull, snap.DroppedFull},
-			{asyncwrite.ResultOversize, snap.DroppedOversize},
-			{asyncwrite.ResultUnsupported, snap.DroppedUnsupported},
-			{asyncwrite.ResultClosed, snap.DroppedClosed},
-		} {
-			observeCount(wm.failures, f.n, writer, attribute.String("reason", f.r.String()))
+		for _, f := range asyncFailureReasons {
+			observeCount(wm.failures, f.count(snap), writer, attribute.String("reason", f.result.String()))
 		}
 		attrs := metric.WithAttributes(writer)
 		o.ObserveInt64(wm.depth, src.QueueDepth(), attrs)
@@ -225,6 +214,23 @@ func (wm *WriteMetrics) observe(_ context.Context, o metric.Observer) error {
 		}
 	}
 	return nil
+}
+
+// asyncFailureReasons is the single mapping from an async writer's
+// Snapshot counters to scion.logging.write.failures{reason}. Every
+// asyncwrite.Result except written and late_return is a failure; those two
+// are exported as write.records and write.late_returns instead.
+var asyncFailureReasons = []struct {
+	result asyncwrite.Result
+	count  func(asyncwrite.Snapshot) uint64
+}{
+	{asyncwrite.ResultError, func(s asyncwrite.Snapshot) uint64 { return s.WriteErrors }},
+	{asyncwrite.ResultTimeout, func(s asyncwrite.Snapshot) uint64 { return s.WriteTimeouts }},
+	{asyncwrite.ResultShutdown, func(s asyncwrite.Snapshot) uint64 { return s.DroppedShutdown }},
+	{asyncwrite.ResultQueueFull, func(s asyncwrite.Snapshot) uint64 { return s.DroppedFull }},
+	{asyncwrite.ResultOversize, func(s asyncwrite.Snapshot) uint64 { return s.DroppedOversize }},
+	{asyncwrite.ResultUnsupported, func(s asyncwrite.Snapshot) uint64 { return s.DroppedUnsupported }},
+	{asyncwrite.ResultClosed, func(s asyncwrite.Snapshot) uint64 { return s.DroppedClosed }},
 }
 
 func clampInt64(n uint64) int64 {

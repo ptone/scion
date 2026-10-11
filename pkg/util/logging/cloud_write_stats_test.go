@@ -95,10 +95,10 @@ func TestCloudFailureReason_ClosedSet(t *testing.T) {
 	for _, w := range want {
 		union[w] = true
 	}
-	for r := asyncwrite.ResultWritten; r <= asyncwrite.ResultLateReturn; r++ {
-		if r.IsFailure() {
-			union[r.String()] = true
-		}
+	// The async writer's failure reasons, from the production mapping
+	// WriteMetrics exports (asyncFailureReasons).
+	for _, f := range asyncFailureReasons {
+		union[f.result.String()] = true
 	}
 	if len(union) != 9 {
 		t.Fatalf("reason union = %d values (%v), want 9", len(union), union)
@@ -722,6 +722,55 @@ func TestWriteMetrics_CumulativeConservationAcrossAttachAndTwoReaders(t *testing
 	}
 	if f, c := cloudPoints(t, r1); len(c) != 1 || c[0] != 0 || f["circuit_open"] != 3 {
 		t.Fatalf("after circuit closed: failures %v circuit %v", f, c)
+	}
+}
+
+// The production mapping from each asyncwrite.Result to its exported
+// series: written -> write.records, late_return -> write.late_returns,
+// every other result -> write.failures{reason=<result>}. Each Snapshot
+// counter is set alone and the exported series is read back, so the test
+// checks asyncFailureReasons and the callback, not a copy of them.
+func TestWriteMetrics_AsyncResultMapping(t *testing.T) {
+	set := map[asyncwrite.Result]func(*asyncwrite.Snapshot){
+		asyncwrite.ResultWritten:     func(s *asyncwrite.Snapshot) { s.Written = 1 },
+		asyncwrite.ResultLateReturn:  func(s *asyncwrite.Snapshot) { s.LateReturns = 1 },
+		asyncwrite.ResultError:       func(s *asyncwrite.Snapshot) { s.WriteErrors = 1 },
+		asyncwrite.ResultTimeout:     func(s *asyncwrite.Snapshot) { s.WriteTimeouts = 1 },
+		asyncwrite.ResultShutdown:    func(s *asyncwrite.Snapshot) { s.DroppedShutdown = 1 },
+		asyncwrite.ResultQueueFull:   func(s *asyncwrite.Snapshot) { s.DroppedFull = 1 },
+		asyncwrite.ResultOversize:    func(s *asyncwrite.Snapshot) { s.DroppedOversize = 1 },
+		asyncwrite.ResultUnsupported: func(s *asyncwrite.Snapshot) { s.DroppedUnsupported = 1 },
+		asyncwrite.ResultClosed:      func(s *asyncwrite.Snapshot) { s.DroppedClosed = 1 },
+	}
+	if len(set) != int(asyncwrite.ResultLateReturn) {
+		t.Fatalf("mapping test covers %d results, want all %d", len(set), asyncwrite.ResultLateReturn)
+	}
+	failures := 0
+	for r, apply := range set {
+		var snap asyncwrite.Snapshot
+		apply(&snap)
+		reader := sdkmetric.NewManualReader()
+		wm := newManualWriteMetrics(t, reader)
+		wm.Observe(&fakeWriterSource{name: "audit", snap: snap})
+		got := sumByAttrs(t, reader)
+		delete(got, MetricQueueDepth+"|audit|")
+		delete(got, MetricWriterStalled+"|audit|")
+		var want string
+		switch r {
+		case asyncwrite.ResultWritten:
+			want = MetricWriteRecords + "|audit|"
+		case asyncwrite.ResultLateReturn:
+			want = MetricWriteLateReturns + "|audit|"
+		default:
+			want = MetricWriteFailures + "|audit|" + r.String()
+			failures++
+		}
+		if len(got) != 1 || got[want] != 1 {
+			t.Errorf("%s: exported %v, want only %s = 1", r, got, want)
+		}
+	}
+	if failures != len(asyncFailureReasons) || failures != 7 {
+		t.Fatalf("failure results = %d, production mapping has %d, want 7", failures, len(asyncFailureReasons))
 	}
 }
 

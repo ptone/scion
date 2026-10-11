@@ -733,20 +733,13 @@ func TestResultLabelsAreClosedSet(t *testing.T) {
 		ResultShutdown: "shutdown", ResultQueueFull: "queue_full", ResultOversize: "oversize",
 		ResultUnsupported: "unsupported", ResultClosed: "closed", ResultLateReturn: "late_return",
 	}
-	failures := 0
 	for r, s := range want {
 		if r.String() != s {
 			t.Errorf("%d.String() = %q, want %q", r, r.String(), s)
 		}
-		if r.IsFailure() {
-			failures++
-		}
 	}
-	if failures != 7 {
-		t.Fatalf("failure reasons = %d, want 7", failures)
-	}
-	if ResultWritten.IsFailure() || ResultLateReturn.IsFailure() {
-		t.Fatal("non-failures marked as failures")
+	if len(want) != int(ResultLateReturn) {
+		t.Fatalf("labels cover %d results, want all %d", len(want), ResultLateReturn)
 	}
 }
 
