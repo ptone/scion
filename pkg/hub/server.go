@@ -4301,6 +4301,12 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 	defer cancel()
 
 	agent, err := s.store.GetAgent(ctx, snapshot.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		// Deleted while it waited: nothing to suspend.
+		slog.Info("Scheduler: skipping auto-suspend; agent no longer exists",
+			"agent_id", snapshot.ID, "agent_name", snapshot.Name)
+		return false
+	}
 	if err != nil {
 		slog.Error("Scheduler: auto-suspend could not re-read agent",
 			"agent_id", snapshot.ID, "agent_name", snapshot.Name, "error", err)
@@ -4326,6 +4332,9 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 	// The container is stopped before phase=suspended is written; see
 	// beginLifecycleOp.
 	endLifecycleOp := s.beginLifecycleOp(agent.ID)
+	// endLifecycleOp is idempotent: this only ends the op if a panic
+	// skipped the explicit calls below (runAutoSuspendBatch recovers it).
+	defer endLifecycleOp()
 	if agent.RuntimeBrokerID != "" {
 		if dispatcher == nil {
 			slog.Error("Scheduler: cannot auto-suspend agent because dispatcher is nil",

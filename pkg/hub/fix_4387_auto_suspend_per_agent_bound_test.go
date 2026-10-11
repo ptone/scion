@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -187,31 +188,45 @@ func TestAutoSuspend_CancelledSchedulerStartsNone(t *testing.T) {
 	assert.Zero(t, disp.stops.Load(), "no auto-suspend starts after shutdown")
 }
 
-// gatedStopDispatcher records each stop dispatch and holds it until release
-// is closed (or its ctx ends).
+// gatedStopDispatcher records each stop dispatch and holds it until it is
+// released: one stop per send on release, or every stop once release is
+// closed (or when its ctx ends). With failFirst the first stop fails once
+// released; with panicFirst the first stop panics without waiting.
 type gatedStopDispatcher struct {
 	createAgentDispatcher
-	mu      sync.Mutex
-	stops   []string
-	started chan string
-	release chan struct{}
+	mu         sync.Mutex
+	stops      []string
+	started    chan string
+	release    chan struct{}
+	failFirst  bool
+	panicFirst bool
 }
 
 func newGatedStopDispatcher() *gatedStopDispatcher {
 	return &gatedStopDispatcher{started: make(chan string, 16), release: make(chan struct{})}
 }
 
+// errGatedStopFailed is the first stop's error with failFirst.
+var errGatedStopFailed = errors.New("gated stop failed")
+
 func (d *gatedStopDispatcher) DispatchAgentStop(ctx context.Context, agent *store.Agent) error {
 	d.mu.Lock()
 	d.stops = append(d.stops, agent.ID)
+	first := len(d.stops) == 1
 	d.mu.Unlock()
 	d.started <- agent.ID
+	if first && d.panicFirst {
+		panic("gated stop panicked")
+	}
 	select {
 	case <-d.release:
-		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+	if first && d.failFirst {
+		return errGatedStopFailed
+	}
+	return nil
 }
 
 func (d *gatedStopDispatcher) stopped() []string {
@@ -246,69 +261,93 @@ func newStalledBrokerAgent(t *testing.T, s store.Store, name string) *store.Agen
 	return loaded
 }
 
-// ptone/scion#4387 round 1 (R1): the auto-suspends run on the server-owned
+// newHandOffAgent creates a running agent on an online broker with intent
+// running that the next stalled-detection tick marks stalled.
+func newHandOffAgent(t *testing.T, s store.Store, name string) *store.Agent {
+	t.Helper()
+	ctx := context.Background()
+	_, _, agent := setupOnlineBrokerAgent(t, s, name)
+	_, err := s.SetRunIntent(ctx, agent.ID, store.RunIntentRunning)
+	require.NoError(t, err)
+	db := s.(*entadapter.CompositeStore).DB()
+	_, err = db.ExecContext(ctx, "UPDATE agents SET activity = '' WHERE id = ?", agent.ID)
+	require.NoError(t, err)
+	makeStalled(t, s, agent.ID)
+	return agent
+}
+
+// ptone/scion#4387 (R1, O-1): the auto-suspends run on the server-owned
 // worker, on the server-lifetime ctx, not on the scheduler's handler ctx.
-// The tick returns while the first auto-suspend is still in flight; the
-// handler ctx then expires and its parent is cancelled, which does not
-// matter to the worker; the server shuts down, and no further
-// auto-suspend starts. Shutdown waits for the one in flight, which
-// completes under its own bound.
+// The tick hands four agents off and returns; its handler ctx then passes
+// its deadline and its parent is cancelled. The worker goes on: the second
+// and third agents' stops start while the server is up. The server then
+// shuts down while the third is in flight, and the fourth never starts.
+// The third completes under its own bound, and shutdown waits for it.
 func TestAutoSuspend_WorkerStopsOnShutdownAfterHandlerCtxEnds(t *testing.T) {
 	srv, s := testServer(t)
 	disp := newGatedStopDispatcher()
 	srv.SetDispatcher(disp)
 	srv.config.AutoSuspendStalled = true
-	a := newStalledBrokerAgent(t, s, "as-shutdown-a")
-	b := newStalledBrokerAgent(t, s, "as-shutdown-b")
-	// Unmark them so the tick marks them again and hands them off.
-	for _, id := range []string{a.ID, b.ID} {
-		db := s.(*entadapter.CompositeStore).DB()
-		_, err := db.ExecContext(context.Background(), "UPDATE agents SET activity = '' WHERE id = ?", id)
-		require.NoError(t, err)
-		makeStalled(t, s, id)
+	all := map[string]bool{}
+	for _, name := range []string{"as-shutdown-1", "as-shutdown-2", "as-shutdown-3", "as-shutdown-4"} {
+		all[newHandOffAgent(t, s, name).ID] = true
 	}
 
 	parent, cancelParent := context.WithCancel(context.Background())
-	handlerCtx, cancelHandler := context.WithTimeout(parent, 5*time.Second)
+	defer cancelParent()
+	handlerCtx, cancelHandler := context.WithTimeout(parent, time.Second)
 	defer cancelHandler()
 	srv.agentStalledDetectionHandler()(handlerCtx)
 
 	first := awaitStopStarted(t, disp)
-	// The scheduler's handler ctx ends (deadline, then its parent): the
-	// worker does not depend on it.
-	cancelHandler()
+	<-handlerCtx.Done()
+	require.ErrorIs(t, handlerCtx.Err(), context.DeadlineExceeded, "fixture check: the handler ctx passed its deadline")
 	cancelParent()
 
-	// Shut down while the first auto-suspend is in flight, then let its
-	// dispatch finish.
+	disp.release <- struct{}{}
+	second := awaitStopStarted(t, disp) // the server is up: the worker goes on.
+	disp.release <- struct{}{}
+	third := awaitStopStarted(t, disp)
+
+	cleaned := make(chan struct{})
 	go func() {
-		time.Sleep(100 * time.Millisecond)
-		close(disp.release)
+		_ = srv.CleanupBackgroundResources(context.Background())
+		close(cleaned)
 	}()
-	require.NoError(t, srv.CleanupBackgroundResources(context.Background()))
-
-	assert.Equal(t, []string{first}, disp.stopped(), "no auto-suspend starts after shutdown")
-	second := a.ID
-	if first == a.ID {
-		second = b.ID
+	<-srv.ctx.Done() // shutdown has begun while the third is in flight.
+	disp.release <- struct{}{}
+	select {
+	case <-cleaned:
+	case <-time.After(10 * time.Second):
+		t.Fatal("shutdown did not return")
 	}
-	got := requireRunIntent(t, s, first, store.RunIntentStopped)
-	assert.Equal(t, string(state.PhaseSuspended), got.Phase, "the auto-suspend in flight completes")
-	got = requireRunIntent(t, s, second, store.RunIntentRunning)
-	assert.Equal(t, string(state.PhaseRunning), got.Phase, "the agent not reached is left running")
 
-	// A hand-off after shutdown is dropped.
-	srv.enqueueAutoSuspend([]store.Agent{*got})
+	assert.Equal(t, []string{first, second, third}, disp.stopped(), "no auto-suspend starts after shutdown")
+	for _, id := range []string{first, second, third} {
+		delete(all, id)
+		got := requireRunIntent(t, s, id, store.RunIntentStopped)
+		assert.Equal(t, string(state.PhaseSuspended), got.Phase, "agent %s is suspended", id)
+	}
+	require.Len(t, all, 1)
+	for fourth := range all {
+		got := requireRunIntent(t, s, fourth, store.RunIntentRunning)
+		assert.Equal(t, string(state.PhaseRunning), got.Phase, "the agent not reached is left running")
+		// A hand-off after shutdown is dropped.
+		srv.enqueueAutoSuspend([]store.Agent{*got})
+	}
 	srv.waitAutoSuspendIdle()
-	assert.Len(t, disp.stopped(), 1)
+	assert.Len(t, disp.stopped(), 3)
 }
 
 // Overlapping hand-offs (ticks) do not process an agent twice: an agent
 // already waiting, or in the batch being processed, is not added again. A
-// batch handed off while the worker is busy is processed after it.
+// batch handed off while the worker is busy is processed after it. The
+// first agent's stop fails, so it stays running and stalled: a duplicate
+// entry would dispatch it a second time.
 func TestAutoSuspend_WorkerDeduplicatesHandOffs(t *testing.T) {
 	srv, s := testServer(t)
 	disp := newGatedStopDispatcher()
+	disp.failFirst = true
 	srv.SetDispatcher(disp)
 	a := newStalledBrokerAgent(t, s, "as-dedup-a")
 	b := newStalledBrokerAgent(t, s, "as-dedup-b")
@@ -318,14 +357,18 @@ func TestAutoSuspend_WorkerDeduplicatesHandOffs(t *testing.T) {
 	// While a is in flight: a again (in progress), b twice (waiting).
 	srv.enqueueAutoSuspend([]store.Agent{*a, *b})
 	srv.enqueueAutoSuspend([]store.Agent{*b})
+	pending, queued := autoSuspendQueueState(srv)
+	assert.Equal(t, []string{b.ID}, pending, "only b waits, once")
+	assert.Equal(t, 2, queued, "a (in progress) and b (waiting)")
 	close(disp.release)
 	srv.waitAutoSuspendIdle()
 
 	assert.Equal(t, []string{a.ID, b.ID}, disp.stopped(), "each agent is dispatched once, in hand-off order")
-	for _, id := range []string{a.ID, b.ID} {
-		got := requireRunIntent(t, s, id, store.RunIntentStopped)
-		assert.Equal(t, string(state.PhaseSuspended), got.Phase)
-	}
+	gotA := requireRunIntent(t, s, a.ID, store.RunIntentRunning)
+	assert.Equal(t, string(state.PhaseRunning), gotA.Phase, "fixture check: a's failed stop left it running")
+	assert.Equal(t, string(state.ActivityStalled), gotA.Activity, "fixture check: and stalled")
+	gotB := requireRunIntent(t, s, b.ID, store.RunIntentStopped)
+	assert.Equal(t, string(state.PhaseSuspended), gotB.Phase)
 }
 
 // The hand-off is bounded: agents beyond autoSuspendQueueLimit are dropped

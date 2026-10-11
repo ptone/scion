@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -40,6 +41,8 @@ import (
 //   - Agents handed off while a batch is being processed wait in the set.
 //     When the batch ends, the worker takes everything pending as the next
 //     batch, which gets its own start window (autoSuspendStalledAgents).
+//   - A panic in a batch is recovered and logged (runAutoSuspendBatch); the
+//     batch's agents leave the queued set and the worker carries on.
 //   - The worker runs on the server-lifetime ctx. Shutdown cancels it, so
 //     no new agent's auto-suspend starts, and stopAutoSuspendWorker waits
 //     (bounded) for the one in flight.
@@ -51,6 +54,10 @@ var autoSuspendQueueLimit = 1000
 // autoSuspendStopGrace bounds how long shutdown waits for an auto-suspend
 // in flight. A variable so tests can change it.
 var autoSuspendStopGrace = 10 * time.Second
+
+// autoSuspendWorkerExitHook, when set (tests), is called by the worker
+// goroutine right after it has decided to exit and released the lock.
+var autoSuspendWorkerExitHook func()
 
 // autoSuspendWorker is the state of the server's auto-suspend worker. The
 // zero value is ready to use.
@@ -136,18 +143,41 @@ func (s *Server) runAutoSuspendWorker() {
 			}
 			w.running = false
 			w.mu.Unlock()
+			if autoSuspendWorkerExitHook != nil {
+				autoSuspendWorkerExitHook()
+			}
 			return
 		}
 		w.mu.Unlock()
 
-		s.autoSuspendStalledAgents(ctx, batch)
+		s.runAutoSuspendBatch(ctx, batch)
+	}
+}
 
+// runAutoSuspendBatch runs one batch and then removes its agents from the
+// queued set. A panic in the batch (dispatcher, store, harness or
+// sync-back) is recovered and logged, as the scheduler did when the batch
+// ran on its goroutine: the hub keeps running, the batch's agents are
+// still removed from the queued set, and the worker goes on with the next
+// batch or exits normally, so later hand-offs are still processed. The
+// agents of the batch after the one that panicked are not suspended; they
+// stay stalled.
+func (s *Server) runAutoSuspendBatch(ctx context.Context, batch []store.Agent) {
+	w := &s.autoSuspend
+	defer func() {
 		w.mu.Lock()
 		for i := range batch {
 			delete(w.queued, batch[i].ID)
 		}
 		w.mu.Unlock()
-	}
+	}()
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("Scheduler: auto-suspend worker panicked",
+				"panic", r, "batch_size", len(batch), "stack", string(debug.Stack()))
+		}
+	}()
+	s.autoSuspendStalledAgents(ctx, batch)
 }
 
 // stopAutoSuspendWorker stops the auto-suspend worker: later hand-offs and
@@ -175,10 +205,4 @@ func (s *Server) stopAutoSuspendWorker(ctx context.Context) {
 	case <-grace.C:
 		slog.Warn("Scheduler: auto-suspend still in flight after the shutdown grace", "grace", autoSuspendStopGrace)
 	}
-}
-
-// waitAutoSuspendIdle waits until the auto-suspend worker has processed
-// everything handed to it (tests).
-func (s *Server) waitAutoSuspendIdle() {
-	s.autoSuspend.wg.Wait()
 }
