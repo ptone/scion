@@ -37,10 +37,6 @@ import (
 // Tests that set it must not run in parallel.
 var testAgentOwnerHookDisabled atomic.Bool
 
-// markRootlessTestAgent exempts the agent from defaultTestAgentOwner, for a
-// test that needs an agent with no resolvable root.
-func markRootlessTestAgent(id string) { rootlessTestAgents.Store(id, true) }
-
 // newTestStore opens a fresh Ent-backed store for tests, mirroring the
 // production single-database layout (see cmd/server_foreground.go:initStore).
 // It is a drop-in replacement for the former sqlite.New: pass ":memory:" for an

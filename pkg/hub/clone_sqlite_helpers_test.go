@@ -17,9 +17,15 @@
 package hub
 
 import (
+	"context"
 	"sync"
 	"time"
 )
+
+func raceRequestIDFromContext(ctx context.Context) (int, bool) {
+	id, ok := ctx.Value(raceRequestIDKey{}).(int)
+	return id, ok
+}
 
 // copyBarrier makes concurrent clone requests interleave deterministically.
 // arrive blocks the calling goroutine until n distinct requests have all

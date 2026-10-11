@@ -334,3 +334,7 @@ func (f *msFixture) agentToken(a *store.Agent, scopes ...AgentTokenScope) string
 func (f *msFixture) agentIdentity(a *store.Agent) AgentIdentity {
 	return newFullAgentIdentity(a.ID, a.ProjectID, a.Ancestry, ScopesForRole(AgentRoleFull))
 }
+
+// markRootlessTestAgent exempts the agent from defaultTestAgentOwner, for a
+// test that needs an agent with no resolvable root.
+func markRootlessTestAgent(id string) { rootlessTestAgents.Store(id, true) }

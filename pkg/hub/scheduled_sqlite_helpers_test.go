@@ -29,23 +29,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// seedScheduleAuthorAgent stores the agent that authzHelperAgent names, in
-// projectID, so the agent can author schedules: a schedule revision records
-// the author's effect ceiling, which for an agent is computed from its
-// stored row. The agent has no edge, the shape of an agent created before
-// the edge backfill (which these tests leave incomplete).
-func seedScheduleAuthorAgent(t *testing.T, s store.Store, projectID string) {
-	t.Helper()
-	require.NoError(t, s.CreateAgent(context.Background(), &store.Agent{
-		ID:            authzHelperAgentID,
-		Slug:          "schedule-author-agent",
-		Name:          "schedule-author-agent",
-		ProjectID:     projectID,
-		Phase:         "running",
-		AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)},
-	}))
-}
-
 // withAgentRevision returns evt carrying the recorded authorization revision
 // a create or resume by the stored agent agentID writes: agent attribution
 // and the agent's own write ceiling, computed at seed time from its stored row and

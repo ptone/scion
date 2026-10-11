@@ -1042,11 +1042,6 @@ func (o *outsideTree) assertIntact(t *testing.T, before map[string]string) {
 		"the tree outside the served directory changed; a handler followed a symlink out of it")
 }
 
-func raceRequestIDFromContext(ctx context.Context) (int, bool) {
-	id, ok := ctx.Value(raceRequestIDKey{}).(int)
-	return id, ok
-}
-
 // projectOwnerBindingFor returns the user's project-owner binding on the
 // project, or nil.
 func projectOwnerBindingFor(t *testing.T, s store.Store, userID, projectID string) *store.RoleBinding {

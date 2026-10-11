@@ -5693,6 +5693,23 @@ func (s *countingBrokerLoadStore) GetRuntimeBroker(ctx context.Context, id strin
 	return s.Store.GetRuntimeBroker(ctx, id)
 }
 
+// seedScheduleAuthorAgent stores the agent that authzHelperAgent names, in
+// projectID, so the agent can author schedules: a schedule revision records
+// the author's effect ceiling, which for an agent is computed from its
+// stored row. The agent has no edge, the shape of an agent created before
+// the edge backfill (which these tests leave incomplete).
+func seedScheduleAuthorAgent(t *testing.T, s store.Store, projectID string) {
+	t.Helper()
+	require.NoError(t, s.CreateAgent(context.Background(), &store.Agent{
+		ID:            authzHelperAgentID,
+		Slug:          "schedule-author-agent",
+		Name:          "schedule-author-agent",
+		ProjectID:     projectID,
+		Phase:         "running",
+		AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)},
+	}))
+}
+
 func (f *federatedTestIdentity) ID() string          { return f.id }
 func (f *federatedTestIdentity) Type() string        { return "federated_user" }
 func (f *federatedTestIdentity) Email() string       { return f.email }
