@@ -857,17 +857,17 @@ See the [Local Development Logging guide](/scion/contributing/logging/) for deta
 
 ### Log delivery guarantees
 
-Server logging is best effort. Losses are counted, never retried, and there is no exactly-once delivery: a record can be lost, and on some platforms it can appear twice (see **Duplicates** below). This section describes what the code guarantees; nothing here is a measured ingestion rate.
+Server logging is best effort. Losses in the modes below are counted, never retried, and there is no exactly-once delivery: a record can be lost, and on some platforms it can appear twice (see **Duplicates** below). This section describes what the code guarantees; nothing here is a measured ingestion rate.
 
 **Local acceptance is not remote ingestion.** A record counts as written when the local handler accepts it: the stdout write returned, or the Cloud Logging client put the entry in its in-memory buffer (8 MiB for application logs). The client sends buffered entries to Cloud Logging later, in the background. Nothing in the Hub confirms that an entry reached Cloud Logging, so no metric reports a delivery ratio for the Cloud path.
 
 **Paths.**
 
 - **stdout** (plain JSON, or Cloud Logging JSON with `SCION_LOG_GCP=true`): written synchronously by the logging call. On Cloud Run and GKE the platform ships stdout to Cloud Logging; on other hosts that depends on the host's log agent (for example the Ops Agent on Compute Engine). That shipping is outside the Hub.
-- **Direct Cloud Logging** (`SCION_CLOUD_LOGGING=true`): the client library buffers and sends entries asynchronously. A circuit breaker probes the client by flushing it every 30 seconds; after 3 consecutive failed flushes it opens and the Hub stops feeding the Cloud path (local logging continues). It probes again at the first 30-second check at least 60 seconds after opening (about 90 seconds with the defaults, and about every 90 seconds while probes keep failing) and closes when a probe succeeds. The request log (`scion_request_log`) and message log (`scion-messages`) share the same client and circuit.
+- **Direct Cloud Logging** (`SCION_CLOUD_LOGGING=true`): the client library buffers and sends entries asynchronously. A circuit breaker probes the client by flushing it every 30 seconds; after 3 consecutive failed flushes it opens and the Hub stops feeding the Cloud path (stdout logging continues where a stdout handler is configured; see the `circuit_open` row). It probes again at the first 30-second check at least 60 seconds after opening (about 90 seconds with the defaults, and about every 90 seconds while probes keep failing) and closes when a probe succeeds. The request log (`scion_request_log`) and message log (`scion-messages`) share the same client and circuit.
 - **Decision-log audit records** (`scion.audit`, only when the `hub.authorization_decision_audit_v2` experiment is on): queued on a bounded asynchronous writer (2,048 records, 2 MiB) with one worker, a 2-second write budget per record and a 5-second drain at shutdown. The worker writes to the same handler chain as other logs, so the stdout and Cloud rules above apply after it.
 
-**Loss modes.** Every loss increments `scion.logging.write.failures{writer, reason}`:
+**Loss modes.** Each loss mode below increments `scion.logging.write.failures{writer, reason}`. Losses outside these modes are not counted: a process ended by `SIGTERM` or by a fatal startup error (see **Shutdown**), and a failed stdout write outside the audit writer.
 
 | `writer` | `reason` | Meaning |
 | :--- | :--- | :--- |
@@ -880,7 +880,7 @@ Server logging is best effort. Losses are counted, never retried, and there is n
 | `audit` | `shutdown` | The record was still queued when the 5-second shutdown drain ended. |
 | `cloud` | `error` | The Cloud Logging client reported an error (a failed batch send, an invalid or oversized entry). One count per reported error, not per record. Under an error storm the client skips some reports, so this undercounts. |
 | `cloud` | `queue_full` | The client's buffer was full and it dropped the entry. |
-| `cloud` | `circuit_open` | The record was dropped from the Cloud path because the circuit breaker was open or probing. Local logging still wrote it. |
+| `cloud` | `circuit_open` | The record was dropped from the Cloud path because the circuit breaker was open or probing. Application and message logs still go to stdout, except on Cloud Run, where the Hub leaves out their stdout handler (see **Duplicates**). The request log has no stdout copy while Cloud Logging is on (unless `SCION_SERVER_REQUEST_LOG_PATH` is set). In those cases the dropped record is lost. |
 | `cloud` | `flush_error` | A periodic, probe or shutdown flush failed, timed out, or was skipped because an earlier flush was still running. A failed flush usually reports errors the client already counted as `error`, so the two can count the same incident. |
 
 `scion.logging.write.records{writer="audit"}` counts records the audit writer's handler accepted. There is no `records` series for `writer="cloud"`, because a client buffer accept is not ingestion. When a Cloud Logging client error is reported, the Hub still prints the client's own `logging client: ...` line, as before.
