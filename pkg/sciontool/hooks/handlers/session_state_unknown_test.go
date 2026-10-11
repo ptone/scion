@@ -1,0 +1,266 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package handlers
+
+import (
+	"bytes"
+	"encoding/json"
+	"os"
+	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
+)
+
+// futureKeys are top-level keys a newer tool might add to the state file:
+// a scalar and a nested object. The values are compact JSON, as the
+// writers encode them.
+var futureKeys = map[string]string{
+	"future_scalar": `42`,
+	"future_object": `{"a":[1,{"b":"c"}],"n":null,"s":"x"}`,
+}
+
+// addFutureKeys adds futureKeys to the state file, as a newer tool would.
+func addFutureKeys(t *testing.T, store *FileSessionState) {
+	t.Helper()
+	all := readRawState(t, store)
+	for k, v := range futureKeys {
+		all[k] = json.RawMessage(v)
+	}
+	data, err := json.Marshal(all)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(store.Path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// readRawState returns the state file's top-level keys.
+func readRawState(t *testing.T, store *FileSessionState) map[string]json.RawMessage {
+	t.Helper()
+	data, err := os.ReadFile(store.Path)
+	if err != nil {
+		t.Fatalf("reading state: %v", err)
+	}
+	var all map[string]json.RawMessage
+	if err := json.Unmarshal(data, &all); err != nil {
+		t.Fatalf("decoding state: %v", err)
+	}
+	return all
+}
+
+// assertFutureKeys checks that the state file still holds futureKeys,
+// unchanged.
+func assertFutureKeys(t *testing.T, store *FileSessionState, after string) {
+	t.Helper()
+	all := readRawState(t, store)
+	for k, want := range futureKeys {
+		got, ok := all[k]
+		if !ok {
+			t.Errorf("after %s: key %q dropped", after, k)
+			continue
+		}
+		if !bytes.Equal(got, []byte(want)) {
+			t.Errorf("after %s: key %q = %s, want %s", after, k, got, want)
+		}
+	}
+}
+
+// The hook processes' writer (save) keeps unknown keys on every write:
+// an event that changes a known field, a session-end that turns the
+// session into a pending report, and the claim and confirmation of that
+// report by the next hook process.
+func TestSessionStateUnknownKeys_HookWriter(t *testing.T) {
+	store := NewFileSessionState(t.TempDir())
+	openSession(t, store)
+	addFutureKeys(t, store)
+
+	// Update, session not ended; a known field changes.
+	if got := hookRun(t, store, toolEvent("s1", "Grep")); got != nil {
+		t.Fatalf("tool-end ended the session: %+v", *got)
+	}
+	assertFutureKeys(t, store, "tool-end")
+	f := readStateFile(t, store)
+	if f.Version != sessionStateVersion || f.Aggregator.SessionID != "s1" || !f.Aggregator.Open ||
+		f.Aggregator.ToolCalls["Grep"].Calls != 1 || f.Aggregator.ToolCalls["Bash"].Calls != 1 {
+		t.Errorf("after tool-end: state = %+v", f)
+	}
+
+	// Update, session ended, by a sender killed before confirming: the
+	// session becomes a pending report.
+	procs := useFakeProcs(t)
+	runKilledSessionEnd(t, store, procs, 200, "s1")
+	assertFutureKeys(t, store, "session-end")
+	f = readStateFile(t, store)
+	if len(f.Pending) != 1 || f.Aggregator.SessionID != "" || f.Aggregator.Open {
+		t.Errorf("after session-end: state = %+v", f)
+	}
+
+	// modify: the next hook process claims the abandoned report
+	// (ClaimAbandonedReports), sends it and confirms it (CompleteReport).
+	r := hookRunAll(t, store, toolEvent("", "Read"))
+	if len(r) != 1 || r[0].SessionID != "s1" || r[0].ToolCalls["Grep"].Calls != 1 {
+		t.Fatalf("reports = %+v", r)
+	}
+	assertFutureKeys(t, store, "report confirmed")
+	f = readStateFile(t, store)
+	if len(f.Pending) != 0 {
+		t.Errorf("after report confirmed: pending = %+v", f.Pending)
+	}
+}
+
+// A normal session-end by one hook process (Update to a pending report,
+// then CompleteReport) leaves only the unknown keys; the file stays.
+func TestSessionStateUnknownKeys_OnlyUnknownKeysNotRemoved(t *testing.T) {
+	store := NewFileSessionState(t.TempDir())
+	openSession(t, store)
+	addFutureKeys(t, store)
+
+	r := hookRunAll(t, store, sessionEvent(hooks.EventSessionEnd, "s1"))
+	if len(r) != 1 || r[0].SessionID != "s1" {
+		t.Fatalf("reports = %+v", r)
+	}
+	assertFutureKeys(t, store, "session-end")
+	f := readStateFile(t, store)
+	if f.Version != sessionStateVersion || len(f.Pending) != 0 || f.Closed ||
+		f.Aggregator.SessionID != "" || f.Aggregator.Open {
+		t.Errorf("state = %+v", f)
+	}
+
+	// The file holding only unknown keys is still usable: the next
+	// session counts from zero and keeps the keys.
+	hookRun(t, store, sessionEvent(hooks.EventSessionStart, "s2"))
+	assertFutureKeys(t, store, "next session-start")
+	if f := readStateFile(t, store); f.Aggregator.SessionID != "s2" || !f.Aggregator.Open {
+		t.Errorf("after next session-start: state = %+v", f)
+	}
+}
+
+// The init daemon's writer (writeStateFileInPlace) keeps unknown keys on
+// every write: the shutdown tombstone, the confirmation of its report, and
+// the removal of the tombstone at the next start, which leaves only the
+// unknown keys (and would otherwise remove the file).
+func TestSessionStateUnknownKeys_InitDaemonWriter(t *testing.T) {
+	store := NewFileSessionState(t.TempDir())
+	openSession(t, store)
+	addFutureKeys(t, store)
+
+	s, ok, err := store.CloseOpenSession("")
+	if err != nil || !ok {
+		t.Fatalf("CloseOpenSession = %v, %v", ok, err)
+	}
+	assertFutureKeys(t, store, "tombstone")
+	f := readStateFile(t, store)
+	if !f.Closed || f.Aggregator.SessionID != "s1" || f.Aggregator.Open || len(f.Pending) != 1 {
+		t.Errorf("after tombstone: state = %+v", f)
+	}
+
+	if err := store.CompleteReportsNoFollow(s); err != nil {
+		t.Fatalf("CompleteReportsNoFollow: %v", err)
+	}
+	assertFutureKeys(t, store, "report confirmed")
+	if f := readStateFile(t, store); !f.Closed || len(f.Pending) != 0 {
+		t.Errorf("after report confirmed: state = %+v", f)
+	}
+
+	cleared, err := store.ClearSessionTombstone()
+	if err != nil || !cleared {
+		t.Fatalf("ClearSessionTombstone = %v, %v", cleared, err)
+	}
+	assertFutureKeys(t, store, "tombstone cleared")
+	f = readStateFile(t, store)
+	if f.Version != sessionStateVersion || f.Closed || f.Aggregator.SessionID != "" || len(f.Pending) != 0 {
+		t.Errorf("after tombstone cleared: state = %+v", f)
+	}
+}
+
+// The init daemon's combined shutdown check (close and claim in one pass)
+// keeps unknown keys too.
+func TestSessionStateUnknownKeys_InitDaemonCloseAndClaim(t *testing.T) {
+	procs := useFakeProcs(t)
+	store := NewFileSessionState(t.TempDir())
+	openSession(t, store)
+	runKilledSessionEnd(t, store, procs, 200, "s1")
+	// s2 is started by a handler that cannot claim pending reports, so the
+	// killed sender's report is left for the shutdown check.
+	h := NewTelemetryHandler(nil, nil, nil)
+	h.SessionState = killedHook{store}
+	if err := h.Handle(sessionEvent(hooks.EventSessionStart, "s2")); err != nil {
+		t.Fatal(err)
+	}
+	addFutureKeys(t, store)
+
+	procs.self = 1
+	got, err := store.CloseOpenSessionAndClaimPending("")
+	if err != nil {
+		t.Fatalf("CloseOpenSessionAndClaimPending: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("shutdown check = %d summaries, want 2 (open s2 and abandoned s1)", len(got))
+	}
+	assertFutureKeys(t, store, "shutdown check")
+	if f := readStateFile(t, store); !f.Closed || f.Aggregator.SessionID != "s2" || len(f.Pending) != 2 {
+		t.Errorf("after shutdown check: state = %+v", f)
+	}
+	if err := store.CompleteReportsNoFollow(got...); err != nil {
+		t.Fatalf("CompleteReportsNoFollow: %v", err)
+	}
+	assertFutureKeys(t, store, "reports confirmed")
+}
+
+// A known field wins over an unknown key of the same name, and without
+// unknown keys the encoding is exactly the struct's.
+func TestEncodeSessionState_KnownFieldsWin(t *testing.T) {
+	file := sessionStateFile{
+		Aggregator: telemetry.AggregatorState{SessionID: "s1", Open: true},
+		extra: map[string]json.RawMessage{
+			"version":    json.RawMessage(`99`),
+			"closed":     json.RawMessage(`true`),
+			"aggregator": json.RawMessage(`{"session_id":"other"}`),
+			"pending":    json.RawMessage(`[{}]`),
+			"future":     json.RawMessage(`"kept"`),
+		},
+	}
+	data, err := encodeSessionState(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := decodeSessionState(data)
+	if err != nil {
+		t.Fatalf("decoding %s: %v", data, err)
+	}
+	if got.Version != sessionStateVersion || got.Closed || len(got.Pending) != 0 ||
+		got.Aggregator.SessionID != "s1" || !got.Aggregator.Open {
+		t.Errorf("known fields overridden: %s", data)
+	}
+	if len(got.extra) != 1 || string(got.extra["future"]) != `"kept"` {
+		t.Errorf("extra = %v, want only future", got.extra)
+	}
+
+	file.extra = nil
+	data, err = encodeSessionState(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file.Version = sessionStateVersion
+	want, err := json.Marshal(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(data, want) {
+		t.Errorf("without unknown keys:\n got %s\nwant %s", data, want)
+	}
+}

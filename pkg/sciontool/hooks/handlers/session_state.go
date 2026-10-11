@@ -85,6 +85,21 @@ type sessionStateFile struct {
 	// confirmed yet (see session_state_pending.go). It is kept across
 	// every rewrite of the file.
 	Pending []pendingReport `json:"pending,omitempty"`
+
+	// extra holds the top-level keys this version does not know, as read,
+	// so that every rewrite of the file keeps them (see encodeSessionState).
+	// A newer tool may add a field that an older tool, still running in
+	// the same container, would otherwise drop on its next write.
+	extra map[string]json.RawMessage
+}
+
+// sessionStateKnownKeys are the top-level keys of sessionStateFile's
+// exported fields. Any other key is kept in extra.
+var sessionStateKnownKeys = map[string]bool{
+	"version":    true,
+	"aggregator": true,
+	"closed":     true,
+	"pending":    true,
 }
 
 // FileSessionState is a SessionStateStore backed by a JSON file. A sibling
@@ -154,8 +169,9 @@ func (s *FileSessionState) Update(agg *telemetry.Aggregator, event *hooks.Event,
 		}
 	}
 
-	// Whatever the file held besides the session (pending reports) is kept.
-	next := sessionStateFile{Pending: file.Pending}
+	// Whatever the file held besides the session (pending reports and
+	// unknown keys) is kept.
+	next := sessionStateFile{Pending: file.Pending, extra: file.extra}
 	summary, ended := apply()
 	if !ended {
 		next.Aggregator = agg.State()
@@ -274,14 +290,52 @@ func decodeSessionState(data []byte) (sessionStateFile, error) {
 	if file.Version != sessionStateVersion {
 		return sessionStateFile{}, fmt.Errorf("has version %d, want %d", file.Version, sessionStateVersion)
 	}
+	var all map[string]json.RawMessage
+	if err := json.Unmarshal(data, &all); err != nil {
+		return sessionStateFile{}, fmt.Errorf("is corrupt: %v", err)
+	}
+	for k, v := range all {
+		if sessionStateKnownKeys[k] {
+			continue
+		}
+		if file.extra == nil {
+			file.extra = make(map[string]json.RawMessage)
+		}
+		file.extra[k] = v
+	}
 	return file, nil
+}
+
+// encodeSessionState encodes file at the current version, with the unknown
+// top-level keys it was read with merged back in. A known field always wins
+// over an unknown key of the same name. Without unknown keys the result is
+// exactly the struct's encoding. Both writers (save and
+// writeStateFileInPlace) encode through it.
+func encodeSessionState(file sessionStateFile) ([]byte, error) {
+	file.Version = sessionStateVersion
+	data, err := json.Marshal(file)
+	if err != nil || len(file.extra) == 0 {
+		return data, err
+	}
+	var all map[string]json.RawMessage
+	if err := json.Unmarshal(data, &all); err != nil {
+		return nil, err
+	}
+	for k, v := range file.extra {
+		if sessionStateKnownKeys[k] {
+			continue
+		}
+		if _, ok := all[k]; !ok {
+			all[k] = v
+		}
+	}
+	return json.Marshal(all)
 }
 
 // save writes file to a 0600 temp file in the same directory and renames it
 // over the state file.
 func (s *FileSessionState) save(file sessionStateFile) error {
-	file.Version = sessionStateVersion
-	data, err := json.Marshal(file)
+	data, err := encodeSessionState(file)
 	if err != nil {
 		return fmt.Errorf("encoding state: %w", err)
 	}
