@@ -3052,19 +3052,19 @@ type startEnvResult struct {
 // caller is the log-message prefix ("DispatchAgentStart" or
 // "DispatchAgentRestart"). site is the caller's mint site, mintSiteStart or
 // mintSiteRestart; it names the site in the mint audit record and gives the
-// verb of the secrets-resolution failure message, the one warning whose
-// wording differs (agent will <verb> without injected secrets) between the
-// two callers. Any other site is an error before any work is done. It
-// returns an error only for such a site, when the agent's project cannot be
-// loaded (checked before any token is minted), or when the agent token is
-// not issued.
+// verb of the secrets-resolution failure (the agent was not <verb>). Any
+// other site is an error before any work is done. It returns an error only
+// for such a site, when the secret backend returns a resolution error (a
+// *secretResolutionError; absence of secrets is not an error), when the
+// agent's project cannot be loaded (both checked before any token is
+// minted), or when the agent token is not issued.
 func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Agent, caller string, site mintSite) (startEnvResult, error) {
 	var startedVerb string
 	switch site {
 	case mintSiteStart:
-		startedVerb = "start"
+		startedVerb = "started"
 	case mintSiteRestart:
-		startedVerb = "restart"
+		startedVerb = "restarted"
 	default:
 		return startEnvResult{}, fmt.Errorf("%s: unsupported mint site %q for a start", caller, site)
 	}
@@ -3119,18 +3119,22 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	}
 
 	// Resolve type-aware secrets and inject environment-type secrets.
+	// A resolution error fails the start/restart here, before the project
+	// lookup and before any agent or transport token is minted below, so
+	// nothing reaches the broker and there is nothing to revoke. Absence is
+	// not an error: an agent with no secrets resolves to an empty list.
 	resolvedSecrets, _, err := d.resolveSecrets(ctx, agent)
-	resolvedSecrets = d.dropTZTargetedSecrets(ctx, agent, resolvedSecrets)
 	if err != nil {
-		d.log.ErrorContext(ctx, caller+": failed to resolve secrets; agent will "+startedVerb+" without injected secrets",
+		d.log.WarnContext(ctx, caller+": failed to resolve secrets; agent not "+startedVerb,
 			"agent_id", agent.ID, "error", err)
-	} else {
-		for _, s := range resolvedSecrets {
-			if (s.Type == "environment" || s.Type == "") && s.Target != "" {
-				if existing, exists := resolvedEnv[s.Target]; !exists || existing == "" {
-					resolvedEnv[s.Target] = s.Value
-					classifyEnv(&envClassifications, s.Target, api.EnvKindSecretFetchable)
-				}
+		return startEnvResult{}, &secretResolutionError{Verb: startedVerb, Err: err}
+	}
+	resolvedSecrets = d.dropTZTargetedSecrets(ctx, agent, resolvedSecrets)
+	for _, s := range resolvedSecrets {
+		if (s.Type == "environment" || s.Type == "") && s.Target != "" {
+			if existing, exists := resolvedEnv[s.Target]; !exists || existing == "" {
+				resolvedEnv[s.Target] = s.Value
+				classifyEnv(&envClassifications, s.Target, api.EnvKindSecretFetchable)
 			}
 		}
 	}
