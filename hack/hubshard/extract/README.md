@@ -49,6 +49,33 @@ testServer
 To regenerate a family move against a newer `main`, check out the generator,
 run `move` again, and run `verify`; do not hand-rebase moved code.
 
+## Bulk extraction
+
+`bulk` moves **every** declaration that another test file uses, grouped by
+origin: the cross-file declarations of `x_test.go` go to `x_helpers_test.go`,
+which gets `x_test.go`'s own build constraint. No family file is needed, so to
+regenerate on a newer `main`, just run it again and `verify`.
+
+```sh
+/tmp/extract bulk -dir pkg/hub                         # all origins
+/tmp/extract bulk -dir pkg/hub -origins '[a-g]*'       # origins matching a glob
+#   -n  dry run: print the first round's plan, write nothing
+```
+
+- A declaration counts as cross-file used when a declaration in a different
+  `_test.go` file refers to it (the same syntactic references `move` uses).
+  Each round makes one `move` per origin, with the cross-file names as the
+  requested names, so the same closure, method and constraint rules apply.
+- A grouped `var (...)`/`const (...)`/`type (...)` block moves whole.
+- It repeats until no origin has a cross-file declaration left. A moved helper
+  that uses a declaration its origin keeps makes that declaration cross-file
+  used in the next round.
+- It never takes declarations from `*_helpers_test.go` files. Some declarations
+  are reported (`note ...`) and left in place: test entry points
+  (`Test*`/`Benchmark*`/...), and names declared more than once (per-platform
+  files). If `move` refuses an origin's family, the origin is reported
+  (`skip ...`) and left alone for the rest of the run.
+
 ## What `move` does
 
 - Moves each requested top-level declaration with its doc comment and any
