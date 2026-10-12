@@ -839,9 +839,9 @@ func TestTestIdentity_ReservedDomainRefusedEverywhere(t *testing.T) {
 		assert.Equal(t, http.StatusForbidden, rec.Code)
 	})
 
-	t.Run("legacy trusted proxy headers", func(t *testing.T) {
+	t.Run("header proxy provider", func(t *testing.T) {
 		reached := false
-		handler := UnifiedAuthMiddleware(AuthConfig{Mode: "production", TrustedProxies: []string{"192.0.2.1"}})(
+		handler := UnifiedAuthMiddleware(AuthConfig{Mode: "production", TrustedProxies: []string{"192.0.2.1"}, HeaderProxyAuth: true})(
 			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached = true; w.WriteHeader(http.StatusOK) }))
 		for _, email := range []string{existing.Email, reserved} {
 			req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)

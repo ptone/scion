@@ -161,8 +161,10 @@ type ServerConfig struct {
 	// ProxyAuthenticator is the configured proxy authenticator (when AuthMode == "proxy").
 	ProxyAuth ProxyAuthenticator
 	// TrustedProxies is server.hub.trusted_proxies: the IPs/CIDRs of the
-	// proxies whose X-Forwarded-For header is honoured when resolving a
-	// request's client address. Empty means the peer address is used.
+	// proxies in front of the hub. The per-client rate limits read
+	// X-Forwarded-For only from these peers, and the header proxy provider
+	// (HeaderProxyAuth) accepts user headers only from them. Empty means
+	// those readers use the peer address.
 	TrustedProxies []string
 	// HeaderProxyAuth is set when auth.mode is "proxy" with provider
 	// "header". Only then are the X-Forwarded-User-* headers from a

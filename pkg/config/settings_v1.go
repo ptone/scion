@@ -1554,9 +1554,9 @@ type V1ServerHubConfig struct {
 	AdminEmails            []string      `json:"admin_emails,omitempty" yaml:"admin_emails,omitempty" koanf:"admin_emails"`
 	// TrustedProxies is server.hub.trusted_proxies (see
 	// HubServerConfig.TrustedProxies): IP addresses and CIDR ranges of the
-	// proxies whose X-Forwarded-For header the hub honours. It is read at
-	// startup and is file/env only: the server-config API refuses it in
-	// every mode.
+	// proxies in front of the hub, used by the per-client rate limits and
+	// the header proxy provider. It is read at startup and is file/env
+	// only: the server-config API refuses it in every mode.
 	TrustedProxies []string `json:"trusted_proxies,omitempty" yaml:"trusted_proxies,omitempty" koanf:"trusted_proxies"`
 
 	// SoftDeleteRetention is how long soft-deleted agents are retained (e.g., "72h").

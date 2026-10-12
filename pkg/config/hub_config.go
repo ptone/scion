@@ -74,11 +74,12 @@ type HubServerConfig struct {
 	AdminEmails []string `json:"adminEmails" yaml:"adminEmails" koanf:"adminEmails"`
 
 	// TrustedProxies is server.hub.trusted_proxies: the IP addresses and
-	// CIDR ranges of the proxies in front of the hub whose X-Forwarded-For
-	// header the hub honours when it resolves a request's client address.
-	// Empty (the default) means forwarded headers are ignored and the peer
-	// address is used. Read once at startup (see ValidateTrustedProxies);
-	// never writable through the settings API.
+	// CIDR ranges of the proxies in front of the hub. The per-client rate
+	// limits read X-Forwarded-For only on requests from these peers, and the
+	// header proxy provider accepts user headers only from them. Empty (the
+	// default) means those readers use the peer address. Read once at
+	// startup (see ValidateTrustedProxies); never writable through the
+	// settings API.
 	TrustedProxies []string `json:"trustedProxies,omitempty" yaml:"trustedProxies,omitempty" koanf:"trustedProxies"`
 
 	// SoftDeleteRetention is how long soft-deleted agents are retained before purging.

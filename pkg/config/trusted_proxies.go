@@ -32,8 +32,8 @@ const trustedProxyEntryMaxEcho = 64
 // ValidateTrustedProxies checks server.hub.trusted_proxies. Each entry must
 // be an IPv4 or IPv6 address or a CIDR range (for example "10.0.0.0/8" or
 // "2001:db8::/32"). An IPv6 zone suffix ("fe80::1%eth0") is refused, as is
-// an empty entry. An empty list is valid and leaves the hub using each
-// request's peer address. The error names the index and the entry.
+// an empty entry. An empty list is valid. The error names the index and the
+// entry.
 func ValidateTrustedProxies(entries []string) error {
 	for i, raw := range entries {
 		entry := strings.TrimSpace(raw)

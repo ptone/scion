@@ -1274,7 +1274,7 @@
         "trusted_proxies": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "IP addresses and CIDR ranges (IPv4 or IPv6) of the proxies or load balancers in front of this Hub. The Hub honours the X-Forwarded-For header only on requests whose peer address is in this list, and resolves the client address by reading that header from the right past listed addresses; the result is used for per-client rate limits. Empty (the default) means forwarded headers are ignored and the peer address is used. Entries that are not an IP address or CIDR range, or that carry an IPv6 zone suffix, stop the Hub at startup. Read at startup only, so a change needs a restart. Settable only in the settings file or environment (comma-separated): the server-config API refuses this key in every mode.",
+          "description": "IP addresses and CIDR ranges (IPv4 or IPv6) of the proxies or load balancers in front of this Hub. For its per-client rate limits, the Hub reads the X-Forwarded-For header only on requests whose peer address is in this list, taking the client address from the right past listed addresses; otherwise those limits use the peer address. With server.auth.mode proxy and provider header, user headers are accepted only from these peers. Empty (the default) means the rate limits use the peer address. Entries that are not an IP address or CIDR range, or that carry an IPv6 zone suffix, stop the Hub at startup. Read at startup only, so a change needs a restart. Settable only in the settings file or environment (comma-separated): the server-config API refuses this key in every mode.",
           "x-env-var": "SCION_SERVER_HUB_TRUSTEDPROXIES",
           "x-since": "1"
         },

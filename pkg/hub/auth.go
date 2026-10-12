@@ -64,7 +64,7 @@ type AuthConfig struct {
 	// with provider "header"): the X-Forwarded-User-* headers of a request
 	// whose peer is in TrustedProxies become its identity. It defaults to
 	// false and is set only from that explicit configuration; with it
-	// false, TrustedProxies affects client-address resolution only.
+	// false, the identity headers are never used.
 	HeaderProxyAuth bool
 	// ProxyAuthenticator is the configured proxy authenticator (for proxy auth mode).
 	// When set, it replaces the legacy IP-only extractProxyUser path.

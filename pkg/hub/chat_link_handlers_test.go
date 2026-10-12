@@ -294,6 +294,8 @@ func TestChatLinkRateLimitIP(t *testing.T) {
 		{name: "direct client", remoteAddr: "192.0.2.1:1234", want: "192.0.2.1"},
 		{name: "untrusted proxy headers ignored", remoteAddr: "192.0.2.1:1234", trustedProxies: []string{"10.0.0.0/8"}, forwardedFor: "203.0.113.7", realIP: "203.0.113.8", want: "192.0.2.1"},
 		{name: "trusted proxy skips trusted hops", remoteAddr: "10.0.0.2:1234", trustedProxies: []string{"10.0.0.0/8"}, forwardedFor: "203.0.113.7, 10.0.0.1", want: "203.0.113.7"},
+		// The leftmost-entry rule gives the same answer for the case above;
+		// this case tells the two rules apart, so keep it.
 		{name: "trusted proxy uses the rightmost untrusted address", remoteAddr: "10.0.0.2:1234", trustedProxies: []string{"10.0.0.0/8"}, forwardedFor: "198.51.100.9, 203.0.113.7", want: "203.0.113.7"},
 		{name: "empty trusted list ignores headers", remoteAddr: "10.0.0.2:1234", forwardedFor: "203.0.113.7", realIP: "203.0.113.8", want: "10.0.0.2"},
 		{name: "trusted proxy falls back to real ip", remoteAddr: "10.0.0.2:1234", trustedProxies: []string{"10.0.0.2"}, forwardedFor: "invalid", realIP: "203.0.113.8", want: "203.0.113.8"},

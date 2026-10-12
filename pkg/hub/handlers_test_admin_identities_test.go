@@ -1485,7 +1485,7 @@ func TestTestAdmin_AdminDomainsRefusedOnEmailPaths(t *testing.T) {
 			_, err = NormalizeInviteEmail(reserved)
 			assert.Error(t, err)
 			reached := false
-			handler := UnifiedAuthMiddleware(AuthConfig{Mode: "production", TrustedProxies: []string{"192.0.2.1"}})(
+			handler := UnifiedAuthMiddleware(AuthConfig{Mode: "production", TrustedProxies: []string{"192.0.2.1"}, HeaderProxyAuth: true})(
 				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached = true; w.WriteHeader(http.StatusOK) }))
 			hreq := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
 			hreq.RemoteAddr = "192.0.2.1:1234"
