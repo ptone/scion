@@ -16,9 +16,11 @@ package logging
 
 import (
 	"context"
+	"encoding"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -388,39 +390,80 @@ func addAttrToMap(m map[string]any, a slog.Attr) {
 // jsonSafeValue returns the value to store in a Cloud Logging payload for a
 // resolved, non-group slog.Value. The payload is encoded with encoding/json,
 // where an error value encodes as {} and a value that fails to marshal drops
-// the whole entry. Errors are written as their message. Other values whose
-// JSON form is {} (for example a struct with only unexported fields) or that
-// fail to marshal are written as their string form. All other values are
-// returned unchanged.
+// the whole entry. The rules, in order:
 //
-// Both string forms pass through redactURLsInText, because error text can
-// quote a URL with credentials in its userinfo or query (a *url.Error from
-// net/http masks only a password; a url.Parse error quotes its raw input).
+//   - A NaN or infinite float is written as its string form ("NaN", "+Inf").
+//   - JSON-native values (nil, strings, bools, numbers, []string,
+//     map[string]any, []any) are returned unchanged.
+//   - A json.Marshaler is returned unchanged and keeps its own encoding, as
+//     in slog.JSONHandler, even when it is also an error.
+//   - An error is written as Error(), a fmt.Stringer as String(), and an
+//     encoding.TextMarshaler as its text.
+//   - Any other value is returned unchanged if it marshals (even to {}), and
+//     otherwise replaced by a placeholder naming only its type.
+//
+// No value is printed by reflection (fmt.Sprint), so fields hidden from JSON,
+// such as json:"-" credentials, are never written. A panic in Error(),
+// String() or MarshalText() (for example on a nil receiver) yields a
+// placeholder instead of crashing the logger. The string forms pass through
+// redactURLsInText, because error text can quote a URL with credentials in
+// its userinfo or query (a *url.Error from net/http masks only a password;
+// a url.Parse error quotes its raw input).
 func jsonSafeValue(v slog.Value) any {
-	if v.Kind() != slog.KindAny {
+	switch v.Kind() {
+	case slog.KindFloat64:
+		if f := v.Float64(); math.IsNaN(f) || math.IsInf(f, 0) {
+			return strconv.FormatFloat(f, 'g', -1, 64)
+		}
+		return f
+	case slog.KindAny:
+	default:
 		return v.Any()
 	}
 	x := v.Any()
-	if x == nil {
-		return nil
-	}
-	rv := reflect.ValueOf(x)
-	if rv.Kind() == reflect.Pointer && rv.IsNil() {
-		// A typed nil pointer encodes as null; calling its methods may panic.
+	switch t := x.(type) {
+	case nil, string, bool, int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64, []string, map[string]any, []any:
 		return x
-	}
-	if err, ok := x.(error); ok {
-		return redactURLsInText(err.Error())
-	}
-	b, err := json.Marshal(x)
-	if err == nil && (string(b) != "{}" || reflect.Indirect(rv).Kind() == reflect.Map) {
+	case json.Marshaler:
 		return x
+	case error:
+		return safeString(x, t.Error)
+	case fmt.Stringer:
+		return safeString(x, t.String)
+	case encoding.TextMarshaler:
+		return safeString(x, func() string {
+			b, err := t.MarshalText()
+			if err != nil {
+				return unencodable(x)
+			}
+			return string(b)
+		})
 	}
-	if s, ok := x.(fmt.Stringer); ok {
-		return redactURLsInText(s.String())
+	if _, err := json.Marshal(x); err != nil {
+		return unencodable(x)
 	}
-	return redactURLsInText(fmt.Sprint(x))
+	return x
 }
+
+// safeString returns the URL-redacted result of f, a string method of x. If
+// f panics it returns "<nil>" for a nil pointer receiver and a placeholder
+// naming only the type otherwise, like slog's own handlers.
+func safeString(x any, f func() string) (s string) {
+	defer func() {
+		if recover() != nil {
+			if rv := reflect.ValueOf(x); rv.Kind() == reflect.Pointer && rv.IsNil() {
+				s = "<nil>"
+				return
+			}
+			s = fmt.Sprintf("<panic formatting %T>", x)
+		}
+	}()
+	return redactURLsInText(f())
+}
+
+// unencodable is the placeholder for a value with no safe string form.
+func unencodable(x any) string { return fmt.Sprintf("<unencodable %T>", x) }
 
 // promoteAttrToLabels checks if a slog.Attr should be promoted to a GCP label.
 func promoteAttrToLabels(labels map[string]string, a slog.Attr) {

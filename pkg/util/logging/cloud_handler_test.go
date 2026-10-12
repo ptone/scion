@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/url"
 	"reflect"
 	"strings"
@@ -500,25 +501,54 @@ type errLogValuer struct{ err error }
 
 func (v errLogValuer) LogValue() slog.Value { return slog.AnyValue(v.err) }
 
+// codeErr is an error whose exported field would otherwise encode as JSON.
+type codeErr struct{ Code int }
+
+func (e codeErr) Error() string { return fmt.Sprintf("code %d", e.Code) }
+
+// jsonErr is an error with its own JSON encoding, which wins over Error().
+type jsonErr struct{ code int }
+
+func (e jsonErr) Error() string { return "json error" }
+func (e jsonErr) MarshalJSON() ([]byte, error) { return []byte(fmt.Sprintf(`{"code":%d}`, e.code)), nil }
+
+// panicErr's Error dereferences its receiver, so a nil *panicErr panics.
+type panicErr struct{ msg string }
+
+func (e *panicErr) Error() string { return e.msg }
+
+// embedErr panics in Error when its embedded error is nil.
+type embedErr struct{ error }
+
 func TestCloudHandler_ErrorAttrsWrittenAsMessage(t *testing.T) {
 	var entries []gcplog.Entry
 	h := newTestCloudHandler("scion-hub", "v1", slog.LevelInfo, &entries)
 	base := errors.New("connection refused")
 	wrapped := fmt.Errorf("dialing store: %w", base)
+	var nilPanicErr *panicErr
 
-	t.Run("plain", func(t *testing.T) {
-		_, got := handleOne(t, h, &entries, slog.Any("error", base))
-		if got["error"] != "connection refused" {
-			t.Errorf("error = %#v, want %q", got["error"], "connection refused")
-		}
-	})
-
-	t.Run("wrapped", func(t *testing.T) {
-		_, got := handleOne(t, h, &entries, slog.Any("error", wrapped))
-		if got["error"] != "dialing store: connection refused" {
-			t.Errorf("error = %#v, want wrapped message", got["error"])
-		}
-	})
+	cases := []struct {
+		name string
+		val  any
+		want any
+	}{
+		{"plain", base, "connection refused"},
+		{"wrapped", wrapped, "dialing store: connection refused"},
+		{"LogValuer resolving to error", errLogValuer{base}, "connection refused"},
+		{"exported fields", codeErr{Code: 7}, "code 7"},
+		{"errors.Join", errors.Join(base, errors.New("timeout")), "connection refused\ntimeout"},
+		{"json.Marshaler keeps its encoding", jsonErr{code: 7}, map[string]any{"code": float64(7)}},
+		{"nil pointer whose Error panics", nilPanicErr, "<nil>"},
+		{"value whose Error panics", embedErr{}, "<panic formatting logging.embedErr>"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			_, got := handleOne(t, h, &entries, slog.Any("error", tt.val))
+			if !reflect.DeepEqual(got["error"], tt.want) {
+				t.Errorf("error = %#v, want %#v", got["error"], tt.want)
+			}
+		})
+	}
 
 	t.Run("in group", func(t *testing.T) {
 		_, got := handleOne(t, h, &entries, slog.Group("op", slog.Any("error", wrapped)))
@@ -528,13 +558,6 @@ func TestCloudHandler_ErrorAttrsWrittenAsMessage(t *testing.T) {
 		}
 		if group["error"] != "dialing store: connection refused" {
 			t.Errorf("op.error = %#v, want wrapped message", group["error"])
-		}
-	})
-
-	t.Run("LogValuer resolving to error", func(t *testing.T) {
-		_, got := handleOne(t, h, &entries, slog.Any("error", errLogValuer{base}))
-		if got["error"] != "connection refused" {
-			t.Errorf("error = %#v, want %q", got["error"], "connection refused")
 		}
 	})
 
@@ -560,41 +583,59 @@ type opaqueStringer struct{ name string }
 
 func (s opaqueStringer) String() string { return "stringer:" + s.name }
 
+type textValue struct{ v string }
+
+func (t textValue) MarshalText() ([]byte, error) { return []byte("text:" + t.v), nil }
+
 type exportedValue struct {
 	Name  string `json:"name"`
 	Count int    `json:"count"`
+}
+
+// testSecret marks credential values that must never reach the payload.
+const testSecret = "s3cr3t"
+
+// hiddenSecret encodes as {}: its only visible field is empty and omitted.
+type hiddenSecret struct {
+	Name  string `json:"name,omitempty"`
+	Token string `json:"-"`
+}
+
+// funcSecret fails to marshal because of its func field.
+type funcSecret struct {
+	Token string `json:"-"`
+	F     func()
+}
+
+// nanSecret fails to marshal because of its NaN field.
+type nanSecret struct {
+	V     float64
+	Token string `json:"-"`
 }
 
 func TestCloudHandler_AttrValuesEncodeOrFallBackToString(t *testing.T) {
 	var entries []gcplog.Entry
 	h := newTestCloudHandler("scion-hub", "v1", slog.LevelInfo, &entries)
 
-	fallbacks := []struct {
+	strs := []struct {
 		name string
-		val  any
+		attr slog.Attr
 		want string
 	}{
-		{"unexported fields only", opaqueValue{id: 7}, "{7}"},
-		{"pointer to unexported fields", &opaqueValue{id: 7}, "&{7}"},
-		{"Stringer with unexported fields", opaqueStringer{name: "x"}, "stringer:x"},
-		// A channel fails to marshal; fmt.Sprint writes its address.
-		{"marshal failure", make(chan int), "0x"},
+		{"Stringer", slog.Any("v", opaqueStringer{name: "x"}), "stringer:x"},
+		{"TextMarshaler", slog.Any("v", textValue{v: "t"}), "text:t"},
+		{"chan", slog.Any("v", make(chan int)), "<unencodable chan int>"},
+		{"func field with hidden secret", slog.Any("v", funcSecret{Token: testSecret, F: func() {}}), "<unencodable logging.funcSecret>"},
+		{"NaN field with hidden secret", slog.Any("v", nanSecret{V: math.NaN(), Token: testSecret}), "<unencodable logging.nanSecret>"},
+		{"NaN float", slog.Float64("v", math.NaN()), "NaN"},
+		{"+Inf float", slog.Float64("v", math.Inf(1)), "+Inf"},
+		{"-Inf float", slog.Float64("v", math.Inf(-1)), "-Inf"},
 	}
-	for _, tt := range fallbacks {
-		t.Run("fallback/"+tt.name, func(t *testing.T) {
-			_, got := handleOne(t, h, &entries, slog.Any("v", tt.val))
-			s, ok := got["v"].(string)
-			if !ok {
-				t.Fatalf("v = %#v (%T), want string", got["v"], got["v"])
-			}
-			if tt.name == "marshal failure" {
-				if !strings.HasPrefix(s, tt.want) {
-					t.Errorf("v = %q, want prefix %q", s, tt.want)
-				}
-				return
-			}
-			if s != tt.want {
-				t.Errorf("v = %q, want %q", s, tt.want)
+	for _, tt := range strs {
+		t.Run("string/"+tt.name, func(t *testing.T) {
+			_, got := handleOne(t, h, &entries, tt.attr)
+			if got["v"] != tt.want {
+				t.Errorf("v = %#v, want %q", got["v"], tt.want)
 			}
 		})
 	}
@@ -608,6 +649,7 @@ func TestCloudHandler_AttrValuesEncodeOrFallBackToString(t *testing.T) {
 	}{
 		{"string", slog.String("v", "s"), "s"},
 		{"int", slog.Int("v", 3), int64(3)},
+		{"float", slog.Float64("v", 1.5), 1.5},
 		{"bool", slog.Bool("v", true), true},
 		{"time", slog.Time("v", now), now},
 		{"duration", slog.Duration("v", time.Second), time.Second},
@@ -615,6 +657,9 @@ func TestCloudHandler_AttrValuesEncodeOrFallBackToString(t *testing.T) {
 		{"empty map", slog.Any("v", map[string]any{}), map[string]any{}},
 		{"slice", slog.Any("v", []string{"a", "b"}), []string{"a", "b"}},
 		{"encodable struct", slog.Any("v", exportedValue{Name: "n", Count: 2}), exportedValue{Name: "n", Count: 2}},
+		{"unexported fields only", slog.Any("v", opaqueValue{id: 7}), opaqueValue{id: 7}},
+		{"pointer to unexported fields", slog.Any("v", &opaqueValue{id: 7}), &opaqueValue{id: 7}},
+		{"json:\"-\" secret encoding as {}", slog.Any("v", hiddenSecret{Token: testSecret}), hiddenSecret{Token: testSecret}},
 		{"nil", slog.Any("v", nil), nil},
 		{"typed nil pointer", slog.Any("v", nilPtr), nilPtr},
 	}
@@ -632,6 +677,23 @@ func TestCloudHandler_AttrValuesEncodeOrFallBackToString(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("hidden secrets never written", func(t *testing.T) {
+		for _, val := range []any{
+			hiddenSecret{Token: testSecret},
+			funcSecret{Token: testSecret, F: func() {}},
+			nanSecret{V: math.NaN(), Token: testSecret},
+		} {
+			_, got := handleOne(t, h, &entries, slog.Any("v", val))
+			b, err := json.Marshal(got)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if strings.Contains(string(b), testSecret) {
+				t.Errorf("payload for %T contains the secret: %s", val, b)
+			}
+		}
+	})
 }
 
 type urlStringer struct{ u string }
