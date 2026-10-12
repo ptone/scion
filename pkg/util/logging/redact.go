@@ -187,8 +187,9 @@ func redactURLsInText(s string) string {
 
 // nestedURLStart returns the offset in m, a urlInText match, at which a
 // second URL starts before m's first '?' or '#', or -1 if there is none.
-// It reads m only up to that offset (or to the first '?' or '#'), so
-// cutting a long run of URLs stays linear.
+// It reads m at most once past each "://" up to the cut (on the -1 path,
+// up to the next "://" after a '?' or '#', or to the end of m), so cutting
+// a long run of URLs stays linear.
 func nestedURLStart(m string) int {
 	i := strings.Index(m, "://") + len("://")
 	for {

@@ -395,7 +395,8 @@ func addAttrToMap(m map[string]any, a slog.Attr) {
 //   - JSON-native containers (nil, []string, map[string]any, []any) are
 //     returned unchanged.
 //   - A url.URL or *url.URL is written as its string with userinfo, query
-//     values and fragment redacted (see redactURLValue).
+//     values and fragment redacted, and an artifact path replaced by
+//     RedactedArtifactPath (see redactURLValue).
 //   - A json.Marshaler keeps its own encoding, as in slog.JSONHandler, even
 //     when it is also an error; if its MarshalJSON fails or panics it is
 //     replaced by a placeholder naming only its type.

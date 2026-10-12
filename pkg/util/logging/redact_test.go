@@ -211,6 +211,7 @@ func TestRedactURLsInText(t *testing.T) {
 			`Get "https://idp/authorize?redirect_uri=REDACTED&client_secret=REDACTED": EOF`,
 		},
 		{"URL nested in a fragment", "go https://h/p#next=https://u:p@h2/x", "go https://h/p#REDACTED"},
+		{"nested scheme starts at its first letter", "https://h/1a://u:p@z", "https://h/1a://REDACTED@z"},
 		{"URL nested after an empty scheme", "see https://h/x/://y/https://u:p@z", "see https://h/x/://y/https://REDACTED@z"},
 		{"backtick trimmed from a URL with a query", "see `https://h/x?t=a` now", "see `https://h/x?t=REDACTED` now"},
 		{"trailing punctuation kept outside the URL", "(see https://h/p?t=abc).", "(see https://h/p?t=REDACTED)."},
