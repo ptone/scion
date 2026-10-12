@@ -688,6 +688,7 @@ func TestCloudHandler_AttrValuesEncodeOrFallBackToString(t *testing.T) {
 		{"*url.URL", slog.Any("v", &testURL), "https://REDACTED@h/x?token=REDACTED#REDACTED"},
 		{"url.URL", slog.Any("v", testURL), "https://REDACTED@h/x?token=REDACTED#REDACTED"},
 		{"relative *url.URL", slog.Any("v", &url.URL{Path: "/cb", RawQuery: "code=abc"}), "/cb?code=REDACTED"},
+		{"artifact *url.URL", slog.Any("v", &url.URL{Scheme: "https", Host: "hub", Path: "/api/v1/artifacts/a1/share/tok"}), "https://hub" + RedactedArtifactPath},
 		{"chan", slog.Any("v", make(chan int)), "<unencodable chan int>"},
 		{"func field with hidden secret", slog.Any("v", funcSecret{Token: testSecret, F: func() {}}), "<unencodable logging.funcSecret>"},
 		{"NaN field with hidden secret", slog.Any("v", nanSecret{V: math.NaN(), Token: testSecret}), "<unencodable logging.nanSecret>"},

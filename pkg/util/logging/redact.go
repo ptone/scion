@@ -144,8 +144,10 @@ const urlTrailingPunct = ".,;:)]}'`"
 // every query parameter value (or bare query part) becomes REDACTED with
 // keys kept, and a fragment becomes REDACTED. A URL with none of these is
 // left byte for byte as it was. A match is cut where a second scheme://
-// starts, so adjacent or nested URLs are redacted separately. A URL that
-// does not parse is replaced by its scheme and "://REDACTED".
+// starts before its first '?' or '#', so adjacent URLs, or a URL nested in
+// a path, are redacted separately; a URL inside a query or fragment is
+// redacted with it. A URL that does not parse is replaced by its scheme and
+// "://REDACTED". The scan is linear in len(s).
 //
 // A match that ends at a double quote escaped by %q (an odd number of
 // backslashes before a '"') was cut short: the credential may continue past
@@ -157,39 +159,63 @@ func redactURLsInText(s string) string {
 	}
 	var b strings.Builder
 	pos := 0
-	for {
-		loc := urlInText.FindStringIndex(s[pos:])
-		if loc == nil {
-			break
+	for _, loc := range urlInText.FindAllStringIndex(s, -1) {
+		if loc[0] < pos {
+			continue // dropped after an escaped quote; it ends before pos
 		}
-		start, end := pos+loc[0], pos+loc[1]
-		if k := nestedURLStart(s[start:end]); k > 0 {
-			end = start + k
+		for start, matchEnd := loc[0], loc[1]; start < matchEnd; start = pos {
+			end := matchEnd
+			if k := nestedURLStart(s[start:matchEnd]); k > 0 {
+				end = start + k
+			}
+			b.WriteString(s[pos:start])
+			match := s[start:end]
+			if end < len(s) && s[end] == '"' && oddTrailingBackslashes(match) {
+				scheme, _, _ := strings.Cut(match, "://")
+				b.WriteString(scheme + "://" + redactedValue)
+				pos = closingQuote(s, end+1)
+				break
+			}
+			red, _ := redactURL(match)
+			b.WriteString(red)
+			pos = end
 		}
-		b.WriteString(s[pos:start])
-		match := s[start:end]
-		if end < len(s) && s[end] == '"' && oddTrailingBackslashes(match) {
-			scheme, _, _ := strings.Cut(match, "://")
-			b.WriteString(scheme + "://" + redactedValue)
-			pos = closingQuote(s, end+1)
-			continue
-		}
-		red, _ := redactURL(match)
-		b.WriteString(red)
-		pos = end
 	}
 	b.WriteString(s[pos:])
 	return b.String()
 }
 
 // nestedURLStart returns the offset in m, a urlInText match, at which a
-// second URL starts, or -1 if there is none.
+// second URL starts before m's first '?' or '#', or -1 if there is none.
+// It reads m only up to that offset (or to the first '?' or '#'), so
+// cutting a long run of URLs stays linear.
 func nestedURLStart(m string) int {
 	i := strings.Index(m, "://") + len("://")
-	if loc := urlInText.FindStringIndex(m[i:]); loc != nil {
-		return i + loc[0]
+	for {
+		j := strings.Index(m[i:], "://")
+		if j < 0 || strings.ContainsAny(m[i:i+j], "?#") {
+			return -1
+		}
+		// Walk back over the scheme, which must start with a letter, as
+		// urlInText's leftmost match would.
+		k := j
+		for k > 0 && isSchemeChar(m[i+k-1]) {
+			k--
+		}
+		for k < j && !isASCIILetter(m[i+k]) {
+			k++
+		}
+		if k < j {
+			return i + k
+		}
+		i += j + len("://")
 	}
-	return -1
+}
+
+func isASCIILetter(c byte) bool { return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' }
+
+func isSchemeChar(c byte) bool {
+	return isASCIILetter(c) || '0' <= c && c <= '9' || c == '+' || c == '.' || c == '-'
 }
 
 // oddTrailingBackslashes reports whether m ends in an odd number of
@@ -238,10 +264,14 @@ func redactURL(raw string) (redacted string, ok bool) {
 }
 
 // redactURLValue returns u as a string with its userinfo, every query
-// value and its fragment replaced by REDACTED (see redactQueryValues). u is
-// not modified.
+// value and its fragment replaced by REDACTED (see redactQueryValues), and,
+// for an artifact URL (see RequestPath), the path replaced by
+// RedactedArtifactPath. u is not modified.
 func redactURLValue(u *url.URL) string {
 	c := *u
+	if isArtifactURL(u) {
+		c.Path, c.RawPath = RedactedArtifactPath, ""
+	}
 	if c.User != nil {
 		c.User = url.User(redactedValue)
 	}

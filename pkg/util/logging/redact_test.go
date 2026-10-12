@@ -205,6 +205,13 @@ func TestRedactURLsInText(t *testing.T) {
 		{"escaped backslash before the closing quote", `Get "https://h/p?t=a\\": EOF`, `Get "https://h/p?t=REDACTED": EOF`},
 		{"URLs joined by quotes", `'https://h/x','https://u:p@h2/'`, `'https://h/x','https://REDACTED@h2/'`},
 		{"URL nested in a path", "via https://proxy/https://u:p@h/x", "via https://proxy/https://REDACTED@h/x"},
+		{
+			"URL nested in a query",
+			`Get "https://idp/authorize?redirect_uri=https://app/cb&client_secret=S": EOF`,
+			`Get "https://idp/authorize?redirect_uri=REDACTED&client_secret=REDACTED": EOF`,
+		},
+		{"URL nested in a fragment", "go https://h/p#next=https://u:p@h2/x", "go https://h/p#REDACTED"},
+		{"URL nested after an empty scheme", "see https://h/x/://y/https://u:p@z", "see https://h/x/://y/https://REDACTED@z"},
 		{"backtick trimmed from a URL with a query", "see `https://h/x?t=a` now", "see `https://h/x?t=REDACTED` now"},
 		{"trailing punctuation kept outside the URL", "(see https://h/p?t=abc).", "(see https://h/p?t=REDACTED)."},
 		{"bare IPv6 host unchanged", `Get "http://[fd00::1]": EOF`, `Get "http://[fd00::1]": EOF`},
@@ -219,4 +226,16 @@ func TestRedactURLsInText(t *testing.T) {
 			}
 		})
 	}
+
+	// A long run of adjacent URLs is cut into 5000 parts. The scan is
+	// linear; a quadratic one would take on the order of 10^8 steps here.
+	t.Run("long run of adjacent URLs", func(t *testing.T) {
+		run := strings.Repeat("a://", 5000)
+		in := run + "https://u:p@h/"
+		want := run + "https://REDACTED@h/"
+		if got := redactURLsInText(in); got != want {
+			t.Errorf("redactURLsInText(long run): got %d bytes ending %q, want %d bytes ending %q",
+				len(got), got[max(0, len(got)-40):], len(want), want[len(want)-40:])
+		}
+	})
 }
