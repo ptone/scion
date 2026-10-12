@@ -200,6 +200,7 @@ func TestRedactURLsInText(t *testing.T) {
 			`parse "https://h/pa\"th%zz?token=abc": invalid URL escape "%zz"`,
 			`parse "https://REDACTED": invalid URL escape "%zz"`,
 		},
+		{"second escaped double quote before the closing quote", `Get "https://h/p?t=a\"b\"c": EOF`, `Get "https://REDACTED": EOF`},
 		{"escaped double quote without a closing quote", `x "https://h/p\"rest of text`, `x "https://REDACTED`},
 		{"escaped backslash before the closing quote", `Get "https://h/p?t=a\\": EOF`, `Get "https://h/p?t=REDACTED": EOF`},
 		{"URLs joined by quotes", `'https://h/x','https://u:p@h2/'`, `'https://h/x','https://REDACTED@h2/'`},

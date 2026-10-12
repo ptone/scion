@@ -473,20 +473,19 @@ func TestCloudHandler_HostnameField(t *testing.T) {
 // both as stored and as Cloud Logging encodes it (JSON round trip).
 func handleOne(t *testing.T, h slog.Handler, entries *[]gcplog.Entry, attrs ...slog.Attr) (map[string]any, map[string]any) {
 	t.Helper()
+	// A panic in Handle or in encoding the payload must fail the test by
+	// assertion, not crash the binary.
+	defer func() {
+		if p := recover(); p != nil {
+			t.Fatalf("panicked: %v", p)
+		}
+	}()
 	*entries = nil
 	r := slog.NewRecord(time.Now(), slog.LevelWarn, "msg", 0)
 	r.AddAttrs(attrs...)
-	func() {
-		// A panic must fail the test by assertion, not crash the binary.
-		defer func() {
-			if p := recover(); p != nil {
-				t.Fatalf("Handle panicked: %v", p)
-			}
-		}()
-		if err := h.Handle(context.Background(), r); err != nil {
-			t.Fatalf("Handle returned error: %v", err)
-		}
-	}()
+	if err := h.Handle(context.Background(), r); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
 	if len(*entries) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(*entries))
 	}
