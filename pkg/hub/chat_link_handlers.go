@@ -18,7 +18,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"strings"
 )
 
 type chatLinkProvider struct {
