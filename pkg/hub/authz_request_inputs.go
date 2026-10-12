@@ -66,11 +66,22 @@ type principalKey struct{ normType, id string }
 // the full closure from authorizationPrincipals, the bindings for exactly
 // that closure with (nil, nil) scope filters, and the role definitions for
 // exactly those bindings. Each slot is populated at most once per entry
-// (first successful store wins); a failed load is never stored. roleDefs is
-// read-only once stored — callers must maps.Clone it before mutating.
+// (first successful store wins). A failed closure load is kept in refsErr
+// (see Principals); failed bindings and role-definition loads are never
+// stored. roleDefs is read-only once stored — callers must maps.Clone it
+// before mutating.
 type memoEntry struct {
 	refs   []store.PrincipalRef
 	refsOK bool
+
+	// refsErr is the first failed closure load for this principal in this
+	// phase. Later decisions in the same phase reuse it and fail closed with
+	// the same error instead of reloading. It is never set when refsOK is
+	// true, and never holds a context cancellation or deadline error.
+	refsErr error
+	// refsErrReported records that one caller has already logged refsErr
+	// (see reportPrincipalsFailure).
+	refsErrReported bool
 
 	bindings   []*store.RoleBinding
 	bindingsOK bool
@@ -80,9 +91,13 @@ type memoEntry struct {
 }
 
 // authzInputMemo memoizes principal-bound authorization inputs for one
-// bounded, read-only evaluation phase of one request. Successful loads
-// only. A failed load is returned to the caller and not stored; the next
-// decision retries.
+// bounded, read-only evaluation phase of one request. Successful loads are
+// stored. A failed principal-closure load is also kept for the rest of the
+// phase, so one principal whose closure cannot be resolved costs one store
+// read and one warning per request rather than one per decision; every
+// decision that reuses it fails closed exactly as the first did. Any other
+// failed load is returned to the caller and not stored; the next decision
+// retries. A new phase (the next request) always reloads.
 //
 // The mutex guards map and slot access only; loads run outside the lock and
 // there is no single-flight. Every production batch path evaluates
@@ -248,6 +263,11 @@ type principalInputs struct {
 	// Principals).
 	principalsEntry *memoEntry
 
+	// principalsFailEntry is the memo entry whose refsErr this handle's
+	// Principals() error was stored into or served from. nil when the error
+	// was not memoised.
+	principalsFailEntry *memoEntry
+
 	bindingsLoaded bool
 	bindingsVal    []*store.RoleBinding
 	bindingsErr    error
@@ -322,11 +342,31 @@ func (h *principalInputs) Principals() ([]store.PrincipalRef, error) {
 		h.principalsEntry = entry
 		return refs, nil
 	}
+	if entry.refsErr != nil {
+		err := entry.refsErr
+		h.memo.mu.Unlock()
+		h.principalsErr = err
+		h.principalsFailEntry = entry
+		return nil, err
+	}
 	h.memo.mu.Unlock()
 
 	refs, err := h.a.authorizationPrincipals(h.ctx, h.identity)
 	if err != nil {
 		h.principalsErr = err
+		// Context cancellation and deadline errors describe the caller's
+		// ctx, not the principal, so they are never kept for later
+		// decisions.
+		if h.ctx.Err() == nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			h.memo.mu.Lock()
+			if !entry.refsOK && entry.refsErr == nil {
+				entry.refsErr = err
+			}
+			if entry.refsErr == err {
+				h.principalsFailEntry = entry
+			}
+			h.memo.mu.Unlock()
+		}
 		return nil, err
 	}
 
@@ -347,6 +387,25 @@ func (h *principalInputs) Principals() ([]store.PrincipalRef, error) {
 	h.principalsVal = refs
 	h.principalsEntry = entry
 	return refs, nil
+}
+
+// reportPrincipalsFailure reports whether the caller should log this
+// handle's Principals() error. It returns true once per memo entry per
+// phase, and always when the error was not memoised, so a principal whose
+// closure cannot be resolved is logged once per request and every
+// unmemoised failure is still logged.
+func (h *principalInputs) reportPrincipalsFailure() bool {
+	entry := h.principalsFailEntry
+	if entry == nil || h.memo == nil {
+		return true
+	}
+	h.memo.mu.Lock()
+	defer h.memo.mu.Unlock()
+	if entry.refsErrReported {
+		return false
+	}
+	entry.refsErrReported = true
+	return true
 }
 
 // Bindings loads the role bindings for exactly the closure this handle's

@@ -588,8 +588,8 @@ func TestParity_D3_DeliveryGateZeroLoads(t *testing.T) {
 // =============================================================================
 
 // TestParity_E1_GetEffectiveGroupsAlwaysFails is row E1: deep-equal
-// denies; the call count equals the number of decisions reaching step 2, in
-// both runs (H3; every decision reaches step 2 here).
+// denies; the reference loads the closure once per decision reaching step 2
+// (H3; every decision reaches step 2 here) and the candidate loads it once.
 func TestParity_E1_GetEffectiveGroupsAlwaysFails(t *testing.T) {
 	_, s := authzTestSetup(t)
 	f := newP1Fixture(t, s, "e1")
@@ -606,7 +606,8 @@ func TestParity_E1_GetEffectiveGroupsAlwaysFails(t *testing.T) {
 		assert.Equal(t, "principal resolution error (fail-closed)", d.Reason)
 	}
 	assert.Equal(t, len(tuples), refStore.countOf("GetEffectiveGroups"), "reference: one call per decision, never memoized")
-	assert.Equal(t, len(tuples), candStore.countOf("GetEffectiveGroups"), "candidate: an always-failing load is never stored, so every decision retries")
+	// A failed closure load is reused within one request.
+	assert.Equal(t, 1, candStore.countOf("GetEffectiveGroups"), "candidate: the failed closure load is kept for the rest of the phase")
 }
 
 // TestParity_E2_ListRoleBindingsAlwaysFails is row E2: same shape as
@@ -763,8 +764,10 @@ func TestParity_E4_ListAccessConstraintsFailsByOffset(t *testing.T) {
 
 // TestParity_E5_EachLoaderFailsOnFirstCallOnly is row E5: each served
 // loader fails on its call #1 only, in each run independently. Decision 1
-// denies in both paths; the error is never memoized, so decision 2 retries
-// and the rest match.
+// denies in both paths; for every loader except GetEffectiveGroups the
+// error is not memoized, so decision 2 retries and the rest match. A failed
+// GetEffectiveGroups load is reused for the rest of the phase, so every
+// candidate decision denies after one call.
 func TestParity_E5_EachLoaderFailsOnFirstCallOnly(t *testing.T) {
 	for _, method := range []string{"GetEffectiveGroups", "ListRoleBindingsForPrincipals", "GetRoleDefinitionsByIDs", "ListAccessConstraints"} {
 		t.Run(method, func(t *testing.T) {
@@ -777,6 +780,20 @@ func TestParity_E5_EachLoaderFailsOnFirstCallOnly(t *testing.T) {
 			refStore.fault = callNFault(method, 1)
 			candStore := newMemoTestStore(s)
 			candStore.fault = callNFault(method, 1)
+
+			if method == "GetEffectiveGroups" {
+				// A failed closure load is reused within one request, so every
+				// candidate decision denies after one call.
+				candAuthz, _ := newRecordingAuthz(candStore)
+				mctx := withAuthzInputMemo(context.Background())
+				for i, tp := range tuples {
+					d := candAuthz.CheckAccess(mctx, f.user, tp.resource, tp.action)
+					assert.False(t, d.Allowed, "tuple %d must deny", i)
+					assert.Equal(t, "principal resolution error (fail-closed)", d.Reason, "tuple %d", i)
+				}
+				assert.Equal(t, 1, candStore.countOf(method), "the candidate loads the closure once")
+				return
+			}
 
 			refDecisions, _, refS, candS := runParityWithStores(t, refStore, candStore, f.user, tuples)
 			assert.False(t, refDecisions[0].Allowed, "decision 1 must deny in both runs")

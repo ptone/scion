@@ -859,8 +859,14 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	authzIn := a.inputsFor(ctx, principal.Identity)
 	principals, err := authzIn.Principals()
 	if err != nil {
-		a.logger.Warn("failed to resolve authorization principals",
-			"principal_id", principal.ID, "error", err)
+		if authzIn.reportPrincipalsFailure() {
+			operation := string(request.Action)
+			if request.ListRow {
+				operation = "list"
+			}
+			a.logger.Warn("failed to resolve authorization principals",
+				"principal_id", principal.ID, "operation", operation, "error", err)
+		}
 		errMsg := "principal resolution error: " + err.Error()
 		if request.Explain {
 			resolutionErrors = append(resolutionErrors, errMsg)
@@ -1271,8 +1277,9 @@ func (a *AuthzService) authorizeReadBatch(ctx context.Context, identity Identity
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	// The memo caches successful loads only, so a store failure still
-	// reaches the decision that observed it and fails closed.
+	// The memo stores successful loads, plus a failed principal-closure
+	// load for the rest of this batch. Every decision that observes a
+	// failure, fresh or reused, fails closed.
 	ctx = withAuthzInputMemo(ctx)
 	if GetIdentityFromContext(ctx) != identity {
 		ctx = contextWithIdentity(ctx, identity)
