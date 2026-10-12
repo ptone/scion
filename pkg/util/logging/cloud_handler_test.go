@@ -613,10 +613,10 @@ type funcStringer struct{ F func() }
 
 func (funcStringer) String() string { return "func stringer" }
 
-// panicStringer encodes as {} and its String dereferences a nil pointer.
-type panicStringer struct{ p *int }
+// nilDerefStringer encodes as {} and its String dereferences a nil pointer.
+type nilDerefStringer struct{ p *int }
 
-func (s panicStringer) String() string { return fmt.Sprint(*s.p) }
+func (s nilDerefStringer) String() string { return fmt.Sprint(*s.p) }
 
 // panicJSON panics in MarshalJSON.
 type panicJSON struct{}
@@ -681,7 +681,7 @@ func TestCloudHandler_AttrValuesEncodeOrFallBackToString(t *testing.T) {
 		{"Stringer", slog.Any("v", opaqueStringer{name: "x"}), "stringer:x"},
 		{"TextMarshaler", slog.Any("v", textValue{v: "t"}), "text:t"},
 		{"Stringer failing to marshal", slog.Any("v", funcStringer{F: func() {}}), "func stringer"},
-		{"Stringer that panics", slog.Any("v", panicStringer{}), "<panic formatting logging.panicStringer>"},
+		{"Stringer that panics", slog.Any("v", nilDerefStringer{}), "<panic formatting logging.nilDerefStringer>"},
 		{"MarshalText that panics", slog.Any("v", panicText{}), "<unencodable logging.panicText>"},
 		{"MarshalJSON that panics", slog.Any("v", panicJSON{}), "<unencodable logging.panicJSON>"},
 		{"MarshalJSON that fails", slog.Any("v", failJSON{}), "<unencodable logging.failJSON>"},
