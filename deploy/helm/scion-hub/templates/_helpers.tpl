@@ -2530,7 +2530,7 @@ as R4. Order is the order the guard appends them in, so the refusal message and
 this list read the same way.
 */}}
 {{- define "scion-hub.existingSecretRefusals" -}}
-config.extra, storage.bucket, agents.imageRegistry, hub.adminEmails, secrets.backend, secrets.gcpsm.projectId, secrets.gcpsm.replicationLocations, database.name, database.user, database.password, auth.oauth.web.github.clientId, auth.oauth.web.github.clientSecret, auth.oauth.web.google.clientId, auth.oauth.web.google.clientSecret, auth.proxy.iap.audience, auth.transport.mode, auth.transport.oidcAudience, auth.transport.platformAuthSa, runtime.gke, workspaceStorage.nfs.enabled, workspaceStorage.nfs.server, workspaceStorage.nfs.export, workspaceStorage.nfs.mountRoot, workspaceStorage.nfs.shareId, workspaceStorage.nfs.pvName, workspaceStorage.nfs.subpathRoot
+config.extra, storage.bucket, agents.imageRegistry, hub.adminEmails, hub.trustedProxies, secrets.backend, secrets.gcpsm.projectId, secrets.gcpsm.replicationLocations, database.name, database.user, database.password, auth.oauth.web.github.clientId, auth.oauth.web.github.clientSecret, auth.oauth.web.google.clientId, auth.oauth.web.google.clientSecret, auth.proxy.iap.audience, auth.transport.mode, auth.transport.oidcAudience, auth.transport.platformAuthSa, runtime.gke, workspaceStorage.nfs.enabled, workspaceStorage.nfs.server, workspaceStorage.nfs.export, workspaceStorage.nfs.mountRoot, workspaceStorage.nfs.shareId, workspaceStorage.nfs.pvName, workspaceStorage.nfs.subpathRoot
 {{- end }}
 
 {{/*
@@ -2581,6 +2581,7 @@ it; keep that call.
 {{- if .Values.storage.bucket }}{{- $inline = append $inline "storage.bucket" }}{{- end }}
 {{- if .Values.agents.imageRegistry }}{{- $inline = append $inline "agents.imageRegistry" }}{{- end }}
 {{- if .Values.hub.adminEmails }}{{- $inline = append $inline "hub.adminEmails" }}{{- end }}
+{{- if .Values.hub.trustedProxies }}{{- $inline = append $inline "hub.trustedProxies" }}{{- end }}
 {{- /*
 secrets.backend has a non-empty default, but local is also what renders nothing,
 so any other value was typed. The gcpsm leaves default empty.
@@ -3201,6 +3202,16 @@ one the same, and an absent key keeps the rendered file free of a no-op line.
 */}}
 {{- with .Values.hub.adminEmails }}
 {{- $hub = set $hub "admin_emails" (toStrings .) }}
+{{- end }}
+{{- /*
+server.hub.trusted_proxies, the V1ServerHubConfig spelling. Omitted when empty:
+an absent list and an empty one both leave the hub ignoring forwarded headers.
+The hub refuses an entry that is not an IP address or CIDR range at startup
+(config.ValidateTrustedProxies); the schema pattern catches the obvious ones at
+render time.
+*/}}
+{{- with .Values.hub.trustedProxies }}
+{{- $hub = set $hub "trusted_proxies" (toStrings .) }}
 {{- end }}
 
 {{- /*

@@ -2079,6 +2079,7 @@ declare -A PROBE_MUTATION=(
   [auth.oauth.web.github.clientId]='--set-string|auth.oauth.web.github.clientId=probe-gh-id|--set-string|auth.oauth.web.github.clientSecret=probe-gh-secret'
   [auth.oauth.web.github.clientSecret]='--set-string|auth.oauth.web.github.clientId=probe-gh-id|--set-string|auth.oauth.web.github.clientSecret=probe-gh-secret2'
   [hub.adminEmails]='--set|hub.adminEmails={probe-admin@example.com}'
+  [hub.trustedProxies]='--set|hub.trustedProxies={192.0.2.0/24}'
   # gcpsm needs its project to render at all, and the project is refused under
   # local, so the three secrets leaves each carry the backend and project.
   [secrets.backend]='--set-string|secrets.gcpsm.projectId=probe-project|--set-string|secrets.backend=gcpsm'

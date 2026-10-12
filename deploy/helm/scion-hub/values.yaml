@@ -144,6 +144,25 @@ hub:
   #
   adminEmails: []
 
+  # Optional. IP addresses and CIDR ranges of the proxies or load balancers in
+  # front of the hub, rendered as server.hub.trusted_proxies in settings.yaml
+  # (V1ServerHubConfig, pkg/config/settings_v1.go). On a request from one of
+  # these addresses the hub reads X-Forwarded-For to find the client address
+  # used by its per-client rate limits; from any other address the headers are
+  # ignored. Empty leaves the key out, and the hub uses each request's peer
+  # address. An entry that is not an IP address or CIDR range stops the hub at
+  # startup.
+  #
+  # With auth.mode proxy and auth.proxy.provider header, a listed proxy is also
+  # trusted for user identity and role (the X-Forwarded-User-* headers), so in
+  # that mode list only a dedicated authenticating proxy, not a shared ingress.
+  #
+  #   trustedProxies:
+  #     - 35.191.0.0/16
+  #     - 130.211.0.0/22
+  #
+  trustedProxies: []
+
   # REQUIRED, and deliberately without a default. The external URL the hub is
   # reached at, scheme and host, no trailing path. Absence is not an error in
   # the hub - it warns once and falls back to http://localhost:<port>, which

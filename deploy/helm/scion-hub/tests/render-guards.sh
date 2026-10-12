@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=207   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 9 (agents.imageRegistry for the in-process broker: three refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: seven refusals, four acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 14 (workspaceStorage.nfs: eleven refusals, one acceptance, two rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check).
+EXPECTED_TOTAL=211   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 9 (agents.imageRegistry for the in-process broker: three refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: seven refusals, four acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 4 (hub.trustedProxies: three refusals, one rendered-shape check) + 14 (workspaceStorage.nfs: eleven refusals, one acceptance, two rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -976,6 +976,33 @@ else
   failed=$((failed + 1))
 fi
 unset _ae _ad
+
+echo "== hub.trustedProxies =="
+# One address or CIDR range per entry. The hub refuses an unparseable entry at
+# startup; the schema refuses the obvious shapes (a hostname, a comma list, an
+# IPv6 zone suffix) at render time.
+reject "trustedProxies entry with a comma, schema layer" "hub.trustedProxies.0" \
+  --set 'hub.trustedProxies[0]=10.0.0.1\,10.0.0.2'
+reject "trustedProxies hostname entry, schema layer" "hub.trustedProxies.0" \
+  --set 'hub.trustedProxies[0]=proxy.example.invalid'
+reject "trustedProxies with config.existingSecret" "inline settings values (hub.trustedProxies)" \
+  --set agents.imageRegistry= --set auth.proxy.iap.audience= --set config.existingSecret=operator-owned \
+  --set 'hub.trustedProxies[0]=192.0.2.0/24'
+executed=$((executed + 1))
+_tp="$(render --set 'hub.trustedProxies={192.0.2.0/24,2001:db8::1}' --show-only templates/secret-settings.yaml)"
+_td="$(render --show-only templates/secret-settings.yaml)"
+if ! printf '%s\n' "$_tp" | grep -q '^kind: Secret$' || ! printf '%s\n' "$_td" | grep -q '^kind: Secret$'; then
+  echo "FAIL  server.hub.trusted_proxies shape: a render produced no settings Secret, so nothing was inspected"
+  failed=$((failed + 1))
+elif printf '%s\n' "$_tp" | grep -A2 -E '^ +trusted_proxies:$' | grep -qE '^ +- 192\.0\.2\.0/24$' \
+  && printf '%s\n' "$_tp" | grep -A2 -E '^ +trusted_proxies:$' | grep -qE '^ +- 2001:db8::1$' \
+  && ! printf '%s\n' "$_td" | grep -q 'trusted_proxies'; then
+  echo "ok    hub.trustedProxies renders server.hub.trusted_proxies as a list; empty renders no trusted_proxies"
+else
+  echo "FAIL  server.hub.trusted_proxies shape: the list did not render, or an empty list rendered the key"
+  failed=$((failed + 1))
+fi
+unset _tp _td
 
 echo "== secrets.backend =="
 # local renders nothing; gcpsm renders server.secrets and needs a project. The
