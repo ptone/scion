@@ -141,3 +141,42 @@ func TestNonArtifactPathsKept(t *testing.T) {
 		t.Errorf("RequestPath(nil)")
 	}
 }
+
+func TestRedactURLsInText(t *testing.T) {
+	cases := []struct {
+		name, in, want string
+	}{
+		{"no URL", "connection refused", "connection refused"},
+		{"URL without credentials", `Get "https://example.com/api/v1/agents": EOF`, `Get "https://example.com/api/v1/agents": EOF`},
+		{
+			"username-only token and query token in a url.Error",
+			`Get "https://ghp_tok@github.com/o/r.git?access_token=abc&page=2": dial tcp: i/o timeout`,
+			`Get "https://REDACTED@github.com/o/r.git?access_token=REDACTED&page=REDACTED": dial tcp: i/o timeout`,
+		},
+		{"password already masked by net/http", `Get "https://user:***@host/p": EOF`, `Get "https://REDACTED@host/p": EOF`},
+		{
+			"unparseable URL in a url.Parse error",
+			`parse "https://alice:hunter2@host/%zz": invalid URL escape "%zz"`,
+			`parse "https://REDACTED": invalid URL escape "%zz"`,
+		},
+		{
+			"unquoted URL followed by a colon",
+			"git clone https://x:tok@h/r.git: exit status 128",
+			"git clone https://REDACTED@h/r.git: exit status 128",
+		},
+		{"fragment", "redirect to https://h/cb#access_token=xyz failed", "redirect to https://h/cb#REDACTED failed"},
+		{"bare query token", "fetch https://h/p?ghp_secret failed", "fetch https://h/p?REDACTED failed"},
+		{
+			"database DSN",
+			"open postgres://app:s3cret@db:5432/scion?sslmode=disable: refused",
+			"open postgres://REDACTED@db:5432/scion?sslmode=REDACTED: refused",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := redactURLsInText(tc.in); got != tc.want {
+				t.Errorf("redactURLsInText(%q)\n got %q\nwant %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}

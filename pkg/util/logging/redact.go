@@ -17,6 +17,7 @@ package logging
 import (
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 )
 
@@ -123,4 +124,62 @@ func RedactURL(u *url.URL) string {
 		c.Path, c.RawPath = RedactedArtifactPath, ""
 	}
 	return c.String()
+}
+
+// urlInText matches a URL with an authority (scheme://...) in free text. It
+// stops at whitespace, quotes and angle brackets, so a URL quoted with %q
+// (as in *url.Error) is matched without its quotes.
+var urlInText = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.\-]*://[^\s"'<>]+`)
+
+// redactURLsInText returns s with every scheme://... URL in it redacted for
+// a log line. It is meant for free text such as error messages, where the
+// URL's origin is unknown and any part of it may carry a credential:
+// userinfo (user:password or a username-only token) becomes REDACTED,
+// every query parameter value (or bare query part) becomes REDACTED with
+// keys kept, and a fragment becomes REDACTED. A URL that does not parse is
+// replaced by its scheme and "://REDACTED".
+func redactURLsInText(s string) string {
+	if !strings.Contains(s, "://") {
+		return s
+	}
+	return urlInText.ReplaceAllStringFunc(s, redactURLInText)
+}
+
+// redactURLInText redacts one URL matched by urlInText. Trailing
+// punctuation that more likely belongs to the surrounding sentence is kept
+// outside the URL.
+func redactURLInText(raw string) string {
+	trimmed := strings.TrimRight(raw, ".,;:)]}")
+	tail := raw[len(trimmed):]
+	u, err := url.Parse(trimmed)
+	if err != nil {
+		scheme, _, _ := strings.Cut(trimmed, "://")
+		return scheme + "://" + redactedValue + tail
+	}
+	if u.User != nil {
+		u.User = url.User(redactedValue)
+	}
+	u.RawQuery = redactQueryValues(u.RawQuery)
+	if u.Fragment != "" {
+		u.Fragment, u.RawFragment = redactedValue, ""
+	}
+	return u.String() + tail
+}
+
+// redactQueryValues replaces the value of every parameter in rawQuery with
+// REDACTED, keeping keys and order. A part without "=" may itself be a bare
+// token, so it is replaced whole.
+func redactQueryValues(rawQuery string) string {
+	if rawQuery == "" {
+		return ""
+	}
+	parts := strings.Split(rawQuery, "&")
+	for i, p := range parts {
+		if key, _, ok := strings.Cut(p, "="); ok {
+			parts[i] = key + "=" + redactedValue
+		} else if p != "" {
+			parts[i] = redactedValue
+		}
+	}
+	return strings.Join(parts, "&")
 }

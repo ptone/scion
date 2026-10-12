@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"reflect"
 	"strings"
 	"testing"
@@ -630,5 +631,45 @@ func TestCloudHandler_AttrValuesEncodeOrFallBackToString(t *testing.T) {
 				t.Errorf("v = %#v (%T), want %#v (%T)", stored["v"], stored["v"], tt.want, tt.want)
 			}
 		})
+	}
+}
+
+type urlStringer struct{ u string }
+
+func (s urlStringer) String() string { return s.u }
+
+func TestCloudHandler_ErrorAttrsRedactURLCredentials(t *testing.T) {
+	var entries []gcplog.Entry
+	h := newTestCloudHandler("scion-hub", "v1", slog.LevelInfo, &entries)
+
+	httpErr := &url.Error{Op: "Get", URL: "https://ghp_tok@github.com/o/r?sig=abc", Err: errors.New("EOF")}
+	_, parseErr := url.Parse("https://alice:hunter2@host/%zz")
+	if parseErr == nil {
+		t.Fatal("url.Parse unexpectedly succeeded")
+	}
+
+	_, got := handleOne(t, h, &entries,
+		slog.Any("error", fmt.Errorf("fetching skill: %w", httpErr)),
+		slog.Group("op", slog.Any("error", parseErr)),
+		slog.Any("target", urlStringer{"https://bob:pw@h/x?token=t1"}),
+	)
+	b, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, secret := range []string{"ghp_tok", "sig=abc", "hunter2", "alice", "bob:pw", "token=t1"} {
+		if strings.Contains(string(b), secret) {
+			t.Errorf("payload contains %q: %s", secret, b)
+		}
+	}
+	if want := `fetching skill: Get "https://REDACTED@github.com/o/r?sig=REDACTED": EOF`; got["error"] != want {
+		t.Errorf("error = %#v, want %q", got["error"], want)
+	}
+	op, _ := got["op"].(map[string]any)
+	if want := `parse "https://REDACTED": invalid URL escape "%zz"`; op["error"] != want {
+		t.Errorf("op.error = %#v, want %q", op["error"], want)
+	}
+	if want := "https://REDACTED@h/x?token=REDACTED"; got["target"] != want {
+		t.Errorf("target = %#v, want %q", got["target"], want)
 	}
 }

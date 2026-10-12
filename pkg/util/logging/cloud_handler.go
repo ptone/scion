@@ -392,6 +392,10 @@ func addAttrToMap(m map[string]any, a slog.Attr) {
 // JSON form is {} (for example a struct with only unexported fields) or that
 // fail to marshal are written as their string form. All other values are
 // returned unchanged.
+//
+// Both string forms pass through redactURLsInText, because error text can
+// quote a URL with credentials in its userinfo or query (a *url.Error from
+// net/http masks only a password; a url.Parse error quotes its raw input).
 func jsonSafeValue(v slog.Value) any {
 	if v.Kind() != slog.KindAny {
 		return v.Any()
@@ -406,16 +410,16 @@ func jsonSafeValue(v slog.Value) any {
 		return x
 	}
 	if err, ok := x.(error); ok {
-		return err.Error()
+		return redactURLsInText(err.Error())
 	}
 	b, err := json.Marshal(x)
 	if err == nil && (string(b) != "{}" || reflect.Indirect(rv).Kind() == reflect.Map) {
 		return x
 	}
 	if s, ok := x.(fmt.Stringer); ok {
-		return s.String()
+		return redactURLsInText(s.String())
 	}
-	return fmt.Sprint(x)
+	return redactURLsInText(fmt.Sprint(x))
 }
 
 // promoteAttrToLabels checks if a slog.Attr should be promoted to a GCP label.
