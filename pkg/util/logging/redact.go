@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 // redactedValue replaces the value of a credential-bearing query parameter.
@@ -127,34 +128,71 @@ func RedactURL(u *url.URL) string {
 }
 
 // urlInText matches a URL with an authority (scheme://...) in free text. It
-// stops at whitespace, quotes and angle brackets, so a URL quoted with %q
-// (as in *url.Error) is matched without its quotes.
-var urlInText = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.\-]*://[^\s"'<>]+`)
+// stops at whitespace, double quotes and angle brackets, so a URL quoted
+// with %q (as in *url.Error) is matched without its quotes. A single quote
+// is legal inside userinfo and query values, so it does not end a match;
+// a trailing one (git quotes URLs as 'https://...') is trimmed instead.
+var urlInText = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.\-]*://[^\s"<>]+`)
+
+// urlTrailingPunct is punctuation trimmed from the end of a matched URL
+// because it more likely belongs to the surrounding text.
+const urlTrailingPunct = ".,;:)]}'`"
 
 // redactURLsInText returns s with every scheme://... URL in it redacted for
 // a log line. It is meant for free text such as error messages, where the
 // URL's origin is unknown and any part of it may carry a credential:
 // userinfo (user:password or a username-only token) becomes REDACTED,
 // every query parameter value (or bare query part) becomes REDACTED with
-// keys kept, and a fragment becomes REDACTED. A URL that does not parse is
-// replaced by its scheme and "://REDACTED".
+// keys kept, and a fragment becomes REDACTED. A URL with none of these is
+// left byte for byte as it was. A URL that does not parse is replaced by
+// its scheme and "://REDACTED"; if it ends in a backslash (a double quote
+// escaped by %q, so the credential may continue past the match), the text
+// up to the next whitespace is dropped too.
 func redactURLsInText(s string) string {
 	if !strings.Contains(s, "://") {
 		return s
 	}
-	return urlInText.ReplaceAllStringFunc(s, redactURLInText)
+	var b strings.Builder
+	last := 0
+	for _, loc := range urlInText.FindAllStringIndex(s, -1) {
+		start, end := loc[0], loc[1]
+		if start < last {
+			continue // inside text already dropped after an escaped quote
+		}
+		b.WriteString(s[last:start])
+		red, ok := redactURL(s[start:end])
+		b.WriteString(red)
+		if !ok && strings.HasSuffix(strings.TrimRight(s[start:end], urlTrailingPunct), `\`) {
+			if i := strings.IndexFunc(s[end:], unicode.IsSpace); i >= 0 {
+				end += i
+			} else {
+				end = len(s)
+			}
+		}
+		last = end
+	}
+	b.WriteString(s[last:])
+	return b.String()
 }
 
-// redactURLInText redacts one URL matched by urlInText. Trailing
-// punctuation that more likely belongs to the surrounding sentence is kept
-// outside the URL.
-func redactURLInText(raw string) string {
-	trimmed := strings.TrimRight(raw, ".,;:)]}")
+// redactURL redacts one URL matched by urlInText, keeping trailing
+// punctuation (urlTrailingPunct) outside it unless the URL only parses
+// with it (as for "http://[::1]"). ok is false when the URL does not parse.
+func redactURL(raw string) (redacted string, ok bool) {
+	trimmed := strings.TrimRight(raw, urlTrailingPunct)
 	tail := raw[len(trimmed):]
 	u, err := url.Parse(trimmed)
 	if err != nil {
+		if u, err = url.Parse(raw); err == nil {
+			trimmed, tail = raw, ""
+		}
+	}
+	if err != nil {
 		scheme, _, _ := strings.Cut(trimmed, "://")
-		return scheme + "://" + redactedValue + tail
+		return scheme + "://" + redactedValue + tail, false
+	}
+	if u.User == nil && u.RawQuery == "" && u.Fragment == "" {
+		return raw, true
 	}
 	if u.User != nil {
 		u.User = url.User(redactedValue)
@@ -163,7 +201,7 @@ func redactURLInText(raw string) string {
 	if u.Fragment != "" {
 		u.Fragment, u.RawFragment = redactedValue, ""
 	}
-	return u.String() + tail
+	return u.String() + tail, true
 }
 
 // redactQueryValues replaces the value of every parameter in rawQuery with

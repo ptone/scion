@@ -16,7 +16,6 @@ package logging
 
 import (
 	"context"
-	"encoding"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -393,22 +392,25 @@ func addAttrToMap(m map[string]any, a slog.Attr) {
 // the whole entry. The rules, in order:
 //
 //   - A NaN or infinite float is written as its string form ("NaN", "+Inf").
-//   - JSON-native values (nil, strings, bools, numbers, []string,
-//     map[string]any, []any) are returned unchanged.
-//   - A json.Marshaler is returned unchanged and keeps its own encoding, as
-//     in slog.JSONHandler, even when it is also an error.
-//   - An error is written as Error(), a fmt.Stringer as String(), and an
-//     encoding.TextMarshaler as its text.
-//   - Any other value is returned unchanged if it marshals (even to {}), and
-//     otherwise replaced by a placeholder naming only its type.
+//   - JSON-native containers (nil, []string, map[string]any, []any) and a
+//     json.Marshaler are returned unchanged; a json.Marshaler keeps its own
+//     encoding, as in slog.JSONHandler, even when it is also an error.
+//   - An error is written as Error().
+//   - Any other value whose JSON form is not {} is returned unchanged, so
+//     its JSON schema is kept (an int enum with a String method stays a
+//     number; an encoding.TextMarshaler is encoded as its text).
+//   - A value whose JSON form is {} or that fails to marshal is written as
+//     String() if it is a fmt.Stringer.
+//   - Otherwise a value encoding as {} is returned unchanged, and one that
+//     fails to marshal is replaced by a placeholder naming only its type.
 //
 // No value is printed by reflection (fmt.Sprint), so fields hidden from JSON,
 // such as json:"-" credentials, are never written. A panic in Error(),
-// String() or MarshalText() (for example on a nil receiver) yields a
-// placeholder instead of crashing the logger. The string forms pass through
-// redactURLsInText, because error text can quote a URL with credentials in
-// its userinfo or query (a *url.Error from net/http masks only a password;
-// a url.Parse error quotes its raw input).
+// String() or the trial marshal (for example on a nil receiver) yields a
+// placeholder instead of crashing the logger. Error() and String() results
+// pass through redactURLsInText, because error text can quote a URL with
+// credentials in its userinfo or query (a *url.Error from net/http masks
+// only a password; a url.Parse error quotes its raw input).
 func jsonSafeValue(v slog.Value) any {
 	switch v.Kind() {
 	case slog.KindFloat64:
@@ -420,35 +422,46 @@ func jsonSafeValue(v slog.Value) any {
 	default:
 		return v.Any()
 	}
+	// slog.AnyValue gives strings, bools and integers their own kinds, so
+	// they never reach here.
 	x := v.Any()
 	switch t := x.(type) {
-	case nil, string, bool, int, int8, int16, int32, int64,
-		uint, uint8, uint16, uint32, uint64, []string, map[string]any, []any:
-		return x
-	case json.Marshaler:
+	case nil, []string, map[string]any, []any, json.Marshaler:
 		return x
 	case error:
 		return safeString(x, t.Error)
-	case fmt.Stringer:
-		return safeString(x, t.String)
-	case encoding.TextMarshaler:
-		return safeString(x, func() string {
-			b, err := t.MarshalText()
-			if err != nil {
-				return unencodable(x)
-			}
-			return string(b)
-		})
 	}
-	if _, err := json.Marshal(x); err != nil {
+	b, err := trialMarshal(x)
+	if err == nil && string(b) != "{}" {
+		return x
+	}
+	if s, ok := x.(fmt.Stringer); ok {
+		return safeString(x, s.String)
+	}
+	if err != nil {
 		return unencodable(x)
 	}
 	return x
 }
 
+// trialMarshal encodes x as the Cloud Logging client will, turning a panic
+// in a MarshalJSON or MarshalText method into an error.
+func trialMarshal(x any) (b []byte, err error) {
+	defer func() {
+		if recover() != nil {
+			b, err = nil, fmt.Errorf("panic marshaling %T", x)
+		}
+	}()
+	return json.Marshal(x)
+}
+
 // safeString returns the URL-redacted result of f, a string method of x. If
 // f panics it returns "<nil>" for a nil pointer receiver and a placeholder
-// naming only the type otherwise, like slog's own handlers.
+// naming only the type otherwise, like slog's own handlers. The recover
+// deliberately also covers redactURLsInText: a redactor panic then fails
+// safe, writing the placeholder rather than unredacted text, and
+// TestRedactURLsInText calls the redactor directly so such a bug still
+// shows up in tests.
 func safeString(x any, f func() string) (s string) {
 	defer func() {
 		if recover() != nil {

@@ -171,6 +171,29 @@ func TestRedactURLsInText(t *testing.T) {
 			"open postgres://app:s3cret@db:5432/scion?sslmode=disable: refused",
 			"open postgres://REDACTED@db:5432/scion?sslmode=REDACTED: refused",
 		},
+		{
+			"git single-quoted URL",
+			"fatal: unable to access 'https://tok@github.com/o/r.git/': The requested URL returned error: 403",
+			"fatal: unable to access 'https://REDACTED@github.com/o/r.git/': The requested URL returned error: 403",
+		},
+		{"single quote in password", `Get "https://u:p'ss@h/x": EOF`, `Get "https://REDACTED@h/x": EOF`},
+		{
+			"single quote in password of an unparseable URL",
+			`parse "https://u:p'ss@h/%zz": invalid URL escape "%zz"`,
+			`parse "https://REDACTED": invalid URL escape "%zz"`,
+		},
+		{"single quote in query value", "fetch https://h/cb?token=ab'cd failed", "fetch https://h/cb?token=REDACTED failed"},
+		{"URL followed by a closing single quote", "open 'https://h/p?k=v'", "open 'https://h/p?k=REDACTED'"},
+		{
+			"escaped double quote in password",
+			`parse "https://u:p\"ss@h/%zz": invalid URL escape "%zz"`,
+			`parse "https://REDACTED invalid URL escape "%zz"`,
+		},
+		{"trailing punctuation kept outside the URL", "(see https://h/p?t=abc).", "(see https://h/p?t=REDACTED)."},
+		{"bare IPv6 host unchanged", `Get "http://[fd00::1]": EOF`, `Get "http://[fd00::1]": EOF`},
+		{"IPv6 host with userinfo", `Get "http://u:p@[fd00::1]": EOF`, `Get "http://REDACTED@[fd00::1]": EOF`},
+		{"backticks unchanged", "see `https://h/x` for details", "see `https://h/x` for details"},
+		{"uppercase scheme and non-ASCII unchanged", `Get "HTTPS://Example.com/Ünï": EOF`, `Get "HTTPS://Example.com/Ünï": EOF`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

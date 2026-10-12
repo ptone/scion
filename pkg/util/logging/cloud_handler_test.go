@@ -476,9 +476,17 @@ func handleOne(t *testing.T, h slog.Handler, entries *[]gcplog.Entry, attrs ...s
 	*entries = nil
 	r := slog.NewRecord(time.Now(), slog.LevelWarn, "msg", 0)
 	r.AddAttrs(attrs...)
-	if err := h.Handle(context.Background(), r); err != nil {
-		t.Fatalf("Handle returned error: %v", err)
-	}
+	func() {
+		// A panic must fail the test by assertion, not crash the binary.
+		defer func() {
+			if p := recover(); p != nil {
+				t.Fatalf("Handle panicked: %v", p)
+			}
+		}()
+		if err := h.Handle(context.Background(), r); err != nil {
+			t.Fatalf("Handle returned error: %v", err)
+		}
+	}()
 	if len(*entries) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(*entries))
 	}
@@ -510,7 +518,9 @@ func (e codeErr) Error() string { return fmt.Sprintf("code %d", e.Code) }
 type jsonErr struct{ code int }
 
 func (e jsonErr) Error() string { return "json error" }
-func (e jsonErr) MarshalJSON() ([]byte, error) { return []byte(fmt.Sprintf(`{"code":%d}`, e.code)), nil }
+func (e jsonErr) MarshalJSON() ([]byte, error) {
+	return []byte(fmt.Sprintf(`{"code":%d}`, e.code)), nil
+}
 
 // panicErr's Error dereferences its receiver, so a nil *panicErr panics.
 type panicErr struct{ msg string }
@@ -587,6 +597,33 @@ type textValue struct{ v string }
 
 func (t textValue) MarshalText() ([]byte, error) { return []byte("text:" + t.v), nil }
 
+// testLevel is an int enum whose JSON form (a number) must be kept.
+type testLevel int
+
+func (l testLevel) String() string { return fmt.Sprintf("level-%d", int(l)) }
+
+// namedStringer encodes to a non-empty object, which wins over String().
+type namedStringer struct {
+	Name string `json:"name"`
+}
+
+func (n namedStringer) String() string { return "named:" + n.Name }
+
+// funcStringer fails to marshal, so String() is used.
+type funcStringer struct{ F func() }
+
+func (funcStringer) String() string { return "func stringer" }
+
+// panicStringer encodes as {} and its String dereferences a nil pointer.
+type panicStringer struct{ p *int }
+
+func (s panicStringer) String() string { return fmt.Sprint(*s.p) }
+
+// panicText panics in MarshalText, so the trial marshal panics.
+type panicText struct{}
+
+func (panicText) MarshalText() ([]byte, error) { panic("boom") }
+
 type exportedValue struct {
 	Name  string `json:"name"`
 	Count int    `json:"count"`
@@ -624,6 +661,9 @@ func TestCloudHandler_AttrValuesEncodeOrFallBackToString(t *testing.T) {
 	}{
 		{"Stringer", slog.Any("v", opaqueStringer{name: "x"}), "stringer:x"},
 		{"TextMarshaler", slog.Any("v", textValue{v: "t"}), "text:t"},
+		{"Stringer failing to marshal", slog.Any("v", funcStringer{F: func() {}}), "func stringer"},
+		{"Stringer that panics", slog.Any("v", panicStringer{}), "<panic formatting logging.panicStringer>"},
+		{"MarshalText that panics", slog.Any("v", panicText{}), "<unencodable logging.panicText>"},
 		{"chan", slog.Any("v", make(chan int)), "<unencodable chan int>"},
 		{"func field with hidden secret", slog.Any("v", funcSecret{Token: testSecret, F: func() {}}), "<unencodable logging.funcSecret>"},
 		{"NaN field with hidden secret", slog.Any("v", nanSecret{V: math.NaN(), Token: testSecret}), "<unencodable logging.nanSecret>"},
@@ -657,6 +697,9 @@ func TestCloudHandler_AttrValuesEncodeOrFallBackToString(t *testing.T) {
 		{"empty map", slog.Any("v", map[string]any{}), map[string]any{}},
 		{"slice", slog.Any("v", []string{"a", "b"}), []string{"a", "b"}},
 		{"encodable struct", slog.Any("v", exportedValue{Name: "n", Count: 2}), exportedValue{Name: "n", Count: 2}},
+		{"int enum with String", slog.Any("v", testLevel(2)), testLevel(2)},
+		{"encodable struct with String", slog.Any("v", namedStringer{Name: "n"}), namedStringer{Name: "n"}},
+		{"TextMarshaler", slog.Any("v", textValue{v: "t"}), textValue{v: "t"}},
 		{"unexported fields only", slog.Any("v", opaqueValue{id: 7}), opaqueValue{id: 7}},
 		{"pointer to unexported fields", slog.Any("v", &opaqueValue{id: 7}), &opaqueValue{id: 7}},
 		{"json:\"-\" secret encoding as {}", slog.Any("v", hiddenSecret{Token: testSecret}), hiddenSecret{Token: testSecret}},
