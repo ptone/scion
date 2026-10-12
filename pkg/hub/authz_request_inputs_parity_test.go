@@ -858,11 +858,15 @@ var e5bExpectedFaultReason = map[string]string{
 // call or list request under one memo, so this divergence is reachable in
 // production, for read decisions as well as writes: a load that fails after
 // an earlier success in the same request no longer denies the later
-// decision. That is accepted. The memo reuses only a value the same request
-// already loaded successfully, a failure before the first success is never
-// cached and still fails closed, a done ctx bypasses the memo, and lookups
-// made for other principals (relationship candidates, the delegation
-// ceiling's delegators) never observe it.
+// decision. That is accepted. The memo reuses a value the same request
+// already loaded successfully. A bindings, role-definition or
+// access-constraint failure before the first success is not cached and
+// fails closed. Within one request, a GetEffectiveGroups failure is reused
+// for that principal, so its later decisions fail closed with the same
+// error; a context cancellation or deadline error is not reused. A done ctx
+// reads and writes no memo slot, and lookups made for other principals
+// (relationship candidates, the delegation ceiling's delegators) never
+// observe it.
 func TestParity_E5b_DocumentedDivergenceOnLaterTransient(t *testing.T) {
 	for _, method := range []string{"GetEffectiveGroups", "ListRoleBindingsForPrincipals", "GetRoleDefinitionsByIDs", "ListAccessConstraints"} {
 		for _, k := range []int{2, 5} {
