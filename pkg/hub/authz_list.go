@@ -91,7 +91,7 @@ func (a *AuthzService) ResolveListScopes(ctx context.Context, identity Identity,
 	principals, err := authzIn.Principals()
 	if err != nil {
 		a.logger.WarnContext(ctx, "ResolveListScopes: failed to resolve principals",
-			"error", err, "permission", permissionID)
+			"error", err, "permission", permissionID, "operation", "list")
 		return none, fmt.Errorf("ResolveListScopes: principal resolution: %w", err)
 	}
 

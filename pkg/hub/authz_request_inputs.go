@@ -358,14 +358,16 @@ func (h *principalInputs) Principals() ([]store.PrincipalRef, error) {
 		// ctx, not the principal, so they are never kept for later
 		// decisions.
 		if h.ctx.Err() == nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			stored := false
 			h.memo.mu.Lock()
 			if !entry.refsOK && entry.refsErr == nil {
 				entry.refsErr = err
-			}
-			if entry.refsErr == err {
-				h.principalsFailEntry = entry
+				stored = true
 			}
 			h.memo.mu.Unlock()
+			if stored {
+				h.principalsFailEntry = entry
+			}
 		}
 		return nil, err
 	}

@@ -31,8 +31,9 @@ import (
 const principalFailureWarning = "failed to resolve authorization principals"
 
 // principalWarningRecorder is a slog.Handler that keeps the attributes of
-// every principal-resolution warning it receives.
+// every record whose message is msg (principalFailureWarning when empty).
 type principalWarningRecorder struct {
+	msg     string
 	mu      sync.Mutex
 	records []map[string]string
 }
@@ -42,7 +43,11 @@ func (r *principalWarningRecorder) WithAttrs([]slog.Attr) slog.Handler       { r
 func (r *principalWarningRecorder) WithGroup(string) slog.Handler            { return r }
 
 func (r *principalWarningRecorder) Handle(_ context.Context, rec slog.Record) error {
-	if rec.Message != principalFailureWarning {
+	want := r.msg
+	if want == "" {
+		want = principalFailureWarning
+	}
+	if rec.Message != want {
 		return nil
 	}
 	attrs := map[string]string{}
@@ -186,29 +191,89 @@ func TestAuthzFailureMemo_NewRequestRetries(t *testing.T) {
 	}
 }
 
-// TestAuthzFailureMemo_CtxErrorNotMemoised: a context cancellation error
-// from the store is not kept for later decisions, so each row reloads.
+// TestAuthzFailureMemo_CtxErrorNotMemoised: a context cancellation or
+// deadline error from the store is not kept for later decisions, so each row
+// reloads.
 func TestAuthzFailureMemo_CtxErrorNotMemoised(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"canceled", context.Canceled},
+		{"deadline_exceeded", context.DeadlineExceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, s := authzTestSetup(t)
+			f := newP1Fixture(t, s, "fmemo-ctx-"+tc.name)
+			const n = 6
+			resources := failureMemoAgents(t, s, f, "fmemo-ctx-"+tc.name, n)
+
+			ms := newMemoTestStore(s)
+			ms.fault = func(m string, _ int, _ context.Context) error {
+				if m == "GetEffectiveGroups" {
+					return fmt.Errorf("store call: %w", tc.err)
+				}
+				return nil
+			}
+			rec := &principalWarningRecorder{}
+			authz := NewAuthzService(ms, slog.New(rec))
+
+			allowed, err := authz.AuthorizeListReadBatch(context.Background(), f.user, resources)
+			require.NoError(t, err)
+			for i, ok := range allowed {
+				assert.False(t, ok, "row %d must be denied", i)
+			}
+			assert.Equal(t, n, ms.countOf("GetEffectiveGroups"), "a ctx error is reloaded on every row")
+			assert.Len(t, rec.snapshot(), n, "each unmemoised failure is logged")
+		})
+	}
+}
+
+// TestAuthzFailureMemo_CtxDoneDuringLoadNotMemoised: when the decision's
+// ctx is done by the time the closure load returns, the failure is not kept
+// even though the error itself is not a context error, so a later decision
+// on a live ctx sharing the same memo reloads.
+func TestAuthzFailureMemo_CtxDoneDuringLoadNotMemoised(t *testing.T) {
 	_, s := authzTestSetup(t)
-	f := newP1Fixture(t, s, "fmemo-ctx")
-	const n = 6
-	resources := failureMemoAgents(t, s, f, "fmemo-ctx", n)
+	f := newP1Fixture(t, s, "fmemo-ctxdone")
+
+	mctx := withAuthzInputMemo(context.Background())
+	child, cancel := context.WithCancel(mctx)
+	defer cancel()
 
 	ms := newMemoTestStore(s)
-	ms.fault = func(m string, _ int, _ context.Context) error {
-		if m == "GetEffectiveGroups" {
-			return fmt.Errorf("store call: %w", context.Canceled)
+	ms.fault = func(m string, n int, _ context.Context) error {
+		if m == "GetEffectiveGroups" && n == 1 {
+			cancel()
+			return fmt.Errorf("plain store fault: %w", errInjected)
 		}
 		return nil
 	}
-	rec := &principalWarningRecorder{}
+	authz := NewAuthzService(ms, slog.New(&principalWarningRecorder{}))
+
+	d1 := authz.CheckAccess(child, f.user, f.agentRes, ActionRead)
+	assert.False(t, d1.Allowed, "the faulted decision is denied")
+	require.Error(t, child.Err(), "the decision ctx is done after the load")
+
+	d2 := authz.CheckAccess(mctx, f.user, f.agentRes, ActionRead)
+	assert.True(t, d2.Allowed, "a later decision on a live ctx reloads: %s", d2.Reason)
+	assert.Equal(t, 2, ms.countOf("GetEffectiveGroups"), "the failure from a done ctx is not kept")
+}
+
+// TestAuthzFailureMemo_ListScopesWarningNamesOperation: the list-scope
+// principal-resolution warning names the list operation.
+func TestAuthzFailureMemo_ListScopesWarningNamesOperation(t *testing.T) {
+	_, s := authzTestSetup(t)
+	f := newP1Fixture(t, s, "fmemo-scopes")
+
+	ms := newMemoTestStore(s)
+	ms.fault = alwaysFault("GetEffectiveGroups")
+	rec := &principalWarningRecorder{msg: "ResolveListScopes: failed to resolve principals"}
 	authz := NewAuthzService(ms, slog.New(rec))
 
-	allowed, err := authz.AuthorizeListReadBatch(context.Background(), f.user, resources)
-	require.NoError(t, err)
-	for i, ok := range allowed {
-		assert.False(t, ok, "row %d must be denied", i)
-	}
-	assert.Equal(t, n, ms.countOf("GetEffectiveGroups"), "a ctx error is reloaded on every row")
-	assert.Len(t, rec.snapshot(), n, "each unmemoised failure is logged")
+	_, err := authz.ResolveListScopes(withAuthzInputMemo(context.Background()), f.user, "agent.list")
+	require.Error(t, err)
+	warnings := rec.snapshot()
+	require.Len(t, warnings, 1)
+	assert.Equal(t, "list", warnings[0]["operation"])
 }
