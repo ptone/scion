@@ -16,11 +16,13 @@ package logging
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
+	"reflect"
 	"runtime"
 	"runtime/debug"
 	"strconv"
@@ -380,7 +382,40 @@ func addAttrToMap(m map[string]any, a slog.Attr) {
 		}
 		return
 	}
-	m[a.Key] = val.Any()
+	m[a.Key] = jsonSafeValue(val)
+}
+
+// jsonSafeValue returns the value to store in a Cloud Logging payload for a
+// resolved, non-group slog.Value. The payload is encoded with encoding/json,
+// where an error value encodes as {} and a value that fails to marshal drops
+// the whole entry. Errors are written as their message. Other values whose
+// JSON form is {} (for example a struct with only unexported fields) or that
+// fail to marshal are written as their string form. All other values are
+// returned unchanged.
+func jsonSafeValue(v slog.Value) any {
+	if v.Kind() != slog.KindAny {
+		return v.Any()
+	}
+	x := v.Any()
+	if x == nil {
+		return nil
+	}
+	rv := reflect.ValueOf(x)
+	if rv.Kind() == reflect.Pointer && rv.IsNil() {
+		// A typed nil pointer encodes as null; calling its methods may panic.
+		return x
+	}
+	if err, ok := x.(error); ok {
+		return err.Error()
+	}
+	b, err := json.Marshal(x)
+	if err == nil && (string(b) != "{}" || reflect.Indirect(rv).Kind() == reflect.Map) {
+		return x
+	}
+	if s, ok := x.(fmt.Stringer); ok {
+		return s.String()
+	}
+	return fmt.Sprint(x)
 }
 
 // promoteAttrToLabels checks if a slog.Attr should be promoted to a GCP label.

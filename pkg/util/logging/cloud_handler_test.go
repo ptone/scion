@@ -16,8 +16,14 @@ package logging
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
+	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	gcplog "cloud.google.com/go/logging"
 )
@@ -458,5 +464,171 @@ func TestCloudHandler_HostnameField(t *testing.T) {
 	newH = h.WithGroup("grp").(*CloudHandler)
 	if newH.hostname != "my-workstation" {
 		t.Errorf("expected hostname=my-workstation, got %s", newH.hostname)
+	}
+}
+
+// handleOne runs one record with attrs through h and returns the payload
+// both as stored and as Cloud Logging encodes it (JSON round trip).
+func handleOne(t *testing.T, h slog.Handler, entries *[]gcplog.Entry, attrs ...slog.Attr) (map[string]any, map[string]any) {
+	t.Helper()
+	*entries = nil
+	r := slog.NewRecord(time.Now(), slog.LevelWarn, "msg", 0)
+	r.AddAttrs(attrs...)
+	if err := h.Handle(context.Background(), r); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(*entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(*entries))
+	}
+	payload, ok := (*entries)[0].Payload.(map[string]any)
+	if !ok {
+		t.Fatalf("payload is %T, want map[string]any", (*entries)[0].Payload)
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("payload does not encode to JSON: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(b, &decoded); err != nil {
+		t.Fatalf("decoding payload JSON: %v", err)
+	}
+	return payload, decoded
+}
+
+type errLogValuer struct{ err error }
+
+func (v errLogValuer) LogValue() slog.Value { return slog.AnyValue(v.err) }
+
+func TestCloudHandler_ErrorAttrsWrittenAsMessage(t *testing.T) {
+	var entries []gcplog.Entry
+	h := newTestCloudHandler("scion-hub", "v1", slog.LevelInfo, &entries)
+	base := errors.New("connection refused")
+	wrapped := fmt.Errorf("dialing store: %w", base)
+
+	t.Run("plain", func(t *testing.T) {
+		_, got := handleOne(t, h, &entries, slog.Any("error", base))
+		if got["error"] != "connection refused" {
+			t.Errorf("error = %#v, want %q", got["error"], "connection refused")
+		}
+	})
+
+	t.Run("wrapped", func(t *testing.T) {
+		_, got := handleOne(t, h, &entries, slog.Any("error", wrapped))
+		if got["error"] != "dialing store: connection refused" {
+			t.Errorf("error = %#v, want wrapped message", got["error"])
+		}
+	})
+
+	t.Run("in group", func(t *testing.T) {
+		_, got := handleOne(t, h, &entries, slog.Group("op", slog.Any("error", wrapped)))
+		group, ok := got["op"].(map[string]any)
+		if !ok {
+			t.Fatalf("op = %#v, want object", got["op"])
+		}
+		if group["error"] != "dialing store: connection refused" {
+			t.Errorf("op.error = %#v, want wrapped message", group["error"])
+		}
+	})
+
+	t.Run("LogValuer resolving to error", func(t *testing.T) {
+		_, got := handleOne(t, h, &entries, slog.Any("error", errLogValuer{base}))
+		if got["error"] != "connection refused" {
+			t.Errorf("error = %#v, want %q", got["error"], "connection refused")
+		}
+	})
+
+	t.Run("WithAttrs under WithGroup", func(t *testing.T) {
+		hg := h.WithGroup("req").WithAttrs([]slog.Attr{slog.Any("cause", base)})
+		_, got := handleOne(t, hg, &entries, slog.Any("error", wrapped))
+		group, ok := got["req"].(map[string]any)
+		if !ok {
+			t.Fatalf("req = %#v, want object", got["req"])
+		}
+		if group["cause"] != "connection refused" {
+			t.Errorf("req.cause = %#v, want %q", group["cause"], "connection refused")
+		}
+		if group["error"] != "dialing store: connection refused" {
+			t.Errorf("req.error = %#v, want wrapped message", group["error"])
+		}
+	})
+}
+
+type opaqueValue struct{ id int }
+
+type opaqueStringer struct{ name string }
+
+func (s opaqueStringer) String() string { return "stringer:" + s.name }
+
+type exportedValue struct {
+	Name  string `json:"name"`
+	Count int    `json:"count"`
+}
+
+func TestCloudHandler_AttrValuesEncodeOrFallBackToString(t *testing.T) {
+	var entries []gcplog.Entry
+	h := newTestCloudHandler("scion-hub", "v1", slog.LevelInfo, &entries)
+
+	fallbacks := []struct {
+		name string
+		val  any
+		want string
+	}{
+		{"unexported fields only", opaqueValue{id: 7}, "{7}"},
+		{"pointer to unexported fields", &opaqueValue{id: 7}, "&{7}"},
+		{"Stringer with unexported fields", opaqueStringer{name: "x"}, "stringer:x"},
+		// A channel fails to marshal; fmt.Sprint writes its address.
+		{"marshal failure", make(chan int), "0x"},
+	}
+	for _, tt := range fallbacks {
+		t.Run("fallback/"+tt.name, func(t *testing.T) {
+			_, got := handleOne(t, h, &entries, slog.Any("v", tt.val))
+			s, ok := got["v"].(string)
+			if !ok {
+				t.Fatalf("v = %#v (%T), want string", got["v"], got["v"])
+			}
+			if tt.name == "marshal failure" {
+				if !strings.HasPrefix(s, tt.want) {
+					t.Errorf("v = %q, want prefix %q", s, tt.want)
+				}
+				return
+			}
+			if s != tt.want {
+				t.Errorf("v = %q, want %q", s, tt.want)
+			}
+		})
+	}
+
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	var nilPtr *exportedValue
+	unchanged := []struct {
+		name string
+		attr slog.Attr
+		want any
+	}{
+		{"string", slog.String("v", "s"), "s"},
+		{"int", slog.Int("v", 3), int64(3)},
+		{"bool", slog.Bool("v", true), true},
+		{"time", slog.Time("v", now), now},
+		{"duration", slog.Duration("v", time.Second), time.Second},
+		{"map", slog.Any("v", map[string]any{"a": 1}), map[string]any{"a": 1}},
+		{"empty map", slog.Any("v", map[string]any{}), map[string]any{}},
+		{"slice", slog.Any("v", []string{"a", "b"}), []string{"a", "b"}},
+		{"encodable struct", slog.Any("v", exportedValue{Name: "n", Count: 2}), exportedValue{Name: "n", Count: 2}},
+		{"nil", slog.Any("v", nil), nil},
+		{"typed nil pointer", slog.Any("v", nilPtr), nilPtr},
+	}
+	for _, tt := range unchanged {
+		t.Run("unchanged/"+tt.name, func(t *testing.T) {
+			stored, _ := handleOne(t, h, &entries, tt.attr)
+			if want, ok := tt.want.(time.Time); ok {
+				if got, ok := stored["v"].(time.Time); !ok || !got.Equal(want) {
+					t.Errorf("v = %#v, want %v", stored["v"], want)
+				}
+				return
+			}
+			if !reflect.DeepEqual(stored["v"], tt.want) {
+				t.Errorf("v = %#v (%T), want %#v (%T)", stored["v"], stored["v"], tt.want, tt.want)
+			}
+		})
 	}
 }
