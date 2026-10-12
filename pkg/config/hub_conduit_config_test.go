@@ -354,7 +354,7 @@ server:
 // TestConduitListKeysSplit: the bootstrap (opsettings) and v1 env paths
 // split the conduit list settings' comma-separated env values.
 func TestConduitListKeysSplit(t *testing.T) {
-	for _, keys := range [][]string{commaSplitKoanfKeys, conduitV1EnvListKeys} {
+	for _, keys := range [][]string{commaSplitKoanfKeys, v1EnvListKeys} {
 		k := koanf.New(".")
 		require.NoError(t, k.Load(confmap.Provider(map[string]interface{}{
 			"server.hub.conduit.peer_service_accounts": "a@p.iam.gserviceaccount.com, b@p.iam.gserviceaccount.com",

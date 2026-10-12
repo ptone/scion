@@ -97,6 +97,10 @@ var layer0Prefixes = []string{
 	// Agent port proxy settings — the response header bound is read into
 	// ServerConfig at startup.
 	"server.hub.port_proxy",
+	// Trusted proxy list — read into ServerConfig at startup and used by the
+	// auth middleware and rate limiters built then. Like test_identities the
+	// server-config API also refuses it in every mode.
+	"server.hub.trusted_proxies",
 }
 
 // isLayer0Key reports whether the given koanf key belongs to the Layer-0

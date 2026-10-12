@@ -1416,6 +1416,9 @@ func validateServerPreflight(cfg *config.GlobalConfig) error {
 		return err
 	}
 	cfg.Hub.AgentEndpoint = normalized
+	if err := config.ValidateTrustedProxies(cfg.Hub.TrustedProxies); err != nil {
+		return err
+	}
 	if err := cfg.Hub.Conduit.Validate(); err != nil {
 		return err
 	}
@@ -2135,6 +2138,15 @@ func newJWTProxyAuthenticator(jwtCfg *config.JWTAuthConfig) (*hub.JWTProxyAuthen
 	}
 }
 
+// headerProxyAuthSetting reports whether the header proxy provider is
+// explicitly configured: auth.mode "proxy" with auth.proxy.provider
+// "header". Only then does the hub take the request identity from the
+// X-Forwarded-User-* headers, and only from server.hub.trusted_proxies
+// peers. Any other configuration, including an unset provider, is false.
+func headerProxyAuthSetting(cfg *config.GlobalConfig) bool {
+	return cfg != nil && cfg.Auth.Mode == "proxy" && cfg.Auth.Proxy != nil && cfg.Auth.Proxy.Provider == "header"
+}
+
 // initHubServer creates and configures the Hub server.
 // buildHubServerConfig builds the static portion of hub.ServerConfig from
 // GlobalConfig and the caller's already-resolved values. It is a pure,
@@ -2161,6 +2173,8 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		Debug:                        enableDebug,
 		AuthorizedDomains:            cfg.Auth.AuthorizedDomains,
 		AdminEmails:                  adminEmailList,
+		TrustedProxies:               append([]string(nil), cfg.Hub.TrustedProxies...),
+		HeaderProxyAuth:              headerProxyAuthSetting(cfg),
 		UserAccessMode:               cfg.Auth.UserAccessMode,
 		DefaultUserRole:              cfg.Auth.DefaultUserRole,
 		HubEndpoint:                  hubEndpoint,
@@ -2437,7 +2451,13 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 			log.Printf("Proxy auth configured: provider=jwt, algorithm=%s", cfg.Auth.Proxy.JWT.Algorithm)
 		case "header":
 			// TODO: HeaderProxyAuthenticator (refactor of extractProxyUser)
-			log.Printf("Proxy auth configured: provider=header (legacy IP-trust mode)")
+			// buildHubServerConfig set hubCfg.HeaderProxyAuth for this mode
+			// (headerProxyAuthSetting).
+			if len(hubCfg.TrustedProxies) == 0 {
+				log.Printf("Proxy auth configured: provider=header, but server.hub.trusted_proxies is empty, so no request is accepted through it")
+			} else {
+				log.Printf("Proxy auth configured: provider=header (identity from server.hub.trusted_proxies peers)")
+			}
 		default:
 			return nil, fmt.Errorf("unsupported auth.proxy.provider: %q", cfg.Auth.Proxy.Provider)
 		}

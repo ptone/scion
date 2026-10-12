@@ -160,8 +160,14 @@ type ServerConfig struct {
 	AuthMode string
 	// ProxyAuthenticator is the configured proxy authenticator (when AuthMode == "proxy").
 	ProxyAuth ProxyAuthenticator
-	// TrustedProxies is a list of trusted proxy IPs/CIDRs for forwarded headers.
+	// TrustedProxies is server.hub.trusted_proxies: the IPs/CIDRs of the
+	// proxies whose X-Forwarded-For header is honoured when resolving a
+	// request's client address. Empty means the peer address is used.
 	TrustedProxies []string
+	// HeaderProxyAuth is set when auth.mode is "proxy" with provider
+	// "header". Only then are the X-Forwarded-User-* headers from a
+	// TrustedProxies peer used as the request identity. Defaults to false.
+	HeaderProxyAuth bool
 	// Debug enables verbose debug logging.
 	Debug bool
 	// OAuthConfig holds OAuth provider credentials for CLI authentication.
@@ -2795,6 +2801,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		UATSvc:             srv.uatService,
 		BrokerAuthSvc:      srv.brokerAuthService,
 		TrustedProxies:     cfg.TrustedProxies,
+		HeaderProxyAuth:    cfg.HeaderProxyAuth,
 		ProxyAuthenticator: cfg.ProxyAuth,
 		FederationAuth:     &srv.federationAuth,
 		CredentialStore:    s,

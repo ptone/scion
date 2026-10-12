@@ -61,6 +61,7 @@ Controls the central Hub API server.
 | `read_timeout` | duration | `"30s"` | HTTP read timeout. |
 | `write_timeout` | duration | `"60s"` | HTTP write timeout. |
 | `admin_emails` | list | `[]` | List of emails granted super-admin access. Listed users are always admins: they are promoted on sign-in. When the list is non-empty, an admin whose email is removed from it is demoted to [`default_user_role`](#authentication-serverauth) at the next hub restart or their next sign-in, whichever comes first. At restart, both `admin_emails` and the default role come from `settings.yaml` or the environment, so a change made only in the Admin UI (Postgres mode) takes effect at the user's next sign-in. If the default role was set only in the Admin UI, a user demoted at restart becomes Member. Two exceptions: admins promoted from **Admin > Users** (or the users API) stay admins, and nobody is demoted if the startup safety check failed (for example, no existing user matched the list at startup and there were no UI-promoted admins); demotions resume only after the configuration is fixed and the hub is restarted. Roles set from the admin UI for users who were never config admins (`member`, `viewer`) are not changed by this list. |
+| `trusted_proxies` | list | `[]` | IP addresses and CIDR ranges (IPv4 or IPv6) of the proxies or load balancers in front of the Hub, for example `["35.191.0.0/16", "130.211.0.0/22"]`. On a request whose peer address is in this list, the Hub reads `X-Forwarded-For` from the right, skipping listed addresses, and uses the first address that is not listed as the client address (falling back to `X-Real-IP`, then the peer address). Per-client rate limits use that address. On any other request, forwarded headers are ignored. Empty (the default) means forwarded headers are always ignored and the peer address is used. An entry that is not an IP address or CIDR range, or that has an IPv6 zone suffix, stops the Hub at startup with an error naming the entry. Read at startup only, so a change needs a restart. Settable only in `settings.yaml` or the environment (`SCION_SERVER_HUB_TRUSTEDPROXIES`, comma-separated); the admin server-config API refuses it in every mode and does not show it. With `server.auth.mode: proxy` and `provider: header`, this list also names the proxies whose user headers are accepted; see [Proxy Auth](#proxy-auth-serverauthproxy). |
 | `auto_suspend_stalled` | bool | `false` | Suspend an agent when the Hub marks it `stalled`, unless its harness does not support session resume. See [Auto-Suspend of Stalled Agents](/scion/local/agent-lifecycle/#auto-suspend-of-stalled-agents). Editable in **Server Config**. Env: `SCION_SERVER_HUB_AUTOSUSPENDSTALLED` (seed: `SCION_SEED_SERVER_HUB_AUTOSUSPENDSTALLED`). |
 | `stalled_threshold` | duration | `"5m"` | How long a `running` agent with a recent heartbeat may go without activity events before the Hub marks it `stalled`. A value under `2m` falls back to the default. Editable in **Server Config**. Applied without a restart when settings are stored in the database; in file mode, at the next restart. Env: `SCION_SERVER_HUB_STALLEDTHRESHOLD` (seed: `SCION_SEED_SERVER_HUB_STALLEDTHRESHOLD`). |
 | `soft_delete_retention` | duration | | Duration to retain soft-deleted agents (e.g., `"72h"`). |
@@ -277,6 +278,8 @@ Proxy authentication configuration (consulted when `server.auth.mode` is set to 
 | :--- | :--- | :--- | :--- |
 | `provider` | string | | Selects the proxy auth provider: `"iap"`, `"jwt"`, or `"header"`. |
 | `require_trusted_proxy_ip` | bool | `false` | Enables defense-in-depth IP allowlisting. Uses the trusted_proxies CIDR list. |
+
+With `provider: header`, the Hub takes the user from the `X-Forwarded-User-Id`, `X-Forwarded-User-Email`, `X-Forwarded-User-Name` and `X-Forwarded-User-Role` headers, but only on requests whose peer address is in [`server.hub.trusted_proxies`](#hub-settings-serverhub) and only when the ID and email headers are present. Otherwise the request is handled as if the headers were absent. In this mode a listed proxy is fully trusted for user identity and role, so list only a dedicated authenticating proxy that sets these headers itself, not a shared ingress or load balancer. These headers are used only in this mode: with any other `server.auth.mode` or provider, `server.hub.trusted_proxies` affects client-address resolution only.
 
 #### Google IAP Settings (`server.auth.proxy.iap`)
 
@@ -860,6 +863,7 @@ There are two exceptions to the pattern:
 - `server.hub.gcp_iam_check_mode` -> `SCION_SERVER_HUB_GCPIAMCHECKMODE`
 - `server.hub.gcp_iam_deny_unknown_policy` -> `SCION_SERVER_HUB_GCPIAMDENYUNKNOWNPOLICY`
 - `server.hub.admin_emails` -> `SCION_SERVER_HUB_ADMINEMAILS`
+- `server.hub.trusted_proxies` -> `SCION_SERVER_HUB_TRUSTEDPROXIES`
 - `server.hub.stalled_threshold` -> `SCION_SERVER_HUB_STALLEDTHRESHOLD`
 - `server.hub.monitoring_dashboard_url` -> `SCION_SERVER_HUB_MONITORINGDASHBOARDURL`
 - `server.auth.user_access_mode` -> `SCION_SERVER_AUTH_USERACCESSMODE`
@@ -1172,6 +1176,7 @@ Settings required before the database connection exists, or that are restart-bou
 | Heartbeat reconcile | `hub.missing_agent_grace` |
 | Conduit relay | `hub.conduit.*` |
 | Port proxy | `hub.port_proxy.*` |
+| Trusted proxies | `hub.trusted_proxies` |
 
 ### Layer 1 — Operational (`hub_settings` table)
 

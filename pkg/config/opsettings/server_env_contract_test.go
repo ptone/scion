@@ -360,6 +360,7 @@ var envContractGaps = map[string]string{
 	"versioned server.hub.start_create_unconfirmed_hold":                 gapVersionedUnderscored,
 	"versioned server.hub.start_max_duration":                            gapVersionedUnderscored,
 	"versioned server.hub.start_unconfirmed_hold":                        gapVersionedUnderscored,
+	"versioned server.hub.trusted_proxies":                               gapVersionedUnderscored,
 	"versioned server.hub.write_timeout":                                 gapVersionedUnderscored,
 	"versioned server.log_format":                                        gapVersionedUnderscored,
 	"versioned server.log_level":                                         gapVersionedUnderscored,

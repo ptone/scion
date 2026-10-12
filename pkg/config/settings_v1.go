@@ -1552,6 +1552,12 @@ type V1ServerHubConfig struct {
 	WriteTimeout           string        `json:"write_timeout,omitempty" yaml:"write_timeout,omitempty" koanf:"write_timeout"`
 	CORS                   *V1CORSConfig `json:"cors,omitempty" yaml:"cors,omitempty" koanf:"cors"`
 	AdminEmails            []string      `json:"admin_emails,omitempty" yaml:"admin_emails,omitempty" koanf:"admin_emails"`
+	// TrustedProxies is server.hub.trusted_proxies (see
+	// HubServerConfig.TrustedProxies): IP addresses and CIDR ranges of the
+	// proxies whose X-Forwarded-For header the hub honours. It is read at
+	// startup and is file/env only: the server-config API refuses it in
+	// every mode.
+	TrustedProxies []string `json:"trusted_proxies,omitempty" yaml:"trusted_proxies,omitempty" koanf:"trusted_proxies"`
 
 	// SoftDeleteRetention is how long soft-deleted agents are retained (e.g., "72h").
 	SoftDeleteRetention string `json:"soft_delete_retention,omitempty" yaml:"soft_delete_retention,omitempty" koanf:"soft_delete_retention"`
@@ -2980,7 +2986,7 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 		}
 		return versionedEnvKeyMapper(key), value
 	}), nil)
-	splitKoanfListKeys(k, conduitV1EnvListKeys)
+	splitKoanfListKeys(k, v1EnvListKeys)
 	// SCION_OTEL_INSECURE is a plaintext switch. Its value is the inverse of
 	// telemetry.cloud.tls.enabled, so a key-only mapper cannot apply it.
 	if raw, present := os.LookupEnv("SCION_OTEL_INSECURE"); present && raw != "" {
@@ -3254,11 +3260,12 @@ func versionedEnvKeyMapper(s string) string {
 	return key
 }
 
-// conduitV1EnvListKeys are the v1 keys of the conduit list settings whose
-// env vars hold comma-separated lists.
-var conduitV1EnvListKeys = []string{
+// v1EnvListKeys are the v1 keys of the list settings whose env vars hold
+// comma-separated lists.
+var v1EnvListKeys = []string{
 	"server.hub.conduit.peer_service_accounts",
 	"server.hub.conduit.tcp_allowed_ports",
+	"server.hub.trusted_proxies",
 }
 
 // knownCompoundFields lists multi-word snake_case field names used in server config.
@@ -3283,6 +3290,7 @@ var knownCompoundFields = []string{
 	"tcp_allowed_ports",
 	"stalled_threshold",
 	"reconnect_window",
+	"trusted_proxies",
 	"internal_listen",
 	"shutdown_grace",
 	"peer_audience",
@@ -3531,6 +3539,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		}
 		if v1.Hub.AgentEndpoint != "" {
 			gc.Hub.AgentEndpoint = v1.Hub.AgentEndpoint
+		}
+		if len(v1.Hub.TrustedProxies) > 0 {
+			gc.Hub.TrustedProxies = append([]string(nil), v1.Hub.TrustedProxies...)
 		}
 		if v1.Hub.MonitoringDashboardURL != "" {
 			gc.Hub.MonitoringDashboardURL = v1.Hub.MonitoringDashboardURL
@@ -3969,6 +3980,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		ReadTimeout:            gc.Hub.ReadTimeout.String(),
 		WriteTimeout:           gc.Hub.WriteTimeout.String(),
 		AdminEmails:            gc.Hub.AdminEmails,
+		TrustedProxies:         append([]string(nil), gc.Hub.TrustedProxies...),
 		CORS: &V1CORSConfig{
 			Enabled:        gc.Hub.CORSEnabled,
 			AllowedOrigins: gc.Hub.CORSAllowedOrigins,

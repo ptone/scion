@@ -73,6 +73,14 @@ type HubServerConfig struct {
 	// AdminEmails is a list of email addresses to auto-promote to admin role.
 	AdminEmails []string `json:"adminEmails" yaml:"adminEmails" koanf:"adminEmails"`
 
+	// TrustedProxies is server.hub.trusted_proxies: the IP addresses and
+	// CIDR ranges of the proxies in front of the hub whose X-Forwarded-For
+	// header the hub honours when it resolves a request's client address.
+	// Empty (the default) means forwarded headers are ignored and the peer
+	// address is used. Read once at startup (see ValidateTrustedProxies);
+	// never writable through the settings API.
+	TrustedProxies []string `json:"trustedProxies,omitempty" yaml:"trustedProxies,omitempty" koanf:"trustedProxies"`
+
 	// SoftDeleteRetention is how long soft-deleted agents are retained before purging.
 	// Zero means soft-delete is disabled (hard-delete immediately).
 	SoftDeleteRetention time.Duration `json:"softDeleteRetention" yaml:"softDeleteRetention" koanf:"softDeleteRetention"`
@@ -1545,6 +1553,7 @@ var snakeCaseFields = map[string]string{
 	"missingagentgrace":          "missing_agent_grace",
 	"membershipsweepreportonly":  "membership_sweep_report_only",
 	"monitoringdashboardurl":     "monitoring_dashboard_url",
+	"trustedproxies":             "trusted_proxies",
 	"grantkeyactivation":         "grant_key_activation",
 	"tcpallowedports":            "tcp_allowed_ports",
 	"internallisten":             "internal_listen",
@@ -1697,6 +1706,7 @@ var camelCaseFields = map[string]string{
 	"softdeleteretainfiles":         "softDeleteRetainFiles",
 	"softdeleteretention":           "softDeleteRetention",
 	"telemetryenabled":              "telemetryEnabled",
+	"trustedproxies":                "trustedProxies",
 	"useraccessmode":                "userAccessMode",
 	"webhooksenabled":               "webhooksEnabled",
 	"webhooksecret":                 "webhookSecret",
@@ -2052,6 +2062,7 @@ var commaSplitKoanfKeys = []string{
 	"server.auth.authorized_domains",
 	"server.hub.conduit.peer_service_accounts",
 	"server.hub.conduit.tcp_allowed_ports",
+	"server.hub.trusted_proxies",
 	"server.federation.algorithms",
 }
 
@@ -2061,6 +2072,7 @@ var commaSplitKoanfKeys = []string{
 var envListConfigKeys = []string{
 	"hub.conduit.peerServiceAccounts",
 	"hub.conduit.tcpAllowedPorts",
+	"hub.trustedProxies",
 }
 
 // splitCommaSeparatedKoanfKeys splits comma-separated string values into slices
@@ -2133,6 +2145,8 @@ func applyEnvOverrides(gc *GlobalConfig) error {
 //     blank entries (no origin matches; methods/headers join to ""), so this
 //     only widens matching: a padded or comma-joined entry, including " * ",
 //     now takes effect.
+//   - server.hub.trusted_proxies uses the same split, trim and drop rule;
+//     ValidateTrustedProxies then checks each remaining entry at startup.
 func normalizeListSettings(gc *GlobalConfig) {
 	for _, list := range []*[]string{&gc.Hub.AdminEmails, &gc.Auth.AuthorizedDomains} {
 		if len(*list) == 1 && strings.Contains((*list)[0], ",") {
@@ -2142,6 +2156,7 @@ func normalizeListSettings(gc *GlobalConfig) {
 	for _, list := range []*[]string{
 		&gc.Hub.CORSAllowedOrigins, &gc.Hub.CORSAllowedMethods, &gc.Hub.CORSAllowedHeaders,
 		&gc.RuntimeBroker.CORSAllowedOrigins, &gc.RuntimeBroker.CORSAllowedMethods, &gc.RuntimeBroker.CORSAllowedHeaders,
+		&gc.Hub.TrustedProxies,
 	} {
 		*list = normalizeCORSList(*list)
 	}

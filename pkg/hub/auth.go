@@ -60,6 +60,12 @@ type AuthConfig struct {
 	BrokerAuthSvc *BrokerAuthService
 	// TrustedProxies is a list of trusted proxy IPs/CIDRs
 	TrustedProxies []string
+	// HeaderProxyAuth enables the header proxy provider (auth.mode "proxy"
+	// with provider "header"): the X-Forwarded-User-* headers of a request
+	// whose peer is in TrustedProxies become its identity. It defaults to
+	// false and is set only from that explicit configuration; with it
+	// false, TrustedProxies affects client-address resolution only.
+	HeaderProxyAuth bool
 	// ProxyAuthenticator is the configured proxy authenticator (for proxy auth mode).
 	// When set, it replaces the legacy IP-only extractProxyUser path.
 	ProxyAuthenticator ProxyAuthenticator
@@ -454,8 +460,12 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 					// (nil, nil) = no assertion present, fall through
 				}
 
-				// Step 3b: Legacy trusted proxy headers (backward compat when no ProxyAuthenticator)
-				if cfg.ProxyAuthenticator == nil && len(trustedNets) > 0 && isTrustedProxy(r, trustedNets) {
+				// Step 3b: Header proxy provider. Requires all of: the header
+				// provider explicitly configured (HeaderProxyAuth), no verified
+				// ProxyAuthenticator, a peer in TrustedProxies, and the
+				// identity headers present (extractProxyUser). Otherwise the
+				// headers are not used and the request falls through.
+				if cfg.HeaderProxyAuth && cfg.ProxyAuthenticator == nil && len(trustedNets) > 0 && isTrustedProxy(r, trustedNets) {
 					if user := extractProxyUser(r); user != nil {
 						// This path builds an identity with no store row,
 						// so it never reaches the JWT row block: refuse

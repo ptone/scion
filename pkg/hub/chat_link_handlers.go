@@ -322,22 +322,13 @@ func remoteIP(remoteAddr string) string {
 	return ip
 }
 
+// chatLinkRateLimitIP returns the rate-limit key for a chat-link verify
+// request. It uses the same rule as the hub's other per-client limits
+// (geExchangeClientIP): forwarded headers count only when the peer is a
+// trusted proxy, and X-Forwarded-For is read from the right past trusted
+// hops.
 func chatLinkRateLimitIP(r *http.Request, trustedNets []*net.IPNet) string {
-	fallback := remoteIP(r.RemoteAddr)
-	if len(trustedNets) == 0 || !isTrustedProxy(r, trustedNets) {
-		return fallback
-	}
-
-	if forwardedFor := r.Header.Get("X-Forwarded-For"); forwardedFor != "" {
-		candidate := strings.TrimSpace(strings.SplitN(forwardedFor, ",", 2)[0])
-		if net.ParseIP(candidate) != nil {
-			return candidate
-		}
-	}
-	if candidate := strings.TrimSpace(r.Header.Get("X-Real-IP")); net.ParseIP(candidate) != nil {
-		return candidate
-	}
-	return fallback
+	return geExchangeClientIP(r, trustedNets)
 }
 
 type chatLinkStatusOptions struct {
