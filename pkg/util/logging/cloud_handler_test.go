@@ -619,6 +619,26 @@ type panicStringer struct{ p *int }
 
 func (s panicStringer) String() string { return fmt.Sprint(*s.p) }
 
+// panicJSON panics in MarshalJSON.
+type panicJSON struct{}
+
+func (panicJSON) MarshalJSON() ([]byte, error) { panic("boom") }
+
+// failJSON's MarshalJSON returns an error.
+type failJSON struct{}
+
+func (failJSON) MarshalJSON() ([]byte, error) { return nil, errors.New("no") }
+
+// testURL holds credentials in its userinfo, query and fragment.
+var testURL = url.URL{
+	Scheme:   "https",
+	User:     url.UserPassword("bob", "pw"),
+	Host:     "h",
+	Path:     "/x",
+	RawQuery: "token=t1",
+	Fragment: "f",
+}
+
 // panicText panics in MarshalText, so the trial marshal panics.
 type panicText struct{}
 
@@ -664,6 +684,11 @@ func TestCloudHandler_AttrValuesEncodeOrFallBackToString(t *testing.T) {
 		{"Stringer failing to marshal", slog.Any("v", funcStringer{F: func() {}}), "func stringer"},
 		{"Stringer that panics", slog.Any("v", panicStringer{}), "<panic formatting logging.panicStringer>"},
 		{"MarshalText that panics", slog.Any("v", panicText{}), "<unencodable logging.panicText>"},
+		{"MarshalJSON that panics", slog.Any("v", panicJSON{}), "<unencodable logging.panicJSON>"},
+		{"MarshalJSON that fails", slog.Any("v", failJSON{}), "<unencodable logging.failJSON>"},
+		{"*url.URL", slog.Any("v", &testURL), "https://REDACTED@h/x?token=REDACTED#REDACTED"},
+		{"url.URL", slog.Any("v", testURL), "https://REDACTED@h/x?token=REDACTED#REDACTED"},
+		{"relative *url.URL", slog.Any("v", &url.URL{Path: "/cb", RawQuery: "code=abc"}), "/cb?code=REDACTED"},
 		{"chan", slog.Any("v", make(chan int)), "<unencodable chan int>"},
 		{"func field with hidden secret", slog.Any("v", funcSecret{Token: testSecret, F: func() {}}), "<unencodable logging.funcSecret>"},
 		{"NaN field with hidden secret", slog.Any("v", nanSecret{V: math.NaN(), Token: testSecret}), "<unencodable logging.nanSecret>"},
@@ -704,6 +729,7 @@ func TestCloudHandler_AttrValuesEncodeOrFallBackToString(t *testing.T) {
 		{"pointer to unexported fields", slog.Any("v", &opaqueValue{id: 7}), &opaqueValue{id: 7}},
 		{"json:\"-\" secret encoding as {}", slog.Any("v", hiddenSecret{Token: testSecret}), hiddenSecret{Token: testSecret}},
 		{"nil", slog.Any("v", nil), nil},
+		{"nil *url.URL", slog.Any("v", (*url.URL)(nil)), nil},
 		{"typed nil pointer", slog.Any("v", nilPtr), nilPtr},
 	}
 	for _, tt := range unchanged {

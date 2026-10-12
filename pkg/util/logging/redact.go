@@ -19,7 +19,6 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
-	"unicode"
 )
 
 // redactedValue replaces the value of a credential-bearing query parameter.
@@ -144,35 +143,76 @@ const urlTrailingPunct = ".,;:)]}'`"
 // userinfo (user:password or a username-only token) becomes REDACTED,
 // every query parameter value (or bare query part) becomes REDACTED with
 // keys kept, and a fragment becomes REDACTED. A URL with none of these is
-// left byte for byte as it was. A URL that does not parse is replaced by
-// its scheme and "://REDACTED"; if it ends in a backslash (a double quote
-// escaped by %q, so the credential may continue past the match), the text
-// up to the next whitespace is dropped too.
+// left byte for byte as it was. A match is cut where a second scheme://
+// starts, so adjacent or nested URLs are redacted separately. A URL that
+// does not parse is replaced by its scheme and "://REDACTED".
+//
+// A match that ends at a double quote escaped by %q (an odd number of
+// backslashes before a '"') was cut short: the credential may continue past
+// it. Such a URL is replaced by its scheme and "://REDACTED", and the text
+// up to the closing unescaped quote (or the end of s) is dropped.
 func redactURLsInText(s string) string {
 	if !strings.Contains(s, "://") {
 		return s
 	}
 	var b strings.Builder
-	last := 0
-	for _, loc := range urlInText.FindAllStringIndex(s, -1) {
-		start, end := loc[0], loc[1]
-		if start < last {
-			continue // inside text already dropped after an escaped quote
+	pos := 0
+	for {
+		loc := urlInText.FindStringIndex(s[pos:])
+		if loc == nil {
+			break
 		}
-		b.WriteString(s[last:start])
-		red, ok := redactURL(s[start:end])
+		start, end := pos+loc[0], pos+loc[1]
+		if k := nestedURLStart(s[start:end]); k > 0 {
+			end = start + k
+		}
+		b.WriteString(s[pos:start])
+		match := s[start:end]
+		if end < len(s) && s[end] == '"' && oddTrailingBackslashes(match) {
+			scheme, _, _ := strings.Cut(match, "://")
+			b.WriteString(scheme + "://" + redactedValue)
+			pos = closingQuote(s, end+1)
+			continue
+		}
+		red, _ := redactURL(match)
 		b.WriteString(red)
-		if !ok && strings.HasSuffix(strings.TrimRight(s[start:end], urlTrailingPunct), `\`) {
-			if i := strings.IndexFunc(s[end:], unicode.IsSpace); i >= 0 {
-				end += i
-			} else {
-				end = len(s)
-			}
-		}
-		last = end
+		pos = end
 	}
-	b.WriteString(s[last:])
+	b.WriteString(s[pos:])
 	return b.String()
+}
+
+// nestedURLStart returns the offset in m, a urlInText match, at which a
+// second URL starts, or -1 if there is none.
+func nestedURLStart(m string) int {
+	i := strings.Index(m, "://") + len("://")
+	if loc := urlInText.FindStringIndex(m[i:]); loc != nil {
+		return i + loc[0]
+	}
+	return -1
+}
+
+// oddTrailingBackslashes reports whether m ends in an odd number of
+// backslashes, so that a '"' right after it is escaped.
+func oddTrailingBackslashes(m string) bool {
+	n := len(m) - len(strings.TrimRight(m, `\`))
+	return n%2 == 1
+}
+
+// closingQuote returns the index of the first '"' at or after i in s that
+// is not escaped by a backslash, or len(s) if there is none.
+func closingQuote(s string, i int) int {
+	for i < len(s) {
+		switch s[i] {
+		case '\\':
+			i += 2
+		case '"':
+			return i
+		default:
+			i++
+		}
+	}
+	return len(s)
 }
 
 // redactURL redacts one URL matched by urlInText, keeping trailing
@@ -194,14 +234,22 @@ func redactURL(raw string) (redacted string, ok bool) {
 	if u.User == nil && u.RawQuery == "" && u.Fragment == "" {
 		return raw, true
 	}
-	if u.User != nil {
-		u.User = url.User(redactedValue)
+	return redactURLValue(u) + tail, true
+}
+
+// redactURLValue returns u as a string with its userinfo, every query
+// value and its fragment replaced by REDACTED (see redactQueryValues). u is
+// not modified.
+func redactURLValue(u *url.URL) string {
+	c := *u
+	if c.User != nil {
+		c.User = url.User(redactedValue)
 	}
-	u.RawQuery = redactQueryValues(u.RawQuery)
-	if u.Fragment != "" {
-		u.Fragment, u.RawFragment = redactedValue, ""
+	c.RawQuery = redactQueryValues(c.RawQuery)
+	if c.Fragment != "" {
+		c.Fragment, c.RawFragment = redactedValue, ""
 	}
-	return u.String() + tail, true
+	return c.String()
 }
 
 // redactQueryValues replaces the value of every parameter in rawQuery with

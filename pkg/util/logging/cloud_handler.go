@@ -392,9 +392,13 @@ func addAttrToMap(m map[string]any, a slog.Attr) {
 // the whole entry. The rules, in order:
 //
 //   - A NaN or infinite float is written as its string form ("NaN", "+Inf").
-//   - JSON-native containers (nil, []string, map[string]any, []any) and a
-//     json.Marshaler are returned unchanged; a json.Marshaler keeps its own
-//     encoding, as in slog.JSONHandler, even when it is also an error.
+//   - JSON-native containers (nil, []string, map[string]any, []any) are
+//     returned unchanged.
+//   - A url.URL or *url.URL is written as its string with userinfo, query
+//     values and fragment redacted (see redactURLValue).
+//   - A json.Marshaler keeps its own encoding, as in slog.JSONHandler, even
+//     when it is also an error; if its MarshalJSON fails or panics it is
+//     replaced by a placeholder naming only its type.
 //   - An error is written as Error().
 //   - Any other value whose JSON form is not {} is returned unchanged, so
 //     its JSON schema is kept (an int enum with a String method stays a
@@ -406,8 +410,8 @@ func addAttrToMap(m map[string]any, a slog.Attr) {
 //
 // No value is printed by reflection (fmt.Sprint), so fields hidden from JSON,
 // such as json:"-" credentials, are never written. A panic in Error(),
-// String() or the trial marshal (for example on a nil receiver) yields a
-// placeholder instead of crashing the logger. Error() and String() results
+// String(), MarshalJSON() or MarshalText() (for example on a nil receiver)
+// yields a placeholder instead of crashing the logger. Error() and String() results
 // pass through redactURLsInText, because error text can quote a URL with
 // credentials in its userinfo or query (a *url.Error from net/http masks
 // only a password; a url.Parse error quotes its raw input).
@@ -422,11 +426,23 @@ func jsonSafeValue(v slog.Value) any {
 	default:
 		return v.Any()
 	}
-	// slog.AnyValue gives strings, bools and integers their own kinds, so
-	// they never reach here.
+	// slog.AnyValue gives unnamed strings, bools and numbers their own
+	// kinds; named types such as an int enum reach the trial marshal below.
 	x := v.Any()
 	switch t := x.(type) {
-	case nil, []string, map[string]any, []any, json.Marshaler:
+	case nil, []string, map[string]any, []any:
+		return x
+	case *url.URL:
+		if t == nil {
+			return nil
+		}
+		return redactURLValue(t)
+	case url.URL:
+		return redactURLValue(&t)
+	case json.Marshaler:
+		if _, err := trialMarshal(x); err != nil {
+			return unencodable(x)
+		}
 		return x
 	case error:
 		return safeString(x, t.Error)
