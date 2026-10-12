@@ -419,7 +419,8 @@ func addAttrToMap(m map[string]any, a slog.Attr) {
 func jsonSafeValue(v slog.Value) any {
 	switch v.Kind() {
 	case slog.KindFloat64:
-		if f := v.Float64(); math.IsNaN(f) || math.IsInf(f, 0) {
+		f := v.Float64()
+		if math.IsNaN(f) || math.IsInf(f, 0) {
 			return strconv.FormatFloat(f, 'g', -1, 64)
 		}
 		return f

@@ -251,7 +251,7 @@ func redactURL(raw string) (redacted string, ok bool) {
 	u, err := url.Parse(trimmed)
 	if err != nil {
 		if u, err = url.Parse(raw); err == nil {
-			trimmed, tail = raw, ""
+			tail = ""
 		}
 	}
 	if err != nil {
