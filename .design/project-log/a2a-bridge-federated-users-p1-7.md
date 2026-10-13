@@ -41,8 +41,9 @@
 - **Executor.** For a federated user:
   - The message is text only (no `a2aTaskId` metadata). The hub refuses
     anything else from a visitor. The reply is correlated through the
-    user topic (the existing `subscribeAllUserTopics` path for user
-    callers).
+    user's own topic: the bridge subscribes to that account's user topic
+    alone (`subscribeUserTopic`), not to the project's user topics, so it
+    takes in no other user's DM traffic for a federated user.
   - An unknown agent, an agent or project the bridge does not expose (the
     server lets a federated user's request for one reach the executor), and
     a hub refusal of the send all end the task with the uniform refusal, as
@@ -57,6 +58,22 @@
     `validateTopicUser` matches a user topic against the stored account ID,
     and `requireTopicUserForFederatedTask` refuses a topic with no user for
     a federated user's task (`PostgresTaskStore.IsFederatedUserTask`).
+  - The reverse holds too: a reply on a user's topic reaches only that
+    user's task. An agent caller's task (its replies arrive on the bridge
+    admin's topic, `subscribeAdminUserTopics`) takes a reply without
+    `a2aTaskId` only on the bridge admin's topic or a topic with no user
+    (`agentCallerReplyTopic`), never on a member's or a federated user's
+    topic. Before this item, under the federation scheme only agent
+    callers existed and the bridge took in only the admin topic; a
+    federated user's subscription makes user topics arrive, so the rule is
+    needed now. Plugin mode: the cache records agent callers
+    (`registerActiveTaskFor` takes the caller, also on the legacy send and
+    stream paths), and the legacy task store fallback checks the stored
+    caller key (`legacyTaskTakesReply`). Standalone mode:
+    `requireAdminTopicForAgentTask` (`PostgresTaskStore.IsAgentCallerTask`),
+    with and without `a2aTaskId`. Tasks with no caller identity and local
+    user callers keep their rules (neither exists under the federation
+    scheme).
   - Before the reply is forwarded, `recheckFederatedUserAccess` reads the
     DM (`GET /api/v1/chat/conversations/dm:agent:<agentId>:user:<accountId>/messages?limit=1`)
     with the caller's credential. A refusal ends the task with the uniform
@@ -123,10 +140,13 @@
   agent: two callers with active tasks on the same agent drop the reply.
   This was already true for every caller; narrowing by the topic's user
   would help.
-- Plugin mode: a reply on a federated user's topic that arrives after that
-  user's task ended goes, as for every other user today, to the latest
-  task not owned by a federated user. Correlating every user caller's task
-  by its topic user would close this for all callers.
+- Plugin mode, auth schemes with local user callers (not the federation
+  scheme): a reply on one user's topic can still reach another local
+  user's task, as before this item, because local user callers subscribe
+  to the project's user topics. Correlating every user caller's task by
+  its topic user would change that for all callers.
+- A federated user's own-topic subscription is kept for the life of the
+  process, like every other subscription (one per account that called).
 - Push notifications (legacy `PushDispatcher`) have no re-check. They are
   off in production wiring (`PushNotifications: false`).
 - The docs page names the scheme `oidcFederation`; the config value is
