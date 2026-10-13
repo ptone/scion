@@ -87,10 +87,16 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 			return
 		}
 
-		// Resolve the Scion agent context (agent ID, project ID).
-		agentCtx, err := e.bridge.resolveContext(ctx, route.ProjectSlug, route.AgentSlug, "")
-		if err != nil {
-			yield(nil, fmt.Errorf("resolve agent: %w", err))
+		caller := callerIdentityFromContext(ctx) // nil in legacy mode
+		federatedUser := caller != nil && caller.IsFederatedUser()
+
+		// Resolve the Scion agent context (agent ID, project ID). A
+		// federated user gets the uniform refusal as a failed task below,
+		// the same answer as when the hub refuses the send, so an unknown
+		// agent cannot be told apart from one it may not message.
+		agentCtx, resolveErr := e.bridge.resolveContext(ctx, route.ProjectSlug, route.AgentSlug, "")
+		if resolveErr != nil && !federatedUser {
+			yield(nil, fmt.Errorf("resolve agent: %w", resolveErr))
 			return
 		}
 
@@ -111,9 +117,15 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 			}
 		}
 
+		if resolveErr != nil {
+			// Federated user only (handled above for everyone else).
+			e.log.Debug("federated user: agent not resolved", "error", resolveErr, "task_id", taskID)
+			yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, federatedUserRefusalMessage()), nil)
+			return
+		}
+
 		// Per-user/agent identity propagation: use the caller's credentials for Hub
 		// writes, sender field, and broker subscriptions (mirrors Bridge.SendMessage).
-		caller := callerIdentityFromContext(ctx) // nil in legacy mode
 		var writeClient hubclient.Client = e.bridge.hubClient
 		senderLabel := fmt.Sprintf("user:%s", e.bridge.config.Hub.User)
 
@@ -131,9 +143,16 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 		scionMsg := TranslateA2APartsToScion(execCtx.Message.Parts)
 		scionMsg.Sender = senderLabel
 		scionMsg.Recipient = fmt.Sprintf("agent:%s", agentCtx.AgentSlug)
-		scionMsg.Metadata = map[string]string{"a2aTaskId": string(taskID)}
+		if !federatedUser {
+			// The hub accepts only a direct text message from a federated
+			// user (no metadata); its reply is correlated through the
+			// user's topic instead.
+			scionMsg.Metadata = map[string]string{"a2aTaskId": string(taskID)}
+		}
 
-		// Request broker subscription for responses.
+		// Request broker subscription for responses. User callers,
+		// federated users included, get their replies on their own user
+		// topic.
 		if e.bridge.broker != nil {
 			if caller != nil && !caller.IsAgent() {
 				e.bridge.subscribeAllUserTopics(agentCtx.ProjectID)
@@ -202,6 +221,9 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 		if _, err := writeClient.Agents().SendStructuredMessage(ctx, agentCtx.AgentID, scionMsg, false, false, false); err != nil {
 			e.log.Error("failed to send message to agent", "error", err, "task_id", taskID, "agent_id", agentCtx.AgentID)
 			failMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("Failed to route message to agent"))
+			if federatedUser && isHubRefusal(err) {
+				failMsg = federatedUserRefusalMessage()
+			}
 			yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, failMsg), nil)
 			return
 		}
@@ -233,6 +255,17 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 			// Metric increment is handled by the CAS winner in
 			// processAndAppendEvent — not duplicated here.
 			return
+		}
+
+		// Revocation: a federated user's access is re-checked with the hub
+		// before the reply is forwarded. A refusal ends the task with the
+		// uniform refusal; the reply is not forwarded.
+		if federatedUser {
+			if failMsg := e.bridge.federatedUserReplyRefusal(ctx, caller, agentCtx.AgentID); failMsg != nil {
+				e.log.Info("federated user reply not forwarded", "task_id", taskID, "agent_id", agentCtx.AgentID)
+				yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, failMsg), nil)
+				return
+			}
 		}
 
 		// Convert the event to SDK format.
@@ -367,6 +400,13 @@ func (e *ScionExecutor) Cancel(ctx context.Context, execCtx *a2asrv.ExecutorCont
 
 			// Per-user/agent identity propagation for cancel interrupts.
 			caller := callerIdentityFromContext(ctx)
+			// A federated user gets no interrupt: the hub accepts only a
+			// text message from it, and the bridge never sends for it as
+			// the admin.
+			if caller.IsFederatedUser() {
+				yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCanceled, nil), nil)
+				return
+			}
 			var cancelClient hubclient.Client = e.bridge.hubClient
 			senderLabel := fmt.Sprintf("user:%s", e.bridge.config.Hub.User)
 			if caller != nil {

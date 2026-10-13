@@ -580,6 +580,13 @@ func (b *Bridge) taskEventToTaskResult(taskID, contextID string, ev *state.TaskE
 // is routed as a follow-up to an existing task (continuing the conversation).
 // When blocking is true (the default), it waits for the agent response.
 func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contextID, existingTaskID string, parts []Part, blocking bool) (*TaskResult, error) {
+	// A federated user is served only by the SDK executor
+	// (ScionExecutor.Execute), which sends the text-only message the hub
+	// accepts from it and re-checks its access before forwarding a reply.
+	if caller := callerIdentityFromContext(ctx); caller != nil && caller.IsFederatedUser() {
+		return nil, fmt.Errorf("%w: %q", ErrAgentNotFound, agentSlug)
+	}
+
 	// Follow-up on an existing task
 	if existingTaskID != "" {
 		return b.sendFollowUp(ctx, projectSlug, agentSlug, existingTaskID, parts, blocking)
@@ -918,8 +925,9 @@ func (b *Bridge) CancelTask(ctx context.Context, taskID string) (*TaskResult, er
 	b.unregisterActiveTask(taskID, aKey)
 
 	// Send interrupt to the agent via Hub, re-resolving if the stored AgentID is stale.
-	// Use per-user client when CallerIdentity is present (M1).
-	if b.hubClient != nil && task.AgentID != "" {
+	// Use per-user client when CallerIdentity is present (M1). A federated
+	// user gets no interrupt: the hub accepts only a text message from it.
+	if b.hubClient != nil && task.AgentID != "" && !caller.IsFederatedUser() {
 		targetAgentID := task.AgentID
 		if agent := b.lookupAgent(ctx, task.ProjectID, task.AgentSlug); agent != nil {
 			targetAgentID = agent.ID
@@ -1501,10 +1509,6 @@ func (b *Bridge) subscribeAdminUserTopics(projectID string) {
 // GenerateAgentCard builds an agent card for the given project and agent,
 // enriching it with metadata from the Hub API when available.
 func (b *Bridge) GenerateAgentCard(ctx context.Context, projectSlug, agentSlug string) map[string]interface{} {
-	cfg := b.effectiveConfig()
-	baseURL := strings.TrimRight(cfg.Bridge.ExternalURL, "/")
-	agentURL := fmt.Sprintf("%s/projects/%s/agents/%s", baseURL, projectSlug, agentSlug)
-
 	name := agentSlug
 	description := fmt.Sprintf("Scion agent %s in project %s", agentSlug, projectSlug)
 	var skills []map[string]interface{}
@@ -1530,6 +1534,17 @@ func (b *Bridge) GenerateAgentCard(ctx context.Context, projectSlug, agentSlug s
 			}
 		}
 	}
+
+	return b.buildAgentCard(projectSlug, agentSlug, name, description, skills)
+}
+
+// buildAgentCard returns the agent card for agentSlug in projectSlug with
+// the given display name, description and skills; with no skills, a single
+// skill named after the agent.
+func (b *Bridge) buildAgentCard(projectSlug, agentSlug, name, description string, skills []map[string]interface{}) map[string]interface{} {
+	cfg := b.effectiveConfig()
+	baseURL := strings.TrimRight(cfg.Bridge.ExternalURL, "/")
+	agentURL := fmt.Sprintf("%s/projects/%s/agents/%s", baseURL, projectSlug, agentSlug)
 
 	if len(skills) == 0 {
 		skills = []map[string]interface{}{
@@ -1719,6 +1734,11 @@ func (b *Bridge) resolveContext(ctx context.Context, projectSlug, agentSlug, con
 
 	agentID, projectID, _ := findAdoptableAgent(agents.Agents, agentSlug)
 	if agentID == "" {
+		// A federated user never makes the bridge create an agent: it may
+		// only reach agents that exist and that the hub lets it message.
+		if caller := callerIdentityFromContext(ctx); caller != nil && caller.IsFederatedUser() {
+			return nil, fmt.Errorf("%w: %q", ErrAgentNotFound, agentSlug)
+		}
 		projectCfg := b.GetProjectConfig(projectSlug)
 		if projectCfg == nil || !projectCfg.AutoProvision || projectCfg.DefaultTemplate == "" {
 			return nil, fmt.Errorf("%w: %q", ErrAgentNotFound, agentSlug)

@@ -48,6 +48,11 @@ type CallerIdentity struct {
 
 	// Ancestry is the agent's lineage chain (from `ancestry` claim).
 	Ancestry []string
+
+	// Subject is the issuer's `sub` claim of a federated user caller (a
+	// federation credential classified as a user, see
+	// classifyFederationClaims). Empty for every other caller.
+	Subject string
 }
 
 // IsAgent returns true if this identity represents an agent caller
@@ -56,11 +61,25 @@ func (c *CallerIdentity) IsAgent() bool {
 	return c.AgentID != ""
 }
 
+// IsFederatedUser reports whether this identity is a federated user caller:
+// a federation credential that names a person rather than an agent. Its
+// UserID is the account the hub resolved for that credential
+// (GET /api/v1/auth/me under the same credential). False for a nil
+// identity (legacy auth modes).
+func (c *CallerIdentity) IsFederatedUser() bool {
+	return c != nil && c.TokenType == "federation" && c.AgentID == "" && c.Subject != ""
+}
+
 // SenderLabel returns the formatted sender string for Hub messages.
-// Agent callers use "agent:<id>", user callers use "user:<email>".
+// Agent callers use "agent:<id>", federated user callers "user:<account
+// ID>" (a reply to that address reaches their DM), and other user callers
+// "user:<email>".
 func (c *CallerIdentity) SenderLabel() string {
 	if c.IsAgent() {
 		return "agent:" + c.AgentID
+	}
+	if c.IsFederatedUser() {
+		return "user:" + c.UserID
 	}
 	return "user:" + c.Email
 }
@@ -68,6 +87,8 @@ func (c *CallerIdentity) SenderLabel() string {
 // CallerKey returns a stable identifier for task-store isolation.
 // For user callers: UserID.
 // For agent callers: "agent:<issuer-host>:<agent-id>".
+// For federated user callers: "fed:<issuer-host>:<sub>" (the raw issuer
+// when it has no host, so the key is never empty).
 func (c *CallerIdentity) CallerKey() string {
 	if c.IsAgent() {
 		u, err := url.Parse(c.IssuerURL)
@@ -76,7 +97,20 @@ func (c *CallerIdentity) CallerKey() string {
 		}
 		return "agent:" + u.Host + ":" + c.AgentID
 	}
+	if c.IsFederatedUser() {
+		return "fed:" + issuerHost(c.IssuerURL) + ":" + c.Subject
+	}
 	return c.UserID
+}
+
+// issuerHost returns the host of an issuer URL, or the issuer unchanged
+// when it does not parse to a URL with a host.
+func issuerHost(issuer string) string {
+	u, err := url.Parse(issuer)
+	if err != nil || u.Host == "" {
+		return issuer
+	}
+	return u.Host
 }
 
 type callerContextKey struct{}

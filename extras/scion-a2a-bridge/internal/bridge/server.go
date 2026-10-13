@@ -224,6 +224,8 @@ func (s *Server) Handler() http.Handler {
 
 	// Per-agent routes — the SDK handler handles JSON-RPC protocol.
 	mux.HandleFunc("GET /projects/{projectSlug}/agents/{agentSlug}/.well-known/agent-card.json", s.handleAgentCard)
+	// Agent cards a federated user may message (authenticated, per caller).
+	mux.HandleFunc("GET /projects/{projectSlug}/agents", s.handleFederatedUserAgentCards)
 	mux.HandleFunc("GET /projects/{projectSlug}/agents/{agentSlug}/.well-known/agent.json", s.handleAgentCard)
 	mux.HandleFunc("POST /projects/{projectSlug}/agents/{agentSlug}/jsonrpc", s.handleJSONRPC)
 	// Direct POST to agent base URL — GE clients may POST JSON-RPC directly
@@ -377,6 +379,80 @@ func (s *Server) handleAgentCard(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(card); err != nil {
 		s.log.Error("failed to encode agent card response", "error", err)
 	}
+}
+
+// handleFederatedUserAgentCards answers GET /projects/{projectSlug}/agents
+// for a federated user caller with the cards of the project's agents it may
+// message: the agents the hub lists for the caller's credential with
+// ?messageable=true, narrowed to the project's exposed agents. Cards carry
+// only what the hub's list shows (name and slug). Any refusal, including an
+// unknown project or a project the caller holds no grant on, is the uniform
+// refusal. Other callers get 404: the route lists cards per caller only for
+// federated users.
+func (s *Server) handleFederatedUserAgentCards(w http.ResponseWriter, r *http.Request) {
+	caller := callerIdentityFromContext(r.Context())
+	if caller == nil || !caller.IsFederatedUser() {
+		http.NotFound(w, r)
+		return
+	}
+	projectSlug := r.PathValue("projectSlug")
+	if !slugRE.MatchString(projectSlug) {
+		writeFederatedUserRefusal(w)
+		return
+	}
+	projectCfg := s.bridge.GetProjectConfig(projectSlug)
+	if projectCfg == nil {
+		writeFederatedUserRefusal(w)
+		return
+	}
+
+	agents, err := s.bridge.federatedUserMessageableAgents(r.Context(), caller, projectSlug)
+	if err != nil {
+		if isHubRefusal(err) {
+			writeFederatedUserRefusal(w)
+			return
+		}
+		s.log.Warn("federated user agent list failed", "project", projectSlug, "error", err)
+		http.Error(w, "unable to list agents from Scion Hub", http.StatusBadGateway)
+		return
+	}
+
+	cards := make([]map[string]interface{}, 0, len(agents))
+	for _, a := range agents {
+		slug := a.Slug
+		if slug == "" {
+			slug = a.Name
+		}
+		if !slugRE.MatchString(slug) || !agentExposed(projectCfg, slug, a.Name) {
+			continue
+		}
+		name := a.Name
+		if name == "" {
+			name = slug
+		}
+		description := fmt.Sprintf("Scion agent %s in project %s", slug, projectSlug)
+		cards = append(cards, s.bridge.buildAgentCard(projectSlug, slug, name, description, nil))
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "private, no-store")
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{"agents": cards}); err != nil {
+		s.log.Error("failed to encode agent cards response", "error", err)
+	}
+}
+
+// agentExposed reports whether an agent with the given slug or name is
+// exposed by the project (every agent is when the project names none).
+func agentExposed(projectCfg *ProjectConfig, slug, name string) bool {
+	if len(projectCfg.ExposedAgents) == 0 {
+		return true
+	}
+	for _, a := range projectCfg.ExposedAgents {
+		if a == slug || (name != "" && a == name) {
+			return true
+		}
+	}
+	return false
 }
 
 // handleJSONRPC validates the project/agent routing and delegates to the SDK handler.
@@ -646,6 +722,27 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				s.log.Debug("federation token decode failed", "error", err)
 				http.Error(w, "unauthorized: malformed token", http.StatusUnauthorized)
 				return
+			}
+			// A user credential names a person: the hub says which account
+			// it belongs to (GET /api/v1/auth/me under the same
+			// credential). The bridge passes a hub refusal on and admits
+			// nobody the hub did not name. Agent credentials are unchanged.
+			if caller.IsFederatedUser() {
+				identified, idErr := s.bridge.identifyFederatedUser(r.Context(), caller)
+				if idErr != nil {
+					s.log.Debug("federated user not admitted by hub", "error", idErr)
+					if isHubUnauthenticated(idErr) {
+						http.Error(w, "unauthorized: token rejected by Scion Hub", http.StatusUnauthorized)
+						return
+					}
+					if isHubRefusal(idErr) {
+						writeFederatedUserRefusal(w)
+						return
+					}
+					http.Error(w, "unable to verify caller with Scion Hub", http.StatusBadGateway)
+					return
+				}
+				caller = identified
 			}
 			ctx := withCallerIdentity(r.Context(), caller)
 			next.ServeHTTP(w, r.WithContext(ctx))

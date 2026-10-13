@@ -35,6 +35,11 @@ type DurableRequestHandler struct {
 	sdkStore   *PostgresTaskStore
 	eventStore *state.PostgresStore
 	notifier   *Notifier
+
+	// bridge re-checks a federated user's access with the hub before a
+	// reply is streamed to it (SetBridge). Without it, a federated user's
+	// subscription streams no new events.
+	bridge *Bridge
 }
 
 // Compile-time check.
@@ -48,6 +53,28 @@ func NewDurableRequestHandler(inner a2asrv.RequestHandler, sdkStore *PostgresTas
 		eventStore: eventStore,
 		notifier:   notifier,
 	}
+}
+
+// SetBridge sets the bridge SubscribeToTask uses to re-check a federated
+// user's access with the hub before it streams a reply.
+func (h *DurableRequestHandler) SetBridge(b *Bridge) {
+	h.bridge = b
+}
+
+// federatedUserStreamRefusal returns nil when a reply may be streamed to the
+// federated user caller on the task's route, otherwise the message the
+// stream ends with (see Bridge.federatedUserReplyRefusal). It fails closed:
+// without a bridge, route or resolvable agent the reply is not streamed.
+func (h *DurableRequestHandler) federatedUserStreamRefusal(ctx context.Context, caller *CallerIdentity) *a2a.Message {
+	route, ok := RouteInfoFrom(ctx)
+	if h.bridge == nil || !ok {
+		return federatedUserRefusalMessage()
+	}
+	agent := h.bridge.lookupAgent(ctx, route.ProjectSlug, route.AgentSlug)
+	if agent == nil || agent.ID == "" {
+		return federatedUserRefusalMessage()
+	}
+	return h.bridge.federatedUserReplyRefusal(ctx, caller, agent.ID)
 }
 
 // SubscribeToTask implements a durable, ownership-enforcing subscribe that
@@ -85,7 +112,12 @@ func (h *DurableRequestHandler) SubscribeToTask(
 			return
 		}
 
-		// 4. Stream only NEW events (id > cursor), no old-replay.
+		// 4. Stream only NEW events (id > cursor), no old-replay. A
+		// federated user's access is re-checked with the hub before each
+		// reply (revocation); a refusal ends the stream with the uniform
+		// refusal instead of the reply.
+		caller := callerIdentityFromContext(ctx)
+		federatedUser := caller != nil && caller.IsFederatedUser()
 		var notifyCh <-chan struct{}
 		if h.notifier != nil {
 			var cleanup func()
@@ -103,6 +135,15 @@ func (h *DurableRequestHandler) SubscribeToTask(
 			}
 			for _, ev := range events {
 				cursor = ev.ID
+				if federatedUser && isResponseEvent(ev) {
+					if failMsg := h.federatedUserStreamRefusal(ctx, caller); failMsg != nil {
+						yield(&a2a.TaskStatusUpdateEvent{
+							TaskID: req.ID,
+							Status: a2a.TaskStatus{State: a2a.TaskStateFailed, Message: failMsg},
+						}, nil)
+						return
+					}
+				}
 				sdkEvent, convErr := taskEventToSDKResubscribeEvent(req.ID, &ev)
 				if convErr != nil {
 					continue
