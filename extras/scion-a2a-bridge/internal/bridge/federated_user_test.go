@@ -17,6 +17,7 @@ package bridge
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -181,14 +182,6 @@ func TestDecodeFederationToken_Classification(t *testing.T) {
 			},
 			wantErr: true,
 		},
-		{
-			name: "user credential whose issuer has no host is refused",
-			claims: map[string]interface{}{
-				"iss": "not-a-url", "sub": fedUserSubject, "email": fedUserEmail,
-				"scion_token_kind": "user",
-			},
-			wantErr: true,
-		},
 	}
 
 	for _, tt := range tests {
@@ -277,14 +270,14 @@ func TestCallerIdentity_FederatedUser(t *testing.T) {
 	if got, want := caller.SenderLabel(), "user:"+fedUserAccountID; got != want {
 		t.Errorf("SenderLabel() = %q, want %q (the account ID, never the email)", got, want)
 	}
-	if got, want := caller.CallerKey(), "fed:hub-a.example.com:"+fedUserSubject; got != want {
-		t.Errorf("CallerKey() = %q, want %q", got, want)
+	if got, want := caller.CallerKey(), "fed:"+fedUserAccountID; got != want {
+		t.Errorf("CallerKey() = %q, want %q (the hub account ID)", got, want)
 	}
 
-	noHost := *caller
-	noHost.IssuerURL = "issuer-without-host"
-	if got, want := noHost.CallerKey(), "fed:issuer-without-host:"+fedUserSubject; got != want {
-		t.Errorf("CallerKey() without issuer host = %q, want %q", got, want)
+	unnamed := *caller
+	unnamed.UserID = ""
+	if got := unnamed.CallerKey(); got != "" {
+		t.Errorf("CallerKey() before the hub named the account = %q, want empty (refused by the task store)", got)
 	}
 
 	var nilCaller *CallerIdentity
@@ -299,6 +292,40 @@ func TestCallerIdentity_FederatedUser(t *testing.T) {
 	}
 }
 
+// TestCallerKey_FederatedUserIssuersOnOneHost: the task-isolation key is
+// the hub account, so users of two issuers on the same host with the same
+// subject (realms on one host, or a port in the issuer or the subject) get
+// different keys when the hub resolved different accounts for them.
+func TestCallerKey_FederatedUserIssuersOnOneHost(t *testing.T) {
+	const otherAccountID = "22222222-3333-4444-8555-666666666666"
+	pairs := []struct {
+		name string
+		a, b CallerIdentity
+	}{
+		{
+			name: "two realms on one host, same subject",
+			a:    CallerIdentity{TokenType: "federation", IssuerURL: "https://idp.example.com/realms/a", Subject: "same-sub", UserID: fedUserAccountID},
+			b:    CallerIdentity{TokenType: "federation", IssuerURL: "https://idp.example.com/realms/b", Subject: "same-sub", UserID: otherAccountID},
+		},
+		{
+			name: "port in the issuer or in the subject",
+			a:    CallerIdentity{TokenType: "federation", IssuerURL: "https://idp.example.com", Subject: "8443:same-sub", UserID: fedUserAccountID},
+			b:    CallerIdentity{TokenType: "federation", IssuerURL: "https://idp.example.com:8443", Subject: "same-sub", UserID: otherAccountID},
+		},
+	}
+	for _, p := range pairs {
+		t.Run(p.name, func(t *testing.T) {
+			keyA, keyB := p.a.CallerKey(), p.b.CallerKey()
+			if keyA == keyB {
+				t.Fatalf("CallerKey() = %q for both users, want different keys", keyA)
+			}
+			if keyA != "fed:"+fedUserAccountID || keyB != "fed:"+otherAccountID {
+				t.Errorf("CallerKey() = %q and %q, want fed:<account ID> for each", keyA, keyB)
+			}
+		})
+	}
+}
+
 // --- hub test double ---
 
 // fedUserHub stands in for the hub the bridge talks to, for both the
@@ -309,8 +336,10 @@ type fedUserHub struct {
 
 	mu           sync.Mutex
 	meStatus     int    // 0: 200 with the visitor account
+	meID         string // account ID in the /auth/me answer
 	meRole       string // role in the /auth/me answer
 	sendStatus   int    // 0: 200
+	adminStatus  int    // 0: 200 for the bridge admin agent list
 	dmReadStatus int    // 0: 200
 	grants       []map[string]interface{}
 	adminAgents  []map[string]interface{}
@@ -343,6 +372,7 @@ func newFedUserHub(t *testing.T, userToken string) *fedUserHub {
 	t.Helper()
 	h := &fedUserHub{
 		userToken: userToken,
+		meID:      fedUserAccountID,
 		meRole:    "viewer",
 		grants: []map[string]interface{}{
 			{"projectId": fedUserProjectID, "projectSlug": "proj1", "projectName": "Project 1", "status": "active"},
@@ -376,7 +406,7 @@ func newFedUserHub(t *testing.T, userToken string) *fedUserHub {
 				return
 			}
 			writeJSON(map[string]interface{}{
-				"id": fedUserAccountID, "email": "visitor+synthetic@hub-b.invalid", "display_name": "Alice", "role": h.meRole,
+				"id": h.meID, "email": "visitor+synthetic@hub-b.invalid", "display_name": "Alice", "role": h.meRole,
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/users/me/visitor-grants":
 			if fedToken != h.userToken {
@@ -398,6 +428,10 @@ func newFedUserHub(t *testing.T, userToken string) *fedUserHub {
 			writeHubError(w, http.StatusForbidden)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/agents":
 			// Bridge admin agent list (resolveContext, lookupAgent).
+			if h.adminStatus != 0 {
+				writeHubError(w, h.adminStatus)
+				return
+			}
 			writeJSON(map[string]interface{}{"agents": h.adminAgents, "totalCount": len(h.adminAgents)})
 		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/v1/agents/") && strings.HasSuffix(r.URL.Path, "/message"):
 			var body map[string]interface{}
@@ -542,9 +576,15 @@ const fedUserSendBody = `{
 // channel with the status and body.
 func sendAsync(t *testing.T, ts *httptest.Server, agentSlug, token string) <-chan [2]interface{} {
 	t.Helper()
+	return sendAsyncTo(t, ts, "proj1", agentSlug, token)
+}
+
+// sendAsyncTo is sendAsync for an agent of any project.
+func sendAsyncTo(t *testing.T, ts *httptest.Server, projectSlug, agentSlug, token string) <-chan [2]interface{} {
+	t.Helper()
 	done := make(chan [2]interface{}, 1)
 	go func() {
-		req, err := http.NewRequest(http.MethodPost, ts.URL+"/projects/proj1/agents/"+agentSlug+"/jsonrpc", strings.NewReader(fedUserSendBody))
+		req, err := http.NewRequest(http.MethodPost, ts.URL+"/projects/"+projectSlug+"/agents/"+agentSlug+"/jsonrpc", strings.NewReader(fedUserSendBody))
 		if err != nil {
 			done <- [2]interface{}{0, err.Error()}
 			return
@@ -657,7 +697,7 @@ func TestAuthMiddleware_FederatedUserIdentity(t *testing.T) {
 		if got, want := seen.SenderLabel(), "user:"+fedUserAccountID; got != want {
 			t.Errorf("SenderLabel() = %q, want %q", got, want)
 		}
-		if got, want := seen.CallerKey(), "fed:hub-a.example.com:"+fedUserSubject; got != want {
+		if got, want := seen.CallerKey(), "fed:"+fedUserAccountID; got != want {
 			t.Errorf("CallerKey() = %q, want %q", got, want)
 		}
 		snap := hub.snapshot()
@@ -686,11 +726,45 @@ func TestAuthMiddleware_FederatedUserIdentity(t *testing.T) {
 		}
 	})
 
-	t.Run("hub names an agent for a user credential", func(t *testing.T) {
-		hub.set(func(h *fedUserHub) { h.meRole = "agent" })
-		defer hub.set(func(h *fedUserHub) { h.meRole = "viewer" })
-		if w := serve(token); w.Code != http.StatusForbidden || seen != nil {
-			t.Fatalf("status = %d (caller %+v), want 403 and no caller", w.Code, seen)
+	// The hub names no project visitor account (its experiment is off, or
+	// the user is not linked): the credential is served as before
+	// credential kinds existed, as an agent caller keyed by its subject.
+	legacy := CallerIdentity{TokenType: "federation", RawToken: token, AgentID: fedUserSubject, IssuerURL: fedUserIssuer}
+	for _, tc := range []struct {
+		name   string
+		meID   string
+		meRole string
+	}{
+		{"hub names an agent for a user credential", fedUserAccountID, "agent"},
+		{"hub names an unlinked identity issuer user", fedUserIssuer + ":" + fedUserSubject, "member"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hub.set(func(h *fedUserHub) { h.meID, h.meRole = tc.meID, tc.meRole })
+			defer hub.set(func(h *fedUserHub) { h.meID, h.meRole = fedUserAccountID, "viewer" })
+			if w := serve(token); w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body %s", w.Code, w.Body.String())
+			}
+			if seen == nil || seen.IsFederatedUser() || !seen.IsAgent() ||
+				seen.TokenType != legacy.TokenType || seen.RawToken != legacy.RawToken || seen.AgentID != legacy.AgentID ||
+				seen.IssuerURL != legacy.IssuerURL || seen.UserID != "" || seen.Email != "" || seen.Subject != "" ||
+				seen.Role != "" || seen.ProjectID != "" || len(seen.Ancestry) != 0 {
+				t.Fatalf("caller = %+v, want the caller built before credential kinds %+v", seen, legacy)
+			}
+			if got, want := seen.CallerKey(), "agent:hub-a.example.com:"+fedUserSubject; got != want {
+				t.Errorf("CallerKey() = %q, want %q", got, want)
+			}
+		})
+	}
+
+	t.Run("hub could not be asked", func(t *testing.T) {
+		hub.set(func(h *fedUserHub) { h.meStatus = http.StatusServiceUnavailable })
+		defer hub.set(func(h *fedUserHub) { h.meStatus = 0 })
+		w := serve(token)
+		if w.Code != http.StatusBadGateway || seen != nil {
+			t.Fatalf("status = %d (caller %+v), want 502 and no caller", w.Code, seen)
+		}
+		if strings.Contains(w.Body.String(), federatedUserRefusalText) {
+			t.Errorf("body = %q: a hub outage is answered with the access refusal", w.Body.String())
 		}
 	})
 
@@ -844,8 +918,9 @@ func TestExecutor_FederatedUserRefusalsAreUniform(t *testing.T) {
 	}
 }
 
-// TestExecutor_FederatedUserHubAccessOff: while the hub does not admit
-// federated users it refuses their credential, and the bridge sends nothing.
+// TestExecutor_FederatedUserHubAccessOff: when the hub does not accept the
+// credential (401, as a hub that refuses user access credentials from peers
+// answers), the bridge answers 401 and sends nothing.
 func TestExecutor_FederatedUserHubAccessOff(t *testing.T) {
 	token := fedUserToken(t)
 	hub := newFedUserHub(t, token)
@@ -1007,5 +1082,460 @@ func TestDurableHandler_FederatedUserStreamRefusal(t *testing.T) {
 	}
 	if len(msg.Parts) != 1 || msg.Parts[0].Text() != federatedUserRefusalText {
 		t.Errorf("refusal message = %v, want the uniform refusal", msg.Parts)
+	}
+}
+
+// --- reply correlation: a federated user hears only its own replies ---
+
+// deliverReplyTo delivers agent1's reply with text msg on userID's user
+// topic, with no a2aTaskId metadata.
+func deliverReplyTo(t *testing.T, b *Bridge, userID, msg string) {
+	t.Helper()
+	reply := &messages.StructuredMessage{
+		Version:   1,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Sender:    "agent:agent1",
+		Recipient: "user:" + userID,
+		Msg:       msg,
+		Type:      messages.TypeInstruction,
+	}
+	if err := b.HandleBrokerMessage(context.Background(), projectkeys.UserTopic(fedUserProjectID, userID), reply); err != nil {
+		t.Fatalf("HandleBrokerMessage: %v", err)
+	}
+}
+
+// TestExecutor_FederatedUserNeverGetsAnotherUsersReply: another user (a
+// member of the project) also talks to agent1. In the default (plugin) mode
+// the bridge correlates replies without a2aTaskId through its local cache;
+// agent1's reply to the other user must not reach the federated user's
+// task, and the federated user's own reply still does.
+func TestExecutor_FederatedUserNeverGetsAnotherUsersReply(t *testing.T) {
+	const (
+		otherUserID    = "33333333-4444-4555-8666-777777777777"
+		otherReplyText = "reply from agent1 to another user"
+	)
+	token := fedUserToken(t)
+	hub := newFedUserHub(t, token)
+	b, _, ts := newFedUserTestServer(t, hub)
+
+	// The other user's task on agent1 started first.
+	aKey := agentKey(fedUserProjectID, "agent1")
+	b.registerActiveTask("other-user-task", aKey)
+	t.Cleanup(func() { b.unregisterActiveTask("other-user-task", aKey) })
+
+	done := sendAsync(t, ts, "agent1", token)
+	waitForSend(t, hub)
+
+	// The federated user's task is now the latest on agent1. The other
+	// user's reply arrives first, on the other user's topic.
+	deliverReplyTo(t, b, otherUserID, otherReplyText)
+	deliverReplyTo(t, b, fedUserAccountID, fedUserReplyText)
+
+	status, body := awaitResult(t, done)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", status, body)
+	}
+	if strings.Contains(body, otherReplyText) {
+		t.Fatalf("the federated user received the reply addressed to another user; body %s", body)
+	}
+	if !strings.Contains(body, fedUserReplyText) {
+		t.Fatalf("response does not carry the federated user's own reply; body %s", body)
+	}
+}
+
+func TestPickPluginModeTask(t *testing.T) {
+	const visitorA, visitorB = "aaaaaaaa-0000-4000-8000-000000000001", "bbbbbbbb-0000-4000-8000-000000000002"
+	fed := map[string]string{"fed-a": visitorA, "fed-b": visitorB}
+	tests := []struct {
+		name      string
+		taskIDs   []string
+		fed       map[string]string
+		topicUser string
+		want      string
+		wantOK    bool
+	}{
+		{"no federated tasks: latest task, as before", []string{"t1", "t2"}, nil, "someone", "t2", true},
+		{"no federated tasks, topic without a user: latest task", []string{"t1", "t2"}, nil, "", "t2", true},
+		{"own topic picks the federated user's task", []string{"t1", "fed-a", "t2"}, fed, visitorA, "fed-a", true},
+		{"another user's topic skips the latest federated task", []string{"t1", "fed-a"}, fed, "someone", "t1", true},
+		{"another visitor's topic skips the federated task", []string{"t1", "fed-a"}, fed, visitorB, "t1", true},
+		{"topic without a user skips federated tasks", []string{"t1", "fed-a"}, fed, "", "t1", true},
+		{"only another user's federated task: none", []string{"fed-a"}, fed, "someone", "", false},
+		{"two federated tasks: the topic's account", []string{"fed-a", "fed-b"}, fed, visitorA, "fed-a", true},
+		{"no tasks: none", nil, nil, visitorA, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := pickPluginModeTask(tt.taskIDs, tt.fed, tt.topicUser)
+			if got != tt.want || ok != tt.wantOK {
+				t.Errorf("pickPluginModeTask = (%q, %v), want (%q, %v)", got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestRegisterActiveTaskFor_KeepsFederatedUser(t *testing.T) {
+	b, _ := newLifecycleTestBridge(t)
+	aKey := agentKey(fedUserProjectID, "agent1")
+	b.registerActiveTaskFor("fed-task", aKey, fedUserAccountID)
+	b.registerActiveTask("fed-task", aKey) // a later registration without the account
+	b.tasksMu.RLock()
+	entry := b.activeTasks["fed-task"]
+	n := len(b.agentTasks[aKey])
+	b.tasksMu.RUnlock()
+	if entry.federatedUserID != fedUserAccountID {
+		t.Errorf("federatedUserID = %q after re-registration, want %q", entry.federatedUserID, fedUserAccountID)
+	}
+	if n != 1 {
+		t.Errorf("agent task list has %d entries, want 1", n)
+	}
+}
+
+// TestCorrelate_FederatedUserTaskStandalone covers standalone mode (the SDK
+// task store is authoritative): a federated user's task takes a reply only
+// on its own account's user topic, with or without a2aTaskId. Needs
+// PostgreSQL (TEST_DATABASE_URL).
+func TestCorrelate_FederatedUserTaskStandalone(t *testing.T) {
+	store := testPostgresTaskStore(t)
+	b, _ := newLifecycleTestBridge(t)
+	b.SetSDKTaskStore(store)
+
+	projID := "proj-fed-" + randomSuffix()
+	const agentSlug = "agent-fed"
+	t.Cleanup(func() {
+		store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE project_id = $1`, projID)
+	})
+
+	fedCaller := &CallerIdentity{TokenType: "federation", Subject: fedUserSubject, IssuerURL: fedUserIssuer, Email: fedUserEmail, UserID: fedUserAccountID}
+	ctx := withCallerIdentity(ctxForRoute(projID, agentSlug), fedCaller)
+	taskID := "fed-task-" + randomSuffix()
+	if _, err := store.Create(ctx, &a2a.Task{ID: a2a.TaskID(taskID), Status: a2a.TaskStatus{State: a2a.TaskStateWorking}}); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	federated, err := store.IsFederatedUserTask(context.Background(), taskID)
+	if err != nil || !federated {
+		t.Fatalf("IsFederatedUserTask = %v, %v; want true", federated, err)
+	}
+
+	reply := func(metadata map[string]string) *messages.StructuredMessage {
+		return &messages.StructuredMessage{Sender: "agent:" + agentSlug, Type: messages.TypeInstruction, Msg: "hi", Metadata: metadata}
+	}
+	own := projectkeys.UserTopic(projID, fedUserAccountID)
+	other := projectkeys.UserTopic(projID, "33333333-4444-4555-8666-777777777777")
+	agentTopic := projectkeys.AgentTopic(projID, "some-agent")
+	withID := map[string]string{"a2aTaskId": taskID}
+
+	for _, tc := range []struct {
+		name     string
+		topic    string
+		metadata map[string]string
+		wantOK   bool
+	}{
+		{"own topic, no metadata", own, nil, true},
+		{"own topic, a2aTaskId", own, withID, true},
+		{"another user's topic, no metadata", other, nil, false},
+		{"another user's topic, a2aTaskId", other, withID, false},
+		{"topic without a user, no metadata", agentTopic, nil, false},
+		{"topic without a user, a2aTaskId", agentTopic, withID, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := b.correlateToTask(context.Background(), projID, agentSlug, tc.topic, reply(tc.metadata))
+			if tc.wantOK && (err != nil || got != taskID) {
+				t.Fatalf("correlateToTask = %q, %v; want %q", got, err, taskID)
+			}
+			if !tc.wantOK && err == nil {
+				t.Fatalf("correlateToTask = %q, want no task", got)
+			}
+		})
+	}
+
+	// A task of a member of the project is not a federated user's task.
+	memberTaskID := "member-task-" + randomSuffix()
+	memberCtx := ctxForRouteAndCaller(projID, "agent-member", fedUserAccountID)
+	if _, err := store.Create(memberCtx, &a2a.Task{ID: a2a.TaskID(memberTaskID), Status: a2a.TaskStatus{State: a2a.TaskStateWorking}}); err != nil {
+		t.Fatalf("create member task: %v", err)
+	}
+	if federated, err := store.IsFederatedUserTask(context.Background(), memberTaskID); err != nil || federated {
+		t.Errorf("IsFederatedUserTask(member task) = %v, %v; want false", federated, err)
+	}
+}
+
+func TestIsFederatedUserOwnerKey(t *testing.T) {
+	tests := []struct {
+		owner, callerUserID string
+		want                bool
+	}{
+		{"proj1:agent1:fed:" + fedUserAccountID, fedUserAccountID, true},
+		{"proj1:agent1:" + fedUserAccountID, fedUserAccountID, false},
+		{"proj1:agent1:agent:hub-a.example.com:a1", "", false},
+		{"proj1:agent1", "", false},
+		{"proj1:agent1:fed:" + fedUserAccountID, "", false},
+	}
+	for _, tt := range tests {
+		if got := isFederatedUserOwnerKey(tt.owner, tt.callerUserID); got != tt.want {
+			t.Errorf("isFederatedUserOwnerKey(%q, %q) = %v, want %v", tt.owner, tt.callerUserID, got, tt.want)
+		}
+	}
+}
+
+// --- an identity issuer user the hub names no visitor account for ---
+
+// TestExecutor_IdentityIssuerCallerUnchangedWithoutVisitorAccount: a
+// credential with an email and no agent claims from an identity issuer,
+// while the hub names no project visitor account for it (for example its
+// project visitor experiment is off): the bridge serves it as before
+// credential kinds existed, with metadata, the agent sender, the bridge
+// admin's topic and no access re-check.
+func TestExecutor_IdentityIssuerCallerUnchangedWithoutVisitorAccount(t *testing.T) {
+	const (
+		issuer  = "https://accounts.example.com"
+		subject = "idp-user-1"
+	)
+	token := buildTestJWT(t, map[string]interface{}{
+		"iss":   issuer,
+		"sub":   subject,
+		"aud":   "https://hub-b.example.com",
+		"email": "person@example.com",
+	})
+	hub := newFedUserHub(t, token)
+	hub.set(func(h *fedUserHub) { h.meID, h.meRole = issuer+":"+subject, "member" })
+	_, broker, ts := newFedUserTestServer(t, hub)
+
+	done := sendAsync(t, ts, "agent1", token)
+	sent := waitForSend(t, hub)
+	awaitResult(t, done) // no reply: the send times out
+
+	if sent.FedToken != token {
+		t.Errorf("send carried federation credential %q, want the caller's", sent.FedToken)
+	}
+	sm, _ := sent.Body["structured_message"].(map[string]interface{})
+	md, _ := sm["metadata"].(map[string]interface{})
+	if md == nil || md["a2aTaskId"] == nil || md["a2aTaskId"] == "" {
+		t.Errorf("send metadata = %v, want a2aTaskId as before", sm["metadata"])
+	}
+	if sm["sender"] != "agent:"+subject {
+		t.Errorf("sender = %v, want agent:%s as before", sm["sender"], subject)
+	}
+	if !brokerSubscribed(broker, projectkeys.UserTopic(fedUserProjectID, "admin@test")) {
+		t.Error("no subscription to the bridge admin's user topic")
+	}
+	if brokerSubscribed(broker, projectkeys.AllUserTopic(fedUserProjectID)) {
+		t.Error("subscribed to all user topics")
+	}
+	if snap := hub.snapshot(); len(snap.dmReadKeys) != 0 {
+		t.Errorf("access re-checks = %d, want 0", len(snap.dmReadKeys))
+	}
+}
+
+// --- uniform answers and outages ---
+
+// TestExecutor_FederatedUserUnexposedAgentRefusedLikeUnknown: an agent that
+// is not exposed and a project that is not configured get the same failed
+// task with the uniform refusal as an unknown agent, with nothing sent;
+// other callers keep the JSON-RPC "agent not found" error.
+func TestExecutor_FederatedUserUnexposedAgentRefusedLikeUnknown(t *testing.T) {
+	token := fedUserToken(t)
+	hub := newFedUserHub(t, token)
+	_, _, ts := newFedUserTestServer(t, hub)
+
+	for _, target := range [][2]string{{"proj1", "agent3"}, {"nope", "agent1"}} {
+		status, body := awaitResult(t, sendAsyncTo(t, ts, target[0], target[1], token))
+		if status != http.StatusOK {
+			t.Errorf("%s/%s: status = %d, want 200; body %s", target[0], target[1], status, body)
+		}
+		if !strings.Contains(body, federatedUserRefusalText) {
+			t.Errorf("%s/%s: response does not carry the uniform refusal; body %s", target[0], target[1], body)
+		}
+		if strings.Contains(body, `"error"`) {
+			t.Errorf("%s/%s: answered with a JSON-RPC error instead of a failed task; body %s", target[0], target[1], body)
+		}
+	}
+	if n := len(hub.snapshot().sent); n != 0 {
+		t.Errorf("%d sends reached the hub, want 0", n)
+	}
+
+	_, body := awaitResult(t, sendAsyncTo(t, ts, "proj1", "agent3", fedAgentToken(t)))
+	if !strings.Contains(body, "agent not found") {
+		t.Errorf("agent caller: body %s, want the JSON-RPC agent not found error as before", body)
+	}
+}
+
+// TestExecutor_FederatedUserHubOutageIsNotARefusal: when the bridge cannot
+// resolve the agent because the hub fails, the federated user gets a routing
+// failure, not the access refusal.
+func TestExecutor_FederatedUserHubOutageIsNotARefusal(t *testing.T) {
+	token := fedUserToken(t)
+	hub := newFedUserHub(t, token)
+	hub.set(func(h *fedUserHub) { h.adminStatus = http.StatusInternalServerError })
+	_, _, ts := newFedUserTestServer(t, hub)
+
+	status, body := awaitResult(t, sendAsync(t, ts, "agent1", token))
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", status, body)
+	}
+	if strings.Contains(body, federatedUserRefusalText) {
+		t.Fatalf("a hub failure is answered with the access refusal; body %s", body)
+	}
+	if !strings.Contains(body, "Failed to route message to agent") {
+		t.Fatalf("response does not carry the routing failure; body %s", body)
+	}
+	if n := len(hub.snapshot().sent); n != 0 {
+		t.Errorf("%d sends reached the hub, want 0", n)
+	}
+}
+
+// --- cancel and the legacy send paths ---
+
+// TestExecutor_FederatedUserCancelSendsNoInterrupt: tasks/cancel for a
+// federated user cancels the task and sends the agent nothing; an agent
+// caller still sends the interrupt.
+func TestExecutor_FederatedUserCancelSendsNoInterrupt(t *testing.T) {
+	token := fedUserToken(t)
+	hub := newFedUserHub(t, token)
+	b, _, _ := newFedUserTestServer(t, hub)
+	executor := NewScionExecutor(b, b.log)
+	route := WithRouteInfo(context.Background(), RouteInfo{ProjectSlug: "proj1", AgentSlug: "agent1"})
+
+	cancel := func(caller *CallerIdentity) []a2a.Event {
+		execCtx := &a2asrv.ExecutorContext{TaskID: "cancel-task", StoredTask: &a2a.Task{ID: "cancel-task"}}
+		var events []a2a.Event
+		for ev, err := range executor.Cancel(withCallerIdentity(route, caller), execCtx) {
+			if err != nil {
+				t.Fatalf("Cancel: %v", err)
+			}
+			events = append(events, ev)
+		}
+		return events
+	}
+
+	fedCaller := &CallerIdentity{TokenType: "federation", RawToken: token, UserID: fedUserAccountID, Email: fedUserEmail, IssuerURL: fedUserIssuer, Subject: fedUserSubject}
+	events := cancel(fedCaller)
+	if len(events) != 1 {
+		t.Fatalf("Cancel yielded %d events, want 1", len(events))
+	}
+	if ev, ok := events[0].(*a2a.TaskStatusUpdateEvent); !ok || ev.Status.State != a2a.TaskStateCanceled {
+		t.Errorf("Cancel event = %#v, want a canceled status", events[0])
+	}
+	if n := len(hub.snapshot().sent); n != 0 {
+		t.Fatalf("%d sends reached the hub for a federated user's cancel, want 0", n)
+	}
+
+	agentToken := fedAgentToken(t)
+	agentCaller, err := decodeFederationToken(agentToken)
+	if err != nil {
+		t.Fatalf("decodeFederationToken: %v", err)
+	}
+	cancel(agentCaller)
+	sent := hub.snapshot().sent
+	if len(sent) != 1 || sent[0].Body["interrupt"] != true {
+		t.Errorf("agent caller cancel sends = %v, want one interrupt as before", sent)
+	}
+}
+
+// TestBridge_LegacySendsRefuseFederatedUser: the legacy send paths (one of
+// them sends as the bridge admin) refuse a federated user without reaching
+// the hub.
+func TestBridge_LegacySendsRefuseFederatedUser(t *testing.T) {
+	token := fedUserToken(t)
+	hub := newFedUserHub(t, token)
+	b, _, _ := newFedUserTestServer(t, hub)
+	caller := &CallerIdentity{TokenType: "federation", RawToken: token, UserID: fedUserAccountID, Email: fedUserEmail, IssuerURL: fedUserIssuer, Subject: fedUserSubject}
+	ctx := withCallerIdentity(context.Background(), caller)
+	parts := []Part{{Text: "Hello from hub A"}}
+
+	if _, err := b.SendMessage(ctx, "proj1", "agent1", "", "", parts, true); !errors.Is(err, ErrAgentNotFound) {
+		t.Errorf("SendMessage error = %v, want ErrAgentNotFound", err)
+	}
+	if _, err := b.SendMessage(ctx, "proj1", "agent1", "", "existing-task", parts, false); !errors.Is(err, ErrAgentNotFound) {
+		t.Errorf("SendMessage follow-up error = %v, want ErrAgentNotFound", err)
+	}
+	if _, _, _, err := b.SendStreamingMessage(ctx, "proj1", "agent1", "", parts); !errors.Is(err, ErrAgentNotFound) {
+		t.Errorf("SendStreamingMessage error = %v, want ErrAgentNotFound", err)
+	}
+	if snap := hub.snapshot(); len(snap.sent) != 0 || snap.createCalls != 0 {
+		t.Errorf("%d sends and %d agent creates reached the hub, want 0 and 0", len(snap.sent), snap.createCalls)
+	}
+}
+
+// --- resubscribe: the per-event decision ---
+
+// TestDurableHandler_FederatedUserResubscribeEvents covers the events
+// SubscribeToTask streams (yieldResubscribeEvents): a federated user's
+// reply is streamed while the hub grants access and replaced by the
+// refusal once it does not; an agent caller's reply is streamed with no
+// re-check.
+func TestDurableHandler_FederatedUserResubscribeEvents(t *testing.T) {
+	token := fedUserToken(t)
+	hub := newFedUserHub(t, token)
+	b, _, _ := newFedUserTestServer(t, hub)
+	h := &DurableRequestHandler{}
+	h.SetBridge(b)
+	ctx := WithRouteInfo(context.Background(), RouteInfo{ProjectSlug: "proj1", AgentSlug: "agent1"})
+	fedCaller := &CallerIdentity{TokenType: "federation", RawToken: token, UserID: fedUserAccountID, Email: fedUserEmail, IssuerURL: fedUserIssuer, Subject: fedUserSubject}
+
+	payload, err := json.Marshal(TaskStatusUpdate{
+		TaskID: "resub-task",
+		Status: TaskStatus{State: TaskStateCompleted, Message: &Message{Role: "agent", Parts: []Part{{Text: fedUserReplyText}}}},
+		Final:  true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := []state.TaskEvent{{ID: 7, TaskID: "resub-task", Kind: "message", Payload: payload, Final: true}}
+
+	stream := func(caller *CallerIdentity) ([]a2a.Event, int64, bool) {
+		var got []a2a.Event
+		cursor, done := h.yieldResubscribeEvents(ctx, "resub-task", caller, events, 3, func(ev a2a.Event, err error) bool {
+			if err != nil {
+				t.Fatalf("yield error: %v", err)
+			}
+			got = append(got, ev)
+			return true
+		})
+		return got, cursor, done
+	}
+	text := func(ev a2a.Event) (a2a.TaskState, string) {
+		su, ok := ev.(*a2a.TaskStatusUpdateEvent)
+		if !ok || su.Status.Message == nil || len(su.Status.Message.Parts) == 0 {
+			t.Fatalf("event = %#v, want a status update with a message", ev)
+		}
+		return su.Status.State, su.Status.Message.Parts[0].Text()
+	}
+
+	got, cursor, done := stream(fedCaller)
+	if len(got) != 1 || cursor != 7 || !done {
+		t.Fatalf("access granted: %d events, cursor %d, done %v; want 1, 7, true", len(got), cursor, done)
+	}
+	if _, msg := text(got[0]); msg != fedUserReplyText {
+		t.Errorf("access granted: streamed %q, want the reply", msg)
+	}
+	if n := len(hub.snapshot().dmReadKeys); n != 1 {
+		t.Errorf("access re-checks = %d, want 1", n)
+	}
+
+	hub.set(func(h *fedUserHub) { h.dmReadStatus = http.StatusForbidden })
+	got, _, done = stream(fedCaller)
+	if len(got) != 1 || !done {
+		t.Fatalf("access revoked: %d events, done %v; want 1, true", len(got), done)
+	}
+	if st, msg := text(got[0]); st != a2a.TaskStateFailed || msg != federatedUserRefusalText {
+		t.Errorf("access revoked: streamed %v %q, want a failed status with the uniform refusal", st, msg)
+	}
+
+	agentCaller, err := decodeFederationToken(fedAgentToken(t))
+	if err != nil {
+		t.Fatalf("decodeFederationToken: %v", err)
+	}
+	before := len(hub.snapshot().dmReadKeys)
+	got, _, _ = stream(agentCaller)
+	if len(got) != 1 {
+		t.Fatalf("agent caller: %d events, want 1", len(got))
+	}
+	if _, msg := text(got[0]); msg != fedUserReplyText {
+		t.Errorf("agent caller: streamed %q, want the reply", msg)
+	}
+	if after := len(hub.snapshot().dmReadKeys); after != before {
+		t.Errorf("agent caller: access re-checks %d -> %d, want none", before, after)
 	}
 }
