@@ -165,26 +165,27 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 			scionMsg.Metadata = map[string]string{"a2aTaskId": string(taskID)}
 		}
 
-		// Request broker subscription for responses. User callers,
-		// federated users included, get their replies on their own user
-		// topic.
+		// Request broker subscription for responses. User callers get
+		// their replies on their own user topic: a federated user only on
+		// its account's topic, other users through the project's user
+		// topics.
 		if e.bridge.broker != nil {
-			if caller != nil && !caller.IsAgent() {
+			switch {
+			case federatedUser:
+				e.bridge.subscribeUserTopic(agentCtx.ProjectID, caller.UserID)
+			case caller != nil && !caller.IsAgent():
 				e.bridge.subscribeAllUserTopics(agentCtx.ProjectID)
-			} else {
+			default:
 				e.bridge.subscribeAdminUserTopics(agentCtx.ProjectID)
 			}
 		}
 
-		// Register active task for broker correlation (local cache). A
-		// federated user's task records its account, so that in plugin mode
-		// it takes replies only from that account's user topic.
+		// Register active task for broker correlation (local cache). It
+		// records the caller, so that in plugin mode a federated user's
+		// task takes replies only from that account's user topic, and an
+		// agent caller's task none from another user's topic.
 		aKey := agentKey(agentCtx.ProjectID, agentCtx.AgentSlug)
-		var federatedUserID string
-		if federatedUser {
-			federatedUserID = caller.UserID
-		}
-		e.bridge.registerActiveTaskFor(string(taskID), aKey, federatedUserID)
+		e.bridge.registerActiveTaskFor(string(taskID), aKey, caller)
 		defer e.bridge.unregisterActiveTask(string(taskID), aKey)
 
 		// Claim execution lease before Hub send to prevent duplicate sends.

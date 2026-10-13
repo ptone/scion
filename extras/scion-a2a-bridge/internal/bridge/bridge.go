@@ -142,6 +142,11 @@ type activeTaskEntry struct {
 	// without a2aTaskId reaches such a task only when it arrives on that
 	// account's user topic (correlateWithoutMetadata).
 	federatedUserID string
+	// agentCaller is true when the task's caller is an agent. A reply
+	// correlated without a2aTaskId reaches such a task only when it arrives
+	// on the bridge admin's user topic or a topic with no user
+	// (agentCallerReplyTopic), never on another user's topic.
+	agentCaller bool
 }
 
 // BridgeOption configures optional Bridge behaviour.
@@ -666,7 +671,7 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 
 	if !blocking {
 		aKey := agentKey(agentCtx.ProjectID, agentCtx.AgentSlug)
-		b.registerActiveTask(taskID, aKey)
+		b.registerActiveTaskFor(taskID, aKey, caller)
 		b.wg.Add(1)
 		go func() {
 			defer b.wg.Done()
@@ -695,7 +700,7 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 	// Blocking mode: register in activeTasks cache for correlation, then poll
 	// the event log for the agent's response.
 	aKey := agentKey(agentCtx.ProjectID, agentCtx.AgentSlug)
-	b.registerActiveTask(taskID, aKey)
+	b.registerActiveTaskFor(taskID, aKey, caller)
 
 	if _, err := writeClient.Agents().SendStructuredMessage(ctx, agentCtx.AgentID, scionMsg, false, false, false); err != nil {
 		if _, err := b.store.UpdateTaskState(ctx, taskID, TaskStateFailed); err != nil {
@@ -793,7 +798,7 @@ func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskI
 
 	if blocking {
 		aKey := agentKey(task.ProjectID, task.AgentSlug)
-		b.registerActiveTask(taskID, aKey)
+		b.registerActiveTaskFor(taskID, aKey, caller)
 
 		if _, err := writeClient.Agents().SendStructuredMessage(ctx, agentID, scionMsg, false, false, false); err != nil {
 			b.failFollowUpTask(taskID)
@@ -823,7 +828,7 @@ func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskI
 
 	// Non-blocking follow-up
 	aKey := agentKey(task.ProjectID, task.AgentSlug)
-	b.registerActiveTask(taskID, aKey)
+	b.registerActiveTaskFor(taskID, aKey, caller)
 	b.wg.Add(1)
 	go func() {
 		defer b.wg.Done()
@@ -1081,6 +1086,9 @@ func (b *Bridge) correlateWithMetadata(ctx context.Context, projectID, agentSlug
 			if err := b.requireTopicUserForFederatedTask(ctx, topic, taskID); err != nil {
 				return "", err
 			}
+			if err := b.requireAdminTopicForAgentTask(ctx, topic, callerUserID, taskID); err != nil {
+				return "", err
+			}
 			return taskID, nil
 		}
 		// SDK miss/error → fail closed. A stale or attacker-controlled
@@ -1142,23 +1150,34 @@ func (b *Bridge) correlateWithoutMetadata(ctx context.Context, projectID, agentS
 		if err := b.requireTopicUserForFederatedTask(ctx, topic, sdkTaskID); err != nil {
 			return "", err
 		}
+		if err := b.requireAdminTopicForAgentTask(ctx, topic, callerUserID, sdkTaskID); err != nil {
+			return "", err
+		}
 		return sdkTaskID, nil
 	}
 
 	// Plugin mode (sdkTaskStore == nil): legacy store only.
-	// Check local cache first (fast path).
+	// Check local cache first (fast path). An agent caller's task is not a
+	// candidate for a reply on another user's topic.
+	topicUserID := extractUserIDFromTopic(topic)
+	agentReplyTopic := b.agentCallerReplyTopic(topicUserID)
 	aKey := agentKey(projectID, agentSlug)
 	b.tasksMu.RLock()
-	taskIDs := append([]string(nil), b.agentTasks[aKey]...)
+	var taskIDs []string
 	federatedUserIDs := make(map[string]string)
-	for _, id := range taskIDs {
-		if accountID := b.activeTasks[id].federatedUserID; accountID != "" {
-			federatedUserIDs[id] = accountID
+	for _, id := range b.agentTasks[aKey] {
+		entry := b.activeTasks[id]
+		if entry.agentCaller && !agentReplyTopic {
+			continue
+		}
+		taskIDs = append(taskIDs, id)
+		if entry.federatedUserID != "" {
+			federatedUserIDs[id] = entry.federatedUserID
 		}
 	}
 	b.tasksMu.RUnlock()
 
-	if taskID, ok := pickPluginModeTask(taskIDs, federatedUserIDs, extractUserIDFromTopic(topic)); ok {
+	if taskID, ok := pickPluginModeTask(taskIDs, federatedUserIDs, topicUserID); ok {
 		b.log.Debug("correlating broker message by agent slug from local cache (plugin mode)",
 			"agent", agentSlug, "project", projectID, "active_tasks", len(taskIDs))
 		return taskID, nil
@@ -1171,6 +1190,10 @@ func (b *Bridge) correlateWithoutMetadata(ctx context.Context, projectID, agentS
 	}
 	if task == nil {
 		return "", fmt.Errorf("no active tasks for agent %s in project %s", agentSlug, projectID)
+	}
+	if !b.legacyTaskTakesReply(task.CallerUserID, topicUserID) {
+		b.log.Warn("dropping message: the task's caller does not own the topic", "topic", topic, "task_id", task.ID)
+		return "", fmt.Errorf("topic user mismatch for task %s", task.ID)
 	}
 
 	b.log.Debug("correlating broker message by agent slug from legacy DB",
@@ -1201,6 +1224,52 @@ func pickPluginModeTask(taskIDs []string, federatedUserIDs map[string]string, to
 		}
 	}
 	return "", false
+}
+
+// agentCallerReplyTopic reports whether a reply on a topic whose user is
+// topicUserID may be correlated, without a2aTaskId, to an agent caller's
+// task. The replies to an agent caller arrive on the bridge admin's user
+// topic (subscribeAdminUserTopics), so only that topic or a topic with no
+// user qualifies; a reply on any other user's topic is addressed to that
+// user.
+func (b *Bridge) agentCallerReplyTopic(topicUserID string) bool {
+	return topicUserID == "" || topicUserID == b.config.Hub.User
+}
+
+// legacyTaskTakesReply reports whether a reply on a topic whose user is
+// topicUserID may be correlated, without a2aTaskId, to a legacy task whose
+// stored caller key (state.Task.CallerUserID) is callerKey: an agent
+// caller's task only on the topics agentCallerReplyTopic accepts, a
+// federated user's task only on its account's topic, any other task as
+// before.
+func (b *Bridge) legacyTaskTakesReply(callerKey, topicUserID string) bool {
+	switch {
+	case strings.HasPrefix(callerKey, agentCallerKeyPrefix):
+		return b.agentCallerReplyTopic(topicUserID)
+	case strings.HasPrefix(callerKey, federatedUserCallerKeyPrefix):
+		return topicUserID == strings.TrimPrefix(callerKey, federatedUserCallerKeyPrefix)
+	}
+	return true
+}
+
+// requireAdminTopicForAgentTask is the standalone-mode check that a reply
+// on another user's topic is not correlated to an agent caller's task
+// (validateTopicUser accepts every topic for a task that stores no caller
+// user ID, as agent callers' tasks do). It fails closed when the store
+// cannot tell.
+func (b *Bridge) requireAdminTopicForAgentTask(ctx context.Context, topic, callerUserID, taskID string) error {
+	if callerUserID != "" || b.agentCallerReplyTopic(extractUserIDFromTopic(topic)) {
+		return nil
+	}
+	agent, err := b.sdkTaskStore.IsAgentCallerTask(ctx, taskID)
+	if err != nil {
+		return fmt.Errorf("check task owner for %s: %w", taskID, err)
+	}
+	if agent {
+		b.log.Warn("dropping message: another user's topic for an agent caller's task", "topic", topic, "task_id", taskID)
+		return fmt.Errorf("topic user mismatch for task %s", taskID)
+	}
+	return nil
 }
 
 // requireTopicUserForFederatedTask is the standalone-mode check that a
@@ -1567,6 +1636,16 @@ func (b *Bridge) subscribeAllUserTopics(projectID string) {
 	}
 }
 
+// subscribeUserTopic subscribes to the user topic of userID alone, for a
+// federated user caller (userID is its hub account ID): the bridge takes in
+// that user's replies and no other user's.
+func (b *Bridge) subscribeUserTopic(projectID, userID string) {
+	pattern := projectkeys.UserTopic(projectID, userID)
+	if err := b.broker.RequestSubscription(pattern); err != nil {
+		b.log.Warn("failed to request subscription", "pattern", pattern, "error", err)
+	}
+}
+
 // subscribeAdminUserTopics subscribes to the bridge admin's user topic (legacy mode).
 func (b *Bridge) subscribeAdminUserTopics(projectID string) {
 	pattern := projectkeys.UserTopic(projectID, b.config.Hub.User)
@@ -1865,14 +1944,22 @@ func (b *Bridge) resolveContext(ctx context.Context, projectSlug, agentSlug, con
 }
 
 func (b *Bridge) registerActiveTask(taskID, aKey string) {
-	b.registerActiveTaskFor(taskID, aKey, "")
+	b.registerActiveTaskFor(taskID, aKey, nil)
 }
 
 // registerActiveTaskFor registers an active task like registerActiveTask
-// and records federatedUserID, the hub account ID of the federated user
-// caller that owns it ("" for every other caller). A task once registered
-// for a federated user keeps that account.
-func (b *Bridge) registerActiveTaskFor(taskID, aKey, federatedUserID string) {
+// and records who its caller is (nil: no caller identity): the hub account
+// ID of a federated user caller, or that the caller is an agent. These
+// decide which replies without a2aTaskId the task may take in plugin mode
+// (correlateWithoutMetadata). A task keeps what an earlier registration
+// recorded.
+func (b *Bridge) registerActiveTaskFor(taskID, aKey string, caller *CallerIdentity) {
+	var federatedUserID string
+	if caller.IsFederatedUser() {
+		federatedUserID = caller.UserID
+	}
+	agentCaller := caller != nil && caller.IsAgent()
+
 	b.tasksMu.Lock()
 	defer b.tasksMu.Unlock()
 	// Only append to agentTasks if the task is not already registered,
@@ -1884,7 +1971,12 @@ func (b *Bridge) registerActiveTaskFor(taskID, aKey, federatedUserID string) {
 	if federatedUserID == "" {
 		federatedUserID = existing.federatedUserID
 	}
-	b.activeTasks[taskID] = activeTaskEntry{aKey: aKey, createdAt: time.Now(), federatedUserID: federatedUserID}
+	b.activeTasks[taskID] = activeTaskEntry{
+		aKey:            aKey,
+		createdAt:       time.Now(),
+		federatedUserID: federatedUserID,
+		agentCaller:     agentCaller || existing.agentCaller,
+	}
 }
 
 func (b *Bridge) unregisterActiveTask(taskID, aKey string) {

@@ -298,7 +298,7 @@ func (b *Bridge) SendStreamingMessage(ctx context.Context, projectSlug, agentSlu
 	}
 
 	aKey := agentKey(agentCtx.ProjectID, agentCtx.AgentSlug)
-	b.registerActiveTask(taskID, aKey)
+	b.registerActiveTaskFor(taskID, aKey, callerIdentityFromContext(ctx))
 
 	sessionCleanup, err := b.streams.AcquireSession(taskID)
 	if err != nil {
