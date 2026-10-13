@@ -814,8 +814,11 @@ func TestExecutor_FederatedUserReplyThroughUserTopic(t *testing.T) {
 	if got, want := sm["sender"], "user:"+fedUserAccountID; got != want {
 		t.Errorf("sender = %v, want %q", got, want)
 	}
-	if !brokerSubscribed(broker, projectkeys.AllUserTopic(fedUserProjectID)) {
-		t.Errorf("no subscription to the project's user topics (%s)", projectkeys.AllUserTopic(fedUserProjectID))
+	if !brokerSubscribed(broker, projectkeys.UserTopic(fedUserProjectID, fedUserAccountID)) {
+		t.Errorf("no subscription to the federated user's own topic (%s)", projectkeys.UserTopic(fedUserProjectID, fedUserAccountID))
+	}
+	if brokerSubscribed(broker, projectkeys.AllUserTopic(fedUserProjectID)) {
+		t.Errorf("federated user caller subscribed to all user topics (%s)", projectkeys.AllUserTopic(fedUserProjectID))
 	}
 
 	deliverReply(t, b)
@@ -1143,6 +1146,169 @@ func TestExecutor_FederatedUserNeverGetsAnotherUsersReply(t *testing.T) {
 	}
 }
 
+// TestExecutor_AgentCallerTakesNoReplyAddressedToAUser: an agent caller's
+// task, in the default (plugin) mode, where replies without a2aTaskId are
+// correlated through the local cache, takes none of agent1's replies
+// addressed to a member of the project or to a federated user (whose task
+// has ended), and still takes agent1's reply on the bridge admin's topic,
+// where the replies to an agent caller arrive.
+func TestExecutor_AgentCallerTakesNoReplyAddressedToAUser(t *testing.T) {
+	const (
+		memberID         = "33333333-4444-4555-8666-777777777777"
+		memberReplyText  = "reply from agent1 to a member"
+		visitorReplyText = "reply from agent1 to a federated user"
+		adminReplyText   = "reply from agent1 to the agent caller"
+	)
+	agentToken := fedAgentToken(t)
+	hub := newFedUserHub(t, "unused-user-token")
+	b, _, ts := newFedUserTestServer(t, hub)
+
+	done := sendAsync(t, ts, "agent1", agentToken)
+	waitForSend(t, hub)
+
+	deliverReplyTo(t, b, memberID, memberReplyText)
+	deliverReplyTo(t, b, fedUserAccountID, visitorReplyText)
+	deliverReplyTo(t, b, "admin@test", adminReplyText)
+
+	status, body := awaitResult(t, done)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", status, body)
+	}
+	if strings.Contains(body, memberReplyText) || strings.Contains(body, visitorReplyText) {
+		t.Fatalf("the agent caller received a reply addressed to a user; body %s", body)
+	}
+	if !strings.Contains(body, adminReplyText) {
+		t.Fatalf("response does not carry the reply on the bridge admin's topic; body %s", body)
+	}
+}
+
+// TestExecutor_FederatedUserNeverGetsAnotherVisitorsReply: a second
+// federated user, whose task on agent1 has ended, gets another reply from
+// agent1. With the first federated user's task and an agent caller's task
+// active on agent1, that reply reaches neither; the first federated user
+// still gets its own reply.
+func TestExecutor_FederatedUserNeverGetsAnotherVisitorsReply(t *testing.T) {
+	const (
+		secondVisitorID   = "44444444-5555-4666-8777-888888888888"
+		secondVisitorText = "reply from agent1 to the second federated user"
+	)
+	token := fedUserToken(t)
+	hub := newFedUserHub(t, token)
+	b, _, ts := newFedUserTestServer(t, hub)
+
+	aKey := agentKey(fedUserProjectID, "agent1")
+	b.registerActiveTaskFor("agent-task", aKey, &CallerIdentity{TokenType: "federation", AgentID: "peer-agent", IssuerURL: fedUserIssuer})
+	t.Cleanup(func() { b.unregisterActiveTask("agent-task", aKey) })
+
+	done := sendAsync(t, ts, "agent1", token)
+	waitForSend(t, hub)
+
+	secondTopic := projectkeys.UserTopic(fedUserProjectID, secondVisitorID)
+	msg := &messages.StructuredMessage{Sender: "agent:agent1", Type: messages.TypeInstruction, Msg: secondVisitorText}
+	if got, err := b.correlateToTask(context.Background(), fedUserProjectID, "agent1", secondTopic, msg); err == nil {
+		t.Errorf("the second federated user's reply correlated to task %q, want none", got)
+	}
+
+	deliverReplyTo(t, b, secondVisitorID, secondVisitorText)
+	deliverReplyTo(t, b, fedUserAccountID, fedUserReplyText)
+
+	status, body := awaitResult(t, done)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", status, body)
+	}
+	if strings.Contains(body, secondVisitorText) {
+		t.Fatalf("the federated user received the reply addressed to another federated user; body %s", body)
+	}
+	if !strings.Contains(body, fedUserReplyText) {
+		t.Fatalf("response does not carry the federated user's own reply; body %s", body)
+	}
+}
+
+// TestCorrelate_PluginModeAgentCallerTask: in plugin mode, an agent
+// caller's task takes a reply without a2aTaskId only on the bridge admin's
+// topic or a topic with no user, both from the local cache and from the
+// legacy task store.
+func TestCorrelate_PluginModeAgentCallerTask(t *testing.T) {
+	b, store := newLifecycleTestBridge(t) // the bridge admin is "test-user"
+	const projID, agentSlug = "proj1", "agent1"
+	agentCaller := &CallerIdentity{TokenType: "federation", AgentID: "peer-agent", IssuerURL: fedUserIssuer}
+	reply := &messages.StructuredMessage{Sender: "agent:" + agentSlug, Type: messages.TypeInstruction, Msg: "hi"}
+	cases := []struct {
+		name   string
+		topic  string
+		wantOK bool
+	}{
+		{"a member's topic", projectkeys.UserTopic(projID, "33333333-4444-4555-8666-777777777777"), false},
+		{"a federated user's topic", projectkeys.UserTopic(projID, fedUserAccountID), false},
+		{"the bridge admin's topic", projectkeys.UserTopic(projID, "test-user"), true},
+		{"topic without a user", projectkeys.AgentTopic(projID, "some-agent"), true},
+	}
+	check := func(t *testing.T, wantTask string) {
+		t.Helper()
+		for _, tc := range cases {
+			got, err := b.correlateToTask(context.Background(), projID, agentSlug, tc.topic, reply)
+			if tc.wantOK && (err != nil || got != wantTask) {
+				t.Errorf("%s: correlateToTask = %q, %v; want %q", tc.name, got, err, wantTask)
+			}
+			if !tc.wantOK && err == nil {
+				t.Errorf("%s: correlateToTask = %q, want no task", tc.name, got)
+			}
+		}
+	}
+
+	t.Run("local cache", func(t *testing.T) {
+		aKey := agentKey(projID, agentSlug)
+		b.registerActiveTaskFor("agent-task", aKey, agentCaller)
+		defer b.unregisterActiveTask("agent-task", aKey)
+		check(t, "agent-task")
+	})
+
+	t.Run("legacy task store", func(t *testing.T) {
+		now := time.Now()
+		if err := store.CreateTask(context.Background(), &state.Task{
+			ID:           "legacy-agent-task",
+			ContextID:    "ctx-agent-caller",
+			ProjectID:    projID,
+			AgentSlug:    agentSlug,
+			AgentID:      fedUserAgentID,
+			State:        TaskStateWorking,
+			CallerUserID: agentCaller.CallerKey(),
+			CreatedAt:    now,
+			UpdatedAt:    now,
+			Metadata:     "{}",
+		}); err != nil {
+			t.Fatalf("create legacy task: %v", err)
+		}
+		check(t, "legacy-agent-task")
+	})
+}
+
+func TestLegacyTaskTakesReply(t *testing.T) {
+	b, _ := newLifecycleTestBridge(t) // the bridge admin is "test-user"
+	const memberID = "33333333-4444-4555-8666-777777777777"
+	agentCallerKey := (&CallerIdentity{TokenType: "federation", AgentID: "peer-agent", IssuerURL: fedUserIssuer}).CallerKey()
+	fedKey := federatedUserCallerKey(fedUserAccountID)
+	tests := []struct {
+		name, callerKey, topicUser string
+		want                       bool
+	}{
+		{"agent caller, bridge admin's topic", agentCallerKey, "test-user", true},
+		{"agent caller, topic without a user", agentCallerKey, "", true},
+		{"agent caller, a member's topic", agentCallerKey, memberID, false},
+		{"agent caller, a federated user's topic", agentCallerKey, fedUserAccountID, false},
+		{"federated user, own topic", fedKey, fedUserAccountID, true},
+		{"federated user, a member's topic", fedKey, memberID, false},
+		{"federated user, topic without a user", fedKey, "", false},
+		{"member, another user's topic: as before", memberID, fedUserAccountID, true},
+		{"no caller identity, a member's topic: as before", "", memberID, true},
+	}
+	for _, tt := range tests {
+		if got := b.legacyTaskTakesReply(tt.callerKey, tt.topicUser); got != tt.want {
+			t.Errorf("%s: legacyTaskTakesReply(%q, %q) = %v, want %v", tt.name, tt.callerKey, tt.topicUser, got, tt.want)
+		}
+	}
+}
+
 func TestPickPluginModeTask(t *testing.T) {
 	const visitorA, visitorB = "aaaaaaaa-0000-4000-8000-000000000001", "bbbbbbbb-0000-4000-8000-000000000002"
 	fed := map[string]string{"fed-a": visitorA, "fed-b": visitorB}
@@ -1177,7 +1343,8 @@ func TestPickPluginModeTask(t *testing.T) {
 func TestRegisterActiveTaskFor_KeepsFederatedUser(t *testing.T) {
 	b, _ := newLifecycleTestBridge(t)
 	aKey := agentKey(fedUserProjectID, "agent1")
-	b.registerActiveTaskFor("fed-task", aKey, fedUserAccountID)
+	fedCaller := &CallerIdentity{TokenType: "federation", Subject: fedUserSubject, IssuerURL: fedUserIssuer, UserID: fedUserAccountID}
+	b.registerActiveTaskFor("fed-task", aKey, fedCaller)
 	b.registerActiveTask("fed-task", aKey) // a later registration without the account
 	b.tasksMu.RLock()
 	entry := b.activeTasks["fed-task"]
@@ -1186,8 +1353,33 @@ func TestRegisterActiveTaskFor_KeepsFederatedUser(t *testing.T) {
 	if entry.federatedUserID != fedUserAccountID {
 		t.Errorf("federatedUserID = %q after re-registration, want %q", entry.federatedUserID, fedUserAccountID)
 	}
+	if entry.agentCaller {
+		t.Error("federated user's task recorded as an agent caller's")
+	}
 	if n != 1 {
 		t.Errorf("agent task list has %d entries, want 1", n)
+	}
+}
+
+func TestRegisterActiveTaskFor_KeepsAgentCaller(t *testing.T) {
+	b, _ := newLifecycleTestBridge(t)
+	aKey := agentKey(fedUserProjectID, "agent1")
+	agentCaller := &CallerIdentity{TokenType: "federation", AgentID: "peer-agent", IssuerURL: fedUserIssuer}
+	b.registerActiveTaskFor("agent-task", aKey, agentCaller)
+	b.registerActiveTask("agent-task", aKey) // a later registration without the caller
+	b.registerActiveTaskFor("member-task", aKey, &CallerIdentity{UserID: "member-1"})
+	b.registerActiveTask("legacy-task", aKey)
+	b.tasksMu.RLock()
+	agentEntry, memberEntry, legacyEntry := b.activeTasks["agent-task"], b.activeTasks["member-task"], b.activeTasks["legacy-task"]
+	b.tasksMu.RUnlock()
+	if !agentEntry.agentCaller || agentEntry.federatedUserID != "" {
+		t.Errorf("agent caller's task = %+v after re-registration, want agentCaller and no account", agentEntry)
+	}
+	if memberEntry.agentCaller || memberEntry.federatedUserID != "" {
+		t.Errorf("member's task = %+v, want neither agentCaller nor an account", memberEntry)
+	}
+	if legacyEntry.agentCaller || legacyEntry.federatedUserID != "" {
+		t.Errorf("task with no caller identity = %+v, want neither agentCaller nor an account", legacyEntry)
 	}
 }
 
@@ -1275,6 +1467,98 @@ func TestIsFederatedUserOwnerKey(t *testing.T) {
 	for _, tt := range tests {
 		if got := isFederatedUserOwnerKey(tt.owner, tt.callerUserID); got != tt.want {
 			t.Errorf("isFederatedUserOwnerKey(%q, %q) = %v, want %v", tt.owner, tt.callerUserID, got, tt.want)
+		}
+	}
+}
+
+// TestCorrelate_AgentCallerTaskStandalone covers standalone mode (the SDK
+// task store is authoritative): an agent caller's task takes a reply only
+// on the bridge admin's topic or a topic with no user, with or without
+// a2aTaskId; a task with no caller identity is unchanged. Needs PostgreSQL
+// (TEST_DATABASE_URL).
+func TestCorrelate_AgentCallerTaskStandalone(t *testing.T) {
+	store := testPostgresTaskStore(t)
+	b, _ := newLifecycleTestBridge(t) // the bridge admin is "test-user"
+	b.SetSDKTaskStore(store)
+
+	projID := "proj-agentcaller-" + randomSuffix()
+	const agentSlug, legacySlug = "agent-ac", "agent-nocaller"
+	t.Cleanup(func() {
+		store.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE project_id = $1`, projID)
+	})
+
+	agentCaller := &CallerIdentity{TokenType: "federation", AgentID: "peer-agent", IssuerURL: fedUserIssuer}
+	taskID := "agent-task-" + randomSuffix()
+	if _, err := store.Create(withCallerIdentity(ctxForRoute(projID, agentSlug), agentCaller), &a2a.Task{ID: a2a.TaskID(taskID), Status: a2a.TaskStatus{State: a2a.TaskStateWorking}}); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if agent, err := store.IsAgentCallerTask(context.Background(), taskID); err != nil || !agent {
+		t.Fatalf("IsAgentCallerTask = %v, %v; want true", agent, err)
+	}
+
+	reply := func(metadata map[string]string) *messages.StructuredMessage {
+		return &messages.StructuredMessage{Sender: "agent:" + agentSlug, Type: messages.TypeInstruction, Msg: "hi", Metadata: metadata}
+	}
+	member := projectkeys.UserTopic(projID, "33333333-4444-4555-8666-777777777777")
+	visitor := projectkeys.UserTopic(projID, fedUserAccountID)
+	admin := projectkeys.UserTopic(projID, "test-user")
+	agentTopic := projectkeys.AgentTopic(projID, "some-agent")
+	withID := map[string]string{"a2aTaskId": taskID}
+
+	for _, tc := range []struct {
+		name     string
+		topic    string
+		metadata map[string]string
+		wantOK   bool
+	}{
+		{"bridge admin's topic, no metadata", admin, nil, true},
+		{"bridge admin's topic, a2aTaskId", admin, withID, true},
+		{"topic without a user, no metadata", agentTopic, nil, true},
+		{"a member's topic, no metadata", member, nil, false},
+		{"a member's topic, a2aTaskId", member, withID, false},
+		{"a federated user's topic, no metadata", visitor, nil, false},
+		{"a federated user's topic, a2aTaskId", visitor, withID, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := b.correlateToTask(context.Background(), projID, agentSlug, tc.topic, reply(tc.metadata))
+			if tc.wantOK && (err != nil || got != taskID) {
+				t.Fatalf("correlateToTask = %q, %v; want %q", got, err, taskID)
+			}
+			if !tc.wantOK && err == nil {
+				t.Fatalf("correlateToTask = %q, want no task", got)
+			}
+		})
+	}
+
+	// A task with no caller identity is not an agent caller's task and
+	// keeps its rule.
+	legacyTaskID := "nocaller-task-" + randomSuffix()
+	if _, err := store.Create(ctxForRoute(projID, legacySlug), &a2a.Task{ID: a2a.TaskID(legacyTaskID), Status: a2a.TaskStatus{State: a2a.TaskStateWorking}}); err != nil {
+		t.Fatalf("create task with no caller identity: %v", err)
+	}
+	if agent, err := store.IsAgentCallerTask(context.Background(), legacyTaskID); err != nil || agent {
+		t.Errorf("IsAgentCallerTask(task with no caller identity) = %v, %v; want false", agent, err)
+	}
+	legacyReply := &messages.StructuredMessage{Sender: "agent:" + legacySlug, Type: messages.TypeInstruction, Msg: "hi", Metadata: map[string]string{"a2aTaskId": legacyTaskID}}
+	if got, err := b.correlateToTask(context.Background(), projID, legacySlug, member, legacyReply); err != nil || got != legacyTaskID {
+		t.Errorf("correlateToTask(task with no caller identity) = %q, %v; want %q", got, err, legacyTaskID)
+	}
+}
+
+func TestIsAgentCallerOwnerKey(t *testing.T) {
+	tests := []struct {
+		owner, callerUserID string
+		want                bool
+	}{
+		{"proj1:agent1:agent:hub-a.example.com:a1", "", true},
+		{"proj1:agent1:agent:a1", "", true},
+		{"proj1:agent1", "", false},
+		{"proj1:agent1:fed:" + fedUserAccountID, fedUserAccountID, false},
+		{"proj1:agent1:member-1", "member-1", false},
+	}
+	for _, tt := range tests {
+		if got := isAgentCallerOwnerKey(tt.owner, tt.callerUserID, "proj1", "agent1"); got != tt.want {
+			t.Errorf("isAgentCallerOwnerKey(%q, %q) = %v, want %v", tt.owner, tt.callerUserID, got, tt.want)
 		}
 	}
 }
@@ -1447,6 +1731,9 @@ func TestBridge_LegacySendsRefuseFederatedUser(t *testing.T) {
 	if _, err := b.SendMessage(ctx, "proj1", "agent1", "", "", parts, true); !errors.Is(err, ErrAgentNotFound) {
 		t.Errorf("SendMessage error = %v, want ErrAgentNotFound", err)
 	}
+	// A follow-up to a real task of agent1 that any caller may continue
+	// (it stores no caller): only the refusal of a federated user stops it.
+	seedTask(t, b.store, "existing-task", "ctx-existing", "proj1", "agent1", fedUserAgentID, TaskStateWorking)
 	if _, err := b.SendMessage(ctx, "proj1", "agent1", "", "existing-task", parts, false); !errors.Is(err, ErrAgentNotFound) {
 		t.Errorf("SendMessage follow-up error = %v, want ErrAgentNotFound", err)
 	}
