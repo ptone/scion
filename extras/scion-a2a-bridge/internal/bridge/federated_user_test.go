@@ -525,7 +525,7 @@ func newFedUserTestServer(t *testing.T, hub *fedUserHub, configure ...func(*Conf
 	return b, broker, ts
 }
 
-const fedUserSendPayload = `{
+const fedUserSendBody = `{
 	"jsonrpc": "2.0",
 	"id": "fed-user-1",
 	"method": "SendMessage",
@@ -544,7 +544,7 @@ func sendAsync(t *testing.T, ts *httptest.Server, agentSlug, token string) <-cha
 	t.Helper()
 	done := make(chan [2]interface{}, 1)
 	go func() {
-		req, err := http.NewRequest(http.MethodPost, ts.URL+"/projects/proj1/agents/"+agentSlug+"/jsonrpc", strings.NewReader(fedUserSendPayload))
+		req, err := http.NewRequest(http.MethodPost, ts.URL+"/projects/proj1/agents/"+agentSlug+"/jsonrpc", strings.NewReader(fedUserSendBody))
 		if err != nil {
 			done <- [2]interface{}{0, err.Error()}
 			return

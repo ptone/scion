@@ -389,6 +389,11 @@ auth:
   - It rewrites the returned `jwks_uri` inside the OIDC config to point back to the bridge's own `/.well-known/jwks.json` endpoint.
   - It serves these endpoints publicly and caches them for **5 minutes** to ensure high performance and reduce Hub load.
   - For air-gapped or manual distribution, administrators can also use the **Download JWKS** button on the federation admin page in the Web Dashboard to download public keys out-of-band.
+* **Users from another hub (project visitors)**: The bridge reads the `scion_token_kind` claim (`user` or `agent`). A credential without the claim counts as an agent when it carries an agent claim (`project_id`, `agent_name`, `ancestry`, `root_user`), and as a user when it carries only an email. A credential that claims both kinds, or another kind, is refused. Agent credentials work as before.
+  - The Hub decides everything for a user caller, asked with the caller's own user access credential. `GET /api/v1/auth/me` names the caller's account on this Hub, and the bridge sends as `user:<account ID>`. Tasks are kept separate per issuer host and subject.
+  - Messages from a user caller are text only. The agent's reply comes back on the user's own topic. Before the bridge forwards a reply, it asks the Hub again whether the caller may still read that conversation. If the Hub refuses (for example, the grant was revoked), the task ends with "You don't have access to this resource". The caller gets the same answer when the agent is unknown or not open to them.
+  - `GET /projects/{project}/agents` (authenticated) returns the cards of the project's exposed agents that the caller may message. This comes from the Hub's `?messageable=true` agent list.
+  - The bridge never creates an agent for a user caller, and never sends for it as the bridge admin. While the Hub does not accept these callers, it refuses them, and the bridge passes that answer on.
 
 ### Per-User Isolation Benefits
 

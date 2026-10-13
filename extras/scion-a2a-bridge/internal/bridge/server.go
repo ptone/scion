@@ -732,7 +732,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				if idErr != nil {
 					s.log.Debug("federated user not admitted by hub", "error", idErr)
 					if isHubUnauthenticated(idErr) {
-						http.Error(w, "unauthorized: token rejected by Scion Hub", http.StatusUnauthorized)
+						http.Error(w, "unauthorized: credential rejected by Scion Hub", http.StatusUnauthorized)
 						return
 					}
 					if isHubRefusal(idErr) {
