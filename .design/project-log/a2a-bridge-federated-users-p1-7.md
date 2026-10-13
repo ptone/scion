@@ -15,20 +15,27 @@
     (`project_id`, `agent_name`, `ancestry`, `root_user`). A user when it
     carries an email and no agent claim. Otherwise an agent, as before.
   - Any other kind, or a kind that is not a string: refused.
-  - A user credential whose issuer has no host is refused too, because the
-    task isolation key needs the host.
 - **User caller path.** `CallerIdentity` gains `Subject` and
   `IsFederatedUser()`, which is nil-safe. The federation scheme sends a
   user caller to `GET /api/v1/auth/me` with the caller's credential in
   `X-Scion-Federation-Token`, plus the bridge's minted bearer, the same
   pair the federation client already sends.
-  - `UserID` is the account the hub names. The email comes from the
-    credential.
-  - A hub 401 is answered with 401. A 403 or 404, or a hub answer that names
-    an agent or no account, gets the uniform refusal (403, the hub's
-    refusal text).
+  - When the hub names a project visitor account (a user, not an agent,
+    whose ID is a canonical UUID), `UserID` is that account ID. The email
+    comes from the credential.
+  - When the hub answers but names no such account (its project visitor
+    experiment is off, or an identity issuer's user is not linked), the
+    bridge uses `legacyFederationCaller`: the agent caller it built for the
+    credential before credential kinds existed. Nothing changes for those
+    callers (design §11, "feature off: nothing changes").
+  - A hub 401 is answered with 401, a 403 or 404 with the uniform refusal
+    (403, the hub's refusal text), and a hub that cannot be asked with 502.
   - Sender label: `user:<account ID>`.
-  - `CallerKey`: `fed:<issuer host>:<sub>`.
+  - `CallerKey`: `fed:<account ID>`. The hub maps (issuer, subject) to one
+    account, so the key is unique per hub. Design §4.6 keyed tasks on the
+    issuer host and subject; two issuers on one host (realms, or a port in
+    the issuer or the subject) could share that key, so the account ID
+    replaces it.
   - The SDK task store records `caller.UserID` (the account ID), so a reply
     on the user's own topic passes `validateTopicUser`.
 - **Executor.** For a federated user:
@@ -36,8 +43,20 @@
     anything else from a visitor. The reply is correlated through the
     user topic (the existing `subscribeAllUserTopics` path for user
     callers).
-  - An unresolved agent and a hub refusal of the send both end the task
-    with the uniform refusal, as a failed task rather than a JSON-RPC error.
+  - An unknown agent, an agent or project the bridge does not expose (the
+    server lets a federated user's request for one reach the executor), and
+    a hub refusal of the send all end the task with the uniform refusal, as
+    a failed task rather than a JSON-RPC error. A hub or store failure while
+    resolving the agent ends it with "Failed to route message to agent".
+  - Reply correlation: a federated user's task takes a reply only when the
+    reply arrives on its own account's user topic. In plugin mode (no SDK
+    task store) the local active-task cache records the account
+    (`registerActiveTaskFor`), and `pickPluginModeTask` picks a federated
+    user's task only for its own topic; every other reply goes, as before,
+    to the latest task not owned by a federated user. In standalone mode
+    `validateTopicUser` matches a user topic against the stored account ID,
+    and `requireTopicUserForFederatedTask` refuses a topic with no user for
+    a federated user's task (`PostgresTaskStore.IsFederatedUserTask`).
   - Before the reply is forwarded, `recheckFederatedUserAccess` reads the
     DM (`GET /api/v1/chat/conversations/dm:agent:<agentId>:user:<accountId>/messages?limit=1`)
     with the caller's credential. A refusal ends the task with the uniform
@@ -47,8 +66,9 @@
     interrupts from visitors).
 - **Durable resubscribe.** `DurableRequestHandler.SetBridge` (wired in
   `main.go`). Before it streams a response event to a federated user, the
-  handler runs the same re-check. Without a bridge, route or resolvable
-  agent, it fails closed.
+  handler runs the same re-check (`yieldResubscribeEvents`, the per-batch
+  step of `SubscribeToTask`). Without a bridge, route, exposed agent or
+  resolvable agent, it fails closed.
 - **No invented access.**
   - `resolveContext` never auto-provisions an agent for a federated user.
   - The legacy `Bridge.SendMessage` and `SendStreamingMessage` entry points
@@ -63,10 +83,14 @@
     the project's `exposed_agents`.
   - Cards are built from the hub's projection only (name and slug, generic
     description) through the new `buildAgentCard`, which `GenerateAgentCard`
-    now also uses (same output).
+    now also uses (same output). The exposed-agent check is `Bridge.AuthorizeExposed`, the
+    same check as the JSON-RPC route.
   - Every refusal is the uniform refusal. Responses are `private, no-store`.
 - **Docs.** `docs-site/.../hosted/user/a2a-bridge.md` describes users from
-  another hub.
+  another hub, and the two requirements: a bridge signing key, and native
+  chat on the hub (the access check reads the conversation through it).
+- The bridge credential sent next to a federated user's is minted by one
+  `MintingAuth` per bridge and reused until it nears expiry.
 
 ## Decisions and notes
 
@@ -82,19 +106,27 @@
   and no agent claim means user. Hub (item 6B): no claim always means
   agent. Every credential a hub mints carries the claim, so they agree in
   practice. For a disagreeing credential the hub's `auth/me` answer names
-  an agent, and the bridge refuses.
+  an agent, and the bridge serves it as the agent caller it always was.
 - Identity issuers (`issuer_type: user`) issue credentials with an email
-  and no agent claim. The bridge used to treat these as agent callers. Now
-  they are user callers and are admitted only if the hub's `auth/me`
-  answers. The hub's own handling of them is unchanged.
+  and no agent claim. The bridge asks the hub's `auth/me` about them. They
+  become user callers only when the hub names a project visitor account;
+  otherwise they keep the agent caller path they had before. Two
+  differences remain: an extra `auth/me` call per request, and an earlier
+  answer when the hub refuses the credential (401 or 403 at the bridge
+  instead of a failed send) or cannot be reached (502).
 
 ## Follow-ups
 
 - `auth/me` runs on every request for a user caller (no cache). A
   short cache keyed by credential hash would cut hub calls during polling.
-- Reply correlation without metadata stays ambiguity-closed per agent. Two
-  callers with active tasks on the same agent drop the reply. This was
-  already true for every caller; narrowing by the topic's user would help.
+- Standalone reply correlation without metadata stays ambiguity-closed per
+  agent: two callers with active tasks on the same agent drop the reply.
+  This was already true for every caller; narrowing by the topic's user
+  would help.
+- Plugin mode: a reply on a federated user's topic that arrives after that
+  user's task ended goes, as for every other user today, to the latest
+  task not owned by a federated user. Correlating every user caller's task
+  by its topic user would close this for all callers.
 - Push notifications (legacy `PushDispatcher`) have no re-check. They are
   off in production wiring (`PushNotifications: false`).
 - The docs page names the scheme `oidcFederation`; the config value is
