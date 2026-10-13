@@ -250,6 +250,32 @@ func (s *PostgresTaskStore) FindActiveSDKTaskForAgent(ctx context.Context, proje
 	return taskID, callerUserID, nil
 }
 
+// IsFederatedUserTask reports whether the SDK task taskID is owned by a
+// federated user caller: its owner key ends with that caller's key
+// (federatedUserCallerKey of the stored caller_user_id). Returns
+// ErrTaskNotFound when there is no such task.
+func (s *PostgresTaskStore) IsFederatedUserTask(ctx context.Context, taskID string) (bool, error) {
+	var owner, callerUserID string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT owner_key, caller_user_id FROM a2a_sdk_tasks WHERE id = $1`,
+		taskID,
+	).Scan(&owner, &callerUserID)
+	if err == sql.ErrNoRows {
+		return false, a2a.ErrTaskNotFound
+	}
+	if err != nil {
+		return false, fmt.Errorf("get SDK task owner: %w", err)
+	}
+	return isFederatedUserOwnerKey(owner, callerUserID), nil
+}
+
+// isFederatedUserOwnerKey reports whether owner, a task owner key
+// (buildOwnerKey: "<project>:<agent>[:<caller key>]"), is that of a task
+// owned by the federated user caller with hub account ID callerUserID.
+func isFederatedUserOwnerKey(owner, callerUserID string) bool {
+	return callerUserID != "" && strings.HasSuffix(owner, ":"+federatedUserCallerKey(callerUserID))
+}
+
 // sdkTaskStoreMigrationLockID is a Postgres advisory lock ID used to
 // serialize schema migrations across replicas (REQ-4).
 const sdkTaskStoreMigrationLockID = 827419618 // arbitrary stable int

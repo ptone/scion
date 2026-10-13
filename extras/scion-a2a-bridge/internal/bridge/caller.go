@@ -87,8 +87,9 @@ func (c *CallerIdentity) SenderLabel() string {
 // CallerKey returns a stable identifier for task-store isolation.
 // For user callers: UserID.
 // For agent callers: "agent:<issuer-host>:<agent-id>".
-// For federated user callers: "fed:<issuer-host>:<sub>" (the raw issuer
-// when it has no host, so the key is never empty).
+// For federated user callers: "fed:<account ID>", the account the hub
+// resolved for the credential (unique on this hub), or "" while the hub has
+// not named it (an empty key is refused by the task store).
 func (c *CallerIdentity) CallerKey() string {
 	if c.IsAgent() {
 		u, err := url.Parse(c.IssuerURL)
@@ -98,19 +99,22 @@ func (c *CallerIdentity) CallerKey() string {
 		return "agent:" + u.Host + ":" + c.AgentID
 	}
 	if c.IsFederatedUser() {
-		return "fed:" + issuerHost(c.IssuerURL) + ":" + c.Subject
+		if c.UserID == "" {
+			return ""
+		}
+		return federatedUserCallerKey(c.UserID)
 	}
 	return c.UserID
 }
 
-// issuerHost returns the host of an issuer URL, or the issuer unchanged
-// when it does not parse to a URL with a host.
-func issuerHost(issuer string) string {
-	u, err := url.Parse(issuer)
-	if err != nil || u.Host == "" {
-		return issuer
-	}
-	return u.Host
+// federatedUserCallerKeyPrefix starts the task-isolation key of a federated
+// user caller.
+const federatedUserCallerKeyPrefix = "fed:"
+
+// federatedUserCallerKey returns the task-isolation key of the federated
+// user caller whose hub account ID is accountID.
+func federatedUserCallerKey(accountID string) string {
+	return federatedUserCallerKeyPrefix + accountID
 }
 
 type callerContextKey struct{}

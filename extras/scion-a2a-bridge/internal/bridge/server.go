@@ -423,7 +423,7 @@ func (s *Server) handleFederatedUserAgentCards(w http.ResponseWriter, r *http.Re
 		if slug == "" {
 			slug = a.Name
 		}
-		if !slugRE.MatchString(slug) || !agentExposed(projectCfg, slug, a.Name) {
+		if !slugRE.MatchString(slug) || s.bridge.AuthorizeExposed(projectSlug, slug) != nil {
 			continue
 		}
 		name := a.Name
@@ -441,18 +441,15 @@ func (s *Server) handleFederatedUserAgentCards(w http.ResponseWriter, r *http.Re
 	}
 }
 
-// agentExposed reports whether an agent with the given slug or name is
-// exposed by the project (every agent is when the project names none).
-func agentExposed(projectCfg *ProjectConfig, slug, name string) bool {
-	if len(projectCfg.ExposedAgents) == 0 {
-		return true
-	}
-	for _, a := range projectCfg.ExposedAgents {
-		if a == slug || (name != "" && a == name) {
-			return true
-		}
-	}
-	return false
+// isFederatedUserRequest reports whether r comes from a federated user
+// caller. Such a request for an agent that is not exposed (or a project
+// that is not configured) still goes on to the SDK handler: the executor
+// answers it with the uniform refusal (ScionExecutor.Execute), the same
+// answer as for an unknown agent or one the hub does not let the caller
+// message. Every other method on such a route sees only the caller's own
+// tasks (the task store is scoped per route and caller).
+func isFederatedUserRequest(r *http.Request) bool {
+	return callerIdentityFromContext(r.Context()).IsFederatedUser()
 }
 
 // handleJSONRPC validates the project/agent routing and delegates to the SDK handler.
@@ -465,7 +462,7 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.bridge.AuthorizeExposed(projectSlug, agentSlug); err != nil {
+	if err := s.bridge.AuthorizeExposed(projectSlug, agentSlug); err != nil && !isFederatedUserRequest(r) {
 		writeJSONRPCError(w, nil, -32602, "agent not found")
 		return
 	}
@@ -499,7 +496,7 @@ func (s *Server) handleV0REST(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.bridge.AuthorizeExposed(projectSlug, agentSlug); err != nil {
+	if err := s.bridge.AuthorizeExposed(projectSlug, agentSlug); err != nil && !isFederatedUserRequest(r) {
 		http.Error(w, "agent not found", http.StatusNotFound)
 		return
 	}
@@ -725,8 +722,11 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			}
 			// A user credential names a person: the hub says which account
 			// it belongs to (GET /api/v1/auth/me under the same
-			// credential). The bridge passes a hub refusal on and admits
-			// nobody the hub did not name. Agent credentials are unchanged.
+			// credential). A project visitor account makes it a federated
+			// user caller; with no such account the credential is served
+			// as before credential kinds existed. The bridge passes a hub
+			// refusal on, and answers 502 when the hub could not be asked.
+			// Agent credentials are unchanged.
 			if caller.IsFederatedUser() {
 				identified, idErr := s.bridge.identifyFederatedUser(r.Context(), caller)
 				if idErr != nil {

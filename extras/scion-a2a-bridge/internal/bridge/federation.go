@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 )
 
@@ -121,7 +120,10 @@ func classifyFederationClaims(c *federationJWTClaims) (string, error) {
 // before credential kinds existed. A user credential yields a federated
 // user caller (Subject = sub, Email from the credential) whose UserID is
 // still empty: the caller is usable only after Bridge.identifyFederatedUser
-// has asked the hub which account the credential belongs to.
+// has asked the hub which account the credential belongs to. When the hub
+// names no project visitor account for it, identifyFederatedUser returns
+// the agent caller this function built before credential kinds existed
+// (legacyFederationCaller).
 func decodeFederationToken(tokenString string) (*CallerIdentity, error) {
 	parts := strings.Split(tokenString, ".")
 	if len(parts) != 3 {
@@ -153,9 +155,6 @@ func decodeFederationToken(tokenString string) (*CallerIdentity, error) {
 	}
 
 	if kind == federationKindUser {
-		if u, err := url.Parse(claims.Issuer); err != nil || u.Host == "" {
-			return nil, fmt.Errorf("federation: user credential issuer %q has no host", claims.Issuer)
-		}
 		return &CallerIdentity{
 			TokenType: "federation",
 			RawToken:  tokenString,

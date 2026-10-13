@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/identity"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -41,8 +42,10 @@ import (
 // X-Scion-Federation-Token): which account the credential belongs to
 // (GET /api/v1/auth/me), which projects and agents it may reach, and, before
 // each agent reply is forwarded, whether it may still read its conversation
-// with that agent. While the hub does not admit such callers it refuses
-// those requests, and the bridge passes the refusal on.
+// with that agent. When the hub names no project visitor account for a
+// credential (for example while its project visitor experiment is off), the
+// bridge serves that credential exactly as before (legacyFederationCaller);
+// when the hub refuses the credential, the bridge passes the refusal on.
 
 // federatedUserRefusalText is the one answer a federated user gets for every
 // refusal: an unknown project or agent, an agent it may not message, and an
@@ -115,12 +118,7 @@ func (b *Bridge) federatedUserGet(ctx context.Context, caller *CallerIdentity, p
 		return fmt.Errorf("federated user request: %w", err)
 	}
 
-	hubUserID := b.config.Hub.UserID
-	if hubUserID == "" {
-		hubUserID = b.config.Hub.User
-	}
-	mintAuth := identity.NewMintingAuth(b.minter, hubUserID, b.config.Hub.User, "admin", 5*time.Minute)
-	if err := mintAuth.ApplyAuth(req); err != nil {
+	if err := b.federatedUserBridgeAuth().ApplyAuth(req); err != nil {
 		return fmt.Errorf("federated user request: %w", err)
 	}
 
@@ -151,12 +149,36 @@ func (b *Bridge) federatedUserGet(ctx context.Context, caller *CallerIdentity, p
 	return nil
 }
 
+// federatedUserBridgeAuth returns the authenticator for the bridge's own
+// credential that federatedUserGet sends next to the caller's: one for the
+// Bridge, so its minted credential is reused until it nears expiry instead
+// of being minted for every hub call. b.minter must be set.
+func (b *Bridge) federatedUserBridgeAuth() *identity.MintingAuth {
+	b.federatedUserAuthOnce.Do(func() {
+		hubUserID := b.config.Hub.UserID
+		if hubUserID == "" {
+			hubUserID = b.config.Hub.User
+		}
+		b.federatedUserAuth = identity.NewMintingAuth(b.minter, hubUserID, b.config.Hub.User, "admin", 5*time.Minute)
+	})
+	return b.federatedUserAuth
+}
+
 // identifyFederatedUser completes a federated user caller from
 // decodeFederationToken: it asks the hub (GET /api/v1/auth/me under the
-// caller's credential) which account the credential belongs to and returns
-// a copy of caller with UserID set to that account ID. The email stays the
-// credential's. A hub that answers with an agent, or with no account ID, is
-// refused: the bridge does not act for a principal the hub did not name.
+// caller's credential) which account the credential belongs to.
+//
+//   - The hub names a project visitor account (a user, not an agent, whose
+//     ID is a canonical UUID): it returns a copy of caller with UserID set
+//     to that account ID. The email stays the credential's.
+//   - The hub answers but names no such account (for example the hub's
+//     project visitor experiment is off, or the credential comes from an
+//     identity issuer whose user is not linked to an account): it returns
+//     legacyFederationCaller(caller), the caller the bridge built for this
+//     credential before credential kinds existed, so nothing changes for it.
+//   - The hub refuses the credential (401, 403 or 404): the refusal
+//     (errFederatedUserRefused; isHubUnauthenticated tells a 401 apart).
+//   - The hub could not be asked: another error, so the caller can retry.
 func (b *Bridge) identifyFederatedUser(ctx context.Context, caller *CallerIdentity) (*CallerIdentity, error) {
 	if caller == nil || !caller.IsFederatedUser() {
 		return nil, fmt.Errorf("identify federated user: not a federated user caller")
@@ -165,13 +187,33 @@ func (b *Bridge) identifyFederatedUser(ctx context.Context, caller *CallerIdenti
 	if err := b.federatedUserGet(ctx, caller, "/api/v1/auth/me", nil, &me); err != nil {
 		return nil, err
 	}
-	if me.ID == "" || me.Role == "agent" {
-		return nil, fmt.Errorf("%w: hub did not name a user account for the credential", errFederatedUserRefused)
+	if me.Role == "agent" || !isCanonicalUUID(me.ID) {
+		return legacyFederationCaller(caller), nil
 	}
 	identified := *caller
 	identified.UserID = me.ID
 	identified.Role = me.Role
 	return &identified, nil
+}
+
+// legacyFederationCaller returns the agent caller decodeFederationToken
+// built for a federation credential before credential kinds existed:
+// AgentID is the credential's sub. A credential classified as a user
+// carries no agent claims, so no other field is set.
+func legacyFederationCaller(caller *CallerIdentity) *CallerIdentity {
+	return &CallerIdentity{
+		TokenType: caller.TokenType,
+		RawToken:  caller.RawToken,
+		AgentID:   caller.Subject,
+		IssuerURL: caller.IssuerURL,
+	}
+}
+
+// isCanonicalUUID reports whether id is a UUID in canonical form (lowercase
+// hex with hyphens), the form of hub account IDs.
+func isCanonicalUUID(id string) bool {
+	u, err := uuid.Parse(id)
+	return err == nil && u.String() == id
 }
 
 // visitorOwnGrant mirrors an entry of GET /api/v1/users/me/visitor-grants.
