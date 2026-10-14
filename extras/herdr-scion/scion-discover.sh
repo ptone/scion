@@ -3,8 +3,9 @@
 #
 # Called as a startup hook and as the "Refresh Scion Agents" action.
 # Lists running agents in the effective scion project (see resolve_scope in
-# scion-common.sh), and for each one not already represented by a herdr pane, creates
-# a new pane running scion-attach-wrapper.sh.
+# scion-common.sh; every project with SCION_HERDR_SCOPE=all), and for each
+# one not already represented by a herdr pane, creates a new pane running
+# scion-attach-wrapper.sh.
 #
 # Requires: scion, herdr, jq on PATH.
 
@@ -21,12 +22,19 @@ source "${SCRIPT_DIR}/scion-common.sh"
 
 log() { echo "[scion-discover] $*" >&2; }
 
-# Collect the names of running agents in the scoped project (one per line).
-# Uses .slug // .name because slug is omitempty in local/podman mode.
+# Running agents as TSV rows: name, then (all mode only) project and
+# projectPath. Uses .slug // .name because slug is omitempty in local/podman
+# mode. Default mode lists the scoped project; all mode lists every project.
 running_agents() {
   local list_json
-  list_json="$(scion_scoped list -r --format json)" || return 1
-  jq -r '.[] | select(.phase == "running") | (.slug // .name)' <<<"$list_json"
+  if [[ "$SCOPE_MODE_ALL" == "1" ]]; then
+    list_json="$(cd "$SCOPE_DIR" && scion list -a -r --format json)" || return 1
+    jq -r '.[] | select(.phase == "running")
+             | [(.slug // .name), (.project // "global"), (.projectPath // "")] | @tsv' <<<"$list_json"
+  else
+    list_json="$(scion_scoped list -r --format json)" || return 1
+    jq -r '.[] | select(.phase == "running") | (.slug // .name)' <<<"$list_json"
+  fi
 }
 
 # Collect agent identifiers from existing herdr panes that belong to this plugin.
@@ -62,20 +70,29 @@ check_deps() {
 
 main() {
   check_deps
-  if ! resolve_scope; then
-    log "Discovery aborted: no scion project resolved."
-    exit 1
+
+  SCOPE_MODE_ALL=0
+  if [[ "$(herdr_scope_mode)" == "all" ]]; then
+    SCOPE_MODE_ALL=1
+    scope_dir_init || exit 1
+    log "Discovering running Scion agents in all projects (SCION_HERDR_SCOPE=all)..."
+  else
+    if ! resolve_scope; then
+      log "Discovery aborted: no scion project resolved."
+      exit 1
+    fi
+    log "Discovering running Scion agents — $(scope_header) [mode ${SCOPE_MODE}: ${SCOPE_PROJECT}${SCOPE_HUB:+, hub ${SCOPE_HUB}}]..."
   fi
-  log "Discovering running Scion agents in project ${SCOPE_LABEL} (from ${SCOPE_SOURCE}: -g ${SCOPE_PROJECT}${SCOPE_HUB:+ --hub ${SCOPE_HUB}})..."
 
   local agents
   if ! agents="$(running_agents)"; then
-    log "scion list failed for project ${SCOPE_LABEL} — see the error above."
+    log "scion list failed — see the error above."
     exit 1
   fi
 
   if [[ -z "$agents" ]]; then
     log "No running Scion agents found."
+    start_state_bridge
     return 0
   fi
 
@@ -83,60 +100,44 @@ main() {
   existing="$(existing_pane_agents)"
 
   local created=0
-
-  while IFS= read -r name; do
+  local name project project_path
+  while IFS=$'\t' read -r name project project_path; do
     [[ -z "$name" ]] && continue
 
-    # Identifier is project/name, not just name: scion agent names are only
-    # unique within a project, and panes from different projects (opened by
-    # earlier refreshes under another `scion use`) share the workspace.
-    # Also what the pane's label is built from.
+    if [[ "$SCOPE_MODE_ALL" == "1" ]]; then
+      # Each agent carries its own project; pin it as `scion list -a`
+      # reported it (path when known, else the project name).
+      scope_set pin "${project_path:-$project}" "" "$project" 0 all
+    fi
+
+    # Identifier is project/name: scion agent names are only unique within a
+    # project, and panes from other projects (earlier refreshes under
+    # another `scion use`, or all mode) share the workspace.
     local identifier="${SCOPE_LABEL}/${name}"
 
-    # Skip if a pane already exists for this agent.
-    if echo "$existing" | grep -qxF "$identifier"; then
+    if grep -qxF "$identifier" <<<"$existing"; then
       log "Pane already exists for $identifier — skipping."
       continue
     fi
 
     log "Creating pane for agent: $identifier"
-
-    local split_json pane_id
-    if ! split_json="$("$HERDR_BIN" pane split --direction right \
-      --env "SCION_AGENT=${name}" --env "SCION_PROJECT=${SCOPE_LABEL}")"; then
-      log "Failed to split a pane for $identifier — skipping."
+    if ! open_agent_pane "$name" >/dev/null; then
+      log "Could not open a pane for $identifier — skipping."
       continue
     fi
-
-    pane_id="$(echo "$split_json" | jq -r '.result.pane.pane_id // empty')"
-    if [[ -z "$pane_id" ]]; then
-      log "herdr pane split returned no pane_id for $identifier: $split_json"
-      continue
-    fi
-
-    "$HERDR_BIN" pane rename "$pane_id" "scion:${identifier}"
-
-    # Pin the pane to the project resolved now: the wrapper gets the same
-    # -g/--hub values, so a later `scion use` elsewhere doesn't re-target
-    # an open pane on reconnect.
-    local run_cmd
-    run_cmd="bash $(printf '%q' "${SCRIPT_DIR}/scion-attach-wrapper.sh") $(printf '%q' "$name")"
-    run_cmd+=" --project $(printf '%q' "$SCOPE_PROJECT") --label $(printf '%q' "$SCOPE_LABEL")"
-    if [[ -n "$SCOPE_HUB" ]]; then
-      run_cmd+=" --hub $(printf '%q' "$SCOPE_HUB")"
-    fi
-    "$HERDR_BIN" pane run "$pane_id" "$run_cmd"
-
     created=$((created + 1))
   done <<< "$agents"
 
   log "Discovery complete. Created $created new pane(s)."
+  start_state_bridge
+}
 
-  # Start the state bridge in the background if it's not already running.
-  # Redirect its stdio away from ours: herdr's plugin runtime waits for this
-  # script's stdout/stderr pipes to close before marking the action/startup
-  # hook finished, and a background child that inherits them holds them open
-  # for as long as it runs (which, for the bridge, is forever).
+# Start the state bridge in the background (it exits at once if one is
+# already running). Redirect its stdio away from ours: herdr's plugin
+# runtime waits for this script's stdout/stderr pipes to close before
+# marking the action/startup hook finished, and a background child that
+# inherits them holds them open for as long as it runs (forever).
+start_state_bridge() {
   bash "${SCRIPT_DIR}/scion-state-bridge.sh" </dev/null >/dev/null 2>&1 &
   disown
 }

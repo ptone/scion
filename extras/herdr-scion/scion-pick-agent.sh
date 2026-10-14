@@ -2,9 +2,10 @@
 # scion-pick-agent.sh — Interactive agent picker for the "Attach to Scion Agent"
 # herdr action.
 #
-# Lists running scion agents, lets the user pick one (via fzf if available,
+# Lists running agents in the effective scion project (every project with
+# SCION_HERDR_SCOPE=all), lets the user pick one (via fzf if available,
 # falling back to a numbered menu), then creates a herdr pane attached to
-# that agent.
+# that agent. The header names the project and where scion got it from.
 #
 # Requires: scion, herdr, jq on PATH. fzf is optional.
 
@@ -21,23 +22,26 @@ source "${SCRIPT_DIR}/scion-common.sh"
 
 log() { echo "[scion-pick] $*" >&2; }
 
-# Build a display row for each agent: display, template, activity, project,
-# name, projectPath. Only the first three columns are shown (see
+# Build a display row for each running agent: display, template, activity,
+# project, name, projectPath. Only the first three columns are shown (see
 # --with-nth below); the rest travel through unseen so the caller can
-# recover the agent's actual project after a selection. display is
-# "project/name" — scion agent names are only unique within a project, and
-# this lists across all projects (-a), so the display (and later, the pane
-# label) needs the project to disambiguate. Uses .slug // .name because
-# slug is omitempty in local/podman mode; project falls back to "global".
+# recover the agent's project after a selection. In all mode display is
+# "project/name" (names are only unique within a project). Uses
+# .slug // .name because slug is omitempty in local/podman mode.
 agent_display_lines() {
-  scion list -a -r --format json 2>/dev/null \
-    | jq -r '.[] | select(.phase == "running")
-              | [((.project // "global") + "/" + (.slug // .name)),
-                 (.template // "-"),
-                 (.activity // "idle"),
-                 (.project // "global"),
-                 (.slug // .name),
-                 (.projectPath // "")] | @tsv' 2>/dev/null
+  local list_json
+  if [[ "$SCOPE_MODE_ALL" == "1" ]]; then
+    list_json="$(cd "$SCOPE_DIR" && scion list -a -r --format json)" || return 1
+    jq -r '.[] | select(.phase == "running")
+             | [((.project // "global") + "/" + (.slug // .name)),
+                (.template // "-"), (.activity // "idle"),
+                (.project // "global"), (.slug // .name), (.projectPath // "-")] | @tsv' <<<"$list_json"
+  else
+    list_json="$(scion_scoped list -r --format json)" || return 1
+    jq -r --arg p "$SCOPE_LABEL" '.[] | select(.phase == "running")
+             | [(.slug // .name), (.template // "-"), (.activity // "idle"),
+                $p, (.slug // .name), "-"] | @tsv' <<<"$list_json"
+  fi
 }
 
 # Pick using fzf if available, otherwise a basic numbered menu on
@@ -52,7 +56,7 @@ pick_agent() {
       | fzf --prompt="Select Scion agent> " \
             --delimiter=$'\t' \
             --with-nth=1,2,3 \
-            --header="AGENT  TEMPLATE  ACTIVITY"
+            --header="$(scope_header)"$'\n'"AGENT  TEMPLATE  ACTIVITY"
     return
   fi
 
@@ -61,6 +65,7 @@ pick_agent() {
   local -a rows=()
   local i=1
   echo "" >&2
+  scope_header >&2
   echo "Running Scion agents:" >&2
   while IFS= read -r line; do
     local display tmpl activity
@@ -93,16 +98,30 @@ check_deps() {
   fi
 }
 
+# Keep the overlay open on an error long enough to read it.
+fail() {
+  echo "$*" >&2
+  read -rp "Press Enter to close." _ || true
+  exit 1
+}
+
 main() {
   check_deps
-  resolve_project_cwd
+
+  SCOPE_MODE_ALL=0
+  if [[ "$(herdr_scope_mode)" == "all" ]]; then
+    SCOPE_MODE_ALL=1
+    scope_set pin global "" all 0 all
+  elif ! resolve_scope; then
+    fail "Cannot list agents: no scion project resolved."
+  fi
 
   local lines
-  lines="$(agent_display_lines)"
+  lines="$(agent_display_lines)" || fail "scion list failed — see the error above."
 
   if [[ -z "$lines" ]]; then
-    echo "No running Scion agents found." >&2
-    exit 0
+    scope_header >&2
+    fail "No running Scion agents found."
   fi
 
   local selected_row
@@ -113,9 +132,13 @@ main() {
     exit 0
   fi
 
-  local display template activity project name project_path
-  IFS=$'\t' read -r display template activity project name project_path <<< "$selected_row"
-  local identifier="${project}/${name}"
+  local project name project_path
+  IFS=$'\t' read -r _ _ _ project name project_path <<< "$selected_row"
+  if [[ "$SCOPE_MODE_ALL" == "1" ]]; then
+    [[ "$project_path" == "-" ]] && project_path=""
+    scope_set pin "${project_path:-$project}" "" "$project" 0 all
+  fi
+  local identifier="${SCOPE_LABEL}/${name}"
 
   # Check if a pane already exists for this agent (tracked via pane .label).
   if pane_exists_for_agent "$identifier"; then
@@ -123,44 +146,15 @@ main() {
     local pane_id
     pane_id="$(pane_id_for_agent "$identifier")"
     if [[ -n "$pane_id" ]]; then
-      # Agent commands accept a pane_id directly (herdr resolves it to the
-      # agent currently hosted in that pane).
-      "$HERDR_BIN" agent focus "$pane_id"
+      # `agent focus` takes a pane id when an agent is reported in it (the
+      # wrapper reports one); 0.9.1's `pane focus` is directional only.
+      "$HERDR_BIN" agent focus "$pane_id" >/dev/null
     fi
     exit 0
   fi
 
   log "Creating pane for agent: $identifier"
-
-  # Split off the pane that opened us (passed via SCION_TARGET_PANE by
-  # scion-open-pane.sh), so the new agent pane lands next to the user's
-  # pane rather than off this overlay. Falls back to herdr's default target
-  # (calling pane, then focused pane) if unset.
-  local -a split_args=(--direction right --env "SCION_AGENT=${name}" --env "SCION_PROJECT=${project}")
-  if [[ -n "${SCION_TARGET_PANE:-}" ]]; then
-    split_args=(--pane "$SCION_TARGET_PANE" "${split_args[@]}")
-  fi
-
-  local split_json pane_id
-  split_json="$("$HERDR_BIN" pane split "${split_args[@]}")"
-  pane_id="$(echo "$split_json" | jq -r '.result.pane.pane_id // empty')"
-  if [[ -z "$pane_id" ]]; then
-    log "herdr pane split returned no pane_id for $identifier: $split_json"
-    exit 1
-  fi
-
-  "$HERDR_BIN" pane rename "$pane_id" "scion:${identifier}"
-
-  # scion resolves its target project from -g or CWD, then falls back to
-  # "global" — the wrapper needs the project (and, when known, its
-  # filesystem path) to attach the right agent rather than hitting
-  # "agent '<name>' not found in project 'global'".
-  local run_cmd
-  run_cmd="bash '${SCRIPT_DIR}/scion-attach-wrapper.sh' '${name}' --project '${project}'"
-  if [[ -n "$project_path" ]]; then
-    run_cmd+=" --project-path '${project_path}'"
-  fi
-  "$HERDR_BIN" pane run "$pane_id" "$run_cmd"
+  open_agent_pane "$name" >/dev/null || fail "Could not open a pane for $identifier."
 }
 
 main "$@"

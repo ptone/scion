@@ -5,6 +5,12 @@
 # via `herdr pane report-agent`. Runs as a background daemon, started from
 # scion-discover.sh or manually.
 #
+# Panes are matched by their "scion:<project-slug>/<name>" label. Each
+# project is polled with the scope the pane was opened with (a record
+# written by scion-common.sh's open_agent_pane / the dashboard), never with
+# `scion list -a`. A project whose scope no longer matches the scion
+# context (scope_check), or that has no record, is reported as unknown.
+#
 # State mapping:
 #   Scion                  -> Herdr
 #   executing, working     -> working
@@ -99,62 +105,71 @@ cleanup() {
 # Main poll loop
 # ---------------------------------------------------------------------------
 
-poll_once() {
-  # Get all herdr panes belonging to this plugin.
-  # Scion panes are identified by their .label, set via `herdr pane rename`
-  # right after split, with the format "scion:<identifier>".
-  local panes_json
-  panes_json="$("$HERDR_BIN" pane list)" || return 1
+# Report herdr state for every pane of project <label>.
+#   $1 — project label, $2 — "pane_id<TAB>name" lines for that project
+poll_project() {
+  local label="$1" entries="$2"
+  local agents_json="" scoped=1
 
-  # Extract pane_id + agent identifier from scion-managed panes.
-  local pane_entries
-  pane_entries="$(echo "$panes_json" \
-    | jq -r '.result.panes[] | select(.label != null and (.label | startswith("scion:")))
-             | "\(.pane_id)\t\(.label | ltrimstr("scion:"))"' 2>/dev/null)"
+  if ! scope_record_load "$label"; then
+    log "No scope record for project '$label' — reporting its panes as unknown."
+    scoped=0
+  elif ! scope_check; then
+    log "Project '$label': $SCOPE_MISMATCH_MSG"
+    scoped=0
+  elif ! agents_json="$(scion_scoped list --format json 2>/dev/null)"; then
+    log "scion list failed for project '$label'."
+    scoped=0
+  fi
 
-  [[ -z "$pane_entries" ]] && return 0
+  local pane_id name agent_info activity phase herdr_state
+  while IFS=$'\t' read -r pane_id name; do
+    [[ -z "$pane_id" || -z "$name" ]] && continue
 
-  # Get current scion agent states in one call.
-  local agents_json
-  agents_json="$(scion list -a --format json 2>/dev/null)" || return 1
-
-  while IFS=$'\t' read -r pane_id identifier; do
-    [[ -z "$pane_id" || -z "$identifier" ]] && continue
-
-    # identifier is "project/name" — agent names are only unique within a
-    # project, and this polls across all projects (-a), so matching on name
-    # alone risks picking up a same-named agent in a different project.
-    local project name
-    project="${identifier%%/*}"
-    name="${identifier#*/}"
-
-    # Look up this agent in the scion list output, matching on project AND
-    # name. Uses .slug // .name because slug is omitempty in local/podman
-    # mode; project falls back to "global" to match how identifiers are built.
-    local agent_info
-    agent_info="$(echo "$agents_json" \
-      | jq -r --arg project "$project" --arg name "$name" \
-        '.[] | select((.project // "global") == $project and (.slug // .name) == $name)' 2>/dev/null)"
-
-    local activity phase herdr_state
-
-    if [[ -z "$agent_info" ]]; then
-      # Agent no longer in scion list at all — report idle (see note above:
-      # "done" is not a settable report-agent state).
-      herdr_state="idle"
+    if [[ "$scoped" == "0" ]]; then
+      herdr_state="unknown"
     else
-      activity="$(echo "$agent_info" | jq -r '.activity // "idle"' 2>/dev/null)"
-      phase="$(echo "$agent_info" | jq -r '.phase // "unknown"' 2>/dev/null)"
-      herdr_state="$(map_state "$activity" "$phase")"
+      # Uses .slug // .name because slug is omitempty in local/podman mode.
+      agent_info="$(jq -c --arg name "$name" \
+        '[.[] | select((.slug // .name) == $name)] | first // empty' <<<"$agents_json" 2>/dev/null)"
+      if [[ -z "$agent_info" ]]; then
+        # Agent no longer in scion list at all — report idle (see note
+        # above: "done" is not a settable report-agent state).
+        herdr_state="idle"
+      else
+        activity="$(jq -r '.activity // "idle"' <<<"$agent_info")"
+        phase="$(jq -r '.phase // "unknown"' <<<"$agent_info")"
+        herdr_state="$(map_state "$activity" "$phase")"
+      fi
     fi
 
     # Report to herdr (state only — identity/tracking is via pane .label).
     "$HERDR_BIN" pane report-agent "$pane_id" \
       --source "scion:integration" \
-      --agent "scion/${identifier}" \
-      --state "$herdr_state"
+      --agent "scion/${label}/${name}" \
+      --state "$herdr_state" >/dev/null
+  done <<< "$entries"
+}
 
-  done <<< "$pane_entries"
+poll_once() {
+  local panes_json
+  panes_json="$("$HERDR_BIN" pane list)" || return 1
+
+  # "project<TAB>pane_id<TAB>name" for each scion pane.
+  local pane_entries
+  pane_entries="$(jq -r '.result.panes[] | select(.label != null and (.label | startswith("scion:")))
+      | (.label | ltrimstr("scion:")) as $id
+      | select($id | contains("/"))
+      | [($id | split("/")[0]), .pane_id, ($id | split("/")[1:] | join("/"))] | @tsv' \
+      <<<"$panes_json" 2>/dev/null)"
+
+  [[ -z "$pane_entries" ]] && return 0
+
+  local label
+  while IFS= read -r label; do
+    [[ -z "$label" ]] && continue
+    poll_project "$label" "$(awk -F'\t' -v l="$label" '$1 == l { print $2 "\t" $3 }' <<<"$pane_entries")"
+  done < <(cut -f1 <<<"$pane_entries" | sort -u)
 }
 
 check_deps() {
@@ -171,10 +186,10 @@ check_deps() {
 
 main() {
   check_deps
-  resolve_project_cwd
   log "Starting state bridge (poll interval: ${POLL_INTERVAL}s)."
   ensure_singleton
-  trap cleanup EXIT INT TERM
+  on_exit cleanup
+  trap 'exit 0' INT TERM
 
   while true; do
     poll_once || log "Poll cycle failed — will retry."

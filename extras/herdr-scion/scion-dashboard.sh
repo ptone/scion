@@ -22,20 +22,16 @@ source "${SCRIPT_DIR}/scion-common.sh"
 
 log() { echo "[scion-dashboard] $*" >&2; }
 
-# Build a layout pane node for a single agent.
-#   $1 — name, $2 — project, $3 — projectPath (may be empty)
-# scion resolves its target project from -g or CWD, then falls back to
-# "global" — the wrapper needs --project (and, when known, --project-path)
-# to attach the right agent rather than hitting "agent '<name>' not found
-# in project 'global'".
+# Build a layout pane node for agent $1 in the current scope (SCOPE_*), and
+# record the scope for the state bridge.
 pane_node() {
-  local name="$1" project="$2" project_path="$3"
-  local identifier="${project}/${name}"
+  local name="$1"
+  local identifier="${SCOPE_LABEL}/${name}"
+  local project="$SCOPE_LABEL"
 
-  local -a cmd=(bash "${SCRIPT_DIR}/scion-attach-wrapper.sh" "$name" --project "$project")
-  if [[ -n "$project_path" ]]; then
-    cmd+=(--project-path "$project_path")
-  fi
+  scope_record_write || log "Warning: could not write the scope record for ${SCOPE_LABEL}"
+  scope_wrapper_argv
+  local -a cmd=(bash "${SCRIPT_DIR}/scion-attach-wrapper.sh" "$name" "${SCOPE_WRAPPER_ARGV[@]}")
 
   local cmd_json
   cmd_json="$(printf '%s\n' "${cmd[@]}" | jq -R . | jq -s .)"
@@ -123,13 +119,23 @@ check_deps() {
 
 main() {
   check_deps
-  resolve_project_cwd
-  log "Building agent dashboard..."
-
-  local agents
-  agents="$(scion list -a -r --format json 2>/dev/null \
-    | jq -r '.[] | select(.phase == "running")
-              | [(.slug // .name), (.project // "global"), (.projectPath // "")] | @tsv' 2>/dev/null)"
+  local all_mode=0 list_json agents
+  if [[ "$(herdr_scope_mode)" == "all" ]]; then
+    all_mode=1
+    scope_dir_init || exit 1
+    log "Building agent dashboard for all projects (SCION_HERDR_SCOPE=all)..."
+    list_json="$(cd "$SCOPE_DIR" && scion list -a -r --format json)" || { log "scion list failed."; exit 1; }
+    agents="$(jq -r '.[] | select(.phase == "running")
+              | [(.slug // .name), (.project // "global"), (.projectPath // "")] | @tsv' <<<"$list_json")"
+  else
+    if ! resolve_scope; then
+      log "Dashboard aborted: no scion project resolved."
+      exit 1
+    fi
+    log "Building agent dashboard — $(scope_header)..."
+    list_json="$(scion_scoped list -r --format json)" || { log "scion list failed."; exit 1; }
+    agents="$(jq -r '.[] | select(.phase == "running") | (.slug // .name)' <<<"$list_json")"
+  fi
 
   if [[ -z "$agents" ]]; then
     echo "No running Scion agents found." >&2
@@ -137,11 +143,14 @@ main() {
   fi
 
   # Build pane nodes array.
-  local pane_nodes="[]"
+  local pane_nodes="[]" name project project_path
   while IFS=$'\t' read -r name project project_path; do
     [[ -z "$name" ]] && continue
+    if [[ "$all_mode" == "1" ]]; then
+      scope_set pin "${project_path:-$project}" "" "$project" 0 all
+    fi
     local node
-    node="$(pane_node "$name" "$project" "$project_path")"
+    node="$(pane_node "$name")"
     pane_nodes="$(echo "$pane_nodes" | jq --argjson n "$node" '. + [$n]')"
   done <<< "$agents"
 
@@ -159,11 +168,13 @@ main() {
 
   # -c (compact) is required: the socket protocol frames one JSON request
   # per line, so the request must not contain embedded newlines.
+  local tab_label="scion: ${SCOPE_LABEL}"
+  [[ "$all_mode" == "1" ]] && tab_label="scion: all projects"
   local api_request
-  api_request="$(jq -nc --arg id "$request_id" --argjson root "$layout_tree" '{
+  api_request="$(jq -nc --arg id "$request_id" --arg tab "$tab_label" --argjson root "$layout_tree" '{
     id: $id,
     method: "layout.apply",
-    params: { root: $root }
+    params: { root: $root, tab_label: $tab }
   }')"
 
   # herdr has no CLI command for layout.apply — send the request straight to

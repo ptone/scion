@@ -4,12 +4,13 @@ A [herdr](https://github.com/herdrdev/herdr) plugin that integrates Scion agents
 
 ## Features
 
-- **Auto-discovery** — On herdr startup, running Scion agents are discovered and opened as labeled panes.
+- **Follows your scion project** — Acts on the project scion itself would pick: the herdr workspace's directory if it is inside a scion project, otherwise the project selected with `scion use`. The pickers show which project and why.
+- **Auto-discovery** — On herdr startup, the project's running Scion agents are discovered and opened as labeled panes.
 - **Interactive attach** — Pick a running agent from a list and open it in a new pane.
 - **Start and attach** — Create a new agent from a Scion template and open it in one step.
 - **State bridge** — Agent states (working, blocked, idle, done) are polled from Scion and reported to herdr's status indicators.
 - **Dashboard** — Create a tiled layout with all running agents in a single action.
-- **Reconnection** — If a session disconnects (e.g., inner tmux detach), the wrapper auto-reconnects after 10 seconds.
+- **Reconnection** — If a session disconnects (e.g., inner tmux detach), the wrapper auto-reconnects after 10 seconds, and stops after 3 short-lived sessions in a row.
 - **Hub support** — Works identically for local and Hub-connected Scion agents.
 
 ## Requirements
@@ -38,9 +39,13 @@ herdr plugin list
 ### Automatic Discovery
 
 On herdr startup, the plugin runs `scion-discover.sh` which:
-1. Queries `scion list` for running agents
-2. Creates a herdr pane for each agent not already represented
-3. Starts the state bridge in the background
+1. Resolves the scion project (see [Project Scope](#project-scope))
+2. Queries `scion list` for that project's running agents
+3. Creates a herdr pane for each agent not already represented
+4. Starts the state bridge in the background
+
+If no project is resolved, the action fails with `No scion project selected
+… run 'scion use <project>'` in `herdr plugin log`.
 
 ### Actions
 
@@ -48,10 +53,10 @@ All actions are available in herdr's action palette:
 
 | Action | Description |
 |--------|-------------|
-| **Attach to Scion Agent** | Pick a running agent and open it in a new pane |
-| **Start Scion Agent** | Choose a template, name the agent, and start+attach in one step |
+| **Attach to Scion Agent** | Pick one of the project's running agents and open it in a new pane |
+| **Start Scion Agent** | Choose one of the project's templates, name the agent, and start+attach in one step |
 | **Refresh Scion Agents** | Re-run discovery to pick up newly started agents |
-| **Scion Agent Dashboard** | Create a tiled layout with all running agents |
+| **Scion Agent Dashboard** | Create a tiled layout (tab `scion: <project>`) with the project's running agents |
 
 ### Manual Invocation
 
@@ -65,52 +70,84 @@ herdr plugin action invoke dashboard --plugin scion.herdr-integration
 
 ## How It Works
 
+### Project Scope
+
+Each action resolves the project once, the way scion would for you, then
+pins it explicitly for every scion call it makes. Precedence is scion's
+own: flags → `SCION_*` env → directory project → `scion use` context →
+global settings. The plugin doesn't reimplement this. It runs `scion use
+--format json`:
+- from the herdr workspace's directory (`workspace_cwd`), if it exists, so
+  a workspace inside a scion project targets that project, as any scion
+  command there would;
+- otherwise from an empty temp dir, so the context applies.
+
+Herdr runs plugin commands from the plugin's own directory, which is
+inside the scion checkout (and that has its own `.scion`). Every scion call
+runs from an empty temp dir, so the plugin's directory can never select a
+project.
+
+How the project is pinned depends on where it came from:
+
+| Source | scion calls | Checked before each call (attach wrapper, state bridge) |
+|--------|-------------|------------------------------------------|
+| A project directory (or `global`) | `scion -g <project-root> …` | The hub endpoint is unchanged |
+| The `scion use` context (a hub project) | `scion …` with no `-g`, so scion applies its context | The context still names the same project UUID and hub |
+
+Context projects are not passed as `-g <uuid>`: scion lets a hub project
+skip its `hub.enabled` check only when it took the project from the context
+itself. An explicit `-g <uuid>` fails for users who ran `scion use` but never
+`scion hub enable`. `--hub` is never passed either: an explicit `--hub` can
+link or register a project on that hub, where the context's hub refuses to.
+
+A pane is bound to the project it was opened for. If you run `scion use`
+for something else, an open pane doesn't attach to the other project. On
+its next connect, it stops and says:
+
+```
+scion context is now other-proj on https://hub…; this pane is for my-proj on https://hub….
+Run 'scion use my-proj' or close this pane.
+```
+
+Press Enter to check again. The next **Refresh** shows the new project's
+agents in new panes.
+
+The overlay pickers show the project and where it came from, e.g.
+`project: my-proj (from context)` or `project: my-proj (from directory)`.
+
+### All Projects (`SCION_HERDR_SCOPE=all`)
+
+To see agents from every project at once (the plugin's earlier behaviour),
+set `SCION_HERDR_SCOPE=all`. Either:
+- export it in the environment herdr starts with; or
+- write `SCION_HERDR_SCOPE=all` to the file `config` in the plugin's config
+  directory (`herdr plugin config-dir scion.herdr-integration`).
+
+The environment wins. In this mode, discovery, the picker and the dashboard
+use `scion list -a`. Each pane is pinned to its agent's project path (or
+project name) as `scion list -a` reports it, with no context check. **Start
+Scion Agent** asks for the project first.
+
 ### Pane Management
 
 `herdr pane split` creates a bare pane — it does not accept a command to run.
-Each Scion agent pane is set up in three steps:
+Each Scion agent pane is set up in three steps (`open_agent_pane` in
+`scion-common.sh`):
 1. `herdr pane split --direction right --env SCION_AGENT=<name>` — split, and
    read the new pane's ID from `.result.pane.pane_id`.
-2. `herdr pane rename <pane_id> "scion:<project>/<name>"` — set the pane's
+2. `herdr pane rename <pane_id> "scion:<project-slug>/<name>"` — set the pane's
    label immediately, before the wrapper starts. This is what duplicate
    detection and the state bridge track panes by. The label includes the
-   project because scion agent names are only unique within a project —
-   discovery and the picker list agents across every project (`-a`), so two
-   different projects can have same-named agents.
-3. `herdr pane run <pane_id> "bash scion-attach-wrapper.sh <name> --project
-   <project> [--project-path <path>] ..."` — type the wrapper command,
-   including the agent's project scope, into the pane's shell and press
+   project because scion agent names are only unique within a project, and
+   panes from different projects can share a workspace.
+3. `herdr pane run <pane_id> "bash scion-attach-wrapper.sh <name> --mode
+   pin|context --project <…> --label <slug> [--hub <endpoint>] …"` — type the
+   wrapper command, with the pinned scope, into the pane's shell and press
    Enter.
 
-### Project Scoping
-
-`scion attach`/`scion start` resolve their target project from `-g`
-(`--project`) or the CWD, then fall back to the `global` project. Herdr
-panes and actions don't run from the project's own directory, so without an
-explicit scope, every call would fail with `agent '<name>' not found in
-project 'global'` whenever the agent actually lives in a non-global project.
-
-To fix this, every script that discovers or creates an agent pane carries
-the agent's `project` and `projectPath` (from `scion list`'s JSON output)
-through to `scion-attach-wrapper.sh` via `--project`/`--project-path`. The
-wrapper then:
-- `cd`s into `--project-path` when given (belt-and-suspenders alongside the
-  next point — scion also resolves project from CWD).
-- Passes `-g <projectPath>` (or `-g <project>` when there's no local path —
-  Hub mode) to every `scion attach`/`scion start`/`scion list` call it
-  makes, so `is_running`/`agent_phase` checks and the actual attach/start
-  are scoped to the agent's real project, not the pane's CWD.
-
-`--project-path` is passed through exactly as `scion list` reports it — it
-isn't normalized between a project's root directory and its `.scion`
-subdirectory, which needs verifying against `-g`'s actual expectations.
-
-**Start Scion Agent** additionally has to pick a project *before* listing
-templates or starting anything: it offers the distinct `project`/
-`projectPath` pairs seen across every known agent (`scion list -a`, any
-phase), plus the invoking pane's own `workspace_cwd`/`focused_pane_cwd` if
-it looks like a scion project directory (contains `.scion`). The picker is
-skipped when there's only one known project.
+The plugin also records each project's scope in its state directory
+(`$HERDR_PLUGIN_STATE_DIR/scopes/<project-slug>`), so the state bridge can
+poll each project the same way its panes do.
 
 ### Interactive Actions (Popup Panes)
 
@@ -136,13 +173,15 @@ directly. Instead:
 
 The `scion-attach-wrapper.sh` script wraps `scion attach` with:
 
-1. **Idempotent start-or-attach**: Checks `scion list` before deciding whether to attach or start. This handles the Hub-mode gap where `scion start -a` may not be idempotent for already-running agents.
-2. **Reconnection loop**: If `scion attach` exits while the agent is still running (e.g., the user pressed Ctrl-b d inside the inner tmux), the wrapper waits 10 seconds then reconnects. Press Enter to reconnect immediately, or Ctrl-C to close the pane.
-3. **Graceful exit**: When the agent stops running, the wrapper prints a status message and waits for the user to dismiss.
+1. **Scope check**: Before each scion call it checks that the pinned project still matches (see [Project Scope](#project-scope)). If it doesn't, it calls nothing and waits.
+2. **Idempotent start-or-attach**: Checks `scion list` before deciding whether to attach or start. This handles the Hub-mode gap where `scion start -a` may not be idempotent for already-running agents.
+3. **Reconnection loop**: If `scion attach` exits while the agent is still running (e.g., the user pressed Ctrl-b d inside the inner tmux), the wrapper waits 10 seconds then reconnects. Press Enter to reconnect immediately, or Ctrl-C to close the pane. This covers deliberate detaches and local runtimes, which `scion attach`'s own reconnect doesn't.
+4. **Reconnect cap**: After 3 sessions in a row that each lasted under 60 seconds, the wrapper stops reconnecting by itself and waits for Enter. `scion attach` already retries a dropped connection itself, so repeated short sessions mean that has given up too.
+5. **Graceful exit**: When the agent stops running, the wrapper prints a status message and waits for the user to dismiss.
 
 ### State Bridge
 
-The `scion-state-bridge.sh` daemon polls `scion list` every 4 seconds and reports agent states to herdr via `herdr pane report-agent`, matching panes to agents by the pane's `scion:<project>/<name>` label — split back into project and name so agents are matched on both, not name alone (which would be ambiguous across projects):
+The `scion-state-bridge.sh` daemon polls every 4 seconds and reports agent states to herdr via `herdr pane report-agent`. It matches panes to agents by the pane's `scion:<project>/<name>` label, then polls each project with that project's recorded scope (`scion list`, never `-a`), so agents are matched on project and name. If a project's scope no longer matches the scion context, or it has no record (e.g. a pane from an older plugin version), its panes are reported as `unknown`.
 
 | Scion Activity | Herdr State |
 |----------------|-------------|
@@ -168,6 +207,7 @@ Environment variables for tuning:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `SCION_HERDR_SCOPE` | `project` | `all` shows agents from every project (also settable in the plugin config file, see above) |
 | `SCION_BRIDGE_INTERVAL` | `4` | State bridge poll interval in seconds |
 | `SCION_BRIDGE_PIDFILE` | `$HERDR_PLUGIN_STATE_DIR/scion-state-bridge.pid` | PID file path for singleton enforcement |
 
@@ -187,7 +227,8 @@ Terminal resize propagates through the full chain. Herdr's detach (herdr keybind
 ## Troubleshooting
 
 ### No agents discovered on startup
-- Check that `scion list -r` shows running agents
+- Check `herdr plugin log`: discovery says which project it used and why (`project: <slug> (from <source>)`), or that none was resolved
+- From the herdr workspace's directory, check that `scion use` names the project you expect, and that `scion list -r` shows running agents
 - Check that `scion` is on PATH when herdr starts
 - Run the refresh action to re-discover
 
@@ -205,13 +246,16 @@ Terminal resize propagates through the full chain. Herdr's detach (herdr keybind
 - The plugin tracks panes by label (`scion:<project>/<name>`); duplicates should not occur
 - If they do, close the extra pane and run refresh
 
-### "agent '<name>' not found in project 'global'"
-- The wrapper wasn't given `--project`/`--project-path`, or scion's `-g`
-  flag doesn't accept the `projectPath` value the way it was passed
-  (project root vs. `.scion` subdirectory — see Project Scoping above)
-- Check the pane's label: it should be `scion:<project>/<name>`, not just
-  `scion:<name>` — a bare name means the identifier wasn't built with a
-  project
+### Pane says "scion context is now …; this pane is for …"
+- You ran `scion use` for another project (or hub) after the pane was opened
+- Run the `scion use …` command the message shows and press Enter, or close the pane and run refresh to open the current project's agents
+
+### Picker shows the wrong project
+- The header says where scion got the project from. `(from directory)` means the herdr workspace's directory is inside that scion project, which wins over `scion use`, as it does for any scion command run there
+- Open the herdr workspace somewhere else, or set `SCION_HERDR_SCOPE=all`
+
+### "hub project references … require hub mode to be enabled"
+- Seen only in `SCION_HERDR_SCOPE=all` mode, when an agent's project has no local path and the plugin pins it by name. Run `scion hub enable`, or use the default mode
 
 ### Keybinding conflicts
 - Herdr and the inner tmux may both use Ctrl-b as a prefix
@@ -237,4 +281,4 @@ This removes the plugin registration. Existing panes remain open but will not be
 | `scion-start-agent.sh` | Template picker and agent launcher (runs as an overlay pane) |
 | `scion-state-bridge.sh` | State synchronization daemon |
 | `scion-dashboard.sh` | Tiled layout dashboard |
-| `scion-common.sh` | Shared helpers (pane tracking, socket API access) |
+| `scion-common.sh` | Shared helpers (project scope, pane creation and tracking, socket API access) |
