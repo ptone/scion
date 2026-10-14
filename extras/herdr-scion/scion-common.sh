@@ -29,6 +29,87 @@ resolve_project_cwd() {
   fi
 }
 
+# Resolve the scion project this action acts on, exactly as scion itself
+# would for the user, and pin it for every later scion call.
+#
+# Precedence is scion's own (flags → env → directory project → `scion use`
+# context → global settings): we ask `scion use --format json` rather than
+# re-implementing it. It runs from herdr's workspace_cwd when that is a
+# directory (so a workspace inside a scion project targets that project,
+# as any scion command there would), otherwise from an empty temp dir, so
+# the scion checkout that holds this plugin (which has its own .scion) can
+# never be picked up by accident.
+#
+# On success, sets:
+#   SCOPE_PROJECT  value for -g: project root path (local/linked), the hub
+#                  project UUID (hub context), or "global"
+#   SCOPE_HUB      hub endpoint, empty when there is no hub
+#   SCOPE_LABEL    project slug for labels and the UI
+#   SCOPE_SOURCE   where scion got the project: flag|env|directory|context|global
+#   SCOPE_DIR      empty temp dir that scion_scoped runs from
+#   SCOPE_ARGS     (-g "$SCOPE_PROJECT" [--hub "$SCOPE_HUB"])
+# On failure, prints the reason to stderr (the herdr plugin log) and
+# returns 1.
+resolve_scope() {
+  SCOPE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/scion-herdr.XXXXXX")" || {
+    echo "resolve_scope: could not create a temp dir" >&2
+    return 1
+  }
+  # shellcheck disable=SC2064  # expand SCOPE_DIR now, not at exit
+  trap "rm -rf '${SCOPE_DIR}'" EXIT
+
+  local probe_dir="$SCOPE_DIR" ws=""
+  if [[ -n "${HERDR_PLUGIN_CONTEXT_JSON:-}" ]]; then
+    ws="$(jq -r '.workspace_cwd // empty' <<<"$HERDR_PLUGIN_CONTEXT_JSON" 2>/dev/null)"
+  fi
+  if [[ -n "$ws" && -d "$ws" ]]; then
+    probe_dir="$ws"
+  fi
+
+  local use_json
+  if ! use_json="$(cd "$probe_dir" && scion use --format json)"; then
+    echo "resolve_scope: 'scion use --format json' failed (run from ${probe_dir})" >&2
+    return 1
+  fi
+
+  local path id
+  path="$(jq -r '.effective.project.path // empty' <<<"$use_json")"
+  id="$(jq -r '.effective.project.id // empty' <<<"$use_json")"
+  SCOPE_SOURCE="$(jq -r '.effective.project.source // "none"' <<<"$use_json")"
+  SCOPE_HUB="$(jq -r '.effective.hub.endpoint // empty' <<<"$use_json")"
+  SCOPE_LABEL="$(jq -r '.effective.project.slug // .effective.project.name // empty' <<<"$use_json")"
+
+  # scion shows the path with the home directory abbreviated to "~".
+  case "$path" in
+    "~") path="$HOME" ;;
+    "~/"*) path="${HOME}/${path#"~/"}" ;;
+  esac
+
+  if [[ "$SCOPE_SOURCE" == "global" ]]; then
+    SCOPE_PROJECT="global"
+  else
+    SCOPE_PROJECT="${path:-$id}"
+  fi
+
+  if [[ "$SCOPE_SOURCE" == "none" || -z "$SCOPE_PROJECT" ]]; then
+    echo "No scion project selected (checked from ${probe_dir}) — run 'scion use <project>' or open the herdr workspace in a scion project directory." >&2
+    return 1
+  fi
+
+  [[ -n "$SCOPE_LABEL" ]] || SCOPE_LABEL="$(basename "$SCOPE_PROJECT")"
+
+  SCOPE_ARGS=(-g "$SCOPE_PROJECT")
+  [[ -n "$SCOPE_HUB" ]] && SCOPE_ARGS+=(--hub "$SCOPE_HUB")
+  return 0
+}
+
+# Run scion pinned to the scope from resolve_scope, from its empty temp dir
+# so the caller's CWD can't change what scion resolves (e.g. the hub of a
+# directory-linked project).
+scion_scoped() {
+  (cd "$SCOPE_DIR" && scion "${SCOPE_ARGS[@]}" "$@")
+}
+
 # Extract the agent identifier from scion list JSON.
 # Uses .slug when present, falls back to .name (slug is omitempty in local mode).
 # Usage: scion list --format json | jq -r '<filter> | .slug // .name'

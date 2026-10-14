@@ -3,7 +3,15 @@
 # idempotent start-or-attach logic, scoped to the agent's own project.
 #
 # Usage:
-#   scion-attach-wrapper.sh <name> --project <project> [--project-path <path>] [--start <template>]
+#   scion-attach-wrapper.sh <name> --project <project> [--hub <endpoint>] [--label <slug>]
+#                           [--project-path <path>] [--start <template>]
+#
+# --project is the -g value resolve_scope() pinned (project root path, hub
+# project UUID, or "global"); --hub is its hub endpoint, when there is one;
+# --label is the project slug, used only for herdr's agent label. Every
+# scion call runs from an empty temp dir with these explicit flags, so the
+# pane's CWD can't change the target. --project-path is the older form
+# (still sent by pick/start): when set it overrides --project as the -g value.
 #
 # `scion attach`/`scion start` resolve their target project from -g/--global
 # or the CWD, then fall back to the "global" project. Herdr panes don't run
@@ -28,16 +36,26 @@
 
 set -uo pipefail
 
-NAME="${1:?Usage: scion-attach-wrapper.sh <name> --project <project> [--project-path <path>] [--start <template>]}"
+NAME="${1:?Usage: scion-attach-wrapper.sh <name> --project <project> [--hub <endpoint>] [--label <slug>] [--project-path <path>] [--start <template>]}"
 shift
 
 PROJECT=""
 PROJECT_PATH=""
+HUB=""
+LABEL=""
 TEMPLATE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --project)
       PROJECT="${2:?--project requires a value}"
+      shift 2
+      ;;
+    --hub)
+      HUB="${2:?--hub requires a value}"
+      shift 2
+      ;;
+    --label)
+      LABEL="${2:?--label requires a value}"
       shift 2
       ;;
     --project-path)
@@ -81,17 +99,23 @@ fi
 if [[ -n "$G_VALUE" ]]; then
   LIST_ARGS=(-g "$G_VALUE")
   TARGET_ARGS=(-g "$G_VALUE")
+  if [[ -n "$HUB" ]]; then
+    LIST_ARGS+=(--hub "$HUB")
+    TARGET_ARGS+=(--hub "$HUB")
+  fi
 else
   LIST_ARGS=(-a)
   TARGET_ARGS=()
 fi
 
-# scion also resolves its project from CWD as a secondary signal — cd into
-# the project directory too, as a belt-and-suspenders alongside -g.
-if [[ -n "$PROJECT_PATH" ]]; then
-  cd "$PROJECT_PATH" 2>/dev/null \
-    || echo "[scion-attach] Warning: could not cd to project path $PROJECT_PATH" >&2
-fi
+# Run every scion call from an empty temp dir: with -g given, the CWD can
+# still decide the hub (a directory-linked project's hub), and without -g it
+# decides the project. Neither should depend on where the pane's shell is.
+NEUTRAL_DIR="$(mktemp -d "${TMPDIR:-/tmp}/scion-herdr-attach.XXXXXX")" \
+  && cd "$NEUTRAL_DIR" \
+  || echo "[scion-attach] Warning: could not create/enter a temp dir; running from $PWD" >&2
+# shellcheck disable=SC2064  # expand NEUTRAL_DIR now, not at exit
+[[ -n "${NEUTRAL_DIR:-}" ]] && trap "rm -rf '${NEUTRAL_DIR}'" EXIT
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -133,7 +157,7 @@ register_pane() {
   if [[ -n "${HERDR_PANE_ID:-}" ]]; then
     "${HERDR_BIN_PATH:-herdr}" pane report-agent "$HERDR_PANE_ID" \
       --source "scion:integration" \
-      --agent "scion/${PROJECT:-global}/${NAME}" \
+      --agent "scion/${LABEL:-${PROJECT:-global}}/${NAME}" \
       --state idle
   fi
 }

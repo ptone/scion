@@ -2,7 +2,8 @@
 # scion-discover.sh — Discover running Scion agents and create herdr panes.
 #
 # Called as a startup hook and as the "Refresh Scion Agents" action.
-# For each running agent not already represented by a herdr pane, creates
+# Lists running agents in the effective scion project (see resolve_scope in
+# scion-common.sh), and for each one not already represented by a herdr pane, creates
 # a new pane running scion-attach-wrapper.sh.
 #
 # Requires: scion, herdr, jq on PATH.
@@ -20,15 +21,12 @@ source "${SCRIPT_DIR}/scion-common.sh"
 
 log() { echo "[scion-discover] $*" >&2; }
 
-# Collect running scion agents as TSV rows: name, project, projectPath (one
-# row per agent). Uses .slug // .name because slug is omitempty in
-# local/podman mode. project falls back to "global" (scion's own fallback
-# project name) so every row has a usable, comparable project value.
-# projectPath may be empty (Hub mode, or an older scion without the field).
+# Collect the names of running agents in the scoped project (one per line).
+# Uses .slug // .name because slug is omitempty in local/podman mode.
 running_agents() {
-  scion list -a -r --format json 2>/dev/null \
-    | jq -r '.[] | select(.phase == "running")
-              | [(.slug // .name), (.project // "global"), (.projectPath // "")] | @tsv' 2>/dev/null
+  local list_json
+  list_json="$(scion_scoped list -r --format json)" || return 1
+  jq -r '.[] | select(.phase == "running") | (.slug // .name)' <<<"$list_json"
 }
 
 # Collect agent identifiers from existing herdr panes that belong to this plugin.
@@ -64,11 +62,17 @@ check_deps() {
 
 main() {
   check_deps
-  resolve_project_cwd
-  log "Discovering running Scion agents..."
+  if ! resolve_scope; then
+    log "Discovery aborted: no scion project resolved."
+    exit 1
+  fi
+  log "Discovering running Scion agents in project ${SCOPE_LABEL} (from ${SCOPE_SOURCE}: -g ${SCOPE_PROJECT}${SCOPE_HUB:+ --hub ${SCOPE_HUB}})..."
 
   local agents
-  agents="$(running_agents)"
+  if ! agents="$(running_agents)"; then
+    log "scion list failed for project ${SCOPE_LABEL} — see the error above."
+    exit 1
+  fi
 
   if [[ -z "$agents" ]]; then
     log "No running Scion agents found."
@@ -80,14 +84,14 @@ main() {
 
   local created=0
 
-  while IFS=$'\t' read -r name project project_path; do
+  while IFS= read -r name; do
     [[ -z "$name" ]] && continue
 
     # Identifier is project/name, not just name: scion agent names are only
-    # unique within a project, and discovery runs across all projects (-a).
-    # Also what the pane's label is built from, so cross-project name
-    # collisions don't get treated as the same pane.
-    local identifier="${project}/${name}"
+    # unique within a project, and panes from different projects (opened by
+    # earlier refreshes under another `scion use`) share the workspace.
+    # Also what the pane's label is built from.
+    local identifier="${SCOPE_LABEL}/${name}"
 
     # Skip if a pane already exists for this agent.
     if echo "$existing" | grep -qxF "$identifier"; then
@@ -99,7 +103,7 @@ main() {
 
     local split_json pane_id
     if ! split_json="$("$HERDR_BIN" pane split --direction right \
-      --env "SCION_AGENT=${name}" --env "SCION_PROJECT=${project}")"; then
+      --env "SCION_AGENT=${name}" --env "SCION_PROJECT=${SCOPE_LABEL}")"; then
       log "Failed to split a pane for $identifier — skipping."
       continue
     fi
@@ -112,14 +116,14 @@ main() {
 
     "$HERDR_BIN" pane rename "$pane_id" "scion:${identifier}"
 
-    # scion resolves its target project from -g or CWD, then falls back to
-    # "global" — the wrapper needs the project (and, when known, its
-    # filesystem path) to attach the right agent rather than hitting
-    # "agent '<name>' not found in project 'global'".
+    # Pin the pane to the project resolved now: the wrapper gets the same
+    # -g/--hub values, so a later `scion use` elsewhere doesn't re-target
+    # an open pane on reconnect.
     local run_cmd
-    run_cmd="bash '${SCRIPT_DIR}/scion-attach-wrapper.sh' '${name}' --project '${project}'"
-    if [[ -n "$project_path" ]]; then
-      run_cmd+=" --project-path '${project_path}'"
+    run_cmd="bash $(printf '%q' "${SCRIPT_DIR}/scion-attach-wrapper.sh") $(printf '%q' "$name")"
+    run_cmd+=" --project $(printf '%q' "$SCOPE_PROJECT") --label $(printf '%q' "$SCOPE_LABEL")"
+    if [[ -n "$SCOPE_HUB" ]]; then
+      run_cmd+=" --hub $(printf '%q' "$SCOPE_HUB")"
     fi
     "$HERDR_BIN" pane run "$pane_id" "$run_cmd"
 
