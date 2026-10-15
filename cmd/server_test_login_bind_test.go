@@ -198,7 +198,9 @@ func TestResolveDaemonServerMode_TestLoginBind(t *testing.T) {
 // The checked-in callers that start a hub with --enable-test-login bind it
 // to loopback, so the confinement leaves them working: the Playwright e2e
 // harness (web/e2e/harness/hub.ts, which also pins the broker listener to
-// loopback when it enables one) and the perf wall-clock benchmark.
+// loopback when it enables one) and the perf wall-clock benchmark. The
+// checks read the scripts' source text, so a reformat of either file fails
+// here loudly (never silently); update the patterns with it.
 func TestTestLoginCallersBindLoopback(t *testing.T) {
 	read := func(rel string) string {
 		t.Helper()
@@ -210,16 +212,16 @@ func TestTestLoginCallersBindLoopback(t *testing.T) {
 	harness := read("web/e2e/harness/hub.ts")
 	require.Contains(t, harness, "'--enable-test-login'")
 	m := regexp.MustCompile(`'--host',\s*'([^']*)'`).FindAllStringSubmatch(harness, -1)
-	require.Len(t, m, 1, "one --host argument in the harness")
+	require.Len(t, m, 1, "one --host argument in web/e2e/harness/hub.ts (if the file was reformatted, update this pattern)")
 	assert.NoError(t, hub.CheckTestLoginBind(true, m[0][1]), "harness --host")
 	b := regexp.MustCompile(`SCION_SERVER_RUNTIMEBROKER_HOST = '([^']*)'`).FindAllStringSubmatch(harness, -1)
-	require.Len(t, b, 1, "the harness pins the broker listener host")
+	require.Len(t, b, 1, "web/e2e/harness/hub.ts pins the broker listener host (if the file was reformatted, update this pattern)")
 	assert.NoError(t, hub.CheckTestLoginBind(true, b[0][1]), "harness broker host")
 
 	bench := read("perf/bench/wallclock.sh")
 	require.Contains(t, bench, "--enable-test-login")
 	h := regexp.MustCompile(`--host (\S+)`).FindAllStringSubmatch(bench, -1)
-	require.Len(t, h, 1, "one --host argument in the benchmark")
+	require.Len(t, h, 1, "one --host argument in perf/bench/wallclock.sh (if the file was reformatted, update this pattern)")
 	assert.NoError(t, hub.CheckTestLoginBind(true, h[0][1]), "benchmark --host")
 	assert.False(t, strings.Contains(bench, "--enable-runtime-broker"), "the benchmark runs no broker listener")
 }

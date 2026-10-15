@@ -183,30 +183,22 @@ func resolveDaemonServerMode(cmd *cobra.Command) error {
 	return validateTestModeFlagsEarly(cmd)
 }
 
-// daemonListenConfig returns the server settings with the listen hosts the
-// --foreground child will use, so the parent can refuse a test-login bind
-// directly instead of reporting a generic start failure. It applies the
-// same overrides as loadAndReconcileConfig: the conduit flags, an explicit
-// --enable-runtime-broker (or the workstation default, on), and
-// applyServerListenHosts. If the settings cannot be loaded it returns nil,
-// which leaves the check to the child, where the same load error is
-// reported.
+// daemonListenConfig returns the server settings with the listeners the
+// --foreground child will open, so the parent can refuse a test-login bind
+// directly instead of reporting a generic start failure. It loads the same
+// settings and applies the same reconcileListeners as loadAndReconcileConfig.
+// applyWorkstationDefaults has not run yet in the parent, so in workstation
+// mode the broker and the hub count as on unless the flag turned them off.
+// If the settings cannot be loaded it returns nil, which leaves the check to
+// the child, where the same load error is reported.
 func daemonListenConfig(cmd *cobra.Command) *config.GlobalConfig {
 	cfg, err := config.LoadGlobalConfig(serverConfigPath)
 	if err != nil {
 		return nil
 	}
-	applyConduitFlagOverrides(cmd, cfg)
-	switch {
-	case !hostedMode:
-		// applyWorkstationDefaults has not run yet in the parent: the
-		// broker is on unless --enable-runtime-broker=false was given.
-		cfg.RuntimeBroker.Enabled = !cmd.Flags().Changed("enable-runtime-broker") || enableRuntimeBroker
-	case cmd.Flags().Changed("enable-runtime-broker"):
-		cfg.RuntimeBroker.Enabled = enableRuntimeBroker
-	}
+	brokerOn := enableRuntimeBroker || (!hostedMode && !cmd.Flags().Changed("enable-runtime-broker"))
 	hubOn := enableHub || (!hostedMode && !cmd.Flags().Changed("enable-hub"))
-	applyServerListenHosts(cfg, hostedMode, cmd.Flags().Changed("host"), hubHost, hubOn)
+	reconcileListeners(cmd, cfg, hostedMode, brokerOn, hubOn)
 	return cfg
 }
 

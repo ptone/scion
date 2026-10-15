@@ -1299,9 +1299,6 @@ func loadAndReconcileConfig(cmd *cobra.Command) (*config.GlobalConfig, error) {
 	if cmd.Flags().Changed("db") {
 		cfg.Database.URL = dbURL
 	}
-	if cmd.Flags().Changed("enable-runtime-broker") {
-		cfg.RuntimeBroker.Enabled = enableRuntimeBroker
-	}
 	if cmd.Flags().Changed("runtime-broker-port") {
 		cfg.RuntimeBroker.Port = runtimeBrokerPort
 	}
@@ -1314,9 +1311,7 @@ func loadAndReconcileConfig(cmd *cobra.Command) (*config.GlobalConfig, error) {
 	if cmd.Flags().Changed("storage-dir") {
 		cfg.Storage.LocalPath = storageDir
 	}
-	applyConduitFlagOverrides(cmd, cfg)
-
-	applyServerListenHosts(cfg, hostedMode, cmd.Flags().Changed("host"), hubHost, enableHub)
+	reconcileListeners(cmd, cfg, hostedMode, enableRuntimeBroker, enableHub)
 	if err := validateTestLoginListeners(enableTestLogin, cfg); err != nil {
 		return nil, err
 	}
@@ -1369,6 +1364,21 @@ func validateDebugEndpoints(hosted, enabled bool) error {
 	return nil
 }
 
+// reconcileListeners applies the flags that decide which TCP listeners the
+// server opens and where: the runtime broker switch (brokerEnabled, applied
+// in workstation mode or when --enable-runtime-broker was given), the conduit
+// flags (applyConduitFlagOverrides) and the listen hosts
+// (applyServerListenHosts). loadAndReconcileConfig and the daemon parent
+// (daemonListenConfig) share it, so the parent's test-login check sees the
+// listeners the --foreground child will open.
+func reconcileListeners(cmd *cobra.Command, cfg *config.GlobalConfig, hosted, brokerEnabled, hubEnabled bool) {
+	if !hosted || cmd.Flags().Changed("enable-runtime-broker") {
+		cfg.RuntimeBroker.Enabled = brokerEnabled
+	}
+	applyConduitFlagOverrides(cmd, cfg)
+	applyServerListenHosts(cfg, hosted, cmd.Flags().Changed("host"), hubHost, hubEnabled)
+}
+
 // validateTestLoginListeners refuses --enable-test-login unless every TCP
 // listener this server process opens is bound to loopback: the Hub API and
 // web server (server.hub.host, --host), the co-located runtime broker when
@@ -1382,22 +1392,26 @@ func validateTestLoginListeners(enabled bool, cfg *config.GlobalConfig) error {
 	if !enabled || cfg == nil {
 		return nil
 	}
+	refuse := func(listener string, err error) error {
+		return fmt.Errorf("--enable-test-login: %s: %w. Bind every listener to loopback, "+
+			"or drop --enable-test-login and issue test identities (--test-mode) on a shared hub", listener, err)
+	}
 	if err := hub.CheckTestLoginBind(true, cfg.Hub.Host); err != nil {
-		return fmt.Errorf("hub API and web listener (--host, server.hub.host): %w", err)
+		return refuse("hub API and web listener (--host, server.hub.host)", err)
 	}
 	if cfg.RuntimeBroker.Enabled {
 		if err := hub.CheckTestLoginBind(true, cfg.RuntimeBroker.Host); err != nil {
-			return fmt.Errorf("runtime broker listener (server.broker.host): %w", err)
+			return refuse("runtime broker listener (server.broker.host)", err)
 		}
 	}
 	if listen := cfg.Hub.Conduit.InternalListen; listen != "" {
 		const what = "conduit internal listener (server.hub.conduit.internal_listen)"
 		host, _, err := net.SplitHostPort(listen)
 		if err != nil {
-			return fmt.Errorf("%s: %w: %q is not a host:port address", what, hub.ErrTestLoginNonLoopback, listen)
+			return refuse(what, fmt.Errorf("%w: %q is not a host:port address", hub.ErrTestLoginNonLoopback, listen))
 		}
 		if bindErr := hub.CheckTestLoginBind(true, host); bindErr != nil {
-			return fmt.Errorf("%s: %w", what, bindErr)
+			return refuse(what, bindErr)
 		}
 	}
 	return nil

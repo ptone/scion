@@ -610,7 +610,7 @@ func IsLoopbackHost(host string) bool {
 // provider, so it is confined to throwaway hubs whose every listener is
 // bound to loopback. Hubs shared by several users issue test identities
 // (--test-mode) instead.
-var ErrTestLoginNonLoopback = errors.New("--enable-test-login requires a loopback listen address")
+var ErrTestLoginNonLoopback = errors.New("test-login requires a loopback listen address")
 
 // CheckTestLoginBind returns an error wrapping ErrTestLoginNonLoopback when
 // test-login is enabled and host is not provably loopback. It returns nil
@@ -633,8 +633,7 @@ func CheckTestLoginBind(enabled bool, host string) error {
 	if shown == "" {
 		shown = "an empty host (every interface)"
 	}
-	return fmt.Errorf("%w: %s is not a loopback address; bind to 127.0.0.1, ::1 or localhost, "+
-		"or drop --enable-test-login and issue test identities with --test-mode on a shared hub", ErrTestLoginNonLoopback, shown)
+	return fmt.Errorf("%w: %s is not a loopback address (127.0.0.1, ::1 or localhost)", ErrTestLoginNonLoopback, shown)
 }
 
 // NewWebServer creates a new web frontend server.
