@@ -93,12 +93,13 @@ func testModeRequested() bool {
 
 // validateTestModeFlagsEarly runs the checks that need only the parsed
 // flags: a removed flag is refused (naming --test-mode), super-admin is
-// refused (G3) and an explicit --production with any level but off is
-// refused (G5). It runs before config is loaded, in the daemon parent as
-// well as the foreground process, so a refused flag never reaches a
-// re-exec. A non-empty --test-mode value that is not recognised is refused
-// too (the parser resolves it to off, so nothing would be granted, but the
-// operator asked for something); an empty value is off.
+// refused unless the test-admin policy classification is complete (G3),
+// and an explicit --production with any level but off is refused (G5). It
+// runs before config is loaded, in the daemon parent as well as the
+// foreground process, so a refused flag never reaches a re-exec. A
+// non-empty --test-mode value that is not recognised is refused too (the
+// parser resolves it to off, so nothing would be granted, but the operator
+// asked for something); an empty value is off.
 func validateTestModeFlagsEarly(cmd *cobra.Command) error {
 	for _, name := range removedTestFlags {
 		if f := cmd.Flags().Lookup(name); f != nil && f.Changed {
@@ -112,7 +113,10 @@ func validateTestModeFlagsEarly(cmd *cobra.Command) error {
 		return nil
 	}
 	if testModeLevel == hub.TestModeSuperAdmin {
-		return hub.ErrTestSuperAdminRequiresPolicyRegistry
+		// G3: the super-admin kind needs a complete test-admin policy.
+		if err := testAdminPolicyComplete(); err != nil {
+			return fmt.Errorf("%w: %v", hub.ErrTestSuperAdminRequiresPolicyRegistry, err)
+		}
 	}
 	if productionFlagIsExplicit {
 		return fmt.Errorf("--test-mode=%s: %w", testModeLevel, hub.ErrTestAdminProductionFlag)
@@ -148,13 +152,28 @@ type testModeInputs struct {
 
 	// ReadMarker reads the test_infra_marker row (G6).
 	ReadMarker func() (*testinfra.Marker, error)
+
+	// PolicyComplete reports whether the test-admin policy classification
+	// is complete (G3, super-admin only). Nil means
+	// hub.TestAdminPolicyComplete.
+	PolicyComplete func() error
+
+	// AdminWebSessions is the value of
+	// server.hub.test_identities.admin_web_sessions: the hub id the admin
+	// web session setting is bound to, or "" (off). Phase WS4.
+	AdminWebSessions string
 }
+
+// testAdminPolicyComplete is the G3 check. A variable only so tests can
+// substitute an incomplete classification.
+var testAdminPolicyComplete = hub.TestAdminPolicyComplete
 
 // testModeResolution is what a resolved level sets on hub.ServerConfig.
 type testModeResolution struct {
 	EnableTestIdentities bool
 	TestAdminGate        hub.TestAdminGateConfig
 	TestMode             hub.TestModeConfig
+	TestAdminWebSessions hub.TestAdminWebSessionsConfig
 }
 
 // resolveTestMode checks every precondition of the requested level and
@@ -162,14 +181,28 @@ type testModeResolution struct {
 // member preconditions (G1 hub and user store, G5 no explicit
 // --production, G2 hub id binding, G4 hub class, G6 marker); admin adds G10
 // (not a workstation hub), G8 (no federation) and G7 (no shared or
-// pre-configured signing key); super-admin is refused (G3). Any unmet
+// pre-configured signing key); super-admin is refused unless the
+// test-admin policy classification is complete (G3). Any unmet
 // precondition refuses startup with a named error (hub.Err*): a level is
 // never lowered. Off returns the zero resolution. hub.New re-checks the
 // result and verifies the actual signing-key sources (G7) before it
 // captures the gate.
+//
+// The admin web session setting (server.hub.test_identities.admin_web_sessions,
+// WS4) refuses startup unless the level is admin or super-admin and its
+// value is the resolved hub id; it is never ignored and never lowers the
+// level. The Helm chart renders only --test-mode=member (G9), so a Helm
+// hub with the setting refuses to start.
 func resolveTestMode(in testModeInputs) (testModeResolution, error) {
 	var off testModeResolution
 	level := in.Level
+	if in.AdminWebSessions != "" && !level.IsAdminLevel() {
+		shown := level
+		if shown == "" {
+			shown = hub.TestModeOff
+		}
+		return off, fmt.Errorf("%s with --test-mode=%s: %w", config.TestIdentityAdminWebSessionsKey, shown, hub.ErrTestAdminWebSessionsBelowAdmin)
+	}
 	if level == "" || level == hub.TestModeOff {
 		return off, nil
 	}
@@ -179,8 +212,15 @@ func resolveTestMode(in testModeInputs) (testModeResolution, error) {
 	switch level {
 	case hub.TestModeMember, hub.TestModeAdmin:
 	case hub.TestModeSuperAdmin:
-		// G3: the super-admin kind needs the A2 policy registry.
-		return refuse(hub.ErrTestSuperAdminRequiresPolicyRegistry)
+		// G3: the super-admin kind is admitted only by a binary whose
+		// test-admin policy classification is complete.
+		complete := in.PolicyComplete
+		if complete == nil {
+			complete = testAdminPolicyComplete
+		}
+		if err := complete(); err != nil {
+			return refuse(fmt.Errorf("%w: %v", hub.ErrTestSuperAdminRequiresPolicyRegistry, err))
+		}
 	default:
 		return refuse(hub.ErrTestModeInconsistent)
 	}
@@ -221,6 +261,9 @@ func resolveTestMode(in testModeInputs) (testModeResolution, error) {
 			return refuse(hub.ErrTestAdminPreconfiguredSigningKey)
 		}
 		preconditions = append(preconditions, hub.TestModeAdminPreconditions()...)
+		if level == hub.TestModeSuperAdmin {
+			preconditions = append(preconditions, hub.TestModePreconditionPolicyComplete)
+		}
 	}
 	// G6: the datastore's own test marker for this hub. Read last: it is
 	// the only check that touches the database.
@@ -252,9 +295,19 @@ func resolveTestMode(in testModeInputs) (testModeResolution, error) {
 			ProductionFlag: in.ProductionFlagExplicit,
 		},
 	}
-	if level == hub.TestModeAdmin {
+	if in.AdminWebSessions != "" {
+		// The level is admin or super-admin (checked first). The binding is
+		// this hub's resolved id, as for --test-mode itself (G2).
+		if in.AdminWebSessions != in.ResolvedHubID {
+			return refuse(fmt.Errorf("%w: %s is %q, resolved hub id %q", hub.ErrTestAdminWebSessionsHubIDMismatch,
+				config.TestIdentityAdminWebSessionsKey, in.AdminWebSessions, in.ResolvedHubID))
+		}
+		res.TestAdminWebSessions = hub.TestAdminWebSessionsConfig{HubID: in.AdminWebSessions}
+	}
+	if level.IsAdminLevel() {
 		res.TestAdminGate = hub.TestAdminGateConfig{
 			HubAdmin:        true,
+			SuperAdmin:      level == hub.TestModeSuperAdmin,
 			HubID:           in.ResolvedHubID,
 			HubClass:        in.HubClass,
 			MarkerHubID:     marker.HubID,
@@ -279,6 +332,7 @@ func testModeInputsFor(ctx context.Context, cfg *config.GlobalConfig, hubCfg hub
 		Federation:              hubCfg.Federation,
 		SharedSigningSecret:     hubCfg.SharedSigningSecret != "",
 		PreconfiguredSigningKey: len(hubCfg.UserTokenConfig.SigningKey) > 0 || len(hubCfg.AgentTokenConfig.SigningKey) > 0,
+		AdminWebSessions:        cfg.Hub.TestIdentityAdminWebSessions(),
 		ReadMarker: func() (*testinfra.Marker, error) {
 			if entClient == nil {
 				return nil, testinfra.ErrMarkerAbsent

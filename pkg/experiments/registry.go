@@ -49,7 +49,7 @@ const (
 var validStages = map[Stage]bool{StageAlpha: true, StageBeta: true}
 
 // NamePattern is the required shape of an experiment name, e.g.
-// "web.terminal_workspace" or "hub.foo.bar". pkg/config/opsettings uses the
+// "web.agent_edit" or "hub.foo.bar". pkg/config/opsettings uses the
 // same pattern in its JSON schema for the "experiments" section, and pkg/hub
 // uses ValidName to apply the identical rule to admin PUT payloads.
 const NamePattern = `^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`
@@ -64,12 +64,12 @@ const reviewByLayout = "2006-01-02"
 
 // Experiment describes one hub-wide feature flag.
 type Experiment struct {
-	// Name is the stable identifier, e.g. "web.terminal_workspace". It must
+	// Name is the stable identifier, e.g. "web.agent_edit". It must
 	// match NamePattern. "web." is the convention for UI-only gates, "hub."
 	// for anything that gates server behaviour (Layers is the source of
 	// truth; the prefix is only a readability aid).
 	Name string
-	// Title is a short UI label, e.g. "Persistent terminal workspace".
+	// Title is a short UI label, e.g. "Edit agent".
 	Title string
 	// Description is one or two sentences shown in the Experiments tab.
 	Description string
@@ -134,6 +134,14 @@ const FlatRuntimeBrokers = "hub.flat_runtime_brokers"
 // every artifact surface.
 const Artifacts = "hub.artifacts"
 
+// AttachmentArtifacts gates storing web-chat attachments as message-scoped
+// artifacts (ptone/scion#4595): while it is on, POST /api/v1/chat/attachments
+// stores each file through the artifact service, which must be installed
+// with its settings section enabled (hub.artifacts need not be on). The hub
+// checks it on every upload. Attachments stored while it was on stay
+// readable after it is turned off.
+const AttachmentArtifacts = "hub.attachment_artifacts"
+
 // ChatScheduledSend gates scheduled send in native web chat: the Schedule
 // send menu item and pending-message banners in the web UI, the hub's
 // /api/v1/chat/conversations/{key}/scheduled routes (404 while off), and
@@ -172,6 +180,13 @@ const FederationProjectVisitors = "federation.project_visitors"
 // personal groups into project groups, and the web rail's project groups.
 // Turning it off hides the feature but keeps every stored group.
 const ChatThreadGroups = "hub.chat_thread_groups"
+
+// AgentPlugins gates native install of Agent Plugins 1.0.0 bundles declared
+// in a template's agent_plugins. The hub sends it to the broker at each
+// dispatch; outside broker mode the settings key local_experiments decides.
+// It is checked at provisioning and at every start, so turning it off
+// removes Scion-installed plugins at the next start.
+const AgentPlugins = "hub.agent_plugins"
 
 // AsyncAgentLaunch gates asynchronous agent create (ptone/scion#4991): the
 // hub sends a create to the broker as an async launch only while it is on
@@ -229,17 +244,6 @@ var compiled = []Experiment{
 		ReviewBy:    "2026-11-30",
 	},
 	{
-		Name:        "web.terminal_workspace",
-		Title:       "Persistent terminal workspace",
-		Description: "Opens agent terminals in the persistent /terminals workspace instead of the legacy single-terminal page.",
-		Default:     true,
-		Layers:      []Layer{LayerWeb},
-		Stage:       StageBeta,
-		Issue:       "ptone/scion#1662",
-		Owner:       "web",
-		ReviewBy:    "2026-12-31",
-	},
-	{
 		Name:        "web.gcs_links",
 		Title:       "gs:// link previews",
 		Description: "Linkifies a gs://bucket/object URI an agent posts in chat and lets the viewer fetch and preview that object through the hub. Gates both the linkifier (LayerWeb) and the GET /api/v1/gcs/object endpoint itself (LayerServer): the endpoint also requires a configured GCP token generator, so this experiment alone does not make links fetchable on a hub without one.",
@@ -282,6 +286,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#3202",
 		Owner:       "artifacts",
 		ReviewBy:    "2027-01-05",
+	},
+	{
+		Name:        AttachmentArtifacts,
+		Title:       "Attachments as artifacts",
+		Description: "Stores files uploaded in web chat in the artifact service as attachments of the message they are sent in: each one is readable exactly by the readers of that message, and is removed when the message is deleted. Gates the hub's attachment upload path (LayerServer; it also needs the artifact service with its settings section enabled, but not hub.artifacts) and is reserved for the web surfaces that follow (LayerWeb). Attachments stored while it was on stay readable after it is turned off.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb, LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#4594",
+		Owner:       "artifacts",
+		ReviewBy:    "2027-01-12",
 	},
 	{
 		Name:        "hub.conduit",
@@ -327,13 +342,30 @@ var compiled = []Experiment{
 		Owner:       "native-chat",
 		ReviewBy:    "2027-01-11",
 	},
+	{
+		Name:        AgentPlugins,
+		Title:       "Agent Plugins (native install)",
+		Description: "Installs Agent Plugins 1.0.0 bundles declared in a template's agent_plugins into harnesses that support them natively (codex, copilot, muse-code, claude). While off, agent_plugins is ignored with a start warning and previously installed plugins are removed at the next start.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#4933",
+		Owner:       "harness",
+		ReviewBy:    "2027-01-13",
+	},
 }
 
 // compiledRetired lists names that PUT rejects true/false for, ignores and
 // prunes if still stored, and that must never be reused.
+//
+// Retiring or graduating an experiment also requires removing its entry from
+// testAdminExperimentPolicy in pkg/hub/test_admin_policy.go; otherwise the
+// TestAdminPolicy classification check reports a stale entry and fails.
 var compiledRetired = []string{
 	"web.access_boundaries_read",
 	"web.access_boundaries_authoring",
+	// Graduated: the terminal workspace is always on (ptone/scion#4917).
+	"web.terminal_workspace",
 }
 
 // Registry is an immutable, validated set of experiments. It is the only way
@@ -418,6 +450,37 @@ func (r *Registry) Lookup(name string) (Experiment, bool) {
 
 // IsRetired reports whether name was retired and must never resolve again.
 func (r *Registry) IsRetired(name string) bool { return r.retired[name] }
+
+// Resolve returns the effective value of the named experiment given the
+// admin overrides and whether the overrides document is malformed: an
+// unknown or retired name is off; a malformed document turns off every
+// experiment with a server layer (fail closed); an override wins over the
+// registry default. The hub and a separate relay both resolve through it.
+func (r *Registry) Resolve(name string, overrides map[string]bool, malformed bool) bool {
+	exp, ok := r.Lookup(name)
+	if !ok {
+		return false
+	}
+	if malformed && exp.HasLayer(LayerServer) {
+		return false
+	}
+	if v, set := overrides[name]; set {
+		return v
+	}
+	return exp.Default
+}
+
+// Retired returns every retired name in sorted order. The returned slice is
+// a copy. Tests use it to check that a stored override for any retired name
+// is ignored and pruned, without naming each retired experiment.
+func (r *Registry) Retired() []string {
+	out := make([]string, 0, len(r.retired))
+	for name := range r.retired {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
 
 // defaultRegistry builds the production registry exactly once.
 var defaultRegistry = sync.OnceValue(func() *Registry {

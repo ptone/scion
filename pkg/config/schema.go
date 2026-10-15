@@ -224,6 +224,18 @@ func ValidateAgentConfig(data []byte, schemaVersion string) ([]ValidationError, 
 // wrong types, enums and ranges anywhere. The known set is the binary's own
 // embedded schema (see harnessConfigKnownKeys).
 func ValidateHarnessConfig(data []byte) (errs []ValidationError, unknownKeys []string, err error) {
+	return validateHarnessConfigWith(data, func(wrapped []byte) ([]ValidationError, error) {
+		return ValidateSettings(wrapped, "1")
+	})
+}
+
+// validateHarnessConfigWith wraps a harness-config config.yaml in a v1
+// settings document and validates it with validateSettings. Tests pass a
+// validator for an older settings schema (see
+// TestHarnessConfigs_ValidateAgainstPre3698Schema). Unknown top-level keys
+// are stripped against the binary's own embedded schema before
+// validateSettings runs, as described on ValidateHarnessConfig.
+func validateHarnessConfigWith(data []byte, validateSettings func([]byte) ([]ValidationError, error)) (errs []ValidationError, unknownKeys []string, err error) {
 	var doc interface{}
 	if err := yaml.Unmarshal(data, &doc); err != nil {
 		return nil, nil, fmt.Errorf("failed to parse harness config: %w", err)
@@ -245,7 +257,7 @@ func ValidateHarnessConfig(data []byte) (errs []ValidationError, unknownKeys []s
 		return nil, nil, fmt.Errorf("failed to prepare harness config for validation: %w", err)
 	}
 
-	errs, err = ValidateSettings(wrappedData, "1")
+	errs, err = validateSettings(wrappedData)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -362,7 +374,13 @@ func validateAgainstSchema(data []byte, schemaVersion string, schemaFiles map[st
 	if err != nil {
 		return nil, fmt.Errorf("failed to read embedded schema: %w", err)
 	}
+	return validateDocAgainstSchemaJSON(doc, schemaPath, schemaData)
+}
 
+// validateDocAgainstSchemaJSON validates doc (already converted by
+// convertYAMLToJSON) against the JSON Schema schemaData, registered under
+// resource name schemaPath.
+func validateDocAgainstSchemaJSON(doc interface{}, schemaPath string, schemaData []byte) ([]ValidationError, error) {
 	var schemaDoc interface{}
 	if err := json.Unmarshal(schemaData, &schemaDoc); err != nil {
 		return nil, fmt.Errorf("failed to parse schema: %w", err)
