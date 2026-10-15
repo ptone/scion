@@ -756,7 +756,7 @@ func TestTIWebIAP_DriverIsNeverAUserOnOtherPaths(t *testing.T) {
 	})
 
 	t.Run("test-login", func(t *testing.T) {
-		e3 := newTIIAPEnv(t, []string{userDriver}, func(c *WebServerConfig) { c.EnableTestLogin = true })
+		e3 := newTIIAPEnv(t, []string{userDriver}, func(c *WebServerConfig) { c.EnableTestLogin, c.Host = true, "127.0.0.1" })
 		login := func(email string) *httptest.ResponseRecorder {
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/test-login", strings.NewReader(`{"email":"`+email+`","role":"member"}`))
 			req.Header.Set("Content-Type", "application/json")

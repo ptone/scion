@@ -189,7 +189,8 @@ type WebServerConfig struct {
 	MaintenanceMessage string
 	// EnableTestLogin enables the POST /api/v1/auth/test-login endpoint
 	// for integration testing. Disabled by default; must never be enabled
-	// in production.
+	// in production. It takes effect only with a loopback Host: NewWebServer
+	// turns it off otherwise (see CheckTestLoginBind).
 	EnableTestLogin bool
 	// EnableDebugEndpoints serves the GET /auth/debug diagnostic endpoint.
 	// Disabled by default and independent of the log level. Intended for
@@ -603,6 +604,36 @@ func IsLoopbackHost(host string) bool {
 	return config.IsLoopbackHost(host)
 }
 
+// ErrTestLoginNonLoopback is returned when --enable-test-login is combined
+// with a listen address that is not loopback. test-login signs in as any
+// email through a challenge token rather than the configured identity
+// provider, so it is confined to throwaway hubs whose every listener is
+// bound to loopback. Hubs shared by several users issue test identities
+// (--test-mode) instead.
+var ErrTestLoginNonLoopback = errors.New("--enable-test-login requires a loopback listen address")
+
+// CheckTestLoginBind returns an error wrapping ErrTestLoginNonLoopback when
+// test-login is enabled and host is not provably loopback. It returns nil
+// when test-login is disabled, whatever the host.
+//
+// It fails closed and never resolves names: only a loopback IP literal
+// (127.0.0.0/8, ::1) or the exact name "localhost" passes (IsLoopbackHost).
+// An empty host is the default bind, every interface, and is refused, as
+// are 0.0.0.0, ::, any other address, and every other hostname, even one
+// that resolves to loopback today: a lookup at startup proves nothing about
+// the address the listener later binds, and the name's records can change.
+func CheckTestLoginBind(enabled bool, host string) error {
+	if !enabled || IsLoopbackHost(host) {
+		return nil
+	}
+	shown := host
+	if shown == "" {
+		shown = "an empty host (every interface)"
+	}
+	return fmt.Errorf("%w: %s is not a loopback address; bind to 127.0.0.1, ::1 or localhost, "+
+		"or drop --enable-test-login and issue test identities with --test-mode on a shared hub", ErrTestLoginNonLoopback, shown)
+}
+
 // NewWebServer creates a new web frontend server.
 func NewWebServer(cfg WebServerConfig) *WebServer {
 	if cfg.Port == 0 {
@@ -619,6 +650,16 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 		log.Fatalf("dev auth cannot be enabled when the server is bound to a non-loopback address (%s). "+
 			"Dev auth auto-logs in all requests as admin and must only be used on localhost. "+
 			"Either bind to 127.0.0.1/::1/localhost (--host 127.0.0.1) or disable dev auth.", cfg.Host)
+	}
+
+	// Defense-in-depth for test-login, mirroring the dev auth guard above:
+	// the server command refuses --enable-test-login on a non-loopback bind
+	// (validateTestLoginListeners in cmd), and a WebServer constructed any other
+	// way fails closed here: test-login stays disabled and the handler
+	// answers 403, as when the flag is off.
+	if err := CheckTestLoginBind(cfg.EnableTestLogin, cfg.Host); err != nil {
+		slog.Error("test-login disabled: web server listen address", "error", err)
+		cfg.EnableTestLogin = false
 	}
 
 	ws := &WebServer{

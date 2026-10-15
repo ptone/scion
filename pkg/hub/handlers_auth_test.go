@@ -2069,7 +2069,7 @@ func TestWebLogin_Invited_ConfigAdminPlaceholder_GetsDefault(t *testing.T) {
 // against a WebServer backed by s.
 func webTestLogin(t *testing.T, s store.Store, email, role string) {
 	t.Helper()
-	ws := NewWebServer(WebServerConfig{EnableTestLogin: true})
+	ws := NewWebServer(WebServerConfig{EnableTestLogin: true, Host: "127.0.0.1"})
 	tokenSvc, err := NewUserTokenService(UserTokenConfig{})
 	require.NoError(t, err)
 	ws.SetUserTokenService(tokenSvc)

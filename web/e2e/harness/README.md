@@ -32,7 +32,9 @@ global-teardown.ts       ← Kills the hub, cleans up temp files
 2. `make build` compiles the Go binary to `build/scion`.
 3. The binary is started with:
    - `--foreground` (no daemonization)
-   - `--host 127.0.0.1` (loopback only — required for dev-auth)
+   - `--host 127.0.0.1` (loopback only — required for dev-auth and for
+     test-login; with a Runtime Broker the harness also pins its listener to
+     127.0.0.1)
    - `--web-port <ephemeral>` (random free port)
    - `--dev-auth` (auto-login as admin on first page load)
    - `--enable-test-login` (programmatic session creation endpoint)
@@ -54,7 +56,11 @@ session cookie for the development admin user (UUID
 For tests that need non-admin identities or multiple concurrent users:
 
 1. The hub is started with `--enable-test-login` and a known
-   `--session-secret`.
+   `--session-secret`. The server refuses `--enable-test-login` unless
+   every listener is on loopback, so this works only on a throwaway local
+   hub like the harness's. On a hub shared by several users, use test
+   identities and their browser sessions instead (below, and
+   `docs-site/src/content/docs/contributing/test-identity-browser-sessions.md`).
 2. The test harness **derives the user-signing key** from the session secret
    using the same algorithm as the Go hub:
    ```

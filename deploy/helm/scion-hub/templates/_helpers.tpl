@@ -1915,7 +1915,10 @@ Exactly one list is.
    WebServer.handleTestLogin (pkg/hub/handlers_test_login.go) returns 403 unless it is set, after which
    the handler mints a user session behind a challenge token rather than the
    configured identity provider. Also warned about in initWebServer, and the same
-   answer applies.
+   answer applies. The binary refuses it too: validateTestLoginListeners
+   (cmd/server_foreground.go) stops startup unless every listener is on loopback,
+   and this chart always renders --host 0.0.0.0, so the pod would not start
+   (ptone/scion#4240 Phase 4). There is no chart value for it.
 
    --test-mode=<level>:<hub id> (cmd/server_test_admin_gate.go) selects the
    hub-issued test identity level of a designated test hub (ptone/scion#4240):

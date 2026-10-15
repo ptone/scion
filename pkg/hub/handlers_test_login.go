@@ -60,14 +60,17 @@ type TestLoginResponse struct {
 
 // handleTestLogin handles POST /api/v1/auth/test-login.
 // It provisions a test user and creates a web session, bypassing OAuth.
-// Gated behind --enable-test-login (WebServerConfig.EnableTestLogin).
+// Gated behind --enable-test-login (WebServerConfig.EnableTestLogin), and
+// only on a web server bound to a loopback address.
 func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
-	if !ws.config.EnableTestLogin {
+	// The bind check repeats NewWebServer's: test-login answers only on a
+	// web server bound to a loopback address (ErrTestLoginNonLoopback).
+	if !ws.config.EnableTestLogin || CheckTestLoginBind(true, ws.config.Host) != nil {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "test-login is not enabled", nil)
 		return
 	}

@@ -118,3 +118,89 @@ func TestHandleTestLogin_ScionTestInvalidStillWorks(t *testing.T) {
 	rec = postTestLogin(t, ws, svc, `{"email":"someone@example.invalid","role":"member"}`)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
+
+// testLoginBindCases is the Phase 4 bind table (ptone/scion#4240): test-login
+// is served only when the listen address is provably loopback. Names are
+// never resolved, so every hostname other than the exact "localhost" is
+// refused, including ones that resolve to loopback.
+var testLoginBindCases = []struct {
+	host  string
+	start bool
+}{
+	// MUST START.
+	{"127.0.0.1", true},
+	{"::1", true},
+	{"localhost", true},
+	{"127.0.0.53", true}, // all of 127.0.0.0/8 is loopback
+	// MUST REFUSE.
+	{"", false}, // unset: every interface
+	{"0.0.0.0", false},
+	{"::", false},
+	{"192.168.1.10", false},
+	{"10.0.0.5", false},
+	{"2001:db8::1", false},
+	{"example.com", false},
+	{"localhost.localdomain", false},
+	{"localhost.", false},
+	{"LOCALHOST", false},
+	{"[::1]", false},
+	{"127.0.0.1:8080", false},
+	{" 127.0.0.1", false},
+}
+
+func TestCheckTestLoginBind(t *testing.T) {
+	for _, tc := range testLoginBindCases {
+		t.Run("host="+tc.host, func(t *testing.T) {
+			err := CheckTestLoginBind(true, tc.host)
+			if tc.start {
+				assert.NoError(t, err)
+			} else {
+				assert.ErrorIs(t, err, ErrTestLoginNonLoopback)
+			}
+			// Disabled test-login never refuses, whatever the host.
+			assert.NoError(t, CheckTestLoginBind(false, tc.host))
+		})
+	}
+}
+
+// The NewWebServer defense-in-depth check: on a host that is not loopback,
+// test-login stays disabled and the handler answers 403 for any email,
+// including the scion-test.invalid domain test-login callers use (DEC-1(c):
+// no non-issuance login path on a hub that is not loopback-only). On a
+// loopback host it works.
+func TestNewWebServer_TestLoginBind(t *testing.T) {
+	for _, tc := range testLoginBindCases {
+		t.Run("host="+tc.host, func(t *testing.T) {
+			ws := NewWebServer(WebServerConfig{EnableTestLogin: true, Host: tc.host})
+			assert.Equal(t, tc.start, ws.config.EnableTestLogin)
+			svc, err := NewUserTokenService(UserTokenConfig{})
+			require.NoError(t, err)
+			ws.SetUserTokenService(svc)
+			mockStore := newTestLoginStore()
+			ws.SetStore(mockStore)
+
+			rec := postTestLogin(t, ws, svc, `{"email":"test-fixture-0123456789abcdef@scion-test.invalid","role":"member"}`)
+			if tc.start {
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				return
+			}
+			assertTestLoginJSONError(t, rec, http.StatusForbidden, ErrCodeForbidden, "test-login is not enabled")
+			assert.Empty(t, mockStore.users, "no user may be created")
+			assert.Empty(t, rec.Result().Cookies(), "no session cookie")
+		})
+	}
+}
+
+// The handler repeats the bind check, so a WebServer whose host changes
+// after construction does not serve test-login either.
+func TestHandleTestLogin_RefusesNonLoopbackHost(t *testing.T) {
+	ws, svc := newTestLoginWebServer(t, true)
+	require.True(t, ws.config.EnableTestLogin)
+	ws.config.Host = "0.0.0.0"
+	mockStore := ws.store.(*testLoginStore)
+
+	rec := postTestLogin(t, ws, svc, `{"email":"someone@example.invalid","role":"admin"}`)
+
+	assertTestLoginJSONError(t, rec, http.StatusForbidden, ErrCodeForbidden, "test-login is not enabled")
+	assert.Empty(t, mockStore.users)
+}

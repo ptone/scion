@@ -98,7 +98,7 @@ The harness lives in `perf/bench/` and in `web/e2e-perf/`:
 | Report schema | `perf/bench/internal/benchout/schema.go` | The JSON types both Go tools write. |
 
 :::caution
-Run all of this against a **throwaway local Hub only**. The README's [Isolate the hub environment](https://github.com/GoogleCloudPlatform/scion/blob/main/perf/bench/README.md#isolate-the-hub-environment-required) section explains why the Hub must be started with a scrubbed environment (`env -i`, metadata server pointed at a dead address) and how to check that the isolation worked. Never pass `--enable-test-login` to anything but a disposable Hub.
+Run all of this against a **throwaway local Hub only**. The README's [Isolate the hub environment](https://github.com/GoogleCloudPlatform/scion/blob/main/perf/bench/README.md#isolate-the-hub-environment-required) section explains why the Hub must be started with a scrubbed environment (`env -i`, metadata server pointed at a dead address) and how to check that the isolation worked. Never pass `--enable-test-login` to anything but a disposable Hub. The server also refuses to start with it unless every listener is on loopback, which is why the commands below bind `--host 127.0.0.1`.
 :::
 
 ### 1. Build the tools

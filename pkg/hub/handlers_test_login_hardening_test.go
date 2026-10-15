@@ -43,7 +43,7 @@ const fixtureTestLoginEmail = "testlogin-fixture@example.com"
 func newRealStoreTestLogin(t *testing.T) (*WebServer, *UserTokenService, store.Store) {
 	t.Helper()
 	_, s := testServer(t)
-	ws := NewWebServer(WebServerConfig{EnableTestLogin: true})
+	ws := NewWebServer(WebServerConfig{EnableTestLogin: true, Host: "127.0.0.1"})
 	tokenSvc, err := NewUserTokenService(UserTokenConfig{})
 	require.NoError(t, err)
 	ws.SetUserTokenService(tokenSvc)

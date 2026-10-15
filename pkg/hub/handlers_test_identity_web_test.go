@@ -1503,7 +1503,7 @@ func TestTestIdentityWeb_ProxyRedeemLimitedBeforeAudit(t *testing.T) {
 // cleanly: the test identity values and marker cookie are dropped, and the
 // new human session works on the next request (N2).
 func TestTestIdentityWeb_LoginReplacesTestIdentitySession(t *testing.T) {
-	e := newTIWebEnv(t, func(c *WebServerConfig) { c.EnableTestLogin = true })
+	e := newTIWebEnv(t, func(c *WebServerConfig) { c.EnableTestLogin, c.Host = true, "127.0.0.1" })
 	fx := e.issue()
 	jar := e.login(fx.Identity.ID)
 

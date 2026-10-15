@@ -25,6 +25,7 @@ import (
 	"io/fs"
 	"log"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -1316,6 +1317,9 @@ func loadAndReconcileConfig(cmd *cobra.Command) (*config.GlobalConfig, error) {
 	applyConduitFlagOverrides(cmd, cfg)
 
 	applyServerListenHosts(cfg, hostedMode, cmd.Flags().Changed("host"), hubHost, enableHub)
+	if err := validateTestLoginListeners(enableTestLogin, cfg); err != nil {
+		return nil, err
+	}
 
 	// Fallback to legacy environment variable
 	if cfg.Storage.Bucket == "" && hostedMode {
@@ -1361,6 +1365,40 @@ func isHADeployment(cfg *config.GlobalConfig) bool {
 func validateDebugEndpoints(hosted, enabled bool) error {
 	if hosted && enabled {
 		return fmt.Errorf("--enable-debug-endpoints is not allowed in hosted mode; diagnostic endpoints are for local development only")
+	}
+	return nil
+}
+
+// validateTestLoginListeners refuses --enable-test-login unless every TCP
+// listener this server process opens is bound to loopback: the Hub API and
+// web server (server.hub.host, --host), the co-located runtime broker when
+// it is enabled (server.broker.host), and the conduit internal listener
+// when one is configured (server.hub.conduit.internal_listen). A separate
+// port or listener on another interface is refused like the main bind.
+// The rule is hub.CheckTestLoginBind (loopback IP literals and "localhost"
+// only, no name resolution). It is independent of --test-mode: no test-mode
+// level relaxes it.
+func validateTestLoginListeners(enabled bool, cfg *config.GlobalConfig) error {
+	if !enabled || cfg == nil {
+		return nil
+	}
+	if err := hub.CheckTestLoginBind(true, cfg.Hub.Host); err != nil {
+		return fmt.Errorf("hub API and web listener (--host, server.hub.host): %w", err)
+	}
+	if cfg.RuntimeBroker.Enabled {
+		if err := hub.CheckTestLoginBind(true, cfg.RuntimeBroker.Host); err != nil {
+			return fmt.Errorf("runtime broker listener (server.broker.host): %w", err)
+		}
+	}
+	if listen := cfg.Hub.Conduit.InternalListen; listen != "" {
+		const what = "conduit internal listener (server.hub.conduit.internal_listen)"
+		host, _, err := net.SplitHostPort(listen)
+		if err != nil {
+			return fmt.Errorf("%s: %w: %q is not a host:port address", what, hub.ErrTestLoginNonLoopback, listen)
+		}
+		if bindErr := hub.CheckTestLoginBind(true, host); bindErr != nil {
+			return fmt.Errorf("%s: %w", what, bindErr)
+		}
 	}
 	return nil
 }

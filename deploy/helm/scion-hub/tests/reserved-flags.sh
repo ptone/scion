@@ -32,7 +32,7 @@
 # an empty table and exited 0; this must not be able to do that.
 set -u
 
-EXPECTED_TOTAL=59          # 38 must-reject + 6 must-accept + 15 test-identity / hub-class value rows. Update deliberately.
+EXPECTED_TOTAL=62          # 38 must-reject + 6 must-accept + 15 test-identity / hub-class value rows + 3 test-login rows. Update deliberately.
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -439,6 +439,24 @@ for ev in '[{"name":"SCION_SERVER_HUB_CLASS","value":"test"}]' \
   "$HELM" template t "$CHART" "${BASE_ES[@]}" --set-json "hub.extraEnv=$ev" 2>&1 | grep -qF 'hub.extraEnv may not set SCION_SERVER_HUB_CLASS' || ti_env_ok=1
 done
 ti_check "hub.extraEnv SCION_SERVER_HUB_CLASS refused (3 forms, with and without existingSecret)" $ti_env_ok
+
+# TEST-LOGIN (ptone/scion#4240 Phase 4). The binary refuses --enable-test-login
+# unless every listener is on loopback. The chart offers no way to pass it (the
+# hub.args rows above refuse it), has no value for it, and always binds 0.0.0.0.
+# Three rows.
+# 16. No render mentions test-login: unset, hub.hubClass test, and test identities on.
+tl_ok=0
+for tl_r in "$ti_default" "$ti_class" "$ti_on"; do
+  printf '%s' "$tl_r" | grep -qiE 'test-login|test_login|testlogin' && tl_ok=1
+done
+ti_check "test-login: no trace in any render (unset, hub class test, test identities on)" $(( tl_ok || ti_rc != 0 || ti_class_rc != 0 || ti_on_rc != 0 ))
+# 17. There is no chart value for it: the schema refuses hub.testLogin and hub.enableTestLogin.
+"$HELM" template t "$CHART" "${BASE[@]}" --set hub.testLogin.enabled=true 2>&1 | grep -qF 'Additional property testLogin is not allowed' \
+  && "$HELM" template t "$CHART" "${BASE[@]}" --set hub.enableTestLogin=true 2>&1 | grep -qF 'Additional property enableTestLogin is not allowed'
+ti_check "test-login: hub.testLogin and hub.enableTestLogin refused by the schema" $?
+# 18. The rendered listen address is 0.0.0.0, which the binary refuses with test-login.
+printf '%s\n' "$ti_default" | grep -A1 -E '^ +- "?--host"?$' | grep -qE '^ +- "?0\.0\.0\.0"?$'
+ti_check "test-login: the chart binds --host 0.0.0.0 (non-loopback)" $?
 
 echo "---"
 echo "executed=${executed} expected=${EXPECTED_TOTAL} failed=${failed}"

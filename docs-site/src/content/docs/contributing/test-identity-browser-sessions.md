@@ -3,7 +3,7 @@ title: Browser Sessions as Test Identities
 description: Using scion hub test-identity web-code and the e2e harness helpers to open a browser session as a test identity on a test hub.
 ---
 
-This guide is for anyone who writes browser tests (for example with Playwright) against a test hub. It shows how a browser context can hold a hub web session as a **test identity**: a short-lived synthetic member or viewer user the hub issues for testing. No sign-in provider and no test-login endpoint are involved.
+This guide is for anyone who writes browser tests (for example with Playwright) against a test hub. It shows how a browser context can hold a hub web session as a **test identity**: a short-lived synthetic member or viewer user the hub issues for testing. No sign-in provider and no test-login endpoint are involved. This is the way to get a browser session on a hub shared by several users: `--enable-test-login` starts only on a hub whose listeners are all on loopback, so it is limited to throwaway local hubs (see `--enable-test-login` in the [CLI reference](/scion/reference/cli/)).
 
 The flow has three steps:
 

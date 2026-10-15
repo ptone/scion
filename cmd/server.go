@@ -251,7 +251,7 @@ func init() {
 
 	// Auth flags
 	serverStartCmd.Flags().BoolVar(&enableDevAuth, "dev-auth", false, "Enable development authentication (auto-generates token)")
-	serverStartCmd.Flags().BoolVar(&enableTestLogin, "enable-test-login", false, "Enable the test-login endpoint for integration testing (do not use in production)")
+	serverStartCmd.Flags().BoolVar(&enableTestLogin, "enable-test-login", false, "Enable the test-login endpoint for local integration testing; refused unless every listener is on loopback (do not use in production)")
 	registerTestModeFlags(serverStartCmd)
 
 	// Debug flags

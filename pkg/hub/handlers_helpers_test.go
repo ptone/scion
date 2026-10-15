@@ -109,6 +109,8 @@ func newTestLoginWebServer(t *testing.T, enableTestLogin bool) (*WebServer, *Use
 	t.Helper()
 	cfg := WebServerConfig{
 		EnableTestLogin: enableTestLogin,
+		// test-login answers only on a loopback bind (CheckTestLoginBind).
+		Host: "127.0.0.1",
 	}
 	ws := NewWebServer(cfg)
 	tokenSvc, err := NewUserTokenService(UserTokenConfig{})

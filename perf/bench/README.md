@@ -266,7 +266,8 @@ you're about to run needs:
   `--enable-web` is set, the Hub API is served on `--web-port`, not `--port`.
   `--enable-test-login` lets the browser script sign in as the seeded
   member/owner without a password; never pass it when pointing at anything
-  other than a disposable local hub.
+  other than a disposable local hub. The server refuses to start with it
+  unless every listener is on loopback (`--host 127.0.0.1`, as below).
 
 Notes on flags, learned the hard way while building this:
 
@@ -712,7 +713,8 @@ baseline section).
   which is now always passed.
 - `--enable-test-login` must never be passed when benchmarking anything
   other than a disposable local hub: it lets any caller mint a session for
-  any email/role with no password.
+  any email/role with no password. The server refuses it unless every
+  listener is on loopback.
 
 ## Choosing regression budgets
 
