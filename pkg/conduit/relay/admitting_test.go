@@ -83,6 +83,43 @@ func TestSetAdmitting(t *testing.T) {
 	}
 }
 
+// TestSetAdmitting_SessionRegisteredAfterStop: a session admitted before
+// admission stopped, but registered with the relay only afterwards, is still
+// drained with GoAway. The before-ready seam stops admission between the
+// session's handshake and its registration, the window in which
+// SetAdmitting's drain cannot see it (ptone/scion#5172).
+func TestSetAdmitting_SessionRegisteredAfterStop(t *testing.T) {
+	w := relaytest.NewWorld(t)
+	a := w.StartNode("relay-a", nil)
+	w.SetPrincipal("a", agentPrincipal("L1", 1))
+	r := a.Relay
+	var stop sync.Once
+	stopped := make(chan struct{})
+	r.SetBeforeReadyHookForTest(func() {
+		stop.Do(func() {
+			r.SetAdmitting(false)
+			close(stopped)
+		})
+	})
+
+	target, _ := a.MustDial("a", relaytest.AgentHello(agentID, "L1", "", "pty"), echoConfig())
+	relaytest.WaitClosed(t, stopped, "admission stopped in the before-ready seam")
+	if r.Admitting() {
+		t.Fatal("admission still on")
+	}
+	relaytest.WaitClosed(t, target.GoAwayReceived(), "GoAway to the session registered after admission stopped")
+	if !relayRow(t, w, "relay-a").Draining {
+		t.Fatal("relay row not marked draining")
+	}
+
+	r.SetAdmitting(true)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, _, err := a.Dial(ctx, "a", relaytest.AgentHello(agentID, "L1", "", "pty"), echoConfig()); err != nil {
+		t.Fatalf("a session after resuming: %v", err)
+	}
+}
+
 // TestSetAdmitting_Concurrent: concurrent admission changes leave the relay
 // row's draining flag matching the relay's final admission state.
 func TestSetAdmitting_Concurrent(t *testing.T) {

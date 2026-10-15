@@ -690,7 +690,7 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 		delete(r.pending, rec.SessionID)
 	}
 	r.sessions[rec.SessionID] = e
-	state, killed := r.state, r.killed
+	state, killed, paused := r.state, r.killed, r.paused
 	r.mu.Unlock()
 	e.readyOnce.Do(func() { close(e.readyCh) })
 	if h := r.testHookAfterReady; h != nil {
@@ -705,8 +705,11 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 		// after the Hello); refuseDialerStream could not close it.
 		r.stopLifetime(e)
 		_ = ls.CloseWithCode(conduit.CloseForbidden, userStreamRefused)
-	case state != stateServing:
-		// Drain or supersede began while this session was admitted.
+	case state != stateServing || paused:
+		// Drain or supersede began while this session was admitted, or
+		// admission was stopped (SetAdmitting) after this session was
+		// admitted but before it was registered here, so that drain's
+		// snapshot of the sessions did not include it.
 		r.stopLifetime(e)
 		r.goAway(e, r.drainOptions(e))
 	default:
