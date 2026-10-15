@@ -132,6 +132,9 @@ var testLoginBindCases = []struct {
 	{"::1", true},
 	{"localhost", true},
 	{"127.0.0.53", true}, // all of 127.0.0.0/8 is loopback
+	{"127.255.255.254", true},
+	{"0:0:0:0:0:0:0:1", true},  // ::1, written out
+	{"::ffff:127.0.0.1", true}, // IPv4-mapped 127.0.0.1 binds IPv4 loopback
 	// MUST REFUSE.
 	{"", false}, // unset: every interface
 	{"0.0.0.0", false},
@@ -143,9 +146,17 @@ var testLoginBindCases = []struct {
 	{"localhost.localdomain", false},
 	{"localhost.", false},
 	{"LOCALHOST", false},
-	{"[::1]", false},
-	{"127.0.0.1:8080", false},
+	{"::ffff:0.0.0.0", false},
+	{"::ffff:192.168.1.10", false},
+	{"128.0.0.1", false},
+	{"Localhost", false},
+	{"[::1]", false},          // brackets belong to host:port syntax, not to a host
+	{"127.0.0.1:8080", false}, // host:port is not a host
+	{"localhost:8080", false},
+	{"[::1]:8080", false},
+	{"::1%lo", false}, // zoned addresses are not parsed as loopback
 	{" 127.0.0.1", false},
+	{"127.0.0.1 ", false},
 }
 
 func TestCheckTestLoginBind(t *testing.T) {

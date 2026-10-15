@@ -617,7 +617,10 @@ var ErrTestLoginNonLoopback = errors.New("--enable-test-login requires a loopbac
 // when test-login is disabled, whatever the host.
 //
 // It fails closed and never resolves names: only a loopback IP literal
-// (127.0.0.0/8, ::1) or the exact name "localhost" passes (IsLoopbackHost).
+// (127.0.0.0/8 in any IPv4 or IPv4-mapped IPv6 spelling, ::1) or the exact,
+// lower-case name "localhost" passes (IsLoopbackHost). A bracketed address,
+// a host:port form, a zoned address, surrounding spaces, a trailing dot or
+// another letter case is not a host literal and is refused.
 // An empty host is the default bind, every interface, and is refused, as
 // are 0.0.0.0, ::, any other address, and every other hostname, even one
 // that resolves to loopback today: a lookup at startup proves nothing about
