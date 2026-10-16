@@ -22,7 +22,6 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -121,10 +120,9 @@ func TestReimport_UnknownTopLevelKeyWarns(t *testing.T) {
 	after := globalClaude(t, s)
 	require.NotNil(t, after)
 	assert.NotEqual(t, hc.ContentHash, after.ContentHash, "reimport must replace the files")
-	rc, _, err := srv.GetStorage().Download(context.Background(), after.StoragePath+"/config.yaml")
-	require.NoError(t, err)
-	defer func() { _ = rc.Close() }()
-	stored, err := io.ReadAll(rc)
+	// Read through the server's object-path resolver: a blob-layout row keeps
+	// config.yaml under its content hash, not at StoragePath/config.yaml.
+	stored, err := srv.readHarnessConfigFile(context.Background(), srv.GetStorage(), after, "config.yaml", 1<<20)
 	require.NoError(t, err)
 	var want []byte
 	for _, f := range embeddedClaudeFiles(t) {
