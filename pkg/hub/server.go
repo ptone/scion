@@ -2302,6 +2302,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	if err := validateSessionOnlyRoutes(startupRouteMetadata()); err != nil {
 		return nil, err
 	}
+	if err := validateVisitorRoutes(startupRouteMetadata()); err != nil {
+		return nil, err
+	}
 	// The test-identity expiry and feature checks run in the auth
 	// middleware's per-request user-row block, which needs a user store.
 	if cfg.EnableTestIdentities && s == nil {
@@ -3057,6 +3060,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		// Federated visitors: a verified user token linked to an active
 		// federated account; off while federation.project_visitors is off.
 		ResolveFederatedVisitor: srv.resolveFederatedVisitor,
+		// User access credentials from peer hub issuers: refused while
+		// federation.project_visitors is off.
+		FederationHubUserTokensEnabled: srv.federationHubUserTokensEnabled,
 		// Workload-bound issuer delegations (test identities phase X2).
 		WorkloadIssuer: srv.workloadIssuer,
 
