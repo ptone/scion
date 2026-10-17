@@ -41,7 +41,7 @@ async function createList(
   items: Array<Record<string, unknown>>
 ): Promise<{ el: ScionResourceList; fetchMock: ReturnType<typeof vi.fn> }> {
   const key = kind === 'template' ? 'templates' : 'harnessConfigs';
-  const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+  const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
     if (init?.method === 'POST') return Promise.resolve(jsonResponse({ count: 1 }));
     return Promise.resolve(jsonResponse({ [key]: items }));
   });
@@ -164,6 +164,49 @@ describe('resource list: Refresh All from Source', () => {
     expect(out).toEqual([10, 20, 30, 40, 50, 60, 70]);
     expect(maxInFlight).toBe(3);
     expect(await runWithConcurrency([], 4, (n: number) => Promise.resolve(n))).toEqual([]);
+  });
+
+  it('reports harness configs refreshed with warnings', async () => {
+    const items = [
+      { id: 'h1', name: 'h1', sourceUrl: 'https://example.com/h1.tgz' },
+      { id: 'h2', name: 'h2', sourceUrl: 'https://example.com/h2.tgz' },
+    ];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string, init?: RequestInit) => {
+        if (init?.method !== 'POST') {
+          return Promise.resolve(jsonResponse({ harnessConfigs: items }));
+        }
+        if (url.includes('/h1/reimport')) {
+          return Promise.resolve(
+            jsonResponse({
+              count: 1,
+              warnings: [
+                { name: 'h1', reason: 'config.yaml: unknown top-level field(s) ready ignored' },
+              ],
+            })
+          );
+        }
+        return Promise.resolve(jsonResponse({ count: 1 }));
+      })
+    );
+    const el = document.createElement('scion-resource-list') as ScionResourceList;
+    el.kind = 'harness-config';
+    el.scope = 'global';
+    document.body.appendChild(el);
+    element = el;
+    await flush(el);
+
+    refreshAllButton(el)!.click();
+    await flush(el);
+    const { showToast } = await import('../../utils/toast.js');
+    expect(showToast).toHaveBeenCalledWith('Refreshed 2, 1 with warnings', 'warning');
+    const icons = el.shadowRoot?.querySelectorAll('.refresh-warning') ?? [];
+    expect(icons.length).toBe(1);
+    const status = icons[0]?.closest('.refresh-status');
+    expect(status?.getAttribute('title') ?? '').toContain(
+      'h1: config.yaml: unknown top-level field(s) ready ignored'
+    );
   });
 
   it('still offers it for harness configs with any source', async () => {

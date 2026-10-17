@@ -232,7 +232,7 @@ func TestHarnessConfigs_ValidateAgainstPre3698Schema(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			verrs, err := validateHarnessConfigWith(data, validateOld)
+			verrs, _, err := validateHarnessConfigWith(data, validateOld)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -248,7 +248,7 @@ func TestHarnessConfigs_ValidateAgainstPre3698Schema(t *testing.T) {
 func TestPre3698Schema_RejectsAgentPluginsCapability(t *testing.T) {
 	validateOld := pre3698SettingsValidator(t)
 	doc := sidecarTestConfig + "capabilities:\n  agent_plugins: { support: \"yes\" }\n"
-	verrs, err := validateHarnessConfigWith([]byte(doc), validateOld)
+	verrs, _, err := validateHarnessConfigWith([]byte(doc), validateOld)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +256,7 @@ func TestPre3698Schema_RejectsAgentPluginsCapability(t *testing.T) {
 		t.Fatal("pre-#3698 schema accepted capabilities.agent_plugins")
 	}
 	// The current schema still accepts it (deprecated, read as the fallback).
-	if verrs, err := ValidateHarnessConfig([]byte(doc)); err != nil || len(verrs) != 0 {
+	if verrs, _, err := ValidateHarnessConfig([]byte(doc)); err != nil || len(verrs) != 0 {
 		t.Fatalf("current schema: errs=%v err=%v", verrs, err)
 	}
 }

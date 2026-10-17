@@ -1419,12 +1419,14 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 	// (ptone/scion#4219).
 	kind := s.harnessConfigImportKind()
 	targetID := hc.ID
-	kind.newStore = func(dir string) (*ResourceStore, error) {
-		// The same config.yaml validation as an import.
-		if _, err := config.LoadHarnessConfigDir(dir); err != nil {
-			return nil, err
+	kind.newStore = func(dir string) (*ResourceStore, []string, error) {
+		// The same config.yaml validation as an import, and the same load
+		// warnings (unknown top-level keys) on the completed event.
+		hcDir, err := config.LoadHarnessConfigDir(dir)
+		if err != nil {
+			return nil, nil, err
 		}
-		return s.targetHarnessConfigStore(targetID), nil
+		return s.targetHarnessConfigStore(targetID), hcDir.Warnings, nil
 	}
 	slug := reimportTargetSlug(hc)
 	run := func(progress importProgressFunc) ([]string, error) {
@@ -1439,8 +1441,9 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	var failures []ImportFailure
-	imported, err := run(failureCollector(&failures))
+	var results importResultCollector
+	imported, err := run(results.progress)
+	failures := results.Failures()
 	if err != nil {
 		if writeUnusableProvisionerImportError(w, err) {
 			return
@@ -1463,6 +1466,7 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 		HarnessConfigs: imported,
 		Count:          len(imported),
 		Failed:         failures,
+		Warnings:       results.Warnings(),
 	})
 }
 
