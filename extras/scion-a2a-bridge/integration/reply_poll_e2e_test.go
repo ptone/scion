@@ -1270,7 +1270,7 @@ func TestCallerWithoutMessagePermissionIsRefusedWithoutPolling(t *testing.T) {
 	if sendIdx < 0 {
 		t.Fatalf("%s: the bridge never sent the message", label)
 	}
-	time.Sleep(1500 * time.Millisecond) // past the poller's first read
+	// The call has already ended, so no read can follow it.
 	for _, r := range e.recorder.snapshot()[sendIdx+1:] {
 		if strings.HasPrefix(r.path, "/api/v1/conversations") {
 			t.Fatalf("%s: conversation read %s %s after the refused send, want none", label, r.method, r.path)

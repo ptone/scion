@@ -830,7 +830,7 @@ func TestReplyPoll_RollbackSwitch(t *testing.T) {
 	f.awaitSend(t)
 	f.addAgentRow(messages.TypeInstruction, execTestDMKey, "a reply in the conversation")
 
-	pushed := func(topicUser, text string) *messages.StructuredMessage {
+	pushed := func(text string) *messages.StructuredMessage {
 		return &messages.StructuredMessage{
 			Version: 1, Sender: "agent:" + execTestAgentSlug, Type: messages.TypeInstruction,
 			Msg: text, Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
@@ -838,10 +838,10 @@ func TestReplyPoll_RollbackSwitch(t *testing.T) {
 		}
 	}
 	// Another user's topic: dropped by the user check.
-	if err := b.HandleBrokerMessage(context.Background(), projectkeys.UserTopic(execTestProjectID, "another-user"), pushed("another-user", "another user's reply")); err != nil {
+	if err := b.HandleBrokerMessage(context.Background(), projectkeys.UserTopic(execTestProjectID, "another-user"), pushed("another user's reply")); err != nil {
 		t.Fatalf("HandleBrokerMessage: %v", err)
 	}
-	if err := b.HandleBrokerMessage(context.Background(), projectkeys.UserTopic(execTestProjectID, execTestCallerID), pushed(execTestCallerID, "the pushed reply")); err != nil {
+	if err := b.HandleBrokerMessage(context.Background(), projectkeys.UserTopic(execTestProjectID, execTestCallerID), pushed("the pushed reply")); err != nil {
 		t.Fatalf("HandleBrokerMessage: %v", err)
 	}
 	out := awaitOutcome(t, done)
@@ -928,7 +928,7 @@ func TestReplyPoll_ExecutorJoinsPollerBeforeYield(t *testing.T) {
 	f.seedConversation()
 	release := make(chan struct{})
 	defer close(release)
-	// Every poll read after the preflight blocks until the request ends.
+	// Every poll read after the preflight blocks until the test returns.
 	f.pageStatus = func(n int) int {
 		if n >= 2 {
 			<-release
