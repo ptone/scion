@@ -14,9 +14,13 @@
   - Hub A runs with its OIDC provider on and `user_token_audiences` set to
     hub B.
   - Hub B trusts hub A as an `issuer_type: hub` issuer with
-    `accept_user_tokens` and `allow_visitor_grants`.
+    `accept_user_tokens` and `allow_visitor_grants`. Hub B runs in `dev`
+    mode, because the federation authenticator accepts an `http` issuer
+    URL (hub A's loopback listener) only in `dev` and `workstation` modes.
   - Both hubs have the `federation.project_visitors` experiment on, run on
-    SQLite stores, and listen on `httptest` loopback ports.
+    SQLite stores, and listen on `httptest` loopback ports. The test sets
+    `HOME` to a temporary directory, so hub B's project directory
+    (`$HOME/.scion/projects/<slug>`) is never created in the real home.
   - The A2A bridge (`Auth.Scheme: federation`) sits in front of hub B. It
     is a spoke of hub B's fan-out event bus, with the broker proxy as its
     host callbacks, the same wiring `cmd/server_foreground.go` uses for a
@@ -54,10 +58,19 @@
   `-count=3`). The test never skips, because that job fails on skipped
   tests. It is not added to `testdata/acceptance_layers.json`, the census
   of the GE suite.
-- **Subscriptions:** the fan-out bus publishes every message to every
-  spoke, and the bridge's `BrokerServer.Publish` does not filter by
-  subscription. The bridge's topic subscriptions are therefore bookkeeping
-  in this wiring (and with the plugin RPC adapter). A test cannot observe
-  a missing subscription.
+- **Fan-out routing:** the fan-out bus sends a message **without** a
+  channel to every spoke. A message **with** a channel goes only to the
+  in-process bus and to the spoke whose routing key matches the channel
+  (`pkg/eventbus/fanout.go`). The bridge spoke has no `ChannelID`.
+- **Subscriptions:** the bridge's `BrokerServer.Publish` does not filter
+  by subscription, and neither does the plugin RPC adapter. For messages
+  that reach the bridge spoke, its topic subscriptions are therefore
+  bookkeeping, and a test cannot observe a missing subscription.
+- **Agent replies:** an agent's direct reply to a user always carries a
+  channel. With no channel in the request and no reply affinity, hub B
+  sets it to `web`. So in this wiring the reply does not reach the bridge
+  spoke, and step 3 is expected to end on the bridge's send timeout until
+  the reply routing to the bridge is changed in a separate item. The test
+  does not set a channel or otherwise route the reply around this.
 - **Compile:** nothing was compiled or run while writing the test. A gate
   agent compiles and runs it after review.
