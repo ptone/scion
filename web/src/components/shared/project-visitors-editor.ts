@@ -21,14 +21,15 @@
  * gives users of a trusted issuer visitor access, by full email (a grant)
  * or by email domain (a visitor rule), with an optional expiry; the list
  * shows each rule and each visitor with its issuer, status, who granted it
- * and its expiry, and offers extend and revoke.
+ * and its expiry, and offers change expiry and revoke.
  *
  *  - List:   GET    /api/v1/projects/{id}/visitors and /visitors/rules
  *  - Add:    POST   /api/v1/projects/{id}/visitors        {issuer, email, expiresAt?}
  *            POST   /api/v1/projects/{id}/visitors/rules  {issuer, domain, expiresAt?}
- *  - Extend: PATCH  …/visitors/{visitorId} or …/visitors/rules/{ruleId}
+ *  - Change expiry: PATCH …/visitors/{visitorId} or …/visitors/rules/{ruleId}
  *            {notBefore, expiresAt}; the PATCH replaces the whole window,
- *            so the current notBefore is sent back unchanged.
+ *            so the current notBefore is sent back unchanged. The new
+ *            expiry counts from now, so it can also shorten the window.
  *  - Revoke: DELETE …/visitors/{visitorId} or …/visitors/rules/{ruleId}
  *
  * The page renders this editor only while the federation.project_visitors
@@ -47,14 +48,15 @@ import {
   expiryFromChoice,
   issuerShapeError,
   loadVisitorIssuerChoices,
-  normalizeIssuer,
   normalizeVisitorDomain,
   projectVisitorRulesUrl,
   projectVisitorsUrl,
   visitorStatusLabel,
+  visitorWindowState,
   type ProjectVisitor,
   type ProjectVisitorRule,
   type VisitorIssuerChoices,
+  type VisitorWindow,
 } from '../../shared/project-visitors.js';
 import { formatInstant } from '../../utils/time.js';
 import { showConfirm } from './confirm-dialog.js';
@@ -72,7 +74,7 @@ interface ExtendTarget {
 
 /** Shown in the add dialog when no issuer accepts visitor grants. */
 export const NO_VISITOR_ISSUERS_MESSAGE =
-  'No trusted issuer accepts visitor access yet. A hub admin turns it on per issuer in Admin > Federation.';
+  'No trusted issuer accepts visitor access yet. A hub admin turns on federation, and visitor access per issuer, in Admin > Federation.';
 
 /** The hint of the issuer text field (callers who are not hub admins). */
 export const ISSUER_TEXT_HINT =
@@ -338,7 +340,7 @@ export class ScionProjectVisitorsEditor extends LitElement {
     const choices = this.issuerChoices;
     if (!choices) return 'Loading issuers';
     if (choices.mode === 'picker') {
-      if (!choices.issuers.includes(normalizeIssuer(this.addIssuer))) return 'Choose an issuer';
+      if (!choices.issuers.includes(this.addIssuer.trim())) return 'Choose an issuer';
     } else {
       const shape = issuerShapeError(this.addIssuer);
       if (shape) return shape;
@@ -366,7 +368,9 @@ export class ScionProjectVisitorsEditor extends LitElement {
     }
     this.addSaving = true;
     this.addError = null;
-    const issuer = normalizeIssuer(this.addIssuer);
+    // Only surrounding whitespace is trimmed: the hub compares the issuer
+    // with its trusted issuers.
+    const issuer = this.addIssuer.trim();
     const expiresAt = expiryFromChoice(this.addExpiry);
     const body: Record<string, unknown> =
       this.addKind === 'email'
@@ -585,10 +589,12 @@ export class ScionProjectVisitorsEditor extends LitElement {
     `;
   }
 
-  private renderStatus(status: string | undefined, issuerAccepted: boolean) {
-    const label = visitorStatusLabel(status, issuerAccepted);
+  private renderStatus(status: string | undefined, issuerAccepted: boolean, bounds: VisitorWindow) {
+    const now = new Date();
+    const label = visitorStatusLabel(status, issuerAccepted, bounds, now);
     let variant = 'success';
     if (!issuerAccepted) variant = 'danger';
+    else if (visitorWindowState(bounds, now) !== 'current') variant = 'neutral';
     else if (status === 'pending') variant = 'neutral';
     else if (status === 'suspended') variant = 'warning';
     return html`<sl-badge variant=${variant} pill data-visitor-status>${label}</sl-badge>`;
@@ -609,7 +615,7 @@ export class ScionProjectVisitorsEditor extends LitElement {
           <div class="meta-text">Everyone with an email at this domain</div>
         </td>
         <td class="issuer-cell" title=${rule.issuer}>${rule.issuer}</td>
-        <td>${this.renderStatus(undefined, rule.issuerAccepted)}</td>
+        <td>${this.renderStatus(undefined, rule.issuerAccepted, rule)}</td>
         <td>${this.grantedByLabel(rule.createdBy)}</td>
         <td>${this.renderExpiry(rule.expiresAt)}</td>
         <td class="actions-cell">
@@ -625,7 +631,7 @@ export class ScionProjectVisitorsEditor extends LitElement {
                 notBefore: rule.notBefore ?? null,
               })}
           >
-            Extend
+            Change expiry
           </sl-button>
           <sl-button
             size="small"
@@ -657,7 +663,7 @@ export class ScionProjectVisitorsEditor extends LitElement {
             : nothing}
         </td>
         <td class="issuer-cell" title=${visitor.issuer}>${visitor.issuer}</td>
-        <td>${this.renderStatus(visitor.status, visitor.issuerAccepted)}</td>
+        <td>${this.renderStatus(visitor.status, visitor.issuerAccepted, visitor)}</td>
         <td>${this.grantedByLabel(visitor.grantedBy)}</td>
         <td>${this.renderExpiry(visitor.expiresAt)}</td>
         <td class="actions-cell">
@@ -675,7 +681,7 @@ export class ScionProjectVisitorsEditor extends LitElement {
                     notBefore: visitor.notBefore ?? null,
                   })}
               >
-                Extend
+                Change expiry
               </sl-button>`}
           <sl-button
             size="small"
@@ -826,7 +832,7 @@ export class ScionProjectVisitorsEditor extends LitElement {
     const target = this.extendTarget;
     return html`
       <sl-dialog
-        label="Extend Access"
+        label="Change Expiry"
         ?open=${target !== null}
         @sl-request-close=${() => this.closeExtendDialog()}
         style="--width: 28rem;"

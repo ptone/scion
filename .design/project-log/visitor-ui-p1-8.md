@@ -47,7 +47,7 @@
 
 ## Decisions and deviations
 
-- No hub change. Design 4.5 asks for an issuer picker for every owner.
+- No hub behaviour change. Design 4.5 asks for an issuer picker for every owner.
   No route an owner can call lists the accepted issuers, so only hub
   admins get the picker; others type the issuer. A project-scoped issuer
   route would only change `loadVisitorIssuerChoices`.
@@ -62,3 +62,25 @@ Nothing was built or run in this item (no npm, no go). The web checks
 (typecheck, lint, unit tests, build) run in a later npm lane. Formatting
 was done by hand to the repo's Prettier settings, so `npm run lint`
 (`prettier/prettier`) is the first check to watch.
+
+## Follow-up changes after review
+
+- `federation.project_visitors` is registered with the web layer as well
+  as the server layer. `GET /api/v1/experiments` carries only web-layer
+  experiments, so without it the Visitors tab and the admin switch never
+  rendered. Tests that set `window.__SCION_FEATURES__` directly could not
+  catch this; a Go test now checks the resolved map, and the existing
+  `resolvedExperiments` test that counted the map was updated.
+- The status badge follows the grant or rule window: **Expired** and
+  **Not yet active** come before the account status (the issuer label
+  still comes first). Test fixtures use instants relative to the run so
+  they do not age.
+- The issuer text field allows a path but refuses non-https URLs, URLs with
+  no host, a query, a fragment or userinfo, and metadata paths
+  (`/.well-known/`, `/openid-configuration`, `/jwks.json`). The value is
+  sent trimmed of surrounding whitespace only.
+- The admin dialog keeps stored fields it does not show only while they
+  apply to the saved issuer type. The hub picker is empty while federation
+  is off. The row action is labelled **Change expiry**.
+- Nothing was built or run in this round either; gofmt, `git diff --check`
+  and a word scan ran.

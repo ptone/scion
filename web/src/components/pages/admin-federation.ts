@@ -89,7 +89,6 @@ export const ALLOW_VISITOR_GRANTS_LABEL =
 const ALLOW_VISITOR_GRANTS_HINT =
   'Off by default. While off, project owners cannot add visitors from this issuer, and its existing visitors are refused until it is turned back on.';
 
-
 @customElement('scion-page-admin-federation')
 export class ScionPageAdminFederation extends LitElement {
   // --- State ---
@@ -597,18 +596,23 @@ export class ScionPageAdminFederation extends LitElement {
     };
 
     // Fields the dialog does not edit are kept as stored on an existing
-    // issuer (default_role is accepted by the hub and ignored).
+    // issuer (default_role is accepted by the hub and ignored), as long as
+    // the hub still accepts them for the issuer type being saved: they are
+    // dropped when the type changes, and accept_user_tokens is kept only
+    // on a hub issuer ("" means hub). The dialog cannot show or clear them.
     const stored = this.editingIndex >= 0 ? this.issuers[this.editingIndex] : undefined;
-    if (stored?.default_role) {
+    const newType = this.editingIssuer.issuer_type || 'hub';
+    const typeUnchanged = stored !== undefined && (stored.issuer_type || 'hub') === newType;
+    if (typeUnchanged && stored?.default_role) {
       issuer.default_role = stored.default_role;
     }
-    if (stored?.allowed_gcp_projects && stored.allowed_gcp_projects.length > 0) {
+    if (typeUnchanged && stored?.allowed_gcp_projects && stored.allowed_gcp_projects.length > 0) {
       issuer.allowed_gcp_projects = [...stored.allowed_gcp_projects];
     }
-    if (stored?.allowed_domains && stored.allowed_domains.length > 0) {
+    if (typeUnchanged && stored?.allowed_domains && stored.allowed_domains.length > 0) {
       issuer.allowed_domains = [...stored.allowed_domains];
     }
-    if (stored?.accept_user_tokens === true) {
+    if (stored?.accept_user_tokens === true && newType === 'hub') {
       issuer.accept_user_tokens = true;
     }
 

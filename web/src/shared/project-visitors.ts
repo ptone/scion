@@ -37,7 +37,10 @@ import { hasAnyPermission, type AdminStatus } from '../lib/admin-permissions.js'
 import { isFeatureEnabled } from '../utils/feature-flags.js';
 import { can, type Capabilities } from './types.js';
 
-/** The registered server-layer experiment (pkg/experiments/registry.go). */
+/**
+ * The registered experiment (pkg/experiments/registry.go). It has the web
+ * and server layers, so GET /api/v1/experiments carries it to the browser.
+ */
 export const PROJECT_VISITORS_FLAG = 'federation.project_visitors';
 
 /** The project capability action of project.manage_visitors. */
@@ -199,11 +202,13 @@ export async function loadVisitorIssuerChoices(
     });
     if (res.ok) {
       const data = (await res.json()) as {
-        federation?: { trusted_issuers?: VisitorIssuerSettings[] };
+        federation?: { enabled?: boolean; trusted_issuers?: VisitorIssuerSettings[] };
       };
+      // While federation is off, the hub accepts no issuer at all.
+      if (data.federation?.enabled !== true) return { mode: 'picker', issuers: [] };
       return {
         mode: 'picker',
-        issuers: visitorGrantIssuers(data.federation?.trusted_issuers ?? []),
+        issuers: visitorGrantIssuers(data.federation.trusted_issuers ?? []),
       };
     }
   } catch {
@@ -212,24 +217,54 @@ export async function loadVisitorIssuerChoices(
   return text;
 }
 
+/** Refusal texts of issuerShapeError. */
+export const ISSUER_EMPTY_ERROR = 'Enter the issuer URL';
+export const ISSUER_NOT_HTTPS_ERROR = 'The issuer must be an https:// URL';
+export const ISSUER_PARTS_ERROR = 'The issuer URL cannot have credentials, a query or a fragment';
+export const ISSUER_METADATA_PATH_ERROR =
+  'Enter the issuer URL itself, not its discovery document or key set URL';
+
 /**
  * Why an issuer typed into the text field is refused before it is sent, or
  * null when its shape is acceptable: an absolute https URL with a host and
- * no credentials, query or fragment. Whether the hub accepts the issuer is
- * the hub's decision; its refusal is shown as it sends it.
+ * no credentials, query or fragment. A path is allowed (some identity
+ * providers have one), except a path that names the issuer's metadata
+ * rather than the issuer: one containing a /.well-known/ segment, or ending
+ * in /openid-configuration or /jwks.json. Only surrounding whitespace is
+ * trimmed; the value is sent as typed otherwise, since the hub compares it
+ * with its trusted issuers. Whether the hub accepts the issuer is the hub's
+ * decision; its refusal is shown as it sends it.
  */
 export function issuerShapeError(value: string): string | null {
   const trimmed = value.trim();
-  if (!trimmed) return 'Enter the issuer URL';
+  if (!trimmed) return ISSUER_EMPTY_ERROR;
   let url: URL;
   try {
     url = new URL(trimmed);
   } catch {
-    return 'The issuer must be an https:// URL';
+    return ISSUER_NOT_HTTPS_ERROR;
   }
-  if (url.protocol !== 'https:' || !url.hostname) return 'The issuer must be an https:// URL';
-  if (url.username || url.password || url.search || url.hash || /[?#]/.test(trimmed)) {
-    return 'The issuer URL cannot have credentials, a query or a fragment';
+  if (url.protocol !== 'https:' || !url.hostname) return ISSUER_NOT_HTTPS_ERROR;
+  // The URL parser drops an empty userinfo ("https://@host"), an empty
+  // query and an empty fragment, so the typed text is checked as well.
+  const authority = trimmed.replace(/^[^:]*:\/\//, '').split(/[/?#]/, 1)[0] ?? '';
+  if (
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash ||
+    authority.includes('@') ||
+    /[?#]/.test(trimmed)
+  ) {
+    return ISSUER_PARTS_ERROR;
+  }
+  const path = url.pathname.toLowerCase().replace(/\/+$/, '');
+  if (
+    `${path}/`.includes('/.well-known/') ||
+    path.endsWith('/openid-configuration') ||
+    path.endsWith('/jwks.json')
+  ) {
+    return ISSUER_METADATA_PATH_ERROR;
   }
   return null;
 }
@@ -237,9 +272,51 @@ export function issuerShapeError(value: string): string | null {
 /** Status text shown when the hub admin has turned the issuer's toggle off. */
 export const ISSUER_DISABLED_LABEL = 'Issuer disabled by hub admin';
 
-/** The status shown for a grant or rule. */
-export function visitorStatusLabel(status: string | undefined, issuerAccepted: boolean): string {
+/** Status text of a grant or rule whose expiry has passed. */
+export const EXPIRED_LABEL = 'Expired';
+
+/** Status text of a grant or rule whose start is still in the future. */
+export const NOT_YET_ACTIVE_LABEL = 'Not yet active';
+
+/** The access window of a grant or rule, as the hub returns it. */
+export interface VisitorWindow {
+  notBefore?: string;
+  expiresAt?: string;
+}
+
+/**
+ * Where now falls in a grant's or rule's window: "expired" once expiresAt
+ * is at or before now, "not_yet_active" while notBefore is after now,
+ * "current" otherwise. The hub lists every grant and rule whatever its
+ * window, and refuses a visitor outside it. A bound the browser cannot
+ * parse is ignored.
+ */
+export function visitorWindowState(
+  bounds: VisitorWindow,
+  now: Date = new Date()
+): 'expired' | 'not_yet_active' | 'current' {
+  const t = now.getTime();
+  const expires = bounds.expiresAt ? Date.parse(bounds.expiresAt) : Number.NaN;
+  if (!Number.isNaN(expires) && expires <= t) return 'expired';
+  const start = bounds.notBefore ? Date.parse(bounds.notBefore) : Number.NaN;
+  if (!Number.isNaN(start) && start > t) return 'not_yet_active';
+  return 'current';
+}
+
+/**
+ * The status shown for a grant or rule (rules have no account status). The
+ * issuer label comes first, then the window, then the account status.
+ */
+export function visitorStatusLabel(
+  status: string | undefined,
+  issuerAccepted: boolean,
+  bounds: VisitorWindow = {},
+  now: Date = new Date()
+): string {
   if (!issuerAccepted) return ISSUER_DISABLED_LABEL;
+  const windowState = visitorWindowState(bounds, now);
+  if (windowState === 'expired') return EXPIRED_LABEL;
+  if (windowState === 'not_yet_active') return NOT_YET_ACTIVE_LABEL;
   switch (status) {
     case 'pending':
       return 'Pending';

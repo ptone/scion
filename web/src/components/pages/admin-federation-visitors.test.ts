@@ -19,7 +19,8 @@
  * switch (allow_visitor_grants), shown for hub and user issuers while the
  * federation.project_visitors experiment is on; the removed Default Role
  * field; and the issuer fields the dialog does not edit, which a save keeps
- * as stored. The page saves through PUT /api/v1/admin/server-config.
+ * as stored while the hub accepts them for the saved issuer type. The page
+ * saves through PUT /api/v1/admin/server-config.
  */
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
@@ -27,20 +28,30 @@ import { ALLOW_VISITOR_GRANTS_LABEL } from './admin-federation.js';
 
 const FLAG = 'federation.project_visitors';
 
+// Shapes the hub accepts (pkg/config/federation_config.go): allowed_domains
+// on a hub issuer with accept_user_tokens, and allowed_gcp_projects and
+// allowed_domains on the Google user issuer with an expected_audience.
 const ISSUERS = [
-  { issuer_url: 'https://hub-a.example.com', issuer_type: 'hub', accept_user_tokens: true },
+  {
+    issuer_url: 'https://hub-a.example.com',
+    issuer_type: 'hub',
+    accept_user_tokens: true,
+    allowed_domains: ['corp.example'],
+  },
   {
     issuer_url: 'https://idp.example.com',
     issuer_type: 'user',
     default_role: 'viewer',
-    allowed_domains: ['corp.example'],
     allow_visitor_grants: true,
   },
   {
     issuer_url: 'https://accounts.google.com',
-    issuer_type: 'service_account',
+    issuer_type: 'user',
+    expected_audience: 'scion-hub',
     allowed_gcp_projects: ['my-project'],
+    allowed_domains: ['corp.example'],
   },
+  { issuer_url: 'https://sa.example.com', issuer_type: 'service_account' },
 ];
 
 function json(body: unknown, status = 200): Promise<Response> {
@@ -151,7 +162,7 @@ describe('scion-page-admin-federation: visitor access switch (ptone/scion#4603)'
   it('does not show the switch for a service_account issuer', async () => {
     setFlag(true);
     const el = await mount();
-    await openEdit(el, 2);
+    await openEdit(el, 3);
     expect(q(el, '[data-allow-visitor-grants]')).toBeNull();
   });
 
@@ -175,6 +186,7 @@ describe('scion-page-admin-federation: visitor access switch (ptone/scion#4603)'
       issuer_url: 'https://hub-a.example.com',
       issuer_type: 'hub',
       accept_user_tokens: true,
+      allowed_domains: ['corp.example'],
       allow_visitor_grants: true,
     });
   });
@@ -238,7 +250,7 @@ describe('scion-page-admin-federation: Default Role removed (ptone/scion#4603)',
     expect(dialogText(el)).not.toContain('Default Role');
 
     const issuers = await saveDialog(el);
-    expect(issuers[3]).toEqual({ issuer_url: 'https://new.example.com', issuer_type: 'user' });
+    expect(issuers[4]).toEqual({ issuer_url: 'https://new.example.com', issuer_type: 'user' });
   });
 
   it('editing keeps the fields the dialog does not edit as stored', async () => {
@@ -250,20 +262,89 @@ describe('scion-page-admin-federation: Default Role removed (ptone/scion#4603)',
       issuer_url: 'https://idp.example.com',
       issuer_type: 'user',
       default_role: 'viewer',
-      allowed_domains: ['corp.example'],
     });
-    expect(issuers.length).toBe(3);
+    expect(issuers.length).toBe(4);
   });
 
-  it('editing a service_account issuer keeps allowed_gcp_projects', async () => {
+  it('editing a hub issuer keeps accept_user_tokens and allowed_domains', async () => {
+    const el = await mount();
+    await openEdit(el, 0);
+    const issuers = await saveDialog(el);
+
+    expect(issuers[0]).toEqual({
+      issuer_url: 'https://hub-a.example.com',
+      issuer_type: 'hub',
+      accept_user_tokens: true,
+      allowed_domains: ['corp.example'],
+    });
+  });
+
+  it('editing the Google user issuer keeps allowed_gcp_projects and allowed_domains', async () => {
     const el = await mount();
     await openEdit(el, 2);
     const issuers = await saveDialog(el);
 
     expect(issuers[2]).toEqual({
       issuer_url: 'https://accounts.google.com',
-      issuer_type: 'service_account',
+      issuer_type: 'user',
+      expected_audience: 'scion-hub',
       allowed_gcp_projects: ['my-project'],
+      allowed_domains: ['corp.example'],
     });
+  });
+});
+
+describe('scion-page-admin-federation: issuer type change (ptone/scion#4603)', () => {
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    puts = [];
+    setFlag(undefined);
+    vi.restoreAllMocks();
+  });
+
+  it('changing a hub issuer to user drops accept_user_tokens and allowed_domains', async () => {
+    const el = await mount();
+    await openEdit(el, 0);
+    el.editingIssuer = { ...el.editingIssuer!, issuer_type: 'user' };
+    await el.updateComplete;
+
+    const issuers = await saveDialog(el);
+    expect(issuers[0]).toEqual({ issuer_url: 'https://hub-a.example.com', issuer_type: 'user' });
+  });
+
+  it('changing a hub issuer to service_account drops accept_user_tokens', async () => {
+    const el = await mount();
+    await openEdit(el, 0);
+    el.editingIssuer = { ...el.editingIssuer!, issuer_type: 'service_account' };
+    await el.updateComplete;
+
+    const issuers = await saveDialog(el);
+    expect(issuers[0]).not.toHaveProperty('accept_user_tokens');
+    expect(issuers[0]).not.toHaveProperty('allowed_domains');
+  });
+
+  it('changing the Google user issuer to service_account drops its Google fields', async () => {
+    const el = await mount();
+    await openEdit(el, 2);
+    el.editingIssuer = { ...el.editingIssuer!, issuer_type: 'service_account' };
+    await el.updateComplete;
+
+    const issuers = await saveDialog(el);
+    expect(issuers[2]).toEqual({
+      issuer_url: 'https://accounts.google.com',
+      issuer_type: 'service_account',
+      expected_audience: 'scion-hub',
+    });
+  });
+
+  it('changing a user issuer to hub drops its stored default_role', async () => {
+    const el = await mount();
+    await openEdit(el, 1);
+    el.editingIssuer = { ...el.editingIssuer!, issuer_type: 'hub' };
+    await el.updateComplete;
+
+    const issuers = await saveDialog(el);
+    expect(issuers[1]).not.toHaveProperty('default_role');
   });
 });

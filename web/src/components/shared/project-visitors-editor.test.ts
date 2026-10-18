@@ -16,8 +16,8 @@
 
 /**
  * Project Visitors editor (ptone/scion#4603): list, add by email and by
- * domain, extend, revoke, and the issuer field for hub admins and for other
- * owners. apiFetch, the admin status, the name lookup and the confirm
+ * domain, change expiry, revoke, and the issuer field for hub admins and for
+ * other owners. apiFetch, the admin status, the name lookup and the confirm
  * dialog are mocked; request bodies mirror pkg/hub.
  */
 
@@ -26,7 +26,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { apiFetch } from '../../client/api.js';
 import { loadAdminStatus } from '../../client/admin-status.js';
 import type { AdminStatus } from '../../lib/admin-permissions.js';
-import type { ProjectVisitor, ProjectVisitorRule } from '../../shared/project-visitors.js';
+import {
+  ISSUER_METADATA_PATH_ERROR,
+  type ProjectVisitor,
+  type ProjectVisitorRule,
+} from '../../shared/project-visitors.js';
 import { showConfirm } from './confirm-dialog.js';
 import {
   ISSUER_TEXT_HINT,
@@ -61,6 +65,13 @@ vi.mock('./confirm-dialog.js', () => ({
 
 const ISSUER = 'https://hub-a.example.com';
 
+/** Instants relative to the test run, so window-based labels do not age. */
+const DAY_MS = 24 * 60 * 60 * 1000;
+const PAST = new Date(Date.now() - 30 * DAY_MS).toISOString();
+const YESTERDAY = new Date(Date.now() - DAY_MS).toISOString();
+const TOMORROW = new Date(Date.now() + DAY_MS).toISOString();
+const FUTURE = new Date(Date.now() + 30 * DAY_MS).toISOString();
+
 const ALICE: ProjectVisitor = {
   id: 'v-alice',
   bindingId: 'b-alice',
@@ -69,8 +80,8 @@ const ALICE: ProjectVisitor = {
   status: 'active',
   issuerAccepted: true,
   grantedBy: 'u-owner',
-  notBefore: '2026-10-01T00:00:00Z',
-  expiresAt: '2026-11-01T00:00:00Z',
+  notBefore: PAST,
+  expiresAt: FUTURE,
   createdAt: '2026-10-01T00:00:00Z',
   source: 'email',
 };
@@ -114,6 +125,37 @@ const DAVE_FROM_RULE: ProjectVisitor = {
   sourceRuleId: 'r-corp',
 };
 
+const ERIN_EXPIRED: ProjectVisitor = {
+  ...ALICE,
+  id: 'v-erin',
+  bindingId: 'b-erin',
+  email: 'erin@corp.example',
+  expiresAt: YESTERDAY,
+};
+
+const FRANK_NOT_STARTED: ProjectVisitor = {
+  ...ALICE,
+  id: 'v-frank',
+  bindingId: 'b-frank',
+  email: 'frank@corp.example',
+  notBefore: TOMORROW,
+};
+
+const RULE_EXPIRED: ProjectVisitorRule = {
+  ...RULE,
+  id: 'r-old',
+  domain: 'old.example',
+  expiresAt: YESTERDAY,
+};
+
+const RULE_NOT_STARTED: ProjectVisitorRule = {
+  ...RULE,
+  id: 'r-later',
+  domain: 'later.example',
+  notBefore: TOMORROW,
+  expiresAt: FUTURE,
+};
+
 const HUB_ADMIN: AdminStatus = {
   isAdmin: true,
   isSuperAdmin: false,
@@ -139,6 +181,8 @@ interface Routes {
   listStatus?: number;
   /** trusted_issuers of GET /api/v1/admin/server-config. */
   issuers?: Array<Record<string, unknown>>;
+  /** federation.enabled of GET /api/v1/admin/server-config (default true). */
+  federationEnabled?: boolean;
   /** Response of a POST, PATCH or DELETE. */
   write?: { status: number; body: unknown };
 }
@@ -152,7 +196,12 @@ function routeApi(routes: Routes): void {
     }
     if (url === '/api/v1/admin/server-config') {
       return Promise.resolve(
-        jsonResponse(200, { federation: { trusted_issuers: routes.issuers ?? [] } })
+        jsonResponse(200, {
+          federation: {
+            enabled: routes.federationEnabled ?? true,
+            trusted_issuers: routes.issuers ?? [],
+          },
+        })
       );
     }
     if (routes.listStatus && routes.listStatus !== 200) {
@@ -272,9 +321,29 @@ describe('scion-project-visitors-editor list', () => {
     const rule = q(el, '[data-rule-row="r-corp"]');
     expect(text(rule)).toContain('@corp.example');
     expect(text(rule)).toContain('Olive Owner');
+    expect(text(rule?.querySelector('[data-visitor-status]') ?? null)).toBe('Active');
 
     const dave = q(el, '[data-visitor-row="v-dave"]');
     expect(text(dave)).toContain('Through the rule @corp.example');
+  });
+
+  it('the status of grants and rules follows their window', async () => {
+    const el = await mount({
+      visitors: [ALICE, ERIN_EXPIRED, FRANK_NOT_STARTED],
+      rules: [RULE, RULE_EXPIRED, RULE_NOT_STARTED],
+    });
+    const status = (sel: string): HTMLElement | null => q(el, `${sel} [data-visitor-status]`);
+
+    expect(text(status('[data-visitor-row="v-alice"]'))).toBe('Active');
+    expect(status('[data-visitor-row="v-alice"]')?.getAttribute('variant')).toBe('success');
+    expect(text(status('[data-visitor-row="v-erin"]'))).toBe('Expired');
+    expect(status('[data-visitor-row="v-erin"]')?.getAttribute('variant')).toBe('neutral');
+    expect(text(status('[data-visitor-row="v-frank"]'))).toBe('Not yet active');
+
+    expect(text(status('[data-rule-row="r-corp"]'))).toBe('Active');
+    expect(text(status('[data-rule-row="r-old"]'))).toBe('Expired');
+    expect(status('[data-rule-row="r-old"]')?.getAttribute('variant')).toBe('neutral');
+    expect(text(status('[data-rule-row="r-later"]'))).toBe('Not yet active');
   });
 
   it('has no Last active column', async () => {
@@ -283,9 +352,11 @@ describe('scion-project-visitors-editor list', () => {
     expect(headers).toEqual(['Visitor', 'Issuer', 'Status', 'Granted by', 'Expires', 'Actions']);
   });
 
-  it('offers no Extend on a visitor a rule added (its window follows the rule)', async () => {
+  it('offers no Change expiry on a visitor a rule added (it follows the rule)', async () => {
     const el = await mount({ visitors: [ALICE, DAVE_FROM_RULE], rules: [RULE] });
-    expect(q(el, '[data-visitor-row="v-alice"] [data-action="extend"]')).not.toBeNull();
+    expect(text(q(el, '[data-visitor-row="v-alice"] [data-action="extend"]'))).toBe(
+      'Change expiry'
+    );
     expect(q(el, '[data-visitor-row="v-dave"] [data-action="extend"]')).toBeNull();
     expect(q(el, '[data-visitor-row="v-dave"] [data-action="revoke"]')).not.toBeNull();
     expect(q(el, '[data-rule-row="r-corp"] [data-action="extend"]')).not.toBeNull();
@@ -366,6 +437,31 @@ describe('scion-project-visitors-editor issuer field', () => {
     expect(el.addError).toBe('The issuer must be an https:// URL');
     expect(calls().filter((c) => c.method === 'POST')).toEqual([]);
   });
+
+  it('the text field refuses a discovery document URL, without a request', async () => {
+    const el = await mount({});
+    await el.openAddDialog();
+    el.addIssuer = `${ISSUER}/.well-known/openid-configuration`;
+    el.addValue = 'alice@corp.example';
+    await el.submitAdd();
+    await el.updateComplete;
+
+    expect(el.addError).toBe(ISSUER_METADATA_PATH_ERROR);
+    expect(calls().filter((c) => c.method === 'POST')).toEqual([]);
+  });
+
+  it('a hub admin sees no issuer to pick while federation is off on the hub', async () => {
+    vi.mocked(loadAdminStatus).mockResolvedValue(HUB_ADMIN);
+    const el = await mount({
+      federationEnabled: false,
+      issuers: [{ issuer_url: ISSUER, issuer_type: 'hub', allow_visitor_grants: true }],
+    });
+    await el.openAddDialog();
+    await el.updateComplete;
+
+    expect(text(q(el, '[data-no-visitor-issuers]'))).toBe(NO_VISITOR_ISSUERS_MESSAGE);
+    expect(q(el, '[data-add-submit]')?.hasAttribute('disabled')).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -373,10 +469,10 @@ describe('scion-project-visitors-editor issuer field', () => {
 // ---------------------------------------------------------------------------
 
 describe('scion-project-visitors-editor actions', () => {
-  it('adds a grant by email with POST /visitors', async () => {
+  it('adds a grant by email with POST /visitors, sending the issuer trimmed only', async () => {
     const el = await mount({});
     await el.openAddDialog();
-    el.addIssuer = `${ISSUER}/`;
+    el.addIssuer = ` ${ISSUER}/realms/corp `;
     el.addValue = ' Alice@Corp.Example ';
     el.addExpiry = '';
     await el.submitAdd();
@@ -385,7 +481,7 @@ describe('scion-project-visitors-editor actions', () => {
     expect(post).toEqual({
       method: 'POST',
       url: '/api/v1/projects/p-1/visitors',
-      body: { issuer: ISSUER, email: 'alice@corp.example' },
+      body: { issuer: `${ISSUER}/realms/corp`, email: 'alice@corp.example' },
     });
     expect(el.addOpen).toBe(false);
   });
@@ -438,7 +534,7 @@ describe('scion-project-visitors-editor actions', () => {
     expect(patch).toEqual({
       method: 'PATCH',
       url: '/api/v1/projects/p-1/visitors/v-alice',
-      body: { notBefore: '2026-10-01T00:00:00Z', expiresAt: null },
+      body: { notBefore: PAST, expiresAt: null },
     });
     expect(el.extendTarget).toBeNull();
   });

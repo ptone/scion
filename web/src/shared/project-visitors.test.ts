@@ -24,7 +24,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { apiFetch } from '../client/api.js';
 import type { AdminStatus } from '../lib/admin-permissions.js';
 import {
+  EXPIRED_LABEL,
   ISSUER_DISABLED_LABEL,
+  ISSUER_EMPTY_ERROR,
+  ISSUER_METADATA_PATH_ERROR,
+  ISSUER_NOT_HTTPS_ERROR,
+  ISSUER_PARTS_ERROR,
+  NOT_YET_ACTIVE_LABEL,
   PROJECT_VISITORS_FLAG,
   acceptedProjectIssuers,
   canReadHubIssuers,
@@ -37,6 +43,7 @@ import {
   projectVisitorsVisible,
   visitorGrantIssuers,
   visitorStatusLabel,
+  visitorWindowState,
   type ProjectVisitor,
   type ProjectVisitorRule,
 } from './project-visitors.js';
@@ -186,6 +193,7 @@ describe('loadVisitorIssuerChoices', () => {
     vi.mocked(apiFetch).mockResolvedValue(
       jsonResponse(200, {
         federation: {
+          enabled: true,
           trusted_issuers: [
             {
               issuer_url: 'https://on.example.com',
@@ -200,6 +208,25 @@ describe('loadVisitorIssuerChoices', () => {
     const choices = await loadVisitorIssuerChoices(HUB_ADMIN, [], []);
     expect(choices).toEqual({ mode: 'picker', issuers: ['https://on.example.com'] });
     expect(vi.mocked(apiFetch).mock.calls[0]![0]).toBe('/api/v1/admin/server-config');
+  });
+
+  it('a hub admin gets an empty picker while federation is off on the hub', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(
+      jsonResponse(200, {
+        federation: {
+          enabled: false,
+          trusted_issuers: [
+            {
+              issuer_url: 'https://on.example.com',
+              issuer_type: 'hub',
+              allow_visitor_grants: true,
+            },
+          ],
+        },
+      })
+    );
+    const choices = await loadVisitorIssuerChoices(HUB_ADMIN, [], []);
+    expect(choices).toEqual({ mode: 'picker', issuers: [] });
   });
 
   it('a hub admin whose settings read fails falls back to the text field', async () => {
@@ -218,19 +245,72 @@ describe('issuerShapeError', () => {
     expect(issuerShapeError('https://hub.example.com')).toBeNull();
     expect(issuerShapeError(' https://hub.example.com/ ')).toBeNull();
     expect(issuerShapeError('https://securetoken.google.com/my-project')).toBeNull();
+    expect(issuerShapeError('https://idp.example.com/realms/corp')).toBeNull();
   });
 
-  it('refuses an empty value, another scheme, credentials, a query or a fragment', () => {
-    expect(issuerShapeError('')).toBe('Enter the issuer URL');
-    expect(issuerShapeError('hub.example.com')).toBe('The issuer must be an https:// URL');
-    expect(issuerShapeError('http://hub.example.com')).toBe('The issuer must be an https:// URL');
-    expect(issuerShapeError('https://user:pw@hub.example.com')).not.toBeNull();
-    expect(issuerShapeError('https://hub.example.com/?a=b')).not.toBeNull();
-    expect(issuerShapeError('https://hub.example.com/#x')).not.toBeNull();
+  it('refuses an empty value', () => {
+    expect(issuerShapeError('')).toBe(ISSUER_EMPTY_ERROR);
+    expect(issuerShapeError('   ')).toBe(ISSUER_EMPTY_ERROR);
+  });
+
+  it('refuses a URL that is not https', () => {
+    expect(issuerShapeError('http://hub.example.com')).toBe(ISSUER_NOT_HTTPS_ERROR);
+    expect(issuerShapeError('ftp://hub.example.com')).toBe(ISSUER_NOT_HTTPS_ERROR);
+  });
+
+  it('refuses a value with no host', () => {
+    expect(issuerShapeError('hub.example.com')).toBe(ISSUER_NOT_HTTPS_ERROR);
+    expect(issuerShapeError('https://')).toBe(ISSUER_NOT_HTTPS_ERROR);
+    expect(issuerShapeError('/realms/corp')).toBe(ISSUER_NOT_HTTPS_ERROR);
+  });
+
+  it('refuses a query', () => {
+    expect(issuerShapeError('https://hub.example.com/?a=b')).toBe(ISSUER_PARTS_ERROR);
+    expect(issuerShapeError('https://hub.example.com?')).toBe(ISSUER_PARTS_ERROR);
+  });
+
+  it('refuses a fragment', () => {
+    expect(issuerShapeError('https://hub.example.com/#x')).toBe(ISSUER_PARTS_ERROR);
+    expect(issuerShapeError('https://hub.example.com#')).toBe(ISSUER_PARTS_ERROR);
+  });
+
+  it('refuses userinfo', () => {
+    expect(issuerShapeError('https://user:pw@hub.example.com')).toBe(ISSUER_PARTS_ERROR);
+    expect(issuerShapeError('https://user@hub.example.com')).toBe(ISSUER_PARTS_ERROR);
+    expect(issuerShapeError('https://@hub.example.com')).toBe(ISSUER_PARTS_ERROR);
+  });
+
+  it('refuses a path with a /.well-known/ segment', () => {
+    expect(issuerShapeError('https://hub.example.com/.well-known/openid-configuration')).toBe(
+      ISSUER_METADATA_PATH_ERROR
+    );
+    expect(issuerShapeError('https://hub.example.com/.well-known/')).toBe(
+      ISSUER_METADATA_PATH_ERROR
+    );
+    expect(issuerShapeError('https://idp.example.com/realms/corp/.well-known')).toBe(
+      ISSUER_METADATA_PATH_ERROR
+    );
+  });
+
+  it('refuses a path ending in /openid-configuration', () => {
+    expect(issuerShapeError('https://idp.example.com/corp/openid-configuration')).toBe(
+      ISSUER_METADATA_PATH_ERROR
+    );
+  });
+
+  it('refuses a path ending in /jwks.json', () => {
+    expect(issuerShapeError('https://hub.example.com/jwks.json')).toBe(ISSUER_METADATA_PATH_ERROR);
+    expect(issuerShapeError('https://idp.example.com/realms/corp/jwks.json/')).toBe(
+      ISSUER_METADATA_PATH_ERROR
+    );
   });
 });
 
 describe('visitorStatusLabel', () => {
+  const NOW = new Date('2026-10-18T12:00:00Z');
+  const BEFORE = '2026-10-17T12:00:00Z';
+  const AFTER = '2026-10-19T12:00:00Z';
+
   it('labels the account status', () => {
     expect(visitorStatusLabel('pending', true)).toBe('Pending');
     expect(visitorStatusLabel('active', true)).toBe('Active');
@@ -241,6 +321,39 @@ describe('visitorStatusLabel', () => {
   it('says the issuer is disabled while the hub does not accept it', () => {
     expect(visitorStatusLabel('active', false)).toBe(ISSUER_DISABLED_LABEL);
     expect(visitorStatusLabel(undefined, false)).toBe('Issuer disabled by hub admin');
+  });
+
+  it('a grant: expired, not yet active, or its account status inside the window', () => {
+    expect(visitorStatusLabel('active', true, { expiresAt: BEFORE }, NOW)).toBe(EXPIRED_LABEL);
+    expect(visitorStatusLabel('active', true, { expiresAt: NOW.toISOString() }, NOW)).toBe(
+      EXPIRED_LABEL
+    );
+    expect(visitorStatusLabel('pending', true, { notBefore: AFTER }, NOW)).toBe(
+      NOT_YET_ACTIVE_LABEL
+    );
+    expect(visitorStatusLabel('active', true, { notBefore: BEFORE, expiresAt: AFTER }, NOW)).toBe(
+      'Active'
+    );
+    expect(visitorStatusLabel('pending', true, { expiresAt: AFTER }, NOW)).toBe('Pending');
+  });
+
+  it('a rule: expired, not yet active, or active inside the window', () => {
+    expect(visitorStatusLabel(undefined, true, { expiresAt: BEFORE }, NOW)).toBe(EXPIRED_LABEL);
+    expect(visitorStatusLabel(undefined, true, { notBefore: AFTER, expiresAt: AFTER }, NOW)).toBe(
+      NOT_YET_ACTIVE_LABEL
+    );
+    expect(visitorStatusLabel(undefined, true, { notBefore: BEFORE }, NOW)).toBe('Active');
+  });
+
+  it('the issuer label comes before the window', () => {
+    expect(visitorStatusLabel('active', false, { expiresAt: BEFORE }, NOW)).toBe(
+      ISSUER_DISABLED_LABEL
+    );
+  });
+
+  it('visitorWindowState ignores a bound it cannot parse', () => {
+    expect(visitorWindowState({ expiresAt: 'not a date' }, NOW)).toBe('current');
+    expect(visitorWindowState({}, NOW)).toBe('current');
   });
 });
 
