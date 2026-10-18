@@ -217,6 +217,7 @@ type rplEnv struct {
 	agentToken  string
 	dispatcher  *rplDispatcher
 	client      *http.Client
+	users       map[string]rplUser
 }
 
 // rplUser is a local hub user and the hub user JWT an A2A client holds.
@@ -279,8 +280,10 @@ func rplDecode(t *testing.T, what string, body []byte, out any) {
 }
 
 // rplNewEnv starts the hub, the project, the agent and the bridge in plugin
-// mode with the hubJWT scheme.
-func rplNewEnv(t *testing.T) *rplEnv {
+// mode with the hubJWT scheme. Each email names a local user who is a
+// project member and in the agent's ancestry (as the user who started it),
+// which is what lets them message the agent.
+func rplNewEnv(t *testing.T, emails ...string) *rplEnv {
 	t.Helper()
 	// The hub creates its project's directory under the global directory
 	// ($HOME/.scion); a per-test HOME keeps every run off the real one.
@@ -290,6 +293,7 @@ func rplNewEnv(t *testing.T) *rplEnv {
 		recorder:   &rplRecorder{},
 		dispatcher: &rplDispatcher{delivered: make(chan *messages.StructuredMessage, 16)},
 		client:     &http.Client{Timeout: rplWait},
+		users:      map[string]rplUser{},
 	}
 	tsHub, hubURL := rplListener(t)
 	tsBridge, bridgeURL := rplListener(t)
@@ -350,10 +354,16 @@ func rplNewEnv(t *testing.T) *rplEnv {
 	}); err != nil {
 		t.Fatalf("create runtime broker: %v", err)
 	}
+	var ancestry []string
+	for _, email := range emails {
+		u := e.rplLocalUser(t, email)
+		e.users[email] = u
+		ancestry = append(ancestry, u.user.ID)
+	}
 	e.agent = &store.Agent{
 		ID: uuid.NewString(), Name: rplAgentSlug, Slug: rplAgentSlug, ProjectID: e.projectID,
 		RuntimeBrokerID: brokerID, Phase: "running", MessageMode: store.MessageModeProject,
-		OwnerID: hub.DevUserID,
+		OwnerID: hub.DevUserID, Ancestry: ancestry,
 	}
 	if err := st.CreateAgent(ctx, e.agent); err != nil {
 		t.Fatalf("create agent: %v", err)
@@ -434,7 +444,8 @@ func rplNewEnv(t *testing.T) *rplEnv {
 }
 
 // rplLocalUser stores an active local hub user, makes them a member of the
-// project, and returns them with a hub user JWT.
+// project, and returns them with a hub user JWT. rplNewEnv calls it before
+// the agent exists, so the agent can record the user in its ancestry.
 func (e *rplEnv) rplLocalUser(t *testing.T, email string) rplUser {
 	t.Helper()
 	ctx := context.Background()
@@ -623,8 +634,8 @@ func (e *rplEnv) rplSentMessageID(t *testing.T, label string, u rplUser) string 
 // call returns that reply. The bridge reads it from the user's own
 // conversation, anchored on the message ID the send returned.
 func TestAgentReplyReachesLocalUser_PluginMode(t *testing.T) {
-	e := rplNewEnv(t)
-	alice := e.rplLocalUser(t, "alice@example.com")
+	e := rplNewEnv(t, "alice@example.com")
+	alice := e.users["alice@example.com"]
 
 	ctx, cancel := context.WithTimeout(context.Background(), rplWait)
 	defer cancel()

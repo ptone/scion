@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -229,15 +230,24 @@ func TestReplyPoller_AppendsReplyForPollOnlyWait(t *testing.T) {
 	if err != nil {
 		t.Fatalf("waitForTaskEvent: %v", err)
 	}
-	if ev.DedupKey != "poll:reply-msg:message" {
-		t.Fatalf("returned event dedup key %q, want %q", ev.DedupKey, "poll:reply-msg:message")
+	// The reply is appended as an artifact event and a message event, both
+	// under the poll: key of the hub message; the wait returns the first.
+	if !strings.HasPrefix(ev.DedupKey, "poll:reply-msg:") {
+		t.Fatalf("returned event dedup key %q, want the prefix %q", ev.DedupKey, "poll:reply-msg:")
 	}
-	var su TaskStatusUpdate
-	if err := json.Unmarshal(ev.Payload, &su); err != nil {
-		t.Fatalf("decode event: %v", err)
+	if got := pollEventText(t, ev); got != "the polled answer" {
+		t.Fatalf("returned event text %q, want %q", got, "the polled answer")
 	}
-	if su.Status.Message == nil || len(su.Status.Message.Parts) == 0 || su.Status.Message.Parts[0].Text != "the polled answer" {
-		t.Fatalf("returned event message %+v, want the polled answer", su.Status.Message)
+	events, err := store.ReadTaskEvents(ctx, taskID, 0, 10)
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+	var keys []string
+	for _, e := range events {
+		keys = append(keys, e.DedupKey)
+	}
+	if len(keys) != 3 || keys[0] != "push-status" || !strings.HasPrefix(keys[1], "poll:reply-msg:artifact:") || keys[2] != "poll:reply-msg:message" {
+		t.Fatalf("event log dedup keys %v, want the push event, then the poll:reply-msg artifact and message events", keys)
 	}
 
 	reader.mu.Lock()
@@ -276,8 +286,11 @@ func TestWaitForTaskEvent_PollOnlySkipsPushEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("waitForTaskEvent: %v", err)
 	}
-	if ev.DedupKey != "poll:m-1:message" {
-		t.Fatalf("returned event dedup key %q, want %q", ev.DedupKey, "poll:m-1:message")
+	if !strings.HasPrefix(ev.DedupKey, "poll:m-1:") {
+		t.Fatalf("returned event dedup key %q, want the prefix %q", ev.DedupKey, "poll:m-1:")
+	}
+	if got := pollEventText(t, ev); got != "polled content" {
+		t.Fatalf("returned event text %q, want %q", got, "polled content")
 	}
 
 	// Without the predicate the first pushed event is returned (today's
@@ -286,7 +299,40 @@ func TestWaitForTaskEvent_PollOnlySkipsPushEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("waitForTaskEvent without predicate: %v", err)
 	}
-	if ev.DedupKey == "poll:m-1:message" {
-		t.Fatalf("wait without predicate returned the polled event, want the first pushed event")
+	if strings.HasPrefix(ev.DedupKey, replyPollDedupPrefix) {
+		t.Fatalf("wait without predicate returned the polled event %q, want the first pushed event", ev.DedupKey)
 	}
+	if got := pollEventText(t, ev); got != "pushed content" {
+		t.Fatalf("wait without predicate returned text %q, want %q", got, "pushed content")
+	}
+}
+
+// pollEventText returns the text of a content event: an artifact event's
+// artifact parts or a message event's status message parts.
+func pollEventText(t *testing.T, ev *state.TaskEvent) string {
+	t.Helper()
+	var parts []Part
+	switch ev.Kind {
+	case "artifact":
+		var au TaskArtifactUpdate
+		if err := json.Unmarshal(ev.Payload, &au); err != nil {
+			t.Fatalf("decode artifact event: %v", err)
+		}
+		parts = au.Artifact.Parts
+	case "message":
+		var su TaskStatusUpdate
+		if err := json.Unmarshal(ev.Payload, &su); err != nil {
+			t.Fatalf("decode message event: %v", err)
+		}
+		if su.Status.Message != nil {
+			parts = su.Status.Message.Parts
+		}
+	default:
+		t.Fatalf("event kind %q is not a content event", ev.Kind)
+	}
+	var text []string
+	for _, p := range parts {
+		text = append(text, p.Text)
+	}
+	return strings.Join(text, "\n")
 }
