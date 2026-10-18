@@ -34,6 +34,7 @@
     "/api/v1/experiments": {
       "status": 200,
       "fields": [
+        "experiments.federation.project_visitors:boolean",
         "experiments.hub.artifacts:boolean",
         "experiments.hub.attachment_artifacts:boolean",
         "experiments.hub.chat_thread_groups:boolean",
