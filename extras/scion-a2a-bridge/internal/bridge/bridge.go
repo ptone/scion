@@ -119,6 +119,16 @@ type Bridge struct {
 	// shutdownCtx is cancelled during graceful shutdown.
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
+
+	// replyPollSem caps the reply poll reads in flight in this process
+	// (reply_poll.concurrency). nil means no cap.
+	replyPollSem chan struct{}
+
+	// replyWaits holds the (reader, agent ID) keys of the executor calls in
+	// this process that wait for a reply through a reply poller; a second
+	// concurrent call with the same key is refused.
+	replyWaitsMu sync.Mutex
+	replyWaits   map[string]struct{}
 }
 
 type agentCacheEntry struct {
@@ -131,6 +141,16 @@ const agentCacheTTL = 3 * time.Minute
 type activeTaskEntry struct {
 	aKey      string
 	createdAt time.Time
+	// userCaller is true when the task's call came from a user caller;
+	// callerUserID is then that user's ID. Otherwise the task is in the
+	// admin class (a call without a caller, or an agent caller). The push
+	// path accepts a message for the task only from the matching user
+	// topic (pushAcceptReason).
+	userCaller   bool
+	callerUserID string
+	// pollerLive marks a task whose executor call has a live reply poller.
+	// Pushed messages for the task are dropped while it is set.
+	pollerLive bool
 }
 
 // BridgeOption configures optional Bridge behaviour.
@@ -164,6 +184,8 @@ func New(store state.Store, hubClient hubclient.Client, minter *identity.TokenMi
 		agentCache:     make(map[string]*agentCacheEntry),
 		shutdownCtx:    ctx,
 		shutdownCancel: cancel,
+		replyPollSem:   make(chan struct{}, cfg.ReplyPoll.MaxConcurrent()),
+		replyWaits:     make(map[string]struct{}),
 	}
 	for _, opt := range opts {
 		opt(b)
@@ -397,6 +419,22 @@ type waitOptions struct {
 	// acceptEvent, when non-nil, filters the events the wait may return:
 	// any event it rejects advances the cursor and is skipped.
 	acceptEvent func(state.TaskEvent) bool
+}
+
+// lastTaskEventID reads a task's event log to its end and returns the ID of
+// its last event (0 when it has none).
+func (b *Bridge) lastTaskEventID(ctx context.Context, taskID string) (int64, error) {
+	var cursor int64
+	for {
+		events, err := b.store.ReadTaskEvents(ctx, taskID, cursor, 100)
+		if err != nil {
+			return 0, err
+		}
+		if len(events) == 0 {
+			return cursor, nil
+		}
+		cursor = events[len(events)-1].ID
+	}
 }
 
 // waitForTaskEvent polls the event log for a response event on the given task,
@@ -1001,36 +1039,47 @@ func (b *Bridge) CancelTask(ctx context.Context, taskID string) (*TaskResult, er
 // writes events to the durable event log, CAS-updates task state, and
 // conditionally dispatches push notifications. No in-memory fan-out is used;
 // all consumers read from the event log.
+//
+// A message for a task whose executor call has a live reply poller is
+// dropped: that call's reply is read from the caller's own conversation.
+// Drop log lines carry a reason code, the topic kind and the sender kind
+// only.
 func (b *Bridge) HandleBrokerMessage(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
-	b.log.Debug("handling broker message",
-		"topic", topic,
-		"sender", msg.Sender,
-		"type", msg.Type,
-		"msg_preview", truncate(msg.Msg, 100),
-	)
-
 	agentSlug := extractAgentIDFromSender(msg.Sender)
 	if agentSlug == "" {
-		b.log.Warn("ignoring message: sender does not use agent:<slug> format, dropping", "topic", topic, "sender", msg.Sender)
+		b.logPushDrop(pushDropSender, topic, msg)
 		return nil
 	}
 
 	projectID := extractProjectIDFromTopic(topic)
 	if projectID == "" {
-		b.log.Warn("dropping message with unparseable project ID", "topic", topic)
+		b.logPushDrop(pushDropTopicKind, topic, msg)
 		return nil
 	}
 
-	// Correlate to taskID (pass topic for user validation).
+	// Correlate to taskID; the topic is checked against the task's caller.
 	taskID, err := b.correlateToTask(ctx, projectID, agentSlug, topic, msg)
 	if err != nil {
-		b.log.Debug("could not correlate broker message to task", "error", err, "topic", topic, "sender", msg.Sender)
+		b.logPushDrop(pushDropReasonOf(err), topic, msg)
 		return nil
 	}
+
+	// The call's reply poller owns its reply: no append, no state update,
+	// no push dispatch for a pushed copy.
+	if b.taskPollerLive(taskID) {
+		b.logPushDrop(pushDropPollerOwns, topic, msg)
+		return nil
+	}
+
+	b.log.Debug("handling broker message",
+		"task_id", taskID,
+		"type", msg.Type,
+		"msg_preview", truncate(msg.Msg, 100),
+	)
 
 	// Skip system messages — they don't produce events.
 	if msg.Type == messages.TypeSystem {
-		b.log.Debug("skipping system message in A2A bridge", "task_id", taskID, "sender", msg.Sender)
+		b.log.Debug("skipping system message in A2A bridge", "task_id", taskID)
 		return nil
 	}
 
@@ -1039,122 +1088,218 @@ func (b *Bridge) HandleBrokerMessage(ctx context.Context, topic string, msg *mes
 	return nil
 }
 
-// correlateToTask determines the taskID for a broker message, using metadata
-// or falling back to DB lookup. The topic parameter is used for user/caller
-// validation (Constraint 1).
+// Reason codes of dropped broker messages, for log lines.
+const (
+	pushDropPollerOwns = "poller_owns"
+	pushDropTopicUser  = "topic_user"
+	pushDropTopicKind  = "topic_kind"
+	pushDropSender     = "sender"
+	pushDropProject    = "project"
+	pushDropAgent      = "agent"
+	pushDropNoTask     = "no_task"
+)
+
+// pushDropError is a correlation refusal with its reason code.
+type pushDropError struct {
+	reason string
+}
+
+func (e *pushDropError) Error() string {
+	return "broker message dropped: " + e.reason
+}
+
+// pushDropReasonOf returns the reason code of a correlation error.
+func pushDropReasonOf(err error) string {
+	var drop *pushDropError
+	if errors.As(err, &drop) {
+		return drop.reason
+	}
+	return pushDropNoTask
+}
+
+// logPushDrop logs a dropped broker message with its reason code, the
+// topic kind and the sender kind only: no topic string, no user or
+// conversation identifiers and no message text.
+func (b *Bridge) logPushDrop(reason, topic string, msg *messages.StructuredMessage) {
+	b.log.Debug("dropping broker message",
+		"reason", reason,
+		"topic_kind", topicKindLabel(topic),
+		"sender_kind", senderKindLabel(msg.Sender),
+	)
+}
+
+// topicKindLabel returns the kind of a broker topic (agent, user,
+// broadcast) or "unparseable".
+func topicKindLabel(topic string) string {
+	parsed, err := projectkeys.ParseTopic(topic)
+	if err != nil {
+		return "unparseable"
+	}
+	return string(parsed.Kind)
+}
+
+// senderKindLabel returns the kind of a sender address (agent, user),
+// "none" when it is empty, or "other".
+func senderKindLabel(sender string) string {
+	if sender == "" {
+		return "none"
+	}
+	kind, _, found := strings.Cut(sender, ":")
+	if found && (kind == "agent" || kind == "user") {
+		return kind
+	}
+	return "other"
+}
+
+// correlateToTask determines the taskID for a broker message. The topic is
+// checked against the task's caller (Constraint 1).
 //
-// When sdkTaskStore is set (standalone mode), the SDK store is authoritative:
-// no legacy a2a_tasks fallback is attempted. Legacy fallback is only used
-// when sdkTaskStore is nil (plugin mode).
+// Plugin mode (sdkTaskStore == nil): the local cache of executor tasks is
+// the only source, and every message must pass the acceptance table
+// (correlatePluginTask). Standalone mode: the SDK store is authoritative.
 func (b *Bridge) correlateToTask(ctx context.Context, projectID, agentSlug, topic string, msg *messages.StructuredMessage) (string, error) {
+	if b.sdkTaskStore == nil {
+		return b.correlatePluginTask(projectID, agentSlug, topic, msg)
+	}
 	if taskID := msg.Metadata["a2aTaskId"]; taskID != "" {
 		return b.correlateWithMetadata(ctx, projectID, agentSlug, topic, taskID)
 	}
 	return b.correlateWithoutMetadata(ctx, projectID, agentSlug, topic)
 }
 
-// correlateWithMetadata handles broker messages that carry a2aTaskId.
-// When SDK store is authoritative, it is checked first; a legacy row cannot
-// bypass SDK caller/route validation.
-func (b *Bridge) correlateWithMetadata(ctx context.Context, projectID, agentSlug, topic, taskID string) (string, error) {
-	if b.sdkTaskStore != nil {
-		// Standalone mode: SDK store is authoritative.
-		sdkTask, callerUserID, sdkErr := b.sdkTaskStore.GetByIDAndAgent(ctx, taskID, projectID, agentSlug)
-		if sdkErr == nil && sdkTask != nil {
-			// A canceled SDK snapshot fences late broker delivery: no assistant
-			// reply may be appended after a cross-replica cancel.
-			if sdkTask.Task.Status.State == a2a.TaskStateCanceled {
-				return "", fmt.Errorf("task is terminal")
-			}
-			if err := b.validateTopicUser(topic, callerUserID, taskID); err != nil {
-				return "", err
-			}
-			return taskID, nil
-		}
-		// SDK miss/error → fail closed. A stale or attacker-controlled
-		// legacy row must not bypass SDK validation.
-		b.log.Debug("SDK metadata correlation failed, fail closed",
-			"task_id", taskID, "project", projectID, "agent", agentSlug)
-		return "", fmt.Errorf("unknown task: %s", taskID)
+// correlatePluginTask correlates a broker message in plugin mode. It fails
+// closed: a message is accepted only from an agent sender, on a user topic
+// of the task's project, from the task's agent, and on the topic of the
+// task's caller (the admin topic for the admin class):
+//
+//	T1 user topic (P, U), user caller C: entry project == P, entry agent == X, C == U
+//	T2 user topic (P, U), admin class:   entry project == P, entry agent == X, U == adminTopicUserID()
+//	T3 non-user or unparseable topic:    never
+//	T4 sender empty or not agent:<slug>: never
+//
+// With a2aTaskId metadata the named cache entry must pass; without it, the
+// newest entry under (P, X) that passes is chosen.
+func (b *Bridge) correlatePluginTask(projectID, agentSlug, topic string, msg *messages.StructuredMessage) (string, error) {
+	if sender := extractAgentIDFromSender(msg.Sender); sender == "" || sender != agentSlug {
+		return "", &pushDropError{reason: pushDropSender}
+	}
+	parsed, err := projectkeys.ParseTopic(topic)
+	if err != nil || parsed.Kind != projectkeys.TopicKindUser || parsed.Actor == "" {
+		return "", &pushDropError{reason: pushDropTopicKind}
+	}
+	if parsed.ProjectID != projectID {
+		return "", &pushDropError{reason: pushDropProject}
 	}
 
-	// Plugin mode (sdkTaskStore == nil): legacy store only.
-	task, err := b.store.GetTask(ctx, taskID)
-	if err == nil && task != nil {
-		if task.AgentSlug != agentSlug {
-			b.log.Warn("dropping cross-agent a2aTaskId injection",
-				"task_agent", task.AgentSlug, "msg_agent", agentSlug, "task_id", taskID)
-			return "", fmt.Errorf("cross-agent injection for task %s", taskID)
+	b.tasksMu.RLock()
+	defer b.tasksMu.RUnlock()
+
+	if taskID := msg.Metadata["a2aTaskId"]; taskID != "" {
+		entry, ok := b.activeTasks[taskID]
+		if !ok {
+			return "", &pushDropError{reason: pushDropNoTask}
+		}
+		if reason := b.pushAcceptReason(entry, parsed.ProjectID, agentSlug, parsed.Actor); reason != "" {
+			return "", &pushDropError{reason: reason}
 		}
 		return taskID, nil
 	}
-	return "", fmt.Errorf("unknown task: %s", taskID)
+
+	reason := pushDropNoTask
+	ids := b.agentTasks[agentKey(parsed.ProjectID, agentSlug)]
+	for i := len(ids) - 1; i >= 0; i-- {
+		entry, ok := b.activeTasks[ids[i]]
+		if !ok {
+			continue
+		}
+		r := b.pushAcceptReason(entry, parsed.ProjectID, agentSlug, parsed.Actor)
+		if r == "" {
+			return ids[i], nil
+		}
+		reason = r
+	}
+	return "", &pushDropError{reason: reason}
 }
 
-// correlateWithoutMetadata handles broker messages without a2aTaskId.
-// Uses durable SDK store lookup with ambiguity-safe uniqueness check.
-// Local cache may accelerate the lookup but NEVER authorizes alone.
-func (b *Bridge) correlateWithoutMetadata(ctx context.Context, projectID, agentSlug, topic string) (string, error) {
-	if b.sdkTaskStore != nil {
-		// Standalone mode: authoritative durable uniqueness check.
-		// Always call FindActiveSDKTaskForAgent first to enforce uniqueness.
-		// This fails closed on ambiguity (multiple active tasks) and on
-		// empty project/agent keys.
-		sdkTaskID, callerUserID, sdkErr := b.sdkTaskStore.FindActiveSDKTaskForAgent(ctx, projectID, agentSlug)
-		if sdkErr != nil {
-			b.log.Debug("SDK no-metadata correlation failed, fail closed",
-				"error", sdkErr, "project", projectID, "agent", agentSlug)
-			return "", fmt.Errorf("no active SDK tasks for agent %s in project %s: %w", agentSlug, projectID, sdkErr)
-		}
+// pushAcceptReason checks a plugin-mode cache entry against a message's
+// topic project, sender agent and topic user. It returns "" when the entry
+// accepts the message, otherwise the reason code of the refusal.
+func (b *Bridge) pushAcceptReason(entry activeTaskEntry, topicProject, senderAgent, topicUser string) string {
+	entryProject, entryAgent, _ := strings.Cut(entry.aKey, ":")
+	if entryProject != topicProject {
+		return pushDropProject
+	}
+	if entryAgent != senderAgent {
+		return pushDropAgent
+	}
+	want := b.adminTopicUserID()
+	if entry.userCaller {
+		want = entry.callerUserID
+	}
+	if want == "" || topicUser != want {
+		return pushDropTopicUser
+	}
+	return ""
+}
 
-		// Local cache can accelerate: if the cached candidate matches the
-		// unique durable result, we skip the topic user revalidation since
-		// FindActiveSDKTaskForAgent already confirmed uniqueness.
-		aKey := agentKey(projectID, agentSlug)
-		b.tasksMu.RLock()
-		var cachedMatch bool
-		if ids := b.agentTasks[aKey]; len(ids) > 0 {
-			cachedMatch = ids[len(ids)-1] == sdkTaskID
+// correlateWithMetadata handles broker messages that carry a2aTaskId in
+// standalone mode: the SDK store is authoritative, and a legacy row cannot
+// bypass SDK caller/route validation.
+func (b *Bridge) correlateWithMetadata(ctx context.Context, projectID, agentSlug, topic, taskID string) (string, error) {
+	sdkTask, callerUserID, sdkErr := b.sdkTaskStore.GetByIDAndAgent(ctx, taskID, projectID, agentSlug)
+	if sdkErr == nil && sdkTask != nil {
+		// A canceled SDK snapshot fences late broker delivery: no assistant
+		// reply may be appended after a cross-replica cancel.
+		if sdkTask.Task.Status.State == a2a.TaskStateCanceled {
+			return "", &pushDropError{reason: pushDropNoTask}
 		}
-		b.tasksMu.RUnlock()
-
-		if cachedMatch {
-			b.log.Debug("no-metadata correlation: cache hit matches durable unique result",
-				"task_id", sdkTaskID, "project", projectID, "agent", agentSlug)
-		}
-
-		// Validate topic user against stored caller.
-		if err := b.validateTopicUser(topic, callerUserID, sdkTaskID); err != nil {
+		if err := b.validateTopicUser(topic, callerUserID, taskID); err != nil {
 			return "", err
 		}
-		return sdkTaskID, nil
+		return taskID, nil
+	}
+	// SDK miss/error → fail closed. A stale legacy row must not stand in
+	// for SDK validation.
+	b.log.Debug("SDK metadata correlation failed, fail closed",
+		"task_id", taskID, "project", projectID, "agent", agentSlug)
+	return "", &pushDropError{reason: pushDropNoTask}
+}
+
+// correlateWithoutMetadata handles broker messages without a2aTaskId in
+// standalone mode, with the durable SDK store's ambiguity-safe uniqueness
+// check. The local cache may accelerate the lookup but never authorizes
+// alone.
+func (b *Bridge) correlateWithoutMetadata(ctx context.Context, projectID, agentSlug, topic string) (string, error) {
+	// Always call FindActiveSDKTaskForAgent first to enforce uniqueness.
+	// This fails closed on ambiguity (multiple active tasks) and on empty
+	// project/agent keys.
+	sdkTaskID, callerUserID, sdkErr := b.sdkTaskStore.FindActiveSDKTaskForAgent(ctx, projectID, agentSlug)
+	if sdkErr != nil {
+		b.log.Debug("SDK no-metadata correlation failed, fail closed",
+			"error", sdkErr, "project", projectID, "agent", agentSlug)
+		return "", &pushDropError{reason: pushDropNoTask}
 	}
 
-	// Plugin mode (sdkTaskStore == nil): legacy store only.
-	// Check local cache first (fast path).
+	// Local cache can accelerate: if the cached candidate matches the
+	// unique durable result, log the hit.
 	aKey := agentKey(projectID, agentSlug)
 	b.tasksMu.RLock()
-	taskIDs := append([]string(nil), b.agentTasks[aKey]...)
+	var cachedMatch bool
+	if ids := b.agentTasks[aKey]; len(ids) > 0 {
+		cachedMatch = ids[len(ids)-1] == sdkTaskID
+	}
 	b.tasksMu.RUnlock()
 
-	if len(taskIDs) > 0 {
-		b.log.Debug("correlating broker message by agent slug from local cache (plugin mode)",
-			"agent", agentSlug, "project", projectID, "active_tasks", len(taskIDs))
-		return taskIDs[len(taskIDs)-1], nil
+	if cachedMatch {
+		b.log.Debug("no-metadata correlation: cache hit matches durable unique result",
+			"task_id", sdkTaskID, "project", projectID, "agent", agentSlug)
 	}
 
-	// Slow path: query legacy DB.
-	task, err := b.store.FindActiveTaskForAgent(ctx, projectID, agentSlug)
-	if err != nil {
-		return "", fmt.Errorf("DB lookup failed: %w", err)
+	// Validate topic user against stored caller.
+	if err := b.validateTopicUser(topic, callerUserID, sdkTaskID); err != nil {
+		return "", err
 	}
-	if task == nil {
-		return "", fmt.Errorf("no active tasks for agent %s in project %s", agentSlug, projectID)
-	}
-
-	b.log.Debug("correlating broker message by agent slug from legacy DB",
-		"agent", agentSlug, "project", projectID, "task_id", task.ID)
-	return task.ID, nil
+	return sdkTaskID, nil
 }
 
 // validateTopicUser checks that the topic's user matches the stored caller.
@@ -1165,9 +1310,8 @@ func (b *Bridge) validateTopicUser(topic, callerUserID, taskID string) error {
 		return nil
 	}
 	if callerUserID != "" && topicUserID != callerUserID {
-		b.log.Warn("dropping message: topic user mismatch",
-			"topic_user", topicUserID, "stored_caller", callerUserID, "task_id", taskID)
-		return fmt.Errorf("topic user mismatch for task %s", taskID)
+		b.log.Warn("dropping message: topic user mismatch", "task_id", taskID)
+		return &pushDropError{reason: pushDropTopicUser}
 	}
 	return nil
 }
@@ -1189,11 +1333,14 @@ func extractUserIDFromTopic(topic string) string {
 // the event log, CAS-updates task state, and conditionally fires push notifications.
 //
 // dedupKey is the explicit dedup key the reply poller passes; the push path
-// passes "", and the key is then taken from the message.
+// passes "", and the key is then taken from the message. The "poll:" prefix
+// is reserved for the reply poller: a message's msgId with that prefix is
+// ignored and the content hash is used instead, so only the poller can
+// produce a poll: key.
 func (b *Bridge) processAndAppendEvent(ctx context.Context, taskID, agentSlug string, msg *messages.StructuredMessage, dedupKey string) {
 	// Determine the dedup key unless the caller passed one.
 	if dedupKey == "" {
-		if msgID, ok := msg.Metadata["msgId"]; ok && msgID != "" {
+		if msgID, ok := msg.Metadata["msgId"]; ok && msgID != "" && !strings.HasPrefix(msgID, replyPollDedupPrefix) {
 			dedupKey = msgID
 		} else {
 			// Generate a deterministic key from taskID + content hash.
@@ -1500,15 +1647,17 @@ func (b *Bridge) callerHubClient(caller *CallerIdentity) (hubclient.Client, erro
 func (b *Bridge) subscribeAllUserTopics(projectID string) {
 	pattern := projectkeys.AllUserTopic(projectID)
 	if err := b.broker.RequestSubscription(pattern); err != nil {
-		b.log.Warn("failed to request wildcard subscription", "pattern", pattern, "error", err)
+		b.log.Warn("failed to request wildcard subscription", "pattern_kind", topicKindLabel(pattern), "error", err)
 	}
 }
 
 // subscribeAdminUserTopics subscribes to the bridge admin's user topic (legacy mode).
+// The hub publishes a reply on the recipient's user ID, so the topic is the
+// admin's user ID when configured (adminTopicUserID).
 func (b *Bridge) subscribeAdminUserTopics(projectID string) {
-	pattern := projectkeys.UserTopic(projectID, b.config.Hub.User)
+	pattern := projectkeys.UserTopic(projectID, b.adminTopicUserID())
 	if err := b.broker.RequestSubscription(pattern); err != nil {
-		b.log.Warn("failed to request subscription", "pattern", pattern, "error", err)
+		b.log.Warn("failed to request subscription", "pattern_kind", topicKindLabel(pattern), "error", err)
 	}
 }
 
@@ -1789,15 +1938,86 @@ func (b *Bridge) resolveContext(ctx context.Context, projectSlug, agentSlug, con
 	return agentCtx, nil
 }
 
+// adminTopicUserID is the user the bridge admin credential is minted for:
+// Hub.UserID when set, else Hub.User. Replies to calls without a caller are
+// published on this user's topic.
+func (b *Bridge) adminTopicUserID() string {
+	if b.config == nil {
+		return ""
+	}
+	if b.config.Hub.UserID != "" {
+		return b.config.Hub.UserID
+	}
+	return b.config.Hub.User
+}
+
+// registerActiveTask registers a task in the admin class (no caller).
 func (b *Bridge) registerActiveTask(taskID, aKey string) {
+	b.registerActiveTaskFor(taskID, aKey, nil)
+}
+
+// registerActiveTaskFor registers a task with its caller for push
+// correlation: a user caller's user ID, or the admin class for a nil caller
+// or an agent caller. A re-registration (a continuation) keeps the earlier
+// caller and poller mark.
+func (b *Bridge) registerActiveTaskFor(taskID, aKey string, caller *CallerIdentity) {
 	b.tasksMu.Lock()
 	defer b.tasksMu.Unlock()
+	entry := activeTaskEntry{aKey: aKey, createdAt: time.Now()}
+	if caller != nil && !caller.IsAgent() {
+		entry.userCaller = true
+		entry.callerUserID = caller.UserID
+	}
 	// Only append to agentTasks if the task is not already registered,
 	// preventing duplicate entries from concurrent follow-ups.
-	if _, exists := b.activeTasks[taskID]; !exists {
+	if existing, exists := b.activeTasks[taskID]; exists {
+		entry.userCaller = existing.userCaller
+		entry.callerUserID = existing.callerUserID
+		entry.pollerLive = existing.pollerLive
+	} else {
 		b.agentTasks[aKey] = append(b.agentTasks[aKey], taskID)
 	}
-	b.activeTasks[taskID] = activeTaskEntry{aKey: aKey, createdAt: time.Now()}
+	b.activeTasks[taskID] = entry
+}
+
+// setTaskPollerLive sets or clears a registered task's poller mark.
+func (b *Bridge) setTaskPollerLive(taskID string, live bool) {
+	b.tasksMu.Lock()
+	defer b.tasksMu.Unlock()
+	if entry, ok := b.activeTasks[taskID]; ok {
+		entry.pollerLive = live
+		b.activeTasks[taskID] = entry
+	}
+}
+
+// taskPollerLive reports whether a task's executor call has a live reply
+// poller in this process.
+func (b *Bridge) taskPollerLive(taskID string) bool {
+	b.tasksMu.RLock()
+	defer b.tasksMu.RUnlock()
+	return b.activeTasks[taskID].pollerLive
+}
+
+// acquireReplyWait marks a reply wait for key, or reports false when a call
+// with the same key is already waiting in this process.
+func (b *Bridge) acquireReplyWait(key string) bool {
+	b.replyWaitsMu.Lock()
+	defer b.replyWaitsMu.Unlock()
+	if b.replyWaits == nil {
+		b.replyWaits = make(map[string]struct{})
+	}
+	if _, busy := b.replyWaits[key]; busy {
+		return false
+	}
+	b.replyWaits[key] = struct{}{}
+	return true
+}
+
+// releaseReplyWait ends the reply wait for key.
+func (b *Bridge) releaseReplyWait(key string) {
+	b.replyWaitsMu.Lock()
+	defer b.replyWaitsMu.Unlock()
+	delete(b.replyWaits, key)
 }
 
 func (b *Bridge) unregisterActiveTask(taskID, aKey string) {

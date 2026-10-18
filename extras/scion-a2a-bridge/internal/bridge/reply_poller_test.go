@@ -152,8 +152,11 @@ func TestSelectReply_AnchorByID(t *testing.T) {
 }
 
 // fakeReplyReader serves one caller's direct conversations and messages and
-// records the requests.
+// records the requests. The embedded interface is nil; only the methods
+// defined here are used.
 type fakeReplyReader struct {
+	hubclient.ConversationService
+
 	mu            sync.Mutex
 	conversations []hubclient.ConversationDetail
 	byID          map[string]hubstore.Message
@@ -221,7 +224,7 @@ func TestReplyPoller_AppendsReplyForPollOnlyWait(t *testing.T) {
 		t.Fatalf("append push event: %v", err)
 	}
 
-	p := newReplyPoller(b, reader, taskID, "helper", pollTestAgentID, pollTestAnchorID)
+	p := newReplyPoller(b, reader, taskID, "helper", pollTestAgentID, pollTestAnchorID, "", nil)
 	p.sleep = func(ctx context.Context, _ time.Duration) bool { return ctx.Err() == nil }
 	p.start(ctx)
 
