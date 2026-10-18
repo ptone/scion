@@ -472,7 +472,7 @@ describe('scion-project-visitors-editor actions', () => {
   it('adds a grant by email with POST /visitors, sending the issuer trimmed only', async () => {
     const el = await mount({});
     await el.openAddDialog();
-    el.addIssuer = ` ${ISSUER}/realms/corp `;
+    el.addIssuer = ` ${ISSUER}/realms/corp/ `;
     el.addValue = ' Alice@Corp.Example ';
     el.addExpiry = '';
     await el.submitAdd();
@@ -481,7 +481,7 @@ describe('scion-project-visitors-editor actions', () => {
     expect(post).toEqual({
       method: 'POST',
       url: '/api/v1/projects/p-1/visitors',
-      body: { issuer: `${ISSUER}/realms/corp`, email: 'alice@corp.example' },
+      body: { issuer: `${ISSUER}/realms/corp/`, email: 'alice@corp.example' },
     });
     expect(el.addOpen).toBe(false);
   });
