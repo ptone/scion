@@ -71,10 +71,11 @@ func newVisitorDMReader(b *Bridge, caller *CallerIdentity, agentID string) (*vis
 	}, nil
 }
 
-// read reads one newest-first page of up to limit messages, from cursor
-// ("" for the newest page).
-func (r *visitorDMReader) read(ctx context.Context, cursor string, limit int) ([]hubstore.Message, string, error) {
-	query := url.Values{"limit": []string{strconv.Itoa(limit)}}
+// page reads one newest-first page of up to replyPollPageSize messages,
+// from cursor ("" for the newest page). It is the poller's page read
+// (replyPageFetch).
+func (r *visitorDMReader) page(ctx context.Context, cursor string) ([]hubstore.Message, string, error) {
+	query := url.Values{"limit": []string{strconv.Itoa(replyPollPageSize)}}
 	if cursor != "" {
 		query.Set("cursor", cursor)
 	}
@@ -85,9 +86,11 @@ func (r *visitorDMReader) read(ctx context.Context, cursor string, limit int) ([
 	return page.Messages, page.NextCursor, nil
 }
 
-// page is the poller's page read (replyPageFetch).
-func (r *visitorDMReader) page(ctx context.Context, cursor string) ([]hubstore.Message, string, error) {
-	return r.read(ctx, cursor, replyPollPageSize)
+// check reads one message from the newest page and decodes nothing: the
+// access read of the preflight and of the re-check before a reply is
+// forwarded (recheckFederatedUserAccess).
+func (r *visitorDMReader) check(ctx context.Context) error {
+	return r.bridge.federatedUserGet(ctx, r.caller, r.path, url.Values{"limit": []string{"1"}}, nil)
 }
 
 // visitorReadOutcome maps a failed read of a federated user's conversation
@@ -104,16 +107,25 @@ func visitorReadOutcome(err error) pollOutcome {
 }
 
 // visitorReplyPreflight checks, before the send, that the federated user
-// can read its conversation with the agent: one message from the newest
-// page, the same read the access re-check makes. A refusal ends the call
+// can read its conversation with the agent: the same read the access
+// re-check makes (check). A refusal ends the call
 // before anything is sent. Other failures are not refusals: the call goes
 // on, and the poll maps them again after the send. A never-used
 // conversation answers 200 with no messages, so first contact passes.
 func visitorReplyPreflight(ctx context.Context, r *visitorDMReader) pollOutcome {
-	if _, _, err := r.read(ctx, "", 1); err != nil {
+	if err := r.check(ctx); err != nil {
 		if o := visitorReadOutcome(err); o == pollRefused {
 			return o
 		}
 	}
 	return ""
+}
+
+// newVisitorReplyPoller returns a poller for one call of a federated user,
+// reading through visitor (the caller's own conversation with the agent).
+// anchorID is the hub message ID the send returned; it must not be empty.
+func newVisitorReplyPoller(b *Bridge, visitor *visitorDMReader, taskID, agentSlug, agentID, anchorID string, endCall func(error)) *replyPoller {
+	p := newReplyPoller(b, nil, taskID, agentSlug, agentID, anchorID, "", endCall)
+	p.visitor = visitor
+	return p
 }
