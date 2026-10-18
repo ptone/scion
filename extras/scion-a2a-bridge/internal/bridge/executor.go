@@ -199,11 +199,31 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 		}
 
 		// Send to Hub using the per-user or admin client.
-		if _, err := writeClient.Agents().SendStructuredMessage(ctx, agentCtx.AgentID, scionMsg, false, false, false); err != nil {
+		sendResp, err := writeClient.Agents().SendStructuredMessage(ctx, agentCtx.AgentID, scionMsg, false, false, false)
+		if err != nil {
 			e.log.Error("failed to send message to agent", "error", err, "task_id", taskID, "agent_id", agentCtx.AgentID)
 			failMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("Failed to route message to agent"))
 			yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, failMsg), nil)
 			return
+		}
+
+		// Reply poller: read the reply from the caller's own conversation
+		// with the agent, anchored on the message the send returned. Agent
+		// callers take no poller. Without an anchor the call waits on the
+		// push path as before.
+		var anchorID string
+		if sendResp != nil {
+			anchorID = sendResp.MessageID
+		}
+		waitOpts := waitOptions{sdkStore: e.bridge.sdkTaskStore}
+		var poller *replyPoller
+		if anchorID != "" && (caller == nil || !caller.IsAgent()) {
+			poller = newReplyPoller(e.bridge, writeClient.Conversations(), string(taskID), agentCtx.AgentSlug, agentCtx.AgentID, anchorID)
+			poller.start(ctx)
+			// Stop on every exit path; the normal path stops it before
+			// yielding the final event.
+			defer poller.stop()
+			waitOpts.acceptEvent = pollOnlyEvent
 		}
 
 		// Emit working status.
@@ -221,7 +241,12 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 			timeout = 120 * time.Second
 		}
 
-		ev, err := e.bridge.waitForTaskEvent(ctx, string(taskID), timeout, e.bridge.sdkTaskStore)
+		ev, err := e.bridge.waitForTaskEvent(ctx, string(taskID), timeout, waitOpts)
+		// End the poller before anything is yielded: once stop returns, no
+		// poller event can be appended for this call.
+		if poller != nil {
+			poller.stop()
+		}
 		if err != nil {
 			var failMsg *a2a.Message
 			if errors.Is(err, ErrTimeout) {

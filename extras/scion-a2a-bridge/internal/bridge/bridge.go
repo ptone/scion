@@ -386,25 +386,32 @@ func agentKey(projectID, agentSlug string) string {
 	return projectID + ":" + agentSlug
 }
 
+// waitOptions configures waitForTaskEvent.
+type waitOptions struct {
+	// sdkStore, when non-nil, is the durable SDK task store: the execution
+	// heartbeat is refreshed on each poll cycle to keep the lease alive, and
+	// the wait starts at the task's durable cursor.
+	sdkStore *PostgresTaskStore
+	// startCursor is the event ID the wait starts after when sdkStore is nil.
+	startCursor int64
+	// acceptEvent, when non-nil, filters the events the wait may return:
+	// any event it rejects advances the cursor and is skipped.
+	acceptEvent func(state.TaskEvent) bool
+}
+
 // waitForTaskEvent polls the event log for a response event on the given task,
 // with adaptive backoff. Returns the first response (content/message) event or
-// a final event, whichever comes first.
-//
-// When sdkStore is provided and non-nil, the execution heartbeat is refreshed
-// on each poll cycle to keep the lease alive during long-running Hub execution.
-func (b *Bridge) waitForTaskEvent(ctx context.Context, taskID string, timeout time.Duration, sdkStore ...*PostgresTaskStore) (*state.TaskEvent, error) {
-	var cursor int64
+// a final event, whichever comes first, among the events opts.acceptEvent
+// accepts.
+func (b *Bridge) waitForTaskEvent(ctx context.Context, taskID string, timeout time.Duration, opts waitOptions) (*state.TaskEvent, error) {
+	cursor := opts.startCursor
 	interval := 100 * time.Millisecond
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	pollTimer := time.NewTimer(interval)
 	defer pollTimer.Stop()
 
-	// Resolve optional SDK store for heartbeat.
-	var heartbeatStore *PostgresTaskStore
-	if len(sdkStore) > 0 {
-		heartbeatStore = sdkStore[0]
-	}
+	heartbeatStore := opts.sdkStore
 	ownerID := OwnerID()
 	var ownerKey string
 	if heartbeatStore != nil {
@@ -462,6 +469,9 @@ func (b *Bridge) waitForTaskEvent(ctx context.Context, taskID string, timeout ti
 		for _, ev := range events {
 			cursor = ev.ID
 			if canceledLeaseRelease && !isCanceledEvent(ev) {
+				continue
+			}
+			if opts.acceptEvent != nil && !opts.acceptEvent(ev) {
 				continue
 			}
 			if isResponseEvent(ev) || ev.Final {
@@ -696,7 +706,7 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 		timeout = 120 * time.Second
 	}
 
-	ev, err := b.waitForTaskEvent(ctx, taskID, timeout)
+	ev, err := b.waitForTaskEvent(ctx, taskID, timeout, waitOptions{})
 	if err != nil {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cleanupCancel()
@@ -788,7 +798,7 @@ func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskI
 			timeout = 120 * time.Second
 		}
 
-		ev, err := b.waitForTaskEvent(ctx, taskID, timeout)
+		ev, err := b.waitForTaskEvent(ctx, taskID, timeout, waitOptions{})
 		if err != nil {
 			if errors.Is(err, ErrTimeout) {
 				b.failFollowUpTask(taskID)
@@ -1025,7 +1035,7 @@ func (b *Bridge) HandleBrokerMessage(ctx context.Context, topic string, msg *mes
 	}
 
 	// Process the message and write to the event log.
-	b.processAndAppendEvent(ctx, taskID, agentSlug, msg)
+	b.processAndAppendEvent(ctx, taskID, agentSlug, msg, "")
 	return nil
 }
 
@@ -1177,15 +1187,19 @@ func extractUserIDFromTopic(topic string) string {
 
 // processAndAppendEvent translates a broker message to an event, appends it to
 // the event log, CAS-updates task state, and conditionally fires push notifications.
-func (b *Bridge) processAndAppendEvent(ctx context.Context, taskID, agentSlug string, msg *messages.StructuredMessage) {
-	// Determine the dedup key.
-	dedupKey := ""
-	if msgID, ok := msg.Metadata["msgId"]; ok && msgID != "" {
-		dedupKey = msgID
-	} else {
-		// Generate a deterministic key from taskID + content hash.
-		h := sha256.Sum256([]byte(taskID + msg.Msg + msg.Timestamp))
-		dedupKey = fmt.Sprintf("%x", h[:16])
+//
+// dedupKey is the explicit dedup key the reply poller passes; the push path
+// passes "", and the key is then taken from the message.
+func (b *Bridge) processAndAppendEvent(ctx context.Context, taskID, agentSlug string, msg *messages.StructuredMessage, dedupKey string) {
+	// Determine the dedup key unless the caller passed one.
+	if dedupKey == "" {
+		if msgID, ok := msg.Metadata["msgId"]; ok && msgID != "" {
+			dedupKey = msgID
+		} else {
+			// Generate a deterministic key from taskID + content hash.
+			h := sha256.Sum256([]byte(taskID + msg.Msg + msg.Timestamp))
+			dedupKey = fmt.Sprintf("%x", h[:16])
+		}
 	}
 
 	if msg.Type == messages.TypeStateChange {
