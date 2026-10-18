@@ -252,12 +252,36 @@ func (d *rplDispatcher) DispatchFinalizeEnv(context.Context, *store.Agent, map[s
 // to the bridge, Subscribe passes the pattern on. The spoke has no channel,
 // so a message with a channel goes only to the in-process bus and the
 // spoke of that channel.
+// It counts, per topic, the messages the bridge has finished handling.
 type rplBrokerSpoke struct {
 	broker *bridge.BrokerServer
+
+	mu      sync.Mutex
+	handled map[string]int
 }
 
 func (s *rplBrokerSpoke) Publish(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
-	return s.broker.Publish(ctx, topic, msg)
+	err := s.broker.Publish(ctx, topic, msg)
+	s.mu.Lock()
+	if s.handled == nil {
+		s.handled = map[string]int{}
+	}
+	s.handled[topic]++
+	s.mu.Unlock()
+	return err
+}
+
+// handledWhere returns the number of handled messages whose topic matches.
+func (s *rplBrokerSpoke) handledWhere(match func(topic string) bool) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for topic, count := range s.handled {
+		if match(topic) {
+			n += count
+		}
+	}
+	return n
 }
 
 func (s *rplBrokerSpoke) Subscribe(pattern string, _ eventbus.EventHandler) (eventbus.Subscription, error) {
@@ -373,6 +397,7 @@ type rplEnv struct {
 	replicas     []*rplReplica
 	webChat      hub.WebChatStore
 	slack        *rplChannelSpoke
+	spoke        *rplBrokerSpoke
 }
 
 func rplListener(t *testing.T) (*httptest.Server, string) {
@@ -629,9 +654,10 @@ func rplNewEnv(t *testing.T, opts rplOptions) *rplEnv {
 	// carry topic patterns, and the log check (D9) covers the bridge's
 	// lines only.
 	hubBusLogger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	e.spoke = &rplBrokerSpoke{broker: e.replicas[0].broker}
 	buses := []eventbus.NamedEventBus{
 		{Name: eventbus.InProcessBusName, Bus: eventbus.NewInProcessEventBus(hubBusLogger)},
-		{Name: "a2a-bridge", Bus: &rplBrokerSpoke{broker: e.replicas[0].broker}},
+		{Name: "a2a-bridge", Bus: e.spoke},
 	}
 	if e.slack != nil {
 		buses = append(buses, eventbus.NamedEventBus{Name: "slack", Bus: e.slack})
@@ -1100,6 +1126,7 @@ func rplRunOtherUsersPushes(t *testing.T, replyPollOff bool) {
 		replyPollOff: replyPollOff,
 	})
 	alice, bob := e.users["alice@example.com"], e.users["bob@example.com"]
+	bobTopic := projectkeys.UserTopic(e.projectID, bob.user.ID)
 	ctx := context.Background()
 	if err := e.hubStore.CreateNotificationSubscription(ctx, &store.NotificationSubscription{
 		ID: uuid.NewString(), Scope: "agent", AgentID: e.agent.ID, SubscriberType: "user", SubscriberID: bob.user.ID,
@@ -1117,14 +1144,20 @@ func rplRunOtherUsersPushes(t *testing.T, replyPollOff bool) {
 
 	e.rplAgentStatus(t, label, "waiting_for_input", "a question for bob")
 	e.rplAgentStatus(t, label, "completed", "finished bob's turn")
-	if err := e.replicas[0].broker.Publish(ctx, projectkeys.UserTopic(e.projectID, bob.user.ID), &messages.StructuredMessage{
+	if err := e.replicas[0].broker.Publish(ctx, bobTopic, &messages.StructuredMessage{
 		Version: 1, Sender: "agent:" + rplAgentSlug, SenderID: e.agent.ID, Recipient: "user:" + bob.user.ID,
 		Msg: "an agent message for bob", Type: messages.TypeInstruction, Timestamp: time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
 		t.Fatalf("%s: publish on bob's topic: %v", label, err)
 	}
-	rplWaitFor(t, label+": three drops on bob's topic", func() bool {
-		return strings.Count(e.logs.String(), "reason=topic_user") >= 3
+	// Wait until the bridge has handled the hub's two notifications on
+	// another user's topic, whatever it decided; the decision is checked
+	// below.
+	rplWaitFor(t, label+": the hub's notifications on bob's topic handled", func() bool {
+		return e.spoke.handledWhere(func(topic string) bool {
+			parsed, err := projectkeys.ParseTopic(topic)
+			return err == nil && parsed.Kind == projectkeys.TopicKindUser && parsed.Actor != alice.user.ID
+		}) >= 2
 	})
 
 	if replyPollOff {
@@ -1151,6 +1184,11 @@ func rplRunOtherUsersPushes(t *testing.T, replyPollOff bool) {
 				t.Fatalf("%s: alice's task event %q carries %q from bob's topic", label, ev.DedupKey, text)
 			}
 		}
+	}
+	// All three pushes on Bob's topic were dropped by the user check, not
+	// by the poller mark.
+	if n := strings.Count(e.logs.String(), "reason=topic_user"); n < 3 {
+		t.Fatalf("%s: %d topic_user drop lines, want at least 3", label, n)
 	}
 	e.rplAssertNeutralLogs(t)
 }
