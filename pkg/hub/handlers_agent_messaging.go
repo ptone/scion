@@ -290,12 +290,13 @@ func (s *Server) resolveOutboundRouting(
 			// Token is a UUID — direct lookup by primary key.
 			u, err := s.store.GetUser(ctx, identifier)
 			if err == nil {
+				// A project visitor this agent may not send to is
+				// answered as an unknown user (visitorRecipientRefusal).
+				err = s.visitorRecipientRefusal(ctx, agent, u)
+			}
+			if err == nil {
 				recipientID = u.ID
-				name := u.Email
-				if name == "" {
-					name = u.ID
-				}
-				recipient = "user:" + name
+				recipient = "user:" + userAddressName(u)
 			} else if errors.Is(err, store.ErrNotFound) {
 				writeError(w, http.StatusBadRequest, ErrCodeAddrUnknown,
 					fmt.Sprintf("user:%s is not a valid addressee. No user exists with that ID.", identifier), nil)
@@ -361,13 +362,14 @@ func (s *Server) resolveOutboundRouting(
 		// security benefit.
 		u, err := s.store.GetUser(ctx, recipientID)
 		if err == nil {
+			// A project visitor this agent may not send to is answered
+			// as an unknown user (visitorRecipientRefusal).
+			err = s.visitorRecipientRefusal(ctx, agent, u)
+		}
+		if err == nil {
 			recipientID = u.ID
 			if recipient == "" {
-				name := u.Email
-				if name == "" {
-					name = u.ID
-				}
-				recipient = "user:" + name
+				recipient = "user:" + userAddressName(u)
 			}
 		} else if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusBadRequest, ErrCodeAddrUnknown,
@@ -1869,6 +1871,19 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	}
 	messaging.RecordStep(ctx, "request_parsed")
 
+	// A project visitor sends a direct text message only
+	// (visitorMessageRequestRefusal); every other field is refused before
+	// anything is looked up or written. The hub sets the timestamp.
+	if visitor, ok := GetIdentityFromContext(ctx).(*VisitorIdentity); ok && visitor != nil {
+		if field := visitorMessageRequestRefusal(&req); field != "" {
+			ValidationError(w, field+" is not available to visitors", map[string]interface{}{"field": field})
+			return
+		}
+		if req.StructuredMessage != nil {
+			req.StructuredMessage.Timestamp = ""
+		}
+	}
+
 	// The retired end-of-turn assistant-reply type is dropped here too, as
 	// in handleAgentOutboundMessage: accepted with 200 so a caller sees
 	// success, but never persisted, dispatched or published.
@@ -1908,11 +1923,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		structuredMsg.SenderID = ""
 		if user := GetUserIdentityFromContext(ctx); user != nil {
 			structuredMsg.SenderID = user.ID()
-			if email := user.Email(); email != "" {
-				structuredMsg.Sender = "user:" + email
-			} else {
-				structuredMsg.Sender = "user:" + user.ID()
-			}
+			structuredMsg.Sender = userSenderAddress(user)
 		} else if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 			structuredMsg.SenderID = agentIdent.ID()
 			senderSlug := agentIdent.ID() // fallback to UUID
@@ -1934,11 +1945,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		senderID := ""
 		if user := GetUserIdentityFromContext(ctx); user != nil {
 			senderID = user.ID()
-			if email := user.Email(); email != "" {
-				sender = "user:" + email
-			} else {
-				sender = "user:" + user.ID()
-			}
+			sender = userSenderAddress(user)
 		} else if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 			senderID = agentIdent.ID()
 			senderSlug := agentIdent.ID() // fallback to UUID
@@ -2304,6 +2311,10 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// Persist to message store before delivery attempt. Set dispatch_state
 	// to "dispatched" (no new pending rows per delivery policy).
 	var persistedMsgID string
+	// persistedConversationID is the conversation the persisted message
+	// landed in; the response reports it to a project visitor only
+	// (visitorDeliveryConversation).
+	var persistedConversationID string
 	// artifactWarning reports artifact references not attached on the
 	// non-agent-sender path below (admitMessageArtifacts).
 	var artifactWarning string
@@ -2820,11 +2831,17 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		structuredMsg.Metadata, artifactRefs, artifactWarning = s.admitMessageArtifacts(ctx, structuredMsg.Metadata,
 			directAgentRecipient(agent, groupID))
 		structuredMsg.ArtifactRefsAdmitted = len(artifactRefs) > 0
+		// A project visitor's message carries the hub-set visitor sender
+		// metadata (the strip above removed any client value), so the
+		// envelope rendered below tells the agent that a project visitor
+		// sent it.
+		structuredMsg.Metadata = stampVisitorSender(structuredMsg.Metadata, GetIdentityFromContext(ctx))
 
 		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 			s.messageLog.Error("Failed to persist message", "error", err)
 		} else {
 			persistedMsgID = storeMsg.ID
+			persistedConversationID = storeMsg.ConversationID
 			recordedRefs = s.recordMessageArtifacts(ctx, storeMsg.ID, artifactRefs)
 		}
 		messaging.RecordStep(ctx, "message_persisted")
@@ -3064,6 +3081,11 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		mentionResults = s.processMentions(ctx, req.Mentions, agent, structuredMsg, mentionParticipantGroupID, groupConversationThreadKey)
 	}
 
+	// A project visitor learns the conversation and DM key its message
+	// landed in, so it can read the DM; no other sender's response
+	// changes.
+	visitorConvID, visitorConvKey := visitorDeliveryConversation(GetIdentityFromContext(ctx), agent, persistedConversationID)
+
 	if deferDelivery {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
@@ -3075,6 +3097,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			MentionResults:  mentionResults,
 			Deferred:        deferredReason(agent),
 			ArtifactWarning: artifactWarning,
+			ConversationID:  visitorConvID,
+			ConversationKey: visitorConvKey,
 		})
 		return
 	}
@@ -3088,6 +3112,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		AgentPhase:      agent.Phase,
 		MentionResults:  mentionResults,
 		ArtifactWarning: artifactWarning,
+		ConversationID:  visitorConvID,
+		ConversationKey: visitorConvKey,
 	})
 }
 
@@ -3110,6 +3136,13 @@ type MessageDeliveryResponse struct {
 	// ArtifactWarning is set when artifact references the request named
 	// were not attached (ptone/scion#3222).
 	ArtifactWarning string `json:"artifact_warning,omitempty"`
+	// ConversationID and ConversationKey are set only for a project
+	// visitor sender (ptone/scion#4603): the conversation its message was
+	// persisted in, and the visitor's DM key with the agent
+	// (dm:agent:<agentId>:user:<visitorId>), which the visitor DM read
+	// routes take. Omitted for every other sender.
+	ConversationID  string `json:"conversation_id,omitempty"`
+	ConversationKey string `json:"conversation_key,omitempty"`
 }
 
 // GroupMessageRecipientResult represents the delivery status for one recipient in a group[] delivery.

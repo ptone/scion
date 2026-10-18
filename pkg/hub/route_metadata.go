@@ -83,6 +83,19 @@ type RouteMetadata struct {
 	// capabilities, and its handler requires the one the identity's kind
 	// needs (WS4).
 	AlsoPermits []string
+	// VisitorMethods lists the HTTP methods on which the route admits a
+	// visitor (a request whose identity is a *VisitorIdentity). routeGuard
+	// refuses a visitor on every other method, and on every route whose
+	// list is empty, with 403 and visitorRouteRefusalMessage, before the
+	// handler runs (refuseVisitorRequest); an admitted visitor then passes
+	// the classification's guard like any other identity. List only the
+	// methods whose handler is safe for a visitor. validateVisitorRoutes
+	// limits the list to authenticated and policy routes and to methods
+	// the pattern serves. On a subtree pattern (one ending in "/") a
+	// listed method admits a visitor only on the sub-paths
+	// visitorAdmittedSubRoutes lists for the pattern and method, and only
+	// when the sub-route's per-request check passes (admitVisitorSubRoute).
+	VisitorMethods []string
 }
 
 // routeMetadataTable maps every registered mux pattern to its authorization metadata.
@@ -187,6 +200,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/auth/me": {
 		Pattern: "/api/v1/auth/me", RouteID: "auth.me",
 		Classification: RouteAuthenticated,
+		// handleAuthMe reads the caller's own profile. The pattern has no
+		// method, so the mux serves every method, HEAD included; a
+		// visitor is admitted on the reads only.
+		VisitorMethods: []string{http.MethodGet, http.MethodHead},
 	},
 	"/api/v1/experiments": {
 		Pattern: "/api/v1/experiments", RouteID: "experiments.resolved",
@@ -226,6 +243,20 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/users/me/groups": {
 		Pattern: "/api/v1/users/me/groups", RouteID: "users.me.groups",
 		Classification: RouteAuthenticated,
+	},
+	// A project visitor's own visitor grants (handleUserMeVisitorGrants):
+	// GET only, and only for a visitor; any other identity gets 404.
+	"/api/v1/users/me/visitor-grants": {
+		Pattern: "/api/v1/users/me/visitor-grants", RouteID: "users.me.visitorGrants",
+		Classification: RouteAuthenticated,
+		VisitorMethods: []string{http.MethodGet},
+	},
+	// A project visitor's own DMs with agents (handleUserMeVisitorDMs):
+	// GET only, and only for a visitor; any other identity gets 404.
+	"/api/v1/users/me/visitor-dms": {
+		Pattern: "/api/v1/users/me/visitor-dms", RouteID: "users.me.visitorDMs",
+		Classification: RouteAuthenticated,
+		VisitorMethods: []string{http.MethodGet},
 	},
 	"/api/v1/principals/": {
 		Pattern: "/api/v1/principals/", RouteID: "principals.byId",
@@ -367,6 +398,9 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/agents/", RouteID: "agents.byId",
 		Classification: RoutePolicy,
 		Permission:     "agent.read", Resource: "agent", Action: "read",
+		// A visitor may only send a message: POST {agentId}/message
+		// (visitorAdmittedSubRoutes).
+		VisitorMethods: []string{http.MethodPost},
 	},
 
 	// -------------------------------------------------------------------------
@@ -386,6 +420,11 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/projects/", RouteID: "projects.byId",
 		Classification: RoutePolicy,
 		Permission:     "project.read", Resource: "project", Action: "read",
+		// A visitor may only send a message (POST
+		// {projectId}/agents/{agentId}/message) and list and read the
+		// project's agents in the visitor view (GET {projectId}/agents and
+		// GET {projectId}/agents/{agentId}); see visitorAdmittedSubRoutes.
+		VisitorMethods: []string{http.MethodGet, http.MethodPost},
 	},
 
 	// -------------------------------------------------------------------------
@@ -622,6 +661,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/chat/conversations/", RouteID: "chat.conversations.byId",
 		Classification: RoutePolicy,
 		Permission:     "project.read", Resource: "project", Action: "read",
+		// A visitor may only read its own DM with an agent: GET
+		// {dmKey}/messages, GET and POST {dmKey}/read
+		// (visitorAdmittedSubRoutes).
+		VisitorMethods: []string{http.MethodGet, http.MethodPost},
 	},
 	"/api/v1/chat/topics/": {
 		Pattern: "/api/v1/chat/topics/", RouteID: "chat.topics.byId",
@@ -1481,10 +1524,16 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 		if meta.RouteID != "" {
 			r = r.WithContext(ContextWithRoute(r.Context(), meta.RouteID))
 		}
-		// A visitor (a federated account, VisitorIdentity) is refused on
-		// every route, whatever its classification, until per-route
-		// visitor admission replaces this check.
-		if refuseVisitorRequest(w, r) {
+		// A visitor (a federated account, VisitorIdentity) is admitted
+		// only on the methods a route lists in VisitorMethods, whatever
+		// the route's classification; any other request is refused here.
+		if refuseVisitorRequest(w, r, meta) {
+			return
+		}
+		// On a subtree route a visitor is admitted only on the sub-paths
+		// listed in visitorAdmittedSubRoutes, for an agent it may message
+		// now; every other visitor request gets the same refusal.
+		if !s.admitVisitorSubRoute(w, r, meta) {
 			return
 		}
 		// An agent delegated credential is admitted only on the routes in

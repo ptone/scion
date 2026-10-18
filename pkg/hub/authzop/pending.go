@@ -110,6 +110,8 @@ var PendingBearerDispositions = []PendingEntry{
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/teams/link/verify", Method: "POST", Area: AreaIdentity},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/telegram/link/verify", Method: "POST", Area: AreaIdentity},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/groups", Method: "GET", Area: AreaIdentity},
+	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/visitor-dms", Method: "GET", Area: AreaIdentity},
+	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/visitor-grants", Method: "GET", Area: AreaIdentity},
 	// --- hub ---
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/delegation-adoption", Method: "GET", Area: AreaHub},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/delegation-adoption/commits", Method: "POST", Area: AreaHub},
