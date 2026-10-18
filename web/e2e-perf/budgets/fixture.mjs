@@ -167,6 +167,7 @@ export function buildFixture() {
       status: 200,
       body: {
         experiments: {
+          'federation.project_visitors': false,
           'hub.artifacts': false,
           'hub.attachment_artifacts': false,
           'hub.chat_thread_groups': false,
