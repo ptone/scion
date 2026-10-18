@@ -352,12 +352,21 @@ type fedUserHub struct {
 	dmReadKeys   []string
 	dmReadTokens []string
 	createCalls  int
+	// dmReadQueries records the query of every conversation read.
+	dmReadQueries []url.Values
+	// dmReadSeq, when not empty, answers the next conversation reads in
+	// order, in place of dmReadStatus (0: 200 with dmMessages).
+	dmReadSeq []int
+	// dmMessages is the conversation page the reads answer, newest first.
+	dmMessages []map[string]interface{}
 }
 
 type fedUserHubSend struct {
 	AgentID  string
 	Body     map[string]interface{}
 	FedToken string
+	// DMReadsBefore is the number of conversation reads before the send.
+	DMReadsBefore int
 }
 
 func writeHubError(w http.ResponseWriter, status int) {
@@ -437,7 +446,7 @@ func newFedUserHub(t *testing.T, userToken string) *fedUserHub {
 			var body map[string]interface{}
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			agentID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/agents/"), "/message")
-			h.sent = append(h.sent, fedUserHubSend{AgentID: agentID, Body: body, FedToken: fedToken})
+			h.sent = append(h.sent, fedUserHubSend{AgentID: agentID, Body: body, FedToken: fedToken, DMReadsBefore: len(h.dmReadKeys)})
 			if h.sendStatus != 0 {
 				writeHubError(w, h.sendStatus)
 				return
@@ -447,15 +456,25 @@ func newFedUserHub(t *testing.T, userToken string) *fedUserHub {
 			key := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/chat/conversations/"), "/messages")
 			h.dmReadKeys = append(h.dmReadKeys, key)
 			h.dmReadTokens = append(h.dmReadTokens, fedToken)
+			h.dmReadQueries = append(h.dmReadQueries, r.URL.Query())
 			if fedToken != h.userToken {
 				writeHubError(w, http.StatusForbidden)
 				return
 			}
-			if h.dmReadStatus != 0 {
-				writeHubError(w, h.dmReadStatus)
+			status := h.dmReadStatus
+			if len(h.dmReadSeq) > 0 {
+				status = h.dmReadSeq[0]
+				h.dmReadSeq = h.dmReadSeq[1:]
+			}
+			if status != 0 {
+				writeHubError(w, status)
 				return
 			}
-			writeJSON(map[string]interface{}{"messages": []interface{}{}})
+			msgs := h.dmMessages
+			if msgs == nil {
+				msgs = []map[string]interface{}{}
+			}
+			writeJSON(map[string]interface{}{"messages": msgs})
 		default:
 			http.Error(w, "not found: "+r.URL.Path, http.StatusNotFound)
 		}
@@ -480,6 +499,8 @@ type fedUserHubCalls struct {
 	dmReadKeys   []string
 	dmReadTokens []string
 	createCalls  int
+	// dmReadQueries is the query of every conversation read.
+	dmReadQueries []url.Values
 }
 
 func (h *fedUserHub) snapshot() fedUserHubCalls {
@@ -494,6 +515,8 @@ func (h *fedUserHub) snapshot() fedUserHubCalls {
 		dmReadKeys:   append([]string(nil), h.dmReadKeys...),
 		dmReadTokens: append([]string(nil), h.dmReadTokens...),
 		createCalls:  h.createCalls,
+
+		dmReadQueries: append([]url.Values(nil), h.dmReadQueries...),
 	}
 }
 
@@ -574,6 +597,14 @@ const fedUserSendBody = `{
 
 // sendAsync sends the JSON-RPC SendMessage in the background and returns a
 // channel with the status and body.
+// fedUserPushOnly turns reply polling off (reply_poll.enabled: false), so
+// the executor waits on pushed replies only: the path these tests drive
+// with deliverReply.
+func fedUserPushOnly(cfg *Config) {
+	off := false
+	cfg.ReplyPoll.Enabled = &off
+}
+
 func sendAsync(t *testing.T, ts *httptest.Server, agentSlug, token string) <-chan [2]interface{} {
 	t.Helper()
 	return sendAsyncTo(t, ts, "proj1", agentSlug, token)
@@ -788,7 +819,7 @@ func TestAuthMiddleware_FederatedUserIdentity(t *testing.T) {
 func TestExecutor_FederatedUserReplyThroughUserTopic(t *testing.T) {
 	token := fedUserToken(t)
 	hub := newFedUserHub(t, token)
-	b, broker, ts := newFedUserTestServer(t, hub)
+	b, broker, ts := newFedUserTestServer(t, hub, fedUserPushOnly)
 
 	done := sendAsync(t, ts, "agent1", token)
 	sent := waitForSend(t, hub)
@@ -841,7 +872,7 @@ func TestExecutor_FederatedUserReplyThroughUserTopic(t *testing.T) {
 func TestExecutor_FederatedUserRevokedEndsTask(t *testing.T) {
 	token := fedUserToken(t)
 	hub := newFedUserHub(t, token)
-	b, _, ts := newFedUserTestServer(t, hub)
+	b, _, ts := newFedUserTestServer(t, hub, fedUserPushOnly)
 
 	done := sendAsync(t, ts, "agent1", token)
 	waitForSend(t, hub)
@@ -869,7 +900,7 @@ func TestExecutor_FederatedUserRevokedEndsTask(t *testing.T) {
 func TestExecutor_FederatedUserRecheckUnavailableStopsReply(t *testing.T) {
 	token := fedUserToken(t)
 	hub := newFedUserHub(t, token)
-	b, _, ts := newFedUserTestServer(t, hub)
+	b, _, ts := newFedUserTestServer(t, hub, fedUserPushOnly)
 
 	done := sendAsync(t, ts, "agent1", token)
 	waitForSend(t, hub)
@@ -1119,7 +1150,7 @@ func TestExecutor_FederatedUserNeverGetsAnotherUsersReply(t *testing.T) {
 	)
 	token := fedUserToken(t)
 	hub := newFedUserHub(t, token)
-	b, _, ts := newFedUserTestServer(t, hub)
+	b, _, ts := newFedUserTestServer(t, hub, fedUserPushOnly)
 
 	// The other user's task on agent1 started first.
 	aKey := agentKey(fedUserProjectID, "agent1")
@@ -1194,7 +1225,7 @@ func TestExecutor_FederatedUserNeverGetsAnotherVisitorsReply(t *testing.T) {
 	)
 	token := fedUserToken(t)
 	hub := newFedUserHub(t, token)
-	b, _, ts := newFedUserTestServer(t, hub)
+	b, _, ts := newFedUserTestServer(t, hub, fedUserPushOnly)
 
 	aKey := agentKey(fedUserProjectID, "agent1")
 	b.registerActiveTaskFor("agent-task", aKey, &CallerIdentity{TokenType: "federation", AgentID: "peer-agent", IssuerURL: fedUserIssuer})

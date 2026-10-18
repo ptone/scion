@@ -1,0 +1,277 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package bridge
+
+import (
+	"fmt"
+	"net/http"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+)
+
+// Reply polling for a federated user caller: the executor reads the reply
+// from the caller's own conversation with the agent, through the chat route
+// of that conversation, with the caller's own credential (federatedUserGet).
+
+// visitorPollTimeout is the call timeout of these tests: long enough for a
+// retried read on the poll schedule (first read 1 s after the send, then
+// 1.5 s later).
+const visitorPollTimeout = 8 * time.Second
+
+func visitorPollConfig(cfg *Config) {
+	cfg.Timeouts.SendMessage = visitorPollTimeout
+}
+
+// visitorDMRows is the visitor's conversation, newest first: the agent's
+// reply, then the anchor (the message the bridge sent, msg-1 in the hub
+// double's send answer).
+func visitorDMRows(replyText string) []map[string]interface{} {
+	sent := time.Now().UTC().Add(-time.Second)
+	return []map[string]interface{}{
+		{"id": "reply-1", "sender": "agent:agent1", "senderId": fedUserAgentID, "type": messages.TypeInstruction, "msg": replyText, "createdAt": sent.Add(500 * time.Millisecond).Format(time.RFC3339Nano)},
+		{"id": "msg-1", "sender": "user:" + fedUserAccountID, "senderId": fedUserAccountID, "type": messages.TypeInstruction, "msg": "Hello from hub A", "createdAt": sent.Format(time.RFC3339Nano)},
+	}
+}
+
+func visitorDMKey(t *testing.T) string {
+	t.Helper()
+	key, err := messages.DMConversationKey("agent", fedUserAgentID, "user", fedUserAccountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
+}
+
+// TestReplyPoll_VisitorReturnsReplyFromOwnConversation: a federated user's
+// call returns the agent's reply read from its own conversation. Every read
+// (preflight, poll, access re-check) is of that conversation's key with the
+// caller's credential; the preflight (one message) comes before the send,
+// on a conversation with no messages yet (first contact), and the poll
+// reads full pages.
+func TestReplyPoll_VisitorReturnsReplyFromOwnConversation(t *testing.T) {
+	token := fedUserToken(t)
+	hub := newFedUserHub(t, token)
+	_, _, ts := newFedUserTestServer(t, hub, visitorPollConfig)
+
+	done := sendAsync(t, ts, "agent1", token)
+	sent := waitForSend(t, hub)
+	hub.set(func(h *fedUserHub) { h.dmMessages = visitorDMRows(fedUserReplyText) })
+
+	status, body := awaitResult(t, done)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", status, body)
+	}
+	if !strings.Contains(body, fedUserReplyText) {
+		t.Fatalf("response does not carry the agent's reply; body %s", body)
+	}
+	if sent.DMReadsBefore != 1 {
+		t.Errorf("conversation reads before the send = %d, want 1 (the preflight)", sent.DMReadsBefore)
+	}
+
+	snap := hub.snapshot()
+	wantKey := visitorDMKey(t)
+	if len(snap.dmReadKeys) < 3 {
+		t.Fatalf("conversation reads = %d, want at least the preflight, a poll and the access re-check", len(snap.dmReadKeys))
+	}
+	for i, key := range snap.dmReadKeys {
+		if key != wantKey || snap.dmReadTokens[i] != token {
+			t.Errorf("read %d: key %q with credential %q, want %q with the caller's", i, key, snap.dmReadTokens[i], wantKey)
+		}
+	}
+	if got := snap.dmReadQueries[0].Get("limit"); got != "1" {
+		t.Errorf("preflight read limit = %q, want 1", got)
+	}
+	if got := snap.dmReadQueries[1].Get("limit"); got != fmt.Sprint(replyPollPageSize) {
+		t.Errorf("poll read limit = %q, want %d", got, replyPollPageSize)
+	}
+	if got := snap.dmReadQueries[1].Get("around"); got != "" {
+		t.Errorf("poll read carries around=%q, want none", got)
+	}
+}
+
+// TestReplyPoll_VisitorPreflightRefusalSendsNothing: when the hub refuses
+// the federated user's read of its conversation (401, 403 or 404) before
+// the send, the call ends with the uniform refusal and nothing is sent.
+func TestReplyPoll_VisitorPreflightRefusalSendsNothing(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			token := fedUserToken(t)
+			hub := newFedUserHub(t, token)
+			hub.set(func(h *fedUserHub) { h.dmReadStatus = status })
+			_, _, ts := newFedUserTestServer(t, hub, visitorPollConfig)
+
+			code, body := awaitResult(t, sendAsync(t, ts, "agent1", token))
+			if code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body %s", code, body)
+			}
+			assertVisitorRefusal(t, body)
+			if n := len(hub.snapshot().sent); n != 0 {
+				t.Errorf("%d sends reached the hub, want 0", n)
+			}
+		})
+	}
+}
+
+// TestReplyPoll_VisitorReadRefusalEndsCall: when the hub refuses a poll of
+// the federated user's conversation (401, 403 or 404) after the send, the
+// call ends at once with the uniform refusal, not at the timeout.
+func TestReplyPoll_VisitorReadRefusalEndsCall(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			token := fedUserToken(t)
+			hub := newFedUserHub(t, token)
+			hub.set(func(h *fedUserHub) {
+				h.dmReadSeq = []int{0} // the preflight is served
+				h.dmReadStatus = status
+				h.dmMessages = visitorDMRows(fedUserReplyText)
+			})
+			_, _, ts := newFedUserTestServer(t, hub, visitorPollConfig)
+
+			start := time.Now()
+			code, body := awaitResult(t, sendAsync(t, ts, "agent1", token))
+			if code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body %s", code, body)
+			}
+			assertVisitorRefusal(t, body)
+			if strings.Contains(body, fedUserReplyText) {
+				t.Errorf("reply returned although the hub refused the read; body %s", body)
+			}
+			if elapsed := time.Since(start); elapsed >= visitorPollTimeout {
+				t.Errorf("call ended after %v, want before the %v timeout", elapsed, visitorPollTimeout)
+			}
+			if n := len(hub.snapshot().sent); n != 1 {
+				t.Errorf("%d sends reached the hub, want 1", n)
+			}
+		})
+	}
+}
+
+// TestReplyPoll_VisitorUnavailableReadIsRetried: a 503 on a poll is not a
+// refusal; the next poll returns the reply.
+func TestReplyPoll_VisitorUnavailableReadIsRetried(t *testing.T) {
+	token := fedUserToken(t)
+	hub := newFedUserHub(t, token)
+	hub.set(func(h *fedUserHub) {
+		h.dmReadSeq = []int{0, http.StatusServiceUnavailable}
+		h.dmMessages = visitorDMRows(fedUserReplyText)
+	})
+	_, _, ts := newFedUserTestServer(t, hub, visitorPollConfig)
+
+	code, body := awaitResult(t, sendAsync(t, ts, "agent1", token))
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", code, body)
+	}
+	if !strings.Contains(body, fedUserReplyText) {
+		t.Fatalf("response does not carry the agent's reply after a retried read; body %s", body)
+	}
+}
+
+// TestReplyPoll_VisitorRevokedBeforeForwardStopsReply: the poll finds the
+// reply, then the hub refuses the access re-check made before the reply is
+// forwarded: the call ends with the uniform refusal and the reply is not
+// forwarded.
+func TestReplyPoll_VisitorRevokedBeforeForwardStopsReply(t *testing.T) {
+	token := fedUserToken(t)
+	hub := newFedUserHub(t, token)
+	hub.set(func(h *fedUserHub) {
+		h.dmReadSeq = []int{0, 0} // the preflight and the poll are served
+		h.dmReadStatus = http.StatusForbidden
+		h.dmMessages = visitorDMRows(fedUserReplyText)
+	})
+	_, _, ts := newFedUserTestServer(t, hub, visitorPollConfig)
+
+	code, body := awaitResult(t, sendAsync(t, ts, "agent1", token))
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", code, body)
+	}
+	if strings.Contains(body, fedUserReplyText) {
+		t.Fatalf("reply forwarded after the access re-check was refused; body %s", body)
+	}
+	assertVisitorRefusal(t, body)
+	if n := len(hub.snapshot().dmReadKeys); n != 3 {
+		t.Errorf("conversation reads = %d, want 3 (preflight, the poll that found the reply, the re-check)", n)
+	}
+}
+
+// TestReplyPoll_VisitorSameCallerGuard: a second concurrent call by the same
+// federated user to the same agent is refused at once and sends nothing;
+// the first call still returns its reply.
+func TestReplyPoll_VisitorSameCallerGuard(t *testing.T) {
+	token := fedUserToken(t)
+	hub := newFedUserHub(t, token)
+	_, _, ts := newFedUserTestServer(t, hub, visitorPollConfig)
+
+	first := sendAsync(t, ts, "agent1", token)
+	waitForSend(t, hub)
+
+	code, body := awaitResult(t, sendAsync(t, ts, "agent1", token))
+	if code != http.StatusOK {
+		t.Fatalf("second call: status = %d, want 200; body %s", code, body)
+	}
+	if !strings.Contains(body, replyMsgBusy) {
+		t.Fatalf("second call: response does not carry the busy refusal; body %s", body)
+	}
+	if n := len(hub.snapshot().sent); n != 1 {
+		t.Errorf("%d sends reached the hub, want 1 (the first call's)", n)
+	}
+
+	hub.set(func(h *fedUserHub) { h.dmMessages = visitorDMRows(fedUserReplyText) })
+	code, body = awaitResult(t, first)
+	if code != http.StatusOK || !strings.Contains(body, fedUserReplyText) {
+		t.Fatalf("first call: status %d, body %s; want the reply", code, body)
+	}
+}
+
+// TestReplyWaitKey_FederatedUser: the same-caller key of a federated user is
+// the conversation's reader, its hub account ID, and the agent. A local
+// caller with the same account ID reads the same conversation and shares
+// the key; another account, another agent or the admin class does not.
+func TestReplyWaitKey_FederatedUser(t *testing.T) {
+	visitor := &CallerIdentity{TokenType: "federation", Subject: fedUserSubject, IssuerURL: fedUserIssuer, UserID: fedUserAccountID}
+	key := replyWaitKey(visitor, "admin@test", fedUserAgentID)
+	if got := replyWaitKey(&CallerIdentity{TokenType: "uat", UserID: fedUserAccountID}, "admin@test", fedUserAgentID); got != key {
+		t.Errorf("local caller with the same account ID: key %q, want the visitor's %q", got, key)
+	}
+	other := &CallerIdentity{TokenType: "federation", Subject: "other-subject", IssuerURL: fedUserIssuer, UserID: "44444444-5555-4666-8777-888888888888"}
+	for name, got := range map[string]string{
+		"another account": replyWaitKey(other, "admin@test", fedUserAgentID),
+		"another agent":   replyWaitKey(visitor, "admin@test", "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"),
+		"admin class":     replyWaitKey(nil, "admin@test", fedUserAgentID),
+	} {
+		if got == key {
+			t.Errorf("%s: key %q equals the visitor's", name, got)
+		}
+	}
+}
+
+// assertVisitorRefusal checks that a call ended failed with the uniform
+// refusal and with none of the local callers' read messages.
+func assertVisitorRefusal(t *testing.T, body string) {
+	t.Helper()
+	if !strings.Contains(body, federatedUserRefusalText) {
+		t.Errorf("response does not carry the uniform refusal; body %s", body)
+	}
+	if !strings.Contains(body, "FAILED") && !strings.Contains(body, "failed") {
+		t.Errorf("task did not end failed; body %s", body)
+	}
+	for _, local := range []string{replyMsgUnauthorized, replyMsgForbidden, replyMsgNotListed} {
+		if strings.Contains(body, local) {
+			t.Errorf("response carries a local caller's message %q; body %s", local, body)
+		}
+	}
+}
