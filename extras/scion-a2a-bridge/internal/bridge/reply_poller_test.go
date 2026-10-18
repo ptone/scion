@@ -164,12 +164,17 @@ type fakeReplyReader struct {
 	listOpts      []hubclient.ListConversationsOptions
 	getMessage    []string
 	messageOpts   []hubclient.ConversationMessagesOptions
+	// listErr, when set, is the answer to every list.
+	listErr error
 }
 
 func (f *fakeReplyReader) List(_ context.Context, opts *hubclient.ListConversationsOptions) (*hubclient.ConversationListResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.listOpts = append(f.listOpts, *opts)
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
 	return &hubclient.ConversationListResult{Conversations: f.conversations}, nil
 }
 
@@ -217,9 +222,9 @@ func TestReplyPoller_AppendsReplyForPollOnlyWait(t *testing.T) {
 	}
 
 	// A push event (agent-wide status) lands before the reply.
-	pushPayload, _ := json.Marshal(TaskStatusUpdate{TaskID: taskID, Status: TaskStatus{State: TaskStateCompleted}})
+	pushStatus, _ := json.Marshal(TaskStatusUpdate{TaskID: taskID, Status: TaskStatus{State: TaskStateCompleted}})
 	if _, err := store.AppendTaskEvent(ctx, &state.TaskEvent{
-		TaskID: taskID, Kind: "status", Payload: pushPayload, Final: true, DedupKey: "push-status",
+		TaskID: taskID, Kind: "status", Payload: pushStatus, Final: true, DedupKey: "push-status",
 	}); err != nil {
 		t.Fatalf("append push event: %v", err)
 	}
