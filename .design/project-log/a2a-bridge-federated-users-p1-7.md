@@ -151,3 +151,7 @@
   off in production wiring (`PushNotifications: false`).
 - The docs page names the scheme `oidcFederation`; the config value is
   `federation`.
+
+## Merge forward (2026-10-18)
+
+- Merged the visitor agent read branch (with the visitor messaging, visitor route allow-list and federation credential check work beneath it) and then upstream main into this branch. Both merges were clean, and this item's own diff is unchanged.
