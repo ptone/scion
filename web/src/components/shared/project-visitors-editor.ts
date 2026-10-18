@@ -78,6 +78,13 @@ export const NO_VISITOR_ISSUERS_MESSAGE =
 export const ISSUER_TEXT_HINT =
   "The issuer URL of the visitor's hub or identity provider. A hub admin must first allow visitor access for that issuer.";
 
+/** The description under the Visitors heading. */
+const VISITORS_DESCRIPTION =
+  "Users of a trusted issuer who may message this project's agents without being members. Add them by email, or by email domain.";
+
+/** The hint under the domain field. */
+const DOMAIN_HINT = 'Matches the domain exactly; subdomains are not included.';
+
 /** Shown when the hub answers the visitor routes with 404 (feature off on the hub). */
 export const VISITORS_UNAVAILABLE_MESSAGE = 'Visitor access is not available on this hub.';
 
@@ -479,7 +486,8 @@ export class ScionProjectVisitorsEditor extends LitElement {
         return;
       }
       this.feedback = {
-        message: kind === 'visitor' ? `Visitor access revoked for ${label}` : `Rule ${label} removed`,
+        message:
+          kind === 'visitor' ? `Visitor access revoked for ${label}` : `Rule ${label} removed`,
         variant: 'success',
       };
       await this.loadData();
@@ -500,10 +508,7 @@ export class ScionProjectVisitorsEditor extends LitElement {
       <div class="section-header">
         <div>
           <h3>Visitors</h3>
-          <p>
-            Users of a trusted issuer who may message this project's agents without being members.
-            Add them by email, or by email domain.
-          </p>
+          <p>${VISITORS_DESCRIPTION}</p>
         </div>
         <sl-button
           size="small"
@@ -777,9 +782,7 @@ export class ScionProjectVisitorsEditor extends LitElement {
                   }}
                 ></sl-input>
                 ${this.addKind === 'domain'
-                  ? html`<span class="hint"
-                      >Matches the domain exactly; subdomains are not included.</span
-                    >`
+                  ? html`<span class="hint">${DOMAIN_HINT}</span>`
                   : nothing}
                 <sl-select
                   label="Expires"
@@ -798,7 +801,9 @@ export class ScionProjectVisitorsEditor extends LitElement {
                   : nothing}
               </div>
               <div slot="footer">
-                <sl-button variant="default" @click=${() => this.closeAddDialog()}>Cancel</sl-button>
+                <sl-button variant="default" @click=${() => this.closeAddDialog()}
+                  >Cancel</sl-button
+                >
                 <sl-button
                   variant="primary"
                   data-add-submit

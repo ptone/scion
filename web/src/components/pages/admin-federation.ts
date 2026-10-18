@@ -85,6 +85,10 @@ interface TrustedIssuerConfig {
 export const ALLOW_VISITOR_GRANTS_LABEL =
   'Allow project owners to grant visitor access to users from this issuer';
 
+/** The hint under the visitor access toggle. */
+const ALLOW_VISITOR_GRANTS_HINT =
+  'Off by default. While off, project owners cannot add visitors from this issuer, and its existing visitors are refused until it is turned back on.';
+
 
 @customElement('scion-page-admin-federation')
 export class ScionPageAdminFederation extends LitElement {
@@ -1196,10 +1200,7 @@ export class ScionPageAdminFederation extends LitElement {
         >
           ${ALLOW_VISITOR_GRANTS_LABEL}
         </sl-switch>
-        <span class="hint"
-          >Off by default. While off, project owners cannot add visitors from this issuer, and its
-          existing visitors are refused until it is turned back on.</span
-        >
+        <span class="hint">${ALLOW_VISITOR_GRANTS_HINT}</span>
       </div>
     `;
   }
