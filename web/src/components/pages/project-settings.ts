@@ -1752,9 +1752,8 @@ export class ScionPageProjectSettings extends LitElement {
         <h1>${this.project.name} Settings</h1>
       </div>
 
-      ${this.renderConfigSection()} ${this.renderMembersSection()}
-      ${this.renderResourcesSection()} ${this.renderMessagingPolicySection()}
-      ${this.renderGitHubAppSection()}
+      ${this.renderConfigSection()} ${this.renderMembersSection()} ${this.renderResourcesSection()}
+      ${this.renderMessagingPolicySection()} ${this.renderGitHubAppSection()}
       <scion-boundary-summary-notice
         label="Access constraints affecting this project"
         .groups=${this.boundaryGroups}

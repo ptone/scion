@@ -34,9 +34,13 @@ function json(body: unknown, status = 200): Promise<Response> {
   );
 }
 
+function requestPath(url: string | URL | Request): string {
+  return typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+}
+
 function createFetchHandler(actions: string[]) {
   return (url: string | URL | Request): Promise<Response> => {
-    const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+    const path = requestPath(url);
     if (path.match(/\/api\/v1\/projects\/[^/?]+(\?|$)/)) {
       return json({
         id: 'proj-1',
@@ -139,7 +143,7 @@ describe('project-settings: Visitors tab gating (ptone/scion#4603)', () => {
     setFlag(false);
     element = await createComponent(['read', 'update', 'manage', 'manage_visitors']);
 
-    const urls = vi.mocked(fetch).mock.calls.map(([u]) => String(u));
+    const urls = vi.mocked(fetch).mock.calls.map(([u]) => requestPath(u));
     expect(urls.some((u) => u.includes('/visitors'))).toBe(false);
   });
 });
