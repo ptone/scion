@@ -29,6 +29,11 @@ import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
 import {
+  PROJECT_VISITORS_FLAG,
+  issuerTypeAllowsVisitorGrants,
+} from '../../shared/project-visitors.js';
+import { isFeatureEnabled } from '../../utils/feature-flags.js';
+import {
   classifySettingsError,
   fieldErrorMessages,
   genericSaveErrorText,
@@ -57,9 +62,29 @@ interface TrustedIssuerConfig {
   allowed_root_users?: string[];
   default_scopes?: string[];
   issuer_type?: string;
+  /**
+   * Accepted by the hub for compatibility and ignored. The page no longer
+   * edits it; an existing value is kept as stored.
+   */
   default_role?: string;
   allowed_emails?: string[];
+  allowed_gcp_projects?: string[];
+  allowed_domains?: string[];
+  accept_user_tokens?: boolean;
+  /**
+   * Lets project owners and admins grant visitor access to users of this
+   * issuer (ptone/scion#4603). Only for issuer_type user or hub.
+   */
+  allow_visitor_grants?: boolean;
 }
+
+/**
+ * The issuer label of the visitor access toggle in the issuer dialog.
+ * Exported for tests.
+ */
+export const ALLOW_VISITOR_GRANTS_LABEL =
+  'Allow project owners to grant visitor access to users from this issuer';
+
 
 @customElement('scion-page-admin-federation')
 export class ScionPageAdminFederation extends LitElement {
@@ -536,8 +561,8 @@ export class ScionPageAdminFederation extends LitElement {
       allowed_root_users: issuer.allowed_root_users ? [...issuer.allowed_root_users] : [],
       default_scopes: issuer.default_scopes ? [...issuer.default_scopes] : [],
       issuer_type: issuer.issuer_type ?? 'hub',
-      default_role: issuer.default_role ?? '',
       allowed_emails: issuer.allowed_emails ? [...issuer.allowed_emails] : [],
+      allow_visitor_grants: issuer.allow_visitor_grants === true,
     };
     this.editingIndex = index;
     this.dialogOpen = true;
@@ -567,6 +592,22 @@ export class ScionPageAdminFederation extends LitElement {
       issuer_url: this.editingIssuer.issuer_url.trim(),
     };
 
+    // Fields the dialog does not edit are kept as stored on an existing
+    // issuer (default_role is accepted by the hub and ignored).
+    const stored = this.editingIndex >= 0 ? this.issuers[this.editingIndex] : undefined;
+    if (stored?.default_role) {
+      issuer.default_role = stored.default_role;
+    }
+    if (stored?.allowed_gcp_projects && stored.allowed_gcp_projects.length > 0) {
+      issuer.allowed_gcp_projects = [...stored.allowed_gcp_projects];
+    }
+    if (stored?.allowed_domains && stored.allowed_domains.length > 0) {
+      issuer.allowed_domains = [...stored.allowed_domains];
+    }
+    if (stored?.accept_user_tokens === true) {
+      issuer.accept_user_tokens = true;
+    }
+
     if (this.editingIssuer.issuer_type) {
       issuer.issuer_type = this.editingIssuer.issuer_type;
     }
@@ -585,11 +626,15 @@ export class ScionPageAdminFederation extends LitElement {
     if (this.editingIssuer.default_scopes && this.editingIssuer.default_scopes.length > 0) {
       issuer.default_scopes = this.editingIssuer.default_scopes;
     }
-    if (this.editingIssuer.default_role?.trim()) {
-      issuer.default_role = this.editingIssuer.default_role.trim();
-    }
     if (this.editingIssuer.allowed_emails && this.editingIssuer.allowed_emails.length > 0) {
       issuer.allowed_emails = this.editingIssuer.allowed_emails;
+    }
+    // The hub refuses allow_visitor_grants on a service_account issuer.
+    if (
+      this.editingIssuer.allow_visitor_grants === true &&
+      issuerTypeAllowsVisitorGrants(issuer.issuer_type)
+    ) {
+      issuer.allow_visitor_grants = true;
     }
 
     const updated = [...this.issuers];
@@ -1023,7 +1068,9 @@ export class ScionPageAdminFederation extends LitElement {
                 ${issuerType === 'service_account' || issuerType === 'user'
                   ? this.renderEmailFields()
                   : nothing}
-                ${issuerType === 'user' ? this.renderUserFields() : nothing}
+                ${this.showVisitorGrantsField(issuerType)
+                  ? this.renderVisitorGrantsField()
+                  : nothing}
 
                 <div class="form-field">
                   <label>Default Scopes</label>
@@ -1125,25 +1172,34 @@ export class ScionPageAdminFederation extends LitElement {
     `;
   }
 
-  private renderUserFields() {
+  /**
+   * The visitor access toggle applies to user and hub issuers, and is shown
+   * only while the federation.project_visitors experiment is on. While it
+   * is hidden, a stored value is kept unchanged.
+   */
+  private showVisitorGrantsField(issuerType: string): boolean {
+    return issuerTypeAllowsVisitorGrants(issuerType) && isFeatureEnabled(PROJECT_VISITORS_FLAG);
+  }
+
+  private renderVisitorGrantsField() {
     return html`
-      <div class="form-field" style="margin-top: 0.5rem;">
-        <label>Default Role</label>
-        <sl-select
-          .value=${this.editingIssuer?.default_role ?? ''}
-          placeholder="Select a default role"
+      <div class="form-field" data-visitor-grants-field>
+        <sl-switch
+          data-allow-visitor-grants
+          ?checked=${this.editingIssuer?.allow_visitor_grants === true}
           @sl-change=${(e: Event) => {
             this.editingIssuer = {
               ...this.editingIssuer!,
-              default_role: (e.target as HTMLSelectElement).value,
+              allow_visitor_grants: (e.target as HTMLInputElement).checked,
             };
           }}
         >
-          <sl-option value="admin">Admin</sl-option>
-          <sl-option value="member">Member</sl-option>
-          <sl-option value="viewer">Viewer</sl-option>
-        </sl-select>
-        <span class="hint">Default role assigned to users authenticating via this issuer.</span>
+          ${ALLOW_VISITOR_GRANTS_LABEL}
+        </sl-switch>
+        <span class="hint"
+          >Off by default. While off, project owners cannot add visitors from this issuer, and its
+          existing visitors are refused until it is turned back on.</span
+        >
       </div>
     `;
   }
