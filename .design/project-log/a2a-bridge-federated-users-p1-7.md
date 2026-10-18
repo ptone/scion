@@ -155,3 +155,7 @@
 ## Merge forward (2026-10-18)
 
 - Merged the visitor agent read branch (with the visitor messaging, visitor route allow-list and federation credential check work beneath it) and then upstream main into this branch. Both merges were clean, and this item's own diff is unchanged.
+
+## Docs and comment correction (2026-10-18)
+
+- The docs page and two bridge comments said that a user access credential from another hub is served as before while the project visitor experiment is off. The Hub now refuses that credential with 401 and the bridge passes the 401 on, so the text says that now. The docs also say that a Hub 400 (a request the Hub does not accept from a user caller) ends the task with "Failed to route message to agent". Text only; no code changes.

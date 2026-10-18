@@ -726,9 +726,9 @@ func TestAuthMiddleware_FederatedUserIdentity(t *testing.T) {
 		}
 	})
 
-	// The hub names no project visitor account (its experiment is off, or
-	// the user is not linked): the credential is served as before
-	// credential kinds existed, as an agent caller keyed by its subject.
+	// The hub names no project visitor account (for example, the user is not
+	// linked; with the experiment off the hub answers 401 instead): the
+	// credential is served as before, as an agent caller keyed by its subject.
 	legacy := CallerIdentity{TokenType: "federation", RawToken: token, AgentID: fedUserSubject, IssuerURL: fedUserIssuer}
 	for _, tc := range []struct {
 		name   string

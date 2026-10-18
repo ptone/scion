@@ -37,15 +37,15 @@ import (
 // Federated user callers (people from another issuer, typically another
 // Scion hub, whom a project owner on this hub has let message agents).
 //
-// The bridge never decides what a federated user may do. Every answer comes
-// from the hub, asked with the caller's own credential (passed in
-// X-Scion-Federation-Token): which account the credential belongs to
-// (GET /api/v1/auth/me), which projects and agents it may reach, and, before
-// each agent reply is forwarded, whether it may still read its conversation
-// with that agent. When the hub names no project visitor account for a
-// credential (for example while its project visitor experiment is off), the
-// bridge serves that credential exactly as before (legacyFederationCaller);
-// when the hub refuses the credential, the bridge passes the refusal on.
+// The bridge never decides what a federated user may do. The hub answers,
+// asked with the caller's own credential (X-Scion-Federation-Token): which
+// account it belongs to (GET /api/v1/auth/me), which projects and agents it
+// may reach, and, before each agent reply is forwarded, whether it may still
+// read its conversation with that agent. When the hub names no project
+// visitor account (for example, for an unlinked identity issuer user), the
+// bridge serves the credential as before (legacyFederationCaller). With its
+// project visitor experiment off, the hub refuses a user access credential
+// from another hub with 401; the bridge passes every hub refusal on.
 
 // federatedUserRefusalText is the one answer a federated user gets for every
 // refusal: an unknown project or agent, an agent it may not message, and an
@@ -171,13 +171,13 @@ func (b *Bridge) federatedUserBridgeAuth() *identity.MintingAuth {
 //   - The hub names a project visitor account (a user, not an agent, whose
 //     ID is a canonical UUID): it returns a copy of caller with UserID set
 //     to that account ID. The email stays the credential's.
-//   - The hub answers but names no such account (for example the hub's
-//     project visitor experiment is off, or the credential comes from an
-//     identity issuer whose user is not linked to an account): it returns
-//     legacyFederationCaller(caller), the caller the bridge built for this
-//     credential before credential kinds existed, so nothing changes for it.
+//   - The hub answers but names no such account (for example, an identity
+//     issuer user not linked to an account): legacyFederationCaller(caller),
+//     the caller built for this credential before credential kinds existed.
 //   - The hub refuses the credential (401, 403 or 404): the refusal
-//     (errFederatedUserRefused; isHubUnauthenticated tells a 401 apart).
+//     (errFederatedUserRefused; isHubUnauthenticated tells a 401 apart). A
+//     user access credential from another hub gets 401 while the hub's
+//     project visitor experiment is off.
 //   - The hub could not be asked: another error, so the caller can retry.
 func (b *Bridge) identifyFederatedUser(ctx context.Context, caller *CallerIdentity) (*CallerIdentity, error) {
 	if caller == nil || !caller.IsFederatedUser() {
