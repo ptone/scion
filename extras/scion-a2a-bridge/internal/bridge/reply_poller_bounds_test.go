@@ -18,14 +18,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 
+	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -363,6 +369,114 @@ func TestReplyPoller_AppendFence(t *testing.T) {
 	})
 }
 
+// pushHoldStore wraps the bridge's event store. The first push-config read
+// signals entered, waits until release is closed, and then fails if its
+// context has ended. Event appends fail on an ended context, as the SQL
+// stores do.
+type pushHoldStore struct {
+	state.Store
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *pushHoldStore) GetPushConfigsByTask(ctx context.Context, taskID string) ([]state.PushNotificationConfig, error) {
+	first := false
+	s.once.Do(func() { first = true })
+	if first {
+		close(s.entered)
+		<-s.release
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return s.Store.GetPushConfigsByTask(ctx, taskID)
+}
+
+func (s *pushHoldStore) AppendTaskEvent(ctx context.Context, ev *state.TaskEvent) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	return s.Store.AppendTaskEvent(ctx, ev)
+}
+
+// TestReplyPoller_StopWaitsForAppend: the wait returns on the reply's
+// artifact event while the rest of the append (the push dispatch and the
+// message event) is still running. Stopping the poller then waits for the
+// append to finish instead of cutting it short, so both poll events of the
+// reply are in the task log when stop returns (D10).
+func TestReplyPoller_StopWaitsForAppend(t *testing.T) {
+	base, err := state.NewSQLite(filepath.Join(t.TempDir(), "stop-append.db"))
+	if err != nil {
+		t.Fatalf("state store: %v", err)
+	}
+	t.Cleanup(func() { base.Close() })
+	hold := &pushHoldStore{Store: base, entered: make(chan struct{}), release: make(chan struct{})}
+	cfg := &Config{Hub: HubConfig{User: "test-user"}, Timeouts: TimeoutConfig{SendMessage: 5 * time.Second}}
+	b := New(hold, nil, nil, cfg, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(b.Shutdown)
+	releaseHold := sync.OnceFunc(func() { close(hold.release) })
+
+	const taskID = "stop-append-task"
+	reply := dmRow("held-reply", pollTestAgentID, messages.TypeInstruction, "dm:x", "the reply", time.Second)
+	reader := &fakeReplyReader{
+		byID: map[string]hubstore.Message{pollTestAnchorID: anchorRow()},
+		page: []hubstore.Message{reply, anchorRow()},
+	}
+	p := newReplyPoller(b, reader, taskID, "helper", pollTestAgentID, pollTestAnchorID, "conv-1", nil)
+	p.sleep = noWaitSleep
+	ctx := context.Background()
+	p.start(ctx)
+	// The held push-config read is released only after stop has cancelled
+	// the poller's context.
+	cancelPoller := p.cancel
+	p.cancel = func() {
+		cancelPoller()
+		releaseHold()
+	}
+	t.Cleanup(func() {
+		releaseHold()
+		p.stop()
+	})
+
+	select {
+	case <-hold.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the reply append did not reach the push dispatch")
+	}
+	ev, err := b.waitForTaskEvent(ctx, taskID, 5*time.Second, waitOptions{acceptEvent: pollOnlyEvent})
+	if err != nil {
+		t.Fatalf("waitForTaskEvent: %v", err)
+	}
+	if ev.Kind != "artifact" {
+		t.Fatalf("the wait returned a %q event, want the reply's artifact event", ev.Kind)
+	}
+
+	stopped := make(chan struct{})
+	go func() {
+		p.stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(15 * time.Second):
+		t.Fatal("stop did not return")
+	}
+
+	events, err := base.ReadTaskEvents(context.Background(), taskID, 0, 10)
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+	var keys []string
+	for _, e := range events {
+		keys = append(keys, e.Kind+" "+e.DedupKey)
+	}
+	if len(events) != 2 || events[0].Kind != "artifact" || !strings.HasPrefix(events[0].DedupKey, replyPollDedupPrefix+"held-reply:artifact:") ||
+		events[1].Kind != "message" || events[1].DedupKey != replyPollDedupPrefix+"held-reply:message" {
+		t.Fatalf("task log after stop holds %v, want the reply's artifact and message events", keys)
+	}
+}
+
 // TestReplyPoller_StandaloneAppendFence: the standalone fence against the
 // PostgreSQL SDK task store. The reply is appended only while the task's
 // snapshot is not final and this replica holds its execution lease (D10).
@@ -373,12 +487,15 @@ func TestReplyPoller_StandaloneAppendFence(t *testing.T) {
 		state   a2a.TaskState
 		claim   bool
 		release bool
-		want    int
+		// final, after the claim, stores a completed snapshot while the
+		// lease is still held, so only the snapshot check refuses.
+		final bool
+		want  int
 	}{
 		{name: "lease held, task working: appended", state: a2a.TaskStateWorking, claim: true, want: 2},
 		{name: "lease released before the append: no append", state: a2a.TaskStateWorking, claim: true, release: true},
 		{name: "lease never claimed: no append", state: a2a.TaskStateWorking},
-		{name: "snapshot final before the append: no append", state: a2a.TaskStateCompleted},
+		{name: "lease held, snapshot final before the append: no append", state: a2a.TaskStateWorking, claim: true, final: true},
 	}
 	for i, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -390,7 +507,8 @@ func TestReplyPoller_StandaloneAppendFence(t *testing.T) {
 			t.Cleanup(func() {
 				_, _ = pg.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id = $1`, taskID)
 			})
-			if _, err := pg.Create(ctx, &a2a.Task{ID: a2a.TaskID(taskID), ContextID: "ctx-fence", Status: a2a.TaskStatus{State: tc.state}}); err != nil {
+			version, err := pg.Create(ctx, &a2a.Task{ID: a2a.TaskID(taskID), ContextID: "ctx-fence", Status: a2a.TaskStatus{State: tc.state}})
+			if err != nil {
 				t.Fatalf("create SDK task: %v", err)
 			}
 			if tc.claim {
@@ -402,6 +520,17 @@ func TestReplyPoller_StandaloneAppendFence(t *testing.T) {
 			if tc.release {
 				if err := pg.ReleaseExecution(ctx, taskID, OwnerID()); err != nil {
 					t.Fatalf("release execution: %v", err)
+				}
+			}
+			if tc.final {
+				if _, err := pg.Update(ctx, &taskstore.UpdateRequest{
+					Task:        &a2a.Task{ID: a2a.TaskID(taskID), ContextID: "ctx-fence", Status: a2a.TaskStatus{State: a2a.TaskStateCompleted}},
+					PrevVersion: version,
+				}); err != nil {
+					t.Fatalf("store the completed snapshot: %v", err)
+				}
+				if err := pg.HeartbeatExecution(ctx, taskID, OwnerID()); err != nil {
+					t.Fatalf("lease not held after the snapshot update: %v", err)
 				}
 			}
 			p := newReplyPoller(b, &fakeReplyReader{}, taskID, "helper", pollTestAgentID, pollTestAnchorID, "conv-1", nil)

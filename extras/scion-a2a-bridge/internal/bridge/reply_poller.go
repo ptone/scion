@@ -63,6 +63,11 @@ const (
 	replyPollStep = 500 * time.Millisecond
 	// replyPollMaxDelay caps the delay between reads.
 	replyPollMaxDelay = 3 * time.Second
+
+	// replyAppendTimeout bounds the append of a reply that passed the
+	// append fence. The append does not end when the call stops the poller;
+	// stop waits for it instead.
+	replyAppendTimeout = 10 * time.Second
 )
 
 // Messages of the calls that end on a reply poll outcome or refusal.
@@ -471,12 +476,18 @@ func (p *replyPoller) pollOnce(ctx context.Context) (pollOutcome, *hubstore.Mess
 }
 
 // appendReply appends the reply to the task's event log, unless the call
-// has ended or the fence refuses.
+// has ended or the fence refuses. Once the fence has passed, the append
+// (the artifact and message events and their push dispatches) runs on a
+// bounded context that stop does not cancel: the wait can return on the
+// first of these events, and stop then waits for the rest of the append
+// instead of cutting it short.
 func (p *replyPoller) appendReply(ctx context.Context, reply *hubstore.Message) {
 	if !p.mayAppend(ctx) {
 		return
 	}
-	p.bridge.processAndAppendEvent(ctx, p.taskID, p.agentSlug, polledReplyMessage(reply), replyPollDedupPrefix+reply.ID)
+	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), replyAppendTimeout)
+	defer cancel()
+	p.bridge.processAndAppendEvent(actx, p.taskID, p.agentSlug, polledReplyMessage(reply), replyPollDedupPrefix+reply.ID)
 }
 
 // mayAppend is the append fence: the call has not ended (done not set, the
