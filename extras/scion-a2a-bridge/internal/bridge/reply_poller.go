@@ -358,12 +358,13 @@ func (p *replyPoller) start(ctx context.Context) {
 
 // stop ends the poller and waits for its goroutine to exit, so that no
 // poller event can be appended after stop returns. It may be called more
-// than once.
+// than once, and does nothing for a poller that was never started.
 func (p *replyPoller) stop() {
 	p.done.Store(true)
-	if p.cancel != nil {
-		p.cancel()
+	if p.cancel == nil {
+		return
 	}
+	p.cancel()
 	<-p.exited
 }
 
@@ -412,6 +413,10 @@ func (p *replyPoller) pollCapped(ctx context.Context) (pollOutcome, *hubstore.Me
 // pollOnce makes one poll of the caller's conversation.
 func (p *replyPoller) pollOnce(ctx context.Context) (pollOutcome, *hubstore.Message) {
 	if p.conversationID == "" {
+		// Listed once per call: after the preflight (or the first poll) has
+		// found the conversation, its ID is reused. Only while the list
+		// itself fails with a retryable error does a later poll list again,
+		// on the same backoff schedule as the reads.
 		id, err := findDirectConversation(ctx, p.reader, p.agentID)
 		if err != nil {
 			return readOutcome(err), nil

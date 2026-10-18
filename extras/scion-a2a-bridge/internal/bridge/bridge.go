@@ -1071,10 +1071,12 @@ func (b *Bridge) HandleBrokerMessage(ctx context.Context, topic string, msg *mes
 		return nil
 	}
 
+	// Metadata only: no message text at any level.
 	b.log.Debug("handling broker message",
 		"task_id", taskID,
 		"type", msg.Type,
-		"msg_preview", truncate(msg.Msg, 100),
+		"text_len", len(msg.Msg),
+		"sender_kind", senderKindLabel(msg.Sender),
 	)
 
 	// Skip system messages — they don't produce events.
@@ -1179,6 +1181,11 @@ func (b *Bridge) correlateToTask(ctx context.Context, projectID, agentSlug, topi
 //
 // With a2aTaskId metadata the named cache entry must pass; without it, the
 // newest entry under (P, X) that passes is chosen.
+//
+// HandleBrokerMessage derives agentSlug and projectID from the same sender
+// and topic, so there the sender and project compares below always agree.
+// They are kept so that this function enforces T1-T4 on its own, whatever
+// its caller passes (the acceptance table tests call it directly).
 func (b *Bridge) correlatePluginTask(projectID, agentSlug, topic string, msg *messages.StructuredMessage) (string, error) {
 	if sender := extractAgentIDFromSender(msg.Sender); sender == "" || sender != agentSlug {
 		return "", &pushDropError{reason: pushDropSender}
@@ -1243,8 +1250,8 @@ func (b *Bridge) pushAcceptReason(entry activeTaskEntry, topicProject, senderAge
 }
 
 // correlateWithMetadata handles broker messages that carry a2aTaskId in
-// standalone mode: the SDK store is authoritative, and a legacy row cannot
-// bypass SDK caller/route validation.
+// standalone mode: the SDK store is authoritative, and a legacy row never
+// stands in for SDK caller/route validation.
 func (b *Bridge) correlateWithMetadata(ctx context.Context, projectID, agentSlug, topic, taskID string) (string, error) {
 	sdkTask, callerUserID, sdkErr := b.sdkTaskStore.GetByIDAndAgent(ctx, taskID, projectID, agentSlug)
 	if sdkErr == nil && sdkTask != nil {
@@ -1550,13 +1557,6 @@ func (b *Bridge) failFollowUpTask(taskID string) {
 		}
 		b.push.Dispatch(b.shutdownCtx, taskID, failEvent)
 	}
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
 }
 
 // callerHubClient creates a per-request Hub client authenticated as the caller.

@@ -153,6 +153,20 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 			}
 		}
 
+		// One waiting call per caller and agent in this process: a second
+		// concurrent call would read the same conversation. The check comes
+		// before the task is registered, so a refused call never becomes the
+		// newest cache entry for the agent.
+		if reader != nil {
+			waitKey := replyWaitKey(caller, e.bridge.adminTopicUserID(), agentCtx.AgentID)
+			if !e.bridge.acquireReplyWait(waitKey) {
+				e.log.Info("refusing a concurrent call from the same caller to the agent", "task_id", taskID)
+				yield(failedStatusEvent(execCtx, replyMsgBusy), nil)
+				return
+			}
+			defer e.bridge.releaseReplyWait(waitKey)
+		}
+
 		// Register active task for broker correlation (local cache), with
 		// its caller for the push path's user check.
 		aKey := agentKey(agentCtx.ProjectID, agentCtx.AgentSlug)
@@ -161,16 +175,6 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 
 		var conversationID string
 		if reader != nil {
-			// One waiting call per caller and agent in this process: a
-			// second concurrent call would read the same conversation.
-			waitKey := replyWaitKey(caller, e.bridge.adminTopicUserID(), agentCtx.AgentID)
-			if !e.bridge.acquireReplyWait(waitKey) {
-				e.log.Info("refusing a concurrent call from the same caller to the agent", "task_id", taskID)
-				yield(failedStatusEvent(execCtx, replyMsgBusy), nil)
-				return
-			}
-			defer e.bridge.releaseReplyWait(waitKey)
-
 			// Preflight: the caller must be able to read its conversation
 			// with the agent. A refusal ends the call before anything is
 			// sent; there is never a fallback to the admin credential.
