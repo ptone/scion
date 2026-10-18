@@ -353,6 +353,7 @@ type fedUserHub struct {
 	dmReadKeys   []string
 	dmReadTokens []string
 	createCalls  int
+	convRequests []fedUserHubConvRequest
 	// dmReadQueries records the query of every conversation read.
 	dmReadQueries []url.Values
 	// dmReadSeq, when not empty, answers the next conversation reads in
@@ -360,6 +361,17 @@ type fedUserHub struct {
 	dmReadSeq []int
 	// dmMessages is the conversation page the reads answer, newest first.
 	dmMessages []map[string]interface{}
+
+	// visitorConvStatus answers /api/v1/conversations* requests that carry
+	// a federation credential, as the hub refuses a visitor there; 0: 404,
+	// as for every other request to those routes.
+	visitorConvStatus int
+}
+
+// fedUserHubConvRequest is a request to an /api/v1/conversations* route.
+type fedUserHubConvRequest struct {
+	Path     string
+	FedToken string
 }
 
 type fedUserHubSend struct {
@@ -481,6 +493,13 @@ func newFedUserHub(t *testing.T, userToken string) *fedUserHub {
 				resp["nextCursor"] = next
 			}
 			writeJSON(resp)
+		case strings.HasPrefix(r.URL.Path, "/api/v1/conversations"):
+			h.convRequests = append(h.convRequests, fedUserHubConvRequest{Path: r.URL.Path, FedToken: fedToken})
+			if fedToken != "" && h.visitorConvStatus != 0 {
+				writeHubError(w, h.visitorConvStatus)
+				return
+			}
+			http.Error(w, "not found: "+r.URL.Path, http.StatusNotFound)
 		default:
 			http.Error(w, "not found: "+r.URL.Path, http.StatusNotFound)
 		}
@@ -532,6 +551,7 @@ type fedUserHubCalls struct {
 	dmReadKeys   []string
 	dmReadTokens []string
 	createCalls  int
+	convRequests []fedUserHubConvRequest
 	// dmReadQueries is the query of every conversation read.
 	dmReadQueries []url.Values
 }
@@ -549,6 +569,7 @@ func (h *fedUserHub) snapshot() fedUserHubCalls {
 		dmReadTokens:  append([]string(nil), h.dmReadTokens...),
 		createCalls:   h.createCalls,
 		dmReadQueries: append([]url.Values(nil), h.dmReadQueries...),
+		convRequests:  append([]fedUserHubConvRequest(nil), h.convRequests...),
 	}
 }
 
@@ -1527,6 +1548,27 @@ func TestCorrelate_AgentCallerTaskStandalone(t *testing.T) {
 			}
 		})
 	}
+
+	// With Hub.UserID set, the bridge admin's topic is Hub.UserID's topic
+	// (the topic the admin subscription uses), not Hub.User's.
+	t.Run("admin user ID differs from the admin user name", func(t *testing.T) {
+		const adminUserID = "44444444-5555-4666-8777-888888888888"
+		b.config.Hub.UserID = adminUserID
+		t.Cleanup(func() { b.config.Hub.UserID = "" })
+		if b.config.Hub.User == adminUserID {
+			t.Fatalf("Hub.User %q equals Hub.UserID; the case needs them to differ", b.config.Hub.User)
+		}
+		byID := projectkeys.UserTopic(projID, adminUserID)
+		byName := projectkeys.UserTopic(projID, b.config.Hub.User)
+		for _, metadata := range []map[string]string{nil, withID} {
+			if got, err := b.correlateToTask(context.Background(), projID, agentSlug, byID, reply(metadata)); err != nil || got != taskID {
+				t.Errorf("correlateToTask(Hub.UserID's topic, metadata %v) = %q, %v; want %q", metadata, got, err, taskID)
+			}
+			if got, err := b.correlateToTask(context.Background(), projID, agentSlug, byName, reply(metadata)); err == nil {
+				t.Errorf("correlateToTask(Hub.User's topic, metadata %v) = %q, want no task", metadata, got)
+			}
+		}
+	})
 
 	// A task with no caller identity is not an agent caller's task and
 	// keeps its rule.
