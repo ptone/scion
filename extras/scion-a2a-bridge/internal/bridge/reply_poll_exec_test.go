@@ -780,7 +780,7 @@ func TestReplyPoll_EmptyAnchor(t *testing.T) {
 		f := newFakeConvHub(t)
 		f.seedConversation()
 		f.omitMessageID = true
-		b, _, _ := newExecTestBridge(t, f, nil)
+		b, _, logs := newExecTestBridge(t, f, nil)
 		const taskID = "task-d15b"
 		done := runExecAsync(context.Background(), b, taskID, execTestCaller(), false, "the request")
 		f.awaitSend(t)
@@ -808,6 +808,12 @@ func TestReplyPoll_EmptyAnchor(t *testing.T) {
 		if _, pages, gets, _ := f.counts(); pages != pagesBefore || gets != getsBefore {
 			t.Fatalf("conversation reads after the send: pages %d->%d, anchor reads %d->%d; want none", pagesBefore, pages, getsBefore, gets)
 		}
+		// No poller: the pushed question reached the accepted-message line,
+		// which carries no text (D9).
+		if !strings.Contains(logs.String(), "handling broker message") {
+			t.Fatalf("the pushed question did not reach the accepted-message line; logs:\n%s", logs.String())
+		}
+		assertNeutralLogs(t, logs, "the request", "a pushed question", "an earlier reply")
 	})
 }
 
@@ -818,7 +824,7 @@ func TestReplyPoll_RollbackSwitch(t *testing.T) {
 	f := newFakeConvHub(t)
 	f.seedConversation()
 	disabled := false
-	b, _, _ := newExecTestBridge(t, f, func(c *Config) { c.ReplyPoll.Enabled = &disabled })
+	b, _, logs := newExecTestBridge(t, f, func(c *Config) { c.ReplyPoll.Enabled = &disabled })
 	const taskID = "task-d16"
 	done := runExecAsync(context.Background(), b, taskID, execTestCaller(), false, "the request")
 	f.awaitSend(t)
@@ -835,7 +841,6 @@ func TestReplyPoll_RollbackSwitch(t *testing.T) {
 	if err := b.HandleBrokerMessage(context.Background(), projectkeys.UserTopic(execTestProjectID, "another-user"), pushed("another-user", "another user's reply")); err != nil {
 		t.Fatalf("HandleBrokerMessage: %v", err)
 	}
-	time.Sleep(200 * time.Millisecond)
 	if err := b.HandleBrokerMessage(context.Background(), projectkeys.UserTopic(execTestProjectID, execTestCallerID), pushed(execTestCallerID, "the pushed reply")); err != nil {
 		t.Fatalf("HandleBrokerMessage: %v", err)
 	}
@@ -848,6 +853,12 @@ func TestReplyPoll_RollbackSwitch(t *testing.T) {
 			t.Fatalf("conversation request %s %s with the switch off, want none", r.method, r.path)
 		}
 	}
+	// No poller: the accepted push reached the accepted-message line, which
+	// carries no text; the drop line for the other topic neither (D9).
+	if !strings.Contains(logs.String(), "handling broker message") || !strings.Contains(logs.String(), "reason="+pushDropTopicUser) {
+		t.Fatalf("missing the accepted-message line or the topic_user drop line; logs:\n%s", logs.String())
+	}
+	assertNeutralLogs(t, logs, "the request", "the pushed reply", "another user's reply", "a reply in the conversation", "another-user")
 }
 
 // recordingHostCallbacks records the subscriptions the bridge requests.

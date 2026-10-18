@@ -198,6 +198,14 @@ func TestHandleBrokerMessage_DropsPushWhilePollerLive(t *testing.T) {
 	if events, _ := store.ReadTaskEvents(ctx, taskID, 0, 100); len(events) == 0 {
 		t.Fatal("no events appended once the mark is cleared")
 	}
+	// With no poller the message reaches the accepted-message line, which
+	// carries metadata only (D9).
+	if !strings.Contains(logs.String(), "handling broker message") || !strings.Contains(logs.String(), "text_len=") {
+		t.Fatalf("no metadata line for the accepted message; logs:\n%s", logs.String())
+	}
+	if strings.Contains(logs.String(), "a pushed question") || strings.Contains(logs.String(), topic) {
+		t.Fatalf("a log line carries message text or the topic; logs:\n%s", logs.String())
+	}
 }
 
 // TestProcessAndAppendEvent_PollPrefixReserved: the push path never yields

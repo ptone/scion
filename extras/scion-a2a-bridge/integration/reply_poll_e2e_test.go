@@ -90,7 +90,6 @@ const (
 type rplRequest struct {
 	method string
 	path   string
-	query  string
 	at     time.Time
 }
 
@@ -113,7 +112,7 @@ func (r *rplRecorder) setRewrite(fn func(*http.Request)) {
 func (r *rplRecorder) wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		r.mu.Lock()
-		r.requests = append(r.requests, rplRequest{method: req.Method, path: req.URL.Path, query: req.URL.RawQuery, at: time.Now()})
+		r.requests = append(r.requests, rplRequest{method: req.Method, path: req.URL.Path, at: time.Now()})
 		rewrite := r.rewrite
 		strip := r.stripSendMessageID
 		r.mu.Unlock()
@@ -337,6 +336,8 @@ type rplOptions struct {
 	// stripSendMessageID answers sends without the message ID.
 	stripSendMessageID bool
 	sendTimeout        time.Duration
+	// replyPollOff runs the bridge with reply_poll.enabled false.
+	replyPollOff bool
 }
 
 // rplReplica is one bridge process.
@@ -608,6 +609,10 @@ func rplNewEnv(t *testing.T, opts rplOptions) *rplEnv {
 			Projects: []bridge.ProjectConfig{{Slug: e.routeProject, ExposedAgents: []string{rplAgentSlug}}},
 			Timeouts: bridge.TimeoutConfig{SendMessage: opts.sendTimeout},
 		}
+		if opts.replyPollOff {
+			off := false
+			bridgeCfg.ReplyPoll = bridge.ReplyPollConfig{Enabled: &off}
+		}
 		e.replicas = append(e.replicas, rplStartReplica(t, ts, url, bridgeCfg, adminClient, minter, logger, dbURL))
 	}
 
@@ -620,14 +625,18 @@ func rplNewEnv(t *testing.T, opts rplOptions) *rplEnv {
 	srv.SetEventPublisher(publisher)
 	srv.SetDispatcher(e.dispatcher)
 	srv.StartNotificationDispatcher()
+	// The hub's buses log to their own sink: their subscription lines
+	// carry topic patterns, and the log check (D9) covers the bridge's
+	// lines only.
+	hubBusLogger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	buses := []eventbus.NamedEventBus{
-		{Name: eventbus.InProcessBusName, Bus: eventbus.NewInProcessEventBus(logger)},
+		{Name: eventbus.InProcessBusName, Bus: eventbus.NewInProcessEventBus(hubBusLogger)},
 		{Name: "a2a-bridge", Bus: &rplBrokerSpoke{broker: e.replicas[0].broker}},
 	}
 	if e.slack != nil {
 		buses = append(buses, eventbus.NamedEventBus{Name: "slack", Bus: e.slack})
 	}
-	srv.StartMessageBroker(eventbus.NewFanOutEventBus(buses, logger))
+	srv.StartMessageBroker(eventbus.NewFanOutEventBus(buses, hubBusLogger))
 	proxy := srv.GetMessageBrokerProxy()
 	if proxy == nil {
 		t.Fatal("hub message broker not started")
@@ -1076,15 +1085,19 @@ func TestConcurrentCallersReadOnlyTheirOwnConversations(t *testing.T) {
 	}
 }
 
-// TestPushFromOtherUsersNeverReachesCaller is the end-to-end case of D4b:
-// on Bob's topic, the hub's input-needed and COMPLETED notifications (Bob
-// subscribes to the agent) and an agent message arrive while Alice's call
-// waits; the push path's user check drops them all (topic_user), and
-// Alice's call returns her own reply.
-func TestPushFromOtherUsersNeverReachesCaller(t *testing.T) {
+// rplRunOtherUsersPushes is the end-to-end case of D4b: on Bob's topic,
+// the hub's input-needed and COMPLETED notifications (Bob subscribes to the
+// agent) and an agent message arrive while Alice's call waits; the push
+// path's user check drops them all (topic_user), none reaches Alice's
+// task's event log, and Alice's call returns her own reply. With reply
+// polling on the reply is read from her conversation; with it off there is
+// no poller mark, so the user check alone keeps Bob's pushes out, and her
+// reply arrives on her own topic.
+func rplRunOtherUsersPushes(t *testing.T, replyPollOff bool) {
 	e := rplNewEnv(t, rplOptions{
-		users:       []rplUserSpec{{email: "alice@example.com"}, {email: "bob@example.com"}},
-		sendTimeout: rplLongSendTimeout,
+		users:        []rplUserSpec{{email: "alice@example.com"}, {email: "bob@example.com"}},
+		sendTimeout:  rplLongSendTimeout,
+		replyPollOff: replyPollOff,
 	})
 	alice, bob := e.users["alice@example.com"], e.users["bob@example.com"]
 	ctx := context.Background()
@@ -1114,12 +1127,45 @@ func TestPushFromOtherUsersNeverReachesCaller(t *testing.T) {
 		return strings.Count(e.logs.String(), "reason=topic_user") >= 3
 	})
 
-	e.rplAgentReply(t, label, got.Sender, "the reply for alice", messages.TypeInstruction)
+	if replyPollOff {
+		if err := e.replicas[0].broker.Publish(ctx, projectkeys.UserTopic(e.projectID, alice.user.ID), &messages.StructuredMessage{
+			Version: 1, Sender: "agent:" + rplAgentSlug, SenderID: e.agent.ID, Recipient: "user:" + alice.user.ID,
+			Msg: "the reply for alice", Type: messages.TypeInstruction, Timestamp: time.Now().UTC().Format(time.RFC3339),
+		}); err != nil {
+			t.Fatalf("%s: publish on alice's topic: %v", label, err)
+		}
+	} else {
+		e.rplAgentReply(t, label, got.Sender, "the reply for alice", messages.TypeInstruction)
+	}
 	out := rplAwaitAnswer(t, label, done)
 	if out.State != a2a.TaskStateCompleted || out.Text != "the reply for alice" {
 		t.Fatalf("%s: alice's task ended %v with %q, want her own reply", label, out.State, out.Text)
 	}
+	events, err := e.replicas[0].events.ReadTaskEvents(ctx, out.TaskID, 0, 100)
+	if err != nil {
+		t.Fatalf("%s: read alice's task events: %v", label, err)
+	}
+	for _, ev := range events {
+		for _, text := range []string{"a question for bob", "bob's turn", "an agent message for bob"} {
+			if strings.Contains(string(ev.Payload), text) {
+				t.Fatalf("%s: alice's task event %q carries %q from bob's topic", label, ev.DedupKey, text)
+			}
+		}
+	}
 	e.rplAssertNeutralLogs(t)
+}
+
+// TestPushFromOtherUsersNeverReachesCaller is D4b end to end, with reply
+// polling on and the log check (D9).
+func TestPushFromOtherUsersNeverReachesCaller(t *testing.T) {
+	rplRunOtherUsersPushes(t, false)
+}
+
+// TestPushFromOtherUsersNeverReachesCaller_ReplyPollOff is D4b end to end
+// with reply_poll.enabled false: no poller mark drops the pushes, so only
+// the user check keeps them out of Alice's call.
+func TestPushFromOtherUsersNeverReachesCaller_ReplyPollOff(t *testing.T) {
+	rplRunOtherUsersPushes(t, true)
 }
 
 // rplWaitFor polls cond until it holds or rplWait passes.
@@ -1314,8 +1360,11 @@ func TestOlderHubPushedQuestionEndsCall_Standalone(t *testing.T) {
 	if taskID := got.Metadata["a2aTaskId"]; taskID != "" {
 		push.Metadata = map[string]string{"a2aTaskId": taskID}
 	}
-	// The executor clears its mark right after the send answers.
-	time.Sleep(300 * time.Millisecond)
+	// The executor clears its mark right after the send answers, then logs
+	// that no poller runs.
+	rplWaitFor(t, label+": the executor's no-anchor line", func() bool {
+		return strings.Contains(e.logs.String(), "reason=no_anchor")
+	})
 	if err := e.replicas[0].broker.Publish(ctx, projectkeys.UserTopic(e.projectID, alice.user.ID), push); err != nil {
 		t.Fatalf("%s: push the question: %v", label, err)
 	}
@@ -1391,8 +1440,12 @@ func TestStandalonePushCopyNeverDuplicatesResponse(t *testing.T) {
 		return poll, other
 	}
 
-	// (a) Same replica: the pushed copy is dropped.
+	// (a) Same replica: the pushed copy is dropped as owned by the poller.
+	ownedBefore := strings.Count(e.logs.String(), "reason=poller_owns")
 	out, events := run("same replica", 0, pushedQuestion("the first question", nil), "the first question")
+	if strings.Count(e.logs.String(), "reason=poller_owns") <= ownedBefore {
+		t.Fatalf("same replica: no poller_owns drop line for the pushed copy")
+	}
 	if out.State != a2a.TaskStateInputRequired || out.Text != "the first question" {
 		t.Fatalf("same replica: task ended %v with %q, want input-required with the question", out.State, out.Text)
 	}

@@ -24,6 +24,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/a2aproject/a2a-go/v2/a2a"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -82,13 +84,17 @@ func TestReplyPoller_BackoffSchedule(t *testing.T) {
 }
 
 // blockingReader blocks every page read until its context ends, counting
-// the reads in flight.
+// the reads in flight. With hold set, a read that saw its context end
+// signals canceled and then waits until hold is closed before it counts
+// itself as returned.
 type blockingReader struct {
 	mu       sync.Mutex
 	inFlight int
 	max      int
 	returned int
 	entered  chan struct{}
+	canceled chan struct{}
+	hold     chan struct{}
 }
 
 func (r *blockingReader) List(context.Context, *hubclient.ListConversationsOptions) (*hubclient.ConversationListResult, error) {
@@ -112,6 +118,13 @@ func (r *blockingReader) ListMessages(ctx context.Context, _ string, _ *hubclien
 	default:
 	}
 	<-ctx.Done()
+	if r.hold != nil {
+		select {
+		case r.canceled <- struct{}{}:
+		default:
+		}
+		<-r.hold
+	}
 	r.mu.Lock()
 	r.inFlight--
 	r.returned++
@@ -186,7 +199,8 @@ func TestReplyPoller_Stops(t *testing.T) {
 
 	t.Run("stop joins the poller's goroutine", func(t *testing.T) {
 		b, _ := newLifecycleTestBridge(t)
-		reader := &blockingReader{entered: make(chan struct{}, 1)}
+		hold := make(chan struct{})
+		reader := &blockingReader{entered: make(chan struct{}, 1), canceled: make(chan struct{}, 1), hold: hold}
 		p := newReplyPoller(b, reader, "stop-join", "helper", pollTestAgentID, pollTestAnchorID, "conv-1", nil)
 		p.sleep = noWaitSleep
 		p.start(context.Background())
@@ -195,7 +209,31 @@ func TestReplyPoller_Stops(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatal("the poller never read")
 		}
-		p.stop()
+		stopped := make(chan struct{})
+		go func() {
+			p.stop()
+			close(stopped)
+		}()
+		// The read has seen the cancel and is held: the poller's goroutine
+		// cannot exit, so stop must not return.
+		select {
+		case <-reader.canceled:
+		case <-time.After(5 * time.Second):
+			close(hold)
+			t.Fatal("the poller's read never saw the cancel")
+		}
+		select {
+		case <-stopped:
+			close(hold)
+			t.Fatal("stop returned while the poller's read was still in flight")
+		case <-time.After(time.Second):
+		}
+		close(hold)
+		select {
+		case <-stopped:
+		case <-time.After(5 * time.Second):
+			t.Fatal("stop did not return after the read ended")
+		}
 		if inFlight, _, returned := reader.stats(); inFlight != 0 || returned != 1 {
 			t.Fatalf("after stop: %d reads in flight, %d returned; want 0 and 1", inFlight, returned)
 		}
@@ -208,6 +246,21 @@ func TestReplyPoller_Stops(t *testing.T) {
 			t.Fatalf("%d read slots held after stop, want 0", n)
 		}
 		p.stop() // a second stop is harmless
+	})
+
+	t.Run("stop on a poller that was never started returns", func(t *testing.T) {
+		b, _ := newLifecycleTestBridge(t)
+		p := newReplyPoller(b, &fakeReplyReader{}, "stop-unstarted", "helper", pollTestAgentID, pollTestAnchorID, "conv-1", nil)
+		stopped := make(chan struct{})
+		go func() {
+			p.stop()
+			close(stopped)
+		}()
+		select {
+		case <-stopped:
+		case <-time.After(5 * time.Second):
+			t.Fatal("stop blocked on a poller that was never started")
+		}
 	})
 }
 
@@ -310,6 +363,62 @@ func TestReplyPoller_AppendFence(t *testing.T) {
 	})
 }
 
+// TestReplyPoller_StandaloneAppendFence: the standalone fence against the
+// PostgreSQL SDK task store. The reply is appended only while the task's
+// snapshot is not final and this replica holds its execution lease (D10).
+func TestReplyPoller_StandaloneAppendFence(t *testing.T) {
+	reply := dmRow("fenced-reply", pollTestAgentID, messages.TypeInstruction, "dm:x", "a late reply", time.Second)
+	tests := []struct {
+		name    string
+		state   a2a.TaskState
+		claim   bool
+		release bool
+		want    int
+	}{
+		{name: "lease held, task working: appended", state: a2a.TaskStateWorking, claim: true, want: 2},
+		{name: "lease released before the append: no append", state: a2a.TaskStateWorking, claim: true, release: true},
+		{name: "lease never claimed: no append", state: a2a.TaskStateWorking},
+		{name: "snapshot final before the append: no append", state: a2a.TaskStateCompleted},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pg := testPostgresTaskStore(t)
+			b, store := newLifecycleTestBridge(t)
+			b.SetSDKTaskStore(pg)
+			ctx := ctxForRoute("proj-fence", "helper")
+			taskID := fmt.Sprintf("fence-pg-%d-%d", time.Now().UnixNano(), i)
+			t.Cleanup(func() {
+				_, _ = pg.db.ExecContext(context.Background(), `DELETE FROM a2a_sdk_tasks WHERE id = $1`, taskID)
+			})
+			if _, err := pg.Create(ctx, &a2a.Task{ID: a2a.TaskID(taskID), ContextID: "ctx-fence", Status: a2a.TaskStatus{State: tc.state}}); err != nil {
+				t.Fatalf("create SDK task: %v", err)
+			}
+			if tc.claim {
+				claimed, err := pg.ClaimExecution(ctx, taskID, OwnerID(), time.Minute)
+				if err != nil || !claimed {
+					t.Fatalf("claim execution: %v, %v; want claimed", claimed, err)
+				}
+			}
+			if tc.release {
+				if err := pg.ReleaseExecution(ctx, taskID, OwnerID()); err != nil {
+					t.Fatalf("release execution: %v", err)
+				}
+			}
+			p := newReplyPoller(b, &fakeReplyReader{}, taskID, "helper", pollTestAgentID, pollTestAnchorID, "conv-1", nil)
+			p.fence = b.standaloneAppendFence(taskID)
+			m := reply
+			p.appendReply(ctx, &m)
+			events, err := store.ReadTaskEvents(context.Background(), taskID, 0, 10)
+			if err != nil {
+				t.Fatalf("read events: %v", err)
+			}
+			if len(events) != tc.want {
+				t.Fatalf("%d events appended, want %d", len(events), tc.want)
+			}
+		})
+	}
+}
+
 // pagedReader serves newest-first pages of 50 by offset cursor.
 type pagedReader struct {
 	mu     sync.Mutex
@@ -395,11 +504,19 @@ func TestReplyPoller_Paging(t *testing.T) {
 		reader := &pagedReader{rows: rows, anchor: anchorRow()}
 		ends := &endCapture{}
 		p := newReplyPoller(b, reader, "paging-b", "helper", pollTestAgentID, pollTestAnchorID, "conv-1", ends.end)
-		p.sleep = noWaitSleep
+		// At most three polls, so the run ends even when no poll ends it.
+		polls := 0
+		p.sleep = func(ctx context.Context, _ time.Duration) bool {
+			polls++
+			return ctx.Err() == nil && polls <= 3
+		}
 		p.run(context.Background())
 		var ended *replyPollEnded
 		if !errors.As(ends.get(), &ended) || ended.Error() != replyMsgTooMany {
 			t.Fatalf("call ended with %v, want %q", ends.get(), replyMsgTooMany)
+		}
+		if polls != 1 {
+			t.Fatalf("polls = %d, want 1 (the call ends on the first poll)", polls)
 		}
 		if n := reader.pageCount(); n != replyPollMaxPages {
 			t.Fatalf("pages read = %d, want %d", n, replyPollMaxPages)
