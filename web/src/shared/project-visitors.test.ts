@@ -331,6 +331,9 @@ describe('visitorStatusLabel', () => {
     expect(visitorStatusLabel('pending', true, { notBefore: AFTER }, NOW)).toBe(
       NOT_YET_ACTIVE_LABEL
     );
+    expect(visitorStatusLabel('active', true, { notBefore: NOW.toISOString() }, NOW)).toBe(
+      'Active'
+    );
     expect(visitorStatusLabel('active', true, { notBefore: BEFORE, expiresAt: AFTER }, NOW)).toBe(
       'Active'
     );
@@ -343,6 +346,9 @@ describe('visitorStatusLabel', () => {
       NOT_YET_ACTIVE_LABEL
     );
     expect(visitorStatusLabel(undefined, true, { notBefore: BEFORE }, NOW)).toBe('Active');
+    expect(visitorStatusLabel(undefined, true, { notBefore: NOW.toISOString() }, NOW)).toBe(
+      'Active'
+    );
   });
 
   it('the issuer label comes before the window', () => {
