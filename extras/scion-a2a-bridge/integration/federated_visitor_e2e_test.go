@@ -179,7 +179,9 @@ func (d *fvDispatcher) DispatchFinalizeEnv(context.Context, *store.Agent, map[st
 // fvBrokerSpoke is the bridge's broker as a spoke of hub B's fan-out event
 // bus, in place of the plugin RPC adapter (plugin.BrokerPluginAdapter):
 // Publish hands the message to the bridge, Subscribe passes the pattern on
-// and discards the handler.
+// and discards the handler. The spoke has no ChannelID, so the fan-out bus
+// hands it every message without a channel; a message with a channel goes
+// only to the in-process bus and the spoke whose routing key matches it.
 type fvBrokerSpoke struct {
 	broker *bridge.BrokerServer
 }
@@ -403,7 +405,8 @@ type fvSendResult struct {
 }
 
 // fvSendAsync sends text to agentSlug through the bridge as an A2A client
-// holding the credential token, and delivers the answer on the returned channel.
+// holding the user access credential, and delivers the answer on the
+// returned channel.
 func (e *fvEnv) fvSendAsync(ctx context.Context, agentSlug, token, text string) <-chan fvSendResult {
 	done := make(chan fvSendResult, 1)
 	go func() {
@@ -493,7 +496,7 @@ func fvTaskOutcome(t *testing.T, label string, res fvSendResult) fvOutcome {
 	return fvOutcome{State: task.Status.State, Text: strings.Join(text, "\n")}
 }
 
-// fvSendAdmitted sends text with the credential token and expects hub B to
+// fvSendAdmitted sends text with the credential and expects hub B to
 // deliver it to the agent, from sender (any user address when sender is
 // empty); the agent replies with reply to the envelope's sender, and the
 // task must complete with that reply. It returns the envelope's sender.
@@ -545,7 +548,7 @@ func (e *fvEnv) fvSendAdmitted(t *testing.T, label, token, sender, text, reply s
 	return got.Sender
 }
 
-// fvSendNotDelivered sends text to agentSlug with the credential token and
+// fvSendNotDelivered sends text to agentSlug with the credential and
 // expects an answer with nothing delivered to the agent.
 func (e *fvEnv) fvSendNotDelivered(t *testing.T, label, agentSlug, token, text string) fvSendResult {
 	t.Helper()
@@ -576,7 +579,9 @@ func (e *fvEnv) fvNoDelivery(t *testing.T, label string) {
 
 // fvSetAcceptUserTokens reloads hub B's federation configuration with
 // accept_user_tokens set to accept on hub A's issuer, the way a settings
-// reload does.
+// reload does. ApplySnapshot lists "federation" in applied only after the
+// authenticator was rebuilt from the new configuration, so its presence is
+// the check that the reload took effect.
 func (e *fvEnv) fvSetAcceptUserTokens(t *testing.T, accept bool) {
 	t.Helper()
 	result := hub.ApplySnapshot(e.hubB.srv, hub.Layer1Snapshot{FederationConfig: &config.FederationConfig{
@@ -594,6 +599,9 @@ func (e *fvEnv) fvSetAcceptUserTokens(t *testing.T, accept bool) {
 
 func fvNewEnv(t *testing.T) *fvEnv {
 	t.Helper()
+	// Hub B creates its project's directory under the global directory
+	// ($HOME/.scion); a per-test HOME keeps every run off the real one.
+	t.Setenv("HOME", t.TempDir())
 	ctx := context.Background()
 	e := &fvEnv{
 		dispatcher: &fvDispatcher{delivered: make(chan *messages.StructuredMessage, 16)},
@@ -617,8 +625,11 @@ func fvNewEnv(t *testing.T) *fvEnv {
 	}
 
 	// Hub B: trusts hub A as a hub issuer that may present user access
-	// credentials, with visitor grants allowed.
+	// credentials, with visitor grants allowed. Dev mode, because the
+	// federation authenticator accepts an http issuer URL (hub A's
+	// loopback listener) only in dev and workstation modes.
 	e.hubB = fvStartHub(t, "hub-b", tsB, urlB, func(cfg *hub.ServerConfig) {
+		cfg.Mode = "dev"
 		cfg.Federation = config.FederationConfig{
 			Enabled:        true,
 			TrustedIssuers: []config.TrustedIssuerConfig{fvPeerIssuer(urlA, urlB, true)},
