@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -470,11 +471,16 @@ func newFedUserHub(t *testing.T, userToken string) *fedUserHub {
 				writeHubError(w, status)
 				return
 			}
-			msgs := h.dmMessages
-			if msgs == nil {
-				msgs = []map[string]interface{}{}
+			page, next, ok := fedUserDMPage(h.dmMessages, r.URL.Query())
+			if !ok {
+				writeHubError(w, http.StatusBadRequest)
+				return
 			}
-			writeJSON(map[string]interface{}{"messages": msgs})
+			resp := map[string]interface{}{"messages": page}
+			if next != "" {
+				resp["nextCursor"] = next
+			}
+			writeJSON(resp)
 		default:
 			http.Error(w, "not found: "+r.URL.Path, http.StatusNotFound)
 		}
@@ -488,6 +494,33 @@ func (h *fedUserHub) set(fn func(h *fedUserHub)) {
 	defer h.mu.Unlock()
 	fn(h)
 }
+
+// fedUserDMPage pages the conversation rows (newest first) as the hub's
+// chat history does: up to limit rows from the cursor's position, and an
+// opaque cursor for the next (older) page when rows remain. ok is false for
+// a cursor the double did not issue.
+func fedUserDMPage(rows []map[string]interface{}, query url.Values) (page []map[string]interface{}, next string, ok bool) {
+	start := 0
+	if c := query.Get("cursor"); c != "" {
+		n, err := strconv.Atoi(strings.TrimPrefix(c, fedUserDMCursorPrefix))
+		if !strings.HasPrefix(c, fedUserDMCursorPrefix) || err != nil || n < 0 || n > len(rows) {
+			return nil, "", false
+		}
+		start = n
+	}
+	end := len(rows)
+	if limit, err := strconv.Atoi(query.Get("limit")); err == nil && limit > 0 && start+limit < end {
+		end = start + limit
+	}
+	page = append([]map[string]interface{}{}, rows[start:end]...)
+	if end < len(rows) {
+		next = fedUserDMCursorPrefix + strconv.Itoa(end)
+	}
+	return page, next, true
+}
+
+// fedUserDMCursorPrefix starts the page cursors fedUserDMPage issues.
+const fedUserDMCursorPrefix = "opaque-page-"
 
 // fedUserHubCalls is a copy of what the hub double has seen.
 type fedUserHubCalls struct {
@@ -507,15 +540,14 @@ func (h *fedUserHub) snapshot() fedUserHubCalls {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return fedUserHubCalls{
-		meCalls:      h.meCalls,
-		meFedTokens:  append([]string(nil), h.meFedTokens...),
-		sent:         append([]fedUserHubSend(nil), h.sent...),
-		listQueries:  append([]url.Values(nil), h.listQueries...),
-		listTokens:   append([]string(nil), h.listTokens...),
-		dmReadKeys:   append([]string(nil), h.dmReadKeys...),
-		dmReadTokens: append([]string(nil), h.dmReadTokens...),
-		createCalls:  h.createCalls,
-
+		meCalls:       h.meCalls,
+		meFedTokens:   append([]string(nil), h.meFedTokens...),
+		sent:          append([]fedUserHubSend(nil), h.sent...),
+		listQueries:   append([]url.Values(nil), h.listQueries...),
+		listTokens:    append([]string(nil), h.listTokens...),
+		dmReadKeys:    append([]string(nil), h.dmReadKeys...),
+		dmReadTokens:  append([]string(nil), h.dmReadTokens...),
+		createCalls:   h.createCalls,
 		dmReadQueries: append([]url.Values(nil), h.dmReadQueries...),
 	}
 }
@@ -595,8 +627,6 @@ const fedUserSendBody = `{
 	}
 }`
 
-// sendAsync sends the JSON-RPC SendMessage in the background and returns a
-// channel with the status and body.
 // fedUserPushOnly turns reply polling off (reply_poll.enabled: false), so
 // the executor waits on pushed replies only: the path these tests drive
 // with deliverReply.
@@ -605,6 +635,8 @@ func fedUserPushOnly(cfg *Config) {
 	cfg.ReplyPoll.Enabled = &off
 }
 
+// sendAsync sends the JSON-RPC SendMessage in the background and returns a
+// channel with the status and body.
 func sendAsync(t *testing.T, ts *httptest.Server, agentSlug, token string) <-chan [2]interface{} {
 	t.Helper()
 	return sendAsyncTo(t, ts, "proj1", agentSlug, token)

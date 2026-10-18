@@ -15,8 +15,11 @@
 package bridge
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -234,6 +237,194 @@ func TestReplyPoll_VisitorSameCallerGuard(t *testing.T) {
 	code, body = awaitResult(t, first)
 	if code != http.StatusOK || !strings.Contains(body, fedUserReplyText) {
 		t.Fatalf("first call: status %d, body %s; want the reply", code, body)
+	}
+}
+
+// visitorDMFiller returns n messages of the caller's own, newest first, all
+// newer than the anchor of visitorDMRows: rows the reply selection skips.
+func visitorDMFiller(n int) []map[string]interface{} {
+	at := time.Now().UTC()
+	rows := make([]map[string]interface{}, 0, n)
+	for i := 0; i < n; i++ {
+		rows = append(rows, map[string]interface{}{"id": fmt.Sprintf("filler-%d", i), "sender": "user:" + fedUserAccountID, "senderId": fedUserAccountID, "type": messages.TypeInstruction, "msg": "later message", "createdAt": at.Add(-time.Duration(i) * time.Millisecond).Format(time.RFC3339Nano)})
+	}
+	return rows
+}
+
+// visitorPollQueries returns the queries of the poll reads (full pages),
+// leaving out the preflight and the access re-check.
+func visitorPollQueries(snap fedUserHubCalls) []url.Values {
+	var polls []url.Values
+	for _, q := range snap.dmReadQueries {
+		if q.Get("limit") == fmt.Sprint(replyPollPageSize) {
+			polls = append(polls, q)
+		}
+	}
+	return polls
+}
+
+// TestReplyPoll_VisitorFollowsPageCursor: the anchor is on the second page
+// of the federated user's conversation and the reply on the first. The poll
+// sends the first page's cursor back for the second page and returns the
+// reply.
+func TestReplyPoll_VisitorFollowsPageCursor(t *testing.T) {
+	token := fedUserToken(t)
+	hub := newFedUserHub(t, token)
+	rows := visitorDMRows(fedUserReplyText)
+	// reply-1, 49 later messages (page 1), then the anchor (page 2).
+	paged := append(append([]map[string]interface{}{rows[0]}, visitorDMFiller(replyPollPageSize-1)...), rows[1])
+	hub.set(func(h *fedUserHub) { h.dmMessages = paged })
+	_, _, ts := newFedUserTestServer(t, hub, visitorPollConfig)
+
+	code, body := awaitResult(t, sendAsync(t, ts, "agent1", token))
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", code, body)
+	}
+	if !strings.Contains(body, fedUserReplyText) {
+		t.Fatalf("response does not carry the reply on the first page; body %s", body)
+	}
+	polls := visitorPollQueries(hub.snapshot())
+	if len(polls) != 2 {
+		t.Fatalf("poll reads = %d (%v), want 2 (both pages)", len(polls), polls)
+	}
+	if got := polls[0].Get("cursor"); got != "" {
+		t.Errorf("first page read carries cursor %q, want none", got)
+	}
+	if got, want := polls[1].Get("cursor"), fedUserDMCursorPrefix+fmt.Sprint(replyPollPageSize); got != want {
+		t.Errorf("second page read carries cursor %q, want the first page's %q", got, want)
+	}
+}
+
+// TestReplyPoll_VisitorTooManyPages: more than replyPollMaxPages full pages
+// of the federated user's conversation are newer than the anchor. The call
+// ends at once with the too-many message after replyPollMaxPages reads,
+// each with the previous page's cursor.
+func TestReplyPoll_VisitorTooManyPages(t *testing.T) {
+	token := fedUserToken(t)
+	hub := newFedUserHub(t, token)
+	rows := visitorDMRows(fedUserReplyText)
+	paged := append(visitorDMFiller(replyPollMaxPages*replyPollPageSize+1), rows[1])
+	hub.set(func(h *fedUserHub) { h.dmMessages = paged })
+	_, _, ts := newFedUserTestServer(t, hub, visitorPollConfig)
+
+	start := time.Now()
+	code, body := awaitResult(t, sendAsync(t, ts, "agent1", token))
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", code, body)
+	}
+	if !strings.Contains(body, replyMsgTooMany) {
+		t.Fatalf("response does not carry the too-many message; body %s", body)
+	}
+	if elapsed := time.Since(start); elapsed >= visitorPollTimeout {
+		t.Errorf("call ended after %v, want before the %v timeout", elapsed, visitorPollTimeout)
+	}
+	polls := visitorPollQueries(hub.snapshot())
+	if len(polls) != replyPollMaxPages {
+		t.Fatalf("poll reads = %d, want %d", len(polls), replyPollMaxPages)
+	}
+	for i, q := range polls {
+		want := ""
+		if i > 0 {
+			want = fedUserDMCursorPrefix + fmt.Sprint(i*replyPollPageSize)
+		}
+		if got := q.Get("cursor"); got != want {
+			t.Errorf("page read %d carries cursor %q, want %q", i, got, want)
+		}
+	}
+}
+
+// TestReplyPoll_VisitorPreflightUnavailableProceeds: a 503 on the preflight
+// read is not a refusal: the message is sent once and the poll returns the
+// reply.
+func TestReplyPoll_VisitorPreflightUnavailableProceeds(t *testing.T) {
+	token := fedUserToken(t)
+	hub := newFedUserHub(t, token)
+	hub.set(func(h *fedUserHub) {
+		h.dmReadSeq = []int{http.StatusServiceUnavailable}
+		h.dmMessages = visitorDMRows(fedUserReplyText)
+	})
+	_, _, ts := newFedUserTestServer(t, hub, visitorPollConfig)
+
+	code, body := awaitResult(t, sendAsync(t, ts, "agent1", token))
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", code, body)
+	}
+	if !strings.Contains(body, fedUserReplyText) {
+		t.Fatalf("response does not carry the reply; body %s", body)
+	}
+	snap := hub.snapshot()
+	if len(snap.sent) != 1 {
+		t.Fatalf("%d sends reached the hub, want 1", len(snap.sent))
+	}
+	if snap.sent[0].DMReadsBefore != 1 {
+		t.Errorf("conversation reads before the send = %d, want 1 (the preflight)", snap.sent[0].DMReadsBefore)
+	}
+}
+
+// TestReplyPoll_VisitorQuestionEndsInputRequired: the agent's question (an
+// input-needed message with a thread ID) in the federated user's
+// conversation ends the call input-required with the question.
+func TestReplyPoll_VisitorQuestionEndsInputRequired(t *testing.T) {
+	const question = "which file do you mean?"
+	token := fedUserToken(t)
+	hub := newFedUserHub(t, token)
+	rows := visitorDMRows(fedUserReplyText)
+	rows[0]["type"] = messages.TypeInputNeeded
+	rows[0]["threadId"] = "thread-1"
+	rows[0]["msg"] = question
+	hub.set(func(h *fedUserHub) { h.dmMessages = rows })
+	_, _, ts := newFedUserTestServer(t, hub, visitorPollConfig)
+
+	code, body := awaitResult(t, sendAsync(t, ts, "agent1", token))
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", code, body)
+	}
+	if !strings.Contains(body, question) {
+		t.Fatalf("response does not carry the question; body %s", body)
+	}
+	if !strings.Contains(body, "input-required") && !strings.Contains(body, "INPUT_REQUIRED") {
+		t.Errorf("task did not end input-required; body %s", body)
+	}
+}
+
+// TestReplyPoll_VisitorIgnoresPushedReply: with reply polling on, a reply
+// pushed on the federated user's topic does not end the call; the reply read
+// from its conversation does.
+func TestReplyPoll_VisitorIgnoresPushedReply(t *testing.T) {
+	const polledText = "the reply in the conversation"
+	token := fedUserToken(t)
+	hub := newFedUserHub(t, token)
+	b, _, ts := newFedUserTestServer(t, hub, visitorPollConfig)
+
+	done := sendAsync(t, ts, "agent1", token)
+	waitForSend(t, hub)
+	deliverReply(t, b)
+	hub.set(func(h *fedUserHub) { h.dmMessages = visitorDMRows(polledText) })
+
+	code, body := awaitResult(t, done)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", code, body)
+	}
+	if !strings.Contains(body, polledText) {
+		t.Fatalf("response does not carry the reply read from the conversation; body %s", body)
+	}
+	if strings.Contains(body, fedUserReplyText) {
+		t.Errorf("response carries the pushed reply; body %s", body)
+	}
+}
+
+// TestVisitorDMReader_KeyNotDerivedIsRefusal: a federated user whose
+// account ID does not give a conversation key (not a canonical UUID) gets
+// a refusal from the reader and from the access re-check, before any hub
+// request (the Bridge here has no hub).
+func TestVisitorDMReader_KeyNotDerivedIsRefusal(t *testing.T) {
+	caller := &CallerIdentity{TokenType: "federation", Subject: fedUserSubject, IssuerURL: fedUserIssuer, UserID: "account-1"}
+	r, err := newVisitorDMReader(&Bridge{}, caller, fedUserAgentID)
+	if r != nil || !errors.Is(err, errFederatedUserRefused) {
+		t.Errorf("newVisitorDMReader = %v, %v; want no reader and a refusal", r, err)
+	}
+	if err := (&Bridge{}).recheckFederatedUserAccess(context.Background(), caller, fedUserAgentID); !errors.Is(err, errFederatedUserRefused) || !isHubRefusal(err) {
+		t.Errorf("recheckFederatedUserAccess = %v, want a refusal", err)
 	}
 }
 
