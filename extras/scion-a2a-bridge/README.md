@@ -367,6 +367,8 @@ With `enabled: false` the bridge behaves as before reply polling existed: no sam
 - **Legacy mode:** every external client is the same caller (the bridge admin's conversation), so one call per agent waits at a time in each bridge process, shared with calls by the admin user's own access token; and a late reply to one client's call can answer another client's next call.
 - **Standalone replicas** do not share the same-caller check: two replicas can run calls by the same caller to the same agent at once, and both may return the same reply. A client's push webhook may receive a pushed copy of a reply as well as the polled reply; the A2A response itself is never duplicated.
 - If the Hub's in-process bus drops a reply because a subscriber's buffer is full, the reply is never stored and the call times out.
+- If the bridge cannot record a reply it has found (its own task store refuses the write), the reply is not read again and the call times out.
+- **One Hub rate limit for forwarded credentials.** The Hub limits sign-ins with forwarded (external) bearer credentials that miss its credential cache per client IP address, and every caller of a bridge reaches the Hub from the bridge's address, so all of them share that budget. Reply reads add such sign-ins only when a cached credential expires.
 
 ### Compatibility
 
