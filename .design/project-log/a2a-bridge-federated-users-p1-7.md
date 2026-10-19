@@ -160,3 +160,10 @@
 
 - The docs page and two bridge comments said that a user access credential from another hub is served as before while the project visitor experiment is off. The Hub now refuses that credential with 401 and the bridge passes the 401 on, so the text says that now. The docs also say that a Hub 400 (a request the Hub does not accept from a user caller) ends the task with "Failed to route message to agent". Text only; no code changes.
 - Docs: the reply access check names its own failure text ("Unable to verify access to agent"); other routing and send answers still end with "Failed to route message to agent".
+
+## Merge forward and unlinked users refused (2026-10-19)
+
+- Merged the visitor agent read branch forward again (it now carries the visitor route allow-list change that follows GoogleCloudPlatform/scion#3577). The merge was clean, and this item's own diff is unchanged.
+- With that change the Hub answers `GET /api/v1/auth/me` with 403 for a user from another issuer that has no project visitor account (for example, an identity issuer user not linked to an account). The bridge passes that refusal on as the uniform refusal (403, "You don't have access to this resource") before any task starts.
+- `legacyFederationCaller` was no longer reachable and is removed; the earlier note above that such a credential is served as an agent caller no longer holds. A Hub answer that names no project visitor account (an agent, or an ID that is not an account ID) is refused the same way, so the caller is never admitted under another identity.
+- The `decodeFederationToken` and auth middleware comments and the docs page now say this. The fake-hub tests that modelled the old 200 answer now model the 403 and assert the uniform refusal; a JSON-RPC send from such a user is refused with nothing sent, no topic subscribed and no access re-check.
