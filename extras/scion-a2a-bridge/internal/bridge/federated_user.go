@@ -41,11 +41,12 @@ import (
 // asked with the caller's own credential (X-Scion-Federation-Token): which
 // account it belongs to (GET /api/v1/auth/me), which projects and agents it
 // may reach, and, before each agent reply is forwarded, whether it may still
-// read its conversation with that agent. When the hub names no project
-// visitor account (for example, for an unlinked identity issuer user), the
-// bridge serves the credential as before (legacyFederationCaller). With its
-// project visitor experiment off, the hub refuses a user access credential
-// from another hub with 401; the bridge passes every hub refusal on.
+// read its conversation with that agent. The hub admits a user access
+// credential from another issuer only for a project visitor account; it
+// refuses any other user (for example, an unlinked identity issuer user)
+// with 403 (GoogleCloudPlatform/scion#3577), and with its project visitor
+// experiment off it refuses a user access credential from another hub with
+// 401. The bridge passes every hub refusal on.
 
 // federatedUserRefusalText is the one answer a federated user gets for every
 // refusal: an unknown project or agent, an agent it may not message, and an
@@ -171,13 +172,14 @@ func (b *Bridge) federatedUserBridgeAuth() *identity.MintingAuth {
 //   - The hub names a project visitor account (a user, not an agent, whose
 //     ID is a canonical UUID): it returns a copy of caller with UserID set
 //     to that account ID. The email stays the credential's.
-//   - The hub answers but names no such account (for example, an identity
-//     issuer user not linked to an account): legacyFederationCaller(caller),
-//     the caller built for this credential before credential kinds existed.
 //   - The hub refuses the credential (401, 403 or 404): the refusal
 //     (errFederatedUserRefused; isHubUnauthenticated tells a 401 apart). A
-//     user access credential from another hub gets 401 while the hub's
-//     project visitor experiment is off.
+//     user with no project visitor account (for example, an identity issuer
+//     user not linked to an account) gets 403; a user access credential from
+//     another hub gets 401 while the hub's project visitor experiment is off.
+//   - The hub answers but names no project visitor account: also a refusal
+//     (errFederatedUserRefused), so the caller is never served under another
+//     identity.
 //   - The hub could not be asked: another error, so the caller can retry.
 func (b *Bridge) identifyFederatedUser(ctx context.Context, caller *CallerIdentity) (*CallerIdentity, error) {
 	if caller == nil || !caller.IsFederatedUser() {
@@ -188,25 +190,12 @@ func (b *Bridge) identifyFederatedUser(ctx context.Context, caller *CallerIdenti
 		return nil, err
 	}
 	if me.Role == "agent" || !isCanonicalUUID(me.ID) {
-		return legacyFederationCaller(caller), nil
+		return nil, fmt.Errorf("%w: hub named no project visitor account", errFederatedUserRefused)
 	}
 	identified := *caller
 	identified.UserID = me.ID
 	identified.Role = me.Role
 	return &identified, nil
-}
-
-// legacyFederationCaller returns the agent caller decodeFederationToken
-// built for a federation credential before credential kinds existed:
-// AgentID is the credential's sub. A credential classified as a user
-// carries no agent claims, so no other field is set.
-func legacyFederationCaller(caller *CallerIdentity) *CallerIdentity {
-	return &CallerIdentity{
-		TokenType: caller.TokenType,
-		RawToken:  caller.RawToken,
-		AgentID:   caller.Subject,
-		IssuerURL: caller.IssuerURL,
-	}
 }
 
 // isCanonicalUUID reports whether id is a UUID in canonical form (lowercase
