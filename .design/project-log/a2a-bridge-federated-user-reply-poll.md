@@ -29,6 +29,11 @@
 
 ## Notes
 
-- A pushed reply is ignored while polling by two independent checks (the
-  poller-live drop in `HandleBrokerMessage` and the `pollOnlyEvent` wait
-  predicate); a test only fails when both are removed.
+- A pushed reply is ignored while polling by the `pollOnlyEvent` wait
+  predicate, which is the guarantee, and by the poller-live drop in
+  `HandleBrokerMessage`, which is an optimisation (no append, no state
+  update, no push dispatch). Each has its own unit test
+  (`TestHandleBrokerMessage_DropsPushWhilePollerLive` and the
+  `pollOnlyEvent` wait tests). The executor-level test
+  `TestReplyPoll_VisitorIgnoresPushedReply` fails only when both are
+  removed.
