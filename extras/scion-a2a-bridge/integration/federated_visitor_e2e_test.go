@@ -23,6 +23,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -268,9 +270,9 @@ func fvStartHub(t *testing.T, name string, ts *httptest.Server, url string, conf
 	}
 	// DB-backed operational settings, built the way the server's startup
 	// builds them (cmd/server_foreground.go initOperationalSettings). hub.New
-	// leaves them unset, and a hub without them reads every settings-backed
-	// switch as off, including the conversation envelope switch that the
-	// bridge's visitor reply poller relies on. With no stored sections each
+	// leaves them unset, and a hub without them reads the switches that need
+	// settings to be present as off, including the conversation envelope
+	// switch that the bridge's visitor reply poller relies on. With no stored sections each
 	// switch takes its compiled default. The startup's snapshot apply is
 	// left out so the federation configuration set above stays in force.
 	ops := hub.NewOperationalSettings(st, config.LoadServerBootstrapKoanf("", nil), config.LoadEnvKoanf())
@@ -576,7 +578,69 @@ func (e *fvEnv) fvSendNotDelivered(t *testing.T, label, agentSlug, token, text s
 		t.Fatalf("%s: the bridge did not answer within %s", label, fvWait)
 	}
 	e.fvNoDelivery(t, label)
+	if e.fvStored(t, text) {
+		t.Fatalf("%s: hub B stored the message %q, want it refused before it is stored", label, text)
+	}
 	return res
+}
+
+// fvStored reports whether hub B's store holds a message with text. Hub B
+// writes a message before it answers the send, so the check does not depend
+// on delivery timing.
+func (e *fvEnv) fvStored(t *testing.T, text string) bool {
+	t.Helper()
+	page, err := e.hubB.store.ListMessages(context.Background(), store.MessageFilter{},
+		store.ListOptions{Limit: 200, SkipTotalCount: true})
+	if err != nil {
+		t.Fatalf("list hub B messages: %v", err)
+	}
+	for _, m := range page.Items {
+		if m.Msg == text {
+			return true
+		}
+	}
+	return false
+}
+
+// fvInProjectGroup reports whether the user is in any group of hub B's
+// project, directly or through nested groups.
+func (e *fvEnv) fvInProjectGroup(t *testing.T, userID string) bool {
+	t.Helper()
+	ctx := context.Background()
+	groupIDs, err := e.hubB.store.GetEffectiveGroups(ctx, userID)
+	if err != nil {
+		t.Fatalf("groups of %s: %v", userID, err)
+	}
+	for _, id := range groupIDs {
+		group, err := e.hubB.store.GetGroup(ctx, id)
+		if err != nil {
+			t.Fatalf("group %s: %v", id, err)
+		}
+		if group.ProjectID == e.projectID {
+			return true
+		}
+	}
+	return false
+}
+
+// fvVisitorDMPath is the history route of the DM between the agent and the
+// user account, the read the bridge's visitor reply poller makes.
+func (e *fvEnv) fvVisitorDMPath(t *testing.T, userID string) string {
+	t.Helper()
+	key, err := messages.DMConversationKey("agent", e.agent.ID, "user", userID)
+	if err != nil {
+		t.Fatalf("DM key: %v", err)
+	}
+	return e.hubB.url + "/api/v1/chat/conversations/" + url.PathEscape(key) + "/messages?limit=10"
+}
+
+// fvVisitorDMHeader is the bridge's request shape for a federation caller:
+// the bridge's own bearer credential plus the user access credential in the
+// federation header (bridge.federationHeaderTransport).
+func fvVisitorDMHeader(token string) map[string]string {
+	h := fvBearer(fvDevToken)
+	h[hub.FederationTokenHeader] = token
+	return h
 }
 
 // fvNoDelivery checks that nothing more reached the agent.
@@ -614,6 +678,15 @@ func fvNewEnv(t *testing.T) *fvEnv {
 	// Hub B creates its project's directory under the global directory
 	// ($HOME/.scion); a per-test HOME keeps every run off the real one.
 	t.Setenv("HOME", t.TempDir())
+	// The operational settings read SCION_SERVER_* and SCION_SEED_*
+	// variables; an empty value counts as unset, so these keep an inherited
+	// variable from changing what either hub reads.
+	for _, kv := range os.Environ() {
+		name, _, _ := strings.Cut(kv, "=")
+		if strings.HasPrefix(name, "SCION_SERVER_") || strings.HasPrefix(name, "SCION_SEED_") {
+			t.Setenv(name, "")
+		}
+	}
 	ctx := context.Background()
 	e := &fvEnv{
 		dispatcher: &fvDispatcher{delivered: make(chan *messages.StructuredMessage, 16)},
@@ -790,6 +863,57 @@ func TestFederatedVisitorEndToEnd(t *testing.T) {
 	if len(linked) != 1 {
 		t.Fatalf("link audit records for alice's account: %d, want 1", len(linked))
 	}
+	if !e.fvStored(t, "hello from hub A") {
+		t.Fatal("first task: hub B has no stored message with the task text")
+	}
+
+	// The reply is in Alice's own DM with the agent, which hub B serves to
+	// the bridge's request shape (the federation header carrying Alice's
+	// credential) and refuses to the bridge's bearer credential alone.
+	dmPath := e.fvVisitorDMPath(t, aliceGrant.ID)
+	status, body = e.fvDo(t, http.MethodGet, dmPath, fvVisitorDMHeader(aliceToken), nil)
+	if status != http.StatusOK {
+		t.Fatalf("alice's DM read: status %d, want 200; body %s", status, body)
+	}
+	var dm struct {
+		Messages []store.Message `json:"messages"`
+	}
+	fvDecode(t, "alice's DM", body, &dm)
+	replyFound := false
+	for _, m := range dm.Messages {
+		if m.SenderID == e.agent.ID && m.Msg == "reply to the first task" {
+			replyFound = true
+		}
+	}
+	if !replyFound {
+		t.Fatalf("alice's DM read: no reply from the agent in %s", body)
+	}
+	if status, body = e.fvDo(t, http.MethodGet, dmPath, fvBearer(fvDevToken), nil); status != http.StatusNotFound {
+		t.Fatalf("alice's DM read without the federation header: status %d, want 404; body %s", status, body)
+	}
+
+	// Alice reaches the agent only through her visitor grant: the agent
+	// row does not name her account, and she is in none of the project's
+	// groups. The project's creator is, which shows the group lookup
+	// finds project groups.
+	agentRow, err := e.hubB.store.GetAgent(ctx, e.agent.ID)
+	if err != nil {
+		t.Fatalf("read agent: %v", err)
+	}
+	if agentRow.OwnerID == aliceGrant.ID || agentRow.CreatedBy == aliceGrant.ID {
+		t.Fatalf("agent row names alice's account: owner %q, created by %q", agentRow.OwnerID, agentRow.CreatedBy)
+	}
+	for _, a := range agentRow.Ancestry {
+		if a == aliceGrant.ID {
+			t.Fatalf("agent ancestry %v names alice's account %s", agentRow.Ancestry, aliceGrant.ID)
+		}
+	}
+	if !e.fvInProjectGroup(t, hub.DevUserID) {
+		t.Fatalf("project creator %s is in none of the project's groups", hub.DevUserID)
+	}
+	if e.fvInProjectGroup(t, aliceGrant.ID) {
+		t.Fatalf("alice's account %s is in a group of the project", aliceGrant.ID)
+	}
 
 	// The bridge lists the agent Alice may message.
 	status, body = e.fvDo(t, http.MethodGet, e.bridgeURL+"/projects/"+e.projectSlug+"/agents", fvBearer(aliceToken), nil)
@@ -841,6 +965,11 @@ func TestFederatedVisitorEndToEnd(t *testing.T) {
 		e.fvSendNotDelivered(t, "after revoke", fvAgentSlug, aliceToken, "hello after revoke"))
 	if revoked != baseline {
 		t.Fatalf("after revoke: task ended %+v, want the same answer as for an unexposed agent %+v", revoked, baseline)
+	}
+	switch status, body = e.fvDo(t, http.MethodGet, dmPath, fvVisitorDMHeader(aliceToken), nil); status {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
+	default:
+		t.Fatalf("alice's DM read after revoke: status %d, want 401, 403 or 404; body %s", status, body)
 	}
 
 	// Step 6: a domain grant. Bob (bob@partner.example on hub A) is
