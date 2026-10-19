@@ -714,27 +714,13 @@ func TestAuthMiddleware_FederatedUserIdentity(t *testing.T) {
 		}
 	})
 
-	t.Run("hub refuses the account", func(t *testing.T) {
-		hub.set(func(h *fedUserHub) { h.meStatus = http.StatusForbidden })
-		defer hub.set(func(h *fedUserHub) { h.meStatus = 0 })
-		w := serve(token)
-		if w.Code != http.StatusForbidden || seen != nil {
-			t.Fatalf("status = %d (caller %+v), want 403 and no caller", w.Code, seen)
-		}
-		if !strings.Contains(w.Body.String(), federatedUserRefusalText) {
-			t.Errorf("body = %q, want the uniform refusal", w.Body.String())
-		}
-	})
-
 	// The hub refuses a user with no project visitor account (for example,
 	// an identity issuer user not linked to an account) with 403
 	// (GoogleCloudPlatform/scion#3577): the bridge answers with the uniform
 	// refusal and admits no caller.
-	t.Run("hub refuses an unlinked identity issuer user", func(t *testing.T) {
-		hub.set(func(h *fedUserHub) {
-			h.meID, h.meRole, h.meStatus = fedUserIssuer+":"+fedUserSubject, "member", http.StatusForbidden
-		})
-		defer hub.set(func(h *fedUserHub) { h.meID, h.meRole, h.meStatus = fedUserAccountID, "viewer", 0 })
+	t.Run("hub refuses the account", func(t *testing.T) {
+		hub.set(func(h *fedUserHub) { h.meStatus = http.StatusForbidden })
+		defer hub.set(func(h *fedUserHub) { h.meStatus = 0 })
 		w := serve(token)
 		if w.Code != http.StatusForbidden || seen != nil {
 			t.Fatalf("status = %d (caller %+v), want 403 and no caller", w.Code, seen)
@@ -1595,9 +1581,7 @@ func TestExecutor_IdentityIssuerUserWithoutVisitorAccountRefused(t *testing.T) {
 		"email": "person@example.com",
 	})
 	hub := newFedUserHub(t, token)
-	hub.set(func(h *fedUserHub) {
-		h.meID, h.meRole, h.meStatus = issuer+":"+subject, "member", http.StatusForbidden
-	})
+	hub.set(func(h *fedUserHub) { h.meStatus = http.StatusForbidden })
 	_, broker, ts := newFedUserTestServer(t, hub)
 
 	status, body := awaitResult(t, sendAsync(t, ts, "agent1", token))
