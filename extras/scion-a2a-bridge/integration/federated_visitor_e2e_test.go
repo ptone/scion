@@ -604,7 +604,8 @@ func (e *fvEnv) fvStored(t *testing.T, text string) bool {
 
 // fvProjectRoles returns the names of the roles the user holds on hub B's
 // project through project-scoped role bindings, one entry per binding.
-// Project membership is the set of these bindings.
+// These are the user's direct project roles; membership also counts
+// group-derived bindings, and the visitor role confers none.
 func (e *fvEnv) fvProjectRoles(t *testing.T, userID string) []string {
 	t.Helper()
 	ctx := context.Background()
@@ -896,10 +897,11 @@ func TestFederatedVisitorEndToEnd(t *testing.T) {
 	}
 
 	// Alice reaches the agent only through her visitor grant: the agent
-	// row does not name her account, and her only role on the project is
-	// the visitor role. The agent row names the project's creator, and the
-	// creator holds the owner role, which shows both lookups find what
-	// they look for.
+	// row does not name her account, her only direct role on the project
+	// is the visitor role, and the hub's membership rule, which also counts
+	// group-derived bindings, finds her a non-member. The agent row names
+	// the project's creator, and the creator holds the owner role and is a
+	// member, which shows each lookup finds what it looks for.
 	agentRow, err := e.hubB.store.GetAgent(ctx, e.agent.ID)
 	if err != nil {
 		t.Fatalf("read agent: %v", err)
@@ -931,6 +933,12 @@ func TestFederatedVisitorEndToEnd(t *testing.T) {
 		if name != store.ProjectRoleVisitor {
 			t.Fatalf("alice's account %s holds project roles %v, want only %s", aliceGrant.ID, aliceRoles, store.ProjectRoleVisitor)
 		}
+	}
+	if m := e.hubB.srv.CheckEffectiveMembership(ctx, hub.DevUserID, e.projectID); m.Err != nil || !m.IsMember || m.Role != store.ProjectRoleOwner {
+		t.Fatalf("project creator %s: membership %+v, want a member with role %s", hub.DevUserID, m, store.ProjectRoleOwner)
+	}
+	if m := e.hubB.srv.CheckEffectiveMembership(ctx, aliceGrant.ID, e.projectID); m.Err != nil || m.IsMember {
+		t.Fatalf("alice's account %s: membership %+v, want a non-member", aliceGrant.ID, m)
 	}
 
 	// The bridge lists the agent Alice may message.

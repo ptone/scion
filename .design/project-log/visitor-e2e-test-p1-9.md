@@ -50,9 +50,12 @@ users
      audit record exists. Her DM with the agent, read the way the bridge
      reads it (the federation header carries her credential), holds the
      reply; the same read with only the bridge's bearer credential answers
-     404. The agent row does not name her account, and she holds no
-     project role other than her visitor grant (the creator's owner role
-     is the positive control). The bridge lists the agent's card.
+     404. The agent row does not name her account, she holds no direct
+     project role other than her visitor grant, and the hub's membership
+     rule (`CheckEffectiveMembership`, which also counts group-derived
+     bindings) finds her a non-member. The creator's owner role and
+     membership are the positive control. The bridge lists the agent's
+     card.
   4. With `accept_user_tokens` off (applied through `ApplySnapshot`), the
      bridge answers HTTP 401 and nothing is delivered. Turned back on, the
      next task completes, and the grant is unchanged.
