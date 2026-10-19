@@ -1,7 +1,9 @@
 # End-to-end test of project visitors across two hubs (phase 1, item 9)
 
 **Date:** 2026-10-18
-**Stacked on:** the A2A bridge item for federated users (item 7)
+**Stacked on:** the federated user reply reading item (the bridge's
+visitor reply poller), which builds on the A2A bridge item for federated
+users
 **Tracked in:** ptone/scion#4603
 
 ## What changed
@@ -20,7 +22,15 @@
   - Both hubs have the `federation.project_visitors` experiment on, run on
     SQLite stores, and listen on `httptest` loopback ports. The test sets
     `HOME` to a temporary directory, so hub B's project directory
-    (`$HOME/.scion/projects/<slug>`) is never created in the real home.
+    (`$HOME/.scion/projects/<slug>`) is never created in the real home,
+    and clears inherited `SCION_SERVER_*` and `SCION_SEED_*` variables.
+  - **Operational settings:** `fvStartHub` installs DB-backed operational
+    settings on each hub, built as `cmd/server_foreground.go`
+    `initOperationalSettings` builds them (`NewOperationalSettings`,
+    `Refresh`, `SetOperationalSettings`), without the snapshot apply, so
+    the federation configuration the test sets stays in force. `hub.New`
+    leaves them unset, and without them the conversation envelope switch
+    reads as off. Step 3 depends on that switch (see "Agent replies").
   - The A2A bridge (`Auth.Scheme: federation`) sits in front of hub B. It
     is a spoke of hub B's fan-out event bus, with the broker proxy as its
     host callbacks, the same wiring `cmd/server_foreground.go` uses for a
@@ -37,17 +47,24 @@
   2. Hub B's owner grants her by email. The grant is pending.
   3. Her first task through the bridge is delivered and completes with the
      agent's reply. The grant is then active, and one `visitor_linked`
-     audit record exists. The bridge lists the agent's card.
+     audit record exists. Her DM with the agent, read the way the bridge
+     reads it (the federation header carries her credential), holds the
+     reply; the same read with only the bridge's bearer credential answers
+     404. The agent row does not name her account, and she is in none of
+     the project's groups. The bridge lists the agent's card.
   4. With `accept_user_tokens` off (applied through `ApplySnapshot`), the
      bridge answers HTTP 401 and nothing is delivered. Turned back on, the
      next task completes, and the grant is unchanged.
-  5. After the grant is revoked, the next task is refused.
+  5. After the grant is revoked, the next task is refused, and so is her
+     DM read.
   6. A visitor rule for `partner.example` admits Bob on his first request,
      bound by the rule. After the rule is removed, his next task is
      refused.
 - **Uniform refusal:** the refusals in steps 5 and 6 must be identical, in
   task state and message text, to the answer for an agent the bridge does
-  not expose. That answer is taken in the same run.
+  not expose. That answer is taken in the same run. After every refusal
+  the test also checks hub B's store for the refused text, which does not
+  depend on delivery timing.
 - **Waits:** every wait is a `select` on the delivery channel or the A2A
   answer, bounded by a 60 s context. There are no sleeps.
 
@@ -68,9 +85,14 @@
   bookkeeping, and a test cannot observe a missing subscription.
 - **Agent replies:** an agent's direct reply to a user always carries a
   channel. With no channel in the request and no reply affinity, hub B
-  sets it to `web`. So in this wiring the reply does not reach the bridge
-  spoke, and step 3 is expected to end on the bridge's send timeout until
-  the reply routing to the bridge is changed in a separate item. The test
-  does not set a channel or otherwise route the reply around this.
-- **Compile:** nothing was compiled or run while writing the test. A gate
-  agent compiles and runs it after review.
+  files it under `web`, so the reply never reaches the bridge spoke. The
+  bridge's visitor reply poller reads it instead from the visitor's own DM
+  history (`GET /api/v1/chat/conversations/<dm key>/messages`, with the
+  user access credential in the federation header). That read needs the
+  conversation envelope switch, which is why the test installs the
+  operational settings. Step 3 passes; with the settings install removed,
+  it ends on the bridge's send timeout.
+- **Runs:** the test has been compiled and run in a scheduled build
+  window: all steps pass, and the run without the operational settings
+  install fails at step 3. CI on the pull request is the evidence for the
+  full suite.
