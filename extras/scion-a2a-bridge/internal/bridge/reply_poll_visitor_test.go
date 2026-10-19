@@ -16,6 +16,7 @@ package bridge
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -464,5 +465,117 @@ func assertVisitorRefusal(t *testing.T, body string) {
 		if strings.Contains(body, local) {
 			t.Errorf("response carries a local caller's message %q; body %s", local, body)
 		}
+	}
+}
+
+// visitorCallResult decodes the final task state and status message text
+// from a JSON-RPC SendMessage response body.
+func visitorCallResult(t *testing.T, body string) (state, text string) {
+	t.Helper()
+	type statusJSON struct {
+		State   string `json:"state"`
+		Message *struct {
+			Parts []struct {
+				Text string `json:"text"`
+			} `json:"parts"`
+		} `json:"message"`
+	}
+	var resp struct {
+		Result struct {
+			Task *struct {
+				Status statusJSON `json:"status"`
+			} `json:"task"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatalf("decoding the response: %v; body %s", err, body)
+	}
+	if resp.Result.Task == nil {
+		t.Fatalf("response carries no task; body %s", body)
+	}
+	st := resp.Result.Task.Status
+	var parts []string
+	if st.Message != nil {
+		for _, p := range st.Message.Parts {
+			parts = append(parts, p.Text)
+		}
+	}
+	return st.State, strings.Join(parts, "\n")
+}
+
+// TestExecutor_FederatedUserPolledWaitIgnoresAppendedPushEvent: while a
+// federated user's call waits with a live reply poller on its own
+// conversation, an agent message appended to the task without the poller's
+// mark (as another bridge process that saw the pushed copy would append it)
+// does not end the call; the call ends with the reply read from the
+// federated user's conversation.
+func TestExecutor_FederatedUserPolledWaitIgnoresAppendedPushEvent(t *testing.T) {
+	const (
+		appendedText = "an appended copy"
+		polledText   = "the reply in the federated user's conversation"
+	)
+	token := fedUserToken(t)
+	hub := newFedUserHub(t, token)
+	b, _, ts := newFedUserTestServer(t, hub, visitorPollConfig)
+	if !b.config.ReplyPoll.IsEnabled() {
+		t.Fatal("reply polling is off; the case needs it on")
+	}
+
+	done := sendAsync(t, ts, "agent1", token)
+	waitForSend(t, hub)
+	taskID, _ := onlyOtherTask(t, b, agentKey(fedUserProjectID, "agent1"))
+	if !b.taskPollerLive(taskID) {
+		t.Fatal("task is not marked as having a live poller after the send")
+	}
+
+	// Append the agent's message directly, past the push path's drop.
+	b.processAndAppendEvent(context.Background(), taskID, "agent1", &messages.StructuredMessage{
+		Version: 1, Sender: "agent:agent1", Recipient: "user:" + fedUserAccountID,
+		Type: messages.TypeInstruction, Msg: appendedText,
+		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
+	}, "")
+
+	// The wait reads the log every 100ms; give it several reads.
+	select {
+	case r := <-done:
+		t.Fatalf("call ended on the appended event: %v %v, want it still waiting", r[0], r[1])
+	case <-time.After(700 * time.Millisecond):
+	}
+
+	hub.set(func(h *fedUserHub) { h.dmMessages = visitorDMRows(polledText) })
+	start := time.Now()
+	code, body := awaitResult(t, done)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", code, body)
+	}
+	finalState, text := visitorCallResult(t, body)
+	if !strings.Contains(strings.ToLower(finalState), "completed") || text != polledText {
+		t.Fatalf("call ended %q %q, want completed with the reply read from the conversation; body %s", finalState, text, body)
+	}
+	if elapsed := time.Since(start); elapsed > 4*time.Second {
+		t.Fatalf("polled reply took %v to end the call, want it delivered promptly", elapsed)
+	}
+
+	// The appended event is in the task's log ahead of the poller's reply,
+	// so the wait read it and skipped it.
+	events, err := b.store.ReadTaskEvents(context.Background(), taskID, 0, 100)
+	if err != nil {
+		t.Fatalf("ReadTaskEvents: %v", err)
+	}
+	appendedAt, polledAt := -1, -1
+	for i, ev := range events {
+		if !isResponseEvent(ev) {
+			continue
+		}
+		if strings.HasPrefix(ev.DedupKey, replyPollDedupPrefix) {
+			if polledAt < 0 {
+				polledAt = i
+			}
+		} else if appendedAt < 0 {
+			appendedAt = i
+		}
+	}
+	if appendedAt < 0 || polledAt < 0 || appendedAt > polledAt {
+		t.Fatalf("task log response events: appended at %d, polled at %d; want the appended event before the polled reply", appendedAt, polledAt)
 	}
 }
