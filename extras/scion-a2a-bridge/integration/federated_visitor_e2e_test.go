@@ -266,6 +266,18 @@ func fvStartHub(t *testing.T, name string, ts *httptest.Server, url string, conf
 	if err != nil {
 		t.Fatalf("%s: hub.New: %v", name, err)
 	}
+	// DB-backed operational settings, built the way the server's startup
+	// builds them (cmd/server_foreground.go initOperationalSettings). hub.New
+	// leaves them unset, and a hub without them reads every settings-backed
+	// switch as off, including the conversation envelope switch that the
+	// bridge's visitor reply poller relies on. With no stored sections each
+	// switch takes its compiled default. The startup's snapshot apply is
+	// left out so the federation configuration set above stays in force.
+	ops := hub.NewOperationalSettings(st, config.LoadServerBootstrapKoanf("", nil), config.LoadEnvKoanf())
+	if _, err := ops.Refresh(ctx); err != nil {
+		t.Fatalf("%s: operational settings refresh: %v", name, err)
+	}
+	srv.SetOperationalSettings(ops)
 	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 	ts.Config.Handler = srv.Handler()
 	ts.Start()
