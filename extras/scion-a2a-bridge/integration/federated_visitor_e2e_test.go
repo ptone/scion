@@ -602,25 +602,28 @@ func (e *fvEnv) fvStored(t *testing.T, text string) bool {
 	return false
 }
 
-// fvInProjectGroup reports whether the user is in any group of hub B's
-// project, directly or through nested groups.
-func (e *fvEnv) fvInProjectGroup(t *testing.T, userID string) bool {
+// fvProjectRoles returns the names of the roles the user holds on hub B's
+// project through project-scoped role bindings, one entry per binding.
+// Project membership is the set of these bindings.
+func (e *fvEnv) fvProjectRoles(t *testing.T, userID string) []string {
 	t.Helper()
 	ctx := context.Background()
-	groupIDs, err := e.hubB.store.GetEffectiveGroups(ctx, userID)
+	bindings, err := e.hubB.store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
 	if err != nil {
-		t.Fatalf("groups of %s: %v", userID, err)
+		t.Fatalf("role bindings of %s: %v", userID, err)
 	}
-	for _, id := range groupIDs {
-		group, err := e.hubB.store.GetGroup(ctx, id)
+	var roles []string
+	for _, rb := range bindings {
+		if rb.ScopeType != store.RoleScopeProject || rb.ScopeID != e.projectID {
+			continue
+		}
+		role, err := e.hubB.store.GetRoleDefinition(ctx, rb.RoleDefinitionID)
 		if err != nil {
-			t.Fatalf("group %s: %v", id, err)
+			t.Fatalf("role definition %s: %v", rb.RoleDefinitionID, err)
 		}
-		if group.ProjectID == e.projectID {
-			return true
-		}
+		roles = append(roles, role.Name)
 	}
-	return false
+	return roles
 }
 
 // fvVisitorDMPath is the history route of the DM between the agent and the
@@ -893,12 +896,16 @@ func TestFederatedVisitorEndToEnd(t *testing.T) {
 	}
 
 	// Alice reaches the agent only through her visitor grant: the agent
-	// row does not name her account, and she is in none of the project's
-	// groups. The project's creator is, which shows the group lookup
-	// finds project groups.
+	// row does not name her account, and her only role on the project is
+	// the visitor role. The agent row names the project's creator, and the
+	// creator holds the owner role, which shows both lookups find what
+	// they look for.
 	agentRow, err := e.hubB.store.GetAgent(ctx, e.agent.ID)
 	if err != nil {
 		t.Fatalf("read agent: %v", err)
+	}
+	if agentRow.OwnerID != hub.DevUserID {
+		t.Fatalf("agent row owner %q, want the project's creator %q", agentRow.OwnerID, hub.DevUserID)
 	}
 	if agentRow.OwnerID == aliceGrant.ID || agentRow.CreatedBy == aliceGrant.ID {
 		t.Fatalf("agent row names alice's account: owner %q, created by %q", agentRow.OwnerID, agentRow.CreatedBy)
@@ -908,11 +915,22 @@ func TestFederatedVisitorEndToEnd(t *testing.T) {
 			t.Fatalf("agent ancestry %v names alice's account %s", agentRow.Ancestry, aliceGrant.ID)
 		}
 	}
-	if !e.fvInProjectGroup(t, hub.DevUserID) {
-		t.Fatalf("project creator %s is in none of the project's groups", hub.DevUserID)
+	creatorRoles := e.fvProjectRoles(t, hub.DevUserID)
+	hasOwner := false
+	for _, name := range creatorRoles {
+		hasOwner = hasOwner || name == store.ProjectRoleOwner
 	}
-	if e.fvInProjectGroup(t, aliceGrant.ID) {
-		t.Fatalf("alice's account %s is in a group of the project", aliceGrant.ID)
+	if !hasOwner {
+		t.Fatalf("project creator %s holds project roles %v, want %s among them", hub.DevUserID, creatorRoles, store.ProjectRoleOwner)
+	}
+	aliceRoles := e.fvProjectRoles(t, aliceGrant.ID)
+	if len(aliceRoles) == 0 {
+		t.Fatalf("alice's account %s holds no role on the project, want %s", aliceGrant.ID, store.ProjectRoleVisitor)
+	}
+	for _, name := range aliceRoles {
+		if name != store.ProjectRoleVisitor {
+			t.Fatalf("alice's account %s holds project roles %v, want only %s", aliceGrant.ID, aliceRoles, store.ProjectRoleVisitor)
+		}
 	}
 
 	// The bridge lists the agent Alice may message.
@@ -966,10 +984,8 @@ func TestFederatedVisitorEndToEnd(t *testing.T) {
 	if revoked != baseline {
 		t.Fatalf("after revoke: task ended %+v, want the same answer as for an unexposed agent %+v", revoked, baseline)
 	}
-	switch status, body = e.fvDo(t, http.MethodGet, dmPath, fvVisitorDMHeader(aliceToken), nil); status {
-	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
-	default:
-		t.Fatalf("alice's DM read after revoke: status %d, want 401, 403 or 404; body %s", status, body)
+	if status, body = e.fvDo(t, http.MethodGet, dmPath, fvVisitorDMHeader(aliceToken), nil); status != http.StatusForbidden {
+		t.Fatalf("alice's DM read after revoke: status %d, want 403; body %s", status, body)
 	}
 
 	// Step 6: a domain grant. Bob (bob@partner.example on hub A) is
