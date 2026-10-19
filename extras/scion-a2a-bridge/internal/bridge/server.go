@@ -723,9 +723,9 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			// A user credential names a person: the hub says which account
 			// it belongs to (GET /api/v1/auth/me under the same
 			// credential). A project visitor account makes it a federated
-			// user caller; with no such account the credential is served
-			// as before credential kinds existed. The bridge passes a hub
-			// refusal on, and answers 502 when the hub could not be asked.
+			// user caller; the hub refuses a user with no such account.
+			// The bridge passes a hub refusal on, and answers 502 when the
+			// hub could not be asked.
 			// Agent credentials are unchanged.
 			if caller.IsFederatedUser() {
 				identified, idErr := s.bridge.identifyFederatedUser(r.Context(), caller)

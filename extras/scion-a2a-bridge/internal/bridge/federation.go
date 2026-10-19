@@ -120,10 +120,10 @@ func classifyFederationClaims(c *federationJWTClaims) (string, error) {
 // before credential kinds existed. A user credential yields a federated
 // user caller (Subject = sub, Email from the credential) whose UserID is
 // still empty: the caller is usable only after Bridge.identifyFederatedUser
-// has asked the hub which account the credential belongs to. When the hub
-// names no project visitor account for it, identifyFederatedUser returns
-// the agent caller this function built before credential kinds existed
-// (legacyFederationCaller).
+// has asked the hub which account the credential belongs to. When the
+// credential belongs to no project visitor account (for example, an
+// unlinked identity issuer user), the hub refuses it and the bridge passes
+// the refusal on.
 func decodeFederationToken(tokenString string) (*CallerIdentity, error) {
 	parts := strings.Split(tokenString, ".")
 	if len(parts) != 3 {
