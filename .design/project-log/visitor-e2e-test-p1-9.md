@@ -50,13 +50,14 @@ users
      audit record exists. Her DM with the agent, read the way the bridge
      reads it (the federation header carries her credential), holds the
      reply; the same read with only the bridge's bearer credential answers
-     404. The agent row does not name her account, and she is in none of
-     the project's groups. The bridge lists the agent's card.
+     404. The agent row does not name her account, and she holds no
+     project role other than her visitor grant (the creator's owner role
+     is the positive control). The bridge lists the agent's card.
   4. With `accept_user_tokens` off (applied through `ApplySnapshot`), the
      bridge answers HTTP 401 and nothing is delivered. Turned back on, the
      next task completes, and the grant is unchanged.
-  5. After the grant is revoked, the next task is refused, and so is her
-     DM read.
+  5. After the grant is revoked, the next task is refused, and her DM
+     read answers 403.
   6. A visitor rule for `partner.example` admits Bob on his first request,
      bound by the rule. After the rule is removed, his next task is
      refused.
