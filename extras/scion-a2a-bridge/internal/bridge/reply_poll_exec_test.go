@@ -944,3 +944,67 @@ func TestReplyPoll_ExecutorJoinsPollerBeforeYield(t *testing.T) {
 		t.Fatalf("%d poll read slots held when the final event was yielded, want 0", out.slotsHeldAtFinal)
 	}
 }
+
+// TestExecutor_PolledWaitIgnoresAppendedPushEvent: while a local caller's
+// call waits with a live reply poller, an agent message appended to the
+// task without the poller's mark (as another bridge process that saw the
+// pushed copy would append it) does not end the call; the call ends with
+// the polled reply.
+func TestExecutor_PolledWaitIgnoresAppendedPushEvent(t *testing.T) {
+	f := newFakeConvHub(t)
+	f.seedConversation()
+	b, store, _ := newExecTestBridge(t, f, nil)
+	const taskID = "task-polled-wait-appended"
+
+	done := runExecAsync(context.Background(), b, taskID, execTestCaller(), false, "the request")
+	f.awaitSend(t)
+	if !b.taskPollerLive(taskID) {
+		t.Fatal("task is not marked as having a live poller after the send")
+	}
+
+	// Append the agent's message directly, past the push path's drop.
+	b.processAndAppendEvent(context.Background(), taskID, execTestAgentSlug, &messages.StructuredMessage{
+		Version: 1, Sender: "agent:" + execTestAgentSlug, Type: messages.TypeInstruction,
+		Msg: "an appended copy", Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
+	}, "")
+
+	// The wait reads the log every 100ms; give it several reads.
+	select {
+	case out := <-done:
+		t.Fatalf("call ended on the appended event: %v %q (states %v), want it still waiting", out.final, out.text, out.states)
+	case <-time.After(700 * time.Millisecond):
+	}
+
+	f.addAgentRow(messages.TypeInstruction, execTestDMKey, "the polled reply")
+	start := time.Now()
+	out := awaitOutcome(t, done)
+	if out.final != a2a.TaskStateCompleted || out.text != "the polled reply" {
+		t.Fatalf("call ended %v %q (states %v), want completed with the polled reply", out.final, out.text, out.states)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("polled reply took %v to end the call, want it delivered promptly", elapsed)
+	}
+
+	// The appended event is in the task's log ahead of the poller's reply,
+	// so the wait read it and skipped it.
+	events, err := store.ReadTaskEvents(context.Background(), taskID, 0, 100)
+	if err != nil {
+		t.Fatalf("ReadTaskEvents: %v", err)
+	}
+	appendedAt, polledAt := -1, -1
+	for i, ev := range events {
+		if !isResponseEvent(ev) {
+			continue
+		}
+		if strings.HasPrefix(ev.DedupKey, replyPollDedupPrefix) {
+			if polledAt < 0 {
+				polledAt = i
+			}
+		} else if appendedAt < 0 {
+			appendedAt = i
+		}
+	}
+	if appendedAt < 0 || polledAt < 0 || appendedAt > polledAt {
+		t.Fatalf("task log response events: appended at %d, polled at %d; want the appended event before the polled reply", appendedAt, polledAt)
+	}
+}
