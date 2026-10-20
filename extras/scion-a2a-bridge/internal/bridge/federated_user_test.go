@@ -798,6 +798,10 @@ func TestAuthMiddleware_FederatedUserIdentity(t *testing.T) {
 		}
 	})
 
+	// The hub refuses a user with no project visitor account (for example,
+	// an identity issuer user not linked to an account) with 403
+	// (GoogleCloudPlatform/scion#3577): the bridge answers with the uniform
+	// refusal and admits no caller.
 	t.Run("hub refuses the account", func(t *testing.T) {
 		hub.set(func(h *fedUserHub) { h.meStatus = http.StatusForbidden })
 		defer hub.set(func(h *fedUserHub) { h.meStatus = 0 })
@@ -805,37 +809,31 @@ func TestAuthMiddleware_FederatedUserIdentity(t *testing.T) {
 		if w.Code != http.StatusForbidden || seen != nil {
 			t.Fatalf("status = %d (caller %+v), want 403 and no caller", w.Code, seen)
 		}
-		if !strings.Contains(w.Body.String(), federatedUserRefusalText) {
-			t.Errorf("body = %q, want the uniform refusal", w.Body.String())
+		if got := strings.TrimSpace(w.Body.String()); got != federatedUserRefusalText {
+			t.Errorf("body = %q, want the uniform refusal %q", got, federatedUserRefusalText)
 		}
 	})
 
-	// The hub names no project visitor account (for example, the user is not
-	// linked; with the experiment off the hub answers 401 instead): the
-	// credential is served as before, as an agent caller keyed by its subject.
-	legacy := CallerIdentity{TokenType: "federation", RawToken: token, AgentID: fedUserSubject, IssuerURL: fedUserIssuer}
+	// A hub answer that names no project visitor account (an agent, or an
+	// ID that is not an account ID) is refused the same way: the caller is
+	// never admitted under another identity.
 	for _, tc := range []struct {
 		name   string
 		meID   string
 		meRole string
 	}{
-		{"hub names an agent for a user credential", fedUserAccountID, "agent"},
-		{"hub names an unlinked identity issuer user", fedUserIssuer + ":" + fedUserSubject, "member"},
+		{"hub answer naming an agent is refused", fedUserAccountID, "agent"},
+		{"hub answer naming no account is refused", fedUserIssuer + ":" + fedUserSubject, "member"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			hub.set(func(h *fedUserHub) { h.meID, h.meRole = tc.meID, tc.meRole })
 			defer hub.set(func(h *fedUserHub) { h.meID, h.meRole = fedUserAccountID, "viewer" })
-			if w := serve(token); w.Code != http.StatusOK {
-				t.Fatalf("status = %d, want 200; body %s", w.Code, w.Body.String())
+			w := serve(token)
+			if w.Code != http.StatusForbidden || seen != nil {
+				t.Fatalf("status = %d (caller %+v), want 403 and no caller", w.Code, seen)
 			}
-			if seen == nil || seen.IsFederatedUser() || !seen.IsAgent() ||
-				seen.TokenType != legacy.TokenType || seen.RawToken != legacy.RawToken || seen.AgentID != legacy.AgentID ||
-				seen.IssuerURL != legacy.IssuerURL || seen.UserID != "" || seen.Email != "" || seen.Subject != "" ||
-				seen.Role != "" || seen.ProjectID != "" || len(seen.Ancestry) != 0 {
-				t.Fatalf("caller = %+v, want the caller built before credential kinds %+v", seen, legacy)
-			}
-			if got, want := seen.CallerKey(), "agent:hub-a.example.com:"+fedUserSubject; got != want {
-				t.Errorf("CallerKey() = %q, want %q", got, want)
+			if got := strings.TrimSpace(w.Body.String()); got != federatedUserRefusalText {
+				t.Errorf("body = %q, want the uniform refusal %q", got, federatedUserRefusalText)
 			}
 		})
 	}
@@ -1605,50 +1603,60 @@ func TestIsAgentCallerOwnerKey(t *testing.T) {
 
 // --- an identity issuer user the hub names no visitor account for ---
 
-// TestExecutor_IdentityIssuerCallerUnchangedWithoutVisitorAccount: a
-// credential with an email and no agent claims from an identity issuer,
-// while the hub names no project visitor account for it (for example its
-// project visitor experiment is off): the bridge serves it as before
-// credential kinds existed, with metadata, the agent sender, the bridge
-// admin's topic and no access re-check.
-func TestExecutor_IdentityIssuerCallerUnchangedWithoutVisitorAccount(t *testing.T) {
+// TestExecutor_IdentityIssuerUserWithoutVisitorAccountRefused: a user
+// access credential from an identity issuer whose user has no project
+// visitor account on the hub is refused, with reply polling on. The hub
+// either refuses it (403 on GET /api/v1/auth/me,
+// GoogleCloudPlatform/scion#3577) or answers 200 with an ID that names no
+// visitor account. Either way the bridge answers the JSON-RPC send with the
+// uniform refusal before any task starts: nothing is sent, no topic is
+// subscribed, and no access re-check or reply read is made.
+func TestExecutor_IdentityIssuerUserWithoutVisitorAccountRefused(t *testing.T) {
 	const (
 		issuer  = "https://accounts.example.com"
 		subject = "idp-user-1"
 	)
-	token := buildTestJWT(t, map[string]interface{}{
-		"iss":   issuer,
-		"sub":   subject,
-		"aud":   "https://hub-b.example.com",
-		"email": "person@example.com",
-	})
-	hub := newFedUserHub(t, token)
-	hub.set(func(h *fedUserHub) { h.meID, h.meRole = issuer+":"+subject, "member" })
-	_, broker, ts := newFedUserTestServer(t, hub)
+	for _, tc := range []struct {
+		name string
+		hub  func(h *fedUserHub)
+	}{
+		{"hub refuses the credential", func(h *fedUserHub) { h.meStatus = http.StatusForbidden }},
+		{"hub answer names no visitor account", func(h *fedUserHub) { h.meID = issuer + ":" + subject }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			token := buildTestJWT(t, map[string]interface{}{
+				"iss":   issuer,
+				"sub":   subject,
+				"aud":   "https://hub-b.example.com",
+				"email": "person@example.com",
+			})
+			hub := newFedUserHub(t, token)
+			hub.set(tc.hub)
+			b, broker, ts := newFedUserTestServer(t, hub)
+			if !b.config.ReplyPoll.IsEnabled() {
+				t.Fatal("reply polling is off; this test needs the default (on)")
+			}
 
-	done := sendAsync(t, ts, "agent1", token)
-	sent := waitForSend(t, hub)
-	awaitResult(t, done) // no reply: the send times out
-
-	if sent.FedToken != token {
-		t.Errorf("send carried federation credential %q, want the caller's", sent.FedToken)
-	}
-	sm, _ := sent.Body["structured_message"].(map[string]interface{})
-	md, _ := sm["metadata"].(map[string]interface{})
-	if md == nil || md["a2aTaskId"] == nil || md["a2aTaskId"] == "" {
-		t.Errorf("send metadata = %v, want a2aTaskId as before", sm["metadata"])
-	}
-	if sm["sender"] != "agent:"+subject {
-		t.Errorf("sender = %v, want agent:%s as before", sm["sender"], subject)
-	}
-	if !brokerSubscribed(broker, projectkeys.UserTopic(fedUserProjectID, "admin@test")) {
-		t.Error("no subscription to the bridge admin's user topic")
-	}
-	if brokerSubscribed(broker, projectkeys.AllUserTopic(fedUserProjectID)) {
-		t.Error("subscribed to all user topics")
-	}
-	if snap := hub.snapshot(); len(snap.dmReadKeys) != 0 {
-		t.Errorf("access re-checks = %d, want 0", len(snap.dmReadKeys))
+			status, body := awaitResult(t, sendAsync(t, ts, "agent1", token))
+			if status != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403; body %s", status, body)
+			}
+			if got := strings.TrimSpace(body); got != federatedUserRefusalText {
+				t.Errorf("body = %q, want the uniform refusal %q", got, federatedUserRefusalText)
+			}
+			snap := hub.snapshot()
+			if snap.meCalls != 1 || snap.meFedTokens[0] != token {
+				t.Errorf("auth/me calls = %d with credentials %v, want 1 with the caller's credential", snap.meCalls, snap.meFedTokens)
+			}
+			if len(snap.sent) != 0 || snap.createCalls != 0 || len(snap.listQueries) != 0 || len(snap.dmReadKeys) != 0 {
+				t.Errorf("hub calls after the refusal: sends %d, creates %d, agent lists %d, access re-checks %d; want none",
+					len(snap.sent), snap.createCalls, len(snap.listQueries), len(snap.dmReadKeys))
+			}
+			if brokerSubscribed(broker, projectkeys.UserTopic(fedUserProjectID, "admin@test")) ||
+				brokerSubscribed(broker, projectkeys.AllUserTopic(fedUserProjectID)) {
+				t.Error("subscribed to a user topic for a refused caller")
+			}
+		})
 	}
 }
 
