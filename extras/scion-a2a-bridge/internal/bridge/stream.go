@@ -26,7 +26,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
 // ErrTooManySubscribers is returned when the SSE connection limit is reached.
@@ -267,6 +266,11 @@ func taskEventToStreamEvent(ev state.TaskEvent) (StreamEvent, error) {
 // SendStreamingMessage creates a task, sends the message to the agent, and
 // returns a channel that will receive SSE events as the agent processes the request.
 func (b *Bridge) SendStreamingMessage(ctx context.Context, projectSlug, agentSlug, contextID string, parts []Part) (string, <-chan StreamEvent, func(), error) {
+	// This path sends as the bridge admin; a federated user is served only
+	// by the SDK executor, which acts with the caller's own credential.
+	if caller := callerIdentityFromContext(ctx); caller != nil && caller.IsFederatedUser() {
+		return "", nil, nil, fmt.Errorf("%w: %q", ErrAgentNotFound, agentSlug)
+	}
 	agentCtx, err := b.resolveContext(ctx, projectSlug, agentSlug, contextID)
 	if err != nil {
 		return "", nil, nil, fmt.Errorf("resolve context: %w", err)
@@ -293,6 +297,8 @@ func (b *Bridge) SendStreamingMessage(ctx context.Context, projectSlug, agentSlu
 	}
 
 	aKey := agentKey(agentCtx.ProjectID, agentCtx.AgentSlug)
+	// The message is sent as the bridge admin, so the task is in the admin
+	// class: it takes pushed replies only from the admin topic.
 	b.registerActiveTask(taskID, aKey)
 
 	sessionCleanup, err := b.streams.AcquireSession(taskID)
@@ -334,10 +340,7 @@ func (b *Bridge) SendStreamingMessage(ctx context.Context, projectSlug, agentSlu
 	scionMsg.Metadata = map[string]string{"a2aTaskId": taskID}
 
 	if b.broker != nil {
-		pattern := projectkeys.UserTopic(agentCtx.ProjectID, b.config.Hub.User)
-		if err := b.broker.RequestSubscription(pattern); err != nil {
-			b.log.Warn("failed to request subscription", "pattern", pattern, "error", err)
-		}
+		b.subscribeAdminUserTopics(agentCtx.ProjectID)
 	}
 
 	b.wg.Add(1)

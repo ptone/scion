@@ -61,6 +61,53 @@ type federationJWTClaims struct {
 	AgentName string           `json:"agent_name,omitempty"`
 	Ancestry  []string         `json:"ancestry,omitempty"`
 	RootUser  string           `json:"root_user,omitempty"`
+	Email     string           `json:"email,omitempty"`
+	// TokenKind is the hub-set credential kind: "user" or "agent". Empty on
+	// credentials from issuers that predate the claim.
+	TokenKind string `json:"scion_token_kind,omitempty"`
+}
+
+// Federation credential kinds (the scion_token_kind claim).
+const (
+	federationKindAgent = "agent"
+	federationKindUser  = "user"
+)
+
+// hasAgentClaims reports whether the claims carry any agent claim.
+func (c *federationJWTClaims) hasAgentClaims() bool {
+	return c.ProjectID != "" || c.AgentName != "" || len(c.Ancestry) > 0 || c.RootUser != ""
+}
+
+// classifyFederationClaims returns the kind of caller a federation
+// credential names: federationKindAgent or federationKindUser.
+//
+//   - scion_token_kind "agent": an agent.
+//   - scion_token_kind "user": a user; refused when it also carries an agent
+//     claim (it would claim both kinds) or has no email.
+//   - no scion_token_kind (issuers that predate the claim): an agent when it
+//     carries an agent claim, a user when it carries an email and no agent
+//     claim, otherwise an agent (as before the claim existed).
+//   - any other scion_token_kind: refused.
+func classifyFederationClaims(c *federationJWTClaims) (string, error) {
+	switch c.TokenKind {
+	case federationKindAgent:
+		return federationKindAgent, nil
+	case federationKindUser:
+		if c.hasAgentClaims() {
+			return "", fmt.Errorf("federation: user credential carries agent claims")
+		}
+		if c.Email == "" {
+			return "", fmt.Errorf("federation: user credential has no email claim")
+		}
+		return federationKindUser, nil
+	case "":
+		if !c.hasAgentClaims() && c.Email != "" {
+			return federationKindUser, nil
+		}
+		return federationKindAgent, nil
+	default:
+		return "", fmt.Errorf("federation: unknown credential kind %q", c.TokenKind)
+	}
 }
 
 // decodeFederationToken parses a JWT WITHOUT signature verification and
@@ -68,6 +115,15 @@ type federationJWTClaims struct {
 // isolation, logging, sender formatting). The hub validates the token via
 // its FederationAuthenticator when the bridge passes it in the
 // X-Scion-Federation-Token header.
+//
+// An agent credential yields an agent caller (AgentID = sub), exactly as
+// before credential kinds existed. A user credential yields a federated
+// user caller (Subject = sub, Email from the credential) whose UserID is
+// still empty: the caller is usable only after Bridge.identifyFederatedUser
+// has asked the hub which account the credential belongs to. When the
+// credential belongs to no project visitor account (for example, an
+// unlinked identity issuer user), the hub refuses it and the bridge passes
+// the refusal on.
 func decodeFederationToken(tokenString string) (*CallerIdentity, error) {
 	parts := strings.Split(tokenString, ".")
 	if len(parts) != 3 {
@@ -91,6 +147,21 @@ func decodeFederationToken(tokenString string) (*CallerIdentity, error) {
 
 	if claims.Subject == "" {
 		return nil, fmt.Errorf("federation: JWT missing sub claim")
+	}
+
+	kind, err := classifyFederationClaims(&claims)
+	if err != nil {
+		return nil, err
+	}
+
+	if kind == federationKindUser {
+		return &CallerIdentity{
+			TokenType: "federation",
+			RawToken:  tokenString,
+			Email:     claims.Email,
+			IssuerURL: claims.Issuer,
+			Subject:   claims.Subject,
+		}, nil
 	}
 
 	return &CallerIdentity{
