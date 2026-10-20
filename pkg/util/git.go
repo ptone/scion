@@ -15,6 +15,7 @@
 package util
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -571,6 +572,28 @@ func RemoveWorktreeEntryIn(repoRoot, path string) error {
 	if repoRoot == "" || path == "" {
 		return nil
 	}
+	return RemoveWorktreeEntry(context.Background(), path, func(ctx context.Context, args ...string) (*exec.Cmd, error) {
+		return exec.CommandContext(ctx, "git", append([]string{"-C", repoRoot}, args...)...), nil
+	})
+}
+
+// RemoveWorktreeEntry is the contract of RemoveWorktreeEntryIn without its
+// agent-container guard, for callers that run git their own way (for
+// example with extra -c settings or environment for a shared checkout).
+// newCmd builds the git command for the given arguments, already pointed
+// at the repository; RemoveWorktreeEntry never adds -C itself. It appends
+// LC_ALL=C to the command's environment so git's messages can be matched.
+//
+// It acts only when path is absent (Lstat reports it does not exist), runs
+// "git worktree remove <path>" without --force, first with path as given
+// and, only if git does not know it, again with its existing ancestor's
+// symlinks resolved. "is not a working tree" after the last attempt means
+// git has no entry for path and is not an error. Any other failure is
+// returned; callers must not fall back to a repository-wide prune.
+func RemoveWorktreeEntry(ctx context.Context, path string, newCmd func(ctx context.Context, args ...string) (*exec.Cmd, error)) error {
+	if path == "" {
+		return nil
+	}
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("worktree entry %q: path must be absolute", path)
 	}
@@ -579,7 +602,7 @@ func RemoveWorktreeEntryIn(repoRoot, path string) error {
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("worktree entry %s: %w", path, err)
 	}
-	known, err := removeWorktreeEntryAt(repoRoot, path)
+	known, err := removeWorktreeEntryAt(ctx, newCmd, path)
 	if err != nil || known {
 		return err
 	}
@@ -590,15 +613,22 @@ func RemoveWorktreeEntryIn(repoRoot, path string) error {
 	if !ok || resolved == path {
 		return nil
 	}
-	_, err = removeWorktreeEntryAt(repoRoot, resolved)
+	_, err = removeWorktreeEntryAt(ctx, newCmd, resolved)
 	return err
 }
 
-// removeWorktreeEntryAt runs "git worktree remove target" in repoRoot. It
-// reports known=false, with no error, when git has no worktree at target.
-func removeWorktreeEntryAt(repoRoot, target string) (known bool, err error) {
-	cmd := exec.Command("git", "-C", repoRoot, "worktree", "remove", target)
-	cmd.Env = append(os.Environ(), "LC_ALL=C")
+// removeWorktreeEntryAt runs "git worktree remove target" through newCmd.
+// It reports known=false, with no error, when git has no worktree at
+// target.
+func removeWorktreeEntryAt(ctx context.Context, newCmd func(ctx context.Context, args ...string) (*exec.Cmd, error), target string) (known bool, err error) {
+	cmd, err := newCmd(ctx, "worktree", "remove", target)
+	if err != nil {
+		return true, fmt.Errorf("git worktree remove %s: %w", target, err)
+	}
+	if cmd.Env == nil {
+		cmd.Env = os.Environ()
+	}
+	cmd.Env = append(cmd.Env, "LC_ALL=C")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if strings.Contains(string(out), "is not a working tree") {
@@ -1509,4 +1539,99 @@ var scionNamespace = uuid.MustParse("a1b8e4f0-7c3d-4a1e-9f2b-6d5c8e7a0b1f")
 // deterministic identifier needs such as cache keys.
 func HashProjectID(normalized string) string {
 	return uuid.NewSHA1(scionNamespace, []byte(normalized)).String()
+}
+
+// AppendGitExcludeLine adds line to the info/exclude file of the git
+// repository containing dir, unless a line equal to it (ignoring surrounding
+// space) is already there. info/exclude is never tracked, so this changes no
+// tracked file. It returns the exclude file's path.
+//
+// A symbolic link or other non-regular file at info or info/exclude is
+// refused rather than followed.
+func AppendGitExcludeLine(dir, line string) (string, error) {
+	// Without --path-format=absolute, which would resolve symbolic links,
+	// so that the checks below see a link at info or info/exclude. The
+	// result is relative to dir unless the git directory is elsewhere.
+	cmd := exec.Command("git", "rev-parse", "--git-path", "info/exclude")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("resolve git exclude file in %s: %w", dir, err)
+	}
+	excludePath := strings.TrimSpace(string(out))
+	if excludePath == "" {
+		return "", fmt.Errorf("resolve git exclude file in %s: empty path", dir)
+	}
+	if !filepath.IsAbs(excludePath) {
+		excludePath = filepath.Join(dir, excludePath)
+	}
+
+	infoDir := filepath.Dir(excludePath)
+	if info, err := os.Lstat(infoDir); err == nil {
+		if !info.IsDir() {
+			return excludePath, fmt.Errorf("%s is not a directory", infoDir)
+		}
+	} else if os.IsNotExist(err) {
+		if err := os.Mkdir(infoDir, 0755); err != nil {
+			return excludePath, fmt.Errorf("create %s: %w", infoDir, err)
+		}
+	} else {
+		return excludePath, err
+	}
+
+	var content []byte
+	if info, err := os.Lstat(excludePath); err == nil {
+		if !info.Mode().IsRegular() {
+			return excludePath, fmt.Errorf("%s is not a regular file", excludePath)
+		}
+		if content, err = os.ReadFile(excludePath); err != nil {
+			return excludePath, err
+		}
+	} else if !os.IsNotExist(err) {
+		return excludePath, err
+	}
+
+	for _, l := range strings.Split(string(content), "\n") {
+		if strings.TrimSpace(l) == line {
+			return excludePath, nil
+		}
+	}
+	entry := line + "\n"
+	if len(content) > 0 && content[len(content)-1] != '\n' {
+		entry = "\n" + entry
+	}
+	f, err := os.OpenFile(excludePath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
+	if err != nil {
+		return excludePath, err
+	}
+	if _, err := f.WriteString(entry); err != nil {
+		_ = f.Close()
+		return excludePath, err
+	}
+	return excludePath, f.Close()
+}
+
+// EnsureGitIgnoresFile makes sure that the file name in dir is ignored by
+// git when dir is inside a git work tree, by adding name (unanchored, so it
+// matches that name in any directory) to the repository's info/exclude when
+// no existing rule already ignores it. Outside a work tree, or without git,
+// it does nothing.
+func EnsureGitIgnoresFile(dir, name string) error {
+	cmd := exec.Command("git", "rev-parse", "--is-inside-work-tree")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil || strings.TrimSpace(string(out)) != "true" {
+		return nil
+	}
+	if IsIgnored(dir, name) {
+		return nil
+	}
+	excludePath, err := AppendGitExcludeLine(dir, name)
+	if err != nil {
+		return err
+	}
+	if !IsIgnored(dir, name) {
+		return fmt.Errorf("the repository at %s un-ignores %s; the rule in %s has no effect", dir, name, excludePath)
+	}
+	return nil
 }
