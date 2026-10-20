@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -353,6 +354,13 @@ type fedUserHub struct {
 	dmReadTokens []string
 	createCalls  int
 	convRequests []fedUserHubConvRequest
+	// dmReadQueries records the query of every conversation read.
+	dmReadQueries []url.Values
+	// dmReadSeq, when not empty, answers the next conversation reads in
+	// order, in place of dmReadStatus (0: 200 with dmMessages).
+	dmReadSeq []int
+	// dmMessages is the conversation page the reads answer, newest first.
+	dmMessages []map[string]interface{}
 
 	// visitorConvStatus answers /api/v1/conversations* requests that carry
 	// a federation credential, as the hub refuses a visitor there; 0: 404,
@@ -370,6 +378,8 @@ type fedUserHubSend struct {
 	AgentID  string
 	Body     map[string]interface{}
 	FedToken string
+	// DMReadsBefore is the number of conversation reads before the send.
+	DMReadsBefore int
 }
 
 func writeHubError(w http.ResponseWriter, status int) {
@@ -449,7 +459,7 @@ func newFedUserHub(t *testing.T, userToken string) *fedUserHub {
 			var body map[string]interface{}
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			agentID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/agents/"), "/message")
-			h.sent = append(h.sent, fedUserHubSend{AgentID: agentID, Body: body, FedToken: fedToken})
+			h.sent = append(h.sent, fedUserHubSend{AgentID: agentID, Body: body, FedToken: fedToken, DMReadsBefore: len(h.dmReadKeys)})
 			if h.sendStatus != 0 {
 				writeHubError(w, h.sendStatus)
 				return
@@ -459,15 +469,30 @@ func newFedUserHub(t *testing.T, userToken string) *fedUserHub {
 			key := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/chat/conversations/"), "/messages")
 			h.dmReadKeys = append(h.dmReadKeys, key)
 			h.dmReadTokens = append(h.dmReadTokens, fedToken)
+			h.dmReadQueries = append(h.dmReadQueries, r.URL.Query())
 			if fedToken != h.userToken {
 				writeHubError(w, http.StatusForbidden)
 				return
 			}
-			if h.dmReadStatus != 0 {
-				writeHubError(w, h.dmReadStatus)
+			status := h.dmReadStatus
+			if len(h.dmReadSeq) > 0 {
+				status = h.dmReadSeq[0]
+				h.dmReadSeq = h.dmReadSeq[1:]
+			}
+			if status != 0 {
+				writeHubError(w, status)
 				return
 			}
-			writeJSON(map[string]interface{}{"messages": []interface{}{}})
+			page, next, ok := fedUserDMPage(h.dmMessages, r.URL.Query())
+			if !ok {
+				writeHubError(w, http.StatusBadRequest)
+				return
+			}
+			resp := map[string]interface{}{"messages": page}
+			if next != "" {
+				resp["nextCursor"] = next
+			}
+			writeJSON(resp)
 		case strings.HasPrefix(r.URL.Path, "/api/v1/conversations"):
 			h.convRequests = append(h.convRequests, fedUserHubConvRequest{Path: r.URL.Path, FedToken: fedToken})
 			if fedToken != "" && h.visitorConvStatus != 0 {
@@ -489,6 +514,33 @@ func (h *fedUserHub) set(fn func(h *fedUserHub)) {
 	fn(h)
 }
 
+// fedUserDMPage pages the conversation rows (newest first) as the hub's
+// chat history does: up to limit rows from the cursor's position, and an
+// opaque cursor for the next (older) page when rows remain. ok is false for
+// a cursor the double did not issue.
+func fedUserDMPage(rows []map[string]interface{}, query url.Values) (page []map[string]interface{}, next string, ok bool) {
+	start := 0
+	if c := query.Get("cursor"); c != "" {
+		n, err := strconv.Atoi(strings.TrimPrefix(c, fedUserDMCursorPrefix))
+		if !strings.HasPrefix(c, fedUserDMCursorPrefix) || err != nil || n < 0 || n > len(rows) {
+			return nil, "", false
+		}
+		start = n
+	}
+	end := len(rows)
+	if limit, err := strconv.Atoi(query.Get("limit")); err == nil && limit > 0 && start+limit < end {
+		end = start + limit
+	}
+	page = append([]map[string]interface{}{}, rows[start:end]...)
+	if end < len(rows) {
+		next = fedUserDMCursorPrefix + strconv.Itoa(end)
+	}
+	return page, next, true
+}
+
+// fedUserDMCursorPrefix starts the page cursors fedUserDMPage issues.
+const fedUserDMCursorPrefix = "opaque-page-"
+
 // fedUserHubCalls is a copy of what the hub double has seen.
 type fedUserHubCalls struct {
 	meCalls      int
@@ -500,21 +552,24 @@ type fedUserHubCalls struct {
 	dmReadTokens []string
 	createCalls  int
 	convRequests []fedUserHubConvRequest
+	// dmReadQueries is the query of every conversation read.
+	dmReadQueries []url.Values
 }
 
 func (h *fedUserHub) snapshot() fedUserHubCalls {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return fedUserHubCalls{
-		meCalls:      h.meCalls,
-		meFedTokens:  append([]string(nil), h.meFedTokens...),
-		sent:         append([]fedUserHubSend(nil), h.sent...),
-		listQueries:  append([]url.Values(nil), h.listQueries...),
-		listTokens:   append([]string(nil), h.listTokens...),
-		dmReadKeys:   append([]string(nil), h.dmReadKeys...),
-		dmReadTokens: append([]string(nil), h.dmReadTokens...),
-		createCalls:  h.createCalls,
-		convRequests: append([]fedUserHubConvRequest(nil), h.convRequests...),
+		meCalls:       h.meCalls,
+		meFedTokens:   append([]string(nil), h.meFedTokens...),
+		sent:          append([]fedUserHubSend(nil), h.sent...),
+		listQueries:   append([]url.Values(nil), h.listQueries...),
+		listTokens:    append([]string(nil), h.listTokens...),
+		dmReadKeys:    append([]string(nil), h.dmReadKeys...),
+		dmReadTokens:  append([]string(nil), h.dmReadTokens...),
+		createCalls:   h.createCalls,
+		dmReadQueries: append([]url.Values(nil), h.dmReadQueries...),
+		convRequests:  append([]fedUserHubConvRequest(nil), h.convRequests...),
 	}
 }
 
@@ -592,6 +647,14 @@ const fedUserSendBody = `{
 		}
 	}
 }`
+
+// fedUserPushOnly turns reply polling off (reply_poll.enabled: false), so
+// the executor waits on pushed replies only: the path these tests drive
+// with deliverReply.
+func fedUserPushOnly(cfg *Config) {
+	off := false
+	cfg.ReplyPoll.Enabled = &off
+}
 
 // sendAsync sends the JSON-RPC SendMessage in the background and returns a
 // channel with the status and body.
@@ -807,7 +870,7 @@ func TestAuthMiddleware_FederatedUserIdentity(t *testing.T) {
 func TestExecutor_FederatedUserReplyThroughUserTopic(t *testing.T) {
 	token := fedUserToken(t)
 	hub := newFedUserHub(t, token)
-	b, broker, ts := newFedUserTestServer(t, hub)
+	b, broker, ts := newFedUserTestServer(t, hub, fedUserPushOnly)
 
 	done := sendAsync(t, ts, "agent1", token)
 	sent := waitForSend(t, hub)
@@ -860,7 +923,7 @@ func TestExecutor_FederatedUserReplyThroughUserTopic(t *testing.T) {
 func TestExecutor_FederatedUserRevokedEndsTask(t *testing.T) {
 	token := fedUserToken(t)
 	hub := newFedUserHub(t, token)
-	b, _, ts := newFedUserTestServer(t, hub)
+	b, _, ts := newFedUserTestServer(t, hub, fedUserPushOnly)
 
 	done := sendAsync(t, ts, "agent1", token)
 	waitForSend(t, hub)
@@ -888,7 +951,7 @@ func TestExecutor_FederatedUserRevokedEndsTask(t *testing.T) {
 func TestExecutor_FederatedUserRecheckUnavailableStopsReply(t *testing.T) {
 	token := fedUserToken(t)
 	hub := newFedUserHub(t, token)
-	b, _, ts := newFedUserTestServer(t, hub)
+	b, _, ts := newFedUserTestServer(t, hub, fedUserPushOnly)
 
 	done := sendAsync(t, ts, "agent1", token)
 	waitForSend(t, hub)
@@ -1138,7 +1201,7 @@ func TestExecutor_FederatedUserNeverGetsAnotherUsersReply(t *testing.T) {
 	)
 	token := fedUserToken(t)
 	hub := newFedUserHub(t, token)
-	b, _, ts := newFedUserTestServer(t, hub)
+	b, _, ts := newFedUserTestServer(t, hub, fedUserPushOnly)
 
 	// The other user's task on agent1 started first.
 	aKey := agentKey(fedUserProjectID, "agent1")
@@ -1213,7 +1276,7 @@ func TestExecutor_FederatedUserNeverGetsAnotherVisitorsReply(t *testing.T) {
 	)
 	token := fedUserToken(t)
 	hub := newFedUserHub(t, token)
-	b, _, ts := newFedUserTestServer(t, hub)
+	b, _, ts := newFedUserTestServer(t, hub, fedUserPushOnly)
 
 	aKey := agentKey(fedUserProjectID, "agent1")
 	b.registerActiveTaskFor("agent-task", aKey, &CallerIdentity{TokenType: "federation", AgentID: "peer-agent", IssuerURL: fedUserIssuer})
@@ -1542,43 +1605,58 @@ func TestIsAgentCallerOwnerKey(t *testing.T) {
 
 // TestExecutor_IdentityIssuerUserWithoutVisitorAccountRefused: a user
 // access credential from an identity issuer whose user has no project
-// visitor account on the hub is refused by the hub (403 on GET
-// /api/v1/auth/me, GoogleCloudPlatform/scion#3577). The bridge answers the
-// JSON-RPC send with the uniform refusal before any task starts: nothing
-// is sent, no topic is subscribed and no access re-check is made.
+// visitor account on the hub is refused, with reply polling on. The hub
+// either refuses it (403 on GET /api/v1/auth/me,
+// GoogleCloudPlatform/scion#3577) or answers 200 with an ID that names no
+// visitor account. Either way the bridge answers the JSON-RPC send with the
+// uniform refusal before any task starts: nothing is sent, no topic is
+// subscribed, and no access re-check or reply read is made.
 func TestExecutor_IdentityIssuerUserWithoutVisitorAccountRefused(t *testing.T) {
 	const (
 		issuer  = "https://accounts.example.com"
 		subject = "idp-user-1"
 	)
-	token := buildTestJWT(t, map[string]interface{}{
-		"iss":   issuer,
-		"sub":   subject,
-		"aud":   "https://hub-b.example.com",
-		"email": "person@example.com",
-	})
-	hub := newFedUserHub(t, token)
-	hub.set(func(h *fedUserHub) { h.meStatus = http.StatusForbidden })
-	_, broker, ts := newFedUserTestServer(t, hub)
+	for _, tc := range []struct {
+		name string
+		hub  func(h *fedUserHub)
+	}{
+		{"hub refuses the credential", func(h *fedUserHub) { h.meStatus = http.StatusForbidden }},
+		{"hub answer names no visitor account", func(h *fedUserHub) { h.meID = issuer + ":" + subject }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			token := buildTestJWT(t, map[string]interface{}{
+				"iss":   issuer,
+				"sub":   subject,
+				"aud":   "https://hub-b.example.com",
+				"email": "person@example.com",
+			})
+			hub := newFedUserHub(t, token)
+			hub.set(tc.hub)
+			b, broker, ts := newFedUserTestServer(t, hub)
+			if !b.config.ReplyPoll.IsEnabled() {
+				t.Fatal("reply polling is off; this test needs the default (on)")
+			}
 
-	status, body := awaitResult(t, sendAsync(t, ts, "agent1", token))
-	if status != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403; body %s", status, body)
-	}
-	if got := strings.TrimSpace(body); got != federatedUserRefusalText {
-		t.Errorf("body = %q, want the uniform refusal %q", got, federatedUserRefusalText)
-	}
-	snap := hub.snapshot()
-	if snap.meCalls != 1 || snap.meFedTokens[0] != token {
-		t.Errorf("auth/me calls = %d with credentials %v, want 1 with the caller's credential", snap.meCalls, snap.meFedTokens)
-	}
-	if len(snap.sent) != 0 || snap.createCalls != 0 || len(snap.listQueries) != 0 || len(snap.dmReadKeys) != 0 {
-		t.Errorf("hub calls after the refusal: sends %d, creates %d, agent lists %d, access re-checks %d; want none",
-			len(snap.sent), snap.createCalls, len(snap.listQueries), len(snap.dmReadKeys))
-	}
-	if brokerSubscribed(broker, projectkeys.UserTopic(fedUserProjectID, "admin@test")) ||
-		brokerSubscribed(broker, projectkeys.AllUserTopic(fedUserProjectID)) {
-		t.Error("subscribed to a user topic for a refused caller")
+			status, body := awaitResult(t, sendAsync(t, ts, "agent1", token))
+			if status != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403; body %s", status, body)
+			}
+			if got := strings.TrimSpace(body); got != federatedUserRefusalText {
+				t.Errorf("body = %q, want the uniform refusal %q", got, federatedUserRefusalText)
+			}
+			snap := hub.snapshot()
+			if snap.meCalls != 1 || snap.meFedTokens[0] != token {
+				t.Errorf("auth/me calls = %d with credentials %v, want 1 with the caller's credential", snap.meCalls, snap.meFedTokens)
+			}
+			if len(snap.sent) != 0 || snap.createCalls != 0 || len(snap.listQueries) != 0 || len(snap.dmReadKeys) != 0 {
+				t.Errorf("hub calls after the refusal: sends %d, creates %d, agent lists %d, access re-checks %d; want none",
+					len(snap.sent), snap.createCalls, len(snap.listQueries), len(snap.dmReadKeys))
+			}
+			if brokerSubscribed(broker, projectkeys.UserTopic(fedUserProjectID, "admin@test")) ||
+				brokerSubscribed(broker, projectkeys.AllUserTopic(fedUserProjectID)) {
+				t.Error("subscribed to a user topic for a refused caller")
+			}
+		})
 	}
 }
 
