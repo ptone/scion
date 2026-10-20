@@ -96,6 +96,9 @@ type separateRelayOptions struct {
 	// agentWithoutRenewal makes the agent's Hello advertise no protocol
 	// features, as a sciontool without stream renewal does.
 	agentWithoutRenewal bool
+	// noConduitAgent starts no conduit agent: the agent has no conduit
+	// session.
+	noConduitAgent bool
 }
 
 // newSeparateRelayWorldWith is newSeparateRelayWorld with opts.
@@ -197,7 +200,9 @@ func newSeparateRelayWorldWith(t *testing.T, opts separateRelayOptions, mods ...
 	for _, m := range mods {
 		m(w)
 	}
-	w.startAgentDialingRelay(t, addr)
+	if !opts.noConduitAgent {
+		w.startAgentDialingRelay(t, addr)
+	}
 
 	w.publicB = httptest.NewServer(w.hubB.Handler())
 	t.Cleanup(w.publicB.Close)
