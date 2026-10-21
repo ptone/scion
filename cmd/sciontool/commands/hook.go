@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"runtime/debug"
+	"strconv"
 	"time"
 	"unicode/utf8"
 
@@ -129,13 +130,16 @@ const maxHookPanicValueLen = 200
 // Copilot adds the hook's stdout to the model context on postToolUseFailure.
 // A crash must instead be a non-blocking error (exit 1) in every dialect.
 //
-// The panic is reported on stderr as one line: its type and its value
+// The panic is reported on stderr as one line: its type and its value,
 // truncated to at most maxHookPanicValueLen bytes (on a UTF-8 rune
-// boundary). The hook runs with quiet logging (log output goes to the log
+// boundary) and then quoted, so newlines, terminal escape sequences and
+// other control bytes in the value are escaped. The hook runs with quiet logging (log output goes to the log
 // file only), so that line is written directly. The sciontool log file also
 // gets the goroutine stack, which holds function names, addresses and raw
 // argument words, but no payload text. Nothing is written to stdout after
-// the panic, so no partial response can reach the harness.
+// the panic, so no partial response can reach the harness. A panic after
+// the response was written (in runHookTelemetry) leaves that complete
+// response on stdout and still exits 1.
 //
 // Not covered, and still exiting 2: panics in other goroutines (for example
 // the stdin decoder in readOptionalStdin) and fatal runtime errors such as
@@ -150,16 +154,28 @@ func recoverHookPanic(errp *error) {
 	if r == nil {
 		return
 	}
-	value := truncateHookPanicValue(fmt.Sprint(r))
+	value := formatHookPanicValue(fmt.Sprint(r))
 	msg := fmt.Sprintf("sciontool hook: recovered panic (%T): %s", r, value)
 	_, _ = fmt.Fprintf(hookStderr, "[sciontool] %s\n", msg)
 	log.Error("%s\n%s", msg, debug.Stack())
 	*errp = fmt.Errorf("recovered panic (%T)", r)
 }
 
+// formatHookPanicValue prepares a panic value for the one-line stderr
+// report: it truncates value with truncateHookPanicValue, then quotes it
+// (strconv.Quote), so control bytes cannot break the line or reach the
+// terminal, and marks a cut value with "...(truncated)" after the quotes.
+func formatHookPanicValue(value string) string {
+	cut := truncateHookPanicValue(value)
+	quoted := strconv.Quote(cut)
+	if len(cut) < len(value) {
+		quoted += "...(truncated)"
+	}
+	return quoted
+}
+
 // truncateHookPanicValue cuts value to at most maxHookPanicValueLen bytes,
-// backing up to a rune boundary so no partial UTF-8 sequence is emitted, and
-// marks a cut value with "...(truncated)".
+// backing up to a rune boundary so no partial UTF-8 sequence is kept.
 func truncateHookPanicValue(value string) string {
 	if len(value) <= maxHookPanicValueLen {
 		return value
@@ -168,7 +184,7 @@ func truncateHookPanicValue(value string) string {
 	for cut > 0 && !utf8.RuneStart(value[cut]) {
 		cut--
 	}
-	return value[:cut] + "...(truncated)"
+	return value[:cut]
 }
 
 func init() {
@@ -457,6 +473,8 @@ var hookOTelErrorHandler = otel.ErrorHandlerFunc(func(err error) {
 // and is best effort: exports are bounded by telemetry.HookExportTimeout and
 // telemetry.HookShutdownTimeout, are not retried, and a failure is logged at
 // debug level only. It never writes to stdout and never fails the hook.
+// The exception is a panic here: recoverHookPanic catches it, the complete
+// response already written stays on stdout, and the hook exits 1.
 // When the Hub client is configured it also persists session counts and, on
 // session-end, reports the session summary to the Hub (bounded by
 // sessionMetricsReportTimeout and by hubBudget, the hook's shared Hub

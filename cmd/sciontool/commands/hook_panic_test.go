@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -59,7 +60,7 @@ func captureHookOutput(t *testing.T) (stdout, stderr *bytes.Buffer) {
 // with the value truncated to maxHookPanicValueLen.
 func assertPanicReport(t *testing.T, stderr string) {
 	t.Helper()
-	assert.Contains(t, stderr, "sciontool hook: recovered panic (string): boom:")
+	assert.Contains(t, stderr, `sciontool hook: recovered panic (string): "boom:`)
 	assert.Contains(t, stderr, "...(truncated)")
 	assert.NotContains(t, stderr, strings.Repeat("x", maxHookPanicValueLen),
 		"the panic value must be truncated on stderr")
@@ -118,7 +119,7 @@ func TestRecoverHookPanic_NonStringValue(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "recovered panic (*errors.errorString)")
-	assert.Contains(t, stderr.String(), "recovered panic (*errors.errorString): handler failed")
+	assert.Contains(t, stderr.String(), `recovered panic (*errors.errorString): "handler failed"`)
 }
 
 func TestRecoverHookPanic_NoPanicKeepsError(t *testing.T) {
@@ -154,7 +155,9 @@ func TestRecoverHookPanic_LongErrorAndStringerAreTruncated(t *testing.T) {
 			_, reported, ok := strings.Cut(line, "): ")
 			require.True(t, ok, "stderr line: %q", line)
 			assert.True(t, strings.HasSuffix(reported, "...(truncated)"), "reported: %q", reported)
-			assert.Len(t, strings.TrimSuffix(reported, "...(truncated)"), maxHookPanicValueLen)
+			unquoted, uqErr := strconv.Unquote(strings.TrimSuffix(reported, "...(truncated)"))
+			require.NoError(t, uqErr, "reported: %q", reported)
+			assert.Len(t, unquoted, maxHookPanicValueLen)
 		})
 	}
 }
@@ -167,17 +170,48 @@ func TestTruncateHookPanicValue(t *testing.T) {
 	// dropped whole rather than split.
 	straddle := strings.Repeat("a", maxHookPanicValueLen-1) + "é" + "tail"
 	got := truncateHookPanicValue(straddle)
-	assert.Equal(t, strings.Repeat("a", maxHookPanicValueLen-1)+"...(truncated)", got)
+	assert.Equal(t, strings.Repeat("a", maxHookPanicValueLen-1), got)
 	assert.True(t, utf8.ValidString(got))
 
 	// A 3-byte rune ending exactly at the limit is kept.
 	exact := strings.Repeat("a", maxHookPanicValueLen-3) + "€" + "tail"
-	assert.Equal(t, strings.Repeat("a", maxHookPanicValueLen-3)+"€...(truncated)", truncateHookPanicValue(exact))
+	assert.Equal(t, strings.Repeat("a", maxHookPanicValueLen-3)+"€", truncateHookPanicValue(exact))
 
 	// All multibyte: the result stays valid UTF-8 and within the limit.
 	got = truncateHookPanicValue(strings.Repeat("€", 100))
 	assert.True(t, utf8.ValidString(got))
-	assert.LessOrEqual(t, len(strings.TrimSuffix(got, "...(truncated)")), maxHookPanicValueLen)
+	assert.LessOrEqual(t, len(got), maxHookPanicValueLen)
+}
+
+func TestFormatHookPanicValue(t *testing.T) {
+	assert.Equal(t, `"short"`, formatHookPanicValue("short"))
+	long := strings.Repeat("a", maxHookPanicValueLen+10)
+	assert.Equal(t, strconv.Quote(long[:maxHookPanicValueLen])+"...(truncated)", formatHookPanicValue(long))
+	// Truncation happens before quoting: the newline at the last kept byte
+	// becomes a whole \n escape, never half of one.
+	esc := strings.Repeat("a", maxHookPanicValueLen-1) + "\n" + "tail"
+	assert.Equal(t, `"`+strings.Repeat("a", maxHookPanicValueLen-1)+`\n"...(truncated)`, formatHookPanicValue(esc))
+}
+
+// A panic value with a newline, a carriage return and an ESC (terminal
+// escape) byte still gives exactly one stderr line, with no raw control
+// bytes in it.
+func TestRecoverHookPanic_ControlBytesAreEscaped(t *testing.T) {
+	setTestLogPath(t, filepath.Join(t.TempDir(), "agent.log"))
+	_, stderr := captureHookOutput(t)
+	err := func() (err error) {
+		defer recoverHookPanic(&err)
+		panic("line1\nline2\r\x1b[31mred\x1b[0m\x00end")
+	}()
+	require.Error(t, err)
+
+	out := stderr.String()
+	assert.Equal(t, 1, strings.Count(out, "\n"), "stderr: %q", out)
+	assert.True(t, strings.HasSuffix(out, "\n"))
+	for _, b := range []byte(strings.TrimSuffix(out, "\n")) {
+		assert.False(t, b < 0x20 || b == 0x7f, "raw control byte %#x in stderr: %q", b, out)
+	}
+	assert.Contains(t, out, `"line1\nline2\r\x1b[31mred\x1b[0m\x00end"`)
 }
 
 func TestExitOnHookError(t *testing.T) {
