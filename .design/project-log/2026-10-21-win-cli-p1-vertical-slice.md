@@ -19,7 +19,7 @@ This is the vertical slice of the native Windows CLI design: one primitive, one 
 - `internal/testutil/wintest`: `MustSymlink` and `MustJunction` fail and never skip. Also ACL, owner and token test helpers.
 - `.github/workflows/windows.yml` and `.github/windows-test-packages.txt`:
   - a capability step that fails the job if anything is missing: symlink privilege and creation, junctions, elevation, 8.3 names, and a FAT32 VHD;
-  - a pkg/hub allowlist guard;
+  - a guard that rejects pkg/hub in the Windows test package list;
   - build+vet;
   - `go test -json` with zero skips allowed.
 
