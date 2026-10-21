@@ -183,6 +183,13 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	// config load (pkg/config gitTracked), which runs with these names
 	// filtered out of its env.
 	scrubServerSecretEnv()
+	// The server keyring (server.keyring_file) is read once, here, in the
+	// server process before any child starts, and validated before any
+	// listener opens (ptone/scion#1530 §2). The relay role returned above
+	// and never reads it.
+	if err := loadServerKeyring(cfg); err != nil {
+		return err
+	}
 	// Apply server.log_level (settings or SCION_SERVER_LOGLEVEL) at setting
 	// precedence. The level filter and the cloud, request and message
 	// handlers built by initServerLogging follow the shared level state, so
@@ -1484,6 +1491,9 @@ func loadAndReconcileConfig(cmd *cobra.Command) (*config.GlobalConfig, error) {
 	if cmd.Flags().Changed("storage-dir") {
 		cfg.Storage.LocalPath = storageDir
 	}
+	if cmd.Flags().Changed("keyring-file") {
+		cfg.KeyringFile = serverKeyringFile
+	}
 	applyConduitFlagOverrides(cmd, cfg)
 
 	applyServerListenHosts(cfg, hostedMode, cmd.Flags().Changed("host"), hubHost, enableHub)
@@ -2478,8 +2488,13 @@ func resolveHubNameFromEnv() string {
 // at startup, then to the SCION_SERVER_SESSION_SECRET env var (then the
 // deprecated SESSION_SECRET). The same value backs both the web session cookie
 // store and the hub JWT signing keys so that all replicas behind the load
-// balancer agree.
+// balancer agree. With a keyring file it is the keyring's "legacy" signing
+// entry, which every purpose but the web session cookies still uses
+// (ptone/scion#1530 Phase 1); the legacy inputs are then refused at startup.
 func resolveSessionSecret() string {
+	if legacy, ok := keyringLegacySecret(); ok {
+		return legacy
+	}
 	secret := webSessionSecret
 	if secret == "" {
 		secret = capturedSessionSecret
@@ -2499,6 +2514,9 @@ func resolveSessionSecret() string {
 // reads: no deprecation or hosted-mode warning (resolveSessionSecret adds
 // the hosted-mode one).
 func sessionSecretValue() string {
+	if legacy, ok := keyringLegacySecret(); ok {
+		return legacy
+	}
 	if webSessionSecret != "" {
 		return webSessionSecret
 	}
@@ -2776,6 +2794,8 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		// The web session cookie key comes from the same secret
 		// (initWebServer); its source label feeds the test admin gate (G7).
 		WebSessionKeySource: webSessionKeySource(resolveSessionSecret()),
+		// The server keyring file, or nil (legacy single-secret mode).
+		Keyring: serverKeyringFromFile(),
 		// When SCION_REQUIRE_STABLE_SIGNING_KEY is truthy, the hub refuses to
 		// start rather than silently mint a new signing key it cannot resolve
 		// (which would invalidate every live token after, e.g., a redeploy onto a
@@ -3255,6 +3275,11 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	// Test admin tier G8, second half: no federation in the stored
 	// operational settings either.
 	if err := hubSrv.VerifyTestAdminFederationOff(); err != nil {
+		return nil, err
+	}
+	// A keyring file needs the server.secret_rotation experiment, read
+	// from the operational settings just loaded; nothing listens yet.
+	if err := verifyKeyringExperiment(hubSrv); err != nil {
 		return nil, err
 	}
 
@@ -3739,6 +3764,7 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		Host:                 webHost,
 		AssetsDir:            webAssetsDir,
 		SessionSecret:        sessionSecret,
+		SigningRing:          serverSigningRingFromFile(),
 		BaseURL:              baseURL,
 		DevAuthToken:         devAuthToken,
 		AuthMode:             cfg.Auth.Mode,

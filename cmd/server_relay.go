@@ -104,6 +104,11 @@ func validateRelayRoleFlags(flags *pflag.FlagSet) error {
 			return fmt.Errorf("--role relay runs only the conduit relay; remove --%s", name)
 		}
 	}
+	// The relay never loads the server keyring (ptone/scion#1530 §2); its
+	// peer secret contract is separate.
+	if f := flags.Lookup("keyring-file"); f != nil && f.Changed {
+		return errors.New("--role relay never reads a server keyring; remove --keyring-file")
+	}
 	return nil
 }
 

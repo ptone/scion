@@ -172,7 +172,7 @@ func dropEmptySecretSettings(rawBody []byte) []byte {
 	}
 	isWanted := func(path []string) bool {
 		for _, want := range wants {
-			if isWanted(path) {
+			if slices.Equal(path, want) {
 				return true
 			}
 		}
@@ -185,7 +185,7 @@ func dropEmptySecretSettings(rawBody []byte) []byte {
 			for _, seg := range strings.Split(name, ".") {
 				path = append(path, foldJSONMemberName(seg))
 			}
-			if slices.Equal(path, want) {
+			if isWanted(path) {
 				if s, isString := child.(string); child == nil || (isString && s == "") {
 					delete(obj, name)
 					dropped = true
