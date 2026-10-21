@@ -60,4 +60,13 @@ The relay refuses to start while `hub.conduit` is off. If the setting cannot be 
 
 At startup the relay logs the configuration files it loaded and its database driver, never the connection string.
 
+### Cloud Run singleton relay (not HA)
+
+Cloud Run instances cannot be addressed one by one, so a relay on Cloud Run runs as a single instance. It is a distinct availability profile, not HA: a restart drops every session, and clients reconnect but their streams do not resume.
+
+- Set `server.relay.singleton: true` and run the service with `max_instances=1`, `min_instances=1` and `cpu_idle=false`. On Cloud Run (`K_SERVICE` set) the relay refuses to start without the setting. Elsewhere the setting is allowed and labels the relay non-HA.
+- The relay lists the feature `singleton` in its `relay_instances` row and logs that it serves as a non-HA singleton.
+- At startup it listens first, then retries its self-check for up to 60 seconds, because during a rollout the service URL still reaches the old instance. It registers once it answers itself; if the minute runs out, startup fails.
+- It never refuses to register because another row has the same internal endpoint. On every heartbeat (15s) it counts the other live, non-draining relays sharing that endpoint and reports the count in the gauge `scion.relay.singleton_endpoint_peers`, with a warning when it goes from 0 to more. A crash-restart overlap clears within about 75 seconds. A count that stays above 0 means two instances are running: alert on it. Hub calls that reach the other instance get `409 relay_target_mismatch` and re-resolve, so an overlap costs availability, never misrouting.
+
 See [Relay Settings](/scion/reference/server-config/#relay-settings-serverrelay) for every setting.

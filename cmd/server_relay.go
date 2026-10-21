@@ -82,9 +82,22 @@ func validateRelayRoleConfig(cfg *config.GlobalConfig) error {
 		return errors.New("server.relay.public_url is required on --role relay")
 	case cfg.Hub.Conduit.InternalListen == "":
 		return errors.New("server.hub.conduit.internal_listen is required on --role relay")
+	case relayOnCloudRun() && !cfg.Relay.Singleton:
+		return errRelaySingletonRequired
 	}
 	return nil
 }
+
+// errRelaySingletonRequired refuses a relay on Cloud Run without the
+// singleton assertion (design §3.9 "Cloud Run singleton"): Cloud Run
+// instances are not individually addressable, so only a single instance
+// may run, which the relay cannot verify itself.
+var errRelaySingletonRequired = errors.New("on Cloud Run (K_SERVICE is set) a relay runs only as a non-HA singleton: set server.relay.singleton: true " +
+	"and run the service with max_instances=1, min_instances=1 and cpu_idle=false")
+
+// relayOnCloudRun reports whether the relay runs on Cloud Run or Knative
+// serving (K_SERVICE is set). No metadata-server call is made.
+var relayOnCloudRun = func() bool { return os.Getenv("K_SERVICE") != "" }
 
 // logRelayStartup names the configuration files the relay loaded and its
 // database driver. The relay reads only its own configuration; the
@@ -167,6 +180,7 @@ func relayServerConfig(ctx context.Context, cfg *config.GlobalConfig, db *relayd
 		ReconnectWindow:  conduitReconnectWindowSetting(cfg),
 		LifetimeCap:      conduitLifetimeCapSetting(cfg),
 		RequireSelfCheck: hostedMode && isHADeployment(cfg),
+		Singleton:        cfg.Relay.Singleton,
 	}, nil
 }
 
