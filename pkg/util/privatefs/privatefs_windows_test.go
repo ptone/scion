@@ -774,6 +774,11 @@ func TestRenameOpen_SwappedTempNeverLands(t *testing.T) {
 	if err := tr.RenameOpen(f, "target"); err != nil {
 		t.Fatalf("RenameOpen: %v", err)
 	}
+	// Close our handle (it holds DELETE access, which os.ReadFile's open
+	// does not share) before reading the result.
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if b, err := os.ReadFile(filepath.Join(dir, "target")); err != nil || string(b) != "mine" {
 		t.Fatalf("target = %q, %v; want the file written through the handle", b, err)
 	}

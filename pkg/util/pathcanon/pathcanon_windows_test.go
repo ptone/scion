@@ -251,7 +251,16 @@ func TestResolve_OutputPrefixConsistent(t *testing.T) {
 // below its target, outside the root.
 func TestWithin_DanglingSymlinkRefused(t *testing.T) {
 	root, _, outside := fixture(t)
-	wintest.MustSymlink(t, filepath.Join(outside, "missing"), filepath.Join(root, "s"))
+	// os.Symlink makes a directory symlink only if the target is a
+	// directory when the link is created: create it, link, then remove it.
+	target := filepath.Join(outside, "missing")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	wintest.MustSymlink(t, target, filepath.Join(root, "s"))
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
 	for _, p := range []string{filepath.Join(root, "s"), filepath.Join(root, "s", "x"), filepath.Join(root, "s", "x", "y")} {
 		if in, err := Within(root, p); !errors.Is(err, ErrDanglingLink) || in {
 			t.Fatalf("Within(root, %q) = %v, %v; want ErrDanglingLink", p, in, err)
@@ -263,8 +272,9 @@ func TestWithin_DanglingSymlinkRefused(t *testing.T) {
 	// Control: the same name as a real, missing directory is a tail inside
 	// the root.
 	mustWithin(t, root, filepath.Join(root, "s2", "x"), true)
-	// Once its target exists, the same entry resolves, to outside the root.
-	if err := os.Mkdir(filepath.Join(outside, "missing"), 0o700); err != nil {
+	// Once its target exists again, the same entry resolves, to outside
+	// the root.
+	if err := os.Mkdir(target, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	mustWithin(t, root, filepath.Join(root, "s", "x"), false)
