@@ -18,6 +18,8 @@ package relay_test
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -254,5 +256,26 @@ func TestSingleton_SelfCheckFailsStartupAfterTheBound(t *testing.T) {
 		if ri.InstanceID == "relay-s" {
 			t.Fatal("the singleton registered after its self-check failed")
 		}
+	}
+}
+
+// TestStart_FeaturesColumnMissingNamesTheFix: when registration fails
+// because relay_instances.features does not exist (the hubs have not
+// migrated the schema), Start fails with an error that names the fix.
+func TestStart_FeaturesColumnMissingNamesTheFix(t *testing.T) {
+	w := relaytest.NewWorld(t)
+	w.SetFault(func(op string) error {
+		if op == registry.OpRegisterRelay {
+			return fmt.Errorf("store: %w", registry.ErrRelayFeaturesColumnMissing)
+		}
+		return nil
+	})
+	n, err := w.NewNode("relay-a", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = n.Relay.Start(context.Background())
+	if !errors.Is(err, registry.ErrRelayFeaturesColumnMissing) || !strings.Contains(err.Error(), "upgrade the hubs") {
+		t.Fatalf("Start = %v, want a startup error naming the hub upgrade", err)
 	}
 }

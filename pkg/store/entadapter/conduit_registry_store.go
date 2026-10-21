@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"entgo.io/ent/dialect"
@@ -156,6 +157,9 @@ RETURNING generation`, s.ph(1), s.ph(2), s.ph(3), s.ph(4), s.ph(5), s.ph(6), s.p
 		r.InstanceID, seed, r.InternalEndpoint, nullIfEmpty(r.PublicEndpoint),
 		r.StartedAt.UTC(), r.LastSeen.UTC(), false, features,
 	).Scan(&gen); err != nil {
+		if missingRelayFeaturesColumn(err) {
+			return 0, fmt.Errorf("conduit registry store: register relay %q: %w (%v)", r.InstanceID, registry.ErrRelayFeaturesColumnMissing, err)
+		}
 		return 0, fmt.Errorf("conduit registry store: register relay %q: %w", r.InstanceID, err)
 	}
 	if err := t.commit(); err != nil {
@@ -501,6 +505,20 @@ func (s *ConduitRegistryStore) ListRelays(ctx context.Context) ([]registry.Relay
 		out = append(out, rel)
 	}
 	return out, nil
+}
+
+// missingRelayFeaturesColumn reports whether err is the database refusing
+// the features column because it does not exist: PostgreSQL's undefined
+// column (SQLSTATE 42703: column "features" of relation "relay_instances"
+// does not exist) or SQLite's "table relay_instances has no column named
+// features".
+func missingRelayFeaturesColumn(err error) bool {
+	msg := err.Error()
+	if !strings.Contains(msg, "features") {
+		return false
+	}
+	return strings.Contains(msg, "42703") || strings.Contains(msg, "does not exist") ||
+		strings.Contains(msg, "no column named") || strings.Contains(msg, "no such column")
 }
 
 // encodeRelayFeatures is relay_instances.features for features: a JSON

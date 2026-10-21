@@ -62,6 +62,11 @@ var (
 	ErrSessionNotFound = errors.New("conduit registry: session not found")
 	// ErrInvalidInput wraps validation failures.
 	ErrInvalidInput = errors.New("conduit registry: invalid input")
+	// ErrRelayFeaturesColumnMissing is returned by RegisterRelay when the
+	// database has no relay_instances.features column: the hubs, which
+	// migrate the schema, have not been upgraded yet (relays never
+	// migrate; design v2.21.54).
+	ErrRelayFeaturesColumnMissing = errors.New("relay_instances.features missing: upgrade the hubs first")
 	// ErrNotRoutable is returned by Eligible for principal kinds that are
 	// never resolved by principal (user, relay-peer).
 	ErrNotRoutable = errors.New("conduit registry: principal kind is not routable by principal")
