@@ -478,6 +478,10 @@ func buildServerConfigFileResponse() (*ServerConfigResponse, error) {
 	}
 	// Likewise the proxy driver settings (WS2).
 	hideNeverAPIWritableProxyKeys(resp.Server)
+	// And the server keyring file path (ptone/scion#1530).
+	if resp.Server != nil {
+		resp.Server.KeyringFile = ""
+	}
 
 	// Env overrides — detect SCION_SERVER_* env vars so the admin UI can
 	// show env-pinned fields in file mode too (H1).
@@ -524,7 +528,7 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// Gate-protected keys (server.hub.class always; federation while the
 	// test admin tier is on) are refused before anything is decoded.
 	// An empty relay-peer secret is ignored; any other value is refused.
-	rawBody = dropEmptyPeerSecret(rawBody)
+	rawBody = dropEmptySecretSettings(rawBody)
 	if s.rejectGateProtectedSettingsKeys(w, rawBody) {
 		return
 	}

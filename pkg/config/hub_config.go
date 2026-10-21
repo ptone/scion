@@ -1137,6 +1137,15 @@ type GlobalConfig struct {
 	// Logging settings
 	LogLevel string `json:"logLevel" yaml:"logLevel" koanf:"logLevel"`
 
+	// KeyringFile is the path of the server keyring file
+	// (server.keyring_file; --keyring-file; SCION_SERVER_KEYRING_FILE): a
+	// version-1 JSON keyring (pkg/keyring) read once at startup by the server
+	// process, never by the relay role. Only the path lives in settings; the
+	// file holds key material and is mounted through the operator's secret
+	// delivery. Requires the server.secret_rotation experiment. Never
+	// returned or accepted by the server-config API (ptone/scion#1530).
+	KeyringFile string `json:"keyringFile,omitempty" yaml:"keyringFile,omitempty" koanf:"keyringFile"`
+
 	// Admin mode settings
 	AdminMode          bool   `json:"adminMode" yaml:"adminMode" koanf:"adminMode"`
 	MaintenanceMessage string `json:"maintenanceMessage" yaml:"maintenanceMessage" koanf:"maintenanceMessage"`
@@ -2703,3 +2712,7 @@ func hasServerYAML(dir string) bool {
 	}
 	return false
 }
+
+// KeyringFileKey is the settings key of the server keyring file path
+// (GlobalConfig.KeyringFile). No settings API reads or writes it.
+const KeyringFileKey = "server.keyring_file"

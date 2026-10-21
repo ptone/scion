@@ -131,6 +131,7 @@
     ]
   },
   "layer0_prefixes": [
+    "server.keyring_file",
     "server.database",
     "server.hub.port",
     "server.hub.host",

@@ -1600,6 +1600,9 @@ type V1ServerConfig struct {
 	// LogFormat is accepted so existing settings files still load, but nothing
 	// reads it (ptone/scion#4103). It is not carried into GlobalConfig.
 	LogFormat string `json:"log_format,omitempty" yaml:"log_format,omitempty" koanf:"log_format"`
+	// KeyringFile is the path of the server keyring file
+	// (server.keyring_file, KeyringFileKey). See GlobalConfig.KeyringFile.
+	KeyringFile string `json:"keyring_file,omitempty" yaml:"keyring_file,omitempty" koanf:"keyring_file"`
 
 	// Maintenance holds binary auto-update and deployment tier settings.
 	Maintenance *V1MaintenanceConfig `json:"maintenance,omitempty" yaml:"maintenance,omitempty" koanf:"maintenance"`
@@ -4315,6 +4318,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 	if v1.LogLevel != "" {
 		gc.LogLevel = v1.LogLevel
 	}
+	if v1.KeyringFile != "" {
+		gc.KeyringFile = v1.KeyringFile
+	}
 
 	// Hub server config
 	if v1.Hub != nil {
@@ -4772,8 +4778,9 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 
 	v1 := &V1ServerConfig{
-		Mode:     gc.Mode,
-		LogLevel: gc.LogLevel,
+		Mode:        gc.Mode,
+		LogLevel:    gc.LogLevel,
+		KeyringFile: gc.KeyringFile,
 	}
 
 	// Hub server config

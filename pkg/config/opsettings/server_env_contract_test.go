@@ -308,6 +308,7 @@ var schemaEnvVarDerivationExceptions = map[string]string{
 	"server.broker.state_dir":                        envNameRuntimeBroker,
 	"server.broker.write_timeout":                    envNameRuntimeBroker,
 	"server.hub.public_url":                          "named after the GlobalConfig field hub.endpoint (ptone/scion#3905)",
+	"server.keyring_file":                            "named SCION_SERVER_KEYRING_FILE by its design (ptone/scion#1530)",
 }
 
 const envNameRuntimeBroker = "server.broker is documented under the GlobalConfig section name runtimeBroker " +

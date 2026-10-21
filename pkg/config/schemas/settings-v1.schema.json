@@ -97,6 +97,13 @@
           "description": "Deprecated and ignored: accepted so existing settings files still load, but nothing reads it. The log output format is chosen by the logging setup at startup (SCION_LOG_GCP selects Cloud Logging JSON). There is no environment-variable override.",
           "x-since": "1"
         },
+        "keyring_file": {
+          "type": "string",
+          "description": "Experimental: path of the server keyring file, a version-1 JSON document holding versioned signing and encryption keys. Read once at startup by the hub/web server process (never by --role relay); a keyring file together with --session-secret, SCION_SERVER_SESSION_SECRET or SESSION_SECRET refuses startup. Requires the server.secret_rotation experiment. In this release only web session cookies use the keyring; every other purpose uses its \"legacy\" entry unchanged. Never returned or accepted by the server-config API. Restart to apply.",
+          "x-sensitive": true,
+          "x-env-var": "SCION_SERVER_KEYRING_FILE",
+          "x-since": "1"
+        },
         "scheduler": { "$ref": "#/$defs/serverScheduler" },
         "mode": {
           "type": "string",

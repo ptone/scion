@@ -237,6 +237,10 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	}
 	// Likewise the proxy driver settings (WS2).
 	hideNeverAPIWritableProxyKeys(resp.Server)
+	// And the server keyring file path (ptone/scion#1530).
+	if resp.Server != nil {
+		resp.Server.KeyringFile = ""
+	}
 
 	// Build section metadata from the cache.
 	resp.SectionMeta = s.buildSectionMetadata(ctx, ops)
@@ -1016,7 +1020,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// body that held nothing else is not an empty request: it still
 	// answers as an update that changes nothing.
 	sentBody := rawBody
-	rawBody = dropEmptyPeerSecret(rawBody)
+	rawBody = dropEmptySecretSettings(rawBody)
 	// The read-only image_registry provenance of a GET body sent back is
 	// ignored, so the echo of a changed report is not refused
 	// (ptone/scion#3916).

@@ -32,6 +32,8 @@ import (
 //
 // See design §3.1 "Two tiers" table for the full rationale.
 var layer0Prefixes = []string{
+	// Server keyring file path (ptone/scion#1530): read once at startup.
+	"server.keyring_file",
 	// Database
 	"server.database",
 	// Listeners
