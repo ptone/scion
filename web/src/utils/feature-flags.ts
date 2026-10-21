@@ -165,3 +165,10 @@ export function setFeatureFlag(name: string, enabled: boolean): void {
  * the /agents/{id}/edit route. Default OFF.
  */
 export const AGENT_EDIT_FLAG = 'web.agent_edit';
+
+/**
+ * Agent badges (ptone/scion#5503): the harness vendor mark and model size
+ * chip in the upper-left of agent cards, table rows and graph nodes.
+ * Presentation only. Default OFF.
+ */
+export const AGENT_BADGES_FLAG = 'web.agent_badges';
