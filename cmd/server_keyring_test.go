@@ -1,0 +1,226 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package cmd
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/spf13/pflag"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// Synthetic fixtures only.
+const (
+	cmdKRLegacySecret = "test-only-cmd-legacy-secret"
+	cmdKRGen1Secret   = "test-only-cmd-keyring-generation-1-0123456789"
+)
+
+// writeCmdKeyring writes a pilot-valid keyring file (legacy entry plus an
+// active gen1) and returns its path.
+func writeCmdKeyring(t *testing.T, mutate func(doc map[string]any)) string {
+	t.Helper()
+	doc := map[string]any{
+		"schema":   1,
+		"revision": "cmd-test-rev",
+		"signing": map[string]any{
+			"active": "gen1",
+			"emit":   "legacy",
+			"keys": []any{
+				map[string]any{"id": "legacy", "secret": cmdKRLegacySecret, "sign_until": nil, "verify_until": nil},
+				map[string]any{"id": "gen1", "secret": cmdKRGen1Secret, "sign_until": nil, "verify_until": nil},
+			},
+			"legacy_read_ids": []any{"legacy"},
+		},
+		"encryption": map[string]any{
+			"active": "legacy", "write_format": "v1",
+			"keys":               []any{map[string]any{"id": "legacy", "key_b64": base64.StdEncoding.EncodeToString(keyring.DeriveLegacyEncryptionKey(cmdKRLegacySecret))}},
+			"legacy_v1_read_ids": []any{"legacy"},
+		},
+	}
+	if mutate != nil {
+		mutate(doc)
+	}
+	data, err := json.Marshal(doc)
+	require.NoError(t, err)
+	path := filepath.Join(t.TempDir(), "keyring.json")
+	require.NoError(t, os.WriteFile(path, data, 0o600))
+	return path
+}
+
+// isolateKeyring resets the keyring globals and the server flags it reads.
+func isolateKeyring(t *testing.T) {
+	t.Helper()
+	isolateServerSecretEnv(t)
+	oldHub, oldWeb, oldKR := enableHub, enableWeb, serverKeyring
+	enableHub, enableWeb, serverKeyring = true, true, nil
+	t.Cleanup(func() { enableHub, enableWeb, serverKeyring = oldHub, oldWeb, oldKR })
+}
+
+func assertNoCmdKRSecret(t *testing.T, s string) {
+	t.Helper()
+	for _, secret := range []string{cmdKRLegacySecret, cmdKRGen1Secret} {
+		assert.NotContains(t, s, secret)
+	}
+}
+
+func TestLoadServerKeyring_LegacyModeUnchanged(t *testing.T) {
+	isolateKeyring(t)
+	webSessionSecret = "test-only-flag-secret"
+	logs := captureSecretEnvSlog(t)
+	require.NoError(t, loadServerKeyring(&config.GlobalConfig{}))
+	assert.Nil(t, serverKeyringFromFile())
+	assert.Equal(t, "test-only-flag-secret", resolveSessionSecret(), "flag > env resolution unchanged")
+	assert.Equal(t, "shared_secret", webSessionKeySource(resolveSessionSecret()))
+	assert.Nil(t, serverSigningRingFromFile(), "the web server keeps the legacy adapter")
+	assert.Contains(t, logs.String(), "legacy single-secret mode")
+	assert.Contains(t, logs.String(), "agent JWTs", "the notice names the coupled uses")
+	assert.NotContains(t, logs.String(), "test-only-flag-secret")
+}
+
+func TestLoadServerKeyring_RingMode(t *testing.T) {
+	isolateKeyring(t)
+	logs := captureSecretEnvSlog(t)
+	require.NoError(t, loadServerKeyring(&config.GlobalConfig{KeyringFile: writeCmdKeyring(t, nil)}))
+	k := serverKeyringFromFile()
+	require.NotNil(t, k)
+	assert.Equal(t, "gen1", serverSigningRingFromFile().ActiveID())
+	// Every other purpose keeps the legacy entry.
+	assert.Equal(t, cmdKRLegacySecret, resolveSessionSecret())
+	assert.Equal(t, cmdKRLegacySecret, sessionSecretValue())
+	assert.Equal(t, "keyring", webSessionKeySource(resolveSessionSecret()))
+	assert.Contains(t, logs.String(), "session cookies only")
+	assertNoCmdKRSecret(t, logs.String())
+}
+
+func TestLoadServerKeyring_Refusals(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T) *config.GlobalConfig
+		want  string
+	}{
+		{"flag secret too", func(t *testing.T) *config.GlobalConfig {
+			webSessionSecret = "test-only-flag-secret"
+			return &config.GlobalConfig{KeyringFile: writeCmdKeyring(t, nil)}
+		}, "cannot be combined with a legacy session secret"},
+		{"env secret too", func(t *testing.T) *config.GlobalConfig {
+			t.Setenv(sessionSecretEnv, "test-only-env-secret")
+			scrubServerSecretEnv()
+			return &config.GlobalConfig{KeyringFile: writeCmdKeyring(t, nil)}
+		}, "cannot be combined with a legacy session secret"},
+		{"deprecated env secret too", func(t *testing.T) *config.GlobalConfig {
+			t.Setenv(legacySessionSecretEnv, "test-only-env-secret")
+			scrubServerSecretEnv()
+			return &config.GlobalConfig{KeyringFile: writeCmdKeyring(t, nil)}
+		}, "cannot be combined with a legacy session secret"},
+		{"missing file", func(t *testing.T) *config.GlobalConfig {
+			return &config.GlobalConfig{KeyringFile: filepath.Join(t.TempDir(), "absent.json")}
+		}, config.KeyringFileKey},
+		{"duplicate ids", func(t *testing.T) *config.GlobalConfig {
+			return &config.GlobalConfig{KeyringFile: writeCmdKeyring(t, func(d map[string]any) {
+				keys := d["signing"].(map[string]any)["keys"].([]any)
+				keys[1].(map[string]any)["id"] = "legacy"
+			})}
+		}, `duplicate signing key id "legacy"`},
+		{"unknown field", func(t *testing.T) *config.GlobalConfig {
+			return &config.GlobalConfig{KeyringFile: writeCmdKeyring(t, func(d map[string]any) { d["extra"] = 1 })}
+		}, `unknown field "extra"`},
+		{"pilot: versioned emit", func(t *testing.T) *config.GlobalConfig {
+			return &config.GlobalConfig{KeyringFile: writeCmdKeyring(t, func(d map[string]any) {
+				d["signing"].(map[string]any)["emit"] = "versioned"
+			})}
+		}, "not supported in this release"},
+		{"no hub", func(t *testing.T) *config.GlobalConfig {
+			enableHub = false
+			return &config.GlobalConfig{KeyringFile: writeCmdKeyring(t, nil)}
+		}, "does not run the hub"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateKeyring(t)
+			err := loadServerKeyring(tc.setup(t))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+			assertNoCmdKRSecret(t, err.Error())
+			assert.NotContains(t, err.Error(), "test-only-flag-secret")
+			assert.NotContains(t, err.Error(), "test-only-env-secret")
+			assert.Nil(t, serverKeyringFromFile(), "a refused keyring is never kept (no fallback either)")
+		})
+	}
+}
+
+func TestVerifyKeyringExperiment(t *testing.T) {
+	isolateKeyring(t)
+	// Legacy mode: no gate.
+	require.NoError(t, verifyKeyringExperiment(&hub.Server{}))
+	require.NoError(t, loadServerKeyring(&config.GlobalConfig{KeyringFile: writeCmdKeyring(t, nil)}))
+	// A hub without operational settings resolves the default (off).
+	err := verifyKeyringExperiment(&hub.Server{})
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, errKeyringExperimentOff))
+	assert.Contains(t, err.Error(), "server.secret_rotation")
+}
+
+// TestKeyringFileEnvScrubContract: every spelling of server.keyring_file is
+// scrubbed from the process env before any child starts, refused on every
+// host-to-agent path, and never expanded into agent-facing values.
+func TestKeyringFileEnvScrubContract(t *testing.T) {
+	isolateServerSecretEnv(t)
+	var tableNames []string
+	for _, e := range config.ServerEnvEntries() {
+		if e.Path == config.KeyringFileKey {
+			tableNames = append(append(tableNames, e.Canonical), e.Aliases...)
+		}
+	}
+	require.NotEmpty(t, tableNames)
+	for _, name := range tableNames {
+		assert.Contains(t, serverSecretEnvNames, name, "every env spelling is scrubbed")
+		assert.True(t, util.IsAgentRefusedHostEnvName(name), "agent/plugin propagation refuses %s", name)
+		t.Setenv(name, "/run/secrets/test-keyring.json")
+	}
+	expanded, _, refused := util.ExpandEnvRefusing("x${SCION_SERVER_KEYRING_FILE}y", util.IsAgentRefusedHostEnvName)
+	assert.Equal(t, "xy", expanded)
+	assert.Equal(t, []string{"SCION_SERVER_KEYRING_FILE"}, refused)
+
+	scrubServerSecretEnv()
+	for _, name := range tableNames {
+		_, ok := os.LookupEnv(name)
+		assert.False(t, ok, "%s is still set after the scrub", name)
+	}
+	for _, kv := range util.EnvWithoutAgentRefusedNames([]string{"SCION_SERVER_KEYRING_FILE=/x", "PATH=/bin"}) {
+		assert.False(t, strings.HasPrefix(kv, "SCION_SERVER_KEYRING_FILE="))
+	}
+}
+
+func TestValidateRelayRoleFlags_RefusesKeyringFile(t *testing.T) {
+	f := pflag.NewFlagSet("server start", pflag.ContinueOnError)
+	var path string
+	f.StringVar(&path, "keyring-file", "", "")
+	require.NoError(t, validateRelayRoleFlags(f))
+	require.NoError(t, f.Parse([]string{"--keyring-file=/run/secrets/k.json"}))
+	err := validateRelayRoleFlags(f)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--keyring-file")
+}
