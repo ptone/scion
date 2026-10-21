@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
@@ -130,6 +131,54 @@ func TestRecoverHookPanic_NoPanicKeepsError(t *testing.T) {
 	assert.Empty(t, stderr.String())
 }
 
+// longStringer is a fmt.Stringer with a long String value.
+type longStringer struct{}
+
+func (longStringer) String() string { return "stringer:" + strings.Repeat("s", 500) }
+
+func TestRecoverHookPanic_LongErrorAndStringerAreTruncated(t *testing.T) {
+	setTestLogPath(t, filepath.Join(t.TempDir(), "agent.log"))
+	for name, value := range map[string]interface{}{
+		"error":    errors.New("err:" + strings.Repeat("e", 500)),
+		"stringer": longStringer{},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, stderr := captureHookOutput(t)
+			err := func() (err error) {
+				defer recoverHookPanic(&err)
+				panic(value)
+			}()
+			require.Error(t, err)
+			line := strings.TrimSuffix(strings.TrimPrefix(stderr.String(), "[sciontool] "), "\n")
+			_, reported, ok := strings.Cut(line, "): ")
+			require.True(t, ok, "stderr line: %q", line)
+			assert.True(t, strings.HasSuffix(reported, "...(truncated)"), "reported: %q", reported)
+			assert.Len(t, strings.TrimSuffix(reported, "...(truncated)"), maxHookPanicValueLen)
+		})
+	}
+}
+
+func TestTruncateHookPanicValue(t *testing.T) {
+	short := strings.Repeat("a", maxHookPanicValueLen)
+	assert.Equal(t, short, truncateHookPanicValue(short), "a value at the limit is kept whole")
+
+	// "é" is 2 bytes; placed so it straddles the byte limit, it must be
+	// dropped whole rather than split.
+	straddle := strings.Repeat("a", maxHookPanicValueLen-1) + "é" + "tail"
+	got := truncateHookPanicValue(straddle)
+	assert.Equal(t, strings.Repeat("a", maxHookPanicValueLen-1)+"...(truncated)", got)
+	assert.True(t, utf8.ValidString(got))
+
+	// A 3-byte rune ending exactly at the limit is kept.
+	exact := strings.Repeat("a", maxHookPanicValueLen-3) + "€" + "tail"
+	assert.Equal(t, strings.Repeat("a", maxHookPanicValueLen-3)+"€...(truncated)", truncateHookPanicValue(exact))
+
+	// All multibyte: the result stays valid UTF-8 and within the limit.
+	got = truncateHookPanicValue(strings.Repeat("€", 100))
+	assert.True(t, utf8.ValidString(got))
+	assert.LessOrEqual(t, len(strings.TrimSuffix(got, "...(truncated)")), maxHookPanicValueLen)
+}
+
 func TestExitOnHookError(t *testing.T) {
 	setTestLogPath(t, filepath.Join(t.TempDir(), "agent.log"))
 	var codes []int
@@ -182,6 +231,11 @@ func TestHookCommand_ExitCode(t *testing.T) {
 		t.Helper()
 		cmd := exec.Command(os.Args[0], "-test.run=^TestHookPanicHelperProcess$")
 		cmd.Env = append(os.Environ(), hookPanicHelperEnv+"="+mode, hookPanicHelperHomeEnv+"="+home)
+		// Same scrub as scrubScionEnv: the child must not reach a Hub or
+		// export telemetry. Later entries win in exec's environment.
+		for _, key := range scrubbedScionEnvKeys {
+			cmd.Env = append(cmd.Env, key+"=")
+		}
 		cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","toolCall":{"name":"run_command"}}`)
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -201,6 +255,8 @@ func TestHookCommand_ExitCode(t *testing.T) {
 		assert.Equal(t, 1, code, "stderr: %s", stderr)
 		assert.Empty(t, stdout)
 		assertPanicReport(t, stderr)
+		assert.Equal(t, 1, strings.Count(stderr, "\n"), "stderr gets exactly one line: %q", stderr)
+		assert.NotContains(t, stderr, "goroutine ", "the stack must not reach stderr")
 	})
 	t.Run("normal event exits 0", func(t *testing.T) {
 		code, stdout, stderr := run("ok")

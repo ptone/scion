@@ -19,25 +19,29 @@ import (
 // or telemetry backend when tests run inside an agent container.
 func scrubScionEnv(t *testing.T) {
 	t.Helper()
-	for _, key := range []string{
-		"SCION_HUB_ENDPOINT",
-		"SCION_HUB_URL",
-		"SCION_AUTH_TOKEN",
-		"SCION_AGENT_ID",
-		"SCION_AGENT_MODE",
-		"SCION_TELEMETRY_ENABLED",
-		"SCION_TELEMETRY_CLOUD_ENABLED",
-		"SCION_OTEL_ENDPOINT",
-		"SCION_OTEL_GCP_CREDENTIALS",
-		"SCION_GCP_PROJECT_ID",
-		"OTEL_EXPORTER_OTLP_ENDPOINT",
-		// An agent container of a native-usage harness exports
-		// SCION_USAGE_SOURCE=native, which makes session-end hooks hold
-		// their reports; tests that want it set it themselves.
-		"SCION_USAGE_SOURCE",
-	} {
+	for _, key := range scrubbedScionEnvKeys {
 		t.Setenv(key, "")
 	}
+}
+
+// scrubbedScionEnvKeys is the environment scrubScionEnv clears. Tests that
+// start a child process clear the same keys in its environment.
+var scrubbedScionEnvKeys = []string{
+	"SCION_HUB_ENDPOINT",
+	"SCION_HUB_URL",
+	"SCION_AUTH_TOKEN",
+	"SCION_AGENT_ID",
+	"SCION_AGENT_MODE",
+	"SCION_TELEMETRY_ENABLED",
+	"SCION_TELEMETRY_CLOUD_ENABLED",
+	"SCION_OTEL_ENDPOINT",
+	"SCION_OTEL_GCP_CREDENTIALS",
+	"SCION_GCP_PROJECT_ID",
+	"OTEL_EXPORTER_OTLP_ENDPOINT",
+	// An agent container of a native-usage harness exports
+	// SCION_USAGE_SOURCE=native, which makes session-end hooks hold
+	// their reports; tests that want it set it themselves.
+	"SCION_USAGE_SOURCE",
 }
 
 func TestProcessHookData_Claude(t *testing.T) {

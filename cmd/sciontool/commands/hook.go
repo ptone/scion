@@ -14,6 +14,7 @@ import (
 	"os"
 	"runtime/debug"
 	"time"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -117,8 +118,8 @@ func exitOnHookError(err error) {
 	hookExit(1)
 }
 
-// maxHookPanicValueLen bounds how much of a recovered panic value is logged.
-// The value may echo hook input, so only a short prefix is kept.
+// maxHookPanicValueLen bounds, in bytes, how much of a recovered panic value
+// is logged. The value may echo hook input, so only a short prefix is kept.
 const maxHookPanicValueLen = 200
 
 // recoverHookPanic turns a panic in the hook command into an error in *errp.
@@ -129,7 +130,8 @@ const maxHookPanicValueLen = 200
 // A crash must instead be a non-blocking error (exit 1) in every dialect.
 //
 // The panic is reported on stderr as one line: its type and its value
-// truncated to maxHookPanicValueLen characters. The hook runs with quiet
+// truncated to at most maxHookPanicValueLen bytes (on a UTF-8 rune
+// boundary). The hook runs with quiet
 // logging (log output goes to the log file only), so that line is written
 // directly. The sciontool log file also gets the goroutine stack, which
 // holds function names and addresses, not payload data. Nothing is written
@@ -138,7 +140,9 @@ const maxHookPanicValueLen = 200
 // Not covered, and still exiting 2: panics in other goroutines (for example
 // the stdin decoder in readOptionalStdin) and fatal runtime errors such as
 // concurrent map writes or running out of memory, which recover cannot
-// intercept.
+// intercept. Panics outside the command bodies, in Execute or the root
+// command's PersistentPreRun (log setup, flag handling), are not covered
+// either.
 //
 // It must be called directly by a deferred statement.
 func recoverHookPanic(errp *error) {
@@ -146,14 +150,25 @@ func recoverHookPanic(errp *error) {
 	if r == nil {
 		return
 	}
-	value := fmt.Sprint(r)
-	if len(value) > maxHookPanicValueLen {
-		value = value[:maxHookPanicValueLen] + "...(truncated)"
-	}
+	value := truncateHookPanicValue(fmt.Sprint(r))
 	msg := fmt.Sprintf("sciontool hook: recovered panic (%T): %s", r, value)
 	_, _ = fmt.Fprintf(hookStderr, "[sciontool] %s\n", msg)
 	log.Error("%s\n%s", msg, debug.Stack())
 	*errp = fmt.Errorf("recovered panic (%T)", r)
+}
+
+// truncateHookPanicValue cuts value to at most maxHookPanicValueLen bytes,
+// backing up to a rune boundary so no partial UTF-8 sequence is emitted, and
+// marks a cut value with "...(truncated)".
+func truncateHookPanicValue(value string) string {
+	if len(value) <= maxHookPanicValueLen {
+		return value
+	}
+	cut := maxHookPanicValueLen
+	for cut > 0 && !utf8.RuneStart(value[cut]) {
+		cut--
+	}
+	return value[:cut] + "...(truncated)"
 }
 
 func init() {
