@@ -29,8 +29,11 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubexport"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/relaydb"
 )
 
@@ -317,4 +320,54 @@ func TestRelayShutdownTimeoutPadsPastTheDrainCap(t *testing.T) {
 	assert.Equal(t, relayShutdownPad, relayShutdownTimeout(0, true))
 	assert.Equal(t, 30*time.Second, relayShutdownTimeout(0, false))
 	assert.Equal(t, 30*time.Second, relayShutdownTimeout(60*time.Second, false))
+}
+
+// TestRelayMetrics_OffIsANoOp (design §3.9, v2.21.55): with metrics unset
+// or off in the relay's settings and no export project, the relay builds
+// no exporter and makes no network call: no metadata lookup is offered and
+// the exporter constructor is never called; the flush is a no-op.
+func TestRelayMetrics_OffIsANoOp(t *testing.T) {
+	prev := relayNewMeterProvider
+	t.Cleanup(func() { relayNewMeterProvider = prev })
+	built := false
+	relayNewMeterProvider = func(context.Context, string, ...hubmetrics.Option) (*sdkmetric.MeterProvider, error) {
+		built = true
+		return sdkmetric.NewMeterProvider(), nil
+	}
+	t.Setenv(hubexport.ProjectIDEnv, "")
+	off := false
+	for name, setting := range map[string]*bool{"unset": nil, "off": &off} {
+		t.Run(name, func(t *testing.T) {
+			cfg := relayRoleTestConfig()
+			cfg.Hub.Observability.MetricsEnabled = setting
+			in := relayObservabilityInputs(cfg)
+			assert.Nil(t, in.metadata, "no metadata-server lookup with metrics not on")
+			mp, flush := relayMetrics(context.Background(), cfg, "relay-7", in)
+			assert.Nil(t, mp)
+			assert.False(t, built, "no exporter is built")
+			assert.NoError(t, flush(context.Background()))
+		})
+	}
+}
+
+// TestRelayMetrics_OnBuildsTheRelayProvider: with metrics on and an export
+// project, the relay builds its provider with the hub's helper for that
+// project, and the flush shuts it down.
+func TestRelayMetrics_OnBuildsTheRelayProvider(t *testing.T) {
+	prev := relayNewMeterProvider
+	t.Cleanup(func() { relayNewMeterProvider = prev })
+	var gotProject string
+	relayNewMeterProvider = func(_ context.Context, project string, _ ...hubmetrics.Option) (*sdkmetric.MeterProvider, error) {
+		gotProject = project
+		return sdkmetric.NewMeterProvider(), nil
+	}
+	t.Setenv(hubexport.ProjectIDEnv, "")
+	on := true
+	cfg := relayRoleTestConfig()
+	cfg.Hub.Observability.MetricsEnabled = &on
+	cfg.Hub.GCPProjectID = "relay-metrics-project"
+	mp, flush := relayMetrics(context.Background(), cfg, "relay-7", relayMetricsInputs{getenv: os.Getenv})
+	require.NotNil(t, mp)
+	assert.Equal(t, "relay-metrics-project", gotProject)
+	assert.NoError(t, flush(context.Background()))
 }
