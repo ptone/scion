@@ -91,6 +91,9 @@ func TestWindowsGate_RefusesServerAndBroker(t *testing.T) {
 		{[]string{"whoami"}, "whoami"},
 		{[]string{"expose"}, "expose"},
 		{[]string{"server"}, "server"},
+		// hub admin tools that write the local hub database.
+		{[]string{"hub", "secret", "migrate"}, "hub secret migrate"},
+		{[]string{"hub", "secret", "migrate-names"}, "hub secret migrate-names"},
 		// Arguments and flags the real command would reject still get the
 		// refusal, not a usage error.
 		{[]string{"server", "start", "extra-arg", "--no-such-flag"}, "server start"},

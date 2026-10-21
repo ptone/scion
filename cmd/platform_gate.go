@@ -76,19 +76,22 @@ var windowsAllowed = map[string]bool{
 	"config.cd-project": true,
 	"config.schema":     true,
 
-	"hub":                               true,
-	"hub.auth":                          true,
-	"hub.auth.login":                    true,
-	"hub.auth.logout":                   true,
-	"hub.auth.federation-token":         true,
-	"hub.secret":                        true,
-	"hub.secret.set":                    true,
-	"hub.secret.get":                    true,
-	"hub.secret.list":                   true,
-	"hub.secret.clear":                  true,
-	"hub.secret.update":                 true,
-	"hub.secret.migrate-names":          true,
-	"hub.secret.migrate":                true,
+	"hub":                       true,
+	"hub.auth":                  true,
+	"hub.auth.login":            true,
+	"hub.auth.logout":           true,
+	"hub.auth.federation-token": true,
+	"hub.secret":                true,
+	"hub.secret.set":            true,
+	"hub.secret.get":            true,
+	"hub.secret.list":           true,
+	"hub.secret.clear":          true,
+	"hub.secret.update":         true,
+	// hub.secret.migrate and hub.secret.migrate-names are deliberately
+	// absent: they are hub-server-host admin tools that open the local hub
+	// database read-write (schema migration, WAL) and can write a foreign-key
+	// snapshot next to it (pkg/store/entadapter/timestamp_normalize.go). Those
+	// local files are not findings §4a sites, so §3.1 keeps them gated.
 	"hub.test-identity":                 true,
 	"hub.test-identity.issue":           true,
 	"hub.test-identity.token":           true,

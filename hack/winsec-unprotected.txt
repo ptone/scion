@@ -67,6 +67,5 @@ pkg/runtimebroker/start_context.go not protected on Windows: gated (runtime brok
 pkg/runtimebroker/workspace_handlers.go not protected on Windows: gated (runtime broker)
 pkg/sciontool/substrate/private_tmp_dir.go not protected on Windows: gated (in-container sciontool)
 pkg/sciontool/substrate/server.go not protected on Windows: gated (in-container sciontool)
-pkg/store/entadapter/timestamp_normalize.go not protected on Windows: gated (hub database snapshot)
+pkg/store/entadapter/timestamp_normalize.go not protected on Windows: gated (hub database snapshot; hub server and the gated hub.secret.migrate/migrate-names)
 pkg/util/fs.go not protected on Windows: gated (removal helpers; chmods make entries removable)
-pkg/util/git.go not protected on Windows: gated (RemoveWorktree containment; agent lifecycle runs on a broker)
