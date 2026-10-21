@@ -1,0 +1,10 @@
+# Packages whose tests run on the windows-latest job (.github/workflows/windows.yml).
+# One package per line; '#' starts a comment. No wildcards ("./...").
+# NEVER ./pkg/hub or a ./pkg/hub/... package: the unsharded pkg/hub test
+# compile needs about 12 GiB (the job fails if such a line appears).
+# A package left off for a Windows-environment reason gets a one-line reason
+# here; nothing is skipped.
+./pkg/util/privatefs
+./pkg/util/pathcanon
+./pkg/util/filelock
+./pkg/tunnelclient
