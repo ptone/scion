@@ -56,8 +56,9 @@ func captureHookOutput(t *testing.T) (stdout, stderr *bytes.Buffer) {
 	return stdout, stderr
 }
 
-// assertPanicReport checks the stderr report: one line naming the panic,
-// with the value truncated to maxHookPanicValueLen.
+// assertPanicReport checks the stderr report names the panic type and
+// quotes the value truncated to maxHookPanicValueLen. Callers check the
+// line count themselves.
 func assertPanicReport(t *testing.T, stderr string) {
 	t.Helper()
 	assert.Contains(t, stderr, `sciontool hook: recovered panic (string): "boom:`)
@@ -90,6 +91,10 @@ func TestRunHookCommand_PanicInDispatchIsRecovered(t *testing.T) {
 	require.NoError(t, readErr)
 	assert.Contains(t, string(logData), "recovered panic (string)")
 	assert.Contains(t, string(logData), "goroutine", "the log file gets the stack")
+	// The stack is taken at the panic site: it includes the panicking
+	// closure installed by panicInDispatch.
+	assert.Contains(t, string(logData), "commands.panicInDispatch.func1",
+		"the logged stack must include the frame that panicked")
 }
 
 func TestRunHookCommand_NormalPathHasNoError(t *testing.T) {
@@ -181,6 +186,19 @@ func TestTruncateHookPanicValue(t *testing.T) {
 	got = truncateHookPanicValue(strings.Repeat("€", 100))
 	assert.True(t, utf8.ValidString(got))
 	assert.LessOrEqual(t, len(got), maxHookPanicValueLen)
+
+	// Invalid continuation bytes at the cut: the backup stops after
+	// utf8.UTFMax-1 bytes instead of eating the whole run.
+	prefix := strings.Repeat("a", maxHookPanicValueLen-10)
+	invalid := prefix + strings.Repeat("\x80", 50)
+	got = truncateHookPanicValue(invalid)
+	assert.Len(t, got, maxHookPanicValueLen-(utf8.UTFMax-1))
+	assert.True(t, strings.HasPrefix(got, prefix))
+
+	// Only continuation bytes: still a non-empty, bounded result.
+	got = truncateHookPanicValue(strings.Repeat("\x80", 500))
+	assert.Len(t, got, maxHookPanicValueLen-(utf8.UTFMax-1))
+	assert.Equal(t, strconv.Quote(got)+"...(truncated)", formatHookPanicValue(strings.Repeat("\x80", 500)))
 }
 
 func TestFormatHookPanicValue(t *testing.T) {
@@ -257,10 +275,11 @@ func TestHookPanicHelperProcess(t *testing.T) {
 
 // hookHelperEnv returns this process's environment without the keys
 // scrubScionEnv clears (so the child cannot reach a Hub or export
-// telemetry) and without the log level variables (so no level or
-// deprecation notice is added to the child's stderr).
+// telemetry), without the log level variables (so no level or deprecation
+// notice is added to the child's stderr), and without TMPDIR, which the
+// caller sets for the child.
 func hookHelperEnv() []string {
-	drop := map[string]bool{loglevel.EnvLogLevel: true, loglevel.EnvDebug: true}
+	drop := map[string]bool{loglevel.EnvLogLevel: true, loglevel.EnvDebug: true, "TMPDIR": true}
 	for _, key := range scrubbedScionEnvKeys {
 		drop[key] = true
 	}
@@ -284,7 +303,12 @@ func TestHookCommand_ExitCode(t *testing.T) {
 	run := func(mode string) (int, string, string) {
 		t.Helper()
 		cmd := exec.Command(os.Args[0], "-test.run=^TestHookPanicHelperProcess$")
-		cmd.Env = append(hookHelperEnv(), hookPanicHelperEnv+"="+mode, hookPanicHelperHomeEnv+"="+home)
+		// TMPDIR points the child's TestMain sandbox directories into a
+		// test temp dir: the helper exits before TestMain's cleanup runs.
+		cmd.Env = append(hookHelperEnv(),
+			hookPanicHelperEnv+"="+mode,
+			hookPanicHelperHomeEnv+"="+home,
+			"TMPDIR="+t.TempDir())
 		cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","toolCall":{"name":"run_command"}}`)
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -319,9 +343,11 @@ func TestHookHelperEnv_DropsScrubbedAndLogLevelKeys(t *testing.T) {
 	t.Setenv(loglevel.EnvLogLevel, "debug")
 	t.Setenv("SCION_OTEL_ENDPOINT", "localhost:4317")
 	t.Setenv("SCION_TEST_HOOK_KEEP", "kept")
-	env := strings.Join(hookHelperEnv(), "\n")
+	t.Setenv("TMPDIR", t.TempDir())
+	env := "\n" + strings.Join(hookHelperEnv(), "\n")
 	assert.NotContains(t, env, loglevel.EnvDebug+"=")
 	assert.NotContains(t, env, loglevel.EnvLogLevel+"=")
 	assert.NotContains(t, env, "SCION_OTEL_ENDPOINT=")
+	assert.NotContains(t, env, "\nTMPDIR=")
 	assert.Contains(t, env, "SCION_TEST_HOOK_KEEP=kept")
 }

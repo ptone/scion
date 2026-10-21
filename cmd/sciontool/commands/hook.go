@@ -133,13 +133,14 @@ const maxHookPanicValueLen = 200
 // The panic is reported on stderr as one line: its type and its value,
 // truncated to at most maxHookPanicValueLen bytes (on a UTF-8 rune
 // boundary) and then quoted, so newlines, terminal escape sequences and
-// other control bytes in the value are escaped. The hook runs with quiet logging (log output goes to the log
-// file only), so that line is written directly. The sciontool log file also
-// gets the goroutine stack, which holds function names, addresses and raw
-// argument words, but no payload text. Nothing is written to stdout after
-// the panic, so no partial response can reach the harness. A panic after
-// the response was written (in runHookTelemetry) leaves that complete
-// response on stdout and still exits 1.
+// other control bytes in the value are escaped. The hook runs with quiet
+// logging (log output goes to the log file only), so that line is written
+// directly. The sciontool log file also gets the goroutine stack, which
+// holds function names, addresses and raw argument words, but no payload
+// text. Nothing is written to stdout after the panic, so no partial
+// response can reach the harness. A panic after the response was written
+// (in runHookTelemetry) leaves that complete response on stdout and still
+// exits 1.
 //
 // Not covered, and still exiting 2: panics in other goroutines (for example
 // the stdin decoder in readOptionalStdin) and fatal runtime errors such as
@@ -175,13 +176,17 @@ func formatHookPanicValue(value string) string {
 }
 
 // truncateHookPanicValue cuts value to at most maxHookPanicValueLen bytes,
-// backing up to a rune boundary so no partial UTF-8 sequence is kept.
+// backing up to a rune boundary so no partial UTF-8 sequence is kept. A
+// valid rune has at most utf8.UTFMax-1 continuation bytes, so the backup is
+// capped there: a run of invalid continuation bytes at the cut is cut
+// through (strconv.Quote escapes those bytes) rather than emptying the
+// value.
 func truncateHookPanicValue(value string) string {
 	if len(value) <= maxHookPanicValueLen {
 		return value
 	}
 	cut := maxHookPanicValueLen
-	for cut > 0 && !utf8.RuneStart(value[cut]) {
+	for back := 0; back < utf8.UTFMax-1 && !utf8.RuneStart(value[cut]); back++ {
 		cut--
 	}
 	return value[:cut]
