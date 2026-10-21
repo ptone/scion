@@ -163,7 +163,7 @@ func TestOpenPrivate_RejectsCreateFlags(t *testing.T) {
 	if err := tr.WriteFile("x", []byte("a"), Private); err != nil {
 		t.Fatal(err)
 	}
-	for _, flag := range []int{os.O_RDWR | os.O_CREATE, os.O_WRONLY | os.O_APPEND, os.O_RDWR | os.O_EXCL} {
+	for _, flag := range []int{os.O_RDWR | os.O_CREATE, os.O_WRONLY | os.O_APPEND, os.O_RDWR | os.O_EXCL, os.O_WRONLY | os.O_RDWR} {
 		if f, err := tr.OpenPrivate("x", flag); err == nil {
 			_ = f.Close()
 			t.Errorf("OpenPrivate with flag %#x succeeded", flag)

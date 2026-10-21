@@ -746,3 +746,47 @@ func TestAttrsByHandleInfo_SeesReparsePoints(t *testing.T) {
 		t.Fatalf("attrsByHandleInfo(regular file) = %#x, %v", attrs, err)
 	}
 }
+
+// RenameOpen renames the file the handle is open on, not whatever holds
+// the temporary name at rename time: a file swapped in under that name
+// (by anyone who may delete and create entries in the directory) never
+// lands at the target (review r2 F1).
+func TestRenameOpen_SwappedTempNeverLands(t *testing.T) {
+	dir := t.TempDir()
+	tr := treeAt(t, dir)
+	mustCreate(t, tr, "target", Private, "old")
+	f, name, err := tr.CreateTemp("", ".target.*.tmp", Private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := f.WriteString("mine"); err != nil {
+		t.Fatal(err)
+	}
+	// Swap: move our temporary file away and put an impostor in its place.
+	tmpPath := filepath.Join(dir, name)
+	if err := os.Rename(tmpPath, filepath.Join(dir, "away")); err != nil {
+		t.Fatalf("swap the temporary file away: %v", err)
+	}
+	if err := os.WriteFile(tmpPath, []byte("evil"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.RenameOpen(f, "target"); err != nil {
+		t.Fatalf("RenameOpen: %v", err)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "target")); err != nil || string(b) != "mine" {
+		t.Fatalf("target = %q, %v; want the file written through the handle", b, err)
+	}
+	assertPrivateSD(t, filepath.Join(dir, "target"))
+	if b, err := os.ReadFile(tmpPath); err != nil || string(b) != "evil" {
+		t.Fatalf("the impostor moved: %q, %v", b, err)
+	}
+	// Control: a rename by name moves whatever holds the name now, the
+	// impostor, which shows the swap was real.
+	if err := tr.Rename(name, "byname"); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "byname")); string(b) != "evil" {
+		t.Fatalf("control: rename by name moved %q, want the impostor", b)
+	}
+}

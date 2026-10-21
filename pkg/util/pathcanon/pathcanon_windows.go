@@ -22,6 +22,7 @@ import (
 	"io/fs"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"unicode/utf8"
 	"unsafe"
 
@@ -68,14 +69,18 @@ func Resolve(p string) (string, error) {
 	cur := abs
 	var tail []string
 	for {
-		final, err := finalPath(cur)
+		final, isDir, err := finalPath(cur)
 		if err == nil {
+			if len(tail) > 0 && !isDir {
+				// Nothing can exist below a file: refuse, as unix does.
+				return "", &fs.PathError{Op: "resolve", Path: cur, Err: syscall.ENOTDIR}
+			}
 			for i := len(tail) - 1; i >= 0; i-- {
 				final = strings.TrimRight(final, `\`) + `\` + tail[i]
 			}
 			return final, nil
 		}
-		if !errors.Is(err, fs.ErrNotExist) {
+		if !notFound(err) {
 			return "", err
 		}
 		// The following open found nothing. Probe cur itself without
@@ -83,7 +88,7 @@ func Resolve(p string) (string, error) {
 		// target is missing, which must never become tail.
 		if perr := probeNoFollow(cur); perr == nil {
 			return "", fmt.Errorf("resolve %s: %w", cur, ErrDanglingLink)
-		} else if !errors.Is(perr, fs.ErrNotExist) {
+		} else if !notFound(perr) {
 			return "", perr
 		}
 		parent := filepath.Dir(cur)
@@ -93,6 +98,14 @@ func Resolve(p string) (string, error) {
 		tail = append(tail, filepath.Base(cur))
 		cur = parent
 	}
+}
+
+// notFound reports an open error meaning nothing is at the path. Besides
+// file/path not found, that includes ERROR_DIRECTORY, which some Windows
+// versions return when an intermediate component is a file; the loop then
+// reaches that file and refuses with ENOTDIR.
+func notFound(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, windows.ERROR_DIRECTORY)
 }
 
 // probeNoFollow opens path itself, not following a reparse point at its
@@ -126,17 +139,17 @@ const (
 )
 
 // finalPath opens path, following links, and returns its normalised DOS
-// name (with the \\?\ prefix).
-func finalPath(path string) (string, error) {
+// name (with the \\?\ prefix) and whether it is a directory.
+func finalPath(path string) (string, bool, error) {
 	p, err := windows.UTF16PtrFromString(path)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	h, err := windows.CreateFile(p, 0,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
 		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
 	if err != nil {
-		return "", &fs.PathError{Op: "open", Path: path, Err: err}
+		return "", false, &fs.PathError{Op: "open", Path: path, Err: err}
 	}
 	defer func() { _ = windows.CloseHandle(h) }()
 	buf := make([]uint16, windows.MAX_PATH)
@@ -144,10 +157,14 @@ func finalPath(path string) (string, error) {
 		n, err := windows.GetFinalPathNameByHandle(h, &buf[0], uint32(len(buf)),
 			fileNameNormalized|volumeNameDOS)
 		if err != nil {
-			return "", &fs.PathError{Op: "GetFinalPathNameByHandle", Path: path, Err: err}
+			return "", false, &fs.PathError{Op: "GetFinalPathNameByHandle", Path: path, Err: err}
 		}
 		if int(n) < len(buf) {
-			return windows.UTF16ToString(buf[:n]), nil
+			var bhfi windows.ByHandleFileInformation
+			if err := windows.GetFileInformationByHandle(h, &bhfi); err != nil {
+				return "", false, &fs.PathError{Op: "GetFileInformationByHandle", Path: path, Err: err}
+			}
+			return windows.UTF16ToString(buf[:n]), bhfi.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0, nil
 		}
 		buf = make([]uint16, n+1)
 	}

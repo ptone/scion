@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/internal/testutil/wintest"
@@ -262,6 +263,11 @@ func TestWithin_DanglingSymlinkRefused(t *testing.T) {
 	// Control: the same name as a real, missing directory is a tail inside
 	// the root.
 	mustWithin(t, root, filepath.Join(root, "s2", "x"), true)
+	// Once its target exists, the same entry resolves, to outside the root.
+	if err := os.Mkdir(filepath.Join(outside, "missing"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mustWithin(t, root, filepath.Join(root, "s", "x"), false)
 }
 
 func TestWithin_DanglingJunctionRefused(t *testing.T) {
@@ -280,4 +286,25 @@ func TestWithin_DanglingJunctionRefused(t *testing.T) {
 		}
 	}
 	mustWithin(t, root, filepath.Join(root, "j2", "x"), true)
+	// Once its target exists again, the same junction resolves outside.
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mustWithin(t, root, filepath.Join(root, "j", "x"), false)
+}
+
+// Nothing can exist below a regular file: Resolve refuses with ENOTDIR, as
+// on unix, rather than appending a tail.
+func TestResolve_FileComponentIsNotDir(t *testing.T) {
+	_, inside, _ := fixture(t)
+	file := filepath.Join(inside, "file.txt")
+	for _, p := range []string{filepath.Join(file, "x"), filepath.Join(file, "x", "y")} {
+		if _, err := Resolve(p); !errors.Is(err, syscall.ENOTDIR) {
+			t.Fatalf("Resolve(%q) = %v, want ENOTDIR", p, err)
+		}
+	}
+	// Control: the file itself resolves.
+	if _, err := Resolve(file); err != nil {
+		t.Fatalf("control: Resolve(file) = %v", err)
+	}
 }

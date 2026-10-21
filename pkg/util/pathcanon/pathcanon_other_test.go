@@ -20,6 +20,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/internal/testutil/wintest"
@@ -108,5 +109,28 @@ func TestWithin_DanglingSymlinkRefusedUnix(t *testing.T) {
 	// Control: the same name as a real, missing directory is inside.
 	if in, err := Within(root, filepath.Join(root, "s2", "x")); err != nil || !in {
 		t.Fatalf("control: Within of a missing tail = %v, %v; want true", in, err)
+	}
+	// Once its target exists, the same entry resolves, to outside the root.
+	if err := os.Mkdir(filepath.Join(outside, "missing"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if in, err := Within(root, filepath.Join(root, "s", "x")); err != nil || in {
+		t.Fatalf("Within through the now-valid symlink = %v, %v; want false", in, err)
+	}
+}
+
+func TestResolve_FileComponentIsNotDirUnix(t *testing.T) {
+	root := t.TempDir()
+	file := filepath.Join(root, "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{filepath.Join(file, "x"), filepath.Join(file, "x", "y")} {
+		if _, err := Resolve(p); !errors.Is(err, syscall.ENOTDIR) {
+			t.Fatalf("Resolve(%q) = %v, want ENOTDIR", p, err)
+		}
+	}
+	if _, err := Resolve(file); err != nil {
+		t.Fatalf("control: Resolve(file) = %v", err)
 	}
 }

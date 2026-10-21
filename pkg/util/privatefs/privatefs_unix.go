@@ -146,7 +146,7 @@ func (t *Tree) OpenPrivate(rel string, flag int) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	if flag&^(os.O_RDONLY|os.O_WRONLY|os.O_RDWR|os.O_TRUNC) != 0 {
+	if flag&^(os.O_RDONLY|os.O_WRONLY|os.O_RDWR|os.O_TRUNC) != 0 || flag&(os.O_WRONLY|os.O_RDWR) == os.O_WRONLY|os.O_RDWR {
 		return nil, &fs.PathError{Op: "open private", Path: path, Err: syscall.EINVAL}
 	}
 	write := flag&(os.O_WRONLY|os.O_RDWR) != 0
@@ -258,6 +258,16 @@ func (t *Tree) Rename(oldRel, newRel string) error {
 		return err
 	}
 	return os.Rename(oldPath, newPath)
+}
+
+// RenameOpen renames the file open as f (created by this tree) to newRel:
+// os.Rename of f's name, today's unix behaviour. f stays open.
+func (t *Tree) RenameOpen(f *os.File, newRel string) error {
+	newPath, err := t.path(newRel)
+	if err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), newPath)
 }
 
 // Remove removes rel (os.Remove, which removes a symlink itself).

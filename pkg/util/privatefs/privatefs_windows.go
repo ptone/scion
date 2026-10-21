@@ -631,6 +631,9 @@ func (t *Tree) OpenPrivate(rel string, flag int) (*os.File, error) {
 	case os.O_RDWR:
 		access |= windows.GENERIC_READ | windows.GENERIC_WRITE | windows.WRITE_DAC
 		write = true
+	default:
+		// O_WRONLY|O_RDWR: open(2) answers EINVAL too.
+		return nil, &fs.PathError{Op: "open private", Path: t.display(rel), Err: syscall.EINVAL}
 	}
 	h, _, err := t.openLeaf(rel, access, windows.FILE_OPEN, windows.FILE_NON_DIRECTORY_FILE, nil)
 	if err != nil {
@@ -697,7 +700,7 @@ func (t *Tree) ReadPrivate(rel string, max int64) ([]byte, error) {
 
 // WriteFile replaces rel atomically: a temporary file created next to it
 // with p (the private descriptor for Private) is written, synced and
-// renamed over rel by handle. The result has the temporary file's
+// renamed over rel through its still-open handle (RenameOpen). The result has the temporary file's
 // protection whatever rel's DACL was, so a too-open file is repaired.
 func (t *Tree) WriteFile(rel string, data []byte, p Protection) error {
 	comps, err := splitRel(rel)
@@ -722,16 +725,13 @@ func (t *Tree) WriteFile(rel string, data []byte, p Protection) error {
 	if err := f.Sync(); err != nil {
 		return err
 	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := t.Rename(tmp, rel); err != nil {
-		_ = t.Remove(tmp)
-		ok = true
+	// Rename through the handle still open on the file just written, so
+	// nothing swapped in under the temporary name can land at rel.
+	if err := t.RenameOpen(f, rel); err != nil {
 		return err
 	}
 	ok = true
-	return nil
+	return f.Close()
 }
 
 // CreateTemp creates a new file in the directory relDir ("" for the
@@ -783,12 +783,37 @@ const fileRenameInformationExClass = 65
 // FILE_RENAME_INFORMATION whose RootDirectory is newRel's walked parent, so
 // no path is resolved at any point. An existing target is replaced (its
 // name only: a reparse point at newRel is replaced, never followed).
+//
+// To replace a file with one you just wrote, use RenameOpen on the still
+// open handle instead: Rename finds oldRel again by name.
 func (t *Tree) Rename(oldRel, newRel string) error {
 	h, _, err := t.openLeaf(oldRel, windows.DELETE|windows.FILE_READ_ATTRIBUTES, windows.FILE_OPEN, 0, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = windows.CloseHandle(h) }()
+	if err := t.renameHandle(h, newRel); err != nil {
+		return &fs.PathError{Op: "rename", Path: t.display(oldRel) + " -> " + t.display(newRel), Err: err}
+	}
+	return nil
+}
+
+// RenameOpen renames the file open as f, which this tree created (Create
+// or CreateTemp, whose handles carry DELETE access), to newRel, through
+// that same handle. The file renamed is the one f was opened on, whatever
+// has happened to its name since: a file swapped in under the temporary
+// name is never what lands at newRel. f stays open.
+func (t *Tree) RenameOpen(f *os.File, newRel string) error {
+	if err := t.renameHandle(windows.Handle(f.Fd()), newRel); err != nil {
+		return &fs.PathError{Op: "rename", Path: f.Name() + " -> " + t.display(newRel), Err: err}
+	}
+	return nil
+}
+
+// renameHandle renames the file open as h to newRel with
+// FILE_RENAME_INFORMATION(_EX) whose RootDirectory is newRel's walked
+// parent (a reparse point on the way is refused).
+func (t *Tree) renameHandle(h windows.Handle, newRel string) error {
 	newParent, newLeaf, done, err := t.walk(newRel, false, Inherit)
 	if err != nil {
 		return err
@@ -800,7 +825,7 @@ func (t *Tree) Rename(oldRel, newRel string) error {
 	}
 	var info fileRenameInformationEx
 	if len(name) > len(info.FileName) {
-		return &fs.PathError{Op: "rename", Path: t.display(newRel), Err: syscall.ENAMETOOLONG}
+		return syscall.ENAMETOOLONG
 	}
 	copy(info.FileName[:], name)
 	info.FileNameLength = uint32((len(name) - 1) * 2)
@@ -818,7 +843,7 @@ func (t *Tree) Rename(oldRel, newRel string) error {
 			uint32(unsafe.Sizeof(info)), windows.FileRenameInformation)
 	}
 	if err != nil {
-		return &fs.PathError{Op: "rename", Path: t.display(oldRel) + " -> " + t.display(newRel), Err: ntErr(err)}
+		return ntErr(err)
 	}
 	return nil
 }

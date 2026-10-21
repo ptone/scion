@@ -105,7 +105,7 @@ type FileStore struct {
 const (
 	recordSuffix = ".json"
 	lockSuffix   = ".lock"
-	// maxRecordSize bounds a record read.
+	// maxRecordSize bounds a record read; a larger record is refused.
 	maxRecordSize = 1 << 20
 )
 
@@ -223,14 +223,14 @@ func (r *fileRecord) Write(rec Record) error {
 		_ = tmp.Close()
 		return err
 	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := r.tree.Rename(name, r.rel); err != nil {
+	// Rename through the still-open handle, so the file renamed into place
+	// is the one just written, whatever happened to its temporary name.
+	if err := r.tree.RenameOpen(tmp, r.rel); err != nil {
+		_ = tmp.Close()
 		return err
 	}
 	ok = true
-	return nil
+	return tmp.Close()
 }
 
 // Close implements RecordWriter: delete the record, then release the lock.
@@ -322,7 +322,9 @@ func openPrivate(t *privatefs.Tree, rel string) (*os.File, error) {
 //
 // The record and the lock are each checked private on the handle that is
 // then read or locked. The liveness probe locks that same verified handle
-// (filelock.LockFile), rather than reopening the lock by path.
+// (filelock.LockFile), rather than reopening the lock by path. The record
+// is opened before the probe and read after it, so it may be one rewrite
+// older than the newest (each rewrite is a complete record).
 func read(t *privatefs.Tree, base, id string) (*Record, bool, error) {
 	recRel := base + "/" + id + recordSuffix
 	lockRel := base + "/" + id + lockSuffix
@@ -361,9 +363,12 @@ func read(t *privatefs.Tree, base, id string) (*Record, bool, error) {
 		// Live, but the first record is not written yet.
 		return nil, true, nil
 	}
-	data, err := io.ReadAll(io.LimitReader(rf, maxRecordSize))
+	data, err := io.ReadAll(io.LimitReader(rf, maxRecordSize+1))
 	if err != nil {
 		return nil, false, err
+	}
+	if len(data) > maxRecordSize {
+		return nil, false, fmt.Errorf("refusing tunnel state %s: record larger than %d bytes", recRel, maxRecordSize)
 	}
 	var rec Record
 	if err := json.Unmarshal(data, &rec); err != nil || rec.Schema != RecordSchema {

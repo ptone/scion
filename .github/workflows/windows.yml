@@ -123,8 +123,12 @@ jobs:
           if ((Get-Item $jprobe).LinkType -ne 'Junction') { Write-Error 'mklink /J did not produce a junction' }
           cmd /c rmdir "$jprobe"
 
-          # 2. Elevation: TestCreate_OwnerExplicitWhenElevated needs the
-          # token's default owner to be Administrators.
+          # 2. Elevation (an administrator token): the tests need
+          # Administrators as an owner-capable group in the token
+          # (TestCreate_OwnerExplicitWhenElevated sets it as the default
+          # owner of an impersonation token), SeRestorePrivilege (setting a
+          # foreign owner in the refuse tests) and the right to create a
+          # local group (TestCheckPrivate_ForeignLocalGroupRefusedBySID).
           $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
           if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { Write-Error 'the runner is not elevated' }
 
