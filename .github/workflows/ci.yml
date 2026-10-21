@@ -562,6 +562,28 @@ jobs:
           esac
           exit "$rc"
 
+      # Windows file-protection guard (design win-cli §4.4): pure bash plus
+      # `go list` (no compile). Exit 1 = findings, 2 = tool or list error.
+      - name: Check Windows File Protection (winsec-guard)
+        run: |
+          set +e
+          bash hack/winsec-guard.sh --self-test
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            set -e
+            echo "::error title=winsec-guard NOT checked::winsec-guard --self-test failed (exit $rc) — the guard itself is broken, so nothing was analysed."
+            exit "$rc"
+          fi
+          bash hack/winsec-guard.sh
+          rc=$?
+          set -e
+          case "$rc" in
+            0) ;;
+            1) echo "::error title=winsec-guard::A Windows-reachable file uses Chmod as protection, string containment, a zero no-follow flag or a nil privacy check; see the step log and the header of hack/winsec-guard.sh." ;;
+            *) echo "::error title=winsec-guard NOT checked::winsec-guard could not run (exit $rc) — NOTHING WAS ANALYSED." ;;
+          esac
+          exit "$rc"
+
       # Run Tests with a diagnostic hang watchdog (ptone/scion#3183). It is
       # diagnostic only: no retries, and on a normal pass or fail the step
       # exits with make test-fast-ci's own exit code. If the tests are still

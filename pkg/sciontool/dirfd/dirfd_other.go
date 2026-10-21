@@ -100,11 +100,11 @@ func WriteFileNoFollow(path string, data []byte, mode os.FileMode, uid, gid int,
 }
 
 func WriteFileNoFollowWithChown(path string, data []byte, mode os.FileMode, uid, gid int, policy LeafPolicy, chown func(fd, uid, gid int) error) error {
-	return unsupported("WriteFileNoFollow", path)
+	return unsupported("WriteFileNoFollowWithChown", path)
 }
 
 func WriteAtNoFollowWithChown(dirFd int, leaf, pathForErrors string, data []byte, mode os.FileMode, uid, gid int, policy LeafPolicy, chown func(fd, uid, gid int) error) error {
-	return unsupported("WriteFileNoFollow", pathForErrors)
+	return unsupported("WriteAtNoFollowWithChown", pathForErrors)
 }
 
 func ReadUnderRootNoFollow(root, path string, max int64) ([]byte, error) {

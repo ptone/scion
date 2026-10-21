@@ -28,7 +28,8 @@
 # LIMITS (read before trusting a green run)
 # These are text checks, not type checks. (b) sees a Rel result only when it
 # reaches HasPrefix within 5 lines and the ".." prefix is a literal in that
-# call (a named constant or a helper hides it). (c) sees only a literal 0.
+# call (a named constant or a helper hides it). (c) sees only a literal zero
+# (0, 00, 0x0, 0o0).
 # (d) sees only functions named check*Private*; a privacy check with another
 # name is not covered. (c) and (d) apply to files built off unix only when
 # that shows in the file name (_windows.go, _other.go) or a //go:build line
@@ -138,7 +139,7 @@ run_checks() {
       [ -n "$hit" ] || continue
       printf '%s:%s: nofollow-zero: a no-follow flag defined as 0 silently follows links\n' "$f" "${hit%%:*}"
       found=1
-    done < <(grep -nE '(O_NOFOLLOW|openNoFollow)[[:space:]]*([A-Za-z0-9_]+[[:space:]]*)?=[[:space:]]*0[[:space:]]*($|//|\))' "$f" || true)
+    done < <(grep -nE '(O_NOFOLLOW|openNoFollow)[[:space:]]*([A-Za-z0-9_]+[[:space:]]*)?=[[:space:]]*0([xXoO]?0*)?[[:space:]]*($|//|\))' "$f" || true)
 
     # (d) return-nil-check
     while IFS= read -r ln; do
@@ -221,6 +222,8 @@ EOF
 
 package p
 const O_NOFOLLOW = 0
+const openNoFollow = 0x0
+const keep = 0x20000
 EOF
     cat >p/ok_other.go <<'EOF'
 package p
@@ -244,7 +247,7 @@ EOF
     out=$(run_checks files.txt list.txt)
     rc=$?
     set -e
-    want=$'p/bad.go:2: chmod-as-protection\np/bad.go:3: chmod-as-protection\np/bad.go:5: string-containment\np/bad.go:10: string-containment\np/bad_other.go:2: nofollow-zero\np/bad_other.go:4: return-nil-check\np/bad_other.go:7: return-nil-check\np/bad_other.go:9: return-nil-check\np/nounix.go:4: nofollow-zero'
+    want=$'p/bad.go:2: chmod-as-protection\np/bad.go:3: chmod-as-protection\np/bad.go:5: string-containment\np/bad.go:10: string-containment\np/bad_other.go:2: nofollow-zero\np/bad_other.go:4: return-nil-check\np/bad_other.go:7: return-nil-check\np/bad_other.go:9: return-nil-check\np/nounix.go:4: nofollow-zero\np/nounix.go:5: nofollow-zero'
     got=$(printf '%s\n' "$out" | sed -E 's/^([^:]+:[0-9]+: [a-z-]+):.*/\1/')
     if [ "$rc" != 1 ] || [ "$got" != "$want" ]; then
       printf 'self-test FAILED (rc=%s)\nwant:\n%s\ngot:\n%s\n' "$rc" "$want" "$got" >&2
