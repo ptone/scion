@@ -39,10 +39,19 @@ import (
 // Resolve for a name or path that is refused.
 var ErrInvalidName = errors.New("invalid path name")
 
+// ErrDanglingLink is returned (wrapped) by Resolve and Within when a
+// component of the path exists but cannot be followed: a symlink or
+// junction whose target is missing. Its name is never treated as a
+// not-yet-existing tail, because creating below it would create below the
+// link's target, wherever that is.
+var ErrDanglingLink = errors.New("path component is a link whose target does not exist")
+
 // Within reports whether p is root or lies below it. Both sides go through
 // Resolve, so links, and on Windows every alias form, are resolved before
-// the comparison. The comparison is per path component: case-insensitive
-// on Windows, exact elsewhere.
+// the comparison. A dangling link in either path is an error
+// (ErrDanglingLink), never a not-yet-existing tail. The comparison is per
+// path component: case-insensitive on Windows (ordinal, through the OS
+// uppercase table, the rule NTFS applies to names), exact elsewhere.
 func Within(root, p string) (bool, error) {
 	r, err := Resolve(root)
 	if err != nil {

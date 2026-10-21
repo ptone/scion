@@ -123,7 +123,13 @@ func open(path string, mode os.FileMode) (f *os.File, created bool, err error) {
 		!errors.Is(err, windows.ERROR_ACCESS_DENIED) {
 		return nil, false, fmt.Errorf("create lock file: %w", &fs.PathError{Op: "open", Path: path, Err: err})
 	}
+	createErr := err
 	f, err = openNoFollow(path, p, lockShare)
+	if err != nil && errors.Is(createErr, windows.ERROR_ACCESS_DENIED) && errors.Is(err, fs.ErrNotExist) {
+		// The create was denied (the directory is not writable) and there
+		// is nothing to open: report the denial, not "not found".
+		return nil, false, fmt.Errorf("create lock file: %w", &fs.PathError{Op: "open", Path: path, Err: createErr})
+	}
 	return f, false, err
 }
 
@@ -151,21 +157,7 @@ func openNoFollow(path string, p *uint16, share uint32) (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open lock file: %w", &fs.PathError{Op: "open", Path: path, Err: err})
 	}
-	var info struct {
-		FileAttributes uint32
-		ReparseTag     uint32
-	}
-	err = windows.GetFileInformationByHandleEx(h, windows.FileAttributeTagInfo,
-		(*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)))
-	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) || errors.Is(err, windows.ERROR_NOT_SUPPORTED) ||
-		errors.Is(err, windows.ERROR_INVALID_FUNCTION) {
-		// The file system does not implement FileAttributeTagInfo (FAT32
-		// has no reparse points): read the same attribute bits from
-		// GetFileInformationByHandle on the same handle.
-		var bhfi windows.ByHandleFileInformation
-		err = windows.GetFileInformationByHandle(h, &bhfi)
-		info.FileAttributes = bhfi.FileAttributes
-	}
+	info, err := attrTag(h)
 	if err != nil {
 		_ = windows.CloseHandle(h)
 		return nil, fmt.Errorf("stat lock file: %w", err)
@@ -179,4 +171,40 @@ func openNoFollow(path string, p *uint16, share uint32) (*os.File, error) {
 		return nil, fmt.Errorf("%w: %s is a directory", ErrNotRegular, path)
 	}
 	return os.NewFile(uintptr(h), path), nil
+}
+
+type fileAttributeTagInfo struct {
+	FileAttributes uint32
+	ReparseTag     uint32
+}
+
+// attrTag reads the attributes (and reparse tag) of the open handle h with
+// FileAttributeTagInfo. Only ERROR_INVALID_PARAMETER falls back: that is
+// what FAT32, which has no reparse points, answers for this information
+// class. Any other error fails closed. (privatefs has the same helper; the
+// two packages share no internal package.)
+func attrTag(h windows.Handle) (fileAttributeTagInfo, error) {
+	var info fileAttributeTagInfo
+	err := windows.GetFileInformationByHandleEx(h, windows.FileAttributeTagInfo,
+		(*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)))
+	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
+		attrs, ferr := attrsByHandleInfo(h)
+		if ferr != nil {
+			return info, fmt.Errorf("%w (FileAttributeTagInfo: %v)", ferr, err)
+		}
+		return fileAttributeTagInfo{FileAttributes: attrs}, nil
+	}
+	return info, err
+}
+
+// attrsByHandleInfo reads the attributes of the open handle h with
+// GetFileInformationByHandle. They carry the same FILE_ATTRIBUTE_REPARSE_POINT
+// and FILE_ATTRIBUTE_DIRECTORY bits as FileAttributeTagInfo on any file
+// system; only the reparse tag is missing, and no decision reads the tag.
+func attrsByHandleInfo(h windows.Handle) (uint32, error) {
+	var bhfi windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(h, &bhfi); err != nil {
+		return 0, err
+	}
+	return bhfi.FileAttributes, nil
 }

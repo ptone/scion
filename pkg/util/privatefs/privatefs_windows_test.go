@@ -626,7 +626,22 @@ func TestNoPersistentACLs_Refused(t *testing.T) {
 		t.Fatalf("OpenTree creating a private anchor on FAT: %v, want ErrNoACLs", err)
 	}
 	// The volume itself is writable: an Inherit file works there.
-	mustCreate(t, tr, "inherit", Inherit, "x")
+	fat := mustCreate(t, tr, "inherit", Inherit, "x")
+	// A file on a volume without ACLs is never private: CheckPrivate
+	// refuses it (it must not crash on a missing owner or DACL).
+	ff, err := os.Open(fat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = CheckPrivate(ff)
+	_ = ff.Close()
+	if !errors.Is(err, ErrNotPrivate) {
+		t.Fatalf("CheckPrivate of a FAT file: %v, want ErrNotPrivate", err)
+	}
+	if _, err := tr.ReadPrivate("inherit", 0); !errors.Is(err, ErrNotPrivate) {
+		t.Fatalf("ReadPrivate of a FAT file: %v, want ErrNotPrivate", err)
+	}
+
 	// Control: the same Private create on NTFS succeeds.
 	ntfs := treeAt(t, t.TempDir())
 	mustCreate(t, ntfs, "x", Private, "x")
@@ -688,5 +703,46 @@ func TestOpenTree_CreateAnchorPrivate(t *testing.T) {
 	// Control: the pre-existing base keeps its inherited Users grant.
 	if sd := wintest.ReadSD(t, base); !sd.HasAllowACE(wintest.SIDUsers) {
 		t.Fatalf("control: the existing base was re-secured: %+v", sd)
+	}
+}
+
+// openNoFollowHandle opens path itself (FILE_FLAG_OPEN_REPARSE_POINT).
+func openNoFollowHandle(t *testing.T, path string) windows.Handle {
+	t.Helper()
+	p, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := windows.CreateFile(p, windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
+		windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	t.Cleanup(func() { _ = windows.CloseHandle(h) })
+	return h
+}
+
+// The FAT32 fallback (attributes from GetFileInformationByHandle) still
+// sees a reparse point: exercised here on NTFS, where junctions and
+// symlinks exist, on handles opened without following.
+func TestAttrsByHandleInfo_SeesReparsePoints(t *testing.T) {
+	dir, outside := t.TempDir(), t.TempDir()
+	j, s, f := filepath.Join(dir, "j"), filepath.Join(dir, "s"), filepath.Join(dir, "f")
+	wintest.MustJunction(t, outside, j)
+	wintest.MustSymlink(t, outside, s)
+	if err := os.WriteFile(f, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{j, s} {
+		attrs, err := attrsByHandleInfo(openNoFollowHandle(t, p))
+		if err != nil || attrs&windows.FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+			t.Fatalf("attrsByHandleInfo(%s) = %#x, %v; want the reparse bit", p, attrs, err)
+		}
+	}
+	// Control: a regular file has no reparse bit.
+	attrs, err := attrsByHandleInfo(openNoFollowHandle(t, f))
+	if err != nil || attrs&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || attrs&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
+		t.Fatalf("attrsByHandleInfo(regular file) = %#x, %v", attrs, err)
 	}
 }

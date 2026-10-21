@@ -21,7 +21,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // POSIX-mode assertions for FileStore. The Windows equivalents, which read
@@ -106,5 +108,38 @@ func TestFileStoreRefusesGroupOrWorldAccess(t *testing.T) {
 	}
 	if got, err := st.List(); err != nil || len(got) != 1 {
 		t.Fatalf("List after restoring modes = %v, %v", got, err)
+	}
+}
+
+// A FIFO planted as a record is refused by List rather than blocking it.
+func TestFileStoreRefusesFIFORecord(t *testing.T) {
+	st := testStore(t)
+	w, err := st.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = w.Close() }()
+	if err := w.Write(sampleRecord("https://hub.example.com", "u1", "s1")); err != nil {
+		t.Fatal(err)
+	}
+	// Control: the store lists before the FIFO is planted.
+	if got, err := st.List(); err != nil || len(got) != 1 {
+		t.Fatalf("List = %v, %v", got, err)
+	}
+	if err := syscall.Mkfifo(filepath.Join(st.Dir, "999-fifo"+recordSuffix), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := st.List()
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+			t.Fatalf("List with a FIFO record: %v, want a refusal", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("List blocked on a FIFO record")
 	}
 }

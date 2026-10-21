@@ -382,27 +382,37 @@ type fileAttributeTagInfo struct {
 	ReparseTag     uint32
 }
 
-// attrTag reads the attributes (and reparse tag) of the open handle h. A
-// file system that does not implement FileAttributeTagInfo (FAT32 answers
-// ERROR_INVALID_PARAMETER) has no reparse points; there the attributes come
-// from GetFileInformationByHandle on the same handle, which carries the
-// same FILE_ATTRIBUTE_REPARSE_POINT and FILE_ATTRIBUTE_DIRECTORY bits.
+// attrTag reads the attributes (and reparse tag) of the open handle h with
+// FileAttributeTagInfo. Only ERROR_INVALID_PARAMETER falls back: that is
+// what FAT32, which has no reparse points, answers for this information
+// class. Any other error fails closed.
 func attrTag(h windows.Handle) (fileAttributeTagInfo, error) {
 	var info fileAttributeTagInfo
 	err := windows.GetFileInformationByHandleEx(h, windows.FileAttributeTagInfo,
 		(*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)))
-	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) || errors.Is(err, windows.ERROR_NOT_SUPPORTED) ||
-		errors.Is(err, windows.ERROR_INVALID_FUNCTION) {
-		var bhfi windows.ByHandleFileInformation
-		if ferr := windows.GetFileInformationByHandle(h, &bhfi); ferr != nil {
+	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
+		attrs, ferr := attrsByHandleInfo(h)
+		if ferr != nil {
 			return info, fmt.Errorf("read file attributes: %w (FileAttributeTagInfo: %v)", ferr, err)
 		}
-		return fileAttributeTagInfo{FileAttributes: bhfi.FileAttributes}, nil
+		return fileAttributeTagInfo{FileAttributes: attrs}, nil
 	}
 	if err != nil {
 		return info, fmt.Errorf("read file attributes: %w", err)
 	}
 	return info, nil
+}
+
+// attrsByHandleInfo reads the attributes of the open handle h with
+// GetFileInformationByHandle. They carry the same FILE_ATTRIBUTE_REPARSE_POINT
+// and FILE_ATTRIBUTE_DIRECTORY bits as FileAttributeTagInfo on any file
+// system; only the reparse tag is missing, and no decision reads the tag.
+func attrsByHandleInfo(h windows.Handle) (uint32, error) {
+	var bhfi windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(h, &bhfi); err != nil {
+		return 0, err
+	}
+	return bhfi.FileAttributes, nil
 }
 
 // isReparse reports whether h is a reparse point of any tag.
@@ -799,9 +809,10 @@ func (t *Tree) Rename(oldRel, newRel string) error {
 	info.Flags = windows.FILE_RENAME_REPLACE_IF_EXISTS | windows.FILE_RENAME_POSIX_SEMANTICS
 	err = windows.NtSetInformationFile(h, &windows.IO_STATUS_BLOCK{}, (*byte)(unsafe.Pointer(&info)),
 		uint32(unsafe.Sizeof(info)), fileRenameInformationExClass)
-	if err != nil {
-		// The file system or OS lacks FILE_RENAME_INFORMATION_EX: retry
-		// with FILE_RENAME_INFORMATION, ReplaceIfExists = TRUE.
+	if err == windows.STATUS_INVALID_INFO_CLASS || err == windows.STATUS_INVALID_PARAMETER || err == windows.STATUS_NOT_SUPPORTED {
+		// The OS or file system lacks FILE_RENAME_INFORMATION_EX or POSIX
+		// semantics (FAT): retry with FILE_RENAME_INFORMATION,
+		// ReplaceIfExists = TRUE. Any other failure is reported as is.
 		info.Flags = 1
 		err = windows.NtSetInformationFile(h, &windows.IO_STATUS_BLOCK{}, (*byte)(unsafe.Pointer(&info)),
 			uint32(unsafe.Sizeof(info)), windows.FileRenameInformation)
@@ -855,11 +866,12 @@ func securityOf(f *os.File) (owner *windows.SID, dacl *windows.ACL, err error) {
 	sd, err := windows.GetSecurityInfo(windows.Handle(f.Fd()), windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read the security descriptor of %s: %w", f.Name(), err)
+		// A descriptor that cannot be read cannot be verified: refuse.
+		return nil, nil, fmt.Errorf("%w: cannot read the security descriptor of %s: %w", ErrNotPrivate, f.Name(), err)
 	}
 	owner, _, err = sd.Owner()
 	if err != nil {
-		return nil, nil, fmt.Errorf("read the owner of %s: %w", f.Name(), err)
+		return nil, nil, fmt.Errorf("%w: cannot read the owner of %s: %w", ErrNotPrivate, f.Name(), err)
 	}
 	dacl, _, err = sd.DACL()
 	if errors.Is(err, windows.ERROR_OBJECT_NOT_FOUND) {
@@ -888,6 +900,11 @@ func checkACL(f *os.File, writeMask uint32) error {
 	owner, dacl, err := securityOf(f)
 	if err != nil {
 		return err
+	}
+	if owner == nil {
+		// No owner at all (a volume without persistent ACLs, some
+		// redirectors). EqualSid on a NULL SID would crash: refuse.
+		return fmt.Errorf("%w: %s has no owner in its security descriptor", ErrNotPrivate, f.Name())
 	}
 	if !owner.Equals(id.user) {
 		return fmt.Errorf("%w: %s is owned by %s, not the current user %s", ErrNotPrivate, f.Name(), owner.String(), id.user.String())
@@ -968,6 +985,9 @@ func OwnedByCurrentUser(f *os.File) (bool, error) {
 	owner, _, err := sd.Owner()
 	if err != nil {
 		return false, fmt.Errorf("read the owner of %s: %w", f.Name(), err)
+	}
+	if owner == nil {
+		return false, nil
 	}
 	return owner.Equals(id.user), nil
 }

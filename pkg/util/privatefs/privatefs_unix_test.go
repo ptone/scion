@@ -138,3 +138,35 @@ func TestCheckPrivate_RefusesOtherOwnerUnix(t *testing.T) {
 		t.Fatalf("world-readable file: %v, want ErrNotPrivate", err)
 	}
 }
+
+// A FIFO planted in a tree is refused, never opened in a blocking way
+// (review finding 5: refuse must not become hang).
+func TestOpenPrivate_RefusesFIFO(t *testing.T) {
+	tr, dir := openTestTree(t)
+	if err := syscall.Mkfifo(filepath.Join(dir, "fifo"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := tr.ReadPrivate("fifo", 0)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+			t.Fatalf("ReadPrivate of a FIFO: %v, want a refusal", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ReadPrivate of a FIFO blocked")
+	}
+	if _, err := tr.OpenPrivate("fifo", os.O_RDWR); err == nil {
+		t.Fatal("OpenPrivate(O_RDWR) of a FIFO succeeded")
+	}
+	// Control: a regular private file next to it reads.
+	if err := tr.WriteFile("real", []byte("x"), Private); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tr.ReadPrivate("real", 0); err != nil {
+		t.Fatalf("control: %v", err)
+	}
+}

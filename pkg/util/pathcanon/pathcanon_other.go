@@ -18,6 +18,7 @@ package pathcanon
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -51,6 +52,14 @@ func Resolve(p string) (string, error) {
 		}
 		if !errors.Is(err, fs.ErrNotExist) {
 			return "", err
+		}
+		// EvalSymlinks found nothing. If cur itself exists (Lstat does not
+		// follow its last component), it is a symlink whose target is
+		// missing, which must never become tail.
+		if _, lerr := os.Lstat(cur); lerr == nil {
+			return "", fmt.Errorf("resolve %s: %w", cur, ErrDanglingLink)
+		} else if !errors.Is(lerr, fs.ErrNotExist) {
+			return "", lerr
 		}
 		parent := filepath.Dir(cur)
 		if parent == cur {

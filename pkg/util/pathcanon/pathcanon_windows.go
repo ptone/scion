@@ -18,10 +18,12 @@ package pathcanon
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -36,7 +38,8 @@ import (
 // is opened, following links, and its name is taken from
 // GetFinalPathNameByHandle(FILE_NAME_NORMALIZED|VOLUME_NAME_DOS), which
 // resolves 8.3 short names, case, junctions and symlinks. The
-// not-yet-existing tail is appended. The output keeps the \\?\ prefix, so
+// not-yet-existing tail is appended; an entry that exists but cannot be
+// followed (a dangling symlink or junction) is ErrDanglingLink, never tail. The output keeps the \\?\ prefix, so
 // two Resolve outputs always compare like with like.
 func Resolve(p string) (string, error) {
 	if p == "" {
@@ -75,6 +78,14 @@ func Resolve(p string) (string, error) {
 		if !errors.Is(err, fs.ErrNotExist) {
 			return "", err
 		}
+		// The following open found nothing. Probe cur itself without
+		// following it: if that succeeds, cur exists and is a link whose
+		// target is missing, which must never become tail.
+		if perr := probeNoFollow(cur); perr == nil {
+			return "", fmt.Errorf("resolve %s: %w", cur, ErrDanglingLink)
+		} else if !errors.Is(perr, fs.ErrNotExist) {
+			return "", perr
+		}
 		parent := filepath.Dir(cur)
 		if parent == cur {
 			return "", err
@@ -82,6 +93,23 @@ func Resolve(p string) (string, error) {
 		tail = append(tail, filepath.Base(cur))
 		cur = parent
 	}
+}
+
+// probeNoFollow opens path itself, not following a reparse point at its
+// last component, and closes it again. A nil result means the entry
+// exists.
+func probeNoFollow(path string) error {
+	p, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+	h, err := windows.CreateFile(p, windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	if err != nil {
+		return &fs.PathError{Op: "open", Path: path, Err: err}
+	}
+	return windows.CloseHandle(h)
 }
 
 // isDeviceNamespace reports whether a volume name is in the Win32 device
@@ -217,6 +245,12 @@ func isASCIILetter(c byte) bool {
 }
 
 // within compares two Resolve outputs per component, case-insensitively.
+//
+// Components are compared with CompareStringOrdinal(ignoreCase=TRUE), which
+// uses the operating system's uppercase table: the same rule NTFS applies
+// to names. strings.EqualFold (Unicode simple folding) is not that rule:
+// it equates "K" and the Kelvin sign U+212A, which NTFS keeps distinct, so
+// it would judge a distinct sibling directory to be inside the root.
 func within(r, q string) bool {
 	rc := strings.Split(strings.TrimRight(r, `\`), `\`)
 	qc := strings.Split(strings.TrimRight(q, `\`), `\`)
@@ -224,9 +258,38 @@ func within(r, q string) bool {
 		return false
 	}
 	for i := range rc {
-		if !strings.EqualFold(rc[i], qc[i]) {
+		if !equalNames(rc[i], qc[i]) {
 			return false
 		}
 	}
 	return true
+}
+
+var procCompareStringOrdinal = windows.NewLazySystemDLL("kernel32.dll").NewProc("CompareStringOrdinal")
+
+const cstrEqual = 2 // CSTR_EQUAL
+
+// equalNames compares two path components the way the file system does:
+// ordinal, case-insensitive through the OS uppercase table. Any failure
+// compares unequal, which fails closed (not Within).
+func equalNames(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ua, err := windows.UTF16FromString(a)
+	if err != nil {
+		return false
+	}
+	ub, err := windows.UTF16FromString(b)
+	if err != nil {
+		return false
+	}
+	if len(ua) <= 1 || len(ub) <= 1 {
+		return false
+	}
+	r, _, _ := procCompareStringOrdinal.Call(
+		uintptr(unsafe.Pointer(&ua[0])), uintptr(len(ua)-1),
+		uintptr(unsafe.Pointer(&ub[0])), uintptr(len(ub)-1),
+		1)
+	return r == cstrEqual
 }

@@ -145,6 +145,24 @@ func TestWithin_CaseInsensitive(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustWithin(t, strings.ToLower(root), strings.ToUpper(sib), false)
+
+	// NTFS compares names through its uppercase table, not Unicode case
+	// folding: "Kit" and "\u212Ait" (Kelvin sign) are two distinct
+	// directories, although strings.EqualFold calls them equal.
+	base := t.TempDir()
+	kit, kelvin := filepath.Join(base, "Kit"), filepath.Join(base, "\u212Ait")
+	for _, d := range []string{kit, kelvin} {
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !strings.EqualFold("Kit", "\u212Ait") {
+		t.Fatal("precondition: strings.EqualFold no longer equates K and the Kelvin sign; this case no longer discriminates")
+	}
+	mustWithin(t, kit, filepath.Join(kelvin, "x"), false)
+	mustWithin(t, kit, kelvin, false)
+	// Control: a plain case variant of the same directory is inside.
+	mustWithin(t, kit, filepath.Join(base, "KIT", "x"), true)
 }
 
 func TestValidName_TrailingDotSpace(t *testing.T) {
@@ -225,4 +243,41 @@ func TestResolve_OutputPrefixConsistent(t *testing.T) {
 	if err := ValidInputPath(existing); !errors.Is(err, ErrInvalidName) {
 		t.Fatalf("ValidInputPath(%q) = %v, want ErrInvalidName", existing, err)
 	}
+}
+
+// A dangling symlink is an existing entry that cannot be followed. It must
+// not be taken for a not-yet-existing tail: creating below it would create
+// below its target, outside the root.
+func TestWithin_DanglingSymlinkRefused(t *testing.T) {
+	root, _, outside := fixture(t)
+	wintest.MustSymlink(t, filepath.Join(outside, "missing"), filepath.Join(root, "s"))
+	for _, p := range []string{filepath.Join(root, "s"), filepath.Join(root, "s", "x"), filepath.Join(root, "s", "x", "y")} {
+		if in, err := Within(root, p); !errors.Is(err, ErrDanglingLink) || in {
+			t.Fatalf("Within(root, %q) = %v, %v; want ErrDanglingLink", p, in, err)
+		}
+		if _, err := Resolve(p); !errors.Is(err, ErrDanglingLink) {
+			t.Fatalf("Resolve(%q) = %v, want ErrDanglingLink", p, err)
+		}
+	}
+	// Control: the same name as a real, missing directory is a tail inside
+	// the root.
+	mustWithin(t, root, filepath.Join(root, "s2", "x"), true)
+}
+
+func TestWithin_DanglingJunctionRefused(t *testing.T) {
+	root, _, outside := fixture(t)
+	target := filepath.Join(outside, "gone")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	wintest.MustJunction(t, target, filepath.Join(root, "j"))
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{filepath.Join(root, "j"), filepath.Join(root, "j", "x")} {
+		if in, err := Within(root, p); !errors.Is(err, ErrDanglingLink) || in {
+			t.Fatalf("Within(root, %q) = %v, %v; want ErrDanglingLink", p, in, err)
+		}
+	}
+	mustWithin(t, root, filepath.Join(root, "j2", "x"), true)
 }

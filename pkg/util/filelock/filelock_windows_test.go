@@ -18,10 +18,13 @@ package filelock
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/windows"
 
 	"github.com/GoogleCloudPlatform/scion/internal/testutil/wintest"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
@@ -182,4 +185,59 @@ func TestLockFile_ShareDeleteRename(t *testing.T) {
 	if _, err := os.Lstat(final); !os.IsNotExist(err) {
 		t.Fatalf("lock file after Remove: %v", err)
 	}
+}
+
+// The FAT32 fallback (attributes from GetFileInformationByHandle) still
+// sees a reparse point: exercised on NTFS junction and symlink handles
+// opened without following, with a regular-file control.
+func TestAttrsByHandleInfo_SeesReparsePoints(t *testing.T) {
+	dir, outside := t.TempDir(), t.TempDir()
+	j, s, f := filepath.Join(dir, "j"), filepath.Join(dir, "s"), filepath.Join(dir, "f")
+	wintest.MustJunction(t, outside, j)
+	wintest.MustSymlink(t, filepath.Join(outside), s)
+	if err := os.WriteFile(f, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	open := func(path string) windows.Handle {
+		p, err := windows.UTF16PtrFromString(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h, err := windows.CreateFile(p, windows.FILE_READ_ATTRIBUTES, probeShare, nil, windows.OPEN_EXISTING, noFollowOpen, 0)
+		if err != nil {
+			t.Fatalf("open %s: %v", path, err)
+		}
+		t.Cleanup(func() { _ = windows.CloseHandle(h) })
+		return h
+	}
+	for _, p := range []string{j, s} {
+		attrs, err := attrsByHandleInfo(open(p))
+		if err != nil || attrs&windows.FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+			t.Fatalf("attrsByHandleInfo(%s) = %#x, %v; want the reparse bit", p, attrs, err)
+		}
+	}
+	attrs, err := attrsByHandleInfo(open(f))
+	if err != nil || attrs&(windows.FILE_ATTRIBUTE_REPARSE_POINT|windows.FILE_ATTRIBUTE_DIRECTORY) != 0 {
+		t.Fatalf("control: attrsByHandleInfo(regular file) = %#x, %v", attrs, err)
+	}
+}
+
+// A lock in a directory the user may not write, where the file does not
+// exist, reports the denied create, not "not found" (review finding 9).
+func TestAcquire_DeniedCreateReportsDenial(t *testing.T) {
+	dir := t.TempDir()
+	ro := filepath.Join(dir, "ro")
+	if err := os.Mkdir(ro, 0700); err != nil {
+		t.Fatal(err)
+	}
+	u := wintest.UserSID(t)
+	// The user may list and traverse, but not add files.
+	wintest.SetDACL(t, ro, "D:P(A;OICI;0x1200a9;;;"+u+")(A;OICI;FA;;;"+wintest.SIDSystem+")")
+	t.Cleanup(func() { wintest.SetDACL(t, ro, "D:P(A;OICI;FA;;;"+u+")") })
+	_, err := Acquire(filepath.Join(ro, "x.lock"), 0600, 0)
+	if err == nil || !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("Acquire in a read-only directory: %v, want a permission error", err)
+	}
+	// Control: the same Acquire in a writable directory works.
+	mustAcquireRegular(t, dir)
 }

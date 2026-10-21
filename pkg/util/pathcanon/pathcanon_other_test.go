@@ -96,3 +96,17 @@ func TestWithin_SymlinkEscapesUnix(t *testing.T) {
 		t.Fatalf("Within with .. escaping = %v, %v; want false", in, err)
 	}
 }
+
+func TestWithin_DanglingSymlinkRefusedUnix(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
+	wintest.MustSymlink(t, filepath.Join(outside, "missing"), filepath.Join(root, "s"))
+	for _, p := range []string{filepath.Join(root, "s"), filepath.Join(root, "s", "x", "y")} {
+		if in, err := Within(root, p); !errors.Is(err, ErrDanglingLink) || in {
+			t.Fatalf("Within(root, %q) = %v, %v; want ErrDanglingLink", p, in, err)
+		}
+	}
+	// Control: the same name as a real, missing directory is inside.
+	if in, err := Within(root, filepath.Join(root, "s2", "x")); err != nil || !in {
+		t.Fatalf("control: Within of a missing tail = %v, %v; want true", in, err)
+	}
+}

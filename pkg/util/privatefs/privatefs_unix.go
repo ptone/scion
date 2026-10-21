@@ -150,7 +150,10 @@ func (t *Tree) OpenPrivate(rel string, flag int) (*os.File, error) {
 		return nil, &fs.PathError{Op: "open private", Path: path, Err: syscall.EINVAL}
 	}
 	write := flag&(os.O_WRONLY|os.O_RDWR) != 0
-	f, err := os.OpenFile(path, (flag&^os.O_TRUNC)|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	// O_NONBLOCK: opening a FIFO planted at rel returns at once (or fails)
+	// instead of blocking, so the regular-file check below refuses it. It
+	// changes nothing for a regular file.
+	f, err := os.OpenFile(path, (flag&^os.O_TRUNC)|syscall.O_NOFOLLOW|syscall.O_CLOEXEC|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, linkErr(path, err)
 	}
