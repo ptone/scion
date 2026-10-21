@@ -20,10 +20,19 @@
 #                            "//winsec:not-containment <reason>" or the file
 #                            is listed in hack/winsec-unprotected.txt.
 #   (c) nofollow-zero        no O_NOFOLLOW or openNoFollow constant defined
-#                            as 0 in a _windows.go or _other.go file.
+#                            as 0 in a file built only off unix (see LIMITS).
 #   (d) return-nil-check     no "return nil" inside a function whose name
-#                            matches check*Private* in a _windows.go or
-#                            _other.go file.
+#                            matches check*Private* in a file built only
+#                            off unix; "return true, nil" counts too.
+#
+# LIMITS (read before trusting a green run)
+# These are text checks, not type checks. (b) sees a Rel result only when it
+# reaches HasPrefix within 5 lines and the ".." prefix is a literal in that
+# call (a named constant or a helper hides it). (c) sees only a literal 0.
+# (d) sees only functions named check*Private*; a privacy check with another
+# name is not covered. (c) and (d) apply to files built off unix only when
+# that shows in the file name (_windows.go, _other.go) or a //go:build line
+# naming windows, !unix or !linux. Review still owns these rules.
 #
 # LIST
 # hack/winsec-unprotected.txt: one file per line, "<path> <status>", where
@@ -108,16 +117,20 @@ run_checks() {
         /filepath\.Rel\(/ && $0 !~ /^[[:space:]]*\/\// {
           if ($0 ~ mark) { pending = 0; next }
           pending = NR
-          if ($0 ~ /HasPrefix\([^)]*"\.\./) { print NR; pending = 0 }
+          if ($0 ~ /HasPrefix\(.*"\.\./) { print NR; pending = 0 }
           next
         }
-        pending && NR - pending <= 5 && /HasPrefix\([^)]*"\.\./ { print pending; pending = 0 }
+        pending && NR - pending <= 5 && /HasPrefix\(.*"\.\./ { print pending; pending = 0 }
       ' "$f")
     fi
 
+    # (c) and (d) apply to files built only off unix: by file name, or by a
+    # //go:build line that names windows or negates unix or linux.
     case "$f" in
       *_windows.go | *_other.go) ;;
-      *) continue ;;
+      *)
+        grep -m1 -E '^//go:build .*(windows|!unix|!linux)' "$f" >/dev/null || continue
+        ;;
     esac
 
     # (c) nofollow-zero
@@ -133,15 +146,21 @@ run_checks() {
       printf '%s:%s: return-nil-check: a privacy check that returns nil on this platform is POSIX reasoning behind a build tag\n' "$f" "$ln"
       found=1
     done < <(awk '
+      # A return whose last result is nil: "return nil", "return true, nil".
+      BEGIN { ret = "return[[:space:]]+([^/]*,[[:space:]]*)?nil[[:space:]]*($|//|})" }
       /^func / {
         name = $0
         sub(/^func (\([^)]*\) )?/, "", name)
         sub(/\(.*/, "", name)
         infn = (tolower(name) ~ /^check.*private/)
+        if (infn && $0 ~ /\{.*\}[[:space:]]*$/) {
+          if ($0 ~ ret) print NR
+          infn = 0
+        }
+        next
       }
-      /^}/ { infn = 0 }
-      infn && /return[[:space:]]+nil([[:space:]]|$|\/\/)/ { print NR }
-      infn && /^func .*\{.*return[[:space:]]+nil.*\}[[:space:]]*$/ { print NR; infn = 0 }
+      /^}/ { infn = 0; next }
+      infn && $0 ~ ret { print NR }
     ' "$f")
   done <"$files"
   return "$found"
@@ -160,6 +179,11 @@ var chmod = os.Chmod
 func b() {
 	rel, err := filepath.Rel(root, p)
 	if err != nil || strings.HasPrefix(rel, "..") {
+	}
+}
+func c() {
+	rel, _ := filepath.Rel(root, p)
+	if strings.HasPrefix(filepath.ToSlash(rel), "../") {
 	}
 }
 EOF
@@ -187,6 +211,16 @@ const openNoFollow = 0
 func checkPrivateFile(f *os.File) error {
 	return nil
 }
+func checkPrivateOwner(f *os.File) (bool, error) {
+	return true, nil
+}
+func checkPrivateMode() (bool, error) { return false, nil }
+EOF
+    cat >p/nounix.go <<'EOF'
+//go:build !unix
+
+package p
+const O_NOFOLLOW = 0
 EOF
     cat >p/ok_other.go <<'EOF'
 package p
@@ -195,15 +229,22 @@ func checkPrivateFile(f *os.File) error {
 	return errors.ErrUnsupported
 }
 func helper() error { return nil }
+func checkPrivateErr() (bool, error) { return false, errors.ErrUnsupported }
+EOF
+    cat >p/portable.go <<'EOF'
+package p
+func checkPrivateRecord(f *os.File) error {
+	return nil
+}
 EOF
     printf 'p/listed.go not protected on Windows: gated (fixture)\n' >list.txt
-    printf '%s\n' p/bad.go p/ok.go p/listed.go p/x_unix.go p/bad_other.go p/ok_other.go >files.txt
+    printf '%s\n' p/bad.go p/ok.go p/listed.go p/x_unix.go p/bad_other.go p/ok_other.go p/nounix.go p/portable.go >files.txt
     set +e
     local out
     out=$(run_checks files.txt list.txt)
     rc=$?
     set -e
-    want=$'p/bad.go:2: chmod-as-protection\np/bad.go:3: chmod-as-protection\np/bad.go:5: string-containment\np/bad_other.go:2: nofollow-zero\np/bad_other.go:4: return-nil-check'
+    want=$'p/bad.go:2: chmod-as-protection\np/bad.go:3: chmod-as-protection\np/bad.go:5: string-containment\np/bad.go:10: string-containment\np/bad_other.go:2: nofollow-zero\np/bad_other.go:4: return-nil-check\np/bad_other.go:7: return-nil-check\np/bad_other.go:9: return-nil-check\np/nounix.go:4: nofollow-zero'
     got=$(printf '%s\n' "$out" | sed -E 's/^([^:]+:[0-9]+: [a-z-]+):.*/\1/')
     if [ "$rc" != 1 ] || [ "$got" != "$want" ]; then
       printf 'self-test FAILED (rc=%s)\nwant:\n%s\ngot:\n%s\n' "$rc" "$want" "$got" >&2
@@ -238,6 +279,8 @@ main() {
   esac
   local root rc
   root=$(git rev-parse --show-toplevel) || die "not in a git checkout"
+  # The physical path, so go list's directories carry the same prefix.
+  root=$(cd "$root" && pwd -P) || die "cannot resolve $root"
   cd "$root"
   files=$(mktemp) || die "mktemp failed"
   trap 'rm -f -- "${files:-}" "${files:-}.raw"' EXIT
@@ -245,7 +288,14 @@ main() {
   GOOS=windows GOARCH=amd64 "$GO" list -deps \
     -f '{{if and (not .Standard) .Module}}{{if .Module.Main}}{{$d := .Dir}}{{range .GoFiles}}{{$d}}/{{.}}{{"\n"}}{{end}}{{end}}{{end}}' \
     ./cmd/scion >"$files.raw" || die "go list failed"
-  sed "s#^$root/##" "$files.raw" | grep -v '^$' | sort -u >"$files"
+  local line
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      "$root"/*) printf '%s\n' "${line#"$root/"}" ;;
+      *) die "go list reported a file outside $root: $line" ;;
+    esac
+  done <"$files.raw" | sort -u >"$files"
   rm -f -- "$files.raw"
   [ -s "$files" ] || die "go list returned no files"
   rc=0
