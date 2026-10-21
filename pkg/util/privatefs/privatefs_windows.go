@@ -677,9 +677,11 @@ func verifyOrRepair(f *os.File, write bool) error {
 	if ierr != nil {
 		return ierr
 	}
-	if serr := windows.SetSecurityInfo(windows.Handle(f.Fd()), windows.SE_FILE_OBJECT,
+	serr := windows.SetSecurityInfo(windows.Handle(f.Fd()), windows.SE_FILE_OBJECT,
 		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		nil, nil, id.fileACL, nil); serr != nil {
+		nil, nil, id.fileACL, nil)
+	runtime.KeepAlive(f)
+	if serr != nil {
 		return fmt.Errorf("repair the ACL of %s: %w (refusing: %v)", f.Name(), serr, err)
 	}
 	return CheckPrivate(f)
@@ -804,15 +806,15 @@ func (t *Tree) Rename(oldRel, newRel string) error {
 	return nil
 }
 
-// RenameOpen renames the private file open as f (a temporary file this
-// tree created with Private: Create and CreateTemp handles carry DELETE
-// access) to newRel, through that same handle. The file renamed is the one
-// f was opened on, whatever has happened to its name since: a file swapped
-// in under the temporary name is never what lands at newRel. f stays open.
+// RenameOpen renames the private file open as f to newRel, through that
+// same handle (it needs DELETE access, which Create and CreateTemp handles
+// carry). The file renamed is the one f was opened on, whatever has
+// happened to its name since: a file swapped in under the temporary name is
+// never what lands at newRel. f stays open.
 //
-// It is a private-tree primitive: f must pass CheckPrivate (verified on
-// the handle before the rename), otherwise it is refused with
-// ErrNotPrivate and nothing is renamed.
+// What is enforced: f must pass CheckPrivate (verified on the handle before
+// the rename), otherwise it is refused with ErrNotPrivate and nothing is
+// renamed. f need not come from this tree.
 func (t *Tree) RenameOpen(f *os.File, newRel string) error {
 	if err := CheckPrivate(f); err != nil {
 		return &fs.PathError{Op: "rename", Path: f.Name() + " -> " + t.display(newRel), Err: err}
@@ -934,6 +936,7 @@ func deleteHandle(h windows.Handle) error {
 func securityOf(f *os.File) (owner *windows.SID, dacl *windows.ACL, err error) {
 	sd, err := windows.GetSecurityInfo(windows.Handle(f.Fd()), windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	runtime.KeepAlive(f) // f.Fd() is valid only while f is reachable
 	if err != nil {
 		// A descriptor that cannot be read cannot be verified: refuse.
 		return nil, nil, fmt.Errorf("%w: cannot read the security descriptor of %s: %w", ErrNotPrivate, f.Name(), err)
@@ -1048,6 +1051,7 @@ func OwnedByCurrentUser(f *os.File) (bool, error) {
 		return false, err
 	}
 	sd, err := windows.GetSecurityInfo(windows.Handle(f.Fd()), windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	runtime.KeepAlive(f)
 	if err != nil {
 		return false, fmt.Errorf("read the owner of %s: %w", f.Name(), err)
 	}

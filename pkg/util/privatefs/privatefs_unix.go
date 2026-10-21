@@ -260,13 +260,13 @@ func (t *Tree) Rename(oldRel, newRel string) error {
 	return os.Rename(oldPath, newPath)
 }
 
-// RenameOpen renames the private file open as f (created by this tree with
-// Private) to newRel: os.Rename of f's name, today's unix behaviour. f must
-// pass CheckPrivate (checked with fstat on the handle), otherwise it is
-// refused with ErrNotPrivate and nothing is renamed. f stays open.
+// RenameOpen renames the private file open as f to newRel: os.Rename of
+// f's name, today's unix behaviour. f stays open. What is enforced: f must
+// pass CheckPrivate (fstat on the handle), otherwise it is refused with
+// ErrNotPrivate and nothing is renamed. f need not come from this tree.
 func (t *Tree) RenameOpen(f *os.File, newRel string) error {
 	if err := CheckPrivate(f); err != nil {
-		return err
+		return &fs.PathError{Op: "rename", Path: f.Name() + " -> " + filepath.Join(t.anchor, newRel), Err: err}
 	}
 	newPath, err := t.path(newRel)
 	if err != nil {

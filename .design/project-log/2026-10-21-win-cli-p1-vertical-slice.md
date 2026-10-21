@@ -63,6 +63,14 @@ All of these were accepted by win-cli-em before implementation, and are listed i
 - **F4:** the file-type dangling symlink (the `os.Symlink` default for a missing target) has a refusal test.
 - **F5, F6:** comment fixes.
 
+**Round 4 (win-cli-rev-p1-r4, APPROVE with small findings):**
+- **F1:** `TestStateGuard_NoTempFileByName` (tunnelclient, every OS) parses `state.go` and fails on any by-name `Rename` and on any `Remove` of a temporary name, with a synthetic positive control. Reverting `RenameOpen` to `Rename` was checked to fail it. The behavioural regression test for the swap pattern is filelock's `TestLockFile_ShareDeleteRename`, together with privatefs's `TestRenameOpen_SwappedTempNeverLands` and `TestRemoveOpen_DeletesHandleNotName` (Windows).
+- **F2:** the `RenameOpen` doc states what is enforced: f must pass CheckPrivate, and it need not come from this tree. win-cli-em carries the precondition in the Phase 3 briefs.
+- **F3:** `runtime.KeepAlive(f)` after the syscall at the exported-API Fd() sites: securityOf, OwnedByCurrentUser, verifyOrRepair, and filelock tryLock/unlock.
+- **F4:** the unix `RenameOpen` refusal is wrapped in the same `fs.PathError` as on Windows.
+
+**Gate series:** one LIGHT window, W1. It runs a multi-package `go test -c` of the 4 packages (gate-rules addendum 0d574538) and the non-test build of pkg/config and pkg/brokercredentials. There are no vet windows, by win-cli-em's ruling: multi-package vet does not count as one compile. Windows vet evidence is the windows-latest CI build+vet step, Linux vet is CI Build & Test, and darwin vet is dev-time only.
+
 **Unix deltas in tunnelclient `read` (beyond §3.7 delta 1):**
 - The record is opened before the liveness probe and read after it, so it can be one rewrite older than the newest. Each rewrite is a complete record.
 - A record over 1 MiB is refused. Main read records unbounded.

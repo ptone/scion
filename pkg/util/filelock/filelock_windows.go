@@ -63,6 +63,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"runtime"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -77,6 +78,7 @@ func tryLock(f *os.File) (held bool, err error) {
 	ol := new(windows.Overlapped)
 	err = windows.LockFileEx(windows.Handle(f.Fd()),
 		windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, ol)
+	runtime.KeepAlive(f) // f.Fd() is valid only while f is reachable
 	if err == nil {
 		return false, nil
 	}
@@ -90,6 +92,7 @@ func tryLock(f *os.File) (held bool, err error) {
 // the handle is closed or the process exits.
 func unlock(f *os.File) {
 	_ = windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, new(windows.Overlapped))
+	runtime.KeepAlive(f)
 }
 
 const (
