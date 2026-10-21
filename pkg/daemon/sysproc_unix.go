@@ -14,8 +14,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package daemon provides utilities for running scion components as background daemons.
-
 package daemon
 
 import "syscall"

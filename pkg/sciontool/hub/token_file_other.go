@@ -14,9 +14,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package hub provides a client for sciontool to communicate with the Scion Hub.
-// It uses the SCION_AUTH_TOKEN environment variable for authentication.
-
 package hub
 
 import (

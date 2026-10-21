@@ -14,13 +14,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package provision implements Tier-1 universal workspace provisioning.
-// It is a config-free leaf package that depends only on stdlib, pkg/api,
-// pkg/store, pkg/util, pkg/util/fsutil (itself stdlib-only) and
-// golang.org/x/sys/unix (for no-follow file operations) — deliberately
-// avoiding pkg/config so that lean binaries (e.g. sciontool) can invoke
-// provisioning without pulling in filesystem-based project path resolution.
-
 package provision
 
 import (
