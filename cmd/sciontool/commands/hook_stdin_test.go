@@ -31,6 +31,18 @@ const copilotPostToolUse = `{
   "toolResult": {"resultType": "success", "textResultForLlm": "README.md"}
 }`
 
+// copilotPostToolUseFailure is the documented camelCase postToolUseFailure
+// payload: Copilot sends it, instead of postToolUse, when a tool fails, with
+// error as a string (docs.github.com/en/copilot/reference/hooks-configuration).
+const copilotPostToolUseFailure = `{
+  "sessionId": "copilot-session-42",
+  "timestamp": 1760136000000,
+  "cwd": "/workspace",
+  "toolName": "bash",
+  "toolArgs": {"command": "false"},
+  "error": "Command failed with exit code 1"
+}`
+
 func decodeEventData(t *testing.T, data []byte) map[string]interface{} {
 	t.Helper()
 	var m map[string]interface{}
@@ -208,6 +220,54 @@ func TestCopilotPostToolUse_StdinThroughDialect(t *testing.T) {
 	assert.Equal(t, "README.md", event.Data.ToolOutput)
 }
 
+// TestCopilotPostToolUseFailure_StdinThroughDialect runs the documented
+// postToolUseFailure payload from a stdin pipe through the shipped Copilot
+// dialect: a failed tool must become a tool-end that is not a success and
+// carries the error (ptone/scion#4408).
+func TestCopilotPostToolUseFailure_StdinThroughDialect(t *testing.T) {
+	md, err := dialects.LoadMappingDialect(testutil.HarnessDialectPath(t, "copilot"))
+	require.NoError(t, err)
+
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	defer func() { _ = r.Close() }()
+	_, err = w.WriteString(copilotPostToolUseFailure)
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(positionalEventData("postToolUseFailure", readOptionalStdin(r, time.Second)), &raw))
+	event, err := md.Parse(raw)
+	require.NoError(t, err)
+
+	assert.Equal(t, hooks.EventToolEnd, event.Name)
+	assert.Equal(t, "postToolUseFailure", event.RawName)
+	assert.Equal(t, "bash", event.Data.ToolName)
+	assert.Equal(t, "copilot-session-42", event.Data.SessionID)
+	assert.JSONEq(t, `{"command":"false"}`, event.Data.ToolInput)
+	assert.False(t, event.Data.Success)
+	assert.Equal(t, "Command failed with exit code 1", event.Data.Error)
+	assert.Empty(t, event.Data.ToolOutput)
+	assert.Empty(t, event.Data.Message)
+}
+
+// TestCopilotPostToolUseFailure_NoStdoutResponse guards the hook's stdout.
+// Copilot appends a postToolUseFailure hook's stdout to the failure the agent
+// sees when the hook exits 2, so the Copilot dialect must declare no response
+// for this event and the hook must write nothing to stdout (ptone/scion#4408).
+func TestCopilotPostToolUseFailure_NoStdoutResponse(t *testing.T) {
+	md, err := dialects.LoadMappingDialect(testutil.HarnessDialectPath(t, "copilot"))
+	require.NoError(t, err)
+
+	assert.Nil(t, md.Response("postToolUseFailure"))
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(positionalEventData("postToolUseFailure", []byte(copilotPostToolUseFailure)), &raw))
+	var stdout strings.Builder
+	require.NoError(t, writeHookResponse(&stdout, md, raw))
+	assert.Empty(t, stdout.String())
+}
+
 func TestCopilotDialect_CamelCasePayloads(t *testing.T) {
 	md, err := dialects.LoadMappingDialect(testutil.HarnessDialectPath(t, "copilot"))
 	require.NoError(t, err)
@@ -224,7 +284,7 @@ func TestCopilotDialect_CamelCasePayloads(t *testing.T) {
 	t.Run("non-success resultType string is not success", func(t *testing.T) {
 		// Guard on the success string rule, not a documented Copilot payload:
 		// the docs list only resultType "success" on postToolUse (failed
-		// tools arrive on postToolUseFailure, which is not registered here).
+		// tools arrive on postToolUseFailure, mapped separately).
 		ev := parse("postToolUse", `{"sessionId":"s1","toolName":"bash","toolResult":{"resultType":"failure","textResultForLlm":"exit 1"}}`)
 		assert.Equal(t, "bash", ev.Data.ToolName)
 		assert.False(t, ev.Data.Success)
