@@ -18,10 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
 // CopyDir recursively copies a directory tree, attempting to preserve permissions.
@@ -239,19 +236,15 @@ func removeSymlinkSafe(path string) {
 	// Strategy 1: unlinkat with parent directory fd.
 	// This avoids full path resolution — the kernel operates directly on
 	// the directory entry via the fd, without resolving the symlink target.
-	dirFD, err := syscall.Open(dir, syscall.O_RDONLY, 0)
+	err := unlinkInDir(dir, name)
 	if err == nil {
-		err = unix.Unlinkat(dirFD, name, 0)
-		_ = syscall.Close(dirFD)
-		if err == nil {
-			elapsed := time.Since(start)
-			if elapsed > 100*time.Millisecond {
-				Debugf("removeSymlinkSafe: unlinkat took %v for %s", elapsed, name)
-			}
-			return
+		elapsed := time.Since(start)
+		if elapsed > 100*time.Millisecond {
+			Debugf("removeSymlinkSafe: unlinkat took %v for %s", elapsed, name)
 		}
-		Debugf("removeSymlinkSafe: unlinkat failed for %s: %v", name, err)
+		return
 	}
+	Debugf("removeSymlinkSafe: unlinkat failed for %s: %v", name, err)
 
 	// Strategy 2: rename a temp file over the symlink, then remove the
 	// regular file. rename(2) operates on directory entries without
