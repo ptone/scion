@@ -1,0 +1,957 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build windows
+
+package privatefs
+
+// This is the Windows implementation. It is new Windows code, not the POSIX
+// sequence behind a build tag: it sets no mode bits and never calls Chmod
+// (on Windows Chmod only toggles FILE_ATTRIBUTE_READONLY).
+//
+// Security descriptor (§3.3.2 of the design):
+//   - The owner is set explicitly to the token user's SID. Under an
+//     elevated token the default owner is BUILTIN\Administrators, so an
+//     implicit owner would make "owner-only" mean "admins-only".
+//   - The DACL is protected (SE_DACL_PROTECTED), so no inherited ACE
+//     survives, and grants FILE_ALL_ACCESS to the token user and SYSTEM
+//     only. Administrators are not granted on create.
+//   - Every SID is the token user's or well-known (CreateWellKnownSid,
+//     StringToSid). No account name is ever looked up or compared: names
+//     are localised and a local group can be given any name.
+//   - The descriptor is passed in the create call (OBJECT_ATTRIBUTES or
+//     SECURITY_ATTRIBUTES), so the object never exists without it. Only an
+//     EXISTING file is ever re-secured (the in-place repair in
+//     verifyOrRepair).
+//
+// Tree walk (§3.3.3): every component below the anchor is opened with
+// NtCreateFile relative to its parent's handle (OBJECT_ATTRIBUTES.
+// RootDirectory) with FILE_OPEN_REPARSE_POINT, and its attributes are read
+// on the new handle. A component carrying FILE_ATTRIBUTE_REPARSE_POINT, of
+// any tag, is refused with ErrReparsePoint. Nothing below the anchor is
+// ever resolved by path, so there is no check-then-open.
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"syscall"
+	"unsafe"
+
+	"golang.org/x/sys/windows"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/pathcanon"
+)
+
+func isSeparator(c byte) bool { return c == '/' || c == '\\' }
+
+func isAbsLike(rel string) bool {
+	return filepath.IsAbs(rel) || filepath.VolumeName(rel) != "" || isSeparator(rel[0])
+}
+
+// Describe returns how p protects a file, for user-facing text.
+func Describe(p Protection) string {
+	if p == Private {
+		return "owner-only ACL"
+	}
+	return "inherited ACL"
+}
+
+// identity is the process's token user and the security descriptors built
+// from it, computed once.
+type identity struct {
+	user    *windows.SID
+	system  *windows.SID
+	admins  *windows.SID
+	fileSD  *windows.SECURITY_DESCRIPTOR
+	dirSD   *windows.SECURITY_DESCRIPTOR
+	fileACL *windows.ACL // the DACL of fileSD, for in-place repair
+}
+
+var (
+	identOnce sync.Once
+	identVal  *identity
+	identErr  error
+)
+
+func getIdentity() (*identity, error) {
+	identOnce.Do(func() { identVal, identErr = newIdentity() })
+	return identVal, identErr
+}
+
+func newIdentity() (*identity, error) {
+	tu, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return nil, fmt.Errorf("read the token user: %w", err)
+	}
+	user, err := tu.User.Sid.Copy()
+	if err != nil {
+		return nil, err
+	}
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		return nil, err
+	}
+	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		return nil, err
+	}
+	u, sy := user.String(), system.String()
+	// FA = FILE_ALL_ACCESS. P = protected DACL. OICI = inherited by files
+	// and subdirectories created inside the directory.
+	fileSD, err := windows.SecurityDescriptorFromString(fmt.Sprintf("O:%sD:P(A;;FA;;;%s)(A;;FA;;;%s)", u, u, sy))
+	if err != nil {
+		return nil, fmt.Errorf("build the private file security descriptor: %w", err)
+	}
+	dirSD, err := windows.SecurityDescriptorFromString(fmt.Sprintf("O:%sD:P(A;OICI;FA;;;%s)(A;OICI;FA;;;%s)", u, u, sy))
+	if err != nil {
+		return nil, fmt.Errorf("build the private directory security descriptor: %w", err)
+	}
+	fileACL, _, err := fileSD.DACL()
+	if err != nil {
+		return nil, err
+	}
+	return &identity{user: user, system: system, admins: admins, fileSD: fileSD, dirSD: dirSD, fileACL: fileACL}, nil
+}
+
+// SecurityAttributesFor returns the SECURITY_ATTRIBUTES a CreateFile call
+// passes to create a file with protection p: the private file descriptor
+// for Private, nil (the parent's inherited DACL) for Inherit.
+func SecurityAttributesFor(p Protection) (*windows.SecurityAttributes, error) {
+	if p != Private {
+		return nil, nil
+	}
+	id, err := getIdentity()
+	if err != nil {
+		return nil, err
+	}
+	sa := &windows.SecurityAttributes{SecurityDescriptor: id.fileSD}
+	sa.Length = uint32(unsafe.Sizeof(*sa))
+	return sa, nil
+}
+
+// Tree is a private directory tree rooted at a trusted anchor. Links at or
+// above the anchor are followed (a redirected profile is legitimate). Below
+// it, no component may be a reparse point.
+type Tree struct {
+	anchor string         // pathcanon.Resolve output (\\?\ form), for messages
+	h      windows.Handle // the anchor directory; pins the object
+	acls   bool           // the volume has FILE_PERSISTENT_ACLS
+	fsName string
+	// volSerial and fileIndex identify the anchor object. They are recorded
+	// for diagnostics only (error text, tests); no security decision reads
+	// them, because the handle itself pins the object.
+	volSerial uint32
+	fileIndex uint64
+}
+
+const (
+	shareAll  = windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE
+	dirAccess = windows.FILE_LIST_DIRECTORY | windows.FILE_TRAVERSE | windows.FILE_READ_ATTRIBUTES | windows.READ_CONTROL
+
+	// IO_STATUS_BLOCK.Information values for NtCreateFile.
+	fileOpened  = 1
+	fileCreated = 2
+)
+
+// OpenTree opens the tree rooted at anchor. The anchor is canonicalised
+// with pathcanon.Resolve and opened following links; it must be a
+// directory. With opt.CreateAnchor, missing components of the anchor are
+// created, each relative to its parent's handle, with the private
+// directory descriptor.
+func OpenTree(anchor string, opt TreeOptions) (*Tree, error) {
+	if _, err := getIdentity(); err != nil {
+		return nil, err
+	}
+	resolved, err := pathcanon.Resolve(anchor)
+	if err != nil {
+		return nil, err
+	}
+	h, err := openFollow(resolved)
+	if err != nil && opt.CreateAnchor && errors.Is(err, fs.ErrNotExist) {
+		h, err = createAnchor(resolved)
+	}
+	if err != nil {
+		return nil, err
+	}
+	t := &Tree{anchor: resolved, h: h}
+	if err := t.init(); err != nil {
+		_ = windows.CloseHandle(h)
+		return nil, err
+	}
+	return t, nil
+}
+
+func (t *Tree) init() error {
+	tag, err := attrTag(t.h)
+	if err != nil {
+		return &fs.PathError{Op: "open tree", Path: t.anchor, Err: err}
+	}
+	if tag.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
+		return &fs.PathError{Op: "open tree", Path: t.anchor, Err: syscall.ENOTDIR}
+	}
+	acls, fsName, err := volumeACLs(t.h)
+	if err != nil {
+		return &fs.PathError{Op: "open tree", Path: t.anchor, Err: err}
+	}
+	t.acls, t.fsName = acls, fsName
+	var bhfi windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(t.h, &bhfi); err == nil {
+		t.volSerial = bhfi.VolumeSerialNumber
+		t.fileIndex = uint64(bhfi.FileIndexHigh)<<32 | uint64(bhfi.FileIndexLow)
+	}
+	return nil
+}
+
+// volumeACLs reports whether the volume holding h stores ACLs.
+func volumeACLs(h windows.Handle) (bool, string, error) {
+	var flags uint32
+	name := make([]uint16, windows.MAX_PATH+1)
+	if err := windows.GetVolumeInformationByHandle(h, nil, 0, nil, nil, &flags, &name[0], uint32(len(name))); err != nil {
+		return false, "", err
+	}
+	return flags&windows.FILE_PERSISTENT_ACLS != 0, windows.UTF16ToString(name), nil
+}
+
+// openFollow opens an existing directory by path, following links. It is
+// used only for the anchor and its ancestors.
+func openFollow(path string) (windows.Handle, error) {
+	p, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return windows.InvalidHandle, err
+	}
+	h, err := windows.CreateFile(p, dirAccess|windows.SYNCHRONIZE, shareAll, nil,
+		windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	if err != nil {
+		return windows.InvalidHandle, &fs.PathError{Op: "open", Path: path, Err: err}
+	}
+	return h, nil
+}
+
+// createAnchor creates the missing components of the anchor path below its
+// deepest existing ancestor, each relative to its parent's handle, with the
+// private directory descriptor, and returns a handle on the anchor.
+func createAnchor(path string) (windows.Handle, error) {
+	var missing []string
+	cur := path
+	var h windows.Handle
+	for {
+		var err error
+		h, err = openFollow(cur)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return windows.InvalidHandle, err
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return windows.InvalidHandle, err
+		}
+		missing = append(missing, filepath.Base(cur))
+		cur = parent
+	}
+	acls, fsName, err := volumeACLs(h)
+	if err != nil {
+		_ = windows.CloseHandle(h)
+		return windows.InvalidHandle, err
+	}
+	if !acls {
+		_ = windows.CloseHandle(h)
+		return windows.InvalidHandle, noACLsError(path, fsName)
+	}
+	id, err := getIdentity()
+	if err != nil {
+		_ = windows.CloseHandle(h)
+		return windows.InvalidHandle, err
+	}
+	for i := len(missing) - 1; i >= 0; i-- {
+		name := missing[i]
+		child, _, err := ntCreate(h, name, dirAccess, 0, shareAll, windows.FILE_CREATE,
+			windows.FILE_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT, id.dirSD)
+		if errors.Is(err, fs.ErrExist) {
+			// Created concurrently: open it, still refusing a reparse point.
+			child, err = openDirAt(h, name)
+		}
+		_ = windows.CloseHandle(h)
+		if err != nil {
+			return windows.InvalidHandle, &fs.PathError{Op: "mkdir", Path: path, Err: err}
+		}
+		h = child
+	}
+	return h, nil
+}
+
+func noACLsError(anchor, fsName string) error {
+	return fmt.Errorf("cannot store private file under %s: the volume (%s) does not support access control lists, so the file cannot be protected: %w", anchor, fsName, ErrNoACLs)
+}
+
+// Anchor returns the tree's anchor (the pathcanon.Resolve form).
+func (t *Tree) Anchor() string { return t.anchor }
+
+// Close releases the anchor handle.
+func (t *Tree) Close() error {
+	if t.h == windows.InvalidHandle || t.h == 0 {
+		return nil
+	}
+	err := windows.CloseHandle(t.h)
+	t.h = windows.InvalidHandle
+	return err
+}
+
+func (t *Tree) display(rel string) string {
+	return strings.TrimRight(t.anchor, `\`) + `\` + strings.ReplaceAll(rel, "/", `\`)
+}
+
+func (t *Tree) diag() string {
+	return fmt.Sprintf("tree %s (volume %08x, file %016x)", t.anchor, t.volSerial, t.fileIndex)
+}
+
+func (t *Tree) reparseErr(rel string) error {
+	return fmt.Errorf("refusing %s: %w; %s", t.display(rel), ErrReparsePoint, t.diag())
+}
+
+func (t *Tree) checkACLs(p Protection) error {
+	if p == Private && !t.acls {
+		return noACLsError(t.anchor, t.fsName)
+	}
+	return nil
+}
+
+// ntCreate is NtCreateFile of name relative to the directory root, for
+// synchronous I/O, case-insensitive like Win32. sd, when not nil, is the
+// security descriptor of a newly created object.
+func ntCreate(root windows.Handle, name string, access, attrs, share, disposition, options uint32, sd *windows.SECURITY_DESCRIPTOR) (windows.Handle, uintptr, error) {
+	u, err := windows.NewNTUnicodeString(name)
+	if err != nil {
+		return windows.InvalidHandle, 0, err
+	}
+	oa := windows.OBJECT_ATTRIBUTES{
+		RootDirectory:      root,
+		ObjectName:         u,
+		Attributes:         windows.OBJ_CASE_INSENSITIVE,
+		SecurityDescriptor: sd,
+	}
+	oa.Length = uint32(unsafe.Sizeof(oa))
+	var iosb windows.IO_STATUS_BLOCK
+	var h windows.Handle
+	err = windows.NtCreateFile(&h, access|windows.SYNCHRONIZE, &oa, &iosb, nil, attrs, share,
+		disposition, options|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0)
+	if err != nil {
+		return windows.InvalidHandle, 0, ntErr(err)
+	}
+	return h, iosb.Information, nil
+}
+
+// ntErr converts an NTSTATUS into the Win32 error the os package uses, so
+// errors.Is(err, fs.ErrNotExist) and fs.ErrExist work.
+func ntErr(err error) error {
+	st, ok := err.(windows.NTStatus)
+	if !ok {
+		return err
+	}
+	switch st {
+	case windows.STATUS_REPARSE_POINT_ENCOUNTERED:
+		return ErrReparsePoint
+	case windows.STATUS_OBJECT_NAME_COLLISION:
+		return windows.ERROR_FILE_EXISTS
+	}
+	return st.Errno()
+}
+
+type fileAttributeTagInfo struct {
+	FileAttributes uint32
+	ReparseTag     uint32
+}
+
+func attrTag(h windows.Handle) (fileAttributeTagInfo, error) {
+	var info fileAttributeTagInfo
+	err := windows.GetFileInformationByHandleEx(h, windows.FileAttributeTagInfo,
+		(*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)))
+	return info, err
+}
+
+// isReparse reports whether h is a reparse point of any tag.
+func isReparse(h windows.Handle) (bool, fileAttributeTagInfo, error) {
+	tag, err := attrTag(h)
+	if err != nil {
+		return false, tag, err
+	}
+	return tag.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0, tag, nil
+}
+
+// openDirAt opens the directory name relative to parent without following
+// a reparse point, and refuses it if it is one or is not a directory.
+func openDirAt(parent windows.Handle, name string) (windows.Handle, error) {
+	h, _, err := ntCreate(parent, name, dirAccess, 0, shareAll, windows.FILE_OPEN, windows.FILE_OPEN_REPARSE_POINT, nil)
+	if err != nil {
+		return windows.InvalidHandle, err
+	}
+	rp, tag, err := isReparse(h)
+	switch {
+	case err != nil:
+	case rp:
+		err = ErrReparsePoint
+	case tag.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0:
+		err = syscall.ENOTDIR
+	}
+	if err != nil {
+		_ = windows.CloseHandle(h)
+		return windows.InvalidHandle, err
+	}
+	return h, nil
+}
+
+// walk opens every directory component of rel except the leaf, relative to
+// its parent's handle, refusing reparse points. With mkdir, a missing
+// component is created with p. It returns the leaf's parent handle and the
+// leaf name; done closes the parent handle when the walk opened it.
+func (t *Tree) walk(rel string, mkdir bool, p Protection) (parent windows.Handle, leaf string, done func(), err error) {
+	comps, err := splitRel(rel)
+	if err != nil {
+		return 0, "", nil, err
+	}
+	parent = t.h
+	owned := false
+	release := func() {
+		if owned {
+			_ = windows.CloseHandle(parent)
+		}
+	}
+	for i, c := range comps[:len(comps)-1] {
+		h, err := openDirAt(parent, c)
+		if mkdir && errors.Is(err, fs.ErrNotExist) {
+			h, err = t.mkdirAt(parent, c, p)
+		}
+		if err != nil {
+			release()
+			return 0, "", nil, t.walkErr(strings.Join(comps[:i+1], "/"), err)
+		}
+		release()
+		parent, owned = h, true
+	}
+	return parent, comps[len(comps)-1], release, nil
+}
+
+func (t *Tree) walkErr(rel string, err error) error {
+	if errors.Is(err, ErrReparsePoint) {
+		return t.reparseErr(rel)
+	}
+	return &fs.PathError{Op: "open", Path: t.display(rel), Err: err}
+}
+
+// mkdirAt creates the directory name relative to parent with p. If it was
+// created concurrently it is opened instead, still refusing a reparse
+// point.
+func (t *Tree) mkdirAt(parent windows.Handle, name string, p Protection) (windows.Handle, error) {
+	if err := t.checkACLs(p); err != nil {
+		return windows.InvalidHandle, err
+	}
+	var sd *windows.SECURITY_DESCRIPTOR
+	if p == Private {
+		id, err := getIdentity()
+		if err != nil {
+			return windows.InvalidHandle, err
+		}
+		sd = id.dirSD
+	}
+	h, _, err := ntCreate(parent, name, dirAccess, 0, shareAll, windows.FILE_CREATE,
+		windows.FILE_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT, sd)
+	if errors.Is(err, fs.ErrExist) {
+		return openDirAt(parent, name)
+	}
+	return h, err
+}
+
+// MkdirAll creates rel and any missing parents with p, each relative to its
+// parent's handle. Existing directories are walked (a reparse point is
+// refused) and left as they are: an existing directory is never silently
+// re-secured.
+func (t *Tree) MkdirAll(rel string, p Protection) error {
+	parent, leaf, done, err := t.walk(rel, true, p)
+	if err != nil {
+		return err
+	}
+	defer done()
+	h, err := openDirAt(parent, leaf)
+	if errors.Is(err, fs.ErrNotExist) {
+		h, err = t.mkdirAt(parent, leaf, p)
+	}
+	if err != nil {
+		return t.walkErr(rel, err)
+	}
+	return windows.CloseHandle(h)
+}
+
+// OpenDir opens the existing directory rel through the walk (no reparse
+// point at any component), so its privacy can be checked and its entries
+// read on the handle.
+func (t *Tree) OpenDir(rel string) (*os.File, error) {
+	parent, leaf, done, err := t.walk(rel, false, Inherit)
+	if err != nil {
+		return nil, err
+	}
+	defer done()
+	h, err := openDirAt(parent, leaf)
+	if err != nil {
+		return nil, t.walkErr(rel, err)
+	}
+	return os.NewFile(uintptr(h), t.display(rel)), nil
+}
+
+// openLeaf opens the leaf of rel relative to its parent's handle with
+// FILE_OPEN_REPARSE_POINT and refuses it if it is a reparse point.
+func (t *Tree) openLeaf(rel string, access, disposition, options uint32, sd *windows.SECURITY_DESCRIPTOR) (windows.Handle, uintptr, error) {
+	parent, leaf, done, err := t.walk(rel, false, Inherit)
+	if err != nil {
+		return windows.InvalidHandle, 0, err
+	}
+	defer done()
+	h, info, err := ntCreate(parent, leaf, access, windows.FILE_ATTRIBUTE_NORMAL, shareAll, disposition,
+		options|windows.FILE_OPEN_REPARSE_POINT, sd)
+	if err != nil {
+		return windows.InvalidHandle, 0, t.walkErr(rel, err)
+	}
+	if info != fileCreated {
+		rp, _, err := isReparse(h)
+		if err == nil && rp {
+			err = t.reparseErr(rel)
+		}
+		if err != nil {
+			_ = windows.CloseHandle(h)
+			return windows.InvalidHandle, 0, err
+		}
+	}
+	return h, info, nil
+}
+
+// Create opens rel for reading and writing, creating it with p if it does
+// not exist (excl: it must not exist). A new Private file gets the private
+// descriptor in the create call. An existing file opened for a Private
+// create is verified and repaired or refused as OpenPrivate does. The
+// handle shares read, write and delete, so the file can be renamed or
+// removed by handle while it is open.
+func (t *Tree) Create(rel string, excl bool, p Protection) (*os.File, error) {
+	if err := t.checkACLs(p); err != nil {
+		return nil, err
+	}
+	var sd *windows.SECURITY_DESCRIPTOR
+	if p == Private {
+		id, err := getIdentity()
+		if err != nil {
+			return nil, err
+		}
+		sd = id.fileSD
+	}
+	access := uint32(windows.GENERIC_READ | windows.GENERIC_WRITE | windows.DELETE | windows.READ_CONTROL | windows.FILE_READ_ATTRIBUTES)
+	disposition := uint32(windows.FILE_CREATE)
+	if !excl {
+		disposition = windows.FILE_OPEN_IF
+		if p == Private {
+			access |= windows.WRITE_DAC
+		}
+	}
+	h, info, err := t.openLeaf(rel, access, disposition, windows.FILE_NON_DIRECTORY_FILE, sd)
+	if err != nil {
+		return nil, err
+	}
+	f := os.NewFile(uintptr(h), t.display(rel))
+	if info == fileOpened && p == Private {
+		if err := verifyOrRepair(f, true); err != nil {
+			_ = f.Close()
+			return nil, err
+		}
+	}
+	return f, nil
+}
+
+// OpenPrivate opens the existing regular file rel through the walk and
+// verifies it with CheckPrivate on the opened handle. Opened for reading
+// only, a file that is not private is refused. Opened for writing, a file
+// owned by the current user is repaired (its DACL replaced by the private
+// one, on the same handle, before any byte is written) and one owned by
+// someone else is refused. flag is os.O_RDONLY, os.O_WRONLY or os.O_RDWR,
+// optionally with os.O_TRUNC (applied after the check).
+func (t *Tree) OpenPrivate(rel string, flag int) (*os.File, error) {
+	if flag&^(os.O_RDONLY|os.O_WRONLY|os.O_RDWR|os.O_TRUNC) != 0 {
+		return nil, &fs.PathError{Op: "open private", Path: t.display(rel), Err: syscall.EINVAL}
+	}
+	access := uint32(windows.READ_CONTROL | windows.FILE_READ_ATTRIBUTES)
+	write := false
+	switch flag & (os.O_RDONLY | os.O_WRONLY | os.O_RDWR) {
+	case os.O_RDONLY:
+		access |= windows.GENERIC_READ
+	case os.O_WRONLY:
+		access |= windows.GENERIC_WRITE | windows.WRITE_DAC
+		write = true
+	case os.O_RDWR:
+		access |= windows.GENERIC_READ | windows.GENERIC_WRITE | windows.WRITE_DAC
+		write = true
+	}
+	h, _, err := t.openLeaf(rel, access, windows.FILE_OPEN, windows.FILE_NON_DIRECTORY_FILE, nil)
+	if err != nil {
+		return nil, err
+	}
+	f := os.NewFile(uintptr(h), t.display(rel))
+	if err := verifyOrRepair(f, write); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if write && flag&os.O_TRUNC != 0 {
+		if err := f.Truncate(0); err != nil {
+			_ = f.Close()
+			return nil, err
+		}
+	}
+	return f, nil
+}
+
+// verifyOrRepair applies the §3.3.5 rules on an open handle: pass if
+// CheckPrivate passes; otherwise refuse, unless the handle is opened for
+// writing and the file is owned by the current user, in which case the
+// private DACL is set on this same handle (protected, so inherited ACEs
+// are dropped) before any byte is written. The owner is not rewritten: it
+// was just verified to be the current user.
+func verifyOrRepair(f *os.File, write bool) error {
+	err := CheckPrivate(f)
+	if err == nil || !write {
+		return err
+	}
+	owned, oerr := OwnedByCurrentUser(f)
+	if oerr != nil {
+		return oerr
+	}
+	if !owned {
+		return err
+	}
+	id, ierr := getIdentity()
+	if ierr != nil {
+		return ierr
+	}
+	if serr := windows.SetSecurityInfo(windows.Handle(f.Fd()), windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, id.fileACL, nil); serr != nil {
+		return fmt.Errorf("repair the ACL of %s: %w (refusing: %v)", f.Name(), serr, err)
+	}
+	return CheckPrivate(f)
+}
+
+// ReadPrivate reads the regular file rel through the walk and refuses it
+// unless CheckPrivate accepts the opened handle. At most max bytes are read
+// (no limit when max <= 0).
+func (t *Tree) ReadPrivate(rel string, max int64) ([]byte, error) {
+	f, err := t.OpenPrivate(rel, os.O_RDONLY)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	if max <= 0 {
+		return io.ReadAll(f)
+	}
+	return io.ReadAll(io.LimitReader(f, max))
+}
+
+// WriteFile replaces rel atomically: a temporary file created next to it
+// with p (the private descriptor for Private) is written, synced and
+// renamed over rel by handle. The result has the temporary file's
+// protection whatever rel's DACL was, so a too-open file is repaired.
+func (t *Tree) WriteFile(rel string, data []byte, p Protection) error {
+	comps, err := splitRel(rel)
+	if err != nil {
+		return err
+	}
+	dir := strings.Join(comps[:len(comps)-1], "/")
+	f, tmp, err := t.CreateTemp(dir, "."+comps[len(comps)-1]+".*.tmp", p)
+	if err != nil {
+		return err
+	}
+	ok := false
+	defer func() {
+		if !ok {
+			_ = f.Close()
+			_ = t.Remove(tmp)
+		}
+	}()
+	if _, err := f.Write(data); err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := t.Rename(tmp, rel); err != nil {
+		_ = t.Remove(tmp)
+		ok = true
+		return err
+	}
+	ok = true
+	return nil
+}
+
+// CreateTemp creates a new file in the directory relDir ("" for the
+// anchor) with p, named by pattern as os.CreateTemp does (the last "*" is
+// replaced by a random string, or one is appended), and returns it with
+// its path relative to the anchor.
+func (t *Tree) CreateTemp(relDir, pattern string, p Protection) (*os.File, string, error) {
+	if strings.ContainsAny(pattern, `/\`) {
+		return nil, "", &fs.PathError{Op: "createtemp", Path: pattern, Err: errors.New("pattern contains a path separator")}
+	}
+	prefix, suffix := pattern, ""
+	if i := strings.LastIndexByte(pattern, '*'); i >= 0 {
+		prefix, suffix = pattern[:i], pattern[i+1:]
+	}
+	for try := 0; ; try++ {
+		var b [8]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			return nil, "", err
+		}
+		name := prefix + hex.EncodeToString(b[:]) + suffix
+		if relDir != "" {
+			name = relDir + "/" + name
+		}
+		f, err := t.Create(name, true, p)
+		if err == nil {
+			return f, name, nil
+		}
+		if !errors.Is(err, fs.ErrExist) || try >= 100 {
+			return nil, "", err
+		}
+	}
+}
+
+// fileRenameInformationEx is FILE_RENAME_INFORMATION_EX (and, read with
+// Flags as a BOOLEAN, FILE_RENAME_INFORMATION): a ULONG or BOOLEAN padded
+// to the handle's alignment, the target directory handle, the name length
+// in bytes and the name.
+type fileRenameInformationEx struct {
+	Flags          uint32
+	RootDirectory  windows.Handle
+	FileNameLength uint32
+	FileName       [windows.MAX_PATH]uint16
+}
+
+const fileRenameInformationExClass = 65
+
+// Rename renames oldRel to newRel by handle: the source is opened relative
+// to its walked parent (a reparse point is refused), and renamed with
+// FILE_RENAME_INFORMATION whose RootDirectory is newRel's walked parent, so
+// no path is resolved at any point. An existing target is replaced (its
+// name only: a reparse point at newRel is replaced, never followed).
+func (t *Tree) Rename(oldRel, newRel string) error {
+	h, _, err := t.openLeaf(oldRel, windows.DELETE|windows.FILE_READ_ATTRIBUTES, windows.FILE_OPEN, 0, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = windows.CloseHandle(h) }()
+	newParent, newLeaf, done, err := t.walk(newRel, false, Inherit)
+	if err != nil {
+		return err
+	}
+	defer done()
+	name, err := windows.UTF16FromString(newLeaf)
+	if err != nil {
+		return err
+	}
+	var info fileRenameInformationEx
+	if len(name) > len(info.FileName) {
+		return &fs.PathError{Op: "rename", Path: t.display(newRel), Err: syscall.ENAMETOOLONG}
+	}
+	copy(info.FileName[:], name)
+	info.FileNameLength = uint32((len(name) - 1) * 2)
+	info.RootDirectory = newParent
+	// POSIX semantics replace a target that is open elsewhere (a reader).
+	info.Flags = windows.FILE_RENAME_REPLACE_IF_EXISTS | windows.FILE_RENAME_POSIX_SEMANTICS
+	err = windows.NtSetInformationFile(h, &windows.IO_STATUS_BLOCK{}, (*byte)(unsafe.Pointer(&info)),
+		uint32(unsafe.Sizeof(info)), fileRenameInformationExClass)
+	if err != nil {
+		// The file system or OS lacks FILE_RENAME_INFORMATION_EX: retry
+		// with FILE_RENAME_INFORMATION, ReplaceIfExists = TRUE.
+		info.Flags = 1
+		err = windows.NtSetInformationFile(h, &windows.IO_STATUS_BLOCK{}, (*byte)(unsafe.Pointer(&info)),
+			uint32(unsafe.Sizeof(info)), windows.FileRenameInformation)
+	}
+	if err != nil {
+		return &fs.PathError{Op: "rename", Path: t.display(oldRel) + " -> " + t.display(newRel), Err: ntErr(err)}
+	}
+	return nil
+}
+
+type fileDispositionInformationEx struct {
+	Flags uint32
+}
+
+type fileDispositionInformation struct {
+	DeleteFile bool
+}
+
+// Remove removes rel by handle: it is opened relative to its walked parent
+// with DELETE and FILE_OPEN_REPARSE_POINT (a reparse point is refused) and
+// marked for deletion, with POSIX semantics where the file system supports
+// them.
+func (t *Tree) Remove(rel string) error {
+	h, _, err := t.openLeaf(rel, windows.DELETE|windows.FILE_READ_ATTRIBUTES, windows.FILE_OPEN, 0, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = windows.CloseHandle(h) }()
+	ex := fileDispositionInformationEx{Flags: windows.FILE_DISPOSITION_DELETE |
+		windows.FILE_DISPOSITION_POSIX_SEMANTICS | windows.FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE}
+	err = windows.NtSetInformationFile(h, &windows.IO_STATUS_BLOCK{}, (*byte)(unsafe.Pointer(&ex)),
+		uint32(unsafe.Sizeof(ex)), windows.FileDispositionInformationEx)
+	switch err {
+	case nil:
+		return nil
+	case windows.STATUS_INVALID_INFO_CLASS, windows.STATUS_INVALID_PARAMETER, windows.STATUS_NOT_SUPPORTED:
+		// No POSIX delete here (older Windows, FAT): classic delete on
+		// close, which is equivalent for these files.
+		d := fileDispositionInformation{DeleteFile: true}
+		err = windows.NtSetInformationFile(h, &windows.IO_STATUS_BLOCK{}, (*byte)(unsafe.Pointer(&d)),
+			uint32(unsafe.Sizeof(d)), windows.FileDispositionInformation)
+	}
+	if err != nil {
+		return &fs.PathError{Op: "remove", Path: t.display(rel), Err: ntErr(err)}
+	}
+	return nil
+}
+
+// securityOf reads the owner and DACL of the open handle.
+func securityOf(f *os.File) (owner *windows.SID, dacl *windows.ACL, err error) {
+	sd, err := windows.GetSecurityInfo(windows.Handle(f.Fd()), windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read the security descriptor of %s: %w", f.Name(), err)
+	}
+	owner, _, err = sd.Owner()
+	if err != nil {
+		return nil, nil, fmt.Errorf("read the owner of %s: %w", f.Name(), err)
+	}
+	dacl, _, err = sd.DACL()
+	if errors.Is(err, windows.ERROR_OBJECT_NOT_FOUND) {
+		// No DACL present at all: same as a NULL DACL, everyone has access.
+		return owner, nil, nil
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("read the DACL of %s: %w", f.Name(), err)
+	}
+	return owner, dacl, nil
+}
+
+func (id *identity) allowedSID(sid *windows.SID) bool {
+	return sid.Equals(id.user) || sid.Equals(id.system) || sid.Equals(id.admins)
+}
+
+// checkACL is the shared predicate of CheckPrivate and
+// CheckNoForeignWriters. A non-zero writeMask restricts the foreign-SID
+// rule to allow ACEs granting any of those rights; zero means any allow
+// ACE for a foreign SID fails.
+func checkACL(f *os.File, writeMask uint32) error {
+	id, err := getIdentity()
+	if err != nil {
+		return err
+	}
+	owner, dacl, err := securityOf(f)
+	if err != nil {
+		return err
+	}
+	if !owner.Equals(id.user) {
+		return fmt.Errorf("%w: %s is owned by %s, not the current user %s", ErrNotPrivate, f.Name(), owner.String(), id.user.String())
+	}
+	if dacl == nil {
+		return fmt.Errorf("%w: %s has a NULL DACL (everyone has full access)", ErrNotPrivate, f.Name())
+	}
+	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, i, &ace); err != nil {
+			return fmt.Errorf("read ACE %d of %s: %w", i, f.Name(), err)
+		}
+		switch ace.Header.AceType {
+		case windows.ACCESS_DENIED_ACE_TYPE:
+			continue
+		case windows.ACCESS_ALLOWED_ACE_TYPE:
+		default:
+			// Callback, object, audit-in-DACL or unknown ACE types: their
+			// effect cannot be judged here, so they fail closed.
+			return fmt.Errorf("%w: %s has an ACE of type %d, which is not a plain allow or deny ACE", ErrNotPrivate, f.Name(), ace.Header.AceType)
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if id.allowedSID(sid) {
+			continue
+		}
+		if writeMask != 0 && uint32(ace.Mask)&writeMask == 0 {
+			continue
+		}
+		// Inherit-only ACEs are included: on a directory they grant access
+		// to everything created inside it.
+		return fmt.Errorf("%w: %s grants access to %s (mask %#x); scion recreates the file with an owner-only ACL if you delete it", ErrNotPrivate, f.Name(), sid.String(), uint32(ace.Mask))
+	}
+	return nil
+}
+
+// CheckPrivate verifies the open handle's security descriptor: the owner is
+// the current user; the DACL is present (not NULL); every ACE is a plain
+// allow or deny ACE; and every allow ACE (inherit-only ones included) is
+// for the current user, SYSTEM (S-1-5-18) or Administrators
+// (S-1-5-32-544), compared by SID. Administrators are accepted on verify
+// (they can take ownership anyway) but never granted on create. The
+// handle needs READ_CONTROL access.
+func CheckPrivate(f *os.File) error {
+	return checkACL(f, 0)
+}
+
+// fileDeleteChild is FILE_DELETE_CHILD (not defined in x/sys/windows).
+const fileDeleteChild = 0x40
+
+// foreignWriteMask is every right that lets a principal change a file or
+// directory's content, metadata, ACL or owner.
+const foreignWriteMask = windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA | fileDeleteChild |
+	windows.FILE_WRITE_EA | windows.FILE_WRITE_ATTRIBUTES | windows.DELETE | windows.WRITE_DAC |
+	windows.WRITE_OWNER | windows.GENERIC_WRITE | windows.GENERIC_ALL | windows.MAXIMUM_ALLOWED
+
+// CheckNoForeignWriters is the integrity-only variant of CheckPrivate: the
+// owner is the current user, every ACE is a plain allow or deny ACE, and no
+// allow ACE grants a write right (FILE_WRITE_DATA/FILE_ADD_FILE,
+// FILE_APPEND_DATA/FILE_ADD_SUBDIRECTORY, FILE_DELETE_CHILD, FILE_WRITE_EA,
+// FILE_WRITE_ATTRIBUTES, DELETE, WRITE_DAC, WRITE_OWNER, GENERIC_WRITE,
+// GENERIC_ALL, MAXIMUM_ALLOWED) to a SID other than the current user,
+// SYSTEM or Administrators.
+func CheckNoForeignWriters(f *os.File) error {
+	return checkACL(f, foreignWriteMask)
+}
+
+// OwnedByCurrentUser reports whether the open handle's owner is the current
+// user's SID.
+func OwnedByCurrentUser(f *os.File) (bool, error) {
+	id, err := getIdentity()
+	if err != nil {
+		return false, err
+	}
+	sd, err := windows.GetSecurityInfo(windows.Handle(f.Fd()), windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return false, fmt.Errorf("read the owner of %s: %w", f.Name(), err)
+	}
+	owner, _, err := sd.Owner()
+	if err != nil {
+		return false, fmt.Errorf("read the owner of %s: %w", f.Name(), err)
+	}
+	return owner.Equals(id.user), nil
+}
