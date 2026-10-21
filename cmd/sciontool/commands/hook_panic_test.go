@@ -16,6 +16,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -220,6 +221,25 @@ func TestHookPanicHelperProcess(t *testing.T) {
 	os.Exit(0)
 }
 
+// hookHelperEnv returns this process's environment without the keys
+// scrubScionEnv clears (so the child cannot reach a Hub or export
+// telemetry) and without the log level variables (so no level or
+// deprecation notice is added to the child's stderr).
+func hookHelperEnv() []string {
+	drop := map[string]bool{loglevel.EnvLogLevel: true, loglevel.EnvDebug: true}
+	for _, key := range scrubbedScionEnvKeys {
+		drop[key] = true
+	}
+	var env []string
+	for _, kv := range os.Environ() {
+		key, _, _ := strings.Cut(kv, "=")
+		if !drop[key] {
+			env = append(env, kv)
+		}
+	}
+	return env
+}
+
 // TestHookCommand_ExitCode runs `sciontool hook` in a child process and
 // checks the real exit status: 1 (not Go's panic status 2) with empty
 // stdout after a panic, and 0 with the dialect response otherwise.
@@ -230,12 +250,7 @@ func TestHookCommand_ExitCode(t *testing.T) {
 	run := func(mode string) (int, string, string) {
 		t.Helper()
 		cmd := exec.Command(os.Args[0], "-test.run=^TestHookPanicHelperProcess$")
-		cmd.Env = append(os.Environ(), hookPanicHelperEnv+"="+mode, hookPanicHelperHomeEnv+"="+home)
-		// Same scrub as scrubScionEnv: the child must not reach a Hub or
-		// export telemetry. Later entries win in exec's environment.
-		for _, key := range scrubbedScionEnvKeys {
-			cmd.Env = append(cmd.Env, key+"=")
-		}
+		cmd.Env = append(hookHelperEnv(), hookPanicHelperEnv+"="+mode, hookPanicHelperHomeEnv+"="+home)
 		cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","toolCall":{"name":"run_command"}}`)
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -263,4 +278,16 @@ func TestHookCommand_ExitCode(t *testing.T) {
 		assert.Equal(t, 0, code, "stderr: %s", stderr)
 		assert.JSONEq(t, `{"decision":"allow"}`, stdout)
 	})
+}
+
+func TestHookHelperEnv_DropsScrubbedAndLogLevelKeys(t *testing.T) {
+	t.Setenv(loglevel.EnvDebug, "1")
+	t.Setenv(loglevel.EnvLogLevel, "debug")
+	t.Setenv("SCION_OTEL_ENDPOINT", "localhost:4317")
+	t.Setenv("SCION_TEST_HOOK_KEEP", "kept")
+	env := strings.Join(hookHelperEnv(), "\n")
+	assert.NotContains(t, env, loglevel.EnvDebug+"=")
+	assert.NotContains(t, env, loglevel.EnvLogLevel+"=")
+	assert.NotContains(t, env, "SCION_OTEL_ENDPOINT=")
+	assert.Contains(t, env, "SCION_TEST_HOOK_KEEP=kept")
 }

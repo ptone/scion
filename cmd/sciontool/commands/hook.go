@@ -131,11 +131,11 @@ const maxHookPanicValueLen = 200
 //
 // The panic is reported on stderr as one line: its type and its value
 // truncated to at most maxHookPanicValueLen bytes (on a UTF-8 rune
-// boundary). The hook runs with quiet
-// logging (log output goes to the log file only), so that line is written
-// directly. The sciontool log file also gets the goroutine stack, which
-// holds function names and addresses, not payload data. Nothing is written
-// to stdout after the panic, so no partial response can reach the harness.
+// boundary). The hook runs with quiet logging (log output goes to the log
+// file only), so that line is written directly. The sciontool log file also
+// gets the goroutine stack, which holds function names, addresses and raw
+// argument words, but no payload text. Nothing is written to stdout after
+// the panic, so no partial response can reach the harness.
 //
 // Not covered, and still exiting 2: panics in other goroutines (for example
 // the stdin decoder in readOptionalStdin) and fatal runtime errors such as
