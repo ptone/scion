@@ -28,10 +28,13 @@ import (
 
 	"cloud.google.com/go/compute/metadata"
 	"github.com/spf13/pflag"
+	"go.opentelemetry.io/otel/metric"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relayrole/relayserver"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubexport"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/relaydb"
 )
 
@@ -205,8 +208,13 @@ func runRelayRole(ctx context.Context, cfg *config.GlobalConfig) error {
 	if err != nil {
 		return err
 	}
+	mp, flushMetrics := relayMetrics(ctx, cfg, rcfg.InstanceID, relayObservabilityInputs(cfg))
+	if mp != nil {
+		rcfg.MeterProvider = mp
+	}
 	srv, err := relayserver.Start(ctx, rcfg)
 	if err != nil {
+		_ = flushMetrics(context.Background())
 		return err
 	}
 	runErr := srv.Wait(ctx)
@@ -214,7 +222,76 @@ func runRelayRole(ctx context.Context, cfg *config.GlobalConfig) error {
 	sctx, cancel := context.WithTimeout(context.Background(), relayShutdownTimeout(grace, capped))
 	defer cancel()
 	_ = srv.Shutdown(sctx, capped, relay.ShutdownDrainCap(grace))
+	// After the drain, within the same shutdown deadline: flushing metrics
+	// never extends the SIGTERM handling.
+	_ = flushMetrics(sctx)
 	return runErr
+}
+
+// relayNewMeterProvider builds the metrics exporter (a test seam).
+var relayNewMeterProvider = hubmetrics.NewMeterProvider
+
+// relayMetricsInputs are the process inputs of the relay's export
+// decision (passed in so the decision is testable).
+type relayMetricsInputs struct {
+	getenv   func(string) string
+	metadata func() (string, error)
+}
+
+// relayObservabilityInputs returns the relay's export inputs. The
+// metadata-server project lookup is offered only when metrics are
+// explicitly on, so with the switch unset or off the decision makes no
+// network call.
+func relayObservabilityInputs(cfg *config.GlobalConfig) relayMetricsInputs {
+	in := relayMetricsInputs{getenv: os.Getenv}
+	if on := cfg.Hub.Observability.MetricsEnabled; on != nil && *on {
+		in.metadata = func() (string, error) {
+			if !metadata.OnGCE() {
+				return "", errors.New("not on GCP")
+			}
+			return metadata.ProjectIDWithContext(context.Background())
+		}
+	}
+	return in
+}
+
+// relayMetricsDecision is the hub's metrics export decision
+// (hubexport.ResolveProject and hubexport.DecideMetrics over
+// server.hub.observability.metrics_enabled and the export project), read
+// from the relay's own settings. The relay has no operational settings
+// service, so the switch comes from the loaded config, as for a hub
+// without one.
+func relayMetricsDecision(cfg *config.GlobalConfig, in relayMetricsInputs) hubexport.Decision {
+	project := hubexport.ResolveProject(hubexport.ProjectInputs{
+		Configured: cfg.Hub.GCPProjectID,
+		EnvValue:   in.getenv(hubexport.ProjectIDEnv),
+		Metadata:   in.metadata,
+	})
+	return hubexport.DecideMetrics(cfg.Hub.Observability.MetricsEnabled, project)
+}
+
+// relayMetrics builds the relay process's metrics export exactly like the
+// hub's (design §3.9, v2.21.55): the same observability switch
+// (server.hub.observability.metrics_enabled in the relay's own settings)
+// and export project, the same exporter helper, with service name
+// scion-relay and the relay instance id. With metrics off, or no project,
+// it returns a nil provider and a no-op flush: no exporter and no network.
+// The returned flush shuts the provider down within the caller's context.
+func relayMetrics(ctx context.Context, cfg *config.GlobalConfig, instanceID string, in relayMetricsInputs) (metric.MeterProvider, func(context.Context) error) {
+	noop := func(context.Context) error { return nil }
+	status := relayMetricsDecision(cfg, in)
+	if !status.Enabled {
+		slog.Info("Conduit relay metrics export", "status", status.LogLine())
+		return nil, noop
+	}
+	mp, err := relayNewMeterProvider(ctx, status.Project.ID,
+		hubmetrics.WithServiceName("scion-relay"), hubmetrics.WithInstanceID(instanceID))
+	if err != nil {
+		slog.Warn("Conduit relay metrics export disabled", "error", err)
+		return nil, noop
+	}
+	slog.Info("Conduit relay metrics export", "status", status.LogLine())
+	return mp, mp.Shutdown
 }
 
 // relayShutdownPad is how long Shutdown may run past a capped drain: the
