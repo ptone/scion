@@ -62,6 +62,9 @@ func TestServerRoleFlag(t *testing.T) {
 // internal URL, its public URL and the internal listener; errors name the
 // setting, never a value.
 func TestValidateRelayRoleConfig(t *testing.T) {
+	prevCR := relayOnCloudRun
+	t.Cleanup(func() { relayOnCloudRun = prevCR })
+	relayOnCloudRun = func() bool { return false }
 	require.NoError(t, validateRelayRoleConfig(relayRoleTestConfig()))
 	for name, tc := range map[string]struct {
 		mod     func(*config.GlobalConfig)
@@ -118,6 +121,45 @@ func TestValidateRelayRoleConfig(t *testing.T) {
 			assert.ErrorContains(t, validateConduitPeerSecret(external, false, ""), "server.hub.conduit.peer_secret is required when server.hub.conduit.relay_mode is external")
 		})
 	}
+}
+
+// TestValidateRelayRoleConfig_CloudRunSingleton (design §3.9 "Cloud Run
+// singleton"): on Cloud Run (K_SERVICE set) a relay without
+// server.relay.singleton: true fails, with an error naming the key and the
+// three instance settings; with it, or off Cloud Run, the relay starts.
+func TestValidateRelayRoleConfig_CloudRunSingleton(t *testing.T) {
+	prevCR := relayOnCloudRun
+	t.Cleanup(func() { relayOnCloudRun = prevCR })
+	for _, tc := range []struct {
+		name      string
+		cloudRun  bool
+		singleton bool
+		wantErr   bool
+	}{
+		{name: "Cloud Run without the assertion", cloudRun: true, wantErr: true},
+		{name: "Cloud Run singleton", cloudRun: true, singleton: true},
+		{name: "singleton off Cloud Run", singleton: true},
+		{name: "neither"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			relayOnCloudRun = func() bool { return tc.cloudRun }
+			cfg := relayRoleTestConfig()
+			cfg.Relay.Singleton = tc.singleton
+			err := validateRelayRoleConfig(cfg)
+			if !tc.wantErr {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			for _, want := range []string{"server.relay.singleton: true", "max_instances=1", "min_instances=1", "cpu_idle=false", "K_SERVICE"} {
+				assert.Contains(t, err.Error(), want)
+			}
+		})
+	}
+	t.Setenv("K_SERVICE", "scion-relay")
+	assert.True(t, prevCR(), "K_SERVICE set means Cloud Run")
+	t.Setenv("K_SERVICE", "")
+	assert.False(t, prevCR(), "an empty K_SERVICE is not Cloud Run")
 }
 
 // TestRunRelayRoleChecksConfigBeforeTheDatabase: an incomplete
@@ -177,6 +219,7 @@ func TestRelayServerConfigReadsRelaySettings(t *testing.T) {
 	assert.Equal(t, "relay-7", rcfg.InstanceID)
 	assert.Equal(t, "http://hub-internal.example:9811", rcfg.HubInternalURL)
 	assert.Equal(t, "https://relay-7.example.com", rcfg.PublicURL)
+	assert.False(t, rcfg.Singleton)
 	assert.Equal(t, "127.0.0.1:18443", rcfg.PublicListen)
 	assert.Equal(t, "127.0.0.1:0", rcfg.InternalListen)
 	assert.Equal(t, "http://relay-7.internal:9811", rcfg.Advertise(nil), "server.hub.conduit.internal_advertise")

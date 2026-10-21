@@ -136,3 +136,42 @@ func TestConduitRegistry_LiveRelays(t *testing.T) {
 	_, err = registry.New(fs, registry.Config{Clock: f.clock}).LiveRelays(f.ctx, now)
 	require.ErrorIs(t, err, assert.AnError, "a read error is returned, never a partial list")
 }
+
+// TestConduitRegistry_RelayFeatures (design v2.21.54): relay_instances.features
+// round-trips a JSON string array written at registration, including names
+// a reader does not know; a relay registered with none stores NULL, and NULL
+// or a malformed value reads as no features. Re-registration replaces the
+// list (fixed per generation).
+func TestConduitRegistry_RelayFeatures(t *testing.T) {
+	f := newConduitFixture(t)
+	_, err := f.reg.RegisterRelay(f.ctx, registry.RelayInstance{InstanceID: "relay-a", InternalEndpoint: "http://relay-a:9811",
+		Features: []string{registry.RelayFeatureSingleton, "a_future_feature"}})
+	require.NoError(t, err)
+	f.registerRelay("relay-b")
+
+	features := func(id string) []string {
+		t.Helper()
+		all, err := f.store.ListRelays(f.ctx)
+		require.NoError(t, err)
+		for _, ri := range all {
+			if ri.InstanceID == id {
+				return ri.Features
+			}
+		}
+		t.Fatalf("relay %s is not registered", id)
+		return nil
+	}
+	assert.Equal(t, []string{registry.RelayFeatureSingleton, "a_future_feature"}, features("relay-a"))
+	assert.Nil(t, features("relay-b"), "no features is stored as NULL and reads as none")
+
+	raw, err := f.store.client.RelayInstance.Get(f.ctx, "relay-b")
+	require.NoError(t, err)
+	assert.Nil(t, raw.Features, "the column is NULL when there are no features")
+
+	require.NoError(t, f.store.client.RelayInstance.UpdateOneID("relay-b").SetFeatures("not json").Exec(f.ctx))
+	assert.Nil(t, features("relay-b"), "a malformed value reads as no features")
+
+	_, err = f.reg.RegisterRelay(f.ctx, registry.RelayInstance{InstanceID: "relay-a", InternalEndpoint: "http://relay-a:9811"})
+	require.NoError(t, err)
+	assert.Nil(t, features("relay-a"), "re-registration replaces the list")
+}

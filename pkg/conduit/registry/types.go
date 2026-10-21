@@ -85,6 +85,24 @@ type RelayInstance struct {
 	StartedAt        time.Time
 	LastSeen         time.Time
 	Draining         bool
+	// Features lists the relay's features (relay_instances.features), set
+	// at registration and fixed per generation; nil when none. Readers
+	// ignore values they do not know (design v2.21.54).
+	Features []string
+}
+
+// RelayFeatureSingleton is the relay feature of a non-HA singleton relay
+// (server.relay.singleton; design §3.9 "Cloud Run singleton").
+const RelayFeatureSingleton = "singleton"
+
+// HasFeature reports whether the relay lists feature f.
+func (ri RelayInstance) HasFeature(f string) bool {
+	for _, have := range ri.Features {
+		if have == f {
+			return true
+		}
+	}
+	return false
 }
 
 // TransportLimits mirrors Capabilities.transport_limits (contract §3).

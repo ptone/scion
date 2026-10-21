@@ -111,6 +111,8 @@ type Config struct {
 	// RequireSelfCheck makes the relay probe its own internal endpoint at
 	// start (HA deployments).
 	RequireSelfCheck bool
+	// Singleton runs the relay as a non-HA singleton (relay.Config.Singleton).
+	Singleton bool
 	// ExperimentPollPeriod is how often hub.conduit is re-read
 	// (DefaultExperimentPollPeriod).
 	ExperimentPollPeriod time.Duration
@@ -282,6 +284,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		InternalEndpoint: endpoint,
 		PublicEndpoint:   cfg.PublicURL,
 		RequireSelfCheck: cfg.RequireSelfCheck,
+		Singleton:        cfg.Singleton,
 		Registry:         registry.New(cfg.Registry, registry.Config{}),
 		Store:            cfg.Registry,
 		Session:          conduit.Config{Clock: clock.Real()},
