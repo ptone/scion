@@ -34,7 +34,6 @@ pkg/config/settings_v1.go pending Phase 3 (C11)
 pkg/credentials/store.go pending Phase 3 (C1, C1r)
 pkg/hubprofile/cache.go pending Phase 3 (C12, C13, C14)
 pkg/hubprofile/profile.go pending Phase 3 (C15)
-pkg/tunnelclient/state.go pending Phase 3 (T1, T2)
 
 # Findings §4b and in-container sites: gated on Windows.
 cmd/broker_purge_guard.go not protected on Windows: gated (runtime-broker purge containment)
