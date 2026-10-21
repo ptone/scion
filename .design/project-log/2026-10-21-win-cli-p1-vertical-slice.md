@@ -91,3 +91,29 @@ All of these were accepted by win-cli-em before implementation, and are listed i
 - Windows CI (run 39659360801 at 1aba4974f): 203 tests passed, 0 skipped, and every §4.2 test for these packages passed, plus the review-round tests.
 - Linux CI (run 39651514719 at dd14add02): fully green, including Build & Test for the four packages. The run for the final head is linked in the PR.
 - Not run locally: anything that compiles `./cmd` or pkg/hub (gate rules).
+
+## Outcome
+
+**Code review:** r1 (REQUEST CHANGES), then r2–r5 (APPROVE). Code was frozen and merged at `97120ae06`; `win-cli/integration` was fast-forwarded to it.
+
+**Security lead (fix-filebrowser-symlink-lead), 2026-10-21, at 97120ae06** (evidence `gs://scion-xproject-exchange/win-cli/p1/seclead-evidence-97120ae06.md`, sha256 6bf04b8c…):
+> "CLEAR against §1-§4. Review readiness, NOT authorization to land; CI-green is a separate gate and the Linux green link is still outstanding."
+> "Deviation 1: ACCEPT, and stronger than the design's method, not merely equivalent." "Deviations 2-8: ACCEPT all."
+
+Its non-blocking items:
+- `AcquireExisting` should be doc-warned or dropped. **Deferred to the Phase 3a brief by the EM.**
+- The FAT-fallback error string prints tag 0x0. **Deferred to the Phase 3a brief by the EM.**
+- Hardlinks are not covered by checklist §3. Checklist addendum A1 (`win-cli/security-checklist-addendum-a1.md`) applies in Phase 3b; no Phase 1 change.
+
+**Gate series:**
+- coordinator-2 SERIES GO [m14727] on lane b02 LIGHT A, for `p1-gate.sh` 5582fce3 (STEP OK by win-cli-srev-p1-2).
+- W1 PASS: `END mode=W1 rc=0 host=e6f2aefc1713 utc=2026-10-21T21:09:41Z`. Results: privatefs 14/0/0, pathcanon 6/0/0, filelock 11/0/0, tunnelclient 78/0/0; the callers build passed.
+- The log is `gs://scion-xproject-exchange/win-cli/gates/p1/p1-W1-log.tgz`, sha256 e5af4c19b51b03779b0e4a0dfb31028656a4821ef4b19778f2b3c04daf0a4929.
+- Rulings recorded:
+  - No vet windows (EM). Multi-package vet does not count as one compile; Windows vet evidence is the windows-latest CI job.
+  - One multi-package non-test `go build` counts as one compile (coordinator-2).
+- `p1-gate-r3.sh` (the srev-p1-2 non-blocking hardening, for a future series) is kept in the bucket and was not run.
+
+**CI at 97120ae06:**
+- Linux: https://github.com/ptone/scion/actions/runs/39674740309 (success, all jobs).
+- Windows: https://github.com/ptone/scion/actions/runs/39674740468 (207 passed, 0 skipped, 0 failed).
