@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 // windowsAllowed lists the commands the Windows build runs. It uses the
@@ -202,22 +203,52 @@ func (e *unsupportedOnWindowsError) Is(target error) bool {
 	return target == errUnsupportedOnWindows
 }
 
+// windowsGatedAnnotation marks a command the Windows gate refuses. Its
+// value is the command path, space-separated, without "scion".
+const windowsGatedAnnotation = "scion_windows_gated"
+
+// flagValidationAnnotations are the cobra flag annotations that make
+// cobra reject an invocation before the command runs: required flags and
+// the three flag-group kinds (cobra v1.10 bash_completions.go and
+// flag_groups.go).
+var flagValidationAnnotations = []string{
+	cobra.BashCompOneRequiredFlag,
+	"cobra_annotation_required_if_others_set",
+	"cobra_annotation_one_required",
+	"cobra_annotation_mutually_exclusive",
+}
+
 // applyPlatformRestrictions gates the command tree for goos. On Windows,
 // every command whose path is not in windowsAllowed is kept in the tree
 // but hidden, and running it returns errUnsupportedOnWindows: removing it
 // would turn "scion server start" into an unknown command, which does not
 // say why. On every other platform it does nothing.
 //
-// A gated command's own run hooks are cleared, and it accepts any
-// arguments and unknown flags, so nothing of the command runs and the
-// refusal is what the user sees. PersistentPreRunE is left alone, so
-// global flag handling still runs. It is called with runtime.GOOS right
-// after applyModeRestrictions; tests pass goos explicitly.
+// A gated command's own run hooks are cleared, it accepts any arguments
+// and unknown flags, and the required-flag and flag-group rules of the
+// flags it defines are dropped, so nothing of the command runs and no
+// usage error for it is reported. Root's PersistentPreRunE still handles
+// the global flags (a bad --format or a --tz/--utc conflict is still
+// reported), then returns the refusal (windowsRefusal) before any
+// invocation-target, project, settings or migration work. RunE refuses
+// too, for a command reached without root's hook. It is called with
+// runtime.GOOS right after applyModeRestrictions; tests pass goos
+// explicitly.
 func applyPlatformRestrictions(root *cobra.Command, goos string) {
 	if goos != "windows" {
 		return
 	}
 	gateCommands(root, "", func(path string) bool { return !windowsAllowed[path] })
+}
+
+// windowsRefusal returns the refusal for a command the Windows gate
+// marked, and nil for any other command.
+func windowsRefusal(cmd *cobra.Command) error {
+	path, ok := cmd.Annotations[windowsGatedAnnotation]
+	if !ok {
+		return nil
+	}
+	return &unsupportedOnWindowsError{path: path}
 }
 
 // gateCommands walks the tree under parent and replaces the run function
@@ -232,7 +263,12 @@ func gateCommands(parent *cobra.Command, prefix string, gate func(path string) b
 		if !gate(path) {
 			continue
 		}
-		refusal := &unsupportedOnWindowsError{path: strings.ReplaceAll(path, ".", " ")}
+		display := strings.ReplaceAll(path, ".", " ")
+		refusal := &unsupportedOnWindowsError{path: display}
+		if child.Annotations == nil {
+			child.Annotations = map[string]string{}
+		}
+		child.Annotations[windowsGatedAnnotation] = display
 		child.RunE = func(*cobra.Command, []string) error { return refusal }
 		child.Run = nil
 		child.PreRun, child.PreRunE = nil, nil
@@ -241,5 +277,13 @@ func gateCommands(parent *cobra.Command, prefix string, gate func(path string) b
 		child.Args = cobra.ArbitraryArgs
 		child.FParseErrWhitelist.UnknownFlags = true
 		child.Hidden = true
+		// Only the flags this command defines (local and its own
+		// persistent ones), never inherited ones: root's global flag
+		// groups keep applying.
+		child.LocalFlags().VisitAll(func(f *pflag.Flag) {
+			for _, a := range flagValidationAnnotations {
+				delete(f.Annotations, a)
+			}
+		})
 	}
 }

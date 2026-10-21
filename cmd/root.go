@@ -129,6 +129,13 @@ return an error instead of blocking.`,
 			return errNoHubRemoved
 		}
 
+		// Windows build: a gated command refuses here, after the global
+		// flags are handled and before any invocation-target, project,
+		// settings or migration work (cmd/platform_gate.go).
+		if err := windowsRefusal(cmd); err != nil {
+			return err
+		}
+
 		// Target-hub profiles (ptone/scion#4240): refuse commands outside
 		// the profile allow-list, and apply the agent-mode target rule.
 		if err := checkHubProfileGate(cmd, mode); err != nil {
