@@ -251,6 +251,23 @@ func TestCopilotPostToolUseFailure_StdinThroughDialect(t *testing.T) {
 	assert.Empty(t, event.Data.Message)
 }
 
+// TestCopilotPostToolUseFailure_NoStdoutResponse guards the hook's stdout.
+// Copilot appends a postToolUseFailure hook's stdout to the failure the agent
+// sees when the hook exits 2, so the Copilot dialect must declare no response
+// for this event and the hook must write nothing to stdout (ptone/scion#4408).
+func TestCopilotPostToolUseFailure_NoStdoutResponse(t *testing.T) {
+	md, err := dialects.LoadMappingDialect(testutil.HarnessDialectPath(t, "copilot"))
+	require.NoError(t, err)
+
+	assert.Nil(t, md.Response("postToolUseFailure"))
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(positionalEventData("postToolUseFailure", []byte(copilotPostToolUseFailure)), &raw))
+	var stdout strings.Builder
+	require.NoError(t, writeHookResponse(&stdout, md, raw))
+	assert.Empty(t, stdout.String())
+}
+
 func TestCopilotDialect_CamelCasePayloads(t *testing.T) {
 	md, err := dialects.LoadMappingDialect(testutil.HarnessDialectPath(t, "copilot"))
 	require.NoError(t, err)
