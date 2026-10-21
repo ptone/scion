@@ -77,6 +77,10 @@ func mustStat(t *testing.T, p string) os.FileInfo {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// On Windows os.Stat records the file ID lazily: os.SameFile reads it
+	// by path at its first call. Read it now, so the result describes the
+	// file that was at p at this moment.
+	_ = os.SameFile(fi, fi)
 	return fi
 }
 

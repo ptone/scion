@@ -143,26 +143,47 @@ func TestCreate_PrivateSD(t *testing.T) {
 	}
 }
 
-// TestCreate_OwnerExplicitWhenElevated: under an elevated token the default
-// owner is Administrators; a Private file's owner is still the user.
+// TestCreate_OwnerExplicitWhenElevated: under an elevated administrator
+// token the default owner of new objects is usually Administrators; a
+// Private file's owner must still be the user.
+//
+// The hosted runner's own token defaults to the user as owner (it runs as
+// the built-in RID-500 account), which would make the check vacuous. So
+// the test sets up the elevated condition itself: it creates the files on a
+// thread impersonating a copy of the process token whose default owner is
+// Administrators, and first asserts that the default owner really is
+// Administrators there, so it cannot pass vacuously.
 func TestCreate_OwnerExplicitWhenElevated(t *testing.T) {
-	if got := wintest.TokenOwnerSID(t); got != wintest.SIDAdministrators {
-		t.Fatalf("the runner token's default owner is %s, not Administrators (%s): the token is not elevated, so this test cannot show the owner is set explicitly. The Windows job must run elevated.", got, wintest.SIDAdministrators)
-	}
 	dir := t.TempDir()
 	tr := treeAt(t, dir)
-	priv := mustCreate(t, tr, "private", Private, "x")
-	if owner := wintest.ReadSD(t, priv).Owner; owner != wintest.UserSID(t) {
-		t.Fatalf("Private file owner = %s, want the user %s", owner, wintest.UserSID(t))
-	}
-	// Control: a file created without an explicit owner gets the token's
-	// default owner, Administrators.
+	user := wintest.UserSID(t)
 	plain := filepath.Join(dir, "plain")
-	if err := os.WriteFile(plain, nil, 0o600); err != nil {
-		t.Fatal(err)
+	var priv string
+	wintest.WithDefaultOwner(t, wintest.SIDAdministrators, func() {
+		if got := wintest.TokenOwnerSID(t); got != wintest.SIDAdministrators {
+			t.Fatalf("the impersonation token's default owner is %s, not Administrators (%s): the test would be vacuous", got, wintest.SIDAdministrators)
+		}
+		priv = mustCreate(t, tr, "private", Private, "x")
+		// Control: a file created without an explicit owner gets the
+		// token's default owner, Administrators.
+		if err := os.WriteFile(plain, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if owner := wintest.ReadSD(t, priv).Owner; owner != user {
+		t.Fatalf("Private file owner = %s, want the user %s", owner, user)
 	}
 	if owner := wintest.ReadSD(t, plain).Owner; owner != wintest.SIDAdministrators {
 		t.Fatalf("control: plain file owner = %s, want Administrators", owner)
+	}
+	// The Private directory descriptor sets the owner explicitly too.
+	wintest.WithDefaultOwner(t, wintest.SIDAdministrators, func() {
+		if err := tr.MkdirAll("pdir", Private); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if owner := wintest.ReadSD(t, filepath.Join(dir, "pdir")).Owner; owner != user {
+		t.Fatalf("Private directory owner = %s, want the user %s", owner, user)
 	}
 }
 
@@ -452,6 +473,9 @@ func TestTree_HandleRenameReplacesTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// os.Stat records the file ID lazily on Windows (os.SameFile reads it
+	// by path on first use): read it now, before the rename.
+	_ = os.SameFile(before, before)
 	tmp, name, err := tr.CreateTemp("", ".t.*.tmp", Private)
 	if err != nil {
 		t.Fatal(err)

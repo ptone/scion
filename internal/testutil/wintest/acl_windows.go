@@ -47,11 +47,12 @@ func UserSID(t testing.TB) string {
 	return tu.User.Sid.String()
 }
 
-// TokenOwnerSID returns the SID string of the process token's default
-// owner (TokenOwner): the owner a new object gets when none is given.
+// TokenOwnerSID returns the SID string of the effective token's default
+// owner (TokenOwner): the owner a new object gets when none is given. Inside
+// WithDefaultOwner that is the impersonation token's.
 func TokenOwnerSID(t testing.TB) string {
 	t.Helper()
-	tok := windows.GetCurrentProcessToken()
+	tok := windows.GetCurrentThreadEffectiveToken()
 	var n uint32
 	_ = windows.GetTokenInformation(tok, windows.TokenOwner, nil, 0, &n)
 	if n == 0 {
@@ -246,4 +247,39 @@ func ShortPath(t testing.TB, path string) string {
 		}
 	}
 	return windows.UTF16ToString(buf[:n])
+}
+
+// WithDefaultOwner runs f on this goroutine's OS thread under an
+// impersonation copy of the process token whose default owner (TokenOwner)
+// is sid. That reproduces what an elevated administrator token looks like
+// under the default "Administrators group" owner policy, whatever the
+// runner's own policy is. sid must be a group in the token that may own
+// objects (Administrators, for an administrator). f must not start
+// goroutines that create files: they would not run under this token.
+func WithDefaultOwner(t testing.TB, sid string, f func()) {
+	t.Helper()
+	s, err := windows.StringToSid(sid)
+	if err != nil {
+		t.Fatalf("StringToSid(%s): %v", sid, err)
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	if err := windows.ImpersonateSelf(windows.SecurityImpersonation); err != nil {
+		t.Fatalf("ImpersonateSelf: %v", err)
+	}
+	defer func() { _ = windows.RevertToSelf() }()
+	thread, err := windows.GetCurrentThread()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tok windows.Token
+	if err := windows.OpenThreadToken(thread, windows.TOKEN_QUERY|windows.TOKEN_ADJUST_DEFAULT, false, &tok); err != nil {
+		t.Fatalf("OpenThreadToken: %v", err)
+	}
+	defer func() { _ = tok.Close() }()
+	owner := struct{ Owner *windows.SID }{Owner: s}
+	if err := windows.SetTokenInformation(tok, windows.TokenOwner, (*byte)(unsafe.Pointer(&owner)), uint32(unsafe.Sizeof(owner))); err != nil {
+		t.Fatalf("set the token's default owner to %s (the Windows job runs as an administrator): %v", sid, err)
+	}
+	f()
 }

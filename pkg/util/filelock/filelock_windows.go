@@ -155,8 +155,18 @@ func openNoFollow(path string, p *uint16, share uint32) (*os.File, error) {
 		FileAttributes uint32
 		ReparseTag     uint32
 	}
-	if err := windows.GetFileInformationByHandleEx(h, windows.FileAttributeTagInfo,
-		(*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info))); err != nil {
+	err = windows.GetFileInformationByHandleEx(h, windows.FileAttributeTagInfo,
+		(*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)))
+	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) || errors.Is(err, windows.ERROR_NOT_SUPPORTED) ||
+		errors.Is(err, windows.ERROR_INVALID_FUNCTION) {
+		// The file system does not implement FileAttributeTagInfo (FAT32
+		// has no reparse points): read the same attribute bits from
+		// GetFileInformationByHandle on the same handle.
+		var bhfi windows.ByHandleFileInformation
+		err = windows.GetFileInformationByHandle(h, &bhfi)
+		info.FileAttributes = bhfi.FileAttributes
+	}
+	if err != nil {
 		_ = windows.CloseHandle(h)
 		return nil, fmt.Errorf("stat lock file: %w", err)
 	}

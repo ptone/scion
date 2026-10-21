@@ -25,16 +25,28 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/sys/windows"
+
 	"github.com/GoogleCloudPlatform/scion/internal/testutil/wintest"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 )
 
+// checkPrivatePath runs CheckPrivate on a fresh handle of path. The handle
+// shares delete access: a live lock file is held by a handle with DELETE
+// access, which os.Open (no FILE_SHARE_DELETE) would collide with.
 func checkPrivatePath(t *testing.T, path string) error {
 	t.Helper()
-	f, err := os.Open(path)
+	p, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := windows.CreateFile(p, windows.READ_CONTROL|windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
+		windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 	if err != nil {
 		t.Fatalf("open %s: %v", path, err)
 	}
+	f := os.NewFile(uintptr(h), path)
 	defer func() { _ = f.Close() }()
 	return privatefs.CheckPrivate(f)
 }

@@ -210,7 +210,7 @@ func (t *Tree) init() error {
 	}
 	acls, fsName, err := volumeACLs(t.h)
 	if err != nil {
-		return &fs.PathError{Op: "open tree", Path: t.anchor, Err: err}
+		return &fs.PathError{Op: "open tree", Path: t.anchor, Err: fmt.Errorf("read volume information: %w", err)}
 	}
 	t.acls, t.fsName = acls, fsName
 	var bhfi windows.ByHandleFileInformation
@@ -382,11 +382,27 @@ type fileAttributeTagInfo struct {
 	ReparseTag     uint32
 }
 
+// attrTag reads the attributes (and reparse tag) of the open handle h. A
+// file system that does not implement FileAttributeTagInfo (FAT32 answers
+// ERROR_INVALID_PARAMETER) has no reparse points; there the attributes come
+// from GetFileInformationByHandle on the same handle, which carries the
+// same FILE_ATTRIBUTE_REPARSE_POINT and FILE_ATTRIBUTE_DIRECTORY bits.
 func attrTag(h windows.Handle) (fileAttributeTagInfo, error) {
 	var info fileAttributeTagInfo
 	err := windows.GetFileInformationByHandleEx(h, windows.FileAttributeTagInfo,
 		(*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)))
-	return info, err
+	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) || errors.Is(err, windows.ERROR_NOT_SUPPORTED) ||
+		errors.Is(err, windows.ERROR_INVALID_FUNCTION) {
+		var bhfi windows.ByHandleFileInformation
+		if ferr := windows.GetFileInformationByHandle(h, &bhfi); ferr != nil {
+			return info, fmt.Errorf("read file attributes: %w (FileAttributeTagInfo: %v)", ferr, err)
+		}
+		return fileAttributeTagInfo{FileAttributes: bhfi.FileAttributes}, nil
+	}
+	if err != nil {
+		return info, fmt.Errorf("read file attributes: %w", err)
+	}
+	return info, nil
 }
 
 // isReparse reports whether h is a reparse point of any tag.
