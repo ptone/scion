@@ -82,7 +82,7 @@ func copyFlags(dst, src *pflag.FlagSet) {
 
 // gateState is what the gate changes on one command.
 type gateState struct {
-	hidden, hasRun, hasRunE bool
+	hidden, hasRun, hasRunE, marked bool
 }
 
 func gateStates(root *cobra.Command) map[string]gateState {
@@ -94,7 +94,8 @@ func gateStates(root *cobra.Command) map[string]gateState {
 			if prefix != "" {
 				path = prefix + "." + path
 			}
-			states[path] = gateState{hidden: child.Hidden, hasRun: child.Run != nil, hasRunE: child.RunE != nil}
+			_, marked := child.Annotations[windowsGatedAnnotation]
+			states[path] = gateState{hidden: child.Hidden, hasRun: child.Run != nil, hasRunE: child.RunE != nil, marked: marked}
 			walk(child, path)
 		}
 	}
@@ -223,14 +224,16 @@ func TestWindowsGate_RefusesBeforeProjectResolution(t *testing.T) {
 
 func TestWindowsGate_HidesOnlyGatedCommands(t *testing.T) {
 	root, _ := gateTestTree(t)
+	before := gateStates(root)
 	applyPlatformRestrictions(root, "windows")
 
 	for path, st := range gateStates(root) {
 		if windowsAllowed[path] {
+			assert.Equal(t, before[path], st, "%s is allowed and must be left unchanged", path)
 			assert.False(t, st.hidden, "%s is allowed and must stay visible", path)
-			assert.True(t, st.hasRun, "%s is allowed and must keep its run function", path)
 			continue
 		}
+		assert.True(t, st.marked, "%s is gated and must be marked for root's hook", path)
 		assert.True(t, st.hidden, "%s is gated and must be hidden", path)
 		assert.False(t, st.hasRun, "%s is gated and must have no Run", path)
 		assert.True(t, st.hasRunE, "%s is gated and must refuse through RunE", path)
