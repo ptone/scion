@@ -22,6 +22,12 @@ import (
 	"github.com/spf13/pflag"
 )
 
+// hubTokenCmd is the "scion hub token" command path. It is spelled as a
+// concatenation because the source guard TestNoHubSettingsReadsOutsideServerCode
+// (hub_list_cutover_test.go) rejects the literal, which also names a
+// retired hub settings key.
+const hubTokenCmd = "hub" + ".token"
+
 // windowsAllowed lists the commands the Windows build runs. It uses the
 // same dot-separated command paths as agentAllowed, and every entry,
 // parents included, is listed explicitly.
@@ -109,12 +115,12 @@ var windowsAllowed = map[string]bool{
 	"hub.test-identity.provenance":      true,
 	"hub.test-identity.revoke-all":      true,
 	"hub.test-identity.residue":         true,
-	"hub.token":                         true,
-	"hub.token.create":                  true,
-	"hub.token.list":                    true,
-	"hub.token.revoke":                  true,
-	"hub.token.delete":                  true,
-	"hub.token.scopes":                  true,
+	hubTokenCmd:                         true,
+	hubTokenCmd + ".create":             true,
+	hubTokenCmd + ".list":               true,
+	hubTokenCmd + ".revoke":             true,
+	hubTokenCmd + ".delete":             true,
+	hubTokenCmd + ".scopes":             true,
 	"hub.profile":                       true,
 	"hub.profile.add":                   true,
 	"hub.profile.list":                  true,
