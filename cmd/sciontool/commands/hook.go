@@ -12,7 +12,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
+	"strconv"
 	"time"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -60,36 +63,133 @@ Examples:
   sciontool hook task_completed "Implemented feature X"`,
 	Args: cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		if len(args) > 0 {
-			// Handle subcommands: ask_user, task_completed
-			switch args[0] {
-			case "ask_user":
-				message := "Input requested"
-				if hookData != "" {
-					message = hookData
-				}
-				runAskUser(message)
-				return
-			case "task_completed":
-				message := "Task completed"
-				if hookData != "" {
-					message = hookData
-				}
-				runTaskCompleted(message)
-				return
-			default:
-				// Treat as event name (for legacy compatibility)
-				runHookWithEvent(args[0])
-				return
-			}
-		}
-
-		// Default: process JSON from stdin
-		if err := runHookFromStdin(); err != nil {
-			log.Error("Hook processing failed: %v", err)
-			os.Exit(1)
-		}
+		exitOnHookError(runHookCommand(args))
 	},
+}
+
+// runHookCommand runs the hook command body. A panic anywhere on this path
+// (stdin read, dialect parsing, handler dispatch, the response write,
+// telemetry) is recovered and returned as an error, so the process exits 1
+// rather than 2; see recoverHookPanic.
+func runHookCommand(args []string) (err error) {
+	defer recoverHookPanic(&err)
+
+	if len(args) > 0 {
+		// Handle subcommands: ask_user, task_completed
+		switch args[0] {
+		case "ask_user":
+			message := "Input requested"
+			if hookData != "" {
+				message = hookData
+			}
+			runAskUser(message)
+			return nil
+		case "task_completed":
+			message := "Task completed"
+			if hookData != "" {
+				message = hookData
+			}
+			runTaskCompleted(message)
+			return nil
+		default:
+			// Treat as event name (for legacy compatibility)
+			return runHookWithEvent(args[0])
+		}
+	}
+
+	// Default: process JSON from stdin
+	return runHookFromStdin()
+}
+
+// hookStderr is where a recovered panic is reported. Tests replace it.
+var hookStderr io.Writer = os.Stderr
+
+// hookExit ends the process with the given status. A variable only so tests
+// can observe the exit code in-process.
+var hookExit = os.Exit
+
+// exitOnHookError logs err and exits 1 when err is non-nil. It is called
+// only after the hook body has returned, so every deferred cleanup in the
+// body (Hub budget cancel, telemetry shutdown) has already run.
+func exitOnHookError(err error) {
+	if err == nil {
+		return
+	}
+	log.Error("Hook processing failed: %v", err)
+	hookExit(1)
+}
+
+// maxHookPanicValueLen bounds, in bytes, how much of a recovered panic value
+// is logged. The value may echo hook input, so only a short prefix is kept.
+const maxHookPanicValueLen = 200
+
+// recoverHookPanic turns a panic in the hook command into an error in *errp.
+//
+// An unrecovered Go panic exits with status 2, and harness hook protocols
+// give exit 2 a meaning: Claude-style hooks treat it as a blocking error and
+// Copilot adds the hook's stdout to the model context on postToolUseFailure.
+// A crash must instead be a non-blocking error (exit 1) in every dialect.
+//
+// The panic is reported on stderr as one line: its type and its value,
+// truncated to at most maxHookPanicValueLen bytes (on a UTF-8 rune
+// boundary) and then quoted, so newlines, terminal escape sequences and
+// other control bytes in the value are escaped. The hook runs with quiet
+// logging (log output goes to the log file only), so that line is written
+// directly. The sciontool log file also gets the goroutine stack, which
+// holds function names, addresses and raw argument words, but no payload
+// text. Nothing is written to stdout after the panic, so no partial
+// response can reach the harness. A panic after the response was written
+// (in runHookTelemetry) leaves that complete response on stdout and still
+// exits 1.
+//
+// Not covered, and still exiting 2: panics in other goroutines (for example
+// the stdin decoder in readOptionalStdin) and fatal runtime errors such as
+// concurrent map writes or running out of memory, which recover cannot
+// intercept. Panics outside the command bodies, in Execute or the root
+// command's PersistentPreRun (log setup, flag handling), are not covered
+// either.
+//
+// It must be called directly by a deferred statement.
+func recoverHookPanic(errp *error) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	value := formatHookPanicValue(fmt.Sprint(r))
+	msg := fmt.Sprintf("sciontool hook: recovered panic (%T): %s", r, value)
+	_, _ = fmt.Fprintf(hookStderr, "[sciontool] %s\n", msg)
+	log.Error("%s\n%s", msg, debug.Stack())
+	*errp = fmt.Errorf("recovered panic (%T)", r)
+}
+
+// formatHookPanicValue prepares a panic value for the one-line stderr
+// report: it truncates value with truncateHookPanicValue, then quotes it
+// (strconv.Quote), so control bytes cannot break the line or reach the
+// terminal, and marks a cut value with "...(truncated)" after the quotes.
+func formatHookPanicValue(value string) string {
+	cut := truncateHookPanicValue(value)
+	quoted := strconv.Quote(cut)
+	if len(cut) < len(value) {
+		quoted += "...(truncated)"
+	}
+	return quoted
+}
+
+// truncateHookPanicValue cuts value to at most maxHookPanicValueLen bytes,
+// backing up to a rune boundary so no partial UTF-8 sequence is kept. A
+// valid rune has at most utf8.UTFMax-1 continuation bytes, so the backup is
+// capped there: a run of invalid continuation bytes at the cut is cut
+// through (strconv.Quote escapes those bytes) rather than emptying the
+// value.
+func truncateHookPanicValue(value string) string {
+	if len(value) <= maxHookPanicValueLen {
+		return value
+	}
+	cut := maxHookPanicValueLen
+	for back := 0; back < utf8.UTFMax-1 && !utf8.RuneStart(value[cut]); back++ {
+		cut--
+	}
+	return value[:cut]
 }
 
 func init() {
@@ -115,7 +215,11 @@ var askUserCmd = &cobra.Command{
 		if len(args) > 0 {
 			message = args[0]
 		}
-		runAskUser(message)
+		exitOnHookError(func() (err error) {
+			defer recoverHookPanic(&err)
+			runAskUser(message)
+			return nil
+		}())
 	},
 }
 
@@ -129,7 +233,11 @@ var taskCompletedCmd = &cobra.Command{
 		if len(args) > 0 {
 			message = args[0]
 		}
-		runTaskCompleted(message)
+		exitOnHookError(func() (err error) {
+			defer recoverHookPanic(&err)
+			runTaskCompleted(message)
+			return nil
+		}())
 	},
 }
 
@@ -159,12 +267,9 @@ func runHookFromStdin() error {
 // hooks this way (Copilot) still pipe the event's JSON payload on stdin, so
 // the payload is read when there is one and merged under the explicit event
 // name. Without a payload the event is synthetic, as before.
-func runHookWithEvent(eventName string) {
+func runHookWithEvent(eventName string) error {
 	jsonData := positionalEventData(eventName, readOptionalStdin(os.Stdin, positionalStdinWait))
-	if err := processHookData(jsonData); err != nil {
-		log.Error("Hook processing failed: %v", err)
-		os.Exit(1)
-	}
+	return processHookData(jsonData)
 }
 
 // positionalStdinWait bounds how long the positional event path waits for a
@@ -373,6 +478,8 @@ var hookOTelErrorHandler = otel.ErrorHandlerFunc(func(err error) {
 // and is best effort: exports are bounded by telemetry.HookExportTimeout and
 // telemetry.HookShutdownTimeout, are not retried, and a failure is logged at
 // debug level only. It never writes to stdout and never fails the hook.
+// The exception is a panic here: recoverHookPanic catches it, the complete
+// response already written stays on stdout, and the hook exits 1.
 // When the Hub client is configured it also persists session counts and, on
 // session-end, reports the session summary to the Hub (bounded by
 // sessionMetricsReportTimeout and by hubBudget, the hook's shared Hub
