@@ -152,7 +152,7 @@ func TestLoadServerKeyring_Refusals(t *testing.T) {
 				d["signing"].(map[string]any)["emit"] = "versioned"
 			})}
 		}, "not supported in this release"},
-		{"no hub", func(t *testing.T) *config.GlobalConfig {
+		{"web without hub", func(t *testing.T) *config.GlobalConfig {
 			enableHub = false
 			return &config.GlobalConfig{KeyringFile: writeCmdKeyring(t, nil)}
 		}, "does not run the hub"},
@@ -169,6 +169,21 @@ func TestLoadServerKeyring_Refusals(t *testing.T) {
 			assert.Nil(t, serverKeyringFromFile(), "a refused keyring is never kept (no fallback either)")
 		})
 	}
+}
+
+// TestLoadServerKeyring_BrokerOnlyNeverOpensFile: a Runtime Broker-only
+// server (no hub, no web) ignores server.keyring_file without reading it,
+// even when the path is unreadable.
+func TestLoadServerKeyring_BrokerOnlyNeverOpensFile(t *testing.T) {
+	isolateKeyring(t)
+	enableHub, enableWeb = false, false
+	opened := false
+	old := loadServerKeyringFile
+	loadServerKeyringFile = func(string) (*keyring.Keyring, error) { opened = true; return nil, errors.New("must not be called") }
+	t.Cleanup(func() { loadServerKeyringFile = old })
+	require.NoError(t, loadServerKeyring(&config.GlobalConfig{KeyringFile: "/nonexistent/keyring.json"}))
+	assert.False(t, opened)
+	assert.Nil(t, serverKeyringFromFile())
 }
 
 func TestVerifyKeyringExperiment(t *testing.T) {

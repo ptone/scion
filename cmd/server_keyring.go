@@ -91,6 +91,12 @@ func loadServerKeyring(cfg *config.GlobalConfig) error {
 		}
 		return nil
 	}
+	if !enableHub && !enableWeb {
+		// A Runtime Broker-only server uses no server secret: like the
+		// relay role, it never opens the keyring file.
+		slog.Info("server.keyring_file is set but not used: this server runs neither the hub nor the web server")
+		return nil
+	}
 	if !enableHub {
 		return fmt.Errorf("%s is set but this server does not run the hub; a keyring file needs the hub (its %s experiment gate is read from hub settings)",
 			config.KeyringFileKey, experiments.SecretRotation)
