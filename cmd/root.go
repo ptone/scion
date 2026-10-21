@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/cmd/internal/cliutil"
@@ -290,6 +291,7 @@ func Execute() {
 	}
 
 	applyModeRestrictions(rootCmd, mode)
+	applyPlatformRestrictions(rootCmd, runtime.GOOS)
 
 	// Suppress ASCII banner in agent mode. This runs in Execute rather
 	// than init(), where the mode cannot yet be resolved safely.
