@@ -35,6 +35,31 @@ All of these were accepted by win-cli-em before implementation, and are listed i
 - **FAT32** does not implement `FileAttributeTagInfo` (it returns `ERROR_INVALID_PARAMETER`). On that error the attribute bits come from `GetFileInformationByHandle` on the same handle. FAT has no reparse points.
 - **Repair** sets only the DACL (protected). The owner was just verified to be the current user, and setting OWNER would need `WRITE_OWNER`, which an owner does not hold implicitly.
 
+## Review rounds
+
+**Round 1 (win-cli-rev-p1-r1, REQUEST CHANGES), fixed in dd14add02:**
+- **F1 (blocking):** Resolve/Within took a dangling symlink or junction for a not-yet-existing tail. The fix probes without following and returns `pathcanon.ErrDanglingLink`.
+- **F2:** the FAT fallback triggers on `ERROR_INVALID_PARAMETER` only, through a helper tested on NTFS link handles.
+- **F3:** a nil owner or an unreadable descriptor is refused, never dereferenced.
+- **F4 (deviation, stricter than the design's `strings.EqualFold`):** components are compared with `CompareStringOrdinal(ignoreCase)`, the OS uppercase table that NTFS uses. Kelvin-sign test.
+- **F5:** unix `OpenPrivate` opens with `O_NONBLOCK`, so a planted FIFO is refused, not blocked on.
+- **F7:** the Rename fallback runs on the information-class statuses only.
+- **F9:** a denied lock create reports the denial.
+- **F8 declined for P1:** the guard is per-function; a transitive check is a follow-up.
+- **F10 (in-place repair does not revoke existing handles):** noted for the Phase 3 briefs, which should prefer atomic replace for secrets.
+
+**Round 2 (win-cli-rev-p1-r2, APPROVE with non-blocking findings), fixed in c87e59011 and 1aba4974f:**
+- **F1:** atomic replace renames through the still-open temp handle (`renameHandle`, `Tree.RenameOpen`). `WriteFile` and tunnelclient's `fileRecord.Write` use it, so a file swapped in under the temporary name never lands at the target. This is load-bearing for Phase 3 row C2. Windows swap test with a by-name control.
+- **F2:** a tunnel record over 1 MiB is refused explicitly.
+- **F3:** `OpenPrivate(O_WRONLY|O_RDWR)` is EINVAL on both OSes (Linux `open(2)` would accept it).
+- **F4:** a regular file with a tail below it is ENOTDIR on Windows, as on unix.
+- **F5:** the windows.yml elevation comment is corrected.
+- **F6:** the dangling-link tests show the same entry flipping to resolved-outside once its target exists.
+
+**Unix deltas in tunnelclient `read` (beyond §3.7 delta 1):**
+- The record is opened before the liveness probe and read after it, so it can be one rewrite older than the newest. Each rewrite is a complete record.
+- A record over 1 MiB is refused. Main read records unbounded.
+
 ## Findings for later phases
 
 - **`os.SameFile` on Windows loads the file ID lazily, by path, on its first call.** A `Stat` before a rename followed by a `SameFile` after it compares the new file with itself. Tests prime the ID with `os.SameFile(fi, fi)` right after the `Stat`.
@@ -48,5 +73,6 @@ All of these were accepted by win-cli-em before implementation, and are listed i
   - GOOS=windows amd64 and arm64 build+vet of the four packages and wintest;
   - darwin vet;
   - Linux vet and `go test`.
-- Windows CI (run 39648975930 at 54b752fb3): 196 tests passed, 0 skipped, and every §4.2 test for these packages passed.
+- Windows CI (run 39659360801 at 1aba4974f): 203 tests passed, 0 skipped, and every §4.2 test for these packages passed, plus the review-round tests.
+- Linux CI (run 39651514719 at dd14add02): fully green, including Build & Test for the four packages. The run for the final head is linked in the PR.
 - Not run locally: anything that compiles `./cmd` or pkg/hub (gate rules).
