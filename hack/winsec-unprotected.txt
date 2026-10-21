@@ -1,0 +1,72 @@
+# Files hack/winsec-guard.sh accepts without per-line markers: the Go files
+# in the GOOS=windows build of ./cmd/scion whose files are NOT protected on
+# Windows (security checklist §1, "honest" form). One file per line:
+#   <path> <status>
+# status is one of:
+#   pending Phase 3 (<rows>)                  a findings §4a site (design §3.5
+#                                             rows C*, T*, I*, X*); Phase 3
+#                                             moves it onto privatefs/pathcanon
+#                                             and deletes its line here.
+#   not protected on Windows: gated (<why>)   a server, broker or in-container
+#                                             site, reachable only from commands
+#                                             the Windows gate refuses
+#                                             (cmd/platform_gate.go).
+# A path listed here is exempt from guard checks (a) and (b) for the whole
+# file. Keep entries sorted by path.
+
+# Findings §4a: client-reachable private files, pending Phase 3.
+cmd/broker_join.go pending Phase 3 (X2; the command itself is gated)
+cmd/hub_test_identity.go pending Phase 3 (X1)
+cmd/hub_test_identity_admin.go pending Phase 3 (X1)
+cmd/hub_test_identity_profile.go pending Phase 3 (X1)
+cmd/ssh.go pending Phase 3 (I3)
+cmd/ssh_config_files.go pending Phase 3 (I1, I2, I3)
+cmd/vscode.go pending Phase 3 (I3, I4)
+pkg/agent/github_resolution_cache.go pending Phase 3 (X3)
+pkg/apiclient/devauth.go pending Phase 3 (C2)
+pkg/config/atomic_write.go pending Phase 3 (C5)
+pkg/config/cli_context.go pending Phase 3 (C7)
+pkg/config/hub_config.go pending Phase 3 (C3, C4)
+pkg/config/integration_config.go pending Phase 3 (C8)
+pkg/config/legacy_grove_migration.go pending Phase 3 (C9, C10)
+pkg/config/settings_lock.go pending Phase 3 (C6)
+pkg/config/settings_v1.go pending Phase 3 (C11)
+pkg/credentials/store.go pending Phase 3 (C1, C1r)
+pkg/hubprofile/cache.go pending Phase 3 (C12, C13, C14)
+pkg/hubprofile/profile.go pending Phase 3 (C15)
+pkg/tunnelclient/state.go pending Phase 3 (T1, T2)
+
+# Findings §4b and in-container sites: gated on Windows.
+cmd/broker_purge_guard.go not protected on Windows: gated (runtime-broker purge containment)
+pkg/agent/agent_files_guard.go not protected on Windows: gated (agent files guard; agent lifecycle runs on a broker)
+pkg/agent/harness_config_policy.go not protected on Windows: gated (harness config record; agent provisioning)
+pkg/agent/hoststate.go not protected on Windows: gated (agent host state; agent lifecycle runs on a broker)
+pkg/agent/hoststate_other.go not protected on Windows: gated (agent host state; agent lifecycle runs on a broker)
+pkg/agent/provision.go not protected on Windows: gated (agent provisioning)
+pkg/agent/shared_dir_storage.go not protected on Windows: gated (shared-dir storage; agent provisioning)
+pkg/agent/task_file.go not protected on Windows: gated (agent task file; agent provisioning)
+pkg/agentplugin/copy.go not protected on Windows: gated (plugin copy; agent provisioning)
+pkg/brokercredentials/multistore.go not protected on Windows: gated (broker HMAC credentials)
+pkg/brokeridentity/identity.go not protected on Windows: gated (broker identity; lock is ErrUnsupported)
+pkg/brokerregistration/registration.go not protected on Windows: gated (broker registration credentials)
+pkg/harness/container_script_harness.go not protected on Windows: gated (harness files in an agent home)
+pkg/harness/project_hook.go not protected on Windows: gated (harness project hook script)
+pkg/hub/maintenance_executors.go not protected on Windows: gated (hub server maintenance)
+pkg/hub/resource_import.go not protected on Windows: gated (hub server resource import)
+pkg/hub/template_source_fetch.go not protected on Windows: gated (hub server template fetch)
+pkg/provision/provision.go not protected on Windows: gated (broker workspace provisioning)
+pkg/provision/sharers.go not protected on Windows: gated (broker workspace provisioning)
+pkg/provision/worktree_validate.go not protected on Windows: gated (broker workspace provisioning)
+pkg/runtime/common.go not protected on Windows: gated (container runtime mounts)
+pkg/runtimebroker/export_id.go not protected on Windows: gated (runtime broker)
+pkg/runtimebroker/launch_journal.go not protected on Windows: gated (runtime broker; lock is ErrUnsupported)
+pkg/runtimebroker/ownership.go not protected on Windows: gated (runtime broker)
+pkg/runtimebroker/project_configs_paths.go not protected on Windows: gated (runtime broker)
+pkg/runtimebroker/project_relink.go not protected on Windows: gated (runtime broker)
+pkg/runtimebroker/start_context.go not protected on Windows: gated (runtime broker)
+pkg/runtimebroker/workspace_handlers.go not protected on Windows: gated (runtime broker)
+pkg/sciontool/substrate/private_tmp_dir.go not protected on Windows: gated (in-container sciontool)
+pkg/sciontool/substrate/server.go not protected on Windows: gated (in-container sciontool)
+pkg/store/entadapter/timestamp_normalize.go not protected on Windows: gated (hub database snapshot)
+pkg/util/fs.go not protected on Windows: gated (removal helpers; chmods make entries removable)
+pkg/util/git.go not protected on Windows: gated (RemoveWorktree containment; agent lifecycle runs on a broker)

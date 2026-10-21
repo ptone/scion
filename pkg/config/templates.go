@@ -549,7 +549,7 @@ func findOrHydrateDefaultTemplate(projectPath string) (*Template, error) {
 	// MkdirTemp creates 0700 and SeedAgnosticTemplate's MkdirAll is a no-op on an
 	// existing dir, so without this the published default diverges from every other
 	// seeding path, which yields 0755.
-	_ = os.Chmod(staging, 0755)
+	_ = os.Chmod(staging, 0755) //winsec:not-protection mode 0755 is not a privacy mode
 
 	if sErr := SeedAgnosticTemplate(staging, false); sErr != nil {
 		util.Debugf("failed to hydrate embedded default template: %v", sErr)
