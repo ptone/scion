@@ -280,6 +280,23 @@ func TestWithin_DanglingSymlinkRefused(t *testing.T) {
 	mustWithin(t, root, filepath.Join(root, "s", "x"), false)
 }
 
+// A link made to a missing target is a file symlink on Windows (os.Symlink
+// picks the type from the target at creation): dangling, it is refused.
+func TestWithin_DanglingFileSymlinkRefused(t *testing.T) {
+	root, _, outside := fixture(t)
+	wintest.MustSymlink(t, filepath.Join(outside, "never"), filepath.Join(root, "sf"))
+	for _, p := range []string{filepath.Join(root, "sf"), filepath.Join(root, "sf", "x")} {
+		if in, err := Within(root, p); !errors.Is(err, ErrDanglingLink) || in {
+			t.Fatalf("Within(root, %q) = %v, %v; want ErrDanglingLink", p, in, err)
+		}
+		if _, err := Resolve(p); !errors.Is(err, ErrDanglingLink) {
+			t.Fatalf("Resolve(%q) = %v, want ErrDanglingLink", p, err)
+		}
+	}
+	// Control: the same name as a missing tail.
+	mustWithin(t, root, filepath.Join(root, "sf2", "x"), true)
+}
+
 func TestWithin_DanglingJunctionRefused(t *testing.T) {
 	root, _, outside := fixture(t)
 	target := filepath.Join(outside, "gone")

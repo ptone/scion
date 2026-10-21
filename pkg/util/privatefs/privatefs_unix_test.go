@@ -170,3 +170,30 @@ func TestOpenPrivate_RefusesFIFO(t *testing.T) {
 		t.Fatalf("control: %v", err)
 	}
 }
+
+func TestRenameOpen_RefusesNonPrivateHandleUnix(t *testing.T) {
+	tr, dir := openTestTree(t)
+	f, err := tr.Create("open.tmp", true, Inherit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	if err := f.Chmod(0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.RenameOpen(f, "target"); !errors.Is(err, ErrNotPrivate) {
+		t.Fatalf("RenameOpen of a 0644 file: %v, want ErrNotPrivate", err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "target")); !os.IsNotExist(err) {
+		t.Fatalf("the refused file was renamed: %v", err)
+	}
+	// Control: a Private temporary file renames.
+	p, _, err := tr.CreateTemp("", ".t.*.tmp", Private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = p.Close() }()
+	if err := tr.RenameOpen(p, "target"); err != nil {
+		t.Fatalf("control: %v", err)
+	}
+}

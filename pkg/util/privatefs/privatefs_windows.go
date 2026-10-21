@@ -51,6 +51,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -632,7 +633,8 @@ func (t *Tree) OpenPrivate(rel string, flag int) (*os.File, error) {
 		access |= windows.GENERIC_READ | windows.GENERIC_WRITE | windows.WRITE_DAC
 		write = true
 	default:
-		// O_WRONLY|O_RDWR: open(2) answers EINVAL too.
+		// O_WRONLY|O_RDWR: refused on both OSes (Linux open(2) would
+		// accept it).
 		return nil, &fs.PathError{Op: "open private", Path: t.display(rel), Err: syscall.EINVAL}
 	}
 	h, _, err := t.openLeaf(rel, access, windows.FILE_OPEN, windows.FILE_NON_DIRECTORY_FILE, nil)
@@ -700,23 +702,25 @@ func (t *Tree) ReadPrivate(rel string, max int64) ([]byte, error) {
 
 // WriteFile replaces rel atomically: a temporary file created next to it
 // with p (the private descriptor for Private) is written, synced and
-// renamed over rel through its still-open handle (RenameOpen). The result has the temporary file's
-// protection whatever rel's DACL was, so a too-open file is repaired.
+// renamed over rel through its still-open handle. The result has the
+// temporary file's protection whatever rel's DACL was, so a too-open file
+// is repaired. On failure the temporary file is deleted through the same
+// handle; nothing acts on its name.
 func (t *Tree) WriteFile(rel string, data []byte, p Protection) error {
 	comps, err := splitRel(rel)
 	if err != nil {
 		return err
 	}
 	dir := strings.Join(comps[:len(comps)-1], "/")
-	f, tmp, err := t.CreateTemp(dir, "."+comps[len(comps)-1]+".*.tmp", p)
+	f, _, err := t.CreateTemp(dir, "."+comps[len(comps)-1]+".*.tmp", p)
 	if err != nil {
 		return err
 	}
 	ok := false
 	defer func() {
 		if !ok {
+			_ = deleteHandle(windows.Handle(f.Fd()))
 			_ = f.Close()
-			_ = t.Remove(tmp)
 		}
 	}()
 	if _, err := f.Write(data); err != nil {
@@ -726,8 +730,10 @@ func (t *Tree) WriteFile(rel string, data []byte, p Protection) error {
 		return err
 	}
 	// Rename through the handle still open on the file just written, so
-	// nothing swapped in under the temporary name can land at rel.
-	if err := t.RenameOpen(f, rel); err != nil {
+	// nothing swapped in under the temporary name can land at rel. This
+	// tree created f with protection p, so RenameOpen's privacy check
+	// (which would refuse an Inherit file) is not needed here.
+	if err := t.renameOpen(f, rel); err != nil {
 		return err
 	}
 	ok = true
@@ -798,14 +804,43 @@ func (t *Tree) Rename(oldRel, newRel string) error {
 	return nil
 }
 
-// RenameOpen renames the file open as f, which this tree created (Create
-// or CreateTemp, whose handles carry DELETE access), to newRel, through
-// that same handle. The file renamed is the one f was opened on, whatever
-// has happened to its name since: a file swapped in under the temporary
-// name is never what lands at newRel. f stays open.
+// RenameOpen renames the private file open as f (a temporary file this
+// tree created with Private: Create and CreateTemp handles carry DELETE
+// access) to newRel, through that same handle. The file renamed is the one
+// f was opened on, whatever has happened to its name since: a file swapped
+// in under the temporary name is never what lands at newRel. f stays open.
+//
+// It is a private-tree primitive: f must pass CheckPrivate (verified on
+// the handle before the rename), otherwise it is refused with
+// ErrNotPrivate and nothing is renamed.
 func (t *Tree) RenameOpen(f *os.File, newRel string) error {
-	if err := t.renameHandle(windows.Handle(f.Fd()), newRel); err != nil {
+	if err := CheckPrivate(f); err != nil {
 		return &fs.PathError{Op: "rename", Path: f.Name() + " -> " + t.display(newRel), Err: err}
+	}
+	return t.renameOpen(f, newRel)
+}
+
+// renameOpen is RenameOpen without the privacy check, for files this
+// package created itself with a known protection.
+func (t *Tree) renameOpen(f *os.File, newRel string) error {
+	err := t.renameHandle(windows.Handle(f.Fd()), newRel)
+	// f.Fd() is valid only while f is reachable.
+	runtime.KeepAlive(f)
+	if err != nil {
+		return &fs.PathError{Op: "rename", Path: f.Name() + " -> " + t.display(newRel), Err: err}
+	}
+	return nil
+}
+
+// RemoveOpen deletes the file open as f (created by this tree, so its
+// handle carries DELETE access) through that same handle, with POSIX
+// semantics where supported: the name is removed whatever has happened to
+// it, and a file swapped in under that name is left alone. f stays open.
+func (t *Tree) RemoveOpen(f *os.File) error {
+	err := deleteHandle(windows.Handle(f.Fd()))
+	runtime.KeepAlive(f)
+	if err != nil {
+		return &fs.PathError{Op: "remove", Path: f.Name(), Err: err}
 	}
 	return nil
 }
@@ -866,22 +901,31 @@ func (t *Tree) Remove(rel string) error {
 		return err
 	}
 	defer func() { _ = windows.CloseHandle(h) }()
+	if err := deleteHandle(h); err != nil {
+		return &fs.PathError{Op: "remove", Path: t.display(rel), Err: err}
+	}
+	return nil
+}
+
+// deleteHandle marks the file open as h (with DELETE access) for deletion:
+// POSIX semantics (the name goes at once) where supported, else classic
+// delete-on-close, which is equivalent for these files.
+func deleteHandle(h windows.Handle) error {
 	ex := fileDispositionInformationEx{Flags: windows.FILE_DISPOSITION_DELETE |
 		windows.FILE_DISPOSITION_POSIX_SEMANTICS | windows.FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE}
-	err = windows.NtSetInformationFile(h, &windows.IO_STATUS_BLOCK{}, (*byte)(unsafe.Pointer(&ex)),
+	err := windows.NtSetInformationFile(h, &windows.IO_STATUS_BLOCK{}, (*byte)(unsafe.Pointer(&ex)),
 		uint32(unsafe.Sizeof(ex)), windows.FileDispositionInformationEx)
 	switch err {
 	case nil:
 		return nil
 	case windows.STATUS_INVALID_INFO_CLASS, windows.STATUS_INVALID_PARAMETER, windows.STATUS_NOT_SUPPORTED:
-		// No POSIX delete here (older Windows, FAT): classic delete on
-		// close, which is equivalent for these files.
+		// No POSIX delete here (older Windows, FAT).
 		d := fileDispositionInformation{DeleteFile: true}
 		err = windows.NtSetInformationFile(h, &windows.IO_STATUS_BLOCK{}, (*byte)(unsafe.Pointer(&d)),
 			uint32(unsafe.Sizeof(d)), windows.FileDispositionInformation)
 	}
 	if err != nil {
-		return &fs.PathError{Op: "remove", Path: t.display(rel), Err: ntErr(err)}
+		return ntErr(err)
 	}
 	return nil
 }

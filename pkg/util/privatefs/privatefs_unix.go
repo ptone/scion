@@ -260,14 +260,25 @@ func (t *Tree) Rename(oldRel, newRel string) error {
 	return os.Rename(oldPath, newPath)
 }
 
-// RenameOpen renames the file open as f (created by this tree) to newRel:
-// os.Rename of f's name, today's unix behaviour. f stays open.
+// RenameOpen renames the private file open as f (created by this tree with
+// Private) to newRel: os.Rename of f's name, today's unix behaviour. f must
+// pass CheckPrivate (checked with fstat on the handle), otherwise it is
+// refused with ErrNotPrivate and nothing is renamed. f stays open.
 func (t *Tree) RenameOpen(f *os.File, newRel string) error {
+	if err := CheckPrivate(f); err != nil {
+		return err
+	}
 	newPath, err := t.path(newRel)
 	if err != nil {
 		return err
 	}
 	return os.Rename(f.Name(), newPath)
+}
+
+// RemoveOpen removes the file open as f (created by this tree): os.Remove
+// of f's name, today's unix behaviour. f stays open.
+func (t *Tree) RemoveOpen(f *os.File) error {
+	return os.Remove(f.Name())
 }
 
 // Remove removes rel (os.Remove, which removes a symlink itself).

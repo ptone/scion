@@ -152,8 +152,9 @@ func TestAcquire_InheritForMode0644(t *testing.T) {
 }
 
 // The tunnelclient pattern: a file created with delete sharing is locked
-// with LockFile and renamed while held, and the lock stays held under the
-// new name.
+// with LockFile and renamed through its own handle (RenameOpen) while held.
+// The lock stays held under the new name, and a file swapped in under the
+// temporary name before the rename is never what becomes the lock file.
 func TestLockFile_ShareDeleteRename(t *testing.T) {
 	dir := t.TempDir()
 	tr, err := privatefs.OpenTree(dir, privatefs.TreeOptions{})
@@ -171,13 +172,27 @@ func TestLockFile_ShareDeleteRename(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer l.Unlock()
-	if err := tr.Rename(".x.lock.tmp", "x.lock"); err != nil {
+	// Swap: move the locked temp away and plant an unlocked impostor.
+	tmp := filepath.Join(dir, ".x.lock.tmp")
+	if err := os.Rename(tmp, filepath.Join(dir, "away")); err != nil {
+		t.Fatalf("swap the lock temp away: %v", err)
+	}
+	if err := os.WriteFile(tmp, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.RenameOpen(f, "x.lock"); err != nil {
 		t.Fatalf("rename while held: %v", err)
 	}
 	final := filepath.Join(dir, "x.lock")
 	if _, err := AcquireExisting(final, 20*time.Millisecond); !errors.Is(err, ErrTimeout) {
-		t.Fatalf("probe of the renamed held lock: %v, want ErrTimeout", err)
+		t.Fatalf("probe of the renamed held lock: %v, want ErrTimeout (the locked file must be the one renamed)", err)
 	}
+	// Control: the impostor under the temporary name is not locked.
+	li, err := AcquireExisting(tmp, 0)
+	if err != nil {
+		t.Fatalf("control: the impostor is lockable: %v", err)
+	}
+	li.Unlock()
 	// The owner can remove its own name while holding the lock.
 	if err := tr.Remove("x.lock"); err != nil {
 		t.Fatalf("remove while held: %v", err)

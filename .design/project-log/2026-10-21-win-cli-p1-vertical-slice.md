@@ -56,6 +56,13 @@ All of these were accepted by win-cli-em before implementation, and are listed i
 - **F5:** the windows.yml elevation comment is corrected.
 - **F6:** the dangling-link tests show the same entry flipping to resolved-outside once its target exists.
 
+**Round 3 (win-cli-rev-p1-r3, APPROVE with small findings), fixed in this push:**
+- **F1:** the tunnel lock temp is renamed into place through its own locked handle (`RenameOpen`). Lock-temp swap test in filelock.
+- **F2:** `RenameOpen` enforces its precondition by running `CheckPrivate` on the source handle first. On Windows the DACL is checked; on unix, fstat. It refuses a non-private file. `runtime.KeepAlive(f)` keeps the handle valid. `WriteFile` uses the unexported `renameOpen`, because it created the temp itself with a known protection, Inherit included.
+- **F3:** failure paths delete the temp through its open handle (`deleteHandle`, `Tree.RemoveOpen`), never by name. Unix is unchanged (`os.Remove` of the name).
+- **F4:** the file-type dangling symlink (the `os.Symlink` default for a missing target) has a refusal test.
+- **F5, F6:** comment fixes.
+
 **Unix deltas in tunnelclient `read` (beyond §3.7 delta 1):**
 - The record is opened before the liveness probe and read after it, so it can be one rewrite older than the newest. Each rewrite is a complete record.
 - A record over 1 MiB is refused. Main read records unbounded.

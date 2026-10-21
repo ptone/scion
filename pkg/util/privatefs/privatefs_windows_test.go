@@ -795,3 +795,64 @@ func TestRenameOpen_SwappedTempNeverLands(t *testing.T) {
 		t.Fatalf("control: rename by name moved %q, want the impostor", b)
 	}
 }
+
+// RenameOpen is a private-tree primitive: it verifies the source handle
+// with CheckPrivate and refuses a file that is not private (review r3 F2).
+func TestRenameOpen_RefusesNonPrivateHandle(t *testing.T) {
+	dir := t.TempDir()
+	wintest.Icacls(t, dir, "/grant", "*"+wintest.SIDUsers+":(OI)(CI)R")
+	tr := treeAt(t, dir)
+	f, err := tr.Create("open.tmp", true, Inherit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	if err := tr.RenameOpen(f, "target"); !errors.Is(err, ErrNotPrivate) {
+		t.Fatalf("RenameOpen of a Users-readable file: %v, want ErrNotPrivate", err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "target")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the refused file was renamed: %v", err)
+	}
+	// Control: a Private temporary file renames.
+	p, _, err := tr.CreateTemp("", ".t.*.tmp", Private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = p.Close() }()
+	if err := tr.RenameOpen(p, "target"); err != nil {
+		t.Fatalf("control: RenameOpen of a Private file: %v", err)
+	}
+}
+
+// RemoveOpen deletes the file the handle is open on, not whatever holds
+// its name: a file swapped in under the temporary name survives (review r3
+// F3).
+func TestRemoveOpen_DeletesHandleNotName(t *testing.T) {
+	dir := t.TempDir()
+	tr := treeAt(t, dir)
+	f, name, err := tr.CreateTemp("", ".t.*.tmp", Private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmp := filepath.Join(dir, name)
+	away := filepath.Join(dir, "away")
+	if err := os.Rename(tmp, away); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tmp, []byte("impostor"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.RemoveOpen(f); err != nil {
+		t.Fatalf("RemoveOpen: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(away); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the file the handle was open on survived: %v", err)
+	}
+	// Control: the impostor under the temporary name is untouched.
+	if b, err := os.ReadFile(tmp); err != nil || string(b) != "impostor" {
+		t.Fatalf("control: the impostor = %q, %v", b, err)
+	}
+}

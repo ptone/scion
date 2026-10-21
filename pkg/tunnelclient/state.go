@@ -179,13 +179,15 @@ func (f FileStore) Open() (RecordWriter, error) {
 	}
 	lock, err := filelock.LockFile(lf, 0)
 	if err != nil {
+		_ = t.RemoveOpen(lf)
 		_ = lf.Close()
-		_ = t.Remove(tmpLock)
 		return nil, err
 	}
-	if err := t.Rename(tmpLock, lockRel); err != nil {
+	// Rename and, on failure, delete through the locked handle itself, so
+	// nothing swapped in under the temporary name becomes the lock file.
+	if err := t.RenameOpen(lf, lockRel); err != nil {
+		_ = t.RemoveOpen(lf)
 		lock.Unlock()
-		_ = t.Remove(tmpLock)
 		return nil, err
 	}
 	ok = true
@@ -205,28 +207,27 @@ func (r *fileRecord) Write(rec Record) error {
 	if err != nil {
 		return err
 	}
-	tmp, name, err := r.tree.CreateTemp(r.base, ".tmp-*", privatefs.Private)
+	tmp, _, err := r.tree.CreateTemp(r.base, ".tmp-*", privatefs.Private)
 	if err != nil {
 		return err
 	}
 	ok := false
 	defer func() {
 		if !ok {
-			_ = r.tree.Remove(name)
+			// Delete through the open handle, never by name.
+			_ = r.tree.RemoveOpen(tmp)
+			_ = tmp.Close()
 		}
 	}()
 	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
 		return err
 	}
 	// Rename through the still-open handle, so the file renamed into place
 	// is the one just written, whatever happened to its temporary name.
 	if err := r.tree.RenameOpen(tmp, r.rel); err != nil {
-		_ = tmp.Close()
 		return err
 	}
 	ok = true
