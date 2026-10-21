@@ -484,6 +484,9 @@ func (r *Relay) Start(ctx context.Context) error {
 		PublicEndpoint:   r.cfg.PublicEndpoint,
 		Features:         r.relayFeatures(),
 	})
+	if errors.Is(err, registry.ErrRelayFeaturesColumnMissing) {
+		return fmt.Errorf("conduit relay %s: cannot register: %w (upgrade the hubs, which migrate the schema, before the relays)", r.cfg.InstanceID, registry.ErrRelayFeaturesColumnMissing)
+	}
 	if err != nil {
 		return fmt.Errorf("conduit relay %s: register: %w", r.cfg.InstanceID, err)
 	}

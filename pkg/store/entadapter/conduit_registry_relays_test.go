@@ -24,6 +24,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	entsql "entgo.io/ent/dialect/sql"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 )
 
@@ -174,4 +176,21 @@ func TestConduitRegistry_RelayFeatures(t *testing.T) {
 	_, err = f.reg.RegisterRelay(f.ctx, registry.RelayInstance{InstanceID: "relay-a", InternalEndpoint: "http://relay-a:9811"})
 	require.NoError(t, err)
 	assert.Nil(t, features("relay-a"), "re-registration replaces the list")
+}
+
+// TestConduitRegistry_FeaturesColumnMissing (design v2.21.54, rollout
+// order): against a schema the hubs have not migrated yet (no
+// relay_instances.features), RegisterRelay fails with
+// registry.ErrRelayFeaturesColumnMissing, for every relay, so the relay's
+// startup error names the fix.
+func TestConduitRegistry_FeaturesColumnMissing(t *testing.T) {
+	f := newConduitFixture(t)
+	drv, ok := f.store.client.Driver().(*entsql.Driver)
+	require.True(t, ok)
+	_, err := drv.DB().ExecContext(f.ctx, "ALTER TABLE relay_instances DROP COLUMN features")
+	require.NoError(t, err)
+	for _, features := range [][]string{nil, {registry.RelayFeatureSingleton}} {
+		_, err := f.reg.RegisterRelay(f.ctx, registry.RelayInstance{InstanceID: "relay-a", InternalEndpoint: "http://relay-a:9811", Features: features})
+		require.ErrorIs(t, err, registry.ErrRelayFeaturesColumnMissing, "features %v", features)
+	}
 }

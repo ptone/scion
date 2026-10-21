@@ -371,3 +371,28 @@ func TestRelayMetrics_OnBuildsTheRelayProvider(t *testing.T) {
 	assert.Equal(t, "relay-metrics-project", gotProject)
 	assert.NoError(t, flush(context.Background()))
 }
+
+// TestRelayMetrics_UnsetWithAProjectExports: as for the hub (legacy rule),
+// with the switch unset an operator-set export project turns relay metrics
+// export on; only an explicit off keeps it off.
+func TestRelayMetrics_UnsetWithAProjectExports(t *testing.T) {
+	prev := relayNewMeterProvider
+	t.Cleanup(func() { relayNewMeterProvider = prev })
+	built := 0
+	relayNewMeterProvider = func(context.Context, string, ...hubmetrics.Option) (*sdkmetric.MeterProvider, error) {
+		built++
+		return sdkmetric.NewMeterProvider(), nil
+	}
+	t.Setenv(hubexport.ProjectIDEnv, "")
+	cfg := relayRoleTestConfig()
+	cfg.Hub.GCPProjectID = "relay-metrics-project"
+	mp, flush := relayMetrics(context.Background(), cfg, "relay-7", relayObservabilityInputs(cfg))
+	require.NotNil(t, mp, "unset switch with a set project: export on")
+	assert.NoError(t, flush(context.Background()))
+
+	off := false
+	cfg.Hub.Observability.MetricsEnabled = &off
+	mp, _ = relayMetrics(context.Background(), cfg, "relay-7", relayObservabilityInputs(cfg))
+	assert.Nil(t, mp, "explicitly off: no export even with a project")
+	assert.Equal(t, 1, built)
+}
