@@ -2276,7 +2276,11 @@ authDone:
 		}
 	}
 
-	// A fresh ctx signal always wins over whatever is already persisted, but
+	// A fresh ctx signal replaces a persisted record that is missing or agrees
+	// with it; a readable record outside the agent's mounts that names a
+	// different root refuses the start before this point (reconcileRepoRoot), so
+	// the record is not overwritten in that case. Otherwise the signal is
+	// persisted here, because
 	// GetAgent skips ProvisionAgent (and so never gets a chance to persist)
 	// when the agent directory already exists on disk — e.g. a leftover from
 	// a deleted hub agent recreated under the same name. In that case this

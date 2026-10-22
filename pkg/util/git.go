@@ -1813,3 +1813,12 @@ func EnsureGitIgnoresFile(dir, name string) error {
 // smallGitFileMax caps how much of a small git metadata file (HEAD, a .git
 // pointer file, commondir) is read. Used by readSmallRegularFile callers.
 const smallGitFileMax = 4096
+
+// ReadSmallRegularFile reads a small regular file with O_NOFOLLOW, O_NONBLOCK
+// and a size cap of max bytes, so that a symlink or FIFO at the path cannot
+// redirect or block the read, and anything other than a regular file is
+// rejected. It is exported for callers outside this package that read small,
+// broker-owned metadata files.
+func ReadSmallRegularFile(path string, max int64) ([]byte, error) {
+	return readSmallRegularFile(path, max)
+}

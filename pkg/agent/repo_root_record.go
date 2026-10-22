@@ -264,14 +264,19 @@ type repoRootRecordState struct {
 	root   string // set only when status is recordPresent
 }
 
+// repoRootRecordMax caps how much of the repository root record is read. The
+// record is a small JSON object; anything larger is treated as unreadable.
+const repoRootRecordMax = 4096
+
 // resolveStartRepoRoot returns the repository root Start passes to the runtime,
 // together with the on-disk record and the candidate it used, so Start can
 // re-run the same composition after a workspace backend changes the workspace.
 // The result is always the derived root (or ""), or a refusal:
 //
 //   - the candidate is the broker signal (ctx) or, when there is none, the
-//     recorded root; it is the input to the derived root, exactly as the
-//     upstream broker-known-path derivation computes it on main.
+//     recorded root; it is the input to the derived root, as the upstream
+//     broker-known-path derivation computes it on main, except that an
+//     untrusted record (one under an agent mount) is not a candidate.
 //   - R is the on-disk record only (never ctx), read tri-state: a record under
 //     an agent mount, or none, is missing; a present record that cannot be read
 //     or is malformed is unreadable.
@@ -293,9 +298,9 @@ func resolveStartRepoRoot(in startRepoRootInput) (repoRoot string, rec repoRootR
 // path derivation does on main — validatedWorktreeRepoRoot(candidate, ws),
 // falling back to detectRepoRoot when that is empty — and then applies the
 // fail-closed record intersection (reconcileRepoRoot). The root is taken only
-// from broker-known paths (the candidate and the project's own root); git is
-// used only to check those paths, never to source the root from the workspace's
-// own metadata.
+// from broker-known paths (the candidate, the workspace path and the project's
+// own root); git is used only to check those paths, never to source the root
+// from the workspace's own metadata.
 func composeRepoRoot(agentName, candidate string, rec repoRootRecordState, workspace, projectDir string, explicit bool, settings *config.VersionedSettings) (string, error) {
 	derived := validatedWorktreeRepoRoot(candidate, workspace)
 	var detectErr error
@@ -312,25 +317,32 @@ func composeRepoRoot(agentName, candidate string, rec repoRootRecordState, works
 // but unreadable or malformed is unreadable; otherwise present. The broker ctx
 // signal is not a record; the caller uses it as the candidate.
 func readRepoRootRecordState(agentName, agentDir, workspace string, volumes []api.VolumeMount) repoRootRecordState {
-	data, err := os.ReadFile(filepath.Join(agentDir, provisionedWorktreeStateFile))
-	if err != nil {
+	recPath := filepath.Join(agentDir, provisionedWorktreeStateFile)
+	reachable := !agentDirOutsideAgentMounts(agentDir, agentMountSources(workspace, "", volumes))
+	// Decide existence with Lstat before opening anything: an absent record is
+	// missing with no log; a reachable record is missing whatever it is.
+	if _, err := os.Lstat(recPath); err != nil {
 		if os.IsNotExist(err) {
 			return repoRootRecordState{status: recordMissing}
 		}
-		// A read error other than not-exist: when the record is one an agent
-		// could reach it is missing; otherwise it is unreadable (refuse).
-		if !agentDirOutsideAgentMounts(agentDir, agentMountSources(workspace, "", volumes)) {
+		if reachable {
 			slog.Warn("start: the agent directory is inside one of the agent's mounts; its repository root record is not used", "agent", agentName)
 			return repoRootRecordState{status: recordMissing}
 		}
 		return repoRootRecordState{status: recordUnreadable}
 	}
-	// Guard before parsing, on the root-independent mount sources: a record an
-	// agent could reach is missing whatever its contents, so a corrupt or empty
-	// record under a mount never refuses the start.
-	if !agentDirOutsideAgentMounts(agentDir, agentMountSources(workspace, "", volumes)) {
+	// Guard before reading, on the root-independent mount sources: a record an
+	// agent could reach is missing whatever its contents, so a corrupt record or
+	// a FIFO placed there can neither refuse the start nor block the broker.
+	if reachable {
 		slog.Warn("start: the repository root record is inside one of the agent's mounts; it is not used", "agent", agentName)
 		return repoRootRecordState{status: recordMissing}
+	}
+	// Read with O_NOFOLLOW, O_NONBLOCK, regular-file-only and a size cap, so a
+	// symlink or FIFO at the path cannot redirect or block the read.
+	data, err := util.ReadSmallRegularFile(recPath, repoRootRecordMax)
+	if err != nil {
+		return repoRootRecordState{status: recordUnreadable}
 	}
 	var state provisionedWorktreeState
 	if err := json.Unmarshal(data, &state); err != nil {
