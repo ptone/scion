@@ -861,6 +861,16 @@ type AgentStore interface {
 	// returns ErrPinnedPlacementChanged; a missing agent ErrNotFound.
 	SetAgentPinnedRuntimeTarget(ctx context.Context, agentID string, expected, next PinnedPlacement) (*Agent, error)
 
+	// SetAgentRuntimeBrokerIfEmpty compare-and-sets an agent's
+	// runtime_broker_id from empty ("" or NULL) to brokerID, bumping
+	// state_version in the same conditional update so a stale UpdateAgent
+	// conflicts instead of reverting it, and returns the updated row. A row
+	// that already stores brokerID is returned unchanged (an idempotent
+	// retry). A row that stores another broker returns
+	// ErrRuntimeBrokerChanged and is not changed; a missing agent
+	// ErrNotFound. brokerID must be non-empty.
+	SetAgentRuntimeBrokerIfEmpty(ctx context.Context, agentID, brokerID string) (*Agent, error)
+
 	// AggregateAgentHealth returns lightweight health-oriented counts and lists
 	// for the health-summary endpoint without fetching full agent records.
 	// This avoids the O(N) deserialization cost of ListAgents on large installations.

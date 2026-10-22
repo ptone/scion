@@ -706,25 +706,36 @@ func (s *Server) generateBlobRowDownloadURLs(ctx context.Context, stor storage.S
 // blob row, the file's hash in the URL. The raw read then serves that blob
 // of this template even after a later commit replaced the file, so a
 // hydration that spans a commit still gets one consistent version.
-func rewriteLocalTemplateDownloadURLs(urls []DownloadURLInfo, hubEndpoint, templateID string, blobs bool) []DownloadURLInfo {
-	return rewriteLocalBlobDownloadURLs(urls, hubEndpoint, "templates", templateID, blobs)
+// agentID, when set, is the agent a broker's dispatch-bound read names
+// (ptone/scion#5770); each proxy URL carries it, because the raw read goes
+// through the same read gate.
+func rewriteLocalTemplateDownloadURLs(urls []DownloadURLInfo, hubEndpoint, templateID string, blobs bool, agentID string) []DownloadURLInfo {
+	return rewriteLocalBlobDownloadURLs(urls, hubEndpoint, "templates", templateID, blobs, agentID)
 }
 
 // rewriteLocalBlobDownloadURLs is rewriteLocalTemplateDownloadURLs for any
 // resource type ("templates", "harness-configs").
-func rewriteLocalBlobDownloadURLs(urls []DownloadURLInfo, hubEndpoint, resourceType, id string, blobs bool) []DownloadURLInfo {
+func rewriteLocalBlobDownloadURLs(urls []DownloadURLInfo, hubEndpoint, resourceType, id string, blobs bool, agentID string) []DownloadURLInfo {
 	local := make([]bool, len(urls))
 	for i := range urls {
 		local[i] = strings.HasPrefix(urls[i].URL, "file://")
 	}
 	urls = rewriteLocalDownloadURLs(urls, hubEndpoint, resourceType, id)
-	if !blobs || hubEndpoint == "" {
+	if hubEndpoint == "" {
 		return urls
 	}
 	for i := range urls {
-		if local[i] && urls[i].Hash != "" {
-			urls[i].URL += "&hash=" + url.QueryEscape(urls[i].Hash)
+		if !local[i] {
+			continue
 		}
+		suffix := ""
+		if blobs && urls[i].Hash != "" {
+			suffix += "&hash=" + url.QueryEscape(urls[i].Hash)
+		}
+		if agentID != "" {
+			suffix += "&" + dispatchAgentQueryParam + "=" + url.QueryEscape(agentID)
+		}
+		urls[i].URL += suffix
 	}
 	return urls
 }

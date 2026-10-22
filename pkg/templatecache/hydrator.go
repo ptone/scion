@@ -114,6 +114,15 @@ func (h *Hydrator) Hydrate(ctx context.Context, templateRef string) (string, err
 	return h.r.Resolve(ctx, templateRef)
 }
 
+// HydrateForAgent is Hydrate for a template read on behalf of a dispatched
+// agent (ptone/scion#5770): every Hub read names agentID, so the Runtime
+// Broker running that agent can read the agent's user-scoped template. The
+// broker's hydration sites use it in place of Hydrate and HydrateWithHash.
+// An empty agentID is exactly Hydrate.
+func (h *Hydrator) HydrateForAgent(ctx context.Context, templateRef, agentID string) (string, error) {
+	return h.r.ResolveForAgent(ctx, templateRef, agentID)
+}
+
 // HydrateWithHash fetches a template, always verifying the current content hash
 // with the hub to prevent serving stale cached content.
 //

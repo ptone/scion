@@ -761,3 +761,77 @@ func TestGetLegacyRuntimeBrokerByName_OldestByCreatedWins(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, older.String(), got.ID)
 }
+
+// SetAgentRuntimeBrokerIfEmpty (ptone/scion#5770) fills an empty broker,
+// bumps state_version and returns the row; the same broker again is an
+// idempotent success; another broker is refused and nothing changes.
+func TestSetAgentRuntimeBrokerIfEmpty_CompareAndSet(t *testing.T) {
+	ctx := context.Background()
+	fs := newFlatStores(t)
+	b := fs.createBroker(t, flatBroker("legacy", store.BrokerStatusOnline, nil))
+	other := fs.createBroker(t, flatBroker("legacy-2", store.BrokerStatusOnline, nil))
+
+	// Empty runtime_broker_id ('').
+	a := makeAgent(fs.projectID, "empty-broker")
+	require.NoError(t, fs.agents.CreateAgent(ctx, a))
+	before, err := fs.agents.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	got, err := fs.agents.SetAgentRuntimeBrokerIfEmpty(ctx, a.ID, b.ID)
+	require.NoError(t, err)
+	assert.Equal(t, b.ID, got.RuntimeBrokerID)
+	assert.Equal(t, before.StateVersion+1, got.StateVersion, "the fill bumps state_version")
+
+	// The same broker again: success, row unchanged.
+	again, err := fs.agents.SetAgentRuntimeBrokerIfEmpty(ctx, a.ID, b.ID)
+	require.NoError(t, err)
+	assert.Equal(t, b.ID, again.RuntimeBrokerID)
+	assert.Equal(t, got.StateVersion, again.StateVersion, "an idempotent retry writes nothing")
+
+	// Another broker: refused, never overwritten.
+	_, err = fs.agents.SetAgentRuntimeBrokerIfEmpty(ctx, a.ID, other.ID)
+	require.ErrorIs(t, err, store.ErrRuntimeBrokerChanged)
+	after, err := fs.agents.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, b.ID, after.RuntimeBrokerID, "a stored broker is never overwritten")
+	assert.Equal(t, got.StateVersion, after.StateVersion)
+
+	// NULL runtime_broker_id also counts as empty.
+	n := makeAgent(fs.projectID, "null-broker")
+	require.NoError(t, fs.agents.CreateAgent(ctx, n))
+	uid, err := parseUUID(n.ID)
+	require.NoError(t, err)
+	_, err = fs.client.Agent.UpdateOneID(uid).ClearRuntimeBrokerID().Save(ctx)
+	require.NoError(t, err)
+	got, err = fs.agents.SetAgentRuntimeBrokerIfEmpty(ctx, n.ID, other.ID)
+	require.NoError(t, err)
+	assert.Equal(t, other.ID, got.RuntimeBrokerID)
+
+	// Missing agent; empty broker ID.
+	_, err = fs.agents.SetAgentRuntimeBrokerIfEmpty(ctx, uuid.NewString(), b.ID)
+	require.ErrorIs(t, err, store.ErrNotFound)
+	_, err = fs.agents.SetAgentRuntimeBrokerIfEmpty(ctx, a.ID, "")
+	require.Error(t, err)
+}
+
+// A whole-row UpdateAgent from a model read before the fill conflicts
+// instead of reverting the broker.
+func TestSetAgentRuntimeBrokerIfEmpty_StaleUpdateAgentConflicts(t *testing.T) {
+	ctx := context.Background()
+	fs := newFlatStores(t)
+	b := fs.createBroker(t, flatBroker("legacy", store.BrokerStatusOnline, nil))
+	a := makeAgent(fs.projectID, "stale")
+	require.NoError(t, fs.agents.CreateAgent(ctx, a))
+	stale, err := fs.agents.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+
+	filled, err := fs.agents.SetAgentRuntimeBrokerIfEmpty(ctx, a.ID, b.ID)
+	require.NoError(t, err)
+	require.ErrorIs(t, fs.agents.UpdateAgent(ctx, stale), store.ErrVersionConflict, "a stale whole-row update must conflict")
+
+	// The refreshed row updates cleanly and keeps the broker.
+	filled.Message = "after start"
+	require.NoError(t, fs.agents.UpdateAgent(ctx, filled))
+	got, err := fs.agents.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, b.ID, got.RuntimeBrokerID)
+}

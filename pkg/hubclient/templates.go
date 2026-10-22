@@ -31,8 +31,9 @@ type TemplateService interface {
 	// List returns templates matching the filter criteria.
 	List(ctx context.Context, opts *ListTemplatesOptions) (*ListTemplatesResponse, error)
 
-	// Get returns a single template by ID.
-	Get(ctx context.Context, templateID string) (*Template, error)
+	// Get returns a single template by ID. opts are per-call options such
+	// as WithDispatchAgent.
+	Get(ctx context.Context, templateID string, opts ...TemplateReadOption) (*Template, error)
 
 	// Create creates a new template.
 	Create(ctx context.Context, req *CreateTemplateRequest) (*CreateTemplateResponse, error)
@@ -58,8 +59,9 @@ type TemplateService interface {
 	// finalize commits; empty when nothing was uploaded for it.
 	Finalize(ctx context.Context, templateID string, manifest *TemplateManifest, expectedContentHash, uploadID string) (*Template, error)
 
-	// RequestDownloadURLs requests signed URLs for downloading template files.
-	RequestDownloadURLs(ctx context.Context, templateID string) (*DownloadResponse, error)
+	// RequestDownloadURLs requests signed URLs for downloading template
+	// files. opts are per-call options such as WithDispatchAgent.
+	RequestDownloadURLs(ctx context.Context, templateID string, opts ...TemplateReadOption) (*DownloadResponse, error)
 
 	// UploadFile uploads a file to the given signed URL.
 	UploadFile(ctx context.Context, url string, method string, headers map[string]string, content io.Reader) error
@@ -69,6 +71,46 @@ type TemplateService interface {
 
 	// Validate checks storage consistency for a template.
 	Validate(ctx context.Context, templateID string) (*ValidationReport, error)
+}
+
+// TemplateReadOption is a per-call option for a template read (Get,
+// RequestDownloadURLs).
+type TemplateReadOption func(*templateReadOptions)
+
+type templateReadOptions struct {
+	dispatchAgentID string
+}
+
+// WithDispatchAgent names the agent a Runtime Broker reads a template for
+// (ptone/scion#5770). The Hub then lets the broker read the agent's
+// user-scoped template, but only when its own records show that agent
+// running on this broker with that template; the agent ID is not itself
+// authority. An empty agentID sends nothing.
+func WithDispatchAgent(agentID string) TemplateReadOption {
+	return func(o *templateReadOptions) { o.dispatchAgentID = agentID }
+}
+
+// DispatchAgentOf returns the agent ID opts name through WithDispatchAgent,
+// or "" when none does. TemplateService implementations other than the
+// Hub client (adapters, test fakes) use it to read the option.
+func DispatchAgentOf(opts ...TemplateReadOption) string {
+	var o templateReadOptions
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&o)
+		}
+	}
+	return o.dispatchAgentID
+}
+
+// templateReadQuery returns the query a template read sends for opts, or
+// nil when there is none (the request is then exactly as before).
+func templateReadQuery(opts []TemplateReadOption) url.Values {
+	agentID := DispatchAgentOf(opts...)
+	if agentID == "" {
+		return nil
+	}
+	return url.Values{"agentId": []string{agentID}}
 }
 
 // templateService is the implementation of TemplateService.
@@ -272,8 +314,8 @@ func (s *templateService) List(ctx context.Context, opts *ListTemplatesOptions) 
 }
 
 // Get returns a single template by ID.
-func (s *templateService) Get(ctx context.Context, templateID string) (*Template, error) {
-	resp, err := s.c.get(ctx, "/api/v1/templates/"+templateID, nil)
+func (s *templateService) Get(ctx context.Context, templateID string, opts ...TemplateReadOption) (*Template, error) {
+	resp, err := s.c.getWithQuery(ctx, "/api/v1/templates/"+templateID, templateReadQuery(opts), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -347,8 +389,8 @@ func (s *templateService) Finalize(ctx context.Context, templateID string, manif
 }
 
 // RequestDownloadURLs requests signed URLs for downloading template files.
-func (s *templateService) RequestDownloadURLs(ctx context.Context, templateID string) (*DownloadResponse, error) {
-	resp, err := s.c.get(ctx, "/api/v1/templates/"+templateID+"/download", nil)
+func (s *templateService) RequestDownloadURLs(ctx context.Context, templateID string, opts ...TemplateReadOption) (*DownloadResponse, error) {
+	resp, err := s.c.getWithQuery(ctx, "/api/v1/templates/"+templateID+"/download", templateReadQuery(opts), nil)
 	if err != nil {
 		return nil, err
 	}

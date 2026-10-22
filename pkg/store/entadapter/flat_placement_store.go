@@ -116,6 +116,33 @@ func (s *AgentStore) SetAgentPinnedRuntimeTarget(ctx context.Context, agentID st
 	return s.GetAgent(ctx, agentID)
 }
 
+// SetAgentRuntimeBrokerIfEmpty implements store.AgentStore.
+func (s *AgentStore) SetAgentRuntimeBrokerIfEmpty(ctx context.Context, agentID, brokerID string) (*store.Agent, error) {
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return nil, err
+	}
+	if brokerID == "" {
+		return nil, fmt.Errorf("SetAgentRuntimeBrokerIfEmpty: empty runtime broker ID")
+	}
+	affected, err := s.client.Agent.Update().
+		Where(agent.IDEQ(uid), agent.Or(agent.RuntimeBrokerIDEQ(""), agent.RuntimeBrokerIDIsNil())).
+		SetRuntimeBrokerID(brokerID).
+		AddStateVersion(1).
+		Save(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	cur, err := s.GetAgent(ctx, agentID)
+	if err != nil {
+		return nil, err
+	}
+	if affected == 0 && cur.RuntimeBrokerID != brokerID {
+		return nil, store.ErrRuntimeBrokerChanged
+	}
+	return cur, nil
+}
+
 // GetLegacyRuntimeBrokerByName implements store.ProjectStore.
 func (s *ProjectStore) GetLegacyRuntimeBrokerByName(ctx context.Context, name string) (*store.RuntimeBroker, error) {
 	b, err := s.client.RuntimeBroker.Query().

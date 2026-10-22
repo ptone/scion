@@ -48,7 +48,7 @@ type countingHCFetcher struct {
 	err   error
 }
 
-func (f *countingHCFetcher) Get(_ context.Context, _ string) (string, string, []hubclient.TemplateFile, error) {
+func (f *countingHCFetcher) Get(_ context.Context, _, _ string) (string, string, []hubclient.TemplateFile, error) {
 	f.calls.Add(1)
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -58,7 +58,7 @@ func (f *countingHCFetcher) Get(_ context.Context, _ string) (string, string, []
 	return "hc-id", f.hash, nil, nil
 }
 
-func (f *countingHCFetcher) RequestDownloadURLs(context.Context, string) (*hubclient.DownloadResponse, error) {
+func (f *countingHCFetcher) RequestDownloadURLs(context.Context, string, string) (*hubclient.DownloadResponse, error) {
 	return nil, errors.New("unexpected download: bundle should be served from cache")
 }
 
