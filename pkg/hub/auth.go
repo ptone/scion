@@ -800,7 +800,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 					// see sessionGenerationRefusal before adding a replica
 					// or cache on the user read path.
 					if reason := sessionGenerationRefusal(claims.SessionGeneration, u.SessionGeneration); reason != "" {
-						logSessionGenerationRefusal(ctx, "jwt_auth", claims.UserID, claims.SessionGeneration, u.SessionGeneration, reason)
+						logSessionGenerationRefusal(ctx, log, "jwt_auth", claims.UserID, claims.SessionGeneration, u.SessionGeneration, reason)
 						writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 							"invalid access token: session revoked", nil)
 						return

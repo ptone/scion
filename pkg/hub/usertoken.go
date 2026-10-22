@@ -311,14 +311,18 @@ const (
 	sessionGenerationReasonAhead = "session_generation_ahead"
 )
 
-// logSessionGenerationRefusal logs a refusal from sessionGenerationRefusal:
-// at Warn for a revoked session, at Error for a credential ahead of the row.
-func logSessionGenerationRefusal(ctx context.Context, path, userID string, claim, row int64, reason string) {
+// logSessionGenerationRefusal logs a refusal from sessionGenerationRefusal to
+// log (the caller's own logger; the default logger when nil): at Warn for a
+// revoked session, at Error for a credential ahead of the row.
+func logSessionGenerationRefusal(ctx context.Context, log *slog.Logger, path, userID string, claim, row int64, reason string) {
+	if log == nil {
+		log = slog.Default()
+	}
 	level := slog.LevelWarn
 	if reason == sessionGenerationReasonAhead {
 		level = slog.LevelError
 	}
-	slog.Log(ctx, level, "Session generation mismatch",
+	log.Log(ctx, level, "Session generation mismatch",
 		"path", path, "user_id", userID, "claim", claim, "row", row, "reason", reason)
 }
 

@@ -1220,7 +1220,7 @@ func (ws *WebServer) refreshHubTokens(ctx context.Context, refreshToken string) 
 			return "", "", 0, errHubRefreshRefused
 		}
 		if reason := sessionGenerationRefusal(claims.SessionGeneration, u.SessionGeneration); reason != "" {
-			logSessionGenerationRefusal(ctx, "web_refresh", claims.UserID, claims.SessionGeneration, u.SessionGeneration, reason)
+			logSessionGenerationRefusal(ctx, ws.logger(), "web_refresh", claims.UserID, claims.SessionGeneration, u.SessionGeneration, reason)
 			return "", "", 0, errHubRefreshRefused
 		}
 	}

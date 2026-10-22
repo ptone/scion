@@ -576,7 +576,7 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 	// generation and the bearer arm checks it on use.
 	if user != nil {
 		if reason := sessionGenerationRefusal(claims.SessionGeneration, user.SessionGeneration); reason != "" {
-			logSessionGenerationRefusal(r.Context(), "auth_refresh", user.ID, claims.SessionGeneration, user.SessionGeneration, reason)
+			logSessionGenerationRefusal(r.Context(), slog.Default(), "auth_refresh", user.ID, claims.SessionGeneration, user.SessionGeneration, reason)
 			writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 				"invalid refresh token", nil)
 			return
@@ -703,7 +703,7 @@ func (s *Server) handleAuthValidate(w http.ResponseWriter, r *http.Request) {
 		// Same session generation rule as the middleware's row block: any
 		// difference between the token's claim and the row is not valid.
 		if reason := sessionGenerationRefusal(claims.SessionGeneration, u.SessionGeneration); reason != "" {
-			logSessionGenerationRefusal(r.Context(), "auth_validate", claims.UserID, claims.SessionGeneration, u.SessionGeneration, reason)
+			logSessionGenerationRefusal(r.Context(), slog.Default(), "auth_validate", claims.UserID, claims.SessionGeneration, u.SessionGeneration, reason)
 			writeJSON(w, http.StatusOK, AuthValidateResponse{Valid: false})
 			return
 		}
