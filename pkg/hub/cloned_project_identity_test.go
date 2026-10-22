@@ -28,12 +28,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
@@ -651,7 +653,7 @@ func TestHandleProjectCacheNotify_KeepsHubWorkspaceIdentity(t *testing.T) {
 
 // TestHubWorkspaceDownloads_UseIdentityKeepingHelper checks that every hub
 // download of a workspace upload goes through syncHubWorkspaceFromGCS:
-//   - the only reference to gcp.SyncFromGCS in the hub package is in
+//   - the only reference to gcp.SyncWorkspaceFromGCS in the hub package is in
 //     Server.hubWorkspaceDownloader, which with setHubWorkspaceDownloader
 //     is the only user of the hubWorkspaceDownload field;
 //   - hubWorkspaceDownloader is used only inside syncHubWorkspaceFromGCS;
@@ -660,15 +662,19 @@ func TestHandleProjectCacheNotify_KeepsHubWorkspaceIdentity(t *testing.T) {
 //     workspace, and from nowhere else.
 func TestHubWorkspaceDownloads_UseIdentityKeepingHelper(t *testing.T) {
 	// pkgmove:scan-covers pkg/hub/apierr
-	// scanned through guardScanSubdirs; guards SyncFromGCS and hub workspace downloader uses.
+	// scanned through guardScanSubdirs; guards SyncWorkspaceFromGCS and hub workspace downloader uses.
 	// pkgmove:scan-covers pkg/hub/internal/principal
-	// scanned through guardScanSubdirs; guards SyncFromGCS and hub workspace downloader uses.
+	// scanned through guardScanSubdirs; guards SyncWorkspaceFromGCS and hub workspace downloader uses.
 	// pkgmove:scan-covers pkg/hub/maintenance
-	// scanned through guardScanSubdirs once it exists; guards SyncFromGCS and hub workspace downloader uses.
+	// scanned through guardScanSubdirs once it exists; guards SyncWorkspaceFromGCS and hub workspace downloader uses.
 	files, err := globGuardScanDirs(".", "*.go")
 	require.NoError(t, err)
 	fset := token.NewFileSet()
 	var gcpRefs []string
+	// volumeSyncRefs are references to the gcp transfers that do not use
+	// the workspace sync list (GCS volumes) or that skip git data; no hub
+	// workspace transfer may use them.
+	var volumeSyncRefs []string
 	varUses := map[string]int{}
 	helperCalls := map[string]int{}
 	for _, file := range files {
@@ -685,9 +691,14 @@ func TestHubWorkspaceDownloads_UseIdentityKeepingHelper(t *testing.T) {
 				continue
 			}
 			ast.Inspect(gen, func(n ast.Node) bool {
-				if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "SyncFromGCS" {
+				if sel, ok := n.(*ast.SelectorExpr); ok {
 					if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "gcp" {
-						gcpRefs = append(gcpRefs, "decl")
+						switch sel.Sel.Name {
+						case "SyncWorkspaceFromGCS":
+							gcpRefs = append(gcpRefs, "decl")
+						case "SyncFromGCS", "SyncToGCS", "SyncWorkspaceContentFromGCS":
+							volumeSyncRefs = append(volumeSyncRefs, "decl: gcp."+sel.Sel.Name)
+						}
 					}
 				}
 				return true
@@ -702,8 +713,14 @@ func TestHubWorkspaceDownloads_UseIdentityKeepingHelper(t *testing.T) {
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
 				switch x := n.(type) {
 				case *ast.SelectorExpr:
-					if pkg, ok := x.X.(*ast.Ident); ok && pkg.Name == "gcp" && x.Sel.Name == "SyncFromGCS" {
+					if pkg, ok := x.X.(*ast.Ident); ok && pkg.Name == "gcp" && x.Sel.Name == "SyncWorkspaceFromGCS" {
 						gcpRefs = append(gcpRefs, fn.Name.Name)
+					}
+					if pkg, ok := x.X.(*ast.Ident); ok && pkg.Name == "gcp" {
+						switch x.Sel.Name {
+						case "SyncFromGCS", "SyncToGCS", "SyncWorkspaceContentFromGCS":
+							volumeSyncRefs = append(volumeSyncRefs, fn.Name.Name+": gcp."+x.Sel.Name)
+						}
 					}
 					if x.Sel.Name == "syncHubWorkspaceFromGCS" {
 						helperCalls[fn.Name.Name]++
@@ -717,7 +734,8 @@ func TestHubWorkspaceDownloads_UseIdentityKeepingHelper(t *testing.T) {
 			})
 		}
 	}
-	assert.Equal(t, []string{"hubWorkspaceDownloader"}, gcpRefs, "gcp.SyncFromGCS references")
+	assert.Equal(t, []string{"hubWorkspaceDownloader"}, gcpRefs, "gcp.SyncWorkspaceFromGCS references")
+	assert.Empty(t, volumeSyncRefs, "hub workspace transfers must use gcp.SyncWorkspaceToGCS/SyncWorkspaceFromGCS")
 	assert.Equal(t, map[string]int{
 		"syncHubWorkspaceFromGCS.hubWorkspaceDownloader": 1,
 		"hubWorkspaceDownloader.hubWorkspaceDownload":    2,
@@ -1062,4 +1080,22 @@ func TestAlignWorkspaceProjectIdentity_UnreadableIdentityIsFailure(t *testing.T)
 	assert.Equal(t, 1, counts.failed)
 	assert.Zero(t, counts.skippedUnexpectedIdentity)
 	assert.DirExists(t, previous)
+}
+
+// TestHubWorkspaceTransfers_UseWorkspaceSyncList pins the gcp transfers the
+// hub's workspace legs use by default: the create-time upload of the hub's
+// project workspace and the sync-back download into it both go through the
+// workspace sync list (content plus git data; never repository
+// configuration, hooks or any .scion entry), and the download is staged and
+// applied without following symlinks. The transfers' behaviour is tested in
+// pkg/gcp.
+func TestHubWorkspaceTransfers_UseWorkspaceSyncList(t *testing.T) {
+	srv, _ := testServer(t)
+	same := func(a, b any) bool { return reflect.ValueOf(a).Pointer() == reflect.ValueOf(b).Pointer() }
+	if !same(srv.hubWorkspaceDownloader(), gcp.SyncWorkspaceFromGCS) {
+		t.Error("hub workspace sync-back download is not gcp.SyncWorkspaceFromGCS")
+	}
+	if !same(syncToGCSForWorkspaceUpload, gcp.SyncWorkspaceToGCS) {
+		t.Error("hub create-time workspace upload is not gcp.SyncWorkspaceToGCS")
+	}
 }
