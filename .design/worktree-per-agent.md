@@ -384,8 +384,14 @@ New work for the base repo:
    `HostGitCommand`: `core.hooksPath=/dev/null`, `core.fsmonitor=false`,
    `core.pager=cat`, `protocol.ext.allow=never`; filter driver variables set
    in the repository's own config are re-set to their global/system value
-   (or emptied); remote operations refuse a repository config that sets
-   transport, credential, proxy or include keys. Global and system config
+   (or emptied); remote operations accept only an allowlist of repository
+   config keys; `submodule.recurse`/`fetch.recurseSubmodules` are off; the
+   environment drops `GIT_*` variables that choose a repository or add
+   config. After each command the repository config it depended on is read
+   again, and a change is reported (`ErrRepoConfigChanged`). That check only
+   detects a lasting change; keeping agents from writing the repository's
+   git config and hooks is the job of the runtime mounts (item 7, extended
+   to every runtime and base type). Global and system config
    stay in effect, so a globally installed git-lfs filter still runs; the
    git-lfs post-checkout hook (lockable files read-only) does not. Running
    `git lfs post-checkout` explicitly instead was rejected: git-lfs reads
