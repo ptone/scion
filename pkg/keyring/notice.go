@@ -45,9 +45,8 @@ func StartupNotice(k *Keyring) string {
 			LegacyID, LegacyID, strings.Join(CoupledUses, "; "))
 	}
 	return fmt.Sprintf("server secret: keyring file revision %q (experimental signing pilot): "+
-		"web session cookies, conduit admission tokens and relay-peer request signatures (shared-secret fallback) "+
-		"use signing generations %v (active %q); every other purpose still uses the "+
-		"unchanged %q entry, whose deadlines apply only to the purposes that use the ring, and encryption keeps the "+
+		"web session cookies, conduit admission tokens and relay-peer signatures (shared-secret fallback) use signing generations %v (active %q); every other "+
+		"purpose still uses the unchanged %q entry, whose deadlines apply to session cookies, admission tokens and relay-peer signatures only, and encryption keeps the "+
 		"imported key %q. Full server-secret rotation is not available in this release.",
 		k.Revision(), k.Signing().IDs(), k.Signing().ActiveID(), LegacyID, k.Encryption().ActiveID())
 }

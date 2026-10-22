@@ -113,7 +113,7 @@ func TestLoadServerKeyring_RingMode(t *testing.T) {
 	assert.Equal(t, cmdKRLegacySecret, resolveSessionSecret())
 	assert.Equal(t, cmdKRLegacySecret, sessionSecretValue())
 	assert.Equal(t, hub.SigningKeySourceKeyring, webSessionKeySource(resolveSessionSecret()))
-	assert.Contains(t, logs.String(), "every other purpose still uses")
+	assert.Contains(t, logs.String(), "admission tokens and relay-peer signatures only")
 	assertNoCmdKRSecret(t, logs.String())
 }
 
