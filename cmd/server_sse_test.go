@@ -173,3 +173,17 @@ func TestConduitIngressLifetimeCapSetting(t *testing.T) {
 		require.LessOrEqual(t, jitter(base), ingress, "every jittered relay cap fits under the ingress cap")
 	}
 }
+
+// ptone/scion#5245 review: external relay mode hands the hub the ingress
+// cap (the top of the relays' jitter range), not the unjittered cap.
+func TestConduitExternalOptions_LifetimeCapIsIngressCap(t *testing.T) {
+	cfg := &config.GlobalConfig{}
+	cfg.Hub.PlatformRequestTimeout = "900s"
+	opts := conduitExternalOptions(cfg, "hub-1", nil, "")
+	assert.Equal(t, conduitIngressLifetimeCapSetting(cfg), opts.LifetimeCap)
+	assert.Equal(t, 864*time.Second, opts.LifetimeCap, "the ingress cap, 1.2 x 720s, not the unjittered 720s")
+	assert.Equal(t, "hub-1", opts.InstanceID)
+
+	cfg.Hub.PlatformRequestTimeout = ""
+	assert.Equal(t, config.ConduitDefaultLifetimeCap, conduitExternalOptions(cfg, "hub-1", nil, "").LifetimeCap)
+}
