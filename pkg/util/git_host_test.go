@@ -939,7 +939,7 @@ func TestLinkedPinnedKeysDoNotExecute(t *testing.T) {
 		t.Fatalf("CreateWorktree (should be allowed, keys are pinned): %v", err)
 	}
 	if _, err := os.Stat(fail); !os.IsNotExist(err) {
-		t.Errorf("a pinned key executed its planted value (marker present)")
+		t.Errorf("a pinned key ran its configured value (marker present)")
 	}
 }
 
