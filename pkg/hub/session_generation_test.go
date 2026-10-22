@@ -25,6 +25,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -427,4 +428,99 @@ func TestNew_WiresAuthUserStoreFromStore(t *testing.T) {
 	srv, s := testServer(t)
 	require.NotNil(t, srv.authConfig.UserStore, "the auth middleware has a user store")
 	assert.True(t, any(srv.authConfig.UserStore) == any(s), "the auth middleware's user store is the store passed to New")
+}
+
+// postRefresh calls POST /api/v1/auth/refresh with refreshToken.
+func (f *sessionGenFixture) postRefresh(t *testing.T, refreshToken string) *httptest.ResponseRecorder {
+	t.Helper()
+	return doRequestNoAuth(t, f.srv, http.MethodPost, "/api/v1/auth/refresh", AuthRefreshRequest{RefreshToken: refreshToken})
+}
+
+func requireRefreshRefused(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "invalid refresh token")
+	assert.NotContains(t, rec.Body.String(), "accessToken", "no token pair is returned")
+}
+
+// Fails if the session generation check is removed from POST
+// /api/v1/auth/refresh: a CLI or web refresh token minted before the revoke
+// would be exchanged for a new pair. The refusal is asserted at the refresh
+// itself, not only at the new pair's first use.
+func TestSessionGen_AuthRefresh_BehindRow_Denied(t *testing.T) {
+	for _, ct := range []ClientType{ClientTypeCLI, ClientTypeWeb} {
+		t.Run(string(ct), func(t *testing.T) {
+			f := newSessionGenFixture(t)
+			_, refresh := f.mintPair(t, 0, ct)
+			f.revoke(t)
+			requireRefreshRefused(t, f.postRefresh(t, refresh))
+		})
+	}
+}
+
+// Fails if the session generation check is removed from POST
+// /api/v1/auth/refresh, or if it refuses only when the row is ahead: a
+// refresh token whose claim is ahead of the row must be refused.
+func TestSessionGen_AuthRefresh_ClaimAhead_Denied(t *testing.T) {
+	f := newSessionGenFixture(t)
+	_, refresh := f.mintPair(t, 1, ClientTypeCLI)
+	requireRefreshRefused(t, f.postRefresh(t, refresh))
+}
+
+// Fails if the session generation check is removed from POST
+// /api/v1/auth/refresh, or if a missing sg claim stops reading as 0: a
+// refresh token without the claim is refused for an ever-revoked user.
+func TestSessionGen_AuthRefresh_Claimless_EverRevoked_Denied(t *testing.T) {
+	f := newSessionGenFixture(t)
+	f.revoke(t)
+	requireRefreshRefused(t, f.postRefresh(t, f.mintClaimless(t, TokenTypeRefresh, ClientTypeCLI)))
+}
+
+// Fails if POST /api/v1/auth/refresh refuses a refresh token at the row's
+// generation, or if the new pair stops carrying the presented token's
+// session generation. Also covers a never-revoked user with a token
+// without the claim.
+func TestSessionGen_AuthRefresh_NeverRevoked_OK_CarriesSameSG(t *testing.T) {
+	check := func(t *testing.T, f *sessionGenFixture, refresh string, want int64) {
+		t.Helper()
+		rec := f.postRefresh(t, refresh)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp AuthRefreshResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		for name, tok := range map[string]string{"access": resp.AccessToken, "refresh": resp.RefreshToken} {
+			claims, err := f.srv.userTokenService.ValidateUserToken(tok)
+			require.NoError(t, err, name)
+			assert.Equal(t, want, claims.SessionGeneration, "new %s token carries the presented generation", name)
+		}
+		assert.Equal(t, http.StatusOK, f.me(t, resp.AccessToken).Code, "the new access token is accepted")
+	}
+	t.Run("never_revoked", func(t *testing.T) {
+		f := newSessionGenFixture(t)
+		_, refresh := f.mintPair(t, 0, ClientTypeCLI)
+		check(t, f, refresh, 0)
+	})
+	t.Run("never_revoked_claimless", func(t *testing.T) {
+		f := newSessionGenFixture(t)
+		check(t, f, f.mintClaimless(t, TokenTypeRefresh, ClientTypeWeb), 0)
+	})
+	t.Run("current_generation", func(t *testing.T) {
+		f := newSessionGenFixture(t)
+		f.revoke(t)
+		row := f.revoke(t)
+		_, refresh := f.mintPair(t, row, ClientTypeWeb)
+		check(t, f, refresh, row)
+	})
+}
+
+// Fails if POST /api/v1/auth/refresh mints a pair when the users row cannot
+// be read (for example by restoring the former fall-back-and-mint path):
+// with the generation unknown it must answer 503 and mint nothing.
+func TestSessionGen_AuthRefresh_StoreFault_FailsClosed(t *testing.T) {
+	f := newSessionGenFixture(t)
+	_, refresh := f.mintPair(t, 0, ClientTypeCLI)
+	f.srv.store = &failingUserLookupStore{Store: f.s, err: errors.New("database is locked")}
+	rec := f.postRefresh(t, refresh)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "store_error")
+	assert.NotContains(t, rec.Body.String(), "accessToken")
 }

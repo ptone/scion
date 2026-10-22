@@ -527,10 +527,9 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 	// Re-evaluate admin status on token refresh. The stored role is the source
 	// of truth for UI-granted promotions; admin_emails can only add to it.
 	//
-	// storedRole deliberately starts empty rather than at claims.Role: if the
-	// store cannot be read we fall back to config-only evaluation instead of
-	// trusting the token's own role claim, which would let a stale admin claim
-	// renew itself indefinitely through the rotating refresh chain.
+	// storedRole deliberately starts empty rather than at claims.Role, so the
+	// token's own role claim is never trusted: a stale admin claim must not
+	// renew itself through the rotating refresh chain.
 	role := claims.Role
 	storedRole := ""
 	var user *store.User
@@ -547,8 +546,13 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 				"invalid refresh token", nil)
 			return
 		default:
-			slog.Warn("Refresh: user lookup failed, falling back to config-only role",
+			// Without the row the session generation cannot be compared,
+			// so no pair is minted.
+			slog.Error("Refresh rejected: user lookup failed",
 				"email", claims.Email, "error", err)
+			writeError(w, http.StatusServiceUnavailable, "store_error",
+				"unable to verify user status", nil)
+			return
 		}
 	}
 	if user != nil && user.Status == store.UserStatusSuspended {
@@ -565,6 +569,18 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 			"invalid refresh token", nil)
 		return
+	}
+	// The refresh token's session generation must equal the users row's
+	// (any difference refuses; a missing claim reads as 0). With no store
+	// there is no row to compare; the new pair still carries the claim's
+	// generation and the bearer arm checks it on use.
+	if user != nil {
+		if reason := sessionGenerationRefusal(claims.SessionGeneration, user.SessionGeneration); reason != "" {
+			logSessionGenerationRefusal(r.Context(), "auth_refresh", user.ID, claims.SessionGeneration, user.SessionGeneration, reason)
+			writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+				"invalid refresh token", nil)
+			return
+		}
 	}
 	refreshUserID := ""
 	if user != nil {
