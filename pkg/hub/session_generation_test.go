@@ -554,3 +554,282 @@ func TestSessionGen_AuthValidate_RevokedToken_Invalid(t *testing.T) {
 	current, _ := f.mintPair(t, row, ClientTypeWeb)
 	assert.True(t, f.postValidate(t, current).Valid, "a token at the row's generation is valid")
 }
+
+// newWeb builds a web server over the fixture's store and token service,
+// with the fixture hub mounted as its API.
+func (f *sessionGenFixture) newWeb(t *testing.T, mutate func(*WebServerConfig)) *WebServer {
+	t.Helper()
+	cfg := WebServerConfig{BaseURL: "http://localhost:8080"}
+	if mutate != nil {
+		mutate(&cfg)
+	}
+	ws := newTestWebServer(t, cfg)
+	ws.SetStore(f.s)
+	ws.SetAccessSettingsProvider(f.srv)
+	ws.SetUserTokenService(f.srv.userTokenService)
+	ws.MountHubAPI(f.srv.Handler(), func(context.Context) error { return nil })
+	return ws
+}
+
+// webSessionCookies returns cookies for a web session holding the fixture
+// user's identity plus vals.
+func (f *sessionGenFixture) webSessionCookies(t *testing.T, ws *WebServer, vals map[string]interface{}) []*http.Cookie {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	sess, err := ws.sessionStore.Get(req, webSessionName)
+	require.NoError(t, err)
+	sess.Values[sessKeyUserID] = f.user.ID
+	sess.Values[sessKeyUserEmail] = f.user.Email
+	sess.Values[sessKeyUserName] = f.user.DisplayName
+	sess.Values[sessKeyUserRole] = f.user.Role
+	for k, v := range vals {
+		sess.Values[k] = v
+	}
+	require.NoError(t, sess.Save(req, rec))
+	cookies := rec.Result().Cookies()
+	require.NotEmpty(t, cookies)
+	return cookies
+}
+
+// webDo sends a request through the web server with cookies.
+func webDo(ws *WebServer, method, path string, cookies []*http.Cookie, browser bool) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, nil)
+	if browser {
+		req.Header.Set("Accept", "text/html")
+	}
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	rec := httptest.NewRecorder()
+	ws.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// webSessionAfter decodes the web session the response's cookies carry.
+// It reports false when the response sets no session cookie.
+func webSessionAfter(t *testing.T, ws *WebServer, rec *httptest.ResponseRecorder) (map[interface{}]interface{}, bool) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	found := false
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == webSessionName {
+			found = true
+			req.AddCookie(c)
+		}
+	}
+	if !found {
+		return nil, false
+	}
+	sess, err := ws.sessionStore.Get(req, webSessionName)
+	require.NoError(t, err)
+	return sess.Values, true
+}
+
+// expiredAccessToken mints an already-expired access token for the fixture
+// user at generation gen.
+func (f *sessionGenFixture) expiredAccessToken(t *testing.T, gen int64) string {
+	t.Helper()
+	u := f.user
+	tok, _, err := f.srv.userTokenService.MintAccessTokenWithTTL(u.ID, u.Email, u.DisplayName, u.Role, gen, ClientTypeWeb, -time.Hour)
+	require.NoError(t, err)
+	return tok
+}
+
+// Fails if the session generation check is removed from the web BFF refresh
+// (refreshHubTokens), on the branch that refreshes an invalid (expired)
+// access token: the session's pre-revoke refresh token would be rotated
+// into a new pair and stored, instead of the session being cleared.
+func TestSessionGen_BFFRefresh_ExpiredAccess_BehindRow_ClearsSession(t *testing.T) {
+	f := newSessionGenFixture(t)
+	ws := f.newWeb(t, nil)
+	_, refresh := f.mintPair(t, 0, ClientTypeWeb)
+	cookies := f.webSessionCookies(t, ws, map[string]interface{}{
+		sessKeyHubAccessToken:    f.expiredAccessToken(t, 0),
+		sessKeyHubRefreshToken:   refresh,
+		sessKeySessionGeneration: int64(0),
+	})
+	f.revoke(t)
+
+	rec := webDo(ws, http.MethodGet, "/api/v1/auth/me", cookies, false)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+	assertSessionCookieCleared(t, rec)
+	if vals, ok := webSessionAfter(t, ws, rec); ok {
+		assert.Empty(t, vals[sessKeyHubAccessToken], "no new access token is stored")
+		assert.Empty(t, vals[sessKeyHubRefreshToken], "no new refresh token is stored")
+	}
+
+	// A browser request on the same branch gets the session-expired answer.
+	rec = webDo(ws, http.MethodGet, "/api/v1/auth/me", cookies, true)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Contains(t, rec.Body.String(), "session_expired")
+	assertSessionCookieCleared(t, rec)
+}
+
+// Fails if the session generation check is removed from the web BFF refresh
+// (refreshHubTokens), on the proactive branch (access token still valid,
+// stored expiry passed): the pre-revoke refresh token would be rotated into
+// a new pair and stored, instead of the session being cleared.
+func TestSessionGen_BFFRefresh_ProactiveExpiry_BehindRow_NoNewPair(t *testing.T) {
+	f := newSessionGenFixture(t)
+	ws := f.newWeb(t, nil)
+	access, refresh := f.mintPair(t, 0, ClientTypeWeb)
+	cookies := f.webSessionCookies(t, ws, map[string]interface{}{
+		sessKeyHubAccessToken:    access,
+		sessKeyHubRefreshToken:   refresh,
+		sessKeyHubTokenExpiry:    time.Now().Add(-time.Minute).UnixMilli(),
+		sessKeySessionGeneration: int64(0),
+	})
+	f.revoke(t)
+
+	rec := webDo(ws, http.MethodGet, "/api/v1/auth/me", cookies, false)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+	assertSessionCookieCleared(t, rec)
+	if vals, ok := webSessionAfter(t, ws, rec); ok {
+		assert.NotEqual(t, refresh, vals[sessKeyHubRefreshToken])
+		assert.Empty(t, vals[sessKeyHubRefreshToken], "no new pair is stored")
+	}
+}
+
+// Fails if the web BFF refresh refuses or stops rotating a never-revoked
+// user's session, on either refresh branch.
+func TestSessionGen_BFFRefresh_NeverRevoked_Rotates(t *testing.T) {
+	cases := map[string]func(f *sessionGenFixture, t *testing.T) (access string, expiry int64){
+		"expired_access": func(f *sessionGenFixture, t *testing.T) (string, int64) {
+			return f.expiredAccessToken(t, 0), time.Now().Add(time.Hour).UnixMilli()
+		},
+		"proactive": func(f *sessionGenFixture, t *testing.T) (string, int64) {
+			access, _ := f.mintPair(t, 0, ClientTypeWeb)
+			return access, time.Now().Add(-time.Minute).UnixMilli()
+		},
+	}
+	for name, setup := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newSessionGenFixture(t)
+			ws := f.newWeb(t, nil)
+			access, expiry := setup(f, t)
+			_, refresh := f.mintPair(t, 0, ClientTypeWeb)
+			cookies := f.webSessionCookies(t, ws, map[string]interface{}{
+				sessKeyHubAccessToken:    access,
+				sessKeyHubRefreshToken:   refresh,
+				sessKeyHubTokenExpiry:    expiry,
+				sessKeySessionGeneration: int64(0),
+			})
+			rec := webDo(ws, http.MethodGet, "/api/v1/auth/me", cookies, false)
+			assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			vals, ok := webSessionAfter(t, ws, rec)
+			require.True(t, ok, "the rotated pair is saved to the session")
+			newRefresh, _ := vals[sessKeyHubRefreshToken].(string)
+			require.NotEmpty(t, newRefresh)
+			assert.NotEqual(t, refresh, newRefresh, "the refresh token was rotated")
+			claims, err := f.srv.userTokenService.ValidateRefreshToken(newRefresh)
+			require.NoError(t, err)
+			assert.Equal(t, int64(0), claims.SessionGeneration)
+		})
+	}
+}
+
+// Fails if the web BFF's cookie-overflow mint (a session with no stored hub
+// token) mints with the users row's generation instead of the session's
+// own: a session established before the revoke would then reach the hub
+// API with a token the bearer arm accepts.
+func TestSessionGen_BFFOverflowMint_UsesCookieGeneration_DeniedAfterRevoke(t *testing.T) {
+	f := newSessionGenFixture(t)
+	ws := f.newWeb(t, nil)
+	stale := f.webSessionCookies(t, ws, map[string]interface{}{sessKeySessionGeneration: int64(0)})
+	rec := webDo(ws, http.MethodGet, "/api/v1/auth/me", stale, false)
+	require.Equal(t, http.StatusOK, rec.Code, "accepted before the revoke: %s", rec.Body.String())
+
+	row := f.revoke(t)
+	rec = webDo(ws, http.MethodGet, "/api/v1/auth/me", stale, false)
+	requireRefusedAsRevoked(t, rec)
+
+	// Control: a session established at the current generation is served.
+	current := f.webSessionCookies(t, ws, map[string]interface{}{sessKeySessionGeneration: row})
+	rec = webDo(ws, http.MethodGet, "/api/v1/auth/me", current, false)
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+// Fails if the proxy-mode role-change re-mint (proxyAuthMiddleware) mints
+// with the users row's generation instead of the session's own.
+func TestSessionGen_ProxyRoleRemint_UsesCookieGeneration(t *testing.T) {
+	f := newSessionGenFixture(t)
+	row := f.revoke(t)
+	require.Equal(t, int64(1), row)
+	ws := f.newWeb(t, func(c *WebServerConfig) {
+		c.AuthMode = "proxy"
+		c.ProxyAuthenticator = &mockProxyAuthenticator{}
+	})
+	// The session's role differs from the stored role, so the middleware
+	// re-mints the session's hub tokens with the corrected role.
+	cookies := f.webSessionCookies(t, ws, map[string]interface{}{
+		sessKeyUserRole:          store.UserRoleAdmin,
+		sessKeySessionGeneration: int64(0),
+	})
+	rec := webDo(ws, http.MethodGet, "/", cookies, true)
+	vals, ok := webSessionAfter(t, ws, rec)
+	require.True(t, ok, "the session is saved after the role change (status %d)", rec.Code)
+	require.Equal(t, store.UserRoleMember, vals[sessKeyUserRole], "the role was corrected")
+	access, _ := vals[sessKeyHubAccessToken].(string)
+	require.NotEmpty(t, access, "hub tokens were re-minted")
+	claims, err := f.srv.userTokenService.ValidateUserToken(access)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), claims.SessionGeneration, "the re-mint carries the session's generation, not the row's")
+}
+
+// Fails if dev-auth web sessions keep a hub token at an old session
+// generation after the dev user's generation changes (the re-mint in
+// devAuthMiddleware is removed): the stored token would then be refused by
+// the hub on every API call.
+func TestSessionGen_DevAuthWeb_RemintsOnGenerationChange(t *testing.T) {
+	ws := newDevAuthWebServer(t)
+	svc, err := NewUserTokenService(UserTokenConfig{})
+	require.NoError(t, err)
+	ws.SetUserTokenService(svc)
+	devStore := ws.store.(*proxyAuthStore)
+
+	tokenGen := func(t *testing.T, vals map[interface{}]interface{}) int64 {
+		t.Helper()
+		access, _ := vals[sessKeyHubAccessToken].(string)
+		require.NotEmpty(t, access)
+		claims, err := svc.ValidateUserToken(access)
+		require.NoError(t, err)
+		return claims.SessionGeneration
+	}
+
+	rec := webDo(ws, http.MethodGet, "/", nil, true)
+	vals, ok := webSessionAfter(t, ws, rec)
+	require.True(t, ok, "dev auth creates a session (status %d)", rec.Code)
+	assert.Equal(t, int64(0), tokenGen(t, vals))
+	cookies := rec.Result().Cookies()
+
+	devStore.users[DevUserID].SessionGeneration = 2
+	rec = webDo(ws, http.MethodGet, "/", cookies, true)
+	vals, ok = webSessionAfter(t, ws, rec)
+	require.True(t, ok, "the session is saved with re-minted tokens (status %d)", rec.Code)
+	assert.Equal(t, int64(2), tokenGen(t, vals))
+	assert.Equal(t, int64(2), vals[sessKeySessionGeneration])
+}
+
+// Fails if the web cookie check refuses only when the users row is ahead of
+// the cookie (restoring ">" in sessionAuthMiddleware): a cookie whose
+// generation is ahead of the row must also end the session.
+func TestSessionGen_CookieCheck_AnyInequality(t *testing.T) {
+	f := newSessionGenFixture(t)
+	ws := f.newWeb(t, nil)
+
+	current := f.webSessionCookies(t, ws, map[string]interface{}{sessKeySessionGeneration: int64(0)})
+	rec := webDo(ws, http.MethodGet, "/", current, true)
+	require.NotEqual(t, "/auth/login", rec.Header().Get("Location"), "a session at the row's generation is served (status %d)", rec.Code)
+
+	ahead := f.webSessionCookies(t, ws, map[string]interface{}{sessKeySessionGeneration: int64(1)})
+	rec = webDo(ws, http.MethodGet, "/", ahead, true)
+	assert.Equal(t, http.StatusFound, rec.Code)
+	assert.Equal(t, "/auth/login", rec.Header().Get("Location"))
+	assertSessionCookieCleared(t, rec)
+
+	f.revoke(t)
+	rec = webDo(ws, http.MethodGet, "/", current, true)
+	assert.Equal(t, http.StatusFound, rec.Code, "a session behind the row ends too")
+	assert.Equal(t, "/auth/login", rec.Header().Get("Location"))
+}
