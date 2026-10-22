@@ -510,6 +510,16 @@ func filterDescriptiveLabels(agentName string, labels map[string]string) map[str
 }
 
 func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName string, err error) {
+	// Refuse, at the single production entry point for every start / restart /
+	// wake / reincarnate, the Kubernetes shapes where agents in a project would
+	// share one repository (its .git) on the NFS export (D237). Run is the only
+	// caller of buildPod, so this gate cannot be bypassed, and keeping it here
+	// rather than in buildPod leaves buildPod a pure pod constructor (the
+	// read-only .git narrowing it builds for that shape stays testable and ready
+	// for the follow-up that lifts this refusal).
+	if msg, refuse := k8sSharedRepoShapeRefusal(config); refuse {
+		return "", errors.New(msg)
+	}
 	fmt.Printf("Starting agent '%s' on Kubernetes...\n", config.Name)
 	namespace := r.runNamespace(config.Labels)
 
@@ -2570,6 +2580,15 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			{Name: "workspace", MountPath: "/repo-root/.git", SubPath: gitSubPath},
 			{Name: "workspace", MountPath: agentWorkingDir, SubPath: worktreeSubPath},
 		}
+		// Read-only narrowing of the shared .git admin surface for the agent
+		// container (C4): hooks/info/objects-info/worktrees read-only, the agent's
+		// own worktrees/<name>/ read-write. This shape is gated by the refusal at
+		// the top of buildPod today; the narrowing is kept here so the follow-up
+		// that lifts the refusal (adding the per-agent private .git/config on the
+		// export) needs no mount changes. The init container stays writable (it
+		// provisions: clone + worktree add) and is hardened by pkg/provision's
+		// SafeGitCommand/HostGitArgs instead.
+		agentVolumeMounts = append(agentVolumeMounts, k8sGitAdminReadOnlyMounts(gitSubPath, config.NFSWorktreeName)...)
 	}
 	// Keep the in-project agents root of a shared /workspace mount out of
 	// the agent's view (k8sWorkspaceAgentsExcluded). The worktree and
@@ -4721,6 +4740,83 @@ func NFSWorktreeContainerPath(name string) string {
 // of the agent's worktree (<workspace>/worktrees/<agent name>) for
 // worktree-per-agent mode. name must be the agent's slug (lower-case
 // letters, digits and dashes), so it is always a single path segment.
+// k8sSharedRepoShapeRefusal reports whether this Kubernetes pod would share one
+// repository's .git across the project's agents on the NFS export, and the
+// neutral end-state message to return if so. The shared-.git shapes are:
+//   - worktree-per-agent (NFSWorktreeName set): every agent mounts the shared
+//     .git at /repo-root/.git;
+//   - shared-workspace git (git-backed, not clone-per-agent, not empty-per-agent),
+//     which includes pre-#3998 agents that stay on the project's shared checkout
+//     (nfsKeepSharedCheckout).
+//
+// Clone-per-agent (each agent its own clone), empty-per-agent, a non-git shared
+// workspace, and the local/emptyDir backends do not share a .git and are allowed.
+func k8sSharedRepoShapeRefusal(config RunConfig) (string, bool) {
+	if config.WorkspaceBackendName != "nfs" || config.NFSPVClaimName == "" {
+		return "", false
+	}
+	sharedGit := config.NFSWorktreeName != ""
+	if config.NFSAgentDirName == "" && !config.NFSAgentDirEmpty && config.GitCloneForInit != nil {
+		// Shared-workspace git: the whole shared checkout (with its .git) is
+		// mounted at /workspace for every agent in the project.
+		sharedGit = true
+	}
+	if !sharedGit {
+		return "", false
+	}
+	return k8sSharedRepoShapeRefusalText, true
+}
+
+// k8sSharedRepoShapeRefusalText is the exact neutral end-state message returned
+// when a Kubernetes start is refused for the shared-repository shape (D237).
+const k8sSharedRepoShapeRefusalText = "Kubernetes does not support git projects that share one repository across agents " +
+	"(worktree-per-agent or shared-workspace on NFS). Re-create the agent as clone-per-agent, " +
+	"or run it on a local or Docker broker. Work not pushed from the existing agent remains in " +
+	"the project's shared checkout on the workspace storage."
+
+// k8sGitAdminReadOnlyMounts returns the read-only subPath volumeMounts that
+// narrow the shared .git admin surface for a worktree-per-agent agent container
+// (E-X2 PR 2, C4). The shared .git subPath itself is mounted read-write
+// elsewhere (objects and refs must be writable for commit); these layer
+// read-only over hooks/, info/, objects/info/ and worktrees/, with the agent's
+// own worktrees/<name>/ re-mounted read-write on top so it can still write its
+// own HEAD/index/logs. gitSubPath is the export-relative path of the shared
+// .git; ownWorktreeName is this agent's worktree admin dir name.
+//
+// Note: this does NOT make .git/config read-only — the per-agent private config
+// on Kubernetes needs the seeded copy on the export and is a tracked follow-up;
+// until it lands the shared config stays read-write (documented residual).
+func k8sGitAdminReadOnlyMounts(gitSubPath, ownWorktreeName string) []corev1.VolumeMount {
+	const base = "/repo-root/.git"
+	ro := func(rel string) corev1.VolumeMount {
+		return corev1.VolumeMount{
+			Name:      "workspace",
+			MountPath: path.Join(base, rel),
+			SubPath:   path.Join(gitSubPath, rel),
+			ReadOnly:  true,
+		}
+	}
+	mounts := []corev1.VolumeMount{
+		ro("hooks"),
+		ro("info"),
+		ro(path.Join("objects", "info")),
+		ro("worktrees"),
+	}
+	if ownWorktreeName != "" {
+		// The agent's own worktree admin dir is read-write on top of the
+		// read-only worktrees/ dir (its gitdir/config.worktree are not singled
+		// out read-only here — unlike the bind-mount runtimes — because k8s
+		// cannot bind single files; the shared-config follow-up addresses the
+		// remaining per-worktree config write).
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      "workspace",
+			MountPath: path.Join(base, "worktrees", ownWorktreeName),
+			SubPath:   path.Join(gitSubPath, "worktrees", ownWorktreeName),
+		})
+	}
+	return mounts
+}
+
 func nfsWorktreeSubPaths(workspaceSubPath, name string) (gitSubPath, worktreeSubPath string, err error) {
 	if slug, err := api.ValidateAgentName(name); err != nil || slug != name {
 		return "", "", fmt.Errorf("worktree-per-agent: agent name %q is not an agent slug", name)
