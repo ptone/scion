@@ -994,6 +994,23 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	var hydratedTemplatePath, hydratedHCPath string
 	var tplHydrated, hcHydrated bool
 	if req.GatherEnv && !req.NoAuth {
+		// A profile the Hub's stored profiles cannot resolve fails the
+		// create at buildStartContext anyway; report it here, before the
+		// auth and env checks below, so a create whose default runtime
+		// needs credentials the request lacks gets the profile error and
+		// not a missing-env 422 (ptone/scion#4888). It is the same error
+		// and response buildStartContext would give.
+		if _, perr := s.resolveRuntimeNameForOpts(api.StartOptions{
+			Name:        req.Name,
+			ProjectPath: req.ProjectPath,
+			Profile:     createRequestProfile(req),
+		}); perr != nil {
+			span.SetStatus(codes.Error, perr.Error())
+			status := s.writeStartContextError(w, perr, "create agent", "agent_id", req.ID, "profile", createRequestProfile(req))
+			markAttemptFailed(status, perr.Error())
+			return
+		}
+
 		// Build a preliminary merged env for env-gather evaluation. Shared
 		// with extractRequiredEnvKeys's own requestEnv so both checks start
 		// from the identical presence-aware base (see buildRequestEnv).
@@ -5924,6 +5941,11 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 		if req.Config != nil {
 			preflightProfile = req.Config.Profile
 		}
+		//
+		// Its error is not handled here: createAgent checks the same
+		// resolution before calling this function and refuses the create
+		// with it (ptone/scion#4888), so on error this only sees the
+		// default runtime's name, as before.
 		dispatchRuntimeName, _ := s.resolveRuntimeNameForOpts(api.StartOptions{
 			Name:        req.Name,
 			ProjectPath: req.ProjectPath,
@@ -6669,7 +6691,9 @@ func (s *Server) resolveRuntimeForAgent(ctx context.Context, id, projectID strin
 //
 // Its error is lenientProfileError's, the same one resolveManagerForOptsStrict
 // returns for this dispatch: a profile the Hub's stored profiles cannot
-// resolve. The name returned with it is the default runtime's.
+// resolve. createAgent uses it to refuse such a create before the auth and
+// env checks (ptone/scion#4888). The name returned with it is the default
+// runtime's.
 //
 // This mirrors resolveManagerForOpts's own ForceRuntime-then-settings logic
 // rather than sharing it, specifically so resolveManagerForOpts itself can
@@ -6722,7 +6746,8 @@ func (s *Server) resolveRuntimeNameForOpts(opts api.StartOptions) (string, error
 	_, runtimeType, err := vs.ResolveRuntime(opts.Profile)
 	if err != nil {
 		// A profile the Hub's stored profiles cannot resolve fails the
-		// dispatch, as resolveManagerForOptsStrict does.
+		// dispatch, as resolveManagerForOptsStrict does, so the caller can
+		// report it before any auth or env check (ptone/scion#4888).
 		if perr := s.lenientProfileError(opts, false, projectDir, err); perr != nil {
 			return defRT.Name(), perr
 		}

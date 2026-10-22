@@ -15,6 +15,7 @@
 package runtimebroker
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -104,6 +105,57 @@ func TestOverlayProfileRuntime_SavedProfileFailsWithoutFallback(t *testing.T) {
 
 			w := op.run(t, f, name)
 			assertDispatchRefused(t, w, "saved runtime profile cannot be resolved", `runtime "gke" not found for profile "dangling"`)
+			f.assertNoRuntimeUsed(t)
+		})
+	}
+}
+
+// A create that gathers env reports the stored-profile error before the
+// env check, not a missing-env answer (ptone/scion#4888).
+func TestOverlayProfileRuntime_GatherEnvCreateReportsProfileFirst(t *testing.T) {
+	for _, tc := range []struct {
+		name, profile string
+		activeDangles bool
+		want          string
+	}{
+		{name: "default profile runtime missing", activeDangles: true, want: `runtime "gke" not found for profile "local"`},
+		{name: "named profile runtime missing", profile: danglingProfile, want: `runtime "gke" not found for profile "dangling"`},
+		{name: "named profile missing", profile: "vanished", want: `profile "vanished" not found`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLifecycleFixture(t)
+			// A harness-config env key the request does not supply, so
+			// the env check alone would answer with requirements.
+			writeLifecycleProject(t, f.projectPath, "schema_version: \"1\"\n"+
+				"active_profile: local\n"+
+				"harness_configs:\n"+
+				"    claude:\n"+
+				"        harness: claude\n"+
+				"        env:\n"+
+				"            SECRET_TOKEN: \"\"\n"+
+				"profiles:\n"+
+				"    local:\n"+
+				"        runtime: docker\n"+
+				"runtimes:\n"+
+				"    docker:\n"+
+				"        type: docker\n")
+			installDanglingOverlay(t, tc.activeDangles)
+			cfg := map[string]any{"template": "claude"}
+			if tc.profile != "" {
+				cfg["profile"] = tc.profile
+			}
+			w := lifecyclePost(t, f.srv, "/api/v1/agents", map[string]any{
+				"name":        "gather-agent",
+				"slug":        "gather-agent",
+				"id":          "agent-uuid-gather",
+				"projectPath": f.projectPath,
+				"gatherEnv":   true,
+				"config":      cfg,
+			})
+			assertDispatchRefused(t, w, tc.want)
+			if strings.Contains(w.Body.String(), "SECRET_TOKEN") {
+				t.Errorf("response is an env answer: %s", w.Body.String())
+			}
 			f.assertNoRuntimeUsed(t)
 		})
 	}
