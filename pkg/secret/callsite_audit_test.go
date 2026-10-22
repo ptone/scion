@@ -39,9 +39,11 @@ func moduleRoot(t *testing.T) string {
 	return root
 }
 
-// selectorCallSites returns "<file>:<enclosing func>" for every call of a
-// method or function named name in the non-test Go files of the module
-// (extras, which are separate modules, and web are excluded).
+// selectorCallSites returns "<file>:<enclosing func>" for every reference
+// to a method or function named name in the non-test Go files of the
+// module: any selector x.name (a call, a method value or a method
+// expression, inside a function or a package-level func literal) and any
+// direct call name(...). extras (separate modules) and web are excluded.
 func selectorCallSites(t *testing.T, name string) []string {
 	t.Helper()
 	root := moduleRoot(t)
@@ -66,29 +68,7 @@ func selectorCallSites(t *testing.T, name string) []string {
 		if err != nil {
 			return err
 		}
-		for _, decl := range f.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
-				continue
-			}
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				switch fun := call.Fun.(type) {
-				case *ast.SelectorExpr:
-					if fun.Sel.Name == name {
-						sites = append(sites, filepath.ToSlash(rel)+":"+fn.Name.Name)
-					}
-				case *ast.Ident:
-					if fun.Name == name {
-						sites = append(sites, filepath.ToSlash(rel)+":"+fn.Name.Name)
-					}
-				}
-				return true
-			})
-		}
+		sites = append(sites, referenceSites(f, filepath.ToSlash(rel), name)...)
 		return nil
 	})
 	if err != nil {
@@ -113,7 +93,7 @@ func TestDecryptForMigrationCallers(t *testing.T) {
 	}
 }
 
-// The scanner itself must see calls: a known caller of a known name.
+// The scanner itself must see references: a known caller of a known name.
 func TestSelectorCallSitesFindsKnownCaller(t *testing.T) {
 	sites := selectorCallSites(t, "decryptRawValue")
 	found := false
@@ -124,5 +104,63 @@ func TestSelectorCallSitesFindsKnownCaller(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("scanner did not find LocalBackend.Resolve calling decryptRawValue: %v", sites)
+	}
+}
+
+// referenceSites returns "<rel>:<enclosing func>" for every reference to
+// name in f. Every reference counts, not only calls: a method value, a
+// method expression or a use inside a package-level func literal reaches
+// the function as well. Declarations are not references (a FuncDecl name
+// is never a selector).
+func referenceSites(f *ast.File, rel, name string) []string {
+	var sites []string
+	enclosing := "<package scope>"
+	var walk func(n ast.Node) bool
+	walk = func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.FuncDecl:
+			prev := enclosing
+			enclosing = x.Name.Name
+			if x.Body != nil {
+				ast.Inspect(x.Body, walk)
+			}
+			enclosing = prev
+			return false
+		case *ast.SelectorExpr:
+			if x.Sel.Name == name {
+				sites = append(sites, rel+":"+enclosing)
+			}
+		case *ast.CallExpr:
+			if id, ok := x.Fun.(*ast.Ident); ok && id.Name == name {
+				sites = append(sites, rel+":"+enclosing)
+			}
+		}
+		return true
+	}
+	for _, decl := range f.Decls {
+		ast.Inspect(decl, walk)
+	}
+	return sites
+}
+
+// The scanner sees every reference form, not only calls.
+func TestReferenceSitesFindsEveryForm(t *testing.T) {
+	const src = `package p
+var pkgLit = func(c *T) { _, _ = c.DecryptForMigration("", nil) }
+var methodExpr = (*T).DecryptForMigration
+func call(c *T)        { c.DecryptForMigration("", nil) }
+func methodValue(c *T) { f := c.DecryptForMigration; _ = f }
+func (T) DecryptForMigration(string, any) (string, error) { return "", nil }
+func unrelated(c *T)   { c.Decrypt("") }
+`
+	f, err := parser.ParseFile(token.NewFileSet(), "p.go", src, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := referenceSites(f, "p.go", "DecryptForMigration")
+	want := []string{"p.go:<package scope>", "p.go:<package scope>", "p.go:call", "p.go:methodValue"}
+	sort.Strings(got)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("referenceSites = %v, want %v", got, want)
 	}
 }

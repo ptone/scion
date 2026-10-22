@@ -132,7 +132,7 @@ func lockEncryptionPolicyTable(ctx context.Context, c *ent.Client) error {
 	}
 	var res sql.Result
 	if err := c.Driver().Exec(ctx, "LOCK TABLE hub_encryption_policy IN EXCLUSIVE MODE", []any{}, &res); err != nil {
-		return fmt.Errorf("locking the encryption policy: %w", err)
+		return fmt.Errorf("locking the encryption policy: %w", mapError(err))
 	}
 	return nil
 }

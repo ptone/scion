@@ -226,9 +226,11 @@ func TestSecretEncryptionFence_Postgres(t *testing.T) {
 }
 
 // TestSecretEncryptionPolicyCreation_Postgres pins that creating the policy
-// (no row yet) also serializes with fenced writes on PostgreSQL: the
-// transition's table lock waits for an in-flight write, and a write that
-// starts during the transition waits and then sees the new policy.
+// (no row yet) waits for an in-flight fenced write on PostgreSQL (the
+// transition's table lock conflicts with the writer's share lock), that a
+// write after the creation commits sees the policy, and that a second
+// creator gets applied=false. TestSecretEncryptionPolicyActivation_Postgres
+// covers a writer that arrives during the creation.
 func TestSecretEncryptionPolicyCreation_Postgres(t *testing.T) {
 	ctx := context.Background()
 	dsn := enttest.NewSchemaURL(t) // skips when Postgres is not configured
@@ -291,4 +293,65 @@ func TestSecretEncryptionPolicyCreation_Postgres(t *testing.T) {
 	ok, err := cs.UpdateEncryptionPolicy(ctx, 0, fencePolicyPG(1, "k3"))
 	require.NoError(t, err)
 	assert.False(t, ok)
+}
+
+// TestSecretEncryptionPolicyActivation_Postgres: a fenced write that
+// arrives while a real policy creation (UpdateEncryptionPolicy 0 -> 1) is
+// uncommitted waits for it (the creation holds LOCK TABLE ... IN EXCLUSIVE
+// MODE, which the writer's FOR SHARE policy read conflicts with even with
+// no row), then sees the new policy and is refused. Without the table lock
+// the writer would find no policy row and commit plaintext.
+func TestSecretEncryptionPolicyActivation_Postgres(t *testing.T) {
+	ctx := context.Background()
+	dsn := enttest.NewSchemaURL(t) // skips when Postgres is not configured
+	client, err := entc.OpenPostgres(dsn, entc.PoolConfig{MaxOpenConns: 4})
+	require.NoError(t, err)
+	defer func() { _ = client.Close() }()
+	cs := entadapter.NewCompositeStore(client)
+
+	release := make(chan struct{})
+	activated := make(chan struct{})
+	activationDone := make(chan error, 1)
+	go func() {
+		activationDone <- cs.WithTx(ctx, func(tx store.Store) error {
+			ok, err := tx.UpdateEncryptionPolicy(ctx, 0, fencePolicyPG(1, "k2"))
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return assert.AnError
+			}
+			close(activated)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case <-activated:
+	case err := <-activationDone:
+		t.Fatalf("activation failed: %v", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("activation never ran")
+	}
+
+	write := make(chan error, 1)
+	go func() {
+		write <- cs.CreateSecret(ctx, &store.Secret{ID: uuid.NewString(), Key: "PG_ACTIVATION_RACE",
+			EncryptedValue: "fake-plain", Scope: store.ScopeHub, ScopeID: "pg-activate"})
+	}()
+	select {
+	case err := <-write:
+		t.Fatalf("fenced write did not wait for the uncommitted policy creation: %v", err)
+	case <-time.After(blockWindow):
+	}
+	close(release)
+	require.NoError(t, <-activationDone)
+	select {
+	case err := <-write:
+		assert.ErrorIs(t, err, store.ErrEncryptionPolicyMismatch, "the write must see the new policy")
+	case <-time.After(30 * time.Second):
+		t.Fatal("fenced write never completed")
+	}
+	_, err = cs.GetSecret(ctx, "PG_ACTIVATION_RACE", store.ScopeHub, "pg-activate")
+	assert.ErrorIs(t, err, store.ErrNotFound, "no plaintext may be committed past the activation")
 }
