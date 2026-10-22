@@ -971,16 +971,6 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			if !s.requireDispatchBoundReadCapabilityForAgent(ctx, w, agent) {
 				return
 			}
-			// Re-record the current version of the agent's user-scoped
-			// template before the stop leg, so a lost compare-and-set
-			// leaves the agent running rather than stopped and never
-			// restarted. The start leg's own re-pin is then a no-op.
-			if err := s.repinUserTemplateForStart(ctx, agent); err != nil {
-				if !s.writeStartClaimError(ctx, w, err, agent.ID) {
-					writeErrorFromErr(w, err, "")
-				}
-				return
-			}
 			// Flat placement pre-check, before the broker cap check, the
 			// start claim, the run intent and the stop leg: a refused
 			// restart never stops the agent.
@@ -1029,6 +1019,21 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 						restartClaim.finish(startReleased)
 					}
 				}()
+			}
+			// Re-record the current version of the agent's user-scoped
+			// template (ptone/scion#5770) once the restart holds its start
+			// claim, so a restart that another start refuses never re-pins
+			// under that start's launch, and before the stop leg, so a lost
+			// compare-and-set leaves the agent running rather than stopped
+			// and never restarted. The start leg's own re-pin is then a
+			// no-op. A refusal undoes the capacity hold; the deferred
+			// release above finishes the claim.
+			if err := s.repinUserTemplateForStart(ctx, agent); err != nil {
+				sd.rollback(ctx)
+				if !s.writeStartClaimError(ctx, w, err, agent.ID) {
+					writeErrorFromErr(w, err, "")
+				}
+				return
 			}
 		}
 		// A restart leaves the agent running: record that before the stop

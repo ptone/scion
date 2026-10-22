@@ -492,17 +492,6 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 		}
 		return err
 	}
-	// A start, restart or resume follows the current version of the
-	// agent's user-scoped template, re-recorded before the dispatch, which
-	// it then stays pinned to (ptone/scion#5770). Undone like the check
-	// above when it fails.
-	if err := s.repinUserTemplateForStart(ctx, agent); err != nil {
-		opts.Dispatch.rollback(ctx)
-		if opts.Existing != nil {
-			opts.Existing.finish(startReleased)
-		}
-		return err
-	}
 	// The effective resting phase (ptone/scion#4669): an error row that
 	// remembers a created or provisioning phase a failed asynchronous start
 	// began from is still a provisioned agent that never ran. Read before
@@ -531,6 +520,16 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 			}
 		}
 		if err := fence(); err != nil {
+			sd.rollback(ctx)
+			return false, err
+		}
+		// A start, restart or resume follows the current version of the
+		// agent's user-scoped template, re-recorded before the dispatch,
+		// which the launch then stays pinned to (ptone/scion#5770). It runs
+		// only here, under the start claim, so a start the claim refuses
+		// never re-pins under another start's launch. Nothing was
+		// dispatched on a failure.
+		if err := s.repinUserTemplateForStart(ctx, agent); err != nil {
 			sd.rollback(ctx)
 			return false, err
 		}

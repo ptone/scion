@@ -450,6 +450,13 @@ type fillProbeDispatcher struct {
 	// and on the agent handed to the dispatch, at dispatch time.
 	storedHash     string
 	dispatchedHash string
+	// stops counts stop dispatches (a restart's stop leg).
+	stops int
+}
+
+func (d *fillProbeDispatcher) DispatchAgentStop(context.Context, *store.Agent) error {
+	d.stops++
+	return nil
 }
 
 func (d *fillProbeDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) error {
@@ -1239,6 +1246,7 @@ func TestRepin_ConcurrentWrite_409NoDispatch(t *testing.T) {
 			rec := p.run(t, f, a)
 			requireAPIError(t, rec, http.StatusConflict, ErrCodeVersionConflict)
 			assert.Zero(t, f.disp.starts, "nothing is dispatched")
+			assert.Zero(t, f.disp.stops, "a restart does not stop the agent")
 			assert.True(t, racing.raced, "the concurrent write ran")
 
 			got, err := f.store.GetAgent(context.Background(), a.ID)
@@ -1270,6 +1278,69 @@ func (r *racingPinWriteStore) SetAgentTemplatePin(ctx context.Context, agentID s
 		}
 	}
 	return r.Store.SetAgentTemplatePin(ctx, agentID, expectedVersion, templateID, expectedHash, newHash)
+}
+
+// A start refused by another start's claim never re-pins: the re-pin runs
+// only under the start's own claim, so an in-flight launch keeps the hash
+// recorded for it.
+func TestRepin_RefusedByStartClaim_PinUnchanged(t *testing.T) {
+	for _, p := range repinPaths {
+		t.Run(p.name, func(t *testing.T) {
+			f := setupResumeFill(t)
+			require.True(t, f.srv.startClaimsEnabled(), "fixture: start claims are on")
+			a := f.userTemplateAgent(t, "repin-claimed-"+tidSlugSafe(p.name), p.phase, f.broker.ID)
+			ctx := context.Background()
+			// Another hub instance's start is in flight.
+			_, err := f.store.ClaimAgentStart(ctx, a.ID, "other-hub-instance", store.StartClaimUser, "", time.Minute)
+			require.NoError(t, err)
+			f.editTemplate(t, repinNewHash)
+
+			rec := p.run(t, f, a)
+			assert.GreaterOrEqual(t, rec.Code, 300, "the start is refused or deferred: %s", rec.Body.String())
+			assert.Zero(t, f.disp.starts, "nothing is dispatched")
+			assert.Zero(t, f.disp.stops, "a refused restart does not stop the agent")
+			got, err := f.store.GetAgent(ctx, a.ID)
+			require.NoError(t, err)
+			assert.Equal(t, dispatchReadHash, got.AppliedConfig.TemplateHash, "a refused start does not change the pin")
+		})
+	}
+}
+
+// A direct-message wake re-pins like a start, and a lost compare-and-set
+// answers the sender 409 version_conflict with nothing dispatched.
+func TestRepin_Wake(t *testing.T) {
+	ctx := context.Background()
+	t.Run("follows the current version", func(t *testing.T) {
+		f := setupResumeFill(t)
+		a := f.userTemplateAgent(t, "repin-wake", string(state.PhaseSuspended), f.broker.ID)
+		f.editTemplate(t, repinNewHash)
+		cur, err := f.store.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+
+		_, dmErr := f.srv.wakeAgentForDM(ctx, cur)
+		require.Nil(t, dmErr)
+		require.Equal(t, 1, f.disp.starts)
+		assert.Equal(t, repinNewHash, f.disp.storedHash)
+		assert.Equal(t, repinNewHash, f.disp.dispatchedHash)
+	})
+	t.Run("lost compare-and-set", func(t *testing.T) {
+		f := setupResumeFill(t)
+		a := f.userTemplateAgent(t, "repin-wake-race", string(state.PhaseSuspended), f.broker.ID)
+		f.editTemplate(t, repinNewHash)
+		cur, err := f.store.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		f.srv.store = &racingPinWriteStore{Store: f.store}
+
+		_, dmErr := f.srv.wakeAgentForDM(ctx, cur)
+		require.NotNil(t, dmErr)
+		assert.Equal(t, http.StatusConflict, dmErr.HTTPStatus)
+		assert.Equal(t, ErrCodeVersionConflict, dmErr.Code)
+		assert.Zero(t, f.disp.starts, "nothing is dispatched")
+		got, err := f.store.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "concurrent write", got.Message)
+		assert.Equal(t, dispatchReadHash, got.AppliedConfig.TemplateHash)
+	})
 }
 
 // "Active" means not soft-deleted, in any phase: a stopped or errored agent's

@@ -49,6 +49,12 @@ var errTemplatePinConflict = fmt.Errorf("agent changed while its template was re
 // re-pin), nothing is written and errTemplatePinConflict is returned: the
 // start must not be dispatched, and writeStartClaimError answers 409.
 //
+// Callers run it only while holding the start's claim (in startAgentCore's
+// claimed dispatch, and in a restart right after it takes its claim), so a
+// start that another start's claim refuses never re-pins under that start's
+// launch. The queued broker dispatch that carries a claimed start to the
+// node holding the broker connection does not re-pin again.
+//
 // A reincarnate or move never calls this: its rebuild refuses a changed
 // user-scoped template instead (carryUserScopedTemplate).
 func (s *Server) repinUserTemplateForStart(ctx context.Context, agent *store.Agent) error {
