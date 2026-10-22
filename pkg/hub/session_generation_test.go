@@ -833,3 +833,72 @@ func TestSessionGen_CookieCheck_AnyInequality(t *testing.T) {
 	assert.Equal(t, http.StatusFound, rec.Code, "a session behind the row ends too")
 	assert.Equal(t, "/auth/login", rec.Header().Get("Location"))
 }
+
+// mockGoogleForFixtureUser is a mocked Google token and userinfo exchange
+// that resolves to the fixture user.
+func (f *sessionGenFixture) mockGoogleForFixtureUser() *http.Client {
+	return &http.Client{Transport: &mockOAuthTransport{
+		tokenJSON:    `{"access_token":"mock-token","token_type":"Bearer","expires_in":3600}`,
+		userinfoJSON: `{"id":"sub-` + f.user.ID + `","email":"` + f.user.Email + `","verified_email":true,"name":"Session Gen User"}`,
+	}}
+}
+
+// Fails if the CLI code-exchange issuance (POST /api/v1/auth/cli/token) or
+// the web BFF OAuth callback mints with a session generation other than
+// the users row's (for example 0): their tokens, issued after a revoke,
+// would then be refused. Complements TokenIssuedAfterRevoke_Accepted,
+// which covers POST /api/v1/auth/token.
+func TestSessionGen_IssuedAfterRevoke_CLIFlowAndOAuthCallback_Accepted(t *testing.T) {
+	t.Run("cli_token_exchange", func(t *testing.T) {
+		f := newSessionGenFixture(t)
+		gen := f.revoke(t)
+		f.srv.oauthService = NewOAuthService(OAuthConfig{
+			CLI: OAuthClientConfig{Google: OAuthProviderConfig{ClientID: "test-cli-id", ClientSecret: "test-cli-secret"}},
+		}, nil)
+		f.srv.oauthService.httpClient = f.mockGoogleForFixtureUser()
+		rec := doRequestNoAuth(t, f.srv, http.MethodPost, "/api/v1/auth/cli/token", CLIAuthTokenRequest{
+			Code: "test-code", CallbackURL: "http://localhost:18271/callback", Provider: "google",
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp CLIAuthTokenResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		for name, tok := range map[string]string{"access": resp.AccessToken, "refresh": resp.RefreshToken} {
+			claims, err := f.srv.userTokenService.ValidateUserToken(tok)
+			require.NoError(t, err, name)
+			assert.Equal(t, gen, claims.SessionGeneration, "%s token carries the users row's generation", name)
+			assert.Equal(t, http.StatusOK, f.me(t, tok).Code, "%s token is accepted", name)
+		}
+	})
+
+	t.Run("web_oauth_callback", func(t *testing.T) {
+		f := newSessionGenFixture(t)
+		gen := f.revoke(t)
+		ws := f.newWeb(t, nil)
+		ws.SetOAuthService(NewOAuthService(OAuthConfig{
+			Web: OAuthClientConfig{Google: OAuthProviderConfig{ClientID: "test-client-id", ClientSecret: "test-client-secret"}},
+		}, nil))
+		ws.oauthService.httpClient = f.mockGoogleForFixtureUser()
+
+		reqSetup := httptest.NewRequest(http.MethodGet, "/auth/login/google", nil)
+		recSetup := httptest.NewRecorder()
+		sess, err := ws.sessionStore.Get(reqSetup, webSessionName)
+		require.NoError(t, err)
+		sess.Values[sessKeyOAuthState] = "state-sessgen"
+		require.NoError(t, sess.Save(reqSetup, recSetup))
+
+		rec := webDo(ws, http.MethodGet, "/auth/callback/google?code=test-code&state=state-sessgen", recSetup.Result().Cookies(), true)
+		require.Equal(t, http.StatusFound, rec.Code, rec.Body.String())
+		require.NotContains(t, rec.Header().Get("Location"), "error", "the callback signed the user in")
+		vals, ok := webSessionAfter(t, ws, rec)
+		require.True(t, ok, "the callback saved a session")
+		assert.Equal(t, gen, vals[sessKeySessionGeneration], "the session records the users row's generation")
+		for _, key := range []string{sessKeyHubAccessToken, sessKeyHubRefreshToken} {
+			tok, _ := vals[key].(string)
+			require.NotEmpty(t, tok, key)
+			claims, err := f.srv.userTokenService.ValidateUserToken(tok)
+			require.NoError(t, err, key)
+			assert.Equal(t, gen, claims.SessionGeneration, "%s carries the users row's generation", key)
+			assert.Equal(t, http.StatusOK, f.me(t, tok).Code, "%s is accepted", key)
+		}
+	})
+}
