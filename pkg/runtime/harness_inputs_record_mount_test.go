@@ -96,18 +96,23 @@ func testRecordOutsideRunArgMounts(t *testing.T) {
 	if inProject == external {
 		t.Fatalf("fixture: shared-workspace agent dir should be external, got %s", external)
 	}
+	priv := seedTestPrivateGitConfig(t)
 	withPaths := func(home, repoRoot, workspace string, gc *api.GitCloneConfig) RunConfig {
 		cfg := minimalRunConfig()
 		cfg.BrokerMode = true
+		cfg.RuntimeName = "docker"
 		cfg.HomeDir = home
 		cfg.RepoRoot = repoRoot
 		cfg.Workspace = workspace
 		cfg.GitClone = gc
+		// A worktree/shared-plain git layout now binds a per-agent private
+		// .git/config; provide a seeded source so buildCommonRunArgs does not
+		// refuse. (The outside-repo-root full-repo-root fallback is gone — I-5 —
+		// so that mode is covered by its own refusal test, not here.)
+		cfg.PrivateGitConfigSource = priv
 		return cfg
 	}
 	modes := []mode{
-		{"worktree outside the repo (full repo root mounted)", inProject,
-			withPaths(config.GetAgentHomePath(scion, "a"), root, filepath.Join(base, ".scion_worktrees", "repo", "a"), nil)},
 		{"worktree inside the repo", inProject,
 			withPaths(config.GetAgentHomePath(scion, "a"), root, filepath.Join(root, "worktrees", "a"), nil)},
 		{"shared workspace (repo root)", external,

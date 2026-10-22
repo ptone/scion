@@ -2405,28 +2405,51 @@ authDone:
 		}
 	}
 
+	// E-X2 PR 2 (P1/P2/P8): for git-backed worktree / shared-plain / fallback
+	// layouts on the bind-mount runtimes (docker/podman/apple), seed a per-agent
+	// private copy of the repository's .git/config in the agent's state dir, for
+	// the runtime to bind read-write over the container's .git/config so in-container
+	// git stays usable without writes reaching the host or siblings. Fail closed:
+	// a seeding error refuses the start (the runtime also refuses if the source is
+	// missing or unsafe). The Kubernetes/NFS runtimes seed on the export instead
+	// (not here); clone-per-agent and empty-per-agent have no shared .git to protect.
+	privateGitConfigSource := ""
+	switch m.Runtime.Name() {
+	case "docker", "podman", "container", "apple-container":
+		if repoRoot != "" {
+			if fi, statErr := os.Stat(filepath.Join(repoRoot, ".git")); statErr == nil && fi.IsDir() {
+				src, seedErr := seedPrivateGitConfig(filepath.Join(repoRoot, ".git", "config"), agentDir)
+				if seedErr != nil {
+					return nil, fmt.Errorf("seed private git config for agent %q: %w", opts.Name, seedErr)
+				}
+				privateGitConfigSource = src
+			}
+		}
+	}
+
 	runCfg := runtime.RunConfig{
-		Name:                 containerName(projectName, opts.Name),
-		Template:             template,
-		UnixUsername:         unixUsername,
-		Image:                resolvedImage,
-		HomeDir:              agentHome,
-		Workspace:            effectiveWorkspace,
-		RepoRoot:             repoRoot,
-		ContainerWorkspace:   containerWorkspace,
-		ResolvedAuth:         resolvedAuth,
-		Harness:              h,
-		Project:              projectName,
-		ProjectID:            projectID,
-		WorkspaceBackendName: workspaceBackendName,
-		NFSUID:               nfsUID,
-		NFSGID:               nfsGID,
-		NFSPVClaimName:       nfsPVClaimName,
-		NFSSubPath:           nfsSubPath,
-		NFSSubPathRoot:       nfsSubPathRoot,
-		NFSShareServer:       nfsShareServer,
-		NFSShareExport:       nfsShareExport,
-		NFSStorageClass:      nfsStorageClass,
+		Name:                   containerName(projectName, opts.Name),
+		PrivateGitConfigSource: privateGitConfigSource,
+		Template:               template,
+		UnixUsername:           unixUsername,
+		Image:                  resolvedImage,
+		HomeDir:                agentHome,
+		Workspace:              effectiveWorkspace,
+		RepoRoot:               repoRoot,
+		ContainerWorkspace:     containerWorkspace,
+		ResolvedAuth:           resolvedAuth,
+		Harness:                h,
+		Project:                projectName,
+		ProjectID:              projectID,
+		WorkspaceBackendName:   workspaceBackendName,
+		NFSUID:                 nfsUID,
+		NFSGID:                 nfsGID,
+		NFSPVClaimName:         nfsPVClaimName,
+		NFSSubPath:             nfsSubPath,
+		NFSSubPathRoot:         nfsSubPathRoot,
+		NFSShareServer:         nfsShareServer,
+		NFSShareExport:         nfsShareExport,
+		NFSStorageClass:        nfsStorageClass,
 		// Lets the provisioning init container treat a failed chown as a
 		// warning for a workspace directory the broker created.
 		NFSWorkspacePreCreated: nfsWorkspacePreCreated,
