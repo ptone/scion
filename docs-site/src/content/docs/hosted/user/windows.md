@@ -27,7 +27,7 @@ You need:
   scion hub auth login
   ```
 
-- **A Hub with tunnels enabled**, for `scion ssh`, `scion ssh-config` and `scion vscode`: the `hub.conduit` [experiment](/scion/reference/experiments/) turned on at the Hub, and agents with a Conduit session. All three commands connect through `scion tunnel`; see [Tunnels from your machine](/scion/hosted/user/port-forwarding/#tunnels-from-your-machine-scion-tunnel). Without it they fail with `does not support tunnels` (see [The Hub does not support tunnels](#the-hub-does-not-support-tunnels)).
+- **A Hub with tunnels enabled**, for `scion ssh`, `scion ssh-config` and `scion vscode`: the `hub.conduit` [experiment](/scion/reference/experiments/) turned on at the Hub, and agents with a Conduit session. They connect through `scion tunnel`; see [Tunnels from your machine](/scion/hosted/user/port-forwarding/#tunnels-from-your-machine-scion-tunnel). `scion ssh-config` itself only reads from the Hub and works either way, but without tunnels `scion ssh`, `scion vscode` and the hosts installed by `scion ssh-config --write` fail to connect with `does not support tunnels` (see [The Hub does not support tunnels](#the-hub-does-not-support-tunnels)).
 - **An OpenSSH client named `ssh` on your `PATH`**, for `scion ssh`, `scion ssh-config` and `scion vscode`. Both the Windows OpenSSH client (`ssh.exe`) and Git for Windows' `ssh` work.
 - **For `scion vscode`:** VS Code with its `code` command on your `PATH`, and the **Remote - SSH** extension.
 
@@ -178,7 +178,7 @@ the hub at <hub> does not support tunnels (HTTP <n>)
 
 or `the hub does not support tunnels (...)`.
 
-`scion ssh`, `scion ssh-config` and `scion vscode` reach agents through `scion tunnel`, and this Hub does not offer tunnels (`scion tunnel` exits with code 11). Ask the Hub's administrator to turn on the `hub.conduit` [experiment](/scion/reference/experiments/); the agent also needs a Conduit session. This is a Hub setting, not something to change on Windows.
+`scion ssh`, `scion vscode` and the hosts installed by `scion ssh-config --write` reach agents through `scion tunnel`, and this Hub does not offer tunnels. `scion vscode` prints the message and exits with code 11. With `scion ssh` and plain `ssh`, `scion tunnel` prints it as the `ProxyCommand`, and `ssh` exits with 255. Ask the Hub's administrator to turn on the `hub.conduit` [experiment](/scion/reference/experiments/); the agent also needs a Conduit session. This is a Hub setting, not something to change on Windows.
 
 The other refusals are about file protection. Most of them include the path and the SID of the account that has too much access. To see a file's ACL, run `icacls <path>`. To remove another account's access, first turn off inheritance on that file or folder (`icacls <path> /inheritance:d`), then remove the account (`icacls <path> /remove:g *<SID>`).
 
@@ -218,7 +218,7 @@ The folder holding an SSH file scion writes (or an existing folder on the way to
 refusing to write <path>: refusing <file>: it has 2 names: file has more than one name (hard link)
 ```
 
-For files outside the SSH folders the message starts at `refusing <file>: it has 2 names`.
+For files outside the SSH folders the message contains `refusing <file>: it has 2 names: ...`, without the `refusing to write` prefix.
 
 scion will not write through a hard link, because the same file also lives somewhere else. Replace the hard link with an ordinary file (copy it, delete the original link, and move the copy into place), or make it a symlink, which scion follows.
 
