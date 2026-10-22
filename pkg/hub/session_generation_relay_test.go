@@ -83,7 +83,7 @@ func TestSessionGen_ConduitRelayAdmit_RevokedJWT_Refused(t *testing.T) {
 	row := revokeRelayRenewalUser(t, f)
 
 	_, err := f.ops.admit(t, bearer(f.jwt), "user-revoked")
-	require.Error(t, err)
+	require.Error(t, err, "the pre-revoke JWT is refused at relay admit")
 	assert.Equal(t, http.StatusUnauthorized, refusalStatus(t, err), "pre-revoke JWT")
 
 	ahead, _, _, err := f.srv.userTokenService.MintTokenPair(f.user.ID(), "renew@conduit.test", "Renew", store.UserRoleMember, row+1, ClientTypeWeb)

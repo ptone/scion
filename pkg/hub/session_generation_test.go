@@ -137,7 +137,7 @@ func (f *sessionGenFixture) me(t *testing.T, token string) *httptest.ResponseRec
 // requireRefusedAsRevoked asserts the bearer arm's session generation refusal.
 func requireRefusedAsRevoked(t *testing.T, rec *httptest.ResponseRecorder) {
 	t.Helper()
-	require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+	require.Equal(t, http.StatusUnauthorized, rec.Code, "refused as revoked: %s", rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "session revoked")
 }
 
@@ -438,7 +438,7 @@ func (f *sessionGenFixture) postRefresh(t *testing.T, refreshToken string) *http
 
 func requireRefreshRefused(t *testing.T, rec *httptest.ResponseRecorder) {
 	t.Helper()
-	require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+	require.Equal(t, http.StatusUnauthorized, rec.Code, "refresh refused: %s", rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "invalid refresh token")
 	assert.NotContains(t, rec.Body.String(), "accessToken", "no token pair is returned")
 }
@@ -520,7 +520,7 @@ func TestSessionGen_AuthRefresh_StoreFault_FailsClosed(t *testing.T) {
 	_, refresh := f.mintPair(t, 0, ClientTypeCLI)
 	f.srv.store = &failingUserLookupStore{Store: f.s, err: errors.New("database is locked")}
 	rec := f.postRefresh(t, refresh)
-	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, "a lookup fault fails closed: %s", rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "store_error")
 	assert.NotContains(t, rec.Body.String(), "accessToken")
 }
@@ -824,7 +824,7 @@ func TestSessionGen_CookieCheck_AnyInequality(t *testing.T) {
 
 	ahead := f.webSessionCookies(t, ws, map[string]interface{}{sessKeySessionGeneration: int64(1)})
 	rec = webDo(ws, http.MethodGet, "/", ahead, true)
-	assert.Equal(t, http.StatusFound, rec.Code)
+	assert.Equal(t, http.StatusFound, rec.Code, "a cookie ahead of the row ends the session")
 	assert.Equal(t, "/auth/login", rec.Header().Get("Location"))
 	assertSessionCookieCleared(t, rec)
 
