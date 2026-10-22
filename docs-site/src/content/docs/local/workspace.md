@@ -312,16 +312,26 @@ safe stops the command rather than being ignored.
   submodule recursion off, and the `GIT_*` environment scrubbed (except the host operator's own
   config-file, transport and `GIT_ALLOW_PROTOCOL` settings). **Note:** a `GIT_ALLOW_PROTOCOL` set by
   the host operator overrides the `protocol.*.allow` pins.
-- **git-lfs:** host-side checkouts take the LFS endpoint from the configured remote, not from a
-  tracked `.lfsconfig`. For a repository Scion manages, the host skips the LFS smudge entirely
-  (agents fetch LFS objects in-container). For your linked checkout, the endpoint is pinned from the
-  `origin` remote URL when it is `http(s)`; when it cannot be derived (for example an `ssh` remote),
-  the smudge is skipped and a warning names the pointer files and says to run `git lfs pull` in the
-  checkout. The git-lfs **post-checkout hook** does not run; it only marks LFS-lockable files
-  read-only.
+- **git-lfs:** host-side checkouts take the LFS endpoint from the configured remote, never from a
+  tracked `.lfsconfig` (which an agent could point at an arbitrary server).
+  - A repository Scion manages (the shared checkout and the shared-workspace clone) and every
+    provisioning clone skip the LFS smudge on the host (`GIT_LFS_SKIP_SMUDGE=1`); agents fetch LFS
+    objects in-container.
+  - Your linked checkout pins the endpoint derived from the `origin` remote URL when it is `http(s)`
+    **and** the committed `.lfsconfig` does not name its own endpoint. If `.lfsconfig` names an
+    endpoint (its objects may legitimately live on a separate server), or the origin is `ssh`/scp or
+    absent, the smudge is skipped and a warning names the pointer files and says to run `git lfs pull`
+    in the checkout. Scion never contacts the `.lfsconfig` endpoint.
+  - The git-lfs **post-checkout hook** does not run; it only marks LFS-lockable files read-only.
+  - git-lfs's own config writes are tolerated: `lfs.repositoryformatversion`, and `lfs.<url>.access`
+    (only `basic`/`none`) and `lfs.<url>.locksverify` with an http(s) URL subsection.
+- **Credentials** are never embedded in a clone URL and never left in a workspace's `.git/config`.
+  A git token is supplied only through a credential helper scoped to the clone URL's host (so it is
+  offered to that host and no other, in particular not to an LFS endpoint), and only for an `http(s)`
+  URL; for any other URL the token is ignored. The scoped helper also disables any other configured
+  credential helper for the command, so nothing persists the token.
 - **Updating a shared workspace** (pull) fetches from the project's clone URL known to the Hub, not
-  from the remote configured in the clone, then fast-forwards the current branch. Any credential is
-  scoped to that clone URL's host, so it is never offered to another endpoint.
+  from the remote configured in the clone, then fast-forwards the current branch.
 
 Your own git commands in your checkout are not affected. In-container git stays fully flexible: an
 upcoming change gives each agent its own private copy of `.git/config`.

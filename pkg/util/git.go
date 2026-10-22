@@ -20,12 +20,12 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -367,9 +367,18 @@ type lfsCheckoutOption struct {
 }
 
 // lfsOptionForLinkedCheckout decides the git-lfs handling for a linked
-// checkout at root: pin the endpoint derived from the origin remote URL when
-// it is http(s), otherwise skip the smudge (ssh remotes, or no origin).
+// checkout at root:
+//   - pin the endpoint derived from the origin remote URL when it is http(s)
+//     AND the checked-out .lfsconfig does not name its own endpoint; or
+//   - skip the smudge (an ssh/scp or absent origin, or a tracked .lfsconfig
+//     that names an endpoint — which may legitimately live on a separate
+//     server the origin-derived pin would not serve; we do not contact it).
 func lfsOptionForLinkedCheckout(root string) lfsCheckoutOption {
+	// A tracked .lfsconfig that sets an endpoint: do not pin (the origin
+	// endpoint may not serve these objects) and do not contact it; skip.
+	if lfsConfigNamesEndpoint(root) {
+		return lfsCheckoutOption{skipSmudge: true}
+	}
 	remote := strings.TrimSpace(GetGitRemoteDir(root))
 	if remote == "" {
 		return lfsCheckoutOption{skipSmudge: true}
@@ -380,18 +389,55 @@ func lfsOptionForLinkedCheckout(root string) lfsCheckoutOption {
 	return lfsCheckoutOption{skipSmudge: true}
 }
 
+// lfsConfigNamesEndpoint reports whether the committed .lfsconfig at HEAD sets
+// an LFS endpoint (lfs.url, lfs.pushurl or remote.<name>.lfsurl). It reads
+// HEAD:.lfsconfig as data (host-side git with the fixed pins); any failure
+// (no file, unparseable) is treated as "no endpoint".
+func lfsConfigNamesEndpoint(root string) bool {
+	out, err := hostGit("-C", root, "show", "HEAD:.lfsconfig").Output()
+	if err != nil {
+		return false
+	}
+	vars, err := parseGitConfigFile(out)
+	if err != nil {
+		return false
+	}
+	for _, v := range vars {
+		if v.Section == "lfs" && !v.HasSubsection && (v.Name == "url" || v.Name == "pushurl") {
+			return true
+		}
+		if v.Section == "remote" && v.HasSubsection && v.Name == "lfsurl" {
+			return true
+		}
+	}
+	return false
+}
+
 // warnLFSPointersNotFetched scans the checkout at path for git-lfs pointer
 // files (left in place when the smudge was skipped) and logs a warning that
-// names them and says how to fetch the objects. The scan is bounded and best
-// effort; it never fails the checkout.
+// names them and says how to fetch the objects. It only runs when the
+// repository tracks LFS content (a .gitattributes assigns filter=lfs), looks
+// only at regular files (never following a symlink or opening a device/FIFO),
+// and reads a bounded prefix. It is best effort and never fails the checkout.
 func warnLFSPointersNotFetched(path string) {
+	if !repoTracksLFS(path) {
+		return
+	}
 	var pointers []string
 	const maxList = 50
 	_ = filepath.WalkDir(path, func(p string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			if d != nil && d.IsDir() && d.Name() == ".git" {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		// Regular files only: WalkDir's DirEntry is lstat-based, so a symlink
+		// reports a non-regular type and is skipped without being followed.
+		if !d.Type().IsRegular() {
 			return nil
 		}
 		if isLFSPointerFile(p) {
@@ -413,14 +459,30 @@ func warnLFSPointersNotFetched(path string) {
 		"path", path, "pointer_files", pointers, "command", "git lfs pull")
 }
 
-// isLFSPointerFile reports whether the file at p begins with the git-lfs
-// pointer header. Only the first bytes are read.
+// repoTracksLFS reports whether a .gitattributes in the checkout root assigns
+// the lfs filter to anything. A cheap gate so a non-LFS checkout is not
+// scanned file by file.
+func repoTracksLFS(path string) bool {
+	data, err := os.ReadFile(filepath.Join(path, ".gitattributes"))
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(data), "filter=lfs")
+}
+
+// isLFSPointerFile reports whether the regular file at p begins with the
+// git-lfs pointer header. It opens with O_NOFOLLOW|O_NONBLOCK (so a symlink
+// or a FIFO cannot redirect or block it) and reads only the first bytes.
 func isLFSPointerFile(p string) bool {
-	f, err := os.Open(p)
+	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return false
 	}
 	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil || !fi.Mode().IsRegular() {
+		return false
+	}
 	buf := make([]byte, 64)
 	n, _ := f.Read(buf)
 	return strings.HasPrefix(string(buf[:n]), "version https://git-lfs.")
@@ -1418,61 +1480,48 @@ func ExtractOrgRepo(gitURL string) (org, repo string) {
 	return parts[len(parts)-2], parts[len(parts)-1]
 }
 
-// authenticatedCloneURL embeds OAuth2 credentials in an HTTPS clone URL.
-//
-// It parses the URL rather than substituting on the scheme prefix: a remote
-// that already carries userinfo (Azure DevOps emits
-// "https://org@dev.azure.com/org/project/_git/repo") would otherwise end up
-// with two "@" separators and fail to resolve. url.UserPassword also escapes
-// tokens containing reserved characters.
-//
-// Only https remotes are rewritten. The previous implementation keyed off the
-// literal "https://" prefix, so ssh:// and git:// remotes were left alone;
-// url.Parse alone would happily inject an OAuth token into those, so the
-// scheme is checked explicitly to preserve that behaviour.
-//
-// The original URL is returned unchanged when there is no token, when it
-// cannot be parsed, and when it is not https.
-func authenticatedCloneURL(cloneURL, token string) string {
-	if token == "" {
-		return cloneURL
-	}
-	parsed, err := url.Parse(cloneURL)
-	if err != nil || parsed.Scheme != "https" {
-		return cloneURL
-	}
-	parsed.User = url.UserPassword("oauth2", token)
-	return parsed.String()
-}
-
 // CloneSharedWorkspace clones a git repository into the specified workspace path
-// for use as a shared workspace project. It configures git identity and optionally
-// uses a token for authentication.
+// for use as a shared workspace project. It configures git identity and
+// optionally authenticates with a token.
+//
+// The token is never embedded in the clone URL (which would persist it in the
+// workspace .git/config, readable by agents). Instead it is supplied through a
+// credential helper scoped to the clone URL's host (ScopedCredentialHelperEnv),
+// and only for an http(s) URL; for any other URL the token is ignored. The
+// clone runs with the LFS smudge skipped, so git-lfs never contacts an endpoint
+// from a tracked .lfsconfig with the host's credentials.
 //
 // If the requested branch does not exist on the remote, the clone falls back to
 // the remote's default branch and creates the requested branch locally.
 func CloneSharedWorkspace(workspacePath, cloneURL, branch, token string) error {
-	authURL := authenticatedCloneURL(cloneURL, token)
+	baseEnv := append(HostGitEnv(os.Environ()), "GIT_TERMINAL_PROMPT=0", "GIT_LFS_SKIP_SMUDGE=1")
+	env := baseEnv
+	if token != "" {
+		if scoped, ok := ScopedCredentialHelperEnv(baseEnv, cloneURL, token); ok {
+			env = scoped
+		}
+		// Non-http(s) URL: the token is ignored, matching the previous
+		// behaviour where it was only ever injected for https.
+	}
+
+	runClone := func(args ...string) ([]byte, error) {
+		cmd := hostGit(args...)
+		cmd.Env = env
+		return cmd.CombinedOutput()
+	}
 
 	args := []string{"clone"}
 	if branch != "" {
 		args = append(args, "--branch", branch)
 	}
-	args = append(args, authURL, workspacePath)
-
-	cmd := hostGit(args...)
-	cmd.Env = append(HostGitEnv(os.Environ()), "GIT_TERMINAL_PROMPT=0")
-	output, err := cmd.CombinedOutput()
+	args = append(args, cloneURL, workspacePath)
+	output, err := runClone(args...)
 
 	if err != nil && branch != "" && isRemoteBranchNotFound(string(output)) {
 		// The branch doesn't exist on the remote yet. Clone the default branch
 		// instead and create the requested branch locally.
 		_ = os.RemoveAll(workspacePath)
-
-		fallbackArgs := []string{"clone", authURL, workspacePath}
-		fallbackCmd := hostGit(fallbackArgs...)
-		fallbackCmd.Env = append(HostGitEnv(os.Environ()), "GIT_TERMINAL_PROMPT=0")
-		output, err = fallbackCmd.CombinedOutput()
+		output, err = runClone("clone", cloneURL, workspacePath)
 		if err != nil {
 			sanitized := strings.TrimSpace(sanitizeGitOutput(string(output), token))
 			gitErr := ClassifyGitError(sanitized)
@@ -1482,8 +1531,9 @@ func CloneSharedWorkspace(workspacePath, cloneURL, branch, token string) error {
 			return &GitError{Kind: gitErr.Kind, Message: fmt.Sprintf("git clone failed: %s", sanitized)}
 		}
 
-		// Create the requested branch locally
+		// Create the requested branch locally.
 		checkoutCmd := hostGit("-C", workspacePath, "checkout", "-b", branch)
+		checkoutCmd.Env = env
 		if checkoutOut, checkoutErr := checkoutCmd.CombinedOutput(); checkoutErr != nil {
 			return fmt.Errorf("failed to create local branch %q: %s", branch, strings.TrimSpace(string(checkoutOut)))
 		}
@@ -1503,10 +1553,11 @@ func CloneSharedWorkspace(workspacePath, cloneURL, branch, token string) error {
 		return fmt.Errorf("failed to configure git user.email: %w", err)
 	}
 
-	if token != "" {
-		if err := gitConfig(workspacePath, "remote.origin.url", cloneURL); err != nil {
-			Debugf("CloneSharedWorkspace: failed to sanitize remote URL: %v", err)
-		}
+	// Pin remote.origin.url to the clean clone URL. The token was never in the
+	// URL, so this is belt-and-braces; a failure to assert it is FATAL rather
+	// than logged, so a credential can never be left in the shared .git/config.
+	if err := gitConfig(workspacePath, "remote.origin.url", cloneURL); err != nil {
+		return fmt.Errorf("failed to set a clean remote.origin.url: %w", err)
 	}
 
 	return nil
@@ -1568,11 +1619,12 @@ func PullSharedWorkspace(workspacePath, cloneURL, token string) (*PullResult, er
 	// leak the token to an agent-chosen endpoint.
 	fetchEnv := baseEnv
 	if token != "" {
-		scoped, ok := ScopedCredentialHelperEnv(baseEnv, cloneURL, token)
-		if !ok {
-			return nil, pullErr("the clone URL has no usable http(s) host for scoped credentials")
+		// Only an http(s) clone URL can carry a host-scoped credential helper.
+		// For an ssh/scp or local-path URL the token is ignored (git uses its
+		// own transport auth), rather than failing the pull.
+		if scoped, ok := ScopedCredentialHelperEnv(baseEnv, cloneURL, token); ok {
+			fetchEnv = scoped
 		}
-		fetchEnv = scoped
 	}
 
 	branchOut, err := hostGit("-C", workspacePath, "symbolic-ref", "--quiet", "--short", "HEAD").CombinedOutput()

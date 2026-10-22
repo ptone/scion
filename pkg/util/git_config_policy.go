@@ -17,6 +17,8 @@ package util
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -83,6 +85,40 @@ var standardLFSFilter = map[string]string{
 	"clean":   "git-lfs clean -- %f",
 	"smudge":  "git-lfs smudge -- %f",
 	"process": "git-lfs filter-process",
+}
+
+// lfsAccessValues are the git-lfs lfs.<url>.access auth modes we accept.
+// negotiate and ntlm are excluded: they would let git-lfs use ambient
+// Kerberos/NTLM credentials from the broker host.
+var lfsAccessValues = map[string]bool{"basic": true, "none": true}
+
+// isGitBool reports whether v is a git boolean literal.
+func isGitBool(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "true", "false", "yes", "no", "on", "off", "1", "0", "":
+		return true
+	}
+	return false
+}
+
+// validLFSURLSubsection reports whether an lfs.<url>.* subsection is an
+// http(s) URL with no whitespace or control characters — so a crafted
+// subsection cannot smuggle anything past the key check.
+func validLFSURLSubsection(sub string) bool {
+	if sub == "" {
+		return false
+	}
+	for _, r := range sub {
+		if r <= 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	u, err := url.Parse(sub)
+	if err != nil {
+		return false
+	}
+	s := strings.ToLower(u.Scheme)
+	return (s == "http" || s == "https") && u.Host != ""
 }
 
 // submoduleUpdateAllowed are the submodule.<name>.update values that run no
@@ -168,6 +204,33 @@ func allowVar(policy RepoConfigPolicy, v gitConfigVar, opts repoConfigAllowOptio
 		if topLevel && (name == "name" || name == "email") {
 			return true, ""
 		}
+	case "lfs":
+		// The only keys git-lfs itself writes to repository config, under both
+		// policies (it writes repositoryformatversion even with the smudge
+		// skipped, and <url>.access after authenticating). Each is value-checked
+		// and none redirects, executes or names a host path. Every other lfs.*
+		// key is refused in the linked section below (and outright for managed).
+		if topLevel && name == "repositoryformatversion" && v.Value == "0" {
+			return true, ""
+		}
+		if hasSub && name == "access" {
+			if !validLFSURLSubsection(sub) {
+				return false, "a git-lfs access key with a non-URL subsection"
+			}
+			if lfsAccessValues[strings.ToLower(v.Value)] {
+				return true, ""
+			}
+			return false, "a git-lfs access mode outside {basic, none}"
+		}
+		if hasSub && name == "locksverify" {
+			if !validLFSURLSubsection(sub) {
+				return false, "a git-lfs locksverify key with a non-URL subsection"
+			}
+			if isGitBool(v.Value) {
+				return true, ""
+			}
+			return false, "a non-boolean git-lfs locksverify"
+		}
 	}
 
 	if policy == RepoPolicyManaged {
@@ -251,7 +314,7 @@ func allowVar(policy RepoConfigPolicy, v gitConfigVar, opts repoConfigAllowOptio
 		if topLevel && (name == "auto" || name == "strategy" || name == "autodetach") {
 			return true, ""
 		}
-		if hasSub && (name == "enabled" || name == "schedule") {
+		if hasSub && (name == "enabled" || name == "schedule" || name == "auto") {
 			return true, ""
 		}
 	case "user":
@@ -432,24 +495,9 @@ func set(keys ...string) map[string]bool {
 // if git resolves any entry the parser did not, so a parser divergence fails
 // closed. It fails closed on anything it cannot locate, read or parse.
 func checkRepoConfigPolicy(ctx context.Context, dir string, env []string, policy RepoConfigPolicy, opts repoConfigAllowOptions) error {
-	files, err := repoConfigFiles(dir, env)
+	parsed, err := parseRepoConfig(dir, env)
 	if err != nil {
-		return fmt.Errorf("git in %s: cannot locate the repository config to check it: %w", dir, err)
-	}
-	var parsed []gitConfigVar
-	for _, f := range files {
-		data, err := os.ReadFile(f)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return fmt.Errorf("git in %s: cannot read %s: %w", dir, f, err)
-		}
-		vars, err := parseGitConfigFile(data)
-		if err != nil {
-			return fmt.Errorf("git in %s: cannot parse %s (refusing): %w", dir, f, err)
-		}
-		parsed = append(parsed, vars...)
+		return err
 	}
 	for _, v := range parsed {
 		if v.Section == "include" || v.Section == "includeif" {
@@ -460,6 +508,111 @@ func checkRepoConfigPolicy(ctx context.Context, dir string, env []string, policy
 		}
 	}
 	return crossCheckAgainstGit(ctx, dir, env, parsed)
+}
+
+// parseRepoConfig reads, as data, every repository config file git would read
+// for a command in dir (repoConfigFiles) and returns the parsed variables.
+// It fails closed on any file it cannot read or parse.
+func parseRepoConfig(dir string, env []string) ([]gitConfigVar, error) {
+	files, err := repoConfigFiles(dir, env)
+	if err != nil {
+		return nil, fmt.Errorf("git in %s: cannot locate the repository config to check it: %w", dir, err)
+	}
+	var parsed []gitConfigVar
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, fmt.Errorf("git in %s: cannot read %s: %w", dir, f, err)
+		}
+		vars, err := parseGitConfigFile(data)
+		if err != nil {
+			return nil, fmt.Errorf("git in %s: cannot parse %s (refusing): %w", dir, f, err)
+		}
+		parsed = append(parsed, vars...)
+	}
+	return parsed, nil
+}
+
+// isSensitiveConfigKey reports whether a full config key is one of the
+// allowed, value-sensitive keys that git-lfs (and no other legitimate
+// in-command writer) never writes, so any change to it while a host-side
+// command runs is treated as tampering. The subsection case is preserved by
+// splitConfigKey; section and name are already lower-case in a snapshot key.
+func isSensitiveConfigKey(key string) bool {
+	section, subsection, name := splitConfigKey(key)
+	hasSub := strings.Count(key, ".") >= 2
+	switch section {
+	case "remote":
+		return hasSub && (name == "url" || name == "fetch")
+	case "branch":
+		return hasSub && (name == "remote" || name == "merge")
+	case "submodule":
+		return hasSub && (name == "update" || name == "url")
+	case "core":
+		return !hasSub && name == "worktree"
+	case "user":
+		return !hasSub && name == "signingkey"
+	case "gpg":
+		return !hasSub && name == "format"
+	case "filter":
+		return hasSub && subsection == "lfs"
+	}
+	return false
+}
+
+// repoConfigSnapshot returns the current repository-config values at dir
+// (parsed as data), keyed by full config key.
+func repoConfigSnapshot(dir string, env []string) (map[string]string, error) {
+	parsed, err := parseRepoConfig(dir, env)
+	if err != nil {
+		return nil, err
+	}
+	m := make(map[string]string, len(parsed))
+	for _, v := range parsed {
+		m[v.Key()] = v.Value
+	}
+	return m, nil
+}
+
+// verifyConfigStable is the post-command check: the config must still pass the
+// deny-by-default policy (including the git cross-check), and no sensitive key
+// may have changed value since before. A change confined to other allowed keys
+// (for example git-lfs writing lfs.repositoryformatversion during its own
+// filter-process) is tolerated and logged by key name only. Any failure
+// returns an error wrapping ErrRepoConfigChanged.
+func verifyConfigStable(ctx context.Context, dir string, env []string, policy RepoConfigPolicy, opts repoConfigAllowOptions, before map[string]string) error {
+	if err := checkRepoConfigPolicy(ctx, dir, env, policy, opts); err != nil {
+		return fmt.Errorf("%w: %v", ErrRepoConfigChanged, err)
+	}
+	after, err := repoConfigSnapshot(dir, env)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrRepoConfigChanged, err)
+	}
+	seen := make(map[string]struct{}, len(before)+len(after))
+	for k := range before {
+		seen[k] = struct{}{}
+	}
+	for k := range after {
+		seen[k] = struct{}{}
+	}
+	var changedOther []string
+	for k := range seen {
+		if before[k] == after[k] {
+			continue
+		}
+		if isSensitiveConfigKey(k) {
+			return fmt.Errorf("%w: sensitive repository config key %q changed while the command ran", ErrRepoConfigChanged, k)
+		}
+		changedOther = append(changedOther, k)
+	}
+	if len(changedOther) > 0 {
+		slog.Debug("host-side git: allowed repository config keys changed during the command (tolerated)",
+			"dir", dir, "keys", changedOther)
+	}
+	return nil
 }
 
 // crossCheckAgainstGit lists the repository-scope config git itself resolves

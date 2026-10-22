@@ -408,7 +408,19 @@ New work for the base repo:
    warning. The shared-workspace pull scopes any credential to the clone
    URL's host. `extensions.partialClone`/`index.sparse` are refused
    (fail-closed; may be lifted later). An operator-set `GIT_ALLOW_PROTOCOL`
-   overrides the `protocol.*.allow` pins. Global and system config
+   overrides the `protocol.*.allow` pins.
+   Host-side git never embeds a token in a URL or leaves one in a repo's
+   `.git/config`: a token is supplied only through a credential helper scoped
+   to the clone URL's host (util.ScopedCredentialHelperEnv), which also resets
+   any other configured helper so nothing persists it. git-lfs: managed repos
+   and provisioning clones skip the smudge; linked checkouts pin lfs.url from
+   origin only when the committed .lfsconfig names no endpoint, else skip and
+   warn. git-lfs's own repo-config writes (lfs.repositoryformatversion,
+   lfs.<url>.access in {basic,none}, lfs.<url>.locksverify) are allowed;
+   post-command the policy is re-checked and a change to a value-sensitive key
+   (remote url/fetch, branch tracking, submodule url/update, core.worktree,
+   user.signingkey, gpg.format, filter.lfs.*) still fails
+   (ErrRepoConfigChanged). Global and system config
    stay in effect, so a globally installed git-lfs filter still runs; the
    git-lfs post-checkout hook (lockable files read-only) does not. Running
    `git lfs post-checkout` explicitly instead was rejected: git-lfs reads

@@ -2831,10 +2831,20 @@ func runGitClone(ctx context.Context, in ProvisionInput) error {
 	args = append(args, gc.URL, in.Resolved.HostPath)
 
 	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	// Skip the LFS smudge on the clone's checkout, so git-lfs never contacts an
+	// endpoint named in the cloned tracked .lfsconfig with the host's
+	// credentials; agents fetch LFS objects in-container. This path also runs
+	// in the Kubernetes init container (via `sciontool provision`).
+	env := append(util.HostGitEnv(os.Environ()), "GIT_TERMINAL_PROMPT=0", "GIT_LFS_SKIP_SMUDGE=1")
 	if in.CloneWithToken {
-		cmd.Env = append(cmd.Env, TokenCredentialHelperEnv(cmd.Env)...)
+		// Host-scoped credential helper: the token is offered only to the clone
+		// URL's host, never to any other endpoint. For a non-http(s) URL the
+		// token is ignored (git uses its own transport auth).
+		if scoped, ok := util.ScopedCredentialHelperEnv(env, gc.URL, os.Getenv(GitTokenEnv)); ok {
+			env = scoped
+		}
 	}
+	cmd.Env = env
 	output, err := cmd.CombinedOutput()
 	if err == nil {
 		return nil
@@ -2855,31 +2865,11 @@ const GitTokenEnv = "GITHUB_TOKEN"
 // workspace provisioning and the agent authenticate the same way.
 const GitTokenCredentialHelper = `!f() { echo "password=${GITHUB_TOKEN}"; echo "username=oauth2"; }; f`
 
-// TokenCredentialHelperEnv returns the GIT_CONFIG_COUNT/KEY/VALUE entries
-// to append to env, the environment of one git command, so that the command
-// uses GitTokenCredentialHelper and no other credential helper: the first
-// entry clears the helpers from git's config files (so none of them stores
-// the credential), the second adds this one. Entries already counted in env
-// are kept. The returned values name the variable, never the token.
-func TokenCredentialHelperEnv(env []string) []string {
-	base := 0
-	for _, e := range env {
-		if v, ok := strings.CutPrefix(e, "GIT_CONFIG_COUNT="); ok {
-			// The last entry is the one exec uses.
-			base = 0
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				base = n
-			}
-		}
-	}
-	return []string{
-		"GIT_CONFIG_COUNT=" + strconv.Itoa(base+2),
-		fmt.Sprintf("GIT_CONFIG_KEY_%d=credential.helper", base),
-		fmt.Sprintf("GIT_CONFIG_VALUE_%d=", base),
-		fmt.Sprintf("GIT_CONFIG_KEY_%d=credential.helper", base+1),
-		fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", base+1, GitTokenCredentialHelper),
-	}
-}
+// Host-side git clones (runGitClone, util.CloneSharedWorkspace) authenticate
+// through util.ScopedCredentialHelperEnv, a credential helper scoped to the
+// clone URL's host, never an unscoped helper or a token embedded in the URL.
+// GitTokenCredentialHelper above remains only for the in-container agent
+// (sciontool init), which authenticates its own clone.
 
 // cloneError builds the error for a failed clone of rawURL. git's output is
 // stripped of the URL's credentials before it is included.

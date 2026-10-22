@@ -239,30 +239,16 @@ func splitConfigKey(key string) (section, subsection, variable string) {
 	return key[:first], key[first+1 : last], key[last+1:]
 }
 
-// hostGitConfig is what HostGitCommand derives from one read of the config
-// git sees in a directory.
-type hostGitConfig struct {
-	// pins are the extra -c settings for repository filter drivers.
-	pins []string
-	// snapshot lists the repository-scope entries the pins and the network
-	// refusal depend on, to compare after the command.
-	snapshot []string
-}
-
-// readHostGitConfig lists the config git sees in dir (with the leading
-// args lead) and derives hostGitConfig from it:
-//
-//   - every filter driver variable (clean, smudge, process, required) the
-//     repository config sets is set again to its global/system value, or,
-//     when there is none, to the empty value (no command; an empty process
-//     disables the whole driver) and required to false. Variables the
-//     repository does not set keep their global/system value.
-//
-// The snapshot of repository-scope keys it records is compared after the
-// command (HostGitCmd); for a network command it covers every key, otherwise
-// the filter keys. Refusal is the deny-by-default policy's job
-// (checkRepoConfigPolicy), not this function's.
-func readHostGitConfig(ctx context.Context, dir string, lead []string, env []string, network bool) (hostGitConfig, error) {
+// readFilterPins lists the config git sees in dir (with the leading args
+// lead) and returns, for every filter driver variable (clean, smudge,
+// process, required) the repository config sets, a -c setting that re-sets
+// it to its global/system value, or, when there is none, to the empty value
+// (no command; an empty process disables the whole driver) and required to
+// false. Variables the repository does not set keep their global/system
+// value. This is defence in depth; the deny-by-default policy
+// (checkRepoConfigPolicy) is the primary control and already refuses any
+// non-standard filter driver.
+func readFilterPins(ctx context.Context, dir string, lead []string, env []string) ([]string, error) {
 	listArgs := append(append([]string{}, lead...), "config", "--show-scope", "-z", "--list")
 	cmd := exec.CommandContext(ctx, "git", listArgs...)
 	cmd.Dir = dir
@@ -271,19 +257,15 @@ func readHostGitConfig(ctx context.Context, dir string, lead []string, env []str
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return hostGitConfig{}, fmt.Errorf("read git config in %s: %w: %s", dir, err, strings.TrimSpace(stderr.String()))
+		return nil, fmt.Errorf("read git config in %s: %w: %s", dir, err, strings.TrimSpace(stderr.String()))
 	}
 
-	var cfg hostGitConfig
 	repoDrivers := map[string]map[string]bool{}
 	trusted := map[string]string{}
 	for _, e := range parseGitConfigList(out) {
 		section, subsection, variable := splitConfigKey(e.key)
 		isFilter := strings.EqualFold(section, "filter") && subsection != ""
 		if repoConfigScope(e.scope) {
-			if isFilter || network {
-				cfg.snapshot = append(cfg.snapshot, e.scope+"\x00"+e.key+"\x00"+e.value)
-			}
 			if isFilter {
 				v := strings.ToLower(variable)
 				if slices.Contains(filterDriverVars, v) {
@@ -306,6 +288,7 @@ func readHostGitConfig(ctx context.Context, dir string, lead []string, env []str
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	var pins []string
 	for _, name := range names {
 		for _, v := range filterDriverVars {
 			if !repoDrivers[name][v] {
@@ -315,10 +298,10 @@ func readHostGitConfig(ctx context.Context, dir string, lead []string, env []str
 			if !ok && v == "required" {
 				value = "false"
 			}
-			cfg.pins = append(cfg.pins, "-c", "filter."+name+"."+v+"="+value)
+			pins = append(pins, "-c", "filter."+name+"."+v+"="+value)
 		}
 	}
-	return cfg, nil
+	return pins, nil
 }
 
 // HostGitCmd is a host-side git command built by HostGitCommand. Run,
@@ -376,10 +359,10 @@ func (c *HostGitCmd) after(runErr error) error {
 // (never through git) and refuses, returning a *RepoConfigRefusedError
 // without running anything, when the config holds an include directive or a
 // key outside opts.Policy's allow-list (checkRepoConfigPolicy). It then reads
-// the config once through git to compute the filter pins and a snapshot;
-// running the returned command reads the config again afterwards and reports
-// a change (HostGitCmd). The policy read is the primary control; the pins,
-// HostGitArgs and the snapshot are defence in depth.
+// the config once through git to compute the filter pins and snapshots the
+// sensitive keys; running the returned command re-checks the policy and the
+// sensitive keys afterwards (HostGitCmd, verifyConfigStable). The policy read
+// is the primary control; the pins and HostGitArgs are defence in depth.
 func HostGitCommand(ctx context.Context, dir string, opts HostGitOptions, args ...string) (*HostGitCmd, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("HostGitCommand: dir is required")
@@ -395,6 +378,12 @@ func HostGitCommand(ctx context.Context, dir string, opts HostGitOptions, args .
 	if err := checkRepoConfigPolicy(ctx, dir, env, opts.Policy, allowOpts); err != nil {
 		return nil, err
 	}
+	// Snapshot the sensitive keys before the command, to detect any change to
+	// them while it runs (verifyConfigStable).
+	before, err := repoConfigSnapshot(dir, env)
+	if err != nil {
+		return nil, err
+	}
 	lead := HostGitArgs()
 	if opts.Network {
 		lead = append(lead, hostGitNetworkArgs...)
@@ -406,28 +395,26 @@ func HostGitCommand(ctx context.Context, dir string, opts HostGitOptions, args .
 	for _, kv := range opts.Config {
 		lead = append(lead, "-c", kv)
 	}
-	cfg, err := readHostGitConfig(ctx, dir, lead, env, opts.Network)
+	pins, err := readFilterPins(ctx, dir, lead, env)
 	if err != nil {
 		return nil, err
 	}
-	full := append(append(append([]string{}, lead...), cfg.pins...), args...)
+	full := append(append(append([]string{}, lead...), pins...), args...)
 	cmd := exec.CommandContext(ctx, "git", full...)
 	cmd.Dir = dir
 	cmd.Env = env
 	verify := func() error {
-		// Re-check the policy (an agent may have added a refused key) and the
-		// snapshot. A fresh context: the command's own may have expired.
-		if err := checkRepoConfigPolicy(context.Background(), dir, env, opts.Policy, allowOpts); err != nil {
-			return fmt.Errorf("%w: %v", ErrRepoConfigChanged, err)
-		}
-		after, err := readHostGitConfig(context.Background(), dir, lead, env, opts.Network)
-		if err != nil {
-			return fmt.Errorf("%w: %v", ErrRepoConfigChanged, err)
-		}
-		if !slices.Equal(cfg.snapshot, after.snapshot) {
-			return fmt.Errorf("%w in %s", ErrRepoConfigChanged, dir)
-		}
-		return nil
+		// After the command, re-run the deny-by-default policy (allow-list plus
+		// the git cross-check) on the current repository config, and confirm no
+		// sensitive key changed value. The command fails (ErrRepoConfigChanged)
+		// on a newly-planted include or refused key, or a change to a sensitive
+		// key (remote url/fetch, branch tracking, submodule url/update,
+		// core.worktree, user.signingkey, gpg.format, filter.lfs.*). A change
+		// confined to other allowed keys is tolerated — git-lfs writes
+		// lfs.repositoryformatversion (and lfs.<url>.access after auth) during
+		// its own filter-process even with the smudge skipped. A fresh context:
+		// the command's own may have expired.
+		return verifyConfigStable(context.Background(), dir, env, opts.Policy, allowOpts, before)
 	}
 	return &HostGitCmd{Cmd: cmd, verify: verify}, nil
 }
@@ -451,19 +438,27 @@ func hostGit(args ...string) *exec.Cmd {
 // skipping the smudge. The point is to pin a trusted endpoint on the command
 // line, outranking any endpoint a tracked .lfsconfig would supply.
 func DeriveLFSEndpoint(remote string) (endpoint string, ok bool) {
-	u := strings.TrimSpace(remote)
-	lower := strings.ToLower(u)
-	if !strings.HasPrefix(lower, "https://") && !strings.HasPrefix(lower, "http://") {
+	parsed, err := url.Parse(strings.TrimSpace(remote))
+	if err != nil {
 		return "", false
 	}
-	u = strings.TrimRight(u, "/")
-	if u == "" {
+	scheme := strings.ToLower(parsed.Scheme)
+	if (scheme != "http" && scheme != "https") || parsed.Host == "" {
 		return "", false
 	}
-	if strings.HasSuffix(strings.ToLower(u), ".git") {
-		return u + "/info/lfs", true
+	// Drop any userinfo, query and fragment: userinfo would otherwise put a
+	// stored credential on the git argv (visible in host process listings),
+	// and a query would end up spliced into the path.
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	if strings.HasSuffix(strings.ToLower(parsed.Path), ".git") {
+		parsed.Path += "/info/lfs"
+	} else {
+		parsed.Path += ".git/info/lfs"
 	}
-	return u + ".git/info/lfs", true
+	return parsed.String(), true
 }
 
 // ScopedCredentialHelperEnv returns the GIT_CONFIG_* environment that
@@ -482,10 +477,19 @@ func ScopedCredentialHelperEnv(base []string, cloneURL, token string) (env []str
 	start := existingConfigCount(base)
 	helper := fmt.Sprintf("!f() { echo username=oauth2; echo password=%s; }; f", token)
 	key := fmt.Sprintf("credential.%s://%s.helper", scheme, host)
+	// First reset the generic credential helper list to empty, so no other
+	// configured helper (for example a global `credential.helper = store`) runs
+	// and persists the token, or offers credentials to any other host. Then add
+	// the one-shot helper scoped to the clone URL's host. NOTE: the empty
+	// `credential.helper` reset below is the single sanctioned use of that
+	// unscoped key; the TestNoUnscopedHostGitCredentials guard exempts this file
+	// for exactly this line.
 	return append(base,
-		"GIT_CONFIG_COUNT="+strconv.Itoa(start+1),
-		fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", start, key),
-		fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", start, helper),
+		"GIT_CONFIG_COUNT="+strconv.Itoa(start+2),
+		fmt.Sprintf("GIT_CONFIG_KEY_%d=credential.helper", start),
+		fmt.Sprintf("GIT_CONFIG_VALUE_%d=", start),
+		fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", start+1, key),
+		fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", start+1, helper),
 	), true
 }
 

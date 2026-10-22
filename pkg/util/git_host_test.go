@@ -27,7 +27,9 @@ import (
 	"slices"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // hostGitTestEnv isolates git from the host's global and system config and
@@ -757,14 +759,40 @@ func TestHostGitCmd_DetectsFilterConfigChange(t *testing.T) {
 		}
 	})
 
-	t.Run("network: any repository key change is reported", func(t *testing.T) {
+	t.Run("sensitive key change is reported", func(t *testing.T) {
 		repo, _ := newHostGitRepo(t)
-		cmd, err := HostGitCommand(ctx, repo, HostGitOptions{Network: true}, "config", "user.name", "changed")
+		hostRunGit(t, repo, "remote", "add", "origin", "https://github.com/o/r.git")
+		cmd, err := HostGitCommand(ctx, repo, HostGitOptions{}, "config", "remote.origin.url", "https://evil.example/o/r.git")
 		if err != nil {
 			t.Fatal(err)
 		}
 		if _, err := cmd.Output(); !errors.Is(err, ErrRepoConfigChanged) {
-			t.Errorf("network: error = %v, want ErrRepoConfigChanged", err)
+			t.Errorf("remote.origin.url changed during the command: error = %v, want ErrRepoConfigChanged", err)
+		}
+	})
+
+	t.Run("non-sensitive allowed key change is tolerated", func(t *testing.T) {
+		repo, _ := newHostGitRepo(t)
+		// user.name is allowed but not sensitive; changing it mid-command is
+		// tolerated (git-lfs-style allowed writes must not fail the command).
+		cmd, err := HostGitCommand(ctx, repo, HostGitOptions{}, "config", "user.name", "changed")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cmd.Run(); err != nil {
+			t.Errorf("user.name change: error = %v, want nil (tolerated)", err)
+		}
+	})
+
+	t.Run("git-lfs-style lfs.repositoryformatversion write tolerated", func(t *testing.T) {
+		repo, _ := newHostGitRepo(t)
+		// Simulate git-lfs writing its repo-format key during our command.
+		cmd, err := HostGitCommand(ctx, repo, HostGitOptions{Policy: RepoPolicyManaged}, "config", "lfs.repositoryformatversion", "0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cmd.Run(); err != nil {
+			t.Errorf("lfs.repositoryformatversion=0 write: error = %v, want nil (tolerated)", err)
 		}
 	})
 
@@ -778,6 +806,40 @@ func TestHostGitCmd_DetectsFilterConfigChange(t *testing.T) {
 			t.Errorf("unchanged: error = %v", err)
 		}
 	})
+}
+
+// C-1/A2/A3: the git-lfs keys git-lfs writes are allowed, value-checked.
+func TestAllowVar_LFSWrittenKeys(t *testing.T) {
+	v := func(key, value string) gitConfigVar {
+		sec, sub, name := splitConfigKey(key)
+		return gitConfigVar{Section: strings.ToLower(sec), Subsection: sub, HasSubsection: sub != "", Name: strings.ToLower(name), Value: value}
+	}
+	for _, mode := range []RepoConfigPolicy{RepoPolicyManaged, RepoPolicyLinked} {
+		ok := func(key, val string) {
+			if a, _ := allowVar(mode, v(key, val), repoConfigAllowOptions{}); !a {
+				t.Errorf("policy%d: %s=%s should be allowed", mode, key, val)
+			}
+		}
+		no := func(key, val string) {
+			if a, _ := allowVar(mode, v(key, val), repoConfigAllowOptions{}); a {
+				t.Errorf("policy%d: %s=%s should be refused", mode, key, val)
+			}
+		}
+		ok("lfs.repositoryformatversion", "0")
+		no("lfs.repositoryformatversion", "1")
+		ok("lfs.https://github.com/o/r.git/info/lfs.access", "basic")
+		ok("lfs.https://github.com/o/r.git/info/lfs.access", "none")
+		no("lfs.https://github.com/o/r.git/info/lfs.access", "negotiate") // A2
+		no("lfs.https://github.com/o/r.git/info/lfs.access", "ntlm")      // A2
+		ok("lfs.https://github.com/o/r.git/info/lfs.locksverify", "true")
+		no("lfs.https://github.com/o/r.git/info/lfs.locksverify", "maybe")
+		// A3: a non-URL subsection is refused.
+		no("lfs.not a url.access", "basic")
+		no("lfs.ext::sh -c id.access", "basic")
+		// Still refused: redirect/host-path keys.
+		no("lfs.url", "https://evil.example/lfs")
+		no("lfs.storage", "/tmp/x")
+	}
 }
 
 // With extensions.worktreeConfig on, the main worktree's config.worktree
@@ -991,15 +1053,20 @@ func TestScopedCredentialHelperEnv(t *testing.T) {
 		t.Fatal("expected ok for an https URL")
 	}
 	joined := strings.Join(env, "\n")
-	if !strings.Contains(joined, "GIT_CONFIG_KEY_0=credential.https://github.com.helper") {
+	// An empty generic reset, then the host-scoped helper.
+	if !strings.Contains(joined, "GIT_CONFIG_KEY_0=credential.helper\nGIT_CONFIG_VALUE_0=\n") {
+		t.Errorf("missing the empty credential.helper reset: %q", env)
+	}
+	if !strings.Contains(joined, "GIT_CONFIG_KEY_1=credential.https://github.com.helper") {
 		t.Errorf("credential not scoped to the host: %q", env)
 	}
-	if !strings.Contains(joined, "GIT_CONFIG_COUNT=1") {
-		t.Errorf("missing count: %q", env)
+	if !strings.Contains(joined, "GIT_CONFIG_COUNT=2") {
+		t.Errorf("wrong count: %q", env)
 	}
-	// Respects an existing count.
+	// Respects an existing count (starts at 2 -> adds 2 more -> 4).
 	env2, _ := ScopedCredentialHelperEnv([]string{"GIT_CONFIG_COUNT=2", "GIT_CONFIG_KEY_0=x.y", "GIT_CONFIG_VALUE_0=z", "GIT_CONFIG_KEY_1=a.b", "GIT_CONFIG_VALUE_1=c"}, "https://h/o/r", "t")
-	if !strings.Contains(strings.Join(env2, "\n"), "GIT_CONFIG_COUNT=3") || !strings.Contains(strings.Join(env2, "\n"), "GIT_CONFIG_KEY_2=credential.https://h.helper") {
+	j2 := strings.Join(env2, "\n")
+	if !strings.Contains(j2, "GIT_CONFIG_COUNT=4") || !strings.Contains(j2, "GIT_CONFIG_KEY_3=credential.https://h.helper") {
 		t.Errorf("did not append after existing count: %q", env2)
 	}
 	if _, ok := ScopedCredentialHelperEnv(nil, "git@github.com:o/r.git", "t"); ok {
@@ -1031,41 +1098,75 @@ func TestHostGitCommandPinsLFSURL(t *testing.T) {
 	}
 }
 
-// An agent-chosen .lfsconfig endpoint must never be contacted (and so never
-// receive a host credential) by a host-side checkout. The hub pull and the
-// linked checkout both skip the smudge or pin a trusted endpoint, so the
-// endpoint named in a tracked .lfsconfig is never reached. git-lfs is not
-// installed in this sandbox; the no-contact assertion runs regardless, and
-// the argv/env wiring is asserted unconditionally by the sibling unit tests
-// (ScopedCredentialHelperEnv, the SkipLFSSmudge env, the pinned lfs.url).
-func TestLFSConfigEndpointNeverContacted(t *testing.T) {
-	lfsPresent := false
-	if _, err := exec.LookPath("git-lfs"); err == nil {
-		lfsPresent = true
+// requireGitLFS skips the test when git-lfs is not installed. The live
+// behaviour (git-lfs runs the smudge filter) can only be exercised with it
+// present; the argv/env wiring is asserted unconditionally in the sibling unit
+// tests (ScopedCredentialHelperEnv, SkipLFSSmudge env, the pinned lfs.url,
+// DeriveLFSEndpoint).
+func requireGitLFS(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("git-lfs"); err != nil {
+		t.Skip("git-lfs not installed; skipping the live git-lfs assertion (argv/env wiring is covered unconditionally elsewhere)")
 	}
-	t.Logf("git-lfs present: %v (the network-contact assertion runs either way; with git-lfs it is the meaningful case)", lfsPresent)
+}
 
-	var hits int32
+// lfsPointer is a valid git-lfs pointer (a 64-hex oid), which git-lfs will try
+// to smudge (fetch) unless the smudge is skipped.
+const lfsPointer = "version https://git-lfs.github.com/spec/v1\noid sha256:1111111111111111111111111111111111111111111111111111111111111111\nsize 3\n"
+
+// configureGlobalLFSFilter writes filter.lfs.* into the test's isolated global
+// config, as `git lfs install` does, so git-lfs's filter runs on checkout.
+func configureGlobalLFSFilter(t *testing.T) {
+	t.Helper()
+	global := os.Getenv("GIT_CONFIG_GLOBAL")
+	if global == "" {
+		t.Fatal("GIT_CONFIG_GLOBAL not set by hostGitTestEnv")
+	}
+	body := "[filter \"lfs\"]\n\tclean = git-lfs clean -- %f\n\tsmudge = git-lfs smudge -- %f\n\tprocess = git-lfs filter-process\n\trequired = true\n"
+	f, err := os.OpenFile(global, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(body); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+}
+
+// recordingLFSServer returns an httptest server that records every request and
+// fails the test if any carries an Authorization header. hits is the request
+// count.
+func recordingLFSServer(t *testing.T, hits *int32) *httptest.Server {
+	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&hits, 1)
+		atomic.AddInt32(hits, 1)
 		if r.Header.Get("Authorization") != "" {
-			t.Errorf("the .lfsconfig endpoint received an Authorization header: %q", r.Header.Get("Authorization"))
+			t.Errorf("the .lfsconfig endpoint received an Authorization header")
 		}
 		http.Error(w, "no", http.StatusNotFound)
 	}))
-	defer srv.Close()
-	lfsconfig := "[lfs]\n\turl = " + srv.URL + "/lfs\n"
+	t.Cleanup(srv.Close)
+	return srv
+}
 
-	t.Run("linked checkout skips smudge (ssh/no http origin)", func(t *testing.T) {
-		repo, _ := newHostGitRepo(t)
-		// An ssh origin: DeriveLFSEndpoint fails, so the checkout skips smudge.
+// An agent-chosen .lfsconfig endpoint must never be contacted (and so never
+// receive a host credential) by a host-side checkout. With git-lfs present and
+// its filter configured globally, a valid LFS pointer would otherwise be
+// smudged against the .lfsconfig endpoint.
+func TestLFSConfigEndpointNeverContacted(t *testing.T) {
+	requireGitLFS(t)
+
+	t.Run("linked checkout, ssh origin, skips smudge", func(t *testing.T) {
+		hostGitTestEnv(t)
+		configureGlobalLFSFilter(t)
+		var hits int32
+		srv := recordingLFSServer(t, &hits)
+		repo := filepath.Join(t.TempDir(), "repo")
+		hostRunGit(t, filepath.Dir(repo), "init", "-q", "-b", "main", repo)
 		hostRunGit(t, repo, "remote", "add", "origin", "git@example.com:o/r.git")
-		if err := os.WriteFile(filepath.Join(repo, ".lfsconfig"), []byte(lfsconfig), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(repo, "big.bin"), []byte("version https://git-lfs.github.com/spec/v1\noid sha256:deadbeef\nsize 3\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeFile(t, filepath.Join(repo, ".lfsconfig"), "[lfs]\n\turl = "+srv.URL+"/lfs\n")
+		writeFile(t, filepath.Join(repo, ".gitattributes"), "*.bin filter=lfs -text\n")
+		writeFile(t, filepath.Join(repo, "big.bin"), lfsPointer)
 		hostRunGit(t, repo, "add", ".")
 		hostRunGit(t, repo, "commit", "-q", "-m", "lfs")
 		wt := filepath.Join(repo, "agents", "a", "workspace")
@@ -1075,21 +1176,98 @@ func TestLFSConfigEndpointNeverContacted(t *testing.T) {
 		if err := CreateWorktree(wt, "agent-a"); err != nil {
 			t.Fatalf("CreateWorktree: %v", err)
 		}
+		if got := atomic.LoadInt32(&hits); got != 0 {
+			t.Errorf(".lfsconfig endpoint contacted %d time(s); must be 0", got)
+		}
 	})
 
 	t.Run("hub pull skips smudge", func(t *testing.T) {
+		hostGitTestEnv(t)
+		configureGlobalLFSFilter(t)
+		var hits int32
+		srv := recordingLFSServer(t, &hits)
 		source, workspace, _ := sharedWorkspaceFixture(t)
-		if err := os.WriteFile(filepath.Join(source, ".lfsconfig"), []byte(lfsconfig), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		commitFile(t, source, "big.bin", "version https://git-lfs.github.com/spec/v1\noid sha256:dead\nsize 3\n", "add lfs")
+		writeFile(t, filepath.Join(source, ".lfsconfig"), "[lfs]\n\turl = "+srv.URL+"/lfs\n")
+		writeFile(t, filepath.Join(source, ".gitattributes"), "*.bin filter=lfs -text\n")
+		writeFile(t, filepath.Join(source, "big.bin"), lfsPointer)
+		hostRunGit(t, source, "add", ".")
+		hostRunGit(t, source, "-c", "core.hooksPath="+os.DevNull, "commit", "-q", "-m", "lfs")
 		if _, err := PullSharedWorkspace(workspace, source, ""); err != nil {
 			t.Fatalf("PullSharedWorkspace: %v", err)
 		}
+		if got := atomic.LoadInt32(&hits); got != 0 {
+			t.Errorf(".lfsconfig endpoint contacted %d time(s); must be 0", got)
+		}
 	})
 
-	if got := atomic.LoadInt32(&hits); got != 0 {
-		t.Errorf("the .lfsconfig endpoint was contacted %d time(s); it must never be reached by a host-side checkout", got)
+	t.Run("linked checkout, http origin with .lfsconfig endpoint, skips (does not pin)", func(t *testing.T) {
+		hostGitTestEnv(t)
+		configureGlobalLFSFilter(t)
+		var hits int32
+		srv := recordingLFSServer(t, &hits)
+		repo := filepath.Join(t.TempDir(), "repo")
+		hostRunGit(t, filepath.Dir(repo), "init", "-q", "-b", "main", repo)
+		// http(s) origin AND a tracked .lfsconfig naming a separate endpoint:
+		// we must not pin the origin-derived endpoint and must not contact the
+		// .lfsconfig one (R-6).
+		hostRunGit(t, repo, "remote", "add", "origin", "https://git.example.com/o/r.git")
+		writeFile(t, filepath.Join(repo, ".lfsconfig"), "[lfs]\n\turl = "+srv.URL+"/lfs\n")
+		writeFile(t, filepath.Join(repo, ".gitattributes"), "*.bin filter=lfs -text\n")
+		writeFile(t, filepath.Join(repo, "big.bin"), lfsPointer)
+		hostRunGit(t, repo, "add", ".")
+		hostRunGit(t, repo, "commit", "-q", "-m", "lfs")
+		wt := filepath.Join(repo, "agents", "a", "workspace")
+		if err := os.MkdirAll(filepath.Dir(wt), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := CreateWorktree(wt, "agent-a"); err != nil {
+			t.Fatalf("CreateWorktree: %v", err)
+		}
+		if got := atomic.LoadInt32(&hits); got != 0 {
+			t.Errorf(".lfsconfig endpoint contacted %d time(s); must be 0", got)
+		}
+	})
+}
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// R-4: the pointer-warning scan must not follow a symlink to a FIFO (which
+// would block) or open non-regular files. A linked worktree with an ssh origin
+// (skip-smudge path) that contains such a symlink must still complete.
+func TestCreateWorktree_PointerScanDoesNotHangOnFIFOSymlink(t *testing.T) {
+	hostGitTestEnv(t)
+	repo := filepath.Join(t.TempDir(), "repo")
+	hostRunGit(t, filepath.Dir(repo), "init", "-q", "-b", "main", repo)
+	hostRunGit(t, repo, "remote", "add", "origin", "git@example.com:o/r.git") // ssh → skip-smudge
+	writeFile(t, filepath.Join(repo, ".gitattributes"), "*.bin filter=lfs -text\n")
+	// A FIFO outside the repo, and a tracked symlink pointing at it.
+	fifo := filepath.Join(t.TempDir(), "fifo")
+	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
+		t.Skipf("mkfifo unsupported: %v", err)
+	}
+	if err := os.Symlink(fifo, filepath.Join(repo, "link.bin")); err != nil {
+		t.Fatal(err)
+	}
+	hostRunGit(t, repo, "add", ".")
+	hostRunGit(t, repo, "commit", "-q", "-m", "fifo link")
+	wt := filepath.Join(repo, "agents", "a", "workspace")
+	if err := os.MkdirAll(filepath.Dir(wt), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- CreateWorktree(wt, "agent-a") }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("CreateWorktree: %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("CreateWorktree hung (pointer scan followed the FIFO symlink)")
 	}
 }
 
@@ -1115,4 +1293,66 @@ func TestHostGitCommand_SubmoduleConfigAllowed(t *testing.T) {
 	if _, err := HostGitCommand(context.Background(), repo2, HostGitOptions{Policy: RepoPolicyLinked}, "status"); err != nil {
 		t.Fatalf("a submodule scp-ssh url was refused: %v", err)
 	}
+}
+
+// R-5: a pull with a token and a non-http(s) clone URL ignores the token
+// rather than failing (git uses its own transport auth).
+func TestPullSharedWorkspace_TokenIgnoredForNonHTTPURL(t *testing.T) {
+	source, workspace, _ := sharedWorkspaceFixture(t)
+	commitFile(t, source, "new.txt", "new\n", "change")
+	// source is a local path (non-http); a token must not make the pull fail.
+	result, err := PullSharedWorkspace(workspace, source, "a-token")
+	if err != nil {
+		t.Fatalf("PullSharedWorkspace with a token on a local-path URL: %v", err)
+	}
+	if !result.Updated {
+		t.Errorf("expected the pull to update")
+	}
+}
+
+// C-1: an LFS repository (where git-lfs has written lfs.repositoryformatversion
+// to .git/config) must not be refused. CreateWorktree and PullSharedWorkspace
+// must each succeed twice in a row.
+func TestLFSRepositoryNotRefusedAfterGitLFSWrites(t *testing.T) {
+	requireGitLFS(t)
+
+	t.Run("CreateWorktree twice", func(t *testing.T) {
+		hostGitTestEnv(t)
+		configureGlobalLFSFilter(t)
+		repo := filepath.Join(t.TempDir(), "repo")
+		hostRunGit(t, filepath.Dir(repo), "init", "-q", "-b", "main", repo)
+		hostRunGit(t, repo, "remote", "add", "origin", "git@example.com:o/r.git")
+		writeFile(t, filepath.Join(repo, ".gitattributes"), "*.bin filter=lfs -text\n")
+		writeFile(t, filepath.Join(repo, "big.bin"), lfsPointer)
+		hostRunGit(t, repo, "add", ".")
+		hostRunGit(t, repo, "commit", "-q", "-m", "lfs")
+		for i, branch := range []string{"agent-a", "agent-b"} {
+			wt := filepath.Join(repo, "agents", branch, "workspace")
+			if err := os.MkdirAll(filepath.Dir(wt), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := CreateWorktree(wt, branch); err != nil {
+				t.Fatalf("CreateWorktree #%d: %v", i+1, err)
+			}
+		}
+	})
+
+	t.Run("PullSharedWorkspace twice", func(t *testing.T) {
+		hostGitTestEnv(t)
+		configureGlobalLFSFilter(t)
+		source, workspace, _ := sharedWorkspaceFixture(t)
+		writeFile(t, filepath.Join(source, ".gitattributes"), "*.bin filter=lfs -text\n")
+		writeFile(t, filepath.Join(source, "a.bin"), lfsPointer)
+		hostRunGit(t, source, "add", ".")
+		hostRunGit(t, source, "-c", "core.hooksPath="+os.DevNull, "commit", "-q", "-m", "lfs")
+		if _, err := PullSharedWorkspace(workspace, source, ""); err != nil {
+			t.Fatalf("PullSharedWorkspace #1: %v", err)
+		}
+		writeFile(t, filepath.Join(source, "b.bin"), lfsPointer)
+		hostRunGit(t, source, "add", ".")
+		hostRunGit(t, source, "-c", "core.hooksPath="+os.DevNull, "commit", "-q", "-m", "lfs2")
+		if _, err := PullSharedWorkspace(workspace, source, ""); err != nil {
+			t.Fatalf("PullSharedWorkspace #2 (after git-lfs wrote repo config): %v", err)
+		}
+	})
 }
