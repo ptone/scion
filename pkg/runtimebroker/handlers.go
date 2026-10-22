@@ -4765,6 +4765,15 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 			writeError(w, http.StatusConflict, ErrCodeConflict, scionrt.ErrRunConflict.Error(), details)
 			return
 		}
+		// A harness-config or template that does not resolve is a naming
+		// problem on an agent that exists: report it as the 404 not_found
+		// naming the resource, as create does (ptone/scion#1316), before
+		// the "not found" text match below would report it as a missing
+		// agent (ptone/scion#5433).
+		if errors.Is(err, config.ErrHarnessConfigNotFound) || errors.Is(err, config.ErrTemplateNotFound) {
+			writeError(w, http.StatusNotFound, ErrCodeNotFound, notFoundMessage("restart agent", err, opts.TemplateName), details)
+			return
+		}
 		if strings.Contains(err.Error(), "not found") {
 			writeError(w, http.StatusNotFound, ErrCodeAgentNotFound, "Agent not found", details)
 			return

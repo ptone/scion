@@ -17,6 +17,7 @@ package runtimebroker
 import (
 	"encoding/json"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -228,5 +229,32 @@ func TestOverlayProfileRuntime_GatherEnvCreateReportsProfileFirst(t *testing.T) 
 			}
 			f.assertNoRuntimeUsed(t)
 		})
+	}
+}
+
+// A restart whose start fails on a missing harness-config is a 404
+// not_found naming the harness-config, not agent_not_found
+// (ptone/scion#5433).
+func TestRestartAgent_MissingHarnessConfigIsNotAgentNotFound(t *testing.T) {
+	f := newLifecycleFixture(t)
+	f.registerK8sAgents()
+	f.defaultMgr.startErr = &config.HarnessConfigNotFoundError{Name: "gone-hc", Searched: []string{"/secret/path/harness-configs"}}
+
+	w := lifecyclePost(t, f.srv, "/api/v1/agents/hc-agent/restart", map[string]any{})
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusNotFound, w.Body.String())
+	}
+	var resp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode body: %v: %s", err, w.Body.String())
+	}
+	if resp.Error.Code != ErrCodeNotFound {
+		t.Errorf("code = %q, want %q", resp.Error.Code, ErrCodeNotFound)
+	}
+	if !strings.Contains(resp.Error.Message, `harness-config "gone-hc" not found`) {
+		t.Errorf("message = %q, want it to name the harness-config", resp.Error.Message)
+	}
+	if strings.Contains(w.Body.String(), "/secret/path") {
+		t.Errorf("response leaks the searched path: %s", w.Body.String())
 	}
 }
