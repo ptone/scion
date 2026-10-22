@@ -552,8 +552,8 @@ func TestKeysNeverFormatMaterial(t *testing.T) {
 	if !strings.Contains(StartupNotice(Legacy(fixtureLegacySecret)), "agent JWTs") {
 		t.Fatal("legacy notice must name the coupled uses")
 	}
-	if !strings.Contains(StartupNotice(k), "session cookies only") {
-		t.Fatal("ring notice must state the pilot limitation")
+	if n := StartupNotice(k); !strings.Contains(n, "every other purpose still uses") || !strings.Contains(n, "conduit admission tokens") {
+		t.Fatal("ring notice must state the pilot limitation and the purposes that use the ring")
 	}
 	// The identification is still there.
 	if !strings.Contains(fmt.Sprint(k.Signing()), "gen1") || !strings.Contains(fmt.Sprint(*k), "rev-2026-10-21.1") {
