@@ -246,7 +246,7 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, projectID, brokerID 
 			if err != nil {
 				return nil, err
 			}
-			value, err := b.decryptRawValue(rawValue)
+			value, err := b.decryptPayload(rawValue, s.SecretRef)
 			if err != nil {
 				failures = append(failures, ResolveFailure{Key: s.Key, Scope: sc.scope, Kind: DecryptFailureKind(err)})
 				continue
@@ -320,7 +320,7 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, projectID, brokerID 
 			if err != nil {
 				return nil, err
 			}
-			value, err := b.decryptRawValue(rawValue)
+			value, err := b.decryptPayload(rawValue, s.SecretRef)
 			if err != nil {
 				failures = append(failures, ResolveFailure{Key: s.Key, Scope: s.Scope, Kind: DecryptFailureKind(err)})
 				continue
@@ -436,7 +436,7 @@ func fromStoreSecretMeta(s *store.Secret) *SecretMeta {
 // its EncryptedValue with the shared cipher. Every failure is a typed
 // ValueCipher or envelope error naming the secret key, never a value.
 func (b *LocalBackend) decryptStoreSecret(s *store.Secret) (*SecretWithValue, error) {
-	value, err := b.cipher.Decrypt(s.EncryptedValue)
+	value, err := b.decryptPayload(s.EncryptedValue, s.SecretRef)
 	if err != nil {
 		return nil, fmt.Errorf("decrypting secret %q: %w", s.Key, err)
 	}
@@ -444,6 +444,18 @@ func (b *LocalBackend) decryptStoreSecret(s *store.Secret) (*SecretWithValue, er
 		SecretMeta: *fromStoreSecretMeta(s),
 		Value:      value,
 	}, nil
+}
+
+// decryptPayload is decryptRawValue for a row with backend reference ref.
+// A reference-only row (an empty value with a non-empty SecretRef, as the
+// GCP backend writes) holds no local payload: it is not decrypted and
+// reads as the empty value, exactly as before, so a managed cipher does
+// not misreport it as unadmitted plaintext (ptone/scion#1530 §7).
+func (b *LocalBackend) decryptPayload(raw, ref string) (string, error) {
+	if raw == "" && ref != "" {
+		return "", nil
+	}
+	return b.decryptRawValue(raw)
 }
 
 // decryptRawValue decrypts a raw stored value with the shared cipher. On

@@ -274,26 +274,40 @@ func (s *Server) startupEncryptionChecks(ctx context.Context, st store.Store) er
 	if len(audit.Unreadable) == 0 {
 		return nil
 	}
-	refs := make([]string, 0, len(audit.Unreadable))
-	for _, r := range audit.Unreadable {
-		refs = append(refs, fmt.Sprintf("%s/%s/%s (%s)", r.Scope, r.ScopeID, r.Key, r.Kind))
-	}
-	sort.Strings(refs)
+	refs := auditRecordIDs(audit.Unreadable, auditLogMaxRecords)
 	if len(audit.BackupUnreadable) > 0 {
 		if s.cipher.Managed() {
 			slog.Error("Encryption audit: infrastructure backups are unreadable; this instance is NOT READY (backup_unreadable). "+
 				"Restore the original encryption key material to the keyring and restart; the records are preserved, never replaced",
-				"backup_unreadable", len(audit.BackupUnreadable), "unreadable_total", len(audit.Unreadable), "records", strings.Join(refs, ", "))
+				"backup_unreadable", len(audit.BackupUnreadable), "unreadable_total", len(audit.Unreadable), "records", refs)
 		} else {
 			slog.Error("Encryption audit: UNHEALTHY: infrastructure backups are unreadable with the configured server secret; "+
 				"serving continues in legacy mode, but these records are preserved and never overwritten. Restore the original server secret to recover them",
-				"backup_unreadable", len(audit.BackupUnreadable), "unreadable_total", len(audit.Unreadable), "records", strings.Join(refs, ", "))
+				"backup_unreadable", len(audit.BackupUnreadable), "unreadable_total", len(audit.Unreadable), "records", refs)
 		}
 		return nil
 	}
 	slog.Error("Encryption audit: stored secrets are unreadable with the configured encryption keys; they are preserved, and resolving them fails",
-		"unreadable_total", len(audit.Unreadable), "records", strings.Join(refs, ", "))
+		"unreadable_total", len(audit.Unreadable), "records", refs)
 	return nil
+}
+
+// auditLogMaxRecords caps the record IDs one audit log line lists.
+const auditLogMaxRecords = 20
+
+// auditRecordIDs renders up to max records as "<id> (<kind>)", sorted by
+// ID, then "and N more": record IDs and classifications only (A1), never
+// payloads, and a bounded line.
+func auditRecordIDs(recs []AuditRecord, max int) string {
+	ids := make([]string, 0, len(recs))
+	for _, r := range recs {
+		ids = append(ids, r.ID+" ("+r.Kind+")")
+	}
+	sort.Strings(ids)
+	if len(ids) <= max {
+		return strings.Join(ids, ", ")
+	}
+	return fmt.Sprintf("%s, and %d more", strings.Join(ids[:max], ", "), len(ids)-max)
 }
 
 // backupNotReadyReason returns readyReasonBackupUnreadable for a managed

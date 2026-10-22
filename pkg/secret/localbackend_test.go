@@ -1511,3 +1511,42 @@ func ciphertestRing(t *testing.T, kid string) *ValueCipher {
 	}
 	return c
 }
+
+// TestLocalBackend_ReferenceOnlyRowsInManagedMode: a reference-only row
+// (empty value, non-empty SecretRef, as the GCP backend writes) holds no
+// local payload, so a managed cipher does not decrypt it: Get and Resolve
+// read it as the empty value instead of failing with
+// plaintext_not_admitted, while a real plaintext row still fails closed.
+func TestLocalBackend_ReferenceOnlyRowsInManagedMode(t *testing.T) {
+	st, err := newTestStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	seedSecret(t, st, &store.Secret{ID: tid("ref-only-row"), Key: "REF_ONLY", EncryptedValue: "",
+		SecretRef: "gcpsm:projects/fake/secrets/ref-only", SecretType: store.SecretTypeEnvironment,
+		Target: "REF_ONLY", Scope: store.ScopeProject, ScopeID: "project-1"})
+	b := NewLocalBackendWithCipher(st, "hub-1", ciphertestRing(t, "k2"))
+	sv, err := b.Get(ctx, "REF_ONLY", ScopeProject, "project-1")
+	if err != nil || sv.Value != "" {
+		t.Fatalf("Get(reference-only) = %v, %v; want the empty value", sv, err)
+	}
+	resolved, err := b.Resolve(ctx, "", "project-1", "", nil)
+	if err != nil {
+		t.Fatalf("Resolve with a reference-only row: %v", err)
+	}
+	if len(resolved) != 1 || resolved[0].Name != "REF_ONLY" {
+		t.Fatalf("resolved = %+v", resolved)
+	}
+
+	// An empty value WITHOUT a ref is plaintext and still fails closed.
+	seedSecret(t, st, &store.Secret{ID: tid("empty-plain-row"), Key: "EMPTY_PLAIN", EncryptedValue: "",
+		SecretType: store.SecretTypeEnvironment, Target: "EMPTY_PLAIN", Scope: store.ScopeProject, ScopeID: "project-1"})
+	_, err = b.Resolve(ctx, "", "project-1", "", nil)
+	if !errors.Is(err, ErrResolveDecrypt) || !strings.Contains(err.Error(), "EMPTY_PLAIN (plaintext_not_admitted)") {
+		t.Fatalf("Resolve with an empty plaintext row: %v", err)
+	}
+}

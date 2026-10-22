@@ -23,6 +23,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -640,4 +641,46 @@ func TestConduitGrantRing_IndependentV2RoundTripAndCAS(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, before.EncryptedValue, after.EncryptedValue, "the unreadable ring was overwritten")
 	assert.Equal(t, before.Version, after.Version)
+}
+
+// D1, the case only the restore-failure branch protects: the stored keyset
+// decrypts with the manager's own cipher (so the overwrite guard's decrypt
+// check passes) but does not parse. The failed restore must leave it in
+// place instead of saving the in-memory keyset over it.
+func TestOIDCRestoreFailureDoesNotSaveUnparseableKeyset(t *testing.T) {
+	st := createOIDCTestStore(t)
+	ctx := context.Background()
+	c := v2Cipher(t, "k2", "k2")
+	_, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{Store: st, HubID: encTestHubID,
+		IssuerURL: "https://example.com", ValueCipher: c})
+	require.NoError(t, err)
+	notJSON, err := c.Encrypt("not-json")
+	require.NoError(t, err)
+	ks, err := st.GetSecret(ctx, SecretKeyOIDCKeyset, store.ScopeHub, encTestHubID)
+	require.NoError(t, err)
+	ks.EncryptedValue = notJSON
+	require.NoError(t, st.UpdateSecret(ctx, ks))
+	before, err := st.GetSecret(ctx, SecretKeyOIDCKeyset, store.ScopeHub, encTestHubID)
+	require.NoError(t, err)
+
+	_, err = NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{Store: st, HubID: encTestHubID,
+		IssuerURL: "https://example.com", ValueCipher: c})
+	require.NoError(t, err)
+	after, err := st.GetSecret(ctx, SecretKeyOIDCKeyset, store.ScopeHub, encTestHubID)
+	require.NoError(t, err)
+	assert.Equal(t, before.EncryptedValue, after.EncryptedValue, "the unparseable keyset was saved over")
+	assert.Equal(t, before.Version, after.Version)
+}
+
+// The audit log lists record IDs and classifications only, capped.
+func TestAuditRecordIDs_Capped(t *testing.T) {
+	var recs []AuditRecord
+	for i := 0; i < 23; i++ {
+		recs = append(recs, AuditRecord{ID: fmt.Sprintf("id-%02d", i), Key: "SECRET_KEY_NAME", Scope: "user", ScopeID: "u", Kind: secret.FailureDecrypt})
+	}
+	got := auditRecordIDs(recs, 20)
+	assert.True(t, strings.HasPrefix(got, "id-00 (decrypt_failed), id-01 (decrypt_failed)"))
+	assert.True(t, strings.HasSuffix(got, "id-19 (decrypt_failed), and 3 more"))
+	assert.NotContains(t, got, "SECRET_KEY_NAME")
+	assert.Equal(t, "id-00 (decrypt_failed)", auditRecordIDs(recs[:1], 20))
 }

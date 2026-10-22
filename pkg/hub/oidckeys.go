@@ -281,15 +281,9 @@ func (m *OIDCKeyManager) RotateKey(ctx context.Context) error {
 	keyName := SecretKeyOIDCSigningKey
 	persisted := false
 	if m.backend != nil {
-		input := &secret.SetSecretInput{
-			Name:        keyName,
-			Value:       pemStr,
-			SecretType:  store.SecretTypeInternal,
-			Scope:       store.ScopeHub,
-			ScopeID:     m.hubID,
-			Description: "OIDC identity token signing key (RSA-2048)",
-		}
-		if _, _, setErr := m.backend.Set(ctx, input); setErr != nil {
+		// Through syncKeyToBackend, so a non-GCP backend never writes over
+		// a record this instance cannot read (ptone/scion#1530 §5).
+		if setErr := m.syncKeyToBackend(ctx, keyName, pemStr, m.hubID); setErr != nil {
 			m.log.Warn("Failed to persist rotated OIDC key to secret backend",
 				"kid", newKID, "error", setErr)
 		} else {

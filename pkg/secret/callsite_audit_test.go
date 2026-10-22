@@ -95,7 +95,7 @@ func TestDecryptForMigrationCallers(t *testing.T) {
 
 // The scanner itself must see references: a known caller of a known name.
 func TestSelectorCallSitesFindsKnownCaller(t *testing.T) {
-	sites := selectorCallSites(t, "decryptRawValue")
+	sites := selectorCallSites(t, "decryptPayload")
 	found := false
 	for _, s := range sites {
 		if s == "pkg/secret/localbackend.go:Resolve" {
@@ -103,7 +103,7 @@ func TestSelectorCallSitesFindsKnownCaller(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("scanner did not find LocalBackend.Resolve calling decryptRawValue: %v", sites)
+		t.Fatalf("scanner did not find LocalBackend.Resolve calling decryptPayload: %v", sites)
 	}
 }
 
