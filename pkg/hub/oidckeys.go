@@ -119,7 +119,8 @@ type OIDCKeyManagerConfig struct {
 	RequireStableSigningKey bool
 	Log                     *slog.Logger
 	// ValueCipher is the server's shared encryption object
-	// (ptone/scion#1530 §5); nil is the disabled cipher.
+	// (ptone/scion#1530 §5). Required: NewOIDCKeyManager refuses nil (the
+	// disabled plaintext mode is secret.NewLegacyValueCipher("")).
 	ValueCipher *secret.ValueCipher
 	// ExistingRecordFlagged reports a record the startup encryption audit
 	// found unreadable; the manager never overwrites such a record.

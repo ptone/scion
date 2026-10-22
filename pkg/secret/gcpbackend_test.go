@@ -3136,7 +3136,10 @@ func TestR7_Item5_MetaEdit_RerunConverges(t *testing.T) {
 // is active; a user secret stays reference-only.
 func TestGCPBackend_Set_ReferenceOnlyKeepsInternalBackup(t *testing.T) {
 	ctx := context.Background()
-	backup := ciphertestRing(t, "k2")
+	// The backup is sealed under k1 while the policy allows only k2: the
+	// prepared-policy case, where re-writing the unchanged bytes is not a
+	// payload change and must pass the fence.
+	backup := ciphertestRing(t, "k1")
 	sealed, err := backup.Encrypt("ZmFrZS1zaWduaW5nLWtleQ==")
 	if err != nil {
 		t.Fatal(err)
@@ -3150,6 +3153,12 @@ func TestGCPBackend_Set_ReferenceOnlyKeepsInternalBackup(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			backend, _ := createTestGCPBackend(t)
 			st := backend.store
+			// An existing internal backup row with local ciphertext, written
+			// before the policy (a policy only ever finds such rows).
+			if err := st.CreateSecret(ctx, &store.Secret{ID: tid("gcp-internal-backup"), Key: "agent_signing_key",
+				EncryptedValue: sealed, SecretType: store.SecretTypeInternal, Scope: store.ScopeHub, ScopeID: "test-hub-id"}); err != nil {
+				t.Fatal(err)
+			}
 			if withPolicy {
 				applied, err := st.(store.SecretEncryptionStore).UpdateEncryptionPolicy(ctx, 0, store.EncryptionPolicy{
 					Generation: 1, MinReaderVersion: store.EncryptionPolicyMinReaderVersion,
@@ -3158,11 +3167,6 @@ func TestGCPBackend_Set_ReferenceOnlyKeepsInternalBackup(t *testing.T) {
 				if err != nil || !applied {
 					t.Fatalf("policy: %v %v", applied, err)
 				}
-			}
-			// An existing internal backup row with local ciphertext.
-			if err := st.CreateSecret(ctx, &store.Secret{ID: tid("gcp-internal-backup"), Key: "agent_signing_key",
-				EncryptedValue: sealed, SecretType: store.SecretTypeInternal, Scope: store.ScopeHub, ScopeID: "test-hub-id"}); err != nil {
-				t.Fatal(err)
 			}
 			if _, _, err := backend.Set(ctx, &SetSecretInput{Name: "agent_signing_key", Value: "ZmFrZS1zaWduaW5nLWtleQ==",
 				SecretType: store.SecretTypeInternal, Scope: store.ScopeHub, ScopeID: "test-hub-id"}); err != nil {
