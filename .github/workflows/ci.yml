@@ -783,9 +783,39 @@ jobs:
       - name: Build Binary
         run: make build
 
-      # Design win-cli §5.1: the Windows CLI must keep compiling. Non-test
-      # builds only (pkg/hub compiles as a dependency, as in make build);
-      # winsec-guard runs in its own step above.
+      - name: Save Go cache
+        uses: ./.github/actions/save-go-cache
+        with:
+          key: ${{ steps.go.outputs.cache-key }}
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
+
+  # Design win-cli §5.1 (ptone/scion#5514): the Windows CLI must keep
+  # compiling. This is §5.1's named fallback, its own ubuntu job rather
+  # than a step in Build & Test: in Build & Test the step measured 9m05s
+  # cold (run 39733690188; GOOS=windows compiles pkg/hub and its
+  # dependencies with no cached objects, and only pushes to main save this
+  # workload's cache), which put that job at 28m of its 30m timeout (review
+  # r4 finding 1). Non-test builds only (pkg/hub compiles as a dependency,
+  # never its test package), so no Web UI build is needed: web/dist/client
+  # holds a committed .gitkeep for the embed. winsec-guard runs in Build &
+  # Test. No needs/if and no path gating: it runs on every PR and push to
+  # main, so the check is always reported.
+  windows-cross-build:
+    name: Windows cross-build (guard)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        id: go
+        uses: ./.github/actions/setup-go-cache
+        with:
+          workload: windows-cross-build
+
       - name: Cross-build for Windows (guard)
         env:
           GOTOOLCHAIN: local

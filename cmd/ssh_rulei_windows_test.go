@@ -355,3 +355,43 @@ func TestSSHWrite_WarnsOnMutableLinkTargetParent(t *testing.T) {
 		})
 	}
 }
+
+// Review r4 finding 2 (Windows): a hard-linked ~/.ssh/config that ALREADY
+// has the scion Include line is not written, so writeSSHHubPlan succeeds
+// and the config and its other name stay byte-identical. Refusal side
+// (Include line missing): TestSSHVSCodeWriteLeaves_RefuseHardLinks/.ssh_config
+// (home snapshot unchanged).
+func TestWriteSSHHubPlan_HardLinkedConfigWithIncludeLineUntouched(t *testing.T) {
+	home := privateHome(t)
+	p := sshPaths{home: home}
+	require.NoError(t, os.MkdirAll(p.sshDir(), 0o700))
+	content := sshIncludeLine + "\n\nHost old\n"
+	require.NoError(t, os.WriteFile(p.userConfig(), []byte(content), 0o600))
+	second := filepath.Join(home, "second-name")
+	require.NoError(t, os.Link(p.userConfig(), second))
+	require.NoError(t, writeSSHHubPlan(p, sshPlan(p)))
+	assertPrivateSD(t, p.includeFile("hub"))
+	for _, f := range []string{p.userConfig(), second} {
+		assert.Equal(t, content, readTestFile(t, f), f)
+	}
+}
+
+// Review r4 finding 2 (Windows), vscode: a hard-linked settings.json that
+// already holds the managed values is not rewritten: updateVSCodeFiles
+// succeeds and both names stay byte-identical. Refusal side: a hard-linked
+// settings.json that needs the managed keys is refused with home unchanged
+// (TestSSHVSCodeWriteLeaves_RefuseHardLinks/..._settings.json).
+func TestUpdateVSCodeFiles_HardLinkedSettingsUnchangedUntouched(t *testing.T) {
+	home := privateHome(t)
+	p := vscodePaths{home: home}
+	require.NoError(t, ensureVSCodeSettings(p))
+	managed := readTestFile(t, p.settings())
+	second := filepath.Join(home, "second-name")
+	require.NoError(t, os.Link(p.settings(), second))
+	_, err := updateVSCodeFiles(p, vscodeUpdateFor(t, "a1"))
+	require.NoError(t, err, "an unchanged hard-linked settings.json is not a leaf of the operation")
+	for _, f := range []string{p.settings(), second} {
+		assert.Equal(t, managed, readTestFile(t, f), f)
+	}
+	assertPrivateSD(t, p.sshConfig())
+}

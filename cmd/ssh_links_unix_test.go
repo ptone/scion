@@ -19,6 +19,7 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -118,4 +119,89 @@ func TestWriteSSHHubPlan_HardLinkedConfigNoSideEffect(t *testing.T) {
 	require.NoError(t, os.Remove(second))
 	require.NoError(t, writeSSHHubPlan(p, res), "control: one name")
 	assert.FileExists(t, p.includeFile("hub"))
+}
+
+// Review r4 finding 2 (unix): a hard-linked ~/.ssh/config that ALREADY has
+// the scion Include line is not part of the operation (it is not written),
+// so writeSSHHubPlan succeeds and leaves it and its other name
+// byte-identical. The refusal side (Include line missing) is
+// TestWriteSSHHubPlan_HardLinkedConfigNoSideEffect.
+func TestWriteSSHHubPlan_HardLinkedConfigWithIncludeLineUntouched(t *testing.T) {
+	home := t.TempDir()
+	p := sshPaths{home: home}
+	require.NoError(t, os.Mkdir(p.sshDir(), 0o700))
+	content := sshIncludeLine + "\n\nHost old\n"
+	require.NoError(t, os.WriteFile(p.userConfig(), []byte(content), 0o600))
+	second := filepath.Join(home, "second-name")
+	require.NoError(t, os.Link(p.userConfig(), second))
+	res := &sshRegenResult{label: "hub", includeFile: p.includeFile("hub"), knownHostsFile: p.knownHostsFile("hub"),
+		includeContent: "# include\n", knownContent: "# known hosts\n"}
+	require.NoError(t, writeSSHHubPlan(p, res))
+	assert.FileExists(t, p.includeFile("hub"))
+	for _, f := range []string{p.userConfig(), second} {
+		b, err := os.ReadFile(f)
+		require.NoError(t, err)
+		assert.Equal(t, content, string(b), f)
+	}
+	fi, err := os.Stat(p.userConfig())
+	require.NoError(t, err)
+	assert.Equal(t, uint64(2), fi.Sys().(*syscall.Stat_t).Nlink, "still the same file with two names")
+}
+
+// Review r4 finding 2 (unix), vscode: a hard-linked settings.json that
+// already holds the managed values is not rewritten, so updateVSCodeFiles
+// succeeds and leaves it and its other name byte-identical. Refusal side:
+// the same hard link on a settings.json that needs the managed keys is
+// refused, and home is unchanged.
+func TestUpdateVSCodeFiles_HardLinkedSettings(t *testing.T) {
+	home := t.TempDir()
+	p := vscodePaths{home: home}
+	require.NoError(t, ensureVSCodeSettings(p))
+	managed, err := os.ReadFile(p.settings())
+	require.NoError(t, err)
+	second := filepath.Join(home, "second-name")
+	require.NoError(t, os.Link(p.settings(), second))
+	block, err := renderSSHHostBlockKnown(sshTestExe, "https://h.example", "h", "p", "a1", vscodeKnownHostsRef)
+	require.NoError(t, err)
+	u := vscodeUpdate{host: "scion.h.p.a1", block: block, key: mustNormKey(t, testSSHPublicKey(t)), endpoint: tunnelclient.NormalizeEndpoint("https://h.example")}
+	_, err = updateVSCodeFiles(p, u)
+	require.NoError(t, err, "an unchanged hard-linked settings.json is not a leaf of the operation")
+	for _, f := range []string{p.settings(), second} {
+		b, err := os.ReadFile(f)
+		require.NoError(t, err)
+		assert.Equal(t, string(managed), string(b), f)
+	}
+
+	home2 := t.TempDir()
+	p2 := vscodePaths{home: home2}
+	require.NoError(t, os.MkdirAll(filepath.Dir(p2.settings()), 0o700))
+	require.NoError(t, os.WriteFile(p2.settings(), []byte("{}\n"), 0o600))
+	require.NoError(t, os.Link(p2.settings(), filepath.Join(home2, "second-name")))
+	before := treeSnapshotUnix(t, home2)
+	_, err = updateVSCodeFiles(p2, u)
+	require.ErrorIs(t, err, privatefs.ErrHardLinked)
+	assert.Equal(t, before, treeSnapshotUnix(t, home2), "the refusal changed nothing in home")
+}
+
+// treeSnapshotUnix records every entry below dir (links recorded, not
+// followed), with regular files' content.
+func treeSnapshotUnix(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	require.NoError(t, filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Type().IsRegular() {
+			b, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			out[path] = "file:" + string(b)
+		} else {
+			out[path] = d.Type().String()
+		}
+		return nil
+	}))
+	return out
 }

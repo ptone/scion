@@ -312,8 +312,9 @@ func ensureSSHDir(home string, rels ...string) error {
 // checks, writing nothing) on every file an operation is about to write,
 // so a file that would be refused is found before the first directory is
 // created or the first file written. writeFileAtomic still checks each
-// file itself; this is in addition, not instead. Every listed file is
-// checked even if the operation turns out not to rewrite it.
+// file itself; this is in addition, not instead. Callers list only the
+// files they will write: a file the operation leaves alone is never
+// refused.
 func preflightSSHWrites(paths ...string) error {
 	for _, path := range paths {
 		if err := privatefs.CheckReplaceTarget(path); err != nil {
@@ -321,6 +322,20 @@ func preflightSSHWrites(paths ...string) error {
 		}
 	}
 	return nil
+}
+
+// sshIncludeLineNeeded reports whether ~/.ssh/config lacks the scion
+// Include line, i.e. whether ensureSSHIncludeLine will write it. A missing
+// file needs it.
+func sshIncludeLineNeeded(p sshPaths) (bool, error) {
+	data, err := os.ReadFile(p.userConfig())
+	if errors.Is(err, fs.ErrNotExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return !hasSSHIncludeLine(string(data)), nil
 }
 
 // sshWarnOut receives sshLinkWarning's lines; tests replace it.
@@ -837,7 +852,18 @@ func writeSSHHubPlan(p sshPaths, res *sshRegenResult) error {
 	// first every file this call may write is checked as writeFileAtomic
 	// will check it, creating nothing; then both directories are verified
 	// together before either is created; only then is anything written.
-	if err := preflightSSHWrites(res.knownHostsFile, res.includeFile, p.userConfig()); err != nil {
+	leaves := []string{res.knownHostsFile, res.includeFile}
+	// ~/.ssh/config only when the Include line is missing, i.e. when
+	// ensureSSHIncludeLine will write it (review r4 finding 2): a config the
+	// operation leaves alone (a hard-linked one that already has the line,
+	// say) is not refused. The read only decides whether to check;
+	// writeFileAtomic applies rule I and A1 on handles if it writes.
+	if need, err := sshIncludeLineNeeded(p); err != nil {
+		return err
+	} else if need {
+		leaves = append(leaves, p.userConfig())
+	}
+	if err := preflightSSHWrites(leaves...); err != nil {
 		return err
 	}
 	if err := ensureSSHDir(p.home, sshKnownHostsDirRel, sshIncludeDirRel); err != nil {

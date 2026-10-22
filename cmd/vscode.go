@@ -278,7 +278,17 @@ func updateVSCodeFiles(p vscodePaths, u vscodeUpdate) (changed bool, err error) 
 	// every file this call may write is checked first (creating nothing),
 	// then both directories are verified before either is created, all
 	// before the lock file.
-	if err := preflightSSHWrites(p.settings(), p.sshConfig(), p.knownHosts()); err != nil {
+	// settings.json only when it will be written (review r4 finding 2): a
+	// file the operation leaves alone is not checked; ensureVSCodeSettings
+	// re-plans under the lock, and writeFileAtomic checks whatever it
+	// writes.
+	leaves := []string{p.sshConfig(), p.knownHosts()}
+	if _, write, err := planVSCodeSettings(p); err != nil {
+		return false, err
+	} else if write {
+		leaves = append(leaves, p.settings())
+	}
+	if err := preflightSSHWrites(leaves...); err != nil {
 		return false, err
 	}
 	if err := ensureSSHDir(p.home, vscodeDirRel, vscodeSettingsDirRel); err != nil {
@@ -515,39 +525,57 @@ func ensureVSCodeSettings(p vscodePaths) error {
 	if err := ensureSSHDir(p.home, vscodeSettingsDirRel); err != nil {
 		return fmt.Errorf("creating %s: %w", filepath.Dir(path), err)
 	}
-	data, err := os.ReadFile(path)
+	data, write, err := planVSCodeSettings(p)
+	if err != nil || !write {
+		return err
+	}
+	return writeVSCodeSettingsData(path, data)
+}
+
+// planVSCodeSettings decides, without writing anything, what
+// ensureVSCodeSettings writes: write reports whether settings.json must be
+// (re)written, and data is its new content. A missing directory or file
+// counts as empty. updateVSCodeFiles uses it to preflight settings.json
+// only when it will be written (review r4 finding 2).
+func planVSCodeSettings(p vscodePaths) (data []byte, write bool, err error) {
+	path := p.settings()
+	data, err = os.ReadFile(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("reading %s: %w", path, err)
+		return nil, false, fmt.Errorf("reading %s: %w", path, err)
 	}
 	if t := strings.TrimSpace(string(data)); t == "" || t == "null" {
 		m := map[string]any{}
 		mergeVSCodeSettings(m, p.sshConfig())
-		return writeVSCodeSettings(path, m)
+		out, err := encodeVSCodeSettings(m)
+		if err != nil {
+			return nil, false, err
+		}
+		return out, true, nil
 	}
 	if m, err := decodeVSCodeSettingsJSON(data); err == nil {
 		before, err := encodeVSCodeSettings(m)
 		if err != nil {
-			return err
+			return nil, false, err
 		}
 		mergeVSCodeSettings(m, p.sshConfig())
 		after, err := encodeVSCodeSettings(m)
 		if err != nil {
-			return err
+			return nil, false, err
 		}
 		if bytes.Equal(before, after) {
-			return nil
+			return nil, false, nil
 		}
-		return writeVSCodeSettingsData(path, after)
+		return after, true, nil
 	}
 	if m, err := decodeVSCodeSettingsJSON(stripJSONComments(data)); err == nil {
 		before, berr := encodeVSCodeSettings(m)
 		mergeVSCodeSettings(m, p.sshConfig())
 		after, aerr := encodeVSCodeSettings(m)
 		if berr == nil && aerr == nil && bytes.Equal(before, after) {
-			return nil
+			return nil, false, nil
 		}
 	}
-	return fmt.Errorf("%s is not plain JSON and lacks the scion vscode settings; set %s to %s and the scion terminal profiles (%s, %s, %s) in it, or remove the file",
+	return nil, false, fmt.Errorf("%s is not plain JSON and lacks the scion vscode settings; set %s to %s and the scion terminal profiles (%s, %s, %s) in it, or remove the file",
 		path, vscodeConfigFileSetting, p.sshConfig(), vscodeProfilesKey, vscodeDefaultProfileKey, vscodeSendKeysKey)
 }
 
