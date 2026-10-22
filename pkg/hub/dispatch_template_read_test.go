@@ -27,6 +27,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -36,8 +38,13 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
 // ============================================================================
@@ -333,6 +340,71 @@ func TestDispatchBoundRead_LocalStorageProxyURLsCarryAgent(t *testing.T) {
 	u.RawQuery = q.Encode()
 	rec = f.asBroker(t, http.MethodGet, u.RequestURI())
 	assert.Equal(t, http.StatusNotFound, rec.Code, "without the agent the raw read is refused: %s", rec.Body.String())
+}
+
+// ptone/scion#5770 issue test: with a user-scoped template and a global
+// template of the same name, the broker's hydrator, talking to a real hub
+// over its HMAC client, hydrates the USER template's content for the agent
+// it runs, on a flat Runtime Broker row and on a legacy one. Without the
+// agent the hub still refuses the read.
+func TestDispatchBoundRead_HydratesUserTemplateOverHMAC(t *testing.T) {
+	for _, flat := range []bool{false, true} {
+		name := map[bool]string{false: "legacy broker", true: "flat broker"}[flat]
+		t.Run(name, func(t *testing.T) {
+			f := setupDispatchReadTest(t)
+			ctx := context.Background()
+			stor, err := storage.NewLocal(storage.Config{Provider: storage.ProviderLocal, Bucket: "b", LocalPath: t.TempDir()})
+			require.NoError(t, err)
+			f.srv.SetStorage(stor)
+
+			// Give both templates real files with different content.
+			withFiles := func(id, storagePath string, content []byte) string {
+				tmpl, err := f.store.GetTemplate(ctx, id)
+				require.NoError(t, err)
+				tmpl.StoragePath, tmpl.StorageBucket = storagePath, "b"
+				_, err = stor.Upload(ctx, storagePath+"/scion-agent.yaml", bytes.NewReader(content), storage.UploadOptions{})
+				require.NoError(t, err)
+				tmpl.Files = []store.TemplateFile{{Path: "scion-agent.yaml", Size: int64(len(content)), Hash: transfer.HashBytes(content)}}
+				tmpl.ContentHash = computeContentHash(tmpl.Files)
+				require.NoError(t, f.store.UpdateTemplate(ctx, tmpl))
+				return tmpl.ContentHash
+			}
+			userContent := []byte("harness: claude\n# user template\n")
+			userHash := withFiles(f.userTmpl.ID, "templates/user/"+f.creator.ID+"/dbr-shared", userContent)
+			withFiles(f.twin.ID, "templates/global/dbr-shared", []byte("harness: claude\n# global template\n"))
+
+			brokerID, secret := f.broker.ID, f.brokerSecret
+			if flat {
+				fb := &store.RuntimeBroker{
+					ID: tid("dbr-flat-broker"), Name: "dbr-flat", Slug: "dbr-flat", Status: store.BrokerStatusOnline,
+					RuntimeTarget: &api.RuntimeTargetDescriptor{ID: tid("dbr-flat-target"), Type: "docker", DisplayName: "Docker"},
+					Created:       time.Now(), Updated: time.Now(),
+				}
+				require.NoError(t, f.store.CreateRuntimeBroker(ctx, fb))
+				secret = seedBrokerSecret(t, f.store, fb.ID)
+				brokerID = fb.ID
+			}
+			a := f.boundAgent(t, "dbr-hydrate-agent", brokerID, f.userTmpl.ID, userHash, f.creator.ID)
+
+			hubTS := httptest.NewServer(f.srv.Handler())
+			defer hubTS.Close()
+			hc, err := hubclient.New(hubTS.URL, hubclient.WithHMACAuth(brokerID, secret))
+			require.NoError(t, err)
+			cache, err := templatecache.New(t.TempDir(), 1<<20)
+			require.NoError(t, err)
+			hydrator := templatecache.NewHydrator(cache, hc)
+
+			dir, err := hydrator.HydrateForAgent(ctx, f.userTmpl.ID, a.ID)
+			require.NoError(t, err)
+			got, err := os.ReadFile(filepath.Join(dir, "scion-agent.yaml"))
+			require.NoError(t, err)
+			assert.Equal(t, string(userContent), string(got), "the user template's content must be hydrated")
+
+			_, err = templatecache.NewHydrator(cache, hc).Hydrate(ctx, f.userTmpl.ID)
+			require.Error(t, err, "without the agent the hub refuses the read")
+			assert.True(t, apiclient.IsNotFoundError(err), "a refusal reads as not found: %v", err)
+		})
+	}
 }
 
 func TestRewriteLocalTemplateDownloadURLs_AgentID(t *testing.T) {
