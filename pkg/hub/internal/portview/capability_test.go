@@ -113,7 +113,7 @@ func TestParseRefuses(t *testing.T) {
 		"tampered exp":            with(4, strconv.FormatInt(exp.Unix()+1, 10)),
 		"tampered sig":            with(5, flipFirst(parts[5])),
 		"sig padded":              good + "=",
-		"sig std alphabet":        with(5, strings.NewReplacer("-", "+", "_", "/").Replace(parts[5]) + "+/"),
+		"sig std alphabet":        with(5, strings.NewReplacer("-", "+", "_", "/").Replace(parts[5])+"+/"),
 		"sig empty":               with(5, ""),
 		"sig non-canonical tail":  with(5, nonCanonicalTail(parts[5])),
 		"wrong key":               Mint(otherKey, testAgent, 8080, testUser, exp),
