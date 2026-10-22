@@ -293,10 +293,14 @@ without the repository's own hooks and commands:
   LFS-lockable files read-only.
 - **Updating a shared workspace** (pull) fetches from the project's clone URL known to the Hub,
   not from the remote configured in the clone, then fast-forwards the current branch. It is refused
-  when the clone's own git config sets URL rewrites (`url.*.insteadOf`), credential settings,
-  `core.sshCommand`, `core.askPass`, `core.gitProxy`, `core.worktree`, remote `uploadpack` or
-  `receivepack` commands or proxies, `include.path`/`includeIf`, `protocol.*`, `http.proxy` or
-  `gpg.*`. Remove the key from the clone's `.git/config` to pull again.
+  when the clone's own git config (`.git/config`) sets a key outside a short list: the core
+  repository settings, `extensions.*`, a remote's `url`/`fetch` and similar, `branch.<name>.*`
+  tracking settings, identity (`user.*`), `gc.*`, `pull.rebase`/`ff`, `push.default`, colours,
+  advice and `rerere.*`. URL rewrites, credential settings, SSH or proxy commands, includes,
+  `protocol.*` and `gpg.*` are refused, as is any key not on the list. The error names the key;
+  remove it from the clone's `.git/config` to pull again.
+- **Submodules** are not entered: these commands run with `submodule.recurse=false` and
+  `fetch.recurseSubmodules=false`.
 
 Your own git commands in your checkout are not affected.
 
