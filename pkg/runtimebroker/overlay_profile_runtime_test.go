@@ -15,9 +15,13 @@
 package runtimebroker
 
 import (
+	"encoding/json"
+	"errors"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
@@ -47,6 +51,28 @@ func installDanglingOverlay(t *testing.T, activeDangles bool) {
 	installOverlayProfiles(t, profiles)
 }
 
+// profileErrorDetails decodes a refusal's error details.
+func profileErrorDetails(t *testing.T, w *httptest.ResponseRecorder) map[string]interface{} {
+	t.Helper()
+	var resp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode body: %v: %s", err, w.Body.String())
+	}
+	return resp.Error.Details
+}
+
+// assertProfileUnresolvedDetails checks the profile_unresolved details.
+func assertProfileUnresolvedDetails(t *testing.T, w *httptest.ResponseRecorder, profile string) {
+	t.Helper()
+	d := profileErrorDetails(t, w)
+	if d[api.BrokerErrorDetailReason] != api.BrokerErrorReasonProfileUnresolved {
+		t.Errorf("details reason = %v, want %q (details %v)", d[api.BrokerErrorDetailReason], api.BrokerErrorReasonProfileUnresolved, d)
+	}
+	if got, ok := d[api.BrokerErrorDetailProfile].(string); !ok || got != profile {
+		t.Errorf("details profile = %v, want %q", d[api.BrokerErrorDetailProfile], profile)
+	}
+}
+
 func (f *lifecycleFixture) assertNoRuntimeUsed(t *testing.T) {
 	t.Helper()
 	if f.defaultMgr.StartCalls() != 0 || f.defaultMgr.stopCalls != 0 {
@@ -72,6 +98,7 @@ func TestOverlayProfileRuntime_NamedProfileCreateRefused(t *testing.T) {
 	assertDispatchRefused(t, w, "runtime profile's runtime cannot be resolved",
 		`runtime "gke" not found for profile "dangling"`, "available runtimes: kubernetes",
 		"retry once the profile's runtime is one of the hub's stored runtimes")
+	assertProfileUnresolvedDetails(t, w, danglingProfile)
 	f.assertNoRuntimeUsed(t)
 }
 
@@ -88,6 +115,7 @@ func TestOverlayProfileRuntime_DefaultProfileCreateRefused(t *testing.T) {
 		"config":      map[string]any{"template": "claude"},
 	})
 	assertDispatchRefused(t, w, "runtime profile's runtime cannot be resolved", `runtime "gke" not found for profile "local"`)
+	assertProfileUnresolvedDetails(t, w, "local")
 	f.assertNoRuntimeUsed(t)
 }
 
@@ -105,8 +133,49 @@ func TestOverlayProfileRuntime_SavedProfileFailsWithoutFallback(t *testing.T) {
 
 			w := op.run(t, f, name)
 			assertDispatchRefused(t, w, "saved runtime profile cannot be resolved", `runtime "gke" not found for profile "dangling"`)
+			assertProfileUnresolvedDetails(t, w, danglingProfile)
 			f.assertNoRuntimeUsed(t)
 		})
+	}
+}
+
+// A named profile the stored profiles lack carries the details too
+// (ptone/scion#4955).
+func TestOverlayProfileRuntime_MissingNamedProfileCarriesDetails(t *testing.T) {
+	f := newLifecycleFixture(t)
+	installStoredProfilesOverlay(t)
+	w := lifecyclePost(t, f.srv, "/api/v1/agents", map[string]any{
+		"name":        "missing-profile-agent",
+		"slug":        "missing-profile-agent",
+		"id":          "agent-uuid-missing",
+		"projectPath": f.projectPath,
+		"config":      map[string]any{"template": "claude", "profile": "vanished"},
+	})
+	assertDispatchRefused(t, w, `profile "vanished" not found`)
+	assertProfileUnresolvedDetails(t, w, "vanished")
+}
+
+// A dispatch needing an unset default profile carries the details with an
+// empty profile.
+func TestOverlayProfileRuntime_UnresolvableDefaultCarriesDetails(t *testing.T) {
+	err := &config.ActiveProfileError{Available: []string{"a", "b"}}
+	d := storedProfileErrorDetails(errors.Join(errDefaultProfileUnresolved, err))
+	if d[api.BrokerErrorDetailReason] != api.BrokerErrorReasonProfileUnresolved || d[api.BrokerErrorDetailProfile] != "" {
+		t.Errorf("details = %v, want profile_unresolved with an empty profile", d)
+	}
+}
+
+// A saved profile that cannot be resolved for a reason other than the
+// stored profiles carries no details, so the Hub keeps its generic text.
+func TestOverlayProfileRuntime_NonStoredErrorHasNoDetails(t *testing.T) {
+	err := errors.New("saved runtime profile cannot be resolved: project settings could not be loaded")
+	if d := storedProfileErrorDetails(err); d != nil {
+		t.Errorf("details = %v, want nil", d)
+	}
+	w := httptest.NewRecorder()
+	writeProfileUnresolved(w, errSavedProfileUnresolved)
+	if d := profileErrorDetails(t, w); d != nil {
+		t.Errorf("response details = %v, want none", d)
 	}
 }
 
@@ -114,13 +183,13 @@ func TestOverlayProfileRuntime_SavedProfileFailsWithoutFallback(t *testing.T) {
 // env check, not a missing-env answer (ptone/scion#4888).
 func TestOverlayProfileRuntime_GatherEnvCreateReportsProfileFirst(t *testing.T) {
 	for _, tc := range []struct {
-		name, profile string
-		activeDangles bool
-		want          string
+		name, profile, wantProfile string
+		activeDangles              bool
+		want                       string
 	}{
-		{name: "default profile runtime missing", activeDangles: true, want: `runtime "gke" not found for profile "local"`},
-		{name: "named profile runtime missing", profile: danglingProfile, want: `runtime "gke" not found for profile "dangling"`},
-		{name: "named profile missing", profile: "vanished", want: `profile "vanished" not found`},
+		{name: "default profile runtime missing", activeDangles: true, wantProfile: "local", want: `runtime "gke" not found for profile "local"`},
+		{name: "named profile runtime missing", profile: danglingProfile, wantProfile: danglingProfile, want: `runtime "gke" not found for profile "dangling"`},
+		{name: "named profile missing", profile: "vanished", wantProfile: "vanished", want: `profile "vanished" not found`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newLifecycleFixture(t)
@@ -153,6 +222,7 @@ func TestOverlayProfileRuntime_GatherEnvCreateReportsProfileFirst(t *testing.T) 
 				"config":      cfg,
 			})
 			assertDispatchRefused(t, w, tc.want)
+			assertProfileUnresolvedDetails(t, w, tc.wantProfile)
 			if strings.Contains(w.Body.String(), "SECRET_TOKEN") {
 				t.Errorf("response is an env answer: %s", w.Body.String())
 			}

@@ -7018,7 +7018,8 @@ var errProfileRuntimeUnresolved = errors.New("runtime profile's runtime cannot b
 //     (*config.StoredProfileRuntimeNotFoundError):
 //     errProfileRuntimeUnresolved.
 //
-// The detail is logged here at Warn, with the profile, runtime
+// The cause is wrapped too, so writeProfileUnresolved can name the
+// profile. The detail is logged here at Warn, with the profile, runtime
 // and cause as string attributes.
 func (s *Server) lenientProfileError(opts api.StartOptions, strict bool, projectDir string, err error) error {
 	var ape *config.ActiveProfileError
@@ -7344,7 +7345,10 @@ func (s *Server) logSavedProfileUnresolved(opts api.StartOptions, projectDir str
 // errProfileRuntimeUnresolved as a retryable 503 (runtime_unavailable,
 // Retry-After: 30): the runtime the dispatch needs is not available on this
 // broker until its profile resolves. The suffix says what to fix for each
-// case.
+// case. When the cause is one of the Hub's stored-profile errors
+// (config.IsStoredProfileError), the details carry
+// api.BrokerErrorReasonProfileUnresolved and the profile, so the Hub can
+// write its own text naming it (ptone/scion#4955).
 func writeProfileUnresolved(w http.ResponseWriter, err error) {
 	suffix := "; the agent's runtime is not available on this broker, retry once its profile is configured"
 	switch {
@@ -7356,7 +7360,32 @@ func writeProfileUnresolved(w http.ResponseWriter, err error) {
 		suffix = "; retry once the profile's runtime is one of the hub's stored runtimes, or choose another profile"
 	}
 	w.Header().Set("Retry-After", recordedRuntimeRetryAfterSeconds)
-	RuntimeUnavailable(w, err.Error()+suffix)
+	writeError(w, http.StatusServiceUnavailable, ErrCodeRuntimeUnavailable, err.Error()+suffix, storedProfileErrorDetails(err))
+}
+
+// storedProfileErrorDetails returns the profile_unresolved details for a
+// stored-profile error in err's chain, or nil for any other error.
+func storedProfileErrorDetails(err error) map[string]interface{} {
+	var (
+		ape *config.ActiveProfileError
+		spe *config.StoredProfileNotFoundError
+		sre *config.StoredProfileRuntimeNotFoundError
+	)
+	var profile string
+	switch {
+	case errors.As(err, &sre):
+		profile = sre.Profile
+	case errors.As(err, &spe):
+		profile = spe.Requested
+	case errors.As(err, &ape):
+		profile = ape.Configured
+	default:
+		return nil
+	}
+	return map[string]interface{}{
+		api.BrokerErrorDetailReason:  api.BrokerErrorReasonProfileUnresolved,
+		api.BrokerErrorDetailProfile: profile,
+	}
 }
 
 // recheckHubDefaultPassthrough re-runs the hub-default passthrough gate's
