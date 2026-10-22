@@ -2154,4 +2154,7 @@ func TestFederatedUserLaunchFailureText(t *testing.T) {
 	if got, want := launchFailureText(notRunning), "Agent failed to start (image_pull_failed): image pull back-off"; got != want {
 		t.Errorf("launchFailureText = %q, want %q", got, want)
 	}
+	if got, want := launchFailureText(noCode), "Agent failed to start (phase: stopped): stopped by user"; got != want {
+		t.Errorf("launchFailureText (phase only) = %q, want %q", got, want)
+	}
 }
