@@ -47,7 +47,7 @@ var keyringReleaseCheck = (*keyring.Keyring).CheckSessionPilot
 // validateKeyringConfig checks a keyring-mode ServerConfig
 // (ptone/scion#1530 Phase 1): the keyring must satisfy this release's
 // session pilot limits, SharedSigningSecret must be its "legacy" signing
-// entry (every purpose but the web session cookies still uses it), and
+// entry (every purpose not yet on the signing ring still uses it), and
 // explicit agent/user JWT signing keys are refused, so no purpose is
 // partly rotated. Legacy mode (no keyring file) is unchanged: explicit
 // signing keys keep their precedence.
