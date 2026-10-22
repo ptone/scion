@@ -1686,6 +1686,9 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	var workspaceSource string
 	shouldCreateWorktree := false
 	explicitWorkspace := false
+	// projectRepoRoot is the repository root recorded for a git project
+	// (Case 2), "" otherwise.
+	var projectRepoRoot string
 
 	// Check for git clone mode from context
 	gitClone := api.GitCloneFromContext(ctx)
@@ -1770,6 +1773,14 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 
 	} else if isGit {
 		// Case 2: Git Repository (and no explicit workspace)
+		// The repository root is identified without git
+		// (trustedProjectRepoRoot) and must match what git reports;
+		// provisioning stops otherwise. It is recorded below.
+		trustedRoot, rootErr := checkProvisionRepoRoot(projectDir)
+		if rootErr != nil {
+			return "", "", nil, rootErr
+		}
+		projectRepoRoot = trustedRoot
 		// A flat Runtime Broker instance serializes the repository's
 		// worktree and sharer changes with every instance of its host (the
 		// host's workspace lock), through the rest of provisioning.
@@ -2576,7 +2587,23 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// gate, for the one case this function never runs at all: GetAgent
 	// skipping ProvisionAgent because the agent directory already exists.
 	// See persistProvisionedWorktreeRepoRootIfValid.
-	persistProvisionedWorktreeRepoRootIfValid(agentDir, api.ProvisionedWorktreeRepoRootFromContext(ctx), workspaceSource)
+	persistProvisionedWorktreeRepoRootIfValid(agentDir, api.ProvisionedWorktreeRepoRootFromContext(ctx), workspaceSource, finalScionCfg.Volumes)
+
+	// Record the project's repository root for a git project (Case 2), so
+	// every later start reads it from this record instead of deriving it
+	// from the workspace. Written only when agentDir is outside every
+	// mount of the agent (writeRepoRootRecord).
+	if projectRepoRoot != "" && api.ProvisionedWorktreeRepoRootFromContext(ctx) == "" {
+		recordWorkspace := agentWorkspace
+		if recordWorkspace == "" {
+			recordWorkspace = workspaceSource
+		}
+		if err := writeRepoRootRecord(agentDir, projectRepoRoot, repoRootSourceProvision,
+			agentMountSources(recordWorkspace, projectRepoRoot, finalScionCfg.Volumes)); err != nil {
+			slog.Info("provision: repository root not recorded; the agent starts without a repository root mount",
+				"agent", agentName, "reason", err)
+		}
+	}
 
 	// scion-agent.json carries only the requester's own environment values
 	// (the inline image, kubernetes, resources and volumes) and the workspace
@@ -3290,15 +3317,20 @@ const provisionedWorktreeStateFile = "provisioned-worktree.json"
 // provisionedWorktreeState is the on-disk shape of provisionedWorktreeStateFile.
 type provisionedWorktreeState struct {
 	RepoRoot string `json:"repoRoot"`
+	// Source is how the record was made (repoRootSourceBroker,
+	// repoRootSourceProvision or repoRootSourceBackfill). Each is written
+	// only when agentDir is outside every mount of the agent; a record
+	// without a known source is not used (readRepoRootRecord).
+	Source string `json:"source,omitempty"`
 }
 
-// writeProvisionedWorktreeRepoRoot persists repoRoot to agentDir's
-// broker-owned state file (atomic write via writeAgentInfoFile). A write
-// failure only means a later resume falls back to detectRepoRoot — a
-// functional regression, not a security issue — so callers may log and
-// continue rather than fail the whole dispatch.
+// writeProvisionedWorktreeRepoRoot writes repoRoot as a broker record to
+// agentDir's state file (atomic write via writeAgentInfoFile) without the
+// mount check writeRepoRootRecord applies. Production code writes through
+// writeRepoRootRecord; this is kept for tests that set up a record
+// directly.
 func writeProvisionedWorktreeRepoRoot(agentDir, repoRoot string) error {
-	data, err := json.Marshal(provisionedWorktreeState{RepoRoot: repoRoot})
+	data, err := json.Marshal(provisionedWorktreeState{RepoRoot: repoRoot, Source: repoRootSourceBroker})
 	if err != nil {
 		return err
 	}
@@ -3351,17 +3383,14 @@ func readProvisionedWorktreeRepoRoot(agentDir string) string {
 //     skips it when the agent directory already exists on disk (e.g. a
 //     leftover from a deleted hub agent recreated under the same name).
 //
-// A write failure only means a later resume falls back to detectRepoRoot;
+// A write failure only means a later resume has no broker record;
 // see writeProvisionedWorktreeRepoRoot.
-func persistProvisionedWorktreeRepoRootIfValid(agentDir, ctxRepoRoot, workspace string) {
+func persistProvisionedWorktreeRepoRootIfValid(agentDir, ctxRepoRoot, workspace string, volumes []api.VolumeMount) {
 	if ctxRepoRoot == "" || validatedWorktreeRepoRoot(ctxRepoRoot, workspace) != ctxRepoRoot {
 		return
 	}
-	if readProvisionedWorktreeRepoRoot(agentDir) == ctxRepoRoot {
-		return
-	}
-	if err := writeProvisionedWorktreeRepoRoot(agentDir, ctxRepoRoot); err != nil {
-		util.Debugf("persistProvisionedWorktreeRepoRootIfValid: failed to persist for %s: %v", agentDir, err)
+	if err := writeRepoRootRecord(agentDir, ctxRepoRoot, repoRootSourceBroker, agentMountSources(workspace, ctxRepoRoot, volumes)); err != nil {
+		util.Debugf("persistProvisionedWorktreeRepoRootIfValid: not persisted for %s: %v", agentDir, err)
 	}
 }
 

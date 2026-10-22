@@ -347,6 +347,9 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	var fuseMounts []string
 	var gcsVolumes []gcsVolumeInfo
 
+	// volumeErr is the first configured volume refused below; it fails the
+	// whole call once the volumes have been processed.
+	var volumeErr error
 	addVolume := func(v api.VolumeMount) {
 		tgt := expandPath(v.Target, true)
 
@@ -375,6 +378,20 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		}
 
 		src := expandPath(v.Source, false)
+		if _, exists := volumeMap[tgt]; exists {
+			// Already mounted (for example the workspace, checked on its
+			// own path); registerMount below would not add this one.
+			return
+		}
+		// Agents' own directories under ~/.scion/project-configs hold state
+		// the host relies on; no configured volume may mount them
+		// (checkVolumeSource).
+		if err := checkVolumeSource(src, v.ReadOnly); err != nil {
+			if volumeErr == nil {
+				volumeErr = err
+			}
+			return
+		}
 		// Generic volumes from config should NOT overwrite already registered mounts (like workspace)
 		registerMount(src, tgt, v.ReadOnly, false)
 	}
@@ -519,6 +536,13 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	} else if config.Workspace != "" {
 		registerMount(config.Workspace, "/workspace", false, true)
 		addArg("--workdir", "/workspace")
+		// A plain workspace mount (for example an explicit --workspace at a
+		// project root) is kept from showing that project's in-project
+		// agents directory, which holds other agents' own directories
+		// (plainWorkspaceAgentsMaskTarget).
+		if target, ok := plainWorkspaceAgentsMaskTarget(config, "/workspace"); ok {
+			sharedWorkspaceAgentsMask = target
+		}
 	}
 
 	// Add generic volumes from config, deduplicating among themselves first
@@ -534,6 +558,9 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	}
 	for _, tgt := range dedupedOrder {
 		addVolume(dedupedVolumes[tgt])
+	}
+	if volumeErr != nil {
+		return nil, volumeErr
 	}
 
 	// If workdir was not set by the RepoRoot/Workspace logic above, check if we have an explicit

@@ -73,6 +73,29 @@ func sharedWorkspaceAgentsMaskTarget(cfg RunConfig, containerWorkspace string, r
 	return path.Join(containerWorkspace, sharedWorkspaceAgentsDir), true
 }
 
+// plainWorkspaceAgentsMaskTarget returns the container path of
+// <workspace>/.scion/agents for a plain workspace mount (no repository root
+// layout, for example an explicit --workspace), and whether to shadow it.
+// It applies when that directory exists on the broker, so the mask never
+// creates a mount point in the workspace. A workspace that is an ancestor of
+// a project (the agents directory sits deeper than <workspace>/.scion) is
+// not covered.
+func plainWorkspaceAgentsMaskTarget(cfg RunConfig, containerWorkspace string) (string, bool) {
+	if cfg.Workspace == "" || containerWorkspace == "" {
+		return "", false
+	}
+	workspace, err := filepath.EvalSymlinks(cfg.Workspace)
+	if err != nil {
+		runtimeLog().Warn("Not masking the in-project agents dir: workspace does not resolve",
+			"agent", cfg.Name, "workspace", cfg.Workspace, "error", err)
+		return "", false
+	}
+	if !isDir(filepath.Join(workspace, filepath.FromSlash(sharedWorkspaceAgentsDir))) {
+		return "", false
+	}
+	return path.Join(containerWorkspace, sharedWorkspaceAgentsDir), true
+}
+
 // isDir reports whether p is a directory, following symlinks.
 func isDir(p string) bool {
 	info, err := os.Stat(p)

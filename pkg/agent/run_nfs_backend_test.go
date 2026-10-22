@@ -595,15 +595,18 @@ profiles:
 		if want := "/repo-root/worktrees/agent-a"; capturedConfig.ContainerWorkspace != want {
 			t.Fatalf("ContainerWorkspace = %q, want %q", capturedConfig.ContainerWorkspace, want)
 		}
-		// The detectRepoRoot fallback resolves effectiveWorkspace (the real
-		// git base) to a non-empty RepoRoot. The Kubernetes runtime builds
-		// its mounts from ContainerWorkspace and the NFS* fields, not
-		// RepoRoot — see the comment on the backend re-validation in run.go.
-		if capturedConfig.RepoRoot != base {
-			t.Fatalf("RepoRoot = %q, want %q (the detectRepoRoot fallback)", capturedConfig.RepoRoot, base)
+		// RepoRoot is no longer derived from the backend's checkout: it comes
+		// only from a broker signal or agentDir's repository root record, and
+		// a Kubernetes dispatch has neither (ptone/scion#4611,
+		// security-lead ruling Q4: record-or-empty). The Kubernetes runtime
+		// builds its mounts from ContainerWorkspace and the NFS* fields, not
+		// RepoRoot; an empty RepoRoot only skips the in-project agents-dir
+		// mask, which the broker-side agent-dir relocation already covers.
+		if capturedConfig.RepoRoot != "" {
+			t.Fatalf("RepoRoot = %q, want \"\" for a Kubernetes dispatch (no broker signal, no record)", capturedConfig.RepoRoot)
 		}
-		if got := readProvisionedWorktreeRepoRoot(agentDir); got != "" {
-			t.Fatalf("persisted repo root = %q, want \"\" — nothing should be written to the broker-owned repo-root file for a Kubernetes dispatch", got)
+		if _, ok := readRepoRootRecord(agentDir); ok {
+			t.Fatalf("a repository root record was written for a Kubernetes dispatch; want none")
 		}
 	}
 
