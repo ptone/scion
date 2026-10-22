@@ -257,7 +257,8 @@ func TestReadRepoRootRecordState(t *testing.T) {
 		})
 	}
 
-	// A non-NotExist read problem: the record path is a directory (EISDIR).
+	// The record path is a directory: it exists, so the guard runs, and the
+	// no-follow read then fails because a directory is not a regular file.
 	t.Run("directory at the record path, plain -> unreadable", func(t *testing.T) {
 		ad := t.TempDir()
 		if err := os.Mkdir(filepath.Join(ad, provisionedWorktreeStateFile), 0o755); err != nil {
@@ -304,6 +305,27 @@ func TestReadRepoRootRecordState(t *testing.T) {
 		}
 		if rs := readRepoRootRecordState("a", ad, ws3, nil); rs.status != recordMissing {
 			t.Errorf("symlink at the record path, under a mount: got %+v, want missing", rs)
+		}
+	})
+
+	// agentDir is itself a regular file, so joining the record name onto it
+	// gives a non-not-exist Lstat error (ENOTDIR): unreadable outside the
+	// mounts, missing under a mount.
+	t.Run("agentDir is a file, plain -> unreadable", func(t *testing.T) {
+		agentFile := filepath.Join(t.TempDir(), "notadir")
+		mustWrite(t, agentFile, "x")
+		if rs := readRepoRootRecordState("a", agentFile, t.TempDir(), nil); rs.status != recordUnreadable {
+			t.Errorf("agentDir is a file, plain: got %+v, want unreadable", rs)
+		}
+	})
+	t.Run("agentDir is a file, under a mount -> missing", func(t *testing.T) {
+		root := t.TempDir()
+		ws3 := mkdirAllT(t, filepath.Join(root, "ws"))
+		mkdirAllT(t, filepath.Join(ws3, "agents"))
+		agentFile := filepath.Join(ws3, "agents", "notadir")
+		mustWrite(t, agentFile, "x")
+		if rs := readRepoRootRecordState("a", agentFile, ws3, nil); rs.status != recordMissing {
+			t.Errorf("agentDir is a file, under a mount: got %+v, want missing", rs)
 		}
 	})
 }

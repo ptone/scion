@@ -1814,13 +1814,14 @@ func EnsureGitIgnoresFile(dir, name string) error {
 // pointer file, commondir) is read. Used by readSmallRegularFile callers.
 const smallGitFileMax = 4096
 
-// ReadSmallRegularFile reads a small regular file with O_NOFOLLOW, O_NONBLOCK
-// and a size cap of max bytes, so that a symlink or FIFO at the path cannot
-// redirect or block the read, and anything other than a regular file is
-// rejected. It is exported for callers outside this package that read small,
+// ReadSmallRegularFile reads the file at path when it is a regular file of at
+// most limit bytes, rejecting anything else. On unix it opens with O_NOFOLLOW
+// and O_NONBLOCK, so a symlink or FIFO at the path cannot redirect or block the
+// read; on other platforms it rejects a symlink with an Lstat check before
+// opening. It is exported for callers outside this package that read small,
 // broker-owned metadata files.
-func ReadSmallRegularFile(path string, max int64) ([]byte, error) {
-	return readSmallRegularFile(path, max)
+func ReadSmallRegularFile(path string, limit int64) ([]byte, error) {
+	return readSmallRegularFile(path, limit)
 }
 
 // hardenedGitCommand returns a git command that reads no system or global
