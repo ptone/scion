@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -515,7 +516,7 @@ func TestKeysNeverFormatMaterial(t *testing.T) {
 		t.Helper()
 		assertNoSecret(t, out)
 		for _, m := range mats {
-			for _, form := range []string{hex.EncodeToString(m), fmt.Sprint(m), base64.StdEncoding.EncodeToString(m), strings.Trim(fmt.Sprint(m), "[]")} {
+			for _, form := range []string{hex.EncodeToString(m), decimalBytes(m), base64.StdEncoding.EncodeToString(m), strings.Trim(decimalBytes(m), "[]")} {
 				if strings.Contains(out, form) {
 					t.Fatalf("%s: output contains key material: %q", label, out)
 				}
@@ -560,6 +561,16 @@ func TestKeysNeverFormatMaterial(t *testing.T) {
 	}
 }
 
+// decimalBytes renders b the way fmt prints a []byte with %v ("[1 2 3]"),
+// the decimal-byte form a leak through reflection would take.
+func decimalBytes(b []byte) string {
+	parts := make([]string, len(b))
+	for i, c := range b {
+		parts[i] = strconv.Itoa(int(c))
+	}
+	return "[" + strings.Join(parts, " ") + "]"
+}
+
 // consumer is a phase 2-5 style struct holding keys in unexported fields.
 type consumer struct {
 	sk   SigningKey
@@ -592,7 +603,7 @@ func reflectDump(v reflect.Value, depth int) string {
 			for i := range out {
 				out[i] = byte(v.Index(i).Uint())
 			}
-			return fmt.Sprint(out) + " " + hex.EncodeToString(out) + " " + string(out)
+			return decimalBytes(out) + " " + hex.EncodeToString(out) + " " + string(out)
 		}
 		var b strings.Builder
 		for i := 0; i < v.Len(); i++ {
