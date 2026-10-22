@@ -32,6 +32,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -3962,11 +3963,10 @@ func TestWorktreeUsage_UnaffectedByReadOnlyHooksAndInfo(t *testing.T) {
 	runIn(t, wtPath, "git", "checkout", "-b", "agent-2-work")
 }
 
-func TestSafeGitCommand_NeutralizesFsmonitorRegardlessOfConfig(t *testing.T) {
-	// core.fsmonitor is a pure .git/config vector (no on-disk file creation
-	// needed), so unlike hooks/info above it cannot be blocked by directory
-	// permissions — this is exactly why SafeGitCommand clears it at the
-	// invocation level (Part B) as belt-and-suspenders over Part A.
+func TestSafeGitCommand_RefusesRepositoryFsmonitorConfig(t *testing.T) {
+	// core.fsmonitor in the base's own config is outside the managed
+	// allow-list, so SafeGitCommand refuses the command before running it
+	// (deny-by-default) rather than running and neutralising it.
 	base := t.TempDir()
 	run(t, "git", "init", "--initial-branch=main", base)
 	runIn(t, base, "git", "-c", "user.name=t", "-c", "user.email=t@t.com",
@@ -3978,30 +3978,15 @@ func TestSafeGitCommand_NeutralizesFsmonitorRegardlessOfConfig(t *testing.T) {
 		[]byte(fmt.Sprintf("#!/bin/sh\necho fsmonitor-ran >> %s\necho \"\"\n", marker)), 0755); err != nil {
 		t.Fatal(err)
 	}
-	// An unexpected core.fsmonitor, however it got there.
 	runIn(t, base, "git", "config", "core.fsmonitor", fsmonScript)
 
-	cmd, err := SafeGitCommand(context.Background(), base, "status", "--porcelain")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git status failed: %v\n%s", err, out)
+	_, err := SafeGitCommand(context.Background(), base, "status", "--porcelain")
+	var refused *util.RepoConfigRefusedError
+	if !errors.As(err, &refused) {
+		t.Fatalf("SafeGitCommand error = %v, want *util.RepoConfigRefusedError", err)
 	}
 	if data, _ := os.ReadFile(marker); len(data) != 0 {
-		t.Errorf("expected core.fsmonitor to be neutralized by SafeGitCommand, but it ran: %q", data)
-	}
-
-	// Revert-check: the identical config, invoked WITHOUT the wrapper, DOES
-	// fire — proving the wrapper (not something incidental) is what
-	// neutralizes it.
-	plain := exec.Command("git", "status", "--porcelain")
-	plain.Dir = base
-	if out, err := plain.CombinedOutput(); err != nil {
-		t.Fatalf("git status (unwrapped) failed: %v\n%s", err, out)
-	}
-	if data, _ := os.ReadFile(marker); len(data) == 0 {
-		t.Error("expected core.fsmonitor to fire without the wrapper (revert-check baseline), got no marker")
+		t.Errorf("fsmonitor ran despite the refusal: %q", data)
 	}
 }
 
@@ -4029,11 +4014,6 @@ func TestSafeGitCommand_GlobalFilterRunsRepositoryHookAndFilterDoNot(t *testing.
 	if err := os.WriteFile(smudgeScript, []byte("#!/bin/sh\ncat >/dev/null\necho smudge-ran >> \"$MARKER_FILE\"\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	repoScript := filepath.Join(t.TempDir(), "repo-filter.sh")
-	if err := os.WriteFile(repoScript, []byte("#!/bin/sh\necho repo-filter-ran >> \"$MARKER_FILE\"\ncat\n"), 0755); err != nil {
-		t.Fatal(err)
-	}
-
 	globalConfig := filepath.Join(home, ".gitconfig")
 	globalConfigBody := fmt.Sprintf(
 		"[filter \"lfs\"]\n\tsmudge = %s\n\tclean = cat\n\trequired = false\n",
@@ -4047,27 +4027,23 @@ func TestSafeGitCommand_GlobalFilterRunsRepositoryHookAndFilterDoNot(t *testing.
 	runIn(t, base, "git", "-c", "user.name=t", "-c", "user.email=t@t.com",
 		"commit", "--allow-empty", "-m", "root")
 
-	if err := os.WriteFile(filepath.Join(base, ".gitattributes"), []byte("data.bin filter=lfs -text\nother.txt filter=repo\n"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(base, ".gitattributes"), []byte("data.bin filter=lfs -text\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(base, "data.bin"), []byte("binary-content"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(base, "other.txt"), []byte("text"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	runIn(t, base, "git", "add", ".")
 	runIn(t, base, "git", "-c", "user.name=t", "-c", "user.email=t@t.com",
 		"commit", "-m", "add filtered files")
 
-	// Repository content: a post-checkout hook, a filter driver defined in
-	// the base's config, and a repository override of the global driver.
+	// Repository content at the default hook path: it must not run. (A
+	// repository-scope filter driver or core.hooksPath would instead be
+	// refused outright; that is covered by the deny-by-default tests.)
 	hookScript := fmt.Sprintf("#!/bin/sh\necho hook-ran >> %s\n", marker)
 	if err := os.WriteFile(filepath.Join(base, ".git", "hooks", "post-checkout"), []byte(hookScript), 0755); err != nil {
 		t.Fatal(err)
 	}
-	runIn(t, base, "git", "config", "filter.repo.smudge", repoScript)
-	runIn(t, base, "git", "config", "filter.lfs.smudge", repoScript)
 
 	// The exact broker trigger: SafeGitCommand-driven `git worktree add`,
 	// which checks out the new worktree.
@@ -4087,11 +4063,8 @@ func TestSafeGitCommand_GlobalFilterRunsRepositoryHookAndFilterDoNot(t *testing.
 	if strings.Contains(string(data), "hook-ran") {
 		t.Errorf("the repository's post-checkout hook ran, marker: %q", data)
 	}
-	if strings.Contains(string(data), "repo-filter-ran") {
-		t.Errorf("a filter driver from the repository config ran, marker: %q", data)
-	}
-	if got, err := os.ReadFile(filepath.Join(wtPath, "other.txt")); err != nil || string(got) != "text" {
-		t.Errorf("other.txt = %q, %v", got, err)
+	if _, err := os.Stat(filepath.Join(wtPath, "data.bin")); err != nil {
+		t.Errorf("data.bin not checked out: %v", err)
 	}
 }
 

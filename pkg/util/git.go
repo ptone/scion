@@ -321,7 +321,7 @@ func CreateWorktree(path, branch string) error {
 	// filter commands (HostGitCommand): agents can write this repository.
 	gitEnv := append(HostGitEnv(os.Environ()), "LC_ALL=C")
 	ctx := context.Background()
-	cmd, err := HostGitCommand(ctx, root, HostGitOptions{Env: gitEnv}, "worktree", "add", "--relative-paths", "-b", branch, path)
+	cmd, err := HostGitCommand(ctx, root, HostGitOptions{Env: gitEnv, Policy: RepoPolicyLinked}, "worktree", "add", "--relative-paths", "-b", branch, path)
 	if err != nil {
 		return fmt.Errorf("failed to create worktree: %w", err)
 	}
@@ -329,7 +329,7 @@ func CreateWorktree(path, branch string) error {
 		outputStr := string(output)
 		// If branch already exists, try to just add it
 		if strings.Contains(outputStr, "already exists") {
-			cmd, err = HostGitCommand(ctx, root, HostGitOptions{Env: gitEnv}, "worktree", "add", "--relative-paths", path, branch)
+			cmd, err = HostGitCommand(ctx, root, HostGitOptions{Env: gitEnv, Policy: RepoPolicyLinked}, "worktree", "add", "--relative-paths", path, branch)
 			if err != nil {
 				return fmt.Errorf("failed to create worktree: %w", err)
 			}

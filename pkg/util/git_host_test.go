@@ -17,11 +17,11 @@ package util
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"strings"
 	"testing"
 )
@@ -51,38 +51,24 @@ func hostRunGit(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// plantRepoCommands configures, in the repository at repo, every hook git
-// runs for the host-side commands under test, a repository hooks path, a
-// file-system monitor and a filter driver applied to every file, each
-// creating a marker file in markers when it runs.
+// plantRepoCommands places, in the repository's default .git/hooks
+// directory, every hook git runs for the host-side commands under test, each
+// touching a marker in markers. These are repository content at the default
+// path (not a config key); HostGitArgs' core.hooksPath=/dev/null pin keeps
+// them from running. Config-based vectors (core.hooksPath, core.fsmonitor,
+// filter drivers) are covered by the deny-by-default policy tests instead.
 func plantRepoCommands(t *testing.T, repo, markers string) {
 	t.Helper()
-	hookDir := filepath.Join(markers, "hooks")
+	gitDir := hostRunGit(t, repo, "rev-parse", "--absolute-git-dir")
+	hookDir := filepath.Join(gitDir, "hooks")
 	if err := os.MkdirAll(hookDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	gitDir := hostRunGit(t, repo, "rev-parse", "--absolute-git-dir")
-	for _, dir := range []string{filepath.Join(gitDir, "hooks"), hookDir} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+	for _, hook := range []string{"post-checkout", "reference-transaction", "post-merge", "pre-commit", "post-index-change"} {
+		script := "#!/bin/sh\ntouch '" + filepath.Join(markers, "hook-"+hook) + "'\n"
+		if err := os.WriteFile(filepath.Join(hookDir, hook), []byte(script), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		for _, hook := range []string{"post-checkout", "reference-transaction", "post-merge", "pre-commit", "post-index-change"} {
-			script := "#!/bin/sh\ntouch '" + filepath.Join(markers, "hook-"+hook) + "'\n"
-			if err := os.WriteFile(filepath.Join(dir, hook), []byte(script), 0o755); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	hostRunGit(t, repo, "config", "core.hooksPath", hookDir)
-	hostRunGit(t, repo, "config", "core.fsmonitor", "touch '"+filepath.Join(markers, "fsmonitor")+"'; false")
-	hostRunGit(t, repo, "config", "filter.planted.smudge", "touch '"+filepath.Join(markers, "smudge")+"'; cat")
-	hostRunGit(t, repo, "config", "filter.planted.clean", "touch '"+filepath.Join(markers, "clean")+"'; cat")
-	hostRunGit(t, repo, "config", "filter.planted.required", "true")
-	if err := os.MkdirAll(filepath.Join(gitDir, "info"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(gitDir, "info", "attributes"), []byte("* filter=planted\n"), 0o644); err != nil {
-		t.Fatal(err)
 	}
 }
 
@@ -149,7 +135,9 @@ func TestParseGitConfigList(t *testing.T) {
 
 // Filter driver variables the repository sets are replaced by the global
 // value of the same variable, or emptied when there is none.
-func TestHostGitCommand_FilterDriversFromRepositoryConfig(t *testing.T) {
+// A standard git-lfs filter in the repository config is allowed, and its
+// variables are pinned to the global/system value as defence in depth.
+func TestHostGitCommand_FilterPinsStandardLFS(t *testing.T) {
 	repo, _ := newHostGitRepo(t)
 	global := os.Getenv("GIT_CONFIG_GLOBAL")
 	f, err := os.OpenFile(global, os.O_APPEND|os.O_WRONLY, 0)
@@ -160,89 +148,199 @@ func TestHostGitCommand_FilterDriversFromRepositoryConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = f.Close()
-	hostRunGit(t, repo, "config", "filter.lfs.smudge", "repo-smudge")
-	hostRunGit(t, repo, "config", "filter.lfs.clean", "repo-clean")
-	hostRunGit(t, repo, "config", "filter.Other.process", "repo-process")
+	// The repository sets the standard git-lfs commands too (git lfs
+	// install --local): allowed by the policy.
+	hostRunGit(t, repo, "config", "filter.lfs.smudge", "git-lfs smudge -- %f")
+	hostRunGit(t, repo, "config", "filter.lfs.clean", "git-lfs clean -- %f")
+	hostRunGit(t, repo, "config", "filter.lfs.required", "true")
 
-	cmd, err := HostGitCommand(context.Background(), repo, HostGitOptions{}, "status")
+	cmd, err := HostGitCommand(context.Background(), repo, HostGitOptions{Policy: RepoPolicyLinked}, "status")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("HostGitCommand: %v", err)
 	}
 	args := strings.Join(cmd.Args, "\x00")
-	// Only the variables the repository sets are pinned: to the global
-	// value, or empty when there is none.
-	for _, want := range []string{
-		"filter.Other.process=",
-		"filter.lfs.clean=", "filter.lfs.smudge=git-lfs smudge -- %f",
-	} {
+	for _, want := range []string{"filter.lfs.clean=", "filter.lfs.smudge=git-lfs smudge -- %f", "filter.lfs.required=true"} {
 		if !strings.Contains(args, "\x00"+want+"\x00") {
 			t.Errorf("command args lack -c %q: %q", want, cmd.Args)
 		}
-	}
-	for _, unwanted := range []string{"filter.Other.clean", "filter.Other.smudge", "filter.Other.required", "filter.lfs.process", "filter.lfs.required"} {
-		if strings.Contains(args, "\x00"+unwanted+"=") {
-			t.Errorf("command args pin %s, which the repository does not set: %q", unwanted, cmd.Args)
-		}
-	}
-	if strings.Contains(args, "repo-") {
-		t.Errorf("command args carry a repository filter value: %q", cmd.Args)
 	}
 	if cmd.Args[len(cmd.Args)-1] != "status" {
 		t.Errorf("subcommand not last: %q", cmd.Args)
 	}
 }
 
-func TestHostGitCommand_NetworkRefusesRepositoryKeys(t *testing.T) {
-	for _, kv := range [][2]string{
+// Deny-by-default: a repository config key outside the allow-list (or an
+// include directive) refuses the command, whether or not it is a network
+// command, and names the key. This covers every finding so far plus an
+// arbitrary unknown key.
+func TestHostGitCommand_PolicyRefuses(t *testing.T) {
+	cases := []struct{ key, value string }{
+		// F1: a filter subsection containing '=' and a non-standard filter.
+		{"filter.a=b.smudge", "touch /tmp/x; cat"},
+		{"filter.custom.smudge", "evil"},
+		// F2: signature-verification knobs that could run gpg.program.
+		{"gpg.program", "touch /tmp/x"},
+		{"gpg.ssh.program", "touch /tmp/x"},
+		{"log.showSignature", "true"},
+		// F3: http.* TLS / resolve / cookie / cert keys.
+		{"http.sslVerify", "false"},
+		{"http.sslCAInfo", "/tmp/ca"},
+		{"http.curloptResolve", "example.com:443:127.0.0.1"},
+		{"http.cookieFile", "/tmp/cookies"},
+		{"http.https://github.com.sslCert", "/tmp/cert"},
+		{"http.proxy", "http://proxy.example"},
+		// Command / redirect keys.
 		{"url.https://elsewhere.example/.insteadOf", "https://github.com/"},
 		{"url.https://elsewhere.example/.pushInsteadOf", "https://github.com/"},
 		{"credential.helper", "store"},
 		{"credential.https://github.com.username", "x"},
 		{"core.sshCommand", "ssh -v"},
-		{"core.askPass", "true"},
-		{"core.gitProxy", "true"},
-		{"core.worktree", "/tmp"},
+		{"core.pager", "less"},
+		{"core.editor", "vi"},
+		{"core.hooksPath", "/tmp/hooks"},
+		{"core.fsmonitor", "/tmp/fsm"},
+		{"core.worktree", "/tmp/elsewhere"},
 		{"remote.origin.uploadpack", "git-upload-pack"},
 		{"remote.origin.receivepack", "git-receive-pack"},
 		{"remote.origin.proxy", "http://proxy.example"},
-		{"include.path", "/dev/null"},
-		{"includeIf.gitdir:/.path", "/dev/null"},
-		{"protocol.allow", "always"},
-		{"http.proxy", "http://proxy.example"},
-		{"http.https://github.com.proxy", "http://proxy.example"},
-		{"gpg.program", "true"},
-	} {
-		t.Run(kv[0], func(t *testing.T) {
-			repo, _ := newHostGitRepo(t)
-			hostRunGit(t, repo, "config", kv[0], kv[1])
-			_, err := HostGitCommand(context.Background(), repo, HostGitOptions{Network: true}, "fetch")
-			var unsafe *UnsafeRepoConfigError
-			if !errors.As(err, &unsafe) {
-				t.Fatalf("HostGitCommand(Network) error = %v, want *UnsafeRepoConfigError", err)
+		{"remote.origin.vcs", "hg"},
+		{"alias.co", "checkout"},
+		{"diff.external", "/tmp/d"},
+		{"diff.x.textconv", "/tmp/t"},
+		{"merge.x.driver", "/tmp/m %O %A %B"},
+		{"submodule.x.update", "!touch /tmp/x"},
+		{"submodule.x.url", "https://evil.example/s"},
+		// An arbitrary unknown key proves the default is deny.
+		{"totally.unknown.key", "whatever"},
+	}
+	for _, mode := range []RepoConfigPolicy{RepoPolicyManaged, RepoPolicyLinked} {
+		for _, c := range cases {
+			for _, network := range []bool{false, true} {
+				name := fmt.Sprintf("policy%d/%s/net%v", mode, c.key, network)
+				t.Run(name, func(t *testing.T) {
+					repo, _ := newHostGitRepo(t)
+					hostRunGit(t, repo, "config", c.key, c.value)
+					_, err := HostGitCommand(context.Background(), repo, HostGitOptions{Policy: mode, Network: network}, "status")
+					var refused *RepoConfigRefusedError
+					if !errors.As(err, &refused) {
+						t.Fatalf("error = %v, want *RepoConfigRefusedError", err)
+					}
+					if !strings.EqualFold(refused.Key, c.key) && !strings.HasPrefix(strings.ToLower(refused.Key), strings.ToLower(strings.SplitN(c.key, ".", 2)[0])) {
+						t.Errorf("refused key = %q, want %q", refused.Key, c.key)
+					}
+				})
 			}
-			if !strings.EqualFold(unsafe.Key, kv[0]) || unsafe.Scope != "local" {
-				t.Errorf("refused key %q scope %q, want %q local", unsafe.Key, unsafe.Scope, kv[0])
-			}
-			// The same key is not refused for a local command.
-			if _, err := HostGitCommand(context.Background(), repo, HostGitOptions{}, "status"); err != nil {
-				t.Errorf("HostGitCommand(local) error = %v", err)
-			}
-		})
+		}
 	}
 }
 
-// Keys in the host user's global config are trusted.
-func TestHostGitCommand_NetworkAllowsGlobalKeys(t *testing.T) {
+// include/includeIf directives are refused outright.
+func TestHostGitCommand_RefusesIncludes(t *testing.T) {
+	for _, key := range []string{"include.path", "includeIf.gitdir:/x/.path"} {
+		repo, _ := newHostGitRepo(t)
+		// Write the directive as data (git config would try to open it).
+		gitDir := hostRunGit(t, repo, "rev-parse", "--absolute-git-dir")
+		cfg := filepath.Join(gitDir, "config")
+		data, err := os.ReadFile(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		section, name, _ := strings.Cut(key, ".")
+		if strings.Contains(key, ":") {
+			// includeIf "<cond>" .path
+			cond := strings.TrimSuffix(strings.SplitN(key, ".path", 2)[0], "")
+			cond = strings.TrimPrefix(cond, "includeIf.")
+			data = append(data, []byte("[includeIf \""+cond+"\"]\n\tpath = /dev/null\n")...)
+		} else {
+			data = append(data, []byte("["+section+"]\n\t"+name+" = /dev/null\n")...)
+		}
+		if err := os.WriteFile(cfg, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err = HostGitCommand(context.Background(), repo, HostGitOptions{Policy: RepoPolicyLinked}, "status")
+		var refused *RepoConfigRefusedError
+		if !errors.As(err, &refused) {
+			t.Errorf("%s: error = %v, want *RepoConfigRefusedError", key, err)
+		}
+	}
+}
+
+// The managed policy allows only the keys git and Scion write; the linked
+// policy allows a typical user repository too.
+func TestHostGitCommand_AllowsExpectedKeys(t *testing.T) {
+	t.Run("managed", func(t *testing.T) {
+		repo, _ := newHostGitRepo(t)
+		for _, kv := range [][2]string{
+			{"gc.auto", "0"}, {"branch.autoSetupMerge", "false"},
+			{"user.name", "Scion"}, {"user.email", "agent@scion.dev"},
+			{"extensions.worktreeConfig", "true"},
+		} {
+			hostRunGit(t, repo, "config", kv[0], kv[1])
+		}
+		if _, err := HostGitCommand(context.Background(), repo, HostGitOptions{Policy: RepoPolicyManaged}, "status"); err != nil {
+			t.Fatalf("managed policy refused a Scion-written config: %v", err)
+		}
+	})
+	t.Run("linked-typical", func(t *testing.T) {
+		repo, _ := newHostGitRepo(t)
+		for _, kv := range [][2]string{
+			{"core.autocrlf", "input"}, {"core.ignorecase", "true"},
+			{"remote.origin.url", "https://github.com/org/repo.git"},
+			{"remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"},
+			{"remote.origin.pushurl", "git@github.com:org/repo.git"},
+			{"branch.main.remote", "origin"}, {"branch.main.merge", "refs/heads/main"},
+			{"branch.main.rebase", "true"},
+			{"user.name", "Dev"}, {"user.email", "dev@example.com"},
+			{"pull.rebase", "true"}, {"push.default", "simple"},
+			{"init.defaultBranch", "main"}, {"color.ui", "auto"},
+			{"filter.lfs.clean", "git-lfs clean -- %f"},
+			{"filter.lfs.smudge", "git-lfs smudge -- %f"},
+			{"filter.lfs.process", "git-lfs filter-process"},
+			{"filter.lfs.required", "true"},
+			{"submodule.sub.update", "checkout"},
+		} {
+			hostRunGit(t, repo, "config", kv[0], kv[1])
+		}
+		if _, err := HostGitCommand(context.Background(), repo, HostGitOptions{Policy: RepoPolicyLinked}, "status"); err != nil {
+			t.Fatalf("linked policy refused a typical user config: %v", err)
+		}
+	})
+	t.Run("managed-refuses-linked-only-keys", func(t *testing.T) {
+		repo, _ := newHostGitRepo(t)
+		hostRunGit(t, repo, "config", "pull.rebase", "true")
+		_, err := HostGitCommand(context.Background(), repo, HostGitOptions{Policy: RepoPolicyManaged}, "status")
+		var refused *RepoConfigRefusedError
+		if !errors.As(err, &refused) {
+			t.Fatalf("managed: error = %v, want pull.rebase refused", err)
+		}
+	})
+}
+
+// A repository-scope core.worktree is allowed only when it equals the
+// caller's AllowedWorktreePath.
+func TestHostGitCommand_CoreWorktreeMatch(t *testing.T) {
+	repo, _ := newHostGitRepo(t)
+	wt := repo // an existing directory git can treat as the work tree
+	hostRunGit(t, repo, "config", "core.worktree", wt)
+	if _, err := HostGitCommand(context.Background(), repo, HostGitOptions{Policy: RepoPolicyLinked, AllowedWorktreePath: wt}, "status"); err != nil {
+		t.Errorf("matching core.worktree refused: %v", err)
+	}
+	_, err := HostGitCommand(context.Background(), repo, HostGitOptions{Policy: RepoPolicyLinked, AllowedWorktreePath: "/other"}, "status")
+	var refused *RepoConfigRefusedError
+	if !errors.As(err, &refused) {
+		t.Errorf("mismatched core.worktree: error = %v, want refusal", err)
+	}
+}
+
+// Keys in the host user's global config are not subject to the policy.
+func TestHostGitCommand_GlobalKeysNotChecked(t *testing.T) {
 	repo, _ := newHostGitRepo(t)
 	global := os.Getenv("GIT_CONFIG_GLOBAL")
 	hostRunGit(t, repo, "config", "--file", global, "url.https://mirror.example/.insteadOf", "https://github.com/")
 	hostRunGit(t, repo, "config", "--file", global, "credential.helper", "store")
-	cmd, err := HostGitCommand(context.Background(), repo, HostGitOptions{Network: true}, "fetch")
-	if err != nil {
-		t.Fatalf("HostGitCommand: %v", err)
-	}
-	if !slices.Contains(cmd.Args, "fetch") {
-		t.Errorf("args = %q", cmd.Args)
+	hostRunGit(t, repo, "config", "--file", global, "core.sshCommand", "ssh -v")
+	if _, err := HostGitCommand(context.Background(), repo, HostGitOptions{Policy: RepoPolicyManaged, Network: true}, "fetch"); err != nil {
+		t.Fatalf("global keys triggered a refusal: %v", err)
 	}
 }
 
@@ -521,7 +619,6 @@ func TestCreateWorktree_WorktreeSupportsCommitPushFetchRebase(t *testing.T) {
 // HostGitArgs, so work-tree writes never recurse into submodules.
 func TestHostGitCommand_CarriesFixedArgs(t *testing.T) {
 	repo, _ := newHostGitRepo(t)
-	hostRunGit(t, repo, "config", "submodule.recurse", "true")
 	for _, network := range []bool{false, true} {
 		cmd, err := HostGitCommand(context.Background(), repo, HostGitOptions{Network: network}, "merge", "--ff-only", "HEAD")
 		if err != nil {
@@ -534,28 +631,56 @@ func TestHostGitCommand_CarriesFixedArgs(t *testing.T) {
 	}
 }
 
-func TestNetworkRepoKeyAllowed(t *testing.T) {
-	for _, key := range []string{
-		"core.repositoryformatversion", "core.filemode", "core.bare", "core.logallrefupdates",
-		"extensions.relativeWorktrees", "remote.origin.url", "remote.origin.fetch",
-		"branch.main.remote", "branch.main.merge", "branch.autoSetupMerge", "user.name", "user.email",
-		"gc.auto", "pull.rebase", "init.defaultBranch",
-		"core.hooksPath", "core.fsmonitor", "core.pager", "submodule.recurse", "filter.lfs.smudge",
-	} {
-		if !networkRepoKeyAllowed(key) {
-			t.Errorf("networkRepoKeyAllowed(%q) = false, want true", key)
+// allowVar unit coverage: the managed and linked allow-lists, and the value
+// checks for core.worktree, filter.lfs.*, submodule.*.update and *.program.
+func TestAllowVar(t *testing.T) {
+	v := func(key, value string) gitConfigVar {
+		sec, sub, name := splitConfigKey(key)
+		return gitConfigVar{Section: strings.ToLower(sec), Subsection: sub, Name: strings.ToLower(name), Value: value}
+	}
+	managedOK := []string{"core.repositoryformatversion", "core.filemode", "extensions.worktreeConfig", "remote.origin.url", "remote.origin.fetch", "branch.main.remote", "branch.main.merge", "gc.auto", "user.name"}
+	for _, k := range managedOK {
+		if ok, _ := allowVar(RepoPolicyManaged, v(k, "x"), repoConfigAllowOptions{}); !ok {
+			t.Errorf("managed allowVar(%q) = false, want true", k)
 		}
 	}
-	for _, key := range []string{
-		"core.editor", "core.sshCommand", "core.askPass", "core.worktree",
-		"log.showSignature", "diff.external", "diff.x.textconv", "merge.x.driver",
-		"submodule.x.url", "submodule.x.update", "remote.origin.uploadpack",
-		"url.x.insteadOf", "credential.helper", "include.path", "http.proxy", "gpg.program",
-		"alias.st", "filter.lfs.driver", "uploadpack.packObjectsHook", "some.new.key",
-	} {
-		if networkRepoKeyAllowed(key) {
-			t.Errorf("networkRepoKeyAllowed(%q) = true, want false", key)
+	linkedOnly := []string{"core.autocrlf", "pull.rebase", "push.default", "remote.origin.pushurl", "color.ui", "init.defaultBranch"}
+	for _, k := range linkedOnly {
+		if ok, _ := allowVar(RepoPolicyManaged, v(k, "x"), repoConfigAllowOptions{}); ok {
+			t.Errorf("managed allowVar(%q) = true, want false", k)
 		}
+		if ok, reason := allowVar(RepoPolicyLinked, v(k, "x"), repoConfigAllowOptions{}); !ok {
+			t.Errorf("linked allowVar(%q) = false (%s), want true", k, reason)
+		}
+	}
+	deny := []string{"core.sshCommand", "core.pager", "core.editor", "core.hooksPath", "core.fsmonitor", "credential.helper", "url.x.insteadOf", "http.proxy", "http.sslVerify", "gpg.program", "gpg.ssh.program", "alias.st", "remote.origin.uploadpack", "diff.external", "diff.x.textconv", "merge.x.driver", "totally.unknown.key"}
+	for _, mode := range []RepoConfigPolicy{RepoPolicyManaged, RepoPolicyLinked} {
+		for _, k := range deny {
+			if ok, _ := allowVar(mode, v(k, "x"), repoConfigAllowOptions{}); ok {
+				t.Errorf("policy%d allowVar(%q) = true, want false", mode, k)
+			}
+		}
+	}
+	// core.worktree only with a matching AllowedWorktreePath.
+	if ok, _ := allowVar(RepoPolicyLinked, v("core.worktree", "/wt"), repoConfigAllowOptions{worktreePath: "/wt"}); !ok {
+		t.Error("core.worktree matching path: want allowed")
+	}
+	if ok, _ := allowVar(RepoPolicyLinked, v("core.worktree", "/wt"), repoConfigAllowOptions{worktreePath: "/other"}); ok {
+		t.Error("core.worktree mismatched path: want refused")
+	}
+	// filter.lfs.* only when standard.
+	if ok, _ := allowVar(RepoPolicyLinked, v("filter.lfs.smudge", "git-lfs smudge -- %f"), repoConfigAllowOptions{}); !ok {
+		t.Error("standard filter.lfs.smudge: want allowed")
+	}
+	if ok, _ := allowVar(RepoPolicyLinked, v("filter.lfs.smudge", "evil"), repoConfigAllowOptions{}); ok {
+		t.Error("non-standard filter.lfs.smudge: want refused")
+	}
+	// submodule.*.update only for none|checkout|rebase|merge.
+	if ok, _ := allowVar(RepoPolicyLinked, v("submodule.s.update", "rebase"), repoConfigAllowOptions{}); !ok {
+		t.Error("submodule update rebase: want allowed")
+	}
+	if ok, _ := allowVar(RepoPolicyLinked, v("submodule.s.update", "!cmd"), repoConfigAllowOptions{}); ok {
+		t.Error("submodule update !cmd: want refused")
 	}
 }
 
@@ -575,41 +700,49 @@ func TestHostGitEnv(t *testing.T) {
 // A change to the repository's filter drivers while the command runs is
 // reported after it.
 func TestHostGitCmd_DetectsFilterConfigChange(t *testing.T) {
-	repo, _ := newHostGitRepo(t)
 	ctx := context.Background()
 
-	cmd, err := HostGitCommand(ctx, repo, HostGitOptions{}, "config", "filter.late.smudge", "x")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := cmd.CombinedOutput(); !errors.Is(err, ErrRepoConfigChanged) {
-		t.Errorf("filter driver added during the command: error = %v, want ErrRepoConfigChanged", err)
-	}
+	t.Run("refused key appears during the command", func(t *testing.T) {
+		repo, _ := newHostGitRepo(t)
+		cmd, err := HostGitCommand(ctx, repo, HostGitOptions{}, "config", "filter.late.smudge", "x")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := cmd.CombinedOutput(); !errors.Is(err, ErrRepoConfigChanged) {
+			t.Errorf("refused key added during the command: error = %v, want ErrRepoConfigChanged", err)
+		}
+	})
 
-	// Other config written by the command itself is not a change here.
-	cmd, err = HostGitCommand(ctx, repo, HostGitOptions{}, "config", "gc.auto", "0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Run(); err != nil {
-		t.Errorf("non-filter change: error = %v, want nil", err)
-	}
+	t.Run("allowed non-filter change is not a change", func(t *testing.T) {
+		repo, _ := newHostGitRepo(t)
+		cmd, err := HostGitCommand(ctx, repo, HostGitOptions{}, "config", "gc.auto", "0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cmd.Run(); err != nil {
+			t.Errorf("non-filter change: error = %v, want nil", err)
+		}
+	})
 
-	// For a network command every repository key counts.
-	cmd, err = HostGitCommand(ctx, repo, HostGitOptions{Network: true}, "config", "user.name", "changed")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := cmd.Output(); !errors.Is(err, ErrRepoConfigChanged) {
-		t.Errorf("network: error = %v, want ErrRepoConfigChanged", err)
-	}
+	t.Run("network: any repository key change is reported", func(t *testing.T) {
+		repo, _ := newHostGitRepo(t)
+		cmd, err := HostGitCommand(ctx, repo, HostGitOptions{Network: true}, "config", "user.name", "changed")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := cmd.Output(); !errors.Is(err, ErrRepoConfigChanged) {
+			t.Errorf("network: error = %v, want ErrRepoConfigChanged", err)
+		}
+	})
 
-	// No change, no error.
-	cmd, err = HostGitCommand(ctx, repo, HostGitOptions{}, "status", "--porcelain")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := cmd.Output(); err != nil {
-		t.Errorf("unchanged: error = %v", err)
-	}
+	t.Run("no change, no error", func(t *testing.T) {
+		repo, _ := newHostGitRepo(t)
+		cmd, err := HostGitCommand(ctx, repo, HostGitOptions{}, "status", "--porcelain")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := cmd.Output(); err != nil {
+			t.Errorf("unchanged: error = %v", err)
+		}
+	})
 }

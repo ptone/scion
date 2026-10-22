@@ -4012,6 +4012,8 @@ func worktreeGit(wt projectWorktree, args ...string) (string, error) {
 	// and no repository-defined filter commands: the agent can write this
 	// worktree's git files.
 	cmd, err := util.HostGitCommand(ctx, wt.workTree, util.HostGitOptions{
+		Policy:              util.RepoPolicyLinked,
+		AllowedWorktreePath: wt.workTree,
 		Config: []string{
 			"core.untrackedCache=false",
 			"core.excludesFile=" + os.DevNull,

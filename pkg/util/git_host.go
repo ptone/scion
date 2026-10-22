@@ -22,7 +22,6 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -137,115 +136,23 @@ type HostGitOptions struct {
 	// Env is the command environment; nil means HostGitEnv(os.Environ()).
 	// A caller that sets it starts from HostGitEnv itself.
 	Env []string
-	// Network marks a command that fetches from or pushes to a remote. The
-	// command is refused when the repository's own config sets a key that
-	// networkRepoKeyAllowed does not allow.
+	// Network marks a command that fetches from or pushes to a remote. It
+	// has no effect on the policy check (deny-by-default applies either way);
+	// it only widens the before/after snapshot to every repository key.
 	Network bool
-}
-
-// UnsafeRepoConfigError reports a repository config key that a host-side
-// remote operation refuses to run with.
-type UnsafeRepoConfigError struct {
-	Dir   string
-	Key   string
-	Scope string
-}
-
-func (e *UnsafeRepoConfigError) Error() string {
-	return fmt.Sprintf("git in %s: the repository's %s config sets %s, which host-side git does not use for remote operations; remove it from the repository config", e.Dir, e.Scope, e.Key)
+	// Policy selects the deny-by-default allow-list the repository config is
+	// checked against before the command runs. The zero value,
+	// RepoPolicyManaged, is the strict list for a Scion-managed repository;
+	// RepoPolicyLinked is the wider list for the user's own checkout.
+	Policy RepoConfigPolicy
+	// AllowedWorktreePath, when set, is the one path a repository-scope
+	// core.worktree may equal without the command being refused.
+	AllowedWorktreePath string
 }
 
 // ErrRepoConfigChanged is returned (wrapped) when the repository config a
 // host-side git command depended on changed while the command ran.
 var ErrRepoConfigChanged = errors.New("the repository's git config changed while host-side git ran")
-
-// unsafeNetworkConfigKeys matches (lower-cased) keys that, set in the
-// repository's own config, change where a fetch connects, which command it
-// runs, or which credentials it sends. networkRepoKeyAllowed refuses every
-// key outside its allowlist anyway; this list is a second check that holds
-// even if the allowlist is widened by mistake:
-//
-//   - url.<base>.insteadOf / pushInsteadOf: rewrite the remote URL.
-//   - credential.*: credential helpers (commands) and per-URL settings.
-//   - core.sshCommand, core.askPass, core.gitProxy: commands.
-//   - remote.<name>.uploadpack / receivepack / proxy / vcs: commands, proxy
-//     and remote helper selection.
-//   - include.path, includeIf.<cond>.path: pull in other files.
-//   - protocol.*: transport allow-lists.
-//   - http[.<url>].proxy: sends traffic, credentials included, elsewhere.
-//   - gpg.*: signature programs.
-//   - core.worktree: moves the work tree a merge writes to.
-//   - core.alternateRefsCommand: a command.
-var unsafeNetworkConfigKeys = []*regexp.Regexp{
-	regexp.MustCompile(`^url\..*\.(insteadof|pushinsteadof)$`),
-	regexp.MustCompile(`^credential\.`),
-	regexp.MustCompile(`^core\.(sshcommand|askpass|gitproxy|worktree|alternaterefscommand|alternaterefsprefixes)$`),
-	regexp.MustCompile(`^remote\..*\.(uploadpack|receivepack|proxy|vcs)$`),
-	regexp.MustCompile(`^include\.path$`),
-	regexp.MustCompile(`^includeif\..*\.path$`),
-	regexp.MustCompile(`^protocol\.`),
-	regexp.MustCompile(`^http\.(.*\.)?proxy$`),
-	regexp.MustCompile(`^gpg\.`),
-}
-
-// allowedNetworkRepoKeys matches the (lower-cased) repository config keys a
-// host-side remote operation accepts. They are what git writes for a
-// clone and its branches and what Scion writes for a shared checkout, plus
-// settings that only affect commands other than fetch and an ff-only merge
-// (identity, colours, advice, rerere, commit and push defaults):
-//
-//   - core: repositoryformatversion, filemode, bare, logallrefupdates,
-//     ignorecase, precomposeunicode, symlinks, autocrlf, eol, safecrlf.
-//   - extensions.*: repository format extensions git itself sets.
-//   - remote.<name>.url/pushurl/fetch/tagopt/prune/prunetags/mirror/
-//     promisor/partialclonefilter: a remote's address and refspecs (the
-//     fetch uses the hub's clone URL, not these).
-//   - branch.<name>.remote/pushremote/merge/rebase/description.
-//   - user.*, author.*, committer.*, init.defaultbranch, gc.*, color.*,
-//     advice.*, rerere.*, pull.rebase/ff, push.default/autosetupremote,
-//     fetch.prune/prunetags/fsckobjects, commit.gpgsign/verbose,
-//     branch.autosetupmerge/autosetuprebase.
-//   - keys whose repository value HostGitArgs or the filter pins override:
-//     core.hooksPath, core.fsmonitor, core.pager, submodule.recurse,
-//     fetch.recurseSubmodules, merge.verifySignatures, filter driver
-//     variables.
-var allowedNetworkRepoKeys = []*regexp.Regexp{
-	regexp.MustCompile(`^core\.(repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode|symlinks|autocrlf|eol|safecrlf)$`),
-	regexp.MustCompile(`^extensions\.[^.]+$`),
-	regexp.MustCompile(`^remote\..+\.(url|pushurl|fetch|tagopt|prune|prunetags|mirror|promisor|partialclonefilter)$`),
-	regexp.MustCompile(`^branch\..+\.(remote|pushremote|merge|rebase|description)$`),
-	regexp.MustCompile(`^branch\.(autosetupmerge|autosetuprebase)$`),
-	regexp.MustCompile(`^(user|author|committer)\.(name|email)$`),
-	regexp.MustCompile(`^init\.defaultbranch$`),
-	regexp.MustCompile(`^gc\.[^.]+$`),
-	regexp.MustCompile(`^(color|advice|rerere)\.[^.]+$`),
-	regexp.MustCompile(`^pull\.(rebase|ff)$`),
-	regexp.MustCompile(`^push\.(default|autosetupremote)$`),
-	regexp.MustCompile(`^fetch\.(prune|prunetags|fsckobjects)$`),
-	regexp.MustCompile(`^commit\.(gpgsign|verbose)$`),
-	// Overridden on every host-side command by HostGitArgs or by the filter
-	// pins, so their repository value has no effect.
-	regexp.MustCompile(`^core\.(hookspath|fsmonitor|pager)$`),
-	regexp.MustCompile(`^(submodule\.recurse|fetch\.recursesubmodules|merge\.verifysignatures)$`),
-	regexp.MustCompile(`^filter\..+\.(clean|smudge|process|required)$`),
-}
-
-// networkRepoKeyAllowed reports whether a repository config key (any case)
-// may be set when a host-side remote operation runs.
-func networkRepoKeyAllowed(key string) bool {
-	lower := strings.ToLower(key)
-	for _, re := range unsafeNetworkConfigKeys {
-		if re.MatchString(lower) {
-			return false
-		}
-	}
-	for _, re := range allowedNetworkRepoKeys {
-		if re.MatchString(lower) {
-			return true
-		}
-	}
-	return false
-}
 
 // filterDriverVars are the per-driver variables git reads for a filter
 // driver (gitattributes(5)).
@@ -313,8 +220,11 @@ type hostGitConfig struct {
 //     when there is none, to the empty value (no command; an empty process
 //     disables the whole driver) and required to false. Variables the
 //     repository does not set keep their global/system value.
-//   - for a network command, the first repository key networkRepoKeyAllowed
-//     refuses is returned as an *UnsafeRepoConfigError.
+//
+// The snapshot of repository-scope keys it records is compared after the
+// command (HostGitCmd); for a network command it covers every key, otherwise
+// the filter keys. Refusal is the deny-by-default policy's job
+// (checkRepoConfigPolicy), not this function's.
 func readHostGitConfig(ctx context.Context, dir string, lead []string, env []string, network bool) (hostGitConfig, error) {
 	listArgs := append(append([]string{}, lead...), "config", "--show-scope", "-z", "--list")
 	cmd := exec.CommandContext(ctx, "git", listArgs...)
@@ -334,9 +244,6 @@ func readHostGitConfig(ctx context.Context, dir string, lead []string, env []str
 		section, subsection, variable := splitConfigKey(e.key)
 		isFilter := strings.EqualFold(section, "filter") && subsection != ""
 		if repoConfigScope(e.scope) {
-			if network && !networkRepoKeyAllowed(e.key) {
-				return hostGitConfig{}, &UnsafeRepoConfigError{Dir: dir, Key: e.key, Scope: e.scope}
-			}
 			if isFilter || network {
 				cfg.snapshot = append(cfg.snapshot, e.scope+"\x00"+e.key+"\x00"+e.value)
 			}
@@ -422,15 +329,20 @@ func (c *HostGitCmd) after(runErr error) error {
 	return runErr
 }
 
-// HostGitCommand builds a git command run in dir (cmd.Dir) with
-// HostGitArgs, opts.Config, and the settings derived from the repository
-// config (see readHostGitConfig) ahead of args. Use it for host-side
-// commands that write the work tree (worktree add, checkout, switch,
-// merge), refresh the index (status) or talk to a remote (opts.Network).
-// It runs one `git config --list` in dir first and returns an error,
-// without running anything else, if that fails or the repository config is
-// refused. Running the returned command reads the config once more
-// afterwards (see HostGitCmd).
+// HostGitCommand builds a git command run in dir (cmd.Dir) with HostGitArgs,
+// opts.Config and the repository filter-driver pins ahead of args. Use it for
+// host-side commands that write the work tree (worktree add, checkout,
+// switch, merge), refresh the index (status) or talk to a remote
+// (opts.Network).
+//
+// Before building the command it reads the repository config files as data
+// (never through git) and refuses, returning a *RepoConfigRefusedError
+// without running anything, when the config holds an include directive or a
+// key outside opts.Policy's allow-list (checkRepoConfigPolicy). It then reads
+// the config once through git to compute the filter pins and a snapshot;
+// running the returned command reads the config again afterwards and reports
+// a change (HostGitCmd). The policy read is the primary control; the pins,
+// HostGitArgs and the snapshot are defence in depth.
 func HostGitCommand(ctx context.Context, dir string, opts HostGitOptions, args ...string) (*HostGitCmd, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("HostGitCommand: dir is required")
@@ -438,6 +350,10 @@ func HostGitCommand(ctx context.Context, dir string, opts HostGitOptions, args .
 	env := opts.Env
 	if env == nil {
 		env = HostGitEnv(os.Environ())
+	}
+	allowOpts := repoConfigAllowOptions{worktreePath: opts.AllowedWorktreePath}
+	if err := checkRepoConfigPolicy(dir, env, opts.Policy, allowOpts); err != nil {
+		return nil, err
 	}
 	lead := HostGitArgs()
 	for _, kv := range opts.Config {
@@ -452,7 +368,11 @@ func HostGitCommand(ctx context.Context, dir string, opts HostGitOptions, args .
 	cmd.Dir = dir
 	cmd.Env = env
 	verify := func() error {
-		// A fresh context: the command's own may have expired with it.
+		// Re-check the policy (an agent may have added a refused key) and the
+		// snapshot. A fresh context: the command's own may have expired.
+		if err := checkRepoConfigPolicy(dir, env, opts.Policy, allowOpts); err != nil {
+			return fmt.Errorf("%w: %v", ErrRepoConfigChanged, err)
+		}
 		after, err := readHostGitConfig(context.Background(), dir, lead, env, opts.Network)
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrRepoConfigChanged, err)

@@ -1317,13 +1317,15 @@ func TestRemoveAgentDirAndWorktreeEntry_LinkTargetModeUnchanged(t *testing.T) {
 	}
 }
 
-// The worktree checks run no hooks, file-system monitor or filter driver
-// from the repository's own config: the agent can write those files.
+// The worktree checks run no hooks from the repository's default hooks
+// directory: core.hooksPath=/dev/null keeps them off. (A repository-scope
+// core.hooksPath, core.fsmonitor or filter driver would instead be refused
+// outright by the deny-by-default policy, which pkg/util covers.)
 func TestHandleAgentDirWithoutConfig_WorktreeChecksRunNoRepositoryCommands(t *testing.T) {
 	_, repo, agentDir, agentHome, ws := staleWorktreeLayout(t)
 	runGitT(t, ws, "commit", "-q", "--allow-empty", "-m", "committed work")
 	markers := t.TempDir()
-	hooks := filepath.Join(markers, "hooks")
+	hooks := filepath.Join(repo, ".git", "hooks")
 	if err := os.MkdirAll(hooks, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1332,15 +1334,6 @@ func TestHandleAgentDirWithoutConfig_WorktreeChecksRunNoRepositoryCommands(t *te
 		if err := os.WriteFile(filepath.Join(hooks, hook), []byte(script), 0o755); err != nil {
 			t.Fatal(err)
 		}
-	}
-	runGitT(t, repo, "config", "core.hooksPath", hooks)
-	runGitT(t, repo, "config", "core.fsmonitor", "touch '"+filepath.Join(markers, "fsmonitor")+"'; false")
-	runGitT(t, repo, "config", "filter.planted.clean", "touch '"+filepath.Join(markers, "clean")+"'; cat")
-	if err := os.MkdirAll(filepath.Join(repo, ".git", "info"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(repo, ".git", "info", "attributes"), []byte("* filter=planted\n"), 0o644); err != nil {
-		t.Fatal(err)
 	}
 	// Make every tracked file look modified, so status refreshes the index.
 	entries, err := os.ReadDir(ws)
@@ -1367,8 +1360,6 @@ func TestHandleAgentDirWithoutConfig_WorktreeChecksRunNoRepositoryCommands(t *te
 		t.Fatal(err)
 	}
 	for _, e := range got {
-		if e.Name() != "hooks" {
-			t.Errorf("repository-defined command ran: %s", e.Name())
-		}
+		t.Errorf("repository hook ran: %s", e.Name())
 	}
 }
