@@ -52,6 +52,11 @@ var errJWTNoEligibleKey = errors.New("no eligible signing generation verifies th
 type ringJWTKeys struct {
 	ring    *keyring.SigningRing
 	purpose keyring.Purpose
+	// newSigner builds the HS256 signer. Each purpose's constructor wraps
+	// jose.NewSigner itself, so the key-material census
+	// (TestSigningKeySource_EveryKeySourceClassified) sees one classified
+	// call site per signing-key class.
+	newSigner func(jose.SigningKey, *jose.SignerOptions) (jose.Signer, error)
 }
 
 // sign serializes claims under the generation allowed to issue at now. It
@@ -69,7 +74,10 @@ func (k ringJWTKeys) sign(claims any, now time.Time) (string, error) {
 	if k.ring.Emit() == keyring.EmitVersioned {
 		key.Key = jose.JSONWebKey{Key: active.Bytes(), KeyID: active.ID, Algorithm: string(jose.HS256)}
 	}
-	signer, err := jose.NewSigner(key, (&jose.SignerOptions{}).WithType("JWT"))
+	if k.newSigner == nil {
+		return "", errors.New("no JWT signer configured")
+	}
+	signer, err := k.newSigner(key, (&jose.SignerOptions{}).WithType("JWT"))
 	if err != nil {
 		return "", fmt.Errorf("creating signer: %w", err)
 	}

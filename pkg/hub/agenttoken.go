@@ -194,7 +194,11 @@ func newRingAgentTokenService(ring *keyring.SigningRing, cfg AgentTokenConfig, n
 	if cfg.TokenDuration == 0 {
 		cfg.TokenDuration = DefaultAgentTokenDuration
 	}
-	return &AgentTokenService{config: cfg, ring: &ringJWTKeys{ring: ring, purpose: agentJWTPurpose}, now: now}, nil
+	keys := &ringJWTKeys{ring: ring, purpose: agentJWTPurpose,
+		newSigner: func(key jose.SigningKey, opts *jose.SignerOptions) (jose.Signer, error) {
+			return jose.NewSigner(key, opts)
+		}}
+	return &AgentTokenService{config: cfg, ring: keys, now: now}, nil
 }
 
 // clock returns the service's current time.

@@ -119,7 +119,11 @@ func newRingUserTokenService(ring *keyring.SigningRing, cfg UserTokenConfig, now
 		return nil, errors.New("an explicit user token signing key cannot be combined with a keyring file")
 	}
 	applyUserTokenDurationDefaults(&cfg)
-	return &UserTokenService{config: cfg, ring: &ringJWTKeys{ring: ring, purpose: userJWTPurpose}, now: now}, nil
+	keys := &ringJWTKeys{ring: ring, purpose: userJWTPurpose,
+		newSigner: func(key jose.SigningKey, opts *jose.SignerOptions) (jose.Signer, error) {
+			return jose.NewSigner(key, opts)
+		}}
+	return &UserTokenService{config: cfg, ring: keys, now: now}, nil
 }
 
 // applyUserTokenDurationDefaults fills the zero token durations.
