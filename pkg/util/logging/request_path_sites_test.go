@@ -121,6 +121,8 @@ var requestPathSites = []requestPathSite{
 	{"redact.go", "RequestPath", "URL(bare)", 2, "the redaction helper"},
 	{"redact.go", "RequestPath", "URL.Path", 1, "the redaction helper itself"},
 	{"redact.go", "isArtifactURL", "URL(bare)", 1, "the redaction predicate"},
+	{"redact.go", "isPortViewURL", "URL(bare)", 1, "the redaction predicate"},
+	{"redact.go", "redactedPath", "URL(bare)", 1, "the redaction predicate"},
 	{"request_log.go", "RequestLogMiddleware", "URL(bare)", 1, "redaction: passes r.URL to RedactURL"},
 	{"request_log.go", "RequestLogMiddleware", "URL.Path", 1, "classification only: extracts project/agent ids for log fields (ids, not the path)"},
 	{"server.go", "Server.registerRoutes", "URL.Path", 2, "routing: dispatch inside registered handlers"},

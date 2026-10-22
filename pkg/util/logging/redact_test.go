@@ -141,3 +141,61 @@ func TestNonArtifactPathsKept(t *testing.T) {
 		t.Errorf("RequestPath(nil)")
 	}
 }
+
+// portViewPathCases are spellings of port view paths; every one must be
+// redacted on every sink.
+var portViewPathCases = []string{
+	"/api/v1/portview/TOKEN/",
+	"/api/v1/portview/TOKEN/index.html",
+	"/api/v1/portview/TOKEN/assets/app.js",
+	"/api/v1//portview/TOKEN/x",
+	"/api/v1/x/../portview/TOKEN/x",
+	"/api/v1/%70ortview/TOKEN/x",
+	"/api/v1/%2570ortview/TOKEN/x",
+	"/API/V1/PORTVIEW/TOKEN/X",
+	"/api/v1/portview%2fTOKEN%2fx",
+}
+
+// TestPortViewPathsRedactedOnEverySink: for every spelling, no part of the
+// page link survives in RequestPath, RedactURL or the trace predicate.
+func TestPortViewPathsRedactedOnEverySink(t *testing.T) {
+	const tok = "v1.0b6f2c1e-4a8d-4f5e-9c3b-2d1e0f9a8b7c.8080.7d3e9f10-2b4c-4d6e-8f01-a2b3c4d5e6f7.1800000000.AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_AbC"
+	for _, c := range portViewPathCases {
+		raw := strings.ReplaceAll(c, "TOKEN", tok)
+		u, err := url.Parse("https://hub.example" + raw + "?a=1")
+		if err != nil {
+			t.Fatalf("%s: %v", raw, err)
+		}
+		r := httptest.NewRequest(http.MethodGet, raw, nil)
+		if got := RequestPath(r); strings.Contains(got, tok) || got != RedactedPortViewPath {
+			t.Errorf("RequestPath(%s) = %q", raw, got)
+		}
+		if got := RedactURL(u); strings.Contains(got, tok) || got != "https://hub.example"+RedactedPortViewPath+"?a=1" {
+			t.Errorf("RedactURL(%s) = %q", raw, got)
+		}
+		if !IsCredentialURL(u) || !IsCredentialURL(r.URL) {
+			t.Errorf("IsCredentialURL(%s) = false", raw)
+		}
+	}
+}
+
+// TestRequestLogMiddleware_RedactsPortViewPath: the request log line of a
+// port view request holds no part of the page link.
+func TestRequestLogMiddleware_RedactsPortViewPath(t *testing.T) {
+	const tok = "v1.SECRETLINK"
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	handler := RequestLogMiddleware(logger, "hub", HubPathPatterns(), 0)(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotFound) }))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/v1/portview/"+tok+"/app.js?x=1", nil))
+	out := buf.String()
+	if out == "" {
+		t.Fatal("no request log line")
+	}
+	if strings.Contains(out, "SECRETLINK") {
+		t.Fatalf("request log holds the page link: %s", out)
+	}
+	if !strings.Contains(out, RedactedPortViewPath) {
+		t.Fatalf("request log missing the redacted path: %s", out)
+	}
+}

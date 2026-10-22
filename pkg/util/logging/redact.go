@@ -56,6 +56,9 @@ func RedactQuery(rawQuery string) string {
 // RedactedArtifactPath is how every artifact request path is logged.
 const RedactedArtifactPath = "/api/v1/artifacts/" + redactedValue
 
+// RedactedPortViewPath is how every port view request path is logged.
+const RedactedPortViewPath = "/api/v1/portview/" + redactedValue
+
 // maxUnescapeRounds bounds how many times artifactPath percent-decodes a
 // path while looking for the artifact routes.
 const maxUnescapeRounds = 4
@@ -69,10 +72,20 @@ const maxUnescapeRounds = 4
 // escaped slashes, escaped letters) reaches a log or a trace whole.
 // Paths that merely contain the word are redacted too; that is the
 // intended trade-off.
-func artifactPath(p string) bool {
+func artifactPath(p string) bool { return pathMentions(p, "artifacts") }
+
+// portViewPath reports whether the URL path p (decoded or escaped) may
+// belong to the port view route (/api/v1/portview/<capability>/...),
+// whose path carries a page link. It applies the same any-spelling rule
+// as artifactPath to the word "portview".
+func portViewPath(p string) bool { return pathMentions(p, "portview") }
+
+// pathMentions reports whether p, lowercased and percent-decoded up to
+// maxUnescapeRounds times, contains word at any step.
+func pathMentions(p, word string) bool {
 	s := strings.ToLower(p)
 	for range maxUnescapeRounds {
-		if strings.Contains(s, "artifacts") {
+		if strings.Contains(s, word) {
 			return true
 		}
 		u, err := url.PathUnescape(s)
@@ -81,7 +94,7 @@ func artifactPath(p string) bool {
 		}
 		s = strings.ToLower(u)
 	}
-	return strings.Contains(s, "artifacts")
+	return strings.Contains(s, word)
 }
 
 // isArtifactURL applies artifactPath to both forms of u's path: the
@@ -90,37 +103,56 @@ func isArtifactURL(u *url.URL) bool {
 	return u != nil && (artifactPath(u.Path) || artifactPath(u.EscapedPath()))
 }
 
+// isPortViewURL applies portViewPath to both forms of u's path.
+func isPortViewURL(u *url.URL) bool {
+	return u != nil && (portViewPath(u.Path) || portViewPath(u.EscapedPath()))
+}
+
+// redactedPath returns the path u is logged with when it must not be
+// logged as is (RedactedArtifactPath or RedactedPortViewPath), or "".
+func redactedPath(u *url.URL) string {
+	switch {
+	case isArtifactURL(u):
+		return RedactedArtifactPath
+	case isPortViewURL(u):
+		return RedactedPortViewPath
+	}
+	return ""
+}
+
 // IsCredentialURL reports whether a request for u must not be recorded
-// with its path, for example in a trace. It shares its predicate with
+// with its path, for example in a trace: an artifact path (artifactPath)
+// or a port view path (portViewPath). It shares its predicate with
 // RequestPath and RedactURL.
-func IsCredentialURL(u *url.URL) bool { return isArtifactURL(u) }
+func IsCredentialURL(u *url.URL) bool { return redactedPath(u) != "" }
 
 // RequestPath returns r's URL path for a log line: RedactedArtifactPath
-// for any request under the artifact routes (see artifactPath, which
-// checks the decoded and the escaped path), the decoded path otherwise.
-// Every log attribute that records a request path must use it.
+// for any request under the artifact routes, RedactedPortViewPath for any
+// request under the port view route (see artifactPath and portViewPath,
+// which check the decoded and the escaped path), the decoded path
+// otherwise. Every log attribute that records a request path must use it.
 func RequestPath(r *http.Request) string {
 	if r == nil || r.URL == nil {
 		return ""
 	}
-	if isArtifactURL(r.URL) {
-		return RedactedArtifactPath
+	if p := redactedPath(r.URL); p != "" {
+		return p
 	}
 	return r.URL.Path
 }
 
 // RedactURL returns u as a string with credential-bearing query parameter
-// values redacted (see RedactQuery) and, for an artifact request (see
-// RequestPath), the path replaced by RedactedArtifactPath. u is not
-// modified.
+// values redacted (see RedactQuery) and, for an artifact or port view
+// request (see RequestPath), the path replaced by its redacted form. u is
+// not modified.
 func RedactURL(u *url.URL) string {
 	if u == nil {
 		return ""
 	}
 	c := *u
 	c.RawQuery = RedactQuery(u.RawQuery)
-	if isArtifactURL(u) {
-		c.Path, c.RawPath = RedactedArtifactPath, ""
+	if p := redactedPath(u); p != "" {
+		c.Path, c.RawPath = p, ""
 	}
 	return c.String()
 }
