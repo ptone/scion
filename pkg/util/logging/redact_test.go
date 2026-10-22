@@ -258,6 +258,10 @@ func TestCredentialLinkInQueryRedacted(t *testing.T) {
 		"next=%252Fapi%252Fv1%252F%2570ortview%252F" + tok,
 		"u=https%3A%2F%2Fhub.example%2Fapi%2Fv1%2Fartifacts%2Fview%2F" + tok,
 		"a=1&PORTVIEW=" + tok,
+		"x=%zz&next=%2Fapi%2Fv1%2F%70ortview%2F" + tok,
+		"next=%2Fapi%2Fv1%2F%70ortview%2F" + tok + "&x=%zz",
+		"x=%&next=%2Fapi%2Fv1%2F%61rtifacts%2Fview%2F" + tok,
+		"next=%2Fapi%2Fv1%2F%70ortview%2F" + tok + ";x=%zz",
 	}
 	for _, q := range queries {
 		if got := RedactQuery(q); got != "REDACTED" {
@@ -280,6 +284,9 @@ func TestCredentialLinkInQueryRedacted(t *testing.T) {
 		if got := RedactReferer("https://hub.example/web/x?" + q); strings.Contains(got, "SECRETLINK") {
 			t.Errorf("RedactReferer(%s) = %q", q, got)
 		}
+	}
+	if got := RedactReferer("https://hub.example/web/x?x=%zz&next=%2Fapi%2Fv1%2F%70ortview%2F" + tok); strings.Contains(got, "SECRETLINK") {
+		t.Errorf("RedactReferer with a malformed parameter kept the link: %q", got)
 	}
 	u, _ := url.Parse("https://hub.example/web/x#/api/v1/portview/" + tok)
 	if got := RedactURL(u); strings.Contains(got, "SECRETLINK") {
