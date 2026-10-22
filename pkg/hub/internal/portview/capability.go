@@ -13,18 +13,11 @@
 // limitations under the License.
 
 // Package portview holds the request-independent parts of the port view
-// route (/api/v1/portview/<capability>/<path>, experiment hub.port-view):
-// the capability format, the navigation predicate and the preflight
-// header rules. The hub's handler (pkg/hub/port_view.go) uses them.
-//
-// A capability names one user's access to one exposed port of one agent
-// until an expiry:
-//
-//	v1.<agentID>.<port>.<userID>.<exp>.<sig>
-//
-// sig is base64url (no padding) of HMAC-SHA256 over "port-view\n" +
-// agentID + "\n" + port + "\n" + userID + "\n" + exp, keyed with the
-// hub's port view key.
+// route (/api/v1/portview/<capability>/<path>, experiment hub.port_view):
+// the capability, the navigation predicate and the preflight header rules.
+// The hub's handler (pkg/hub/port_view.go) uses them. A capability names
+// one user's access to one exposed port of one agent until an expiry; Mint
+// creates one and Parse checks one.
 package portview
 
 import (
