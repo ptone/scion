@@ -15,9 +15,13 @@
 package util
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 )
 
@@ -220,13 +224,45 @@ func allowVar(policy RepoConfigPolicy, v gitConfigVar, opts repoConfigAllowOptio
 		if name == "defaultbranch" {
 			return true, ""
 		}
-	case "color", "advice", "rerere", "status", "diff", "merge":
-		// Only booleans/enums here never run a command. Refuse the ones that
-		// name a program; allow the rest of these display/behaviour knobs.
-		if diffMergeRunsCommand(sec, sub, name) {
-			return false, "a diff/merge command or textconv"
+	case "color":
+		// color.<slot> and color.<cmd>.<slot>: enums/booleans, never a
+		// command. Only a bounded set of command names is allowed as the
+		// subsection, and no color key names a program.
+		if sub == "" && colorTopKeys[name] {
+			return true, ""
 		}
+		if sub != "" && colorCmds[strings.ToLower(sub)] {
+			return true, ""
+		}
+	case "advice":
+		// advice.* are all booleans.
 		return true, ""
+	case "rerere":
+		if name == "enabled" || name == "autoupdate" {
+			return true, ""
+		}
+	case "status":
+		if sub == "" && statusKeys[name] {
+			return true, ""
+		}
+	case "diff":
+		if sub == "" && diffTopKeys[name] {
+			return true, ""
+		}
+		if sub != "" && diffDriverKeys[name] {
+			// A named diff driver's data attributes only (never textconv,
+			// command or cachetextconv).
+			return true, ""
+		}
+	case "merge":
+		if sub == "" && mergeTopKeys[name] {
+			return true, ""
+		}
+		if sub != "" && (name == "name" || name == "recursive") {
+			// A named merge driver's description/strategy only (never driver
+			// or cmd).
+			return true, ""
+		}
 	case "submodule":
 		if sub != "" && name == "update" {
 			if submoduleUpdateAllowed[strings.ToLower(v.Value)] {
@@ -247,49 +283,74 @@ func allowVar(policy RepoConfigPolicy, v gitConfigVar, opts repoConfigAllowOptio
 		}
 		return false, "a filter driver command"
 	case "lfs":
-		// git-lfs data keys. Anything naming a path or a custom transfer
-		// program runs or reads host files.
-		if strings.EqualFold(sub, "customtransfer") || name == "path" {
-			return false, "a git-lfs transfer command"
+		if sub == "" && lfsTopKeys[name] {
+			return true, ""
 		}
-		return true, ""
+		// lfs.<url>.access and similar per-endpoint data keys.
+		if sub != "" && !strings.EqualFold(sub, "customtransfer") && lfsEndpointKeys[name] {
+			return true, ""
+		}
+		return false, "a git-lfs setting that is not on the allow-list"
 	}
 
-	return false, "not on the linked-checkout allow-list"
+	if policy == RepoPolicyLinked {
+		return false, "not on the linked-checkout allow-list"
+	}
+	return false, "not on the allow-list"
 }
 
-// diffMergeRunsCommand reports whether a diff.* or merge.* key names a
-// command or textconv (which git would execute).
-func diffMergeRunsCommand(sec, sub, name string) bool {
-	if sec == "diff" {
-		if sub != "" && (name == "textconv" || name == "command" || name == "cachetextconv") {
-			return true
-		}
-		if sub == "" && (name == "external" || name == "tool") {
-			return true
-		}
+// Explicit per-section key sets for the linked-checkout policy. They list
+// keys that carry only data or enums (never a command, path or program), so
+// nothing in these sections can make host-side git execute. Any key not
+// listed is refused by deny-by-default.
+var (
+	colorTopKeys = set("ui", "pager", "advice", "showbranch")
+	colorCmds    = set("branch", "diff", "decorate", "grep", "interactive",
+		"log", "push", "remote", "status", "transport", "add")
+	statusKeys = set("short", "branch", "showstash", "showuntrackedfiles",
+		"submodulesummary", "relativepaths", "displaycommentprefix",
+		"renamelimit", "renames", "aheadbehind")
+	diffTopKeys = set("algorithm", "renames", "renamelimit", "indentheuristic",
+		"colormoved", "colormovedws", "context", "interhunkcontext",
+		"mnemonicprefix", "noprefix", "wordregex", "submodule", "relative",
+		"ignoresubmodules", "dirstat", "statgraphwidth", "wserrorhighlight",
+		"suppressblankempty", "colorwords", "tabsize", "orderfile")
+	diffDriverKeys = set("binary", "wordregex", "xfuncname")
+	mergeTopKeys   = set("conflictstyle", "ff", "renamelimit", "renames",
+		"stat", "log", "autostash", "verbosity", "directoryrenames",
+		"renormalize", "branchdesc")
+	lfsTopKeys = set("url", "pushurl", "concurrenttransfers", "dialtimeout",
+		"tlstimeout", "activitytimeout", "fetchrecentrefsdays",
+		"fetchrecentcommitsdays", "fetchrecentremoterefs", "pruneoffsetdays",
+		"pruneverifyremotealways", "locksverifyeverywhere", "locksverify",
+		"skipdownloaderrors", "setlockablereadonly", "cachecredentials",
+		"fetchinclude", "fetchexclude", "fetchrecentalways", "gitprotocol",
+		"batch", "transfermaxretries", "contenttype")
+	lfsEndpointKeys = set("access", "locksverify")
+)
+
+func set(keys ...string) map[string]bool {
+	m := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		m[k] = true
 	}
-	if sec == "merge" {
-		if sub != "" && (name == "driver" || name == "cmd") {
-			return true
-		}
-		if sub == "" && name == "tool" {
-			return true
-		}
-	}
-	return false
+	return m
 }
 
-// checkRepoConfigPolicy reads the repository config files git would read for
-// a command in dir (the common .git/config and, when present, the worktree's
-// config.worktree), as data, and returns a *RepoConfigRefusedError for the
-// first include directive or key that policy does not allow. It fails closed:
-// a config file it cannot locate or parse is an error.
-func checkRepoConfigPolicy(dir string, env []string, policy RepoConfigPolicy, opts repoConfigAllowOptions) error {
+// checkRepoConfigPolicy reads, as data, every repository config file git
+// would read for a command in dir — the common .git/config, and, when
+// extensions.worktreeConfig is on, the main worktree's config.worktree and
+// this worktree's config.worktree — and returns a *RepoConfigRefusedError
+// for the first include directive or key the policy does not allow. It then
+// cross-checks the parsed repository-scope entries against git's own
+// --show-scope listing and refuses on any difference, so a parser divergence
+// fails closed. It fails closed on anything it cannot locate, read or parse.
+func checkRepoConfigPolicy(ctx context.Context, dir string, env []string, policy RepoConfigPolicy, opts repoConfigAllowOptions) error {
 	files, err := repoConfigFiles(dir, env)
 	if err != nil {
 		return fmt.Errorf("git in %s: cannot locate the repository config to check it: %w", dir, err)
 	}
+	var parsed []gitConfigVar
 	for _, f := range files {
 		data, err := os.ReadFile(f)
 		if err != nil {
@@ -302,33 +363,94 @@ func checkRepoConfigPolicy(dir string, env []string, policy RepoConfigPolicy, op
 		if err != nil {
 			return fmt.Errorf("git in %s: cannot parse %s (refusing): %w", dir, f, err)
 		}
-		for _, v := range vars {
-			if v.Section == "include" || v.Section == "includeif" {
-				return &RepoConfigRefusedError{Dir: dir, Key: v.Key(), Value: v.Value, Reason: "an include directive"}
-			}
-			if ok, reason := allowVar(policy, v, opts); !ok {
-				return &RepoConfigRefusedError{Dir: dir, Key: v.Key(), Value: v.Value, Reason: reason}
-			}
+		parsed = append(parsed, vars...)
+	}
+	for _, v := range parsed {
+		if v.Section == "include" || v.Section == "includeif" {
+			return &RepoConfigRefusedError{Dir: dir, Key: v.Key(), Value: v.Value, Reason: "an include directive"}
 		}
+		if ok, reason := allowVar(policy, v, opts); !ok {
+			return &RepoConfigRefusedError{Dir: dir, Key: v.Key(), Value: v.Value, Reason: reason}
+		}
+	}
+	return crossCheckAgainstGit(ctx, dir, env, parsed)
+}
+
+// crossCheckAgainstGit lists the repository-scope config git itself resolves
+// (local and worktree scope) and refuses if it differs from the parsed set,
+// so any divergence between the as-data parser and git fails closed. git runs
+// with the same host-side pins and scrubbed environment.
+func crossCheckAgainstGit(ctx context.Context, dir string, env []string, parsed []gitConfigVar) error {
+	args := append(HostGitArgs(), "config", "--show-scope", "-z", "--list")
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	cmd.Env = env
+	out, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("git in %s: cannot list the repository config to cross-check it: %w", dir, err)
+	}
+	var gitRepo []string
+	for _, e := range parseGitConfigList(out) {
+		if repoConfigScope(e.scope) {
+			gitRepo = append(gitRepo, strings.ToLower(e.key)+"\x00"+e.value)
+		}
+	}
+	parsedSet := make([]string, 0, len(parsed))
+	for _, v := range parsed {
+		parsedSet = append(parsedSet, v.Key()+"\x00"+v.Value)
+	}
+	sort.Strings(gitRepo)
+	sort.Strings(parsedSet)
+	if !slices.Equal(gitRepo, parsedSet) {
+		return &RepoConfigRefusedError{Dir: dir, Key: "<repository config>", Reason: "read differently by the config parser and by git; refusing to be safe"}
 	}
 	return nil
 }
 
-// repoConfigFiles returns the config files to check for a git command run in
-// dir, honouring GIT_COMMON_DIR / GIT_DIR in env when set: the common
-// directory's config, and the per-worktree config.worktree when it exists.
-// It resolves a .git gitfile pointer and a worktree's commondir file,
-// without running git.
+// repoConfigFiles returns the config files git reads for a command in dir,
+// honouring GIT_COMMON_DIR / GIT_DIR in env when set: the common
+// .git/config, and — only when extensions.worktreeConfig is enabled in that
+// common config — the main worktree's config.worktree (in the common dir)
+// and this worktree's config.worktree. It resolves a .git gitfile pointer
+// and a worktree's commondir file without running git.
 func repoConfigFiles(dir string, env []string) ([]string, error) {
 	commonDir, perWorktreeDir, err := resolveGitDirs(dir, env)
 	if err != nil {
 		return nil, err
 	}
 	files := []string{filepath.Join(commonDir, "config")}
-	if perWorktreeDir != "" && perWorktreeDir != commonDir {
-		files = append(files, filepath.Join(perWorktreeDir, "config.worktree"))
+	if worktreeConfigEnabled(filepath.Join(commonDir, "config")) {
+		// git reads config.worktree only with the extension on. The main
+		// worktree's lives in the common dir; a linked worktree's in its own.
+		files = append(files, filepath.Join(commonDir, "config.worktree"))
+		if perWorktreeDir != "" && perWorktreeDir != commonDir {
+			files = append(files, filepath.Join(perWorktreeDir, "config.worktree"))
+		}
 	}
 	return files, nil
+}
+
+// worktreeConfigEnabled reports whether the config file at path sets
+// extensions.worktreeConfig to a true boolean. A parse failure returns false
+// (git would not honour config.worktree without a readable common config);
+// the common config is parsed and policy-checked separately, so a genuine
+// parse error is still caught there.
+func worktreeConfigEnabled(configPath string) bool {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return false
+	}
+	vars, err := parseGitConfigFile(data)
+	if err != nil {
+		return false
+	}
+	for _, v := range vars {
+		if v.Section == "extensions" && v.Name == "worktreeconfig" {
+			return strings.EqualFold(v.Value, "true") || v.Value == "1" ||
+				strings.EqualFold(v.Value, "yes") || strings.EqualFold(v.Value, "on")
+		}
+	}
+	return false
 }
 
 // resolveGitDirs returns the common git directory and the per-worktree git

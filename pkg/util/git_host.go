@@ -87,6 +87,21 @@ func HostGitArgs() []string {
 	}
 }
 
+// hostGitNetworkArgs are added to HostGitArgs for a remote operation: a
+// transport allow-list that denies every protocol except the ones a hub
+// fetch legitimately uses, so no repository or environment setting can
+// re-enable, say, the ext or a custom helper transport. protocol.file is
+// allowed because the shared-workspace clone URL may be a local path (and is
+// in tests); http/https/ssh/git cover real remotes.
+var hostGitNetworkArgs = []string{
+	"-c", "protocol.allow=never",
+	"-c", "protocol.file.allow=always",
+	"-c", "protocol.http.allow=always",
+	"-c", "protocol.https.allow=always",
+	"-c", "protocol.ssh.allow=always",
+	"-c", "protocol.git.allow=always",
+}
+
 // hostGitEnvKept are the GIT_* variables HostGitEnv keeps. They choose the
 // host user's own config files and the transport and authentication the
 // host operator set up; none of them chooses a repository or adds
@@ -352,10 +367,13 @@ func HostGitCommand(ctx context.Context, dir string, opts HostGitOptions, args .
 		env = HostGitEnv(os.Environ())
 	}
 	allowOpts := repoConfigAllowOptions{worktreePath: opts.AllowedWorktreePath}
-	if err := checkRepoConfigPolicy(dir, env, opts.Policy, allowOpts); err != nil {
+	if err := checkRepoConfigPolicy(ctx, dir, env, opts.Policy, allowOpts); err != nil {
 		return nil, err
 	}
 	lead := HostGitArgs()
+	if opts.Network {
+		lead = append(lead, hostGitNetworkArgs...)
+	}
 	for _, kv := range opts.Config {
 		lead = append(lead, "-c", kv)
 	}
@@ -370,7 +388,7 @@ func HostGitCommand(ctx context.Context, dir string, opts HostGitOptions, args .
 	verify := func() error {
 		// Re-check the policy (an agent may have added a refused key) and the
 		// snapshot. A fresh context: the command's own may have expired.
-		if err := checkRepoConfigPolicy(dir, env, opts.Policy, allowOpts); err != nil {
+		if err := checkRepoConfigPolicy(context.Background(), dir, env, opts.Policy, allowOpts); err != nil {
 			return fmt.Errorf("%w: %v", ErrRepoConfigChanged, err)
 		}
 		after, err := readHostGitConfig(context.Background(), dir, lead, env, opts.Network)

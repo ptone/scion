@@ -746,3 +746,69 @@ func TestHostGitCmd_DetectsFilterConfigChange(t *testing.T) {
 		}
 	})
 }
+
+// With extensions.worktreeConfig on, the main worktree's config.worktree
+// (in the common dir) is checked too (D-2).
+func TestHostGitCommand_ChecksMainWorktreeConfig(t *testing.T) {
+	repo, _ := newHostGitRepo(t)
+	hostRunGit(t, repo, "config", "extensions.worktreeConfig", "true")
+	gitDir := hostRunGit(t, repo, "rev-parse", "--absolute-git-dir")
+	// A refused key placed in the main worktree's config.worktree.
+	if err := os.WriteFile(filepath.Join(gitDir, "config.worktree"), []byte("[core]\n\tsshCommand = ssh -v\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := HostGitCommand(context.Background(), repo, HostGitOptions{Policy: RepoPolicyLinked}, "status")
+	var refused *RepoConfigRefusedError
+	if !errors.As(err, &refused) || !strings.EqualFold(refused.Key, "core.sshCommand") {
+		t.Fatalf("error = %v, want core.sshCommand refused from config.worktree", err)
+	}
+}
+
+// A remote operation carries the transport allow-list (D-3).
+func TestHostGitCommand_NetworkTransportAllowlist(t *testing.T) {
+	repo, _ := newHostGitRepo(t)
+	cmd, err := HostGitCommand(context.Background(), repo, HostGitOptions{Network: true}, "fetch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join(cmd.Args, "\x00")
+	for _, want := range []string{"protocol.allow=never", "protocol.https.allow=always", "protocol.ssh.allow=always"} {
+		if !strings.Contains(args, "\x00"+want+"\x00") {
+			t.Errorf("network args lack -c %q: %q", want, cmd.Args)
+		}
+	}
+}
+
+// diff/merge driver keys that name a command are refused; data attributes
+// are allowed (D-3 explicit keys).
+func TestHostGitCommand_DiffMergeExplicitKeys(t *testing.T) {
+	allowed := [][2]string{
+		{"diff.algorithm", "histogram"},
+		{"diff.myd.xfuncname", "^def "},
+		{"merge.conflictstyle", "zdiff3"},
+		{"merge.mym.name", "my merge"},
+	}
+	for _, kv := range allowed {
+		repo, _ := newHostGitRepo(t)
+		hostRunGit(t, repo, "config", kv[0], kv[1])
+		if _, err := HostGitCommand(context.Background(), repo, HostGitOptions{Policy: RepoPolicyLinked}, "status"); err != nil {
+			t.Errorf("%s=%s refused: %v", kv[0], kv[1], err)
+		}
+	}
+	refused := [][2]string{
+		{"diff.external", "/tmp/d"},
+		{"diff.myd.textconv", "/tmp/t"},
+		{"diff.myd.command", "/tmp/c"},
+		{"merge.mym.driver", "/tmp/m %O %A %B"},
+		{"merge.tool", "mytool"},
+	}
+	for _, kv := range refused {
+		repo, _ := newHostGitRepo(t)
+		hostRunGit(t, repo, "config", kv[0], kv[1])
+		_, err := HostGitCommand(context.Background(), repo, HostGitOptions{Policy: RepoPolicyLinked}, "status")
+		var r *RepoConfigRefusedError
+		if !errors.As(err, &r) {
+			t.Errorf("%s=%s: error = %v, want refusal", kv[0], kv[1], err)
+		}
+	}
+}
