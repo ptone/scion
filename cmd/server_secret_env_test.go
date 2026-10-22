@@ -374,7 +374,8 @@ func TestRunServerStart_ScrubsServerSecretEnvBeforeChildProcesses(t *testing.T) 
 		"validateHostedBasic",
 		"validateHostedHAPreflight",
 		"secret.NewBackend",
-		"initPluginManager",
+		"loadServerKeyring",
+		"initPluginManagerFn",
 		"initHubServerFn",
 		"startConduit",
 		"initWebServer",
@@ -388,5 +389,11 @@ func TestRunServerStart_ScrubsServerSecretEnvBeforeChildProcesses(t *testing.T) 
 		if pos < scrub {
 			t.Errorf("%s runs before scrubServerSecretEnv", later)
 		}
+	}
+	// The keyring file is read before the first step that can start a
+	// child (TestRunServerStart_ScrubsSecretEnvBeforeFirstChild observes
+	// the same order at run time).
+	if kr, pm := first["loadServerKeyring"], first["initPluginManagerFn"]; kr == 0 || pm == 0 || kr > pm {
+		t.Error("loadServerKeyring must run before initPluginManagerFn")
 	}
 }
