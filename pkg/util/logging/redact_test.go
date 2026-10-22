@@ -315,3 +315,42 @@ func TestRequestLogMiddleware_RedactsLinkInQuery(t *testing.T) {
 		t.Fatalf("request log missing the redacted URL: %s", out)
 	}
 }
+
+// TestEncodedBeyondDecodeRoundsRedacted: a link encoded more often than
+// the decoder unwraps, or with a sequence that does not decode, still
+// counts as one, in a path, a query value and a sub-path.
+func TestEncodedBeyondDecodeRoundsRedacted(t *testing.T) {
+	const tok = "v1.SECRETLINK"
+	nested := "%2525252570ortview" // "portview" encoded five times over its first letter
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/x/"+nested+"/"+tok, nil)
+	if got := RequestPath(r); strings.Contains(got, tok) {
+		t.Errorf("RequestPath(nested) = %q", got)
+	}
+	if got := RedactQuery("next=/api/v1/" + nested + "/" + tok); got != "REDACTED" {
+		t.Errorf("RedactQuery(nested) = %q", got)
+	}
+	if got := SubPath("/api/v1/" + nested + "/" + tok); got != RedactedSubPath {
+		t.Errorf("SubPath(nested) = %q", got)
+	}
+}
+
+// TestSubPath: an agent-side path naming a page or artifact link is
+// logged redacted; others are kept.
+func TestSubPath(t *testing.T) {
+	const tok = "v1.SECRETLINK"
+	for _, p := range []string{
+		"/api/v1/portview/" + tok + "/app.js",
+		"/x/%70ortview/" + tok,
+		"/api/v1/artifacts/view/" + tok + "/i.html",
+		"/x/%zz/" + tok,
+	} {
+		if got := SubPath(p); got != RedactedSubPath {
+			t.Errorf("SubPath(%q) = %q", p, got)
+		}
+	}
+	for _, p := range []string{"/", "/index.html", "/api/ping", "/img/dot.png"} {
+		if got := SubPath(p); got != p {
+			t.Errorf("SubPath(%q) = %q", p, got)
+		}
+	}
+}

@@ -85,7 +85,9 @@ func artifactPath(p string) bool { return pathMentions(p, "artifacts") }
 func portViewPath(p string) bool { return pathMentions(p, "portview") }
 
 // pathMentions reports whether p, lowercased and percent-decoded up to
-// maxUnescapeRounds times, contains word at any step.
+// maxUnescapeRounds times, contains word at any step. Input that still
+// holds a '%' when decoding stops (it does not decode, or is encoded more
+// than maxUnescapeRounds times) also counts as a match.
 func pathMentions(p, word string) bool {
 	s := strings.ToLower(p)
 	for range maxUnescapeRounds {
@@ -98,44 +100,24 @@ func pathMentions(p, word string) bool {
 		}
 		s = strings.ToLower(u)
 	}
-	return strings.Contains(s, word)
+	return strings.Contains(s, word) || strings.Contains(s, "%")
 }
 
 // credentialQuery reports whether a raw query (or fragment) may carry an
 // artifact or port view URL: the same any-spelling rule as artifactPath
 // and portViewPath, applied to the whole query and to each key and value
-// on its own ('&', ';' and '=' separate them). A key or value that does
-// not decode counts as a match.
+// on its own ('&', ';' and '=' separate them), so a key or value that does
+// not decode (a match by pathMentions) cannot hide another.
 func credentialQuery(rawQuery string) bool {
 	if pathMentions(rawQuery, "artifacts") || pathMentions(rawQuery, "portview") {
 		return true
 	}
 	for _, part := range strings.FieldsFunc(rawQuery, func(r rune) bool { return r == '&' || r == ';' || r == '=' }) {
-		if partMentions(part, "artifacts") || partMentions(part, "portview") {
+		if pathMentions(part, "artifacts") || pathMentions(part, "portview") {
 			return true
 		}
 	}
 	return false
-}
-
-// partMentions is pathMentions for one query key or value, except that a
-// decoding error at any round counts as a match.
-func partMentions(p, word string) bool {
-	s := strings.ToLower(p)
-	for range maxUnescapeRounds {
-		if strings.Contains(s, word) {
-			return true
-		}
-		u, err := url.PathUnescape(s)
-		if err != nil {
-			return true
-		}
-		if u == s {
-			return false
-		}
-		s = strings.ToLower(u)
-	}
-	return strings.Contains(s, word)
 }
 
 // isArtifactURL applies artifactPath to both forms of u's path: the
@@ -218,4 +200,18 @@ func RedactReferer(referer string) string {
 		return redactedValue
 	}
 	return RedactURL(u)
+}
+
+// RedactedSubPath is how a proxied request's path at the agent port is
+// logged when it may name an artifact or port view URL.
+const RedactedSubPath = "/" + redactedValue
+
+// SubPath returns p, the path a proxied request is sent with to an agent
+// port, for a log line: RedactedSubPath when it may name an artifact or
+// port view URL (the rule of artifactPath and portViewPath), p otherwise.
+func SubPath(p string) string {
+	if pathMentions(p, "artifacts") || pathMentions(p, "portview") {
+		return RedactedSubPath
+	}
+	return p
 }

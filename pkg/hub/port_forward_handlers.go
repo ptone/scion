@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
 	"github.com/GoogleCloudPlatform/scion/pkg/portforward"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
@@ -590,7 +591,7 @@ func (s *Server) proxyToAgentPort(w http.ResponseWriter, r *http.Request, identi
 		"caller", policy.caller,
 		"surface", policy.surface,
 		"method", r.Method,
-		"path", reqPath,
+		"path", logging.SubPath(reqPath),
 		"status", resp.Status,
 		"duration", time.Since(start),
 	)

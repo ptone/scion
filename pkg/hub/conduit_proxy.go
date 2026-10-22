@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
@@ -307,7 +308,7 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 			"caller", policy.caller,
 			"surface", policy.surface,
 			"method", r.Method,
-			"path", reqPath,
+			"path", logging.SubPath(reqPath),
 			"status", status,
 			"transport", "conduit",
 			"duration", time.Since(start),

@@ -947,6 +947,8 @@ func TestPortView_LogsNeverHoldTheLink(t *testing.T) {
 		mintedCap, _, _ := strings.Cut(strings.TrimPrefix(resolveLocation(t, link, minted).Path, portview.Route), "/")
 		caps = append(caps, mintedCap)
 		f.send(t, http.MethodGet, f.viewURL(valid, "a.js?q=1"), h(subHeader()), nil)
+		// A sub-path at the agent port that itself names a page link.
+		f.send(t, http.MethodGet, f.viewURL(valid, "api/v1/portview/"+valid+"/x"), h(subHeader()), nil)
 		f.send(t, http.MethodGet, f.viewURL(mintedCap, "p.html"), h(navHeader()), nil)
 		f.send(t, http.MethodGet, f.viewURL(expired, "a.js"), h(subHeader()), nil)
 		f.send(t, http.MethodGet, f.viewURL(expired, "p.html"), h(navHeader()), nil)
