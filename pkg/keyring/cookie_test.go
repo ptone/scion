@@ -49,6 +49,59 @@ func withActive(id string) func(d map[string]any) {
 	return func(d map[string]any) { sub(d, "signing")["active"] = id }
 }
 
+func mustCodecs(t *testing.T, r *SigningRing, h, b Purpose, maxAge int, now func() time.Time) []securecookie.Codec {
+	t.Helper()
+	codecs, err := CookieCodecs(r, h, b, maxAge, now)
+	if err != nil {
+		t.Fatalf("CookieCodecs: %v", err)
+	}
+	return codecs
+}
+
+// TestRingsWithoutActiveFailClosed: a zero, nil or empty ring never yields
+// a key derived from an empty secret: Active errors, Generations and
+// Candidates are empty, LegacySecret is absent, CookieCodecs refuses, and
+// a zero or nil encryption ring has no key bytes and no candidates.
+func TestRingsWithoutActiveFailClosed(t *testing.T) {
+	var nilRing *SigningRing
+	for name, r := range map[string]*SigningRing{
+		"nil":             nilRing,
+		"zero":            {},
+		"empty":           {active: "gen1"},
+		"dangling active": {active: "nope", entries: []signingEntry{{id: "gen1", secret: newMaterial([]byte(fixtureGen1Secret))}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := r.Active(sessionHash, t0); !errors.Is(err, ErrNoActiveGeneration) {
+				t.Fatalf("Active = %v, want ErrNoActiveGeneration", err)
+			}
+			if g := r.Generations(sessionHash); len(g) != 0 {
+				t.Fatalf("Generations = %v", g)
+			}
+			if c := r.Candidates(sessionHash, "", t0); len(c) != 0 {
+				t.Fatalf("Candidates = %v", c)
+			}
+			if _, ok := r.LegacySecret(); ok {
+				t.Fatal("LegacySecret present")
+			}
+			if codecs, err := CookieCodecs(r, sessionHash, sessionBlock, 86400, nil); !errors.Is(err, ErrNoActiveGeneration) || codecs != nil {
+				t.Fatalf("CookieCodecs = %v, %v; want refusal", codecs, err)
+			}
+		})
+	}
+	var nilEnc *EncryptionRing
+	for name, e := range map[string]*EncryptionRing{"nil": nilEnc, "zero": {}} {
+		if b := e.Active().Bytes(); b != nil {
+			t.Fatalf("%s encryption ring: Active has bytes", name)
+		}
+		if c := e.Candidates(""); len(c) != 0 {
+			t.Fatalf("%s encryption ring: Candidates = %v", name, c)
+		}
+		if c := e.Candidates("legacy"); len(c) != 0 {
+			t.Fatalf("%s encryption ring: Candidates(legacy) = %v", name, c)
+		}
+	}
+}
+
 func values() map[interface{}]interface{} {
 	return map[interface{}]interface{}{"user_id": "u-1", "n": 7}
 }
@@ -70,7 +123,7 @@ func TestCookieCodecsLegacyMatchesPreKeyringStore(t *testing.T) {
 	old := securecookie.New(derive("scion-session-hash"), derive("scion-session-block"))
 	old.MaxAge(86400)
 	c := &clock{t0}
-	codecs := CookieCodecs(Legacy(fixtureLegacySecret).Signing(), sessionHash, sessionBlock, 86400, c.now)
+	codecs := mustCodecs(t, Legacy(fixtureLegacySecret).Signing(), sessionHash, sessionBlock, 86400, c.now)
 	if len(codecs) != 1 {
 		t.Fatalf("legacy codecs = %d", len(codecs))
 	}
@@ -94,8 +147,8 @@ func TestCookieCodecsLegacyMatchesPreKeyringStore(t *testing.T) {
 func TestCookieCodecsCrossGenerationAndActiveReencode(t *testing.T) {
 	c := &clock{t0}
 	// Replica A: active legacy. Replica B: active gen1. Same file otherwise.
-	a := CookieCodecs(ringFile(t, withActive("legacy")), sessionHash, sessionBlock, 86400, c.now)
-	b := CookieCodecs(ringFile(t, nil), sessionHash, sessionBlock, 86400, c.now)
+	a := mustCodecs(t, ringFile(t, withActive("legacy")), sessionHash, sessionBlock, 86400, c.now)
+	b := mustCodecs(t, ringFile(t, nil), sessionHash, sessionBlock, 86400, c.now)
 
 	fromA, err := securecookie.EncodeMulti(cookieName, values(), a...)
 	if err != nil {
@@ -125,7 +178,7 @@ func TestCookieCodecsCrossGenerationAndActiveReencode(t *testing.T) {
 	}
 	// A staged generation (gen2) cookie is readable before activation
 	// elsewhere is complete.
-	staged := CookieCodecs(ringFile(t, withActive("gen2")), sessionHash, sessionBlock, 86400, c.now)
+	staged := mustCodecs(t, ringFile(t, withActive("gen2")), sessionHash, sessionBlock, 86400, c.now)
 	fromStaged, err := securecookie.EncodeMulti(cookieName, values(), staged...)
 	if err != nil {
 		t.Fatal(err)
@@ -138,8 +191,8 @@ func TestCookieCodecsCrossGenerationAndActiveReencode(t *testing.T) {
 func TestCookieCodecsDeadlines(t *testing.T) {
 	c := &clock{t0}
 	// legacy: sign_until 13:00, verify_until next day 13:00 (validDoc).
-	a := CookieCodecs(ringFile(t, withActive("legacy")), sessionHash, sessionBlock, 86400*3, c.now)
-	b := CookieCodecs(ringFile(t, nil), sessionHash, sessionBlock, 86400*3, c.now)
+	a := mustCodecs(t, ringFile(t, withActive("legacy")), sessionHash, sessionBlock, 86400*3, c.now)
+	b := mustCodecs(t, ringFile(t, nil), sessionHash, sessionBlock, 86400*3, c.now)
 	fromA, err := securecookie.EncodeMulti(cookieName, values(), a...)
 	if err != nil {
 		t.Fatal(err)
@@ -183,7 +236,7 @@ func TestCookieCodecsDeadlines(t *testing.T) {
 
 func TestCookieCodecsLimits(t *testing.T) {
 	c := &clock{t0}
-	b := CookieCodecs(ringFile(t, nil), sessionHash, sessionBlock, 86400, c.now)
+	b := mustCodecs(t, ringFile(t, nil), sessionHash, sessionBlock, 86400, c.now)
 	// 4096-byte securecookie length limit stays in force.
 	big := map[interface{}]interface{}{"blob": strings.Repeat("x", 5000)}
 	if _, err := securecookie.EncodeMulti(cookieName, big, b...); err == nil {
@@ -201,7 +254,7 @@ func TestCookieCodecsLimits(t *testing.T) {
 	if _, err := decode(b, v); err != nil {
 		t.Fatalf("24h codec refused a fresh cookie: %v", err)
 	}
-	expired := CookieCodecs(ringFile(t, nil), sessionHash, sessionBlock, -1, c.now)
+	expired := mustCodecs(t, ringFile(t, nil), sessionHash, sessionBlock, -1, c.now)
 	if _, err := decode(expired, v); err == nil {
 		t.Fatal("max age not applied to inner codecs")
 	}

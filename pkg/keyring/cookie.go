@@ -52,15 +52,23 @@ var (
 //     generation.
 //   - Decode succeeds only before the codec's verify_until.
 //
+// A ring without a usable active generation (zero, nil or empty) is
+// refused with ErrNoActiveGeneration: no codec is ever built from an empty
+// secret. The returned codecs hold raw securecookie keys: keep them inside
+// the cookie store and never print or reflect them.
+//
 // Pass the result to sessions.CookieStore.Codecs. Do not call
 // CookieStore.MaxAge afterwards expecting it to reach the codecs (it only
 // updates *securecookie.SecureCookie values); the max age is set here.
-func CookieCodecs(r *SigningRing, hashPurpose, blockPurpose Purpose, maxAge int, now func() time.Time) []securecookie.Codec {
+func CookieCodecs(r *SigningRing, hashPurpose, blockPurpose Purpose, maxAge int, now func() time.Time) ([]securecookie.Codec, error) {
 	if now == nil {
 		now = time.Now
 	}
 	hashes := r.Generations(hashPurpose)
 	blocks := r.Generations(blockPurpose)
+	if len(hashes) == 0 || len(hashes) != len(blocks) {
+		return nil, ErrNoActiveGeneration
+	}
 	out := make([]securecookie.Codec, 0, len(hashes))
 	for i := range hashes {
 		sc := securecookie.New(hashes[i].Bytes(), blocks[i].Bytes())
@@ -74,7 +82,7 @@ func CookieCodecs(r *SigningRing, hashPurpose, blockPurpose Purpose, maxAge int,
 			now:         now,
 		})
 	}
-	return out
+	return out, nil
 }
 
 // deadlineCodec enforces one generation's deadlines around a

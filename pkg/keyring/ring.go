@@ -28,6 +28,11 @@ import (
 // from) the single legacy server secret.
 const LegacyID = "legacy"
 
+// ErrNoActiveGeneration is returned by SigningRing.Active for a ring
+// without a usable active entry (a zero or nil ring): the ring fails
+// closed instead of deriving a key from an empty secret.
+var ErrNoActiveGeneration = errors.New("keyring: the signing ring has no active generation")
+
 // ErrIssuanceClosed is returned by SigningRing.Active at or after the
 // active entry's sign_until: the instance must stop issuing with it.
 var ErrIssuanceClosed = errors.New("keyring: the active signing generation has reached its sign_until; issuance is closed")
@@ -113,7 +118,9 @@ type SigningKey struct {
 	VerifyUntil *time.Time // nil: no verification bound
 }
 
-// Bytes returns a copy of the derived key the caller owns.
+// Bytes returns a copy of the derived key the caller owns. Compare keys by
+// ID and Bytes: the closure holding the bytes makes reflect.DeepEqual (and
+// testify's Equal) report any two keys as different.
 func (k SigningKey) Bytes() []byte { return k.key.bytes() }
 
 // CanSign reports whether now is before the issuance bound.
@@ -152,7 +159,8 @@ type EncryptionKey struct {
 	key material
 }
 
-// Bytes returns a copy of the raw key the caller owns.
+// Bytes returns a copy of the raw key the caller owns (compare keys by ID
+// and Bytes, never reflect.DeepEqual; see SigningKey.Bytes).
 func (k EncryptionKey) Bytes() []byte { return k.key.bytes() }
 
 // String prints the ID only.
@@ -219,7 +227,7 @@ func (r *SigningRing) Emit() Emit { return r.emit }
 // IDs returns every generation ID, active first, then file order (nil for
 // a nil ring).
 func (r *SigningRing) IDs() []string {
-	if r == nil {
+	if r == nil || len(r.entries) == 0 {
 		return nil
 	}
 	out := []string{r.active}
@@ -235,7 +243,13 @@ func (r *SigningRing) IDs() []string {
 // entry's sign_until it returns ErrIssuanceClosed: no issuance path may use
 // that key any more (design §2/§3).
 func (r *SigningRing) Active(p Purpose, now time.Time) (SigningKey, error) {
-	e, _ := r.entry(r.active)
+	if r == nil {
+		return SigningKey{}, ErrNoActiveGeneration
+	}
+	e, ok := r.entry(r.active)
+	if !ok {
+		return SigningKey{}, ErrNoActiveGeneration
+	}
 	k := e.key(p)
 	if !k.CanSign(now) {
 		return SigningKey{}, ErrIssuanceClosed
@@ -250,6 +264,9 @@ func (r *SigningRing) Active(p Purpose, now time.Time) (SigningKey, error) {
 // configured legacy_read_ids, in file order, each while now is before its
 // verify_until.
 func (r *SigningRing) Candidates(p Purpose, kid string, now time.Time) []SigningKey {
+	if r == nil {
+		return nil
+	}
 	var ids []string
 	if kid == "" {
 		ids = r.legacyReads
@@ -274,9 +291,19 @@ func (r *SigningRing) Candidates(p Purpose, kid string, now time.Time) []Signing
 // build one verifier per generation at startup and enforce the deadlines
 // on every use (the session cookie codecs).
 func (r *SigningRing) Generations(p Purpose) []SigningKey {
+	if r == nil {
+		return nil
+	}
+	if _, ok := r.entry(r.active); !ok {
+		// No active generation: nothing may encode or decode (fail closed).
+		return nil
+	}
 	out := make([]SigningKey, 0, len(r.entries))
 	for _, id := range r.IDs() {
-		e, _ := r.entry(id)
+		e, ok := r.entry(id)
+		if !ok {
+			continue
+		}
 		out = append(out, e.key(p))
 	}
 	return out
@@ -287,6 +314,9 @@ func (r *SigningRing) Generations(p Purpose) []SigningKey {
 // material. Later phases replace its callers; new code must use Active and
 // Candidates.
 func (r *SigningRing) LegacySecret() (string, bool) {
+	if r == nil {
+		return "", false
+	}
 	e, ok := r.entry(LegacyID)
 	if !ok {
 		return "", false
@@ -326,7 +356,7 @@ func (r *EncryptionRing) WriteFormat() WriteFormat { return r.writeFormat }
 // IDs returns every key ID, active first, then file order (nil for a nil
 // ring).
 func (r *EncryptionRing) IDs() []string {
-	if r == nil {
+	if r == nil || len(r.entries) == 0 {
 		return nil
 	}
 	out := []string{r.active}
@@ -338,8 +368,12 @@ func (r *EncryptionRing) IDs() []string {
 	return out
 }
 
-// Active returns the writer key.
+// Active returns the writer key. A zero or nil ring returns a key with no
+// bytes (Bytes returns nil), which no cipher accepts.
 func (r *EncryptionRing) Active() EncryptionKey {
+	if r == nil {
+		return EncryptionKey{}
+	}
 	e, _ := r.entry(r.active)
 	return EncryptionKey{ID: e.id, key: e.key}
 }
@@ -348,6 +382,9 @@ func (r *EncryptionRing) Active() EncryptionKey {
 // that key only for a non-empty kid (none if unknown, never a fallback),
 // or the legacy_v1_read_ids for an ID-less enc:v1: value.
 func (r *EncryptionRing) Candidates(kid string) []EncryptionKey {
+	if r == nil {
+		return nil
+	}
 	var ids []string
 	if kid == "" {
 		ids = r.legacyReads

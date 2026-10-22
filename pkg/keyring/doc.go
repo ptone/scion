@@ -30,7 +30,10 @@
 // remaining limit is deliberate: bytes returned by SigningKey.Bytes,
 // EncryptionKey.Bytes or SigningRing.LegacySecret are plain values, and a
 // caller that formats, logs or stores them leaks them; so would unsafe
-// access to unexported state.
+// access to unexported state. The codecs CookieCodecs returns wrap
+// gorilla/securecookie values that hold their HMAC and AES keys in plain
+// unexported fields: keep them inside the cookie store and never print them.
+// Keys held in closures are never reflect.DeepEqual; compare by ID and Bytes.
 //
 // Design: ptone/scion#1530 ("Safe rotation of the Hub server secret"),
 // §1-§3. This release uses the signing ring for web session cookies only
