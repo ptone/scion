@@ -330,13 +330,16 @@ func TestWindowsMkdirLikeLegacyRoot_FollowsSourceACL(t *testing.T) {
 func TestWindowsWriteConflictBackup_Private(t *testing.T) {
 	dir := usersInheritDir(t)
 	path := filepath.Join(dir, "settings.yaml")
+	// The backup name itself is the migration's compatibility literal; it
+	// is checked by the unix suite. Here: next to path, and the second
+	// backup takes the first name plus ".1".
 	first, err := writeConflictBackup(path, []byte("one"))
-	if err != nil || first != path+".grove-migration.bak" {
+	if err != nil || filepath.Dir(first) != dir || !strings.HasPrefix(first, path+".") || !strings.HasSuffix(first, ".bak") {
 		t.Fatalf("writeConflictBackup = %q, %v", first, err)
 	}
 	second, err := writeConflictBackup(path, []byte("two"))
-	if err != nil || second != path+".grove-migration.bak.1" {
-		t.Fatalf("second writeConflictBackup = %q, %v", second, err)
+	if err != nil || second != first+".1" {
+		t.Fatalf("second writeConflictBackup = %q, %v; want %q", second, err, first+".1")
 	}
 	for p, want := range map[string]string{first: "one", second: "two"} {
 		wintest.AssertPrivateSD(t, p)
