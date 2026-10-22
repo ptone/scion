@@ -274,3 +274,50 @@ func TestRunRelayRoleNeverLoadsKeyring(t *testing.T) {
 		assert.False(t, ok, "%s still set in the relay process", name)
 	}
 }
+
+// TestLoadServerKeyring_UnreadableRingNeverSelectsLegacy (ptone/scion#1530
+// Phase 3): a configured keyring file that is missing, unreadable or not a
+// regular file refuses startup; no keyring is kept and the legacy-mode
+// notice is never printed (missing managed material never selects legacy
+// mode). hub.New refuses the same configuration on its own through
+// KeyringConfigured.
+func TestLoadServerKeyring_UnreadableRingNeverSelectsLegacy(t *testing.T) {
+	unreadable := writeCmdKeyring(t, nil)
+	require.NoError(t, os.Chmod(unreadable, 0))
+	if f, err := os.Open(unreadable); err == nil {
+		_ = f.Close()
+		t.Skip("running with privileges that read mode-000 files")
+	}
+	for name, path := range map[string]string{
+		"missing":    filepath.Join(t.TempDir(), "absent.json"),
+		"unreadable": unreadable,
+		"directory":  t.TempDir(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			isolateKeyring(t)
+			logs := captureSecretEnvSlog(t)
+			cfg := &config.GlobalConfig{KeyringFile: path}
+			err := loadServerKeyring(cfg)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), config.KeyringFileKey)
+			assert.Nil(t, serverKeyringFromFile())
+			assert.NotContains(t, logs.String(), "legacy single-secret mode")
+			hubCfg := buildHubServerConfig(cfg, "https://hub.example.com", "", nil, false, "", nil)
+			assert.True(t, hubCfg.KeyringConfigured)
+			assert.Nil(t, hubCfg.Keyring)
+		})
+	}
+}
+
+// TestBuildHubServerConfig_KeyringConfigured: the hub is told a keyring
+// file is configured exactly when server.keyring_file is set.
+func TestBuildHubServerConfig_KeyringConfigured(t *testing.T) {
+	isolateKeyring(t)
+	assert.False(t, buildHubServerConfig(&config.GlobalConfig{}, "https://hub.example.com", "", nil, false, "", nil).KeyringConfigured)
+	cfg := &config.GlobalConfig{KeyringFile: writeCmdKeyring(t, nil)}
+	require.NoError(t, loadServerKeyring(cfg))
+	hubCfg := buildHubServerConfig(cfg, "https://hub.example.com", "", nil, false, "", nil)
+	assert.True(t, hubCfg.KeyringConfigured)
+	require.NotNil(t, hubCfg.Keyring)
+	assert.Equal(t, "gen1", hubCfg.Keyring.Signing().ActiveID())
+}
