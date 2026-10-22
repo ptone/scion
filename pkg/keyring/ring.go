@@ -86,14 +86,35 @@ func (p Purpose) Name() string { return p.name }
 // redacted is what every key-holding type prints.
 const redacted = "[redacted]"
 
+// material holds key bytes behind a closure, so no reflection-based
+// printer (fmt through an unexported field, spew, testify diffs) can reach
+// them: they render a func address, never bytes. The only way to the bytes
+// is calling Bytes, which returns a fresh copy.
+type material func() []byte
+
+func newMaterial(b []byte) material {
+	c := slices.Clone(b)
+	return func() []byte { return slices.Clone(c) }
+}
+
+func (m material) bytes() []byte {
+	if m == nil {
+		return nil
+	}
+	return m()
+}
+
 // SigningKey is one generation's derived key for one purpose, with the
-// generation's deadlines. Key is a copy the caller owns.
+// generation's deadlines. The key bytes are reachable only through Bytes.
 type SigningKey struct {
 	ID          string
-	Key         []byte
+	key         material
 	SignUntil   *time.Time // nil: no issuance bound
 	VerifyUntil *time.Time // nil: no verification bound
 }
+
+// Bytes returns a copy of the derived key the caller owns.
+func (k SigningKey) Bytes() []byte { return k.key.bytes() }
 
 // CanSign reports whether now is before the issuance bound.
 func (k SigningKey) CanSign(now time.Time) bool {
@@ -124,12 +145,15 @@ func (k SigningKey) MarshalJSON() ([]byte, error) {
 	return json.Marshal(map[string]string{"id": k.ID, "key": redacted})
 }
 
-// EncryptionKey is one raw 32-byte encryption key. Key is a copy the
-// caller owns.
+// EncryptionKey is one raw 32-byte encryption key, reachable only through
+// Bytes.
 type EncryptionKey struct {
 	ID  string
-	Key []byte
+	key material
 }
+
+// Bytes returns a copy of the raw key the caller owns.
+func (k EncryptionKey) Bytes() []byte { return k.key.bytes() }
 
 // String prints the ID only.
 func (k EncryptionKey) String() string {
@@ -154,7 +178,7 @@ func (k EncryptionKey) MarshalJSON() ([]byte, error) {
 
 type signingEntry struct {
 	id          string
-	secret      []byte
+	secret      material
 	signUntil   *time.Time
 	verifyUntil *time.Time
 }
@@ -180,7 +204,7 @@ func (r *SigningRing) entry(id string) (signingEntry, bool) {
 func (e signingEntry) key(p Purpose) SigningKey {
 	return SigningKey{
 		ID:          e.id,
-		Key:         p.derive(slices.Clone(e.secret)),
+		key:         newMaterial(p.derive(e.secret.bytes())),
 		SignUntil:   cloneTime(e.signUntil),
 		VerifyUntil: cloneTime(e.verifyUntil),
 	}
@@ -192,8 +216,12 @@ func (r *SigningRing) ActiveID() string { return r.active }
 // Emit is the configured signing wire-format selection.
 func (r *SigningRing) Emit() Emit { return r.emit }
 
-// IDs returns every generation ID, active first, then file order.
+// IDs returns every generation ID, active first, then file order (nil for
+// a nil ring).
 func (r *SigningRing) IDs() []string {
+	if r == nil {
+		return nil
+	}
 	out := []string{r.active}
 	for _, e := range r.entries {
 		if e.id != r.active {
@@ -263,12 +291,12 @@ func (r *SigningRing) LegacySecret() (string, bool) {
 	if !ok {
 		return "", false
 	}
-	return string(e.secret), true
+	return string(e.secret.bytes()), true
 }
 
 type encryptionEntry struct {
 	id  string
-	key []byte
+	key material
 }
 
 // EncryptionRing is the immutable set of raw encryption keys (at most
@@ -295,8 +323,12 @@ func (r *EncryptionRing) ActiveID() string { return r.active }
 // WriteFormat is the configured ciphertext envelope for writes.
 func (r *EncryptionRing) WriteFormat() WriteFormat { return r.writeFormat }
 
-// IDs returns every key ID, active first, then file order.
+// IDs returns every key ID, active first, then file order (nil for a nil
+// ring).
 func (r *EncryptionRing) IDs() []string {
+	if r == nil {
+		return nil
+	}
 	out := []string{r.active}
 	for _, e := range r.entries {
 		if e.id != r.active {
@@ -309,7 +341,7 @@ func (r *EncryptionRing) IDs() []string {
 // Active returns the writer key.
 func (r *EncryptionRing) Active() EncryptionKey {
 	e, _ := r.entry(r.active)
-	return EncryptionKey{ID: e.id, Key: slices.Clone(e.key)}
+	return EncryptionKey{ID: e.id, key: e.key}
 }
 
 // Candidates returns the decryption keys for a value carrying key ID kid:
@@ -325,7 +357,7 @@ func (r *EncryptionRing) Candidates(kid string) []EncryptionKey {
 	var out []EncryptionKey
 	for _, id := range ids {
 		if e, ok := r.entry(id); ok {
-			out = append(out, EncryptionKey{ID: e.id, Key: slices.Clone(e.key)})
+			out = append(out, EncryptionKey{ID: e.id, key: e.key})
 		}
 	}
 	return out
@@ -442,13 +474,13 @@ func Legacy(secret string) *Keyring {
 		signing: &SigningRing{
 			active:      LegacyID,
 			emit:        EmitLegacy,
-			entries:     []signingEntry{{id: LegacyID, secret: []byte(secret)}},
+			entries:     []signingEntry{{id: LegacyID, secret: newMaterial([]byte(secret))}},
 			legacyReads: []string{LegacyID},
 		},
 		encryption: &EncryptionRing{
 			active:      LegacyID,
 			writeFormat: WriteV1,
-			entries:     []encryptionEntry{{id: LegacyID, key: DeriveLegacyEncryptionKey(secret)}},
+			entries:     []encryptionEntry{{id: LegacyID, key: newMaterial(DeriveLegacyEncryptionKey(secret))}},
 			legacyReads: []string{LegacyID},
 		},
 	}

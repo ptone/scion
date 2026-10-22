@@ -34,7 +34,7 @@ func TestDeriveLocalEncryptionKeyMatchesKeyringLegacy(t *testing.T) {
 		if !bytes.Equal(DeriveLocalEncryptionKey(s), keyring.DeriveLegacyEncryptionKey(s)) {
 			t.Fatalf("derivations differ for a %d-byte secret", len(s))
 		}
-		if !bytes.Equal(DeriveLocalEncryptionKey(s), keyring.Legacy(s).Encryption().Active().Key) {
+		if !bytes.Equal(DeriveLocalEncryptionKey(s), keyring.Legacy(s).Encryption().Active().Bytes()) {
 			t.Fatalf("legacy keyring encryption key differs for a %d-byte secret", len(s))
 		}
 	}

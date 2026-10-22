@@ -63,7 +63,7 @@ func CookieCodecs(r *SigningRing, hashPurpose, blockPurpose Purpose, maxAge int,
 	blocks := r.Generations(blockPurpose)
 	out := make([]securecookie.Codec, 0, len(hashes))
 	for i := range hashes {
-		sc := securecookie.New(hashes[i].Key, blocks[i].Key)
+		sc := securecookie.New(hashes[i].Bytes(), blocks[i].Bytes())
 		sc.MaxAge(maxAge)
 		out = append(out, &deadlineCodec{
 			inner:       sc,

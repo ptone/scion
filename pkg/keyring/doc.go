@@ -23,8 +23,14 @@
 // consumer defines a Purpose with its existing derivation, so a ring built
 // from the legacy secret derives exactly the bytes the pre-ring code did.
 //
-// The package has no dependency on the hub, config or cmd packages, and no
-// value it returns formats or logs key material.
+// The package has no dependency on the hub, config or cmd packages. Its
+// types print, log and marshal IDs only, and key bytes sit behind an
+// unexported closure, so reflection-based printers (fmt through an
+// unexported field, spew, testify diffs) cannot reach them either. The
+// remaining limit is deliberate: bytes returned by SigningKey.Bytes,
+// EncryptionKey.Bytes or SigningRing.LegacySecret are plain values, and a
+// caller that formats, logs or stores them leaks them; so would unsafe
+// access to unexported state.
 //
 // Design: ptone/scion#1530 ("Safe rotation of the Hub server secret"),
 // §1-§3. This release uses the signing ring for web session cookies only

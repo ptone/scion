@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"os"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -143,7 +144,7 @@ func Parse(data []byte) (*Keyring, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&f); err != nil {
-		return nil, decodeError(err)
+		return nil, decodeError(err, dec.InputOffset())
 	}
 	if f.Schema == nil {
 		return nil, missing("schema")
@@ -193,6 +194,7 @@ func buildSigning(s *signingV1) (*SigningRing, error) {
 	}
 	r := &SigningRing{active: *s.Active, emit: emit}
 	seen := map[string]bool{}
+	firstAt := map[string]int{}
 	for i, k := range s.Keys {
 		field := fmt.Sprintf("signing.keys[%d]", i)
 		if k.ID == nil {
@@ -203,25 +205,25 @@ func buildSigning(s *signingV1) (*SigningRing, error) {
 			return nil, invalid(field+".id", "must match "+idPattern.String())
 		}
 		if seen[id] {
-			return nil, fmt.Errorf("keyring file: duplicate signing key id %q", id)
+			return nil, fmt.Errorf("keyring file: duplicate signing key id: %s repeats signing.keys[%d]", field, firstAt[id])
 		}
 		seen[id] = true
-		field = fmt.Sprintf("signing key %q", id)
+		firstAt[id] = i
 		if k.Secret == nil {
-			return nil, missing(field + " secret")
+			return nil, missing(field + ".secret")
 		}
 		if id == LegacyID {
 			if len(*k.Secret) == 0 {
-				return nil, invalid(field+" secret", "must not be empty")
+				return nil, invalid(field+".secret", "must not be empty")
 			}
 		} else if len(*k.Secret) < MinSigningSecretBytes {
-			return nil, invalid(field+" secret", fmt.Sprintf("must be at least %d bytes", MinSigningSecretBytes))
+			return nil, invalid(field+".secret", fmt.Sprintf("must be at least %d bytes", MinSigningSecretBytes))
 		}
-		signUntil, err := deadline(k.SignUntil, field+" sign_until")
+		signUntil, err := deadline(k.SignUntil, field+".sign_until")
 		if err != nil {
 			return nil, err
 		}
-		verifyUntil, err := deadline(k.VerifyUntil, field+" verify_until")
+		verifyUntil, err := deadline(k.VerifyUntil, field+".verify_until")
 		if err != nil {
 			return nil, err
 		}
@@ -232,7 +234,7 @@ func buildSigning(s *signingV1) (*SigningRing, error) {
 			return nil, invalid(field, "sign_until must be before verify_until")
 		}
 		r.entries = append(r.entries, signingEntry{
-			id: id, secret: []byte(*k.Secret), signUntil: signUntil, verifyUntil: verifyUntil,
+			id: id, secret: newMaterial([]byte(*k.Secret)), signUntil: signUntil, verifyUntil: verifyUntil,
 		})
 	}
 	if !seen[r.active] {
@@ -268,6 +270,7 @@ func buildEncryption(e *encryptionV1) (*EncryptionRing, error) {
 	}
 	r := &EncryptionRing{active: *e.Active, writeFormat: wf}
 	seen := map[string]bool{}
+	firstAt := map[string]int{}
 	for i, k := range e.Keys {
 		field := fmt.Sprintf("encryption.keys[%d]", i)
 		if k.ID == nil {
@@ -278,21 +281,21 @@ func buildEncryption(e *encryptionV1) (*EncryptionRing, error) {
 			return nil, invalid(field+".id", "must match "+idPattern.String())
 		}
 		if seen[id] {
-			return nil, fmt.Errorf("keyring file: duplicate encryption key id %q", id)
+			return nil, fmt.Errorf("keyring file: duplicate encryption key id: %s repeats encryption.keys[%d]", field, firstAt[id])
 		}
 		seen[id] = true
-		field = fmt.Sprintf("encryption key %q", id)
+		firstAt[id] = i
 		if k.KeyB64 == nil {
-			return nil, missing(field + " key_b64")
+			return nil, missing(field + ".key_b64")
 		}
 		raw, err := base64.StdEncoding.Strict().DecodeString(*k.KeyB64)
 		if err != nil {
-			return nil, invalid(field+" key_b64", "must be standard padded base64")
+			return nil, invalid(field+".key_b64", "must be standard padded base64")
 		}
 		if len(raw) != EncryptionKeyBytes {
-			return nil, invalid(field+" key_b64", fmt.Sprintf("must decode to exactly %d bytes", EncryptionKeyBytes))
+			return nil, invalid(field+".key_b64", fmt.Sprintf("must decode to exactly %d bytes", EncryptionKeyBytes))
 		}
-		r.entries = append(r.entries, encryptionEntry{id: id, key: raw})
+		r.entries = append(r.entries, encryptionEntry{id: id, key: newMaterial(raw)})
 	}
 	if !seen[r.active] {
 		return nil, invalid("encryption.active", "must name an encryption key id")
@@ -313,12 +316,12 @@ func candidateIDs(ids []string, known map[string]bool, field string) ([]string, 
 		return nil, invalid(field, fmt.Sprintf("must hold at most %d ids", MaxLegacyReadIDs))
 	}
 	seen := map[string]bool{}
-	for _, id := range ids {
+	for i, id := range ids {
 		if !known[id] {
-			return nil, invalid(field, fmt.Sprintf("names unknown key id %q", id))
+			return nil, invalid(fmt.Sprintf("%s[%d]", field, i), "names no key in the ring")
 		}
 		if seen[id] {
-			return nil, invalid(field, fmt.Sprintf("repeats key id %q", id))
+			return nil, invalid(fmt.Sprintf("%s[%d]", field, i), "repeats an earlier id")
 		}
 		seen[id] = true
 	}
@@ -353,10 +356,10 @@ func invalid(field, why string) error {
 	return fmt.Errorf("keyring file: invalid %s: %s", field, why)
 }
 
-// decodeError maps a json decode error to a message that names the field
-// or offset only: syntax errors from encoding/json quote input bytes,
-// which may be key material.
-func decodeError(err error) error {
+// decodeError maps a json decode error to a message that names a schema
+// field path or a byte offset only: encoding/json's syntax and
+// unknown-field errors quote input, which may be misplaced key material.
+func decodeError(err error, offset int64) error {
 	var typeErr *json.UnmarshalTypeError
 	var synErr *json.SyntaxError
 	switch {
@@ -367,12 +370,12 @@ func decodeError(err error) error {
 	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
 		return errors.New("keyring file: empty or truncated JSON")
 	default:
-		// DisallowUnknownFields: `json: unknown field "<name>"` names a
-		// key, not a value.
-		if msg := err.Error(); len(msg) > len("json: unknown field ") && msg[:len("json: unknown field ")] == "json: unknown field " {
-			return fmt.Errorf("keyring file: unknown field %s", msg[len("json: unknown field "):])
+		// DisallowUnknownFields: the error quotes the key, which may be
+		// misplaced key material; report the position only.
+		if strings.HasPrefix(err.Error(), "json: unknown field ") {
+			return fmt.Errorf("keyring file: unknown field near byte %d", offset)
 		}
-		return errors.New("keyring file: malformed JSON")
+		return fmt.Errorf("keyring file: malformed JSON near byte %d", offset)
 	}
 }
 
@@ -399,7 +402,7 @@ func checkJSONShape(data []byte) error {
 			break
 		}
 		if err != nil {
-			return decodeError(err)
+			return decodeError(err, dec.InputOffset())
 		}
 		if started && len(stack) == 0 {
 			return errors.New("keyring file: trailing data after the JSON document")
@@ -419,11 +422,13 @@ func checkJSONShape(data []byte) error {
 		case string:
 			if n := len(stack); n > 0 && stack[n-1].object && stack[n-1].wantKey {
 				top := stack[n-1]
+				// Keys are never quoted back: a misplaced value (an
+				// operator who left out a field name) arrives here as a key.
 				if !keyPattern.MatchString(v) {
-					return fmt.Errorf("keyring file: invalid JSON key %q: keys are lower-case snake_case", v)
+					return fmt.Errorf("keyring file: invalid JSON object key near byte %d: keys are lower-case snake_case", dec.InputOffset())
 				}
 				if top.keys[v] {
-					return fmt.Errorf("keyring file: duplicate JSON key %q", v)
+					return fmt.Errorf("keyring file: duplicate JSON object key near byte %d", dec.InputOffset())
 				}
 				top.keys[v] = true
 				top.wantKey = false
@@ -461,7 +466,7 @@ func (k *Keyring) CheckSessionPilot() error {
 		return fmt.Errorf("keyring file: this release requires a signing key with id %q holding the legacy server secret: every purpose except web session cookies still uses it", LegacyID)
 	}
 	want := DeriveLegacyEncryptionKey(legacy)
-	if subtle.ConstantTimeCompare(k.encryption.Active().Key, want) != 1 {
+	if subtle.ConstantTimeCompare(k.encryption.Active().Bytes(), want) != 1 {
 		return fmt.Errorf("keyring file: this release requires the active encryption key to be the imported legacy key (derived from the %q signing secret), kept unchanged", LegacyID)
 	}
 	return nil
