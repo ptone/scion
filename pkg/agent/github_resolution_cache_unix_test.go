@@ -19,6 +19,8 @@ package agent
 import (
 	"errors"
 	"os"
+	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -43,5 +45,32 @@ func TestNewGitHubResolutionCache_DirModeFailureIsNotFatal(t *testing.T) {
 	cache.Flush()
 	if f := readCacheFile(t, dir); len(f.Entries) != 1 {
 		t.Fatalf("file has %d entries, want 1", len(f.Entries))
+	}
+}
+
+// Delta-4-class unix change (review r1 F2): the cache save now creates its
+// temp file with privatefs Tree.CreateTemp(Private), which chmods it to
+// 0600, so a umask stricter than 077 no longer leaves the cache file
+// unwritable by its owner. Control: under the default umask it is 0600.
+func TestGitHubResolutionCache_SaveChmodsUnderStrictUmask(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := newTestResolutionCache(dir, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, resolutionCacheFileName)
+
+	cache.putEntry("gh://o/r/a@main", ResolvedSkill{Name: "a"}, true)
+	old := syscall.Umask(0o277)
+	cache.Flush()
+	syscall.Umask(old)
+	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("cache file mode after a save under umask 0277 = %v, %v; want 0600", fi.Mode().Perm(), err)
+	}
+
+	cache.putEntry("gh://o/r/b@main", ResolvedSkill{Name: "b"}, true)
+	cache.Flush()
+	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("control: cache file mode = %v, %v; want 0600", fi.Mode().Perm(), err)
 	}
 }

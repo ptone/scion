@@ -1210,14 +1210,21 @@ func writeConflictBackup(path string, orig []byte) (string, error) {
 			}
 			return "", err
 		}
-		if _, writeErr := backupWriteFile(f, orig); writeErr != nil {
+		_, writeErr := backupWriteFile(f, orig)
+		if writeErr == nil {
+			// Sync while the handle is open, so a flush failure is
+			// still handled by deleting through it.
+			writeErr = f.Sync()
+		}
+		if writeErr != nil {
 			// Delete the partial file through its own handle.
 			_ = tree.RemoveOpen(f)
 			_ = backupCloseFile(f)
 			return "", writeErr
 		}
 		if closeErr := backupCloseFile(f); closeErr != nil {
-			// No handle is left to delete through: remove the name,
+			// Only a close failing after a successful sync gets here, and
+			// no handle is left to delete through: remove the name,
 			// walked without following a reparse point.
 			_ = tree.Remove(name)
 			return "", closeErr

@@ -379,3 +379,60 @@ func TestWindowsCopySettingsBackup_FollowsSourceACL(t *testing.T) {
 		}
 	}
 }
+
+// Row C11, review r1 F1: the protection decision and the read are made on
+// the same handle. A settings name swapped for a link to a private file
+// (after backupSettingsFile's Lstat) yields a Private backup holding those
+// private bytes, never an Inherit copy of them. Control: the same swap to
+// a too-open file yields an Inherit backup of its bytes. And copyBackupFrom,
+// which takes only the handle, decides from the object that handle reads.
+func TestWindowsCopySettingsBackup_DecisionFromReadHandle(t *testing.T) {
+	dir, other := usersInheritDir(t), t.TempDir()
+	otherTree, err := privatefs.OpenTree(other, privatefs.TreeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = otherTree.Close() }()
+	if err := otherTree.WriteFile("credentials.json", []byte("secret"), privatefs.Private); err != nil {
+		t.Fatal(err)
+	}
+	open := filepath.Join(other, "open.yaml")
+	if err := os.WriteFile(open, []byte("open"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wintest.MakeUsersReadable(t, open)
+
+	swapped := filepath.Join(dir, "settings.yaml")
+	wintest.MustSymlink(t, filepath.Join(other, "credentials.json"), swapped)
+	if err := copySettingsBackup(swapped, swapped+".bak", nil); err != nil {
+		t.Fatalf("copySettingsBackup of a name swapped to a private file: %v", err)
+	}
+	mustRead(t, swapped+".bak", "secret")
+	wintest.AssertPrivateSD(t, swapped+".bak")
+
+	control := filepath.Join(dir, "other.yaml")
+	wintest.MustSymlink(t, open, control)
+	if err := copySettingsBackup(control, control+".bak", nil); err != nil {
+		t.Fatalf("control: copySettingsBackup of a name swapped to an open file: %v", err)
+	}
+	mustRead(t, control+".bak", "open")
+	assertInherited(t, control+".bak")
+
+	// The helper sees only the handle: a handle on the private file gives
+	// a Private copy whatever name it is written under.
+	src, err := os.Open(filepath.Join(other, "credentials.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = src.Close() }()
+	tree, err := privatefs.OpenTree(dir, privatefs.TreeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tree.Close() }()
+	if err := copyBackupFrom(tree, src, "open.yaml.bak"); err != nil {
+		t.Fatal(err)
+	}
+	mustRead(t, filepath.Join(dir, "open.yaml.bak"), "secret")
+	wintest.AssertPrivateSD(t, filepath.Join(dir, "open.yaml.bak"))
+}

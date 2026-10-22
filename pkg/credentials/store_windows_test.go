@@ -50,7 +50,7 @@ func TestLoad_RefusesUsersReadableCredentials(t *testing.T) {
 	if !errors.Is(err, privatefs.ErrNotPrivate) {
 		t.Fatalf("Load of a Users-readable credentials file = %v, want ErrNotPrivate", err)
 	}
-	for _, want := range []string{path, wintest.SIDUsers, "Delete the file", "scion hub auth login", "owner-only ACL"} {
+	for _, want := range []string{path, wintest.SIDUsers, "Delete the file", "scion hub auth login", "owner-only ACL", "other hubs"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("refusal %q does not mention %q", err, want)
 		}

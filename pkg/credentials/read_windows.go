@@ -27,7 +27,9 @@ import (
 // and its ACL is verified on the open handle. A file other users can read
 // is REFUSED, not repaired (design row C1r, decision D3): the user deletes
 // it and logs in again, and the next save creates it with an owner-only
-// ACL. A missing file reads as fs.ErrNotExist.
+// ACL. Its contents are never read, so a login (Store) replaces it with a
+// file holding only the new hub: logins to other hubs must be repeated,
+// which the refusal says. A missing file reads as fs.ErrNotExist.
 func readCredentialsFile(path string) ([]byte, error) {
 	tree, err := privatefs.OpenTree(filepath.Dir(path), privatefs.TreeOptions{})
 	if err != nil {
@@ -36,7 +38,7 @@ func readCredentialsFile(path string) ([]byte, error) {
 	defer func() { _ = tree.Close() }()
 	data, err := tree.ReadPrivate(filepath.Base(path), 0)
 	if errors.Is(err, privatefs.ErrNotPrivate) {
-		return nil, fmt.Errorf("refusing to read credentials from %s: %w. Delete the file and log in again with 'scion hub auth login'", path, err)
+		return nil, fmt.Errorf("refusing to read credentials from %s: %w. Delete the file and log in again with 'scion hub auth login'; logins to other hubs stored in it must be repeated too", path, err)
 	}
 	return data, err
 }

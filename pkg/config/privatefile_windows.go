@@ -15,7 +15,6 @@
 package config
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -80,33 +79,42 @@ func mkdirLikeLegacyRoot(scionHome, legacyName, canonicalName string, _ os.FileI
 }
 
 // copySettingsBackup writes backupPath, in the directory of path, as a new
-// file holding a copy of the settings file at path (row C11): Private when
-// path passes CheckPrivate, else Inherit. A private source is read through
-// the verified handle. A partial copy is deleted through its own handle.
+// file holding a copy of the settings file at path (row C11). The source is
+// opened ONCE: the protection decision (sourceProtection: Private when it
+// passes CheckPrivate, else Inherit) and the read are made on that same
+// handle, so whatever object is actually read decides its own protection
+// (security checklist §7.3: no check-then-open). A partial copy is deleted
+// through its own handle.
 func copySettingsBackup(path, backupPath string, _ os.FileInfo) error {
+	if filepath.Dir(backupPath) != filepath.Dir(path) {
+		return fmt.Errorf("settings backup %s is not in the directory of %s", backupPath, path)
+	}
 	tree, err := privatefs.OpenTree(filepath.Dir(path), privatefs.TreeOptions{})
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tree.Close() }()
-	p := privatefs.Inherit
-	var data []byte
-	src, err := tree.OpenPrivate(filepath.Base(path), os.O_RDONLY)
-	switch {
-	case err == nil:
-		p = privatefs.Private
-		data, err = io.ReadAll(src)
-		_ = src.Close()
-	case errors.Is(err, privatefs.ErrNotPrivate):
-		data, err = os.ReadFile(path)
-	}
+	// GENERIC_READ includes READ_CONTROL, so the DACL is read on this
+	// handle too.
+	src, err := os.Open(path)
 	if err != nil {
 		return err
 	}
-	if filepath.Dir(backupPath) != filepath.Dir(path) {
-		return fmt.Errorf("settings backup %s is not in the directory of %s", backupPath, path)
+	defer func() { _ = src.Close() }()
+	return copyBackupFrom(tree, src, filepath.Base(backupPath))
+}
+
+// copyBackupFrom creates name in tree, exclusively, as a copy of the open
+// file src, with the protection src's own handle earns (sourceProtection).
+// It takes no source path: the decision cannot come from another object
+// than the bytes copied.
+func copyBackupFrom(tree *privatefs.Tree, src *os.File, name string) error {
+	p := sourceProtection(src)
+	data, err := io.ReadAll(src)
+	if err != nil {
+		return err
 	}
-	f, err := tree.Create(filepath.Base(backupPath), true, p)
+	f, err := tree.Create(name, true, p)
 	if err != nil {
 		return err
 	}
