@@ -335,8 +335,19 @@ safe stops the command rather than being ignored.
 - **Updating a shared workspace** (pull) fetches from the project's clone URL known to the Hub, not
   from the remote configured in the clone, then fast-forwards the current branch.
 
-Your own git commands in your checkout are not affected. In-container git stays fully flexible: an
-upcoming change gives each agent its own private copy of `.git/config`.
+Your own git commands in your checkout are not affected. Scion also mounts the repository's git
+metadata into agents so that an agent cannot change what git does for you or for other agents: the
+hooks and admin directories (`.git/hooks`, `.git/info`, `.git/objects/info`, and other agents'
+worktree admin directories) are read-only, and each agent gets its own **private copy of
+`.git/config`**, bound read-write over the shared one. In-container git stays fully flexible —
+`git config --local`, `git push -u`, `branch --set-upstream-to` and the like all work inside the
+agent, and their writes land only in the agent's own copy, never in your checkout or another agent's.
+On the Apple runtime, which cannot bind a single private file, the agent's `.git` is read-only
+instead, so in-container `git config --local` and `git push -u` upstream recording do not persist.
+
+On Kubernetes, git projects that share one repository across agents (worktree-per-agent or
+shared-workspace on NFS) are not supported: use a clone-per-agent workspace, where each agent gets
+its own clone of the repository, or run the project on a local or Docker broker.
 
 ---
 
