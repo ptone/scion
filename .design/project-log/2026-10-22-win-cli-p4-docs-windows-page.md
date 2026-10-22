@@ -45,3 +45,16 @@ Design: win-cli-design.md (sha256 7cb5d107…), §7 and §8 Phase 4 ("Docs page"
   (deploy steps are gated to `main`).
 - The docs site was not built locally: `d2` and `node_modules` are not installed in this container. Links and anchors were
   checked by hand. The docs workflow run is the build gate.
+
+## Review r1 (win-cli-rev-p4docs-r1, REQUEST CHANGES) and dispositions
+
+- R1 fixed: added "A Hub with tunnels enabled" (the `hub.conduit` experiment and agents with a Conduit session) under "You need",
+  with links to the experiments reference and port-forwarding#tunnels-from-your-machine-scion-tunnel. Added a "The Hub does not support
+  tunnels" refusal entry (exit 11 text from pkg/tunnelclient/session.go).
+- R2: EM ruling. A dev-time astro build is impossible in the LIGHT envelope: V8 runs out of memory under ulimit -v 8000000, even with
+  --disable-wasm-trap-handler. No 16G request. The gate is the upstream docs CI at landing, and reviewer r1's full hand check of links and
+  anchors is on record.
+- Nits 3-7 fixed: the full hard-link error text; vscode order (check, then write, then launch); per-folder link rule
+  (`run\tunnels` itself is refused); `hub auth` added to the list; "deliberately added to the Windows allowlist".
+- 8 kept as plain wording (EM: docs merge only with or after the p4ci release-matrix change).
+- FYI: "For example:" added before the SSH refusal excerpts (the intermediate-directory form is `open <dir>: not private: ...`).

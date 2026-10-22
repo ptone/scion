@@ -27,6 +27,7 @@ You need:
   scion hub auth login
   ```
 
+- **A Hub with tunnels enabled**, for `scion ssh`, `scion ssh-config` and `scion vscode`: the `hub.conduit` [experiment](/scion/reference/experiments/) turned on at the Hub, and agents with a Conduit session. All three commands connect through `scion tunnel`; see [Tunnels from your machine](/scion/hosted/user/port-forwarding/#tunnels-from-your-machine-scion-tunnel). Without it they fail with `does not support tunnels` (see [The Hub does not support tunnels](#the-hub-does-not-support-tunnels)).
 - **An OpenSSH client named `ssh` on your `PATH`**, for `scion ssh`, `scion ssh-config` and `scion vscode`. Both the Windows OpenSSH client (`ssh.exe`) and Git for Windows' `ssh` work.
 - **For `scion vscode`:** VS Code with its `code` command on your `PATH`, and the **Remote - SSH** extension.
 
@@ -91,7 +92,7 @@ scion vscode my-project/my-agent
 scion vscode my-project/my-agent --path /workspace/sub
 ```
 
-`scion vscode` leaves `~/.ssh/config` alone. It writes the agent's `Host` block and host key to `%USERPROFILE%\.scion\vscode\ssh_config` and `%USERPROFILE%\.scion\vscode\known_hosts`, keeping every other agent's entries, checks the agent with one SSH tunnel, and then runs:
+`scion vscode` leaves `~/.ssh/config` alone. It first checks the agent with one SSH tunnel (if that fails, nothing is written), then writes the agent's `Host` block and host key to `%USERPROFILE%\.scion\vscode\ssh_config` and `%USERPROFILE%\.scion\vscode\known_hosts`, keeping every other agent's entries, and then runs:
 
 ```
 code --user-data-dir %USERPROFILE%\.scion\vscode\user-data --remote ssh-remote+<host> /workspace
@@ -122,13 +123,13 @@ The files themselves are still checked as above. To silence the warning, remove 
 
 ## Supported commands
 
-The Windows build runs these commands, and nothing else. The list is an allowlist: a command added to scion later is unsupported on Windows until it is added here on purpose.
+The Windows build runs these commands, and nothing else. The list is an allowlist: a command added to scion later is unsupported on Windows until it is deliberately added to the Windows allowlist.
 
 - **Agents over the Hub:** `list`, `ssh`, `ssh-config`, `vscode`, `tunnel`, `tunnel status`
 - **Messages:** `message`, `message channels`, `messages`, `messages read`
 - **Conversations:** `conversation` and `conversation list`, `messages`, `create`, `get`, `get-message`, `set-default`, `participants`, `join`, `leave`, `catch-up`; `conversation group` and its `list`, `get`, `create`, `rename`, `delete`, `add`, `remove`
 - **Configuration:** `config` and `config list`, `set`, `get`, `unset`, `validate`, `migrate`, `dir`, `cd-config`, `cd-project`, `schema`
-- **Hub list and login:** `hub`, `hub add`, `hub list`, `hub rename`, `hub remove`, `hub status`, `hub shadow`, `hub auth login`, `hub auth logout`, `hub auth federation-token`
+- **Hub list and login:** `hub`, `hub add`, `hub list`, `hub rename`, `hub remove`, `hub status`, `hub shadow`, `hub auth`, `hub auth login`, `hub auth logout`, `hub auth federation-token`
 - **Hub projects and linking:** `hub projects`, `hub projects info`, `create`, `delete`; `hub link`, `hub unlink`, `hub enable`, `hub disable`
 - **Hub secrets and environment:** `hub secret` and `set`, `get`, `list`, `clear`, `update`; `hub env` and `set`, `get`, `list`, `clear`
 - **Hub administration (Hub API calls):** `hub brokers`, `hub brokers info`, `hub brokers delete`, `hub brokers join-token`, `hub brokers join-token create`; `hub users`, `hub users provision`; `hub invite` and `create`, `list`, `revoke`, `delete`; `hub allow-list` and `add`, `remove`, `list`, `import`; `hub hook` and `list`, `show`, `create`, `update`, `activate`, `delete`; `hub messaging`, `get`, `set`; `hub notifications`, `hub notifications ack`
@@ -162,14 +163,24 @@ On Linux and macOS, scion protects its private files (logins, tokens, per-user s
 
 - **Private files and directories get an owner-only ACL when they are created**, never afterwards: full access for you and SYSTEM only, inheritance from the parent turned off, and you set explicitly as the owner (even in an elevated shell, where Windows would otherwise make Administrators the owner).
 - **Files holding secrets are checked when scion reads them** (`credentials.json`, the cached identities under `hub-profiles`, the tunnel state under `run\tunnels`). A file passes when you own it and its ACL grants access only to you, SYSTEM or Administrators. Administrators are accepted because the default ACL of your user profile includes them. Accounts are compared by SID, never by name.
-- **No links inside private folders.** scion refuses, rather than follows, a symlink or junction in place of `credentials.json`, anywhere below `hub-profiles`, or at or below `run\tunnels`. A link **at or above** those folders is followed, so a `%USERPROFILE%\.scion` that is itself a junction to another NTFS drive works. When scion rewrites a private file such as `context.yaml` and finds a link in its place, it replaces the link with an ordinary private file instead of writing through it.
+- **No links inside private folders.** scion refuses, rather than follows, a symlink or junction in these places: in place of `credentials.json`; anywhere below `hub-profiles`; and at `run\tunnels` or below it. Links higher up are followed: `%USERPROFILE%\.scion` itself, `hub-profiles` itself and `run`. So a `%USERPROFILE%\.scion` that is a junction to another NTFS drive works. When scion rewrites a private file such as `context.yaml` and finds a link in its place, it replaces the link with an ordinary private file instead of writing through it.
 - **Atomic replacement repairs open files.** When scion rewrites a private file you own, it writes a new owner-only file and swaps it in, so a file whose ACL had become too open ends up private again.
 
 `~/.ssh` is the exception to the "no links" rule; see [Dotfile-managed `~/.ssh`](#dotfile-managed-ssh).
 
 ## Refusals and how to fix them
 
-Most of these errors include the path and the SID of the account that has too much access. To see a file's ACL, run `icacls <path>`. To remove another account's access, first turn off inheritance on that file or folder (`icacls <path> /inheritance:d`), then remove the account (`icacls <path> /remove:g *<SID>`).
+### The Hub does not support tunnels
+
+```
+the hub at <hub> does not support tunnels (HTTP <n>)
+```
+
+or `the hub does not support tunnels (...)`.
+
+`scion ssh`, `scion ssh-config` and `scion vscode` reach agents through `scion tunnel`, and this Hub does not offer tunnels (`scion tunnel` exits with code 11). Ask the Hub's administrator to turn on the `hub.conduit` [experiment](/scion/reference/experiments/); the agent also needs a Conduit session. This is a Hub setting, not something to change on Windows.
+
+The other refusals are about file protection. Most of them include the path and the SID of the account that has too much access. To see a file's ACL, run `icacls <path>`. To remove another account's access, first turn off inheritance on that file or folder (`icacls <path> /inheritance:d`), then remove the account (`icacls <path> /remove:g *<SID>`).
 
 ### `credentials.json` is readable by others
 
@@ -192,6 +203,8 @@ For a file (for example in `hub-profiles` or `run\tunnels`), delete it; scion cr
 
 ### An SSH file or folder can be changed by someone else
 
+For example:
+
 ```
 refusing to write <path>: its directory can be changed by another user: not private: <dir> grants access to <SID> (mask 0x...); ...
 refusing to write <path>: not private: <file> is owned by <SID>, which is not the current user <SID>, SYSTEM or Administrators
@@ -202,8 +215,10 @@ The folder holding an SSH file scion writes (or an existing folder on the way to
 ### A file is hard-linked
 
 ```
-refusing <path>: it has 2 names: file has more than one name (hard link)
+refusing to write <path>: refusing <file>: it has 2 names: file has more than one name (hard link)
 ```
+
+For files outside the SSH folders the message starts at `refusing <file>: it has 2 names`.
 
 scion will not write through a hard link, because the same file also lives somewhere else. Replace the hard link with an ordinary file (copy it, delete the original link, and move the copy into place), or make it a symlink, which scion follows.
 
