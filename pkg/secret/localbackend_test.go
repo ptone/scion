@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -1222,7 +1223,8 @@ func TestLocalBackend_DecryptRawValue_NilKeyEncryptedValue(t *testing.T) {
 		t.Errorf("expected ErrNoDecryptionKey, got: %v", err)
 	}
 
-	// Also verify via Resolve: encrypted values should be skipped, not leaked.
+	// Also verify via Resolve: the encrypted value is neither leaked nor
+	// silently skipped; the resolution fails with the typed error.
 	seedSecret(t, s, &store.Secret{
 		ID:             tid("resolve-enc-no-key"),
 		Key:            "LEAKED_SECRET",
@@ -1235,13 +1237,11 @@ func TestLocalBackend_DecryptRawValue_NilKeyEncryptedValue(t *testing.T) {
 
 	ctx := context.Background()
 	resolved, err := backend.Resolve(ctx, "user-1", "", "", nil)
-	if err != nil {
-		t.Fatalf("Resolve failed: %v", err)
+	if !errors.Is(err, ErrResolveDecrypt) || resolved != nil {
+		t.Fatalf("Resolve = %d secrets, %v; want ErrResolveDecrypt", len(resolved), err)
 	}
-	for _, sv := range resolved {
-		if sv.Name == "LEAKED_SECRET" {
-			t.Error("encrypted secret should not appear in resolved secrets when encryption key is nil")
-		}
+	if !strings.Contains(err.Error(), "LEAKED_SECRET (no_decryption_key)") {
+		t.Errorf("error does not name the key and classification: %v", err)
 	}
 }
 

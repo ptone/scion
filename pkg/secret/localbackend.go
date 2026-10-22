@@ -16,6 +16,7 @@ package secret
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -205,6 +206,12 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, projectID, brokerID 
 	// in this codebase, and the reason a stale broker-scoped secret could
 	// silently shadow a project-scoped one regardless of which was meant
 	// to win.)
+	// Decrypt failures are collected and fail the whole resolution
+	// (ptone/scion#1530 §5): a value that cannot be read is never treated
+	// as a missing secret, so no agent starts with an apparently complete
+	// but partial set.
+	var failures []ResolveFailure
+
 	scopes := make([]scopeEntry, 0, 4)
 	if brokerID != "" {
 		scopes = append(scopes, scopeEntry{scope: store.ScopeRuntimeBroker, scopeID: brokerID})
@@ -234,13 +241,15 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, projectID, brokerID 
 			}
 
 			rawValue, err := b.store.GetSecretValue(ctx, s.Key, sc.scope, sc.scopeID)
+			if errors.Is(err, store.ErrNotFound) {
+				continue // deleted since it was listed
+			}
 			if err != nil {
-				continue
+				return nil, err
 			}
 			value, err := b.decryptRawValue(rawValue)
 			if err != nil {
-				slog.Warn("skipping secret: decryption not possible",
-					"key", s.Key, "error", err)
+				failures = append(failures, ResolveFailure{Key: s.Key, Scope: sc.scope, Kind: DecryptFailureKind(err)})
 				continue
 			}
 
@@ -306,13 +315,15 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, projectID, brokerID 
 			}
 
 			rawValue, err := b.store.GetSecretValue(ctx, s.Key, s.Scope, s.ScopeID)
+			if errors.Is(err, store.ErrNotFound) {
+				continue // deleted since it was listed
+			}
 			if err != nil {
-				continue
+				return nil, err
 			}
 			value, err := b.decryptRawValue(rawValue)
 			if err != nil {
-				slog.Warn("skipping progeny secret: decryption not possible",
-					"key", s.Key, "error", err)
+				failures = append(failures, ResolveFailure{Key: s.Key, Scope: s.Scope, Kind: DecryptFailureKind(err)})
 				continue
 			}
 
@@ -346,6 +357,10 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, projectID, brokerID 
 				Value: value,
 			}
 		}
+	}
+
+	if len(failures) > 0 {
+		return nil, newResolveDecryptError(failures)
 	}
 
 	result := make([]SecretWithValue, 0, len(merged))
