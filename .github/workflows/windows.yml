@@ -182,8 +182,7 @@ jobs:
           go vet $pkgs
           # The Windows CLI itself (Phase 3: every client-reachable 4a
           # site compiles for Windows).
-          # TEMP (until 3a fixes pkg/config for Windows; reverted before merge):
-          # go build -o scion.exe ./cmd/scion
+          go build -o scion.exe ./cmd/scion
 
       - name: Test (allowlist, zero skips)
         shell: bash

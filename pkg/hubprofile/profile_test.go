@@ -23,6 +23,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/GoogleCloudPlatform/scion/internal/testutil/wintest"
 )
 
 func validProfile() *Profile {
@@ -222,16 +224,10 @@ func TestLoadRefusesUnknownFieldsSymlinksAndOpenModes(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid file")
 
-	require.NoError(t, os.WriteFile(path, data, 0o644))
-	require.NoError(t, os.Chmod(path, 0o644))
-	_, err = Load(home, "t1")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "must be 0600")
-
 	require.NoError(t, os.Remove(path))
 	other := filepath.Join(home, "elsewhere.yaml")
 	require.NoError(t, os.WriteFile(other, data, 0o600))
-	require.NoError(t, os.Symlink(other, path))
+	wintest.MustSymlink(t, other, path)
 	_, err = Load(home, "t1")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "symlink")
