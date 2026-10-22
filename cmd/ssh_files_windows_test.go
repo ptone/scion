@@ -24,8 +24,10 @@ package cmd
 // same test (security checklist §5).
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -179,31 +181,57 @@ func TestSSHWrite_RefusesForeignWritableParent(t *testing.T) {
 	assertPrivateSD(t, p.userConfig())
 }
 
-// Rule I refuse + control: a ~/.ssh/config owned by another principal
-// (SYSTEM) is refused and left untouched, naming the owner; the same DACL
-// on a config the user owns is replaced by a private file.
+// fakeAdminsGroupSID creates a local group named like Administrators but
+// with a new, non-well-known SID, and returns that SID (looked up here,
+// in the test, only to set it as an owner).
+func fakeAdminsGroupSID(t *testing.T) string {
+	t.Helper()
+	const group = "scion-test-administrators"
+	_ = exec.Command("net", "localgroup", group, "/delete").Run()
+	if out, err := exec.Command("net", "localgroup", group, "/add").CombinedOutput(); err != nil {
+		t.Fatalf("create local group %s (the Windows job runs as an administrator): %v: %s", group, err, out)
+	}
+	t.Cleanup(func() { _ = exec.Command("net", "localgroup", group, "/delete").Run() })
+	sid, _, _, err := windows.LookupSID("", group)
+	require.NoError(t, err)
+	require.False(t, sid.IsWellKnown(windows.WinBuiltinAdministratorsSid) || sid.IsWellKnown(windows.WinLocalSystemSid))
+	return sid.String()
+}
+
+// Rule I refuse + control: a ~/.ssh/config owned by another principal (a
+// local group named like Administrators, not S-1-5-32-544) is refused and
+// left untouched, naming the owner. Accepted (security-lead ruling on
+// review r1 finding 4): the same config owned by SYSTEM or by
+// Administrators, and owned by the user (the control); each is replaced by
+// a private file.
 func TestSSHWrite_RefusesForeignOwnedTarget(t *testing.T) {
 	home := privateHome(t)
 	p := sshPaths{home: home}
 	require.NoError(t, os.MkdirAll(p.sshDir(), 0o700))
-	require.NoError(t, os.WriteFile(p.userConfig(), []byte("Host old\n"), 0o600))
 	u := wintest.UserSID(t)
-	open := fmt.Sprintf("D:P(A;;FA;;;%s)(A;;FR;;;%s)", u, wintest.SIDUsers)
-	wintest.SetDACL(t, p.userConfig(), open)
-	wintest.SetOwner(t, p.userConfig(), wintest.SIDSystem)
-
+	open := fmt.Sprintf("D:P(A;;FA;;;%s)(A;;FA;;;%s)(A;;FR;;;%s)", u, wintest.SIDSystem, wintest.SIDUsers)
+	reset := func(owner string) {
+		t.Helper()
+		_ = os.Remove(p.userConfig())
+		require.NoError(t, os.WriteFile(p.userConfig(), []byte("Host old\n"), 0o600))
+		wintest.SetDACL(t, p.userConfig(), open)
+		wintest.SetOwner(t, p.userConfig(), owner)
+	}
+	foreign := fakeAdminsGroupSID(t)
+	reset(foreign)
 	_, err := ensureSSHIncludeLine(p)
 	require.ErrorIs(t, err, privatefs.ErrNotPrivate)
-	assert.Contains(t, err.Error(), wintest.SIDSystem)
+	assert.Contains(t, err.Error(), foreign)
 	assert.Equal(t, "Host old\n", readTestFile(t, p.userConfig()))
-	assert.Equal(t, wintest.SIDSystem, wintest.ReadSD(t, p.userConfig()).Owner)
+	assert.Equal(t, foreign, wintest.ReadSD(t, p.userConfig()).Owner)
 
-	// Control: owned by the user, same DACL.
-	wintest.SetOwner(t, p.userConfig(), u)
-	changed, err := ensureSSHIncludeLine(p)
-	require.NoError(t, err)
-	assert.True(t, changed)
-	assertPrivateSD(t, p.userConfig())
+	for _, owner := range []string{wintest.SIDSystem, wintest.SIDAdministrators, u} {
+		reset(owner)
+		changed, err := ensureSSHIncludeLine(p)
+		require.NoError(t, err, "owner %s", owner)
+		assert.True(t, changed)
+		assertPrivateSD(t, p.userConfig())
+	}
 }
 
 // Addendum A1 on the relaxed ssh path: a ~/.ssh/config with a second name
@@ -259,4 +287,104 @@ func TestVSCodeFiles_PrivateOnWindows(t *testing.T) {
 	require.Contains(t, blocks, "scion.h.p.a2")
 	assert.Contains(t, blocks["scion.h.p.a2"], `"C:/Program Files/Scion/scion.exe"`)
 	assert.Equal(t, "https://h.example", vscodeBlockHub(blocks["scion.h.p.a2"]), "the quoted --hub reads back")
+}
+
+// Review r1 finding 1 on Windows: ~/.ssh and ~/.scion linked (junction or
+// symlink) to directories OUTSIDE home are followed: ssh-config and vscode
+// write private files into the link targets, and the links are kept.
+// Control: the same writers in a home without links.
+func TestSSHAndVSCodeFollowLinksOutsideHome(t *testing.T) {
+	write := func(t *testing.T, home string) {
+		t.Helper()
+		p := sshPaths{home: home}
+		_, err := regenerateSSHHubFiles(p, regenTestEndpoint, winSSHExe, regenListing(
+			sshListedAgent{"proj", "agent", testSSHPublicKey(t)}))
+		require.NoError(t, err)
+		block, err := renderSSHHostBlockKnown(winSSHExe, "https://h.example", "h", "p", "a1", vscodeKnownHostsRef)
+		require.NoError(t, err)
+		_, err = updateVSCodeFiles(vscodePaths{home: home}, vscodeUpdate{host: "scion.h.p.a1", block: block,
+			key: mustNormKey(t, testSSHPublicKey(t)), endpoint: tunnelclient.NormalizeEndpoint("https://h.example")})
+		require.NoError(t, err)
+	}
+	for _, kind := range []string{"junction", "symlink"} {
+		t.Run(kind, func(t *testing.T) {
+			home := privateHome(t)
+			outside := privateHome(t)
+			for _, d := range []string{"dotfiles-ssh", "big-disk-scion"} {
+				require.NoError(t, os.Mkdir(filepath.Join(outside, d), 0o700))
+				link := filepath.Join(home, map[string]string{"dotfiles-ssh": ".ssh", "big-disk-scion": ".scion"}[d])
+				if kind == "junction" {
+					wintest.MustJunction(t, filepath.Join(outside, d), link)
+				} else {
+					wintest.MustSymlink(t, filepath.Join(outside, d), link)
+				}
+			}
+			write(t, home)
+			for _, f := range []string{
+				filepath.Join(outside, "dotfiles-ssh", "config"),
+				filepath.Join(outside, "dotfiles-ssh", "config.d", "scion-hub"),
+				filepath.Join(outside, "big-disk-scion", "ssh", "known_hosts-hub"),
+				filepath.Join(outside, "big-disk-scion", "vscode", "ssh_config"),
+				filepath.Join(outside, "big-disk-scion", "vscode", "user-data", "User", "settings.json"),
+			} {
+				assertPrivateSD(t, f)
+			}
+			for _, l := range []string{".ssh", ".scion"} {
+				fi, err := os.Lstat(filepath.Join(home, l))
+				require.NoError(t, err)
+				assert.False(t, fi.Mode().IsDir() && fi.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0, "%s is still a link (%v)", l, fi.Mode())
+			}
+		})
+	}
+	plain := privateHome(t)
+	write(t, plain)
+	assertPrivateSD(t, filepath.Join(plain, ".ssh", "config.d", "scion-hub"))
+}
+
+// Review r1 finding 2: scion ssh works when %TMP%/%TEMP% has a space (an
+// account name like "John Smith"). The per-run known_hosts file is created
+// private there and passed as UserKnownHostsFile="C:/.../known_hosts"
+// (quoted, forward slashes); GlobalKnownHostsFile is /dev/null, which
+// Win32-OpenSSH maps to NUL. Refusal + control: a '%' in TMP is refused
+// with a hint naming TMP and TEMP.
+func TestSSHPrepare_SpaceInTempWindows(t *testing.T) {
+	tmp := filepath.Join(privateHome(t), "John Smith", "Temp")
+	require.NoError(t, os.MkdirAll(tmp, 0o700))
+	t.Setenv("TMP", tmp)
+	t.Setenv("TEMP", tmp)
+	hub := twoProjectHub(t, "tok")
+	env, _, _ := newSSHTestEnv(t, privateHome(t), hub)
+	env.exe = winSSHExe
+	args, cleanup, err := prepareSSH(context.Background(), env, "a-b/c", nil)
+	require.NoError(t, err)
+	var kh, proxy string
+	for _, a := range args {
+		if v, ok := strings.CutPrefix(a, "UserKnownHostsFile="); ok {
+			kh = v
+		}
+		if v, ok := strings.CutPrefix(a, "ProxyCommand="); ok {
+			proxy = v
+		}
+	}
+	require.True(t, strings.HasPrefix(kh, `"`) && strings.HasSuffix(kh, `"`), kh)
+	assert.NotContains(t, kh, `\`)
+	path := filepath.FromSlash(strings.Trim(kh, `"`))
+	assert.Contains(t, path, "John Smith")
+	assertPrivateSD(t, path)
+	assert.Contains(t, args, "GlobalKnownHostsFile=/dev/null")
+	assert.True(t, strings.HasPrefix(proxy, `"C:/Program Files/Scion/scion.exe" tunnel`), proxy)
+	cleanup()
+	assert.NoFileExists(t, path)
+
+	bad := filepath.Join(privateHome(t), "100%")
+	require.NoError(t, os.MkdirAll(bad, 0o700))
+	t.Setenv("TMP", bad)
+	t.Setenv("TEMP", bad)
+	_, cleanup, err = prepareSSH(context.Background(), env, "a-b/c", nil)
+	if cleanup != nil {
+		cleanup()
+	}
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "set TMP and TEMP")
+	assert.NotContains(t, err.Error(), "TMPDIR")
 }

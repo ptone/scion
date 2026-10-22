@@ -595,7 +595,10 @@ func (t *tokenFile) writeExact(content string) error {
 		err = cerr
 		if err != nil {
 			// The data may not have reached the file: remove it by name,
-			// as before (the handle is gone).
+			// as before (the handle is gone). Tree.Remove works relative
+			// to the pinned directory handle and refuses a reparse point,
+			// so it can only remove whatever is at that name in that
+			// directory at this moment (normally our file).
 			_ = t.t.Remove(filepath.Base(t.path))
 		}
 	}

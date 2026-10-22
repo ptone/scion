@@ -40,12 +40,14 @@ import (
 //     replaced; the link itself is kept.
 //   - The target's parent directory is opened (it pins the directory) and
 //     must pass CheckNoForeignWriters on that handle: a parent another
-//     principal can write to is refused, because that principal could swap
-//     the file after us.
+//     principal can write to (or owns, other than SYSTEM or Administrators)
+//     is refused, because that principal could swap the file after us.
 //   - An existing target is opened relative to the parent's handle (a
 //     reparse point there is refused). It must have one name (addendum A1)
-//     and be owned by the current user; otherwise it is refused. A
-//     user-owned target whose ACL is too open is replaced, not refused.
+//     and be owned by the current user, SYSTEM or Administrators (the
+//     CheckNoForeignWriters owner set, a security-lead ruling); otherwise
+//     it is refused. Such a target whose ACL is too open is replaced, not
+//     refused.
 //   - The new content goes to a temporary file created relative to the
 //     parent's handle with the private descriptor, and is renamed over the
 //     target through that handle. The old descriptor is never copied: a
@@ -113,9 +115,10 @@ func ReplaceFollowing(path string, data []byte, newMode fs.FileMode, tempPrefix 
 
 // checkReplaceTarget applies rule I to the existing file leaf directly below
 // the anchor, if there is one: it must not be a reparse point, must have
-// one name, and must be owned by the current user. A user-owned file that
-// fails CheckNoForeignWriters is accepted here: the caller replaces it with
-// a private one (the repair). A missing file is accepted (a new file).
+// one name, and must be owned by the current user, SYSTEM or
+// Administrators. Such a file that fails CheckNoForeignWriters only on its
+// ACL is accepted here: the caller replaces it with a private one (the
+// repair). A missing file is accepted (a new file).
 func (t *Tree) checkReplaceTarget(leaf string) error {
 	h, _, err := t.openLeaf(leaf, windows.READ_CONTROL|windows.FILE_READ_ATTRIBUTES, windows.FILE_OPEN,
 		windows.FILE_NON_DIRECTORY_FILE, nil)
@@ -134,13 +137,14 @@ func (t *Tree) checkReplaceTarget(leaf string) error {
 	if werr == nil {
 		return nil
 	}
-	owned, err := OwnedByCurrentUser(f)
+	owned, err := ownerAllowed(f)
 	if err != nil {
 		return fmt.Errorf("%w (%v)", werr, err)
 	}
 	if !owned {
 		return werr
 	}
-	// Owned by the current user but too open: replaced by a private file.
+	// Owned by the current user (or SYSTEM or Administrators, see
+	// CheckNoForeignWriters) but too open: replaced by a private file.
 	return nil
 }

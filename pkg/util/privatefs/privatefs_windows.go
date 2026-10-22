@@ -1009,8 +1009,10 @@ func (id *identity) allowedSID(sid *windows.SID) bool {
 // checkACL is the shared predicate of CheckPrivate and
 // CheckNoForeignWriters. A non-zero writeMask restricts the foreign-SID
 // rule to allow ACEs granting any of those rights; zero means any allow
-// ACE for a foreign SID fails.
-func checkACL(f *os.File, writeMask uint32) error {
+// ACE for a foreign SID fails. anyAllowedOwner accepts SYSTEM and
+// Administrators as owners besides the current user (the integrity-only
+// rule); otherwise the owner must be the current user.
+func checkACL(f *os.File, writeMask uint32, anyAllowedOwner bool) error {
 	id, err := getIdentity()
 	if err != nil {
 		return err
@@ -1024,7 +1026,10 @@ func checkACL(f *os.File, writeMask uint32) error {
 		// redirectors). EqualSid on a NULL SID would crash: refuse.
 		return fmt.Errorf("%w: %s has no owner in its security descriptor", ErrNotPrivate, f.Name())
 	}
-	if !owner.Equals(id.user) {
+	if anyAllowedOwner && !id.allowedSID(owner) {
+		return fmt.Errorf("%w: %s is owned by %s, which is not the current user %s, SYSTEM or Administrators", ErrNotPrivate, f.Name(), owner.String(), id.user.String())
+	}
+	if !anyAllowedOwner && !owner.Equals(id.user) {
 		return fmt.Errorf("%w: %s is owned by %s, not the current user %s", ErrNotPrivate, f.Name(), owner.String(), id.user.String())
 	}
 	if dacl == nil {
@@ -1066,7 +1071,7 @@ func checkACL(f *os.File, writeMask uint32) error {
 // (they can take ownership anyway) but never granted on create. The
 // handle needs READ_CONTROL access.
 func CheckPrivate(f *os.File) error {
-	return checkACL(f, 0)
+	return checkACL(f, 0, false)
 }
 
 // fileDeleteChild is FILE_DELETE_CHILD (not defined in x/sys/windows).
@@ -1079,14 +1084,41 @@ const foreignWriteMask = windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA | fi
 	windows.WRITE_OWNER | windows.GENERIC_WRITE | windows.GENERIC_ALL | windows.MAXIMUM_ALLOWED
 
 // CheckNoForeignWriters is the integrity-only variant of CheckPrivate: the
-// owner is the current user, every ACE is a plain allow or deny ACE, and no
+// owner is the current user, SYSTEM (S-1-5-18) or Administrators
+// (S-1-5-32-544), compared by SID; every ACE is a plain allow or deny ACE;
+// and no
 // allow ACE grants a write right (FILE_WRITE_DATA/FILE_ADD_FILE,
 // FILE_APPEND_DATA/FILE_ADD_SUBDIRECTORY, FILE_DELETE_CHILD, FILE_WRITE_EA,
 // FILE_WRITE_ATTRIBUTES, DELETE, WRITE_DAC, WRITE_OWNER, GENERIC_WRITE,
 // GENERIC_ALL, MAXIMUM_ALLOWED) to a SID other than the current user,
 // SYSTEM or Administrators.
+//
+// The owner set is a security-lead ruling (win-cli Phase 3b review r1,
+// finding 4), consistent with ruling C (Administrators accepted on verify,
+// by well-known SID only): an elevated shell makes Administrators the
+// default owner of what it creates (ssh-keygen, an editor), admins and
+// SYSTEM already own the machine and can take ownership anyway, and
+// Win32-OpenSSH itself accepts these owners for its config. Refusing them
+// would push users to loosen ACLs on key material. CheckPrivate (the
+// confidentiality rule) is unchanged: its owner must be the current user.
+// The SIDs are token-derived or well-known (CreateWellKnownSid), never
+// looked up by name.
 func CheckNoForeignWriters(f *os.File) error {
-	return checkACL(f, foreignWriteMask)
+	return checkACL(f, foreignWriteMask, true)
+}
+
+// ownerAllowed reports whether the open handle's owner is the current
+// user, SYSTEM or Administrators (the CheckNoForeignWriters owner set).
+func ownerAllowed(f *os.File) (bool, error) {
+	id, err := getIdentity()
+	if err != nil {
+		return false, err
+	}
+	owner, _, err := securityOf(f)
+	if err != nil {
+		return false, err
+	}
+	return owner != nil && id.allowedSID(owner), nil
 }
 
 // OwnedByCurrentUser reports whether the open handle's owner is the current

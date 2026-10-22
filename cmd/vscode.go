@@ -78,12 +78,21 @@ const (
 // directory.
 type vscodePaths struct{ home string }
 
-func (p vscodePaths) dir() string        { return filepath.Join(p.home, ".scion", "vscode") }
+// The directories scion vscode creates, relative to the home directory
+// (slash-separated, constant), for ensureSSHDir.
+const (
+	vscodeDirRel         = ".scion/vscode"
+	vscodeSettingsDirRel = vscodeDirRel + "/user-data/User"
+)
+
+func (p vscodePaths) dir() string        { return filepath.Join(p.home, filepath.FromSlash(vscodeDirRel)) }
 func (p vscodePaths) sshConfig() string  { return filepath.Join(p.dir(), "ssh_config") }
 func (p vscodePaths) knownHosts() string { return filepath.Join(p.dir(), "known_hosts") }
 func (p vscodePaths) lockFile() string   { return filepath.Join(p.dir(), ".lock") }
 func (p vscodePaths) userData() string   { return filepath.Join(p.dir(), "user-data") }
-func (p vscodePaths) settings() string   { return filepath.Join(p.userData(), "User", "settings.json") }
+func (p vscodePaths) settings() string {
+	return filepath.Join(p.home, filepath.FromSlash(vscodeSettingsDirRel), "settings.json")
+}
 
 var (
 	vscodeFolder string
@@ -265,7 +274,7 @@ type vscodeUpdate struct {
 // concurrent runs keep each other's entries. It reports whether u.host had
 // a different pin before.
 func updateVSCodeFiles(p vscodePaths, u vscodeUpdate) (changed bool, err error) {
-	if err := ensureSSHDir(p.home, p.dir()); err != nil {
+	if err := ensureSSHDir(p.home, vscodeDirRel); err != nil {
 		return false, fmt.Errorf("creating %s: %w", p.dir(), err)
 	}
 	unlock, err := lockVSCodeDir(p.lockFile())
@@ -496,7 +505,7 @@ func mergeVSCodeSettings(m map[string]any, configFile string) {
 // the vscode directory lock.
 func ensureVSCodeSettings(p vscodePaths) error {
 	path := p.settings()
-	if err := ensureSSHDir(p.home, filepath.Dir(path)); err != nil {
+	if err := ensureSSHDir(p.home, vscodeSettingsDirRel); err != nil {
 		return fmt.Errorf("creating %s: %w", filepath.Dir(path), err)
 	}
 	data, err := os.ReadFile(path)

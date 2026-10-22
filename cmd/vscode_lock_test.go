@@ -41,7 +41,7 @@ func setVSCodeLockWait(t *testing.T, d time.Duration) {
 func TestLockVSCodeDir_TimesOut(t *testing.T) {
 	setVSCodeLockWait(t, 50*time.Millisecond)
 	p := vscodePaths{home: t.TempDir()}
-	require.NoError(t, ensureSSHDir(p.home, p.dir()))
+	require.NoError(t, ensureSSHDir(p.home, vscodeDirRel))
 	unlock, err := lockVSCodeDir(p.lockFile())
 	require.NoError(t, err)
 
@@ -63,7 +63,7 @@ func TestLockVSCodeDir_TimesOut(t *testing.T) {
 func TestLockVSCodeDir_WaitsForRelease(t *testing.T) {
 	setVSCodeLockWait(t, 10*time.Second)
 	p := vscodePaths{home: t.TempDir()}
-	require.NoError(t, ensureSSHDir(p.home, p.dir()))
+	require.NoError(t, ensureSSHDir(p.home, vscodeDirRel))
 	unlock, err := lockVSCodeDir(p.lockFile())
 	require.NoError(t, err)
 	got := make(chan error, 1)

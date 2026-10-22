@@ -354,7 +354,7 @@ func readPrivateFile(home, rel, path string) ([]byte, error) {
 	case errors.Is(err, privatefs.ErrReparsePoint):
 		return nil, fmt.Errorf("refusing %s: it is a symlink or junction: %w", path, err)
 	case errors.Is(err, privatefs.ErrNotPrivate):
-		return nil, fmt.Errorf("refusing %s: others can read it; it must be private to you (%s): %w", path, privatefs.Describe(privatefs.Private), err)
+		return nil, fmt.Errorf("refusing %s: it is not private to you; it must be private to you (%s): %w", path, privatefs.Describe(privatefs.Private), err)
 	}
 	return data, err
 }

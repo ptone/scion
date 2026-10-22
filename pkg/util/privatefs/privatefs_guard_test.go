@@ -19,6 +19,7 @@ package privatefs
 
 import (
 	"bufio"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -320,12 +321,109 @@ func f() { windows.LookupSID("", "Administrators"); _ = name == "BUILTIN\\Users"
 		t.Fatalf("detector on the sample found %v, want the call and both literals", got)
 	}
 
+	// replace_windows.go holds rule I, whose owner set (SYSTEM,
+	// Administrators) is by SID only too (security-lead ruling, Phase 3b).
+	for _, name := range []string{"privatefs_windows.go", "replace_windows.go"} {
+		fset = token.NewFileSet()
+		f, err = parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := nameLookups(fset, f); len(got) > 0 {
+			t.Fatalf("%s uses account names:\n%s", name, strings.Join(got, "\n"))
+		}
+	}
+}
+
+// pathOpeners are calls that resolve a path by name (following links or
+// not): none may appear on the walk below a Tree's anchor, where every
+// component is opened relative to its parent's handle.
+var pathOpeners = map[string]bool{
+	"CreateFile": true, "CreateDirectory": true, "GetFileAttributes": true, "GetFileAttributesEx": true,
+	"Open": true, "OpenFile": true, "Stat": true, "Lstat": true, "Mkdir": true, "MkdirAll": false,
+	"ReadDir": true, "Readlink": true, "EvalSymlinks": true, "Resolve": true,
+	"openFollow": true, "createAnchor": true, "OpenTree": true,
+}
+
+// walkFuncs is the MkdirAll path below the anchor (also the walk of every
+// other Tree operation): MkdirAll, walk, openDirComp, openDirAt, mkdirAt.
+var walkFuncs = []string{"MkdirAll", "walk", "openDirComp", "openDirAt", "mkdirAt"}
+
+// handleWalkViolations reports, for the walk functions in file, any call to
+// a path-based opener, and any ntCreate whose RootDirectory argument is a
+// literal 0 (an absolute, by-name open). It also returns how many walk
+// functions and ntCreate calls it inspected.
+func handleWalkViolations(fset *token.FileSet, file *ast.File) (bad []string, funcs, ntCreates int) {
+	want := map[string]bool{}
+	for _, n := range walkFuncs {
+		want[n] = true
+	}
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil || !want[fn.Name.Name] {
+			continue
+		}
+		funcs++
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			var name string
+			switch f := call.Fun.(type) {
+			case *ast.Ident:
+				name = f.Name
+			case *ast.SelectorExpr:
+				name = f.Sel.Name
+			}
+			if pathOpeners[name] {
+				bad = append(bad, fmt.Sprintf("%s %s calls %s", fset.Position(call.Pos()), fn.Name.Name, name))
+			}
+			if name == "ntCreate" {
+				ntCreates++
+				if lit, ok := call.Args[0].(*ast.BasicLit); ok && lit.Value == "0" {
+					bad = append(bad, fmt.Sprintf("%s %s calls ntCreate with RootDirectory 0", fset.Position(call.Pos()), fn.Name.Name))
+				}
+			}
+			return true
+		})
+	}
+	return bad, funcs, ntCreates
+}
+
+// TestTreeWalkIsHandleRelative: the property ensureSSHDir relies on (brief
+// addendum (b), as revised by the security lead): every component below a
+// Tree's anchor, on the MkdirAll path, is opened relative to its parent's
+// handle (ntCreate with a RootDirectory), and no path-based open appears
+// anywhere on that path. Behavioural tests: the junction/symlink refusal and
+// FollowLinks tests, and cmd's TestEnsureSSHDir_* tests.
+func TestTreeWalkIsHandleRelative(t *testing.T) {
+	// Positive control: the detector flags a path open and a root-less
+	// ntCreate in a walk function, and ignores other functions.
+	const sample = `package p
+func walk() { windows.CreateFile(nil, 0, 0, nil, 0, 0, 0); ntCreate(0, "x") }
+func openDirAt(parent int) { ntCreate(parent, "x") }
+func other() { os.Open("x") }
+`
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "sample.go", sample, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bad, funcs, nts := handleWalkViolations(fset, f); len(bad) != 2 || funcs != 2 || nts != 2 {
+		t.Fatalf("detector on the sample: %v, %d functions, %d ntCreate calls; want 2 violations, 2, 2", bad, funcs, nts)
+	}
+
 	fset = token.NewFileSet()
 	f, err = parser.ParseFile(fset, "privatefs_windows.go", nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := nameLookups(fset, f); len(got) > 0 {
-		t.Fatalf("privatefs_windows.go uses account names:\n%s", strings.Join(got, "\n"))
+	bad, funcs, nts := handleWalkViolations(fset, f)
+	if funcs != len(walkFuncs) || nts == 0 {
+		t.Fatalf("privatefs_windows.go: found %d of the walk functions %v and %d ntCreate calls: the guard would pass vacuously", funcs, walkFuncs, nts)
+	}
+	if len(bad) > 0 {
+		t.Fatalf("the walk below a Tree's anchor must open every component relative to its parent's handle:\n%s", strings.Join(bad, "\n"))
 	}
 }

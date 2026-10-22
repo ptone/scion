@@ -24,8 +24,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"golang.org/x/sys/windows"
 
 	"github.com/GoogleCloudPlatform/scion/internal/testutil/wintest"
 )
@@ -243,20 +247,47 @@ func TestReplaceFollowing_RefusesForeignWritableParent(t *testing.T) {
 	}
 }
 
-// Rule I refuse + control: a target owned by someone else is refused and
-// left untouched; a user-owned target with the same DACL is replaced.
+// fakeAdminsGroupSID creates a local group named like Administrators
+// ("scion-test-administrators", a new, non-well-known SID; the builtin
+// name itself belongs to S-1-5-32-544) and returns its SID. The SID is
+// looked up here, in the test, only to set it as an owner: the code under
+// test compares SIDs and never names.
+func fakeAdminsGroupSID(t *testing.T) string {
+	t.Helper()
+	const group = "scion-test-administrators"
+	_ = exec.Command("net", "localgroup", group, "/delete").Run()
+	if out, err := exec.Command("net", "localgroup", group, "/add").CombinedOutput(); err != nil {
+		t.Fatalf("create local group %s (the Windows job runs as an administrator): %v: %s", group, err, out)
+	}
+	t.Cleanup(func() { _ = exec.Command("net", "localgroup", group, "/delete").Run() })
+	sid, _, _, err := windows.LookupSID("", group)
+	if err != nil {
+		t.Fatalf("look up the test group's SID: %v", err)
+	}
+	if sid.IsWellKnown(windows.WinBuiltinAdministratorsSid) || sid.IsWellKnown(windows.WinLocalSystemSid) {
+		t.Fatal("the test group resolved to a well-known SID")
+	}
+	return sid.String()
+}
+
+// Rule I refuse + control: a target owned by another principal (a local
+// group named like Administrators, but not S-1-5-32-544) is refused and
+// left untouched, naming its SID; a user-owned target with the same DACL
+// is replaced.
 func TestReplaceFollowing_RefusesForeignOwnedTarget(t *testing.T) {
 	dir := replaceDir(t)
 	u := wintest.UserSID(t)
+	foreignSID := fakeAdminsGroupSID(t)
 	open := fmt.Sprintf("D:P(A;;FA;;;%s)(A;;FR;;;%s)", u, wintest.SIDUsers)
 	foreign := filepath.Join(dir, "foreign")
 	if err := os.WriteFile(foreign, []byte("old"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	wintest.SetDACL(t, foreign, open)
-	wintest.SetOwner(t, foreign, wintest.SIDSystem)
-	if err := ReplaceFollowing(foreign, []byte("new"), 0o600, ".tmp-"); !errors.Is(err, ErrNotPrivate) {
-		t.Fatalf("foreign-owned target: %v, want ErrNotPrivate", err)
+	wintest.SetOwner(t, foreign, foreignSID)
+	err := ReplaceFollowing(foreign, []byte("new"), 0o600, ".tmp-")
+	if !errors.Is(err, ErrNotPrivate) || !strings.Contains(err.Error(), foreignSID) {
+		t.Fatalf("target owned by %s: %v, want ErrNotPrivate naming the SID", foreignSID, err)
 	}
 	if got := readString(t, foreign); got != "old" {
 		t.Fatalf("the foreign file changed: %q", got)
@@ -270,6 +301,49 @@ func TestReplaceFollowing_RefusesForeignOwnedTarget(t *testing.T) {
 		t.Fatalf("control: user-owned target: %v", err)
 	}
 	assertPrivateSD(t, owned)
+}
+
+// Security-lead ruling (review r1 finding 4): for the integrity-only rule,
+// SYSTEM (S-1-5-18) and Administrators (S-1-5-32-544) are accepted as
+// owners of the target and of its parent directory, by SID. A too-open
+// target they own is replaced by a private one. Refusal side: a parent
+// owned by a local group merely NAMED like Administrators is refused.
+// CheckPrivate is unchanged: it still refuses those owners.
+func TestReplaceFollowing_AcceptsSystemAndAdminsOwners(t *testing.T) {
+	u := wintest.UserSID(t)
+	for _, owner := range []string{wintest.SIDSystem, wintest.SIDAdministrators} {
+		t.Run(owner, func(t *testing.T) {
+			dir := replaceDir(t)
+			target := filepath.Join(dir, "config")
+			if err := os.WriteFile(target, []byte("old"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			wintest.SetDACL(t, target, fmt.Sprintf("D:P(A;;FA;;;%s)(A;;FA;;;%s)(A;;FR;;;%s)", u, wintest.SIDSystem, wintest.SIDUsers))
+			wintest.SetOwner(t, target, owner)
+			if err := checkPath(t, target); !errors.Is(err, ErrNotPrivate) {
+				t.Fatalf("CheckPrivate of a %s-owned file: %v, want ErrNotPrivate (unchanged)", owner, err)
+			}
+			if err := ReplaceFollowing(target, []byte("new"), 0o600, ".tmp-"); err != nil {
+				t.Fatalf("target owned by %s: %v", owner, err)
+			}
+			assertPrivateSD(t, target)
+
+			wintest.SetOwner(t, dir, owner)
+			if err := ReplaceFollowing(filepath.Join(dir, "other"), []byte("x"), 0o600, ".tmp-"); err != nil {
+				t.Fatalf("parent owned by %s: %v", owner, err)
+			}
+		})
+	}
+	dir := replaceDir(t)
+	fake := fakeAdminsGroupSID(t)
+	wintest.SetOwner(t, dir, fake)
+	if err := ReplaceFollowing(filepath.Join(dir, "x"), []byte("x"), 0o600, ".tmp-"); !errors.Is(err, ErrNotPrivate) || !strings.Contains(err.Error(), fake) {
+		t.Fatalf("parent owned by the look-alike group %s: %v, want ErrNotPrivate naming it", fake, err)
+	}
+	wintest.SetOwner(t, dir, u)
+	if err := ReplaceFollowing(filepath.Join(dir, "x"), []byte("x"), 0o600, ".tmp-"); err != nil {
+		t.Fatalf("control: user-owned parent: %v", err)
+	}
 }
 
 // Addendum A1 on the relaxed path: a hard-linked target is refused (not

@@ -146,7 +146,7 @@ func TestListSSHIncludeFiles(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, files)
 
-	require.NoError(t, ensureSSHDir(home, p.includeDir()))
+	require.NoError(t, ensureSSHDir(home, sshIncludeDirRel))
 	require.NoError(t, os.WriteFile(p.includeFile("myhub"), []byte(renderSSHIncludeFile("https://hub.example.com", "myhub", nil)), 0o600))
 	require.NoError(t, os.WriteFile(p.includeFile("bare"), []byte("Host x\n"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(p.includeDir(), sshTempPrefix+"scion-myhub-123"), []byte("partial"), 0o600))
@@ -175,13 +175,33 @@ func TestEnsureSSHDir(t *testing.T) {
 	home := t.TempDir()
 	require.NoError(t, os.Mkdir(filepath.Join(home, ".ssh"), 0o755))
 	require.NoError(t, os.Chmod(filepath.Join(home, ".ssh"), 0o755))
-	require.NoError(t, ensureSSHDir(home, filepath.Join(home, ".ssh", "config.d")))
-	require.NoError(t, ensureSSHDir(home, filepath.Join(home, ".scion", "ssh")))
+	require.NoError(t, ensureSSHDir(home, sshIncludeDirRel))
+	require.NoError(t, ensureSSHDir(home, sshKnownHostsDirRel))
 	assert.Equal(t, fs.FileMode(0o755), fileMode(t, filepath.Join(home, ".ssh")))
 	assert.Equal(t, fs.FileMode(0o700), fileMode(t, filepath.Join(home, ".ssh", "config.d")))
 	assert.Equal(t, fs.FileMode(0o700), fileMode(t, filepath.Join(home, ".scion")))
 	assert.Equal(t, fs.FileMode(0o700), fileMode(t, filepath.Join(home, ".scion", "ssh")))
+	// rel is validated per component: no absolute path, no "..".
 	assert.Error(t, ensureSSHDir(home, "/elsewhere"))
+	assert.Error(t, ensureSSHDir(home, "../elsewhere"))
+	assert.Error(t, ensureSSHDir(home, ".ssh/../../elsewhere"))
+}
+
+// The constant relative directories name the same directories as the path
+// helpers, so ensureSSHDir creates what the writers then use.
+func TestSSHDirRelsMatchPaths(t *testing.T) {
+	home := t.TempDir()
+	p, v := sshPaths{home: home}, vscodePaths{home: home}
+	for rel, path := range map[string]string{
+		sshDirRel:            p.sshDir(),
+		sshIncludeDirRel:     p.includeDir(),
+		sshKnownHostsDirRel:  p.knownHostsDir(),
+		vscodeDirRel:         v.dir(),
+		vscodeSettingsDirRel: filepath.Dir(v.settings()),
+	} {
+		assert.Equal(t, path, filepath.Join(home, filepath.FromSlash(rel)), rel)
+	}
+	assert.Equal(t, filepath.Join(v.userData(), "User", "settings.json"), v.settings())
 }
 
 // writeFileAtomic replaces the file through a rename (a new inode), gives a
@@ -336,19 +356,19 @@ func TestRenderSSHHostBlock(t *testing.T) {
 	assert.Equal(t, want, got)
 }
 
-// setSSHQuoteForCmd selects the ProxyCommand quoting form for one test.
-func setSSHQuoteForCmd(t *testing.T, forCmd bool) {
+// setSSHQuoteForWindows selects the ProxyCommand quoting form for one test.
+func setSSHQuoteForWindows(t *testing.T, forCmd bool) {
 	t.Helper()
-	prev := sshQuoteForCmd
-	sshQuoteForCmd = forCmd
-	t.Cleanup(func() { sshQuoteForCmd = prev })
+	prev := sshQuoteForWindows
+	sshQuoteForWindows = forCmd
+	t.Cleanup(func() { sshQuoteForWindows = prev })
 }
 
 // The Windows ProxyCommand quoting (from miller79/scion#189): backslashes
 // become forward slashes, and a word with a space or a shell character is
 // double-quoted. Runs on every OS (the form is a variable).
 func TestSSHShellQuoteForCmd(t *testing.T) {
-	setSSHQuoteForCmd(t, true)
+	setSSHQuoteForWindows(t, true)
 	assert.Equal(t, `C:/Users/me/bin/scion.exe`, sshShellQuote(`C:\Users\me\bin\scion.exe`))
 	assert.Equal(t, `"C:/Program Files/Scion/scion.exe"`, sshShellQuote(`C:\Program Files\Scion\scion.exe`))
 	assert.Equal(t, "https://hub.example.com:8443", sshShellQuote("https://hub.example.com:8443"))
@@ -357,8 +377,34 @@ func TestSSHShellQuoteForCmd(t *testing.T) {
 	assert.Equal(t, `C:/Program Files/x`, sshShellUnquote(sshShellQuote(`C:\Program Files\x`)))
 }
 
+// UserKnownHostsFile values (review r1 finding 2): unix refuses
+// whitespace and '%' (hint: TMPDIR); the Windows form forward-slashes the
+// path, quotes it when it has a space, and refuses '%', '"' and control
+// characters (hint: TMP and TEMP). Runs on every OS (the form is a
+// variable).
+func TestSSHKnownHostsOptionValue(t *testing.T) {
+	setSSHQuoteForWindows(t, false)
+	v, err := sshKnownHostsOptionValue("/tmp/scion-ssh-1/known_hosts")
+	require.NoError(t, err)
+	assert.Equal(t, "/tmp/scion-ssh-1/known_hosts", v)
+	_, err = sshKnownHostsOptionValue("/tmp/a b/known_hosts")
+	require.ErrorContains(t, err, "TMPDIR")
+
+	setSSHQuoteForWindows(t, true)
+	v, err = sshKnownHostsOptionValue(`C:\Users\John Smith\AppData\Local\Temp\scion-ssh-1\known_hosts`)
+	require.NoError(t, err)
+	assert.Equal(t, `"C:/Users/John Smith/AppData/Local/Temp/scion-ssh-1/known_hosts"`, v)
+	v, err = sshKnownHostsOptionValue(`C:\Users\me\AppData\Local\Temp\scion-ssh-1\known_hosts`)
+	require.NoError(t, err)
+	assert.Equal(t, `C:/Users/me/AppData/Local/Temp/scion-ssh-1/known_hosts`, v)
+	for _, bad := range []string{`C:\100%\known_hosts`, `C:\a"b\known_hosts`, "C:\\a\x01\\known_hosts"} {
+		_, err = sshKnownHostsOptionValue(bad)
+		require.ErrorContains(t, err, "TMP and TEMP", bad)
+	}
+}
+
 func TestSSHShellQuote(t *testing.T) {
-	setSSHQuoteForCmd(t, false)
+	setSSHQuoteForWindows(t, false)
 	assert.Equal(t, "/usr/local/bin/scion", sshShellQuote("/usr/local/bin/scion"))
 	assert.Equal(t, "https://hub.example.com:8443", sshShellQuote("https://hub.example.com:8443"))
 	assert.Equal(t, "'/Applications/My Tools/scion'", sshShellQuote("/Applications/My Tools/scion"))
@@ -473,7 +519,7 @@ func TestNormalizeSSHHostKey(t *testing.T) {
 func TestListSSHIncludeFiles_IgnoresNonSlugHeaderLabel(t *testing.T) {
 	home := t.TempDir()
 	p := sshPaths{home: home}
-	require.NoError(t, ensureSSHDir(home, p.includeDir()))
+	require.NoError(t, ensureSSHDir(home, sshIncludeDirRel))
 	content := sshHeaderGeneratedTag + "\n" + sshHeaderEndpointKey + "https://hub.example.com\n" + sshHeaderLabelKey + "../x\n"
 	require.NoError(t, os.WriteFile(p.includeFile("hub"), []byte(content), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(p.includeDir(), "scion-Not.A.Slug"), []byte(content), 0o600))
@@ -545,7 +591,7 @@ func TestRegenerateSSHHubFiles_IncompleteListingWritesNothing(t *testing.T) {
 func TestRegenerateSSHHubFiles_OtherHubUntouchedAndReported(t *testing.T) {
 	home := t.TempDir()
 	p := sshPaths{home: home}
-	require.NoError(t, ensureSSHDir(home, p.includeDir()))
+	require.NoError(t, ensureSSHDir(home, sshIncludeDirRel))
 	other := p.includeFile("old")
 	otherContent := renderSSHIncludeFile("https://old.example.org", "old", map[string]string{
 		"scion.old.p.a": mustRenderSSHHostBlock(t, "/bin/scion", "https://old.example.org", "old", "p", "a"),

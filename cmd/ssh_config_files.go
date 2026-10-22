@@ -33,7 +33,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/tunnelclient"
-	"github.com/GoogleCloudPlatform/scion/pkg/util/pathcanon"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 )
 
@@ -62,10 +61,22 @@ type sshPaths struct {
 	home string
 }
 
-func (p sshPaths) sshDir() string        { return filepath.Join(p.home, ".ssh") }
-func (p sshPaths) userConfig() string    { return filepath.Join(p.sshDir(), "config") }
-func (p sshPaths) includeDir() string    { return filepath.Join(p.sshDir(), "config.d") }
-func (p sshPaths) knownHostsDir() string { return filepath.Join(p.home, ".scion", "ssh") }
+// The directories ssh-config creates, relative to the home directory
+// (slash-separated, constant): ensureSSHDir takes these, never a path.
+const (
+	sshDirRel           = ".ssh"
+	sshIncludeDirRel    = ".ssh/config.d"
+	sshKnownHostsDirRel = ".scion/ssh"
+)
+
+func (p sshPaths) sshDir() string     { return filepath.Join(p.home, filepath.FromSlash(sshDirRel)) }
+func (p sshPaths) userConfig() string { return filepath.Join(p.sshDir(), "config") }
+func (p sshPaths) includeDir() string {
+	return filepath.Join(p.home, filepath.FromSlash(sshIncludeDirRel))
+}
+func (p sshPaths) knownHostsDir() string {
+	return filepath.Join(p.home, filepath.FromSlash(sshKnownHostsDirRel))
+}
 
 func (p sshPaths) includeFile(label string) string {
 	return filepath.Join(p.includeDir(), sshIncludePrefix+label)
@@ -255,25 +266,29 @@ func resolveSSHHubLabel(endpoint string, u *url.URL, files []sshIncludeFileInfo)
 // execution via ProxyCommand. The same writer and directory rule serve
 // ~/.scion/ssh and ~/.scion/vscode, which ssh and VS Code read the same way.
 
-// ensureSSHDir creates dir and any missing parents below stop, private
-// (mode 0700 on unix; an owner-only ACL on Windows). Existing directories
-// are left as they are, and existing links on the way (a dotfile manager's
-// ~/.ssh) are followed: see the note above. Containment is decided by
-// pathcanon.Within on canonical forms.
-func ensureSSHDir(stop, dir string) error {
-	in, err := pathcanon.Within(stop, dir)
-	if err != nil || !in {
-		return fmt.Errorf("%s is not under %s", dir, stop)
-	}
-	// Lexical: it only names the components to create below stop.
-	rel, err := filepath.Rel(stop, dir) //winsec:not-containment containment is decided by pathcanon.Within above
-	if err != nil {
-		return fmt.Errorf("%s is not under %s", dir, stop)
-	}
-	if rel == "." {
-		return nil
-	}
-	t, err := privatefs.OpenTree(stop, privatefs.TreeOptions{FollowLinks: true})
+// ensureSSHDir creates the directory rel below home, and any missing
+// parents, private (mode 0700 on unix; an owner-only ACL on Windows).
+// Existing directories are left as they are, and existing links on the way
+// are followed, wherever they lead (a dotfile manager's ~/.ssh or a
+// ~/.scion moved to another disk): see the note above.
+//
+// rel is one of the constant relative paths of sshPaths and vscodePaths
+// (sshDirRel, sshIncludeDirRel, sshKnownHostsDirRel, vscodeDirRel,
+// vscodeSettingsDirRel), never a caller-supplied path, so there is nothing
+// to contain: Tree.MkdirAll opens every component relative to its
+// parent's handle (no path-based open on this path) and validates each
+// one (pathcanon.ValidName: no "..", no absolute or alias forms).
+//
+// There is deliberately no pathcanon.Within here (design §3.5 I1 as
+// corrected in review r1, finding 1, accepted by the security lead as "a
+// correction rather than a relaxation"). The location check was a proxy:
+// it resolves links, so it refused exactly the linked layouts FollowLinks
+// exists for. The property it stood in for (nobody else can change what
+// ssh and VS Code will read) is enforced by rule I on the resolved handles
+// of every file written below these directories (writeFileAtomic,
+// privatefs.ReplaceFollowing), and a rule I failure is a returned error.
+func ensureSSHDir(home, rel string) error {
+	t, err := privatefs.OpenTree(home, privatefs.TreeOptions{FollowLinks: true})
 	if err != nil {
 		return err
 	}
@@ -315,7 +330,7 @@ func hasSSHIncludeLine(content string) bool {
 // ensureSSHIncludeLine adds the scion Include line at the top of ~/.ssh/config
 // once. It reports whether the file changed.
 func ensureSSHIncludeLine(p sshPaths) (bool, error) {
-	if err := ensureSSHDir(p.home, p.sshDir()); err != nil {
+	if err := ensureSSHDir(p.home, sshDirRel); err != nil {
 		return false, err
 	}
 	data, err := os.ReadFile(p.userConfig())
@@ -431,17 +446,17 @@ func renderSSHIncludeFile(endpoint, label string, blocks map[string]string) stri
 	return b.String()
 }
 
-// sshQuoteForCmd reports whether ProxyCommand words are quoted for Windows
-// OpenSSH, which runs a ProxyCommand through cmd.exe rather than a POSIX
-// shell. It is a variable so tests can exercise both forms. (From
-// miller79/scion#189.)
-var sshQuoteForCmd = runtime.GOOS == "windows"
+// sshQuoteForWindows reports whether ProxyCommand words are quoted for a
+// Windows ssh client (sshCmdQuote) rather than for a POSIX shell. It is a
+// variable so tests can exercise both forms. (From miller79/scion#189,
+// where it was named sshQuoteForCmd.)
+var sshQuoteForWindows = runtime.GOOS == "windows"
 
 // sshShellQuote quotes s for the shell ssh runs a ProxyCommand with, and
 // doubles '%' so ssh does not expand it as a token.
 func sshShellQuote(s string) string {
 	s = strings.ReplaceAll(s, "%", "%%")
-	if sshQuoteForCmd {
+	if sshQuoteForWindows {
 		return sshCmdQuote(s)
 	}
 	safe := s != ""
@@ -457,14 +472,23 @@ func sshShellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// sshCmdQuote quotes s for a Windows ssh client's ProxyCommand. Windows
-// OpenSSH runs it without a shell, but Git for Windows' ssh runs it with
-// /bin/sh, which drops unquoted backslashes, so backslashes become forward
-// slashes, which both accept in a Windows path. A word of path-safe
-// characters, including a drive colon, is then left as is; anything else is
-// wrapped in double quotes. A Windows path cannot contain a double quote,
-// and endpoints and slugs are validated before they get here. (From
-// miller79/scion#189.)
+// sshCmdQuote quotes s for a Windows ssh client's ProxyCommand. No
+// cmd.exe is involved with either client, so '%' needs no cmd escaping
+// (ssh's own %% token escape is applied by sshShellQuote):
+//   - Win32-OpenSSH runs the expanded ProxyCommand without a shell: it
+//     posix_spawnp's the command line (sshconnect.c ssh_proxy_connect,
+//     FORK_NOT_SUPPORTED branch, PowerShell/openssh-portable latestw_all
+//     274893f8), and CreateProcess splits it with the C runtime's rules, so
+//     double quotes group a word with spaces.
+//   - Git for Windows' ssh runs it with /bin/sh, which drops unquoted
+//     backslashes.
+//
+// So backslashes become forward slashes, which both accept in a Windows
+// path. A word of path-safe characters, including a drive colon, is left
+// as is; anything else is wrapped in double quotes, which both clients
+// read as one word. A Windows path cannot contain a double quote, and
+// endpoints and slugs are validated before they get here. (From
+// miller79/scion#189; the name is kept from there.)
 func sshCmdQuote(s string) string {
 	s = strings.ReplaceAll(s, `\`, "/")
 	safe := s != ""
@@ -762,10 +786,10 @@ func regenerateSSHHubFiles(p sshPaths, hub, exe string, l sshAgentListing) (*ssh
 // The known-hosts file is written first, so an installed block never lacks
 // its pin.
 func writeSSHHubPlan(p sshPaths, res *sshRegenResult) error {
-	if err := ensureSSHDir(p.home, p.knownHostsDir()); err != nil {
+	if err := ensureSSHDir(p.home, sshKnownHostsDirRel); err != nil {
 		return err
 	}
-	if err := ensureSSHDir(p.home, p.includeDir()); err != nil {
+	if err := ensureSSHDir(p.home, sshIncludeDirRel); err != nil {
 		return err
 	}
 	if err := writeFileAtomic(res.knownHostsFile, []byte(res.knownContent), sshFileMode); err != nil {
