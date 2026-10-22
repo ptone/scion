@@ -1143,11 +1143,11 @@ type provisionedWorktreeRepoRootContextKey struct{}
 // ContextWithGitClone / ContextWithSharedWorkspace: broker-local, never on
 // the wire.
 //
-// pkg/agent/run.go's Start consumes it (ProvisionedWorktreeRepoRootFromContext)
-// to set RunConfig.RepoRoot directly, skipping detectRepoRoot's "an explicit
-// workspace skips git detection" rule — that rule exists for a user's own
-// --workspace override and must not swallow the broker's own
-// provisioning. This doc is the canonical statement of that rationale; other
+// pkg/agent/run.go's Start consumes it (ProvisionedWorktreeRepoRootFromContext,
+// via resolveStartRepoRoot) to set RunConfig.RepoRoot directly, rather than
+// from the agent directory's recorded repository root — a broker-provisioned
+// worktree is authoritative for this dispatch. This doc is the canonical
+// statement of that rationale; other
 // call sites point back here.
 //
 // The value is never a ScionConfig field (populated by unmarshaling

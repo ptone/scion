@@ -1755,6 +1755,9 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			if _, err := os.Stat(absWorkspace); os.IsNotExist(err) {
 				return "", "", nil, fmt.Errorf("workspace path does not exist: %s", absWorkspace)
 			}
+			if err := refuseWorkspaceInScionDir(projectDir, absWorkspace); err != nil {
+				return "", "", nil, err
+			}
 			workspaceSource = absWorkspace
 			agentWorkspace = ""
 			explicitWorkspace = true
@@ -1764,6 +1767,9 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			projectRoot := resolveProjectRoot(settings, projectDir)
 			resolved, err := resolveWorkspaceSubdir(projectRoot, workspace)
 			if err != nil {
+				return "", "", nil, err
+			}
+			if err := refuseWorkspaceInScionDir(projectDir, resolved); err != nil {
 				return "", "", nil, err
 			}
 			workspaceSource = resolved
@@ -3322,36 +3328,6 @@ type provisionedWorktreeState struct {
 	// only when agentDir is outside every mount of the agent; a record
 	// without a known source is not used (readRepoRootRecord).
 	Source string `json:"source,omitempty"`
-}
-
-// writeProvisionedWorktreeRepoRoot writes repoRoot as a broker record to
-// agentDir's state file (atomic write via writeAgentInfoFile) without the
-// mount check writeRepoRootRecord applies. Production code writes through
-// writeRepoRootRecord; this is kept for tests that set up a record
-// directly.
-func writeProvisionedWorktreeRepoRoot(agentDir, repoRoot string) error {
-	data, err := json.Marshal(provisionedWorktreeState{RepoRoot: repoRoot, Source: repoRootSourceBroker})
-	if err != nil {
-		return err
-	}
-	return writeAgentInfoFile(filepath.Join(agentDir, provisionedWorktreeStateFile), data, 0o644)
-}
-
-// readProvisionedWorktreeRepoRoot reads the value written by
-// writeProvisionedWorktreeRepoRoot, or "" if the file is absent or doesn't
-// parse. Never returns an error: a missing or unreadable state file is
-// exactly equivalent to "no broker-provisioned worktree recorded", which is
-// the correct, common state for every agent that isn't one.
-func readProvisionedWorktreeRepoRoot(agentDir string) string {
-	data, err := os.ReadFile(filepath.Join(agentDir, provisionedWorktreeStateFile))
-	if err != nil {
-		return ""
-	}
-	var state provisionedWorktreeState
-	if err := json.Unmarshal(data, &state); err != nil {
-		return ""
-	}
-	return state.RepoRoot
 }
 
 // persistProvisionedWorktreeRepoRootIfValid validates ctxRepoRoot against

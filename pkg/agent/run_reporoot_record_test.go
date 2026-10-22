@@ -42,14 +42,16 @@ func TestTrustedProjectRepoRoot(t *testing.T) {
 	}
 
 	// Neither the environment nor the repository configuration is read.
-	t.Setenv("GIT_DIR", filepath.Join(root, "elsewhere"))
-	gitCfg := filepath.Join(repo, ".git", "config")
-	data, _ := os.ReadFile(gitCfg)
-	mustWrite(t, gitCfg, string(data)+"[core]\n\tworktree = "+root+"\n")
-	if got := trustedProjectRepoRoot(deep); got != eval(t, repo) {
-		t.Errorf("with GIT_DIR and core.worktree set: got %q, want %q", got, eval(t, repo))
-	}
-	os.Unsetenv("GIT_DIR")
+	t.Run("ignores env and core.worktree", func(t *testing.T) {
+		t.Setenv("GIT_DIR", filepath.Join(root, "elsewhere"))
+		t.Setenv("GIT_WORK_TREE", root)
+		gitCfg := filepath.Join(repo, ".git", "config")
+		data, _ := os.ReadFile(gitCfg)
+		mustWrite(t, gitCfg, string(data)+"[core]\n\tworktree = "+root+"\n")
+		if got := trustedProjectRepoRoot(deep); got != eval(t, repo) {
+			t.Errorf("with GIT_DIR, GIT_WORK_TREE and core.worktree set: got %q, want %q", got, eval(t, repo))
+		}
+	})
 
 	gitfile := mkdirAllT(t, filepath.Join(root, "linked", ".scion"))
 	mustWrite(t, filepath.Join(root, "linked", ".git"), "gitdir: "+filepath.Join(repo, ".git")+"\n")
@@ -64,8 +66,12 @@ func TestTrustedProjectRepoRoot(t *testing.T) {
 		t.Errorf(".git with commondir: got %q, want \"\"", got)
 	}
 
-	if got := trustedProjectRepoRoot(mkdirAllT(t, filepath.Join(root, "plain"))); got != "" && got != eval(t, root) {
-		t.Errorf("no repository: got %q", got)
+	// A directory with no repository at or above it in the temp tree. t.TempDir
+	// is not itself a git repo, so the walk reaches the filesystem root and
+	// returns "".
+	plain := mkdirAllT(t, filepath.Join(t.TempDir(), "plain"))
+	if got := trustedProjectRepoRoot(plain); got != "" {
+		t.Errorf("no repository: got %q, want \"\"", got)
 	}
 }
 
@@ -183,5 +189,75 @@ func TestResolveStartRepoRoot_Conditions(t *testing.T) {
 	}
 	if _, ok := readRepoRootRecord(agentDir); ok {
 		t.Error("a backfill record was written with agentDir inside a configured volume")
+	}
+}
+
+// R5 behaviour change: a project whose checkout is a linked worktree (its
+// top-level .git is a gitfile, not a directory) is refused at provision,
+// because the repository root cannot be identified without reading git
+// metadata the container could edit. detectRepoRoot used to accept it.
+func TestProvision_RefusesLinkedWorktreeProject(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	root := t.TempDir()
+	base := filepath.Join(root, "base")
+	setupGitRepo(t, mkdirAllT(t, base))
+	linked := filepath.Join(root, "linked")
+	if out, err := exec.Command("git", "-C", base, "worktree", "add", "-b", "feature", linked).CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v\n%s", err, out)
+	}
+	// <linked>/.git is a gitfile, so trustedProjectRepoRoot stops and the
+	// cross-check refuses.
+	if _, err := checkProvisionRepoRoot(filepath.Join(linked, ".scion")); err == nil {
+		t.Error("checkProvisionRepoRoot: expected a refusal for a linked-worktree checkout")
+	}
+	if got := trustedProjectRepoRoot(filepath.Join(linked, ".scion")); got != "" {
+		t.Errorf("trustedProjectRepoRoot of a linked worktree = %q, want \"\"", got)
+	}
+}
+
+// R2(b): an explicit workspace inside the project's .scion directory is
+// refused at provision.
+func TestRefuseWorkspaceInScionDir(t *testing.T) {
+	root := t.TempDir()
+	scion := mkdirAllT(t, filepath.Join(root, "proj", ".scion"))
+	agents := mkdirAllT(t, filepath.Join(scion, "agents"))
+	agentDir := mkdirAllT(t, filepath.Join(agents, "a"))
+	outside := mkdirAllT(t, filepath.Join(root, "proj", "work"))
+	for _, ws := range []string{scion, agents, agentDir} {
+		if err := refuseWorkspaceInScionDir(scion, ws); err == nil {
+			t.Errorf("refuseWorkspaceInScionDir(%q): want a refusal", ws)
+		}
+	}
+	if err := refuseWorkspaceInScionDir(scion, outside); err != nil {
+		t.Errorf("refuseWorkspaceInScionDir(outside) = %v, want nil", err)
+	}
+}
+
+// R1: a planted provision record naming another repository is not used
+// (its root does not match the trusted walk from the project), so RepoRoot
+// is empty.
+func TestResolveStartRepoRoot_RejectsRecordNotMatchingProject(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	setupGitRepo(t, mkdirAllT(t, repo))
+	other := filepath.Join(root, "other")
+	setupGitRepo(t, mkdirAllT(t, other))
+	projectDir := mkdirAllT(t, filepath.Join(repo, ".scion"))
+	agentDir := mkdirAllT(t, filepath.Join(projectDir, "agents", "a"))
+	ws := mkdirAllT(t, filepath.Join(agentDir, "workspace"))
+
+	// A planted provision record naming the other repository, which is not
+	// an ancestor of the per-agent workspace, so the mount check passes.
+	if err := writeRepoRootRecord(agentDir, eval(t, other), repoRootSourceProvision, nil); err != nil {
+		t.Fatal(err)
+	}
+	in := startRepoRootInput{agentName: "a", agentDir: agentDir, projectDir: projectDir, workspace: ws}
+	got, _ := resolveStartRepoRoot(in)
+	if got == eval(t, other) {
+		t.Errorf("resolveStartRepoRoot used the planted record naming the other repository: %q", got)
+	}
+	if got != eval(t, repo) && got != "" {
+		t.Errorf("resolveStartRepoRoot = %q, want the project root %q or \"\"", got, eval(t, repo))
 	}
 }

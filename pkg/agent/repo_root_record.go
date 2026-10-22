@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -245,8 +246,9 @@ type startRepoRootInput struct {
 //     only while agentDir is outside every mount of the agent now
 //     (agentDirOutsideAgentMounts), computed for the root it names:
 //     - a broker record once validatedWorktreeRepoRoot confirms it;
-//     - a provision or backfill record as it is, except on an
-//     explicit-workspace start, which keeps "".
+//     - a provision or backfill record only when its root still equals
+//     trustedProjectRepoRoot(projectDir), and not on an explicit-workspace
+//     start.
 //  3. With no usable record, an explicit-workspace start, or a project
 //     that is not a git project, gets "".
 //  4. Otherwise (a git project provisioned before records were written),
@@ -273,6 +275,17 @@ func resolveStartRepoRoot(in startRepoRootInput) (repoRoot, brokerCandidate stri
 		if in.explicit {
 			return "", ""
 		}
+		// A provision or backfill record is honoured only when its root
+		// still equals the trusted walk from the project directory. The
+		// provenance field is not a proof — anything that can write the
+		// record can write the source too — so the root is checked against
+		// the project here, not trusted on the source alone. The walk runs
+		// no git and reads no config or environment.
+		if !samePath(rec.RepoRoot, trustedProjectRepoRoot(in.projectDir)) {
+			slog.Warn("start: the recorded repository root does not match the project; it is not used",
+				"agent", in.agentName)
+			return "", ""
+		}
 		return rec.RepoRoot, ""
 	}
 	if in.explicit || !isGitWorkspaceProject(in.projectDir) {
@@ -297,4 +310,30 @@ func resolveStartRepoRoot(in startRepoRootInput) (repoRoot, brokerCandidate stri
 	slog.Info("start: recorded the project's repository root for an agent provisioned without one",
 		"agent", in.agentName, "repo_root", root)
 	return root, ""
+}
+
+// refuseWorkspaceInScionDir rejects an explicit workspace that resolves at or
+// below the project's own .scion directory (which holds agents' own
+// directories and configuration, never a workspace). Such a workspace would
+// mount the agents tree read-write and is not covered by the in-project
+// agents-dir mask, since the agents directory would not sit at
+// <workspace>/.scion/agents. projectDir is the resolved .scion directory (or
+// its parent); both spellings are handled.
+func refuseWorkspaceInScionDir(projectDir, workspace string) error {
+	scionDir := projectDir
+	if filepath.Base(projectDir) != config.DotScion {
+		scionDir = filepath.Join(projectDir, config.DotScion)
+	}
+	rs, err := filepath.EvalSymlinks(scionDir)
+	if err != nil {
+		return nil // no .scion directory to be inside
+	}
+	rw, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		return nil // the workspace existence check elsewhere handles this
+	}
+	if pathUnder(rw, rs) {
+		return fmt.Errorf("workspace %q is inside the project's .scion directory (%s), which holds agent state, not a workspace; choose a workspace outside it", workspace, scionDir)
+	}
+	return nil
 }

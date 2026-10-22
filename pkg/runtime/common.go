@@ -540,7 +540,8 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		// project root) is kept from showing that project's in-project
 		// agents directory, which holds other agents' own directories
 		// (plainWorkspaceAgentsMaskTarget).
-		if target, ok := plainWorkspaceAgentsMaskTarget(config, "/workspace"); ok {
+		requirePlainAgentsDir := config.RuntimeName == appleContainerRuntimeName
+		if target, ok := plainWorkspaceAgentsMaskTarget(config, "/workspace", requirePlainAgentsDir); ok {
 			sharedWorkspaceAgentsMask = target
 		}
 	}
@@ -900,6 +901,12 @@ func isHubManagedWorktreeBase(repoRoot string) bool {
 // never legitimately needs to write them (identity and credentials are
 // supplied via $HOME/.gitconfig, not .git/config, and there is no
 // in-container `git config --local` write).
+//
+// objects/ stays writable on purpose (in-container commit) and is shared
+// across the project's agents, so this six-path list is not, on its own,
+// complete hardening of the shared store (ptone/scion#4611). The durable fix
+// is a read-only shared store as an alternate plus a writable per-container
+// store.
 //
 // Each subpath is mounted read-only only if it currently exists, so a
 // freshly-cloned base without a config.worktree (the common case —
