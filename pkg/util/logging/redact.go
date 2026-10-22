@@ -60,6 +60,11 @@ func RedactQuery(rawQuery string) string {
 // RedactedArtifactPath is how every artifact request path is logged.
 const RedactedArtifactPath = "/api/v1/artifacts/" + redactedValue
 
+// RedactedPath is how a request path is logged that is still encoded
+// when decoding stops, so that neither an artifact nor a port view path
+// can be ruled out.
+const RedactedPath = "/" + redactedValue
+
 // RedactedPortViewPath is how every port view request path is logged.
 const RedactedPortViewPath = "/api/v1/portview/" + redactedValue
 
@@ -89,10 +94,18 @@ func portViewPath(p string) bool { return pathMentions(p, "portview") }
 // holds a '%' when decoding stops (it does not decode, or is encoded more
 // than maxUnescapeRounds times) also counts as a match.
 func pathMentions(p, word string) bool {
+	found, undecoded := scanPath(p, word)
+	return found || undecoded
+}
+
+// scanPath decodes p (lowercased) up to maxUnescapeRounds times. found
+// reports whether word appears at any step; undecoded whether a '%' is
+// left when decoding stops.
+func scanPath(p, word string) (found, undecoded bool) {
 	s := strings.ToLower(p)
 	for range maxUnescapeRounds {
 		if strings.Contains(s, word) {
-			return true
+			return true, false
 		}
 		u, err := url.PathUnescape(s)
 		if err != nil || u == s {
@@ -100,7 +113,7 @@ func pathMentions(p, word string) bool {
 		}
 		s = strings.ToLower(u)
 	}
-	return strings.Contains(s, word) || strings.Contains(s, "%")
+	return strings.Contains(s, word), strings.Contains(s, "%")
 }
 
 // credentialQuery reports whether a raw query (or fragment) may carry an
@@ -132,13 +145,25 @@ func isPortViewURL(u *url.URL) bool {
 }
 
 // redactedPath returns the path u is logged with when it must not be
-// logged as is (RedactedArtifactPath or RedactedPortViewPath), or "".
+// logged as is (RedactedArtifactPath, RedactedPortViewPath, or
+// RedactedPath when it is still encoded and names neither), or "".
 func redactedPath(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	word := func(w string) bool {
+		a, _ := scanPath(u.Path, w)
+		b, _ := scanPath(u.EscapedPath(), w)
+		return a || b
+	}
 	switch {
-	case isArtifactURL(u):
+	case word("artifacts"):
 		return RedactedArtifactPath
-	case isPortViewURL(u):
+	case word("portview"):
 		return RedactedPortViewPath
+	case isArtifactURL(u) || isPortViewURL(u):
+		// Still encoded when decoding stopped: neither route can be told.
+		return RedactedPath
 	}
 	return ""
 }

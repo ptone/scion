@@ -354,3 +354,19 @@ func TestSubPath(t *testing.T) {
 		}
 	}
 }
+
+// TestStillEncodedPathRedactedNeutral: a path that keeps an undecodable
+// sequence is logged as RedactedPath, not as an artifact or port view
+// path, and is not traced.
+func TestStillEncodedPathRedactedNeutral(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/agents/a1/x%2525zz", nil)
+	if got := RequestPath(r); got != RedactedPath {
+		t.Errorf("RequestPath = %q, want %q", got, RedactedPath)
+	}
+	if got := RedactURL(r.URL); got != RedactedPath {
+		t.Errorf("RedactURL = %q, want %q", got, RedactedPath)
+	}
+	if !IsCredentialURL(r.URL) {
+		t.Error("IsCredentialURL = false")
+	}
+}
