@@ -27,12 +27,12 @@ import (
 	"slices"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/tunnelclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/filelock"
 )
 
 const (
@@ -313,21 +313,23 @@ func updateVSCodeFiles(p vscodePaths, u vscodeUpdate) (changed bool, err error) 
 	return hadPin && old != u.key, nil
 }
 
+// vscodeLockWait bounds the wait for the vscode directory lock (design
+// §3.7 delta 2: it was unbounded). A var so tests can shorten it.
+var vscodeLockWait = 2 * time.Minute
+
 // lockVSCodeDir takes an exclusive advisory lock on path, which works
-// across processes (as for context.yaml).
+// across processes (filelock: flock on unix, LockFileEx on Windows, a
+// private lock file for mode 0600). It waits at most vscodeLockWait and
+// then fails with an error wrapping filelock.ErrTimeout.
 func lockVSCodeDir(path string) (func(), error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, sshFileMode)
+	l, err := filelock.Acquire(path, sshFileMode, vscodeLockWait)
 	if err != nil {
-		return nil, fmt.Errorf("open lock %s: %w", path, err)
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		_ = f.Close()
+		if errors.Is(err, filelock.ErrTimeout) {
+			return nil, fmt.Errorf("lock %s: another scion vscode is still updating these files after %s: %w", path, vscodeLockWait, err)
+		}
 		return nil, fmt.Errorf("lock %s: %w", path, err)
 	}
-	return func() {
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-		_ = f.Close()
-	}, nil
+	return l.Unlock, nil
 }
 
 // vscodeBlockHub returns the hub endpoint, normalized, that a Host block's
@@ -351,6 +353,8 @@ func vscodeBlockHub(block string) string {
 func sshShellUnquote(w string) string {
 	if len(w) >= 2 && strings.HasPrefix(w, "'") && strings.HasSuffix(w, "'") {
 		w = strings.ReplaceAll(w[1:len(w)-1], `'\''`, "'")
+	} else if len(w) >= 2 && strings.HasPrefix(w, `"`) && strings.HasSuffix(w, `"`) {
+		w = w[1 : len(w)-1]
 	}
 	return strings.ReplaceAll(w, "%%", "%")
 }

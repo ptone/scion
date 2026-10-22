@@ -23,6 +23,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"unicode"
@@ -32,6 +33,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/tunnelclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/pathcanon"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 )
 
 // File layout managed by scion ssh-config, one include file and one
@@ -239,82 +242,55 @@ func resolveSSHHubLabel(endpoint string, u *url.URL, files []sshIncludeFileInfo)
 	return "", fmt.Errorf("hub label %q and %q are both used by other scion include files in %s", preferred, fallback, filepath.Dir(files[0].path))
 }
 
-// ensureSSHDir creates dir and any missing parents below stop with mode
-// 0700. Existing directories keep their mode.
+// ~/.ssh is deliberately NOT a refuse-reparse tree (design §3.5 I1-I2,
+// security lead ruling I). Dotfile managers (chezmoi, stow, yadm) symlink
+// ~/.ssh or the files in it, so refusing links there would break
+// legitimate setups. Instead links are followed and the trust decision is
+// made on handles after following (privatefs.ReplaceFollowing): the
+// target's parent directory and an existing target must pass
+// CheckNoForeignWriters; a foreign-owned target or a foreign-writable
+// parent is refused; a target the user owns but left too open is replaced
+// by a private temporary file through a handle rename; the old security
+// descriptor is never copied, because a writable ssh config is code
+// execution via ProxyCommand. The same writer and directory rule serve
+// ~/.scion/ssh and ~/.scion/vscode, which ssh and VS Code read the same way.
+
+// ensureSSHDir creates dir and any missing parents below stop, private
+// (mode 0700 on unix; an owner-only ACL on Windows). Existing directories
+// are left as they are, and existing links on the way (a dotfile manager's
+// ~/.ssh) are followed: see the note above. Containment is decided by
+// pathcanon.Within on canonical forms.
 func ensureSSHDir(stop, dir string) error {
-	rel, err := filepath.Rel(stop, dir)
-	if err != nil || strings.HasPrefix(rel, "..") {
+	in, err := pathcanon.Within(stop, dir)
+	if err != nil || !in {
 		return fmt.Errorf("%s is not under %s", dir, stop)
 	}
-	cur := stop
-	for _, part := range strings.Split(rel, string(filepath.Separator)) {
-		if part == "." || part == "" {
-			continue
-		}
-		cur = filepath.Join(cur, part)
-		if err := os.Mkdir(cur, sshDirMode); err != nil {
-			if errors.Is(err, fs.ErrExist) {
-				continue
-			}
-			return err
-		}
-		// Mkdir is subject to the umask; set the mode explicitly.
-		if err := os.Chmod(cur, sshDirMode); err != nil {
-			return err
-		}
+	// Lexical: it only names the components to create below stop.
+	rel, err := filepath.Rel(stop, dir) //winsec:not-containment containment is decided by pathcanon.Within above
+	if err != nil {
+		return fmt.Errorf("%s is not under %s", dir, stop)
 	}
-	return nil
+	if rel == "." {
+		return nil
+	}
+	t, err := privatefs.OpenTree(stop, privatefs.TreeOptions{FollowLinks: true})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = t.Close() }()
+	return t.MkdirAll(rel, privatefs.ForMode(sshDirMode))
 }
 
 // writeFileAtomic replaces path with data through a temporary file in the
 // same directory and a rename, so readers see the old or the new file and
-// never a partial one. An existing file keeps its mode; a new file gets
-// newMode. When path is a symlink, the file it points to is replaced and the
-// link is kept.
+// never a partial one. When path is a symlink, the file it points to is
+// replaced and the link is kept (see the ~/.ssh note above). On unix an
+// existing file keeps its mode and a new file gets newMode; on Windows the
+// result is always private, a foreign-owned target or a foreign-writable
+// directory is refused, and a hard-linked target is refused on both
+// (privatefs.ReplaceFollowing).
 func writeFileAtomic(path string, data []byte, newMode fs.FileMode) error {
-	target := path
-	if fi, err := os.Lstat(path); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
-		resolved, err := filepath.EvalSymlinks(path)
-		if err != nil {
-			return err
-		}
-		target = resolved
-	}
-	mode := newMode
-	if fi, err := os.Stat(target); err == nil {
-		mode = fi.Mode().Perm()
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(target), sshTempPrefix+filepath.Base(target)+"-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	ok := false
-	defer func() {
-		if !ok {
-			_ = tmp.Close()
-			_ = os.Remove(tmpName)
-		}
-	}()
-	if err := tmp.Chmod(mode); err != nil {
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpName, target); err != nil {
-		return err
-	}
-	ok = true
-	return nil
+	return privatefs.ReplaceFollowing(path, data, newMode, sshTempPrefix)
 }
 
 // hasSSHIncludeLine reports whether content already has the scion Include
@@ -455,10 +431,19 @@ func renderSSHIncludeFile(endpoint, label string, blocks map[string]string) stri
 	return b.String()
 }
 
+// sshQuoteForCmd reports whether ProxyCommand words are quoted for Windows
+// OpenSSH, which runs a ProxyCommand through cmd.exe rather than a POSIX
+// shell. It is a variable so tests can exercise both forms. (From
+// miller79/scion#189.)
+var sshQuoteForCmd = runtime.GOOS == "windows"
+
 // sshShellQuote quotes s for the shell ssh runs a ProxyCommand with, and
 // doubles '%' so ssh does not expand it as a token.
 func sshShellQuote(s string) string {
 	s = strings.ReplaceAll(s, "%", "%%")
+	if sshQuoteForCmd {
+		return sshCmdQuote(s)
+	}
 	safe := s != ""
 	for _, r := range s {
 		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && !strings.ContainsRune("@%+=:,./_-", r) {
@@ -470,6 +455,29 @@ func sshShellQuote(s string) string {
 		return s
 	}
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// sshCmdQuote quotes s for a Windows ssh client's ProxyCommand. Windows
+// OpenSSH runs it without a shell, but Git for Windows' ssh runs it with
+// /bin/sh, which drops unquoted backslashes, so backslashes become forward
+// slashes, which both accept in a Windows path. A word of path-safe
+// characters, including a drive colon, is then left as is; anything else is
+// wrapped in double quotes. A Windows path cannot contain a double quote,
+// and endpoints and slugs are validated before they get here. (From
+// miller79/scion#189.)
+func sshCmdQuote(s string) string {
+	s = strings.ReplaceAll(s, `\`, "/")
+	safe := s != ""
+	for _, r := range s {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && !strings.ContainsRune("@%+=:,./_-", r) {
+			safe = false
+			break
+		}
+	}
+	if safe {
+		return s
+	}
+	return `"` + s + `"`
 }
 
 // renderSSHHostBlock returns the Host block for one agent. exe must be an

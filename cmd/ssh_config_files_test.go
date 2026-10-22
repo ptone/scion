@@ -336,7 +336,29 @@ func TestRenderSSHHostBlock(t *testing.T) {
 	assert.Equal(t, want, got)
 }
 
+// setSSHQuoteForCmd selects the ProxyCommand quoting form for one test.
+func setSSHQuoteForCmd(t *testing.T, forCmd bool) {
+	t.Helper()
+	prev := sshQuoteForCmd
+	sshQuoteForCmd = forCmd
+	t.Cleanup(func() { sshQuoteForCmd = prev })
+}
+
+// The Windows ProxyCommand quoting (from miller79/scion#189): backslashes
+// become forward slashes, and a word with a space or a shell character is
+// double-quoted. Runs on every OS (the form is a variable).
+func TestSSHShellQuoteForCmd(t *testing.T) {
+	setSSHQuoteForCmd(t, true)
+	assert.Equal(t, `C:/Users/me/bin/scion.exe`, sshShellQuote(`C:\Users\me\bin\scion.exe`))
+	assert.Equal(t, `"C:/Program Files/Scion/scion.exe"`, sshShellQuote(`C:\Program Files\Scion\scion.exe`))
+	assert.Equal(t, "https://hub.example.com:8443", sshShellQuote("https://hub.example.com:8443"))
+	assert.Equal(t, `"C:/a&b/scion.exe"`, sshShellQuote(`C:\a&b\scion.exe`))
+	assert.Equal(t, `C:/100%%/scion.exe`, sshShellQuote(`C:\100%\scion.exe`))
+	assert.Equal(t, `C:/Program Files/x`, sshShellUnquote(sshShellQuote(`C:\Program Files\x`)))
+}
+
 func TestSSHShellQuote(t *testing.T) {
+	setSSHQuoteForCmd(t, false)
 	assert.Equal(t, "/usr/local/bin/scion", sshShellQuote("/usr/local/bin/scion"))
 	assert.Equal(t, "https://hub.example.com:8443", sshShellQuote("https://hub.example.com:8443"))
 	assert.Equal(t, "'/Applications/My Tools/scion'", sshShellQuote("/Applications/My Tools/scion"))

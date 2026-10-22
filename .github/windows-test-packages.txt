@@ -19,3 +19,7 @@
 # ./pkg/agent: row X3 only (the rest is gated agent provisioning).
 ./pkg/agent -run=^(TestWindowsResolutionCache_NewDirAndFilePrivate|TestWindowsResolutionCache_RepairsOwnedTooOpenFile|TestWindowsResolutionCache_ForeignOwnedFileWarnedNotRepaired|TestWindowsResolutionCache_TooOpenDirWarnedNotRepaired)$
 ./pkg/hubprofile
+# ./cmd: anchored to the Windows-relevant tests (design §5.2; the full
+# suite is POSIX-bound, follow-up D4). Never the attachment-writing
+# message tests.
+./cmd -run=^(TestSSHWrite_NewFilePrivate|TestSSHWrite_FollowsUserSymlinkAndRepairsOpenTarget|TestSSHWrite_RefusesForeignWritableParent|TestSSHWrite_RefusesForeignOwnedTarget|TestSSHWrite_RefusesHardLinkedTarget|TestSSHKnownHostsTempFilePrivate|TestSSHShellQuoteForCmd|TestVSCodeFiles_PrivateOnWindows|TestLockVSCodeDir_TimesOut|TestLockVSCodeDir_WaitsForRelease|TestLockVSCodeDir_DefaultWait|TestHubTestIdentityOut_DescribesACL|TestResolveBrokerJoinToken_WarnsOnForeignACE|TestWindowsGate_RefusesServerAndBroker|TestWindowsGate_DropsFlagValidationOnGatedCommands|TestWindowsGate_RefusesBeforeProjectResolution|TestWindowsGate_HidesOnlyGatedCommands|TestWindowsGate_AllowlistEntriesExist|TestWindowsGate_NoopOnUnix)$

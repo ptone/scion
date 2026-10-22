@@ -189,7 +189,9 @@ func prepareSSH(ctx context.Context, env *sshCommandEnv, ref string, remote []st
 	if hasSpaceOrControl(knownHosts) || strings.Contains(knownHosts, "%") {
 		return nil, cleanup, tunnelclient.Errorf(tunnelclient.ExitError, "temporary directory %s contains whitespace or %%; set TMPDIR to a plain path", dir)
 	}
-	if err := os.WriteFile(knownHosts, []byte(host+" "+norm+"\n"), sshFileMode); err != nil {
+	// The shared atomic writer (design §3.7 delta 3): a new private file in
+	// the fresh temporary directory.
+	if err := writeFileAtomic(knownHosts, []byte(host+" "+norm+"\n"), sshFileMode); err != nil {
 		return nil, cleanup, tunnelclient.Errorf(tunnelclient.ExitError, "writing known hosts: %v", err)
 	}
 

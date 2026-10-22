@@ -15,13 +15,6 @@
 # file. Keep entries sorted by path.
 
 # Findings §4a: client-reachable private files, pending Phase 3.
-cmd/broker_join.go pending Phase 3 (X2; the command itself is gated)
-cmd/hub_test_identity.go pending Phase 3 (X1)
-cmd/hub_test_identity_admin.go pending Phase 3 (X1)
-cmd/hub_test_identity_profile.go pending Phase 3 (X1)
-cmd/ssh.go pending Phase 3 (I3)
-cmd/ssh_config_files.go pending Phase 3 (I1, I2, I3)
-cmd/vscode.go pending Phase 3 (I3, I4)
 
 # Findings §4b and in-container sites: gated on Windows.
 cmd/broker_purge_guard.go not protected on Windows: gated (runtime-broker purge containment)
