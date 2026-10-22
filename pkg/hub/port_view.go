@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -241,6 +242,9 @@ func (s *Server) handlePortView(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	agent, err := s.store.GetAgent(ctx, grant.AgentID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		slog.Warn("Port view: agent lookup failed", "agent_id", grant.AgentID, "error", err)
+	}
 	if err != nil || agent == nil || agent.ID != grant.AgentID || !agent.DeletedAt.IsZero() {
 		writePortViewInvalid(w)
 		return
