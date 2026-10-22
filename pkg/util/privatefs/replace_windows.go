@@ -68,32 +68,11 @@ func ReplaceFollowing(path string, data []byte, newMode fs.FileMode, tempPrefix 
 	if strings.ContainsAny(tempPrefix, `/\`) {
 		return &fs.PathError{Op: "replace", Path: tempPrefix, Err: errors.New("temporary prefix contains a path separator")}
 	}
-	resolved, err := pathcanon.Resolve(path)
-	if err != nil {
-		return err
-	}
-	dir, leaf := filepath.Dir(resolved), filepath.Base(resolved)
-	if err := pathcanon.ValidName(leaf); err != nil {
-		return err
-	}
-	t, err := OpenTree(dir, TreeOptions{})
+	t, leaf, err := openReplaceTarget(path)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = t.Close() }()
-
-	parent, err := t.anchorFile()
-	if err != nil {
-		return err
-	}
-	err = CheckNoForeignWriters(parent)
-	_ = parent.Close()
-	if err != nil {
-		return fmt.Errorf("refusing to write %s: its directory can be changed by another user: %w", path, err)
-	}
-	if err := t.checkReplaceTarget(leaf); err != nil {
-		return fmt.Errorf("refusing to write %s: %w", path, err)
-	}
 
 	f, _, err := t.CreateTemp("", tempPrefix+leaf+"-*", Private)
 	if err != nil {
@@ -119,6 +98,67 @@ func ReplaceFollowing(path string, data []byte, newMode fs.FileMode, tempPrefix 
 	}
 	ok = true
 	return f.Close()
+}
+
+// CheckReplaceTarget runs every check ReplaceFollowing makes before it
+// writes, on the same handles, and writes nothing: path is resolved
+// (following a symlinked leaf), its directory is opened and must pass
+// CheckNoForeignWriters, and an existing target must not be a reparse
+// point, must have one name (addendum A1) and must be owned by the current
+// user, SYSTEM or Administrators. Callers that write several files in one
+// operation run it on every file first, so a refusal leaves no side effect
+// (security-lead ruling, win-cli Phase 3b review r3). ReplaceFollowing
+// still makes these checks itself; this is a preflight, not a
+// replacement. Once the directory passes CheckNoForeignWriters, no other
+// principal can change the target between this check and the write.
+//
+// A target whose directory does not exist yet passes: there is nothing to
+// check, and the caller creates the directory (private) before writing.
+// Run it BEFORE creating any directory, so a refusal creates nothing.
+func CheckReplaceTarget(path string) error {
+	t, _, err := openReplaceTarget(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return t.Close()
+}
+
+// openReplaceTarget resolves path, opens its directory as a tree, checks
+// the directory with CheckNoForeignWriters and the existing target with
+// checkReplaceTarget, and returns the tree and the target's leaf name. On
+// error nothing is left open.
+func openReplaceTarget(path string) (*Tree, string, error) {
+	resolved, err := pathcanon.Resolve(path)
+	if err != nil {
+		return nil, "", err
+	}
+	dir, leaf := filepath.Dir(resolved), filepath.Base(resolved)
+	if err := pathcanon.ValidName(leaf); err != nil {
+		return nil, "", err
+	}
+	t, err := OpenTree(dir, TreeOptions{})
+	if err != nil {
+		return nil, "", err
+	}
+	parent, err := t.anchorFile()
+	if err != nil {
+		_ = t.Close()
+		return nil, "", err
+	}
+	err = CheckNoForeignWriters(parent)
+	_ = parent.Close()
+	if err != nil {
+		_ = t.Close()
+		return nil, "", fmt.Errorf("refusing to write %s: its directory can be changed by another user: %w", path, err)
+	}
+	if err := t.checkReplaceTarget(leaf); err != nil {
+		_ = t.Close()
+		return nil, "", fmt.Errorf("refusing to write %s: %w", path, err)
+	}
+	return t, leaf, nil
 }
 
 // checkReplaceTarget applies rule I to the existing file leaf directly below

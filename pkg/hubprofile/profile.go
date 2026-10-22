@@ -412,7 +412,7 @@ func HomeDir() (string, error) {
 }
 
 // privateRel returns dir relative to base, which must be base itself or
-// above it: the containment is decided by pathcanon.Within on canonical
+// below it: the containment is decided by pathcanon.Within on canonical
 // forms, never by comparing strings. The result is "." for base itself.
 func privateRel(base, dir string) (string, error) {
 	// Rel is lexical: it only names the components to walk, and explains a

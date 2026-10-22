@@ -181,30 +181,42 @@ func TestSSHDirCallers_LinkTargetFailingRuleIRefused(t *testing.T) {
 
 // Addendum (d), foreign-owned target: ~/.ssh/config is a link to a file
 // owned by another principal (a group named like Administrators, not
-// S-1-5-32-544) in a directory the user controls: refused, untouched.
-// Control: the same link to a user-owned file is followed and the file
-// replaced by a private one.
+// S-1-5-32-544) in a directory the user controls: refused, untouched, and
+// with no side effect: home and the link's directory are unchanged, so
+// writeSSHHubPlan wrote neither the known-hosts nor the include file first
+// (review r3). Control: the same link to a user-owned file is followed and
+// the file replaced by a private one.
 func TestSSHWrite_LinkToForeignOwnedTargetRefused(t *testing.T) {
-	home := privateHome(t)
-	p := sshPaths{home: home}
-	require.NoError(t, os.MkdirAll(p.sshDir(), 0o700))
-	outside := privateHome(t)
-	target := filepath.Join(outside, "ssh_config")
-	require.NoError(t, os.WriteFile(target, []byte("Host old\n"), 0o600))
-	foreign := fakeAdminsGroupSID(t)
-	wintest.SetOwner(t, target, foreign)
-	wintest.MustSymlink(t, target, p.userConfig())
+	calls := map[string]func(p sshPaths) error{
+		"ensureSSHIncludeLine": func(p sshPaths) error { _, err := ensureSSHIncludeLine(p); return err },
+		"writeSSHHubPlan":      func(p sshPaths) error { return writeSSHHubPlan(p, sshPlan(p)) },
+	}
+	for name, call := range calls {
+		t.Run(name, func(t *testing.T) {
+			home := privateHome(t)
+			p := sshPaths{home: home}
+			require.NoError(t, os.MkdirAll(p.sshDir(), 0o700))
+			outside := privateHome(t)
+			target := filepath.Join(outside, "ssh_config")
+			require.NoError(t, os.WriteFile(target, []byte("Host old\n"), 0o600))
+			foreign := fakeAdminsGroupSID(t)
+			wintest.SetOwner(t, target, foreign)
+			wintest.MustSymlink(t, target, p.userConfig())
+			homeBefore, outsideBefore := treeSnapshot(t, home), treeSnapshot(t, outside)
 
-	_, err := ensureSSHIncludeLine(p)
-	require.ErrorIs(t, err, privatefs.ErrNotPrivate)
-	assert.Contains(t, err.Error(), foreign)
-	assert.Equal(t, "Host old\n", readTestFile(t, target))
+			err := call(p)
+			require.ErrorIs(t, err, privatefs.ErrNotPrivate)
+			assert.Contains(t, err.Error(), foreign)
+			assert.Equal(t, "Host old\n", readTestFile(t, target))
+			assert.Equal(t, homeBefore, treeSnapshot(t, home), "the refusal changed nothing in home")
+			assert.Equal(t, outsideBefore, treeSnapshot(t, outside), "the refusal changed nothing at the link target")
 
-	wintest.SetOwner(t, target, wintest.UserSID(t))
-	changed, err := ensureSSHIncludeLine(p)
-	require.NoError(t, err, "control: a user-owned link target")
-	assert.True(t, changed)
-	assertPrivateSD(t, target)
+			wintest.SetOwner(t, target, wintest.UserSID(t))
+			require.NoError(t, call(p), "control: a user-owned link target")
+			assert.True(t, strings.HasPrefix(readTestFile(t, target), sshIncludeLine))
+			assertPrivateSD(t, target)
+		})
+	}
 }
 
 // Addendum (b): ValidName is load-bearing on the ensureSSHDir path. '..',
@@ -290,10 +302,14 @@ func TestSSHVSCodeWriteLeaves_RefuseHardLinks(t *testing.T) {
 			require.NoError(t, os.WriteFile(leaf, nil, 0o600))
 			second := filepath.Join(home, "second-name")
 			require.NoError(t, os.Link(leaf, second))
+			before := treeSnapshot(t, home)
 
 			err := tc.write(t, home)
 			require.ErrorIs(t, err, privatefs.ErrHardLinked)
 			assert.Empty(t, readTestFile(t, second), "the other name is untouched")
+			// No side effect (security lead, review r3): no other leaf, no
+			// directory and no lock file was written before the refusal.
+			assert.Equal(t, before, treeSnapshot(t, home), "the refusal changed nothing in home")
 
 			require.NoError(t, os.Remove(second))
 			require.NoError(t, tc.write(t, home), "control: one name")

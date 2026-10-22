@@ -38,27 +38,9 @@ import (
 // existing regular target with more than one name (Nlink != 1, read on the
 // opened file) is refused with ErrHardLinked, never replaced.
 func ReplaceFollowing(path string, data []byte, newMode fs.FileMode, tempPrefix string) error {
-	target := path
-	if fi, err := os.Lstat(path); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
-		resolved, err := filepath.EvalSymlinks(path)
-		if err != nil {
-			return err
-		}
-		target = resolved
-	}
-	mode := newMode
-	if f, err := os.OpenFile(target, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0); err == nil {
-		fi, serr := f.Stat()
-		if serr == nil {
-			serr = checkSingleLinkInfo(target, fi)
-		}
-		_ = f.Close()
-		if serr != nil {
-			return serr
-		}
-		mode = fi.Mode().Perm()
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return linkErr(target, err)
+	target, mode, err := replaceTarget(path, newMode)
+	if err != nil {
+		return err
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(target), tempPrefix+filepath.Base(target)+"-*")
 	if err != nil {
@@ -89,6 +71,47 @@ func ReplaceFollowing(path string, data []byte, newMode fs.FileMode, tempPrefix 
 	}
 	ok = true
 	return nil
+}
+
+// CheckReplaceTarget runs the checks ReplaceFollowing makes before it
+// writes, and writes nothing: the leaf is resolved if it is a symlink, and
+// an existing regular target must have one name (addendum A1). Callers
+// writing several files in one operation run it on each first, so a
+// refusal leaves no side effect. A target whose directory does not exist
+// yet passes (nothing to check).
+func CheckReplaceTarget(path string) error {
+	_, _, err := replaceTarget(path, 0)
+	return err
+}
+
+// replaceTarget resolves path (following a symlinked leaf) and returns the
+// file to replace and the mode the new file gets: the existing file's mode,
+// or newMode for a new file. An existing regular target with more than one
+// name is refused.
+func replaceTarget(path string, newMode fs.FileMode) (string, fs.FileMode, error) {
+	target := path
+	if fi, err := os.Lstat(path); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return "", 0, err
+		}
+		target = resolved
+	}
+	mode := newMode
+	if f, err := os.OpenFile(target, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0); err == nil {
+		fi, serr := f.Stat()
+		if serr == nil {
+			serr = checkSingleLinkInfo(target, fi)
+		}
+		_ = f.Close()
+		if serr != nil {
+			return "", 0, serr
+		}
+		mode = fi.Mode().Perm()
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return "", 0, linkErr(target, err)
+	}
+	return target, mode, nil
 }
 
 // checkSingleLinkInfo refuses a regular file with more than one name

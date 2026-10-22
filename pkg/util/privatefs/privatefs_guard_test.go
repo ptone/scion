@@ -347,7 +347,7 @@ var pathOpeners = map[string]bool{
 
 // walkFuncs is the MkdirAll/MkdirAllEach path below the anchor (also the
 // walk of every other Tree operation).
-var walkFuncs = []string{"MkdirAll", "MkdirAllEach", "verifyExisting", "walk", "openDirComp", "openDirAt", "mkdirAt"}
+var walkFuncs = []string{"MkdirAll", "MkdirAllEach", "verifyExisting", "walk", "openDirComp", "openDirAt", "mkdirAt", "checkHandleNoForeignWriters"}
 
 // handleWalkViolations reports, for the walk functions in file, any call to
 // a path-based opener, and any ntCreate whose RootDirectory argument is a
@@ -413,6 +413,18 @@ func other() { os.Open("x") }
 	if bad, funcs, nts := handleWalkViolations(fset, f); len(bad) != 2 || funcs != 2 || nts != 2 {
 		t.Fatalf("detector on the sample: %v, %d functions, %d ntCreate calls; want 2 violations, 2, 2", bad, funcs, nts)
 	}
+	const diagSample = `package p
+func (t *Tree) warnMutableLinkParent(h int, name string) error { windows.CloseHandle(h); return nil }
+func (t *Tree) openDirComp() { t.warnMutableLinkParent(1, "x") }
+func (t *Tree) walk() { _ = t.warnMutableLinkParent(1, "x"); t.warnMutableLinkParent(1, "y") }
+`
+	df, err := parser.ParseFile(token.NewFileSet(), "diag.go", diagSample, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msgs := diagnosticViolations(token.NewFileSet(), df); len(msgs) != 4 {
+		t.Fatalf("diagnostic detector on the sample: %v; want 4 (returns a value, closes h, used as a value, called from walk)", msgs)
+	}
 
 	fset = token.NewFileSet()
 	f, err = parser.ParseFile(fset, "privatefs_windows.go", nil, 0)
@@ -430,16 +442,81 @@ func other() { os.Open("x") }
 	// warnMutableLinkParent (the security lead's "accept as residual +
 	// warn" ruling). It must stay unable to influence a result: no return
 	// value.
-	diag := false
-	for _, decl := range f.Decls {
-		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "warnMutableLinkParent" {
-			diag = true
-			if fn.Type.Results != nil && len(fn.Type.Results.List) > 0 {
-				t.Fatal("warnMutableLinkParent must return nothing: it is diagnostic only and opens a path")
-			}
+	if msgs := diagnosticViolations(fset, f); len(msgs) > 0 {
+		t.Fatalf("warnMutableLinkParent must stay diagnostic only:\n%s", strings.Join(msgs, "\n"))
+	}
+}
+
+// diagnosticViolations checks that warnMutableLinkParent cannot influence
+// the walk: it returns nothing, never closes or duplicates its handle
+// parameter, and is called only as a bare statement from openDirComp.
+func diagnosticViolations(fset *token.FileSet, file *ast.File) []string {
+	var msgs []string
+	found, calls := false, 0
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
 		}
+		if fn.Name.Name == "warnMutableLinkParent" {
+			found = true
+			if fn.Type.Results != nil && len(fn.Type.Results.List) > 0 {
+				msgs = append(msgs, "warnMutableLinkParent returns a value")
+			}
+			var hname string
+			if ps := fn.Type.Params.List; len(ps) > 0 && len(ps[0].Names) > 0 {
+				hname = ps[0].Names[0].Name
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				sel, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok || (sel.Sel.Name != "CloseHandle" && sel.Sel.Name != "DuplicateHandle") {
+					return true
+				}
+				for _, a := range call.Args {
+					if id, ok := a.(*ast.Ident); ok && id.Name == hname {
+						msgs = append(msgs, fmt.Sprintf("%s %s on the walk's handle %s", fset.Position(call.Pos()), sel.Sel.Name, hname))
+					}
+				}
+				return true
+			})
+		}
+		// Every call of warnMutableLinkParent: a bare statement in openDirComp.
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.ExprStmt:
+				if isDiagCall(x.X) {
+					calls++
+					if fn.Name.Name != "openDirComp" {
+						msgs = append(msgs, fmt.Sprintf("%s warnMutableLinkParent called from %s", fset.Position(x.Pos()), fn.Name.Name))
+					}
+					return false
+				}
+			case *ast.CallExpr:
+				if isDiagCall(x) {
+					msgs = append(msgs, fmt.Sprintf("%s warnMutableLinkParent used as a value", fset.Position(x.Pos())))
+				}
+			}
+			return true
+		})
 	}
-	if !diag {
-		t.Fatal("warnMutableLinkParent not found in privatefs_windows.go")
+	if !found {
+		msgs = append(msgs, "warnMutableLinkParent not found")
 	}
+	if calls == 0 {
+		msgs = append(msgs, "warnMutableLinkParent is never called: the check would pass vacuously")
+	}
+	return msgs
+}
+
+func isDiagCall(e ast.Expr) bool {
+	call, ok := e.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	return ok && sel.Sel.Name == "warnMutableLinkParent"
 }

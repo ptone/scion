@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/internal/testutil/wintest"
 	"github.com/GoogleCloudPlatform/scion/pkg/tunnelclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 )
 
 // writeLinkedLayout runs the ssh-config and vscode writers in home and
@@ -75,4 +76,46 @@ func TestSSHAndVSCodeFollowLinksOutsideHome(t *testing.T) {
 	plain := t.TempDir()
 	writeLinkedLayout(t, plain)
 	assert.FileExists(t, filepath.Join(plain, ".ssh", "config.d", "scion-hub"), "control: a home without links")
+}
+
+// Review r3 finding 1 on unix: a hard-linked ~/.ssh/config makes
+// writeSSHHubPlan refuse (addendum A1) BEFORE it writes the known-hosts or
+// include file or creates their directories: home is unchanged. Control:
+// with one name the same call succeeds.
+func TestWriteSSHHubPlan_HardLinkedConfigNoSideEffect(t *testing.T) {
+	home := t.TempDir()
+	p := sshPaths{home: home}
+	require.NoError(t, os.Mkdir(p.sshDir(), 0o700))
+	require.NoError(t, os.WriteFile(p.userConfig(), []byte("Host old\n"), 0o600))
+	second := filepath.Join(home, "second-name")
+	require.NoError(t, os.Link(p.userConfig(), second))
+	snapshot := func() map[string]string {
+		out := map[string]string{}
+		require.NoError(t, filepath.WalkDir(home, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.Type().IsRegular() {
+				b, err := os.ReadFile(path)
+				if err != nil {
+					return err
+				}
+				out[path] = "file:" + string(b)
+			} else {
+				out[path] = d.Type().String()
+			}
+			return nil
+		}))
+		return out
+	}
+	before := snapshot()
+	res := &sshRegenResult{label: "hub", includeFile: p.includeFile("hub"), knownHostsFile: p.knownHostsFile("hub"),
+		includeContent: "# include\n", knownContent: "# known hosts\n"}
+	err := writeSSHHubPlan(p, res)
+	require.ErrorIs(t, err, privatefs.ErrHardLinked)
+	assert.Equal(t, before, snapshot(), "the refusal changed nothing in home")
+
+	require.NoError(t, os.Remove(second))
+	require.NoError(t, writeSSHHubPlan(p, res), "control: one name")
+	assert.FileExists(t, p.includeFile("hub"))
 }

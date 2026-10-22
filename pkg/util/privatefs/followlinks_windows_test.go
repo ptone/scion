@@ -485,3 +485,60 @@ func TestReplaceFollowing_RefusesHardLinkedTarget(t *testing.T) {
 		t.Fatalf("control: ordinary target: %v", err)
 	}
 }
+
+// dirListing returns name -> content for the files in dir (one level),
+// to show that a call wrote nothing.
+func dirListing(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]string{}
+	for _, e := range entries {
+		b, _ := os.ReadFile(filepath.Join(dir, e.Name()))
+		out[e.Name()] = string(b)
+	}
+	return out
+}
+
+// CheckReplaceTarget (review r3 finding 1) is ReplaceFollowing's checks
+// with no write: a hard-linked target, a foreign-owned target and a
+// foreign-writable parent are refused and nothing in the directory
+// changes; controls: an ordinary target and a missing target pass, still
+// writing nothing.
+func TestCheckReplaceTarget_RefusesAndWritesNothing(t *testing.T) {
+	dir := replaceDir(t)
+	linked := filepath.Join(dir, "linked")
+	foreign := filepath.Join(dir, "foreign")
+	ordinary := filepath.Join(dir, "ordinary")
+	for _, p := range []string{linked, foreign, ordinary} {
+		if err := os.WriteFile(p, []byte("old"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Link(linked, filepath.Join(t.TempDir(), "second")); err != nil {
+		t.Fatal(err)
+	}
+	wintest.SetOwner(t, foreign, fakeAdminsGroupSID(t))
+	before := dirListing(t, dir)
+	if err := CheckReplaceTarget(linked); !errors.Is(err, ErrHardLinked) {
+		t.Fatalf("hard-linked target: %v, want ErrHardLinked", err)
+	}
+	if err := CheckReplaceTarget(foreign); !errors.Is(err, ErrNotPrivate) {
+		t.Fatalf("foreign-owned target: %v, want ErrNotPrivate", err)
+	}
+	for _, p := range []string{ordinary, filepath.Join(dir, "missing"), filepath.Join(dir, "no-dir", "missing")} {
+		if err := CheckReplaceTarget(p); err != nil {
+			t.Fatalf("control %s: %v", p, err)
+		}
+	}
+	wintest.Icacls(t, dir, "/grant", "*"+wintest.SIDUsers+":(DC)")
+	if err := CheckReplaceTarget(ordinary); !errors.Is(err, ErrNotPrivate) {
+		t.Fatalf("foreign-writable parent: %v, want ErrNotPrivate", err)
+	}
+	wintest.Icacls(t, dir, "/remove:g", "*"+wintest.SIDUsers)
+	if got := dirListing(t, dir); fmt.Sprint(got) != fmt.Sprint(before) {
+		t.Fatalf("CheckReplaceTarget changed the directory:\nbefore %v\nafter  %v", before, got)
+	}
+}

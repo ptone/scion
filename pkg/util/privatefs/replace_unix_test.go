@@ -111,3 +111,30 @@ func TestTree_FollowLinksUnix(t *testing.T) {
 		t.Fatalf("sub: %v %v", fi, err)
 	}
 }
+
+// CheckReplaceTarget (unix): a hard-linked target is refused, an ordinary
+// or missing one passes, and nothing is written either way.
+func TestCheckReplaceTarget_Unix(t *testing.T) {
+	dir := t.TempDir()
+	linked := filepath.Join(dir, "linked")
+	ordinary := filepath.Join(dir, "ordinary")
+	for _, p := range []string{linked, ordinary} {
+		if err := os.WriteFile(p, []byte("old"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Link(linked, filepath.Join(t.TempDir(), "second")); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckReplaceTarget(linked); !errors.Is(err, ErrHardLinked) {
+		t.Fatalf("hard-linked target: %v, want ErrHardLinked", err)
+	}
+	for _, p := range []string{ordinary, filepath.Join(dir, "missing")} {
+		if err := CheckReplaceTarget(p); err != nil {
+			t.Fatalf("control %s: %v", p, err)
+		}
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 2 {
+		t.Fatalf("CheckReplaceTarget wrote something: %v", entries)
+	}
+}

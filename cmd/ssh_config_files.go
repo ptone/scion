@@ -308,6 +308,21 @@ func ensureSSHDir(home string, rels ...string) error {
 	return t.MkdirAllEach(privatefs.ForMode(sshDirMode), rels...)
 }
 
+// preflightSSHWrites runs privatefs.CheckReplaceTarget (writeFileAtomic's
+// checks, writing nothing) on every file an operation is about to write,
+// so a file that would be refused is found before the first directory is
+// created or the first file written. writeFileAtomic still checks each
+// file itself; this is in addition, not instead. Every listed file is
+// checked even if the operation turns out not to rewrite it.
+func preflightSSHWrites(paths ...string) error {
+	for _, path := range paths {
+		if err := privatefs.CheckReplaceTarget(path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // sshWarnOut receives sshLinkWarning's lines; tests replace it.
 var sshWarnOut io.Writer = os.Stderr
 
@@ -818,8 +833,13 @@ func regenerateSSHHubFiles(p sshPaths, hub, exe string, l sshAgentListing) (*ssh
 // The known-hosts file is written first, so an installed block never lacks
 // its pin.
 func writeSSHHubPlan(p sshPaths, res *sshRegenResult) error {
-	// Both directories in one call: verified together before either is
-	// created, so a refusal leaves nothing behind.
+	// A refusal leaves no side effect (security lead, reviews r2 and r3):
+	// first every file this call may write is checked as writeFileAtomic
+	// will check it, creating nothing; then both directories are verified
+	// together before either is created; only then is anything written.
+	if err := preflightSSHWrites(res.knownHostsFile, res.includeFile, p.userConfig()); err != nil {
+		return err
+	}
 	if err := ensureSSHDir(p.home, sshKnownHostsDirRel, sshIncludeDirRel); err != nil {
 		return err
 	}

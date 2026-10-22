@@ -274,8 +274,13 @@ type vscodeUpdate struct {
 // concurrent runs keep each other's entries. It reports whether u.host had
 // a different pin before.
 func updateVSCodeFiles(p vscodePaths, u vscodeUpdate) (changed bool, err error) {
-	// The settings directory too: both are verified before anything (the
-	// lock file included) is created, so a refusal leaves nothing behind.
+	// A refusal leaves nothing behind (security lead, reviews r2 and r3):
+	// every file this call may write is checked first (creating nothing),
+	// then both directories are verified before either is created, all
+	// before the lock file.
+	if err := preflightSSHWrites(p.settings(), p.sshConfig(), p.knownHosts()); err != nil {
+		return false, err
+	}
 	if err := ensureSSHDir(p.home, vscodeDirRel, vscodeSettingsDirRel); err != nil {
 		return false, fmt.Errorf("creating %s: %w", p.dir(), err)
 	}
