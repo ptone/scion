@@ -153,6 +153,22 @@ func (f *dispatchReadFixture) asOther(t *testing.T, target string) *httptest.Res
 	return signedBrokerRequest(t, f.srv, f.other.ID, []byte("dbr-other-secret-32-bytes!!!!!!"), http.MethodGet, target, target)
 }
 
+// commitTemplateContent applies mutate to template id and writes its content
+// and storage columns the way a template commit does (UpdateTemplate writes
+// metadata only).
+func commitTemplateContent(t *testing.T, st store.Store, id string, mutate func(*store.Template)) *store.Template {
+	t.Helper()
+	ctx := context.Background()
+	tmpl, err := st.GetTemplate(ctx, id)
+	require.NoError(t, err)
+	expected := store.TemplateContentPrecondition{ContentHash: tmpl.ContentHash, Layout: tmpl.Layout}
+	mutate(tmpl)
+	require.NoError(t, st.UpdateTemplateContent(ctx, tmpl, expected))
+	got, err := st.GetTemplate(ctx, id)
+	require.NoError(t, err)
+	return got
+}
+
 func templateGetFor(tmplID, agentID string) string {
 	target := "/api/v1/templates/" + tmplID
 	if agentID != "" {
@@ -315,14 +331,14 @@ func TestDispatchBoundRead_LocalStorageProxyURLsCarryAgent(t *testing.T) {
 	f.srv.SetStorage(stor)
 
 	content := []byte("harness: claude\n")
-	tmpl, err := f.store.GetTemplate(ctx, f.userTmpl.ID)
+	storagePath := "templates/user/" + f.creator.ID + "/dbr-shared"
+	_, err = stor.Upload(ctx, storagePath+"/scion-agent.yaml", bytes.NewReader(content), storage.UploadOptions{})
 	require.NoError(t, err)
-	tmpl.StoragePath = "templates/user/" + f.creator.ID + "/dbr-shared"
-	tmpl.StorageBucket = "b"
-	_, err = stor.Upload(ctx, tmpl.StoragePath+"/scion-agent.yaml", bytes.NewReader(content), storage.UploadOptions{})
-	require.NoError(t, err)
-	tmpl.Files = []store.TemplateFile{{Path: "scion-agent.yaml", Size: int64(len(content)), Hash: "sha256:placeholder"}}
-	require.NoError(t, f.store.UpdateTemplate(ctx, tmpl))
+	// Same content hash as the agent records: only files and storage change.
+	tmpl := commitTemplateContent(t, f.store, f.userTmpl.ID, func(tm *store.Template) {
+		tm.StoragePath, tm.StorageBucket = storagePath, "b"
+		tm.Files = []store.TemplateFile{{Path: "scion-agent.yaml", Size: int64(len(content)), Hash: "sha256:placeholder"}}
+	})
 
 	rec := f.asBroker(t, http.MethodGet, "/api/v1/templates/"+tmpl.ID+"/download?agentId="+url.QueryEscape(f.agent.ID))
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -361,14 +377,13 @@ func TestDispatchBoundRead_HydratesUserTemplateOverHMAC(t *testing.T) {
 
 			// Give both templates real files with different content.
 			withFiles := func(id, storagePath string, content []byte) string {
-				tmpl, err := f.store.GetTemplate(ctx, id)
+				_, err := stor.Upload(ctx, storagePath+"/scion-agent.yaml", bytes.NewReader(content), storage.UploadOptions{})
 				require.NoError(t, err)
-				tmpl.StoragePath, tmpl.StorageBucket = storagePath, "b"
-				_, err = stor.Upload(ctx, storagePath+"/scion-agent.yaml", bytes.NewReader(content), storage.UploadOptions{})
-				require.NoError(t, err)
-				tmpl.Files = []store.TemplateFile{{Path: "scion-agent.yaml", Size: int64(len(content)), Hash: transfer.HashBytes(content)}}
-				tmpl.ContentHash = computeContentHash(tmpl.Files)
-				require.NoError(t, f.store.UpdateTemplate(ctx, tmpl))
+				tmpl := commitTemplateContent(t, f.store, id, func(tm *store.Template) {
+					tm.StoragePath, tm.StorageBucket = storagePath, "b"
+					tm.Files = []store.TemplateFile{{Path: "scion-agent.yaml", Size: int64(len(content)), Hash: transfer.HashBytes(content)}}
+					tm.ContentHash = computeContentHash(tm.Files)
+				})
 				return tmpl.ContentHash
 			}
 			userContent := []byte("harness: claude\n# user template\n")
@@ -707,6 +722,16 @@ func reincUserTemplates(t *testing.T, s store.Store) (user, twin *store.Template
 	return user, twin
 }
 
+// transferTemplate makes user-scoped template id belong to owner, so its
+// previous owner can no longer read it.
+func transferTemplate(t *testing.T, st store.Store, id, owner string) {
+	t.Helper()
+	tmpl, err := st.GetTemplate(context.Background(), id)
+	require.NoError(t, err)
+	tmpl.OwnerID, tmpl.ScopeID = owner, owner
+	require.NoError(t, st.UpdateTemplate(context.Background(), tmpl))
+}
+
 func bindTemplate(tmpl *store.Template) func(a *store.Agent) {
 	return func(a *store.Agent) {
 		a.Template = tmpl.Slug
@@ -794,10 +819,10 @@ func TestReincarnate_UserTemplate_CreatorGone_409(t *testing.T) {
 	user, _ := reincUserTemplates(t, s)
 	agent := newReincarnateTestAgent(t, s, project, broker, bindTemplate(user))
 	ctx := context.Background()
-	creator, err := s.GetUser(ctx, tid("user-creator"))
-	require.NoError(t, err)
-	creator.Status = "suspended"
-	require.NoError(t, s.UpdateUser(ctx, creator))
+	// The creator can no longer read the template: it now belongs to
+	// another user. (Deactivating the creator would instead put the agent
+	// on a standing hold, refused earlier.)
+	transferTemplate(t, s, user.ID, tid("reinc-other-owner"))
 	before, err := s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
 
@@ -827,10 +852,7 @@ func TestReincarnate_UserTemplate_MoveCreatorGone_409(t *testing.T) {
 	require.NoError(t, f.s.UpdateAgent(ctx, a))
 	f.agent, err = f.s.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
-	creator, err := f.s.GetUser(ctx, tid("user-creator"))
-	require.NoError(t, err)
-	creator.Status = "suspended"
-	require.NoError(t, f.s.UpdateUser(ctx, creator))
+	transferTemplate(t, f.s, user.ID, tid("reinc-other-owner"))
 
 	rec := f.reincarnate(t, ReincarnateAgentRequest{DryRun: true, TargetBroker: f.dst.ID})
 	requireAPIError(t, rec, http.StatusConflict, ErrCodeTemplateUnavailable)
@@ -1109,10 +1131,7 @@ const repinNewHash = "sha256:444444444444444444444444444444444444444444444444444
 // editTemplate commits a new content hash to the fixture's user template.
 func (f *resumeFillFixture) editTemplate(t *testing.T, hash string) {
 	t.Helper()
-	tmpl, err := f.store.GetTemplate(context.Background(), f.tmpl.ID)
-	require.NoError(t, err)
-	tmpl.ContentHash = hash
-	require.NoError(t, f.store.UpdateTemplate(context.Background(), tmpl))
+	commitTemplateContent(t, f.store, f.tmpl.ID, func(tm *store.Template) { tm.ContentHash = hash })
 }
 
 // repinPaths are the three ways an existing agent is started.
@@ -1183,9 +1202,9 @@ func TestRepin_CreatorLostAccess_NotRepinned(t *testing.T) {
 	ctx := context.Background()
 	// The template now belongs to another user: the agent's creator can no
 	// longer read it.
+	f.editTemplate(t, repinNewHash)
 	tmpl, err := f.store.GetTemplate(ctx, f.tmpl.ID)
 	require.NoError(t, err)
-	tmpl.ContentHash = repinNewHash
 	tmpl.OwnerID, tmpl.ScopeID = f.member.ID, f.member.ID
 	require.NoError(t, f.store.UpdateTemplate(ctx, tmpl))
 
@@ -1318,6 +1337,12 @@ func TestRepin_RefusedByStartClaim_PinUnchanged(t *testing.T) {
 // answers the sender 409 version_conflict with nothing dispatched.
 func TestRepin_Wake(t *testing.T) {
 	ctx := context.Background()
+	// The fake dispatcher never reports the woken agent ready, so the
+	// readiness wait after the dispatch is cut short; these tests look only
+	// at what was dispatched.
+	prevReady := wakeReadyTimeout
+	wakeReadyTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { wakeReadyTimeout = prevReady })
 	t.Run("follows the current version", func(t *testing.T) {
 		f := setupResumeFill(t)
 		a := f.userTemplateAgent(t, "repin-wake", string(state.PhaseSuspended), f.broker.ID)
@@ -1325,8 +1350,7 @@ func TestRepin_Wake(t *testing.T) {
 		cur, err := f.store.GetAgent(ctx, a.ID)
 		require.NoError(t, err)
 
-		_, dmErr := f.srv.wakeAgentForDM(ctx, cur)
-		require.Nil(t, dmErr)
+		f.srv.wakeAgentForDM(ctx, cur)
 		require.Equal(t, 1, f.disp.starts)
 		assert.Equal(t, repinNewHash, f.disp.storedHash)
 		assert.Equal(t, repinNewHash, f.disp.dispatchedHash)
@@ -1353,11 +1377,11 @@ func TestRepin_Wake(t *testing.T) {
 		// An immediate retry wakes the agent (not deferred behind a held
 		// claim).
 		f.srv.store = f.store
-		res, dmErr := f.srv.wakeAgentForDM(ctx, got)
-		require.Nil(t, dmErr)
-		require.NotNil(t, res)
-		assert.NotEqual(t, WakeDeferred, res.Outcome, "the retry is not deferred")
-		assert.Equal(t, 1, f.disp.starts)
+		res, _ := f.srv.wakeAgentForDM(ctx, got)
+		if res != nil {
+			assert.NotEqual(t, WakeDeferred, res.Outcome, "the retry is not deferred")
+		}
+		assert.Equal(t, 1, f.disp.starts, "the retry is dispatched")
 		assert.Equal(t, repinNewHash, f.disp.storedHash)
 	})
 }
