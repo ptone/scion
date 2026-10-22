@@ -396,4 +396,10 @@ func TestRunServerStart_ScrubsServerSecretEnvBeforeChildProcesses(t *testing.T) 
 	if kr, pm := first["loadServerKeyring"], first["initPluginManagerFn"]; kr == 0 || pm == 0 || kr > pm {
 		t.Error("loadServerKeyring must run before initPluginManagerFn")
 	}
+	// The relay role returns from runServerStart before the keyring load,
+	// so it never reads the keyring (TestRunRelayRoleNeverLoadsKeyring
+	// drives runRelayRole itself).
+	if relay, kr := first["runRelayRole"], first["loadServerKeyring"]; relay == 0 || kr == 0 || relay > kr {
+		t.Error("runRelayRole must be reached before loadServerKeyring")
+	}
 }

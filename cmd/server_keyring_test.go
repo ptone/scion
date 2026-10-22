@@ -145,10 +145,10 @@ func TestLoadServerKeyring_Refusals(t *testing.T) {
 				keys := d["signing"].(map[string]any)["keys"].([]any)
 				keys[1].(map[string]any)["id"] = "legacy"
 			})}
-		}, `duplicate signing key id "legacy"`},
+		}, "duplicate signing key id: signing.keys[1] repeats signing.keys[0]"},
 		{"unknown field", func(t *testing.T) *config.GlobalConfig {
 			return &config.GlobalConfig{KeyringFile: writeCmdKeyring(t, func(d map[string]any) { d["extra"] = 1 })}
-		}, `unknown field "extra"`},
+		}, "unknown field near byte"},
 		{"pilot: versioned emit", func(t *testing.T) *config.GlobalConfig {
 			return &config.GlobalConfig{KeyringFile: writeCmdKeyring(t, func(d map[string]any) {
 				d["signing"].(map[string]any)["emit"] = "versioned"
