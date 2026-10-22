@@ -223,6 +223,17 @@ func isResponseHeaderTimeout(err error) bool {
 // stripped from the request and the response is sandboxed exactly as on
 // the tunnel path.
 func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent *store.Agent, port int, proxyPath string, conn net.Conn) {
+	s.serveConduitProxyWith(w, r, agent, port, proxyPath, conn, portProxyPolicy{
+		surface: portProxySurfacePath,
+		caller:  identityStringFromContext(r.Context()),
+	})
+}
+
+// serveConduitProxyWith is serveConduitProxy for a surface's policy: the
+// page view surface (policy.portView) also removes the request headers in
+// portViewStrippedRequestHeader and applies portViewModifyResponse, and
+// each surface logs its own caller string.
+func (s *Server) serveConduitProxyWith(w http.ResponseWriter, r *http.Request, agent *store.Agent, port int, proxyPath string, conn net.Conn, policy portProxyPolicy) {
 	start := time.Now()
 	reqPath := "/" + strings.TrimPrefix(proxyPath, "/")
 	target := net.JoinHostPort(conduitProxyHost, strconv.Itoa(port))
@@ -237,7 +248,7 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 			pr.Out.URL.RawQuery = r.URL.RawQuery
 			pr.Out.Host = target
 			for k := range pr.Out.Header {
-				if sensitiveHeader(k) {
+				if sensitiveHeader(k) || (policy.portView && portViewStrippedRequestHeader(k)) {
 					pr.Out.Header.Del(k)
 				}
 			}
@@ -251,6 +262,10 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 				if stripFromProxyResponse(k) {
 					resp.Header.Del(k)
 				}
+			}
+			if policy.portView {
+				portViewModifyResponse(resp.Header)
+				return nil
 			}
 			resp.Header.Set("Content-Security-Policy", untrustedContentSandboxCSP)
 			resp.Header.Set("X-Content-Type-Options", "nosniff")
@@ -297,7 +312,8 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 		slog.Debug("Proxy request", append([]any{
 			"agent_id", agent.ID,
 			"port", port,
-			"caller", identityStringFromContext(r.Context()),
+			"caller", policy.caller,
+			"surface", policy.surface,
 			"method", r.Method,
 			"path", reqPath,
 			"status", status,

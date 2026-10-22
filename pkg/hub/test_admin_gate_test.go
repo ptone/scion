@@ -224,7 +224,7 @@ func TestSigningKeySource_EveryClassHubLocalAfterNew(t *testing.T) {
 		src := srv.signingKeySource(c.KeyName)
 		assert.True(t, signingKeySourceIsHubLocal(src), "%s source %q", c.Class, src)
 	}
-	for _, want := range []string{"user_jwt", "agent_token", "oidc", "download_url", "artifact_view_url", "list_cursor", "conduit_grant", "web_session"} {
+	for _, want := range []string{"user_jwt", "agent_token", "oidc", "download_url", "artifact_view_url", "port_view_url", "list_cursor", "conduit_grant", "web_session"} {
 		assert.True(t, got[want], "class %s is checked", want)
 	}
 	assert.Len(t, testAdminSigningKeyClasses(false), len(classes)-1, "OIDC is checked only when enabled")
@@ -852,6 +852,7 @@ var tiaSecretKeyClasses = map[string]string{
 	"SecretKeyAgentSigningKey":    "agent_token",
 	"SecretKeyDownloadSigningKey": "download_url",
 	"SecretKeyArtifactViewKey":    "artifact_view_url",
+	"SecretKeyPortViewKey":        "port_view_url",
 	"SecretKeyListCursorKey":      "list_cursor",
 	"SecretKeyOIDCSigningKey":     "oidc",
 	"SecretKeyOIDCKeyset":         "oidc", // the same manager's persisted keyset
@@ -905,6 +906,7 @@ var tiaKeyMaterialSites = map[string]string{
 	"oidckeys.go:generateRSAKeyPair:crypto/rsa.GenerateKey":                                         "oidc",
 	"oidckeys.go:decodePEMPrivateKey:crypto/x509.ParsePKCS8PrivateKey":                              "oidc",
 	"download_signing.go:computeSkillFileHMAC:crypto/hmac.New":                                      "download_url",
+	"internal/portview/capability.go:mac:crypto/hmac.New":                                           "port_view_url",
 	"authorized_list.go:newListCursorSealer:crypto/aes.NewCipher":                                   "list_cursor",
 	"authorized_list.go:newListCursorSealer:crypto/cipher.NewGCM":                                   "list_cursor",
 	"conduit_grants.go:bootstrap:github.com/GoogleCloudPlatform/scion/pkg/conduit/grant.NewRingKey": "conduit_grant",

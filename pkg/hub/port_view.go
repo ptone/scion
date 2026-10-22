@@ -1,0 +1,423 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package hub
+
+import (
+	"context"
+	"crypto/rand"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"path"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/portview"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+)
+
+// Port page view (experiment hub.port_view, ptone/scion#5569).
+//
+// A user who opens an exposed port's link from the hub
+// (/api/v1/agents/{id}/ports/{port}/proxy/...) is sent to a page link
+// under /api/v1/portview/<capability>/<path> (see pkg/hub/internal/portview
+// for the capability). Every request on that route, including the page's
+// own scripts, styles, images, requests and WebSockets, is served on the
+// capability alone, as the user it names, for the one port it names:
+// handlePortView checks the capability, the agent, the user's account and
+// the user's port access on each request. Pages are served in the same
+// browser sandbox as on the port link.
+
+// SecretKeyPortViewKey is the secret key name of the key that signs page
+// view capabilities. It is a key of its own, separate from every other hub
+// key (the artifact view key included), so that a capability can never be
+// accepted by another route; the signed message also carries its own
+// domain (pkg/hub/internal/portview).
+const SecretKeyPortViewKey = "port_view_signing_key"
+
+// portViewScope is the only permission of the identity a page view
+// request runs as.
+const portViewScope = "agent:port_access"
+
+// portViewInvalidBody is the body of the one answer every capability
+// failure gets (writePortViewInvalid).
+const portViewInvalidBody = "This page's access link is not valid or has expired. Reload the page from the hub.\n"
+
+// portViewPreflightMaxAge is the Access-Control-Max-Age of a preflight
+// answer, in seconds.
+const portViewPreflightMaxAge = "600"
+
+// initPortViewKey loads or creates the page view capability key, with the
+// same stable-key policy as the artifact view key: required on deployments
+// that need stable keys, otherwise an in-memory key, since losing it only
+// ends page links within their lifetime.
+func (s *Server) initPortViewKey(ctx context.Context) error {
+	key, err := s.ensureSigningKey(ctx, SecretKeyPortViewKey, nil)
+	if err == nil && len(key) == 0 {
+		err = fmt.Errorf("port view key resolved to an empty value")
+	}
+	if err != nil {
+		_, isGCPBackend := s.secretBackend.(*secret.GCPBackend)
+		if isGCPBackend || s.config.RequireStableSigningKey {
+			return fmt.Errorf("port view key: %w", err)
+		}
+		slog.Warn("Port view key could not be loaded or persisted; using an ephemeral in-memory key "+
+			"(page links will not work on other replicas or after restart)", "error", err)
+		key = make([]byte, 32)
+		if _, rerr := rand.Read(key); rerr != nil {
+			return fmt.Errorf("generate ephemeral port view key: %w", rerr)
+		}
+		s.recordSigningKeySource(SecretKeyPortViewKey, signingKeySourceEphemeral)
+	}
+	s.mu.Lock()
+	s.portViewKey = key
+	s.mu.Unlock()
+	return nil
+}
+
+// portViewSigningKey returns the page view capability key (nil when it
+// was never initialised, which refuses every capability).
+func (s *Server) portViewSigningKey() []byte {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.portViewKey
+}
+
+// portViewTTL is the configured lifetime of a page link
+// (server.hub.port_proxy.view_ttl; 0 = the 2h default).
+func (s *Server) portViewTTL() time.Duration {
+	if d := s.config.PortViewTTL; d > 0 {
+		return d
+	}
+	return config.PortProxyDefaultViewTTL
+}
+
+// portViewNow is the clock of the page view route (a test hook).
+func (s *Server) portViewNow() time.Time {
+	if s.portViewClock != nil {
+		return s.portViewClock()
+	}
+	return time.Now()
+}
+
+// isPortViewRequest reports whether r is a request for the page view
+// route in the one shape the route serves: the decoded and the escaped
+// path both under portview.Route and clean (one trailing slash allowed),
+// the escaped path not encoding a slash, dot, backslash or NUL (in any
+// letter case), and a non-empty capability segment that is not escaped
+// at all, so the request this check admits is the one the mux routes to
+// the route. Any method. Only the request shape is checked here.
+func isPortViewRequest(r *http.Request) bool {
+	p, esc := r.URL.Path, r.URL.EscapedPath()
+	if !strings.HasPrefix(p, portview.Route) || !strings.HasPrefix(esc, portview.Route) {
+		return false
+	}
+	if !cleanRoutePath(p) || !cleanRoutePath(esc) {
+		return false
+	}
+	lower := strings.ToLower(esc)
+	if strings.Contains(lower, "%2f") || strings.Contains(lower, "%2e") || strings.Contains(lower, "%5c") ||
+		strings.Contains(lower, "%00") || strings.IndexByte(p, 0) >= 0 {
+		return false
+	}
+	capability, _, _ := strings.Cut(esc[len(portview.Route):], "/")
+	return capability != "" && !strings.Contains(capability, "%")
+}
+
+// cleanRoutePath reports whether p is already clean (path.Clean), apart
+// from one trailing slash.
+func cleanRoutePath(p string) bool {
+	c := path.Clean(p)
+	if strings.HasSuffix(p, "/") && c != "/" {
+		c += "/"
+	}
+	return c == p
+}
+
+// writePortViewInvalid writes the one answer for every capability failure
+// on the page view route: whatever failed (shape, signature, expiry, the
+// agent, the user's account or the user's access), the status, headers
+// and body are the same. Reloading the page from the hub opens the port's
+// link, which answers for the caller who opens it.
+func writePortViewInvalid(w http.ResponseWriter) {
+	h := w.Header()
+	h.Set("Content-Type", "text/plain; charset=utf-8")
+	h.Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusNotFound)
+	_, _ = io.WriteString(w, portViewInvalidBody)
+}
+
+// setPortViewResponseHeaders sets the hub-owned headers of every answer
+// on the page view route, before any branch: the sandbox policy, nosniff,
+// no referrer, and Access-Control-Allow-Origin "*" (never with
+// Access-Control-Allow-Credentials), so a page in the sandbox can load
+// its module scripts and read its own requests. Values a proxied app
+// sends for these headers are dropped (portViewModifyResponse), so each
+// is sent once.
+func setPortViewResponseHeaders(w http.ResponseWriter) {
+	h := w.Header()
+	h.Set("Content-Security-Policy", untrustedContentSandboxCSP)
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Referrer-Policy", "no-referrer")
+	h.Set("Access-Control-Allow-Origin", "*")
+	h.Del("Access-Control-Allow-Credentials")
+}
+
+// handlePortView serves ANY /api/v1/portview/<capability>/<path>.
+//
+// Order of the checks (each one's position matters):
+//  1. the experiment, then the hub-owned headers;
+//  2. the request shape; a preflight is answered here on the capability
+//     alone and never reaches the app;
+//  3. the capability; a page navigation with one that fails is sent to
+//     the port's link instead;
+//  4. a page navigation by a signed-in user other than the capability's
+//     is sent to the port's link (which link a browser is sent to only;
+//     see portview.IsNavigation);
+//  5. the agent, the user's account and the user's port access, as an
+//     identity limited to port access in the agent's project;
+//  6. the exposed port, then the proxy, as that identity.
+//
+// Every failure in 2, 3 and 5 gets writePortViewInvalid. The identity in
+// the request context, if any, is read only by step 4.
+func (s *Server) handlePortView(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	if !s.experimentEnabled(experiments.PortView) {
+		NotFound(w, "route")
+		return
+	}
+	setPortViewResponseHeaders(w)
+	if !isPortViewRequest(r) {
+		writePortViewInvalid(w)
+		return
+	}
+	rest := r.URL.Path[len(portview.Route):]
+	capability, sub, _ := strings.Cut(rest, "/")
+	_, escSub, _ := strings.Cut(r.URL.EscapedPath()[len(portview.Route):], "/")
+	key, now, ttl := s.portViewSigningKey(), s.portViewNow(), s.portViewTTL()
+
+	if r.Method == http.MethodOptions {
+		if _, err := portview.Parse(key, capability, now, ttl); err != nil {
+			writePortViewInvalid(w)
+			return
+		}
+		writePortViewPreflight(w, r)
+		return
+	}
+
+	navigation := (r.Method == http.MethodGet || r.Method == http.MethodHead) && portview.IsNavigation(r)
+	grant, err := portview.Parse(key, capability, now, ttl)
+	if err != nil {
+		if agentID, port, ok := portview.Target(capability); ok && navigation {
+			redirectToPortLink(w, r, agentID, port, escSub)
+			return
+		}
+		writePortViewInvalid(w)
+		return
+	}
+	if navigation {
+		if user := GetUserIdentityFromContext(r.Context()); user != nil && user.ID() != grant.UserID {
+			redirectToPortLink(w, r, grant.AgentID, grant.Port, escSub)
+			return
+		}
+	}
+
+	ctx := r.Context()
+	agent, err := s.store.GetAgent(ctx, grant.AgentID)
+	if err != nil || agent == nil || agent.ID != grant.AgentID || !agent.DeletedAt.IsZero() {
+		writePortViewInvalid(w)
+		return
+	}
+	identity, ok := s.portViewIdentity(ctx, grant.UserID, agent)
+	if !ok {
+		writePortViewInvalid(w)
+		return
+	}
+	exposed := findExposedPort(agent.ExposedPorts, grant.Port)
+	if exposed == nil {
+		writePortNotExposed(w, r)
+		return
+	}
+	s.proxyToAgentPort(w, r, identity, agent, exposed, "/"+sub, portProxyPolicy{
+		surface:     portProxySurfaceView,
+		caller:      "user:" + grant.UserID,
+		conduitOnly: true,
+		portView:    true,
+	}, start)
+}
+
+// writePortViewPreflight answers a preflight on the page view route (the
+// capability already checked): 204, the requested method when it is one
+// of GET, HEAD, POST, PUT, PATCH and DELETE, the requested headers other
+// than Authorization and Cookie, and a 10-minute Max-Age.
+// Access-Control-Allow-Origin "*" is already set.
+func writePortViewPreflight(w http.ResponseWriter, r *http.Request) {
+	h := w.Header()
+	if m := portview.PreflightMethod(r.Header.Get("Access-Control-Request-Method")); m != "" {
+		h.Set("Access-Control-Allow-Methods", m)
+	}
+	if hs := portview.PreflightHeaders(strings.Join(r.Header.Values("Access-Control-Request-Headers"), ",")); hs != "" {
+		h.Set("Access-Control-Allow-Headers", hs)
+	}
+	h.Set("Access-Control-Max-Age", portViewPreflightMaxAge)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// portViewIdentity returns the identity a page view request for userID
+// on agent runs as, and whether userID may open the agent's ports now:
+// the user's account must be active, and the user, limited to port access
+// within the agent's project, must pass the port access check. The port
+// link calls it before it creates a page link, so a link is only created
+// for a user it would serve.
+func (s *Server) portViewIdentity(ctx context.Context, userID string, agent *store.Agent) (Identity, bool) {
+	user, err := checkUserAccount(ctx, s.store, PrincipalContext{Kind: PrincipalKindUser, ID: userID})
+	if refusal := classifyUserAccount(user, err); refusal != accountAllowed || user == nil {
+		if refusal == accountLookupFault {
+			slog.Warn("Port view: user lookup failed", "agent_id", agent.ID, "error", err)
+		}
+		return nil, false
+	}
+	base := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, string(ClientTypeWeb))
+	identity := NewScopedUserIdentity(base, agent.ProjectID, []string{portViewScope})
+	if !s.userPortAccessAllowed(ctx, identity, agent, ActionPortAccess) {
+		return nil, false
+	}
+	return identity, true
+}
+
+// redirectToPortView answers a page navigation to an exposed port's link
+// with a redirect to a new page link, and reports whether it did. It
+// applies with the experiment on, to a GET or HEAD page navigation by a
+// signed-in user (not an agent or a token), for a loopback port of an
+// agent this node can reach over conduit, and only when the page view
+// route would serve that user (portViewIdentity). In every other case the
+// port link serves the request as before.
+func (s *Server) redirectToPortView(w http.ResponseWriter, r *http.Request, agent *store.Agent, exposed *store.ExposedPort) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	if !s.experimentEnabled(experiments.PortView) || !portview.IsNavigation(r) {
+		return false
+	}
+	var userID string
+	switch u := GetIdentityFromContext(r.Context()).(type) {
+	case *AuthenticatedUser:
+		userID = u.ID()
+	case *DevUser:
+		userID = u.ID()
+	default:
+		return false
+	}
+	if !portview.CanonicalID(userID) || !portview.CanonicalID(agent.ID) {
+		return false
+	}
+	if !s.conduitRoutable() || !isLoopbackHost(exposed.Host) {
+		return false
+	}
+	escSub, ok := portLinkSubpath(r.URL.EscapedPath())
+	if !ok {
+		return false
+	}
+	key := s.portViewSigningKey()
+	if len(key) == 0 {
+		return false
+	}
+	if _, ok := s.portViewIdentity(r.Context(), userID, agent); !ok {
+		slog.Debug("Port view: not opened for this user; serving the port link", "agent_id", agent.ID, "port", exposed.Port)
+		return false
+	}
+	exp := s.portViewNow().Add(s.portViewTTL()).Truncate(time.Second)
+	capability := portview.Mint(key, agent.ID, exposed.Port, userID, exp)
+	loc := relativeAPIRoot(r.URL.EscapedPath()) + "portview/" + capability + "/" + escSub
+	if r.URL.RawQuery != "" {
+		loc += "?" + encodeLocationQuery(r.URL.RawQuery)
+	}
+	w.Header().Set("Location", loc)
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusFound)
+	return true
+}
+
+// redirectToPortLink sends a page navigation on the page view route to
+// the port's link with the same sub-path and query, where the caller is
+// checked and a page link is created for them.
+func redirectToPortLink(w http.ResponseWriter, r *http.Request, agentID string, port int, escSub string) {
+	loc := relativeAPIRoot(r.URL.EscapedPath()) + "agents/" + agentID + "/ports/" + strconv.Itoa(port) + "/proxy/" + escSub
+	if r.URL.RawQuery != "" {
+		loc += "?" + encodeLocationQuery(r.URL.RawQuery)
+	}
+	w.Header().Set("Location", loc)
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusFound)
+}
+
+// relativeAPIRoot returns the relative reference from escPath, a path
+// under /api/v1/, to /api/v1/ itself ("../" once per slash after
+// /api/v1/), so a Location built on it resolves against the URL the
+// client used, whatever prefix a front proxy put in front of the hub.
+func relativeAPIRoot(escPath string) string {
+	n := strings.Count(strings.TrimPrefix(escPath, "/api/v1/"), "/")
+	if n == 0 {
+		return "./"
+	}
+	return strings.Repeat("../", n)
+}
+
+// portLinkSubpath returns the escaped sub-path after
+// /api/v1/agents/{id}/ports/{port}/proxy/ in escPath.
+func portLinkSubpath(escPath string) (string, bool) {
+	segs := strings.SplitN(escPath, "/", 9)
+	// "", "api", "v1", "agents", id, "ports", port, "proxy", sub
+	if len(segs) != 9 || segs[0] != "" || segs[1] != "api" || segs[2] != "v1" || segs[3] != "agents" ||
+		segs[5] != "ports" || segs[7] != "proxy" {
+		return "", false
+	}
+	return segs[8], true
+}
+
+// portViewStrippedRequestHeader reports whether a request header is
+// removed before a page view request reaches the app: the hub's own
+// credential headers (sensitiveHeader) and the identity headers a front
+// proxy or a federated caller may add.
+func portViewStrippedRequestHeader(k string) bool {
+	if sensitiveHeader(k) {
+		return true
+	}
+	switch strings.ToLower(k) {
+	case strings.ToLower(FederationTokenHeader), strings.ToLower(IAPAssertionHeader),
+		"x-forwarded-user-id", "x-forwarded-user-email", "x-forwarded-user-name", "x-forwarded-user-role",
+		"x-goog-authenticated-user-email", "x-goog-authenticated-user-id":
+		return true
+	default:
+		return false
+	}
+}
+
+// portViewModifyResponse applies the page view rules to the headers of a
+// proxied app response, after the shared ones (stripFromProxyResponse):
+// the app's Referrer-Policy is dropped, because the hub sets its own on
+// every page view answer (setPortViewResponseHeaders), and a response
+// without Cache-Control gets "private".
+func portViewModifyResponse(h http.Header) {
+	h.Del("Referrer-Policy")
+	if h.Get("Cache-Control") == "" {
+		h.Set("Cache-Control", "private")
+	}
+}

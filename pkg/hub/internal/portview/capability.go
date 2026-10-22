@@ -146,6 +146,10 @@ func Target(capability string) (agentID string, port int, ok bool) {
 	return parts[1], int(p), true
 }
 
+// CanonicalID reports whether s may be used as an agent or user ID in a
+// capability: a UUID in its canonical (lower-case, hyphenated) spelling.
+func CanonicalID(s string) bool { return canonicalUUID(s) }
+
 // canonicalUUID reports whether s is a UUID in its canonical spelling.
 func canonicalUUID(s string) bool {
 	if len(s) != 36 {
