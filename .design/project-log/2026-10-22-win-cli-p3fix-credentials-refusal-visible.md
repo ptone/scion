@@ -87,3 +87,17 @@ No ./cmd build (none needed: cmd is unchanged).
   `TestWindowsAtomicWrite_InheritKeepsOwnerOnlyTarget`. The symlink test
   of row C5 is unchanged; `TestWindowsAtomicWrite_InheritDecisionDoesNotFollowLink`
   is new. Both new tests are anchored.
+
+## Item 3: `scion use` / `scion project use` on Windows (ptone D2)
+- Added `use` and `project.use` to `windowsAllowed`. The parent `project`
+  stays gated (hidden; `scion project` alone is refused), which makes
+  this the only allowed command under a gated parent. I flagged it in the
+  allowlist comment.
+- Traced the writes: context.yaml, its directory and its lock (C7); and
+  credentials.json, only through the login offer (C1). All are migrated
+  sites. The reads match those of the allowed hub commands.
+- Tests: the portable gate test `TestWindowsGate_AllowsUseOnlyUnderProject`,
+  and the Windows end-to-end `TestWindowsUse_SelectWritesPrivateContext`
+  (temporary USERPROFILE, fake hub, too-open context.yaml repaired).
+- Dev-time checks (not evidence): a masked Linux ./cmd run of the named
+  tests, and a masked GOOS=windows `go test -c` of ./cmd.
