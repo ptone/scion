@@ -4216,3 +4216,31 @@ func TestPlatformSkillsHubEnabled(t *testing.T) {
 		})
 	}
 }
+
+// TestProvisionAgent_HubNativeWorktreeWorkspaceAccepted is the regression for
+// the broker worktree-per-agent path: the agent's worktree lives at
+// <project>/.scion/workspace/worktrees/<agent>, under .scion but not under
+// .scion/agents, and is passed as the explicit workspace. ProvisionAgent must
+// accept it (an earlier over-broad refusal of everything under .scion rejected
+// it).
+func TestProvisionAgent_HubNativeWorktreeWorkspaceAccepted(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	tmpDir := t.TempDir()
+	projectScionDir, _ := provisionAgentRepoRootScaffold(t, tmpDir)
+
+	// The hub-native base and the agent's worktree, both under .scion/workspace.
+	base := filepath.Join(projectScionDir, "workspace")
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	setupGitRepo(t, base)
+	worktree := createRealWorktree(t, base, "agent-a")
+	if want := filepath.Join(projectScionDir, "workspace", "worktrees", "agent-a"); worktree != want {
+		t.Fatalf("worktree at %q, want %q", worktree, want)
+	}
+
+	ctx := api.ContextWithProvisionedWorktreeRepoRoot(context.Background(), base)
+	if _, _, _, err := ProvisionAgent(ctx, "agent-a", "claude", "", "", projectScionDir, "", "", "", worktree); err != nil {
+		t.Fatalf("ProvisionAgent refused a hub-native .scion/workspace worktree: %v", err)
+	}
+}

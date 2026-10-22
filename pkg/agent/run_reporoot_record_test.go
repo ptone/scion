@@ -222,34 +222,41 @@ func TestProvision_RefusesLinkedWorktreeProject(t *testing.T) {
 	}
 }
 
-// An explicit workspace inside the project's .scion directory is refused
-// at provision.
-func TestRefuseWorkspaceInScionDir(t *testing.T) {
+// An explicit workspace inside the project's .scion/agents directory is
+// refused at provision; other locations under .scion (the project's own
+// .scion, and the hub-native base's .scion/workspace) are allowed.
+func TestRefuseWorkspaceInAgentsDir(t *testing.T) {
 	root := t.TempDir()
 	scion := mkdirAllT(t, filepath.Join(root, "proj", ".scion"))
 	agents := mkdirAllT(t, filepath.Join(scion, "agents"))
 	agentDir := mkdirAllT(t, filepath.Join(agents, "a"))
+	wtWorkspace := mkdirAllT(t, filepath.Join(scion, "workspace", "worktrees", "a"))
 	outside := mkdirAllT(t, filepath.Join(root, "proj", "work"))
-	for _, ws := range []string{scion, agents, agentDir} {
-		if err := refuseWorkspaceInScionDir(scion, ws); err == nil {
-			t.Errorf("refuseWorkspaceInScionDir(%q): want a refusal", ws)
+	// Refused: the agents tree and everything under it.
+	for _, ws := range []string{agents, agentDir} {
+		if err := refuseWorkspaceInAgentsDir(scion, ws); err == nil {
+			t.Errorf("refuseWorkspaceInAgentsDir(%q): want a refusal", ws)
 		}
 	}
-	if err := refuseWorkspaceInScionDir(scion, outside); err != nil {
-		t.Errorf("refuseWorkspaceInScionDir(outside) = %v, want nil", err)
+	// Allowed: .scion itself, the hub-native .scion/workspace worktree, and a
+	// workspace outside .scion entirely.
+	for _, ws := range []string{scion, wtWorkspace, outside} {
+		if err := refuseWorkspaceInAgentsDir(scion, ws); err != nil {
+			t.Errorf("refuseWorkspaceInAgentsDir(%q) = %v, want nil", ws, err)
+		}
 	}
 	// The project directory given as the parent (the project root, not
 	// .scion) is handled too.
-	if err := refuseWorkspaceInScionDir(filepath.Dir(scion), agents); err == nil {
-		t.Error("refuseWorkspaceInScionDir(projectRoot, agents): want a refusal")
+	if err := refuseWorkspaceInAgentsDir(filepath.Dir(scion), agentDir); err == nil {
+		t.Error("refuseWorkspaceInAgentsDir(projectRoot, agentDir): want a refusal")
 	}
-	// A symlink into .scion is caught (both sides resolve).
+	// A symlink into the agents tree is caught (both sides resolve).
 	link := filepath.Join(root, "link-to-agents")
-	if err := os.Symlink(agents, link); err != nil {
+	if err := os.Symlink(agentDir, link); err != nil {
 		t.Fatal(err)
 	}
-	if err := refuseWorkspaceInScionDir(scion, link); err == nil {
-		t.Error("refuseWorkspaceInScionDir(symlink into .scion): want a refusal")
+	if err := refuseWorkspaceInAgentsDir(scion, link); err == nil {
+		t.Error("refuseWorkspaceInAgentsDir(symlink into agents): want a refusal")
 	}
 }
 

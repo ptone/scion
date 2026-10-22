@@ -1755,7 +1755,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			if _, err := os.Stat(absWorkspace); os.IsNotExist(err) {
 				return "", "", nil, fmt.Errorf("workspace path does not exist: %s", absWorkspace)
 			}
-			if err := refuseWorkspaceInScionDir(projectDir, absWorkspace); err != nil {
+			if err := refuseWorkspaceInAgentsDir(projectDir, absWorkspace); err != nil {
 				return "", "", nil, err
 			}
 			workspaceSource = absWorkspace
@@ -1769,7 +1769,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			if err != nil {
 				return "", "", nil, err
 			}
-			if err := refuseWorkspaceInScionDir(projectDir, resolved); err != nil {
+			if err := refuseWorkspaceInAgentsDir(projectDir, resolved); err != nil {
 				return "", "", nil, err
 			}
 			workspaceSource = resolved
