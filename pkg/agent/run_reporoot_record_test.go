@@ -15,13 +15,13 @@
 package agent
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
@@ -103,9 +103,10 @@ func TestProvision_RefusesWhenRepoRootsDisagree(t *testing.T) {
 	}
 }
 
-// An agent provisioned before records were written gets a backfill record
-// from the directory walk on its next start.
-func TestStart_BackfillsMissingRecord(t *testing.T) {
+// An agent whose record is missing falls back to GCP#4037's derivation on its
+// next start (a missing record means the derivation governs); no backfill
+// record is written.
+func TestStart_MissingRecordUsesDerivation(t *testing.T) {
 	f := newRepoRootMetadataFixture(t)
 	agentDir := config.GetAgentDir(f.projectScionDir, f.agentName, false)
 	if err := os.Remove(filepath.Join(agentDir, provisionedWorktreeStateFile)); err != nil {
@@ -113,83 +114,113 @@ func TestStart_BackfillsMissingRecord(t *testing.T) {
 	}
 	cfg := f.start(t)
 	if got, want := cfg.RepoRoot, eval(t, f.projectDir); got != want {
-		t.Errorf("restart: RepoRoot = %q, want %q", got, want)
+		t.Errorf("restart: RepoRoot = %q, want the derived project root %q", got, want)
 	}
-	rec, ok := readRepoRootRecord(agentDir)
-	if !ok || rec.Source != repoRootSourceBackfill || rec.RepoRoot != eval(t, f.projectDir) {
-		t.Errorf("record after backfill = %+v (ok=%v), want a backfill record", rec, ok)
+	if rec, ok := readRepoRootRecord(agentDir); ok && rec.Source == repoRootSourceBackfill {
+		t.Errorf("a backfill record was written on a missing-record start: %+v", rec)
 	}
 }
 
-// A record written by an older version (no source) is not used; the
-// per-agent workspace gets a backfill instead.
-func TestStart_LegacyRecordNotUsed(t *testing.T) {
+// A record that names a repository other than the project's derived root (here
+// in the legacy no-source format) makes the start refuse (fail closed); the
+// other repository is never mounted.
+func TestStart_RecordNamingAnotherRepoRefused(t *testing.T) {
 	f := newRepoRootMetadataFixture(t)
 	agentDir := config.GetAgentDir(f.projectScionDir, f.agentName, false)
 	mustWrite(t, filepath.Join(agentDir, provisionedWorktreeStateFile), `{"repoRoot":"`+eval(t, f.otherRepo)+`"}`)
-	if _, ok := readRepoRootRecord(agentDir); ok {
-		t.Fatal("a record without a source was accepted")
+
+	if err := f.startErr(t); err == nil {
+		t.Fatalf("restart: want a refusal when the record names another repository; got RepoRoot=%q", f.captured.RepoRoot)
 	}
-	cfg := f.start(t)
-	if got, want := cfg.RepoRoot, eval(t, f.projectDir); got != want {
-		t.Errorf("restart: RepoRoot = %q, want the backfilled %q", got, want)
+	if f.captured.RepoRoot == eval(t, f.otherRepo) {
+		t.Errorf("restart: RunConfig.RepoRoot = %q, the other repository; it must never be mounted", f.captured.RepoRoot)
 	}
 }
 
-func TestResolveStartRepoRoot_Conditions(t *testing.T) {
-	t.Setenv("SCION_HOST_UID", "")
-	root := t.TempDir()
-	repo := filepath.Join(root, "repo")
-	setupGitRepo(t, mkdirAllT(t, repo))
-	projectDir := mkdirAllT(t, filepath.Join(repo, ".scion"))
-	agentDir := mkdirAllT(t, filepath.Join(projectDir, "agents", "a"))
-	ws := mkdirAllT(t, filepath.Join(agentDir, "workspace"))
-	want := eval(t, repo)
+// TestReconcileRepoRoot covers the fail-closed intersection decision table
+// (D = the derived root, R = the record). It is the single place the
+// mismatch/unreadable policy lives.
+func TestReconcileRepoRoot(t *testing.T) {
+	errRefuse := errors.New("derivation refused")
+	cases := []struct {
+		name      string
+		derived   string
+		detectErr error
+		rec       repoRootRecordState
+		wantRoot  string
+		wantErr   bool
+	}{
+		{name: "row1 missing record, D is a full root -> D", derived: "/repo", rec: repoRootRecordState{status: recordMissing}, wantRoot: "/repo"},
+		{name: "row2 D refuses -> refuse (whatever R)", derived: "", detectErr: errRefuse, rec: repoRootRecordState{status: recordPresent, root: "/repo"}, wantErr: true},
+		{name: "row3 D plain, record present -> plain", derived: "", rec: repoRootRecordState{status: recordPresent, root: "/repo"}, wantRoot: ""},
+		{name: "row3 D plain, record missing -> plain", derived: "", rec: repoRootRecordState{status: recordMissing}, wantRoot: ""},
+		{name: "row4 record equals D -> D", derived: "/repo", rec: repoRootRecordState{status: recordPresent, root: "/repo"}, wantRoot: "/repo"},
+		{name: "row4 record mismatches D -> refuse", derived: "/repo", rec: repoRootRecordState{status: recordPresent, root: "/other"}, wantErr: true},
+		{name: "row5 record unreadable -> refuse", derived: "/repo", rec: repoRootRecordState{status: recordUnreadable}, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := reconcileRepoRoot("a", tc.derived, tc.detectErr, tc.rec)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("want a refusal, got root %q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.wantRoot {
+				t.Errorf("root = %q, want %q", got, tc.wantRoot)
+			}
+		})
+	}
+}
 
-	write := func(source string) {
-		t.Helper()
-		if err := writeRepoRootRecord(agentDir, want, source, nil); err != nil {
-			t.Fatal(err)
-		}
-	}
-	in := startRepoRootInput{agentName: "a", agentDir: agentDir, projectDir: projectDir, workspace: ws}
+// TestReadRepoRootRecordState covers reading R: the ctx signal, a missing file,
+// a readable record (including a legacy record with no source), a corrupt or
+// empty record (unreadable -> refuse), and a record under an agent mount, which
+// is treated as missing so an agent-reachable record can never force a root.
+func TestReadRepoRootRecordState(t *testing.T) {
+	ws := t.TempDir()
 
-	write(repoRootSourceProvision)
-	if got, _ := resolveStartRepoRoot(in); got != want {
-		t.Errorf("provision record: got %q, want %q", got, want)
+	if rs := readRepoRootRecordState("/broker/root", t.TempDir(), ws, nil); rs.status != recordPresent || rs.root != "/broker/root" {
+		t.Errorf("ctx signal: got %+v, want present /broker/root", rs)
 	}
 
-	explicit := in
-	explicit.explicit = true
-	if got, _ := resolveStartRepoRoot(explicit); got != "" {
-		t.Errorf("explicit start with a provision record: got %q, want \"\"", got)
+	agentDir := t.TempDir()
+	recPath := filepath.Join(agentDir, provisionedWorktreeStateFile)
+	if rs := readRepoRootRecordState("", agentDir, ws, nil); rs.status != recordMissing {
+		t.Errorf("no file: got %+v, want missing", rs)
 	}
 
-	mounted := in
-	mounted.volumes = []api.VolumeMount{{Source: filepath.Join(projectDir, "agents"), Target: "/mnt/agents"}}
-	if got, _ := resolveStartRepoRoot(mounted); got != "" {
-		t.Errorf("agentDir inside a configured volume: got %q, want \"\"", got)
-	}
-	if err := writeRepoRootRecord(agentDir, want, repoRootSourceProvision, agentMountSources(ws, want, mounted.volumes)); err != errAgentDirMounted {
-		t.Errorf("writeRepoRootRecord with agentDir mounted: err = %v, want errAgentDirMounted", err)
+	mustWrite(t, recPath, `{"repoRoot":"/repo","source":"provision"}`)
+	if rs := readRepoRootRecordState("", agentDir, ws, nil); rs.status != recordPresent || rs.root != "/repo" {
+		t.Errorf("valid record: got %+v, want present /repo", rs)
 	}
 
-	if err := os.Remove(filepath.Join(agentDir, provisionedWorktreeStateFile)); err != nil {
-		t.Fatal(err)
+	mustWrite(t, recPath, `{"repoRoot":"/repo"}`)
+	if rs := readRepoRootRecordState("", agentDir, ws, nil); rs.status != recordPresent || rs.root != "/repo" {
+		t.Errorf("legacy record without a source: got %+v, want present /repo", rs)
 	}
-	elsewhere := in
-	elsewhere.workspace = mkdirAllT(t, filepath.Join(root, "external-worktree"))
-	if got, _ := resolveStartRepoRoot(elsewhere); got != "" {
-		t.Errorf("no record, workspace outside the per-agent directory: got %q, want \"\"", got)
+
+	mustWrite(t, recPath, `{not json`)
+	if rs := readRepoRootRecordState("", agentDir, ws, nil); rs.status != recordUnreadable {
+		t.Errorf("corrupt record: got %+v, want unreadable", rs)
 	}
-	if _, ok := readRepoRootRecord(agentDir); ok {
-		t.Error("a backfill record was written for a workspace outside the per-agent directory")
+
+	mustWrite(t, recPath, `{"source":"provision"}`)
+	if rs := readRepoRootRecordState("", agentDir, ws, nil); rs.status != recordUnreadable {
+		t.Errorf("record with an empty root: got %+v, want unreadable", rs)
 	}
-	if got, _ := resolveStartRepoRoot(mounted); got != "" {
-		t.Errorf("no record, agentDir inside a configured volume: got %q, want \"\"", got)
-	}
-	if _, ok := readRepoRootRecord(agentDir); ok {
-		t.Error("a backfill record was written with agentDir inside a configured volume")
+
+	// A record an agent could reach: agentDir sits under the workspace mount.
+	root2 := t.TempDir()
+	ws2 := mkdirAllT(t, filepath.Join(root2, "ws"))
+	agentDir2 := mkdirAllT(t, filepath.Join(ws2, "agents", "a"))
+	mustWrite(t, filepath.Join(agentDir2, provisionedWorktreeStateFile), `{"repoRoot":"/repo","source":"provision"}`)
+	if rs := readRepoRootRecordState("", agentDir2, ws2, nil); rs.status != recordMissing {
+		t.Errorf("record under the workspace mount: got %+v, want missing (ignored)", rs)
 	}
 }
 
@@ -350,15 +381,14 @@ func TestResolveStartRepoRoot_RejectsRecordNotMatchingProject(t *testing.T) {
 	agentDir := mkdirAllT(t, filepath.Join(projectDir, "agents", "a"))
 	ws := mkdirAllT(t, filepath.Join(agentDir, "workspace"))
 
-	// A provision record naming another repository, which is not an ancestor
-	// of the per-agent workspace, so the mount check passes.
+	// A provision record naming another repository. The project's derived root
+	// is this repo, so the record does not equal D and the start is refused.
 	if err := writeRepoRootRecord(agentDir, eval(t, other), repoRootSourceProvision, nil); err != nil {
 		t.Fatal(err)
 	}
 	in := startRepoRootInput{agentName: "a", agentDir: agentDir, projectDir: projectDir, workspace: ws}
-	got, _ := resolveStartRepoRoot(in)
-	if got != "" {
-		t.Errorf("resolveStartRepoRoot = %q, want \"\" (a record whose root does not match the project is not used)", got)
+	if _, err := resolveStartRepoRoot(in); err == nil {
+		t.Error("resolveStartRepoRoot: want a refusal when the record names a repository other than the project's derived root")
 	}
 }
 

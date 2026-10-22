@@ -97,15 +97,23 @@ func newRepoRootMetadataFixture(t *testing.T) *repoRootMetadataFixture {
 
 func (f *repoRootMetadataFixture) start(t *testing.T) runtime.RunConfig {
 	t.Helper()
-	*f.captured = runtime.RunConfig{}
-	if _, err := f.mgr.Start(context.Background(), api.StartOptions{
-		Name:        f.agentName,
-		ProjectPath: f.projectScionDir,
-		NoAuth:      true,
-	}); err != nil {
+	if err := f.startErr(t); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	return *f.captured
+}
+
+// startErr starts the agent and returns the error (if any) instead of failing
+// the test, for cases that must fail closed.
+func (f *repoRootMetadataFixture) startErr(t *testing.T) error {
+	t.Helper()
+	*f.captured = runtime.RunConfig{}
+	_, err := f.mgr.Start(context.Background(), api.StartOptions{
+		Name:        f.agentName,
+		ProjectPath: f.projectScionDir,
+		NoAuth:      true,
+	})
+	return err
 }
 
 // adminDir returns the worktree's admin directory in the project repository,
@@ -123,13 +131,15 @@ func (f *repoRootMetadataFixture) adminDir(t *testing.T) string {
 	return filepath.Clean(gitdir)
 }
 
-// TestStart_RepoRootFollowsOnlyTheProjectRepository checks what RepoRoot a
-// restart computes after the worktree's own metadata files (the .git
-// pointer in the workspace, or commondir in its admin directory) are
-// changed to name a different repository. RunConfig.RepoRoot must stay the
-// project's repository or be empty; it must never become the other
-// repository. (Before the root was recorded at provision, the restart
-// derived it from the workspace and got the other repository.)
+// TestStart_RepoRootFollowsOnlyTheProjectRepository checks what a restart does
+// after the worktree's own metadata files (the .git pointer in the workspace,
+// or commondir in its admin directory) are changed to name a different
+// repository. The recorded root no longer validates against the workspace, so
+// the derivation falls to detectRepoRoot, which finds the worktree's git common
+// dir pointing outside the project's repository and refuses. The start must
+// fail closed and must never mount the other repository. (Before the root was
+// recorded at provision, the restart derived it from the workspace and got the
+// other repository.)
 func TestStart_RepoRootFollowsOnlyTheProjectRepository(t *testing.T) {
 	cases := []struct {
 		name string
@@ -153,14 +163,17 @@ func TestStart_RepoRootFollowsOnlyTheProjectRepository(t *testing.T) {
 			f := newRepoRootMetadataFixture(t)
 			tc.edit(t, f)
 
-			cfg := f.start(t)
-			t.Logf("restart: RepoRoot=%q Workspace=%q", cfg.RepoRoot, cfg.Workspace)
-			if cfg.RepoRoot == eval(t, f.otherRepo) {
-				t.Errorf("restart: RunConfig.RepoRoot = %q, the other repository named by the worktree's metadata; want %q or \"\"",
-					cfg.RepoRoot, eval(t, f.projectDir))
+			*f.captured = runtime.RunConfig{}
+			_, err := f.mgr.Start(context.Background(), api.StartOptions{
+				Name:        f.agentName,
+				ProjectPath: f.projectScionDir,
+				NoAuth:      true,
+			})
+			if err == nil {
+				t.Fatalf("restart: want a refusal after the worktree metadata was changed to name another repository; got RepoRoot=%q", f.captured.RepoRoot)
 			}
-			if cfg.RepoRoot != "" && cfg.RepoRoot != eval(t, f.projectDir) {
-				t.Errorf("restart: RunConfig.RepoRoot = %q; want %q or \"\"", cfg.RepoRoot, eval(t, f.projectDir))
+			if f.captured.RepoRoot == eval(t, f.otherRepo) {
+				t.Errorf("restart: RunConfig.RepoRoot = %q, the other repository; the start must never mount it", f.captured.RepoRoot)
 			}
 		})
 	}
