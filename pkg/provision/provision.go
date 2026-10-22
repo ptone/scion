@@ -891,8 +891,9 @@ func gitInSharedCheckout(ctx context.Context, base, worktree string, args ...str
 // (util.RemoveWorktreeEntry).
 func sharedCheckoutGitCmd(base, worktree string) func(ctx context.Context, args ...string) (*exec.Cmd, error) {
 	return func(ctx context.Context, args ...string) (*exec.Cmd, error) {
-		full := append([]string{"-c", "safe.directory=" + base, "-c", "safe.directory=" + worktree, "-C", base}, args...)
-		return exec.CommandContext(ctx, "git", full...), nil
+		return util.HostGitCommand(ctx, base, util.HostGitOptions{
+			Config: []string{"safe.directory=" + base, "safe.directory=" + worktree},
+		}, args...)
 	}
 }
 
@@ -2197,28 +2198,18 @@ var ErrCommondirPresent = errors.New("refusing git operation: base .git/commondi
 //     <dir>/.git/commondir exists at all and refuses (ErrCommondirPresent)
 //     if so, since a hub-native base never legitimately has one.
 //
-// It deliberately does NOT disable hooks (core.hooksPath), filters, aliases,
-// or the global/system gitconfig — once the above holds, any hook/filter
-// still configured for the base is host-managed and must keep running (most
-// notably git-lfs: a post-checkout hook + filter.lfs.* smudge/clean driver).
-// Specifically:
-//   - GIT_CONFIG_NOSYSTEM=1 / GIT_CONFIG_GLOBAL=/dev/null were considered and
-//     REJECTED: `git lfs install` writes filter.lfs.* to the global or system
-//     gitconfig (not repo-local), so this would silently break LFS. It would
-//     also strip broker-host config the broker legitimately relies on
-//     (safe.directory, credential.helper, url.insteadOf, http.*,
-//     core.sshCommand for its own auth) for no corresponding benefit.
-//   - core.sshCommand is left alone for the same reason: this wrapper also
-//     covers the base clone/pull paths, which may legitimately depend on the
-//     broker's configured SSH transport.
-//   - Alias neutralization is unnecessary: every caller here invokes an
-//     explicit, hardcoded subcommand, never a user-suppliable one.
-//
-// What it does additionally clear:
-//   - core.fsmonitor (both boolean and hook-path forms): not used by git-lfs
-//     or any other broker operation, so clearing it costs nothing.
-//   - core.pager=cat: purely cosmetic — a pager must never block
-//     non-interactive broker output.
+// The command itself is built by util.HostGitCommand, because agent
+// containers can write the base's .git: it runs without repository hooks
+// (core.hooksPath=/dev/null), without a file-system monitor, with
+// core.pager=cat, and with every filter driver defined in the repository's
+// own config replaced by its global/system definition (or disabled). The
+// global and system gitconfig stay in effect (safe.directory,
+// credential.helper, url.insteadOf, http.*, core.sshCommand for the
+// broker's own auth, and the filter.lfs.* driver `git lfs install` writes
+// there), so LFS content is still checked out. The git-lfs post-checkout
+// hook does not run; it only marks lockable files read-only.
+// Aliases are not a concern: every caller here invokes an explicit,
+// hardcoded subcommand, never a user-suppliable one.
 //
 // dir is the working directory (cmd.Dir) and the base whose common directory
 // is pinned; it must be non-empty. args are the git subcommand and its
@@ -2238,16 +2229,8 @@ func SafeGitCommand(ctx context.Context, dir string, args ...string) (*exec.Cmd,
 		return nil, fmt.Errorf("%w: %s", ErrCommondirPresent, commondirFile)
 	}
 
-	safeArgs := []string{
-		"-c", "core.fsmonitor=false",
-		"-c", "core.fsmonitor=",
-		"-c", "core.pager=cat",
-	}
-	fullArgs := append(safeArgs, args...)
-	cmd := exec.CommandContext(ctx, "git", fullArgs...)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GIT_COMMON_DIR="+filepath.Join(dir, ".git"))
-	return cmd, nil
+	env := append(os.Environ(), "GIT_COMMON_DIR="+filepath.Join(dir, ".git"))
+	return util.HostGitCommand(ctx, dir, util.HostGitOptions{Env: env}, args...)
 }
 
 // markedWorkspaceNeedsClone reports whether a shared-plain git workspace that
@@ -3622,7 +3605,7 @@ func mountedDisplayPath(in ProvisionInput, path string) string {
 // error status means the name is invalid; git failing to start or to be
 // waited on is returned as an error running git.
 func checkBranchName(ctx context.Context, base, name string) error {
-	out, err := exec.CommandContext(ctx, "git", "-C", base, "check-ref-format", "--branch", name).Output()
+	out, err := exec.CommandContext(ctx, "git", append(util.HostGitArgs(), "-C", base, "check-ref-format", "--branch", name)...).Output()
 	var exitErr *exec.ExitError
 	switch {
 	case errors.As(err, &exitErr):
@@ -3807,7 +3790,7 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 // currentBranch returns the branch checked out in the repository at
 // repoDir, or "" when HEAD is detached or cannot be read.
 func currentBranch(ctx context.Context, repoDir string) string {
-	out, err := exec.CommandContext(ctx, "git", "-C", repoDir, "symbolic-ref", "--quiet", "--short", "HEAD").Output()
+	out, err := exec.CommandContext(ctx, "git", append(util.HostGitArgs(), "-C", repoDir, "symbolic-ref", "--quiet", "--short", "HEAD")...).Output()
 	if err != nil {
 		return ""
 	}
