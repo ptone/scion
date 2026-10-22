@@ -15,6 +15,8 @@
 package util
 
 import (
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -97,16 +99,82 @@ func TestRedactGitConfigSecrets_ParseErrorFailsClosed(t *testing.T) {
 	}
 }
 
+// TestRedactedPrivateConfig_IsUsableByGit is the functional check for the
+// private-config mechanism: a config run through RedactGitConfigSecrets and put
+// back as a repository's .git/config is still a fully working config — git can
+// commit, set local config (push -u's upstream recording), and push/fetch — while
+// the credential material is gone. This exercises the re-serialisation on a real
+// git.
+func TestRedactedPrivateConfig_IsUsableByGit(t *testing.T) {
+	hostGitTestEnv(t)
+	root := t.TempDir()
+
+	// A bare "remote".
+	remote := filepath.Join(root, "remote.git")
+	hostRunGit(t, root, "init", "-q", "--bare", remote)
+
+	// A working repo with an origin and a credential-bearing config.
+	repo := filepath.Join(root, "repo")
+	hostRunGit(t, root, "init", "-q", "-b", "main", repo)
+	hostRunGit(t, repo, "remote", "add", "origin", remote)
+	hostRunGit(t, repo, "config", "--local", "http.https://host.example.extraheader", "Authorization: Basic QUJD")
+	hostRunGit(t, repo, "config", "--local", "credential.helper", "store")
+
+	// Redact the repo's own .git/config and write it back (what the seed does).
+	cfgPath := filepath.Join(repo, ".git", "config")
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	redacted, stripped, err := RedactGitConfigSecrets(raw)
+	if err != nil {
+		t.Fatalf("redact: %v", err)
+	}
+	if len(stripped) == 0 {
+		t.Fatal("expected credential keys to be stripped")
+	}
+	if err := os.WriteFile(cfgPath, redacted, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// git still works with the redacted config: commit, push -u (writes
+	// branch.main.{remote,merge} to the now-private config), a second commit and
+	// push, and fetch.
+	writeFile(t, filepath.Join(repo, "f.txt"), "hello\n")
+	hostRunGit(t, repo, "add", ".")
+	hostRunGit(t, repo, "-c", "core.hooksPath="+os.DevNull, "commit", "-q", "-m", "first")
+	hostRunGit(t, repo, "push", "-q", "-u", "origin", "main")
+	writeFile(t, filepath.Join(repo, "f.txt"), "hello again\n")
+	hostRunGit(t, repo, "add", ".")
+	hostRunGit(t, repo, "-c", "core.hooksPath="+os.DevNull, "commit", "-q", "-m", "second")
+	hostRunGit(t, repo, "push", "-q", "origin", "main")
+	hostRunGit(t, repo, "fetch", "-q", "origin")
+
+	// The credential material is gone; the origin url remains.
+	cfgNow, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"extraheader", "credential", "Basic QUJD"} {
+		if strings.Contains(string(cfgNow), bad) {
+			t.Errorf("redacted config still contains %q:\n%s", bad, cfgNow)
+		}
+	}
+	if out := hostRunGit(t, repo, "config", "--local", "branch.main.remote"); out != "origin" {
+		t.Errorf("push -u did not record the upstream in the private config: branch.main.remote=%q", out)
+	}
+}
+
 func TestStripURLUserinfo(t *testing.T) {
 	cases := map[string]struct {
 		want    string
 		changed bool
 	}{
-		"https://u:p@h/x":    {"https://h/x", true},
-		"https://u@h/x":      {"https://h/x", true},
-		"https://h/x":        {"https://h/x", false},
-		"git@h:o/r.git":      {"git@h:o/r.git", false}, // scp-style, not http(s)
-		"ssh://u@h/x":        {"ssh://u@h/x", false},   // not http(s)
+		"https://u:p@h/x": {"https://h/x", true},
+		"https://u@h/x":   {"https://h/x", true},
+		"https://h/x":     {"https://h/x", false},
+		"git@h:o/r.git":   {"git@h:o/r.git", false}, // scp-style, not http(s)
+		"ssh://u@h/x":     {"ssh://u@h/x", false},   // not http(s)
 	}
 	for in, want := range cases {
 		got, changed := stripURLUserinfo(in)
