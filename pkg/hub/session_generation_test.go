@@ -517,8 +517,10 @@ func TestSessionGen_AuthRefresh_NeverRevoked_OK_CarriesSameSG(t *testing.T) {
 // with the generation unknown it must answer 503 and mint nothing.
 func TestSessionGen_AuthRefresh_StoreFault_FailsClosed(t *testing.T) {
 	f := newSessionGenFixture(t)
+	installStoreFault(t, f.srv, func(inner store.Store, _ *storeFaultSwitch) *failingUserLookupStore {
+		return &failingUserLookupStore{Store: inner, err: errors.New("database is locked")}
+	})
 	_, refresh := f.mintPair(t, 0, ClientTypeCLI)
-	f.srv.store = &failingUserLookupStore{Store: f.s, err: errors.New("database is locked")}
 	rec := f.postRefresh(t, refresh)
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code, "a lookup fault fails closed: %s", rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "store_error")
@@ -547,10 +549,8 @@ func TestSessionGen_AuthValidate_RevokedToken_Invalid(t *testing.T) {
 	resp := f.postValidate(t, access)
 	assert.False(t, resp.Valid, "a token behind the row is not valid")
 	assert.Nil(t, resp.User)
-
 	ahead, _ := f.mintPair(t, row+1, ClientTypeWeb)
 	assert.False(t, f.postValidate(t, ahead).Valid, "a token ahead of the row is not valid")
-
 	current, _ := f.mintPair(t, row, ClientTypeWeb)
 	assert.True(t, f.postValidate(t, current).Valid, "a token at the row's generation is valid")
 }
