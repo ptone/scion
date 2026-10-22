@@ -50,6 +50,28 @@ func foreignWritableDir(t *testing.T, grant string) (string, func()) {
 	}
 }
 
+// grantSubtestName and safeSubtestName keep subtest names (and so the
+// temp directories passed to mklink) to letters, digits and underscores.
+func grantSubtestName(grant string) string {
+	switch {
+	case grant == "":
+		return "none"
+	case strings.Contains(grant, "DC"):
+		return "deletechild"
+	default:
+		return "modify"
+	}
+}
+
+func safeSubtestName(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			return r
+		}
+		return '_'
+	}, s)
+}
+
 // treeSnapshot records every entry below dir (links are recorded, not
 // followed): directories, other entries by type, and regular files with
 // their content. Two equal snapshots mean nothing was created, removed or
@@ -131,7 +153,9 @@ func TestSSHDirCallers_LinkTargetFailingRuleIRefused(t *testing.T) {
 	}
 	for _, grant := range []string{"(OI)(CI)(M)", "(DC)"} {
 		for _, tc := range cases {
-			t.Run(grant+" "+tc.name, func(t *testing.T) {
+			// Subtest names become temp paths given to mklink: no '=',
+			// parentheses, '~' or spaces.
+			t.Run(grantSubtestName(grant)+"_"+safeSubtestName(tc.name), func(t *testing.T) {
 				home := privateHome(t)
 				target, clear := foreignWritableDir(t, grant)
 				link := filepath.Join(home, filepath.FromSlash(tc.link))
@@ -285,7 +309,7 @@ func TestSSHVSCodeWriteLeaves_RefuseHardLinks(t *testing.T) {
 // private parent, no warning.
 func TestSSHWrite_WarnsOnMutableLinkTargetParent(t *testing.T) {
 	for _, grant := range []string{"(M)", "(DC)", ""} {
-		t.Run("grant="+grant, func(t *testing.T) {
+		t.Run(grantSubtestName(grant), func(t *testing.T) {
 			var out strings.Builder
 			prev := sshWarnOut
 			sshWarnOut = &out

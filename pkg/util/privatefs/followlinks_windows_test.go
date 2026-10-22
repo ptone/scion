@@ -91,6 +91,19 @@ func TestTree_FollowLinksDirectoryComponents(t *testing.T) {
 	}
 }
 
+// grantName names an icacls grant for a subtest (and so for the temp
+// directory that cmd's mklink is given: no '=' or parentheses).
+func grantName(grant string) string {
+	switch {
+	case grant == "":
+		return "none"
+	case strings.Contains(grant, "DC"):
+		return "deletechild"
+	default:
+		return "modify"
+	}
+}
+
 // FollowLinks, refusal side (review r2 finding 1, addendum (d)): an
 // EXISTING directory component another principal can write to (Modify) or
 // delete children from (DELETE_CHILD only) is refused with ErrNotPrivate,
@@ -100,7 +113,8 @@ func TestTree_FollowLinksDirectoryComponents(t *testing.T) {
 func TestTree_FollowLinksRefusesForeignWritableComponent(t *testing.T) {
 	for _, grant := range []string{"(OI)(CI)(M)", "(DC)"} {
 		for _, viaLink := range []bool{true, false} {
-			t.Run(fmt.Sprintf("%s/link=%v", grant, viaLink), func(t *testing.T) {
+			// Subtest names become temp paths given to mklink: letters only.
+			t.Run(fmt.Sprintf("%s_link_%v", grantName(grant), viaLink), func(t *testing.T) {
 				root := replaceDir(t)
 				anchor := filepath.Join(root, "home")
 				target := filepath.Join(root, "shared")
@@ -146,7 +160,7 @@ func TestTree_FollowLinksRefusesForeignWritableComponent(t *testing.T) {
 // succeeds. Control: a private parent gives no warning.
 func TestTree_FollowLinksWarnsOnMutableTargetParent(t *testing.T) {
 	for _, grant := range []string{"(M)", "(DC)", ""} {
-		t.Run("grant="+grant, func(t *testing.T) {
+		t.Run(grantName(grant), func(t *testing.T) {
 			root := replaceDir(t)
 			anchor := filepath.Join(root, "home")
 			parent := filepath.Join(root, "shared")
