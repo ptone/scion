@@ -135,6 +135,7 @@ Settings for the agent port proxy (`/api/v1/agents/{id}/ports/{port}/...`) when 
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `response_header_timeout` | duration | `"60s"` | How long the proxy waits for the service on the agent port to send its response headers, counted from when the request has been sent. This includes the WebSocket handshake. If the headers do not arrive in time, the proxy cancels the upstream request, answers `504` (code `runtime_error`; a browser gets the proxy error page) and counts it in `scion.hub.port_proxy.upstream_timeout`. The response body has no time limit: server-sent events, downloads, chunked responses and upgraded WebSockets keep flowing once the headers have arrived. Between `"5s"` and `"10m"`; `0` is not accepted. Env: `SCION_SERVER_HUB_PORTPROXY_RESPONSEHEADERTIMEOUT`. |
+| `view_ttl` | duration | `"2h"` | With the `hub.port-view` [experiment](/scion/reference/experiments/) on, how long the page link stays valid that the hub creates when a user opens an exposed port from the hub. Opening the port's link from the hub again creates a new one. The lifetime is fixed when the link is created; using the link does not extend it. Between `"15m"` and `"24h"`. Env: `SCION_SERVER_HUB_PORTPROXY_VIEWTTL`. |
 
 #### Observability export (`server.hub.observability`)
 

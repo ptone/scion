@@ -169,6 +169,11 @@ type ServerConfig struct {
 	// The range (5s to 10m) is enforced at startup by config validation.
 	// On timeout the proxy answers 504.
 	PortProxyResponseHeaderTimeout time.Duration
+	// PortViewTTL is the lifetime of a page view link minted when a user
+	// opens an exposed port from the hub (server.hub.port_proxy.view_ttl,
+	// experiment hub.port-view; 0 = 2h). The range (15m to 24h) is
+	// enforced at startup by config validation.
+	PortViewTTL time.Duration
 	// AuthMode is the configured human auth mode (server.auth.mode). "proxy"
 	// is the only value the code checks: the auth handlers then list no
 	// OAuth providers and treat logout as a no-op. Any other value,

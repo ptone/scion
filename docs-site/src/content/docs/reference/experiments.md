@@ -20,6 +20,10 @@ The Experiments tab lists every experiment this hub version knows about: its tit
 
 An agent can see which experiments are on with `scion whoami --full`, which reads `GET /api/v1/experiments` live (see [`scion whoami`](/scion/reference/cli/#scion-whoami)). That includes `hub.artifacts`. The environment variable `SCION_HUB_EXPERIMENTS` covers only the experiments dispatched to agents (currently `hub.conduit`), fixed when the agent starts; it is not the list of enabled experiments.
 
+## Server experiments with notes
+
+- **`hub.port_view` (Port page view, alpha, off by default).** Opening an agent's exposed port from the hub serves the page through a short-lived page link, so the page's relative scripts (including modules), styles, images, same-app requests and WebSockets load. The page still runs in the browser sandbox: URLs that start with `/`, browser storage, cookies and workers do not work. The link lasts [`server.hub.port_proxy.view_ttl`](/scion/reference/server-config/#port-proxy-serverhubport_proxy) (default 2 hours); opening the port from the hub again gives a new one. In this release it applies to agents connected over Conduit (the `hub.conduit` experiment). Do not turn it on for a hub behind an authenticating front proxy (for example IAP) yet.
+
 ## For developers: launching an experiment
 
 1. Open or link a tracking issue.

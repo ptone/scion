@@ -153,6 +153,14 @@ const ChatScheduledSend = "web.chat_scheduled_send"
 // needs explicit owner approval.
 const AuthorizationDecisionAuditV2 = "hub.authorization_decision_audit_v2"
 
+// PortView gates the page view mode of the agent port proxy
+// (ptone/scion#5569): a user who opens an exposed port's link from the hub
+// is sent to a short-lived page link under /api/v1/portview/, through
+// which the page's relative scripts, styles, images, requests and
+// WebSockets load. While it is off, the port link behaves as before and
+// /api/v1/portview/ answers 404.
+const PortView = "hub.port_view"
+
 // AgentEdit gates the web Edit agent page (/agents/{id}/edit) and the Edit
 // button on the agent page. It is web-only for now: the hub's config PATCH
 // accepts edits of agents with no container whether or not it is on.
@@ -301,6 +309,17 @@ var compiled = []Experiment{
 		Issue:    "ptone/scion#2926",
 		Owner:    "runtime-broker",
 		ReviewBy: "2027-03-31",
+	},
+	{
+		Name:        PortView,
+		Title:       "Port page view",
+		Description: "Opening an agent's exposed port from the hub serves the page through a short-lived page link, so its relative scripts (including modules), styles, images, same-app requests and WebSockets work. Pages stay in the browser sandbox: URLs that start with /, browser storage, cookies and workers do not work. The link lasts server.hub.port_proxy.view_ttl (default 2h); opening the port from the hub again gives a new one. Conduit transport only in this release. Gates the hub's port link redirect and the /api/v1/portview/ route (LayerServer), which answers 404 while it is off. Do not turn it on behind an authenticating front proxy (for example IAP) yet.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#5569",
+		Owner:       "hub",
+		ReviewBy:    "2027-01-20",
 	},
 	{
 		Name:        Artifacts,
