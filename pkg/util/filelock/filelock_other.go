@@ -26,5 +26,3 @@ func tryLock(*os.File) (bool, error) { return false, errors.ErrUnsupported }
 func unlock(*os.File) {}
 
 func open(string, os.FileMode) (*os.File, bool, error) { return nil, false, errors.ErrUnsupported }
-
-func openExisting(string) (*os.File, error) { return nil, errors.ErrUnsupported }

@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -237,33 +236,6 @@ func TestAcquire_TimeoutWrapsErrTimeout(t *testing.T) {
 	l, err = Acquire(path, 0600, 30*time.Millisecond)
 	if err != nil {
 		t.Fatalf("Acquire of a free lock: %v", err)
-	}
-	l.Unlock()
-}
-
-func TestAcquireExisting(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "x.lock")
-	if _, err := AcquireExisting(path, 0); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("AcquireExisting of a missing file: %v, want fs.ErrNotExist", err)
-	}
-	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("AcquireExisting created the file: %v", err)
-	}
-	l, err := Acquire(path, 0600, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := AcquireExisting(path, 0); !errors.Is(err, ErrTimeout) {
-		t.Fatalf("AcquireExisting of a held lock: %v, want ErrTimeout", err)
-	}
-	l.Unlock()
-	// Control: a free existing lock is taken.
-	l, err = AcquireExisting(path, 0)
-	if err != nil {
-		t.Fatalf("AcquireExisting of a free lock: %v", err)
-	}
-	if l.Created {
-		t.Error("Created = true from AcquireExisting")
 	}
 	l.Unlock()
 }

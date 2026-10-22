@@ -97,7 +97,6 @@ func unlock(f *os.File) {
 
 const (
 	lockShare      = windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE // no FILE_SHARE_DELETE: ruling H
-	probeShare     = windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE
 	noFollowCreate = windows.FILE_FLAG_OPEN_REPARSE_POINT | windows.FILE_ATTRIBUTE_NORMAL
 	// FILE_FLAG_BACKUP_SEMANTICS lets an existing directory open, so it is
 	// refused as ErrNotRegular on its handle rather than failing earlier
@@ -136,17 +135,6 @@ func open(path string, mode os.FileMode) (f *os.File, created bool, err error) {
 	return f, false, err
 }
 
-// openExisting opens the existing lock file path for AcquireExisting. Its
-// handle shares delete access: the file belongs to another process, which
-// may rename or remove it while it holds the lock.
-func openExisting(path string) (*os.File, error) {
-	p, err := windows.UTF16PtrFromString(path)
-	if err != nil {
-		return nil, fmt.Errorf("open lock file: %w", err)
-	}
-	return openNoFollow(path, p, probeShare)
-}
-
 // openNoFollow opens an existing path without following a reparse point,
 // falling back to read-only access (LockFileEx works on a read handle, as
 // flock does on a read-only descriptor), and refuses anything but a
@@ -160,14 +148,14 @@ func openNoFollow(path string, p *uint16, share uint32) (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open lock file: %w", &fs.PathError{Op: "open", Path: path, Err: err})
 	}
-	info, err := attrTag(h)
+	info, tagKnown, err := attrTag(h)
 	if err != nil {
 		_ = windows.CloseHandle(h)
 		return nil, fmt.Errorf("stat lock file: %w", err)
 	}
 	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
 		_ = windows.CloseHandle(h)
-		return nil, fmt.Errorf("%w: %s is a symlink, junction or other reparse point (tag %#x)", ErrNotRegular, path, info.ReparseTag)
+		return nil, fmt.Errorf("%w: %s is a symlink, junction or other reparse point%s", ErrNotRegular, path, reparseTagText(info.ReparseTag, tagKnown))
 	}
 	if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
 		_ = windows.CloseHandle(h)
@@ -185,19 +173,30 @@ type fileAttributeTagInfo struct {
 // FileAttributeTagInfo. Only ERROR_INVALID_PARAMETER falls back: that is
 // what FAT32, which has no reparse points, answers for this information
 // class. Any other error fails closed. (privatefs has the same helper; the
-// two packages share no internal package.)
-func attrTag(h windows.Handle) (fileAttributeTagInfo, error) {
-	var info fileAttributeTagInfo
-	err := windows.GetFileInformationByHandleEx(h, windows.FileAttributeTagInfo,
+// two packages share no internal package.) tagKnown is false after the
+// fallback, which reads no reparse tag: info.ReparseTag is then 0 because
+// it is unknown, not because the file has tag 0.
+func attrTag(h windows.Handle) (info fileAttributeTagInfo, tagKnown bool, err error) {
+	err = windows.GetFileInformationByHandleEx(h, windows.FileAttributeTagInfo,
 		(*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)))
 	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
 		attrs, ferr := attrsByHandleInfo(h)
 		if ferr != nil {
-			return info, fmt.Errorf("%w (FileAttributeTagInfo: %v)", ferr, err)
+			return info, false, fmt.Errorf("%w (FileAttributeTagInfo: %v)", ferr, err)
 		}
-		return fileAttributeTagInfo{FileAttributes: attrs}, nil
+		return fileAttributeTagInfo{FileAttributes: attrs}, false, nil
 	}
-	return info, err
+	return info, err == nil, err
+}
+
+// reparseTagText describes a reparse tag for an error message. It claims a
+// tag only when one was read (tagKnown); the FAT attribute fallback reads
+// none.
+func reparseTagText(tag uint32, tagKnown bool) string {
+	if !tagKnown {
+		return " (its reparse tag was not read)"
+	}
+	return fmt.Sprintf(" (tag %#x)", tag)
 }
 
 // attrsByHandleInfo reads the attributes of the open handle h with

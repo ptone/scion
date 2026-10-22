@@ -21,6 +21,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -71,9 +72,6 @@ func TestAcquire_RefusesJunction(t *testing.T) {
 	wintest.MustJunction(t, target, j)
 	if _, err := Acquire(j, 0600, 0); !errors.Is(err, ErrNotRegular) {
 		t.Fatalf("junction: err = %v, want ErrNotRegular", err)
-	}
-	if _, err := AcquireExisting(j, 0); !errors.Is(err, ErrNotRegular) {
-		t.Fatalf("junction (AcquireExisting): err = %v, want ErrNotRegular", err)
 	}
 	mustAcquireRegular(t, dir)
 }
@@ -184,11 +182,24 @@ func TestLockFile_ShareDeleteRename(t *testing.T) {
 		t.Fatalf("rename while held: %v", err)
 	}
 	final := filepath.Join(dir, "x.lock")
-	if _, err := AcquireExisting(final, 20*time.Millisecond); !errors.Is(err, ErrTimeout) {
+	// probe locks rel through a second handle that, like the owner's,
+	// shares delete access (OpenPrivate opens with every share mode).
+	probe := func(rel string, wait time.Duration) (*Lock, error) {
+		pf, err := tr.OpenPrivate(rel, os.O_RDWR)
+		if err != nil {
+			t.Fatalf("open %s for the probe: %v", rel, err)
+		}
+		pl, err := LockFile(pf, wait)
+		if err != nil {
+			_ = pf.Close()
+		}
+		return pl, err
+	}
+	if _, err := probe("x.lock", 20*time.Millisecond); !errors.Is(err, ErrTimeout) {
 		t.Fatalf("probe of the renamed held lock: %v, want ErrTimeout (the locked file must be the one renamed)", err)
 	}
 	// Control: the impostor under the temporary name is not locked.
-	li, err := AcquireExisting(tmp, 0)
+	li, err := probe(".x.lock.tmp", 0)
 	if err != nil {
 		t.Fatalf("control: the impostor is lockable: %v", err)
 	}
@@ -218,7 +229,8 @@ func TestAttrsByHandleInfo_SeesReparsePoints(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		h, err := windows.CreateFile(p, windows.FILE_READ_ATTRIBUTES, probeShare, nil, windows.OPEN_EXISTING, noFollowOpen, 0)
+		h, err := windows.CreateFile(p, windows.FILE_READ_ATTRIBUTES,
+			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, noFollowOpen, 0)
 		if err != nil {
 			t.Fatalf("open %s: %v", path, err)
 		}
@@ -255,4 +267,17 @@ func TestAcquire_DeniedCreateReportsDenial(t *testing.T) {
 	}
 	// Control: the same Acquire in a writable directory works.
 	mustAcquireRegular(t, dir)
+}
+
+// The refusal message names a reparse tag only when one was read: the FAT
+// attribute fallback reads none, and its 0 is not a tag (security lead nit,
+// deferred from Phase 1).
+func TestReparseTagText_NoTagClaimedWithoutOne(t *testing.T) {
+	if got := reparseTagText(0, false); strings.Contains(got, "0x") || strings.Contains(got, "tag 0") {
+		t.Fatalf("fallback text %q claims a tag", got)
+	}
+	// Control: a tag that was read is printed.
+	if got := reparseTagText(0xa000000c, true); !strings.Contains(got, "0xa000000c") {
+		t.Fatalf("known-tag text %q does not name the tag", got)
+	}
 }

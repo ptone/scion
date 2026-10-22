@@ -83,24 +83,6 @@ func Acquire(path string, mode os.FileMode, wait time.Duration) (*Lock, error) {
 	return l, nil
 }
 
-// AcquireExisting is Acquire for a lock file that must already exist: it
-// never creates path, and returns an error wrapping fs.ErrNotExist when
-// path does not exist. It is for liveness probes of a lock another process
-// created; on Windows its handle shares delete access, so the owner can
-// still rename or remove its file.
-func AcquireExisting(path string, wait time.Duration) (*Lock, error) {
-	f, err := openExisting(path)
-	if err != nil {
-		return nil, err
-	}
-	l, err := LockFile(f, wait)
-	if err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	return l, nil
-}
-
 // LockFile takes an exclusive lock on the already open file f, retrying
 // until wait has passed as Acquire does. Acquire is built on it.
 //
