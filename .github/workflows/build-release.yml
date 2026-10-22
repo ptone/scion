@@ -21,6 +21,9 @@ on:
       - 'v[0-9]+.[0-9]+.[0-9]+-preview.*' # Preview: v0.3.0-preview.1
       - 'v[0-9]+.[0-9]+.[0-9]+-rc.*'      # RC: v0.3.0-rc.1
       - 'nightly-[0-9]*'                   # Nightly: nightly-20260916
+  # DRY-RUN (temporary, reverted before review): build the matrix on the
+  # fork PR. The release and update-manifest jobs are disabled (if: false).
+  pull_request: {}
   workflow_call:
     inputs:
       ref:
@@ -242,6 +245,7 @@ jobs:
 
   release:
     name: Create GitHub Release
+    if: false  # DRY-RUN: never publish
     needs: [build, build-plugins]
     runs-on: ubuntu-latest
     permissions:
@@ -340,6 +344,7 @@ jobs:
 
   update-manifest:
     name: Update LATEST.json
+    if: false  # DRY-RUN: never publish
     needs: release
     runs-on: ubuntu-latest
     permissions:
@@ -449,3 +454,41 @@ jobs:
           if [ "${MERGED}" != "true" ]; then
             echo "::warning::Failed to merge ${PR_URL} after retries. Manual merge required."
           fi
+
+  # DRY-RUN (temporary, reverted before review): evidence for the two
+  # Windows zips. Downloads only; publishes nothing.
+  dryrun-verify-windows:
+    name: DRY-RUN verify Windows zips
+    if: github.event_name == 'pull_request'
+    needs: [build]
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          pattern: scion-windows-*
+          path: zips
+      - name: Inspect zips and run scion.exe version (amd64)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Get-ChildItem -Recurse zips | Format-Table FullName, Length -AutoSize
+          foreach ($a in 'amd64','arm64') {
+            $z = Get-ChildItem -Recurse zips -Filter "scion-windows-$a.zip" | Select-Object -First 1
+            if (-not $z) { Write-Error "scion-windows-$a.zip missing" }
+            "$($z.Name) size=$($z.Length) sha256=$((Get-FileHash $z.FullName).Hash)"
+            $d = "x-$a"; Expand-Archive $z.FullName -DestinationPath $d
+            $entries = Get-ChildItem $d | ForEach-Object Name
+            "entries: $entries"
+            if (($entries -join ',') -ne 'scion.exe') { Write-Error "unexpected zip contents: $entries" }
+            # PE machine type at e_lfanew+4: 0x8664 amd64, 0xAA64 arm64.
+            $b = [IO.File]::ReadAllBytes("$d\scion.exe")
+            $pe = [BitConverter]::ToInt32($b, 0x3c)
+            $m = '{0:X4}' -f [BitConverter]::ToUInt16($b, $pe + 4)
+            "PE machine: 0x$m"
+            $want = @{ amd64 = '8664'; arm64 = 'AA64' }[$a]
+            if ($m -ne $want) { Write-Error "scion.exe for $a has PE machine 0x$m, want 0x$want" }
+          }
+          & .\x-amd64\scion.exe version
+          if ($LASTEXITCODE -ne 0) { Write-Error "scion.exe version failed ($LASTEXITCODE)" }
