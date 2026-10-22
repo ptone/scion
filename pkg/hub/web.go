@@ -840,6 +840,23 @@ func (ws *WebServer) resaveUnderActiveGeneration(w http.ResponseWriter, r *http.
 	}
 }
 
+// keyringResaveMiddleware re-saves, under the active keyring generation, a
+// session cookie an authenticated page request carried under another
+// generation (resaveUnderActiveGeneration). Public routes (which include
+// the API, see isPublicRoute) and requests without a session user pass
+// through untouched. It is the innermost middleware, so the admin-mode and
+// suspended-user checks run first.
+func (ws *WebServer) keyringResaveMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if len(ws.sessionCodecs) > 1 && !isPublicRoute(r.URL.Path) && getWebSessionUser(r.Context()) != nil {
+			if session, err := ws.sessionStore.Get(r, webSessionName); err == nil {
+				ws.resaveUnderActiveGeneration(w, r, session)
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // SetMaintenanceState sets the shared runtime maintenance state.
 func (ws *WebServer) SetMaintenanceState(ms *MaintenanceState) {
 	ws.maintenance = ms
@@ -3527,11 +3544,6 @@ func (ws *WebServer) sessionAuthMiddleware(next http.Handler) http.Handler {
 				Role:      sessionString(session, sessKeyUserRole),
 			}
 			ctx = context.WithValue(ctx, webUserContextKey{}, user)
-			// Every authenticated page and SSR request passes here (API
-			// requests re-save in sessionToBearerMiddleware): a session read
-			// under a non-active keyring generation goes back to the browser
-			// under the active one.
-			ws.resaveUnderActiveGeneration(w, r, session)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
@@ -4179,7 +4191,14 @@ func (ws *WebServer) loggingMiddleware(next http.Handler) http.Handler {
 func (ws *WebServer) buildHandler() http.Handler {
 	var handler http.Handler = ws.mux
 
-	// Admin mode middleware (innermost — runs after session user is loaded).
+	// Keyring re-save (innermost): an authenticated page or SSR request
+	// whose session was read under a non-active keyring generation gets it
+	// back under the active one, only after the admin-mode and
+	// suspended-user checks let it through (a successfully used session,
+	// ptone/scion#1530 §3). API requests re-save in sessionToBearerMiddleware.
+	handler = ws.keyringResaveMiddleware(handler)
+
+	// Admin mode middleware (runs after session user is loaded).
 	// Always applied — checks runtime MaintenanceState on each request.
 	handler = ws.adminModeWebMiddleware(handler)
 

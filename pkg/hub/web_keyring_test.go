@@ -17,6 +17,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -183,6 +184,17 @@ func krLogin(t *testing.T, from, to *krReplica) *http.Cookie {
 	return c
 }
 
+// sessionCookieCount counts the Set-Cookie headers for the session cookie.
+func sessionCookieCount(resp *http.Response) int {
+	n := 0
+	for _, c := range resp.Cookies() {
+		if c.Name == webSessionName {
+			n++
+		}
+	}
+	return n
+}
+
 func decodesUnderActive(ws *WebServer, c *http.Cookie) bool {
 	return keyring.DecodesWithActive(webSessionName, c.Value, ws.sessionCodecs)
 }
@@ -246,6 +258,7 @@ func TestWebKeyring_OldCookieLoginSurvivesSecondReplica(t *testing.T) {
 
 	resaved := sessionCookie(resp)
 	require.NotNil(t, resaved, "B must re-save a session read under a non-active generation")
+	assert.Equal(t, 1, sessionCookieCount(resp), "exactly one Set-Cookie")
 	assert.True(t, decodesUnderActive(b.ws, resaved), "the fresh cookie uses B's active pair")
 	assert.False(t, decodesUnderActive(a.ws, resaved))
 
@@ -433,9 +446,23 @@ func TestNew_KeyringModeRefusesExplicitSigningKeys(t *testing.T) {
 	assert.NoError(t, validateKeyringConfig(ServerConfig{UserTokenConfig: UserTokenConfig{SigningKey: []byte("k")}}))
 }
 
+// krPageLoad serves an authenticated page request (sessionAuthMiddleware
+// path, not the /api bearer path) on r.
+func krPageLoad(t *testing.T, r *krReplica, path string, c *http.Cookie) *http.Response {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.Header.Set("Accept", "text/html")
+	if c != nil {
+		req.AddCookie(c)
+	}
+	rec := httptest.NewRecorder()
+	r.ws.Handler().ServeHTTP(rec, req)
+	return rec.Result()
+}
+
 // TestWebKeyring_PageLoadResavesUnderActive: an authenticated page load
-// (sessionAuthMiddleware, not the /api bearer path) also re-saves a session
-// read under a non-active generation under the active one.
+// re-saves a session read under a non-active generation under the active
+// one, once, with the same values (Hub token and expiry unchanged).
 func TestWebKeyring_PageLoadResavesUnderActive(t *testing.T) {
 	st, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
@@ -444,15 +471,84 @@ func TestWebKeyring_PageLoadResavesUnderActive(t *testing.T) {
 	a, b := newKRReplica(t, st, ka, clk), newKRReplica(t, st, kb, clk)
 	old := krLogin(t, a, a)
 
-	req := httptest.NewRequest(http.MethodGet, "/agents", nil)
-	req.Header.Set("Accept", "text/html")
-	req.AddCookie(old)
-	rec := httptest.NewRecorder()
-	b.ws.Handler().ServeHTTP(rec, req)
-	resp := rec.Result()
+	resp := krPageLoad(t, b, "/agents", old)
 	require.Equal(t, http.StatusOK, resp.StatusCode, "the page loads for the old-generation session")
+	require.Equal(t, 1, sessionCookieCount(resp), "exactly one Set-Cookie")
 	resaved := sessionCookie(resp)
-	require.NotNil(t, resaved, "the page load re-saves the session")
+	require.NotNil(t, resaved)
 	assert.True(t, decodesUnderActive(b.ws, resaved))
-	assert.Equal(t, decodeSession(t, b.ws, old)[sessKeyUserID], decodeSession(t, b.ws, resaved)[sessKeyUserID])
+	before, after := decodeSession(t, b.ws, old), decodeSession(t, b.ws, resaved)
+	for _, key := range []string{sessKeyUserID, sessKeyHubAccessToken, sessKeyHubRefreshToken, sessKeyHubTokenExpiry, sessKeySessionGeneration} {
+		assert.Equal(t, before[key], after[key], "re-save keeps %s unchanged", key)
+	}
+	require.NotEmpty(t, before[sessKeyHubAccessToken], "the fixture session carries a Hub token")
+
+	// Under the active generation already: no re-save.
+	resp = krPageLoad(t, b, "/agents", resaved)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Zero(t, sessionCookieCount(resp))
+}
+
+// TestWebKeyring_NoResaveOffTheSuccessPath: no re-save on a public route,
+// for a session without a user, or for a suspended user (the re-save runs
+// only after the suspended-user and admin-mode checks).
+func TestWebKeyring_NoResaveOffTheSuccessPath(t *testing.T) {
+	st, err := newTestStore(t, ":memory:")
+	require.NoError(t, err)
+	clk := &krClock{krT0}
+	ka, kb := krRollout(t)
+	a, b := newKRReplica(t, st, ka, clk), newKRReplica(t, st, kb, clk)
+	old := krLogin(t, a, a)
+
+	// Public route.
+	resp := krPageLoad(t, b, "/login", old)
+	assert.Zero(t, sessionCookieCount(resp), "public route: no re-save")
+
+	// A session with no user (only OAuth state), on the API path.
+	loginResp := a.serve(t, http.MethodGet, "/auth/login/google", nil)
+	stateOnly := sessionCookie(loginResp)
+	require.NotNil(t, stateOnly)
+	resp = b.serve(t, http.MethodGet, "/api/v1/projects", []*http.Cookie{stateOnly})
+	assert.Zero(t, sessionCookieCount(resp), "no user: no re-save")
+	assert.Empty(t, b.hubAuth)
+
+	// Suspended user: refused, and no re-save.
+	u, err := st.GetUserByEmail(context.Background(), krUserEmail)
+	require.NoError(t, err)
+	u.Status = store.UserStatusSuspended
+	require.NoError(t, st.UpdateUser(context.Background(), u))
+	resp = krPageLoad(t, b, "/agents", old)
+	assert.NotEqual(t, http.StatusOK, resp.StatusCode, "a suspended user is refused")
+	assert.Zero(t, sessionCookieCount(resp), "suspended user: no re-save")
+}
+
+// TestWebKeyring_RefreshSavesOnceUnderActive: when the bearer middleware
+// refreshes the Hub token of an old-generation session, that save (under
+// the active generation) is the only Set-Cookie: the re-save is skipped.
+func TestWebKeyring_RefreshSavesOnceUnderActive(t *testing.T) {
+	st, err := newTestStore(t, ":memory:")
+	require.NoError(t, err)
+	clk := &krClock{krT0}
+	ka, kb := krRollout(t)
+	a, b := newKRReplica(t, st, ka, clk), newKRReplica(t, st, kb, clk)
+	old := krLogin(t, a, a)
+
+	// The same session with its Hub token expiry in the past, still under
+	// A's generation (gen1).
+	vals := decodeSession(t, a.ws, old)
+	vals[sessKeyHubTokenExpiry] = time.Now().Add(-time.Minute).UnixMilli()
+	enc, err := securecookie.EncodeMulti(webSessionName, vals, a.ws.sessionCodecs...)
+	require.NoError(t, err)
+	stale := &http.Cookie{Name: webSessionName, Value: enc}
+	require.False(t, decodesUnderActive(b.ws, stale))
+
+	resp := b.serve(t, http.MethodGet, "/api/v1/projects", []*http.Cookie{stale})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, 1, sessionCookieCount(resp), "the refresh save is the only Set-Cookie")
+	saved := sessionCookie(resp)
+	require.NotNil(t, saved)
+	assert.True(t, decodesUnderActive(b.ws, saved))
+	after := decodeSession(t, b.ws, saved)
+	exp, _ := after[sessKeyHubTokenExpiry].(int64)
+	assert.Greater(t, exp, time.Now().UnixMilli(), "the token was refreshed (new expiry in the future)")
 }
