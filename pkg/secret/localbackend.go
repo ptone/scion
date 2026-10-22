@@ -31,7 +31,7 @@ import (
 type LocalBackend struct {
 	store  store.SecretStore
 	hubID  string
-	cipher *ValueCipher // never nil; disabled only in legacy dev mode
+	cipher *ValueCipher // the shared cipher; nil fails closed
 }
 
 // NewLocalBackend creates a LocalBackend wrapping the given SecretStore,
@@ -44,12 +44,11 @@ func NewLocalBackend(s store.SecretStore, hubID, sharedSecret string) *LocalBack
 }
 
 // NewLocalBackendWithCipher creates a LocalBackend that encrypts with c,
-// the server's one shared ValueCipher. A nil c is the disabled cipher.
+// the server's one shared ValueCipher. A nil c fails closed: every value
+// operation returns ErrCipherNotConfigured (the disabled plaintext mode is
+// only NewLegacyValueCipher("")).
 func NewLocalBackendWithCipher(s store.SecretStore, hubID string, c *ValueCipher) *LocalBackend {
-	if c == nil {
-		c = NewLegacyValueCipher("")
-	}
-	if !c.Enabled() {
+	if c != nil && !c.Enabled() {
 		slog.Warn("local secret backend: no shared signing secret configured; " +
 			"secret values will be stored WITHOUT encryption")
 	}

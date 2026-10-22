@@ -164,3 +164,16 @@ func unrelated(c *T)   { c.Decrypt("") }
 		t.Fatalf("referenceSites = %v, want %v", got, want)
 	}
 }
+
+// TestNoDirectScalarCipherCallers is the call-site audit of
+// ptone/scion#1530 Phase 2: every locally stored Hub ciphertext goes
+// through the shared ValueCipher, so no non-test code calls the legacy
+// scalar helpers. They remain only as compatibility fixtures (and are
+// pinned to the cipher's v1 envelope by the golden tests).
+func TestNoDirectScalarCipherCallers(t *testing.T) {
+	for _, name := range []string{"EncryptValue", "DecryptValue", "DeriveLocalEncryptionKey"} {
+		for _, site := range selectorCallSites(t, name) {
+			t.Errorf("direct scalar-secret cipher call %s at %s: use the shared secret.ValueCipher", name, site)
+		}
+	}
+}

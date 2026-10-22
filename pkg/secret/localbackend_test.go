@@ -23,6 +23,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -1271,7 +1272,7 @@ func TestLocalBackend_DecryptRawValue_CorruptCiphertextReturnsError(t *testing.T
 // decryptRawValue still returns plaintext values when the encryption key
 // is nil (legacy path).
 func TestLocalBackend_DecryptRawValue_NilKeyPlaintextValue(t *testing.T) {
-	backend := NewLocalBackendWithCipher(nil, "test-hub-id", nil) // disabled cipher
+	backend := NewLocalBackendWithCipher(nil, "test-hub-id", NewLegacyValueCipher("")) // disabled cipher
 
 	value, err := backend.decryptRawValue("plain-legacy-value")
 	if err != nil {
@@ -1446,4 +1447,67 @@ func TestLocalBackend_UpdateMeta_PartialFields(t *testing.T) {
 	if sv.Value != "secret-value" {
 		t.Errorf("expected value unchanged %q, got %q", "secret-value", sv.Value)
 	}
+}
+
+// TestLocalBackend_StaleWriterPolicyMismatch: once the database encryption
+// policy fences writers to another key, a backend whose cipher is stale
+// gets store.ErrEncryptionPolicyMismatch and nothing is written; a current
+// writer succeeds (ptone/scion#1530 §6).
+func TestLocalBackend_StaleWriterPolicyMismatch(t *testing.T) {
+	st, err := newTestStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	applied, err := st.UpdateEncryptionPolicy(ctx, 0, store.EncryptionPolicy{
+		Generation: 1, MinReaderVersion: store.EncryptionPolicyMinReaderVersion,
+		AllowedWriteKIDs: []string{"k2"}, RequiredReadKIDs: []string{"k2"}, State: store.EncryptionPolicyPrepared,
+	})
+	if err != nil || !applied {
+		t.Fatalf("policy: %v %v", applied, err)
+	}
+	stale := NewLocalBackend(st, "hub-1", "FAKE-stale-legacy-secret")
+	_, _, err = stale.Set(ctx, &SetSecretInput{Name: "STALE", Value: "fake-value", Scope: ScopeUser, ScopeID: "u1"})
+	if !errors.Is(err, store.ErrEncryptionPolicyMismatch) {
+		t.Fatalf("stale legacy writer: err = %v, want ErrEncryptionPolicyMismatch", err)
+	}
+	if _, err := st.GetSecret(ctx, "STALE", ScopeUser, "u1"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("a refused write stored a row: %v", err)
+	}
+	k1 := ciphertestRing(t, "k1")
+	if _, _, err := NewLocalBackendWithCipher(st, "hub-1", k1).Set(ctx, &SetSecretInput{Name: "STALE", Value: "fake-value", Scope: ScopeUser, ScopeID: "u1"}); !errors.Is(err, store.ErrEncryptionPolicyMismatch) {
+		t.Fatalf("stale v2 writer: err = %v, want ErrEncryptionPolicyMismatch", err)
+	}
+	k2 := ciphertestRing(t, "k2")
+	b := NewLocalBackendWithCipher(st, "hub-1", k2)
+	if _, _, err := b.Set(ctx, &SetSecretInput{Name: "CURRENT", Value: "fake-value", Scope: ScopeUser, ScopeID: "u1"}); err != nil {
+		t.Fatalf("current writer: %v", err)
+	}
+	sv, err := b.Get(ctx, "CURRENT", ScopeUser, "u1")
+	if err != nil || sv.Value != "fake-value" {
+		t.Fatalf("Get = %v, %v", sv, err)
+	}
+}
+
+// ciphertestRing is a managed v2 cipher whose only key is a synthetic
+// 32-byte key for kid (the internal tests cannot import ciphertest).
+func ciphertestRing(t *testing.T, kid string) *ValueCipher {
+	t.Helper()
+	key := base64.StdEncoding.EncodeToString([]byte(("FAKE-KEY-" + kid + "-00000000000000000000000000")[:32]))
+	doc := `{"schema":1,"revision":"internal-test","signing":{"active":"legacy","emit":"legacy",` +
+		`"keys":[{"id":"legacy","secret":"FAKE-test-only-signing-secret-0000000000","sign_until":null,"verify_until":null}],` +
+		`"legacy_read_ids":["legacy"]},"encryption":{"active":"` + kid + `","write_format":"v2",` +
+		`"keys":[{"id":"` + kid + `","key_b64":"` + key + `"}],"legacy_v1_read_ids":[]}}`
+	k, err := keyring.Parse([]byte(doc))
+	if err != nil {
+		t.Fatalf("parse synthetic keyring: %v", err)
+	}
+	c, err := NewValueCipher(k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
 }
