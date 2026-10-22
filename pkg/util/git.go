@@ -1789,3 +1789,7 @@ func EnsureGitIgnoresFile(dir, name string) error {
 	}
 	return nil
 }
+
+// smallGitFileMax caps how much of a small git metadata file (HEAD, a .git
+// pointer file, commondir) is read. Used by readSmallRegularFile callers.
+const smallGitFileMax = 4096
