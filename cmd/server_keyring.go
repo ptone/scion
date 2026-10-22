@@ -24,12 +24,39 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 )
 
 // serverKeyring is the keyring loaded from server.keyring_file by
 // loadServerKeyring, or nil in legacy single-secret mode (no keyring file,
 // or a role that does not use one). It holds key material in memory only.
 var serverKeyring *keyring.Keyring
+
+// serverValueCipher is the server's one shared encryption object
+// (ptone/scion#1530 §5), built by buildServerValueCipher after
+// loadServerKeyring. The local secret backend and the hub hold this same
+// pointer, so every locally stored ciphertext uses one ring. Nil until
+// built (roles without the hub never build it).
+var serverValueCipher *secret.ValueCipher
+
+// buildServerValueCipher builds serverValueCipher: from the keyring file
+// when there is one (managed mode; an unusable encryption ring fails
+// startup, never a fallback to legacy), else the legacy cipher over the
+// resolved session secret (an empty secret disables encryption, as
+// before). Errors carry no key material.
+func buildServerValueCipher() error {
+	serverValueCipher = nil
+	if k := serverKeyringFromFile(); k != nil {
+		c, err := secret.NewValueCipher(k)
+		if err != nil {
+			return fmt.Errorf("%s: encryption ring: %w", config.KeyringFileKey, err)
+		}
+		serverValueCipher = c
+		return nil
+	}
+	serverValueCipher = secret.NewLegacyValueCipher(resolveSessionSecret())
+	return nil
+}
 
 // loadServerKeyringFile is keyring.LoadFile; a var for tests.
 var loadServerKeyringFile = keyring.LoadFile
