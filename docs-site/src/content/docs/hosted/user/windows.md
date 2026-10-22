@@ -39,13 +39,20 @@ These three commands are the main reason to run scion on Windows. Each one conne
 
 ### Choosing the agent
 
-Name the agent as `<agent>` or `<project>/<agent>`. On Windows, `scion use` (and `scion project use`) is not supported, so you cannot select a current project there. A bare `<agent>` is looked up:
+Name the agent as `<agent>` or `<project>/<agent>`. To avoid typing the project every time, select a current project on the current Hub:
+
+```powershell
+scion use my-project
+```
+
+A bare `<agent>` is looked up:
 
 1. in the project given with `--project`;
 2. otherwise, when you run the command inside a project directory linked to the Hub (`scion hub link`), in that project. Inside a project directory that is not linked, the command fails;
-3. otherwise, as the only agent with that name across all projects on the Hub.
+3. otherwise, in the project selected with `scion use`;
+4. otherwise, as the only agent with that name across all projects on the Hub.
 
-`scion hub add ... --use` selects the current **Hub** only, not a project. When an agent name exists in more than one project, write `<project>/<agent>` or pass `--project`.
+`scion hub add ... --use` selects the current **Hub** only; `scion use <project>` selects the project on it. See [Working with Several Hubs](/scion/hosted/user/multiple-hubs/) for the hub list and `scion use`.
 
 ### `scion ssh`: open a shell
 
@@ -128,6 +135,7 @@ The Windows build runs these commands, and nothing else. The list is an allowlis
 - **Agents over the Hub:** `list`, `ssh`, `ssh-config`, `vscode`, `tunnel`, `tunnel status`
 - **Messages:** `message`, `message channels`, `messages`, `messages read`
 - **Conversations:** `conversation` and `conversation list`, `messages`, `create`, `get`, `get-message`, `set-default`, `participants`, `join`, `leave`, `catch-up`; `conversation group` and its `list`, `get`, `create`, `rename`, `delete`, `add`, `remove`
+- **Project selection:** `use`, `project use` <!-- TODO(p3fix): final names -->
 - **Configuration:** `config` and `config list`, `set`, `get`, `unset`, `validate`, `migrate`, `dir`, `cd-config`, `cd-project`, `schema`
 - **Hub list and login:** `hub`, `hub add`, `hub list`, `hub rename`, `hub remove`, `hub status`, `hub shadow`, `hub auth`, `hub auth login`, `hub auth logout`, `hub auth federation-token`
 - **Hub projects and linking:** `hub projects`, `hub projects info`, `create`, `delete`; `hub link`, `hub unlink`, `hub enable`, `hub disable`
@@ -154,7 +162,6 @@ The unsupported commands fall into these groups:
 - **The server and the Runtime Broker** (`server`, `runtime-broker`): running a Hub or a broker on Windows is out of scope.
 - **Agent-mode commands** (`whoami`, `expose`, `unexpose`): these run inside agent containers and read in-container token files.
 - **Agent lifecycle and workspace commands** such as `start`, `create`, `stop`, `suspend`, `resume`, `delete`, `attach`, `logs`, `look`, `sync`, `init`, `templates` and `doctor`: they have not been checked for Windows file handling. Run them from a Linux or macOS machine.
-- **Project selection** (`use`, `project use`): see [Choosing the agent](#choosing-the-agent).
 - **Hub database tools** (`hub secret migrate`, `hub secret migrate-names`): these run on the Hub's host and open its local database.
 
 ## How private files are protected
