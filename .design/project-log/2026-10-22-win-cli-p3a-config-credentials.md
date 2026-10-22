@@ -12,6 +12,8 @@ Every Windows-reachable private file in `pkg/credentials`, `pkg/apiclient`, `pkg
 2. `writeConflictBackup` via `Tree.Create(excl, Private)` (review r1 F2): `TestWriteConflictBackup_ChmodsUnderStrictUmask`.
 3. The resolution-cache save via `Tree.CreateTemp(Private)` (review r1 F2): `TestGitHubResolutionCache_SaveChmodsUnderStrictUmask`.
 
+One durability-only change, not security-related (review r2 #1): `writeConflictBackup` now fsyncs the backup before closing it, on every OS.
+
 - **C1/C1r credentials.** Saving uses `OpenTree(dir, CreateAnchor)` and `Tree.WriteFile(Private)`. Loading on Windows uses `Tree.ReadPrivate` and REFUSES a too-open file (D3 default), with a "delete the file and log in again" hint. Unix load keeps no check, so the read helper is split by OS.
 - **C2 dev token.** The file goes through `Tree.WriteFile(Private)`. The directory stays `MkdirAll(0755)`, as the row specifies.
 - **C3/C4 hub id.** The global directory is created through `OpenTree(CreateAnchor)`. The temp file comes from `Tree.CreateTemp(Private)`, is linked while it is still open, and is then deleted by handle. `createFileExclusive` is `Tree.Create(excl, ForMode(mode))`. That is delta 4, and it has a unix umask test.
@@ -45,6 +47,12 @@ Every Windows-reachable private file in `pkg/credentials`, `pkg/apiclient`, `pkg
 - **F4, accepted as deliberate (D3).** A refused too-open credentials.json is never read, so the next login replaces it with a private file holding only that hub. The refusal message now says that logins to other hubs must be repeated.
 - **F5, accepted.** The C4 hard link is made by name, as design row C4 specifies; the hub id is not a secret.
 - **F6, accepted.** The C2 read of an existing dev token is unchecked. It is reachable only from `scion server` (gated on Windows). It is a follow-up if D1 widens scope.
+
+## Review round 2 (win-cli-rev-p3a-r2, APPROVE)
+
+- **#1, fixed (docs).** The new `writeConflictBackup` fsync is declared as a unix change.
+- **#2, adopted (fail closed).** `sourceProtection` (C10, C11) returns Inherit only for a `CheckPrivate` error wrapping `ErrNotPrivate`. It returns Private on a pass and on any other error, such as an unreadable descriptor. Test: `TestWindowsProtectionForCheck_FailsClosed`, a table test of the mapping helper `protectionForCheck`.
+- **#3-#5, FYI, accepted:** C11 follows a reparse leaf, as unix does; the C5 Inherit path renames its non-secret temp by name, as design row C5 sanctions; the X3 control note.
 
 ## Open issues / follow-ups
 

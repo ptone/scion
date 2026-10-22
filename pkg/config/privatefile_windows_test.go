@@ -16,10 +16,13 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/windows"
 
 	"github.com/GoogleCloudPlatform/scion/internal/testutil/wintest"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/filelock"
@@ -438,4 +441,24 @@ func TestWindowsCopySettingsBackup_DecisionFromReadHandle(t *testing.T) {
 	}
 	mustRead(t, filepath.Join(dir, "open.yaml.bak"), "secret")
 	wintest.AssertPrivateSD(t, filepath.Join(dir, "open.yaml.bak"))
+}
+
+// Rows C10, C11, review r2 #2: the copy's protection fails closed. Only a
+// CheckPrivate error wrapping ErrNotPrivate yields Inherit; a pass and any
+// other error (a descriptor that cannot be read at all) yield Private.
+func TestWindowsProtectionForCheck_FailsClosed(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		err  error
+		want privatefs.Protection
+	}{
+		{"passes", nil, privatefs.Private},
+		{"not private", fmt.Errorf("x grants access to S-1-5-32-545: %w", privatefs.ErrNotPrivate), privatefs.Inherit},
+		{"unreadable descriptor", fmt.Errorf("read the DACL of x: %w", windows.ERROR_ACCESS_DENIED), privatefs.Private},
+		{"other error", errors.New("boom"), privatefs.Private},
+	} {
+		if got := protectionForCheck(c.err); got != c.want {
+			t.Errorf("%s: protectionForCheck(%v) = %v, want %v", c.name, c.err, got, c.want)
+		}
+	}
 }

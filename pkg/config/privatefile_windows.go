@@ -15,6 +15,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -49,14 +50,23 @@ func currentUserOwns(path string, _ os.FileInfo) (bool, error) {
 }
 
 // sourceProtection is the protection a copy of the existing object open as
-// f gets (rows C10, C11): Private when f passes privatefs.CheckPrivate,
-// otherwise Inherit. Protection follows the source's real ACL, never its
-// meaningless Perm.
+// f gets (rows C10, C11): Inherit only when f is shown not to be private,
+// else Private. Protection follows the source's real ACL, never its
+// meaningless Perm; see protectionForCheck for the error mapping.
 func sourceProtection(f *os.File) privatefs.Protection {
-	if privatefs.CheckPrivate(f) == nil {
-		return privatefs.Private
+	return protectionForCheck(privatefs.CheckPrivate(f))
+}
+
+// protectionForCheck maps a privatefs.CheckPrivate result to the copy's
+// protection, failing closed: Inherit only for a source shown not to be
+// private (an error wrapping privatefs.ErrNotPrivate); Private when it
+// passes and for any other error, such as a descriptor that cannot be read
+// at all (review r2 #2).
+func protectionForCheck(err error) privatefs.Protection {
+	if err != nil && errors.Is(err, privatefs.ErrNotPrivate) {
+		return privatefs.Inherit
 	}
-	return privatefs.Inherit
+	return privatefs.Private
 }
 
 // mkdirLikeLegacyRoot creates the canonical root scionHome/canonicalName
