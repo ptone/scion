@@ -167,6 +167,8 @@ func relayServerConfig(ctx context.Context, cfg *config.GlobalConfig, db *relayd
 		ReconnectWindow:  conduitReconnectWindowSetting(cfg),
 		LifetimeCap:      conduitLifetimeCapSetting(cfg),
 		RequireSelfCheck: hostedMode && isHADeployment(cfg),
+		// Per-session jitter of the cap (ptone/scion#5245).
+		JitterLifetimeCap: conduitLifetimeJitter(cfg),
 	}, nil
 }
 

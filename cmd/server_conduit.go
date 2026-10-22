@@ -159,15 +159,17 @@ func warnConduitTargetStreamDeadlines(c config.HubConduitConfig) {
 		"user streams to renewal-capable agents are refused (503 stream_renewal_unavailable) until relay renewals land")
 }
 
-// conduitLifetimeCapSetting returns the configured conduit session lifetime
-// cap (default 3500s). validateServerPreflight has already rejected a
+// conduitLifetimeCapSetting returns the conduit session lifetime cap
+// before the per-session jitter: the configured cap (default 3500s),
+// clamped to 0.8 of the declared platform request timeout
+// (ptone/scion#5245). validateServerPreflight has already rejected a
 // malformed or out-of-range value.
 func conduitLifetimeCapSetting(cfg *config.GlobalConfig) time.Duration {
 	d, err := cfg.Hub.Conduit.LifetimeCapDuration()
 	if err != nil {
-		return config.ConduitDefaultLifetimeCap
+		d = config.ConduitDefaultLifetimeCap
 	}
-	return d
+	return config.EffectiveConduitLifetimeCap(d, platformRequestTimeoutSetting(cfg))
 }
 
 // conduitUserStreamAuthzMaxSetting returns the configured authorization
@@ -579,6 +581,8 @@ func startConduitRelay(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hu
 		PeerAuth:         auth,
 		ReconnectWindow:  conduitReconnectWindowSetting(cfg),
 		LifetimeCap:      conduitLifetimeCapSetting(cfg),
+		// Per-session jitter of the cap (ptone/scion#5245).
+		JitterLifetimeCap: conduitLifetimeJitter(cfg),
 	}); err != nil {
 		return err
 	}
