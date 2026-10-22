@@ -212,4 +212,18 @@ func stringsWithout(list, drop []string) []string {
 		}
 	}
 	return out
+// warnUnlimitedUnsupported adds unlimitedCountCreateWarning to the create's
+// or start's dispatch warnings, for the agent's broker: the dispatched
+// inline config sets a count limit to 0 that the broker would not apply. A
+// failed broker lookup adds nothing.
+func (d *HTTPAgentDispatcher) warnUnlimitedUnsupported(ctx context.Context, agent *store.Agent, inline *api.ScionConfig) {
+	if inline == nil || (!api.IsUnlimitedCount(inline.MaxTurns) && !api.IsUnlimitedCount(inline.MaxModelCalls)) ||
+		agent == nil || agent.RuntimeBrokerID == "" || d.store == nil {
+		return
+	}
+	broker, err := d.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
+	if err != nil || broker == nil {
+		return
+	}
+	addDispatchWarnings(ctx, unlimitedCountCreateWarning(inline, broker.Capabilities))
 }

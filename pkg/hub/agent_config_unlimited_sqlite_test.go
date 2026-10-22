@@ -68,3 +68,31 @@ func TestUnlimitedCountRefusal(t *testing.T) {
 	require.NoError(t, err, "an edit that sets no count limit to 0 never looks the broker up")
 	assert.Nil(t, got)
 }
+
+// TestWarnUnlimitedUnsupported_DispatchWarning: a create or start that
+// dispatches an inline count limit of 0 to a broker without
+// unlimitedCountLimits warns that the agent keeps the inherited limit; a
+// capable broker, or no Unlimited, gives no warning.
+func TestWarnUnlimitedUnsupported_DispatchWarning(t *testing.T) {
+	_, s, project, broker := setupReincarnateTestServer(t, newReincarnateTestDispatcher())
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	d := &HTTPAgentDispatcher{store: s}
+	inline := &api.ScionConfig{MaxTurns: api.IntPtr(0)}
+
+	ctx, warns := withDispatchWarnings(context.Background())
+	d.warnUnlimitedUnsupported(ctx, agent, inline)
+	require.Len(t, warns.Warnings(), 1)
+	assert.Contains(t, warns.Warnings()[0], "config.max_turns: this agent's runtime broker keeps the inherited limit")
+
+	ctx, warns = withDispatchWarnings(context.Background())
+	d.warnUnlimitedUnsupported(ctx, agent, &api.ScionConfig{MaxTurns: api.IntPtr(4)})
+	assert.Empty(t, warns.Warnings())
+
+	b, err := s.GetRuntimeBroker(context.Background(), broker.ID)
+	require.NoError(t, err)
+	b.Capabilities = &store.BrokerCapabilities{Reprovision: true, UnlimitedCountLimits: true}
+	require.NoError(t, s.UpdateRuntimeBroker(context.Background(), b))
+	ctx, warns = withDispatchWarnings(context.Background())
+	d.warnUnlimitedUnsupported(ctx, agent, inline)
+	assert.Empty(t, warns.Warnings())
+}
