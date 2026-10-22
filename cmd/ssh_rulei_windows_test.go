@@ -274,11 +274,14 @@ func TestEnsureSSHDir_ShortNameStaysInside(t *testing.T) {
 // untouched. Control: once the second name is gone, the same writer
 // succeeds and the leaf is private.
 func TestSSHVSCodeWriteLeaves_RefuseHardLinks(t *testing.T) {
+	// writeSSHHubPlan with a fixed plan (label "hub"): it writes exactly
+	// these three ssh leaves. (regenerateSSHHubFiles would read the empty
+	// pre-seeded scion-hub as another hub's file, pick the fallback label
+	// and write scion-hub-example-com instead, so that leaf would not be
+	// part of the operation; seen on the Windows job.)
 	ssh := func(t *testing.T, home string) error {
 		p := sshPaths{home: home}
-		_, err := regenerateSSHHubFiles(p, regenTestEndpoint, winSSHExe, regenListing(
-			sshListedAgent{"proj", "agent", testSSHPublicKey(t)}))
-		return err
+		return writeSSHHubPlan(p, sshPlan(p))
 	}
 	vscode := func(t *testing.T, home string) error {
 		_, err := updateVSCodeFiles(vscodePaths{home: home}, vscodeUpdateFor(t, "a1"))
