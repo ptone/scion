@@ -34,7 +34,8 @@ var credentialQueryParams = map[string]bool{
 // RedactQuery returns rawQuery with the values of credential-bearing
 // parameters replaced by REDACTED. Other parameters, and their order, are
 // preserved. A query that cannot be parsed, or that names an artifact or
-// port view URL (credentialQuery), is replaced whole by REDACTED.
+// port view URL or holds a key or value that does not decode
+// (credentialQuery), is replaced whole by REDACTED.
 func RedactQuery(rawQuery string) string {
 	if rawQuery == "" {
 		return ""
