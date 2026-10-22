@@ -335,6 +335,9 @@ func TestCallerKey_FederatedUserIssuersOnOneHost(t *testing.T) {
 type fedUserHub struct {
 	*httptest.Server
 	userToken string
+	// otherUsers maps further user access credentials the hub accepts to
+	// their account IDs (other visitor accounts).
+	otherUsers map[string]string
 
 	mu           sync.Mutex
 	meStatus     int    // 0: 200 with the visitor account
@@ -406,7 +409,7 @@ func newFedUserHub(t *testing.T, userToken string) *fedUserHub {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/auth/me":
 			h.meCalls++
 			h.meFedTokens = append(h.meFedTokens, fedToken)
-			if fedToken != h.userToken {
+			if !h.knownUser(fedToken) {
 				writeHubError(w, http.StatusUnauthorized)
 				return
 			}
@@ -414,11 +417,15 @@ func newFedUserHub(t *testing.T, userToken string) *fedUserHub {
 				writeHubError(w, h.meStatus)
 				return
 			}
+			meID := h.meID
+			if fedToken != h.userToken {
+				meID = h.otherUsers[fedToken]
+			}
 			writeJSON(map[string]interface{}{
-				"id": h.meID, "email": "visitor+synthetic@hub-b.invalid", "display_name": "Alice", "role": h.meRole,
+				"id": meID, "email": "visitor+synthetic@hub-b.invalid", "display_name": "Alice", "role": h.meRole,
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/users/me/visitor-grants":
-			if fedToken != h.userToken {
+			if !h.knownUser(fedToken) {
 				writeHubError(w, http.StatusForbidden)
 				return
 			}
@@ -426,7 +433,7 @@ func newFedUserHub(t *testing.T, userToken string) *fedUserHub {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/"+fedUserProjectID+"/agents":
 			h.listQueries = append(h.listQueries, r.URL.Query())
 			h.listTokens = append(h.listTokens, fedToken)
-			if fedToken != h.userToken {
+			if !h.knownUser(fedToken) {
 				writeHubError(w, http.StatusForbidden)
 				return
 			}
@@ -467,7 +474,7 @@ func newFedUserHub(t *testing.T, userToken string) *fedUserHub {
 			h.dmReadKeys = append(h.dmReadKeys, key)
 			h.dmReadTokens = append(h.dmReadTokens, fedToken)
 			h.order = append(h.order, "dm-read")
-			if fedToken != h.userToken {
+			if !h.knownUser(fedToken) {
 				writeHubError(w, http.StatusForbidden)
 				return
 			}
@@ -482,6 +489,16 @@ func newFedUserHub(t *testing.T, userToken string) *fedUserHub {
 	}))
 	t.Cleanup(h.Close)
 	return h
+}
+
+// knownUser reports whether the hub accepts fedToken as a visitor's user
+// access credential. The caller holds h.mu.
+func (h *fedUserHub) knownUser(fedToken string) bool {
+	if fedToken == h.userToken {
+		return true
+	}
+	_, ok := h.otherUsers[fedToken]
+	return ok
 }
 
 func (h *fedUserHub) set(fn func(h *fedUserHub)) {
@@ -2156,5 +2173,153 @@ func TestFederatedUserLaunchFailureText(t *testing.T) {
 	}
 	if got, want := launchFailureText(noCode), "Agent failed to start (phase: stopped): stopped by user"; got != want {
 		t.Errorf("launchFailureText (phase only) = %q, want %q", got, want)
+	}
+}
+
+// Second visitor account of the per-account task tests.
+const (
+	fedUser2Subject   = "bob-on-hub-a"
+	fedUser2Email     = "bob@corp.example.com"
+	fedUser2AccountID = "22222222-3333-4444-8555-666666666666"
+)
+
+// fedUser2Token is the second visitor's user access credential, from the
+// same peer hub as fedUserToken.
+func fedUser2Token(t *testing.T) string {
+	t.Helper()
+	return buildTestJWT(t, map[string]interface{}{
+		"iss":              fedUserIssuer,
+		"sub":              fedUser2Subject,
+		"aud":              "https://hub-b.example.com",
+		"email":            fedUser2Email,
+		"email_verified":   true,
+		"scion_token_kind": "user",
+	})
+}
+
+// TestExecutor_FederatedUsersLaunchingAgentTasksKeptPerAccount: two
+// visitor accounts message agent1 while it is still launching. In the
+// default (plugin) mode, where replies without a2aTaskId are correlated
+// through the local cache, each task is registered for its own account
+// once the launch ends: each account's reply reaches only that account's
+// task, and the second account can neither read nor cancel the first
+// account's task.
+func TestExecutor_FederatedUsersLaunchingAgentTasksKeptPerAccount(t *testing.T) {
+	const (
+		firstReplyText  = "reply from agent1 to the first visitor"
+		secondReplyText = "reply from agent1 to the second visitor"
+	)
+	token1, token2 := fedUserToken(t), fedUser2Token(t)
+	hub := newFedUserHub(t, token1)
+	hub.set(func(h *fedUserHub) {
+		h.otherUsers = map[string]string{token2: fedUser2AccountID}
+		h.adminAgents = []map[string]interface{}{fedUserLaunchingAgent()}
+		h.agentGet = map[string]interface{}{
+			"id": fedUserAgentID, "name": "agent1", "slug": "agent1", "projectId": fedUserProjectID, "phase": "running", "status": "running",
+			"launch": map[string]interface{}{"id": "launch-1", "state": "ended", "kind": "create"},
+		}
+	})
+	b, _, ts := newFedUserTestServer(t, hub)
+	b.launchPollInterval = 5 * time.Millisecond
+
+	waitForSends := func(n int) []fedUserHubSend {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if s := hub.snapshot(); len(s.sent) >= n {
+				return s.sent
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("hub received fewer than %d message sends", n)
+		return nil
+	}
+
+	done1 := sendAsync(t, ts, "agent1", token1)
+	waitForSends(1)
+	done2 := sendAsync(t, ts, "agent1", token2)
+	sent := waitForSends(2)
+
+	if len(hub.snapshot().agentGets) == 0 {
+		t.Fatalf("the bridge did not wait for the launch (no read of the agent)")
+	}
+	for i, want := range []struct{ token, sender string }{
+		{token1, "user:" + fedUserAccountID},
+		{token2, "user:" + fedUser2AccountID},
+	} {
+		sm, _ := sent[i].Body["structured_message"].(map[string]interface{})
+		if sent[i].FedToken != want.token || sm["sender"] != want.sender {
+			t.Errorf("send %d: sender %v (own credential: %v), want %q with its own credential", i, sm["sender"], sent[i].FedToken == want.token, want.sender)
+		}
+	}
+
+	// Both tasks are active on agent1, the first account's first; each is
+	// registered for its own account.
+	aKey := agentKey(fedUserProjectID, "agent1")
+	b.tasksMu.RLock()
+	taskIDs := append([]string(nil), b.agentTasks[aKey]...)
+	owners := make([]string, len(taskIDs))
+	for i, id := range taskIDs {
+		owners[i] = b.activeTasks[id].federatedUserID
+	}
+	b.tasksMu.RUnlock()
+	if len(taskIDs) != 2 {
+		t.Fatalf("active tasks on agent1 = %v, want the two visitors' tasks", taskIDs)
+	}
+	if owners[0] != fedUserAccountID || owners[1] != fedUser2AccountID {
+		t.Errorf("tasks registered for accounts %q, want [%q %q]", owners, fedUserAccountID, fedUser2AccountID)
+	}
+	firstTask := taskIDs[0]
+
+	// Each account's reply correlates to that account's task.
+	reply := &messages.StructuredMessage{Sender: "agent:agent1", Type: messages.TypeInstruction, Msg: "hi"}
+	for i, userID := range []string{fedUserAccountID, fedUser2AccountID} {
+		got, err := b.correlateToTask(context.Background(), fedUserProjectID, "agent1", projectkeys.UserTopic(fedUserProjectID, userID), reply)
+		if err != nil || got != taskIDs[i] {
+			t.Errorf("reply on account %s's topic correlated to (%q, %v), want its task %q", userID, got, err, taskIDs[i])
+		}
+	}
+
+	// The second account cannot read or cancel the first account's task.
+	path := "/projects/proj1/agents/agent1/jsonrpc"
+	auth2 := map[string]string{"Authorization": "Bearer " + token2}
+	for _, method := range []string{"GetTask", "CancelTask"} {
+		payload := `{"jsonrpc":"2.0","id":"other-account","method":"` + method + `","params":{"id":"` + firstTask + `"}}`
+		status, raw := doRPCRaw(t, ts, path, payload, auth2)
+		var resp map[string]interface{}
+		_ = json.Unmarshal(raw, &resp)
+		if status != http.StatusOK || resp["error"] == nil || resp["result"] != nil {
+			t.Errorf("%s by the second account on the first account's task: status %d, body %s; want a JSON-RPC error", method, status, raw)
+		}
+	}
+	b.tasksMu.RLock()
+	_, firstActive := b.activeTasks[firstTask]
+	b.tasksMu.RUnlock()
+	if !firstActive {
+		t.Errorf("the first account's task %q is no longer active after the second account's cancel", firstTask)
+	}
+
+	// The first account's reply arrives first, while both tasks are active.
+	deliverReplyTo(t, b, fedUserAccountID, firstReplyText)
+	deliverReplyTo(t, b, fedUser2AccountID, secondReplyText)
+
+	for _, tc := range []struct {
+		name       string
+		done       <-chan [2]interface{}
+		own, other string
+	}{
+		{"first account", done1, firstReplyText, secondReplyText},
+		{"second account", done2, secondReplyText, firstReplyText},
+	} {
+		status, body := awaitResult(t, tc.done)
+		if status != http.StatusOK {
+			t.Fatalf("%s: status = %d, want 200; body %s", tc.name, status, body)
+		}
+		if strings.Contains(body, tc.other) {
+			t.Errorf("%s: received the reply addressed to the other account; body %s", tc.name, body)
+		}
+		if !strings.Contains(body, tc.own) {
+			t.Errorf("%s: response does not carry its own reply; body %s", tc.name, body)
+		}
 	}
 }
