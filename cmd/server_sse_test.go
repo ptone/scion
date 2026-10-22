@@ -184,6 +184,9 @@ func TestConduitExternalOptions_LifetimeCapIsIngressCap(t *testing.T) {
 	assert.Equal(t, 864*time.Second, opts.LifetimeCap, "the ingress cap, 1.2 x 720s, not the unjittered 720s")
 	assert.Equal(t, "hub-1", opts.InstanceID)
 
+	// Without a declared timeout the ingress cap equals the unjittered cap
+	// (both 3500s), so this only pins the no-timeout default; the 900s case
+	// above is what tells the two wirings apart.
 	cfg.Hub.PlatformRequestTimeout = ""
 	assert.Equal(t, config.ConduitDefaultLifetimeCap, conduitExternalOptions(cfg, "hub-1", nil, "").LifetimeCap)
 }
