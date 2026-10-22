@@ -278,31 +278,36 @@ the Hub and cannot be changed later.
 
 The broker and the Hub run git on the host in repositories that agent containers can also write:
 your linked checkout (when it creates or removes an agent's worktree), the shared clone of a
-`worktree-per-agent` project, and the clone of a shared-workspace project. These commands run
-without the repository's own hooks and commands:
+`worktree-per-agent` project, and the clone of a shared-workspace project. Before each of these
+commands, Scion reads the repository's config (`.git/config`, and a worktree's `config.worktree`)
+as data and **refuses the command, naming the key**, if the config contains an `include`/`includeIf`
+directive or any key outside an allow-list. This is deny-by-default: a key that is not known to be
+safe stops the command rather than being ignored.
 
-- **No repository hooks** run (`core.hooksPath` is set to `/dev/null` for these commands), and no
-  file-system monitor (`core.fsmonitor`).
-- **Filter drivers** (`filter.<name>.clean`, `smudge`, `process`, `required`) set in the
-  repository's own config (`.git/config`, or a worktree's `config.worktree`) are not used. The
-  global or system definition of the same driver is used instead. `git lfs install` writes its
-  filter to your global config, so LFS files are still checked out in agent worktrees. A driver
-  defined only in the repository config (for example after `git lfs install --local`) is not
-  applied to these checkouts.
-- The git-lfs **post-checkout hook** does not run when the broker creates a worktree. It only marks
-  LFS-lockable files read-only.
-- **Updating a shared workspace** (pull) fetches from the project's clone URL known to the Hub,
-  not from the remote configured in the clone, then fast-forwards the current branch. It is refused
-  when the clone's own git config (`.git/config`) sets a key outside a short list: the core
-  repository settings, `extensions.*`, a remote's `url`/`fetch` and similar, `branch.<name>.*`
-  tracking settings, identity (`user.*`), `gc.*`, `pull.rebase`/`ff`, `push.default`, colours,
-  advice and `rerere.*`. URL rewrites, credential settings, SSH or proxy commands, includes,
-  `protocol.*` and `gpg.*` are refused, as is any key not on the list. The error names the key;
-  remove it from the clone's `.git/config` to pull again.
-- **Submodules** are not entered: these commands run with `submodule.recurse=false` and
-  `fetch.recurseSubmodules=false`.
+- **A repository Scion manages** (the shared checkout of a `worktree-per-agent` project, the clone
+  of a shared-workspace project) allows only the keys git and Scion write for it: the core
+  repository format settings, `extensions.*`, a remote's `url`/`fetch`, `branch.<name>` tracking,
+  identity, `gc.auto`, `branch.autoSetupMerge`.
+- **Your own linked checkout** allows those plus a wider set of keys that cannot run a command or
+  redirect network traffic: `core.autocrlf`/`eol` and similar, `pull.*`/`push.*` defaults, a
+  remote's `pushurl`/`tagopt`/`prune`, `branch.<name>` metadata, `color.*`, `advice.*`, `rerere.*`,
+  `init.defaultBranch`, git-lfs data keys, `filter.lfs.*` **only** when it is exactly the standard
+  git-lfs commands, and `submodule.<name>.update` **only** as `none`/`checkout`/`rebase`/`merge`.
+- **Refused on both** (so an agent cannot make the broker's or your own git run a command): any
+  hook path, `core.sshCommand`/`pager`/`editor`/`fsmonitor`, `credential.*`, `url.*.insteadOf`,
+  `http.*`, `gpg.*`, any `*.program`, `alias.*`, a remote's `uploadpack`/`receivepack`/`proxy`,
+  diff/merge command or textconv drivers, and any key not on the list. If a command is refused, the
+  error names the key; remove it from the repository's `.git/config` (or `config.worktree`).
+- As defence in depth these commands also run with hooks, the file-system monitor and the pager
+  off, the `ext::` transport and submodule recursion disabled, and the `GIT_*` environment scrubbed.
+  The git-lfs **post-checkout hook** therefore does not run when the broker creates a worktree; it
+  only marks LFS-lockable files read-only. Globally installed git-lfs filters still run, so LFS
+  files are checked out.
+- **Updating a shared workspace** (pull) fetches from the project's clone URL known to the Hub, not
+  from the remote configured in the clone, then fast-forwards the current branch.
 
-Your own git commands in your checkout are not affected.
+Your own git commands in your checkout are not affected. In-container git stays fully flexible: an
+upcoming change gives each agent its own private copy of `.git/config`.
 
 ---
 
