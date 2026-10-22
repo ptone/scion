@@ -109,6 +109,11 @@ func beat(t *testing.T, n *relaytest.Node) {
 // heartbeat counts the other live, non-draining rows with the singleton's
 // internal endpoint; the count falls to 0 when the peer goes stale or
 // draining; WARN is logged only when the count goes from 0 to non-zero.
+//
+// Leaving out draining relays is sound only because a drain is bounded:
+// the reduce-only invariant pinned by TestReduceOnly_NoPathLengthensASession
+// (a drain deadline or cap only ever shortens a session). A change to that
+// invariant means revisiting this count.
 func TestSingleton_SharedEndpointPeersGauge(t *testing.T) {
 	w := relaytest.NewWorld(t)
 	warns := &warnCounter{match: "shares this singleton's internal endpoint"}

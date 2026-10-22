@@ -59,8 +59,8 @@ func collectRelayMetrics(t *testing.T, reader *sdkmetric.ManualReader) map[strin
 // TestRelayMetrics_RegisteredOnTheProvider (design §3.9, v2.21.55): with a
 // MeterProvider, a singleton exports scion.relay.singleton_endpoint_peers,
 // and every relay exports the ingress header counter with both causes
-// (ingress_header_untrusted from a3-i, ingress_cap_invalid from PR1); a
-// relay that is not a singleton has no shared-endpoint gauge.
+// (ingress_header_untrusted and ingress_cap_invalid); a relay that is not
+// a singleton has no shared-endpoint gauge.
 func TestRelayMetrics_RegisteredOnTheProvider(t *testing.T) {
 	for _, singleton := range []bool{true, false} {
 		w := relaytest.NewWorld(t)
