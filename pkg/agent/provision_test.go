@@ -4244,3 +4244,21 @@ func TestProvisionAgent_HubNativeWorktreeWorkspaceAccepted(t *testing.T) {
 		t.Fatalf("ProvisionAgent refused a hub-native .scion/workspace worktree: %v", err)
 	}
 }
+
+// TestProvisionAgent_ScionDirWorkspaceRefused is the companion of the
+// accepted case: an explicit workspace that is the project's .scion directory
+// itself holds agent state, not a workspace, and ProvisionAgent must refuse it
+// (the agents-tree mask does not cover .scion itself).
+func TestProvisionAgent_ScionDirWorkspaceRefused(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	tmpDir := t.TempDir()
+	projectScionDir, _ := provisionAgentRepoRootScaffold(t, tmpDir)
+
+	_, _, _, err := ProvisionAgent(context.Background(), "agent-a", "claude", "", "", projectScionDir, "", "", "", projectScionDir)
+	if err == nil {
+		t.Fatal("ProvisionAgent accepted the project's .scion directory as the workspace; want a refusal")
+	}
+	if !strings.Contains(err.Error(), "holds agent state") {
+		t.Fatalf("ProvisionAgent refused for an unexpected reason: %v", err)
+	}
+}

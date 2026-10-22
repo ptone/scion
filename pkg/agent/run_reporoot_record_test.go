@@ -238,8 +238,8 @@ func TestRefuseWorkspaceInAgentsDir(t *testing.T) {
 			t.Errorf("refuseWorkspaceInAgentsDir(%q): want a refusal", ws)
 		}
 	}
-	// A relative ".scion" resolves to the same directory (the Case 1 relative
-	// route), and is refused the same way.
+	// The parent spelling of projectDir (the project root, which the function
+	// turns into <root>/.scion) refuses the resolved .scion the same way.
 	if err := refuseWorkspaceInAgentsDir(filepath.Dir(scion), scion); err == nil {
 		t.Error("refuseWorkspaceInAgentsDir(projectRoot, .scion): want a refusal")
 	}
@@ -284,6 +284,48 @@ func TestRefuseWorkspaceInAgentsDir(t *testing.T) {
 	if err := refuseWorkspaceInAgentsDir(scionLink, agentsLink); err == nil {
 		t.Error("refuseWorkspaceInAgentsDir(symlinked .scion, symlinked agent dir): want a refusal")
 	}
+}
+
+// refuseWorkspaceInAgentsDir fails closed: when resolving the project's
+// .scion directory, or its agents directory, fails for a reason other than
+// not-exist (here EACCES from an unsearchable parent), the workspace is
+// refused rather than allowed.
+func TestRefuseWorkspaceInAgentsDir_FailClosedOnResolveError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission-bit denial does not apply to root")
+	}
+	// Branch 1: resolving .scion fails. The project directory is made
+	// unsearchable, so EvalSymlinks(<project>/.scion) returns EACCES. The
+	// workspace itself lives elsewhere and resolves cleanly.
+	t.Run("scion", func(t *testing.T) {
+		root := t.TempDir()
+		proj := mkdirAllT(t, filepath.Join(root, "proj"))
+		mkdirAllT(t, filepath.Join(proj, ".scion"))
+		ws := mkdirAllT(t, filepath.Join(root, "work"))
+		if err := os.Chmod(proj, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(proj, 0o755) })
+		if err := refuseWorkspaceInAgentsDir(proj, ws); err == nil {
+			t.Error("refuseWorkspaceInAgentsDir with an unreadable .scion: want a refusal")
+		}
+	})
+	// Branch 2: .scion resolves, but resolving .scion/agents fails because
+	// .scion is unsearchable.
+	t.Run("agents", func(t *testing.T) {
+		root := t.TempDir()
+		proj := mkdirAllT(t, filepath.Join(root, "proj"))
+		scion := mkdirAllT(t, filepath.Join(proj, ".scion"))
+		mkdirAllT(t, filepath.Join(scion, "agents"))
+		ws := mkdirAllT(t, filepath.Join(root, "work"))
+		if err := os.Chmod(scion, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(scion, 0o755) })
+		if err := refuseWorkspaceInAgentsDir(proj, ws); err == nil {
+			t.Error("refuseWorkspaceInAgentsDir with an unreadable agents dir: want a refusal")
+		}
+	})
 }
 
 // A provision record naming another repository is not used (its root does
