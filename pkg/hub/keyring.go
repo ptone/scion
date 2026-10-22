@@ -96,7 +96,7 @@ func (s *Server) signingNotReadyReason() string {
 	if errors.Is(err, keyring.ErrIssuanceClosed) {
 		reason = readyReasonSigningIssuanceClosed
 	}
-	if s.signingIssuanceClosedLogged.CompareAndSwap(false, true) {
+	if s.signingNotReadyLogged.CompareAndSwap(false, true) {
 		slog.Warn("Not ready: the keyring's signing ring cannot issue",
 			"reason", reason, "active_id", k.Signing().ActiveID())
 	}

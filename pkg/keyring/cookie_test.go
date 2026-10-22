@@ -65,10 +65,15 @@ func mustCodecs(t *testing.T, r *SigningRing, h, b Purpose, maxAge int, now func
 func TestRingsWithoutActiveFailClosed(t *testing.T) {
 	var nilRing *SigningRing
 	for name, r := range map[string]*SigningRing{
-		"nil":             nilRing,
-		"zero":            {},
-		"empty":           {active: "gen1"},
-		"dangling active": {active: "nope", entries: []signingEntry{{id: "gen1", secret: newMaterial([]byte(fixtureGen1Secret))}}},
+		"nil":   nilRing,
+		"zero":  {},
+		"empty": {active: "gen1"},
+		// A legacy entry and legacy_read_ids make the LegacySecret and
+		// ID-less Candidates assertions depend on the usable() guard.
+		"dangling active": {active: "nope", legacyReads: []string{"legacy"}, entries: []signingEntry{
+			{id: "legacy", secret: newMaterial([]byte(fixtureLegacySecret))},
+			{id: "gen1", secret: newMaterial([]byte(fixtureGen1Secret))},
+		}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := r.Active(sessionHash, t0); !errors.Is(err, ErrNoActiveGeneration) {
@@ -100,7 +105,7 @@ func TestRingsWithoutActiveFailClosed(t *testing.T) {
 	for name, e := range map[string]*EncryptionRing{
 		"nil":             nilEnc,
 		"zero":            {},
-		"dangling active": {active: "nope", entries: []encryptionEntry{{id: "legacy", key: newMaterial([]byte(fixtureOtherEncKey))}}},
+		"dangling active": {active: "nope", legacyReads: []string{"legacy"}, entries: []encryptionEntry{{id: "legacy", key: newMaterial([]byte(fixtureOtherEncKey))}}},
 	} {
 		if ids := e.IDs(); ids != nil {
 			t.Fatalf("%s encryption ring: IDs = %v", name, ids)

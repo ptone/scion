@@ -41,8 +41,11 @@
 // SigningRing.Active returns ErrNoActiveGeneration; Generations, Candidates
 // (for any kid), IDs and LegacySecret return nothing; CookieCodecs refuses;
 // EncryptionRing.Active has no bytes and Candidates returns nothing. Every
-// exported accessor of SigningRing, EncryptionRing and Keyring accepts a nil
-// receiver and returns zero values ("" or nil) and no material.
+// pointer-receiver accessor of SigningRing, EncryptionRing and Keyring
+// accepts a nil receiver and returns zero values ("" or nil) and no
+// material. The value-receiver formatting methods (String, GoString,
+// Format, LogValue, MarshalJSON) are safe through fmt, slog and
+// encoding/json, but a direct call on a nil pointer panics.
 //
 // Design: ptone/scion#1530 ("Safe rotation of the Hub server secret"),
 // §1-§3. This release uses the signing ring for web session cookies only
