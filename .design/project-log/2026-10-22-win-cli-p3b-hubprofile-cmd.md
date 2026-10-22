@@ -62,6 +62,13 @@
 - **F4 fixed.** The diagnostic warning function is pinned by an AST guard: no return value, no close or duplicate of the walk handle, and called only from `openDirComp` as a bare statement.
 - **F5 accepted as an error path.** A dangling directory link in a later rel can leave an earlier rel created inside home. **F6 fixed.**
 
+## Final round prep and review r4
+
+- **Stacked on win-cli/p3a** (combined Phase 3 gate series). TEMP is dropped. The ci.yml cross-build landed; `winsec-unprotected.txt` lists only gated sites. The first Windows run of the cmd tests found one test construction bug and nothing else.
+- **r4 F1: the cross-build is its own CI job** `windows-cross-build`, design §5.1's named fallback. In Build & Test it ran 9 min cold and took the job to 28 of its 30 min.
+- **r4 F2: the multi-file writers preflight only the files they will write.** `~/.ssh/config` is checked only when the Include line is missing; `settings.json` only when it changes (`planVSCodeSettings`). A hard-linked file the operation leaves alone is no longer refused.
+- **Gate series** for Phase 3 (3a + 3b) is at `gs://scion-xproject-exchange/win-cli/gates/p3/`. 3b owns the runner, B1, C1, X1a/b and G1/G2; 3a supplies p3-a1/a2. Script review r1 found the runner launched windows with SIGINT ignored; r2 launches through `env --default-signal=INT` and cross-checks END lines.
+
 ## Open issues
 
 - **The cmd Windows tests wait for 3a.** pkg/config does not compile for Windows until 3a's C9 lands (`legacy_grove_migration.go:306`). A TEMP commit keeps `./cmd` out of the Windows job. Merge order is 3a first; then I rebase and drop the TEMP commit.
