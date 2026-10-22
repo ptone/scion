@@ -245,9 +245,14 @@ func allowVar(policy RepoConfigPolicy, v gitConfigVar, opts repoConfigAllowOptio
 			return true, ""
 		}
 	case "maintenance":
-		// maintenance.* configures the background maintenance tasks; none of
-		// its keys names a command (the tasks are git built-ins).
-		return true, ""
+		// The background maintenance tasks are git built-ins; these keys only
+		// enable/schedule them and name no command.
+		if topLevel && (name == "auto" || name == "strategy" || name == "autodetach") {
+			return true, ""
+		}
+		if hasSub && (name == "enabled" || name == "schedule") {
+			return true, ""
+		}
 	case "user":
 		// Signing key identity (a key id or path) is inert data; a planted
 		// gpg/ssh *.program that would act on it is refused above, which

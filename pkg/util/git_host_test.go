@@ -651,7 +651,7 @@ func TestAllowVar(t *testing.T) {
 	}
 	// Allowed in linked, refused in managed. Includes the keys allowed in
 	// linked only because a HostGitArgs pin neutralises them.
-	linkedOnly := []string{"core.autocrlf", "core.sparseCheckout", "pull.rebase", "push.default", "remote.origin.pushurl", "color.ui", "init.defaultBranch", "core.hooksPath", "core.fsmonitor", "core.pager", "submodule.recurse", "maintenance.auto", "gpg.format", "user.signingKey", "advice.detachedHead", "rerere.enabled"}
+	linkedOnly := []string{"core.autocrlf", "core.sparseCheckout", "pull.rebase", "push.default", "remote.origin.pushurl", "color.ui", "init.defaultBranch", "core.hooksPath", "core.fsmonitor", "core.pager", "submodule.recurse", "maintenance.auto", "maintenance.gc.enabled", "gpg.format", "user.signingKey", "advice.detachedHead", "rerere.enabled"}
 	for _, k := range linkedOnly {
 		if ok, _ := allowVar(RepoPolicyManaged, v(k, "x"), repoConfigAllowOptions{}); ok {
 			t.Errorf("managed allowVar(%q) = true, want false", k)
