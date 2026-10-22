@@ -253,7 +253,7 @@ func TestProvisionShared_CloneWithToken_GitOutputRedacted(t *testing.T) {
 	assert.NoFileExists(t, filepath.Join(stateDir, ProvisionSentinelFile))
 }
 
-// The lead's required regression: a provisioning clone (runGitClone) of a repo
+// Regression: a provisioning clone (runGitClone) of a repo
 // with a tracked .lfsconfig naming a recording server must not contact it (the
 // clone skips the LFS smudge), so the server receives no request and no
 // Authorization header. Live part gated on git-lfs; the scoped-helper wiring is

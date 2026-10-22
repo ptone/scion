@@ -181,18 +181,18 @@ func TestHostGitCommand_FilterPinsStandardLFS(t *testing.T) {
 
 // Deny-by-default: a repository config key outside the allow-list (or an
 // include directive) refuses the command, whether or not it is a network
-// command, and names the key. This covers every finding so far plus an
+// command, and names the key. This covers the known key families plus an
 // arbitrary unknown key.
 func TestHostGitCommand_PolicyRefuses(t *testing.T) {
 	cases := []struct{ key, value string }{
-		// F1: a filter subsection containing '=' and a non-standard filter.
+		// A filter subsection containing '=' and a non-standard filter.
 		{"filter.a=b.smudge", "touch /tmp/x; cat"},
 		{"filter.custom.smudge", "evil"},
-		// F2: signature-verification knobs that could run gpg.program.
+		// Signature-verification knobs that could run gpg.program.
 		{"gpg.program", "touch /tmp/x"},
 		{"gpg.ssh.program", "touch /tmp/x"},
 		{"log.showSignature", "true"},
-		// F3: http.* TLS / resolve / cookie / cert keys.
+		// http.* TLS / resolve / cookie / cert keys.
 		{"http.sslVerify", "false"},
 		{"http.sslCAInfo", "/tmp/ca"},
 		{"http.curloptResolve", "example.com:443:127.0.0.1"},
@@ -830,11 +830,11 @@ func TestAllowVar_LFSWrittenKeys(t *testing.T) {
 		no("lfs.repositoryformatversion", "1")
 		ok("lfs.https://github.com/o/r.git/info/lfs.access", "basic")
 		ok("lfs.https://github.com/o/r.git/info/lfs.access", "none")
-		no("lfs.https://github.com/o/r.git/info/lfs.access", "negotiate") // A2
-		no("lfs.https://github.com/o/r.git/info/lfs.access", "ntlm")      // A2
+		no("lfs.https://github.com/o/r.git/info/lfs.access", "negotiate") // non-basic access mode
+		no("lfs.https://github.com/o/r.git/info/lfs.access", "ntlm")      // non-basic access mode
 		ok("lfs.https://github.com/o/r.git/info/lfs.locksverify", "true")
 		no("lfs.https://github.com/o/r.git/info/lfs.locksverify", "maybe")
-		// A3: a non-URL subsection is refused.
+		// A non-URL subsection is refused.
 		no("lfs.not a url.access", "basic")
 		no("lfs.ext::sh -c id.access", "basic")
 		// Still refused: redirect/host-path keys.
@@ -925,7 +925,7 @@ func TestLinkedPinnedKeysDoNotExecute(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// Planted values that would run a command if the pins did not override them.
+	// Values that would run a command if the pins did not override them.
 	hostRunGit(t, repo, "config", "core.hooksPath", hookDir)
 	hostRunGit(t, repo, "config", "core.fsmonitor", "touch '"+fail+"'; false")
 	hostRunGit(t, repo, "config", "core.pager", "touch '"+fail+"'; cat")
@@ -1362,7 +1362,7 @@ func TestLFSRepositoryNotRefusedAfterGitLFSWrites(t *testing.T) {
 	})
 }
 
-// R1 (round 6): a committed .lfsconfig that sets lfs.<url>.access (even spelled
+// A committed .lfsconfig that sets lfs.<url>.access (even spelled
 // differently from the origin-derived endpoint) makes the linked checkout skip
 // the smudge rather than pin, so the endpoint is never contacted.
 func TestLFSConfigAccessKeyForcesSkip(t *testing.T) {
@@ -1425,8 +1425,7 @@ func TestLFSConfigAccessKeyForcesSkip(t *testing.T) {
 			}
 			err = CreateWorktree(wt, "agent-a")
 			// Check the hit count BEFORE acting on the CreateWorktree error, so
-			// the contact (or its absence) is always reported — the W10 mutant
-			// records this count.
+			// the contact (or its absence) is always reported.
 			if got := atomic.LoadInt32(&hits); got != 0 {
 				t.Errorf("endpoint contacted %d time(s); a .lfsconfig access key must force skip-smudge", got)
 			}
@@ -1465,7 +1464,7 @@ func TestLfsConfigNamesEndpoint(t *testing.T) {
 	}
 }
 
-// R2 (round 6): a tracked .gitattributes that is itself a symlink to a FIFO or
+// A tracked .gitattributes that is itself a symlink to a FIFO or
 // /dev/zero must not hang or unbounded-read CreateWorktree. repoTracksLFS reads
 // it through the regular-file-only safe reader.
 func TestCreateWorktree_GitattributesSymlinkDoesNotHang(t *testing.T) {
@@ -1511,7 +1510,7 @@ func TestCreateWorktree_GitattributesSymlinkDoesNotHang(t *testing.T) {
 	}
 }
 
-// Optional (round 6): the post-command sensitive-key check catches a reordered
+// The post-command sensitive-key check catches a reordered
 // or inserted multi-valued key (remote.origin.url).
 func TestVerifyConfigStable_MultiValuedKeyChange(t *testing.T) {
 	hostGitTestEnv(t)

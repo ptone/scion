@@ -66,7 +66,7 @@ func TestParseGitConfigFile(t *testing.T) {
 }
 
 // A subsection containing '=' keeps the '=' in the subsection, so a filter
-// driver cannot hide behind it (the F1 bypass).
+// driver cannot hide behind it.
 func TestParseGitConfigFile_SubsectionWithEquals(t *testing.T) {
 	vars, err := parseGitConfigFile([]byte("[filter \"a=b\"]\n\tsmudge = evil\n"))
 	if err != nil {
