@@ -1921,7 +1921,7 @@ type V1ServerHubPortProxyConfig struct {
 	// "60s", between "5s" and "10m"). The body is not time-limited.
 	ResponseHeaderTimeout string `json:"response_header_timeout,omitempty" yaml:"response_header_timeout,omitempty" koanf:"response_header_timeout"`
 	// ViewTTL is how long a page view link stays valid (experiment
-	// hub.port-view; e.g. "2h"; default "2h", between "15m" and "24h").
+	// hub.port_view; e.g. "2h"; default "2h", between "15m" and "24h").
 	ViewTTL string `json:"view_ttl,omitempty" yaml:"view_ttl,omitempty" koanf:"view_ttl"`
 }
 

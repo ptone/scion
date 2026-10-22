@@ -30,7 +30,7 @@ const (
 	PortProxyMaxResponseHeaderTimeout = 10 * time.Minute
 
 	// PortProxyDefaultViewTTL is the default lifetime of a page view link
-	// (server.hub.port_proxy.view_ttl, experiment hub.port-view).
+	// (server.hub.port_proxy.view_ttl, experiment hub.port_view).
 	PortProxyDefaultViewTTL = 2 * time.Hour
 	// PortProxyMinViewTTL and PortProxyMaxViewTTL bound view_ttl.
 	PortProxyMinViewTTL = 15 * time.Minute
@@ -47,7 +47,7 @@ type HubPortProxyConfig struct {
 	// time-limited.
 	ResponseHeaderTimeout string `json:"responseHeaderTimeout,omitempty" yaml:"responseHeaderTimeout,omitempty" koanf:"responseHeaderTimeout"`
 	// ViewTTL is how long a page view link minted when a user opens an
-	// exposed port from the hub stays valid (experiment hub.port-view;
+	// exposed port from the hub stays valid (experiment hub.port_view;
 	// "" = PortProxyDefaultViewTTL). Opening the port's link again mints
 	// a new one.
 	ViewTTL string `json:"viewTtl,omitempty" yaml:"viewTtl,omitempty" koanf:"viewTtl"`

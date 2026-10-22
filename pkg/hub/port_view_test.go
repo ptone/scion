@@ -786,9 +786,10 @@ func TestPortView_AuthStepOrder(t *testing.T) {
 }
 
 // TestPortView_LogsNeverHoldTheLink: every log line written while serving
-// page view requests (request log, auth debug, the proxy line, failures,
-// redirects and transport errors) holds no part of the capability, and
-// such requests are not traced.
+// page view requests (both request loggers, auth debug, the proxy line,
+// failures, redirects and transport errors), and the request log line of
+// any request whose Referer is a page link, holds no part of the
+// capability; such requests are not traced.
 func TestPortView_LogsNeverHoldTheLink(t *testing.T) {
 	var buf safeBuffer
 	prev := slog.Default()
@@ -798,36 +799,65 @@ func TestPortView_LogsNeverHoldTheLink(t *testing.T) {
 	f := newPortViewFixture(t, nil)
 	f.srv.authConfig.Debug = true
 	f.srv.config.Debug = true
-	// The auth middleware reads its config when the handler is built.
-	debugSrv := httptest.NewServer(f.srv.Handler())
-	t.Cleanup(debugSrv.Close)
-	f.base = debugSrv.URL
+	// The auth middleware and the request logger are read when the handler
+	// is built: one server with the default request log middleware, one
+	// with the request logger cmd installs.
+	legacySrv := httptest.NewServer(f.srv.Handler())
+	t.Cleanup(legacySrv.Close)
+	f.srv.SetRequestLogger(slog.Default())
+	requestLogSrv := httptest.NewServer(f.srv.Handler())
+	t.Cleanup(requestLogSrv.Close)
+	bases := []string{legacySrv.URL, requestLogSrv.URL}
+
 	valid := f.ownerCap()
 	expired := f.capFor(f.launched.OwnerID, f.app.port, time.Now().Add(-time.Second))
 	foreign := f.capFor(f.stranger.ID(), f.app.port, time.Now().Add(time.Hour))
+	caps := []string{valid, expired, foreign}
+	// Every request carries the page link as its Referer, as a page that
+	// sets its own referrer policy would send it, and a User-Agent.
+	h := func(base http.Header) http.Header {
+		base.Set("Referer", f.base+portview.Route+valid+"/index.html?r=1")
+		base.Set("User-Agent", "port-view-log-test")
+		return base
+	}
 
 	// Before the agent connects: the agent-offline path.
-	f.send(t, http.MethodGet, f.viewURL(valid, "a.js"), subHeader(), nil)
+	for _, b := range bases {
+		f.base = b
+		f.send(t, http.MethodGet, f.viewURL(valid, "a.js"), h(subHeader()), nil)
+	}
+	f.base = f.public.URL
 	f.startAgent(t)
-	link := f.portLink("p.html?x=1")
-	minted := f.send(t, http.MethodGet, link, withBearer(navHeader(), f.userToken), nil)
-	require.Equal(t, http.StatusFound, minted.status)
-	mintedCap, _, _ := strings.Cut(strings.TrimPrefix(resolveLocation(t, link, minted).Path, portview.Route), "/")
-	f.send(t, http.MethodGet, f.viewURL(valid, "a.js?q=1"), subHeader(), nil)
-	f.send(t, http.MethodGet, f.viewURL(mintedCap, "p.html"), navHeader(), nil)
-	f.send(t, http.MethodGet, f.viewURL(expired, "a.js"), subHeader(), nil)
-	f.send(t, http.MethodGet, f.viewURL(expired, "p.html"), navHeader(), nil)
-	f.send(t, http.MethodGet, f.viewURL(foreign, "a.js"), subHeader(), nil)
-	f.send(t, http.MethodOptions, f.viewURL(valid, "a.js"), http.Header{"Origin": {"null"}, "Access-Control-Request-Method": {"GET"}}, nil)
-	f.send(t, http.MethodGet, f.viewURL(valid, "a.js"), withBearer(navHeader(), f.strangerToken), nil)
+	for _, b := range bases {
+		f.base = b
+		link := f.portLink("p.html?x=1")
+		minted := f.send(t, http.MethodGet, link, h(withBearer(navHeader(), f.userToken)), nil)
+		require.Equal(t, http.StatusFound, minted.status)
+		mintedCap, _, _ := strings.Cut(strings.TrimPrefix(resolveLocation(t, link, minted).Path, portview.Route), "/")
+		caps = append(caps, mintedCap)
+		f.send(t, http.MethodGet, f.viewURL(valid, "a.js?q=1"), h(subHeader()), nil)
+		f.send(t, http.MethodGet, f.viewURL(mintedCap, "p.html"), h(navHeader()), nil)
+		f.send(t, http.MethodGet, f.viewURL(expired, "a.js"), h(subHeader()), nil)
+		f.send(t, http.MethodGet, f.viewURL(expired, "p.html"), h(navHeader()), nil)
+		f.send(t, http.MethodGet, f.viewURL(foreign, "a.js"), h(subHeader()), nil)
+		f.send(t, http.MethodOptions, f.viewURL(valid, "a.js"), h(http.Header{"Origin": {"null"}, "Access-Control-Request-Method": {"GET"}}), nil)
+		f.send(t, http.MethodGet, f.viewURL(valid, "a.js"), h(withBearer(navHeader(), f.strangerToken)), nil)
+		// Another hub route, requested by the page with the link as Referer.
+		f.send(t, http.MethodGet, b+"/api/v1/agents", h(subHeader()), nil)
+	}
 	// A transport error: the port answers nothing.
 	f.app.srv.Close()
-	f.send(t, http.MethodGet, f.viewURL(valid, "gone.js"), subHeader(), nil)
+	for _, b := range bases {
+		f.base = b
+		f.send(t, http.MethodGet, f.viewURL(valid, "gone.js"), h(subHeader()), nil)
+	}
 
 	out := buf.String()
 	require.Contains(t, out, `"surface":"portview"`, "the proxy line was logged")
 	require.Contains(t, out, logging.RedactedPortViewPath, "request lines use the redacted path")
-	for _, c := range []string{valid, expired, foreign, mintedCap} {
+	require.Contains(t, out, `"httpRequest"`, "the request logger cmd installs wrote its lines")
+	require.Contains(t, out, `"userAgent":"port-view-log-test"`, "the request log records request headers")
+	for _, c := range caps {
 		parts := strings.Split(c, ".")
 		sig := parts[len(parts)-1]
 		assert.NotContains(t, out, c)

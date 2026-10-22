@@ -172,7 +172,7 @@ type ServerConfig struct {
 	PortProxyResponseHeaderTimeout time.Duration
 	// PortViewTTL is the lifetime of a page view link minted when a user
 	// opens an exposed port from the hub (server.hub.port_proxy.view_ttl,
-	// experiment hub.port-view; 0 = 2h). The range (15m to 24h) is
+	// experiment hub.port_view; 0 = 2h). The range (15m to 24h) is
 	// enforced at startup by config validation.
 	PortViewTTL time.Duration
 	// AuthMode is the configured human auth mode (server.auth.mode). "proxy"

@@ -1612,7 +1612,7 @@
             },
             "view_ttl": {
               "type": "string",
-              "description": "Lifetime of a page view link minted when a user opens an exposed port from the hub (hub.port-view experiment). Opening the port's link again mints a new one (e.g. '2h'; default '2h', between '15m' and '24h').",
+              "description": "Lifetime of a page view link minted when a user opens an exposed port from the hub (hub.port_view experiment). Opening the port's link again mints a new one (e.g. '2h'; default '2h', between '15m' and '24h').",
               "x-env-var": "SCION_SERVER_HUB_PORTPROXY_VIEWTTL",
               "x-since": "1"
             }

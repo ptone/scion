@@ -199,3 +199,49 @@ func TestRequestLogMiddleware_RedactsPortViewPath(t *testing.T) {
 		t.Fatalf("request log missing the redacted path: %s", out)
 	}
 }
+
+// TestRedactReferer: a Referer naming a port view or artifact URL is
+// logged with its path redacted; one that does not parse is replaced;
+// others are kept.
+func TestRedactReferer(t *testing.T) {
+	const tok = "v1.SECRETLINK"
+	cases := map[string]string{
+		"":                                     "",
+		"https://hub.example/api/v1/agents/a1": "https://hub.example/api/v1/agents/a1",
+		"https://hub.example/web/agents?x=1":   "https://hub.example/web/agents?x=1",
+		"https://hub.example/api/v1/portview/" + tok + "/index.html?a=1": "https://hub.example" + RedactedPortViewPath + "?a=1",
+		"https://hub.example/api/v1/%70ortview/" + tok + "/x":            "https://hub.example" + RedactedPortViewPath,
+		"https://hub.example/api/v1/artifacts/view/" + tok + "/i.html":   "https://hub.example" + RedactedArtifactPath,
+		"https://hub.example/x?sig=" + tok:                               "https://hub.example/x?sig=REDACTED",
+		"https://hub.example/api/v1/portview/" + tok + "/%zz":            "REDACTED",
+		"://bad referer " + tok:                                          "REDACTED",
+	}
+	for in, want := range cases {
+		got := RedactReferer(in)
+		if got != want {
+			t.Errorf("RedactReferer(%q) = %q, want %q", in, got, want)
+		}
+		if strings.Contains(got, "SECRETLINK") {
+			t.Errorf("RedactReferer(%q) kept the link: %q", in, got)
+		}
+	}
+}
+
+// TestRequestLogMiddleware_RedactsPortViewReferer: a request to any route
+// whose Referer is a page link is logged without the link.
+func TestRequestLogMiddleware_RedactsPortViewReferer(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	handler := RequestLogMiddleware(logger, "hub", HubPathPatterns(), 0)(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusUnauthorized) }))
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil)
+	req.Header.Set("Referer", "https://hub.example/api/v1/portview/v1.SECRETLINK/index.html")
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+	out := buf.String()
+	if strings.Contains(out, "SECRETLINK") {
+		t.Fatalf("request log holds the page link: %s", out)
+	}
+	if !strings.Contains(out, `"referer":"https://hub.example`+RedactedPortViewPath+`"`) {
+		t.Fatalf("request log missing the redacted referer: %s", out)
+	}
+}

@@ -257,9 +257,10 @@ jobs:
 
       # The page view journeys (ptone/scion#5569) need the hub.port_view
       # experiment on from hub start, so they run on a second hub of the
-      # same rig, under their own config.
+      # same rig, under their own config. They run even when the journeys
+      # above failed, so both results are reported.
       - name: Run Playwright page view suite (port-proxy)
-        if: matrix.suite == 'port-proxy'
+        if: ${{ !cancelled() && matrix.suite == 'port-proxy' }}
         working-directory: ./web
         env:
           E2E_PREBUILT: '1'

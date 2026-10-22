@@ -224,11 +224,21 @@ test('journey 3: a multi-file page opened from the hub loads its relative resour
 });
 
 test('journey 3: a page using a root-relative script does not run it', async () => {
-  const { page, nav } = await open('member', `${portLink()}/abs.html`);
+  const page = await ctx('member').newPage();
+  // The script's URL resolves to the hub's root, outside the page link.
+  const rootScripts: Response[] = [];
+  page.on('response', (res) => {
+    if (new URL(res.url()).pathname === '/app.js') rootScripts.push(res);
+  });
+  const nav = await page.goto(`${portLink()}/abs.html`, { waitUntil: 'load' });
   expect(nav?.status()).toBe(200);
   expect(viewParts(page.url())?.sub).toBe('abs.html');
   await page.waitForTimeout(3000);
   await expect(page.locator('#probe')).toHaveText('');
+  for (const res of rootScripts) {
+    const body = await res.text().catch(() => '');
+    expect(body, '/app.js is not the fixture script').not.toContain('checkFetch');
+  }
   await page.close();
 });
 
@@ -320,14 +330,29 @@ test('journey 4: an open page after its user loses access', async () => {
   await expect(peer.page.locator('#probe')).toHaveText('ok', { timeout: 20_000 });
   expect(await pageFetch(peer.page, './api/ping')).toMatchObject({ status: 200 });
 
-  // The project owner removes the peer's role.
-  const res = await ctx('member').request.delete(
-    `/api/v1/projects/${suite.projectId}/members/principals/user/${encodeURIComponent(suite.peer!.email)}`
-  );
-  expect(res.status(), await res.text()).toBe(204);
+  // The project owner removes the peer's role, and gives it back at the
+  // end, so a retry of the serial group starts from the same state.
+  const owner = ctx('member').request;
+  const peerEmail = suite.peer!.email;
+  try {
+    const res = await owner.delete(
+      `/api/v1/projects/${suite.projectId}/members/principals/user/${encodeURIComponent(peerEmail)}`
+    );
+    expect(res.status(), await res.text()).toBe(204);
 
-  await expect
-    .poll(async () => pageFetch(peer.page, './api/ping'), { timeout: 10_000 })
-    .toEqual({ status: 404, body: LINK_REFUSED_BODY });
-  await peer.page.close();
+    await expect
+      .poll(async () => pageFetch(peer.page, './api/ping'), { timeout: 10_000 })
+      .toEqual({ status: 404, body: LINK_REFUSED_BODY });
+  } finally {
+    await peer.page.close();
+    const roles = (await (
+      await owner.get(`/api/v1/projects/${suite.projectId}/members/assignable-roles`)
+    ).json()) as { items?: Array<{ id: string; name: string }> };
+    const role = roles.items?.find((r) => r.name === 'project-admin');
+    if (role) {
+      await owner.post(`/api/v1/projects/${suite.projectId}/members`, {
+        data: { roleDefinitionId: role.id, principalType: 'user', principalId: peerEmail },
+      });
+    }
+  }
 });

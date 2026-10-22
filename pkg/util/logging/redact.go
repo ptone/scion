@@ -156,3 +156,19 @@ func RedactURL(u *url.URL) string {
 	}
 	return c.String()
 }
+
+// RedactReferer returns a request's Referer value for a log line: as sent
+// when it parses as a URL that RequestPath would log as is, with its
+// credential-bearing query values and artifact or port view path
+// redacted (RedactURL) otherwise, and redactedValue when it does not
+// parse.
+func RedactReferer(referer string) string {
+	if referer == "" {
+		return ""
+	}
+	u, err := url.Parse(referer)
+	if err != nil {
+		return redactedValue
+	}
+	return RedactURL(u)
+}
