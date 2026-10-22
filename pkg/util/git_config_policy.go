@@ -20,8 +20,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
-	"sort"
 	"strings"
 )
 
@@ -100,12 +98,18 @@ type repoConfigAllowOptions struct {
 }
 
 // allowVar reports whether v is allowed under policy, with a reason when it
-// is not. It never allows a key that can run a command; keys whose value may
-// carry one are value-checked.
+// is not. It never allows a key that can run a command, read or write an
+// arbitrary host path, or redirect the network; keys whose value may carry
+// one of those are value-checked. topLevel below means [section] (no
+// subsection) — [section ""] (an empty quoted subsection) is a different
+// section and is treated as subsectioned, so it cannot impersonate a
+// top-level key.
 func allowVar(policy RepoConfigPolicy, v gitConfigVar, opts repoConfigAllowOptions) (bool, string) {
 	sec := v.Section
 	sub := v.Subsection
 	name := v.Name
+	topLevel := !v.HasSubsection
+	hasSub := v.HasSubsection
 
 	// include/includeIf pull in other files: always refused (the caller
 	// refuses before reaching here too).
@@ -122,41 +126,45 @@ func allowVar(policy RepoConfigPolicy, v gitConfigVar, opts repoConfigAllowOptio
 	// repository they manage.
 	switch sec {
 	case "core":
-		switch name {
-		case "repositoryformatversion", "filemode", "bare", "logallrefupdates",
-			"ignorecase", "precomposeunicode", "symlinks":
-			return true, ""
-		case "worktree":
-			if opts.worktreePath != "" && v.Value == opts.worktreePath {
+		if topLevel {
+			switch name {
+			case "repositoryformatversion", "filemode", "bare", "logallrefupdates",
+				"ignorecase", "precomposeunicode", "symlinks":
 				return true, ""
+			case "worktree":
+				if opts.worktreePath != "" && v.Value == opts.worktreePath {
+					return true, ""
+				}
+				return false, "a work-tree redirect"
 			}
-			return false, "a work-tree redirect"
 		}
 	case "extensions":
-		switch name {
-		case "worktreeconfig", "relativeworktrees", "objectformat", "refstorage":
-			return true, ""
+		if topLevel {
+			switch name {
+			case "worktreeconfig", "relativeworktrees", "objectformat", "refstorage":
+				return true, ""
+			}
 		}
 	case "remote":
-		if sub != "" && (name == "url" || name == "fetch") {
+		if hasSub && (name == "url" || name == "fetch") {
 			return true, ""
 		}
 	case "branch":
-		if sub != "" {
+		if hasSub {
 			switch name {
 			case "remote", "merge", "rebase":
 				return true, ""
 			}
 		}
-		if sub == "" && name == "autosetupmerge" {
+		if topLevel && name == "autosetupmerge" {
 			return true, ""
 		}
 	case "gc":
-		if name == "auto" {
+		if topLevel && name == "auto" {
 			return true, ""
 		}
 	case "user":
-		if name == "name" || name == "email" {
+		if topLevel && (name == "name" || name == "email") {
 			return true, ""
 		}
 	}
@@ -165,20 +173,28 @@ func allowVar(policy RepoConfigPolicy, v gitConfigVar, opts repoConfigAllowOptio
 		return false, "not on the managed-repository allow-list"
 	}
 
-	// Wider list for the user's own linked checkout: keys that run nothing
-	// and redirect no network traffic. Keys whose value can carry a command
-	// are value-checked.
+	// Wider list for the user's own linked checkout: keys that run nothing,
+	// read or write no arbitrary host path, and redirect no network traffic.
+	// A few keys that would run a command are allowed here only because a
+	// fixed -c pin on every host-side call (HostGitArgs) overrides their
+	// repository value — core.hooksPath, core.fsmonitor, core.pager and
+	// submodule.recurse — so a planted value never executes.
 	switch sec {
 	case "core":
-		switch name {
-		case "autocrlf", "eol", "safecrlf", "whitespace", "commentchar",
-			"quotepath", "longpaths", "protecthfs", "protectntfs",
-			"checkstat", "trustctime", "untrackedcache", "fsyncmethod",
-			"splitindex", "preloadindex", "abbrev", "pager-is-not-a-key":
-			return true, ""
+		if topLevel {
+			switch name {
+			case "autocrlf", "eol", "safecrlf", "whitespace", "commentchar",
+				"quotepath", "longpaths", "protecthfs", "protectntfs",
+				"checkstat", "trustctime", "untrackedcache", "fsyncmethod",
+				"splitindex", "preloadindex", "abbrev",
+				"sparsecheckout", "sparsecheckoutcone",
+				// Neutralised by the HostGitArgs pins on every call.
+				"hookspath", "fsmonitor", "pager":
+				return true, ""
+			}
 		}
 	case "remote":
-		if sub != "" {
+		if hasSub {
 			switch name {
 			case "pushurl", "tagopt", "prune", "prunetags", "mirror",
 				"promisor", "partialclonefilter", "fetchrecursesubmodules",
@@ -189,90 +205,129 @@ func allowVar(policy RepoConfigPolicy, v gitConfigVar, opts repoConfigAllowOptio
 			}
 		}
 	case "branch":
-		if sub != "" {
+		if hasSub {
 			switch name {
 			case "description", "pushremote", "mergeoptions", "autosetuprebase":
 				return true, ""
 			}
 		}
-		if sub == "" && name == "autosetuprebase" {
+		if topLevel && name == "autosetuprebase" {
 			return true, ""
 		}
 	case "pull":
-		if name == "rebase" || name == "ff" || name == "octopus" || name == "twohead" {
+		if topLevel && (name == "rebase" || name == "ff" || name == "octopus" || name == "twohead") {
 			return true, ""
 		}
 	case "push":
-		switch name {
-		case "default", "autosetupremote", "followtags", "gpgsign":
-			return true, ""
+		if topLevel {
+			switch name {
+			case "default", "autosetupremote", "followtags", "gpgsign":
+				return true, ""
+			}
 		}
 	case "fetch":
-		switch name {
-		case "prune", "prunetags", "fsckobjects", "output", "parallel":
-			return true, ""
+		if topLevel {
+			switch name {
+			case "prune", "prunetags", "fsckobjects", "output", "parallel":
+				return true, ""
+			}
 		}
 	case "commit":
-		if name == "gpgsign" || name == "verbose" {
+		if topLevel && (name == "gpgsign" || name == "verbose") {
 			return true, ""
 		}
 	case "tag":
-		if name == "gpgsign" || name == "sort" || name == "forcesignannotated" {
+		if topLevel && (name == "gpgsign" || name == "sort" || name == "forcesignannotated") {
 			return true, ""
 		}
 	case "init":
-		if name == "defaultbranch" {
+		if topLevel && name == "defaultbranch" {
 			return true, ""
 		}
+	case "maintenance":
+		// maintenance.* configures the background maintenance tasks; none of
+		// its keys names a command (the tasks are git built-ins).
+		return true, ""
+	case "user":
+		// Signing key identity (a key id or path) is inert data; a planted
+		// gpg/ssh *.program that would act on it is refused above, which
+		// refuses the whole config.
+		if topLevel && name == "signingkey" {
+			return true, ""
+		}
+	case "gpg":
+		// SSH/commit signing format only — inert data. Any gpg program key is
+		// refused (name == "program" above), and any gpg.<fmt>.program would
+		// be too; gpg.ssh.allowedSignersFile and the like (host-file reads)
+		// are not on the list.
+		if topLevel && name == "format" {
+			return true, ""
+		}
+		return false, "a gpg setting that is not inert"
 	case "color":
 		// color.<slot> and color.<cmd>.<slot>: enums/booleans, never a
-		// command. Only a bounded set of command names is allowed as the
-		// subsection, and no color key names a program.
-		if sub == "" && colorTopKeys[name] {
+		// command, and no color key names a program.
+		if topLevel && colorTopKeys[name] {
 			return true, ""
 		}
-		if sub != "" && colorCmds[strings.ToLower(sub)] {
+		if hasSub && colorCmds[strings.ToLower(sub)] {
 			return true, ""
 		}
 	case "advice":
-		// advice.* are all booleans.
-		return true, ""
+		if topLevel {
+			// advice.* are all booleans.
+			return true, ""
+		}
 	case "rerere":
-		if name == "enabled" || name == "autoupdate" {
+		if topLevel && (name == "enabled" || name == "autoupdate") {
 			return true, ""
 		}
 	case "status":
-		if sub == "" && statusKeys[name] {
+		if topLevel && statusKeys[name] {
 			return true, ""
 		}
 	case "diff":
-		if sub == "" && diffTopKeys[name] {
+		if topLevel && diffTopKeys[name] {
 			return true, ""
 		}
-		if sub != "" && diffDriverKeys[name] {
+		if hasSub && diffDriverKeys[name] {
 			// A named diff driver's data attributes only (never textconv,
 			// command or cachetextconv).
 			return true, ""
 		}
 	case "merge":
-		if sub == "" && mergeTopKeys[name] {
+		if topLevel && mergeTopKeys[name] {
 			return true, ""
 		}
-		if sub != "" && (name == "name" || name == "recursive") {
+		if hasSub && (name == "name" || name == "recursive") {
 			// A named merge driver's description/strategy only (never driver
 			// or cmd).
 			return true, ""
 		}
 	case "submodule":
-		if sub != "" && name == "update" {
-			if submoduleUpdateAllowed[strings.ToLower(v.Value)] {
+		if topLevel && name == "recurse" {
+			// Pinned off by HostGitArgs, so inert.
+			return true, ""
+		}
+		if hasSub {
+			switch name {
+			case "update":
+				if submoduleUpdateAllowed[strings.ToLower(v.Value)] {
+					return true, ""
+				}
+				return false, "a submodule update command"
+			case "url":
+				if submoduleURLAllowed(v.Value) {
+					return true, ""
+				}
+				return false, "a submodule URL with a non-https/ssh transport"
+			case "active", "ignore", "shallow", "branch", "fetchrecursesubmodules":
 				return true, ""
 			}
-			return false, "a submodule update command"
 		}
-		return false, "a submodule setting"
+		return false, "a submodule setting that is not on the allow-list"
 	case "filter":
-		if strings.EqualFold(sub, "lfs") {
+		if strings.EqualFold(sub, "lfs") && hasSub {
 			if name == "required" {
 				return true, ""
 			}
@@ -283,20 +338,44 @@ func allowVar(policy RepoConfigPolicy, v gitConfigVar, opts repoConfigAllowOptio
 		}
 		return false, "a filter driver command"
 	case "lfs":
-		if sub == "" && lfsTopKeys[name] {
+		// Deny-by-default: only a small set of inert top-level keys. Every
+		// subsectioned lfs.* (lfs.<url>.access, lfs.extension.<n>.*,
+		// lfs.customtransfer.<n>.*) and the redirect/exec/host-path keys
+		// (url, pushurl, storage, standalonetransferagent) are refused.
+		if topLevel && lfsInertKeys[name] {
 			return true, ""
 		}
-		// lfs.<url>.access and similar per-endpoint data keys.
-		if sub != "" && !strings.EqualFold(sub, "customtransfer") && lfsEndpointKeys[name] {
-			return true, ""
-		}
-		return false, "a git-lfs setting that is not on the allow-list"
+		return false, "a git-lfs setting that is not inert"
 	}
 
 	if policy == RepoPolicyLinked {
 		return false, "not on the linked-checkout allow-list"
 	}
 	return false, "not on the allow-list"
+}
+
+// submoduleURLAllowed reports whether a submodule URL uses only the https or
+// ssh transport (so recursion, were it ever on, could not reach an ext:: or
+// file transport). Submodule recursion is pinned off regardless; this is a
+// second bound.
+func submoduleURLAllowed(url string) bool {
+	u := strings.TrimSpace(url)
+	lower := strings.ToLower(u)
+	if strings.HasPrefix(lower, "https://") || strings.HasPrefix(lower, "ssh://") {
+		return true
+	}
+	// scp-like syntax user@host:path is ssh, but must not be a transport
+	// prefix like ext::/file:/ and must not be an absolute or relative path.
+	if strings.Contains(u, "://") {
+		return false
+	}
+	if at := strings.Index(u, "@"); at > 0 {
+		rest := u[at+1:]
+		if colon := strings.Index(rest, ":"); colon > 0 && !strings.Contains(rest[:colon], "/") {
+			return true
+		}
+	}
+	return false
 }
 
 // Explicit per-section key sets for the linked-checkout policy. They list
@@ -319,14 +398,14 @@ var (
 	mergeTopKeys   = set("conflictstyle", "ff", "renamelimit", "renames",
 		"stat", "log", "autostash", "verbosity", "directoryrenames",
 		"renormalize", "branchdesc")
-	lfsTopKeys = set("url", "pushurl", "concurrenttransfers", "dialtimeout",
-		"tlstimeout", "activitytimeout", "fetchrecentrefsdays",
-		"fetchrecentcommitsdays", "fetchrecentremoterefs", "pruneoffsetdays",
+	// Inert git-lfs keys (timeouts, counts, booleans, in-repo globs). No
+	// URL, path, storage location, custom transfer or extension command.
+	lfsInertKeys = set("concurrenttransfers", "dialtimeout", "tlstimeout",
+		"activitytimeout", "fetchrecentrefsdays", "fetchrecentcommitsdays",
+		"fetchrecentremoterefs", "fetchrecentalways", "pruneoffsetdays",
 		"pruneverifyremotealways", "locksverifyeverywhere", "locksverify",
-		"skipdownloaderrors", "setlockablereadonly", "cachecredentials",
-		"fetchinclude", "fetchexclude", "fetchrecentalways", "gitprotocol",
-		"batch", "transfermaxretries", "contenttype")
-	lfsEndpointKeys = set("access", "locksverify")
+		"skipdownloaderrors", "setlockablereadonly", "fetchinclude",
+		"fetchexclude", "batch", "transfermaxretries", "contenttype")
 )
 
 func set(keys ...string) map[string]bool {
@@ -389,68 +468,50 @@ func crossCheckAgainstGit(ctx context.Context, dir string, env []string, parsed 
 	if err != nil {
 		return fmt.Errorf("git in %s: cannot list the repository config to cross-check it: %w", dir, err)
 	}
-	var gitRepo []string
-	for _, e := range parseGitConfigList(out) {
-		if repoConfigScope(e.scope) {
-			gitRepo = append(gitRepo, strings.ToLower(e.key)+"\x00"+e.value)
-		}
-	}
-	parsedSet := make([]string, 0, len(parsed))
+	parsedSet := make(map[string]int, len(parsed))
 	for _, v := range parsed {
-		parsedSet = append(parsedSet, v.Key()+"\x00"+v.Value)
+		parsedSet[strings.ToLower(v.Key())+"\x00"+v.Value]++
 	}
-	sort.Strings(gitRepo)
-	sort.Strings(parsedSet)
-	if !slices.Equal(gitRepo, parsedSet) {
-		return &RepoConfigRefusedError{Dir: dir, Key: "<repository config>", Reason: "read differently by the config parser and by git; refusing to be safe"}
+	// Every repository-scope entry git actually resolves must appear in the
+	// parsed set. The parsed set may hold more — config.worktree is parsed
+	// even when extensions.worktreeConfig is off, which git then ignores — so
+	// this is a subset check, not equality: it catches any key or value the
+	// parser missed or read differently (a parser divergence), which is the
+	// security-relevant direction, while allowing the intentional extra.
+	for _, e := range parseGitConfigList(out) {
+		if !repoConfigScope(e.scope) {
+			continue
+		}
+		k := strings.ToLower(e.key) + "\x00" + e.value
+		if parsedSet[k] <= 0 {
+			return &RepoConfigRefusedError{Dir: dir, Key: e.key, Reason: "read differently by the config parser and by git; refusing to be safe"}
+		}
+		parsedSet[k]--
 	}
 	return nil
 }
 
-// repoConfigFiles returns the config files git reads for a command in dir,
+// repoConfigFiles returns the config files to check for a command in dir,
 // honouring GIT_COMMON_DIR / GIT_DIR in env when set: the common
-// .git/config, and — only when extensions.worktreeConfig is enabled in that
-// common config — the main worktree's config.worktree (in the common dir)
-// and this worktree's config.worktree. It resolves a .git gitfile pointer
-// and a worktree's commondir file without running git.
+// .git/config, the main worktree's config.worktree (in the common dir), and
+// this worktree's config.worktree. config.worktree is checked ALWAYS, even
+// when extensions.worktreeConfig is off, so a refused key placed there is
+// never missed (fail closed) — git would read it the moment the extension is
+// turned on. It resolves a .git gitfile pointer and a worktree's commondir
+// file without running git.
 func repoConfigFiles(dir string, env []string) ([]string, error) {
 	commonDir, perWorktreeDir, err := resolveGitDirs(dir, env)
 	if err != nil {
 		return nil, err
 	}
-	files := []string{filepath.Join(commonDir, "config")}
-	if worktreeConfigEnabled(filepath.Join(commonDir, "config")) {
-		// git reads config.worktree only with the extension on. The main
-		// worktree's lives in the common dir; a linked worktree's in its own.
-		files = append(files, filepath.Join(commonDir, "config.worktree"))
-		if perWorktreeDir != "" && perWorktreeDir != commonDir {
-			files = append(files, filepath.Join(perWorktreeDir, "config.worktree"))
-		}
+	files := []string{
+		filepath.Join(commonDir, "config"),
+		filepath.Join(commonDir, "config.worktree"),
+	}
+	if perWorktreeDir != "" && perWorktreeDir != commonDir {
+		files = append(files, filepath.Join(perWorktreeDir, "config.worktree"))
 	}
 	return files, nil
-}
-
-// worktreeConfigEnabled reports whether the config file at path sets
-// extensions.worktreeConfig to a true boolean. A parse failure returns false
-// (git would not honour config.worktree without a readable common config);
-// the common config is parsed and policy-checked separately, so a genuine
-// parse error is still caught there.
-func worktreeConfigEnabled(configPath string) bool {
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return false
-	}
-	vars, err := parseGitConfigFile(data)
-	if err != nil {
-		return false
-	}
-	for _, v := range vars {
-		if v.Section == "extensions" && v.Name == "worktreeconfig" {
-			return strings.EqualFold(v.Value, "true") || v.Value == "1" ||
-				strings.EqualFold(v.Value, "yes") || strings.EqualFold(v.Value, "on")
-		}
-	}
-	return false
 }
 
 // resolveGitDirs returns the common git directory and the per-worktree git

@@ -28,12 +28,20 @@ type gitConfigVar struct {
 	Subsection string
 	Name       string
 	Value      string
-	Line       int
+	// HasSubsection distinguishes [section "sub"] (true, even when sub is
+	// empty — [section ""]) from [section] (false). git treats these as
+	// different sections, so an empty quoted subsection is not the same as
+	// no subsection.
+	HasSubsection bool
+	Line          int
 }
 
-// Key returns section[.subsection].name.
+// Key returns the variable's canonical git key: section.name with no
+// subsection, section.subsection.name with one. An empty subsection keeps
+// both dots (section..name), matching how `git config --list` renders it, so
+// the cross-check against git compares like for like.
 func (v gitConfigVar) Key() string {
-	if v.Subsection == "" {
+	if !v.HasSubsection {
 		return v.Section + "." + v.Name
 	}
 	return v.Section + "." + v.Subsection + "." + v.Name
@@ -54,6 +62,7 @@ type gitConfigParser struct {
 	line       int
 	section    string
 	subsection string
+	hasSub     bool
 	inSection  bool
 	vars       []gitConfigVar
 }
@@ -160,9 +169,9 @@ func (p *gitConfigParser) parseSection() error {
 			if i == 0 || i == len(name)-1 {
 				return p.errorf("invalid section name %q", name)
 			}
-			p.setSection(name[:i], strings.ToLower(name[i+1:]))
+			p.setSection(name[:i], strings.ToLower(name[i+1:]), true)
 		} else {
-			p.setSection(name, "")
+			p.setSection(name, "", false)
 		}
 		return nil
 	case ' ', '\t':
@@ -200,15 +209,16 @@ func (p *gitConfigParser) parseSection() error {
 			return p.errorf("expected ] after subsection")
 		}
 		p.pos++
-		p.setSection(name, sub.String())
+		p.setSection(name, sub.String(), true)
 		return nil
 	}
 	return p.errorf("unexpected %q in section header", p.peek())
 }
 
-func (p *gitConfigParser) setSection(section, subsection string) {
+func (p *gitConfigParser) setSection(section, subsection string, hasSub bool) {
 	p.section = strings.ToLower(section)
 	p.subsection = subsection
+	p.hasSub = hasSub
 	p.inSection = true
 }
 
@@ -221,7 +231,7 @@ func (p *gitConfigParser) parseVariable() error {
 		p.pos++
 	}
 	name := strings.ToLower(p.src[start:p.pos])
-	v := gitConfigVar{Section: p.section, Subsection: p.subsection, Name: name, Line: p.line}
+	v := gitConfigVar{Section: p.section, Subsection: p.subsection, HasSubsection: p.hasSub, Name: name, Line: p.line}
 	p.skipSpace()
 	if p.eof() || p.peek() == '\n' || p.peek() == '#' || p.peek() == ';' {
 		// "name" alone: boolean true.

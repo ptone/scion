@@ -74,28 +74,34 @@ import (
 //   - submodule.recurse=false, fetch.recurseSubmodules=false: git never
 //     works inside submodules, whose own config (.git/modules/<name>) is not
 //     part of the checks here, and never fetches from submodule URLs.
-//   - merge.verifySignatures=false: a merge never runs gpg.program.
+//   - merge.verifySignatures=false, commit.gpgsign=false, tag.gpgsign=false:
+//     no git invocation runs gpg.program to verify or make a signature.
+//   - protocol.file.allow=user: the file:// transport is used only for a URL
+//     given on the command line (a hub clone URL that is a local path), never
+//     one coming from config (a submodule URL, an alternates entry).
 func HostGitArgs() []string {
 	return []string{
 		"-c", "core.hooksPath=" + os.DevNull,
 		"-c", "core.fsmonitor=false",
 		"-c", "core.pager=cat",
 		"-c", "protocol.ext.allow=never",
+		"-c", "protocol.file.allow=user",
 		"-c", "submodule.recurse=false",
 		"-c", "fetch.recurseSubmodules=false",
 		"-c", "merge.verifySignatures=false",
+		"-c", "commit.gpgsign=false",
+		"-c", "tag.gpgsign=false",
 	}
 }
 
 // hostGitNetworkArgs are added to HostGitArgs for a remote operation: a
 // transport allow-list that denies every protocol except the ones a hub
 // fetch legitimately uses, so no repository or environment setting can
-// re-enable, say, the ext or a custom helper transport. protocol.file is
-// allowed because the shared-workspace clone URL may be a local path (and is
-// in tests); http/https/ssh/git cover real remotes.
+// re-enable, say, the ext or a custom helper transport. file is not listed
+// here; HostGitArgs' protocol.file.allow=user already permits a local-path
+// clone URL given on the command line while refusing a config-sourced one.
 var hostGitNetworkArgs = []string{
 	"-c", "protocol.allow=never",
-	"-c", "protocol.file.allow=always",
 	"-c", "protocol.http.allow=always",
 	"-c", "protocol.https.allow=always",
 	"-c", "protocol.ssh.allow=always",

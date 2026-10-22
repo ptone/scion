@@ -107,9 +107,12 @@ func TestHostGitArgs(t *testing.T) {
 		"-c", "core.fsmonitor=false",
 		"-c", "core.pager=cat",
 		"-c", "protocol.ext.allow=never",
+		"-c", "protocol.file.allow=user",
 		"-c", "submodule.recurse=false",
 		"-c", "fetch.recurseSubmodules=false",
 		"-c", "merge.verifySignatures=false",
+		"-c", "commit.gpgsign=false",
+		"-c", "tag.gpgsign=false",
 	}
 	if got := HostGitArgs(); !reflect.DeepEqual(got, want) {
 		t.Errorf("HostGitArgs() = %q, want %q", got, want)
@@ -195,10 +198,7 @@ func TestHostGitCommand_PolicyRefuses(t *testing.T) {
 		{"credential.helper", "store"},
 		{"credential.https://github.com.username", "x"},
 		{"core.sshCommand", "ssh -v"},
-		{"core.pager", "less"},
 		{"core.editor", "vi"},
-		{"core.hooksPath", "/tmp/hooks"},
-		{"core.fsmonitor", "/tmp/fsm"},
 		{"core.worktree", "/tmp/elsewhere"},
 		{"remote.origin.uploadpack", "git-upload-pack"},
 		{"remote.origin.receivepack", "git-receive-pack"},
@@ -209,7 +209,12 @@ func TestHostGitCommand_PolicyRefuses(t *testing.T) {
 		{"diff.x.textconv", "/tmp/t"},
 		{"merge.x.driver", "/tmp/m %O %A %B"},
 		{"submodule.x.update", "!touch /tmp/x"},
-		{"submodule.x.url", "https://evil.example/s"},
+		{"submodule.x.url", "file:///tmp/s"},
+		{"lfs.url", "https://evil.example/lfs"},
+		{"lfs.storage", "/tmp/store"},
+		{"lfs.standalonetransferagent", "evil"},
+		{"lfs.extension.foo.clean", "evil %f"},
+		{"gpg.ssh.allowedSignersFile", "/tmp/signers"},
 		// An arbitrary unknown key proves the default is deny.
 		{"totally.unknown.key", "whatever"},
 	}
@@ -636,7 +641,7 @@ func TestHostGitCommand_CarriesFixedArgs(t *testing.T) {
 func TestAllowVar(t *testing.T) {
 	v := func(key, value string) gitConfigVar {
 		sec, sub, name := splitConfigKey(key)
-		return gitConfigVar{Section: strings.ToLower(sec), Subsection: sub, Name: strings.ToLower(name), Value: value}
+		return gitConfigVar{Section: strings.ToLower(sec), Subsection: sub, HasSubsection: sub != "", Name: strings.ToLower(name), Value: value}
 	}
 	managedOK := []string{"core.repositoryformatversion", "core.filemode", "extensions.worktreeConfig", "remote.origin.url", "remote.origin.fetch", "branch.main.remote", "branch.main.merge", "gc.auto", "user.name"}
 	for _, k := range managedOK {
@@ -644,7 +649,9 @@ func TestAllowVar(t *testing.T) {
 			t.Errorf("managed allowVar(%q) = false, want true", k)
 		}
 	}
-	linkedOnly := []string{"core.autocrlf", "pull.rebase", "push.default", "remote.origin.pushurl", "color.ui", "init.defaultBranch"}
+	// Allowed in linked, refused in managed. Includes the keys allowed in
+	// linked only because a HostGitArgs pin neutralises them.
+	linkedOnly := []string{"core.autocrlf", "core.sparseCheckout", "pull.rebase", "push.default", "remote.origin.pushurl", "color.ui", "init.defaultBranch", "core.hooksPath", "core.fsmonitor", "core.pager", "submodule.recurse", "maintenance.auto", "gpg.format", "user.signingKey", "advice.detachedHead", "rerere.enabled"}
 	for _, k := range linkedOnly {
 		if ok, _ := allowVar(RepoPolicyManaged, v(k, "x"), repoConfigAllowOptions{}); ok {
 			t.Errorf("managed allowVar(%q) = true, want false", k)
@@ -653,13 +660,35 @@ func TestAllowVar(t *testing.T) {
 			t.Errorf("linked allowVar(%q) = false (%s), want true", k, reason)
 		}
 	}
-	deny := []string{"core.sshCommand", "core.pager", "core.editor", "core.hooksPath", "core.fsmonitor", "credential.helper", "url.x.insteadOf", "http.proxy", "http.sslVerify", "gpg.program", "gpg.ssh.program", "alias.st", "remote.origin.uploadpack", "diff.external", "diff.x.textconv", "merge.x.driver", "totally.unknown.key"}
+	// user.signingKey is top-level user.*; the v() helper treats it as such.
+	deny := []string{"core.sshCommand", "core.editor", "credential.helper", "url.x.insteadOf", "http.proxy", "http.sslVerify", "gpg.program", "gpg.ssh.program", "gpg.ssh.allowedSignersFile", "alias.st", "remote.origin.uploadpack", "diff.external", "diff.x.textconv", "merge.x.driver", "lfs.url", "lfs.storage", "lfs.standalonetransferagent", "lfs.extension.foo.clean", "totally.unknown.key"}
 	for _, mode := range []RepoConfigPolicy{RepoPolicyManaged, RepoPolicyLinked} {
 		for _, k := range deny {
 			if ok, _ := allowVar(mode, v(k, "x"), repoConfigAllowOptions{}); ok {
 				t.Errorf("policy%d allowVar(%q) = true, want false", mode, k)
 			}
 		}
+	}
+	// Submodule URL scheme check.
+	if ok, _ := allowVar(RepoPolicyLinked, v("submodule.s.url", "https://github.com/o/r"), repoConfigAllowOptions{}); !ok {
+		t.Error("submodule https url: want allowed")
+	}
+	if ok, _ := allowVar(RepoPolicyLinked, v("submodule.s.url", "git@github.com:o/r"), repoConfigAllowOptions{}); !ok {
+		t.Error("submodule scp-ssh url: want allowed")
+	}
+	for _, bad := range []string{"file:///tmp/s", "ext::sh -c id", "/local/path", "../rel"} {
+		if ok, _ := allowVar(RepoPolicyLinked, v("submodule.s.url", bad), repoConfigAllowOptions{}); ok {
+			t.Errorf("submodule url %q: want refused", bad)
+		}
+	}
+	// lfs inert key allowed.
+	if ok, _ := allowVar(RepoPolicyLinked, v("lfs.concurrenttransfers", "3"), repoConfigAllowOptions{}); !ok {
+		t.Error("lfs.concurrenttransfers: want allowed")
+	}
+	// An empty quoted subsection is not a top-level key.
+	emptySub := gitConfigVar{Section: "push", Subsection: "", HasSubsection: true, Name: "default", Value: "simple"}
+	if ok, _ := allowVar(RepoPolicyLinked, emptySub, repoConfigAllowOptions{}); ok {
+		t.Error("[push \"\"] default: want refused (not a top-level push.default)")
 	}
 	// core.worktree only with a matching AllowedWorktreePath.
 	if ok, _ := allowVar(RepoPolicyLinked, v("core.worktree", "/wt"), repoConfigAllowOptions{worktreePath: "/wt"}); !ok {
@@ -809,6 +838,56 @@ func TestHostGitCommand_DiffMergeExplicitKeys(t *testing.T) {
 		var r *RepoConfigRefusedError
 		if !errors.As(err, &r) {
 			t.Errorf("%s=%s: error = %v, want refusal", kv[0], kv[1], err)
+		}
+	}
+}
+
+// R-2 condition 1: keys allowed in a linked checkout only because a fixed
+// pin overrides them (core.hooksPath, core.fsmonitor, core.pager,
+// submodule.recurse) must not execute their planted value on a host git
+// command. CreateWorktree (which checks out) is the trigger.
+func TestLinkedPinnedKeysDoNotExecute(t *testing.T) {
+	repo, markers := newHostGitRepo(t)
+	fail := filepath.Join(markers, "ran")
+	hookDir := filepath.Join(markers, "hooks")
+	if err := os.MkdirAll(hookDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, hook := range []string{"post-checkout", "reference-transaction", "post-index-change"} {
+		if err := os.WriteFile(filepath.Join(hookDir, hook), []byte("#!/bin/sh\ntouch '"+fail+"'\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Planted values that would run a command if the pins did not override them.
+	hostRunGit(t, repo, "config", "core.hooksPath", hookDir)
+	hostRunGit(t, repo, "config", "core.fsmonitor", "touch '"+fail+"'; false")
+	hostRunGit(t, repo, "config", "core.pager", "touch '"+fail+"'; cat")
+	hostRunGit(t, repo, "config", "submodule.recurse", "true")
+
+	wt := filepath.Join(repo, "agents", "a", "workspace")
+	if err := os.MkdirAll(filepath.Dir(wt), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := CreateWorktree(wt, "agent-a"); err != nil {
+		t.Fatalf("CreateWorktree (should be allowed, keys are pinned): %v", err)
+	}
+	if _, err := os.Stat(fail); !os.IsNotExist(err) {
+		t.Errorf("a pinned key executed its planted value (marker present)")
+	}
+}
+
+// commit.gpgsign/tag.gpgsign are pinned off, so a commit the broker makes
+// does not invoke a signing program.
+func TestGpgSignPinnedOff(t *testing.T) {
+	repo, _ := newHostGitRepo(t)
+	cmd, err := HostGitCommand(context.Background(), repo, HostGitOptions{Policy: RepoPolicyLinked}, "status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join(cmd.Args, "\x00")
+	for _, want := range []string{"commit.gpgsign=false", "tag.gpgsign=false", "protocol.file.allow=user"} {
+		if !strings.Contains(args, "\x00"+want+"\x00") {
+			t.Errorf("args lack -c %q: %q", want, cmd.Args)
 		}
 	}
 }
