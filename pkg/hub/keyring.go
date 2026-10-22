@@ -39,19 +39,50 @@ const (
 // hub-local (signingKeySourceIsHubLocal): the test admin tier refuses it.
 const SigningKeySourceKeyring = "keyring"
 
-// validateKeyringConfig checks a keyring-mode ServerConfig
-// (ptone/scion#1530 Phase 1): the keyring must satisfy this release's
-// session pilot limits, SharedSigningSecret must be its "legacy" signing
-// entry (every purpose but the web session cookies still uses it), and
-// explicit agent/user JWT signing keys are refused, so no purpose is
-// partly rotated. Legacy mode (no keyring file) is unchanged: explicit
-// signing keys keep their precedence.
+// keyringReleaseCheck enforces this release's limits on a keyring file
+// (no versioned emit, no v2 writes, the imported legacy entries). A
+// package variable only so tests can run versioned rings through New;
+// production never changes it.
+var keyringReleaseCheck = (*keyring.Keyring).CheckSessionPilot
+
+// managedSigning reports whether cfg is in managed ring mode: a keyring
+// file is configured, or any keyring other than the legacy adapter is set
+// (the same rule /readyz applies). In managed mode the signing ring is
+// authoritative for the agent and user JWT keys: missing or incomplete
+// ring material refuses startup and never selects the legacy signing-key
+// resolution (design §4).
+func managedSigning(cfg ServerConfig) bool {
+	return cfg.KeyringConfigured || (cfg.Keyring != nil && cfg.Keyring.Source() != keyring.SourceLegacy)
+}
+
+// validateKeyringConfig checks a managed-mode ServerConfig
+// (ptone/scion#1530 Phases 1 and 3) before New reads any signing key: a
+// configured keyring file must have produced a file keyring (a missing or
+// unreadable file, or a legacy adapter in its place, never selects legacy
+// mode); its signing ring must have an active generation; it must satisfy
+// this release's limits (keyringReleaseCheck); SharedSigningSecret must be
+// its "legacy" signing entry (every purpose but the web session cookies and
+// the agent/user JWTs still uses it); and explicit agent/user JWT signing
+// keys are refused, so no purpose is partly rotated. Legacy mode (no
+// keyring file) is unchanged: explicit signing keys keep their precedence.
+// Errors name no key material, key ID or value.
 func validateKeyringConfig(cfg ServerConfig) error {
-	k := cfg.Keyring
-	if k == nil || k.Source() != keyring.SourceFile {
+	if !managedSigning(cfg) {
 		return nil
 	}
-	if err := k.CheckSessionPilot(); err != nil {
+	k := cfg.Keyring
+	if k == nil {
+		return errors.New("keyring mode: server.keyring_file is configured but no keyring file was loaded; refusing to fall back to legacy signing keys")
+	}
+	// The zero time never reaches a sign_until, so only a ring without a
+	// usable active generation errors here.
+	if _, err := k.Signing().Active(agentJWTPurpose, time.Time{}); err != nil {
+		return errors.New("keyring mode: the signing ring has no active generation")
+	}
+	if k.Source() != keyring.SourceFile {
+		return errors.New("keyring mode: server.keyring_file is configured but the keyring did not come from it; refusing to fall back to legacy signing keys")
+	}
+	if err := keyringReleaseCheck(k); err != nil {
 		return err
 	}
 	if legacy, _ := k.Signing().LegacySecret(); cfg.SharedSigningSecret != legacy {
