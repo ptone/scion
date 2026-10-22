@@ -700,6 +700,13 @@ func (s *Server) handleAuthValidate(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, AuthValidateResponse{Valid: false})
 			return
 		}
+		// Same session generation rule as the middleware's row block: any
+		// difference between the token's claim and the row is not valid.
+		if reason := sessionGenerationRefusal(claims.SessionGeneration, u.SessionGeneration); reason != "" {
+			logSessionGenerationRefusal(r.Context(), "auth_validate", claims.UserID, claims.SessionGeneration, u.SessionGeneration, reason)
+			writeJSON(w, http.StatusOK, AuthValidateResponse{Valid: false})
+			return
+		}
 		// Same admin-kind rule as the middleware's row block.
 		_, reason, kErr := testAdminRowRejection(r.Context(), s.kindForPrincipal,
 			func(kind string) bool { return s.testAdminTierEnabled(testAdminKind(kind)) },

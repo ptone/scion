@@ -524,3 +524,33 @@ func TestSessionGen_AuthRefresh_StoreFault_FailsClosed(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "store_error")
 	assert.NotContains(t, rec.Body.String(), "accessToken")
 }
+
+// postValidate calls POST /api/v1/auth/validate for token.
+func (f *sessionGenFixture) postValidate(t *testing.T, token string) AuthValidateResponse {
+	t.Helper()
+	rec := doRequestNoAuth(t, f.srv, http.MethodPost, "/api/v1/auth/validate", AuthValidateRequest{Token: token})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp AuthValidateResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
+	return resp
+}
+
+// Fails if the session generation check is removed from POST
+// /api/v1/auth/validate: a token minted before the revoke, or one whose
+// claim is ahead of the row, would be reported valid.
+func TestSessionGen_AuthValidate_RevokedToken_Invalid(t *testing.T) {
+	f := newSessionGenFixture(t)
+	access, _ := f.mintPair(t, 0, ClientTypeCLI)
+	require.True(t, f.postValidate(t, access).Valid, "valid before the revoke")
+	row := f.revoke(t)
+
+	resp := f.postValidate(t, access)
+	assert.False(t, resp.Valid, "a token behind the row is not valid")
+	assert.Nil(t, resp.User)
+
+	ahead, _ := f.mintPair(t, row+1, ClientTypeWeb)
+	assert.False(t, f.postValidate(t, ahead).Valid, "a token ahead of the row is not valid")
+
+	current, _ := f.mintPair(t, row, ClientTypeWeb)
+	assert.True(t, f.postValidate(t, current).Valid, "a token at the row's generation is valid")
+}
