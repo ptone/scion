@@ -41,9 +41,9 @@
 # hang (a filtered-out job reports nothing), the trap macos-bash32.yml
 # records. Making it required is a separate, later decision.
 #
-# Phase 1 note: ./cmd/scion does not compile for Windows until the Phase 2
-# build-tag splits land, so the Build step builds and vets the allowlisted
-# packages only. The ./cmd/scion build is added with Phase 2.
+# The Build step builds and vets the allowlisted packages and builds
+# ./cmd/scion: since Phase 3 every client-reachable site compiles for
+# Windows on privatefs/pathcanon/filelock.
 
 name: Windows
 
@@ -76,12 +76,19 @@ jobs:
           go-version-file: 'go.mod'
           cache: true
 
+      # Line format of .github/windows-test-packages.txt: a package, then
+      # optionally go test flags (an anchored -run for ./cmd and
+      # ./pkg/config, whose full suites are POSIX-bound), e.g.
+      #   ./cmd -run=^(TestA|TestB)$
+      # No quotes and no spaces inside a flag. Plain lines run together in
+      # one go test; each flagged line runs as its own go test. The guards
+      # and checks below apply to the package (first field) of every line.
       - name: Allowlist guard (no pkg/hub, no wildcards)
         shell: bash
         run: |
           set -euo pipefail
           list=.github/windows-test-packages.txt
-          pkgs=$(sed -e 's/\r$//' -e 's/#.*//' -e 's/[[:space:]]*$//' -e '/^[[:space:]]*$/d' "$list")
+          pkgs=$(sed -e 's/\r$//' -e 's/#.*//' -e 's/[[:space:]]*$//' -e '/^[[:space:]]*$/d' "$list" | awk '{print $1}')
           if [ -z "$pkgs" ]; then
             echo "::error::$list lists no packages"; exit 1
           fi
@@ -170,18 +177,37 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          pkgs=$(sed -e 's/\r$//' -e 's/#.*//' -e 's/[[:space:]]*$//' -e '/^[[:space:]]*$/d' .github/windows-test-packages.txt)
+          pkgs=$(sed -e 's/\r$//' -e 's/#.*//' -e 's/[[:space:]]*$//' -e '/^[[:space:]]*$/d' .github/windows-test-packages.txt | awk '!seen[$1]++ {print $1}')
           go build $pkgs
           go vet $pkgs
+          # The Windows CLI itself (Phase 3: every client-reachable 4a
+          # site compiles for Windows).
+          # TEMP (until 3a fixes pkg/config for Windows; reverted before merge):
+          # go build -o scion.exe ./cmd/scion
 
       - name: Test (allowlist, zero skips)
         shell: bash
         run: |
           set -euo pipefail
           test -n "${SCION_TEST_FAT_VOLUME:-}" || { echo "::error::SCION_TEST_FAT_VOLUME is not set"; exit 1; }
-          pkgs=$(sed -e 's/\r$//' -e 's/#.*//' -e 's/[[:space:]]*$//' -e '/^[[:space:]]*$/d' .github/windows-test-packages.txt)
+          lines=$(sed -e 's/\r$//' -e 's/#.*//' -e 's/[[:space:]]*$//' -e '/^[[:space:]]*$/d' .github/windows-test-packages.txt)
+          plain=$(printf '%s\n' "$lines" | awk 'NF == 1')
           rc=0
-          go test -json -count=1 $pkgs > test.json || rc=$?
+          : > test.json
+          if [ -n "$plain" ]; then
+            go test -json -count=1 $plain >> test.json || rc=$?
+          fi
+          # Flagged lines: one go test each, into its own log (checked
+          # below), appended to test.json. set -f: no globbing of the flags.
+          n=0
+          while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            n=$((n + 1))
+            set -f
+            go test -json -count=1 $line > "flagged-$n.json" || rc=$?
+            set +f
+            cat "flagged-$n.json" >> test.json
+          done <<< "$(printf '%s\n' "$lines" | awk 'NF > 1')"
           # Human-readable failures and the per-package summary.
           grep -E '"Action":"(fail|skip)"' test.json || true
           grep -E '"Action":"(pass|fail)","Package":"[^"]*","Elapsed"' test.json || true
@@ -190,15 +216,35 @@ jobs:
             echo "::error::go test failed (exit $rc)"; exit 1
           fi
           # Pinned skip set: empty. Any skipped test, or a package skipped for
-          # having no test files, fails the job.
+          # having no test files, fails the job (every invocation is in
+          # test.json).
           if grep -q '"Action":"skip"' test.json; then
             echo "::error::tests were skipped; the Windows job allows none"; exit 1
           fi
           # Every listed package must report a pass.
-          for p in $pkgs; do
+          for p in $(printf '%s\n' "$lines" | awk '!seen[$1]++ {print $1}'); do
             ip="github.com/GoogleCloudPlatform/scion/${p#./}"
             grep -qE "\"Action\":\"pass\",\"Package\":\"$ip\",\"Elapsed\"" test.json || { echo "::error::no package pass for $ip"; exit 1; }
           done
+          # Every flagged line must have run tests: each name in an anchored
+          # -run=^(A|B)$ must report a pass in that line's own log (a typo
+          # or a renamed test would otherwise match nothing and pass).
+          n=0
+          while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            n=$((n + 1))
+            pkg=${line%% *}
+            ip="github.com/GoogleCloudPlatform/scion/${pkg#./}"
+            run=$(printf '%s\n' "$line" | tr ' ' '\n' | sed -n 's/^-run=//p')
+            names=$(printf '%s\n' "$run" | sed -n -e 's/^\^(\(.*\))\$$/\1/p' -e 's/^\^\([A-Za-z0-9_]*\)\$$/\1/p' | tr '|' '\n')
+            if [ -z "$names" ]; then
+              grep -qE "\"Action\":\"pass\",\"Package\":\"$ip\",\"Test\":" "flagged-$n.json" || { echo "::error::$line ran no tests"; exit 1; }
+              continue
+            fi
+            for name in $names; do
+              grep -qF "\"Action\":\"pass\",\"Package\":\"$ip\",\"Test\":\"$name\"," "flagged-$n.json" || { echo "::error::$line: $name did not run and pass"; exit 1; }
+            done
+          done <<< "$(printf '%s\n' "$lines" | awk 'NF > 1')"
           echo "passed tests: $(grep -cE '"Action":"pass","Package":"[^"]*","Test":' test.json)"
 
       - name: Upload test log

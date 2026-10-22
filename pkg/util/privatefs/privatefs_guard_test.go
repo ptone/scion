@@ -50,40 +50,82 @@ func repoRoot(t *testing.T) string {
 	}
 }
 
-// windowsTestPackages reads .github/windows-test-packages.txt: one package
-// per line, '#' starts a comment.
-func windowsTestPackages(t *testing.T, root string) []string {
+// allowEntry is one line of .github/windows-test-packages.txt: a package
+// and, for a line with an anchored -run (./cmd, ./pkg/config), the test
+// names that run on Windows. names is nil for a whole-package line.
+type allowEntry struct {
+	pkg   string
+	names map[string]bool
+}
+
+// windowsTestEntries reads .github/windows-test-packages.txt: one package
+// per line, optionally followed by go test flags, '#' starts a comment. A
+// flagged line must carry -run=^(A|B|...)$ or -run=^A$ (anchored names),
+// which windows.yml also requires to run and pass.
+func windowsTestEntries(t *testing.T, root string) []allowEntry {
 	t.Helper()
 	f, err := os.Open(filepath.Join(root, ".github", "windows-test-packages.txt"))
 	if err != nil {
 		t.Fatalf("read the Windows test allowlist: %v", err)
 	}
 	defer func() { _ = f.Close() }()
-	var pkgs []string
+	var out []allowEntry
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		line := strings.TrimSpace(strings.TrimSuffix(sc.Text(), "\r"))
 		if i := strings.IndexByte(line, '#'); i >= 0 {
 			line = strings.TrimSpace(line[:i])
 		}
-		if line != "" {
-			pkgs = append(pkgs, line)
+		if line == "" {
+			continue
 		}
+		fields := strings.Fields(line)
+		e := allowEntry{pkg: fields[0]}
+		for _, fl := range fields[1:] {
+			run, ok := strings.CutPrefix(fl, "-run=")
+			if !ok {
+				continue
+			}
+			body, ok := strings.CutPrefix(run, "^")
+			if ok {
+				body, ok = strings.CutSuffix(body, "$")
+			}
+			if ok && strings.HasPrefix(body, "(") && strings.HasSuffix(body, ")") {
+				body = body[1 : len(body)-1]
+			}
+			if !ok || body == "" || strings.ContainsAny(body, "()^$.*+?[]{}\\") {
+				t.Fatalf("allowlist line %q: -run must be anchored names, ^(A|B)$ or ^A$", line)
+			}
+			e.names = map[string]bool{}
+			for _, n := range strings.Split(body, "|") {
+				e.names[n] = true
+			}
+		}
+		if len(fields) > 1 && e.names == nil {
+			t.Fatalf("allowlist line %q: flags without an anchored -run", line)
+		}
+		out = append(out, e)
 	}
 	if err := sc.Err(); err != nil {
 		t.Fatal(err)
 	}
-	return pkgs
+	return out
 }
 
 // skipOnLinkPath reports, per top-level function in src, whether it both
 // creates a symlink or junction (os.Symlink, MustSymlink, MustJunction, or
 // a "mklink" string) and can skip (t.Skip, t.Skipf, t.SkipNow, or a
 // testing.Short() check). It also returns how many functions create links.
-func skipOnLinkPath(fset *token.FileSet, file *ast.File) (offenders []string, linkFuncs int) {
+//
+// keep, when not nil, limits the check to the functions it accepts (the
+// tests an anchored allowlist line runs on Windows, and every helper).
+func skipOnLinkPath(fset *token.FileSet, file *ast.File, keep func(name string) bool) (offenders []string, linkFuncs int) {
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Body == nil {
+			continue
+		}
+		if keep != nil && !keep(fn.Name.Name) {
 			continue
 		}
 		links, skips := false, false
@@ -140,22 +182,42 @@ func TestUnrelatedSkip(t *testing.T) { t.Skip("no link here") }
 	if err != nil {
 		t.Fatal(err)
 	}
-	if off, n := skipOnLinkPath(fset, f); len(off) != 2 || n != 3 {
+	if off, n := skipOnLinkPath(fset, f, nil); len(off) != 2 || n != 3 {
 		t.Fatalf("detector on the sample: offenders %v, link functions %d; want TestBad and TestShort, 3", off, n)
+	}
+	// An anchored line checks only its named tests and the helpers.
+	if off, n := skipOnLinkPath(fset, f, func(name string) bool { return name == "TestGood" || name == "TestBad" }); len(off) != 1 || n != 2 {
+		t.Fatalf("detector on the sample, limited to TestGood and TestBad: offenders %v, link functions %d; want TestBad, 2", off, n)
 	}
 
 	root := repoRoot(t)
-	pkgs := windowsTestPackages(t, root)
-	if len(pkgs) == 0 {
+	entries := windowsTestEntries(t, root)
+	if len(entries) == 0 {
 		t.Fatal("the Windows test allowlist is empty")
 	}
-	dirs := map[string]bool{filepath.Join(root, "internal", "testutil", "wintest"): true}
+	// dirs maps a package directory to the test names run on Windows; nil
+	// means the whole package (a plain line wins over anchored ones).
+	dirs := map[string]map[string]bool{filepath.Join(root, "internal", "testutil", "wintest"): nil}
 	self := false
-	for _, p := range pkgs {
+	for _, e := range entries {
+		p := e.pkg
 		if strings.Contains(p, "...") {
 			t.Fatalf("allowlist line %q: wildcards are not allowed", p)
 		}
-		dirs[filepath.Join(root, filepath.FromSlash(p))] = true
+		d := filepath.Join(root, filepath.FromSlash(p))
+		names, seen := dirs[d]
+		switch {
+		case e.names == nil:
+			dirs[d] = nil
+		case !seen:
+			dirs[d] = map[string]bool{}
+			names = dirs[d]
+			fallthrough
+		case names != nil:
+			for n := range e.names {
+				names[n] = true
+			}
+		}
 		if filepath.ToSlash(p) == "./pkg/util/privatefs" {
 			self = true
 		}
@@ -165,7 +227,13 @@ func TestUnrelatedSkip(t *testing.T) { t.Skip("no link here") }
 	}
 	var offenders []string
 	linkFuncs := 0
-	for dir := range dirs {
+	for dir, names := range dirs {
+		var keep func(string) bool
+		if names != nil {
+			// Anchored: only the named tests run on Windows; helpers are
+			// always checked.
+			keep = func(n string) bool { return !strings.HasPrefix(n, "Test") || names[n] }
+		}
 		files, err := filepath.Glob(filepath.Join(dir, "*.go"))
 		if err != nil {
 			t.Fatal(err)
@@ -182,7 +250,7 @@ func TestUnrelatedSkip(t *testing.T) { t.Skip("no link here") }
 			if err != nil {
 				t.Fatal(err)
 			}
-			off, n := skipOnLinkPath(fset, f)
+			off, n := skipOnLinkPath(fset, f, keep)
 			offenders = append(offenders, off...)
 			linkFuncs += n
 		}
