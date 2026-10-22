@@ -49,6 +49,13 @@
 - **F6/F7/F8, fixed.** F5 was relayed to 3a by the EM. F3 is the final-round gate.
 - **The vscode `.lock` file: A1 does not apply** (win-cli-em ruling, 2026-10-22 01:33Z, recorded for the security lead's sign-off). It is a filelock lock file. It is opened with write access only for `LockFileEx`, and no data is ever written to it. Per design §3.2: no secret sits behind the lock (dependency 3), and the leaf is opened no-follow and checked on the handle (dependency 2). filelock is not changed.
 
+## Review r2 and security-lead rulings
+
+- **F1 (item (d)), fixed.** In a FollowLinks tree every existing directory component below the anchor must pass `CheckNoForeignWriters` on its handle. Only components created during the current walk skip the check. The skip is keyed on creation, never on a name.
+- **No side effect on refusal.** `Tree.MkdirAllEach` verifies every directory of a call before it creates any. Tests snapshot home and the target and require both to be unchanged after a refusal.
+- **Ancestor chain: accepted as a residual, with a warning** (security-lead ruling). A followed directory link whose target's parent is writable by another principal gets one warning (`TreeOptions.Warn`, diagnostic only). The stated limit: rule I protects the target, not the mutability of the path to it.
+- **F3/F4 fixed.** The `sshShellUnquote` unix delta is listed in the PR. The guard comment now says the handle-relative walk is Windows-only.
+
 ## Open issues
 
 - **The cmd Windows tests wait for 3a.** pkg/config does not compile for Windows until 3a's C9 lands (`legacy_grove_migration.go:306`). A TEMP commit keeps `./cmd` out of the Windows job. Merge order is 3a first; then I rebase and drop the TEMP commit.
