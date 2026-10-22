@@ -245,3 +245,66 @@ func TestRequestLogMiddleware_RedactsPortViewReferer(t *testing.T) {
 		t.Fatalf("request log missing the redacted referer: %s", out)
 	}
 }
+
+// TestCredentialLinkInQueryRedacted: a query (or fragment) that names a
+// page or artifact link, in any spelling, is replaced whole, the path is
+// kept, and the request is not traced.
+func TestCredentialLinkInQueryRedacted(t *testing.T) {
+	const tok = "v1.SECRETLINK"
+	queries := []string{
+		"next=/api/v1/portview/" + tok + "/x",
+		"next=https://hub.example/api/v1/portview/" + tok + "/x&a=1",
+		"next=%2Fapi%2Fv1%2Fportview%2F" + tok,
+		"next=%252Fapi%252Fv1%252F%2570ortview%252F" + tok,
+		"u=https%3A%2F%2Fhub.example%2Fapi%2Fv1%2Fartifacts%2Fview%2F" + tok,
+		"a=1&PORTVIEW=" + tok,
+	}
+	for _, q := range queries {
+		if got := RedactQuery(q); got != "REDACTED" {
+			t.Errorf("RedactQuery(%q) = %q", q, got)
+		}
+		u, err := url.Parse("https://hub.example/api/v1/agents?" + q)
+		if err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+		if got := RedactURL(u); got != "https://hub.example/api/v1/agents?REDACTED" {
+			t.Errorf("RedactURL(%s) = %q", q, got)
+		}
+		if !IsCredentialURL(u) {
+			t.Errorf("IsCredentialURL(%s) = false", q)
+		}
+		r := httptest.NewRequest(http.MethodGet, "/api/v1/agents?"+q, nil)
+		if got := RequestPath(r); got != "/api/v1/agents" {
+			t.Errorf("RequestPath(%s) = %q", q, got)
+		}
+		if got := RedactReferer("https://hub.example/web/x?" + q); strings.Contains(got, "SECRETLINK") {
+			t.Errorf("RedactReferer(%s) = %q", q, got)
+		}
+	}
+	u, _ := url.Parse("https://hub.example/web/x#/api/v1/portview/" + tok)
+	if got := RedactURL(u); strings.Contains(got, "SECRETLINK") {
+		t.Errorf("RedactURL with a link in the fragment = %q", got)
+	}
+	plain, _ := url.Parse("https://hub.example/api/v1/agents?limit=5")
+	if IsCredentialURL(plain) || RedactURL(plain) != "https://hub.example/api/v1/agents?limit=5" {
+		t.Errorf("a plain query changed: %q", RedactURL(plain))
+	}
+}
+
+// TestRequestLogMiddleware_RedactsLinkInQuery: a request whose query holds
+// a page link is logged without it.
+func TestRequestLogMiddleware_RedactsLinkInQuery(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	handler := RequestLogMiddleware(logger, "hub", HubPathPatterns(), 0)(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet,
+		"/api/v1/agents?next=%2Fapi%2Fv1%2Fportview%2Fv1.SECRETLINK%2Fx", nil))
+	out := buf.String()
+	if strings.Contains(out, "SECRETLINK") {
+		t.Fatalf("request log holds the page link: %s", out)
+	}
+	if !strings.Contains(out, `/api/v1/agents?REDACTED`) {
+		t.Fatalf("request log missing the redacted URL: %s", out)
+	}
+}

@@ -130,7 +130,7 @@ func navHeader() http.Header {
 	return http.Header{"Sec-Fetch-Mode": {"navigate"}, "Accept": {"text/html,application/xhtml+xml"}}
 }
 
-// subHeader is what a sandboxed page sends for a module script or fetch.
+// subHeader is what a proxied page sends for a module script or fetch.
 func subHeader() http.Header {
 	return http.Header{"Sec-Fetch-Mode": {"cors"}, "Origin": {"null"}, "Accept": {"*/*"}}
 }
@@ -193,7 +193,7 @@ func TestPortView_PortLinkRedirectsAndServes(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, portview.Grant{AgentID: f.launched.ID, Port: f.app.port, UserID: f.launched.OwnerID, Expires: g.Expires}, g)
 
-	// A sub-request from the sandboxed page: no cookie, no bearer.
+	// A sub-request of the page, with no credential.
 	served := f.send(t, http.MethodGet, view.String(), subHeader(), nil)
 	require.Equal(t, http.StatusOK, served.status, served.body)
 	assert.Equal(t, "hello /dir/index.html?a=1&b=two", served.body)
@@ -448,6 +448,29 @@ func TestPortView_UniformFailure(t *testing.T) {
 	assert.Equal(t, 1, n, "only the one valid request reached the app")
 }
 
+// TestPortView_LinkWithoutTrailingSlash: GET of a valid link without the
+// trailing slash answers 308 to "<link>/" with the query kept; a failed
+// link without it, and any other method, get the single 404.
+func TestPortView_LinkWithoutTrailingSlash(t *testing.T) {
+	f := newPortViewFixture(t, nil)
+	f.startAgent(t)
+	valid := f.ownerCap()
+	bare := f.base + portview.Route + valid + "?a=1"
+	res := f.send(t, http.MethodGet, bare, subHeader(), nil)
+	require.Equal(t, http.StatusPermanentRedirect, res.status, res.body)
+	assert.Equal(t, "no-store", res.header.Get("Cache-Control"))
+	got := resolveLocation(t, bare, res)
+	assert.Equal(t, f.viewURL(valid, "?a=1"), got.String())
+	served := f.send(t, http.MethodGet, got.String(), subHeader(), nil)
+	require.Equal(t, http.StatusOK, served.status, served.body)
+	assert.Equal(t, "hello /?a=1", served.body)
+
+	expired := f.capFor(f.launched.OwnerID, f.app.port, time.Now().Add(-time.Second))
+	requirePortViewInvalid(t, f.send(t, http.MethodGet, f.base+portview.Route+expired, subHeader(), nil))
+	// Other methods get the single 404.
+	requirePortViewInvalid(t, f.send(t, http.MethodPost, f.base+portview.Route+valid, subHeader(), strings.NewReader("x")))
+}
+
 // TestPortView_PortNotExposed: a valid capability for a port the agent
 // does not expose gets the port link's port-not-available answer.
 func TestPortView_PortNotExposed(t *testing.T) {
@@ -634,10 +657,10 @@ func TestPortView_Preflight(t *testing.T) {
 	}
 }
 
-// TestPortView_ResponsePolicy: the app's own cookie, CSP, nosniff,
-// Clear-Site-Data, CORS and Referrer-Policy headers are dropped; the hub
-// sets the sandbox policy, nosniff, no referrer and "*" once each, never
-// Access-Control-Allow-Credentials; Cache-Control defaults to private.
+// TestPortView_ResponsePolicy: the app's Set-Cookie,
+// Content-Security-Policy, X-Content-Type-Options, Clear-Site-Data,
+// Access-Control-* and Referrer-Policy headers are replaced by the hub's,
+// each sent once; Cache-Control defaults to private.
 func TestPortView_ResponsePolicy(t *testing.T) {
 	app := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
@@ -912,8 +935,10 @@ func TestPortView_LogsNeverHoldTheLink(t *testing.T) {
 		f.send(t, http.MethodGet, f.viewURL(foreign, "a.js"), h(subHeader()), nil)
 		f.send(t, http.MethodOptions, f.viewURL(valid, "a.js"), h(http.Header{"Origin": {"null"}, "Access-Control-Request-Method": {"GET"}}), nil)
 		f.send(t, http.MethodGet, f.viewURL(valid, "a.js"), h(withBearer(navHeader(), f.strangerToken)), nil)
-		// Another hub route, requested by the page with the link as Referer.
+		// Another hub route, requested by the page with the link as Referer,
+		// and with the link in its query.
 		f.send(t, http.MethodGet, b+"/api/v1/agents", h(subHeader()), nil)
+		f.send(t, http.MethodGet, b+"/api/v1/agents?next="+url.QueryEscape(f.viewURL(valid, "x")), h(subHeader()), nil)
 	}
 	// A transport error: the port answers nothing.
 	f.app.srv.Close()

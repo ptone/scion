@@ -313,7 +313,7 @@ var compiled = []Experiment{
 	{
 		Name:        PortView,
 		Title:       "Port page view",
-		Description: "Opening an agent's exposed port from the hub serves the page through a short-lived page link, so its relative scripts (including modules), styles, images, same-app requests and WebSockets work. Pages stay in the browser sandbox: URLs that start with /, browser storage, cookies and workers do not work. The link lasts server.hub.port_proxy.view_ttl (default 2h); opening the port from the hub again gives a new one. Conduit transport only in this release. Gates the hub's port link redirect and the /api/v1/portview/ route (LayerServer), which answers 404 while it is off. Do not turn it on behind an authenticating front proxy (for example IAP) yet.",
+		Description: "Opening an agent's exposed port from the hub serves the page through a short-lived page link, so its relative scripts (including modules), styles, images, same-app requests and WebSockets work. Pages opened this way can only use relative URLs: URLs that start with / do not work. Browser storage, cookies and web workers are not available to the page. The link lasts server.hub.port_proxy.view_ttl (default 2h); opening the port from the hub again gives a new one. Conduit transport only in this release. Gates the hub's port link redirect and the /api/v1/portview/ route (LayerServer), which answers 404 while it is off. Do not turn it on behind an authenticating front proxy (for example IAP) yet.",
 		Default:     false,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,

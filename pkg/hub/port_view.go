@@ -191,7 +191,8 @@ func setPortViewResponseHeaders(w http.ResponseWriter) {
 //     see portview.IsNavigation);
 //  5. the agent, the user's account and the user's port access, as an
 //     identity limited to port access in the agent's project;
-//  6. the exposed port, then the proxy, as that identity.
+//  6. the exposed port, the trailing-slash redirect, then the proxy, as
+//     that identity.
 //
 // Any other request that fails 2, 3 or 5 gets writePortViewInvalid. The
 // identity in the request context, if any, is read only by step 4.
@@ -207,7 +208,7 @@ func (s *Server) handlePortView(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rest := r.URL.Path[len(portview.Route):]
-	capability, sub, _ := strings.Cut(rest, "/")
+	capability, sub, hasSlash := strings.Cut(rest, "/")
 	_, escSub, _ := strings.Cut(r.URL.EscapedPath()[len(portview.Route):], "/")
 	key, now, ttl := s.portViewSigningKey(), s.portViewNow(), s.portViewTTL()
 
@@ -264,6 +265,24 @@ func (s *Server) handlePortView(w http.ResponseWriter, r *http.Request) {
 	exposed := findExposedPort(agent.ExposedPorts, grant.Port)
 	if exposed == nil {
 		writePortNotExposed(w, r)
+		return
+	}
+	// The link without a trailing slash: GET and HEAD are answered with a
+	// redirect to "<capability>/", so the page's relative URLs resolve
+	// inside the link, as the port link does for .../proxy; every other
+	// request gets writePortViewInvalid.
+	if !hasSlash {
+		if (r.Method != http.MethodGet && r.Method != http.MethodHead) || isWebSocketUpgrade(r) {
+			writePortViewInvalid(w)
+			return
+		}
+		loc := capability + "/"
+		if r.URL.RawQuery != "" {
+			loc += "?" + encodeLocationQuery(r.URL.RawQuery)
+		}
+		w.Header().Set("Location", loc)
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusPermanentRedirect)
 		return
 	}
 	s.proxyToAgentPort(w, r, identity, agent, exposed, "/"+sub, portProxyPolicy{

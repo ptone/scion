@@ -242,7 +242,7 @@ test('journey 3: a page using a root-relative script does not run it', async () 
   await page.close();
 });
 
-test('journey 4: the page has no hub session, cookies or storage', async () => {
+test('journey 4: what the page can reach', async () => {
   expect(memberIndex).not.toBe('');
   const { page } = await open('member', memberIndex);
   await expect(page.locator('#probe')).toHaveText('ok', { timeout: 20_000 });

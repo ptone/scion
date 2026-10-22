@@ -33,11 +33,14 @@ var credentialQueryParams = map[string]bool{
 
 // RedactQuery returns rawQuery with the values of credential-bearing
 // parameters replaced by REDACTED. Other parameters, and their order, are
-// preserved. A query that cannot be parsed is dropped entirely rather than
-// risk logging a credential.
+// preserved. A query that cannot be parsed, or that names an artifact or
+// port view URL (credentialQuery), is replaced whole by REDACTED.
 func RedactQuery(rawQuery string) string {
 	if rawQuery == "" {
 		return ""
+	}
+	if credentialQuery(rawQuery) {
+		return redactedValue
 	}
 	parts := strings.Split(rawQuery, "&")
 	for i, p := range parts {
@@ -97,6 +100,13 @@ func pathMentions(p, word string) bool {
 	return strings.Contains(s, word)
 }
 
+// credentialQuery reports whether a raw query may carry an artifact or port
+// view URL: the same any-spelling rule as artifactPath and portViewPath,
+// applied to the whole query.
+func credentialQuery(rawQuery string) bool {
+	return pathMentions(rawQuery, "artifacts") || pathMentions(rawQuery, "portview")
+}
+
 // isArtifactURL applies artifactPath to both forms of u's path: the
 // decoded path and the escaped path the router may see.
 func isArtifactURL(u *url.URL) bool {
@@ -121,10 +131,13 @@ func redactedPath(u *url.URL) string {
 }
 
 // IsCredentialURL reports whether a request for u must not be recorded
-// with its path, for example in a trace: an artifact path (artifactPath)
-// or a port view path (portViewPath). It shares its predicate with
-// RequestPath and RedactURL.
-func IsCredentialURL(u *url.URL) bool { return redactedPath(u) != "" }
+// with its path or query, for example in a trace: an artifact path
+// (artifactPath), a port view path (portViewPath), or a query that names
+// either (credentialQuery). It shares its predicates with RequestPath,
+// RedactQuery and RedactURL.
+func IsCredentialURL(u *url.URL) bool {
+	return redactedPath(u) != "" || (u != nil && credentialQuery(u.RawQuery))
+}
 
 // RequestPath returns r's URL path for a log line: RedactedArtifactPath
 // for any request under the artifact routes, RedactedPortViewPath for any
@@ -141,8 +154,8 @@ func RequestPath(r *http.Request) string {
 	return r.URL.Path
 }
 
-// RedactURL returns u as a string with credential-bearing query parameter
-// values redacted (see RedactQuery) and, for an artifact or port view
+// RedactURL returns u as a string with its query redacted (see
+// RedactQuery) and, for an artifact or port view
 // request (see RequestPath), the path replaced by its redacted form. u is
 // not modified.
 func RedactURL(u *url.URL) string {
@@ -151,6 +164,9 @@ func RedactURL(u *url.URL) string {
 	}
 	c := *u
 	c.RawQuery = RedactQuery(u.RawQuery)
+	if credentialQuery(u.EscapedFragment()) {
+		c.Fragment, c.RawFragment = redactedValue, ""
+	}
 	if p := redactedPath(u); p != "" {
 		c.Path, c.RawPath = p, ""
 	}
