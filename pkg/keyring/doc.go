@@ -35,6 +35,15 @@
 // unexported fields: keep them inside the cookie store and never print them.
 // Keys held in closures are never reflect.DeepEqual; compare by ID and Bytes.
 //
+// Fail-closed rule (part of the contract): a ring is usable only when its
+// active ID names one of its entries. A nil, zero or empty ring, or one with
+// a dangling active ID, is treated as empty by every accessor:
+// SigningRing.Active returns ErrNoActiveGeneration; Generations, Candidates
+// (for any kid), IDs and LegacySecret return nothing; CookieCodecs refuses;
+// EncryptionRing.Active has no bytes and Candidates returns nothing. Every
+// exported accessor of SigningRing, EncryptionRing and Keyring accepts a nil
+// receiver and returns zero values ("" or nil) and no material.
+//
 // Design: ptone/scion#1530 ("Safe rotation of the Hub server secret"),
 // §1-§3. This release uses the signing ring for web session cookies only
 // (Phase 1); every other purpose still uses the ring's "legacy" entry.

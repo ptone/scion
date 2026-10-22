@@ -86,10 +86,25 @@ func TestRingsWithoutActiveFailClosed(t *testing.T) {
 			if codecs, err := CookieCodecs(r, sessionHash, sessionBlock, 86400, nil); !errors.Is(err, ErrNoActiveGeneration) || codecs != nil {
 				t.Fatalf("CookieCodecs = %v, %v; want refusal", codecs, err)
 			}
+			for _, kid := range []string{"gen1", "nope", "legacy"} {
+				if c := r.Candidates(sessionHash, kid, t0); len(c) != 0 {
+					t.Fatalf("Candidates(%q) = %v", kid, c)
+				}
+			}
+			if ids := r.IDs(); ids != nil {
+				t.Fatalf("IDs = %v", ids)
+			}
 		})
 	}
 	var nilEnc *EncryptionRing
-	for name, e := range map[string]*EncryptionRing{"nil": nilEnc, "zero": {}} {
+	for name, e := range map[string]*EncryptionRing{
+		"nil":             nilEnc,
+		"zero":            {},
+		"dangling active": {active: "nope", entries: []encryptionEntry{{id: "legacy", key: newMaterial([]byte(fixtureOtherEncKey))}}},
+	} {
+		if ids := e.IDs(); ids != nil {
+			t.Fatalf("%s encryption ring: IDs = %v", name, ids)
+		}
 		if b := e.Active().Bytes(); b != nil {
 			t.Fatalf("%s encryption ring: Active has bytes", name)
 		}
@@ -99,6 +114,20 @@ func TestRingsWithoutActiveFailClosed(t *testing.T) {
 		if c := e.Candidates("legacy"); len(c) != 0 {
 			t.Fatalf("%s encryption ring: Candidates(legacy) = %v", name, c)
 		}
+	}
+	// Nil receivers on every exported accessor: zero values, no panic.
+	var nk *Keyring
+	if nk.Source() != "" || nk.Revision() != "" || nk.Signing() != nil || nk.Encryption() != nil {
+		t.Fatal("nil Keyring accessors must return zero values")
+	}
+	if nilRing.ActiveID() != "" || nilRing.Emit() != "" || nilEnc.ActiveID() != "" || nilEnc.WriteFormat() != "" {
+		t.Fatal("nil ring accessors must return zero values")
+	}
+	if _, err := nk.Signing().Active(sessionHash, t0); !errors.Is(err, ErrNoActiveGeneration) {
+		t.Fatalf("nil Keyring signing Active = %v", err)
+	}
+	if nk.Encryption().Active().Bytes() != nil {
+		t.Fatal("nil Keyring encryption key has bytes")
 	}
 }
 

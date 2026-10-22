@@ -200,6 +200,18 @@ type SigningRing struct {
 	legacyReads []string       // file order
 }
 
+// usable reports whether the ring has an active entry. Every accessor that
+// yields keys or IDs treats a ring that is not usable (nil, zero, empty or
+// with a dangling active ID) as empty: one fail-closed rule for the
+// contract phases 2-5 build on.
+func (r *SigningRing) usable() bool {
+	if r == nil {
+		return false
+	}
+	_, ok := r.entry(r.active)
+	return ok
+}
+
 func (r *SigningRing) entry(id string) (signingEntry, bool) {
 	for _, e := range r.entries {
 		if e.id == id {
@@ -219,15 +231,25 @@ func (e signingEntry) key(p Purpose) SigningKey {
 }
 
 // ActiveID is the active generation's ID.
-func (r *SigningRing) ActiveID() string { return r.active }
+func (r *SigningRing) ActiveID() string {
+	if r == nil {
+		return ""
+	}
+	return r.active
+}
 
 // Emit is the configured signing wire-format selection.
-func (r *SigningRing) Emit() Emit { return r.emit }
+func (r *SigningRing) Emit() Emit {
+	if r == nil {
+		return ""
+	}
+	return r.emit
+}
 
 // IDs returns every generation ID, active first, then file order (nil for
 // a nil ring).
 func (r *SigningRing) IDs() []string {
-	if r == nil || len(r.entries) == 0 {
+	if !r.usable() {
 		return nil
 	}
 	out := []string{r.active}
@@ -264,7 +286,7 @@ func (r *SigningRing) Active(p Purpose, now time.Time) (SigningKey, error) {
 // configured legacy_read_ids, in file order, each while now is before its
 // verify_until.
 func (r *SigningRing) Candidates(p Purpose, kid string, now time.Time) []SigningKey {
-	if r == nil {
+	if !r.usable() {
 		return nil
 	}
 	var ids []string
@@ -291,10 +313,7 @@ func (r *SigningRing) Candidates(p Purpose, kid string, now time.Time) []Signing
 // build one verifier per generation at startup and enforce the deadlines
 // on every use (the session cookie codecs).
 func (r *SigningRing) Generations(p Purpose) []SigningKey {
-	if r == nil {
-		return nil
-	}
-	if _, ok := r.entry(r.active); !ok {
+	if !r.usable() {
 		// No active generation: nothing may encode or decode (fail closed).
 		return nil
 	}
@@ -314,7 +333,7 @@ func (r *SigningRing) Generations(p Purpose) []SigningKey {
 // material. Later phases replace its callers; new code must use Active and
 // Candidates.
 func (r *SigningRing) LegacySecret() (string, bool) {
-	if r == nil {
+	if !r.usable() {
 		return "", false
 	}
 	e, ok := r.entry(LegacyID)
@@ -338,6 +357,16 @@ type EncryptionRing struct {
 	legacyReads []string
 }
 
+// usable reports whether the ring has an active entry; see
+// SigningRing.usable.
+func (r *EncryptionRing) usable() bool {
+	if r == nil {
+		return false
+	}
+	_, ok := r.entry(r.active)
+	return ok
+}
+
 func (r *EncryptionRing) entry(id string) (encryptionEntry, bool) {
 	for _, e := range r.entries {
 		if e.id == id {
@@ -348,15 +377,25 @@ func (r *EncryptionRing) entry(id string) (encryptionEntry, bool) {
 }
 
 // ActiveID is the active (writer) key's ID.
-func (r *EncryptionRing) ActiveID() string { return r.active }
+func (r *EncryptionRing) ActiveID() string {
+	if r == nil {
+		return ""
+	}
+	return r.active
+}
 
 // WriteFormat is the configured ciphertext envelope for writes.
-func (r *EncryptionRing) WriteFormat() WriteFormat { return r.writeFormat }
+func (r *EncryptionRing) WriteFormat() WriteFormat {
+	if r == nil {
+		return ""
+	}
+	return r.writeFormat
+}
 
 // IDs returns every key ID, active first, then file order (nil for a nil
 // ring).
 func (r *EncryptionRing) IDs() []string {
-	if r == nil || len(r.entries) == 0 {
+	if !r.usable() {
 		return nil
 	}
 	out := []string{r.active}
@@ -368,10 +407,10 @@ func (r *EncryptionRing) IDs() []string {
 	return out
 }
 
-// Active returns the writer key. A zero or nil ring returns a key with no
-// bytes (Bytes returns nil), which no cipher accepts.
+// Active returns the writer key. A ring that is not usable returns a key
+// with no bytes (Bytes returns nil), which no cipher accepts.
 func (r *EncryptionRing) Active() EncryptionKey {
-	if r == nil {
+	if !r.usable() {
 		return EncryptionKey{}
 	}
 	e, _ := r.entry(r.active)
@@ -382,7 +421,7 @@ func (r *EncryptionRing) Active() EncryptionKey {
 // that key only for a non-empty kid (none if unknown, never a fallback),
 // or the legacy_v1_read_ids for an ID-less enc:v1: value.
 func (r *EncryptionRing) Candidates(kid string) []EncryptionKey {
-	if r == nil {
+	if !r.usable() {
 		return nil
 	}
 	var ids []string
@@ -409,17 +448,37 @@ type Keyring struct {
 }
 
 // Source says whether the keyring came from a file or the legacy adapter.
-func (k *Keyring) Source() Source { return k.source }
+func (k *Keyring) Source() Source {
+	if k == nil {
+		return ""
+	}
+	return k.source
+}
 
 // Revision is the operator's delivery revision ("" for the legacy
 // adapter). It is not secret.
-func (k *Keyring) Revision() string { return k.revision }
+func (k *Keyring) Revision() string {
+	if k == nil {
+		return ""
+	}
+	return k.revision
+}
 
 // Signing is the signing ring.
-func (k *Keyring) Signing() *SigningRing { return k.signing }
+func (k *Keyring) Signing() *SigningRing {
+	if k == nil {
+		return nil
+	}
+	return k.signing
+}
 
 // Encryption is the encryption ring.
-func (k *Keyring) Encryption() *EncryptionRing { return k.encryption }
+func (k *Keyring) Encryption() *EncryptionRing {
+	if k == nil {
+		return nil
+	}
+	return k.encryption
+}
 
 // The rings and the keyring print, log and marshal non-secret
 // identification only (source, revision, IDs). Value receivers, so a
