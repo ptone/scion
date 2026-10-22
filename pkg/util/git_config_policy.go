@@ -50,8 +50,8 @@ import (
 // url.*.insteadOf, http.*, gpg.*, any *.program, alias.*, remote.* upload/
 // receive/proxy/vcs) are never on either list, so deny-by-default refuses
 // them. The read is as-data and does not depend on git's own config
-// resolution, so a subsection containing '=' or quotes cannot slip a key
-// past the check.
+// resolution, so a subsection containing '=' or quotes stays part of the
+// subsection name and the full key is checked.
 
 // RepoConfigPolicy selects the allow-list a host-side git command uses.
 type RepoConfigPolicy int
@@ -103,8 +103,9 @@ func isGitBool(v string) bool {
 }
 
 // validLFSURLSubsection reports whether an lfs.<url>.* subsection is an
-// http(s) URL with no whitespace or control characters — so the
-// subsection is treated as part of the key.
+// http(s) URL with a host and no whitespace or control characters;
+// lfs.<url>.access and lfs.<url>.locksverify are allowed only under such a
+// subsection.
 func validLFSURLSubsection(sub string) bool {
 	if sub == "" {
 		return false
@@ -140,8 +141,8 @@ type repoConfigAllowOptions struct {
 // arbitrary host path, or redirect the network; keys whose value may carry
 // one of those are value-checked. topLevel below means [section] (no
 // subsection) — [section ""] (an empty quoted subsection) is a different
-// section and is treated as subsectioned, so it cannot impersonate a
-// top-level key.
+// section and is treated as subsectioned, so it is checked against the
+// subsectioned rules rather than the top-level ones.
 func allowVar(policy RepoConfigPolicy, v gitConfigVar, opts repoConfigAllowOptions) (bool, string) {
 	sec := v.Section
 	sub := v.Subsection
