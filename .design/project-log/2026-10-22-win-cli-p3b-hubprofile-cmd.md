@@ -47,7 +47,7 @@
   - `/dev/null` is mapped to NUL by Win32-OpenSSH: `misc.c` `w32_fopen_utf8` and `fileio.c` `fileio_open` at openssh-portable latestw_all 274893f8.
   - Win32-OpenSSH runs a ProxyCommand with `posix_spawnp`, not cmd.exe (`sshconnect.c` at the same commit).
 - **F6/F7/F8, fixed.** F5 was relayed to 3a by the EM. F3 is the final-round gate.
-- The vscode `.lock` file is opened with write access only for `LockFileEx`; no byte is ever written to it. It is created through filelock, which 3a owns, so the A1 link-count check is not applied to it.
+- **The vscode `.lock` file: A1 does not apply** (win-cli-em ruling, 2026-10-22 01:33Z, recorded for the security lead's sign-off). It is a filelock lock file. It is opened with write access only for `LockFileEx`, and no data is ever written to it. Per design §3.2: no secret sits behind the lock (dependency 3), and the leaf is opened no-follow and checked on the handle (dependency 2). filelock is not changed.
 
 ## Open issues
 
