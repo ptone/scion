@@ -792,8 +792,10 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 	return ws
 }
 
-// deriveSessionKey deterministically derives a 32-byte key from the shared
-// session secret and a label. The label provides domain separation so the
+// deriveSessionKey deterministically derives a 32-byte key from a
+// generation's signing secret (the shared session secret in legacy mode)
+// and a label; it is the derivation of the web session cookie keys
+// (webSessionHashPurpose, webSessionBlockPurpose). The label provides domain separation so the
 // HMAC authentication key and the AES encryption key differ even though both
 // originate from the same SESSION_SECRET. Every replica configured with the
 // same secret derives identical keys, which is what lets a session cookie
@@ -811,9 +813,13 @@ const webSessionMaxAge = 86400
 // the same labels, so every generation (and the legacy adapter) derives
 // keys exactly as before.
 var (
-	webSessionHashPurpose  = keyring.SHA256LabelPurpose("scion-session-hash")
-	webSessionBlockPurpose = keyring.SHA256LabelPurpose("scion-session-block")
+	webSessionHashPurpose  = sessionKeyPurpose("scion-session-hash")
+	webSessionBlockPurpose = sessionKeyPurpose("scion-session-block")
 )
+
+func sessionKeyPurpose(label string) keyring.Purpose {
+	return keyring.NewPurpose(label, func(secret []byte) []byte { return deriveSessionKey(string(secret), label) })
+}
 
 // resaveUnderActiveGeneration re-saves session when its cookie decoded
 // only under a non-active keyring generation, so the browser gets it back
@@ -1230,9 +1236,10 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 			}
 		}
 
-		// A session read under a non-active keyring generation goes back to
-		// the browser under the active one (once; a refresh above already
-		// saved it under the active generation).
+		// API requests skip sessionAuthMiddleware (isPublicRoute), so this
+		// is their re-save point: a session read under a non-active keyring
+		// generation goes back under the active one (once; a refresh above
+		// already saved it under the active generation).
 		if !saved {
 			ws.resaveUnderActiveGeneration(w, r, session)
 		}
@@ -3520,6 +3527,11 @@ func (ws *WebServer) sessionAuthMiddleware(next http.Handler) http.Handler {
 				Role:      sessionString(session, sessKeyUserRole),
 			}
 			ctx = context.WithValue(ctx, webUserContextKey{}, user)
+			// Every authenticated page and SSR request passes here (API
+			// requests re-save in sessionToBearerMiddleware): a session read
+			// under a non-active keyring generation goes back to the browser
+			// under the active one.
+			ws.resaveUnderActiveGeneration(w, r, session)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}

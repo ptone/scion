@@ -432,3 +432,27 @@ func TestNew_KeyringModeRefusesExplicitSigningKeys(t *testing.T) {
 	assert.NoError(t, validateKeyringConfig(legacy))
 	assert.NoError(t, validateKeyringConfig(ServerConfig{UserTokenConfig: UserTokenConfig{SigningKey: []byte("k")}}))
 }
+
+// TestWebKeyring_PageLoadResavesUnderActive: an authenticated page load
+// (sessionAuthMiddleware, not the /api bearer path) also re-saves a session
+// read under a non-active generation under the active one.
+func TestWebKeyring_PageLoadResavesUnderActive(t *testing.T) {
+	st, err := newTestStore(t, ":memory:")
+	require.NoError(t, err)
+	clk := &krClock{krT0}
+	ka, kb := krRollout(t)
+	a, b := newKRReplica(t, st, ka, clk), newKRReplica(t, st, kb, clk)
+	old := krLogin(t, a, a)
+
+	req := httptest.NewRequest(http.MethodGet, "/agents", nil)
+	req.Header.Set("Accept", "text/html")
+	req.AddCookie(old)
+	rec := httptest.NewRecorder()
+	b.ws.Handler().ServeHTTP(rec, req)
+	resp := rec.Result()
+	require.Equal(t, http.StatusOK, resp.StatusCode, "the page loads for the old-generation session")
+	resaved := sessionCookie(resp)
+	require.NotNil(t, resaved, "the page load re-saves the session")
+	assert.True(t, decodesUnderActive(b.ws, resaved))
+	assert.Equal(t, decodeSession(t, b.ws, old)[sessKeyUserID], decodeSession(t, b.ws, resaved)[sessKeyUserID])
+}

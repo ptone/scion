@@ -27,10 +27,11 @@ import (
 // names no key material, ID or deadline.
 const readyReasonSigningIssuanceClosed = "signing_issuance_closed"
 
-// signingKeySourceKeyring labels a key from a keyring file
-// (server.keyring_file). It is deployment-wide, so not hub-local
-// (signingKeySourceIsHubLocal).
-const signingKeySourceKeyring = "keyring"
+// SigningKeySourceKeyring is the signing-key source label of the web
+// session cookie keys when a keyring file (server.keyring_file) supplies
+// them (ServerConfig.WebSessionKeySource). It is deployment-wide, so not
+// hub-local (signingKeySourceIsHubLocal): the test admin tier refuses it.
+const SigningKeySourceKeyring = "keyring"
 
 // validateKeyringConfig checks a keyring-mode ServerConfig
 // (ptone/scion#1530 Phase 1): the keyring must satisfy this release's

@@ -386,7 +386,7 @@ func webSessionKeySource(sessionSecret string) string {
 	if serverKeyringFromFile() != nil {
 		// Deployment-wide keyring generations (not hub-local, so the test
 		// admin tier's G7 still refuses).
-		return "keyring"
+		return hub.SigningKeySourceKeyring
 	}
 	if sessionSecret == "" {
 		return "generated"
