@@ -1402,10 +1402,19 @@ func TestLFSConfigAccessKeyForcesSkip(t *testing.T) {
 			if configKey == endpoint {
 				t.Fatalf("spelling %q did not change the endpoint (%q); the case would not test an equivalent spelling", spelling, endpoint)
 			}
+			// A test-local credential helper (written to the test's own
+			// GIT_CONFIG_GLOBAL temp file, never the real global/system config)
+			// and no terminal prompt, so that if the guard is removed git-lfs
+			// actually AUTHENTICATES and sends a request — the hit then proves
+			// the endpoint was contacted, not that credentials were missing.
+			// With the guard in place the smudge is skipped, so the endpoint is
+			// still not contacted even though a credential is available.
+			addTestCredentialHelper(t, srv.URL)
+			t.Setenv("GIT_TERMINAL_PROMPT", "0")
 			repo := filepath.Join(t.TempDir(), "repo")
 			hostRunGit(t, filepath.Dir(repo), "init", "-q", "-b", "main", repo)
 			hostRunGit(t, repo, "remote", "add", "origin", origin)
-			writeFile(t, filepath.Join(repo, ".lfsconfig"), "[lfs \""+configKey+"\"]\n\taccess = negotiate\n")
+			writeFile(t, filepath.Join(repo, ".lfsconfig"), "[lfs \""+configKey+"\"]\n\taccess = basic\n")
 			writeFile(t, filepath.Join(repo, ".gitattributes"), "*.bin filter=lfs -text\n")
 			writeFile(t, filepath.Join(repo, "big.bin"), lfsPointer)
 			hostRunGit(t, repo, "add", ".")
@@ -1414,11 +1423,15 @@ func TestLFSConfigAccessKeyForcesSkip(t *testing.T) {
 			if err := os.MkdirAll(filepath.Dir(wt), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			if err := CreateWorktree(wt, "agent-a"); err != nil {
-				t.Fatalf("CreateWorktree: %v", err)
-			}
+			err = CreateWorktree(wt, "agent-a")
+			// Check the hit count BEFORE acting on the CreateWorktree error, so
+			// the contact (or its absence) is always reported — the W10 mutant
+			// records this count.
 			if got := atomic.LoadInt32(&hits); got != 0 {
 				t.Errorf("endpoint contacted %d time(s); a .lfsconfig access key must force skip-smudge", got)
+			}
+			if err != nil {
+				t.Fatalf("CreateWorktree: %v", err)
 			}
 		})
 	}
@@ -1517,4 +1530,27 @@ func TestVerifyConfigStable_MultiValuedKeyChange(t *testing.T) {
 	if _, err := cmd.CombinedOutput(); !errors.Is(err, ErrRepoConfigChanged) {
 		t.Errorf("inserting a second remote.origin.url: error = %v, want ErrRepoConfigChanged", err)
 	}
+}
+
+// addTestCredentialHelper writes a credential helper to the test's own
+// GIT_CONFIG_GLOBAL temp file (set by hostGitTestEnv) scoped to serverURL's
+// host, returning a fixed dummy username/password. It is test-local only
+// (a temp config, never the real global or system config), so git/git-lfs can
+// authenticate to the recording server during the test.
+func addTestCredentialHelper(t *testing.T, serverURL string) {
+	t.Helper()
+	global := os.Getenv("GIT_CONFIG_GLOBAL")
+	if global == "" {
+		t.Fatal("GIT_CONFIG_GLOBAL not set by hostGitTestEnv")
+	}
+	f, err := os.OpenFile(global, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Scope to the server's scheme://host[:port]; matches any path on it.
+	body := "[credential \"" + serverURL + "\"]\n\thelper = \"!f() { echo username=ci; echo password=ci-token; }; f\"\n"
+	if _, err := f.WriteString(body); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
 }
