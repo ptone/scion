@@ -212,6 +212,8 @@ func stringsWithout(list, drop []string) []string {
 		}
 	}
 	return out
+}
+
 // warnUnlimitedUnsupported adds unlimitedCountCreateWarning to the create's
 // or start's dispatch warnings, for the agent's broker: the dispatched
 // inline config sets a count limit to 0 that the broker would not apply. A
