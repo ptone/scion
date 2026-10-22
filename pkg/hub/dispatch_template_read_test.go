@@ -200,10 +200,12 @@ func TestDispatchBoundRead_Denials(t *testing.T) {
 
 	// An agent on this broker bound to a different template.
 	otherTmpl := mustCreateScopeTemplate(t, f.store, "dbr-other-user-tmpl", store.TemplateScopeUser, f.creator.ID, f.creator.ID)
-	otherAgent := f.boundAgent(t, "dbr-other-agent", f.broker.ID, otherTmpl.ID, "", f.creator.ID)
+	// Same recorded hash as the user template, so only the TemplateID check
+	// tells them apart.
+	otherAgent := f.boundAgent(t, "dbr-other-agent", f.broker.ID, otherTmpl.ID, dispatchReadHash, f.creator.ID)
 
 	// An agent whose slug names the template but whose TemplateID does not.
-	slugOnly := f.boundAgent(t, "dbr-slug-only", f.broker.ID, f.twin.ID, f.twin.ContentHash, f.creator.ID)
+	slugOnly := f.boundAgent(t, "dbr-slug-only", f.broker.ID, f.twin.ID, dispatchReadHash, f.creator.ID)
 
 	// A soft-deleted agent.
 	deleted := f.boundAgent(t, "dbr-deleted", f.broker.ID, f.userTmpl.ID, dispatchReadHash, f.creator.ID)
