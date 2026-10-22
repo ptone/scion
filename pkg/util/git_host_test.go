@@ -1093,8 +1093,12 @@ func TestHostGitCommandPinsLFSURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(strings.Join(cmd.Args, "\x00"), "\x00lfs.url=https://host/o/r.git/info/lfs\x00") {
+	args := strings.Join(cmd.Args, "\x00")
+	if !strings.Contains(args, "\x00lfs.url=https://host/o/r.git/info/lfs\x00") {
 		t.Errorf("args lack the pinned lfs.url: %q", cmd.Args)
+	}
+	if !strings.Contains(args, "\x00lfs.https://host/o/r.git/info/lfs.access=basic\x00") {
+		t.Errorf("args lack the pinned lfs.<endpoint>.access=basic: %q", cmd.Args)
 	}
 }
 

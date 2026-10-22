@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -461,31 +462,46 @@ func warnLFSPointersNotFetched(path string) {
 
 // repoTracksLFS reports whether a .gitattributes in the checkout root assigns
 // the lfs filter to anything. A cheap gate so a non-LFS checkout is not
-// scanned file by file.
+// scanned file by file. It reads the file safely (regular files only, never
+// following a symlink or blocking on a FIFO/device), so a tracked
+// .gitattributes that is a symlink to a FIFO cannot hang the checkout.
 func repoTracksLFS(path string) bool {
-	data, err := os.ReadFile(filepath.Join(path, ".gitattributes"))
-	if err != nil {
+	data, ok := readRegularFilePrefix(filepath.Join(path, ".gitattributes"), 1<<16)
+	if !ok {
 		return false
 	}
 	return strings.Contains(string(data), "filter=lfs")
 }
 
 // isLFSPointerFile reports whether the regular file at p begins with the
-// git-lfs pointer header. It opens with O_NOFOLLOW|O_NONBLOCK (so a symlink
-// or a FIFO cannot redirect or block it) and reads only the first bytes.
+// git-lfs pointer header.
 func isLFSPointerFile(p string) bool {
-	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
-	if err != nil {
+	data, ok := readRegularFilePrefix(p, 64)
+	if !ok {
 		return false
+	}
+	return strings.HasPrefix(string(data), "version https://git-lfs.")
+}
+
+// readRegularFilePrefix reads up to limit bytes from a regular file at path.
+// It opens with O_NOFOLLOW|O_NONBLOCK (so a symlink cannot redirect it and a
+// FIFO/device cannot block it) and confirms via fstat that the opened file is
+// regular. ok is false for a symlink, a non-regular file, or any error.
+func readRegularFilePrefix(path string, limit int64) ([]byte, bool) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, false
 	}
 	defer f.Close()
 	fi, err := f.Stat()
 	if err != nil || !fi.Mode().IsRegular() {
-		return false
+		return nil, false
 	}
-	buf := make([]byte, 64)
-	n, _ := f.Read(buf)
-	return strings.HasPrefix(string(buf[:n]), "version https://git-lfs.")
+	data, err := io.ReadAll(io.LimitReader(f, limit))
+	if err != nil {
+		return nil, false
+	}
+	return data, true
 }
 
 // WorktreeBranchHeldError reports that branch cannot be checked out because

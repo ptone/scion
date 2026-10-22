@@ -389,8 +389,11 @@ func HostGitCommand(ctx context.Context, dir string, opts HostGitOptions, args .
 		lead = append(lead, hostGitNetworkArgs...)
 	}
 	if opts.LFSURL != "" {
-		// Pin the LFS endpoint; -c outranks a tracked .lfsconfig.
-		lead = append(lead, "-c", "lfs.url="+opts.LFSURL)
+		// Pin the LFS endpoint and its auth mode; -c outranks a tracked
+		// .lfsconfig. Pinning access=basic stops a committed
+		// lfs.<endpoint>.access=negotiate from making git-lfs use ambient
+		// Kerberos/NTLM credentials on the broker host.
+		lead = append(lead, "-c", "lfs.url="+opts.LFSURL, "-c", "lfs."+opts.LFSURL+".access=basic")
 	}
 	for _, kv := range opts.Config {
 		lead = append(lead, "-c", kv)

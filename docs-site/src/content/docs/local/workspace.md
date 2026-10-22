@@ -317,7 +317,7 @@ safe stops the command rather than being ignored.
   - A repository Scion manages (the shared checkout and the shared-workspace clone) and every
     provisioning clone skip the LFS smudge on the host (`GIT_LFS_SKIP_SMUDGE=1`); agents fetch LFS
     objects in-container.
-  - Your linked checkout pins the endpoint derived from the `origin` remote URL when it is `http(s)`
+  - Your linked checkout pins the endpoint (and its auth mode to `basic`, so a committed `.lfsconfig` cannot select `negotiate`/`ntlm`) derived from the `origin` remote URL when it is `http(s)`
     **and** the committed `.lfsconfig` does not name its own endpoint. If `.lfsconfig` names an
     endpoint (its objects may legitimately live on a separate server), or the origin is `ssh`/scp or
     absent, the smudge is skipped and a warning names the pointer files and says to run `git lfs pull`

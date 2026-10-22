@@ -292,7 +292,11 @@ func TestRunGitClone_SkipsLFSSmudge_NoEndpointContact(t *testing.T) {
 	writeTestFile(t, filepath.Join(work, "big.bin"), "version https://git-lfs.github.com/spec/v1\noid sha256:1111111111111111111111111111111111111111111111111111111111111111\nsize 3\n")
 	runIn(t, work, "git", "add", ".")
 	runIn(t, work, "git", "-c", "user.name=t", "-c", "user.email=t@t.com", "commit", "-m", "lfs")
-	runIn(t, work, "git", "push", "origin", "main")
+	// git-lfs installs a pre-push hook into the fixture on `git add`; push with
+	// hooks off so the fixture's own push does not POST to the recording
+	// server. Then reset the counter: only the clone under test should matter.
+	runIn(t, work, "git", "-c", "core.hooksPath="+os.DevNull, "push", "origin", "main")
+	atomic.StoreInt32(&hits, 0)
 
 	dest := filepath.Join(dir, "dest")
 	err = runGitClone(context.Background(), ProvisionInput{
@@ -301,10 +305,68 @@ func TestRunGitClone_SkipsLFSSmudge_NoEndpointContact(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.FileExists(t, filepath.Join(dest, "big.bin"))
-	assert.Equal(t, int32(0), atomic.LoadInt32(&hits), "the .lfsconfig endpoint must not be contacted")
+	assert.Equal(t, int32(0), atomic.LoadInt32(&hits), "the .lfsconfig endpoint must not be contacted by the clone")
 }
 
 func writeTestFile(t *testing.T, path, content string) {
 	t.Helper()
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+}
+
+// O-3: a provisioning clone that needs a token (auth-requiring server) with a
+// global credential.helper=store configured must not let the store persist the
+// token, and must not contact an endpoint named in the cloned .lfsconfig. The
+// credential path runs unconditionally; the LFS smudge only fires when git-lfs
+// is installed (then skip-smudge keeps the hit count at 0 regardless).
+func TestRunGitClone_WithToken_NoStorePersist_NoLFSContact(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	store := isolateGitConfig(t) // global credential.helper = store --file store
+	t.Setenv(GitTokenEnv, testCloneToken)
+	if _, err := exec.LookPath("git-lfs"); err == nil {
+		// Configure the git-lfs filter globally so a smudge would fire (and be
+		// skipped) during the clone's checkout.
+		global := os.Getenv("GIT_CONFIG_GLOBAL")
+		f, err := os.OpenFile(global, os.O_APPEND|os.O_WRONLY, 0)
+		require.NoError(t, err)
+		_, err = f.WriteString("[filter \"lfs\"]\n\tclean = git-lfs clean -- %f\n\tsmudge = git-lfs smudge -- %f\n\tprocess = git-lfs filter-process\n\trequired = true\n")
+		require.NoError(t, err)
+		require.NoError(t, f.Close())
+	}
+
+	var hits int32
+	lfsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		assert.Empty(t, r.Header.Get("Authorization"), "the .lfsconfig endpoint received an Authorization header")
+		http.Error(w, "no", http.StatusNotFound)
+	}))
+	defer lfsSrv.Close()
+
+	// A bare repo whose content tracks LFS and names the recording server.
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "bare.git")
+	run(t, "git", "init", "--bare", "--initial-branch=main", bare)
+	work := filepath.Join(dir, "work")
+	run(t, "git", "clone", bare, work)
+	writeTestFile(t, filepath.Join(work, ".lfsconfig"), "[lfs]\n\turl = "+lfsSrv.URL+"/lfs\n")
+	writeTestFile(t, filepath.Join(work, ".gitattributes"), "*.bin filter=lfs -text\n")
+	writeTestFile(t, filepath.Join(work, "big.bin"), "version https://git-lfs.github.com/spec/v1\noid sha256:1111111111111111111111111111111111111111111111111111111111111111\nsize 3\n")
+	runIn(t, work, "git", "add", ".")
+	runIn(t, work, "git", "-c", "user.name=t", "-c", "user.email=t@t.com", "commit", "-m", "lfs")
+	runIn(t, work, "git", "-c", "core.hooksPath="+os.DevNull, "push", "origin", "main")
+
+	// Serve it over dumb HTTP requiring oauth2:testCloneToken.
+	cloneURL := privateGitServer(t, bare)
+	atomic.StoreInt32(&hits, 0)
+
+	dest := filepath.Join(dir, "dest")
+	fullClone := 0 // dumb http does not support shallow
+	err := runGitClone(context.Background(), ProvisionInput{
+		GitClone:       &api.GitCloneConfig{URL: cloneURL, Depth: &fullClone},
+		Resolved:       ResolvedWorkspace{HostPath: dest},
+		CloneWithToken: true,
+	})
+	require.NoError(t, err)
+	assert.NoFileExists(t, store, "the global store helper must not persist the token")
+	assertTokenAbsent(t, dest)
+	assert.Equal(t, int32(0), atomic.LoadInt32(&hits), "the .lfsconfig endpoint must not be contacted")
 }

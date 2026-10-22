@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -564,26 +565,29 @@ func isSensitiveConfigKey(key string) bool {
 }
 
 // repoConfigSnapshot returns the current repository-config values at dir
-// (parsed as data), keyed by full config key.
-func repoConfigSnapshot(dir string, env []string) (map[string]string, error) {
+// (parsed as data), keyed by full config key. A key's value is the ordered
+// list of all its values (git config is multi-valued and order-significant,
+// for example several remote.<n>.fetch refspecs or two remote.<n>.url lines),
+// so a reordering or an inserted value is not collapsed away.
+func repoConfigSnapshot(dir string, env []string) (map[string][]string, error) {
 	parsed, err := parseRepoConfig(dir, env)
 	if err != nil {
 		return nil, err
 	}
-	m := make(map[string]string, len(parsed))
+	m := make(map[string][]string, len(parsed))
 	for _, v := range parsed {
-		m[v.Key()] = v.Value
+		m[v.Key()] = append(m[v.Key()], v.Value)
 	}
 	return m, nil
 }
 
 // verifyConfigStable is the post-command check: the config must still pass the
 // deny-by-default policy (including the git cross-check), and no sensitive key
-// may have changed value since before. A change confined to other allowed keys
-// (for example git-lfs writing lfs.repositoryformatversion during its own
-// filter-process) is tolerated and logged by key name only. Any failure
-// returns an error wrapping ErrRepoConfigChanged.
-func verifyConfigStable(ctx context.Context, dir string, env []string, policy RepoConfigPolicy, opts repoConfigAllowOptions, before map[string]string) error {
+// may have changed its ordered value list since before. A change confined to
+// other allowed keys (for example git-lfs writing lfs.repositoryformatversion
+// during its own filter-process) is tolerated and logged by key name only. Any
+// failure returns an error wrapping ErrRepoConfigChanged.
+func verifyConfigStable(ctx context.Context, dir string, env []string, policy RepoConfigPolicy, opts repoConfigAllowOptions, before map[string][]string) error {
 	if err := checkRepoConfigPolicy(ctx, dir, env, policy, opts); err != nil {
 		return fmt.Errorf("%w: %v", ErrRepoConfigChanged, err)
 	}
@@ -600,7 +604,10 @@ func verifyConfigStable(ctx context.Context, dir string, env []string, policy Re
 	}
 	var changedOther []string
 	for k := range seen {
-		if before[k] == after[k] {
+		b, a := before[k], after[k]
+		// A missing key (nil) is distinct from a key present with an empty
+		// value ([]string{""}): slices.Equal(nil, [""]) is false.
+		if slices.Equal(b, a) {
 			continue
 		}
 		if isSensitiveConfigKey(k) {
