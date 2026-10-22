@@ -118,7 +118,7 @@ func TestParseGitConfigFile_SubsectionCase(t *testing.T) {
 	}
 }
 
-// An empty quoted subsection [x ""] is distinct from [x] (R-1).
+// An empty quoted subsection [x ""] is distinct from [x].
 func TestParseGitConfigFile_EmptyQuotedSubsection(t *testing.T) {
 	vars, err := parseGitConfigFile([]byte("[x \"\"]\n\ty = 1\n[x]\n\ty = 2\n"))
 	if err != nil {

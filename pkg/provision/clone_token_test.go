@@ -313,7 +313,7 @@ func writeTestFile(t *testing.T, path, content string) {
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
 }
 
-// O-3: a provisioning clone that needs a token (auth-requiring server) with a
+// A provisioning clone that needs a token (auth-requiring server) with a
 // global credential.helper=store configured must not let the store persist the
 // token, and must not contact an endpoint named in the cloned .lfsconfig. The
 // credential path runs unconditionally; the LFS smudge only fires when git-lfs
