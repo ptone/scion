@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // repoState is what a test compares to show a repository was not changed.
@@ -62,6 +63,7 @@ func worktreeFixture(t *testing.T) (repoA, wt, repoB, wtB string) {
 		t.Fatalf("CreateWorktree B: %v", err)
 	}
 	gitIn(t, repoB, "branch", "agent")
+	gitIn(t, repoB, "branch", "unrelated")
 	return repoA, wt, repoB, wtB
 }
 
@@ -98,6 +100,19 @@ func TestRemoveWorktree_EditedMetadataChangesOnlyCallerRepo(t *testing.T) {
 		{"commondir names another repository", func(t *testing.T, wt, repoB, wtB string) {
 			mustWriteFile(t, filepath.Join(adminDirOf(t, wt), "commondir"), filepath.Join(repoB, ".git")+"\n")
 		}},
+		{"pointer names a made-up admin directory on an unrelated branch of another repository", func(t *testing.T, wt, repoB, wtB string) {
+			// Git in the worktree would report repository B and branch
+			// "unrelated", which is not checked out anywhere, so a
+			// derived "branch -D unrelated" in B would succeed.
+			fake := filepath.Join(t.TempDir(), "admin")
+			if err := os.MkdirAll(fake, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			mustWriteFile(t, filepath.Join(fake, "HEAD"), "ref: refs/heads/unrelated\n")
+			mustWriteFile(t, filepath.Join(fake, "commondir"), filepath.Join(repoB, ".git")+"\n")
+			mustWriteFile(t, filepath.Join(fake, "gitdir"), filepath.Join(wt, ".git")+"\n")
+			mustWriteFile(t, filepath.Join(wt, ".git"), "gitdir: "+fake+"\n")
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -114,6 +129,9 @@ func TestRemoveWorktree_EditedMetadataChangesOnlyCallerRepo(t *testing.T) {
 			}
 			if after := repoState(t, repoB); after != before {
 				t.Errorf("the other repository changed:\nbefore:\n%s\nafter:\n%s", before, after)
+			}
+			if !BranchExistsIn(repoB, "unrelated") {
+				t.Error("the other repository's branch \"unrelated\" was deleted")
 			}
 			if _, err := os.Stat(wt); !os.IsNotExist(err) {
 				t.Errorf("worktree directory still present: %v", err)
@@ -139,8 +157,11 @@ func TestRemoveWorktree_InheritedGitDirIgnored(t *testing.T) {
 	if !deleted {
 		t.Error("expected the caller's branch to be deleted")
 	}
-	os.Unsetenv("GIT_DIR")
-	os.Unsetenv("GIT_WORK_TREE")
+	// Read the repositories back without the inherited values (an empty
+	// GIT_DIR is not the same as an unset one); t.Setenv above restores the
+	// original environment at cleanup.
+	_ = os.Unsetenv("GIT_DIR")
+	_ = os.Unsetenv("GIT_WORK_TREE")
 	if after := repoState(t, repoB); after != before {
 		t.Errorf("the other repository changed:\nbefore:\n%s\nafter:\n%s", before, after)
 	}
@@ -149,9 +170,10 @@ func TestRemoveWorktree_InheritedGitDirIgnored(t *testing.T) {
 	}
 }
 
-// A hook in the repository does not run when the branch is deleted, and the
-// legitimate case deletes the branch and the worktree entry.
-func TestRemoveWorktree_RunsNoRepositoryHooks(t *testing.T) {
+// A hook file in the repository does not run when the branch is deleted
+// (core.hooksPath points at an empty location), and the legitimate case
+// deletes the branch and the worktree entry.
+func TestRemoveWorktree_RunsNoRepositoryHookFiles(t *testing.T) {
 	repoA, wt, _, _ := worktreeFixture(t)
 	sentinel := filepath.Join(t.TempDir(), "hook-ran")
 	hooks := filepath.Join(repoA, ".git", "hooks")
@@ -175,7 +197,7 @@ func TestRemoveWorktree_RunsNoRepositoryHooks(t *testing.T) {
 		t.Errorf("worktree entry still listed:\n%s", worktreeEntries(t, repoA))
 	}
 	if _, err := os.Stat(sentinel); err == nil {
-		t.Error("a repository hook ran during RemoveWorktree")
+		t.Error("a repository hook file ran during RemoveWorktree")
 	}
 
 	// The hook is live: plain git runs it, so the check above is not vacuous.
@@ -270,5 +292,98 @@ func mustWriteFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The admin files are read only as small regular files: a symlinked or
+// oversized .git file, or a FIFO HEAD, keeps the branch, and the directory
+// and the worktree entry are still removed. The FIFO case must not block.
+func TestRemoveWorktree_AdminFilesMustBeSmallRegularFiles(t *testing.T) {
+	orig := baseRepoGitTimeout
+	baseRepoGitTimeout = 5 * time.Second
+	t.Cleanup(func() { baseRepoGitTimeout = orig })
+
+	cases := []struct {
+		name string
+		edit func(t *testing.T, wt string)
+		// entryRemoved: git itself can remove the entry. With a FIFO HEAD
+		// in the admin directory git blocks reading it, so the entry
+		// removal ends at baseRepoGitTimeout and the entry stays.
+		entryRemoved bool
+	}{
+		{"symlinked .git file", func(t *testing.T, wt string) {
+			target := filepath.Join(t.TempDir(), "pointer")
+			mustWriteFile(t, target, "gitdir: "+adminDirOf(t, wt)+"\n")
+			if err := os.Remove(filepath.Join(wt, ".git")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, filepath.Join(wt, ".git")); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+		{"oversized .git file", func(t *testing.T, wt string) {
+			line := "gitdir: " + adminDirOf(t, wt) + "\n"
+			mustWriteFile(t, filepath.Join(wt, ".git"), line+strings.Repeat(" ", smallGitFileMax))
+		}, true},
+		{"FIFO HEAD", func(t *testing.T, wt string) {
+			head := filepath.Join(adminDirOf(t, wt), "HEAD")
+			if err := os.Remove(head); err != nil {
+				t.Fatal(err)
+			}
+			if err := exec.Command("mkfifo", head).Run(); err != nil {
+				t.Skipf("mkfifo unavailable: %v", err)
+			}
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repoA, wt, _, _ := worktreeFixture(t)
+			admin := adminDirOf(t, wt)
+			tc.edit(t, wt)
+			deleted, err := RemoveWorktree(repoA, wt, repoA, "agent")
+			if err != nil {
+				t.Fatalf("RemoveWorktree: %v", err)
+			}
+			if !tc.entryRemoved {
+				// Put a regular HEAD back so the git checks below can run.
+				_ = os.Remove(filepath.Join(admin, "HEAD"))
+				mustWriteFile(t, filepath.Join(admin, "HEAD"), "ref: refs/heads/agent\n")
+			}
+			if deleted || !BranchExistsIn(repoA, "agent") {
+				t.Errorf("branch deleted (deleted=%v)", deleted)
+			}
+			if _, err := os.Stat(wt); !os.IsNotExist(err) {
+				t.Errorf("worktree directory still present: %v", err)
+			}
+			if tc.entryRemoved && strings.Contains(worktreeEntries(t, repoA), "worktrees/agent") {
+				t.Errorf("worktree entry still listed:\n%s", worktreeEntries(t, repoA))
+			}
+		})
+	}
+}
+
+// Known limit, kept as a test so the follow-up that makes the repository
+// configuration read-only flips it: a hook defined in the repository's
+// configuration (hook.<name>.command and .event) is not covered by
+// core.hooksPath and still runs when the branch is deleted.
+func TestRemoveWorktree_ConfigDefinedHookStillRuns(t *testing.T) {
+	repoA, wt, _, _ := worktreeFixture(t)
+	sentinel := filepath.Join(t.TempDir(), "config-hook-ran")
+	gitIn(t, repoA, "config", "hook.p4611check.event", "reference-transaction")
+	gitIn(t, repoA, "config", "hook.p4611check.command", "touch '"+sentinel+"'")
+	out, err := exec.Command("git", "-C", repoA, "hook", "list", "reference-transaction").CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "p4611check") {
+		t.Skipf("this git does not support configuration-defined hooks: %v %s", err, out)
+	}
+
+	deleted, err := RemoveWorktree(repoA, wt, repoA, "agent")
+	if err != nil {
+		t.Fatalf("RemoveWorktree: %v", err)
+	}
+	if !deleted {
+		t.Fatal("expected the branch to be deleted")
+	}
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Errorf("configuration-defined hook did not run (%v); if repository configuration is now read-only or ignored, update this test and BaseRepoGitCommand's doc", err)
 	}
 }

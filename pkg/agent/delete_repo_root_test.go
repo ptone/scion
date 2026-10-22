@@ -31,9 +31,9 @@ func gitOutput(t *testing.T, repo string, args ...string) string {
 }
 
 // TestDeleteAgentFiles_ChangesOnlyTheProjectRepository: deleting an agent
-// whose worktree's .git file was changed to name another repository deletes
-// the agent's branch in the project's repository and changes nothing in the
-// other repository.
+// whose worktree's .git file was changed to name another repository's
+// branch deletes the agent's branch in the project's repository and changes
+// nothing in the other repository.
 func TestDeleteAgentFiles_ChangesOnlyTheProjectRepository(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	t.Setenv("HOME", t.TempDir())
@@ -58,12 +58,31 @@ func TestDeleteAgentFiles_ChangesOnlyTheProjectRepository(t *testing.T) {
 		t.Fatal(err)
 	}
 	setupGitRepo(t, other)
-	if out, err := exec.Command("git", "-C", other, "branch", "worker").CombinedOutput(); err != nil {
-		t.Fatalf("git branch: %v\n%s", err, out)
+	for _, b := range []string{"worker", "unrelated"} {
+		if out, err := exec.Command("git", "-C", other, "branch", b).CombinedOutput(); err != nil {
+			t.Fatalf("git branch %s: %v\n%s", b, err, out)
+		}
 	}
 	otherBefore := gitOutput(t, other, "for-each-ref") + gitOutput(t, other, "worktree", "list", "--porcelain")
 
-	if err := os.WriteFile(filepath.Join(workspace, ".git"), []byte("gitdir: "+filepath.Join(other, ".git")+"\n"), 0o644); err != nil {
+	// The worktree's .git file names a made-up admin directory whose HEAD is
+	// the other repository's "unrelated" branch (checked out nowhere) and
+	// whose commondir is the other repository: git run in the worktree
+	// would report that repository and that branch.
+	fake := filepath.Join(t.TempDir(), "admin")
+	if err := os.MkdirAll(fake, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		"HEAD":      "ref: refs/heads/unrelated\n",
+		"commondir": filepath.Join(other, ".git") + "\n",
+		"gitdir":    filepath.Join(workspace, ".git") + "\n",
+	} {
+		if err := os.WriteFile(filepath.Join(fake, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(workspace, ".git"), []byte("gitdir: "+fake+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

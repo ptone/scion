@@ -521,8 +521,10 @@ func RemoveWorktree(base, path, repoRoot, branch string) (bool, error) {
 
 // worktreeOnBranch reports whether the worktree at path is a linked
 // worktree of the main repository at repoRoot checked out on branch, reading
-// the files git would read but without running git in the worktree. All of
-// these must hold:
+// the files git would read but without running git in the worktree. Each
+// file is read with readSmallRegularFile: a symlink, a FIFO or other special
+// file, or content over smallGitFileMax bytes fails the check. All of these
+// must hold:
 //   - path/.git is a "gitdir:" file naming a directory directly under
 //     repoRoot/.git/worktrees (compared with symlinks resolved);
 //   - that admin directory's commondir file names repoRoot/.git;
@@ -530,7 +532,7 @@ func RemoveWorktree(base, path, repoRoot, branch string) (bool, error) {
 //
 // The reason names the first check that failed.
 func worktreeOnBranch(path, repoRoot, branch string) (bool, string) {
-	data, err := os.ReadFile(filepath.Join(path, ".git"))
+	data, err := readSmallRegularFile(filepath.Join(path, ".git"), smallGitFileMax)
 	if err != nil {
 		return false, fmt.Sprintf("read worktree .git file: %v", err)
 	}
@@ -554,7 +556,7 @@ func worktreeOnBranch(path, repoRoot, branch string) (bool, string) {
 	if filepath.Dir(adminDir) != filepath.Join(commonDir, "worktrees") {
 		return false, "worktree gitdir is not an admin directory of the repository"
 	}
-	data, err = os.ReadFile(filepath.Join(adminDir, "commondir"))
+	data, err = readSmallRegularFile(filepath.Join(adminDir, "commondir"), smallGitFileMax)
 	if err != nil {
 		return false, fmt.Sprintf("read commondir: %v", err)
 	}
@@ -565,7 +567,7 @@ func worktreeOnBranch(path, repoRoot, branch string) (bool, string) {
 	if resolved, err := filepath.EvalSymlinks(named); err != nil || resolved != commonDir {
 		return false, "commondir does not name the repository"
 	}
-	data, err = os.ReadFile(filepath.Join(adminDir, "HEAD"))
+	data, err = readSmallRegularFile(filepath.Join(adminDir, "HEAD"), smallGitFileMax)
 	if err != nil {
 		return false, fmt.Sprintf("read HEAD: %v", err)
 	}
@@ -574,6 +576,11 @@ func worktreeOnBranch(path, repoRoot, branch string) (bool, string) {
 	}
 	return true, ""
 }
+
+// baseRepoGitTimeout bounds each git command RemoveWorktreeEntryIn and
+// DeleteBranchIn run, so a repository file that makes git wait (for
+// example a FIFO) cannot hold the caller forever.
+var baseRepoGitTimeout = 2 * time.Minute
 
 // baseRepoGitDir returns repoRoot's .git directory once repoRoot is shown to
 // be a main repository: an absolute path whose .git is a directory (not a
@@ -602,9 +609,16 @@ func baseRepoGitDir(repoRoot string) (string, error) {
 // directory or follow any worktree's metadata; GIT_* variables inherited
 // from the process are dropped (other than GIT_CONFIG_NOSYSTEM and
 // GIT_CONFIG_GLOBAL) and LC_ALL=C is set; core.hooksPath points at an empty
-// location (os.DevNull), so no hook in the repository runs; and the
-// file-system monitor is off. It returns an error, and no command, when
+// location (os.DevNull), so hook files in the repository are not run; and
+// the file-system monitor is off. It returns an error, and no command, when
 // repoRoot is not a main repository (baseRepoGitDir).
+//
+// git still reads the repository's own configuration. core.hooksPath does
+// not cover hooks defined in configuration (hook.<name>.command with
+// hook.<name>.event, directly or through include.path), so such a hook in
+// the repository's configuration still runs for the commands built here
+// (for example reference-transaction on branch -D). Making the repository
+// configuration read-only from agent containers is a follow-up.
 func BaseRepoGitCommand(ctx context.Context, repoRoot string, args ...string) (*exec.Cmd, error) {
 	gitDir, err := baseRepoGitDir(repoRoot)
 	if err != nil {
@@ -616,6 +630,7 @@ func BaseRepoGitCommand(ctx context.Context, repoRoot string, args ...string) (*
 		"-C", repoRoot,
 	}, args...)
 	cmd := exec.CommandContext(ctx, "git", full...)
+	cmd.WaitDelay = 5 * time.Second
 	cmd.Env = append(scrubbedGitEnv(), "GIT_DIR="+gitDir, "GIT_COMMON_DIR="+gitDir)
 	return cmd, nil
 }
@@ -668,7 +683,9 @@ func RemoveWorktreeEntryIn(repoRoot, path string) error {
 	if repoRoot == "" || path == "" {
 		return nil
 	}
-	return RemoveWorktreeEntry(context.Background(), path, func(ctx context.Context, args ...string) (*exec.Cmd, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), baseRepoGitTimeout)
+	defer cancel()
+	return RemoveWorktreeEntry(ctx, path, func(ctx context.Context, args ...string) (*exec.Cmd, error) {
 		return BaseRepoGitCommand(ctx, repoRoot, args...)
 	})
 }
@@ -814,14 +831,17 @@ func resolveMissingPath(path string) (resolved string, state resolveState, err e
 }
 
 // DeleteBranchIn deletes a git branch from the main repository at repoRoot,
-// through BaseRepoGitCommand (repository pinned, no hooks) with "--" before
+// through BaseRepoGitCommand (repository pinned, hook files not run; see
+// there for configuration-defined hooks) with "--" before
 // the branch name. A branch name that is empty or starts with "-" is
 // refused. Returns true if the branch was deleted, false otherwise.
 func DeleteBranchIn(repoRoot, branchName string) bool {
 	if branchName == "" || strings.HasPrefix(branchName, "-") {
 		return false
 	}
-	cmd, err := BaseRepoGitCommand(context.Background(), repoRoot, "branch", "-D", "--", branchName)
+	ctx, cancel := context.WithTimeout(context.Background(), baseRepoGitTimeout)
+	defer cancel()
+	cmd, err := BaseRepoGitCommand(ctx, repoRoot, "branch", "-D", "--", branchName)
 	if err != nil {
 		return false
 	}
