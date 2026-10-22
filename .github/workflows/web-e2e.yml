@@ -85,6 +85,8 @@ on:
       - 'pkg/hub/auth.go'
       - 'pkg/hub/port_proxy_metrics.go'
       - 'pkg/hub/web.go'
+      - 'pkg/hub/port_view.go'
+      - 'pkg/hub/internal/portview/**'
       - 'pkg/portforward/**'
       - 'pkg/sciontool/portforward/**'
       - 'pkg/sciontool/conduit/**'
@@ -101,6 +103,8 @@ on:
       - 'pkg/hub/auth.go'
       - 'pkg/hub/port_proxy_metrics.go'
       - 'pkg/hub/web.go'
+      - 'pkg/hub/port_view.go'
+      - 'pkg/hub/internal/portview/**'
       - 'pkg/portforward/**'
       - 'pkg/sciontool/portforward/**'
       - 'pkg/sciontool/conduit/**'
@@ -250,6 +254,19 @@ jobs:
           export CHROMIUM_EXECUTABLE
           export TERMINAL_OWNER_CHROMIUM="$CHROMIUM_EXECUTABLE"
           npx playwright test -c "e2e/$SUITE/playwright.config.ts"
+
+      # The page view journeys (ptone/scion#5569) need the hub.port_view
+      # experiment on from hub start, so they run on a second hub of the
+      # same rig, under their own config.
+      - name: Run Playwright page view suite (port-proxy)
+        if: matrix.suite == 'port-proxy'
+        working-directory: ./web
+        env:
+          E2E_PREBUILT: '1'
+        run: |
+          CHROMIUM_EXECUTABLE="$(node -p "require('playwright-core').chromium.executablePath()")"
+          export CHROMIUM_EXECUTABLE
+          npx playwright test -c e2e/port-proxy/playwright.view.config.ts
 
       # Uploaded whenever the suite ran, so retry traces of flaky tests (which
       # pass the job) are kept too. Paths match each config's HTML report
