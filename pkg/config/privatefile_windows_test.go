@@ -94,13 +94,6 @@ func TestWindowsAtomicWrite_PrivateReplacesTooOpenInheritInherits(t *testing.T) 
 	if fi, err := os.Stat(plain); err != nil || fi.Mode().Perm()&0o200 == 0 {
 		t.Fatalf("inherit write left %v, %v; want a writable file (no read-only attribute)", fi, err)
 	}
-	// writeFileAtomic (the preserved-mode writer) never copies a private
-	// file's protection from its fake Perm: the caller's intent, 0644,
-	// decides.
-	if err := writeFileAtomic(target, []byte("again")); err != nil {
-		t.Fatal(err)
-	}
-	assertInherited(t, target)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -109,6 +102,82 @@ func TestWindowsAtomicWrite_PrivateReplacesTooOpenInheritInherits(t *testing.T) 
 		if strings.Contains(e.Name(), ".tmp-") {
 			t.Errorf("temporary file left behind: %s", e.Name())
 		}
+	}
+}
+
+// Row C5, audit I2 (security lead approved): an Inherit-mode atomic write
+// keeps an existing owner-only file private, deciding from its real ACL on
+// a no-follow handle, never from its meaningless Perm. Control: a file with
+// the inherited ACL stays inherited, and a missing target gets Inherit.
+// Both writers are covered: writeFileAtomic and writeFileAtomicMode(0644).
+func TestWindowsAtomicWrite_InheritKeepsOwnerOnlyTarget(t *testing.T) {
+	dir := usersInheritDir(t)
+	tight := filepath.Join(dir, "tight.yaml")
+	if err := writeFileAtomicMode(tight, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wintest.AssertPrivateSD(t, tight)
+	if err := writeFileAtomic(tight, []byte("new")); err != nil {
+		t.Fatalf("writeFileAtomic over an owner-only file: %v", err)
+	}
+	wintest.AssertPrivateSD(t, tight)
+	mustRead(t, tight, "new")
+	if err := writeFileAtomicMode(tight, []byte("newer"), 0o644); err != nil {
+		t.Fatalf("0644 write over an owner-only file: %v", err)
+	}
+	wintest.AssertPrivateSD(t, tight)
+	mustRead(t, tight, "newer")
+
+	plain := filepath.Join(dir, "plain.yaml")
+	if err := writeFileAtomic(plain, []byte("first")); err != nil {
+		t.Fatal(err)
+	}
+	assertInherited(t, plain)
+	if err := writeFileAtomic(plain, []byte("second")); err != nil {
+		t.Fatal(err)
+	}
+	assertInherited(t, plain)
+	mustRead(t, plain, "second")
+}
+
+// Row C5, audit I2: the protection decision never follows a link at the
+// target. A symlink to an owner-only file is refused by OpenNoFollow, so
+// the caller's protection (Inherit) is used, and the write replaces the
+// link itself; the link's target is neither checked nor changed. The same
+// holds for a junction. Control: TestWindowsAtomicWrite_InheritKeepsOwnerOnlyTarget
+// keeps the same owner-only file private when it is the target itself.
+func TestWindowsAtomicWrite_InheritDecisionDoesNotFollowLink(t *testing.T) {
+	dir, outside := usersInheritDir(t), t.TempDir()
+	victim := filepath.Join(outside, "victim.yaml")
+	if err := writeFileAtomicMode(victim, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wintest.AssertPrivateSD(t, victim)
+
+	link := filepath.Join(dir, "settings.yaml")
+	wintest.MustSymlink(t, victim, link)
+	if err := writeFileAtomic(link, []byte("new")); err != nil {
+		t.Fatalf("writeFileAtomic over a symlink: %v", err)
+	}
+	fi, err := os.Lstat(link)
+	if err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() {
+		t.Fatalf("after the write %s is %v, %v; want a regular file", link, fi, err)
+	}
+	assertInherited(t, link)
+	mustRead(t, link, "new")
+	mustRead(t, victim, "keep")
+	wintest.AssertPrivateSD(t, victim)
+
+	if got := atomicProtection(link, 0o644); got != privatefs.Inherit {
+		t.Fatalf("control: atomicProtection of the replaced regular file = %v, want Inherit", got)
+	}
+	junction := filepath.Join(dir, "junction")
+	wintest.MustJunction(t, outside, junction)
+	if got := atomicProtection(junction, 0o644); got != privatefs.Inherit {
+		t.Errorf("atomicProtection of a junction = %v, want Inherit (the link is not followed)", got)
+	}
+	if got := atomicProtection(filepath.Join(dir, "absent.yaml"), 0o644); got != privatefs.Inherit {
+		t.Errorf("atomicProtection of a missing target = %v, want Inherit", got)
 	}
 }
 

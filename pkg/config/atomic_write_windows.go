@@ -15,35 +15,78 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 )
 
-// preservedAtomicMode is the mode writeFileAtomic gives the new file. The
-// unix "keep the existing file's mode" rule does not apply on Windows: an
-// existing file's Perm reads 0666 (or 0444) whatever its ACL, so copying it
-// would mean nothing. The caller's intent decides: writeFileAtomic writes
-// ordinary files, mode 0644, which privatefs.ForMode maps to Inherit.
+// preservedAtomicMode is the mode writeFileAtomic asks for. The unix "keep
+// the existing file's mode" rule does not apply on Windows: an existing
+// file's Perm reads 0666 (or 0444) whatever its ACL, so copying it would
+// mean nothing. writeFileAtomic writes ordinary files, mode 0644, which
+// privatefs.ForMode maps to Inherit; writeFileAtomicMode then keeps an
+// existing owner-only file private from its real ACL (see
+// atomicProtection).
 func preservedAtomicMode(string) os.FileMode {
 	return 0644
 }
 
-// writeFileAtomicMode is writeFileAtomic with the protection of the new file
-// given by mode, through privatefs.ForMode (design row C5):
+// atomicProtection is the protection writeFileAtomicMode gives the new
+// file (design row C5; audit I2, approved by the security lead). Private
+// when mode is Private (privatefs.ForMode). Otherwise the existing target
+// decides, as for the copies of rows C10 and C11: it is opened with
+// Tree.OpenNoFollow in a Tree anchored at its directory and checked with
+// privatefs.CheckPrivate on that handle, so a user-tightened file stays
+// private, and protectionForCheck maps the result (Inherit only for
+// ErrNotPrivate, which includes a security descriptor or owner privatefs
+// cannot read; any other check error is Private). The mode's protection
+// (Inherit) is kept when there is nothing to decide from: no target, a
+// reparse point at the target (refused by OpenNoFollow and never followed:
+// the write then replaces the link itself, not its target), or a directory
+// the Tree cannot be opened on (the write itself reports that). Any other
+// failure to open the target is Private (fail closed).
 //
-//   - Private (mode grants nothing to group or others): the temporary file
-//     is created in a privatefs Tree anchored at the target's directory with
-//     the owner-only ACL set at creation, and renamed over the target
-//     through its still-open handle. The result is private whatever the old
+// The decision is made on the handle and the write goes through its own
+// handle, as before; the target is not checked again by path in between.
+func atomicProtection(targetPath string, mode os.FileMode) privatefs.Protection {
+	p := privatefs.ForMode(mode)
+	if p == privatefs.Private {
+		return p
+	}
+	tree, err := privatefs.OpenTree(filepath.Dir(targetPath), privatefs.TreeOptions{})
+	if err != nil {
+		return p
+	}
+	defer func() { _ = tree.Close() }()
+	f, err := tree.OpenNoFollow(filepath.Base(targetPath))
+	switch {
+	case errors.Is(err, fs.ErrNotExist), errors.Is(err, privatefs.ErrReparsePoint):
+		return p
+	case err != nil:
+		return privatefs.Private
+	}
+	defer func() { _ = f.Close() }()
+	return protectionForCheck(privatefs.CheckPrivate(f))
+}
+
+// writeFileAtomicMode is writeFileAtomic with the protection of the new file
+// given by atomicProtection (design row C5):
+//
+//   - Private (mode grants nothing to group or others, or the existing
+//     target passes CheckPrivate): the temporary file is created in a
+//     privatefs Tree anchored at the target's directory with the owner-only
+//     ACL set at creation, and renamed over the target through its
+//     still-open handle. The result is private whatever the old
 //     file's ACL was (a too-open file is replaced: an implicit repair).
 //   - Inherit: the temporary file is created by createTempFile and gets the
 //     directory's inherited ACL, as any new file there would. No Chmod is
 //     called: on Windows it only sets the read-only attribute.
 func writeFileAtomicMode(targetPath string, data []byte, mode os.FileMode) error {
-	if privatefs.ForMode(mode) == privatefs.Private {
+	if atomicProtection(targetPath, mode) == privatefs.Private {
 		return writeFileAtomicPrivate(targetPath, data)
 	}
 	dir := filepath.Dir(targetPath)

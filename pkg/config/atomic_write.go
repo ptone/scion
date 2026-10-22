@@ -41,8 +41,10 @@ var errAtomicNotDurable = errors.New("file replaced but the change may not be du
 // same directory followed by a rename, so readers never see a partial file.
 // On unix it preserves the mode of an existing regular file and uses 0644
 // otherwise. On Windows mode bits mean nothing (an existing file's Perm
-// reads 0666), so the new file always gets the protection of mode 0644:
-// the directory's inherited ACL (see atomic_write_windows.go).
+// reads 0666), so the new file gets the directory's inherited ACL (the
+// protection of mode 0644) unless the existing file passes the owner-only
+// check on its real ACL, when it stays private (see atomicProtection in
+// atomic_write_windows.go).
 // The rename does not keep the owner: the new file belongs to the writing
 // user (for example root, under sudo).
 //
