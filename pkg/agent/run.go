@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -31,6 +32,8 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
+	"github.com/GoogleCloudPlatform/scion/pkg/agentplugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -400,6 +403,16 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		logImageProvenanceError(opts.Name, err)
 		return nil, err
 	}
+	// startProfile is the settings profile this start resolves the agent's
+	// settings with when the request names none: opts.Profile (a broker
+	// start or restart fills it from the provisioned profile, else the
+	// Hub-sent one), else the profile recorded in broker-side image
+	// provenance. The profile in agent-info.json (finalScionCfg.Info, read
+	// from the agent home) is never used for it.
+	startProfile := opts.Profile
+	if startProfile == "" && provenance != nil {
+		startProfile = provenance.Profile
+	}
 	// A template recorded as loaded from a content-addressed cache is not
 	// available by name here: the recorded name is then a display name
 	// only, so it is never looked up, and the template counts as
@@ -492,21 +505,11 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	}
 
 	if settings != nil && harnessConfigName != "" {
-		// A local restart (no --profile) has no request-level profile to
-		// resolve settings against; fall back to the profile the agent was
-		// actually created with (finalScionCfg.Info.Profile, already loaded —
-		// the same value agent.GetSavedProfile would read from
-		// agent-info.json), matching the broker's own restart-dispatch
-		// behavior (runtimebroker/handlers.go's GetSavedProfile calls).
-		settingsProfile := opts.Profile
-		if settingsProfile == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
-			settingsProfile = finalScionCfg.Info.Profile
-		}
+		// Settings are resolved against startProfile (see above).
+		settingsProfile := startProfile
 		// The image and pull-policy lookups use the profile recorded in
-		// broker-side image provenance when it exists, rather than the
-		// agent-info.json profile or the broker's restart profile (which is
-		// read from agent-info.json). An agent
-		// provisioned before provenance was recorded keeps the legacy
+		// broker-side image provenance when it exists. An agent
+		// provisioned before provenance was recorded keeps the
 		// settingsProfile lookup.
 		imageProfile := settingsProfile
 		if provenance != nil {
@@ -565,10 +568,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		ownEnv = persisted
 	}
 	if finalScionCfg != nil {
-		envProfile := opts.Profile
-		if envProfile == "" && finalScionCfg.Info != nil {
-			envProfile = finalScionCfg.Info.Profile
-		}
+		envProfile := startProfile
 		finalScionCfg = withEnvironment(finalScionCfg, ownEnv.clone())
 		finalScionCfg.Volumes = mergeEnvironmentVolumes(settingsVolumes, fileVolumes, ownEnv.Volumes)
 		applyEnvironmentResources(ctx, finalScionCfg, settings, envProfile, harnessConfigName)
@@ -648,10 +648,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// agent was created with, else the active profile). Unset keeps the
 	// depth sent with the request.
 	if opts.GitClone != nil {
-		cdProfile := opts.Profile
-		if cdProfile == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
-			cdProfile = finalScionCfg.Info.Profile
-		}
+		cdProfile := startProfile
 		var cdIn cloneDepthInput
 		if finalScionCfg != nil {
 			cdIn.Template = finalScionCfg.CloneDepth
@@ -671,6 +668,12 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	}
 
 	warnings := templateEnvWarns.Warnings()
+	// Templates left at a hub-managed project's workspace root are no
+	// longer read; say so instead of silently resolving another template.
+	if w := config.LegacyProjectTemplatesWarning(opts.ProjectPath); w != "" {
+		slog.Warn("Project templates found at the old location", "agent", opts.Name, "warning", w)
+		warnings = append(warnings, w)
+	}
 
 	// The template env layer (ptone/scion#4524): recomputed from the live
 	// template chain on every start, never read from scion-agent.json, and
@@ -827,9 +830,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// node), so we must skip the local check to ensure registry rewrite applies.
 	if settings != nil && resolvedImage != "" {
 		// The profile-level image_registry is looked up with the
-		// provisioned profile recorded in broker-side provenance, never a
-		// profile read from agent-info.json (a broker start/restart fills
-		// opts.Profile from there); legacy agents keep opts.Profile.
+		// provisioned profile recorded in broker-side provenance; legacy
+		// agents keep opts.Profile (the Hub-sent profile on a broker start).
 		registryProfile := opts.Profile
 		if provenance != nil {
 			registryProfile = provenance.Profile
@@ -1339,8 +1341,7 @@ authDone:
 	if opts.NoAuth {
 		// Clean up stale auth-candidates from a prior run so the
 		// provisioner sees no candidates and runs in no-auth mode.
-		authCandidatesPath := filepath.Join(agentHome, ".scion", "harness", "inputs", "auth-candidates.json")
-		if err := os.Remove(authCandidatesPath); err != nil && !os.IsNotExist(err) {
+		if err := removeStaleAuthCandidates(agentHome); err != nil {
 			util.Debugf("Start: failed to remove stale auth-candidates: %v", err)
 		}
 	}
@@ -1933,10 +1934,7 @@ authDone:
 			// The profile is the one named for this start, else the one
 			// the agent was created with (as for the shared-dir PVC
 			// defaults below); an agent that recorded its backend keeps it.
-			sdStorageProfile := opts.Profile
-			if sdStorageProfile == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
-				sdStorageProfile = finalScionCfg.Info.Profile
-			}
+			sdStorageProfile := startProfile
 			cfg, err := selectSharedDirStorage(globalSettings, sdStorageProfile, recordedSharedDirBackend, opts.Name)
 			if err != nil {
 				return nil, err
@@ -2012,10 +2010,7 @@ authDone:
 	// Home storage: local, or (Kubernetes only) an NFS home on the export of
 	// the profile's shared_dir_storage. Chosen at the agent's first start
 	// and recorded, before any pod exists; later starts use the record.
-	homeStorageProfile := opts.Profile
-	if homeStorageProfile == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
-		homeStorageProfile = finalScionCfg.Info.Profile
-	}
+	homeStorageProfile := startProfile
 	homePlan, err := resolveHomeStorage(homeStorageInput{
 		AgentDir:     agentDir,
 		AgentName:    opts.Name,
@@ -2316,10 +2311,7 @@ authDone:
 	// other runtimes it is accepted and ignored, with a warning.
 	var sdClass, sdSize string
 	var settingsSafeToEvict *bool
-	sdProfile := opts.Profile
-	if sdProfile == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
-		sdProfile = finalScionCfg.Info.Profile
-	}
+	sdProfile := startProfile
 	var tmplSafeToEvict *bool
 	if finalScionCfg != nil && finalScionCfg.Kubernetes != nil {
 		tmplSafeToEvict = finalScionCfg.Kubernetes.SafeToEvict
@@ -2361,7 +2353,7 @@ authDone:
 	if finalScionCfg != nil {
 		agentK8s = finalScionCfg.Kubernetes
 	}
-	placedK8s, placementWarnings, err := m.applyStartPlacement(opts, agentK8s)
+	placedK8s, placementWarnings, err := m.applyStartPlacement(ctx, opts, agentK8s)
 	if err != nil {
 		return nil, err
 	}
@@ -2409,6 +2401,8 @@ authDone:
 		Workspace:            effectiveWorkspace,
 		RepoRoot:             repoRoot,
 		ContainerWorkspace:   containerWorkspace,
+		AgentOwnWorkspace:    isAgentOwnWorkspace(agentDir, projectDir, effectiveWorkspace),
+		ProjectConfigPath:    projectConfigPath(opts.ProjectPath, projectDir),
 		ResolvedAuth:         resolvedAuth,
 		Harness:              h,
 		Project:              projectName,
@@ -2837,27 +2831,125 @@ func workspacePlacementFor(in workspacePlacementInput) string {
 // §5. util.Debugf is deliberately not used for the failures: per #1339, debug
 // output from this subsystem may not emit at all, so a Debugf here is a failure
 // report that can vanish.
+//
+// The writes are confined to the agent home (pkg/agenthome), through one
+// handle opened on the home: a link at the token file or its temp file is
+// replaced, never written through, and a linked .scion is refused.
 func writeAgentTokenFile(agentHome, token string) error {
 	scionDir := filepath.Join(agentHome, ".scion")
-	if err := os.MkdirAll(scionDir, 0700); err != nil {
+	home, err := agenthome.OpenCreate(agentHome, 0700)
+	if err != nil {
+		return fmt.Errorf("create agent token directory %s: %w", scionDir, err)
+	}
+	defer func() { _ = home.Close() }()
+	if err := home.MkdirAll(".scion", 0700); err != nil {
 		return fmt.Errorf("create agent token directory %s: %w", scionDir, err)
 	}
 
+	const tokenRel, tmpRel = ".scion/scion-token", ".scion/scion-token.tmp"
 	tokenPath := filepath.Join(scionDir, "scion-token")
 	tmp := tokenPath + ".tmp"
-	if err := os.WriteFile(tmp, []byte(token), 0600); err != nil {
-		_ = os.Remove(tmp)
+	if err := home.WriteFile(tmpRel, []byte(token), 0600); err != nil {
+		_ = home.Remove(tmpRel)
 		return fmt.Errorf("write agent token file %s: %w", tmp, err)
 	}
-	if err := os.Rename(tmp, tokenPath); err != nil {
+	if err := home.Rename(tmpRel, tokenRel); err != nil {
 		// Best effort: the temp file holds the credential, so leaving it behind
 		// on a path we are about to abort on is worse than a lost error here.
-		_ = os.Remove(tmp)
+		_ = home.Remove(tmpRel)
 		return fmt.Errorf("install agent token file %s from %s: %w", tokenPath, tmp, err)
 	}
 
 	util.Debugf("Start: wrote agent token to %s", tokenPath)
 	return nil
+}
+
+// isAgentOwnWorkspace reports whether workspace is the agent's own checkout:
+// <agentDir>/workspace, or the existing worktree provisioning attached the
+// agent to, as recorded in agentDir (writeAgentOwnWorkspace). It compares
+// broker-owned paths only, after resolving symlinks, and never looks at the
+// workspace's contents, which the agent can write. With no record, only
+// <agentDir>/workspace counts, so any other workspace's .scion is treated as
+// project configuration (read-only).
+//
+// The recorded path is accepted only when it is not the project root or
+// the repository root and contains neither, and git (run hardened) lists
+// it as a linked worktree of the project's repository.
+func isAgentOwnWorkspace(agentDir, projectDir, workspace string) bool {
+	if agentDir == "" || workspace == "" {
+		return false
+	}
+	ws := resolvedClean(workspace)
+	if ws == resolvedClean(filepath.Join(agentDir, "workspace")) {
+		return true
+	}
+	recorded := readAgentOwnWorkspace(agentDir)
+	if recorded == "" || ws != resolvedClean(recorded) {
+		return false
+	}
+	return validAttachedWorktree(projectDir, ws)
+}
+
+// validAttachedWorktree reports whether ws (resolved) may be an attached
+// worktree of the project at projectDir: neither the project root nor the
+// repository root, containing neither, and a registered linked worktree of
+// the repository.
+func validAttachedWorktree(projectDir, ws string) bool {
+	if projectDir == "" {
+		return false
+	}
+	projectRoot := projectDir
+	if filepath.Base(projectRoot) == config.DotScion {
+		projectRoot = filepath.Dir(projectRoot)
+	}
+	projectRoot = resolvedClean(projectRoot)
+	if ws == projectRoot || pathWithin(projectRoot, ws) {
+		return false
+	}
+	repoRoot, err := util.HardenedRepoRootDir(projectRoot)
+	if err != nil {
+		return false
+	}
+	repoRoot = resolvedClean(repoRoot)
+	if ws == repoRoot || pathWithin(repoRoot, ws) {
+		return false
+	}
+	ok, err := util.IsRegisteredLinkedWorktree(repoRoot, ws)
+	return err == nil && ok
+}
+
+// projectConfigPath is the broker-side path of the project's .scion entry
+// as the request named it (projectPath, a project root or its .scion), else
+// the resolved project dir.
+func projectConfigPath(projectPath, projectDir string) string {
+	if projectPath != "" {
+		return projectPath
+	}
+	return projectDir
+}
+
+// resolvedClean returns p with symlinks resolved where it exists, cleaned.
+func resolvedClean(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		p = resolved
+	}
+	return filepath.Clean(p)
+}
+
+// removeStaleAuthCandidates removes the staged auth-candidates.json from the
+// agent home, confined to the home (pkg/agenthome): a link there is removed
+// itself and a linked directory component is refused. A missing home or file
+// is not an error.
+func removeStaleAuthCandidates(agentHome string) error {
+	home, err := agenthome.Open(agentHome)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer func() { _ = home.Close() }()
+	return home.Remove(agentplugin.InputsRel + "/auth-candidates.json")
 }
 
 // detectRepoRoot resolves the git repo root to bind-mount for an agent, or ""
