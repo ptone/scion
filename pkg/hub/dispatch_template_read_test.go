@@ -811,7 +811,7 @@ func TestReincarnate_UserTemplate_MoveKeepsTemplateID(t *testing.T) {
 	assert.Equal(t, reincUserHash, decodePlan(t, rec).Plan.Template.New, "a move keeps the user template")
 }
 
-// The creator can no longer read the template (deactivated): 409
+// The creator can no longer read the template (it moved to another owner): 409
 // template_unavailable on a dry run and a real run, the agent unchanged.
 func TestReincarnate_UserTemplate_CreatorGone_409(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
@@ -856,6 +856,7 @@ func TestReincarnate_UserTemplate_MoveCreatorGone_409(t *testing.T) {
 
 	rec := f.reincarnate(t, ReincarnateAgentRequest{DryRun: true, TargetBroker: f.dst.ID})
 	requireAPIError(t, rec, http.StatusConflict, ErrCodeTemplateUnavailable)
+	assert.Contains(t, rec.Body.String(), "its creator can no longer read")
 }
 
 // The user template changed since the agent was dispatched: a reincarnate
@@ -1333,6 +1334,17 @@ func TestRepin_RefusedByStartClaim_PinUnchanged(t *testing.T) {
 	}
 }
 
+// requireWakeReadinessTimeout asserts the wake's answer after a dispatch that
+// the fake dispatcher never reports ready: the readiness-timeout error, and
+// nothing else.
+func requireWakeReadinessTimeout(t *testing.T, dmErr *AgentDMError) {
+	t.Helper()
+	require.NotNil(t, dmErr, "the fake never reports ready, so the wake ends in the readiness timeout")
+	assert.Equal(t, ErrCodeRuntimeError, dmErr.Code)
+	assert.Equal(t, http.StatusBadGateway, dmErr.HTTPStatus)
+	assert.Contains(t, dmErr.Message, "did not become ready")
+}
+
 // A direct-message wake re-pins like a start, and a lost compare-and-set
 // answers the sender 409 version_conflict with nothing dispatched.
 func TestRepin_Wake(t *testing.T) {
@@ -1350,7 +1362,8 @@ func TestRepin_Wake(t *testing.T) {
 		cur, err := f.store.GetAgent(ctx, a.ID)
 		require.NoError(t, err)
 
-		f.srv.wakeAgentForDM(ctx, cur)
+		_, dmErr := f.srv.wakeAgentForDM(ctx, cur)
+		requireWakeReadinessTimeout(t, dmErr)
 		require.Equal(t, 1, f.disp.starts)
 		assert.Equal(t, repinNewHash, f.disp.storedHash)
 		assert.Equal(t, repinNewHash, f.disp.dispatchedHash)
@@ -1377,10 +1390,10 @@ func TestRepin_Wake(t *testing.T) {
 		// An immediate retry wakes the agent (not deferred behind a held
 		// claim).
 		f.srv.store = f.store
-		res, _ := f.srv.wakeAgentForDM(ctx, got)
-		if res != nil {
-			assert.NotEqual(t, WakeDeferred, res.Outcome, "the retry is not deferred")
-		}
+		_, dmErr = f.srv.wakeAgentForDM(ctx, got)
+		// Dispatched, then only the (fake's) readiness wait fails: a
+		// deferred wake would answer no error and dispatch nothing.
+		requireWakeReadinessTimeout(t, dmErr)
 		assert.Equal(t, 1, f.disp.starts, "the retry is dispatched")
 		assert.Equal(t, repinNewHash, f.disp.storedHash)
 	})
