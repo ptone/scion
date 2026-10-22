@@ -1396,9 +1396,8 @@ func TestLFSConfigAccessKeyForcesSkip(t *testing.T) {
 				u.Scheme = strings.ToUpper(u.Scheme)
 			}
 			configKey := u.String()
-			// Guard against the case silently degrading to the exact pinned
-			// spelling (then it would not exercise an equivalent-but-different
-			// key at all).
+			// Fail if it silently degrades to the exact pinned spelling (then it
+			// would not exercise an equivalent-but-different key at all).
 			if configKey == endpoint {
 				t.Fatalf("spelling %q did not change the endpoint (%q); the case would not test an equivalent spelling", spelling, endpoint)
 			}
