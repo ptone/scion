@@ -312,23 +312,20 @@ func resolveStartRepoRoot(in startRepoRootInput) (repoRoot, brokerCandidate stri
 	return root, ""
 }
 
-// refuseWorkspaceInAgentsDir rejects an explicit workspace that resolves at or
-// below the project's own .scion/agents directory (which holds agents' own
-// directories, never a workspace). Such a workspace would mount the agents
-// tree read-write and is not covered by the in-project agents-dir mask, since
-// the agents directory would not sit at <workspace>/.scion/agents. Other
-// locations under .scion (for example the hub-native base's
-// .scion/workspace/worktrees/<agent>) are allowed. projectDir is the resolved
-// .scion directory (or its parent); both spellings are handled.
+// refuseWorkspaceInAgentsDir rejects an explicit workspace that is the
+// project's own .scion directory, or that resolves at or below .scion/agents
+// (which holds agents' own directories, never a workspace). Either would
+// mount the agents tree read-write: .scion/agents is not covered by the
+// in-project agents-dir mask (the agents directory would not sit at
+// <workspace>/.scion/agents), and the mask shadows <workspace>/.scion/agents,
+// not the whole of a .scion mounted directly. Other locations under .scion
+// (for example the hub-native base's .scion/workspace/worktrees/<agent>) are
+// allowed. projectDir is the resolved .scion directory (or its parent); both
+// spellings are handled.
 func refuseWorkspaceInAgentsDir(projectDir, workspace string) error {
 	scionDir := projectDir
 	if filepath.Base(projectDir) != config.DotScion {
 		scionDir = filepath.Join(projectDir, config.DotScion)
-	}
-	agentsDir := filepath.Join(scionDir, "agents")
-	ra, err := filepath.EvalSymlinks(agentsDir)
-	if err != nil {
-		return nil // no agents directory to be inside
 	}
 	rw, err := filepath.EvalSymlinks(workspace)
 	if err != nil {
@@ -336,8 +333,22 @@ func refuseWorkspaceInAgentsDir(projectDir, workspace string) error {
 		// resolution failure here is unexpected.
 		return fmt.Errorf("resolve workspace %q: %w", workspace, err)
 	}
-	if pathUnder(rw, ra) {
-		return fmt.Errorf("workspace %q is inside the project's agents directory (%s), which holds agent state, not a workspace; choose a workspace outside it", workspace, agentsDir)
+	// Refuse the workspace being the .scion directory itself.
+	if rs, err := filepath.EvalSymlinks(scionDir); err == nil {
+		if rw == rs {
+			return fmt.Errorf("workspace %q is the project's .scion directory (%s), which holds agent state, not a workspace; choose a workspace outside it", workspace, scionDir)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("resolve project .scion %q: %w", scionDir, err)
+	}
+	// Refuse the workspace being, or being under, the agents directory.
+	agentsDir := filepath.Join(scionDir, "agents")
+	if ra, err := filepath.EvalSymlinks(agentsDir); err == nil {
+		if pathUnder(rw, ra) {
+			return fmt.Errorf("workspace %q is inside the project's agents directory (%s), which holds agent state, not a workspace; choose a workspace outside it", workspace, agentsDir)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("resolve project agents directory %q: %w", agentsDir, err)
 	}
 	return nil
 }

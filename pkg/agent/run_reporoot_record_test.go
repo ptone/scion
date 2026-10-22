@@ -232,15 +232,20 @@ func TestRefuseWorkspaceInAgentsDir(t *testing.T) {
 	agentDir := mkdirAllT(t, filepath.Join(agents, "a"))
 	wtWorkspace := mkdirAllT(t, filepath.Join(scion, "workspace", "worktrees", "a"))
 	outside := mkdirAllT(t, filepath.Join(root, "proj", "work"))
-	// Refused: the agents tree and everything under it.
-	for _, ws := range []string{agents, agentDir} {
+	// Refused: the .scion directory itself, the agents tree, and below it.
+	for _, ws := range []string{scion, agents, agentDir} {
 		if err := refuseWorkspaceInAgentsDir(scion, ws); err == nil {
 			t.Errorf("refuseWorkspaceInAgentsDir(%q): want a refusal", ws)
 		}
 	}
-	// Allowed: .scion itself, the hub-native .scion/workspace worktree, and a
-	// workspace outside .scion entirely.
-	for _, ws := range []string{scion, wtWorkspace, outside} {
+	// A relative ".scion" resolves to the same directory (the Case 1 relative
+	// route), and is refused the same way.
+	if err := refuseWorkspaceInAgentsDir(filepath.Dir(scion), scion); err == nil {
+		t.Error("refuseWorkspaceInAgentsDir(projectRoot, .scion): want a refusal")
+	}
+	// Allowed: the hub-native .scion/workspace worktree, and a workspace
+	// outside .scion entirely.
+	for _, ws := range []string{wtWorkspace, outside} {
 		if err := refuseWorkspaceInAgentsDir(scion, ws); err != nil {
 			t.Errorf("refuseWorkspaceInAgentsDir(%q) = %v, want nil", ws, err)
 		}
@@ -257,6 +262,27 @@ func TestRefuseWorkspaceInAgentsDir(t *testing.T) {
 	}
 	if err := refuseWorkspaceInAgentsDir(scion, link); err == nil {
 		t.Error("refuseWorkspaceInAgentsDir(symlink into agents): want a refusal")
+	}
+
+	// A project whose .scion directory is itself reached through a symlink
+	// (the projectDir passed in is named .scion but is a link): both the
+	// ==.scion and the agents-tree checks still fire (both sides resolve).
+	realProj := mkdirAllT(t, filepath.Join(root, "real", ".scion"))
+	realAgentDir := mkdirAllT(t, filepath.Join(realProj, "agents", "x"))
+	linkParent := mkdirAllT(t, filepath.Join(root, "linked"))
+	scionLink := filepath.Join(linkParent, ".scion")
+	if err := os.Symlink(realProj, scionLink); err != nil {
+		t.Fatal(err)
+	}
+	if err := refuseWorkspaceInAgentsDir(scionLink, scionLink); err == nil {
+		t.Error("refuseWorkspaceInAgentsDir(symlinked .scion, itself): want a refusal")
+	}
+	agentsLink := filepath.Join(root, "link-to-real-agent")
+	if err := os.Symlink(realAgentDir, agentsLink); err != nil {
+		t.Fatal(err)
+	}
+	if err := refuseWorkspaceInAgentsDir(scionLink, agentsLink); err == nil {
+		t.Error("refuseWorkspaceInAgentsDir(symlinked .scion, symlinked agent dir): want a refusal")
 	}
 }
 
