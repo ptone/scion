@@ -294,8 +294,21 @@ func IsIgnored(dir, path string) bool {
 	return err == nil
 }
 
-// CreateWorktree creates a new git worktree at the specified path with a new branch.
+// CreateWorktree creates a new git worktree at the specified path with a new
+// branch, with no broker-recorded origin for the git-lfs endpoint pin (the
+// endpoint is derived from the live remote.origin.url, the pre-G-5 behaviour).
+// Prefer CreateWorktreeWithOrigin from broker/hub start paths, which pass the
+// recorded origin.
 func CreateWorktree(path, branch string) error {
+	return CreateWorktreeWithOrigin(path, branch, "")
+}
+
+// CreateWorktreeWithOrigin is CreateWorktree with the broker-recorded origin URL
+// for the project (the hub project's repository). It is used to pin the git-lfs
+// endpoint from a trusted source rather than the live, agent-writable
+// remote.origin.url, and to skip the smudge when the live origin no longer
+// matches the recorded one (G-5). Pass "" when no recorded origin is available.
+func CreateWorktreeWithOrigin(path, branch, recordedOrigin string) error {
 	// Guard: refuse to create worktrees inside an agent container.
 	// SCION_HOST_UID is set by the runtime when launching containers.
 	// Creating worktrees inside containers produces path-identity mismatches
@@ -323,10 +336,11 @@ func CreateWorktree(path, branch string) error {
 	gitEnv := append(HostGitEnv(os.Environ()), "LC_ALL=C")
 	ctx := context.Background()
 	// git-lfs on a host-side checkout would otherwise take its endpoint from
-	// a tracked .lfsconfig; pin the endpoint from the trusted origin remote
-	// instead (lfs.url via -c outranks .lfsconfig). When the endpoint cannot
-	// be derived (for example an ssh remote), skip the smudge and warn.
-	lfsOpt := lfsOptionForLinkedCheckout(root, branch)
+	// a tracked .lfsconfig; pin the endpoint from the trusted (broker-recorded)
+	// origin instead (lfs.url via -c outranks .lfsconfig). When the endpoint
+	// cannot be derived (for example an ssh remote) or the live origin no longer
+	// matches the recorded one, skip the smudge and warn.
+	lfsOpt := lfsOptionForLinkedCheckout(root, branch, recordedOrigin)
 	opts := HostGitOptions{Env: gitEnv, Policy: RepoPolicyLinked, SkipLFSSmudge: lfsOpt.skipSmudge, LFSURL: lfsOpt.url}
 	cmd, err := HostGitCommand(ctx, root, opts, "worktree", "add", "--relative-paths", "-b", branch, path)
 	if err != nil {
@@ -369,14 +383,23 @@ type lfsCheckoutOption struct {
 
 // lfsOptionForLinkedCheckout decides the git-lfs handling for a linked
 // checkout at root:
-//   - pin the endpoint (and its auth mode to basic) derived from the origin
-//     remote URL when the origin is http(s) AND the checked-out .lfsconfig
-//     neither names its own endpoint nor sets any lfs.<url>.access; otherwise
-//   - skip the smudge (an ssh/scp or absent origin, or a tracked .lfsconfig
-//     that names an endpoint or an access mode — its objects may legitimately
-//     live on a separate server, or it may select an auth mode we will not
-//     use; either way we do not pin and never contact it).
-func lfsOptionForLinkedCheckout(root, branch string) lfsCheckoutOption {
+//   - pin the endpoint (and its auth mode to basic) derived from the
+//     broker-recorded origin when it is http(s), the live remote.origin.url
+//     still matches it, AND the checked-out .lfsconfig neither names its own
+//     endpoint nor sets any lfs.<url>.access; otherwise
+//   - skip the smudge (an ssh/scp or absent/mismatched origin, or a tracked
+//     .lfsconfig that names an endpoint or an access mode — its objects may
+//     legitimately live on a separate server, or it may select an auth mode we
+//     will not use; either way we do not pin and never contact it).
+//
+// recordedOrigin is the broker-recorded origin for the project. The live
+// remote.origin.url is agent-writable in the shared repository config until PR 2's
+// config narrowing applies, and host-side CreateWorktree runs before the
+// container in any case, so the endpoint is derived from the recorded origin and
+// we refuse to pin when the live origin has been pointed elsewhere (G-5). When
+// recordedOrigin is empty (no hub record available) we fall back to the live
+// origin, the pre-G-5 behaviour.
+func lfsOptionForLinkedCheckout(root, branch, recordedOrigin string) lfsCheckoutOption {
 	// Read the .lfsconfig of the ref actually being checked out: the existing
 	// branch when it already exists, otherwise HEAD (a new branch is created
 	// from HEAD, so it has HEAD's tree).
@@ -391,11 +414,23 @@ func lfsOptionForLinkedCheckout(root, branch string) lfsCheckoutOption {
 	if lfsConfigNamesEndpoint(root, ref) {
 		return lfsCheckoutOption{skipSmudge: true}
 	}
-	remote := strings.TrimSpace(GetGitRemoteDir(root))
-	if remote == "" {
+	// G-5: derive from the broker-recorded origin, never trust the live origin
+	// alone. If a recorded origin is present but the live origin no longer
+	// normalises to it, the repository the agent points at is not the one the
+	// hub recorded — skip rather than pin.
+	origin := strings.TrimSpace(recordedOrigin)
+	if origin == "" {
+		origin = strings.TrimSpace(GetGitRemoteDir(root))
+	} else {
+		live := strings.TrimSpace(GetGitRemoteDir(root))
+		if live == "" || NormalizeGitRemote(live) != NormalizeGitRemote(origin) {
+			return lfsCheckoutOption{skipSmudge: true}
+		}
+	}
+	if origin == "" {
 		return lfsCheckoutOption{skipSmudge: true}
 	}
-	if endpoint, ok := DeriveLFSEndpoint(remote); ok {
+	if endpoint, ok := DeriveLFSEndpoint(origin); ok {
 		return lfsCheckoutOption{url: endpoint}
 	}
 	return lfsCheckoutOption{skipSmudge: true}

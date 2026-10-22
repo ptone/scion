@@ -1575,14 +1575,51 @@ func TestLfsOptionForLinkedCheckout_ReadsBranchRef(t *testing.T) {
 	hostRunGit(t, repo, "-c", "core.hooksPath="+os.DevNull, "commit", "-q", "-m", "feat lfs")
 	hostRunGit(t, repo, "checkout", "-q", "main")
 
-	if opt := lfsOptionForLinkedCheckout(repo, "feat"); !opt.skipSmudge {
+	if opt := lfsOptionForLinkedCheckout(repo, "feat", ""); !opt.skipSmudge {
 		t.Errorf("branch feat names an endpoint: want skipSmudge, got %+v", opt)
 	}
-	if opt := lfsOptionForLinkedCheckout(repo, "main"); opt.skipSmudge || opt.url == "" {
+	if opt := lfsOptionForLinkedCheckout(repo, "main", ""); opt.skipSmudge || opt.url == "" {
 		t.Errorf("branch main has no endpoint (http origin): want pinned url, got %+v", opt)
 	}
 	// A new branch (does not exist yet) reads HEAD, which is main → pinned.
-	if opt := lfsOptionForLinkedCheckout(repo, "brand-new"); opt.skipSmudge || opt.url == "" {
+	if opt := lfsOptionForLinkedCheckout(repo, "brand-new", ""); opt.skipSmudge || opt.url == "" {
 		t.Errorf("new branch reads HEAD (no endpoint): want pinned url, got %+v", opt)
+	}
+}
+
+// G-5: the git-lfs endpoint is pinned from the broker-recorded origin, not the
+// live remote.origin.url. When the live origin no longer matches the recorded
+// one (an agent repointed it), the smudge is skipped rather than pinned.
+func TestLfsOptionForLinkedCheckout_RecordedOrigin(t *testing.T) {
+	hostGitTestEnv(t)
+	repo := filepath.Join(t.TempDir(), "repo")
+	hostRunGit(t, filepath.Dir(repo), "init", "-q", "-b", "main", repo)
+	writeFile(t, filepath.Join(repo, "f.txt"), "x\n")
+	hostRunGit(t, repo, "add", ".")
+	hostRunGit(t, repo, "-c", "core.hooksPath="+os.DevNull, "commit", "-q", "-m", "main")
+
+	const recorded = "https://host.example/o/r.git"
+
+	// Live origin matches the recorded origin (http): pin the recorded endpoint.
+	hostRunGit(t, repo, "remote", "add", "origin", recorded)
+	opt := lfsOptionForLinkedCheckout(repo, "main", recorded)
+	if opt.skipSmudge || opt.url == "" {
+		t.Fatalf("live origin matches recorded (http): want pinned url, got %+v", opt)
+	}
+	if want, _ := DeriveLFSEndpoint(recorded); opt.url != want {
+		t.Errorf("pinned url = %q, want endpoint derived from the recorded origin %q", opt.url, want)
+	}
+
+	// Agent repoints the live origin elsewhere: the live origin no longer matches
+	// the recorded one, so skip rather than pin (never contact the agent's host).
+	hostRunGit(t, repo, "remote", "set-url", "origin", "https://evil.example/x.git")
+	if opt := lfsOptionForLinkedCheckout(repo, "main", recorded); !opt.skipSmudge {
+		t.Errorf("live origin repointed away from recorded: want skipSmudge, got %+v", opt)
+	}
+
+	// An ssh recorded origin cannot derive an http(s) endpoint: skip.
+	hostRunGit(t, repo, "remote", "set-url", "origin", "git@host.example:o/r.git")
+	if opt := lfsOptionForLinkedCheckout(repo, "main", "git@host.example:o/r.git"); !opt.skipSmudge {
+		t.Errorf("ssh recorded origin: want skipSmudge, got %+v", opt)
 	}
 }
