@@ -243,7 +243,7 @@ func allowVar(policy RepoConfigPolicy, v gitConfigVar, opts repoConfigAllowOptio
 	// A few keys that would run a command are allowed here only because a
 	// fixed -c pin on every host-side call (HostGitArgs) overrides their
 	// repository value — core.hooksPath, core.fsmonitor, core.pager and
-	// submodule.recurse — so a planted value never executes.
+	// submodule.recurse — so such a repository value never runs a command.
 	switch sec {
 	case "core":
 		if topLevel {
@@ -319,7 +319,7 @@ func allowVar(policy RepoConfigPolicy, v gitConfigVar, opts repoConfigAllowOptio
 			return true, ""
 		}
 	case "user":
-		// Signing key identity (a key id or path) is inert data; a planted
+		// Signing key identity (a key id or path) is inert data; a
 		// gpg/ssh *.program that would act on it is refused above, which
 		// refuses the whole config.
 		if topLevel && name == "signingkey" {
@@ -540,7 +540,7 @@ func parseRepoConfig(dir string, env []string) ([]gitConfigVar, error) {
 // isSensitiveConfigKey reports whether a full config key is one of the
 // allowed, value-sensitive keys that git-lfs (and no other legitimate
 // in-command writer) never writes, so any change to it while a host-side
-// command runs is treated as tampering. The subsection case is preserved by
+// command runs is rejected. The subsection case is preserved by
 // splitConfigKey; section and name are already lower-case in a snapshot key.
 func isSensitiveConfigKey(key string) bool {
 	section, subsection, name := splitConfigKey(key)
