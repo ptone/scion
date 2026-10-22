@@ -2094,7 +2094,7 @@ type Server struct {
 	signingKeySources   map[string]string
 
 	// signingIssuanceClosedLogged is set once /readyz has logged that the
-	// keyring's active signing generation reached its sign_until.
+	// keyring's signing ring cannot issue (signingNotReadyReason).
 	signingIssuanceClosedLogged atomic.Bool
 
 	// OIDC identity provider (nil = OIDC IdP disabled)

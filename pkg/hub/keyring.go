@@ -22,10 +22,16 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
 )
 
-// readyReasonSigningIssuanceClosed is the /readyz reason while the
-// keyring's active signing generation is at or past its sign_until. It
-// names no key material, ID or deadline.
-const readyReasonSigningIssuanceClosed = "signing_issuance_closed"
+// The /readyz reasons of a keyring file whose signing ring cannot issue.
+// They name no key material, ID or deadline.
+const (
+	// readyReasonSigningIssuanceClosed: the active generation is at or
+	// past its sign_until.
+	readyReasonSigningIssuanceClosed = "signing_issuance_closed"
+	// readyReasonSigningNoActiveGeneration: the ring has no usable active
+	// generation (unreachable through the loader; fail closed anyway).
+	readyReasonSigningNoActiveGeneration = "signing_no_active_generation"
+)
 
 // SigningKeySourceKeyring is the signing-key source label of the web
 // session cookie keys when a keyring file (server.keyring_file) supplies
@@ -68,23 +74,33 @@ func (s *Server) keyringNow() time.Time {
 	return time.Now()
 }
 
-// signingIssuanceClosed reports whether the keyring's active signing
-// generation is at or past its sign_until: the instance has stopped
-// issuing and must fail readiness. Always false without a keyring file.
-// The first true result is logged once at WARN, without key material.
-func (s *Server) signingIssuanceClosed() bool {
+// signingNotReadyReason returns the /readyz reason when a keyring file's
+// signing ring cannot issue: signing_issuance_closed at or after the active
+// generation's sign_until, signing_no_active_generation for a ring without
+// a usable active generation (any other Active error is treated the same
+// way). It returns "" when issuance works, and always without a keyring
+// file or with the legacy adapter. The first not-ready result is logged once at WARN, without key
+// material.
+func (s *Server) signingNotReadyReason() string {
 	k := s.config.Keyring
-	if k == nil || k.Source() != keyring.SourceFile {
-		return false
+	if k == nil || k.Source() == keyring.SourceLegacy {
+		// No keyring file (or the legacy adapter): nothing to check. Any
+		// other keyring, including a zero one, must be able to issue.
+		return ""
 	}
-	if _, err := k.Signing().Active(webSessionHashPurpose, s.keyringNow()); !errors.Is(err, keyring.ErrIssuanceClosed) {
-		return false
+	_, err := k.Signing().Active(webSessionHashPurpose, s.keyringNow())
+	if err == nil {
+		return ""
+	}
+	reason := readyReasonSigningNoActiveGeneration
+	if errors.Is(err, keyring.ErrIssuanceClosed) {
+		reason = readyReasonSigningIssuanceClosed
 	}
 	if s.signingIssuanceClosedLogged.CompareAndSwap(false, true) {
-		slog.Warn("Not ready: the keyring's active signing generation reached its sign_until; issuance stopped",
-			"reason", readyReasonSigningIssuanceClosed, "active_id", k.Signing().ActiveID())
+		slog.Warn("Not ready: the keyring's signing ring cannot issue",
+			"reason", reason, "active_id", k.Signing().ActiveID())
 	}
-	return true
+	return reason
 }
 
 // ExperimentEnabled reports whether the named experiment is enabled now.

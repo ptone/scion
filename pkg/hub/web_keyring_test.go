@@ -17,9 +17,11 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -353,6 +355,22 @@ func TestWebKeyring_IssuanceClosedFailsReadinessButVerifies(t *testing.T) {
 	assert.NotEmpty(t, r.hubAuth, "a session minted before sign_until still authenticates")
 }
 
+// TestWebKeyring_NoActiveGenerationNotReady: a keyring whose signing ring
+// has no usable active generation reports not ready with
+// signing_no_active_generation (unreachable through the loader, which
+// refuses such files; fail closed anyway).
+func TestWebKeyring_NoActiveGenerationNotReady(t *testing.T) {
+	st, err := newTestStore(t, ":memory:")
+	require.NoError(t, err)
+	hubSrv := &Server{store: st, config: ServerConfig{Keyring: &keyring.Keyring{}}}
+	rec := httptest.NewRecorder()
+	hubSrv.handleReadyz(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	var body map[string]string
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, map[string]string{"status": "not_ready", "reason": "signing_no_active_generation"}, body)
+}
+
 // TestWebKeyring_LegacyReadinessUnchanged: without a keyring file /readyz
 // never reports signing_issuance_closed.
 func TestWebKeyring_LegacyReadinessUnchanged(t *testing.T) {
@@ -585,6 +603,8 @@ func TestWebKeyring_ResaveSkippedWhenAlreadySetOrIssuanceClosed(t *testing.T) {
 		krEntry{id: "legacy", secret: krLegacySecret},
 		krEntry{id: "gen1", secret: krGen1Secret, signUntil: krTime(time.Hour), verifyUntl: krTime(48 * time.Hour)})
 	l, c := newKRReplica(t, st, kl, clk), newKRReplica(t, st, kc, clk)
+	var logs bytes.Buffer
+	c.ws.log = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	legacyCookie := krLogin(t, l, l)
 	clk.t = krT0.Add(2 * time.Hour)
 	resp := c.serve(t, http.MethodGet, "/api/v1/projects", []*http.Cookie{legacyCookie})
@@ -594,4 +614,7 @@ func TestWebKeyring_ResaveSkippedWhenAlreadySetOrIssuanceClosed(t *testing.T) {
 	resp = krPageLoad(t, c, "/agents", legacyCookie)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Zero(t, sessionCookieCount(resp), "no page re-save after sign_until")
+	// The re-save was skipped, not attempted and failed: a failing save
+	// would also emit no cookie, but would log on every request.
+	assert.NotContains(t, logs.String(), "Failed to re-save session", "no failing re-save after sign_until")
 }

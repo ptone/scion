@@ -453,13 +453,14 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// An instance whose active signing generation reached its sign_until
-	// has stopped issuing and is not ready (ptone/scion#1530 §2);
-	// verification of eligible generations continues until verify_until.
-	if s.signingIssuanceClosed() {
+	// An instance whose keyring signing ring cannot issue (its active
+	// generation reached sign_until, or it has none) is not ready
+	// (ptone/scion#1530 §2); verification of eligible generations continues
+	// until verify_until.
+	if reason := s.signingNotReadyReason(); reason != "" {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 			"status": "not_ready",
-			"reason": readyReasonSigningIssuanceClosed,
+			"reason": reason,
 		})
 		return
 	}
