@@ -18,12 +18,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -253,4 +255,24 @@ func TestRestartAgent_TemplateReadsNameAgentFromResolvedEnv(t *testing.T) {
 	for _, got := range stub.getAgents {
 		assert.Equal(t, "agent-uuid-restart", got)
 	}
+}
+
+// The broker advertises dispatchBoundCatalogRead everywhere the Hub learns
+// capabilities: the static set (registration and every heartbeat), the
+// registration names, and the info endpoint (ptone/scion#5770).
+func TestDispatchBoundCatalogReadCapability(t *testing.T) {
+	assert.True(t, StaticCapabilities(nil, "").DispatchBoundCatalogRead, "static set")
+	assert.Contains(t, StaticCapabilityNames(nil), "dispatchBoundCatalogRead", "registration names")
+
+	client := &mockRuntimeBrokerService{}
+	svc := NewHeartbeatService(client, "b", time.Hour, &heartbeatMockManager{}, nil, slog.Default())
+	hb := lastHeartbeat(t, svc, client)
+	require.NotNil(t, hb.Capabilities)
+	assert.True(t, hb.Capabilities.DispatchBoundCatalogRead, "heartbeat")
+
+	srv := newTestServer(t)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/info", nil))
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"dispatchBoundCatalogRead":true`, "info")
 }

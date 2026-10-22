@@ -167,3 +167,14 @@ func TestBrokerRegistrationCapabilities_IncludesAsyncStart(t *testing.T) {
 		t.Errorf("brokerRegistrationCapabilities() = %v, want it to include asyncStart", brokerRegistrationCapabilities())
 	}
 }
+
+// TestBrokerRegistrationCapabilities_IncludesDispatchBoundCatalogRead pins
+// that the broker CLI reports dispatchBoundCatalogRead at register and join
+// (ptone/scion#5770). The join replaces the stored capabilities, so without
+// it a user-scoped template create would get a spurious 412 until the next
+// heartbeat.
+func TestBrokerRegistrationCapabilities_IncludesDispatchBoundCatalogRead(t *testing.T) {
+	if !slices.Contains(brokerRegistrationCapabilities(), "dispatchBoundCatalogRead") {
+		t.Errorf("brokerRegistrationCapabilities() = %v, want it to include dispatchBoundCatalogRead", brokerRegistrationCapabilities())
+	}
+}

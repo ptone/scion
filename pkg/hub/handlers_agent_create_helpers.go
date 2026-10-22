@@ -1440,6 +1440,11 @@ func (s *Server) handleExistingAgent(
 		if needBrokerFill && !s.persistRuntimeBrokerFill(ctx, w, existingAgent, runtimeBrokerID) {
 			return existingAgentErrored
 		}
+		// A user-scoped template on a broker known to lack dispatch-bound
+		// template reads (ptone/scion#5770): 412.
+		if !s.requireDispatchBoundReadCapabilityForAgent(ctx, w, existingAgent) {
+			return existingAgentErrored
+		}
 
 		if req.Task != "" {
 			if existingAgent.AppliedConfig == nil {
@@ -1599,6 +1604,11 @@ func (s *Server) handleExistingAgent(
 			// start is the one the hub records as running the agent
 			// (ptone/scion#5770).
 			if needBrokerFill && !s.persistRuntimeBrokerFill(ctx, w, existingAgent, runtimeBrokerID) {
+				return existingAgentErrored
+			}
+			// A user-scoped template on a broker known to lack dispatch-bound
+			// template reads (ptone/scion#5770): 412.
+			if !s.requireDispatchBoundReadCapabilityForAgent(ctx, w, existingAgent) {
 				return existingAgentErrored
 			}
 
@@ -1864,6 +1874,11 @@ func (s *Server) handleExistingAgent(
 		// start is the one the hub records as running the agent
 		// (ptone/scion#5770).
 		if needBrokerFill && !s.persistRuntimeBrokerFill(ctx, w, existingAgent, runtimeBrokerID) {
+			return existingAgentErrored
+		}
+		// A user-scoped template on a broker known to lack dispatch-bound
+		// template reads (ptone/scion#5770): 412.
+		if !s.requireDispatchBoundReadCapabilityForAgent(ctx, w, existingAgent) {
 			return existingAgentErrored
 		}
 

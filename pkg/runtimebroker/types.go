@@ -137,6 +137,10 @@ type BrokerCapabilities struct {
 	// create/start/restart as policy above everything. A hub may stop writing those values into
 	// InlineConfig only for a broker that reports this (ptone/scion#4222).
 	TemplateTiers bool `json:"templateTiers,omitempty"`
+	// DispatchBoundCatalogRead indicates this broker names the agent it
+	// hydrates a template for on its Hub template reads, so the Hub can let
+	// it read that agent's user-scoped template (ptone/scion#5770).
+	DispatchBoundCatalogRead bool `json:"dispatchBoundCatalogRead,omitempty"`
 }
 
 // ProjectInfo is a summary of a project registered on this broker.

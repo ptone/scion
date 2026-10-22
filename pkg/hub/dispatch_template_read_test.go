@@ -867,3 +867,134 @@ func TestReincarnate_TemplateStoreError_FailsWithoutSwap(t *testing.T) {
 	assert.Zero(t, disp.startCalls)
 	assert.Zero(t, disp.reprovisionCalls)
 }
+
+// ptone/scion#5770 slice 2: the dispatchBoundCatalogRead capability, and the
+// 412 for a user-scoped template on a broker known to lack it.
+
+func TestCapabilitiesFromStrings_DispatchBoundCatalogRead(t *testing.T) {
+	for _, name := range []string{"dispatchBoundCatalogRead", "dispatch_bound_catalog_read"} {
+		assert.True(t, capabilitiesFromStrings([]string{name}).DispatchBoundCatalogRead, name)
+	}
+	assert.False(t, capabilitiesFromStrings([]string{"sync"}).DispatchBoundCatalogRead)
+}
+
+func TestCheckDispatchBoundReadCapability(t *testing.T) {
+	user := &store.Template{Slug: "mine", Scope: store.TemplateScopeUser}
+	lacking := &store.RuntimeBroker{ID: "b1", Name: "old-broker", Capabilities: &store.BrokerCapabilities{Sync: true}}
+	having := &store.RuntimeBroker{ID: "b2", Capabilities: &store.BrokerCapabilities{DispatchBoundCatalogRead: true}}
+	unknown := &store.RuntimeBroker{ID: "b3"}
+
+	err := checkDispatchBoundReadCapability(user, lacking)
+	require.ErrorIs(t, err, errBrokerLacksDispatchBoundRead, "known to lack: refused")
+	assert.Contains(t, err.Error(), "user-scoped template mine cannot be used on Runtime Broker old-broker")
+	assert.NoError(t, checkDispatchBoundReadCapability(user, having))
+	assert.NoError(t, checkDispatchBoundReadCapability(user, unknown), "nil capabilities: tried")
+	for _, scope := range []string{store.TemplateScopeGlobal, store.TemplateScopeProject} {
+		assert.NoError(t, checkDispatchBoundReadCapability(&store.Template{Slug: "x", Scope: scope}, lacking), "%s templates are never refused", scope)
+	}
+	assert.NoError(t, checkDispatchBoundReadCapability(nil, lacking))
+}
+
+type capabilityGateFixture struct {
+	*handleExistingAgentAuthzFixture
+	broker   *store.RuntimeBroker
+	userTmpl *store.Template
+	global   *store.Template
+}
+
+func setupCapabilityGate(t *testing.T, caps *store.BrokerCapabilities) *capabilityGateFixture {
+	t.Helper()
+	ctx := context.Background()
+	f := &capabilityGateFixture{handleExistingAgentAuthzFixture: handleExistingAgentAuthzSetup(t)}
+	f.srv.SetDispatcher(&createAgentDispatcher{})
+	var err error
+	f.broker, err = f.store.GetRuntimeBroker(ctx, f.project.DefaultRuntimeBrokerID)
+	require.NoError(t, err)
+	f.broker.Capabilities = caps
+	require.NoError(t, f.store.UpdateRuntimeBroker(ctx, f.broker))
+	f.userTmpl = &store.Template{
+		ID: tid("capgate-user-tmpl"), Slug: "capgate-user", Name: "capgate-user", Harness: "claude",
+		Scope: store.TemplateScopeUser, ScopeID: f.owner.ID, OwnerID: f.owner.ID,
+		Status: store.TemplateStatusActive, ContentHash: dispatchReadHash, Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, f.store.CreateTemplate(ctx, f.userTmpl))
+	f.global = &store.Template{
+		ID: tid("capgate-global-tmpl"), Slug: "capgate-global", Name: "capgate-global", Harness: "claude",
+		Scope: store.TemplateScopeGlobal, Status: store.TemplateStatusActive, ContentHash: dispatchReadHash,
+		Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, f.store.CreateTemplate(ctx, f.global))
+	return f
+}
+
+func (f *capabilityGateFixture) create(t *testing.T, name, templateID string) int {
+	t.Helper()
+	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents", map[string]interface{}{
+		"name": name, "projectId": f.project.ID, "template": templateID,
+	})
+	if rec.Code == http.StatusPreconditionFailed {
+		requireAPIError(t, rec, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability)
+		assert.Contains(t, rec.Body.String(), "does not support user-scoped templates")
+	}
+	return rec.Code
+}
+
+// A create with a user-scoped template on a broker known to lack the
+// capability is refused with 412 before anything is persisted.
+func TestDispatchBoundCapability_CreateKnownToLack_412(t *testing.T) {
+	f := setupCapabilityGate(t, &store.BrokerCapabilities{Sync: true})
+	assert.Equal(t, http.StatusPreconditionFailed, f.create(t, "capgate-refused", f.userTmpl.ID))
+	_, err := f.store.GetAgentBySlug(context.Background(), f.project.ID, "capgate-refused")
+	assert.ErrorIs(t, err, store.ErrNotFound, "a refused create persists nothing")
+}
+
+// Global templates are never refused; a broker with no recorded
+// capabilities, or one that has the flag, is not refused.
+func TestDispatchBoundCapability_CreateNotRefused(t *testing.T) {
+	t.Run("global template on a lacking broker", func(t *testing.T) {
+		f := setupCapabilityGate(t, &store.BrokerCapabilities{Sync: true})
+		assert.NotEqual(t, http.StatusPreconditionFailed, f.create(t, "capgate-global", f.global.ID))
+	})
+	t.Run("nil capabilities", func(t *testing.T) {
+		f := setupCapabilityGate(t, nil)
+		assert.NotEqual(t, http.StatusPreconditionFailed, f.create(t, "capgate-nil", f.userTmpl.ID))
+	})
+	t.Run("broker has the capability", func(t *testing.T) {
+		f := setupCapabilityGate(t, &store.BrokerCapabilities{Sync: true, DispatchBoundCatalogRead: true})
+		assert.NotEqual(t, http.StatusPreconditionFailed, f.create(t, "capgate-has", f.userTmpl.ID))
+	})
+}
+
+// A start, and a resume through create, of an agent recorded with a
+// user-scoped template on a lacking broker are refused with 412, and
+// nothing is dispatched.
+func TestDispatchBoundCapability_StartAndResumeKnownToLack_412(t *testing.T) {
+	ctx := context.Background()
+	t.Run("lifecycle start", func(t *testing.T) {
+		f := setupCapabilityGate(t, &store.BrokerCapabilities{Sync: true})
+		a := f.agent(t, "capgate-start", string(state.PhaseStopped))
+		a.RuntimeBrokerID = f.broker.ID
+		a.AppliedConfig.TemplateID, a.AppliedConfig.TemplateHash = f.userTmpl.ID, f.userTmpl.ContentHash
+		require.NoError(t, f.store.UpdateAgent(ctx, a))
+		disp := &createAgentDispatcher{}
+		f.srv.SetDispatcher(disp)
+
+		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil)
+		requireAPIError(t, rec, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability)
+		assert.False(t, disp.startCalled)
+	})
+	t.Run("resume through create", func(t *testing.T) {
+		f := setupCapabilityGate(t, &store.BrokerCapabilities{Sync: true})
+		a := f.agent(t, "capgate-resume", string(state.PhaseSuspended))
+		a.AppliedConfig.TemplateID, a.AppliedConfig.TemplateHash = f.userTmpl.ID, f.userTmpl.ContentHash
+		require.NoError(t, f.store.UpdateAgent(ctx, a))
+		disp := &createAgentDispatcher{}
+		f.srv.SetDispatcher(disp)
+
+		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents", map[string]interface{}{
+			"name": a.Slug, "projectId": f.project.ID,
+		})
+		requireAPIError(t, rec, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability)
+		assert.False(t, disp.startCalled)
+	})
+}

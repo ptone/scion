@@ -812,6 +812,11 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				}
 				return
 			}
+			// A user-scoped template on a broker known to lack
+			// dispatch-bound template reads (ptone/scion#5770): 412.
+			if !s.requireDispatchBoundReadCapabilityForAgent(ctx, w, agent) {
+				return
+			}
 			// From here the start no longer follows the client
 			// (ptone/scion#1961): a client that gives up must not cancel the
 			// broker launch, the rollback or the final status write. The
@@ -959,6 +964,11 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// the empty-per-agent capability would have the agent
 			// stopped and then the start refused (design #2703 D3).
 			if !s.requireEmptyPerAgentBrokerCapabilityForAgent(ctx, w, agent) {
+				return
+			}
+			// Likewise for a user-scoped template on a broker known to
+			// lack dispatch-bound template reads (ptone/scion#5770).
+			if !s.requireDispatchBoundReadCapabilityForAgent(ctx, w, agent) {
 				return
 			}
 			// Flat placement pre-check, before the broker cap check, the
