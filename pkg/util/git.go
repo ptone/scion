@@ -369,14 +369,17 @@ type lfsCheckoutOption struct {
 
 // lfsOptionForLinkedCheckout decides the git-lfs handling for a linked
 // checkout at root:
-//   - pin the endpoint derived from the origin remote URL when it is http(s)
-//     AND the checked-out .lfsconfig does not name its own endpoint; or
+//   - pin the endpoint (and its auth mode to basic) derived from the origin
+//     remote URL when the origin is http(s) AND the checked-out .lfsconfig
+//     neither names its own endpoint nor sets any lfs.<url>.access; otherwise
 //   - skip the smudge (an ssh/scp or absent origin, or a tracked .lfsconfig
-//     that names an endpoint — which may legitimately live on a separate
-//     server the origin-derived pin would not serve; we do not contact it).
+//     that names an endpoint or an access mode — its objects may legitimately
+//     live on a separate server, or it may select an auth mode we will not
+//     use; either way we do not pin and never contact it).
 func lfsOptionForLinkedCheckout(root string) lfsCheckoutOption {
-	// A tracked .lfsconfig that sets an endpoint: do not pin (the origin
-	// endpoint may not serve these objects) and do not contact it; skip.
+	// A tracked .lfsconfig that sets an endpoint or an access mode: do not pin
+	// (the origin endpoint may not serve these objects, and an access key could
+	// select ambient credentials) and do not contact it; skip.
 	if lfsConfigNamesEndpoint(root) {
 		return lfsCheckoutOption{skipSmudge: true}
 	}
@@ -390,10 +393,10 @@ func lfsOptionForLinkedCheckout(root string) lfsCheckoutOption {
 	return lfsCheckoutOption{skipSmudge: true}
 }
 
-// lfsConfigNamesEndpoint reports whether the committed .lfsconfig at HEAD sets
-// an LFS endpoint (lfs.url, lfs.pushurl or remote.<name>.lfsurl). It reads
-// HEAD:.lfsconfig as data (host-side git with the fixed pins); any failure
-// (no file, unparseable) is treated as "no endpoint".
+// lfsConfigNamesEndpoint reports whether the committed .lfsconfig at HEAD names
+// an LFS endpoint (lfs.url, lfs.pushurl or remote.<name>.lfsurl) or sets any
+// per-endpoint lfs.<url>.access. It reads HEAD:.lfsconfig as data (host-side
+// git with the fixed pins); a missing file means no endpoint.
 func lfsConfigNamesEndpoint(root string) bool {
 	out, err := hostGit("-C", root, "show", "HEAD:.lfsconfig").Output()
 	if err != nil {

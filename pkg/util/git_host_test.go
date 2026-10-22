@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	neturl "net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1366,22 +1367,45 @@ func TestLFSRepositoryNotRefusedAfterGitLFSWrites(t *testing.T) {
 // the smudge rather than pin, so the endpoint is never contacted.
 func TestLFSConfigAccessKeyForcesSkip(t *testing.T) {
 	requireGitLFS(t)
-	for _, spelling := range []string{
-		"https://host.example:443/o/r.git/info/lfs", // explicit default port
-		"https://host.example/o/r.git/info/lfs/",    // trailing slash
-	} {
+	// The origin IS the recording server, so the origin-derived endpoint the
+	// code would pin points at it. The committed .lfsconfig sets access on a
+	// URL-equivalent but textually-different spelling of that same endpoint.
+	// With the fix, the access key forces skip-smudge and the server gets no
+	// request; if the code pinned instead, git-lfs would smudge against the
+	// (origin-derived) endpoint and hit the recording server — so the
+	// zero-contact assertion actually fires on a regression.
+	for _, spelling := range []string{"trailing-slash", "uppercase-scheme"} {
 		t.Run(spelling, func(t *testing.T) {
 			hostGitTestEnv(t)
 			configureGlobalLFSFilter(t)
 			var hits int32
 			srv := recordingLFSServer(t, &hits)
-			_ = srv
+			origin := srv.URL + "/o/r.git"
+			endpoint, ok := DeriveLFSEndpoint(origin)
+			if !ok {
+				t.Fatalf("could not derive the LFS endpoint for %q", origin)
+			}
+			u, err := neturl.Parse(endpoint)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch spelling {
+			case "trailing-slash":
+				u.Path += "/"
+			case "uppercase-scheme":
+				u.Scheme = strings.ToUpper(u.Scheme)
+			}
+			configKey := u.String()
+			// Guard against the case silently degrading to the exact pinned
+			// spelling (then it would not exercise an equivalent-but-different
+			// key at all).
+			if configKey == endpoint {
+				t.Fatalf("spelling %q did not change the endpoint (%q); the case would not test an equivalent spelling", spelling, endpoint)
+			}
 			repo := filepath.Join(t.TempDir(), "repo")
 			hostRunGit(t, filepath.Dir(repo), "init", "-q", "-b", "main", repo)
-			hostRunGit(t, repo, "remote", "add", "origin", "https://host.example/o/r.git")
-			// .lfsconfig sets only access (no url): a differently-spelled
-			// endpoint key that would otherwise outrank the pinned basic.
-			writeFile(t, filepath.Join(repo, ".lfsconfig"), "[lfs \""+spelling+"\"]\n\taccess = negotiate\n")
+			hostRunGit(t, repo, "remote", "add", "origin", origin)
+			writeFile(t, filepath.Join(repo, ".lfsconfig"), "[lfs \""+configKey+"\"]\n\taccess = negotiate\n")
 			writeFile(t, filepath.Join(repo, ".gitattributes"), "*.bin filter=lfs -text\n")
 			writeFile(t, filepath.Join(repo, "big.bin"), lfsPointer)
 			hostRunGit(t, repo, "add", ".")
