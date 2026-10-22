@@ -317,11 +317,13 @@ safe stops the command rather than being ignored.
   - A repository Scion manages (the shared checkout and the shared-workspace clone) and every
     provisioning clone skip the LFS smudge on the host (`GIT_LFS_SKIP_SMUDGE=1`); agents fetch LFS
     objects in-container.
-  - Your linked checkout pins the endpoint (and its auth mode to `basic`, so a committed `.lfsconfig` cannot select `negotiate`/`ntlm`) derived from the `origin` remote URL when it is `http(s)`
-    **and** the committed `.lfsconfig` does not name its own endpoint. If `.lfsconfig` names an
-    endpoint (its objects may legitimately live on a separate server), or the origin is `ssh`/scp or
-    absent, the smudge is skipped and a warning names the pointer files and says to run `git lfs pull`
-    in the checkout. Scion never contacts the `.lfsconfig` endpoint.
+  - Your linked checkout pins the endpoint derived from the `origin` remote URL, with its auth mode
+    pinned to `basic` (`lfs.<endpoint>.access`), when the origin is `http(s)` **and** the committed
+    `.lfsconfig` neither names its own endpoint (`lfs.url`/`pushurl`, `remote.*.lfsurl`) nor sets any
+    `lfs.<url>.access`. If it does either (its objects may legitimately live on a separate server, or
+    it selects an auth mode such as `negotiate`), or the origin is `ssh`/scp or absent, the smudge is
+    skipped and a warning names the pointer files and says to run `git lfs pull` in the checkout.
+    Scion never contacts the `.lfsconfig` endpoint.
   - The git-lfs **post-checkout hook** does not run; it only marks LFS-lockable files read-only.
   - git-lfs's own config writes are tolerated: `lfs.repositoryformatversion`, and `lfs.<url>.access`
     (only `basic`/`none`) and `lfs.<url>.locksverify` with an http(s) URL subsection.

@@ -410,6 +410,15 @@ func lfsConfigNamesEndpoint(root string) bool {
 		if v.Section == "remote" && v.HasSubsection && v.Name == "lfsurl" {
 			return true
 		}
+		// Any per-endpoint lfs.<url>.access in the committed .lfsconfig: skip the
+		// smudge rather than pin. git-lfs matches lfs.<url>.access keys by URL
+		// equivalence (explicit :443, trailing slash, …), so a pinned
+		// lfs.<endpoint>.access=basic cannot reliably override one spelled
+		// differently; refusing to pin (and never contacting the endpoint)
+		// closes that without reimplementing git-lfs's URL normalisation.
+		if v.Section == "lfs" && v.HasSubsection && v.Name == "access" {
+			return true
+		}
 	}
 	return false
 }

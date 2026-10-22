@@ -1360,3 +1360,137 @@ func TestLFSRepositoryNotRefusedAfterGitLFSWrites(t *testing.T) {
 		}
 	})
 }
+
+// R1 (round 6): a committed .lfsconfig that sets lfs.<url>.access (even spelled
+// differently from the origin-derived endpoint) makes the linked checkout skip
+// the smudge rather than pin, so the endpoint is never contacted.
+func TestLFSConfigAccessKeyForcesSkip(t *testing.T) {
+	requireGitLFS(t)
+	for _, spelling := range []string{
+		"https://host.example:443/o/r.git/info/lfs", // explicit default port
+		"https://host.example/o/r.git/info/lfs/",    // trailing slash
+	} {
+		t.Run(spelling, func(t *testing.T) {
+			hostGitTestEnv(t)
+			configureGlobalLFSFilter(t)
+			var hits int32
+			srv := recordingLFSServer(t, &hits)
+			_ = srv
+			repo := filepath.Join(t.TempDir(), "repo")
+			hostRunGit(t, filepath.Dir(repo), "init", "-q", "-b", "main", repo)
+			hostRunGit(t, repo, "remote", "add", "origin", "https://host.example/o/r.git")
+			// .lfsconfig sets only access (no url): a differently-spelled
+			// endpoint key that would otherwise outrank the pinned basic.
+			writeFile(t, filepath.Join(repo, ".lfsconfig"), "[lfs \""+spelling+"\"]\n\taccess = negotiate\n")
+			writeFile(t, filepath.Join(repo, ".gitattributes"), "*.bin filter=lfs -text\n")
+			writeFile(t, filepath.Join(repo, "big.bin"), lfsPointer)
+			hostRunGit(t, repo, "add", ".")
+			hostRunGit(t, repo, "commit", "-q", "-m", "lfs")
+			wt := filepath.Join(repo, "agents", "a", "workspace")
+			if err := os.MkdirAll(filepath.Dir(wt), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := CreateWorktree(wt, "agent-a"); err != nil {
+				t.Fatalf("CreateWorktree: %v", err)
+			}
+			if got := atomic.LoadInt32(&hits); got != 0 {
+				t.Errorf("endpoint contacted %d time(s); a .lfsconfig access key must force skip-smudge", got)
+			}
+		})
+	}
+}
+
+// lfsConfigNamesEndpoint (unit): any lfs.url/pushurl, remote.*.lfsurl or
+// lfs.<url>.access in the committed .lfsconfig forces skip-smudge.
+func TestLfsConfigNamesEndpoint(t *testing.T) {
+	hostGitTestEnv(t)
+	cases := map[string]bool{
+		"":                                   false,
+		"[lfs]\n\turl = https://x/lfs\n":     true,
+		"[lfs]\n\tpushurl = https://x/lfs\n": true,
+		"[remote \"origin\"]\n\tlfsurl = https://x":           true,
+		"[lfs \"https://x:443/lfs\"]\n\taccess = negotiate\n": true,
+		"[lfs]\n\tconcurrenttransfers = 4\n":                  false, // inert, not an endpoint
+	}
+	for body, want := range cases {
+		repo := filepath.Join(t.TempDir(), "repo")
+		hostRunGit(t, filepath.Dir(repo), "init", "-q", "-b", "main", repo)
+		if body != "" {
+			writeFile(t, filepath.Join(repo, ".lfsconfig"), body)
+			hostRunGit(t, repo, "add", ".")
+			hostRunGit(t, repo, "-c", "core.hooksPath="+os.DevNull, "commit", "-q", "-m", "c")
+		} else {
+			hostRunGit(t, repo, "-c", "core.hooksPath="+os.DevNull, "commit", "-q", "--allow-empty", "-m", "empty")
+		}
+		if got := lfsConfigNamesEndpoint(repo); got != want {
+			t.Errorf("lfsConfigNamesEndpoint(%q) = %v, want %v", body, got, want)
+		}
+	}
+}
+
+// R2 (round 6): a tracked .gitattributes that is itself a symlink to a FIFO or
+// /dev/zero must not hang or unbounded-read CreateWorktree. repoTracksLFS reads
+// it through the regular-file-only safe reader.
+func TestCreateWorktree_GitattributesSymlinkDoesNotHang(t *testing.T) {
+	for _, target := range []string{"fifo", "devzero"} {
+		t.Run(target, func(t *testing.T) {
+			hostGitTestEnv(t)
+			repo := filepath.Join(t.TempDir(), "repo")
+			hostRunGit(t, filepath.Dir(repo), "init", "-q", "-b", "main", repo)
+			hostRunGit(t, repo, "remote", "add", "origin", "git@example.com:o/r.git") // ssh → skip path runs repoTracksLFS
+			var dst string
+			switch target {
+			case "fifo":
+				dst = filepath.Join(t.TempDir(), "fifo")
+				if err := syscall.Mkfifo(dst, 0o644); err != nil {
+					t.Skipf("mkfifo unsupported: %v", err)
+				}
+			case "devzero":
+				if _, err := os.Stat("/dev/zero"); err != nil {
+					t.Skip("/dev/zero unavailable")
+				}
+				dst = "/dev/zero"
+			}
+			if err := os.Symlink(dst, filepath.Join(repo, ".gitattributes")); err != nil {
+				t.Fatal(err)
+			}
+			hostRunGit(t, repo, "add", ".")
+			hostRunGit(t, repo, "-c", "core.hooksPath="+os.DevNull, "commit", "-q", "-m", "attr link")
+			wt := filepath.Join(repo, "agents", "a", "workspace")
+			if err := os.MkdirAll(filepath.Dir(wt), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan error, 1)
+			go func() { done <- CreateWorktree(wt, "agent-a") }()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("CreateWorktree: %v", err)
+				}
+			case <-time.After(20 * time.Second):
+				t.Fatal("CreateWorktree hung reading a .gitattributes symlink")
+			}
+		})
+	}
+}
+
+// Optional (round 6): the post-command sensitive-key check catches a reordered
+// or inserted multi-valued key (remote.origin.url).
+func TestVerifyConfigStable_MultiValuedKeyChange(t *testing.T) {
+	hostGitTestEnv(t)
+	repo := filepath.Join(t.TempDir(), "repo")
+	hostRunGit(t, filepath.Dir(repo), "init", "-q", "-b", "main", repo)
+	hostRunGit(t, repo, "remote", "add", "origin", "https://github.com/o/r.git")
+	// Add a second remote.origin.url with the SAME value: the last value is
+	// unchanged, so a last-wins (collapsed) snapshot would miss it, but the
+	// ordered-list snapshot sees [url] -> [url, url] and reports a change. (git
+	// allows duplicate multi-values; it uses the first url for fetch.)
+	cmd, err := HostGitCommand(context.Background(), repo, HostGitOptions{Policy: RepoPolicyLinked},
+		"config", "--add", "remote.origin.url", "https://github.com/o/r.git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cmd.CombinedOutput(); !errors.Is(err, ErrRepoConfigChanged) {
+		t.Errorf("inserting a second remote.origin.url: error = %v, want ErrRepoConfigChanged", err)
+	}
+}
