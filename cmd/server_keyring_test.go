@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -26,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/relaydb"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
@@ -110,7 +112,7 @@ func TestLoadServerKeyring_RingMode(t *testing.T) {
 	// Every other purpose keeps the legacy entry.
 	assert.Equal(t, cmdKRLegacySecret, resolveSessionSecret())
 	assert.Equal(t, cmdKRLegacySecret, sessionSecretValue())
-	assert.Equal(t, "keyring", webSessionKeySource(resolveSessionSecret()))
+	assert.Equal(t, hub.SigningKeySourceKeyring, webSessionKeySource(resolveSessionSecret()))
 	assert.Contains(t, logs.String(), "session cookies only")
 	assertNoCmdKRSecret(t, logs.String())
 }
@@ -152,6 +154,12 @@ func TestLoadServerKeyring_Refusals(t *testing.T) {
 				d["signing"].(map[string]any)["emit"] = "versioned"
 			})}
 		}, "not supported in this release"},
+		{"whitespace-only path", func(t *testing.T) *config.GlobalConfig {
+			return &config.GlobalConfig{KeyringFile: "   "}
+		}, "whitespace"},
+		{"path with trailing newline", func(t *testing.T) *config.GlobalConfig {
+			return &config.GlobalConfig{KeyringFile: writeCmdKeyring(t, nil) + "\n"}
+		}, "whitespace"},
 		{"web without hub", func(t *testing.T) *config.GlobalConfig {
 			enableHub = false
 			return &config.GlobalConfig{KeyringFile: writeCmdKeyring(t, nil)}
@@ -238,4 +246,31 @@ func TestValidateRelayRoleFlags_RefusesKeyringFile(t *testing.T) {
 	err := validateRelayRoleFlags(f)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--keyring-file")
+}
+
+// TestRunRelayRoleNeverLoadsKeyring: the relay role never opens the keyring
+// file, whether server.keyring_file comes from settings or the env; its
+// spellings are unset like every other server secret name.
+func TestRunRelayRoleNeverLoadsKeyring(t *testing.T) {
+	isolateKeyring(t)
+	t.Setenv(keyringFileEnv, "/nonexistent/env-keyring.json")
+	t.Setenv(keyringFileAliasEnv, "/nonexistent/env-keyring.json")
+	called := false
+	oldLoad := loadServerKeyringFile
+	loadServerKeyringFile = func(string) (*keyring.Keyring, error) { called = true; return nil, errors.New("must not be called") }
+	t.Cleanup(func() { loadServerKeyringFile = oldLoad })
+	prevOpen := openRelayDB
+	t.Cleanup(func() { openRelayDB = prevOpen })
+	errStop := errors.New("stop before the database")
+	openRelayDB = func(context.Context, relaydb.Options) (*relaydb.DB, error) { return nil, errStop }
+
+	cfg := relayRoleTestConfig()
+	cfg.KeyringFile = "/nonexistent/settings-keyring.json"
+	require.ErrorIs(t, runRelayRole(context.Background(), cfg), errStop)
+	assert.False(t, called, "the relay opened the keyring file")
+	assert.Nil(t, serverKeyringFromFile())
+	for _, name := range []string{keyringFileEnv, keyringFileAliasEnv} {
+		_, ok := os.LookupEnv(name)
+		assert.False(t, ok, "%s still set in the relay process", name)
+	}
 }

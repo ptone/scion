@@ -84,17 +84,22 @@ func legacySessionSecretConfigured() bool {
 // hub). Errors and notices carry no key material.
 func loadServerKeyring(cfg *config.GlobalConfig) error {
 	serverKeyring = nil
-	path := strings.TrimSpace(cfg.KeyringFile)
+	path := cfg.KeyringFile
+	if path != "" && !enableHub && !enableWeb {
+		// A Runtime Broker-only server uses no server secret: like the
+		// relay role, it never opens (or judges) the keyring setting.
+		slog.Info("server.keyring_file is set but not used: this server runs neither the hub nor the web server")
+		return nil
+	}
+	if path != strings.TrimSpace(path) {
+		// Ambiguous configuration never silently selects legacy mode, nor
+		// guesses which path was meant.
+		return fmt.Errorf("%s has leading or trailing whitespace (or is only whitespace); set the exact path or unset it", config.KeyringFileKey)
+	}
 	if path == "" {
 		if enableHub || enableWeb {
 			slog.Info(keyring.StartupNotice(keyring.Legacy("")))
 		}
-		return nil
-	}
-	if !enableHub && !enableWeb {
-		// A Runtime Broker-only server uses no server secret: like the
-		// relay role, it never opens the keyring file.
-		slog.Info("server.keyring_file is set but not used: this server runs neither the hub nor the web server")
 		return nil
 	}
 	if !enableHub {

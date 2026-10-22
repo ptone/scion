@@ -138,6 +138,10 @@ var pinProcessUTC = util.PinProcessUTC
 var (
 	initServerLoggingFn = initServerLogging
 	initHubServerFn     = initHubServer
+	// initPluginManagerFn is the first step after the server secret env
+	// scrub that can start a child process (plugins); a test observes the
+	// process env there (TestRunServerStart_ScrubsSecretEnvBeforeFirstChild).
+	initPluginManagerFn = initPluginManager
 )
 
 func runServerStart(cmd *cobra.Command, args []string) error {
@@ -490,7 +494,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	}
 
 	// 10b. Initialize plugin manager
-	pluginMgr := initPluginManager(ctx, secretBackend, s)
+	pluginMgr := initPluginManagerFn(ctx, secretBackend, s)
 	defer pluginMgr.Shutdown()
 	// From the shutdown signal on, plugin process exits are expected: the
 	// service manager's SIGTERM can reach the plugins before Shutdown
