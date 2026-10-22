@@ -280,6 +280,8 @@ type WebServer struct {
 
 	// sessionCodecs are sessionStore's codecs, active generation first.
 	sessionCodecs []securecookie.Codec
+	// signingRing is the ring sessionCodecs came from.
+	signingRing *keyring.SigningRing
 	// now is the keyring deadline clock (WebServerConfig.Now).
 	now func() time.Time
 
@@ -729,10 +731,15 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 	// active one encodes, and each decodes until its verify_until, so a
 	// cookie minted by any replica's active generation is readable here
 	// (ptone/scion#1530 §3, Cookies).
-	cookieStore := &sessions.CookieStore{
-		Codecs: keyring.CookieCodecs(ring, webSessionHashPurpose, webSessionBlockPurpose, webSessionMaxAge, ws.now),
+	codecs, err := keyring.CookieCodecs(ring, webSessionHashPurpose, webSessionBlockPurpose, webSessionMaxAge, ws.now)
+	if err != nil {
+		// Unreachable with a validated keyring (cmd refuses startup first);
+		// fail closed: with no codecs every session save and read fails.
+		ws.logger().Error("Session cookie keyring has no usable active generation; sessions are disabled", "error", err)
 	}
+	cookieStore := &sessions.CookieStore{Codecs: codecs}
 	ws.sessionCodecs = cookieStore.Codecs
+	ws.signingRing = ring
 	cookieStore.Options = &sessions.Options{
 		Path:     "/",
 		MaxAge:   webSessionMaxAge, // 24 hours
@@ -824,15 +831,29 @@ func sessionKeyPurpose(label string) keyring.Purpose {
 // resaveUnderActiveGeneration re-saves session when its cookie decoded
 // only under a non-active keyring generation, so the browser gets it back
 // under the active one (ptone/scion#1530 §3, Cookies). Values are saved
-// unchanged: no hub token expiry is extended. A save failure (for example
-// the active generation past its sign_until) is logged and the request
-// continues with the session as read.
+// unchanged: no hub token expiry is extended. It does nothing when:
+//   - the response already sets the session cookie (another save on this
+//     request, e.g. dev or proxy auth, already wrote it under the active
+//     generation);
+//   - the active generation's issuance is closed (sign_until reached;
+//     /readyz reports that state, so no per-request warning).
+//
+// Any other save failure is logged and the request continues with the
+// session as read.
 func (ws *WebServer) resaveUnderActiveGeneration(w http.ResponseWriter, r *http.Request, session *sessions.Session) {
 	if session == nil || session.IsNew || len(ws.sessionCodecs) < 2 {
 		return
 	}
 	c, err := r.Cookie(webSessionName)
 	if err != nil || keyring.DecodesWithActive(webSessionName, c.Value, ws.sessionCodecs) {
+		return
+	}
+	for _, sc := range w.Header().Values("Set-Cookie") {
+		if strings.HasPrefix(sc, webSessionName+"=") {
+			return
+		}
+	}
+	if _, err := ws.signingRing.Active(webSessionHashPurpose, ws.now()); err != nil {
 		return
 	}
 	if err := session.Save(r, w); err != nil {
@@ -1257,6 +1278,14 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 		// is their re-save point: a session read under a non-active keyring
 		// generation goes back under the active one (once; a refresh above
 		// already saved it under the active generation).
+		//
+		// Pilot behaviour (ptone/scion#1530 Phase 1): this runs before the
+		// hub authorizes the request, so a request the hub then refuses
+		// (for example a suspended user) still gets its session re-saved.
+		// The re-save writes identical contents under the active pair,
+		// extends no token expiry and confers nothing; gating it on the
+		// response status would need a ResponseWriter wrapper that risks
+		// the streaming, Flush and Hijack paths of the API mux.
 		if !saved {
 			ws.resaveUnderActiveGeneration(w, r, session)
 		}

@@ -552,3 +552,46 @@ func TestWebKeyring_RefreshSavesOnceUnderActive(t *testing.T) {
 	exp, _ := after[sessKeyHubTokenExpiry].(int64)
 	assert.Greater(t, exp, time.Now().UnixMilli(), "the token was refreshed (new expiry in the future)")
 }
+
+// TestWebKeyring_ResaveSkippedWhenAlreadySetOrIssuanceClosed: the re-save
+// adds no second Set-Cookie when the response already sets the session
+// cookie, and does nothing (no failing save, no per-request warning) once
+// the active generation's issuance is closed, while the old-generation
+// session still authenticates.
+func TestWebKeyring_ResaveSkippedWhenAlreadySetOrIssuanceClosed(t *testing.T) {
+	st, err := newTestStore(t, ":memory:")
+	require.NoError(t, err)
+	clk := &krClock{krT0}
+	ka, kb := krRollout(t)
+	a, b := newKRReplica(t, st, ka, clk), newKRReplica(t, st, kb, clk)
+	old := krLogin(t, a, a)
+
+	// Already set on this response: no second Set-Cookie.
+	req := httptest.NewRequest(http.MethodGet, "/agents", nil)
+	req.AddCookie(old)
+	sess, err := b.ws.sessionStore.Get(req, webSessionName)
+	require.NoError(t, err)
+	rec := httptest.NewRecorder()
+	rec.Header().Add("Set-Cookie", webSessionName+"=already-saved; Path=/")
+	b.ws.resaveUnderActiveGeneration(rec, req, sess)
+	assert.Len(t, rec.Header().Values("Set-Cookie"), 1, "no second session Set-Cookie")
+
+	// Issuance closed on a replica whose active generation (gen1) reached
+	// sign_until, reading a legacy-generation session (no deadlines).
+	kc := krKeyring(t, "gen1",
+		krEntry{id: "legacy", secret: krLegacySecret},
+		krEntry{id: "gen1", secret: krGen1Secret, signUntil: krTime(time.Hour), verifyUntl: krTime(48 * time.Hour)})
+	kl := krKeyring(t, "legacy",
+		krEntry{id: "legacy", secret: krLegacySecret},
+		krEntry{id: "gen1", secret: krGen1Secret, signUntil: krTime(time.Hour), verifyUntl: krTime(48 * time.Hour)})
+	l, c := newKRReplica(t, st, kl, clk), newKRReplica(t, st, kc, clk)
+	legacyCookie := krLogin(t, l, l)
+	clk.t = krT0.Add(2 * time.Hour)
+	resp := c.serve(t, http.MethodGet, "/api/v1/projects", []*http.Cookie{legacyCookie})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.NotEmpty(t, c.hubAuth, "the legacy-generation session still authenticates")
+	assert.Zero(t, sessionCookieCount(resp), "no re-save after sign_until")
+	resp = krPageLoad(t, c, "/agents", legacyCookie)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Zero(t, sessionCookieCount(resp), "no page re-save after sign_until")
+}
