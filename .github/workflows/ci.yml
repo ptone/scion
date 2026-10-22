@@ -783,6 +783,18 @@ jobs:
       - name: Build Binary
         run: make build
 
+      # Design win-cli §5.1: the Windows CLI must keep compiling. Non-test
+      # builds only (pkg/hub compiles as a dependency, as in make build);
+      # winsec-guard runs in its own step above.
+      - name: Cross-build for Windows (guard)
+        env:
+          GOTOOLCHAIN: local
+          GOGC: '50'
+        run: |
+          GOOS=windows GOARCH=amd64 go build -buildvcs=false -o /dev/null ./cmd/scion
+          GOOS=windows GOARCH=arm64 go build -buildvcs=false -o /dev/null ./cmd/scion
+          GOOS=windows GOARCH=amd64 go vet ./pkg/util/privatefs/... ./pkg/util/pathcanon/... ./pkg/util/filelock/... ./pkg/tunnelclient/...
+
       - name: Save Go cache
         uses: ./.github/actions/save-go-cache
         with:

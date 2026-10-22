@@ -14,7 +14,8 @@
 # A path listed here is exempt from guard checks (a) and (b) for the whole
 # file. Keep entries sorted by path.
 
-# Findings §4a: client-reachable private files, pending Phase 3.
+# Findings §4a: client-reachable private files, pending Phase 3: none.
+# Phase 3 moved every one onto privatefs/pathcanon/filelock (design §3.5).
 
 # Findings §4b and in-container sites: gated on Windows.
 cmd/broker_purge_guard.go not protected on Windows: gated (runtime-broker purge containment)
