@@ -154,7 +154,7 @@ func TestAgentConfigPatch_ChangedFieldsNeverFromRequest(t *testing.T) {
 	stored, err := s.GetAgent(context.Background(), agent.ID)
 	require.NoError(t, err)
 	assert.Nil(t, stored.AppliedConfig.InlineConfig.ChangedFields)
-	assert.Equal(t, 8, stored.AppliedConfig.InlineConfig.MaxTurns)
+	assert.Equal(t, api.IntPtr(8), stored.AppliedConfig.InlineConfig.MaxTurns)
 }
 
 // TestWarnRerenderUnsupported_StartResponseWarning: the start dispatch adds
@@ -193,7 +193,7 @@ func TestAgentConfigPatch_ClearingBrokerAppliesClearsAtStart(t *testing.T) {
 	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
 		a.Phase = string(state.PhaseStopped)
 		a.AppliedConfig.Model = "old-model"
-		a.AppliedConfig.InlineConfig = &api.ScionConfig{Harness: "claude", Model: "old-model", MaxTurns: 3, MaxModelCalls: 7, Env: map[string]string{"KEEP": "1", "DROP": "2"}}
+		a.AppliedConfig.InlineConfig = &api.ScionConfig{Harness: "claude", Model: "old-model", MaxTurns: api.IntPtr(3), MaxModelCalls: api.IntPtr(7), Env: map[string]string{"KEEP": "1", "DROP": "2"}}
 	})
 
 	resp, code, body := patchAgentBody(t, srv, agent.ID, map[string]interface{}{

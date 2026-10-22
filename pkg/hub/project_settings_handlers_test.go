@@ -590,7 +590,7 @@ func TestApplyProjectDefaults_ResourcesMerge(t *testing.T) {
 		require.NotNil(t, ac.InlineConfig.Resources)
 		assert.Equal(t, "1Gi", ac.InlineConfig.Resources.Disk)
 		assert.Empty(t, ac.InlineConfig.Resources.Requests.CPU)
-		assert.Equal(t, 5, ac.InlineConfig.MaxTurns)
+		assert.Equal(t, api.IntPtr(5), ac.InlineConfig.MaxTurns)
 	})
 
 	// The merge must not alias the project's spec into the agent's config:

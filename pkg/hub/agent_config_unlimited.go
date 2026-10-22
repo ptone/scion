@@ -1,0 +1,141 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package hub
+
+import (
+	"context"
+	"errors"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+)
+
+// An agent's count limits (max_turns, max_model_calls) are optional typed
+// values: nil inherits, 0 is "no limit", n >= 1 is a limit
+// (ptone/scion#5605). Only a Runtime Broker that advertises
+// unlimitedCountLimits keeps a 0 over an inherited limit at start; an older
+// one decodes it as "unset" and the agent keeps the inherited limit, at a
+// start and at a reincarnation alike. So the hub refuses a change of a count
+// limit to 0 for such an agent, rather than report an edit as applied that
+// no start applies.
+
+// Reasons for refusing a change of a count limit to Unlimited, as the
+// validation error's per-field detail.
+const (
+	unlimitedNotSupportedByBroker = "unlimited_not_supported_by_broker: this agent's runtime broker cannot apply Unlimited over an inherited limit; reload the page, or upgrade the broker"
+	unlimitedBrokerUnknown        = "broker_unknown: the agent has no runtime broker, so no start can promise Unlimited"
+)
+
+// errBrokerLookup is returned by agentBrokerStartSupportStrict when the
+// agent's broker record cannot be read; the caller answers 503.
+var errBrokerLookup = errors.New("runtime broker lookup failed")
+
+// unlimitedCountChanges returns the wire keys (config.max_turns,
+// config.max_model_calls) whose value req changes to 0 ("no limit") from
+// base, the value the agent's next run would otherwise use. A key req
+// leaves unset (nil) or sends with base's own 0 (an echo) is not a change.
+func unlimitedCountChanges(req, base *api.ScionConfig) []string {
+	if req == nil {
+		return nil
+	}
+	var baseTurns, baseCalls *int
+	if base != nil {
+		baseTurns, baseCalls = base.MaxTurns, base.MaxModelCalls
+	}
+	var out []string
+	if api.IsUnlimitedCount(req.MaxTurns) && !api.IsUnlimitedCount(baseTurns) {
+		out = append(out, agentConfigKeyPrefix+"max_turns")
+	}
+	if api.IsUnlimitedCount(req.MaxModelCalls) && !api.IsUnlimitedCount(baseCalls) {
+		out = append(out, agentConfigKeyPrefix+"max_model_calls")
+	}
+	return out
+}
+
+// agentBrokerStartSupportStrict is agentBrokerStartSupport for a decision
+// that must not guess: assigned is false when the agent has no broker, and
+// err is errBrokerLookup when the broker's record cannot be read (a missing
+// record included), instead of folding both into the zero value.
+func (s *Server) agentBrokerStartSupportStrict(ctx context.Context, agent *store.Agent) (sup brokerStartSupport, assigned bool, err error) {
+	if agent == nil || agent.RuntimeBrokerID == "" || s.store == nil {
+		return brokerStartSupport{}, false, nil
+	}
+	broker, err := s.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
+	if err != nil || broker == nil {
+		return brokerStartSupport{}, true, errBrokerLookup
+	}
+	return brokerStartSupportFrom(broker.Capabilities), true, nil
+}
+
+// unlimitedCountRefusal checks a config edit of agent whose decoded request
+// is req against base, the value the agent's next run would otherwise use
+// (the applied inline config, overlaid by any held value when held edits
+// are enabled). It returns the per-field reasons for refusing a change of a
+// count limit to Unlimited, nil when there is nothing to refuse, or
+// errBrokerLookup (answer 503) when the broker record cannot be read.
+//
+// The broker is looked up only when the request does change a count limit
+// to 0, so an ordinary edit never depends on that lookup.
+func (s *Server) unlimitedCountRefusal(ctx context.Context, agent *store.Agent, req, base *api.ScionConfig) (map[string]string, error) {
+	changed := unlimitedCountChanges(req, base)
+	if len(changed) == 0 {
+		return nil, nil
+	}
+	sup, assigned, err := s.agentBrokerStartSupportStrict(ctx, agent)
+	if err != nil {
+		return nil, err
+	}
+	var reason string
+	switch {
+	case !assigned:
+		reason = unlimitedBrokerUnknown
+	case !sup.UnlimitedCountLimits:
+		reason = unlimitedNotSupportedByBroker
+	default:
+		return nil, nil
+	}
+	out := make(map[string]string, len(changed))
+	for _, k := range changed {
+		out[k] = reason
+	}
+	return out, nil
+}
+
+// unlimitedCountCreateWarning returns the create warning for an agent whose
+// dispatched inline config cfg (the request after the project stamp) sets a
+// count limit to 0 while its broker, with capabilities caps, does not
+// advertise unlimitedCountLimits: the agent keeps the inherited limit. It
+// returns "" when there is nothing to say. Template zeros are not seen here
+// (the hub's template snapshot may predate them); the broker logs those.
+func unlimitedCountCreateWarning(cfg *api.ScionConfig, caps *store.BrokerCapabilities) string {
+	if cfg == nil || brokerStartSupportFrom(caps).UnlimitedCountLimits {
+		return ""
+	}
+	var keys []string
+	if api.IsUnlimitedCount(cfg.MaxTurns) {
+		keys = append(keys, agentConfigKeyPrefix+"max_turns")
+	}
+	if api.IsUnlimitedCount(cfg.MaxModelCalls) {
+		keys = append(keys, agentConfigKeyPrefix+"max_model_calls")
+	}
+	if len(keys) == 0 {
+		return ""
+	}
+	msg := keys[0]
+	if len(keys) == 2 {
+		msg += ", " + keys[1]
+	}
+	return msg + ": this agent's runtime broker keeps the inherited limit; Unlimited applies only on a broker that supports it"
+}
