@@ -18,6 +18,7 @@ import (
 	"errors"
 	"io"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -156,6 +157,61 @@ func TestWindowsGate_RefusesServerAndBroker(t *testing.T) {
 			require.NoError(t, root.Execute())
 			assert.Equal(t, []string{tc.path}, *ran)
 		})
+	}
+}
+
+// TestWindowsGate_AllowsUseOnlyUnderProject: 'scion use' and 'scion project
+// use' (with the parent's aliases) run on Windows (ptone's decision D2),
+// while the parent 'project' stays gated, and so do its other subcommands.
+// The refusals are the control that the gate is applied.
+func TestWindowsGate_AllowsUseOnlyUnderProject(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		path string
+	}{
+		{[]string{"use"}, "use"},
+		{[]string{"use", "foo"}, "use"},
+		{[]string{"project", "use", "foo"}, "project.use"},
+		{[]string{"projects", "use", "foo"}, "project.use"},
+		{[]string{"group", "use"}, "project.use"},
+	} {
+		t.Run("runs "+strings.Join(tc.args, " "), func(t *testing.T) {
+			root, ran := gateTestTree(t)
+			applyPlatformRestrictions(root, "windows")
+			root.SetArgs(tc.args)
+
+			require.NoError(t, root.Execute())
+			assert.Equal(t, []string{tc.path}, *ran)
+		})
+	}
+	for _, tc := range []struct {
+		args []string
+		path string
+	}{
+		{[]string{"project"}, "project"},
+		{[]string{"project", "init"}, "project init"},
+		{[]string{"project", "list"}, "project list"},
+		{[]string{"projects", "list"}, "project list"},
+	} {
+		t.Run("refuses "+tc.path, func(t *testing.T) {
+			root, ran := gateTestTree(t)
+			applyPlatformRestrictions(root, "windows")
+			root.SetArgs(tc.args)
+
+			err := root.Execute()
+			require.Error(t, err)
+			assert.True(t, errors.Is(err, errUnsupportedOnWindows), "got %v", err)
+			assert.Contains(t, err.Error(), "scion "+tc.path+" is not supported on Windows")
+			assert.Empty(t, *ran, "a gated command must not run")
+		})
+	}
+	root, _ := gateTestTree(t)
+	applyPlatformRestrictions(root, "windows")
+	for _, path := range []string{"use", "project.use"} {
+		c := resolveCommandPath(root, path)
+		require.NotNil(t, c, path)
+		assert.NoError(t, windowsRefusal(c), "%s is allowed: root's hook must not refuse it", path)
+		assert.False(t, c.Hidden, "%s is allowed and must stay visible", path)
 	}
 }
 

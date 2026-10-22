@@ -30,7 +30,8 @@ const windowsHubTokenPath = "hub" + ".token"
 
 // windowsAllowed lists the commands the Windows build runs. It uses the
 // same dot-separated command paths as agentAllowed, and every entry,
-// parents included, is listed explicitly.
+// parents included, is listed explicitly. The one allowed command under a
+// gated parent is project.use (see its entry).
 //
 // It is an allowlist so that it fails closed: a command added later is
 // unsupported on Windows until someone adds it here deliberately, after
@@ -70,6 +71,19 @@ var windowsAllowed = map[string]bool{
 	"conversation.group.delete": true,
 	"conversation.group.add":    true,
 	"conversation.group.remove": true,
+
+	// 'scion use' and its alias 'scion project use': included on Windows by
+	// ptone's decision D2 (2026-10-22). Their local writes are migrated
+	// findings §4a sites only: ~/.scion/context.yaml with its directory and
+	// lock (row C7: Tree.MkdirAll Private, writeFileAtomicMode 0600 →
+	// Private, filelock.Acquire 0600), and credentials.json when the login
+	// offer runs (row C1, as 'hub auth login'). Their reads (settings,
+	// context.yaml, credentials, dev token, hub entry transport) are those
+	// of the hub commands above. The parent 'project' stays gated (its
+	// other subcommands write project directories), so it is hidden and
+	// 'scion project' alone is refused; 'scion project use' still runs.
+	"use":         true,
+	"project.use": true,
 
 	"config":            true,
 	"config.list":       true,
