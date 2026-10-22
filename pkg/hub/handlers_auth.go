@@ -345,8 +345,8 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accessToken, refreshToken, expiresIn, err := s.userTokenService.GenerateTokenPair(
-		user.ID, user.Email, user.DisplayName, user.Role, ClientTypeWeb,
+	accessToken, refreshToken, expiresIn, err := s.userTokenService.MintTokenPair(
+		user.ID, user.Email, user.DisplayName, user.Role, user.SessionGeneration, ClientTypeWeb,
 	)
 	if err != nil {
 		InternalError(w)
@@ -460,8 +460,8 @@ func (s *Server) handleAuthToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accessToken, refreshToken, expiresIn, err := s.userTokenService.GenerateTokenPair(
-		user.ID, user.Email, user.DisplayName, user.Role, clientType,
+	accessToken, refreshToken, expiresIn, err := s.userTokenService.MintTokenPair(
+		user.ID, user.Email, user.DisplayName, user.Role, user.SessionGeneration, clientType,
 	)
 	if err != nil {
 		InternalError(w)
@@ -606,8 +606,11 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 		userID = user.ID
 	}
 
-	accessToken, refreshToken, expiresIn, err := s.userTokenService.GenerateTokenPair(
-		userID, claims.Email, claims.DisplayName, role, claims.ClientType,
+	// The new pair carries the presented refresh token's own session
+	// generation, never a fresh row read, so a refresh cannot move a
+	// credential to a newer generation.
+	accessToken, refreshToken, expiresIn, err := s.userTokenService.MintTokenPair(
+		userID, claims.Email, claims.DisplayName, role, claims.SessionGeneration, claims.ClientType,
 	)
 	if err != nil {
 		InternalError(w)
@@ -1379,8 +1382,8 @@ func (s *Server) handleCLIAuthToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accessToken, refreshToken, expiresIn, err := s.userTokenService.GenerateTokenPair(
-		user.ID, user.Email, user.DisplayName, user.Role, ClientTypeCLI,
+	accessToken, refreshToken, expiresIn, err := s.userTokenService.MintTokenPair(
+		user.ID, user.Email, user.DisplayName, user.Role, user.SessionGeneration, ClientTypeCLI,
 	)
 	if err != nil {
 		InternalError(w)
@@ -1606,8 +1609,8 @@ func (s *Server) completeOAuthLogin(w http.ResponseWriter, r *http.Request, user
 		return
 	}
 
-	accessToken, refreshToken, expiresIn, err := s.userTokenService.GenerateTokenPair(
-		user.ID, user.Email, user.DisplayName, user.Role, ClientTypeCLI,
+	accessToken, refreshToken, expiresIn, err := s.userTokenService.MintTokenPair(
+		user.ID, user.Email, user.DisplayName, user.Role, user.SessionGeneration, ClientTypeCLI,
 	)
 	if err != nil {
 		InternalError(w)

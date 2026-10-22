@@ -1063,7 +1063,11 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 				email, _ := session.Values[sessKeyUserEmail].(string)
 				name, _ := session.Values[sessKeyUserName].(string)
 				role, _ := session.Values[sessKeyUserRole].(string)
-				if tok, _, err := ws.userTokenSvc.GenerateAccessToken(uid, email, name, role, ClientTypeWeb); err == nil {
+				// Carry the session's own generation, never a fresh row
+				// read: a session established before a revocation yields a
+				// token the hub refuses. A cookie without the key reads 0.
+				gen, _ := session.Values[sessKeySessionGeneration].(int64)
+				if tok, _, err := ws.userTokenSvc.MintAccessToken(uid, email, name, role, gen, ClientTypeWeb); err == nil {
 					accessToken = tok
 				} else {
 					ws.logger().Warn("Failed to regenerate Bearer token for cookie-overflow session", "error", err, "user", uid)
@@ -1101,7 +1105,7 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 		if !tokenValid {
 			refreshToken, _ := session.Values[sessKeyHubRefreshToken].(string)
 			if refreshToken != "" && ws.userTokenSvc != nil {
-				newAccess, newRefresh, expiresIn, err := ws.userTokenSvc.RefreshTokens(refreshToken)
+				newAccess, newRefresh, expiresIn, err := ws.refreshHubTokens(r.Context(), refreshToken)
 				if err == nil {
 					accessToken = newAccess
 					tokenValid = true
@@ -1151,7 +1155,7 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 			if time.Now().UnixMilli() >= expiryMs {
 				refreshToken, _ := session.Values[sessKeyHubRefreshToken].(string)
 				if refreshToken != "" && ws.userTokenSvc != nil {
-					newAccess, newRefresh, expiresIn, err := ws.userTokenSvc.RefreshTokens(refreshToken)
+					newAccess, newRefresh, expiresIn, err := ws.refreshHubTokens(r.Context(), refreshToken)
 					if err == nil {
 						accessToken = newAccess
 						session.Values[sessKeyHubAccessToken] = newAccess
@@ -1170,6 +1174,17 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 		r2.Header.Set("Authorization", "Bearer "+accessToken)
 		next.ServeHTTP(w, r2)
 	})
+}
+
+// refreshHubTokens rotates the session's hub token pair from its refresh
+// token. The new pair carries the presented refresh token's own session
+// generation, never a fresh row read.
+func (ws *WebServer) refreshHubTokens(_ context.Context, refreshToken string) (accessToken, newRefreshToken string, expiresIn int64, err error) {
+	claims, err := ws.userTokenSvc.ValidateRefreshToken(refreshToken)
+	if err != nil {
+		return "", "", 0, fmt.Errorf("invalid refresh token: %w", err)
+	}
+	return ws.userTokenSvc.MintTokenPair(claims.UserID, claims.Email, claims.DisplayName, claims.Role, claims.SessionGeneration, claims.ClientType)
 }
 
 // registerRoutes sets up the web server routes.
@@ -2896,8 +2911,10 @@ func (ws *WebServer) devAuthMiddleware(next http.Handler) http.Handler {
 		// Read from the store so any identity set via the onboarding wizard is reflected.
 		devEmail := "dev@localhost"
 		devName := "Development User"
+		var devGen int64
 		if ws.store != nil {
 			if dbUser, err := ws.store.GetUser(r.Context(), DevUserID); err == nil {
+				devGen = dbUser.SessionGeneration
 				if dbUser.Email != "" {
 					devEmail = dbUser.Email
 				}
@@ -2926,13 +2943,14 @@ func (ws *WebServer) devAuthMiddleware(next http.Handler) http.Handler {
 		session.Values[sessKeyUserName] = devUser.Name
 		session.Values[sessKeyUserAvatar] = devUser.AvatarURL
 		session.Values[sessKeyUserRole] = devUser.Role
+		session.Values[sessKeySessionGeneration] = devGen
 
 		// Generate Hub JWTs so the session-to-bearer middleware can
 		// authenticate API requests, mirroring handleOAuthCallback.
 		if ws.userTokenSvc != nil {
 			if _, ok := session.Values[sessKeyHubAccessToken].(string); !ok {
-				accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.GenerateTokenPair(
-					devUser.UserID, devUser.Email, devUser.Name, "admin", ClientTypeWeb,
+				accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.MintTokenPair(
+					devUser.UserID, devUser.Email, devUser.Name, "admin", devGen, ClientTypeWeb,
 				)
 				if err == nil {
 					session.Values[sessKeyHubAccessToken] = accessToken
@@ -3101,8 +3119,12 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 				// calls within this session also reflect the change.
 				if ws.userTokenSvc != nil {
 					name, _ := session.Values[sessKeyUserName].(string)
-					accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.GenerateTokenPair(
-						uid, email, name, expectedRole, ClientTypeWeb,
+					// Carry the session's own generation, never a fresh
+					// row read (see the cookie-overflow mint in
+					// sessionToBearerMiddleware).
+					gen, _ := session.Values[sessKeySessionGeneration].(int64)
+					accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.MintTokenPair(
+						uid, email, name, expectedRole, gen, ClientTypeWeb,
 					)
 					if err == nil {
 						session.Values[sessKeyHubAccessToken] = accessToken
@@ -3312,8 +3334,8 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 
 		// Generate Hub JWT tokens (mirrors devAuthMiddleware / handleOAuthCallback)
 		if ws.userTokenSvc != nil {
-			accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.GenerateTokenPair(
-				user.ID, user.Email, user.DisplayName, user.Role, ClientTypeWeb,
+			accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.MintTokenPair(
+				user.ID, user.Email, user.DisplayName, user.Role, user.SessionGeneration, ClientTypeWeb,
 			)
 			if err == nil {
 				session.Values[sessKeyHubAccessToken] = accessToken
@@ -3758,8 +3780,8 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 
 	// Generate Hub tokens if token service is available
 	if ws.userTokenSvc != nil {
-		accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.GenerateTokenPair(
-			user.ID, user.Email, user.DisplayName, user.Role, ClientTypeWeb,
+		accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.MintTokenPair(
+			user.ID, user.Email, user.DisplayName, user.Role, user.SessionGeneration, ClientTypeWeb,
 		)
 		if err != nil {
 			ws.logger().Warn("Failed to generate Hub tokens", "error", err)
