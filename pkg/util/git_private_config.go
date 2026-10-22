@@ -1,0 +1,165 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package util
+
+import (
+	"bytes"
+	"fmt"
+	"net/url"
+	"strings"
+)
+
+// RedactGitConfigSecrets parses a git config file and returns an equivalent
+// config with credential-bearing material removed, together with the names of
+// the keys it changed (never their values). It is used to seed a per-agent
+// private .git/config (E-X2 PR 2, P8) so a copy of a linked checkout's host
+// config does not carry the host user's credentials into the agent.
+//
+// It strips:
+//   - every credential.* key (the git credential-helper configuration),
+//   - every http.<url>.extraheader (authorization headers), and
+//   - userinfo (user[:password]) from http(s) URL values in remote.*.url /
+//     remote.*.pushurl / url.*.insteadof / url.*.pushinsteadof and from the
+//     subsection of a url.<base>.* entry.
+//
+// The returned config is re-serialised from the parsed variables: comments are
+// not preserved, but every retained key/value (including multi-valued keys and
+// their order) is. A parse error is returned unchanged so the caller can fail
+// closed rather than seed an unvetted copy.
+func RedactGitConfigSecrets(raw []byte) (out []byte, stripped []string, err error) {
+	vars, err := parseGitConfigFile(raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	kept := make([]gitConfigVar, 0, len(vars))
+	seen := map[string]struct{}{}
+	note := func(key string) {
+		if _, ok := seen[key]; !ok {
+			seen[key] = struct{}{}
+			stripped = append(stripped, key)
+		}
+	}
+	for _, v := range vars {
+		// credential.* — drop entirely.
+		if v.Section == "credential" {
+			note(v.Key())
+			continue
+		}
+		// http.<url>.extraheader — drop entirely.
+		if v.Section == "http" && v.Name == "extraheader" {
+			note(v.Key())
+			continue
+		}
+		// Userinfo in URL-valued keys — rewrite the value.
+		if isURLValuedKey(v) {
+			if clean, changed := stripURLUserinfo(v.Value); changed {
+				note(v.Key())
+				v.Value = clean
+			}
+		}
+		// Userinfo in a url.<base>.* subsection (the base is the URL).
+		if v.Section == "url" && v.HasSubsection {
+			if clean, changed := stripURLUserinfo(v.Subsection); changed {
+				note(v.Key())
+				v.Subsection = clean
+			}
+		}
+		kept = append(kept, v)
+	}
+	return serializeGitConfig(kept), stripped, nil
+}
+
+// isURLValuedKey reports whether a config variable's value is a URL whose
+// userinfo should be scrubbed.
+func isURLValuedKey(v gitConfigVar) bool {
+	switch {
+	case v.Section == "remote" && (v.Name == "url" || v.Name == "pushurl"):
+		return true
+	case v.Section == "url" && (v.Name == "insteadof" || v.Name == "pushinsteadof"):
+		return true
+	}
+	return false
+}
+
+// stripURLUserinfo removes any user[:password]@ userinfo from an http(s) URL,
+// returning the cleaned string and whether it changed. Non-URL or
+// non-http(s) strings (e.g. scp-style git@host:path) are returned unchanged.
+func stripURLUserinfo(s string) (string, bool) {
+	u, err := url.Parse(strings.TrimSpace(s))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.User == nil {
+		return s, false
+	}
+	u.User = nil
+	return u.String(), true
+}
+
+// serializeGitConfig renders variables back to git config file syntax. Values
+// are always quoted and escaped, which git always accepts, so no value can be
+// misparsed after a round trip.
+func serializeGitConfig(vars []gitConfigVar) []byte {
+	var b bytes.Buffer
+	type sectionKey struct {
+		section string
+		sub     string
+		hasSub  bool
+	}
+	var cur sectionKey
+	started := false
+	for _, v := range vars {
+		k := sectionKey{v.Section, v.Subsection, v.HasSubsection}
+		if !started || k != cur {
+			if v.HasSubsection {
+				fmt.Fprintf(&b, "[%s \"%s\"]\n", v.Section, escapeConfigSubsection(v.Subsection))
+			} else {
+				fmt.Fprintf(&b, "[%s]\n", v.Section)
+			}
+			cur = k
+			started = true
+		}
+		fmt.Fprintf(&b, "\t%s = %s\n", v.Name, escapeConfigValue(v.Value))
+	}
+	return b.Bytes()
+}
+
+// escapeConfigSubsection escapes a subsection for the [section "sub"] form:
+// git only recognises \" and \\ there.
+func escapeConfigSubsection(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+	return r.Replace(s)
+}
+
+// escapeConfigValue renders a value as a quoted git config string.
+func escapeConfigValue(s string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; c {
+		case '\\':
+			b.WriteString(`\\`)
+		case '"':
+			b.WriteString(`\"`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\t':
+			b.WriteString(`\t`)
+		case '\b':
+			b.WriteString(`\b`)
+		default:
+			b.WriteByte(c)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
