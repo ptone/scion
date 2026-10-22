@@ -862,12 +862,13 @@ func isHubManagedWorktreeBase(repoRoot string) bool {
 	if err != nil {
 		return false
 	}
-	// RepoRoot normally arrives symlink-resolved (trustedProjectRepoRoot and
-	// Start's broker-signal/record resolution both EvalSymlinks it), while
-	// os.UserHomeDir() may itself be reached through a symlink (e.g.
-	// /home -> /var/home). Resolve both sides the same way before comparing so
-	// a symlinked home directory doesn't cause a hub-native base to be
-	// misclassified as linked (and so miss the mount narrowing).
+	// RepoRoot is symlink-resolved by Start and again in buildCommonRunArgs
+	// before this call, whatever its source, and this function resolves
+	// repoAbs itself; os.UserHomeDir() may instead be reached through a
+	// symlink (e.g. /home -> /var/home). Resolve both sides the same way
+	// before comparing so a symlinked home directory doesn't cause a
+	// hub-native base to be misclassified as linked (and so miss the mount
+	// narrowing).
 	if resolved, evalErr := filepath.EvalSymlinks(repoAbs); evalErr == nil {
 		repoAbs = resolved
 	}
