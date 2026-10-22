@@ -21,6 +21,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 )
 
 func TestStore_Load(t *testing.T) {
@@ -371,10 +373,14 @@ func writeStoreFixture(t *testing.T, store *Store, creds *BrokerCredentials) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Dir(store.Path()), DirMode); err != nil {
+	// As the broker writes it: a private file (mode 0600; on Windows an
+	// owner-only ACL) in a directory created private.
+	tree, err := privatefs.OpenTree(filepath.Dir(store.Path()), privatefs.TreeOptions{CreateAnchor: true})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(store.Path(), data, FileMode); err != nil {
+	defer func() { _ = tree.Close() }()
+	if err := tree.WriteFile(filepath.Base(store.Path()), data, privatefs.ForMode(FileMode)); err != nil {
 		t.Fatal(err)
 	}
 }
