@@ -103,7 +103,7 @@ func isGitBool(v string) bool {
 }
 
 // validLFSURLSubsection reports whether an lfs.<url>.* subsection is an
-// http(s) URL with a host and no ASCII whitespace or control characters;
+// http(s) URL with a host and no whitespace or control characters;
 // lfs.<url>.access and lfs.<url>.locksverify are allowed only under such a
 // subsection.
 func validLFSURLSubsection(sub string) bool {

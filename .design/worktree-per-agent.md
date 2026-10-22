@@ -389,8 +389,8 @@ New work for the base repo:
    that choose a repository or add config. The primary control is a
    deny-by-default check: before each such command the repository config
    (`.git/config`, `config.worktree`) is read as data (a parser in
-   `pkg/util`, not by git, so a `=` inside a subsection stays part of the
-   subsection name) and the command is refused, naming the key, on any
+   `pkg/util`, never through git, which keeps a `=` inside a subsection as part
+   of the subsection name) and the command is refused, naming the key, on any
    `include`/`includeIf` directive or any key outside an allow-list. A
    managed repository (hub-native base, shared-workspace clone) allows only
    the keys git and Scion write; a linked checkout allows a wider set of keys
