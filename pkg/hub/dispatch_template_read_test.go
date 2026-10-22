@@ -1085,6 +1085,9 @@ func TestDispatchBoundCapability_StartAndResumeKnownToLack_412(t *testing.T) {
 		})
 		requireAPIError(t, rec, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability)
 		assert.False(t, disp.startCalled)
+		got, err := f.store.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Empty(t, got.RuntimeBrokerID, "a 412 refusal persists no broker fill")
 	})
 }
 
@@ -1220,24 +1223,53 @@ func TestRepin_NothingToRepin_NoWrite(t *testing.T) {
 	})
 }
 
-// A concurrent change of the recorded pin refuses the start with a
-// version conflict and nothing is dispatched.
-func TestRepin_ConcurrentPinChange_Refused(t *testing.T) {
-	f := setupResumeFill(t)
-	a := f.userTemplateAgent(t, "repin-race", string(state.PhaseStopped), f.broker.ID)
-	f.editTemplate(t, repinNewHash)
-	f.srv.store = &racingPinChangeStore{Store: f.store}
+// A concurrent write to the agent between the handler's read and the
+// re-pin makes the re-pin's compare-and-set fail: the start, restart or
+// resume answers 409 version_conflict, nothing is dispatched (a restart
+// does not even stop the agent), and the concurrent write survives.
+func TestRepin_ConcurrentWrite_409NoDispatch(t *testing.T) {
+	for _, p := range repinPaths {
+		t.Run(p.name, func(t *testing.T) {
+			f := setupResumeFill(t)
+			a := f.userTemplateAgent(t, "repin-race-"+tidSlugSafe(p.name), p.phase, f.broker.ID)
+			f.editTemplate(t, repinNewHash)
+			racing := &racingPinWriteStore{Store: f.store}
+			f.srv.store = racing
 
-	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil)
-	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
-	assert.Zero(t, f.disp.starts, "nothing is dispatched")
+			rec := p.run(t, f, a)
+			requireAPIError(t, rec, http.StatusConflict, ErrCodeVersionConflict)
+			assert.Zero(t, f.disp.starts, "nothing is dispatched")
+			assert.True(t, racing.raced, "the concurrent write ran")
+
+			got, err := f.store.GetAgent(context.Background(), a.ID)
+			require.NoError(t, err)
+			assert.Equal(t, "concurrent write", got.Message, "the concurrent write is not reverted")
+			assert.Equal(t, dispatchReadHash, got.AppliedConfig.TemplateHash, "nothing is re-recorded")
+			assert.Equal(t, p.phase, got.Phase, "the agent is left as it was")
+		})
+	}
 }
 
-// racingPinChangeStore reports a concurrent change of the template pin.
-type racingPinChangeStore struct{ store.Store }
+// racingPinWriteStore commits another writer's whole-row update just before
+// the handler's re-pin, so the row is newer than the handler's read.
+type racingPinWriteStore struct {
+	store.Store
+	raced bool
+}
 
-func (r *racingPinChangeStore) SetAgentTemplatePin(context.Context, string, string, string, string) (int64, error) {
-	return 0, store.ErrTemplatePinChanged
+func (r *racingPinWriteStore) SetAgentTemplatePin(ctx context.Context, agentID string, expectedVersion int64, templateID, expectedHash, newHash string) (int64, error) {
+	if !r.raced {
+		r.raced = true
+		cur, err := r.Store.GetAgent(ctx, agentID)
+		if err != nil {
+			return 0, err
+		}
+		cur.Message = "concurrent write"
+		if err := r.Store.UpdateAgent(ctx, cur); err != nil {
+			return 0, err
+		}
+	}
+	return r.Store.SetAgentTemplatePin(ctx, agentID, expectedVersion, templateID, expectedHash, newHash)
 }
 
 // "Active" means not soft-deleted, in any phase: a stopped or errored agent's

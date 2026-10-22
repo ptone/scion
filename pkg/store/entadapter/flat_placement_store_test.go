@@ -837,8 +837,9 @@ func TestSetAgentRuntimeBrokerIfEmpty_StaleUpdateAgentConflicts(t *testing.T) {
 }
 
 // SetAgentTemplatePin (ptone/scion#5770) re-records only the template hash,
-// only while the recorded template and hash still match, and bumps
-// state_version so a stale whole-row write conflicts.
+// only while the row is still at the caller's state_version with the
+// recorded template and hash, and bumps state_version so a stale whole-row
+// write conflicts.
 func TestSetAgentTemplatePin(t *testing.T) {
 	ctx := context.Background()
 	fs := newFlatStores(t)
@@ -848,7 +849,7 @@ func TestSetAgentTemplatePin(t *testing.T) {
 	stale, err := fs.agents.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
 
-	v, err := fs.agents.SetAgentTemplatePin(ctx, a.ID, "tpl-1", "sha256:old", "sha256:new")
+	v, err := fs.agents.SetAgentTemplatePin(ctx, a.ID, stale.StateVersion, "tpl-1", "sha256:old", "sha256:new")
 	require.NoError(t, err)
 	got, err := fs.agents.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
@@ -859,16 +860,42 @@ func TestSetAgentTemplatePin(t *testing.T) {
 	assert.Equal(t, "img:1", got.AppliedConfig.Image, "other applied-config keys are kept")
 	require.ErrorIs(t, fs.agents.UpdateAgent(ctx, stale), store.ErrVersionConflict, "a stale whole-row write conflicts")
 
-	// A mismatched expectation writes nothing.
-	_, err = fs.agents.SetAgentTemplatePin(ctx, a.ID, "tpl-1", "sha256:old", "sha256:other")
+	// A mismatched template or hash writes nothing.
+	_, err = fs.agents.SetAgentTemplatePin(ctx, a.ID, got.StateVersion, "tpl-1", "sha256:old", "sha256:other")
 	require.ErrorIs(t, err, store.ErrTemplatePinChanged)
-	_, err = fs.agents.SetAgentTemplatePin(ctx, a.ID, "tpl-2", "sha256:new", "sha256:other")
+	_, err = fs.agents.SetAgentTemplatePin(ctx, a.ID, got.StateVersion, "tpl-2", "sha256:new", "sha256:other")
 	require.ErrorIs(t, err, store.ErrTemplatePinChanged)
 	again, err := fs.agents.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
 	assert.Equal(t, got.StateVersion, again.StateVersion)
 	assert.Equal(t, "sha256:new", again.AppliedConfig.TemplateHash)
 
-	_, err = fs.agents.SetAgentTemplatePin(ctx, uuid.NewString(), "tpl-1", "", "x")
+	_, err = fs.agents.SetAgentTemplatePin(ctx, uuid.NewString(), 1, "tpl-1", "", "x")
 	require.ErrorIs(t, err, store.ErrNotFound)
+}
+
+// A caller whose read is older than the row (another writer committed in
+// between) is refused and nothing is written, so it never gets a version
+// that would let its stale copy overwrite that write.
+func TestSetAgentTemplatePin_StaleExpectedVersionRefused(t *testing.T) {
+	ctx := context.Background()
+	fs := newFlatStores(t)
+	a := makeAgent(fs.projectID, "pin-stale")
+	a.AppliedConfig = &store.AgentAppliedConfig{TemplateID: "tpl-1", TemplateHash: "sha256:old"}
+	require.NoError(t, fs.agents.CreateAgent(ctx, a))
+	read, err := fs.agents.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+
+	other, err := fs.agents.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	other.Message = "other writer"
+	require.NoError(t, fs.agents.UpdateAgent(ctx, other))
+
+	_, err = fs.agents.SetAgentTemplatePin(ctx, a.ID, read.StateVersion, "tpl-1", "sha256:old", "sha256:new")
+	require.ErrorIs(t, err, store.ErrTemplatePinChanged)
+	got, err := fs.agents.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, other.StateVersion, got.StateVersion, "nothing is written")
+	assert.Equal(t, "sha256:old", got.AppliedConfig.TemplateHash)
+	assert.Equal(t, "other writer", got.Message)
 }

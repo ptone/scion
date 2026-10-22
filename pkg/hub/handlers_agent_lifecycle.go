@@ -971,6 +971,16 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			if !s.requireDispatchBoundReadCapabilityForAgent(ctx, w, agent) {
 				return
 			}
+			// Re-record the current version of the agent's user-scoped
+			// template before the stop leg, so a lost compare-and-set
+			// leaves the agent running rather than stopped and never
+			// restarted. The start leg's own re-pin is then a no-op.
+			if err := s.repinUserTemplateForStart(ctx, agent); err != nil {
+				if !s.writeStartClaimError(ctx, w, err, agent.ID) {
+					writeErrorFromErr(w, err, "")
+				}
+				return
+			}
 			// Flat placement pre-check, before the broker cap check, the
 			// start claim, the run intent and the stop leg: a refused
 			// restart never stops the agent.

@@ -22,6 +22,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
+// errTemplatePinConflict is a re-pin that lost its compare-and-set because
+// the agent changed since it was read. writeStartClaimError answers it with
+// 409 version_conflict; nothing is dispatched.
+var errTemplatePinConflict = fmt.Errorf("agent changed while its template was re-recorded; retry: %w", store.ErrVersionConflict)
+
 // repinUserTemplateForStart re-records, before a start, restart or resume is
 // dispatched, the current content hash of the agent's user-scoped template
 // (ptone/scion#5770; see "Version pinning" in authorize.go). The template is
@@ -37,10 +42,12 @@ import (
 // version anyway), an unchanged hash, or a creator who can no longer read
 // it (the read gate then refuses, and the broker reports it clearly).
 //
-// On a write, agent's in-memory TemplateHash and StateVersion are updated to
-// the stored row, so a later whole-row write neither conflicts nor reverts
-// it. A concurrent change of the recorded template or hash returns an error
-// wrapping store.ErrVersionConflict, and the start must not be dispatched.
+// The write is a compare-and-set on the state_version agent was read at, so
+// on success agent's in-memory TemplateHash and StateVersion match the row
+// exactly and a later whole-row write neither conflicts nor reverts it. If
+// the row changed since agent was read (any concurrent write, or another
+// re-pin), nothing is written and errTemplatePinConflict is returned: the
+// start must not be dispatched, and writeStartClaimError answers 409.
 //
 // A reincarnate or move never calls this: its rebuild refuses a changed
 // user-scoped template instead (carryUserScopedTemplate).
@@ -65,9 +72,9 @@ func (s *Server) repinUserTemplateForStart(ctx context.Context, agent *store.Age
 			"agent_id", agent.ID, "template_id", tmpl.ID)
 		return nil
 	}
-	newVersion, err := s.store.SetAgentTemplatePin(ctx, agent.ID, tmpl.ID, agent.AppliedConfig.TemplateHash, tmpl.ContentHash)
+	newVersion, err := s.store.SetAgentTemplatePin(ctx, agent.ID, agent.StateVersion, tmpl.ID, agent.AppliedConfig.TemplateHash, tmpl.ContentHash)
 	if errors.Is(err, store.ErrTemplatePinChanged) {
-		return fmt.Errorf("agent template changed concurrently; retry: %w", store.ErrVersionConflict)
+		return errTemplatePinConflict
 	}
 	if err != nil {
 		return err

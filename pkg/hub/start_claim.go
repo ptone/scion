@@ -1100,6 +1100,11 @@ func (s *Server) writeStartClaimError(ctx context.Context, w http.ResponseWriter
 		return true
 	}
 	switch {
+	case errors.Is(err, errTemplatePinConflict):
+		// The re-pin of the agent's user-scoped template lost its
+		// compare-and-set (ptone/scion#5770); nothing was dispatched.
+		writeError(w, http.StatusConflict, ErrCodeVersionConflict, errTemplatePinConflict.Error(), nil)
+		return true
 	case errors.Is(err, errStartingWrite):
 		// The starting write before dispatch failed (409 when the stored
 		// phase moved on), as beginStartDispatchHTTP answers.

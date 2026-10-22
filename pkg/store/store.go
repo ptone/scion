@@ -873,13 +873,16 @@ type AgentStore interface {
 
 	// SetAgentTemplatePin re-records the content hash of an agent's Hub
 	// template (AgentAppliedConfig.TemplateHash) and changes no other
-	// applied-config key or column. It applies only while the stored
+	// applied-config key or column. It applies only while the row is still
+	// at expectedVersion (the state_version the caller read) and its
 	// applied config still names templateID with expectedHash; otherwise
-	// it returns ErrTemplatePinChanged and writes nothing. The write bumps
-	// state_version by exactly one, so a writer holding an older read gets
-	// ErrVersionConflict from UpdateAgent, and returns the new
-	// state_version. A missing or deleted agent returns ErrNotFound.
-	SetAgentTemplatePin(ctx context.Context, agentID, templateID, expectedHash, newHash string) (newVersion int64, err error)
+	// it returns ErrTemplatePinChanged and writes nothing, so a caller
+	// holding a stale read never gets a version that would let it overwrite
+	// another writer's change. The write bumps state_version by exactly one
+	// (expectedVersion+1, returned), so any other writer holding a read from
+	// before it gets ErrVersionConflict from UpdateAgent. A missing or
+	// deleted agent returns ErrNotFound.
+	SetAgentTemplatePin(ctx context.Context, agentID string, expectedVersion int64, templateID, expectedHash, newHash string) (newVersion int64, err error)
 
 	// AggregateAgentHealth returns lightweight health-oriented counts and lists
 	// for the health-summary endpoint without fetching full agent records.

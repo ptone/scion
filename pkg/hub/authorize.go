@@ -329,6 +329,7 @@ type dispatchCatalogResource struct {
 const (
 	dispatchReadCatalog         = "catalog"
 	dispatchReadBound           = "dispatch_bound"
+	dispatchDenyNoBroker        = "no_broker"
 	dispatchDenyNotUserScope    = "not_user_scope"
 	dispatchDenyNoAgent         = "no_agent_id"
 	dispatchDenyAgentLookup     = "agent_lookup_failed"
@@ -378,7 +379,10 @@ func (s *Server) brokerMayReadForDispatch(ctx context.Context, broker BrokerIden
 	if s.brokerMayReadCatalogResource(ctx, broker, res.Scope, res.ScopeID) {
 		return true, dispatchReadCatalog
 	}
-	if isNilIdentity(broker) || res.Scope != store.TemplateScopeUser { // == store.HarnessConfigScopeUser
+	if isNilIdentity(broker) {
+		return false, dispatchDenyNoBroker
+	}
+	if res.Scope != store.TemplateScopeUser { // == store.HarnessConfigScopeUser
 		return false, dispatchDenyNotUserScope
 	}
 	if agentID == "" {
