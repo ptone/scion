@@ -502,13 +502,17 @@ func (d *fillProbeDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 }
 
 // racingFillStore lands a competing broker fill just before the handler's
-// own SetAgentRuntimeBrokerIfEmpty.
+// own SetAgentRuntimeBrokerIfEmpty, once its fault switch is armed.
 type racingFillStore struct {
 	store.Store
+	fault     *storeFaultSwitch
 	competing string
 }
 
 func (r *racingFillStore) SetAgentRuntimeBrokerIfEmpty(ctx context.Context, agentID, brokerID string) (*store.Agent, error) {
+	if !r.fault.Active() {
+		return r.Store.SetAgentRuntimeBrokerIfEmpty(ctx, agentID, brokerID)
+	}
 	if _, err := r.Store.SetAgentRuntimeBrokerIfEmpty(ctx, agentID, r.competing); err != nil {
 		return nil, err
 	}
@@ -612,7 +616,10 @@ func TestResumeFill_LostCompareAndSet_409NoDispatch(t *testing.T) {
 		t.Run(br.name, func(t *testing.T) {
 			f := setupResumeFill(t)
 			a := f.userTemplateAgent(t, "fill-race-"+tidSlugSafe(br.name), br.phase, "")
-			f.srv.store = &racingFillStore{Store: f.store, competing: f.other.ID}
+			_, fault := installStoreFault(t, f.srv, func(inner store.Store, fault *storeFaultSwitch) *racingFillStore {
+				return &racingFillStore{Store: inner, fault: fault, competing: f.other.ID}
+			})
+			fault.Arm()
 
 			rec := f.post(t, a, br.resume)
 			assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
@@ -631,7 +638,10 @@ func TestResumeFill_SameBrokerAlreadyFilled_Succeeds(t *testing.T) {
 		t.Run(br.name, func(t *testing.T) {
 			f := setupResumeFill(t)
 			a := f.userTemplateAgent(t, "fill-same-"+tidSlugSafe(br.name), br.phase, "")
-			f.srv.store = &racingFillStore{Store: f.store, competing: f.broker.ID}
+			_, fault := installStoreFault(t, f.srv, func(inner store.Store, fault *storeFaultSwitch) *racingFillStore {
+				return &racingFillStore{Store: inner, fault: fault, competing: f.broker.ID}
+			})
+			fault.Arm()
 
 			rec := f.post(t, a, br.resume)
 			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -950,13 +960,14 @@ func TestReincarnate_NoTemplateID_SlugPathUnchanged(t *testing.T) {
 // error.
 type templateLookupErrStore struct {
 	store.Store
+	fault  *storeFaultSwitch
 	failID string
 }
 
 var errInjectedTemplateLookup = errors.New("injected template lookup failure")
 
 func (s *templateLookupErrStore) GetTemplate(ctx context.Context, id string) (*store.Template, error) {
-	if id == s.failID {
+	if s.fault.Active() && id == s.failID {
 		return nil, errInjectedTemplateLookup
 	}
 	return s.Store.GetTemplate(ctx, id)
@@ -971,7 +982,10 @@ func TestReincarnate_TemplateStoreError_FailsWithoutSwap(t *testing.T) {
 	agent := newReincarnateTestAgent(t, s, project, broker, bindTemplate(user))
 	before, err := s.GetAgent(context.Background(), agent.ID)
 	require.NoError(t, err)
-	srv.store = &templateLookupErrStore{Store: s, failID: user.ID}
+	_, fault := installStoreFault(t, srv, func(inner store.Store, fault *storeFaultSwitch) *templateLookupErrStore {
+		return &templateLookupErrStore{Store: inner, fault: fault, failID: user.ID}
+	})
+	fault.Arm()
 
 	req := reincarnateRequest(t, agent.ID, agentIdentityFor(agent.ID, project.ID), ReincarnateAgentRequest{})
 	rec := httptest.NewRecorder()
@@ -1260,8 +1274,10 @@ func TestRepin_ConcurrentWrite_409NoDispatch(t *testing.T) {
 			f := setupResumeFill(t)
 			a := f.userTemplateAgent(t, "repin-race-"+tidSlugSafe(p.name), p.phase, f.broker.ID)
 			f.editTemplate(t, repinNewHash)
-			racing := &racingPinWriteStore{Store: f.store}
-			f.srv.store = racing
+			racing, fault := installStoreFault(t, f.srv, func(inner store.Store, fault *storeFaultSwitch) *racingPinWriteStore {
+				return &racingPinWriteStore{Store: inner, fault: fault}
+			})
+			fault.Arm()
 
 			rec := p.run(t, f, a)
 			requireAPIError(t, rec, http.StatusConflict, ErrCodeVersionConflict)
@@ -1276,8 +1292,8 @@ func TestRepin_ConcurrentWrite_409NoDispatch(t *testing.T) {
 			assert.Equal(t, p.phase, got.Phase, "the agent is left as it was")
 			assert.Empty(t, got.StartClaimID, "the refused start releases its start claim")
 
-			// The 409 says retry: an immediate retry succeeds.
-			f.srv.store = f.store
+			// The 409 says retry: an immediate retry succeeds (the wrapper
+			// races only once).
 			rec = p.run(t, f, got)
 			require.Less(t, rec.Code, 300, "the retry starts: %s", rec.Body.String())
 			assert.Equal(t, 1, f.disp.starts)
@@ -1290,11 +1306,12 @@ func TestRepin_ConcurrentWrite_409NoDispatch(t *testing.T) {
 // the handler's re-pin, so the row is newer than the handler's read.
 type racingPinWriteStore struct {
 	store.Store
+	fault *storeFaultSwitch
 	raced bool
 }
 
 func (r *racingPinWriteStore) SetAgentTemplatePin(ctx context.Context, agentID string, expectedVersion int64, templateID, expectedHash, newHash string) (int64, error) {
-	if !r.raced {
+	if r.fault.Active() && !r.raced {
 		r.raced = true
 		cur, err := r.Store.GetAgent(ctx, agentID)
 		if err != nil {
@@ -1374,7 +1391,10 @@ func TestRepin_Wake(t *testing.T) {
 		f.editTemplate(t, repinNewHash)
 		cur, err := f.store.GetAgent(ctx, a.ID)
 		require.NoError(t, err)
-		f.srv.store = &racingPinWriteStore{Store: f.store}
+		_, fault := installStoreFault(t, f.srv, func(inner store.Store, fault *storeFaultSwitch) *racingPinWriteStore {
+			return &racingPinWriteStore{Store: inner, fault: fault}
+		})
+		fault.Arm()
 
 		_, dmErr := f.srv.wakeAgentForDM(ctx, cur)
 		require.NotNil(t, dmErr)
@@ -1388,8 +1408,7 @@ func TestRepin_Wake(t *testing.T) {
 		assert.Empty(t, got.StartClaimID, "the refused wake releases its start claim")
 
 		// An immediate retry wakes the agent (not deferred behind a held
-		// claim).
-		f.srv.store = f.store
+		// claim; the wrapper races only once).
 		_, dmErr = f.srv.wakeAgentForDM(ctx, got)
 		// Dispatched, then only the (fake's) readiness wait fails: a
 		// deferred wake would answer no error and dispatch nothing.
