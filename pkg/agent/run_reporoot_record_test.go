@@ -222,9 +222,9 @@ func TestProvision_RefusesLinkedWorktreeProject(t *testing.T) {
 	}
 }
 
-// An explicit workspace inside the project's .scion/agents directory is
-// refused at provision; other locations under .scion (the project's own
-// .scion, and the hub-native base's .scion/workspace) are allowed.
+// An explicit workspace that is the project's .scion directory, or inside
+// .scion/agents, is refused at provision; the hub-native base's
+// .scion/workspace is still allowed.
 func TestRefuseWorkspaceInAgentsDir(t *testing.T) {
 	root := t.TempDir()
 	scion := mkdirAllT(t, filepath.Join(root, "proj", ".scion"))
@@ -306,8 +306,12 @@ func TestRefuseWorkspaceInAgentsDir_FailClosedOnResolveError(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = os.Chmod(proj, 0o755) })
-		if err := refuseWorkspaceInAgentsDir(proj, ws); err == nil {
-			t.Error("refuseWorkspaceInAgentsDir with an unreadable .scion: want a refusal")
+		err := refuseWorkspaceInAgentsDir(proj, ws)
+		if err == nil {
+			t.Fatal("refuseWorkspaceInAgentsDir with an unreadable .scion: want a refusal")
+		}
+		if !strings.Contains(err.Error(), "resolve project .scion") {
+			t.Errorf("refuseWorkspaceInAgentsDir refused for an unexpected reason: %v", err)
 		}
 	})
 	// Branch 2: .scion resolves, but resolving .scion/agents fails because
@@ -322,8 +326,12 @@ func TestRefuseWorkspaceInAgentsDir_FailClosedOnResolveError(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = os.Chmod(scion, 0o755) })
-		if err := refuseWorkspaceInAgentsDir(proj, ws); err == nil {
-			t.Error("refuseWorkspaceInAgentsDir with an unreadable agents dir: want a refusal")
+		err := refuseWorkspaceInAgentsDir(proj, ws)
+		if err == nil {
+			t.Fatal("refuseWorkspaceInAgentsDir with an unreadable agents dir: want a refusal")
+		}
+		if !strings.Contains(err.Error(), "resolve project agents directory") {
+			t.Errorf("refuseWorkspaceInAgentsDir refused for an unexpected reason: %v", err)
 		}
 	})
 }

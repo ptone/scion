@@ -4250,15 +4250,27 @@ func TestProvisionAgent_HubNativeWorktreeWorkspaceAccepted(t *testing.T) {
 // itself holds agent state, not a workspace, and ProvisionAgent must refuse it
 // (the agents-tree mask does not cover .scion itself).
 func TestProvisionAgent_ScionDirWorkspaceRefused(t *testing.T) {
-	t.Setenv("SCION_HOST_UID", "")
-	tmpDir := t.TempDir()
-	projectScionDir, _ := provisionAgentRepoRootScaffold(t, tmpDir)
+	// Both spellings of the .scion directory reach it: the absolute path and
+	// the relative ".scion" route (resolved against the project root).
+	for _, tc := range []struct {
+		name      string
+		workspace func(projectScionDir string) string
+	}{
+		{name: "absolute", workspace: func(d string) string { return d }},
+		{name: "relative", workspace: func(string) string { return ".scion" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SCION_HOST_UID", "")
+			tmpDir := t.TempDir()
+			projectScionDir, _ := provisionAgentRepoRootScaffold(t, tmpDir)
 
-	_, _, _, err := ProvisionAgent(context.Background(), "agent-a", "claude", "", "", projectScionDir, "", "", "", projectScionDir)
-	if err == nil {
-		t.Fatal("ProvisionAgent accepted the project's .scion directory as the workspace; want a refusal")
-	}
-	if !strings.Contains(err.Error(), "holds agent state") {
-		t.Fatalf("ProvisionAgent refused for an unexpected reason: %v", err)
+			_, _, _, err := ProvisionAgent(context.Background(), "agent-a", "claude", "", "", projectScionDir, "", "", "", tc.workspace(projectScionDir))
+			if err == nil {
+				t.Fatal("ProvisionAgent accepted the project's .scion directory as the workspace; want a refusal")
+			}
+			if !strings.Contains(err.Error(), "project's .scion directory") {
+				t.Fatalf("ProvisionAgent refused for an unexpected reason: %v", err)
+			}
+		})
 	}
 }
