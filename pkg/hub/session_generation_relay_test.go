@@ -128,7 +128,8 @@ func TestSessionGen_ConduitRelayAdmit_AuthctxVisibleInAdmission(t *testing.T) {
 }
 
 // Fails if a second non-test call to authctx.WithSessionGeneration is added
-// anywhere in the module: the JWT bearer arm in pkg/hub/auth.go is the only
+// anywhere in this module (nested modules and hidden directories, such as
+// agent worktrees under .scion, are not scanned): the JWT bearer arm in pkg/hub/auth.go is the only
 // place that may record a session generation.
 func TestSessionGen_AuthctxSetterSingleCallSite(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
@@ -143,8 +144,18 @@ func TestSessionGen_AuthctxSetterSingleCallSite(t *testing.T) {
 			return err
 		}
 		if d.IsDir() {
-			switch d.Name() {
-			case ".git", "node_modules", "vendor", "testdata":
+			if path == root {
+				return nil
+			}
+			// Stay in this module's own sources: skip hidden directories
+			// (.git, and .scion, which holds agent worktrees with full
+			// copies of the tree), dependency and fixture directories, and
+			// nested modules (extras/*).
+			switch name := d.Name(); {
+			case strings.HasPrefix(name, "."), name == "node_modules", name == "vendor", name == "testdata":
+				return filepath.SkipDir
+			}
+			if _, err := os.Stat(filepath.Join(path, "go.mod")); err == nil {
 				return filepath.SkipDir
 			}
 			return nil
