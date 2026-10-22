@@ -56,6 +56,12 @@
 - **Ancestor chain: accepted as a residual, with a warning** (security-lead ruling). A followed directory link whose target's parent is writable by another principal gets one warning (`TreeOptions.Warn`, diagnostic only). The stated limit: rule I protects the target, not the mutability of the path to it.
 - **F3/F4 fixed.** The `sshShellUnquote` unix delta is listed in the PR. The guard comment now says the handle-relative walk is Windows-only.
 
+## Review r3
+
+- **F1 fixed.** `privatefs.CheckReplaceTarget` is a write-free preflight of `ReplaceFollowing`'s checks. The multi-file writers (ssh-config hub plan, vscode files) run it on every leaf before they create any directory or the lock file. So a leaf refusal (hard link, foreign owner) also leaves no side effect. Tests snapshot home and the link target.
+- **F4 fixed.** The diagnostic warning function is pinned by an AST guard: no return value, no close or duplicate of the walk handle, and called only from `openDirComp` as a bare statement.
+- **F5 accepted as an error path.** A dangling directory link in a later rel can leave an earlier rel created inside home. **F6 fixed.**
+
 ## Open issues
 
 - **The cmd Windows tests wait for 3a.** pkg/config does not compile for Windows until 3a's C9 lands (`legacy_grove_migration.go:306`). A TEMP commit keeps `./cmd` out of the Windows job. Merge order is 3a first; then I rebase and drop the TEMP commit.
