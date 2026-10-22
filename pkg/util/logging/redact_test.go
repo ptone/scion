@@ -329,7 +329,7 @@ func TestEncodedBeyondDecodeRoundsRedacted(t *testing.T) {
 	if got := RedactQuery("next=/api/v1/" + nested + "/" + tok); got != "REDACTED" {
 		t.Errorf("RedactQuery(nested) = %q", got)
 	}
-	if got := SubPath("/api/v1/" + nested + "/" + tok); got != RedactedSubPath {
+	if got := SubPath("/api/v1/" + nested + "/" + tok); got != RedactedPath {
 		t.Errorf("SubPath(nested) = %q", got)
 	}
 }
@@ -344,7 +344,7 @@ func TestSubPath(t *testing.T) {
 		"/api/v1/artifacts/view/" + tok + "/i.html",
 		"/x/%zz/" + tok,
 	} {
-		if got := SubPath(p); got != RedactedSubPath {
+		if got := SubPath(p); got != RedactedPath {
 			t.Errorf("SubPath(%q) = %q", p, got)
 		}
 	}

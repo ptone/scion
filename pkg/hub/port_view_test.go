@@ -313,6 +313,10 @@ func TestPortView_PortLinkUnchanged(t *testing.T) {
 		target := f.base + "/api/v1/agents/" + f.launched.ID + "/ports/" + strconv.Itoa(other) + "/proxy/page.html"
 		notRedirected(t, f.send(t, http.MethodGet, target, withBearer(navHeader(), f.userToken), nil))
 	})
+	t.Run("sub-path the page view route does not accept", func(t *testing.T) {
+		target := f.portLink("a%2Fb.html")
+		notRedirected(t, f.send(t, http.MethodGet, target, withBearer(navHeader(), f.userToken), nil))
+	})
 	t.Run("conduit off", func(t *testing.T) {
 		setPortViewExperiments(t, f.srv, false, true)
 		t.Cleanup(func() { setPortViewExperiments(t, f.srv, true, true) })

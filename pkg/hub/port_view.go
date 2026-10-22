@@ -22,6 +22,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"path"
 	"strconv"
 	"strings"
@@ -374,6 +375,11 @@ func (s *Server) redirectToPortView(w http.ResponseWriter, r *http.Request, agen
 	}
 	exp := s.portViewNow().Add(s.portViewTTL()).Truncate(time.Second)
 	capability := portview.Mint(key, agent.ID, exposed.Port, userID, exp)
+	// A sub-path the page view route would not accept (isPortViewRequest)
+	// keeps the port link.
+	if u, err := url.Parse(portview.Route + capability + "/" + escSub); err != nil || !isPortViewRequest(&http.Request{URL: u}) {
+		return false
+	}
 	loc := relativeAPIRoot(r.URL.EscapedPath()) + "portview/" + capability + "/" + escSub
 	if r.URL.RawQuery != "" {
 		loc += "?" + encodeLocationQuery(r.URL.RawQuery)

@@ -227,16 +227,12 @@ func RedactReferer(referer string) string {
 	return RedactURL(u)
 }
 
-// RedactedSubPath is how a proxied request's path at the agent port is
-// logged when it may name an artifact or port view URL.
-const RedactedSubPath = "/" + redactedValue
-
 // SubPath returns p, the path a proxied request is sent with to an agent
-// port, for a log line: RedactedSubPath when it may name an artifact or
+// port, for a log line: RedactedPath when it may name an artifact or
 // port view URL (the rule of artifactPath and portViewPath), p otherwise.
 func SubPath(p string) string {
 	if pathMentions(p, "artifacts") || pathMentions(p, "portview") {
-		return RedactedSubPath
+		return RedactedPath
 	}
 	return p
 }
