@@ -267,8 +267,8 @@ func TestResolveStartRepoRoot_RejectsRecordNotMatchingProject(t *testing.T) {
 	agentDir := mkdirAllT(t, filepath.Join(projectDir, "agents", "a"))
 	ws := mkdirAllT(t, filepath.Join(agentDir, "workspace"))
 
-	// A planted provision record naming the other repository, which is not
-	// an ancestor of the per-agent workspace, so the mount check passes.
+	// A provision record naming another repository, which is not an ancestor
+	// of the per-agent workspace, so the mount check passes.
 	if err := writeRepoRootRecord(agentDir, eval(t, other), repoRootSourceProvision, nil); err != nil {
 		t.Fatal(err)
 	}

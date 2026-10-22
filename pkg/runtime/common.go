@@ -862,13 +862,12 @@ func isHubManagedWorktreeBase(repoRoot string) bool {
 	if err != nil {
 		return false
 	}
-	// `git rev-parse --git-common-dir` (RepoRoot comes from pkg/agent's
-	// trustedProjectRepoRoot walk, checked at provision against the resolved
-	// root git reports) returns a resolved (symlink-free)
-	// path, while os.UserHomeDir() may itself be reached through a symlink
-	// (e.g. /home -> /var/home). Resolve both sides the same way before
-	// comparing so a symlinked home directory doesn't cause a hub-native base
-	// to be misclassified as linked (and so miss the mount narrowing).
+	// RepoRoot normally arrives symlink-resolved (trustedProjectRepoRoot and
+	// Start's broker-signal/record resolution both EvalSymlinks it), while
+	// os.UserHomeDir() may itself be reached through a symlink (e.g.
+	// /home -> /var/home). Resolve both sides the same way before comparing so
+	// a symlinked home directory doesn't cause a hub-native base to be
+	// misclassified as linked (and so miss the mount narrowing).
 	if resolved, evalErr := filepath.EvalSymlinks(repoAbs); evalErr == nil {
 		repoAbs = resolved
 	}
@@ -914,8 +913,8 @@ func isHubManagedWorktreeBase(repoRoot string) bool {
 // objects/ stays writable on purpose (in-container commit) and is shared
 // across the project's agents, so this read-only narrowing (here and in
 // narrowSharerRegistryMounts) is not, on its own, complete hardening of the
-// shared store (ptone/scion#4611). The durable fix
-// is a read-only shared store as an alternate plus a writable per-container
+// shared store (ptone/scion#4611). The durable fix is a read-only shared
+// store as an alternate plus a writable per-container
 // store.
 //
 // Each subpath is mounted read-only only if it currently exists, so a

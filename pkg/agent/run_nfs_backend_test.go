@@ -597,9 +597,8 @@ profiles:
 		}
 		// RepoRoot is no longer derived from the backend's checkout: it comes
 		// only from a broker signal or agentDir's repository root record, and
-		// a Kubernetes dispatch has neither (the root comes from a record or
-		// is empty). The Kubernetes runtime
-		// builds its mounts from ContainerWorkspace and the NFS* fields, not
+		// a Kubernetes dispatch has neither. The Kubernetes runtime builds its
+		// mounts from ContainerWorkspace and the NFS* fields, not
 		// RepoRoot; an empty RepoRoot only skips the in-project agents-dir
 		// mask, which the broker-side agent-dir relocation already covers.
 		if capturedConfig.RepoRoot != "" {
