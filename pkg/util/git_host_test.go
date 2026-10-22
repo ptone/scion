@@ -62,7 +62,7 @@ func hostRunGit(t *testing.T, dir string, args ...string) string {
 // directory, every hook git runs for the host-side commands under test, each
 // touching a marker in markers. These are repository content at the default
 // path (not a config key); HostGitArgs' core.hooksPath=/dev/null pin keeps
-// them from running. Config-based vectors (core.hooksPath, core.fsmonitor,
+// them from running. Config-based settings (core.hooksPath, core.fsmonitor,
 // filter drivers) are covered by the deny-by-default policy tests instead.
 func plantRepoCommands(t *testing.T, repo, markers string) {
 	t.Helper()

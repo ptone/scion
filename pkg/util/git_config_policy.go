@@ -103,8 +103,8 @@ func isGitBool(v string) bool {
 }
 
 // validLFSURLSubsection reports whether an lfs.<url>.* subsection is an
-// http(s) URL with no whitespace or control characters — so a crafted
-// subsection cannot smuggle anything past the key check.
+// http(s) URL with no whitespace or control characters — so the
+// subsection is treated as part of the key.
 func validLFSURLSubsection(sub string) bool {
 	if sub == "" {
 		return false

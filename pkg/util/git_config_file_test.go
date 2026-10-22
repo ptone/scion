@@ -65,8 +65,8 @@ func TestParseGitConfigFile(t *testing.T) {
 	}
 }
 
-// A subsection containing '=' keeps the '=' in the subsection, so a filter
-// driver cannot hide behind it.
+// A subsection containing '=' keeps the '=' in the subsection, so the filter
+// driver is checked like any other key.
 func TestParseGitConfigFile_SubsectionWithEquals(t *testing.T) {
 	vars, err := parseGitConfigFile([]byte("[filter \"a=b\"]\n\tsmudge = evil\n"))
 	if err != nil {
