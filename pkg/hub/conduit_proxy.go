@@ -221,19 +221,11 @@ func isResponseHeaderTimeout(err error) bool {
 // is bounded (portProxyResponseHeaderTimeout; 504 on timeout); once they
 // arrive the exchange lasts as long as the request. Credentials are
 // stripped from the request and the response is sandboxed exactly as on
-// the tunnel path.
-func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent *store.Agent, port int, proxyPath string, conn net.Conn) {
-	s.serveConduitProxyWith(w, r, agent, port, proxyPath, conn, portProxyPolicy{
-		surface: portProxySurfacePath,
-		caller:  identityStringFromContext(r.Context()),
-	})
-}
-
-// serveConduitProxyWith is serveConduitProxy for a surface's policy: the
-// page view surface (policy.portView) also removes the request headers in
+// the tunnel path. policy is the surface's: the page view surface
+// (policy.portView) also removes the request headers in
 // portViewStrippedRequestHeader and applies portViewModifyResponse, and
 // each surface logs its own caller string.
-func (s *Server) serveConduitProxyWith(w http.ResponseWriter, r *http.Request, agent *store.Agent, port int, proxyPath string, conn net.Conn, policy portProxyPolicy) {
+func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent *store.Agent, port int, proxyPath string, conn net.Conn, policy portProxyPolicy) {
 	start := time.Now()
 	reqPath := "/" + strings.TrimPrefix(proxyPath, "/")
 	target := net.JoinHostPort(conduitProxyHost, strconv.Itoa(port))

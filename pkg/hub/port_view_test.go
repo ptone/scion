@@ -262,6 +262,63 @@ func TestPortView_PortLinkUnchanged(t *testing.T) {
 		assert.Equal(t, http.StatusForbidden, res.status, res.body)
 		assert.Empty(t, res.header.Values("Location"))
 	})
+	// The port link answers itself (no redirect) wherever the page view
+	// route would not serve the link.
+	notRedirected := func(t *testing.T, res pvResult) {
+		t.Helper()
+		assert.NotEqual(t, http.StatusFound, res.status, res.body)
+		assert.Empty(t, res.header.Values("Location"))
+	}
+	t.Run("page view would not serve the caller", func(t *testing.T) {
+		// The agent's owner has no role in its project: the port link
+		// admits them as the owner, the page view identity is limited to
+		// the project and is refused.
+		ctx := context.Background()
+		loneID := tid("port-view-lone-owner")
+		require.NoError(t, f.store.CreateUser(ctx, &store.User{
+			ID: loneID, Email: "lone@conduit.test", DisplayName: "Lone", Role: store.UserRoleMember, Status: store.UserStatusActive,
+		}))
+		ensureHubMembership(ctx, f.store, loneID)
+		lone := &store.Agent{
+			ID: tid("port-view-lone-agent"), Slug: "port-view-lone-agent", Name: "Lone",
+			ProjectID: f.launched.ProjectID, OwnerID: loneID, Ancestry: []string{loneID},
+			RuntimeBrokerID: "broker-1", Phase: "running",
+		}
+		require.NoError(t, f.store.CreateAgent(ctx, lone))
+		require.NoError(t, f.store.UpdateAgentExposedPorts(ctx, lone.ID, []store.ExposedPort{{Port: f.app.port, Host: conduitProxyHost, Mode: "rw"}}))
+		got, err := f.store.GetAgent(ctx, lone.ID)
+		require.NoError(t, err)
+		_, ok := f.srv.portViewIdentity(ctx, loneID, got)
+		require.False(t, ok, "the page view identity is refused")
+		tok, _, _, err := f.srv.userTokenService.GenerateTokenPair(loneID, "lone@conduit.test", "Lone", store.UserRoleMember, ClientTypeWeb)
+		require.NoError(t, err)
+		loneLink := f.base + "/api/v1/agents/" + lone.ID + "/ports/" + strconv.Itoa(f.app.port) + "/proxy/page.html"
+		check := f.send(t, http.MethodGet, loneLink, withBearer(http.Header{"Accept": {"*/*"}}, tok), nil)
+		require.NotEqual(t, http.StatusForbidden, check.status, "the port link admits the owner: %s", check.body)
+		notRedirected(t, f.send(t, http.MethodGet, loneLink, withBearer(navHeader(), tok), nil))
+	})
+	t.Run("port not on loopback", func(t *testing.T) {
+		ctx := context.Background()
+		other := f.app.port + 1
+		if other > 65535 {
+			other = f.app.port - 1
+		}
+		require.NoError(t, f.store.UpdateAgentExposedPorts(ctx, f.launched.ID, []store.ExposedPort{
+			{Port: f.app.port, Host: conduitProxyHost, Mode: "rw"},
+			{Port: other, Host: "192.0.2.10", Mode: "rw"},
+		}))
+		t.Cleanup(func() {
+			_ = f.store.UpdateAgentExposedPorts(context.Background(), f.launched.ID, []store.ExposedPort{{Port: f.app.port, Host: conduitProxyHost, Mode: "rw"}})
+		})
+		target := f.base + "/api/v1/agents/" + f.launched.ID + "/ports/" + strconv.Itoa(other) + "/proxy/page.html"
+		notRedirected(t, f.send(t, http.MethodGet, target, withBearer(navHeader(), f.userToken), nil))
+	})
+	t.Run("conduit off", func(t *testing.T) {
+		setPortViewExperiments(t, f.srv, false, true)
+		t.Cleanup(func() { setPortViewExperiments(t, f.srv, true, true) })
+		require.False(t, f.srv.conduitRoutable())
+		notRedirected(t, f.send(t, http.MethodGet, link, withBearer(navHeader(), f.userToken), nil))
+	})
 }
 
 // createPortViewUAT creates a user access token of the agent owner that
@@ -471,6 +528,19 @@ func TestPortView_NavigationMatrix(t *testing.T) {
 	t.Run("expired, not a navigation", func(t *testing.T) {
 		requirePortViewInvalid(t, f.send(t, http.MethodGet, at(expired), subHeader(), nil))
 		requirePortViewInvalid(t, f.send(t, http.MethodGet, at(expired), withBearer(subHeader(), f.userToken), nil))
+	})
+	t.Run("valid link the user can no longer use, navigation", func(t *testing.T) {
+		foreign := f.capFor(f.stranger.ID(), f.app.port, time.Now().Add(time.Hour))
+		toPortLink(t, at(foreign), f.send(t, http.MethodGet, at(foreign), navHeader(), nil))
+		gone := portview.Mint(f.srv.portViewSigningKey(), tid("port-view-gone-agent"), f.app.port, f.launched.OwnerID, time.Now().Add(time.Hour))
+		res := f.send(t, http.MethodGet, f.viewURL(gone, "dir/page.html?q=1"), navHeader(), nil)
+		require.Equal(t, http.StatusFound, res.status, res.body)
+		got := resolveLocation(t, f.viewURL(gone, "dir/page.html?q=1"), res)
+		assert.Equal(t, "/api/v1/agents/"+tid("port-view-gone-agent")+"/ports/"+strconv.Itoa(f.app.port)+"/proxy/dir/page.html", got.Path)
+	})
+	t.Run("valid link the user can no longer use, not a navigation", func(t *testing.T) {
+		foreign := f.capFor(f.stranger.ID(), f.app.port, time.Now().Add(time.Hour))
+		requirePortViewInvalid(t, f.send(t, http.MethodGet, at(foreign), subHeader(), nil))
 	})
 	t.Run("expired form post navigation", func(t *testing.T) {
 		requirePortViewInvalid(t, f.send(t, http.MethodPost, at(expired), navHeader(), strings.NewReader("a=1")))

@@ -440,10 +440,9 @@ type portProxyPolicy struct {
 	// conduitOnly: only the conduit transport serves; without it the
 	// answer is writeAgentOffline.
 	conduitOnly bool
-	// portView applies the page view request and response rules
-	// (portViewStrippedRequestHeader, portViewModifyResponse); the
-	// hub-owned response headers are already set
-	// (setPortViewResponseHeaders).
+	// portView applies the page view headers (setPortViewResponseHeaders)
+	// and request and response rules (portViewStrippedRequestHeader,
+	// portViewModifyResponse).
 	portView bool
 }
 
@@ -465,6 +464,9 @@ func writePortNotExposed(w http.ResponseWriter, r *http.Request) {
 // refuseLegacyProxy rule.
 func (s *Server) proxyToAgentPort(w http.ResponseWriter, r *http.Request, identity Identity, agent *store.Agent, exposed *store.ExposedPort, proxyPath string, policy portProxyPolicy, start time.Time) {
 	port := exposed.Port
+	if policy.portView {
+		setPortViewResponseHeaders(w)
+	}
 	// Conduit first (hub.conduit on and this node runs the relay): an agent
 	// with a conduit session is proxied over it. An agent without one may
 	// be an older sciontool on the port-forward tunnel below. Every loopback
@@ -476,7 +478,7 @@ func (s *Server) proxyToAgentPort(w http.ResponseWriter, r *http.Request, identi
 		conn, err := s.openConduitPort(r.Context(), identity, agent, exposed.Port)
 		switch {
 		case err == nil:
-			s.serveConduitProxyWith(w, r, agent, exposed.Port, proxyPath, conn, policy)
+			s.serveConduitProxy(w, r, agent, exposed.Port, proxyPath, conn, policy)
 			return
 		case !errors.Is(err, router.ErrNoSession):
 			writeConduitProxyError(w, r, agent.ID, err)

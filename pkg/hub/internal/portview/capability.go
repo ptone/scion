@@ -197,9 +197,8 @@ func PreflightMethod(method string) string {
 
 // PreflightHeaders returns the value of Access-Control-Allow-Headers for a
 // preflight whose Access-Control-Request-Headers is requested: the
-// requested names, lower-cased, without authorization and cookie and
-// without any name that is not an HTTP token. "" means the header is not
-// sent.
+// requested names, lower-cased, except authorization, cookie and any name
+// that is not an HTTP token. "" means the header is not sent.
 func PreflightHeaders(requested string) string {
 	var out []string
 	for _, name := range strings.Split(requested, ",") {

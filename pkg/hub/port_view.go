@@ -118,13 +118,14 @@ func (s *Server) portViewNow() time.Time {
 	return time.Now()
 }
 
-// isPortViewRequest reports whether r is a request for the page view
-// route in the one shape the route serves: the decoded and the escaped
-// path both under portview.Route and clean (one trailing slash allowed),
-// the escaped path not encoding a slash, dot, backslash or NUL (in any
-// letter case), and a non-empty capability segment that is not escaped
-// at all, so the request this check admits is the one the mux routes to
-// the route. Any method. Only the request shape is checked here.
+// isPortViewRequest reports whether r is a request under the page view
+// route, of any method, whose path segment after portview.Route holds a
+// capability. Both the decoded and the escaped path must be clean (one
+// trailing slash allowed) and under the route, the escaped path may not
+// encode a slash, dot, backslash or NUL (in any letter case), and the
+// capability segment may not be escaped at all, so the request this check
+// admits is the one the mux routes to the route. Only the request shape is
+// checked here; the route checks the capability.
 func isPortViewRequest(r *http.Request) bool {
 	p, esc := r.URL.Path, r.URL.EscapedPath()
 	if !strings.HasPrefix(p, portview.Route) || !strings.HasPrefix(esc, portview.Route) {
@@ -152,11 +153,9 @@ func cleanRoutePath(p string) bool {
 	return c == p
 }
 
-// writePortViewInvalid writes the one answer for every capability failure
-// on the page view route: whatever failed (shape, signature, expiry, the
-// agent, the user's account or the user's access), the status, headers
-// and body are the same. Reloading the page from the hub opens the port's
-// link, which answers for the caller who opens it.
+// writePortViewInvalid writes the single answer the page view route uses
+// for a link it cannot serve: a plain-text 404 asking to reload the page
+// from the hub.
 func writePortViewInvalid(w http.ResponseWriter) {
 	h := w.Header()
 	h.Set("Content-Type", "text/plain; charset=utf-8")
@@ -165,13 +164,11 @@ func writePortViewInvalid(w http.ResponseWriter) {
 	_, _ = io.WriteString(w, portViewInvalidBody)
 }
 
-// setPortViewResponseHeaders sets the hub-owned headers of every answer
-// on the page view route, before any branch: the sandbox policy, nosniff,
-// no referrer, and Access-Control-Allow-Origin "*" (never with
-// Access-Control-Allow-Credentials), so a page in the sandbox can load
-// its module scripts and read its own requests. Values a proxied app
-// sends for these headers are dropped (portViewModifyResponse), so each
-// is sent once.
+// setPortViewResponseHeaders sets the hub's headers of every answer on the
+// page view route: Content-Security-Policy, X-Content-Type-Options,
+// Referrer-Policy and Access-Control-Allow-Origin, and removes
+// Access-Control-Allow-Credentials. A proxied app's values for these
+// headers are dropped (portViewModifyResponse), so each is sent once.
 func setPortViewResponseHeaders(w http.ResponseWriter) {
 	h := w.Header()
 	h.Set("Content-Security-Policy", untrustedContentSandboxCSP)
@@ -188,7 +185,7 @@ func setPortViewResponseHeaders(w http.ResponseWriter) {
 //  2. the request shape; a preflight is answered here on the capability
 //     alone and never reaches the app;
 //  3. the capability; a page navigation with one that fails is sent to
-//     the port's link instead;
+//     the port's link instead (as in 5);
 //  4. a page navigation by a signed-in user other than the capability's
 //     is sent to the port's link (which link a browser is sent to only;
 //     see portview.IsNavigation);
@@ -196,8 +193,8 @@ func setPortViewResponseHeaders(w http.ResponseWriter) {
 //     identity limited to port access in the agent's project;
 //  6. the exposed port, then the proxy, as that identity.
 //
-// Every failure in 2, 3 and 5 gets writePortViewInvalid. The identity in
-// the request context, if any, is read only by step 4.
+// Any other request that fails 2, 3 or 5 gets writePortViewInvalid. The
+// identity in the request context, if any, is read only by step 4.
 func (s *Server) handlePortView(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	if !s.experimentEnabled(experiments.PortView) {
@@ -240,18 +237,28 @@ func (s *Server) handlePortView(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// unusable answers a link that can no longer be served like one that
+	// failed to parse: a page navigation goes to the port's link, anything
+	// else gets writePortViewInvalid.
+	unusable := func() {
+		if navigation {
+			redirectToPortLink(w, r, grant.AgentID, grant.Port, escSub)
+			return
+		}
+		writePortViewInvalid(w)
+	}
 	ctx := r.Context()
 	agent, err := s.store.GetAgent(ctx, grant.AgentID)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		slog.Warn("Port view: agent lookup failed", "error", err)
 	}
 	if err != nil || agent == nil || agent.ID != grant.AgentID || !agent.DeletedAt.IsZero() {
-		writePortViewInvalid(w)
+		unusable()
 		return
 	}
 	identity, ok := s.portViewIdentity(ctx, grant.UserID, agent)
 	if !ok {
-		writePortViewInvalid(w)
+		unusable()
 		return
 	}
 	exposed := findExposedPort(agent.ExposedPorts, grant.Port)
@@ -267,11 +274,10 @@ func (s *Server) handlePortView(w http.ResponseWriter, r *http.Request) {
 	}, start)
 }
 
-// writePortViewPreflight answers a preflight on the page view route (the
-// capability already checked): 204, the requested method when it is one
-// of GET, HEAD, POST, PUT, PATCH and DELETE, the requested headers other
-// than Authorization and Cookie, and a 10-minute Max-Age.
-// Access-Control-Allow-Origin "*" is already set.
+// writePortViewPreflight answers a preflight on the page view route: 204
+// with Access-Control-Allow-Methods (portview.PreflightMethod),
+// Access-Control-Allow-Headers (portview.PreflightHeaders) and a
+// 10-minute Access-Control-Max-Age.
 func writePortViewPreflight(w http.ResponseWriter, r *http.Request) {
 	h := w.Header()
 	if m := portview.PreflightMethod(r.Header.Get("Access-Control-Request-Method")); m != "" {
