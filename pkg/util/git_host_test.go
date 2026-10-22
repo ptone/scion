@@ -121,6 +121,9 @@ func TestHostGitArgs(t *testing.T) {
 		"-c", "core.fsmonitor=false",
 		"-c", "core.pager=cat",
 		"-c", "protocol.ext.allow=never",
+		"-c", "submodule.recurse=false",
+		"-c", "fetch.recurseSubmodules=false",
+		"-c", "merge.verifySignatures=false",
 	}
 	if got := HostGitArgs(); !reflect.DeepEqual(got, want) {
 		t.Errorf("HostGitArgs() = %q, want %q", got, want)
@@ -238,10 +241,8 @@ func TestHostGitCommand_NetworkAllowsGlobalKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HostGitCommand: %v", err)
 	}
-	for _, want := range []string{"fetch.recurseSubmodules=false", "submodule.recurse=false", "merge.verifySignatures=false"} {
-		if !slices.Contains(cmd.Args, want) {
-			t.Errorf("network command lacks -c %s: %q", want, cmd.Args)
-		}
+	if !slices.Contains(cmd.Args, "fetch") {
+		t.Errorf("args = %q", cmd.Args)
 	}
 }
 
@@ -513,5 +514,102 @@ func TestCreateWorktree_WorktreeSupportsCommitPushFetchRebase(t *testing.T) {
 	hostRunGit(t, wt, "push", "-q", "--force-with-lease", "origin", "agent-a")
 	if got := hostRunGit(t, wt, "rev-parse", "@{upstream}"); got != hostRunGit(t, wt, "rev-parse", "HEAD") {
 		t.Errorf("upstream %s != HEAD", got)
+	}
+}
+
+// Every command HostGitCommand builds, network or not, starts with
+// HostGitArgs, so work-tree writes never recurse into submodules.
+func TestHostGitCommand_CarriesFixedArgs(t *testing.T) {
+	repo, _ := newHostGitRepo(t)
+	hostRunGit(t, repo, "config", "submodule.recurse", "true")
+	for _, network := range []bool{false, true} {
+		cmd, err := HostGitCommand(context.Background(), repo, HostGitOptions{Network: network}, "merge", "--ff-only", "HEAD")
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixed := HostGitArgs()
+		if !reflect.DeepEqual(cmd.Args[1:1+len(fixed)], fixed) {
+			t.Errorf("args = %q, want them to start with %q", cmd.Args, fixed)
+		}
+	}
+}
+
+func TestNetworkRepoKeyAllowed(t *testing.T) {
+	for _, key := range []string{
+		"core.repositoryformatversion", "core.filemode", "core.bare", "core.logallrefupdates",
+		"extensions.relativeWorktrees", "remote.origin.url", "remote.origin.fetch",
+		"branch.main.remote", "branch.main.merge", "branch.autoSetupMerge", "user.name", "user.email",
+		"gc.auto", "pull.rebase", "init.defaultBranch",
+		"core.hooksPath", "core.fsmonitor", "core.pager", "submodule.recurse", "filter.lfs.smudge",
+	} {
+		if !networkRepoKeyAllowed(key) {
+			t.Errorf("networkRepoKeyAllowed(%q) = false, want true", key)
+		}
+	}
+	for _, key := range []string{
+		"core.editor", "core.sshCommand", "core.askPass", "core.worktree",
+		"log.showSignature", "diff.external", "diff.x.textconv", "merge.x.driver",
+		"submodule.x.url", "submodule.x.update", "remote.origin.uploadpack",
+		"url.x.insteadOf", "credential.helper", "include.path", "http.proxy", "gpg.program",
+		"alias.st", "filter.lfs.driver", "uploadpack.packObjectsHook", "some.new.key",
+	} {
+		if networkRepoKeyAllowed(key) {
+			t.Errorf("networkRepoKeyAllowed(%q) = true, want false", key)
+		}
+	}
+}
+
+func TestHostGitEnv(t *testing.T) {
+	in := []string{
+		"HOME=/h", "PATH=/bin", "GIT_DIR=/x", "GIT_WORK_TREE=/y", "GIT_COMMON_DIR=/z",
+		"GIT_INDEX_FILE=/i", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=core.pager", "GIT_CONFIG_VALUE_0=x",
+		"GIT_CONFIG_PARAMETERS='a.b=c'", "GIT_EXEC_PATH=/e", "GIT_EDITOR=vi", "GIT_PAGER=less",
+		"GIT_CONFIG_GLOBAL=/g", "GIT_CONFIG_NOSYSTEM=1", "GIT_SSH_COMMAND=ssh", "GIT_TERMINAL_PROMPT=0",
+	}
+	want := []string{"HOME=/h", "PATH=/bin", "GIT_CONFIG_GLOBAL=/g", "GIT_CONFIG_NOSYSTEM=1", "GIT_SSH_COMMAND=ssh", "GIT_TERMINAL_PROMPT=0"}
+	if got := HostGitEnv(in); !reflect.DeepEqual(got, want) {
+		t.Errorf("HostGitEnv = %q, want %q", got, want)
+	}
+}
+
+// A change to the repository's filter drivers while the command runs is
+// reported after it.
+func TestHostGitCmd_DetectsFilterConfigChange(t *testing.T) {
+	repo, _ := newHostGitRepo(t)
+	ctx := context.Background()
+
+	cmd, err := HostGitCommand(ctx, repo, HostGitOptions{}, "config", "filter.late.smudge", "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cmd.CombinedOutput(); !errors.Is(err, ErrRepoConfigChanged) {
+		t.Errorf("filter driver added during the command: error = %v, want ErrRepoConfigChanged", err)
+	}
+
+	// Other config written by the command itself is not a change here.
+	cmd, err = HostGitCommand(ctx, repo, HostGitOptions{}, "config", "gc.auto", "0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Run(); err != nil {
+		t.Errorf("non-filter change: error = %v, want nil", err)
+	}
+
+	// For a network command every repository key counts.
+	cmd, err = HostGitCommand(ctx, repo, HostGitOptions{Network: true}, "config", "user.name", "changed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cmd.Output(); !errors.Is(err, ErrRepoConfigChanged) {
+		t.Errorf("network: error = %v, want ErrRepoConfigChanged", err)
+	}
+
+	// No change, no error.
+	cmd, err = HostGitCommand(ctx, repo, HostGitOptions{}, "status", "--porcelain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cmd.Output(); err != nil {
+		t.Errorf("unchanged: error = %v", err)
 	}
 }

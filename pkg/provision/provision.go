@@ -874,11 +874,14 @@ func moveWorktreeAside(base, name, prefix string) (string, error) {
 	return to, nil
 }
 
-// gitInSharedCheckout runs git in the shared checkout at base. The shared
-// checkout and the agent's worktree belong to the agents' user rather than
-// the caller, so both are listed in safe.directory for this command only.
+// gitInSharedCheckout runs git in the shared checkout at base through
+// util.HostGitCommand. The shared checkout and the agent's worktree belong
+// to the agents' user rather than the caller, so both are listed in
+// safe.directory for this command only.
 func gitInSharedCheckout(ctx context.Context, base, worktree string, args ...string) (string, error) {
-	cmd, err := sharedCheckoutGitCmd(base, worktree)(ctx, args...)
+	cmd, err := util.HostGitCommand(ctx, base, util.HostGitOptions{
+		Config: []string{"safe.directory=" + base, "safe.directory=" + worktree},
+	}, args...)
 	if err != nil {
 		return "", err
 	}
@@ -886,14 +889,17 @@ func gitInSharedCheckout(ctx context.Context, base, worktree string, args ...str
 	return strings.TrimSpace(string(out)), err
 }
 
-// sharedCheckoutGitCmd returns a builder of the git commands
-// gitInSharedCheckout runs, for callers that run the command themselves
-// (util.RemoveWorktreeEntry).
+// sharedCheckoutGitCmd returns a builder of git commands in the shared
+// checkout at base for util.RemoveWorktreeEntry, which runs "git worktree
+// remove" only once the worktree directory is gone, so no work tree file is
+// read: the fixed host settings (util.HostGitArgs, util.HostGitEnv) are
+// enough. safe.directory lists base and worktree as in gitInSharedCheckout.
 func sharedCheckoutGitCmd(base, worktree string) func(ctx context.Context, args ...string) (*exec.Cmd, error) {
 	return func(ctx context.Context, args ...string) (*exec.Cmd, error) {
-		return util.HostGitCommand(ctx, base, util.HostGitOptions{
-			Config: []string{"safe.directory=" + base, "safe.directory=" + worktree},
-		}, args...)
+		full := append(util.HostGitArgs(), "-c", "safe.directory="+base, "-c", "safe.directory="+worktree, "-C", base)
+		cmd := exec.CommandContext(ctx, "git", append(full, args...)...)
+		cmd.Env = util.HostGitEnv(os.Environ())
+		return cmd, nil
 	}
 }
 
@@ -2218,7 +2224,7 @@ var ErrCommondirPresent = errors.New("refusing git operation: base .git/commondi
 // GIT_COMMON_DIR; callers that need to layer additional env (e.g. the
 // GIT_CONFIG_COUNT/KEY_0/VALUE_0 credential-helper technique) must append to
 // cmd.Env rather than replace it, or the pin is lost.
-func SafeGitCommand(ctx context.Context, dir string, args ...string) (*exec.Cmd, error) {
+func SafeGitCommand(ctx context.Context, dir string, args ...string) (*util.HostGitCmd, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("SafeGitCommand: dir is required")
 	}
@@ -2229,7 +2235,7 @@ func SafeGitCommand(ctx context.Context, dir string, args ...string) (*exec.Cmd,
 		return nil, fmt.Errorf("%w: %s", ErrCommondirPresent, commondirFile)
 	}
 
-	env := append(os.Environ(), "GIT_COMMON_DIR="+filepath.Join(dir, ".git"))
+	env := append(util.HostGitEnv(os.Environ()), "GIT_COMMON_DIR="+filepath.Join(dir, ".git"))
 	return util.HostGitCommand(ctx, dir, util.HostGitOptions{Env: env}, args...)
 }
 
@@ -3917,8 +3923,14 @@ func worktreeRegisteredAt(ctx context.Context, repoDir, path string) (bool, erro
 // Any failing step returns an error that names the path and what to do,
 // depending on the state the step left behind.
 func clearOwnStaleWorktreeEntry(ctx context.Context, in ProvisionInput, base, worktreePath string) error {
+	// util.RemoveWorktreeEntry runs the command itself, after the worktree
+	// directory is gone; the SafeGitCommand settings and pin stay on it.
 	gitCmd := func(ctx context.Context, args ...string) (*exec.Cmd, error) {
-		return SafeGitCommand(ctx, base, args...)
+		cmd, err := SafeGitCommand(ctx, base, args...)
+		if err != nil {
+			return nil, err
+		}
+		return cmd.Cmd, nil
 	}
 	fi, err := os.Lstat(worktreePath)
 	if errors.Is(err, fs.ErrNotExist) {

@@ -89,7 +89,7 @@ func CheckGitRepoDir(dir string) (bool, error) {
 		cmd.Dir = dir
 	}
 	// Force untranslated git messages so the stderr match is locale-stable.
-	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	cmd.Env = append(HostGitEnv(os.Environ()), "LC_ALL=C")
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err == nil {
@@ -319,7 +319,7 @@ func CreateWorktree(path, branch string) error {
 	// LC_ALL=C keeps git's messages in English, so the matches below hold.
 	// The checkout runs without repository hooks or repository-defined
 	// filter commands (HostGitCommand): agents can write this repository.
-	gitEnv := append(os.Environ(), "LC_ALL=C")
+	gitEnv := append(HostGitEnv(os.Environ()), "LC_ALL=C")
 	ctx := context.Background()
 	cmd, err := HostGitCommand(ctx, root, HostGitOptions{Env: gitEnv}, "worktree", "add", "--relative-paths", "-b", branch, path)
 	if err != nil {
@@ -547,7 +547,9 @@ func RemoveWorktreeEntryIn(repoRoot, path string) error {
 	return RemoveWorktreeEntry(context.Background(), path, func(ctx context.Context, args ...string) (*exec.Cmd, error) {
 		// The worktree directory is gone when git runs, so no work tree
 		// file is read: the fixed host settings are enough.
-		return exec.CommandContext(ctx, "git", append(append(HostGitArgs(), "-C", repoRoot), args...)...), nil
+		cmd := exec.CommandContext(ctx, "git", append(append(HostGitArgs(), "-C", repoRoot), args...)...)
+		cmd.Env = HostGitEnv(os.Environ())
+		return cmd, nil
 	})
 }
 
@@ -1381,7 +1383,7 @@ func CloneSharedWorkspace(workspacePath, cloneURL, branch, token string) error {
 	args = append(args, authURL, workspacePath)
 
 	cmd := hostGit(args...)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = append(HostGitEnv(os.Environ()), "GIT_TERMINAL_PROMPT=0")
 	output, err := cmd.CombinedOutput()
 
 	if err != nil && branch != "" && isRemoteBranchNotFound(string(output)) {
@@ -1391,7 +1393,7 @@ func CloneSharedWorkspace(workspacePath, cloneURL, branch, token string) error {
 
 		fallbackArgs := []string{"clone", authURL, workspacePath}
 		fallbackCmd := hostGit(fallbackArgs...)
-		fallbackCmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+		fallbackCmd.Env = append(HostGitEnv(os.Environ()), "GIT_TERMINAL_PROMPT=0")
 		output, err = fallbackCmd.CombinedOutput()
 		if err != nil {
 			sanitized := strings.TrimSpace(sanitizeGitOutput(string(output), token))
@@ -1478,7 +1480,7 @@ func PullSharedWorkspace(workspacePath, cloneURL, token string) (*PullResult, er
 		return nil, pullErr("the shared workspace has no clone URL")
 	}
 
-	env := append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	env := append(HostGitEnv(os.Environ()), "GIT_TERMINAL_PROMPT=0")
 
 	// If a token is provided, configure a temporary credential helper via env
 	if token != "" {
@@ -1538,7 +1540,12 @@ func PullSharedWorkspace(workspacePath, cloneURL, token string) (*PullResult, er
 
 	result.Updated = true
 
-	logCmd := hostGit("-C", workspacePath, "log", "--oneline", "--no-decorate",
+	// git log runs no repository-defined command here (no pager, no
+	// signature display): this relies on the fetch above, whose network
+	// check refuses gpg.*, include and other repository keys outside the
+	// allowlist, and on the merge's config check having passed. Keep it
+	// after both.
+	logCmd := hostGit("-c", "log.showSignature=false", "-C", workspacePath, "log", "--oneline", "--no-decorate",
 		oldHeadStr+".."+newHeadStr)
 	logOut, err := logCmd.Output()
 	if err != nil {
