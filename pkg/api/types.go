@@ -566,7 +566,7 @@ type ScionConfig struct {
 	// branch in ProvisionAgent): both cases mount from a Volumes-derived path
 	// rather than GetAgent's managed <agentDir>/workspace recovery. RepoRoot
 	// resolution, not this flag, is what tells the two cases apart — see
-	// pkg/agent's readProvisionedWorktreeRepoRoot. That value is deliberately
+	// pkg/agent's repository root record (readRepoRootRecord). That value is deliberately
 	// not a field on ScionConfig (populated by unmarshaling templates, hub
 	// inline config, and --config files) nor on AgentInfo (persisted in
 	// agentHome, which the container can write) — see
@@ -1154,7 +1154,7 @@ type provisionedWorktreeRepoRootContextKey struct{}
 // templates, hub inline config, and --config files) or an AgentInfo field
 // (agent-info.json lives in agentHome, which the container can write). The
 // broker persists it in a broker-owned file under agentDir instead — see
-// pkg/agent's writeProvisionedWorktreeRepoRoot/readProvisionedWorktreeRepoRoot
+// pkg/agent's repository root record (writeRepoRootRecord/readRepoRootRecord)
 // — and run.go independently validates it against the real filesystem
 // (provision.ValidateWorktreeForBase) before trusting it either way.
 func ContextWithProvisionedWorktreeRepoRoot(ctx context.Context, repoRoot string) context.Context {

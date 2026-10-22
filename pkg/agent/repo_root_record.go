@@ -221,7 +221,7 @@ func checkProvisionRepoRoot(projectDir string) (string, error) {
 		gitRoot = resolved
 	}
 	if trusted == "" || trusted != gitRoot {
-		return "", fmt.Errorf("the project's repository root could not be confirmed: git reports %q, the directory walk from %s finds %q (a .git directory without a commondir file is required)", gitRoot, projectDir, trusted)
+		return "", fmt.Errorf("the project's repository root could not be confirmed without reading container-writable git metadata, so agents cannot be provisioned for it in this interim release (ptone/scion#4611): git reports %q but the directory walk from %s finds %q (the project's top-level .git must be a directory without a commondir file; a linked worktree or a submodule working directory is not supported here yet). Provision from the repository's main checkout instead. A project that merely contains submodules is unaffected", gitRoot, projectDir, trusted)
 	}
 	return trusted, nil
 }
@@ -330,7 +330,9 @@ func refuseWorkspaceInScionDir(projectDir, workspace string) error {
 	}
 	rw, err := filepath.EvalSymlinks(workspace)
 	if err != nil {
-		return nil // the workspace existence check elsewhere handles this
+		// Fail closed: the caller passes an existing workspace, so a
+		// resolution failure here is unexpected.
+		return fmt.Errorf("resolve workspace %q: %w", workspace, err)
 	}
 	if pathUnder(rw, rs) {
 		return fmt.Errorf("workspace %q is inside the project's .scion directory (%s), which holds agent state, not a workspace; choose a workspace outside it", workspace, scionDir)

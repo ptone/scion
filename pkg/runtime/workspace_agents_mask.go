@@ -78,10 +78,13 @@ func sharedWorkspaceAgentsMaskTarget(cfg RunConfig, containerWorkspace string, r
 // plainWorkspaceAgentsMaskTarget returns the container path of
 // <workspace>/.scion/agents for a plain workspace mount (no repository root
 // layout, for example an explicit --workspace), and whether to shadow it.
-// It applies when that directory exists on the broker, so the mask never
-// creates a mount point in the workspace. A workspace that is an ancestor of
-// a project (the agents directory sits deeper than <workspace>/.scion) is
-// not covered.
+// It applies when <workspace>/.scion is a directory (a project root),
+// whether or not <workspace>/.scion/agents exists yet; the caller creates
+// that directory on the host before mounting the tmpfs. The agents directory
+// is required to pre-exist only where the runtime cannot create a tmpfs
+// mount point itself (Apple). A workspace that is an ancestor of a project
+// (the agents directory sits deeper than <workspace>/.scion) is not
+// covered.
 func plainWorkspaceAgentsMaskTarget(cfg RunConfig, containerWorkspace string, requireAgentsDir bool) (string, bool) {
 	if cfg.Workspace == "" || containerWorkspace == "" {
 		return "", false

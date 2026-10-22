@@ -720,6 +720,14 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	// equivalent --tmpfs flag. Kubernetes keeps the path out of its pods
 	// itself (k8sWorkspaceAgentsExcluded).
 	if sharedWorkspaceAgentsMask != "" {
+		// Create <workspace>/.scion/agents on the host first, owned by the
+		// broker, so the runtime mounts the tmpfs over an existing directory
+		// rather than creating the mount point through the bind and leaving a
+		// root-owned directory in the user's checkout. The tmpfs then hides
+		// whatever is there.
+		if config.Workspace != "" {
+			_ = os.MkdirAll(filepath.Join(config.Workspace, filepath.FromSlash(sharedWorkspaceAgentsDir)), 0o755)
+		}
 		if config.RuntimeName == appleContainerRuntimeName {
 			addArg("--tmpfs", sharedWorkspaceAgentsMask)
 		} else {
@@ -855,7 +863,7 @@ func isHubManagedWorktreeBase(repoRoot string) bool {
 		return false
 	}
 	// `git rev-parse --git-common-dir` (how RepoRoot is ultimately derived,
-	// see pkg/agent/run.go's detectRepoRoot) returns a resolved (symlink-free)
+	// see pkg/agent/run.go's trustedProjectRepoRoot) returns a resolved (symlink-free)
 	// path, while os.UserHomeDir() may itself be reached through a symlink
 	// (e.g. /home -> /var/home). Resolve both sides the same way before
 	// comparing so a symlinked home directory doesn't cause a hub-native base

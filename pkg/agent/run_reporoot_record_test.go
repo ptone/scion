@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -207,8 +208,14 @@ func TestProvision_RefusesLinkedWorktreeProject(t *testing.T) {
 	}
 	// <linked>/.git is a gitfile, so trustedProjectRepoRoot stops and the
 	// cross-check refuses.
-	if _, err := checkProvisionRepoRoot(filepath.Join(linked, ".scion")); err == nil {
-		t.Error("checkProvisionRepoRoot: expected a refusal for a linked-worktree checkout")
+	_, err := checkProvisionRepoRoot(filepath.Join(linked, ".scion"))
+	if err == nil {
+		t.Fatal("checkProvisionRepoRoot: expected a refusal for a linked-worktree checkout")
+	}
+	for _, want := range []string{"interim", "main checkout", "submodule"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal message %q does not mention %q", err.Error(), want)
+		}
 	}
 	if got := trustedProjectRepoRoot(filepath.Join(linked, ".scion")); got != "" {
 		t.Errorf("trustedProjectRepoRoot of a linked worktree = %q, want \"\"", got)
@@ -230,6 +237,19 @@ func TestRefuseWorkspaceInScionDir(t *testing.T) {
 	}
 	if err := refuseWorkspaceInScionDir(scion, outside); err != nil {
 		t.Errorf("refuseWorkspaceInScionDir(outside) = %v, want nil", err)
+	}
+	// The project directory given as the parent (the project root, not
+	// .scion) is handled too.
+	if err := refuseWorkspaceInScionDir(filepath.Dir(scion), agents); err == nil {
+		t.Error("refuseWorkspaceInScionDir(projectRoot, agents): want a refusal")
+	}
+	// A symlink into .scion is caught (both sides resolve).
+	link := filepath.Join(root, "link-to-agents")
+	if err := os.Symlink(agents, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := refuseWorkspaceInScionDir(scion, link); err == nil {
+		t.Error("refuseWorkspaceInScionDir(symlink into .scion): want a refusal")
 	}
 }
 
@@ -254,10 +274,31 @@ func TestResolveStartRepoRoot_RejectsRecordNotMatchingProject(t *testing.T) {
 	}
 	in := startRepoRootInput{agentName: "a", agentDir: agentDir, projectDir: projectDir, workspace: ws}
 	got, _ := resolveStartRepoRoot(in)
-	if got == eval(t, other) {
-		t.Errorf("resolveStartRepoRoot used the planted record naming the other repository: %q", got)
+	if got != "" {
+		t.Errorf("resolveStartRepoRoot = %q, want \"\" (a record whose root does not match the project is not used)", got)
 	}
-	if got != eval(t, repo) && got != "" {
-		t.Errorf("resolveStartRepoRoot = %q, want the project root %q or \"\"", got, eval(t, repo))
+}
+
+// R5 scope: the provision refusal is ROOT-only. A project whose root is a
+// normal repository still provisions even when it contains a submodule
+// (whose own .git is a gitfile), because trustedProjectRepoRoot walks up
+// from the project directory and stops at the root's .git directory, above
+// any contained submodule.
+func TestProvision_ContainingSubmoduleStillProvisions(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	setupGitRepo(t, mkdirAllT(t, repo))
+	// A submodule-like nested checkout: a directory whose .git is a gitfile.
+	sub := mkdirAllT(t, filepath.Join(repo, "vendor", "sub"))
+	mustWrite(t, filepath.Join(sub, ".git"), "gitdir: "+filepath.Join(repo, ".git", "modules", "sub")+"\n")
+	projectDir := mkdirAllT(t, filepath.Join(repo, ".scion"))
+
+	got, err := checkProvisionRepoRoot(projectDir)
+	if err != nil {
+		t.Fatalf("checkProvisionRepoRoot refused a project that merely contains a submodule: %v", err)
+	}
+	if got != eval(t, repo) {
+		t.Errorf("checkProvisionRepoRoot = %q, want the project root %q", got, eval(t, repo))
 	}
 }

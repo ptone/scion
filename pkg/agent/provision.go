@@ -3360,7 +3360,8 @@ type provisionedWorktreeState struct {
 //     leftover from a deleted hub agent recreated under the same name).
 //
 // A write failure only means a later resume has no broker record;
-// see writeProvisionedWorktreeRepoRoot.
+// see writeRepoRootRecord (the production writer, which also applies the
+// agentDir-unmounted check).
 func persistProvisionedWorktreeRepoRootIfValid(agentDir, ctxRepoRoot, workspace string, volumes []api.VolumeMount) {
 	if ctxRepoRoot == "" || validatedWorktreeRepoRoot(ctxRepoRoot, workspace) != ctxRepoRoot {
 		return

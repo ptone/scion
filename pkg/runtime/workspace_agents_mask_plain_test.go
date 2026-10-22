@@ -50,6 +50,20 @@ func TestBuildCommonRunArgs_PlainWorkspaceMasksAgentsDir(t *testing.T) {
 	if got := run(project); !strings.Contains(got, "type=tmpfs,destination=/workspace/.scion/agents") {
 		t.Errorf("project-root workspace: no agents-dir mask in %s", got)
 	}
+
+	// The mask applies even when .scion/agents does not exist yet, and the
+	// host directory is created first so the runtime does not make a
+	// root-owned mount point in the checkout.
+	fresh := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(fresh, ".scion"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := run(fresh); !strings.Contains(got, "type=tmpfs,destination=/workspace/.scion/agents") {
+		t.Errorf("project root without an agents dir: no mask in %s", got)
+	}
+	if fi, err := os.Stat(filepath.Join(fresh, ".scion", "agents")); err != nil || !fi.IsDir() {
+		t.Errorf("the host agents dir was not created before the mount: %v", err)
+	}
 	plain := t.TempDir()
 	if got := run(plain); strings.Contains(got, "/workspace/.scion/agents") {
 		t.Errorf("workspace without an agents dir: unexpected mask in %s", got)
