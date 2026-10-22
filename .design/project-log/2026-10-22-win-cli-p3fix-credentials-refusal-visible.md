@@ -70,3 +70,20 @@ No ./cmd build (none needed: cmd is unchanged).
 - Dev-time checks: GOOS=windows vet of pkg/agent and pkg/util/filelock,
   Linux host-state tests, masked GOOS=windows build of ./cmd/scion
   (allowed by the EM), and winsec-guard all passed.
+
+## I2 update: fixed (sec-review-lead decision, option b)
+- `atomicProtection` in `pkg/config/atomic_write_windows.go`: in an
+  Inherit-mode write, the existing target is opened with
+  `Tree.OpenNoFollow`. If `CheckPrivate` passes on that handle the write
+  is Private, else Inherit (`protectionForCheck`). A missing target, a
+  reparse point at the target (never followed; win-cli-lead ledger 14),
+  or an unopenable Tree keep the caller's protection; any other open
+  failure is Private (fail closed).
+- It applies in `writeFileAtomicMode`, so it covers `writeFileAtomic` and
+  also the explicit-0644 `replaceSettingsFileByName` (settings migration).
+- The old assertion in `TestWindowsAtomicWrite_PrivateReplacesTooOpenInheritInherits`
+  ("writeFileAtomic over a private file inherits") encoded the behaviour
+  this fix changes, so it was removed. Its replacement is
+  `TestWindowsAtomicWrite_InheritKeepsOwnerOnlyTarget`. The symlink test
+  of row C5 is unchanged; `TestWindowsAtomicWrite_InheritDecisionDoesNotFollowLink`
+  is new. Both new tests are anchored.
