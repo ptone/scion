@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -179,10 +180,12 @@ func splitConfigKey(key string) (section, subsection, variable string) {
 }
 
 // hostGitConfigPins reads the config git sees in dir and returns the extra
-// -c settings HostGitCommand adds: for every filter driver the repository
-// config defines, each driver variable is set to its global/system value,
-// or to the empty value (no filter) when there is none, with required
-// defaulting to false. For a network command it returns an
+// -c settings HostGitCommand adds: every filter driver variable (clean,
+// smudge, process, required) the repository config sets is set again to
+// its global/system value, or, when there is none, to the empty value (no
+// command; an empty process disables the whole driver) and required to
+// false. Variables the repository does not set keep their global/system
+// value. For a network command it returns an
 // *UnsafeRepoConfigError for the first repository key in
 // unsafeNetworkConfigKeys.
 func hostGitConfigPins(ctx context.Context, dir string, lead []string, env []string, network bool) ([]string, error) {
@@ -198,7 +201,7 @@ func hostGitConfigPins(ctx context.Context, dir string, lead []string, env []str
 	}
 	entries := parseGitConfigList(out)
 
-	repoDrivers := map[string]bool{}
+	repoDrivers := map[string]map[string]bool{}
 	trusted := map[string]string{}
 	for _, e := range entries {
 		lower := strings.ToLower(e.key)
@@ -212,7 +215,13 @@ func hostGitConfigPins(ctx context.Context, dir string, lead []string, env []str
 				}
 			}
 			if strings.EqualFold(section, "filter") && subsection != "" {
-				repoDrivers[subsection] = true
+				v := strings.ToLower(variable)
+				if slices.Contains(filterDriverVars, v) {
+					if repoDrivers[subsection] == nil {
+						repoDrivers[subsection] = map[string]bool{}
+					}
+					repoDrivers[subsection][v] = true
+				}
 			}
 			continue
 		}
@@ -230,6 +239,9 @@ func hostGitConfigPins(ctx context.Context, dir string, lead []string, env []str
 	var pins []string
 	for _, name := range names {
 		for _, v := range filterDriverVars {
+			if !repoDrivers[name][v] {
+				continue
+			}
 			value, ok := trusted[name+"."+v]
 			if !ok && v == "required" {
 				value = "false"

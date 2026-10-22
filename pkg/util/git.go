@@ -413,8 +413,10 @@ func pathResolvedUnderBase(base, candidate string) (ok bool, resolvedCandidate s
 // created here) must not have it silently honored.
 //
 // repoRoot is the repository the worktree belongs to, as the caller knows
-// it; empty means no git record is removed and no branch is deleted. It is
-// never derived from the worktree's own .git file.
+// it. When the caller does not know it (empty), the repository the
+// worktree's .git file names is used only if that repository's own worktree
+// registry lists path (registeredRepoOf); otherwise no git record is
+// removed and no branch is deleted.
 //
 // Instead of using "git worktree remove" (which does its own directory
 // deletion and can trigger macOS autofs timeouts on symlinks pointing to
@@ -459,6 +461,9 @@ func RemoveWorktree(base, path, repoRoot string, deleteBranch bool) (bool, error
 	// The repository and the branch come from the caller and from git's
 	// own worktree registry in that repository, never from the worktree's
 	// .git file, which the agent using the worktree can rewrite.
+	if repoRoot == "" {
+		repoRoot = registeredRepoOf(resolvedPath)
+	}
 	var branchName string
 	branchDeleted := false
 	if deleteBranch && repoRoot != "" {
@@ -732,6 +737,25 @@ func FindWorktreeByBranchIn(repoRoot, branchName string) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+// registeredRepoOf returns the main worktree of the repository that the
+// worktree at path belongs to according to its .git file, but only when
+// that repository's worktree registry lists path; "" otherwise.
+func registeredRepoOf(path string) string {
+	out, err := hostGit("-C", path, "rev-parse", "--git-common-dir").Output()
+	if err != nil {
+		return ""
+	}
+	commonDir := strings.TrimSpace(string(out))
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(path, commonDir)
+	}
+	repo := filepath.Dir(filepath.Clean(commonDir))
+	if ok, err := IsRegisteredWorktree(repo, path); err != nil || !ok {
+		return ""
+	}
+	return repo
 }
 
 // worktreeBranchIn returns the branch git's worktree registry in the

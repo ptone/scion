@@ -274,6 +274,32 @@ To give agents on a remote Hub git worktrees instead of separate clones, create 
 makes a worktree per agent of its own shared clone. The mode is set when the project is created on
 the Hub and cannot be changed later.
 
+#### Git that Scion runs on the host
+
+The broker and the Hub run git on the host in repositories that agent containers can also write:
+your linked checkout (when it creates or removes an agent's worktree), the shared clone of a
+`worktree-per-agent` project, and the clone of a shared-workspace project. These commands run
+without the repository's own hooks and commands:
+
+- **No repository hooks** run (`core.hooksPath` is set to `/dev/null` for these commands), and no
+  file-system monitor (`core.fsmonitor`).
+- **Filter drivers** (`filter.<name>.clean`, `smudge`, `process`, `required`) set in the
+  repository's own config (`.git/config`, or a worktree's `config.worktree`) are not used. The
+  global or system definition of the same driver is used instead. `git lfs install` writes its
+  filter to your global config, so LFS files are still checked out in agent worktrees. A driver
+  defined only in the repository config (for example after `git lfs install --local`) is not
+  applied to these checkouts.
+- The git-lfs **post-checkout hook** does not run when the broker creates a worktree. It only marks
+  LFS-lockable files read-only.
+- **Updating a shared workspace** (pull) fetches from the project's clone URL known to the Hub,
+  not from the remote configured in the clone, then fast-forwards the current branch. It is refused
+  when the clone's own git config sets URL rewrites (`url.*.insteadOf`), credential settings,
+  `core.sshCommand`, `core.askPass`, `core.gitProxy`, `core.worktree`, remote `uploadpack` or
+  `receivepack` commands or proxies, `include.path`/`includeIf`, `protocol.*`, `http.proxy` or
+  `gpg.*`. Remove the key from the clone's `.git/config` to pull again.
+
+Your own git commands in your checkout are not affected.
+
 ---
 
 ## 5. Project Shared Directories

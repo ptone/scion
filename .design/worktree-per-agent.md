@@ -377,6 +377,20 @@ New work for the base repo:
    change what the broker's own git operations do against the shared base;
    see `pkg/provision/provision.go`'s `SafeGitCommand` and
    `pkg/runtime/common.go`'s `narrowGitAdminMounts`.
+8. **Host-side git runs without repository hooks or repository-defined
+   commands.** Every git command the broker or Hub runs on the host in a
+   repository agents can write (the shared base, a linked checkout, a
+   shared-workspace clone) goes through `pkg/util`'s `HostGitArgs` /
+   `HostGitCommand`: `core.hooksPath=/dev/null`, `core.fsmonitor=false`,
+   `core.pager=cat`, `protocol.ext.allow=never`; filter driver variables set
+   in the repository's own config are re-set to their global/system value
+   (or emptied); remote operations refuse a repository config that sets
+   transport, credential, proxy or include keys. Global and system config
+   stay in effect, so a globally installed git-lfs filter still runs; the
+   git-lfs post-checkout hook (lockable files read-only) does not. Running
+   `git lfs post-checkout` explicitly instead was rejected: git-lfs reads
+   further repository config (`lfs.*`, including custom transfer agents),
+   which would reintroduce repository-defined commands.
 
 ---
 

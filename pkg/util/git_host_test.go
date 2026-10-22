@@ -144,8 +144,8 @@ func TestParseGitConfigList(t *testing.T) {
 	}
 }
 
-// A filter driver the repository defines is replaced by the global
-// definition of the same name, or disabled when there is none.
+// Filter driver variables the repository sets are replaced by the global
+// value of the same variable, or emptied when there is none.
 func TestHostGitCommand_FilterDriversFromRepositoryConfig(t *testing.T) {
 	repo, _ := newHostGitRepo(t)
 	global := os.Getenv("GIT_CONFIG_GLOBAL")
@@ -166,12 +166,19 @@ func TestHostGitCommand_FilterDriversFromRepositoryConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := strings.Join(cmd.Args, "\x00")
+	// Only the variables the repository sets are pinned: to the global
+	// value, or empty when there is none.
 	for _, want := range []string{
-		"filter.Other.clean=", "filter.Other.smudge=", "filter.Other.process=", "filter.Other.required=false",
-		"filter.lfs.clean=", "filter.lfs.smudge=git-lfs smudge -- %f", "filter.lfs.process=git-lfs filter-process", "filter.lfs.required=true",
+		"filter.Other.process=",
+		"filter.lfs.clean=", "filter.lfs.smudge=git-lfs smudge -- %f",
 	} {
 		if !strings.Contains(args, "\x00"+want+"\x00") {
 			t.Errorf("command args lack -c %q: %q", want, cmd.Args)
+		}
+	}
+	for _, unwanted := range []string{"filter.Other.clean", "filter.Other.smudge", "filter.Other.required", "filter.lfs.process", "filter.lfs.required"} {
+		if strings.Contains(args, "\x00"+unwanted+"=") {
+			t.Errorf("command args pin %s, which the repository does not set: %q", unwanted, cmd.Args)
 		}
 	}
 	if strings.Contains(args, "repo-") {
@@ -320,27 +327,56 @@ func TestRemoveWorktree_IgnoresWorktreeGitFile(t *testing.T) {
 	assertNoMarkers(t, markers)
 }
 
-// With no repository given, RemoveWorktree removes the directory only.
-func TestRemoveWorktree_NoRepoRootLeavesGitAlone(t *testing.T) {
-	repo, _ := newHostGitRepo(t)
-	agentDir := filepath.Join(repo, "agents", "a")
-	wt := filepath.Join(agentDir, "workspace")
-	if err := os.MkdirAll(agentDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := CreateWorktree(wt, "agent-a"); err != nil {
-		t.Fatal(err)
-	}
-	deleted, err := RemoveWorktree(agentDir, wt, "", true)
-	if err != nil || deleted {
-		t.Fatalf("RemoveWorktree = %v, %v", deleted, err)
-	}
-	if _, err := os.Stat(wt); !os.IsNotExist(err) {
-		t.Error("worktree directory still exists")
-	}
-	if !BranchExistsIn(repo, "agent-a") {
-		t.Error("branch deleted without a repository")
-	}
+// With no repository given, RemoveWorktree uses the repository the .git
+// file names only when that repository's registry lists the worktree.
+func TestRemoveWorktree_NoRepoRootRequiresRegisteredWorktree(t *testing.T) {
+	t.Run("registered", func(t *testing.T) {
+		repo, _ := newHostGitRepo(t)
+		agentDir := filepath.Join(repo, "agents", "a")
+		wt := filepath.Join(agentDir, "workspace")
+		if err := os.MkdirAll(agentDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := CreateWorktree(wt, "agent-a"); err != nil {
+			t.Fatal(err)
+		}
+		deleted, err := RemoveWorktree(agentDir, wt, "", true)
+		if err != nil || !deleted {
+			t.Fatalf("RemoveWorktree = %v, %v; want the branch deleted", deleted, err)
+		}
+		if BranchExistsIn(repo, "agent-a") {
+			t.Error("branch agent-a still exists")
+		}
+	})
+	t.Run("redirected", func(t *testing.T) {
+		repo, markers := newHostGitRepo(t)
+		agentDir := filepath.Join(repo, "agents", "a")
+		wt := filepath.Join(agentDir, "workspace")
+		if err := os.MkdirAll(agentDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := CreateWorktree(wt, "agent-a"); err != nil {
+			t.Fatal(err)
+		}
+		other, _ := newHostGitRepo(t)
+		hostRunGit(t, other, "worktree", "add", "-q", filepath.Join(t.TempDir(), "o"), "-b", "agent-a")
+		plantRepoCommands(t, other, markers)
+		otherAdmin := filepath.Join(other, ".git", "worktrees", "o")
+		if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: "+otherAdmin+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		deleted, err := RemoveWorktree(agentDir, wt, "", true)
+		if err != nil || deleted {
+			t.Fatalf("RemoveWorktree = %v, %v; want no branch deleted", deleted, err)
+		}
+		if _, err := os.Stat(wt); !os.IsNotExist(err) {
+			t.Error("worktree directory still exists")
+		}
+		if !BranchExistsIn(other, "agent-a") {
+			t.Error("a branch was deleted in the repository the .git file names")
+		}
+		assertNoMarkers(t, markers)
+	})
 }
 
 // sharedWorkspaceFixture returns a source repository and a shared
