@@ -412,7 +412,13 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 	// retargeted: the stream always goes to conduitProxyHost (127.0.0.1)
 	// inside the agent.
 	conduitOn := s.conduitRoutable()
-	identity := GetIdentityFromContext(r.Context())
+	// A hub user token request without a session generation is refused,
+	// never defaulted (conduitCaptureSessionGeneration).
+	identity, ok := conduitCaptureSessionGeneration(r.Context(), GetIdentityFromContext(r.Context()))
+	if !ok {
+		refuseConduitUncapturedSessionGeneration(w)
+		return
+	}
 	if conduitOn && isLoopbackHost(exposed.Host) {
 		conn, err := s.openConduitPort(r.Context(), identity, agent, exposed.Port)
 		switch {
