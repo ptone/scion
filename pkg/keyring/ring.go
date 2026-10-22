@@ -16,6 +16,7 @@ package keyring
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -82,15 +83,6 @@ func NewPurpose(name string, derive func(secret []byte) []byte) Purpose {
 // Name is the purpose's name (never key material).
 func (p Purpose) Name() string { return p.name }
 
-// SHA256LabelPurpose is the purpose deriving sha256(label + ":" + secret),
-// the derivation of the web session cookie keys.
-func SHA256LabelPurpose(label string) Purpose {
-	return NewPurpose(label, func(secret []byte) []byte {
-		sum := sha256.Sum256(append([]byte(label+":"), secret...))
-		return sum[:]
-	})
-}
-
 // redacted is what every key-holding type prints.
 const redacted = "[redacted]"
 
@@ -127,6 +119,11 @@ func (k SigningKey) LogValue() slog.Value {
 // Format prints the ID only for every verb.
 func (k SigningKey) Format(f fmt.State, _ rune) { _, _ = f.Write([]byte(k.String())) }
 
+// MarshalJSON emits the ID only.
+func (k SigningKey) MarshalJSON() ([]byte, error) {
+	return json.Marshal(map[string]string{"id": k.ID, "key": redacted})
+}
+
 // EncryptionKey is one raw 32-byte encryption key. Key is a copy the
 // caller owns.
 type EncryptionKey struct {
@@ -149,6 +146,11 @@ func (k EncryptionKey) LogValue() slog.Value {
 
 // Format prints the ID only for every verb.
 func (k EncryptionKey) Format(f fmt.State, _ rune) { _, _ = f.Write([]byte(k.String())) }
+
+// MarshalJSON emits the ID only.
+func (k EncryptionKey) MarshalJSON() ([]byte, error) {
+	return json.Marshal(map[string]string{"id": k.ID, "key": redacted})
+}
 
 type signingEntry struct {
 	id          string
@@ -350,10 +352,74 @@ func (k *Keyring) Signing() *SigningRing { return k.signing }
 // Encryption is the encryption ring.
 func (k *Keyring) Encryption() *EncryptionRing { return k.encryption }
 
+// The rings and the keyring print, log and marshal non-secret
+// identification only (source, revision, IDs). Value receivers, so a
+// dereferenced copy is covered as well as the pointer.
+
+// String prints IDs only.
+func (r SigningRing) String() string {
+	return fmt.Sprintf("SigningRing{active:%s ids:%v emit:%s}", r.active, r.IDs(), r.emit)
+}
+
+// GoString prints IDs only.
+func (r SigningRing) GoString() string { return r.String() }
+
+// Format prints IDs only for every verb.
+func (r SigningRing) Format(f fmt.State, _ rune) { _, _ = f.Write([]byte(r.String())) }
+
+// LogValue logs IDs only.
+func (r SigningRing) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("active", r.active), slog.Any("ids", r.IDs()), slog.String("emit", string(r.emit)))
+}
+
+// MarshalJSON emits IDs only.
+func (r SigningRing) MarshalJSON() ([]byte, error) {
+	return json.Marshal(map[string]any{"active": r.active, "ids": r.IDs(), "emit": r.emit})
+}
+
+// String prints IDs only.
+func (r EncryptionRing) String() string {
+	return fmt.Sprintf("EncryptionRing{active:%s ids:%v write_format:%s}", r.active, r.IDs(), r.writeFormat)
+}
+
+// GoString prints IDs only.
+func (r EncryptionRing) GoString() string { return r.String() }
+
+// Format prints IDs only for every verb.
+func (r EncryptionRing) Format(f fmt.State, _ rune) { _, _ = f.Write([]byte(r.String())) }
+
+// LogValue logs IDs only.
+func (r EncryptionRing) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("active", r.active), slog.Any("ids", r.IDs()), slog.String("write_format", string(r.writeFormat)))
+}
+
+// MarshalJSON emits IDs only.
+func (r EncryptionRing) MarshalJSON() ([]byte, error) {
+	return json.Marshal(map[string]any{"active": r.active, "ids": r.IDs(), "write_format": r.writeFormat})
+}
+
 // String prints non-secret identification only.
-func (k *Keyring) String() string {
+func (k Keyring) String() string {
 	return fmt.Sprintf("Keyring{source:%s revision:%q signing:%v encryption:%v}",
 		k.source, k.revision, k.signing.IDs(), k.encryption.IDs())
+}
+
+// GoString prints non-secret identification only.
+func (k Keyring) GoString() string { return k.String() }
+
+// Format prints non-secret identification only for every verb.
+func (k Keyring) Format(f fmt.State, _ rune) { _, _ = f.Write([]byte(k.String())) }
+
+// LogValue logs non-secret identification only.
+func (k Keyring) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("source", string(k.source)), slog.String("revision", k.revision),
+		slog.Any("signing", k.signing.IDs()), slog.Any("encryption", k.encryption.IDs()))
+}
+
+// MarshalJSON emits non-secret identification only.
+func (k Keyring) MarshalJSON() ([]byte, error) {
+	return json.Marshal(map[string]any{"source": k.source, "revision": k.revision,
+		"signing": k.signing.IDs(), "encryption": k.encryption.IDs()})
 }
 
 // DeriveLegacyEncryptionKey is the legacy local secret encryption key

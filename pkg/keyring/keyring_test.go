@@ -15,6 +15,8 @@
 package keyring
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -24,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -46,9 +49,18 @@ const (
 	goldenEncryption  = "216b3dfda93c482541529e7bd3362249aac73f3b32c745298ed1e08ae45482aa"
 )
 
+// sha256LabelPurpose is the web session cookie key derivation,
+// sha256(label + ":" + secret), recomputed here independently of pkg/hub.
+func sha256LabelPurpose(label string) Purpose {
+	return NewPurpose(label, func(secret []byte) []byte {
+		sum := sha256.Sum256(append([]byte(label+":"), secret...))
+		return sum[:]
+	})
+}
+
 var (
-	sessionHash  = SHA256LabelPurpose("scion-session-hash")
-	sessionBlock = SHA256LabelPurpose("scion-session-block")
+	sessionHash  = sha256LabelPurpose("scion-session-hash")
+	sessionBlock = sha256LabelPurpose("scion-session-block")
 	t0           = time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
 )
 
@@ -188,6 +200,18 @@ func TestParseRejects(t *testing.T) {
 			e["keys"] = append(e["keys"].([]any), map[string]any{"id": "legacy", "key_b64": legacyEncB64()})
 		}, want: `duplicate encryption key id "legacy"`},
 		{name: "duplicate JSON key", raw: `{"schema":1,"schema":1}`, want: `duplicate JSON key "schema"`},
+		{name: "upper-case key Secret", mutate: func(d map[string]any) {
+			k := signingKeyAt(d, 1)
+			k["Secret"] = k["secret"]
+			delete(k, "secret")
+		}, want: `invalid JSON key "Secret"`},
+		{name: "upper-case key SCHEMA", mutate: func(d map[string]any) { d["SCHEMA"] = d["schema"]; delete(d, "schema") }, want: `invalid JSON key "SCHEMA"`},
+		{name: "unicode-folded key", mutate: func(d map[string]any) {
+			k := signingKeyAt(d, 1)
+			k["\u017fecret"] = k["secret"] // U+017F LATIN SMALL LETTER LONG S folds to s
+			delete(k, "secret")
+		}, want: `invalid JSON key`},
+		{name: "secret plus Secret", mutate: func(d map[string]any) { signingKeyAt(d, 1)["Secret"] = fixtureGen2Secret }, want: `invalid JSON key "Secret"`},
 		{name: "duplicate nested JSON key", raw: `{"signing":{"active":"a","active":"b"}}`, want: `duplicate JSON key "active"`},
 		{name: "unknown top-level field", mutate: func(d map[string]any) { d["extra"] = true }, want: `unknown field "extra"`},
 		{name: "unknown ring field", mutate: func(d map[string]any) { sub(d, "signing")["extra"] = 1 }, want: `unknown field "extra"`},
@@ -446,24 +470,108 @@ func TestKeysNeverFormatMaterial(t *testing.T) {
 	}
 	sk, _ := k.Signing().Active(sessionHash, t0)
 	ek := k.Encryption().Active()
-	var buf strings.Builder
-	logger := slog.New(slog.NewTextHandler(&buf, nil))
-	logger.Info("x", "signing", sk, "encryption", ek, "ring", k)
-	outs := []string{
-		fmt.Sprint(sk), fmt.Sprintf("%v %+v %#v %s %x", sk, sk, sk, sk, sk),
-		fmt.Sprintf("%v %+v %#v %s %x", ek, ek, ek, ek, ek),
-		fmt.Sprint(k), StartupNotice(k), StartupNotice(Legacy(fixtureLegacySecret)), buf.String(),
+	values := map[string]any{
+		"SigningKey": sk, "EncryptionKey": ek,
+		"*SigningRing": k.Signing(), "SigningRing": *k.Signing(),
+		"*EncryptionRing": k.Encryption(), "EncryptionRing": *k.Encryption(),
+		"*Keyring": k, "Keyring": *k,
+		"legacy *Keyring": Legacy(fixtureLegacySecret),
 	}
-	for _, o := range outs {
-		assertNoSecret(t, o)
-		if strings.Contains(o, hex.EncodeToString(sk.Key)) || strings.Contains(o, hex.EncodeToString(ek.Key)) {
-			t.Fatalf("output contains key bytes: %q", o)
+	// Every rendering of key material that a leak could take: raw bytes as
+	// text, hex and the decimal-byte form, for the secrets, the raw
+	// encryption key and the derived keys.
+	var material [][]byte
+	for _, sec := range []string{fixtureLegacySecret, fixtureGen1Secret, fixtureGen2Secret} {
+		material = append(material, []byte(sec))
+	}
+	material = append(material, ek.Key, sk.Key, DeriveLegacyEncryptionKey(fixtureLegacySecret))
+	check := func(label, out string) {
+		t.Helper()
+		assertNoSecret(t, out)
+		for _, m := range material {
+			for _, form := range []string{hex.EncodeToString(m), fmt.Sprint(m), base64.StdEncoding.EncodeToString(m), strings.Trim(fmt.Sprint(m), "[]")} {
+				if strings.Contains(out, form) {
+					t.Fatalf("%s: output contains key material: %q", label, out)
+				}
+			}
 		}
 	}
+	for name, v := range values {
+		for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%d", "%x", "%q"} {
+			check(name+" "+verb, fmt.Sprintf(verb, v))
+		}
+		check(name+" Sprint", fmt.Sprint(v))
+		js, err := json.Marshal(v)
+		if err != nil {
+			t.Fatalf("%s: json.Marshal: %v", name, err)
+		}
+		check(name+" json", string(js))
+		for _, h := range []string{"text", "json"} {
+			var buf bytes.Buffer
+			var handler slog.Handler = slog.NewTextHandler(&buf, nil)
+			if h == "json" {
+				handler = slog.NewJSONHandler(&buf, nil)
+			}
+			slog.New(handler).Info("x", "v", v, slog.Any("any", v))
+			check(name+" slog "+h, buf.String())
+		}
+	}
+	check("notice", StartupNotice(k))
+	check("legacy notice", StartupNotice(Legacy(fixtureLegacySecret)))
 	if !strings.Contains(StartupNotice(Legacy(fixtureLegacySecret)), "agent JWTs") {
 		t.Fatal("legacy notice must name the coupled uses")
 	}
 	if !strings.Contains(StartupNotice(k), "session cookies only") {
 		t.Fatal("ring notice must state the pilot limitation")
+	}
+	// The identification is still there.
+	if !strings.Contains(fmt.Sprint(k.Signing()), "gen1") || !strings.Contains(fmt.Sprint(*k), "rev-2026-10-21.1") {
+		t.Fatalf("identification missing: %v / %v", k.Signing(), *k)
+	}
+}
+
+func TestLoadFileRefusesNonRegularBeforeOpen(t *testing.T) {
+	dir := t.TempDir()
+	fifo := filepath.Join(dir, "fifo.json")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { _, err := LoadFile(fifo); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+			t.Fatalf("LoadFile(fifo) = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("LoadFile blocked on a FIFO")
+	}
+}
+
+func TestLoadFileWarnsOnGroupOrOtherAccess(t *testing.T) {
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+	dir := t.TempDir()
+	for _, tc := range []struct {
+		mode os.FileMode
+		warn bool
+	}{{0o600, false}, {0o640, true}, {0o604, true}} {
+		buf.Reset()
+		path := filepath.Join(dir, fmt.Sprintf("k%o.json", tc.mode))
+		if err := os.WriteFile(path, marshal(t, validDoc()), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, tc.mode); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadFile(path); err != nil {
+			t.Fatalf("mode %o: LoadFile refused (must only warn): %v", tc.mode, err)
+		}
+		if got := strings.Contains(buf.String(), "accessible to group or others"); got != tc.warn {
+			t.Fatalf("mode %o: warned=%v, want %v (%s)", tc.mode, got, tc.warn, buf.String())
+		}
+		assertNoSecret(t, buf.String())
 	}
 }

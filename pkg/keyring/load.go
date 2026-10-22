@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"regexp"
 	"time"
@@ -45,6 +46,12 @@ const (
 )
 
 var (
+	// keyPattern is the only accepted spelling of a JSON object key: the
+	// schema's field names are lower-case snake_case, and encoding/json
+	// would otherwise bind "Secret", "SCHEMA" or "\u017fecret" to the same
+	// field case-insensitively, bypassing the unknown-field and duplicate
+	// checks.
+	keyPattern      = regexp.MustCompile(`^[a-z0-9_]+$`)
 	idPattern       = regexp.MustCompile(`^[A-Za-z0-9_-]{1,32}$`)
 	revisionPattern = regexp.MustCompile(`^[A-Za-z0-9._:+/@-]{1,128}$`)
 )
@@ -86,23 +93,37 @@ type encryptionKeyV1 struct {
 
 // LoadFile reads and validates a version-1 keyring file. The path may be
 // a symlink (as Kubernetes secret mounts are) but must resolve to a
-// regular file of at most MaxFileBytes. No error carries key material.
+// regular file of at most MaxFileBytes; anything else is refused before it
+// is opened. A file accessible to group or others loads with a WARN naming
+// the path and mode only. No error carries key material.
 func LoadFile(path string) (*Keyring, error) {
+	// Stat before Open: a FIFO or device would block or misbehave in Open.
+	pre, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("keyring file: %w", err)
+	}
+	if !pre.Mode().IsRegular() {
+		return nil, errors.New("keyring file: not a regular file")
+	}
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("keyring file: %w", errors.Unwrap(err))
+		return nil, fmt.Errorf("keyring file: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 	st, err := f.Stat()
 	if err != nil {
-		return nil, fmt.Errorf("keyring file: %w", errors.Unwrap(err))
+		return nil, fmt.Errorf("keyring file: %w", err)
 	}
-	if !st.Mode().IsRegular() {
-		return nil, errors.New("keyring file: not a regular file")
+	if !os.SameFile(pre, st) || !st.Mode().IsRegular() {
+		return nil, errors.New("keyring file: changed while being opened")
+	}
+	if perm := st.Mode().Perm(); perm&0o077 != 0 {
+		slog.Warn("keyring file is accessible to group or others; restrict it to the server user (chmod 600)",
+			"path", path, "mode", fmt.Sprintf("%#o", perm))
 	}
 	data, err := io.ReadAll(io.LimitReader(f, MaxFileBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("keyring file: read failed: %w", errors.Unwrap(err))
+		return nil, fmt.Errorf("keyring file: read failed: %w", err)
 	}
 	return Parse(data)
 }
@@ -398,6 +419,9 @@ func checkJSONShape(data []byte) error {
 		case string:
 			if n := len(stack); n > 0 && stack[n-1].object && stack[n-1].wantKey {
 				top := stack[n-1]
+				if !keyPattern.MatchString(v) {
+					return fmt.Errorf("keyring file: invalid JSON key %q: keys are lower-case snake_case", v)
+				}
 				if top.keys[v] {
 					return fmt.Errorf("keyring file: duplicate JSON key %q", v)
 				}

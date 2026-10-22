@@ -189,23 +189,20 @@ func TestCookieCodecsLimits(t *testing.T) {
 	if _, err := securecookie.EncodeMulti(cookieName, big, b...); err == nil {
 		t.Fatal("oversize cookie encoded")
 	}
-	// MaxAge reaches the inner codecs: a cookie older than 24h is refused.
+	// MaxAge reaches the inner codecs. securecookie stamps and checks with
+	// the wall clock, so instead of waiting out a short max age this uses
+	// max age -1: a codec refuses a value when its timestamp is older than
+	// now - maxAge, which with -1 is every value, while the 24h codec
+	// accepts the same fresh cookie.
 	v, err := securecookie.EncodeMulti(cookieName, values(), b...)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// securecookie timestamps use the wall clock; re-encode with a codec
-	// whose max age is 1s and wait it out instead of faking time.
-	short := CookieCodecs(ringFile(t, nil), sessionHash, sessionBlock, 1, c.now)
-	sv, err := securecookie.EncodeMulti(cookieName, values(), short...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(2100 * time.Millisecond)
-	if _, err := decode(short, sv); err == nil {
-		t.Fatal("max age not applied to inner codecs")
-	}
 	if _, err := decode(b, v); err != nil {
 		t.Fatalf("24h codec refused a fresh cookie: %v", err)
+	}
+	expired := CookieCodecs(ringFile(t, nil), sessionHash, sessionBlock, -1, c.now)
+	if _, err := decode(expired, v); err == nil {
+		t.Fatal("max age not applied to inner codecs")
 	}
 }
