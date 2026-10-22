@@ -87,7 +87,7 @@ func startOutcomeOf(err error) startOutcome {
 		return startReleased
 	case errors.Is(err, ErrLaunchInFlight), errors.As(err, &incomplete), errors.As(err, &stillMissing),
 		errors.Is(err, ErrLaunchInvalidPhase),
-		errors.Is(err, errStartRunNotBegun),
+		errors.Is(err, errStartRunNotBegun), errors.Is(err, errStartRepinRefused),
 		errors.As(err, &tokenErr), errors.Is(err, errBrokerLacksEmptyPerAgent),
 		isBrokerRuntimeUnavailable(err), isBrokerDraining(err), errors.Is(err, errStartClaimLost), errors.Is(err, store.ErrDeleteInProgress):
 		return startReleased
@@ -531,7 +531,7 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 		// dispatched on a failure.
 		if err := s.repinUserTemplateForStart(ctx, agent); err != nil {
 			sd.rollback(ctx)
-			return false, err
+			return false, fmt.Errorf("%w: %w", errStartRepinRefused, err)
 		}
 		dctx := ctx
 		if opts.KeepCallerDeadline && hasCallerDeadline {

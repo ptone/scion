@@ -27,6 +27,12 @@ import (
 // 409 version_conflict; nothing is dispatched.
 var errTemplatePinConflict = fmt.Errorf("agent changed while its template was re-recorded; retry: %w", store.ErrVersionConflict)
 
+// errStartRepinRefused wraps any re-pin failure inside a claimed start
+// dispatch (errTemplatePinConflict included, still reachable with
+// errors.Is). Nothing was sent to a broker, so startOutcomeOf releases the
+// start claim and an immediate retry is not refused as a start in progress.
+var errStartRepinRefused = errors.New("start refused before dispatch: template re-pin failed")
+
 // repinUserTemplateForStart re-records, before a start, restart or resume is
 // dispatched, the current content hash of the agent's user-scoped template
 // (ptone/scion#5770; see "Version pinning" in authorize.go). The template is

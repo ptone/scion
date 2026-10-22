@@ -1254,6 +1254,14 @@ func TestRepin_ConcurrentWrite_409NoDispatch(t *testing.T) {
 			assert.Equal(t, "concurrent write", got.Message, "the concurrent write is not reverted")
 			assert.Equal(t, dispatchReadHash, got.AppliedConfig.TemplateHash, "nothing is re-recorded")
 			assert.Equal(t, p.phase, got.Phase, "the agent is left as it was")
+			assert.Empty(t, got.StartClaimID, "the refused start releases its start claim")
+
+			// The 409 says retry: an immediate retry succeeds.
+			f.srv.store = f.store
+			rec = p.run(t, f, got)
+			require.Less(t, rec.Code, 300, "the retry starts: %s", rec.Body.String())
+			assert.Equal(t, 1, f.disp.starts)
+			assert.Equal(t, repinNewHash, f.disp.storedHash, "the retry re-records the current hash")
 		})
 	}
 }
@@ -1340,6 +1348,17 @@ func TestRepin_Wake(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "concurrent write", got.Message)
 		assert.Equal(t, dispatchReadHash, got.AppliedConfig.TemplateHash)
+		assert.Empty(t, got.StartClaimID, "the refused wake releases its start claim")
+
+		// An immediate retry wakes the agent (not deferred behind a held
+		// claim).
+		f.srv.store = f.store
+		res, dmErr := f.srv.wakeAgentForDM(ctx, got)
+		require.Nil(t, dmErr)
+		require.NotNil(t, res)
+		assert.NotEqual(t, WakeDeferred, res.Outcome, "the retry is not deferred")
+		assert.Equal(t, 1, f.disp.starts)
+		assert.Equal(t, repinNewHash, f.disp.storedHash)
 	})
 }
 
