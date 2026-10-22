@@ -341,13 +341,13 @@ func f() { windows.LookupSID("", "Administrators"); _ = name == "BUILTIN\\Users"
 var pathOpeners = map[string]bool{
 	"CreateFile": true, "CreateDirectory": true, "GetFileAttributes": true, "GetFileAttributesEx": true,
 	"Open": true, "OpenFile": true, "Stat": true, "Lstat": true, "Mkdir": true, "MkdirAll": false,
-	"ReadDir": true, "Readlink": true, "EvalSymlinks": true, "Resolve": true,
+	"ReadDir": true, "Readlink": true, "EvalSymlinks": true, "Resolve": true, "OpenDir": true,
 	"openFollow": true, "createAnchor": true, "OpenTree": true,
 }
 
-// walkFuncs is the MkdirAll path below the anchor (also the walk of every
-// other Tree operation): MkdirAll, walk, openDirComp, openDirAt, mkdirAt.
-var walkFuncs = []string{"MkdirAll", "walk", "openDirComp", "openDirAt", "mkdirAt"}
+// walkFuncs is the MkdirAll/MkdirAllEach path below the anchor (also the
+// walk of every other Tree operation).
+var walkFuncs = []string{"MkdirAll", "MkdirAllEach", "verifyExisting", "walk", "openDirComp", "openDirAt", "mkdirAt"}
 
 // handleWalkViolations reports, for the walk functions in file, any call to
 // a path-based opener, and any ntCreate whose RootDirectory argument is a
@@ -425,5 +425,21 @@ func other() { os.Open("x") }
 	}
 	if len(bad) > 0 {
 		t.Fatalf("the walk below a Tree's anchor must open every component relative to its parent's handle:\n%s", strings.Join(bad, "\n"))
+	}
+	// The one by-path open reachable from the walk is the diagnostic
+	// warnMutableLinkParent (the security lead's "accept as residual +
+	// warn" ruling). It must stay unable to influence a result: no return
+	// value.
+	diag := false
+	for _, decl := range f.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "warnMutableLinkParent" {
+			diag = true
+			if fn.Type.Results != nil && len(fn.Type.Results.List) > 0 {
+				t.Fatal("warnMutableLinkParent must return nothing: it is diagnostic only and opens a path")
+			}
+		}
+	}
+	if !diag {
+		t.Fatal("warnMutableLinkParent not found in privatefs_windows.go")
 	}
 }

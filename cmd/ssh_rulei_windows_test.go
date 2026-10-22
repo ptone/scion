@@ -37,16 +37,45 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 )
 
-// foreignWritableDir returns a directory outside any home that Users may
-// modify, and a function that takes that right away again.
-func foreignWritableDir(t *testing.T) (string, func()) {
+// foreignWritableDir returns a directory outside any home on which Users
+// hold grant (an icacls grant: "(OI)(CI)(M)" for Modify, "(DC)" for
+// DELETE_CHILD only), and a function that takes it away again.
+func foreignWritableDir(t *testing.T, grant string) (string, func()) {
 	t.Helper()
 	d := privateHome(t)
-	wintest.Icacls(t, d, "/grant", "*"+wintest.SIDUsers+":(OI)(CI)(M)")
+	wintest.Icacls(t, d, "/grant", "*"+wintest.SIDUsers+":"+grant)
 	return d, func() {
 		wintest.Icacls(t, d, "/remove:g", "*"+wintest.SIDUsers)
 		setUserOnlyDirDACL(t, d)
 	}
+}
+
+// treeSnapshot records every entry below dir (links are recorded, not
+// followed): directories, other entries by type, and regular files with
+// their content. Two equal snapshots mean nothing was created, removed or
+// changed.
+func treeSnapshot(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	require.NoError(t, filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		switch {
+		case d.Type().IsRegular():
+			b, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			out[path] = "file:" + string(b)
+		case d.IsDir():
+			out[path] = "dir"
+		default:
+			out[path] = "other:" + d.Type().String()
+		}
+		return nil
+	}))
+	return out
 }
 
 func vscodeUpdateFor(t *testing.T, agent string) vscodeUpdate {
@@ -57,58 +86,72 @@ func vscodeUpdateFor(t *testing.T, agent string) vscodeUpdate {
 		key: mustNormKey(t, testSSHPublicKey(t)), endpoint: tunnelclient.NormalizeEndpoint("https://h.example")}
 }
 
-// Addendum (a) and (d): for EVERY caller of ensureSSHDir, a link (junction)
-// whose target directory another principal can write to is followed and
-// then REFUSED by rule I, as a returned error, with nothing written there.
-// Control: once the foreign right is removed, the same call succeeds.
+// Addendum (a) and (d), review r2 finding 1: for EVERY caller of
+// ensureSSHDir, a link (junction) at ~/.ssh, ~/.scion or a directory below
+// them whose target another principal can write to (Modify) or delete
+// children from (DELETE_CHILD only) is followed and then REFUSED by the
+// FollowLinks component check, as a returned ErrNotPrivate. A refusal
+// leaves no side effect (security lead): home and the target are
+// unchanged, no file AND no directory created (not even the lock file or
+// a directory for another path of the same call). Control: once the
+// foreign right is removed, the same call succeeds and its leaves are
+// private.
 func TestSSHDirCallers_LinkTargetFailingRuleIRefused(t *testing.T) {
+	includeLine := func(t *testing.T, home string) error {
+		_, err := ensureSSHIncludeLine(sshPaths{home: home})
+		return err
+	}
+	hubPlan := func(t *testing.T, home string) error {
+		p := sshPaths{home: home}
+		return writeSSHHubPlan(p, sshPlan(p))
+	}
+	vscodeFiles := func(t *testing.T, home string) error {
+		_, err := updateVSCodeFiles(vscodePaths{home: home}, vscodeUpdateFor(t, "a1"))
+		return err
+	}
+	vscodeSettings := func(t *testing.T, home string) error {
+		return ensureVSCodeSettings(vscodePaths{home: home})
+	}
 	cases := []struct {
 		name   string
 		link   string   // relative to home; its parent is created first
-		leaves []string // files the call would write in the link target
+		leaves []string // files the call writes, relative to the link target
 		call   func(t *testing.T, home string) error
 	}{
-		{"ensureSSHIncludeLine ~/.ssh", ".ssh", []string{"config"}, func(t *testing.T, home string) error {
-			_, err := ensureSSHIncludeLine(sshPaths{home: home})
-			return err
-		}},
-		{"writeSSHHubPlan ~/.scion/ssh", ".scion/ssh", []string{"known_hosts-hub"}, func(t *testing.T, home string) error {
-			p := sshPaths{home: home}
-			return writeSSHHubPlan(p, sshPlan(p))
-		}},
-		{"writeSSHHubPlan ~/.ssh/config.d", ".ssh/config.d", []string{"scion-hub"}, func(t *testing.T, home string) error {
-			p := sshPaths{home: home}
-			return writeSSHHubPlan(p, sshPlan(p))
-		}},
-		{"updateVSCodeFiles ~/.scion/vscode", ".scion/vscode", []string{"ssh_config", "known_hosts"}, func(t *testing.T, home string) error {
-			_, err := updateVSCodeFiles(vscodePaths{home: home}, vscodeUpdateFor(t, "a1"))
-			return err
-		}},
-		{"ensureVSCodeSettings ~/.scion/vscode/user-data/User", ".scion/vscode/user-data/User", []string{"settings.json"}, func(t *testing.T, home string) error {
-			return ensureVSCodeSettings(vscodePaths{home: home})
-		}},
+		{"ensureSSHIncludeLine ~/.ssh", ".ssh", []string{"config"}, includeLine},
+		{"writeSSHHubPlan include ~/.ssh", ".ssh", []string{"config.d/scion-hub", "config"}, hubPlan},
+		{"writeSSHHubPlan include ~/.ssh/config.d", ".ssh/config.d", []string{"scion-hub"}, hubPlan},
+		{"writeSSHHubPlan known-hosts ~/.scion", ".scion", []string{"ssh/known_hosts-hub"}, hubPlan},
+		{"writeSSHHubPlan known-hosts ~/.scion/ssh", ".scion/ssh", []string{"known_hosts-hub"}, hubPlan},
+		{"updateVSCodeFiles ~/.scion", ".scion", []string{"vscode/ssh_config", "vscode/known_hosts", "vscode/user-data/User/settings.json"}, vscodeFiles},
+		{"updateVSCodeFiles ~/.scion/vscode", ".scion/vscode", []string{"ssh_config", "known_hosts", "user-data/User/settings.json"}, vscodeFiles},
+		{"updateVSCodeFiles ~/.scion/vscode/user-data/User", ".scion/vscode/user-data/User", []string{"settings.json"}, vscodeFiles},
+		{"ensureVSCodeSettings ~/.scion", ".scion", []string{"vscode/user-data/User/settings.json"}, vscodeSettings},
+		{"ensureVSCodeSettings ~/.scion/vscode/user-data/User", ".scion/vscode/user-data/User", []string{"settings.json"}, vscodeSettings},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			home := privateHome(t)
-			target, clear := foreignWritableDir(t)
-			link := filepath.Join(home, filepath.FromSlash(tc.link))
-			require.NoError(t, os.MkdirAll(filepath.Dir(link), 0o700))
-			wintest.MustJunction(t, target, link)
+	for _, grant := range []string{"(OI)(CI)(M)", "(DC)"} {
+		for _, tc := range cases {
+			t.Run(grant+" "+tc.name, func(t *testing.T) {
+				home := privateHome(t)
+				target, clear := foreignWritableDir(t, grant)
+				link := filepath.Join(home, filepath.FromSlash(tc.link))
+				require.NoError(t, os.MkdirAll(filepath.Dir(link), 0o700))
+				wintest.MustJunction(t, target, link)
+				homeBefore, targetBefore := treeSnapshot(t, home), treeSnapshot(t, target)
 
-			err := tc.call(t, home)
-			require.ErrorIs(t, err, privatefs.ErrNotPrivate, "the rule I failure is returned")
-			assert.Contains(t, err.Error(), wintest.SIDUsers)
-			for _, l := range tc.leaves {
-				assert.NoFileExists(t, filepath.Join(target, l))
-			}
+				err := tc.call(t, home)
+				require.ErrorIs(t, err, privatefs.ErrNotPrivate, "the rule I failure is returned")
+				assert.Contains(t, err.Error(), wintest.SIDUsers)
+				assert.Equal(t, homeBefore, treeSnapshot(t, home), "the refusal changed nothing in home")
+				assert.Equal(t, targetBefore, treeSnapshot(t, target), "the refusal changed nothing in the target")
 
-			clear()
-			require.NoError(t, tc.call(t, home), "control: the same link once no one else can write there")
-			for _, l := range tc.leaves {
-				assertPrivateSD(t, filepath.Join(target, l))
-			}
-		})
+				clear()
+				require.NoError(t, tc.call(t, home), "control: the same link once no one else can write there")
+				for _, l := range tc.leaves {
+					assertPrivateSD(t, filepath.Join(target, filepath.FromSlash(l)))
+				}
+			})
+		}
 	}
 }
 
@@ -231,6 +274,41 @@ func TestSSHVSCodeWriteLeaves_RefuseHardLinks(t *testing.T) {
 			require.NoError(t, os.Remove(second))
 			require.NoError(t, tc.write(t, home), "control: one name")
 			assertPrivateSD(t, leaf)
+		})
+	}
+}
+
+// Security-lead ruling (review r2, "accept as residual + warn"): ~/.ssh is
+// a link to a directory whose PARENT another user can write to or delete
+// children from. ssh-config still succeeds (the target itself passes rule
+// I) and prints ONE warning naming that parent and the SID. Control: a
+// private parent, no warning.
+func TestSSHWrite_WarnsOnMutableLinkTargetParent(t *testing.T) {
+	for _, grant := range []string{"(M)", "(DC)", ""} {
+		t.Run("grant="+grant, func(t *testing.T) {
+			var out strings.Builder
+			prev := sshWarnOut
+			sshWarnOut = &out
+			t.Cleanup(func() { sshWarnOut = prev })
+
+			home := privateHome(t)
+			parent := filepath.Join(privateHome(t), "shared-dotfiles")
+			target := filepath.Join(parent, "ssh")
+			require.NoError(t, os.MkdirAll(target, 0o700))
+			if grant != "" {
+				wintest.Icacls(t, parent, "/grant", "*"+wintest.SIDUsers+":"+grant)
+			}
+			wintest.MustJunction(t, target, filepath.Join(home, ".ssh"))
+			p := sshPaths{home: home}
+			require.NoError(t, writeSSHHubPlan(p, sshPlan(p)), "the operation still succeeds")
+			assertPrivateSD(t, filepath.Join(target, "config"))
+			if grant == "" {
+				assert.Empty(t, out.String(), "control: a private parent gives no warning")
+				return
+			}
+			assert.Equal(t, 1, strings.Count(out.String(), "scion: warning:"), out.String())
+			assert.Contains(t, out.String(), "shared-dotfiles")
+			assert.Contains(t, out.String(), wintest.SIDUsers)
 		})
 	}
 }

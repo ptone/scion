@@ -160,6 +160,10 @@ type Tree struct {
 	// followLinks: TreeOptions.FollowLinks (directory components below the
 	// anchor may be reparse points, which are followed).
 	followLinks bool
+	// warn and warned: TreeOptions.Warn, and the directories already
+	// reported.
+	warn   func(string)
+	warned map[string]bool
 	// volSerial and fileIndex identify the anchor object. They are recorded
 	// for diagnostics only (error text, tests); no security decision reads
 	// them, because the handle itself pins the object.
@@ -196,7 +200,7 @@ func OpenTree(anchor string, opt TreeOptions) (*Tree, error) {
 	if err != nil {
 		return nil, err
 	}
-	t := &Tree{anchor: resolved, h: h, followLinks: opt.FollowLinks}
+	t := &Tree{anchor: resolved, h: h, followLinks: opt.FollowLinks, warn: opt.Warn}
 	if err := t.init(); err != nil {
 		_ = windows.CloseHandle(h)
 		return nil, err
@@ -450,30 +454,110 @@ func openDirAt(parent windows.Handle, name string) (windows.Handle, error) {
 	return h, nil
 }
 
-// openDirComp opens the directory component name relative to parent. In a
-// tree without FollowLinks it is openDirAt: a reparse point is refused. With
-// FollowLinks a reparse point is opened again without
-// FILE_OPEN_REPARSE_POINT, so the kernel follows it (relative to parent's
-// handle, never by a path built here), and the result must be a directory.
-// See TreeOptions.FollowLinks for why ~/.ssh needs this.
+// openDirComp opens the existing directory component name relative to
+// parent. In a tree without FollowLinks it is openDirAt: a reparse point is
+// refused.
+//
+// With FollowLinks (see TreeOptions.FollowLinks for why ~/.ssh needs it):
+//   - a reparse point is opened again without FILE_OPEN_REPARSE_POINT, so
+//     the kernel follows it (relative to parent's handle, never by a path
+//     built here), and the result must be a directory;
+//   - every EXISTING component, followed or not, must pass
+//     CheckNoForeignWriters on its handle (the rule I owner set: the
+//     current user, SYSTEM or Administrators). A directory someone else can
+//     write to or delete children from could have its entries swapped after
+//     any check made below it, so it is refused before anything is written
+//     there (win-cli Phase 3b review r2, finding 1; brief addendum (d)).
+//     The only components that skip the check are the ones mkdirAt
+//     creates during the current walk (they get the protection asked for
+//     in the create call, and walk and MkdirAll use the new handle without
+//     coming back here). The carve-out keys on "created by this walk",
+//     never on a name: a pre-existing directory of any name, including
+//     one created concurrently (mkdirAt's ErrExist path), comes through
+//     here and is checked. The anchor itself is trusted, as for every
+//     Tree.
 func (t *Tree) openDirComp(parent windows.Handle, name string) (windows.Handle, error) {
 	h, err := openDirAt(parent, name)
-	if !t.followLinks || !errors.Is(err, ErrReparsePoint) {
+	if !t.followLinks {
 		return h, err
 	}
-	h, _, err = ntCreate(parent, name, dirAccess, 0, shareAll, windows.FILE_OPEN, windows.FILE_DIRECTORY_FILE, nil)
+	if errors.Is(err, ErrReparsePoint) {
+		h, _, err = ntCreate(parent, name, dirAccess, 0, shareAll, windows.FILE_OPEN, windows.FILE_DIRECTORY_FILE, nil)
+		if err != nil {
+			return windows.InvalidHandle, err
+		}
+		tag, terr := attrTag(h)
+		if terr == nil && tag.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
+			terr = syscall.ENOTDIR
+		}
+		if terr != nil {
+			_ = windows.CloseHandle(h)
+			return windows.InvalidHandle, terr
+		}
+		if err == nil {
+			t.warnMutableLinkParent(h, name)
+		}
+	}
 	if err != nil {
 		return windows.InvalidHandle, err
 	}
-	tag, err := attrTag(h)
-	if err == nil && tag.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
-		err = syscall.ENOTDIR
-	}
-	if err != nil {
+	if err := checkHandleNoForeignWriters(h, name); err != nil {
 		_ = windows.CloseHandle(h)
 		return windows.InvalidHandle, err
 	}
 	return h, nil
+}
+
+// warnMutableLinkParent reports, through TreeOptions.Warn, a followed
+// link whose target directory (open as h) sits in a parent directory that
+// another principal can write to or delete children from: the accepted
+// residual of the security-lead ruling (see TreeOptions.FollowLinks). It
+// is DIAGNOSTIC ONLY: it never changes a result, so the parent is opened
+// by path (GetFinalPathNameByHandle of h, then its directory), which no
+// decision on the walk ever does.
+func (t *Tree) warnMutableLinkParent(h windows.Handle, name string) {
+	if t.warn == nil {
+		return
+	}
+	buf := make([]uint16, windows.MAX_PATH)
+	n, err := windows.GetFinalPathNameByHandle(h, &buf[0], uint32(len(buf)), 0)
+	if err == nil && int(n) > len(buf) {
+		buf = make([]uint16, n)
+		n, err = windows.GetFinalPathNameByHandle(h, &buf[0], uint32(len(buf)), 0)
+	}
+	if err != nil || int(n) > len(buf) {
+		return
+	}
+	target := windows.UTF16ToString(buf[:n])
+	parent := filepath.Dir(target)
+	if parent == target || t.warned[parent] {
+		return
+	}
+	ph, err := openFollow(parent)
+	if err != nil {
+		return
+	}
+	defer func() { _ = windows.CloseHandle(ph) }()
+	if cerr := checkHandleNoForeignWriters(ph, parent); errors.Is(cerr, ErrNotPrivate) {
+		if t.warned == nil {
+			t.warned = map[string]bool{}
+		}
+		t.warned[parent] = true
+		t.warn(fmt.Sprintf("%s is a link to %s, and the directory above it, %s, can be changed by another user (%v); scion protects the files it writes there, not the path to them", name, target, parent, cerr))
+	}
+}
+
+// checkHandleNoForeignWriters runs CheckNoForeignWriters on a duplicate of
+// the open handle h (which keeps its owner), named name in errors.
+func checkHandleNoForeignWriters(h windows.Handle, name string) error {
+	cur := windows.CurrentProcess()
+	var dup windows.Handle
+	if err := windows.DuplicateHandle(cur, h, cur, &dup, 0, false, windows.DUPLICATE_SAME_ACCESS); err != nil {
+		return fmt.Errorf("%w: cannot check %s: %w", ErrNotPrivate, name, err)
+	}
+	f := os.NewFile(uintptr(dup), name)
+	defer func() { _ = f.Close() }()
+	return CheckNoForeignWriters(f)
 }
 
 // walk opens every directory component of rel except the leaf, relative to
@@ -550,6 +634,50 @@ func (t *Tree) MkdirAll(rel string, p Protection) error {
 	h, err := t.openDirComp(parent, leaf)
 	if errors.Is(err, fs.ErrNotExist) {
 		h, err = t.mkdirAt(parent, leaf, p)
+	}
+	if err != nil {
+		return t.walkErr(rel, err)
+	}
+	return windows.CloseHandle(h)
+}
+
+// MkdirAllEach is MkdirAll for several directories, with no side effect
+// on refusal: it first walks every rel WITHOUT creating anything, opening
+// each existing component exactly as MkdirAll would (a reparse point is
+// refused; in a FollowLinks tree every existing component must pass
+// CheckNoForeignWriters), and only when all of them pass does it create
+// the missing ones. So a refused location is found before any directory
+// is created anywhere, and a later run finds nothing the tool created
+// while deciding not to trust it.
+func (t *Tree) MkdirAllEach(p Protection, rels ...string) error {
+	for _, rel := range rels {
+		if err := t.verifyExisting(rel); err != nil {
+			return err
+		}
+	}
+	for _, rel := range rels {
+		if err := t.MkdirAll(rel, p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// verifyExisting opens the existing components of rel, in order, as the
+// walk does, and stops without error at the first missing one. It creates
+// nothing.
+func (t *Tree) verifyExisting(rel string) error {
+	parent, leaf, done, err := t.walk(rel, false, Inherit)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer done()
+	h, err := t.openDirComp(parent, leaf)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
 	}
 	if err != nil {
 		return t.walkErr(rel, err)

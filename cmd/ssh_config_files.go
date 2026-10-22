@@ -18,6 +18,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/url"
@@ -26,6 +27,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"unicode"
 
 	"golang.org/x/crypto/ssh"
@@ -287,13 +289,43 @@ func resolveSSHHubLabel(endpoint string, u *url.URL, files []sshIncludeFileInfo)
 // ssh and VS Code will read) is enforced by rule I on the resolved handles
 // of every file written below these directories (writeFileAtomic,
 // privatefs.ReplaceFollowing), and a rule I failure is a returned error.
-func ensureSSHDir(home, rel string) error {
-	t, err := privatefs.OpenTree(home, privatefs.TreeOptions{FollowLinks: true})
+//
+// Several rels are verified together before any is created
+// (Tree.MkdirAllEach): a refused location leaves no side effect, not even
+// a directory created for another rel of the same call (security lead,
+// review r2: "a refusal must leave no side effect").
+//
+// A followed link whose target sits in a directory another user can
+// change is warned about on stderr (sshLinkWarning), not refused: the
+// security lead accepted it as a residual (rule I protects the target,
+// not the path to it; see privatefs.TreeOptions.FollowLinks).
+func ensureSSHDir(home string, rels ...string) error {
+	t, err := privatefs.OpenTree(home, privatefs.TreeOptions{FollowLinks: true, Warn: sshLinkWarning})
 	if err != nil {
 		return err
 	}
 	defer func() { _ = t.Close() }()
-	return t.MkdirAll(rel, privatefs.ForMode(sshDirMode))
+	return t.MkdirAllEach(privatefs.ForMode(sshDirMode), rels...)
+}
+
+// sshWarnOut receives sshLinkWarning's lines; tests replace it.
+var sshWarnOut io.Writer = os.Stderr
+
+var (
+	sshWarnedMu sync.Mutex
+	sshWarned   = map[string]bool{}
+)
+
+// sshLinkWarning prints a privatefs FollowLinks warning once per process
+// (several ensureSSHDir calls in one command walk the same link).
+func sshLinkWarning(msg string) {
+	sshWarnedMu.Lock()
+	defer sshWarnedMu.Unlock()
+	if sshWarned[msg] {
+		return
+	}
+	sshWarned[msg] = true
+	_, _ = fmt.Fprintf(sshWarnOut, "scion: warning: %s\n", msg)
 }
 
 // writeFileAtomic replaces path with data through a temporary file in the
@@ -786,10 +818,9 @@ func regenerateSSHHubFiles(p sshPaths, hub, exe string, l sshAgentListing) (*ssh
 // The known-hosts file is written first, so an installed block never lacks
 // its pin.
 func writeSSHHubPlan(p sshPaths, res *sshRegenResult) error {
-	if err := ensureSSHDir(p.home, sshKnownHostsDirRel); err != nil {
-		return err
-	}
-	if err := ensureSSHDir(p.home, sshIncludeDirRel); err != nil {
+	// Both directories in one call: verified together before either is
+	// created, so a refusal leaves nothing behind.
+	if err := ensureSSHDir(p.home, sshKnownHostsDirRel, sshIncludeDirRel); err != nil {
 		return err
 	}
 	if err := writeFileAtomic(res.knownHostsFile, []byte(res.knownContent), sshFileMode); err != nil {

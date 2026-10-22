@@ -51,7 +51,9 @@ func followTree(t *testing.T, dir string) *Tree {
 func TestTree_FollowLinksDirectoryComponents(t *testing.T) {
 	for _, kind := range []string{"junction", "symlink", "relative-symlink"} {
 		t.Run(kind, func(t *testing.T) {
-			root := t.TempDir()
+			// A directory tree no other principal can write to, like a
+			// profile; FollowLinks checks every existing component.
+			root := replaceDir(t)
 			anchor := filepath.Join(root, "home")
 			real := filepath.Join(root, "dotfiles", "ssh")
 			for _, d := range []string{anchor, real} {
@@ -89,11 +91,109 @@ func TestTree_FollowLinksDirectoryComponents(t *testing.T) {
 	}
 }
 
+// FollowLinks, refusal side (review r2 finding 1, addendum (d)): an
+// EXISTING directory component another principal can write to (Modify) or
+// delete children from (DELETE_CHILD only) is refused with ErrNotPrivate,
+// whether it is reached through a junction or is a plain directory, and
+// nothing is created there. Controls: the same layout once the grant is
+// removed, and a component owned by Administrators (the rule I owner set).
+func TestTree_FollowLinksRefusesForeignWritableComponent(t *testing.T) {
+	for _, grant := range []string{"(OI)(CI)(M)", "(DC)"} {
+		for _, viaLink := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/link=%v", grant, viaLink), func(t *testing.T) {
+				root := replaceDir(t)
+				anchor := filepath.Join(root, "home")
+				target := filepath.Join(root, "shared")
+				for _, d := range []string{anchor, target} {
+					if err := os.MkdirAll(d, 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				comp := filepath.Join(anchor, ".scion")
+				if viaLink {
+					wintest.MustJunction(t, target, comp)
+				} else {
+					target = comp
+					if err := os.Mkdir(comp, 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				wintest.Icacls(t, target, "/grant", "*"+wintest.SIDUsers+":"+grant)
+				err := followTree(t, anchor).MkdirAll(".scion/vscode/user-data", Private)
+				if !errors.Is(err, ErrNotPrivate) || !strings.Contains(err.Error(), wintest.SIDUsers) {
+					t.Fatalf("foreign-writable component (%s): %v, want ErrNotPrivate naming Users", grant, err)
+				}
+				if entries, _ := os.ReadDir(target); len(entries) != 0 {
+					t.Fatalf("created under the refused component: %v", entries)
+				}
+				wintest.Icacls(t, target, "/remove:g", "*"+wintest.SIDUsers)
+				if err := followTree(t, anchor).MkdirAll(".scion/vscode/user-data", Private); err != nil {
+					t.Fatalf("control: without the grant: %v", err)
+				}
+				wintest.SetOwner(t, target, wintest.SIDAdministrators)
+				if err := followTree(t, anchor).MkdirAll(".scion/vscode/user-data", Private); err != nil {
+					t.Fatalf("control: an Administrators-owned component: %v", err)
+				}
+			})
+		}
+	}
+}
+
+// Security-lead ruling (review r2, "accept as residual + warn"): when a
+// followed link's target sits in a parent directory another principal can
+// write to (Modify) or delete children from (DELETE_CHILD), Warn gets ONE
+// message naming that directory and the SID, and the operation still
+// succeeds. Control: a private parent gives no warning.
+func TestTree_FollowLinksWarnsOnMutableTargetParent(t *testing.T) {
+	for _, grant := range []string{"(M)", "(DC)", ""} {
+		t.Run("grant="+grant, func(t *testing.T) {
+			root := replaceDir(t)
+			anchor := filepath.Join(root, "home")
+			parent := filepath.Join(root, "shared")
+			target := filepath.Join(parent, "ssh")
+			for _, d := range []string{anchor, target} {
+				if err := os.MkdirAll(d, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if grant != "" {
+				// Not inheritable: only the parent is foreign-writable;
+				// the target itself passes the component check.
+				wintest.Icacls(t, parent, "/grant", "*"+wintest.SIDUsers+":"+grant)
+			}
+			wintest.MustJunction(t, target, filepath.Join(anchor, ".ssh"))
+			var warnings []string
+			tr, err := OpenTree(anchor, TreeOptions{FollowLinks: true, Warn: func(m string) { warnings = append(warnings, m) }})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = tr.Close() }()
+			for _, rel := range []string{".ssh/config.d", ".ssh/other"} {
+				if err := tr.MkdirAll(rel, Private); err != nil {
+					t.Fatalf("MkdirAll(%s) must still succeed: %v", rel, err)
+				}
+			}
+			if grant == "" {
+				if len(warnings) != 0 {
+					t.Fatalf("control: private parent warned: %v", warnings)
+				}
+				return
+			}
+			if len(warnings) != 1 {
+				t.Fatalf("warnings %v, want exactly one", warnings)
+			}
+			if !strings.Contains(warnings[0], "shared") || !strings.Contains(warnings[0], wintest.SIDUsers) {
+				t.Fatalf("warning %q must name the parent directory and the SID", warnings[0])
+			}
+		})
+	}
+}
+
 // FollowLinks never follows a leaf FILE: a symlink at the leaf is still
 // refused by Create. Control: a regular leaf in the same followed
 // directory is created.
 func TestTree_FollowLinksLeafFileStillRefused(t *testing.T) {
-	root := t.TempDir()
+	root := replaceDir(t)
 	outside := filepath.Join(root, "outside.txt")
 	if err := os.WriteFile(outside, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)

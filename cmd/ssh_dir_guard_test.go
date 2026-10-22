@@ -25,12 +25,13 @@ import (
 // TestEnsureSSHDirOnlyUsesTheHandleWalk: ensureSSHDir makes no path-based
 // open or location decision of its own (review r1 finding 1, brief
 // addendum (b) as revised by the security lead). Its body may call only
-// privatefs.OpenTree (the anchor, home), Tree.MkdirAll (the handle-relative
-// walk, guarded by privatefs's TestTreeWalkIsHandleRelative), Tree.Close
-// and privatefs.ForMode. Anything else (os.MkdirAll, os.Stat,
-// filepath.EvalSymlinks, pathcanon.Within, ...) fails this test.
+// privatefs.OpenTree (the anchor, home), Tree.MkdirAllEach (on Windows the
+// handle-relative walk, guarded by privatefs's TestTreeWalkIsHandleRelative;
+// on unix os.MkdirAll, as before), Tree.Close and privatefs.ForMode.
+// Anything else (os.MkdirAll, os.Stat, filepath.EvalSymlinks,
+// pathcanon.Within, ...) fails this test.
 func TestEnsureSSHDirOnlyUsesTheHandleWalk(t *testing.T) {
-	allowed := map[string]bool{"OpenTree": true, "MkdirAll": true, "Close": true, "ForMode": true}
+	allowed := map[string]bool{"OpenTree": true, "MkdirAllEach": true, "Close": true, "ForMode": true}
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "ssh_config_files.go", nil, 0)
 	if err != nil {
@@ -70,7 +71,7 @@ func TestEnsureSSHDirOnlyUsesTheHandleWalk(t *testing.T) {
 	}
 	sort.Strings(calls)
 	if len(calls) < 3 {
-		t.Fatalf("ensureSSHDir calls %v: expected OpenTree, MkdirAll and Close (the guard would pass vacuously)", calls)
+		t.Fatalf("ensureSSHDir calls %v: expected OpenTree, MkdirAllEach and Close (the guard would pass vacuously)", calls)
 	}
 	if len(bad) > 0 {
 		t.Fatalf("ensureSSHDir may only open home as a privatefs tree and walk it by handle; it calls: %v", bad)

@@ -109,6 +109,19 @@ func (t *Tree) MkdirAll(rel string, p Protection) error {
 	return os.MkdirAll(path, dirMode(p))
 }
 
+// MkdirAllEach creates every rel with p, as MkdirAll does. (The Windows
+// implementation first verifies every existing component of every rel
+// before creating anything; on unix nothing below the anchor is checked,
+// so there is nothing to verify first.)
+func (t *Tree) MkdirAllEach(p Protection, rels ...string) error {
+	for _, rel := range rels {
+		if err := t.MkdirAll(rel, p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Create opens rel for reading and writing, creating it with p if it does
 // not exist (excl: it must not exist). It never follows a symlink at rel.
 // A Private file is also chmodded to 0600, so the umask cannot loosen it

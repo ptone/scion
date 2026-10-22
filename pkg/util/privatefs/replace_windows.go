@@ -54,6 +54,14 @@ import (
 //     writable ssh config is code execution via ProxyCommand. newMode is not
 //     used; the result is always Private.
 //
+// Stated limit (security-lead ruling, win-cli Phase 3b review r2): rule I
+// protects the target, not the mutability of the path to it. Directories
+// above the target's parent are not checked: a live swap is defeated by
+// the handle-based operations above, and a swap between sessions needs a
+// directory that passes rule I, which a non-admin attacker cannot produce.
+// (TreeOptions.Warn reports a followed directory link whose target's
+// parent is writable by another principal.)
+//
 // tempPrefix names the temporary file (tempPrefix + leaf + "-<random>").
 func ReplaceFollowing(path string, data []byte, newMode fs.FileMode, tempPrefix string) error {
 	_ = newMode // POSIX only; see above

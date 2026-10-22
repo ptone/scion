@@ -274,7 +274,9 @@ type vscodeUpdate struct {
 // concurrent runs keep each other's entries. It reports whether u.host had
 // a different pin before.
 func updateVSCodeFiles(p vscodePaths, u vscodeUpdate) (changed bool, err error) {
-	if err := ensureSSHDir(p.home, vscodeDirRel); err != nil {
+	// The settings directory too: both are verified before anything (the
+	// lock file included) is created, so a refusal leaves nothing behind.
+	if err := ensureSSHDir(p.home, vscodeDirRel, vscodeSettingsDirRel); err != nil {
 		return false, fmt.Errorf("creating %s: %w", p.dir(), err)
 	}
 	unlock, err := lockVSCodeDir(p.lockFile())

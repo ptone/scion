@@ -103,10 +103,14 @@ type TreeOptions struct {
 	// FollowLinks follows existing reparse points (symlinks, junctions)
 	// at DIRECTORY components below the anchor instead of refusing them;
 	// components that are missing are created with the protection asked
-	// for. Leaf files are never followed: Create, OpenPrivate, ReadPrivate,
-	// WriteFile, Rename and Remove still refuse a reparse point at the
-	// leaf. On unix it changes nothing (the unix MkdirAll already follows
-	// directory symlinks, and leaves are opened O_NOFOLLOW).
+	// for. On Windows every EXISTING directory component below the anchor,
+	// followed or not, must also pass CheckNoForeignWriters on its handle
+	// (ErrNotPrivate otherwise), so nothing is created or written under a
+	// directory another principal could swap entries in. Leaf files are
+	// never followed: Create, OpenPrivate, ReadPrivate, WriteFile, Rename
+	// and Remove still refuse a reparse point at the leaf. On unix it
+	// changes nothing (the unix MkdirAll already follows directory
+	// symlinks, and leaves are opened O_NOFOLLOW).
 	//
 	// It exists for ~/.ssh (design §3.5 I1, security lead ruling I).
 	// ~/.ssh is deliberately NOT a refuse-reparse tree: dotfile managers
@@ -120,7 +124,23 @@ type TreeOptions struct {
 	// rename; the old security descriptor is never copied (a writable ssh
 	// config is code execution via ProxyCommand). Never use FollowLinks for
 	// a tree that holds secrets.
+	//
+	// Stated limit (security-lead ruling, win-cli Phase 3b review r2):
+	// rule I protects the target, not the mutability of the path to it. A
+	// followed link's target directory is checked, but not the directories
+	// above it. A live swap is defeated by the handle-based operations; a
+	// swap between sessions needs a directory that passes rule I, which a
+	// non-admin attacker cannot produce. Where the target's parent is
+	// writable by another principal, Warn reports it (see Warn); it is not
+	// refused.
 	FollowLinks bool
+
+	// Warn, when not nil, receives a one-line diagnostic, once per
+	// directory, when FollowLinks follows a link whose target's parent
+	// directory grants another principal write or delete-child rights (the
+	// CheckNoForeignWriters rules, owner set included). It never changes
+	// the result of an operation. Windows only; on unix it is not called.
+	Warn func(msg string)
 }
 
 // splitRel validates a path relative to a Tree's anchor and returns its
