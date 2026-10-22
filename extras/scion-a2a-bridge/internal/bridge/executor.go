@@ -181,6 +181,29 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 			}
 		}
 
+		// A federated user gets the hub's decision on the message before
+		// anything about a launch. The hub refuses a message to an agent
+		// that is still launching, so the send cannot be asked yet; the
+		// caller's read of its conversation with the agent
+		// (recheckFederatedUserAccess) is admitted by the same hub check
+		// as the send. A refusal ends the task at once with the uniform
+		// refusal, the same answer as for a running agent, with no launch
+		// step, launch outcome or wait; any other error is a routing
+		// failure. Only a caller the hub allows waits for the launch.
+		if federatedUser && hubclient.LaunchActive(launching) {
+			if err := e.bridge.recheckFederatedUserAccess(ctx, caller, agentCtx.AgentID); err != nil {
+				failMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("Failed to route message to agent"))
+				if isHubRefusal(err) {
+					e.log.Debug("federated user: hub refused the message to a launching agent", "error", err, "task_id", taskID, "agent_id", agentCtx.AgentID)
+					failMsg = federatedUserRefusalMessage()
+				} else {
+					e.log.Error("federated user: access check before the launch wait failed", "error", err, "task_id", taskID, "agent_id", agentCtx.AgentID)
+				}
+				yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, failMsg), nil)
+				return
+			}
+		}
+
 		// An agent still launching (an asynchronous create, or an adopted
 		// agent another client is launching) is waited for before the
 		// send. This runs before the execution lease is claimed, so no
@@ -208,7 +231,11 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 			}
 			if waitErr != nil {
 				e.log.Warn("agent did not start; message not sent", "error", waitErr, "task_id", taskID, "agent_id", agentCtx.AgentID)
-				failMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart(launchFailureText(waitErr)))
+				failText := launchFailureText(waitErr)
+				if federatedUser {
+					failText = federatedUserLaunchFailureText(waitErr)
+				}
+				failMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart(failText))
 				yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, failMsg), nil)
 				return
 			}

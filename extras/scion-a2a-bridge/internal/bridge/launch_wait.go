@@ -146,6 +146,25 @@ func launchFailureText(err error) string {
 	return "Could not confirm that the agent started: " + err.Error()
 }
 
+// federatedUserLaunchFailureText is launchFailureText for a federated
+// user: the launch outcome code (or phase) only. The outcome message and
+// a read error come from the bridge's own read of the agent and are not
+// shown to a caller from another issuer.
+func federatedUserLaunchFailureText(err error) string {
+	var notRunning *hubclient.LaunchNotRunningError
+	if errors.As(err, &notRunning) {
+		label := notRunning.Outcome.Code
+		if label == "" {
+			label = "phase: " + notRunning.Outcome.Phase
+		}
+		return "Agent failed to start (" + label + ")"
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return "Request cancelled while waiting for the agent to start"
+	}
+	return "Could not confirm that the agent started"
+}
+
 // launchKeepAliveInterval is how often a legacy task waiting for a launch is
 // touched (TouchTask), so the stale-task reaper (updated_at older than
 // twice the send timeout, see janitor) does not fail it during a long
