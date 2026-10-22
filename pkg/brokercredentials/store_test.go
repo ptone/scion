@@ -176,14 +176,12 @@ func TestStore_LoadValidation(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			// Write invalid content directly
-			err := os.WriteFile(credPath, []byte(tc.content), 0600)
-			if err != nil {
-				t.Fatalf("Failed to write test file: %v", err)
-			}
+			// Write the content directly, as a private file (mode 0600; on
+			// Windows an owner-only ACL) so only the content is under test.
+			writePrivateFixture(t, credPath, []byte(tc.content))
 
 			store := NewStore(credPath)
-			_, err = store.Load()
+			_, err := store.Load()
 			if tc.expectErr && err == nil {
 				t.Error("Expected error but got nil")
 			}
@@ -373,14 +371,20 @@ func writeStoreFixture(t *testing.T, store *Store, creds *BrokerCredentials) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// As the broker writes it: a private file (mode 0600; on Windows an
-	// owner-only ACL) in a directory created private.
-	tree, err := privatefs.OpenTree(filepath.Dir(store.Path()), privatefs.TreeOptions{CreateAnchor: true})
+	writePrivateFixture(t, store.Path(), data)
+}
+
+// writePrivateFixture writes data to path as the broker writes its
+// credentials: a private file (mode 0600; on Windows an owner-only ACL) in
+// a directory created private.
+func writePrivateFixture(t *testing.T, path string, data []byte) {
+	t.Helper()
+	tree, err := privatefs.OpenTree(filepath.Dir(path), privatefs.TreeOptions{CreateAnchor: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = tree.Close() }()
-	if err := tree.WriteFile(filepath.Base(store.Path()), data, privatefs.ForMode(FileMode)); err != nil {
+	if err := tree.WriteFile(filepath.Base(path), data, privatefs.ForMode(FileMode)); err != nil {
 		t.Fatal(err)
 	}
 }

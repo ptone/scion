@@ -38,7 +38,7 @@ func readCredentialsFile(path string) ([]byte, error) {
 	defer func() { _ = tree.Close() }()
 	data, err := tree.ReadPrivate(filepath.Base(path), 0)
 	if errors.Is(err, privatefs.ErrNotPrivate) {
-		return nil, fmt.Errorf("refusing to read broker credentials from %s: %w. Delete the file and register the broker again: scion recreates it with an owner-only ACL", path, err)
+		return nil, fmt.Errorf("refusing to read broker credentials from %s: %w. Delete the file and register the broker again", path, err)
 	}
 	return data, err
 }
