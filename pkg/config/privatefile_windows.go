@@ -58,12 +58,16 @@ func sourceProtection(f *os.File) privatefs.Protection {
 }
 
 // protectionForCheck maps a privatefs.CheckPrivate result to the copy's
-// protection, failing closed: Inherit only for a source shown not to be
-// private (an error wrapping privatefs.ErrNotPrivate); Private when it
-// passes and for any other error, such as a descriptor that cannot be read
-// at all (review r2 #2).
+// protection: Inherit for an error wrapping privatefs.ErrNotPrivate, and
+// Private when the check passes or fails with any other error (review r2
+// #2). Note what ErrNotPrivate covers: privatefs classifies a security
+// descriptor or owner it cannot read (GetSecurityInfo or the owner lookup
+// failing) as ErrNotPrivate, so that case yields Inherit, as design §3.5
+// says ("Private if it passes, else Inherit"). Only the errors privatefs
+// does not wrap that way (the DACL or an ACE cannot be read, the process
+// identity cannot be built) fail closed to Private.
 func protectionForCheck(err error) privatefs.Protection {
-	if err != nil && errors.Is(err, privatefs.ErrNotPrivate) {
+	if errors.Is(err, privatefs.ErrNotPrivate) {
 		return privatefs.Inherit
 	}
 	return privatefs.Private

@@ -443,9 +443,11 @@ func TestWindowsCopySettingsBackup_DecisionFromReadHandle(t *testing.T) {
 	wintest.AssertPrivateSD(t, filepath.Join(dir, "open.yaml.bak"))
 }
 
-// Rows C10, C11, review r2 #2: the copy's protection fails closed. Only a
-// CheckPrivate error wrapping ErrNotPrivate yields Inherit; a pass and any
-// other error (a descriptor that cannot be read at all) yield Private.
+// Rows C10, C11, review r2 #2: only a CheckPrivate error wrapping
+// ErrNotPrivate yields Inherit. That includes a descriptor or owner privatefs
+// cannot read, which it classifies as ErrNotPrivate (the case is built in
+// securityOf's shape). A pass and the errors privatefs does not wrap (DACL
+// or ACE read errors) fail closed to Private.
 func TestWindowsProtectionForCheck_FailsClosed(t *testing.T) {
 	for _, c := range []struct {
 		name string
@@ -454,7 +456,8 @@ func TestWindowsProtectionForCheck_FailsClosed(t *testing.T) {
 	}{
 		{"passes", nil, privatefs.Private},
 		{"not private", fmt.Errorf("x grants access to S-1-5-32-545: %w", privatefs.ErrNotPrivate), privatefs.Inherit},
-		{"unreadable descriptor", fmt.Errorf("read the DACL of x: %w", windows.ERROR_ACCESS_DENIED), privatefs.Private},
+		{"descriptor unreadable (classified ErrNotPrivate by privatefs)", fmt.Errorf("%w: cannot read the security descriptor of x: %w", privatefs.ErrNotPrivate, windows.ERROR_ACCESS_DENIED), privatefs.Inherit},
+		{"DACL read error", fmt.Errorf("read the DACL of x: %w", windows.ERROR_ACCESS_DENIED), privatefs.Private},
 		{"other error", errors.New("boom"), privatefs.Private},
 	} {
 		if got := protectionForCheck(c.err); got != c.want {

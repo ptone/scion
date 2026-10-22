@@ -50,8 +50,11 @@ One durability-only change, not security-related (review r2 #1): `writeConflictB
 
 ## Review round 2 (win-cli-rev-p3a-r2, APPROVE)
 
-- **#1, fixed (docs).** The new `writeConflictBackup` fsync is declared as a unix change.
-- **#2, adopted (fail closed).** `sourceProtection` (C10, C11) returns Inherit only for a `CheckPrivate` error wrapping `ErrNotPrivate`. It returns Private on a pass and on any other error, such as an unreadable descriptor. Test: `TestWindowsProtectionForCheck_FailsClosed`, a table test of the mapping helper `protectionForCheck`.
+- **#1, fixed (docs).** The new `writeConflictBackup` fsync (shared code, so on every OS) is declared.
+- **#2, adopted.** `sourceProtection` (C10, C11) returns Inherit only for a `CheckPrivate` error wrapping `ErrNotPrivate`. It returns Private on a pass and on any other error. Test: `TestWindowsProtectionForCheck_FailsClosed`, a table test of the mapping helper `protectionForCheck`.
+  - **Caveat (review r3 R1).** privatefs classifies a security descriptor or owner it cannot read as `ErrNotPrivate`, so that case yields Inherit, as design §3.5 says.
+  - Only DACL, ACE and identity errors, which privatefs does not wrap that way, fail closed to Private.
+  - privatefs is unchanged (owned by 3b).
 - **#3-#5, FYI, accepted:** C11 follows a reparse leaf, as unix does; the C5 Inherit path renames its non-secret temp by name, as design row C5 sanctions; the X3 control note.
 
 ## Open issues / follow-ups
