@@ -776,3 +776,93 @@ func TestExtract_SymlinkThenEntryThroughItToExclude(t *testing.T) {
 		t.Errorf("result = %+v, want 2 unsafe", res)
 	}
 }
+
+// Writing stops before the destination's file system would drop below the
+// free space floor; the check runs before the first file, after every
+// freeCheckInterval bytes and before any file that large.
+func TestExtract_FreeSpaceFloor(t *testing.T) {
+	var checks int
+	var avail int64
+	orig := freeSpace
+	freeSpace = func(string) (int64, bool) { checks++; return avail, true }
+	defer func() { freeSpace = orig }()
+
+	t.Run("refused before the first file", func(t *testing.T) {
+		l := newLayout(t)
+		checks, avail = 0, 100
+		_, err := extract(t, l.dest, Options{MinFreeBytes: 100}, file("./a", "x"))
+		if !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "free") {
+			t.Fatalf("err = %v, want free space refusal", err)
+		}
+		if _, err := os.Lstat(filepath.Join(l.dest, "a")); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("file written below the floor (err %v)", err)
+		}
+	})
+	t.Run("small files share a check", func(t *testing.T) {
+		l := newLayout(t)
+		checks, avail = 0, 1<<40
+		if _, err := extract(t, l.dest, Options{}, file("./a", "x"), file("./b", "y"), file("./c", "z")); err != nil {
+			t.Fatal(err)
+		}
+		if checks != 1 {
+			t.Errorf("checks = %d, want 1", checks)
+		}
+	})
+	t.Run("disabled", func(t *testing.T) {
+		l := newLayout(t)
+		checks, avail = 0, 0
+		if _, err := extract(t, l.dest, Options{MinFreeBytes: -1}, file("./a", "x")); err != nil {
+			t.Fatal(err)
+		}
+		if checks != 0 {
+			t.Errorf("checks = %d, want 0", checks)
+		}
+	})
+	t.Run("default floor", func(t *testing.T) {
+		l := newLayout(t)
+		checks, avail = 0, DefaultMinFreeBytes
+		if _, err := extract(t, l.dest, Options{}, file("./a", "x")); !errors.Is(err, ErrRefused) {
+			t.Fatalf("err = %v, want refusal at the default floor", err)
+		}
+	})
+}
+
+// A large file is checked on its own, even right after another check.
+func TestExtractor_CheckFreeLargeFile(t *testing.T) {
+	var checks int
+	orig := freeSpace
+	freeSpace = func(string) (int64, bool) { checks++; return 1 << 40, true }
+	defer func() { freeSpace = orig }()
+	x := &extractor{minFree: 1, sinceCheck: -1}
+	for _, size := range []int64{1, 1, freeCheckInterval, 1, freeCheckInterval - 2, 1} {
+		if err := x.checkFree(size); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 1: first check. 1: shared. interval: its own check, which counts
+	// interval bytes. 1: reaches the interval again, check. interval-2:
+	// shared (total interval-1). 1: reaches the interval, check.
+	if checks != 4 {
+		t.Errorf("checks = %d, want 4", checks)
+	}
+	freeSpace = func(string) (int64, bool) { return 0, false }
+	x = &extractor{minFree: 1 << 40, sinceCheck: -1}
+	if err := x.checkFree(1); err != nil {
+		t.Errorf("unknown free space refused: %v", err)
+	}
+}
+
+// Skip reasons quote names from the archive.
+func TestExtract_SkipReasonsQuoteNames(t *testing.T) {
+	l := newLayout(t)
+	res, err := extract(t, l.dest, Options{},
+		symlink("./l\x1b[2J", "AGENTS.md"),
+		file("./l\x1b[2J/f", "x"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Unsafe) != 1 || strings.ContainsRune(res.Unsafe[0].Reason, 0x1b) {
+		t.Errorf("unsafe = %q, want one reason with the name quoted", res.Unsafe)
+	}
+}

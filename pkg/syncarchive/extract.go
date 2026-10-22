@@ -48,7 +48,9 @@
 //     is skipped and reported: the extractor never writes through a link.
 //
 // The archive is bounded by entry count and by the total size of entry
-// contents; exceeding either refuses the rest of the archive.
+// contents, and writing stops before the destination's file system would
+// drop below a free space floor; any of these refuses the rest of the
+// archive.
 package syncarchive
 
 import (
@@ -68,10 +70,17 @@ import (
 
 const (
 	// DefaultMaxEntries is the entry limit used when Options.MaxEntries is 0.
-	DefaultMaxEntries = 2_000_000
+	DefaultMaxEntries = 1_000_000
 	// DefaultMaxBytes is the content size limit used when Options.MaxBytes
 	// is 0.
-	DefaultMaxBytes int64 = 64 << 30
+	DefaultMaxBytes int64 = 16 << 30
+	// DefaultMinFreeBytes is the free space floor used when
+	// Options.MinFreeBytes is 0.
+	DefaultMinFreeBytes int64 = 2 << 30
+
+	// freeCheckInterval is how many bytes may be written between two free
+	// space checks; a file at least this large is checked on its own.
+	freeCheckInterval int64 = 64 << 20
 
 	// maxReported caps the number of skipped entries kept in Result.Unsafe.
 	maxReported = 50
@@ -106,7 +115,17 @@ type Options struct {
 	// MaxBytes limits the summed content size of all entries; 0 means
 	// DefaultMaxBytes.
 	MaxBytes int64
+	// MinFreeBytes is the free space the destination's file system must
+	// keep after each file is written; 0 means DefaultMinFreeBytes, a
+	// negative value disables the check. Free space is checked before the
+	// first file, then at least every freeCheckInterval bytes, and before
+	// any file that large.
+	MinFreeBytes int64
 }
+
+// freeSpace reports the bytes available to this process on the file
+// system holding dir, and whether it could tell. Tests replace it.
+var freeSpace = availableBytes
 
 // Skip records an entry that was not written, with the reason.
 type Skip struct {
@@ -182,7 +201,11 @@ func Extract(r io.Reader, dest string, opts Options) (Result, error) {
 		}
 	}
 
-	x := &extractor{root: root, res: &res, excludes: excludes}
+	minFree := opts.MinFreeBytes
+	if minFree == 0 {
+		minFree = DefaultMinFreeBytes
+	}
+	x := &extractor{root: root, dest: dest, res: &res, excludes: excludes, minFree: minFree, sinceCheck: -1}
 	tr := tar.NewReader(r)
 	var entries int
 	var total int64
@@ -216,8 +239,34 @@ func Extract(r io.Reader, dest string, opts Options) (Result, error) {
 
 type extractor struct {
 	root     *os.Root
+	dest     string
 	res      *Result
 	excludes [][]string
+	// minFree is the free space floor (negative: no check); sinceCheck
+	// counts bytes written since the last check (-1: none yet).
+	minFree    int64
+	sinceCheck int64
+}
+
+// checkFree refuses a file of size bytes if writing it could leave the
+// destination's file system with less than minFree bytes available.
+func (x *extractor) checkFree(size int64) error {
+	if x.minFree < 0 {
+		return nil
+	}
+	if x.sinceCheck >= 0 && x.sinceCheck+size < freeCheckInterval {
+		x.sinceCheck += size
+		return nil
+	}
+	avail, ok := freeSpace(x.dest)
+	if !ok {
+		return nil
+	}
+	if avail-size < x.minFree {
+		return fmt.Errorf("%w: writing it would leave less than %d bytes free in the destination", ErrRefused, x.minFree)
+	}
+	x.sinceCheck = size
+	return nil
 }
 
 // entryName validates an archive member name and returns its components
@@ -368,10 +417,10 @@ func (x *extractor) parents(parts []string, rel string) (bool, error) {
 		case err != nil:
 			return false, fmt.Errorf("inspect %s: %w", p, err)
 		case fi.Mode()&fs.ModeSymlink != 0:
-			x.res.unsafe(rel, "parent "+p+" is a symbolic link")
+			x.res.unsafe(rel, fmt.Sprintf("parent %q is a symbolic link", p))
 			return false, nil
 		case !fi.IsDir():
-			x.res.unsafe(rel, "parent "+p+" is not a directory")
+			x.res.unsafe(rel, fmt.Sprintf("parent %q is not a directory", p))
 			return false, nil
 		}
 	}
@@ -431,6 +480,9 @@ func (x *extractor) place(tmp, rel string) error {
 func (x *extractor) file(tr *tar.Reader, parts []string, rel string, hdr *tar.Header) error {
 	ok, err := x.parents(parts, rel)
 	if err != nil || !ok {
+		return err
+	}
+	if err := x.checkFree(hdr.Size); err != nil {
 		return err
 	}
 	tmp, err := tempName(rel)

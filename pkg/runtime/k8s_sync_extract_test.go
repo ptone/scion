@@ -259,3 +259,27 @@ func TestExtractPodArchive_SymlinkThenEntryThroughIt(t *testing.T) {
 		t.Errorf("result = %+v, want 3 links skipped and 4 in-tree files", res)
 	}
 }
+
+// Skipped entry names from the pod are printed quoted, so control
+// characters in them cannot reach the terminal.
+func TestReportSkippedSyncEntries_QuotesNames(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stdout
+	os.Stdout = w
+	reportSkippedSyncEntries(syncarchive.Result{
+		UnsafeCount: 2,
+		Unsafe:      []syncarchive.Skip{{Name: "evil\x1b[2J\nWARN forged", Reason: "FIFO"}},
+	})
+	os.Stdout = orig
+	_ = w.Close()
+	out, _ := io.ReadAll(r)
+	if strings.ContainsRune(string(out), 0x1b) || strings.Contains(string(out), "\nWARN forged") {
+		t.Errorf("unquoted name printed: %q", out)
+	}
+	if !strings.Contains(string(out), `"evil\x1b[2J\nWARN forged": FIFO`) || !strings.Contains(string(out), "and 1 more") {
+		t.Errorf("output = %q", out)
+	}
+}

@@ -3807,7 +3807,9 @@ func reportSkippedSyncEntries(res syncarchive.Result) {
 	}
 	fmt.Printf("  Warning: %d entries were not copied (only regular files, directories and links inside the workspace are):\n", res.UnsafeCount)
 	for _, s := range res.Unsafe {
-		fmt.Printf("    %s: %s\n", s.Name, s.Reason)
+		// Names come from the pod; quote them so control characters
+		// cannot rewrite the terminal or forge log lines.
+		fmt.Printf("    %q: %s\n", s.Name, s.Reason)
 	}
 	if more := res.UnsafeCount - len(res.Unsafe); more > 0 {
 		fmt.Printf("    ... and %d more\n", more)
