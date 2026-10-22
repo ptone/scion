@@ -296,7 +296,7 @@ safe stops the command rather than being ignored.
   as `none`/`checkout`/`rebase`/`merge`, `submodule.<name>.url` **only** for an `https`/`ssh` remote.
   A few keys that would run a command are allowed here only because a fixed command-line setting
   overrides them on every call (`core.hooksPath`, `core.fsmonitor`, `core.pager`,
-  `submodule.recurse`), so a planted value never executes.
+  `submodule.recurse`), so such a repository value never runs a command.
 - **Refused on both** (so an agent cannot make the broker's or your own git run a command): any
   `credential.*`, `url.*.insteadOf`, `http.*`, `gpg.*` program/signing-file keys, any `*.program`,
   `alias.*`, `core.sshCommand`/`editor`, a remote's `uploadpack`/`receivepack`/`proxy`, diff/merge
