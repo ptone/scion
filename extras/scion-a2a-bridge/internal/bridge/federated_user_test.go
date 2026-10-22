@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -357,6 +358,9 @@ type fedUserHub struct {
 	// nil); agentGets records the IDs read.
 	agentGet  map[string]interface{}
 	agentGets []string
+	// order records, in arrival order, the caller's DM reads ("dm-read"),
+	// the admin agent reads ("agent-get") and the sends ("send").
+	order []string
 }
 
 type fedUserHubSend struct {
@@ -443,6 +447,7 @@ func newFedUserHub(t *testing.T, userToken string) *fedUserHub {
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			agentID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/agents/"), "/message")
 			h.sent = append(h.sent, fedUserHubSend{AgentID: agentID, Body: body, FedToken: fedToken})
+			h.order = append(h.order, "send")
 			if h.sendStatus != 0 {
 				writeHubError(w, h.sendStatus)
 				return
@@ -451,6 +456,7 @@ func newFedUserHub(t *testing.T, userToken string) *fedUserHub {
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/agents/") && !strings.Contains(strings.TrimPrefix(r.URL.Path, "/api/v1/agents/"), "/"):
 			// Bridge admin agent read (the launch wait).
 			h.agentGets = append(h.agentGets, strings.TrimPrefix(r.URL.Path, "/api/v1/agents/"))
+			h.order = append(h.order, "agent-get")
 			if h.agentGet == nil {
 				writeHubError(w, http.StatusNotFound)
 				return
@@ -460,6 +466,7 @@ func newFedUserHub(t *testing.T, userToken string) *fedUserHub {
 			key := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/chat/conversations/"), "/messages")
 			h.dmReadKeys = append(h.dmReadKeys, key)
 			h.dmReadTokens = append(h.dmReadTokens, fedToken)
+			h.order = append(h.order, "dm-read")
 			if fedToken != h.userToken {
 				writeHubError(w, http.StatusForbidden)
 				return
@@ -494,6 +501,7 @@ type fedUserHubCalls struct {
 	dmReadTokens []string
 	createCalls  int
 	agentGets    []string
+	order        []string
 }
 
 func (h *fedUserHub) snapshot() fedUserHubCalls {
@@ -509,6 +517,7 @@ func (h *fedUserHub) snapshot() fedUserHubCalls {
 		dmReadTokens: append([]string(nil), h.dmReadTokens...),
 		createCalls:  h.createCalls,
 		agentGets:    append([]string(nil), h.agentGets...),
+		order:        append([]string(nil), h.order...),
 	}
 }
 
@@ -1995,6 +2004,9 @@ func TestExecutor_FederatedUserLaunchingAgentAllowedWaits(t *testing.T) {
 	if len(snap.agentGets) == 0 {
 		t.Errorf("the bridge did not wait for the launch (no read of the agent)")
 	}
+	if dm, get := slices.Index(snap.order, "dm-read"), slices.Index(snap.order, "agent-get"); dm < 0 || get < 0 || dm > get {
+		t.Errorf("hub requests in order %v, want the caller's DM read before the first agent read", snap.order)
+	}
 	if sent.AgentID != fedUserAgentID {
 		t.Errorf("send went to agent %q, want %q", sent.AgentID, fedUserAgentID)
 	}
@@ -2013,6 +2025,51 @@ func TestExecutor_FederatedUserLaunchingAgentAllowedWaits(t *testing.T) {
 	}
 	if !strings.Contains(body, fedUserReplyText) {
 		t.Fatalf("response does not carry the agent's reply; body %s", body)
+	}
+}
+
+// TestExecutor_FederatedUserLaunchingAgentSendRefusedAfterWait: the hub
+// allows the federated user at the check before the launch wait, the agent
+// starts, and the hub then refuses the send (for example, the grant was
+// revoked during the wait). The task ends with the uniform refusal, no reply
+// is forwarded, and no launch outcome is shown. The launch progress the
+// caller saw while the hub allowed it stays in the task history.
+func TestExecutor_FederatedUserLaunchingAgentSendRefusedAfterWait(t *testing.T) {
+	token := fedUserToken(t)
+	hub := newFedUserHub(t, token)
+	hub.set(func(h *fedUserHub) {
+		h.adminAgents = []map[string]interface{}{fedUserLaunchingAgent()}
+		h.agentGet = map[string]interface{}{
+			"id": fedUserAgentID, "name": "agent1", "slug": "agent1", "projectId": fedUserProjectID, "phase": "running", "status": "running",
+			"launch": map[string]interface{}{"id": "launch-1", "state": "ended", "kind": "create"},
+		}
+		h.sendStatus = http.StatusForbidden
+	})
+	b, _, ts := newFedUserTestServer(t, hub)
+	b.launchPollInterval = 5 * time.Millisecond
+
+	done := sendAsync(t, ts, "agent1", token)
+	waitForSend(t, hub)
+	deliverReply(t, b)
+
+	status, body := awaitResult(t, done)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", status, body)
+	}
+	if state, texts := fedUserTaskOutcome(t, body); state != string(a2a.TaskStateFailed) || !slices.Contains(texts, federatedUserRefusalText) {
+		t.Errorf("answer (%s, %q), want failed with the uniform refusal %q", state, texts, federatedUserRefusalText)
+	}
+	if strings.Contains(body, fedUserReplyText) {
+		t.Errorf("reply forwarded although the hub refused the send; body %s", body)
+	}
+	for _, banned := range []string{"Agent failed to start", "Could not confirm that the agent started", "Request cancelled while waiting"} {
+		if strings.Contains(body, banned) {
+			t.Errorf("response contains launch text %q; body %s", banned, body)
+		}
+	}
+	snap := hub.snapshot()
+	if len(snap.dmReadKeys) == 0 || len(snap.agentGets) == 0 || len(snap.sent) != 1 {
+		t.Errorf("DM reads %v, agent reads %v, %d sends; want the check, the launch wait and one send", snap.dmReadKeys, snap.agentGets, len(snap.sent))
 	}
 }
 
