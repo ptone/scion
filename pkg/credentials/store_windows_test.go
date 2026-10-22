@@ -39,6 +39,7 @@ var testToken = &TokenResponse{AccessToken: "tok", ExpiresIn: time.Hour}
 // Control: the same file loads while it is private.
 func TestLoad_RefusesUsersReadableCredentials(t *testing.T) {
 	path := useTempCredentials(t)
+	captureNotices(t)
 	if err := Store("https://hub.example.com", testToken); err != nil {
 		t.Fatal(err)
 	}
@@ -88,6 +89,7 @@ func TestStore_WritesPrivateAndReplacesTooOpenFile(t *testing.T) {
 	orig := credentialsPath
 	credentialsPath = func() string { return path }
 	t.Cleanup(func() { credentialsPath = orig })
+	captureNotices(t)
 
 	if err := Store("https://hub.example.com", testToken); err != nil {
 		t.Fatal(err)
@@ -102,5 +104,81 @@ func TestStore_WritesPrivateAndReplacesTooOpenFile(t *testing.T) {
 	wintest.AssertPrivateSD(t, path)
 	if _, err := os.Stat(path); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Design §7 for row C1r: the read paths (GetAccessToken, IsAuthenticated,
+// Load) report "not logged in" for a refused credentials file, so the
+// refusal with its fix hint is printed on stderr, once per process.
+// Control: a private file prints nothing.
+func TestReadPaths_PrintRefusalOnceForUsersReadableCredentials(t *testing.T) {
+	path := useTempCredentials(t)
+	buf := captureNotices(t)
+	if err := Store("https://hub.example.com", testToken); err != nil {
+		t.Fatal(err)
+	}
+	if GetAccessToken("https://hub.example.com") != "tok" || !IsAuthenticated("https://hub.example.com") {
+		t.Fatal("control: the private file did not load")
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("control: a private file printed %q", buf.String())
+	}
+
+	wintest.MakeUsersReadable(t, path)
+	if tok := GetAccessToken("https://hub.example.com"); tok != "" {
+		t.Fatalf("GetAccessToken of a refused file = %q, want empty", tok)
+	}
+	if IsAuthenticated("https://hub.example.com") {
+		t.Fatal("IsAuthenticated is true for a refused file")
+	}
+	if _, err := Load("https://hub.example.com"); !errors.Is(err, privatefs.ErrNotPrivate) {
+		t.Fatalf("Load = %v, want ErrNotPrivate", err)
+	}
+	out := buf.String()
+	if n := strings.Count(out, "refusing to read credentials"); n != 1 {
+		t.Fatalf("refusal printed %d times, want once: %q", n, out)
+	}
+	for _, want := range []string{path, "Delete the file", "scion hub auth login", "other hubs"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printed refusal %q does not mention %q", out, want)
+		}
+	}
+	if !wintest.ReadSD(t, path).HasAllowACE(wintest.SIDUsers) {
+		t.Error("the refused file was modified by a read path")
+	}
+}
+
+// Row C1r, decision D3: a login over a refused credentials file warns that
+// the file is replaced and other hubs' logins must be repeated.
+// Control: a login over a private file warns nothing.
+func TestStore_WarnsWhenReplacingRefusedCredentials(t *testing.T) {
+	path := useTempCredentials(t)
+	buf := captureNotices(t)
+	if err := Store("https://hub.example.com", testToken); err != nil {
+		t.Fatal(err)
+	}
+	if err := Store("https://other.example.com", testToken); err != nil {
+		t.Fatal(err)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("control: a login over a private file printed %q", buf.String())
+	}
+
+	wintest.MakeUsersReadable(t, path)
+	if err := Store("https://third.example.com", testToken); err != nil {
+		t.Fatalf("Store over a refused file: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{path, "not private", "replaced", "other hubs", "scion hub auth login"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("login warning %q does not mention %q", out, want)
+		}
+	}
+	wintest.AssertPrivateSD(t, path)
+	if IsAuthenticated("https://hub.example.com") {
+		t.Error("a login from the replaced file survived; the refused file must not be read")
+	}
+	if !IsAuthenticated("https://third.example.com") {
+		t.Error("the new login is missing")
 	}
 }

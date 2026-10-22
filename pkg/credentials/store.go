@@ -101,7 +101,8 @@ func Store(hubURL string, token *TokenResponse) error {
 
 	path := credentialsPath()
 
-	creds, _ := loadFile(path)
+	creds, err := loadFile(path)
+	warnReplacingRefused(path, err)
 	if creds == nil {
 		creds = &Credentials{Version: 1, Hubs: make(map[string]*HubCredentials)}
 	}
@@ -134,6 +135,7 @@ func Load(hubURL string) (*HubCredentials, error) {
 	path := credentialsPath()
 	creds, err := loadFile(path)
 	if err != nil {
+		reportRefusal(err)
 		return nil, err
 	}
 

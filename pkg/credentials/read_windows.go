@@ -29,7 +29,9 @@ import (
 // it and logs in again, and the next save creates it with an owner-only
 // ACL. Its contents are never read, so a login (Store) replaces it with a
 // file holding only the new hub: logins to other hubs must be repeated,
-// which the refusal says. A missing file reads as fs.ErrNotExist.
+// which the refusal says. The read paths print the refusal on stderr once
+// per process, and a login over a refused file warns before replacing it
+// (see notice.go). A missing file reads as fs.ErrNotExist.
 func readCredentialsFile(path string) ([]byte, error) {
 	tree, err := privatefs.OpenTree(filepath.Dir(path), privatefs.TreeOptions{})
 	if err != nil {
