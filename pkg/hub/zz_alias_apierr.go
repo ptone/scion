@@ -104,6 +104,7 @@ const (
 	ErrCodeSubjectNotFound                  = apierr.ErrCodeSubjectNotFound
 	ErrCodeTargetRoleProtected              = apierr.ErrCodeTargetRoleProtected
 	ErrCodeTemplateConflict                 = apierr.ErrCodeTemplateConflict
+	ErrCodeTemplateUnavailable              = apierr.ErrCodeTemplateUnavailable
 	ErrCodeThreadProjectRequired            = apierr.ErrCodeThreadProjectRequired
 	ErrCodeUnauthorized                     = apierr.ErrCodeUnauthorized
 	ErrCodeUnavailable                      = apierr.ErrCodeUnavailable
