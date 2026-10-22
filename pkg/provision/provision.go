@@ -2236,7 +2236,10 @@ func SafeGitCommand(ctx context.Context, dir string, args ...string) (*util.Host
 	}
 
 	env := append(util.HostGitEnv(os.Environ()), "GIT_COMMON_DIR="+filepath.Join(dir, ".git"))
-	return util.HostGitCommand(ctx, dir, util.HostGitOptions{Env: env}, args...)
+	// Managed base: a worktree add checks out files, but agents fetch LFS
+	// objects in-container, so skip the host-side LFS smudge rather than let
+	// git-lfs read a tracked .lfsconfig for its endpoint.
+	return util.HostGitCommand(ctx, dir, util.HostGitOptions{Env: env, SkipLFSSmudge: true}, args...)
 }
 
 // markedWorkspaceNeedsClone reports whether a shared-plain git workspace that

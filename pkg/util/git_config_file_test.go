@@ -117,3 +117,20 @@ func TestParseGitConfigFile_SubsectionCase(t *testing.T) {
 		t.Errorf("quoted subsection = %q, want case kept", vars[1].Subsection)
 	}
 }
+
+// An empty quoted subsection [x ""] is distinct from [x] (R-1).
+func TestParseGitConfigFile_EmptyQuotedSubsection(t *testing.T) {
+	vars, err := parseGitConfigFile([]byte("[x \"\"]\n\ty = 1\n[x]\n\ty = 2\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vars) != 2 {
+		t.Fatalf("parsed %d vars, want 2: %#v", len(vars), vars)
+	}
+	if !vars[0].HasSubsection || vars[0].Subsection != "" || vars[0].Key() != "x..y" {
+		t.Errorf("[x \"\"] y: HasSubsection=%v sub=%q key=%q, want true/\"\"/x..y", vars[0].HasSubsection, vars[0].Subsection, vars[0].Key())
+	}
+	if vars[1].HasSubsection || vars[1].Key() != "x.y" {
+		t.Errorf("[x] y: HasSubsection=%v key=%q, want false/x.y", vars[1].HasSubsection, vars[1].Key())
+	}
+}

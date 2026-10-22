@@ -18,11 +18,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -123,9 +127,9 @@ func TestParseGitConfigList(t *testing.T) {
 	out := []byte("global\x00user.name\nA B\x00local\x00filter.My.Driver.smudge\nx\ny\x00local\x00core.flag\x00")
 	got := parseGitConfigList(out)
 	want := []gitConfigEntry{
-		{scope: "global", key: "user.name", value: "A B"},
-		{scope: "local", key: "filter.My.Driver.smudge", value: "x\ny"},
-		{scope: "local", key: "core.flag", value: ""},
+		{scope: "global", key: "user.name", value: "A B", hasValue: true},
+		{scope: "local", key: "filter.My.Driver.smudge", value: "x\ny", hasValue: true},
+		{scope: "local", key: "core.flag", value: "", hasValue: false},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("parseGitConfigList = %#v, want %#v", got, want)
@@ -889,5 +893,226 @@ func TestGpgSignPinnedOff(t *testing.T) {
 		if !strings.Contains(args, "\x00"+want+"\x00") {
 			t.Errorf("args lack -c %q: %q", want, cmd.Args)
 		}
+	}
+}
+
+// O-1: a valueless boolean key in .git/config ([core] symlinks) must pass
+// the cross-check (git lists it with no value; the parser stores "true").
+func TestHostGitCommand_ValuelessBooleanKey(t *testing.T) {
+	repo, _ := newHostGitRepo(t)
+	gitDir := hostRunGit(t, repo, "rev-parse", "--absolute-git-dir")
+	data, err := os.ReadFile(filepath.Join(gitDir, "config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A bare boolean with no value, in a legal hand-written form.
+	data = append(data, []byte("[core]\n\tsymlinks\n")...)
+	if err := os.WriteFile(filepath.Join(gitDir, "config"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := HostGitCommand(context.Background(), repo, HostGitOptions{Policy: RepoPolicyManaged}, "status"); err != nil {
+		t.Fatalf("valueless boolean refused: %v", err)
+	}
+}
+
+// R-2: config.worktree is checked even with extensions.worktreeConfig OFF
+// (fail closed), in both the main worktree and a linked worktree, and the
+// subset check tolerates an allowed key git ignores.
+func TestHostGitCommand_ConfigWorktreeAlwaysChecked(t *testing.T) {
+	writeWT := func(gitDir, body string) {
+		if err := os.WriteFile(filepath.Join(gitDir, "config.worktree"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Run("main worktree, extension off, refused key", func(t *testing.T) {
+		repo, _ := newHostGitRepo(t)
+		gitDir := hostRunGit(t, repo, "rev-parse", "--absolute-git-dir")
+		writeWT(gitDir, "[core]\n\tsshCommand = ssh -v\n")
+		_, err := HostGitCommand(context.Background(), repo, HostGitOptions{Policy: RepoPolicyLinked}, "status")
+		var refused *RepoConfigRefusedError
+		if !errors.As(err, &refused) || !strings.EqualFold(refused.Key, "core.sshCommand") {
+			t.Fatalf("error = %v, want core.sshCommand refused (extension off)", err)
+		}
+	})
+	t.Run("main worktree, extension off, allowed key tolerated", func(t *testing.T) {
+		repo, _ := newHostGitRepo(t)
+		gitDir := hostRunGit(t, repo, "rev-parse", "--absolute-git-dir")
+		writeWT(gitDir, "[core]\n\tautocrlf = input\n")
+		if _, err := HostGitCommand(context.Background(), repo, HostGitOptions{Policy: RepoPolicyLinked}, "status"); err != nil {
+			t.Fatalf("allowed key in an ignored config.worktree refused: %v", err)
+		}
+	})
+	t.Run("linked worktree config.worktree, refused key", func(t *testing.T) {
+		repo, _ := newHostGitRepo(t)
+		lwt := filepath.Join(t.TempDir(), "lwt")
+		hostRunGit(t, repo, "worktree", "add", "-q", lwt, "-b", "lw")
+		// The linked worktree's own admin dir.
+		admin := strings.TrimSpace(hostRunGit(t, lwt, "rev-parse", "--absolute-git-dir"))
+		for _, ext := range []bool{false, true} {
+			if ext {
+				hostRunGit(t, repo, "config", "extensions.worktreeConfig", "true")
+			}
+			if err := os.WriteFile(filepath.Join(admin, "config.worktree"), []byte("[core]\n\tfsmonitor = /tmp/x\n[core]\n\tsshCommand = ssh -v\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := HostGitCommand(context.Background(), lwt, HostGitOptions{Policy: RepoPolicyLinked}, "status")
+			var refused *RepoConfigRefusedError
+			if !errors.As(err, &refused) {
+				t.Fatalf("ext=%v: error = %v, want a refusal from the linked worktree's config.worktree", ext, err)
+			}
+		}
+	})
+}
+
+func TestDeriveLFSEndpoint(t *testing.T) {
+	cases := map[string]struct {
+		want string
+		ok   bool
+	}{
+		"https://github.com/o/r":       {"https://github.com/o/r.git/info/lfs", true},
+		"https://github.com/o/r.git":   {"https://github.com/o/r.git/info/lfs", true},
+		"https://github.com/o/r.git/":  {"https://github.com/o/r.git/info/lfs", true},
+		"http://host/o/r":              {"http://host/o/r.git/info/lfs", true},
+		"git@github.com:o/r.git":       {"", false},
+		"ssh://git@github.com/o/r.git": {"", false},
+		"":                             {"", false},
+	}
+	for in, exp := range cases {
+		got, ok := DeriveLFSEndpoint(in)
+		if ok != exp.ok || got != exp.want {
+			t.Errorf("DeriveLFSEndpoint(%q) = %q,%v want %q,%v", in, got, ok, exp.want, exp.ok)
+		}
+	}
+}
+
+func TestScopedCredentialHelperEnv(t *testing.T) {
+	env, ok := ScopedCredentialHelperEnv(nil, "https://github.com/o/r.git", "secret-tok")
+	if !ok {
+		t.Fatal("expected ok for an https URL")
+	}
+	joined := strings.Join(env, "\n")
+	if !strings.Contains(joined, "GIT_CONFIG_KEY_0=credential.https://github.com.helper") {
+		t.Errorf("credential not scoped to the host: %q", env)
+	}
+	if !strings.Contains(joined, "GIT_CONFIG_COUNT=1") {
+		t.Errorf("missing count: %q", env)
+	}
+	// Respects an existing count.
+	env2, _ := ScopedCredentialHelperEnv([]string{"GIT_CONFIG_COUNT=2", "GIT_CONFIG_KEY_0=x.y", "GIT_CONFIG_VALUE_0=z", "GIT_CONFIG_KEY_1=a.b", "GIT_CONFIG_VALUE_1=c"}, "https://h/o/r", "t")
+	if !strings.Contains(strings.Join(env2, "\n"), "GIT_CONFIG_COUNT=3") || !strings.Contains(strings.Join(env2, "\n"), "GIT_CONFIG_KEY_2=credential.https://h.helper") {
+		t.Errorf("did not append after existing count: %q", env2)
+	}
+	if _, ok := ScopedCredentialHelperEnv(nil, "git@github.com:o/r.git", "t"); ok {
+		t.Error("expected not ok for a non-http(s) URL")
+	}
+}
+
+// A managed-base worktree add carries GIT_LFS_SKIP_SMUDGE and no lfs.url.
+func TestSafeGitCommandBuilderSkipsLFSSmudge(t *testing.T) {
+	repo, _ := newHostGitRepo(t)
+	cmd, err := HostGitCommand(context.Background(), repo, HostGitOptions{Policy: RepoPolicyManaged, SkipLFSSmudge: true}, "status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(cmd.Env, "GIT_LFS_SKIP_SMUDGE=1") {
+		t.Errorf("env lacks GIT_LFS_SKIP_SMUDGE=1: %v", cmd.Env)
+	}
+}
+
+// A linked checkout pins lfs.url from the trusted remote.
+func TestHostGitCommandPinsLFSURL(t *testing.T) {
+	repo, _ := newHostGitRepo(t)
+	cmd, err := HostGitCommand(context.Background(), repo, HostGitOptions{Policy: RepoPolicyLinked, LFSURL: "https://host/o/r.git/info/lfs"}, "status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(cmd.Args, "\x00"), "\x00lfs.url=https://host/o/r.git/info/lfs\x00") {
+		t.Errorf("args lack the pinned lfs.url: %q", cmd.Args)
+	}
+}
+
+// An agent-chosen .lfsconfig endpoint must never be contacted (and so never
+// receive a host credential) by a host-side checkout. The hub pull and the
+// linked checkout both skip the smudge or pin a trusted endpoint, so the
+// endpoint named in a tracked .lfsconfig is never reached. git-lfs is not
+// installed in this sandbox; the no-contact assertion runs regardless, and
+// the argv/env wiring is asserted unconditionally by the sibling unit tests
+// (ScopedCredentialHelperEnv, the SkipLFSSmudge env, the pinned lfs.url).
+func TestLFSConfigEndpointNeverContacted(t *testing.T) {
+	lfsPresent := false
+	if _, err := exec.LookPath("git-lfs"); err == nil {
+		lfsPresent = true
+	}
+	t.Logf("git-lfs present: %v (the network-contact assertion runs either way; with git-lfs it is the meaningful case)", lfsPresent)
+
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		if r.Header.Get("Authorization") != "" {
+			t.Errorf("the .lfsconfig endpoint received an Authorization header: %q", r.Header.Get("Authorization"))
+		}
+		http.Error(w, "no", http.StatusNotFound)
+	}))
+	defer srv.Close()
+	lfsconfig := "[lfs]\n\turl = " + srv.URL + "/lfs\n"
+
+	t.Run("linked checkout skips smudge (ssh/no http origin)", func(t *testing.T) {
+		repo, _ := newHostGitRepo(t)
+		// An ssh origin: DeriveLFSEndpoint fails, so the checkout skips smudge.
+		hostRunGit(t, repo, "remote", "add", "origin", "git@example.com:o/r.git")
+		if err := os.WriteFile(filepath.Join(repo, ".lfsconfig"), []byte(lfsconfig), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, "big.bin"), []byte("version https://git-lfs.github.com/spec/v1\noid sha256:deadbeef\nsize 3\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		hostRunGit(t, repo, "add", ".")
+		hostRunGit(t, repo, "commit", "-q", "-m", "lfs")
+		wt := filepath.Join(repo, "agents", "a", "workspace")
+		if err := os.MkdirAll(filepath.Dir(wt), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := CreateWorktree(wt, "agent-a"); err != nil {
+			t.Fatalf("CreateWorktree: %v", err)
+		}
+	})
+
+	t.Run("hub pull skips smudge", func(t *testing.T) {
+		source, workspace, _ := sharedWorkspaceFixture(t)
+		if err := os.WriteFile(filepath.Join(source, ".lfsconfig"), []byte(lfsconfig), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		commitFile(t, source, "big.bin", "version https://git-lfs.github.com/spec/v1\noid sha256:dead\nsize 3\n", "add lfs")
+		if _, err := PullSharedWorkspace(workspace, source, ""); err != nil {
+			t.Fatalf("PullSharedWorkspace: %v", err)
+		}
+	})
+
+	if got := atomic.LoadInt32(&hits); got != 0 {
+		t.Errorf("the .lfsconfig endpoint was contacted %d time(s); it must never be reached by a host-side checkout", got)
+	}
+}
+
+// A repository with initialised submodules (https URL, active/branch) is not
+// refused by the linked policy; recursion is pinned off regardless.
+func TestHostGitCommand_SubmoduleConfigAllowed(t *testing.T) {
+	repo, _ := newHostGitRepo(t)
+	for _, kv := range [][2]string{
+		{"submodule.lib.url", "https://github.com/o/lib.git"},
+		{"submodule.lib.active", "true"},
+		{"submodule.lib.branch", "main"},
+		{"submodule.lib.ignore", "dirty"},
+		{"submodule.recurse", "false"},
+	} {
+		hostRunGit(t, repo, "config", kv[0], kv[1])
+	}
+	if _, err := HostGitCommand(context.Background(), repo, HostGitOptions{Policy: RepoPolicyLinked}, "status"); err != nil {
+		t.Fatalf("a submodule config with an https url was refused: %v", err)
+	}
+	// An ssh-scp submodule url is also accepted.
+	repo2, _ := newHostGitRepo(t)
+	hostRunGit(t, repo2, "config", "submodule.lib.url", "git@github.com:o/lib.git")
+	if _, err := HostGitCommand(context.Background(), repo2, HostGitOptions{Policy: RepoPolicyLinked}, "status"); err != nil {
+		t.Fatalf("a submodule scp-ssh url was refused: %v", err)
 	}
 }

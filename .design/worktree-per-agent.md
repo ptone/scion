@@ -400,7 +400,15 @@ New work for the base repo:
    is reported (`ErrRepoConfigChanged`). The runtime mounts (item 7, extended
    to every runtime and base type) are what keep agents from writing the
    config in the first place; in-container git stays flexible through the
-   per-agent private `.git/config` of that change. Global and system config
+   per-agent private `.git/config` of that change.
+   Host-side checkouts also take the git-lfs endpoint from the configured
+   remote, never a tracked `.lfsconfig`: managed repos skip the LFS smudge
+   (agents fetch LFS in-container), linked checkouts pin `lfs.url` from the
+   `origin` remote when it is http(s) and otherwise skip-smudge with a
+   warning. The shared-workspace pull scopes any credential to the clone
+   URL's host. `extensions.partialClone`/`index.sparse` are refused
+   (fail-closed; may be lifted later). An operator-set `GIT_ALLOW_PROTOCOL`
+   overrides the `protocol.*.allow` pins. Global and system config
    stay in effect, so a globally installed git-lfs filter still runs; the
    git-lfs post-checkout hook (lockable files read-only) does not. Running
    `git lfs post-checkout` explicitly instead was rejected: git-lfs reads

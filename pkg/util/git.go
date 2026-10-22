@@ -321,7 +321,13 @@ func CreateWorktree(path, branch string) error {
 	// filter commands (HostGitCommand): agents can write this repository.
 	gitEnv := append(HostGitEnv(os.Environ()), "LC_ALL=C")
 	ctx := context.Background()
-	cmd, err := HostGitCommand(ctx, root, HostGitOptions{Env: gitEnv, Policy: RepoPolicyLinked}, "worktree", "add", "--relative-paths", "-b", branch, path)
+	// git-lfs on a host-side checkout would otherwise take its endpoint from
+	// a tracked .lfsconfig; pin the endpoint from the trusted origin remote
+	// instead (lfs.url via -c outranks .lfsconfig). When the endpoint cannot
+	// be derived (for example an ssh remote), skip the smudge and warn.
+	lfsOpt := lfsOptionForLinkedCheckout(root)
+	opts := HostGitOptions{Env: gitEnv, Policy: RepoPolicyLinked, SkipLFSSmudge: lfsOpt.skipSmudge, LFSURL: lfsOpt.url}
+	cmd, err := HostGitCommand(ctx, root, opts, "worktree", "add", "--relative-paths", "-b", branch, path)
 	if err != nil {
 		return fmt.Errorf("failed to create worktree: %w", err)
 	}
@@ -329,7 +335,7 @@ func CreateWorktree(path, branch string) error {
 		outputStr := string(output)
 		// If branch already exists, try to just add it
 		if strings.Contains(outputStr, "already exists") {
-			cmd, err = HostGitCommand(ctx, root, HostGitOptions{Env: gitEnv, Policy: RepoPolicyLinked}, "worktree", "add", "--relative-paths", path, branch)
+			cmd, err = HostGitCommand(ctx, root, opts, "worktree", "add", "--relative-paths", path, branch)
 			if err != nil {
 				return fmt.Errorf("failed to create worktree: %w", err)
 			}
@@ -341,11 +347,83 @@ func CreateWorktree(path, branch string) error {
 				}
 				return fmt.Errorf("failed to create worktree: %s", strings.TrimSpace(outputStr))
 			}
+			if lfsOpt.skipSmudge {
+				warnLFSPointersNotFetched(path)
+			}
 			return nil
 		}
 		return fmt.Errorf("failed to create worktree: %s", strings.TrimSpace(outputStr))
 	}
+	if lfsOpt.skipSmudge {
+		warnLFSPointersNotFetched(path)
+	}
 	return nil
+}
+
+// lfsCheckoutOption is how a host-side linked checkout handles git-lfs.
+type lfsCheckoutOption struct {
+	url        string // pinned lfs.url (empty when none)
+	skipSmudge bool   // skip the LFS smudge instead
+}
+
+// lfsOptionForLinkedCheckout decides the git-lfs handling for a linked
+// checkout at root: pin the endpoint derived from the origin remote URL when
+// it is http(s), otherwise skip the smudge (ssh remotes, or no origin).
+func lfsOptionForLinkedCheckout(root string) lfsCheckoutOption {
+	remote := strings.TrimSpace(GetGitRemoteDir(root))
+	if remote == "" {
+		return lfsCheckoutOption{skipSmudge: true}
+	}
+	if endpoint, ok := DeriveLFSEndpoint(remote); ok {
+		return lfsCheckoutOption{url: endpoint}
+	}
+	return lfsCheckoutOption{skipSmudge: true}
+}
+
+// warnLFSPointersNotFetched scans the checkout at path for git-lfs pointer
+// files (left in place when the smudge was skipped) and logs a warning that
+// names them and says how to fetch the objects. The scan is bounded and best
+// effort; it never fails the checkout.
+func warnLFSPointersNotFetched(path string) {
+	var pointers []string
+	const maxList = 50
+	_ = filepath.WalkDir(path, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			if d != nil && d.IsDir() && d.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if isLFSPointerFile(p) {
+			if rel, relErr := filepath.Rel(path, p); relErr == nil {
+				pointers = append(pointers, rel)
+			} else {
+				pointers = append(pointers, p)
+			}
+			if len(pointers) >= maxList {
+				return filepath.SkipAll
+			}
+		}
+		return nil
+	})
+	if len(pointers) == 0 {
+		return
+	}
+	slog.Warn("git-lfs objects were not fetched on the host checkout; the files hold LFS pointers. Fetch them yourself with 'git lfs pull' in the checkout",
+		"path", path, "pointer_files", pointers, "command", "git lfs pull")
+}
+
+// isLFSPointerFile reports whether the file at p begins with the git-lfs
+// pointer header. Only the first bytes are read.
+func isLFSPointerFile(p string) bool {
+	f, err := os.Open(p)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	buf := make([]byte, 64)
+	n, _ := f.Read(buf)
+	return strings.HasPrefix(string(buf[:n]), "version https://git-lfs.")
 }
 
 // WorktreeBranchHeldError reports that branch cannot be checked out because
@@ -1464,7 +1542,7 @@ type PullResult struct {
 // than the workspace's configured remote, and git runs through
 // HostGitCommand: no repository hooks, no repository-defined filter
 // commands, and a workspace config that sets transport, credential or
-// include keys is refused (UnsafeRepoConfigError). The branch fetched is the
+// include keys is refused (RepoConfigRefusedError). The branch fetched is the
 // current branch's configured upstream branch, or the current branch's own
 // name; it is fetched into refs/remotes/origin/<branch>.
 func PullSharedWorkspace(workspacePath, cloneURL, token string) (*PullResult, error) {
@@ -1480,17 +1558,21 @@ func PullSharedWorkspace(workspacePath, cloneURL, token string) (*PullResult, er
 		return nil, pullErr("the shared workspace has no clone URL")
 	}
 
-	env := append(HostGitEnv(os.Environ()), "GIT_TERMINAL_PROMPT=0")
+	baseEnv := append(HostGitEnv(os.Environ()), "GIT_TERMINAL_PROMPT=0")
 
-	// If a token is provided, configure a temporary credential helper via env
+	// The fetch talks to the clone URL and may need the token. Scope the
+	// credential helper to that URL's host only, so git never offers the
+	// token to any other endpoint — in particular an LFS endpoint a tracked
+	// .lfsconfig might name. The merge/checkout step below gets no credential
+	// config at all and skips the LFS smudge, so no host-side checkout can
+	// leak the token to an agent-chosen endpoint.
+	fetchEnv := baseEnv
 	if token != "" {
-		// Use a one-shot credential helper that provides the token
-		helper := fmt.Sprintf("!f() { echo username=oauth2; echo password=%s; }; f", token)
-		env = append(env,
-			"GIT_CONFIG_COUNT=1",
-			"GIT_CONFIG_KEY_0=credential.helper",
-			"GIT_CONFIG_VALUE_0="+helper,
-		)
+		scoped, ok := ScopedCredentialHelperEnv(baseEnv, cloneURL, token)
+		if !ok {
+			return nil, pullErr("the clone URL has no usable http(s) host for scoped credentials")
+		}
+		fetchEnv = scoped
 	}
 
 	branchOut, err := hostGit("-C", workspacePath, "symbolic-ref", "--quiet", "--short", "HEAD").CombinedOutput()
@@ -1514,7 +1596,7 @@ func PullSharedWorkspace(workspacePath, cloneURL, token string) (*PullResult, er
 	oldHeadStr := strings.TrimSpace(string(oldHead))
 
 	ctx := context.Background()
-	fetch, err := HostGitCommand(ctx, workspacePath, HostGitOptions{Env: env, Network: true},
+	fetch, err := HostGitCommand(ctx, workspacePath, HostGitOptions{Env: fetchEnv, Network: true},
 		"fetch", "--no-tags", "--", cloneURL, "+refs/heads/"+remoteBranch+":"+trackingRef)
 	if err != nil {
 		return nil, pullErr(err.Error())
@@ -1522,7 +1604,10 @@ func PullSharedWorkspace(workspacePath, cloneURL, token string) (*PullResult, er
 	if output, err := fetch.CombinedOutput(); err != nil {
 		return nil, pullErr(strings.TrimSpace(string(output)))
 	}
-	merge, err := HostGitCommand(ctx, workspacePath, HostGitOptions{Env: env}, "merge", "--ff-only", trackingRef)
+	// The merge writes the work tree. It gets no credential config (baseEnv,
+	// not fetchEnv) and skips the LFS smudge, so git-lfs never contacts an
+	// endpoint from a tracked .lfsconfig with the host's credentials.
+	merge, err := HostGitCommand(ctx, workspacePath, HostGitOptions{Env: baseEnv, SkipLFSSmudge: true}, "merge", "--ff-only", trackingRef)
 	if err != nil {
 		return nil, pullErr(err.Error())
 	}

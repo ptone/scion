@@ -70,10 +70,11 @@ type RepoConfigRefusedError struct {
 }
 
 func (e *RepoConfigRefusedError) Error() string {
-	if e.Reason == "" {
-		e.Reason = "not on the host-side git allow-list"
+	reason := e.Reason
+	if reason == "" {
+		reason = "not on the host-side git allow-list"
 	}
-	return fmt.Sprintf("git in %s refused: repository config sets %s, which is %s; remove it from the repository's .git/config (or config.worktree)", e.Dir, e.Key, e.Reason)
+	return fmt.Sprintf("git in %s refused: repository config sets %s, which is %s; remove it from the repository's .git/config (or config.worktree)", e.Dir, e.Key, reason)
 }
 
 // standardLFSFilter is the exact filter.lfs.* command set `git lfs install`
@@ -332,7 +333,7 @@ func allowVar(policy RepoConfigPolicy, v gitConfigVar, opts repoConfigAllowOptio
 		}
 		return false, "a submodule setting that is not on the allow-list"
 	case "filter":
-		if strings.EqualFold(sub, "lfs") && hasSub {
+		if sub == "lfs" && hasSub {
 			if name == "required" {
 				return true, ""
 			}
@@ -422,13 +423,14 @@ func set(keys ...string) map[string]bool {
 }
 
 // checkRepoConfigPolicy reads, as data, every repository config file git
-// would read for a command in dir — the common .git/config, and, when
-// extensions.worktreeConfig is on, the main worktree's config.worktree and
-// this worktree's config.worktree — and returns a *RepoConfigRefusedError
-// for the first include directive or key the policy does not allow. It then
-// cross-checks the parsed repository-scope entries against git's own
-// --show-scope listing and refuses on any difference, so a parser divergence
-// fails closed. It fails closed on anything it cannot locate, read or parse.
+// would read for a command in dir — the common .git/config, the main
+// worktree's config.worktree (in the common dir), and this worktree's
+// config.worktree, all always (see repoConfigFiles) — and returns a
+// *RepoConfigRefusedError for the first include directive or key the policy
+// does not allow. It then cross-checks the parsed repository-scope entries
+// against git's own --show-scope listing (crossCheckAgainstGit) and refuses
+// if git resolves any entry the parser did not, so a parser divergence fails
+// closed. It fails closed on anything it cannot locate, read or parse.
 func checkRepoConfigPolicy(ctx context.Context, dir string, env []string, policy RepoConfigPolicy, opts repoConfigAllowOptions) error {
 	files, err := repoConfigFiles(dir, env)
 	if err != nil {
@@ -461,9 +463,10 @@ func checkRepoConfigPolicy(ctx context.Context, dir string, env []string, policy
 }
 
 // crossCheckAgainstGit lists the repository-scope config git itself resolves
-// (local and worktree scope) and refuses if it differs from the parsed set,
-// so any divergence between the as-data parser and git fails closed. git runs
-// with the same host-side pins and scrubbed environment.
+// (local and worktree scope) and refuses if git resolves any entry that is not
+// in the parsed set, so any divergence between the as-data parser and git
+// fails closed. git runs with the same host-side pins and scrubbed
+// environment.
 func crossCheckAgainstGit(ctx context.Context, dir string, env []string, parsed []gitConfigVar) error {
 	args := append(HostGitArgs(), "config", "--show-scope", "-z", "--list")
 	cmd := exec.CommandContext(ctx, "git", args...)
@@ -473,9 +476,12 @@ func crossCheckAgainstGit(ctx context.Context, dir string, env []string, parsed 
 	if err != nil {
 		return fmt.Errorf("git in %s: cannot list the repository config to cross-check it: %w", dir, err)
 	}
+	// Compare keys exactly: git lower-cases the section and variable and keeps
+	// the subsection's case, and gitConfigVar.Key() does the same, so no extra
+	// lower-casing is needed (and subsections are case-sensitive).
 	parsedSet := make(map[string]int, len(parsed))
 	for _, v := range parsed {
-		parsedSet[strings.ToLower(v.Key())+"\x00"+v.Value]++
+		parsedSet[v.Key()+"\x00"+v.Value]++
 	}
 	// Every repository-scope entry git actually resolves must appear in the
 	// parsed set. The parsed set may hold more — config.worktree is parsed
@@ -487,7 +493,13 @@ func crossCheckAgainstGit(ctx context.Context, dir string, env []string, parsed 
 		if !repoConfigScope(e.scope) {
 			continue
 		}
-		k := strings.ToLower(e.key) + "\x00" + e.value
+		// A valueless boolean lists as the key alone; the parser stores it as
+		// "true". Match the two.
+		value := e.value
+		if !e.hasValue {
+			value = "true"
+		}
+		k := e.key + "\x00" + value
 		if parsedSet[k] <= 0 {
 			return &RepoConfigRefusedError{Dir: dir, Key: e.key, Reason: "read differently by the config parser and by git; refusing to be safe"}
 		}

@@ -291,20 +291,37 @@ safe stops the command rather than being ignored.
 - **Your own linked checkout** allows those plus a wider set of keys that cannot run a command or
   redirect network traffic: `core.autocrlf`/`eol` and similar, `pull.*`/`push.*` defaults, a
   remote's `pushurl`/`tagopt`/`prune`, `branch.<name>` metadata, `color.*`, `advice.*`, `rerere.*`,
-  `init.defaultBranch`, git-lfs data keys, `filter.lfs.*` **only** when it is exactly the standard
-  git-lfs commands, and `submodule.<name>.update` **only** as `none`/`checkout`/`rebase`/`merge`.
+  `status.*`, `maintenance.*`, sparse-checkout toggles, `init.defaultBranch`, inert git-lfs data
+  keys, `gpg.format` and `user.signingKey` (signing data only), and `submodule.<name>.update` **only**
+  as `none`/`checkout`/`rebase`/`merge`, `submodule.<name>.url` **only** for an `https`/`ssh` remote.
+  A few keys that would run a command are allowed here only because a fixed command-line setting
+  overrides them on every call (`core.hooksPath`, `core.fsmonitor`, `core.pager`,
+  `submodule.recurse`), so a planted value never executes.
 - **Refused on both** (so an agent cannot make the broker's or your own git run a command): any
-  hook path, `core.sshCommand`/`pager`/`editor`/`fsmonitor`, `credential.*`, `url.*.insteadOf`,
-  `http.*`, `gpg.*`, any `*.program`, `alias.*`, a remote's `uploadpack`/`receivepack`/`proxy`,
-  diff/merge command or textconv drivers, and any key not on the list. If a command is refused, the
-  error names the key; remove it from the repository's `.git/config` (or `config.worktree`).
+  `credential.*`, `url.*.insteadOf`, `http.*`, `gpg.*` program/signing-file keys, any `*.program`,
+  `alias.*`, `core.sshCommand`/`editor`, a remote's `uploadpack`/`receivepack`/`proxy`, diff/merge
+  command or textconv drivers, non-standard `filter.*` drivers, and any key not on the list. If a
+  command is refused, the error names the key; remove it from the repository's `.git/config` (or
+  `config.worktree`).
+- **Partial clones and sparse-index checkouts are refused:** `extensions.partialClone` and
+  `index.sparse` are not on the allow-list, so host-side git in such a repository is refused and an
+  agent cannot start there. This is a deliberate, fail-closed limitation; it may be lifted later.
 - As defence in depth these commands also run with hooks, the file-system monitor and the pager
-  off, the `ext::` transport and submodule recursion disabled, and the `GIT_*` environment scrubbed.
-  The git-lfs **post-checkout hook** therefore does not run when the broker creates a worktree; it
-  only marks LFS-lockable files read-only. Globally installed git-lfs filters still run, so LFS
-  files are checked out.
+  off, signing off (`commit.gpgsign`/`tag.gpgsign`/`merge.verifySignatures` false), the `ext::`
+  transport disabled and the `file://` transport allowed only for a URL given on the command line,
+  submodule recursion off, and the `GIT_*` environment scrubbed (except the host operator's own
+  config-file, transport and `GIT_ALLOW_PROTOCOL` settings). **Note:** a `GIT_ALLOW_PROTOCOL` set by
+  the host operator overrides the `protocol.*.allow` pins.
+- **git-lfs:** host-side checkouts take the LFS endpoint from the configured remote, not from a
+  tracked `.lfsconfig`. For a repository Scion manages, the host skips the LFS smudge entirely
+  (agents fetch LFS objects in-container). For your linked checkout, the endpoint is pinned from the
+  `origin` remote URL when it is `http(s)`; when it cannot be derived (for example an `ssh` remote),
+  the smudge is skipped and a warning names the pointer files and says to run `git lfs pull` in the
+  checkout. The git-lfs **post-checkout hook** does not run; it only marks LFS-lockable files
+  read-only.
 - **Updating a shared workspace** (pull) fetches from the project's clone URL known to the Hub, not
-  from the remote configured in the clone, then fast-forwards the current branch.
+  from the remote configured in the clone, then fast-forwards the current branch. Any credential is
+  scoped to that clone URL's host, so it is never offered to another endpoint.
 
 Your own git commands in your checkout are not affected. In-container git stays fully flexible: an
 upcoming change gives each agent its own private copy of `.git/config`.
