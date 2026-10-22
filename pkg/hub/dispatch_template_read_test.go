@@ -446,6 +446,10 @@ type fillProbeDispatcher struct {
 	storedAllowed bool
 	otherAllowed  bool
 	startErr      error
+	// storedHash and dispatchedHash are the template hash on the agent row
+	// and on the agent handed to the dispatch, at dispatch time.
+	storedHash     string
+	dispatchedHash string
 }
 
 func (d *fillProbeDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) error {
@@ -455,8 +459,19 @@ func (d *fillProbeDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		return err
 	}
 	d.storedBroker = row.RuntimeBrokerID
-	res := dispatchCatalogResource{Kind: catalogKindTemplate, ID: d.tmpl.ID, Scope: d.tmpl.Scope, ScopeID: d.tmpl.ScopeID,
-		ContentHash: d.tmpl.ContentHash, Authz: templateResource(d.tmpl)}
+	if row.AppliedConfig != nil {
+		d.storedHash = row.AppliedConfig.TemplateHash
+	}
+	if agent.AppliedConfig != nil {
+		d.dispatchedHash = agent.AppliedConfig.TemplateHash
+	}
+	// The gate reads the template's current row, as the hub does.
+	tmpl, err := d.srv.store.GetTemplate(ctx, d.tmpl.ID)
+	if err != nil {
+		return err
+	}
+	res := dispatchCatalogResource{Kind: catalogKindTemplate, ID: tmpl.ID, Scope: tmpl.Scope, ScopeID: tmpl.ScopeID,
+		ContentHash: tmpl.ContentHash, Authz: templateResource(tmpl)}
 	if row.RuntimeBrokerID != "" {
 		d.storedAllowed, _ = d.srv.brokerMayReadForDispatch(ctx, NewBrokerIdentity(row.RuntimeBrokerID), res, agent.ID)
 	}
@@ -826,7 +841,7 @@ func TestReincarnate_UserTemplate_ChangedSinceDispatch_409(t *testing.T) {
 
 	rec := reincDryRun(t, srv, agent, agentIdentityFor(agent.ID, project.ID))
 	requireAPIError(t, rec, http.StatusConflict, ErrCodeTemplateUnavailable)
-	assert.Contains(t, rec.Body.String(), "changed since the agent was dispatched")
+	assert.Contains(t, rec.Body.String(), "changed since the agent was dispatched; reincarnate cannot keep it: re-create the agent, or restore the template to the version the agent was dispatched with and reincarnate again")
 }
 
 // R3-A regression guard: a global-template agent whose creator agent is
@@ -1071,4 +1086,174 @@ func TestDispatchBoundCapability_StartAndResumeKnownToLack_412(t *testing.T) {
 		requireAPIError(t, rec, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability)
 		assert.False(t, disp.startCalled)
 	})
+}
+
+// ============================================================================
+// Start, restart and resume follow the current version of the SAME user
+// template, re-recorded before the dispatch while the creator can still
+// read it; each launch then stays pinned to that hash (ptone/scion#5770).
+// ============================================================================
+
+const repinNewHash = "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+
+// editTemplate commits a new content hash to the fixture's user template.
+func (f *resumeFillFixture) editTemplate(t *testing.T, hash string) {
+	t.Helper()
+	tmpl, err := f.store.GetTemplate(context.Background(), f.tmpl.ID)
+	require.NoError(t, err)
+	tmpl.ContentHash = hash
+	require.NoError(t, f.store.UpdateTemplate(context.Background(), tmpl))
+}
+
+// repinPaths are the three ways an existing agent is started.
+var repinPaths = []struct {
+	name  string
+	phase string
+	run   func(t *testing.T, f *resumeFillFixture, a *store.Agent) *httptest.ResponseRecorder
+}{
+	{"lifecycle start", string(state.PhaseStopped), func(t *testing.T, f *resumeFillFixture, a *store.Agent) *httptest.ResponseRecorder {
+		return doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil)
+	}},
+	{"lifecycle restart", string(state.PhaseRunning), func(t *testing.T, f *resumeFillFixture, a *store.Agent) *httptest.ResponseRecorder {
+		return doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents/"+a.ID+"/restart", nil)
+	}},
+	{"resume through create", string(state.PhaseSuspended), func(t *testing.T, f *resumeFillFixture, a *store.Agent) *httptest.ResponseRecorder {
+		return f.post(t, a, false)
+	}},
+}
+
+// After the user template is edited, a start, restart or resume re-records
+// its current hash before the dispatch: the dispatched agent and the row
+// carry it, so the broker running the agent reads the edited template.
+func TestRepin_StartRestartResumeFollowCurrentVersion(t *testing.T) {
+	for _, p := range repinPaths {
+		t.Run(p.name, func(t *testing.T) {
+			f := setupResumeFill(t)
+			a := f.userTemplateAgent(t, "repin-"+tidSlugSafe(p.name), p.phase, f.broker.ID)
+			f.editTemplate(t, repinNewHash)
+
+			rec := p.run(t, f, a)
+			require.Less(t, rec.Code, 300, rec.Body.String())
+			require.Equal(t, 1, f.disp.starts)
+			assert.Equal(t, repinNewHash, f.disp.storedHash, "the current hash is recorded before the dispatch")
+			assert.Equal(t, repinNewHash, f.disp.dispatchedHash, "the dispatch carries the current hash")
+			assert.True(t, f.disp.storedAllowed, "the broker running the agent reads the current version")
+			got, err := f.store.GetAgent(context.Background(), a.ID)
+			require.NoError(t, err)
+			assert.Equal(t, repinNewHash, got.AppliedConfig.TemplateHash, "later writes must not revert the re-recorded hash")
+		})
+	}
+}
+
+// Within a launch the read stays pinned: a commit after the re-record makes
+// the gate refuse that launch's reads.
+func TestRepin_LaunchStaysPinned(t *testing.T) {
+	f := setupResumeFill(t)
+	a := f.userTemplateAgent(t, "repin-pinned", string(state.PhaseStopped), f.broker.ID)
+	f.editTemplate(t, repinNewHash)
+	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil)
+	require.Less(t, rec.Code, 300, rec.Body.String())
+	require.True(t, f.disp.storedAllowed)
+
+	f.editTemplate(t, "sha256:5555555555555555555555555555555555555555555555555555555555555555")
+	tmpl, err := f.store.GetTemplate(context.Background(), f.tmpl.ID)
+	require.NoError(t, err)
+	allowed, reason := f.srv.brokerMayReadForDispatch(context.Background(), NewBrokerIdentity(f.broker.ID), dispatchCatalogResource{
+		Kind: catalogKindTemplate, ID: tmpl.ID, Scope: tmpl.Scope, ScopeID: tmpl.ScopeID, ContentHash: tmpl.ContentHash, Authz: templateResource(tmpl),
+	}, a.ID)
+	assert.False(t, allowed, "a commit during the launch is refused")
+	assert.Equal(t, dispatchDenyVersionMismatch, reason)
+}
+
+// A creator who can no longer read the template blocks the re-record: the
+// old hash stays, so the broker's read is refused.
+func TestRepin_CreatorLostAccess_NotRepinned(t *testing.T) {
+	f := setupResumeFill(t)
+	a := f.userTemplateAgent(t, "repin-creator-gone", string(state.PhaseStopped), f.broker.ID)
+	ctx := context.Background()
+	// The template now belongs to another user: the agent's creator can no
+	// longer read it.
+	tmpl, err := f.store.GetTemplate(ctx, f.tmpl.ID)
+	require.NoError(t, err)
+	tmpl.ContentHash = repinNewHash
+	tmpl.OwnerID, tmpl.ScopeID = f.member.ID, f.member.ID
+	require.NoError(t, f.store.UpdateTemplate(ctx, tmpl))
+
+	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil)
+	require.Less(t, rec.Code, 300, rec.Body.String())
+	require.Equal(t, 1, f.disp.starts)
+	assert.Equal(t, dispatchReadHash, f.disp.storedHash, "no re-record without the creator's access")
+	assert.False(t, f.disp.storedAllowed, "the broker's read is refused")
+}
+
+// Global templates are never re-recorded (their reads follow the current
+// version through the catalog rule); an unchanged user template writes
+// nothing.
+func TestRepin_NothingToRepin_NoWrite(t *testing.T) {
+	ctx := context.Background()
+	t.Run("unchanged user template", func(t *testing.T) {
+		f := setupResumeFill(t)
+		a := f.userTemplateAgent(t, "repin-unchanged", string(state.PhaseStopped), f.broker.ID)
+		before, err := f.store.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		require.NoError(t, f.srv.repinUserTemplateForStart(ctx, before))
+		after, err := f.store.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, before.StateVersion, after.StateVersion)
+	})
+	t.Run("global template", func(t *testing.T) {
+		f := setupResumeFill(t)
+		global := &store.Template{ID: tid("repin-global"), Slug: "repin-global", Name: "repin-global", Harness: "claude",
+			Scope: store.TemplateScopeGlobal, Status: store.TemplateStatusActive, ContentHash: repinNewHash}
+		require.NoError(t, f.store.CreateTemplate(ctx, global))
+		a := f.agent(t, "repin-global-agent", string(state.PhaseStopped))
+		a.RuntimeBrokerID = f.broker.ID
+		a.AppliedConfig.TemplateID, a.AppliedConfig.TemplateHash = global.ID, dispatchReadHash
+		require.NoError(t, f.store.UpdateAgent(ctx, a))
+		before, err := f.store.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		require.NoError(t, f.srv.repinUserTemplateForStart(ctx, before))
+		after, err := f.store.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, before.StateVersion, after.StateVersion, "a global template is never re-recorded")
+		assert.Equal(t, dispatchReadHash, after.AppliedConfig.TemplateHash)
+	})
+}
+
+// A concurrent change of the recorded pin refuses the start with a
+// version conflict and nothing is dispatched.
+func TestRepin_ConcurrentPinChange_Refused(t *testing.T) {
+	f := setupResumeFill(t)
+	a := f.userTemplateAgent(t, "repin-race", string(state.PhaseStopped), f.broker.ID)
+	f.editTemplate(t, repinNewHash)
+	f.srv.store = &racingPinChangeStore{Store: f.store}
+
+	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil)
+	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Zero(t, f.disp.starts, "nothing is dispatched")
+}
+
+// racingPinChangeStore reports a concurrent change of the template pin.
+type racingPinChangeStore struct{ store.Store }
+
+func (r *racingPinChangeStore) SetAgentTemplatePin(context.Context, string, string, string, string) (int64, error) {
+	return 0, store.ErrTemplatePinChanged
+}
+
+// "Active" means not soft-deleted, in any phase: a stopped or errored agent's
+// broker reads, a soft-deleted agent's does not.
+func TestDispatchBoundRead_AnyPhaseReads_SoftDeletedRefused(t *testing.T) {
+	f := setupDispatchReadTest(t)
+	ctx := context.Background()
+	for _, phase := range []string{string(state.PhaseStopped), string(state.PhaseError), string(state.PhaseCreated), string(state.PhaseSuspended)} {
+		a := f.boundAgent(t, "dbr-phase-"+phase, f.broker.ID, f.userTmpl.ID, dispatchReadHash, f.creator.ID)
+		a.Phase = phase
+		require.NoError(t, f.store.UpdateAgent(ctx, a))
+		assert.Equal(t, http.StatusOK, f.asBroker(t, http.MethodGet, templateGetFor(f.userTmpl.ID, a.ID)).Code, "phase %s reads", phase)
+	}
+	gone := f.boundAgent(t, "dbr-phase-deleted", f.broker.ID, f.userTmpl.ID, dispatchReadHash, f.creator.ID)
+	gone.Phase = string(state.PhaseStopped)
+	gone.DeletedAt = time.Now()
+	require.NoError(t, f.store.UpdateAgent(ctx, gone))
+	assert.Equal(t, http.StatusNotFound, f.asBroker(t, http.MethodGet, templateGetFor(f.userTmpl.ID, gone.ID)).Code)
 }

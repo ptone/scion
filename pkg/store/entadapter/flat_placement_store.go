@@ -16,6 +16,7 @@ package entadapter
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -141,6 +142,102 @@ func (s *AgentStore) SetAgentRuntimeBrokerIfEmpty(ctx context.Context, agentID, 
 		return nil, store.ErrRuntimeBrokerChanged
 	}
 	return cur, nil
+}
+
+// SetAgentTemplatePin implements store.AgentStore.
+func (s *AgentStore) SetAgentTemplatePin(ctx context.Context, agentID, templateID, expectedHash, newHash string) (int64, error) {
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return 0, err
+	}
+	if templateID == "" {
+		return 0, fmt.Errorf("SetAgentTemplatePin: empty template ID")
+	}
+	useLock := s.usesRowLocks()
+	for i := 0; i < clearRuntimeTargetAttempts; i++ {
+		v, done, err := s.setTemplatePinOnce(ctx, uid, templateID, expectedHash, newHash, useLock)
+		if err != nil || done {
+			return v, err
+		}
+	}
+	return 0, fmt.Errorf("set template pin for agent %s: agent changed concurrently %d times", agentID, clearRuntimeTargetAttempts)
+}
+
+// setTemplatePinOnce is one SetAgentTemplatePin attempt. done is false only
+// when the conditional write matched no row because the agent changed after
+// it was read.
+func (s *AgentStore) setTemplatePinOnce(ctx context.Context, uid uuid.UUID, templateID, expectedHash, newHash string, useLock bool) (int64, bool, error) {
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return 0, false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	q := tx.Agent.Query().Where(agent.IDEQ(uid), agent.DeletedAtIsNil())
+	if useLock {
+		q = q.ForUpdate()
+	}
+	row, err := q.Select(agent.FieldAppliedConfig, agent.FieldStateVersion).Only(ctx)
+	if err != nil {
+		return 0, false, mapError(err)
+	}
+	if row.AppliedConfig == "" {
+		return 0, false, store.ErrTemplatePinChanged
+	}
+	// Edit the raw JSON object, as ClearAgentRuntimeTarget does, so every
+	// other stored key is kept exactly as written.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(row.AppliedConfig), &raw); err != nil {
+		return 0, false, fmt.Errorf("set template pin for agent %s: %w", uid, err)
+	}
+	var gotID, gotHash string
+	if v, ok := raw["templateId"]; ok {
+		if err := json.Unmarshal(v, &gotID); err != nil {
+			return 0, false, fmt.Errorf("set template pin for agent %s: %w", uid, err)
+		}
+	}
+	if v, ok := raw["templateHash"]; ok {
+		if err := json.Unmarshal(v, &gotHash); err != nil {
+			return 0, false, fmt.Errorf("set template pin for agent %s: %w", uid, err)
+		}
+	}
+	if gotID != templateID || gotHash != expectedHash {
+		return 0, false, store.ErrTemplatePinChanged
+	}
+	if newHash == "" {
+		delete(raw, "templateHash")
+	} else {
+		enc, err := json.Marshal(newHash)
+		if err != nil {
+			return 0, false, err
+		}
+		raw["templateHash"] = enc
+	}
+	updated, err := json.Marshal(raw)
+	if err != nil {
+		return 0, false, err
+	}
+	newVersion := row.StateVersion + 1
+	n, err := tx.Agent.Update().
+		Where(
+			agent.IDEQ(uid),
+			agent.DeletedAtIsNil(),
+			agent.AppliedConfigEQ(row.AppliedConfig),
+			agent.StateVersionEQ(row.StateVersion),
+		).
+		SetAppliedConfig(string(updated)).
+		SetStateVersion(newVersion).
+		Save(ctx)
+	if err != nil {
+		return 0, false, mapError(err)
+	}
+	if n == 0 {
+		return 0, false, nil
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, false, err
+	}
+	return newVersion, true, nil
 }
 
 // GetLegacyRuntimeBrokerByName implements store.ProjectStore.

@@ -291,21 +291,18 @@ func (s *Server) brokerMayReadCatalogResource(ctx context.Context, broker Broker
 // Version pinning of dispatch-bound user-scoped template reads
 // (ptone/scion#5770). The read gate requires the template's current content
 // hash to equal the hash the hub recorded for the agent
-// (AppliedConfig.TemplateHash). The hub records it at create and at a
-// reincarnate rebuild only; start, restart and resume dispatch it unchanged
-// (dispatchTemplateIdentity). So:
-//   - within one launch a broker never reads a version committed after the
-//     launch was dispatched: a commit that races a launch fails it rather
-//     than hydrating newer content;
-//   - after the template is edited, a start, restart or resume of the agent
-//     fails with a clear error, and a reincarnate or move refuses with 409
-//     template_unavailable (carryUserScopedTemplate) instead of re-pinning.
-//     The agent must be re-created to use the edited template.
-//
-// Letting start, restart and resume follow edits instead would mean
-// re-recording the current hash of the SAME TemplateID, after re-checking
-// the creator, before each of those dispatches; the gate itself would not
-// change.
+// (AppliedConfig.TemplateHash). Where the hub records it decides which
+// version each operation sees:
+//   - create records the hash of the template it resolved;
+//   - start, restart and resume re-record the current hash of the SAME
+//     TemplateID, after re-checking that the agent's creator can read it,
+//     before dispatching (repinUserTemplateForStart);
+//   - within a launch nothing re-records it, so a commit that races the
+//     launch fails it rather than hydrating content the hub did not record
+//     for it;
+//   - a reincarnate or move never re-records it: a user-scoped template
+//     whose hash changed since dispatch is refused with 409
+//     template_unavailable (carryUserScopedTemplate).
 
 // catalogResourceKind names the kind of catalog resource a dispatch-bound
 // read is for. Only templates are wired today; the gate is generic so that

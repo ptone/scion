@@ -263,6 +263,11 @@ func (s *Server) execDispatchStart(ctx context.Context, d store.BrokerDispatch) 
 		opts.Kind = args.Kind
 		opts.PriorPhase = args.PriorPhase
 	}
+	// As startAgentCore does: re-record the current version of the agent's
+	// user-scoped template before the dispatch (ptone/scion#5770).
+	if err := s.repinUserTemplateForStart(ctx, agent); err != nil {
+		return "", err
+	}
 	ctx, warns := withDispatchWarnings(ctx)
 	// A dispatcher that takes start options gets the intent's options (and
 	// may return an accepted launch); any other runs the synchronous start
@@ -422,6 +427,10 @@ func (s *Server) execDispatchRestart(ctx context.Context, d store.BrokerDispatch
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
 		return "", fmt.Errorf("no dispatcher available")
+	}
+	// As for a start (ptone/scion#5770).
+	if err := s.repinUserTemplateForStart(ctx, agent); err != nil {
+		return "", err
 	}
 	ctx, warns := withDispatchWarnings(ctx)
 	if err := dispatcher.DispatchAgentRestart(ctx, agent); err != nil {

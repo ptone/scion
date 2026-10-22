@@ -871,6 +871,16 @@ type AgentStore interface {
 	// ErrNotFound. brokerID must be non-empty.
 	SetAgentRuntimeBrokerIfEmpty(ctx context.Context, agentID, brokerID string) (*Agent, error)
 
+	// SetAgentTemplatePin re-records the content hash of an agent's Hub
+	// template (AgentAppliedConfig.TemplateHash) and changes no other
+	// applied-config key or column. It applies only while the stored
+	// applied config still names templateID with expectedHash; otherwise
+	// it returns ErrTemplatePinChanged and writes nothing. The write bumps
+	// state_version by exactly one, so a writer holding an older read gets
+	// ErrVersionConflict from UpdateAgent, and returns the new
+	// state_version. A missing or deleted agent returns ErrNotFound.
+	SetAgentTemplatePin(ctx context.Context, agentID, templateID, expectedHash, newHash string) (newVersion int64, err error)
+
 	// AggregateAgentHealth returns lightweight health-oriented counts and lists
 	// for the health-summary endpoint without fetching full agent records.
 	// This avoids the O(N) deserialization cost of ListAgents on large installations.

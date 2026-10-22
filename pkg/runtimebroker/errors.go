@@ -394,7 +394,7 @@ func (e *OpaqueError) Unwrap() error { return e.err }
 // dispatch that named a Hub TemplateID the Hub would not let this broker
 // read (ptone/scion#5770): the template was deleted, its creator lost
 // access to it, the agent is no longer recorded on this broker, or (for a
-// user-scoped template) it changed since the agent was dispatched.
+// user-scoped template) it changed while the launch was in progress.
 var errDispatchTemplateUnreadable = errors.New("dispatched template is not readable")
 
 // dispatchTemplateUnreadableError is errDispatchTemplateUnreadable with the
@@ -420,7 +420,7 @@ func dispatchTemplateUnreadableText(err error) (string, bool) {
 	if !errors.As(err, &e) {
 		return "", false
 	}
-	return "template " + e.template + " is no longer readable for this agent (it was removed, its access changed, or it was edited since the agent was dispatched); re-create the agent or choose another template", true
+	return "template " + e.template + " is no longer readable for this agent (it was removed, its access changed, or it was edited while this launch was in progress); retry, or re-create the agent or choose another template", true
 }
 
 // runtimeOpError builds the OpaqueError a broker runtime-op handler

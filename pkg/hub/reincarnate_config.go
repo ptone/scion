@@ -131,7 +131,7 @@ func (s *Server) carryUserScopedTemplate(ctx context.Context, agent *store.Agent
 	}
 	if tmpl.ContentHash != agent.AppliedConfig.TemplateHash {
 		return nil, false, &templateNotCarriableError{msg: fmt.Sprintf(
-			"template %s recorded for this agent is a user-scoped template that changed since the agent was dispatched; reincarnate cannot keep it: re-create the agent", name)}
+			"template %s recorded for this agent is a user-scoped template that changed since the agent was dispatched; reincarnate cannot keep it: re-create the agent, or restore the template to the version the agent was dispatched with and reincarnate again", name)}
 	}
 	return tmpl, true, nil
 }
