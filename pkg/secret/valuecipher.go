@@ -47,15 +47,26 @@ var (
 	ErrNoDecryptionKey = errors.New("secret: no key is configured to read this encrypted value")
 	// ErrNoEncryptionKey: the ring has no usable writer key.
 	ErrNoEncryptionKey = errors.New("secret: no encryption key is configured")
+	// ErrCipherNotConfigured: a nil or zero ValueCipher was used. It never
+	// falls back to plaintext; the disabled (plaintext) mode exists only
+	// through NewLegacyValueCipher("").
+	ErrCipherNotConfigured = errors.New("secret: no value cipher is configured")
+	// ErrWriterNotReadable: a ring that writes enc:v1: does not list its
+	// active key among legacy_v1_read_ids, so it could not read back what
+	// it writes.
+	ErrWriterNotReadable = errors.New("secret: encryption write_format v1 requires the active key in legacy_v1_read_ids")
 )
 
 type cipherMode int
 
 const (
+	// modeInvalid is the zero value (a nil or zero ValueCipher): every
+	// Encrypt and Decrypt fails with ErrCipherNotConfigured.
+	modeInvalid cipherMode = iota
 	// modeDisabled: legacy adapter without a server secret (ephemeral
 	// development): values are stored and read as plaintext; an encrypted
 	// value cannot be read.
-	modeDisabled cipherMode = iota
+	modeDisabled
 	// modeLegacy: legacy adapter over the server secret; plaintext rows
 	// pass through unchanged (pre-policy legacy behaviour, design §7).
 	modeLegacy
@@ -65,12 +76,14 @@ const (
 
 func (m cipherMode) String() string {
 	switch m {
+	case modeDisabled:
+		return "disabled"
 	case modeLegacy:
 		return "legacy"
 	case modeManaged:
 		return "managed"
 	default:
-		return "disabled"
+		return "unconfigured"
 	}
 }
 
@@ -102,6 +115,17 @@ func NewValueCipher(k *keyring.Keyring) (*ValueCipher, error) {
 	if len(ring.Active().Bytes()) == 0 {
 		return nil, ErrNoEncryptionKey
 	}
+	if ring.WriteFormat() == keyring.WriteV1 {
+		readable := false
+		for _, cand := range ring.Candidates("") {
+			if cand.ID == ring.ActiveID() {
+				readable = true
+			}
+		}
+		if !readable {
+			return nil, ErrWriterNotReadable
+		}
+	}
 	mode := modeLegacy
 	if k.Source() == keyring.SourceFile {
 		mode = modeManaged
@@ -124,9 +148,14 @@ func NewLegacyValueCipher(sharedSecret string) *ValueCipher {
 	return c
 }
 
-// Enabled reports whether values are encrypted (false only for the
-// disabled cipher). A nil cipher is disabled.
-func (c *ValueCipher) Enabled() bool { return c != nil && c.mode != modeDisabled }
+// Enabled reports whether values are encrypted: false for the disabled
+// cipher and for a nil or zero one (which refuses every operation).
+func (c *ValueCipher) Enabled() bool {
+	return c != nil && (c.mode == modeLegacy || c.mode == modeManaged)
+}
+
+// configured reports whether c may be used at all.
+func (c *ValueCipher) configured() bool { return c != nil && c.mode != modeInvalid }
 
 // Managed reports whether the cipher comes from a keyring file.
 func (c *ValueCipher) Managed() bool { return c != nil && c.mode == modeManaged }
@@ -163,8 +192,12 @@ func (c *ValueCipher) UsesRing(r *keyring.EncryptionRing) bool {
 // Encrypt seals plaintext under the active key in the configured write
 // format: enc:v1: (byte-compatible with EncryptValue) or
 // enc:v2:<kid>: with AAD "scion-secret-v2:"+kid. The disabled cipher
-// returns plaintext unchanged (legacy ephemeral development mode).
+// returns plaintext unchanged (legacy ephemeral development mode); a nil
+// or zero cipher fails with ErrCipherNotConfigured.
 func (c *ValueCipher) Encrypt(plaintext string) (string, error) {
+	if !c.configured() {
+		return "", ErrCipherNotConfigured
+	}
 	if !c.Enabled() {
 		return plaintext, nil
 	}
@@ -204,19 +237,23 @@ func (c *ValueCipher) Decrypt(stored string) (string, error) {
 // DecryptForMigration is Decrypt for the administrative migration reader
 // (phase 6): it additionally admits plaintext, in any mode, but only for a
 // migration that is running with plaintext admission enabled. It is not a
-// runtime capability; a source-scan test pins its callers.
+// runtime capability; TestDecryptForMigrationCallers pins its callers to
+// an allow-list.
 func (c *ValueCipher) DecryptForMigration(stored string, m *store.EncryptionMigration) (string, error) {
 	admit := m != nil && m.State == store.EncryptionMigrationRunning && m.PlaintextReadAdmitted
 	return c.decrypt(stored, admit)
 }
 
 func (c *ValueCipher) decrypt(stored string, admitPlaintext bool) (string, error) {
+	if !c.configured() {
+		return "", ErrCipherNotConfigured
+	}
 	env, err := envelope.Parse(stored)
 	if err != nil {
 		return "", err
 	}
 	if env.Format == envelope.FormatPlaintext {
-		if admitPlaintext || c == nil || c.mode != modeManaged {
+		if admitPlaintext || c.mode != modeManaged {
 			return stored, nil
 		}
 		return "", ErrPlaintextNotAdmitted
@@ -272,7 +309,7 @@ func newGCM(key []byte) (cipher.AEAD, error) {
 // String prints the mode and key IDs only.
 func (c *ValueCipher) String() string {
 	if c == nil {
-		return "ValueCipher{mode:disabled}"
+		return "ValueCipher{mode:unconfigured}"
 	}
 	return fmt.Sprintf("ValueCipher{mode:%s writer:%s readers:%v format:%s}", c.mode, c.WriterID(), c.ReaderIDs(), c.WriteFormat())
 }
@@ -286,7 +323,7 @@ func (c *ValueCipher) Format(f fmt.State, _ rune) { _, _ = f.Write([]byte(c.Stri
 // LogValue logs the mode and key IDs only.
 func (c *ValueCipher) LogValue() slog.Value {
 	if c == nil {
-		return slog.GroupValue(slog.String("mode", modeDisabled.String()))
+		return slog.GroupValue(slog.String("mode", modeInvalid.String()))
 	}
 	return slog.GroupValue(slog.String("mode", c.mode.String()), slog.String("writer", c.WriterID()),
 		slog.Any("readers", c.ReaderIDs()), slog.String("format", string(c.WriteFormat())))
@@ -295,7 +332,7 @@ func (c *ValueCipher) LogValue() slog.Value {
 // MarshalJSON emits the mode and key IDs only.
 func (c *ValueCipher) MarshalJSON() ([]byte, error) {
 	if c == nil {
-		return json.Marshal(map[string]any{"mode": modeDisabled.String()})
+		return json.Marshal(map[string]any{"mode": modeInvalid.String()})
 	}
 	return json.Marshal(map[string]any{"mode": c.mode.String(), "writer": c.WriterID(),
 		"readers": c.ReaderIDs(), "format": c.WriteFormat()})

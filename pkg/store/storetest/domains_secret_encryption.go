@@ -218,6 +218,11 @@ func replaceConformance(t *testing.T, s store.Store) {
 		require.NoError(t, err)
 		assert.False(t, applied)
 	})
+	t.Run("empty replacement is refused", func(t *testing.T) {
+		applied, err := encReplace(ctx, s, before.ID, before.Version, old, "")
+		assert.ErrorIs(t, err, store.ErrInvalidInput)
+		assert.False(t, applied)
+	})
 	t.Run("unknown and invalid id", func(t *testing.T) {
 		applied, err := encReplace(ctx, s, uuid.NewString(), 1, old, v2Value("k2", 8))
 		require.NoError(t, err)
@@ -532,6 +537,12 @@ func fenceConformance(t *testing.T, s store.Store) {
 			assert.Equal(t, c.allowed, applied)
 		})
 		t.Run("ReplaceSecretCiphertext/"+c.name, func(t *testing.T) {
+			if c.value == "" {
+				// An empty replacement is refused before the fence
+				// (ErrInvalidInput; see the ReplaceSecretCiphertext
+				// conformance).
+				return
+			}
 			key := "FENCE_REPLACE_" + suffix
 			seedFenceRowRef(t, ctx, s, key, scope, scopeID, c.ref)
 			before := snapshot(t, key)

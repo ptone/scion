@@ -157,4 +157,138 @@ func TestSecretEncryptionFence_Postgres(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, int64(3), p.Generation)
 	})
+
+	t.Run("RowLockedReplaceBlocksUnchangedValueWriteBack", func(t *testing.T) {
+		// A fenced write that re-writes what it read as the stored value
+		// must not race a ciphertext replacement: it waits for the row
+		// lock, then sees the new bytes, so its (stale) value is a payload
+		// change and is fenced, never written back unfenced.
+		key, scope, scopeID := "PG_FENCE_REPLACE_RACE", store.ScopeHub, "pg-fence"
+		require.NoError(t, cs.CreateSecret(ctx, &store.Secret{ID: uuid.NewString(), Key: key,
+			EncryptedValue: fakeV2("k4"), Scope: scope, ScopeID: scopeID}))
+		stale, err := cs.GetSecret(ctx, key, scope, scopeID)
+		require.NoError(t, err)
+
+		// Move the fence to k5 (policy generation 3 -> 4); the stored k4
+		// value is now one a writer may not re-introduce.
+		applied, err := cs.UpdateEncryptionPolicy(ctx, 3, fencePolicyPG(4, "k5"))
+		require.NoError(t, err)
+		require.True(t, applied)
+
+		release := make(chan struct{})
+		replaced := make(chan struct{})
+		replaceDone := make(chan error, 1)
+		go func() {
+			replaceDone <- cs.WithTx(ctx, func(tx store.Store) error {
+				ok, err := tx.ReplaceSecretCiphertext(ctx, stale.ID, stale.Version, stale.EncryptedValue, fakeV2("k5"))
+				if err != nil {
+					return err
+				}
+				if !ok {
+					return assert.AnError
+				}
+				close(replaced)
+				<-release
+				return nil
+			})
+		}()
+		select {
+		case <-replaced:
+		case err := <-replaceDone:
+			t.Fatalf("replace failed: %v", err)
+		case <-time.After(30 * time.Second):
+			t.Fatal("replace never ran")
+		}
+
+		writeBack := make(chan error, 1)
+		go func() {
+			upd := *stale
+			upd.Description = "metadata write carrying the stale payload"
+			writeBack <- cs.UpdateSecret(ctx, &upd)
+		}()
+		select {
+		case err := <-writeBack:
+			t.Fatalf("write-back did not wait for the replaced row: %v", err)
+		case <-time.After(blockWindow):
+		}
+		close(release)
+		require.NoError(t, <-replaceDone)
+		select {
+		case err := <-writeBack:
+			assert.ErrorIs(t, err, store.ErrEncryptionPolicyMismatch, "the stale payload must be fenced")
+		case <-time.After(30 * time.Second):
+			t.Fatal("write-back never completed")
+		}
+		got, err := cs.GetSecret(ctx, key, scope, scopeID)
+		require.NoError(t, err)
+		assert.Equal(t, fakeV2("k5"), got.EncryptedValue, "the replacement must survive")
+	})
+}
+
+// TestSecretEncryptionPolicyCreation_Postgres pins that creating the policy
+// (no row yet) also serializes with fenced writes on PostgreSQL: the
+// transition's table lock waits for an in-flight write, and a write that
+// starts during the transition waits and then sees the new policy.
+func TestSecretEncryptionPolicyCreation_Postgres(t *testing.T) {
+	ctx := context.Background()
+	dsn := enttest.NewSchemaURL(t) // skips when Postgres is not configured
+	client, err := entc.OpenPostgres(dsn, entc.PoolConfig{MaxOpenConns: 4})
+	require.NoError(t, err)
+	defer func() { _ = client.Close() }()
+	cs := entadapter.NewCompositeStore(client)
+
+	// An in-flight plaintext write (allowed: no policy yet) holds the
+	// creation back until it commits.
+	release := make(chan struct{})
+	written := make(chan struct{})
+	writeDone := make(chan error, 1)
+	go func() {
+		writeDone <- cs.WithTx(ctx, func(tx store.Store) error {
+			if err := tx.CreateSecret(ctx, &store.Secret{ID: uuid.NewString(), Key: "PG_CREATE_INFLIGHT",
+				EncryptedValue: "fake-plain", Scope: store.ScopeHub, ScopeID: "pg-create"}); err != nil {
+				return err
+			}
+			close(written)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case <-written:
+	case err := <-writeDone:
+		t.Fatalf("in-flight write failed: %v", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("in-flight write never ran")
+	}
+	created := make(chan error, 1)
+	go func() {
+		ok, err := cs.UpdateEncryptionPolicy(ctx, 0, fencePolicyPG(1, "k2"))
+		if err == nil && !ok {
+			err = assert.AnError
+		}
+		created <- err
+	}()
+	select {
+	case err := <-created:
+		t.Fatalf("policy creation did not wait for the in-flight write: %v", err)
+	case <-time.After(blockWindow):
+	}
+	close(release)
+	require.NoError(t, <-writeDone)
+	select {
+	case err := <-created:
+		require.NoError(t, err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("policy creation never completed")
+	}
+
+	// A write that starts after the creation sees the new policy.
+	err = cs.CreateSecret(ctx, &store.Secret{ID: uuid.NewString(), Key: "PG_CREATE_AFTER",
+		EncryptedValue: "fake-plain", Scope: store.ScopeHub, ScopeID: "pg-create"})
+	assert.ErrorIs(t, err, store.ErrEncryptionPolicyMismatch)
+
+	// A second creator gets applied=false, not an error.
+	ok, err := cs.UpdateEncryptionPolicy(ctx, 0, fencePolicyPG(1, "k3"))
+	require.NoError(t, err)
+	assert.False(t, ok)
 }

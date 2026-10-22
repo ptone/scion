@@ -380,18 +380,18 @@ func (s *SecretStore) UpsertSecret(ctx context.Context, secret *store.Secret) (b
 		now := time.Now()
 		secret.Updated = now
 
-		existing, err := getSecretRow(ctx, c, secret.Key, secret.Scope, secret.ScopeID)
+		// Lock order: policy, then the secret row.
+		policy, err := loadEncryptionPolicyForWrite(ctx, c)
+		if err != nil {
+			return err
+		}
+		existing, err := lockSecretRowForWrite(ctx, c, secret.Key, secret.Scope, secret.ScopeID)
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			return err
 		}
-		if existing == nil || existing.EncryptedValue != secret.EncryptedValue {
-			policy, err := loadEncryptionPolicyForWrite(ctx, c)
-			if err != nil {
-				return err
-			}
-			if !policy.AllowsWrite(secret.EncryptedValue, secret.SecretRef) {
-				return store.ErrEncryptionPolicyMismatch
-			}
+		if (existing == nil || existing.EncryptedValue != secret.EncryptedValue) &&
+			!policy.AllowsWrite(secret.EncryptedValue, secret.SecretRef) {
+			return store.ErrEncryptionPolicyMismatch
 		}
 
 		if existing != nil {

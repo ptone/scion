@@ -303,12 +303,52 @@ func TestValueCipher_Accessors(t *testing.T) {
 	if !l.Enabled() || l.Managed() || l.WriterID() != keyring.LegacyID || l.WriteFormat() != keyring.WriteV1 {
 		t.Fatalf("legacy accessors: %v", l)
 	}
+}
+
+// TestValueCipher_UnconfiguredFailsClosed: a nil or zero cipher (a missed
+// wiring) never stores or returns plaintext; only NewLegacyValueCipher("")
+// gives the disabled plaintext mode.
+func TestValueCipher_UnconfiguredFailsClosed(t *testing.T) {
 	var nilCipher *secret.ValueCipher
-	if nilCipher.Enabled() || nilCipher.Managed() || nilCipher.WriterID() != "" || nilCipher.ReaderIDs() != nil {
-		t.Fatal("nil cipher must be disabled")
+	for name, c := range map[string]*secret.ValueCipher{"nil": nilCipher, "zero": {}} {
+		if c.Enabled() || c.Managed() || c.WriterID() != "" || c.ReaderIDs() != nil {
+			t.Fatalf("%s cipher reports a configuration", name)
+		}
+		if got, err := c.Encrypt("fake-plain"); !errors.Is(err, secret.ErrCipherNotConfigured) || got != "" {
+			t.Fatalf("%s Encrypt = %q, %v; want ErrCipherNotConfigured", name, got, err)
+		}
+		for _, v := range []string{"fake-plain", "", goldenV1, goldenV2} {
+			if got, err := c.Decrypt(v); !errors.Is(err, secret.ErrCipherNotConfigured) || got != "" {
+				t.Fatalf("%s Decrypt(%.10q) = %q, %v; want ErrCipherNotConfigured", name, v, got, err)
+			}
+		}
+		admitted := &store.EncryptionMigration{State: store.EncryptionMigrationRunning, PlaintextReadAdmitted: true}
+		if _, err := c.DecryptForMigration("fake-plain", admitted); !errors.Is(err, secret.ErrCipherNotConfigured) {
+			t.Fatalf("%s DecryptForMigration: %v", name, err)
+		}
 	}
-	if got, err := nilCipher.Encrypt("fake"); err != nil || got != "fake" {
-		t.Fatal("nil cipher Encrypt")
+}
+
+// TestValueCipher_V1WriterMustReadItself: a v1-writing ring whose active
+// key is not a legacy v1 reader would write values it cannot read back.
+func TestValueCipher_V1WriterMustReadItself(t *testing.T) {
+	for name, readers := range map[string][]string{"no readers": {}, "other reader": {"k0"}} {
+		k := ciphertest.Keyring(t, ciphertest.Ring{Active: "k1", IDs: []string{"k0", "k1"}, WriteFormat: keyring.WriteV1, V1Readers: readers})
+		if _, err := secret.NewValueCipher(k); !errors.Is(err, secret.ErrWriterNotReadable) {
+			t.Fatalf("%s: err = %v, want ErrWriterNotReadable", name, err)
+		}
+	}
+	// v2 writers carry their key ID, so readers are irrelevant.
+	if _, err := secret.NewValueCipher(ciphertest.Keyring(t, ciphertest.Ring{Active: "k1", IDs: []string{"k1"}, WriteFormat: keyring.WriteV2})); err != nil {
+		t.Fatal(err)
+	}
+	ok := ciphertest.Cipher(t, ciphertest.Ring{Active: "k1", IDs: []string{"k0", "k1"}, WriteFormat: keyring.WriteV1, V1Readers: []string{"k0", "k1"}})
+	v, err := ok.Encrypt("fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ok.Decrypt(v); err != nil || got != "fake" {
+		t.Fatalf("v1 writer reads itself: %q, %v", got, err)
 	}
 }
 
