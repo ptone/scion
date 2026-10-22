@@ -469,6 +469,24 @@ func TestPortView_LinkWithoutTrailingSlash(t *testing.T) {
 	requirePortViewInvalid(t, f.send(t, http.MethodGet, f.base+portview.Route+expired, subHeader(), nil))
 	// Other methods get the single 404.
 	requirePortViewInvalid(t, f.send(t, http.MethodPost, f.base+portview.Route+valid, subHeader(), strings.NewReader("x")))
+
+	// HEAD is redirected like GET.
+	head := f.send(t, http.MethodHead, bare, subHeader(), nil)
+	require.Equal(t, http.StatusPermanentRedirect, head.status)
+	assert.Equal(t, f.viewURL(valid, "?a=1"), resolveLocation(t, bare, head).String())
+
+	// A WebSocket upgrade is not redirected: the single 404.
+	ws := subHeader()
+	ws.Set("Connection", "Upgrade")
+	ws.Set("Upgrade", "websocket")
+	ws.Set("Sec-WebSocket-Version", "13")
+	ws.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	requirePortViewInvalid(t, f.send(t, http.MethodGet, f.base+portview.Route+valid, ws, nil))
+
+	// A page navigation with a failed link goes to the port link's root.
+	nav := f.send(t, http.MethodGet, f.base+portview.Route+expired+"?a=1", navHeader(), nil)
+	require.Equal(t, http.StatusFound, nav.status, nav.body)
+	assert.Equal(t, f.portLink("?a=1"), resolveLocation(t, f.base+portview.Route+expired+"?a=1", nav).String())
 }
 
 // TestPortView_PortNotExposed: a valid capability for a port the agent
