@@ -163,6 +163,14 @@ var SecurityMutationSymbols = map[string]string{
 	"DeleteSecret":               "delete-resource",
 	"DeleteSecretsByScope":       "delete-resource",
 	"GetSecretValue":             "read-secret",
+	// Secret encryption (ptone/scion#1530 §6): the privileged payload
+	// scan, ciphertext-only replacement, policy transitions and
+	// migration records.
+	"ScanSecretPayloads":        "read-secret",
+	"ReplaceSecretCiphertext":   "update-resource",
+	"UpdateEncryptionPolicy":    "update-resource",
+	"CreateEncryptionMigration": "create-resource",
+	"UpdateEncryptionMigration": "update-resource",
 
 	// Broker secret operations
 	"CreateBrokerSecret":     "create-resource",
@@ -779,8 +787,6 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/store/entadapter/agent_deletion_finalize.go", Function: "finalizeAgentDeletionOnce", Symbol: "DeleteGroupMembershipsForAgents", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store adapter: finalize-hard removes the agent's group memberships before tx.Agent.Delete(), in the same transaction; the caller (FinalizeAgentDeletion via the delete engine) authorizes (ptone/scion#2769)", Scope: "pkg/store/entadapter"}},
 	{File: "pkg/store/entadapter/composite.go", Function: "DeleteProject", Symbol: "DeleteProject", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store adapter: composite DeleteProject implementation", Scope: "pkg/store/entadapter"}},
 	{File: "pkg/store/entadapter/composite.go", Function: "DeleteProject", Symbol: "DeleteProject", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store adapter: composite DeleteProject re-enters itself on the transactional store so the cascade and the row deletes commit together (ptone/scion#2769)", Scope: "pkg/store/entadapter"}},
-	{File: "pkg/store/entadapter/secret_store.go", Function: "UpsertSecret", Symbol: "CreateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store adapter: UpsertSecret delegates to CreateSecret", Scope: "pkg/store/entadapter"}},
-	{File: "pkg/store/entadapter/secret_store.go", Function: "UpsertSecret", Symbol: "UpdateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store adapter: UpsertSecret delegates to UpdateSecret", Scope: "pkg/store/entadapter"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/store/storetest/ — store interface conformance test fixtures
