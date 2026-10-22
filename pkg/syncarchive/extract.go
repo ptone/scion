@@ -18,9 +18,10 @@
 // The extractor writes only regular files, directories, and symbolic links
 // whose targets stay inside the destination, and it writes all of them
 // through an [os.Root] opened on the destination, so no entry can reach
-// outside it. Entries under a ".scion" directory (at any depth, compared
-// case-insensitively) are skipped, so the copy never changes project
-// configuration on the host. Each regular file is first written to a
+// outside it. Entries under a ".scion" or ".git" directory, or a ".git"
+// file (at any depth, compared case-insensitively), are skipped, so the copy
+// never changes project configuration or git metadata (configuration,
+// hooks, worktree and submodule pointer files) on the host. Each regular file is first written to a
 // temporary name in its directory and then renamed into place, so an
 // interrupted stream never leaves a partly written file behind.
 //
@@ -28,7 +29,7 @@
 //
 //   - A name that is absolute or has a ".." component refuses the whole
 //     archive (an archive made with "tar -C dir ." never has one).
-//   - An entry with a ".scion" component, or under one of
+//   - An entry with a ".scion" or ".git" component, or under one of
 //     [Options.Excludes], is skipped.
 //   - A directory, or a regular file, is written. Modes keep the
 //     permission bits only (no setuid, setgid or sticky bit) and are
@@ -37,7 +38,7 @@
 //     permission so their contents can be written.
 //   - A symbolic link is written only if its target is relative, any ".."
 //     components come before all other components, the target resolves
-//     inside the destination, and it names no ".scion" component.
+//     inside the destination, and it names no ".scion" or ".git" component.
 //     Otherwise it is skipped and reported.
 //   - A hard link is written only if it names an existing regular file
 //     inside the destination that is not skipped. Otherwise it is skipped
@@ -65,7 +66,9 @@ import (
 	"os"
 	"path"
 	"runtime"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -85,8 +88,19 @@ const (
 	// maxReported caps the number of skipped entries kept in Result.Unsafe.
 	maxReported = 50
 
-	// ProtectedDir is the directory name the extractor never writes under.
+	// maxTrailing bounds the data read after the end of the tar archive
+	// (tar pads its output to a whole record, 10 KiB by default).
+	maxTrailing int64 = 1 << 20
+
+	// maxQuotedName is the longest name QuoteName prints in full.
+	maxQuotedName = 200
+
+	// ProtectedDir is the project configuration directory the extractor
+	// never writes under.
 	ProtectedDir = ".scion"
+	// GitDir is the git metadata name (a directory, or a file in a
+	// worktree or submodule) the extractor never writes or writes under.
+	GitDir = ".git"
 )
 
 // unsafeNameChars are characters never accepted in an entry name or link
@@ -141,8 +155,10 @@ type Result struct {
 	Hardlinks int
 	Bytes     int64
 	// Protected counts entries skipped because they are under a ".scion"
-	// directory or one of Options.Excludes.
+	// directory, a ".git" name, or one of Options.Excludes. Git counts
+	// the ".git" ones among them.
 	Protected int
+	Git       int
 	// UnsafeCount counts entries skipped because writing them would not be
 	// safe (link targets outside the destination, device nodes, and so
 	// on). Unsafe lists the first of them.
@@ -164,13 +180,20 @@ func ExtractGzip(r io.Reader, dest string, opts Options) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("read archive: %w", err)
 	}
+	// One gzip member only: nothing after it is read.
+	zr.Multistream(false)
 	res, err := Extract(zr, dest, opts)
 	if err != nil {
 		return res, err
 	}
-	// Read to the end so a corrupt trailer is reported.
-	if _, err := io.Copy(io.Discard, zr); err != nil {
+	// Read the padding after the end of the archive so a corrupt trailer
+	// is reported, but no more than tar's padding can explain.
+	n, err := io.CopyN(io.Discard, zr, maxTrailing+1)
+	if err != nil && err != io.EOF {
 		return res, fmt.Errorf("read archive: %w", err)
+	}
+	if n > maxTrailing {
+		return res, fmt.Errorf("%w: more than %d bytes after the end of the archive", ErrRefused, maxTrailing)
 	}
 	return res, zr.Close()
 }
@@ -216,16 +239,17 @@ func Extract(r io.Reader, dest string, opts Options) (Result, error) {
 		}
 		if err != nil {
 			if errors.Is(err, tar.ErrInsecurePath) && hdr != nil {
-				return res, fmt.Errorf("%w: entry %q has an unsafe name", ErrRefused, hdr.Name)
+				return res, fmt.Errorf("%w: entry %s has an unsafe name", ErrRefused, QuoteName(hdr.Name))
 			}
 			return res, fmt.Errorf("read archive: %w", err)
-		}
-		if hdr.Typeflag == tar.TypeXGlobalHeader {
-			continue
 		}
 		entries++
 		if entries > maxEntries {
 			return res, fmt.Errorf("%w: more than %d entries", ErrRefused, maxEntries)
+		}
+		if hdr.Typeflag == tar.TypeXGlobalHeader {
+			// Counted, but nothing to write.
+			continue
 		}
 		if hdr.Size < 0 || hdr.Size > maxBytes-total {
 			return res, fmt.Errorf("%w: contents larger than %d bytes", ErrRefused, maxBytes)
@@ -277,14 +301,14 @@ func entryName(name string) ([]string, error) {
 		return nil, fmt.Errorf("%w: entry with an empty name", ErrRefused)
 	}
 	if strings.HasPrefix(name, "/") || strings.ContainsAny(name, unsafeNameChars) {
-		return nil, fmt.Errorf("%w: entry %q has an unsafe name", ErrRefused, name)
+		return nil, fmt.Errorf("%w: entry %s has an unsafe name", ErrRefused, QuoteName(name))
 	}
 	var parts []string
 	for _, p := range strings.Split(name, "/") {
 		switch p {
 		case "", ".":
 		case "..":
-			return nil, fmt.Errorf("%w: entry %q leaves the destination", ErrRefused, name)
+			return nil, fmt.Errorf("%w: entry %s leaves the destination", ErrRefused, QuoteName(name))
 		default:
 			parts = append(parts, p)
 		}
@@ -304,11 +328,25 @@ func splitClean(p string) []string {
 	return parts
 }
 
-// IsProtectedName reports whether a path component names the protected
-// directory on any file system the host might use: compared with Unicode
-// case folding, ignoring trailing dots and spaces (Windows) and code points
-// some file systems ignore in names (HFS+).
-func IsProtectedName(c string) bool {
+// QuoteName returns name quoted for printing, shortened to its first
+// maxQuotedName bytes (on a rune boundary) when longer. Entry names come
+// from the archive, so they are never printed raw.
+func QuoteName(name string) string {
+	if len(name) <= maxQuotedName {
+		return strconv.Quote(name)
+	}
+	cut := maxQuotedName
+	for cut > 0 && !utf8.RuneStart(name[cut]) {
+		cut--
+	}
+	return fmt.Sprintf("%s... (%d bytes)", strconv.Quote(name[:cut]), len(name))
+}
+
+// protectedName returns ProtectedDir or GitDir if path component c names
+// it on any file system the host might use (compared with Unicode case
+// folding, ignoring trailing dots and spaces as Windows does and code
+// points some file systems ignore in names, as HFS+ does), and "" if not.
+func protectedName(c string) string {
 	var b strings.Builder
 	for _, r := range c {
 		if ignorableRune(r) {
@@ -316,8 +354,18 @@ func IsProtectedName(c string) bool {
 		}
 		b.WriteRune(r)
 	}
-	return strings.EqualFold(strings.TrimRight(b.String(), ". "), ProtectedDir)
+	n := strings.TrimRight(b.String(), ". ")
+	for _, p := range []string{ProtectedDir, GitDir} {
+		if strings.EqualFold(n, p) {
+			return p
+		}
+	}
+	return ""
 }
+
+// IsProtectedName reports whether a path component names ProtectedDir or
+// GitDir; see protectedName.
+func IsProtectedName(c string) bool { return protectedName(c) != "" }
 
 func ignorableRune(r rune) bool {
 	switch {
@@ -335,14 +383,17 @@ func ignorableRune(r rune) bool {
 	return false
 }
 
-func hasProtected(parts []string) bool {
+// firstProtected returns the first protected name among parts, or "".
+func firstProtected(parts []string) string {
 	for _, p := range parts {
-		if IsProtectedName(p) {
-			return true
+		if n := protectedName(p); n != "" {
+			return n
 		}
 	}
-	return false
+	return ""
 }
+
+func hasProtected(parts []string) bool { return firstProtected(parts) != "" }
 
 func (x *extractor) excluded(parts []string) bool {
 	for _, e := range x.excludes {
@@ -372,8 +423,11 @@ func (x *extractor) entry(tr *tar.Reader, hdr *tar.Header) error {
 		// mode is left alone.
 		return nil
 	}
-	if hasProtected(parts) || x.excluded(parts) {
+	if n := firstProtected(parts); n != "" || x.excluded(parts) {
 		x.res.Protected++
+		if n == GitDir {
+			x.res.Git++
+		}
 		return nil
 	}
 	rel := strings.Join(parts, "/")
@@ -417,10 +471,10 @@ func (x *extractor) parents(parts []string, rel string) (bool, error) {
 		case err != nil:
 			return false, fmt.Errorf("inspect %s: %w", p, err)
 		case fi.Mode()&fs.ModeSymlink != 0:
-			x.res.unsafe(rel, fmt.Sprintf("parent %q is a symbolic link", p))
+			x.res.unsafe(rel, "parent "+QuoteName(p)+" is a symbolic link")
 			return false, nil
 		case !fi.IsDir():
-			x.res.unsafe(rel, fmt.Sprintf("parent %q is not a directory", p))
+			x.res.unsafe(rel, "parent "+QuoteName(p)+" is not a directory")
 			return false, nil
 		}
 	}
@@ -509,13 +563,14 @@ func (x *extractor) file(tr *tar.Reader, parts []string, rel string, hdr *tar.He
 	return nil
 }
 
-// symlinkTargetOK reports whether a symbolic link at rel (components
-// parts) pointing at target stays inside the destination without naming
-// the protected directory. The link's own directory is a real directory
+// symlinkTargetProblem returns why a symbolic link at parts pointing at
+// target is not written, or "" if it stays inside the destination without
+// naming a protected name. The link's own directory is a real directory
 // (parents checks that), so leading ".." components climb exactly as far
 // as they say; ".." after any other component could climb out of a
-// directory reached through another link, so it is not allowed.
-func symlinkTargetOK(parts []string, target string) string {
+// directory reached through another link (d/r -> "..", then d/e ->
+// "r/.." names the destination's parent), so it is not allowed.
+func symlinkTargetProblem(parts []string, target string) string {
 	if target == "" || strings.HasPrefix(target, "/") || strings.ContainsAny(target, unsafeNameChars) {
 		return "link target is absolute or unsafe"
 	}
@@ -533,23 +588,25 @@ func symlinkTargetOK(parts []string, target string) string {
 				return "link target leaves the destination"
 			}
 		default:
-			if IsProtectedName(c) {
-				return "link target names " + ProtectedDir
+			if n := protectedName(c); n != "" {
+				return "link target names " + n
 			}
 			descended = true
 		}
 	}
-	// The resolved path must not name the protected directory either (for
-	// example a link in a subdirectory climbing to the root's ".scion").
+	// Defence in depth: the checks above already cover the resolved path
+	// (the link's own components were checked by entry, and cleaning only
+	// removes components), but the resolved target must not name a
+	// protected name either.
 	resolved := splitClean(path.Join(path.Dir(strings.Join(parts, "/")), target))
-	if hasProtected(resolved) {
-		return "link target names " + ProtectedDir
+	if n := firstProtected(resolved); n != "" {
+		return "link target names " + n
 	}
 	return ""
 }
 
 func (x *extractor) symlink(parts []string, rel string, hdr *tar.Header) error {
-	if reason := symlinkTargetOK(parts, hdr.Linkname); reason != "" {
+	if reason := symlinkTargetProblem(parts, hdr.Linkname); reason != "" {
 		x.res.unsafe(rel, reason)
 		return nil
 	}

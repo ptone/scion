@@ -30,6 +30,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -253,9 +255,10 @@ func isSyncTransientError(err error) bool {
 	if err == nil {
 		return false
 	}
-	// A refused archive is refused again on retry, and its message quotes
-	// entry names from the pod, which must not decide whether to retry.
-	if errors.Is(err, syncarchive.ErrRefused) {
+	// A refused archive, or any other extraction failure, would fail
+	// again on retry, and its message quotes entry names from the pod,
+	// which must not decide whether to retry.
+	if errors.Is(err, syncarchive.ErrRefused) || errors.Is(err, errSyncExtract) {
 		return false
 	}
 	msg := err.Error()
@@ -3734,13 +3737,13 @@ func (r *KubernetesRuntime) syncFromPod(ctx context.Context, namespace, podName,
 	}
 
 	fmt.Printf("  Streaming archive from pod '%s' (destination: %s)...\n", podName, localPath)
-	var stderr bytes.Buffer
-	res, err := extractPodArchive(localPath, excludes, func(w io.Writer) error {
+	stderr := &cappedBuffer{max: maxRemoteStderr}
+	res, err := extractPodArchive(ctx, localPath, excludes, func(ctx context.Context, w io.Writer) error {
 		return executor.StreamWithContext(ctx, remotecommand.StreamOptions{
 			Stdout: w,
-			Stderr: &stderr,
+			Stderr: stderr,
 		})
-	}, &stderr)
+	}, stderr)
 	if err != nil {
 		return err
 	}
@@ -3749,8 +3752,46 @@ func (r *KubernetesRuntime) syncFromPod(ctx context.Context, namespace, podName,
 	fmt.Printf("  Sync from %s complete.\n", remotePath)
 	runtimeLog().Info("Sync from pod complete", "pod", podName, "dest", localPath,
 		"files", res.Files, "bytes", res.Bytes,
-		"skipped_protected", res.Protected, "skipped_unsafe", res.UnsafeCount)
+		"skipped_protected", res.Protected, "skipped_git", res.Git, "skipped_unsafe", res.UnsafeCount)
 	return nil
+}
+
+// errSyncExtract marks a sync-from failure that came from extracting the
+// pod's archive rather than from the stream. Such a failure is not
+// retried: retrying would fail the same way, and its message quotes entry
+// names from the pod, which must not decide whether to retry.
+var errSyncExtract = errors.New("extract archive from pod")
+
+// syncArchiveTrailingGrace is how long the stream may stay open after the
+// archive has been read completely (the pod's tar exiting) before it is
+// cut off.
+var syncArchiveTrailingGrace = 30 * time.Second
+
+// maxRemoteStderr bounds the pod's stderr kept for error messages.
+const maxRemoteStderr = 64 << 10
+
+// cappedBuffer keeps the first max bytes written to it and discards the
+// rest. It is safe for concurrent use: the exec stream may still write to
+// it after StreamWithContext has returned on cancellation.
+type cappedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+	max int
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if room := b.max - b.buf.Len(); room > 0 {
+		b.buf.Write(p[:min(len(p), room)])
+	}
+	return len(p), nil
+}
+
+func (b *cappedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // extractPodArchive runs stream, which writes a gzip-compressed tar archive
@@ -3758,8 +3799,19 @@ func (r *KubernetesRuntime) syncFromPod(ctx context.Context, namespace, podName,
 // arrives. The archive is built by the agent, so it is extracted by
 // syncarchive rather than by tar: only regular files, directories and
 // in-tree symbolic links are written, nothing outside localPath and nothing
-// under .scion. remoteStderr, if not nil, is quoted when the stream fails.
-func extractPodArchive(localPath string, excludes []string, stream func(io.Writer) error, remoteStderr *bytes.Buffer) (syncarchive.Result, error) {
+// under .scion or .git.
+//
+// stream must stop when its context is cancelled. The context is cancelled
+// as soon as extraction fails (a failed write to the pipe does not end a
+// client-go exec stream, which keeps reading the pod's output), and
+// syncArchiveTrailingGrace after the archive has been read completely if
+// the stream is still open. remoteStderr, if not nil, is quoted when the
+// stream fails.
+func extractPodArchive(ctx context.Context, localPath string, excludes []string, stream func(context.Context, io.Writer) error, remoteStderr fmt.Stringer) (syncarchive.Result, error) {
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var streamDone, extractStopped, trailingCut atomic.Bool
 	pr, pw := io.Pipe()
 	type extraction struct {
 		res syncarchive.Result
@@ -3768,40 +3820,56 @@ func extractPodArchive(localPath string, excludes []string, stream func(io.Write
 	done := make(chan extraction, 1)
 	go func() {
 		res, err := syncarchive.ExtractGzip(pr, localPath, syncarchive.Options{Excludes: excludes})
-		// If extraction stopped early, fail the stream's next write
-		// instead of leaving it blocked on the pipe.
 		if err != nil {
 			_ = pr.CloseWithError(err)
+			if !streamDone.Load() {
+				extractStopped.Store(true)
+				cancel()
+			}
 		} else {
 			_ = pr.Close()
+			time.AfterFunc(syncArchiveTrailingGrace, func() {
+				if !streamDone.Load() {
+					trailingCut.Store(true)
+					cancel()
+				}
+			})
 		}
 		done <- extraction{res: res, err: err}
 	}()
 
-	streamErr := stream(pw)
+	streamErr := stream(streamCtx, pw)
+	streamDone.Store(true)
 	// A nil streamErr closes the pipe with io.EOF, ending the archive.
 	_ = pw.CloseWithError(streamErr)
 	ext := <-done
 
-	// A refused archive is reported as such even though refusing it also
-	// broke the stream; otherwise a stream failure is the cause of any
-	// extraction error.
-	if ext.err != nil && (streamErr == nil || errors.Is(ext.err, syncarchive.ErrRefused)) {
-		return ext.res, fmt.Errorf("extract archive from pod: %w", ext.err)
+	// An extraction failure is the cause when the stream ended normally,
+	// when extraction stopped first (and cut the stream off), or when the
+	// archive was refused.
+	if ext.err != nil && (streamErr == nil || extractStopped.Load() || errors.Is(ext.err, syncarchive.ErrRefused)) {
+		return ext.res, fmt.Errorf("%w: %w", errSyncExtract, ext.err)
 	}
 	if streamErr != nil {
+		if trailingCut.Load() {
+			return ext.res, fmt.Errorf("%w: the pod kept the stream open %s after the end of the archive", errSyncExtract, syncArchiveTrailingGrace)
+		}
 		var stderr string
 		if remoteStderr != nil {
 			stderr = remoteStderr.String()
 		}
-		return ext.res, fmt.Errorf("stream failed: %w (remote stderr: %s)", streamErr, stderr)
+		return ext.res, fmt.Errorf("stream failed: %w (remote stderr: %q)", streamErr, stderr)
 	}
 	return ext.res, nil
 }
 
 // reportSkippedSyncEntries prints the entries of an archive from a pod that
-// were not copied because writing them would not be safe.
+// were not copied: git metadata (counted), and entries that would not be
+// safe to write (listed).
 func reportSkippedSyncEntries(res syncarchive.Result) {
+	if res.Git > 0 {
+		fmt.Printf("  Note: %d git metadata entries (.git) were not copied; commits reach the host by pushing them to the remote.\n", res.Git)
+	}
 	if res.UnsafeCount == 0 {
 		return
 	}
@@ -3809,7 +3877,7 @@ func reportSkippedSyncEntries(res syncarchive.Result) {
 	for _, s := range res.Unsafe {
 		// Names come from the pod; quote them so control characters
 		// cannot rewrite the terminal or forge log lines.
-		fmt.Printf("    %q: %s\n", s.Name, s.Reason)
+		fmt.Printf("    %s: %s\n", syncarchive.QuoteName(s.Name), s.Reason)
 	}
 	if more := res.UnsafeCount - len(res.Unsafe); more > 0 {
 		fmt.Printf("    ... and %d more\n", more)
