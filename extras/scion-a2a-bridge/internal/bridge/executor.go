@@ -97,11 +97,12 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 		// executor), the same answer as when the hub refuses the send, so
 		// these cannot be told apart; a routing failure for any other error.
 		var agentCtx *state.Context
+		var launching *hubclient.Agent
 		var resolveErr error
 		if federatedUser && e.bridge.AuthorizeExposed(route.ProjectSlug, route.AgentSlug) != nil {
 			resolveErr = fmt.Errorf("%w: %q", ErrAgentNotFound, route.AgentSlug)
 		} else {
-			agentCtx, resolveErr = e.bridge.resolveContext(ctx, route.ProjectSlug, route.AgentSlug, "")
+			agentCtx, launching, resolveErr = e.bridge.resolveContextLaunch(ctx, route.ProjectSlug, route.AgentSlug, "")
 		}
 		if resolveErr != nil && !federatedUser {
 			yield(nil, fmt.Errorf("resolve agent: %w", resolveErr))
@@ -177,6 +178,39 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 				e.bridge.subscribeAllUserTopics(agentCtx.ProjectID)
 			default:
 				e.bridge.subscribeAdminUserTopics(agentCtx.ProjectID)
+			}
+		}
+
+		// An agent still launching (an asynchronous create, or an adopted
+		// agent another client is launching) is waited for before the
+		// send. This runs before the execution lease is claimed, so no
+		// lease is held during the wait. The task reports working with the
+		// launch step, and fails without a send when the launch fails.
+		if hubclient.LaunchActive(launching) {
+			waitCtx, cancelWait := context.WithCancel(ctx)
+			defer cancelWait()
+			consumerGone := false
+			report := launchStepReporter(func(text string) {
+				if consumerGone {
+					return
+				}
+				msg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart(text))
+				if !yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateWorking, msg), nil) {
+					consumerGone = true
+					cancelWait()
+				}
+			})
+			report(launchStep(launching))
+			waitErr := e.bridge.waitForAgentLaunch(waitCtx, launching, report)
+			cancelWait()
+			if consumerGone {
+				return
+			}
+			if waitErr != nil {
+				e.log.Warn("agent did not start; message not sent", "error", waitErr, "task_id", taskID, "agent_id", agentCtx.AgentID)
+				failMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart(launchFailureText(waitErr)))
+				yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, failMsg), nil)
+				return
 			}
 		}
 

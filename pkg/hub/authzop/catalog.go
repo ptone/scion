@@ -322,9 +322,6 @@ var EntryPointExemptions = []EntryPointExemption{
 	// (hub.githubapp.read, hub.githubapp.update) with method-aware route guard
 	// enforcement. Exemptions removed; see Catalog OperationSpec entries.
 
-	// Access constraint preview endpoints — hub-admin, access_constraint.admin permission
-	{Pattern: "/api/v1/admin/access-constraint-previews", Kind: ExemptionHubAdmin, Reason: "Access constraint previews, hub-admin with access_constraint.admin; a preview precedes each governed boundary commit", Owner: "route_metadata.go"},
-	{Pattern: "/api/v1/admin/access-constraint-previews/", Kind: ExemptionHubAdmin, Reason: "Access constraint preview by ID, hub-admin with access_constraint.admin; a preview precedes each governed boundary commit", Owner: "route_metadata.go"},
 }
 
 // MutationClassifications maps every discovered security-relevant mutation
@@ -768,6 +765,7 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/httpdispatcher.go", Function: "DispatchAgentDelete", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "HTTP dispatcher agent delete dispatch, infrastructure adapter", Scope: "pkg/hub/httpdispatcher.go"}},
 	{File: "pkg/hub/httpdispatcher.go", Function: "deletePreviousRuns", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "HTTP dispatcher run-scoped delete of an agent's previous runs, part of DispatchAgentDelete, infrastructure adapter", Scope: "pkg/hub/httpdispatcher.go"}},
 	{File: "pkg/hub/move_dispatch.go", Function: "DispatchAgentDeleteLocalOnly", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "move dispatcher source-broker local-only agent delete during reincarnate --broker, infrastructure adapter", Scope: "pkg/hub/move_dispatch.go"}},
+	{File: "pkg/hub/move_dispatch.go", Function: "DispatchAgentDeleteRecreated", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "move dispatcher target-broker rollback delete of a failed forced move during reincarnate --broker, infrastructure adapter", Scope: "pkg/hub/move_dispatch.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/store/entadapter/ — store layer implementation
@@ -788,6 +786,8 @@ var MutationClassifications = []MutationClassification{
 	// pkg/store/storetest/ — store interface conformance test fixtures
 	// -----------------------------------------------------------------------
 	{File: "pkg/store/storetest/domains.go", Function: "AgentDomain", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: agent domain setup", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains.go", Function: "GCPServiceAccountDomain", Symbol: "CreateGCPServiceAccount", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: GCP SA domain setup", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains.go", Function: "GCPServiceAccountDomain", Symbol: "CreateGCPServiceAccount", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: GCP SA domain setup", Scope: "pkg/store/storetest"}},
 	{File: "pkg/store/storetest/domains.go", Function: "GCPServiceAccountDomain", Symbol: "CreateGCPServiceAccount", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: GCP SA domain setup", Scope: "pkg/store/storetest"}},
 	{File: "pkg/store/storetest/domains.go", Function: "GCPServiceAccountDomain", Symbol: "CreateGCPServiceAccount", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: GCP SA domain setup", Scope: "pkg/store/storetest"}},
 	{File: "pkg/store/storetest/domains.go", Function: "GCPServiceAccountDomain", Symbol: "CreateGCPServiceAccount", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: GCP SA domain setup", Scope: "pkg/store/storetest"}},

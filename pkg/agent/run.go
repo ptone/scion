@@ -1858,14 +1858,15 @@ authDone:
 		} else if globalSettings != nil && (globalSettings.Server == nil || globalSettings.Server.SharedDirStorage == nil) &&
 			config.GlobalSettingsIsLegacyFormat() && config.GlobalSettingsMentions("shared_dir_storage") {
 			// Round 4 review finding S-L1: a global settings.yaml with no
-			// "schema_version: \"1\"" takes the LEGACY loader path, which
-			// silently drops the entire server block — LoadGlobalSettings
-			// returns err == nil with Server == nil, so the gErr != nil
-			// branch above never runs. Without this check, an operator's
-			// shared_dir_storage config would vanish with only a generic
-			// "unrecognized keys" WARN, which is a worse silent failure
-			// than the malformed-YAML case, and contradicts G5 fail-closed
-			// for an operator who plausibly intended to configure it.
+			// "schema_version: \"1\"" used to take a legacy loader path
+			// that dropped the entire server block. Such a file is now
+			// converted with its server block kept (ptone/scion#3919), so
+			// a real block loads and is enforced below. This check still
+			// fails closed when a legacy-format file mentions the key but
+			// no block loads (for example a misplaced or commented-out
+			// block): LoadGlobalSettings returns err == nil with no block,
+			// so the gErr != nil branch above never runs, and the
+			// operator plausibly intended to configure it (G5).
 			//
 			// Round 5 review finding C1=T1=S-L2: GlobalSettingsMentions is a
 			// raw substring check, so it also fires on a well-formed v1 file
@@ -1875,11 +1876,9 @@ authDone:
 			// successfully as v1, the loader above is authoritative — no
 			// parsed block means it genuinely was not configured, exactly
 			// like main. The GlobalSettingsIsLegacyFormat() gate restricts
-			// this fail-closed substring check to files that actually took
-			// the legacy loader path, where there is no parsed struct to
-			// trust and the substring is the only available signal; the
-			// "(missing schema_version...)" wording below is therefore
-			// always accurate when this branch fires.
+			// this fail-closed substring check to files without
+			// schema_version, where the substring is the only signal that
+			// a block was intended.
 			return nil, fmt.Errorf(
 				"global settings mention server.shared_dir_storage but it was not loaded (missing schema_version: \"1\"?)")
 		} else if globalSettings != nil {
@@ -2031,32 +2030,24 @@ authDone:
 		// pod-local EmptyDir on Kubernetes). With NFS storage it gets its
 		// own agent directory on the export (design #2703 P3), which only
 		// the Kubernetes runtime can mount: see nfsEmptyAgentDirSelection.
-		var emptyAgentDirName string
 		if emptyPerAgent {
 			sharingMode = store.SharingModeEmptyPerAgent
-			var selErr error
-			emptyAgentDirName, selErr = nfsEmptyAgentDirSelection(m.Runtime.Name(), settings.Server.WorkspaceStorage, opts.Name)
-			if selErr != nil {
-				return nil, selErr
-			}
+		}
+		// The agent's own directory on the export, if it gets one
+		// (nfsOwnAgentDirSelection): empty-per-agent, or a git project
+		// dispatched in clone-per-agent mode on Kubernetes, with a
+		// workspace the agent container clones into. Paths are still
+		// resolved from the project's workspace path (shared-plain).
+		emptyAgentDirName, agentDirName, agentBranch, selErr := nfsOwnAgentDirSelection(m.Runtime.Name(), settings.Server.WorkspaceStorage, emptyPerAgent, opts.Env, opts.GitClone, opts.Name)
+		if selErr != nil {
+			return nil, selErr
 		}
 		// On Kubernetes, a git project dispatched in worktree-per-agent mode
 		// gets its own worktree under the shared checkout. Shared-plain and
 		// every other runtime keep the layout above.
-		// A git project dispatched in clone-per-agent mode gets its own
-		// agent directory next to the project's workspace path instead,
-		// with a workspace the agent container clones into. Paths are
-		// still resolved from the project's workspace path (shared-plain).
-		var worktreeName, worktreeBranch, agentDirName, agentBranch string
+		var worktreeName, worktreeBranch string
 		if isKubernetesRuntime(m.Runtime.Name()) && !emptyPerAgent {
 			worktreeName, worktreeBranch = nfsWorktreeSelection(opts.Env, opts.GitClone, opts.Name)
-			if settings.Server.WorkspaceStorage.Backend == "nfs" {
-				var selErr error
-				agentDirName, agentBranch, selErr = nfsAgentDirSelection(opts.Env, opts.GitClone, opts.Name)
-				if selErr != nil {
-					return nil, selErr
-				}
-			}
 		}
 		if worktreeName != "" {
 			sharingMode = store.SharingModeWorktreePerAgent
@@ -2121,6 +2112,11 @@ authDone:
 					agentEnv = withEnvValue(agentEnv, "SCION_WORKSPACE_MODE", string(store.SharingModeSharedPlain))
 				}
 			}
+			// ownDirCreated reports whether this start created the agent's
+			// own directory on the export (an atomic claim in the leaf
+			// helper): a forced move's start marks it as the move's only
+			// then (markMoveExportAgentDir).
+			ownDirName, ownDirCreated := "", false
 			if emptyAgentDirName != "" {
 				// Empty-per-agent: only the agent's own directory is ever
 				// mounted, never the project's workspace path resolved
@@ -2129,15 +2125,29 @@ authDone:
 				if mount.PVClaimName == "" {
 					return nil, errEmptyPerAgentNFSNoClaim
 				}
-				nfsWorkspacePreCreated, err = ensureNFSAgentWorkspaceLeaf(m.Runtime.Name(), projectID, resolvedWorkspace, mount.PVClaimName, claimSharedDirNames, emptyAgentDirName)
+				nfsWorkspacePreCreated, ownDirCreated, err = ensureNFSAgentWorkspaceLeafClaim(m.Runtime.Name(), projectID, resolvedWorkspace, mount.PVClaimName, claimSharedDirNames, emptyAgentDirName)
+				ownDirName = emptyAgentDirName
 				nfsAgentDirName = emptyAgentDirName
 				nfsAgentDirEmpty = true
 			} else if agentDirName != "" && mount.PVClaimName != "" {
-				nfsWorkspacePreCreated, err = ensureNFSAgentWorkspaceLeaf(m.Runtime.Name(), projectID, resolvedWorkspace, mount.PVClaimName, claimSharedDirNames, agentDirName)
+				nfsWorkspacePreCreated, ownDirCreated, err = ensureNFSAgentWorkspaceLeafClaim(m.Runtime.Name(), projectID, resolvedWorkspace, mount.PVClaimName, claimSharedDirNames, agentDirName)
+				ownDirName = agentDirName
 				nfsAgentDirName = agentDirName
 				nfsAgentBranch = agentBranch
 			} else {
 				nfsWorkspacePreCreated, err = ensureNFSWorkspaceLeaf(m.Runtime.Name(), projectID, resolvedWorkspace, mount.PVClaimName, claimSharedDirNames)
+			}
+			// A directory this start created is marked even when the leaf
+			// helper then failed on a later directory, before that failure
+			// is returned, so a forced move's rollback can still remove it.
+			if ownDirCreated {
+				ownDirPath, perr := nfsOwnAgentDirPath(resolvedWorkspace, ownDirName)
+				if perr == nil {
+					perr = markMoveExportAgentDir(agentDir, ownDirPath)
+				}
+				if perr != nil {
+					return nil, errors.Join(err, perr)
+				}
 			}
 			if err != nil {
 				return nil, err
