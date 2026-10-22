@@ -22,7 +22,6 @@ cmd/broker_purge_guard.go not protected on Windows: gated (runtime-broker purge 
 pkg/agent/agent_files_guard.go not protected on Windows: gated (agent files guard; agent lifecycle runs on a broker)
 pkg/agent/harness_config_policy.go not protected on Windows: gated (harness config record; agent provisioning)
 pkg/agent/hoststate.go not protected on Windows: gated (agent host state; agent lifecycle runs on a broker)
-pkg/agent/hoststate_other.go not protected on Windows: gated (agent host state; agent lifecycle runs on a broker)
 pkg/agent/provision.go not protected on Windows: gated (agent provisioning)
 pkg/agent/shared_dir_storage.go not protected on Windows: gated (shared-dir storage; agent provisioning)
 pkg/agent/task_file.go not protected on Windows: gated (agent task file; agent provisioning)
