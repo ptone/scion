@@ -236,7 +236,7 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 						}
 					}
 					worktreeStart := time.Now()
-					if deleted, err := util.RemoveWorktree(repoRoot, wtPath, removeBranch); err == nil {
+					if deleted, err := util.RemoveWorktree(repoRoot, wtPath, repoRoot, branchToDelete(removeBranch, branch)); err == nil {
 						if deleted {
 							branchDeleted = true
 						}
@@ -295,7 +295,7 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 		if _, err := os.Stat(filepath.Join(worktreeDir, ".git")); err == nil {
 			util.Debugf("delete: removing worktree-per-agent workspace at %s", worktreeDir)
 			worktreeStart := time.Now()
-			if deleted, err := util.RemoveWorktree(repoRoot, worktreeDir, removeBranch); err == nil {
+			if deleted, err := util.RemoveWorktree(repoRoot, worktreeDir, repoRoot, branchToDelete(removeBranch, api.Slugify(agentName))); err == nil {
 				if deleted {
 					branchDeleted = true
 				}
@@ -332,7 +332,7 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 				}
 				util.Debugf("delete: removing workspace at %s", agentWorkspace)
 				worktreeStart := time.Now()
-				if deleted, err := util.RemoveWorktree(agentDir, agentWorkspace, removeBranch); err == nil {
+				if deleted, err := util.RemoveWorktree(agentDir, agentWorkspace, repoRoot, branchToDelete(removeBranch, api.Slugify(agentName))); err == nil {
 					if deleted {
 						branchDeleted = true
 					}
@@ -4120,6 +4120,17 @@ func removeWorkspaceWorktreeEntry(agentWorkspace string) {
 	if err := util.RemoveWorktreeEntryIn(root, agentWorkspace); err != nil {
 		slog.Warn("could not remove the worktree entry", "path", agentWorkspace, "error", err)
 	}
+}
+
+// branchToDelete returns branch when removeBranch is set and "" otherwise:
+// the branch util.RemoveWorktree is asked to delete. The branch always comes
+// from the caller (the sharer marker, or the agent's own branch name), never
+// from the worktree.
+func branchToDelete(removeBranch bool, branch string) string {
+	if !removeBranch {
+		return ""
+	}
+	return branch
 }
 
 // claimAgentHome is claimDir for ProvisionAgent's agent home; a variable

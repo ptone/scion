@@ -409,15 +409,29 @@ func pathResolvedUnderBase(base, candidate string) (ok bool, resolvedCandidate s
 // path (e.g. one sourced from stored/discovered state rather than freshly
 // created here) must not have it silently honored.
 //
+// repoRoot and branch come from the caller, never from the worktree: no git
+// command runs inside the worktree, and its own metadata files (the .git
+// pointer, the admin directory's commondir and HEAD) never choose which
+// repository is changed or which branch is deleted. repoRoot is the main
+// repository the worktree belongs to; when it is empty, or is not a main
+// repository (see BaseRepoGitCommand), the worktree entry and the branch
+// are left alone. branch is the branch to delete; when it is empty no
+// branch is deleted. The branch is deleted only when the worktree's admin
+// directory in repoRoot shows the worktree checked out on exactly that
+// branch (worktreeOnBranch), and only through DeleteBranchIn.
+//
 // Instead of using "git worktree remove" (which does its own directory
 // deletion and can trigger macOS autofs timeouts on symlinks pointing to
 // container-internal paths), this function:
-//  1. Gathers git metadata (branch name, repo root) while the worktree exists.
+//  1. Checks, while the worktree exists, whether it is on branch in repoRoot.
 //  2. Removes the worktree directory using RemoveAllSafe (which uses unlinkat
 //     to avoid autofs triggers).
 //  3. Removes the now-stale record of this worktree only
 //     (RemoveWorktreeEntryIn), never a repository-wide prune.
-func RemoveWorktree(base, path string, deleteBranch bool) (bool, error) {
+//  4. Deletes branch, if step 1 matched.
+//
+// It reports whether the branch was deleted.
+func RemoveWorktree(base, path, repoRoot, branch string) (bool, error) {
 	// Every failure from here through the containment check is a pre-removal
 	// validation failure, not a removal-mechanics failure — none of them have
 	// proven path safe to act on, so all of them wrap ErrPathNotContained
@@ -448,29 +462,22 @@ func RemoveWorktree(base, path string, deleteBranch bool) (bool, error) {
 		return false, fmt.Errorf("RemoveWorktree: %q does not resolve under %q: %w", path, base, ErrPathNotContained)
 	}
 
-	var branchName string
-	var repoRoot string
-	branchDeleted := false
-
-	// Get the common git dir (main repo's .git dir) — needed for both
-	// pruning and optional branch deletion.
-	cmd := exec.Command("git", "-C", path, "rev-parse", "--git-common-dir")
-	output, err := cmd.Output()
-	if err == nil {
-		commonDir := strings.TrimSpace(string(output))
-		if !filepath.IsAbs(commonDir) {
-			// If relative, it's relative to the worktree root
-			commonDir = filepath.Join(path, commonDir)
+	if repoRoot != "" {
+		if _, err := baseRepoGitDir(repoRoot); err != nil {
+			slog.Warn("remove worktree: not a main repository; leaving its worktree entry and branch alone",
+				"path", resolvedPath, "repo_root", repoRoot, "error", err)
+			repoRoot = ""
 		}
-		repoRoot = filepath.Dir(commonDir)
 	}
 
-	if deleteBranch {
-		// Get branch name
-		cmd = exec.Command("git", "-C", path, "branch", "--show-current")
-		output, err = cmd.Output()
-		if err == nil {
-			branchName = strings.TrimSpace(string(output))
+	// Read before the directory (which holds the .git pointer) is removed.
+	onBranch := false
+	if repoRoot != "" && branch != "" {
+		var reason string
+		onBranch, reason = worktreeOnBranch(resolvedPath, repoRoot, branch)
+		if !onBranch {
+			slog.Warn("remove worktree: worktree is not on the expected branch of the repository; the branch is not deleted",
+				"path", resolvedPath, "repo_root", repoRoot, "branch", branch, "reason", reason)
 		}
 	}
 
@@ -502,19 +509,132 @@ func RemoveWorktree(base, path string, deleteBranch bool) (bool, error) {
 		}
 	}
 
-	if deleteBranch && branchName != "" && repoRoot != "" {
-		// Now delete the branch from the main repo
-		Debugf("RemoveWorktree: deleting branch %s", branchName)
-		branchDeleteStart := time.Now()
-		cmd := exec.Command("git", "-C", repoRoot, "branch", "-D", branchName)
-		if err := cmd.Run(); err == nil {
-			branchDeleted = true
-			Debugf("RemoveWorktree: branch delete completed in %v", time.Since(branchDeleteStart))
-		} else {
-			Debugf("RemoveWorktree: branch delete failed in %v: %v", time.Since(branchDeleteStart), err)
-		}
+	if !onBranch {
+		return false, nil
 	}
-	return branchDeleted, nil
+	Debugf("RemoveWorktree: deleting branch %s", branch)
+	branchDeleteStart := time.Now()
+	deleted := DeleteBranchIn(repoRoot, branch)
+	Debugf("RemoveWorktree: branch delete (deleted: %v) completed in %v", deleted, time.Since(branchDeleteStart))
+	return deleted, nil
+}
+
+// worktreeOnBranch reports whether the worktree at path is a linked
+// worktree of the main repository at repoRoot checked out on branch, reading
+// the files git would read but without running git in the worktree. All of
+// these must hold:
+//   - path/.git is a "gitdir:" file naming a directory directly under
+//     repoRoot/.git/worktrees (compared with symlinks resolved);
+//   - that admin directory's commondir file names repoRoot/.git;
+//   - its HEAD file is exactly "ref: refs/heads/<branch>".
+//
+// The reason names the first check that failed.
+func worktreeOnBranch(path, repoRoot, branch string) (bool, string) {
+	data, err := os.ReadFile(filepath.Join(path, ".git"))
+	if err != nil {
+		return false, fmt.Sprintf("read worktree .git file: %v", err)
+	}
+	line := strings.TrimSpace(string(data))
+	gitdir, ok := strings.CutPrefix(line, "gitdir:")
+	if !ok || strings.ContainsAny(line, "\n") {
+		return false, "worktree .git is not a single gitdir line"
+	}
+	gitdir = strings.TrimSpace(gitdir)
+	if !filepath.IsAbs(gitdir) {
+		gitdir = filepath.Join(path, gitdir)
+	}
+	adminDir, err := filepath.EvalSymlinks(gitdir)
+	if err != nil {
+		return false, fmt.Sprintf("resolve worktree gitdir: %v", err)
+	}
+	commonDir, err := filepath.EvalSymlinks(filepath.Join(repoRoot, ".git"))
+	if err != nil {
+		return false, fmt.Sprintf("resolve repository .git: %v", err)
+	}
+	if filepath.Dir(adminDir) != filepath.Join(commonDir, "worktrees") {
+		return false, "worktree gitdir is not an admin directory of the repository"
+	}
+	data, err = os.ReadFile(filepath.Join(adminDir, "commondir"))
+	if err != nil {
+		return false, fmt.Sprintf("read commondir: %v", err)
+	}
+	named := strings.TrimSpace(string(data))
+	if !filepath.IsAbs(named) {
+		named = filepath.Join(adminDir, named)
+	}
+	if resolved, err := filepath.EvalSymlinks(named); err != nil || resolved != commonDir {
+		return false, "commondir does not name the repository"
+	}
+	data, err = os.ReadFile(filepath.Join(adminDir, "HEAD"))
+	if err != nil {
+		return false, fmt.Sprintf("read HEAD: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != "ref: refs/heads/"+branch {
+		return false, "HEAD is not the expected branch"
+	}
+	return true, ""
+}
+
+// baseRepoGitDir returns repoRoot's .git directory once repoRoot is shown to
+// be a main repository: an absolute path whose .git is a directory (not a
+// gitdir file) without a commondir file. It returns an error otherwise.
+func baseRepoGitDir(repoRoot string) (string, error) {
+	if repoRoot == "" || !filepath.IsAbs(repoRoot) {
+		return "", fmt.Errorf("repository root %q must be an absolute path", repoRoot)
+	}
+	gitDir := filepath.Join(repoRoot, ".git")
+	fi, err := os.Stat(gitDir)
+	if err != nil {
+		return "", fmt.Errorf("repository root %q: %w", repoRoot, err)
+	}
+	if !fi.IsDir() {
+		return "", fmt.Errorf("repository root %q: .git is not a directory", repoRoot)
+	}
+	if _, err := os.Lstat(filepath.Join(gitDir, "commondir")); err == nil {
+		return "", fmt.Errorf("repository root %q: .git has a commondir file", repoRoot)
+	}
+	return gitDir, nil
+}
+
+// BaseRepoGitCommand returns a git command that acts on the main repository
+// at repoRoot and nothing else. GIT_DIR and GIT_COMMON_DIR are pinned to
+// repoRoot/.git, so git does not discover the repository from the current
+// directory or follow any worktree's metadata; GIT_* variables inherited
+// from the process are dropped (other than GIT_CONFIG_NOSYSTEM and
+// GIT_CONFIG_GLOBAL) and LC_ALL=C is set; core.hooksPath points at an empty
+// location (os.DevNull), so no hook in the repository runs; and the
+// file-system monitor is off. It returns an error, and no command, when
+// repoRoot is not a main repository (baseRepoGitDir).
+func BaseRepoGitCommand(ctx context.Context, repoRoot string, args ...string) (*exec.Cmd, error) {
+	gitDir, err := baseRepoGitDir(repoRoot)
+	if err != nil {
+		return nil, err
+	}
+	full := append([]string{
+		"-c", "core.hooksPath=" + os.DevNull,
+		"-c", "core.fsmonitor=false",
+		"-C", repoRoot,
+	}, args...)
+	cmd := exec.CommandContext(ctx, "git", full...)
+	cmd.Env = append(scrubbedGitEnv(), "GIT_DIR="+gitDir, "GIT_COMMON_DIR="+gitDir)
+	return cmd, nil
+}
+
+// scrubbedGitEnv returns the process environment without GIT_* variables
+// (other than GIT_CONFIG_NOSYSTEM and GIT_CONFIG_GLOBAL, which only choose
+// the system and global config files) and with LC_ALL=C.
+func scrubbedGitEnv() []string {
+	env := make([]string, 0, len(os.Environ())+3)
+	for _, kv := range os.Environ() {
+		k, _, _ := strings.Cut(kv, "=")
+		switch {
+		case k == "GIT_CONFIG_NOSYSTEM" || k == "GIT_CONFIG_GLOBAL":
+		case strings.HasPrefix(k, "GIT_") || k == "LC_ALL":
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(env, "LC_ALL=C")
 }
 
 // RemoveWorktreeEntryIn removes git's record of the single worktree at path
@@ -549,7 +669,7 @@ func RemoveWorktreeEntryIn(repoRoot, path string) error {
 		return nil
 	}
 	return RemoveWorktreeEntry(context.Background(), path, func(ctx context.Context, args ...string) (*exec.Cmd, error) {
-		return exec.CommandContext(ctx, "git", append([]string{"-C", repoRoot}, args...)...), nil
+		return BaseRepoGitCommand(ctx, repoRoot, args...)
 	})
 }
 
@@ -693,10 +813,18 @@ func resolveMissingPath(path string) (resolved string, state resolveState, err e
 	return filepath.Join(append([]string{resolvedDir}, tail...)...), resolvedWithin, nil
 }
 
-// DeleteBranchIn deletes a git branch from the specified repository root.
-// Returns true if the branch was deleted, false otherwise.
+// DeleteBranchIn deletes a git branch from the main repository at repoRoot,
+// through BaseRepoGitCommand (repository pinned, no hooks) with "--" before
+// the branch name. A branch name that is empty or starts with "-" is
+// refused. Returns true if the branch was deleted, false otherwise.
 func DeleteBranchIn(repoRoot, branchName string) bool {
-	cmd := exec.Command("git", "-C", repoRoot, "branch", "-D", branchName)
+	if branchName == "" || strings.HasPrefix(branchName, "-") {
+		return false
+	}
+	cmd, err := BaseRepoGitCommand(context.Background(), repoRoot, "branch", "-D", "--", branchName)
+	if err != nil {
+		return false
+	}
 	return cmd.Run() == nil
 }
 
