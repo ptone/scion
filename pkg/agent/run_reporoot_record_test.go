@@ -103,7 +103,7 @@ func TestProvision_RefusesWhenRepoRootsDisagree(t *testing.T) {
 	}
 }
 
-// An agent whose record is missing falls back to GCP#4037's derivation on its
+// An agent whose record is missing falls back to the broker-known-path derivation on its
 // next start (a missing record means the derivation governs); no backfill
 // record is written.
 func TestStart_MissingRecordUsesDerivation(t *testing.T) {
@@ -129,11 +129,12 @@ func TestStart_RecordNamingAnotherRepoRefused(t *testing.T) {
 	agentDir := config.GetAgentDir(f.projectScionDir, f.agentName, false)
 	mustWrite(t, filepath.Join(agentDir, provisionedWorktreeStateFile), `{"repoRoot":"`+eval(t, f.otherRepo)+`"}`)
 
-	if err := f.startErr(t); err == nil {
+	err := f.startErr(t)
+	if err == nil {
 		t.Fatalf("restart: want a refusal when the record names another repository; got RepoRoot=%q", f.captured.RepoRoot)
 	}
-	if f.captured.RepoRoot == eval(t, f.otherRepo) {
-		t.Errorf("restart: RunConfig.RepoRoot = %q, the other repository; it must never be mounted", f.captured.RepoRoot)
+	if !strings.Contains(err.Error(), "does not match the repository root") {
+		t.Errorf("restart refused for an unexpected reason: %v", err)
 	}
 }
 
@@ -150,13 +151,15 @@ func TestReconcileRepoRoot(t *testing.T) {
 		wantRoot  string
 		wantErr   bool
 	}{
-		{name: "row1 missing record, D is a full root -> D", derived: "/repo", rec: repoRootRecordState{status: recordMissing}, wantRoot: "/repo"},
-		{name: "row2 D refuses -> refuse (whatever R)", derived: "", detectErr: errRefuse, rec: repoRootRecordState{status: recordPresent, root: "/repo"}, wantErr: true},
-		{name: "row3 D plain, record present -> plain", derived: "", rec: repoRootRecordState{status: recordPresent, root: "/repo"}, wantRoot: ""},
-		{name: "row3 D plain, record missing -> plain", derived: "", rec: repoRootRecordState{status: recordMissing}, wantRoot: ""},
+		{name: "row1 D refuses, record present -> refuse", derived: "", detectErr: errRefuse, rec: repoRootRecordState{status: recordPresent, root: "/repo"}, wantErr: true},
+		{name: "row1 D refuses, record unreadable -> refuse", derived: "", detectErr: errRefuse, rec: repoRootRecordState{status: recordUnreadable}, wantErr: true},
+		{name: "row2 D plain, record present -> plain", derived: "", rec: repoRootRecordState{status: recordPresent, root: "/repo"}, wantRoot: ""},
+		{name: "row2 D plain, record missing -> plain", derived: "", rec: repoRootRecordState{status: recordMissing}, wantRoot: ""},
+		{name: "row2 D plain, record unreadable -> plain", derived: "", rec: repoRootRecordState{status: recordUnreadable}, wantRoot: ""},
+		{name: "row3 missing record, D full root -> D", derived: "/repo", rec: repoRootRecordState{status: recordMissing}, wantRoot: "/repo"},
 		{name: "row4 record equals D -> D", derived: "/repo", rec: repoRootRecordState{status: recordPresent, root: "/repo"}, wantRoot: "/repo"},
 		{name: "row4 record mismatches D -> refuse", derived: "/repo", rec: repoRootRecordState{status: recordPresent, root: "/other"}, wantErr: true},
-		{name: "row5 record unreadable -> refuse", derived: "/repo", rec: repoRootRecordState{status: recordUnreadable}, wantErr: true},
+		{name: "row5 record unreadable, D full root -> refuse", derived: "/repo", rec: repoRootRecordState{status: recordUnreadable}, wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -175,52 +178,82 @@ func TestReconcileRepoRoot(t *testing.T) {
 			}
 		})
 	}
+
+	// Row 4 with aliased paths: a record root that resolves (through a symlink)
+	// to the derived root is accepted, pinning the samePath use in reconcile.
+	t.Run("row4 record aliases D -> D", func(t *testing.T) {
+		root := t.TempDir()
+		real := mkdirAllT(t, filepath.Join(root, "repo"))
+		alias := filepath.Join(root, "repo-link")
+		if err := os.Symlink(real, alias); err != nil {
+			t.Fatal(err)
+		}
+		got, err := reconcileRepoRoot("a", real, nil, repoRootRecordState{status: recordPresent, root: alias})
+		if err != nil {
+			t.Fatalf("aliased record equal to D: unexpected error: %v", err)
+		}
+		if got != real {
+			t.Errorf("aliased record equal to D: got %q, want %q", got, real)
+		}
+	})
 }
 
-// TestReadRepoRootRecordState covers reading R: the ctx signal, a missing file,
-// a readable record (including a legacy record with no source), a corrupt or
-// empty record (unreadable -> refuse), and a record under an agent mount, which
-// is treated as missing so an agent-reachable record can never force a root.
+// TestReadRepoRootRecordState covers reading the on-disk record R: a missing
+// file, a readable record (including a legacy record with no source), a corrupt
+// or empty record (unreadable -> refuse), and records under an agent mount,
+// which are missing whatever their contents (B1) so an agent-reachable record
+// can never force a root or a refusal. The broker ctx signal is not a record and
+// is not read here.
 func TestReadRepoRootRecordState(t *testing.T) {
 	ws := t.TempDir()
-
-	if rs := readRepoRootRecordState("/broker/root", t.TempDir(), ws, nil); rs.status != recordPresent || rs.root != "/broker/root" {
-		t.Errorf("ctx signal: got %+v, want present /broker/root", rs)
-	}
-
 	agentDir := t.TempDir()
 	recPath := filepath.Join(agentDir, provisionedWorktreeStateFile)
-	if rs := readRepoRootRecordState("", agentDir, ws, nil); rs.status != recordMissing {
+
+	if rs := readRepoRootRecordState("a", agentDir, ws, nil); rs.status != recordMissing {
 		t.Errorf("no file: got %+v, want missing", rs)
 	}
 
 	mustWrite(t, recPath, `{"repoRoot":"/repo","source":"provision"}`)
-	if rs := readRepoRootRecordState("", agentDir, ws, nil); rs.status != recordPresent || rs.root != "/repo" {
+	if rs := readRepoRootRecordState("a", agentDir, ws, nil); rs.status != recordPresent || rs.root != "/repo" {
 		t.Errorf("valid record: got %+v, want present /repo", rs)
 	}
 
 	mustWrite(t, recPath, `{"repoRoot":"/repo"}`)
-	if rs := readRepoRootRecordState("", agentDir, ws, nil); rs.status != recordPresent || rs.root != "/repo" {
+	if rs := readRepoRootRecordState("a", agentDir, ws, nil); rs.status != recordPresent || rs.root != "/repo" {
 		t.Errorf("legacy record without a source: got %+v, want present /repo", rs)
 	}
 
 	mustWrite(t, recPath, `{not json`)
-	if rs := readRepoRootRecordState("", agentDir, ws, nil); rs.status != recordUnreadable {
+	if rs := readRepoRootRecordState("a", agentDir, ws, nil); rs.status != recordUnreadable {
 		t.Errorf("corrupt record: got %+v, want unreadable", rs)
 	}
 
 	mustWrite(t, recPath, `{"source":"provision"}`)
-	if rs := readRepoRootRecordState("", agentDir, ws, nil); rs.status != recordUnreadable {
+	if rs := readRepoRootRecordState("a", agentDir, ws, nil); rs.status != recordUnreadable {
 		t.Errorf("record with an empty root: got %+v, want unreadable", rs)
 	}
 
-	// A record an agent could reach: agentDir sits under the workspace mount.
+	// Records an agent could reach: agentDir sits under the workspace mount.
+	// Guarded first, before parsing, so even a corrupt or empty-root record is
+	// missing (never a refusal).
 	root2 := t.TempDir()
 	ws2 := mkdirAllT(t, filepath.Join(root2, "ws"))
 	agentDir2 := mkdirAllT(t, filepath.Join(ws2, "agents", "a"))
-	mustWrite(t, filepath.Join(agentDir2, provisionedWorktreeStateFile), `{"repoRoot":"/repo","source":"provision"}`)
-	if rs := readRepoRootRecordState("", agentDir2, ws2, nil); rs.status != recordMissing {
-		t.Errorf("record under the workspace mount: got %+v, want missing (ignored)", rs)
+	rec2Path := filepath.Join(agentDir2, provisionedWorktreeStateFile)
+	for _, tc := range []struct {
+		name    string
+		content string
+	}{
+		{name: "valid under a mount", content: `{"repoRoot":"/repo","source":"provision"}`},
+		{name: "corrupt under a mount", content: `{not json`},
+		{name: "empty-root under a mount", content: `{"source":"provision"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mustWrite(t, rec2Path, tc.content)
+			if rs := readRepoRootRecordState("a", agentDir2, ws2, nil); rs.status != recordMissing {
+				t.Errorf("record under the workspace mount: got %+v, want missing (ignored)", rs)
+			}
+		})
 	}
 }
 
@@ -387,8 +420,12 @@ func TestResolveStartRepoRoot_RejectsRecordNotMatchingProject(t *testing.T) {
 		t.Fatal(err)
 	}
 	in := startRepoRootInput{agentName: "a", agentDir: agentDir, projectDir: projectDir, workspace: ws}
-	if _, err := resolveStartRepoRoot(in); err == nil {
-		t.Error("resolveStartRepoRoot: want a refusal when the record names a repository other than the project's derived root")
+	_, _, _, err := resolveStartRepoRoot(in)
+	if err == nil {
+		t.Fatal("resolveStartRepoRoot: want a refusal when the record names a repository other than the project's derived root")
+	}
+	if !strings.Contains(err.Error(), "does not match the repository root") {
+		t.Errorf("resolveStartRepoRoot refused for an unexpected reason: %v", err)
 	}
 }
 
@@ -413,5 +450,54 @@ func TestProvision_ContainingSubmoduleStillProvisions(t *testing.T) {
 	}
 	if got != eval(t, repo) {
 		t.Errorf("checkProvisionRepoRoot = %q, want the project root %q", got, eval(t, repo))
+	}
+}
+
+// TestStart_CorruptRecordRefused is row 5 at Start level: a corrupt on-disk
+// record outside every agent mount refuses the start.
+func TestStart_CorruptRecordRefused(t *testing.T) {
+	f := newRepoRootMetadataFixture(t)
+	agentDir := config.GetAgentDir(f.projectScionDir, f.agentName, false)
+	mustWrite(t, filepath.Join(agentDir, provisionedWorktreeStateFile), `{not json`)
+
+	err := f.startErr(t)
+	if err == nil {
+		t.Fatalf("restart: want a refusal for a corrupt record; got RepoRoot=%q", f.captured.RepoRoot)
+	}
+	if !strings.Contains(err.Error(), "could not be read") {
+		t.Errorf("restart refused for an unexpected reason: %v", err)
+	}
+}
+
+// TestResolveStartRepoRoot_CtxIsCandidateNotRecord pins B2: the broker ctx
+// signal is the candidate that feeds the derived root, not a record R. With ctx
+// set but not validating as the workspace's base and no on-disk record, the
+// derivation falls to detectRepoRoot and governs (as on main); ctx is never
+// compared as a record, so the start is not refused.
+func TestResolveStartRepoRoot_CtxIsCandidateNotRecord(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	root := t.TempDir()
+	base := filepath.Join(root, "base")
+	setupGitRepo(t, mkdirAllT(t, base))
+	ws := createRealWorktree(t, base, "a")
+	projectDir := mkdirAllT(t, filepath.Join(base, ".scion"))
+	agentDir := mkdirAllT(t, filepath.Join(projectDir, "agents", "a"))
+
+	in := startRepoRootInput{
+		agentName:   "a",
+		agentDir:    agentDir,
+		projectDir:  projectDir,
+		workspace:   ws,
+		ctxRepoRoot: filepath.Join(root, "unrelated"),
+	}
+	got, rec, _, err := resolveStartRepoRoot(in)
+	if err != nil {
+		t.Fatalf("unexpected refusal: %v (ctx must be a candidate, not a record)", err)
+	}
+	if got != eval(t, base) {
+		t.Errorf("RepoRoot = %q, want the detectRepoRoot fallback %q", got, eval(t, base))
+	}
+	if rec.status != recordMissing {
+		t.Errorf("record = %+v, want missing (ctx is not a record)", rec)
 	}
 }

@@ -3185,8 +3185,10 @@ type provisionedWorktreeState struct {
 	RepoRoot string `json:"repoRoot"`
 	// Source is how the record was made (repoRootSourceBroker,
 	// repoRootSourceProvision or repoRootSourceBackfill). Each is written
-	// only when agentDir is outside every mount of the agent; a record
-	// without a known source is not used (readRepoRootRecord).
+	// only when agentDir is outside every mount of the agent. Source is used
+	// by writeRepoRootRecord's idempotence check and by readRepoRootRecord
+	// (write path); the start read path reconciles the record with the
+	// derived root regardless of source.
 	Source string `json:"source,omitempty"`
 }
 

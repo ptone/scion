@@ -163,17 +163,14 @@ func TestStart_RepoRootFollowsOnlyTheProjectRepository(t *testing.T) {
 			f := newRepoRootMetadataFixture(t)
 			tc.edit(t, f)
 
-			*f.captured = runtime.RunConfig{}
-			_, err := f.mgr.Start(context.Background(), api.StartOptions{
-				Name:        f.agentName,
-				ProjectPath: f.projectScionDir,
-				NoAuth:      true,
-			})
+			err := f.startErr(t)
 			if err == nil {
 				t.Fatalf("restart: want a refusal after the worktree metadata was changed to name another repository; got RepoRoot=%q", f.captured.RepoRoot)
 			}
-			if f.captured.RepoRoot == eval(t, f.otherRepo) {
-				t.Errorf("restart: RunConfig.RepoRoot = %q, the other repository; the start must never mount it", f.captured.RepoRoot)
+			// detectRepoRoot refuses because the worktree's git common dir now
+			// points outside the project's own repository.
+			if !strings.Contains(err.Error(), "outside the project's own repository") {
+				t.Errorf("restart refused for an unexpected reason: %v", err)
 			}
 		})
 	}

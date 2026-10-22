@@ -1708,53 +1708,45 @@ authDone:
 
 	// On resume/restart opts.Workspace is empty, so re-derive the explicit intent
 	// from the persisted config to keep the explicit workspace plain-mounted.
-	//
-	// The persisted ExplicitWorkspace flag lives in agentDir's
-	// scion-agent.json. For the repository root it is one-way by design:
-	// when set it only makes RepoRoot empty (resolveStartRepoRoot ignores a
-	// provision or backfill record on an explicit-workspace start). Clearing
-	// it does not by itself give an explicit workspace a repository root: a
-	// provision record is written only for a non-explicit git workspace, and
-	// a backfill is made only for the per-agent workspace directory
-	// (<agentDir>/workspace), so it is safe even if agentDir were writable
-	// from a container.
+	// The persisted ExplicitWorkspace flag lives in agentDir's scion-agent.json;
+	// it selects the plain-mount path and is re-derived on every entry so the
+	// guarantee holds on resume.
 	explicitWorkspace := opts.Workspace != "" || (finalScionCfg != nil && finalScionCfg.ExplicitWorkspace)
 
-	// RepoRoot comes from broker-held state or from agentDir's repository
-	// root record, never from the workspace's own git metadata. See
-	// resolveStartRepoRoot for the order and the conditions.
+	// The repository root is the derived root — validatedWorktreeRepoRoot(broker
+	// candidate, workspace) falling back to detectRepoRoot — reconciled with the
+	// on-disk record and failing closed (resolveStartRepoRoot). The root is
+	// taken only from broker-known paths; git is used only to check them.
 	//
-	// This first pass uses the pre-workspace-backend effectiveWorkspace,
-	// only because containerWorkspace (computed below) needs a repoRoot to
-	// feed the NFS/cloudrun/gke backend resolution that can still replace
+	// This first pass uses the pre-workspace-backend effectiveWorkspace, only
+	// because containerWorkspace (computed below) needs a repoRoot to feed the
+	// NFS/cloudrun/gke backend resolution that can still replace
 	// effectiveWorkspace. If that happens, the block after that resolution
-	// re-checks a broker value against the value RunConfig will actually
-	// use. persistProvisionedWorktreeRepoRootIfValid, below, runs its own,
-	// separate comparison against the workspace value as it stood before
-	// runtime.ValidateWorkspaceSource resolved it — see that function's own
-	// doc comment for why.
+	// recomposes against the value RunConfig will actually use.
+	// persistProvisionedWorktreeRepoRootIfValid, below, runs its own, separate
+	// comparison against the workspace value as it stood before
+	// runtime.ValidateWorkspaceSource resolved it — see that function's own doc
+	// comment for why.
 	var startVolumes []api.VolumeMount
 	if finalScionCfg != nil {
 		startVolumes = finalScionCfg.Volumes
 	}
 	ctxRepoRoot := api.ProvisionedWorktreeRepoRootFromContext(ctx)
 	preValidationWorkspace := effectiveWorkspace
-	// Compose GCP#4037's derivation with this branch's broker-owned record,
-	// failing closed. The derived root D is validatedWorktreeRepoRoot(candidate,
-	// ws) falling back to detectRepoRoot (exactly as GCP#4037 computes it on
-	// main), where candidate is the broker signal or the recorded root. The
-	// record intersection (reconcileRepoRoot) then mounts the full root only
-	// when a present record equals D; a mismatch or an unreadable record
-	// refuses the start, and a missing or untrusted record uses D unchanged.
 	// The refusal is returned after the workspace source check below, which
 	// reports the more specific errors for the shapes it rejects; nothing
-	// between here and there sets up a mount.
-	repoRootRec := readRepoRootRecordState(ctxRepoRoot, agentDir, effectiveWorkspace, startVolumes)
-	candidateRepoRoot := ""
-	if repoRootRec.status == recordPresent {
-		candidateRepoRoot = repoRootRec.root
-	}
-	repoRoot, detectErr := composeRepoRoot(opts.Name, candidateRepoRoot, repoRootRec, effectiveWorkspace, projectDir, explicitWorkspace, settings)
+	// between here and there sets up a mount. repoRootRec and candidateRepoRoot
+	// are reused by the backend recompose below.
+	repoRoot, repoRootRec, candidateRepoRoot, detectErr := resolveStartRepoRoot(startRepoRootInput{
+		agentName:   opts.Name,
+		agentDir:    agentDir,
+		projectDir:  projectDir,
+		workspace:   effectiveWorkspace,
+		ctxRepoRoot: ctxRepoRoot,
+		explicit:    explicitWorkspace,
+		volumes:     startVolumes,
+		settings:    settings,
+	})
 	// Empty-per-agent (design #2703): the workspace is exactly the private
 	// agents/<slug>/workspace directory, never a git checkout, so no repo
 	// root is mounted even when projectDir sits in a git repository, and any
@@ -2268,9 +2260,10 @@ authDone:
 	//
 	// The root was composed against the PRE-backend workspace. The derivation
 	// depends on the workspace, so when the backend actually changed it,
-	// recompose against the value RunConfig will use, exactly as GCP#4037 does
-	// on main: validatedWorktreeRepoRoot(candidate, ws) falling back to
-	// detectRepoRoot, with the record intersection re-applied (failing closed).
+	// recompose against the value RunConfig will use, exactly as the upstream
+	// broker-known-path derivation does on main: validatedWorktreeRepoRoot(
+	// candidate, ws) falling back to detectRepoRoot, with the record
+	// intersection re-applied (failing closed).
 	// On Kubernetes the runtime builds its workspace mounts from
 	// containerWorkspace and the NFS* fields above, not from repoRoot, and reads
 	// RepoRoot only to decide whether the shared workspace's in-project agents
