@@ -26,11 +26,13 @@ package filelock
 // dependencies hold (design §3.2; keep the numbering, so that a later
 // change can name which one failed):
 //
-//  1. Verified tree. Where a lock sits inside a private tree (cli_context,
-//     tunnelclient), privatefs has verified that tree's directories
-//     owner-only. So the only principals who could plant a junction above
-//     the leaf are the user, SYSTEM and Administrators, who are outside
-//     this threat model.
+//  1. Verified tree (tunnelclient: CheckPrivate on the state directory
+//     handle). There privatefs has verified the directory owner-only, so
+//     the only principals who could plant a junction above the leaf are
+//     the user, SYSTEM and Administrators, who are outside this threat
+//     model. cli_context does not verify an existing global directory
+//     (it only creates missing components private) and relies on 2 and
+//     3, as settings.lock does.
 //  2. Leaf no-follow. The leaf itself is opened with
 //     FILE_FLAG_OPEN_REPARSE_POINT and checked on the handle
 //     (FileAttributeTagInfo): any reparse point or directory is refused
