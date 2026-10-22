@@ -100,11 +100,14 @@
 ./pkg/version/update
 ./pkg/wsprotocol
 ./resources
+# ./pkg/artifacts: anchored to the reference parsing and encoding that the
+# allowlisted message command uses (--artifact); full suite OFF, see below.
+./pkg/artifacts -run=^(TestParseRef|TestParseMessageRef|TestParseMessageRefsBoundsAndDedupes|TestEncodeMessageRefsRoundTrip)$
 # Left OFF after triage (Windows-environment reasons; nothing is skipped):
 # ./deploy/terraform/tools/settingscheck: test-only package (go build refuses it); Terraform deploy tooling, Linux-only.
 # ./hack/checktimeliterals: TestScanFixtures scans 11 fixture files instead of 10 on a Windows checkout; Linux-only repo guard.
 # ./harnesses: the Python harness tests are POSIX-bound (os.O_DIRECTORY, /run paths, ~ expansion), and the vendored-lib header check fails on a CRLF checkout.
-# ./pkg/artifacts: a testdata fixture compares unequal on a Windows checkout, and TestViewSandboxBrowserProbe skips without Chromium.
+# ./pkg/artifacts (full suite): a testdata fixture compares unequal on a Windows checkout, and TestViewSandboxBrowserProbe skips without Chromium.
 # ./pkg/brokerregistration: broker instance-directory locking is unsupported on Windows (the broker is gated on Windows).
 # ./pkg/config/pgprovider: every test needs Postgres (-tags integration) and skips without it.
 # ./pkg/hub/authzop: the catalog report and mutation-classification guards compare unequal on a Windows checkout; Linux-only hub guard.
