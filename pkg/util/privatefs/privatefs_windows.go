@@ -157,6 +157,9 @@ type Tree struct {
 	h      windows.Handle // the anchor directory; pins the object
 	acls   bool           // the volume has FILE_PERSISTENT_ACLS
 	fsName string
+	// followLinks: TreeOptions.FollowLinks (directory components below the
+	// anchor may be reparse points, which are followed).
+	followLinks bool
 	// volSerial and fileIndex identify the anchor object. They are recorded
 	// for diagnostics only (error text, tests); no security decision reads
 	// them, because the handle itself pins the object.
@@ -193,7 +196,7 @@ func OpenTree(anchor string, opt TreeOptions) (*Tree, error) {
 	if err != nil {
 		return nil, err
 	}
-	t := &Tree{anchor: resolved, h: h}
+	t := &Tree{anchor: resolved, h: h, followLinks: opt.FollowLinks}
 	if err := t.init(); err != nil {
 		_ = windows.CloseHandle(h)
 		return nil, err
@@ -447,6 +450,32 @@ func openDirAt(parent windows.Handle, name string) (windows.Handle, error) {
 	return h, nil
 }
 
+// openDirComp opens the directory component name relative to parent. In a
+// tree without FollowLinks it is openDirAt: a reparse point is refused. With
+// FollowLinks a reparse point is opened again without
+// FILE_OPEN_REPARSE_POINT, so the kernel follows it (relative to parent's
+// handle, never by a path built here), and the result must be a directory.
+// See TreeOptions.FollowLinks for why ~/.ssh needs this.
+func (t *Tree) openDirComp(parent windows.Handle, name string) (windows.Handle, error) {
+	h, err := openDirAt(parent, name)
+	if !t.followLinks || !errors.Is(err, ErrReparsePoint) {
+		return h, err
+	}
+	h, _, err = ntCreate(parent, name, dirAccess, 0, shareAll, windows.FILE_OPEN, windows.FILE_DIRECTORY_FILE, nil)
+	if err != nil {
+		return windows.InvalidHandle, err
+	}
+	tag, err := attrTag(h)
+	if err == nil && tag.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
+		err = syscall.ENOTDIR
+	}
+	if err != nil {
+		_ = windows.CloseHandle(h)
+		return windows.InvalidHandle, err
+	}
+	return h, nil
+}
+
 // walk opens every directory component of rel except the leaf, relative to
 // its parent's handle, refusing reparse points. With mkdir, a missing
 // component is created with p. It returns the leaf's parent handle and the
@@ -464,7 +493,7 @@ func (t *Tree) walk(rel string, mkdir bool, p Protection) (parent windows.Handle
 		}
 	}
 	for i, c := range comps[:len(comps)-1] {
-		h, err := openDirAt(parent, c)
+		h, err := t.openDirComp(parent, c)
 		if mkdir && errors.Is(err, fs.ErrNotExist) {
 			h, err = t.mkdirAt(parent, c, p)
 		}
@@ -503,7 +532,7 @@ func (t *Tree) mkdirAt(parent windows.Handle, name string, p Protection) (window
 	h, _, err := ntCreate(parent, name, dirAccess, 0, shareAll, windows.FILE_CREATE,
 		windows.FILE_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT, sd)
 	if errors.Is(err, fs.ErrExist) {
-		return openDirAt(parent, name)
+		return t.openDirComp(parent, name)
 	}
 	return h, err
 }
@@ -518,7 +547,7 @@ func (t *Tree) MkdirAll(rel string, p Protection) error {
 		return err
 	}
 	defer done()
-	h, err := openDirAt(parent, leaf)
+	h, err := t.openDirComp(parent, leaf)
 	if errors.Is(err, fs.ErrNotExist) {
 		h, err = t.mkdirAt(parent, leaf, p)
 	}
@@ -537,7 +566,7 @@ func (t *Tree) OpenDir(rel string) (*os.File, error) {
 		return nil, err
 	}
 	defer done()
-	h, err := openDirAt(parent, leaf)
+	h, err := t.openDirComp(parent, leaf)
 	if err != nil {
 		return nil, t.walkErr(rel, err)
 	}
@@ -601,8 +630,17 @@ func (t *Tree) Create(rel string, excl bool, p Protection) (*os.File, error) {
 		return nil, err
 	}
 	f := os.NewFile(uintptr(h), t.display(rel))
-	if info == fileOpened && p == Private {
-		if err := verifyOrRepair(f, true); err != nil {
+	if info == fileOpened {
+		// An existing file opened for writing: one name only (addendum
+		// A1, checked by verifyOrRepair for Private), and for Private the
+		// §3.3.5 verify-or-repair.
+		var err error
+		if p == Private {
+			err = verifyOrRepair(f, true)
+		} else {
+			err = checkSingleLink(f)
+		}
+		if err != nil {
 			_ = f.Close()
 			return nil, err
 		}
@@ -661,7 +699,15 @@ func (t *Tree) OpenPrivate(rel string, flag int) (*os.File, error) {
 // private DACL is set on this same handle (protected, so inherited ACEs
 // are dropped) before any byte is written. The owner is not rewritten: it
 // was just verified to be the current user.
+//
+// A file opened for writing must also have exactly one name (addendum A1):
+// a hard-linked file is refused, never repaired.
 func verifyOrRepair(f *os.File, write bool) error {
+	if write {
+		if err := checkSingleLink(f); err != nil {
+			return err
+		}
+	}
 	err := CheckPrivate(f)
 	if err == nil || !write {
 		return err
@@ -1063,4 +1109,34 @@ func OwnedByCurrentUser(f *os.File) (bool, error) {
 		return false, nil
 	}
 	return owner.Equals(id.user), nil
+}
+
+// checkSingleLink refuses the open file unless it has exactly one name
+// (security checklist addendum A1). NumberOfLinks comes from
+// GetFileInformationByHandle on the handle itself. If it cannot be read the
+// file is refused (fail closed), as the attribute fallback does for
+// anything but ERROR_INVALID_PARAMETER.
+func checkSingleLink(f *os.File) error {
+	var bhfi windows.ByHandleFileInformation
+	err := windows.GetFileInformationByHandle(windows.Handle(f.Fd()), &bhfi)
+	runtime.KeepAlive(f)
+	if err != nil {
+		return fmt.Errorf("refusing %s: cannot read its link count: %v: %w", f.Name(), err, ErrHardLinked)
+	}
+	if bhfi.NumberOfLinks != 1 {
+		return fmt.Errorf("refusing %s: it has %d names: %w", f.Name(), bhfi.NumberOfLinks, ErrHardLinked)
+	}
+	return nil
+}
+
+// anchorFile returns a duplicate of the anchor handle as an *os.File, so
+// the handle checks (CheckNoForeignWriters, CheckPrivate) can run on the
+// anchor directory itself. The caller closes it.
+func (t *Tree) anchorFile() (*os.File, error) {
+	cur := windows.CurrentProcess()
+	var dup windows.Handle
+	if err := windows.DuplicateHandle(cur, t.h, cur, &dup, 0, false, windows.DUPLICATE_SAME_ACCESS); err != nil {
+		return nil, &fs.PathError{Op: "open", Path: t.anchor, Err: err}
+	}
+	return os.NewFile(uintptr(dup), t.anchor), nil
 }

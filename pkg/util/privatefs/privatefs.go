@@ -84,12 +84,43 @@ var ErrNotPrivate = errors.New("not private")
 // shares), so the object could not be protected. There is no fallback.
 var ErrNoACLs = errors.New("the volume does not support access control lists")
 
+// ErrHardLinked is returned (wrapped) when a file about to be written, or
+// replaced on a path where a tree rule is relaxed, has more than one name
+// (security checklist addendum A1). A hard link is not a reparse point and
+// is identical to its target under handle comparison, so no other rule
+// catches it: a write through it would land in a file that also lives
+// outside the tree. It is refused, never repaired: a second name cannot be
+// seen from here. A link count that cannot be read is refused too.
+var ErrHardLinked = errors.New("file has more than one name (hard link)")
+
 // TreeOptions configure OpenTree.
 type TreeOptions struct {
 	// CreateAnchor creates the anchor and any missing parent directories.
 	// Created directories get Private protection; existing ones are left
 	// as they are.
 	CreateAnchor bool
+
+	// FollowLinks follows existing reparse points (symlinks, junctions)
+	// at DIRECTORY components below the anchor instead of refusing them;
+	// components that are missing are created with the protection asked
+	// for. Leaf files are never followed: Create, OpenPrivate, ReadPrivate,
+	// WriteFile, Rename and Remove still refuse a reparse point at the
+	// leaf. On unix it changes nothing (the unix MkdirAll already follows
+	// directory symlinks, and leaves are opened O_NOFOLLOW).
+	//
+	// It exists for ~/.ssh (design §3.5 I1, security lead ruling I).
+	// ~/.ssh is deliberately NOT a refuse-reparse tree: dotfile managers
+	// (chezmoi, stow, yadm) symlink ~/.ssh or its subdirectories, so
+	// refusing links there would break legitimate setups. Integrity is
+	// decided on handles after following instead (rule I, see
+	// ReplaceFollowing): CheckNoForeignWriters on the target's parent
+	// directory handle and on the existing target; a foreign-owned target
+	// or a foreign-writable parent is refused; a user-owned but too-open
+	// target is replaced by a private temporary file through a handle
+	// rename; the old security descriptor is never copied (a writable ssh
+	// config is code execution via ProxyCommand). Never use FollowLinks for
+	// a tree that holds secrets.
+	FollowLinks bool
 }
 
 // splitRel validates a path relative to a Tree's anchor and returns its

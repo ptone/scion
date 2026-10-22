@@ -1,0 +1,146 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build windows
+
+package privatefs
+
+import (
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"golang.org/x/sys/windows"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/pathcanon"
+)
+
+// ReplaceFollowing atomically replaces the file at path with data, for
+// integrity-only files the user may manage through links, such as
+// ~/.ssh/config (design §3.5 I2, security lead ruling I: follow the link,
+// then decide on handles).
+//
+// Windows:
+//   - path is resolved with pathcanon.Resolve, so a symlinked leaf (a
+//     dotfile manager's link) is followed and the file it names is the one
+//     replaced; the link itself is kept.
+//   - The target's parent directory is opened (it pins the directory) and
+//     must pass CheckNoForeignWriters on that handle: a parent another
+//     principal can write to is refused, because that principal could swap
+//     the file after us.
+//   - An existing target is opened relative to the parent's handle (a
+//     reparse point there is refused). It must have one name (addendum A1)
+//     and be owned by the current user; otherwise it is refused. A
+//     user-owned target whose ACL is too open is replaced, not refused.
+//   - The new content goes to a temporary file created relative to the
+//     parent's handle with the private descriptor, and is renamed over the
+//     target through that handle. The old descriptor is never copied: a
+//     writable ssh config is code execution via ProxyCommand. newMode is not
+//     used; the result is always Private.
+//
+// tempPrefix names the temporary file (tempPrefix + leaf + "-<random>").
+func ReplaceFollowing(path string, data []byte, newMode fs.FileMode, tempPrefix string) error {
+	_ = newMode // POSIX only; see above
+	if strings.ContainsAny(tempPrefix, `/\`) {
+		return &fs.PathError{Op: "replace", Path: tempPrefix, Err: errors.New("temporary prefix contains a path separator")}
+	}
+	resolved, err := pathcanon.Resolve(path)
+	if err != nil {
+		return err
+	}
+	dir, leaf := filepath.Dir(resolved), filepath.Base(resolved)
+	if err := pathcanon.ValidName(leaf); err != nil {
+		return err
+	}
+	t, err := OpenTree(dir, TreeOptions{})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = t.Close() }()
+
+	parent, err := t.anchorFile()
+	if err != nil {
+		return err
+	}
+	err = CheckNoForeignWriters(parent)
+	_ = parent.Close()
+	if err != nil {
+		return fmt.Errorf("refusing to write %s: its directory can be changed by another user: %w", path, err)
+	}
+	if err := t.checkReplaceTarget(leaf); err != nil {
+		return fmt.Errorf("refusing to write %s: %w", path, err)
+	}
+
+	f, _, err := t.CreateTemp("", tempPrefix+leaf+"-*", Private)
+	if err != nil {
+		return err
+	}
+	ok := false
+	defer func() {
+		if !ok {
+			_ = deleteHandle(windows.Handle(f.Fd()))
+			_ = f.Close()
+		}
+	}()
+	if _, err := f.Write(data); err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	// The temporary file was created by this tree with the private
+	// descriptor; rename it over the target through its open handle.
+	if err := t.renameOpen(f, leaf); err != nil {
+		return err
+	}
+	ok = true
+	return f.Close()
+}
+
+// checkReplaceTarget applies rule I to the existing file leaf directly below
+// the anchor, if there is one: it must not be a reparse point, must have
+// one name, and must be owned by the current user. A user-owned file that
+// fails CheckNoForeignWriters is accepted here: the caller replaces it with
+// a private one (the repair). A missing file is accepted (a new file).
+func (t *Tree) checkReplaceTarget(leaf string) error {
+	h, _, err := t.openLeaf(leaf, windows.READ_CONTROL|windows.FILE_READ_ATTRIBUTES, windows.FILE_OPEN,
+		windows.FILE_NON_DIRECTORY_FILE, nil)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	f := os.NewFile(uintptr(h), t.display(leaf))
+	defer func() { _ = f.Close() }()
+	if err := checkSingleLink(f); err != nil {
+		return err
+	}
+	werr := CheckNoForeignWriters(f)
+	if werr == nil {
+		return nil
+	}
+	owned, err := OwnedByCurrentUser(f)
+	if err != nil {
+		return fmt.Errorf("%w (%v)", werr, err)
+	}
+	if !owned {
+		return werr
+	}
+	// Owned by the current user but too open: replaced by a private file.
+	return nil
+}
