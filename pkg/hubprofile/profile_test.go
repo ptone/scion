@@ -181,12 +181,8 @@ func TestSaveLoadListRemove(t *testing.T) {
 	require.NoError(t, Save(home, p, false))
 
 	path := filepath.Join(Dir(home), "t1.yaml")
-	fi, err := os.Stat(path)
-	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0o600), fi.Mode().Perm())
-	di, err := os.Stat(Dir(home))
-	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0o700), di.Mode().Perm())
+	assertPrivateFile(t, path)
+	assertPrivateDir(t, Dir(home))
 
 	got, err := Load(home, "t1")
 	require.NoError(t, err)
