@@ -82,10 +82,17 @@ func validateKeyringConfig(cfg ServerConfig) error {
 	if k.Source() != keyring.SourceFile {
 		return errors.New("keyring mode: server.keyring_file is configured but the keyring did not come from it; refusing to fall back to legacy signing keys")
 	}
+	// The purposes that do not use the ring yet still need the "legacy"
+	// entry. Checked here, not only by keyringReleaseCheck, so the test
+	// seam can never admit a ring without it.
+	legacy, ok := k.Signing().LegacySecret()
+	if !ok {
+		return errors.New("keyring mode: the signing ring has no \"legacy\" entry; every purpose that does not use the ring yet still needs it")
+	}
 	if err := keyringReleaseCheck(k); err != nil {
 		return err
 	}
-	if legacy, _ := k.Signing().LegacySecret(); cfg.SharedSigningSecret != legacy {
+	if cfg.SharedSigningSecret != legacy {
 		return errors.New("keyring mode: SharedSigningSecret must be the keyring's \"legacy\" signing entry")
 	}
 	if len(cfg.AgentTokenConfig.SigningKey) > 0 {

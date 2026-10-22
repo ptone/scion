@@ -24,14 +24,16 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
@@ -134,6 +136,22 @@ func (s *aliasCountingStore) GetSecretValue(ctx context.Context, key, scope, sco
 	return s.Store.GetSecretValue(ctx, key, scope, scopeID)
 }
 
+func (s *aliasCountingStore) ListSecrets(ctx context.Context, filter store.SecretFilter) ([]store.Secret, error) {
+	rows, err := s.Store.ListSecrets(ctx, filter)
+	for _, row := range rows {
+		s.c.read("store.ListSecrets", row.Key)
+	}
+	return rows, err
+}
+
+func (s *aliasCountingStore) ListProgenySecrets(ctx context.Context, ancestorIDs []string) ([]store.Secret, error) {
+	rows, err := s.Store.ListProgenySecrets(ctx, ancestorIDs)
+	for _, row := range rows {
+		s.c.read("store.ListProgenySecrets", row.Key)
+	}
+	return rows, err
+}
+
 func (s *aliasCountingStore) CreateSecret(ctx context.Context, sec *store.Secret) error {
 	s.c.write("store.CreateSecret", sec.Key)
 	return s.Store.CreateSecret(ctx, sec)
@@ -191,6 +209,14 @@ func (b *aliasCountingBackend) FetchValues(ctx context.Context, metas []secret.S
 		b.c.read("backend.FetchValues", m.Name)
 	}
 	return b.SecretBackend.FetchValues(ctx, metas)
+}
+
+func (b *aliasCountingBackend) List(ctx context.Context, filter secret.Filter) ([]secret.SecretMeta, error) {
+	metas, err := b.SecretBackend.List(ctx, filter)
+	for _, m := range metas {
+		b.c.read("backend.List", m.Name)
+	}
+	return metas, err
 }
 
 func (b *aliasCountingBackend) Set(ctx context.Context, in *secret.SetSecretInput) (bool, *secret.SecretMeta, error) {
@@ -390,45 +416,57 @@ func TestP3_ManagedStartupRefusesWithoutAliasReads(t *testing.T) {
 	cases := []struct {
 		name string
 		cfg  func(f *p3Fixture) ServerConfig
+		// noopSeam swaps keyringReleaseCheck for a no-op: the refusal
+		// must not depend on the test seam.
+		noopSeam bool
 	}{
 		// (a) ring file missing or unreadable: cmd built no keyring.
-		{"file missing or unreadable", func(f *p3Fixture) ServerConfig { return f.config(nil, true) }},
+		{"file missing or unreadable", func(f *p3Fixture) ServerConfig { return f.config(nil, true) }, false},
 		// (a') a legacy adapter in place of the configured file.
 		{"legacy adapter instead of the file", func(f *p3Fixture) ServerConfig {
 			cfg := f.config(keyring.Legacy(jkLegacySecret), true)
 			cfg.SharedSigningSecret = jkLegacySecret
 			return cfg
-		}},
+		}, false},
 		// (b) active generation absent.
-		{"active generation absent (configured)", func(f *p3Fixture) ServerConfig { return f.config(&keyring.Keyring{}, true) }},
-		{"active generation absent (keyring only)", func(f *p3Fixture) ServerConfig { return f.config(&keyring.Keyring{}, false) }},
+		{"active generation absent (configured)", func(f *p3Fixture) ServerConfig { return f.config(&keyring.Keyring{}, true) }, false},
+		{"active generation absent (keyring only)", func(f *p3Fixture) ServerConfig { return f.config(&keyring.Keyring{}, false) }, false},
 		// (c) incomplete required signing material.
-		{"no legacy entry", func(f *p3Fixture) ServerConfig { return f.config(noLegacy, true) }},
+		{"no legacy entry", func(f *p3Fixture) ServerConfig { return f.config(noLegacy, true) }, false},
+		{"no legacy entry, release check swapped out", func(f *p3Fixture) ServerConfig { return f.config(noLegacy, true) }, true},
 		{"shared secret not the legacy entry", func(f *p3Fixture) ServerConfig {
 			cfg := f.config(good, true)
 			cfg.SharedSigningSecret = p3StaleAliasSecret
 			return cfg
-		}},
+		}, false},
 		// Explicit keys never combine with managed mode.
 		{"explicit agent key", func(f *p3Fixture) ServerConfig {
 			cfg := f.config(good, true)
 			cfg.AgentTokenConfig.SigningKey = p3StaleKey(SecretKeyAgentSigningKey)
 			return cfg
-		}},
+		}, false},
 		{"explicit user key", func(f *p3Fixture) ServerConfig {
 			cfg := f.config(good, true)
 			cfg.UserTokenConfig.SigningKey = p3StaleKey(SecretKeyUserSigningKey)
 			return cfg
-		}},
+		}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.noopSeam {
+				prev := keyringReleaseCheck
+				keyringReleaseCheck = func(*keyring.Keyring) error { return nil }
+				t.Cleanup(func() { keyringReleaseCheck = prev })
+			}
 			f := newP3Fixture(t)
 			before := f.snapshot(t)
 			logs := captureLogs(t)
 			srv, err := f.start(t, tc.cfg(f))
 			require.Error(t, err)
 			require.Nil(t, srv)
+			if tc.noopSeam {
+				assert.Contains(t, err.Error(), `no "legacy" entry`)
+			}
 			requireNoAliasAccess(t, f)
 			assert.Equal(t, before, f.snapshot(t))
 			assertNoJWTKeyMaterial(t, err.Error())
@@ -567,6 +605,39 @@ func p3Do(t *testing.T, srv *Server, method, path string, body any, hdr map[stri
 	return rec
 }
 
+// p3AgentAuth authenticates one request through the hub's own
+// UnifiedAuthMiddleware and auth configuration (as Server.Handler chains
+// it), in front of a probe that answers 200 with the authenticated agent
+// ID, so acceptance is asserted exactly (status and identity), not as
+// "not 401".
+func p3AgentAuth(t *testing.T, srv *Server, hdr map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	h := UnifiedAuthMiddleware(srv.authConfig)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := "no-agent-identity"
+		if a := GetAgentIdentityFromContext(r.Context()); a != nil {
+			id = a.ID()
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(id))
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/p3-probe", nil)
+	for k, v := range hdr {
+		req.Header.Set(k, v)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+// p3ConduitRefresh runs the conduit relay's in-band agent credential
+// refresh check on srv for the agent's session.
+func p3ConduitRefresh(srv *Server, agentID, projectID, tok string) string {
+	outcome, _ := srv.conduitAgentRefreshCheck(context.Background(),
+		relay.Principal{Kind: registry.PrincipalAgent, ID: agentID, ProjectID: projectID},
+		relay.RefreshSession{SessionID: "p3-session"}, &conduitv1.AuthRefresh{Credential: []byte(tok)})
+	return outcome
+}
+
 // verifiesOnlyUnder reports which of the fixture generations verifies tok
 // for the named purpose.
 func verifiesOnlyUnder(t *testing.T, tok, name string) []string {
@@ -626,9 +697,32 @@ func TestP3_CrossReplicaTokensThroughHandlers(t *testing.T) {
 				srv *Server
 				tok string
 			}{{srvB, oldAgent}, {srvA, newAgent}, {srvA, oldAgent}, {srvB, newAgent}} {
-				rec := p3Do(t, tc.srv, http.MethodGet, "/api/v1/agents/"+agentID, nil, map[string]string{"X-Scion-Agent-Token": tc.tok})
-				assert.NotEqual(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+				rec := p3AgentAuth(t, tc.srv, map[string]string{"X-Scion-Agent-Token": tc.tok})
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				assert.Equal(t, agentID, rec.Body.String())
+				// The agent token wins over a federation header (auth.go
+				// step 1 before 1.5), for either generation.
+				rec = p3AgentAuth(t, tc.srv, map[string]string{"X-Scion-Agent-Token": tc.tok, FederationTokenHeader: "not-a-federation-token"})
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				assert.Equal(t, agentID, rec.Body.String())
+				// Conduit in-band agent refresh accepts it on either replica.
+				assert.Equal(t, conduitRefreshOK, p3ConduitRefresh(tc.srv, agentID, project.ID, tc.tok))
 			}
+			// An unknown generation is refused on every agent path, and the
+			// federation header is never tried instead.
+			c := jkRing(t, "versioned", "gen3", []string{"legacy"},
+				jkEntry{id: "legacy", secret: jkLegacySecret}, jkEntry{id: "gen3", secret: jkGen3Secret})
+			unknownAgent, _, err := jkAgentSvc(t, c, f.clk).SignAgentToken(AgentTokenGrant{AgentID: agentID, ProjectID: project.ID, Scopes: ScopesForRole(AgentRoleFull)}, "")
+			require.NoError(t, err)
+			for _, srv := range []*Server{srvA, srvB} {
+				rec := p3AgentAuth(t, srv, map[string]string{"X-Scion-Agent-Token": unknownAgent, FederationTokenHeader: "not-a-federation-token"})
+				assert.Equal(t, http.StatusUnauthorized, rec.Code)
+				assert.Equal(t, agentTokenRefusedBody, rec.Body.String())
+				assert.Equal(t, conduitRefreshRefused, p3ConduitRefresh(srv, agentID, project.ID, unknownAgent))
+			}
+			// A token for the conduit retirement check below (its own credential).
+			conduitOld, err := srvA.GenerateAgentToken(agentID, project.ID, nil, AgentRoleFull, nil)
+			require.NoError(t, err)
 
 			// User access, CLI, refresh and test-login tokens.
 			oldAccess, oldRefresh, _, err := srvA.userTokenService.GenerateTokenPair(user.ID, user.Email, user.DisplayName, user.Role, ClientTypeWeb)
@@ -680,7 +774,7 @@ func TestP3_CrossReplicaTokensThroughHandlers(t *testing.T) {
 			assert.NotNil(t, oldCred.RevokedAt)
 			// The refreshed (revoked) old token is now refused on both replicas.
 			for _, srv := range []*Server{srvA, srvB} {
-				rec := p3Do(t, srv, http.MethodGet, "/api/v1/agents/"+agentID, nil, map[string]string{"X-Scion-Agent-Token": oldAgent})
+				rec := p3AgentAuth(t, srv, map[string]string{"X-Scion-Agent-Token": oldAgent})
 				assert.Equal(t, http.StatusUnauthorized, rec.Code)
 				assert.Equal(t, agentTokenRefusedBody, rec.Body.String())
 			}
@@ -693,7 +787,7 @@ func TestP3_CrossReplicaTokensThroughHandlers(t *testing.T) {
 			cred, err := f.raw.GetAgentCredentialByJTIHash(context.Background(), hashJTI(rc.ID))
 			require.NoError(t, err)
 			require.NoError(t, f.raw.RevokeAgentCredential(context.Background(), cred.ID, "test", "explicit"))
-			rec = p3Do(t, srvB, http.MethodGet, "/api/v1/agents/"+agentID, nil, map[string]string{"X-Scion-Agent-Token": revoked})
+			rec = p3AgentAuth(t, srvB, map[string]string{"X-Scion-Agent-Token": revoked})
 			assert.Equal(t, http.StatusUnauthorized, rec.Code)
 			assert.Equal(t, agentTokenRefusedBody, rec.Body.String())
 			rec = p3Do(t, srvB, http.MethodPost, "/api/v1/agents/"+agentID+"/token/refresh", nil, map[string]string{"X-Scion-Agent-Token": revoked})
@@ -705,10 +799,14 @@ func TestP3_CrossReplicaTokensThroughHandlers(t *testing.T) {
 			lateOld, err := srvA.GenerateAgentToken(agentID, project.ID, nil, AgentRoleFull, nil)
 			require.NoError(t, err)
 			f.clk.t = f.base.Add(3 * time.Hour)
-			rec = p3Do(t, srvB, http.MethodGet, "/api/v1/agents/"+agentID, nil, map[string]string{"X-Scion-Agent-Token": lateOld})
-			assert.Equal(t, http.StatusUnauthorized, rec.Code)
-			rec = p3Do(t, srvA, http.MethodGet, "/api/v1/agents/"+agentID, nil, map[string]string{"X-Scion-Agent-Token": lateOld})
-			assert.NotEqual(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+			recB := p3AgentAuth(t, srvB, map[string]string{"X-Scion-Agent-Token": lateOld})
+			assert.Equal(t, http.StatusUnauthorized, recB.Code)
+			assert.Equal(t, agentTokenRefusedBody, recB.Body.String())
+			assert.Equal(t, conduitRefreshRefused, p3ConduitRefresh(srvB, agentID, project.ID, conduitOld))
+			rec = p3AgentAuth(t, srvA, map[string]string{"X-Scion-Agent-Token": lateOld})
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			assert.Equal(t, agentID, rec.Body.String())
+			assert.Equal(t, conduitRefreshOK, p3ConduitRefresh(srvA, agentID, project.ID, conduitOld))
 			recV := p3Do(t, srvB, http.MethodPost, "/api/v1/auth/validate", AuthValidateRequest{Token: oldCLI}, nil)
 			var resp AuthValidateResponse
 			require.NoError(t, json.Unmarshal(recV.Body.Bytes(), &resp))
@@ -717,7 +815,7 @@ func TestP3_CrossReplicaTokensThroughHandlers(t *testing.T) {
 			assert.ErrorIs(t, err, errJWTNoEligibleKey)
 
 			requireNoAliasAccess(t, f)
-			assert.False(t, strings.Contains(rec.Body.String(), jkLegacySecret))
+			assertNoJWTKeyMaterial(t, recB.Body.String()+recV.Body.String())
 		})
 	}
 }
