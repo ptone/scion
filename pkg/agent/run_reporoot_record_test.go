@@ -193,7 +193,7 @@ func TestResolveStartRepoRoot_Conditions(t *testing.T) {
 	}
 }
 
-// R5 behaviour change: a project whose checkout is a linked worktree (its
+// Behaviour change: a project whose checkout is a linked worktree (its
 // top-level .git is a gitfile, not a directory) is refused at provision,
 // because the repository root cannot be identified without reading git
 // metadata the container could edit. detectRepoRoot used to accept it.
@@ -222,8 +222,8 @@ func TestProvision_RefusesLinkedWorktreeProject(t *testing.T) {
 	}
 }
 
-// R2(b): an explicit workspace inside the project's .scion directory is
-// refused at provision.
+// An explicit workspace inside the project's .scion directory is refused
+// at provision.
 func TestRefuseWorkspaceInScionDir(t *testing.T) {
 	root := t.TempDir()
 	scion := mkdirAllT(t, filepath.Join(root, "proj", ".scion"))
@@ -253,8 +253,8 @@ func TestRefuseWorkspaceInScionDir(t *testing.T) {
 	}
 }
 
-// R1: a planted provision record naming another repository is not used
-// (its root does not match the trusted walk from the project), so RepoRoot
+// A provision record naming another repository is not used (its root does
+// not match the trusted walk from the project), so the resolved RepoRoot
 // is empty.
 func TestResolveStartRepoRoot_RejectsRecordNotMatchingProject(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
@@ -279,11 +279,11 @@ func TestResolveStartRepoRoot_RejectsRecordNotMatchingProject(t *testing.T) {
 	}
 }
 
-// R5 scope: the provision refusal is ROOT-only. A project whose root is a
-// normal repository still provisions even when it contains a submodule
-// (whose own .git is a gitfile), because trustedProjectRepoRoot walks up
-// from the project directory and stops at the root's .git directory, above
-// any contained submodule.
+// The provision refusal is root-only. A project whose root is a normal
+// repository still provisions even when it contains a submodule (whose own
+// .git is a gitfile), because trustedProjectRepoRoot walks up from the
+// project directory and stops at the root's .git directory, above any
+// contained submodule.
 func TestProvision_ContainingSubmoduleStillProvisions(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	root := t.TempDir()
