@@ -135,6 +135,7 @@ func templateJobConfig(ctx context.Context, tpl *config.Template, tplCfg *api.Sc
 	}
 	job := *stripped
 	job.Env = nil
+	logTemplateUnlimitedCounts(ctx, tpl, &job)
 	if len(ignored) == 0 {
 		return &job
 	}
@@ -298,4 +299,24 @@ func templateDisplayName(templateName string, provenance *imageProvenance, cfg *
 		return cfg.Info.Template
 	}
 	return templateName
+}
+
+// logTemplateUnlimitedCounts logs, at info level, a template layer that sets
+// max_turns or max_model_calls to 0. That now means "no limit", overriding
+// any inherited or default limit (ptone/scion#5605); before, such a 0 was
+// accepted silently and meant "inherit". The line lets an operator find
+// templates written with the old meaning.
+func logTemplateUnlimitedCounts(ctx context.Context, tpl *config.Template, job *api.ScionConfig) {
+	var keys []string
+	if api.IsUnlimitedCount(job.MaxTurns) {
+		keys = append(keys, "max_turns")
+	}
+	if api.IsUnlimitedCount(job.MaxModelCalls) {
+		keys = append(keys, "max_model_calls")
+	}
+	if len(keys) == 0 {
+		return
+	}
+	slog.InfoContext(ctx, "template sets a count limit to 0, which means no limit; remove the key to inherit the default limit",
+		"template", templateRef(tpl), "path", tpl.Path, "keys", keys)
 }

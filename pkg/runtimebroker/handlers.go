@@ -3831,7 +3831,7 @@ func (s *Server) applyInlineConfigUpdate(ctx context.Context, agentName, project
 	}
 	if s.config.Debug {
 		s.agentLifecycleLog.Debug("applyInlineConfigUpdate: applied inline config update",
-			"agent", agentName, "maxTurns", inlineConfig.MaxTurns, "maxModelCalls", inlineConfig.MaxModelCalls)
+			"agent", agentName, "maxTurns", api.FormatCountLimit(inlineConfig.MaxTurns), "maxModelCalls", api.FormatCountLimit(inlineConfig.MaxModelCalls))
 	}
 }
 
