@@ -35,6 +35,20 @@
   - A link leading out of the tree is reported as "a symlink or junction below … leads outside it". `Within` decides this before the walk.
 - **The hubprofile anchor is followed when it is a link (Windows)**, as for every Tree anchor. On unix the existing walk still refuses a symlinked `hub-profiles`.
 
+## Review r1 (REQUEST CHANGES) and security-lead rulings
+
+- **F1 (High), fixed.** `pathcanon.Within` in `ensureSSHDir` resolved links. That made it refuse a `~/.ssh` or `~/.scion` linked outside home, on every OS. `ensureSSHDir(home, rel)` now takes constant relative paths and makes no location decision. The security lead accepted this as "a correction rather than a relaxation", with conditions (brief addendum (a)-(d)):
+  - (a) Rule I covers every write below these directories. Each caller has a test where a link target fails rule I.
+  - (b) As revised by the security lead: a guard that the Tree walk opens every component relative to its parent handle; refusal tests; an 8.3 containment proof. ValidName is unchanged, so '~' stays legal.
+  - (c) A1 has a test on every ssh/vscode write leaf.
+  - (d) A link to a foreign target is refused.
+- **F4, security-lead ruling.** For the integrity-only rule (`CheckNoForeignWriters`), SYSTEM and Administrators are accepted as owners, by SID only. `CheckPrivate` is unchanged.
+- **F2, fixed.** On Windows, scion ssh's known_hosts path is passed quoted and forward-slashed, so a space in TMP/TEMP works.
+  - `/dev/null` is mapped to NUL by Win32-OpenSSH: `misc.c` `w32_fopen_utf8` and `fileio.c` `fileio_open` at openssh-portable latestw_all 274893f8.
+  - Win32-OpenSSH runs a ProxyCommand with `posix_spawnp`, not cmd.exe (`sshconnect.c` at the same commit).
+- **F6/F7/F8, fixed.** F5 was relayed to 3a by the EM. F3 is the final-round gate.
+- The vscode `.lock` file is opened with write access only for `LockFileEx`; no byte is ever written to it. It is created through filelock, which 3a owns, so the A1 link-count check is not applied to it.
+
 ## Open issues
 
 - **The cmd Windows tests wait for 3a.** pkg/config does not compile for Windows until 3a's C9 lands (`legacy_grove_migration.go:306`). A TEMP commit keeps `./cmd` out of the Windows job. Merge order is 3a first; then I rebase and drop the TEMP commit.
