@@ -176,3 +176,16 @@ func JitterConduitLifetimeCap(base time.Duration, platformDeclared bool, u float
 	}
 	return max(JitterLifetime(base, up, u), min(base, ConduitMinLifetimeCap))
 }
+
+// ConduitLifetimeCapCeiling is the highest per-session cap
+// JitterConduitLifetimeCap can give for base: 1.2 x base with a declared
+// platform request timeout, base without one. A hub in external relay mode
+// sends it as the ingress lifetime cap, so the relay's own per-session
+// jitter (the one side that jitters) is never cut back to a single value by
+// the hub's cap, while the session still ends below the platform timeout.
+func ConduitLifetimeCapCeiling(base time.Duration, platformDeclared bool) time.Duration {
+	if platformDeclared {
+		return time.Duration(float64(base) * (1 + LifetimeJitter))
+	}
+	return base
+}

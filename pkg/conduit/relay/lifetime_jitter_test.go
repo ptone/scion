@@ -23,6 +23,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay/relaytest"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
 // jitterHint dials one agent session on a relay with relayCap and the
@@ -87,5 +88,39 @@ func TestLifetimeCap_JitterWithoutRelayCap(t *testing.T) {
 	hint, calls := jitterHint(t, 0, 90*time.Second, func(d time.Duration) time.Duration { return d / 2 })
 	if hint != 30 || calls != 0 {
 		t.Fatalf("Welcome.lifetime_hint_s = %d, calls = %d; want 30 and 0", hint, calls)
+	}
+}
+
+// ptone/scion#5245 review: under an ingress cap (the principal cap a hub in
+// external relay mode sends) the relay's per-session caps still spread over
+// the jitter range when the hub sends the range's top
+// (config.ConduitLifetimeCapCeiling). Sending the unjittered cap instead
+// would lower every session above it to that one value.
+func TestLifetimeCap_JitterSpreadsUnderIngressCap(t *testing.T) {
+	base := config.EffectiveConduitLifetimeCap(config.ConduitDefaultLifetimeCap, 900*time.Second) // 720s
+	ceiling := config.ConduitLifetimeCapCeiling(base, true)                                       // 864s
+	hints := map[uint32]bool{}
+	var top uint32
+	for _, u := range []float64{0, 0.25, 0.5, 0.75, 0.999} {
+		u := u
+		hint, _ := jitterHint(t, base, ceiling, func(d time.Duration) time.Duration {
+			return config.JitterConduitLifetimeCap(d, true, u)
+		})
+		hints[hint] = true
+		top = max(top, hint)
+	}
+	if len(hints) != 5 {
+		t.Fatalf("lifetime hints under the ingress cap = %v, want 5 distinct values (caps spread)", hints)
+	}
+	if top <= uint32((base-relay.LifetimeGoAwayLead)/time.Second) {
+		t.Fatalf("highest hint %d is not above the unjittered cap's %d: the upward jitter was cut", top, (base-relay.LifetimeGoAwayLead)/time.Second)
+	}
+
+	// The unjittered cap as the ingress cap collapses the upper half.
+	collapsed, _ := jitterHint(t, base, base, func(d time.Duration) time.Duration {
+		return config.JitterConduitLifetimeCap(d, true, 0.999)
+	})
+	if want := uint32((base - relay.LifetimeGoAwayLead) / time.Second); collapsed != want {
+		t.Fatalf("with the unjittered ingress cap the hint = %d, want %d", collapsed, want)
 	}
 }

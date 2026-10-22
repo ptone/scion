@@ -156,3 +156,20 @@ func TestValidateServerPreflight_CloudRunWarningOnce(t *testing.T) {
 	require.NoError(t, validateServerPreflight(&config.GlobalConfig{}))
 	assert.Equal(t, 1, strings.Count(buf.String(), "Running on Cloud Run without server.hub.platform_request_timeout"))
 }
+
+// ptone/scion#5245 review: in external relay mode the hub's ingress cap is
+// the top of the relays' jitter range, so it never cuts the relay's
+// per-session jitter back to one value; it stays below the platform
+// timeout, and without a declared timeout it is the cap itself.
+func TestConduitIngressLifetimeCapSetting(t *testing.T) {
+	cfg := &config.GlobalConfig{}
+	assert.Equal(t, config.ConduitDefaultLifetimeCap, conduitIngressLifetimeCapSetting(cfg))
+	cfg.Hub.PlatformRequestTimeout = "900s"
+	ingress := conduitIngressLifetimeCapSetting(cfg)
+	assert.Equal(t, 864*time.Second, ingress, "1.2 x 720s")
+	jitter := conduitLifetimeJitter(cfg)
+	base := conduitLifetimeCapSetting(cfg)
+	for i := 0; i < 500; i++ {
+		require.LessOrEqual(t, jitter(base), ingress, "every jittered relay cap fits under the ingress cap")
+	}
+}

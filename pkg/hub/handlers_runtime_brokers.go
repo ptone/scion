@@ -1799,6 +1799,18 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				// (ptone/scion#5233): a heartbeat that only bumped last_seen
 				// is silent, and one that carries a real change (a phase,
 				// activity, exit or message) publishes as trigger=change.
+				//
+				// The comparison is against agent, the row read before this
+				// write, not against what clients last received. Two limits
+				// follow. (1) Lost update window: if another writer changed
+				// the row (and published) between that read and this write,
+				// and this write puts the visible fields back to the values
+				// read, the comparison sees no change and clients keep the
+				// other writer's value until the next real change, a resync
+				// or the agent list's own refresh. (2) agent was mutated in
+				// place above (the AppliedConfig backfill of HarnessAuth and
+				// Profile); those fields are not in the status event, so the
+				// mutation does not affect the comparison.
 				if updated, err := s.store.GetAgent(ctx, agent.ID); err == nil && updated.DeletedAt.IsZero() {
 					if agentStatusVisiblyChanged(agent, updated) {
 						s.events.PublishAgentStatus(ctx, updated)

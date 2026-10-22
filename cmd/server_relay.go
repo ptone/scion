@@ -72,6 +72,12 @@ func validateRelayRoleConfig(cfg *config.GlobalConfig) error {
 	if err := cfg.Hub.Conduit.Validate(); err != nil {
 		return err
 	}
+	// The relay clamps and jitters its session lifetime cap with the
+	// declared platform request timeout (ptone/scion#5245); it reads no
+	// server.hub.sse setting.
+	if err := config.ValidatePlatformRequestTimeout(cfg.Hub.PlatformRequestTimeout); err != nil {
+		return err
+	}
 	if err := cfg.Relay.Validate(); err != nil {
 		return err
 	}

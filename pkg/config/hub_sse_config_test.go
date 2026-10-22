@@ -253,3 +253,20 @@ func TestSSESettings_V1RoundTrip(t *testing.T) {
 	assert.Nil(t, empty.Hub.SSE, "an unset block is not written")
 	assert.Empty(t, empty.Hub.PlatformRequestTimeout)
 }
+
+// The ingress cap ceiling is the top of the jitter range: every jittered
+// cap fits under it, and with a declared timeout it stays below the
+// timeout.
+func TestConduitLifetimeCapCeiling(t *testing.T) {
+	platform := 900 * time.Second
+	base := EffectiveConduitLifetimeCap(ConduitDefaultLifetimeCap, platform)
+	ceiling := ConduitLifetimeCapCeiling(base, true)
+	assert.Equal(t, 864*time.Second, ceiling, "1.2 x 720s")
+	assert.Less(t, ceiling, platform)
+	assert.Equal(t, ConduitDefaultLifetimeCap, ConduitLifetimeCapCeiling(ConduitDefaultLifetimeCap, false), "no declared timeout: the cap itself")
+	for i := 0; i < 1000; i++ {
+		u := float64(i) / 1000
+		require.LessOrEqual(t, JitterConduitLifetimeCap(base, true, u), ceiling)
+		require.LessOrEqual(t, JitterConduitLifetimeCap(ConduitDefaultLifetimeCap, false, u), ConduitDefaultLifetimeCap)
+	}
+}

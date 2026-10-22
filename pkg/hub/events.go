@@ -638,8 +638,11 @@ func agentStatusVisiblyChanged(before, after *store.Agent) bool {
 // PublishAgentStatus publishes an agent status event to both agent-specific
 // and project-scoped subjects (dual-publish pattern).
 //
-// An agent status event published with an eventstreams.WithHeartbeatTrigger
-// context counts as trigger=heartbeat on scion.hub.events.published.
+// An event published with an eventstreams.WithHeartbeatTrigger context
+// counts as trigger=heartbeat on scion.hub.events.published. Since
+// ptone/scion#5233 no production caller sets it (heartbeats that change
+// nothing visible publish nothing), so that series stays at zero as a
+// regression signal.
 func (p *eventBuilder) PublishAgentStatus(ctx context.Context, agent *store.Agent) {
 	evt := agentStatusEvent(agent, time.Now())
 	sink := p.statusSink(ctx)

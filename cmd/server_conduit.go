@@ -172,6 +172,15 @@ func conduitLifetimeCapSetting(cfg *config.GlobalConfig) time.Duration {
 	return config.EffectiveConduitLifetimeCap(d, platformRequestTimeoutSetting(cfg))
 }
 
+// conduitIngressLifetimeCapSetting returns the lifetime cap a hub in
+// external relay mode sends on the ingress leg: the top of the per-session
+// jitter range of conduitLifetimeCapSetting (ptone/scion#5245). The relay
+// is the one side that jitters; sending the unjittered cap would lower
+// every session above it back to that single value.
+func conduitIngressLifetimeCapSetting(cfg *config.GlobalConfig) time.Duration {
+	return config.ConduitLifetimeCapCeiling(conduitLifetimeCapSetting(cfg), platformRequestTimeoutSetting(cfg) > 0)
+}
+
 // conduitUserStreamAuthzMaxSetting returns the configured authorization
 // interval of user-originated streams (0 = hub default).
 // validateServerPreflight has already rejected a malformed value.
@@ -641,7 +650,7 @@ func startConduitExternal(ctx context.Context, cfg *config.GlobalConfig, hubSrv 
 		PeerAuth:        auth,
 		Ingress:         cfg.Hub.Conduit.IngressValue(),
 		IngressOffCause: ingressOff,
-		LifetimeCap:     conduitLifetimeCapSetting(cfg),
+		LifetimeCap:     conduitIngressLifetimeCapSetting(cfg),
 	}); err != nil {
 		return err
 	}
