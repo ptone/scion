@@ -104,7 +104,41 @@ func (s *Server) validateAgentConfigPatch(ctx context.Context, w http.ResponseWr
 			return false
 		}
 	}
-	return true
+	return s.validateUnlimitedCounts(ctx, w, agent, cfg)
+}
+
+// validateUnlimitedCounts refuses a change of a count limit to Unlimited (0)
+// that the agent's broker cannot apply (ptone/scion#5605): 422 with the
+// per-field reasons, or 503 when the broker record cannot be read. Only a
+// change counts, against the value the agent's next run would otherwise
+// use: with held edits on, the applied inline config overlaid by the
+// pending config; with them off, pending rows are inert, so the applied
+// inline config alone. The broker is looked up only when there is such a
+// change. It runs for the live PATCH and for the held save alike.
+func (s *Server) validateUnlimitedCounts(ctx context.Context, w http.ResponseWriter, agent *store.Agent, cfg *api.ScionConfig) bool {
+	var base *api.ScionConfig
+	if s.heldEditsEnabled() {
+		base = effectiveNextRunInline(agent)
+	} else if agent != nil && agent.AppliedConfig != nil {
+		base = agent.AppliedConfig.InlineConfig
+	}
+	fields, err := s.unlimitedCountRefusal(ctx, agent, cfg, base)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+			"The agent's runtime broker could not be read to check that it supports Unlimited; retry", nil)
+		return false
+	}
+	if len(fields) == 0 {
+		return true
+	}
+	details := make(map[string]interface{}, len(fields))
+	for k, v := range fields {
+		details[k] = v
+	}
+	writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+		"Unlimited is not supported for this agent's runtime broker; reload the page, or upgrade the broker",
+		map[string]interface{}{"fields": details})
+	return false
 }
 
 // configPatchResult is what applyAgentConfigPatch did: the warnings for the

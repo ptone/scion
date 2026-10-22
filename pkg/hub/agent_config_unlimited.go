@@ -17,6 +17,9 @@ package hub
 import (
 	"context"
 	"errors"
+	"slices"
+	"sort"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -37,6 +40,13 @@ const (
 	unlimitedNotSupportedByBroker = "unlimited_not_supported_by_broker: this agent's runtime broker cannot apply Unlimited over an inherited limit; reload the page, or upgrade the broker"
 	unlimitedBrokerUnknown        = "broker_unknown: the agent has no runtime broker, so no start can promise Unlimited"
 )
+
+// unlimitedCountFieldKeys are the edit keys of the count limits, whose 0 is
+// Unlimited.
+var unlimitedCountFieldKeys = map[string]bool{
+	agentConfigKeyPrefix + "max_turns":       true,
+	agentConfigKeyPrefix + "max_model_calls": true,
+}
 
 // errBrokerLookup is returned by agentBrokerStartSupportStrict when the
 // agent's broker record cannot be read; the caller answers 503.
@@ -138,4 +148,68 @@ func unlimitedCountCreateWarning(cfg *api.ScionConfig, caps *store.BrokerCapabil
 		msg += ", " + keys[1]
 	}
 	return msg + ": this agent's runtime broker keeps the inherited limit; Unlimited applies only on a broker that supports it"
+}
+
+// foldKeep returns the keep rule a fold of the pending config pc applies
+// with this broker: the keys a start applies (startApplies), except a count
+// limit pending as 0 (Unlimited) when the broker does not advertise
+// unlimitedCountLimits, which a start would not apply over an inherited
+// limit (ptone/scion#5605). Such keys stay pending and are returned in
+// waiting, sorted wire keys, for unlimitedWaitsWarning. A broker can lose
+// the capability after the edit was saved (a downgrade or a re-registration).
+func (sup brokerStartSupport) foldKeep(pc *store.AgentPendingConfig) (keep func(agentEditField) bool, waiting []string) {
+	keep = sup.startApplies
+	if sup.UnlimitedCountLimits || pc.IsEmpty() {
+		return keep, nil
+	}
+	p := pendingConfigPatch(pc)
+	held := map[string]bool{}
+	if p.present["max_turns"] && api.IsUnlimitedCount(p.cfg.MaxTurns) {
+		held[agentConfigKeyPrefix+"max_turns"] = true
+	}
+	if p.present["max_model_calls"] && api.IsUnlimitedCount(p.cfg.MaxModelCalls) {
+		held[agentConfigKeyPrefix+"max_model_calls"] = true
+	}
+	if len(held) == 0 {
+		return keep, nil
+	}
+	for k := range held {
+		waiting = append(waiting, k)
+	}
+	sort.Strings(waiting)
+	return func(f agentEditField) bool { return !held[f.Key] && sup.startApplies(f) }, waiting
+}
+
+// unlimitedWaitsWarning is the warning for pending count limits left pending
+// because the agent's broker cannot apply Unlimited (foldKeep): a start
+// warning at the start fold, and a PATCH response warning at the fold of a
+// PATCH to an agent with no container. "" when there are none.
+func unlimitedWaitsWarning(keys []string) string {
+	if len(keys) == 0 {
+		return ""
+	}
+	return strings.Join(keys, ", ") + ": Unlimited waits for a runtime broker that supports it; discard it with DELETE /api/v1/agents/{id}/pending-config"
+}
+
+// addUnlimitedWaitsWarning adds unlimitedWaitsWarning for keys to the
+// start's dispatch warnings.
+func addUnlimitedWaitsWarning(ctx context.Context, keys []string) {
+	if w := unlimitedWaitsWarning(keys); w != "" {
+		addDispatchWarnings(ctx, w)
+	}
+}
+
+// stringsWithout returns list without the entries in drop, in order; nil
+// when nothing is left.
+func stringsWithout(list, drop []string) []string {
+	if len(drop) == 0 {
+		return list
+	}
+	var out []string
+	for _, s := range list {
+		if !slices.Contains(drop, s) {
+			out = append(out, s)
+		}
+	}
+	return out
 }

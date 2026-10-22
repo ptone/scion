@@ -195,7 +195,11 @@ func (s *Server) applyAgentConfigUpdateHeld(ctx context.Context, w http.Response
 	}
 
 	if !live {
-		out.folded, out.unappliable = s.foldPendingConfig(ctx, agent, sup.startApplies)
+		keep, waiting := sup.foldKeep(agent.PendingConfig)
+		out.folded, out.unappliable = s.foldPendingConfig(ctx, agent, keep)
+		if w := unlimitedWaitsWarning(waiting); w != "" {
+			out.warnings = append(out.warnings, w)
+		}
 		if !nowPart.empty() {
 			res := s.applyAgentConfigPatch(ctx, agent, nowPart, canAttachEnv)
 			out.warnings = append(out.warnings, res.warnings...)
@@ -603,12 +607,17 @@ func (s *Server) foldPendingConfigAtStart(ctx context.Context, agent *store.Agen
 		st := *stored
 		st.AppliedConfig = cloneAppliedConfig(stored.AppliedConfig)
 		st.PendingConfig = stored.PendingConfig.Clone()
-		folded, unappliable := s.foldPendingConfig(ctx, &st, sup.startApplies)
+		// A pending Unlimited the broker cannot apply stays pending
+		// (foldKeep, ptone/scion#5605), with its own start warning rather
+		// than the held-for-reincarnation one.
+		keep, waiting := sup.foldKeep(stored.PendingConfig)
+		folded, unappliable := s.foldPendingConfig(ctx, &st, keep)
 		if len(folded) == 0 && len(unappliable) == 0 {
 			// Nothing to apply or remove now (another start applied it, or
 			// it was discarded): the caller's copy follows the stored row.
 			agent.PendingConfig = stored.PendingConfig
-			return pendingConfigKeys(stored.PendingConfig), nil
+			addUnlimitedWaitsWarning(ctx, waiting)
+			return stringsWithout(pendingConfigKeys(stored.PendingConfig), waiting), nil
 		}
 		version, err := s.store.UpdateAgentConfig(ctx, agent.ID, stored.StateVersion, st.AppliedConfig, st.PendingConfig)
 		if errors.Is(err, store.ErrVersionConflict) {
@@ -620,7 +629,7 @@ func (s *Server) foldPendingConfigAtStart(ctx context.Context, agent *store.Agen
 		mem := *agent
 		mem.AppliedConfig = cloneAppliedConfig(agent.AppliedConfig)
 		mem.PendingConfig = stored.PendingConfig.Clone()
-		s.foldPendingConfig(ctx, &mem, sup.startApplies)
+		s.foldPendingConfig(ctx, &mem, keep)
 		agent.AppliedConfig = mem.AppliedConfig
 		agent.PendingConfig = st.PendingConfig
 		if agent.StateVersion == stored.StateVersion {
@@ -630,7 +639,8 @@ func (s *Server) foldPendingConfigAtStart(ctx context.Context, agent *store.Agen
 			s.auditPendingConfig(ctx, agent.ID, mutationTypeAgentPendingConfigApplied, folded, trigger)
 		}
 		s.auditUnappliablePendingKeys(ctx, agent.ID, unappliable)
-		return pendingConfigKeys(st.PendingConfig), nil
+		addUnlimitedWaitsWarning(ctx, waiting)
+		return stringsWithout(pendingConfigKeys(st.PendingConfig), waiting), nil
 	}
 	return nil, fmt.Errorf("%w: %w", errPendingConfigFold, store.ErrVersionConflict)
 }

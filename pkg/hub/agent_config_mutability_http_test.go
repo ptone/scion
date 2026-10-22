@@ -615,6 +615,11 @@ func TestAgentEditGoldens(t *testing.T) {
 		// notWarned are keys no warning may name: Unlimited on Max duration
 		// ("0") applies at the next start, so it is not "cleared".
 		notWarned []string
+		// unlimitedBroker gives the agent's broker unlimitedCountLimits,
+		// without which a change of a count limit to 0 is refused
+		// (ptone/scion#5605; the refusal is
+		// TestAgentConfigPatch_UnlimitedCountByBroker).
+		unlimitedBroker bool
 	}{
 		{name: "untouched", applied: []string{}, check: func(t *testing.T, inline *api.ScionConfig) {
 			assert.Equal(t, "old-model", inline.Model)
@@ -627,7 +632,7 @@ func TestAgentEditGoldens(t *testing.T) {
 		}},
 		// Unlimited on Max turns (0) is a value the start merge applies
 		// (ptone/scion#5605), like Unlimited on Max duration ("0").
-		{name: "unlimited", applied: []string{"config.max_duration", "config.max_turns"}, notWarned: []string{"config.max_duration", "config.max_turns"}, check: func(t *testing.T, inline *api.ScionConfig) {
+		{name: "unlimited", unlimitedBroker: true, applied: []string{"config.max_duration", "config.max_turns"}, notWarned: []string{"config.max_duration", "config.max_turns"}, check: func(t *testing.T, inline *api.ScionConfig) {
 			assert.Equal(t, api.IntPtr(0), inline.MaxTurns)
 			assert.Equal(t, "0", inline.MaxDuration)
 			assert.Zero(t, inline.ParseMaxDuration(), `"0" is no duration limit`)
@@ -671,6 +676,9 @@ func TestAgentEditGoldens(t *testing.T) {
 
 			disp := &inlineCaptureDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher()}
 			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+			if tc.unlimitedBroker {
+				setBrokerCapabilities(t, s, broker.ID, &store.BrokerCapabilities{Reprovision: true, UnlimitedCountLimits: true})
+			}
 			agent := newEditTestAgent(t, s, project, broker, phase)
 			body["stateVersion"] = agent.StateVersion
 
@@ -817,14 +825,13 @@ func TestAgentConfigPatch_FixedKeyEchoOfAppliedValue(t *testing.T) {
 }
 
 // TestAgentConfigPatch_NoWarningsForUnchangedValues: the Configure page's
-// untouched body, sent to an agent whose prompts, limits and user are
+// untouched body (less its count limits), sent to an agent whose prompts, limits and user are
 // already empty, changes nothing and so warns about nothing; a real clear
 // does warn.
 func TestAgentConfigPatch_NoWarningsForUnchangedValues(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("testdata", "configure-untouched-body.json"))
-	require.NoError(t, err)
-	var cfg map[string]interface{}
-	require.NoError(t, json.Unmarshal(raw, &cfg))
+	// Without the body's count limits: their 0 is Unlimited now, a real
+	// change (TestAgentConfigPatch_RetiredConfigureBodyMeansUnlimited).
+	cfg := configureUntouchedBody(t)
 
 	disp := &inlineCaptureDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher()}
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
