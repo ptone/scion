@@ -1448,6 +1448,7 @@ func TestLfsConfigNamesEndpoint(t *testing.T) {
 		"[remote \"origin\"]\n\tlfsurl = https://x":           true,
 		"[lfs \"https://x:443/lfs\"]\n\taccess = negotiate\n": true,
 		"[lfs]\n\tconcurrenttransfers = 4\n":                  false, // inert, not an endpoint
+		"[lfs\n\tbroken":                                      true,  // present but unparseable -> fail closed
 	}
 	for body, want := range cases {
 		repo := filepath.Join(t.TempDir(), "repo")
@@ -1459,7 +1460,7 @@ func TestLfsConfigNamesEndpoint(t *testing.T) {
 		} else {
 			hostRunGit(t, repo, "-c", "core.hooksPath="+os.DevNull, "commit", "-q", "--allow-empty", "-m", "empty")
 		}
-		if got := lfsConfigNamesEndpoint(repo); got != want {
+		if got := lfsConfigNamesEndpoint(repo, "HEAD"); got != want {
 			t.Errorf("lfsConfigNamesEndpoint(%q) = %v, want %v", body, got, want)
 		}
 	}
@@ -1553,4 +1554,35 @@ func addTestCredentialHelper(t *testing.T, serverURL string) {
 		t.Fatal(err)
 	}
 	_ = f.Close()
+}
+
+// G-6: lfsOptionForLinkedCheckout reads the .lfsconfig of the ref being checked
+// out, not the root's HEAD. A branch that adds an endpoint is skipped even when
+// HEAD has none; a branch with none (and an http origin) is pinned.
+func TestLfsOptionForLinkedCheckout_ReadsBranchRef(t *testing.T) {
+	hostGitTestEnv(t)
+	repo := filepath.Join(t.TempDir(), "repo")
+	hostRunGit(t, filepath.Dir(repo), "init", "-q", "-b", "main", repo)
+	hostRunGit(t, repo, "remote", "add", "origin", "https://host.example/o/r.git")
+	// main (HEAD): no .lfsconfig endpoint.
+	writeFile(t, filepath.Join(repo, "f.txt"), "x\n")
+	hostRunGit(t, repo, "add", ".")
+	hostRunGit(t, repo, "-c", "core.hooksPath="+os.DevNull, "commit", "-q", "-m", "main")
+	// feat: adds a .lfsconfig naming an endpoint.
+	hostRunGit(t, repo, "checkout", "-q", "-b", "feat")
+	writeFile(t, filepath.Join(repo, ".lfsconfig"), "[lfs]\n\turl = https://lfs.example/lfs\n")
+	hostRunGit(t, repo, "add", ".")
+	hostRunGit(t, repo, "-c", "core.hooksPath="+os.DevNull, "commit", "-q", "-m", "feat lfs")
+	hostRunGit(t, repo, "checkout", "-q", "main")
+
+	if opt := lfsOptionForLinkedCheckout(repo, "feat"); !opt.skipSmudge {
+		t.Errorf("branch feat names an endpoint: want skipSmudge, got %+v", opt)
+	}
+	if opt := lfsOptionForLinkedCheckout(repo, "main"); opt.skipSmudge || opt.url == "" {
+		t.Errorf("branch main has no endpoint (http origin): want pinned url, got %+v", opt)
+	}
+	// A new branch (does not exist yet) reads HEAD, which is main → pinned.
+	if opt := lfsOptionForLinkedCheckout(repo, "brand-new"); opt.skipSmudge || opt.url == "" {
+		t.Errorf("new branch reads HEAD (no endpoint): want pinned url, got %+v", opt)
+	}
 }

@@ -326,7 +326,7 @@ func CreateWorktree(path, branch string) error {
 	// a tracked .lfsconfig; pin the endpoint from the trusted origin remote
 	// instead (lfs.url via -c outranks .lfsconfig). When the endpoint cannot
 	// be derived (for example an ssh remote), skip the smudge and warn.
-	lfsOpt := lfsOptionForLinkedCheckout(root)
+	lfsOpt := lfsOptionForLinkedCheckout(root, branch)
 	opts := HostGitOptions{Env: gitEnv, Policy: RepoPolicyLinked, SkipLFSSmudge: lfsOpt.skipSmudge, LFSURL: lfsOpt.url}
 	cmd, err := HostGitCommand(ctx, root, opts, "worktree", "add", "--relative-paths", "-b", branch, path)
 	if err != nil {
@@ -376,11 +376,19 @@ type lfsCheckoutOption struct {
 //     that names an endpoint or an access mode — its objects may legitimately
 //     live on a separate server, or it may select an auth mode we will not
 //     use; either way we do not pin and never contact it).
-func lfsOptionForLinkedCheckout(root string) lfsCheckoutOption {
-	// A tracked .lfsconfig that sets an endpoint or an access mode: do not pin
-	// (the origin endpoint may not serve these objects, and an access key could
-	// select ambient credentials) and do not contact it; skip.
-	if lfsConfigNamesEndpoint(root) {
+func lfsOptionForLinkedCheckout(root, branch string) lfsCheckoutOption {
+	// Read the .lfsconfig of the ref actually being checked out: the existing
+	// branch when it already exists, otherwise HEAD (a new branch is created
+	// from HEAD, so it has HEAD's tree).
+	ref := "HEAD"
+	if branch != "" && BranchExistsIn(root, branch) {
+		ref = "refs/heads/" + branch
+	}
+	// A tracked .lfsconfig that sets an endpoint or an access mode (or is
+	// unparseable): do not pin (the origin endpoint may not serve these objects,
+	// and an access key could select ambient credentials) and do not contact it;
+	// skip.
+	if lfsConfigNamesEndpoint(root, ref) {
 		return lfsCheckoutOption{skipSmudge: true}
 	}
 	remote := strings.TrimSpace(GetGitRemoteDir(root))
@@ -393,18 +401,20 @@ func lfsOptionForLinkedCheckout(root string) lfsCheckoutOption {
 	return lfsCheckoutOption{skipSmudge: true}
 }
 
-// lfsConfigNamesEndpoint reports whether the committed .lfsconfig at HEAD names
-// an LFS endpoint (lfs.url, lfs.pushurl or remote.<name>.lfsurl) or sets any
-// per-endpoint lfs.<url>.access. It reads HEAD:.lfsconfig as data (host-side
-// git with the fixed pins); a missing file means no endpoint.
-func lfsConfigNamesEndpoint(root string) bool {
-	out, err := hostGit("-C", root, "show", "HEAD:.lfsconfig").Output()
+// lfsConfigNamesEndpoint reports whether the .lfsconfig committed at ref sets
+// an LFS endpoint (lfs.url, lfs.pushurl or remote.<name>.lfsurl) or any
+// per-endpoint lfs.<url>.access. It reads <ref>:.lfsconfig as data (host-side
+// git with the fixed pins). A missing file is "no endpoint" (false); a present
+// but unparseable file is treated as naming an endpoint (true, fail closed:
+// skip-smudge rather than pin against an endpoint we could not vet).
+func lfsConfigNamesEndpoint(root, ref string) bool {
+	out, err := hostGit("-C", root, "show", ref+":.lfsconfig").Output()
 	if err != nil {
-		return false
+		return false // no committed .lfsconfig at this ref
 	}
 	vars, err := parseGitConfigFile(out)
 	if err != nil {
-		return false
+		return true // present but unparseable: fail closed (skip)
 	}
 	for _, v := range vars {
 		if v.Section == "lfs" && !v.HasSubsection && (v.Name == "url" || v.Name == "pushurl") {
