@@ -484,7 +484,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			ProjectID:            cfg.Secrets.GCPProjectID,
 			CredentialsJSON:      cfg.Secrets.GCPCredentials,
 			ReplicationLocations: cfg.Secrets.GCPReplicationLocations,
-		}, hubID, resolveSessionSecret())
+		}, hubID, secret.NewLegacyValueCipher(resolveSessionSecret()))
 		if sbErr != nil {
 			log.Printf("Warning: failed to initialize secret backend: %v", sbErr)
 		}

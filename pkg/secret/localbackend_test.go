@@ -19,7 +19,7 @@ package secret
 import (
 	"context"
 	"encoding/base64"
-	"strings"
+	"errors"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -1149,7 +1149,7 @@ func TestLocalBackend_DecryptStoreSecret_NilKeyEncryptedValue(t *testing.T) {
 	seedSecret(t, s, &store.Secret{
 		ID:             tid("enc-no-key-1"),
 		Key:            "ENCRYPTED_SECRET",
-		EncryptedValue: "enc:v1:AAAAAAAAAAAAAAAAAAAAAA==",
+		EncryptedValue: wellFormedV1Fixture(t),
 		SecretType:     store.SecretTypeEnvironment,
 		Target:         "ENCRYPTED_SECRET",
 		Scope:          store.ScopeUser,
@@ -1160,9 +1160,20 @@ func TestLocalBackend_DecryptStoreSecret_NilKeyEncryptedValue(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when encryption key is nil but value is encrypted; got nil")
 	}
-	if !strings.Contains(err.Error(), "no encryption key is configured") {
-		t.Errorf("expected error about missing encryption key, got: %v", err)
+	if !errors.Is(err, ErrNoDecryptionKey) {
+		t.Errorf("expected ErrNoDecryptionKey, got: %v", err)
 	}
+}
+
+// wellFormedV1Fixture is a well-formed enc:v1: value sealed under a
+// synthetic key no backend in these tests holds.
+func wellFormedV1Fixture(t *testing.T) string {
+	t.Helper()
+	v, err := EncryptValue("fake-sealed-value", DeriveLocalEncryptionKey("FAKE-unrelated-test-secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v
 }
 
 // TestLocalBackend_DecryptStoreSecret_NilKeyPlaintextValue verifies that
@@ -1199,7 +1210,7 @@ func TestLocalBackend_DecryptRawValue_NilKeyEncryptedValue(t *testing.T) {
 	s := createTestStore(t)
 	backend := NewLocalBackend(s, "test-hub-id", "") // nil encryption key
 
-	encrypted := "enc:v1:AAAAAAAAAAAAAAAAAAAAAA=="
+	encrypted := wellFormedV1Fixture(t)
 	value, err := backend.decryptRawValue(encrypted)
 	if err == nil {
 		t.Fatal("expected error when encryption key is nil but value is encrypted; got nil")
@@ -1207,8 +1218,8 @@ func TestLocalBackend_DecryptRawValue_NilKeyEncryptedValue(t *testing.T) {
 	if value != "" {
 		t.Errorf("expected empty string on error, got %q", value)
 	}
-	if !strings.Contains(err.Error(), "no encryption key is configured") {
-		t.Errorf("expected error about missing encryption key, got: %v", err)
+	if !errors.Is(err, ErrNoDecryptionKey) {
+		t.Errorf("expected ErrNoDecryptionKey, got: %v", err)
 	}
 
 	// Also verify via Resolve: encrypted values should be skipped, not leaked.
@@ -1260,7 +1271,7 @@ func TestLocalBackend_DecryptRawValue_CorruptCiphertextReturnsError(t *testing.T
 // decryptRawValue still returns plaintext values when the encryption key
 // is nil (legacy path).
 func TestLocalBackend_DecryptRawValue_NilKeyPlaintextValue(t *testing.T) {
-	backend := &LocalBackend{encryptionKey: nil}
+	backend := NewLocalBackendWithCipher(nil, "test-hub-id", nil) // disabled cipher
 
 	value, err := backend.decryptRawValue("plain-legacy-value")
 	if err != nil {

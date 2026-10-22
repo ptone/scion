@@ -76,13 +76,14 @@ func recordGenerationChanged(s *store.Secret, meta SecretMeta) bool {
 
 // NewBackend creates a SecretBackend of the specified type.
 // The "local" backend wraps the given SecretStore directly and encrypts values
-// at rest using a key derived from sharedSecret.
+// at rest with cipher, the server's one shared ValueCipher (ptone/scion#1530
+// §5; nil means the disabled cipher).
 // The "gcpsm" backend uses a hybrid approach: metadata in the Hub DB, values in GCP SM.
 // The hubID parameter is the unique hub instance identifier used for secret namespacing.
-func NewBackend(ctx context.Context, backendType string, s store.SecretStore, gcpCfg GCPBackendConfig, hubID, sharedSecret string) (SecretBackend, error) {
+func NewBackend(ctx context.Context, backendType string, s store.SecretStore, gcpCfg GCPBackendConfig, hubID string, cipher *ValueCipher) (SecretBackend, error) {
 	switch backendType {
 	case BackendLocal, "":
-		return NewLocalBackend(s, hubID, sharedSecret), nil
+		return NewLocalBackendWithCipher(s, hubID, cipher), nil
 	case BackendGCPSM:
 		return NewGCPBackend(ctx, s, gcpCfg, hubID)
 	default:

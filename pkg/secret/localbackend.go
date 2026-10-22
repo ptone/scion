@@ -18,36 +18,46 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // LocalBackend implements SecretBackend using the local store.SecretStore.
-// Values are encrypted at rest using AES-256-GCM before being written to
-// the Hub database. The encryption key is derived from the deployment-wide
-// shared signing secret via DeriveLocalEncryptionKey.
+// Values are encrypted at rest by the shared ValueCipher (ptone/scion#1530
+// §5) before they are written to the Hub database: AES-256-GCM in the
+// enc:v1: or enc:v2:<kid>: envelope the cipher's ring selects.
 type LocalBackend struct {
-	store         store.SecretStore
-	hubID         string
-	encryptionKey []byte // 32-byte AES-256 key; nil disables encryption (legacy/dev)
+	store  store.SecretStore
+	hubID  string
+	cipher *ValueCipher // never nil; disabled only in legacy dev mode
 }
 
-// NewLocalBackend creates a LocalBackend wrapping the given SecretStore.
-// The sharedSecret parameter is the deployment-wide signing secret used to
-// derive the AES-256 encryption key for at-rest encryption. When empty,
-// encryption is disabled and values are stored as plaintext (with a warning).
+// NewLocalBackend creates a LocalBackend wrapping the given SecretStore,
+// with the legacy-mode cipher over sharedSecret (NewLegacyValueCipher).
+// When sharedSecret is empty, encryption is disabled and values are stored
+// as plaintext (with a warning). Production wiring shares one cipher with
+// the Hub through NewLocalBackendWithCipher.
 func NewLocalBackend(s store.SecretStore, hubID, sharedSecret string) *LocalBackend {
-	var key []byte
-	if sharedSecret != "" {
-		key = DeriveLocalEncryptionKey(sharedSecret)
-	} else {
+	return NewLocalBackendWithCipher(s, hubID, NewLegacyValueCipher(sharedSecret))
+}
+
+// NewLocalBackendWithCipher creates a LocalBackend that encrypts with c,
+// the server's one shared ValueCipher. A nil c is the disabled cipher.
+func NewLocalBackendWithCipher(s store.SecretStore, hubID string, c *ValueCipher) *LocalBackend {
+	if c == nil {
+		c = NewLegacyValueCipher("")
+	}
+	if !c.Enabled() {
 		slog.Warn("local secret backend: no shared signing secret configured; " +
 			"secret values will be stored WITHOUT encryption")
 	}
-	return &LocalBackend{store: s, hubID: hubID, encryptionKey: key}
+	return &LocalBackend{store: s, hubID: hubID, cipher: c}
 }
+
+// Cipher returns the backend's ValueCipher (for identity checks: the Hub
+// and the backend must share one object).
+func (b *LocalBackend) Cipher() *ValueCipher { return b.cipher }
 
 // HubID returns the hub instance ID used for hub-scoped secret namespacing.
 func (b *LocalBackend) HubID() string {
@@ -114,15 +124,15 @@ func (b *LocalBackend) fetchValue(ctx context.Context, meta SecretMeta) FetchRes
 func (b *LocalBackend) Set(ctx context.Context, input *SetSecretInput) (bool, *SecretMeta, error) {
 	s := toStoreSecret(input)
 
-	// Encrypt the value before persisting. When no encryption key is
-	// configured the plaintext is stored as-is (legacy/dev mode).
-	if b.encryptionKey != nil {
-		encrypted, err := EncryptValue(s.EncryptedValue, b.encryptionKey)
-		if err != nil {
-			return false, nil, fmt.Errorf("encrypting secret value: %w", err)
-		}
-		s.EncryptedValue = encrypted
+	// Encrypt the value before persisting. The disabled cipher (legacy dev
+	// mode, no server secret) stores the plaintext as-is. A write the
+	// database encryption policy refuses returns
+	// store.ErrEncryptionPolicyMismatch, never an unencrypted fallback.
+	encrypted, err := b.cipher.Encrypt(s.EncryptedValue)
+	if err != nil {
+		return false, nil, fmt.Errorf("encrypting secret value: %w", err)
 	}
+	s.EncryptedValue = encrypted
 
 	created, err := b.store.UpsertSecret(ctx, s)
 	if err != nil {
@@ -409,21 +419,12 @@ func fromStoreSecretMeta(s *store.Secret) *SecretMeta {
 }
 
 // decryptStoreSecret converts a store.Secret to SecretWithValue, decrypting
-// the EncryptedValue if an encryption key is configured. Legacy plaintext
-// values (those without the enc:v1: prefix) are returned as-is.
+// its EncryptedValue with the shared cipher. Every failure is a typed
+// ValueCipher or envelope error naming the secret key, never a value.
 func (b *LocalBackend) decryptStoreSecret(s *store.Secret) (*SecretWithValue, error) {
-	value := s.EncryptedValue
-	if b.encryptionKey != nil {
-		plaintext, _, err := DecryptValue(s.EncryptedValue, b.encryptionKey)
-		if err != nil {
-			return nil, fmt.Errorf("decrypting secret %q: %w", s.Key, err)
-		}
-		value = plaintext
-	} else if strings.HasPrefix(s.EncryptedValue, EncryptedPrefix) {
-		// The stored value is encrypted but no encryption key is configured.
-		// Returning the raw ciphertext would leak an indistinguishable blob
-		// that the caller would treat as a real secret value.
-		return nil, fmt.Errorf("secret %q is encrypted but no encryption key is configured", s.Key)
+	value, err := b.cipher.Decrypt(s.EncryptedValue)
+	if err != nil {
+		return nil, fmt.Errorf("decrypting secret %q: %w", s.Key, err)
 	}
 	return &SecretWithValue{
 		SecretMeta: *fromStoreSecretMeta(s),
@@ -431,22 +432,12 @@ func (b *LocalBackend) decryptStoreSecret(s *store.Secret) (*SecretWithValue, er
 	}, nil
 }
 
-// decryptRawValue decrypts a raw encrypted value string. If decryption fails
-// (e.g. corrupted ciphertext or key mismatch after rotation), an error is
-// returned and the value is always empty: a failure is reported to the
-// caller instead of being delivered as an indistinguishable empty value.
-// This is used in Resolve, where the caller skips the affected secret on a
-// non-nil error rather than aborting the entire resolution.
+// decryptRawValue decrypts a raw stored value with the shared cipher. On
+// failure the value is always empty and the error is typed: a failure is
+// reported to the caller, never delivered as an indistinguishable empty
+// value.
 func (b *LocalBackend) decryptRawValue(raw string) (string, error) {
-	if b.encryptionKey == nil {
-		if strings.HasPrefix(raw, EncryptedPrefix) {
-			// The stored value is encrypted but no encryption key is
-			// configured. Return an error instead of leaking ciphertext.
-			return "", fmt.Errorf("value is encrypted but no encryption key is configured")
-		}
-		return raw, nil // legacy plaintext
-	}
-	plaintext, _, err := DecryptValue(raw, b.encryptionKey)
+	plaintext, err := b.cipher.Decrypt(raw)
 	if err != nil {
 		return "", fmt.Errorf("decrypting secret value: %w", err)
 	}
