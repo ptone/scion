@@ -4459,6 +4459,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			warnings = append(warnings, out.warnings...)
 			configApplied, configHeld, configHeldForReincarnate = out.applied, out.held, out.heldForReincarnate
 			pendingSaved, pendingFolded, pendingUnappliable = out.saved, out.folded, out.unappliable
+			pendingSuperseded = out.superseded
 		} else {
 			if !configPatchPhase(agent.Phase) {
 				Conflict(w, configPatchPhaseMessage)

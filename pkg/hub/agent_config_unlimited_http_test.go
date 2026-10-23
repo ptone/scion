@@ -367,3 +367,63 @@ func containsSubstring(list []string, sub string) bool {
 	}
 	return false
 }
+
+// waitingUnlimitedFixture is a stopped agent with held edits on and a
+// pending max_turns of 0 saved while its broker advertised
+// unlimitedCountLimits, on a broker that no longer does: the pending 0
+// waits (foldKeep).
+func waitingUnlimitedFixture(t *testing.T) (*Server, store.Store, *inlineCaptureDispatcher, *store.Agent) {
+	t.Helper()
+	srv, s, disp, agent := heldEditsFixture(t, state.PhaseRunning)
+	setBrokerCapabilities(t, s, agent.RuntimeBrokerID, &store.BrokerCapabilities{Reprovision: true, UnlimitedCountLimits: true})
+	patchPending(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{"max_turns": 0}})
+	setBrokerCapabilities(t, s, agent.RuntimeBrokerID, &store.BrokerCapabilities{Reprovision: true})
+	row := pendingReloadAgent(t, s, agent.ID)
+	row.Phase = string(state.PhaseStopped)
+	require.NoError(t, s.UpdateAgent(context.Background(), row))
+	return srv, s, disp, pendingReloadAgent(t, s, agent.ID)
+}
+
+// TestAgentPendingConfig_WaitingUnlimitedSupersededByWrite: a PATCH of an
+// agent with no container that writes a count limit now removes a waiting
+// pending Unlimited of that key (audited superseded), so the older pending
+// 0 is never applied over the newer value, even after the broker gains the
+// capability.
+func TestAgentPendingConfig_WaitingUnlimitedSupersededByWrite(t *testing.T) {
+	srv, s, disp, agent := waitingUnlimitedFixture(t)
+
+	resp := patchPending(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{"max_turns": 5}})
+	assert.Equal(t, []string{"config.max_turns"}, resp.Disposition.Applied)
+	assert.False(t, containsSubstring(resp.Warnings, "Unlimited waits"), "%v", resp.Warnings)
+	stored := pendingReloadAgent(t, s, agent.ID)
+	assert.Equal(t, api.IntPtr(5), stored.AppliedConfig.InlineConfig.MaxTurns)
+	if stored.PendingConfig != nil {
+		assert.NotContains(t, stored.PendingConfig.Config, "max_turns")
+	}
+	discarded := pendingAudits(t, s, agent.ID, mutationTypeAgentPendingConfigDiscarded, 1)
+	keys, trigger := pendingAuditSummary(t, discarded[0])
+	assert.Equal(t, []string{"config.max_turns"}, keys)
+	assert.Equal(t, pendingDiscardTriggerSuperseded, trigger)
+
+	setBrokerCapabilities(t, s, agent.RuntimeBrokerID, &store.BrokerCapabilities{Reprovision: true, UnlimitedCountLimits: true})
+	pendingLifecycleWarnings(t, srv, agent.ID, "start")
+	starts := disp.snapshot()
+	require.Len(t, starts, 1)
+	assert.Equal(t, api.IntPtr(5), starts[0].inline.MaxTurns, "the newer value is dispatched, not the stale pending 0")
+}
+
+// TestAgentPendingConfig_WaitingUnlimitedIsNotTheBase: a pending 0 waiting
+// for a capable broker is not the next run's value, so a PATCH of 0 on a
+// stopped agent is a change and an old broker refuses it, instead of the
+// 0 being written to the applied config and reported applied.
+func TestAgentPendingConfig_WaitingUnlimitedIsNotTheBase(t *testing.T) {
+	srv, s, _, agent := waitingUnlimitedFixture(t)
+	before := pendingReloadAgent(t, s, agent.ID)
+
+	_, code, body := patchAgentBody(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{"max_turns": 0}})
+	require.Equal(t, http.StatusUnprocessableEntity, code, body)
+	assert.Contains(t, body, "unlimited_not_supported_by_broker")
+	after := pendingReloadAgent(t, s, agent.ID)
+	assert.Equal(t, api.IntPtr(3), after.AppliedConfig.InlineConfig.MaxTurns, "nothing written")
+	assert.Equal(t, before.StateVersion, after.StateVersion)
+}

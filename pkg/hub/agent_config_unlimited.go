@@ -229,3 +229,20 @@ func (d *HTTPAgentDispatcher) warnUnlimitedUnsupported(ctx context.Context, agen
 	}
 	addDispatchWarnings(ctx, unlimitedCountCreateWarning(inline, broker.Capabilities))
 }
+
+// waitingKeysNamed returns the lower-cased config keys of waiting (wire keys
+// foldKeep left pending) that present (a request's lower-cased config keys)
+// names, as the presence map dropPendingKeysNamed takes; nil when none.
+func waitingKeysNamed(waiting []string, present map[string]bool) map[string]bool {
+	var out map[string]bool
+	for _, k := range waiting {
+		key := strings.ToLower(strings.TrimPrefix(k, agentConfigKeyPrefix))
+		if present[key] {
+			if out == nil {
+				out = map[string]bool{}
+			}
+			out[key] = true
+		}
+	}
+	return out
+}

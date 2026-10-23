@@ -155,6 +155,11 @@ type heldConfigUpdate struct {
 	// unappliable lists stored pending keys the fold removed because they
 	// can never be applied.
 	unappliable []string
+	// superseded lists pending keys the request wrote now (a phase with no
+	// container) that the fold had left pending: a waiting Unlimited
+	// (foldKeep). They are removed, so a stale pending value is never
+	// applied later over the newer one.
+	superseded []string
 }
 
 // applyAgentConfigUpdateHeld is the agent PATCH's config step with held
@@ -197,14 +202,19 @@ func (s *Server) applyAgentConfigUpdateHeld(ctx context.Context, w http.Response
 	if !live {
 		keep, waiting := sup.foldKeep(agent.PendingConfig)
 		out.folded, out.unappliable = s.foldPendingConfig(ctx, agent, keep)
-		if w := unlimitedWaitsWarning(waiting); w != "" {
-			out.warnings = append(out.warnings, w)
-		}
 		if !nowPart.empty() {
 			res := s.applyAgentConfigPatch(ctx, agent, nowPart, canAttachEnv)
 			out.warnings = append(out.warnings, res.warnings...)
 			out.applied = res.applied
 			out.heldForReincarnate = res.heldForReincarnate
+			// A waiting key the request writes now is superseded: the
+			// fold used to drain every pending container key before the
+			// request, and must still leave none older than this write.
+			out.superseded = dropPendingKeysNamed(agent, waitingKeysNamed(waiting, nowPart.present))
+			waiting = stringsWithout(waiting, out.superseded)
+		}
+		if w := unlimitedWaitsWarning(waiting); w != "" {
+			out.warnings = append(out.warnings, w)
 		}
 	}
 	if !heldPart.empty() {
