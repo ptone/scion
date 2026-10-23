@@ -18,6 +18,24 @@ Download the zip for your machine from the project's GitHub releases:
 
 Each zip holds a single `scion.exe`. Extract it to a folder of your choice and add that folder to your user `PATH`. There is no installer, and the binary is not signed.
 
+To verify the download, also download `SHA256SUMS` from the same release. It has one line per file built by the release: the SHA-256 hash in lowercase hex, two spaces, and the file name. In PowerShell, in the folder where you saved both files, compute the hash of your zip:
+
+```powershell
+(Get-FileHash .\scion-windows-amd64.zip -Algorithm SHA256).Hash
+```
+
+`Get-FileHash` prints the hash in uppercase. Compare it, ignoring case, with the hash on the `scion-windows-amd64.zip` line of `SHA256SUMS`. To let PowerShell compare them (`-eq` ignores case), run this in the same folder:
+
+```powershell
+$expected = ((Get-Content .\SHA256SUMS | Where-Object { $_.EndsWith('  scion-windows-amd64.zip') }) -split ' ')[0]
+$actual = (Get-FileHash .\scion-windows-amd64.zip -Algorithm SHA256).Hash
+if ($expected -and $actual -eq $expected) { 'OK' } else { 'MISMATCH' }
+```
+
+For ARM64, use `scion-windows-arm64.zip` instead. If the result is `MISMATCH`, delete the zip and download it again.
+
+This check confirms that the zip matches the release's checksum file. Both come from the same release and the binary is not signed, so it does not show who published them.
+
 You need:
 
 - **A Hub to connect to.** Add it and log in as on any other platform:
