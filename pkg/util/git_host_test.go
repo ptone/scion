@@ -1621,3 +1621,54 @@ func TestLfsOptionForLinkedCheckout_RecordedOrigin(t *testing.T) {
 		t.Errorf("ssh recorded origin: want skipSmudge, got %+v", opt)
 	}
 }
+
+// A committed .lfsconfig whose blob is unreadable (present in the tree but the
+// object is missing) must be treated as naming an endpoint — skip the smudge,
+// not pin — just like an unparseable one. `git show` reports the same error for
+// an absent and an unreadable path, so the code distinguishes them with ls-tree.
+func TestLfsOptionForLinkedCheckout_UnreadableLfsConfigSkips(t *testing.T) {
+	hostGitTestEnv(t)
+	repo := filepath.Join(t.TempDir(), "repo")
+	hostRunGit(t, filepath.Dir(repo), "init", "-q", "-b", "main", repo)
+	hostRunGit(t, repo, "remote", "add", "origin", "https://host.example/o/r.git")
+	writeFile(t, filepath.Join(repo, ".lfsconfig"), "[lfs]\n\turl = https://lfs.example/lfs\n")
+	hostRunGit(t, repo, "add", ".")
+	hostRunGit(t, repo, "-c", "core.hooksPath="+os.DevNull, "commit", "-q", "-m", "lfs")
+
+	// Control: with the blob readable, the endpoint is seen and the smudge skips.
+	if opt := lfsOptionForLinkedCheckout(repo, "main", ""); !opt.skipSmudge {
+		t.Fatalf("readable .lfsconfig names an endpoint: want skipSmudge, got %+v", opt)
+	}
+
+	// Remove the blob object so `git show main:.lfsconfig` fails while ls-tree
+	// still reports the entry.
+	sha := strings.TrimSpace(string(mustOutput(t, repo, "rev-parse", "main:.lfsconfig")))
+	if len(sha) < 3 {
+		t.Fatalf("unexpected blob sha %q", sha)
+	}
+	obj := filepath.Join(repo, ".git", "objects", sha[:2], sha[2:])
+	if err := os.Remove(obj); err != nil {
+		t.Fatalf("remove blob object: %v", err)
+	}
+	// Confirm the blob is now unreadable but the tree entry remains.
+	if _, err := mustOutputErr(repo, "show", "main:.lfsconfig"); err == nil {
+		t.Skip("git still served the removed blob (packed elsewhere); cannot exercise the unreadable path")
+	}
+	if opt := lfsOptionForLinkedCheckout(repo, "main", ""); !opt.skipSmudge {
+		t.Errorf("unreadable .lfsconfig must skip the smudge (fail closed), got %+v", opt)
+	}
+}
+
+func mustOutput(t *testing.T, dir string, args ...string) []byte {
+	t.Helper()
+	out, err := mustOutputErr(dir, args...)
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return out
+}
+
+func mustOutputErr(dir string, args ...string) ([]byte, error) {
+	c := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	return c.CombinedOutput()
+}

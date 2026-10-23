@@ -291,9 +291,13 @@ func TestSeedPrivateGitConfig_EscapesBranchSubsection(t *testing.T) {
 	// git must parse the seeded config without error (an unescaped quote would
 	// break the [branch "..."] header and every key after it).
 	c := exec.Command("git", "config", "--file", dest, "--list")
-	if out, err := c.CombinedOutput(); err != nil {
+	out, err := c.CombinedOutput()
+	if err != nil {
 		t.Fatalf("git could not parse the seeded config with a quoted branch name: %v\n%s", err, out)
-	} else if !strings.Contains(string(out), `branch.od"d.remote=origin`) {
-		t.Errorf("expected the escaped branch section to read back, got:\n%s", out)
+	}
+	for _, want := range []string{`branch.od"d.remote=origin`, `branch.od"d.merge=refs/heads/od"d`} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("expected %q to read back, got:\n%s", want, out)
+		}
 	}
 }

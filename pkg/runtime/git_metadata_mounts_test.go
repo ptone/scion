@@ -285,7 +285,7 @@ func TestTrustedWorktreeAdminName_RefusesSymlinkedGitfile(t *testing.T) {
 	}
 }
 
-// aesec A1 invariant: wherever the base .git is bound read-write, the whole
+// Invariant: wherever the base .git is bound read-write, the whole
 // worktrees/ admin directory must be bound read-only, with only the agent's own
 // worktrees/<name>/ overlaid read-write. This is what the back-link trust relies
 // on; a future layout or a relaxed narrowing that left worktrees/ writable would

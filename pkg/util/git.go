@@ -439,13 +439,29 @@ func lfsOptionForLinkedCheckout(root, branch, recordedOrigin string) lfsCheckout
 // lfsConfigNamesEndpoint reports whether the .lfsconfig committed at ref sets
 // an LFS endpoint (lfs.url, lfs.pushurl or remote.<name>.lfsurl) or any
 // per-endpoint lfs.<url>.access. It reads <ref>:.lfsconfig as data (host-side
-// git with the fixed pins). A missing file is "no endpoint" (false); a present
-// but unparseable file is treated as naming an endpoint (true, fail closed:
-// skip-smudge rather than pin against an endpoint we could not vet).
+// git with the fixed pins). Only a genuinely absent file is "no endpoint"
+// (false). A file that is present but unreadable or unparseable, or an entry that
+// is not a blob, is treated as naming an endpoint (true, fail closed: skip-smudge
+// rather than pin against an endpoint we could not vet). "Absent" and
+// "unreadable" are distinguished with ls-tree, because `git show` reports the
+// same error for both.
 func lfsConfigNamesEndpoint(root, ref string) bool {
+	ls, err := hostGit("-C", root, "ls-tree", ref, "--", ".lfsconfig").Output()
+	if err != nil {
+		return true // cannot read the tree entry: fail closed (skip)
+	}
+	entry := strings.TrimSpace(string(ls))
+	if entry == "" {
+		return false // no committed .lfsconfig at this ref (genuinely absent)
+	}
+	// The entry exists. It must be a blob to be a real .lfsconfig; a tree or a
+	// gitlink (submodule) at that path is unexpected — fail closed.
+	if fields := strings.Fields(entry); len(fields) < 2 || fields[1] != "blob" {
+		return true
+	}
 	out, err := hostGit("-C", root, "show", ref+":.lfsconfig").Output()
 	if err != nil {
-		return false // no committed .lfsconfig at this ref
+		return true // present but unreadable: fail closed (skip)
 	}
 	vars, err := parseGitConfigFile(out)
 	if err != nil {
