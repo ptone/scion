@@ -1115,3 +1115,33 @@ func countNotes(notes []string, sub string) int {
 	}
 	return n
 }
+
+// The migration only reads the hub/broker workspace records (identity
+// markers): a run leaves existing records byte-identical and creates none
+// (sec-review-3 I2).
+func TestRun_WritesNoWorkspaceRecords(t *testing.T) {
+	f := newHubFixture(t)
+	writeTree(t, f.global, map[string]string{
+		"projects/p1/notes.txt": "n",
+		"hub-workspaces/p1":     pid1,
+		"broker-workspaces/p1":  pid1,
+	})
+	writeTree(t, f.share, map[string]string{legacyHubProjectsDir + "/p2/.scion/project-id": pid2, legacyHubProjectsDir + "/p2/a": "a"})
+	before := map[string]map[string]string{
+		"hub":    snapshot(t, filepath.Join(f.global, "hub-workspaces")),
+		"broker": snapshot(t, filepath.Join(f.global, "broker-workspaces")),
+	}
+	rep, err := Run(context.Background(), f.input(ProjectRef{ID: pid1, Slug: "p1"}, ProjectRef{ID: pid2, Slug: "p2"}), opts(false))
+	if err != nil || rep.Failed() || rep.Moves() == 0 {
+		t.Fatalf("err=%v failed=%t moves=%d", err, rep.Failed(), rep.Moves())
+	}
+	after := map[string]map[string]string{
+		"hub":    snapshot(t, filepath.Join(f.global, "hub-workspaces")),
+		"broker": snapshot(t, filepath.Join(f.global, "broker-workspaces")),
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("workspace records changed:\nbefore %v\nafter  %v", before, after)
+	}
+	assertAbsent(t, filepath.Join(f.global, "hub-workspaces", "p2"))
+	assertAbsent(t, filepath.Join(f.global, "broker-workspaces", "p2"))
+}
