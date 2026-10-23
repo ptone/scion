@@ -379,11 +379,16 @@ export class ReviewController {
   }
 
   /**
-   * Opens md; false when it cannot be shown in this editor. ownership is
-   * the review's object that keeps the reviewer's own marks own across
-   * loads (view switches); without it, every mark is earlier.
+   * Opens md; false when it cannot be shown in this editor. Every mark of
+   * the opened text is earlier (design E6): a mark is the reviewer's own
+   * only if it is made in this editor after this load. A composition still
+   * pending from the previous text is dropped.
    */
   load(md: string): boolean {
+    if (this.endedTimer) clearTimeout(this.endedTimer);
+    this.endedTimer = null;
+    this.composing = null;
+    this.ended = null;
     this.loading = true;
     try {
       return this.session.load(md);

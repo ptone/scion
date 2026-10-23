@@ -243,6 +243,17 @@ describe('track changes (inline)', () => {
     expect(decide(v.state.tr.insertText('X', p), v.state)).toBe('earlier');
   });
 
+  it('replacing a whole emphasised word is refused with a hint in this version', async () => {
+    // The replacement's separator would be written outside the emphasis
+    // ({~~*clear~>x*~~}), which changes the text outside the marks.
+    const md = 'Make it *clear* now\n';
+    const { c, hints } = await open(md);
+    const p = posOf(c, 'clear');
+    type(c, 'x', p, p + 5);
+    expect(hints).toEqual(['generic']);
+    expect(text(c)).toBe(md);
+  });
+
   it('one undo reverts a deletion and a replacement', async () => {
     const { c } = await open('a big dog\n');
     const p = posOf(c, 'big');

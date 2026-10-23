@@ -373,15 +373,16 @@ describe('artifact page: graphical review editor experiment', () => {
     expect($(el, '.hint-strip')).toBeNull();
     await chooseView(el, 'graphical');
     const again = $<FakeReviewEditor>(el, 'scion-review-editor')!;
+    // Returning from Source opens the text in a new editor: ownership starts over.
+    expect(again).not.toBe(editor);
     again.own = true;
     await chooseView(el, 'source');
     const strip = $(el, '.hint-strip')!;
     expect(strip.textContent).toContain(
-      "Suggestions you've made so far become read-only in the graphical view after editing in Source."
+      "Suggestions you've made so far become read-only in the graphical view after you switch to Source."
     );
     expect(strip.textContent).toContain('You can still change them there.');
     expect(byText(el, '.hint-strip sl-button', 'Open Source view')).toBeUndefined();
-    void editor;
   });
 
   it('Ctrl+Alt+M comments in the source view', async () => {

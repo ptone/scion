@@ -296,6 +296,20 @@ test('edits become suggestions, comments work by button and shortcut, and the re
     await cdp.detach();
   }
 
+  // A switch to Source and back, with no edit, makes the reviewer's own
+  // comments earlier: the notice says so, and Enter on one shows the
+  // earlier-review hint.
+  await page.locator('sl-radio-button[value="source"]').click();
+  await expect(hint(page)).toContainText(
+    "Suggestions you've made so far become read-only in the graphical view after you switch to Source."
+  );
+  await page.locator('sl-radio-button[value="graphical"]').click();
+  await expect(editor(page)).toBeVisible();
+  await editor(page).locator('.critic-comment').nth(1).click();
+  await page.keyboard.press('Enter');
+  await expect(hint(page)).toContainText('This suggestion is from an earlier review.');
+  await expect(dialog).not.toHaveAttribute('open', '');
+
   // Source view: the tokens are there, and Ctrl+Alt+M comments there too.
   await page.locator('sl-radio-button[value="source"]').click();
   const code = page.locator('scion-page-artifact-detail scion-code-editor.review-editor');

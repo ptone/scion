@@ -15,9 +15,10 @@
  */
 
 /**
- * Earlier marks in this version of the editor (design E5): a mark is the
- * reviewer's own only if this review made it (kept across a switch to the
- * Source view and back); every other mark is earlier and immutable, and
+ * Earlier marks in this version of the editor (design E5 and E6): a mark
+ * is the reviewer's own only if it was made in this editor since the text
+ * was last opened here (opening a text, including every return from the
+ * Source view, makes every mark earlier); earlier marks are immutable, and
  * no edit may move one (its place in the source with the marks removed).
  */
 
@@ -412,6 +413,8 @@ describe('own is never saved', () => {
       return false;
     });
     expect(ownCount(c)).toBeGreaterThan(0);
+    expect(docMarkRuns(tr.doc).length).toBeGreaterThan(0);
+    expect(docMarkRuns(tr.doc).every((r) => r.mine === false)).toBe(true);
     const a1 = chooseAlphabet(docStrings(doc))!;
     const a2 = chooseAlphabet(docStrings(tr.doc))!;
     const serialize = (d: Node): string =>
@@ -495,6 +498,25 @@ describe('composition and history', () => {
     expect(c.dirty).toBe(false);
     expect(changes.n).toBe(1);
     expect(c.flush()).toBe('a dog\n');
+  });
+
+  it('opening a text drops a composition still pending from the previous one', async () => {
+    const { c, hints } = await open('a dog\n');
+    const p = posOf(c, 'dog');
+    const v = c.view;
+    v.dispatch(v.state.tr.setSelection(TextSelection.create(v.state.doc, p)));
+    c.beginComposition();
+    const tr = v.state.tr.insertText('犬', p);
+    tr.setMeta('composition', 3);
+    v.dispatch(tr);
+    c.endComposition();
+    // The text is opened again before the deferred settle step runs.
+    expect(c.load('other text\n')).toBe(true);
+    await new Promise((r) => setTimeout(r, 0));
+    c.settleComposition();
+    expect(hints).toEqual([]);
+    expect(c.dirty).toBe(false);
+    expect(c.flush()).toBe('other text\n');
   });
 
   it('opening another text drops the undo history', async () => {

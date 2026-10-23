@@ -206,7 +206,7 @@ export const REVIEW_HINT_TEXT: Record<ReviewHint, { title: string; body: string 
   },
   'source-own': {
     title:
-      "Suggestions you've made so far become read-only in the graphical view after editing in Source.",
+      "Suggestions you've made so far become read-only in the graphical view after you switch to Source.",
     body: 'You can still change them there.',
   },
   generic: {
