@@ -707,7 +707,7 @@ func TestVSCodeBlockHub(t *testing.T) {
 	assert.Equal(t, tunnelclient.NormalizeEndpoint("https://hub.example"), vscodeBlockHub(rendered))
 	quoted := "Host scion.h.p.a\n  ProxyCommand /s tunnel --stdio --ssh --hub 'https://Hub.Example:443/' --project p a\n"
 	assert.Equal(t, tunnelclient.NormalizeEndpoint("https://hub.example"), vscodeBlockHub(quoted))
-	assert.Equal(t, "https://h.example/a b'c%d", sshShellUnquote(sshShellQuote("https://h.example/a b'c%d")))
+	assert.Equal(t, "https://h.example/a b'c%d", sshShellUnquote(mustSSHShellQuote(t, "https://h.example/a b'c%d")))
 	assert.Empty(t, vscodeBlockHub("Host scion.h.p.a\n  HostKeyAlias scion.h.p.a\n"))
 }
 

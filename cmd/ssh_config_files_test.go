@@ -364,17 +364,62 @@ func setSSHQuoteForWindows(t *testing.T, forCmd bool) {
 	t.Cleanup(func() { sshQuoteForWindows = prev })
 }
 
-// The Windows ProxyCommand quoting (from miller79/scion#189): backslashes
-// become forward slashes, and a word with a space or a shell character is
-// double-quoted. Runs on every OS (the form is a variable).
+// mustSSHShellQuote is sshShellQuote for a word the current form accepts.
+func mustSSHShellQuote(t *testing.T, s string) string {
+	t.Helper()
+	q, err := sshShellQuote(s)
+	require.NoError(t, err, s)
+	return q
+}
+
+// The Windows ProxyCommand form: backslashes become forward slashes, a
+// word of allowlisted characters is left as is, and a word with a space is
+// double-quoted. Non-ASCII letters (an account name in a path) are
+// accepted. Runs on every OS (the form is a variable).
 func TestSSHShellQuoteForCmd(t *testing.T) {
 	setSSHQuoteForWindows(t, true)
-	assert.Equal(t, `C:/Users/me/bin/scion.exe`, sshShellQuote(`C:\Users\me\bin\scion.exe`))
-	assert.Equal(t, `"C:/Program Files/Scion/scion.exe"`, sshShellQuote(`C:\Program Files\Scion\scion.exe`))
-	assert.Equal(t, "https://hub.example.com:8443", sshShellQuote("https://hub.example.com:8443"))
-	assert.Equal(t, `"C:/a&b/scion.exe"`, sshShellQuote(`C:\a&b\scion.exe`))
-	assert.Equal(t, `C:/100%%/scion.exe`, sshShellQuote(`C:\100%\scion.exe`))
-	assert.Equal(t, `C:/Program Files/x`, sshShellUnquote(sshShellQuote(`C:\Program Files\x`)))
+	for in, want := range map[string]string{
+		`C:\Users\me\bin\scion.exe`:           `C:/Users/me/bin/scion.exe`,
+		`C:\Program Files\Scion\scion.exe`:    `"C:/Program Files/Scion/scion.exe"`,
+		`C:\Users\José Núñez\bin\scion.exe`:   `"C:/Users/José Núñez/bin/scion.exe"`,
+		"https://hub.example.com:8443/team-a": "https://hub.example.com:8443/team-a",
+		"my-project":                          "my-project",
+	} {
+		assert.Equal(t, want, mustSSHShellQuote(t, in), in)
+	}
+	assert.Equal(t, `C:/Program Files/x`, sshShellUnquote(mustSSHShellQuote(t, `C:\Program Files\x`)))
+}
+
+// The Windows form refuses, rather than quotes, a word with any character
+// outside its allowlist: every character that the ProxyCommand shell or
+// the C runtime's command-line parser treats specially, '%', and other
+// whitespace. The error names the character. Runs on every OS.
+func TestSSHCmdQuote_RefusesShellSpecialChars(t *testing.T) {
+	setSSHQuoteForWindows(t, true)
+	for _, c := range []string{`"`, "$", "`", "!", "%", "^", "&", "|", "<", ">", "(", ")", ";", "'", "*", "?", "[", "]", "{", "}", "~", "#", "\t", "\n", "\u00a0", "\uff02"} {
+		word := "C:/a" + c + "b/scion.exe"
+		_, err := sshShellQuote(word)
+		require.Error(t, err, "%q", word)
+		assert.Contains(t, err.Error(), "cannot carry", "%q", word)
+	}
+	_, err := sshShellQuote("")
+	require.Error(t, err)
+	// Backslashes are path separators: they become '/', never an error.
+	assert.Equal(t, "C:/a/b", mustSSHShellQuote(t, `C:\a\b`))
+}
+
+func TestSSHShellQuote(t *testing.T) {
+	setSSHQuoteForWindows(t, false)
+	for in, want := range map[string]string{
+		"/usr/local/bin/scion":         "/usr/local/bin/scion",
+		"https://hub.example.com:8443": "https://hub.example.com:8443",
+		"/Applications/My Tools/scion": "'/Applications/My Tools/scion'",
+		"/opt/100%/scion":              "/opt/100%%/scion",
+		"/it's/scion":                  `'/it'\''s/scion'`,
+		"/a$(b)`c`\"d/scion":           "'/a$(b)`c`\"d/scion'",
+	} {
+		assert.Equal(t, want, mustSSHShellQuote(t, in), in)
+	}
 }
 
 // UserKnownHostsFile values (review r1 finding 2): unix refuses
@@ -401,15 +446,6 @@ func TestSSHKnownHostsOptionValue(t *testing.T) {
 		_, err = sshKnownHostsOptionValue(bad)
 		require.ErrorContains(t, err, "TMP and TEMP", bad)
 	}
-}
-
-func TestSSHShellQuote(t *testing.T) {
-	setSSHQuoteForWindows(t, false)
-	assert.Equal(t, "/usr/local/bin/scion", sshShellQuote("/usr/local/bin/scion"))
-	assert.Equal(t, "https://hub.example.com:8443", sshShellQuote("https://hub.example.com:8443"))
-	assert.Equal(t, "'/Applications/My Tools/scion'", sshShellQuote("/Applications/My Tools/scion"))
-	assert.Equal(t, "/opt/100%%/scion", sshShellQuote("/opt/100%/scion"))
-	assert.Equal(t, `'/it'\''s/scion'`, sshShellQuote("/it's/scion"))
 }
 
 func mustRenderSSHHostBlock(t *testing.T, exe, endpoint, label, project, agent string) string {

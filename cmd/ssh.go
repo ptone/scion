@@ -178,6 +178,12 @@ func prepareSSH(ctx context.Context, env *sshCommandEnv, ref string, remote []st
 		return nil, nil, tunnelclient.Errorf(tunnelclient.ExitError, "scion executable path %q is not a clean absolute path", env.exe)
 	}
 	host := sshHostName(hub.label, entry.projectSlug, entry.agentSlug)
+	// Every ProxyCommand word is checked before the temporary directory is
+	// made.
+	proxy, err := sshProxyCommand(env.exe, hub.hubArg, entry.projectSlug, entry.agentSlug, "", "")
+	if err != nil {
+		return nil, nil, tunnelclient.Errorf(tunnelclient.ExitError, "%v", err)
+	}
 
 	dir, err := os.MkdirTemp("", "scion-ssh-")
 	if err != nil {
@@ -195,12 +201,6 @@ func prepareSSH(ctx context.Context, env *sshCommandEnv, ref string, remote []st
 		return nil, cleanup, tunnelclient.Errorf(tunnelclient.ExitError, "writing known hosts: %v", err)
 	}
 
-	proxy := strings.Join([]string{
-		sshShellQuote(env.exe), "tunnel", "--stdio", "--ssh",
-		"--hub", sshShellQuote(hub.hubArg),
-		"--project", sshShellQuote(entry.projectSlug),
-		sshShellQuote(entry.agentSlug),
-	}, " ")
 	sshArgs := []string{
 		"-o", "ProxyCommand=" + proxy,
 		"-o", "HostKeyAlias=" + host,

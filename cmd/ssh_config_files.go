@@ -29,6 +29,7 @@ import (
 	"strings"
 	"sync"
 	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/ssh"
 
@@ -125,7 +126,28 @@ func sshEndpointURL(endpoint string) (*url.URL, error) {
 	if u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
 		return nil, fmt.Errorf("invalid hub endpoint %q: user info, query and fragment are not allowed", config.RedactURL(endpoint))
 	}
+	if r, ok := sshEndpointUnsafeRune(endpoint, u); ok {
+		return nil, fmt.Errorf("invalid hub endpoint %q: contains %q; a hub endpoint may contain only ASCII letters, digits and -._:/ (and [ ] around an IPv6 address)", config.RedactURL(endpoint), r)
+	}
 	return u, nil
+}
+
+// sshEndpointUnsafeRune returns the first character of endpoint outside the
+// characters a hub endpoint is written with: ASCII letters, digits and
+// -._:/, plus one [ ] pair when the host is an IPv6 literal. The endpoint is
+// written into ProxyCommand lines and ssh options, so it is held to this
+// set on every OS.
+func sshEndpointUnsafeRune(endpoint string, u *url.URL) (rune, bool) {
+	ipv6 := strings.HasPrefix(u.Host, "[") && strings.Count(endpoint, "[") == 1 && strings.Count(endpoint, "]") == 1
+	for _, r := range endpoint {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || strings.ContainsRune("-._:/", r):
+		case ipv6 && (r == '[' || r == ']'):
+		default:
+			return r, true
+		}
+	}
+	return 0, false
 }
 
 // sshHubLabelCandidates returns the preferred hub label and the fallback
@@ -515,55 +537,86 @@ func renderSSHIncludeFile(endpoint, label string, blocks map[string]string) stri
 var sshQuoteForWindows = runtime.GOOS == "windows"
 
 // sshShellQuote quotes s for the shell ssh runs a ProxyCommand with, and
-// doubles '%' so ssh does not expand it as a token.
-func sshShellQuote(s string) string {
-	s = strings.ReplaceAll(s, "%", "%%")
+// doubles '%' so ssh does not expand it as a token. Only the Windows form
+// (sshCmdQuote) can return an error; the unix form quotes every word.
+func sshShellQuote(s string) (string, error) {
 	if sshQuoteForWindows {
 		return sshCmdQuote(s)
 	}
+	s = strings.ReplaceAll(s, "%", "%%")
 	safe := s != ""
 	for _, r := range s {
-		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && !strings.ContainsRune("@%+=:,./_-", r) {
+		if !isSSHWordSafe(r) && r != '%' {
 			safe = false
 			break
 		}
 	}
 	if safe {
-		return s
+		return s, nil
 	}
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'", nil
 }
 
-// sshCmdQuote quotes s for a Windows ssh client's ProxyCommand. No
-// cmd.exe is involved with either client, so '%' needs no cmd escaping
-// (ssh's own %% token escape is applied by sshShellQuote):
+// isSSHWordSafe reports whether r may appear in a ProxyCommand word on
+// either form without quoting: ASCII letters and digits and @+=:,./_-.
+func isSSHWordSafe(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || strings.ContainsRune("@+=:,./_-", r)
+}
+
+// sshCmdQuote writes s as one word of a Windows ssh client's ProxyCommand.
+// The two clients read that command differently:
 //   - Win32-OpenSSH runs the expanded ProxyCommand without a shell: it
 //     posix_spawnp's the command line (sshconnect.c ssh_proxy_connect,
 //     FORK_NOT_SUPPORTED branch, PowerShell/openssh-portable latestw_all
 //     274893f8), and CreateProcess splits it with the C runtime's rules, so
 //     double quotes group a word with spaces.
 //   - Git for Windows' ssh runs it with /bin/sh, which drops unquoted
-//     backslashes.
+//     backslashes and treats many characters specially, inside double
+//     quotes too.
 //
-// So backslashes become forward slashes, which both accept in a Windows
-// path. A word of path-safe characters, including a drive colon, is left
-// as is; anything else is wrapped in double quotes, which both clients
-// read as one word. A Windows path cannot contain a double quote, and
-// endpoints and slugs are validated before they get here. (From
-// miller79/scion#189; the name is kept from there.)
-func sshCmdQuote(s string) string {
+// No single quoting is read the same way by both, so the word is
+// validated against an allowlist instead of being escaped. Backslashes
+// become forward slashes, which both accept in a Windows path. After that
+// a word may contain only:
+//   - ASCII letters and digits and @+=:,./_- (left unquoted), and
+//   - non-ASCII letters, digits and combining marks (an account name in a
+//     path), and
+//   - spaces, in which case the whole word is double-quoted.
+//
+// Any other character, including '%' and every character that sh or the
+// C runtime's command-line parser treats specially, is an error that
+// names the character; the caller names the word. (The allowlist replaces
+// the quoting from miller79/scion#189; the name is kept from there.)
+func sshCmdQuote(s string) (string, error) {
 	s = strings.ReplaceAll(s, `\`, "/")
-	safe := s != ""
+	if s == "" {
+		return "", errors.New("is empty")
+	}
+	quote := false
 	for _, r := range s {
-		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && !strings.ContainsRune("@%+=:,./_-", r) {
-			safe = false
-			break
+		switch {
+		case isSSHWordSafe(r):
+		case r == ' ':
+			quote = true
+		case r >= utf8.RuneSelf && (unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsMark(r)):
+		default:
+			return "", fmt.Errorf("contains %q, which a Windows ssh ProxyCommand cannot carry as written", r)
 		}
 	}
-	if safe {
-		return s
+	if quote {
+		return `"` + s + `"`, nil
 	}
-	return `"` + s + `"`
+	return s, nil
+}
+
+// sshProxyWord is sshShellQuote for one named ProxyCommand word; the error
+// names the word as shown (an endpoint is shown redacted).
+func sshProxyWord(kind, shown, s string) (string, error) {
+	q, err := sshShellQuote(s)
+	if err != nil {
+		return "", fmt.Errorf("%s %q %w", kind, shown, err)
+	}
+	return q, nil
 }
 
 // renderSSHHostBlock returns the Host block for one agent. exe must be an
@@ -601,15 +654,10 @@ func renderSSHHostBlockPinned(exe, endpoint, label, projectSlug, agentSlug, know
 		return "", fmt.Errorf("known-hosts path %q is not a clean absolute path", pinFile)
 	}
 	host := sshHostName(label, projectSlug, agentSlug)
-	words := []string{
-		sshShellQuote(exe), "tunnel", "--stdio", "--ssh",
-		"--hub", sshShellQuote(endpoint),
-		"--project", sshShellQuote(projectSlug),
+	proxy, err := sshProxyCommand(exe, endpoint, projectSlug, agentSlug, pinFile, host)
+	if err != nil {
+		return "", err
 	}
-	if pinFile != "" {
-		words = append(words, "--known-hosts", sshShellQuote(pinFile), "--host-key-alias", sshShellQuote(host))
-	}
-	proxy := strings.Join(append(words, sshShellQuote(agentSlug)), " ")
 	var b strings.Builder
 	b.WriteString("Host " + host + "\n")
 	b.WriteString("  ProxyCommand " + proxy + "\n")
@@ -617,6 +665,38 @@ func renderSSHHostBlockPinned(exe, endpoint, label, projectSlug, agentSlug, know
 	b.WriteString("  UserKnownHostsFile " + knownHostsRef + "\n")
 	b.WriteString("  StrictHostKeyChecking yes\n")
 	return b.String(), nil
+}
+
+// sshProxyCommand returns the ProxyCommand that runs scion tunnel for an
+// agent: exe tunnel --stdio --ssh --hub endpoint --project projectSlug
+// [--known-hosts pinFile --host-key-alias host] agentSlug. Every word is
+// checked (sshProxyWord), so a word the Windows form cannot carry is an
+// error before anything is written.
+func sshProxyCommand(exe, endpoint, projectSlug, agentSlug, pinFile, host string) (string, error) {
+	type word struct{ kind, shown, value string }
+	parts := []word{
+		{"scion executable path", exe, exe}, {"", "", "tunnel"}, {"", "", "--stdio"}, {"", "", "--ssh"},
+		{"", "", "--hub"}, {"hub endpoint", config.RedactURL(endpoint), endpoint},
+		{"", "", "--project"}, {"project", projectSlug, projectSlug},
+	}
+	if pinFile != "" {
+		parts = append(parts, word{"", "", "--known-hosts"}, word{"known-hosts path", pinFile, pinFile},
+			word{"", "", "--host-key-alias"}, word{"host key alias", host, host})
+	}
+	parts = append(parts, word{"agent", agentSlug, agentSlug})
+	words := make([]string, 0, len(parts))
+	for _, w := range parts {
+		if w.kind == "" {
+			words = append(words, w.value)
+			continue
+		}
+		q, err := sshProxyWord(w.kind, w.shown, w.value)
+		if err != nil {
+			return "", err
+		}
+		words = append(words, q)
+	}
+	return strings.Join(words, " "), nil
 }
 
 // isSSHSlug reports whether v is a non-empty slug, the only form allowed in
