@@ -31,6 +31,13 @@ with zero skips; each package left off has a one-line reason in the file.
   agent log is not opened on Windows by design).
 - `pkg/util/urlredact`'s source-copy test normalises CRLF before locating its
   span, so it passes on the CRLF checkout of windows-latest.
+- `pkg/preflight` stays off; its line names the two failing tests and what
+  they report on windows-latest (taken from a run's test.json artifact).
+- The job's artifact `windows-test-json` holds the full go test -json
+  streams (test.json and each flagged line's flagged-N.json) for 7 days, so
+  a failure or a timeout's goroutine dump can be read without a rerun (the
+  console shows only the last 200 output lines). The job has no secrets, so
+  the files hold only test names, results and test output.
 
 ## Gated commands: persistent hooks and completion
 
@@ -43,11 +50,18 @@ with zero skips; each package left off has a one-line reason in the file.
 - `completeGated` answers cobra's shell completion request (`__complete`,
   `__completeNoDesc`) for a gated command, or for anything under a gated
   parent, with only the `ShellCompDirectiveNoFileComp` directive line, before
-  cobra runs. The command's `ValidArgsFunction` and the completion functions
-  registered for its flags therefore never run. `Execute` calls it right
-  after the platform restrictions; off Windows nothing is gated, so it never
-  answers. The directive line is printed (and nothing else) because without
-  it the completion scripts fall back to file completion.
+  cobra runs, so for any request cobra would treat as a completion request
+  the command's `ValidArgsFunction` and the completion functions registered
+  for its flags do not run. The request is recognised as cobra recognises
+  it: a temporary hidden placeholder named `__complete` is resolved with
+  `root.Find`, so global flags before `__complete` (`--debug`,
+  `--project <name>`) are covered too. `Execute` calls it right after the
+  platform restrictions; off Windows nothing is gated, so it never answers.
+  The directive line is printed (and nothing else) because without it the
+  completion scripts fall back to file completion.
+- Known limitation: on Windows, `scion project <TAB>` offers nothing, so the
+  allowed `project use` is not suggested by completion (it still runs, and
+  `scion use` is the same command).
 - PowerShell completion and stderr: cobra's PowerShell script (v1.10.2) runs
   the request as `Invoke-Expression -OutVariable out "$RequestComp" 2>&1 |
   Out-Null`, so stderr from `__complete` (for example the credentials
@@ -57,7 +71,7 @@ with zero skips; each package left off has a one-line reason in the file.
 
 ## Follow-ups
 
-- `cmd/ssh_rulei_windows_test.go` is now `cmd/ssh_links_windows_test.go`;
+- The Windows ssh link test file is now `cmd/ssh_links_windows_test.go`;
   test and message names describe what they check.
 - The free-floating note on `isUnderHubProjectsDir` in pkg/config/templates.go
   is part of `isHubWorkspaceRootWithoutScion`'s doc comment.
@@ -71,6 +85,15 @@ with zero skips; each package left off has a one-line reason in the file.
 ## Open items
 
 - `pkg/plugin/grpcbroker` hit the 10-minute go test timeout once on
-  windows-latest (no test failed and the job log kept no goroutine dump);
-  the next run passed. If it recurs, capture the timeout's goroutine dump
-  (the job prints only the last 200 output lines) before deciding.
+  windows-latest; the next runs passed. The goroutine dump (from that run's
+  test.json artifact) shows
+  `TestGoogleIDTokenValidator_AllCallersCanceledFetchStillStops` blocked on its unbounded `<-requestStarted` receive
+  (tokenvalidator_test.go): no handler goroutine and no fetch goroutine were
+  left, so the first JWKS fetch returned without reaching the test server
+  and the test waited forever. The hang is in that test's wait, outside the
+  Windows file-protection code; a bounded wait in the test is the follow-up.
+- Local gate series for this branch: drafted (not run): gofmt and
+  winsec-guard, Linux tests of pkg/config, urlredact and otlptls,
+  GOOS=windows vet of the changed packages, and the named cmd gate tests. The full ./cmd suite is
+  proposed to rest on fork CI (Linux Build & Test, and the Windows job's
+  ./cmd anchor).
