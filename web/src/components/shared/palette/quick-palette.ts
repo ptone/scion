@@ -816,6 +816,44 @@ export class ScionQuickPalette extends LitElement {
     }
   }
 
+  /**
+   * Opens the palette and focuses its query input synchronously, for an open
+   * raised by a tap. iOS opens the on-screen keyboard only for a text field
+   * focused inside the tap, and a home-screen web app also refuses a later
+   * move of focus from one field to another, so the hidden field a host
+   * focuses first cannot pass the keyboard on there.
+   *
+   * Renders this element and its dialog now instead of at the next update,
+   * and shows the dialog's base, which Shoelace would unhide only after its
+   * own awaits: a `hidden` element cannot take focus. Shoelace then runs the
+   * rest of its show as usual (the open animation starts before the next
+   * paint, and its `sl-initial-focus` finds the input already focused).
+   *
+   * Needs the element mounted and rendered closed first, so Shoelace sees a
+   * real false -> true transition. Returns whether the query input has focus;
+   * where it does not, the open still goes ahead at the next update.
+   */
+  openAndFocusNow(): boolean {
+    if (!this.hasUpdated || !this.isConnected) return false;
+    this.open = true;
+    this.performUpdate();
+    const dialog = this.renderRoot.querySelector('sl-dialog') as
+      | (HTMLElement & { hasUpdated?: boolean; performUpdate?: () => void })
+      | null;
+    // Shoelace's dialog, once upgraded and rendered: run its open now.
+    if (dialog?.hasUpdated && typeof dialog.performUpdate === 'function') {
+      dialog.performUpdate();
+      const base = dialog.shadowRoot?.querySelector<HTMLElement>('[part~="base"]');
+      if (base) base.hidden = false;
+    }
+    const input = this.paletteInputEl;
+    if (!input) return false;
+    input.focus({ preventScroll: true });
+    // A focus event applied any type-ahead; none fires in a window without focus.
+    this.applyTypeahead();
+    return this.shadowRoot?.activeElement === input;
+  }
+
   private handlePaletteInitialFocus(e: Event): void {
     // Bound directly on the palette's own sl-dialog: a nested Shoelace
     // dialog/drawer added inside the palette later could otherwise bubble

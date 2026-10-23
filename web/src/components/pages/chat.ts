@@ -108,6 +108,7 @@ import { openTerminal, terminalHref, agentGraphHref } from '../../client/open-te
 import { hasOpenModalDescendant, isOpenModalElement } from '../shared/open-modal.js';
 import { deepActiveElement } from '../shared/deep-active-element.js';
 import { PaletteTypeahead, primaryPointerIsTouch } from '../shared/palette/palette-typeahead.js';
+import type { ScionQuickPalette } from '../shared/palette/quick-palette.js';
 import '../shared/chat/chat-thread.js';
 import type { PeerAgentResolvedDetail } from '../shared/chat/chat-thread.js';
 import { ChatPanelHistory, type ChatPanel } from './chat-panel-history.js';
@@ -164,6 +165,10 @@ const MEMBERS_WIDTH_KEY = 'scion.chat.membersWidth';
 const loadChatSearch = () => import('../shared/chat/chat-search.js');
 // Lazy-load the quick switcher component on first Cmd+K press
 const loadQuickPalette = () => import('../shared/palette/quick-palette.js');
+/** Longest wait for an idle moment before the quick switcher preloads on a touch device. */
+const PALETTE_PRELOAD_IDLE_TIMEOUT_MS = 5000;
+/** When the quick switcher preloads on a touch device without requestIdleCallback. */
+const PALETTE_PRELOAD_FALLBACK_DELAY_MS = 2000;
 
 /**
  * How long a successfully-loaded People or Threads group stays fresh across
@@ -806,6 +811,8 @@ export class ScionPageChat extends LitElement {
    * the browser to open the keyboard.
    */
   private _paletteOpenByTouch = false;
+  /** Cancels the idle-time preload of the quick switcher, while one is scheduled. */
+  private _cancelPalettePreload: (() => void) | null = null;
   /**
    * The `pointerType` of the latest `pointerdown` on a quick-switcher button,
    * cleared by its click or a `pointercancel`. Read only for a click that
@@ -1848,6 +1855,7 @@ export class ScionPageChat extends LitElement {
     // Created wide on top of entries made in the mobile layout: drop back to
     // the first of them (see ChatPanelHistory.toBase).
     if (!this.isMobileLayout && this._isOnChatRoute()) this._panelHistory.toBase();
+    this._schedulePalettePreload();
     this.restoreMembersWidth();
     // Restore persisted layout density preference.
     try {
@@ -1906,6 +1914,8 @@ export class ScionPageChat extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
+    this._cancelPalettePreload?.();
+    this._cancelPalettePreload = null;
     chatUnread.setSource(null);
     ++this._unreadDMRequestId;
     ++this._userNavSeq;
@@ -5041,6 +5051,43 @@ export class ScionPageChat extends LitElement {
     await this._openPalette();
   }
 
+  /** Opens the mounted palette and focuses its query input synchronously (see `_openPalette`). */
+  private _openPaletteInTap(): void {
+    const palette = this._switcherEl as ScionQuickPalette | undefined;
+    palette?.openAndFocusNow();
+  }
+
+  /**
+   * On a touch-primary device, imports and mounts the quick switcher (closed)
+   * once the page is idle, so a tap can open it and focus its query input
+   * inside the tap (see `_openPalette`). Elsewhere it still loads on its
+   * first open, so a desktop first load does not fetch it.
+   */
+  private _schedulePalettePreload(): void {
+    if (this.v2SwitcherLoaded || this._cancelPalettePreload || !primaryPointerIsTouch()) return;
+    const run = (): void => {
+      this._cancelPalettePreload = null;
+      if (!this.isConnected || this.v2SwitcherLoaded) return;
+      loadQuickPalette().then(
+        () => {
+          if (this.isConnected) this.v2SwitcherLoaded = true;
+        },
+        // The first open imports it again and reports a failure itself.
+        () => {}
+      );
+    };
+    const idle = (window as { requestIdleCallback?: typeof requestIdleCallback })
+      .requestIdleCallback;
+    if (typeof idle === 'function') {
+      const handle = idle(run, { timeout: PALETTE_PRELOAD_IDLE_TIMEOUT_MS });
+      this._cancelPalettePreload = () => window.cancelIdleCallback(handle);
+    } else {
+      // Safari has no requestIdleCallback.
+      const timer = setTimeout(run, PALETTE_PRELOAD_FALLBACK_DELAY_MS);
+      this._cancelPalettePreload = () => clearTimeout(timer);
+    }
+  }
+
   /**
    * A queued reopen is an open request too: keys typed until it runs become
    * its query. Cancelling the queue stops the capture.
@@ -5066,6 +5113,7 @@ export class ScionPageChat extends LitElement {
       // focus to a hidden field that holds the on-screen keyboard.
       if (!options.skipInvokerCapture) this._capturePaletteInvokerFocus();
       this._paletteTypeahead.start();
+      const mountedAtStart = this.v2SwitcherLoaded;
       if (!this.v2SwitcherLoaded) {
         await loadQuickPalette();
         this.v2SwitcherLoaded = true;
@@ -5082,6 +5130,12 @@ export class ScionPageChat extends LitElement {
         return;
       }
       this.v2PaletteOpen = true;
+      // A tap with the palette already mounted (this call has not awaited
+      // anything): open it and focus its query input now, inside the tap,
+      // which is the only focus a home-screen web app on iOS opens the
+      // on-screen keyboard for. A first tap before the palette loaded keeps
+      // the hidden field that the type-ahead focused above.
+      if (this._paletteOpenByTouch && mountedAtStart) this._openPaletteInTap();
       this._startPaletteVisibilityWatchdog();
       this._loadPaletteGroupsOnOpen();
     } catch (err) {
