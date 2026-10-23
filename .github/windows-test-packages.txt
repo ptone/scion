@@ -36,6 +36,7 @@
 ./hack/hubshard/extract
 ./internal/fixturegen
 ./internal/settingslockhook
+./internal/writesonread
 ./pkg/agent/state
 ./pkg/agentkeys
 ./pkg/artifacts/critic
@@ -65,10 +66,12 @@
 ./pkg/hub/auditevent
 ./pkg/hub/auth
 ./pkg/hub/capacityplan
+./pkg/hub/eventstreams
 ./pkg/hub/githubapp
 ./pkg/hub/imagecheck
 ./pkg/hub/internal/hubtestutil
 ./pkg/hub/permissions
+./pkg/k8s
 ./pkg/labels
 ./pkg/lifecyclehooks
 ./pkg/messages
@@ -78,11 +81,13 @@
 ./pkg/observability/hubmetrics
 ./pkg/observability/hubtracing
 ./pkg/observability/reapermetrics
+./pkg/observability/ssemetrics
 ./pkg/plugin/grpcbroker
 ./pkg/plugin/refbroker
 ./pkg/runtime/substrate
 ./pkg/sciontool/backoff
 ./pkg/sciontool/control
+./pkg/sciontool/log
 ./pkg/sciontool/portforward
 ./pkg/sciontool/startuplistener
 ./pkg/secretmigration
@@ -101,6 +106,7 @@
 ./pkg/util/logging
 ./pkg/util/logging/loglevel
 ./pkg/util/otlptls
+./pkg/util/urlredact
 ./pkg/version/update
 ./pkg/wsprotocol
 ./resources
@@ -116,6 +122,7 @@
 # ./pkg/config/pgprovider: every test needs Postgres (-tags integration) and skips without it.
 # ./pkg/hub/authzop: the catalog report and mutation-classification guards compare unequal on a Windows checkout; Linux-only hub guard.
 # ./pkg/integration/runtime: links pkg/hub production code; server-side integration runtime, not on a windowsAllowed path.
+# ./pkg/projectfs/migrate: unix-only package (every file is unix-tagged; hub-side project storage migration).
 # ./pkg/preflight: two settings-profile check tests fail on Windows (not diagnosed; hub-side upgrade preflight, follow-up).
 # ./pkg/sciontool/autoexpose: TestReconciler_IPv6OnlyListenerRegisteredAsLoopback skips without /proc/net/tcp6 (in-container tool).
 # ./pkg/sciontool/conduit: the sciontool agent log cannot be opened on Windows (in-container tool), and the IPv6-only loopback fallback fails.
