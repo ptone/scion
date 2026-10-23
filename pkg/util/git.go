@@ -494,7 +494,10 @@ func warnLFSPointersNotFetched(path string) {
 			return nil
 		}
 		// Regular files only: WalkDir's DirEntry is lstat-based, so a symlink
-		// reports a non-regular type and is skipped without being followed.
+		// reports a non-regular type and is skipped without being followed. If a
+		// regular file is swapped for a symlink/FIFO after this lstat but before
+		// the read, isLFSPointerFile opens with O_NOFOLLOW|O_NONBLOCK and an fstat
+		// regular-file check, so the swap is not followed either.
 		if !d.Type().IsRegular() {
 			return nil
 		}

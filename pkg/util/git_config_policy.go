@@ -263,8 +263,7 @@ func allowVar(policy RepoConfigPolicy, v gitConfigVar, opts repoConfigAllowOptio
 		if hasSub {
 			switch name {
 			case "pushurl", "tagopt", "prune", "prunetags", "mirror",
-				"promisor", "partialclonefilter", "fetchrecursesubmodules",
-				"followremotehead":
+				"fetchrecursesubmodules", "followremotehead":
 				return true, ""
 			case "uploadpack", "receivepack", "proxy", "vcs":
 				return false, "a remote command or proxy override"
@@ -464,7 +463,7 @@ var (
 		"colormoved", "colormovedws", "context", "interhunkcontext",
 		"mnemonicprefix", "noprefix", "wordregex", "submodule", "relative",
 		"ignoresubmodules", "dirstat", "statgraphwidth", "wserrorhighlight",
-		"suppressblankempty", "colorwords", "tabsize", "orderfile")
+		"suppressblankempty", "colorwords", "tabsize")
 	diffDriverKeys = set("binary", "wordregex", "xfuncname")
 	mergeTopKeys   = set("conflictstyle", "ff", "renamelimit", "renames",
 		"stat", "log", "autostash", "verbosity", "directoryrenames",

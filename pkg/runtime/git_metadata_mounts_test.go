@@ -245,3 +245,115 @@ func TestCheckPrivateGitConfigSource_RefusesHardLink(t *testing.T) {
 		t.Error("a hard-linked (nlink>1) source must be refused, got nil")
 	}
 }
+
+// Regression for the overlay-selection bypass: the workspace .git gitfile is
+// agent-writable, so an agent could replace it with a symlink to a sibling's
+// gitfile. If the agent's own back-link is stale, only the sibling would then
+// resolve to the (symlink-followed) target. The resolver must refuse a
+// non-regular <workspace>/.git rather than let a sibling admin dir be selected.
+func TestTrustedWorktreeAdminName_RefusesSymlinkedGitfile(t *testing.T) {
+	repoRoot := t.TempDir()
+	gitDir := filepath.Join(repoRoot, ".git")
+	siblingWs := filepath.Join(repoRoot, "sib")
+	if err := os.MkdirAll(siblingWs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A legitimate sibling worktree admin whose back-link points at its own gitfile.
+	setupWorktreeAdmin(t, repoRoot, "other", siblingWs)
+
+	// The agent's own workspace, with a STALE own back-link (points elsewhere),
+	// and a <ws>/.git that is a symlink to the sibling's gitfile.
+	ws := filepath.Join(repoRoot, "wt")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ownAdmin := filepath.Join(gitDir, "worktrees", "agent-1")
+	if err := os.MkdirAll(ownAdmin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Stale: points at a path that no longer exists / is not this workspace.
+	if err := os.WriteFile(filepath.Join(ownAdmin, "gitdir"), []byte(filepath.Join(repoRoot, "gone", ".git")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(siblingWs, ".git"), filepath.Join(ws, ".git")); err != nil {
+		t.Fatal(err)
+	}
+
+	name, ok := trustedWorktreeAdminName(gitDir, ws)
+	if ok || name != "" {
+		t.Errorf("a symlinked <workspace>/.git must be refused (fail closed), got name=%q ok=%v", name, ok)
+	}
+}
+
+// aesec A1 invariant: wherever the base .git is bound read-write, the whole
+// worktrees/ admin directory must be bound read-only, with only the agent's own
+// worktrees/<name>/ overlaid read-write. This is what the back-link trust relies
+// on; a future layout or a relaxed narrowing that left worktrees/ writable would
+// let a container write a sibling's admin files again.
+func TestWorktreesDir_IsReadOnlyWhereverGitIsReadWrite(t *testing.T) {
+	for _, rt := range []string{"docker", "podman"} {
+		t.Run(rt, func(t *testing.T) {
+			repoRoot, workspace := setupHubManagedBaseRepo(t, "agent-1")
+			gitDir := filepath.Join(repoRoot, ".git")
+			args, err := buildCommonRunArgs(RunConfig{
+				Harness:                &harness.Generic{},
+				Name:                   "test-agent",
+				UnixUsername:           "scion",
+				Image:                  "scion-agent:latest",
+				RuntimeName:            rt,
+				RepoRoot:               repoRoot,
+				Workspace:              workspace,
+				PrivateGitConfigSource: seedTestPrivateGitConfig(t),
+			})
+			if err != nil {
+				t.Fatalf("buildCommonRunArgs: %v", err)
+			}
+			argStr := strings.Join(args, " ")
+			// The base .git is read-write (not a :ro base like Apple).
+			if !strings.Contains(argStr, "-v "+gitDir+":/repo-root/.git ") {
+				t.Fatalf("expected a read-write base .git mount, got: %s", argStr)
+			}
+			if strings.Contains(argStr, "-v "+gitDir+":/repo-root/.git:ro") {
+				t.Fatalf("base .git unexpectedly read-only for %s", rt)
+			}
+			// worktrees/ itself must be read-only.
+			if !strings.Contains(argStr, ":/repo-root/.git/worktrees:ro") {
+				t.Errorf("worktrees/ must be read-only wherever .git is rw, got: %s", argStr)
+			}
+			// The only read-write bind under worktrees/ is the agent's own admin dir.
+			for _, a := range args {
+				i := strings.Index(a, ":/repo-root/.git/worktrees/")
+				if i < 0 {
+					continue
+				}
+				target := a[i+1:]
+				isOwn := strings.HasPrefix(target, "/repo-root/.git/worktrees/agent-1")
+				isRO := strings.HasSuffix(target, ":ro")
+				if !isRO && !isOwn {
+					t.Errorf("unexpected read-write bind under worktrees/: %s", a)
+				}
+			}
+		})
+	}
+}
+
+// bindReadOnlyCreateFirstFile must return an error (so the caller refuses the
+// start) when it cannot create the placeholder, rather than silently registering
+// no read-only bind and leaving a writable file inside the rw .git root.
+func TestBindReadOnlyCreateFirstFile_FailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	// A regular file where a directory is needed: MkdirAll of <blocker>/sub fails.
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(blocker, "sub", "config.worktree")
+	registered := false
+	err := bindReadOnlyCreateFirstFile(func(string, string, bool, bool) { registered = true }, src, "/repo-root/.git/config.worktree")
+	if err == nil {
+		t.Error("expected an error when the placeholder cannot be created, got nil")
+	}
+	if registered {
+		t.Error("no mount must be registered when the placeholder cannot be created")
+	}
+}

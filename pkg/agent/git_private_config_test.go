@@ -191,3 +191,109 @@ func TestSeedPrivateGitConfig_PushUExitsZeroNoWrite(t *testing.T) {
 		t.Errorf("push -u modified the repo config despite the pre-seeded upstream:\nbefore:\n%s\nafter:\n%s", before, after)
 	}
 }
+
+// A base .git/config that already carries branch.<b>.remote/merge (the normal
+// pre-upgrade state after an agent or the host user ran `git push -u`) must not
+// produce duplicate upstream entries in the private copy: duplicates make bare
+// `git push` fail with "multiple upstream branches". Both bare `git push` and
+// `git push -u` must exit 0, and the config must be unchanged by the push.
+func TestSeedPrivateGitConfig_DedupesExistingUpstream(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	for _, base := range []string{"same value", "different value"} {
+		t.Run(base, func(t *testing.T) {
+			root := t.TempDir()
+			t.Setenv("HOME", root)
+			t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(root, "gc"))
+			t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+			t.Setenv("SCION_HOST_UID", "")
+			if err := os.WriteFile(filepath.Join(root, "gc"), []byte("[user]\n\temail=a@b.c\n\tname=A\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			run := func(dir string, args ...string) {
+				t.Helper()
+				c := exec.Command("git", args...)
+				c.Dir = dir
+				if out, err := c.CombinedOutput(); err != nil {
+					t.Fatalf("git %v: %v\n%s", args, err, out)
+				}
+			}
+			bare := filepath.Join(root, "bare.git")
+			run(root, "init", "-q", "--bare", bare)
+			repo := filepath.Join(root, "repo")
+			run(root, "init", "-q", "-b", "agent-x", repo)
+			run(repo, "remote", "add", "origin", bare)
+			// Pre-existing upstream for agent-x in the base config.
+			mergeVal := "refs/heads/agent-x"
+			if base == "different value" {
+				mergeVal = "refs/heads/stale"
+			}
+			run(repo, "config", "branch.agent-x.remote", "origin")
+			run(repo, "config", "branch.agent-x.merge", mergeVal)
+			run(repo, "config", "push.autoSetupRemote", "true")
+
+			agentDir := t.TempDir()
+			dest, err := seedPrivateGitConfig(filepath.Join(repo, ".git", "config"), agentDir, "agent-x")
+			if err != nil {
+				t.Fatal(err)
+			}
+			seeded, err := os.ReadFile(dest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Exactly one branch.agent-x.merge entry survives.
+			if n := strings.Count(string(seeded), "merge = "); n != 1 {
+				t.Fatalf("expected exactly one merge entry after dedupe, got %d:\n%s", n, seeded)
+			}
+			if err := os.WriteFile(filepath.Join(repo, ".git", "config"), seeded, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(repo, "f.txt"), []byte("x\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			run(repo, "add", ".")
+			run(repo, "-c", "core.hooksPath="+os.DevNull, "commit", "-q", "-m", "x")
+
+			before, _ := os.ReadFile(filepath.Join(repo, ".git", "config"))
+			// Bare `git push` must succeed (no "multiple upstream branches").
+			bareCmd := exec.Command("git", "push")
+			bareCmd.Dir = repo
+			if out, err := bareCmd.CombinedOutput(); err != nil {
+				t.Fatalf("bare git push should exit 0 after dedupe, got: %v\n%s", err, out)
+			}
+			// And `git push -u` too.
+			uCmd := exec.Command("git", "push", "-u", "origin", "agent-x")
+			uCmd.Dir = repo
+			if out, err := uCmd.CombinedOutput(); err != nil {
+				t.Fatalf("git push -u should exit 0, got: %v\n%s", err, out)
+			}
+			after, _ := os.ReadFile(filepath.Join(repo, ".git", "config"))
+			if string(before) != string(after) {
+				t.Errorf("push modified the read-only-intended config:\nbefore:\n%s\nafter:\n%s", before, after)
+			}
+		})
+	}
+}
+
+// A branch name containing a double quote (legal in a git refname) must be
+// escaped in the [branch "..."] header and the merge value, so the seeded config
+// still parses and git can read it.
+func TestSeedPrivateGitConfig_EscapesBranchSubsection(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	agentDir := t.TempDir()
+	dest, err := seedPrivateGitConfig(filepath.Join(t.TempDir(), "nobase"), agentDir, `od"d`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// git must parse the seeded config without error (an unescaped quote would
+	// break the [branch "..."] header and every key after it).
+	c := exec.Command("git", "config", "--file", dest, "--list")
+	if out, err := c.CombinedOutput(); err != nil {
+		t.Fatalf("git could not parse the seeded config with a quoted branch name: %v\n%s", err, out)
+	} else if !strings.Contains(string(out), `branch.od"d.remote=origin`) {
+		t.Errorf("expected the escaped branch section to read back, got:\n%s", out)
+	}
+}

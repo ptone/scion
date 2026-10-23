@@ -50,7 +50,7 @@ func TestProvisioningClone_UsesHardenedEnv(t *testing.T) {
 	binDir := t.TempDir()
 	envFile := filepath.Join(binDir, "clone-env.txt")
 	script := "#!/bin/sh\n" +
-		"if [ \"$1\" = clone ]; then env > '" + envFile + "'; fi\n" +
+		"for a in \"$@\"; do if [ \"$a\" = clone ]; then env > '" + envFile + "'; break; fi; done\n" +
 		"exec '" + realGit + "' \"$@\"\n"
 	require.NoError(t, os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755))
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))

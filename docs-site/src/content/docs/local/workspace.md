@@ -308,8 +308,9 @@ safe stops the command rather than being ignored.
   agent cannot start there. This is a deliberate, fail-closed limitation; it may be lifted later.
 - As defence in depth these commands also run with hooks, the file-system monitor and the pager
   off, signing off (`commit.gpgsign`/`tag.gpgsign`/`merge.verifySignatures` false), the `ext::`
-  transport disabled and the `file://` transport allowed only for a URL given on the command line,
-  submodule recursion off, and the `GIT_*` environment scrubbed (except the host operator's own
+  transport disabled and the `file://` transport allowed only for a top-level operation the user
+  drives directly (`protocol.file.allow=user`; git's own indirect uses such as submodule fetches are
+  blocked), submodule recursion off, and the `GIT_*` environment scrubbed (except the host operator's own
   config-file, transport and `GIT_ALLOW_PROTOCOL` settings). **Note:** a `GIT_ALLOW_PROTOCOL` set by
   the host operator overrides the `protocol.*.allow` pins.
 - **git-lfs:** host-side checkouts take the LFS endpoint from the configured remote, never from a

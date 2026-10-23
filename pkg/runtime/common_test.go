@@ -1701,6 +1701,10 @@ func TestNarrowSharerRegistryMounts_LocalDocker(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(backLinkDir, "gitdir"), []byte(filepath.Join(workspace, ".git")+"\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	// A real worktree has a regular .git gitfile; the resolver requires it.
+	if err := os.WriteFile(filepath.Join(workspace, ".git"), []byte("gitdir: "+backLinkDir+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	if isHubManagedWorktreeBase(repoRoot) {
 		t.Fatal("test setup invariant broken: repoRoot must be a local (non-hub-managed) base")

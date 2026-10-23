@@ -91,6 +91,27 @@ func RedactGitConfigSecrets(raw []byte) (out []byte, stripped []string, err erro
 	return serializeGitConfig(kept), stripped, nil
 }
 
+// StripGitConfigKeys re-serialises raw with every variable for which drop
+// returns true removed. section and name are lower-cased (as git stores them);
+// subsection keeps its case. It is used to remove pre-existing branch-upstream
+// and autoSetupRemote entries before a fresh upstream pre-seed is appended, so
+// the result never has duplicate single-valued keys. A parse error is returned
+// so the caller can fail closed.
+func StripGitConfigKeys(raw []byte, drop func(section, subsection string, hasSubsection bool, name string) bool) ([]byte, error) {
+	vars, err := parseGitConfigFile(raw)
+	if err != nil {
+		return nil, err
+	}
+	kept := make([]gitConfigVar, 0, len(vars))
+	for _, v := range vars {
+		if drop(v.Section, v.Subsection, v.HasSubsection, v.Name) {
+			continue
+		}
+		kept = append(kept, v)
+	}
+	return serializeGitConfig(kept), nil
+}
+
 // isURLValuedKey reports whether a config variable's value is a URL whose
 // userinfo should be scrubbed.
 func isURLValuedKey(v gitConfigVar) bool {
@@ -182,6 +203,21 @@ func serializeGitConfig(vars []gitConfigVar) []byte {
 func escapeConfigSubsection(s string) string {
 	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
 	return r.Replace(s)
+}
+
+// EscapeGitConfigSubsection escapes a string for use as a quoted git config
+// subsection ([section "sub"]). git only recognises \" and \\ there, so a value
+// containing a double quote or backslash must be escaped or it breaks the
+// section header (and every subsequent key).
+func EscapeGitConfigSubsection(s string) string {
+	return escapeConfigSubsection(s)
+}
+
+// EscapeGitConfigValue renders s as a fully quoted, escaped git config value
+// (including the surrounding quotes), which git always accepts, so no value can
+// be misparsed after writing it.
+func EscapeGitConfigValue(s string) string {
+	return escapeConfigValue(s)
 }
 
 // escapeConfigValue renders a value as a quoted git config string.

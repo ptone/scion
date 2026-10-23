@@ -19,6 +19,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -66,6 +67,25 @@ func seedPrivateGitConfig(baseConfigPath, agentDir, branch string) (string, erro
 		util.Debugf("seedPrivateGitConfig: stripped credential-bearing keys from the private copy: %v", stripped)
 	}
 
+	// Drop any pre-existing upstream for the seed branch and push.autoSetupRemote
+	// from the base before appending our own, so the copy never ends up with
+	// duplicate single-valued branch.<b>.remote/merge keys. A base that already
+	// carries them is the normal pre-upgrade state (an agent that ran `git push -u`
+	// while the config was writable, or a host user's upstream); duplicates make
+	// bare `git push` fail with "multiple upstream branches".
+	redacted, err = util.StripGitConfigKeys(redacted, func(section, subsection string, hasSubsection bool, name string) bool {
+		if section == "push" && !hasSubsection && name == "autosetupremote" {
+			return true
+		}
+		if branch != "" && section == "branch" && hasSubsection && subsection == branch {
+			return true
+		}
+		return false
+	})
+	if err != nil {
+		return "", fmt.Errorf("seed private git config: strip stale upstream: %w", err)
+	}
+
 	// The repository config is read-only to the agent (the copy is bound
 	// read-only), so `git push -u` / `git config --local` cannot persist. Pre-seed
 	// the agent's own branch upstream and push.autoSetupRemote so that `git push`
@@ -98,20 +118,37 @@ func seedPrivateGitConfig(baseConfigPath, agentDir, branch string) (string, erro
 	return dest, nil
 }
 
+// conservativeBranchName matches branch names that need no git-config escaping in
+// a [branch "..."] subsection or a value: ordinary refname characters only.
+var conservativeBranchName = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
+
 // privateConfigUpstreamSeed returns the git config text appended to the private
 // read-only repository config so normal push flows exit 0 without a write:
 // push.autoSetupRemote=true, and (when branch is known) the agent's own branch
-// upstream set to origin. branch is an agent slug (git-safe), so it needs no
-// escaping; an empty branch appends only the push setting.
+// upstream set to origin. For an ordinary branch name the block is written in
+// git's canonical form, so `git push -u` finds the upstream already set and
+// writes nothing. A git refname may legally contain a double quote; such a name
+// is escaped in both the subsection header and the merge value (a bare quote
+// would otherwise break the [branch "..."] header and every key after it) at the
+// cost of a possible one-time rewrite by git. An empty branch appends only the
+// push setting.
 func privateConfigUpstreamSeed(branch string) []byte {
 	var b strings.Builder
 	b.WriteString("\n[push]\n\tautoSetupRemote = true\n")
 	if branch != "" {
-		b.WriteString("[branch \"")
-		b.WriteString(branch)
-		b.WriteString("\"]\n\tremote = origin\n\tmerge = refs/heads/")
-		b.WriteString(branch)
-		b.WriteString("\n")
+		if conservativeBranchName.MatchString(branch) {
+			b.WriteString("[branch \"")
+			b.WriteString(branch)
+			b.WriteString("\"]\n\tremote = origin\n\tmerge = refs/heads/")
+			b.WriteString(branch)
+			b.WriteString("\n")
+		} else {
+			b.WriteString("[branch \"")
+			b.WriteString(util.EscapeGitConfigSubsection(branch))
+			b.WriteString("\"]\n\tremote = origin\n\tmerge = ")
+			b.WriteString(util.EscapeGitConfigValue("refs/heads/" + branch))
+			b.WriteString("\n")
+		}
 	}
 	return []byte(b.String())
 }

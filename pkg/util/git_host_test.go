@@ -668,7 +668,7 @@ func TestAllowVar(t *testing.T) {
 		}
 	}
 	// user.signingKey is top-level user.*; the v() helper treats it as such.
-	deny := []string{"core.sshCommand", "core.editor", "credential.helper", "url.x.insteadOf", "http.proxy", "http.sslVerify", "gpg.program", "gpg.ssh.program", "gpg.ssh.allowedSignersFile", "alias.st", "remote.origin.uploadpack", "diff.external", "diff.x.textconv", "merge.x.driver", "lfs.url", "lfs.storage", "lfs.standalonetransferagent", "lfs.extension.foo.clean", "totally.unknown.key"}
+	deny := []string{"core.sshCommand", "core.editor", "credential.helper", "url.x.insteadOf", "http.proxy", "http.sslVerify", "gpg.program", "gpg.ssh.program", "gpg.ssh.allowedSignersFile", "alias.st", "remote.origin.uploadpack", "diff.external", "diff.x.textconv", "merge.x.driver", "lfs.url", "lfs.storage", "lfs.standalonetransferagent", "lfs.extension.foo.clean", "totally.unknown.key", "diff.orderfile", "remote.origin.promisor", "remote.origin.partialclonefilter"}
 	for _, mode := range []RepoConfigPolicy{RepoPolicyManaged, RepoPolicyLinked} {
 		for _, k := range deny {
 			if ok, _ := allowVar(mode, v(k, "x"), repoConfigAllowOptions{}); ok {
@@ -1608,9 +1608,9 @@ func TestLfsOptionForLinkedCheckout_RecordedOrigin(t *testing.T) {
 		t.Errorf("pinned url = %q, want endpoint derived from the recorded origin %q", opt.url, want)
 	}
 
-	// Agent repoints the live origin elsewhere: the live origin no longer matches
-	// the recorded one, so skip rather than pin (never contact the agent's host).
-	hostRunGit(t, repo, "remote", "set-url", "origin", "https://evil.example/x.git")
+	// The live origin is repointed elsewhere: it no longer matches the recorded
+	// one, so skip rather than pin (never contact that host).
+	hostRunGit(t, repo, "remote", "set-url", "origin", "https://other.example/x.git")
 	if opt := lfsOptionForLinkedCheckout(repo, "main", recorded); !opt.skipSmudge {
 		t.Errorf("live origin repointed away from recorded: want skipSmudge, got %+v", opt)
 	}
