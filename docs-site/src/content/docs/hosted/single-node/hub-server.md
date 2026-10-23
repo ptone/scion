@@ -216,6 +216,14 @@ The panel also lists one-time data migrations, with **Run** for a pending migrat
 
 `group-participant-mode-cleanup` removes legacy agent participant rows from group conversations; see [Agents in Group Conversations](/scion/reference/messaging-authorization/#agents-in-group-conversations). It only reports unless run through the API with `{"params":{"apply":"true"}}` (the string `"true"`), which the panel's **Run** does not send; a panel run without dry run reports what it would remove and is still marked completed; the migration can still be run with apply through the API.
 
+`project-storage-migrate` moves project files from the hub's older storage locations into the project storage layout that agents mount. Run it once on a hub whose workspace storage is shared (`nfs`, `cloudrun-volume` or `gke-shared-volume`). On local storage it does nothing. Until it has run, the project **Files** tab shows a notice for each project that still has files in an old location. The migration moves three things for each project:
+
+- the hub-managed project tree on the share and the hub's own `~/.scion/projects/<slug>`, into `projects/<project id>/workspace`;
+- the hub-written `.scion` seed, into `projects/<project id>/.scion`;
+- the hub's local shared-dir content, into `projects/<project id>/shared-dirs/<name>`.
+
+A tree is renamed only when its target does not exist yet. Otherwise only the files missing from the target are copied, and no file in the target is ever overwritten. Each conflict is listed, and the source is kept beside itself as `<name>.migrated-<time>`. Symlinks and special files are never followed or copied; they are listed instead. If a broker in the hub process still uses `~/.scion/projects/<slug>`, that tree is only copied from and is left in place. Migrated files are given the agents' uid and gid from the storage configuration. If the export refuses that (root squash), the log says so; fix ownership as described in the [hybrid tier guide](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/hybrid-tier.md). Once every step for a project has succeeded, the project's old workspace copy in object storage is deleted; per-agent sync objects are kept. Run it with `{"params":{"dryRun":true}}` first to see the plan. It is safe to run again: a second run reports `moves=0`.
+
 ### Operation Execution & History
 
 All maintenance tasks executed through the panel are tracked. The maintenance interface provides:
