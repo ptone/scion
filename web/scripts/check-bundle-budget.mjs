@@ -33,7 +33,9 @@
  *   - requiredChunks:     chunk file name prefixes that must exist (proves a
  *                         lazy split still happens);
  *   - forbiddenModules:   source modules that must not be in the static
- *                         closure of the given routes. Module lists come from
+ *                         closure of the given routes, by base name
+ *                         (pattern) or by full path (pathPattern, for
+ *                         example node_modules/<package>/). Module lists come from
  *                         each chunk's source map, looked up next to the chunk
  *                         or under dist/sourcemaps/ (where hidden maps may be
  *                         moved), so the check works with either policy.
@@ -102,13 +104,20 @@ export function findSourceMap(distDir, file) {
 }
 
 /**
- * Modules in `modules` whose base name matches `pattern` and that are not in
- * the exact-path allowlist `allow` (no globs: each entry is one path).
+ * Modules in `modules` whose base name matches `pattern` or whose path
+ * (relative to web/) matches `pathPattern`, and that are not in the
+ * exact-path allowlist `allow` (no globs: each entry is one path). Either
+ * pattern may be absent.
  */
-export function forbiddenIn(modules, pattern, allow) {
-  const re = new RegExp(pattern);
+export function forbiddenIn(modules, pattern, allow, pathPattern) {
+  const re = pattern ? new RegExp(pattern) : null;
+  const pathRe = pathPattern ? new RegExp(pathPattern) : null;
   const allowed = new Set(allow.map((a) => a.path));
-  return modules.filter((m) => re.test(posix.basename(m)) && !allowed.has(m));
+  return modules.filter(
+    (m) =>
+      ((re !== null && re.test(posix.basename(m))) || (pathRe !== null && pathRe.test(m))) &&
+      !allowed.has(m)
+  );
 }
 
 function gzipSize(buf) {
@@ -189,6 +198,11 @@ export function checkBudget({ manifest, budget, readFile, listFiles, readMapModu
 
   for (const rule of budget.forbiddenModules ?? []) {
     const allow = rule.allow ?? [];
+    if (!rule.pattern && !rule.pathPattern) {
+      failures.push(`forbiddenModules rule for ${rule.roots}: needs a pattern or a pathPattern`);
+      continue;
+    }
+    const label = [rule.pattern, rule.pathPattern].filter(Boolean).join(' or path ');
     for (const a of allow) {
       if (typeof a.path !== 'string' || /[*?[\]{}]/.test(a.path) || !a.reason) {
         failures.push(
@@ -206,10 +220,12 @@ export function checkBudget({ manifest, budget, readFile, listFiles, readMapModu
           failures.push(`${file}: no source map, cannot check modules in the closure of ${root}`);
           continue;
         }
-        for (const m of forbiddenIn(modules, rule.pattern, allow)) bad.add(`${m} (in ${file})`);
+        for (const m of forbiddenIn(modules, rule.pattern, allow, rule.pathPattern)) {
+          bad.add(`${m} (in ${file})`);
+        }
       }
       report.push(
-        `static closure of ${root} (${keys.length} chunks): ${bad.size} module(s) matching ${rule.pattern}`
+        `static closure of ${root} (${keys.length} chunks): ${bad.size} module(s) matching ${label}`
       );
       for (const b of bad) failures.push(`${root}: static closure contains ${b}`);
     }

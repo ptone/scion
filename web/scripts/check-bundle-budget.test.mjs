@@ -144,6 +144,64 @@ test('forbiddenIn matches the base name and honours exact allowlist paths only',
   ]);
 });
 
+test('forbiddenIn matches a full-path pattern, alone or with a base-name pattern', () => {
+  const modules = [
+    'src/client/main.ts',
+    'node_modules/@milkdown/core/lib/index.js',
+    'node_modules/prosemirror-view/dist/index.js',
+    'node_modules/lit/index.js',
+    'src/components/artifact-review/review-editor.ts',
+    'src/components/artifact-review/review-editor-loader.ts',
+    'src/client/terminal-coordinator.ts',
+  ];
+  const pathPattern = '(node_modules/(@milkdown/|prosemirror-))|src/components/artifact-review/';
+  const loader = [
+    { path: 'src/components/artifact-review/review-editor-loader.ts', reason: 'loader' },
+  ];
+  assert.deepEqual(forbiddenIn(modules, undefined, loader, pathPattern), [
+    'node_modules/@milkdown/core/lib/index.js',
+    'node_modules/prosemirror-view/dist/index.js',
+    'src/components/artifact-review/review-editor.ts',
+  ]);
+  assert.deepEqual(forbiddenIn(modules, '^terminal-', loader, pathPattern), [
+    'node_modules/@milkdown/core/lib/index.js',
+    'node_modules/prosemirror-view/dist/index.js',
+    'src/components/artifact-review/review-editor.ts',
+    'src/client/terminal-coordinator.ts',
+  ]);
+  // The base-name pattern alone does not see package paths.
+  assert.deepEqual(forbiddenIn(modules, '^index', [], undefined), [
+    'node_modules/@milkdown/core/lib/index.js',
+    'node_modules/prosemirror-view/dist/index.js',
+    'node_modules/lit/index.js',
+  ]);
+});
+
+test('a pathPattern rule fails a static closure that holds a matching module', () => {
+  const b = budget({
+    forbiddenModules: [
+      {
+        roots: ['src/components/pages/login.ts'],
+        pathPattern: 'node_modules/@milkdown/',
+      },
+    ],
+  });
+  const { failures } = run({
+    b,
+    modules: { 'assets/lit-1.js': ['node_modules/@milkdown/core/lib/index.js'] },
+  });
+  assert.equal(failures.length, 1);
+  assert.match(failures[0], /static closure contains node_modules\/@milkdown\/core/);
+});
+
+test('a forbiddenModules rule without any pattern fails', () => {
+  const b = budget({ forbiddenModules: [{ roots: ['src/components/pages/login.ts'] }] });
+  const { failures } = run({ b });
+  assert.deepEqual(failures, [
+    'forbiddenModules rule for src/components/pages/login.ts: needs a pattern or a pathPattern',
+  ]);
+});
+
 test('passes within budget', () => {
   const { failures } = run();
   assert.deepEqual(failures, []);

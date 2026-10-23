@@ -5,7 +5,9 @@
   },
   "chunks": {
     "$comment": "CodeMirror editor core (ptone/scion#5351). Each language is its own lazily loaded lang-<name> chunk (vite.config.ts), so this chunk holds only the core: @codemirror/view, state, language, autocomplete, commands, search and @lezer/common, highlight (409,273 B raw at the split, from 783,936 B with every language). The design's 350,000 B estimate assumed about 430 KB of languages; they measured about 350 KB, so the limit was revised to 420,000 B with webperf-lead approval.",
-    "assets/codemirror-": { "raw": 420000, "gzip": 140000 }
+    "assets/codemirror-": { "raw": 420000, "gzip": 140000 },
+    "$comment-review-editor": "The graphical review editor (ptone/scion#5913): Milkdown, ProseMirror and the remark stack (about 149 kB gzip measured in the design spike) plus the editor modules, loaded only when a review opens in the graphical view.",
+    "assets/review-editor-": { "raw": 520000, "gzip": 160000 }
   },
   "entryClosure": {
     "entry": "src/client/main.ts",
@@ -21,7 +23,8 @@
     "assets/lang-markdown-",
     "assets/lang-python-",
     "assets/lang-rust-",
-    "assets/lang-yaml-"
+    "assets/lang-yaml-",
+    "assets/review-editor-"
   ],
   "forbiddenModules": [
     {
@@ -40,6 +43,22 @@
         {
           "path": "src/client/terminal-workspace-events.ts",
           "reason": "Event-name and drag-MIME constants only (no workspace code); the header imports TERMINAL_SESSION_COUNT_EVENT on every route."
+        }
+      ]
+    },
+    {
+      "$comment": "The graphical review editor (ptone/scion#5913) loads lazily through review-editor-loader.ts. None of its modules, nor Milkdown, ProseMirror or the remark stack, may be in what the entry, the login and home routes or the artifact page load statically, so plain artifact viewing never downloads it.",
+      "roots": [
+        "src/client/main.ts",
+        "src/components/pages/login.ts",
+        "src/components/pages/home.ts",
+        "src/components/pages/artifact-detail.ts"
+      ],
+      "pathPattern": "(node_modules/(@milkdown/|prosemirror-|remark-|micromark|mdast-|unified/|vfile))|src/components/artifact-review/",
+      "allow": [
+        {
+          "path": "src/components/artifact-review/review-editor-loader.ts",
+          "reason": "The lazy loader itself (a single-flight import of the editor chunk, no editor code); the artifact page must reach it statically."
         }
       ]
     }

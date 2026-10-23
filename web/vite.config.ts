@@ -148,6 +148,23 @@ function codemirrorChunk(id: string): string | undefined {
     return undefined;
 }
 
+/**
+ * Packages only the review editor uses: Milkdown, ProseMirror, and the
+ * remark / micromark / unified stack with its small helpers.
+ */
+const REVIEW_EDITOR_PACKAGES =
+    /node_modules\/(@milkdown\/|prosemirror-|remark-|remark\/|micromark|mdast-|unist-|unified\/|vfile|bail\/|trough\/|zwitch\/|devlop\/|ccount\/|longest-streak\/|markdown-table\/|decode-named-character-reference\/|character-entities\/|orderedmap\/|rope-sequence\/|w3c-keyname\/|is-plain-obj\/|extend\/|escape-string-regexp\/)/;
+
+/**
+ * Whether a module belongs in the lazily loaded review-editor chunk. Only
+ * packages are listed: the editor's own modules follow its dynamic import
+ * into a chunk of the same name, while modules it shares with the page
+ * (critic.ts, artifact-preview.ts) stay with the page.
+ */
+function reviewEditorChunk(id: string): boolean {
+    return REVIEW_EDITOR_PACKAGES.test(id);
+}
+
 export default defineConfig({
     root: '.',
     publicDir: 'public',
@@ -192,6 +209,12 @@ export default defineConfig({
                     }
                     if (id.includes('node_modules/@codemirror') || id.includes('node_modules/@lezer')) {
                         return 'codemirror';
+                    }
+                    // The graphical review editor (ptone/scion#5913) and its whole
+                    // Milkdown, ProseMirror and remark stack, loaded only when a
+                    // review opens in the graphical view (review-editor-loader.ts).
+                    if (reviewEditorChunk(id)) {
+                        return 'review-editor';
                     }
                     if (id.includes('node_modules/marked') || id.includes('node_modules/dompurify')) {
                         return 'markdown';
