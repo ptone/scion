@@ -560,3 +560,70 @@ func TestCreateSharedWorkspaceProject_SharedBackend_CloneFailureRollsBack(t *tes
 		assert.Empty(t, entries, "the failed create leaves no project tree")
 	}
 }
+
+// TestImportFromWorkspace_SymlinksAreNotFollowed (rev-1 security finding):
+// resource import reads the workspace through a confined root: a templates
+// directory that is a symlink leading out of the workspace is refused, and a
+// symlinked file inside a template is not followed (here the template's only
+// scion-agent.yaml is a symlink to a file outside, so nothing is found).
+func TestImportFromWorkspace_SymlinksAreNotFollowed(t *testing.T) {
+	srv, _, project, wsRoot := setupWorkspaceProject(t, "ws-symlink")
+	ctx := context.Background()
+	outside := t.TempDir()
+	outTmpl := filepath.Join(outside, "templates", "leaked")
+	require.NoError(t, os.MkdirAll(outTmpl, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(outTmpl, "scion-agent.yaml"), []byte("harness: claude\n"), 0o644))
+
+	require.NoError(t, os.MkdirAll(filepath.Join(wsRoot, ".scion"), 0o755))
+	require.NoError(t, os.Symlink(filepath.Join(outside, "templates"), filepath.Join(wsRoot, ".scion", "templates")))
+	_, err := srv.importTemplatesFromWorkspace(ctx, project, "/.scion/templates")
+	require.Error(t, err, "a symlinked templates directory leading out of the workspace is refused")
+	assert.NotContains(t, err.Error(), outside, "no host path in the error")
+	assert.NotContains(t, err.Error(), wsRoot, "no host path in the error")
+	_, _, err = srv.discoverFromWorkspace(ctx, project, "/.scion/templates", srv.templateImportKind())
+	require.Error(t, err)
+
+	inner := filepath.Join(wsRoot, "templates", "linked")
+	require.NoError(t, os.MkdirAll(inner, 0o755))
+	require.NoError(t, os.Symlink(filepath.Join(outTmpl, "scion-agent.yaml"), filepath.Join(inner, "scion-agent.yaml")))
+	_, err = srv.importTemplatesFromWorkspace(ctx, project, "/templates")
+	require.Error(t, err, "a symlinked file inside the workspace is not followed")
+	assert.Contains(t, err.Error(), "no scion templates found")
+}
+
+// TestProjectWorkspacePull_ConfinedAndNoHostPaths (rev-1 security finding):
+// pull confirms the workspace through the confined open before git runs (a
+// workspace replaced by a symlink is refused), and a failing pull answers
+// fixed text without host paths.
+func TestProjectWorkspacePull_ConfinedAndNoHostPaths(t *testing.T) {
+	f := newWorkspaceLayoutFixture(t)
+	f.useNFS()
+	src := newSourceRepo(t)
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{
+		Name: "Pull NFS", GitRemote: "github.com/test/pull-nfs", WorkspaceMode: store.WorkspaceModeShared,
+		Labels: map[string]string{store.LabelCloneURL: src, store.LabelDefaultBranch: "main"},
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	var project store.Project
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
+	pullURL := fmt.Sprintf("/api/v1/projects/%s/workspace/pull", project.ID)
+	ws := filepath.Join(f.shareBase, "projects", project.ID, "workspace")
+
+	// The source repository is gone: the pull fails with fixed text.
+	require.NoError(t, os.RemoveAll(src))
+	rec = doRequest(t, f.srv, http.MethodPost, pullURL, nil)
+	require.GreaterOrEqual(t, rec.Code, 400, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "git pull failed")
+	for _, p := range []string{ws, src, f.shareBase} {
+		assert.NotContains(t, rec.Body.String(), p, "no host path in the pull error")
+	}
+
+	// The workspace replaced by a symlink leading elsewhere is refused.
+	elsewhere := t.TempDir()
+	require.NoError(t, os.RemoveAll(ws))
+	require.NoError(t, os.Symlink(elsewhere, ws))
+	rec = doRequest(t, f.srv, http.MethodPost, pullURL, nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), elsewhere)
+	assert.NotContains(t, rec.Body.String(), f.shareBase)
+}

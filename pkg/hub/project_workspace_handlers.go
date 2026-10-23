@@ -446,15 +446,6 @@ func (s *Server) resolveProjectWorkspace(ctx context.Context, project *store.Pro
 	return projectfs.Resolved{}, errLinkedWorkspaceRemote
 }
 
-// resolveProjectWorkspacePath is resolveProjectWorkspace's host path.
-func (s *Server) resolveProjectWorkspacePath(ctx context.Context, project *store.Project) (string, error) {
-	res, err := s.resolveProjectWorkspace(ctx, project)
-	if err != nil {
-		return "", err
-	}
-	return res.HostPath, nil
-}
-
 // errWorkspaceNoMount is returned for a project without a project-scoped
 // workspace (empty-per-agent: each agent has its own private directory).
 var errWorkspaceNoMount = errors.New("this project has no shared workspace: each agent gets its own private workspace directory")
@@ -1609,6 +1600,22 @@ func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Reque
 		}
 		return
 	}
+	// The workspace can be agent-writable: confirm through the confined
+	// open (the anchored O_NOFOLLOW walk on a shared backend; no symlinked
+	// base locally) that it resolves to the project's own directory before
+	// git runs in it. git's own safe.directory check stays in force.
+	root, err := resolved.Open(false)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			Conflict(w, "The shared workspace has not been provisioned yet")
+			return
+		}
+		slog.WarnContext(ctx, "shared workspace pull: workspace not accessible",
+			"project_id", project.ID, "error", err)
+		BadRequest(w, "Workspace not accessible")
+		return
+	}
+	_ = root.Close()
 	workspacePath := resolved.HostPath
 
 	token := s.resolveCloneToken(ctx, project)
@@ -1618,8 +1625,12 @@ func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Reque
 		slog.Warn("shared workspace pull failed",
 			"project_id", project.ID, "error", err.Error())
 
+		// git's text can name host paths (and the safe.directory guidance
+		// does): the response carries fixed text by kind, and the detail
+		// stays in the log.
 		statusCode := http.StatusConflict
 		errorCode := ErrCodePullFailed
+		message := "git pull failed in the shared workspace"
 		var details map[string]interface{}
 		var gitErr *util.GitError
 		if errors.As(err, &gitErr) {
@@ -1629,11 +1640,17 @@ func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Reque
 			switch gitErr.Kind {
 			case util.GitErrAuth:
 				statusCode = http.StatusUnauthorized
+				message = "git pull failed: the repository did not accept the project's git credential"
 			case util.GitErrNetwork:
 				statusCode = http.StatusBadGateway
+				message = "git pull failed: the repository could not be reached"
+			case util.GitErrNotFound:
+				message = "git pull failed: repository or branch not found"
+			case util.GitErrNonFastForward:
+				message = "git pull failed: the workspace has local commits that diverge from the remote"
 			}
 		}
-		writeError(w, statusCode, errorCode, err.Error(), details)
+		writeError(w, statusCode, errorCode, message, details)
 		return
 	}
 
