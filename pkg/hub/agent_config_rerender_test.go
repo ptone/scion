@@ -195,29 +195,27 @@ func TestBrokerStartSupport_ClearAppliesAtStart(t *testing.T) {
 		assert.False(t, without.clearAppliesAtStart(f.Key), "without clearedFields: %s", f.Key)
 	}
 	cleared := []string{"config.max_turns", "config.model", "config.resources"}
-	nullClear := rawConfigOf(t, `{"Max_Turns": null, "model": "", "resources": {}}`)
 	recorded := []string{"max_turns", "resources"}
-	assert.Equal(t, []string{"config.model"}, with.heldClearEdits(cleared, nullClear, recorded, nil), "a null count limit is a clear the broker applies")
-	assert.Equal(t, cleared, without.heldClearEdits(cleared, nullClear, recorded, nil))
-	assert.Equal(t, cleared, with.heldClearEdits(cleared, nullClear, nil, nil), "a clear that was not recorded is not applied")
+	assert.Equal(t, []string{"config.model"}, with.heldClearEdits(cleared, recorded, nil), "a null count limit is a clear the broker applies")
+	assert.Equal(t, cleared, without.heldClearEdits(cleared, recorded, nil))
+	assert.Equal(t, cleared, with.heldClearEdits(cleared, nil, nil), "a clear that was not recorded is not applied")
 	// A recorded null clear of either count limit is applied by a broker
 	// with clearedFields. Their 0 (Unlimited) never reaches heldClearEdits:
 	// the start merge applies it, so it is not reported as cleared
 	// (ptone/scion#5605).
 	for _, key := range []string{"max_turns", "max_model_calls"} {
-		null := rawConfigOf(t, `{"`+key+`": null}`)
-		assert.Empty(t, with.heldClearEdits([]string{"config." + key}, null, []string{key}, nil), key)
-		assert.Equal(t, []string{"config." + key}, without.heldClearEdits([]string{"config." + key}, null, []string{key}, nil), key)
+		assert.Empty(t, with.heldClearEdits([]string{"config." + key}, []string{key}, nil), key)
+		assert.Equal(t, []string{"config." + key}, without.heldClearEdits([]string{"config." + key}, []string{key}, nil), key)
 	}
 	// env is applied only when every dropped key was recorded: a caller who
 	// cannot view env records none, and auto-expose and TZ keys are never
 	// recorded.
 	env := []string{"config.env"}
-	assert.Empty(t, with.heldClearEdits(env, nil, []string{"env.A", "env.B"}, []string{"A", "B"}))
-	assert.Equal(t, env, with.heldClearEdits(env, nil, []string{"env.A"}, []string{"A", "B"}))
-	assert.Equal(t, env, with.heldClearEdits(env, nil, nil, []string{"A"}))
-	assert.Equal(t, env, with.heldClearEdits(env, nil, nil, []string{"SCION_AUTO_EXPOSE_PORTS"}))
-	assert.Equal(t, env, without.heldClearEdits(env, nil, []string{"env.A"}, []string{"A"}))
+	assert.Empty(t, with.heldClearEdits(env, []string{"env.A", "env.B"}, []string{"A", "B"}))
+	assert.Equal(t, env, with.heldClearEdits(env, []string{"env.A"}, []string{"A", "B"}))
+	assert.Equal(t, env, with.heldClearEdits(env, nil, []string{"A"}))
+	assert.Equal(t, env, with.heldClearEdits(env, nil, []string{"SCION_AUTO_EXPOSE_PORTS"}))
+	assert.Equal(t, env, without.heldClearEdits(env, []string{"env.A"}, []string{"A"}))
 
 	removed := map[string][]string{"env": {"A"}, "volumes": {"/data"}}
 	assert.Equal(t, map[string][]string{"volumes": {"/data"}}, with.heldRemovals(removed, []string{"env.A"}))

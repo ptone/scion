@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -60,13 +61,29 @@ func TestUnlimitedCountRefusal(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"config.max_turns": unlimitedBrokerUnknown}, got)
 
+	// A broker record that no longer exists is not retryable: broker_unknown.
 	missing := *agent
 	missing.RuntimeBrokerID = "no-such-broker"
-	_, err = srv.unlimitedCountRefusal(ctx, &missing, unlimited, base)
-	assert.ErrorIs(t, err, errBrokerLookup, "a broker record that cannot be read is a 503, not a refusal")
-	got, err = srv.unlimitedCountRefusal(ctx, &missing, &api.ScionConfig{Model: "m"}, base)
+	got, err = srv.unlimitedCountRefusal(ctx, &missing, unlimited, base)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"config.max_turns": unlimitedBrokerUnknown}, got)
+
+	// A failing broker read is a 503 (errBrokerLookup), and an edit that
+	// sets no count limit to 0 never looks the broker up.
+	srv.store = failingBrokerReadStore{Store: s}
+	_, err = srv.unlimitedCountRefusal(ctx, agent, unlimited, base)
+	assert.ErrorIs(t, err, errBrokerLookup)
+	got, err = srv.unlimitedCountRefusal(ctx, agent, &api.ScionConfig{Model: "m"}, base)
 	require.NoError(t, err, "an edit that sets no count limit to 0 never looks the broker up")
 	assert.Nil(t, got)
+}
+
+// failingBrokerReadStore is a store whose runtime broker reads fail with a
+// store error (not "not found").
+type failingBrokerReadStore struct{ store.Store }
+
+func (failingBrokerReadStore) GetRuntimeBroker(context.Context, string) (*store.RuntimeBroker, error) {
+	return nil, errors.New("store unavailable")
 }
 
 // TestWarnUnlimitedUnsupported_DispatchWarning: a create or start that

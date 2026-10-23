@@ -292,7 +292,7 @@ func (s *Server) applyAgentConfigPatch(ctx context.Context, agent *store.Agent, 
 	// What is reported applied follows what was recorded above.
 	sup := s.agentBrokerStartSupport(ctx, agent)
 	provision = sup.heldProvisionEdits(provision, old.InlineConfig, cfg, merged.ClearedFields)
-	cleared = sup.heldClearEdits(cleared, p.raw, merged.ClearedFields, droppedEnvKeys(old.InlineConfig, cfg, p.present))
+	cleared = sup.heldClearEdits(cleared, merged.ClearedFields, droppedEnvKeys(old.InlineConfig, cfg, p.present))
 	removed = sup.heldRemovals(removed, merged.ClearedFields)
 	res.warnings = append(res.warnings, sup.reincarnateOnlyEditWarnings(provision, cleared)...)
 	res.warnings = append(res.warnings, removedEntriesWarnings(removed)...)

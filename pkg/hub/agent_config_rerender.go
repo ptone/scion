@@ -16,7 +16,6 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"slices"
 	"sort"
@@ -171,9 +170,7 @@ func (sup brokerStartSupport) clearAppliesAtStart(key string) bool {
 // container keys, from reincarnateOnlyConfigEdits) that still wait for a
 // reincarnation with this broker. recorded is the cleared paths the PATCH
 // recorded (the new ClearedFields), and envDropped the env keys the request
-// drops (droppedEnvKeys). The request's raw config object, the second
-// argument, is no longer read: a count limit's null and 0 are told apart by
-// type now (ptone/scion#5605).
+// drops (droppedEnvKeys).
 //
 // A clear is reported applied only when the broker applies cleared_fields
 // and the PATCH actually recorded it: the key itself, or, for env, an
@@ -185,7 +182,7 @@ func (sup brokerStartSupport) clearAppliesAtStart(key string) bool {
 // start merge applies, so reincarnateOnlyConfigEdits does not report it as
 // cleared, and the hub accepts it only for a broker with
 // UnlimitedCountLimits (unlimitedCountRefusal, ptone/scion#5605).
-func (sup brokerStartSupport) heldClearEdits(cleared []string, _ map[string]json.RawMessage, recorded, envDropped []string) []string {
+func (sup brokerStartSupport) heldClearEdits(cleared, recorded, envDropped []string) []string {
 	var out []string
 	for _, key := range cleared {
 		k := strings.TrimPrefix(key, agentConfigKeyPrefix)

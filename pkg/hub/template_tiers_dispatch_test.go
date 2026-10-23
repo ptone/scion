@@ -443,7 +443,7 @@ func TestTemplateTiers_OtherLaddersUnchanged(t *testing.T) {
 		require.NotNil(t, req.InlineConfig)
 		assert.Equal(t, api.IntPtr(40), req.InlineConfig.MaxTurns)
 		require.NotNil(t, req.Config.HubAgentDefaults)
-		assert.Equal(t, api.IntPtr(99), req.Config.HubAgentDefaults.MaxTurns)
+		assert.Equal(t, 99, req.Config.HubAgentDefaults.MaxTurns)
 
 		f.project.Annotations = map[string]string{}
 		req, err = f.d.buildCreateRequest(ctx, f.newAgent(t, ctx, "limits-hub", nil), "test")
@@ -452,7 +452,7 @@ func TestTemplateTiers_OtherLaddersUnchanged(t *testing.T) {
 			assert.Nil(t, req.InlineConfig.MaxTurns, "the hub limit never travels inline")
 		}
 		require.NotNil(t, req.Config.HubAgentDefaults)
-		assert.Equal(t, api.IntPtr(99), req.Config.HubAgentDefaults.MaxTurns)
+		assert.Equal(t, 99, req.Config.HubAgentDefaults.MaxTurns)
 	})
 }
 

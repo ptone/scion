@@ -2026,6 +2026,20 @@ func (s *Server) createAgentInProject(
 			return
 		}
 	}
+	// A count limit is unset, 0 (no limit) or positive (ptone/scion#5605).
+	if req.Config != nil {
+		issues := map[string]interface{}{}
+		if err := api.ValidateCountLimit("max_turns", req.Config.MaxTurns); err != nil {
+			issues["max_turns"] = err.Error()
+		}
+		if err := api.ValidateCountLimit("max_model_calls", req.Config.MaxModelCalls); err != nil {
+			issues["max_model_calls"] = err.Error()
+		}
+		if len(issues) > 0 {
+			ValidationError(w, "Config contains invalid count limits", map[string]interface{}{"fields": issues})
+			return
+		}
+	}
 
 	// Harness-config resolution (request > project annotation > template
 	// default) happens later, in deriveAgentConfig, along with the rest of

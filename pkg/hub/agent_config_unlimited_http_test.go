@@ -18,12 +18,14 @@ package hub
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -173,7 +175,35 @@ func TestAgentConfigPatch_HeldUnlimitedCount(t *testing.T) {
 		starts := disp.snapshot()
 		require.Len(t, starts, 1)
 		assert.Equal(t, api.IntPtr(0), starts[0].inline.MaxTurns)
+		assert.NotContains(t, starts[0].inline.ClearedFields, "max_turns", "Unlimited is a value, not a clear")
 		assert.Nil(t, pendingReloadAgent(t, s, agent.ID).PendingConfig)
+	})
+
+	t.Run("clearedFields-only broker refuses", func(t *testing.T) {
+		srv, s, _, agent := heldEditsFixture(t, state.PhaseRunning)
+		setBrokerCapabilities(t, s, agent.RuntimeBrokerID, &store.BrokerCapabilities{Reprovision: true, ClearedFields: true})
+		_, code, body := patchAgentBody(t, srv, agent.ID, map[string]interface{}{
+			"config": map[string]interface{}{"max_turns": 0},
+		})
+		require.Equal(t, http.StatusUnprocessableEntity, code, body)
+		assert.Nil(t, pendingReloadAgent(t, s, agent.ID).PendingConfig)
+	})
+
+	// A null clear held for a running agent keeps today's meaning: the
+	// start records it in cleared_fields.
+	t.Run("held null clear is recorded in cleared_fields", func(t *testing.T) {
+		srv, s, disp, agent := heldEditsFixture(t, state.PhaseRunning)
+		setBrokerCapabilities(t, s, agent.RuntimeBrokerID, &store.BrokerCapabilities{Reprovision: true, ClearedFields: true})
+		resp := patchPending(t, srv, agent.ID, map[string]interface{}{
+			"config": map[string]interface{}{"max_turns": nil},
+		})
+		assert.Equal(t, []string{"config.max_turns"}, resp.Disposition.Held)
+		pendingLifecycleWarnings(t, srv, agent.ID, "stop")
+		pendingLifecycleWarnings(t, srv, agent.ID, "start")
+		starts := disp.snapshot()
+		require.Len(t, starts, 1)
+		assert.Nil(t, starts[0].inline.MaxTurns)
+		assert.Contains(t, starts[0].inline.ClearedFields, "max_turns")
 	})
 
 	// Test (g): a fresh pending row (nothing pending before) stores 0 as
@@ -426,4 +456,196 @@ func TestAgentPendingConfig_WaitingUnlimitedIsNotTheBase(t *testing.T) {
 	after := pendingReloadAgent(t, s, agent.ID)
 	assert.Equal(t, api.IntPtr(3), after.AppliedConfig.InlineConfig.MaxTurns, "nothing written")
 	assert.Equal(t, before.StateVersion, after.StateVersion)
+}
+
+// TestHTTPAgentDispatcher_UnlimitedWarningOnCreateAndStart: a create or a
+// start whose inline config sets a count limit to 0, dispatched to a broker
+// without unlimitedCountLimits, carries the warning in its dispatch
+// warnings (the create and start responses); a capable broker gets none.
+func TestHTTPAgentDispatcher_UnlimitedWarningOnCreateAndStart(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+	broker := &store.RuntimeBroker{
+		ID: tid("broker-unl"), Name: "unl-broker", Slug: "unl-broker",
+		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, memStore.CreateRuntimeBroker(ctx, broker))
+	project := &store.Project{ID: tid("project-unl"), Name: "unl-project", Slug: "unl-project"}
+	require.NoError(t, memStore.CreateProject(ctx, project))
+	require.NoError(t, memStore.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: project.ID, BrokerID: broker.ID, BrokerName: broker.Name,
+		LocalPath: "/home/user/project/.scion", Status: store.BrokerStatusOnline,
+	}))
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, &mockRuntimeBrokerClient{}, false, slog.Default())
+	agent := &store.Agent{
+		ID: "agent-unl", Name: "unl-agent", Slug: "unl-agent",
+		ProjectID: project.ID, RuntimeBrokerID: broker.ID,
+		AppliedConfig: &store.AgentAppliedConfig{
+			HarnessConfig: "claude",
+			InlineConfig:  &api.ScionConfig{MaxTurns: api.IntPtr(0)},
+		},
+	}
+	const want = "config.max_turns: this agent's runtime broker keeps the inherited limit"
+
+	wctx, warns := withDispatchWarnings(ctx)
+	_, err := dispatcher.DispatchAgentCreate(wctx, agent)
+	require.NoError(t, err)
+	assert.True(t, containsSubstring(warns.Warnings(), want), "create: %v", warns.Warnings())
+
+	wctx, warns = withDispatchWarnings(ctx)
+	require.NoError(t, dispatcher.DispatchAgentStart(wctx, agent, "", false))
+	assert.True(t, containsSubstring(warns.Warnings(), want), "start: %v", warns.Warnings())
+
+	broker.Capabilities = &store.BrokerCapabilities{UnlimitedCountLimits: true}
+	require.NoError(t, memStore.UpdateRuntimeBroker(ctx, broker))
+	wctx, warns = withDispatchWarnings(ctx)
+	require.NoError(t, dispatcher.DispatchAgentStart(wctx, agent, "", false))
+	assert.False(t, containsSubstring(warns.Warnings(), want), "capable broker: %v", warns.Warnings())
+}
+
+// TestAgentConfigPatch_UnlimitedLookupErrorWritesNothing: a PATCH that
+// changes a count limit to 0 while the broker record cannot be read answers
+// 503 and writes nothing; an edit that sets no count limit to 0 still
+// succeeds, since it needs no lookup.
+func TestAgentConfigPatch_UnlimitedLookupErrorWritesNothing(t *testing.T) {
+	disp := &inlineCaptureDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher()}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newEditTestAgent(t, s, project, broker, state.PhaseStopped)
+	srv.store = failingBrokerReadStore{Store: s}
+
+	_, code, body := patchAgentBody(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{"max_turns": 0}})
+	require.Equal(t, http.StatusServiceUnavailable, code, body)
+	after := pendingReloadAgent(t, s, agent.ID)
+	assert.Equal(t, api.IntPtr(3), after.AppliedConfig.InlineConfig.MaxTurns)
+	assert.Equal(t, agent.StateVersion, after.StateVersion, "nothing written")
+
+	_, code, body = patchAgentBody(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{"model": "other-model"}})
+	require.Equal(t, http.StatusOK, code, body)
+}
+
+// TestAgentConfigPatch_UnlimitedEchoOnOldBroker: an agent whose stored
+// count limit is already 0 (from create or a template) on a broker without
+// unlimitedCountLimits can still be edited: resending the 0 with another
+// change is an echo, not refused.
+func TestAgentConfigPatch_UnlimitedEchoOnOldBroker(t *testing.T) {
+	disp := &inlineCaptureDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher()}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseStopped)
+		a.AppliedConfig.InlineConfig = &api.ScionConfig{Harness: "claude", MaxTurns: api.IntPtr(0)}
+	})
+	resp, code, body := patchAgentBody(t, srv, agent.ID, map[string]interface{}{
+		"config": map[string]interface{}{"max_turns": 0, "max_duration": "1h"},
+	})
+	require.Equal(t, http.StatusOK, code, body)
+	assert.Equal(t, []string{"config.max_duration"}, resp.Disposition.Applied)
+	after := pendingReloadAgent(t, s, agent.ID)
+	assert.Equal(t, api.IntPtr(0), after.AppliedConfig.InlineConfig.MaxTurns)
+	assert.Equal(t, "1h", after.AppliedConfig.InlineConfig.MaxDuration)
+}
+
+// simulateBrokerStart is what the agent's Runtime Broker does with a
+// dispatched inline config at start, by the shared rules: an older broker
+// (no unlimitedCountLimits) decodes a count limit of 0 as unset; the start
+// merge (config.MergeScionConfig) lays the inline config over the agent's
+// persisted config; a broker with clearedFields restores each cleared key
+// from the template chain (inherit); then the default limits fill what is
+// still unset (config.FillDefaultLimits). It returns the effective config.
+func simulateBrokerStart(persisted *api.ScionConfig, inline api.ScionConfig, caps store.BrokerCapabilities, inherit *api.ScionConfig, hub *api.HubAgentDefaults) *api.ScionConfig {
+	in := inline
+	if !caps.UnlimitedCountLimits {
+		if api.IsUnlimitedCount(in.MaxTurns) {
+			in.MaxTurns = nil
+		}
+		if api.IsUnlimitedCount(in.MaxModelCalls) {
+			in.MaxModelCalls = nil
+		}
+	}
+	merged := config.MergeScionConfig(persisted, &in)
+	if caps.ClearedFields {
+		api.ApplyClearedFields(merged, in.ClearedFields, inherit)
+	}
+	out := *merged
+	config.FillDefaultLimits(&out, hub, 0, 0, "")
+	return &out
+}
+
+// TestAgentConfigPatch_CountLimitDispositionInvariant is the design's
+// invariant table for the count limits (ptone/scion#5605): for each edit
+// (Unlimited, a null clear, a value) and broker capability set, on the
+// live path (stopped agent) and the held path (running agent, held edits
+// on), the PATCH lists config.max_turns under applied (live) or held
+// (held) exactly when the next start, simulated by the shared merge and
+// default rules, yields the value the edit asked for. A refused edit lists
+// nothing. The agent's own limit is 3, its template's 5 and the hub
+// default 9.
+func TestAgentConfigPatch_CountLimitDispositionInvariant(t *testing.T) {
+	inherit := &api.ScionConfig{MaxTurns: api.IntPtr(5)}
+	hub := &api.HubAgentDefaults{MaxTurns: 9}
+	persisted := &api.ScionConfig{MaxTurns: api.IntPtr(3)}
+	edits := []struct {
+		name  string
+		value interface{}
+		want  *int // the effective limit the edit asks for
+	}{
+		{name: "unlimited", value: 0, want: api.IntPtr(0)},
+		{name: "null clear", value: nil, want: api.IntPtr(5)},
+		{name: "value", value: 7, want: api.IntPtr(7)},
+	}
+	capSets := []struct {
+		name string
+		caps store.BrokerCapabilities
+	}{
+		{name: "none", caps: store.BrokerCapabilities{Reprovision: true}},
+		{name: "clearedFields", caps: store.BrokerCapabilities{Reprovision: true, ClearedFields: true}},
+		{name: "unlimitedCountLimits", caps: store.BrokerCapabilities{Reprovision: true, ClearedFields: true, UnlimitedCountLimits: true}},
+	}
+	for _, held := range []bool{false, true} {
+		path := "live"
+		if held {
+			path = "held"
+		}
+		for _, e := range edits {
+			for _, c := range capSets {
+				t.Run(path+"/"+e.name+"/"+c.name, func(t *testing.T) {
+					disp := &inlineCaptureDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher()}
+					srv, s, project, broker := setupReincarnateTestServer(t, disp)
+					caps := c.caps
+					setBrokerCapabilities(t, s, broker.ID, &caps)
+					phase := state.PhaseStopped
+					if held {
+						setHeldEditsExperiment(t, srv, true)
+						phase = state.PhaseRunning
+					}
+					agent := newEditTestAgent(t, s, project, broker, phase)
+
+					resp, code, body := patchAgentBody(t, srv, agent.ID, map[string]interface{}{
+						"config": map[string]interface{}{"max_turns": e.value},
+					})
+					if code == http.StatusUnprocessableEntity {
+						assert.Equal(t, 0, e.value, "only Unlimited is refused: %s", body)
+						assert.False(t, c.caps.UnlimitedCountLimits, "a capable broker never refuses Unlimited")
+						return
+					}
+					require.Equal(t, http.StatusOK, code, body)
+					list := resp.Disposition.Applied
+					if held {
+						list = resp.Disposition.Held
+						pendingLifecycleWarnings(t, srv, agent.ID, "stop")
+					}
+					listed := false
+					for _, k := range list {
+						listed = listed || k == "config.max_turns"
+					}
+					pendingLifecycleWarnings(t, srv, agent.ID, "start")
+					starts := disp.snapshot()
+					require.NotEmpty(t, starts)
+					effective := simulateBrokerStart(persisted, starts[len(starts)-1].inline, c.caps, inherit, hub)
+					assert.Equal(t, api.IntPtrEqual(effective.MaxTurns, e.want), listed,
+						"listed=%v, but the start yields %s for a requested %s", listed,
+						api.FormatCountLimit(effective.MaxTurns), api.FormatCountLimit(e.want))
+				})
+			}
+		}
+	}
 }

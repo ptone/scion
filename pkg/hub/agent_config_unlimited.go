@@ -38,7 +38,7 @@ import (
 // validation error's per-field detail.
 const (
 	unlimitedNotSupportedByBroker = "unlimited_not_supported_by_broker: this agent's runtime broker cannot apply Unlimited over an inherited limit; reload the page, or upgrade the broker"
-	unlimitedBrokerUnknown        = "broker_unknown: the agent has no runtime broker, so no start can promise Unlimited"
+	unlimitedBrokerUnknown        = "broker_unknown: the agent has no registered runtime broker, so no start can promise Unlimited"
 )
 
 // unlimitedCountFieldKeys are the edit keys of the count limits, whose 0 is
@@ -48,8 +48,9 @@ var unlimitedCountFieldKeys = map[string]bool{
 	agentConfigKeyPrefix + "max_model_calls": true,
 }
 
-// errBrokerLookup is returned by agentBrokerStartSupportStrict when the
-// agent's broker record cannot be read; the caller answers 503.
+// errBrokerLookup is returned by agentBrokerStartSupportStrict when reading
+// the agent's broker record fails (a store error, which a retry may fix);
+// the caller answers 503.
 var errBrokerLookup = errors.New("runtime broker lookup failed")
 
 // unlimitedCountChanges returns the wire keys (config.max_turns,
@@ -75,15 +76,19 @@ func unlimitedCountChanges(req, base *api.ScionConfig) []string {
 }
 
 // agentBrokerStartSupportStrict is agentBrokerStartSupport for a decision
-// that must not guess: assigned is false when the agent has no broker, and
-// err is errBrokerLookup when the broker's record cannot be read (a missing
-// record included), instead of folding both into the zero value.
+// that must not guess: assigned is false when the agent has no broker or its
+// broker record no longer exists (a retry would not help), and err is
+// errBrokerLookup when reading the record fails, instead of folding both
+// into the zero value.
 func (s *Server) agentBrokerStartSupportStrict(ctx context.Context, agent *store.Agent) (sup brokerStartSupport, assigned bool, err error) {
 	if agent == nil || agent.RuntimeBrokerID == "" || s.store == nil {
 		return brokerStartSupport{}, false, nil
 	}
 	broker, err := s.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
-	if err != nil || broker == nil {
+	switch {
+	case errors.Is(err, store.ErrNotFound), err == nil && broker == nil:
+		return brokerStartSupport{}, false, nil
+	case err != nil:
 		return brokerStartSupport{}, true, errBrokerLookup
 	}
 	return brokerStartSupportFrom(broker.Capabilities), true, nil
