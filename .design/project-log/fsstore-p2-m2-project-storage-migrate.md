@@ -1,0 +1,125 @@
+# fsstore P2-M2: project storage migration (M2/M3) and the Files tab notice
+
+**Date**: 2026-10-23
+**Issue**: ptone/scion#5819 (phase 2 of ptone/scion#5805, part of ptone/scion#5813)
+**Design**: fs-cleanup design-v7 §Migration M2/M3, §P1a rule 4/5 (gs://scion-xproject-exchange/fs-cleanup/design-v7.md, sha256 ff4583c6…64a95e2)
+
+## Summary
+
+Phase 2 retires the hub's legacy project trees. Without a migration, files
+that hubs on shared storage wrote to `hub-projects/<slug>`, to their own
+`~/.scion/projects/<slug>`, or to hub-local
+`project-configs/<slug>__<short>/shared-dirs` would disappear from the
+Files tab. This adds the one-shot maintenance migration
+`project-storage-migrate` and a Files tab notice that shows until it has run.
+
+- **Engine: `pkg/projectfs/migrate`.** It is a new leaf package that imports
+  only projectfs, shareddirs, api, projectkeys and x/sys. It contains:
+  - `Move`: the M2 rule.
+  - `MigrateProject` and `Run`: steps 4 → 1 → 2 → 3, plus an empty step-5
+    slot for phase 3.
+  - `CleanObjects` and `LegacyObjectPrefix`: M3.
+  - `LegacyHubProjectsRoot`: the only place the retired `hub-projects` name
+    survives, as one constant (the A2 exception).
+
+  All of its decision logic is tested without pkg/hub.
+- **Hub**: `ProjectStorageMigrateExecutor` (`pkg/hub/project_storage_migrate.go`)
+  gathers the hub's workspace Layout (P2's `workspaceLayout`), its shared-dir
+  Layout (P1's `sharedDirLayout`), the projects, and the object storage. The
+  seed entry is in entadapter, and the migration is listed in
+  `rerunnableMigrations`. `workspace_migration_notice.go` fills
+  `migrationNotice` on the workspace listing from a cached background dry-run
+  plan.
+- **Web**: `scion-workspace-migration-notice` is rendered by
+  `scion-file-browser` when the listing carries the notice.
+- **`provision.WithProjectStateLock`** (additive) exposes the provisioning
+  state lock so that a rename into a workspace excludes a concurrent first
+  provisioning.
+
+## Decisions (fs-cleanup-arch rulings on ptone/scion#5819)
+
+- **Rename only into an ABSENT target.** The rename runs under the project's
+  provisioning lock, with `renameat2(RENAME_NOREPLACE)` where supported. An
+  existing target, even an empty one, may be a live bind or subPath mount
+  source, so the migration copies into it instead. Copying never overwrites
+  (O_EXCL), lists each conflict, and keeps the source as
+  `<name>.migrated-<UTC ts>`. A source file identical to the target counts as
+  identical, not as a conflict, so a re-run after a partial failure stays clean.
+- **Symlinks** in a source are never followed or copied; they are listed under
+  REFUSED, as are special files. A symlink at any component of either path
+  refuses the move. Every component is walked with O_NOFOLLOW openat.
+- **Step 4 runs before step 1.** A non-git source moves its whole `.scion` to
+  `ProjectRoot/.scion`. A git source moves only `settings.yaml` and
+  `project-id`, and only when `git ls-files --error-unmatch` reports them
+  untracked. git runs with an explicit GIT_DIR, no system or global config,
+  no fsmonitor or hooks, and a minimal environment. A `.git` that is a file
+  leaves the seed in place.
+- **Ownership (Q6).** Migrated entries are chowned to the Layout's uid:gid.
+  Under shared dirs, directories get setgid 2775 with the EnsureLeaf default
+  ACL and files get group rw. A tree renamed into a workspace leaf gets the
+  leaf contract on its top directory. Workspace modes are otherwise kept.
+  EPERM (root squash) is reported as "migrated; ownership not normalised",
+  with the hybrid-tier fix-up hint, and is not treated as a failure.
+- **Co-located broker (Q7).** The hub-local `~/.scion/projects/<slug>` is
+  only copied from (never renamed; `.scion/agents` and `shared-dirs`
+  excluded) in two cases:
+  - the embedded broker serves the project from it (per-project provider
+    check; a failed lookup counts as served);
+  - its `.scion` holds anything besides the hub's own `settings.yaml`.
+- **Precondition.** The workspace steps (1, 2, 4) run only on a shared
+  workspace Layout. A shared shared-dir Layout alone still gets step 3. On a
+  local hub the migration is a no-op.
+- **M3** deletes only `[hubs/<hub>/]workspaces/<uuid>/<legacy dir>/`, and only
+  when every M2 step of that project succeeded. A conflict is not a failure.
+  The per-agent `workspaces/<uuid>/<agentID>/` prefixes (CLI bootstrap,
+  `scion sync`) are never touched. The legacy directory name is routed
+  through `pkg/projectkeys.LegacyProjectWorkspaceObjectDir`, which is
+  allowlisted in the compat-literals guard.
+- **Broker-local step 3** (shared dirs under the brokers' own project-configs)
+  is phase 3 (#5823), which calls `migrate.Move`.
+- **Notice.** The plan runs at most once at a time, is bounded at 2 min,
+  retries 5 min after a failure, and is never on the request path. It is
+  recomputed when the Layouts change or after a real run. A project is
+  pending when it has something to move or a failed step. Once the migration
+  is completed, no notice is shown.
+
+## Tests
+
+- `pkg/projectfs/migrate` (LIGHT): mover tests:
+  - rename into an absent target;
+  - copy into an existing empty target (inode kept);
+  - a target created before the locked re-check is copied into;
+  - merge never overwrites;
+  - second run moves nothing;
+  - dry run changes nothing;
+  - symlinks and special files refused;
+  - symlinked source, source component, target and target component refused;
+  - copy-only with excludes.
+
+  Normalisation: chown set, shared-dir leaf contract, EPERM reported.
+  Plan and run:
+  - T1 no-op;
+  - full NFS scenario with conflict, idempotence and M3;
+  - M3 kept on failure;
+  - per-agent objects kept;
+  - volume backends' legacy root, and fail-closed without a volume name;
+  - git seed rule;
+  - empty-per-agent;
+  - copy-only by evidence and by provider;
+  - shared-dirs-only topology.
+- `pkg/provision`: `TestWithProjectStateLock`.
+- `pkg/hub` (sharded, lane): seeded and rerunnable; T1 no-op; NFS move and
+  idempotence; M3 through `storage.NewLocal`; volume fail-closed; notice plus
+  the `migrationNotice` field on GET workspace/files; recompute after a run;
+  the co-located tree left untouched.
+- web (vitest): the banner shows, is absent without a notice, and clears on
+  reload.
+
+## Follow-ups
+
+- If P2's seeding already created `ProjectRoot/.scion/settings.yaml` for a
+  project, the legacy seed's settings become a conflict. The target is kept,
+  and the legacy file stays in `.migrated`.
+- The shared-dir tab has no notice; only the workspace listing carries one.
+- Phase 6 (#5839) deletes `pkg/projectfs/migrate`, the projectkeys constant and
+  its allowlist entry.

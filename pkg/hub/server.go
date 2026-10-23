@@ -2380,6 +2380,10 @@ type Server struct {
 	// When non-nil, Telegram/Discord/Teams link services delegate to it.
 	chatLinkStore *ChatLinkStore
 
+	// storageMigrationNotice caches the dry-run plan of the project storage
+	// migration behind the Files tab notice (workspace_migration_notice.go).
+	storageMigrationNotice storageMigrationNoticeCache
+
 	// GE Google credential exchange service (nil = exchange disabled).
 	geExchangeService *GEExchangeService
 	// GE exchange endpoint rate limiter (per-client-IP token bucket).

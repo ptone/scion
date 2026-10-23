@@ -1,0 +1,174 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package hub
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs/migrate"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
+)
+
+// ProjectStorageMigrateExecutor is the one-shot project storage migration
+// (design-v4 §Migration M2 and M3, ptone/scion#5819): on a hub whose
+// workspace backend is shared it moves each project's legacy trees into the
+// project storage layout and then deletes the project's legacy GCS
+// workspace copy. The engine is pkg/projectfs/migrate; this executor only
+// gathers the hub's Layouts, projects and object storage.
+//
+// It supports a dry run (nothing changes; the log is the plan) and is safe
+// to re-run (a second run reports moves=0), so it is in
+// rerunnableMigrations. On a local workspace backend it does nothing. A run
+// with a failed step returns an error, so the migration is marked failed
+// and the Files tab notice stays until a later run succeeds.
+type ProjectStorageMigrateExecutor struct {
+	srv *Server
+}
+
+// Run implements MaintenanceExecutor.
+func (e *ProjectStorageMigrateExecutor) Run(ctx context.Context, w io.Writer, params map[string]string) error {
+	dryRun := params["dryRun"] == "true"
+	if !dryRun {
+		// Whatever the outcome, the notice's cached plan is stale now.
+		defer e.srv.storageMigrationNotice.invalidate()
+	}
+	in, err := e.srv.projectStorageMigrateInput(ctx, true)
+	if err != nil {
+		return err
+	}
+	rep, err := migrate.Run(ctx, in, migrate.Options{DryRun: dryRun})
+	rep.WriteLog(w)
+	if err != nil {
+		return err
+	}
+	if rep.Failed() {
+		return errors.New("one or more projects did not migrate completely; see the log, fix the cause and run again")
+	}
+	return nil
+}
+
+// projectStorageMigrateInput gathers one hub-wide migrate.HubInput: the
+// workspace and shared-dir Layouts the hub serves files from, its global
+// dir, every project, and (withObjects) its object storage for M3.
+func (s *Server) projectStorageMigrateInput(ctx context.Context, withObjects bool) (migrate.HubInput, error) {
+	wsLayout, err := s.workspaceLayout()
+	if err != nil {
+		return migrate.HubInput{}, fmt.Errorf("workspace storage: %w", err)
+	}
+	sdLayout, _, err := s.sharedDirLayout()
+	if err != nil {
+		return migrate.HubInput{}, fmt.Errorf("shared dir storage: %w", err)
+	}
+	in := migrate.HubInput{Workspace: wsLayout, SharedDirs: sdLayout}
+	if !wsLayout.Backend.Shared() && !sdLayout.Backend.Shared() {
+		return in, nil // migrate.Run reports the no-op
+	}
+	if in.GlobalDir, err = config.GetGlobalDir(); err != nil {
+		return migrate.HubInput{}, fmt.Errorf("global dir: %w", err)
+	}
+	if in.Projects, err = s.storageMigrateProjects(ctx); err != nil {
+		return migrate.HubInput{}, err
+	}
+	in.WorkspaceLock = func(workspaceHostPath string) func(func() error) error {
+		return func(section func() error) error {
+			return provision.WithProjectStateLock(ctx, provision.ProjectStateDir(workspaceHostPath), func(context.Context) error {
+				return section()
+			})
+		}
+	}
+	if stor := s.GetStorage(); withObjects && stor != nil {
+		hubID := s.HubID()
+		in.Objects = storageObjects{stor}
+		in.ObjectPrefix = func(projectID string) string {
+			return migrate.LegacyObjectPrefix(hubID, projectID)
+		}
+	}
+	return in, nil
+}
+
+// storageMigrateProjects lists every project as the migration sees it.
+func (s *Server) storageMigrateProjects(ctx context.Context) ([]migrate.ProjectRef, error) {
+	var refs []migrate.ProjectRef
+	cursor := ""
+	for {
+		page, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 500, Cursor: cursor, SkipTotalCount: true})
+		if err != nil {
+			return nil, fmt.Errorf("list projects: %w", err)
+		}
+		for i := range page.Items {
+			p := &page.Items[i]
+			ref := storageMigrateProjectRef(p)
+			ref.LocalBrokerTree = s.localTreeServedByEmbeddedBroker(ctx, p)
+			refs = append(refs, ref)
+		}
+		if page.NextCursor == "" || page.NextCursor == cursor {
+			return refs, nil
+		}
+		cursor = page.NextCursor
+	}
+}
+
+// storageMigrateProjectRef maps a project to the migration's view: it has a
+// project-scoped hub workspace exactly when projectWorkspaceResolved
+// resolves one (not empty-per-agent, and not a linked project in a
+// per-agent git mode).
+func storageMigrateProjectRef(p *store.Project) migrate.ProjectRef {
+	return migrate.ProjectRef{
+		ID:          p.ID,
+		Slug:        p.Slug,
+		NoWorkspace: p.IsEmptyPerAgent() || (p.GitRemote != "" && !p.IsSharedWorkspace()),
+	}
+}
+
+// localTreeServedByEmbeddedBroker reports whether this process's embedded
+// broker serves project from ~/.scion/projects/<slug>, the hub-local tree
+// M2 steps 2 and 4 read (fs-cleanup-arch Q7). Such a tree is only copied
+// from. A provider lookup that fails counts as served: a needless copy-only
+// leaves a tree behind, a wrong rename breaks a broker.
+func (s *Server) localTreeServedByEmbeddedBroker(ctx context.Context, project *store.Project) bool {
+	if !s.hasEmbeddedBroker() {
+		return false
+	}
+	providers, err := s.store.GetProjectProviders(ctx, project.ID)
+	if err != nil {
+		return true
+	}
+	return s.embeddedBrokerUsesSlugProjectDir(project, providers)
+}
+
+// storageObjects adapts storage.Storage to migrate.ObjectStore.
+type storageObjects struct{ s storage.Storage }
+
+func (o storageObjects) HasObjects(ctx context.Context, prefix string) (bool, error) {
+	res, err := o.s.List(ctx, storage.ListOptions{Prefix: prefix, MaxResults: 1})
+	if err != nil {
+		return false, err
+	}
+	return len(res.Objects) > 0, nil
+}
+
+func (o storageObjects) DeletePrefix(ctx context.Context, prefix string) error {
+	return o.s.DeletePrefix(ctx, prefix)
+}
+
+// projectStorageMigrateKey is the maintenance operation key.
+const projectStorageMigrateKey = entadapter.ProjectStorageMigrateKey
