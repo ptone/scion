@@ -111,7 +111,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.thread.list",
 		Domain:      "chat",
-		Description: "List the threads of a chat space. Needs project:read on the space's project",
+		Description: "List the threads of a chat space. Needs project:read on the space's project; each thread carries _capabilities, what the caller may do in it (chat-thread-access)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/spaces/{id}/threads", Method: "GET"},
 		},
@@ -271,13 +271,13 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.conversation.history.topic",
 		Domain:      "chat",
-		Description: "Read the messages of a chat thread. Needs project:read on the thread's project; canPost reports whether the caller's account holds project.chat_post on it",
+		Description: "Read the messages of a chat thread. Decided by chat-thread-access: needs project:read on the thread's project (a caller without it gets the missing-thread answer). _capabilities lists what the caller may do in the thread (post needs project.chat_post on the account, and for a token inbox:write for the project), with reason read_only or token_scope when post is missing; canPost is its post action",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/conversations/{id}/messages", Method: "GET", Variant: "topic"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
-		ResourceResolver: "conversation-project",
+		ResourceResolver: "chat-thread-access",
 		BasePermission:   "project.read",
 		Effects:          []SecurityEffect{EffectReadOne, EffectListScoped},
 		DelegationKind:   DelegationNone,
@@ -312,13 +312,13 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.conversation.send.topic",
 		Domain:      "chat",
-		Description: "Post a message to a chat thread. Needs project:read and project.chat_post on the thread's project; a caller that reads the thread but lacks project.chat_post gets 403 chat_post_denied. A token also needs inbox:write for it; project.chat_post is checked on the token holder's account, and the project:chat_post selector is not needed (it only lets a token delegate roles that include project.chat_post). Agent recipients need agent:message",
+		Description: "Post a message to a chat thread. Decided by chat-thread-access: needs project:read and project.chat_post on the thread's project; a caller without project:read gets the missing-thread answer, and one that reads the thread but may not post gets 403 chat_post_denied with details.reason read_only (no project.chat_post) or token_scope (a token without inbox:write for the project). project.chat_post is checked on a token holder's account, and the project:chat_post selector is not needed (it only lets a token delegate roles that include project.chat_post). Agent recipients need agent:message",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/conversations/{id}/messages", Method: "POST", Variant: "topic"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
-		ResourceResolver: "conversation-project",
+		ResourceResolver: "chat-thread-access",
 		BasePermission:   "inbox.write",
 		Effects:          []SecurityEffect{EffectCreateResource, EffectEmitExternal},
 		DelegationKind:   DelegationNone,
@@ -1014,7 +1014,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.attachment.upload.project",
 		Domain:      "chat",
-		Description: "Upload chat attachments to a space. Needs project:read on the space's project; a token also needs inbox:write for it",
+		Description: "Upload chat attachments to a space. Needs project:read on the space's project, a token also inbox:write for it, and then the post action of chat-thread-access (project.chat_post on the account; 403 chat_post_denied without it)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/attachments", Method: "POST", Variant: "project"},
 		},
@@ -1126,7 +1126,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.conversation.promote",
 		Domain:      "chat",
-		Description: "Promote one of the caller's DMs with an agent into a thread of the agent's space. Needs DM participation, and project:read and project.chat_post on the agent's project (403 chat_post_denied without project.chat_post); a token also needs inbox:write under the DM rule, and project.chat_post is checked on its holder's account (the project:chat_post selector is not needed)",
+		Description: "Promote one of the caller's DMs with an agent into a thread of the agent's space. Needs DM participation, project:read on the agent's project, and the create_thread action of chat-space-access (project.chat_post; 403 chat_post_denied without it); a token also needs inbox:write under the DM rule, and project.chat_post is checked on its holder's account (the project:chat_post selector is not needed)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/conversations/{id}/promote", Method: "POST"},
 		},
