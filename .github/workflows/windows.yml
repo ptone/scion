@@ -246,10 +246,18 @@ jobs:
           done <<< "$(printf '%s\n' "$lines" | awk 'NF > 1')"
           echo "passed tests: $(grep -cE '"Action":"pass","Package":"[^"]*","Test":' test.json)"
 
+      # The full go test -json streams (test.json, and each flagged line's
+      # flagged-N.json), so a failure or a timeout's goroutine dump can be
+      # read without a rerun; the console above shows only the last 200
+      # output lines. Plain go test -json output: test names, results and
+      # test output, no credentials.
       - name: Upload test log
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: windows-test-json
-          path: test.json
+          path: |
+            test.json
+            flagged-*.json
           if-no-files-found: ignore
+          retention-days: 7
