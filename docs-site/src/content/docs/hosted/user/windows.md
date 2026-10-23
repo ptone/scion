@@ -135,7 +135,7 @@ The Windows build runs these commands, and nothing else. The list is an allowlis
 - **Agents over the Hub:** `list`, `ssh`, `ssh-config`, `vscode`, `tunnel`, `tunnel status`
 - **Messages:** `message`, `message channels`, `messages`, `messages read`
 - **Conversations:** `conversation` and `conversation list`, `messages`, `create`, `get`, `get-message`, `set-default`, `participants`, `join`, `leave`, `catch-up`; `conversation group` and its `list`, `get`, `create`, `rename`, `delete`, `add`, `remove`
-- **Project selection:** `use`, and its alias `project use`. The `project` command itself and its other subcommands are not supported, so `scion project` on its own is refused.
+- **Project selection:** `use` and `project use` (`use` is an alias of `project use`). The `project` command itself and its other subcommands are not supported, so `scion project` on its own is refused.
 - **Configuration:** `config` and `config list`, `set`, `get`, `unset`, `validate`, `migrate`, `dir`, `cd-config`, `cd-project`, `schema`
 - **Hub list and login:** `hub`, `hub add`, `hub list`, `hub rename`, `hub remove`, `hub status`, `hub shadow`, `hub auth`, `hub auth login`, `hub auth logout`, `hub auth federation-token`
 - **Hub projects and linking:** `hub projects`, `hub projects info`, `create`, `delete`; `hub link`, `hub unlink`, `hub enable`, `hub disable`
