@@ -25,6 +25,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { TextSelection } from '@milkdown/prose/state';
 
+import { parseCritic } from '../../../utils/critic.js';
 import { SENTINEL_CANDIDATES } from '../../../utils/critic-sentinels.js';
 import { ReviewController } from './controller.js';
 import type { HintKind } from './policy.js';
@@ -292,5 +293,16 @@ describe('sentinel characters in the text (S6)', () => {
     expect(c.view.dom.querySelectorAll('ins.critic-ins').length).toBe(1);
     expect(c.view.dom.textContent).toContain(chars);
     expect(c.flush()).toBe(md);
+  });
+
+  it('keeps a sentinel character typed after opening as text when saving', async () => {
+    const c = await open('abc\n');
+    const v = c.view;
+    const ch = SENTINEL_CANDIDATES[0];
+    v.dispatch(v.state.tr.setSelection(TextSelection.create(v.state.doc, 1)));
+    v.dispatch(v.state.tr.insertText(`${ch}x`, 1, 1));
+    const out = c.flush()!;
+    expect(out).toBe(`{++${ch}x++}abc\n`);
+    expect(parseCritic(out).filter((s) => s.kind !== 'text')).toHaveLength(1);
   });
 });

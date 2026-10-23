@@ -208,13 +208,18 @@ describe('refused edits in suggest mode', () => {
   });
 
   it('an edit whose save would change text outside marks is refused', async () => {
-    // The serializer writes this paragraph differently (backslashes), so an
-    // edit in it cannot be saved as a review in this version.
-    const md = 'a \\# b * c\n';
+    // The serializer writes this paragraph without its backslash, which
+    // would change the text outside marks, so the edit is refused.
+    const md = 'a \\# b c\n';
     const { c, hints } = await open(md);
-    type(c, 'X', posOf(c, 'a'));
-    const out = text(c);
-    expect(onlyMarksChanged(out, md) || hints.includes('generic')).toBe(true);
+    type(c, 'X', posOf(c, 'b c'));
+    expect(hints).toEqual(['generic']);
+    expect(text(c)).toBe(md);
+    // Positive control: the same edit in a paragraph the serializer keeps.
+    const ok = await open('a b c\n');
+    type(ok.c, 'X', posOf(ok.c, 'b c'));
+    expect(ok.hints).toEqual([]);
+    expect(text(ok.c)).toBe('a {++X++}b c\n');
   });
 });
 
