@@ -63,23 +63,42 @@ Files tab. This adds the one-shot maintenance migration
   Both outcomes are reported with the markers read and their IDs. The project
   stays pending, M3 keeps its objects, and the notice names the reason and
   the parameter.
-- **No provisioning lock and no sentinel write** (fs-cleanup-arch,
-  01:08Z, after checking the provisioner). The provisioner reuses an
-  existing `.git`, refuses a non-empty workspace with no marker and no
-  `.git`, and discards its clone if the workspace changed during the clone.
-  With NOREPLACE-only renames and O_EXCL copies, every interleaving with a
-  first-agent provisioning gives one of three results: the intended
-  content, a list of conflicts with nothing overwritten, or the
-  provisioner's own refusal. Residuals:
-  - a git project migrated without `.git` is reported, because its first
-    start will refuse;
-  - a non-git workspace provisioned during the copy shows a partial tree
-    until the copy finishes (documented for operators).
+- **Provisioning lock, no sentinel write** (fs-cleanup-arch 01:22Z, after
+  review round 2 found that on NFS the workspace is always copied,
+  `.git/` first). A first agent start during that copy would take
+  "reusing prior clone" and write the sentinel over a partial checkout.
+  - For a project with legacy content, steps 4/1/2 hold the project's
+    provisioning lock, copy included: `provision.WithProjectStateLock` on
+    `<ProjectRoot>/provision`, which the migration first creates with
+    `shareddirs.EnsureLeaf`.
+  - The lock refuses a missing directory and keeps a heartbeat.
+  - The copy runs under the lock's context: a lost lock stops it at the
+    next entry and leaves the project pending.
+  - Agent starts wait on the migration, and may fail cleanly; the report
+    and docs say so.
+  - Earlier, the arch reversed this ruling twice: lock → no lock (NOREPLACE
+    makes renames safe) → lock (the copy window).
+- **Step 4 include list** (01:22Z): `settings.yaml`, `project-id`,
+  `project-slug`, `templates/` and `harness-configs/` move to
+  `<ProjectRoot>/.scion`, for both the move and the copy-only variants.
+  Broker records and other entries never do.
+  - For a non-git source, whatever stays in `.scion` (and an emptied
+    `.scion` is removed) is excluded from the workspace move, along with
+    every step-4 backup (`.scion.migrated-*`, `.scion/*.migrated-*`).
+  - Those stay in the source's `.migrated` copy: P1a's "not visible to
+    agents" (review round 2, finding 2).
+  - The hub's startup identity pass usually creates `<ProjectRoot>/.scion`
+    first. Step 4 is then a plain merge: an identical project-id is
+    IDENTICAL, and a differing project-slug is a CONFLICT (kept).
+- **Identity files:** step 4 does not write `project-id`/`project-slug`. The
+  hub ensures them (one writer), so that write was removed.
 - **Step 4 gates steps 1 and 2.** If the seed step fails or cannot decide
   (git error, `.git` is a file), nothing moves from that source into
   `workspace/`. git gets `-c safe.directory=<dir>`.
-- **M3** runs only when the project's workspace steps actually ran:
-  workspace Layout shared, nothing skipped, no content left in place.
+- **M3** runs only when the project's workspace steps actually ran
+  (workspace Layout shared, nothing skipped, no content left in place) and
+  the target workspace holds content (NB3): with neither, the object copy
+  may be the only copy.
 - **Symlinks** in a source are never followed or copied; they are listed under
   REFUSED, as are special files. A symlink at any component of either path
   refuses the move. Every component is walked with O_NOFOLLOW openat.
@@ -153,7 +172,17 @@ Files tab. This adds the one-shot maintenance migration
     slug; a pre-rename-keyed seed verifies; the workspace record binds;
   - a shared-dirs/ subtree stays out of workspace/;
   - the broker cloned first, then the migration copies (conflicts listed,
-    nothing overwritten, re-run 0); a git project without `.git` is reported.
+    nothing overwritten, re-run 0); a git project without `.git` is reported;
+  - a hub-seeded target: plain merge under plain, forced-EINVAL (NFS) and
+    EXDEV renames, with no `.scion*` in workspace/; a git seed backup never
+    reaches workspace/;
+  - the moves hold the provisioning lock (a waiting provisioner sees only the
+    complete workspace; `provision/` gets the leaf contract; no lock without
+    legacy content); a lost lock stops before any write;
+  - M3 keeps objects with no workspace content anywhere; mixed markers
+    (the mismatch wins); hard-linked files are not chowned.
+- `pkg/provision`: `TestWithProjectStateLock` (refuses a missing dir),
+  `TestWithProjectStateLock_ExcludesProvisioning`.
 - `pkg/hub` (sharded, lane): seeded and rerunnable; T1 no-op; NFS move and
   idempotence; M3 through `storage.NewLocal`; volume fail-closed; notice plus
   the `migrationNotice` field on GET workspace/files; recompute after a run;
@@ -174,3 +203,4 @@ Files tab. This adds the one-shot maintenance migration
   markers name the deleted ID (fs-cleanup-arch Q8 follow-on (a)).
 - On NFS a migrated tree exists twice (target and `.migrated`) until the
   operator deletes the `.migrated` copy.
+- Hard-linked files in a renamed tree are not chowned (reported).

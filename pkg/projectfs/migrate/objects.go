@@ -112,6 +112,11 @@ func CleanObjects(ctx context.Context, store ObjectStore, prefix string, m2 Proj
 		res.Err = errors.New("the project's workspace was not migrated on this hub; objects kept")
 		return res
 	}
+	if !m2.WorkspacePopulated {
+		res.Outcome = ObjectsKept
+		res.Err = errors.New("no workspace content found on the shared storage for this project; the object copy may be the only copy, so it is kept")
+		return res
+	}
 	if dryRun {
 		res.Outcome = ObjectsWouldDelete
 		return res

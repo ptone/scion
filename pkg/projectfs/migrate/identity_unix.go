@@ -44,9 +44,11 @@ const (
 // maxMarkerBytes caps an identity marker read.
 const maxMarkerBytes = 1 << 20
 
-// Workspace record directories the hub and brokers wrote for a hub-local
-// project tree (config.HubWorkspacesDir, config.BrokerWorkspacesDir), each
-// holding a file named after the slug with the project ID.
+// Workspace record directories under the global dir that older hubs and
+// brokers wrote for a hub-local project tree (pkg/config workspace records
+// as of the phase-2 base: hub-workspaces/ by the hub, broker-workspaces/ by
+// a broker), each holding a file named after the slug with the project ID.
+// Phase 2 retires the writers; the records remain on upgraded hubs.
 var workspaceRecordDirs = []string{"hub-workspaces", "broker-workspaces"}
 
 // treeIdentity reports whether the legacy tree src belongs to projectID.
