@@ -42,6 +42,11 @@ func CloseFd(fd int) error { return nil }
 // FdGID is unsupported on this platform.
 func FdGID(fd int) (uint32, error) { return 0, unsupported("FdGID", "") }
 
+// DeleteProjectRoot is unsupported on this platform.
+func DeleteProjectRoot(hostBase, subPathRoot, projectID string) error {
+	return unsupported("DeleteProjectRoot", projectID)
+}
+
 // DeleteProjectTree is unsupported on this platform.
 func DeleteProjectTree(hostBase, subPathRoot, projectID string) error {
 	return unsupported("DeleteProjectTree", projectID)

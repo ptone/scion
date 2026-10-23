@@ -41,3 +41,9 @@ func (r Resolved) ResolvedHostBase() (string, error) {
 func (r Resolved) VerifyNoSymlinks() (string, error) {
 	return "", fmt.Errorf("verify project directory: %w on this platform", errors.ErrUnsupported)
 }
+
+// EnsureProjectConfigDir always fails with errors.ErrUnsupported on this
+// platform.
+func (l Layout) EnsureProjectConfigDir(projectID string) (string, error) {
+	return "", fmt.Errorf("create project configuration directory: %w on this platform", errors.ErrUnsupported)
+}
