@@ -146,16 +146,17 @@ func withHeader(t testing.TB, token string, h map[string]any) string {
 // when non-empty.
 func signRaw(t testing.TB, alg jose.SignatureAlgorithm, key []byte, kid string, claims any) string {
 	t.Helper()
-	var sk jose.SigningKey
+	opts := (&jose.SignerOptions{}).WithType("JWT")
 	if kid != "" {
-		sk = jose.SigningKey{Algorithm: alg, Key: jose.JSONWebKey{Key: key, KeyID: kid, Algorithm: string(alg)}}
-	} else {
-		sk = jose.SigningKey{Algorithm: alg, Key: key}
+		opts = opts.WithHeader(jose.HeaderKey("kid"), kid)
 	}
-	signer, err := jose.NewSigner(sk, (&jose.SignerOptions{}).WithType("JWT"))
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: alg, Key: key}, opts)
 	require.NoError(t, err)
 	tok, err := jwt.Signed(signer).Claims(claims).Serialize()
 	require.NoError(t, err)
+	if kid != "" {
+		require.Equal(t, kid, jwtHeader(t, tok)["kid"], "signRaw must write the kid header")
+	}
 	return tok
 }
 

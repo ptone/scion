@@ -19,6 +19,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"log/slog"
@@ -124,6 +125,22 @@ func (c *aliasCounter) writesOf(name string) int {
 type aliasCountingStore struct {
 	store.Store
 	c *aliasCounter
+}
+
+// DB and Dialect forward to the wrapped store, so New runs its
+// migrations and startup checks against the real store.
+func (s *aliasCountingStore) DB() *sql.DB {
+	if p, ok := s.Store.(interface{ DB() *sql.DB }); ok {
+		return p.DB()
+	}
+	return nil
+}
+
+func (s *aliasCountingStore) Dialect() string {
+	if p, ok := s.Store.(interface{ Dialect() string }); ok {
+		return p.Dialect()
+	}
+	return ""
 }
 
 func (s *aliasCountingStore) GetSecret(ctx context.Context, key, scope, scopeID string) (*store.Secret, error) {

@@ -70,14 +70,16 @@ func (k ringJWTKeys) sign(claims any, now time.Time) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	key := jose.SigningKey{Algorithm: jose.HS256, Key: active.Bytes()}
+	opts := (&jose.SignerOptions{}).WithType("JWT")
 	if k.ring.Emit() == keyring.EmitVersioned {
-		key.Key = jose.JSONWebKey{Key: active.Bytes(), KeyID: active.ID, Algorithm: string(jose.HS256)}
+		// go-jose writes a JWK's KeyID only for asymmetric keys, so an
+		// HS256 kid goes in as an explicit protected header.
+		opts = opts.WithHeader(jose.HeaderKey("kid"), active.ID)
 	}
 	if k.newSigner == nil {
 		return "", errors.New("no JWT signer configured")
 	}
-	signer, err := k.newSigner(key, (&jose.SignerOptions{}).WithType("JWT"))
+	signer, err := k.newSigner(jose.SigningKey{Algorithm: jose.HS256, Key: active.Bytes()}, opts)
 	if err != nil {
 		return "", fmt.Errorf("creating signer: %w", err)
 	}
