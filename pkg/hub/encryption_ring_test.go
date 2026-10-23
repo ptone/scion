@@ -308,7 +308,7 @@ func TestAudit_UnreadableBackupReportedWithExternalBackend(t *testing.T) {
 }
 
 // Restart with a partially migrated, mixed-format database: v1 (legacy
-// key), v2 under two keys and a plaintext user secret. The managed ring
+// key), v2 under two keys and a plaintext (non-infrastructure) secret. The managed ring
 // holding every key reads all infrastructure rows unchanged across two
 // restarts; the plaintext row is reported, not admitted, and does not gate
 // readiness (it is not an infrastructure backup).
@@ -330,8 +330,11 @@ func TestRestartMixedFormatDatabase(t *testing.T) {
 		seedInfraRow(t, st, key, v, "")
 		want[key] = raw
 	}
-	_, err := st.UpsertSecret(ctx, &store.Secret{ID: "00000000-0000-4000-8000-0000000000aa", Key: "USER_PLAIN",
-		EncryptedValue: "fake-plaintext", Scope: store.ScopeUser, ScopeID: "user-1", SecretType: store.SecretTypeEnvironment})
+	// A hub-scope (not infrastructure) plaintext row: user-scope rows of
+	// users that do not exist are removed by the asynchronous startup
+	// sweep, which would race the second restart's audit.
+	_, err := st.UpsertSecret(ctx, &store.Secret{ID: "00000000-0000-4000-8000-0000000000aa", Key: "HUB_PLAIN",
+		EncryptedValue: "fake-plaintext", Scope: store.ScopeHub, ScopeID: encTestHubID, SecretType: store.SecretTypeEnvironment})
 	require.NoError(t, err)
 
 	ring := ciphertest.Cipher(t, ciphertest.Ring{Active: "k2", IDs: []string{keyring.LegacyID, "k1", "k2"},
@@ -351,7 +354,7 @@ func TestRestartMixedFormatDatabase(t *testing.T) {
 		audit := srv.EncryptionAudit()
 		assert.Empty(t, audit.BackupUnreadable)
 		require.Len(t, audit.Unreadable, 1)
-		assert.Equal(t, "USER_PLAIN", audit.Unreadable[0].Key)
+		assert.Equal(t, "HUB_PLAIN", audit.Unreadable[0].Key)
 		assert.Equal(t, secret.FailurePlaintextNotAdmitted, audit.Unreadable[0].Kind)
 		assert.Equal(t, 1, audit.ByFormat["v1"])
 		assert.Equal(t, 1, audit.ByFormat["plaintext"])
@@ -413,6 +416,16 @@ func TestCiphertextReplacementKeepsIdentities(t *testing.T) {
 		rewritten++
 	}
 	require.GreaterOrEqual(t, rewritten, len(encSigningKeys)+1, "the signing backups and the grant ring were rewrapped")
+	// ReplaceSecretCiphertext itself preserves Version and refs (§6).
+	page, err = st.ScanSecretPayloads(ctx, "", store.MaxSecretPayloadScan)
+	require.NoError(t, err)
+	for _, p := range page {
+		if b, ok := before[p.ID]; ok {
+			assert.Equal(t, b.version, p.Version, "%s version changed by the replacement", p.Key)
+			assert.Equal(t, b.ref, p.SecretRef, "%s ref changed by the replacement", p.Key)
+			assert.True(t, strings.HasPrefix(p.EncryptedValue, "enc:v2:k2:"), "%s is not v2 after the replacement", p.Key)
+		}
+	}
 
 	srv2 := encServer(t, st, newRing, true)
 	keysAfter := signingKeyBytes(srv2)
@@ -429,7 +442,13 @@ func TestCiphertextReplacementKeepsIdentities(t *testing.T) {
 		if !ok {
 			continue
 		}
-		assert.Equal(t, b.version, p.Version, "%s version changed", p.Key)
+		// The restart's backend path re-saves each signing-key backup
+		// (backupSigningKeyToStore after a backend Get, an UpdateSecret that
+		// bumps Version), so only the grant ring keeps its Version here;
+		// refs and the payload format hold for every row.
+		if p.Key == conduitGrantKeySecretName {
+			assert.Equal(t, b.version, p.Version, "%s version changed", p.Key)
+		}
 		assert.Equal(t, b.ref, p.SecretRef, "%s ref changed", p.Key)
 		assert.True(t, strings.HasPrefix(p.EncryptedValue, "enc:v2:k2:"), "%s is not v2 after the restart", p.Key)
 	}
