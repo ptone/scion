@@ -59,6 +59,7 @@ func TestSSHWindowsForm_RefusesEndpointShellSpecialChars(t *testing.T) {
 	hub := twoProjectHub(t, "tok")
 	for _, s := range sshSpecialSuffixes {
 		env, _, _ := newSSHTestEnv(t, t.TempDir(), hub)
+		env.exe = testAbsExe(t)
 		fake := stubVSCode(t)
 		env.endpoint = hub.srv.URL + s
 		before := sshFilesSnapshot(t, env.home)
@@ -76,6 +77,7 @@ func TestSSHWindowsForm_RefusesEndpointShellSpecialChars(t *testing.T) {
 	}
 
 	env, _, _ := newSSHTestEnv(t, t.TempDir(), hub)
+	env.exe = testAbsExe(t)
 	stubVSCode(t)
 	require.NoError(t, sshConfigMain(context.Background(), env, nil, true))
 	require.NoError(t, vscodeMain(context.Background(), env, "a/b-c", vscodeDefaultFolder, false))
@@ -180,6 +182,7 @@ func TestVSCode_ValidatesArgumentsForCmdLauncher(t *testing.T) {
 		for _, dir := range []string{"a&b", "a%b", "a^b", "a(b)", "a!b"} {
 			_, runs := useVSCodeLauncher(t, launcher)
 			env, _, _ := newSSHTestEnv(t, filepath.Join(t.TempDir(), dir), hub)
+			env.exe = testAbsExe(t)
 			require.NoError(t, os.MkdirAll(env.home, 0o700))
 			stubVSCodePreflight(t)
 			err := vscodeMain(context.Background(), env, "a/b-c", vscodeDefaultFolder, false)
@@ -190,6 +193,7 @@ func TestVSCode_ValidatesArgumentsForCmdLauncher(t *testing.T) {
 		}
 		_, runs := useVSCodeLauncher(t, launcher)
 		env, _, _ := newSSHTestEnv(t, t.TempDir(), hub)
+		env.exe = testAbsExe(t)
 		stubVSCodePreflight(t)
 		err := vscodeMain(context.Background(), env, "a/b-c", "/work&x", false)
 		require.Error(t, err)
@@ -198,6 +202,7 @@ func TestVSCode_ValidatesArgumentsForCmdLauncher(t *testing.T) {
 
 		bin, runs := useVSCodeLauncher(t, launcher)
 		env, _, _ = newSSHTestEnv(t, t.TempDir(), hub)
+		env.exe = testAbsExe(t)
 		stubVSCodePreflight(t)
 		require.NoError(t, vscodeMain(context.Background(), env, "a/b-c", vscodeDefaultFolder, false), launcher)
 		require.Len(t, *runs, 1)
@@ -206,6 +211,7 @@ func TestVSCode_ValidatesArgumentsForCmdLauncher(t *testing.T) {
 
 	_, runs := useVSCodeLauncher(t, "code.exe")
 	env, _, _ := newSSHTestEnv(t, filepath.Join(t.TempDir(), "a&b"), hub)
+	env.exe = testAbsExe(t)
 	require.NoError(t, os.MkdirAll(env.home, 0o700))
 	stubVSCodePreflight(t)
 	require.NoError(t, vscodeMain(context.Background(), env, "a/b-c", vscodeDefaultFolder, false))
@@ -239,4 +245,11 @@ func TestCheckVSCodeBatchArgs(t *testing.T) {
 	for _, c := range []string{`"`, "%", "^", "&", "|", "<", ">", "(", ")", "!", "\n", "'", ";", "$", "`"} {
 		require.Error(t, checkVSCodeBatchArgs(`C:\VS Code\bin\code.cmd`, []vscodeArg{{"--path", "/a" + c + "b"}}), "%q", c)
 	}
+}
+
+// testAbsExe returns an absolute scion path on the host OS (sshTestExe is a
+// unix path, which is not absolute on Windows).
+func testAbsExe(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), "scion")
 }
