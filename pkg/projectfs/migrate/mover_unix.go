@@ -177,7 +177,8 @@ func (r Result) Failed() bool {
 }
 
 // Move moves spec.Source into spec.Target by the M2 rule (design-v4
-// §Migration M2): rename when the target is empty or absent; otherwise
+// §Migration M2): rename when the target is absent (an existing empty
+// target is copied into instead, because it may be mounted); otherwise
 // copy the files the target does not have, never overwriting one, report
 // conflicts, and rename the source to <name>.migrated-<ts>. Symlinks in the
 // source are never followed and never copied (reported in Refused). A
@@ -240,6 +241,15 @@ func Move(spec Spec, opts Options) Result {
 		res.Outcome = OutcomeNothing
 		return res
 	}
+	// Rename only into a target that did not exist before this move: an
+	// existing directory, even an empty one, may be the source of a
+	// running agent's bind or subPath mount, which a rename onto it would
+	// leave pointing at the replaced, unlinked inode. A target the move
+	// itself creates (PrepareTarget) exists only for this rename.
+	preexisting, err := entryKind(spec.Target)
+	if err != nil {
+		return fail(fmt.Errorf("inspect target: %w", err))
+	}
 	if spec.PrepareTarget != nil && !opts.DryRun {
 		// The target's owner creates it (mode, default ACL), before any
 		// rename or copy; an existing target is left as it is.
@@ -281,7 +291,7 @@ func Move(spec Spec, opts Options) Result {
 		}
 	}
 
-	if !spec.NoRename && targetEmpty && (!dstParentOK || sameDevice(srcFd, dstParent)) {
+	if !spec.NoRename && preexisting == kindAbsent && targetEmpty && (!dstParentOK || sameDevice(srcFd, dstParent)) {
 		if opts.DryRun {
 			res.Outcome = OutcomeWouldRename
 			return res

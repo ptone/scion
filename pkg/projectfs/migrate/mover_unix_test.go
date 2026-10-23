@@ -139,17 +139,42 @@ func TestMove_RenamesIntoAbsentTarget(t *testing.T) {
 	}
 }
 
-func TestMove_RenamesOntoEmptyTarget(t *testing.T) {
+// An existing empty target may be the source of a running agent's mount:
+// it is copied into, never replaced by a rename.
+func TestMove_CopiesIntoExistingEmptyTarget(t *testing.T) {
 	base := t.TempDir()
 	writeTree(t, base, map[string]string{"old/proj/a.txt": "A", "projects/u1/workspace/": ""})
-
+	var before syscall.Stat_t
+	if err := syscall.Stat(filepath.Join(base, "projects/u1/workspace"), &before); err != nil {
+		t.Fatal(err)
+	}
 	res := Move(spec(base, "old/proj", "projects/u1/workspace"), opts(false))
-	if res.Outcome != OutcomeRenamed || res.Err != nil {
-		t.Fatalf("got %s err=%v, want renamed", res.Outcome, res.Err)
+	if res.Outcome != OutcomeMerged || res.Err != nil || res.Copied != 1 {
+		t.Fatalf("got %s err=%v copied=%d, want merged", res.Outcome, res.Err, res.Copied)
+	}
+	var after syscall.Stat_t
+	if err := syscall.Stat(filepath.Join(base, "projects/u1/workspace"), &after); err != nil {
+		t.Fatal(err)
+	}
+	if before.Ino != after.Ino {
+		t.Fatal("the existing target directory was replaced")
 	}
 	if got := readFile(t, filepath.Join(base, "projects/u1/workspace/a.txt")); got != "A" {
 		t.Fatalf("a.txt = %q", got)
 	}
+}
+
+// A target the move creates itself through PrepareTarget is renamed onto.
+func TestMove_RenamesOntoTargetItPrepared(t *testing.T) {
+	base := t.TempDir()
+	writeTree(t, base, map[string]string{"old/proj/a.txt": "A"})
+	s := spec(base, "old/proj", "projects/u1/workspace")
+	s.PrepareTarget = func() error { return os.MkdirAll(filepath.Join(base, "projects/u1/workspace"), 0o2775) }
+	res := Move(s, opts(false))
+	if res.Outcome != OutcomeRenamed || res.Err != nil {
+		t.Fatalf("got %s err=%v, want renamed", res.Outcome, res.Err)
+	}
+	assertAbsent(t, filepath.Join(base, "old/proj"))
 }
 
 // A10: the target is never overwritten; conflicts are reported; missing
@@ -239,7 +264,7 @@ func TestMove_DryRunChangesNothing(t *testing.T) {
 		copy  int
 	}{
 		{"rename-absent", map[string]string{"old/proj/a.txt": "A"}, OutcomeWouldRename, 0},
-		{"rename-empty", map[string]string{"old/proj/a.txt": "A", "projects/u1/workspace/": ""}, OutcomeWouldRename, 0},
+		{"existing-empty", map[string]string{"old/proj/a.txt": "A", "projects/u1/workspace/": ""}, OutcomeWouldMerge, 1},
 		{"merge", map[string]string{"old/proj/a.txt": "A", "old/proj/d/c.txt": "C", "old/proj/b.txt": "x", "projects/u1/workspace/b.txt": "B"}, OutcomeWouldMerge, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
