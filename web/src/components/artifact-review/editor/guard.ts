@@ -162,7 +162,9 @@ export function textMarkRuns(text: string, plain: (md: string) => string): MarkR
   return out;
 }
 
-const squash = (t: string): string => t.replace(/\s+/g, ' ').trim();
+// Whitespace is not compared: line breaks inside a mark read differently
+// as Markdown text and as the editor's text.
+const squash = (t: string): string => t.replace(/\s+/g, '');
 
 /**
  * Whether the saved text reads back as the document's marks: the same

@@ -17,9 +17,10 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { chooseAlphabet } from '../../../utils/critic-sentinels.js';
-import { loadDoc } from './bridge.js';
+import { loadDoc, saveDoc } from './bridge.js';
 import type { Core } from './create.js';
-import { docMarkKinds, textMarkKinds } from './guard.js';
+import { docMarkKinds, marksReadBack, textMarkKinds } from './guard.js';
+import { projectCritic } from '../../../utils/critic.js';
 import { ReviewSession } from './session.js';
 import { corpus, destroyCores, makeCore } from './__fixtures__/core.js';
 
@@ -88,5 +89,49 @@ describe('corpus round trip', () => {
     expect(
       dom.querySelector('ins.critic-sub-new strong, strong ins.critic-sub-new')
     ).not.toBeNull();
+  });
+
+  it('reads the same mark texts back after saving, except the pinned literal cases', () => {
+    const bad: string[] = [];
+    for (const c of corpus) {
+      const a = chooseAlphabet(c.in)!;
+      const doc = loadDoc(c.in, core.parse, core.schema, a);
+      if (marksReadBack(doc, c.in, core.plain) !== null) bad.push(c.name);
+    }
+    expect(bad).toEqual(LITERAL);
+  });
+
+  // A forced full re-serialization (no source passthrough) keeps the clean
+  // and accept projections of every other corpus document, compared after
+  // both sides go through the same serializer normalization. Where it does
+  // not: an empty substitution (its tokens stay literal and get
+  // backslashes), and the cases where CommonMark sees code that the
+  // critic parser does not (the serializer rewrites the code block).
+  // Phase 1 refuses edits in such blocks; phase 2 patches the source.
+  const RESERIALIZE_DIFFERS = [
+    'substitution both empty',
+    'tilde fence in a block quote stays marks (container blocks are not recognised)',
+    'tilde fence nested in a list item four spaces deep stays marks',
+    'indented code block stays marks',
+    'a heading does not end a run of lines',
+  ];
+
+  it('keeps the projections after a forced full re-serialization, except pinned cases', () => {
+    const norm = (t: string): string => core.serialize(core.parse(t)).replace(/\s+$/, '');
+    const bad: string[] = [];
+    for (const c of corpus) {
+      const a = chooseAlphabet(c.in)!;
+      const out = saveDoc(
+        loadDoc(c.in, core.parse, core.schema, a),
+        core.serialize,
+        core.schema,
+        a
+      );
+      const same = (['clean', 'accept'] as const).every(
+        (m) => norm(projectCritic(out, m)) === norm(projectCritic(c.in, m))
+      );
+      if (!same) bad.push(c.name);
+    }
+    expect(bad).toEqual(RESERIALIZE_DIFFERS);
   });
 });

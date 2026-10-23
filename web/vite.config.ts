@@ -15,6 +15,7 @@
  */
 
 import { defineConfig, type Plugin } from 'vite';
+import { readFileSync } from 'fs';
 import { resolve } from 'path';
 
 /**
@@ -149,20 +150,21 @@ function codemirrorChunk(id: string): string | undefined {
 }
 
 /**
- * Packages only the review editor uses: Milkdown, ProseMirror, and the
- * remark / micromark / unified stack with its small helpers.
+ * Packages placed in named chunks, from bundle-budget.json (manualChunks),
+ * where the bundle check reads the same list: for example the graphical
+ * review editor's Milkdown, ProseMirror and remark stack.
  */
-const REVIEW_EDITOR_PACKAGES =
-    /node_modules\/(@milkdown\/|prosemirror-|remark-|remark\/|micromark|mdast-|unist-|unified\/|vfile|bail\/|trough\/|zwitch\/|devlop\/|ccount\/|longest-streak\/|markdown-table\/|decode-named-character-reference\/|character-entities\/|orderedmap\/|rope-sequence\/|is-plain-obj\/|extend\/)/;
+const PACKAGE_CHUNKS: [string, RegExp][] = Object.entries(
+    (JSON.parse(readFileSync(resolve(__dirname, 'bundle-budget.json'), 'utf-8')) as {
+        manualChunks?: Record<string, string>;
+    }).manualChunks ?? {}
+)
+    .filter(([name]) => !name.startsWith('$'))
+    .map(([name, pattern]) => [name, new RegExp(pattern)]);
 
-/**
- * Whether a module belongs in the lazily loaded review-editor chunk. Only
- * packages are listed: the editor's own modules follow its dynamic import
- * into a chunk of the same name, while modules it shares with the page
- * (critic.ts, artifact-preview.ts) stay with the page.
- */
-function reviewEditorChunk(id: string): boolean {
-    return REVIEW_EDITOR_PACKAGES.test(id);
+/** The named package chunk of a module, or undefined. */
+function packageChunk(id: string): string | undefined {
+    return PACKAGE_CHUNKS.find(([, re]) => re.test(id))?.[0];
 }
 
 export default defineConfig({
@@ -207,14 +209,21 @@ export default defineConfig({
                     if (cmChunk) {
                         return cmChunk;
                     }
+                    // Key names, used by both CodeMirror and the review editor's
+                    // ProseMirror keymaps: its own small chunk, so neither editor
+                    // chunk has to load the other.
+                    if (id.includes('node_modules/w3c-keyname/')) {
+                        return 'w3c-keyname';
+                    }
                     if (id.includes('node_modules/@codemirror') || id.includes('node_modules/@lezer')) {
                         return 'codemirror';
                     }
-                    // The graphical review editor (ptone/scion#5913) and its whole
-                    // Milkdown, ProseMirror and remark stack, loaded only when a
-                    // review opens in the graphical view (review-editor-loader.ts).
-                    if (reviewEditorChunk(id)) {
-                        return 'review-editor';
+                    // Package chunks listed in bundle-budget.json, such as the
+                    // graphical review editor's stack (loaded only when a review
+                    // opens in the graphical view, review-editor-loader.ts).
+                    const named = packageChunk(id);
+                    if (named) {
+                        return named;
                     }
                     if (id.includes('node_modules/marked') || id.includes('node_modules/dompurify')) {
                         return 'markdown';

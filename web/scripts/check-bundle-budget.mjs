@@ -39,7 +39,12 @@
  *   - forbiddenModules:   source modules that must not be in the static
  *                         closure of the given routes, by base name
  *                         (pattern) or by full path (pathPattern, for
- *                         example node_modules/<package>/). Module lists come from
+ *                         example node_modules/<package>/), or as packages
+ *                         of a named chunk in manualChunks (chunkPackages);
+ *   - manualChunks:       the package pattern of each named chunk, which
+ *                         vite.config.ts uses to place those packages;
+ *   - a chunks entry with combined: true limits all chunks of the prefix
+ *                         together (otherwise each one). Module lists come from
  *                         each chunk's source map, looked up next to the chunk
  *                         or under dist/sourcemaps/ (where hidden maps may be
  *                         moved), so the check works with either policy.
@@ -184,6 +189,27 @@ export function checkBudget({ manifest, budget, readFile, listFiles, readMapModu
       failures.push(`no chunk matching ${prefix}*.js`);
       continue;
     }
+    if (limit.combined) {
+      // One limit for all chunks of the prefix: raw bytes and gzip sizes add up.
+      let raw = 0;
+      let gz = 0;
+      for (const file of found) {
+        const buf = readFile(file);
+        if (!buf) {
+          failures.push(`${file}: missing from the build`);
+          continue;
+        }
+        raw += buf.length;
+        gz += gzipSize(buf);
+      }
+      const label = `${prefix}* combined (${found.join(', ')})`;
+      report.push(`${label}: raw ${raw} / ${limit.raw}, gzip ${gz} / ${limit.gzip}`);
+      if (limit.raw !== undefined && raw > limit.raw)
+        failures.push(`${label}: raw ${raw} B exceeds ${limit.raw} B`);
+      if (limit.gzip !== undefined && gz > limit.gzip)
+        failures.push(`${label}: gzip ${gz} B exceeds ${limit.gzip} B`);
+      continue;
+    }
     for (const file of found) {
       const buf = readFile(file);
       if (!buf) {
@@ -214,7 +240,8 @@ export function checkBudget({ manifest, budget, readFile, listFiles, readMapModu
   for (const prefix of budget.isolatedChunks ?? []) {
     const bad = staticImportersOf(manifest, prefix);
     report.push(`isolated chunk ${prefix}*: ${bad.length} static importer(s) outside it`);
-    for (const b of bad) failures.push(`${b.from} imports ${b.to} statically (isolated ${prefix}*)`);
+    for (const b of bad)
+      failures.push(`${b.from} imports ${b.to} statically (isolated ${prefix}*)`);
   }
 
   for (const prefix of budget.requiredChunks ?? []) {
@@ -225,11 +252,22 @@ export function checkBudget({ manifest, budget, readFile, listFiles, readMapModu
 
   for (const rule of budget.forbiddenModules ?? []) {
     const allow = rule.allow ?? [];
-    if (!rule.pattern && !rule.pathPattern) {
+    const chunkPkgs = rule.chunkPackages ? budget.manualChunks?.[rule.chunkPackages] : undefined;
+    if (rule.chunkPackages && !chunkPkgs) {
+      failures.push(
+        `forbiddenModules rule for ${rule.roots}: no manualChunks entry ${rule.chunkPackages}`
+      );
+      continue;
+    }
+    const pathPattern = [rule.pathPattern, chunkPkgs]
+      .filter(Boolean)
+      .map((p) => `(${p})`)
+      .join('|');
+    if (!rule.pattern && !pathPattern) {
       failures.push(`forbiddenModules rule for ${rule.roots}: needs a pattern or a pathPattern`);
       continue;
     }
-    const label = [rule.pattern, rule.pathPattern].filter(Boolean).join(' or path ');
+    const label = [rule.pattern, pathPattern].filter(Boolean).join(' or path ');
     for (const a of allow) {
       if (typeof a.path !== 'string' || /[*?[\]{}]/.test(a.path) || !a.reason) {
         failures.push(
@@ -247,7 +285,7 @@ export function checkBudget({ manifest, budget, readFile, listFiles, readMapModu
           failures.push(`${file}: no source map, cannot check modules in the closure of ${root}`);
           continue;
         }
-        for (const m of forbiddenIn(modules, rule.pattern, allow, rule.pathPattern)) {
+        for (const m of forbiddenIn(modules, rule.pattern, allow, pathPattern || undefined)) {
           bad.add(`${m} (in ${file})`);
         }
       }

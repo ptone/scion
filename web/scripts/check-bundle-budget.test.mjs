@@ -205,7 +205,11 @@ test('a forbiddenModules rule without any pattern fails', () => {
 
 test('staticImportersOf finds static imports of a prefix from outside it, not dynamic ones', () => {
   const m = {
-    'src/client/main.ts': { file: 'assets/main.js', imports: ['_lit.js'], dynamicImports: ['src/x.ts'] },
+    'src/client/main.ts': {
+      file: 'assets/main.js',
+      imports: ['_lit.js'],
+      dynamicImports: ['src/x.ts'],
+    },
     'src/x.ts': { file: 'assets/x-1.js', dynamicImports: ['src/r.ts'] },
     'src/r.ts': { file: 'assets/review-editor-1.js', imports: ['_review-editor-2.js'] },
     '_review-editor-2.js': { file: 'assets/review-editor-2.js' },
@@ -225,6 +229,44 @@ test('an isolated chunk imported statically from outside fails', () => {
   assert.ok(failures.length > 0);
   assert.match(failures[0], /imports assets\/lit-1\.js statically \(isolated assets\/lit-\*\)/);
 });
+
+test('a combined chunk limit adds up every chunk of the prefix', () => {
+  const sizes = { 'assets/codemirror-1.js': 300, 'assets/codemirror-2.js': 300 };
+  const files = ['assets/main.js', 'assets/codemirror-1.js', 'assets/codemirror-2.js'];
+  const each = runChunks2(sizes, files, { raw: 500, gzip: 100000 });
+  assert.deepEqual(each.failures, []);
+  const together = runChunks2(sizes, files, { raw: 500, gzip: 100000, combined: true });
+  assert.equal(together.failures.length, 1);
+  assert.match(together.failures[0], /combined .*raw 600 B exceeds 500 B/);
+});
+
+test('a forbiddenModules rule can name the packages of a manual chunk', () => {
+  const b = budget({
+    manualChunks: { editor: 'node_modules/@milkdown/' },
+    forbiddenModules: [{ roots: ['src/components/pages/login.ts'], chunkPackages: 'editor' }],
+  });
+  const { failures } = run({
+    b,
+    modules: { 'assets/lit-1.js': ['node_modules/@milkdown/core/lib/index.js'] },
+  });
+  assert.equal(failures.length, 1);
+  assert.match(failures[0], /static closure contains node_modules\/@milkdown\/core/);
+  const missing = budget({
+    forbiddenModules: [{ roots: ['src/components/pages/login.ts'], chunkPackages: 'nope' }],
+  });
+  assert.match(run({ b: missing }).failures[0], /no manualChunks entry nope/);
+});
+
+/** Runs the chunk limits alone over files of the given sizes (others 10 bytes). */
+function runChunks2(sizes, files, limit) {
+  return checkBudget({
+    manifest: { 'src/client/main.ts': { file: 'assets/main.js', imports: [] } },
+    budget: { chunks: { 'assets/codemirror-': limit } },
+    readFile: (f) => (files.includes(f) ? Buffer.alloc(sizes[f] ?? 10, 'a') : null),
+    listFiles: () => files,
+    readMapModules: () => [],
+  });
+}
 
 test('passes within budget', () => {
   const { failures } = run();
