@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -1100,7 +1101,25 @@ func (s *Server) initHubManagedProject(project *store.Project) error {
 	if err != nil {
 		return err
 	}
+	if err := s.seedSharedProjectIdentity(project, scionDir); err != nil {
+		return err
+	}
 	return s.seedHubProjectSettings(project, scionDir)
+}
+
+// seedSharedProjectIdentity writes the project-id and project-slug files
+// into a shared-backend project configuration directory; a no-op on the
+// local backend, whose .scion keeps its existing form.
+func (s *Server) seedSharedProjectIdentity(project *store.Project, scionDir string) error {
+	if !s.workspaceBackendShared() {
+		return nil
+	}
+	if err := writeProjectConfigIdentity(scionDir, project); err != nil {
+		s.projectsLogger().Warn("failed to write the project identity files on shared workspace storage",
+			"project_id", project.ID, "error", err)
+		return fmt.Errorf("project configuration: %w", errWorkspaceStorageUnavailable)
+	}
+	return nil
 }
 
 // ensureProjectConfigDir creates the hub-managed project's configuration
@@ -1134,6 +1153,42 @@ func (s *Server) ensureProjectConfigDir(project *store.Project, createWorkspace 
 		return "", fmt.Errorf("failed to create .scion directory: %w", err)
 	}
 	return scionDir, nil
+}
+
+// writeProjectConfigIdentity writes the project-id and project-slug files
+// of a shared-backend project configuration directory (design-v7 §P1a;
+// project-slug: fs-cleanup-arch P3b Q7). The files are written through an
+// os.Root opened on scionDir, so an entry that is a symbolic link leading
+// out of it is refused rather than followed. Mode 0644, like project-id
+// elsewhere.
+func writeProjectConfigIdentity(scionDir string, project *store.Project) error {
+	root, err := os.OpenRoot(scionDir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	if err := writeRootFile(root, projectkeys.ProjectIDFile, project.ID+"\n"); err != nil {
+		return err
+	}
+	return writeProjectSlugFile(root, project.Slug)
+}
+
+// writeProjectSlugFile writes the project-slug file in root.
+func writeProjectSlugFile(root *os.Root, slug string) error {
+	return writeRootFile(root, projectkeys.ProjectSlugFile, slug+"\n")
+}
+
+// writeRootFile replaces name in root with content (mode 0644).
+func writeRootFile(root *os.Root, name, content string) error {
+	f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString(content); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // seedHubProjectSettings seeds the default settings.yaml in scionDir when
@@ -1172,6 +1227,34 @@ func (s *Server) writeHubConnectionSettings(project *store.Project, scionDir str
 	}
 }
 
+// updateSharedProjectSlugFile rewrites <ProjectRoot>/.scion/project-slug
+// with newSlug when that directory exists (it is created at project create
+// or by the storage migration; a rename never creates it). Best-effort:
+// failures are logged.
+func (s *Server) updateSharedProjectSlugFile(project *store.Project, newSlug string) {
+	layout, err := s.workspaceLayout()
+	if err != nil {
+		return
+	}
+	cfg, err := layout.ProjectConfig(project.ID)
+	if err != nil {
+		return
+	}
+	root, err := cfg.Open(false)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			s.projectsLogger().Warn("could not open the project configuration to update project-slug",
+				"project_id", project.ID, "error", err)
+		}
+		return
+	}
+	defer func() { _ = root.Close() }()
+	if err := writeProjectSlugFile(root, newSlug); err != nil {
+		s.projectsLogger().Warn("failed to update project-slug in the project configuration",
+			"project_id", project.ID, "error", err)
+	}
+}
+
 // cloneSharedWorkspaceProject prepares a shared-workspace git project.
 //
 // On the local workspace backend it performs the host-side git clone into
@@ -1188,6 +1271,9 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 	if s.workspaceBackendShared() {
 		scionDir, err := s.ensureProjectConfigDir(project, false)
 		if err != nil {
+			return err
+		}
+		if err := s.seedSharedProjectIdentity(project, scionDir); err != nil {
 			return err
 		}
 		return s.seedHubProjectSettings(project, scionDir)
@@ -3199,11 +3285,17 @@ func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project,
 	// source of authority; project-scoped RoleBindings are scope-keyed by
 	// project ID (not slug), so no rename is needed.
 
+	// On a shared backend the project tree is keyed by project ID and
+	// nothing moves; only the project-slug file of its project
+	// configuration is updated, when that directory exists (best-effort).
+	if s.workspaceBackendShared() {
+		s.updateSharedProjectSlugFile(project, newSlug)
+	}
+
 	// Migrate the hub-managed project workspace directory (best-effort).
 	// Only the local workspace backend keys it by slug
-	// (~/.scion/projects/<slug>); on a shared backend the project tree is
-	// keyed by project ID and nothing moves. Derive newPath from oldPath's
-	// parent so the renamed workspace stays alongside the original.
+	// (~/.scion/projects/<slug>). Derive newPath from oldPath's parent so
+	// the renamed workspace stays alongside the original.
 	if !s.workspaceBackendShared() {
 		if oldPath, err := localProjectPath(oldSlug); err == nil {
 			if _, statErr := os.Stat(oldPath); statErr == nil {
