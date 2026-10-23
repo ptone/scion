@@ -23,8 +23,7 @@ import (
 )
 
 // TestEnsureSSHDirOnlyUsesTheHandleWalk: ensureSSHDir makes no path-based
-// open or location decision of its own (review r1 finding 1, brief
-// addendum (b) as revised by the security lead). Its body may call only
+// open or location decision of its own. Its body may call only
 // privatefs.OpenTree (the anchor, home), Tree.MkdirAllEach (on Windows the
 // handle-relative walk, guarded by privatefs's TestTreeWalkIsHandleRelative;
 // on unix os.MkdirAll, as before), Tree.Close and privatefs.ForMode.

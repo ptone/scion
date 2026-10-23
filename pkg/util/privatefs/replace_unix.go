@@ -34,7 +34,7 @@ import (
 // (tempPrefix + leaf + "-<random>").
 //
 // This is the POSIX sequence scion's ssh-config writer used before this
-// package, with one tightening (security checklist addendum A1): an
+// package, with one tightening (the one-name rule): an
 // existing regular target with more than one name (Nlink != 1, read on the
 // opened file) is refused with ErrHardLinked, never replaced.
 func ReplaceFollowing(path string, data []byte, newMode fs.FileMode, tempPrefix string) error {
@@ -75,7 +75,7 @@ func ReplaceFollowing(path string, data []byte, newMode fs.FileMode, tempPrefix 
 
 // CheckReplaceTarget runs the checks ReplaceFollowing makes before it
 // writes, and writes nothing: the leaf is resolved if it is a symlink, and
-// an existing regular target must have one name (addendum A1). Callers
+// an existing regular target must have one name (the one-name rule). Callers
 // writing several files in one operation run it on each first, so a
 // refusal leaves no side effect. A target whose directory does not exist
 // yet passes (nothing to check).
@@ -115,7 +115,7 @@ func replaceTarget(path string, newMode fs.FileMode) (string, fs.FileMode, error
 }
 
 // checkSingleLinkInfo refuses a regular file with more than one name
-// (addendum A1). Other file types are left to the caller (a directory has
+// (the one-name rule). Other file types are left to the caller (a directory has
 // several links by nature). A link count that cannot be read is refused.
 func checkSingleLinkInfo(name string, fi fs.FileInfo) error {
 	if !fi.Mode().IsRegular() {

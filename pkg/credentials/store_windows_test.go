@@ -34,7 +34,7 @@ func assertPrivateFile(t *testing.T, path string) {
 
 var testToken = &TokenResponse{AccessToken: "tok", ExpiresIn: time.Hour}
 
-// Row C1r, decision D3: a credentials file other users can read is refused
+// A credentials file other users can read is refused
 // on load, with the delete-and-log-in-again hint, and is left as it is.
 // Control: the same file loads while it is private.
 func TestLoad_RefusesUsersReadableCredentials(t *testing.T) {
@@ -64,7 +64,7 @@ func TestLoad_RefusesUsersReadableCredentials(t *testing.T) {
 	}
 }
 
-// Row C1r: a symlinked credentials file is refused, never followed.
+// A symlinked credentials file is refused, never followed.
 // Control: the target itself loads when it is the credentials file.
 func TestLoad_RefusesSymlinkedCredentials(t *testing.T) {
 	path := useTempCredentials(t)
@@ -80,7 +80,7 @@ func TestLoad_RefusesSymlinkedCredentials(t *testing.T) {
 	}
 }
 
-// Row C1: saving creates the file with the owner-only ACL, in a directory
+// Saving creates the file with the owner-only ACL, in a directory
 // created private, and replaces an existing too-open file with a private
 // one (atomic replace: an implicit repair).
 func TestStore_WritesPrivateAndReplacesTooOpenFile(t *testing.T) {
@@ -107,7 +107,7 @@ func TestStore_WritesPrivateAndReplacesTooOpenFile(t *testing.T) {
 	}
 }
 
-// Design §7 for row C1r: the read paths (GetAccessToken, IsAuthenticated,
+// The read paths (GetAccessToken, IsAuthenticated,
 // Load) report "not logged in" for a refused credentials file, so the
 // refusal with its fix hint is printed on stderr, once per process.
 // Control: a private file prints nothing.
@@ -148,7 +148,7 @@ func TestReadPaths_PrintRefusalOnceForUsersReadableCredentials(t *testing.T) {
 	}
 }
 
-// Row C1r, decision D3: a login over a refused credentials file warns that
+// A login over a refused credentials file warns that
 // the file is replaced and other hubs' logins must be repeated.
 // Control: a login over a private file warns nothing.
 func TestStore_WarnsWhenReplacingRefusedCredentials(t *testing.T) {

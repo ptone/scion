@@ -34,8 +34,8 @@ import (
 // component is never followed. Components above base (such as ~/.scion)
 // are created with MkdirAll when missing and not inspected.
 //
-// This Lstat-per-component walk is the unix implementation of design §3.5
-// C15; privatedir_windows.go walks handles with privatefs.Tree.MkdirAll.
+// This Lstat-per-component walk is the unix implementation;
+// privatedir_windows.go walks handles with privatefs.Tree.MkdirAll.
 func ensurePrivateDir(base, dir string) (*privatefs.Tree, error) {
 	rel, err := privateRel(base, dir)
 	if err != nil {

@@ -40,7 +40,7 @@ func assertPrivateDir(t *testing.T, path string) {
 	assert.Equal(t, os.FileMode(0o700), fi.Mode().Perm(), path)
 }
 
-// C13 refuse + control: a cache entry or profile others can read (mode
+// Refuse + control: a cache entry or profile others can read (mode
 // 0644) is refused on read; at 0600 it is read.
 func TestReadRefusesOpenModes(t *testing.T) {
 	home := t.TempDir()

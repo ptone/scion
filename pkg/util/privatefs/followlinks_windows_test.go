@@ -16,8 +16,8 @@
 
 package privatefs
 
-// Phase 3b additions: TreeOptions.FollowLinks, the addendum A1 link-count
-// refusal and ReplaceFollowing (rule I). Each refusal has its positive
+// TreeOptions.FollowLinks, the one-name rule's link-count refusal and
+// ReplaceFollowing (the follow-then-verify rule). Each refusal has its positive
 // control in the same test.
 
 import (
@@ -104,12 +104,13 @@ func grantName(grant string) string {
 	}
 }
 
-// FollowLinks, refusal side (review r2 finding 1, addendum (d)): an
+// FollowLinks, refusal side: an
 // EXISTING directory component another principal can write to (Modify) or
 // delete children from (DELETE_CHILD only) is refused with ErrNotPrivate,
 // whether it is reached through a junction or is a plain directory, and
 // nothing is created there. Controls: the same layout once the grant is
-// removed, and a component owned by Administrators (the rule I owner set).
+// removed, and a component owned by Administrators (the follow-then-verify
+// owner set).
 func TestTree_FollowLinksRefusesForeignWritableComponent(t *testing.T) {
 	for _, grant := range []string{"(OI)(CI)(M)", "(DC)"} {
 		for _, viaLink := range []bool{true, false} {
@@ -153,7 +154,7 @@ func TestTree_FollowLinksRefusesForeignWritableComponent(t *testing.T) {
 	}
 }
 
-// Security-lead ruling (review r2, "accept as residual + warn"): when a
+// Accepted residual, warned: when a
 // followed link's target sits in a parent directory another principal can
 // write to (Modify) or delete children from (DELETE_CHILD), Warn gets ONE
 // message naming that directory and the SID, and the operation still
@@ -228,7 +229,7 @@ func TestTree_FollowLinksLeafFileStillRefused(t *testing.T) {
 	_ = f.Close()
 }
 
-// Addendum A1: an existing leaf opened for writing with more than one name
+// The one-name rule: an existing leaf opened for writing with more than one name
 // is refused, never repaired: OpenPrivate for writing and a non-exclusive
 // Create. Control: an ordinary leaf with the same DACL passes both, and a
 // read-only OpenPrivate of the linked file (no write) is not affected.
@@ -297,7 +298,7 @@ func readString(t *testing.T, path string) string {
 	return string(b)
 }
 
-// Rule I: a new file is private; a user-owned too-open file is replaced by
+// The follow-then-verify rule: a new file is private; a user-owned too-open file is replaced by
 // a private one (the old descriptor is not copied).
 func TestReplaceFollowing_NewPrivateAndRepairsOwned(t *testing.T) {
 	dir := replaceDir(t)
@@ -320,7 +321,7 @@ func TestReplaceFollowing_NewPrivateAndRepairsOwned(t *testing.T) {
 	}
 }
 
-// Rule I: a symlinked leaf is followed; the target is replaced (private)
+// The follow-then-verify rule: a symlinked leaf is followed; the target is replaced (private)
 // and the link is kept.
 func TestReplaceFollowing_FollowsSymlinkLeaf(t *testing.T) {
 	dir := replaceDir(t)
@@ -342,7 +343,7 @@ func TestReplaceFollowing_FollowsSymlinkLeaf(t *testing.T) {
 	assertPrivateSD(t, real)
 }
 
-// Rule I refuse + control: a parent directory another principal can write
+// Follow-then-verify refuse + control: a parent directory another principal can write
 // to is refused (nothing written); without the foreign ACE it works.
 func TestReplaceFollowing_RefusesForeignWritableParent(t *testing.T) {
 	dir := replaceDir(t)
@@ -384,7 +385,7 @@ func fakeAdminsGroupSID(t *testing.T) string {
 	return sid.String()
 }
 
-// Rule I refuse + control: a target owned by another principal (a local
+// Follow-then-verify refuse + control: a target owned by another principal (a local
 // group named like Administrators, but not S-1-5-32-544) is refused and
 // left untouched, naming its SID; a user-owned target with the same DACL
 // is replaced.
@@ -417,7 +418,7 @@ func TestReplaceFollowing_RefusesForeignOwnedTarget(t *testing.T) {
 	assertPrivateSD(t, owned)
 }
 
-// Security-lead ruling (review r1 finding 4): for the integrity-only rule,
+// For the integrity-only rule,
 // SYSTEM (S-1-5-18) and Administrators (S-1-5-32-544) are accepted as
 // owners of the target and of its parent directory, by SID. A too-open
 // target they own is replaced by a private one. Refusal side: a parent
@@ -460,7 +461,7 @@ func TestReplaceFollowing_AcceptsSystemAndAdminsOwners(t *testing.T) {
 	}
 }
 
-// Addendum A1 on the relaxed path: a hard-linked target is refused (not
+// The one-name rule on the relaxed path: a hard-linked target is refused (not
 // replaced); an ordinary target with the same DACL is replaced.
 func TestReplaceFollowing_RefusesHardLinkedTarget(t *testing.T) {
 	dir := replaceDir(t)
@@ -502,7 +503,7 @@ func dirListing(t *testing.T, dir string) map[string]string {
 	return out
 }
 
-// CheckReplaceTarget (review r3 finding 1) is ReplaceFollowing's checks
+// CheckReplaceTarget is ReplaceFollowing's checks
 // with no write: a hard-linked target, a foreign-owned target and a
 // foreign-writable parent are refused and nothing in the directory
 // changes; controls: an ordinary target and a missing target pass, still

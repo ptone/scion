@@ -101,9 +101,8 @@ func tempByName(t *testing.T, src string) []string {
 // TestStateGuard_NoTempFileByName fails if state.go renames or removes a
 // temporary file by name. Temporary records and lock files must be renamed
 // into place, and removed on failure, through their open handle, so a file
-// swapped in under the temporary name never becomes the record or the lock
-// (review r2 F1, r3 F1/F3, r4 F1). The behavioural regression test for the
-// pattern is filelock's TestLockFile_ShareDeleteRename and privatefs's
+// swapped in under the temporary name never becomes the record or the
+// lock. The behavioural regression test for the pattern is filelock's TestLockFile_ShareDeleteRename and privatefs's
 // TestRenameOpen_SwappedTempNeverLands / TestRemoveOpen_DeletesHandleNotName
 // on Windows.
 func TestStateGuard_NoTempFileByName(t *testing.T) {

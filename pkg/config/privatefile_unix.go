@@ -22,8 +22,9 @@ import (
 	"syscall"
 )
 
-// The unix half of the Windows private-file split (design win-cli §3.5,
-// rows C9, C10, C11). Each function is the POSIX code these sites ran
+// The unix half of the Windows private-file split (the legacy migration
+// owner check, mkdirLikeLegacyRoot and the settings backups). Each
+// function is the POSIX code these sites ran
 // before the split, unchanged; privatefile_windows.go decides the same
 // questions on handles through privatefs.
 

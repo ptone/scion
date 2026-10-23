@@ -19,7 +19,7 @@ package credentials
 import "os"
 
 // readCredentialsFile reads the credentials file. On unix the load does no
-// privacy check, as before (design row C1r: unix unchanged); the file is
+// privacy check; the file is
 // written 0600.
 func readCredentialsFile(path string) ([]byte, error) {
 	return os.ReadFile(path)

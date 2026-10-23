@@ -21,7 +21,7 @@ import (
 )
 
 // ensurePrivateDir creates dir, which must be base or below it, and returns
-// the private tree anchored at base (design §3.5 C15). base is
+// the private tree anchored at base. base is
 // ~/.scion/hub-profiles. It and any missing parent are created with the
 // private directory descriptor (TreeOptions.CreateAnchor); a link at or
 // above base is followed, as for any tree anchor. Below base every

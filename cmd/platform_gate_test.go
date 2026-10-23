@@ -161,7 +161,7 @@ func TestWindowsGate_RefusesServerAndBroker(t *testing.T) {
 }
 
 // TestWindowsGate_AllowsUseOnlyUnderProject: 'scion use' and 'scion project
-// use' (with the parent's aliases) run on Windows (ptone's decision D2),
+// use' (with the parent's aliases) run on Windows,
 // while the parent 'project' stays gated, and so do its other subcommands.
 // The refusals are the control that the gate is applied.
 func TestWindowsGate_AllowsUseOnlyUnderProject(t *testing.T) {

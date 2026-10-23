@@ -25,7 +25,7 @@ import (
 // readCredentialsFile reads the credentials file through privatefs, anchored
 // at its directory (normally ~/.scion): the file must not be a reparse point,
 // and its ACL is verified on the open handle. A file other users can read
-// is REFUSED, not repaired (design row C1r, decision D3): the user deletes
+// is REFUSED, not repaired: the user deletes
 // it and logs in again, and the next save creates it with an owner-only
 // ACL. Its contents are never read, so a login (Store) replaces it with a
 // file holding only the new hub: logins to other hubs must be repeated,

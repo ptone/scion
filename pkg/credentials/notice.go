@@ -30,7 +30,7 @@ import (
 // printed here: on stderr, never stdout (JSON and other machine-read output
 // stay clean), and once per process. Only a privacy refusal is printed
 // (privatefs.ErrNotPrivate, Windows only: the unix load does no privacy
-// check, design row C1r); other load errors keep their silent behaviour.
+// check); other load errors keep their silent behaviour.
 // Both variables are guarded by mu.
 var (
 	// noticeOut receives the notices; tests replace it.
@@ -52,7 +52,7 @@ func reportRefusal(err error) {
 
 // warnReplacingRefused tells the user that a login is replacing a refused
 // credentials file, whose other logins are lost (its contents are never
-// read, design decision D3). The caller holds mu.
+// read). The caller holds mu.
 func warnReplacingRefused(path string, err error) {
 	if !errors.Is(err, privatefs.ErrNotPrivate) {
 		return

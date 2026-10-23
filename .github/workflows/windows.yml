@@ -12,15 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Native Windows build and test (ptone/scion#5514, design §5.2).
+# Native Windows build and test.
 #
 # WHY THIS EXISTS. The Windows private-file code (pkg/util/privatefs,
 # pathcanon, filelock and their callers) is new Windows code: owner-only
 # DACLs set at creation, DACL checks on open handles, reparse-point
 # refusal. None of it runs on Linux, so only a real Windows runner can show
-# it works. The security merge gate (checklist §5) requires these tests to
-# run here, with a negative case per alias form and junction and symlink
-# cases that FAIL, never skip, when the runner cannot create links.
+# it works. These tests run here, with a negative case per alias form, and
+# junction and symlink cases that FAIL, never skip, when the runner cannot
+# create links.
 #
 # WHAT MAKES IT TRUSTWORTHY.
 #   - The capability step proves, before any test runs, that this runner
@@ -42,8 +42,8 @@
 # records. Making it required is a separate, later decision.
 #
 # The Build step builds and vets the allowlisted packages and builds
-# ./cmd/scion: since Phase 3 every client-reachable site compiles for
-# Windows on privatefs/pathcanon/filelock.
+# ./cmd/scion: every client-reachable site compiles for Windows on
+# privatefs/pathcanon/filelock.
 
 name: Windows
 
@@ -101,9 +101,9 @@ jobs:
           printf '%s\n' "$pkgs"
 
       # Runner capabilities. Every check FAILS the job; none is skippable.
-      # A symlink or junction test that cannot create its link must fail
-      # (security checklist §5, §7.4), and so must the job that would make
-      # it fail for a configuration reason.
+      # A symlink or junction test that cannot create its link must fail,
+      # and so must the job that would make it fail for a configuration
+      # reason.
       - name: Runner capabilities (fail, never skip)
         shell: pwsh
         run: |
@@ -180,7 +180,7 @@ jobs:
           pkgs=$(sed -e 's/\r$//' -e 's/#.*//' -e 's/[[:space:]]*$//' -e '/^[[:space:]]*$/d' .github/windows-test-packages.txt | awk '!seen[$1]++ {print $1}')
           go build $pkgs
           go vet $pkgs
-          # The Windows CLI itself (Phase 3: every client-reachable 4a
+          # The Windows CLI itself (every client-reachable private-file
           # site compiles for Windows).
           go build -o scion.exe ./cmd/scion
 

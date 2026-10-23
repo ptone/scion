@@ -244,7 +244,7 @@ func prepareSSH(ctx context.Context, env *sshCommandEnv, ref string, remote []st
 	if err != nil {
 		return nil, cleanup, tunnelclient.Errorf(tunnelclient.ExitError, "temporary directory %s %v", dir, err)
 	}
-	// The shared atomic writer (design §3.7 delta 3): a new private file in
+	// The shared atomic writer: a new private file in
 	// the fresh temporary directory.
 	if err := writeFileAtomic(knownHosts, []byte(host+" "+norm+"\n"), sshFileMode); err != nil {
 		return nil, cleanup, tunnelclient.Errorf(tunnelclient.ExitError, "writing known hosts: %v", err)
@@ -284,7 +284,7 @@ func prepareSSH(ctx context.Context, env *sshCommandEnv, ref string, remote []st
 // Win32-OpenSSH and Git for Windows' ssh accept C:/ paths) and wrapped in
 // double quotes when it has a space, which ssh's option parser reads as
 // one word. Only a control character, '%' or '"' is refused there, and the
-// hint names TMP and TEMP. (Review r1 finding 2.)
+// hint names TMP and TEMP.
 func sshKnownHostsOptionValue(path string) (string, error) {
 	if !sshQuoteForWindows {
 		if hasSpaceOrControl(path) || strings.Contains(path, "%") {

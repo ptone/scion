@@ -18,7 +18,7 @@ package wintest
 
 import "testing"
 
-// Helpers for the Phase 3 site tests (design §4.2): each refusing site
+// Helpers for the Windows private-file site tests: each refusing site
 // test makes a file too open, and each writing site test checks the
 // result is private.
 

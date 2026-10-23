@@ -17,11 +17,10 @@
 package cmd
 
 // Windows file-level tests of the ssh-config, ssh and vscode write paths
-// (design §3.5 I1-I4, §4.2; security lead ruling I; checklist addendum
-// A1). They drive the real command code (writeSSHHubPlan,
-// regenerateSSHHubFiles, updateVSCodeFiles, the ssh known-hosts writer)
-// into a temporary home. Every refusal has its positive control in the
-// same test (security checklist §5).
+// (the follow-then-verify and one-name rules). They drive the real command
+// code (writeSSHHubPlan, regenerateSSHHubFiles, updateVSCodeFiles, the ssh
+// known-hosts writer) into a temporary home. Every refusal has its
+// positive control in the same test.
 
 import (
 	"context"
@@ -91,7 +90,7 @@ func sshPlan(p sshPaths) *sshRegenResult {
 	}
 }
 
-// I1-I3: a fresh ssh-config run creates ~/.ssh, ~/.ssh/config.d and
+// A fresh ssh-config run creates ~/.ssh, ~/.ssh/config.d and
 // ~/.scion/ssh private, and writes ~/.ssh/config, the include file and the
 // known-hosts file with the private descriptor. The generated ProxyCommand
 // uses the Windows quoting for a scion path with a space (sshCmdQuote).
@@ -118,7 +117,7 @@ func TestSSHWrite_NewFilePrivate(t *testing.T) {
 	assert.True(t, wintest.ReadSD(t, plain).HasAllowACE(wintest.SIDAdministrators), "control: an inheriting file differs from the private descriptor")
 }
 
-// I1/I2, rule I: ~/.ssh is a dotfile-manager link (junction, absolute and
+// The follow-then-verify rule: ~/.ssh is a dotfile-manager link (junction, absolute and
 // relative symlink) to a directory elsewhere, and ~/.ssh/config is itself
 // a symlink to a file the user owns but left readable and writable by
 // Users. The links are followed and kept; config.d is created private in
@@ -160,7 +159,7 @@ func TestSSHWrite_FollowsUserSymlinkAndRepairsOpenTarget(t *testing.T) {
 	}
 }
 
-// Rule I refuse + control: when ~/.ssh grants Users modify, writing the
+// Follow-then-verify refuse + control: when ~/.ssh grants Users modify, writing the
 // include file and ~/.ssh/config is refused (another user could swap them
 // after us) and nothing is written; once the foreign ACE is gone the same
 // write succeeds.
@@ -198,10 +197,10 @@ func fakeAdminsGroupSID(t *testing.T) string {
 	return sid.String()
 }
 
-// Rule I refuse + control: a ~/.ssh/config owned by another principal (a
-// local group named like Administrators, not S-1-5-32-544) is refused and
-// left untouched, naming the owner. Accepted (security-lead ruling on
-// review r1 finding 4): the same config owned by SYSTEM or by
+// Follow-then-verify refuse + control: a ~/.ssh/config owned by another
+// principal (a local group named like Administrators, not S-1-5-32-544) is
+// refused and left untouched, naming the owner. Accepted: the same config
+// owned by SYSTEM or by
 // Administrators, and owned by the user (the control); each is replaced by
 // a private file.
 func TestSSHWrite_RefusesForeignOwnedTarget(t *testing.T) {
@@ -234,7 +233,7 @@ func TestSSHWrite_RefusesForeignOwnedTarget(t *testing.T) {
 	}
 }
 
-// Addendum A1 on the relaxed ssh path: a ~/.ssh/config with a second name
+// The one-name rule on the relaxed ssh path: a ~/.ssh/config with a second name
 // (a hard link) is refused and left untouched; an ordinary config with the
 // same DACL is rewritten.
 func TestSSHWrite_RefusesHardLinkedTarget(t *testing.T) {
@@ -255,7 +254,7 @@ func TestSSHWrite_RefusesHardLinkedTarget(t *testing.T) {
 	assert.True(t, changed)
 }
 
-// I3 (cmd/ssh.go): scion ssh's per-run known-hosts file goes through the
+// cmd/ssh.go: scion ssh's per-run known-hosts file goes through the
 // shared writer and is private. Control: the refusal side of the same
 // writer is covered by the TestSSHWrite_Refuses* tests.
 func TestSSHKnownHostsTempFilePrivate(t *testing.T) {
@@ -265,8 +264,8 @@ func TestSSHKnownHostsTempFilePrivate(t *testing.T) {
 	assertPrivateSD(t, kh)
 }
 
-// I3: scion vscode's ssh_config, known_hosts and settings.json are written
-// private through the shared writer, under the directory lock (I4), with
+// Scion vscode's ssh_config, known_hosts and settings.json are written
+// private through the shared writer, under the directory lock, with
 // the Windows ProxyCommand quoting. A second run rewrites them in place.
 func TestVSCodeFiles_PrivateOnWindows(t *testing.T) {
 	home := privateHome(t)
@@ -289,7 +288,7 @@ func TestVSCodeFiles_PrivateOnWindows(t *testing.T) {
 	assert.Equal(t, "https://h.example", vscodeBlockHub(blocks["scion.h.p.a2"]), "the quoted --hub reads back")
 }
 
-// Review r1 finding 1 on Windows: ~/.ssh and ~/.scion linked (junction or
+// On Windows, ~/.ssh and ~/.scion linked (junction or
 // symlink) to directories OUTSIDE home are followed: ssh-config and vscode
 // write private files into the link targets, and the links are kept.
 // Control: the same writers in a home without links.
@@ -341,7 +340,7 @@ func TestSSHAndVSCodeFollowLinksOutsideHome(t *testing.T) {
 	assertPrivateSD(t, filepath.Join(plain, ".ssh", "config.d", "scion-hub"))
 }
 
-// Review r1 finding 2: scion ssh works when %TMP%/%TEMP% has a space (an
+// Scion ssh works when %TMP%/%TEMP% has a space (an
 // account name like "John Smith"). The per-run known_hosts file is created
 // private there and passed as UserKnownHostsFile="C:/.../known_hosts"
 // (quoted, forward slashes); GlobalKnownHostsFile is /dev/null, which

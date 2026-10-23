@@ -16,9 +16,8 @@
 
 package cmd
 
-// Security-lead conditions on the I1 correction (review r1 finding 1;
-// brief addendum (a)-(d)): ensureSSHDir makes no location decision, so
-// rule I on the resolved handles carries the property alone. These tests
+// ensureSSHDir makes no location decision, so the follow-then-verify rule
+// on the resolved handles carries the property alone. These tests
 // pin that down for every caller of ensureSSHDir, for the name validation
 // on its path, and for the link-count rule on every ssh/vscode write leaf.
 // Each refusal has its positive control in the same test.
@@ -108,12 +107,12 @@ func vscodeUpdateFor(t *testing.T, agent string) vscodeUpdate {
 		key: mustNormKey(t, testSSHPublicKey(t)), endpoint: tunnelclient.NormalizeEndpoint("https://h.example")}
 }
 
-// Addendum (a) and (d), review r2 finding 1: for EVERY caller of
+// For EVERY caller of
 // ensureSSHDir, a link (junction) at ~/.ssh, ~/.scion or a directory below
 // them whose target another principal can write to (Modify) or delete
 // children from (DELETE_CHILD only) is followed and then REFUSED by the
 // FollowLinks component check, as a returned ErrNotPrivate. A refusal
-// leaves no side effect (security lead): home and the target are
+// leaves no side effect: home and the target are
 // unchanged, no file AND no directory created (not even the lock file or
 // a directory for another path of the same call). Control: once the
 // foreign right is removed, the same call succeeds and its leaves are
@@ -179,12 +178,12 @@ func TestSSHDirCallers_LinkTargetFailingRuleIRefused(t *testing.T) {
 	}
 }
 
-// Addendum (d), foreign-owned target: ~/.ssh/config is a link to a file
+// Foreign-owned target: ~/.ssh/config is a link to a file
 // owned by another principal (a group named like Administrators, not
 // S-1-5-32-544) in a directory the user controls: refused, untouched, and
 // with no side effect: home and the link's directory are unchanged, so
-// writeSSHHubPlan wrote neither the known-hosts nor the include file first
-// (review r3). Control: the same link to a user-owned file is followed and
+// writeSSHHubPlan wrote neither the known-hosts nor the include file
+// first. Control: the same link to a user-owned file is followed and
 // the file replaced by a private one.
 func TestSSHWrite_LinkToForeignOwnedTargetRefused(t *testing.T) {
 	calls := map[string]func(p sshPaths) error{
@@ -219,7 +218,7 @@ func TestSSHWrite_LinkToForeignOwnedTargetRefused(t *testing.T) {
 	}
 }
 
-// Addendum (b): ValidName is load-bearing on the ensureSSHDir path. '..',
+// ValidName is load-bearing on the ensureSSHDir path. '..',
 // absolute and drive forms, alternate data streams, trailing dot or space,
 // mixed separators, device names and empty components are refused and
 // create nothing. Control: the constant relative paths are accepted.
@@ -250,7 +249,7 @@ func TestEnsureSSHDir_RefusesInvalidComponents(t *testing.T) {
 	}
 }
 
-// Addendum (b), 8.3 short names: ValidName accepts them by design (an 8.3
+// 8.3 short names: ValidName accepts them by design (an 8.3
 // name is a legal component; aliasing is pathcanon.Resolve's concern). On
 // this path a component is opened relative to its parent's handle, so a
 // short name can only name a CHILD of that same directory: it creates
@@ -269,7 +268,7 @@ func TestEnsureSSHDir_ShortNameStaysInside(t *testing.T) {
 	assert.Len(t, entries, 1, "nothing outside home")
 }
 
-// Addendum (c): every ssh-config and vscode write leaf with a second name
+// Every ssh-config and vscode write leaf with a second name
 // (a hard link) is REFUSED, never repaired, and its other name is left
 // untouched. Control: once the second name is gone, the same writer
 // succeeds and the leaf is private.
@@ -310,7 +309,7 @@ func TestSSHVSCodeWriteLeaves_RefuseHardLinks(t *testing.T) {
 			err := tc.write(t, home)
 			require.ErrorIs(t, err, privatefs.ErrHardLinked)
 			assert.Empty(t, readTestFile(t, second), "the other name is untouched")
-			// No side effect (security lead, review r3): no other leaf, no
+			// No side effect: no other leaf, no
 			// directory and no lock file was written before the refusal.
 			assert.Equal(t, before, treeSnapshot(t, home), "the refusal changed nothing in home")
 
@@ -321,10 +320,10 @@ func TestSSHVSCodeWriteLeaves_RefuseHardLinks(t *testing.T) {
 	}
 }
 
-// Security-lead ruling (review r2, "accept as residual + warn"): ~/.ssh is
-// a link to a directory whose PARENT another user can write to or delete
-// children from. ssh-config still succeeds (the target itself passes rule
-// I) and prints ONE warning naming that parent and the SID. Control: a
+// Accepted residual, warned: ~/.ssh is a link to a directory whose PARENT
+// another user can write to or delete children from. ssh-config still
+// succeeds (the target itself passes the follow-then-verify rule) and
+// prints ONE warning naming that parent and the SID. Control: a
 // private parent, no warning.
 func TestSSHWrite_WarnsOnMutableLinkTargetParent(t *testing.T) {
 	for _, grant := range []string{"(M)", "(DC)", ""} {
@@ -356,7 +355,7 @@ func TestSSHWrite_WarnsOnMutableLinkTargetParent(t *testing.T) {
 	}
 }
 
-// Review r4 finding 2 (Windows): a hard-linked ~/.ssh/config that ALREADY
+// On Windows, a hard-linked ~/.ssh/config that ALREADY
 // has the scion Include line is not written, so writeSSHHubPlan succeeds
 // and the config and its other name stay byte-identical. Refusal side
 // (Include line missing): TestSSHVSCodeWriteLeaves_RefuseHardLinks/.ssh_config
@@ -376,7 +375,7 @@ func TestWriteSSHHubPlan_HardLinkedConfigWithIncludeLineUntouched(t *testing.T) 
 	}
 }
 
-// Review r4 finding 2 (Windows), vscode: a hard-linked settings.json that
+// On Windows, vscode: a hard-linked settings.json that
 // already holds the managed values is not rewritten: updateVSCodeFiles
 // succeeds and both names stay byte-identical. Refusal side: a hard-linked
 // settings.json that needs the managed keys is refused with home unchanged

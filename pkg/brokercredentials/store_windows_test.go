@@ -38,7 +38,7 @@ func windowsFixture(t *testing.T) (*Store, string) {
 
 // The read that allowed hub commands reach (getCurrentHostBrokerID) refuses
 // a broker credentials file other users can read, and leaves it as it is,
-// by the same rule as the CLI credentials (row C1r). Control: the same
+// by the same rule as the CLI credentials. Control: the same
 // file loads while it is private.
 func TestWindowsBrokerCredentials_RefusesUsersReadableFile(t *testing.T) {
 	store, path := windowsFixture(t)

@@ -72,12 +72,11 @@ var windowsAllowed = map[string]bool{
 	"conversation.group.add":    true,
 	"conversation.group.remove": true,
 
-	// 'scion use' and its alias 'scion project use': included on Windows by
-	// ptone's decision D2 (2026-10-22). Their local writes are migrated
-	// findings §4a sites only: ~/.scion/context.yaml with its directory and
-	// lock (row C7: Tree.MkdirAll Private, writeFileAtomicMode 0600 →
-	// Private, filelock.Acquire 0600), and credentials.json when the login
-	// offer runs (row C1, as 'hub auth login'). Their reads (settings,
+	// 'scion use' and its alias 'scion project use' run on Windows. Their
+	// local writes all go through the private-file primitives:
+	// ~/.scion/context.yaml with its directory and lock (Tree.MkdirAll
+	// Private, writeFileAtomicMode 0600 → Private, filelock.Acquire 0600),
+	// and credentials.json when the login offer runs (as 'hub auth login'). Their reads (settings,
 	// context.yaml, credentials, dev token, hub entry transport) are those
 	// of the hub commands above. The parent 'project' stays gated (its
 	// other subcommands write project directories), so it is hidden and
@@ -112,7 +111,8 @@ var windowsAllowed = map[string]bool{
 	// absent: they are hub-server-host admin tools that open the local hub
 	// database read-write (schema migration, WAL) and can write a foreign-key
 	// snapshot next to it (pkg/store/entadapter/timestamp_normalize.go). Those
-	// local files are not findings §4a sites, so §3.1 keeps them gated.
+	// local files are not written through the private-file primitives, so
+	// they stay gated.
 	"hub.test-identity":                 true,
 	"hub.test-identity.issue":           true,
 	"hub.test-identity.token":           true,

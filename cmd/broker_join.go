@@ -132,7 +132,7 @@ func resolveBrokerJoinToken(tokenFile string, stdin io.Reader, stderr io.Writer)
 		if err != nil {
 			return "", fmt.Errorf("failed to read the join token file: %w", err)
 		}
-		// Checked on the open handle by privatefs (design §3.5 X2): the
+		// Checked on the open handle by privatefs: the
 		// mode bits and owner on unix, the real DACL and owner on Windows
 		// (where the command is gated; this keeps the warning honest if it
 		// is ever reached).

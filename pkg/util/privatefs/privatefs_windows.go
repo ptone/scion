@@ -20,7 +20,7 @@ package privatefs
 // sequence behind a build tag: it sets no mode bits and never calls Chmod
 // (on Windows Chmod only toggles FILE_ATTRIBUTE_READONLY).
 //
-// Security descriptor (§3.3.2 of the design):
+// Security descriptor:
 //   - The owner is set explicitly to the token user's SID. Under an
 //     elevated token the default owner is BUILTIN\Administrators, so an
 //     implicit owner would make "owner-only" mean "admins-only".
@@ -35,7 +35,7 @@ package privatefs
 //     EXISTING file is ever re-secured (the in-place repair in
 //     verifyOrRepair).
 //
-// Tree walk (§3.3.3): every component below the anchor is opened with
+// Tree walk: every component below the anchor is opened with
 // NtCreateFile relative to its parent's handle (OBJECT_ATTRIBUTES.
 // RootDirectory) with FILE_OPEN_REPARSE_POINT, and its attributes are read
 // on the new handle. A component carrying FILE_ATTRIBUTE_REPARSE_POINT, of
@@ -463,11 +463,12 @@ func openDirAt(parent windows.Handle, name string) (windows.Handle, error) {
 //     the kernel follows it (relative to parent's handle, never by a path
 //     built here), and the result must be a directory;
 //   - every EXISTING component, followed or not, must pass
-//     CheckNoForeignWriters on its handle (the rule I owner set: the
+//     CheckNoForeignWriters on its handle (the follow-then-verify owner
+//     set: the
 //     current user, SYSTEM or Administrators). A directory someone else can
 //     write to or delete children from could have its entries swapped after
 //     any check made below it, so it is refused before anything is written
-//     there (win-cli Phase 3b review r2, finding 1; brief addendum (d)).
+//     there.
 //     The only components that skip the check are the ones mkdirAt
 //     creates during the current walk (they get the protection asked for
 //     in the create call, and walk and MkdirAll use the new handle without
@@ -511,7 +512,7 @@ func (t *Tree) openDirComp(parent windows.Handle, name string) (windows.Handle, 
 // warnMutableLinkParent reports, through TreeOptions.Warn, a followed
 // link whose target directory (open as h) sits in a parent directory that
 // another principal can write to or delete children from: the accepted
-// residual of the security-lead ruling (see TreeOptions.FollowLinks). It
+// residual of FollowLinks (see TreeOptions.FollowLinks). It
 // is DIAGNOSTIC ONLY: it never changes a result, so the parent is opened
 // by path (GetFinalPathNameByHandle of h, then its directory), which no
 // decision on the walk ever does.
@@ -759,9 +760,9 @@ func (t *Tree) Create(rel string, excl bool, p Protection) (*os.File, error) {
 	}
 	f := os.NewFile(uintptr(h), t.display(rel))
 	if info == fileOpened {
-		// An existing file opened for writing: one name only (addendum
-		// A1, checked by verifyOrRepair for Private), and for Private the
-		// §3.3.5 verify-or-repair.
+		// An existing file opened for writing: one name only (the one-name
+		// rule, checked by verifyOrRepair for Private), and for Private the
+		// verify-or-repair rule.
 		var err error
 		if p == Private {
 			err = verifyOrRepair(f, true)
@@ -821,14 +822,15 @@ func (t *Tree) OpenPrivate(rel string, flag int) (*os.File, error) {
 	return f, nil
 }
 
-// verifyOrRepair applies the §3.3.5 rules on an open handle: pass if
+// verifyOrRepair applies the verify-or-repair rules on an open handle: pass if
 // CheckPrivate passes; otherwise refuse, unless the handle is opened for
 // writing and the file is owned by the current user, in which case the
 // private DACL is set on this same handle (protected, so inherited ACEs
 // are dropped) before any byte is written. The owner is not rewritten: it
 // was just verified to be the current user.
 //
-// A file opened for writing must also have exactly one name (addendum A1):
+// A file opened for writing must also have exactly one name (the one-name
+// rule):
 // a hard-linked file is refused, never repaired.
 func verifyOrRepair(f *os.File, write bool) error {
 	if write {
@@ -1221,9 +1223,8 @@ const foreignWriteMask = windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA | fi
 // GENERIC_ALL, MAXIMUM_ALLOWED) to a SID other than the current user,
 // SYSTEM or Administrators.
 //
-// The owner set is a security-lead ruling (win-cli Phase 3b review r1,
-// finding 4), consistent with ruling C (Administrators accepted on verify,
-// by well-known SID only): an elevated shell makes Administrators the
+// The owner set is consistent with CheckPrivate (Administrators accepted
+// on verify, by well-known SID only): an elevated shell makes Administrators the
 // default owner of what it creates (ssh-keygen, an editor), admins and
 // SYSTEM already own the machine and can take ownership anyway, and
 // Win32-OpenSSH itself accepts these owners for its config. Refusing them
@@ -1272,7 +1273,7 @@ func OwnedByCurrentUser(f *os.File) (bool, error) {
 }
 
 // checkSingleLink refuses the open file unless it has exactly one name
-// (security checklist addendum A1). NumberOfLinks comes from
+// (the one-name rule). NumberOfLinks comes from
 // GetFileInformationByHandle on the handle itself. If it cannot be read the
 // file is refused (fail closed), as the attribute fallback does for
 // anything but ERROR_INVALID_PARAMETER.

@@ -16,7 +16,7 @@
 
 package pathcanon
 
-// One negative test per alias form of security checklist §2, each with a
+// One negative test per Windows path alias form, each with a
 // positive control: the same file under its legitimate name is Within the
 // root, or the legitimate name is accepted.
 

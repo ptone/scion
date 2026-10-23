@@ -23,8 +23,8 @@ package filelock
 // WHY THE LOCK PATH IS NOT WALKED. Acquire opens only the leaf no-follow,
 // by path; it does not walk the parent components handle by handle as a
 // privatefs Tree does. That is acceptable ONLY while all three of these
-// dependencies hold (design §3.2; keep the numbering, so that a later
-// change can name which one failed):
+// dependencies hold (keep the numbering, so that a later change can name
+// which one failed):
 //
 //  1. Verified tree (tunnelclient: CheckPrivate on the state directory
 //     handle). There privatefs has verified the directory owner-only, so
@@ -46,7 +46,7 @@ package filelock
 // tree (settings.lock in a non-private settings directory) rely on 2 and 3
 // only, which is the same exposure as unix flock on a path.
 //
-// NO FILE_SHARE_DELETE (security lead ruling H). Acquire's handle shares
+// NO FILE_SHARE_DELETE. Acquire's handle shares
 // read and write but not delete. With share-delete, another process could
 // delete a held lock file and a third could CREATE_NEW and lock a new file
 // of the same name, so two holders would each believe they had the lock.
@@ -98,7 +98,7 @@ func unlock(f *os.File) {
 }
 
 const (
-	lockShare      = windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE // no FILE_SHARE_DELETE: ruling H
+	lockShare      = windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE // no FILE_SHARE_DELETE: a held lock file cannot be deleted
 	noFollowCreate = windows.FILE_FLAG_OPEN_REPARSE_POINT | windows.FILE_ATTRIBUTE_NORMAL
 	// FILE_FLAG_BACKUP_SEMANTICS lets an existing directory open, so it is
 	// refused as ErrNotRegular on its handle rather than failing earlier

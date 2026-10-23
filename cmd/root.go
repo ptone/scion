@@ -134,9 +134,10 @@ return an error instead of blocking.`,
 			return errNoHubRemoved
 		}
 
-		// Windows build: a gated command refuses here, after the global
-		// flags are handled and before any invocation-target, project,
-		// settings or migration work (cmd/platform_gate.go).
+		// Windows build: a gated command refuses here, in the root pre-run
+		// hook, before the command runs or does any invocation-target,
+		// project or migration work of its own (cmd/platform_gate.go). The
+		// CLI mode resolved above may already have read the settings.
 		if err := windowsRefusal(cmd); err != nil {
 			return err
 		}

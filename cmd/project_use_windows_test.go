@@ -28,8 +28,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
-// ptone's decision D2: 'scion use <project>' runs on Windows, and the
-// context file it writes, ~/.scion/context.yaml (row C7), gets the
+// 'scion use <project>' runs on Windows, and the context file it
+// writes, ~/.scion/context.yaml, gets the
 // owner-only descriptor, replacing a too-open one; so does its lock file.
 // It drives the real command end to end against a fake hub, in a
 // temporary profile (USERPROFILE, which os.UserHomeDir reads on Windows).

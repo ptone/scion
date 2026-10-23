@@ -48,10 +48,9 @@ func TestNewGitHubResolutionCache_DirModeFailureIsNotFatal(t *testing.T) {
 	}
 }
 
-// Delta-4-class unix change (review r1 F2): the cache save now creates its
-// temp file with privatefs Tree.CreateTemp(Private), which chmods it to
-// 0600, so a umask stricter than 077 no longer leaves the cache file
-// unwritable by its owner. Control: under the default umask it is 0600.
+// On unix, the cache save creates its temp file with privatefs
+// Tree.CreateTemp(Private), which chmods it to 0600, so a umask stricter
+// than 077 cannot leave the cache file unwritable by its owner. Control: under the default umask it is 0600.
 func TestGitHubResolutionCache_SaveChmodsUnderStrictUmask(t *testing.T) {
 	dir := t.TempDir()
 	cache, err := newTestResolutionCache(dir, time.Hour)

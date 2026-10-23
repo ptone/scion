@@ -24,7 +24,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/internal/testutil/wintest"
 )
 
-// Windows site tests for design row X3 (the GitHub resolution cache). They
+// Windows site tests for the GitHub resolution cache. They
 // run on the windows-latest job through the anchored
 // "./pkg/agent -run=^TestWindowsResolutionCache" line.
 
@@ -55,7 +55,7 @@ func TestWindowsResolutionCache_NewDirAndFilePrivate(t *testing.T) {
 }
 
 // A too-open cache file owned by the user is repaired when the cache loads
-// it, before any rewrite (the §3.3.5 in-place rule). Control: the file
+// it, before any rewrite (the verify-or-repair rule). Control: the file
 // carried the Users ACE before the load.
 func TestWindowsResolutionCache_RepairsOwnedTooOpenFile(t *testing.T) {
 	dir := t.TempDir()
@@ -104,7 +104,7 @@ func TestWindowsResolutionCache_ForeignOwnedFileWarnedNotRepaired(t *testing.T) 
 }
 
 // A too-open existing cache directory is reported and never repaired
-// (§3.3.5: existing directories are not silently re-secured); the cache
+// (existing directories are not silently re-secured); the cache
 // still works. Control: a private directory passes the check.
 func TestWindowsResolutionCache_TooOpenDirWarnedNotRepaired(t *testing.T) {
 	dir := filepath.Join(usersInheritParent(t), "cache")

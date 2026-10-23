@@ -21,7 +21,7 @@ import (
 	"testing"
 )
 
-// Audit L1 (checklist 7.5): on Windows agent host state is refused with
+// On Windows agent host state is refused with
 // errors.ErrUnsupported, not protected by a path-based Lstat walk and a
 // chmod. A read reports the error (not the zero state), an update writes
 // nothing, and an existing file is left as it is. Control: the agent dir

@@ -28,7 +28,7 @@ func assertPrivateTokenFile(t *testing.T, path string) {
 	wintest.AssertPrivateSD(t, path)
 }
 
-// Row C2: a new dev token file gets the owner-only ACL even in a directory
+// A new dev token file gets the owner-only ACL even in a directory
 // that hands an inheritable Users ACE to new files; the directory itself
 // keeps its default (inherited) protection. Control: a file created there
 // without privatefs carries the Users ACE.

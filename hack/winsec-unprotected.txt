@@ -1,12 +1,13 @@
 # Files hack/winsec-guard.sh accepts without per-line markers: the Go files
 # in the GOOS=windows build of ./cmd/scion whose files are NOT protected on
-# Windows (security checklist §1, "honest" form). One file per line:
+# Windows, stated openly. One file per line:
 #   <path> <status>
 # status is one of:
-#   pending Phase 3 (<rows>)                  a findings §4a site (design §3.5
-#                                             rows C*, T*, I*, X*); Phase 3
-#                                             moves it onto privatefs/pathcanon
-#                                             and deletes its line here.
+#   pending Phase 3 (<sites>)                 a client-reachable private-file
+#                                             site not yet on privatefs/
+#                                             pathcanon (the keyword is what
+#                                             hack/winsec-guard.sh parses); its
+#                                             line goes when the site moves.
 #   not protected on Windows: gated (<why>)   a server, broker or in-container
 #                                             site, reachable only from commands
 #                                             the Windows gate refuses
@@ -14,10 +15,11 @@
 # A path listed here is exempt from guard checks (a) and (b) for the whole
 # file. Keep entries sorted by path.
 
-# Findings §4a: client-reachable private files, pending Phase 3: none.
-# Phase 3 moved every one onto privatefs/pathcanon/filelock (design §3.5).
+# Client-reachable private files not yet on privatefs/pathcanon/filelock:
+# none.
 
-# Findings §4b and in-container sites: gated on Windows.
+# Server, broker, agent-provisioning and in-container sites: gated on
+# Windows.
 cmd/broker_purge_guard.go not protected on Windows: gated (runtime-broker purge containment)
 pkg/agent/agent_files_guard.go not protected on Windows: gated (agent files guard; agent lifecycle runs on a broker)
 pkg/agent/harness_config_policy.go not protected on Windows: gated (harness config record; agent provisioning)

@@ -525,7 +525,7 @@ type tokenFile struct {
 	f    *os.File
 }
 
-// createTokenFile creates path for writing a token (design §3.5 X1): the
+// createTokenFile creates path for writing a token: the
 // path is checked by pathcanon.ValidInputPath, its directory is opened as
 // a privatefs tree anchor (links at or above it are followed), and the
 // file is created there exclusively and private (Tree.Create: an existing

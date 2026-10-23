@@ -86,7 +86,7 @@ var ErrNoACLs = errors.New("the volume does not support access control lists")
 
 // ErrHardLinked is returned (wrapped) when a file about to be written, or
 // replaced on a path where a tree rule is relaxed, has more than one name
-// (security checklist addendum A1). A hard link is not a reparse point and
+// (the one-name rule). A hard link is not a reparse point and
 // is identical to its target under handle comparison, so no other rule
 // catches it: a write through it would land in a file that also lives
 // outside the tree. It is refused, never repaired: a second name cannot be
@@ -112,11 +112,12 @@ type TreeOptions struct {
 	// changes nothing (the unix MkdirAll already follows directory
 	// symlinks, and leaves are opened O_NOFOLLOW).
 	//
-	// It exists for ~/.ssh (design §3.5 I1, security lead ruling I).
+	// It exists for ~/.ssh.
 	// ~/.ssh is deliberately NOT a refuse-reparse tree: dotfile managers
 	// (chezmoi, stow, yadm) symlink ~/.ssh or its subdirectories, so
 	// refusing links there would break legitimate setups. Integrity is
-	// decided on handles after following instead (rule I, see
+	// decided on handles after following instead (the follow-then-verify
+	// rule, see
 	// ReplaceFollowing): CheckNoForeignWriters on the target's parent
 	// directory handle and on the existing target; a foreign-owned target
 	// or a foreign-writable parent is refused; a user-owned but too-open
@@ -125,12 +126,12 @@ type TreeOptions struct {
 	// config is code execution via ProxyCommand). Never use FollowLinks for
 	// a tree that holds secrets.
 	//
-	// Stated limit (security-lead ruling, win-cli Phase 3b review r2):
-	// rule I protects the target, not the mutability of the path to it. A
-	// followed link's target directory is checked, but not the directories
-	// above it. A live swap is defeated by the handle-based operations; a
-	// swap between sessions needs a directory that passes rule I, which a
-	// non-admin attacker cannot produce. Where the target's parent is
+	// Stated limit: the follow-then-verify rule protects the target, not
+	// the mutability of the path to it. A followed link's target directory
+	// is checked, but not the directories above it. A live swap is defeated
+	// by the handle-based operations; a swap between sessions needs a
+	// directory that passes the follow-then-verify rule, which another
+	// non-admin user cannot produce. Where the target's parent is
 	// writable by another principal, Warn reports it (see Warn); it is not
 	// refused.
 	FollowLinks bool

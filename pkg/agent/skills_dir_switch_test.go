@@ -156,7 +156,7 @@ func symlink(t *testing.T, target, link string) {
 	}
 	if err := os.Symlink(target, link); err != nil {
 		// Fail, never skip: a symlink test that skips tests nothing
-		// (security checklist §5; TestNoSkipOnSymlinkPaths).
+		// (TestNoSkipOnSymlinkPaths).
 		t.Fatalf("symlink creation failed: %v", err)
 	}
 }

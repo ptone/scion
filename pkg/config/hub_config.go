@@ -391,8 +391,8 @@ var linkFile = os.Link
 // createFileExclusive writes data to a new file at path, in tree (anchored
 // at path's directory), failing with an error wrapping fs.ErrExist if path
 // already exists. The file gets the protection of mode (privatefs.ForMode):
-// for 0600, mode 0600 even under a umask stricter than 077 (design §3.7
-// delta 4), and on Windows an owner-only ACL set at creation. A partial
+// for 0600, mode 0600 even under a umask stricter than 077, and on Windows
+// an owner-only ACL set at creation. A partial
 // file is deleted through its own handle.
 func createFileExclusive(tree *privatefs.Tree, path string, data []byte, mode os.FileMode) error {
 	f, err := tree.Create(filepath.Base(path), true, privatefs.ForMode(mode))

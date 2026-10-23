@@ -167,8 +167,8 @@ func skipOnLinkPath(fset *token.FileSet, file *ast.File, keep func(name string) 
 // TestNoSkipOnSymlinkPaths fails if any function in a test file of an
 // allowlisted Windows package (or in internal/testutil/wintest) that
 // creates a symlink or junction can also skip. A symlink test that skips
-// silently on the runner reports green while testing nothing (security
-// checklist §5, §7.4); the helpers fail instead.
+// silently on the runner reports green while testing nothing; the helpers
+// fail instead.
 func TestNoSkipOnSymlinkPaths(t *testing.T) {
 	// Positive control: the detector flags a skip on a link path and
 	// accepts a link path without one.
@@ -306,7 +306,7 @@ func nameLookups(fset *token.FileSet, file *ast.File) []string {
 
 // TestVerifierUsesNoNameLookup fails if the Windows create or verify code
 // looks up or compares account names. SIDs come only from the token,
-// CreateWellKnownSid and StringToSid (security lead ruling C).
+// CreateWellKnownSid and StringToSid.
 func TestVerifierUsesNoNameLookup(t *testing.T) {
 	// Positive control: the detector flags a lookup and a name literal.
 	const sample = `package p
@@ -321,8 +321,8 @@ func f() { windows.LookupSID("", "Administrators"); _ = name == "BUILTIN\\Users"
 		t.Fatalf("detector on the sample found %v, want the call and both literals", got)
 	}
 
-	// replace_windows.go holds rule I, whose owner set (SYSTEM,
-	// Administrators) is by SID only too (security-lead ruling, Phase 3b).
+	// replace_windows.go holds the follow-then-verify rule, whose owner set
+	// (SYSTEM, Administrators) is by SID only too.
 	for _, name := range []string{"privatefs_windows.go", "replace_windows.go"} {
 		fset = token.NewFileSet()
 		f, err = parser.ParseFile(fset, name, nil, 0)
@@ -391,8 +391,8 @@ func handleWalkViolations(fset *token.FileSet, file *ast.File) (bad []string, fu
 	return bad, funcs, ntCreates
 }
 
-// TestTreeWalkIsHandleRelative: the property ensureSSHDir relies on (brief
-// addendum (b), as revised by the security lead): every component below a
+// TestTreeWalkIsHandleRelative: the property ensureSSHDir relies on: every
+// component below a
 // Tree's anchor, on the MkdirAll path, is opened relative to its parent's
 // handle (ntCreate with a RootDirectory), and no path-based open appears
 // anywhere on that path. Behavioural tests: the junction/symlink refusal and
@@ -439,8 +439,7 @@ func (t *Tree) walk() { _ = t.warnMutableLinkParent(1, "x"); t.warnMutableLinkPa
 		t.Fatalf("the walk below a Tree's anchor must open every component relative to its parent's handle:\n%s", strings.Join(bad, "\n"))
 	}
 	// The one by-path open reachable from the walk is the diagnostic
-	// warnMutableLinkParent (the security lead's "accept as residual +
-	// warn" ruling). It must stay unable to influence a result: no return
+	// warnMutableLinkParent (an accepted residual, warned). It must stay unable to influence a result: no return
 	// value.
 	if msgs := diagnosticViolations(fset, f); len(msgs) > 0 {
 		t.Fatalf("warnMutableLinkParent must stay diagnostic only:\n%s", strings.Join(msgs, "\n"))

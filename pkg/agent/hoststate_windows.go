@@ -29,7 +29,7 @@ import (
 // 0600; a path-based Lstat walk and a chmod would protect nothing here
 // (Lstat does not report a junction as a symlink, and a chmod only sets
 // the read-only attribute), so every entry point returns an error wrapping
-// errors.ErrUnsupported instead of a weaker fallback (design §3.5). The
+// errors.ErrUnsupported instead of a weaker fallback. The
 // callers tolerate it: startFailedForDisplay is fail-quiet, RecordedRunOwner
 // reports the owner unknown so files are kept, and the writers return the
 // error for their caller to log.

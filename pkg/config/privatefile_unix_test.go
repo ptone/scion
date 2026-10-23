@@ -23,10 +23,10 @@ import (
 	"testing"
 )
 
-// Delta-4-class unix change (review r1 F2): writeConflictBackup now creates
-// the backup with privatefs Tree.Create(excl, Private), which chmods it to
-// 0600, so a umask stricter than 077 no longer leaves it unwritable by its
-// owner. Control: under the default umask it is 0600 as before.
+// On unix, writeConflictBackup creates the backup with privatefs
+// Tree.Create(excl, Private), which chmods it to 0600, so a umask stricter
+// than 077 cannot leave it unwritable by its owner. Control: under the
+// default umask it is 0600.
 func TestWriteConflictBackup_ChmodsUnderStrictUmask(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "settings.yaml")

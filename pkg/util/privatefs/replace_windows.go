@@ -31,8 +31,8 @@ import (
 
 // ReplaceFollowing atomically replaces the file at path with data, for
 // integrity-only files the user may manage through links, such as
-// ~/.ssh/config (design §3.5 I2, security lead ruling I: follow the link,
-// then decide on handles).
+// ~/.ssh/config (the follow-then-verify rule: follow the link, then decide
+// on handles).
 //
 // Windows:
 //   - path is resolved with pathcanon.Resolve, so a symlinked leaf (a
@@ -43,9 +43,9 @@ import (
 //     principal can write to (or owns, other than SYSTEM or Administrators)
 //     is refused, because that principal could swap the file after us.
 //   - An existing target is opened relative to the parent's handle (a
-//     reparse point there is refused). It must have one name (addendum A1)
-//     and be owned by the current user, SYSTEM or Administrators (the
-//     CheckNoForeignWriters owner set, a security-lead ruling); otherwise
+//     reparse point there is refused). It must have one name (the one-name
+//     rule) and be owned by the current user, SYSTEM or Administrators (the
+//     CheckNoForeignWriters owner set); otherwise
 //     it is refused. Such a target whose ACL is too open is replaced, not
 //     refused.
 //   - The new content goes to a temporary file created relative to the
@@ -54,11 +54,11 @@ import (
 //     writable ssh config is code execution via ProxyCommand. newMode is not
 //     used; the result is always Private.
 //
-// Stated limit (security-lead ruling, win-cli Phase 3b review r2): rule I
-// protects the target, not the mutability of the path to it. Directories
-// above the target's parent are not checked: a live swap is defeated by
-// the handle-based operations above, and a swap between sessions needs a
-// directory that passes rule I, which a non-admin attacker cannot produce.
+// Stated limit: the follow-then-verify rule protects the target, not the
+// mutability of the path to it. Directories above the target's parent are
+// not checked: a live swap is defeated by the handle-based operations
+// above, and a swap between sessions needs a directory that passes the
+// follow-then-verify rule, which another non-admin user cannot produce.
 // (TreeOptions.Warn reports a followed directory link whose target's
 // parent is writable by another principal.)
 //
@@ -104,10 +104,10 @@ func ReplaceFollowing(path string, data []byte, newMode fs.FileMode, tempPrefix 
 // writes, on the same handles, and writes nothing: path is resolved
 // (following a symlinked leaf), its directory is opened and must pass
 // CheckNoForeignWriters, and an existing target must not be a reparse
-// point, must have one name (addendum A1) and must be owned by the current
+// point, must have one name (the one-name rule) and must be owned by the current
 // user, SYSTEM or Administrators. Callers that write several files in one
-// operation run it on every file first, so a refusal leaves no side effect
-// (security-lead ruling, win-cli Phase 3b review r3). ReplaceFollowing
+// operation run it on every file first, so a refusal leaves no side
+// effect. ReplaceFollowing
 // still makes these checks itself; this is a preflight, not a
 // replacement. Once the directory passes CheckNoForeignWriters, no other
 // principal can change the target between this check and the write.
@@ -161,7 +161,8 @@ func openReplaceTarget(path string) (*Tree, string, error) {
 	return t, leaf, nil
 }
 
-// checkReplaceTarget applies rule I to the existing file leaf directly below
+// checkReplaceTarget applies the follow-then-verify rule to the existing
+// file leaf directly below
 // the anchor, if there is one: it must not be a reparse point, must have
 // one name, and must be owned by the current user, SYSTEM or
 // Administrators. Such a file that fails CheckNoForeignWriters only on its

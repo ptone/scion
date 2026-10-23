@@ -16,9 +16,9 @@
 
 package cmd
 
-// Windows tests of design §3.5 X1: the --out token file of
-// hub test-identity is created exclusively with the private descriptor,
-// and the output says how it is protected truthfully (§7.1).
+// Windows tests of the hub test-identity --out token file: it is created
+// exclusively with the private descriptor, and the output says truthfully
+// how it is protected.
 
 import (
 	"bytes"

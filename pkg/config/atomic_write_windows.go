@@ -36,9 +36,10 @@ func preservedAtomicMode(string) os.FileMode {
 }
 
 // atomicProtection is the protection writeFileAtomicMode gives the new
-// file (design row C5; audit I2, approved by the security lead). Private
+// file. Private
 // when mode is Private (privatefs.ForMode). Otherwise the existing target
-// decides, as for the copies of rows C10 and C11: it is opened with
+// decides, as for the copies in mkdirLikeLegacyRoot and the settings
+// backups: it is opened with
 // Tree.OpenNoFollow in a Tree anchored at its directory and checked with
 // privatefs.CheckPrivate on that handle, so a user-tightened file stays
 // private, and protectionForCheck maps the result (Inherit only for
@@ -74,7 +75,7 @@ func atomicProtection(targetPath string, mode os.FileMode) privatefs.Protection 
 }
 
 // writeFileAtomicMode is writeFileAtomic with the protection of the new file
-// given by atomicProtection (design row C5):
+// given by atomicProtection:
 //
 //   - Private (mode grants nothing to group or others, or the existing
 //     target passes CheckPrivate): the temporary file is created in a

@@ -277,12 +277,12 @@ func resolveSSHHubLabel(endpoint string, u *url.URL, files []sshIncludeFileInfo)
 	return "", fmt.Errorf("hub label %q and %q are both used by other scion include files in %s", preferred, fallback, filepath.Dir(files[0].path))
 }
 
-// ~/.ssh is deliberately NOT a refuse-reparse tree (design §3.5 I1-I2,
-// security lead ruling I). Dotfile managers (chezmoi, stow, yadm) symlink
-// ~/.ssh or the files in it, so refusing links there would break
-// legitimate setups. Instead links are followed and the trust decision is
-// made on handles after following (privatefs.ReplaceFollowing): the
-// target's parent directory and an existing target must pass
+// ~/.ssh is deliberately NOT a refuse-reparse tree. Dotfile managers
+// (chezmoi, stow, yadm) symlink ~/.ssh or the files in it, so refusing
+// links there would break legitimate setups. Instead links are followed
+// and the trust decision is made on handles after following (the
+// follow-then-verify rule, privatefs.ReplaceFollowing): the target's
+// parent directory and an existing target must pass
 // CheckNoForeignWriters; a foreign-owned target or a foreign-writable
 // parent is refused; a target the user owns but left too open is replaced
 // by a private temporary file through a handle rename; the old security
@@ -303,23 +303,22 @@ func resolveSSHHubLabel(endpoint string, u *url.URL, files []sshIncludeFileInfo)
 // parent's handle (no path-based open on this path) and validates each
 // one (pathcanon.ValidName: no "..", no absolute or alias forms).
 //
-// There is deliberately no pathcanon.Within here (design §3.5 I1 as
-// corrected in review r1, finding 1, accepted by the security lead as "a
-// correction rather than a relaxation"). The location check was a proxy:
-// it resolves links, so it refused exactly the linked layouts FollowLinks
-// exists for. The property it stood in for (nobody else can change what
-// ssh and VS Code will read) is enforced by rule I on the resolved handles
-// of every file written below these directories (writeFileAtomic,
-// privatefs.ReplaceFollowing), and a rule I failure is a returned error.
+// There is deliberately no pathcanon.Within here. A location check would
+// be a proxy: it resolves links, so it would refuse exactly the linked
+// layouts FollowLinks exists for. The property it would stand in for
+// (nobody else can change what ssh and VS Code will read) is enforced by
+// the follow-then-verify rule on the resolved handles of every file
+// written below these directories (writeFileAtomic,
+// privatefs.ReplaceFollowing), and a failure of that rule is a returned
+// error.
 //
 // Several rels are verified together before any is created
 // (Tree.MkdirAllEach): a refused location leaves no side effect, not even
-// a directory created for another rel of the same call (security lead,
-// review r2: "a refusal must leave no side effect").
+// a directory created for another rel of the same call.
 //
 // A followed link whose target sits in a directory another user can
-// change is warned about on stderr (sshLinkWarning), not refused: the
-// security lead accepted it as a residual (rule I protects the target,
+// change is warned about on stderr (sshLinkWarning), not refused: that is
+// an accepted residual (the follow-then-verify rule protects the target,
 // not the path to it; see privatefs.TreeOptions.FollowLinks).
 func ensureSSHDir(home string, rels ...string) error {
 	t, err := privatefs.OpenTree(home, privatefs.TreeOptions{FollowLinks: true, Warn: sshLinkWarning})
@@ -960,16 +959,17 @@ func regenerateSSHHubFiles(p sshPaths, hub, exe string, l sshAgentListing) (*ssh
 // The known-hosts file is written first, so an installed block never lacks
 // its pin.
 func writeSSHHubPlan(p sshPaths, res *sshRegenResult) error {
-	// A refusal leaves no side effect (security lead, reviews r2 and r3):
+	// A refusal leaves no side effect:
 	// first every file this call may write is checked as writeFileAtomic
 	// will check it, creating nothing; then both directories are verified
 	// together before either is created; only then is anything written.
 	leaves := []string{res.knownHostsFile, res.includeFile}
 	// ~/.ssh/config only when the Include line is missing, i.e. when
-	// ensureSSHIncludeLine will write it (review r4 finding 2): a config the
+	// ensureSSHIncludeLine will write it: a config the
 	// operation leaves alone (a hard-linked one that already has the line,
 	// say) is not refused. The read only decides whether to check;
-	// writeFileAtomic applies rule I and A1 on handles if it writes.
+	// writeFileAtomic applies the follow-then-verify and one-name rules on
+	// handles if it writes.
 	if need, err := sshIncludeLineNeeded(p); err != nil {
 		return err
 	} else if need {

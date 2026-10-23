@@ -25,13 +25,13 @@ import (
 )
 
 // The Windows form of the resolution cache's "tighten an existing
-// directory or file" step (design row X3). Mode bits mean nothing here and
+// directory or file" step. Mode bits mean nothing here and
 // no Chmod is called; decisions are made on handles through privatefs.
 
 // tightenCacheDir checks the existing cache directory, opened without
 // following a reparse point, with privatefs.CheckPrivate. A directory that
 // fails is reported and left as it is: an existing directory is never
-// silently repaired (design §3.3.5). New directories are created private by
+// silently repaired. New directories are created private by
 // the caller.
 func tightenCacheDir(dir string) error {
 	tree, err := privatefs.OpenTree(filepath.Dir(dir), privatefs.TreeOptions{})
@@ -51,8 +51,8 @@ func tightenCacheDir(dir string) error {
 }
 
 // tightenCacheFile opens the existing cache file for writing through
-// privatefs (Tree.OpenPrivate with O_RDWR), which applies the §3.3.5
-// in-place rule on that handle: a private file passes, a too-open file
+// privatefs (Tree.OpenPrivate with O_RDWR), which applies the
+// verify-or-repair rule on that handle: a private file passes, a too-open file
 // owned by the current user gets the owner-only ACL before anything else
 // happens to it (repair), and a file owned by someone else is refused and
 // reported. Nothing is written. A missing file is not an error.

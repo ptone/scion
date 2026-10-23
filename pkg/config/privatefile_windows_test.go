@@ -29,7 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 )
 
-// Windows site tests for design win-cli §3.5 rows C3-C11 (pkg/config). They
+// Windows site tests for the pkg/config private files. They
 // run on the windows-latest job through the anchored -run line in
 // .github/windows-test-packages.txt (every test here is named TestWindows*).
 
@@ -69,7 +69,7 @@ func useWindowsHome(t *testing.T) string {
 	return home
 }
 
-// Row C5: a mode-0600 atomic write replaces an existing too-open file with
+// A mode-0600 atomic write replaces an existing too-open file with
 // a private one (implicit repair) and leaves no temporary file. Control: a
 // mode-0644 write in the same directory gets the inherited ACL, with no
 // read-only attribute (no Chmod).
@@ -105,7 +105,7 @@ func TestWindowsAtomicWrite_PrivateReplacesTooOpenInheritInherits(t *testing.T) 
 	}
 }
 
-// Row C5, audit I2 (security lead approved): an Inherit-mode atomic write
+// An Inherit-mode atomic write
 // keeps an existing owner-only file private, deciding from its real ACL on
 // a no-follow handle, never from its meaningless Perm. Control: a file with
 // the inherited ACL stays inherited, and a missing target gets Inherit.
@@ -140,7 +140,7 @@ func TestWindowsAtomicWrite_InheritKeepsOwnerOnlyTarget(t *testing.T) {
 	mustRead(t, plain, "second")
 }
 
-// Row C5, audit I2: the protection decision never follows a link at the
+// The atomic write's protection decision never follows a link at the
 // target. A symlink to an owner-only file is refused by OpenNoFollow, so
 // the caller's protection (Inherit) is used, and the write replaces the
 // link itself; the link's target is neither checked nor changed. The same
@@ -181,7 +181,7 @@ func TestWindowsAtomicWrite_InheritDecisionDoesNotFollowLink(t *testing.T) {
 	}
 }
 
-// Row C5: a private atomic write over a symlink replaces the link itself
+// A private atomic write over a symlink replaces the link itself
 // and never writes through it. Control: the link's target keeps its
 // content.
 func TestWindowsAtomicWrite_PrivateReplacesSymlinkNotTarget(t *testing.T) {
@@ -204,7 +204,7 @@ func TestWindowsAtomicWrite_PrivateReplacesSymlinkNotTarget(t *testing.T) {
 	mustRead(t, link, "new")
 }
 
-// Rows C3, C4: the first PersistentHubID creates a missing global directory
+// The first PersistentHubID creates a missing global directory
 // private and persists the hub id private, through the hard-link path and,
 // with hard links failing, through createFileExclusive.
 func TestWindowsPersistHubID_GlobalDirAndFilePrivate(t *testing.T) {
@@ -236,7 +236,7 @@ func TestWindowsPersistHubID_GlobalDirAndFilePrivate(t *testing.T) {
 	}
 }
 
-// Row C6: the settings lock refuses a junction planted at its lock file.
+// The settings lock refuses a junction planted at its lock file.
 // Control: the same directory locks once the junction is gone.
 func TestWindowsSettingsLock_RefusesJunctionLockFile(t *testing.T) {
 	dir, outside := t.TempDir(), t.TempDir()
@@ -258,7 +258,7 @@ func TestWindowsSettingsLock_RefusesJunctionLockFile(t *testing.T) {
 	l.Unlock()
 }
 
-// Row C7: UpdateCLIContext creates the global directory, context.yaml and
+// UpdateCLIContext creates the global directory, context.yaml and
 // its lock file private, and replaces a too-open context.yaml with a
 // private one.
 func TestWindowsUpdateCLIContext_Private(t *testing.T) {
@@ -279,7 +279,7 @@ func TestWindowsUpdateCLIContext_Private(t *testing.T) {
 	wintest.AssertPrivateSD(t, ctxPath)
 }
 
-// Row C8: the plugin config file and its directory are created private,
+// The plugin config file and its directory are created private,
 // and a too-open existing file is replaced with a private one.
 func TestWindowsIntegrationConfig_Private(t *testing.T) {
 	base := usersInheritDir(t)
@@ -305,7 +305,7 @@ func TestWindowsIntegrationConfig_Private(t *testing.T) {
 	}
 }
 
-// Row C9: the migration owner check reads the owner SID on a no-follow
+// The migration owner check reads the owner SID on a no-follow
 // handle. A SYSTEM-owned file or directory is not the user's; a junction is
 // refused (an error: the caller skips). Control: the user's own file and
 // directory pass.
@@ -343,7 +343,7 @@ func TestWindowsCurrentUserOwns(t *testing.T) {
 	}
 }
 
-// Row C9 through the migration: a legacy entry owned by SYSTEM is skipped
+// The owner check through the migration: a legacy entry owned by SYSTEM is skipped
 // as owned by another user, and left in place. Control: the user's own
 // entry next to it is migrated.
 func TestWindowsMigrateLegacyGlobalLayout_SkipsForeignOwnedEntry(t *testing.T) {
@@ -369,7 +369,7 @@ func TestWindowsMigrateLegacyGlobalLayout_SkipsForeignOwnedEntry(t *testing.T) {
 	}
 }
 
-// Row C10 (:472): the canonical root is created Private when the legacy
+// mkdirLikeLegacyRoot: the canonical root is created Private when the legacy
 // root passes CheckPrivate, and Inherit when it does not: protection
 // follows the source's real ACL, not its meaningless Perm.
 func TestWindowsMkdirLikeLegacyRoot_FollowsSourceACL(t *testing.T) {
@@ -397,7 +397,7 @@ func TestWindowsMkdirLikeLegacyRoot_FollowsSourceACL(t *testing.T) {
 	assertInherited(t, filepath.Join(home, "canon-open"))
 }
 
-// Row C10 (:1198): the conflict backup is created private, next to the
+// writeConflictBackup: the conflict backup is created private, next to the
 // settings file, with a numeric suffix when the name is taken.
 func TestWindowsWriteConflictBackup_Private(t *testing.T) {
 	dir := usersInheritDir(t)
@@ -419,7 +419,7 @@ func TestWindowsWriteConflictBackup_Private(t *testing.T) {
 	}
 }
 
-// Row C11: the copied settings backup (no hard links) is Private when the
+// copySettingsBackup: the copied settings backup (no hard links) is Private when the
 // original passes CheckPrivate and Inherit when it does not.
 func TestWindowsCopySettingsBackup_FollowsSourceACL(t *testing.T) {
 	dir := usersInheritDir(t)
@@ -455,7 +455,7 @@ func TestWindowsCopySettingsBackup_FollowsSourceACL(t *testing.T) {
 	}
 }
 
-// Row C11, review r1 F1: the protection decision and the read are made on
+// copySettingsBackup: the protection decision and the read are made on
 // the same handle. A settings name swapped for a link to a private file
 // (after backupSettingsFile's Lstat) yields a Private backup holding those
 // private bytes, never an Inherit copy of them. Control: the same swap to
@@ -512,7 +512,7 @@ func TestWindowsCopySettingsBackup_DecisionFromReadHandle(t *testing.T) {
 	wintest.AssertPrivateSD(t, filepath.Join(dir, "open.yaml.bak"))
 }
 
-// Rows C10, C11, review r2 #2: only a CheckPrivate error wrapping
+// mkdirLikeLegacyRoot and the backups: only a CheckPrivate error wrapping
 // ErrNotPrivate yields Inherit. That includes a descriptor or owner privatefs
 // cannot read, which it classifies as ErrNotPrivate (the case is built in
 // securityOf's shape). A pass and the errors privatefs does not wrap (DACL

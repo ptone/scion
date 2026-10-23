@@ -275,11 +275,11 @@ type vscodeUpdate struct {
 // concurrent runs keep each other's entries. It reports whether u.host had
 // a different pin before.
 func updateVSCodeFiles(p vscodePaths, u vscodeUpdate) (changed bool, err error) {
-	// A refusal leaves nothing behind (security lead, reviews r2 and r3):
+	// A refusal leaves nothing behind:
 	// every file this call may write is checked first (creating nothing),
 	// then both directories are verified before either is created, all
 	// before the lock file.
-	// settings.json only when it will be written (review r4 finding 2): a
+	// settings.json only when it will be written: a
 	// file the operation leaves alone is not checked; ensureVSCodeSettings
 	// re-plans under the lock, and writeFileAtomic checks whatever it
 	// writes.
@@ -340,8 +340,8 @@ func updateVSCodeFiles(p vscodePaths, u vscodeUpdate) (changed bool, err error) 
 	return hadPin && old != u.key, nil
 }
 
-// vscodeLockWait bounds the wait for the vscode directory lock (design
-// §3.7 delta 2: it was unbounded). A var so tests can shorten it.
+// vscodeLockWait bounds the wait for the vscode directory lock. A var so
+// tests can shorten it.
 var vscodeLockWait = 2 * time.Minute
 
 // lockVSCodeDir takes an exclusive advisory lock on path, which works
@@ -537,7 +537,7 @@ func ensureVSCodeSettings(p vscodePaths) error {
 // ensureVSCodeSettings writes: write reports whether settings.json must be
 // (re)written, and data is its new content. A missing directory or file
 // counts as empty. updateVSCodeFiles uses it to preflight settings.json
-// only when it will be written (review r4 finding 2).
+// only when it will be written.
 func planVSCodeSettings(p vscodePaths) (data []byte, write bool, err error) {
 	path := p.settings()
 	data, err = os.ReadFile(path)

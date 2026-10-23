@@ -45,7 +45,7 @@ func writeLinkedLayout(t *testing.T, home string) {
 	require.NoError(t, err)
 }
 
-// Review r1 finding 1: ~/.ssh and ~/.scion linked to directories OUTSIDE
+// ~/.ssh and ~/.scion linked to directories OUTSIDE
 // home (a dotfile manager, a ~/.scion moved to another disk) are followed:
 // ssh-config and vscode write into the link targets, and the links are
 // kept. Control: the same writers in a home without links.
@@ -79,8 +79,8 @@ func TestSSHAndVSCodeFollowLinksOutsideHome(t *testing.T) {
 	assert.FileExists(t, filepath.Join(plain, ".ssh", "config.d", "scion-hub"), "control: a home without links")
 }
 
-// Review r3 finding 1 on unix: a hard-linked ~/.ssh/config makes
-// writeSSHHubPlan refuse (addendum A1) BEFORE it writes the known-hosts or
+// On unix, a hard-linked ~/.ssh/config makes writeSSHHubPlan refuse
+// (the one-name rule) BEFORE it writes the known-hosts or
 // include file or creates their directories: home is unchanged. Control:
 // with one name the same call succeeds.
 func TestWriteSSHHubPlan_HardLinkedConfigNoSideEffect(t *testing.T) {
@@ -121,7 +121,7 @@ func TestWriteSSHHubPlan_HardLinkedConfigNoSideEffect(t *testing.T) {
 	assert.FileExists(t, p.includeFile("hub"))
 }
 
-// Review r4 finding 2 (unix): a hard-linked ~/.ssh/config that ALREADY has
+// On unix, a hard-linked ~/.ssh/config that ALREADY has
 // the scion Include line is not part of the operation (it is not written),
 // so writeSSHHubPlan succeeds and leaves it and its other name
 // byte-identical. The refusal side (Include line missing) is
@@ -148,7 +148,7 @@ func TestWriteSSHHubPlan_HardLinkedConfigWithIncludeLineUntouched(t *testing.T) 
 	assert.Equal(t, uint64(2), fi.Sys().(*syscall.Stat_t).Nlink, "still the same file with two names")
 }
 
-// Review r4 finding 2 (unix), vscode: a hard-linked settings.json that
+// On unix, vscode: a hard-linked settings.json that
 // already holds the managed values is not rewritten, so updateVSCodeFiles
 // succeeds and leaves it and its other name byte-identical. Refusal side:
 // the same hard link on a settings.json that needs the managed keys is

@@ -15,8 +15,8 @@
 // Package wintest holds test helpers for the Windows private-file tests.
 //
 // Symlink and junction creation FAILS the test when it does not work; it
-// never skips. A skipped symlink test reports green while testing nothing
-// (security checklist §5, §7.4). TestNoSkipOnSymlinkPaths in
+// never skips. A skipped symlink test reports green while testing
+// nothing. TestNoSkipOnSymlinkPaths in
 // pkg/util/privatefs enforces that no test calling these helpers skips.
 package wintest
 

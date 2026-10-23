@@ -29,7 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/internal/testutil/wintest"
 )
 
-// Design §3.5 X2: broker join is gated on Windows, but its token-file
+// Broker join is gated on Windows, but its token-file
 // warning reads the real DACL (privatefs.CheckPrivate), not mode bits: a
 // file granting Users read warns, naming the SID, and is still used.
 // Control: the same file with an owner-only DACL does not warn.

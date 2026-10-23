@@ -33,7 +33,7 @@ func assertPrivateFile(t *testing.T, path string) {
 	}
 }
 
-// Unix load keeps no privacy check (design row C1r: unix unchanged): a
+// Unix load makes no privacy check: a
 // group-readable credentials file still loads.
 func TestLoad_UnixKeepsNoPrivacyCheck(t *testing.T) {
 	path := useTempCredentials(t)

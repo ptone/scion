@@ -26,7 +26,7 @@ import (
 // anchored at its directory (normally ~/.scion): a reparse point is
 // refused, and the file's ACL is verified on the open handle. A file other
 // users can read is REFUSED, not repaired, by the same rule as the CLI
-// credentials (design row C1r, decision D3): the broker HMAC secret must
+// credentials: the broker HMAC secret must
 // not be used from a file others can read. Writing broker credentials is
 // gated on Windows (the broker commands are refused), so this read is the
 // only Windows-reachable access. A missing file reads as fs.ErrNotExist.

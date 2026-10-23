@@ -433,7 +433,7 @@ func TestSSHShellQuote(t *testing.T) {
 	}
 }
 
-// UserKnownHostsFile values (review r1 finding 2): unix refuses
+// UserKnownHostsFile values: unix refuses
 // whitespace and '%' (hint: TMPDIR); the Windows form forward-slashes the
 // path, quotes it when it has a space, and refuses '%', '"' and control
 // characters (hint: TMP and TEMP). Runs on every OS (the form is a

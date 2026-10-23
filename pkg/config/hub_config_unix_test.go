@@ -25,8 +25,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 )
 
-// Design win-cli §3.7 delta 4: createFileExclusive (the hub id fallback
-// where hard links are not supported) now chmods its 0600 file like the
+// createFileExclusive (the hub id fallback where hard links are not
+// supported) chmods its 0600 file like the
 // other exclusive creates, so a umask stricter than 077 cannot leave it
 // unwritable by its owner. Control: the 0600 file is not loosened beyond
 // 0600 under the default umask.

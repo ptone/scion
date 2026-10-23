@@ -24,10 +24,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 )
 
-// The Windows half of the private-file split (design win-cli §3.5, rows C9,
-// C10, C11). Mode bits mean nothing on Windows (an existing file's Perm
-// reads 0666 or 0444), so every decision here is made on an open handle
-// through privatefs: the owner SID for C9, the real DACL for C10 and C11.
+// The Windows half of the private-file split (the legacy migration owner
+// check, mkdirLikeLegacyRoot and the settings backups). Mode bits mean
+// nothing on Windows (an existing file's Perm reads 0666 or 0444), so every
+// decision here is made on an open handle through privatefs: the owner SID
+// for the owner check, the real DACL for the root and the backups.
 
 // currentUserOwns reports whether the migration may act on path: true only
 // when the object at path is owned by the current user's SID. It is opened
@@ -50,7 +51,8 @@ func currentUserOwns(path string, _ os.FileInfo) (bool, error) {
 }
 
 // sourceProtection is the protection a copy of the existing object open as
-// f gets (rows C10, C11): Inherit only when f is shown not to be private,
+// f gets (mkdirLikeLegacyRoot, the settings backups): Inherit only when f
+// is shown not to be private,
 // else Private. Protection follows the source's real ACL, never its
 // meaningless Perm; see protectionForCheck for the error mapping.
 func sourceProtection(f *os.File) privatefs.Protection {
@@ -59,11 +61,11 @@ func sourceProtection(f *os.File) privatefs.Protection {
 
 // protectionForCheck maps a privatefs.CheckPrivate result to the copy's
 // protection: Inherit for an error wrapping privatefs.ErrNotPrivate, and
-// Private when the check passes or fails with any other error (review r2
-// #2). Note what ErrNotPrivate covers: privatefs classifies a security
-// descriptor or owner it cannot read (GetSecurityInfo or the owner lookup
-// failing) as ErrNotPrivate, so that case yields Inherit, as design §3.5
-// says ("Private if it passes, else Inherit"). Only the errors privatefs
+// Private when the check passes or fails with any other error. Note what
+// ErrNotPrivate covers: privatefs classifies a security descriptor or
+// owner it cannot read (GetSecurityInfo or the owner lookup failing) as
+// ErrNotPrivate, so that case yields Inherit ("Private if it passes, else
+// Inherit"). Only the errors privatefs
 // does not wrap that way (the DACL or an ACE cannot be read, the process
 // identity cannot be built) fail closed to Private.
 func protectionForCheck(err error) privatefs.Protection {
@@ -74,7 +76,7 @@ func protectionForCheck(err error) privatefs.Protection {
 }
 
 // mkdirLikeLegacyRoot creates the canonical root scionHome/canonicalName
-// (row C10, :472) in a Tree anchored at scionHome: Private when the legacy
+// in a Tree anchored at scionHome: Private when the legacy
 // root scionHome/legacyName passes CheckPrivate, else Inherit. An existing
 // canonical root is left as it is.
 func mkdirLikeLegacyRoot(scionHome, legacyName, canonicalName string, _ os.FileInfo) error {
@@ -93,11 +95,11 @@ func mkdirLikeLegacyRoot(scionHome, legacyName, canonicalName string, _ os.FileI
 }
 
 // copySettingsBackup writes backupPath, in the directory of path, as a new
-// file holding a copy of the settings file at path (row C11). The source is
+// file holding a copy of the settings file at path. The source is
 // opened ONCE: the protection decision (sourceProtection: Private when it
 // passes CheckPrivate, else Inherit) and the read are made on that same
 // handle, so whatever object is actually read decides its own protection
-// (security checklist §7.3: no check-then-open). A partial copy is deleted
+// (no check-then-open). A partial copy is deleted
 // through its own handle.
 func copySettingsBackup(path, backupPath string, _ os.FileInfo) error {
 	if filepath.Dir(backupPath) != filepath.Dir(path) {

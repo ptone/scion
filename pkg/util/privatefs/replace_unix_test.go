@@ -62,7 +62,7 @@ func TestReplaceFollowing_UnixKeepsModeAndFollowsLink(t *testing.T) {
 	}
 }
 
-// Addendum A1 (unix delta on the relaxed ssh path): a target with a second
+// The one-name rule on unix (the relaxed ssh path): a target with a second
 // name is refused and left untouched. Control: an ordinary target with the
 // same mode is replaced.
 func TestReplaceFollowing_UnixRefusesHardLinkedTarget(t *testing.T) {

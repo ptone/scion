@@ -33,7 +33,7 @@ func setVSCodeLockWait(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { vscodeLockWait = prev })
 }
 
-// Design §3.7 delta 2: the vscode directory lock wait is bounded. With the
+// The vscode directory lock wait is bounded. With the
 // lock held (in-process: filelock locks are per open file, so a second
 // Acquire waits like another process would), a second lockVSCodeDir fails
 // after the wait with an error wrapping filelock.ErrTimeout instead of
@@ -88,7 +88,7 @@ func TestLockVSCodeDir_WaitsForRelease(t *testing.T) {
 	}
 }
 
-// The default wait is two minutes (design §3.7 delta 2).
+// The default wait is two minutes.
 func TestLockVSCodeDir_DefaultWait(t *testing.T) {
 	assert.Equal(t, 2*time.Minute, vscodeLockWait)
 }

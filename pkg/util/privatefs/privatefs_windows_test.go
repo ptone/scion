@@ -18,7 +18,7 @@ package privatefs
 
 // Every negative test has its positive control in the same test, so a
 // refusal cannot pass because the operation was broken for an unrelated
-// reason (security checklist §5).
+// reason.
 
 import (
 	"crypto/rand"
@@ -530,7 +530,7 @@ func TestTree_RenameIntoJunctionedDirRefused(t *testing.T) {
 	}
 }
 
-// §3.3.5: an owned, too-open file opened for writing is repaired on the
+// Verify-or-repair: an owned, too-open file opened for writing is repaired on the
 // same handle before any byte is written; opened read-only it is refused.
 func TestRepair_InPlaceOwned(t *testing.T) {
 	dir := t.TempDir()
@@ -560,7 +560,7 @@ func TestRepair_InPlaceOwned(t *testing.T) {
 	}
 }
 
-// §3.3.5: a too-open file owned by someone else is refused, not repaired.
+// Verify-or-repair: a too-open file owned by someone else is refused, not repaired.
 func TestRefuse_InPlaceForeignOwned(t *testing.T) {
 	dir := t.TempDir()
 	tr := treeAt(t, dir)
@@ -593,7 +593,7 @@ func TestRefuse_InPlaceForeignOwned(t *testing.T) {
 	assertPrivateSD(t, c)
 }
 
-// §3.3.6: on a volume without persistent ACLs (FAT32) a Private create
+// On a volume without persistent ACLs (FAT32) a Private create
 // fails, naming the volume as the cause; there is no fallback.
 func TestNoPersistentACLs_Refused(t *testing.T) {
 	vol := os.Getenv("SCION_TEST_FAT_VOLUME")
@@ -750,7 +750,7 @@ func TestAttrsByHandleInfo_SeesReparsePoints(t *testing.T) {
 // RenameOpen renames the file the handle is open on, not whatever holds
 // the temporary name at rename time: a file swapped in under that name
 // (by anyone who may delete and create entries in the directory) never
-// lands at the target (review r2 F1).
+// lands at the target.
 func TestRenameOpen_SwappedTempNeverLands(t *testing.T) {
 	dir := t.TempDir()
 	tr := treeAt(t, dir)
@@ -797,7 +797,7 @@ func TestRenameOpen_SwappedTempNeverLands(t *testing.T) {
 }
 
 // RenameOpen is a private-tree primitive: it verifies the source handle
-// with CheckPrivate and refuses a file that is not private (review r3 F2).
+// with CheckPrivate and refuses a file that is not private.
 func TestRenameOpen_RefusesNonPrivateHandle(t *testing.T) {
 	dir := t.TempDir()
 	wintest.Icacls(t, dir, "/grant", "*"+wintest.SIDUsers+":(OI)(CI)R")
@@ -825,8 +825,7 @@ func TestRenameOpen_RefusesNonPrivateHandle(t *testing.T) {
 }
 
 // RemoveOpen deletes the file the handle is open on, not whatever holds
-// its name: a file swapped in under the temporary name survives (review r3
-// F3).
+// its name: a file swapped in under the temporary name survives.
 func TestRemoveOpen_DeletesHandleNotName(t *testing.T) {
 	dir := t.TempDir()
 	tr := treeAt(t, dir)

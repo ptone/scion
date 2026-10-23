@@ -16,8 +16,8 @@
 
 package hubprofile
 
-// Windows site tests for design §3.5 rows C12-C15. Every refusal has its
-// positive control in the same test (security checklist §5).
+// Windows site tests for the hub profile files (run cache, entries,
+// profiles). Every refusal has its positive control in the same test.
 
 import (
 	"errors"
@@ -66,7 +66,7 @@ func homeWithUsersRead(t *testing.T) string {
 	return home
 }
 
-// C12 + C15: the run cache directories and the entry are created with the
+// The run cache directories and the entry are created with the
 // private descriptor although home grants Users read inheritably. Control:
 // a file created plainly in the same home carries the Users ACE.
 func TestReserveEntry_PrivateDespiteInheritableUsersACE(t *testing.T) {
@@ -84,7 +84,7 @@ func TestReserveEntry_PrivateDespiteInheritableUsersACE(t *testing.T) {
 	assert.True(t, wintest.ReadSD(t, plain).HasAllowACE(wintest.SIDUsers), "control: the Users ACE is inheritable")
 }
 
-// C13 refuse + control: an entry and a profile that grant Users read are
+// Refuse + control: an entry and a profile that grant Users read are
 // refused on read, naming the SID; with the private DACL they are read.
 func TestReadRefusesUsersReadableACL(t *testing.T) {
 	home := t.TempDir()
@@ -115,7 +115,7 @@ func TestReadRefusesUsersReadableACL(t *testing.T) {
 	require.NoError(t, err, "control: the private profile is read")
 }
 
-// C15 refuse + control: a junction at the run directory or at the profile
+// Refuse + control: a junction at the run directory or at the profile
 // cache directory is refused (it leads outside the tree) and nothing is
 // written where it points; with real directories the reservation works.
 func TestReserveEntry_RefusesJunctionedDirs(t *testing.T) {
@@ -149,7 +149,7 @@ func TestReserveEntry_RefusesJunctionedDirs(t *testing.T) {
 	}
 }
 
-// C15: the anchor itself (~/.scion/hub-profiles) and the components above
+// The anchor itself (~/.scion/hub-profiles) and the components above
 // it are followed when they are links: a redirected profile is legitimate.
 func TestReserveEntry_FollowsJunctionAboveAnchor(t *testing.T) {
 	home := t.TempDir()
@@ -163,7 +163,7 @@ func TestReserveEntry_FollowsJunctionAboveAnchor(t *testing.T) {
 	require.NoError(t, err, "the entry is under the junction's target")
 }
 
-// C14: replacing an entry whose DACL the user loosened gives a private
+// Replacing an entry whose DACL the user loosened gives a private
 // file (atomic replace repairs), with the new content and no temporary
 // file left. Control: the read before the replace is refused, so the entry
 // really started too open.

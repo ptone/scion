@@ -140,7 +140,7 @@ func TestCheckPrivate_RefusesOtherOwnerUnix(t *testing.T) {
 }
 
 // A FIFO planted in a tree is refused, never opened in a blocking way
-// (review finding 5: refuse must not become hang).
+// (a refusal must not become a hang).
 func TestOpenPrivate_RefusesFIFO(t *testing.T) {
 	tr, dir := openTestTree(t)
 	if err := syscall.Mkfifo(filepath.Join(dir, "fifo"), 0o600); err != nil {

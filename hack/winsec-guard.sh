@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# winsec-guard: static guard for the Windows build's file-protection rules
-# (design win-cli §4.4; security checklist §7.1, §7.2, §7.5).
+# winsec-guard: static guard for the Windows build's file-protection
+# rules.
 #
 # WHAT IT CHECKS
 # Over every non-test Go file of this module that a GOOS=windows build of
@@ -37,11 +37,11 @@
 #
 # LIST
 # hack/winsec-unprotected.txt: one file per line, "<path> <status>", where
-# status starts with "pending Phase 3" (a findings §4a site not yet on
-# privatefs/pathcanon) or "not protected on Windows: gated" (a server or
-# broker site behind the Windows command gate). Every listed path must exist
-# and appear once. This is the "honest" form of checklist §1: the list says
-# which files are not protected on Windows.
+# status starts with "pending Phase 3" (a client-reachable private-file site
+# not yet on privatefs/pathcanon; the keyword is what this script parses) or
+# "not protected on Windows: gated" (a server or broker site behind the
+# Windows command gate). Every listed path must exist and appear once. The
+# list states openly which files are not protected on Windows.
 #
 # USAGE
 #   hack/winsec-guard.sh              run the guard (repo root or any subdir)

@@ -88,7 +88,7 @@ func TestAcquire_RefusesDirectory(t *testing.T) {
 	mustAcquireRegular(t, dir)
 }
 
-// Security lead ruling H: Acquire's handle does not share delete access,
+// Acquire's handle does not share delete access,
 // so a held lock file cannot be deleted (and re-created and locked by a
 // third process).
 func TestAcquire_HeldFileCannotBeDeleted(t *testing.T) {
@@ -250,7 +250,7 @@ func TestAttrsByHandleInfo_SeesReparsePoints(t *testing.T) {
 }
 
 // A lock in a directory the user may not write, where the file does not
-// exist, reports the denied create, not "not found" (review finding 9).
+// exist, reports the denied create, not "not found".
 func TestAcquire_DeniedCreateReportsDenial(t *testing.T) {
 	dir := t.TempDir()
 	ro := filepath.Join(dir, "ro")
@@ -270,8 +270,7 @@ func TestAcquire_DeniedCreateReportsDenial(t *testing.T) {
 }
 
 // The refusal message names a reparse tag only when one was read: the FAT
-// attribute fallback reads none, and its 0 is not a tag (security lead nit,
-// deferred from Phase 1).
+// attribute fallback reads none, and its 0 is not a tag.
 func TestReparseTagText_NoTagClaimedWithoutOne(t *testing.T) {
 	if got := reparseTagText(0, false); strings.Contains(got, "0x") || strings.Contains(got, "tag 0") {
 		t.Fatalf("fallback text %q claims a tag", got)
