@@ -1672,3 +1672,45 @@ func mustOutputErr(dir string, args ...string) ([]byte, error) {
 	c := exec.Command("git", append([]string{"-C", dir}, args...)...)
 	return c.CombinedOutput()
 }
+
+// The host-side guard refuses a root-level .git/commondir or gitdir in a linked
+// checkout (a .git directory): such a file would redirect the repository's common
+// git dir — where host git reads config, hooks and refs — through an
+// agent-writable path. A .git gitfile (a linked worktree) is not the target.
+func TestRefuseRootCommonDirRedirect(t *testing.T) {
+	dir := t.TempDir()
+	gitDir := filepath.Join(dir, ".git")
+	if err := os.MkdirAll(gitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A normal .git directory (no root commondir/gitdir) passes.
+	if err := refuseRootCommonDirRedirect(dir); err != nil {
+		t.Fatalf("a .git with no root commondir/gitdir must pass, got: %v", err)
+	}
+	// A root-level commondir or gitdir is refused.
+	for _, name := range []string{"commondir", "gitdir"} {
+		p := filepath.Join(gitDir, name)
+		if err := os.WriteFile(p, []byte("../elsewhere\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		err := refuseRootCommonDirRedirect(dir)
+		var refused *RepoConfigRefusedError
+		if !errors.As(err, &refused) {
+			t.Errorf("a root .git/%s must be refused with RepoConfigRefusedError, got: %v", name, err)
+		}
+		if err := os.Remove(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A .git gitfile (a linked worktree, which legitimately resolves a commondir
+	// inside its admin dir) is not the target of this guard.
+	if err := os.RemoveAll(gitDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(gitDir, []byte("gitdir: /somewhere/worktrees/x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := refuseRootCommonDirRedirect(dir); err != nil {
+		t.Errorf("a .git gitfile (linked worktree) must not be refused, got: %v", err)
+	}
+}

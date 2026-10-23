@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
@@ -157,7 +158,10 @@ func privateConfigUpstreamSeed(branch string) []byte {
 // .git/config. A missing file is not an error (returns empty); a file larger
 // than the cap is.
 func readBaseGitConfig(path string) ([]byte, error) {
-	f, err := os.Open(path)
+	// Open with O_NOFOLLOW so a symlink at the base .git/config path cannot
+	// redirect the broker's read elsewhere, and confirm via fstat that the opened
+	// file is a regular file (not a FIFO/device). A missing file is not an error.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -165,6 +169,13 @@ func readBaseGitConfig(path string) ([]byte, error) {
 		return nil, err
 	}
 	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("base git config %s is not a regular file", path)
+	}
 	raw, err := io.ReadAll(io.LimitReader(f, maxPrivateGitConfigSize+1))
 	if err != nil {
 		return nil, err

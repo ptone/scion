@@ -36,9 +36,12 @@ func TestK8sSharedRepoShapeRefusal(t *testing.T) {
 	// a git-backed NFS shared workspace with no worktree/agent-dir — i.e. nfsBaseConfig.
 	sticky := nfsBaseConfig("sticky")
 
-	// A non-git NFS shared workspace has no shared .git to protect.
-	nonGitShared := nfsBaseConfig("plain")
-	nonGitShared.GitCloneForInit = nil
+	// An NFS shared-workspace shape with no clone input (e.g. a bare restart, or
+	// an agent whose shape is otherwise unset): the shared-workspace shape is a
+	// shared git checkout regardless of the ephemeral GitCloneForInit, so it is
+	// refused fail-closed.
+	sharedNoClone := nfsBaseConfig("plain")
+	sharedNoClone.GitCloneForInit = nil
 
 	cases := []struct {
 		name    string
@@ -50,7 +53,7 @@ func TestK8sSharedRepoShapeRefusal(t *testing.T) {
 		{"#3998 sticky shared checkout", sticky, true},
 		{"clone-per-agent", nfsAgentDirConfig("cpa"), false},
 		{"empty-per-agent", nfsEmptyAgentDirConfig("epa"), false},
-		{"non-git shared workspace", nonGitShared, false},
+		{"shared workspace, no clone input (fail closed)", sharedNoClone, true},
 		{"local emptyDir", minimalRunConfig(), false},
 	}
 	for _, tc := range cases {
@@ -130,5 +133,45 @@ func TestK8sGitAdminReadOnlyMounts(t *testing.T) {
 	own := got[len(got)-1]
 	if own.ReadOnly {
 		t.Error("the agent's own worktree admin dir must be read-write")
+	}
+}
+
+// The shape is derived from the re-sent workspace mode, not the ephemeral
+// GitCloneForInit, so the refusal fires on a bare restart (GitCloneForInit nil)
+// of a shared-repo agent, while clone-per-agent and empty-per-agent are not
+// refused. An unset shape on an NFS agent is refused fail-closed.
+func TestK8sSharedRepoShapeRefusal_Restart(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(*RunConfig)
+		refused bool
+	}{
+		{"shared-workspace bare restart", func(c *RunConfig) { c.GitCloneForInit = nil }, true},
+		{"worktree-per-agent bare restart", func(c *RunConfig) {
+			c.GitCloneForInit = nil
+			c.NFSWorktreeName = "agent-1"
+		}, true},
+		{"clone-per-agent restart", func(c *RunConfig) {
+			c.GitCloneForInit = nil
+			c.NFSAgentDirName = "clone"
+		}, false},
+		{"empty-per-agent restart", func(c *RunConfig) {
+			c.GitCloneForInit = nil
+			c.NFSAgentDirName = "empty"
+			c.NFSAgentDirEmpty = true
+		}, false},
+		{"unset shape on an NFS agent (fail closed)", func(c *RunConfig) {
+			c.GitCloneForInit = nil
+		}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := nfsBaseConfig("restart")
+			tc.mutate(&cfg)
+			_, refuse := k8sSharedRepoShapeRefusal(cfg)
+			if refuse != tc.refused {
+				t.Errorf("refuse = %v, want %v", refuse, tc.refused)
+			}
+		})
 	}
 }

@@ -337,22 +337,29 @@ safe stops the command rather than being ignored.
   from the remote configured in the clone, then fast-forwards the current branch.
 
 Your own git commands in your checkout are not affected. Scion also mounts the repository's git
-metadata into agents so that an agent cannot change what git does for you or for other agents: the
-hooks and admin directories (`.git/hooks`, `.git/info`, `.git/objects/info`, and other agents'
-worktree admin directories) are read-only, and each agent gets its own **private, read-only copy of
-`.git/config`** in place of the shared one. The private copy has credential-bearing settings
-stripped and is pre-seeded so that `git push` and `git push -u origin <branch>` for the agent's own
-branch succeed without needing to write the config. Personal git preferences inside the agent go in
-the agent's own global git config, which is writable, not in the repository config. On the Apple
-runtime agents read the repository's git config directly; keep credentials out of repository git
-config (use a credential helper). The Apple runtime also mounts the whole `.git` read-only (only the
-agent's own worktree admin dir, objects, refs and logs are writable), so in-container operations that
-rewrite shared `.git` root files — `git pack-refs` / `git gc`, deleting a packed-only branch, or
-fetching into a shallow clone — do not work inside an Apple agent.
+metadata into agents so that an agent cannot change what git does for you or for other agents. In the
+worktree layouts, the whole `.git` root is mounted **read-only**, so an agent cannot create a
+root-level file git honours (such as a `commondir` that would redirect where git reads config, hooks
+and refs from). Only the paths an in-container git must write are re-opened read-write: `objects/`,
+`refs/`, `logs/`, the git-lfs object store (`.git/lfs`), the rerere cache (`.git/rr-cache`), and the
+agent's own worktree admin directory. On docker and podman, `.git/config` is served from each agent's
+own **private, read-only copy** in place of the shared one; the private copy has credential-bearing
+settings stripped and is pre-seeded so that `git push` and `git push -u origin <branch>` for the
+agent's own branch succeed without needing to write the config. Personal git preferences inside the
+agent go in the agent's own global git config, which is writable, not in the repository config. On the
+Apple runtime agents read the repository's git config directly; keep credentials out of repository git
+config (use a credential helper).
 
-This applies to the worktree-per-agent layout, where each agent has its own worktree. In the
-shared-workspace layout agents share one working tree and the `.git` root stays writable, so the
-cross-agent protection is limited to the read-only admin surface above.
+Commit, branch creation, fetch, pull and push work normally. Because the `.git` root is read-only, a
+few operations that write a lock or state file directly in it do not work inside an agent: deleting a
+branch and `git fetch --prune` (both need `packed-refs.lock`), `git gc` / `git pack-refs`, and
+fetching into a shallow clone. These fail cleanly, without corrupting the repository.
+
+This applies to the worktree-per-agent and outside-root layouts, where each agent has its own
+worktree. In the shared-workspace layout agents share one working tree and the `.git` root stays
+writable; there the host-side git controls additionally refuse to run if a root-level `commondir` or
+`gitdir` is present in the repository, so a redirect file cannot steer git that Scion runs on the
+host.
 
 On Kubernetes, git projects that share one repository across agents (worktree-per-agent or
 shared-workspace on NFS) are not supported: use a clone-per-agent workspace, where each agent gets

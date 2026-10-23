@@ -517,13 +517,15 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			if !ok {
 				return nil, fmt.Errorf("agent %q: cannot resolve the broker-recorded worktree admin directory for workspace %q against %q; refusing to mount git metadata", config.Name, config.Workspace, gitDir)
 			}
-			if config.RuntimeName == appleContainerRuntimeName {
-				if err := registerAppleGitMounts(registerMount, gitDir, "/repo-root/.git", name); err != nil {
-					return nil, err
-				}
-			} else {
-				registerMount(gitDir, "/repo-root/.git", false, true)
-				if err := registerRwBaseGitNarrowing(registerMount, config, gitDir, "/repo-root/.git", name); err != nil {
+			// The .git root is read-only (no root-level commondir/other honoured
+			// file can be created); objects/refs/logs/own-worktree are read-write.
+			// docker/podman additionally bind the per-agent private config; Apple
+			// reads the repository config directly (documented).
+			if err := registerReadOnlyBaseGitMounts(registerMount, gitDir, "/repo-root/.git", name); err != nil {
+				return nil, err
+			}
+			if config.RuntimeName != appleContainerRuntimeName {
+				if err := registerPrivateGitConfig(registerMount, config, "/repo-root/.git"); err != nil {
 					return nil, err
 				}
 			}
@@ -949,6 +951,39 @@ func bindReadOnlyCreateFirstFile(registerMount func(string, string, bool, bool),
 	return nil
 }
 
+// ensureOverlayDir creates src as a directory if it does not exist, so a
+// read-write overlay can be bound over an otherwise read-only base. It fails
+// closed: an existing non-directory, a symlink, or a creation error returns an
+// error so the caller refuses the start rather than binding an unexpected source.
+func ensureOverlayDir(src string) error {
+	fi, err := os.Lstat(src)
+	switch {
+	case err == nil:
+		if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+			return fmt.Errorf("overlay source %s is not a directory", src)
+		}
+	case os.IsNotExist(err):
+		if mkErr := os.MkdirAll(src, 0755); mkErr != nil {
+			return fmt.Errorf("create overlay dir %s: %w", src, mkErr)
+		}
+	default:
+		return fmt.Errorf("stat overlay dir %s: %w", src, err)
+	}
+	return nil
+}
+
+// bindReadWriteOverlayDir binds src read-write over dst, creating src as a
+// directory first if it does not exist (fail closed via ensureOverlayDir). Used
+// to re-open the specific directories an in-container git must write (objects/,
+// refs/, logs/, lfs/, rr-cache/) on top of a read-only .git base.
+func bindReadWriteOverlayDir(registerMount func(string, string, bool, bool), src, dst string) error {
+	if err := ensureOverlayDir(src); err != nil {
+		return err
+	}
+	registerMount(src, dst, false, true)
+	return nil
+}
+
 // narrowModuleAdminDirs binds read-only every .git/modules/<sub>/{hooks,info}
 // directory and <sub>/config file that exists at start, under containerGitDir.
 // Submodule admin dirs are honored by host-side git and by the agent's own
@@ -1137,14 +1172,12 @@ func checkPrivateGitConfigSource(path string) error {
 }
 
 // registerWorktreeGitMounts registers the .git mounts for an in-repo worktree
-// layout (workspace is a subdirectory of the repo root), applying the
-// narrowing on every runtime. On docker/podman the base .git is bound
-// read-write and the admin surface is narrowed on top (read-only hooks/info/
-// objects-info/ sibling-worktrees, plus the per-agent private config over
-// .git/config). On Apple, which cannot bind single files, the base .git is bound
-// read-only and only the directories an in-container git must write (objects/,
-// refs/, logs/ and the agent's own worktrees/<name>/) are overlaid read-write;
-// .git/config is then read-only there (documented trade-off).
+// layout (workspace is a subdirectory of the repo root). On every runtime the
+// base .git is bound read-only (registerReadOnlyBaseGitMounts), with read-write
+// overlays only for the paths an in-container git must write, so no root-level
+// file git honours can be created. On docker/podman a per-agent redacted private
+// config is then bound read-only over .git/config; Apple cannot bind a single
+// file, so there the agent reads the repository config directly (documented).
 func registerWorktreeGitMounts(registerMount func(string, string, bool, bool), config RunConfig) error {
 	gitDir := filepath.Join(config.RepoRoot, ".git")
 	const containerGit = "/repo-root/.git"
@@ -1156,11 +1189,18 @@ func registerWorktreeGitMounts(registerMount func(string, string, bool, bool), c
 	if !ok {
 		return fmt.Errorf("agent %q: cannot resolve the broker-recorded worktree admin directory for workspace %q against %q; refusing to mount git metadata", config.Name, config.Workspace, gitDir)
 	}
-	if config.RuntimeName == appleContainerRuntimeName {
-		return registerAppleGitMounts(registerMount, gitDir, containerGit, name)
+	// The .git root is read-only on every runtime (so no root-level commondir or
+	// other honoured file can be created); objects/refs/logs/own-worktree are
+	// overlaid read-write. On docker/podman a per-agent redacted private config is
+	// then bound read-only over .git/config; Apple cannot bind a single file, so
+	// there the agent reads the repository config directly (documented).
+	if err := registerReadOnlyBaseGitMounts(registerMount, gitDir, containerGit, name); err != nil {
+		return err
 	}
-	registerMount(gitDir, containerGit, false, true)
-	return registerRwBaseGitNarrowing(registerMount, config, gitDir, containerGit, name)
+	if config.RuntimeName == appleContainerRuntimeName {
+		return nil
+	}
+	return registerPrivateGitConfig(registerMount, config, containerGit)
 }
 
 // registerRwBaseGitNarrowing narrows a read-write .git base
@@ -1181,22 +1221,37 @@ func registerRwBaseGitNarrowing(registerMount func(string, string, bool, bool), 
 	return registerPrivateGitConfig(registerMount, config, containerGitDir)
 }
 
-// registerAppleGitMounts implements the Apple read-only-.git layout. The
-// whole .git is bound read-only as a directory, then the directories an
-// in-container git must write are overlaid read-write: objects/ (loose objects),
-// refs/, logs/, and the agent's own worktrees/<name>/. objects/info/ is pinned
-// read-only again on top of the read-write objects/ overlay (alternates), as is
-// the agent's own worktrees/<name>/{gitdir,config.worktree}. hooks/, info/ and
-// .git/config stay read-only by inheritance from the read-only base.
-// worktreeName must be the broker-trusted admin name (trustedWorktreeAdminName).
-func registerAppleGitMounts(registerMount func(string, string, bool, bool), gitDir, containerGitDir, worktreeName string) error {
+// registerReadOnlyBaseGitMounts implements the read-only-.git-root layout used by
+// the worktree and outside-root fallback layouts on every runtime. The whole .git
+// is bound read-only as a directory, so no new root-level entry (commondir,
+// gitdir, or any other file git would honour) can be created. Only the specific
+// paths an in-container git must write are re-opened read-write on top:
+//   - objects/, refs/, logs/ (commit/fetch/push write loose objects, refs, reflogs);
+//   - lfs/ (the in-container git-lfs object store) and rr-cache/ (rerere) — these
+//     are directories, so writes land in their own subtrees, not the root;
+//   - the agent's own worktrees/<name>/ (its HEAD/index/logs).
+//
+// objects/info/ is pinned read-only again on top of the read-write objects/
+// overlay (alternates), as are the agent's own worktrees/<name>/{gitdir,commondir,
+// config.worktree}. hooks/, info/, the root config and every other root entry
+// stay read-only by inheritance from the read-only base. Overlay source dirs are
+// created host-side first, failing closed (a symlink or non-directory source
+// refuses the start).
+//
+// Operations that write a lock or state file directly in the .git root fail
+// cleanly rather than silently, and are documented limitations of this layout
+// (the same ones the Apple layout has): deleting a branch or fetch --prune
+// (packed-refs.lock), git gc / git pack-refs, and a shallow fetch (shallow.lock)
+// all need a writable .git root; objects under modules/<name>/ (submodules) are
+// read-only too. Commit, branch creation, fetch, pull and push work normally.
+// worktreeName must be the broker-trusted admin name (trustedWorktreeAdminName),
+// or "" when the layout has no own per-agent worktree.
+func registerReadOnlyBaseGitMounts(registerMount func(string, string, bool, bool), gitDir, containerGitDir, worktreeName string) error {
 	registerMount(gitDir, containerGitDir, true, true) // read-only base
-	for _, dir := range []string{"objects", "refs", "logs"} {
-		src := filepath.Join(gitDir, dir)
-		if err := os.MkdirAll(src, 0755); err != nil {
-			continue
+	for _, dir := range []string{"objects", "refs", "logs", "lfs", "rr-cache"} {
+		if err := bindReadWriteOverlayDir(registerMount, filepath.Join(gitDir, dir), filepath.Join(containerGitDir, dir)); err != nil {
+			return err
 		}
-		registerMount(src, filepath.Join(containerGitDir, dir), false, true) // read-write overlay
 	}
 	// objects/info read-only again (alternates), on top of the rw objects/.
 	narrowObjectsInfo(registerMount, gitDir, containerGitDir)

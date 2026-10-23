@@ -301,3 +301,21 @@ func TestSeedPrivateGitConfig_EscapesBranchSubsection(t *testing.T) {
 		}
 	}
 }
+
+// A base .git/config that is a symlink must be refused (O_NOFOLLOW), so the
+// broker's read of the base cannot be redirected elsewhere by a symlink an agent
+// (or anything) left at the base config path.
+func TestSeedPrivateGitConfig_RefusesSymlinkedBase(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "outside")
+	if err := os.WriteFile(target, []byte("[core]\n\tfilemode = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	base := filepath.Join(dir, "config")
+	if err := os.Symlink(target, base); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := seedPrivateGitConfig(base, t.TempDir(), "agent-x"); err == nil {
+		t.Error("a symlinked base .git/config must be refused, got nil")
+	}
+}

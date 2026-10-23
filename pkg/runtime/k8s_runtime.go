@@ -4741,31 +4741,34 @@ func NFSWorktreeContainerPath(name string) string {
 // neutral end-state message to return if so. The shared-.git shapes are:
 //   - worktree-per-agent (NFSWorktreeName set): every agent mounts the shared
 //     .git at /repo-root/.git;
-//   - shared-workspace git (git-backed, not clone-per-agent, not empty-per-agent),
-//     which includes pre-#3998 agents that stay on the project's shared checkout
-//     (nfsKeepSharedCheckout).
+//   - shared-workspace (the project's shared checkout, with its .git, mounted at
+//     /workspace for every agent), which includes pre-#3998 agents that stay on
+//     the shared checkout (nfsKeepSharedCheckout).
 //
-// Clone-per-agent (each agent its own clone), empty-per-agent, a non-git shared
-// workspace, and the local/emptyDir backends do not share a .git and are allowed.
+// Clone-per-agent (NFSAgentDirName set) and empty-per-agent (NFSAgentDirEmpty)
+// each get their own agent directory and do not share a .git; the local/emptyDir
+// backends do not either. Everything else on the NFS backend is a shared checkout.
 //
-// The shared-workspace-git signal is read from the start inputs (GitCloneForInit,
-// derived from SharedWorkspaceClone). A restart that carries none of the start
-// inputs leaves that nil, so the refusal is driven by create/start, the paths
-// that establish the shape; an already-running shared-workspace git agent is not
-// re-refused on a bare restart.
+// The shape is derived from the workspace sharing mode (SharedWorkspace /
+// WorkspaceMode), which is re-sent on every start, not from the ephemeral
+// GitCloneForInit. So the refusal fires on EVERY start of a shared-repo agent,
+// including a bare restart; and an NFS agent whose shape is unset/unknown is
+// refused fail-closed rather than brought up on a writable shared checkout.
 func k8sSharedRepoShapeRefusal(config RunConfig) (string, bool) {
 	if config.WorkspaceBackendName != "nfs" || config.NFSPVClaimName == "" {
 		return "", false
 	}
-	sharedGit := config.NFSWorktreeName != ""
-	if config.NFSAgentDirName == "" && !config.NFSAgentDirEmpty && config.GitCloneForInit != nil {
-		// Shared-workspace git: the whole shared checkout (with its .git) is
-		// mounted at /workspace for every agent in the project.
-		sharedGit = true
+	// worktree-per-agent: every agent mounts the shared .git.
+	if config.NFSWorktreeName != "" {
+		return k8sSharedRepoShapeRefusalText, true
 	}
-	if !sharedGit {
+	// clone-per-agent and empty-per-agent get their own agent directory and do not
+	// share a repository.
+	if config.NFSAgentDirName != "" || config.NFSAgentDirEmpty {
 		return "", false
 	}
+	// Otherwise this NFS agent uses the project's shared checkout (shared-workspace),
+	// a shared git repository — refused on create, restart, or an unset shape.
 	return k8sSharedRepoShapeRefusalText, true
 }
 

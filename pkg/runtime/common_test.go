@@ -1414,17 +1414,18 @@ func TestNarrowGitAdminMounts_HubNativeDocker(t *testing.T) {
 	}
 	argStr := strings.Join(args, " ")
 
-	// The rw base .git mount must remain (agents still need to commit).
-	wantRW := fmt.Sprintf("-v %s:/repo-root/.git ", filepath.Join(repoRoot, ".git"))
-	if !strings.Contains(argStr, wantRW) {
-		t.Errorf("expected rw base .git mount %q, got: %s", wantRW, argStr)
+	// The .git root is bound READ-ONLY (so hooks/info and every other root entry
+	// are read-only by inheritance; no new root-level file can be created).
+	wantRO := fmt.Sprintf("-v %s:/repo-root/.git:ro", filepath.Join(repoRoot, ".git"))
+	if !strings.Contains(argStr, wantRO) {
+		t.Errorf("expected read-only base .git mount %q, got: %s", wantRO, argStr)
 	}
 
-	// hooks/ and info/ (and objects/info) are read-only.
-	for _, sub := range []string{"hooks", "info"} {
-		want := fmt.Sprintf("-v %s:/repo-root/.git/%s:ro", filepath.Join(repoRoot, ".git", sub), sub)
+	// The writable overlays an in-container git needs.
+	for _, sub := range []string{"objects", "refs", "logs"} {
+		want := fmt.Sprintf("-v %s:/repo-root/.git/%s ", filepath.Join(repoRoot, ".git", sub), sub)
 		if !strings.Contains(argStr, want) {
-			t.Errorf("expected narrowed read-only mount %q, got: %s", want, argStr)
+			t.Errorf("expected read-write overlay %q, got: %s", want, argStr)
 		}
 	}
 	wantObjInfo := fmt.Sprintf("-v %s:/repo-root/.git/objects/info:ro", filepath.Join(repoRoot, ".git", "objects", "info"))
@@ -1438,10 +1439,7 @@ func TestNarrowGitAdminMounts_HubNativeDocker(t *testing.T) {
 		t.Errorf("expected the private config bound read-only over .git/config %q, got: %s", wantPriv, argStr)
 	}
 
-	// config.worktree is bound read-only (create-first), so writes fail.
-	if !strings.Contains(argStr, ":/repo-root/.git/config.worktree:ro") {
-		t.Errorf("expected a read-only config.worktree mount, got: %s", argStr)
-	}
+	// The own worktree admin dir's config.worktree stays read-only.
 	if !strings.Contains(argStr, ":/repo-root/.git/worktrees/agent-1/config.worktree:ro") {
 		t.Errorf("expected the own worktree config.worktree bound read-only, got: %s", argStr)
 	}
@@ -1484,11 +1482,10 @@ func TestNarrowGitAdminMounts_AppliesToLinkedProject(t *testing.T) {
 	}
 	argStr := strings.Join(args, " ")
 
-	for _, sub := range []string{"hooks", "info"} {
-		want := fmt.Sprintf("-v %s:/repo-root/.git/%s:ro", filepath.Join(gitDir, sub), sub)
-		if !strings.Contains(argStr, want) {
-			t.Errorf("linked project must get the narrowed read-only mount %q, got: %s", want, argStr)
-		}
+	// The linked checkout's .git root is read-only (hooks/info read-only by
+	// inheritance); the config is served from the private copy.
+	if want := fmt.Sprintf("-v %s:/repo-root/.git:ro", gitDir); !strings.Contains(argStr, want) {
+		t.Errorf("linked project must get a read-only .git root %q, got: %s", want, argStr)
 	}
 	if want := fmt.Sprintf("-v %s:/repo-root/.git/config:ro", priv); !strings.Contains(argStr, want) {
 		t.Errorf("expected private config bound read-only %q, got: %s", want, argStr)
@@ -1496,8 +1493,8 @@ func TestNarrowGitAdminMounts_AppliesToLinkedProject(t *testing.T) {
 }
 
 func TestNarrowGitAdminMounts_AppliesToPodman(t *testing.T) {
-	// Podman now gets the same narrowing as docker (rw base .git,
-	// read-only hooks/info, private config over .git/config).
+	// Podman gets the same read-only-root layout as docker (read-only .git root,
+	// read-write objects/refs/logs overlays, private config over .git/config).
 	repoRoot, workspace := setupHubManagedBaseRepo(t, "agent-1")
 	priv := seedTestPrivateGitConfig(t)
 	args, err := buildCommonRunArgs(RunConfig{
@@ -1514,11 +1511,8 @@ func TestNarrowGitAdminMounts_AppliesToPodman(t *testing.T) {
 		t.Fatalf("buildCommonRunArgs failed: %v", err)
 	}
 	argStr := strings.Join(args, " ")
-	for _, sub := range []string{"hooks", "info"} {
-		want := fmt.Sprintf("-v %s:/repo-root/.git/%s:ro", filepath.Join(repoRoot, ".git", sub), sub)
-		if !strings.Contains(argStr, want) {
-			t.Errorf("podman must get the read-only mount %q, got: %s", want, argStr)
-		}
+	if want := fmt.Sprintf("-v %s:/repo-root/.git:ro", filepath.Join(repoRoot, ".git")); !strings.Contains(argStr, want) {
+		t.Errorf("podman must get a read-only .git root %q, got: %s", want, argStr)
 	}
 	if want := fmt.Sprintf("-v %s:/repo-root/.git/config:ro", priv); !strings.Contains(argStr, want) {
 		t.Errorf("podman must get the private config bound read-only %q, got: %s", want, argStr)
@@ -1569,11 +1563,12 @@ func TestAppleWorktreeGitMounts_ReadOnlyGitWithRwOverlays(t *testing.T) {
 }
 
 func TestNarrowGitAdminMounts_CreatesMissingHooksAndInfoDirs(t *testing.T) {
-	// An empty/custom init.templateDir (or `git init --template=`) can
-	// produce a base without .git/hooks or .git/info. Skipping the mount in
-	// that case would fail open: the container could then create its own
-	// writable hooks/info directly in the rw .git root. narrowGitAdminMounts
-	// must create both on the host before mounting.
+	// The shared-plain layout keeps a read-write .git root (the main worktree's
+	// HEAD/index live there), so its admin surface is narrowed on top. An
+	// empty/custom init.templateDir can produce a base without .git/hooks or
+	// .git/info; skipping the read-only mount would fail open (the container could
+	// create its own writable hooks/info in the rw root), so narrowGitAdminMounts
+	// creates both on the host before mounting them read-only.
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	repoRoot := filepath.Join(home, config.GlobalDir, config.ProjectsDir, "myproject")
@@ -1585,15 +1580,11 @@ func TestNarrowGitAdminMounts_CreatesMissingHooksAndInfoDirs(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Deliberately do NOT create hooks/ or info/.
-	workspace := filepath.Join(repoRoot, "worktrees", "agent-1")
-	if err := os.MkdirAll(workspace, 0755); err != nil {
-		t.Fatal(err)
-	}
-	setupWorktreeAdmin(t, repoRoot, "agent-1", workspace)
 	if _, err := os.Stat(filepath.Join(gitDir, "hooks")); err == nil {
 		t.Fatal("test setup invariant broken: hooks/ should not exist yet")
 	}
 
+	// Shared-plain: the workspace IS the repo root.
 	args, err := buildCommonRunArgs(RunConfig{
 		Harness:                &harness.Generic{},
 		Name:                   "test-agent",
@@ -1601,7 +1592,7 @@ func TestNarrowGitAdminMounts_CreatesMissingHooksAndInfoDirs(t *testing.T) {
 		Image:                  "scion-agent:latest",
 		RuntimeName:            "docker",
 		RepoRoot:               repoRoot,
-		Workspace:              workspace,
+		Workspace:              repoRoot,
 		PrivateGitConfigSource: seedTestPrivateGitConfig(t),
 	})
 	if err != nil {
@@ -1613,7 +1604,7 @@ func TestNarrowGitAdminMounts_CreatesMissingHooksAndInfoDirs(t *testing.T) {
 		if _, statErr := os.Stat(filepath.Join(gitDir, sub)); statErr != nil {
 			t.Errorf("expected narrowGitAdminMounts to create %s on the host, got: %v", sub, statErr)
 		}
-		want := fmt.Sprintf("-v %s:/repo-root/.git/%s:ro", filepath.Join(gitDir, sub), sub)
+		want := fmt.Sprintf("-v %s:/workspace/.git/%s:ro", filepath.Join(gitDir, sub), sub)
 		if !strings.Contains(argStr, want) {
 			t.Errorf("expected read-only mount %q even though %s was initially missing, got: %s", want, sub, argStr)
 		}
@@ -1649,27 +1640,18 @@ func TestNarrowSharerRegistryMounts_HubNativeDocker(t *testing.T) {
 	}
 	argStr := strings.Join(args, " ")
 
-	sharersDir := filepath.Join(gitDir, "scion-sharers")
-	if _, statErr := os.Stat(sharersDir); statErr != nil {
-		t.Errorf("expected narrowSharerRegistryMounts to create the sharer-registry dir on the host, got: %v", statErr)
+	// The .git root is read-only, so the sharer-registry dir, hooks/ and info/ are
+	// read-only by inheritance (no separate read-write overlay for scion-sharers).
+	if !strings.Contains(argStr, "-v "+gitDir+":/repo-root/.git:ro") {
+		t.Errorf("expected a read-only .git root, got: %s", argStr)
 	}
-	wantSharers := fmt.Sprintf("-v %s:/repo-root/.git/scion-sharers:ro", sharersDir)
-	if !strings.Contains(argStr, wantSharers) {
-		t.Errorf("expected read-only sharer-registry mount %q, got: %s", wantSharers, argStr)
+	if strings.Contains(argStr, ":/repo-root/.git/scion-sharers ") {
+		t.Errorf("the sharer-registry dir must not be read-write, got: %s", argStr)
 	}
-
+	// The agent's own admin back-link stays read-only, and config is the private copy.
 	wantBackLink := fmt.Sprintf("-v %s:/repo-root/.git/worktrees/agent-1/gitdir:ro", filepath.Join(backLinkDir, "gitdir"))
 	if !strings.Contains(argStr, wantBackLink) {
 		t.Errorf("expected read-only admin back-link mount %q, got: %s", wantBackLink, argStr)
-	}
-
-	// The broader admin surface applies too (hooks/info read-only; config via
-	// the private copy, not a read-only bind).
-	for _, sub := range []string{"hooks", "info"} {
-		want := fmt.Sprintf("-v %s:/repo-root/.git/%s:ro", filepath.Join(gitDir, sub), sub)
-		if !strings.Contains(argStr, want) {
-			t.Errorf("expected read-only mount %q to still apply, got: %s", want, argStr)
-		}
 	}
 	if !strings.Contains(argStr, ":/repo-root/.git/config:ro") {
 		t.Errorf("config must be bound read-only (private copy), got: %s", argStr)
@@ -1725,26 +1707,16 @@ func TestNarrowSharerRegistryMounts_LocalDocker(t *testing.T) {
 	}
 	argStr := strings.Join(args, " ")
 
-	// The admin surface now applies to a local base too (hooks/info
-	// read-only, config via the private copy).
-	for _, sub := range []string{"hooks", "info"} {
-		want := fmt.Sprintf("-v %s:/repo-root/.git/%s:ro", filepath.Join(gitDir, sub), sub)
-		if !strings.Contains(argStr, want) {
-			t.Errorf("local base must now get the read-only mount %q, got: %s", want, argStr)
-		}
+	// The local base gets the read-only .git root too (hooks/info and the sharer
+	// registry read-only by inheritance), with the private config over .git/config.
+	if !strings.Contains(argStr, "-v "+gitDir+":/repo-root/.git:ro") {
+		t.Errorf("local base must get a read-only .git root, got: %s", argStr)
 	}
 	if !strings.Contains(argStr, ":/repo-root/.git/config:ro") {
 		t.Errorf("config must be bound read-only (private copy), got: %s", argStr)
 	}
-
-	// The sharer-registry and back-link paths apply to a local base as before.
-	sharersDir := filepath.Join(gitDir, "scion-sharers")
-	if _, statErr := os.Stat(sharersDir); statErr != nil {
-		t.Errorf("expected narrowSharerRegistryMounts to create the sharer-registry dir on the host, got: %v", statErr)
-	}
-	wantSharers := fmt.Sprintf("-v %s:/repo-root/.git/scion-sharers:ro", sharersDir)
-	if !strings.Contains(argStr, wantSharers) {
-		t.Errorf("expected read-only sharer-registry mount %q on a local base, got: %s", wantSharers, argStr)
+	if strings.Contains(argStr, ":/repo-root/.git/scion-sharers ") {
+		t.Errorf("the sharer-registry dir must not be read-write on a local base, got: %s", argStr)
 	}
 	wantBackLink := fmt.Sprintf("-v %s:/repo-root/.git/worktrees/agent-1/gitdir:ro", filepath.Join(backLinkDir, "gitdir"))
 	if !strings.Contains(argStr, wantBackLink) {
@@ -1822,16 +1794,19 @@ func TestNarrowSharerRegistryMounts_LocalRealAgentLayout(t *testing.T) {
 		t.Errorf("back-link mount must not use the agent name when the gitfile resolves to a different admin name, got: %s", argStr)
 	}
 
-	sharersDir := filepath.Join(gitDir, "scion-sharers")
-	wantSharers := fmt.Sprintf("-v %s:/repo-root/.git/scion-sharers:ro", sharersDir)
-	if !strings.Contains(argStr, wantSharers) {
-		t.Errorf("expected the sharer-registry mount independent of admin-name resolution, got: %s", argStr)
+	// The sharer-registry dir is read-only by inheritance from the read-only .git
+	// root (not a separate read-write overlay), independent of admin-name resolution.
+	if !strings.Contains(argStr, "-v "+gitDir+":/repo-root/.git:ro") {
+		t.Errorf("expected a read-only .git root, got: %s", argStr)
+	}
+	if strings.Contains(argStr, ":/repo-root/.git/scion-sharers ") {
+		t.Errorf("the sharer-registry dir must not be read-write, got: %s", argStr)
 	}
 }
 
 func TestNarrowSharerRegistryMounts_AppliesToPodman(t *testing.T) {
-	// The sharer-registry narrowing now applies to podman (and docker),
-	// not docker-only. (Apple uses the read-only-.git layout, covered separately.)
+	// On podman (as on docker) the sharer-registry dir is read-only by inheritance
+	// from the read-only .git root, not a separate read-write overlay.
 	repoRoot, workspace := setupHubManagedBaseRepo(t, "agent-1")
 	args, err := buildCommonRunArgs(RunConfig{
 		Harness:                &harness.Generic{},
@@ -1847,9 +1822,11 @@ func TestNarrowSharerRegistryMounts_AppliesToPodman(t *testing.T) {
 		t.Fatalf("buildCommonRunArgs failed: %v", err)
 	}
 	argStr := strings.Join(args, " ")
-	wantSharers := fmt.Sprintf("-v %s:/repo-root/.git/scion-sharers:ro", filepath.Join(repoRoot, ".git", "scion-sharers"))
-	if !strings.Contains(argStr, wantSharers) {
-		t.Errorf("podman must get the sharer-registry mount %q, got: %s", wantSharers, argStr)
+	if !strings.Contains(argStr, "-v "+filepath.Join(repoRoot, ".git")+":/repo-root/.git:ro") {
+		t.Errorf("podman must get a read-only .git root, got: %s", argStr)
+	}
+	if strings.Contains(argStr, ":/repo-root/.git/scion-sharers ") {
+		t.Errorf("the sharer-registry dir must not be read-write on podman, got: %s", argStr)
 	}
 }
 
