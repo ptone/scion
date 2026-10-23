@@ -230,6 +230,11 @@ func Move(spec Spec, opts Options) Result {
 	if err := spec.Target.validate(); err != nil {
 		return fail(fmt.Errorf("target: %w", err))
 	}
+	if opts.Context != nil && opts.Context.Err() != nil {
+		// Before any write (a rename is one syscall the per-entry check
+		// would not see): a lost lock or an expired run writes nothing.
+		return fail(fmt.Errorf("not started: %w", opts.Context.Err()))
+	}
 	if len(spec.Entries) > 0 {
 		return moveEntries(spec, opts, res)
 	}

@@ -21,16 +21,20 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
+	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 )
 
 // ProjectRef is a hub project as M2 sees it.
 type ProjectRef struct {
 	ID   string
 	Slug string
+	// Git: the project is git-backed (has a git remote).
+	Git bool
 	// LocalBrokerTree: a co-located broker serves this project from the
 	// hub-local ~/.scion/projects/<slug> (the per-project provider check);
 	// steps 2 and 4 only copy from that tree.
@@ -57,6 +61,12 @@ type HubInput struct {
 	// ObjectPrefix is the directory prefix of a project's legacy GCS
 	// workspace copy (M3).
 	ObjectPrefix func(projectID string) string
+	// ProvisionLock, when set, runs section holding the provisioning lock of
+	// the project state directory stateDir (an existing directory; the
+	// migration creates it with the leaf contract first). The hub passes
+	// provision.WithProjectStateLock.
+	// The section gets the lock's context, cancelled if the lock is lost.
+	ProvisionLock func(stateDir string, section func(lockCtx context.Context) error) error
 	// Tracked overrides GitTracked (tests).
 	Tracked func(ctx context.Context, dir, path string) (bool, error)
 }
@@ -108,6 +118,10 @@ func (h HubReport) PendingProjects() []string {
 	}
 	return ids
 }
+
+// provisionStateDir is provision.ProvisionStateDirName (this leaf package
+// does not import pkg/provision).
+const provisionStateDir = "provision"
 
 // IdentityBlockedProjects returns the IDs of projects with a legacy tree
 // that failed the identity check (mismatch or unverified).
@@ -177,6 +191,7 @@ func projectInput(in HubInput, legacy Tree, ref ProjectRef) (ProjectInput, error
 		GlobalDir:     in.GlobalDir,
 		Tracked:       in.Tracked,
 		LocalCopyOnly: ref.LocalBrokerTree,
+		Git:           ref.Git,
 	}
 	pi.WorkspaceOwner = layoutOwner(in.Workspace)
 	pi.SharedDirOwner = layoutOwner(in.SharedDirs)
@@ -190,6 +205,27 @@ func projectInput(in HubInput, legacy Tree, ref ProjectRef) (ProjectInput, error
 			return ProjectInput{}, fmt.Errorf("resolve project root: %w", err)
 		}
 		pi.ProjectRoot = Tree{Base: root.HostBase, Rel: root.RelPath}
+		if in.ProvisionLock != nil {
+			// <ProjectRoot>/provision: the broker's derivation
+			// (runtime.NFSProvisionStateSubPath, provision.ProjectStateDir).
+			stateRel := filepath.Join(root.RelPath, provisionStateDir)
+			hostBase := root.HostBase
+			lock := in.ProvisionLock
+			pi.LockWorkspace = func(section func(lockCtx context.Context) error) error {
+				base, err := filepath.EvalSymlinks(hostBase)
+				if err != nil {
+					return fmt.Errorf("resolve host base: %w", err)
+				}
+				fd, _, err := shareddirs.EnsureLeaf(base, stateRel) // mode 2775 + default ACL, as the broker
+				if err != nil {
+					return fmt.Errorf("create provisioning state dir: %w", err)
+				}
+				if err := shareddirs.CloseFd(fd); err != nil {
+					return err
+				}
+				return lock(filepath.Join(base, stateRel), section)
+			}
+		}
 	}
 	if !ref.NoWorkspace && !pi.SkipWorkspace {
 		// The project-scoped workspace Mount, as the hub's Files tab

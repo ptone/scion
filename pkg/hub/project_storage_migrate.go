@@ -23,6 +23,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs/migrate"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
@@ -110,6 +111,9 @@ func (s *Server) projectStorageMigrateInput(ctx context.Context, withObjects boo
 	if in.Projects, err = s.storageMigrateProjects(ctx); err != nil {
 		return migrate.HubInput{}, err
 	}
+	in.ProvisionLock = func(stateDir string, section func(lockCtx context.Context) error) error {
+		return provision.WithProjectStateLock(ctx, stateDir, section)
+	}
 	if stor := s.GetStorage(); withObjects && stor != nil {
 		hubID := s.HubID()
 		in.Objects = storageObjects{stor}
@@ -150,6 +154,7 @@ func storageMigrateProjectRef(p *store.Project) migrate.ProjectRef {
 	return migrate.ProjectRef{
 		ID:          p.ID,
 		Slug:        p.Slug,
+		Git:         p.GitRemote != "",
 		NoWorkspace: p.IsEmptyPerAgent() || (p.GitRemote != "" && !p.IsSharedWorkspace()),
 	}
 }

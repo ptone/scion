@@ -171,6 +171,16 @@ func TestProjectStorageMigrate_NFSMovesAndIsIdempotent(t *testing.T) {
 	}
 	_, statErr = os.Stat(filepath.Join(root, "workspace/.scion"))
 	assert.True(t, os.IsNotExist(statErr), "the seed must not land in the workspace")
+	// The moves ran under the project's provisioning lock (the real
+	// provision.WithProjectStateLock): provision/ exists with the broker's
+	// leaf contract, and the lock was released.
+	fi, err := os.Stat(filepath.Join(root, "provision"))
+	require.NoError(t, err, log)
+	assert.Equal(t, os.FileMode(0o775), fi.Mode().Perm(), "provision/ mode")
+	assert.NotZero(t, fi.Mode()&os.ModeSetgid, "provision/ must be setgid")
+	_, statErr = os.Stat(filepath.Join(root, "provision", ".scion-provision.lock"))
+	assert.True(t, os.IsNotExist(statErr), "the provisioning lock must be released")
+	assert.Contains(t, log, "agent starts for this project waited on its migration")
 
 	log, err = runStorageMigrate(t, f.srv, false)
 	require.NoError(t, err, log)

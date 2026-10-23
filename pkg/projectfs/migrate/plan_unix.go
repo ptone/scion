@@ -128,6 +128,13 @@ type ProjectInput struct {
 	// applies, without a provider, when the tree itself carries broker
 	// state (localTreeUsedByBroker).
 	LocalCopyOnly bool
+	// LockWorkspace runs steps 4, 1 and 2 under the project's provisioning
+	// lock (nil: no lock). The hub creates <ProjectRoot>/provision with the
+	// leaf contract and takes the lock ProvisionShared takes there.
+	LockWorkspace func(section func(lockCtx context.Context) error) error
+	// Git: the project is git-backed; a workspace migrated without a .git
+	// is reported, because the first agent start will refuse it.
+	Git bool
 	// SkipWorkspace: the workspace Layout is not shared, so steps 1, 2 and
 	// 4 do not apply (only step 3 runs); reported per project.
 	SkipWorkspace bool
@@ -155,6 +162,12 @@ type ProjectReport struct {
 	// content was left in place, or a seed step stopped a source. M3 then
 	// keeps the project's legacy object-storage copy.
 	WorkspaceIncomplete bool
+	// WorkspacePopulated: after the run the project's workspace target
+	// holds content (migrated now or earlier, or provisioned). M3 deletes
+	// the legacy object copy only then (fs-cleanup-arch NB3): with neither
+	// legacy content nor a populated target, the object copy may be the
+	// only copy (an ephemeral hub switched to shared storage).
+	WorkspacePopulated bool
 }
 
 // Moves counts the Specs that moved (or would move) anything.
@@ -191,10 +204,12 @@ func (p ProjectReport) Failed() bool {
 	return false
 }
 
-// seedEntries are the hub-written identity entries of a hub-managed
-// project's .scion: what initHubManagedProject seeds (settings.yaml with
-// the hub connection) and the project-id marker.
-var seedEntries = []string{"settings.yaml", projectkeys.ProjectIDFile}
+// seedEntries are the project-configuration entries step 4 moves from a
+// legacy .scion to <ProjectRoot>/.scion (fs-cleanup-arch 01:22Z): the
+// hub-written identity and settings, and the project-level template and
+// harness-config tiers (P3b reads the tier from ProjectRoot/.scion). Broker
+// records (agents/, markers) and anything else are never moved there.
+var seedEntries = []string{"settings.yaml", projectkeys.ProjectIDFile, projectkeys.ProjectSlugFile, "templates", "harness-configs"}
 
 // localTreeUsedByBroker reports whether the hub-local project tree carries
 // state a broker created (fs-cleanup-arch Q7: conservative; a needless
@@ -228,8 +243,14 @@ func localTreeUsedByBroker(local Tree) (bool, error) {
 
 // infraEntries are the entries a legacy workspace may hold that are not
 // workspace content (the retired probe's rule): a source with nothing else
-// has nothing to move into workspace/.
+// (step-4 backups included) has nothing to move into workspace/.
 var infraEntries = map[string]bool{"shared-dirs": true, ".scion": true}
+
+// isInfraEntry reports whether a top-level legacy entry is not workspace
+// content: infraEntries, or a step-4 backup (.scion.migrated-<ts>).
+func isInfraEntry(name string) bool {
+	return infraEntries[name] || strings.HasPrefix(name, ".scion"+MigratedSuffix)
+}
 
 // MigrateProject runs (or, with opts.DryRun, plans) every M2 step for one
 // project, in ProjectSteps order.
@@ -262,7 +283,7 @@ func MigrateProject(ctx context.Context, in ProjectInput, opts Options) ProjectR
 			}
 			localCopyOnly = used
 		}
-		if k, _ := entryKind(local); localCopyOnly && k == kindDir {
+		if k, err := entryKind(local); err == nil && localCopyOnly && k == kindDir {
 			rep.Notes = append(rep.Notes, fmt.Sprintf("%s: a broker uses this tree; its content and seed are copied, the tree is left in place", local))
 		}
 		// A source whose seed step failed or could not decide is not moved
@@ -274,17 +295,67 @@ func MigrateProject(ctx context.Context, in ProjectInput, opts Options) ProjectR
 			}
 			return rep.seed(ctx, in, src, copyOnly, wsOpts)
 		}
-		for _, src := range sources {
-			if rep.bound(src, false, in, opts) && seedOK(src, false) {
-				rep.workspace(StepHubProjects, src, in, false, wsOpts)
+		moveAll := func(lockCtx context.Context) error {
+			if lockCtx != nil {
+				// The copy runs under the lock's context: a lost lock
+				// stops it at the next entry (it must not finish under a
+				// lock it no longer holds).
+				wsOpts.Context = lockCtx
+			}
+			for _, src := range sources {
+				if rep.bound(src, false, in, opts) && seedOK(src, false) {
+					rep.workspace(StepHubProjects, src, in, false, wsOpts)
+				} else {
+					rep.WorkspaceIncomplete = true
+				}
+			}
+			if rep.bound(local, true, in, opts) && seedOK(local, localCopyOnly) {
+				rep.workspace(StepLocalProjects, local, in, localCopyOnly, wsOpts)
 			} else {
 				rep.WorkspaceIncomplete = true
 			}
+			return nil
 		}
-		if rep.bound(local, true, in, opts) && seedOK(local, localCopyOnly) {
-			rep.workspace(StepLocalProjects, local, in, localCopyOnly, wsOpts)
-		} else {
-			rep.WorkspaceIncomplete = true
+		// Steps 4, 1 and 2 hold the project's provisioning lock for their
+		// whole duration (the copy included), so a first agent start
+		// cannot provision a half-migrated workspace (review round 2,
+		// finding 1). Only when there is legacy content to move, and never
+		// in a dry run.
+		legacy := hasLegacyContent(append(append([]Tree{}, sources...), local))
+		switch {
+		case !legacy || in.LockWorkspace == nil:
+			_ = moveAll(nil)
+		case opts.DryRun:
+			rep.Notes = append(rep.Notes, "agent starts for this project will wait on its migration (it holds the project's provisioning lock) and may fail cleanly while it runs")
+			_ = moveAll(nil)
+		default:
+			var lost error
+			err := in.LockWorkspace(func(lockCtx context.Context) error {
+				err := moveAll(lockCtx)
+				if lockCtx.Err() != nil {
+					lost = lockCtx.Err()
+				}
+				return err
+			})
+			switch {
+			case err != nil:
+				rep.WorkspaceIncomplete = true
+				rep.Results = append(rep.Results, Result{Step: StepLock, Outcome: OutcomeFailed, Err: fmt.Errorf("provisioning lock: %w (agent starts may hold it; run again)", err)})
+			case lost != nil:
+				rep.WorkspaceIncomplete = true
+				rep.Results = append(rep.Results, Result{Step: StepLock, Outcome: OutcomeFailed, Err: fmt.Errorf("lost the project's provisioning lock during the migration; stopped (%v); run again", lost)})
+			default:
+				rep.Notes = append(rep.Notes, "held the project's provisioning lock: agent starts for this project waited on its migration")
+			}
+		}
+		rep.noteGitlessWorkspace(in, opts)
+		if in.Workspace != nil {
+			names, ok, err := listDir(*in.Workspace)
+			rep.WorkspacePopulated = err == nil && ok && len(names) > 0
+			if opts.DryRun && legacy {
+				// The plan would move legacy content into the target.
+				rep.WorkspacePopulated = true
+			}
 		}
 	}
 	if in.SharedDir != nil {
@@ -372,20 +443,30 @@ func (rep *ProjectReport) seed(ctx context.Context, in ProjectInput, src Tree, c
 	}
 
 	if gitKind == kindAbsent {
-		if !copyOnly {
-			return move() // the whole .scion is the hub's seed
-		}
-		// A broker's live tree: copy only the identity files, never its
-		// private records (agents/, markers).
+		// Only the project-configuration entries move (or, from a broker's
+		// live tree, are copied); broker records and anything else stay in
+		// the legacy tree and are kept out of workspace/ by steps 1 and 2.
+		var other []string
 		for _, name := range names {
-			if isSeed(name) {
+			switch {
+			case isSeed(name):
 				spec.Entries = append(spec.Entries, name)
+			case strings.Contains(name, MigratedSuffix):
+			default:
+				other = append(other, name)
 			}
+		}
+		if len(other) > 0 && !copyOnly {
+			rep.Notes = append(rep.Notes, fmt.Sprintf("%s: %s not moved to the project configuration; kept out of the workspace in the source's .migrated copy", scion, strings.Join(other, ", ")))
 		}
 		if len(spec.Entries) == 0 {
 			return true
 		}
-		return move()
+		ok := move()
+		if ok && !copyOnly && !opts.DryRun {
+			removeEmptyDir(scion) // nothing left: no remnant to keep out of the workspace
+		}
+		return ok
 	}
 	if gitKind != kindDir {
 		// A .git file or symlink points elsewhere: tracked state cannot be
@@ -416,6 +497,53 @@ func (rep *ProjectReport) seed(ctx context.Context, in ProjectInput, src Tree, c
 		return true
 	}
 	return move()
+}
+
+// noteGitlessWorkspace reports a git project whose workspace content was
+// migrated without a .git (fs-cleanup-arch residual 1): the provisioner
+// refuses a non-empty workspace with no provisioning marker and no .git, so
+// the first agent start will fail until the operator acts.
+func (rep *ProjectReport) noteGitlessWorkspace(in ProjectInput, opts Options) {
+	if !in.Git || in.Workspace == nil {
+		return
+	}
+	moved := false
+	for _, r := range rep.Results {
+		if (r.Step == StepHubProjects || r.Step == StepLocalProjects) && r.Moved() {
+			moved = true
+		}
+	}
+	if !moved {
+		return
+	}
+	k, err := entryKind(Tree{Base: in.Workspace.Base, Rel: filepath.Join(in.Workspace.Rel, ".git")})
+	if err != nil || k != kindAbsent {
+		return
+	}
+	if opts.DryRun {
+		// The target may not exist yet; say what the source lacks.
+		rep.Notes = append(rep.Notes, "git project: the migrated workspace would have no .git; its first agent start would refuse until the operator moves the non-git entries out or re-clones")
+		return
+	}
+	rep.Notes = append(rep.Notes, "git project: migrated, but the workspace has no .git; the first agent start will refuse (non-empty workspace without a provisioning marker or .git) until the operator moves the non-git entries out or re-clones")
+}
+
+// StepLock reports a failure to take the project's provisioning lock.
+const StepLock Step = "provisioning-lock"
+
+// hasLegacyContent reports whether any of the legacy trees exists with an
+// entry (a seed or content to move).
+func hasLegacyContent(trees []Tree) bool {
+	for _, t := range trees {
+		names, ok, err := listDir(t)
+		if err != nil {
+			return true // let the steps report it, under the lock
+		}
+		if ok && len(names) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // StepIdentity reports a legacy tree that is not bound to the project.
@@ -482,7 +610,7 @@ func (rep *ProjectReport) workspace(step Step, src Tree, in ProjectInput, copyOn
 	}
 	content := false
 	for _, n := range names {
-		content = content || !infraEntries[n]
+		content = content || !isInfraEntry(n)
 	}
 	if !ok || !content {
 		return
@@ -500,22 +628,73 @@ func (rep *ProjectReport) workspace(step Step, src Tree, in ProjectInput, copyOn
 		TargetIsLeaf:  true,
 		Normalize:     NormalizeWorkspace,
 	}
-	hasSharedDirs := false
-	for _, n := range names {
-		hasSharedDirs = hasSharedDirs || n == "shared-dirs"
-	}
-	switch {
-	case copyOnly:
+	if copyOnly {
 		spec.CopyOnly = true
 		spec.Exclude = []string{".scion", "shared-dirs"}
-	case hasSharedDirs:
-		// Shared dirs never land in workspace/ (step 3 owns them): copy
-		// the rest and keep shared-dirs/ in the source's .migrated copy.
-		spec.NoRename = true
-		spec.Exclude = []string{"shared-dirs"}
-		rep.Notes = append(rep.Notes, fmt.Sprintf("%s/shared-dirs: not moved into the workspace; it stays in the source's .migrated copy", src))
+	} else {
+		exclude, err := workspaceExcludes(src, names)
+		if err != nil {
+			rep.Results = append(rep.Results, Result{Step: step, Source: src.String(), Outcome: OutcomeFailed, Err: err})
+			return
+		}
+		if len(exclude) > 0 {
+			// Copy the rest; the excluded entries stay in the source's
+			// .migrated copy (a rename would carry them into workspace/).
+			spec.NoRename = true
+			spec.Exclude = exclude
+			rep.Notes = append(rep.Notes, fmt.Sprintf("%s: %s not moved into the workspace; kept in the source's .migrated copy", src, strings.Join(exclude, ", ")))
+		}
 	}
 	rep.Results = append(rep.Results, Move(spec, opts))
+}
+
+// workspaceExcludes lists the entries of a legacy workspace source that
+// must not land in the agent-visible workspace/ (design P1a, review round 2
+// finding 2): shared-dirs/ (step 3 owns shared dirs), step 4's backups
+// (.scion.migrated-<ts>, .scion/<entry>.migrated-<ts>), and, for a
+// non-git source, whatever .scion remnant step 4 left (broker records,
+// unknown entries); a git source's remaining .scion is the repository tier
+// and stays with the workspace.
+func workspaceExcludes(src Tree, names []string) ([]string, error) {
+	gitKind, err := entryKind(Tree{Base: src.Base, Rel: filepath.Join(src.Rel, ".git")})
+	if err != nil {
+		return nil, err
+	}
+	var exclude []string
+	for _, n := range names {
+		switch {
+		case n == "shared-dirs", strings.HasPrefix(n, ".scion"+MigratedSuffix):
+			exclude = append(exclude, n)
+		case n == ".scion" && gitKind == kindAbsent:
+			exclude = append(exclude, n)
+		case n == ".scion":
+			inner, ok, err := listDir(Tree{Base: src.Base, Rel: filepath.Join(src.Rel, ".scion")})
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				exclude = append(exclude, n) // not a directory: never carried
+				continue
+			}
+			for _, e := range inner {
+				if strings.Contains(e, MigratedSuffix) {
+					exclude = append(exclude, ".scion/"+e)
+				}
+			}
+		}
+	}
+	return exclude, nil
+}
+
+// removeEmptyDir removes t only if it is an empty directory (rmdir never
+// removes content); any error leaves it in place.
+func removeEmptyDir(t Tree) {
+	parent, name, ok, err := openParent(t, false)
+	if err != nil || !ok {
+		return
+	}
+	defer closeFd(parent)
+	_ = unix.Unlinkat(parent, name, unix.AT_REMOVEDIR)
 }
 
 // sharedDirs is step 3: hub-local project-configs/<slug>__<short>/shared-dirs/<name>.
@@ -633,6 +812,7 @@ func GitTracked(ctx context.Context, dir, path string) (bool, error) {
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_OPTIONAL_LOCKS=0",
+		"GIT_LITERAL_PATHSPECS=1", // entry names are paths, never globs
 		"HOME=/nonexistent",
 	}
 	err := cmd.Run()

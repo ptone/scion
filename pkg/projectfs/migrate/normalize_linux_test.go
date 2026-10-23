@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build unix
+//go:build linux
 
 package migrate
 
@@ -163,5 +163,34 @@ func TestNormalize_NoOwnerNoChown(t *testing.T) {
 	}
 	if got := chowned(); len(got) != 0 {
 		t.Fatalf("chowned without an owner: %v", got)
+	}
+}
+
+// A hard-linked file in a renamed tree is not chowned (its inode is shared
+// with a name outside the migrated set); the skip is reported.
+func TestNormalize_HardLinkedFileNotChowned(t *testing.T) {
+	base := t.TempDir()
+	outside := t.TempDir()
+	writeTree(t, outside, map[string]string{"shared.txt": "s"})
+	writeTree(t, base, map[string]string{"old/proj/a.txt": "A"})
+	if err := os.Link(filepath.Join(outside, "shared.txt"), filepath.Join(base, "old/proj/linked.txt")); err != nil {
+		t.Skipf("hard link across temp dirs: %v", err)
+	}
+	chowned := recordChowns(t, nil)
+	s := spec(base, "old/proj", "projects/u1/workspace")
+	s.Normalize = NormalizeWorkspace
+	o := opts(false)
+	o.Owner = self()
+	res := Move(s, o)
+	if res.Outcome != OutcomeRenamed || res.Err != nil {
+		t.Fatalf("got %s err=%v", res.Outcome, res.Err)
+	}
+	for _, p := range chowned() {
+		if strings.HasSuffix(p, "linked.txt") {
+			t.Fatal("hard-linked file was chowned")
+		}
+	}
+	if res.OwnershipErr == nil || !strings.Contains(res.OwnershipErr.Error(), "hard-linked") {
+		t.Fatalf("ownership err = %v", res.OwnershipErr)
 	}
 }

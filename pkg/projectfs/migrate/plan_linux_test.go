@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build unix
+//go:build linux
 
 package migrate
 
@@ -20,12 +20,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
@@ -769,4 +771,347 @@ func TestRun_SharedDirsSubtreeNotMovedIntoWorkspace(t *testing.T) {
 	if readFile(t, filepath.Join(f.share, legacyHubProjectsDir, "p1"+backupSuffix, "shared-dirs/s/f.txt")) != "old shared" {
 		t.Fatal("shared-dirs/ not kept in the .migrated copy")
 	}
+}
+
+// Residual 3: the broker created the leaf and cloned into it before the
+// migration ran. The copy lists conflicts, overwrites nothing, copies the
+// rest, and a re-run reports 0 moves.
+func TestRun_BrokerClonedFirstThenMigration(t *testing.T) {
+	f := newHubFixture(t)
+	ws := filepath.Join(f.share, "projects", pid1, "workspace")
+	writeTree(t, ws, map[string]string{".git/HEAD": "ref: refs/heads/main", "main.go": "package main // fresh clone"})
+	cloned := snapshot(t, ws)
+	writeTree(t, f.share, map[string]string{
+		legacyHubProjectsDir + "/p1/.scion/project-id": pid1,
+		legacyHubProjectsDir + "/p1/.git/HEAD":         "ref: refs/heads/old",
+		legacyHubProjectsDir + "/p1/main.go":           "package main // legacy edit",
+		legacyHubProjectsDir + "/p1/notes.txt":         "legacy notes",
+	})
+	in := f.input(ProjectRef{ID: pid1, Slug: "p1", Git: true})
+	rep, err := Run(context.Background(), in, opts(false))
+	if err != nil || rep.Failed() {
+		t.Fatalf("err=%v failed=%t", err, rep.Failed())
+	}
+	got := snapshot(t, ws)
+	for p, v := range cloned {
+		if got[p] != v {
+			t.Fatalf("clone's %s changed: %q -> %q", p, v, got[p])
+		}
+	}
+	if readFile(t, filepath.Join(ws, "notes.txt")) != "legacy notes" {
+		t.Fatal("missing file not copied")
+	}
+	var b bytes.Buffer
+	rep.WriteLog(&b)
+	for _, want := range []string{"CONFLICT main.go", "CONFLICT .git/HEAD"} {
+		if !strings.Contains(b.String(), want) {
+			t.Fatalf("log lacks %q:\n%s", want, b.String())
+		}
+	}
+	again, err := Run(context.Background(), in, opts(false))
+	if err != nil || again.Moves() != 0 || again.Failed() {
+		t.Fatalf("re-run: err=%v moves=%d failed=%t", err, again.Moves(), again.Failed())
+	}
+}
+
+// Residual 1: a git project's tree migrated without a .git is reported,
+// because its first agent start will refuse.
+func TestRun_GitProjectWithoutGitDirIsReported(t *testing.T) {
+	f := newHubFixture(t)
+	writeTree(t, f.share, map[string]string{
+		legacyHubProjectsDir + "/p1/.scion/project-id": pid1,
+		legacyHubProjectsDir + "/p1/notes.txt":         "n",
+	})
+	rep, err := Run(context.Background(), f.input(ProjectRef{ID: pid1, Slug: "p1", Git: true}), opts(false))
+	if err != nil || rep.Failed() {
+		t.Fatalf("err=%v failed=%t", err, rep.Failed())
+	}
+	found := false
+	for _, n := range rep.Projects[0].Notes {
+		found = found || strings.Contains(n, "first agent start will refuse")
+	}
+	if !found {
+		t.Fatalf("notes = %v", rep.Projects[0].Notes)
+	}
+	// A non-git project gets no such note.
+	g := newHubFixture(t)
+	writeTree(t, g.share, map[string]string{legacyHubProjectsDir + "/p1/.scion/project-id": pid1, legacyHubProjectsDir + "/p1/notes.txt": "n"})
+	rep, _ = Run(context.Background(), g.input(ProjectRef{ID: pid1, Slug: "p1"}), opts(false))
+	for _, n := range rep.Projects[0].Notes {
+		if strings.Contains(n, "refuse") {
+			t.Fatalf("unexpected note for a non-git project: %q", n)
+		}
+	}
+}
+
+// The hub's startup identity pass has already created <ProjectRoot>/.scion
+// with project-id and project-slug: step 4 is a plain merge. settings.yaml
+// and the template tiers are copied in, the identical project-id is
+// identical (not a conflict), a differing project-slug is a conflict that
+// is not overwritten and not an identity mismatch, broker records stay
+// out, and nothing .scion-ish lands in workspace/ (the step-4 backups stay
+// in the source's .migrated copy). Run plain, with every rename flag
+// rejected (NFS) and with renames failing EXDEV (cross-device).
+func TestRun_HubSeededTargetMergeNoSeedLeak(t *testing.T) {
+	for _, mode := range []struct {
+		name  string
+		errno syscall.Errno
+	}{{"plain", 0}, {"nfs-einval", syscall.EINVAL}, {"exdev", syscall.EXDEV}} {
+		t.Run(mode.name, func(t *testing.T) {
+			switch mode.errno {
+			case syscall.EXDEV:
+				// Cross-device: renames between directories fail; a rename
+				// within one directory (the .migrated backup) cannot.
+				old := renameat2
+				renameat2 = func(od int, on string, nd int, nn string, flags uint) error {
+					if od != nd {
+						return syscall.EXDEV
+					}
+					return old(od, on, nd, nn, flags)
+				}
+				t.Cleanup(func() { renameat2 = old })
+			case 0:
+			default:
+				forceRename(t, nil, mode.errno)
+			}
+			f := newHubFixture(t)
+			root := filepath.Join(f.share, "projects", pid1)
+			writeTree(t, root, map[string]string{".scion/project-id": pid1, ".scion/project-slug": "renamed\n"})
+			writeTree(t, f.share, map[string]string{
+				legacyHubProjectsDir + "/p1/.scion/settings.yaml":        idSettings(pid1),
+				legacyHubProjectsDir + "/p1/.scion/project-id":           pid1,
+				legacyHubProjectsDir + "/p1/.scion/project-slug":         "p1\n",
+				legacyHubProjectsDir + "/p1/.scion/templates/t/agent.md": "tpl",
+				legacyHubProjectsDir + "/p1/.scion/harness-configs/h/c":  "hc",
+				legacyHubProjectsDir + "/p1/.scion/agents/a1/x":          "broker record",
+				legacyHubProjectsDir + "/p1/.scion/other.txt":            "other",
+				legacyHubProjectsDir + "/p1/main.go":                     "package main",
+			})
+			in := f.input(ProjectRef{ID: pid1, Slug: "p1"})
+			rep, err := Run(context.Background(), in, opts(false))
+			var b bytes.Buffer
+			rep.WriteLog(&b)
+			if err != nil || rep.Failed() {
+				t.Fatalf("err=%v failed=%t\n%s", err, rep.Failed(), b.String())
+			}
+			for p, want := range map[string]string{
+				".scion/settings.yaml":        idSettings(pid1),
+				".scion/project-id":           pid1,
+				".scion/project-slug":         "renamed\n",
+				".scion/templates/t/agent.md": "tpl",
+				".scion/harness-configs/h/c":  "hc",
+				"workspace/main.go":           "package main",
+			} {
+				if got := readFile(t, filepath.Join(root, p)); got != want {
+					t.Fatalf("%s = %q, want %q\n%s", p, got, want, b.String())
+				}
+			}
+			assertAbsent(t, filepath.Join(root, ".scion/agents"))
+			assertAbsent(t, filepath.Join(root, ".scion/other.txt"))
+			if !strings.Contains(b.String(), "CONFLICT .") || strings.Contains(b.String(), "identity mismatch") {
+				t.Fatalf("want a project-slug conflict and no identity mismatch:\n%s", b.String())
+			}
+			entries, err := os.ReadDir(filepath.Join(root, "workspace"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, e := range entries {
+				if strings.HasPrefix(e.Name(), ".scion") {
+					t.Fatalf("%s landed in workspace/\n%s", e.Name(), b.String())
+				}
+			}
+			again, err := Run(context.Background(), in, opts(false))
+			if err != nil || again.Moves() != 0 || again.Failed() {
+				t.Fatalf("re-run: err=%v moves=%d failed=%t", err, again.Moves(), again.Failed())
+			}
+		})
+	}
+}
+
+// Git source on the copy path: the per-entry backup
+// .scion/settings.yaml.migrated-<ts> never reaches workspace/.
+func TestRun_GitSeedBackupNotCarriedIntoWorkspace(t *testing.T) {
+	forceRename(t, nil, syscall.EINVAL)
+	f := newHubFixture(t)
+	root := filepath.Join(f.share, "projects", pid1)
+	writeTree(t, root, map[string]string{".scion/settings.yaml": "hub's new seed"})
+	writeTree(t, f.share, map[string]string{
+		legacyHubProjectsDir + "/p1/.git/HEAD":            "ref",
+		legacyHubProjectsDir + "/p1/.scion/settings.yaml": idSettings(pid1),
+		legacyHubProjectsDir + "/p1/main.go":              "package main",
+	})
+	rep, err := Run(context.Background(), f.input(ProjectRef{ID: pid1, Slug: "p1", Git: true}), opts(false))
+	if err != nil || rep.Failed() {
+		t.Fatalf("err=%v failed=%t", err, rep.Failed())
+	}
+	if readFile(t, filepath.Join(root, ".scion/settings.yaml")) != "hub's new seed" {
+		t.Fatal("target settings overwritten")
+	}
+	err = filepath.WalkDir(filepath.Join(root, "workspace"), func(p string, d os.DirEntry, err error) error {
+		if err == nil && strings.Contains(d.Name(), MigratedSuffix) {
+			t.Fatalf("seed backup %s landed in workspace/", p)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// fakeLock is a ProvisionLock that serializes on a mutex, records the state
+// dir it was given, and can hand the section an already-lost context.
+type fakeLock struct {
+	mu       sync.Mutex
+	dirs     []string
+	lose     bool
+	inLock   bool
+	observed func()
+}
+
+func (l *fakeLock) lock(stateDir string, section func(context.Context) error) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.dirs = append(l.dirs, stateDir)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if l.lose {
+		cancel()
+	}
+	l.inLock = true
+	defer func() { l.inLock = false }()
+	if l.observed != nil {
+		l.observed()
+	}
+	return section(ctx)
+}
+
+// Steps 4/1/2 run inside the project's provisioning lock, taken on
+// <ProjectRoot>/provision created with the leaf contract; a provisioner
+// waiting on the same lock only ever sees the complete workspace.
+func TestRun_WorkspaceMovesHoldProvisioningLock(t *testing.T) {
+	forceRename(t, nil, syscall.EINVAL) // NFS: the long copy path
+	f := newHubFixture(t)
+	files := map[string]string{legacyHubProjectsDir + "/p1/.scion/project-id": pid1}
+	for i := 0; i < 40; i++ {
+		files[fmt.Sprintf("%s/p1/d%02d/f.txt", legacyHubProjectsDir, i)] = "x"
+	}
+	writeTree(t, f.share, files)
+	ws := filepath.Join(f.share, "projects", pid1, "workspace")
+	lk := &fakeLock{}
+	var seen map[string]string
+	var wg sync.WaitGroup
+	lk.observed = func() {
+		if _, err := os.Lstat(ws); !os.IsNotExist(err) {
+			t.Errorf("workspace touched before the lock was held")
+		}
+		wg.Add(1)
+		go func() { // a provisioner waiting on the same lock
+			defer wg.Done()
+			lk.mu.Lock()
+			defer lk.mu.Unlock()
+			seen = snapshot(t, ws)
+		}()
+	}
+	in := f.input(ProjectRef{ID: pid1, Slug: "p1"})
+	in.ProvisionLock = lk.lock
+	rep, err := Run(context.Background(), in, opts(false))
+	wg.Wait()
+	if err != nil || rep.Failed() {
+		t.Fatalf("err=%v failed=%t", err, rep.Failed())
+	}
+	if len(lk.dirs) != 1 || lk.dirs[0] != filepath.Join(f.share, "projects", pid1, "provision") {
+		t.Fatalf("lock dirs = %v", lk.dirs)
+	}
+	if m := mode(t, lk.dirs[0]); m.Perm() != 0o775 || m&os.ModeSetgid == 0 {
+		t.Fatalf("provision/ mode = %v, want the leaf contract (setgid 0775)", m)
+	}
+	if final := snapshot(t, ws); !reflect.DeepEqual(seen, final) || len(final) < 41 {
+		t.Fatalf("the waiting provisioner saw %d entries, final %d", len(seen), len(final))
+	}
+	if countNotes(rep.Projects[0].Notes, "agent starts for this project waited") != 1 {
+		t.Fatalf("notes = %v", rep.Projects[0].Notes)
+	}
+	// No lock for a project without legacy content.
+	g := newHubFixture(t)
+	lk2 := &fakeLock{}
+	in2 := g.input(ProjectRef{ID: pid1, Slug: "p1"})
+	in2.ProvisionLock = lk2.lock
+	if _, err := Run(context.Background(), in2, opts(false)); err != nil || len(lk2.dirs) != 0 {
+		t.Fatalf("err=%v lock taken %d times without legacy content", err, len(lk2.dirs))
+	}
+	assertAbsent(t, filepath.Join(g.share, "projects", pid1, "provision"))
+}
+
+// A lost lock stops the migration before any write: the project is
+// pending with the reason, the legacy tree is intact, M3 keeps objects.
+func TestRun_LostProvisioningLockStops(t *testing.T) {
+	f := newHubFixture(t)
+	writeTree(t, f.share, map[string]string{legacyHubProjectsDir + "/p1/.scion/project-id": pid1, legacyHubProjectsDir + "/p1/a": "a"})
+	before := snapshot(t, filepath.Join(f.share, legacyHubProjectsDir, "p1"))
+	f.objects.objects[objectPrefix(pid1)+"a"] = true
+	in := f.input(ProjectRef{ID: pid1, Slug: "p1"})
+	in.ProvisionLock = (&fakeLock{lose: true}).lock
+	rep, err := Run(context.Background(), in, opts(false))
+	if err != nil || !rep.Failed() || len(rep.PendingProjects()) != 1 {
+		t.Fatalf("err=%v failed=%t", err, rep.Failed())
+	}
+	var b bytes.Buffer
+	rep.WriteLog(&b)
+	if !strings.Contains(b.String(), "lost the project's provisioning lock") {
+		t.Fatalf("log:\n%s", b.String())
+	}
+	if got := snapshot(t, filepath.Join(f.share, legacyHubProjectsDir, "p1")); !reflect.DeepEqual(got, before) {
+		t.Fatal("the legacy tree changed under a lost lock")
+	}
+	assertAbsent(t, filepath.Join(f.share, "projects", pid1, "workspace"))
+	if rep.Objects[0].Outcome != ObjectsKept {
+		t.Fatalf("objects = %s", rep.Objects[0].Outcome)
+	}
+}
+
+// M3 keeps the object copy when there was no legacy content and the
+// target workspace is empty: it may be the only copy.
+func TestRun_M3KeepsObjectsWithoutAnyWorkspaceContent(t *testing.T) {
+	f := newHubFixture(t)
+	f.objects.objects[objectPrefix(pid1)+"only-copy"] = true
+	rep, err := Run(context.Background(), f.input(ProjectRef{ID: pid1, Slug: "p1"}), opts(false))
+	if err != nil || rep.Failed() {
+		t.Fatalf("err=%v failed=%t", err, rep.Failed())
+	}
+	if rep.Objects[0].Outcome != ObjectsKept || len(f.objects.deletes) != 0 {
+		t.Fatalf("objects=%s deletes=%v", rep.Objects[0].Outcome, f.objects.deletes)
+	}
+	// A populated target (provisioned earlier) lets M3 delete.
+	writeTree(t, f.share, map[string]string{"projects/" + pid1 + "/workspace/x": "x"})
+	rep, _ = Run(context.Background(), f.input(ProjectRef{ID: pid1, Slug: "p1"}), opts(false))
+	if rep.Objects[0].Outcome != ObjectsDeleted {
+		t.Fatalf("objects = %s", rep.Objects[0].Outcome)
+	}
+}
+
+// One matching and one mismatching marker: the mismatch wins.
+func TestRun_MixedMarkersMismatchWins(t *testing.T) {
+	f := newHubFixture(t)
+	legacyKey := strings.TrimPrefix(projectkeys.LegacyConfigHubProjectIDKey, "hub.")
+	writeTree(t, f.share, map[string]string{
+		legacyHubProjectsDir + "/p1/.scion/project-id":    pid1,
+		legacyHubProjectsDir + "/p1/.scion/settings.yaml": "hub:\n  " + legacyKey + ": " + pid2 + "\n",
+		legacyHubProjectsDir + "/p1/a":                    "a",
+	})
+	rep, err := Run(context.Background(), f.input(ProjectRef{ID: pid1, Slug: "p1"}), opts(false))
+	if err != nil || !rep.Failed() {
+		t.Fatalf("err=%v failed=%t", err, rep.Failed())
+	}
+	assertAbsent(t, filepath.Join(f.share, "projects", pid1))
+}
+
+// countNotes counts the notes containing sub.
+func countNotes(notes []string, sub string) int {
+	n := 0
+	for _, note := range notes {
+		if strings.Contains(note, sub) {
+			n++
+		}
+	}
+	return n
 }

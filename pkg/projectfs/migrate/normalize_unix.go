@@ -79,7 +79,11 @@ func (n *normalizer) entry(dir int, name string, st *unix.Stat_t) {
 	if !n.active() {
 		return
 	}
-	if n.owner != nil {
+	if n.owner != nil && st.Mode&unix.S_IFMT != unix.S_IFDIR && st.Nlink > 1 {
+		// A hard-linked file shares its inode with a name outside the
+		// migrated set: chowning it would change that file too.
+		n.note(fmt.Errorf("%s is hard-linked (%d links); owner left unchanged", name, st.Nlink))
+	} else if n.owner != nil {
 		if err := fchownat(dir, name, n.owner.UID, n.owner.GID, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 			n.note(fmt.Errorf("chown %s to %d:%d: %w", name, n.owner.UID, n.owner.GID, err))
 		}
