@@ -66,6 +66,10 @@ describe('review editor HTML lint rule', () => {
     ['Lit srcdoc attribute binding', 'html`<iframe srcdoc=${s}></iframe>`;'],
     ['quoted Lit srcdoc attribute binding', 'html`<iframe srcdoc="${s}"></iframe>`;'],
     ['window.document.write', 'window.document.write(s);'],
+    ['upper-case Lit SRCDOC binding', 'html`<iframe SRCDOC=${s}></iframe>`;'],
+    ["setAttribute('srcdoc')", "el.setAttribute('srcdoc', s);"],
+    ["setAttribute('onclick')", "el.setAttribute('onclick', s);"],
+    ["setAttribute('ONLOAD')", "el.setAttribute('ONLOAD', s);"],
     ['globalThis.document.writeln', 'globalThis.document.writeln(s);'],
   ])('catches %s', async (_name, code) => {
     expect(await htmlErrors(code)).toBeGreaterThan(0);
@@ -77,6 +81,7 @@ describe('review editor HTML lint rule', () => {
     ['object key textContent', 'Object.assign(el, { textContent: s });'],
     ['a write method on another object', 'stream.write(s);'],
     ['write on another member', 'window.stream.write(s);'],
+    ["setAttribute('title')", "el.setAttribute('title', s);"],
     ['a srcdoc word in template text', 'html`<p>srcdoc is an attribute</p>`;'],
   ])('allows %s', async (_name, code) => {
     expect(await htmlErrors(code)).toBe(0);

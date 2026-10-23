@@ -282,11 +282,12 @@ export default defineConfig([
         },
         {
           // Lit property bindings (.innerHTML=${…}), a srcdoc attribute
-          // binding, object keys (Object.assign(el, { innerHTML })), and
+          // binding (any case) or setAttribute('srcdoc' | 'on…'), object
+          // keys (Object.assign(el, { innerHTML })), and
           // write() on a document reached through another object
           // (window.document.write).
           selector:
-            "TemplateElement[value.raw=/\\.(innerHTML|outerHTML|srcdoc)\\s*=/], TemplateElement[value.raw=/\\bsrcdoc\\s*=\\s*[\"']?$/], Property[key.name=/^(innerHTML|outerHTML|srcdoc)$/], Property[key.value=/^(innerHTML|outerHTML|srcdoc)$/], CallExpression[callee.object.property.name='document'][callee.property.name=/^(write|writeln)$/]",
+            "TemplateElement[value.raw=/\\.(innerHTML|outerHTML|srcdoc)\\s*=/], TemplateElement[value.raw=/\\bsrcdoc\\s*=\\s*[\"']?$/i], CallExpression[callee.property.name='setAttribute'][arguments.0.value=/^(srcdoc|on)/i], Property[key.name=/^(innerHTML|outerHTML|srcdoc)$/], Property[key.value=/^(innerHTML|outerHTML|srcdoc)$/], CallExpression[callee.object.property.name='document'][callee.property.name=/^(write|writeln)$/]",
           message: 'The review editor must not turn strings into HTML (see eslint.config.mjs).',
         },
         {
