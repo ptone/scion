@@ -955,36 +955,50 @@ func bindReadOnlyCreateFirstFile(registerMount func(string, string, bool, bool),
 	return nil
 }
 
-// ensureOverlayDir creates src as a directory if it does not exist, so a
-// read-write overlay can be bound over an otherwise read-only base. It fails
-// closed: an existing non-directory, a symlink, or a creation error returns an
-// error so the caller refuses the start rather than binding an unexpected source.
-func ensureOverlayDir(src string) error {
-	fi, err := os.Lstat(src)
+// ensureOverlayDir is the single fail-closed inspection every read-write overlay
+// source passes through before it is bound over a read-only base. It Lstats src
+// (so a symlink is never followed) and returns whether a real directory is present
+// to bind:
+//   - a real directory: present.
+//   - a symlink or a non-directory: an error, so the caller refuses the start
+//     rather than binding an unexpected (possibly out-of-repository) source.
+//   - missing: created when createIfMissing is set (objects/, refs/, logs/, lfs/,
+//     which an in-container git always needs), otherwise reported absent so the
+//     caller skips it (rr-cache must not be created host-side — that would enable
+//     rerere in the user's own checkout).
+func ensureOverlayDir(src string, createIfMissing bool) (present bool, err error) {
+	fi, statErr := os.Lstat(src)
 	switch {
-	case err == nil:
+	case statErr == nil:
 		if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
-			return fmt.Errorf("overlay source %s is not a directory", src)
+			return false, fmt.Errorf("overlay source %s is not a directory", src)
 		}
-	case os.IsNotExist(err):
+		return true, nil
+	case os.IsNotExist(statErr):
+		if !createIfMissing {
+			return false, nil
+		}
 		if mkErr := os.MkdirAll(src, 0755); mkErr != nil {
-			return fmt.Errorf("create overlay dir %s: %w", src, mkErr)
+			return false, fmt.Errorf("create overlay dir %s: %w", src, mkErr)
 		}
+		return true, nil
 	default:
-		return fmt.Errorf("stat overlay dir %s: %w", src, err)
+		return false, fmt.Errorf("stat overlay dir %s: %w", src, statErr)
 	}
-	return nil
 }
 
-// bindReadWriteOverlayDir binds src read-write over dst, creating src as a
-// directory first if it does not exist (fail closed via ensureOverlayDir). Used
-// to re-open the specific directories an in-container git must write (objects/,
-// refs/, logs/, lfs/, rr-cache/) on top of a read-only .git base.
-func bindReadWriteOverlayDir(registerMount func(string, string, bool, bool), src, dst string) error {
-	if err := ensureOverlayDir(src); err != nil {
+// bindReadWriteOverlayDir binds src read-write over dst through the single
+// ensureOverlayDir refusal path. With createIfMissing a missing src is created
+// (objects/, refs/, logs/, lfs/); without it a missing src is skipped (rr-cache).
+// A symlink or non-directory src is refused.
+func bindReadWriteOverlayDir(registerMount func(string, string, bool, bool), src, dst string, createIfMissing bool) error {
+	present, err := ensureOverlayDir(src, createIfMissing)
+	if err != nil {
 		return err
 	}
-	registerMount(src, dst, false, true)
+	if present {
+		registerMount(src, dst, false, true)
+	}
 	return nil
 }
 
@@ -1272,8 +1286,9 @@ func readSmallConfigFile(path string) ([]byte, error) {
 		return nil, fmt.Errorf("%s is not a regular file", path)
 	}
 	const maxConfig = 1 << 20
-	// Read one byte past the cap so an over-cap file is refused rather than
-	// silently truncated (a credential past the cap must not escape the check).
+	// Read one byte past the cap and refuse a file larger than it, so the whole
+	// config is covered by the credential check: every byte that is checked is the
+	// whole file, with no unread remainder.
 	raw, err := io.ReadAll(io.LimitReader(f, maxConfig+1))
 	if err != nil {
 		return nil, err
@@ -1333,25 +1348,33 @@ func registerReadOnlyBaseGitMounts(registerMount func(string, string, bool, bool
 	// in-container git-lfs store works (harmless when absent). Each is a writable
 	// overlay (created host-side, fail-closed).
 	for _, dir := range []string{"objects", "refs", "logs", "lfs"} {
-		if err := bindReadWriteOverlayDir(registerMount, filepath.Join(gitDir, dir), filepath.Join(containerGitDir, dir)); err != nil {
+		if err := bindReadWriteOverlayDir(registerMount, filepath.Join(gitDir, dir), filepath.Join(containerGitDir, dir), true); err != nil {
 			return err
 		}
 	}
-	// rr-cache is overlaid read-write only if it already exists: creating it
-	// host-side would turn on rerere in the user's own checkout (git enables
-	// rerere automatically when .git/rr-cache exists and rerere.enabled is unset).
-	if rr := filepath.Join(gitDir, "rr-cache"); fileExists(rr) {
-		registerMount(rr, filepath.Join(containerGitDir, "rr-cache"), false, true)
+	// rr-cache is overlaid read-write only if it already exists (createIfMissing
+	// false): creating it host-side would turn on rerere in the user's own checkout
+	// (git enables rerere automatically when .git/rr-cache exists and rerere.enabled
+	// is unset). It passes the same ensureOverlayDir refusal, so a symlink or a
+	// non-directory there is refused.
+	if err := bindReadWriteOverlayDir(registerMount, filepath.Join(gitDir, "rr-cache"), filepath.Join(containerGitDir, "rr-cache"), false); err != nil {
+		return err
 	}
 	// objects/info read-only again (alternates), on top of the rw objects/.
 	narrowObjectsInfo(registerMount, gitDir, containerGitDir)
 	// The agent's own worktree admin dir must be writable (HEAD/index/logs), but
-	// its gitdir, commondir and config.worktree stay read-only.
+	// its gitdir, commondir and config.worktree stay read-only. The rw overlay goes
+	// through the same ensureOverlayDir refusal; a missing own dir means no own
+	// worktree (skip the admin binds), a symlink or non-directory is refused.
 	if worktreeName == "" {
 		return nil
 	}
 	own := filepath.Join(gitDir, "worktrees", worktreeName)
-	if !fileExists(own) {
+	present, err := ensureOverlayDir(own, false)
+	if err != nil {
+		return err
+	}
+	if !present {
 		return nil
 	}
 	ownContainer := filepath.Join(containerGitDir, "worktrees", worktreeName)

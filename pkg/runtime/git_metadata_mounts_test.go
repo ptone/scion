@@ -514,21 +514,25 @@ func TestReadOnlyGitRoot_Functional(t *testing.T) {
 		t.Errorf("the stale remote-tracking ref must remain intact after the clean failure, got: %v\n%s", err, out)
 	}
 
-	// Stash must never lose work: refs/stash is a loose ref in the writable refs/
-	// overlay, so a stash push/pop cycle round-trips (a cosmetic packed-refs.lock
-	// warning may print). If a push ever fails non-zero instead, the change stays
-	// in the working tree. Either way the change is preserved.
+	// Stash round-trips: refs/stash is a loose ref in the writable refs/ overlay,
+	// so a stash push/pop cycle preserves the change (a cosmetic packed-refs.lock
+	// warning may print, but push still exits 0). Prove the full round-trip: push
+	// succeeds (mustGit), refs/stash exists, the change left the working tree, and
+	// pop brings it back with its content intact.
 	if err := os.WriteFile(filepath.Join(wt, "h.txt"), []byte("z\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	mustGit(wt, "add", "h.txt")
-	if _, err := git(wt, "stash", "push", "-m", "wip"); err == nil {
-		if out, err := git(wt, "stash", "pop"); err != nil {
-			t.Errorf("stash pop after a successful push should restore the change, got: %v\n%s", err, out)
-		}
+	mustGit(wt, "stash", "push", "-m", "wip")
+	if out, err := git(wt, "rev-parse", "--verify", "-q", "refs/stash"); err != nil {
+		t.Errorf("refs/stash must exist after a successful stash push, got: %v\n%s", err, out)
 	}
+	if _, err := os.Stat(filepath.Join(wt, "h.txt")); !os.IsNotExist(err) {
+		t.Errorf("the stashed change must have left the working tree, stat err: %v", err)
+	}
+	mustGit(wt, "stash", "pop")
 	if data, err := os.ReadFile(filepath.Join(wt, "h.txt")); err != nil || string(data) != "z\n" {
-		t.Errorf("the stashed change must never be lost under the read-only root, got %q err=%v", string(data), err)
+		t.Errorf("stash pop must restore the change under the read-only root, got %q err=%v", string(data), err)
 	}
 }
 
@@ -583,19 +587,37 @@ func TestAppleRepoConfigWithSecrets_RefusedAtStart(t *testing.T) {
 	}
 }
 
-// R3: ensureOverlayDir creates a missing directory, refuses a symlink, and
-// refuses a non-directory (fail closed).
+// R3: ensureOverlayDir is the single fail-closed inspection for overlay sources.
+// With createIfMissing it creates a missing directory; without it it reports a
+// missing source absent (skip, no create). A symlink or a non-directory is always
+// refused, and a real directory is reported present.
 func TestEnsureOverlayDir(t *testing.T) {
 	dir := t.TempDir()
-	// Missing -> created.
+	// Missing + createIfMissing -> created, present.
 	missing := filepath.Join(dir, "sub", "overlay")
-	if err := ensureOverlayDir(missing); err != nil {
-		t.Errorf("missing dir should be created, got: %v", err)
+	if present, err := ensureOverlayDir(missing, true); err != nil || !present {
+		t.Errorf("missing dir with createIfMissing should be created and present, got present=%v err=%v", present, err)
 	}
 	if fi, err := os.Stat(missing); err != nil || !fi.IsDir() {
 		t.Errorf("overlay dir not created: %v", err)
 	}
-	// A symlink -> refused.
+	// Missing + !createIfMissing -> absent, not created (rr-cache semantics).
+	skip := filepath.Join(dir, "sub2", "overlay")
+	if present, err := ensureOverlayDir(skip, false); err != nil || present {
+		t.Errorf("missing dir without createIfMissing should be absent and uncreated, got present=%v err=%v", present, err)
+	}
+	if _, err := os.Stat(skip); !os.IsNotExist(err) {
+		t.Errorf("a skip-if-missing overlay must not be created, stat err: %v", err)
+	}
+	// A real directory -> present.
+	real := filepath.Join(dir, "real")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if present, err := ensureOverlayDir(real, false); err != nil || !present {
+		t.Errorf("a real directory should be present, got present=%v err=%v", present, err)
+	}
+	// A symlink -> refused (both modes).
 	target := filepath.Join(dir, "target")
 	if err := os.MkdirAll(target, 0o755); err != nil {
 		t.Fatal(err)
@@ -604,15 +626,17 @@ func TestEnsureOverlayDir(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	if err := ensureOverlayDir(link); err == nil {
-		t.Error("a symlink overlay source must be refused")
+	for _, create := range []bool{true, false} {
+		if present, err := ensureOverlayDir(link, create); err == nil {
+			t.Errorf("a symlink overlay source must be refused (createIfMissing=%v), got present=%v", create, present)
+		}
 	}
 	// A non-directory (regular file) -> refused.
 	reg := filepath.Join(dir, "file")
 	if err := os.WriteFile(reg, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := ensureOverlayDir(reg); err == nil {
+	if _, err := ensureOverlayDir(reg, true); err == nil {
 		t.Error("a non-directory overlay source must be refused")
 	}
 }
@@ -654,6 +678,112 @@ func TestReadOnlyGitRoot_RrCacheOnlyIfExists(t *testing.T) {
 	want := "-v " + filepath.Join(repoRoot2, ".git", "rr-cache") + ":/repo-root/.git/rr-cache "
 	if !strings.Contains(strings.Join(args2, " "), want) {
 		t.Errorf("rr-cache must be overlaid read-write when it exists, got: %s", strings.Join(args2, " "))
+	}
+
+	// A symlink at .git/rr-cache is refused (fail closed via Lstat): following it
+	// would bind a directory outside the repository read-write into the agent.
+	// Reverting ensureOverlayDir to os.Stat (which follows the link) makes this
+	// case bind the link target instead of refusing — the os.Stat-revert mutant.
+	repoRoot3, workspace3 := setupHubManagedBaseRepo(t, "agent-1")
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(repoRoot3, ".git", "rr-cache")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	_, err = buildCommonRunArgs(RunConfig{
+		Harness: &harness.Generic{}, Name: "test-agent", UnixUsername: "scion",
+		Image: "scion-agent:latest", RuntimeName: "docker", RepoRoot: repoRoot3,
+		Workspace: workspace3, PrivateGitConfigSource: seedTestPrivateGitConfig(t),
+	})
+	if err == nil || !strings.Contains(err.Error(), "rr-cache") {
+		t.Errorf("a symlinked .git/rr-cache must be refused naming rr-cache, got: %v", err)
+	}
+}
+
+// F2: readSmallConfigFile accepts a file exactly at the cap and refuses one a
+// single byte over it, so the whole config is covered by the credential check.
+// Reverting it to read only up to the cap (the silent-truncation form) makes the
+// over-cap case return the truncated prefix with no error — this test goes red.
+func TestReadSmallConfigFile_SizeCap(t *testing.T) {
+	const maxConfig = 1 << 20
+	dir := t.TempDir()
+
+	atCap := filepath.Join(dir, "at-cap")
+	if err := os.WriteFile(atCap, make([]byte, maxConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readSmallConfigFile(atCap)
+	if err != nil {
+		t.Errorf("a file exactly at the cap must be accepted, got: %v", err)
+	}
+	if len(got) != maxConfig {
+		t.Errorf("expected %d bytes read, got %d", maxConfig, len(got))
+	}
+
+	overCap := filepath.Join(dir, "over-cap")
+	if err := os.WriteFile(overCap, make([]byte, maxConfig+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readSmallConfigFile(overCap); err == nil {
+		t.Error("a file one byte over the cap must be refused")
+	}
+}
+
+// F2: an Apple start is refused when a [credential] section sits past the size
+// cap — the over-cap refusal keeps a credential beyond the cap from going
+// unchecked.
+func TestAppleRepoConfigWithSecrets_OverCapRefused(t *testing.T) {
+	repoRoot, workspace := setupHubManagedBaseRepo(t, "agent-1")
+	cfgPath := filepath.Join(repoRoot, ".git", "config")
+	const maxConfig = 1 << 20
+	var b []byte
+	b = append(b, []byte("[core]\n\tfiller = ")...)
+	b = append(b, make([]byte, maxConfig)...) // pushes the next section past the cap
+	for i := range b[len("[core]\n\tfiller = "):] {
+		b[len("[core]\n\tfiller = ")+i] = 'x'
+	}
+	b = append(b, []byte("\n[credential]\n\thelper = store\n")...)
+	if err := os.WriteFile(cfgPath, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := buildCommonRunArgs(RunConfig{
+		Harness: &harness.Generic{}, Name: "test-agent", UnixUsername: "scion",
+		Image: "scion-agent:latest", RuntimeName: appleContainerRuntimeName,
+		RepoRoot: repoRoot, Workspace: workspace,
+	})
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("an over-cap repository config must be refused on Apple, got: %v", err)
+	}
+}
+
+// Structural: every read-write overlay source in the read-only-root layout is
+// reached through the single ensureOverlayDir refusal, so a symlink planted at any
+// of them is refused (fail closed) rather than followed. If a future overlay were
+// bound without going through ensureOverlayDir, adding its name here would catch it.
+func TestReadOnlyGitRoot_AllOverlaysRefuseSymlink(t *testing.T) {
+	for _, name := range []string{"objects", "refs", "logs", "lfs", "rr-cache"} {
+		t.Run(name, func(t *testing.T) {
+			repoRoot, workspace := setupHubManagedBaseRepo(t, "agent-1")
+			outside := filepath.Join(t.TempDir(), "outside")
+			if err := os.MkdirAll(outside, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			src := filepath.Join(repoRoot, ".git", name)
+			_ = os.RemoveAll(src)
+			if err := os.Symlink(outside, src); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			_, err := buildCommonRunArgs(RunConfig{
+				Harness: &harness.Generic{}, Name: "test-agent", UnixUsername: "scion",
+				Image: "scion-agent:latest", RuntimeName: "docker", RepoRoot: repoRoot,
+				Workspace: workspace, PrivateGitConfigSource: seedTestPrivateGitConfig(t),
+			})
+			if err == nil || !strings.Contains(err.Error(), name) {
+				t.Errorf("a symlinked .git/%s overlay must be refused naming %s, got: %v", name, name, err)
+			}
+		})
 	}
 }
 

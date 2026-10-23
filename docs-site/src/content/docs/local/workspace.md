@@ -341,24 +341,29 @@ metadata into agents so that an agent cannot change what git does for you or for
 worktree layouts, the whole `.git` root is mounted **read-only**, so an agent cannot create a
 root-level file git honours (such as a `commondir` that would redirect where git reads config, hooks
 and refs from). Only the paths an in-container git must write are re-opened read-write: `objects/`,
-`refs/`, `logs/`, the git-lfs object store (`.git/lfs`), the rerere cache (`.git/rr-cache`), and the
-agent's own worktree admin directory. On docker and podman, `.git/config` is served from each agent's
-own **private, read-only copy** in place of the shared one; the private copy has credential-bearing
-settings stripped and is pre-seeded so that `git push` and `git push -u origin <branch>` for the
-agent's own branch succeed without needing to write the config. Personal git preferences inside the
+`refs/`, `logs/`, the git-lfs object store (`.git/lfs`), and the agent's own worktree admin directory.
+The rerere cache (`.git/rr-cache`) is re-opened read-write only if it already exists — Scion never
+creates it, because creating it would turn on rerere in your own checkout. On docker and podman,
+`.git/config` is served from each agent's own **private, read-only copy** in place of the shared one;
+the private copy has credential-bearing settings stripped and is pre-seeded so that `git push` and
+`git push -u origin <branch>` for the agent's own branch succeed without needing to write the config.
+That copy also disables automatic housekeeping (`gc.auto=0`, `maintenance.auto=false`) so routine
+commands do not try to write lock files in the read-only root. Personal git preferences inside the
 agent go in the agent's own global git config, which is writable, not in the repository config. On the
 Apple runtime agents read the repository's git config directly (the runtime cannot bind a single
-private file); keep credentials out of repository git config (use a credential helper). An Apple agent
-whose repository `.git/config` holds credential-bearing settings is refused at start, naming the
-sections that must be cleared; use a credential helper, or run the project on a runtime that provides
-the private config copy.
+private file), so the private-copy settings above (credential stripping, the push pre-seed, the
+housekeeping defaults) do not apply there; keep credentials out of repository git config (use a
+credential helper in your global git config). An Apple agent whose repository `.git/config` holds
+credential-bearing settings is refused at start, naming the sections that must be cleared; use a
+credential helper in your global git config, or run the project on a runtime that provides the private
+config copy.
 
-Commit, branch creation, fetch, pull and push work normally. Because the `.git` root is read-only, a
-few operations that write a lock or state file directly in it do not work inside an agent: deleting a
-branch or a tag and `git fetch --prune` (all need `packed-refs.lock`), `git gc` / `git pack-refs`, and
-fetching into a shallow clone. These fail cleanly, without corrupting the repository. `git stash` still
-round-trips (the stash ref lives in the writable `refs/` overlay), though it may print a cosmetic
-`packed-refs.lock` warning.
+Commit, branch creation, fetch, pull, push and rebase work normally. Because the `.git` root is
+read-only, a few operations that write a lock or state file directly in it do not work inside an agent:
+deleting a branch or a tag and `git fetch --prune` (all need `packed-refs.lock`), `git gc` /
+`git pack-refs`, and fetching into a shallow clone. These fail cleanly, without corrupting the
+repository. `git stash` still round-trips (the stash ref lives in the writable `refs/` overlay), though
+it may print a cosmetic `packed-refs.lock` warning.
 
 This applies to the worktree-per-agent and outside-root layouts, where each agent has its own
 worktree. In the shared-workspace layout agents share one working tree and the `.git` root stays

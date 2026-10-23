@@ -171,6 +171,11 @@ func TestK8sSharedRepoShapeRefusal_Restart(t *testing.T) {
 			c.GitCloneForInit = nil
 			c.Env = append(c.Env, "SCION_WORKSPACE_GIT=false")
 		}, false},
+		{"git clone input wins over a non-git env signal", func(c *RunConfig) {
+			// GitCloneForInit present is a positive git signal and is checked first,
+			// so a conflicting SCION_WORKSPACE_GIT=false does not allow the start.
+			c.Env = append(c.Env, "SCION_WORKSPACE_GIT=false")
+		}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -127,8 +127,20 @@ func TestSeedPrivateGitConfig_MissingBaseSeedsUpstreamOnly(t *testing.T) {
 	}
 	// Automatic gc and maintenance are disabled so routine commands do not try to
 	// write lock files in the read-only .git root (which would only print warnings).
-	if !strings.Contains(s, "auto = 0") || !strings.Contains(s, "auto = false") {
-		t.Errorf("seed must disable automatic gc and maintenance, got %q", s)
+	// Read the values through git so the section names (gc.auto / maintenance.auto),
+	// not just the bare values, are checked.
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	cfg := func(key string) string {
+		out, _ := exec.Command("git", "config", "--file", dest, "--get", key).Output()
+		return strings.TrimSpace(string(out))
+	}
+	if got := cfg("gc.auto"); got != "0" {
+		t.Errorf("seed must set gc.auto=0, got %q", got)
+	}
+	if got := cfg("maintenance.auto"); got != "false" {
+		t.Errorf("seed must set maintenance.auto=false, got %q", got)
 	}
 }
 
