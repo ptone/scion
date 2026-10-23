@@ -63,6 +63,18 @@ Files tab. This adds the one-shot maintenance migration
   Both outcomes are reported with the markers read and their IDs. The project
   stays pending, M3 keeps its objects, and the notice names the reason and
   the parameter.
+- **No provisioning lock and no sentinel write** (fs-cleanup-arch,
+  01:08Z, after checking the provisioner). The provisioner reuses an
+  existing `.git`, refuses a non-empty workspace with no marker and no
+  `.git`, and discards its clone if the workspace changed during the clone.
+  With NOREPLACE-only renames and O_EXCL copies, every interleaving with a
+  first-agent provisioning gives one of three results: the intended
+  content, a list of conflicts with nothing overwritten, or the
+  provisioner's own refusal. Residuals:
+  - a git project migrated without `.git` is reported, because its first
+    start will refuse;
+  - a non-git workspace provisioned during the copy shows a partial tree
+    until the copy finishes (documented for operators).
 - **Step 4 gates steps 1 and 2.** If the seed step fails or cannot decide
   (git error, `.git` is a file), nothing moves from that source into
   `workspace/`. git gets `-c safe.directory=<dir>`.
@@ -139,7 +151,9 @@ Files tab. This adds the one-shot maintenance migration
   - a failed or undecidable seed step blocks the workspace move;
   - identity mismatch never migrates; unverified skipped and adopted per
     slug; a pre-rename-keyed seed verifies; the workspace record binds;
-  - a shared-dirs/ subtree stays out of workspace/.
+  - a shared-dirs/ subtree stays out of workspace/;
+  - the broker cloned first, then the migration copies (conflicts listed,
+    nothing overwritten, re-run 0); a git project without `.git` is reported.
 - `pkg/hub` (sharded, lane): seeded and rerunnable; T1 no-op; NFS move and
   idempotence; M3 through `storage.NewLocal`; volume fail-closed; notice plus
   the `migrationNotice` field on GET workspace/files; recompute after a run;

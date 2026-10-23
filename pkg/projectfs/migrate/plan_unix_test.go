@@ -770,3 +770,74 @@ func TestRun_SharedDirsSubtreeNotMovedIntoWorkspace(t *testing.T) {
 		t.Fatal("shared-dirs/ not kept in the .migrated copy")
 	}
 }
+
+// Residual 3: the broker created the leaf and cloned into it before the
+// migration ran. The copy lists conflicts, overwrites nothing, copies the
+// rest, and a re-run reports 0 moves.
+func TestRun_BrokerClonedFirstThenMigration(t *testing.T) {
+	f := newHubFixture(t)
+	ws := filepath.Join(f.share, "projects", pid1, "workspace")
+	writeTree(t, ws, map[string]string{".git/HEAD": "ref: refs/heads/main", "main.go": "package main // fresh clone"})
+	cloned := snapshot(t, ws)
+	writeTree(t, f.share, map[string]string{
+		legacyHubProjectsDir + "/p1/.scion/project-id": pid1,
+		legacyHubProjectsDir + "/p1/.git/HEAD":         "ref: refs/heads/old",
+		legacyHubProjectsDir + "/p1/main.go":           "package main // legacy edit",
+		legacyHubProjectsDir + "/p1/notes.txt":         "legacy notes",
+	})
+	in := f.input(ProjectRef{ID: pid1, Slug: "p1", Git: true})
+	rep, err := Run(context.Background(), in, opts(false))
+	if err != nil || rep.Failed() {
+		t.Fatalf("err=%v failed=%t", err, rep.Failed())
+	}
+	got := snapshot(t, ws)
+	for p, v := range cloned {
+		if got[p] != v {
+			t.Fatalf("clone's %s changed: %q -> %q", p, v, got[p])
+		}
+	}
+	if readFile(t, filepath.Join(ws, "notes.txt")) != "legacy notes" {
+		t.Fatal("missing file not copied")
+	}
+	var b bytes.Buffer
+	rep.WriteLog(&b)
+	for _, want := range []string{"CONFLICT main.go", "CONFLICT .git/HEAD"} {
+		if !strings.Contains(b.String(), want) {
+			t.Fatalf("log lacks %q:\n%s", want, b.String())
+		}
+	}
+	again, err := Run(context.Background(), in, opts(false))
+	if err != nil || again.Moves() != 0 || again.Failed() {
+		t.Fatalf("re-run: err=%v moves=%d failed=%t", err, again.Moves(), again.Failed())
+	}
+}
+
+// Residual 1: a git project's tree migrated without a .git is reported,
+// because its first agent start will refuse.
+func TestRun_GitProjectWithoutGitDirIsReported(t *testing.T) {
+	f := newHubFixture(t)
+	writeTree(t, f.share, map[string]string{
+		legacyHubProjectsDir + "/p1/.scion/project-id": pid1,
+		legacyHubProjectsDir + "/p1/notes.txt":         "n",
+	})
+	rep, err := Run(context.Background(), f.input(ProjectRef{ID: pid1, Slug: "p1", Git: true}), opts(false))
+	if err != nil || rep.Failed() {
+		t.Fatalf("err=%v failed=%t", err, rep.Failed())
+	}
+	found := false
+	for _, n := range rep.Projects[0].Notes {
+		found = found || strings.Contains(n, "first agent start will refuse")
+	}
+	if !found {
+		t.Fatalf("notes = %v", rep.Projects[0].Notes)
+	}
+	// A non-git project gets no such note.
+	g := newHubFixture(t)
+	writeTree(t, g.share, map[string]string{legacyHubProjectsDir + "/p1/.scion/project-id": pid1, legacyHubProjectsDir + "/p1/notes.txt": "n"})
+	rep, _ = Run(context.Background(), g.input(ProjectRef{ID: pid1, Slug: "p1"}), opts(false))
+	for _, n := range rep.Projects[0].Notes {
+		if strings.Contains(n, "refuse") {
+			t.Fatalf("unexpected note for a non-git project: %q", n)
+		}
+	}
+}

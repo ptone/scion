@@ -150,6 +150,7 @@ func storageMigrateProjectRef(p *store.Project) migrate.ProjectRef {
 	return migrate.ProjectRef{
 		ID:          p.ID,
 		Slug:        p.Slug,
+		Git:         p.GitRemote != "",
 		NoWorkspace: p.IsEmptyPerAgent() || (p.GitRemote != "" && !p.IsSharedWorkspace()),
 	}
 }

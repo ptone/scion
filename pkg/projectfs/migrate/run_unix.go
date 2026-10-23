@@ -31,6 +31,8 @@ import (
 type ProjectRef struct {
 	ID   string
 	Slug string
+	// Git: the project is git-backed (has a git remote).
+	Git bool
 	// LocalBrokerTree: a co-located broker serves this project from the
 	// hub-local ~/.scion/projects/<slug> (the per-project provider check);
 	// steps 2 and 4 only copy from that tree.
@@ -177,6 +179,7 @@ func projectInput(in HubInput, legacy Tree, ref ProjectRef) (ProjectInput, error
 		GlobalDir:     in.GlobalDir,
 		Tracked:       in.Tracked,
 		LocalCopyOnly: ref.LocalBrokerTree,
+		Git:           ref.Git,
 	}
 	pi.WorkspaceOwner = layoutOwner(in.Workspace)
 	pi.SharedDirOwner = layoutOwner(in.SharedDirs)

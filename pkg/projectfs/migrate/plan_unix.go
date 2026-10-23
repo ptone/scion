@@ -128,6 +128,9 @@ type ProjectInput struct {
 	// applies, without a provider, when the tree itself carries broker
 	// state (localTreeUsedByBroker).
 	LocalCopyOnly bool
+	// Git: the project is git-backed; a workspace migrated without a .git
+	// is reported, because the first agent start will refuse it.
+	Git bool
 	// SkipWorkspace: the workspace Layout is not shared, so steps 1, 2 and
 	// 4 do not apply (only step 3 runs); reported per project.
 	SkipWorkspace bool
@@ -286,6 +289,7 @@ func MigrateProject(ctx context.Context, in ProjectInput, opts Options) ProjectR
 		} else {
 			rep.WorkspaceIncomplete = true
 		}
+		rep.noteGitlessWorkspace(in, opts)
 	}
 	if in.SharedDir != nil {
 		rep.sharedDirs(in, sdOpts)
@@ -416,6 +420,35 @@ func (rep *ProjectReport) seed(ctx context.Context, in ProjectInput, src Tree, c
 		return true
 	}
 	return move()
+}
+
+// noteGitlessWorkspace reports a git project whose workspace content was
+// migrated without a .git (fs-cleanup-arch residual 1): the provisioner
+// refuses a non-empty workspace with no provisioning marker and no .git, so
+// the first agent start will fail until the operator acts.
+func (rep *ProjectReport) noteGitlessWorkspace(in ProjectInput, opts Options) {
+	if !in.Git || in.Workspace == nil {
+		return
+	}
+	moved := false
+	for _, r := range rep.Results {
+		if (r.Step == StepHubProjects || r.Step == StepLocalProjects) && r.Moved() {
+			moved = true
+		}
+	}
+	if !moved {
+		return
+	}
+	k, err := entryKind(Tree{Base: in.Workspace.Base, Rel: filepath.Join(in.Workspace.Rel, ".git")})
+	if err != nil || k != kindAbsent {
+		return
+	}
+	if opts.DryRun {
+		// The target may not exist yet; say what the source lacks.
+		rep.Notes = append(rep.Notes, "git project: the migrated workspace would have no .git; its first agent start would refuse until the operator moves the non-git entries out or re-clones")
+		return
+	}
+	rep.Notes = append(rep.Notes, "git project: migrated, but the workspace has no .git; the first agent start will refuse (non-empty workspace without a provisioning marker or .git) until the operator moves the non-git entries out or re-clones")
 }
 
 // StepIdentity reports a legacy tree that is not bound to the project.
