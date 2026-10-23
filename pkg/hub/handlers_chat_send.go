@@ -158,6 +158,97 @@ func chatSendPostDenied(reason string) *chatSendError {
 		"You can read this thread but not post in it", details)
 }
 
+// chatActionDenied is the refusal for a caller who may read a thread but
+// may not take action in it (chatThreadAccess). It has the shape of
+// chatSendPostDenied, with the refused action in details.chat_action:
+// every thread write needs project.chat_post, and a user access token
+// without inbox:write for the project loses them all (reason token_scope).
+func chatActionDenied(action, reason string) *chatSendError {
+	details := map[string]interface{}{
+		"resource_type": "project",
+		"denied_action": string(ActionChatPost),
+		"chat_action":   action,
+	}
+	if reason != "" {
+		details["reason"] = reason
+	}
+	message := "You can read this thread but not change it"
+	if reason == ChatReasonTokenScope {
+		message = "This access token may not write chat in this project"
+	}
+	return newChatSendError(http.StatusForbidden, ErrCodeChatPostDenied, message, details)
+}
+
+// requireChatThreadAction decides with chatThreadAccess whether user may
+// take every one of actions in thread, and writes the refusal when not: a
+// caller who may not read the thread gets 404 notFound (the reason is
+// logged), one who may read it but not take an action 403
+// chat_post_denied (chatActionDenied). A resolver error fails closed.
+// Callers run it before any mutation or event, so a refused request
+// changes nothing.
+func (s *Server) requireChatThreadAction(w http.ResponseWriter, r *http.Request, user UserIdentity, thread chatThreadRef, notFound string, actions ...string) bool {
+	access, err := s.chatThreadAccess(r.Context(), user, thread)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return false
+	}
+	if !access.Can(ChatActionRead) {
+		if thread.Project != nil {
+			logAuthzDenial(r, user, projectResource(thread.Project), ActionRead, access.readDenial.Reason)
+		}
+		NotFound(w, notFound)
+		return false
+	}
+	for _, action := range actions {
+		if !access.Can(action) {
+			logAuthzDenial(r, user, projectResource(thread.Project), ActionChatPost, access.postDenial.Reason)
+			chatActionDenied(action, access.Reason).write(w)
+			return false
+		}
+	}
+	return true
+}
+
+// requireChatMessageAction applies requireChatThreadAction to a message of
+// the conversation key: a topic message needs action in the topic, and a
+// topic or project that cannot be read answers as a missing thread. A DM
+// message passes: a DM is not decided by the chat resolvers (its sender
+// and key participation decide it).
+func (s *Server) requireChatMessageAction(w http.ResponseWriter, r *http.Request, user UserIdentity, wcs WebChatStore, key, action string) bool {
+	if strings.HasPrefix(key, "dm:") {
+		return true
+	}
+	ctx := r.Context()
+	topic, err := wcs.GetTopic(ctx, key)
+	if err != nil || topic == nil {
+		NotFound(w, "Thread")
+		return false
+	}
+	project, err := s.store.GetProject(ctx, topic.ProjectID)
+	if err != nil {
+		NotFound(w, "Thread")
+		return false
+	}
+	return s.requireChatThreadAction(w, r, user, chatThreadRef{Key: key, Project: project}, "Thread", action)
+}
+
+// requireChatConversationAction applies requireChatThreadAction to a user
+// caller on a project conversation (a topic's row or a project group).
+// Agents and legacy groups with no project are not decided by the chat
+// resolvers in Phase 1 and pass unchanged (ptone/scion#5519 Phase 2).
+func (s *Server) requireChatConversationAction(w http.ResponseWriter, r *http.Request, conv *store.Conversation, action string) bool {
+	user := GetUserIdentityFromContext(r.Context())
+	if user == nil || conv.ProjectID == nil || *conv.ProjectID == "" {
+		return true
+	}
+	project, err := s.store.GetProject(r.Context(), *conv.ProjectID)
+	if err != nil {
+		writeErrorFromErr(w, err, "Conversation")
+		return false
+	}
+	return s.requireChatThreadAction(w, r, user, chatThreadRef{Project: project, ConversationID: conv.ID}, "Conversation", action)
+}
+
 // chatPostIdentity is the identity whose account decides project.chat_post:
 // the holder of a user access token, the caller otherwise. A token keeps
 // needing only inbox:write for a send; the post permission is a property
