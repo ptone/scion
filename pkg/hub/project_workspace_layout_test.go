@@ -27,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -282,6 +283,59 @@ func TestInitHubManagedProject_SharedBackend_SeedsProjectRoot(t *testing.T) {
 	dir, err := f.srv.projectConfigDir(project)
 	require.NoError(t, err)
 	assert.Equal(t, cfgDir, dir)
+
+	// The identity files beside settings.yaml: project-id and project-slug
+	// (fs-cleanup-arch P3b Q7), one line each, mode 0644.
+	for name, want := range map[string]string{projectkeys.ProjectIDFile: project.ID, projectkeys.ProjectSlugFile: project.Slug} {
+		data, err := os.ReadFile(filepath.Join(cfgDir, name))
+		require.NoError(t, err, name)
+		assert.Equal(t, want+"\n", string(data), name)
+		info, err := os.Lstat(filepath.Join(cfgDir, name))
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0o644), info.Mode().Perm(), name)
+	}
+}
+
+// TestProjectSlugRename_SharedBackend_UpdatesProjectSlugFile: renaming a
+// project's slug on a shared backend rewrites <ProjectRoot>/.scion/
+// project-slug; nothing slug-keyed moves.
+func TestProjectSlugRename_SharedBackend_UpdatesProjectSlugFile(t *testing.T) {
+	f := newWorkspaceLayoutFixture(t)
+	f.useNFS()
+	project, _ := createTestHubManagedProject(t, f.srv, "Slug Before")
+	slugFile := filepath.Join(f.shareBase, "projects", project.ID, ".scion", projectkeys.ProjectSlugFile)
+	data, err := os.ReadFile(slugFile)
+	require.NoError(t, err)
+	require.Equal(t, project.Slug+"\n", string(data), "fixture check")
+
+	oldSlug := project.Slug
+	project.Slug = "slug-after"
+	f.srv.migrateProjectSlug(context.Background(), project, oldSlug)
+
+	data, err = os.ReadFile(slugFile)
+	require.NoError(t, err)
+	assert.Equal(t, "slug-after\n", string(data))
+	_, err = os.Stat(filepath.Join(f.home, ".scion", "projects", "slug-after"))
+	assert.True(t, os.IsNotExist(err), "nothing slug-keyed is created on the hub's local disk")
+
+	// A project without a project configuration directory yet (created
+	// before the upgrade, not migrated) gets none from a rename.
+	other := &store.Project{ID: "aaaaaaaa-0000-4000-8000-0000000000c1", Name: "Legacy", Slug: "legacy-old"}
+	other.Slug = "legacy-new"
+	f.srv.migrateProjectSlug(context.Background(), other, "legacy-old")
+	_, err = os.Stat(filepath.Join(f.shareBase, "projects", other.ID))
+	assert.True(t, os.IsNotExist(err), "a rename never creates the project configuration")
+}
+
+// TestProjectSlugFile_LocalBackendUnaffected: on the local backend the seed
+// keeps its existing form (no project-id / project-slug files are added).
+func TestProjectSlugFile_LocalBackendUnaffected(t *testing.T) {
+	f := newWorkspaceLayoutFixture(t)
+	_, workspacePath := createTestHubManagedProject(t, f.srv, "Local Slug")
+	for _, name := range []string{projectkeys.ProjectIDFile, projectkeys.ProjectSlugFile} {
+		_, err := os.Stat(filepath.Join(workspacePath, ".scion", name))
+		assert.True(t, os.IsNotExist(err), "%s is not written on the local backend", name)
+	}
 }
 
 // TestCreateProject_SharedBackendUnmounted_RollsBack: a shared backend whose
