@@ -179,10 +179,15 @@ export function textMarkKinds(text: string): string[] {
 }
 
 /** The marks parseCritic reads in text, their texts read by plain() (comments as written). */
-export function textMarkRuns(text: string, plain: (md: string) => string): MarkRun[] {
+export function textMarkRuns(
+  text: string,
+  plain: (md: string) => string,
+  from = 0,
+  to = Infinity
+): MarkRun[] {
   const out: MarkRun[] = [];
   for (const s of parseCritic(text)) {
-    if (s.kind === 'text') continue;
+    if (s.kind === 'text' || s.start < from || s.start >= to) continue;
     if (s.kind === 'comment') out.push({ kind: 'comment', text: s.text });
     else if (s.kind === 'substitution') {
       out.push({ kind: 'substitution', text: plain(s.text), next: plain(s.next ?? '') });
@@ -225,4 +230,29 @@ export function marksReadBack(
     ? textMarkRuns(text, plain)
     : textMarkKinds(text).map((kind) => ({ kind, text: '' }) as MarkRun);
   return sameRuns(d, t, !!plain) ? null : { doc: d, text: t };
+}
+
+/** How the save invariant compares a mark: kind, text, new side (a note is a comment's text). */
+export function markKey(x: { kind: string; text: string; next?: string }): string {
+  return `${x.kind}\u0000${x.text}\u0000${x.next ?? ''}`;
+}
+
+/**
+ * The save invariant (I2): every earlier mark and note (before, as
+ * markKey, in source order) appears unchanged and in the same order in
+ * out, and out has exactly own other marks (the reviewer's own, counted in
+ * the document).
+ */
+export function earlierKept(before: string[], out: string, own: number): boolean {
+  const after = parseCritic(out)
+    .filter((x) => x.kind !== 'text')
+    .map(markKey);
+  let p = 0;
+  for (const k of after) if (p < before.length && k === before[p]) p++;
+  return p === before.length && after.length - before.length === own;
+}
+
+/** The number of this session's own mark runs and comments in a document. */
+export function ownRuns(doc: Node): number {
+  return docMarkRuns(doc).filter((r) => r.mine).length;
 }

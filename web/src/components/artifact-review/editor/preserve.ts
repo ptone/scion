@@ -29,9 +29,14 @@
 
 import type { Node, Schema } from '@milkdown/prose/model';
 
-import { chooseAlphabet, criticToSentinelText } from '../../../utils/critic-sentinels.js';
+import {
+  chooseAlphabet,
+  criticToSentinelText,
+  sentinelSet,
+} from '../../../utils/critic-sentinels.js';
 import type { SentinelAlphabet } from '../../../utils/critic-sentinels.js';
 import { saveDoc } from './bridge.js';
+import type { Consumed } from './bridge.js';
 
 interface Block {
   src: string;
@@ -161,4 +166,54 @@ export function savePreserving(
     i = j + 1;
   }
   return { md, rewritten };
+}
+
+/**
+ * The load invariant (I1) on what the sentinel pass consumed: every
+ * sentinel of md's sentinel form lies inside a top-level block of the
+ * Markdown parser's reading (none in the gaps between blocks, where link
+ * reference definitions are), and for every top-level block the sentinels
+ * consumed while visiting it are exactly the sentinels of that block's
+ * source, in order, each comment with its own note. Whatever construct
+ * moves a mark or a note (a definition copied to its references, text
+ * moved by a parser extension), the editor then refuses to open rather
+ * than show it in another place.
+ */
+export function consumedAsInSource(
+  md: string,
+  a: SentinelAlphabet,
+  parseMd: (s: string) => { children: MdNode[] },
+  blockCount: number,
+  consumed: Consumed[]
+): boolean {
+  const { text, notes } = criticToSentinelText(md, a);
+  const sentinels = sentinelSet(a);
+  const kids = parseMd(text).children;
+  const any = [...text].some((c) => sentinels.has(c));
+  if (
+    kids.length !== blockCount ||
+    kids.some((k) => k.position?.start.offset === undefined || k.position?.end.offset === undefined)
+  ) {
+    return !any && consumed.length === 0;
+  }
+  const want: Consumed[][] = kids.map(() => []);
+  let note = 0;
+  let k = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (!sentinels.has(c)) continue;
+    while (k < kids.length && kids[k].position!.end.offset! <= i) k++;
+    if (k >= kids.length || kids[k].position!.start.offset! > i) return false;
+    want[k].push(c === a.note ? { block: k, ch: c, note: notes[note++] } : { block: k, ch: c });
+  }
+  const got: Consumed[][] = kids.map(() => []);
+  for (const x of consumed) {
+    if (x.block < 0 || x.block >= got.length) return false;
+    got[x.block].push(x);
+  }
+  return want.every(
+    (w, b) =>
+      w.length === got[b].length &&
+      w.every((x, i) => x.ch === got[b][i].ch && x.note === got[b][i].note)
+  );
 }

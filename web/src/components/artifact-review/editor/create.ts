@@ -67,6 +67,19 @@ export interface CoreOptions {
   plugins?: (schema: Schema) => Plugin[];
 }
 
+/**
+ * Preset plugins left out: each changes the document on its own (a view
+ * update or an appended transaction), which in a review would be an edit
+ * the reviewer did not make. Heading ids (the DOM never shows them; links
+ * to headings use the text), ordered-list labels, table alignment and
+ * table repair (tables are not edited in this version), marks cleared
+ * around line breaks, and typing between two inline atoms (the browser's
+ * own input path records it). Every other preset plugin is listed in
+ * KEPT_PLUGINS (editor.test.ts), so an upgrade that adds one fails a test.
+ */
+export const DROPPED_PLUGIN =
+  /^(MILKDOWN_HEADING_ID|MILKDOWN_KEEP_LIST_ORDER|MILKDOWN_KEEP_TABLE_ALIGN_PLUGIN|MILKDOWN_HARDBREAK_MARKS|MILKDOWN_INLINE_NODES_CURSOR|selectingCells)\$\d*$/;
+
 export async function createCore(opts: CoreOptions): Promise<Core> {
   const editor = await Editor.make()
     .config((ctx) => {
@@ -76,7 +89,9 @@ export async function createCore(opts: CoreOptions): Promise<Core> {
         const o = prev(options);
         const ours = opts.plugins ? opts.plugins(o.schema ?? ctx.get(schemaCtx)) : [];
         const rest = (o.plugins ?? []).filter(
-          (p) => !(p.spec as { isInputRules?: boolean }).isInputRules
+          (p) =>
+            !(p.spec as { isInputRules?: boolean }).isInputRules &&
+            !DROPPED_PLUGIN.test((p as unknown as { key: string }).key)
         );
         return { ...o, plugins: [...ours, ...rest] };
       });

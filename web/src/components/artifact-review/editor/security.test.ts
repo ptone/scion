@@ -507,7 +507,20 @@ describe('sentinel characters in the text (S6)', () => {
     ['a {>>x\n===<<} &#x2E00;f&#x2E01; &#x2E11;', 'marks'],
     ['| a {>>x | b<<} | &#x2E00;f&#x2E01; &#x2E11; |\n|---|---|\n| 1 | 2 |', 'marks'],
     ['{>>x\n```\n<<} &#x2E00;f&#x2E01; &#x2E11;\n```', 'marks'],
-    ['[r]: u "{>>x<<} &#x2E00;f&#x2E01; &#x2E11;"\n\n[r]', 'attribute'],
+    // Link reference definitions: the parser copies a definition onto its
+    // references and drops it, so a mark or note in one would show in
+    // another place (or nowhere). The load invariant refuses them.
+    ['[r]: u "{>>x<<} &#x2E00;f&#x2E01; &#x2E11;"\n\n[r]', 'refuses'],
+    ['[a][r]\n\nPara {==x==}{>>B<<}\n\n[r]: http://e.example/{>>A<<}', 'refuses'],
+    ['[r]: /p "{>>A<<}"\n\nPara {==x==}{>>B<<}\n\n[t][r]', 'refuses'],
+    ['![alt][r]\n\nPara {==x==}{>>B<<}\n\n[r]: i.png "{>>A<<}"', 'refuses'],
+    ['[r]: /p "{>>R<<}"\n\n{>>X<<} hello\n\n[t][r]', 'refuses'],
+    ['[a][r] [b][r] {>>X<<}\n\n[r]: /p "{>>R<<}"\n[q]: /p "{>>Q<<}"', 'refuses'],
+    ['see <http://a.example/{>>A<<}> here {>>B<<}\n\n[u]: /x "{>>C<<}"', 'refuses'],
+    ['[u]: /x "{++"\n\nhello ++} world', 'refuses'],
+    // A link whose text ends in an image: its target is not restored, so
+    // the document does not open (kept deliberately; it fails safe).
+    ['[![b](i.png)](https://x.example/{++y++}) and {++real two++}', 'refuses'],
     ['[l](u "{++x++}") and {++real two++}', 'attribute'],
     ['<span title="{--x--}">s</span> and {++real two++}', 'attribute'],
     ['![i]({++x++}.png) and {++real two++}', 'attribute'],

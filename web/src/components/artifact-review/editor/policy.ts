@@ -158,7 +158,8 @@ export type UnitCheck = (doc: Node, first: number, last: number) => boolean;
  * Whether a replace from..to (in doc) would change a mark or comment of an
  * earlier review: it deletes an earlier insertion, replacement new side,
  * highlighted text or comment, or it inserts inside an earlier mark's run
- * (between the two sides of an earlier replacement included). Deleting
+ * (between the two sides of an earlier replacement included, and between
+ * an earlier highlight and the comment after it). Deleting
  * text an earlier review already marked as deleted changes nothing.
  */
 export function touchesEarlier(doc: Node, from: number, to: number): boolean {
@@ -181,6 +182,10 @@ export function touchesEarlier(doc: Node, from: number, to: number): boolean {
   const before = $a.nodeBefore;
   const after = $b.nodeAfter;
   if (!before || !after || !$a.parent.isTextblock) return false;
+  // An earlier highlight and its comment are one unit.
+  if (after.type.name === COMMENT && markKeyOf(before.marks) === 'hl' && !isMine(before.marks)) {
+    return true;
+  }
   const kb = runKeyOf(before.marks);
   const ka = runKeyOf(after.marks);
   if (!kb || !ka || isMine(before.marks) || isMine(after.marks)) return false;

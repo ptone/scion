@@ -21,7 +21,7 @@ import { NodeSelection, TextSelection } from '@milkdown/prose/state';
 
 import { containerClass } from './policy.js';
 import type { HintKind } from './policy.js';
-import { COMMENT, MARKS, markKeyOf } from './schema.js';
+import { COMMENT, MARKS, markKeyOf, runKeyOf } from './schema.js';
 import { SKIP_TRACK } from './track.js';
 
 function hasCritic(state: EditorState, from: number, to: number): boolean {
@@ -72,7 +72,40 @@ export function planComment(state: EditorState): CommentPlan | { refuse: HintKin
     $from.parent.isTextblock &&
     !hasCritic(state, from, to) &&
     !inCode(from);
-  return { at: to, highlight: canWrap ? { from, to } : null, quote };
+  return {
+    at: canWrap ? to : afterRun(state, to),
+    highlight: canWrap ? { from, to } : null,
+    quote,
+  };
+}
+
+/**
+ * Where a note placed at pos goes so it does not split a mark: pos itself,
+ * or the end of the critic run pos is strictly inside (a replacement's two
+ * sides are one run), after the comment of a highlight run.
+ */
+export function afterRun(state: EditorState, pos: number): number {
+  const $p = state.doc.resolve(pos);
+  const parent = $p.parent;
+  const before = $p.nodeBefore;
+  const after = $p.nodeAfter;
+  if (!before || !after) return pos;
+  const same = (a: string | null, b: string | null): boolean =>
+    !!a && !!b && (a === b || (a === 'subOld' && b === 'subNew'));
+  let key = runKeyOf(before.marks);
+  if (!same(key, runKeyOf(after.marks))) return pos;
+  // The node after pos (the one containing it when pos is inside a text node).
+  let i = $p.index();
+  let end = pos - $p.textOffset + parent.child(i).nodeSize;
+  key = runKeyOf(parent.child(i).marks);
+  while (i + 1 < parent.childCount && same(key, runKeyOf(parent.child(i + 1).marks))) {
+    i++;
+    key = runKeyOf(parent.child(i).marks);
+    end += parent.child(i).nodeSize;
+  }
+  const next = i + 1 < parent.childCount ? parent.child(i + 1) : null;
+  if (markKeyOf(parent.child(i).marks) === 'hl' && next?.type.name === COMMENT) end += 1;
+  return end;
 }
 
 /** The transaction adding a comment with note as planned. */

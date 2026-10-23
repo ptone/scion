@@ -24,7 +24,7 @@ import { onlyMarksChanged, projectCritic } from '../../../utils/critic.js';
 import { ReviewController, scrollToHeading } from './controller.js';
 import type { NoteRequest } from './controller.js';
 import type { HintKind } from './policy.js';
-import { renderContext } from './__fixtures__/core.js';
+import { corpus, renderContext } from './__fixtures__/core.js';
 
 interface Harness {
   c: ReviewController;
@@ -175,6 +175,30 @@ describe('track changes (inline)', () => {
     type(c, 'W', posOf(c, 'hl', 1));
     expect(hints).toEqual(['earlier', 'earlier', 'earlier']);
     expect(text(c)).toBe(md);
+  });
+
+  it('typing between an earlier highlight and its comment is refused (they are one unit)', async () => {
+    const md = 'a {==x==}{>>n<<} z\n';
+    const { c, hints } = await open(md);
+    type(c, 'Y', posOf(c, 'x', 1));
+    expect(hints).toEqual(['earlier']);
+    expect(text(c)).toBe(md);
+    // Positive control: after the comment, typing is recorded.
+    type(c, 'W', posOf(c, ' z'));
+    expect(text(c)).toBe('a {==x==}{>>n<<}{++W++} z\n');
+  });
+
+  it('a unit the editor does not read as the critic parser does is read-only', async () => {
+    // An empty insertion: the critic parser reads a mark, the editor shows
+    // the tokens as text (there is no text to carry a mark).
+    const md = 'a {++++} b\n\nnext para\n';
+    const { c, hints } = await open(md);
+    expect(c.readOnlyBlocks()).toEqual([0]);
+    type(c, 'Q', posOf(c, ' b'));
+    expect(hints).toEqual(['generic']);
+    // Positive control: the next block takes edits; the first is written as it was.
+    type(c, 'Z', posOf(c, 'next'));
+    expect(text(c)).toBe('a {++++} b\n\n{++Z++}next para\n');
   });
 
   it('one undo reverts a deletion and a replacement', async () => {
@@ -469,6 +493,103 @@ describe('comments', () => {
     expect(text(c)).toBe('{++X++}one {>>changed<<}two\n');
   });
 
+  it('puts a caret comment inside a mark after the mark, not inside it', async () => {
+    const cases: [string, string, number, string][] = [
+      ['a {++ab++} z\n', 'ab', 1, 'a {++ab++}{>>a note<<} z\n'],
+      ['a {~~old~>new~~} z\n', 'new', 2, 'a {~~old~>new~~}{>>a note<<} z\n'],
+      ['a {~~old~>new~~} z\n', 'old', 1, 'a {~~old~>new~~}{>>a note<<} z\n'],
+      ['a {==ab==}{>>theirs<<} z\n', 'ab', 1, 'a {==ab==}{>>theirs<<}{>>a note<<} z\n'],
+    ];
+    for (const [md, needle, offset, want] of cases) {
+      const { c } = await open(md);
+      select(c, posOf(c, needle, offset));
+      await c.comment();
+      expect(text(c), md).toBe(want);
+    }
+    // Positive control: at a plain caret the note goes at the caret.
+    const { c } = await open('one two\n');
+    select(c, posOf(c, 'two', 1));
+    await c.comment();
+    expect(text(c)).toBe('one t{>>a note<<}wo\n');
+  });
+
+  it('shows a hint and adds nothing when the document changed while the comment dialog was open', async () => {
+    const root = document.createElement('div');
+    document.body.append(root);
+    const hints: HintKind[] = [];
+    let onAsk: () => void = () => {};
+    const c = await ReviewController.create({
+      root,
+      render: () => renderContext,
+      askNote: () => {
+        onAsk();
+        return Promise.resolve('note');
+      },
+      onHint: (h) => hints.push(h),
+      onChange: () => {},
+    });
+    made.push(c);
+    expect(c.load('one two\n')).toBe(true);
+    select(c, posOf(c, 'two'));
+    onAsk = (): void => type(c, 'X', 1);
+    await c.comment();
+    expect(hints).toEqual(['generic']);
+    expect(text(c)).toBe('{++X++}one two\n');
+    // Positive control: with no change, the comment is added where planned.
+    onAsk = (): void => {};
+    select(c, posOf(c, 'two'));
+    await c.comment();
+    expect(text(c)).toBe('{++X++}one {>>note<<}two\n');
+  });
+
+  it('Enter on a comment badge reached with Tab edits that comment', async () => {
+    const { c, asked, answer } = await open('one two\n');
+    select(c, posOf(c, 'two'));
+    answer.note = 'first';
+    await c.comment();
+    const badge = c.view.dom.querySelector('.critic-comment') as HTMLElement;
+    select(c, 1);
+    badge.focus();
+    answer.note = 'second';
+    const e = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+    badge.dispatchEvent(e);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(e.defaultPrevented).toBe(true);
+    expect(asked[1]).toMatchObject({ note: 'first', number: 1 });
+    expect(text(c)).toBe('one {>>second<<}two\n');
+  });
+
+  it("matches the reviewer's own marks by place, so an identical earlier mark stays earlier", async () => {
+    const version = 'the {==the==}{>>theirs<<} end\n';
+    const md = '{==the==}{>>mine<<} {==the==}{>>theirs<<} end\n';
+    const { c } = await open('x\n');
+    expect(c.load(md, version)).toBe(true);
+    // Each highlight and each comment, in order: whether it is the reviewer's.
+    const mine: boolean[] = [];
+    c.view.state.doc.descendants((n) => {
+      if (n.type.name === 'critic_comment') mine.push(n.attrs.mine === true);
+      const hl = n.marks.find((m) => m.type.name === 'critic_hl');
+      if (n.isText && hl) mine.push(hl.attrs.mine === true);
+      return true;
+    });
+    expect(mine).toEqual([true, true, false, false]);
+  });
+
+  it("keeps the reviewer's own marks theirs when another block is read-only", async () => {
+    const version = '[l](u "{++x++}") text\n\none two\n';
+    const md = '[l](u "{++x++}") text\n\none {>>mine<<}two\n';
+    const { c } = await open('x\n');
+    expect(c.load(md, version)).toBe(true);
+    expect(c.readOnlyBlocks()).toEqual([0]);
+    let mine = false;
+    c.view.state.doc.descendants((n) => {
+      if (n.type.name === 'critic_comment') mine = n.attrs.mine === true;
+      return true;
+    });
+    expect(mine).toBe(true);
+  });
+
   it('does not edit a comment already in the text', async () => {
     const { c, hints, asked } = await open('one {==two==}{>>old<<} three\n');
     let pos = -1;
@@ -659,6 +780,18 @@ describe('composition timing', () => {
     expect(text(c)).toBe('a {++犬猫++}dog\n');
   });
 
+  it('records a composition whose start the editor did not see', async () => {
+    const { c, hints } = await open('a dog\n');
+    const p = posOf(c, 'dog');
+    select(c, p);
+    // No compositionstart: the first composition transaction is the start.
+    composeStep(c, p, '犬', 13);
+    c.view.dom.dispatchEvent(new CompositionEvent('compositionend'));
+    await tick();
+    expect(hints).toEqual([]);
+    expect(text(c)).toBe('a {++犬++}dog\n');
+  });
+
   it('restores exactly when the composed letter repeats its neighbour, in a list and in code', async () => {
     const md = '- item\n\n```\ncoode\n```\n';
     const { c, hints } = await open(md);
@@ -680,7 +813,7 @@ describe('composition timing', () => {
     expect(text(c)).toBe(md);
   });
 
-  it('restores a composition inside an earlier insertion (it would split that mark)', async () => {
+  it('restores a composition inside an earlier insertion, with the earlier-review hint', async () => {
     const md = 'a {++big++} dog\n';
     const { c, hints } = await open(md);
     const before = c.view.state.doc;
@@ -690,7 +823,7 @@ describe('composition timing', () => {
     composeStep(c, p, '犬', 12);
     c.endComposition();
     c.settleComposition();
-    expect(hints).toEqual(['generic']);
+    expect(hints).toEqual(['earlier']);
     expect(c.view.state.doc.eq(before)).toBe(true);
     expect(text(c)).toBe(md);
   });
@@ -722,6 +855,64 @@ describe('composition timing', () => {
     expect(out.match(/\{\+\+l\+\+\}/g)?.length).toBe(1);
     expect(projectCritic(out, 'accept')).toBe('hello\n');
     expect(projectCritic(out, 'clean')).toBe('helo\n');
+  });
+});
+
+describe('preset plugins', () => {
+  // Every plugin in the editor state. A Milkdown upgrade that adds a
+  // plugin fails here, so it is audited before it can change a review's
+  // document on its own (create.ts DROPPED_PLUGIN).
+  const KEPT_PLUGINS = [
+    'criticPaste',
+    'criticPolicy',
+    'criticTrack',
+    'criticUi',
+    'plugin', // the review keymap (controller.ts)
+    'MILKDOWN_VIEW_CLEAR',
+    'MILKDOWN_HARDBREAK_FILTER',
+    'safari-ime-span',
+    'history',
+    'MILKDOWN_STATE_TRACKER',
+    'plugin', // Milkdown's keymap
+  ];
+
+  it('keeps only the audited plugins', async () => {
+    const { c } = await open('x\n');
+    // Keys end in $ and an instance number.
+    const keys = c.view.state.plugins.map((p) =>
+      (p as unknown as { key: string }).key.replace(/\$\d*$/, '')
+    );
+    expect(keys).toEqual(KEPT_PLUGINS);
+  });
+
+  it('shows no hint when a document with a heading opens, nor after an edit', async () => {
+    const { c, hints } = await open('# Title\n\npara\n');
+    expect(hints).toEqual([]);
+    type(c, 'X', posOf(c, 'para'));
+    type(c, 'Y', posOf(c, 'Title'));
+    expect(hints).toEqual([]);
+    expect(text(c)).toBe('# {++Y++}Title\n\n{++X++}para\n');
+  });
+
+  it('shows no hint when any corpus document opens', async () => {
+    const noisy: string[] = [];
+    for (const doc of corpus) {
+      const root = document.createElement('div');
+      document.body.append(root);
+      const hints: HintKind[] = [];
+      const c = await ReviewController.create({
+        root,
+        render: () => renderContext,
+        askNote: () => Promise.resolve(null),
+        onHint: (h) => hints.push(h),
+        onChange: () => {},
+      });
+      made.push(c);
+      c.load(doc.in);
+      await new Promise((r) => setTimeout(r, 0));
+      if (hints.length) noisy.push(`${doc.name}: ${hints.join(',')}`);
+    }
+    expect(noisy).toEqual([]);
   });
 });
 

@@ -133,6 +133,9 @@ test('toggling views without an edit never changes the text', async ({ page }) =
   await expect(page.locator('scion-review-editor')).toHaveCount(0);
   await startGraphicalReview(page);
   expect(await editorText(page)).toBe(DOC);
+  // Opening a document with a heading shows no hint.
+  await expect(page.locator('scion-page-artifact-detail .hint-region')).toBeAttached();
+  await expect(hint(page)).toHaveCount(0);
   await page.locator('sl-radio-button[value="source"]').click();
   const code = page.locator('scion-page-artifact-detail scion-code-editor.review-editor');
   await expect(code).toBeVisible();
@@ -274,13 +277,22 @@ test('edits become suggestions, comments work by button and shortcut, and the re
     });
     await cdp.send('Input.insertText', { text: '日本' });
     await expect.poll(() => editorText(page)).toContain('{++日本++}');
-    // Two compositions back to back (the second starts before the first
-    // one's deferred end step): both are recorded.
+    // Two compositions in a row are both recorded (whether the second
+    // starts before the first one's end step is up to the browser; the
+    // unit tests drive that order through the DOM events).
     await cdp.send('Input.imeSetComposition', { text: 'か', selectionStart: 1, selectionEnd: 1 });
     await cdp.send('Input.insertText', { text: '下' });
     await cdp.send('Input.imeSetComposition', { text: 'き', selectionStart: 1, selectionEnd: 1 });
     await cdp.send('Input.insertText', { text: '木' });
     await expect.poll(() => editorText(page)).toContain('{++日本下木++}');
+    // A composition over a selected word (it would remove text) is undone,
+    // with the generic hint.
+    const beforeDelete = await editorText(page);
+    await selectWord(page, 'journey');
+    await cdp.send('Input.imeSetComposition', { text: 'た', selectionStart: 1, selectionEnd: 1 });
+    await cdp.send('Input.insertText', { text: '旅' });
+    await expect(hint(page)).toContainText("That change can't be recorded as a suggestion.");
+    await expect.poll(() => editorText(page)).toBe(beforeDelete);
     await cdp.detach();
   }
 

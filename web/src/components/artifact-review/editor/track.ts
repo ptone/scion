@@ -351,7 +351,7 @@ export function reconcileComposition(
   view: EditorView,
   snap: CompositionSnapshot,
   compositionId: unknown,
-  check: (doc: Node, blockPos: number) => string | null = () => null
+  check: (doc: Node, blockPos: number, at: number, before: Node) => string | null = () => null
 ): string | null {
   const state = view.state;
   const tag = (tr: Transaction): Transaction => {
@@ -395,7 +395,7 @@ export function reconcileComposition(
   if (!applied.doc) return restore('generic');
   const t = trackStep(step, oldDoc, applied.doc, { empty: true, head: base + start });
   if (!t) return restore('generic');
-  const refused = check(t.transform.doc, block.pos);
+  const refused = check(t.transform.doc, block.pos, base + start, oldDoc);
   if (refused) return restore(refused);
   revert.step(step);
   for (const st of t.transform.steps) revert.step(st);

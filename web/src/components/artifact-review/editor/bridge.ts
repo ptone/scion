@@ -65,6 +65,23 @@ export interface SentinelResult {
    * these blocks are read-only and always saved from their source.
    */
   attributeBlocks: Set<number>;
+  /**
+   * Top-level blocks where a sentinel became literal text (inside code,
+   * a mark around no markable text, or a token whose partner was in code).
+   */
+  literalBlocks: Set<number>;
+  /**
+   * Every sentinel the pass consumed, in the order it visited them, with
+   * the top-level block it was in and, for a comment, the note it took.
+   */
+  consumed: Consumed[];
+}
+
+/** One sentinel consumed by applySentinels. */
+export interface Consumed {
+  block: number;
+  ch: string;
+  note?: string;
 }
 
 /**
@@ -113,12 +130,22 @@ export function applySentinels(
   const edits: Edit[] = [];
   let noteIdx = 0;
   const attributeBlocks = new Set<number>();
+  const consumed: Consumed[] = [];
+  const takeNote = (block: number, ch: string): string => {
+    const note = notes[noteIdx++] ?? '';
+    consumed.push({ block, ch, note });
+    return note;
+  };
+  const take = (block: number, ch: string): void => {
+    consumed.push({ block, ch });
+  };
   const attrEdits: (() => void)[] = [];
   // Restores the sentinels of attrs (in ATTR_ORDER), consuming notes;
   // returns the new attrs, or null when none held a sentinel.
   const restoreAttrs = (
     typeName: string,
-    attrs: Record<string, unknown>
+    attrs: Record<string, unknown>,
+    block: number
   ): Record<string, unknown> | null => {
     const names = ATTR_ORDER[typeName] ?? Object.keys(attrs);
     let changed = false;
@@ -127,7 +154,11 @@ export function applySentinels(
       const v = attrs[name];
       if (typeof v !== 'string' || ![...v].some((c) => sentinels.has(c))) continue;
       out[name] = [...v]
-        .map((c) => (c === a.note ? `{>>${notes[noteIdx++] ?? ''}<<}` : tok(c)))
+        .map((c) => {
+          if (c === a.note) return `{>>${takeNote(block, c)}<<}`;
+          if (sentinels.has(c)) take(block, c);
+          return tok(c);
+        })
         .join('');
       changed = true;
     }
@@ -154,9 +185,10 @@ export function applySentinels(
     if (!node.isText) {
       // Atoms (images, raw HTML) and a code block's language come before
       // their text in the source.
-      const attrs = restoreAttrs(node.type.name, node.attrs);
+      const block = doc0.resolve(pos).index(0);
+      const attrs = restoreAttrs(node.type.name, node.attrs, block);
       if (attrs) {
-        attributeBlocks.add(doc0.resolve(pos).index(0));
+        attributeBlocks.add(block);
         attrEdits.push(() => {
           tr.setNodeMarkup(pos, undefined, attrs, node.marks);
         });
@@ -165,12 +197,14 @@ export function applySentinels(
     }
     const t = node.text ?? '';
     const code = !parent?.type.allowsMarkType(insType);
+    const block = doc0.resolve(pos).index(0);
     for (let i = 0; i < t.length; i++) {
       const c = t[i];
       if (!sentinels.has(c)) continue;
       const p = pos + i;
+      if (c !== a.note) take(block, c);
       if (code) {
-        if (c === a.note) edits.push({ pos: p, literal: `{>>${notes[noteIdx++] ?? ''}<<}` });
+        if (c === a.note) edits.push({ pos: p, literal: `{>>${takeNote(block, c)}<<}` });
         else edits.push({ pos: p, literal: tok(c) });
         continue;
       }
@@ -201,7 +235,7 @@ export function applySentinels(
         }
         state = null;
       } else if (c === a.note) {
-        edits.push({ pos: p, note: notes[noteIdx++] ?? '' });
+        edits.push({ pos: p, note: takeNote(block, c) });
       } else {
         // Its partner was inside code: keep the token as written.
         edits.push({ pos: p, literal: tok(c) });
@@ -212,9 +246,9 @@ export function applySentinels(
     const next = parent?.maybeChild(index + 1);
     for (const m of node.marks) {
       if (!ATTR_ORDER[m.type.name] || (next && m.isInSet(next.marks))) continue;
-      const attrs = restoreAttrs(m.type.name, m.attrs);
+      const attrs = restoreAttrs(m.type.name, m.attrs, block);
       if (!attrs) continue;
-      attributeBlocks.add(doc0.resolve(pos).index(0));
+      attributeBlocks.add(block);
       let start = pos;
       for (let k = index - 1; k >= 0; k--) {
         const prev = parent!.child(k);
@@ -239,6 +273,10 @@ export function applySentinels(
   for (const r of ranges) {
     if (r.to > r.from) tr.addMark(r.from, r.to, schema.marks[MARKS[r.key]].create());
   }
+  const literalBlocks = new Set<number>();
+  for (const e of edits) {
+    if (e.literal !== undefined) literalBlocks.add(doc0.resolve(e.pos).index(0));
+  }
   for (const e of edits.reverse()) {
     if (e.literal !== undefined) {
       const marks = tr.doc.resolve(e.pos + 1).marks();
@@ -249,7 +287,7 @@ export function applySentinels(
       tr.delete(e.pos, e.pos + 1);
     }
   }
-  return { notesUsed: noteIdx, attributeBlocks };
+  return { notesUsed: noteIdx, attributeBlocks, literalBlocks, consumed };
 }
 
 interface Item {
@@ -386,10 +424,12 @@ export function sentinelLeft(doc: Node, a: SentinelAlphabet): boolean {
   return found;
 }
 
-/** A loaded document and the top-level blocks holding tokens in attributes. */
+/** A loaded document and what the sentinel pass found. */
 export interface LoadedDoc {
   doc: Node;
   attributeBlocks: Set<number>;
+  literalBlocks: Set<number>;
+  consumed: Consumed[];
 }
 
 /**
@@ -407,7 +447,12 @@ export function loadDocument(
   const tr = new Transform(parse(text));
   const r = applySentinels(tr, schema, notes, a);
   if (r.notesUsed !== notes.length || sentinelLeft(tr.doc, a)) return null;
-  return { doc: tr.doc, attributeBlocks: r.attributeBlocks };
+  return {
+    doc: tr.doc,
+    attributeBlocks: r.attributeBlocks,
+    literalBlocks: r.literalBlocks,
+    consumed: r.consumed,
+  };
 }
 
 /** loadDocument's document alone (tests and checks). */

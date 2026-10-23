@@ -331,3 +331,39 @@ test('artifact text renders only as the rules allow, and a paste is read as plai
   expect(violations.filter((v) => v.includes('review-editor'))).toEqual([]);
   expect(violations.filter((v) => v.startsWith('enforce'))).toEqual([]);
 });
+
+// Marks or notes the Markdown parser would show in another place (link
+// reference definitions copy their target and title onto every reference
+// and are dropped), and a link whose text ends in an image: the graphical
+// view does not open; Review opens in the Source view with a notice.
+const REFUSED = [
+  '[a][r]\n\nPara {==x==}{>>B<<}\n\n[r]: http://e.example/{>>A<<}\n',
+  '[r]: /p "{>>R<<}"\n\n{>>X<<} hello\n\n[t][r]\n',
+  '[a][r] [b][r] {>>X<<}\n\n[r]: /p "{>>R<<}"\n[q]: /p "{>>Q<<}"\n',
+  'see <http://a.example/{>>A<<}> here {>>B<<}\n\n[u]: /x "{>>C<<}"\n',
+  '[u]: /x "{++"\n\nhello ++} world\n',
+  '[![b](img/dot.png)](https://x.example/{++y++}) and {++real two++}\n',
+];
+
+test('documents whose marks would show elsewhere open in the Source view', async ({ page }) => {
+  for (const [i, text] of REFUSED.entries()) {
+    const md = `${text}\nand {++real++} with {==hl==}{>>real note<<}\n`;
+    const a = await publish({
+      project,
+      title: `Refused ${i}`,
+      entry: 'index.md',
+      files: { 'index.md': Buffer.from(md), 'img/dot.png': DOT_PNG },
+    });
+    await openArtifact(page, project, a.id);
+    await page
+      .locator('scion-page-artifact-detail .header-actions sl-button', { hasText: 'Review' })
+      .click();
+    await expect(page.locator('scion-page-artifact-detail .hint-strip'), md).toContainText(
+      'The graphical view could not be loaded.'
+    );
+    const code = page.locator('scion-page-artifact-detail scion-code-editor.review-editor');
+    await expect(code).toBeVisible();
+    expect(await code.evaluate((el) => (el as HTMLElement & { content: string }).content)).toBe(md);
+    await expect(page.locator('scion-review-editor .ProseMirror')).toHaveCount(0);
+  }
+});

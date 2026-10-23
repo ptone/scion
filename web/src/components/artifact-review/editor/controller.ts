@@ -32,13 +32,13 @@ import { artifactLinkTarget } from '../../../client/artifact-preview.js';
 import { createCore } from './create.js';
 import type { Core } from './create.js';
 import { guardTransfers, pastePlugin } from './paste.js';
-import { containerClass, policyPlugin } from './policy.js';
+import { containerClass, policyPlugin, touchesEarlier } from './policy.js';
 import type { HintKind } from './policy.js';
 import { addComment, commentNumber, editComment, planComment, selectedComment } from './review.js';
 import type { RenderContext } from './safe-render.js';
 import { COMMENT, CRITIC_MARK_NAMES } from './schema.js';
 import { ReviewSession } from './session.js';
-import { reconcileComposition, snapshotComposition, trackPlugin } from './track.js';
+import { SKIP_TRACK, reconcileComposition, snapshotComposition, trackPlugin } from './track.js';
 import type { CompositionSnapshot } from './track.js';
 
 /** What the note dialog is asked to show. */
@@ -164,6 +164,24 @@ export class ReviewController {
         // Shortcuts act on the selection the reviewer sees, even if the
         // browser has not reported its latest move yet.
         handleKeyDown: (view, event): boolean => {
+          // Enter on a comment badge reached with Tab edits that comment.
+          const badge = (event.target as Element | null)?.closest?.('.critic-comment');
+          if (
+            event.key === 'Enter' &&
+            !event.shiftKey &&
+            !event.ctrlKey &&
+            !event.metaKey &&
+            !event.altKey &&
+            badge &&
+            view.dom.contains(badge)
+          ) {
+            const pos = this.badgePos(badge);
+            if (pos !== null) {
+              event.preventDefault();
+              void this.editNote(pos);
+              return true;
+            }
+          }
           if (!view.composing && event.keyCode !== 229) this.syncSelection();
           // Comment by the key's position (KeyM), so layouts where
           // Ctrl+Alt (AltGr) + M types a character still comment.
@@ -214,6 +232,20 @@ export class ReviewController {
           },
         },
       },
+      // A composition whose start the editor did not see (focus entering
+      // mid-composition, some mobile keyboards) is snapshotted from the
+      // state before its first transaction.
+      filterTransaction: (tr, state): boolean => {
+        if (
+          tr.getMeta('composition') !== undefined &&
+          !tr.getMeta(SKIP_TRACK) &&
+          !this.composing &&
+          !this.ended
+        ) {
+          this.composing = snapshotComposition(state);
+        }
+        return true;
+      },
       state: {
         init: (): unknown => undefined,
         // The id of the latest composition transaction, for endComposition.
@@ -227,6 +259,21 @@ export class ReviewController {
         },
       }),
     });
+  }
+
+  /** The document position of a comment badge element, or null. */
+  private badgePos(el: Element): number | null {
+    const view = this.core.view;
+    let pos: number;
+    try {
+      pos = view.posAtDOM(el, 0);
+    } catch {
+      return null;
+    }
+    for (const p of [pos, pos - 1]) {
+      if (p >= 0 && view.state.doc.nodeAt(p)?.type.name === COMMENT) return p;
+    }
+    return null;
   }
 
   /** The Markdown of a slice, without review marks or comments. */
@@ -299,10 +346,12 @@ export class ReviewController {
       return;
     }
     const id: unknown = this.uiKey.getState(view.state);
-    const refused = reconcileComposition(view, snap, id, (doc, pos) => {
+    const refused = reconcileComposition(view, snap, id, (doc, pos, at, before) => {
       const container = containerClass(view.state.doc.resolve(pos + 1));
       if (container === 'code') return 'code';
       if (container) return 'list-table';
+      // The same hint as for typing at that place.
+      if (touchesEarlier(before, at, at)) return 'earlier';
       const i = doc.resolve(pos).index(0);
       return this.session.unitOk(doc, i, i) ? null : 'generic';
     });
@@ -381,13 +430,17 @@ export class ReviewController {
       return;
     }
     const context = plan.highlight ? '' : this.commentContext(plan.at);
+    const docBefore = view.state.doc;
     const note = await this.opts.askNote({ note: '', number: 0, quote: plan.quote, context });
     view.focus();
     if (note === null || note.trim() === '') return;
-    // The document may have changed while the dialog was open.
-    const again = planComment(view.state);
-    if ('refuse' in again) return;
-    this.dispatchChecked(addComment(view.state, again, note), again.at);
+    // The comment goes where it was planned; if the document changed while
+    // the dialog was open, that place may have moved.
+    if (view.state.doc !== docBefore) {
+      this.opts.onHint('generic');
+      return;
+    }
+    this.dispatchChecked(addComment(view.state, plan, note), plan.at);
   }
 
   /**
@@ -430,7 +483,7 @@ export class ReviewController {
   private dispatchChecked(tr: Transaction, pos: number): void {
     const view = this.core.view;
     const i = view.state.doc.resolve(Math.min(pos, view.state.doc.content.size)).index(0);
-    if (!this.session.unitOk(tr.doc, i, i, false)) {
+    if (!this.session.unitOk(tr.doc, i, i)) {
       this.opts.onHint('generic');
       return;
     }
