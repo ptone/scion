@@ -19,10 +19,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs/migrate"
-	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
@@ -55,7 +55,7 @@ func (e *ProjectStorageMigrateExecutor) Run(ctx context.Context, w io.Writer, pa
 	if err != nil {
 		return err
 	}
-	rep, err := migrate.Run(ctx, in, migrate.Options{DryRun: dryRun})
+	rep, err := migrate.Run(ctx, in, migrate.Options{DryRun: dryRun, AdoptUnverified: adoptUnverified(params["adoptUnverified"])})
 	rep.WriteLog(w)
 	if err != nil {
 		return err
@@ -64,6 +64,28 @@ func (e *ProjectStorageMigrateExecutor) Run(ctx context.Context, w io.Writer, pa
 		return errors.New("one or more projects did not migrate completely; see the log, fix the cause and run again")
 	}
 	return nil
+}
+
+// adoptUnverified parses the adoptUnverified parameter: "true" adopts the
+// unverified legacy trees of every project, a comma-separated list of
+// project slugs adopts those projects' only, and anything else none
+// (fs-cleanup-arch Q8). Trees whose identity marker names another project
+// are never adopted.
+func adoptUnverified(param string) func(slug string) bool {
+	param = strings.TrimSpace(param)
+	if param == "" || param == "false" {
+		return nil
+	}
+	if param == "true" {
+		return func(string) bool { return true }
+	}
+	slugs := map[string]bool{}
+	for _, s := range strings.Split(param, ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			slugs[s] = true
+		}
+	}
+	return func(slug string) bool { return slugs[slug] }
 }
 
 // projectStorageMigrateInput gathers one hub-wide migrate.HubInput: the
@@ -87,13 +109,6 @@ func (s *Server) projectStorageMigrateInput(ctx context.Context, withObjects boo
 	}
 	if in.Projects, err = s.storageMigrateProjects(ctx); err != nil {
 		return migrate.HubInput{}, err
-	}
-	in.WorkspaceLock = func(workspaceHostPath string) func(func() error) error {
-		return func(section func() error) error {
-			return provision.WithProjectStateLock(ctx, provision.ProjectStateDir(workspaceHostPath), func(context.Context) error {
-				return section()
-			})
-		}
 	}
 	if stor := s.GetStorage(); withObjects && stor != nil {
 		hubID := s.HubID()

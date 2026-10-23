@@ -210,9 +210,10 @@ allowed_paths=(
   # already allowlisted above) so the read-only admin-dir mount narrowing
   # applies to both current and pre-migration hub-native project layouts.
   "^pkg/runtime/common.go$"
-  # The retired object-storage workspace copy's directory name, read only by
-  # the one-shot project storage migration (M3, ptone/scion#5819) to delete
-  # those objects; removed with it in phase 6 (ptone/scion#5839).
+  # The retired object-storage workspace copy's directory name and the
+  # pre-rename project identity markers, read only by the one-shot project
+  # storage migration (M3 deletion; identity check of slug-keyed legacy
+  # trees, ptone/scion#5819); removed with it in phase 6 (ptone/scion#5839).
   "^pkg/projectkeys/legacy_storage.go$"
   # Reserved-identity-attribute denylist: the three retired grove-named
   # telemetry keys (scion.grove, scion.grove.id, scion.grove_id) are kept

@@ -18,6 +18,7 @@ package migrate
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -69,10 +70,6 @@ type Spec struct {
 	// source has nothing to move. Without it a target the copy needs is
 	// created with the source directory's permission bits.
 	PrepareTarget func() error
-	// Lock, when set, runs the rename section (target re-check and
-	// rename) under the project's provisioning lock, so a concurrent first
-	// agent start cannot create and mount the target in between.
-	Lock func(section func() error) error
 	// TargetIsLeaf: the target is a Mount leaf (mode 2775 and the default
 	// ACL, as shareddirs.EnsureLeaf creates it). A tree renamed into it
 	// gets that contract on its top-level directory.
@@ -101,6 +98,15 @@ type Options struct {
 	// Now stamps the .migrated-<ts> name of a copied source (default
 	// time.Now).
 	Now func() time.Time
+	// Context, when set, bounds the walks: a done context stops a copy or
+	// an ownership walk at the next entry (the move then fails and its
+	// source stays in place).
+	Context context.Context
+	// AdoptUnverified, when it returns true for a project slug, migrates
+	// that project's slug-keyed legacy trees that carry no identity marker
+	// (an operator's decision per project). A tree whose marker names
+	// another project is never migrated. Nil adopts none.
+	AdoptUnverified func(slug string) bool
 	// Owner, when set, is the uid:gid migrated entries are chowned to
 	// (Specs with a Normalize mode). Sources and their .migrated copies
 	// are never chowned.
@@ -285,43 +291,31 @@ func Move(spec Spec, opts Options) Result {
 
 	// Rename only into an ABSENT target. An existing directory, even an
 	// empty one, may be the source of a running agent's bind or subPath
-	// mount, which a rename onto it would leave on the replaced, unlinked
-	// inode; it is copied into instead.
+	// mount, or held open by an upload, which a rename onto it would leave
+	// on the replaced, unlinked inode; it is copied into instead.
 	if !spec.NoRename && !spec.CopyOnly && targetKind == kindAbsent && (!dstParentOK || sameDevice(srcFd, dstParent)) {
 		if opts.DryRun {
 			res.Outcome = OutcomeWouldRename
 			return res
 		}
+		// Atomic no-replace rename (renameat2 RENAME_NOREPLACE): a target
+		// created concurrently by a broker, an agent start or an upload is
+		// never replaced. Where the filesystem has no atomic no-replace
+		// rename (NFS), the tree is copied instead.
 		renamed := false
-		section := func() error {
-			// Re-checked under the lock: a first agent start may have
-			// created the leaf since.
-			k, err := kindAt(dstParent, dstName)
-			if err != nil || k != kindAbsent {
-				return err
-			}
-			err = renameNoReplaceAt(srcParent, srcName, dstParent, dstName)
-			switch {
-			case err == nil:
-				renamed = true
-				return nil
-			case errors.Is(err, unix.EEXIST), errors.Is(err, unix.ENOTEMPTY), errors.Is(err, unix.EXDEV), errors.Is(err, unix.EBUSY):
-				return nil // copy instead
-			default:
-				return fmt.Errorf("rename source into target: %w", err)
-			}
-		}
-		if spec.Lock != nil {
-			err = spec.Lock(section)
-		} else {
-			err = section()
-		}
-		if err != nil {
-			return fail(err)
+		err := renameDirNoReplace(srcParent, srcName, dstParent, dstName)
+		switch {
+		case err == nil:
+			renamed = true
+		case errors.Is(err, errNoAtomicRename), errors.Is(err, unix.EEXIST), errors.Is(err, unix.ENOTEMPTY),
+			errors.Is(err, unix.EXDEV), errors.Is(err, unix.EBUSY):
+			// copy below
+		default:
+			return fail(fmt.Errorf("rename source into target: %w", err))
 		}
 		if renamed {
 			res.Outcome = OutcomeRenamed
-			n := normalizer{mode: spec.Normalize, owner: opts.Owner, res: &res}
+			n := normalizer{mode: spec.Normalize, owner: opts.Owner, res: &res, ctx: opts.Context}
 			if spec.TargetIsLeaf {
 				// The renamed directory replaces the leaf the owner would
 				// have created: give it the leaf's own contract.
@@ -358,18 +352,19 @@ func Move(spec Spec, opts Options) Result {
 		}
 	}
 
-	n := &normalizer{mode: spec.Normalize, owner: opts.Owner, res: &res}
+	n := &normalizer{mode: spec.Normalize, owner: opts.Owner, res: &res, ctx: opts.Context}
 	if dstFd < 0 && !opts.DryRun {
 		if dstFd, err = createTarget(dstParent, dstName, &srcSt); err != nil {
 			return fail(err)
 		}
+		defer closeFd(dstFd)
 		var st unix.Stat_t
 		if err := unix.Fstat(dstFd, &st); err == nil {
 			n.entry(dstParent, dstName, &st)
 		}
 	}
 
-	m := merger{dryRun: opts.DryRun, res: &res, norm: n, exclude: excludeSet(spec.Exclude)}
+	m := merger{dryRun: opts.DryRun, res: &res, norm: n, exclude: excludeSet(spec.Exclude), ctx: opts.Context}
 	m.mergeDir(srcFd, dstFd, "", 0)
 	if len(m.errs) > 0 {
 		return fail(fmt.Errorf("copy into target: %d error(s), first: %w", len(m.errs), m.errs[0]))
@@ -403,12 +398,18 @@ func moveEntries(spec Spec, opts Options, res Result) Result {
 			res.Err = fmt.Errorf("invalid entry name %q", name)
 			return res
 		}
+		// Every field carries over. PrepareTarget and TargetIsLeaf describe
+		// spec.Target itself (the entries' parent), not an entry, so they
+		// do not apply to the per-entry moves; Exclude paths under the
+		// entry are re-rooted at it.
 		sub := Spec{
 			Step:      spec.Step,
 			Source:    Tree{Base: spec.Source.Base, Rel: filepath.Join(spec.Source.Rel, name)},
 			Target:    Tree{Base: spec.Target.Base, Rel: filepath.Join(spec.Target.Rel, name)},
-			Normalize: spec.Normalize,
+			NoRename:  spec.NoRename,
 			CopyOnly:  spec.CopyOnly,
+			Exclude:   excludeUnder(spec.Exclude, name),
+			Normalize: spec.Normalize,
 		}
 		r := Move(sub, opts)
 		res.Entries = append(res.Entries, r)
@@ -441,89 +442,92 @@ func moveFile(spec Spec, opts Options, res Result, srcParent int, srcName string
 	if dstParentOK {
 		defer closeFd(dstParent)
 	}
+	n := normalizer{mode: spec.Normalize, owner: opts.Owner, res: &res, ctx: opts.Context}
+	// compareExisting records an existing target as identical or a conflict.
+	compareExisting := func() error {
+		var dstSt unix.Stat_t
+		if err := unix.Fstatat(dstParent, dstName, &dstSt, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			return fmt.Errorf("stat target: %w", err)
+		}
+		if dstSt.Mode&unix.S_IFMT != unix.S_IFREG {
+			res.Conflicts = append(res.Conflicts, ".")
+			return nil
+		}
+		same, err := sameContent(srcParent, srcName, dstParent, dstName)
+		if err != nil {
+			return err
+		}
+		if same {
+			res.Identical++
+		} else {
+			res.Conflicts = append(res.Conflicts, ".")
+		}
+		return nil
+	}
 	exists := false
 	if dstParentOK {
-		var dstSt unix.Stat_t
-		err := unix.Fstatat(dstParent, dstName, &dstSt, unix.AT_SYMLINK_NOFOLLOW)
-		switch {
-		case errors.Is(err, unix.ENOENT):
-		case err != nil:
+		k, err := kindAt(dstParent, dstName)
+		if err != nil {
 			return fail(fmt.Errorf("stat target: %w", err))
-		default:
+		}
+		if k != kindAbsent {
 			exists = true
-			if dstSt.Mode&unix.S_IFMT == unix.S_IFREG {
-				same, err := sameContent(srcParent, srcName, dstParent, dstName)
-				if err != nil {
-					return fail(err)
-				}
-				if same {
-					res.Identical++
-				} else {
-					res.Conflicts = append(res.Conflicts, ".")
-				}
-			} else {
-				res.Conflicts = append(res.Conflicts, ".")
+			if err := compareExisting(); err != nil {
+				return fail(err)
 			}
+		}
+	}
+	if opts.DryRun {
+		switch {
+		case exists && spec.CopyOnly:
+			res.Outcome = OutcomeWouldCopy
+		case exists:
+			res.Outcome = OutcomeWouldMerge // the source would be kept aside
+		case spec.CopyOnly:
+			res.Copied++
+			res.Outcome = OutcomeWouldCopy
+		case !dstParentOK || sameDeviceStat(srcSt, dstParent):
+			res.Outcome = OutcomeWouldRename
+		default:
+			res.Copied++
+			res.Outcome = OutcomeWouldMerge
+		}
+		return res
+	}
+	if !exists && !spec.CopyOnly {
+		// Atomic no-replace placement: a target created concurrently is
+		// never overwritten (EEXIST), on NFS too (linkat).
+		err := renameFileNoReplace(srcParent, srcName, dstParent, dstName)
+		switch {
+		case err == nil:
+			res.Outcome = OutcomeRenamed
+			n.tree(dstParent, dstName)
+			return res
+		case errors.Is(err, unix.EEXIST):
+			exists = true
+			if err := compareExisting(); err != nil {
+				return fail(err)
+			}
+		case errors.Is(err, unix.EXDEV):
+			// another device: copy below
+		default:
+			return fail(fmt.Errorf("place source file in target: %w", err))
+		}
+	}
+	if !exists {
+		conflict, err := copyFile(srcParent, srcName, dstParent, dstName, srcSt)
+		if err != nil {
+			return fail(err)
+		}
+		if conflict {
+			res.Conflicts = append(res.Conflicts, ".")
+		} else {
+			res.Copied++
+			n.entry(dstParent, dstName, srcSt)
 		}
 	}
 	if spec.CopyOnly {
 		res.Outcome = OutcomeCopied
-		if opts.DryRun {
-			res.Outcome = OutcomeWouldCopy
-		}
-		if exists {
-			return res
-		}
-		if opts.DryRun {
-			res.Copied++
-			return res
-		}
-		conflict, err := copyFile(srcParent, srcName, dstParent, dstName, srcSt)
-		if err != nil {
-			return fail(err)
-		}
-		if conflict {
-			res.Conflicts = append(res.Conflicts, ".")
-		} else {
-			res.Copied++
-			n := normalizer{mode: spec.Normalize, owner: opts.Owner, res: &res}
-			n.entry(dstParent, dstName, srcSt)
-		}
-		return res
-	}
-	if !exists {
-		if opts.DryRun {
-			if !dstParentOK || sameDeviceStat(srcSt, dstParent) {
-				res.Outcome = OutcomeWouldRename
-			} else {
-				res.Copied++
-				res.Outcome = OutcomeWouldMerge
-			}
-			return res
-		}
-		n := normalizer{mode: spec.Normalize, owner: opts.Owner, res: &res}
-		err := renameNoReplaceAt(srcParent, srcName, dstParent, dstName)
-		if err == nil {
-			res.Outcome = OutcomeRenamed
-			n.tree(dstParent, dstName)
-			return res
-		}
-		if !errors.Is(err, unix.EXDEV) {
-			return fail(fmt.Errorf("rename source into target: %w", err))
-		}
-		conflict, err := copyFile(srcParent, srcName, dstParent, dstName, srcSt)
-		if err != nil {
-			return fail(err)
-		}
-		if conflict {
-			res.Conflicts = append(res.Conflicts, ".")
-		} else {
-			res.Copied++
-			n.entry(dstParent, dstName, srcSt)
-		}
-	}
-	if opts.DryRun {
-		res.Outcome = OutcomeWouldMerge
 		return res
 	}
 	backup, err := renameToBackup(srcParent, srcName, opts)
@@ -555,7 +559,7 @@ func renameToBackup(srcParent int, srcName string, opts Options) (string, error)
 	if err := unix.Fstatat(srcParent, backup, &st, unix.AT_SYMLINK_NOFOLLOW); err == nil {
 		return "", fmt.Errorf("rename source to %s: already exists", backup)
 	}
-	if err := renameNoReplaceAt(srcParent, srcName, srcParent, backup); err != nil {
+	if err := renameBackup(srcParent, srcName, backup); err != nil {
 		return "", fmt.Errorf("rename source to %s: %w", backup, err)
 	}
 	return backup, nil
@@ -563,11 +567,24 @@ func renameToBackup(srcParent int, srcName string, opts Options) (string, error)
 
 // merger copies a source tree into a target without overwriting.
 type merger struct {
+	ctx     context.Context
 	dryRun  bool
 	res     *Result
 	norm    *normalizer
 	exclude map[string]bool
 	errs    []error
+}
+
+// excludeUnder re-roots the Exclude paths below entry at it.
+func excludeUnder(paths []string, entry string) []string {
+	var out []string
+	for _, p := range paths {
+		p = filepath.ToSlash(filepath.Clean(filepath.FromSlash(p)))
+		if rest, ok := strings.CutPrefix(p, entry+"/"); ok && rest != "" {
+			out = append(out, rest)
+		}
+	}
+	return out
 }
 
 func excludeSet(paths []string) map[string]bool {
@@ -587,6 +604,10 @@ func (m *merger) mergeDir(src, dst int, rel string, depth int) {
 		return
 	}
 	for _, name := range names {
+		if m.ctx != nil && m.ctx.Err() != nil {
+			m.errs = append(m.errs, fmt.Errorf("stopped at %q: %w", relOrDot(rel), m.ctx.Err()))
+			return
+		}
 		p := filepath.Join(rel, name)
 		if m.exclude[p] {
 			continue

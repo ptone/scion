@@ -32,19 +32,42 @@ Files tab. This adds the one-shot maintenance migration
   plan.
 - **Web**: `scion-workspace-migration-notice` is rendered by
   `scion-file-browser` when the listing carries the notice.
-- **`provision.WithProjectStateLock`** (additive) exposes the provisioning
-  state lock so that a rename into a workspace excludes a concurrent first
-  provisioning.
 
 ## Decisions (fs-cleanup-arch rulings on ptone/scion#5819)
 
-- **Rename only into an ABSENT target.** The rename runs under the project's
-  provisioning lock, with `renameat2(RENAME_NOREPLACE)` where supported. An
-  existing target, even an empty one, may be a live bind or subPath mount
-  source, so the migration copies into it instead. Copying never overwrites
+- **Rename only into an ABSENT target, and only atomically.** A directory
+  is renamed with `renameat2(RENAME_NOREPLACE)`. Where the filesystem rejects
+  the flag (the Linux NFS client rejects every rename flag), it is never
+  renamed; it is copied into the EnsureLeaf-created target instead. A file is
+  placed with NOREPLACE, or with `linkat` + `unlinkat`, never with a plain
+  rename. A target created concurrently is never replaced or overwritten,
+  and no lock is needed (review round 1, finding 1, which made the
+  provisioning-lock approach and its `provision/` side effect unnecessary).
+  An existing target, even an empty one, may be a live bind or subPath mount
+  source, so the migration copies into it. Copying never overwrites
   (O_EXCL), lists each conflict, and keeps the source as
   `<name>.migrated-<UTC ts>`. A source file identical to the target counts as
-  identical, not as a conflict, so a re-run after a partial failure stays clean.
+  identical, not as a conflict, so a re-run after a partial failure stays
+  clean.
+- **Identity binding (Q8).** Legacy trees are found by slug. On delete, the
+  old hub removed only the root its probe resolved, so a stale tree can
+  belong to a deleted project whose slug was reused. A tree migrates only
+  when the markers it carries name the project's ID: `.scion/project-id`, the
+  `settings.yaml` project ID keys (current and pre-rename, read through
+  `pkg/projectkeys`), and for the hub-local tree the
+  hub-workspaces/broker-workspaces record.
+  - A marker naming another ID is a MISMATCH: never migrated.
+  - No marker at all is UNVERIFIED: skipped unless `adoptUnverified`
+    (`"true"` or a list of slugs).
+
+  Both outcomes are reported with the markers read and their IDs. The project
+  stays pending, M3 keeps its objects, and the notice names the reason and
+  the parameter.
+- **Step 4 gates steps 1 and 2.** If the seed step fails or cannot decide
+  (git error, `.git` is a file), nothing moves from that source into
+  `workspace/`. git gets `-c safe.directory=<dir>`.
+- **M3** runs only when the project's workspace steps actually ran:
+  workspace Layout shared, nothing skipped, no content left in place.
 - **Symlinks** in a source are never followed or copied; they are listed under
   REFUSED, as are special files. A symlink at any component of either path
   refuses the move. Every component is walked with O_NOFOLLOW openat.
@@ -77,7 +100,9 @@ Files tab. This adds the one-shot maintenance migration
   allowlisted in the compat-literals guard.
 - **Broker-local step 3** (shared dirs under the brokers' own project-configs)
   is phase 3 (#5823), which calls `migrate.Move`.
-- **Notice.** The plan runs at most once at a time, is bounded at 2 min,
+- **Notice.** The plan starts in the background at hub start, runs at
+  most once at a time, and is bounded at 2 min (the context is checked per
+  entry inside the walks),
   retries 5 min after a failure, and is never on the request path. It is
   recomputed when the Layouts change or after a real run. A project is
   pending when it has something to move or a failed step. Once the migration
@@ -94,7 +119,11 @@ Files tab. This adds the one-shot maintenance migration
   - dry run changes nothing;
   - symlinks and special files refused;
   - symlinked source, source component, target and target component refused;
-  - copy-only with excludes.
+  - copy-only with excludes;
+  - forced EINVAL (NFS): directories copied (target inode kept), files
+    placed by link and never overwritten;
+  - a target created between check and rename is not replaced;
+  - a cancelled context stops a copy.
 
   Normalisation: chown set, shared-dir leaf contract, EPERM reported.
   Plan and run:
@@ -106,12 +135,16 @@ Files tab. This adds the one-shot maintenance migration
   - git seed rule;
   - empty-per-agent;
   - copy-only by evidence and by provider;
-  - shared-dirs-only topology.
-- `pkg/provision`: `TestWithProjectStateLock`.
+  - shared-dirs-only topology (M3 keeps the object);
+  - a failed or undecidable seed step blocks the workspace move;
+  - identity mismatch never migrates; unverified skipped and adopted per
+    slug; a pre-rename-keyed seed verifies; the workspace record binds;
+  - a shared-dirs/ subtree stays out of workspace/.
 - `pkg/hub` (sharded, lane): seeded and rerunnable; T1 no-op; NFS move and
   idempotence; M3 through `storage.NewLocal`; volume fail-closed; notice plus
   the `migrationNotice` field on GET workspace/files; recompute after a run;
-  the co-located tree left untouched.
+  the co-located tree left untouched; unverified tree, notice text and
+  per-slug adoption; adoptUnverified parsing.
 - web (vitest): the banner shows, is absent without a notice, and clears on
   reload.
 
@@ -121,5 +154,9 @@ Files tab. This adds the one-shot maintenance migration
   project, the legacy seed's settings become a conflict. The target is kept,
   and the legacy file stays in `.migrated`.
 - The shared-dir tab has no notice; only the workspace listing carries one.
-- Phase 6 (#5839) deletes `pkg/projectfs/migrate`, the projectkeys constant and
-  its allowlist entry.
+- Phase 6 (#5839) deletes `pkg/projectfs/migrate`, the projectkeys constants
+  and their allowlist entry.
+- P5 (#5835) `DeleteProject` should also remove legacy slug trees whose
+  markers name the deleted ID (fs-cleanup-arch Q8 follow-on (a)).
+- On NFS a migrated tree exists twice (target and `.migrated`) until the
+  operator deletes the `.migrated` copy.

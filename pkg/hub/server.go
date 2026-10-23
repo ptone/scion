@@ -6602,6 +6602,10 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// created with a locally generated one.
 	s.startClonedProjectIdentityAlignment(ctx)
 
+	// Plan the project storage migration in the background so the Files
+	// tab notice is known early (never blocks start or readiness).
+	s.startStorageMigrationNoticePlan(ctx)
+
 	// Pause schedules whose cron expression carries an unsupported zone
 	// prefix before the evaluator's first tick, so it never runs them.
 	s.startScheduler(ctx)

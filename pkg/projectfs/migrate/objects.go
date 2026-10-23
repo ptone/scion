@@ -75,9 +75,10 @@ type ObjectResult struct {
 	Err     error
 }
 
-// CleanObjects is M3 (design-v4 §Migration M3) for one project: the GCS
-// copy of the hub-managed workspace under prefix is deleted only when M2
-// succeeded for that project (m2 has no failed step; conflicts kept in a
+// CleanObjects is M3 (design §Migration M3) for one project: the GCS copy
+// of the hub-managed workspace under prefix is deleted only when M2
+// succeeded for that project AND its workspace steps actually ran (m2 has
+// no failed step and is not WorkspaceIncomplete; conflicts kept in a
 // .migrated copy are not failures). A dry run deletes nothing. prefix must
 // be a directory prefix ending in "/".
 func CleanObjects(ctx context.Context, store ObjectStore, prefix string, m2 ProjectReport, dryRun bool) ObjectResult {
@@ -104,6 +105,11 @@ func CleanObjects(ctx context.Context, store ObjectStore, prefix string, m2 Proj
 	if m2.Failed() {
 		res.Outcome = ObjectsKept
 		res.Err = errors.New("M2 did not succeed for this project; objects kept")
+		return res
+	}
+	if m2.WorkspaceIncomplete {
+		res.Outcome = ObjectsKept
+		res.Err = errors.New("the project's workspace was not migrated on this hub; objects kept")
 		return res
 	}
 	if dryRun {

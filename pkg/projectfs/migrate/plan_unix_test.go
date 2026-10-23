@@ -19,6 +19,7 @@ package migrate
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -66,6 +67,9 @@ func (f *fakeObjects) DeletePrefix(_ context.Context, prefix string) error {
 	return nil
 }
 
+// idSettings is a hub seed settings.yaml naming project id.
+func idSettings(id string) string { return "hub:\n  project_id: " + id + "\n" }
+
 func objectPrefix(id string) string { return LegacyObjectPrefix("h1", id) }
 
 type hubFixture struct {
@@ -99,11 +103,11 @@ func TestLegacyHubProjectsRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// nfs hubs wrote <mount_root>/<share>/hub-projects, without subpath_root.
+	// nfs hubs wrote <mount_root>/<share>/<legacyHubProjectsDir>, without subpath_root.
 	if want := (Tree{Base: "/mnt/nfs/hub1", Rel: legacyHubProjectsDir}); got != want {
 		t.Fatalf("nfs: got %+v, want %+v", got, want)
 	}
-	// The volume backends wrote <mnt>/<volume>/<subpath_root>/hub-projects.
+	// The volume backends wrote <mnt>/<volume>/<subpath_root>/<legacyHubProjectsDir>.
 	for _, b := range []projectfs.Backend{projectfs.BackendCloudRunVolume, projectfs.BackendGKESharedVolume} {
 		got, err := LegacyHubProjectsRoot(projectfs.Layout{Backend: b, HostBase: "/mnt/vol", SubPathRoot: "tier/projects"})
 		if err != nil {
@@ -159,13 +163,13 @@ func TestRun_LocalBackendIsNoOp(t *testing.T) {
 func seedHubProject(t *testing.T, f hubFixture) {
 	t.Helper()
 	writeTree(t, f.share, map[string]string{
-		"hub-projects/p1/.scion/settings.yaml": "hub:\n  project_id: " + pid1,
-		"hub-projects/p1/.scion/project-id":    pid1,
-		"hub-projects/p1/README.md":            "readme",
-		"hub-projects/p1/src/main.go":          "package main",
+		legacyHubProjectsDir + "/p1/.scion/settings.yaml": "hub:\n  project_id: " + pid1,
+		legacyHubProjectsDir + "/p1/.scion/project-id":    pid1,
+		legacyHubProjectsDir + "/p1/README.md":            "readme",
+		legacyHubProjectsDir + "/p1/src/main.go":          "package main",
 	})
 	writeTree(t, f.global, map[string]string{
-		"projects/p1/.scion/settings.yaml":                          "older local seed",
+		"projects/p1/.scion/settings.yaml":                          idSettings(pid1) + "# older local seed\n",
 		"projects/p1/notes.txt":                                     "local notes",
 		"projects/p1/README.md":                                     "a different readme",
 		"project-configs/p1__0f8fad5b/shared-dirs/scratchpad/f.txt": "scratch",
@@ -225,7 +229,7 @@ func TestRun_SharedBackendMigratesEveryStep(t *testing.T) {
 		}
 	}
 	assertAbsent(t, filepath.Join(ws, ".scion"))
-	assertAbsent(t, filepath.Join(f.share, "hub-projects/p1"))
+	assertAbsent(t, filepath.Join(f.share, legacyHubProjectsDir+"/p1"))
 	if !strings.Contains(log.String(), "CONFLICT README.md") {
 		t.Fatalf("conflict not reported:\n%s", log.String())
 	}
@@ -271,7 +275,7 @@ func TestRun_ObjectsKeptWhenM2Fails(t *testing.T) {
 	f := newHubFixture(t)
 	outside := t.TempDir()
 	writeTree(t, outside, map[string]string{"a.txt": "A"})
-	writeTree(t, f.share, map[string]string{"hub-projects/p1": "->" + outside})
+	writeTree(t, f.share, map[string]string{legacyHubProjectsDir + "/p1": "->" + outside})
 	f.objects.objects[objectPrefix(pid1)+"a.txt"] = true
 	rep, err := Run(context.Background(), f.input(ProjectRef{ID: pid1, Slug: "p1"}), opts(false))
 	if err != nil {
@@ -285,19 +289,24 @@ func TestRun_ObjectsKeptWhenM2Fails(t *testing.T) {
 
 func TestRun_EmptyPerAgentLeavesContentMovesSeed(t *testing.T) {
 	f := newHubFixture(t)
-	writeTree(t, f.share, map[string]string{"hub-projects/p1/.scion/settings.yaml": "s", "hub-projects/p1/data.txt": "d"})
+	writeTree(t, f.share, map[string]string{legacyHubProjectsDir + "/p1/.scion/settings.yaml": idSettings(pid1), legacyHubProjectsDir + "/p1/data.txt": "d"})
+	f.objects.objects[objectPrefix(pid1)+"x"] = true
 	rep, err := Run(context.Background(), f.input(ProjectRef{ID: pid1, Slug: "p1", NoWorkspace: true}), opts(false))
 	if err != nil || rep.Failed() {
 		t.Fatalf("err=%v failed=%t", err, rep.Failed())
 	}
-	if readFile(t, filepath.Join(f.share, "projects", pid1, ".scion/settings.yaml")) != "s" {
+	if readFile(t, filepath.Join(f.share, "projects", pid1, ".scion/settings.yaml")) != idSettings(pid1) {
 		t.Fatal("seed not moved")
 	}
-	if readFile(t, filepath.Join(f.share, "hub-projects/p1/data.txt")) != "d" {
+	if readFile(t, filepath.Join(f.share, legacyHubProjectsDir+"/p1/data.txt")) != "d" {
 		t.Fatal("content of a project without a project-scoped workspace must stay")
 	}
 	if len(rep.Projects[0].Notes) != 1 {
 		t.Fatalf("notes = %v", rep.Projects[0].Notes)
+	}
+	// Legacy content was left in place: M3 keeps the legacy copy.
+	if !f.objects.objects[objectPrefix(pid1)+"x"] || rep.Objects[0].Outcome != ObjectsKept {
+		t.Fatalf("objects=%s deletes=%v", rep.Objects[0].Outcome, f.objects.deletes)
 	}
 }
 
@@ -318,7 +327,7 @@ func TestRun_GitSeedMovesOnlyUntrackedIdentity(t *testing.T) {
 		t.Skip("git not installed")
 	}
 	f := newHubFixture(t)
-	repo := filepath.Join(f.share, "hub-projects/p1")
+	repo := filepath.Join(f.share, legacyHubProjectsDir+"/p1")
 	writeTree(t, repo, map[string]string{
 		".scion/templates/t.yaml": "repo template",
 		".scion/settings.yaml":    "hub seed",
@@ -364,27 +373,54 @@ func TestRun_GitSeedMovesOnlyUntrackedIdentity(t *testing.T) {
 	}
 }
 
-func TestRun_GitFileGitdirLeavesSeed(t *testing.T) {
-	f := newHubFixture(t)
-	writeTree(t, f.share, map[string]string{"hub-projects/p1/.git": "gitdir: /elsewhere", "hub-projects/p1/.scion/settings.yaml": "s", "hub-projects/p1/a": "a"})
-	in := f.input(ProjectRef{ID: pid1, Slug: "p1"})
-	in.Tracked = func(context.Context, string, string) (bool, error) {
-		t.Fatal("tracked check must not run for a .git file")
-		return false, nil
-	}
-	rep, err := Run(context.Background(), in, opts(false))
-	if err != nil || rep.Failed() {
-		t.Fatalf("err=%v failed=%t", err, rep.Failed())
-	}
-	assertAbsent(t, filepath.Join(f.share, "projects", pid1, ".scion"))
-	if readFile(t, filepath.Join(f.share, "projects", pid1, "workspace/.scion/settings.yaml")) != "s" {
-		t.Fatal("workspace not moved")
+// When step 4 cannot tell the hub seed apart (.git is a file) or fails
+// (git errors), steps 1 and 2 do not move that source: the seed never lands
+// in agent-visible workspace/. The project stays failed, so M3 keeps its
+// objects and the notice stays.
+func TestRun_SeedUndecidedOrFailedBlocksWorkspaceMove(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		files   map[string]string
+		tracked func(context.Context, string, string) (bool, error)
+	}{
+		{"git-file", map[string]string{legacyHubProjectsDir + "/p1/.git": "gitdir: /elsewhere", legacyHubProjectsDir + "/p1/.scion/settings.yaml": idSettings(pid1), legacyHubProjectsDir + "/p1/a": "a"},
+			func(context.Context, string, string) (bool, error) {
+				return false, errors.New("tracked check must not run for a .git file")
+			}},
+		{"git-error", map[string]string{legacyHubProjectsDir + "/p1/.git/HEAD": "ref", legacyHubProjectsDir + "/p1/.scion/settings.yaml": idSettings(pid1), legacyHubProjectsDir + "/p1/a": "a"},
+			func(context.Context, string, string) (bool, error) {
+				return false, errors.New("exit status 128: detected dubious ownership")
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newHubFixture(t)
+			writeTree(t, f.share, tc.files)
+			f.objects.objects[objectPrefix(pid1)+"a"] = true
+			before := snapshot(t, filepath.Join(f.share, legacyHubProjectsDir+"/p1"))
+			in := f.input(ProjectRef{ID: pid1, Slug: "p1"})
+			in.Tracked = tc.tracked
+			rep, err := Run(context.Background(), in, opts(false))
+			if err != nil || !rep.Failed() {
+				t.Fatalf("err=%v failed=%t, want a failed project", err, rep.Failed())
+			}
+			assertAbsent(t, filepath.Join(f.share, "projects", pid1, "workspace"))
+			assertAbsent(t, filepath.Join(f.share, "projects", pid1, ".scion"))
+			if got := snapshot(t, filepath.Join(f.share, legacyHubProjectsDir+"/p1")); !reflect.DeepEqual(got, before) {
+				t.Fatal("the legacy tree changed")
+			}
+			if rep.Objects[0].Outcome != ObjectsKept || len(f.objects.deletes) != 0 {
+				t.Fatalf("objects=%s deletes=%v", rep.Objects[0].Outcome, f.objects.deletes)
+			}
+			if len(rep.PendingProjects()) != 1 {
+				t.Fatal("the project must stay pending")
+			}
+		})
 	}
 }
 
 func TestRun_TwoProjectsIndependent(t *testing.T) {
 	f := newHubFixture(t)
-	writeTree(t, f.share, map[string]string{"hub-projects/p1/a": "1", "hub-projects/p2": "->/etc"})
+	writeTree(t, f.share, map[string]string{legacyHubProjectsDir + "/p1/a": "1", legacyHubProjectsDir + "/p1/.scion/project-id": pid1, legacyHubProjectsDir + "/p2": "->/etc"})
 	f.objects.objects[objectPrefix(pid1)+"a"] = true
 	f.objects.objects[objectPrefix(pid2)+"a"] = true
 	rep, err := Run(context.Background(), f.input(ProjectRef{ID: pid1, Slug: "p1"}, ProjectRef{ID: pid2, Slug: "p2"}), opts(false))
@@ -426,7 +462,7 @@ func TestMigrateProject_RejectsBadInput(t *testing.T) {
 
 func TestRun_DryRunWouldDeleteObjectsButDoesNot(t *testing.T) {
 	f := newHubFixture(t)
-	writeTree(t, f.share, map[string]string{"hub-projects/p1/a": "1"})
+	writeTree(t, f.share, map[string]string{legacyHubProjectsDir + "/p1/a": "1", legacyHubProjectsDir + "/p1/.scion/project-id": pid1})
 	f.objects.objects[objectPrefix(pid1)+"a"] = true
 	rep, err := Run(context.Background(), f.input(ProjectRef{ID: pid1, Slug: "p1"}), opts(true))
 	if err != nil || rep.Failed() {
@@ -440,10 +476,10 @@ func TestRun_DryRunWouldDeleteObjectsButDoesNot(t *testing.T) {
 func TestRun_VolumeBackendLegacyRoot(t *testing.T) {
 	vol := t.TempDir()
 	global := t.TempDir()
-	writeTree(t, vol, map[string]string{"projects/hub-projects/p1/a.txt": "A"})
+	writeTree(t, vol, map[string]string{"projects/" + legacyHubProjectsDir + "/p1/a.txt": "A", "projects/" + legacyHubProjectsDir + "/p1/.scion/project-id": pid1})
 	layout := projectfs.Layout{Backend: projectfs.BackendCloudRunVolume, HostBase: vol, SubPathRoot: "projects"}
 	rep, err := Run(context.Background(), HubInput{Workspace: layout, SharedDirs: projectfs.Layout{Backend: projectfs.BackendLocal}, GlobalDir: global, Projects: []ProjectRef{{ID: pid1, Slug: "p1"}}}, opts(false))
-	if err != nil || rep.Failed() || rep.Moves() != 1 {
+	if err != nil || rep.Failed() || rep.Moves() != 2 { // seed + workspace
 		t.Fatalf("err=%v failed=%t moves=%d", err, rep.Failed(), rep.Moves())
 	}
 	if readFile(t, filepath.Join(vol, "projects", pid1, "workspace/a.txt")) != "A" {
@@ -474,7 +510,7 @@ func TestLegacyObjectPrefix(t *testing.T) {
 // ID shares a prefix, and other hubs' objects survive.
 func TestRun_M3LeavesPerAgentAndSiblingObjects(t *testing.T) {
 	f := newHubFixture(t)
-	writeTree(t, f.share, map[string]string{"hub-projects/p1/a": "1"})
+	writeTree(t, f.share, map[string]string{legacyHubProjectsDir + "/p1/a": "1", legacyHubProjectsDir + "/p1/.scion/project-id": pid1})
 	keep := []string{
 		"hubs/h1/workspaces/" + pid1 + "/agent-1/file",
 		"hubs/h1/workspaces/" + pid1 + "/" + projectkeys.LegacyProjectWorkspaceObjectDir + "-extra/file",
@@ -515,7 +551,7 @@ func TestRun_LocalBrokerTreeIsCopyOnly(t *testing.T) {
 			"projects/p1/shared-dirs/s/f":         "old shared",
 		}, false},
 		{"provider", map[string]string{
-			"projects/p1/.scion/settings.yaml": "broker settings",
+			"projects/p1/.scion/settings.yaml": idSettings(pid1),
 			"projects/p1/notes.txt":            "notes",
 		}, true},
 	} {
@@ -543,7 +579,7 @@ func TestRun_LocalBrokerTreeIsCopyOnly(t *testing.T) {
 			if readFile(t, filepath.Join(root, "workspace/notes.txt")) != "notes" {
 				t.Fatal("content not copied")
 			}
-			if readFile(t, filepath.Join(root, ".scion/settings.yaml")) != "broker settings" {
+			if readFile(t, filepath.Join(root, ".scion/settings.yaml")) != tc.files["projects/p1/.scion/settings.yaml"] {
 				t.Fatal("seed not copied")
 			}
 			assertAbsent(t, filepath.Join(root, ".scion/agents"))
@@ -565,6 +601,7 @@ func TestRun_LocalWorkspaceSharedDirsOnly(t *testing.T) {
 		"projects/p1/a.txt": "A",
 		"project-configs/p1__0f8fad5b/shared-dirs/scratchpad/f.txt": "scratch",
 	})
+	f.objects.objects[objectPrefix(pid1)+"a.txt"] = true
 	in := f.input(ProjectRef{ID: pid1, Slug: "p1"})
 	in.Workspace = projectfs.Layout{Backend: projectfs.BackendLocal, HostBase: f.global}
 	rep, err := Run(context.Background(), in, opts(false))
@@ -580,5 +617,156 @@ func TestRun_LocalWorkspaceSharedDirsOnly(t *testing.T) {
 	assertAbsent(t, filepath.Join(f.share, "projects", pid1, "workspace"))
 	if len(rep.Projects[0].Notes) == 0 || !strings.Contains(rep.Projects[0].Notes[0], "not shared") {
 		t.Fatalf("notes = %v", rep.Projects[0].Notes)
+	}
+	// Nothing of the workspace was migrated: M3 keeps the legacy copy.
+	if !f.objects.objects[objectPrefix(pid1)+"a.txt"] || len(f.objects.deletes) != 0 || rep.Objects[0].Outcome != ObjectsKept {
+		t.Fatalf("objects=%s deletes=%v", rep.Objects[0].Outcome, f.objects.deletes)
+	}
+}
+
+// Q8: a slug-keyed legacy tree is migrated only when its identity markers
+// name the project. A tree of another project (a deleted project whose
+// slug was reused) is never migrated, not even with adoptUnverified.
+func TestRun_IdentityMismatchNeverMigrates(t *testing.T) {
+	f := newHubFixture(t)
+	writeTree(t, f.share, map[string]string{
+		legacyHubProjectsDir + "/p1/.scion/project-id": pid2,
+		legacyHubProjectsDir + "/p1/secret.txt":        "other project's data",
+	})
+	f.objects.objects[objectPrefix(pid1)+"a"] = true
+	before := snapshot(t, filepath.Join(f.share, legacyHubProjectsDir, "p1"))
+	o := opts(false)
+	o.AdoptUnverified = func(string) bool { return true }
+	rep, err := Run(context.Background(), f.input(ProjectRef{ID: pid1, Slug: "p1"}), o)
+	if err != nil || !rep.Failed() {
+		t.Fatalf("err=%v failed=%t", err, rep.Failed())
+	}
+	assertAbsent(t, filepath.Join(f.share, "projects", pid1))
+	if got := snapshot(t, filepath.Join(f.share, legacyHubProjectsDir, "p1")); !reflect.DeepEqual(got, before) {
+		t.Fatal("a mismatched tree changed")
+	}
+	if rep.Objects[0].Outcome != ObjectsKept {
+		t.Fatalf("objects = %s", rep.Objects[0].Outcome)
+	}
+	var b bytes.Buffer
+	rep.WriteLog(&b)
+	for _, want := range []string{"identity mismatch", pid2, "never adopted"} {
+		if !strings.Contains(b.String(), want) {
+			t.Fatalf("log lacks %q:\n%s", want, b.String())
+		}
+	}
+}
+
+// A tree without any identity marker is skipped by default (named in the
+// report with the parameter to adopt it) and migrates when its project's
+// slug is adopted; adopting another slug does not adopt it.
+func TestRun_UnverifiedTreeAdoptedPerProject(t *testing.T) {
+	f := newHubFixture(t)
+	writeTree(t, f.share, map[string]string{legacyHubProjectsDir + "/p1/a.txt": "A"})
+	in := f.input(ProjectRef{ID: pid1, Slug: "p1"})
+
+	rep, err := Run(context.Background(), in, opts(false))
+	if err != nil || !rep.Failed() {
+		t.Fatalf("default: err=%v failed=%t", err, rep.Failed())
+	}
+	var b bytes.Buffer
+	rep.WriteLog(&b)
+	for _, want := range []string{"unverified", "no identity marker found", `"adoptUnverified":"p1"`} {
+		if !strings.Contains(b.String(), want) {
+			t.Fatalf("log lacks %q:\n%s", want, b.String())
+		}
+	}
+	assertAbsent(t, filepath.Join(f.share, "projects", pid1))
+
+	other := opts(false)
+	other.AdoptUnverified = func(slug string) bool { return slug == "p2" }
+	if rep, _ := Run(context.Background(), in, other); !rep.Failed() {
+		t.Fatal("adopting another slug adopted this tree")
+	}
+
+	adopt := opts(false)
+	adopt.AdoptUnverified = func(slug string) bool { return slug == "p1" }
+	rep, err = Run(context.Background(), in, adopt)
+	if err != nil || rep.Failed() || rep.Moves() != 1 {
+		t.Fatalf("adopted: err=%v failed=%t moves=%d", err, rep.Failed(), rep.Moves())
+	}
+	if readFile(t, filepath.Join(f.share, "projects", pid1, "workspace/a.txt")) != "A" {
+		t.Fatal("adopted tree not migrated")
+	}
+}
+
+// A seed written by a pre-rename hub carries the legacy project key; read
+// through pkg/projectkeys, it verifies the tree (the customer case: such
+// projects migrate on the default run), and a legacy key naming another
+// project is a mismatch.
+func TestRun_LegacyKeyedSeedVerifies(t *testing.T) {
+	legacyKey := strings.TrimPrefix(projectkeys.LegacyConfigHubProjectIDKey, "hub.")
+	for _, tc := range []struct {
+		name   string
+		id     string
+		wantOK bool
+	}{{"same-project", pid1, true}, {"other-project", pid2, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newHubFixture(t)
+			writeTree(t, f.share, map[string]string{
+				legacyHubProjectsDir + "/p1/.scion/settings.yaml": "hub:\n  " + legacyKey + ": " + tc.id + "\n",
+				legacyHubProjectsDir + "/p1/README.md":            "readme",
+			})
+			rep, err := Run(context.Background(), f.input(ProjectRef{ID: pid1, Slug: "p1"}), opts(false))
+			if err != nil || rep.Failed() == tc.wantOK {
+				t.Fatalf("err=%v failed=%t, want ok=%t", err, rep.Failed(), tc.wantOK)
+			}
+			if tc.wantOK && readFile(t, filepath.Join(f.share, "projects", pid1, "workspace/README.md")) != "readme" {
+				t.Fatal("not migrated")
+			}
+			if !tc.wantOK {
+				assertAbsent(t, filepath.Join(f.share, "projects", pid1))
+			}
+		})
+	}
+	// The legacy project-id file name is a marker too.
+	f := newHubFixture(t)
+	writeTree(t, f.share, map[string]string{
+		legacyHubProjectsDir + "/p1/.scion/" + projectkeys.LegacyProjectIDFile: pid2,
+		legacyHubProjectsDir + "/p1/a":                                         "a",
+	})
+	if rep, _ := Run(context.Background(), f.input(ProjectRef{ID: pid1, Slug: "p1"}), opts(false)); !rep.Failed() {
+		t.Fatal("a legacy project-id file naming another project must be a mismatch")
+	}
+}
+
+// The hub's workspace record binds a hub-local tree without other markers.
+func TestRun_LocalTreeBoundByWorkspaceRecord(t *testing.T) {
+	f := newHubFixture(t)
+	writeTree(t, f.global, map[string]string{"projects/p1/notes.txt": "n", "hub-workspaces/p1": pid1})
+	rep, err := Run(context.Background(), f.input(ProjectRef{ID: pid1, Slug: "p1"}), opts(false))
+	if err != nil || rep.Failed() || rep.Moves() != 1 {
+		t.Fatalf("err=%v failed=%t moves=%d", err, rep.Failed(), rep.Moves())
+	}
+	if readFile(t, filepath.Join(f.share, "projects", pid1, "workspace/notes.txt")) != "n" {
+		t.Fatal("not migrated")
+	}
+}
+
+// A legacy workspace source with a shared-dirs/ subtree: the rest moves,
+// shared-dirs/ never lands in workspace/ and stays in the .migrated copy.
+func TestRun_SharedDirsSubtreeNotMovedIntoWorkspace(t *testing.T) {
+	f := newHubFixture(t)
+	writeTree(t, f.share, map[string]string{
+		legacyHubProjectsDir + "/p1/.scion/project-id":   pid1,
+		legacyHubProjectsDir + "/p1/a.txt":               "A",
+		legacyHubProjectsDir + "/p1/shared-dirs/s/f.txt": "old shared",
+	})
+	rep, err := Run(context.Background(), f.input(ProjectRef{ID: pid1, Slug: "p1"}), opts(false))
+	if err != nil || rep.Failed() {
+		t.Fatalf("err=%v failed=%t", err, rep.Failed())
+	}
+	ws := filepath.Join(f.share, "projects", pid1, "workspace")
+	if readFile(t, filepath.Join(ws, "a.txt")) != "A" {
+		t.Fatal("content not migrated")
+	}
+	assertAbsent(t, filepath.Join(ws, "shared-dirs"))
+	if readFile(t, filepath.Join(f.share, legacyHubProjectsDir, "p1"+backupSuffix, "shared-dirs/s/f.txt")) != "old shared" {
+		t.Fatal("shared-dirs/ not kept in the .migrated copy")
 	}
 }

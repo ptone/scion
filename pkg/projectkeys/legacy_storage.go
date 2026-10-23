@@ -21,3 +21,16 @@ package projectkeys
 // is the one-shot project storage migration (M3, ptone/scion#5819), which
 // deletes those objects; both go in phase 6 (ptone/scion#5839).
 const LegacyProjectWorkspaceObjectDir = "grove-workspace"
+
+// Legacy project identity markers a hub-managed project tree seeded by an
+// older hub may carry: the project-id file and settings keys from before
+// the project rename. Their only reader is the project storage migration's
+// identity check of slug-keyed legacy trees (ptone/scion#5819), which
+// treats them like the current markers; removed with it in phase 6
+// (ptone/scion#5839).
+const (
+	LegacyProjectIDFile          = "grove-id"
+	LegacyConfigProjectIDKey     = "grove_id"
+	LegacyConfigHubProjectIDKey  = "hub.grove_id"
+	LegacyConfigHubProjectIDJSON = "hub.groveId"
+)

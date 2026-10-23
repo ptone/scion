@@ -17,6 +17,7 @@
 package migrate
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -56,6 +57,7 @@ var fchownat = unix.Fchownat
 // normalizer applies Normalize to migrated entries. Failures never stop a
 // move: the first one is kept as the Result's OwnershipErr.
 type normalizer struct {
+	ctx   context.Context
 	mode  Normalize
 	owner *Ownership
 	res   *Result
@@ -166,6 +168,10 @@ func (n *normalizer) below(dir int, name string, depth int) {
 		return
 	}
 	for _, child := range names {
+		if n.ctx != nil && n.ctx.Err() != nil {
+			n.note(fmt.Errorf("%s: stopped: %w", name, n.ctx.Err()))
+			return
+		}
 		var st unix.Stat_t
 		if err := unix.Fstatat(fd, child, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 			if !errors.Is(err, unix.ENOENT) {

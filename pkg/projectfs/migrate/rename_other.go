@@ -16,10 +16,8 @@
 
 package migrate
 
-import "golang.org/x/sys/unix"
-
-// renameNoReplaceAt is a plain renameat where renameat2 does not exist;
-// callers check that the target is absent first.
-func renameNoReplaceAt(oldDir int, oldName string, newDir int, newName string) error {
-	return unix.Renameat(oldDir, oldName, newDir, newName)
+// renameNoReplace has no atomic no-replace rename to use where renameat2
+// does not exist.
+func renameNoReplace(oldDir int, oldName string, newDir int, newName string) error {
+	return errNoAtomicRename
 }
