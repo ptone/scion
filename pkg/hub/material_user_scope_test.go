@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -325,15 +326,36 @@ func TestAgentGetSecret_UserMetaErrorIsUnavailable(t *testing.T) {
 	assertBackendErrorAudited(t, auditor)
 }
 
-// TestAgentSecretRead_UserScopeCeilingApplied documents the known gap
-// (partial coverage): user-scoped reads have no delegation-ceiling step at
-// all yet. Check 8 still calls the relationship resolver directly rather
-// than routing through a permission decision, so closing this gap needs two
-// further changes neither of which has landed: a shared, exact-permission
-// progeny decision path that accepts a non-read-only action, and a
-// user-material delegation ceiling to evaluate once that path exists.
+// TestAgentSecretRead_UserScopeCeilingApplied is the follow-up-2 target:
+// once check 8 routes through Decide(secret.use, ActionUse), a user-scope
+// read is bounded by the agent's delegation ceiling. It asserts the two
+// step-10 outcomes that routing needs: an agent whose recorded edge carries
+// a principal ceiling is admitted (today's allow case must stay allowed),
+// and one whose bounded ceiling leaves out secret.use is denied by the
+// ceiling.
+//
+// State on main: progenyExactPairs admits (secret.use, ActionUse) for
+// progeny, but check 8 does not use it yet, and step 10 has no
+// user-material ceiling: it asks whether the delegating user holds
+// secret.use, which no plain user role or relationship grants, so the
+// principal-ceiling case is denied too. That is pinned, green, by
+// TestAgentSecretRead_UserScopeSecretUseStep10Characterization
+// (material_user_scope_ceiling_test.go). This test stays gated until the
+// ceiling lands; set SCION_TEST_USER_SCOPE_CEILING=1 to run it as the
+// proof.
 func TestAgentSecretRead_UserScopeCeilingApplied(t *testing.T) {
-	t.Skip("pending the shared exact-permission progeny decision path and the user-material delegation ceiling")
+	if os.Getenv("SCION_TEST_USER_SCOPE_CEILING") == "" {
+		t.Skip("pending the user-material delegation ceiling for secret.use at step 10; " +
+			"see TestAgentSecretRead_UserScopeSecretUseStep10Characterization")
+	}
+	principal := newUserScopeCeilingFixture(t, "usc-principal", store.EffectCeiling{Kind: store.EffectCeilingPrincipal})
+	d := principal.decideSecretUse(t)
+	require.True(t, d.Allowed, "principal ceiling: the shared user secret must stay usable; reason %q", d.Reason)
+
+	bounded := newUserScopeCeilingFixture(t, "usc-bounded", boundedCeiling("project.read", "agent.read"))
+	d = bounded.decideSecretUse(t)
+	require.False(t, d.Allowed, "bounded ceiling without secret.use must deny")
+	require.Equal(t, DeniedByDelegationCeiling, d.DeniedBy, "reason %q", d.Reason)
 }
 
 // TestAgentSecretRead_ProgenyEligibleSecretIDsNilRecDenies pins that
