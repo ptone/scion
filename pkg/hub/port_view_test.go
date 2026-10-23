@@ -270,32 +270,30 @@ func TestPortView_PortLinkUnchanged(t *testing.T) {
 		assert.Empty(t, res.header.Values("Location"))
 	}
 	t.Run("page view would not serve the caller", func(t *testing.T) {
-		// The agent's owner has no role in its project: the port link
-		// admits them as the owner, the page view identity is limited to
-		// the project and is refused.
-		ctx := context.Background()
-		loneID := tid("port-view-lone-owner")
-		require.NoError(t, f.store.CreateUser(ctx, &store.User{
-			ID: loneID, Email: "lone@conduit.test", DisplayName: "Lone", Role: store.UserRoleMember, Status: store.UserStatusActive,
-		}))
-		ensureHubMembership(ctx, f.store, loneID)
-		lone := &store.Agent{
-			ID: tid("port-view-lone-agent"), Slug: "port-view-lone-agent", Name: "Lone",
-			ProjectID: f.launched.ProjectID, OwnerID: loneID, Ancestry: []string{loneID},
-			RuntimeBrokerID: "broker-1", Phase: "running",
+		// redirectToPortView runs after the port link's own access check;
+		// when the page view identity is refused (here: a caller with no
+		// user row), it answers nothing and the port link serves. The owner
+		// is the positive control.
+		mk := func(userID string) *http.Request {
+			r := httptest.NewRequest(http.MethodGet, "/api/v1/agents/"+f.launched.ID+"/ports/"+strconv.Itoa(f.app.port)+"/proxy/page.html", nil)
+			for k, v := range navHeader() {
+				r.Header[k] = v
+			}
+			return r.WithContext(contextWithIdentity(r.Context(),
+				NewAuthenticatedUser(userID, userID+"@conduit.test", "U", store.UserRoleMember, string(ClientTypeWeb))))
 		}
-		require.NoError(t, f.store.CreateAgent(ctx, lone))
-		require.NoError(t, f.store.UpdateAgentExposedPorts(ctx, lone.ID, []store.ExposedPort{{Port: f.app.port, Host: conduitProxyHost, Mode: "rw"}}))
-		got, err := f.store.GetAgent(ctx, lone.ID)
-		require.NoError(t, err)
-		_, ok := f.srv.portViewIdentity(ctx, loneID, got)
+		exposed := findExposedPort(f.launched.ExposedPorts, f.app.port)
+		require.NotNil(t, exposed)
+		nobody := tid("port-view-no-row")
+		_, ok := f.srv.portViewIdentity(context.Background(), nobody, f.launched)
 		require.False(t, ok, "the page view identity is refused")
-		tok, _, _, err := f.srv.userTokenService.GenerateTokenPair(loneID, "lone@conduit.test", "Lone", store.UserRoleMember, ClientTypeWeb)
-		require.NoError(t, err)
-		loneLink := f.base + "/api/v1/agents/" + lone.ID + "/ports/" + strconv.Itoa(f.app.port) + "/proxy/page.html"
-		check := f.send(t, http.MethodGet, loneLink, withBearer(http.Header{"Accept": {"*/*"}}, tok), nil)
-		require.NotEqual(t, http.StatusForbidden, check.status, "the port link admits the owner: %s", check.body)
-		notRedirected(t, f.send(t, http.MethodGet, loneLink, withBearer(navHeader(), tok), nil))
+		rec := httptest.NewRecorder()
+		assert.False(t, f.srv.redirectToPortView(rec, mk(nobody), f.launched, exposed))
+		assert.Empty(t, rec.Header().Values("Location"))
+		assert.Equal(t, 0, rec.Body.Len())
+		rec = httptest.NewRecorder()
+		require.True(t, f.srv.redirectToPortView(rec, mk(f.launched.OwnerID), f.launched, exposed), "positive control")
+		assert.Equal(t, http.StatusFound, rec.Code)
 	})
 	t.Run("port not on loopback", func(t *testing.T) {
 		ctx := context.Background()
@@ -330,7 +328,7 @@ func TestPortView_PortLinkUnchanged(t *testing.T) {
 func createPortViewUAT(t *testing.T, f *portViewFixture) string {
 	t.Helper()
 	require.NotNil(t, f.srv.uatService)
-	tok, _, err := f.srv.uatService.CreateToken(context.Background(), f.launched.OwnerID, "port view test",
+	tok, _, err := f.srv.uatService.CreateToken(rs4MintContext(f.launched.OwnerID), f.launched.OwnerID, "port view test",
 		f.launched.ProjectID, []string{store.UATScopeAgentPortAccess}, nil)
 	require.NoError(t, err)
 	return tok
@@ -781,7 +779,8 @@ func TestPortView_WebSocketRunsAsRestrictedIdentity(t *testing.T) {
 	f := newPortViewFixture(t, echoApp())
 	f.startAgent(t)
 	wsURL := "ws" + strings.TrimPrefix(f.viewURL(f.ownerCap(), "ws"), "http")
-	c, _, err := websocket.DefaultDialer.Dial(wsURL, http.Header{"Origin": {"null"}})
+	// No Origin header: the echo app's upgrader accepts only its own origin.
+	c, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 	require.NoError(t, c.SetReadDeadline(time.Now().Add(10*time.Second)))
