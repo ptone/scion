@@ -57,10 +57,6 @@ type HubInput struct {
 	// ObjectPrefix is the directory prefix of a project's legacy GCS
 	// workspace copy (M3).
 	ObjectPrefix func(projectID string) string
-	// WorkspaceLock, when set, returns the lock a rename into a project's
-	// workspace runs under: the project's provisioning lock, keyed by the
-	// workspace's host path.
-	WorkspaceLock func(workspaceHostPath string) func(section func() error) error
 	// Tracked overrides GitTracked (tests).
 	Tracked func(ctx context.Context, dir, path string) (bool, error)
 }
@@ -113,12 +109,30 @@ func (h HubReport) PendingProjects() []string {
 	return ids
 }
 
+// IdentityBlockedProjects returns the IDs of projects with a legacy tree
+// that failed the identity check (mismatch or unverified).
+func (h HubReport) IdentityBlockedProjects() []string {
+	var ids []string
+	for _, p := range h.Projects {
+		for _, r := range p.Results {
+			if r.Step == StepIdentity && r.Failed() {
+				ids = append(ids, p.ID)
+				break
+			}
+		}
+	}
+	return ids
+}
+
 // Run runs (or plans) M2 for every project of a hub, then M3 per project.
 // On a hub whose workspace backend is not shared it touches nothing and
 // reports Skipped. A shared backend without a usable mount root fails
 // closed with an error.
 func Run(ctx context.Context, in HubInput, opts Options) (HubReport, error) {
 	rep := HubReport{DryRun: opts.DryRun}
+	if opts.Context == nil {
+		opts.Context = ctx
+	}
 	wsShared, sdShared := in.Workspace.Backend.Shared(), in.SharedDirs.Backend.Shared()
 	if !wsShared && !sdShared {
 		rep.Skipped = fmt.Sprintf("workspace backend %q and shared-dir backend %q are not shared; nothing to migrate", in.Workspace.Backend, in.SharedDirs.Backend)
@@ -186,9 +200,6 @@ func projectInput(in HubInput, legacy Tree, ref ProjectRef) (ProjectInput, error
 		}
 		pi.Workspace = &Tree{Base: ws.HostBase, Rel: ws.RelPath}
 		pi.PrepareWorkspace = func() error { return ensureLeaf(ws) }
-		if in.WorkspaceLock != nil {
-			pi.LockWorkspace = in.WorkspaceLock(ws.HostPath)
-		}
 	}
 	if in.SharedDirs.Backend.Shared() {
 		layout := in.SharedDirs

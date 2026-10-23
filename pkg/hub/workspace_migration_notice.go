@@ -37,6 +37,12 @@ type WorkspaceMigrationNotice struct {
 const workspaceMigrationNoticeMessage = "Some files of this project are still in the hub's previous storage location and are not shown here. " +
 	"A hub administrator can move them with the Project Storage Migration maintenance operation."
 
+// workspaceMigrationIdentityMessage is added when a legacy tree of the
+// project could not be verified as the project's own (slug reuse): the
+// administrator must review it, and may adopt it per project.
+const workspaceMigrationIdentityMessage = " The previous location could not be verified as belonging to this project; " +
+	"an administrator must review the migration log and may adopt it by running the operation with the adoptUnverified parameter set to this project's slug."
+
 // Bounds of the background plan behind the notice: the plan walks the
 // share, so it never runs on a request path, at most one runs at a time,
 // and a failed or timed-out plan is retried only after a pause.
@@ -50,8 +56,8 @@ var (
 // the Layouts it was computed against.
 type storageMigrationNoticeCache struct {
 	mu       sync.Mutex
-	key      string // Layout identity of the plan; "" = none
-	pending  map[string]bool
+	key      string            // Layout identity of the plan; "" = none
+	pending  map[string]string // project ID -> pending reason ("" or noticeReasonIdentity)
 	running  bool
 	failedAt time.Time
 	gen      uint64 // bumped by invalidate; a plan started earlier is dropped
@@ -87,10 +93,15 @@ func (s *Server) workspaceMigrationNotice(ctx context.Context, project *store.Pr
 	if err != nil {
 		return nil
 	}
-	if !s.storageMigrationPending(key, project.ID) {
+	pending, reason := s.storageMigrationPending(key, project.ID)
+	if !pending {
 		return nil
 	}
-	return &WorkspaceMigrationNotice{Message: workspaceMigrationNoticeMessage, OperationKey: projectStorageMigrateKey}
+	msg := workspaceMigrationNoticeMessage
+	if reason == noticeReasonIdentity {
+		msg += workspaceMigrationIdentityMessage
+	}
+	return &WorkspaceMigrationNotice{Message: msg, OperationKey: projectStorageMigrateKey}
 }
 
 // storageMigrationLayoutKey identifies the Layouts a plan is valid for.
@@ -106,20 +117,46 @@ func (s *Server) storageMigrationLayoutKey() (string, error) {
 	return fmt.Sprintf("%#v|%#v", ws, sd), nil
 }
 
+// noticeReasonIdentity marks a project whose legacy tree failed the
+// identity check (mismatch or unverified).
+const noticeReasonIdentity = "identity"
+
 // storageMigrationPending reports whether the cached plan for key lists
-// projectID, starting a background plan when there is none for key.
-func (s *Server) storageMigrationPending(key, projectID string) bool {
+// projectID (and why), starting a background plan when there is none for
+// key.
+func (s *Server) storageMigrationPending(key, projectID string) (bool, string) {
 	c := &s.storageMigrationNotice
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.key == key && c.pending != nil {
-		return c.pending[projectID]
+		reason, ok := c.pending[projectID]
+		return ok, reason
 	}
 	if !c.running && (c.failedAt.IsZero() || time.Since(c.failedAt) >= storageMigrationNoticeRetry) {
 		c.running = true
 		go s.computeStorageMigrationPlan(key, c.gen)
 	}
-	return false
+	return false, ""
+}
+
+// startStorageMigrationNoticePlan starts the notice's plan at hub start, in
+// the background, when the workspace backend is shared and the migration
+// has not completed. It never blocks start or readiness.
+func (s *Server) startStorageMigrationNoticePlan(ctx context.Context) {
+	if !s.workspaceBackendShared() {
+		return
+	}
+	go func() {
+		op, err := s.store.GetMaintenanceOperation(ctx, projectStorageMigrateKey)
+		if err == nil && op.Status == store.MaintenanceStatusCompleted {
+			return
+		}
+		key, err := s.storageMigrationLayoutKey()
+		if err != nil {
+			return
+		}
+		s.storageMigrationPending(key, "")
+	}()
 }
 
 // computeStorageMigrationPlan runs the migration as a dry run (no object
@@ -144,9 +181,9 @@ func (s *Server) computeStorageMigrationPlan(key string, gen uint64) {
 	c.key, c.pending, c.failedAt = key, pending, time.Time{}
 }
 
-// planStorageMigration returns the IDs of projects the migration would
-// move something for.
-func (s *Server) planStorageMigration(ctx context.Context) (map[string]bool, error) {
+// planStorageMigration returns the projects the migration would move
+// something for, or that have a failed step, with the reason.
+func (s *Server) planStorageMigration(ctx context.Context) (map[string]string, error) {
 	in, err := s.projectStorageMigrateInput(ctx, false)
 	if err != nil {
 		return nil, err
@@ -155,9 +192,12 @@ func (s *Server) planStorageMigration(ctx context.Context) (map[string]bool, err
 	if err != nil {
 		return nil, err
 	}
-	pending := map[string]bool{}
+	pending := map[string]string{}
 	for _, id := range rep.PendingProjects() {
-		pending[id] = true
+		pending[id] = ""
+	}
+	for _, id := range rep.IdentityBlockedProjects() {
+		pending[id] = noticeReasonIdentity
 	}
 	return pending, nil
 }

@@ -16,21 +16,19 @@
 
 package migrate
 
-import (
-	"errors"
+import "golang.org/x/sys/unix"
 
-	"golang.org/x/sys/unix"
-)
+// renameat2 is unix.Renameat2; a test seam forces the NFS behaviour
+// (every rename flag rejected with EINVAL).
+var renameat2 = unix.Renameat2
 
-// renameNoReplaceAt renames without replacing an existing target:
-// renameat2(RENAME_NOREPLACE), or, where the filesystem does not support
-// it (NFS), a plain renameat, which still refuses a non-empty directory.
-// Callers check that the target is absent first (under the project's
-// provisioning lock where one applies).
-func renameNoReplaceAt(oldDir int, oldName string, newDir int, newName string) error {
-	err := unix.Renameat2(oldDir, oldName, newDir, newName, unix.RENAME_NOREPLACE)
-	if errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.ENOTSUP) {
-		return unix.Renameat(oldDir, oldName, newDir, newName)
+// renameNoReplace is renameat2(RENAME_NOREPLACE): atomic, and EEXIST when
+// the target exists. errNoAtomicRename where the filesystem rejects the
+// flag (the Linux NFS client rejects every rename flag).
+func renameNoReplace(oldDir int, oldName string, newDir int, newName string) error {
+	err := renameat2(oldDir, oldName, newDir, newName, unix.RENAME_NOREPLACE)
+	if noAtomicRename(err) {
+		return errNoAtomicRename
 	}
 	return err
 }

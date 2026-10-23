@@ -33,8 +33,8 @@ import (
 )
 
 // legacyHubProjectsDir is the retired hub-managed project tree on a shared
-// workspace backend (design-v4 G7, invariant "hub-projects/<slug> does not
-// exist"). This constant is the only place the name survives (ptone/scion#5819,
+// workspace backend (design-v4 G7: the invariant that this tree no longer
+// exists). This constant is the only place the name survives (ptone/scion#5819,
 // A2 exception agreed with fs-cleanup-arch); the migration that reads it is
 // deleted in phase 6 (ptone/scion#5839).
 const legacyHubProjectsDir = "hub-projects"
@@ -45,7 +45,7 @@ type Step string
 
 const (
 	StepSeed          Step = "4-scion-seed"
-	StepHubProjects   Step = "1-hub-projects"
+	StepHubProjects   Step = "1-legacy-hub-workspace"
 	StepLocalProjects Step = "2-local-projects"
 	StepSharedDirs    Step = "3-shared-dirs"
 	// StepCloudRunHomes is phase 3's slot (ptone/scion#5825): Cloud Run
@@ -60,9 +60,9 @@ var ProjectSteps = []Step{StepSeed, StepHubProjects, StepLocalProjects, StepShar
 // LegacyHubProjectsRoot returns the directory under which a hub on the
 // shared workspace Layout wrote hub-managed projects as <root>/<slug>,
 // exactly as the retired resolver did: nfs hubs wrote
-// <mount_root>/<share id>/hub-projects (no subpath_root); the volume
+// <mount_root>/<share id>/<legacyHubProjectsDir> (no subpath_root); the volume
 // backends (cloudrun-volume, gke-shared-volume) wrote
-// /mnt/<volume>/<subpath_root>/hub-projects. The Layout's HostBase is that
+// /mnt/<volume>/<subpath_root>/<legacyHubProjectsDir>. The Layout's HostBase is that
 // mount root on every shared backend. It fails closed for a Layout that is
 // not durable or has no absolute HostBase (an empty volume name,
 // ptone/scion#1073), rather than falling back to any other root.
@@ -107,9 +107,6 @@ type ProjectInput struct {
 	// before steps 1 and 2 move anything into it (nil: the mover creates
 	// it).
 	PrepareWorkspace func() error
-	// LockWorkspace runs a rename into the workspace under the project's
-	// provisioning lock (nil: no lock).
-	LockWorkspace func(section func() error) error
 	// ProjectRoot is <subpath_root>/<uuid>; the seed goes to its .scion.
 	// Zero skips step 4.
 	ProjectRoot Tree
@@ -153,6 +150,11 @@ type ProjectReport struct {
 	// OwnershipRequested: migrated entries were to be chowned (the Layout
 	// names a uid/gid).
 	OwnershipRequested bool
+	// WorkspaceIncomplete: the project's workspace content was not (fully)
+	// migrated on this run: the workspace steps were skipped, legacy
+	// content was left in place, or a seed step stopped a source. M3 then
+	// keeps the project's legacy object-storage copy.
+	WorkspaceIncomplete bool
 }
 
 // Moves counts the Specs that moved (or would move) anything.
@@ -248,6 +250,7 @@ func MigrateProject(ctx context.Context, in ProjectInput, opts Options) ProjectR
 	// Step 4 first: otherwise the workspace rename carries the hub seed
 	// into workspace/, where it would pose as a repository tier.
 	if in.SkipWorkspace {
+		rep.WorkspaceIncomplete = true
 		rep.Notes = append(rep.Notes, "the workspace storage is not shared; workspace and seed steps (1, 2, 4) skipped")
 	} else {
 		localCopyOnly := in.LocalCopyOnly
@@ -262,16 +265,27 @@ func MigrateProject(ctx context.Context, in ProjectInput, opts Options) ProjectR
 		if k, _ := entryKind(local); localCopyOnly && k == kindDir {
 			rep.Notes = append(rep.Notes, fmt.Sprintf("%s: a broker uses this tree; its content and seed are copied, the tree is left in place", local))
 		}
-		if in.ProjectRoot.Base != "" {
-			for _, src := range sources {
-				rep.seed(ctx, in, src, false, wsOpts)
+		// A source whose seed step failed or could not decide is not moved
+		// into workspace/: the hub seed must never become agent-visible
+		// workspace content (design P1a).
+		seedOK := func(src Tree, copyOnly bool) bool {
+			if in.ProjectRoot.Base == "" {
+				return true
 			}
-			rep.seed(ctx, in, local, localCopyOnly, wsOpts)
+			return rep.seed(ctx, in, src, copyOnly, wsOpts)
 		}
 		for _, src := range sources {
-			rep.workspace(StepHubProjects, src, in, false, wsOpts)
+			if rep.bound(src, false, in, opts) && seedOK(src, false) {
+				rep.workspace(StepHubProjects, src, in, false, wsOpts)
+			} else {
+				rep.WorkspaceIncomplete = true
+			}
 		}
-		rep.workspace(StepLocalProjects, local, in, localCopyOnly, wsOpts)
+		if rep.bound(local, true, in, opts) && seedOK(local, localCopyOnly) {
+			rep.workspace(StepLocalProjects, local, in, localCopyOnly, wsOpts)
+		} else {
+			rep.WorkspaceIncomplete = true
+		}
 	}
 	if in.SharedDir != nil {
 		rep.sharedDirs(in, sdOpts)
@@ -311,71 +325,151 @@ func validateInput(in ProjectInput) error {
 }
 
 // seed is step 4 for one legacy workspace source.
-func (rep *ProjectReport) seed(ctx context.Context, in ProjectInput, src Tree, copyOnly bool, opts Options) {
+func (rep *ProjectReport) seed(ctx context.Context, in ProjectInput, src Tree, copyOnly bool, opts Options) (ok bool) {
 	scion := Tree{Base: src.Base, Rel: filepath.Join(src.Rel, ".scion")}
 	target := Tree{Base: in.ProjectRoot.Base, Rel: filepath.Join(in.ProjectRoot.Rel, ".scion")}
 	spec := Spec{Step: StepSeed, Source: scion, Target: target, Normalize: NormalizeWorkspace, CopyOnly: copyOnly}
-	if copyOnly {
-		spec.Exclude = []string{"agents"} // the broker's per-agent state
+	failed := func(err error) bool {
+		rep.Results = append(rep.Results, Result{Step: StepSeed, Source: scion.String(), Target: target.String(), Outcome: OutcomeFailed, Err: err})
+		return false
+	}
+	move := func() bool {
+		r := Move(spec, opts)
+		rep.Results = append(rep.Results, r)
+		return !r.Failed()
 	}
 
+	scionKind, err := entryKind(scion)
+	if err != nil {
+		return failed(fmt.Errorf("inspect .scion: %w", err))
+	}
+	if scionKind == kindAbsent {
+		return true // no seed: nothing to move
+	}
 	gitKind, err := entryKind(Tree{Base: src.Base, Rel: filepath.Join(src.Rel, ".git")})
 	if err != nil {
-		rep.Results = append(rep.Results, Result{Step: StepSeed, Source: scion.String(), Target: target.String(), Outcome: OutcomeFailed, Err: fmt.Errorf("inspect .git: %w", err)})
-		return
+		return failed(fmt.Errorf("inspect .git: %w", err))
 	}
-	if gitKind == kindAbsent {
-		rep.Results = append(rep.Results, Move(spec, opts))
-		return
-	}
-	scionKind, err := entryKind(scion)
-	if err != nil || scionKind != kindDir {
-		if err != nil {
-			rep.Results = append(rep.Results, Result{Step: StepSeed, Source: scion.String(), Target: target.String(), Outcome: OutcomeFailed, Err: err})
+	if scionKind != kindDir {
+		// A .scion marker file: the project's configuration lives elsewhere
+		// (a broker's external config); there is no hub seed to move here.
+		if copyOnly {
+			return true
 		}
-		return // no .scion directory: nothing to move
+		return failed(errors.New(".scion is not a directory; cannot tell the hub seed apart, so the tree is not moved"))
+	}
+	names, _, err := listDir(scion)
+	if err != nil {
+		return failed(err)
+	}
+	isSeed := func(name string) bool {
+		for _, s := range seedEntries {
+			if s == name {
+				return true
+			}
+		}
+		return false
+	}
+
+	if gitKind == kindAbsent {
+		if !copyOnly {
+			return move() // the whole .scion is the hub's seed
+		}
+		// A broker's live tree: copy only the identity files, never its
+		// private records (agents/, markers).
+		for _, name := range names {
+			if isSeed(name) {
+				spec.Entries = append(spec.Entries, name)
+			}
+		}
+		if len(spec.Entries) == 0 {
+			return true
+		}
+		return move()
 	}
 	if gitKind != kindDir {
-		// A .git file or symlink points elsewhere; tracked state cannot be
-		// read safely here, so nothing is moved.
-		rep.Notes = append(rep.Notes, fmt.Sprintf("%s: .git is not a directory; the seed is left in place", scion))
-		return
+		// A .git file or symlink points elsewhere: tracked state cannot be
+		// read safely, so the seed cannot be told apart from repository
+		// content. Nothing moves from this source (steps 1 and 2 skip it).
+		return failed(errors.New(".git is not a directory; cannot tell the hub seed from repository .scion content, so this tree is not moved"))
 	}
 	tracked := in.Tracked
 	if tracked == nil {
 		tracked = GitTracked
 	}
-	names, _, err := listDir(scion)
-	if err != nil {
-		rep.Results = append(rep.Results, Result{Step: StepSeed, Source: scion.String(), Target: target.String(), Outcome: OutcomeFailed, Err: err})
-		return
-	}
 	dir := src.String()
-	var move []string
 	for _, name := range names {
-		isSeed := false
-		for _, s := range seedEntries {
-			isSeed = isSeed || s == name
-		}
 		t, err := tracked(ctx, dir, filepath.Join(".scion", name))
 		if err != nil {
-			rep.Results = append(rep.Results, Result{Step: StepSeed, Source: scion.String(), Target: target.String(), Outcome: OutcomeFailed, Err: fmt.Errorf("git tracked check of %s: %w", name, err)})
-			return
+			return failed(fmt.Errorf("git tracked check of %s (this tree is not moved): %w", name, err))
 		}
 		switch {
 		case t:
-			// Repository tier (design-v4 P1a): stays in the workspace.
-		case isSeed:
-			move = append(move, name)
+			// Repository tier (design P1a): stays in the workspace.
+		case isSeed(name):
+			spec.Entries = append(spec.Entries, name)
 		default:
-			rep.Notes = append(rep.Notes, fmt.Sprintf("%s/%s: untracked and not a hub seed entry; left in place", scion, name))
+			rep.Notes = append(rep.Notes, fmt.Sprintf("%s/%s: untracked and not a hub seed entry; left with the workspace", scion, name))
 		}
 	}
-	if len(move) == 0 {
-		return
+	if len(spec.Entries) == 0 {
+		return true
 	}
-	spec.Entries = move
-	rep.Results = append(rep.Results, Move(spec, opts))
+	return move()
+}
+
+// StepIdentity reports a legacy tree that is not bound to the project.
+const StepIdentity Step = "identity"
+
+// bound reports whether the slug-keyed legacy tree src may be migrated into
+// this project (fs-cleanup-arch Q8): an absent tree trivially; otherwise
+// only when its identity markers name the project's ID, or, with
+// opts.AdoptUnverified, when it carries none. A mismatched or unverified
+// tree is reported as a failed step and left for an operator.
+func (rep *ProjectReport) bound(src Tree, local bool, in ProjectInput, opts Options) bool {
+	k, err := entryKind(src)
+	if err != nil {
+		rep.Results = append(rep.Results, Result{Step: StepIdentity, Source: src.String(), Outcome: OutcomeFailed, Err: err})
+		return false
+	}
+	if k == kindAbsent {
+		return true
+	}
+	if k == kindDir {
+		// Nothing to migrate (no content, no seed): nothing to bind.
+		names, _, err := listDir(src)
+		if err != nil {
+			rep.Results = append(rep.Results, Result{Step: StepIdentity, Source: src.String(), Outcome: OutcomeFailed, Err: err})
+			return false
+		}
+		relevant := false
+		for _, n := range names {
+			relevant = relevant || n != "shared-dirs"
+		}
+		if !relevant {
+			return true
+		}
+	}
+	id, detail, err := treeIdentity(src, local, in.GlobalDir, in.Slug, in.ID)
+	if err != nil {
+		rep.Results = append(rep.Results, Result{Step: StepIdentity, Source: src.String(), Outcome: OutcomeFailed, Err: err})
+		return false
+	}
+	switch id {
+	case identityVerified:
+		return true
+	case identityUnverified:
+		if opts.AdoptUnverified != nil && opts.AdoptUnverified(in.Slug) {
+			rep.Notes = append(rep.Notes, fmt.Sprintf("%s: %s; adopted (adoptUnverified)", src, detail))
+			return true
+		}
+		rep.Results = append(rep.Results, Result{Step: StepIdentity, Source: src.String(), Outcome: OutcomeFailed,
+			Err: fmt.Errorf("unverified (%s): the tree may belong to a deleted project with the same slug; left in place. To migrate it, run with {\"params\":{\"adoptUnverified\":\"%s\"}}", detail, in.Slug)})
+	default:
+		rep.Results = append(rep.Results, Result{Step: StepIdentity, Source: src.String(), Outcome: OutcomeFailed,
+			Err: fmt.Errorf("identity mismatch (%s): the tree belongs to another project with the same slug; left in place (never adopted)", detail)})
+	}
+	return false
 }
 
 // workspace is steps 1 and 2 for one legacy workspace source.
@@ -394,6 +488,7 @@ func (rep *ProjectReport) workspace(step Step, src Tree, in ProjectInput, copyOn
 		return
 	}
 	if target == nil {
+		rep.WorkspaceIncomplete = true
 		rep.Notes = append(rep.Notes, fmt.Sprintf("%s: the project has no project-scoped workspace; the legacy tree is left in place", src))
 		return
 	}
@@ -402,13 +497,23 @@ func (rep *ProjectReport) workspace(step Step, src Tree, in ProjectInput, copyOn
 		Source:        src,
 		Target:        *target,
 		PrepareTarget: in.PrepareWorkspace,
-		Lock:          in.LockWorkspace,
 		TargetIsLeaf:  true,
 		Normalize:     NormalizeWorkspace,
 	}
-	if copyOnly {
+	hasSharedDirs := false
+	for _, n := range names {
+		hasSharedDirs = hasSharedDirs || n == "shared-dirs"
+	}
+	switch {
+	case copyOnly:
 		spec.CopyOnly = true
 		spec.Exclude = []string{".scion", "shared-dirs"}
+	case hasSharedDirs:
+		// Shared dirs never land in workspace/ (step 3 owns them): copy
+		// the rest and keep shared-dirs/ in the source's .migrated copy.
+		spec.NoRename = true
+		spec.Exclude = []string{"shared-dirs"}
+		rep.Notes = append(rep.Notes, fmt.Sprintf("%s/shared-dirs: not moved into the workspace; it stays in the source's .migrated copy", src))
 	}
 	rep.Results = append(rep.Results, Move(spec, opts))
 }
@@ -507,12 +612,17 @@ const gitTimeout = 30 * time.Second
 // .git must be a directory), is tracked: git ls-files --error-unmatch. The
 // repository is untrusted content, so git runs with an explicit GIT_DIR and
 // work tree, no system or global config, no fsmonitor or hooks, no
-// optional locks, and a minimal environment.
+// optional locks, and a minimal environment; safe.directory names dir so a
+// checkout owned by another uid is still read. Any failure (git missing,
+// timeout) is an error, and the caller then moves nothing from that tree.
 func GitTracked(ctx context.Context, dir, path string) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git",
 		"-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+		// The checkout may be owned by another uid (agents, a squashed
+		// export); hooks and fsmonitor are off, so trusting it is safe.
+		"-c", "safe.directory="+dir,
 		"--no-optional-locks", "ls-files", "--error-unmatch", "--", path)
 	cmd.Dir = dir
 	cmd.Env = []string{

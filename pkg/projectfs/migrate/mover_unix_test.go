@@ -17,6 +17,8 @@
 package migrate
 
 import (
+	"context"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -164,19 +166,17 @@ func TestMove_CopiesIntoExistingEmptyTarget(t *testing.T) {
 	}
 }
 
-// A rename runs under Lock, and the renamed top-level directory gets the
+// A rename into an absent target gives the renamed top-level directory the
 // leaf contract (setgid 2775) when the target is a Mount leaf.
-func TestMove_RenameUnderLockAppliesLeafContract(t *testing.T) {
+func TestMove_RenameAppliesLeafContract(t *testing.T) {
 	base := t.TempDir()
 	writeTree(t, base, map[string]string{"old/proj/a.txt": "A"})
-	locked := 0
 	s := spec(base, "old/proj", "projects/u1/workspace")
 	s.TargetIsLeaf = true
-	s.Lock = func(section func() error) error { locked++; return section() }
 	s.PrepareTarget = func() error { t.Fatal("PrepareTarget must not run for a rename"); return nil }
 	res := Move(s, opts(false))
-	if res.Outcome != OutcomeRenamed || res.Err != nil || locked != 1 {
-		t.Fatalf("got %s err=%v locked=%d", res.Outcome, res.Err, locked)
+	if res.Outcome != OutcomeRenamed || res.Err != nil {
+		t.Fatalf("got %s err=%v", res.Outcome, res.Err)
 	}
 	if m := mode(t, filepath.Join(base, "projects/u1/workspace")); m.Perm() != 0o775 || m&os.ModeSetgid == 0 {
 		t.Fatalf("renamed leaf mode = %v, want setgid 0775", m)
@@ -186,26 +186,46 @@ func TestMove_RenameUnderLockAppliesLeafContract(t *testing.T) {
 	}
 }
 
-// A target created concurrently before the locked re-check is copied into
-// (its inode survives); the rename does not replace it.
-func TestMove_TargetCreatedBeforeLockedRecheckIsCopiedInto(t *testing.T) {
+// forceRename replaces the renameat2 seam: before is run first (to create
+// a target concurrently), then errno is returned, or the real call runs
+// when errno is 0.
+func forceRename(t *testing.T, before func(), errno syscall.Errno) {
+	t.Helper()
+	old := renameat2
+	renameat2 = func(od int, on string, nd int, nn string, flags uint) error {
+		if before != nil {
+			before()
+		}
+		if errno != 0 {
+			return errno
+		}
+		return old(od, on, nd, nn, flags)
+	}
+	t.Cleanup(func() { renameat2 = old })
+}
+
+// A target created concurrently, between the absent check and the rename,
+// is never replaced: atomic NOREPLACE fails with EEXIST and the tree is
+// copied into the existing directory (its inode survives).
+func TestMove_TargetCreatedConcurrentlyIsNotReplaced(t *testing.T) {
 	base := t.TempDir()
 	writeTree(t, base, map[string]string{"old/proj/a.txt": "A"})
 	ws := filepath.Join(base, "projects/u1/workspace")
 	var ino uint64
-	s := spec(base, "old/proj", "projects/u1/workspace")
-	s.Lock = func(section func() error) error {
+	forceRename(t, func() {
+		if ino != 0 {
+			return
+		}
 		if err := os.Mkdir(ws, 0o2775); err != nil {
-			return err
+			t.Fatal(err)
 		}
 		var st syscall.Stat_t
 		if err := syscall.Stat(ws, &st); err != nil {
-			return err
+			t.Fatal(err)
 		}
 		ino = st.Ino
-		return section()
-	}
-	res := Move(s, opts(false))
+	}, 0)
+	res := Move(spec(base, "old/proj", "projects/u1/workspace"), opts(false))
 	if res.Outcome != OutcomeMerged || res.Err != nil {
 		t.Fatalf("got %s err=%v, want merged", res.Outcome, res.Err)
 	}
@@ -218,19 +238,91 @@ func TestMove_TargetCreatedBeforeLockedRecheckIsCopiedInto(t *testing.T) {
 	}
 }
 
-func TestMove_LockFailureLeavesSource(t *testing.T) {
+// NFS: every rename flag is rejected (EINVAL). A directory is then never
+// renamed: an absent target is created through PrepareTarget and copied
+// into, and the source is kept as .migrated. An empty target created
+// concurrently is not replaced.
+func TestMove_NoAtomicRenameCopiesDirectories(t *testing.T) {
 	base := t.TempDir()
-	writeTree(t, base, map[string]string{"old/proj/a.txt": "A"})
+	writeTree(t, base, map[string]string{"old/proj/a.txt": "A", "old/proj/d/b.txt": "B"})
+	ws := filepath.Join(base, "projects/u1/workspace")
+	forceRename(t, nil, syscall.EINVAL)
+	prepared := 0
 	s := spec(base, "old/proj", "projects/u1/workspace")
-	s.Lock = func(func() error) error { return os.ErrDeadlineExceeded }
+	var ino uint64
+	s.PrepareTarget = func() error {
+		prepared++
+		if err := os.MkdirAll(ws, 0o2775); err != nil {
+			return err
+		}
+		var st syscall.Stat_t
+		if err := syscall.Stat(ws, &st); err != nil {
+			return err
+		}
+		ino = st.Ino
+		return nil
+	}
 	res := Move(s, opts(false))
-	if res.Outcome != OutcomeFailed || res.Err == nil {
-		t.Fatalf("got %s err=%v, want failed", res.Outcome, res.Err)
+	if res.Outcome != OutcomeMerged || res.Err != nil || res.Copied != 2 || prepared != 1 {
+		t.Fatalf("got %s err=%v copied=%d prepared=%d, want merged", res.Outcome, res.Err, res.Copied, prepared)
 	}
-	if readFile(t, filepath.Join(base, "old/proj/a.txt")) != "A" {
-		t.Fatal("source changed")
+	var st syscall.Stat_t
+	if err := syscall.Stat(ws, &st); err != nil || st.Ino != ino {
+		t.Fatalf("the prepared target was replaced (err=%v)", err)
 	}
-	assertAbsent(t, filepath.Join(base, "projects/u1/workspace"))
+	if readFile(t, filepath.Join(base, "old/proj"+backupSuffix, "a.txt")) != "A" {
+		t.Fatal("source not kept as .migrated")
+	}
+	if readFile(t, filepath.Join(ws, "d/b.txt")) != "B" {
+		t.Fatal("not copied")
+	}
+}
+
+// NFS file placement: linkat, never a plain rename. A target file created
+// concurrently (before the link) is not overwritten: a CONFLICT, and the
+// source is kept aside.
+func TestMove_NoAtomicRenameFileNeverOverwrites(t *testing.T) {
+	base := t.TempDir()
+	writeTree(t, base, map[string]string{"src/settings.yaml": "legacy seed", "dst/": ""})
+	target := filepath.Join(base, "dst/settings.yaml")
+	forceRename(t, func() {
+		if _, err := os.Lstat(target); os.IsNotExist(err) {
+			if err := os.WriteFile(target, []byte("NEW SEED"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}, syscall.EINVAL)
+	res := Move(Spec{Step: StepSeed, Source: Tree{Base: base, Rel: "src/settings.yaml"}, Target: Tree{Base: base, Rel: "dst/settings.yaml"}}, opts(false))
+	if res.Failed() || len(res.Conflicts) != 1 {
+		t.Fatalf("got %s err=%v conflicts=%v, want one conflict", res.Outcome, res.Err, res.Conflicts)
+	}
+	if readFile(t, target) != "NEW SEED" {
+		t.Fatal("target overwritten")
+	}
+	if readFile(t, filepath.Join(base, "src/settings.yaml"+backupSuffix)) != "legacy seed" {
+		t.Fatal("source not kept aside")
+	}
+}
+
+// NFS file placement into an absent target links the file (same inode)
+// and removes the source name.
+func TestMove_NoAtomicRenameFileLinks(t *testing.T) {
+	base := t.TempDir()
+	writeTree(t, base, map[string]string{"src/settings.yaml": "seed", "dst/": ""})
+	var before syscall.Stat_t
+	if err := syscall.Stat(filepath.Join(base, "src/settings.yaml"), &before); err != nil {
+		t.Fatal(err)
+	}
+	forceRename(t, nil, syscall.EINVAL)
+	res := Move(Spec{Step: StepSeed, Source: Tree{Base: base, Rel: "src/settings.yaml"}, Target: Tree{Base: base, Rel: "dst/settings.yaml"}}, opts(false))
+	if res.Outcome != OutcomeRenamed || res.Err != nil {
+		t.Fatalf("got %s err=%v", res.Outcome, res.Err)
+	}
+	var after syscall.Stat_t
+	if err := syscall.Stat(filepath.Join(base, "dst/settings.yaml"), &after); err != nil || after.Ino != before.Ino {
+		t.Fatalf("not placed by link (err=%v)", err)
+	}
+	assertAbsent(t, filepath.Join(base, "src/settings.yaml"))
 }
 
 // A10: the target is never overwritten; conflicts are reported; missing
@@ -643,5 +735,30 @@ func TestMove_CopyOnlyLeavesSourceAndHonoursExclude(t *testing.T) {
 	again := Move(s, opts(false))
 	if again.Moved() || again.Identical != 2 {
 		t.Fatalf("re-run: %s copied=%d identical=%d", again.Outcome, again.Copied, again.Identical)
+	}
+}
+
+func TestExcludeUnder(t *testing.T) {
+	got := excludeUnder([]string{"agents", "agents/x", "a/b/c", "./a/d", "b"}, "a")
+	if want := []string{"b/c", "d"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+// A done context stops a copy at the next entry: the move fails and the
+// source stays in place.
+func TestMove_CancelledContextStopsCopy(t *testing.T) {
+	base := t.TempDir()
+	writeTree(t, base, map[string]string{"src/a.txt": "A", "src/b.txt": "B", "dst/x": "x"})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	o := opts(false)
+	o.Context = ctx
+	res := Move(Spec{Step: StepLocalProjects, Source: Tree{Base: base, Rel: "src"}, Target: Tree{Base: base, Rel: "dst"}}, o)
+	if res.Outcome != OutcomeFailed || !errors.Is(res.Err, context.Canceled) {
+		t.Fatalf("got %s err=%v, want failed with context.Canceled", res.Outcome, res.Err)
+	}
+	if readFile(t, filepath.Join(base, "src/a.txt")) != "A" {
+		t.Fatal("source not left in place")
 	}
 }

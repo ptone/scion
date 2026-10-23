@@ -83,6 +83,9 @@ func legacyHubProjects(t *testing.T, share string) string {
 	return legacy.String()
 }
 
+// seedSettings is a hub seed settings.yaml naming projectID.
+func seedSettings(projectID string) string { return "hub:\n  project_id: " + projectID + "\n" }
+
 func writeFiles(t *testing.T, root string, files map[string]string) {
 	t.Helper()
 	for p, content := range files {
@@ -142,7 +145,7 @@ func TestProjectStorageMigrate_NFSMovesAndIsIdempotent(t *testing.T) {
 	g := f.globalDir(t)
 	writeFiles(t, legacyHubProjects(t, share), map[string]string{
 		"migrate-me/README.md":            "readme",
-		"migrate-me/.scion/settings.yaml": "hub seed",
+		"migrate-me/.scion/settings.yaml": seedSettings(f.project.ID),
 	})
 	writeFiles(t, g, map[string]string{
 		filepath.Join("project-configs", projectfs.LocalConfigDirName(f.project.Slug, f.project.ID), "shared-dirs/scratchpad/f.txt"): "scratch",
@@ -159,7 +162,7 @@ func TestProjectStorageMigrate_NFSMovesAndIsIdempotent(t *testing.T) {
 	root := filepath.Join(share, "projects", f.project.ID)
 	for p, want := range map[string]string{
 		"workspace/README.md":          "readme",
-		".scion/settings.yaml":         "hub seed",
+		".scion/settings.yaml":         seedSettings(f.project.ID),
 		"shared-dirs/scratchpad/f.txt": "scratch",
 	} {
 		got, err := os.ReadFile(filepath.Join(root, p))
@@ -179,7 +182,7 @@ func TestProjectStorageMigrate_NFSMovesAndIsIdempotent(t *testing.T) {
 func TestProjectStorageMigrate_M3DeletesOnlyLegacyCopy(t *testing.T) {
 	f := newStorageMigrateFixture(t)
 	share := f.useNFS(t)
-	writeFiles(t, legacyHubProjects(t, share), map[string]string{"migrate-me/a.txt": "A"})
+	writeFiles(t, legacyHubProjects(t, share), map[string]string{"migrate-me/a.txt": "A", "migrate-me/.scion/project-id": f.project.ID})
 	blobs, err := storage.NewLocal(storage.Config{Provider: storage.ProviderLocal, Bucket: "hub", LocalPath: t.TempDir()})
 	require.NoError(t, err)
 	f.srv.SetStorage(blobs)
@@ -230,7 +233,7 @@ func TestWorkspaceMigrationNotice(t *testing.T) {
 	assert.Nil(t, f.srv.workspaceMigrationNotice(ctx, f.project))
 
 	share := f.useNFS(t)
-	writeFiles(t, legacyHubProjects(t, share), map[string]string{"migrate-me/a.txt": "A"})
+	writeFiles(t, legacyHubProjects(t, share), map[string]string{"migrate-me/a.txt": "A", "migrate-me/.scion/project-id": f.project.ID})
 	other := &store.Project{ID: uuid.NewString(), Name: "Clean", Slug: "clean"}
 	require.NoError(t, f.srv.store.CreateProject(ctx, other))
 
@@ -263,7 +266,7 @@ func TestWorkspaceMigrationNotice(t *testing.T) {
 func TestWorkspaceMigrationNotice_RecomputedAfterRun(t *testing.T) {
 	f := newStorageMigrateFixture(t)
 	share := f.useNFS(t)
-	writeFiles(t, legacyHubProjects(t, share), map[string]string{"migrate-me/a.txt": "A"})
+	writeFiles(t, legacyHubProjects(t, share), map[string]string{"migrate-me/a.txt": "A", "migrate-me/.scion/project-id": f.project.ID})
 	waitForNotice(t, f.srv, f.project)
 	_, err := runStorageMigrate(t, f.srv, false)
 	require.NoError(t, err)
@@ -279,7 +282,7 @@ func TestProjectStorageMigrate_LocalBrokerTreeUntouched(t *testing.T) {
 	g := f.globalDir(t)
 	local := filepath.Join(g, "projects", f.project.Slug)
 	writeFiles(t, local, map[string]string{
-		".scion/settings.yaml":    "broker settings",
+		".scion/settings.yaml":    seedSettings(f.project.ID),
 		".scion/agents/a1/home/x": "agent",
 		"notes.txt":               "notes",
 	})
@@ -297,4 +300,43 @@ func TestProjectStorageMigrate_LocalBrokerTreeUntouched(t *testing.T) {
 	log, err = runStorageMigrate(t, f.srv, false)
 	require.NoError(t, err, log)
 	assert.Contains(t, log, "moves=0")
+}
+
+// Q8: a legacy tree without an identity marker is not migrated by default;
+// the notice names the reason and the parameter; adopting the project's
+// slug migrates it.
+func TestProjectStorageMigrate_UnverifiedTreeAndAdoption(t *testing.T) {
+	f := newStorageMigrateFixture(t)
+	share := f.useNFS(t)
+	writeFiles(t, legacyHubProjects(t, share), map[string]string{"migrate-me/a.txt": "A"})
+
+	n := waitForNotice(t, f.srv, f.project)
+	assert.Contains(t, n.Message, "adoptUnverified")
+
+	log, err := runStorageMigrate(t, f.srv, false)
+	require.Error(t, err)
+	assert.Contains(t, log, "unverified")
+	_, statErr := os.Stat(filepath.Join(share, "projects", f.project.ID, "workspace"))
+	assert.True(t, os.IsNotExist(statErr), "an unverified tree must not be migrated by default")
+
+	exec, err := f.srv.resolveMaintenanceExecutor(entadapter.ProjectStorageMigrateKey)
+	require.NoError(t, err)
+	var buf bytes.Buffer
+	require.NoError(t, exec.Run(context.Background(), &buf, map[string]string{"adoptUnverified": "other-slug, " + f.project.Slug}), buf.String())
+	got, err := os.ReadFile(filepath.Join(share, "projects", f.project.ID, "workspace/a.txt"))
+	require.NoError(t, err, buf.String())
+	assert.Equal(t, "A", string(got))
+}
+
+func TestAdoptUnverifiedParam(t *testing.T) {
+	assert.Nil(t, adoptUnverified(""))
+	assert.Nil(t, adoptUnverified("false"))
+	all := adoptUnverified("true")
+	require.NotNil(t, all)
+	assert.True(t, all("anything"))
+	some := adoptUnverified(" a , b ")
+	require.NotNil(t, some)
+	assert.True(t, some("a"))
+	assert.True(t, some("b"))
+	assert.False(t, some("c"))
 }
