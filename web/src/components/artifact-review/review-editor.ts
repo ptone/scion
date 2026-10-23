@@ -22,7 +22,7 @@
  * and the save: this element reports the text with review-change and
  * returns it from flush().
  *
- * Loaded lazily by the artifact page (import() of this module), so the
+ * Loaded lazily by the artifact page (review-editor-loader.ts), so the
  * editor stays out of every other page's download.
  *
  * Events:
@@ -123,6 +123,12 @@ export class ScionReviewEditor extends LitElement {
     } catch (err) {
       console.error('review editor: could not start', err);
       this.emit('review-load-failed', {});
+      return;
+    }
+    if (!this.isConnected) {
+      // Removed while the editor was starting (a quick toggle): nothing uses it.
+      void this.controller.destroy();
+      this.controller = null;
       return;
     }
     const view = this.controller.view;

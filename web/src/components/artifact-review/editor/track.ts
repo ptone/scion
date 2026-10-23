@@ -265,12 +265,22 @@ export function isExempt(tr: Transaction): boolean {
   );
 }
 
+/**
+ * Tracked results the policy computed while deciding a transaction, so the
+ * tracker does not compute them again when it applies.
+ */
+const decided = new WeakMap<Transaction, Tracked>();
+
 /** Tracks a user transaction against the state it applies to, or null. */
 export function trackTransaction(tr: Transaction, before: EditorState): Tracked | null {
+  const known = decided.get(tr);
+  if (known) return known;
   const step = singleReplace(tr);
   if (!step) return null;
   const sel = before.selection;
-  return trackStep(step, before.doc, tr.doc, { empty: sel.empty, head: sel.head });
+  const t = trackStep(step, before.doc, tr.doc, { empty: sel.empty, head: sel.head });
+  if (t) decided.set(tr, t);
+  return t;
 }
 
 /** The tracking plugin. */

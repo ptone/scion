@@ -56,8 +56,9 @@ export function clipboardText(data: DataTransfer | null): string {
 
 /**
  * The inline content of pasted text, read as Markdown, or a refusal hint:
- * text of more than one paragraph, or text that is not a paragraph (a
- * heading, list, table or code), is not pasted in this version; neither is
+ * text of more than one paragraph (the paste-multi hint), or text that is
+ * not a paragraph (a heading, list, table or code; the generic hint), is
+ * not pasted in this version; neither is
  * text carrying CriticMarkup, which would be read as marks.
  */
 export function pasteContent(
@@ -70,7 +71,8 @@ export function pasteContent(
   const doc = parse(trimmed);
   if (doc.childCount !== 1) return { refuse: 'paste-multi' };
   const block = doc.firstChild!;
-  if (block.type.name !== 'paragraph') return { refuse: 'paste-multi' };
+  // A single heading, list, table or code block is not paragraph text.
+  if (block.type.name !== 'paragraph') return { refuse: 'generic' };
   const nodes: Node[] = [];
   let ok = true;
   block.forEach((n) => {

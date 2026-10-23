@@ -675,8 +675,14 @@ export class ScionPageArtifactDetail extends LitElement {
           gap: 0.3rem;
           padding: 0.4rem;
         }
+        /* Visually hidden, still the buttons' accessible names. */
         .g-toolbar .lbl {
-          display: none;
+          position: absolute;
+          width: 1px;
+          height: 1px;
+          overflow: hidden;
+          clip: rect(0 0 0 0);
+          white-space: nowrap;
         }
         .g-toolbar .narrow {
           display: inline;
@@ -1111,17 +1117,28 @@ export class ScionPageArtifactDetail extends LitElement {
     this.graphicalHint = null;
   }
 
-  /** Takes the graphical editor's current text into reviewText. */
-  private takeGraphicalText(): void {
-    const t = this.graphicalEditor?.flush();
-    if (t !== null && t !== undefined) this.reviewText = t;
+  /**
+   * Takes the graphical editor's current text into reviewText. Returns
+   * false (and shows the hint) when the editor cannot write its document,
+   * so the caller stops instead of using older text.
+   */
+  private takeGraphicalText(): boolean {
+    const ed = this.graphicalEditor;
+    if (!ed) return true;
+    const t = ed.flush();
+    if (t === null) {
+      this.showHint('generic');
+      return false;
+    }
+    this.reviewText = t;
+    return true;
   }
 
   /** Switches between the graphical and source views, remembering the choice. */
   private setReviewView(next: ReviewView): void {
     if (next === this.reviewView) return;
     if (next === 'source') {
-      this.takeGraphicalText();
+      if (!this.takeGraphicalText()) return;
     } else {
       void this.ensureEditor();
     }
@@ -1157,7 +1174,8 @@ export class ScionPageArtifactDetail extends LitElement {
     const v = this.data?.version;
     const f = this.entry;
     if (!v || !f) return;
-    if (this.graphicalReview && this.reviewView === 'graphical') this.takeGraphicalText();
+    if (this.graphicalReview && this.reviewView === 'graphical' && !this.takeGraphicalText())
+      return;
     this.reviewBusy = true;
     this.reviewError = null;
     try {
@@ -2163,7 +2181,8 @@ export class ScionPageArtifactDetail extends LitElement {
           ${graphical
             ? html`<sl-tooltip content="A review records every edit as a suggestion">
                   <sl-switch size="small" checked disabled class="track">
-                    <span class="lbl">Track changes</span><span class="narrow">Track</span>
+                    <span class="lbl">Track changes</span
+                    ><span class="narrow" aria-hidden="true">Track</span>
                   </sl-switch>
                 </sl-tooltip>
                 <span class="sep"></span>
@@ -2210,10 +2229,12 @@ export class ScionPageArtifactDetail extends LitElement {
               label="View"
               class="view-toggle"
               value=${this.reviewView}
-              @sl-change=${(e: Event): void =>
-                this.setReviewView(
-                  (e.target as HTMLElement & { value: string }).value as ReviewView
-                )}
+              @sl-change=${(e: Event): void => {
+                const group = e.target as HTMLElement & { value: string };
+                this.setReviewView(group.value as ReviewView);
+                // A refused switch puts the control back.
+                if (group.value !== this.reviewView) group.value = this.reviewView;
+              }}
             >
               <sl-radio-button value="graphical">
                 <sl-icon slot="prefix" name="file-earmark-richtext"></sl-icon>
@@ -2275,7 +2296,12 @@ export class ScionPageArtifactDetail extends LitElement {
                     this.showHint(e.detail.kind)}
                   @review-load-failed=${(): void => this.editorFailed()}
                 ></scion-review-editor>`
-              : html`<div class="skeleton" aria-busy="true" aria-label="Loading the editor">
+              : html`<div
+                  class="skeleton"
+                  role="status"
+                  aria-busy="true"
+                  aria-label="Loading the editor"
+                >
                   <div style="width:40%;height:1.3rem"></div>
                   <div style="width:92%"></div>
                   <div style="width:85%"></div>

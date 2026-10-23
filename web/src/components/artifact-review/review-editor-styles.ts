@@ -76,7 +76,9 @@ export const reviewEditorStyles = css`
     counter-reset: critic-note;
   }
   .ProseMirror:focus-visible {
-    outline: none;
+    outline: 2px solid var(--sl-color-primary-500, #0ea5e9);
+    outline-offset: -2px;
+    border-radius: 0.25rem;
   }
   .ProseMirror h1,
   .ProseMirror h2,

@@ -39,8 +39,12 @@ import {
 
 const MARKER = 'window.__pwned=1';
 
-/** Hosts the app shell itself loads from (its web fonts), whatever the page shows. */
-const SHELL_HOSTS = new Set(['fonts.googleapis.com', 'fonts.gstatic.com']);
+/**
+ * Request types only the app shell makes (its web font stylesheet and font
+ * files); artifact content can request images at most, so an artifact
+ * image on a font host still counts.
+ */
+const SHELL_TYPES = new Set(['font', 'stylesheet']);
 
 const FIXTURE = [
   '# Fixture',
@@ -61,11 +65,26 @@ const FIXTURE = [
   '',
   `[ref][r] <https://auto.invalid/>`,
   '',
+  `<javascript:${MARKER}> [ok4](https://ok.invalid/4)`,
+  '',
+  `<JaVaScRiPt:${MARKER}> [ok5](https://ok.invalid/5)`,
+  '',
+  `<data:text/html,x> [ok6](https://ok.invalid/6)`,
+  '',
+  `[refdata][rd] [refcase][rc] [refent][re] [ok7](https://ok.invalid/7)`,
+  '',
+  `[ctl1](java&#x09;script:${MARKER}) [ctl2](&#x0A;javascript:${MARKER}) [ok8](https://ok.invalid/8)`,
+  '',
   `[r]: javascript:${MARKER}`,
+  `[rd]: data:text/html,x`,
+  `[rc]: JaVaScRiPt:${MARKER}`,
+  `[re]: &#106;avascript:${MARKER}`,
   '',
   '![ext](https://img.invalid/a.png) ![proto](//img.invalid/b.png) ![dot](img/dot.png)',
   '',
   'Sentinels ⸀⸁⸂⸃ stay text, and {++real++} marks stay marks.',
+  '',
+  'References &#x2E00;fake&#x2E01; and &#x2E11; stay text, with {==hl==}{>>first note<<} and {>>second note<<}.',
   '',
 ].join('\n');
 
@@ -79,6 +98,8 @@ interface Facts {
   dotLoaded: boolean;
   rawHtml: number;
   ins: number;
+  comments: string[];
+  text: string;
 }
 
 /** Reads the editor's DOM: everything outside the rules, and the positive controls. */
@@ -100,6 +121,10 @@ async function facts(page: Page): Promise<Facts> {
       dotLoaded: false,
       rawHtml: root.querySelectorAll('code.raw-html').length,
       ins: root.querySelectorAll('ins.critic-ins').length,
+      comments: Array.from(root.querySelectorAll('.critic-comment')).map(
+        (e) => e.getAttribute('aria-label') ?? ''
+      ),
+      text: root.textContent ?? '',
     };
     const hubFile = /^\/api\/v1\/artifacts\/[^/]+\/versions\/\d+\/files\/[^?#]+(\?stream=1)?$/;
     for (const el of Array.from(root.querySelectorAll('*'))) {
@@ -151,7 +176,7 @@ test('artifact text renders only as the rules allow, and a paste is read as plai
     if (u.startsWith('data:') || u.startsWith('blob:') || u.startsWith('about:')) return;
     const url = new URL(u);
     // The app shell's own web fonts are not artifact content.
-    if (SHELL_HOSTS.has(url.hostname)) return;
+    if (SHELL_TYPES.has(r.resourceType())) return;
     if (url.origin !== origin) foreign.push(u);
   });
   page.on('dialog', (d) => {
@@ -187,20 +212,20 @@ test('artifact text renders only as the rules allow, and a paste is read as plai
   expect(f.badSrcs).toEqual([]);
   // Positive controls.
   expect(f.em).toBeGreaterThanOrEqual(1);
-  expect(f.okLinks).toEqual([
-    'https://ok.invalid/1',
-    'https://ok.invalid/2',
-    'https://ok.invalid/3',
-  ]);
+  expect(f.okLinks).toEqual([1, 2, 3, 4, 5, 6, 7, 8].map((n) => `https://ok.invalid/${n}`));
   expect(f.rawHtml).toBeGreaterThanOrEqual(3);
   expect(f.ins).toBe(1);
+  // Character references of sentinel candidates stay text, and the real
+  // comments keep their own notes (positive control in the same line).
+  expect(f.comments).toEqual(['Comment: first note', 'Comment: second note']);
+  expect(f.text).toContain('\u2E00fake\u2E01 and \u2E11 stay text');
   // The document round-trips unchanged.
   expect(await editorText(page)).toBe(FIXTURE);
 
   // A paste whose HTML and plain text disagree inserts the plain text.
   await page.locator('scion-review-editor .ProseMirror p', { hasText: 'Sentinels' }).click();
   await page.keyboard.press('End');
-  const html = `<img src=x onerror="${MARKER}"><a href="javascript:${MARKER}">evil</a>`;
+  const html = `<img src="https://paste.invalid/x" onerror="${MARKER}"><a href="javascript:${MARKER}">evil</a>`;
   if (browserName === 'firefox') {
     // Firefox hides the data of a script-made paste event, so the paste is
     // a real one: a copy handler puts the two disagreeing readings on the

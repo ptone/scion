@@ -44,8 +44,11 @@ const TEXT = 'We ship in Q3.\n';
 class FakeReviewEditor extends HTMLElement {
   content = '';
   next: string | null = null;
+  /** flush() reports that the document cannot be written. */
+  unwritable = false;
   comments = 0;
   flush(): string | null {
+    if (this.unwritable) return null;
     return this.next ?? this.content;
   }
   comment(): Promise<void> {
@@ -86,12 +89,19 @@ function meta(): ArtifactResponse {
   } as ArtifactResponse;
 }
 
+const writes: string[] = [];
+
 function mockFetch(): void {
   const m = meta();
+  writes.length = 0;
   vi.stubGlobal(
     'fetch',
-    vi.fn((input: RequestInfo | URL) => {
+    vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = requestUrl(input);
+      if (init?.method && init.method !== 'GET') {
+        writes.push(`${init.method} ${url}`);
+        return Promise.resolve(new Response('{}', { status: 500 }));
+      }
       if (url.endsWith('/grants')) {
         return Promise.resolve(new Response('{"grants":[]}', { status: 200 }));
       }
@@ -315,5 +325,31 @@ describe('artifact page: graphical review editor experiment', () => {
       new KeyboardEvent('keydown', { code: 'KeyM', ctrlKey: true, altKey: true, bubbles: true })
     );
     expect(apply).toHaveBeenCalledWith('comment');
+  });
+
+  it('stops Save and the switch to Source when the editor cannot write its text', async () => {
+    mockFetch();
+    const el = await mount(true);
+    await startReview(el);
+    const editor = $<FakeReviewEditor>(el, 'scion-review-editor')!;
+    editor.dispatchEvent(
+      new CustomEvent('review-change', {
+        detail: { text: 'We {++really ++}ship in Q3.\n' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await settle(el);
+    editor.unwritable = true;
+    byText(el, '.edit-footer sl-button', 'Save review')!.click();
+    await settle(el);
+    expect(writes).toEqual([]);
+    expect($(el, '.hint-strip')!.textContent).toContain(
+      "That change can't be recorded as a suggestion."
+    );
+    await chooseView(el, 'source');
+    expect($(el, 'scion-review-editor')).not.toBeNull();
+    expect($(el, '.g-work scion-code-editor.review-editor')).toBeNull();
+    expect(window.localStorage.getItem('scion:artifact-review-view')).not.toBe('source');
   });
 });
