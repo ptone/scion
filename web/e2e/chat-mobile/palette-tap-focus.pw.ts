@@ -15,9 +15,10 @@
 /**
  * A tap on a quick-switcher button focuses a text field before the tap ends,
  * so a phone opens its on-screen keyboard, and the switcher's query input
- * then takes focus over from it. Also on a phone that does not match the
+ * then takes focus over from it, on a phone that does not match the
  * touch-primary query (several Android phones report hover support or a
- * fine pointer), emulated by making that one query report no match.
+ * fine pointer), emulated by making that one query report no match. A
+ * phone that matches it is covered in e2e/chat-palette/touch-keyboard.pw.ts.
  * Playwright cannot show an on-screen keyboard: these tests check the focus
  * the keyboard depends on, not the keyboard itself.
  */
@@ -66,14 +67,6 @@ async function expectTapFocusesQueryInput(page: Page, button: Locator): Promise<
   await expect.poll(() => paletteInputHasFocus(page)).toBe(true);
   await expect(page.locator('input[data-palette-keyboard-proxy]')).toHaveCount(0);
 }
-
-test('@static phone: a tap on the spaces column button focuses the query input', async ({
-  page,
-}, testInfo) => {
-  test.skip(isDesktop(testInfo.project.name), 'touch only');
-  await openChatRail(page);
-  await expectTapFocusesQueryInput(page, railButton(page));
-});
 
 test('@static phone not matching the touch-primary query: a tap still focuses the query input', async ({
   page,

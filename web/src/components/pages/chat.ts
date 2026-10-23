@@ -797,7 +797,11 @@ export class ScionPageChat extends LitElement {
    * the browser to open the keyboard.
    */
   private _paletteOpenByTouch = false;
-  /** The `pointerType` of the latest `pointerdown` on a quick-switcher button, until its click. */
+  /**
+   * The `pointerType` of the latest `pointerdown` on a quick-switcher button,
+   * cleared by its click or a `pointercancel`. Read only for a click that
+   * carries no `pointerType` of its own.
+   */
   private _paletteFooterPointerType = '';
   /**
    * Bumped synchronously at the start of every `_openPalette` call (fresh or
@@ -6343,6 +6347,7 @@ export class ScionPageChat extends LitElement {
           aria-keyshortcuts=${isTouch ? nothing : keyShortcuts}
           title=${isTouch ? nothing : `Quick switcher (${shortcutLabel})`}
           @pointerdown=${this._handlePaletteFooterPointerDown}
+          @pointercancel=${this._handlePaletteFooterPointerCancel}
           @click=${this._handlePaletteFooterClick}
         >
           <sl-icon name="compass" aria-hidden="true"></sl-icon>
@@ -6364,10 +6369,15 @@ export class ScionPageChat extends LitElement {
    */
   private _handlePaletteFooterClick(e: Event): void {
     const btn = e.currentTarget as HTMLElement;
-    // A click is a PointerEvent in current engines; the pointerdown record
-    // covers one that is not.
+    // A click is a PointerEvent with its own pointerType in current engines
+    // ('' for one raised by Enter or Space). Only a click that is not one
+    // falls back to the latest pointerdown, and only if it came from a
+    // pointer (detail 0 marks a keyboard click).
+    const clickType = (e as Partial<PointerEvent>).pointerType;
     const byTouch =
-      (e as PointerEvent).pointerType === 'touch' || this._paletteFooterPointerType === 'touch';
+      clickType !== undefined
+        ? clickType === 'touch'
+        : (e as MouseEvent).detail > 0 && this._paletteFooterPointerType === 'touch';
     this._paletteFooterPointerType = '';
     btn.focus({ preventScroll: true });
     this._paletteOpenByTouch = byTouch;
@@ -6382,6 +6392,11 @@ export class ScionPageChat extends LitElement {
 
   private _handlePaletteFooterPointerDown(e: PointerEvent): void {
     this._paletteFooterPointerType = e.pointerType;
+  }
+
+  /** A cancelled press (the page scrolled, the finger slid away) never clicks. */
+  private _handlePaletteFooterPointerCancel(): void {
+    this._paletteFooterPointerType = '';
   }
 
   /** The left rail: the space rail once loaded, else a spinner or a load error. */
