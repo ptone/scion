@@ -65,10 +65,12 @@ export class ScionReviewEditor extends LitElement {
   @property({ type: String }) entryPath = '';
   @property({ attribute: false }) files: ArtifactFile[] = [];
   /**
-   * The version's own text: marks in content that it does not have are the
-   * reviewer's own (kept as theirs across a switch to Source and back).
+   * The review's ownership record, held by the page for the whole review
+   * (a new object for each review): the editor keeps in it which marks
+   * the reviewer added, so they stay the reviewer's across a switch to the
+   * Source view and back. Every other mark is earlier and read-only.
    */
-  @property({ type: String }) baseline = '';
+  @property({ attribute: false }) ownership: object = {};
   /** Shown as the author of comments already in the text. */
   @property({ type: String }) noteAuthor = '';
 
@@ -153,7 +155,7 @@ export class ScionReviewEditor extends LitElement {
     if (!this.controller) return;
     this.clearTimer();
     this.known = text;
-    if (this.controller.load(text, this.baseline || undefined)) {
+    if (this.controller.load(text, this.ownership)) {
       this.emit('review-ready', {});
     } else {
       this.emit('review-load-failed', {});

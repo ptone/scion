@@ -168,6 +168,7 @@ export type ReviewHint =
   | 'break'
   | 'paste-multi'
   | 'earlier'
+  | 'moved'
   | 'generic'
   | 'load-failed';
 
@@ -197,6 +198,10 @@ export const REVIEW_HINT_TEXT: Record<ReviewHint, { title: string; body: string 
   earlier: {
     title: 'This suggestion is from an earlier review.',
     body: 'You can comment on it.',
+  },
+  moved: {
+    title: 'This edit would move an earlier comment.',
+    body: 'Edit around it, or use the Source view.',
   },
   generic: {
     title: "That change can't be recorded as a suggestion.",
@@ -306,6 +311,11 @@ export class ScionPageArtifactDetail extends LitElement {
    * taking the editor's text) even if the experiment changes mid-review.
    */
   @state() private reviewGraphical = false;
+  /**
+   * The graphical editor's record of the reviewer's own marks, one object
+   * per review (opaque here; the editor fills it).
+   */
+  private reviewOwnership: object = {};
   @state() private reviewText = '';
   @state() private reviewNote = '';
   @state() private reviewBusy = false;
@@ -1083,6 +1093,7 @@ export class ScionPageArtifactDetail extends LitElement {
     this.criticView = 'marks';
     this.reviewing = true;
     this.reviewGraphical = this.graphicalReview;
+    this.reviewOwnership = {};
     if (this.reviewGraphical) {
       this.clearHint();
       this.reviewView = storedReviewView();
@@ -1253,6 +1264,8 @@ export class ScionPageArtifactDetail extends LitElement {
     this.reviewText = lfText(this.text);
     this.reviewPreview = this.reviewText;
     this.discardedReview = discarded;
+    // The reloaded text starts a new review: no mark in it is the reviewer's.
+    this.reviewOwnership = {};
   }
 
   /**
@@ -2317,7 +2330,7 @@ export class ScionPageArtifactDetail extends LitElement {
             ? this.editorLoad === 'ready'
               ? html`<scion-review-editor
                   .content=${this.reviewText}
-                  .baseline=${lfText(this.text)}
+                  .ownership=${this.reviewOwnership}
                   .artifactId=${this.artifactId}
                   .seq=${v.seq}
                   .entryPath=${f.path}

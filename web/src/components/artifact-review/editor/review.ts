@@ -23,6 +23,7 @@ import { containerClass } from './policy.js';
 import type { HintKind } from './policy.js';
 import { COMMENT, MARKS, markKeyOf, runKeyOf } from './schema.js';
 import { SKIP_TRACK } from './track.js';
+import { sharedMarks } from './bridge.js';
 
 function hasCritic(state: EditorState, from: number, to: number): boolean {
   let found = false;
@@ -122,7 +123,12 @@ export function addComment(state: EditorState, plan: CommentPlan, note: string):
       schema.marks[MARKS.hl].create({ mine: true })
     );
   }
-  tr.insert(plan.at, schema.nodes[COMMENT].create({ note, mine: true }));
+  // The comment takes the formatting marks both its neighbours share (a
+  // note inside link or emphasis text stays inside it).
+  const $at = tr.doc.resolve(plan.at);
+  const marks =
+    $at.nodeBefore && $at.nodeAfter ? sharedMarks($at.nodeBefore.marks, $at.nodeAfter.marks) : [];
+  tr.insert(plan.at, schema.nodes[COMMENT].create({ note, mine: true }, null, marks));
   tr.setSelection(TextSelection.create(tr.doc, plan.at + 1));
   tr.setMeta(SKIP_TRACK, true);
   return tr.scrollIntoView();

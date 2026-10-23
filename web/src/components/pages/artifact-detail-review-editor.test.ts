@@ -343,6 +343,21 @@ describe('artifact page: graphical review editor experiment', () => {
     expect(byText(el, '.hint-strip sl-button', 'Open Source view')).toBeUndefined();
   });
 
+  it('shows the moved-comment hint with Open Source view', async () => {
+    mockFetch();
+    const el = await mount(true);
+    await startReview(el);
+    const editor = $<FakeReviewEditor>(el, 'scion-review-editor')!;
+    editor.dispatchEvent(
+      new CustomEvent('review-hint', { detail: { kind: 'moved' }, bubbles: true, composed: true })
+    );
+    await settle(el);
+    const strip = $(el, '.hint-strip')!;
+    expect(strip.textContent).toContain('This edit would move an earlier comment.');
+    expect(strip.textContent).toContain('Edit around it, or use the Source view.');
+    expect(byText(el, '.hint-strip sl-button', 'Open Source view')).toBeDefined();
+  });
+
   it('Ctrl+Alt+M comments in the source view', async () => {
     mockFetch();
     window.localStorage.setItem('scion:artifact-review-view', 'source');

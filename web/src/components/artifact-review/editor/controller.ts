@@ -121,8 +121,8 @@ export class ReviewController {
   private async init(): Promise<void> {
     const opts = this.opts;
     const onRefuse = (hint: HintKind): void => opts.onHint(hint);
-    const unitOk = (doc: Node, first: number, last: number): boolean =>
-      this.session.unitOk(doc, first, last);
+    const unitCheck = (doc: Node, first: number, last: number): HintKind | null =>
+      this.session.unitCheck(doc, first, last);
     let parse: (md: string) => Node = () => {
       throw new Error('editor not ready');
     };
@@ -131,7 +131,7 @@ export class ReviewController {
       render: opts.render,
       plugins: () => [
         pastePlugin((md) => parse(md), onRefuse),
-        policyPlugin(onRefuse, unitOk, (block) => this.session.earlierHint(block)),
+        policyPlugin(onRefuse, unitCheck, (block) => this.session.earlierHint(block)),
         trackPlugin(),
         this.uiPlugin(),
         keymap({
@@ -255,6 +255,9 @@ export class ReviewController {
         update: (view, prev): void => {
           if (this.loading || view.state.doc.eq(prev.doc)) return;
           this.session.markDirty();
+          // Text being composed is not tracked until the composition
+          // settles; the settle step's own change is reported then.
+          if (view.composing || this.composing || this.ended) return;
           this.opts.onChange();
         },
       }),
@@ -354,33 +357,37 @@ export class ReviewController {
       if (touchesEarlier(before, at, at))
         return this.session.earlierHint(before.resolve(at).index(0));
       const i = doc.resolve(pos).index(0);
-      return this.session.unitOk(doc, i, i) ? null : 'generic';
+      return this.session.unitCheck(doc, i, i);
     });
     if (refused) this.opts.onHint(refused as HintKind);
   }
 
-  /** Opens md; false when it cannot be shown in this editor. */
-  load(md: string, baseline?: string): boolean {
+  /**
+   * Opens md; false when it cannot be shown in this editor. ownership is
+   * the review's object that keeps the reviewer's own marks own across
+   * loads (view switches); without it, every mark is earlier.
+   */
+  load(md: string, ownership?: object): boolean {
     this.loading = true;
     try {
-      return this.session.load(md, baseline);
+      return this.session.load(md, ownership);
     } finally {
       this.loading = false;
     }
   }
 
+  /** The ownership object of the open review (to pass to load). */
+  get ownership(): object {
+    return this.session.ownershipState;
+  }
+
   /**
-   * The current text, serializing only after an edit. Logs a diagnostic
-   * (and still returns the text, which the page then checks) when the
-   * saved marks do not read back as the document's.
+   * The current text, serializing only after an edit; null when it cannot
+   * be written faithfully (every unit written must read back as the
+   * document and keep every earlier mark, design 4.6 item 3 and E5).
    */
   flush(): string | null {
-    const text = this.session.save();
-    if (text !== null && this.session.isDirty) {
-      const diff = this.session.marksCheck();
-      if (diff) console.error('review editor: saved marks read back differently', diff);
-    }
-    return text;
+    return this.session.save();
   }
 
   /** Top-level blocks that are read-only and saved from their source. */
@@ -453,7 +460,8 @@ export class ReviewController {
     const node = view.state.doc.nodeAt(pos);
     if (node?.type.name !== COMMENT) return;
     if (node.attrs.mine !== true) {
-      this.opts.onHint('generic');
+      // Earlier notes are read-only in this version (design E5, S-b).
+      this.opts.onHint(this.session.earlierHint(view.state.doc.resolve(pos).index(0)));
       return;
     }
     const docBefore = view.state.doc;
@@ -484,8 +492,9 @@ export class ReviewController {
   private dispatchChecked(tr: Transaction, pos: number): void {
     const view = this.core.view;
     const i = view.state.doc.resolve(Math.min(pos, view.state.doc.content.size)).index(0);
-    if (!this.session.unitOk(tr.doc, i, i)) {
-      this.opts.onHint('generic');
+    const refused = this.session.unitCheck(tr.doc, i, i);
+    if (refused) {
+      this.opts.onHint(refused);
       return;
     }
     view.dispatch(tr);

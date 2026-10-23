@@ -23,7 +23,7 @@
 
 import type { Node } from '@milkdown/prose/model';
 import { Transform } from '@milkdown/prose/transform';
-import { TextSelection } from '@milkdown/prose/state';
+import { EditorState, TextSelection } from '@milkdown/prose/state';
 
 import { normalizeCritic, parseCritic, projectCritic } from '../../../utils/critic.js';
 
@@ -36,11 +36,11 @@ import {
   docMarkRuns,
   earlierKept,
   keyedMarks,
+  markKey,
   marksReadBack,
   sameRuns,
   textMarkRuns,
 } from './guard.js';
-import type { MarkRun } from './guard.js';
 import {
   consumedAsInSource,
   docStrings,
@@ -50,7 +50,6 @@ import {
 } from './preserve.js';
 import type { Baseline } from './preserve.js';
 import { COMMENT, CRITIC_MARK_NAMES } from './schema.js';
-import { LOAD_META } from './track.js';
 import type { HintKind } from './policy.js';
 
 export class ReviewSession {
@@ -63,16 +62,18 @@ export class ReviewSession {
    * editor does not read as the critic parser does (design 4.2, item 3).
    */
   private readOnly = new Set<number>();
-  /** The source's marks not added by this reviewer, with their source offsets. */
-  private earlier: { start: number; key: string }[] = [];
+  /** Source offsets of the marks of the opening text that are this session's own. */
+  private mineStarts = new Set<number>();
   /** The source offset of each top-level block. */
   private starts: number[] = [];
   /**
-   * Blocks of units whose marks could not be told apart (ownMarks could
-   * not align them): the reviewer's own marks there look earlier, so a
-   * refusal there shows the generic hint, never the earlier-review one.
+   * Blocks of units where an own mark could not be shown as own (a
+   * read-only or unaligned unit): a refusal there shows the generic hint,
+   * never the earlier-review one.
    */
   private ownerUnknown = new Set<number>();
+  /** The review's ownership, kept across loads (view switches). */
+  private ownership: Ownership = newOwnership();
 
   constructor(private readonly core: Core) {}
 
@@ -83,7 +84,7 @@ export class ReviewSession {
    * would show in another place than the source has it, or with other
    * text (the load invariant: consumedAsInSource, then readOnlyUnits).
    */
-  load(md: string, baseline?: string): boolean {
+  load(md: string, ownership?: object): boolean {
     const { view, schema, parse, parseMd } = this.core;
     // The alphabet must be free in the source and in what the Markdown
     // parser makes of the sentinel form (character references decode to
@@ -101,23 +102,24 @@ export class ReviewSession {
     const base = makeBaseline(md, loaded.doc, parseMd, a);
     const readOnly = this.readOnlyUnits(md, loaded, base, held);
     if (!readOnly) return false;
-    const own =
-      baseline === undefined || !base
-        ? { doc: loaded.doc, mine: new Set<number>(), unknown: new Set<number>() }
-        : this.ownMarks(loaded.doc, md, baseline, base, readOnly);
-    const doc = own.doc;
-    const tr = view.state.tr.replaceWith(0, view.state.doc.content.size, doc.content);
-    tr.setSelection(TextSelection.atStart(tr.doc));
-    tr.setMeta(LOAD_META, true).setMeta('addToHistory', false);
-    view.dispatch(tr);
+    const owner = asOwnership(ownership);
+    const own = this.ownMarks(loaded.doc, md, owner, base, readOnly);
+    // A fresh state: the opened document, with no undo history.
+    view.updateState(
+      EditorState.create({
+        doc: own.doc,
+        plugins: view.state.plugins,
+        selection: TextSelection.atStart(own.doc),
+      })
+    );
     this.baseline = makeBaseline(md, view.state.doc, parseMd, a);
     this.source = md;
     this.readOnly = readOnly;
-    this.earlier = keyedMarks(md)
-      .filter((m) => !m.starts.every((st) => own.mine.has(st)))
-      .map((m) => ({ start: m.start, key: m.key }));
+    this.mineStarts = own.mine;
     this.starts = this.baseline ? blockStarts(this.baseline) : [];
     this.ownerUnknown = own.unknown;
+    this.ownership = owner;
+    recordOwnership(owner, md, own.mine);
     this.dirty = false;
     return true;
   }
@@ -159,29 +161,26 @@ export class ReviewSession {
   }
 
   /**
-   * Marks the marks and comments of md that the version's own text
-   * (baseline) does not have as this session's (mine), so a reviewer's own
-   * marks stay theirs across a switch to the Source view and back. A mark
-   * is earlier when the version's text has the same mark at the same
-   * offset of the clean reading (a review never moves that offset: its
-   * insertions are not in it, its deletions and highlights keep their
-   * text). Units are aligned one by one; read-only units are skipped.
-   * Returns the document, the source offsets of the marks it made mine,
-   * and the blocks of the units it could not align (unknown).
+   * Marks this session's own marks of md as mine (design E5, S-a). A mark
+   * is own when the last text this review handed out had it as own at the
+   * same place, or when it is new (no mark with its kind, text and new
+   * side was in that text: added in the Source view). Every other mark is
+   * earlier. Nothing is matched against the version's text. Units are
+   * aligned one by one; an own mark in a read-only or unaligned unit stays
+   * earlier there (immutable), and its blocks are noted as unknown.
    */
   private ownMarks(
     doc: Node,
     md: string,
-    baseline: string,
-    base: Baseline,
+    owner: Ownership,
+    base: Baseline | null,
     readOnly: Set<number>
   ): { doc: Node; mine: Set<number>; unknown: Set<number> } {
     const mine = new Set<number>();
     const unknown = new Set<number>();
-    const earlier = new Map<string, number>();
-    for (const x of cleanKeyed(baseline)) earlier.set(x.key, (earlier.get(x.key) ?? 0) + 1);
-    const segs = cleanKeyed(md);
-    // Each run of the document, by the top-level block it starts in.
+    const wanted = ownStarts(owner, md);
+    if (!wanted.size || !base) return { doc, mine, unknown };
+    const segs = parseCritic(md).filter((x) => x.kind !== 'text');
     const ranges = docMarkRanges(doc);
     const blockOf = (r: { from: number }[]): number => doc.resolve(r[0].from).index(0);
     const starts = blockStarts(base);
@@ -189,26 +188,22 @@ export class ReviewSession {
     for (let k = 0; k < base.blocks.length; k++) {
       const [i, j] = unitRangeOf(base, k, k);
       k = j;
-      let skip = false;
-      for (let q = i; q <= j; q++) if (readOnly.has(q)) skip = true;
-      if (skip) continue;
       const from = starts[i];
       const to = starts[j] + base.blocks[j].src.length;
       const unitSegs = segs.filter((x) => x.start >= from && x.start < to);
+      if (!unitSegs.some((x) => wanted.has(x.start))) continue;
+      let skip = false;
+      for (let q = i; q <= j; q++) if (readOnly.has(q)) skip = true;
       const unitRanges = ranges.filter((r) => {
         const b = blockOf(r);
         return b >= i && b <= j;
       });
-      if (unitSegs.length !== unitRanges.length) {
+      if (skip || unitSegs.length !== unitRanges.length) {
         for (let q = i; q <= j; q++) unknown.add(q);
         continue;
       }
       unitSegs.forEach((seg, n) => {
-        const left = earlier.get(seg.key) ?? 0;
-        if (left > 0) {
-          earlier.set(seg.key, left - 1);
-          return;
-        }
+        if (!wanted.has(seg.start)) return;
         mine.add(seg.start);
         for (const r of unitRanges[n]) markMine(tr, r.from, r.to);
       });
@@ -224,81 +219,73 @@ export class ReviewSession {
     return unitSourceOf(this.baseline!, i, j);
   }
 
-  /** The earlier marks of blocks i..j (all of them when i is undefined). */
-  private earlierOf(i?: number, j?: number): string[] {
-    if (i === undefined || j === undefined) return this.earlier.map((x) => x.key);
-    const from = this.starts[i];
-    const to = this.starts[j] + this.baseline!.blocks[j].src.length;
-    return this.earlier.filter((x) => x.start >= from && x.start < to).map((x) => x.key);
+  /**
+   * The earlier marks of blocks i..j (the whole text when i is undefined),
+   * keyed as the save invariant compares them: each with its place in
+   * that unit's source with the marks removed (withPlace).
+   */
+  private earlierOf(i?: number, j?: number, withPlace = true): string[] {
+    const whole = i === undefined || j === undefined;
+    const src = whole ? this.source : this.unitSource(i, j);
+    const at = whole ? 0 : this.starts[i];
+    return keyedMarks(src, (st) => this.mineStarts.has(at + st), withPlace)
+      .filter((m) => !m.mine)
+      .map((m) => m.key);
   }
 
   /**
    * Whether the top-level blocks first..last of doc (the units they belong
    * to) would save as text the hub accepts and the reviewer meant: the
    * same clean text as their source, marks that read back as the
-   * document's, and every earlier mark and note of the source unchanged
-   * and in order (earlierKept: with the read-back, the document's own
-   * earlier marks are then unchanged too). A read-only unit refuses every
-   * edit.
+   * document's, and every earlier mark and note of the source unchanged,
+   * in order and in its place (earlierKept). Returns null when they would,
+   * 'moved' when only an earlier mark's place would change, and 'generic'
+   * otherwise (also for a read-only unit, or blocks that no longer line up
+   * with the opening text).
    */
-  unitOk(doc: Node, first: number, last: number): boolean {
+  unitCheck(doc: Node, first: number, last: number): HintKind | null {
     const { schema, serialize } = this.core;
     const clean = (t: string): string => normalizeCritic(projectCritic(t, 'clean'));
     const base = this.baseline;
-    if (!base || doc.childCount !== base.blocks.length) {
-      if (this.readOnly.size > 0) return false;
-      const r = savePreserving(doc, base, serialize, schema);
-      return (
-        !!r &&
-        clean(r.md) === clean(this.source) &&
-        earlierKept(this.earlierOf(), r.md, docMarkRuns(doc))
-      );
-    }
+    if (!base || doc.childCount !== base.blocks.length) return 'generic';
     const [i, j] = this.unitRange(first, last);
-    for (let k = i; k <= j; k++) if (this.readOnly.has(k)) return false;
+    for (let k = i; k <= j; k++) if (this.readOnly.has(k)) return 'generic';
     const src = this.unitSource(i, j);
     const kids: Node[] = [];
     for (let k = i; k <= j; k++) kids.push(doc.child(k));
     const unit = schema.topNodeType.create(null, kids);
     const a = chooseAlphabet(docStrings(unit));
-    if (!a) return false;
+    if (!a) return 'generic';
     const md = saveDoc(unit, serialize, schema, a).replace(/\n+$/, '');
-    if (clean(md) !== clean(src)) return false;
-    if (marksReadBack(unit, md, this.core.plain) !== null) return false;
-    return earlierKept(this.earlierOf(i, j), md, docMarkRuns(unit));
+    if (clean(md) !== clean(src)) return 'generic';
+    if (marksReadBack(unit, md, this.core.plain) !== null) return 'generic';
+    // The written unit must open again as it is shown (for example, an
+    // escaped autolink-looking text must not become a link that takes in
+    // a mark's closing token).
+    if (!this.reopens(md)) return 'generic';
+    const runs = docMarkRuns(unit);
+    if (earlierKept(this.earlierOf(i, j), md, runs)) return null;
+    return earlierKept(this.earlierOf(i, j, false), md, runs, false) ? 'moved' : 'generic';
   }
 
-  /**
-   * The save-time mark check (design 4.6, item 3), per unit: every unit
-   * the serializer writes must read back as the document's marks. Units
-   * written from their source (unchanged since load, or read-only) are not
-   * compared. Returns the first difference, or null.
-   */
-  marksCheck(): { doc: MarkRun[]; text: MarkRun[] } | null {
-    const base = this.baseline;
-    const { view, schema, serialize } = this.core;
-    const doc = view.state.doc;
-    if (!base || doc.childCount !== base.blocks.length) return null;
-    for (let k = 0; k < base.blocks.length; k++) {
-      const [i, j] = this.unitRange(k, k);
-      k = j;
-      let unchanged = true;
-      let readOnly = false;
-      for (let q = i; q <= j; q++) {
-        if (doc.child(q) !== base.nodes[q]) unchanged = false;
-        if (this.readOnly.has(q)) readOnly = true;
-      }
-      if (unchanged || readOnly) continue;
-      const kids: Node[] = [];
-      for (let q = i; q <= j; q++) kids.push(doc.child(q));
-      const unit = schema.topNodeType.create(null, kids);
-      const a = chooseAlphabet(docStrings(unit));
-      if (!a) continue;
-      const md = saveDoc(unit, serialize, schema, a).replace(/\n+$/, '');
-      const diff = marksReadBack(unit, md, this.core.plain);
-      if (diff) return diff;
-    }
-    return null;
+  /** Whether md opens in the editor (the load checks, without showing it). */
+  private reopens(md: string): boolean {
+    const { schema, parse, parseMd } = this.core;
+    const a = chooseOpeningAlphabet(
+      md,
+      (text) => `${docStrings(parse(md))}\n${docStrings(parse(text))}`
+    );
+    if (!a) return false;
+    const loaded = loadDocument(md, parse, schema, a);
+    if (!loaded || sentinelInDefinition(md, a, this.core.parseMdRaw)) return false;
+    const held = consumedAsInSource(md, a, parseMd, loaded.doc.childCount, loaded.consumed);
+    if (!held) return false;
+    return this.readOnlyUnits(md, loaded, makeBaseline(md, loaded.doc, parseMd, a), held) !== null;
+  }
+
+  /** unitCheck passes. */
+  unitOk(doc: Node, first: number, last: number): boolean {
+    return this.unitCheck(doc, first, last) === null;
   }
 
   /**
@@ -325,27 +312,48 @@ export class ReviewSession {
     return this.dirty;
   }
 
+  /** The review's ownership object (pass it to load to keep own marks own). */
+  get ownershipState(): object {
+    return this.ownership;
+  }
+
   /**
    * The current text. Without an edit, the opening text. Returns null if
-   * the edited document cannot be written (no free sentinel alphabet).
+   * the edited document cannot be written (no free sentinel alphabet), or
+   * if any unit the serializer wrote would not read back as the document
+   * or would change an earlier mark or note (key, order or place). Records
+   * which marks of the text are own, for the next load.
    */
   save(): string | null {
     if (!this.dirty) return this.source;
     const { view, schema, serialize } = this.core;
     const doc = view.state.doc;
     const r = savePreserving(doc, this.baseline, serialize, schema, this.readOnly);
-    // The save invariant: no earlier mark or note changes.
     if (!r) return null;
-    // The save invariant, per unit the serializer wrote: no earlier mark
-    // or note changes.
+    const ownOut = new Set<number>();
     for (const u of r.units) {
+      if (!u.written) {
+        // Written from its source: its own marks are the opening text's.
+        const from = this.starts[u.i];
+        const to = this.starts[u.j] + this.baseline!.blocks[u.j].src.length;
+        for (const st of this.mineStarts) if (st >= from && st < to) ownOut.add(st - from + u.at);
+        continue;
+      }
       const kids: Node[] = [];
       if (u.i < 0) doc.forEach((n) => kids.push(n));
       else for (let k = u.i; k <= u.j; k++) kids.push(doc.child(k));
-      const runs = docMarkRuns(this.core.schema.topNodeType.create(null, kids));
+      const unit = schema.topNodeType.create(null, kids);
+      if (marksReadBack(unit, u.md, this.core.plain) !== null) return null;
+      const runs = docMarkRuns(unit);
       const before = u.i < 0 ? this.earlierOf() : this.earlierOf(u.i, u.j);
       if (!earlierKept(before, u.md, runs)) return null;
+      parseCritic(u.md)
+        .filter((x) => x.kind !== 'text')
+        .forEach((x, n) => {
+          if (runs[n].mine) ownOut.add(x.start + u.at);
+        });
     }
+    recordOwnership(this.ownership, r.md, ownOut);
     return r.md;
   }
 }
@@ -378,18 +386,40 @@ function unitSourceOf(base: Baseline, i: number, j: number): string {
 }
 
 /**
- * The marks of md, each keyed by kind, text, new side and its offset in
- * the clean reading, with its source offset.
+ * Which marks of a review are the reviewer's own, kept across loads (view
+ * switches) by the element that holds the review (design E5, S-a). The
+ * page passes the same object for the whole review.
  */
-function cleanKeyed(md: string): { key: string; start: number }[] {
-  const out: { key: string; start: number }[] = [];
+export interface Ownership {
+  /** The own marks of the last text handed out, by kind, text, new side and place. */
+  own: Map<string, number>;
+  /** Every mark of that text, by kind, text and new side; null before the first load. */
+  handed: Map<string, number> | null;
+}
+
+/** An ownership with no own marks (a new review). */
+export function newOwnership(): Ownership {
+  return { own: new Map(), handed: null };
+}
+
+/** The ownership in an object the page holds (filled on first use). */
+function asOwnership(o: object | undefined): Ownership {
+  const x = (o ?? {}) as Partial<Ownership>;
+  if (!(x.own instanceof Map)) {
+    x.own = new Map();
+    x.handed = null;
+  }
+  return x as Ownership;
+}
+
+/** Each mark segment of md: source offset, content key, and content key with its place. */
+function segmentKeys(md: string): { start: number; content: string; placed: string }[] {
+  const out: { start: number; content: string; placed: string }[] = [];
   let clean = 0;
   for (const x of parseCritic(md)) {
     if (x.kind !== 'text') {
-      out.push({
-        key: `${x.kind}\u0000${x.text}\u0000${x.next ?? ''}\u0000${clean}`,
-        start: x.start,
-      });
+      const content = markKey(x);
+      out.push({ start: x.start, content, placed: `${content}\u0000@${clean}` });
     }
     if (
       x.kind === 'text' ||
@@ -397,10 +427,46 @@ function cleanKeyed(md: string): { key: string; start: number }[] {
       x.kind === 'highlight' ||
       x.kind === 'substitution'
     ) {
-      clean += x.text.length;
+      clean += x.text.replace(/\r\n?/g, '\n').length;
     }
   }
   return out;
+}
+
+/** Takes one of key from a multiset; whether there was one. */
+function take(m: Map<string, number>, key: string): boolean {
+  const n = m.get(key) ?? 0;
+  if (n <= 0) return false;
+  m.set(key, n - 1);
+  return true;
+}
+
+/** The source offsets of md's marks that are own under owner. */
+function ownStarts(owner: Ownership, md: string): Set<number> {
+  const segs = segmentKeys(md);
+  const own = new Map(owner.own);
+  const handed = owner.handed ? new Map(owner.handed) : null;
+  const out = new Set<number>();
+  for (const x of segs) {
+    if (take(own, x.placed)) {
+      out.add(x.start);
+      if (handed) take(handed, x.content);
+    }
+  }
+  if (handed) {
+    for (const x of segs) if (!out.has(x.start) && !take(handed, x.content)) out.add(x.start);
+  }
+  return out;
+}
+
+/** Records md as the text handed out, with the marks at mine (source offsets) as own. */
+function recordOwnership(owner: Ownership, md: string, mine: ReadonlySet<number>): void {
+  owner.own = new Map();
+  owner.handed = new Map();
+  for (const x of segmentKeys(md)) {
+    owner.handed.set(x.content, (owner.handed.get(x.content) ?? 0) + 1);
+    if (mine.has(x.start)) owner.own.set(x.placed, (owner.own.get(x.placed) ?? 0) + 1);
+  }
 }
 
 /** Marks the critic mark or comment at from..to as this session's. */

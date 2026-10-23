@@ -240,53 +240,90 @@ export function markKey(x: { kind: string; text: string; next?: string }): strin
 
 /** A mark of a text as the save invariant compares it. */
 export interface KeyedMark {
+  /** Kind, text, new side (and note, for a folded pair), then the place. */
   key: string;
   /** Source offset of the mark (of the highlight, for a folded pair). */
   start: number;
   /** Source offsets of every segment folded into it. */
   starts: number[];
+  /** This session's own (every folded segment is). */
+  mine: boolean;
 }
 
 /**
- * The marks of md in order, as the save invariant compares them: a
- * highlight directly followed by a comment is ONE mark (the comment is
- * that highlight's note), so a note placed between them changes the key.
+ * The marks of md in order, as the save invariant compares them (design
+ * E5, S-c). Each key holds the mark's kind, text and new side and its
+ * PLACE: its offset in md with every mark removed (the clean projection
+ * of the Markdown source, so moving a mark across inline syntax such as a
+ * link's closing bracket or an emphasis delimiter changes it). A
+ * highlight directly followed by a comment of the same owner is ONE mark,
+ * so a note placed between them changes the key. mineAt tells the owner
+ * of the segment at a source offset; withPlace false leaves the place out.
  */
-export function keyedMarks(md: string): KeyedMark[] {
-  const segs = parseCritic(md).filter((x) => x.kind !== 'text');
+export function keyedMarks(
+  md: string,
+  mineAt: (start: number) => boolean = () => false,
+  withPlace = true
+): KeyedMark[] {
+  const segs: { s: ReturnType<typeof parseCritic>[number]; place: number }[] = [];
+  let clean = 0;
+  for (const x of parseCritic(md)) {
+    if (x.kind !== 'text') segs.push({ s: x, place: clean });
+    if (
+      x.kind === 'text' ||
+      x.kind === 'deletion' ||
+      x.kind === 'highlight' ||
+      x.kind === 'substitution'
+    ) {
+      clean += x.text.replace(/\r\n?/g, '\n').length;
+    }
+  }
   const out: KeyedMark[] = [];
+  const at = (place: number): string => (withPlace ? `\u0000@${place}` : '');
   for (let i = 0; i < segs.length; i++) {
-    const s = segs[i];
-    const n = segs[i + 1];
-    if (s.kind === 'highlight' && n?.kind === 'comment' && n.start === s.end) {
+    const { s, place } = segs[i];
+    const n = segs[i + 1]?.s;
+    const mine = mineAt(s.start);
+    if (
+      s.kind === 'highlight' &&
+      n?.kind === 'comment' &&
+      n.start === s.end &&
+      mineAt(n.start) === mine
+    ) {
       out.push({
-        key: `${markKey(s)}\u0000${markKey(n)}`,
+        key: `${markKey(s)}\u0000${markKey(n)}${at(place)}`,
         start: s.start,
         starts: [s.start, n.start],
+        mine,
       });
       i++;
       continue;
     }
-    out.push({ key: markKey(s), start: s.start, starts: [s.start] });
+    out.push({ key: `${markKey(s)}${at(place)}`, start: s.start, starts: [s.start], mine });
   }
   return out;
 }
 
 /**
- * The save invariant (I2), exact: out's marks are aligned index by index
- * with the document's runs (runs, as the read-back compares them); the
- * marks whose runs are this session's own are dropped, and what is left
- * must equal before (the earlier marks, keyed by keyedMarks) exactly. A
- * folded highlight and comment count as own only when both are. Returns
- * false when out's marks do not align with runs.
+ * The save invariant (I2), exact and positional: out's marks are aligned
+ * index by index with the document's runs (runs, as the read-back compares
+ * them); the marks whose runs are this session's own are dropped, and
+ * what is left must equal before (the earlier marks, keyed by keyedMarks
+ * with the same withPlace) exactly. Returns false when out's marks do not
+ * align with runs.
  */
-export function earlierKept(before: string[], out: string, runs: MarkRun[]): boolean {
+export function earlierKept(
+  before: string[],
+  out: string,
+  runs: MarkRun[],
+  withPlace = true
+): boolean {
   const segs = parseCritic(out).filter((x) => x.kind !== 'text');
   if (segs.length !== runs.length) return false;
   const mineAt = new Map<number, boolean>();
   segs.forEach((s, i) => mineAt.set(s.start, runs[i].mine === true));
-  const kept = keyedMarks(out)
-    .filter((m) => !m.starts.every((st) => mineAt.get(st)))
+  const kept = keyedMarks(out, (st) => mineAt.get(st) === true, withPlace)
+    .filter((m) => !m.mine)
     .map((m) => m.key);
   return kept.length === before.length && kept.every((k, i) => k === before[i]);
 }

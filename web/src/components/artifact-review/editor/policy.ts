@@ -48,6 +48,7 @@ export type HintKind =
   | 'break'
   | 'paste-multi'
   | 'earlier'
+  | 'moved'
   | 'generic';
 
 /** Classes of document-changing transactions. */
@@ -150,9 +151,10 @@ export function classify(tr: Transaction, before: EditorState): EditClass {
 
 /**
  * Checks that the top-level blocks first..last of doc would save as text
- * the hub accepts (same clean text as their source, marks read back).
+ * the hub accepts (same clean text as their source, marks read back,
+ * earlier marks kept in their place): null, or the hint for the refusal.
  */
-export type UnitCheck = (doc: Node, first: number, last: number) => boolean;
+export type UnitCheck = (doc: Node, first: number, last: number) => HintKind | null;
 
 /**
  * Whether a replace from..to (in doc) would change a mark or comment of an
@@ -203,7 +205,7 @@ export type EarlierHint = (block: number) => HintKind;
 export function decide(
   tr: Transaction,
   before: EditorState,
-  unitOk: UnitCheck = () => true,
+  unitCheck: UnitCheck = () => null,
   earlierHint: EarlierHint = () => 'earlier'
 ): HintKind | null {
   if (isExempt(tr)) return null;
@@ -222,8 +224,7 @@ export function decide(
   if (!cleanUnchanged(before.doc, after, step.from, step.to)) return 'generic';
   const first = before.doc.resolve(step.from).index(0);
   const last = before.doc.resolve(step.to).index(0);
-  if (!unitOk(after, first, last)) return 'generic';
-  return null;
+  return unitCheck(after, first, last);
 }
 
 export const policyKey = new PluginKey('criticPolicy');
@@ -231,13 +232,13 @@ export const policyKey = new PluginKey('criticPolicy');
 /** The suggest-mode filter. onRefuse is told the hint of each refused edit. */
 export function policyPlugin(
   onRefuse: (hint: HintKind) => void,
-  unitOk?: UnitCheck,
+  unitCheck?: UnitCheck,
   earlierHint?: EarlierHint
 ): Plugin {
   return new Plugin({
     key: policyKey,
     filterTransaction(tr, state): boolean {
-      const hint = decide(tr, state, unitOk, earlierHint);
+      const hint = decide(tr, state, unitCheck, earlierHint);
       if (hint === null) return true;
       onRefuse(hint);
       return false;

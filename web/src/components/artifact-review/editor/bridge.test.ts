@@ -331,8 +331,11 @@ describe('save invariant (I2)', () => {
     expect(kept('{==x==}{>>n<<}', '{==x==}{>>m<<}{>>n<<}', [false, true, false])).toBe(false);
     // Positive control: the own note after the pair.
     expect(kept('{==x==}{>>n<<}', '{==x==}{>>n<<}{>>m<<}', [false, false, true])).toBe(true);
-    // An own note joined to an earlier lone highlight changes that mark.
-    expect(kept('{==x==} y', '{==x==}{>>m<<} y', [false, true])).toBe(false);
+    // An own note after an earlier lone highlight is not folded into it
+    // (the halves have different owners), so the earlier mark is kept.
+    expect(kept('{==x==} y', '{==x==}{>>m<<} y', [false, true])).toBe(true);
+    // Folded, the same pair from an earlier review differs from the lone highlight.
+    expect(kept('{==x==} y', '{==x==}{>>m<<} y', [false, false])).toBe(false);
   });
 
   it("earlierKept: an own mark with an earlier mark's key does not stand in for it", () => {
@@ -379,6 +382,24 @@ describe('save invariant (I2)', () => {
     ok.markDirty();
     expect(ok.unitOk(v.state.doc, 0, 0)).toBe(true);
     expect(ok.save()).toBe('a {++*x*++} b{++*x*++}\n');
+  });
+
+  it('refuses the save when a written unit does not read back as the document', () => {
+    // A serializer that changes the reviewer's own inserted text: the
+    // earlier marks are untouched, but the text no longer says what the
+    // document shows.
+    const src = 'a {++x++} b\n';
+    const broken = {
+      ...core,
+      serialize: (d: Node): string => core.serialize(d).replace('Q', 'R'),
+    };
+    const s = new ReviewSession(broken);
+    expect(s.load(src)).toBe(true);
+    const v = core.view;
+    const ins = core.schema.marks[MARKS.ins].create({ mine: true });
+    v.dispatch(v.state.tr.insert(v.state.doc.child(0).nodeSize - 1, core.schema.text('Q', [ins])));
+    s.markDirty();
+    expect(s.save()).toBeNull();
   });
 
   it('saves the edit with the real serializer', () => {

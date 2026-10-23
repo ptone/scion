@@ -302,7 +302,10 @@ export function applySentinels(
       const marks = tr.doc.resolve(e.pos + 1).marks();
       tr.replaceWith(e.pos, end, schema.text(e.literal, marks));
     } else if (e.note !== undefined) {
-      tr.replaceWith(e.pos, end, schema.nodes[COMMENT].create({ note: e.note }));
+      // The comment keeps the formatting marks it was written under (a
+      // comment at the end of link or emphasis text stays inside it).
+      const marks = formatting(tr.doc.nodeAt(e.pos)?.marks ?? []);
+      tr.replaceWith(e.pos, end, schema.nodes[COMMENT].create({ note: e.note }, null, marks));
     } else {
       tr.delete(e.pos, end);
     }
@@ -325,12 +328,15 @@ interface RunState {
   run: string;
 }
 
+/** The formatting marks of a set (not code, not critic). */
+export function formatting(ms: readonly Mark[]): Mark[] {
+  return ms.filter((m) => !m.type.spec.code && !CRITIC_MARK_NAMES.has(m.type.name));
+}
+
 /** Formatting marks two neighbours share (not code, not critic). */
-function sharedMarks(a: readonly Mark[], b: readonly Mark[]): Mark[] {
-  const keep = (ms: readonly Mark[]): Mark[] =>
-    ms.filter((m) => !m.type.spec.code && !CRITIC_MARK_NAMES.has(m.type.name));
-  const bm = keep(b);
-  return keep(a).filter((m) => m.isInSet(bm));
+export function sharedMarks(a: readonly Mark[], b: readonly Mark[]): Mark[] {
+  const bm = formatting(b);
+  return formatting(a).filter((m) => m.isInSet(bm));
 }
 
 /** The document with critic marks and comments replaced by sentinels. */
@@ -412,9 +418,10 @@ export function docToSentinels(
   for (const op of ops) {
     const $p = doc.resolve(op.pos);
     if (op.order === 0) {
-      const before = $p.nodeBefore;
-      const after = doc.resolve(op.pos + 1).nodeAfter;
-      const ms = before && after ? sharedMarks(before.marks, after.marks) : [];
+      // A comment is written under its own formatting marks (those it had
+      // at load, or those it was added under), so a comment at the edge of
+      // a link or emphasis run stays on its side of the closing syntax.
+      const ms = formatting(doc.nodeAt(op.pos)?.marks ?? []);
       tr.replaceWith(op.pos, op.pos + 1, schema.text(op.s, ms));
     } else {
       const before = $p.nodeBefore;

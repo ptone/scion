@@ -140,7 +140,11 @@ export function savePreserving(
   if (!base || doc.childCount !== base.blocks.length) {
     if (verbatim.size > 0) return null;
     const whole = saveDoc(doc, serialize, schema, a);
-    return { md: whole, rewritten: doc.childCount, units: [{ i: -1, j: -1, md: whole }] };
+    return {
+      md: whole,
+      rewritten: doc.childCount,
+      units: [{ i: -1, j: -1, md: whole, at: 0, written: true }],
+    };
   }
   let md = base.lead;
   let rewritten = 0;
@@ -153,10 +157,14 @@ export function savePreserving(
     for (let k = i; k <= j; k++) if (doc.child(k) !== base.nodes[k]) same = false;
     for (let k = i; k <= j; k++) if (verbatim.has(k)) same = true;
     if (same) {
+      const at = md.length;
+      let unit = '';
       for (let k = i; k <= j; k++) {
-        md += base.blocks[k].src;
-        if (k < j) md += base.blocks[k].after;
+        unit += base.blocks[k].src;
+        if (k < j) unit += base.blocks[k].after;
       }
+      units.push({ i, j, md: unit, at, written: false });
+      md += unit;
     } else {
       const kids: Node[] = [];
       for (let k = i; k <= j; k++) kids.push(doc.child(k));
@@ -165,7 +173,7 @@ export function savePreserving(
         /\n+$/,
         ''
       );
-      units.push({ i, j, md: unit });
+      units.push({ i, j, md: unit, at: md.length, written: true });
       md += unit;
     }
     md += base.blocks[j].after;
@@ -179,10 +187,11 @@ export interface SaveResult {
   md: string;
   rewritten: number;
   /**
-   * The units written by the serializer (blocks i..j and their text); the
-   * whole document as i = j = -1 when the blocks do not line up.
+   * Every unit (blocks i..j), its text, where it starts in md, and whether
+   * the serializer wrote it (otherwise it is its source); the whole
+   * document as i = j = -1 when the blocks do not line up.
    */
-  units: { i: number; j: number; md: string }[];
+  units: { i: number; j: number; md: string; at: number; written: boolean }[];
 }
 
 /**

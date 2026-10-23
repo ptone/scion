@@ -160,12 +160,28 @@ describe('track changes (inline)', () => {
     expect(text(c)).toBe('a {++big ++}dog{>>note<<}\n');
   });
 
-  it('typing next to an earlier insertion, deletion or highlight makes a separate insertion', async () => {
-    const { c } = await open('a {++big++} {--old--} {==hl==} z\n');
-    type(c, 'X', posOf(c, 'big', 3));
+  it('typing next to an earlier deletion or highlight makes a separate insertion', async () => {
+    const { c, hints } = await open('a {++big++} {--old--} {==hl==} z\n');
     type(c, 'Y', posOf(c, 'old', 3));
     type(c, 'W', posOf(c, 'hl', 2));
-    expect(text(c)).toBe('a {++big++}{++X++} {--old--}{++Y++} {==hl==}{++W++} z\n');
+    expect(hints).toEqual([]);
+    expect(text(c)).toBe('a {++big++} {--old--}{++Y++} {==hl==}{++W++} z\n');
+  });
+
+  it('an own suggestion never joins an earlier one of the same kind (refused)', async () => {
+    const md = 'a {++big++} {--old--}de z\n';
+    const { c, hints } = await open(md);
+    // Directly after and directly before an earlier insertion.
+    type(c, 'X', posOf(c, 'big', 3));
+    type(c, 'X', posOf(c, 'big', 0));
+    // Deleting the character right after an earlier deletion.
+    const p = posOf(c, 'de');
+    deleteRange(c, p, p + 1);
+    expect(hints).toEqual(['generic', 'generic', 'generic']);
+    expect(text(c)).toBe(md);
+    // Positive control: one character away, the insertion is recorded.
+    type(c, 'X', posOf(c, 'de', 1));
+    expect(text(c)).toBe('a {++big++} {--old--}d{++X++}e z\n');
   });
 
   it('typing inside an earlier replacement or highlight is refused, with the earlier hint', async () => {
@@ -365,13 +381,13 @@ describe('comments', () => {
     expect(text(c)).toBe('one two three\n');
   });
 
-  it('deleting an own note next to an earlier highlight keeps the earlier one', async () => {
-    const { c, answer } = await open('a {==x==}y z\n');
+  it('deleting an own note near an earlier highlight keeps the earlier one', async () => {
+    const { c, answer } = await open('a {==x==} y z\n');
     const p = posOf(c, 'y');
     select(c, p, p + 1);
     answer.note = 'mine';
     await c.comment();
-    expect(text(c)).toBe('a {==x==}{==y==}{>>mine<<} z\n');
+    expect(text(c)).toBe('a {==x==} {==y==}{>>mine<<} z\n');
     let pos = -1;
     c.view.state.doc.descendants((n, q) => {
       if (n.type.name === 'critic_comment') pos = q;
@@ -379,12 +395,25 @@ describe('comments', () => {
     });
     answer.note = '';
     await c.editNote(pos);
-    expect(text(c)).toBe('a {==x==}y z\n');
+    expect(text(c)).toBe('a {==x==} y z\n');
   });
 
-  it("keeps the reviewer's own comment theirs after a reload with the version's text", async () => {
-    const { c, asked, answer, hints } = await open('one two\n');
-    c.load('one {>>mine<<}two {>>earlier<<}\n', 'one two {>>earlier<<}\n');
+  it('an own highlight directly after an earlier one is refused (they would join)', async () => {
+    const md = 'a {==x==}y z\n';
+    const { c, hints } = await open(md);
+    const p = posOf(c, 'y');
+    select(c, p, p + 1);
+    await c.comment();
+    expect(hints).toEqual(['generic']);
+    expect(text(c)).toBe(md);
+  });
+  it("keeps the reviewer's own comment theirs across a switch to Source and back", async () => {
+    const { c, asked, answer, hints } = await open('one two {>>earlier<<}\n');
+    select(c, posOf(c, 'two'));
+    answer.note = 'mine';
+    await c.comment();
+    // Graphical -> Source -> Graphical, with the review's ownership.
+    expect(c.load(c.flush()!, c.ownership)).toBe(true);
     const comments: number[] = [];
     c.view.state.doc.descendants((n, q) => {
       if (n.type.name === 'critic_comment') comments.push(q);
@@ -394,10 +423,11 @@ describe('comments', () => {
     expect(c.view.state.doc.nodeAt(comments[1])?.attrs.mine).toBe(false);
     answer.note = 'edited';
     await c.editNote(comments[0]);
-    expect(asked).toHaveLength(1);
+    expect(asked).toHaveLength(2);
     expect(text(c)).toBe('one {>>edited<<}two {>>earlier<<}\n');
-    await c.editNote(comments[1] + 0);
-    expect(hints).toEqual(['generic']);
+    // An earlier note is read-only.
+    await c.editNote(comments[1]);
+    expect(hints).toEqual(['earlier']);
   });
 
   it('a key acts on the selection the browser shows, even before the editor saw the move', async () => {
@@ -601,11 +631,15 @@ describe('comments', () => {
     expect(text(c)).toBe('one {>>second<<}two\n');
   });
 
-  it("matches the reviewer's own marks by place, so an identical earlier mark stays earlier", async () => {
+  it('a mark identical to an earlier one stays earlier; only marks made in this review are own', async () => {
     const version = 'the {==the==}{>>theirs<<} end\n';
-    const md = '{==the==}{>>mine<<} {==the==}{>>theirs<<} end\n';
-    const { c } = await open('x\n');
-    expect(c.load(md, version)).toBe(true);
+    const { c, answer } = await open(version);
+    // The reviewer highlights the first "the" with a note.
+    select(c, posOf(c, 'the'), posOf(c, 'the', 3));
+    answer.note = 'mine';
+    await c.comment();
+    expect(c.flush()).toBe('{==the==}{>>mine<<} {==the==}{>>theirs<<} end\n');
+    expect(c.load(c.flush()!, c.ownership)).toBe(true);
     // Each highlight and each comment, in order: whether it is the reviewer's.
     const mine: boolean[] = [];
     c.view.state.doc.descendants((n) => {
@@ -615,13 +649,41 @@ describe('comments', () => {
       return true;
     });
     expect(mine).toEqual([true, true, false, false]);
+    // Without the review's ownership (a new review), every mark is earlier.
+    expect(c.load(c.flush()!)).toBe(true);
+    let any = false;
+    c.view.state.doc.descendants((n) => {
+      if (n.type.name === 'critic_comment' && n.attrs.mine) any = true;
+      return true;
+    });
+    expect(any).toBe(false);
+  });
+
+  it("a mark added in the Source view is the reviewer's; marks already there stay earlier", async () => {
+    const { c } = await open('one two {>>earlier<<}\n');
+    const own = c.ownership;
+    const handed = c.flush()!;
+    // The reviewer adds a comment in the Source view.
+    expect(c.load(handed.replace('one ', 'one {>>from source<<}'), own)).toBe(true);
+    const mine: [string, boolean][] = [];
+    c.view.state.doc.descendants((n) => {
+      if (n.type.name === 'critic_comment')
+        mine.push([String(n.attrs.note), n.attrs.mine === true]);
+      return true;
+    });
+    expect(mine).toEqual([
+      ['from source', true],
+      ['earlier', false],
+    ]);
   });
 
   it("keeps the reviewer's own marks theirs when another block is read-only", async () => {
-    const version = '[l](u "{++x++}") text\n\none two\n';
-    const md = '[l](u "{++x++}") text\n\none {>>mine<<}two\n';
-    const { c } = await open('x\n');
-    expect(c.load(md, version)).toBe(true);
+    const { c, answer } = await open('[l](u "{++x++}") text\n\none two\n');
+    expect(c.readOnlyBlocks()).toEqual([0]);
+    select(c, posOf(c, 'two'));
+    answer.note = 'mine';
+    await c.comment();
+    expect(c.load(c.flush()!, c.ownership)).toBe(true);
     expect(c.readOnlyBlocks()).toEqual([0]);
     let mine = false;
     c.view.state.doc.descendants((n) => {
@@ -661,7 +723,7 @@ describe('comments', () => {
     });
     await c.editNote(pos);
     expect(asked).toEqual([]);
-    expect(hints).toEqual(['generic']);
+    expect(hints).toEqual(['earlier']);
     expect(text(c)).toBe('one {==two==}{>>old<<} three\n');
   });
 
