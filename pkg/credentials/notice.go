@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync/atomic"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 )
@@ -35,16 +36,17 @@ var (
 	// noticeOut receives the notices; tests replace it.
 	noticeOut io.Writer = os.Stderr
 	// refusalReported is set once the read-side refusal has been printed.
-	refusalReported bool
+	// It is atomic so the notice stays once-only even without mu.
+	refusalReported atomic.Bool
 )
 
 // reportRefusal prints a privacy refusal from a read path once per process.
-// The caller holds mu.
+// The caller holds mu (for noticeOut); the once-only check does not depend
+// on it.
 func reportRefusal(err error) {
-	if refusalReported || !errors.Is(err, privatefs.ErrNotPrivate) {
+	if !errors.Is(err, privatefs.ErrNotPrivate) || !refusalReported.CompareAndSwap(false, true) {
 		return
 	}
-	refusalReported = true
 	_, _ = fmt.Fprintf(noticeOut, "Warning: %v\n", err)
 }
 

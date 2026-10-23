@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io/fs"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
@@ -31,12 +32,14 @@ func captureNotices(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
 	mu.Lock()
-	origOut, origReported := noticeOut, refusalReported
-	noticeOut, refusalReported = &buf, false
+	origOut, origReported := noticeOut, refusalReported.Load()
+	noticeOut = &buf
+	refusalReported.Store(false)
 	mu.Unlock()
 	t.Cleanup(func() {
 		mu.Lock()
-		noticeOut, refusalReported = origOut, origReported
+		noticeOut = origOut
+		refusalReported.Store(origReported)
 		mu.Unlock()
 	})
 	return &buf
@@ -62,6 +65,25 @@ func TestReportRefusal_OncePerProcessAndOnlyNotPrivate(t *testing.T) {
 	reportRefusal(refusal)
 	reportRefusal(refusal)
 	mu.Unlock()
+	if got, want := buf.String(), "Warning: "+refusal.Error()+"\n"; got != want {
+		t.Fatalf("notices = %q, want exactly one %q", got, want)
+	}
+}
+
+// Concurrent reports of the refusal still print it exactly once: the
+// once-only check is atomic and does not rely on mu.
+func TestReportRefusal_OnceUnderConcurrency(t *testing.T) {
+	buf := captureNotices(t)
+	refusal := fmt.Errorf("refusing to read credentials from /x: %w", privatefs.ErrNotPrivate)
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			reportRefusal(refusal)
+		}()
+	}
+	wg.Wait()
 	if got, want := buf.String(), "Warning: "+refusal.Error()+"\n"; got != want {
 		t.Fatalf("notices = %q, want exactly one %q", got, want)
 	}
