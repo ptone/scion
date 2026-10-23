@@ -19,11 +19,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs/migrate"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
+	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
@@ -111,8 +113,8 @@ func (s *Server) projectStorageMigrateInput(ctx context.Context, withObjects boo
 	if in.Projects, err = s.storageMigrateProjects(ctx); err != nil {
 		return migrate.HubInput{}, err
 	}
-	in.ProvisionLock = func(stateDir string, section func(lockCtx context.Context) error) error {
-		return provision.WithProjectStateLock(ctx, stateDir, section)
+	in.ProvisionLock = func(ws migrate.Tree, section func(lockCtx context.Context) error) error {
+		return withWorkspaceProvisionLocks(ctx, ws, section)
 	}
 	if stor := s.GetStorage(); withObjects && stor != nil {
 		hubID := s.HubID()
@@ -173,6 +175,34 @@ func (s *Server) localTreeServedByEmbeddedBroker(ctx context.Context, project *s
 		return true
 	}
 	return s.embeddedBrokerUsesSlugProjectDir(project, providers)
+}
+
+// withWorkspaceProvisionLocks runs section holding every provisioning lock
+// a provisioner of the workspace ws may take (provision.
+// WithWorkspaceProvisionLocks: the project root for the hub-side Cloud Run
+// provisioner, the project state directory for the Kubernetes init
+// container; derived by pkg/provision itself). The state directory is
+// first created, if absent, with the broker's leaf contract
+// (shareddirs.EnsureLeaf: mode 2775 and the default ACL), never by the
+// lock code.
+func withWorkspaceProvisionLocks(ctx context.Context, ws migrate.Tree, section func(lockCtx context.Context) error) error {
+	base, err := filepath.EvalSymlinks(ws.Base)
+	if err != nil {
+		return fmt.Errorf("resolve host base: %w", err)
+	}
+	wsPath := filepath.Join(base, ws.Rel)
+	stateRel, err := filepath.Rel(base, provision.ProjectStateDir(wsPath))
+	if err != nil || !filepath.IsLocal(stateRel) {
+		return fmt.Errorf("provisioning state dir is not below the host base")
+	}
+	fd, _, err := shareddirs.EnsureLeaf(base, stateRel)
+	if err != nil {
+		return fmt.Errorf("create provisioning state dir: %w", err)
+	}
+	if err := shareddirs.CloseFd(fd); err != nil {
+		return err
+	}
+	return provision.WithWorkspaceProvisionLocks(ctx, wsPath, section)
 }
 
 // storageObjects adapts storage.Storage to migrate.ObjectStore.

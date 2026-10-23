@@ -289,13 +289,16 @@ func MigrateProject(ctx context.Context, in ProjectInput, opts Options) ProjectR
 		// A source whose seed step failed or could not decide is not moved
 		// into workspace/: the hub seed must never become agent-visible
 		// workspace content (design P1a).
+		seeded := map[string][]string{} // source -> entries step 4 copied
 		seedOK := func(src Tree, copyOnly bool) bool {
 			if in.ProjectRoot.Base == "" {
 				return true
 			}
-			return rep.seed(ctx, in, src, copyOnly, wsOpts)
+			ok, copied := rep.seed(ctx, in, src, copyOnly, wsOpts)
+			seeded[src.String()] = copied
+			return ok
 		}
-		moveAll := func(lockCtx context.Context) error {
+		moveAll := func(lockCtx context.Context) {
 			if lockCtx != nil {
 				// The copy runs under the lock's context: a lost lock
 				// stops it at the next entry (it must not finish under a
@@ -304,17 +307,16 @@ func MigrateProject(ctx context.Context, in ProjectInput, opts Options) ProjectR
 			}
 			for _, src := range sources {
 				if rep.bound(src, false, in, opts) && seedOK(src, false) {
-					rep.workspace(StepHubProjects, src, in, false, wsOpts)
+					rep.workspace(StepHubProjects, src, in, false, seeded[src.String()], wsOpts)
 				} else {
 					rep.WorkspaceIncomplete = true
 				}
 			}
 			if rep.bound(local, true, in, opts) && seedOK(local, localCopyOnly) {
-				rep.workspace(StepLocalProjects, local, in, localCopyOnly, wsOpts)
+				rep.workspace(StepLocalProjects, local, in, localCopyOnly, seeded[local.String()], wsOpts)
 			} else {
 				rep.WorkspaceIncomplete = true
 			}
-			return nil
 		}
 		// Steps 4, 1 and 2 hold the project's provisioning lock for their
 		// whole duration (the copy included), so a first agent start
@@ -324,26 +326,28 @@ func MigrateProject(ctx context.Context, in ProjectInput, opts Options) ProjectR
 		legacy := hasLegacyContent(append(append([]Tree{}, sources...), local))
 		switch {
 		case !legacy || in.LockWorkspace == nil:
-			_ = moveAll(nil)
+			moveAll(nil)
 		case opts.DryRun:
-			rep.Notes = append(rep.Notes, "agent starts for this project will wait on its migration (it holds the project's provisioning lock) and may fail cleanly while it runs")
-			_ = moveAll(nil)
+			rep.Notes = append(rep.Notes, "agent starts for this project will wait on its migration (it holds the project's provisioning locks) and may fail cleanly while it runs")
+			moveAll(nil)
 		default:
-			var lost error
+			var stopped error
 			err := in.LockWorkspace(func(lockCtx context.Context) error {
-				err := moveAll(lockCtx)
-				if lockCtx.Err() != nil {
-					lost = lockCtx.Err()
-				}
-				return err
+				moveAll(lockCtx)
+				stopped = lockCtx.Err()
+				return nil
 			})
 			switch {
 			case err != nil:
 				rep.WorkspaceIncomplete = true
 				rep.Results = append(rep.Results, Result{Step: StepLock, Outcome: OutcomeFailed, Err: fmt.Errorf("provisioning lock: %w (agent starts may hold it; run again)", err)})
-			case lost != nil:
+			case stopped != nil && ctx.Err() != nil:
+				// The run itself was stopped (timeout, shutdown), not the lock.
 				rep.WorkspaceIncomplete = true
-				rep.Results = append(rep.Results, Result{Step: StepLock, Outcome: OutcomeFailed, Err: fmt.Errorf("lost the project's provisioning lock during the migration; stopped (%v); run again", lost)})
+				rep.Results = append(rep.Results, Result{Step: StepLock, Outcome: OutcomeFailed, Err: fmt.Errorf("the migration run stopped during this project (%v); interrupted, run again before starting agents", ctx.Err())})
+			case stopped != nil:
+				rep.WorkspaceIncomplete = true
+				rep.Results = append(rep.Results, Result{Step: StepLock, Outcome: OutcomeFailed, Err: fmt.Errorf("lost the project's provisioning lock during the migration; stopped (%v); interrupted, run again before starting agents", stopped)})
 			default:
 				rep.Notes = append(rep.Notes, "held the project's provisioning lock: agent starts for this project waited on its migration")
 			}
@@ -351,7 +355,15 @@ func MigrateProject(ctx context.Context, in ProjectInput, opts Options) ProjectR
 		rep.noteGitlessWorkspace(in, opts)
 		if in.Workspace != nil {
 			names, ok, err := listDir(*in.Workspace)
-			rep.WorkspacePopulated = err == nil && ok && len(names) > 0
+			content := 0
+			for _, n := range names {
+				// Provisioning lock litter and a legacy sentinel are not
+				// workspace content.
+				if !strings.HasPrefix(n, ".scion-provision") && n != GitMigratingName {
+					content++
+				}
+			}
+			rep.WorkspacePopulated = err == nil && ok && content > 0
 			if opts.DryRun && legacy {
 				// The plan would move legacy content into the target.
 				rep.WorkspacePopulated = true
@@ -396,18 +408,24 @@ func validateInput(in ProjectInput) error {
 }
 
 // seed is step 4 for one legacy workspace source.
-func (rep *ProjectReport) seed(ctx context.Context, in ProjectInput, src Tree, copyOnly bool, opts Options) (ok bool) {
+//
+// The entries are COPIED, never moved out of the legacy tree: the tree
+// keeps its identity markers until the workspace move completes and the
+// whole source is kept as <name>.migrated-<ts> (so an interrupted run can
+// resume and re-verify the tree). copied lists the entries step 4 handled;
+// steps 1 and 2 keep them out of workspace/.
+func (rep *ProjectReport) seed(ctx context.Context, in ProjectInput, src Tree, copyOnly bool, opts Options) (ok bool, copied []string) {
 	scion := Tree{Base: src.Base, Rel: filepath.Join(src.Rel, ".scion")}
 	target := Tree{Base: in.ProjectRoot.Base, Rel: filepath.Join(in.ProjectRoot.Rel, ".scion")}
-	spec := Spec{Step: StepSeed, Source: scion, Target: target, Normalize: NormalizeWorkspace, CopyOnly: copyOnly}
-	failed := func(err error) bool {
+	spec := Spec{Step: StepSeed, Source: scion, Target: target, Normalize: NormalizeWorkspace, CopyOnly: true}
+	failed := func(err error) (bool, []string) {
 		rep.Results = append(rep.Results, Result{Step: StepSeed, Source: scion.String(), Target: target.String(), Outcome: OutcomeFailed, Err: err})
-		return false
+		return false, nil
 	}
-	move := func() bool {
+	move := func() (bool, []string) {
 		r := Move(spec, opts)
 		rep.Results = append(rep.Results, r)
-		return !r.Failed()
+		return !r.Failed(), spec.Entries
 	}
 
 	scionKind, err := entryKind(scion)
@@ -415,7 +433,7 @@ func (rep *ProjectReport) seed(ctx context.Context, in ProjectInput, src Tree, c
 		return failed(fmt.Errorf("inspect .scion: %w", err))
 	}
 	if scionKind == kindAbsent {
-		return true // no seed: nothing to move
+		return true, nil // no seed: nothing to move
 	}
 	gitKind, err := entryKind(Tree{Base: src.Base, Rel: filepath.Join(src.Rel, ".git")})
 	if err != nil {
@@ -425,7 +443,7 @@ func (rep *ProjectReport) seed(ctx context.Context, in ProjectInput, src Tree, c
 		// A .scion marker file: the project's configuration lives elsewhere
 		// (a broker's external config); there is no hub seed to move here.
 		if copyOnly {
-			return true
+			return true, nil
 		}
 		return failed(errors.New(".scion is not a directory; cannot tell the hub seed apart, so the tree is not moved"))
 	}
@@ -460,13 +478,9 @@ func (rep *ProjectReport) seed(ctx context.Context, in ProjectInput, src Tree, c
 			rep.Notes = append(rep.Notes, fmt.Sprintf("%s: %s not moved to the project configuration; kept out of the workspace in the source's .migrated copy", scion, strings.Join(other, ", ")))
 		}
 		if len(spec.Entries) == 0 {
-			return true
+			return true, nil
 		}
-		ok := move()
-		if ok && !copyOnly && !opts.DryRun {
-			removeEmptyDir(scion) // nothing left: no remnant to keep out of the workspace
-		}
-		return ok
+		return move()
 	}
 	if gitKind != kindDir {
 		// A .git file or symlink points elsewhere: tracked state cannot be
@@ -494,7 +508,7 @@ func (rep *ProjectReport) seed(ctx context.Context, in ProjectInput, src Tree, c
 		}
 	}
 	if len(spec.Entries) == 0 {
-		return true
+		return true, nil
 	}
 	return move()
 }
@@ -601,7 +615,7 @@ func (rep *ProjectReport) bound(src Tree, local bool, in ProjectInput, opts Opti
 }
 
 // workspace is steps 1 and 2 for one legacy workspace source.
-func (rep *ProjectReport) workspace(step Step, src Tree, in ProjectInput, copyOnly bool, opts Options) {
+func (rep *ProjectReport) workspace(step Step, src Tree, in ProjectInput, copyOnly bool, seeded []string, opts Options) {
 	target := in.Workspace
 	names, ok, err := listDir(src)
 	if err != nil {
@@ -627,12 +641,13 @@ func (rep *ProjectReport) workspace(step Step, src Tree, in ProjectInput, copyOn
 		PrepareTarget: in.PrepareWorkspace,
 		TargetIsLeaf:  true,
 		Normalize:     NormalizeWorkspace,
+		GitLast:       true,
 	}
 	if copyOnly {
 		spec.CopyOnly = true
 		spec.Exclude = []string{".scion", "shared-dirs"}
 	} else {
-		exclude, err := workspaceExcludes(src, names)
+		exclude, err := workspaceExcludes(src, names, seeded)
 		if err != nil {
 			rep.Results = append(rep.Results, Result{Step: step, Source: src.String(), Outcome: OutcomeFailed, Err: err})
 			return
@@ -650,12 +665,13 @@ func (rep *ProjectReport) workspace(step Step, src Tree, in ProjectInput, copyOn
 
 // workspaceExcludes lists the entries of a legacy workspace source that
 // must not land in the agent-visible workspace/ (design P1a, review round 2
-// finding 2): shared-dirs/ (step 3 owns shared dirs), step 4's backups
-// (.scion.migrated-<ts>, .scion/<entry>.migrated-<ts>), and, for a
-// non-git source, whatever .scion remnant step 4 left (broker records,
-// unknown entries); a git source's remaining .scion is the repository tier
-// and stays with the workspace.
-func workspaceExcludes(src Tree, names []string) ([]string, error) {
+// finding 2): shared-dirs/ (step 3 owns shared dirs), step-4 backups
+// (.scion.migrated-<ts>, .scion/<entry>.migrated-<ts>), for a non-git
+// source the whole .scion (project configuration step 4 copied, broker
+// records, unknown entries), and for a git source the configuration
+// entries step 4 copied; the rest of a git source's .scion is the
+// repository tier and stays with the workspace.
+func workspaceExcludes(src Tree, names []string, seeded []string) ([]string, error) {
 	gitKind, err := entryKind(Tree{Base: src.Base, Rel: filepath.Join(src.Rel, ".git")})
 	if err != nil {
 		return nil, err
@@ -676,25 +692,21 @@ func workspaceExcludes(src Tree, names []string) ([]string, error) {
 				exclude = append(exclude, n) // not a directory: never carried
 				continue
 			}
+			copiedSet := map[string]bool{}
+			for _, e := range seeded {
+				copiedSet[e] = true
+			}
 			for _, e := range inner {
-				if strings.Contains(e, MigratedSuffix) {
+				// Step-4 backups, and the configuration entries step 4
+				// copied to the project root (the legacy tree keeps them
+				// until its .migrated copy is made).
+				if strings.Contains(e, MigratedSuffix) || copiedSet[e] {
 					exclude = append(exclude, ".scion/"+e)
 				}
 			}
 		}
 	}
 	return exclude, nil
-}
-
-// removeEmptyDir removes t only if it is an empty directory (rmdir never
-// removes content); any error leaves it in place.
-func removeEmptyDir(t Tree) {
-	parent, name, ok, err := openParent(t, false)
-	if err != nil || !ok {
-		return
-	}
-	defer closeFd(parent)
-	_ = unix.Unlinkat(parent, name, unix.AT_REMOVEDIR)
 }
 
 // sharedDirs is step 3: hub-local project-configs/<slug>__<short>/shared-dirs/<name>.
