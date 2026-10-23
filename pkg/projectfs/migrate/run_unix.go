@@ -1,0 +1,275 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build unix
+
+package migrate
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
+)
+
+// ProjectRef is a hub project as M2 sees it.
+type ProjectRef struct {
+	ID   string
+	Slug string
+	// Mode is the workspace sharing mode; empty means shared-plain.
+	Mode projectfs.Mode
+}
+
+// HubInput is one hub's M2/M3 run.
+type HubInput struct {
+	// Workspace is the hub's workspace Layout (targets of steps 1, 2, 4,
+	// and the legacy hub-managed root).
+	Workspace projectfs.Layout
+	// SharedDirs is the hub's shared-dir Layout. Step 3 runs only when it
+	// is a shared backend.
+	SharedDirs projectfs.Layout
+	// GlobalDir is the hub's own global Scion dir (~/.scion).
+	GlobalDir string
+	Projects  []ProjectRef
+	// Objects is the hub's object storage (nil: M3 is skipped).
+	Objects ObjectStore
+	// ObjectPrefix is the directory prefix of a project's legacy GCS
+	// workspace copy (M3).
+	ObjectPrefix func(projectID string) string
+	// Tracked overrides GitTracked (tests).
+	Tracked func(ctx context.Context, dir, path string) (bool, error)
+}
+
+// HubReport is one hub's M2/M3 report.
+type HubReport struct {
+	DryRun bool
+	// Skipped is set when the run did nothing at all (the workspace
+	// backend is not shared: the workstation server and single-node
+	// Cloud Run keep today's layout).
+	Skipped  string
+	Projects []ProjectReport
+	Objects  []ObjectResult
+}
+
+// Moves counts the moves (or planned moves) over all projects.
+func (h HubReport) Moves() int {
+	n := 0
+	for _, p := range h.Projects {
+		n += p.Moves()
+	}
+	return n
+}
+
+// Failed reports whether any project step or object cleanup failed.
+func (h HubReport) Failed() bool {
+	for _, p := range h.Projects {
+		if p.Failed() {
+			return true
+		}
+	}
+	for _, o := range h.Objects {
+		if o.Outcome == ObjectsFailed {
+			return true
+		}
+	}
+	return false
+}
+
+// PendingProjects returns the IDs of projects with something to move.
+func (h HubReport) PendingProjects() []string {
+	var ids []string
+	for _, p := range h.Projects {
+		if p.Moves() > 0 {
+			ids = append(ids, p.ID)
+		}
+	}
+	return ids
+}
+
+// Run runs (or plans) M2 for every project of a hub, then M3 per project.
+// On a hub whose workspace backend is not shared it touches nothing and
+// reports Skipped. A shared backend without a usable mount root fails
+// closed with an error.
+func Run(ctx context.Context, in HubInput, opts Options) (HubReport, error) {
+	rep := HubReport{DryRun: opts.DryRun}
+	if !in.Workspace.Backend.Durable() {
+		rep.Skipped = fmt.Sprintf("workspace backend %q is not shared; nothing to migrate", in.Workspace.Backend)
+		return rep, nil
+	}
+	legacy, err := LegacyHubProjectsRoot(in.Workspace)
+	if err != nil {
+		return rep, err
+	}
+	if in.GlobalDir == "" {
+		return rep, errors.New("global dir is required")
+	}
+	for _, ref := range in.Projects {
+		if err := ctx.Err(); err != nil {
+			return rep, err
+		}
+		pi, err := projectInput(in, legacy, ref)
+		var pr ProjectReport
+		if err != nil {
+			pr = ProjectReport{ID: ref.ID, Slug: ref.Slug, Results: []Result{{Step: StepSeed, Outcome: OutcomeFailed, Err: err}}}
+		} else {
+			pr = MigrateProject(ctx, pi, opts)
+		}
+		rep.Projects = append(rep.Projects, pr)
+		if in.Objects != nil && in.ObjectPrefix != nil {
+			o := CleanObjects(ctx, in.Objects, in.ObjectPrefix(ref.ID), pr, opts.DryRun)
+			rep.Objects = append(rep.Objects, o)
+		}
+	}
+	return rep, nil
+}
+
+// projectInput derives one project's targets from the layout authority.
+func projectInput(in HubInput, legacy Tree, ref ProjectRef) (ProjectInput, error) {
+	root, err := in.Workspace.ProjectRoot(ref.ID)
+	if err != nil {
+		return ProjectInput{}, fmt.Errorf("resolve project root: %w", err)
+	}
+	pi := ProjectInput{
+		ID:          ref.ID,
+		Slug:        ref.Slug,
+		ProjectRoot: Tree{Base: root.HostBase, Rel: root.RelPath},
+		HubProjects: legacy,
+		GlobalDir:   in.GlobalDir,
+		Tracked:     in.Tracked,
+	}
+	mode := ref.Mode
+	if mode == "" {
+		mode = projectfs.ModeSharedPlain
+	}
+	if mode != projectfs.ModeEmptyPerAgent {
+		ws, err := in.Workspace.Resolve(projectfs.Project{ID: ref.ID, Slug: ref.Slug}, "", projectfs.WorkspaceMount(mode, ""))
+		if err != nil {
+			return ProjectInput{}, fmt.Errorf("resolve workspace: %w", err)
+		}
+		pi.Workspace = &Tree{Base: ws.HostBase, Rel: ws.RelPath}
+		pi.PrepareWorkspace = func() error { return ensureLeaf(ws) }
+	}
+	if in.SharedDirs.Backend.Durable() {
+		layout := in.SharedDirs
+		pi.SharedDir = func(name string) (SharedDirTarget, error) {
+			r, err := layout.Resolve(projectfs.Project{ID: ref.ID, Slug: ref.Slug}, "", projectfs.SharedDirMount(api.SharedDir{Name: name}, ""))
+			if err != nil {
+				return SharedDirTarget{}, err
+			}
+			return SharedDirTarget{
+				Tree:    Tree{Base: r.HostBase, Rel: r.RelPath},
+				Prepare: func() error { return ensureLeaf(r) },
+			}, nil
+		}
+	}
+	return pi, nil
+}
+
+// WriteLog writes the human-readable report: one line per step that did
+// (or would do) something or failed, its conflicts and refusals, notes,
+// object cleanups, and a summary line.
+func (h HubReport) WriteLog(w io.Writer) {
+	pf := func(format string, a ...any) { _, _ = fmt.Fprintf(w, format+"\n", a...) }
+	if h.DryRun {
+		pf("dry run: nothing is changed")
+	}
+	if h.Skipped != "" {
+		pf("skipped: %s", h.Skipped)
+	}
+	var conflicts, refused, failed int
+	for i, p := range h.Projects {
+		for _, r := range flatten(p.Results) {
+			conflicts += len(r.Conflicts)
+			refused += len(r.Refused)
+			if r.Outcome == OutcomeNothing && r.Err == nil && len(r.Conflicts) == 0 && len(r.Refused) == 0 {
+				continue
+			}
+			line := fmt.Sprintf("project %s (%s): step %s %s %s -> %s", p.ID, p.Slug, r.Step, r.Outcome, r.Source, r.Target)
+			if r.Copied > 0 || r.Identical > 0 {
+				line += fmt.Sprintf(" copied=%d identical=%d", r.Copied, r.Identical)
+			}
+			if r.Backup != "" {
+				line += " source kept as " + r.Backup
+			}
+			if r.Err != nil {
+				failed++
+				line += " error: " + r.Err.Error()
+			}
+			pf("%s", line)
+			for _, c := range r.Conflicts {
+				pf("  CONFLICT %s (target kept; the source's version stays in the .migrated copy)", c)
+			}
+			for _, rf := range r.Refused {
+				pf("  REFUSED %s (not copied)", rf)
+			}
+		}
+		for _, n := range p.Notes {
+			pf("project %s (%s): note: %s", p.ID, p.Slug, n)
+		}
+		if i < len(h.Objects) {
+			o := h.Objects[i]
+			if o.Outcome != ObjectsNone {
+				line := fmt.Sprintf("project %s (%s): objects %s %s", p.ID, p.Slug, o.Outcome, o.Prefix)
+				if o.Err != nil {
+					line += " (" + o.Err.Error() + ")"
+				}
+				pf("%s", line)
+			}
+		}
+	}
+	var objDeleted int
+	for _, o := range h.Objects {
+		if o.Outcome == ObjectsDeleted || o.Outcome == ObjectsWouldDelete {
+			objDeleted++
+		}
+	}
+	pf("summary: projects=%d moves=%d conflicts=%d refused=%d failed=%d object-prefixes-deleted=%d dry-run=%t",
+		len(h.Projects), h.Moves(), conflicts, refused, failed, objDeleted, h.DryRun)
+}
+
+// flatten expands Entries moves into their per-entry results.
+func flatten(rs []Result) []Result {
+	var out []Result
+	for _, r := range rs {
+		if len(r.Entries) > 0 {
+			for _, e := range r.Entries {
+				if e.Step == "" {
+					e.Step = r.Step
+				}
+				out = append(out, e)
+			}
+			if r.Err != nil && !strings.HasPrefix(r.Err.Error(), "entry ") {
+				out = append(out, Result{Step: r.Step, Source: r.Source, Target: r.Target, Outcome: OutcomeFailed, Err: r.Err})
+			}
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// ensureLeaf creates r's directory if absent through the authority
+// (Resolved.Open(create): shareddirs.EnsureLeaf, mode 2775 and the default
+// ACL, the same leaf creation the broker uses).
+func ensureLeaf(r projectfs.Resolved) error {
+	root, err := r.Open(true)
+	if err != nil {
+		return err
+	}
+	return root.Close()
+}
