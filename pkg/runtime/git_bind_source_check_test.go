@@ -17,6 +17,7 @@ package runtime
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -283,5 +284,55 @@ func TestCheckedBindSource_CreateWindowComponentSwapRefused(t *testing.T) {
 				t.Errorf("the entry created through the swapped symlink must be removed, stat err: %v", lerr)
 			}
 		})
+	}
+}
+
+// TestReadOnlyBaseWorktreeFiles_RefuseSymlink covers the production worktree
+// read-only-base layout's own-worktree file binds: registerReadOnlyBaseGitMounts
+// with a real worktree name binds worktrees/<name>/{gitdir,commondir,config.worktree}
+// create-first through bindChecked(bindFileCreate). Each file is exercised with a
+// symlink to an existing directory (refused) and a dangling symlink (refused, with
+// nothing created at the target). Reverting that loop to unchecked
+// fileExists+create code (which would stat/open through the link) makes this RED.
+//
+// It drives registerReadOnlyBaseGitMounts directly with the broker-trusted name
+// "agent-1": routing through buildCommonRunArgs would mask the gitdir case, because a
+// symlinked worktrees/agent-1/gitdir makes trustedWorktreeAdminName fail to resolve
+// the admin name, so the layout is never reached. The committed worktrees/agent-1
+// cases in TestNarrowSources_* go through narrowWorktreesDir, whose own-worktree
+// branch this layout does not use.
+func TestReadOnlyBaseWorktreeFiles_RefuseSymlink(t *testing.T) {
+	for _, f := range []string{"gitdir", "commondir", "config.worktree"} {
+		for _, variant := range []string{"symlink-to-dir", "dangling"} {
+			t.Run(f+"/"+variant, func(t *testing.T) {
+				repoRoot, _ := setupHubManagedBaseRepo(t, "agent-1")
+				gitDir := filepath.Join(repoRoot, ".git")
+				src := filepath.Join(gitDir, "worktrees", "agent-1", f)
+				_ = os.RemoveAll(src) // gitdir exists as a regular file; the others do not
+
+				var target string
+				if variant == "symlink-to-dir" {
+					target = filepath.Join(t.TempDir(), "outside")
+					if err := os.MkdirAll(target, 0o755); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					target = filepath.Join(t.TempDir(), "victim") // must not exist
+				}
+				if err := os.Symlink(target, src); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+
+				err := registerReadOnlyBaseGitMounts(noopMount, gitDir, "/repo-root/.git", "agent-1")
+				if err == nil || !strings.Contains(err.Error(), f) {
+					t.Errorf("a symlinked worktrees/agent-1/%s (%s) must refuse the start naming %s, got: %v", f, variant, f, err)
+				}
+				if variant == "dangling" {
+					if _, lerr := os.Lstat(target); !os.IsNotExist(lerr) {
+						t.Errorf("the dangling symlink target must NOT be created for %s, stat err: %v", f, lerr)
+					}
+				}
+			})
+		}
 	}
 }
