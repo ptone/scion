@@ -459,6 +459,15 @@ function dmListSignature(dms: readonly ChatDMListEntry[]): string {
     .join('\u0001');
 }
 
+/**
+ * Whether a `pointerType` is a finger or a pen: a press that should hold the
+ * on-screen keyboard. A pen counts because stylus phones are among those that
+ * report hover support.
+ */
+function isTapPointer(type: string | undefined): boolean {
+  return type === 'touch' || type === 'pen';
+}
+
 @customElement('scion-page-chat')
 export class ScionPageChat extends LitElement {
   @property({ type: Object })
@@ -6373,14 +6382,11 @@ export class ScionPageChat extends LitElement {
     // ('' for one raised by Enter or Space). Only a click that is not one
     // falls back to the latest pointerdown, and only if it came from a
     // pointer (detail 0 marks a keyboard click).
-    // A pen counts as a finger: stylus phones are among those that report
-    // hover support.
-    const isTap = (type: string | undefined): boolean => type === 'touch' || type === 'pen';
     const clickType = (e as Partial<PointerEvent>).pointerType;
     const byTouch =
       clickType !== undefined
-        ? isTap(clickType)
-        : (e as MouseEvent).detail > 0 && isTap(this._paletteFooterPointerType);
+        ? isTapPointer(clickType)
+        : (e as MouseEvent).detail > 0 && isTapPointer(this._paletteFooterPointerType);
     this._paletteFooterPointerType = '';
     btn.focus({ preventScroll: true });
     this._paletteOpenByTouch = byTouch;

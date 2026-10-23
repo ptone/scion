@@ -2584,6 +2584,25 @@ describe('a finger tap on a quick-switcher button holds the on-screen keyboard o
     await vi.waitFor(() => expect(page.v2PaletteOpen).toBe(true));
   });
 
+  it('Cmd/Ctrl+K after a touch-opened palette closes does not hold the keyboard', async () => {
+    stubNotTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    const button = await footerButton(page);
+    button.dispatchEvent(
+      new PointerEvent('click', { pointerType: 'touch', bubbles: true, composed: true })
+    );
+    await vi.waitFor(() => expect(page.v2PaletteOpen).toBe(true));
+    page._closePaletteAndCancelLoad();
+    expect(document.querySelector('input[data-palette-keyboard-proxy]')).toBeNull();
+
+    // Queued behind the close animation or opened, either way the
+    // type-ahead starts again: the tap must not still count.
+    page._handleGlobalKeydown(makeKeydownEvent({ metaKey: true }));
+
+    expect(document.querySelector('input[data-palette-keyboard-proxy]')).toBeNull();
+  });
+
   it('Cmd/Ctrl+K after a stray touch pointerdown does not hold the keyboard on a desktop', async () => {
     stubNotTouchPrimary();
     const page = createEligiblePage();
