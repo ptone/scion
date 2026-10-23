@@ -427,6 +427,48 @@ describe('comments', () => {
     expect(asked).toHaveLength(1);
   });
 
+  it('shows a hint and changes nothing when the comment moved while the dialog was open', async () => {
+    const root = document.createElement('div');
+    document.body.append(root);
+    const hints: HintKind[] = [];
+    let onAsk: () => void = () => {};
+    let answer = 'first';
+    const c = await ReviewController.create({
+      root,
+      render: () => renderContext,
+      askNote: () => {
+        onAsk();
+        return Promise.resolve(answer);
+      },
+      onHint: (h) => hints.push(h),
+      onChange: () => {},
+    });
+    made.push(c);
+    expect(c.load('one two\n')).toBe(true);
+    select(c, posOf(c, 'two'));
+    await c.comment();
+    let pos = -1;
+    c.view.state.doc.descendants((n, q) => {
+      if (n.type.name === 'critic_comment') pos = q;
+      return true;
+    });
+    // While the dialog is open, text typed before the comment moves it.
+    answer = 'changed';
+    onAsk = (): void => type(c, 'X', 1);
+    await c.editNote(pos);
+    expect(hints).toEqual(['generic']);
+    expect(text(c)).toBe('{++X++}one {>>first<<}two\n');
+    // Positive control: without the move, the note changes.
+    onAsk = (): void => {};
+    let now = -1;
+    c.view.state.doc.descendants((n, q) => {
+      if (n.type.name === 'critic_comment') now = q;
+      return true;
+    });
+    await c.editNote(now);
+    expect(text(c)).toBe('{++X++}one {>>changed<<}two\n');
+  });
+
   it('does not edit a comment already in the text', async () => {
     const { c, hints, asked } = await open('one {==two==}{>>old<<} three\n');
     let pos = -1;
