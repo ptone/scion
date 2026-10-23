@@ -25,7 +25,12 @@ with zero skips; each package left off has a one-line reason in the file.
   `GOOS=windows go list -test -deps <pkg>`.
 - `pkg/util/otlptls`'s test accepts the `%q`-quoted path in error messages
   (a quoted Windows path doubles its backslashes).
-- `pkg/projectfs/migrate` is left off: every file in it is unix-only.
+- Left off after triage on windows-latest, each with its reason in the file:
+  `pkg/projectfs/migrate` (every file is unix-only), `pkg/k8s` (its exec
+  credential plugin test runs a shell script) and `pkg/sciontool/log` (the
+  agent log is not opened on Windows by design).
+- `pkg/util/urlredact`'s source-copy test normalises CRLF before locating its
+  span, so it passes on the CRLF checkout of windows-latest.
 
 ## Gated commands: persistent hooks and completion
 
@@ -65,6 +70,7 @@ with zero skips; each package left off has a one-line reason in the file.
 
 ## Open items
 
-- The Windows job's first run on this list decides the final ON/OFF state of
-  the newly added packages; any that fail get a one-line reason and move to
-  the left-off list.
+- `pkg/plugin/grpcbroker` hit the 10-minute go test timeout once on
+  windows-latest (no test failed and the job log kept no goroutine dump);
+  the next run passed. If it recurs, capture the timeout's goroutine dump
+  (the job prints only the last 200 output lines) before deciding.
