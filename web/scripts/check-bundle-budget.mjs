@@ -34,6 +34,10 @@
  *                         prefix may import statically (a lazily loaded
  *                         chunk stays lazy wherever it is reached from,
  *                         including other lazy chunks);
+ *   - chunkImports:       per chunk file name prefix, the only chunk file
+ *                         name prefixes its chunks may import statically
+ *                         (so a lazy chunk never pulls in an unrelated
+ *                         large one through a shared helper);
  *   - requiredChunks:     chunk file name prefixes that must exist (proves a
  *                         lazy split still happens);
  *   - forbiddenModules:   source modules that must not be in the static
@@ -146,6 +150,23 @@ export function staticImportersOf(manifest, prefix) {
   return out;
 }
 
+/**
+ * Static imports from chunks named `prefix`* of chunks whose file starts
+ * with none of `allowed`.
+ */
+export function importsOutside(manifest, prefix, allowed) {
+  const out = [];
+  for (const chunk of Object.values(manifest)) {
+    if (!chunk.file.startsWith(prefix)) continue;
+    for (const dep of chunk.imports ?? []) {
+      const target = manifest[dep];
+      const file = target ? target.file : dep;
+      if (!allowed.some((a) => file.startsWith(a))) out.push({ from: chunk.file, to: file });
+    }
+  }
+  return out;
+}
+
 function gzipSize(buf) {
   return gzipSync(buf).length;
 }
@@ -242,6 +263,14 @@ export function checkBudget({ manifest, budget, readFile, listFiles, readMapModu
     report.push(`isolated chunk ${prefix}*: ${bad.length} static importer(s) outside it`);
     for (const b of bad)
       failures.push(`${b.from} imports ${b.to} statically (isolated ${prefix}*)`);
+  }
+
+  for (const [prefix, allowed] of Object.entries(budget.chunkImports ?? {})) {
+    if (prefix.startsWith('$')) continue;
+    const bad = importsOutside(manifest, prefix, allowed);
+    report.push(`static imports of ${prefix}*: ${bad.length} outside the allowed list`);
+    for (const b of bad)
+      failures.push(`${b.from} imports ${b.to} statically (not allowed for ${prefix}*)`);
   }
 
   for (const prefix of budget.requiredChunks ?? []) {

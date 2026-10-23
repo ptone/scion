@@ -29,6 +29,7 @@ import {
   findSourceMap,
   forbiddenIn,
   staticImportersOf,
+  importsOutside,
   mapSources,
   staticClosure,
 } from './check-bundle-budget.mjs';
@@ -228,6 +229,40 @@ test('an isolated chunk imported statically from outside fails', () => {
   const { failures } = run({ b });
   assert.ok(failures.length > 0);
   assert.match(failures[0], /imports assets\/lit-1\.js statically \(isolated assets\/lit-\*\)/);
+});
+
+test('importsOutside lists static imports of a prefix outside its allowed list, not dynamic ones', () => {
+  const m = {
+    'src/r.ts': {
+      file: 'assets/review-editor-1.js',
+      imports: ['_review-editor-2.js', '_lit.js'],
+      dynamicImports: ['_xterm.js'],
+    },
+    '_review-editor-2.js': { file: 'assets/review-editor-2.js', imports: ['_xterm.js'] },
+    '_lit.js': { file: 'assets/lit-1.js', imports: ['_xterm.js'] },
+    '_xterm.js': { file: 'assets/xterm-1.js' },
+  };
+  const allowed = ['assets/review-editor-', 'assets/lit-'];
+  assert.deepEqual(importsOutside(m, 'assets/review-editor-', allowed), [
+    { from: 'assets/review-editor-2.js', to: 'assets/xterm-1.js' },
+  ]);
+  m['_review-editor-2.js'].imports = [];
+  assert.deepEqual(importsOutside(m, 'assets/review-editor-', allowed), []);
+});
+
+test('a chunk importing a chunk outside its chunkImports list fails', () => {
+  const ok = run({
+    b: budget({ chunkImports: { 'assets/main': ['assets/lit-', 'assets/shoelace-'] } }),
+  });
+  assert.deepEqual(ok.failures, []);
+  const { failures } = run({
+    b: budget({ chunkImports: { 'assets/main': ['assets/shoelace-'] } }),
+  });
+  assert.equal(failures.length, 1);
+  assert.match(
+    failures[0],
+    /assets\/main\.js imports assets\/lit-1\.js statically \(not allowed for assets\/main\*\)/
+  );
 });
 
 test('a combined chunk limit adds up every chunk of the prefix', () => {

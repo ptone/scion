@@ -209,6 +209,13 @@ export default defineConfig({
                     if (cmChunk) {
                         return cmChunk;
                     }
+                    // Rollup's CommonJS interop helpers, used by packages of
+                    // several lazy chunks (the terminal's and the review
+                    // editor's): their own small chunk, so no lazy chunk loads
+                    // another just for them.
+                    if (id.includes('commonjsHelpers')) {
+                        return 'commonjs-helpers';
+                    }
                     // Key names, used by both CodeMirror and the review editor's
                     // ProseMirror keymaps: its own small chunk, so neither editor
                     // chunk has to load the other.
