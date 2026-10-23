@@ -2390,6 +2390,10 @@ type Server struct {
 	// slug on a request path. See warnEphemeralProjectPath.
 	warnedEphemeralProjects sync.Map
 
+	// storageMigrationNotice caches the dry-run plan of the project storage
+	// migration behind the Files tab notice (workspace_migration_notice.go).
+	storageMigrationNotice storageMigrationNoticeCache
+
 	// GE Google credential exchange service (nil = exchange disabled).
 	geExchangeService *GEExchangeService
 	// GE exchange endpoint rate limiter (per-client-IP token bucket).

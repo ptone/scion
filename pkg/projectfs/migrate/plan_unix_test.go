@@ -65,7 +65,7 @@ func (f *fakeObjects) DeletePrefix(_ context.Context, prefix string) error {
 	return nil
 }
 
-func objectPrefix(id string) string { return "hubs/h1/workspaces/" + id + "/grove-workspace/" }
+func objectPrefix(id string) string { return "hubs/h1/workspaces/" + id + "/project-copy/" }
 
 type hubFixture struct {
 	share, global string

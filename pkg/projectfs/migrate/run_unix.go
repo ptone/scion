@@ -96,11 +96,13 @@ func (h HubReport) Failed() bool {
 	return false
 }
 
-// PendingProjects returns the IDs of projects with something to move.
+// PendingProjects returns the IDs of projects with legacy content left:
+// something to move, or a step that failed (content that could not be
+// moved stays in its legacy tree).
 func (h HubReport) PendingProjects() []string {
 	var ids []string
 	for _, p := range h.Projects {
-		if p.Moves() > 0 {
+		if p.Moves() > 0 || p.Failed() {
 			ids = append(ids, p.ID)
 		}
 	}
