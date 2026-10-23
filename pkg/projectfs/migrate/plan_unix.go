@@ -107,6 +107,9 @@ type ProjectInput struct {
 	// before steps 1 and 2 move anything into it (nil: the mover creates
 	// it).
 	PrepareWorkspace func() error
+	// LockWorkspace runs a rename into the workspace under the project's
+	// provisioning lock (nil: no lock).
+	LockWorkspace func(section func() error) error
 	// ProjectRoot is <subpath_root>/<uuid>; the seed goes to its .scion.
 	// Zero skips step 4.
 	ProjectRoot Tree
@@ -210,9 +213,9 @@ func MigrateProject(ctx context.Context, in ProjectInput, opts Options) ProjectR
 		}
 	}
 	for _, src := range sources {
-		rep.workspace(StepHubProjects, src, in.Workspace, in.PrepareWorkspace, wsOpts)
+		rep.workspace(StepHubProjects, src, in, wsOpts)
 	}
-	rep.workspace(StepLocalProjects, local, in.Workspace, in.PrepareWorkspace, wsOpts)
+	rep.workspace(StepLocalProjects, local, in, wsOpts)
 	if in.SharedDir != nil {
 		rep.sharedDirs(in, sdOpts)
 	}
@@ -316,7 +319,8 @@ func (rep *ProjectReport) seed(ctx context.Context, in ProjectInput, src Tree, o
 }
 
 // workspace is steps 1 and 2 for one legacy workspace source.
-func (rep *ProjectReport) workspace(step Step, src Tree, target *Tree, prepare func() error, opts Options) {
+func (rep *ProjectReport) workspace(step Step, src Tree, in ProjectInput, opts Options) {
+	target := in.Workspace
 	names, ok, err := listDir(src)
 	if err != nil {
 		rep.Results = append(rep.Results, Result{Step: step, Source: src.String(), Outcome: OutcomeFailed, Err: err})
@@ -333,7 +337,15 @@ func (rep *ProjectReport) workspace(step Step, src Tree, target *Tree, prepare f
 		rep.Notes = append(rep.Notes, fmt.Sprintf("%s: the project has no project-scoped workspace; the legacy tree is left in place", src))
 		return
 	}
-	rep.Results = append(rep.Results, Move(Spec{Step: step, Source: src, Target: *target, PrepareTarget: prepare, Normalize: NormalizeWorkspace}, opts))
+	rep.Results = append(rep.Results, Move(Spec{
+		Step:          step,
+		Source:        src,
+		Target:        *target,
+		PrepareTarget: in.PrepareWorkspace,
+		Lock:          in.LockWorkspace,
+		TargetIsLeaf:  true,
+		Normalize:     NormalizeWorkspace,
+	}, opts))
 }
 
 // sharedDirs is step 3: hub-local project-configs/<slug>__<short>/shared-dirs/<name>.

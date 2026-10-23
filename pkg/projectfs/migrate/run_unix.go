@@ -53,6 +53,10 @@ type HubInput struct {
 	// ObjectPrefix is the directory prefix of a project's legacy GCS
 	// workspace copy (M3).
 	ObjectPrefix func(projectID string) string
+	// WorkspaceLock, when set, returns the lock a rename into a project's
+	// workspace runs under: the project's provisioning lock, keyed by the
+	// workspace's host path.
+	WorkspaceLock func(workspaceHostPath string) func(section func() error) error
 	// Tracked overrides GitTracked (tests).
 	Tracked func(ctx context.Context, dir, path string) (bool, error)
 }
@@ -165,6 +169,9 @@ func projectInput(in HubInput, legacy Tree, ref ProjectRef) (ProjectInput, error
 		}
 		pi.Workspace = &Tree{Base: ws.HostBase, Rel: ws.RelPath}
 		pi.PrepareWorkspace = func() error { return ensureLeaf(ws) }
+		if in.WorkspaceLock != nil {
+			pi.LockWorkspace = in.WorkspaceLock(ws.HostPath)
+		}
 	}
 	if in.SharedDirs.Backend.Shared() {
 		layout := in.SharedDirs

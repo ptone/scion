@@ -112,6 +112,25 @@ func (n *normalizer) entry(dir int, name string, st *unix.Stat_t) {
 	}
 }
 
+// leaf gives the directory name in dir the Mount leaf contract
+// (shareddirs.EnsureLeaf's mode 2775 and default ACL). Used for a tree
+// renamed into an absent leaf, which replaces the leaf the owner would
+// have created.
+func (n *normalizer) leaf(dir int, name string) {
+	fd, err := openDirAt(dir, name)
+	if err != nil {
+		n.note(fmt.Errorf("open %s: %w", name, err))
+		return
+	}
+	defer closeFd(fd)
+	if err := shareddirs.ChmodFd(fd, 0o2775); err != nil {
+		n.note(fmt.Errorf("chmod %s: %w", name, err))
+	}
+	if err := shareddirs.SetLeafDefaultACL(fd); err != nil {
+		n.note(fmt.Errorf("ACL %s: %w", name, err))
+	}
+}
+
 // tree normalises a whole renamed tree: the directory name in dir and
 // everything below it, walked with no-follow fds (symlinks are chowned as
 // links, never followed).

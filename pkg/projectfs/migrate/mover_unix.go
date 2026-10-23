@@ -63,12 +63,20 @@ type Spec struct {
 	// (a shared-dir leaf gets its mode and default ACL from EnsureLeaf).
 	NoRename bool
 	// PrepareTarget, when set, creates the target directory (if absent)
-	// before anything is moved: the authority's leaf creation
-	// (projectfs Resolved.Open(create), i.e. shareddirs.EnsureLeaf, mode
-	// 2775 and the default ACL). Never called in a dry run or when the
+	// before a copy: the authority's leaf creation (projectfs
+	// Resolved.Open(create), i.e. shareddirs.EnsureLeaf, mode 2775 and the
+	// default ACL). Never called in a dry run, for a rename, or when the
 	// source has nothing to move. Without it a target the copy needs is
 	// created with the source directory's permission bits.
 	PrepareTarget func() error
+	// Lock, when set, runs the rename section (target re-check and
+	// rename) under the project's provisioning lock, so a concurrent first
+	// agent start cannot create and mount the target in between.
+	Lock func(section func() error) error
+	// TargetIsLeaf: the target is a Mount leaf (mode 2775 and the default
+	// ACL, as shareddirs.EnsureLeaf creates it). A tree renamed into it
+	// gets that contract on its top-level directory.
+	TargetIsLeaf bool
 	// Normalize says how migrated entries are made usable by agents
 	// (owner from Options.Owner; modes by Mount).
 	Normalize Normalize
@@ -241,23 +249,6 @@ func Move(spec Spec, opts Options) Result {
 		res.Outcome = OutcomeNothing
 		return res
 	}
-	// Rename only into a target that did not exist before this move: an
-	// existing directory, even an empty one, may be the source of a
-	// running agent's bind or subPath mount, which a rename onto it would
-	// leave pointing at the replaced, unlinked inode. A target the move
-	// itself creates (PrepareTarget) exists only for this rename.
-	preexisting, err := entryKind(spec.Target)
-	if err != nil {
-		return fail(fmt.Errorf("inspect target: %w", err))
-	}
-	if spec.PrepareTarget != nil && !opts.DryRun {
-		// The target's owner creates it (mode, default ACL), before any
-		// rename or copy; an existing target is left as it is.
-		if err := spec.PrepareTarget(); err != nil {
-			return fail(fmt.Errorf("prepare target: %w", err))
-		}
-	}
-
 	dstParent, dstName, dstParentOK, err := openParent(spec.Target, !opts.DryRun)
 	if err != nil {
 		return fail(fmt.Errorf("open target parent: %w", err))
@@ -265,10 +256,71 @@ func Move(spec Spec, opts Options) Result {
 	if dstParentOK {
 		defer closeFd(dstParent)
 	}
+	targetKind := kindAbsent
+	if dstParentOK {
+		if targetKind, err = kindAt(dstParent, dstName); err != nil {
+			return fail(fmt.Errorf("stat target: %w", err))
+		}
+	}
 
-	// Target state: absent, an empty directory, a directory with content.
+	// Rename only into an ABSENT target. An existing directory, even an
+	// empty one, may be the source of a running agent's bind or subPath
+	// mount, which a rename onto it would leave on the replaced, unlinked
+	// inode; it is copied into instead.
+	if !spec.NoRename && targetKind == kindAbsent && (!dstParentOK || sameDevice(srcFd, dstParent)) {
+		if opts.DryRun {
+			res.Outcome = OutcomeWouldRename
+			return res
+		}
+		renamed := false
+		section := func() error {
+			// Re-checked under the lock: a first agent start may have
+			// created the leaf since.
+			k, err := kindAt(dstParent, dstName)
+			if err != nil || k != kindAbsent {
+				return err
+			}
+			err = renameNoReplaceAt(srcParent, srcName, dstParent, dstName)
+			switch {
+			case err == nil:
+				renamed = true
+				return nil
+			case errors.Is(err, unix.EEXIST), errors.Is(err, unix.ENOTEMPTY), errors.Is(err, unix.EXDEV), errors.Is(err, unix.EBUSY):
+				return nil // copy instead
+			default:
+				return fmt.Errorf("rename source into target: %w", err)
+			}
+		}
+		if spec.Lock != nil {
+			err = spec.Lock(section)
+		} else {
+			err = section()
+		}
+		if err != nil {
+			return fail(err)
+		}
+		if renamed {
+			res.Outcome = OutcomeRenamed
+			n := normalizer{mode: spec.Normalize, owner: opts.Owner, res: &res}
+			if spec.TargetIsLeaf {
+				// The renamed directory replaces the leaf the owner would
+				// have created: give it the leaf's own contract.
+				n.leaf(dstParent, dstName)
+			}
+			n.tree(dstParent, dstName)
+			return res
+		}
+	}
+
+	if spec.PrepareTarget != nil && !opts.DryRun {
+		// The target's owner creates it if absent (mode, default ACL).
+		if err := spec.PrepareTarget(); err != nil {
+			return fail(fmt.Errorf("prepare target: %w", err))
+		}
+	}
+
+	// Target state for the copy: absent (dry run only) or a directory.
 	dstFd := -1
-	targetEmpty := true
 	if dstParentOK {
 		var dstSt unix.Stat_t
 		err := unix.Fstatat(dstParent, dstName, &dstSt, unix.AT_SYMLINK_NOFOLLOW)
@@ -283,30 +335,6 @@ func Move(spec Spec, opts Options) Result {
 				return fail(fmt.Errorf("open target: %w", err))
 			}
 			defer func() { closeFd(dstFd) }()
-			entries, err := readDirNames(dstFd)
-			if err != nil {
-				return fail(fmt.Errorf("read target: %w", err))
-			}
-			targetEmpty = len(entries) == 0
-		}
-	}
-
-	if !spec.NoRename && preexisting == kindAbsent && targetEmpty && (!dstParentOK || sameDevice(srcFd, dstParent)) {
-		if opts.DryRun {
-			res.Outcome = OutcomeWouldRename
-			return res
-		}
-		err := unix.Renameat(srcParent, srcName, dstParent, dstName)
-		if err == nil {
-			res.Outcome = OutcomeRenamed
-			n := normalizer{mode: spec.Normalize, owner: opts.Owner, res: &res}
-			n.tree(dstParent, dstName)
-			return res
-		}
-		// The target filled up, or it is on another device after all:
-		// fall back to the copy, which never overwrites.
-		if !errors.Is(err, unix.ENOTEMPTY) && !errors.Is(err, unix.EEXIST) && !errors.Is(err, unix.EXDEV) && !errors.Is(err, unix.EBUSY) {
-			return fail(fmt.Errorf("rename source into target: %w", err))
 		}
 	}
 
@@ -421,7 +449,7 @@ func moveFile(spec Spec, opts Options, res Result, srcParent int, srcName string
 			return res
 		}
 		n := normalizer{mode: spec.Normalize, owner: opts.Owner, res: &res}
-		err := unix.Renameat(srcParent, srcName, dstParent, dstName)
+		err := renameNoReplaceAt(srcParent, srcName, dstParent, dstName)
 		if err == nil {
 			res.Outcome = OutcomeRenamed
 			n.tree(dstParent, dstName)
@@ -474,7 +502,7 @@ func renameToBackup(srcParent int, srcName string, opts Options) (string, error)
 	if err := unix.Fstatat(srcParent, backup, &st, unix.AT_SYMLINK_NOFOLLOW); err == nil {
 		return "", fmt.Errorf("rename source to %s: already exists", backup)
 	}
-	if err := unix.Renameat(srcParent, srcName, srcParent, backup); err != nil {
+	if err := renameNoReplaceAt(srcParent, srcName, srcParent, backup); err != nil {
 		return "", fmt.Errorf("rename source to %s: %w", backup, err)
 	}
 	return backup, nil
@@ -758,6 +786,21 @@ func openParent(t Tree, create bool) (fd int, name string, ok bool, err error) {
 		cur = next
 	}
 	return cur, name, true, nil
+}
+
+// kindAt reports what name in dir is, without following a symlink.
+func kindAt(dir int, name string) (kind, error) {
+	var st unix.Stat_t
+	if err := unix.Fstatat(dir, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return kindAbsent, nil
+		}
+		return kindAbsent, err
+	}
+	if st.Mode&unix.S_IFMT == unix.S_IFDIR {
+		return kindDir, nil
+	}
+	return kindOther, nil
 }
 
 // openDirAt opens the directory name under dir without following a

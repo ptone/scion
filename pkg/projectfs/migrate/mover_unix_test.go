@@ -164,17 +164,73 @@ func TestMove_CopiesIntoExistingEmptyTarget(t *testing.T) {
 	}
 }
 
-// A target the move creates itself through PrepareTarget is renamed onto.
-func TestMove_RenamesOntoTargetItPrepared(t *testing.T) {
+// A rename runs under Lock, and the renamed top-level directory gets the
+// leaf contract (setgid 2775) when the target is a Mount leaf.
+func TestMove_RenameUnderLockAppliesLeafContract(t *testing.T) {
+	base := t.TempDir()
+	writeTree(t, base, map[string]string{"old/proj/a.txt": "A"})
+	locked := 0
+	s := spec(base, "old/proj", "projects/u1/workspace")
+	s.TargetIsLeaf = true
+	s.Lock = func(section func() error) error { locked++; return section() }
+	s.PrepareTarget = func() error { t.Fatal("PrepareTarget must not run for a rename"); return nil }
+	res := Move(s, opts(false))
+	if res.Outcome != OutcomeRenamed || res.Err != nil || locked != 1 {
+		t.Fatalf("got %s err=%v locked=%d", res.Outcome, res.Err, locked)
+	}
+	if m := mode(t, filepath.Join(base, "projects/u1/workspace")); m.Perm() != 0o775 || m&os.ModeSetgid == 0 {
+		t.Fatalf("renamed leaf mode = %v, want setgid 0775", m)
+	}
+	if m := mode(t, filepath.Join(base, "projects/u1/workspace/a.txt")); m.Perm() != 0o644 {
+		t.Fatalf("workspace file mode changed: %v", m)
+	}
+}
+
+// A target created concurrently before the locked re-check is copied into
+// (its inode survives); the rename does not replace it.
+func TestMove_TargetCreatedBeforeLockedRecheckIsCopiedInto(t *testing.T) {
+	base := t.TempDir()
+	writeTree(t, base, map[string]string{"old/proj/a.txt": "A"})
+	ws := filepath.Join(base, "projects/u1/workspace")
+	var ino uint64
+	s := spec(base, "old/proj", "projects/u1/workspace")
+	s.Lock = func(section func() error) error {
+		if err := os.Mkdir(ws, 0o2775); err != nil {
+			return err
+		}
+		var st syscall.Stat_t
+		if err := syscall.Stat(ws, &st); err != nil {
+			return err
+		}
+		ino = st.Ino
+		return section()
+	}
+	res := Move(s, opts(false))
+	if res.Outcome != OutcomeMerged || res.Err != nil {
+		t.Fatalf("got %s err=%v, want merged", res.Outcome, res.Err)
+	}
+	var st syscall.Stat_t
+	if err := syscall.Stat(ws, &st); err != nil || st.Ino != ino {
+		t.Fatalf("the concurrently created target was replaced (err=%v)", err)
+	}
+	if readFile(t, filepath.Join(ws, "a.txt")) != "A" {
+		t.Fatal("not copied")
+	}
+}
+
+func TestMove_LockFailureLeavesSource(t *testing.T) {
 	base := t.TempDir()
 	writeTree(t, base, map[string]string{"old/proj/a.txt": "A"})
 	s := spec(base, "old/proj", "projects/u1/workspace")
-	s.PrepareTarget = func() error { return os.MkdirAll(filepath.Join(base, "projects/u1/workspace"), 0o2775) }
+	s.Lock = func(func() error) error { return os.ErrDeadlineExceeded }
 	res := Move(s, opts(false))
-	if res.Outcome != OutcomeRenamed || res.Err != nil {
-		t.Fatalf("got %s err=%v, want renamed", res.Outcome, res.Err)
+	if res.Outcome != OutcomeFailed || res.Err == nil {
+		t.Fatalf("got %s err=%v, want failed", res.Outcome, res.Err)
 	}
-	assertAbsent(t, filepath.Join(base, "old/proj"))
+	if readFile(t, filepath.Join(base, "old/proj/a.txt")) != "A" {
+		t.Fatal("source changed")
+	}
+	assertAbsent(t, filepath.Join(base, "projects/u1/workspace"))
 }
 
 // A10: the target is never overwritten; conflicts are reported; missing
