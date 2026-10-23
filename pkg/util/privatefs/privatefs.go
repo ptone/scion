@@ -69,8 +69,10 @@ func ForMode(m fs.FileMode) Protection {
 
 // ErrReparsePoint is returned (wrapped) when a component at or below a
 // Tree's anchor is a symlink, a junction or any other reparse point. On
-// Windows such components are refused, never followed. On unix a
-// symlinked leaf is refused through O_NOFOLLOW.
+// Windows such components are refused, never followed. On unix the
+// leaf opens of Create, OpenPrivate, ReadPrivate and OpenDir refuse a
+// symlink through O_NOFOLLOW (WriteFile follows one; see
+// TreeOptions.FollowLinks).
 var ErrReparsePoint = errors.New("symlink, junction or other reparse point refused inside a private tree")
 
 // ErrNotPrivate is returned (wrapped) by CheckPrivate, CheckNoForeignWriters
@@ -106,11 +108,14 @@ type TreeOptions struct {
 	// for. On Windows every EXISTING directory component below the anchor,
 	// followed or not, must also pass CheckNoForeignWriters on its handle
 	// (ErrNotPrivate otherwise), so nothing is created or written under a
-	// directory another principal could swap entries in. Leaf files are
-	// never followed: Create, OpenPrivate, ReadPrivate, WriteFile, Rename
-	// and Remove still refuse a reparse point at the leaf. On unix it
-	// changes nothing (the unix MkdirAll already follows directory
-	// symlinks, and leaves are opened O_NOFOLLOW).
+	// directory another principal could swap entries in. On Windows leaf
+	// files are never followed: Create, OpenPrivate, ReadPrivate,
+	// WriteFile, Rename and Remove still refuse a reparse point at the
+	// leaf. On unix it changes nothing: the unix MkdirAll already follows
+	// directory symlinks, and leaves keep their unix behaviour (Create,
+	// OpenPrivate and ReadPrivate open them O_NOFOLLOW and refuse a
+	// symlink; WriteFile writes in place with os.WriteFile, which follows
+	// a symlink at the leaf; Rename and Remove act on a symlink itself).
 	//
 	// It exists for ~/.ssh.
 	// ~/.ssh is deliberately NOT a refuse-reparse tree: dotfile managers
