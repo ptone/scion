@@ -16,7 +16,7 @@
 
 /**
  * Block-level source preservation. A Markdown serializer normalizes what it
- * writes (list bullets, table padding, escapes), so re-serializing a whole
+ * writes (list bullets, table padding, backslashes), so re-serializing a whole
  * document after a one-word edit would change text outside the marks.
  * Instead each top-level block keeps the exact source it was loaded from.
  * On save, a block that is still the same node object as at load

@@ -208,7 +208,7 @@ describe('refused edits in suggest mode', () => {
   });
 
   it('an edit whose save would change text outside marks is refused', async () => {
-    // The serializer writes this paragraph differently (escapes), so an
+    // The serializer writes this paragraph differently (backslashes), so an
     // edit in it cannot be saved as a review in this version.
     const md = 'a \\# b * c\n';
     const { c, hints } = await open(md);
