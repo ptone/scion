@@ -122,7 +122,7 @@
 # ./pkg/integration/runtime: links pkg/hub production code; server-side integration runtime, not on a windowsAllowed path.
 # ./pkg/projectfs/migrate: unix-only package (every file is unix-tagged; hub-side project storage migration).
 # ./pkg/k8s: the exec credential plugin test runs a #!/bin/sh script (POSIX-only); the Kubernetes runtime is broker-side.
-# ./pkg/preflight: two settings-profile check tests fail on Windows (not diagnosed; hub-side upgrade preflight, follow-up).
+# ./pkg/preflight: TestProfilesCheck_BeforeViewWithoutRetention reports only dropped_unused_profile (active_profile_fallback missing) and TestProfilesCheck_RealBadSettingsFileNeverQuotesValue reports a warning instead of the undecodable-settings block (hub-side upgrade preflight; follow-up).
 # ./pkg/sciontool/autoexpose: TestReconciler_IPv6OnlyListenerRegisteredAsLoopback skips without /proc/net/tcp6 (in-container tool).
 # ./pkg/sciontool/conduit: the sciontool agent log cannot be opened on Windows (in-container tool), and the IPv6-only loopback fallback fails.
 # ./pkg/sciontool/log: the agent log cannot be opened on Windows by design (openLogFileNoFollow is ErrUnsupported; in-container tool).
