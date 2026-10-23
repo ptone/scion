@@ -38,9 +38,40 @@ const DIRECT = [
   '@milkdown/utils',
 ];
 
-/** Import specifiers the editor may use. */
+/** Milkdown import specifiers the editor may use (the prose subpaths exactly). */
 const ALLOWED_IMPORT =
-  /^@milkdown\/(core|ctx|utils|preset-commonmark|preset-gfm|plugin-history|prose\/[a-z-]+)$/;
+  /^@milkdown\/(core|ctx|utils|preset-commonmark|preset-gfm|plugin-history|prose\/(model|state|view|transform|commands|history|keymap))$/;
+
+/** Packages that come only through Milkdown: never imported by name. */
+const TRANSITIVE = /^(prosemirror-|remark|micromark|mdast-|unified)/;
+
+/** The module specifiers of a source file's imports and re-exports. */
+function importSpecs(text: string): { spec: string; sideEffect: boolean }[] {
+  const re =
+    /(?:^|[\s;])(?:import|export)\s*(?:type\s+)?(?:([\w*{}\s,$]+?)\s*from\s*)?['"]([^'"]+)['"]|import\(\s*['"]([^'"]+)['"]\s*\)/g;
+  return [...text.matchAll(re)].map((m) => ({
+    spec: m[2] ?? m[3],
+    sideEffect: m[2] !== undefined && m[1] === undefined,
+  }));
+}
+
+/**
+ * The problems with the Milkdown-related imports of one source file: a
+ * Milkdown specifier outside ALLOWED_IMPORT, any import of a package that
+ * only comes through Milkdown, a side-effect import of either, or a
+ * Milkdown import outside the editor's folder (inEditor false).
+ */
+function importProblems(text: string, inEditor: boolean): string[] {
+  const out: string[] = [];
+  for (const { spec, sideEffect } of importSpecs(text)) {
+    if (TRANSITIVE.test(spec)) out.push(`transitive package ${spec}`);
+    if (!spec.startsWith('@milkdown/')) continue;
+    if (!ALLOWED_IMPORT.test(spec)) out.push(`not allowed ${spec}`);
+    if (sideEffect) out.push(`side-effect import ${spec}`);
+    if (!inEditor) out.push(`outside the editor ${spec}`);
+  }
+  return out;
+}
 
 const web = join(__dirname, '../../..');
 
@@ -70,29 +101,62 @@ describe('Milkdown dependency', () => {
     expect(names).not.toContain('@milkdown/crepe');
   });
 
-  it('imports only the allowed Milkdown packages', () => {
+  it('finds imports the editor may not use (negative cases)', () => {
+    expect(importProblems("import { EditorView } from '@milkdown/prose/view';", true)).toEqual([]);
+    expect(importProblems("import { x } from '@milkdown/prose/tables';", true)).toEqual([
+      'not allowed @milkdown/prose/tables',
+    ]);
+    expect(importProblems("import { x } from '@milkdown/prose';", true)).toEqual([
+      'not allowed @milkdown/prose',
+    ]);
+    expect(importProblems("import '@milkdown/core';", true)).toEqual([
+      'side-effect import @milkdown/core',
+    ]);
+    expect(importProblems("import 'prosemirror-view/style/prosemirror.css';", true)).toEqual([
+      'transitive package prosemirror-view/style/prosemirror.css',
+    ]);
+    expect(importProblems("import { Node } from 'prosemirror-model';", true)).toEqual([
+      'transitive package prosemirror-model',
+    ]);
+    expect(importProblems("export { a } from 'remark-gfm';", true)).toEqual([
+      'transitive package remark-gfm',
+    ]);
+    expect(importProblems("const u = await import('unified');", true)).toEqual([
+      'transitive package unified',
+    ]);
+    expect(importProblems("import type { Root } from 'mdast-util-x';", true)).toEqual([
+      'transitive package mdast-util-x',
+    ]);
+    expect(importProblems("import { a } from '@milkdown/core';", false)).toEqual([
+      'outside the editor @milkdown/core',
+    ]);
+  });
+
+  it('imports only the allowed Milkdown packages, and nothing that comes through them', () => {
     const files: string[] = [];
     const walk = (dir: string): void => {
       for (const name of readdirSync(dir)) {
         const p = join(dir, name);
         if (statSync(p).isDirectory()) walk(p);
-        else if (p.endsWith('.ts')) files.push(p);
+        else if (/\.(ts|js|mjs)$/.test(p)) files.push(p);
       }
     };
     walk(join(web, 'src'));
-    const seen = new Set<string>();
+    const problems: string[] = [];
+    let mentions = 0;
+    let found = 0;
     for (const f of files) {
+      const rel = relative(web, f);
+      if (rel === 'src/components/artifact-review/dependencies.test.ts') continue;
       const text = readFileSync(f, 'utf-8');
-      for (const m of text.matchAll(/from '(@milkdown\/[^']+)'|import\('(@milkdown\/[^']+)'\)/g)) {
-        const spec = m[1] ?? m[2];
-        seen.add(spec);
-        expect(ALLOWED_IMPORT.test(spec), `${relative(web, f)}: ${spec}`).toBe(true);
-        expect(
-          relative(web, f).startsWith('src/components/artifact-review/'),
-          relative(web, f)
-        ).toBe(true);
-      }
+      // Every quoted Milkdown specifier is found by the import scan.
+      mentions += text.match(/'@milkdown\//g)?.length ?? 0;
+      found += importSpecs(text).filter((x) => x.spec.startsWith('@milkdown/')).length;
+      for (const p of importProblems(text, rel.startsWith('src/components/artifact-review/')))
+        problems.push(`${rel}: ${p}`);
     }
-    expect(seen.size).toBeGreaterThan(0);
+    expect(problems).toEqual([]);
+    expect(found).toBeGreaterThan(0);
+    expect(found).toBe(mentions);
   });
 });
