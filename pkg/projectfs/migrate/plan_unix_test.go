@@ -498,3 +498,87 @@ func TestRun_M3LeavesPerAgentAndSiblingObjects(t *testing.T) {
 		t.Fatal("legacy copy not deleted")
 	}
 }
+
+// Q7: a hub-local tree carrying broker state is copied from, never changed;
+// .scion/agents and shared-dirs are not copied; a re-run moves nothing.
+func TestRun_LocalBrokerTreeIsCopyOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		files    map[string]string
+		provider bool
+	}{
+		{"evidence", map[string]string{
+			"projects/p1/.scion/settings.yaml":    "broker settings",
+			"projects/p1/.scion/project-id":       pid1,
+			"projects/p1/.scion/agents/a1/home/x": "agent state",
+			"projects/p1/notes.txt":               "notes",
+			"projects/p1/shared-dirs/s/f":         "old shared",
+		}, false},
+		{"provider", map[string]string{
+			"projects/p1/.scion/settings.yaml": "broker settings",
+			"projects/p1/notes.txt":            "notes",
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newHubFixture(t)
+			writeTree(t, f.global, tc.files)
+			local := filepath.Join(f.global, "projects/p1")
+			before := snapshot(t, local)
+			in := f.input(ProjectRef{ID: pid1, Slug: "p1", LocalBrokerTree: tc.provider})
+
+			dry, err := Run(context.Background(), in, opts(true))
+			if err != nil || dry.Moves() == 0 {
+				t.Fatalf("dry run: err=%v moves=%d", err, dry.Moves())
+			}
+			rep, err := Run(context.Background(), in, opts(false))
+			if err != nil || rep.Failed() {
+				var b bytes.Buffer
+				rep.WriteLog(&b)
+				t.Fatalf("err=%v\n%s", err, b.String())
+			}
+			if got := snapshot(t, local); !reflect.DeepEqual(got, before) {
+				t.Fatalf("the broker's tree changed:\nbefore %v\nafter  %v", before, got)
+			}
+			root := filepath.Join(f.share, "projects", pid1)
+			if readFile(t, filepath.Join(root, "workspace/notes.txt")) != "notes" {
+				t.Fatal("content not copied")
+			}
+			if readFile(t, filepath.Join(root, ".scion/settings.yaml")) != "broker settings" {
+				t.Fatal("seed not copied")
+			}
+			assertAbsent(t, filepath.Join(root, ".scion/agents"))
+			assertAbsent(t, filepath.Join(root, "workspace/shared-dirs"))
+			assertAbsent(t, filepath.Join(root, "workspace/.scion"))
+			again, err := Run(context.Background(), in, opts(false))
+			if err != nil || again.Moves() != 0 || again.Failed() {
+				t.Fatalf("re-run: err=%v moves=%d failed=%t", err, again.Moves(), again.Failed())
+			}
+		})
+	}
+}
+
+// Precondition: with a local workspace Layout the workspace steps do not
+// run; a shared shared-dir Layout still gets step 3.
+func TestRun_LocalWorkspaceSharedDirsOnly(t *testing.T) {
+	f := newHubFixture(t)
+	writeTree(t, f.global, map[string]string{
+		"projects/p1/a.txt": "A",
+		"project-configs/p1__0f8fad5b/shared-dirs/scratchpad/f.txt": "scratch",
+	})
+	in := f.input(ProjectRef{ID: pid1, Slug: "p1"})
+	in.Workspace = projectfs.Layout{Backend: projectfs.BackendLocal, HostBase: f.global}
+	rep, err := Run(context.Background(), in, opts(false))
+	if err != nil || rep.Failed() || rep.Skipped != "" {
+		t.Fatalf("err=%v failed=%t skipped=%q", err, rep.Failed(), rep.Skipped)
+	}
+	if readFile(t, filepath.Join(f.share, "projects", pid1, "shared-dirs/scratchpad/f.txt")) != "scratch" {
+		t.Fatal("step 3 did not run")
+	}
+	if readFile(t, filepath.Join(f.global, "projects/p1/a.txt")) != "A" {
+		t.Fatal("a workspace step ran on a local workspace Layout")
+	}
+	assertAbsent(t, filepath.Join(f.share, "projects", pid1, "workspace"))
+	if len(rep.Projects[0].Notes) == 0 || !strings.Contains(rep.Projects[0].Notes[0], "not shared") {
+		t.Fatalf("notes = %v", rep.Projects[0].Notes)
+	}
+}

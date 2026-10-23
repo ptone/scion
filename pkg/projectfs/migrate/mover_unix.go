@@ -77,6 +77,14 @@ type Spec struct {
 	// ACL, as shareddirs.EnsureLeaf creates it). A tree renamed into it
 	// gets that contract on its top-level directory.
 	TargetIsLeaf bool
+	// CopyOnly copies the files the target lacks and changes nothing in the
+	// source: no rename into the target, no .migrated copy. For a source
+	// that is still another component's live tree (a co-located broker's
+	// ~/.scion/projects/<slug>). Such a Spec "moves" only when it copies.
+	CopyOnly bool
+	// Exclude lists source paths (relative to Source, slash-separated)
+	// that are not copied (copy path only).
+	Exclude []string
 	// Normalize says how migrated entries are made usable by agents
 	// (owner from Options.Owner; modes by Mount).
 	Normalize Normalize
@@ -117,9 +125,14 @@ const (
 	// OutcomeMerged: files missing from the target were copied in, and the
 	// source was renamed to <name>.migrated-<ts>.
 	OutcomeMerged Outcome = "merged"
-	// OutcomeWouldRename and OutcomeWouldMerge are the dry-run forms.
+	// OutcomeCopied: a CopyOnly Spec copied what the target lacked; the
+	// source is unchanged.
+	OutcomeCopied Outcome = "copied"
+	// OutcomeWouldRename, OutcomeWouldMerge and OutcomeWouldCopy are the
+	// dry-run forms.
 	OutcomeWouldRename Outcome = "would-rename"
 	OutcomeWouldMerge  Outcome = "would-merge"
+	OutcomeWouldCopy   Outcome = "would-copy"
 	// OutcomeFailed: the move stopped with Err; the source is left in place.
 	OutcomeFailed Outcome = "failed"
 )
@@ -167,6 +180,13 @@ func (r Result) Moved() bool {
 	switch r.Outcome {
 	case OutcomeRenamed, OutcomeMerged, OutcomeWouldRename, OutcomeWouldMerge:
 		return true
+	case OutcomeCopied, OutcomeWouldCopy:
+		return r.Copied > 0
+	}
+	for _, e := range r.Entries {
+		if e.Moved() {
+			return true
+		}
 	}
 	return false
 }
@@ -267,7 +287,7 @@ func Move(spec Spec, opts Options) Result {
 	// empty one, may be the source of a running agent's bind or subPath
 	// mount, which a rename onto it would leave on the replaced, unlinked
 	// inode; it is copied into instead.
-	if !spec.NoRename && targetKind == kindAbsent && (!dstParentOK || sameDevice(srcFd, dstParent)) {
+	if !spec.NoRename && !spec.CopyOnly && targetKind == kindAbsent && (!dstParentOK || sameDevice(srcFd, dstParent)) {
 		if opts.DryRun {
 			res.Outcome = OutcomeWouldRename
 			return res
@@ -349,10 +369,17 @@ func Move(spec Spec, opts Options) Result {
 		}
 	}
 
-	m := merger{dryRun: opts.DryRun, res: &res, norm: n}
+	m := merger{dryRun: opts.DryRun, res: &res, norm: n, exclude: excludeSet(spec.Exclude)}
 	m.mergeDir(srcFd, dstFd, "", 0)
 	if len(m.errs) > 0 {
 		return fail(fmt.Errorf("copy into target: %d error(s), first: %w", len(m.errs), m.errs[0]))
+	}
+	if spec.CopyOnly {
+		res.Outcome = OutcomeCopied
+		if opts.DryRun {
+			res.Outcome = OutcomeWouldCopy
+		}
+		return res
 	}
 	if opts.DryRun {
 		res.Outcome = OutcomeWouldMerge
@@ -381,6 +408,7 @@ func moveEntries(spec Spec, opts Options, res Result) Result {
 			Source:    Tree{Base: spec.Source.Base, Rel: filepath.Join(spec.Source.Rel, name)},
 			Target:    Tree{Base: spec.Target.Base, Rel: filepath.Join(spec.Target.Rel, name)},
 			Normalize: spec.Normalize,
+			CopyOnly:  spec.CopyOnly,
 		}
 		r := Move(sub, opts)
 		res.Entries = append(res.Entries, r)
@@ -437,6 +465,31 @@ func moveFile(spec Spec, opts Options, res Result, srcParent int, srcName string
 				res.Conflicts = append(res.Conflicts, ".")
 			}
 		}
+	}
+	if spec.CopyOnly {
+		res.Outcome = OutcomeCopied
+		if opts.DryRun {
+			res.Outcome = OutcomeWouldCopy
+		}
+		if exists {
+			return res
+		}
+		if opts.DryRun {
+			res.Copied++
+			return res
+		}
+		conflict, err := copyFile(srcParent, srcName, dstParent, dstName, srcSt)
+		if err != nil {
+			return fail(err)
+		}
+		if conflict {
+			res.Conflicts = append(res.Conflicts, ".")
+		} else {
+			res.Copied++
+			n := normalizer{mode: spec.Normalize, owner: opts.Owner, res: &res}
+			n.entry(dstParent, dstName, srcSt)
+		}
+		return res
 	}
 	if !exists {
 		if opts.DryRun {
@@ -510,10 +563,19 @@ func renameToBackup(srcParent int, srcName string, opts Options) (string, error)
 
 // merger copies a source tree into a target without overwriting.
 type merger struct {
-	dryRun bool
-	res    *Result
-	norm   *normalizer
-	errs   []error
+	dryRun  bool
+	res     *Result
+	norm    *normalizer
+	exclude map[string]bool
+	errs    []error
+}
+
+func excludeSet(paths []string) map[string]bool {
+	set := map[string]bool{}
+	for _, p := range paths {
+		set[filepath.Clean(filepath.FromSlash(p))] = true
+	}
+	return set
 }
 
 // mergeDir copies src's entries into dst. dst is -1 when the target
@@ -526,6 +588,9 @@ func (m *merger) mergeDir(src, dst int, rel string, depth int) {
 	}
 	for _, name := range names {
 		p := filepath.Join(rel, name)
+		if m.exclude[p] {
+			continue
+		}
 		var st unix.Stat_t
 		if err := unix.Fstatat(src, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 			if errors.Is(err, unix.ENOENT) {

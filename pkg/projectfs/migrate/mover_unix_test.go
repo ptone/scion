@@ -618,3 +618,30 @@ func TestMove_BackupNameTaken(t *testing.T) {
 		t.Fatal("source must stay in place when it cannot be renamed aside")
 	}
 }
+
+func TestMove_CopyOnlyLeavesSourceAndHonoursExclude(t *testing.T) {
+	base := t.TempDir()
+	writeTree(t, base, map[string]string{"src/a.txt": "A", "src/skip/x": "x", "src/keep/y": "y"})
+	snap := snapshot(t, filepath.Join(base, "src"))
+	s := Spec{Step: StepLocalProjects, Source: Tree{Base: base, Rel: "src"}, Target: Tree{Base: base, Rel: "dst"}, CopyOnly: true, Exclude: []string{"skip"}}
+	dry := Move(s, opts(true))
+	if dry.Outcome != OutcomeWouldCopy || dry.Copied != 2 || !dry.Moved() {
+		t.Fatalf("dry: %s copied=%d", dry.Outcome, dry.Copied)
+	}
+	assertAbsent(t, filepath.Join(base, "dst"))
+	res := Move(s, opts(false))
+	if res.Outcome != OutcomeCopied || res.Copied != 2 || res.Err != nil {
+		t.Fatalf("got %s copied=%d err=%v", res.Outcome, res.Copied, res.Err)
+	}
+	if got := snapshot(t, filepath.Join(base, "src")); !reflect.DeepEqual(got, snap) {
+		t.Fatal("copy-only changed the source")
+	}
+	assertAbsent(t, filepath.Join(base, "dst/skip"))
+	if readFile(t, filepath.Join(base, "dst/keep/y")) != "y" {
+		t.Fatal("not copied")
+	}
+	again := Move(s, opts(false))
+	if again.Moved() || again.Identical != 2 {
+		t.Fatalf("re-run: %s copied=%d identical=%d", again.Outcome, again.Copied, again.Identical)
+	}
+}

@@ -31,6 +31,10 @@ import (
 type ProjectRef struct {
 	ID   string
 	Slug string
+	// LocalBrokerTree: a co-located broker serves this project from the
+	// hub-local ~/.scion/projects/<slug> (the per-project provider check);
+	// steps 2 and 4 only copy from that tree.
+	LocalBrokerTree bool
 	// NoWorkspace: the hub manages no project-scoped workspace for the
 	// project (empty-per-agent, or a linked project in a per-agent git
 	// mode). Steps 1 and 2 then leave legacy content in place, reported.
@@ -115,13 +119,17 @@ func (h HubReport) PendingProjects() []string {
 // closed with an error.
 func Run(ctx context.Context, in HubInput, opts Options) (HubReport, error) {
 	rep := HubReport{DryRun: opts.DryRun}
-	if !in.Workspace.Backend.Shared() {
-		rep.Skipped = fmt.Sprintf("workspace backend %q is not shared; nothing to migrate", in.Workspace.Backend)
+	wsShared, sdShared := in.Workspace.Backend.Shared(), in.SharedDirs.Backend.Shared()
+	if !wsShared && !sdShared {
+		rep.Skipped = fmt.Sprintf("workspace backend %q and shared-dir backend %q are not shared; nothing to migrate", in.Workspace.Backend, in.SharedDirs.Backend)
 		return rep, nil
 	}
-	legacy, err := LegacyHubProjectsRoot(in.Workspace)
-	if err != nil {
-		return rep, err
+	var legacy Tree
+	if wsShared {
+		var err error
+		if legacy, err = LegacyHubProjectsRoot(in.Workspace); err != nil {
+			return rep, err
+		}
 	}
 	if in.GlobalDir == "" {
 		return rep, errors.New("global dir is required")
@@ -148,21 +156,28 @@ func Run(ctx context.Context, in HubInput, opts Options) (HubReport, error) {
 
 // projectInput derives one project's targets from the layout authority.
 func projectInput(in HubInput, legacy Tree, ref ProjectRef) (ProjectInput, error) {
-	root, err := in.Workspace.ProjectRoot(ref.ID)
-	if err != nil {
-		return ProjectInput{}, fmt.Errorf("resolve project root: %w", err)
-	}
 	pi := ProjectInput{
-		ID:          ref.ID,
-		Slug:        ref.Slug,
-		ProjectRoot: Tree{Base: root.HostBase, Rel: root.RelPath},
-		HubProjects: legacy,
-		GlobalDir:   in.GlobalDir,
-		Tracked:     in.Tracked,
+		ID:            ref.ID,
+		Slug:          ref.Slug,
+		HubProjects:   legacy,
+		GlobalDir:     in.GlobalDir,
+		Tracked:       in.Tracked,
+		LocalCopyOnly: ref.LocalBrokerTree,
 	}
 	pi.WorkspaceOwner = layoutOwner(in.Workspace)
 	pi.SharedDirOwner = layoutOwner(in.SharedDirs)
-	if !ref.NoWorkspace {
+	if !in.Workspace.Backend.Shared() {
+		// Precondition (fs-cleanup-arch Q7): the workspace steps act only
+		// when the workspace Layout is shared.
+		pi.SkipWorkspace = true
+	} else {
+		root, err := in.Workspace.ProjectRoot(ref.ID)
+		if err != nil {
+			return ProjectInput{}, fmt.Errorf("resolve project root: %w", err)
+		}
+		pi.ProjectRoot = Tree{Base: root.HostBase, Rel: root.RelPath}
+	}
+	if !ref.NoWorkspace && !pi.SkipWorkspace {
 		// The project-scoped workspace Mount, as the hub's Files tab
 		// resolves it (projectWorkspaceResolved).
 		ws, err := in.Workspace.Resolve(projectfs.Project{ID: ref.ID, Slug: ref.Slug}, "", projectfs.WorkspaceMount(projectfs.ModeSharedPlain, ""))

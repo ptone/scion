@@ -271,3 +271,30 @@ func TestWorkspaceMigrationNotice_RecomputedAfterRun(t *testing.T) {
 		return f.srv.workspaceMigrationNotice(context.Background(), f.project) != nil
 	}, 300*time.Millisecond, 20*time.Millisecond)
 }
+
+// Q7: a hub-local project tree with broker state is only copied from.
+func TestProjectStorageMigrate_LocalBrokerTreeUntouched(t *testing.T) {
+	f := newStorageMigrateFixture(t)
+	share := f.useNFS(t)
+	g := f.globalDir(t)
+	local := filepath.Join(g, "projects", f.project.Slug)
+	writeFiles(t, local, map[string]string{
+		".scion/settings.yaml":    "broker settings",
+		".scion/agents/a1/home/x": "agent",
+		"notes.txt":               "notes",
+	})
+	log, err := runStorageMigrate(t, f.srv, false)
+	require.NoError(t, err, log)
+	got, err := os.ReadFile(filepath.Join(share, "projects", f.project.ID, "workspace/notes.txt"))
+	require.NoError(t, err, log)
+	assert.Equal(t, "notes", string(got))
+	for _, p := range []string{".scion/settings.yaml", ".scion/agents/a1/home/x", "notes.txt"} {
+		_, err := os.Stat(filepath.Join(local, p))
+		assert.NoError(t, err, "the broker's %s must stay", p)
+	}
+	_, err = os.Stat(filepath.Join(share, "projects", f.project.ID, ".scion/agents"))
+	assert.True(t, os.IsNotExist(err), "broker agent state must not be copied")
+	log, err = runStorageMigrate(t, f.srv, false)
+	require.NoError(t, err, log)
+	assert.Contains(t, log, "moves=0")
+}

@@ -124,6 +124,16 @@ type ProjectInput struct {
 	// Tracked reports whether path (relative to the checkout at dir) is
 	// tracked by git. Nil uses GitTracked.
 	Tracked func(ctx context.Context, dir, path string) (bool, error)
+	// LocalCopyOnly: a co-located broker serves the project from the
+	// hub-local ~/.scion/projects/<slug> (the per-project provider check).
+	// Steps 2 and 4 then copy from it and change nothing in it, leaving
+	// .scion/agents and shared-dirs out (fs-cleanup-arch Q7). The same
+	// applies, without a provider, when the tree itself carries broker
+	// state (localTreeUsedByBroker).
+	LocalCopyOnly bool
+	// SkipWorkspace: the workspace Layout is not shared, so steps 1, 2 and
+	// 4 do not apply (only step 3 runs); reported per project.
+	SkipWorkspace bool
 	// WorkspaceOwner and SharedDirOwner are the uid:gid migrated entries
 	// are chowned to, under the workspace/.scion and under shared dirs
 	// (nil: owners are kept).
@@ -184,6 +194,36 @@ func (p ProjectReport) Failed() bool {
 // the hub connection) and the project-id marker.
 var seedEntries = []string{"settings.yaml", projectkeys.ProjectIDFile}
 
+// localTreeUsedByBroker reports whether the hub-local project tree carries
+// state a broker created (fs-cleanup-arch Q7: conservative; a needless
+// copy-only leaves a tree behind, a wrong rename breaks a broker). The hub
+// itself only ever wrote .scion/settings.yaml there, so a .scion that is a
+// marker file, or holds anything else (agents/, project-id, templates,
+// markers), counts as broker state.
+func localTreeUsedByBroker(local Tree) (bool, error) {
+	scion := Tree{Base: local.Base, Rel: filepath.Join(local.Rel, ".scion")}
+	k, err := entryKind(scion)
+	if err != nil {
+		return false, err
+	}
+	switch k {
+	case kindAbsent:
+		return false, nil
+	case kindOther:
+		return true, nil
+	}
+	names, _, err := listDir(scion)
+	if err != nil {
+		return false, err
+	}
+	for _, n := range names {
+		if n != "settings.yaml" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // infraEntries are the entries a legacy workspace may hold that are not
 // workspace content (the retired probe's rule): a source with nothing else
 // has nothing to move into workspace/.
@@ -207,15 +247,32 @@ func MigrateProject(ctx context.Context, in ProjectInput, opts Options) ProjectR
 	wsOpts.Owner, sdOpts.Owner = in.WorkspaceOwner, in.SharedDirOwner
 	// Step 4 first: otherwise the workspace rename carries the hub seed
 	// into workspace/, where it would pose as a repository tier.
-	if in.ProjectRoot.Base != "" {
-		for _, src := range append(append([]Tree{}, sources...), local) {
-			rep.seed(ctx, in, src, wsOpts)
+	if in.SkipWorkspace {
+		rep.Notes = append(rep.Notes, "the workspace storage is not shared; workspace and seed steps (1, 2, 4) skipped")
+	} else {
+		localCopyOnly := in.LocalCopyOnly
+		if !localCopyOnly {
+			used, err := localTreeUsedByBroker(local)
+			if err != nil {
+				rep.Results = append(rep.Results, Result{Step: StepLocalProjects, Source: local.String(), Outcome: OutcomeFailed, Err: fmt.Errorf("inspect local tree: %w", err)})
+				return rep
+			}
+			localCopyOnly = used
 		}
+		if k, _ := entryKind(local); localCopyOnly && k == kindDir {
+			rep.Notes = append(rep.Notes, fmt.Sprintf("%s: a broker uses this tree; its content and seed are copied, the tree is left in place", local))
+		}
+		if in.ProjectRoot.Base != "" {
+			for _, src := range sources {
+				rep.seed(ctx, in, src, false, wsOpts)
+			}
+			rep.seed(ctx, in, local, localCopyOnly, wsOpts)
+		}
+		for _, src := range sources {
+			rep.workspace(StepHubProjects, src, in, false, wsOpts)
+		}
+		rep.workspace(StepLocalProjects, local, in, localCopyOnly, wsOpts)
 	}
-	for _, src := range sources {
-		rep.workspace(StepHubProjects, src, in, wsOpts)
-	}
-	rep.workspace(StepLocalProjects, local, in, wsOpts)
 	if in.SharedDir != nil {
 		rep.sharedDirs(in, sdOpts)
 	}
@@ -254,10 +311,13 @@ func validateInput(in ProjectInput) error {
 }
 
 // seed is step 4 for one legacy workspace source.
-func (rep *ProjectReport) seed(ctx context.Context, in ProjectInput, src Tree, opts Options) {
+func (rep *ProjectReport) seed(ctx context.Context, in ProjectInput, src Tree, copyOnly bool, opts Options) {
 	scion := Tree{Base: src.Base, Rel: filepath.Join(src.Rel, ".scion")}
 	target := Tree{Base: in.ProjectRoot.Base, Rel: filepath.Join(in.ProjectRoot.Rel, ".scion")}
-	spec := Spec{Step: StepSeed, Source: scion, Target: target, Normalize: NormalizeWorkspace}
+	spec := Spec{Step: StepSeed, Source: scion, Target: target, Normalize: NormalizeWorkspace, CopyOnly: copyOnly}
+	if copyOnly {
+		spec.Exclude = []string{"agents"} // the broker's per-agent state
+	}
 
 	gitKind, err := entryKind(Tree{Base: src.Base, Rel: filepath.Join(src.Rel, ".git")})
 	if err != nil {
@@ -319,7 +379,7 @@ func (rep *ProjectReport) seed(ctx context.Context, in ProjectInput, src Tree, o
 }
 
 // workspace is steps 1 and 2 for one legacy workspace source.
-func (rep *ProjectReport) workspace(step Step, src Tree, in ProjectInput, opts Options) {
+func (rep *ProjectReport) workspace(step Step, src Tree, in ProjectInput, copyOnly bool, opts Options) {
 	target := in.Workspace
 	names, ok, err := listDir(src)
 	if err != nil {
@@ -337,7 +397,7 @@ func (rep *ProjectReport) workspace(step Step, src Tree, in ProjectInput, opts O
 		rep.Notes = append(rep.Notes, fmt.Sprintf("%s: the project has no project-scoped workspace; the legacy tree is left in place", src))
 		return
 	}
-	rep.Results = append(rep.Results, Move(Spec{
+	spec := Spec{
 		Step:          step,
 		Source:        src,
 		Target:        *target,
@@ -345,7 +405,12 @@ func (rep *ProjectReport) workspace(step Step, src Tree, in ProjectInput, opts O
 		Lock:          in.LockWorkspace,
 		TargetIsLeaf:  true,
 		Normalize:     NormalizeWorkspace,
-	}, opts))
+	}
+	if copyOnly {
+		spec.CopyOnly = true
+		spec.Exclude = []string{".scion", "shared-dirs"}
+	}
+	rep.Results = append(rep.Results, Move(spec, opts))
 }
 
 // sharedDirs is step 3: hub-local project-configs/<slug>__<short>/shared-dirs/<name>.

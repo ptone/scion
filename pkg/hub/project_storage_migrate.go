@@ -74,15 +74,14 @@ func (s *Server) projectStorageMigrateInput(ctx context.Context, withObjects boo
 	if err != nil {
 		return migrate.HubInput{}, fmt.Errorf("workspace storage: %w", err)
 	}
-	in := migrate.HubInput{Workspace: wsLayout}
-	if !wsLayout.Backend.Shared() {
-		return in, nil // migrate.Run reports the no-op
-	}
 	sdLayout, _, err := s.sharedDirLayout()
 	if err != nil {
 		return migrate.HubInput{}, fmt.Errorf("shared dir storage: %w", err)
 	}
-	in.SharedDirs = sdLayout
+	in := migrate.HubInput{Workspace: wsLayout, SharedDirs: sdLayout}
+	if !wsLayout.Backend.Shared() && !sdLayout.Backend.Shared() {
+		return in, nil // migrate.Run reports the no-op
+	}
 	if in.GlobalDir, err = config.GetGlobalDir(); err != nil {
 		return migrate.HubInput{}, fmt.Errorf("global dir: %w", err)
 	}
@@ -116,7 +115,10 @@ func (s *Server) storageMigrateProjects(ctx context.Context) ([]migrate.ProjectR
 			return nil, fmt.Errorf("list projects: %w", err)
 		}
 		for i := range page.Items {
-			refs = append(refs, storageMigrateProjectRef(&page.Items[i]))
+			p := &page.Items[i]
+			ref := storageMigrateProjectRef(p)
+			ref.LocalBrokerTree = s.localTreeServedByEmbeddedBroker(ctx, p)
+			refs = append(refs, ref)
 		}
 		if page.NextCursor == "" || page.NextCursor == cursor {
 			return refs, nil
@@ -135,6 +137,22 @@ func storageMigrateProjectRef(p *store.Project) migrate.ProjectRef {
 		Slug:        p.Slug,
 		NoWorkspace: p.IsEmptyPerAgent() || (p.GitRemote != "" && !p.IsSharedWorkspace()),
 	}
+}
+
+// localTreeServedByEmbeddedBroker reports whether this process's embedded
+// broker serves project from ~/.scion/projects/<slug>, the hub-local tree
+// M2 steps 2 and 4 read (fs-cleanup-arch Q7). Such a tree is only copied
+// from. A provider lookup that fails counts as served: a needless copy-only
+// leaves a tree behind, a wrong rename breaks a broker.
+func (s *Server) localTreeServedByEmbeddedBroker(ctx context.Context, project *store.Project) bool {
+	if !s.hasEmbeddedBroker() {
+		return false
+	}
+	providers, err := s.store.GetProjectProviders(ctx, project.ID)
+	if err != nil {
+		return true
+	}
+	return s.embeddedBrokerUsesSlugProjectDir(project, providers)
 }
 
 // storageObjects adapts storage.Storage to migrate.ObjectStore.
