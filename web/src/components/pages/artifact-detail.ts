@@ -1125,7 +1125,7 @@ export class ScionPageArtifactDetail extends LitElement {
   /**
    * Takes the graphical editor's current text into reviewText. Returns
    * false (and shows the hint) when the editor cannot write its document,
-   * so the caller stops instead of using older text.
+   * so the caller stops and leaves the older text unused.
    */
   private takeGraphicalText(): boolean {
     const ed = this.graphicalEditor;
@@ -2201,6 +2201,9 @@ export class ScionPageArtifactDetail extends LitElement {
                   <span
                     class="track-wrap"
                     tabindex="0"
+                    role="switch"
+                    aria-checked="true"
+                    aria-disabled="true"
                     aria-label="Track changes: on. A review records every edit as a suggestion."
                   >
                     <sl-switch size="small" checked disabled class="track" aria-hidden="true">

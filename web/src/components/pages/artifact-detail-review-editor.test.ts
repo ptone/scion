@@ -213,6 +213,13 @@ describe('artifact page: graphical review editor experiment', () => {
     const track = $(el, 'sl-switch.track')!;
     expect(track.hasAttribute('checked')).toBe(true);
     expect(track.hasAttribute('disabled')).toBe(true);
+    // The focusable wrapper names the locked switch for keyboard users.
+    const wrap = $(el, '.track-wrap')!;
+    expect(wrap.getAttribute('tabindex')).toBe('0');
+    expect(wrap.getAttribute('role')).toBe('switch');
+    expect(wrap.getAttribute('aria-checked')).toBe('true');
+    expect(wrap.getAttribute('aria-disabled')).toBe('true');
+    expect(wrap.getAttribute('aria-label')).toContain('Track changes: on.');
     expect($(el, '.edit-bar')!.textContent).toContain('Your edits are recorded as suggestions.');
     // Phase 1 shows no tray, accept, reject or mark navigation controls.
     for (const label of ['Reject', 'Accept', 'Withdraw']) {
