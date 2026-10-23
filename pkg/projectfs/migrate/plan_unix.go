@@ -67,7 +67,7 @@ var ProjectSteps = []Step{StepSeed, StepHubProjects, StepLocalProjects, StepShar
 // not durable or has no absolute HostBase (an empty volume name,
 // ptone/scion#1073), rather than falling back to any other root.
 func LegacyHubProjectsRoot(l projectfs.Layout) (Tree, error) {
-	if !l.Backend.Durable() {
+	if !l.Backend.Shared() {
 		return Tree{}, fmt.Errorf("backend %q is not a shared backend; nothing to migrate", l.Backend)
 	}
 	if l.HostBase == "" || !filepath.IsAbs(l.HostBase) {

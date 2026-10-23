@@ -31,8 +31,10 @@ import (
 type ProjectRef struct {
 	ID   string
 	Slug string
-	// Mode is the workspace sharing mode; empty means shared-plain.
-	Mode projectfs.Mode
+	// NoWorkspace: the hub manages no project-scoped workspace for the
+	// project (empty-per-agent, or a linked project in a per-agent git
+	// mode). Steps 1 and 2 then leave legacy content in place, reported.
+	NoWorkspace bool
 }
 
 // HubInput is one hub's M2/M3 run.
@@ -107,7 +109,7 @@ func (h HubReport) PendingProjects() []string {
 // closed with an error.
 func Run(ctx context.Context, in HubInput, opts Options) (HubReport, error) {
 	rep := HubReport{DryRun: opts.DryRun}
-	if !in.Workspace.Backend.Durable() {
+	if !in.Workspace.Backend.Shared() {
 		rep.Skipped = fmt.Sprintf("workspace backend %q is not shared; nothing to migrate", in.Workspace.Backend)
 		return rep, nil
 	}
@@ -154,19 +156,17 @@ func projectInput(in HubInput, legacy Tree, ref ProjectRef) (ProjectInput, error
 	}
 	pi.WorkspaceOwner = layoutOwner(in.Workspace)
 	pi.SharedDirOwner = layoutOwner(in.SharedDirs)
-	mode := ref.Mode
-	if mode == "" {
-		mode = projectfs.ModeSharedPlain
-	}
-	if mode != projectfs.ModeEmptyPerAgent {
-		ws, err := in.Workspace.Resolve(projectfs.Project{ID: ref.ID, Slug: ref.Slug}, "", projectfs.WorkspaceMount(mode, ""))
+	if !ref.NoWorkspace {
+		// The project-scoped workspace Mount, as the hub's Files tab
+		// resolves it (projectWorkspaceResolved).
+		ws, err := in.Workspace.Resolve(projectfs.Project{ID: ref.ID, Slug: ref.Slug}, "", projectfs.WorkspaceMount(projectfs.ModeSharedPlain, ""))
 		if err != nil {
 			return ProjectInput{}, fmt.Errorf("resolve workspace: %w", err)
 		}
 		pi.Workspace = &Tree{Base: ws.HostBase, Rel: ws.RelPath}
 		pi.PrepareWorkspace = func() error { return ensureLeaf(ws) }
 	}
-	if in.SharedDirs.Backend.Durable() {
+	if in.SharedDirs.Backend.Shared() {
 		layout := in.SharedDirs
 		pi.SharedDir = func(name string) (SharedDirTarget, error) {
 			r, err := layout.Resolve(projectfs.Project{ID: ref.ID, Slug: ref.Slug}, "", projectfs.SharedDirMount(api.SharedDir{Name: name}, ""))

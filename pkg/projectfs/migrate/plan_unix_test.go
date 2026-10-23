@@ -102,6 +102,20 @@ func TestLegacyHubProjectsRoot(t *testing.T) {
 	if want := (Tree{Base: "/mnt/nfs/hub1", Rel: legacyHubProjectsDir}); got != want {
 		t.Fatalf("nfs: got %+v, want %+v", got, want)
 	}
+	// The volume backends wrote <mnt>/<volume>/<subpath_root>/hub-projects.
+	for _, b := range []projectfs.Backend{projectfs.BackendCloudRunVolume, projectfs.BackendGKESharedVolume} {
+		got, err := LegacyHubProjectsRoot(projectfs.Layout{Backend: b, HostBase: "/mnt/vol", SubPathRoot: "tier/projects"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := (Tree{Base: "/mnt/vol", Rel: "tier/projects/" + legacyHubProjectsDir}); got != want {
+			t.Fatalf("%s: got %+v, want %+v", b, got, want)
+		}
+		got, err = LegacyHubProjectsRoot(projectfs.Layout{Backend: b, HostBase: "/mnt/vol"})
+		if err != nil || got.Rel != "projects/"+legacyHubProjectsDir {
+			t.Fatalf("%s default subpath_root: got %+v err=%v", b, got, err)
+		}
+	}
 	for name, l := range map[string]projectfs.Layout{
 		"local":        {Backend: projectfs.BackendLocal, HostBase: "/home/u/.scion"},
 		"nfs-no-base":  {Backend: projectfs.BackendNFS},
@@ -271,7 +285,7 @@ func TestRun_ObjectsKeptWhenM2Fails(t *testing.T) {
 func TestRun_EmptyPerAgentLeavesContentMovesSeed(t *testing.T) {
 	f := newHubFixture(t)
 	writeTree(t, f.share, map[string]string{"hub-projects/p1/.scion/settings.yaml": "s", "hub-projects/p1/data.txt": "d"})
-	rep, err := Run(context.Background(), f.input(ProjectRef{ID: pid1, Slug: "p1", Mode: projectfs.ModeEmptyPerAgent}), opts(false))
+	rep, err := Run(context.Background(), f.input(ProjectRef{ID: pid1, Slug: "p1", NoWorkspace: true}), opts(false))
 	if err != nil || rep.Failed() {
 		t.Fatalf("err=%v failed=%t", err, rep.Failed())
 	}
@@ -419,5 +433,23 @@ func TestRun_DryRunWouldDeleteObjectsButDoesNot(t *testing.T) {
 	}
 	if rep.Objects[0].Outcome != ObjectsWouldDelete || len(f.objects.deletes) != 0 || !f.objects.objects[objectPrefix(pid1)+"a"] {
 		t.Fatalf("objects=%s deletes=%v", rep.Objects[0].Outcome, f.objects.deletes)
+	}
+}
+
+func TestRun_VolumeBackendLegacyRoot(t *testing.T) {
+	vol := t.TempDir()
+	global := t.TempDir()
+	writeTree(t, vol, map[string]string{"projects/hub-projects/p1/a.txt": "A"})
+	layout := projectfs.Layout{Backend: projectfs.BackendCloudRunVolume, HostBase: vol, SubPathRoot: "projects"}
+	rep, err := Run(context.Background(), HubInput{Workspace: layout, SharedDirs: projectfs.Layout{Backend: projectfs.BackendLocal}, GlobalDir: global, Projects: []ProjectRef{{ID: pid1, Slug: "p1"}}}, opts(false))
+	if err != nil || rep.Failed() || rep.Moves() != 1 {
+		t.Fatalf("err=%v failed=%t moves=%d", err, rep.Failed(), rep.Moves())
+	}
+	if readFile(t, filepath.Join(vol, "projects", pid1, "workspace/a.txt")) != "A" {
+		t.Fatal("not moved to the uuid tree on the volume")
+	}
+	// Fail closed: a volume backend without a mount root is an error.
+	if _, err := Run(context.Background(), HubInput{Workspace: projectfs.Layout{Backend: projectfs.BackendGKESharedVolume}, GlobalDir: global}, opts(true)); err == nil {
+		t.Fatal("want an error for a volume backend without a mount root")
 	}
 }
