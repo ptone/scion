@@ -382,7 +382,7 @@ describe("copying from the editor (S5, the editor's own copies)", () => {
     c.view.state.doc.firstChild!.nodeSize - 1,
   ];
 
-  it('copies Markdown, so escaped characters paste back literally', async () => {
+  it('copies Markdown, so backslashed characters paste back literally', async () => {
     const c = await open('a\\*b\\*c\n');
     const text = copied(c, ...inner(c));
     expect(text).toBe('a\\*b\\*c');
