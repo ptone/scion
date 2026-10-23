@@ -127,6 +127,7 @@ export default defineConfig([
     [
       'e2e/agent-store-count/*.ts',
       'e2e/artifacts-access/*.ts',
+      'e2e/artifacts-review/*.ts',
       'e2e/chat/*.ts',
       'e2e/chat-file-preview/*.ts',
       'e2e/chat-mobile/*.ts',
@@ -159,6 +160,11 @@ export default defineConfig([
   project(['e2e/terminal-lifecycle/*.ts'], './e2e/terminal-lifecycle/tsconfig.json'),
   project(['e2e/terminal-owner/*.ts'], './e2e/terminal-owner/tsconfig.json'),
   project(['e2e-perf/budgets/*.ts'], './e2e-perf/budgets/tsconfig.json'),
+  // The review editor is its own TS project (see its tsconfig.json).
+  project(
+    ['src/components/artifact-review/**/*.ts'],
+    './src/components/artifact-review/tsconfig.json'
+  ),
 
   // Test files: a looser type-aware rule set than sources. Tests reach
   // into private members and use `as any` fakes, so the no-unsafe-* rules
@@ -214,6 +220,66 @@ export default defineConfig([
       // no-restricted-imports does not see.
       'no-restricted-syntax': [
         'error',
+        {
+          selector:
+            'MemberExpression[property.name=/^(push|replace)State$/], MemberExpression[property.value=/^(push|replace)State$/], MemberExpression[property.type="TemplateLiteral"][property.quasis.0.value.cooked=/^(push|replace)State$/], ObjectPattern > Property[key.name=/^(push|replace)State$/], ObjectPattern > Property[key.value=/^(push|replace)State$/]',
+          message:
+            'Use navigateTo(), pushUrl() or replaceSearch() from client/navigation.js instead of raw history.pushState/replaceState.',
+        },
+        {
+          selector:
+            'ImportExpression[source.value=/\\/client\\/main(\\.(js|ts))?$/], ImportExpression[source.type="TemplateLiteral"][source.quasis.length=1][source.quasis.0.value.cooked=/\\/client\\/main(\\.(js|ts))?$/]',
+          message:
+            'Import navigation helpers from client/navigation.js; importing client/main boots the app.',
+        },
+      ],
+    },
+  },
+
+  // The review editor renders artifact text in the page (ptone/scion#5913):
+  // it builds DOM only through ProseMirror's renderers and text bindings,
+  // so no string reaches the DOM as HTML from these files. The navigation
+  // rules of the block above are repeated, because a later
+  // no-restricted-syntax or no-restricted-imports entry replaces an
+  // earlier one for the same files.
+  {
+    files: ['src/components/artifact-review/**/*.ts'],
+    ignores: ['src/components/artifact-review/**/*.test.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          paths: [
+            {
+              name: 'lit/directives/unsafe-html.js',
+              message: 'The review editor must not turn strings into HTML.',
+            },
+            {
+              name: 'lit-html/directives/unsafe-html.js',
+              message: 'The review editor must not turn strings into HTML.',
+            },
+          ],
+          patterns: [
+            {
+              group: ['**/client/main', '**/client/main.js', '**/client/main.ts'],
+              message:
+                'Import navigation helpers from client/navigation.js; importing client/main boots the app.',
+            },
+          ],
+        },
+      ],
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector:
+            'MemberExpression[property.name=/^(innerHTML|outerHTML|insertAdjacentHTML|srcdoc|setHTMLUnsafe|createContextualFragment|parseFromString)$/], MemberExpression[property.value=/^(innerHTML|outerHTML|insertAdjacentHTML|srcdoc|setHTMLUnsafe|createContextualFragment|parseFromString)$/]',
+          message: 'The review editor must not turn strings into HTML (see eslint.config.mjs).',
+        },
+        {
+          selector:
+            "NewExpression[callee.name='DOMParser'], CallExpression[callee.object.name='document'][callee.property.name=/^(write|writeln)$/], Identifier[name='unsafeHTML']",
+          message: 'The review editor must not turn strings into HTML (see eslint.config.mjs).',
+        },
         {
           selector:
             'MemberExpression[property.name=/^(push|replace)State$/], MemberExpression[property.value=/^(push|replace)State$/], MemberExpression[property.type="TemplateLiteral"][property.quasis.0.value.cooked=/^(push|replace)State$/], ObjectPattern > Property[key.name=/^(push|replace)State$/], ObjectPattern > Property[key.value=/^(push|replace)State$/]',

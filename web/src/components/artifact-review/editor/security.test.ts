@@ -1,0 +1,296 @@
+/**
+ * Copyright 2026 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/**
+ * The editor renders artifact text in the page, so it must show raw HTML
+ * as text, render only a fixed set of elements and attributes, and give
+ * links and images only the targets the read-only preview allows. Every
+ * check is paired with a positive control in the same document, so a
+ * blank render cannot pass.
+ */
+
+import { afterEach, describe, expect, it } from 'vitest';
+import { TextSelection } from '@milkdown/prose/state';
+
+import { SENTINEL_CANDIDATES } from '../../../utils/critic-sentinels.js';
+import { ReviewController } from './controller.js';
+import type { HintKind } from './policy.js';
+import { ALLOWED_ATTRIBUTES, ALLOWED_TAGS, HARDENED } from './safe-render.js';
+import { renderContext } from './__fixtures__/core.js';
+
+const made: ReviewController[] = [];
+afterEach(async () => {
+  for (const c of made.splice(0)) await c.destroy();
+  document.body.replaceChildren();
+});
+
+async function open(md: string, hints: HintKind[] = []): Promise<ReviewController> {
+  const root = document.createElement('div');
+  document.body.append(root);
+  const c = await ReviewController.create({
+    root,
+    render: () => renderContext,
+    askNote: () => Promise.resolve('n'),
+    onHint: (h) => hints.push(h),
+    onChange: () => {},
+  });
+  made.push(c);
+  expect(c.load(md)).toBe(true);
+  return c;
+}
+
+/** Fails on any element or attribute outside the editor's fixed sets. */
+function assertFixedDom(root: Element): void {
+  for (const el of Array.from(root.querySelectorAll('*'))) {
+    const tag = el.tagName.toLowerCase();
+    expect(ALLOWED_TAGS.has(tag), `tag ${tag}`).toBe(true);
+    for (const attr of Array.from(el.attributes)) {
+      expect(attr.name.startsWith('on'), `${tag}[${attr.name}]`).toBe(false);
+      expect(ALLOWED_ATTRIBUTES.has(attr.name), `${tag}[${attr.name}]`).toBe(true);
+    }
+  }
+}
+
+const HUB_FILE = /^\/api\/v1\/artifacts\/art1\/versions\/3\/files\/[^?#]+(\?stream=1)?$/;
+
+function assertTargets(root: Element): void {
+  for (const a of Array.from(root.querySelectorAll('a[href]'))) {
+    const href = a.getAttribute('href')!;
+    expect(/^(https?:|mailto:)/.test(href) || HUB_FILE.test(href), href).toBe(true);
+    expect(a.getAttribute('rel')).toBe('noopener noreferrer');
+    expect(a.getAttribute('referrerpolicy')).toBe('no-referrer');
+  }
+  // ProseMirror's own separator image (no source) is the only other image.
+  for (const img of Array.from(root.querySelectorAll('img:not(.ProseMirror-separator)'))) {
+    const src = img.getAttribute('src')!;
+    expect(HUB_FILE.test(src) || /^data:image\/(png|jpeg|gif|webp)[;,]/.test(src), src).toBe(true);
+    expect(img.hasAttribute('srcset')).toBe(false);
+    expect(img.getAttribute('referrerpolicy')).toBe('no-referrer');
+  }
+}
+
+const RAW_HTML = [
+  '<script>window.__pwned=1</script>',
+  '<img src=x onerror="window.__pwned=1">',
+  '<svg onload="window.__pwned=1"></svg>',
+  '<iframe src="https://evil.example/"></iframe>',
+];
+
+describe('raw HTML (S1)', () => {
+  it('shows raw HTML as literal text, while Markdown beside it still renders', async () => {
+    const md =
+      RAW_HTML.map((h) => `Inline ${h} and *emphasis*.\n\n${h}\n`).join('\n') + '\n**strong**\n';
+    const c = await open(md);
+    const dom = c.view.dom;
+    const raw = Array.from(dom.querySelectorAll('code.raw-html')).map((e) => e.textContent);
+    for (const h of RAW_HTML) expect(raw.some((t) => t?.includes(h.slice(0, 7)))).toBe(true);
+    expect(dom.querySelectorAll('script, iframe, svg').length).toBe(0);
+    // Positive controls.
+    expect(dom.querySelectorAll('em').length).toBe(RAW_HTML.length);
+    expect(dom.querySelector('strong')?.textContent).toBe('strong');
+    assertFixedDom(dom);
+    // The document saves back unchanged.
+    expect(c.flush()).toBe(md);
+  });
+});
+
+describe('fixed attributes (S2)', () => {
+  it('renders every node and mark through the hardened renderers', async () => {
+    const c = await open('x\n');
+    const schema = c.view.state.schema;
+    for (const t of [...Object.values(schema.nodes), ...Object.values(schema.marks)]) {
+      const toDOM = (t.spec as unknown as { toDOM?: Record<symbol, unknown> }).toDOM;
+      if (toDOM) expect(toDOM[HARDENED], t.name).toBe(true);
+    }
+  });
+
+  it('drops content-derived attributes and keeps comment notes as text', async () => {
+    const note = '"><img src=x onerror=alert(1)>';
+    const md = [
+      '# Heading <b>one</b>',
+      '',
+      '```js" onmouseover="x',
+      'code',
+      '```',
+      '',
+      '3. ordered',
+      '',
+      `text {==mark==}{>>${note}<<} end`,
+      '',
+      '- [x] task',
+      '',
+      '| a | b |',
+      '|:-|-:|',
+      '| 1 | 2 |',
+      '',
+    ].join('\n');
+    const c = await open(md);
+    const dom = c.view.dom;
+    assertFixedDom(dom);
+    expect(dom.querySelector('h1')?.hasAttribute('id')).toBe(false);
+    expect(dom.querySelector('pre')?.hasAttribute('data-language')).toBe(false);
+    const comment = dom.querySelector('.critic-comment')!;
+    expect(comment.getAttribute('aria-label')).toBe(`Comment: ${note}`);
+    expect(comment.querySelector('img')).toBeNull();
+    // Positive controls.
+    expect(dom.querySelector('mark.critic-hl')?.textContent).toBe('mark');
+    expect(dom.querySelector('ol')?.getAttribute('start')).toBe('3');
+    expect(dom.querySelectorAll('td').length).toBe(2);
+  });
+});
+
+describe('links (S3)', () => {
+  const bad = [
+    'javascript:window.__pwned=1',
+    'JaVaScRiPt:window.__pwned=1',
+    'java\tscript:window.__pwned=1',
+    '&#106;avascript:window.__pwned=1',
+    'data:text/html,window.__pwned=1',
+    'vbscript:x',
+    'blob:https://hub.example/x',
+    'file:///etc/passwd',
+    '//evil.example/x',
+    'tel:+15551234',
+    'missing.md',
+    '../../outside.md',
+  ];
+
+  it('gives a target only to http, https, mailto and version files', async () => {
+    const md =
+      bad.map((h, i) => `[bad${i}](<${h}>) and [good${i}](https://ok.example/${i})`).join('\n\n') +
+      '\n\n[file](notes.md) [mail](mailto:a@b.example) [frag](#top) <https://auto.example/>\n\n' +
+      '[ref][r]\n\n[r]: javascript:window.__pwned=1\n';
+    const c = await open(md);
+    const dom = c.view.dom;
+    assertFixedDom(dom);
+    assertTargets(dom);
+    const byText = (t: string): Element =>
+      Array.from(dom.querySelectorAll('a')).find((a) => a.textContent === t)!;
+    bad.forEach((_h, i) => {
+      expect(byText(`bad${i}`).hasAttribute('href'), `bad${i}`).toBe(false);
+      // Positive control beside each one.
+      expect(byText(`good${i}`).getAttribute('href')).toBe(`https://ok.example/${i}`);
+    });
+    expect(byText('file').getAttribute('href')).toBe(
+      '/api/v1/artifacts/art1/versions/3/files/docs/notes.md'
+    );
+    expect(byText('mail').getAttribute('href')).toBe('mailto:a@b.example');
+    expect(byText('frag').hasAttribute('href')).toBe(false);
+    expect(byText('ref').hasAttribute('href')).toBe(false);
+    expect(byText('https://auto.example/').getAttribute('href')).toBe('https://auto.example/');
+    expect(c.flush()).toBe(md);
+  });
+});
+
+describe('images (S4)', () => {
+  it('loads only version files, fetched copies and a few data images', async () => {
+    const md = [
+      '![ext](https://evil.example/a.png)',
+      '![proto](//evil.example/a.png)',
+      '![missing](nothere.png)',
+      // The editor is stricter than the preview on purpose: raster data images only.
+      '![svg](data:image/svg+xml;base64,PHN2Zy8+)',
+      '![dot](img/dot.png)',
+      '![remote](https://img.example/pic.png)',
+      '![png](data:image/png;base64,iVBORw0KGgo=)',
+      '',
+    ].join('\n\n');
+    const c = await open(md);
+    const dom = c.view.dom;
+    assertFixedDom(dom);
+    assertTargets(dom);
+    const placeholders = Array.from(dom.querySelectorAll('.image-placeholder')).map(
+      (e) => e.textContent
+    );
+    expect(placeholders).toEqual([
+      'Image not fetched: ext',
+      'Image not fetched: proto',
+      'Image not in this version: missing',
+      'Image not in this version: svg',
+    ]);
+    // Positive controls.
+    const srcs = Array.from(dom.querySelectorAll('img:not(.ProseMirror-separator)')).map((i) =>
+      i.getAttribute('src')
+    );
+    expect(srcs).toEqual([
+      '/api/v1/artifacts/art1/versions/3/files/docs/img/dot.png?stream=1',
+      '/api/v1/artifacts/art1/versions/3/files/_remote/1/pic.png?stream=1',
+      'data:image/png;base64,iVBORw0KGgo=',
+    ]);
+    expect(c.flush()).toBe(md);
+  });
+});
+
+function pasteEvent(data: Record<string, string>): ClipboardEvent {
+  const event = new Event('paste', { bubbles: true, cancelable: true }) as ClipboardEvent;
+  Object.defineProperty(event, 'clipboardData', {
+    value: {
+      getData: (t: string) => data[t] ?? '',
+      items: [],
+      files: [],
+      types: Object.keys(data),
+    },
+  });
+  return event;
+}
+
+describe('paste and drop (S5)', () => {
+  it('inserts the plain-text reading when HTML and plain text disagree', async () => {
+    const c = await open('one two\n');
+    const v = c.view;
+    const p = v.state.doc.resolve(5).pos;
+    v.dispatch(v.state.tr.setSelection(TextSelection.create(v.state.doc, p)));
+    v.dom.dispatchEvent(
+      pasteEvent({
+        'text/html': '<img src=x onerror="window.__pwned=1"><a href="javascript:x">evil</a>',
+        'text/plain': 'plain words',
+      })
+    );
+    const out = c.flush()!;
+    expect(out).toBe('one {++plain words++}two\n');
+    expect(v.dom.querySelector('img, a')).toBeNull();
+  });
+
+  it('empties pasted HTML that reaches the default path', async () => {
+    const c = await open('x\n');
+    const transform = c.view.someProp('transformPastedHTML');
+    expect(transform?.('<b>x</b>', c.view)).toBe('');
+  });
+
+  it('refuses a drop and an image file, with the image hint', async () => {
+    const hints: HintKind[] = [];
+    const c = await open('one two\n', hints);
+    const drop = new Event('drop', { bubbles: true, cancelable: true }) as DragEvent;
+    Object.defineProperty(drop, 'dataTransfer', {
+      value: { items: [{ kind: 'file', type: 'image/png' }], files: [], getData: () => '' },
+    });
+    const handled = c.view.someProp('handleDrop', (f) => f(c.view, drop, null as never, false));
+    expect(handled).toBe(true);
+    expect(hints).toEqual(['image']);
+    expect(c.flush()).toBe('one two\n');
+  });
+});
+
+describe('sentinel characters in the text (S6)', () => {
+  it('keeps them as text and still reads real marks', async () => {
+    const chars = SENTINEL_CANDIDATES.slice(0, 10).join('');
+    const md = `text ${chars} and {++real++} mark ${chars}\n`;
+    const c = await open(md);
+    expect(c.view.dom.querySelectorAll('ins.critic-ins').length).toBe(1);
+    expect(c.view.dom.textContent).toContain(chars);
+    expect(c.flush()).toBe(md);
+  });
+});
