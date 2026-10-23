@@ -62,7 +62,7 @@ func hostRunGit(t *testing.T, dir string, args ...string) string {
 // directory, every hook git runs for the host-side commands under test, each
 // touching a marker in markers. These are repository content at the default
 // path (not a config key); HostGitArgs' core.hooksPath=/dev/null pin keeps
-// them from running. Config-based vectors (core.hooksPath, core.fsmonitor,
+// them from running. Config-based settings (core.hooksPath, core.fsmonitor,
 // filter drivers) are covered by the deny-by-default policy tests instead.
 func plantRepoCommands(t *testing.T, repo, markers string) {
 	t.Helper()
@@ -181,18 +181,18 @@ func TestHostGitCommand_FilterPinsStandardLFS(t *testing.T) {
 
 // Deny-by-default: a repository config key outside the allow-list (or an
 // include directive) refuses the command, whether or not it is a network
-// command, and names the key. This covers every finding so far plus an
+// command, and names the key. This covers the known key families plus an
 // arbitrary unknown key.
 func TestHostGitCommand_PolicyRefuses(t *testing.T) {
 	cases := []struct{ key, value string }{
-		// F1: a filter subsection containing '=' and a non-standard filter.
+		// A filter subsection containing '=' and a non-standard filter.
 		{"filter.a=b.smudge", "touch /tmp/x; cat"},
 		{"filter.custom.smudge", "evil"},
-		// F2: signature-verification knobs that could run gpg.program.
+		// Signature-verification knobs that could run gpg.program.
 		{"gpg.program", "touch /tmp/x"},
 		{"gpg.ssh.program", "touch /tmp/x"},
 		{"log.showSignature", "true"},
-		// F3: http.* TLS / resolve / cookie / cert keys.
+		// http.* TLS / resolve / cookie / cert keys.
 		{"http.sslVerify", "false"},
 		{"http.sslCAInfo", "/tmp/ca"},
 		{"http.curloptResolve", "example.com:443:127.0.0.1"},
@@ -809,7 +809,7 @@ func TestHostGitCmd_DetectsFilterConfigChange(t *testing.T) {
 	})
 }
 
-// C-1/A2/A3: the git-lfs keys git-lfs writes are allowed, value-checked.
+// The git-lfs keys git-lfs writes are allowed, value-checked.
 func TestAllowVar_LFSWrittenKeys(t *testing.T) {
 	v := func(key, value string) gitConfigVar {
 		sec, sub, name := splitConfigKey(key)
@@ -830,11 +830,11 @@ func TestAllowVar_LFSWrittenKeys(t *testing.T) {
 		no("lfs.repositoryformatversion", "1")
 		ok("lfs.https://github.com/o/r.git/info/lfs.access", "basic")
 		ok("lfs.https://github.com/o/r.git/info/lfs.access", "none")
-		no("lfs.https://github.com/o/r.git/info/lfs.access", "negotiate") // A2
-		no("lfs.https://github.com/o/r.git/info/lfs.access", "ntlm")      // A2
+		no("lfs.https://github.com/o/r.git/info/lfs.access", "negotiate") // non-basic access mode
+		no("lfs.https://github.com/o/r.git/info/lfs.access", "ntlm")      // non-basic access mode
 		ok("lfs.https://github.com/o/r.git/info/lfs.locksverify", "true")
 		no("lfs.https://github.com/o/r.git/info/lfs.locksverify", "maybe")
-		// A3: a non-URL subsection is refused.
+		// A non-URL subsection is refused.
 		no("lfs.not a url.access", "basic")
 		no("lfs.ext::sh -c id.access", "basic")
 		// Still refused: redirect/host-path keys.
@@ -844,7 +844,7 @@ func TestAllowVar_LFSWrittenKeys(t *testing.T) {
 }
 
 // With extensions.worktreeConfig on, the main worktree's config.worktree
-// (in the common dir) is checked too (D-2).
+// (in the common dir) is checked too.
 func TestHostGitCommand_ChecksMainWorktreeConfig(t *testing.T) {
 	repo, _ := newHostGitRepo(t)
 	hostRunGit(t, repo, "config", "extensions.worktreeConfig", "true")
@@ -860,7 +860,7 @@ func TestHostGitCommand_ChecksMainWorktreeConfig(t *testing.T) {
 	}
 }
 
-// A remote operation carries the transport allow-list (D-3).
+// A remote operation carries the transport allow-list.
 func TestHostGitCommand_NetworkTransportAllowlist(t *testing.T) {
 	repo, _ := newHostGitRepo(t)
 	cmd, err := HostGitCommand(context.Background(), repo, HostGitOptions{Network: true}, "fetch")
@@ -876,7 +876,7 @@ func TestHostGitCommand_NetworkTransportAllowlist(t *testing.T) {
 }
 
 // diff/merge driver keys that name a command are refused; data attributes
-// are allowed (D-3 explicit keys).
+// are allowed (explicit keys).
 func TestHostGitCommand_DiffMergeExplicitKeys(t *testing.T) {
 	allowed := [][2]string{
 		{"diff.algorithm", "histogram"},
@@ -909,9 +909,9 @@ func TestHostGitCommand_DiffMergeExplicitKeys(t *testing.T) {
 	}
 }
 
-// R-2 condition 1: keys allowed in a linked checkout only because a fixed
+// Keys allowed in a linked checkout only because a fixed
 // pin overrides them (core.hooksPath, core.fsmonitor, core.pager,
-// submodule.recurse) must not execute their planted value on a host git
+// submodule.recurse) must not run their configured value on a host git
 // command. CreateWorktree (which checks out) is the trigger.
 func TestLinkedPinnedKeysDoNotExecute(t *testing.T) {
 	repo, markers := newHostGitRepo(t)
@@ -925,7 +925,7 @@ func TestLinkedPinnedKeysDoNotExecute(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// Planted values that would run a command if the pins did not override them.
+	// Values that would run a command if the pins did not override them.
 	hostRunGit(t, repo, "config", "core.hooksPath", hookDir)
 	hostRunGit(t, repo, "config", "core.fsmonitor", "touch '"+fail+"'; false")
 	hostRunGit(t, repo, "config", "core.pager", "touch '"+fail+"'; cat")
@@ -939,7 +939,7 @@ func TestLinkedPinnedKeysDoNotExecute(t *testing.T) {
 		t.Fatalf("CreateWorktree (should be allowed, keys are pinned): %v", err)
 	}
 	if _, err := os.Stat(fail); !os.IsNotExist(err) {
-		t.Errorf("a pinned key executed its planted value (marker present)")
+		t.Errorf("a pinned key ran its configured value (marker present)")
 	}
 }
 
@@ -959,7 +959,7 @@ func TestGpgSignPinnedOff(t *testing.T) {
 	}
 }
 
-// O-1: a valueless boolean key in .git/config ([core] symlinks) must pass
+// A valueless boolean key in .git/config ([core] symlinks) must pass
 // the cross-check (git lists it with no value; the parser stores "true").
 func TestHostGitCommand_ValuelessBooleanKey(t *testing.T) {
 	repo, _ := newHostGitRepo(t)
@@ -978,7 +978,7 @@ func TestHostGitCommand_ValuelessBooleanKey(t *testing.T) {
 	}
 }
 
-// R-2: config.worktree is checked even with extensions.worktreeConfig OFF
+// config.worktree is checked even with extensions.worktreeConfig OFF
 // (fail closed), in both the main worktree and a linked worktree, and the
 // subset check tolerates an allowed key git ignores.
 func TestHostGitCommand_ConfigWorktreeAlwaysChecked(t *testing.T) {
@@ -1214,7 +1214,7 @@ func TestLFSConfigEndpointNeverContacted(t *testing.T) {
 		hostRunGit(t, filepath.Dir(repo), "init", "-q", "-b", "main", repo)
 		// http(s) origin AND a tracked .lfsconfig naming a separate endpoint:
 		// we must not pin the origin-derived endpoint and must not contact the
-		// .lfsconfig one (R-6).
+		// .lfsconfig one.
 		hostRunGit(t, repo, "remote", "add", "origin", "https://git.example.com/o/r.git")
 		writeFile(t, filepath.Join(repo, ".lfsconfig"), "[lfs]\n\turl = "+srv.URL+"/lfs\n")
 		writeFile(t, filepath.Join(repo, ".gitattributes"), "*.bin filter=lfs -text\n")
@@ -1241,7 +1241,7 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
-// R-4: the pointer-warning scan must not follow a symlink to a FIFO (which
+// The pointer-warning scan must not follow a symlink to a FIFO (which
 // would block) or open non-regular files. A linked worktree with an ssh origin
 // (skip-smudge path) that contains such a symlink must still complete.
 func TestCreateWorktree_PointerScanDoesNotHangOnFIFOSymlink(t *testing.T) {
@@ -1300,7 +1300,7 @@ func TestHostGitCommand_SubmoduleConfigAllowed(t *testing.T) {
 	}
 }
 
-// R-5: a pull with a token and a non-http(s) clone URL ignores the token
+// A pull with a token and a non-http(s) clone URL ignores the token
 // rather than failing (git uses its own transport auth).
 func TestPullSharedWorkspace_TokenIgnoredForNonHTTPURL(t *testing.T) {
 	source, workspace, _ := sharedWorkspaceFixture(t)
@@ -1315,7 +1315,7 @@ func TestPullSharedWorkspace_TokenIgnoredForNonHTTPURL(t *testing.T) {
 	}
 }
 
-// C-1: an LFS repository (where git-lfs has written lfs.repositoryformatversion
+// An LFS repository (where git-lfs has written lfs.repositoryformatversion
 // to .git/config) must not be refused. CreateWorktree and PullSharedWorkspace
 // must each succeed twice in a row.
 func TestLFSRepositoryNotRefusedAfterGitLFSWrites(t *testing.T) {
@@ -1362,7 +1362,7 @@ func TestLFSRepositoryNotRefusedAfterGitLFSWrites(t *testing.T) {
 	})
 }
 
-// R1 (round 6): a committed .lfsconfig that sets lfs.<url>.access (even spelled
+// A committed .lfsconfig that sets lfs.<url>.access (even spelled
 // differently from the origin-derived endpoint) makes the linked checkout skip
 // the smudge rather than pin, so the endpoint is never contacted.
 func TestLFSConfigAccessKeyForcesSkip(t *testing.T) {
@@ -1396,9 +1396,8 @@ func TestLFSConfigAccessKeyForcesSkip(t *testing.T) {
 				u.Scheme = strings.ToUpper(u.Scheme)
 			}
 			configKey := u.String()
-			// Guard against the case silently degrading to the exact pinned
-			// spelling (then it would not exercise an equivalent-but-different
-			// key at all).
+			// Fail if it silently degrades to the exact pinned spelling (then it
+			// would not exercise an equivalent-but-different key at all).
 			if configKey == endpoint {
 				t.Fatalf("spelling %q did not change the endpoint (%q); the case would not test an equivalent spelling", spelling, endpoint)
 			}
@@ -1425,8 +1424,7 @@ func TestLFSConfigAccessKeyForcesSkip(t *testing.T) {
 			}
 			err = CreateWorktree(wt, "agent-a")
 			// Check the hit count BEFORE acting on the CreateWorktree error, so
-			// the contact (or its absence) is always reported — the W10 mutant
-			// records this count.
+			// the contact (or its absence) is always reported.
 			if got := atomic.LoadInt32(&hits); got != 0 {
 				t.Errorf("endpoint contacted %d time(s); a .lfsconfig access key must force skip-smudge", got)
 			}
@@ -1466,7 +1464,7 @@ func TestLfsConfigNamesEndpoint(t *testing.T) {
 	}
 }
 
-// R2 (round 6): a tracked .gitattributes that is itself a symlink to a FIFO or
+// A tracked .gitattributes that is itself a symlink to a FIFO or
 // /dev/zero must not hang or unbounded-read CreateWorktree. repoTracksLFS reads
 // it through the regular-file-only safe reader.
 func TestCreateWorktree_GitattributesSymlinkDoesNotHang(t *testing.T) {
@@ -1512,7 +1510,7 @@ func TestCreateWorktree_GitattributesSymlinkDoesNotHang(t *testing.T) {
 	}
 }
 
-// Optional (round 6): the post-command sensitive-key check catches a reordered
+// The post-command sensitive-key check catches a reordered
 // or inserted multi-valued key (remote.origin.url).
 func TestVerifyConfigStable_MultiValuedKeyChange(t *testing.T) {
 	hostGitTestEnv(t)

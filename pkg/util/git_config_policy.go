@@ -50,8 +50,8 @@ import (
 // url.*.insteadOf, http.*, gpg.*, any *.program, alias.*, remote.* upload/
 // receive/proxy/vcs) are never on either list, so deny-by-default refuses
 // them. The read is as-data and does not depend on git's own config
-// resolution, so a subsection containing '=' or quotes cannot slip a key
-// past the check.
+// resolution, so a subsection containing '=' or quotes stays part of the
+// subsection name and the full key is checked.
 
 // RepoConfigPolicy selects the allow-list a host-side git command uses.
 type RepoConfigPolicy int
@@ -103,8 +103,9 @@ func isGitBool(v string) bool {
 }
 
 // validLFSURLSubsection reports whether an lfs.<url>.* subsection is an
-// http(s) URL with no whitespace or control characters — so a crafted
-// subsection cannot smuggle anything past the key check.
+// http(s) URL with a host and no whitespace or control characters;
+// lfs.<url>.access and lfs.<url>.locksverify are allowed only under such a
+// subsection.
 func validLFSURLSubsection(sub string) bool {
 	if sub == "" {
 		return false
@@ -140,8 +141,8 @@ type repoConfigAllowOptions struct {
 // arbitrary host path, or redirect the network; keys whose value may carry
 // one of those are value-checked. topLevel below means [section] (no
 // subsection) — [section ""] (an empty quoted subsection) is a different
-// section and is treated as subsectioned, so it cannot impersonate a
-// top-level key.
+// section and is treated as subsectioned, so it is checked against the
+// subsectioned rules rather than the top-level ones.
 func allowVar(policy RepoConfigPolicy, v gitConfigVar, opts repoConfigAllowOptions) (bool, string) {
 	sec := v.Section
 	sub := v.Subsection
@@ -243,7 +244,7 @@ func allowVar(policy RepoConfigPolicy, v gitConfigVar, opts repoConfigAllowOptio
 	// A few keys that would run a command are allowed here only because a
 	// fixed -c pin on every host-side call (HostGitArgs) overrides their
 	// repository value — core.hooksPath, core.fsmonitor, core.pager and
-	// submodule.recurse — so a planted value never executes.
+	// submodule.recurse — so such a repository value never runs a command.
 	switch sec {
 	case "core":
 		if topLevel {
@@ -319,7 +320,7 @@ func allowVar(policy RepoConfigPolicy, v gitConfigVar, opts repoConfigAllowOptio
 			return true, ""
 		}
 	case "user":
-		// Signing key identity (a key id or path) is inert data; a planted
+		// Signing key identity (a key id or path) is inert data; a
 		// gpg/ssh *.program that would act on it is refused above, which
 		// refuses the whole config.
 		if topLevel && name == "signingkey" {
@@ -540,7 +541,7 @@ func parseRepoConfig(dir string, env []string) ([]gitConfigVar, error) {
 // isSensitiveConfigKey reports whether a full config key is one of the
 // allowed, value-sensitive keys that git-lfs (and no other legitimate
 // in-command writer) never writes, so any change to it while a host-side
-// command runs is treated as tampering. The subsection case is preserved by
+// command runs is rejected. The subsection case is preserved by
 // splitConfigKey; section and name are already lower-case in a snapshot key.
 func isSensitiveConfigKey(key string) bool {
 	section, subsection, name := splitConfigKey(key)

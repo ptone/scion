@@ -410,7 +410,7 @@ func HostGitCommand(ctx context.Context, dir string, opts HostGitOptions, args .
 		// After the command, re-run the deny-by-default policy (allow-list plus
 		// the git cross-check) on the current repository config, and confirm no
 		// sensitive key changed value. The command fails (ErrRepoConfigChanged)
-		// on a newly-planted include or refused key, or a change to a sensitive
+		// on a newly-added include or refused key, or a change to a sensitive
 		// key (remote url/fetch, branch tracking, submodule url/update,
 		// core.worktree, user.signingkey, gpg.format, filter.lfs.*). A change
 		// confined to other allowed keys is tolerated — git-lfs writes
