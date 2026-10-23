@@ -361,24 +361,25 @@ func TestReadOnlyGitRoot_WorktreeLayout_BoundedRwOverlays(t *testing.T) {
 	}
 }
 
-// bindReadOnlyCreateFirstFile must return an error (so the caller refuses the
-// start) when it cannot create the placeholder, rather than silently registering
-// no read-only bind and leaving a writable file inside the rw .git root.
+// bindChecked (bindFileCreate) must return an error (so the caller refuses the
+// start) when the create-first file cannot be created because an intermediate
+// component is not a directory, rather than silently registering no read-only bind
+// and leaving a writable file inside the rw .git root.
 func TestBindReadOnlyCreateFirstFile_FailsClosed(t *testing.T) {
-	dir := t.TempDir()
-	// A regular file where a directory is needed: MkdirAll of <blocker>/sub fails.
-	blocker := filepath.Join(dir, "blocker")
-	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+	gitRoot := t.TempDir()
+	// A regular file where a directory is needed: the intermediate "blocker"
+	// component is not a directory, so the component walk refuses.
+	if err := os.WriteFile(filepath.Join(gitRoot, "blocker"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	src := filepath.Join(blocker, "sub", "config.worktree")
 	registered := false
-	err := bindReadOnlyCreateFirstFile(func(string, string, bool, bool) { registered = true }, src, "/repo-root/.git/config.worktree")
+	err := bindChecked(func(string, string, bool, bool) { registered = true },
+		gitRoot, "/repo-root/.git", true, bindFileCreate, "blocker", "config.worktree")
 	if err == nil {
-		t.Error("expected an error when the placeholder cannot be created, got nil")
+		t.Error("expected an error when an intermediate component is not a directory, got nil")
 	}
 	if registered {
-		t.Error("no mount must be registered when the placeholder cannot be created")
+		t.Error("no mount must be registered when the source cannot be created")
 	}
 }
 
@@ -593,8 +594,10 @@ func TestAppleRepoConfigWithSecrets_RefusedAtStart(t *testing.T) {
 // refused, and a real directory is reported present.
 func TestEnsureOverlayDir(t *testing.T) {
 	dir := t.TempDir()
-	// Missing + createIfMissing -> created, present.
-	missing := filepath.Join(dir, "sub", "overlay")
+	// Missing + createIfMissing -> created, present. (ensureOverlayDir inspects a
+	// single overlay component directly under a trusted parent, as its real callers
+	// do — objects/refs/logs/lfs/rr-cache under the .git root.)
+	missing := filepath.Join(dir, "overlay")
 	if present, err := ensureOverlayDir(missing, true); err != nil || !present {
 		t.Errorf("missing dir with createIfMissing should be created and present, got present=%v err=%v", present, err)
 	}
@@ -602,7 +605,7 @@ func TestEnsureOverlayDir(t *testing.T) {
 		t.Errorf("overlay dir not created: %v", err)
 	}
 	// Missing + !createIfMissing -> absent, not created (rr-cache semantics).
-	skip := filepath.Join(dir, "sub2", "overlay")
+	skip := filepath.Join(dir, "skip-overlay")
 	if present, err := ensureOverlayDir(skip, false); err != nil || present {
 		t.Errorf("missing dir without createIfMissing should be absent and uncreated, got present=%v err=%v", present, err)
 	}
@@ -763,15 +766,20 @@ func TestAppleRepoConfigWithSecrets_OverCapRefused(t *testing.T) {
 // of them is refused (fail closed) rather than followed. If a future overlay were
 // bound without going through ensureOverlayDir, adding its name here would catch it.
 func TestReadOnlyGitRoot_AllOverlaysRefuseSymlink(t *testing.T) {
-	for _, name := range []string{"objects", "refs", "logs", "lfs", "rr-cache"} {
+	// objects/info is a nested read-only source (narrowObjectsInfo) in this layout;
+	// the rest are the read-write overlay roots.
+	for _, name := range []string{"objects", "refs", "logs", "lfs", "rr-cache", "objects/info"} {
 		t.Run(name, func(t *testing.T) {
 			repoRoot, workspace := setupHubManagedBaseRepo(t, "agent-1")
 			outside := filepath.Join(t.TempDir(), "outside")
 			if err := os.MkdirAll(outside, 0o755); err != nil {
 				t.Fatal(err)
 			}
-			src := filepath.Join(repoRoot, ".git", name)
+			src := filepath.Join(repoRoot, ".git", filepath.FromSlash(name))
 			_ = os.RemoveAll(src)
+			if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+				t.Fatal(err)
+			}
 			if err := os.Symlink(outside, src); err != nil {
 				t.Skipf("symlinks unavailable: %v", err)
 			}

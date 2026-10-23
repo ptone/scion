@@ -905,14 +905,12 @@ func narrowGitAdminMounts(registerMount func(string, string, bool, bool), gitDir
 	// first (an empty read-only directory is harmless) so the mount always
 	// applies.
 	for _, dir := range []string{"hooks", "info"} {
-		src := filepath.Join(gitDir, dir)
-		if err := os.MkdirAll(src, 0755); err != nil {
-			// If the directory cannot even be created, mounting it read-only
-			// isn't possible either; leave this one subpath uncovered rather
-			// than fail agent startup over it.
-			continue
+		// Create-first through the component-checked path (fail closed on a symlink
+		// or non-directory) so the read-only mount always applies and a container
+		// cannot create its own writable hooks/ or info/ in the rw .git root.
+		if err := bindChecked(registerMount, gitDir, containerGitDir, true, bindDirCreate, dir); err != nil {
+			return err
 		}
-		registerMount(src, filepath.Join(containerGitDir, dir), true, true)
 	}
 
 	// .git/config is bound read-only (a per-agent redacted copy; see
@@ -921,7 +919,7 @@ func narrowGitAdminMounts(registerMount func(string, string, bool, bool), gitDir
 	// The common .git/config.worktree is bound read-only too (create-first): git
 	// consults it when extensions.worktreeConfig is set. The agent's own
 	// worktrees/<name>/config.worktree is handled in narrowWorktreesDir.
-	if err := bindReadOnlyCreateFirstFile(registerMount, filepath.Join(gitDir, "config.worktree"), filepath.Join(containerGitDir, "config.worktree")); err != nil {
+	if err := bindChecked(registerMount, gitDir, containerGitDir, true, bindFileCreate, "config.worktree"); err != nil {
 		return err
 	}
 
@@ -929,68 +927,242 @@ func narrowGitAdminMounts(registerMount func(string, string, bool, bool), gitDir
 	// dirs are also honored by host-side git and by the agent's own in-container
 	// git for that submodule. Narrow each that exists at start (dirs are
 	// create-first like hooks/info above; config is a file bound only if present).
-	narrowModuleAdminDirs(registerMount, gitDir, containerGitDir)
-	return nil
+	return narrowModuleAdminDirs(registerMount, gitDir, containerGitDir)
 }
 
-// bindReadOnlyCreateFirstFile binds src read-only over dst, creating src as an
-// empty regular file first if it does not exist, so the read-only mount applies
-// even when git would otherwise create the file writable in the rw .git root.
-// Used for single files git consults/writes that must stay read-only
-// (config.worktree, a worktree's gitdir/commondir). It returns an error if the
-// file cannot be created, so the caller refuses the start (fail closed) rather
-// than register no read-only bind and let the agent create a writable file.
-func bindReadOnlyCreateFirstFile(registerMount func(string, string, bool, bool), src, dst string) error {
-	if !fileExists(src) {
-		if err := os.MkdirAll(filepath.Dir(src), 0755); err != nil {
-			return fmt.Errorf("create read-only placeholder dir for %s: %w", src, err)
-		}
-		f, err := os.OpenFile(src, os.O_CREATE|os.O_WRONLY, 0644)
+// bindSourceMode selects how checkedBindSource treats the leaf of a git-metadata
+// bind source.
+type bindSourceMode int
+
+const (
+	bindDirRequire  bindSourceMode = iota // leaf must be an existing real directory; missing -> absent
+	bindDirCreate                         // create the directory (and missing parents) if absent; -> present
+	bindFileRequire                       // leaf must be an existing regular file; missing -> absent
+	bindFileCreate                        // create the regular file (no-follow) if absent; -> present
+)
+
+// bindSourceRaceHook, when non-nil, is invoked by checkedBindSource in the window
+// after every component has been verified and immediately before the leaf is
+// created. It is nil in production (the guarded call then costs nothing); it exists
+// only so a test can deterministically stand in for a concurrent swap of an
+// already-verified component — replacing a verified real directory with a symlink
+// in exactly the create window the post-create re-walk is there to close.
+var bindSourceRaceHook func(leaf string)
+
+// reverifyChain re-walks gitRoot/comps with os.Lstat after a component has been
+// created, confirming that no component became a symlink and that the leaf still
+// has the expected type. The forward walk verifies each component one at a time,
+// but a component verified as a real directory can be swapped for a symlink before
+// the leaf is created (O_NOFOLLOW guards only the final path component, never an
+// intermediate one), which would land the created leaf outside the repository. This
+// re-walk runs after the create and fails closed on any such swap, so the caller
+// can refuse the start and remove what it created.
+func reverifyChain(gitRoot string, comps []string, leafWantDir bool) error {
+	cur := gitRoot
+	last := len(comps) - 1
+	for i, c := range comps {
+		cur = filepath.Join(cur, c)
+		fi, err := os.Lstat(cur)
 		if err != nil {
-			return fmt.Errorf("create read-only placeholder %s: %w", src, err)
+			return fmt.Errorf("re-check git metadata bind source %s: %w", cur, err)
 		}
-		_ = f.Close()
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("git metadata bind source %s became a symlink", cur)
+		}
+		if i < last {
+			if !fi.IsDir() {
+				return fmt.Errorf("git metadata bind source parent %s is not a directory", cur)
+			}
+			continue
+		}
+		if leafWantDir {
+			if !fi.IsDir() {
+				return fmt.Errorf("git metadata bind source %s is not a directory", cur)
+			}
+		} else if !fi.Mode().IsRegular() {
+			return fmt.Errorf("git metadata bind source %s is not a regular file", cur)
+		}
 	}
-	registerMount(src, dst, true, true)
 	return nil
 }
 
-// ensureOverlayDir is the single fail-closed inspection every read-write overlay
-// source passes through before it is bound over a read-only base. It Lstats src
-// (so a symlink is never followed) and returns whether a real directory is present
-// to bind:
-//   - a real directory: present.
-//   - a symlink or a non-directory: an error, so the caller refuses the start
-//     rather than binding an unexpected (possibly out-of-repository) source.
-//   - missing: created when createIfMissing is set (objects/, refs/, logs/, lfs/,
-//     which an in-container git always needs), otherwise reported absent so the
-//     caller skips it (rr-cache must not be created host-side — that would enable
-//     rerere in the user's own checkout).
-func ensureOverlayDir(src string, createIfMissing bool) (present bool, err error) {
-	fi, statErr := os.Lstat(src)
-	switch {
-	case statErr == nil:
-		if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
-			return false, fmt.Errorf("overlay source %s is not a directory", src)
+// checkedBindSource is the single fail-closed inspection every git-metadata bind
+// SOURCE passes through before it is bound into an agent. Starting at the
+// broker-trusted gitRoot, it walks each component in comps with os.Lstat: a
+// component that is a symlink, or a non-directory intermediate component, refuses
+// the start — so a planted symlink, at the leaf or at any intermediate component,
+// can never redirect a bind to, or create a file or directory at, a path outside
+// the repository. A symlink is never followed and nothing is ever created through
+// one. The leaf is handled by mode:
+//   - bindDirRequire:  the leaf must be an existing real directory; a missing leaf
+//     or a missing intermediate component reports absent (present=false).
+//   - bindDirCreate:   a missing component is created one level at a time (its
+//     parent already verified a real directory); an existing non-dir/symlink refuses.
+//   - bindFileRequire: the leaf must be an existing regular file; missing reports absent.
+//   - bindFileCreate:  a missing leaf is created as a regular file with
+//     O_NOFOLLOW|O_EXCL in the verified parent (so a dangling symlink at the leaf is
+//     refused rather than created through); an existing non-regular/symlink refuses.
+//
+// For the *Create modes, after the leaf is created it re-walks the whole component
+// chain (reverifyChain): O_NOFOLLOW guards only the leaf, so a component verified as
+// a real directory and then swapped for a symlink before the create would land the
+// new entry outside the repository. The post-create re-walk fails closed on any such
+// swap, removing what was created and refusing the start.
+//
+// It returns the validated absolute source path and whether it is present to bind.
+func checkedBindSource(gitRoot string, mode bindSourceMode, comps ...string) (src string, present bool, err error) {
+	if len(comps) == 0 {
+		return "", false, fmt.Errorf("checkedBindSource: empty source under %s", gitRoot)
+	}
+	cur := gitRoot
+	last := len(comps) - 1
+	// Walk the intermediate components (all but the leaf): each must be an existing
+	// real directory. A symlink or non-directory refuses; a missing intermediate is
+	// created one level at a time for the *Create modes (its parent already verified
+	// a real directory) or reports absent for the *Require modes.
+	for i, c := range comps {
+		if c == "" || c == "." || c == ".." {
+			return "", false, fmt.Errorf("checkedBindSource: unsafe component %q under %s", c, gitRoot)
 		}
-		return true, nil
-	case os.IsNotExist(statErr):
-		if !createIfMissing {
-			return false, nil
+		cur = filepath.Join(cur, c)
+		if i == last {
+			break
 		}
-		if mkErr := os.MkdirAll(src, 0755); mkErr != nil {
-			return false, fmt.Errorf("create overlay dir %s: %w", src, mkErr)
+		fi, statErr := os.Lstat(cur)
+		switch {
+		case statErr == nil:
+			if fi.Mode()&os.ModeSymlink != 0 {
+				return "", false, fmt.Errorf("git metadata bind source %s is a symlink", cur)
+			}
+			if !fi.IsDir() {
+				return "", false, fmt.Errorf("git metadata bind source parent %s is not a directory", cur)
+			}
+		case os.IsNotExist(statErr):
+			if mode == bindDirRequire || mode == bindFileRequire {
+				return "", false, nil
+			}
+			if mkErr := os.Mkdir(cur, 0755); mkErr != nil {
+				return "", false, fmt.Errorf("create git metadata directory %s: %w", cur, mkErr)
+			}
+		default:
+			return "", false, fmt.Errorf("stat git metadata bind source %s: %w", cur, statErr)
 		}
-		return true, nil
+	}
+
+	// The leaf. cur is now gitRoot/comps.
+	switch mode {
+	case bindDirRequire, bindDirCreate:
+		fi, statErr := os.Lstat(cur)
+		switch {
+		case statErr == nil:
+			if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+				return "", false, fmt.Errorf("git metadata bind source %s is not a directory", cur)
+			}
+			return cur, true, nil
+		case os.IsNotExist(statErr):
+			if mode == bindDirRequire {
+				return "", false, nil
+			}
+			if bindSourceRaceHook != nil {
+				bindSourceRaceHook(cur)
+			}
+			if mkErr := os.Mkdir(cur, 0755); mkErr != nil {
+				return "", false, fmt.Errorf("create git metadata directory %s: %w", cur, mkErr)
+			}
+			// Close the create-window TOCTOU: if a verified component was swapped for
+			// a symlink before the Mkdir, the directory landed outside the repository.
+			// Re-walk and, on any swap, remove it and refuse.
+			if rErr := reverifyChain(gitRoot, comps, true); rErr != nil {
+				_ = os.Remove(cur)
+				return "", false, rErr
+			}
+			return cur, true, nil
+		default:
+			return "", false, fmt.Errorf("stat git metadata bind source %s: %w", cur, statErr)
+		}
+	case bindFileRequire:
+		fi, statErr := os.Lstat(cur)
+		switch {
+		case statErr == nil:
+			if fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() {
+				return "", false, fmt.Errorf("git metadata bind source %s is not a regular file", cur)
+			}
+			return cur, true, nil
+		case os.IsNotExist(statErr):
+			return "", false, nil
+		default:
+			return "", false, fmt.Errorf("stat git metadata bind source %s: %w", cur, statErr)
+		}
+	case bindFileCreate:
+		// Create the leaf as a regular file with O_EXCL|O_NOFOLLOW so that any
+		// existing path at cur — including a symlink (even a dangling one) — is
+		// refused rather than followed or created through. O_EXCL|O_NOFOLLOW is the
+		// load-bearing guard here: it is what keeps a symlinked leaf from being
+		// written through at the broker's uid.
+		if bindSourceRaceHook != nil {
+			bindSourceRaceHook(cur)
+		}
+		f, oErr := os.OpenFile(cur, os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW, 0644)
+		if oErr == nil {
+			_ = f.Close()
+			// Close the create-window TOCTOU: O_NOFOLLOW guards only the leaf, not an
+			// intermediate component. If a verified component was swapped for a symlink
+			// before the open, the file landed outside the repository. Re-walk and, on
+			// any swap, remove it and refuse.
+			if rErr := reverifyChain(gitRoot, comps, false); rErr != nil {
+				_ = os.Remove(cur)
+				return "", false, rErr
+			}
+			return cur, true, nil
+		}
+		if !errors.Is(oErr, os.ErrExist) {
+			return "", false, fmt.Errorf("create git metadata file %s: %w", cur, oErr)
+		}
+		// It already exists: bind only a real regular file (not a symlink/dir/other).
+		fi, lErr := os.Lstat(cur)
+		if lErr != nil {
+			return "", false, fmt.Errorf("stat git metadata bind source %s: %w", cur, lErr)
+		}
+		if fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() {
+			return "", false, fmt.Errorf("git metadata bind source %s is not a regular file", cur)
+		}
+		return cur, true, nil
 	default:
-		return false, fmt.Errorf("stat overlay dir %s: %w", src, statErr)
+		return "", false, fmt.Errorf("checkedBindSource: unknown mode %d", mode)
 	}
 }
 
-// bindReadWriteOverlayDir binds src read-write over dst through the single
-// ensureOverlayDir refusal path. With createIfMissing a missing src is created
-// (objects/, refs/, logs/, lfs/); without it a missing src is skipped (rr-cache).
-// A symlink or non-directory src is refused.
+// bindChecked validates (and for the *Create modes creates) the git-metadata bind
+// source gitRoot/comps via checkedBindSource and, when present, registers it over
+// containerRoot/comps with the given read-only flag. Every git-metadata bind
+// source goes through here (or through ensureOverlayDir, which also calls
+// checkedBindSource), so none resolves via os.Stat/fileExists/MkdirAll/OpenFile
+// unchecked.
+func bindChecked(registerMount func(string, string, bool, bool), gitRoot, containerRoot string, readOnly bool, mode bindSourceMode, comps ...string) error {
+	src, present, err := checkedBindSource(gitRoot, mode, comps...)
+	if err != nil {
+		return err
+	}
+	if present {
+		registerMount(src, filepath.Join(append([]string{containerRoot}, comps...)...), readOnly, true)
+	}
+	return nil
+}
+
+// ensureOverlayDir inspects a single read-write overlay source directly under a
+// trusted parent (objects/, refs/, logs/, lfs/, rr-cache/ under the .git root)
+// through the same checkedBindSource fail-closed path. createIfMissing selects
+// bindDirCreate vs bindDirRequire; a symlink or non-directory refuses.
+func ensureOverlayDir(src string, createIfMissing bool) (present bool, err error) {
+	mode := bindDirRequire
+	if createIfMissing {
+		mode = bindDirCreate
+	}
+	_, present, err = checkedBindSource(filepath.Dir(src), mode, filepath.Base(src))
+	return present, err
+}
+
+// bindReadWriteOverlayDir binds src read-write over dst through ensureOverlayDir.
 func bindReadWriteOverlayDir(registerMount func(string, string, bool, bool), src, dst string, createIfMissing bool) error {
 	present, err := ensureOverlayDir(src, createIfMissing)
 	if err != nil {
@@ -1008,16 +1180,18 @@ func bindReadWriteOverlayDir(registerMount func(string, string, bool, bool), src
 // in-container git for that submodule, so they get the same treatment as the
 // top-level hooks/info/config. Submodules created in-container after start are
 // out of scope (not present at mount time).
-func narrowModuleAdminDirs(registerMount func(string, string, bool, bool), gitDir, containerGitDir string) {
+func narrowModuleAdminDirs(registerMount func(string, string, bool, bool), gitDir, containerGitDir string) error {
 	modulesDir := filepath.Join(gitDir, "modules")
-	_ = filepath.WalkDir(modulesDir, func(path string, d os.DirEntry, err error) error {
+	return filepath.WalkDir(modulesDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
 		if !d.IsDir() {
 			return nil
 		}
-		// A submodule admin dir is one that directly contains a HEAD file.
+		// A submodule admin dir is one that directly contains a HEAD file. This is a
+		// discovery predicate, not a bind source; each bound source below is
+		// resolved through checkedBindSource (component-checked, symlink refused).
 		if !fileExists(filepath.Join(path, "HEAD")) {
 			return nil
 		}
@@ -1025,16 +1199,18 @@ func narrowModuleAdminDirs(registerMount func(string, string, bool, bool), gitDi
 		if relErr != nil {
 			return nil
 		}
-		containerSub := filepath.Join(containerGitDir, rel)
+		relComps := strings.Split(filepath.ToSlash(rel), "/")
+		leaf := func(name string) []string {
+			c := make([]string, 0, len(relComps)+1)
+			c = append(c, relComps...)
+			return append(c, name)
+		}
 		for _, dir := range []string{"hooks", "info"} {
-			if src := filepath.Join(path, dir); fileExists(src) {
-				registerMount(src, filepath.Join(containerSub, dir), true, true)
+			if e := bindChecked(registerMount, gitDir, containerGitDir, true, bindDirRequire, leaf(dir)...); e != nil {
+				return e
 			}
 		}
-		if cfg := filepath.Join(path, "config"); fileExists(cfg) {
-			registerMount(cfg, filepath.Join(containerSub, "config"), true, true)
-		}
-		return nil
+		return bindChecked(registerMount, gitDir, containerGitDir, true, bindFileRequire, leaf("config")...)
 	})
 }
 
@@ -1066,15 +1242,13 @@ func narrowModuleAdminDirs(registerMount func(string, string, bool, bool), gitDi
 // container ever starts, so — like config.worktree above — it keeps
 // skip-if-missing: there is no create-first fail-open gap to close, only a
 // path that legitimately might not exist for a base with no worktrees yet.
-func narrowSharerRegistryMounts(registerMount func(string, string, bool, bool), gitDir, containerGitDir string) {
-	sharersDir := filepath.Join(gitDir, sharerRegistryDirName)
-	if err := os.MkdirAll(sharersDir, 0755); err == nil {
-		registerMount(sharersDir, filepath.Join(containerGitDir, sharerRegistryDirName), true, true)
-	}
-	// If the directory cannot even be created, mounting it read-only isn't
-	// possible either; leave it uncovered rather than fail agent startup.
+func narrowSharerRegistryMounts(registerMount func(string, string, bool, bool), gitDir, containerGitDir string) error {
+	// Create-first through the component-checked path (fail closed on a symlink or
+	// non-directory) so the read-only mount always applies and a container cannot
+	// create its own writable scion-sharers/ in the rw .git root.
 	// The per-worktree admin back-link (worktrees/<name>/gitdir) is pinned
 	// read-only in narrowWorktreesDir, using the broker-trusted admin name.
+	return bindChecked(registerMount, gitDir, containerGitDir, true, bindDirCreate, sharerRegistryDirName)
 }
 
 // narrowObjectsInfo binds .git/objects/info read-only under containerGitDir.
@@ -1083,12 +1257,10 @@ func narrowSharerRegistryMounts(registerMount func(string, string, bool, bool), 
 // git honors to read objects from another repository path — a cross-repo read
 // primitive. It is a directory, so this works as a bind on every runtime,
 // including Apple. Created first (like hooks/info) so the mount always applies.
-func narrowObjectsInfo(registerMount func(string, string, bool, bool), gitDir, containerGitDir string) {
-	src := filepath.Join(gitDir, "objects", "info")
-	if err := os.MkdirAll(src, 0755); err != nil {
-		return
-	}
-	registerMount(src, filepath.Join(containerGitDir, "objects", "info"), true, true)
+func narrowObjectsInfo(registerMount func(string, string, bool, bool), gitDir, containerGitDir string) error {
+	// Create-first through the component-checked path: the intermediate objects/ and
+	// the leaf objects/info are each Lstat-checked (symlink/non-dir refused).
+	return bindChecked(registerMount, gitDir, containerGitDir, true, bindDirCreate, "objects", "info")
 }
 
 // narrowWorktreesDir binds .git/worktrees read-only, then re-mounts the agent's
@@ -1104,34 +1276,39 @@ func narrowObjectsInfo(registerMount func(string, string, bool, bool), gitDir, c
 // worktreeName must be the broker-trusted admin name (trustedWorktreeAdminName),
 // or "" for a layout with no own per-agent worktree (shared-plain).
 func narrowWorktreesDir(registerMount func(string, string, bool, bool), gitDir, containerGitDir, worktreeName string) error {
-	worktreesDir := filepath.Join(gitDir, "worktrees")
-	if !fileExists(worktreesDir) {
-		return nil
-	}
 	// The whole worktrees/ dir is read-only so a container cannot write any
 	// sibling's admin files (HEAD, index, commondir, gitdir, config.worktree).
-	registerMount(worktreesDir, filepath.Join(containerGitDir, "worktrees"), true, true)
+	wtSrc, present, err := checkedBindSource(gitDir, bindDirRequire, "worktrees")
+	if err != nil {
+		return err
+	}
+	if !present {
+		return nil
+	}
+	registerMount(wtSrc, filepath.Join(containerGitDir, "worktrees"), true, true)
 	if worktreeName == "" {
 		return nil
 	}
-	own := filepath.Join(worktreesDir, worktreeName)
-	if !fileExists(own) {
+	ownSrc, ownPresent, err := checkedBindSource(gitDir, bindDirRequire, "worktrees", worktreeName)
+	if err != nil {
+		return err
+	}
+	if !ownPresent {
 		return nil
 	}
-	ownContainer := filepath.Join(containerGitDir, "worktrees", worktreeName)
 	// The agent's own worktree admin dir is read-write for HEAD/index/logs/ORIG_HEAD.
-	registerMount(own, ownContainer, false, true)
+	registerMount(ownSrc, filepath.Join(containerGitDir, "worktrees", worktreeName), false, true)
 	// …but its back-link (gitdir), its commondir pointer, and its config.worktree
-	// stay read-only (create-first), so the agent cannot redirect its own gitdir/
-	// commondir or write worktree-scoped config. These sit inside the read-write
-	// own-admin overlay, so a failed create would fail open; refuse the start.
-	if err := bindReadOnlyCreateFirstFile(registerMount, filepath.Join(own, "gitdir"), filepath.Join(ownContainer, "gitdir")); err != nil {
-		return err
+	// stay read-only (create-first through the component-checked path), so the agent
+	// cannot redirect its own gitdir/commondir or write worktree-scoped config.
+	// These sit inside the read-write own-admin overlay, so a failed create would
+	// fail open; refuse the start.
+	for _, f := range []string{"gitdir", "commondir", "config.worktree"} {
+		if e := bindChecked(registerMount, gitDir, containerGitDir, true, bindFileCreate, "worktrees", worktreeName, f); e != nil {
+			return e
+		}
 	}
-	if err := bindReadOnlyCreateFirstFile(registerMount, filepath.Join(own, "commondir"), filepath.Join(ownContainer, "commondir")); err != nil {
-		return err
-	}
-	return bindReadOnlyCreateFirstFile(registerMount, filepath.Join(own, "config.worktree"), filepath.Join(ownContainer, "config.worktree"))
+	return nil
 }
 
 // registerPrivateGitConfig binds the per-agent private .git/config copy
@@ -1309,8 +1486,12 @@ func registerRwBaseGitNarrowing(registerMount func(string, string, bool, bool), 
 	if err := narrowGitAdminMounts(registerMount, gitDir, containerGitDir); err != nil {
 		return err
 	}
-	narrowSharerRegistryMounts(registerMount, gitDir, containerGitDir)
-	narrowObjectsInfo(registerMount, gitDir, containerGitDir)
+	if err := narrowSharerRegistryMounts(registerMount, gitDir, containerGitDir); err != nil {
+		return err
+	}
+	if err := narrowObjectsInfo(registerMount, gitDir, containerGitDir); err != nil {
+		return err
+	}
 	if err := narrowWorktreesDir(registerMount, gitDir, containerGitDir, worktreeName); err != nil {
 		return err
 	}
@@ -1361,31 +1542,31 @@ func registerReadOnlyBaseGitMounts(registerMount func(string, string, bool, bool
 		return err
 	}
 	// objects/info read-only again (alternates), on top of the rw objects/.
-	narrowObjectsInfo(registerMount, gitDir, containerGitDir)
+	if err := narrowObjectsInfo(registerMount, gitDir, containerGitDir); err != nil {
+		return err
+	}
 	// The agent's own worktree admin dir must be writable (HEAD/index/logs), but
-	// its gitdir, commondir and config.worktree stay read-only. The rw overlay goes
-	// through the same ensureOverlayDir refusal; a missing own dir means no own
-	// worktree (skip the admin binds), a symlink or non-directory is refused.
+	// its gitdir, commondir and config.worktree stay read-only. The rw overlay and
+	// each file go through the same checkedBindSource refusal, component by component;
+	// a missing own dir means no own worktree (skip the admin binds), a symlink or
+	// non-directory is refused.
 	if worktreeName == "" {
 		return nil
 	}
-	own := filepath.Join(gitDir, "worktrees", worktreeName)
-	present, err := ensureOverlayDir(own, false)
+	ownSrc, present, err := checkedBindSource(gitDir, bindDirRequire, "worktrees", worktreeName)
 	if err != nil {
 		return err
 	}
 	if !present {
 		return nil
 	}
-	ownContainer := filepath.Join(containerGitDir, "worktrees", worktreeName)
-	registerMount(own, ownContainer, false, true)
-	if err := bindReadOnlyCreateFirstFile(registerMount, filepath.Join(own, "gitdir"), filepath.Join(ownContainer, "gitdir")); err != nil {
-		return err
+	registerMount(ownSrc, filepath.Join(containerGitDir, "worktrees", worktreeName), false, true)
+	for _, f := range []string{"gitdir", "commondir", "config.worktree"} {
+		if e := bindChecked(registerMount, gitDir, containerGitDir, true, bindFileCreate, "worktrees", worktreeName, f); e != nil {
+			return e
+		}
 	}
-	if err := bindReadOnlyCreateFirstFile(registerMount, filepath.Join(own, "commondir"), filepath.Join(ownContainer, "commondir")); err != nil {
-		return err
-	}
-	return bindReadOnlyCreateFirstFile(registerMount, filepath.Join(own, "config.worktree"), filepath.Join(ownContainer, "config.worktree"))
+	return nil
 }
 
 // registerSharedPlainGitMounts narrows the .git admin surface of a shared-plain
