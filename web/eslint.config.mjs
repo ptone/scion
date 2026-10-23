@@ -281,10 +281,12 @@ export default defineConfig([
           message: 'The review editor must not turn strings into HTML (see eslint.config.mjs).',
         },
         {
-          // Lit property bindings (.innerHTML=${…}) and object keys
-          // (Object.assign(el, { innerHTML })).
+          // Lit property bindings (.innerHTML=${…}), a srcdoc attribute
+          // binding, object keys (Object.assign(el, { innerHTML })), and
+          // write() on a document reached through another object
+          // (window.document.write).
           selector:
-            'TemplateElement[value.raw=/\\.(innerHTML|outerHTML|srcdoc)\\s*=/], Property[key.name=/^(innerHTML|outerHTML|srcdoc)$/], Property[key.value=/^(innerHTML|outerHTML|srcdoc)$/]',
+            "TemplateElement[value.raw=/\\.(innerHTML|outerHTML|srcdoc)\\s*=/], TemplateElement[value.raw=/\\bsrcdoc\\s*=\\s*[\"']?$/], Property[key.name=/^(innerHTML|outerHTML|srcdoc)$/], Property[key.value=/^(innerHTML|outerHTML|srcdoc)$/], CallExpression[callee.object.property.name='document'][callee.property.name=/^(write|writeln)$/]",
           message: 'The review editor must not turn strings into HTML (see eslint.config.mjs).',
         },
         {
