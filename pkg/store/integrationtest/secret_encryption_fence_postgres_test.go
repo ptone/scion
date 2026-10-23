@@ -28,7 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	enthubencryptionpolicy "github.com/GoogleCloudPlatform/scion/pkg/ent/hubencryptionpolicy"
-	"github.com/GoogleCloudPlatform/scion/pkg/secret/envelope"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret/secretenvelope"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -47,7 +47,7 @@ func fencePolicyPG(gen int64, writer string) store.EncryptionPolicy {
 }
 
 func fakeV2(kid string) string {
-	return envelope.FormatV2Value(kid, bytes.Repeat([]byte{0x5A}, envelope.NonceSize+envelope.TagSize+4))
+	return secretenvelope.FormatV2Value(kid, bytes.Repeat([]byte{0x5A}, secretenvelope.NonceSize+secretenvelope.TagSize+4))
 }
 
 // TestSecretEncryptionFence_Postgres pins the PostgreSQL locking of the

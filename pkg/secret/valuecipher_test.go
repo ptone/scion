@@ -30,7 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret/ciphertest"
-	"github.com/GoogleCloudPlatform/scion/pkg/secret/envelope"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret/secretenvelope"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -189,16 +189,16 @@ func TestValueCipher_MalformedAndTampered(t *testing.T) {
 		in   string
 		want error
 	}{
-		{"unknown version", "enc:v9:" + base64.StdEncoding.EncodeToString(raw), envelope.ErrUnknownVersion},
-		{"bare enc", "enc:", envelope.ErrUnknownVersion},
-		{"bare v1", "enc:v1:", envelope.ErrMalformed},
-		{"bad base64", "enc:v2:k2:@@@@", envelope.ErrMalformed},
-		{"short nonce", "enc:v2:k2:" + base64.StdEncoding.EncodeToString(raw[:10]), envelope.ErrMalformed},
-		{"missing kid", "enc:v2::" + base64.StdEncoding.EncodeToString(raw), envelope.ErrMissingKeyID},
-		{"invalid kid", "enc:v2:k/2:" + base64.StdEncoding.EncodeToString(raw), envelope.ErrMalformed},
-		{"tampered tag", envelope.FormatV2Value("k2", tampered), secret.ErrDecrypt},
-		{"tampered ciphertext", envelope.FormatV2Value("k2", tamperedBody), secret.ErrDecrypt},
-		{"tampered v1", envelope.FormatV1Value(v1tampered), secret.ErrDecrypt},
+		{"unknown version", "enc:v9:" + base64.StdEncoding.EncodeToString(raw), secretenvelope.ErrUnknownVersion},
+		{"bare enc", "enc:", secretenvelope.ErrUnknownVersion},
+		{"bare v1", "enc:v1:", secretenvelope.ErrMalformed},
+		{"bad base64", "enc:v2:k2:@@@@", secretenvelope.ErrMalformed},
+		{"short nonce", "enc:v2:k2:" + base64.StdEncoding.EncodeToString(raw[:10]), secretenvelope.ErrMalformed},
+		{"missing kid", "enc:v2::" + base64.StdEncoding.EncodeToString(raw), secretenvelope.ErrMissingKeyID},
+		{"invalid kid", "enc:v2:k/2:" + base64.StdEncoding.EncodeToString(raw), secretenvelope.ErrMalformed},
+		{"tampered tag", secretenvelope.FormatV2Value("k2", tampered), secret.ErrDecrypt},
+		{"tampered ciphertext", secretenvelope.FormatV2Value("k2", tamperedBody), secret.ErrDecrypt},
+		{"tampered v1", secretenvelope.FormatV1Value(v1tampered), secret.ErrDecrypt},
 		{"v2 sealed without AAD", v2WithoutAAD(t), secret.ErrDecrypt},
 	}
 	for _, tc := range tests {
@@ -224,7 +224,7 @@ func v2WithoutAAD(t *testing.T) string {
 	block, _ := aes.NewCipher(ciphertest.FakeKey("k2"))
 	gcm, _ := cipher.NewGCM(block)
 	nonce := []byte(goldenNonce)
-	return envelope.FormatV2Value("k2", gcm.Seal(nonce, nonce, []byte(goldenPlaintext), nil))
+	return secretenvelope.FormatV2Value("k2", gcm.Seal(nonce, nonce, []byte(goldenPlaintext), nil))
 }
 
 func TestValueCipher_PlaintextModes(t *testing.T) {

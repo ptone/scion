@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/secret/envelope"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret/secretenvelope"
 )
 
 // ErrEncryptionPolicyMismatch refuses a payload write the database
@@ -89,7 +89,7 @@ func (p *EncryptionPolicy) Validate() error {
 func validKIDList(ids []string, field string) error {
 	seen := make(map[string]bool, len(ids))
 	for i, id := range ids {
-		if !envelope.ValidKID(id) {
+		if !secretenvelope.ValidKID(id) {
 			return fmt.Errorf("%w: encryption policy %s[%d] is not a valid key ID", ErrInvalidInput, field, i)
 		}
 		if seen[id] {
@@ -111,8 +111,8 @@ func (p *EncryptionPolicy) AllowsWrite(value, secretRef string) bool {
 	if value == "" {
 		return secretRef != ""
 	}
-	env, err := envelope.Parse(value)
-	if err != nil || env.Format != envelope.FormatV2 {
+	env, err := secretenvelope.Parse(value)
+	if err != nil || env.Format != secretenvelope.FormatV2 {
 		return false
 	}
 	for _, id := range p.AllowedWriteKIDs {
@@ -174,7 +174,7 @@ func (m *EncryptionMigration) Validate() error {
 	if m.ID == "" {
 		return fmt.Errorf("%w: encryption migration needs an ID", ErrInvalidInput)
 	}
-	if !envelope.ValidKID(m.TargetKID) {
+	if !secretenvelope.ValidKID(m.TargetKID) {
 		return fmt.Errorf("%w: encryption migration target_kid is not a valid key ID", ErrInvalidInput)
 	}
 	switch m.State {

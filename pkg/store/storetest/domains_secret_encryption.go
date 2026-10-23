@@ -23,7 +23,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/secret/envelope"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret/secretenvelope"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -81,11 +81,13 @@ func encUpdateMigration(ctx context.Context, s store.SecretEncryptionStore, m *s
 
 // fakeSealed is filler standing in for nonce||ciphertext||tag.
 func fakeSealed(fill byte) []byte {
-	return bytes.Repeat([]byte{fill}, envelope.NonceSize+envelope.TagSize+8)
+	return bytes.Repeat([]byte{fill}, secretenvelope.NonceSize+secretenvelope.TagSize+8)
 }
 
-func v1Value(fill byte) string             { return envelope.FormatV1Value(fakeSealed(fill)) }
-func v2Value(kid string, fill byte) string { return envelope.FormatV2Value(kid, fakeSealed(fill)) }
+func v1Value(fill byte) string { return secretenvelope.FormatV1Value(fakeSealed(fill)) }
+func v2Value(kid string, fill byte) string {
+	return secretenvelope.FormatV2Value(kid, fakeSealed(fill))
+}
 
 func encSecret(key, scope, scopeID, value, ref string) *store.Secret {
 	return &store.Secret{

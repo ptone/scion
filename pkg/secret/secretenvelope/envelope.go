@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package envelope parses and formats the stored ciphertext envelopes of
+// Package secretenvelope parses and formats the stored ciphertext envelopes of
 // Hub-encrypted secret values (ptone/scion#1530 design §5):
 //
 //	enc:v1:<base64(nonce+ciphertext)>        key-ID-less legacy envelope
@@ -22,7 +22,7 @@
 // to enforce the encryption policy fence on writes. It depends on the
 // standard library only. Errors never contain the stored value: they name
 // the format problem and, at most, a byte offset.
-package envelope
+package secretenvelope
 
 import (
 	"encoding/base64"

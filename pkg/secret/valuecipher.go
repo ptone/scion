@@ -24,12 +24,12 @@ import (
 	"log/slog"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
-	"github.com/GoogleCloudPlatform/scion/pkg/secret/envelope"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret/secretenvelope"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// Typed ValueCipher errors (in addition to envelope.ErrUnknownVersion,
-// envelope.ErrMalformed and envelope.ErrMissingKeyID). None of them is,
+// Typed ValueCipher errors (in addition to secretenvelope.ErrUnknownVersion,
+// secretenvelope.ErrMalformed and secretenvelope.ErrMissingKeyID). None of them is,
 // wraps or may be treated as store.ErrNotFound: a value that cannot be
 // read is never missing data. No error text carries a key, a stored value
 // or a plaintext.
@@ -210,15 +210,15 @@ func (c *ValueCipher) Encrypt(plaintext string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	nonce := make([]byte, envelope.NonceSize)
+	nonce := make([]byte, secretenvelope.NonceSize)
 	if err := c.nonce(nonce); err != nil {
 		return "", fmt.Errorf("secret: generating nonce: %w", err)
 	}
 	switch c.ring.WriteFormat() {
 	case keyring.WriteV1:
-		return envelope.FormatV1Value(gcm.Seal(nonce, nonce, []byte(plaintext), nil)), nil
+		return secretenvelope.FormatV1Value(gcm.Seal(nonce, nonce, []byte(plaintext), nil)), nil
 	case keyring.WriteV2:
-		return envelope.FormatV2Value(active.ID, gcm.Seal(nonce, nonce, []byte(plaintext), envelope.AADV2(active.ID))), nil
+		return secretenvelope.FormatV2Value(active.ID, gcm.Seal(nonce, nonce, []byte(plaintext), secretenvelope.AADV2(active.ID))), nil
 	default:
 		return "", errors.New("secret: unknown encryption write format")
 	}
@@ -248,11 +248,11 @@ func (c *ValueCipher) decrypt(stored string, admitPlaintext bool) (string, error
 	if !c.configured() {
 		return "", ErrCipherNotConfigured
 	}
-	env, err := envelope.Parse(stored)
+	env, err := secretenvelope.Parse(stored)
 	if err != nil {
 		return "", err
 	}
-	if env.Format == envelope.FormatPlaintext {
+	if env.Format == secretenvelope.FormatPlaintext {
 		if admitPlaintext || c.mode != modeManaged {
 			return stored, nil
 		}
@@ -266,20 +266,20 @@ func (c *ValueCipher) decrypt(stored string, admitPlaintext bool) (string, error
 		aad        func(id string) []byte
 	)
 	switch env.Format {
-	case envelope.FormatV1:
+	case secretenvelope.FormatV1:
 		candidates = c.ring.Candidates("")
 		if len(candidates) == 0 {
 			return "", ErrNoDecryptionKey
 		}
 		aad = func(string) []byte { return nil }
-	case envelope.FormatV2:
+	case secretenvelope.FormatV2:
 		candidates = c.ring.Candidates(env.KID)
 		if len(candidates) == 0 {
 			return "", ErrUnknownKeyID
 		}
-		aad = envelope.AADV2
+		aad = secretenvelope.AADV2
 	}
-	nonce, sealed := env.Sealed[:envelope.NonceSize], env.Sealed[envelope.NonceSize:]
+	nonce, sealed := env.Sealed[:secretenvelope.NonceSize], env.Sealed[secretenvelope.NonceSize:]
 	for _, k := range candidates {
 		gcm, err := newGCM(k.Bytes())
 		if err != nil {
@@ -293,8 +293,8 @@ func (c *ValueCipher) decrypt(stored string, admitPlaintext bool) (string, error
 }
 
 // Inspect parses a stored value without decrypting it.
-func (c *ValueCipher) Inspect(stored string) (envelope.Envelope, error) {
-	return envelope.Parse(stored)
+func (c *ValueCipher) Inspect(stored string) (secretenvelope.Envelope, error) {
+	return secretenvelope.Parse(stored)
 }
 
 func newGCM(key []byte) (cipher.AEAD, error) {
