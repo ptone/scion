@@ -347,8 +347,11 @@ own **private, read-only copy** in place of the shared one; the private copy has
 settings stripped and is pre-seeded so that `git push` and `git push -u origin <branch>` for the
 agent's own branch succeed without needing to write the config. Personal git preferences inside the
 agent go in the agent's own global git config, which is writable, not in the repository config. On the
-Apple runtime agents read the repository's git config directly; keep credentials out of repository git
-config (use a credential helper).
+Apple runtime agents read the repository's git config directly (the runtime cannot bind a single
+private file); keep credentials out of repository git config (use a credential helper). An Apple agent
+whose repository `.git/config` holds credential-bearing settings is refused at start, naming the
+sections that must be cleared; use a credential helper, or run the project on a runtime that provides
+the private config copy.
 
 Commit, branch creation, fetch, pull and push work normally. Because the `.git` root is read-only, a
 few operations that write a lock or state file directly in it do not work inside an agent: deleting a

@@ -524,7 +524,11 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			if err := registerReadOnlyBaseGitMounts(registerMount, gitDir, "/repo-root/.git", name); err != nil {
 				return nil, err
 			}
-			if config.RuntimeName != appleContainerRuntimeName {
+			if config.RuntimeName == appleContainerRuntimeName {
+				if err := refuseAppleRepoConfigWithSecrets(config.Name, gitDir); err != nil {
+					return nil, err
+				}
+			} else {
 				if err := registerPrivateGitConfig(registerMount, config, "/repo-root/.git"); err != nil {
 					return nil, err
 				}
@@ -1198,9 +1202,77 @@ func registerWorktreeGitMounts(registerMount func(string, string, bool, bool), c
 		return err
 	}
 	if config.RuntimeName == appleContainerRuntimeName {
-		return nil
+		return refuseAppleRepoConfigWithSecrets(config.Name, gitDir)
 	}
 	return registerPrivateGitConfig(registerMount, config, containerGit)
+}
+
+// refuseAppleRepoConfigWithSecrets refuses the start when, on the Apple runtime,
+// the repository's .git/config holds credential-bearing settings. Apple cannot
+// bind a single file, so the agent reads the repository config directly (no
+// redacted per-agent copy); a read-only mount keeps the agent from changing the
+// config but still lets it read the values. The check runs
+// util.RedactGitConfigSecrets on the config and refuses if anything would be
+// stripped, naming only the sections (never the values). docker/podman are
+// unaffected: they bind a redacted private copy.
+func refuseAppleRepoConfigWithSecrets(agentName, gitDir string) error {
+	raw, err := readSmallConfigFile(filepath.Join(gitDir, "config"))
+	if err != nil {
+		return fmt.Errorf("agent %q: cannot read the repository git config to vet it for the Apple runtime: %w", agentName, err)
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+	_, stripped, err := util.RedactGitConfigSecrets(raw)
+	if err != nil {
+		return fmt.Errorf("agent %q: cannot parse the repository git config to vet it for the Apple runtime: %w", agentName, err)
+	}
+	if len(stripped) == 0 {
+		return nil
+	}
+	return fmt.Errorf("agent %q: the repository's .git/config holds credentials in section(s) %s; remove them, or use a runtime that supports a private git config", agentName, strings.Join(creditSections(stripped), ", "))
+}
+
+// creditSections returns the sorted, unique top-level sections of the given
+// config keys (the part before the first "."), so a refusal can name the
+// sections without ever quoting a credential value.
+func creditSections(keys []string) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	for _, k := range keys {
+		sec := k
+		if i := strings.IndexByte(k, '.'); i >= 0 {
+			sec = k[:i]
+		}
+		if _, ok := seen[sec]; !ok {
+			seen[sec] = struct{}{}
+			out = append(out, sec)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// readSmallConfigFile reads a .git/config, refusing a symlink or non-regular file
+// (O_NOFOLLOW) and capping the size. A missing file returns nil with no error.
+func readSmallConfigFile(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	const maxConfig = 1 << 20
+	return io.ReadAll(io.LimitReader(f, maxConfig))
 }
 
 // registerRwBaseGitNarrowing narrows a read-write .git base

@@ -473,3 +473,54 @@ func TestReadOnlyGitRoot_Functional(t *testing.T) {
 		t.Errorf("the branch ref must remain intact after the clean failure, got: %v\n%s", err, out)
 	}
 }
+
+// On the Apple runtime the agent reads the repository .git/config directly (no
+// redacted private copy), so a config carrying credentials is refused at start,
+// with the refusal naming only the sections, never the values. A clean config
+// starts normally.
+func TestAppleRepoConfigWithSecrets_RefusedAtStart(t *testing.T) {
+	cases := []struct {
+		name    string
+		config  string
+		refused bool
+		section string
+	}{
+		{"http extraheader", "[http \"https://host.example\"]\n\textraheader = Authorization: Basic QUJD\n", true, "http"},
+		{"userinfo in remote url", "[remote \"origin\"]\n\turl = https://alice:s3cret@host.example/o/r.git\n", true, "remote"},
+		{"credential entry", "[credential]\n\thelper = store\n", true, "credential"},
+		{"clean config", "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n", false, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repoRoot, workspace := setupHubManagedBaseRepo(t, "agent-1")
+			if err := os.WriteFile(filepath.Join(repoRoot, ".git", "config"), []byte(tc.config), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := buildCommonRunArgs(RunConfig{
+				Harness:      &harness.Generic{},
+				Name:         "test-agent",
+				UnixUsername: "scion",
+				Image:        "scion-agent:latest",
+				RuntimeName:  appleContainerRuntimeName,
+				RepoRoot:     repoRoot,
+				Workspace:    workspace,
+			})
+			if tc.refused {
+				if err == nil {
+					t.Fatalf("expected the start to be refused for a config with %s secrets", tc.section)
+				}
+				if !strings.Contains(err.Error(), "holds credentials") || !strings.Contains(err.Error(), tc.section) {
+					t.Errorf("refusal should name the section %q and no value, got: %v", tc.section, err)
+				}
+				// The refusal must not echo a secret value.
+				for _, secret := range []string{"s3cret", "QUJD", "store", "alice:"} {
+					if strings.Contains(err.Error(), secret) {
+						t.Errorf("refusal leaked a secret value %q: %v", secret, err)
+					}
+				}
+			} else if err != nil {
+				t.Errorf("a clean config must start, got: %v", err)
+			}
+		})
+	}
+}
