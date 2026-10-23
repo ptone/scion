@@ -84,13 +84,13 @@ func TestSSHWindowsForm_RefusesEndpointShellSpecialChars(t *testing.T) {
 
 // With the Windows form, a scion executable path with a character outside
 // the allowlist is refused by ssh-config, vscode and ssh, and nothing in
-// the home directory changes. Control: a path with a space is written
-// double-quoted.
+// the home directory changes. Controls: paths with a space, with
+// "(x86)" and with an 8.3 "~" are written double-quoted.
 func TestSSHWindowsForm_RefusesExePathShellSpecialChars(t *testing.T) {
 	setSSHQuoteForWindows(t, true)
 	hub := twoProjectHub(t, "tok")
 	base := t.TempDir()
-	for _, dir := range []string{"a$(b)", "a`b`", "a!b", "a%b", "a&b", "a;b", "Program Files (x86)"} {
+	for _, dir := range []string{"a$(b)", "a`b`", "a!b", "a%b", "a&b", "a;b", "a'b", "a^b"} {
 		exe := filepath.Join(base, dir, "scion")
 		env, _, _ := newSSHTestEnv(t, t.TempDir(), hub)
 		fake := stubVSCode(t)
@@ -111,13 +111,15 @@ func TestSSHWindowsForm_RefusesExePathShellSpecialChars(t *testing.T) {
 		assert.Equal(t, before, sshFilesSnapshot(t, env.home), "%s: nothing is written", exe)
 	}
 
-	env, _, _ := newSSHTestEnv(t, t.TempDir(), hub)
-	stubVSCode(t)
-	env.exe = filepath.Join(base, "My Tools", "scion")
-	require.NoError(t, sshConfigMain(context.Background(), env, nil, true))
-	require.NoError(t, vscodeMain(context.Background(), env, "a/b-c", vscodeDefaultFolder, false))
-	cfg := readTestFile(t, vscodePaths{home: env.home}.sshConfig())
-	assert.Contains(t, cfg, `ProxyCommand "`+filepath.ToSlash(env.exe)+`" tunnel --stdio --ssh`)
+	for _, dir := range []string{"My Tools", "Program Files (x86)", "PROGRA~1"} {
+		env, _, _ := newSSHTestEnv(t, t.TempDir(), hub)
+		stubVSCode(t)
+		env.exe = filepath.Join(base, dir, "scion")
+		require.NoError(t, sshConfigMain(context.Background(), env, nil, true), dir)
+		require.NoError(t, vscodeMain(context.Background(), env, "a/b-c", vscodeDefaultFolder, false), dir)
+		cfg := readTestFile(t, vscodePaths{home: env.home}.sshConfig())
+		assert.Contains(t, cfg, `ProxyCommand "`+filepath.ToSlash(env.exe)+`" tunnel --stdio --ssh`, dir)
+	}
 }
 
 // The rendered Host block with the Windows form and an endpoint with a
@@ -130,4 +132,15 @@ func TestRenderSSHHostBlock_WindowsFormEndpointWithPath(t *testing.T) {
 	block, err := renderSSHHostBlockPinned(exe, "https://hub.example.com/team-a", "hub", "p", "a", vscodeKnownHostsRef, pin)
 	require.NoError(t, err)
 	assert.Contains(t, block, `  ProxyCommand "`+filepath.ToSlash(exe)+`" tunnel --stdio --ssh --hub https://hub.example.com/team-a --project p --known-hosts `+filepath.ToSlash(pin)+` --host-key-alias scion.hub.p.a a`+"\n")
+}
+
+// With the Windows form, an IPv6-literal endpoint is accepted and written
+// double-quoted, and the vscode block parser reads it back.
+func TestRenderSSHHostBlock_WindowsFormIPv6Endpoint(t *testing.T) {
+	setSSHQuoteForWindows(t, true)
+	exe := filepath.Join(t.TempDir(), "scion")
+	block, err := renderSSHHostBlock(exe, "http://[::1]:9810", "hub", "p", "a")
+	require.NoError(t, err)
+	assert.Contains(t, block, ` --hub "http://[::1]:9810" --project p a`+"\n")
+	assert.Equal(t, "http://[::1]:9810", vscodeBlockHub(block))
 }

@@ -581,11 +581,15 @@ func isSSHWordSafe(r rune) bool {
 //   - ASCII letters and digits and @+=:,./_- (left unquoted), and
 //   - non-ASCII letters, digits and combining marks (an account name in a
 //     path), and
-//   - spaces, in which case the whole word is double-quoted.
+//   - spaces and ( ) ~ [ ], in which case the whole word is
+//     double-quoted: inside double quotes they are literal for sh and for
+//     the C runtime's command-line parser (a "Program Files (x86)" or 8.3
+//     "~" path, an IPv6 host).
 //
-// Any other character, including '%' and every character that sh or the
-// C runtime's command-line parser treats specially, is an error that
-// names the character; the caller names the word. (The allowlist replaces
+// Any other character, including '%' (ssh expands % tokens in a
+// ProxyCommand) and every character that sh or the C runtime's
+// command-line parser treats specially inside double quotes, is an error
+// that names the character; the caller names the word. (The allowlist replaces
 // the quoting from miller79/scion#189; the name is kept from there.)
 func sshCmdQuote(s string) (string, error) {
 	s = strings.ReplaceAll(s, `\`, "/")
@@ -596,7 +600,7 @@ func sshCmdQuote(s string) (string, error) {
 	for _, r := range s {
 		switch {
 		case isSSHWordSafe(r):
-		case r == ' ':
+		case strings.ContainsRune(" ()~[]", r):
 			quote = true
 		case r >= utf8.RuneSelf && (unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsMark(r)):
 		default:

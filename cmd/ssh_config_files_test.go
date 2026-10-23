@@ -373,17 +373,20 @@ func mustSSHShellQuote(t *testing.T, s string) string {
 }
 
 // The Windows ProxyCommand form: backslashes become forward slashes, a
-// word of allowlisted characters is left as is, and a word with a space is
-// double-quoted. Non-ASCII letters (an account name in a path) are
+// word of allowlisted characters is left as is, and a word with a space or
+// ( ) ~ [ ] is double-quoted. Non-ASCII letters (an account name in a path) are
 // accepted. Runs on every OS (the form is a variable).
 func TestSSHShellQuoteForCmd(t *testing.T) {
 	setSSHQuoteForWindows(t, true)
 	for in, want := range map[string]string{
-		`C:\Users\me\bin\scion.exe`:           `C:/Users/me/bin/scion.exe`,
-		`C:\Program Files\Scion\scion.exe`:    `"C:/Program Files/Scion/scion.exe"`,
-		`C:\Users\José Núñez\bin\scion.exe`:   `"C:/Users/José Núñez/bin/scion.exe"`,
-		"https://hub.example.com:8443/team-a": "https://hub.example.com:8443/team-a",
-		"my-project":                          "my-project",
+		`C:\Users\me\bin\scion.exe`:              `C:/Users/me/bin/scion.exe`,
+		`C:\Program Files\Scion\scion.exe`:       `"C:/Program Files/Scion/scion.exe"`,
+		`C:\Users\José Núñez\bin\scion.exe`:      `"C:/Users/José Núñez/bin/scion.exe"`,
+		"https://hub.example.com:8443/team-a":    "https://hub.example.com:8443/team-a",
+		`C:\Program Files (x86)\Scion\scion.exe`: `"C:/Program Files (x86)/Scion/scion.exe"`,
+		`C:\PROGRA~1\Scion\scion.exe`:            `"C:/PROGRA~1/Scion/scion.exe"`,
+		"http://[::1]:9810":                      `"http://[::1]:9810"`,
+		"my-project":                             "my-project",
 	} {
 		assert.Equal(t, want, mustSSHShellQuote(t, in), in)
 	}
@@ -396,7 +399,7 @@ func TestSSHShellQuoteForCmd(t *testing.T) {
 // whitespace. The error names the character. Runs on every OS.
 func TestSSHCmdQuote_RefusesShellSpecialChars(t *testing.T) {
 	setSSHQuoteForWindows(t, true)
-	for _, c := range []string{`"`, "$", "`", "!", "%", "^", "&", "|", "<", ">", "(", ")", ";", "'", "*", "?", "[", "]", "{", "}", "~", "#", "\t", "\n", "\u00a0", "\uff02"} {
+	for _, c := range []string{`"`, "$", "`", "!", "%", "^", "&", "|", "<", ">", ";", "'", "*", "?", "{", "}", "#", "\t", "\n", "\u00a0", "\uff02"} {
 		word := "C:/a" + c + "b/scion.exe"
 		_, err := sshShellQuote(word)
 		require.Error(t, err, "%q", word)
