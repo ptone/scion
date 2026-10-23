@@ -977,6 +977,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		req.ProjectPath = filepath.Join(globalDir, "projects", req.ProjectSlug)
+		req.workspaceAdmissionChecked = true
 		if _, statErr := os.Lstat(req.ProjectPath); os.IsNotExist(statErr) {
 			req.workspaceAbsentAtAdmission = true
 		}
@@ -2175,10 +2176,12 @@ const bootstrapSkippedWarning = "The project workspace already exists on the run
 
 // bootstrapSkipsExistingWorkspace reports whether a create's workspace
 // bootstrap must leave the workspace alone: a project-level (slug)
-// bootstrap whose workspace directory existed when the create was admitted.
-// Per-agent bootstrap directories are always applied.
+// bootstrap whose workspace directory createAgent found existing when it
+// admitted the create. Per-agent bootstrap directories, and a request
+// whose project path was not checked at admission (one that names its
+// project path, such as the global project), are always applied.
 func bootstrapSkipsExistingWorkspace(req CreateAgentRequest) bool {
-	return req.WorkspaceStoragePath != "" && req.ProjectSlug != "" && !req.workspaceAbsentAtAdmission
+	return req.WorkspaceStoragePath != "" && req.ProjectSlug != "" && req.workspaceAdmissionChecked && !req.workspaceAbsentAtAdmission
 }
 
 // resolveGCSWorkspaceDir computes the directory a GCS workspace bootstrap

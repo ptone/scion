@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -28,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -85,16 +87,6 @@ func requireRefusedCreate(t *testing.T, s store.Store, project *store.Project, d
 	agents, err := s.ListAgents(context.Background(), store.AgentFilter{ProjectID: project.ID}, store.ListOptions{})
 	require.NoError(t, err)
 	require.Empty(t, agents.Items, "the agent row must be cleaned up")
-}
-
-func TestCreateAgent_RemoteBroker_LocalHubWorkspace_Refused409(t *testing.T) {
-	srv, s, project, disp := setupRemoteBrokerWorkspaceServer(t)
-
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name: "t6-local-hub", ProjectID: project.ID,
-	})
-	requireRefusedCreate(t, s, project, disp, rec.Code, rec.Body.String(),
-		"lives on the hub's local disk, which a remote runtime broker cannot reach")
 }
 
 func TestCreateAgent_RemoteBroker_SharedWorkspaceGit_LocalHub_Refused409(t *testing.T) {
@@ -193,4 +185,45 @@ func TestCreateAgent_RemoteBroker_ClonePerAgentGit_Dispatches(t *testing.T) {
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 	require.NotNil(t, disp.capturedAgent, "the agent must be dispatched")
+}
+
+// TestWorkspaceFinalize_RelaysBrokerBootstrapSkippedWarning: when the broker
+// skips a workspace bootstrap because the project workspace already exists
+// (its create answer carries the warning), the hub relays the warning into
+// the finalize response the CLI prints (Q4 condition 2; review rev-1 #7).
+func TestWorkspaceFinalize_RelaysBrokerBootstrapSkippedWarning(t *testing.T) {
+	const skipped = "The project workspace already exists on the runtime broker, so the uploaded files were not applied; use `scion sync to <agent>` to push changes"
+	srv, f, c := newLandingCompletionServer(t)
+	c.warnings = []string{skipped}
+	agent := f.agent(t, "fin-skip", string(state.PhaseProvisioning), false)
+
+	rec := doBootstrapRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", agent.ID),
+		SyncToFinalizeRequest{Manifest: &transfer.Manifest{Version: "1.0"}})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp SyncToFinalizeResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Contains(t, resp.Warnings, skipped)
+}
+
+// TestCreateAgent_RemoteBroker_NonGitLocalHub_CarveOut pins the T6
+// carve-out (fs-cleanup-arch Q4 boundary; review rev-1 #2): a non-git
+// project on a local-backend hub dispatched to a remote broker without a
+// local path is NOT refused, also without a task or workspace files (scion
+// start/create, an empty directory); the broker uses its own project
+// directory, so no hub path is recorded.
+func TestCreateAgent_RemoteBroker_NonGitLocalHub_CarveOut(t *testing.T) {
+	srv, _, project, disp := setupRemoteBrokerWorkspaceServer(t)
+	require.Empty(t, project.GitRemote, "fixture check: non-git project")
+
+	for _, req := range []CreateAgentRequest{
+		{Name: "carve-no-task", ProjectID: project.ID},
+		{Name: "carve-task", ProjectID: project.ID, Task: "work"},
+	} {
+		disp.capturedAgent = nil
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", req)
+		require.Equal(t, http.StatusCreated, rec.Code, "%s: %s", req.Name, rec.Body.String())
+		require.NotNil(t, disp.capturedAgent, "dispatched")
+		assert.Empty(t, disp.capturedAgent.AppliedConfig.Workspace, "the hub's local path is not sent to a remote broker")
+	}
 }

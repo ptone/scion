@@ -235,9 +235,14 @@ func TestProjectWorkspaceFiles_RemoteLinkedProject_ConflictNoCache(t *testing.T)
 	}
 	_, err := os.Stat(filepath.Join(f.home, ".scion", "projects", project.Slug))
 	assert.True(t, os.IsNotExist(err), "no hub-side cache directory is created")
-	for _, route := range []string{"workspace/cache/refresh", "workspace/cache/status", "workspace/cache/notify", "sync/status"} {
-		rec := doRequest(t, f.srv, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s/%s", project.ID, route), nil)
-		assert.NotEqual(t, http.StatusOK, rec.Code, "the linked-project cache route %s is gone", route)
+	for _, rt := range []struct{ method, route string }{
+		{http.MethodPost, "workspace/cache/refresh"},
+		{http.MethodGet, "workspace/cache/status"},
+		{http.MethodPost, "workspace/cache/notify"},
+		{http.MethodGet, "sync/status"},
+	} {
+		rec := doRequest(t, f.srv, rt.method, fmt.Sprintf("/api/v1/projects/%s/%s", project.ID, rt.route), nil)
+		assert.Equal(t, http.StatusNotFound, rec.Code, "the linked-project cache route %s %s is gone: %s", rt.method, rt.route, rec.Body.String())
 	}
 }
 
@@ -626,4 +631,124 @@ func TestProjectWorkspacePull_ConfinedAndNoHostPaths(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
 	assert.NotContains(t, rec.Body.String(), elsewhere)
 	assert.NotContains(t, rec.Body.String(), f.shareBase)
+}
+
+// unusableWorkspaceStorage is a shared workspace backend the hub cannot
+// build a Layout for (a volume backend with no volume name,
+// ptone/scion#1073): every resolution fails closed.
+func unusableWorkspaceStorage() *config.V1WorkspaceStorageConfig {
+	return &config.V1WorkspaceStorageConfig{Backend: "cloudrun-volume"}
+}
+
+// TestCreateAgent_UnusableSharedStorage_503NoRowNoDispatch (review rev-1
+// #4): an agent create that cannot resolve the project workspace answers
+// 503 (no host path), creates no row and dispatches nothing.
+func TestCreateAgent_UnusableSharedStorage_503NoRowNoDispatch(t *testing.T) {
+	f := newWorkspaceLayoutFixture(t)
+	ctx := context.Background()
+	disp := &mockDispatcher{}
+	f.srv.SetDispatcher(disp)
+	broker := &store.RuntimeBroker{ID: tid("broker-unusable"), Slug: "unusable-broker", Name: "Unusable Broker", Status: store.BrokerStatusOnline}
+	require.NoError(t, f.s.CreateRuntimeBroker(ctx, broker))
+	project := &store.Project{ID: tid("project-unusable"), Slug: "unusable", Name: "Unusable"}
+	require.NoError(t, f.s.CreateProject(ctx, project))
+	f.srv.config.WorkspaceStorageConfig = unusableWorkspaceStorage()
+
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents", map[string]interface{}{
+		"name": "unusable-agent", "projectId": project.ID, "runtimeBrokerId": broker.ID,
+	})
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "Workspace storage is not available")
+	agents, err := f.s.ListAgents(ctx, store.AgentFilter{ProjectID: project.ID, IncludeDeleted: true}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, agents.Items, "no agent row may be created")
+	assert.Empty(t, disp.dispatchedAgents, "nothing may be dispatched")
+}
+
+// TestCreateAgent_EmbeddedBroker_WorkspaceLeafFailure_503: the co-located
+// broker's workspace leaf cannot be created (the share is not mounted):
+// 503, no row, nothing dispatched.
+func TestCreateAgent_EmbeddedBroker_WorkspaceLeafFailure_503(t *testing.T) {
+	f := newWorkspaceLayoutFixture(t)
+	ctx := context.Background()
+	disp := &mockDispatcher{}
+	f.srv.SetDispatcher(disp)
+	broker := &store.RuntimeBroker{ID: tid("broker-leaf-fail"), Slug: "leaf-fail-broker", Name: "Leaf Fail Broker", Status: store.BrokerStatusOnline}
+	require.NoError(t, f.s.CreateRuntimeBroker(ctx, broker))
+	f.srv.SetEmbeddedBrokerID(broker.ID)
+	project := &store.Project{ID: tid("project-leaf-fail"), Slug: "leaf-fail", Name: "Leaf Fail"}
+	require.NoError(t, f.s.CreateProject(ctx, project))
+	f.srv.config.WorkspaceStorageConfig = nfsConfig(filepath.Join(f.home, "not-mounted"))
+
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents", map[string]interface{}{
+		"name": "leaf-fail-agent", "projectId": project.ID, "runtimeBrokerId": broker.ID,
+	})
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), f.home, "no host path")
+	agents, err := f.s.ListAgents(ctx, store.AgentFilter{ProjectID: project.ID, IncludeDeleted: true}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, agents.Items)
+	assert.Empty(t, disp.dispatchedAgents)
+}
+
+// TestReincarnateAgent_UnusableSharedStorage_503: reincarnate re-derives the
+// agent's config and fails closed the same way.
+func TestReincarnateAgent_UnusableSharedStorage_503(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	srv.config.WorkspaceStorageConfig = unusableWorkspaceStorage()
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.AppliedConfig.Workspace = ""
+	})
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/reincarnate", ReincarnateAgentRequest{DryRun: true})
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "Workspace storage is not available")
+}
+
+// TestCreateProject_UnusableSharedStorage_ReleasesProjectQuota: the rolled
+// back create releases its project quota reservation.
+func TestCreateProject_UnusableSharedStorage_ReleasesProjectQuota(t *testing.T) {
+	f := newWorkspaceLayoutFixture(t)
+	setUserProjectQuotaCeiling(t, f.s, 1)
+	f.srv.config.WorkspaceStorageConfig = unusableWorkspaceStorage()
+	for i := 0; i < 2; i++ {
+		rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{Name: fmt.Sprintf("Unusable Quota %d", i)})
+		require.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
+		assert.Zero(t, countProjectQuotaReservations(t, f.s, DevUserID), "rollback must release the reservation")
+	}
+	f.srv.config.WorkspaceStorageConfig = nil
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{Name: "Usable Quota"})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+}
+
+// TestSafetyGate_WorkspaceAbsent_NothingCreated (review rev-1 #6): on a
+// Cloud Run Service with local workspace storage, refused writes to an
+// absent workspace create nothing.
+func TestSafetyGate_WorkspaceAbsent_NothingCreated(t *testing.T) {
+	f := newWorkspaceLayoutFixture(t)
+	project, workspacePath := createTestHubManagedProject(t, f.srv, "Gate Absent")
+	require.NoError(t, os.RemoveAll(workspacePath))
+	t.Setenv("K_SERVICE", "hub-service")
+
+	url := workspaceFilesURL(project.ID)
+	assert.Equal(t, http.StatusServiceUnavailable,
+		doMultipartRequest(t, f.srv, http.MethodPost, url, map[string][]byte{"a.txt": []byte("a")}).Code)
+	assert.Equal(t, http.StatusServiceUnavailable,
+		doRequest(t, f.srv, http.MethodPut, url+"/a.txt", ProjectWorkspaceWriteRequest{Content: "a"}).Code)
+	_, err := os.Stat(workspacePath)
+	assert.True(t, os.IsNotExist(err), "a refused write creates nothing")
+}
+
+// TestProjectWorkspaceFiles_ShareRootMissing_503 (review rev-1 #9): on a
+// shared backend whose share root is missing (not mounted), the Files tab
+// answers 503, not an empty listing.
+func TestProjectWorkspaceFiles_ShareRootMissing_503(t *testing.T) {
+	f := newWorkspaceLayoutFixture(t)
+	project, _ := createTestHubManagedProject(t, f.srv, "Share Missing")
+	f.srv.config.WorkspaceStorageConfig = nfsConfig(filepath.Join(f.home, "not-mounted"))
+	rec := doRequest(t, f.srv, http.MethodGet, workspaceFilesURL(project.ID), nil)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), f.home)
 }

@@ -57,7 +57,7 @@ import (
 // Returns the leaf's open fd (caller must close via CloseFd) and whether it
 // already existed before this call.
 func EnsureLeaf(hostBase, rel string) (leafFd int, alreadyExisted bool, err error) {
-	parentFd, leafName, fd, existed, walkErr := createViaComponentWalk(hostBase, rel, 0o2755)
+	parentFd, leafName, fd, existed, walkErr := createViaComponentWalk(hostBase, rel, 0o2755, 0o775)
 	if walkErr != nil {
 		return -1, false, walkErr
 	}
@@ -95,12 +95,13 @@ func EnsureLeaf(hostBase, rel string) (leafFd int, alreadyExisted bool, err erro
 // before returning the error, as EnsureLeaf does. Returns the leaf's open
 // fd (caller must close via CloseFd) and whether it already existed.
 func EnsurePrivateDir(hostBase, rel string) (leafFd int, alreadyExisted bool, err error) {
-	parentFd, leafName, fd, existed, walkErr := createViaComponentWalk(hostBase, rel, 0o2755)
+	// The leaf is created at 0755, so it never has a group-write window.
+	parentFd, leafName, fd, existed, walkErr := createViaComponentWalk(hostBase, rel, 0o2755, 0o755)
 	if walkErr != nil {
 		return -1, false, walkErr
 	}
 	if !existed {
-		if chmodErr := unix.Fchmod(fd, 0o2755); chmodErr != nil {
+		if chmodErr := chmodLeaf(fd, 0o2755); chmodErr != nil {
 			_ = CloseFd(fd)
 			_ = unix.Unlinkat(parentFd, leafName, unix.AT_REMOVEDIR)
 			_ = unix.Close(parentFd)
@@ -151,7 +152,7 @@ func SetLeafFinalizationHooksForTest(chmod func(fd int, mode uint32) error, acl 
 // fd (still open — the caller owns closing it) alongside the leaf's own fd
 // and name, so a caller (EnsureLeaf) can roll back a partially-finalized
 // leaf via Unlinkat(parentFd, leafName, ...) without re-walking.
-func createViaComponentWalk(hostBase, rel string, intermediateMode uint32) (parentFd int, leafName string, leafFd int, alreadyExisted bool, err error) {
+func createViaComponentWalk(hostBase, rel string, intermediateMode, leafCreateMode uint32) (parentFd int, leafName string, leafFd int, alreadyExisted bool, err error) {
 	baseFd, err := unix.Open(hostBase, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return -1, "", -1, false, fmt.Errorf("open host base %q: %w", hostBase, err)
@@ -184,7 +185,7 @@ func createViaComponentWalk(hostBase, rel string, intermediateMode uint32) (pare
 	}
 
 	leafComp := parts[len(parts)-1]
-	fd, existed, walkErr := openOrCreateDirNoFollow(currentFd, leafComp, 0o775)
+	fd, existed, walkErr := openOrCreateDirNoFollow(currentFd, leafComp, leafCreateMode)
 	if walkErr != nil {
 		_ = unix.Close(currentFd)
 		return -1, "", -1, false, walkErr

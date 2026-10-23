@@ -24,6 +24,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -80,10 +82,17 @@ func createRollbackSites() []createRollbackSite {
 			wantStage:    createStageUploadURL,
 		},
 		{
-			// A hub-managed project on a remote broker that cannot reach
-			// the hub's (local) workspace storage: the T6 refusal.
-			name:         "workspace storage",
-			disp:         &createAgentDispatcher{},
+			// A hub-managed project on a remote broker that does not
+			// report the hub's shared workspace storage: the T6 refusal.
+			name: "workspace storage",
+			disp: &createAgentDispatcher{},
+			setup: func(t *testing.T, srv *Server) {
+				mountRoot := t.TempDir()
+				if err := os.MkdirAll(filepath.Join(mountRoot, "share1"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				srv.config.WorkspaceStorageConfig = nfsConfig(mountRoot)
+			},
 			remoteBroker: true,
 			wantStage:    createStageWorkspaceStorage,
 		},

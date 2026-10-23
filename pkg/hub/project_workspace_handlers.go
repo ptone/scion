@@ -446,6 +446,17 @@ func (s *Server) resolveProjectWorkspace(ctx context.Context, project *store.Pro
 	return projectfs.Resolved{}, errLinkedWorkspaceRemote
 }
 
+// sharedBaseMissing reports whether resolved is on a shared backend whose
+// host base (the share's mount point) does not exist on this host: the
+// storage is unavailable, which must not read as an empty workspace.
+func sharedBaseMissing(resolved projectfs.Resolved) bool {
+	if !resolved.Backend.Shared() || resolved.HostBase == "" {
+		return false
+	}
+	_, err := os.Stat(resolved.HostBase)
+	return errors.Is(err, fs.ErrNotExist)
+}
+
 // errWorkspaceNoMount is returned for a project without a project-scoped
 // workspace (empty-per-agent: each agent has its own private directory).
 var errWorkspaceNoMount = errors.New("this project has no shared workspace: each agent gets its own private workspace directory")
@@ -505,6 +516,12 @@ func (s *Server) handleProjectWorkspace(w http.ResponseWriter, r *http.Request, 
 	}
 	root, err := resolved.Open(createIfMissing)
 	if err != nil {
+		if sharedBaseMissing(resolved) {
+			// The share is not mounted: storage unavailable, not an empty
+			// workspace (review rev-1 #9).
+			writeWorkspaceStorageUnavailable(w, errWorkspaceStorageUnavailable)
+			return
+		}
 		if errors.Is(err, fs.ErrNotExist) {
 			if r.Method == http.MethodGet && filePath == "" {
 				writeJSON(w, http.StatusOK, ProjectWorkspaceListResponse{Files: []ProjectWorkspaceFile{}, MigrationNotice: notice})
@@ -874,6 +891,10 @@ func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Re
 	// "not found".
 	root, err := resolved.Open(false)
 	if err != nil {
+		if sharedBaseMissing(resolved) {
+			writeWorkspaceStorageUnavailable(w, errWorkspaceStorageUnavailable)
+			return
+		}
 		if errors.Is(err, fs.ErrNotExist) {
 			NotFound(w, "Workspace")
 			return

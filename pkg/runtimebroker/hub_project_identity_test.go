@@ -474,3 +474,42 @@ func TestRecordHubProjectIdentity_UnreadableIdentityIsFailure(t *testing.T) {
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, config.ErrInvalidProjectID)
 }
+
+// TestBootstrapSkipsExistingWorkspace: only a project-level (slug)
+// bootstrap whose project path createAgent checked at admission and found
+// existing is skipped; a per-agent bootstrap (no slug) and a request that
+// names its project path (the global project: path and slug, never
+// checked at admission) are always applied (review rev-1 #7).
+func TestBootstrapSkipsExistingWorkspace(t *testing.T) {
+	base := CreateAgentRequest{WorkspaceStoragePath: "workspaces/p/a"}
+	for _, tc := range []struct {
+		name string
+		req  func() CreateAgentRequest
+		want bool
+	}{
+		{"per-agent bootstrap", func() CreateAgentRequest { r := base; return r }, false},
+		{"slug, existed at admission", func() CreateAgentRequest {
+			r := base
+			r.ProjectSlug, r.workspaceAdmissionChecked = "p", true
+			return r
+		}, true},
+		{"slug, absent at admission", func() CreateAgentRequest {
+			r := base
+			r.ProjectSlug, r.workspaceAdmissionChecked, r.workspaceAbsentAtAdmission = "p", true, true
+			return r
+		}, false},
+		{"global project: path and slug, not checked", func() CreateAgentRequest {
+			r := base
+			r.ProjectSlug, r.ProjectPath = "global", "/home/u/.scion"
+			return r
+		}, false},
+		{"no bootstrap", func() CreateAgentRequest {
+			r := CreateAgentRequest{ProjectSlug: "p", workspaceAdmissionChecked: true}
+			return r
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, bootstrapSkipsExistingWorkspace(tc.req()))
+		})
+	}
+}
