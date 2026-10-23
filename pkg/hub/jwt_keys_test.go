@@ -36,6 +36,7 @@ const (
 	jkLegacySecret = "test-only-p3-legacy-server-secret"
 	jkGen2Secret   = "test-only-p3-generation-2-secret-0123456789abcdef"
 	jkGen3Secret   = "test-only-p3-generation-3-secret-0123456789abcdef"
+	jkGen1Secret   = "test-only-p3-generation-1-secret-0123456789abcdef"
 )
 
 var jkT0 = time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
@@ -175,7 +176,7 @@ func jkAgentClaims(now time.Time, ttl time.Duration) AgentTokenClaims {
 // JWT key (raw, hex or a fingerprint prefix).
 func assertNoJWTKeyMaterial(t testing.TB, s string) {
 	t.Helper()
-	for _, secret := range []string{jkLegacySecret, jkGen2Secret, jkGen3Secret} {
+	for _, secret := range []string{jkLegacySecret, jkGen1Secret, jkGen2Secret, jkGen3Secret} {
 		assert.NotContains(t, s, secret)
 		for _, name := range []string{SecretKeyAgentSigningKey, SecretKeyUserSigningKey} {
 			k := deriveSharedSigningKey(secret, name)
@@ -279,6 +280,10 @@ func TestJWTRing_UnknownKidNeverFallsBack(t *testing.T) {
 	a, b := jkRollout(t, 30*24*time.Hour)
 	for _, k := range []*keyring.Keyring{a, b} {
 		svc := jkAgentSvc(t, k, clk)
+		// The legacy-secret token is the discriminating case: without its
+		// kid it would verify through the legacy reader, so only the
+		// unknown kid refuses it. The gen2 token refuses either way on A
+		// (gen2 is no legacy reader there) and is a second unknown-kid check.
 		for _, secret := range []string{jkLegacySecret, jkGen2Secret} {
 			tok := signRaw(t, jose.HS256, deriveSharedSigningKey(secret, SecretKeyAgentSigningKey), "nope", jkAgentClaims(jkT0, time.Hour))
 			_, err := svc.ValidateAgentToken(tok)
@@ -339,6 +344,29 @@ func TestJWTRing_RetiredGenerationRefuses(t *testing.T) {
 		clk.t = jkT0.Add(verifyUntil)
 		_, err = svc.ValidateAgentToken(tok)
 		assert.ErrorIs(t, err, errJWTNoEligibleKey)
+	}
+
+	// A retired generation that is not a legacy reader (gen1), selectable
+	// only by its kid: verify_until is enforced on the kid-selected
+	// generation too, and its ID-less form never verifies at all.
+	k := jkRing(t, "versioned", "gen2", []string{"legacy"},
+		jkEntry{id: "legacy", secret: jkLegacySecret},
+		jkEntry{id: "gen1", secret: jkGen1Secret, signUntil: jkAt(time.Hour), verifyUntl: jkAt(verifyUntil)},
+		jkEntry{id: "gen2", secret: jkGen2Secret})
+	clk.t = jkT0
+	svc = jkAgentSvc(t, k, clk)
+	gen1Key := deriveSharedSigningKey(jkGen1Secret, SecretKeyAgentSigningKey)
+	gen1Kid := signRaw(t, jose.HS256, gen1Key, "gen1", jkAgentClaims(jkT0, 365*24*time.Hour))
+	gen1Idless := signRaw(t, jose.HS256, gen1Key, "", jkAgentClaims(jkT0, 365*24*time.Hour))
+	clk.t = jkT0.Add(verifyUntil - time.Second)
+	_, err := svc.ValidateAgentToken(gen1Kid)
+	require.NoError(t, err, "gen1 by kid before its verify_until")
+	_, err = svc.ValidateAgentToken(gen1Idless)
+	assert.ErrorIs(t, err, errJWTNoEligibleKey, "gen1 is not a legacy reader")
+	for _, at := range []time.Duration{verifyUntil, verifyUntil + time.Hour} {
+		clk.t = jkT0.Add(at)
+		_, err = svc.ValidateAgentToken(gen1Kid)
+		assert.ErrorIs(t, err, errJWTNoEligibleKey, "gen1 by kid at T0+%s", at)
 	}
 }
 
