@@ -271,11 +271,14 @@ func MigrateProject(ctx context.Context, in ProjectInput, opts Options) ProjectR
 		// A source whose seed step failed or could not decide is not moved
 		// into workspace/: the hub seed must never become agent-visible
 		// workspace content (design P1a).
+		seedFailed := false
 		seedOK := func(src Tree, copyOnly bool) bool {
 			if in.ProjectRoot.Base == "" {
 				return true
 			}
-			return rep.seed(ctx, in, src, copyOnly, wsOpts)
+			ok := rep.seed(ctx, in, src, copyOnly, wsOpts)
+			seedFailed = seedFailed || !ok
+			return ok
 		}
 		for _, src := range sources {
 			if rep.bound(src, false, in, opts) && seedOK(src, false) {
@@ -290,6 +293,9 @@ func MigrateProject(ctx context.Context, in ProjectInput, opts Options) ProjectR
 			rep.WorkspaceIncomplete = true
 		}
 		rep.noteGitlessWorkspace(in, opts)
+		if !seedFailed && !rep.identityBlocked() {
+			rep.writeProjectSlug(in, wsOpts)
+		}
 	}
 	if in.SharedDir != nil {
 		rep.sharedDirs(in, sdOpts)
@@ -449,6 +455,105 @@ func (rep *ProjectReport) noteGitlessWorkspace(in ProjectInput, opts Options) {
 		return
 	}
 	rep.Notes = append(rep.Notes, "git project: migrated, but the workspace has no .git; the first agent start will refuse (non-empty workspace without a provisioning marker or .git) until the operator moves the non-git entries out or re-clones")
+}
+
+// projectSlugFile is the project's current slug, one line, in the project
+// configuration directory <ProjectRoot>/.scion (fs-cleanup-arch 01:15Z):
+// the hub's seeding writes it for new projects and its rename code keeps it
+// current; M2 writes it for existing projects after their seed moved.
+const projectSlugFile = "project-slug"
+
+// identityBlocked reports whether a legacy tree of the project failed the
+// identity check.
+func (rep *ProjectReport) identityBlocked() bool {
+	for _, r := range rep.Results {
+		if r.Step == StepIdentity && r.Failed() {
+			return true
+		}
+	}
+	return false
+}
+
+// writeProjectSlug writes <ProjectRoot>/.scion/project-slug after a seed
+// move of this run: never overwriting (an existing file with other content
+// is a conflict), no-follow, created with O_EXCL.
+func (rep *ProjectReport) writeProjectSlug(in ProjectInput, opts Options) {
+	moved := false
+	for _, r := range rep.Results {
+		if r.Step == StepSeed && r.Moved() {
+			moved = true
+		}
+	}
+	if !moved || in.ProjectRoot.Base == "" {
+		return
+	}
+	t := Tree{Base: in.ProjectRoot.Base, Rel: filepath.Join(in.ProjectRoot.Rel, ".scion", projectSlugFile)}
+	res := Result{Step: StepSeed, Source: "project slug " + in.Slug, Target: t.String()}
+	want := in.Slug + "\n"
+	b, ok, err := readMarker(t)
+	switch {
+	case err != nil:
+		res.Outcome, res.Err = OutcomeFailed, err
+	case ok && strings.TrimSpace(string(b)) == in.Slug:
+		return // already current
+	case ok:
+		res.Outcome = OutcomeNothing
+		res.Conflicts = []string{projectSlugFile}
+	case opts.DryRun:
+		rep.Notes = append(rep.Notes, fmt.Sprintf("would write %s (%s)", t, in.Slug))
+		return
+	default:
+		err := createSmallFile(t, want, opts)
+		switch {
+		case err == nil:
+			// A write, not a move: reported as a note so moves count
+			// legacy content only.
+			rep.Notes = append(rep.Notes, fmt.Sprintf("wrote %s (%s)", t, in.Slug))
+			return
+		case errors.Is(err, unix.EEXIST):
+			res.Outcome = OutcomeNothing
+			res.Conflicts = []string{projectSlugFile}
+		default:
+			res.Outcome, res.Err = OutcomeFailed, err
+		}
+	}
+	rep.Results = append(rep.Results, res)
+}
+
+// createSmallFile creates t (which must not exist) with content, without
+// following a symlink anywhere in its path, and chowns it like a migrated
+// entry.
+func createSmallFile(t Tree, content string, opts Options) error {
+	parent, name, ok, err := openParent(t, false)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("%s: parent directory missing", t)
+	}
+	defer closeFd(parent)
+	fd, err := unix.Openat(parent, name, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o644)
+	if err != nil {
+		return err
+	}
+	f := os.NewFile(uintptr(fd), name)
+	_, werr := f.WriteString(content)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		_ = unix.Unlinkat(parent, name, 0)
+		return werr
+	}
+	if opts.Owner != nil {
+		var r Result
+		n := normalizer{mode: NormalizeWorkspace, owner: opts.Owner, res: &r}
+		var st unix.Stat_t
+		if err := unix.Fstatat(parent, name, &st, unix.AT_SYMLINK_NOFOLLOW); err == nil {
+			n.entry(parent, name, &st)
+		}
+	}
+	return nil
 }
 
 // StepIdentity reports a legacy tree that is not bound to the project.

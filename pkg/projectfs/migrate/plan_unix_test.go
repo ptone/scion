@@ -67,6 +67,17 @@ func (f *fakeObjects) DeletePrefix(_ context.Context, prefix string) error {
 	return nil
 }
 
+// countNotes counts the notes containing sub.
+func countNotes(notes []string, sub string) int {
+	n := 0
+	for _, note := range notes {
+		if strings.Contains(note, sub) {
+			n++
+		}
+	}
+	return n
+}
+
 // idSettings is a hub seed settings.yaml naming project id.
 func idSettings(id string) string { return "hub:\n  project_id: " + id + "\n" }
 
@@ -301,7 +312,7 @@ func TestRun_EmptyPerAgentLeavesContentMovesSeed(t *testing.T) {
 	if readFile(t, filepath.Join(f.share, legacyHubProjectsDir+"/p1/data.txt")) != "d" {
 		t.Fatal("content of a project without a project-scoped workspace must stay")
 	}
-	if len(rep.Projects[0].Notes) != 1 {
+	if countNotes(rep.Projects[0].Notes, "no project-scoped workspace") != 1 {
 		t.Fatalf("notes = %v", rep.Projects[0].Notes)
 	}
 	// Legacy content was left in place: M3 keeps the legacy copy.
@@ -368,7 +379,7 @@ func TestRun_GitSeedMovesOnlyUntrackedIdentity(t *testing.T) {
 		t.Fatal("other untracked entry must stay in the workspace")
 	}
 	assertAbsent(t, filepath.Join(ws, ".scion/settings.yaml"))
-	if len(rep.Projects[0].Notes) != 1 || !strings.Contains(rep.Projects[0].Notes[0], "other.txt") {
+	if countNotes(rep.Projects[0].Notes, "other.txt") != 1 {
 		t.Fatalf("notes = %v", rep.Projects[0].Notes)
 	}
 }
@@ -840,4 +851,48 @@ func TestRun_GitProjectWithoutGitDirIsReported(t *testing.T) {
 			t.Fatalf("unexpected note for a non-git project: %q", n)
 		}
 	}
+}
+
+// Step 4 writes <ProjectRoot>/.scion/project-slug after a seed move; a
+// differing existing file is a conflict and is not overwritten; nothing is
+// written when the identity check blocks the tree; a re-run moves nothing.
+func TestRun_ProjectSlugWrittenAfterSeedMove(t *testing.T) {
+	f := newHubFixture(t)
+	writeTree(t, f.share, map[string]string{legacyHubProjectsDir + "/p1/.scion/settings.yaml": idSettings(pid1), legacyHubProjectsDir + "/p1/a": "a"})
+	in := f.input(ProjectRef{ID: pid1, Slug: "p1"})
+	if rep, err := Run(context.Background(), in, opts(false)); err != nil || rep.Failed() {
+		t.Fatalf("err=%v failed=%t", err, rep.Failed())
+	}
+	slugFile := filepath.Join(f.share, "projects", pid1, ".scion", "project-slug")
+	if got := readFile(t, slugFile); got != "p1\n" {
+		t.Fatalf("project-slug = %q", got)
+	}
+	if again, _ := Run(context.Background(), in, opts(false)); again.Moves() != 0 || again.Failed() {
+		t.Fatalf("re-run: moves=%d failed=%t", again.Moves(), again.Failed())
+	}
+
+	// A differing existing file: conflict, kept.
+	g := newHubFixture(t)
+	writeTree(t, g.share, map[string]string{
+		legacyHubProjectsDir + "/p1/.scion/settings.yaml": idSettings(pid1),
+		"projects/" + pid1 + "/.scion/project-slug":       "renamed-slug\n",
+	})
+	rep, err := Run(context.Background(), g.input(ProjectRef{ID: pid1, Slug: "p1"}), opts(false))
+	if err != nil || rep.Failed() {
+		t.Fatalf("err=%v failed=%t", err, rep.Failed())
+	}
+	if got := readFile(t, filepath.Join(g.share, "projects", pid1, ".scion", "project-slug")); got != "renamed-slug\n" {
+		t.Fatalf("an existing project-slug was overwritten: %q", got)
+	}
+	var b bytes.Buffer
+	rep.WriteLog(&b)
+	if !strings.Contains(b.String(), "CONFLICT project-slug") {
+		t.Fatalf("conflict not reported:\n%s", b.String())
+	}
+
+	// Identity blocked: nothing written.
+	h := newHubFixture(t)
+	writeTree(t, h.share, map[string]string{legacyHubProjectsDir + "/p1/.scion/project-id": pid2, legacyHubProjectsDir + "/p1/a": "a"})
+	_, _ = Run(context.Background(), h.input(ProjectRef{ID: pid1, Slug: "p1"}), opts(false))
+	assertAbsent(t, filepath.Join(h.share, "projects", pid1, ".scion", "project-slug"))
 }
