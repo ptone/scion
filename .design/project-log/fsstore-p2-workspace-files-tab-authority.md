@@ -32,10 +32,21 @@ Changes:
   `shareddirs.EnsurePrivateDir` (2755, no ACL).
 - **Project configuration seed** (§P1a, hub side): on a shared backend
   project create seeds `projects/<uuid>/.scion` (settings with the hub
-  connection and project ID), beside `workspace/` and in no Mount. The hub no
-  longer clones a shared-workspace project into the agents' tree there (the
-  first agent provisions it). Cloned-identity alignment runs only on the
-  local backend.
+  connection), beside `workspace/` and in no Mount, plus the identity files
+  `project-id` and `project-slug` (the hub is their single writer: at create,
+  on slug rename, and in a bounded pass at hub start; a differing
+  `project-id` is reported by the `project_config_identity` health check,
+  never overwritten). Cloned-identity alignment runs only on the local
+  backend.
+- **Shared workspace provisioning at create** (review rev-1 #1, ruling
+  option (a)): on a shared backend the hub provisions a shared-workspace git
+  project's uuid workspace through `provision.ProvisionShared` with the k8s
+  init container's layout (same locks, same sentinel in
+  `<ProjectRoot>/provision`), so Docker/co-located brokers and pods take the
+  reuse path. New `provision.ProvisionInput.CloneToken`.
+- **Resource import / pull** read the agent-writable workspace through
+  confined roots (import works on a private snapshot copy); pull errors are
+  fixed text.
 - **Deleted**: `hubManagedProjectPath` (method and package-level),
   `resolveDurableOrLegacyPath`, `probeWorkspaceContent` and its in-flight
   map, `volumeBackedProjectPath`, `hubManagedProjectsRoots`, the ephemeral
@@ -51,7 +62,9 @@ Changes:
   `resolveGCSWorkspaceDir`, ruling Q4).
 - **T6 refusal**: a hub-managed or shared-workspace project dispatched to a
   remote broker that has no local path for it and does not report the hub's
-  shared workspace storage is refused with 409 before anything is dispatched.
+  shared workspace storage is refused with 409 before anything is dispatched,
+  except a non-git project on a local-backend hub (Q4 carve-out: the broker
+  keeps the workspace in its own project directory).
 - **Bootstrap guard** (Q4 condition 2): a project-level bootstrap whose
   workspace already existed at admission is not applied; the create answers
   with a warning pointing at `scion sync to`.
@@ -81,6 +94,8 @@ Changes:
   (ptone/scion#5833).
 - `project_sync_states` table and store methods are now unused (only the
   deletion service clears rows); drop in P6.
+- Broker backstop for shared-plain provisioning, and asynchronous project
+  provisioning (large clones at create), are recorded on ptone/scion#5823.
 - An NFS hang on the Files tab path now blocks the request (the probe's 2 s
   timeout is gone with the probe); health still reports mount availability.
 - The CLI bootstrap still downloads into the broker-local slug dir on
