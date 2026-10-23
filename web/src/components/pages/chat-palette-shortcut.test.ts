@@ -2384,6 +2384,7 @@ describe('on a touch-primary device, the open request holds the on-screen keyboa
 
 describe('a finger tap on a quick-switcher button holds the on-screen keyboard on any device', () => {
   afterEach(() => {
+    for (const page of document.querySelectorAll('scion-page-chat')) page.remove();
     vi.unstubAllGlobals();
     for (const proxy of document.querySelectorAll('input[data-palette-keyboard-proxy]')) {
       proxy.remove();
@@ -2624,6 +2625,7 @@ describe('a finger tap on a quick-switcher button holds the on-screen keyboard o
 
 describe('with the quick switcher mounted, a tap focuses its query input inside the tap', () => {
   afterEach(() => {
+    for (const page of document.querySelectorAll('scion-page-chat')) page.remove();
     vi.unstubAllGlobals();
     for (const proxy of document.querySelectorAll('input[data-palette-keyboard-proxy]')) {
       proxy.remove();
@@ -2730,6 +2732,7 @@ describe('with the quick switcher mounted, a tap focuses its query input inside 
 
 describe('quick switcher preload', () => {
   afterEach(() => {
+    for (const page of document.querySelectorAll('scion-page-chat')) page.remove();
     vi.unstubAllGlobals();
   });
 
@@ -2801,6 +2804,7 @@ describe('quick switcher preload', () => {
 
 describe('quick switcher preload without requestIdleCallback, and after a failed import', () => {
   afterEach(() => {
+    for (const page of document.querySelectorAll('scion-page-chat')) page.remove();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     for (const proxy of document.querySelectorAll('input[data-palette-keyboard-proxy]')) {

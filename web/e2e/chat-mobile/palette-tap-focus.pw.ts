@@ -146,6 +146,14 @@ test('@static phone: Escape after an in-tap open closes the switcher and release
   // The dialog's focus trap is released: Tab moves on from the button rather
   // than back into the closed switcher.
   await page.keyboard.press('Tab');
-  expect(await paletteInputHasFocus(page)).toBe(false);
   await expect(railButton(page)).not.toBeFocused();
+  const insideSwitcher = await page.evaluate(() => {
+    let el: Element | null = document.activeElement;
+    while (el) {
+      if (el.tagName === 'SCION-QUICK-PALETTE') return true;
+      el = el.shadowRoot?.activeElement ?? null;
+    }
+    return false;
+  });
+  expect(insideSwitcher, 'focus is not inside the switcher or its shadow root').toBe(false);
 });
