@@ -61,7 +61,7 @@ scion ssh my-project/my-agent
 scion ssh my-project/my-agent -- git status
 ```
 
-`scion ssh` runs your `ssh` client with `scion tunnel` as its `ProxyCommand`. It writes the agent's host key to a temporary `known_hosts` file in your temporary folder (`TMP` or `TEMP`) for the session and deletes it afterwards. Flags for `scion ssh` go before the agent; everything after the agent is passed to `ssh` unchanged. It never prompts, and it exits with the remote command's status, or 255 for a local or connection failure.
+`scion ssh` runs your `ssh` client with `scion tunnel` as its `ProxyCommand`. It writes the agent's host key to a temporary `known_hosts` file in your temporary folder (`TMP` or `TEMP`) for the session and deletes it afterwards. Flags for `scion ssh` go before the agent; everything after the agent is passed to `ssh` unchanged. It never prompts, and it exits with the remote command's status, or 255 for a local or connection failure. Closing the console window, logging off or shutting down ends `ssh` too, and `scion ssh` then exits with 143.
 
 User names and `TEMP` paths with spaces (for example `C:\Users\Jane Doe\AppData\Local\Temp`) work. The temporary path is refused only if it contains a control character, `%` or `"`; the error then ends with `set TMP and TEMP to a plain path`.
 
@@ -92,6 +92,8 @@ Without an agent argument every agent on the Hub is included, and blocks of agen
 
 Each `Host` block's `ProxyCommand` records the absolute path of `scion.exe`, quoted so that both the Windows OpenSSH client and Git for Windows' `ssh` read it as one word, spaces included. **If you move `scion.exe`, run `scion ssh-config --write` again.**
 
+The path of `scion.exe` and the Hub endpoint must use a limited set of characters; see [Characters in paths and the Hub endpoint](#characters-in-paths-and-the-hub-endpoint).
+
 ### `scion vscode`: open VS Code on an agent
 
 ```powershell
@@ -108,6 +110,36 @@ code --user-data-dir %USERPROFILE%\.scion\vscode\user-data --remote ssh-remote+<
 That separate VS Code user data directory sets `remote.SSH.configFile` to scion's `ssh_config`, so your own VS Code settings are never changed. Extensions are shared with your normal VS Code. `--prune` removes the blocks of this Hub's agents that no longer exist. If `code` is missing, the command fails with `VS Code CLI code not found on PATH`.
 
 Two `scion vscode` runs update these files one at a time; a run that waits more than two minutes for another fails with `another scion vscode is still updating these files`.
+
+VS Code's `code` command on Windows is a batch file (`bin\code.cmd`), which Windows runs through `cmd.exe`. When `code` is a `.cmd` or `.bat` file, scion checks the arguments it passes before it starts VS Code; see [Characters in paths and the Hub endpoint](#characters-in-paths-and-the-hub-endpoint).
+
+### Characters in paths and the Hub endpoint
+
+scion writes the path of `scion.exe` and the Hub endpoint into each `ProxyCommand` (`scion vscode` also writes the path of `%USERPROFILE%\.scion\vscode\known_hosts`). The Windows OpenSSH client and Git for Windows' `ssh` read a `ProxyCommand` differently, and no quoting reads the same way in both. So scion does not escape these values: it accepts a limited set of characters and refuses anything else before it writes a file or starts `ssh`.
+
+- **The path of `scion.exe`, and for `scion vscode` your user profile path**, may contain letters and digits (including non-ASCII letters in account names), spaces, backslashes and `@ + = : , . / _ - ( ) ~ [ ]`. Any other character, such as `&`, `'`, `%`, `!`, `$`, `;` or `#`, is refused:
+
+  ```
+  scion executable path "<path>" contains '&', which a Windows ssh ProxyCommand cannot carry as written
+  ```
+
+  For `scion.exe`, move it to a folder whose path uses only these characters. For `scion vscode`, the message names the `known-hosts path` instead; `scion ssh` and `scion ssh-config` do not write your profile path into a `ProxyCommand`.
+
+- **The Hub endpoint** may contain only ASCII letters, digits, `-`, `.`, `_`, `:` and `/`, plus `[` and `]` around an IPv6 address, and no user name, query or fragment. This applies on every OS, not just Windows:
+
+  ```
+  invalid hub endpoint "<endpoint>": contains '~'; a hub endpoint may contain only ASCII letters, digits and -._:/ (and [ ] around an IPv6 address)
+  ```
+
+  Write an internationalized host name in its `xn--` form.
+
+- **Arguments for VS Code's `code.cmd`.** When `code` is a `.cmd` or `.bat` file, the VS Code user data folder (under your user profile), the `--remote` value and `--path` may contain only letters and digits (including non-ASCII letters), spaces, backslashes, `~` and `@ + = : , . / _ -`. Otherwise `scion vscode` fails before VS Code starts (the agent's entries in `%USERPROFILE%\.scion\vscode` are already written):
+
+  ```
+  --path "<dir>" contains '&', which cannot be passed to the VS Code launcher <code> (a .cmd file run by cmd.exe); use a home directory and a --path with only letters, digits, spaces and the characters @+=:,./_-~\
+  ```
+
+  Choose a `--path` with only these characters.
 
 ### Dotfile-managed `~/.ssh`
 
