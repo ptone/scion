@@ -209,6 +209,18 @@ describe('artifactLinkTarget (shared by the preview and the review editor)', () 
     });
     expect(artifactLinkTarget('#part-two', ctx)).toEqual({ kind: 'fragment', id: 'part-two' });
   });
+  it('strips what the URL parser strips, and nothing more', () => {
+    // C0 controls and spaces around the value, tabs and line breaks inside.
+    expect(artifactLinkTarget('\u0001 \x1fhttps://x.example/a\tb\u0000 ', ctx)).toEqual({
+      kind: 'external',
+      href: 'https://x.example/ab',
+    });
+    // Other whitespace is part of the value, as for the browser: a relative
+    // link to a file the version does not have.
+    expect(artifactLinkTarget('\u00a0https://x.example/', ctx)).toEqual({ kind: 'none' });
+    expect(artifactLinkTarget('\ufeffjavascript:alert(1)', ctx)).toEqual({ kind: 'none' });
+    expect(new URL('\u00a0https://x.example/', 'https://base.example/').host).toBe('base.example');
+  });
   it('the preview shows tel: and ftp: links and fragments as text, and keeps https', () => {
     const tpl = document.createElement('template');
     tpl.innerHTML = rewriteImages(

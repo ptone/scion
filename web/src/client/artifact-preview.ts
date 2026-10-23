@@ -136,12 +136,14 @@ const LINK_SCHEMES = new Set(['http:', 'https:', 'mailto:']);
  * - anything else (other schemes, protocol-relative URLs, relative links
  *   to files the version does not have) gets no target and shows as text.
  *
- * The value is read as the URL parser reads it: ASCII tabs and line
- * breaks anywhere are dropped and surrounding spaces trimmed, and the
- * scheme is taken from the parsed URL.
+ * The value is read as the URL parser reads it: leading and trailing C0
+ * control characters and spaces are stripped, then ASCII tabs and line
+ * breaks anywhere are dropped (other whitespace is kept), and the scheme
+ * is taken from the parsed URL.
  */
 export function artifactLinkTarget(href: string, ctx: ArtifactLinkContext): LinkTarget {
-  const value = href.replace(/[\t\n\r]/g, '').trim();
+  // eslint-disable-next-line no-control-regex
+  const value = href.replace(/^[\u0000- ]+|[\u0000- ]+$/g, '').replace(/[\t\n\r]/g, '');
   if (value === '') return { kind: 'none' };
   if (value.startsWith('#')) {
     return value.length > 1 ? { kind: 'fragment', id: value.slice(1) } : { kind: 'none' };
