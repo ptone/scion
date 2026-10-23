@@ -30,6 +30,10 @@
  *   - entryClosure:       gzip limit on the entry chunk plus every chunk and
  *                         stylesheet it imports statically (what every route
  *                         downloads before the first render);
+ *   - isolatedChunks:     chunk file name prefixes that no chunk outside the
+ *                         prefix may import statically (a lazily loaded
+ *                         chunk stays lazy wherever it is reached from,
+ *                         including other lazy chunks);
  *   - requiredChunks:     chunk file name prefixes that must exist (proves a
  *                         lazy split still happens);
  *   - forbiddenModules:   source modules that must not be in the static
@@ -120,6 +124,23 @@ export function forbiddenIn(modules, pattern, allow, pathPattern) {
   );
 }
 
+/**
+ * Static imports of chunks named `prefix`* by chunks not named so: the
+ * manifest entries outside the prefix whose `imports` (not
+ * `dynamicImports`) name an entry whose file starts with `prefix`.
+ */
+export function staticImportersOf(manifest, prefix) {
+  const out = [];
+  for (const chunk of Object.values(manifest)) {
+    if (chunk.file.startsWith(prefix)) continue;
+    for (const dep of chunk.imports ?? []) {
+      const target = manifest[dep];
+      if (target && target.file.startsWith(prefix)) out.push({ from: chunk.file, to: target.file });
+    }
+  }
+  return out;
+}
+
 function gzipSize(buf) {
   return gzipSync(buf).length;
 }
@@ -188,6 +209,12 @@ export function checkBudget({ manifest, budget, readFile, listFiles, readMapModu
     report.push(`entry closure of ${entry} (${files.join(', ')}): gzip ${total} / ${limit}`);
     if (total > limit)
       failures.push(`entry closure of ${entry}: gzip ${total} B exceeds ${limit} B`);
+  }
+
+  for (const prefix of budget.isolatedChunks ?? []) {
+    const bad = staticImportersOf(manifest, prefix);
+    report.push(`isolated chunk ${prefix}*: ${bad.length} static importer(s) outside it`);
+    for (const b of bad) failures.push(`${b.from} imports ${b.to} statically (isolated ${prefix}*)`);
   }
 
   for (const prefix of budget.requiredChunks ?? []) {

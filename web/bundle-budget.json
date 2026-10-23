@@ -13,6 +13,8 @@
     "entry": "src/client/main.ts",
     "gzip": 140000
   },
+  "$comment-isolatedChunks": "The review editor chunks (ptone/scion#5913) are reached only through import(): no other chunk, lazy ones included, may import them statically (a shared package placed in them would make, for example, the CodeMirror chunk download the whole editor).",
+  "isolatedChunks": ["assets/review-editor-"],
   "requiredChunks": [
     "assets/terminal-workspace-",
     "assets/lang-css-",

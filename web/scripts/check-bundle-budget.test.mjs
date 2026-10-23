@@ -28,6 +28,7 @@ import {
   closureFiles,
   findSourceMap,
   forbiddenIn,
+  staticImportersOf,
   mapSources,
   staticClosure,
 } from './check-bundle-budget.mjs';
@@ -200,6 +201,29 @@ test('a forbiddenModules rule without any pattern fails', () => {
   assert.deepEqual(failures, [
     'forbiddenModules rule for src/components/pages/login.ts: needs a pattern or a pathPattern',
   ]);
+});
+
+test('staticImportersOf finds static imports of a prefix from outside it, not dynamic ones', () => {
+  const m = {
+    'src/client/main.ts': { file: 'assets/main.js', imports: ['_lit.js'], dynamicImports: ['src/x.ts'] },
+    'src/x.ts': { file: 'assets/x-1.js', dynamicImports: ['src/r.ts'] },
+    'src/r.ts': { file: 'assets/review-editor-1.js', imports: ['_review-editor-2.js'] },
+    '_review-editor-2.js': { file: 'assets/review-editor-2.js' },
+    '_lit.js': { file: 'assets/lit-1.js' },
+    '_codemirror.js': { file: 'assets/codemirror-1.js', imports: ['_review-editor-2.js'] },
+  };
+  assert.deepEqual(staticImportersOf(m, 'assets/review-editor-'), [
+    { from: 'assets/codemirror-1.js', to: 'assets/review-editor-2.js' },
+  ]);
+  delete m['_codemirror.js'];
+  assert.deepEqual(staticImportersOf(m, 'assets/review-editor-'), []);
+});
+
+test('an isolated chunk imported statically from outside fails', () => {
+  const b = budget({ isolatedChunks: ['assets/lit-'] });
+  const { failures } = run({ b });
+  assert.ok(failures.length > 0);
+  assert.match(failures[0], /imports assets\/lit-1\.js statically \(isolated assets\/lit-\*\)/);
 });
 
 test('passes within budget', () => {

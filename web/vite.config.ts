@@ -153,7 +153,7 @@ function codemirrorChunk(id: string): string | undefined {
  * remark / micromark / unified stack with its small helpers.
  */
 const REVIEW_EDITOR_PACKAGES =
-    /node_modules\/(@milkdown\/|prosemirror-|remark-|remark\/|micromark|mdast-|unist-|unified\/|vfile|bail\/|trough\/|zwitch\/|devlop\/|ccount\/|longest-streak\/|markdown-table\/|decode-named-character-reference\/|character-entities\/|orderedmap\/|rope-sequence\/|w3c-keyname\/|is-plain-obj\/|extend\/)/;
+    /node_modules\/(@milkdown\/|prosemirror-|remark-|remark\/|micromark|mdast-|unist-|unified\/|vfile|bail\/|trough\/|zwitch\/|devlop\/|ccount\/|longest-streak\/|markdown-table\/|decode-named-character-reference\/|character-entities\/|orderedmap\/|rope-sequence\/|is-plain-obj\/|extend\/)/;
 
 /**
  * Whether a module belongs in the lazily loaded review-editor chunk. Only
