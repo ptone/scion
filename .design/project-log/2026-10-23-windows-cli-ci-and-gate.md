@@ -95,3 +95,9 @@ with zero skips; each package left off has a one-line reason in the file.
   returned without reaching the test server and the test waited forever. The
   hang is in that test's wait, outside the Windows file-protection code; a
   bounded wait in the test is the follow-up.
+- Local gate tree checks for this branch run git with every GIT_* variable
+  unset and no global or system config, from `/`, and stop on any
+  repository-local config key outside a short allowlist and on
+  skip-worktree or assume-unchanged index entries; a dirty-tree,
+  config-key, skip-worktree and deleted-cwd plant is checked before each
+  run.
