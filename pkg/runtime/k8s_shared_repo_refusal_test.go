@@ -160,9 +160,17 @@ func TestK8sSharedRepoShapeRefusal_Restart(t *testing.T) {
 			c.NFSAgentDirName = "empty"
 			c.NFSAgentDirEmpty = true
 		}, false},
-		{"unset shape on an NFS agent (fail closed)", func(c *RunConfig) {
+		{"unset shape, git-ness undeterminable (fail closed)", func(c *RunConfig) {
 			c.GitCloneForInit = nil
 		}, true},
+		{"shared-workspace restart, git via env (no GitClone)", func(c *RunConfig) {
+			c.GitCloneForInit = nil
+			c.Env = append(c.Env, "SCION_WORKSPACE_GIT=true")
+		}, true},
+		{"shared-workspace restart, positively non-git via env", func(c *RunConfig) {
+			c.GitCloneForInit = nil
+			c.Env = append(c.Env, "SCION_WORKSPACE_GIT=false")
+		}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

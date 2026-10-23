@@ -472,6 +472,64 @@ func TestReadOnlyGitRoot_Functional(t *testing.T) {
 	if out, err := git(wt, "rev-parse", "--verify", "-q", "refs/heads/tmp"); err != nil {
 		t.Errorf("the branch ref must remain intact after the clean failure, got: %v\n%s", err, out)
 	}
+
+	// Tag deletion shares the limitation (it needs the packed-refs.lock in the
+	// read-only root): it fails cleanly and the tag survives.
+	mustGit(wt, "tag", "keep-tag")
+	if out, err := git(wt, "tag", "-d", "keep-tag"); err == nil {
+		t.Errorf("tag deletion should fail cleanly under the read-only .git root, got success:\n%s", out)
+	}
+	if out, err := git(wt, "rev-parse", "--verify", "-q", "refs/tags/keep-tag"); err != nil {
+		t.Errorf("the tag ref must remain intact after the clean failure, got: %v\n%s", err, out)
+	}
+
+	// git gc needs to write under the read-only root (lock / gc.log), so it fails
+	// cleanly and the object store stays intact (HEAD still resolves).
+	if out, err := git(wt, "gc", "--quiet"); err == nil {
+		t.Errorf("git gc should fail cleanly under the read-only .git root, got success:\n%s", out)
+	}
+	if out, err := git(wt, "rev-parse", "--verify", "-q", "HEAD"); err != nil {
+		t.Errorf("HEAD must still resolve after a failed gc, got: %v\n%s", err, out)
+	}
+
+	// A shallow fetch writes .git/shallow (+ shallow.lock) in the read-only root,
+	// so it fails cleanly and the full history is preserved.
+	if out, err := git(wt, "fetch", "-q", "--depth=1", "origin", "agent-1"); err == nil {
+		t.Errorf("a shallow fetch should fail cleanly under the read-only .git root, got success:\n%s", out)
+	}
+	if out, err := git(wt, "rev-list", "--count", "HEAD"); err != nil || strings.TrimSpace(out) == "1" {
+		t.Errorf("history must stay complete after a failed shallow fetch, got count=%q err=%v", strings.TrimSpace(out), err)
+	}
+
+	// fetch --prune must delete a stale remote-tracking ref, which needs the
+	// packed-refs.lock in the read-only root, so it fails cleanly and the stale
+	// ref survives (no corruption).
+	mustGit(wt, "push", "-q", "origin", "agent-1:refs/heads/throwaway")
+	mustGit(wt, "fetch", "-q", "origin") // creates refs/remotes/origin/throwaway
+	mustGit(bare, "update-ref", "-d", "refs/heads/throwaway")
+	if out, err := git(wt, "fetch", "-q", "--prune", "origin"); err == nil {
+		t.Errorf("fetch --prune of a stale ref should fail cleanly under the read-only .git root, got success:\n%s", out)
+	}
+	if out, err := git(wt, "rev-parse", "--verify", "-q", "refs/remotes/origin/throwaway"); err != nil {
+		t.Errorf("the stale remote-tracking ref must remain intact after the clean failure, got: %v\n%s", err, out)
+	}
+
+	// Stash must never lose work: refs/stash is a loose ref in the writable refs/
+	// overlay, so a stash push/pop cycle round-trips (a cosmetic packed-refs.lock
+	// warning may print). If a push ever fails non-zero instead, the change stays
+	// in the working tree. Either way the change is preserved.
+	if err := os.WriteFile(filepath.Join(wt, "h.txt"), []byte("z\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(wt, "add", "h.txt")
+	if _, err := git(wt, "stash", "push", "-m", "wip"); err == nil {
+		if out, err := git(wt, "stash", "pop"); err != nil {
+			t.Errorf("stash pop after a successful push should restore the change, got: %v\n%s", err, out)
+		}
+	}
+	if data, err := os.ReadFile(filepath.Join(wt, "h.txt")); err != nil || string(data) != "z\n" {
+		t.Errorf("the stashed change must never be lost under the read-only root, got %q err=%v", string(data), err)
+	}
 }
 
 // On the Apple runtime the agent reads the repository .git/config directly (no
@@ -522,5 +580,190 @@ func TestAppleRepoConfigWithSecrets_RefusedAtStart(t *testing.T) {
 				t.Errorf("a clean config must start, got: %v", err)
 			}
 		})
+	}
+}
+
+// R3: ensureOverlayDir creates a missing directory, refuses a symlink, and
+// refuses a non-directory (fail closed).
+func TestEnsureOverlayDir(t *testing.T) {
+	dir := t.TempDir()
+	// Missing -> created.
+	missing := filepath.Join(dir, "sub", "overlay")
+	if err := ensureOverlayDir(missing); err != nil {
+		t.Errorf("missing dir should be created, got: %v", err)
+	}
+	if fi, err := os.Stat(missing); err != nil || !fi.IsDir() {
+		t.Errorf("overlay dir not created: %v", err)
+	}
+	// A symlink -> refused.
+	target := filepath.Join(dir, "target")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := ensureOverlayDir(link); err == nil {
+		t.Error("a symlink overlay source must be refused")
+	}
+	// A non-directory (regular file) -> refused.
+	reg := filepath.Join(dir, "file")
+	if err := os.WriteFile(reg, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureOverlayDir(reg); err == nil {
+		t.Error("a non-directory overlay source must be refused")
+	}
+}
+
+// R4: rr-cache is overlaid read-write only if it already exists; it is never
+// created host-side (creating it would enable rerere in the user's checkout).
+func TestReadOnlyGitRoot_RrCacheOnlyIfExists(t *testing.T) {
+	// Absent: no rr-cache overlay, and it is not created on the host.
+	repoRoot, workspace := setupHubManagedBaseRepo(t, "agent-1")
+	gitDir := filepath.Join(repoRoot, ".git")
+	args, err := buildCommonRunArgs(RunConfig{
+		Harness: &harness.Generic{}, Name: "test-agent", UnixUsername: "scion",
+		Image: "scion-agent:latest", RuntimeName: "docker", RepoRoot: repoRoot,
+		Workspace: workspace, PrivateGitConfigSource: seedTestPrivateGitConfig(t),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(args, " "), "/repo-root/.git/rr-cache") {
+		t.Error("rr-cache must not be overlaid when it does not exist")
+	}
+	if _, err := os.Stat(filepath.Join(gitDir, "rr-cache")); !os.IsNotExist(err) {
+		t.Errorf("rr-cache must not be created host-side, stat err: %v", err)
+	}
+
+	// Present: overlaid read-write.
+	repoRoot2, workspace2 := setupHubManagedBaseRepo(t, "agent-1")
+	if err := os.MkdirAll(filepath.Join(repoRoot2, ".git", "rr-cache"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	args2, err := buildCommonRunArgs(RunConfig{
+		Harness: &harness.Generic{}, Name: "test-agent", UnixUsername: "scion",
+		Image: "scion-agent:latest", RuntimeName: "docker", RepoRoot: repoRoot2,
+		Workspace: workspace2, PrivateGitConfigSource: seedTestPrivateGitConfig(t),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "-v " + filepath.Join(repoRoot2, ".git", "rr-cache") + ":/repo-root/.git/rr-cache "
+	if !strings.Contains(strings.Join(args2, " "), want) {
+		t.Errorf("rr-cache must be overlaid read-write when it exists, got: %s", strings.Join(args2, " "))
+	}
+}
+
+// setupOutsideRootWorktree creates a real git repo and a registered worktree
+// OUTSIDE the repo root, returning (repoRoot, workspace). It drives the
+// outside-root fallback layout in buildCommonRunArgs.
+func setupOutsideRootWorktree(t *testing.T) (string, string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	base := t.TempDir()
+	t.Setenv("HOME", base)
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(base, "gc"))
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+	if err := os.WriteFile(filepath.Join(base, "gc"), []byte("[user]\n\temail=a@b.c\n\tname=A\n[init]\n\tdefaultBranch=main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repoRoot := filepath.Join(base, "repo")
+	run := func(dir string, args ...string) {
+		t.Helper()
+		c := exec.Command("git", args...)
+		c.Dir = dir
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run(base, "init", "-q", "-b", "main", repoRoot)
+	if err := os.WriteFile(filepath.Join(repoRoot, "f.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(repoRoot, "add", ".")
+	run(repoRoot, "-c", "core.hooksPath="+os.DevNull, "commit", "-q", "-m", "init")
+	workspace := filepath.Join(base, "wt") // outside repoRoot
+	run(repoRoot, "worktree", "add", "-q", "-b", "agent-1", workspace)
+	return repoRoot, workspace
+}
+
+// R2: the outside-root fallback layout mounts the .git root read-only with the
+// bounded read-write overlay set (docker/podman), and no root-level entry can be
+// created, mirroring the in-repo worktree layout.
+func TestReadOnlyGitRoot_OutsideRootLayout(t *testing.T) {
+	for _, rt := range []string{"docker", "podman"} {
+		t.Run(rt, func(t *testing.T) {
+			repoRoot, workspace := setupOutsideRootWorktree(t)
+			gitDir := filepath.Join(repoRoot, ".git")
+			args, err := buildCommonRunArgs(RunConfig{
+				Harness: &harness.Generic{}, Name: "test-agent", UnixUsername: "scion",
+				Image: "scion-agent:latest", RuntimeName: rt, RepoRoot: repoRoot,
+				Workspace: workspace, PrivateGitConfigSource: seedTestPrivateGitConfig(t),
+			})
+			if err != nil {
+				t.Fatalf("buildCommonRunArgs: %v", err)
+			}
+			argStr := strings.Join(args, " ")
+			if !strings.Contains(argStr, "-v "+gitDir+":/repo-root/.git:ro") {
+				t.Fatalf("expected a read-only .git root in the outside-root layout, got: %s", argStr)
+			}
+			if strings.Contains(argStr, "-v "+gitDir+":/repo-root/.git ") {
+				t.Fatalf("the .git root must not be read-write")
+			}
+			// Only the bounded overlay set is read-write under /repo-root/.git.
+			allowed := map[string]bool{
+				"/repo-root/.git/objects": true, "/repo-root/.git/refs": true,
+				"/repo-root/.git/logs": true, "/repo-root/.git/lfs": true,
+			}
+			for i, a := range args {
+				if a != "-v" || i+1 >= len(args) {
+					continue
+				}
+				spec := args[i+1]
+				j := strings.Index(spec, ":/repo-root/.git")
+				if j < 0 || strings.HasSuffix(spec, ":ro") {
+					continue
+				}
+				target := spec[j+1:]
+				if target == "/repo-root/.git" {
+					t.Errorf(".git root must not be read-write: %s", spec)
+				} else if !allowed[target] && !strings.HasPrefix(target, "/repo-root/.git/worktrees/") {
+					t.Errorf("unexpected read-write bind under /repo-root/.git: %s", spec)
+				}
+			}
+		})
+	}
+}
+
+// R2 (Apple I3 on the outside-root path): an Apple agent on the fallback path is
+// refused when the repository config holds credentials, and starts on a clean one.
+func TestAppleRepoConfigWithSecrets_OutsideRoot(t *testing.T) {
+	repoRoot, workspace := setupOutsideRootWorktree(t)
+	cfgPath := filepath.Join(repoRoot, ".git", "config")
+	base, _ := os.ReadFile(cfgPath)
+	// Clean config (the real one) starts.
+	if _, err := buildCommonRunArgs(RunConfig{
+		Harness: &harness.Generic{}, Name: "test-agent", UnixUsername: "scion",
+		Image: "scion-agent:latest", RuntimeName: appleContainerRuntimeName,
+		RepoRoot: repoRoot, Workspace: workspace,
+	}); err != nil {
+		t.Fatalf("clean config must start on Apple outside-root, got: %v", err)
+	}
+	// Add a credential -> refused, naming the section.
+	if err := os.WriteFile(cfgPath, append(base, []byte("[credential]\n\thelper = store\n")...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := buildCommonRunArgs(RunConfig{
+		Harness: &harness.Generic{}, Name: "test-agent", UnixUsername: "scion",
+		Image: "scion-agent:latest", RuntimeName: appleContainerRuntimeName,
+		RepoRoot: repoRoot, Workspace: workspace,
+	})
+	if err == nil || !strings.Contains(err.Error(), "holds credentials") || !strings.Contains(err.Error(), "credential") {
+		t.Errorf("Apple outside-root must refuse a credential-bearing config naming the section, got: %v", err)
 	}
 }

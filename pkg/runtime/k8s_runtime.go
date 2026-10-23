@@ -4767,9 +4767,31 @@ func k8sSharedRepoShapeRefusal(config RunConfig) (string, bool) {
 	if config.NFSAgentDirName != "" || config.NFSAgentDirEmpty {
 		return "", false
 	}
-	// Otherwise this NFS agent uses the project's shared checkout (shared-workspace),
-	// a shared git repository — refused on create, restart, or an unset shape.
+	// Otherwise this NFS agent uses the project's shared checkout (shared-workspace).
+	// A git-backed shared checkout is the shared-repository shape and is refused on
+	// every start (create, restart, or an unset shape). A non-git shared workspace
+	// has no shared .git and is allowed — but only when the signals positively say
+	// non-git; if git-ness cannot be determined, refuse (fail closed).
+	if config.GitCloneForInit != nil {
+		return k8sSharedRepoShapeRefusalText, true
+	}
+	if v, present := runConfigEnvValue(config, "SCION_WORKSPACE_GIT"); present {
+		if b, ok := util.ParseBool(v); ok && !b {
+			return "", false // positively non-git
+		}
+	}
 	return k8sSharedRepoShapeRefusalText, true
+}
+
+// runConfigEnvValue returns the value of the given key in config.Env ("KEY=VALUE"
+// entries), and whether it was present.
+func runConfigEnvValue(config RunConfig, key string) (string, bool) {
+	for _, kv := range config.Env {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == key {
+			return v, true
+		}
+	}
+	return "", false
 }
 
 // k8sSharedRepoShapeRefusalText is the exact neutral end-state message returned

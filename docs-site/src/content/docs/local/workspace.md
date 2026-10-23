@@ -355,8 +355,10 @@ the private config copy.
 
 Commit, branch creation, fetch, pull and push work normally. Because the `.git` root is read-only, a
 few operations that write a lock or state file directly in it do not work inside an agent: deleting a
-branch and `git fetch --prune` (both need `packed-refs.lock`), `git gc` / `git pack-refs`, and
-fetching into a shallow clone. These fail cleanly, without corrupting the repository.
+branch or a tag and `git fetch --prune` (all need `packed-refs.lock`), `git gc` / `git pack-refs`, and
+fetching into a shallow clone. These fail cleanly, without corrupting the repository. `git stash` still
+round-trips (the stash ref lives in the writable `refs/` overlay), though it may print a cosmetic
+`packed-refs.lock` warning.
 
 This applies to the worktree-per-agent and outside-root layouts, where each agent has its own
 worktree. In the shared-workspace layout agents share one working tree and the `.git` root stays

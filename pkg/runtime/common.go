@@ -1230,13 +1230,13 @@ func refuseAppleRepoConfigWithSecrets(agentName, gitDir string) error {
 	if len(stripped) == 0 {
 		return nil
 	}
-	return fmt.Errorf("agent %q: the repository's .git/config holds credentials in section(s) %s; remove them, or use a runtime that supports a private git config", agentName, strings.Join(creditSections(stripped), ", "))
+	return fmt.Errorf("agent %q: the repository's .git/config holds credentials in section(s) %s; remove them, or use a runtime that supports a private git config", agentName, strings.Join(credentialSections(stripped), ", "))
 }
 
-// creditSections returns the sorted, unique top-level sections of the given
+// credentialSections returns the sorted, unique top-level sections of the given
 // config keys (the part before the first "."), so a refusal can name the
 // sections without ever quoting a credential value.
-func creditSections(keys []string) []string {
+func credentialSections(keys []string) []string {
 	seen := map[string]struct{}{}
 	var out []string
 	for _, k := range keys {
@@ -1272,7 +1272,16 @@ func readSmallConfigFile(path string) ([]byte, error) {
 		return nil, fmt.Errorf("%s is not a regular file", path)
 	}
 	const maxConfig = 1 << 20
-	return io.ReadAll(io.LimitReader(f, maxConfig))
+	// Read one byte past the cap so an over-cap file is refused rather than
+	// silently truncated (a credential past the cap must not escape the check).
+	raw, err := io.ReadAll(io.LimitReader(f, maxConfig+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > maxConfig {
+		return nil, fmt.Errorf("%s exceeds %d bytes", path, maxConfig)
+	}
+	return raw, nil
 }
 
 // registerRwBaseGitNarrowing narrows a read-write .git base
@@ -1320,10 +1329,19 @@ func registerRwBaseGitNarrowing(registerMount func(string, string, bool, bool), 
 // or "" when the layout has no own per-agent worktree.
 func registerReadOnlyBaseGitMounts(registerMount func(string, string, bool, bool), gitDir, containerGitDir, worktreeName string) error {
 	registerMount(gitDir, containerGitDir, true, true) // read-only base
-	for _, dir := range []string{"objects", "refs", "logs", "lfs", "rr-cache"} {
+	// objects/refs/logs are always present and needed; lfs is created so the
+	// in-container git-lfs store works (harmless when absent). Each is a writable
+	// overlay (created host-side, fail-closed).
+	for _, dir := range []string{"objects", "refs", "logs", "lfs"} {
 		if err := bindReadWriteOverlayDir(registerMount, filepath.Join(gitDir, dir), filepath.Join(containerGitDir, dir)); err != nil {
 			return err
 		}
+	}
+	// rr-cache is overlaid read-write only if it already exists: creating it
+	// host-side would turn on rerere in the user's own checkout (git enables
+	// rerere automatically when .git/rr-cache exists and rerere.enabled is unset).
+	if rr := filepath.Join(gitDir, "rr-cache"); fileExists(rr) {
+		registerMount(rr, filepath.Join(containerGitDir, "rr-cache"), false, true)
 	}
 	// objects/info read-only again (alternates), on top of the rw objects/.
 	narrowObjectsInfo(registerMount, gitDir, containerGitDir)

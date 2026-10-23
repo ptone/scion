@@ -135,7 +135,12 @@ var conservativeBranchName = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
 // push setting.
 func privateConfigUpstreamSeed(branch string) []byte {
 	var b strings.Builder
-	b.WriteString("\n[push]\n\tautoSetupRemote = true\n")
+	// Disable automatic gc and maintenance: under the read-only .git root they
+	// cannot write their lock files in the root and would print warnings on routine
+	// commands. (Apple reads the repository config directly, so this does not apply
+	// there; see the workspace guide.)
+	b.WriteString("\n[gc]\n\tauto = 0\n[maintenance]\n\tauto = false\n")
+	b.WriteString("[push]\n\tautoSetupRemote = true\n")
 	if branch != "" {
 		if conservativeBranchName.MatchString(branch) {
 			b.WriteString("[branch \"")

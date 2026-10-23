@@ -1714,3 +1714,25 @@ func TestRefuseRootCommonDirRedirect(t *testing.T) {
 		t.Errorf("a .git gitfile (linked worktree) must not be refused, got: %v", err)
 	}
 }
+
+// R1: host-side git refuses, through HostGitCommand's policy check, to run in a
+// repository whose .git directory carries a root-level commondir or gitdir (a
+// redirect of the common git dir). The command is refused before any git runs.
+func TestHostGitCommand_RefusesRootCommonDirRedirect(t *testing.T) {
+	for _, name := range []string{"commondir", "gitdir"} {
+		t.Run(name, func(t *testing.T) {
+			repo, _ := newHostGitRepo(t)
+			if err := os.WriteFile(filepath.Join(repo, ".git", name), []byte("../elsewhere\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := HostGitCommand(context.Background(), repo, HostGitOptions{Policy: RepoPolicyLinked}, "status")
+			var refused *RepoConfigRefusedError
+			if !errors.As(err, &refused) {
+				t.Fatalf("error = %v, want *RepoConfigRefusedError for a root .git/%s", err, name)
+			}
+			if !strings.Contains(refused.Key, name) {
+				t.Errorf("refused key = %q, want it to name .git/%s", refused.Key, name)
+			}
+		})
+	}
+}

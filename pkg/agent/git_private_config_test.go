@@ -125,6 +125,11 @@ func TestSeedPrivateGitConfig_MissingBaseSeedsUpstreamOnly(t *testing.T) {
 	if strings.Contains(s, "[core]") || strings.Contains(s, "[remote") {
 		t.Errorf("missing base must not invent base config, got %q", s)
 	}
+	// Automatic gc and maintenance are disabled so routine commands do not try to
+	// write lock files in the read-only .git root (which would only print warnings).
+	if !strings.Contains(s, "auto = 0") || !strings.Contains(s, "auto = false") {
+		t.Errorf("seed must disable automatic gc and maintenance, got %q", s)
+	}
 }
 
 // The pre-seeded branch upstream + push.autoSetupRemote must let `git push -u`
