@@ -88,7 +88,7 @@ With `--write`, scion installs one include file and one known-hosts file per Hub
 ssh scion.hub.my-project.my-agent
 ```
 
-Without an agent argument every agent on the Hub is included, and blocks of agents that no longer exist are removed; if the listing fails or is incomplete, nothing is written. With an agent, only that agent's block is updated. `~/.ssh/config` is rewritten only when that line is missing from the top section, before the first `Host` or `Match` line. An `Include` line further down applies only to the `Host` or `Match` block above it, so it does not count.
+Without an agent argument every agent on the Hub is included, and blocks of agents that no longer exist are removed; if the listing fails or is incomplete, nothing is written. With an agent, only that agent's block is updated. `~/.ssh/config` is rewritten only when that line is missing from the top section, before the first `Host` or `Match` line. An `Include` line after a `Host` or `Match` line belongs to that block, so it applies only when that block matches and does not count.
 
 Each `Host` block's `ProxyCommand` records the absolute path of `scion.exe`, quoted so that both the Windows OpenSSH client and Git for Windows' `ssh` read it as one word, spaces included. **If you move `scion.exe`, run `scion ssh-config --write` again.**
 
@@ -190,6 +190,10 @@ Error: scion server start is not supported on Windows; the Windows build support
 ```
 
 The error names the command by its canonical name, so `scion broker join` reports `scion runtime-broker join` and `scion run` reports `scion start`. Global flags are still checked first.
+
+**Shell completion.** Completion for the supported commands works as on other platforms, in PowerShell (`scion completion powershell`), bash, zsh and fish. Unsupported commands are not offered, and completing one returns no suggestions, not even file names.
+
+Because `project` itself is not supported, `scion project <TAB>` offers no subcommands on Windows. `scion project use` (the same as `scion use`) still works when you type it in full.
 
 The unsupported commands fall into these groups:
 

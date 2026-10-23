@@ -32,10 +32,11 @@ Every quoted message on the page was matched to its source string
   (`hasSSHIncludeLine`), the Hub label rule for an IP address or `localhost`
   (`sshHubLabelCandidates`), and the non-ASCII characters the word allowlists
   refuse (`isNonASCIIWordRune`).
+- shell completion on Windows: an unsupported command completes to nothing,
+  not even file names, and `scion project <TAB>` offers no subcommands while
+  `scion project use` still runs (`completeGated` in `cmd/platform_gate.go`).
 
 ## Open
 
-- Shell completion for gated commands on Windows: document once that change
-  lands.
 - The docs site build runs in the upstream docs CI; links and anchors on the
   page were checked by hand.
