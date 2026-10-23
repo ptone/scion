@@ -2458,7 +2458,7 @@ describe('a finger tap on a quick-switcher button holds the on-screen keyboard o
     const focusedInTap = focusAtClickEnd(button);
 
     button.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'touch', bubbles: true }));
-    button.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+    button.dispatchEvent(new MouseEvent('click', { detail: 1, bubbles: true, composed: true }));
 
     expect(isTextInput(focusedInTap())).toBe(true);
     expect(page._paletteFooterPointerType).toBe('');
@@ -2480,6 +2480,45 @@ describe('a finger tap on a quick-switcher button holds the on-screen keyboard o
     expect(focusedInTap()).toBe(button);
     expect(document.querySelector('input[data-palette-keyboard-proxy]')).toBeNull();
     await vi.waitFor(() => expect(page.v2PaletteOpen).toBe(true));
+  });
+
+  it('a stray touch pointerdown does not make a later mouse click a tap', async () => {
+    stubNotTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    const button = await footerButton(page);
+    const focusedInTap = focusAtClickEnd(button);
+
+    // The finger slid off: no click followed this pointerdown.
+    button.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'touch', bubbles: true }));
+    button.dispatchEvent(
+      new PointerEvent('click', { pointerType: 'mouse', bubbles: true, composed: true })
+    );
+
+    expect(focusedInTap()).toBe(button);
+    expect(document.querySelector('input[data-palette-keyboard-proxy]')).toBeNull();
+    await vi.waitFor(() => expect(page.v2PaletteOpen).toBe(true));
+  });
+
+  it('a keyboard click, or a click after a cancelled touch press, is not a tap', async () => {
+    stubNotTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    const button = await footerButton(page);
+    const focusedInTap = focusAtClickEnd(button);
+
+    // Enter or Space after a stray touch pointerdown: a click with detail 0
+    // and, in an engine whose clicks are not PointerEvents, no pointerType.
+    button.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'touch', bubbles: true }));
+    button.dispatchEvent(new MouseEvent('click', { detail: 0, bubbles: true, composed: true }));
+    expect(focusedInTap()).toBe(button);
+    expect(document.querySelector('input[data-palette-keyboard-proxy]')).toBeNull();
+    await vi.waitFor(() => expect(page.v2PaletteOpen).toBe(true));
+
+    // A touch press the browser cancelled (the page scrolled) never clicks.
+    button.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'touch', bubbles: true }));
+    button.dispatchEvent(new PointerEvent('pointercancel', { pointerType: 'touch', bubbles: true }));
+    expect(page._paletteFooterPointerType).toBe('');
   });
 
   it('Cmd/Ctrl+K after a stray touch pointerdown does not hold the keyboard on a desktop', async () => {
