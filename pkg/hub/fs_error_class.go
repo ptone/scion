@@ -34,7 +34,7 @@ const (
 // err with errors.Is and never formats it.
 func fsErrorClass(err error) string {
 	switch {
-	case errors.Is(err, errWorkspaceContentTimeout),
+	case errors.Is(err, errWorkspaceStorageUnavailable),
 		errors.Is(err, context.DeadlineExceeded),
 		errors.Is(err, os.ErrDeadlineExceeded):
 		return fsErrorClassTimeout

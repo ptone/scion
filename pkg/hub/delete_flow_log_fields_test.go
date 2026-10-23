@@ -37,7 +37,7 @@ func TestFSErrorClass(t *testing.T) {
 		err  error
 		want string
 	}{
-		{"workspace timeout", fmt.Errorf("probe: %w", errWorkspaceContentTimeout), fsErrorClassTimeout},
+		{"workspace timeout", fmt.Errorf("probe: %w", errWorkspaceStorageUnavailable), fsErrorClassTimeout},
 		{"context deadline", context.DeadlineExceeded, fsErrorClassTimeout},
 		{"os deadline", os.ErrDeadlineExceeded, fsErrorClassTimeout},
 		{"not exist", &fs.PathError{Op: "remove", Path: "/some/dir", Err: fs.ErrNotExist}, fsErrorClassNotExist},

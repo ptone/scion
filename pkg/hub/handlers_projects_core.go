@@ -607,7 +607,7 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 			// seeded .scion/settings.yaml) cannot be created, so roll back
 			// like the clone failure above and answer 503. Other failures
 			// stay best-effort, as before.
-			if errors.Is(err, errWorkspaceContentTimeout) {
+			if errors.Is(err, errWorkspaceStorageUnavailable) {
 				s.projectsLogger().Error("project workspace storage did not respond, rolling back project creation",
 					"project_id", project.ID, "slug", project.Slug, "error", err)
 				rollbackCreatedProject()
@@ -1048,7 +1048,7 @@ func (s *Server) createProjectMembersGroup(ctx context.Context, project *store.P
 // returned instead. A backward-compatible fallback checks the durable path
 // first, then the legacy local path, so existing local deployments continue to
 // work when durable storage is first configured. If either check times out,
-// it returns an error wrapping errWorkspaceContentTimeout and no path (see
+// it returns an error wrapping errWorkspaceStorageUnavailable and no path (see
 // resolveDurableOrLegacyPath); HTTP handlers map that to 503.
 func (s *Server) hubManagedProjectPath(slug string) (string, error) {
 	if err := validateProjectSlug(slug); err != nil {
@@ -1121,12 +1121,6 @@ var workspaceContentTimeout = 2 * time.Second
 // a package-level var so tests can inject a read that hangs.
 var workspaceReadDir = os.ReadDir
 
-// errWorkspaceContentTimeout is returned by probeWorkspaceContent when the
-// directory read does not finish within workspaceContentTimeout. It reaches
-// hubManagedProjectPath's callers wrapped; HTTP handlers map it to 503 with
-// writeWorkspaceStorageUnavailable.
-var errWorkspaceContentTimeout = errors.New("workspace storage did not respond")
-
 // workspaceReadResult is the outcome of one directory read.
 type workspaceReadResult struct {
 	entries []os.DirEntry
@@ -1154,7 +1148,7 @@ var workspaceProbesInFlight sync.Map
 // directory share one read (see workspaceProbesInFlight); a probe that joins
 // an in-flight read can see a result up to one read old.
 //
-// On timeout it returns (false, errWorkspaceContentTimeout). The read keeps
+// On timeout it returns (false, errWorkspaceStorageUnavailable). The read keeps
 // running until it returns, then removes itself from
 // workspaceProbesInFlight. A read error (missing dir, permission) is not an
 // error here. It means "no content" and returns (false, nil).
@@ -1173,7 +1167,7 @@ func probeWorkspaceContent(dir string) (bool, error) {
 	select {
 	case <-call.done:
 	case <-timer.C:
-		return false, errWorkspaceContentTimeout
+		return false, errWorkspaceStorageUnavailable
 	}
 	res := call.res
 	if res.err != nil {
@@ -1230,7 +1224,7 @@ func (s *Server) resolveDurableOrLegacyPath(slug, durablePath string, warnEpheme
 // workspaceProbeError logs a timed-out workspace probe and wraps err with the
 // project slug only. The error text can reach stored, API-visible fields
 // (e.g. a scheduled event's error), so it must not carry the filesystem path.
-// It still matches errWorkspaceContentTimeout.
+// It still matches errWorkspaceStorageUnavailable.
 //
 // The log line carries the probe timeout and a fixed error class only: no
 // project ID is in scope here (callers resolve by slug), and the slug, path
@@ -1242,10 +1236,10 @@ func (s *Server) workspaceProbeError(slug string, err error) error {
 }
 
 // writeWorkspaceStorageUnavailable writes a 503 and returns true when err is
-// a workspace storage timeout (errWorkspaceContentTimeout). Otherwise it
+// a workspace storage timeout (errWorkspaceStorageUnavailable). Otherwise it
 // writes nothing and returns false. The response does not include the path.
 func writeWorkspaceStorageUnavailable(w http.ResponseWriter, err error) bool {
-	if !errors.Is(err, errWorkspaceContentTimeout) {
+	if !errors.Is(err, errWorkspaceStorageUnavailable) {
 		return false
 	}
 	writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
