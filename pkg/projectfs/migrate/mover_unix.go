@@ -69,6 +69,9 @@ type Spec struct {
 	// source has nothing to move. Without it a target the copy needs is
 	// created with the source directory's permission bits.
 	PrepareTarget func() error
+	// Normalize says how migrated entries are made usable by agents
+	// (owner from Options.Owner; modes by Mount).
+	Normalize Normalize
 	// Entries, when set, moves only these top-level entries of Source,
 	// each by the same rule, into Target (created when absent). The Source
 	// directory itself and its other entries stay where they are.
@@ -82,6 +85,10 @@ type Options struct {
 	// Now stamps the .migrated-<ts> name of a copied source (default
 	// time.Now).
 	Now func() time.Time
+	// Owner, when set, is the uid:gid migrated entries are chowned to
+	// (Specs with a Normalize mode). Sources and their .migrated copies
+	// are never chowned.
+	Owner *Ownership
 }
 
 func (o Options) now() time.Time {
@@ -140,7 +147,10 @@ type Result struct {
 	Backup string
 	// Entries holds the per-entry results of an Entries move.
 	Entries []Result
-	Err     error
+	// OwnershipErr is the first failure normalising migrated entries
+	// (owner, mode, ACL). It does not fail the move.
+	OwnershipErr error
+	Err          error
 }
 
 // Moved reports whether the Spec moved (or, in a dry run, would move)
@@ -279,6 +289,8 @@ func Move(spec Spec, opts Options) Result {
 		err := unix.Renameat(srcParent, srcName, dstParent, dstName)
 		if err == nil {
 			res.Outcome = OutcomeRenamed
+			n := normalizer{mode: spec.Normalize, owner: opts.Owner, res: &res}
+			n.tree(dstParent, dstName)
 			return res
 		}
 		// The target filled up, or it is on another device after all:
@@ -288,13 +300,18 @@ func Move(spec Spec, opts Options) Result {
 		}
 	}
 
+	n := &normalizer{mode: spec.Normalize, owner: opts.Owner, res: &res}
 	if dstFd < 0 && !opts.DryRun {
 		if dstFd, err = createTarget(dstParent, dstName, &srcSt); err != nil {
 			return fail(err)
 		}
+		var st unix.Stat_t
+		if err := unix.Fstat(dstFd, &st); err == nil {
+			n.entry(dstParent, dstName, &st)
+		}
 	}
 
-	m := merger{dryRun: opts.DryRun, res: &res}
+	m := merger{dryRun: opts.DryRun, res: &res, norm: n}
 	m.mergeDir(srcFd, dstFd, "", 0)
 	if len(m.errs) > 0 {
 		return fail(fmt.Errorf("copy into target: %d error(s), first: %w", len(m.errs), m.errs[0]))
@@ -322,9 +339,10 @@ func moveEntries(spec Spec, opts Options, res Result) Result {
 			return res
 		}
 		sub := Spec{
-			Step:   spec.Step,
-			Source: Tree{Base: spec.Source.Base, Rel: filepath.Join(spec.Source.Rel, name)},
-			Target: Tree{Base: spec.Target.Base, Rel: filepath.Join(spec.Target.Rel, name)},
+			Step:      spec.Step,
+			Source:    Tree{Base: spec.Source.Base, Rel: filepath.Join(spec.Source.Rel, name)},
+			Target:    Tree{Base: spec.Target.Base, Rel: filepath.Join(spec.Target.Rel, name)},
+			Normalize: spec.Normalize,
 		}
 		r := Move(sub, opts)
 		res.Entries = append(res.Entries, r)
@@ -392,9 +410,11 @@ func moveFile(spec Spec, opts Options, res Result, srcParent int, srcName string
 			}
 			return res
 		}
+		n := normalizer{mode: spec.Normalize, owner: opts.Owner, res: &res}
 		err := unix.Renameat(srcParent, srcName, dstParent, dstName)
 		if err == nil {
 			res.Outcome = OutcomeRenamed
+			n.tree(dstParent, dstName)
 			return res
 		}
 		if !errors.Is(err, unix.EXDEV) {
@@ -408,6 +428,7 @@ func moveFile(spec Spec, opts Options, res Result, srcParent int, srcName string
 			res.Conflicts = append(res.Conflicts, ".")
 		} else {
 			res.Copied++
+			n.entry(dstParent, dstName, srcSt)
 		}
 	}
 	if opts.DryRun {
@@ -453,6 +474,7 @@ func renameToBackup(srcParent int, srcName string, opts Options) (string, error)
 type merger struct {
 	dryRun bool
 	res    *Result
+	norm   *normalizer
 	errs   []error
 }
 
@@ -510,9 +532,16 @@ func (m *merger) mergeSubdir(src, dst int, name, p string, st *unix.Stat_t, dept
 			m.mergeDir(childSrc, -1, p, depth+1)
 			return
 		}
-		if err := unix.Mkdirat(dst, name, uint32(st.Mode&0o777)); err != nil && !errors.Is(err, unix.EEXIST) {
+		err := unix.Mkdirat(dst, name, uint32(st.Mode&0o777))
+		if err != nil && !errors.Is(err, unix.EEXIST) {
 			m.errs = append(m.errs, fmt.Errorf("create %q: %w", p, err))
 			return
+		}
+		if err == nil {
+			var newSt unix.Stat_t
+			if err := unix.Fstatat(dst, name, &newSt, unix.AT_SYMLINK_NOFOLLOW); err == nil {
+				m.norm.entry(dst, name, &newSt)
+			}
 		}
 	case err != nil:
 		m.errs = append(m.errs, fmt.Errorf("stat target %q: %w", p, err))
@@ -555,6 +584,7 @@ func (m *merger) mergeFile(src, dst int, name, p string, st *unix.Stat_t) {
 			m.res.Conflicts = append(m.res.Conflicts, p)
 		default:
 			m.res.Copied++
+			m.norm.entry(dst, name, st)
 		}
 	case err != nil:
 		m.errs = append(m.errs, fmt.Errorf("stat target %q: %w", p, err))

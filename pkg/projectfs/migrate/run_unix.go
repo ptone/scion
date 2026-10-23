@@ -152,6 +152,8 @@ func projectInput(in HubInput, legacy Tree, ref ProjectRef) (ProjectInput, error
 		GlobalDir:   in.GlobalDir,
 		Tracked:     in.Tracked,
 	}
+	pi.WorkspaceOwner = layoutOwner(in.Workspace)
+	pi.SharedDirOwner = layoutOwner(in.SharedDirs)
 	mode := ref.Mode
 	if mode == "" {
 		mode = projectfs.ModeSharedPlain
@@ -218,6 +220,13 @@ func (h HubReport) WriteLog(w io.Writer) {
 				pf("  REFUSED %s (not copied)", rf)
 			}
 		}
+		if p.Moves() > 0 && !h.DryRun {
+			if errs := p.OwnershipErrors(); len(errs) > 0 {
+				pf("project %s (%s): migrated; ownership not normalised (%d entries failed, first: %v); %s", p.ID, p.Slug, len(errs), errs[0], OwnershipHint)
+			} else if p.OwnershipRequested {
+				pf("project %s (%s): ownership normalised", p.ID, p.Slug)
+			}
+		}
 		for _, n := range p.Notes {
 			pf("project %s (%s): note: %s", p.ID, p.Slug, n)
 		}
@@ -261,6 +270,21 @@ func flatten(rs []Result) []Result {
 		out = append(out, r)
 	}
 	return out
+}
+
+// layoutOwner is the uid:gid a Layout names, or nil when it names none.
+func layoutOwner(l projectfs.Layout) *Ownership {
+	if l.UID <= 0 && l.GID <= 0 {
+		return nil
+	}
+	uid, gid := l.UID, l.GID
+	if uid <= 0 {
+		uid = -1 // fchownat: leave unchanged
+	}
+	if gid <= 0 {
+		gid = -1
+	}
+	return &Ownership{UID: uid, GID: gid}
 }
 
 // ensureLeaf creates r's directory if absent through the authority

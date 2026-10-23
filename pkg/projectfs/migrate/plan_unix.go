@@ -121,6 +121,11 @@ type ProjectInput struct {
 	// Tracked reports whether path (relative to the checkout at dir) is
 	// tracked by git. Nil uses GitTracked.
 	Tracked func(ctx context.Context, dir, path string) (bool, error)
+	// WorkspaceOwner and SharedDirOwner are the uid:gid migrated entries
+	// are chowned to, under the workspace/.scion and under shared dirs
+	// (nil: owners are kept).
+	WorkspaceOwner *Ownership
+	SharedDirOwner *Ownership
 	// CloudRunHomes is phase 3's step 5 (ptone/scion#5825); nil in phase 2.
 	CloudRunHomes func(opts Options) []Result
 }
@@ -132,6 +137,9 @@ type ProjectReport struct {
 	Results []Result
 	// Notes are informational lines (entries left in place on purpose).
 	Notes []string
+	// OwnershipRequested: migrated entries were to be chowned (the Layout
+	// names a uid/gid).
+	OwnershipRequested bool
 }
 
 // Moves counts the Specs that moved (or would move) anything.
@@ -143,6 +151,18 @@ func (p ProjectReport) Moves() int {
 		}
 	}
 	return n
+}
+
+// OwnershipErrors returns the ownership/mode normalisation failures of
+// the project's moves (empty: every migrated entry was normalised).
+func (p ProjectReport) OwnershipErrors() []error {
+	var errs []error
+	for _, r := range flatten(p.Results) {
+		if r.OwnershipErr != nil {
+			errs = append(errs, r.OwnershipErr)
+		}
+	}
+	return errs
 }
 
 // Failed reports whether any step failed. A conflict is not a failure: the
@@ -169,7 +189,7 @@ var infraEntries = map[string]bool{"shared-dirs": true, ".scion": true}
 // MigrateProject runs (or, with opts.DryRun, plans) every M2 step for one
 // project, in ProjectSteps order.
 func MigrateProject(ctx context.Context, in ProjectInput, opts Options) ProjectReport {
-	rep := ProjectReport{ID: in.ID, Slug: in.Slug}
+	rep := ProjectReport{ID: in.ID, Slug: in.Slug, OwnershipRequested: in.WorkspaceOwner != nil || in.SharedDirOwner != nil}
 	if err := validateInput(in); err != nil {
 		rep.Results = append(rep.Results, Result{Step: StepSeed, Outcome: OutcomeFailed, Err: err})
 		return rep
@@ -180,19 +200,21 @@ func MigrateProject(ctx context.Context, in ProjectInput, opts Options) ProjectR
 	}
 	local := Tree{Base: in.GlobalDir, Rel: filepath.Join("projects", in.Slug)}
 
+	wsOpts, sdOpts := opts, opts
+	wsOpts.Owner, sdOpts.Owner = in.WorkspaceOwner, in.SharedDirOwner
 	// Step 4 first: otherwise the workspace rename carries the hub seed
 	// into workspace/, where it would pose as a repository tier.
 	if in.ProjectRoot.Base != "" {
 		for _, src := range append(append([]Tree{}, sources...), local) {
-			rep.seed(ctx, in, src, opts)
+			rep.seed(ctx, in, src, wsOpts)
 		}
 	}
 	for _, src := range sources {
-		rep.workspace(StepHubProjects, src, in.Workspace, in.PrepareWorkspace, opts)
+		rep.workspace(StepHubProjects, src, in.Workspace, in.PrepareWorkspace, wsOpts)
 	}
-	rep.workspace(StepLocalProjects, local, in.Workspace, in.PrepareWorkspace, opts)
+	rep.workspace(StepLocalProjects, local, in.Workspace, in.PrepareWorkspace, wsOpts)
 	if in.SharedDir != nil {
-		rep.sharedDirs(in, opts)
+		rep.sharedDirs(in, sdOpts)
 	}
 	if in.CloudRunHomes != nil {
 		rep.Results = append(rep.Results, in.CloudRunHomes(opts)...)
@@ -232,7 +254,7 @@ func validateInput(in ProjectInput) error {
 func (rep *ProjectReport) seed(ctx context.Context, in ProjectInput, src Tree, opts Options) {
 	scion := Tree{Base: src.Base, Rel: filepath.Join(src.Rel, ".scion")}
 	target := Tree{Base: in.ProjectRoot.Base, Rel: filepath.Join(in.ProjectRoot.Rel, ".scion")}
-	spec := Spec{Step: StepSeed, Source: scion, Target: target}
+	spec := Spec{Step: StepSeed, Source: scion, Target: target, Normalize: NormalizeWorkspace}
 
 	gitKind, err := entryKind(Tree{Base: src.Base, Rel: filepath.Join(src.Rel, ".git")})
 	if err != nil {
@@ -311,7 +333,7 @@ func (rep *ProjectReport) workspace(step Step, src Tree, target *Tree, prepare f
 		rep.Notes = append(rep.Notes, fmt.Sprintf("%s: the project has no project-scoped workspace; the legacy tree is left in place", src))
 		return
 	}
-	rep.Results = append(rep.Results, Move(Spec{Step: step, Source: src, Target: *target, PrepareTarget: prepare}, opts))
+	rep.Results = append(rep.Results, Move(Spec{Step: step, Source: src, Target: *target, PrepareTarget: prepare, Normalize: NormalizeWorkspace}, opts))
 }
 
 // sharedDirs is step 3: hub-local project-configs/<slug>__<short>/shared-dirs/<name>.
@@ -336,7 +358,7 @@ func (rep *ProjectReport) sharedDirs(in ProjectInput, opts Options) {
 			rep.Results = append(rep.Results, Result{Step: StepSharedDirs, Source: src.String(), Outcome: OutcomeFailed, Err: fmt.Errorf("resolve target: %w", err)})
 			continue
 		}
-		rep.Results = append(rep.Results, Move(Spec{Step: StepSharedDirs, Source: src, Target: t.Tree, NoRename: true, PrepareTarget: t.Prepare}, opts))
+		rep.Results = append(rep.Results, Move(Spec{Step: StepSharedDirs, Source: src, Target: t.Tree, NoRename: true, PrepareTarget: t.Prepare, Normalize: NormalizeSharedDir}, opts))
 	}
 }
 
