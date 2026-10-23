@@ -483,8 +483,14 @@ func TestWindowsGate_CompletionSkipsGatedCommands(t *testing.T) {
 		{cobra.ShellCompRequestCmd, "server", "start", "--probe", ""},
 		{cobra.ShellCompRequestCmd, "server", "start", "--probe="},
 		{cobra.ShellCompNoDescRequestCmd, "server", "start", "x", ""},
+		// Intended: under the gated project nothing is completed, so
+		// "scion project <TAB>" does not offer the allowed "use" on Windows.
 		{cobra.ShellCompRequestCmd, "project", ""},
 		{cobra.ShellCompRequestCmd, "project", "--probe", ""},
+		// Global flags before __complete: cobra still treats the request
+		// as a completion request, so the gate must too.
+		{"--debug", cobra.ShellCompRequestCmd, "server", "start", "--probe", ""},
+		{"--project", "x", cobra.ShellCompRequestCmd, "server", "start", ""},
 	} {
 		t.Run("gated "+strings.Join(args, " "), func(t *testing.T) {
 			root, _ := gateTestTree(t)
@@ -496,6 +502,7 @@ func TestWindowsGate_CompletionSkipsGatedCommands(t *testing.T) {
 			require.True(t, completeGated(root, args, &out), "a request for a gated command must be answered by the gate")
 			assert.Equal(t, fmt.Sprintf(":%d\n", cobra.ShellCompDirectiveNoFileComp), out.String(), "only the NoFileComp directive")
 			assert.Empty(t, called, "no completion function of a gated command may run")
+			assertNoCompletionPlaceholder(t, root)
 
 			// Control: the same request handed to cobra directly does call
 			// the gated command's completion function.
@@ -514,6 +521,7 @@ func TestWindowsGate_CompletionSkipsGatedCommands(t *testing.T) {
 		{"windows", []string{cobra.ShellCompRequestCmd, "hub", "status", "--probe", ""}, "hub status flag"},
 		{"windows", []string{cobra.ShellCompRequestCmd, "project", "use", ""}, "project use args"},
 		{"windows", []string{cobra.ShellCompRequestCmd, "project", "use", "--probe", ""}, "project use flag"},
+		{"windows", []string{"--debug", cobra.ShellCompRequestCmd, "hub", "status", "--probe", ""}, "hub status flag"},
 		{"linux", []string{cobra.ShellCompRequestCmd, "server", "start", ""}, "server start args"},
 		{"linux", []string{cobra.ShellCompRequestCmd, "server", "start", "--probe", ""}, "server start flag"},
 	} {
@@ -525,6 +533,7 @@ func TestWindowsGate_CompletionSkipsGatedCommands(t *testing.T) {
 			var gateOut bytes.Buffer
 			require.False(t, completeGated(root, tc.args, &gateOut), "the gate must leave this request to cobra")
 			assert.Empty(t, gateOut.String())
+			assertNoCompletionPlaceholder(t, root)
 
 			var out bytes.Buffer
 			root.SetOut(&out)
@@ -542,4 +551,14 @@ func TestWindowsGate_CompletionSkipsGatedCommands(t *testing.T) {
 	assert.False(t, completeGated(root, []string{"server", "start"}, &out))
 	assert.False(t, completeGated(root, []string{cobra.ShellCompRequestCmd}, &out))
 	assert.Empty(t, out.String())
+}
+
+// assertNoCompletionPlaceholder checks that completeGated left no command
+// named like cobra's completion request in the tree: cobra adds its own
+// when it executes.
+func assertNoCompletionPlaceholder(t *testing.T, root *cobra.Command) {
+	t.Helper()
+	for _, c := range root.Commands() {
+		assert.NotEqual(t, cobra.ShellCompRequestCmd, c.Name(), "completeGated must remove its placeholder")
+	}
 }
