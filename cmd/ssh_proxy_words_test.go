@@ -228,7 +228,7 @@ func stubVSCodePreflight(t *testing.T) {
 
 // checkVSCodeBatchArgs is off on other OSes and for a CLI that is not a
 // .cmd or .bat; on the Windows form it accepts paths with backslashes,
-// spaces and non-ASCII letters.
+// spaces, '~' and non-ASCII letters, and refuses modifier letters.
 func TestCheckVSCodeBatchArgs(t *testing.T) {
 	orig := vscodeOnWindows
 	t.Cleanup(func() { vscodeOnWindows = orig })
@@ -242,7 +242,11 @@ func TestCheckVSCodeBatchArgs(t *testing.T) {
 		{vscodeUserDataFlag, `C:\Users\José Núñez\.scion\vscode\user-data`},
 		{"--remote", "ssh-remote+scion.hub.p.a"}, {"--path", "/workspace/sub_dir-1"},
 	}))
-	for _, c := range []string{`"`, "%", "^", "&", "|", "<", ">", "(", ")", "!", "\n", "'", ";", "$", "`"} {
+	// An 8.3 short name: '~' is literal for cmd.exe.
+	require.NoError(t, checkVSCodeBatchArgs(`C:\VS Code\bin\code.cmd`, []vscodeArg{
+		{vscodeUserDataFlag, `C:\Users\FIRSTN~1\.scion\vscode\user-data`},
+	}))
+	for _, c := range []string{`"`, "%", "^", "&", "|", "<", ">", "(", ")", "!", "\n", "'", ";", "$", "`", "\u02b9", "\u02ba", "\u02bc", "\u02c6"} {
 		require.Error(t, checkVSCodeBatchArgs(`C:\VS Code\bin\code.cmd`, []vscodeArg{{"--path", "/a" + c + "b"}}), "%q", c)
 	}
 }
@@ -252,4 +256,39 @@ func TestCheckVSCodeBatchArgs(t *testing.T) {
 func testAbsExe(t *testing.T) string {
 	t.Helper()
 	return filepath.Join(t.TempDir(), "scion")
+}
+
+// scion ssh checks every ProxyCommand word before it makes its temporary
+// directory: on a refusal the temporary directory stays empty. Control: a
+// successful prepare makes one entry there (removed by its cleanup).
+func TestPrepareSSH_RefusalMakesNoTempDir(t *testing.T) {
+	setSSHQuoteForWindows(t, true)
+	hub := twoProjectHub(t, "tok")
+	// Everything t.TempDir makes is made before the temp dir is redirected.
+	env, _, _ := newSSHTestEnv(t, t.TempDir(), hub)
+	badExe := filepath.Join(t.TempDir(), "a&b", "scion")
+	goodExe := testAbsExe(t)
+	tmp := t.TempDir()
+	for _, k := range []string{"TMPDIR", "TMP", "TEMP"} {
+		t.Setenv(k, tmp)
+	}
+	require.Equal(t, filepath.Clean(tmp), filepath.Clean(os.TempDir()))
+	entries := func() int {
+		des, err := os.ReadDir(tmp)
+		require.NoError(t, err)
+		return len(des)
+	}
+
+	env.exe = badExe
+	_, cleanup, err := prepareSSH(context.Background(), env, "a/b-c", nil)
+	require.Error(t, err)
+	assert.Nil(t, cleanup, "no cleanup: nothing was made")
+	assert.Equal(t, 0, entries(), "no temporary directory on refusal")
+
+	env.exe = goodExe
+	_, cleanup, err = prepareSSH(context.Background(), env, "a/b-c", nil)
+	require.NoError(t, err)
+	assert.Equal(t, 1, entries(), "control: one temporary directory")
+	cleanup()
+	assert.Equal(t, 0, entries())
 }

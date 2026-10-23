@@ -399,7 +399,7 @@ func TestSSHShellQuoteForCmd(t *testing.T) {
 // whitespace. The error names the character. Runs on every OS.
 func TestSSHCmdQuote_RefusesShellSpecialChars(t *testing.T) {
 	setSSHQuoteForWindows(t, true)
-	for _, c := range []string{`"`, "$", "`", "!", "%", "^", "&", "|", "<", ">", ";", "'", "*", "?", "{", "}", "#", "\t", "\n", "\u00a0", "\uff02"} {
+	for _, c := range []string{`"`, "$", "`", "!", "%", "^", "&", "|", "<", ">", ";", "'", "*", "?", "{", "}", "#", "\t", "\n", "\u00a0", "\uff02", "\u02b9", "\u02ba", "\u02bc", "\u02c6"} {
 		word := "C:/a" + c + "b/scion.exe"
 		_, err := sshShellQuote(word)
 		require.Error(t, err, "%q", word)

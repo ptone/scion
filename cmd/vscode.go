@@ -29,8 +29,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -693,8 +691,8 @@ type vscodeArg struct{ flag, value string }
 // .cmd or .bat file on Windows (VS Code's own bin\code.cmd is). Windows
 // runs such a file through cmd.exe, and os/exec does not escape arguments
 // for cmd.exe, so each argument may contain only ASCII letters and digits,
-// @+=:,./_-, backslashes, spaces, and non-ASCII letters, digits and
-// combining marks. Any other character is an error naming the argument,
+// @+=:,./_-, backslashes, '~' (8.3 short names), spaces, and non-ASCII
+// letters (except modifier letters), digits and combining marks. Any other character is an error naming the argument,
 // before VS Code is started. A CLI that is not a .cmd or .bat, and every
 // other OS, is not affected.
 func checkVSCodeBatchArgs(bin string, args []vscodeArg) error {
@@ -707,10 +705,10 @@ func checkVSCodeBatchArgs(bin string, args []vscodeArg) error {
 	}
 	for _, a := range args {
 		for _, r := range a.value {
-			if isSSHWordSafe(r) || r == ' ' || r == '\\' || (r >= utf8.RuneSelf && (unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsMark(r))) {
+			if isSSHWordSafe(r) || r == ' ' || r == '\\' || r == '~' || isNonASCIIWordRune(r) {
 				continue
 			}
-			return tunnelclient.Errorf(tunnelclient.ExitError, "%s %q contains %q, which cannot be passed to the VS Code launcher %s (a %s file run by cmd.exe); use a profile and home path, and a --path, with only letters, digits, spaces and -._ characters", a.flag, a.value, r, bin, ext)
+			return tunnelclient.Errorf(tunnelclient.ExitError, "%s %q contains %q, which cannot be passed to the VS Code launcher %s (a %s file run by cmd.exe); use a home directory and a --path with only letters, digits, spaces and the characters @+=:,./_-~\\", a.flag, a.value, r, bin, ext)
 		}
 	}
 	return nil

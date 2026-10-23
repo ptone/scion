@@ -579,8 +579,8 @@ func isSSHWordSafe(r rune) bool {
 // become forward slashes, which both accept in a Windows path. After that
 // a word may contain only:
 //   - ASCII letters and digits and @+=:,./_- (left unquoted), and
-//   - non-ASCII letters, digits and combining marks (an account name in a
-//     path), and
+//   - non-ASCII letters (except modifier letters), digits and combining
+//     marks (an account name in a path), and
 //   - spaces and ( ) ~ [ ], in which case the whole word is
 //     double-quoted: inside double quotes they are literal for sh and for
 //     the C runtime's command-line parser (a "Program Files (x86)" or 8.3
@@ -602,7 +602,7 @@ func sshCmdQuote(s string) (string, error) {
 		case isSSHWordSafe(r):
 		case strings.ContainsRune(" ()~[]", r):
 			quote = true
-		case r >= utf8.RuneSelf && (unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsMark(r)):
+		case isNonASCIIWordRune(r):
 		default:
 			return "", fmt.Errorf("contains %q, which a Windows ssh ProxyCommand cannot carry as written", r)
 		}
@@ -611,6 +611,18 @@ func sshCmdQuote(s string) (string, error) {
 		return `"` + s + `"`, nil
 	}
 	return s, nil
+}
+
+// isNonASCIIWordRune reports whether r is a non-ASCII letter, digit or
+// combining mark allowed in a Windows word. Modifier letters (category Lm)
+// are excluded: some of them become ASCII punctuation under a Windows
+// best-fit code page conversion. Modifier symbols (Sk) and other
+// punctuation are not letters, digits or marks, so they are excluded too.
+func isNonASCIIWordRune(r rune) bool {
+	if r < utf8.RuneSelf {
+		return false
+	}
+	return (unicode.IsLetter(r) && !unicode.Is(unicode.Lm, r)) || unicode.IsDigit(r) || unicode.IsMark(r)
 }
 
 // sshProxyWord is sshShellQuote for one named ProxyCommand word; the error

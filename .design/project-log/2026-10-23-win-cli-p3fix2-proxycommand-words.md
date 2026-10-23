@@ -44,3 +44,12 @@ The new tests are added to the Windows job's `./cmd` anchor.
 ## Open issues
 
 - The sweep of other Windows-reachable strings that a shell or CreateProcess interprets went to the EM as a bucket report. One item, the VS Code CLI launch on Windows, is listed there for a decision.
+
+## Review r1 (APPROVE, win-cli-rev-p3fix2-r1): all four items adopted
+
+1. Both allowlists (the ProxyCommand words and the VS Code .cmd arguments) now exclude modifier letters (Unicode Lm) through a shared `isNonASCIIWordRune`. Some of them become ASCII punctuation under a best-fit code page conversion. Modifier symbols (Sk) stay excluded. U+02B9, U+02BA, U+02BC and U+02C6 are added to both refusal tests.
+2. `checkVSCodeBatchArgs` allows `~` (it is literal for cmd.exe), with an 8.3 control (`C:\Users\FIRSTN~1\...`). `%` stays refused.
+3. The .cmd refusal hint now lists exactly what the check allows.
+4. `TestPrepareSSH_RefusalMakesNoTempDir`: on a refusal, `scion ssh` makes no temporary directory (TMPDIR/TMP/TEMP redirected to an empty directory). Control: a successful prepare makes one, and its cleanup removes it.
+
+Also fixed after the first Windows run: the new tests use a host-absolute scion path. `sshTestExe` is a unix path, which is not absolute on Windows.
