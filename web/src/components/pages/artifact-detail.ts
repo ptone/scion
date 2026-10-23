@@ -169,6 +169,7 @@ export type ReviewHint =
   | 'paste-multi'
   | 'earlier'
   | 'moved'
+  | 'source-own'
   | 'generic'
   | 'load-failed';
 
@@ -202,6 +203,11 @@ export const REVIEW_HINT_TEXT: Record<ReviewHint, { title: string; body: string 
   moved: {
     title: 'This edit would move an earlier comment.',
     body: 'Edit around it, or use the Source view.',
+  },
+  'source-own': {
+    title:
+      "Suggestions you've made so far become read-only in the graphical view after editing in Source.",
+    body: 'You can still change them there.',
   },
   generic: {
     title: "That change can't be recorded as a suggestion.",
@@ -311,11 +317,6 @@ export class ScionPageArtifactDetail extends LitElement {
    * taking the editor's text) even if the experiment changes mid-review.
    */
   @state() private reviewGraphical = false;
-  /**
-   * The graphical editor's record of the reviewer's own marks, one object
-   * per review (opaque here; the editor fills it).
-   */
-  private reviewOwnership: object = {};
   @state() private reviewText = '';
   @state() private reviewNote = '';
   @state() private reviewBusy = false;
@@ -1093,7 +1094,6 @@ export class ScionPageArtifactDetail extends LitElement {
     this.criticView = 'marks';
     this.reviewing = true;
     this.reviewGraphical = this.graphicalReview;
-    this.reviewOwnership = {};
     if (this.reviewGraphical) {
       this.clearHint();
       this.reviewView = storedReviewView();
@@ -1160,7 +1160,11 @@ export class ScionPageArtifactDetail extends LitElement {
   /** Switches between the graphical and source views, remembering the choice. */
   private setReviewView(next: ReviewView): void {
     if (next === this.reviewView) return;
+    // Own suggestions are the reviewer's only until the text returns from
+    // the Source view, where it is opened again (every mark then earlier).
+    let ownMarks = false;
     if (next === 'source') {
+      ownMarks = this.graphicalEditor?.hasOwnMarks() ?? false;
       if (!this.takeGraphicalText()) return;
     } else {
       void this.ensureEditor();
@@ -1168,6 +1172,7 @@ export class ScionPageArtifactDetail extends LitElement {
     if (this.graphicalHint !== 'load-failed' || next === 'graphical') this.clearHint();
     this.reviewView = next;
     storeReviewView(next);
+    if (ownMarks) this.showHint('source-own');
   }
 
   /** Ctrl+Alt+M (and Cmd+Alt+M) comments in the source view too. */
@@ -1264,8 +1269,6 @@ export class ScionPageArtifactDetail extends LitElement {
     this.reviewText = lfText(this.text);
     this.reviewPreview = this.reviewText;
     this.discardedReview = discarded;
-    // The reloaded text starts a new review: no mark in it is the reviewer's.
-    this.reviewOwnership = {};
   }
 
   /**
@@ -2171,9 +2174,15 @@ export class ScionPageArtifactDetail extends LitElement {
     if (!hint) return nothing;
     const t = REVIEW_HINT_TEXT[hint];
     const icon =
-      hint === 'image' ? 'image' : hint === 'load-failed' ? 'exclamation-triangle' : 'slash-circle';
+      hint === 'image'
+        ? 'image'
+        : hint === 'load-failed'
+          ? 'exclamation-triangle'
+          : hint === 'source-own'
+            ? 'info-circle'
+            : 'slash-circle';
     const action =
-      hint === 'image' || hint === 'load-failed' || hint === 'earlier'
+      hint === 'image' || hint === 'load-failed' || hint === 'earlier' || hint === 'source-own'
         ? nothing
         : html`<div class="hint-actions">
             <sl-button size="small" @click=${(): void => this.setReviewView('source')}>
@@ -2330,7 +2339,6 @@ export class ScionPageArtifactDetail extends LitElement {
             ? this.editorLoad === 'ready'
               ? html`<scion-review-editor
                   .content=${this.reviewText}
-                  .ownership=${this.reviewOwnership}
                   .artifactId=${this.artifactId}
                   .seq=${v.seq}
                   .entryPath=${f.path}

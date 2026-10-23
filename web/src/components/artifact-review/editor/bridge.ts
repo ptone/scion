@@ -320,6 +320,8 @@ interface Item {
   /** runKeyOf: neighbours with the same key but different runs are separate marks. */
   run: string | null;
   note?: string;
+  /** The formatting marks of the node. */
+  fmt: readonly Mark[];
 }
 
 /** A run of the serializer's walk: the mark key and its run identity. */
@@ -359,10 +361,17 @@ export function docToSentinels(
     subNew: a.subClose,
     hl: a.hlClose,
   };
-  const transition = (from: RunState | null, to: RunState | null): string => {
-    if (from?.run === to?.run) return '';
-    if (from?.key === 'subOld' && to?.key === 'subNew') return a.subSep;
-    return (from ? closeS[from.key] : '') + (to ? openS[to.key] : '');
+  // A transition between runs: the closing token of the run that ends,
+  // the opening token of the run that starts, or a replacement's
+  // separator between its two sides.
+  const transition = (
+    from: RunState | null,
+    to: RunState | null
+  ): { close: string; open: string; sep: string } => {
+    if (from?.run === to?.run) return { close: '', open: '', sep: '' };
+    if (from?.key === 'subOld' && to?.key === 'subNew')
+      return { close: '', open: '', sep: a.subSep };
+    return { close: from ? closeS[from.key] : '', open: to ? openS[to.key] : '', sep: '' };
   };
   const blocks: { end: number; items: Item[] }[] = [];
   doc.descendants((node, pos) => {
@@ -371,22 +380,65 @@ export function docToSentinels(
     node.forEach((child, off) => {
       const from = pos + 1 + off;
       if (child.type.name === COMMENT) {
-        items.push({ from, to: from + 1, key: null, run: null, note: String(child.attrs.note) });
+        items.push({
+          from,
+          to: from + 1,
+          key: null,
+          run: null,
+          note: String(child.attrs.note),
+          fmt: formatting(child.marks),
+        });
       } else {
         items.push({
           from,
           to: from + child.nodeSize,
           key: markKeyOf(child.marks),
           run: runKeyOf(child.marks),
+          fmt: formatting(child.marks),
         });
       }
     });
     blocks.push({ end: pos + 1 + node.content.size, items });
     return false;
   });
-  const ins = new Map<number, string>();
-  const add = (pos: number, s: string): void => {
-    if (s) ins.set(pos, (ins.get(pos) ?? '') + s);
+  // Tokens to insert at each position: closing ones go under the
+  // formatting of the text before them (inside the run they close),
+  // opening ones under the formatting of the text after them, so a mark
+  // at the edge of link or emphasis text keeps its tokens inside it.
+  // The formatting each run's tokens are written under: the formatting
+  // that covers the whole run and continues past one of its ends (the run
+  // is inside that link or emphasis). Formatting that starts and ends with
+  // the run stays inside the mark ({++*x*++}).
+  const openFmt = new Map<number, readonly Mark[]>();
+  const closeFmt = new Map<number, readonly Mark[]>();
+  for (const b of blocks) {
+    const items = b.items;
+    for (let i = 0; i < items.length; i++) {
+      if (!items[i].run) continue;
+      let j = i;
+      while (
+        j + 1 < items.length &&
+        items[j + 1].run !== null &&
+        (items[j + 1].run === items[j].run ||
+          (items[j].key === 'subOld' && items[j + 1].key === 'subNew'))
+      ) {
+        j++;
+      }
+      const all = items[i].fmt.filter((m) =>
+        items.slice(i, j + 1).every((it) => m.isInSet(it.fmt))
+      );
+      const outside = [...(items[i - 1]?.fmt ?? []), ...(items[j + 1]?.fmt ?? [])];
+      const enclosing = all.filter((m) => m.isInSet(outside));
+      openFmt.set(items[i].from, enclosing);
+      closeFmt.set(items[j].to, enclosing);
+      i = j;
+    }
+  }
+  const ins = new Map<number, { close: string; open: string; sep: string }>();
+  const add = (pos: number, t: { close: string; open: string; sep: string }): void => {
+    if (!t.close && !t.open && !t.sep) return;
+    const cur = ins.get(pos) ?? { close: '', open: '', sep: '' };
+    ins.set(pos, { close: cur.close + t.close, open: cur.open + t.open, sep: cur.sep + t.sep });
   };
   const notes: string[] = [];
   const comments: number[] = [];
@@ -412,22 +464,29 @@ export function docToSentinels(
   });
   const tr = new Transform(doc);
   const ops = [
-    ...[...ins].map(([pos, s]) => ({ pos, s, order: 1 })),
-    ...comments.map((pos) => ({ pos, s: a.note, order: 0 })),
+    ...[...ins].map(([pos, t]) => ({ pos, t, order: 1 })),
+    ...comments.map((pos) => ({ pos, t: null, order: 0 })),
   ].sort((x, y) => y.pos - x.pos || x.order - y.order);
   for (const op of ops) {
     const $p = doc.resolve(op.pos);
-    if (op.order === 0) {
+    if (op.t === null) {
       // A comment is written under its own formatting marks (those it had
       // at load, or those it was added under), so a comment at the edge of
       // a link or emphasis run stays on its side of the closing syntax.
       const ms = formatting(doc.nodeAt(op.pos)?.marks ?? []);
-      tr.replaceWith(op.pos, op.pos + 1, schema.text(op.s, ms));
+      tr.replaceWith(op.pos, op.pos + 1, schema.text(a.note, ms));
     } else {
       const before = $p.nodeBefore;
       const after = $p.nodeAfter;
-      const ms = before && after ? sharedMarks(before.marks, after.marks) : [];
-      tr.insert(op.pos, schema.text(op.s, ms));
+      // Inserted in reverse: opening tokens, the separator, then closing ones before them.
+      if (op.t.open) tr.insert(op.pos, schema.text(op.t.open, [...(openFmt.get(op.pos) ?? [])]));
+      if (op.t.sep) {
+        const ms = before && after ? sharedMarks(before.marks, after.marks) : [];
+        tr.insert(op.pos, schema.text(op.t.sep, ms));
+      }
+      if (op.t.close) {
+        tr.insert(op.pos, schema.text(op.t.close, [...(closeFmt.get(op.pos) ?? [])]));
+      }
     }
   }
   for (const name of Object.values(MARKS)) {

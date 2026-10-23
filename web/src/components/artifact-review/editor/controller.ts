@@ -25,7 +25,7 @@ import { Fragment } from '@milkdown/prose/model';
 import type { Node, Slice } from '@milkdown/prose/model';
 import { Transform } from '@milkdown/prose/transform';
 import { NodeSelection, Plugin, PluginKey, TextSelection } from '@milkdown/prose/state';
-import type { Transaction } from '@milkdown/prose/state';
+import type { EditorState, Transaction } from '@milkdown/prose/state';
 import type { EditorView } from '@milkdown/prose/view';
 
 import { artifactLinkTarget } from '../../../client/artifact-preview.js';
@@ -103,6 +103,8 @@ export class ReviewController {
   private readonly uiKey = new PluginKey<unknown>('criticUi');
   private composing: CompositionSnapshot | null = null;
   private ended: CompositionSnapshot | null = null;
+  /** Whether the document had changed since load when each snapshot was taken. */
+  private dirtyAt = new WeakMap<CompositionSnapshot, boolean>();
   private endedTimer: ReturnType<typeof setTimeout> | null = null;
   private unguard: () => void = () => {};
 
@@ -242,7 +244,7 @@ export class ReviewController {
           !this.composing &&
           !this.ended
         ) {
-          this.composing = snapshotComposition(state);
+          this.composing = this.snapshot(state);
         }
         return true;
       },
@@ -311,7 +313,7 @@ export class ReviewController {
     this.settleComposition();
     // Still composing in the view (settle kept the older snapshot): that
     // snapshot covers this composition too.
-    this.composing ??= snapshotComposition(this.core.view.state);
+    this.composing ??= this.snapshot(this.core.view.state);
   }
 
   /**
@@ -348,6 +350,7 @@ export class ReviewController {
       this.composing = snap;
       return;
     }
+    const docBefore = view.state.doc;
     const id: unknown = this.uiKey.getState(view.state);
     const refused = reconcileComposition(view, snap, id, (doc, pos, at, before) => {
       const container = containerClass(view.state.doc.resolve(pos + 1));
@@ -360,6 +363,19 @@ export class ReviewController {
       return this.session.unitCheck(doc, i, i);
     });
     if (refused) this.opts.onHint(refused as HintKind);
+    if (view.state.doc === docBefore && docBefore.eq(snap.doc)) {
+      // The composition changed nothing: the document is as before it, and
+      // no change was reported while it ran.
+      this.session.setDirty(this.dirtyAt.get(snap) ?? true);
+      this.opts.onChange();
+    }
+  }
+
+  /** A composition snapshot, remembering whether the document was edited then. */
+  private snapshot(state: EditorState): CompositionSnapshot {
+    const snap = snapshotComposition(state);
+    this.dirtyAt.set(snap, this.session.isDirty);
+    return snap;
   }
 
   /**
@@ -367,18 +383,13 @@ export class ReviewController {
    * the review's object that keeps the reviewer's own marks own across
    * loads (view switches); without it, every mark is earlier.
    */
-  load(md: string, ownership?: object): boolean {
+  load(md: string): boolean {
     this.loading = true;
     try {
-      return this.session.load(md, ownership);
+      return this.session.load(md);
     } finally {
       this.loading = false;
     }
-  }
-
-  /** The ownership object of the open review (to pass to load). */
-  get ownership(): object {
-    return this.session.ownershipState;
   }
 
   /**
@@ -388,6 +399,11 @@ export class ReviewController {
    */
   flush(): string | null {
     return this.session.save();
+  }
+
+  /** Whether a mark or comment made in this editor since the last load is in the document. */
+  hasOwnMarks(): boolean {
+    return this.session.hasOwnMarks();
   }
 
   /** Top-level blocks that are read-only and saved from their source. */

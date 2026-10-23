@@ -47,6 +47,11 @@ class FakeReviewEditor extends HTMLElement {
   /** flush() reports that the document cannot be written. */
   unwritable = false;
   comments = 0;
+  /** hasOwnMarks() answer. */
+  own = false;
+  hasOwnMarks(): boolean {
+    return this.own;
+  }
   flush(): string | null {
     if (this.unwritable) return null;
     return this.next ?? this.content;
@@ -356,6 +361,27 @@ describe('artifact page: graphical review editor experiment', () => {
     expect(strip.textContent).toContain('This edit would move an earlier comment.');
     expect(strip.textContent).toContain('Edit around it, or use the Source view.');
     expect(byText(el, '.hint-strip sl-button', 'Open Source view')).toBeDefined();
+  });
+
+  it('switching to Source with own suggestions says they become read-only in the graphical view', async () => {
+    mockFetch();
+    const el = await mount(true);
+    await startReview(el);
+    const editor = $<FakeReviewEditor>(el, 'scion-review-editor')!;
+    // Without own suggestions, no notice.
+    await chooseView(el, 'source');
+    expect($(el, '.hint-strip')).toBeNull();
+    await chooseView(el, 'graphical');
+    const again = $<FakeReviewEditor>(el, 'scion-review-editor')!;
+    again.own = true;
+    await chooseView(el, 'source');
+    const strip = $(el, '.hint-strip')!;
+    expect(strip.textContent).toContain(
+      "Suggestions you've made so far become read-only in the graphical view after editing in Source."
+    );
+    expect(strip.textContent).toContain('You can still change them there.');
+    expect(byText(el, '.hint-strip sl-button', 'Open Source view')).toBeUndefined();
+    void editor;
   });
 
   it('Ctrl+Alt+M comments in the source view', async () => {

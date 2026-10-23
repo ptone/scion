@@ -26,6 +26,8 @@
 export interface ReviewEditorElement extends HTMLElement {
   flush(): string | null;
   comment(): Promise<void>;
+  /** Whether the reviewer has made a suggestion or comment in this view since it opened. */
+  hasOwnMarks(): boolean;
 }
 
 /*

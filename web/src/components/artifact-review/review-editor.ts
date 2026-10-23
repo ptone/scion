@@ -64,13 +64,6 @@ export class ScionReviewEditor extends LitElement {
   @property({ type: Number }) seq = 0;
   @property({ type: String }) entryPath = '';
   @property({ attribute: false }) files: ArtifactFile[] = [];
-  /**
-   * The review's ownership record, held by the page for the whole review
-   * (a new object for each review): the editor keeps in it which marks
-   * the reviewer added, so they stay the reviewer's across a switch to the
-   * Source view and back. Every other mark is earlier and read-only.
-   */
-  @property({ attribute: false }) ownership: object = {};
   /** Shown as the author of comments already in the text. */
   @property({ type: String }) noteAuthor = '';
 
@@ -155,7 +148,7 @@ export class ScionReviewEditor extends LitElement {
     if (!this.controller) return;
     this.clearTimer();
     this.known = text;
-    if (this.controller.load(text, this.ownership)) {
+    if (this.controller.load(text)) {
       this.emit('review-ready', {});
     } else {
       this.emit('review-load-failed', {});
@@ -165,6 +158,11 @@ export class ScionReviewEditor extends LitElement {
   /** Resolves once the editor has opened its document (or failed to). */
   get ready(): Promise<void> {
     return this.starting ?? Promise.resolve();
+  }
+
+  /** Whether the reviewer has made a suggestion or comment here since the text was opened. */
+  hasOwnMarks(): boolean {
+    return this.controller?.hasOwnMarks() ?? false;
   }
 
   /** The current text; serializes only after an edit. Null if it cannot be written. */
