@@ -649,3 +649,39 @@ func TestAgentConfigPatch_CountLimitDispositionInvariant(t *testing.T) {
 		}
 	}
 }
+
+// TestCreateAgent_RefusesNegativeCountLimit: a create whose config sets a
+// count limit below 0 is refused (400 validation_error naming the field)
+// and creates nothing; 0 (no limit) is accepted (ptone/scion#5605).
+func TestCreateAgent_RefusesNegativeCountLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		cfg   *api.ScionConfig
+		field string
+	}{
+		{name: "max_turns", cfg: &api.ScionConfig{MaxTurns: api.IntPtr(-1)}, field: "max_turns"},
+		{name: "max_model_calls", cfg: &api.ScionConfig{MaxModelCalls: api.IntPtr(-5)}, field: "max_model_calls"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+			srv, s, project := setupCreateAgentServer(t, disp)
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+				Name: "negative-limit-agent", ProjectID: project.ID, Config: tc.cfg,
+			})
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), tc.field)
+			_, err := s.GetAgentBySlug(context.Background(), project.ID, "negative-limit-agent")
+			assert.ErrorIs(t, err, store.ErrNotFound, "a refused create stores nothing")
+		})
+	}
+
+	t.Run("zero is accepted", func(t *testing.T) {
+		disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+		srv, _, project := setupCreateAgentServer(t, disp)
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+			Name: "unlimited-agent", ProjectID: project.ID,
+			Config: &api.ScionConfig{MaxTurns: api.IntPtr(0)},
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	})
+}
