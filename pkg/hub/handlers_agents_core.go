@@ -2567,7 +2567,7 @@ func (s *Server) createAgentInProject(
 		if !hasLocalPath && !s.isEmbeddedBroker(runtimeBrokerID) {
 			if stor := s.GetStorage(); stor != nil {
 				resolvedWorkspace, workspaceErr := s.resolveHubManagedWorkspaceForUpload(agent.AppliedConfig.Workspace, project.Slug)
-				if errors.Is(workspaceErr, errWorkspaceContentTimeout) {
+				if errors.Is(workspaceErr, errWorkspaceStorageUnavailable) {
 					// Workspace storage did not respond. Dispatching without
 					// the upload would leave the remote broker resolving the
 					// workspace against its own stale or empty project copy,

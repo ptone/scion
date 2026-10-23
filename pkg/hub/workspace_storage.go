@@ -151,7 +151,7 @@ func (s *Server) warnEphemeralProjectPath(slug string) {
 // platform volume backends, "cloudrun-volume" and "gke-shared-volume". The
 // second return is false when wsCfg does not select one of them, or selects
 // one without a volume name; the caller then falls through to the local path.
-// A non-nil error (wrapping errWorkspaceContentTimeout) means the volume or
+// A non-nil error (wrapping errWorkspaceStorageUnavailable) means the volume or
 // the legacy local path did not respond; see resolveDurableOrLegacyPath.
 //
 // Both backends share one guard. The mount root comes from workspaceMountRoot,

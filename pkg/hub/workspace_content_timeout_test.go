@@ -64,7 +64,7 @@ func TestProbeWorkspaceContent_TimesOutOnHungRead(t *testing.T) {
 	has, err := probeWorkspaceContent(dir)
 	elapsed := time.Since(start)
 
-	assert.ErrorIs(t, err, errWorkspaceContentTimeout)
+	assert.ErrorIs(t, err, errWorkspaceStorageUnavailable)
 	assert.False(t, has)
 	assert.Less(t, elapsed, 5*time.Second, "probe must not block on a hung read")
 }
@@ -72,7 +72,7 @@ func TestProbeWorkspaceContent_TimesOutOnHungRead(t *testing.T) {
 // A hung NFS mount must not resolve to either path: the legacy local path
 // might be wrong (the project may live on NFS), and the empty-looking NFS
 // path might be wrong (a legacy project lives locally). It returns an error
-// wrapping errWorkspaceContentTimeout, and logs on the projects logger.
+// wrapping errWorkspaceStorageUnavailable, and logs on the projects logger.
 func TestServerHubManagedProjectPath_NFSHungMountReturnsError(t *testing.T) {
 	f := newHungPathFixture(t, "hung-project")
 	mountRoot := filepath.Join(f.tmpHome, "nfs-mount")
@@ -83,7 +83,7 @@ func TestServerHubManagedProjectPath_NFSHungMountReturnsError(t *testing.T) {
 	srv.config.WorkspaceStorageConfig = nfsConfig(mountRoot)
 
 	path, err := srv.hubManagedProjectPath(f.slug)
-	require.ErrorIs(t, err, errWorkspaceContentTimeout)
+	require.ErrorIs(t, err, errWorkspaceStorageUnavailable)
 	assert.Empty(t, path)
 	nfsPath := filepath.Join(mountRoot, "share1", "hub-projects", f.slug)
 	assert.NotContains(t, err.Error(), mountRoot, "the error text must not carry the path (it can be stored, e.g. ScheduledEvent.Error)")
@@ -91,7 +91,7 @@ func TestServerHubManagedProjectPath_NFSHungMountReturnsError(t *testing.T) {
 	// project ID is in scope when resolving by slug.
 	assertSingleLogLine(t, logs, "Workspace storage did not respond",
 		map[string]string{"error_class": fsErrorClassTimeout, "timeout": workspaceContentTimeout.String()},
-		f.slug, nfsPath, mountRoot, f.tmpHome, errWorkspaceContentTimeout.Error(), "slug=", "path=", "error=")
+		f.slug, nfsPath, mountRoot, f.tmpHome, errWorkspaceStorageUnavailable.Error(), "slug=", "path=", "error=")
 }
 
 // N2: durable NFS path empty, legacy local path hangs. The project might
@@ -107,11 +107,11 @@ func TestServerHubManagedProjectPath_NFSEmptyLocalHungReturnsError(t *testing.T)
 	srv.config.WorkspaceStorageConfig = nfsConfig(mountRoot)
 
 	path, err := srv.hubManagedProjectPath(f.slug)
-	require.ErrorIs(t, err, errWorkspaceContentTimeout)
+	require.ErrorIs(t, err, errWorkspaceStorageUnavailable)
 	assert.Empty(t, path)
 	assertSingleLogLine(t, logs, "Workspace storage did not respond",
 		map[string]string{"error_class": fsErrorClassTimeout},
-		f.slug, f.localDir, f.tmpHome, errWorkspaceContentTimeout.Error(), "slug=", "path=", "error=")
+		f.slug, f.localDir, f.tmpHome, errWorkspaceStorageUnavailable.Error(), "slug=", "path=", "error=")
 }
 
 // NFS has content: the local path is never probed, so a hung local path
@@ -150,7 +150,7 @@ func TestServerHubManagedProjectPath_VolumeHungMountReturnsError(t *testing.T) {
 	srv.config.WorkspaceStorageConfig = cloudRunVolumeConfig()
 
 	path, err := srv.hubManagedProjectPath(f.slug)
-	require.ErrorIs(t, err, errWorkspaceContentTimeout)
+	require.ErrorIs(t, err, errWorkspaceStorageUnavailable)
 	assert.Empty(t, path)
 }
 
@@ -165,7 +165,7 @@ func TestServerHubManagedProjectPath_VolumeEmptyLocalHungReturnsError(t *testing
 	srv.config.WorkspaceStorageConfig = cloudRunVolumeConfig()
 
 	path, err := srv.hubManagedProjectPath(f.slug)
-	require.ErrorIs(t, err, errWorkspaceContentTimeout)
+	require.ErrorIs(t, err, errWorkspaceStorageUnavailable)
 	assert.Empty(t, path)
 }
 
@@ -175,19 +175,19 @@ func TestWriteWorkspaceStorageUnavailable(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code, "nothing written for other errors")
 
 	rec = httptest.NewRecorder()
-	wrapped := fmt.Errorf("workspace content check for /mnt/x: %w", errWorkspaceContentTimeout)
+	wrapped := fmt.Errorf("workspace content check for /mnt/x: %w", errWorkspaceStorageUnavailable)
 	assert.True(t, writeWorkspaceStorageUnavailable(rec, wrapped))
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 	assert.NotContains(t, rec.Body.String(), "/mnt/x", "response must not leak the path")
 }
 
 func TestProjectPathResolveError(t *testing.T) {
-	err := projectPathResolveError(fmt.Errorf("check /mnt/x: %w", errWorkspaceContentTimeout), "failed to resolve project path")
-	assert.ErrorIs(t, err, errWorkspaceContentTimeout)
+	err := projectPathResolveError(fmt.Errorf("check /mnt/x: %w", errWorkspaceStorageUnavailable), "failed to resolve project path")
+	assert.ErrorIs(t, err, errWorkspaceStorageUnavailable)
 	assert.NotContains(t, err.Error(), "/mnt/x")
 
 	err = projectPathResolveError(fmt.Errorf("slug /etc: bad"), "failed to resolve project path")
-	assert.NotErrorIs(t, err, errWorkspaceContentTimeout)
+	assert.NotErrorIs(t, err, errWorkspaceStorageUnavailable)
 	assert.Equal(t, "failed to resolve project path", err.Error())
 }
 
@@ -270,13 +270,13 @@ func TestProbeWorkspaceContent_DedupesInFlightReads(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			_, err := probeWorkspaceContent(dir)
-			assert.ErrorIs(t, err, errWorkspaceContentTimeout)
+			assert.ErrorIs(t, err, errWorkspaceStorageUnavailable)
 		}()
 	}
 	wg.Wait()
 	for i := 0; i < 3; i++ {
 		_, err := probeWorkspaceContent(dir)
-		assert.ErrorIs(t, err, errWorkspaceContentTimeout)
+		assert.ErrorIs(t, err, errWorkspaceStorageUnavailable)
 	}
 	assert.Equal(t, int32(1), reads.Load(), "a hung directory must have only one read in flight")
 
@@ -421,7 +421,7 @@ func TestDeriveAgentConfig_HungStorageReturnsError(t *testing.T) {
 	agent := &store.Agent{ID: "agent-derive-hung", AppliedConfig: &store.AgentAppliedConfig{}}
 
 	err := srv.deriveAgentConfig(context.Background(), agent, project, nil)
-	require.ErrorIs(t, err, errWorkspaceContentTimeout)
+	require.ErrorIs(t, err, errWorkspaceStorageUnavailable)
 	assert.Empty(t, agent.AppliedConfig.Workspace)
 }
 
