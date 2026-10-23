@@ -277,7 +277,14 @@ export default defineConfig([
         },
         {
           selector:
-            "NewExpression[callee.name='DOMParser'], CallExpression[callee.object.name='document'][callee.property.name=/^(write|writeln)$/], Identifier[name='unsafeHTML']",
+            "NewExpression[callee.name='DOMParser'], CallExpression[callee.object.name='document'][callee.property.name=/^(write|writeln)$/], CallExpression[callee.object.name='document'][callee.property.value=/^(write|writeln)$/], Identifier[name='unsafeHTML']",
+          message: 'The review editor must not turn strings into HTML (see eslint.config.mjs).',
+        },
+        {
+          // Lit property bindings (.innerHTML=${…}) and object keys
+          // (Object.assign(el, { innerHTML })).
+          selector:
+            'TemplateElement[value.raw=/\\.(innerHTML|outerHTML|srcdoc)\\s*=/], Property[key.name=/^(innerHTML|outerHTML|srcdoc)$/], Property[key.value=/^(innerHTML|outerHTML|srcdoc)$/]',
           message: 'The review editor must not turn strings into HTML (see eslint.config.mjs).',
         },
         {
