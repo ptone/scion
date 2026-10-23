@@ -963,6 +963,46 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// On a shared storage backend a hub-managed project runs from the
+	// Layout's project root (sharedHubProjectPath). Its configuration is
+	// hub-seeded and never written here: the record of its .scion entry is
+	// checked and kept, nothing is aligned.
+	sharedProjectPath, sharedLayout, sharedErr := "", false, (*startContextError)(nil)
+	if req.ProjectSlug != "" && req.ProjectPath == "" {
+		sharedProjectPath, sharedLayout, sharedErr = s.sharedHubProjectPath(ctx, req.ProjectID)
+	}
+	if sharedErr != nil {
+		span.SetStatus(codes.Error, startContextSpanText(sharedErr))
+		status := s.writeStartContextError(w, sharedErr, "create agent", "agent_id", req.ID, "profile", createRequestProfile(req))
+		markAttemptFailed(status, sharedErr.Error())
+		return
+	}
+	if sharedLayout {
+		req.ProjectPath = sharedProjectPath
+		// A workspace bootstrap is skipped for a shared workspace that was
+		// already in use (provisioning sentinel, or any content) when the
+		// create was admitted; applySharedBootstrap checks again under the
+		// provisioning locks.
+		if ws, _, ok, wsErr := s.sharedBootstrapWorkspace(req); ok && wsErr == nil {
+			req.workspaceAdmissionChecked = true
+			req.workspaceAbsentAtAdmission = !sharedWorkspaceProvisioned(ws)
+		}
+		var checkErr error
+		if lockErr := s.withWorkspaceLock(ctx, func() {
+			checkErr = s.withCheckedWorkspaceConfig(req.ProjectPath, req.ProjectID, req.ProjectSlug, func() {})
+		}, req.ProjectPath); lockErr != nil {
+			s.writeRuntimeOpError(w, ctx, "create agent", lockErr, "agent_id", req.ID, "project_id", req.ProjectID)
+			return
+		}
+		if checkErr != nil {
+			sce := s.workspaceConfigStartContextError(checkErr, req.Name)
+			markAttemptFailed(sce.Status, "hub-managed workspace configuration check failed")
+			span.SetStatus(codes.Error, "hub-managed workspace configuration check failed")
+			writeError(w, sce.Status, ErrCodeConflict, sce.Message, nil)
+			return
+		}
+	}
+
 	// Resolve project path early for env-gather (needs settings access before buildStartContext)
 	if req.ProjectSlug != "" && req.ProjectPath == "" {
 		globalDir, err := config.GetGlobalDir()
@@ -977,6 +1017,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		req.ProjectPath = filepath.Join(globalDir, "projects", req.ProjectSlug)
+		req.workspaceAdmissionChecked = true
 		if _, statErr := os.Lstat(req.ProjectPath); os.IsNotExist(statErr) {
 			req.workspaceAbsentAtAdmission = true
 		}
@@ -1340,13 +1381,6 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// already refuses worktree-per-agent before dispatching (A2/A4); this is
 	// the broker's own independent defense, and it also keeps
 	// tryProvisionWorktree off the reprovision path entirely.
-	// A shared dir backend change is part of a reincarnation only.
-	if !req.Reprovision && (len(req.SharedDirBackendChanges) > 0 || req.AllowEmptySharedDir) {
-		markAttemptFailed(http.StatusBadRequest, "shared dir backend change without reprovision")
-		BadRequest(w, "a shared dir backend change is only supported on a reprovision request")
-		return
-	}
-
 	if req.Reprovision && req.WorkspaceMode == store.WorkspaceModeWorktreePerAgent {
 		const msg = "reprovision refused: worktree-per-agent workspaces are not supported by reincarnate"
 		// O-a (review p1b-r2): use the same dispatch-attempt message as the
@@ -1495,8 +1529,6 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// buildStartContext computed for opCreate.
 	if req.Reprovision {
 		opts.FreshProvision = false
-		opts.SharedDirBackendChanges = req.SharedDirBackendChanges
-		opts.AllowEmptySharedDir = req.AllowEmptySharedDir
 	}
 	s.agentLifecycleLog.Info("Agent dispatch: buildStartContext complete",
 		"agent_id", req.ID, "name", req.Name, "elapsed", time.Since(buildCtxStart).String())
@@ -1589,10 +1621,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// through the async gate above (flag absent, ProvisionOnly, Reprovision,
 	// no LaunchID, or a too-small LaunchTimeoutSeconds), so an eligible async
 	// create never downloads twice.
+	var bootstrapSkipped bootstrapOutcome
 	if req.WorkspaceStoragePath != "" {
 		var attemptMsg, httpMessage string
 		var dlErr error
-		opts, attemptMsg, httpMessage, dlErr = s.downloadWorkspaceFromGCS(ctx, req, opts)
+		opts, attemptMsg, httpMessage, dlErr = s.downloadWorkspaceFromGCS(context.WithValue(ctx, bootstrapOutcomeKey{}, &bootstrapSkipped), req, opts)
 		if dlErr != nil {
 			span.SetStatus(codes.Error, dlErr.Error())
 			if errors.Is(dlErr, errInvalidWorkspaceDir) {
@@ -1811,8 +1844,6 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			// asked for it — the hub's dispatch fails closed when it asked
 			// for a reprovision and did not get this echo back.
 			Reprovisioned: req.Reprovision,
-			// Reprovision returned without error, so it recorded the change.
-			SharedDirBackendsChanged: req.Reprovision && len(req.SharedDirBackendChanges) > 0,
 		}
 		if attempt != nil {
 			s.dispatchAttemptsMu.Lock()
@@ -1965,6 +1996,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		Agent:   agentInfoPtr(AgentInfoToResponse(*agentInfo)),
 		Created: true,
 	}
+	if (bootstrapSkipsExistingWorkspace(req) || bootstrapSkipped.skipped) && resp.Agent != nil {
+		resp.Agent.Warnings = append(resp.Agent.Warnings, bootstrapSkippedWarning)
+	}
 	if attempt != nil {
 		s.dispatchAttemptsMu.Lock()
 		s.completeAttempt(attempt, dispatchAttemptSucceeded, http.StatusCreated, &resp, nil, "")
@@ -2111,6 +2145,48 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 	}
 	defer unlockWorkspace()
 
+	// A project-level workspace that already existed when the create was
+	// admitted is in use (by earlier agents of the project): it is never
+	// overwritten from a laptop's upload. The agent uses it as it is and
+	// the create answers with bootstrapSkippedWarning (ptone/scion#5815). Nothing is downloaded, recorded or
+	// re-marked.
+	if bootstrapSkipsExistingWorkspace(req) {
+		s.agentLifecycleLog.Info("Workspace bootstrap skipped: the project workspace already exists on this broker",
+			"agent_id", req.ID, "project_id", req.ProjectID)
+		opts.Workspace = workspaceDir
+		return opts, "", "", nil
+	}
+
+	// A hub-managed project on the shared Layout: the upload is applied to
+	// the shared workspace under the project's provisioning locks, only
+	// when it is not in use yet (no sentinel and no content), and the
+	// sentinel is written after it. No broker-local record or workspace
+	// marker is written: the project's identity lives in its configuration
+	// at the project root.
+	if _, rel, shared, _ := s.sharedBootstrapWorkspace(req); shared {
+		skipped, applyErr := s.applySharedBootstrap(ctx, workspaceDir, rel, func(lockCtx context.Context) error {
+			if s.config.Debug {
+				s.agentLifecycleLog.Debug("Downloading workspace from GCS into the shared workspace", "agent_id", req.ID,
+					"bucket", bucket, "storagePath", req.WorkspaceStoragePath+"/files", "projectSlug", req.ProjectSlug)
+			}
+			return s.workspaceDownloader()(lockCtx, bucket, req.WorkspaceStoragePath+"/files", workspaceDir)
+		})
+		if applyErr != nil {
+			attemptMsg, httpMessage, err = s.workspaceBootstrapFailed(req, opDownloadWorkspace, applyErr)
+			return opts, attemptMsg, httpMessage, err
+		}
+		if skipped {
+			s.agentLifecycleLog.Info("Workspace bootstrap skipped: the shared project workspace came into use meanwhile",
+				"agent_id", req.ID, "project_id", req.ProjectID)
+			// The create answers with bootstrapSkippedWarning too.
+			if out, ok := ctx.Value(bootstrapOutcomeKey{}).(*bootstrapOutcome); ok {
+				out.skipped = true
+			}
+		}
+		opts.Workspace = workspaceDir
+		return opts, "", "", nil
+	}
+
 	if mkErr := os.MkdirAll(workspaceDir, 0755); mkErr != nil {
 		attemptMsg, httpMessage, err = s.workspaceBootstrapFailed(req, opCreateWorkspaceDir, mkErr)
 		return opts, attemptMsg, httpMessage, err
@@ -2144,14 +2220,36 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 
 	// Write a workspace marker so in-container CLI
 	// can discover the project context and use the Hub API.
-	// A workspace a hub keeps as its own on this host keeps the hub's
-	// identity entry.
-	if req.ProjectID != "" && req.ProjectSlug != "" && !hubWorkspaceRecordExists(req.ProjectSlug) {
+	if req.ProjectID != "" && req.ProjectSlug != "" {
 		if writeErr := config.WriteWorkspaceMarker(workspaceDir, req.ProjectID, req.ProjectSlug, req.ProjectSlug); writeErr != nil {
 			s.agentLifecycleLog.Warn("Failed to write workspace marker", "agent_id", req.ID, "project_id", req.ProjectID, "error", writeErr)
 		}
 	}
 	return opts, "", "", nil
+}
+
+// bootstrapOutcome records, for the synchronous create path, that the
+// workspace bootstrap was skipped because the shared workspace came into
+// use between admission and the provisioning locks, so the create answers
+// with bootstrapSkippedWarning as for a skip decided at admission. Carried
+// in the download's context under bootstrapOutcomeKey.
+type bootstrapOutcome struct{ skipped bool }
+
+type bootstrapOutcomeKey struct{}
+
+// bootstrapSkippedWarning is the create warning for a workspace bootstrap
+// whose upload was not applied because the project workspace already
+// existed on the broker (bootstrapSkipsExistingWorkspace).
+const bootstrapSkippedWarning = "The project workspace already exists on the runtime broker, so the uploaded files were not applied; use `scion sync to <agent>` to push changes"
+
+// bootstrapSkipsExistingWorkspace reports whether a create's workspace
+// bootstrap must leave the workspace alone: a project-level (slug)
+// bootstrap whose workspace directory createAgent found existing when it
+// admitted the create. Per-agent bootstrap directories, and a request
+// whose project path was not checked at admission (one that names its
+// project path, such as the global project), are always applied.
+func bootstrapSkipsExistingWorkspace(req CreateAgentRequest) bool {
+	return req.WorkspaceStoragePath != "" && req.ProjectSlug != "" && req.workspaceAdmissionChecked && !req.workspaceAbsentAtAdmission
 }
 
 // resolveGCSWorkspaceDir computes the directory a GCS workspace bootstrap
@@ -2166,7 +2264,18 @@ func (s *Server) resolveGCSWorkspaceDir(req CreateAgentRequest) (resolvedDir str
 	// ~/.scion/projects/<slug>/ instead of the worktree-based path.
 	var workspaceDir string
 	var workspaceRoot string
-	if req.ProjectSlug != "" {
+	sharedWS, _, shared, sharedErr := s.sharedBootstrapWorkspace(req)
+	switch {
+	case sharedErr != nil:
+		s.logWorkspaceBootstrapFailure(req, opValidateWorkspaceDir, sharedErr)
+		return "", "invalid workspace directory", invalidWorkspaceDirMessage,
+			fmt.Errorf("%w: %w", errInvalidWorkspaceDir, sharedErr)
+	case shared:
+		// A hub-managed project on the shared Layout: the project's
+		// workspace Mount on the share, below its project root.
+		workspaceRoot = req.ProjectPath
+		workspaceDir = sharedWS
+	case req.ProjectSlug != "":
 		globalDir, gdErr := config.GetGlobalDir()
 		if gdErr != nil {
 			return "", "failed to resolve global dir", failedOpText(opGetGlobalDir),
@@ -2174,7 +2283,7 @@ func (s *Server) resolveGCSWorkspaceDir(req CreateAgentRequest) (resolvedDir str
 		}
 		workspaceRoot = filepath.Join(globalDir, "projects")
 		workspaceDir = filepath.Join(workspaceRoot, req.ProjectSlug)
-	} else {
+	default:
 		workspaceRoot = s.config.WorktreeBase
 		workspaceDir = filepath.Join(workspaceRoot, req.Name, "workspace")
 	}
@@ -8674,6 +8783,13 @@ func (s *Server) cleanupLeftoverAgentResources(ctx context.Context, agentName, p
 // equals projectID, so a stale or wrong hint can never redirect deletion to
 // another project's files.
 func (s *Server) findAgentProjectDir(agentName, projectID, projectPathHint string) (string, error) {
+	// A hub-managed project (no linked path hint) on the shared Layout is
+	// resolved there only, fail-closed, never by the broker-local scan.
+	if projectPathHint == "" {
+		if dir, handled, err := s.findAgentInSharedProject(context.Background(), agentName, projectID, true); handled {
+			return dir, err
+		}
+	}
 	resolved, err := findAgentInHubManagedProjects(agentName, projectID)
 	if err != nil || resolved != "" || projectID == "" {
 		return resolved, err
@@ -8907,6 +9023,14 @@ func (s *Server) checkNFSForDispatch(ctx context.Context, name, projectPath, pro
 			if ok {
 				detail = st.Message
 			}
+			// The broker reads and creates project storage through its
+			// own mount of the share: on a shared Layout an unmounted share
+			// refuses the dispatch (ptone/scion#5823).
+			if s.config.StorageLayout.Backend.Shared() {
+				s.agentLifecycleLog.Error("NFS share not mounted on the broker; refusing dispatch",
+					"agent", name, "runtime", runtimeType, "share", shareID, "detail", detail)
+				return fmt.Errorf(sharedProjectUnmountedFmt, filepath.Join(nfsCfg.MountRoot, shareID))
+			}
 			s.agentLifecycleLog.Warn("NFS share not mounted on the broker; continuing dispatch, the runtime mounts the export into the agent",
 				"agent", name, "runtime", runtimeType, "share", shareID, "detail", detail)
 		}
@@ -8940,8 +9064,8 @@ func dispatchUsesNFSWorkspace(projectDir string) bool {
 	if err != nil || vs == nil {
 		return true
 	}
-	return vs.Server != nil && vs.Server.WorkspaceStorage != nil &&
-		vs.Server.WorkspaceStorage.Backend == "nfs"
+	return vs.Server != nil && vs.Server.EffectiveWorkspaceStorage() != nil &&
+		vs.Server.EffectiveWorkspaceStorage().Backend == "nfs"
 }
 
 // preResolvedHubEndpoint picks the Hub base URL used to absolutize the

@@ -45,6 +45,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -211,6 +212,14 @@ type ServerConfig struct {
 	// (see BuildWorkspaceStorageDescriptor).
 	WorkspaceStorageBackend string
 
+	// StorageLayout is the broker's projectfs Layout, built at startup from
+	// the same server.project_storage struct the hub builds its own from
+	// (config.ResolveProjectStorage, config.ProjectStorageLayout). Its
+	// Homes is reported in the workspace storage descriptor, so the hub
+	// can refuse shared-mode dispatch to a broker whose layout disagrees
+	// with its own (projectfs.Layout.DescriptorDiff).
+	StorageLayout projectfs.Layout
+
 	// DefaultProfile is the broker's default (active) profile name from its
 	// settings (active_profile), reported to the hub on every heartbeat. A
 	// pointer to "" reports that the settings name no active profile; nil
@@ -301,10 +310,9 @@ type Server struct {
 	// each replaces its real implementation when set (see the setters in
 	// workspace_handlers.go), per Server, so tests can fake one without
 	// racing parallel tests. Guarded by mu.
-	workspaceUpload      func(ctx context.Context, localPath, bucket, prefix string) error
-	manifestUpload       func(ctx context.Context, bucket, storagePath string, manifest *transfer.Manifest) error
-	projectWorkspaceStat func(path string) (os.FileInfo, error)
-	projectPathAbs       func(path string) (string, error)
+	workspaceUpload func(ctx context.Context, localPath, bucket, prefix string) error
+	manifestUpload  func(ctx context.Context, bucket, storagePath string, manifest *transfer.Manifest) error
+	projectPathAbs  func(path string) (string, error)
 	// projectConfigsRemove, when set (tests), replaces
 	// removeProjectConfigsSubtree for a project delete's project-configs
 	// entry (removeProjectConfigs).
@@ -540,7 +548,10 @@ type Server struct {
 	nfsStartupReconcileDone chan struct{}
 	nfsReconcileStopped     chan struct{}
 	nfsReconcileOnce        sync.Once
-	nfsReconcileCancel      context.CancelFunc
+	// sharedDirsMigrateOnce runs the node-local shared-dir migration hook
+	// once per process (startSharedDirsMigrationHook).
+	sharedDirsMigrateOnce sync.Once
+	nfsReconcileCancel    context.CancelFunc
 	// nfsReconcileInterval overrides DefaultNFSReconcileInterval (tests).
 	nfsReconcileInterval time.Duration
 
@@ -1552,6 +1563,10 @@ func (s *Server) startServices(ctx context.Context, withListener bool) error {
 	// reconciled.
 	s.startNFSReconcileLoop(ctx)
 
+	// Move shared dirs this broker kept node-local onto the shared tree
+	// its Layout now places them on (background, once per process).
+	s.startSharedDirsMigrationHook(ctx)
+
 	// Start all hub connections' services. Start is called without
 	// s.hubMu held: it takes the connection's lifecycle lock and, inside,
 	// s.hubMu itself.
@@ -1812,6 +1827,10 @@ func (s *Server) discoverAuxiliaryRuntimes() {
 			}
 		}
 	}
+
+	// Hub-managed projects on shared project storage that this broker has
+	// agent state for (sharedProjectsWithLocalAgents).
+	projectPaths = append(projectPaths, s.sharedProjectsWithLocalAgents()...)
 
 	// Current project dir
 	if pd, _ := config.GetResolvedProjectDir(""); pd != "" {
@@ -3121,7 +3140,6 @@ func (s *Server) registerRoutes() {
 	// Workspace sync routes (for Hub-initiated sync via control channel)
 	s.mux.HandleFunc("/api/v1/workspace/upload", s.handleWorkspaceUpload)
 	s.mux.HandleFunc("/api/v1/workspace/apply", s.handleWorkspaceApply)
-	s.mux.HandleFunc("/api/v1/workspace/project-upload", s.handleProjectWorkspaceUpload)
 }
 
 // applyMiddleware wraps the handler with middleware.

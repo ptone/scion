@@ -107,6 +107,11 @@ func deleteAgentFiles(agentName, projectPath, hubProjectID string, removeBranch 
 	var repoRoot string
 	var externalAgentDir string
 	var hubAgentDir string // state dir resolved from hubProjectID, when distinct
+	// legacyAgentDir is the in-project state dir an agent of a shared
+	// project configuration had before the configuration moved to the
+	// project root (config.LegacySharedProjectAgentDir); removed with the
+	// agent so a later agent of the same name never resolves to it.
+	var legacyAgentDir string
 	var worktreeDir string // worktree-per-agent: agent's worktree path
 	// ownWorktreePaths lists the paths where this agent's own worktree may
 	// be registered. Only these entries are removed from git's worktree
@@ -128,7 +133,15 @@ func deleteAgentFiles(agentName, projectPath, hubProjectID string, removeBranch 
 	var layout agentProjectLayout
 	if projectDir, err := config.GetResolvedProjectDir(projectPath); err == nil {
 		resolvedProjectDir = projectDir
-		agentsDirs = append(agentsDirs, filepath.Join(projectDir, "agents"))
+		// A shared project configuration's in-project agents root is on
+		// the share, in the hub-owned configuration: never a delete target.
+		if !config.IsSharedProjectConfigDir(projectDir) {
+			agentsDirs = append(agentsDirs, filepath.Join(projectDir, "agents"))
+		}
+		if legacy := config.LegacySharedProjectAgentDir(projectDir, agentName); legacy != "" {
+			legacyAgentDir = legacy
+			agentsDirs = append(agentsDirs, filepath.Dir(legacy))
+		}
 
 		// The global project's own per-agent workspace
 		// (~/.scion/workspace/<agentName>, see ProvisionAgent's Case 3) is
@@ -172,7 +185,7 @@ func deleteAgentFiles(agentName, projectPath, hubProjectID string, removeBranch 
 	// state dir ProvisionAgent's guard also trusts; it is verified like an
 	// extra root (anchored at its parent, not trusted when it resolves
 	// elsewhere). An empty hubAgentDir is ignored.
-	guard := projectAgentFilesGuardWithLayout(context.Background(), resolvedProjectDir, layout, agentName, hubAgentDir)
+	guard := projectAgentFilesGuardWithLayout(context.Background(), resolvedProjectDir, layout, agentName, hubAgentDir, legacyAgentDir)
 	// Empty-per-agent (design #2703): the agent's workspace is a private,
 	// non-git directory that owns no worktree or branch. Even when the
 	// agent ran `git init` in it, or the project sits inside an enclosing
@@ -583,7 +596,7 @@ func migrateLegacyAgentState(legacyDir, externalDir string) {
 	}
 	moveFile("prompt.md")
 	moveFile("scion-agent.json")
-	moveFile(sharedDirStorageRecordFile)
+	moveFile(legacySharedDirStorageRecordFile)
 	// Remove the legacy dir if empty (best effort; non-empty leftovers like a
 	// stale workspace/ shell are left in place to avoid surprising deletes).
 	_ = os.Remove(legacyDir)
@@ -967,17 +980,6 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 		return nil, fmt.Errorf("%w: agent %q container is still running; stop it first", ErrReprovisionRefused, opts.Name)
 	}
 
-	// An explicit shared-dir backend change is checked before anything is
-	// provisioned, and recorded only after provisioning succeeds.
-	var sdChange *pendingSharedDirBackendChange
-	if len(opts.SharedDirBackendChanges) > 0 || opts.AllowEmptySharedDir {
-		c, err := prepareSharedDirBackendChange(ctx, projectDir, agentDir, opts)
-		if err != nil {
-			return nil, err
-		}
-		sdChange = c
-	}
-
 	ctx, inlineCfg := buildProvisionContext(ctx, opts)
 	ctx = api.ContextWithReprovision(ctx)
 
@@ -1002,17 +1004,8 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 	// Staging does not deliver the task: prompt.md is only read by Start as
 	// a fallback when its request has no task, and a start that carries
 	// the same task overwrites the file with it and delivers it once.
-	// This runs before the shared dir backend change is recorded, so a
-	// failed write leaves that change unrecorded ("recorded only after
-	// provisioning succeeds").
 	if err := writeReprovisionPrompt(agentDir, opts.Task); err != nil {
 		return cfg, err
-	}
-
-	if sdChange != nil {
-		if err := sdChange.record(opts, cfg); err != nil {
-			return cfg, err
-		}
 	}
 
 	return withProvisionedImage(ctx, opts, agentDir, cfg)
@@ -1445,6 +1438,12 @@ func agentStateDir(projectDir, agentName string, sharedWorkspace bool, hubProjec
 func effectiveSharedWorkspace(projectDir, agentName string, sharedWorkspace bool, hubProjectID string) bool {
 	if sharedWorkspace {
 		return true
+	}
+	// A shared project configuration keeps every agent's state in the
+	// external root (config.AgentsRootForProject), so its presence there
+	// says nothing about the workspace mode.
+	if config.IsSharedProjectConfigDir(projectDir) {
+		return false
 	}
 	ext, err := config.AgentDirForProject(projectDir, agentName, true, hubProjectID)
 	if err != nil {
