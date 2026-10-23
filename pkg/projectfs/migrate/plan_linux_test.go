@@ -370,7 +370,7 @@ func TestRun_GitSeedMovesOnlyUntrackedIdentity(t *testing.T) {
 		t.Fatal("other untracked entry must stay in the workspace")
 	}
 	assertAbsent(t, filepath.Join(ws, ".scion/settings.yaml"))
-	if len(rep.Projects[0].Notes) != 1 || !strings.Contains(rep.Projects[0].Notes[0], "other.txt") {
+	if countNotes(rep.Projects[0].Notes, "other.txt") != 1 {
 		t.Fatalf("notes = %v", rep.Projects[0].Notes)
 	}
 }
@@ -482,7 +482,9 @@ func TestRun_VolumeBackendLegacyRoot(t *testing.T) {
 	layout := projectfs.Layout{Backend: projectfs.BackendCloudRunVolume, HostBase: vol, SubPathRoot: "projects"}
 	rep, err := Run(context.Background(), HubInput{Workspace: layout, SharedDirs: projectfs.Layout{Backend: projectfs.BackendLocal}, GlobalDir: global, Projects: []ProjectRef{{ID: pid1, Slug: "p1"}}}, opts(false))
 	if err != nil || rep.Failed() || rep.Moves() != 2 { // seed + workspace
-		t.Fatalf("err=%v failed=%t moves=%d", err, rep.Failed(), rep.Moves())
+		var b bytes.Buffer
+		rep.WriteLog(&b)
+		t.Fatalf("err=%v failed=%t moves=%d\n%s", err, rep.Failed(), rep.Moves(), b.String())
 	}
 	if readFile(t, filepath.Join(vol, "projects", pid1, "workspace/a.txt")) != "A" {
 		t.Fatal("not moved to the uuid tree on the volume")
@@ -803,7 +805,10 @@ func TestRun_BrokerClonedFirstThenMigration(t *testing.T) {
 	}
 	var b bytes.Buffer
 	rep.WriteLog(&b)
-	for _, want := range []string{"CONFLICT main.go", "CONFLICT .git/HEAD"} {
+	// The broker's .git exists: the legacy .git is a conflict as a whole
+	// (never merged into it, no temp dir created).
+	assertAbsent(t, filepath.Join(ws, GitMigratingName))
+	for _, want := range []string{"CONFLICT main.go", "CONFLICT .git ("} {
 		if !strings.Contains(b.String(), want) {
 			t.Fatalf("log lacks %q:\n%s", want, b.String())
 		}
@@ -968,10 +973,10 @@ type fakeLock struct {
 	observed func()
 }
 
-func (l *fakeLock) lock(stateDir string, section func(context.Context) error) error {
+func (l *fakeLock) lock(ws Tree, section func(context.Context) error) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.dirs = append(l.dirs, stateDir)
+	l.dirs = append(l.dirs, ws.String())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if l.lose {
@@ -1019,11 +1024,10 @@ func TestRun_WorkspaceMovesHoldProvisioningLock(t *testing.T) {
 	if err != nil || rep.Failed() {
 		t.Fatalf("err=%v failed=%t", err, rep.Failed())
 	}
-	if len(lk.dirs) != 1 || lk.dirs[0] != filepath.Join(f.share, "projects", pid1, "provision") {
-		t.Fatalf("lock dirs = %v", lk.dirs)
-	}
-	if m := mode(t, lk.dirs[0]); m.Perm() != 0o775 || m&os.ModeSetgid == 0 {
-		t.Fatalf("provision/ mode = %v, want the leaf contract (setgid 0775)", m)
+	// The lock is taken for the project's workspace (the hub derives the
+	// lock directories from it through pkg/provision).
+	if len(lk.dirs) != 1 || lk.dirs[0] != ws {
+		t.Fatalf("lock workspaces = %v, want [%s]", lk.dirs, ws)
 	}
 	if final := snapshot(t, ws); !reflect.DeepEqual(seen, final) || len(final) < 41 {
 		t.Fatalf("the waiting provisioner saw %d entries, final %d", len(seen), len(final))
@@ -1114,4 +1118,193 @@ func countNotes(notes []string, sub string) int {
 		}
 	}
 	return n
+}
+
+// The migration only reads the hub/broker workspace records (identity
+// markers): a run leaves existing records byte-identical and creates none
+// (sec-review-3 I2).
+func TestRun_WritesNoWorkspaceRecords(t *testing.T) {
+	f := newHubFixture(t)
+	writeTree(t, f.global, map[string]string{
+		"projects/p1/notes.txt": "n",
+		"hub-workspaces/p1":     pid1,
+		"broker-workspaces/p1":  pid1,
+	})
+	writeTree(t, f.share, map[string]string{legacyHubProjectsDir + "/p2/.scion/project-id": pid2, legacyHubProjectsDir + "/p2/a": "a"})
+	before := map[string]map[string]string{
+		"hub":    snapshot(t, filepath.Join(f.global, "hub-workspaces")),
+		"broker": snapshot(t, filepath.Join(f.global, "broker-workspaces")),
+	}
+	rep, err := Run(context.Background(), f.input(ProjectRef{ID: pid1, Slug: "p1"}, ProjectRef{ID: pid2, Slug: "p2"}), opts(false))
+	if err != nil || rep.Failed() || rep.Moves() == 0 {
+		t.Fatalf("err=%v failed=%t moves=%d", err, rep.Failed(), rep.Moves())
+	}
+	after := map[string]map[string]string{
+		"hub":    snapshot(t, filepath.Join(f.global, "hub-workspaces")),
+		"broker": snapshot(t, filepath.Join(f.global, "broker-workspaces")),
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("workspace records changed:\nbefore %v\nafter  %v", before, after)
+	}
+	assertAbsent(t, filepath.Join(f.global, "hub-workspaces", "p2"))
+	assertAbsent(t, filepath.Join(f.global, "broker-workspaces", "p2"))
+}
+
+// gitRepoFiles builds a legacy git workspace with several .git entries.
+func gitRepoFiles() map[string]string {
+	files := map[string]string{
+		legacyHubProjectsDir + "/p1/.scion/project-id": pid1,
+		legacyHubProjectsDir + "/p1/main.go":           "package main",
+		legacyHubProjectsDir + "/p1/.git/HEAD":         "ref: refs/heads/main",
+	}
+	for i := 0; i < 10; i++ {
+		files[fmt.Sprintf("%s/p1/.git/objects/%02d/obj", legacyHubProjectsDir, i)] = "blob"
+	}
+	return files
+}
+
+// Finding 3 ruling: .git is copied last under GitMigratingName and renamed
+// in only when complete. Interrupted inside .git: workspace/ has no .git
+// (a first start refuses: not empty, no marker, no .git), only the temp
+// dir; the re-run resumes, renames it to .git, and the result is the full
+// repository.
+func TestRun_GitCopiedLastAndRenamedInWhenComplete(t *testing.T) {
+	forceRename(t, nil, syscall.EINVAL) // NFS: the copy path
+	f := newHubFixture(t)
+	writeTree(t, f.share, gitRepoFiles())
+	ws := filepath.Join(f.share, "projects", pid1, "workspace")
+	in := f.input(ProjectRef{ID: pid1, Slug: "p1", Git: true})
+
+	lk := &fakeLock{}
+	var cancel context.CancelFunc
+	in.ProvisionLock = func(w Tree, section func(context.Context) error) error {
+		return lk.lock(w, func(ctx context.Context) error {
+			c, cf := context.WithCancel(ctx)
+			cancel = cf
+			defer cf()
+			return section(c)
+		})
+	}
+	seen := 0
+	old := copyEntryHook
+	copyEntryHook = func(rel string) {
+		if strings.HasPrefix(rel, ".git/objects/") {
+			seen++
+			if seen == 3 && cancel != nil {
+				cancel() // the lock is lost mid-.git copy
+			}
+		}
+		if rel == "main.go" {
+			// Everything else is copied before .git starts.
+			if _, err := os.Lstat(filepath.Join(ws, GitMigratingName)); !os.IsNotExist(err) {
+				t.Errorf(".git copy started before the other entries")
+			}
+		}
+	}
+	t.Cleanup(func() { copyEntryHook = old })
+
+	rep, err := Run(context.Background(), in, opts(false))
+	if err != nil || !rep.Failed() || len(rep.PendingProjects()) != 1 {
+		t.Fatalf("interrupted run: err=%v failed=%t", err, rep.Failed())
+	}
+	assertAbsent(t, filepath.Join(ws, ".git")) // a provisioner refuses, never adopts
+	if _, err := os.Stat(filepath.Join(ws, GitMigratingName)); err != nil {
+		t.Fatalf("temp dir missing after the interruption: %v", err)
+	}
+	if readFile(t, filepath.Join(f.share, legacyHubProjectsDir, "p1/.git/HEAD")) != "ref: refs/heads/main" {
+		t.Fatal("source not left in place after the interruption")
+	}
+	var b bytes.Buffer
+	rep.WriteLog(&b)
+	if !strings.Contains(b.String(), "lost the project's provisioning lock") || !strings.Contains(b.String(), "interrupted, run again before starting agents") {
+		t.Fatalf("log:\n%s", b.String())
+	}
+
+	// Re-run: resumes into the temp dir and renames it in.
+	copyEntryHook = old
+	in.ProvisionLock = (&fakeLock{}).lock
+	rep, err = Run(context.Background(), in, opts(false))
+	b.Reset()
+	rep.WriteLog(&b)
+	if err != nil || rep.Failed() {
+		t.Fatalf("re-run: err=%v failed=%t\n%s", err, rep.Failed(), b.String())
+	}
+	assertAbsent(t, filepath.Join(ws, GitMigratingName))
+	if readFile(t, filepath.Join(ws, ".git/HEAD")) != "ref: refs/heads/main" || readFile(t, filepath.Join(ws, ".git/objects/09/obj")) != "blob" {
+		t.Fatal("the renamed-in .git is not complete")
+	}
+	if strings.Contains(b.String(), "CONFLICT") {
+		t.Fatalf("a resumed run must not report conflicts:\n%s", b.String())
+	}
+}
+
+// A run stopped by the run's own context (timeout, shutdown) is reported
+// as such, not as a lost lock.
+func TestRun_RunStoppedIsNotReportedAsLostLock(t *testing.T) {
+	forceRename(t, nil, syscall.EINVAL)
+	f := newHubFixture(t)
+	writeTree(t, f.share, gitRepoFiles())
+	in := f.input(ProjectRef{ID: pid1, Slug: "p1", Git: true})
+	ctx, cancel := context.WithCancel(context.Background())
+	in.ProvisionLock = func(w Tree, section func(context.Context) error) error {
+		return section(ctx) // the lock context derives from the run context
+	}
+	old := copyEntryHook
+	copyEntryHook = func(rel string) {
+		if rel == "main.go" {
+			cancel()
+		}
+	}
+	t.Cleanup(func() { copyEntryHook = old; cancel() })
+	rep, _ := Run(ctx, in, opts(false))
+	var b bytes.Buffer
+	rep.WriteLog(&b)
+	if !strings.Contains(b.String(), "the migration run stopped") || strings.Contains(b.String(), "lost the project's provisioning lock") {
+		t.Fatalf("log:\n%s", b.String())
+	}
+}
+
+// A copy into a hard-linked source's target is chowned: the new file is
+// never hard-linked (review round 3, finding 2).
+func TestRun_CopyOfHardLinkedSourceIsChowned(t *testing.T) {
+	forceRename(t, nil, syscall.EINVAL)
+	f := newHubFixture(t)
+	writeTree(t, f.share, map[string]string{legacyHubProjectsDir + "/p1/.scion/project-id": pid1, legacyHubProjectsDir + "/p1/a.txt": "A"})
+	if err := os.Link(filepath.Join(f.share, legacyHubProjectsDir, "p1/a.txt"), filepath.Join(f.share, legacyHubProjectsDir, "p1/b.txt")); err != nil {
+		t.Fatal(err)
+	}
+	chowned := recordChowns(t, nil)
+	in := f.input(ProjectRef{ID: pid1, Slug: "p1"})
+	in.Workspace.UID, in.Workspace.GID = os.Getuid(), os.Getgid()
+	rep, err := Run(context.Background(), in, opts(false))
+	if err != nil || rep.Failed() {
+		t.Fatalf("err=%v failed=%t", err, rep.Failed())
+	}
+	got := strings.Join(chowned(), "\n")
+	for _, n := range []string{"workspace/a.txt", "workspace/b.txt"} {
+		if !strings.Contains(got, n) {
+			t.Fatalf("%s not chowned; chowned:\n%s", n, got)
+		}
+	}
+	for _, e := range rep.Projects[0].OwnershipErrors() {
+		if strings.Contains(e.Error(), "hard-linked") {
+			t.Fatalf("a fresh copy reported as hard-linked: %v", e)
+		}
+	}
+}
+
+// Provisioning lock litter and the temp .git dir do not make a workspace
+// "populated" for M3.
+func TestRun_M3IgnoresLockLitter(t *testing.T) {
+	f := newHubFixture(t)
+	writeTree(t, f.share, map[string]string{
+		"projects/" + pid1 + "/workspace/.scion-provision.lock/owner": "x",
+		"projects/" + pid1 + "/workspace/.scion-provisioned":          "x",
+		"projects/" + pid1 + "/workspace/" + GitMigratingName + "/x":  "x",
+	})
+	f.objects.objects[objectPrefix(pid1)+"a"] = true
+	rep, err := Run(context.Background(), f.input(ProjectRef{ID: pid1, Slug: "p1"}), opts(false))
+	if err != nil || rep.Objects[0].Outcome != ObjectsKept {
+		t.Fatalf("err=%v objects=%s", err, rep.Objects[0].Outcome)
+	}
 }

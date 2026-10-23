@@ -63,28 +63,55 @@ Files tab. This adds the one-shot maintenance migration
   Both outcomes are reported with the markers read and their IDs. The project
   stays pending, M3 keeps its objects, and the notice names the reason and
   the parameter.
-- **Provisioning lock, no sentinel write** (fs-cleanup-arch 01:22Z, after
-  review round 2 found that on NFS the workspace is always copied,
-  `.git/` first). A first agent start during that copy would take
+- **Provisioning locks, no sentinel write** (fs-cleanup-arch 01:22Z).
+  Review round 2 found that on NFS the workspace is always copied,
+  `.git/` first. A first agent start during that copy would take
   "reusing prior clone" and write the sentinel over a partial checkout.
-  - For a project with legacy content, steps 4/1/2 hold the project's
-    provisioning lock, copy included: `provision.WithProjectStateLock` on
-    `<ProjectRoot>/provision`, which the migration first creates with
-    `shareddirs.EnsureLeaf`.
-  - The lock refuses a missing directory and keeps a heartbeat.
-  - The copy runs under the lock's context: a lost lock stops it at the
-    next entry and leaves the project pending.
-  - Agent starts wait on the migration, and may fail cleanly; the report
+  - For a project with legacy content, steps 4/1/2 hold, copy included,
+    every lock a provisioner of that workspace may take:
+    `provision.WithWorkspaceProvisionLocks(workspace)`, which derives the
+    dirs with ProvisionShared's own resolvers.
+    - The project root is locked by the hub-side Cloud Run provisioner
+      (no SentinelDir). Review round 3 found this one missing.
+    - `<ProjectRoot>/provision` is locked by the Kubernetes init container.
+      The hub creates it first with `shareddirs.EnsureLeaf`.
+    - The locks are taken in that fixed order with
+      `acquireOrderedFileLocks`. No provisioner takes both, so the order
+      cannot deadlock.
+  - The locks refuse missing directories and keep heartbeats.
+  - The copy runs under the locks' context: a lost lock stops it at the
+    next entry. A stop caused by the run itself (timeout, shutdown) is
+    reported as such.
+  - Agent starts wait on the migration and may fail cleanly; the report
     and docs say so.
-  - Earlier, the arch reversed this ruling twice: lock → no lock (NOREPLACE
-    makes renames safe) → lock (the copy window).
+  - History: the arch's ruling went lock → no lock (NOREPLACE makes renames
+    safe) → lock (the copy window).
+- **`.git` last, renamed in when complete** (fs-cleanup-arch ruling on
+  review round 3, finding 3).
+  - The top-level `.git` of a workspace source is copied last, into
+    `workspace/.git.scion-migrating`. Once that copy is complete and
+    `workspace/.git` is still absent, it is renamed to `.git` under the
+    locks (a plain rename onto an absent name, which is atomic on NFS).
+  - A provisioner therefore sees either no `.git`, and refuses a non-empty
+    workspace, or a complete one.
+  - An interrupted run leaves only the temp dir; a re-run resumes into it.
+  - A broker's existing `.git` is a conflict: the legacy `.git` is not
+    merged into it.
+  - Non-git projects: a partial tree can be adopted by a first start.
+    Nothing is lost, and the next run converges (accepted). An optional
+    in-progress marker is a follow-up on #5834.
+- **Step 4 copies, never moves:** the legacy tree keeps its identity
+  markers until the workspace move completes and the whole source becomes
+  `<name>.migrated-<ts>`. Moving them would make an interrupted run
+  unverifiable on resume.
 - **Step 4 include list** (01:22Z): `settings.yaml`, `project-id`,
-  `project-slug`, `templates/` and `harness-configs/` move to
+  `project-slug`, `templates/` and `harness-configs/` are copied to
   `<ProjectRoot>/.scion`, for both the move and the copy-only variants.
   Broker records and other entries never do.
   - For a non-git source, whatever stays in `.scion` (and an emptied
-    `.scion` is removed) is excluded from the workspace move, along with
-    every step-4 backup (`.scion.migrated-*`, `.scion/*.migrated-*`).
+    `.scion` is kept whole) is excluded from the workspace move. So are
+    every step-4 backup (`.scion.migrated-*`, `.scion/*.migrated-*`) and,
+    for git sources, the entries step 4 copied.
   - Those stay in the source's `.migrated` copy: P1a's "not visible to
     agents" (review round 2, finding 2).
   - The hub's startup identity pass usually creates `<ProjectRoot>/.scion`
@@ -181,8 +208,14 @@ Files tab. This adds the one-shot maintenance migration
     legacy content); a lost lock stops before any write;
   - M3 keeps objects with no workspace content anywhere; mixed markers
     (the mismatch wins); hard-linked files are not chowned.
-- `pkg/provision`: `TestWithProjectStateLock` (refuses a missing dir),
-  `TestWithProjectStateLock_ExcludesProvisioning`.
+  - `.git` copied last and renamed in when complete; interrupted mid-`.git`
+    leaves no `.git`, and a re-run resumes; run-stop versus lost-lock
+    reporting; a copy of a hard-linked source is chowned; M3 ignores lock
+    litter.
+- `pkg/provision`: `TestWorkspaceProvisionLockDirs`, `TestWithWorkspaceProvisionLocks`
+  (refuses missing dirs), `TestWithWorkspaceProvisionLocks_ExcludesEveryProvisioner`
+  (real `acquireProvisionLock` for the Cloud Run shape (no SentinelDir) and the
+  Kubernetes shape (SentinelDir plus LegacyDir) cannot acquire while held).
 - `pkg/hub` (sharded, lane): seeded and rerunnable; T1 no-op; NFS move and
   idempotence; M3 through `storage.NewLocal`; volume fail-closed; notice plus
   the `migrationNotice` field on GET workspace/files; recompute after a run;

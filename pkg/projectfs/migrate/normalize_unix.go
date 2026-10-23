@@ -137,6 +137,19 @@ func (n *normalizer) leaf(dir int, name string) {
 	}
 }
 
+// entryAt normalises the entry name in dir by its own (no-follow) stat.
+func (n *normalizer) entryAt(dir int, name string) {
+	if !n.active() {
+		return
+	}
+	var st unix.Stat_t
+	if err := unix.Fstatat(dir, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		n.note(fmt.Errorf("stat %s: %w", name, err))
+		return
+	}
+	n.entry(dir, name, &st)
+}
+
 // tree normalises a whole renamed tree: the directory name in dir and
 // everything below it, walked with no-follow fds (symlinks are chowned as
 // links, never followed).

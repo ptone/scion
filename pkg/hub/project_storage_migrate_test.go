@@ -30,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs/migrate"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
@@ -172,14 +173,19 @@ func TestProjectStorageMigrate_NFSMovesAndIsIdempotent(t *testing.T) {
 	_, statErr = os.Stat(filepath.Join(root, "workspace/.scion"))
 	assert.True(t, os.IsNotExist(statErr), "the seed must not land in the workspace")
 	// The moves ran under the project's provisioning lock (the real
-	// provision.WithProjectStateLock): provision/ exists with the broker's
+	// provision.WithWorkspaceProvisionLocks): provision/ exists with the broker's
 	// leaf contract, and the lock was released.
 	fi, err := os.Stat(filepath.Join(root, "provision"))
 	require.NoError(t, err, log)
 	assert.Equal(t, os.FileMode(0o775), fi.Mode().Perm(), "provision/ mode")
 	assert.NotZero(t, fi.Mode()&os.ModeSetgid, "provision/ must be setgid")
-	_, statErr = os.Stat(filepath.Join(root, "provision", ".scion-provision.lock"))
-	assert.True(t, os.IsNotExist(statErr), "the provisioning lock must be released")
+	// Both provisioning locks (the project root's, taken by the hub-side
+	// Cloud Run provisioner, and the state dir's, taken by the Kubernetes
+	// init container) were taken and released.
+	for _, dir := range provision.WorkspaceProvisionLockDirs(filepath.Join(root, "workspace")) {
+		_, statErr = os.Stat(filepath.Join(dir, ".scion-provision.lock"))
+		assert.True(t, os.IsNotExist(statErr), "the provisioning lock in %s must be released", dir)
+	}
 	assert.Contains(t, log, "agent starts for this project waited on its migration")
 
 	log, err = runStorageMigrate(t, f.srv, false)

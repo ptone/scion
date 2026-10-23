@@ -74,6 +74,10 @@ type Spec struct {
 	// ACL, as shareddirs.EnsureLeaf creates it). A tree renamed into it
 	// gets that contract on its top-level directory.
 	TargetIsLeaf bool
+	// GitLast copies a top-level .git directory last, under
+	// GitMigratingName, renaming it to .git only once complete (workspace
+	// moves).
+	GitLast bool
 	// CopyOnly copies the files the target lacks and changes nothing in the
 	// source: no rename into the target, no .migrated copy. For a source
 	// that is still another component's live tree (a co-located broker's
@@ -187,7 +191,9 @@ func (r Result) Moved() bool {
 	case OutcomeRenamed, OutcomeMerged, OutcomeWouldRename, OutcomeWouldMerge:
 		return true
 	case OutcomeCopied, OutcomeWouldCopy:
-		return r.Copied > 0
+		if r.Copied > 0 {
+			return true
+		}
 	}
 	for _, e := range r.Entries {
 		if e.Moved() {
@@ -369,7 +375,7 @@ func Move(spec Spec, opts Options) Result {
 		}
 	}
 
-	m := merger{dryRun: opts.DryRun, res: &res, norm: n, exclude: excludeSet(spec.Exclude), ctx: opts.Context}
+	m := merger{dryRun: opts.DryRun, res: &res, norm: n, exclude: excludeSet(spec.Exclude), ctx: opts.Context, gitLast: spec.GitLast}
 	m.mergeDir(srcFd, dstFd, "", 0)
 	if len(m.errs) > 0 {
 		return fail(fmt.Errorf("copy into target: %d error(s), first: %w", len(m.errs), m.errs[0]))
@@ -528,7 +534,7 @@ func moveFile(spec Spec, opts Options, res Result, srcParent int, srcName string
 			res.Conflicts = append(res.Conflicts, ".")
 		} else {
 			res.Copied++
-			n.entry(dstParent, dstName, srcSt)
+			n.entryAt(dstParent, dstName)
 		}
 	}
 	if spec.CopyOnly {
@@ -570,9 +576,21 @@ func renameToBackup(srcParent int, srcName string, opts Options) (string, error)
 	return backup, nil
 }
 
+// copyEntryHook runs before each entry of a copy walk with the entry's
+// path relative to the source; a test seam.
+var copyEntryHook = func(rel string) {}
+
+// GitMigratingName is the temporary name a source .git directory is copied
+// under inside the target (fs-cleanup-arch ruling on review finding 3): it
+// is renamed to .git only once complete, so a provisioner sees either no
+// .git (and refuses a non-empty workspace) or a complete one, never a
+// partial one. An interrupted run resumes into it.
+const GitMigratingName = ".git.scion-migrating"
+
 // merger copies a source tree into a target without overwriting.
 type merger struct {
 	ctx     context.Context
+	gitLast bool
 	dryRun  bool
 	res     *Result
 	norm    *normalizer
@@ -608,14 +626,22 @@ func (m *merger) mergeDir(src, dst int, rel string, depth int) {
 		m.errs = append(m.errs, fmt.Errorf("read %q: %w", relOrDot(rel), err))
 		return
 	}
+	gitLast := false
 	for _, name := range names {
+		p := filepath.Join(rel, name)
+		copyEntryHook(p)
 		if m.ctx != nil && m.ctx.Err() != nil {
-			m.errs = append(m.errs, fmt.Errorf("stopped at %q: %w", relOrDot(rel), m.ctx.Err()))
+			m.errs = append(m.errs, fmt.Errorf("stopped at %q: %w", p, m.ctx.Err()))
 			return
 		}
-		p := filepath.Join(rel, name)
 		if m.exclude[p] {
 			continue
+		}
+		if m.gitLast && rel == "" && name == ".git" {
+			if k, err := kindAt(src, name); err == nil && k == kindDir {
+				gitLast = true // copied after everything else, under a temp name
+				continue
+			}
 		}
 		var st unix.Stat_t
 		if err := unix.Fstatat(src, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
@@ -635,6 +661,90 @@ func (m *merger) mergeDir(src, dst int, rel string, depth int) {
 		default:
 			m.res.Refused = append(m.res.Refused, p+" (special file)")
 		}
+	}
+	if gitLast {
+		m.mergeGit(src, dst)
+	}
+}
+
+// mergeGit copies the source's top-level .git directory last: into
+// GitMigratingName inside the target, then, once that copy is complete and
+// workspace/.git is still absent, renames it to .git (the caller holds the
+// project's provisioning locks, so no provisioner clones concurrently). A
+// target .git that already exists (a broker cloned first) is a conflict:
+// the temp dir is not created or renamed.
+func (m *merger) mergeGit(src, dst int) {
+	childSrc, err := openDirAt(src, ".git")
+	if err != nil {
+		m.errs = append(m.errs, fmt.Errorf("open %q: %w", ".git", err))
+		return
+	}
+	defer closeFd(childSrc)
+	if dst < 0 {
+		m.mergeDir(childSrc, -1, ".git", 1)
+		return
+	}
+	k, err := kindAt(dst, ".git")
+	if err != nil {
+		m.errs = append(m.errs, fmt.Errorf("stat target .git: %w", err))
+		return
+	}
+	if k != kindAbsent {
+		m.res.Conflicts = append(m.res.Conflicts, ".git")
+		return
+	}
+	tk, err := kindAt(dst, GitMigratingName)
+	if err != nil {
+		m.errs = append(m.errs, fmt.Errorf("stat %s: %w", GitMigratingName, err))
+		return
+	}
+	switch tk {
+	case kindAbsent:
+		if m.dryRun {
+			m.mergeDir(childSrc, -1, ".git", 1)
+			return
+		}
+		var st unix.Stat_t
+		if err := unix.Fstat(childSrc, &st); err != nil {
+			m.errs = append(m.errs, err)
+			return
+		}
+		if err := unix.Mkdirat(dst, GitMigratingName, uint32(st.Mode&0o777)); err != nil && !errors.Is(err, unix.EEXIST) {
+			m.errs = append(m.errs, fmt.Errorf("create %s: %w", GitMigratingName, err))
+			return
+		}
+		m.norm.entryAt(dst, GitMigratingName)
+	case kindOther:
+		m.res.Conflicts = append(m.res.Conflicts, GitMigratingName)
+		return
+	}
+	tmp, err := openDirAt(dst, GitMigratingName)
+	if err != nil {
+		m.errs = append(m.errs, fmt.Errorf("open %s: %w", GitMigratingName, err))
+		return
+	}
+	defer closeFd(tmp)
+	before := len(m.errs)
+	m.mergeDir(childSrc, tmp, ".git", 1)
+	if len(m.errs) > before || m.dryRun || (m.ctx != nil && m.ctx.Err() != nil) {
+		return // incomplete: a re-run resumes into the temp dir
+	}
+	if k, err := kindAt(dst, ".git"); err != nil || k != kindAbsent {
+		m.res.Conflicts = append(m.res.Conflicts, ".git")
+		return
+	}
+	err = renameNoReplace(dst, GitMigratingName, dst, ".git")
+	if errors.Is(err, errNoAtomicRename) {
+		// NFS: a plain rename onto an absent name is atomic; the absent
+		// check above ran under the provisioning locks.
+		err = unix.Renameat(dst, GitMigratingName, dst, ".git")
+	}
+	if err != nil {
+		if errors.Is(err, unix.EEXIST) || errors.Is(err, unix.ENOTEMPTY) {
+			m.res.Conflicts = append(m.res.Conflicts, ".git")
+			return
+		}
+		m.errs = append(m.errs, fmt.Errorf("rename %s to .git: %w", GitMigratingName, err))
 	}
 }
 
@@ -713,7 +823,7 @@ func (m *merger) mergeFile(src, dst int, name, p string, st *unix.Stat_t) {
 			m.res.Conflicts = append(m.res.Conflicts, p)
 		default:
 			m.res.Copied++
-			m.norm.entry(dst, name, st)
+			m.norm.entryAt(dst, name) // the new file's own stat (never hard-linked)
 		}
 	case err != nil:
 		m.errs = append(m.errs, fmt.Errorf("stat target %q: %w", p, err))
