@@ -197,3 +197,68 @@ func TestRenameOpen_RefusesNonPrivateHandleUnix(t *testing.T) {
 		t.Fatalf("control: %v", err)
 	}
 }
+
+// CheckPrivate, OwnedByCurrentUser and CheckNoForeignWriters compare the
+// owner with one uid source (currentUID, the real uid), so they agree on
+// every file: with that uid all three accept the user's own 0600 file, and
+// with another uid all three refuse it, and a write open of an owned 0644
+// file refuses instead of repairing.
+func TestOwnerChecks_OneUIDSource(t *testing.T) {
+	if got, want := currentUID(), os.Getuid(); got != want {
+		t.Fatalf("currentUID() = %d, want the real uid %d", got, want)
+	}
+	tr, dir := openTestTree(t)
+	own := filepath.Join(dir, "own")
+	if err := os.WriteFile(own, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	open := filepath.Join(dir, "open")
+	if err := os.WriteFile(open, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(open, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(own)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+
+	if err := CheckPrivate(f); err != nil {
+		t.Errorf("CheckPrivate of the user's own 0600 file: %v", err)
+	}
+	if owned, err := OwnedByCurrentUser(f); err != nil || !owned {
+		t.Errorf("OwnedByCurrentUser of the user's own file = %v, %v; want true", owned, err)
+	}
+	if err := CheckNoForeignWriters(f); err != nil {
+		t.Errorf("CheckNoForeignWriters of the user's own 0600 file: %v", err)
+	}
+
+	saved := currentUID
+	t.Cleanup(func() { currentUID = saved })
+	currentUID = func() int { return os.Getuid() + 1 }
+
+	if err := CheckPrivate(f); !errors.Is(err, ErrNotPrivate) {
+		t.Errorf("CheckPrivate with another uid: %v, want ErrNotPrivate", err)
+	}
+	if owned, err := OwnedByCurrentUser(f); err != nil || owned {
+		t.Errorf("OwnedByCurrentUser with another uid = %v, %v; want false", owned, err)
+	}
+	if err := CheckNoForeignWriters(f); !errors.Is(err, ErrNotPrivate) {
+		t.Errorf("CheckNoForeignWriters with another uid: %v, want ErrNotPrivate", err)
+	}
+	if w, err := tr.OpenPrivate("open", os.O_WRONLY); err == nil {
+		_ = w.Close()
+		t.Errorf("OpenPrivate for writing of a 0644 file owned by another uid succeeded; want a refusal")
+	} else if !errors.Is(err, ErrNotPrivate) {
+		t.Errorf("OpenPrivate for writing with another uid: %v, want ErrNotPrivate", err)
+	}
+	fi, err := os.Stat(open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o644 {
+		t.Errorf("mode after the refused write open = %04o, want 0644 (not repaired)", fi.Mode().Perm())
+	}
+}

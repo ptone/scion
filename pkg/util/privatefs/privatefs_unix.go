@@ -337,19 +337,24 @@ func CheckPrivate(f *os.File) error {
 	return checkInfo(f.Name(), fi)
 }
 
+// currentUID is the uid that CheckPrivate, OwnedByCurrentUser and
+// CheckNoForeignWriters compare a file's owner with: the real uid, one
+// source for all three (a variable so tests can check that they agree).
+var currentUID = os.Getuid
+
 // checkInfo is CheckPrivate's predicate on a stat result.
 func checkInfo(name string, fi fs.FileInfo) error {
 	if fi.Mode().Perm()&0o077 != 0 {
 		return fmt.Errorf("%w: %s is group- or world-accessible (mode %04o)", ErrNotPrivate, name, fi.Mode().Perm())
 	}
-	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != currentUID() {
 		return fmt.Errorf("%w: %s is owned by another user", ErrNotPrivate, name)
 	}
 	return nil
 }
 
 // OwnedByCurrentUser reports whether the open file is owned by the
-// effective user.
+// current user (currentUID, as CheckPrivate).
 func OwnedByCurrentUser(f *os.File) (bool, error) {
 	fi, err := f.Stat()
 	if err != nil {
@@ -359,7 +364,7 @@ func OwnedByCurrentUser(f *os.File) (bool, error) {
 	if !ok {
 		return false, fmt.Errorf("cannot read the owner of %s", f.Name())
 	}
-	return int(st.Uid) == os.Geteuid(), nil
+	return int(st.Uid) == currentUID(), nil
 }
 
 // CheckNoForeignWriters verifies, on the open file, that it is owned by the
@@ -372,7 +377,7 @@ func CheckNoForeignWriters(f *os.File) error {
 	if fi.Mode().Perm()&0o022 != 0 {
 		return fmt.Errorf("%w: %s is group- or world-writable (mode %04o)", ErrNotPrivate, f.Name(), fi.Mode().Perm())
 	}
-	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != currentUID() {
 		return fmt.Errorf("%w: %s is owned by another user", ErrNotPrivate, f.Name())
 	}
 	return nil
