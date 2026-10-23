@@ -75,7 +75,7 @@ func configSchemaFields() []schemaField {
 		{Name: "volumes", Type: "list", Description: "Volume mounts"},
 		{Name: "detached", Type: "bool", Description: "Run in detached mode"},
 		{Name: "max_turns", Type: "int", Description: "Maximum conversation turns (0 = no limit; omit to inherit)"},
-		{Name: "max_model_calls", Type: "int", Description: "Maximum model API calls"},
+		{Name: "max_model_calls", Type: "int", Description: "Maximum model API calls (0 = no limit; omit to inherit)"},
 		{Name: "max_duration", Type: "string", Description: "Maximum duration (e.g., 30m, 1h)"},
 		{Name: "resources", Type: "object", Description: "Compute resource requirements (requests/limits)"},
 		{Name: "services", Type: "list", Description: "Sidecar service definitions"},
