@@ -104,6 +104,39 @@ func mergePatchWorkspaceModeLabel(stored, updates map[string]string) (map[string
 	return out, nil
 }
 
+// rejectProjectOriginLabel refuses a client-supplied project-origin label
+// (store.LabelProjectOrigin is server-owned) on create and register.
+func rejectProjectOriginLabel(labels map[string]string) error {
+	if _, ok := labels[store.LabelProjectOrigin]; ok {
+		return fmt.Errorf("label %s is server-owned and cannot be set", store.LabelProjectOrigin)
+	}
+	return nil
+}
+
+// mergePatchProjectOriginLabel keeps the stored project-origin label across
+// a PATCH that replaces the labels map: a replacement that repeats the
+// stored value (or omits the key) keeps it; any other value, or setting it
+// on a project without one, is rejected.
+func mergePatchProjectOriginLabel(stored, updates map[string]string) (map[string]string, error) {
+	storedVal, storedHas := stored[store.LabelProjectOrigin]
+	newVal, newHas := updates[store.LabelProjectOrigin]
+	if newHas {
+		if !storedHas || newVal != storedVal {
+			return nil, fmt.Errorf("label %s is server-owned and cannot be changed", store.LabelProjectOrigin)
+		}
+		return updates, nil
+	}
+	if !storedHas {
+		return updates, nil
+	}
+	out := maps.Clone(updates)
+	if out == nil {
+		out = make(map[string]string, 1)
+	}
+	out[store.LabelProjectOrigin] = storedVal
+	return out, nil
+}
+
 // deriveCloneWorkspaceMode returns the workspace-mode label a project clone
 // gets from its source's label: the source's mode is carried when it is
 // valid for the CLONE's git-ness (i.e. after any gitRemote override), and
@@ -282,13 +315,14 @@ func (s *Server) remoteBrokerWorkspaceRefusal(ctx context.Context, project *stor
 	const tail = "; use a co-located runtime broker, configure shared workspace storage (nfs) on the hub and the broker, " +
 		"or use a per-agent workspace mode (clone-per-agent)"
 	if !s.workspaceBackendShared() {
-		// Carve-out (fs-cleanup-arch Q4 boundary): a non-git project on a
-		// local-backend hub keeps its workspace on the remote broker, which
-		// populates it from the CLI workspace bootstrap and `scion sync
-		// to`; the broker uses its own project directory. Only a
-		// shared-workspace git project, whose workspace the hub holds, is
-		// refused.
-		if project.GitRemote == "" {
+		// Carve-out (fs-cleanup-arch Q4/T6 boundary): a LINKED non-git
+		// project (registered from an existing checkout) on a local-backend
+		// hub keeps its workspace on the remote broker, which populates it
+		// from the CLI workspace bootstrap and `scion sync to`; the broker
+		// uses its own project directory, and the hub's Files tab answers
+		// 409 for it. A hub-managed project, whose workspace the hub holds,
+		// is refused.
+		if project.GitRemote == "" && project.IsLinkedOrigin() {
 			return "", false
 		}
 		return "this project's shared workspace lives on the hub's local disk, which a remote runtime broker cannot reach" + tail, true

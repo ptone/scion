@@ -458,8 +458,9 @@ func TestEnsureProjectConfigIdentities_MismatchLeftAndReported(t *testing.T) {
 
 	checks := map[string]string{}
 	f.srv.checkProjectConfigIdentityHealth(checks)
-	assert.Contains(t, checks[projectConfigIdentityHealthKey], HealthStatusDegraded)
-	assert.Contains(t, checks[projectConfigIdentityHealthKey], project.ID)
+	assert.Equal(t, HealthStatusDegraded+": project-id mismatch in 1 project configuration(s)", checks[projectConfigIdentityHealthKey],
+		"the unauthenticated health check carries a count only")
+	assert.NotContains(t, checks[projectConfigIdentityHealthKey], project.ID, "no project ID on the health endpoint")
 	assert.NotContains(t, checks[projectConfigIdentityHealthKey], f.shareBase, "no host path")
 	assert.Equal(t, HealthStatusDegraded, deriveHealthStatus(checks), "a mismatch degrades, never fails, health")
 }
@@ -557,12 +558,20 @@ func TestCreateSharedWorkspaceProject_SharedBackend_CloneFailureRollsBack(t *tes
 		Name: "Bad Clone NFS", GitRemote: "github.com/test/bad-clone-nfs", WorkspaceMode: store.WorkspaceModeShared,
 		Labels: map[string]string{store.LabelCloneURL: missing},
 	})
-	require.GreaterOrEqual(t, rec.Code, 400, "body: %s", rec.Body.String())
+	require.Contains(t, []int{http.StatusUnprocessableEntity, http.StatusInternalServerError}, rec.Code,
+		"a clone failure answers 422 (auth/not found) or 500, body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "clone_failed")
 	assert.NotContains(t, rec.Body.String(), f.shareBase, "no host path in the error")
 	assert.NotContains(t, rec.Body.String(), missing, "no clone source path in the error")
+	result, err := f.s.ListProjects(context.Background(), store.ProjectFilter{}, store.ListOptions{})
+	require.NoError(t, err)
+	for _, p := range result.Items {
+		assert.NotEqual(t, "Bad Clone NFS", p.Name, "the project row is rolled back")
+	}
 	entries, err := os.ReadDir(filepath.Join(f.shareBase, "projects"))
-	if err == nil {
-		assert.Empty(t, entries, "the failed create leaves no project tree")
+	if !os.IsNotExist(err) {
+		require.NoError(t, err)
+		assert.Empty(t, entries, "the failed create leaves no project tree (projects/<id> removed)")
 	}
 }
 

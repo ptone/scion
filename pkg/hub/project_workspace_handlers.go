@@ -405,6 +405,18 @@ func openConfinedBase(base string, createIfMissing bool) (*os.Root, error) {
 // Errors are safe to show to clients (no filesystem paths). A storage
 // misconfiguration wraps errWorkspaceStorageUnavailable (503).
 func (s *Server) resolveProjectWorkspace(ctx context.Context, project *store.Project) (projectfs.Resolved, error) {
+	// A linked project without a git remote whose workspace lives only on
+	// remote brokers (the T6 carve-out) has no workspace the hub can
+	// reach: 409, and the hub never creates its own copy.
+	if project != nil && project.GitRemote == "" && project.IsLinkedOrigin() {
+		embedded, err := s.hasEmbeddedProvider(ctx, project)
+		if err != nil {
+			return projectfs.Resolved{}, fmt.Errorf("failed to resolve project providers")
+		}
+		if !embedded {
+			return projectfs.Resolved{}, errLinkedWorkspaceRemote
+		}
+	}
 	res, err := s.projectWorkspaceResolved(project)
 	switch {
 	case err == nil:
@@ -455,6 +467,21 @@ func sharedBaseMissing(resolved projectfs.Resolved) bool {
 	}
 	_, err := os.Stat(resolved.HostBase)
 	return errors.Is(err, fs.ErrNotExist)
+}
+
+// hasEmbeddedProvider reports whether the co-located (embedded) broker
+// provides project.
+func (s *Server) hasEmbeddedProvider(ctx context.Context, project *store.Project) (bool, error) {
+	providers, err := s.store.GetProjectProviders(ctx, project.ID)
+	if err != nil {
+		return false, err
+	}
+	for _, p := range providers {
+		if s.isEmbeddedBroker(p.BrokerID) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // errWorkspaceNoMount is returned for a project without a project-scoped

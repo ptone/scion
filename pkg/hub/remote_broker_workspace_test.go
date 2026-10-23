@@ -206,15 +206,42 @@ func TestWorkspaceFinalize_RelaysBrokerBootstrapSkippedWarning(t *testing.T) {
 	assert.Contains(t, resp.Warnings, skipped)
 }
 
-// TestCreateAgent_RemoteBroker_NonGitLocalHub_CarveOut pins the T6
-// carve-out (fs-cleanup-arch Q4 boundary; review rev-1 #2): a non-git
-// project on a local-backend hub dispatched to a remote broker without a
-// local path is NOT refused, also without a task or workspace files (scion
-// start/create, an empty directory); the broker uses its own project
-// directory, so no hub path is recorded.
-func TestCreateAgent_RemoteBroker_NonGitLocalHub_CarveOut(t *testing.T) {
-	srv, _, project, disp := setupRemoteBrokerWorkspaceServer(t)
+// markLinkedOrigin sets the server-owned project-origin label as a
+// registration from an existing checkout does.
+func markLinkedOrigin(t *testing.T, s store.Store, project *store.Project) {
+	t.Helper()
+	if project.Labels == nil {
+		project.Labels = map[string]string{}
+	}
+	project.Labels[store.LabelProjectOrigin] = store.ProjectOriginLinked
+	require.NoError(t, s.UpdateProject(context.Background(), project))
+	require.True(t, project.IsLinkedOrigin(), "fixture check")
+}
+
+// TestCreateAgent_RemoteBroker_LocalHubWorkspace_Refused409: a HUB-MANAGED
+// non-git project on a local-backend hub sent to a remote broker without a
+// local path is refused (T6): the hub holds its workspace.
+func TestCreateAgent_RemoteBroker_LocalHubWorkspace_Refused409(t *testing.T) {
+	srv, s, project, disp := setupRemoteBrokerWorkspaceServer(t)
+	require.False(t, project.IsLinkedOrigin(), "fixture check: hub-managed project")
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name: "t6-local-hub", ProjectID: project.ID,
+	})
+	requireRefusedCreate(t, s, project, disp, rec.Code, rec.Body.String(),
+		"lives on the hub's local disk, which a remote runtime broker cannot reach")
+}
+
+// TestCreateAgent_RemoteBroker_LinkedNonGitLocalHub_CarveOut pins the T6
+// carve-out (fs-cleanup-arch Q4/T6 boundary; review rev-1 #2, rev-2 #1): a
+// LINKED non-git project on a local-backend hub dispatched to a remote
+// broker without a local path is NOT refused, also without a task or
+// workspace files (scion start/create, an empty directory); the broker uses
+// its own project directory, so no hub path is recorded.
+func TestCreateAgent_RemoteBroker_LinkedNonGitLocalHub_CarveOut(t *testing.T) {
+	srv, s, project, disp := setupRemoteBrokerWorkspaceServer(t)
 	require.Empty(t, project.GitRemote, "fixture check: non-git project")
+	markLinkedOrigin(t, s, project)
 
 	for _, req := range []CreateAgentRequest{
 		{Name: "carve-no-task", ProjectID: project.ID},
@@ -225,5 +252,77 @@ func TestCreateAgent_RemoteBroker_NonGitLocalHub_CarveOut(t *testing.T) {
 		require.Equal(t, http.StatusCreated, rec.Code, "%s: %s", req.Name, rec.Body.String())
 		require.NotNil(t, disp.capturedAgent, "dispatched")
 		assert.Empty(t, disp.capturedAgent.AppliedConfig.Workspace, "the hub's local path is not sent to a remote broker")
+	}
+}
+
+// TestProjectWorkspaceFiles_LinkedNonGitRemoteOnly_Conflict: the Files tab
+// for the carve-out case answers 409 and never creates a hub copy; with an
+// embedded provider it is served as before (T1 unchanged).
+func TestProjectWorkspaceFiles_LinkedNonGitRemoteOnly_Conflict(t *testing.T) {
+	srv, s, project, _ := setupRemoteBrokerWorkspaceServer(t)
+	markLinkedOrigin(t, s, project)
+	local, err := localProjectPath(project.Slug)
+	require.NoError(t, err)
+	require.NoError(t, os.RemoveAll(local))
+	url := fmt.Sprintf("/api/v1/projects/%s/workspace/files", project.ID)
+
+	rec := doRequest(t, srv, http.MethodGet, url, nil)
+	assert.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "remote runtime brokers without shared storage")
+	rec = doRequest(t, srv, http.MethodPut, url+"/a.txt", ProjectWorkspaceWriteRequest{Content: "a"})
+	assert.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
+	_, err = os.Stat(local)
+	assert.True(t, os.IsNotExist(err), "no hub-side copy is created")
+
+	srv.SetEmbeddedBrokerID(project.DefaultRuntimeBrokerID)
+	rec = doRequest(t, srv, http.MethodGet, url, nil)
+	assert.Equal(t, http.StatusOK, rec.Code, "with the co-located broker the workspace is served as before: %s", rec.Body.String())
+}
+
+// TestProjectOriginLabel_ServerOwned: the project-origin label is set only
+// by registration (a new project from an existing checkout is linked), is
+// refused from clients on create and register, cannot be changed or set by
+// PATCH (and survives a labels replacement), and is not copied by clone.
+func TestProjectOriginLabel_ServerOwned(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{
+		Name: "Origin Create", Labels: map[string]string{store.LabelProjectOrigin: store.ProjectOriginLinked},
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "create refuses the label: %s", rec.Body.String())
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+		Name: "origin-register-bad", Labels: map[string]string{store.LabelProjectOrigin: "hub"},
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "register refuses the label: %s", rec.Body.String())
+
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{Name: "origin-register"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var reg RegisterProjectResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &reg))
+	require.NotNil(t, reg.Project)
+	linked, err := s.GetProject(ctx, reg.Project.ID)
+	require.NoError(t, err)
+	assert.True(t, linked.IsLinkedOrigin(), "a registered project is linked")
+
+	hub, _ := createTestHubManagedProject(t, srv, "Origin Hub")
+	assert.False(t, hub.IsLinkedOrigin(), "a created project is hub-managed")
+
+	patch := func(id string, labels map[string]string) int {
+		return doRequest(t, srv, http.MethodPatch, "/api/v1/projects/"+id, map[string]interface{}{"labels": labels}).Code
+	}
+	assert.Equal(t, http.StatusBadRequest, patch(hub.ID, map[string]string{store.LabelProjectOrigin: store.ProjectOriginLinked}), "PATCH cannot set it")
+	assert.Equal(t, http.StatusBadRequest, patch(linked.ID, map[string]string{store.LabelProjectOrigin: "other"}), "PATCH cannot change it")
+	assert.Less(t, patch(linked.ID, map[string]string{"team": "a"}), 300, "a labels replacement without the key is accepted")
+	after, err := s.GetProject(ctx, linked.ID)
+	require.NoError(t, err)
+	assert.True(t, after.IsLinkedOrigin(), "the label survives a labels replacement")
+
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+linked.ID+"/clone", map[string]interface{}{"name": "Origin Clone"})
+	if rec.Code < 300 {
+		var clone store.Project
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &clone))
+		assert.False(t, clone.IsLinkedOrigin(), "a clone is hub-managed")
 	}
 }

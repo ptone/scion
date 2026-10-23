@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -338,6 +339,10 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	// validated field (design #2703 §2.4).
 	labels, err := resolveCreateWorkspaceModeLabels(req.WorkspaceMode, req.Labels, normalizedRemote != "")
 	if err != nil {
+		ValidationError(w, err.Error(), nil)
+		return
+	}
+	if err := rejectProjectOriginLabel(labels); err != nil {
 		ValidationError(w, err.Error(), nil)
 		return
 	}
@@ -1569,6 +1574,10 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		ValidationError(w, err.Error(), nil)
 		return
 	}
+	if err := rejectProjectOriginLabel(req.Labels); err != nil {
+		ValidationError(w, err.Error(), nil)
+		return
+	}
 
 	// Try to find existing project
 	var project *store.Project
@@ -1872,12 +1881,19 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			displayName = api.DisplayNameWithSerial(req.Name, slug, baseSlug)
 		}
 
+		// A project created by registration from an existing checkout is
+		// a linked project (server-owned origin label).
+		registerLabels := maps.Clone(req.Labels)
+		if registerLabels == nil {
+			registerLabels = make(map[string]string, 1)
+		}
+		registerLabels[store.LabelProjectOrigin] = store.ProjectOriginLinked
 		project = &store.Project{
 			ID:        projectID,
 			Name:      displayName,
 			Slug:      slug,
 			GitRemote: normalizedRemote,
-			Labels:    req.Labels,
+			Labels:    registerLabels,
 		}
 
 		// Set ownership from authenticated user
@@ -3274,6 +3290,11 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 		// workspace-mode label and refuse attempts to change it (design
 		// #2703 §2.4 / D6).
 		merged, err := mergePatchWorkspaceModeLabel(project.Labels, updates.Labels)
+		if err != nil {
+			ValidationError(w, err.Error(), nil)
+			return
+		}
+		merged, err = mergePatchProjectOriginLabel(project.Labels, merged)
 		if err != nil {
 			ValidationError(w, err.Error(), nil)
 			return

@@ -242,17 +242,17 @@ func (s *Server) ensureProjectConfigIdentities(ctx context.Context) projectConfi
 }
 
 // checkProjectConfigIdentityHealth reports identity mismatches as a
-// non-critical (degraded) check on shared backends. The project IDs are
-// listed; no host path is.
+// non-critical (degraded) check on shared backends. The health endpoint is
+// unauthenticated, so it carries only a count; the project IDs are in the
+// Error log line ensureProjectConfigIdentity writes.
 func (s *Server) checkProjectConfigIdentityHealth(checks map[string]string) {
 	if !s.workspaceBackendShared() {
 		return
 	}
-	ids := s.projectConfigIdentity.list()
-	if len(ids) == 0 {
+	n := len(s.projectConfigIdentity.list())
+	if n == 0 {
 		checks[projectConfigIdentityHealthKey] = HealthStatusHealthy
 		return
 	}
-	checks[projectConfigIdentityHealthKey] = fmt.Sprintf("%s: project-id mismatch in the project configuration of %d project(s): %s",
-		HealthStatusDegraded, len(ids), strings.Join(ids, ","))
+	checks[projectConfigIdentityHealthKey] = fmt.Sprintf("%s: project-id mismatch in %d project configuration(s)", HealthStatusDegraded, n)
 }

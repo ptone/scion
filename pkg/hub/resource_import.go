@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 
 	"golang.org/x/sync/errgroup"
 
@@ -771,11 +772,23 @@ func (s *Server) snapshotWorkspaceDir(ctx context.Context, project *store.Projec
 		if files > workspaceSnapshotMaxFiles {
 			return errWorkspaceSnapshotTooLarge
 		}
-		in, err := sub.Open(p)
+		// Opened non-blocking and without following a final symlink, and
+		// checked to still be a regular file: an entry swapped for a FIFO
+		// or a link after the walk classified it is skipped, never read
+		// (a FIFO would block the open or the read).
+		in, err := sub.OpenFile(p, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
 		if err != nil {
+			if errors.Is(err, syscall.ELOOP) {
+				return nil
+			}
 			return err
 		}
 		defer func() { _ = in.Close() }()
+		if fi, err := in.Stat(); err != nil {
+			return err
+		} else if !fi.Mode().IsRegular() {
+			return nil
+		}
 		out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 		if err != nil {
 			return err
