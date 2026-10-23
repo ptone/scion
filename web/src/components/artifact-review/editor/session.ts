@@ -26,7 +26,7 @@ import { TextSelection } from '@milkdown/prose/state';
 
 import { normalizeCritic, projectCritic } from '../../../utils/critic.js';
 
-import { chooseAlphabet } from '../../../utils/critic-sentinels.js';
+import { chooseAlphabet, chooseOpeningAlphabet } from '../../../utils/critic-sentinels.js';
 import { loadDoc, saveDoc } from './bridge.js';
 import type { Core } from './create.js';
 import { marksReadBack } from './guard.js';
@@ -49,11 +49,15 @@ export class ReviewSession {
   load(md: string): boolean {
     const { view, schema, parse, parseMd } = this.core;
     // The alphabet must be free in the source and in what the Markdown
-    // parser makes of it: character references (&#x2E00;) decode to
-    // candidate characters, which would otherwise read as sentinels.
-    const a = chooseAlphabet(`${md}\n${docStrings(parse(md))}`);
+    // parser makes of the sentinel form (character references decode to
+    // candidate characters, which would otherwise read as sentinels).
+    const a = chooseOpeningAlphabet(
+      md,
+      (text) => `${docStrings(parse(md))}\n${docStrings(parse(text))}`
+    );
     if (!a) return false;
     const doc = loadDoc(md, parse, schema, a);
+    if (!doc) return false;
     const tr = view.state.tr.replaceWith(0, view.state.doc.content.size, doc.content);
     tr.setSelection(TextSelection.atStart(tr.doc));
     tr.setMeta(LOAD_META, true).setMeta('addToHistory', false);

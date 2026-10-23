@@ -83,13 +83,43 @@ export const SENTINEL_CANDIDATES: readonly string[] = [
  * null when fewer than ten are free (the editor then does not open).
  */
 export function chooseAlphabet(md: string): SentinelAlphabet | null {
-  const free = SENTINEL_CANDIDATES.filter((c) => !md.includes(c));
-  if (free.length < ROLES.length) return null;
+  return alphabetOf(SENTINEL_CANDIDATES.filter((c) => !md.includes(c)));
+}
+
+/** The alphabet made of the first ten of chars, or null when there are fewer. */
+export function alphabetOf(chars: readonly string[]): SentinelAlphabet | null {
+  if (chars.length < ROLES.length) return null;
   const a = {} as SentinelAlphabet;
   ROLES.forEach((role, i) => {
-    a[role] = free[i];
+    a[role] = chars[i];
   });
   return a;
+}
+
+/**
+ * The alphabet for opening md in the editor, where the marks are read from
+ * the Markdown parser's reading of the sentinel form, not of md itself.
+ * The sentinel form drops comment notes, so text the parser keeps literal
+ * in md (inside raw HTML or indented code that a note opens) can decode in
+ * the sentinel form, for example a character reference to a candidate.
+ * So a probe alphabet (the last ten candidates free in md) builds the
+ * sentinel form first; every candidate the parser yields from it, other
+ * than the probe's own, came from the source and is excluded. Swapping one
+ * candidate for another does not change how the text parses (all are
+ * punctuation with no Markdown meaning), so the real sentinel form parses
+ * the same way. shown(text) returns every string the parser yields for
+ * text. Needs twenty free candidates; null otherwise.
+ */
+export function chooseOpeningAlphabet(
+  md: string,
+  shown: (sentinelText: string) => string
+): SentinelAlphabet | null {
+  const free = SENTINEL_CANDIDATES.filter((c) => !md.includes(c));
+  if (free.length < 2 * ROLES.length) return null;
+  const probeChars = free.slice(-ROLES.length);
+  const probe = alphabetOf(probeChars)!;
+  const yielded = shown(criticToSentinelText(md, probe).text);
+  return alphabetOf(free.slice(0, -ROLES.length).filter((c) => !yielded.includes(c)));
 }
 
 /** The sentinels of an alphabet, as a set. */

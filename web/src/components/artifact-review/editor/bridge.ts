@@ -292,15 +292,39 @@ export function docToSentinels(
   return { doc: tr.doc, notes };
 }
 
-/** Parses Markdown with CriticMarkup into a document. */
+/**
+ * Whether a sentinel landed in an attribute (a token inside a link target
+ * or title, an image source, raw HTML, an HTML comment, a code block's
+ * language). The critic parser reads a mark there, but the editor would
+ * show the token as part of the attribute, and a comment's note could not
+ * be matched to its place: such a document is not opened in the editor.
+ */
+function sentinelInAttribute(doc: Node, a: SentinelAlphabet): boolean {
+  const sentinels = sentinelSet(a);
+  const has = (attrs: Record<string, unknown>): boolean =>
+    Object.values(attrs).some((v) => typeof v === 'string' && [...v].some((c) => sentinels.has(c)));
+  let found = false;
+  doc.descendants((node) => {
+    if (found) return false;
+    if (has(node.attrs) || node.marks.some((m) => has(m.attrs))) found = true;
+    return !found;
+  });
+  return found;
+}
+
+/**
+ * Parses Markdown with CriticMarkup into a document, or null when it
+ * cannot be shown faithfully (a mark token inside an attribute).
+ */
 export function loadDoc(
   md: string,
   parse: (s: string) => Node,
   schema: Schema,
   a: SentinelAlphabet
-): Node {
+): Node | null {
   const { text, notes } = criticToSentinelText(md, a);
   const tr = new Transform(parse(text));
+  if (sentinelInAttribute(tr.doc, a)) return null;
   applySentinels(tr, schema, notes, a);
   return tr.doc;
 }

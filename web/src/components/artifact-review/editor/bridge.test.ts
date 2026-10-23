@@ -69,7 +69,7 @@ describe('corpus round trip', () => {
     const bad: string[] = [];
     for (const c of corpus) {
       const a = chooseAlphabet(c.in)!;
-      const doc = loadDoc(c.in, core.parse, core.schema, a);
+      const doc = loadDoc(c.in, core.parse, core.schema, a)!;
       const d = docMarkKinds(doc).join(',');
       const t = textMarkKinds(c.in).join(',');
       if (d !== t) bad.push(c.name);
@@ -95,7 +95,7 @@ describe('corpus round trip', () => {
     const bad: string[] = [];
     for (const c of corpus) {
       const a = chooseAlphabet(c.in)!;
-      const doc = loadDoc(c.in, core.parse, core.schema, a);
+      const doc = loadDoc(c.in, core.parse, core.schema, a)!;
       if (marksReadBack(doc, c.in, core.plain) !== null) bad.push(c.name);
     }
     expect(bad).toEqual(LITERAL);
@@ -122,7 +122,7 @@ describe('corpus round trip', () => {
     for (const c of corpus) {
       const a = chooseAlphabet(c.in)!;
       const out = saveDoc(
-        loadDoc(c.in, core.parse, core.schema, a),
+        loadDoc(c.in, core.parse, core.schema, a)!,
         core.serialize,
         core.schema,
         a

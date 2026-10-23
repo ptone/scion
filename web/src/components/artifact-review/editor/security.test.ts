@@ -28,6 +28,7 @@ import { TextSelection } from '@milkdown/prose/state';
 import { parseCritic } from '../../../utils/critic.js';
 import { SENTINEL_CANDIDATES } from '../../../utils/critic-sentinels.js';
 import { ReviewController } from './controller.js';
+import { docMarkKinds } from './guard.js';
 import type { HintKind } from './policy.js';
 import { ALLOWED_ATTRIBUTES, ALLOWED_TAGS, HARDENED } from './safe-render.js';
 import { renderContext } from './__fixtures__/core.js';
@@ -398,4 +399,93 @@ describe('sentinel characters in the text (S6)', () => {
     expect(dom.textContent).toContain('\u2E00x\u2E01 \u2E11');
     expect(c.flush()).toBe(md);
   });
+
+  // References hidden from the parser in the source (inside raw HTML or
+  // indented code that a comment note opens) decode in the sentinel form,
+  // where the note is gone. They must stay text too.
+  const hidden = [
+    ['raw HTML in a note', '{>><b title="<<} &#x2E00;fake&#x2E01; ">', '<b title="'],
+    ['indented code in a note', 'x {>>a\n\n    <<} &#x2E00;fake&#x2E01;', 'a\n\n    '],
+  ];
+  for (const [name, frag, note] of hidden) {
+    it(`keeps references hidden by ${name} as text, beside real marks`, async () => {
+      const md = `${frag}\n\nand {++real++} with {==hl==}{>>real note<<}\n`;
+      const c = await open(md);
+      const dom = c.view.dom;
+      expect(dom.querySelectorAll('ins.critic-ins').length).toBe(1);
+      expect(dom.querySelector('ins.critic-ins')?.textContent).toBe('real');
+      const labels = Array.from(dom.querySelectorAll('.critic-comment')).map((e) =>
+        e.getAttribute('aria-label')
+      );
+      expect(labels).toEqual([`Comment: ${note}`, 'Comment: real note']);
+      expect(dom.textContent).toContain('\u2E00fake\u2E01');
+      expect(c.flush()).toBe(md);
+    });
+  }
+
+  it('does not shift real notes when a hidden reference poses as a comment', async () => {
+    const md = '{>><b title="<<} &#x2E11; "> then {>>real<<}\n';
+    const c = await open(md);
+    const labels = Array.from(c.view.dom.querySelectorAll('.critic-comment')).map((e) =>
+      e.getAttribute('aria-label')
+    );
+    expect(labels).toEqual(['Comment: <b title="', 'Comment: real']);
+    expect(c.flush()).toBe(md);
+  });
+
+  // Other constructs a note can open or close around a reference. Either
+  // the editor refuses to open the document (a mark token inside an
+  // attribute: raw HTML, an HTML comment, a link target or title), or its
+  // marks are exactly the critic parser's and the text saves byte for byte.
+  const constructs: [string, 'opens' | 'refuses'][] = [
+    ['<!-- {>>x<<} &#x2E00;f&#x2E01; &#x2E11; -->', 'refuses'],
+    ['{>><!--<<} &#x2E00;f&#x2E01; &#x2E11; -->', 'opens'],
+    ['[l](<{>>x<<}&#x2E00;f&#x2E01;&#x2E11;>)', 'refuses'],
+    ['[l](u "{>>x<<} &#x2E00;f&#x2E01; &#x2E11;")', 'refuses'],
+    ['[l](u "{>>"<<} &#x2E00;f&#x2E01; &#x2E11;")', 'refuses'],
+    ['<http://a.example/{>>x<<}&#x2E00;f&#x2E01;&#x2E11;>', 'refuses'],
+    ['`{>>x<<} &#x2E00;f&#x2E01; &#x2E11;`', 'opens'],
+    ['{>>`<<} &#x2E00;f&#x2E01; &#x2E11;`', 'opens'],
+    ['a {>>x\n===<<} &#x2E00;f&#x2E01; &#x2E11;', 'opens'],
+    ['| a {>>x | b<<} | &#x2E00;f&#x2E01; &#x2E11; |\n|---|---|\n| 1 | 2 |', 'opens'],
+    ['{>>x\n```\n<<} &#x2E00;f&#x2E01; &#x2E11;\n```', 'opens'],
+    ['[r]: u "{>>x<<} &#x2E00;f&#x2E01; &#x2E11;"\n\n[r]', 'refuses'],
+    ['[l](u "{++x++}") and {++real two++}', 'refuses'],
+    ['<span title="{--x--}">s</span> and {++real two++}', 'refuses'],
+    ['![i]({++x++}.png) and {++real two++}', 'refuses'],
+  ];
+  for (const [frag, expected] of constructs) {
+    it(`references around a note, ${expected}: ${JSON.stringify(frag).slice(0, 40)}`, async () => {
+      const md = `${frag}\n\nand {++real++} with {==hl==}{>>real note<<}\n`;
+      const root = document.createElement('div');
+      document.body.append(root);
+      const c = await ReviewController.create({
+        root,
+        render: () => renderContext,
+        askNote: () => Promise.resolve('n'),
+        onHint: () => {},
+        onChange: () => {},
+      });
+      made.push(c);
+      const opened = c.load(md);
+      expect(opened ? 'opens' : 'refuses').toBe(expected);
+      if (!opened) return;
+      // The editor's marks are exactly what the critic parser reads: the
+      // same kinds in order, and the comments with the parser's notes.
+      const dom = c.view.dom;
+      expect(docMarkKinds(c.view.state.doc)).toEqual(
+        parseCritic(md)
+          .filter((x) => x.kind !== 'text')
+          .map((x) => x.kind)
+      );
+      const want = parseCritic(md)
+        .filter((x) => x.kind === 'comment')
+        .map((x) => `Comment: ${x.text}`);
+      const labels = Array.from(dom.querySelectorAll('.critic-comment')).map(
+        (e) => e.getAttribute('aria-label') ?? ''
+      );
+      expect(labels).toEqual(want);
+      expect(c.flush()).toBe(md);
+    });
+  }
 });

@@ -84,6 +84,14 @@ const FIXTURE = [
   '',
   'Sentinels ⸀⸁⸂⸃ stay text, and {++real++} marks stay marks.',
   '',
+  // A note can hide references from the parser in the source (raw HTML,
+  // indented code); they must stay text in the editor too.
+  '{>><b title="<<} &#x2E00;hidden&#x2E01; &#x2E11; ">',
+  '',
+  'x {>>a',
+  '',
+  '    <<} &#x2E00;indented&#x2E01;',
+  '',
   'References &#x2E00;fake&#x2E01; and &#x2E11; stay text, with {==hl==}{>>first note<<} and {>>second note<<}.',
   '',
 ].join('\n');
@@ -217,8 +225,15 @@ test('artifact text renders only as the rules allow, and a paste is read as plai
   expect(f.ins).toBe(1);
   // Character references of sentinel candidates stay text, and the real
   // comments keep their own notes (positive control in the same line).
-  expect(f.comments).toEqual(['Comment: first note', 'Comment: second note']);
+  expect(f.comments).toEqual([
+    'Comment: <b title="',
+    'Comment: a\n\n    ',
+    'Comment: first note',
+    'Comment: second note',
+  ]);
   expect(f.text).toContain('\u2E00fake\u2E01 and \u2E11 stay text');
+  expect(f.text).toContain('\u2E00hidden\u2E01 \u2E11');
+  expect(f.text).toContain('\u2E00indented\u2E01');
   // The document round-trips unchanged.
   expect(await editorText(page)).toBe(FIXTURE);
 
