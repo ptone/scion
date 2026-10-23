@@ -167,6 +167,9 @@ describe('links (S3)', () => {
     'tel:+15551234',
     'missing.md',
     '../../outside.md',
+    'java&#x09;script:window.__pwned=1',
+    '&#x0A;javascript:window.__pwned=1',
+    'jav&#x0D;ascript:window.__pwned=1',
   ];
 
   it('gives a target only to http, https, mailto and version files', async () => {
@@ -192,6 +195,49 @@ describe('links (S3)', () => {
     expect(byText('frag').hasAttribute('href')).toBe(false);
     expect(byText('ref').hasAttribute('href')).toBe(false);
     expect(byText('https://auto.example/').getAttribute('href')).toBe('https://auto.example/');
+    expect(c.flush()).toBe(md);
+  });
+});
+
+describe('links in autolink and reference form (S3)', () => {
+  it('gives no target to other schemes, beside https links that keep theirs', async () => {
+    const autos = [
+      'javascript:window.__pwned=1',
+      'JaVaScRiPt:window.__pwned=1',
+      'data:text/html,x',
+    ];
+    const refs = [
+      'data:text/html,x',
+      'JaVaScRiPt:window.__pwned=1',
+      '&#106;avascript:window.__pwned=1',
+      'java&#x09;script:window.__pwned=1',
+    ];
+    const md =
+      autos.map((h, i) => `<${h}> and [autoOk${i}](https://ok.example/a${i})`).join('\n\n') +
+      '\n\n' +
+      refs
+        .map((_h, i) => `[ref${i}][r${i}] and [refOk${i}](https://ok.example/r${i})`)
+        .join('\n\n') +
+      '\n\n' +
+      refs.map((h, i) => `[r${i}]: ${h}`).join('\n') +
+      '\n';
+    const c = await open(md);
+    const dom = c.view.dom;
+    assertFixedDom(dom);
+    assertTargets(dom);
+    const anchors = Array.from(dom.querySelectorAll('a'));
+    const byText = (t: string): Element | undefined => anchors.find((a) => a.textContent === t);
+    autos.forEach((h, i) => {
+      const a = byText(h);
+      // An autolink with another scheme is text, or a link without a target.
+      if (a) expect(a.hasAttribute('href'), h).toBe(false);
+      expect(dom.textContent).toContain(h);
+      expect(byText(`autoOk${i}`)?.getAttribute('href')).toBe(`https://ok.example/a${i}`);
+    });
+    refs.forEach((_h, i) => {
+      expect(byText(`ref${i}`)?.hasAttribute('href'), `ref${i}`).toBe(false);
+      expect(byText(`refOk${i}`)?.getAttribute('href')).toBe(`https://ok.example/r${i}`);
+    });
     expect(c.flush()).toBe(md);
   });
 });
@@ -285,6 +331,40 @@ describe('paste and drop (S5)', () => {
   });
 });
 
+describe('paste and drop never reach the default paths (S5)', () => {
+  it('handles a paste on the element around the editor before ProseMirror, also mid-composition', async () => {
+    const c = await open('one two\n');
+    const v = c.view;
+    v.dispatch(v.state.tr.setSelection(TextSelection.create(v.state.doc, 5)));
+    c.beginComposition();
+    const event = pasteEvent({
+      'text/html': '<img src="https://paste.invalid/x">',
+      'text/plain': 'words',
+    });
+    v.dom.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(c.flush()).toBe('one {++words++}two\n');
+    expect(v.dom.querySelector('img')).toBeNull();
+  });
+
+  it('refuses a drop with no position and any drag over the editor', async () => {
+    const hints: HintKind[] = [];
+    const c = await open('one two\n', hints);
+    const root = c.view.dom.parentElement!;
+    const drop = new Event('drop', { bubbles: true, cancelable: true }) as DragEvent;
+    Object.defineProperty(drop, 'dataTransfer', {
+      value: { items: [{ kind: 'file', type: 'image/png' }], files: [], getData: () => '<b>x</b>' },
+    });
+    root.dispatchEvent(drop);
+    const over = new Event('dragover', { bubbles: true, cancelable: true });
+    c.view.dom.dispatchEvent(over);
+    expect(drop.defaultPrevented).toBe(true);
+    expect(over.defaultPrevented).toBe(true);
+    expect(hints).toEqual(['image']);
+    expect(c.flush()).toBe('one two\n');
+  });
+});
+
 describe('sentinel characters in the text (S6)', () => {
   it('keeps them as text and still reads real marks', async () => {
     const chars = SENTINEL_CANDIDATES.slice(0, 10).join('');
@@ -304,5 +384,18 @@ describe('sentinel characters in the text (S6)', () => {
     const out = c.flush()!;
     expect(out).toBe(`{++${ch}x++}abc\n`);
     expect(parseCritic(out).filter((s) => s.kind !== 'text')).toHaveLength(1);
+  });
+
+  it('keeps character references of sentinel candidates as text, beside real marks', async () => {
+    const md = '&#x2E00;x&#x2E01; &#x2E11; and {++real++} with {==hl==}{>>real note<<}\n';
+    const c = await open(md);
+    const dom = c.view.dom;
+    expect(dom.querySelectorAll('ins.critic-ins').length).toBe(1);
+    expect(dom.querySelector('ins.critic-ins')?.textContent).toBe('real');
+    const comments = dom.querySelectorAll('.critic-comment');
+    expect(comments.length).toBe(1);
+    expect(comments[0].getAttribute('aria-label')).toBe('Comment: real note');
+    expect(dom.textContent).toContain('\u2E00x\u2E01 \u2E11');
+    expect(c.flush()).toBe(md);
   });
 });

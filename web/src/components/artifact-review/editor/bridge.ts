@@ -37,7 +37,7 @@ import {
   tokenOf,
 } from '../../../utils/critic-sentinels.js';
 import type { SentinelAlphabet } from '../../../utils/critic-sentinels.js';
-import { COMMENT, CRITIC_MARK_NAMES, MARKS, markKeyOf } from './schema.js';
+import { COMMENT, CRITIC_MARK_NAMES, MARKS, markKeyOf, runKeyOf } from './schema.js';
 import type { MarkKey } from './schema.js';
 
 interface Edit {
@@ -177,7 +177,15 @@ interface Item {
   from: number;
   to: number;
   key: MarkKey | null;
+  /** runKeyOf: neighbours with the same key but different runs are separate marks. */
+  run: string | null;
   note?: string;
+}
+
+/** A run of the serializer's walk: the mark key and its run identity. */
+interface RunState {
+  key: MarkKey;
+  run: string;
 }
 
 /** Formatting marks two neighbours share (not code, not critic). */
@@ -208,10 +216,10 @@ export function docToSentinels(
     subNew: a.subClose,
     hl: a.hlClose,
   };
-  const transition = (from: MarkKey | null, to: MarkKey | null): string => {
-    if (from === to) return '';
-    if (from === 'subOld' && to === 'subNew') return a.subSep;
-    return (from ? closeS[from] : '') + (to ? openS[to] : '');
+  const transition = (from: RunState | null, to: RunState | null): string => {
+    if (from?.run === to?.run) return '';
+    if (from?.key === 'subOld' && to?.key === 'subNew') return a.subSep;
+    return (from ? closeS[from.key] : '') + (to ? openS[to.key] : '');
   };
   const blocks: { end: number; items: Item[] }[] = [];
   doc.descendants((node, pos) => {
@@ -220,9 +228,14 @@ export function docToSentinels(
     node.forEach((child, off) => {
       const from = pos + 1 + off;
       if (child.type.name === COMMENT) {
-        items.push({ from, to: from + 1, key: null, note: String(child.attrs.note) });
+        items.push({ from, to: from + 1, key: null, run: null, note: String(child.attrs.note) });
       } else {
-        items.push({ from, to: from + child.nodeSize, key: markKeyOf(child.marks) });
+        items.push({
+          from,
+          to: from + child.nodeSize,
+          key: markKeyOf(child.marks),
+          run: runKeyOf(child.marks),
+        });
       }
     });
     blocks.push({ end: pos + 1 + node.content.size, items });
@@ -234,19 +247,22 @@ export function docToSentinels(
   };
   const notes: string[] = [];
   const comments: number[] = [];
-  let state: MarkKey | null = null;
+  let state: RunState | null = null;
+  const runOf = (it: Item | undefined): RunState | null =>
+    it?.key && it.run ? { key: it.key, run: it.run } : null;
   blocks.forEach((b, bi) => {
     for (const it of b.items) {
-      add(it.from, transition(state, it.key));
-      state = it.key;
+      const next = runOf(it);
+      add(it.from, transition(state, next));
+      state = next;
       if (it.note !== undefined) {
         comments.push(it.from);
         notes.push(it.note);
       }
     }
     // A run carries into the next block only if that block starts with it.
-    const next = blocks[bi + 1]?.items[0]?.key ?? null;
-    if (state !== null && next !== state) {
+    const next = runOf(blocks[bi + 1]?.items[0]);
+    if (state !== null && next?.run !== state.run) {
       add(b.end, transition(state, null));
       state = null;
     }

@@ -48,7 +48,10 @@ export class ReviewSession {
    */
   load(md: string): boolean {
     const { view, schema, parse, parseMd } = this.core;
-    const a = chooseAlphabet(md);
+    // The alphabet must be free in the source and in what the Markdown
+    // parser makes of it: character references (&#x2E00;) decode to
+    // candidate characters, which would otherwise read as sentinels.
+    const a = chooseAlphabet(`${md}\n${docStrings(parse(md))}`);
     if (!a) return false;
     const doc = loadDoc(md, parse, schema, a);
     const tr = view.state.tr.replaceWith(0, view.state.doc.content.size, doc.content);
@@ -93,8 +96,9 @@ export class ReviewSession {
     if (!a) return false;
     const md = saveDoc(unit, serialize, schema, a).replace(/\n+$/, '');
     if (clean(md) !== clean(src)) return false;
-    if (marksReadBack(unit, md) === null) return true;
-    return marksReadBack(schema.topNodeType.create(null, orig), src) !== null;
+    const plain = this.core.plain;
+    if (marksReadBack(unit, md, plain) === null) return true;
+    return marksReadBack(schema.topNodeType.create(null, orig), src, plain) !== null;
   }
 
   /** Records that the document changed after load. */

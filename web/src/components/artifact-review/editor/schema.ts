@@ -62,6 +62,9 @@ function criticMark(key: MarkKey): ReturnType<typeof $markSchema> {
     // Marks do not nest: a span of text carries at most one critic mark.
     excludes: 'critic',
     inclusive: false,
+    // mine: added in this editing session (not saved; marks read from the
+    // text are someone's earlier suggestions).
+    attrs: { mine: { default: false, validate: 'boolean' } },
     parseDOM: [],
     toDOM: () => [MARK_TAG[key], { class: cls, title: MARK_LABEL[key] }, 0],
     parseMarkdown: never,
@@ -106,6 +109,25 @@ export const commentNode = $nodeSchema(COMMENT, () => ({
 }));
 
 export const criticSchema = [insMark, delMark, subOldMark, subNewMark, hlMark, commentNode].flat();
+
+/** Whether the critic mark of a set of marks was added in this session. */
+export function isMine(marks: readonly Mark[]): boolean {
+  for (const m of marks) if (CRITIC_MARK_NAMES.has(m.type.name)) return m.attrs.mine === true;
+  return false;
+}
+
+/**
+ * The run identity of a node's critic mark: its key, plus whether it is
+ * this session's for insertions, deletions and highlights, so that a new
+ * suggestion next to an earlier one stays a separate mark. A replacement's
+ * two sides are always one unit.
+ */
+export function runKeyOf(marks: readonly Mark[]): string | null {
+  const k = markKeyOf(marks);
+  if (k === null) return null;
+  if (k === 'subOld' || k === 'subNew') return k;
+  return isMine(marks) ? `${k}:mine` : k;
+}
 
 /** The critic mark key of a set of marks, or null. */
 export function markKeyOf(marks: readonly Mark[]): MarkKey | null {

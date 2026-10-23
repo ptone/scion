@@ -32,7 +32,7 @@
 import type { Node } from '@milkdown/prose/model';
 
 import { parseCritic } from '../../../utils/critic.js';
-import { COMMENT, markKeyOf } from './schema.js';
+import { COMMENT, markKeyOf, runKeyOf } from './schema.js';
 import type { MarkKey } from './schema.js';
 
 /** The clean reading of a node: what the text is with every mark rejected. */
@@ -74,11 +74,15 @@ export function cleanUnchanged(before: Node, after: Node, from: number, to: numb
 }
 
 /** One mark as the document holds it and as parseCritic reads it. */
-export interface MarkReading {
+export interface MarkRun {
   kind: 'insertion' | 'deletion' | 'substitution' | 'highlight' | 'comment';
+  /** The mark's text (a replacement's old side); a comment's note. */
+  text: string;
+  /** A replacement's new side. */
+  next?: string;
 }
 
-const KIND_OF: Record<MarkKey, MarkReading['kind']> = {
+const KIND_OF: Record<MarkKey, MarkRun['kind']> = {
   ins: 'insertion',
   del: 'deletion',
   subOld: 'substitution',
@@ -86,26 +90,56 @@ const KIND_OF: Record<MarkKey, MarkReading['kind']> = {
   hl: 'highlight',
 };
 
-/** The sequence of mark kinds in a document, in order (a replacement once). */
-export function docMarkKinds(doc: Node): string[] {
-  const out: string[] = [];
-  let prev: MarkKey | null = null;
+/**
+ * The marks of a document in order, with their text (a replacement once,
+ * with both sides). Runs follow runKeyOf, as the serializer writes them.
+ */
+export function docMarkRuns(doc: Node): MarkRun[] {
+  const out: MarkRun[] = [];
+  let prev: string | null = null;
+  let cur: MarkRun | null = null;
+  let side: 'text' | 'next' = 'text';
   doc.descendants((n) => {
     if (n.type.name === COMMENT) {
-      out.push('comment');
+      out.push({ kind: 'comment', text: String(n.attrs.note) });
       prev = null;
+      cur = null;
       return false;
     }
-    if (n.isBlock) {
-      // A run that continues into the next block stays one mark.
-      return true;
-    }
+    if (n.isBlock) return true; // A run that continues into the next block stays one mark.
     const k = markKeyOf(n.marks);
-    if (k !== prev && k !== null && !(prev === 'subOld' && k === 'subNew')) out.push(KIND_OF[k]);
-    prev = k;
+    const run = runKeyOf(n.marks);
+    if (k === null || run === null) {
+      prev = null;
+      cur = null;
+      return false;
+    }
+    if (run !== prev) {
+      if (prev === 'subOld' && k === 'subNew' && cur) {
+        side = 'next';
+        cur.next = '';
+      } else {
+        cur = { kind: KIND_OF[k], text: '' };
+        side = 'text';
+        if (k === 'subOld' || k === 'subNew') cur.next = '';
+        if (k === 'subNew') side = 'next';
+        out.push(cur);
+      }
+    }
+    const t = n.isText ? (n.text ?? '') : '';
+    if (cur) {
+      if (side === 'next') cur.next = (cur.next ?? '') + t;
+      else cur.text += t;
+    }
+    prev = run;
     return false;
   });
   return out;
+}
+
+/** The sequence of mark kinds in a document, in order (a replacement once). */
+export function docMarkKinds(doc: Node): string[] {
+  return docMarkRuns(doc).map((r) => r.kind);
 }
 
 /** The sequence of mark kinds parseCritic reads in text. */
@@ -115,12 +149,44 @@ export function textMarkKinds(text: string): string[] {
     .map((s) => s.kind);
 }
 
+/** The marks parseCritic reads in text, their texts read by plain() (comments as written). */
+export function textMarkRuns(text: string, plain: (md: string) => string): MarkRun[] {
+  const out: MarkRun[] = [];
+  for (const s of parseCritic(text)) {
+    if (s.kind === 'text') continue;
+    if (s.kind === 'comment') out.push({ kind: 'comment', text: s.text });
+    else if (s.kind === 'substitution') {
+      out.push({ kind: 'substitution', text: plain(s.text), next: plain(s.next ?? '') });
+    } else out.push({ kind: s.kind, text: plain(s.text) });
+  }
+  return out;
+}
+
+const squash = (t: string): string => t.replace(/\s+/g, ' ').trim();
+
 /**
- * Whether the saved text reads back as the document's marks. Returns the
- * two sequences when they differ, for a diagnostic.
+ * Whether the saved text reads back as the document's marks: the same
+ * kinds in the same order and, when plain is given (it reads a mark's
+ * Markdown as the editor shows it), the same texts. Returns both readings
+ * when they differ, for a diagnostic.
  */
-export function marksReadBack(doc: Node, text: string): { doc: string[]; text: string[] } | null {
-  const d = docMarkKinds(doc);
-  const t = textMarkKinds(text);
-  return d.length === t.length && d.every((k, i) => k === t[i]) ? null : { doc: d, text: t };
+export function marksReadBack(
+  doc: Node,
+  text: string,
+  plain?: (md: string) => string
+): { doc: MarkRun[]; text: MarkRun[] } | null {
+  const d = docMarkRuns(doc);
+  const t = plain
+    ? textMarkRuns(text, plain)
+    : textMarkKinds(text).map((kind) => ({ kind, text: '' }) as MarkRun);
+  const same =
+    d.length === t.length &&
+    d.every((r, i) => {
+      const o = t[i];
+      if (r.kind !== o.kind) return false;
+      if (!plain) return true;
+      if (r.kind === 'comment') return r.text === o.text;
+      return squash(r.text) === squash(o.text) && squash(r.next ?? '') === squash(o.next ?? '');
+    });
+  return same ? null : { doc: d, text: t };
 }

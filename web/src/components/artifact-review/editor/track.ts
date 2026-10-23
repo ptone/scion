@@ -25,12 +25,13 @@
  * - deleted plain or highlighted text stays, marked as a deletion (or as a
  *   replacement's old side when the step also inserts text);
  * - deleted text of the reviewer's own pending insertion (or a
- *   replacement's new side, or a comment) really goes;
+ *   replacement's new side, or a comment, added in this session) really
+ *   goes; an earlier reviewer's is never removed by typing (refused);
  * - already deleted text is left alone;
  * - inserted text goes after the deleted range, marked as an insertion, or
  *   as a replacement's new side when it replaces text or continues one.
  *   Equal adjacent marks merge, so typing inside one's own suggestion
- *   extends it instead of nesting.
+ *   extends that suggestion; marks never nest.
  * - an edit inside an unmarked inline code span becomes a replacement of
  *   the whole span (old span, then new span), since a mark inside code
  *   would be read as literal text.
@@ -45,7 +46,7 @@ import type { EditorState, Transaction } from '@milkdown/prose/state';
 import { ReplaceStep, Transform } from '@milkdown/prose/transform';
 import type { EditorView } from '@milkdown/prose/view';
 
-import { COMMENT, CRITIC_MARK_NAMES, MARKS, markKeyOf } from './schema.js';
+import { COMMENT, CRITIC_MARK_NAMES, MARKS, isMine, markKeyOf } from './schema.js';
 
 /** Meta of transactions the tracker must not rewrite (its own, and commands'). */
 export const SKIP_TRACK = 'criticSkipTrack';
@@ -157,8 +158,8 @@ export function trackStep(
       .slice(run.from, from)
       .content.append(insFrag ?? Fragment.empty)
       .append(oldDoc.slice(to, run.to).content);
-    out.addMark(run.from, run.to, schema.marks[MARKS.subOld].create());
-    const subNew = schema.marks[MARKS.subNew].create();
+    out.addMark(run.from, run.to, schema.marks[MARKS.subOld].create({ mine: true }));
+    const subNew = schema.marks[MARKS.subNew].create({ mine: true });
     const nodes: Node[] = [];
     edited.forEach((n) => {
       if (n.isText) nodes.push(n.mark(subNew.addToSet(n.marks)));
@@ -169,29 +170,38 @@ export function trackStep(
     return { transform: out, head };
   }
 
-  // Classify the deleted range.
+  // Classify the deleted range. Only this session's own insertions and
+  // comments really go; an earlier suggestion or comment is not removed by
+  // typing (the edit is refused).
   const realDeletes: { from: number; to: number }[] = [];
   const toMark: { from: number; to: number }[] = [];
+  let foreign = false;
   oldDoc.nodesBetween(from, to, (node, pos) => {
     if (!node.isInline) return true;
     const a = Math.max(pos, from);
     const b = Math.min(pos + node.nodeSize, to);
     if (b <= a) return false;
     if (node.type.name === COMMENT) {
-      realDeletes.push({ from: a, to: b });
+      if (node.attrs.mine === true) realDeletes.push({ from: a, to: b });
+      else foreign = true;
       return false;
     }
     const k = markKeyOf(node.marks);
-    if (k === 'ins' || k === 'subNew') realDeletes.push({ from: a, to: b });
-    else if (k === null || k === 'hl') toMark.push({ from: a, to: b });
+    if (k === 'ins' || k === 'subNew') {
+      if (isMine(node.marks)) realDeletes.push({ from: a, to: b });
+      else foreign = true;
+    } else if (k === null || k === 'hl') {
+      toMark.push({ from: a, to: b });
+    }
     return false;
   });
+  if (foreign) return null;
 
   const replacing = !!insFrag && toMark.length > 0;
   const delType = schema.marks[replacing ? MARKS.subOld : MARKS.del];
   for (const r of toMark) {
     out.removeMark(r.from, r.to, schema.marks[MARKS.hl]);
-    out.addMark(r.from, r.to, delType.create());
+    out.addMark(r.from, r.to, delType.create({ mine: true }));
   }
 
   let insEnd = -1;
@@ -201,11 +211,14 @@ export function trackStep(
     if (replacing) {
       key = 'subNew';
     } else {
-      const before = $from.nodeBefore ? markKeyOf($from.nodeBefore.marks) : null;
-      const after = $to.nodeAfter ? markKeyOf($to.nodeAfter.marks) : null;
+      // Continue only this session's own replacement.
+      const own = (n: Node | null | undefined): string | null =>
+        n && isMine(n.marks) ? markKeyOf(n.marks) : null;
+      const before = own($from.nodeBefore);
+      const after = own($to.nodeAfter);
       if (before === 'subNew' || after === 'subNew' || before === 'subOld') key = 'subNew';
     }
-    const mark = schema.marks[MARKS[key]].create();
+    const mark = schema.marks[MARKS[key]].create({ mine: true });
     const nodes = stripCritic(insFrag, schema).map((n) => n.mark(mark.addToSet(n.marks)));
     const at = fwd().map(to);
     out.insert(at, nodes);
@@ -274,17 +287,20 @@ export function trackPlugin(): Plugin {
   });
 }
 
-/** The textblock around a position and where it starts. */
-interface BlockSnapshot {
-  pos: number;
-  node: Node;
+/** The state before a composition: the whole document and the textblock at the selection. */
+export interface CompositionSnapshot {
+  doc: Node;
+  /** The textblock at the selection and where it starts, or null when the selection is not in one. */
+  block: { pos: number; node: Node } | null;
 }
 
-/** The textblock at the selection, to compare with after a composition. */
-export function snapshotBlock(state: EditorState): BlockSnapshot | null {
+/** Snapshots the state before a composition, to compare with after it. */
+export function snapshotComposition(state: EditorState): CompositionSnapshot {
   const $from = state.selection.$from;
-  if (!$from.parent.isTextblock) return null;
-  return { pos: $from.before(), node: $from.parent };
+  return {
+    doc: state.doc,
+    block: $from.parent.isTextblock ? { pos: $from.before(), node: $from.parent } : null,
+  };
 }
 
 /**
@@ -292,31 +308,51 @@ export function snapshotBlock(state: EditorState): BlockSnapshot | null {
  * which neither the policy nor the tracker touches while it runs, records
  * the composed text as an insertion. check vets the result (the block's
  * container, and that it would save); it returns a refusal reason or null.
- * Returns null when the composition was recorded, or the reason it was
- * not ('generic' when the composition removed text); the block is then
- * restored to its state before the composition.
+ * Returns null when the composition was recorded (or changed nothing), or
+ * the reason it was not; the document is then restored to its state
+ * before the composition. The transaction carries the composition's id,
+ * so history groups it with the composition: one undo reverts both.
  */
 export function reconcileComposition(
   view: EditorView,
-  snap: BlockSnapshot,
+  snap: CompositionSnapshot,
+  compositionId: unknown,
   check: (doc: Node, blockPos: number) => string | null = () => null
 ): string | null {
   const state = view.state;
-  const now = state.doc.nodeAt(snap.pos);
-  if (!now || now.type !== snap.node.type) return 'generic';
-  const restore = (why: string): string => {
-    const tr = state.tr.replaceWith(
-      snap.pos + 1,
-      snap.pos + 1 + now.content.size,
-      snap.node.content
-    );
+  const tag = (tr: Transaction): Transaction => {
     tr.setMeta(SKIP_TRACK, true);
-    view.dispatch(tr);
+    if (compositionId !== undefined && compositionId !== null)
+      tr.setMeta('composition', compositionId);
+    return tr;
+  };
+  const restore = (why: string): string => {
+    const start = state.doc.content.findDiffStart(snap.doc.content);
+    const end = state.doc.content.findDiffEnd(snap.doc.content);
+    if (start !== null && end) {
+      const endNow = Math.max(end.a, start);
+      const endOld = Math.max(end.b, start);
+      view.dispatch(tag(state.tr.replace(start, endNow, snap.doc.slice(start, endOld))));
+    }
     return why;
   };
-  const start = now.content.findDiffStart(snap.node.content);
+  if (state.doc.eq(snap.doc)) return null;
+  const block = snap.block;
+  if (!block) return restore('generic');
+  const now = state.doc.nodeAt(block.pos);
+  if (!now || now.type !== block.node.type) return restore('generic');
+  // Everything outside the snapshot block must be unchanged.
+  const size = block.node.nodeSize;
+  const delta = now.nodeSize - size;
+  if (
+    !state.doc.slice(0, block.pos).eq(snap.doc.slice(0, block.pos)) ||
+    !state.doc.slice(block.pos + size + delta).eq(snap.doc.slice(block.pos + size))
+  ) {
+    return restore('generic');
+  }
+  const start = now.content.findDiffStart(block.node.content);
   if (start === null) return null;
-  const end = now.content.findDiffEnd(snap.node.content);
+  const end = now.content.findDiffEnd(block.node.content);
   if (!end) return null;
   let { a: endNow, b: endOld } = end;
   // findDiffEnd may overlap findDiffStart when text repeats.
@@ -328,21 +364,20 @@ export function reconcileComposition(
   // Only insertions are recorded in this version: a composition that
   // removed text (or replaced a selection) is undone.
   if (endOld > start) return restore('generic');
-  const base = snap.pos + 1;
+  const base = block.pos + 1;
   // Restore the block, then apply the composed text as one insertion.
-  const revert = state.tr.replaceWith(base, base + now.content.size, snap.node.content);
+  const revert = state.tr.replaceWith(base, base + now.content.size, block.node.content);
   const oldDoc = revert.doc;
   const step = new ReplaceStep(base + start, base + start, now.slice(start, endNow));
   const applied = step.apply(oldDoc);
   if (!applied.doc) return restore('generic');
   const t = trackStep(step, oldDoc, applied.doc, { empty: true, head: base + start });
   if (!t) return restore('generic');
-  const refused = check(t.transform.doc, snap.pos);
+  const refused = check(t.transform.doc, block.pos);
   if (refused) return restore(refused);
   revert.step(step);
-  for (const s of t.transform.steps) revert.step(s);
+  for (const st of t.transform.steps) revert.step(st);
   revert.setSelection(TextSelection.create(revert.doc, t.head));
-  revert.setMeta(SKIP_TRACK, true);
-  view.dispatch(revert);
+  view.dispatch(tag(revert));
   return null;
 }

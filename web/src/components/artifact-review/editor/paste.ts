@@ -82,7 +82,71 @@ export function pasteContent(
   return { content: Fragment.from(nodes) };
 }
 
-/** The paste and drop plugin. */
+/** Inserts what a paste carries (its text only), or refuses it with a hint. */
+export function pasteInto(
+  view: EditorView,
+  data: DataTransfer | null,
+  parse: (md: string) => Node,
+  onRefuse: (hint: HintKind) => void
+): void {
+  if (hasImageFile(data)) {
+    onRefuse('image');
+    return;
+  }
+  const read = pasteContent(clipboardText(data), parse);
+  if ('refuse' in read) {
+    onRefuse(read.refuse);
+    return;
+  }
+  if (read.content.size === 0) return;
+  const { from, to } = view.state.selection;
+  const tr = view.state.tr.replace(from, to, new Slice(read.content, 0, 0));
+  view.dispatch(tr.scrollIntoView());
+}
+
+/**
+ * Takes over paste, drop and drag on the element around the editor, in the
+ * capture phase, so neither ProseMirror's own paths (some of which skip
+ * the plugin props, for example while composing, or for a drop with no
+ * position) nor the browser's default insertion ever see them. Returns a
+ * function that removes the listeners.
+ */
+export function guardTransfers(
+  root: HTMLElement,
+  view: () => EditorView,
+  parse: (md: string) => Node,
+  onRefuse: (hint: HintKind) => void
+): () => void {
+  const onPaste = (e: Event): void => {
+    e.preventDefault();
+    e.stopPropagation();
+    pasteInto(view(), (e as ClipboardEvent).clipboardData, parse, onRefuse);
+  };
+  const onDrop = (e: Event): void => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (hasImageFile((e as DragEvent).dataTransfer)) onRefuse('image');
+  };
+  const onDrag = (e: Event): void => {
+    e.preventDefault();
+    e.stopPropagation();
+    const dt = (e as DragEvent).dataTransfer;
+    if (dt) dt.dropEffect = 'none';
+  };
+  const events: [string, (e: Event) => void][] = [
+    ['paste', onPaste],
+    ['drop', onDrop],
+    ['dragover', onDrag],
+    ['dragenter', onDrag],
+    ['dragstart', onDrag],
+  ];
+  for (const [name, fn] of events) root.addEventListener(name, fn, true);
+  return (): void => {
+    for (const [name, fn] of events) root.removeEventListener(name, fn, true);
+  };
+}
+
+/** The paste and drop plugin (behind guardTransfers, which normally handles both). */
 export function pastePlugin(
   parse: (md: string) => Node,
   onRefuse: (hint: HintKind) => void
@@ -91,20 +155,7 @@ export function pastePlugin(
     key: pasteKey,
     props: {
       handlePaste(view: EditorView, event: ClipboardEvent): boolean {
-        const data = event.clipboardData;
-        if (hasImageFile(data)) {
-          onRefuse('image');
-          return true;
-        }
-        const read = pasteContent(clipboardText(data), parse);
-        if ('refuse' in read) {
-          onRefuse(read.refuse);
-          return true;
-        }
-        if (read.content.size === 0) return true;
-        const { from, to } = view.state.selection;
-        const tr = view.state.tr.replace(from, to, new Slice(read.content, 0, 0));
-        view.dispatch(tr.scrollIntoView());
+        pasteInto(view, event.clipboardData, parse, onRefuse);
         return true;
       },
       transformPastedHTML(): string {

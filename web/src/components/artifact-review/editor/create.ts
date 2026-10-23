@@ -54,6 +54,8 @@ export interface Core {
   schema: Schema;
   parse(md: string): Node;
   serialize(doc: Node): string;
+  /** The text a fragment of inline Markdown shows (marks compare by it). */
+  plain(md: string): string;
   parseMd(md: string): MdRoot;
   destroy(): Promise<void>;
 }
@@ -95,6 +97,9 @@ export async function createCore(opts: CoreOptions): Promise<Core> {
       schema: ctx.get(schemaCtx),
       parse: (md: string): Node => parser(md),
       serialize: (doc: Node): string => serializer(doc),
+      // A leading word keeps line-start syntax (list markers, headings,
+      // quotes) inline, as it is inside a mark.
+      plain: (md: string): string => parser(`a ${md}`).textContent.slice(2),
       parseMd: (md: string): MdRoot => remark.runSync(remark.parse(md), md) as unknown as MdRoot,
       destroy: async (): Promise<void> => {
         await editor.destroy();

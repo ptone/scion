@@ -22,21 +22,23 @@
 
 import { keymap } from '@milkdown/prose/keymap';
 import type { Node } from '@milkdown/prose/model';
-import { NodeSelection, Plugin, TextSelection } from '@milkdown/prose/state';
+import { NodeSelection, Plugin, PluginKey, TextSelection } from '@milkdown/prose/state';
+import type { Transaction } from '@milkdown/prose/state';
 import type { EditorView } from '@milkdown/prose/view';
 
 import { artifactLinkTarget } from '../../../client/artifact-preview.js';
 import { createCore } from './create.js';
 import type { Core } from './create.js';
 import { marksReadBack } from './guard.js';
-import { pastePlugin } from './paste.js';
+import { guardTransfers, pastePlugin } from './paste.js';
 import { containerClass, policyPlugin } from './policy.js';
 import type { HintKind } from './policy.js';
 import { addComment, commentNumber, editComment, planComment, selectedComment } from './review.js';
 import type { RenderContext } from './safe-render.js';
 import { COMMENT } from './schema.js';
 import { ReviewSession } from './session.js';
-import { reconcileComposition, snapshotBlock, trackPlugin } from './track.js';
+import { reconcileComposition, snapshotComposition, trackPlugin } from './track.js';
+import type { CompositionSnapshot } from './track.js';
 
 /** What the note dialog is asked to show. */
 export interface NoteRequest {
@@ -97,6 +99,9 @@ export class ReviewController {
   private core!: Core;
   private session!: ReviewSession;
   private loading = false;
+  private readonly uiKey = new PluginKey<unknown>('criticUi');
+  private composing: CompositionSnapshot | null = null;
+  private unguard: () => void = () => {};
 
   private constructor(private readonly opts: ControllerOptions) {}
 
@@ -146,11 +151,12 @@ export class ReviewController {
     });
     parse = this.core.parse;
     this.session = new ReviewSession(this.core);
+    this.unguard = guardTransfers(opts.root, () => this.core.view, this.core.parse, onRefuse);
   }
 
   private uiPlugin(): Plugin {
-    let snap: ReturnType<typeof snapshotBlock> = null;
     return new Plugin({
+      key: this.uiKey,
       props: {
         // Shortcuts act on the selection the reviewer sees, even if the
         // browser has not reported its latest move yet.
@@ -184,28 +190,21 @@ export class ReviewController {
           return false;
         },
         handleDOMEvents: {
-          compositionstart: (view): boolean => {
-            snap = snapshotBlock(view.state);
+          compositionstart: (): boolean => {
+            this.beginComposition();
             return false;
           },
-          compositionend: (view): boolean => {
-            const s = snap;
-            snap = null;
-            if (!s) return false;
+          compositionend: (): boolean => {
             // After ProseMirror has applied the composition's last change.
-            setTimeout(() => {
-              const refused = reconcileComposition(view, s, (doc, pos) => {
-                const container = containerClass(view.state.doc.resolve(pos + 1));
-                if (container === 'code') return 'code';
-                if (container) return 'list-table';
-                const i = doc.resolve(pos).index(0);
-                return this.session.unitOk(doc, i, i) ? null : 'generic';
-              });
-              if (refused) this.opts.onHint(refused as HintKind);
-            }, 0);
+            setTimeout(() => this.endComposition(), 0);
             return false;
           },
         },
+      },
+      state: {
+        init: (): unknown => undefined,
+        // The id of the latest composition transaction, for endComposition.
+        apply: (tr, value): unknown => tr.getMeta('composition') ?? value,
       },
       view: () => ({
         update: (view, prev): void => {
@@ -215,6 +214,31 @@ export class ReviewController {
         },
       }),
     });
+  }
+
+  /** Snapshots the document as a composition starts. */
+  beginComposition(): void {
+    this.composing = snapshotComposition(this.core.view.state);
+  }
+
+  /**
+   * Records the finished composition as an insertion, or restores the
+   * document from before it (with a hint) when it cannot be recorded.
+   */
+  endComposition(): void {
+    const snap = this.composing;
+    this.composing = null;
+    if (!snap) return;
+    const view = this.core.view;
+    const id: unknown = this.uiKey.getState(view.state);
+    const refused = reconcileComposition(view, snap, id, (doc, pos) => {
+      const container = containerClass(view.state.doc.resolve(pos + 1));
+      if (container === 'code') return 'code';
+      if (container) return 'list-table';
+      const i = doc.resolve(pos).index(0);
+      return this.session.unitOk(doc, i, i) ? null : 'generic';
+    });
+    if (refused) this.opts.onHint(refused as HintKind);
   }
 
   /** Opens md; false when it cannot be shown in this editor. */
@@ -235,7 +259,7 @@ export class ReviewController {
   flush(): string | null {
     const text = this.session.save();
     if (text !== null && this.session.isDirty) {
-      const diff = marksReadBack(this.core.view.state.doc, text);
+      const diff = marksReadBack(this.core.view.state.doc, text, this.core.plain);
       if (diff) console.error('review editor: saved marks read back differently', diff);
     }
     return text;
@@ -290,14 +314,22 @@ export class ReviewController {
     // The document may have changed while the dialog was open.
     const again = planComment(view.state);
     if ('refuse' in again) return;
-    view.dispatch(addComment(view.state, again, note));
+    this.dispatchChecked(addComment(view.state, again, note), again.at);
   }
 
-  /** Edit the note of the comment at pos (Enter, double-click). */
+  /**
+   * Edit the note of this session's comment at pos (Enter, double-click).
+   * Comments already in the text are not edited here.
+   */
   async editNote(pos: number): Promise<void> {
     const view = this.core.view;
     const node = view.state.doc.nodeAt(pos);
     if (node?.type.name !== COMMENT) return;
+    if (node.attrs.mine !== true) {
+      this.opts.onHint('generic');
+      return;
+    }
+    const docBefore = view.state.doc;
     const number = commentNumber(view.state, pos);
     const note = await this.opts.askNote({
       note: String(node.attrs.note),
@@ -307,8 +339,26 @@ export class ReviewController {
     });
     view.focus();
     if (note === null) return;
+    // The document may have changed while the dialog was open: the comment
+    // must still be at pos, unchanged.
+    if (view.state.doc !== docBefore && view.state.doc.nodeAt(pos) !== node) return;
     const tr = editComment(view.state, pos, note);
-    if (tr) view.dispatch(tr);
+    if (tr) this.dispatchChecked(tr, pos);
+  }
+
+  /**
+   * Dispatches a comment command unless its save would change text outside
+   * marks or misread the marks (the same check as for typed edits); then
+   * it shows the generic hint instead.
+   */
+  private dispatchChecked(tr: Transaction, pos: number): void {
+    const view = this.core.view;
+    const i = view.state.doc.resolve(Math.min(pos, view.state.doc.content.size)).index(0);
+    if (!this.session.unitOk(tr.doc, i, i)) {
+      this.opts.onHint('generic');
+      return;
+    }
+    view.dispatch(tr);
   }
 
   /** "After “…text.”": where a comment without highlight sits. */
@@ -325,6 +375,7 @@ export class ReviewController {
   }
 
   async destroy(): Promise<void> {
+    this.unguard();
     await this.core.destroy();
   }
 }
