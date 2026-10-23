@@ -248,7 +248,7 @@ var messagingOperations = []OperationSpec{
 	{
 		ID:          "inbox.conversation.defaultagent.set",
 		Domain:      "inbox",
-		Description: "Set the default agent of a group conversation. Needs project:read on the conversation's project; a token also needs inbox:write for it",
+		Description: "Set the default agent of a group conversation. Needs project:read on the conversation's project; a token also needs inbox:write for it. A user on a project conversation then needs the set_default_agent action of chat-thread-access (project.chat_post on the account; 403 chat_post_denied with details.chat_action set_default_agent and reason read_only without it), decided before the body is read; agents and groups with no project are not decided by it",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/conversations/{id}/default-agent", Method: "PUT"},
 		},
@@ -262,13 +262,14 @@ var messagingOperations = []OperationSpec{
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestConversationCreateToken_RequiresInboxWriteAndProjectRead"},
+			{Package: "pkg/hub", Function: "TestChatConversationDefaultAgent_RequiresSetDefaultAgentAction"},
 		},
 		Bearer: AdmitOn(BearerTargetConversationRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "inbox.conversation.participant.add",
 		Domain:      "inbox",
-		Description: "Add a participant to a group conversation. Every caller needs project:read on the conversation's project; an added agent must be in that project and an added user must be a member of it; a token also needs inbox:write for it. A caller who is not a participant or cannot read the group gets the unknown-conversation answer, and an agent of another project the unknown-agent answer",
+		Description: "Add a participant to a group conversation. Every caller needs project:read on the conversation's project; an added agent must be in that project and an added user must be a member of it; a token also needs inbox:write for it. A caller who is not a participant or cannot read the group gets the unknown-conversation answer, and an agent of another project the unknown-agent answer. A user on a project conversation then needs the add_participant action of chat-thread-access (project.chat_post on the account; 403 chat_post_denied with details.chat_action add_participant and reason read_only without it), decided before the body is read; agents and groups with no project are not decided by it",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/conversations/{id}/participants", Method: "POST"},
 		},
@@ -284,6 +285,7 @@ var messagingOperations = []OperationSpec{
 			{Package: "pkg/hub", Function: "TestConversationAddParticipant_RequiresProjectReadAndMemberPrincipals"},
 			{Package: "pkg/hub", Function: "TestConversationAddParticipant_UnreadableGroupMatchesUnknownConversation"},
 			{Package: "pkg/hub", Function: "TestConversationAddParticipant_AgentOfOtherProjectMatchesUnknownAgent"},
+			{Package: "pkg/hub", Function: "TestChatConversationAddParticipant_RequiresAddParticipantAction"},
 		},
 		Bearer: AdmitOn(BearerTargetConversationRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},

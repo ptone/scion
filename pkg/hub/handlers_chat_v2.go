@@ -853,6 +853,21 @@ func (s *Server) handleTopicPatch(w http.ResponseWriter, r *http.Request, topicI
 		return
 	}
 
+	// What the caller may do in the thread (chatThreadAccess): a name needs
+	// rename, a default agent set_default_agent. Decided before the body is
+	// validated, so a refused caller learns nothing about agents or names
+	// and nothing is changed.
+	var patchActions []string
+	if body.Name != nil {
+		patchActions = append(patchActions, ChatActionRename)
+	}
+	if body.DefaultAgent != nil {
+		patchActions = append(patchActions, ChatActionSetDefaultAgent)
+	}
+	if len(patchActions) > 0 && !s.requireChatThreadAction(w, r, user, chatThreadRef{Key: topicID, Project: project}, "Thread", patchActions...) {
+		return
+	}
+
 	updates := TopicUpdate{}
 
 	if body.Name != nil {
@@ -958,6 +973,10 @@ func (s *Server) handleTopicDelete(w http.ResponseWriter, r *http.Request, topic
 		return
 	}
 	if !s.authorizeChatTokenProject(w, r, token, permInboxWrite, project.ID, chatRefuseForbidden) {
+		return
+	}
+	// Deleting the thread is its delete action (chatThreadAccess).
+	if !s.requireChatThreadAction(w, r, user, chatThreadRef{Key: topicID, Project: project}, "Thread", ChatActionDelete) {
 		return
 	}
 
@@ -2761,6 +2780,11 @@ func (s *Server) handleMessageEdit(w http.ResponseWriter, r *http.Request, key, 
 		return
 	}
 
+	// Then what the caller may do in a topic (edit_own, chatThreadAccess).
+	if !s.requireChatMessageAction(w, r, user, wcs, key, ChatActionEditOwn) {
+		return
+	}
+
 	// Check no agent has replied after this message.
 	if hasAgentReplyAfter(ctx, s.store, key, msg.CreatedAt) {
 		writeError(w, http.StatusConflict, "AGENT_REPLIED", "Cannot edit: an agent has replied after this message", nil)
@@ -2875,6 +2899,11 @@ func (s *Server) handleMessageDelete(w http.ResponseWriter, r *http.Request, key
 
 	// A token is re-checked against the conversation the message is in.
 	if !s.authorizeChatTokenMessageTarget(w, r, token, wcs, key) {
+		return
+	}
+
+	// Then what the caller may do in a topic (delete_own, chatThreadAccess).
+	if !s.requireChatMessageAction(w, r, user, wcs, key, ChatActionDeleteOwn) {
 		return
 	}
 

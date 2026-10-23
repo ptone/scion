@@ -882,16 +882,22 @@ func (s *Server) handleSetDefaultAgent(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
-	// Authorization: project membership is the gate (design doc §3.2),
-	// matching the web topic PATCH, which any project member may call. The
-	// separate check that the AGENT BEING SET belongs to conv's project
-	// (below) is unrelated and unchanged.
+	// Authorization: read access to the conversation's project first
+	// (design doc §3.2); a user then needs set_default_agent in the
+	// conversation (chatThreadAccess, below), as for the web topic PATCH.
+	// The separate check that the AGENT BEING SET belongs to conv's project
+	// (further below) is unrelated and unchanged.
 	if !s.authorizeGroupConversationAccess(w, r, conv, ActionRead) {
 		return
 	}
 	// A token also needs inbox:write for the conversation's project; a
 	// group with no project needs a hub boundary.
 	if cls == inboxCredentialToken && !s.authorizeTokenConversation(w, r, token, permInboxWrite, conv) {
+		return
+	}
+	// A user then needs set_default_agent in the conversation
+	// (chatThreadAccess), before the body is read.
+	if !s.requireChatConversationAction(w, r, conv, ChatActionSetDefaultAgent) {
 		return
 	}
 
@@ -1045,6 +1051,11 @@ func (s *Server) handleAddParticipant(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 	if !s.authorizeGroupConversationReadAsNotFound(w, r, conv) {
+		return
+	}
+	// A user then needs add_participant in the conversation
+	// (chatThreadAccess).
+	if !s.requireChatConversationAction(w, r, conv, ChatActionAddParticipant) {
 		return
 	}
 

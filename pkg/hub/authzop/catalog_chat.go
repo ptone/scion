@@ -231,7 +231,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.topic.update",
 		Domain:      "chat",
-		Description: "Rename a chat thread or set its default agent. Needs project:read on the thread's project; a token also needs inbox:write for it",
+		Description: "Rename a chat thread or set its default agent. Needs project:read on the thread's project; a token also needs inbox:write for it. Then chat-thread-access decides, before the body is validated: a name needs the rename action and a default agent the set_default_agent action (project.chat_post on the account); a reader without them gets 403 chat_post_denied with details.chat_action and reason read_only, and nothing changes",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/topics/{id}", Method: "PATCH"},
 		},
@@ -245,13 +245,15 @@ var chatOperations = []OperationSpec{
 		DenialCodes:      []DenialCode{DenialForbidden, DenialResourceNotFound},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestChatWriteToken_RequiresInboxWrite"},
+			{Package: "pkg/hub", Function: "TestChatTopicRename_RequiresRenameAction"},
+			{Package: "pkg/hub", Function: "TestChatTopicDefaultAgent_RequiresSetDefaultAgentAction"},
 		},
 		Bearer: AdmitOn(BearerTargetConversationRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "chat.topic.delete",
 		Domain:      "chat",
-		Description: "Delete a chat thread (soft delete; the last thread of a space stays). Needs project:read on the thread's project; a token also needs inbox:write for it",
+		Description: "Delete a chat thread (soft delete; the last thread of a space stays). Needs project:read on the thread's project; a token also needs inbox:write for it. Then the delete action of chat-thread-access (project.chat_post on the account); a reader without it gets 403 chat_post_denied with details.chat_action delete and reason read_only, and the thread stays",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/topics/{id}", Method: "DELETE"},
 		},
@@ -265,6 +267,7 @@ var chatOperations = []OperationSpec{
 		DenialCodes:      []DenialCode{DenialForbidden, DenialResourceNotFound},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestChatWriteToken_RequiresInboxWrite"},
+			{Package: "pkg/hub", Function: "TestChatTopicDelete_RequiresDeleteAction"},
 		},
 		Bearer: AdmitOn(BearerTargetConversationRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
@@ -401,7 +404,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.message.edit",
 		Domain:      "chat",
-		Description: "Edit one of the caller's chat messages. Only the author edits, and only before an agent replies. A token needs inbox:write, and the message's conversation is re-checked: project:read for a thread, the DM rule for a DM",
+		Description: "Edit one of the caller's chat messages. Only the author edits, and only before an agent replies. A token needs inbox:write, and the message's conversation is re-checked: project:read for a thread, the DM rule for a DM. A thread message then needs the edit_own action of chat-thread-access (project.chat_post on the account; 403 chat_post_denied with details.chat_action edit_own and reason read_only without it); a DM message is not decided by it",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/conversations/{id}/messages/{messageId}", Method: "PUT"},
 		},
@@ -415,13 +418,14 @@ var chatOperations = []OperationSpec{
 		DenialCodes:      []DenialCode{DenialForbidden, DenialResourceNotFound},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestChatMessageEdit_RechecksTargetConversation"},
+			{Package: "pkg/hub", Function: "TestChatMessageEdit_RequiresEditOwnAction"},
 		},
 		Bearer: AdmitOn(BearerTargetConversationRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "chat.message.delete",
 		Domain:      "chat",
-		Description: "Delete one of the caller's chat messages (soft delete). Only the author deletes, and only before an agent replies. A token needs inbox:write, and the message's conversation is re-checked: project:read for a thread, the DM rule for a DM",
+		Description: "Delete one of the caller's chat messages (soft delete). Only the author deletes, and only before an agent replies. A token needs inbox:write, and the message's conversation is re-checked: project:read for a thread, the DM rule for a DM. A thread message then needs the delete_own action of chat-thread-access, which every reader of the thread holds (a token without inbox:write for the project does not); a DM message is not decided by it",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/conversations/{id}/messages/{messageId}", Method: "DELETE"},
 		},
@@ -435,6 +439,7 @@ var chatOperations = []OperationSpec{
 		DenialCodes:      []DenialCode{DenialForbidden, DenialResourceNotFound},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestChatMessageEdit_RechecksTargetConversation"},
+			{Package: "pkg/hub", Function: "TestChatMessageDelete_DeleteOwnAction"},
 		},
 		Bearer: AdmitOn(BearerTargetConversationRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
