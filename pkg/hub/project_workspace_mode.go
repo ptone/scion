@@ -282,6 +282,15 @@ func (s *Server) remoteBrokerWorkspaceRefusal(ctx context.Context, project *stor
 	const tail = "; use a co-located runtime broker, configure shared workspace storage (nfs) on the hub and the broker, " +
 		"or use a per-agent workspace mode (clone-per-agent)"
 	if !s.workspaceBackendShared() {
+		// Carve-out (fs-cleanup-arch Q4 boundary): a non-git project on a
+		// local-backend hub keeps its workspace on the remote broker, which
+		// populates it from the CLI workspace bootstrap and `scion sync
+		// to`; the broker uses its own project directory. Only a
+		// shared-workspace git project, whose workspace the hub holds, is
+		// refused.
+		if project.GitRemote == "" {
+			return "", false
+		}
 		return "this project's shared workspace lives on the hub's local disk, which a remote runtime broker cannot reach" + tail, true
 	}
 	hubBackend := s.config.WorkspaceStorageConfig.Backend

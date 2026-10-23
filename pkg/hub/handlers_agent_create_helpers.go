@@ -333,13 +333,16 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 				if errors.Is(err, errWorkspaceStorageUnavailable) {
 					return err
 				}
-			case resolved.Backend.Shared() && agent.RuntimeBrokerID != "" && !s.isEmbeddedBroker(agent.RuntimeBrokerID):
-				// A remote broker on the hub's shared storage resolves the
-				// project workspace through its own mount of the share
-				// (its workspace backend places the agent on the
-				// project's leaf). The hub's mount path need not exist on
-				// that broker, so it is not recorded; later dispatches
-				// are built from this row.
+			case s.remoteBrokerWithoutProjectPath(ctx, project, agent.RuntimeBrokerID):
+				// A remote broker with no local path for the project
+				// resolves the workspace itself: on the hub's shared
+				// storage through its own mount of the share (its
+				// workspace backend places the agent on the project's
+				// leaf); for a non-git project on a local-backend hub in
+				// its own project directory, populated by the CLI
+				// workspace bootstrap (the T6 carve-out). The hub's path
+				// need not exist on that broker, so it is not recorded;
+				// later dispatches are built from this row.
 			default:
 				// On a shared backend the workspace leaf is created here
 				// if missing (the same O_NOFOLLOW EnsureLeaf the brokers
@@ -372,6 +375,16 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 
 	s.resolveDerivedConfig(ctx, agent, project, resolvedTemplate)
 	return nil
+}
+
+// remoteBrokerWithoutProjectPath reports whether brokerID names a remote
+// (non-embedded) runtime broker that has no local path for project.
+func (s *Server) remoteBrokerWithoutProjectPath(ctx context.Context, project *store.Project, brokerID string) bool {
+	if brokerID == "" || s.isEmbeddedBroker(brokerID) {
+		return false
+	}
+	provider, err := s.store.GetProjectProvider(ctx, project.ID, brokerID)
+	return err != nil || provider.LocalPath == ""
 }
 
 // projectCloneSource returns the URL and branch to clone a git-anchored

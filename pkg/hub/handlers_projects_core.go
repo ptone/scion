@@ -35,8 +35,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
+	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
@@ -1211,6 +1213,114 @@ func (s *Server) writeHubConnectionSettings(project *store.Project, scionDir str
 	}
 }
 
+// provisionSharedWorkspace provisions a shared-workspace git project's
+// workspace on a shared backend through provision.ProvisionShared with the
+// Kubernetes init container's layout: the uuid workspace leaf
+// (Resolve(workspace)), shared-plain, the sentinel and lock in
+// <ProjectRoot>/provision (provision.ProjectStateDir), the legacy lock in
+// the workspace itself (so an older pod's lock still excludes this one),
+// uid/gid from the Layout, chown best-effort. The workspace leaf and the
+// provisioning state directory are created first through the confined
+// EnsureLeaf walk. The project's git token reaches only the clone command
+// (ProvisionInput.CloneToken). An existing sentinel means no clone.
+//
+// Errors returned to the caller carry no host path: a storage failure
+// wraps errWorkspaceStorageUnavailable, a clone failure is a *util.GitError
+// with fixed text and the classified kind (details are logged).
+func (s *Server) provisionSharedWorkspace(ctx context.Context, project *store.Project) error {
+	layout, err := s.workspaceLayout()
+	if err != nil {
+		return err
+	}
+	res, err := s.projectWorkspaceResolved(project)
+	if err != nil {
+		return err
+	}
+	storageErr := func(step string, err error) error {
+		s.projectsLogger().Warn("shared workspace provisioning: storage step failed",
+			"project_id", project.ID, "step", step, "error", err)
+		return fmt.Errorf("shared workspace provisioning: %w", errWorkspaceStorageUnavailable)
+	}
+	pr, err := layout.ProjectRoot(project.ID)
+	if err != nil {
+		return storageErr("project root", err)
+	}
+	base, err := res.ResolvedHostBase()
+	if err != nil {
+		return storageErr("host base", err)
+	}
+	// A project root this create made is removed again when provisioning
+	// fails, as the local backend removes its failed clone.
+	_, statErr := os.Lstat(filepath.Join(base, pr.RelPath))
+	createdRoot := errors.Is(statErr, fs.ErrNotExist)
+	cleanup := func() {
+		if !createdRoot {
+			return
+		}
+		if err := shareddirs.DeleteProjectTree(base, pr.SubPathRoot, project.ID); err != nil {
+			s.projectsLogger().Warn("shared workspace provisioning: could not remove the failed project tree",
+				"project_id", project.ID, "error", err)
+		}
+	}
+	root, err := res.Open(true)
+	if err != nil {
+		cleanup()
+		return storageErr("workspace leaf", err)
+	}
+	_ = root.Close()
+	fd, _, err := shareddirs.EnsureLeaf(base, filepath.Join(pr.RelPath, provision.ProvisionStateDirName))
+	if err != nil {
+		cleanup()
+		return storageErr("provisioning state directory", err)
+	}
+	if err := shareddirs.CloseFd(fd); err != nil {
+		cleanup()
+		return storageErr("provisioning state directory", err)
+	}
+	stateDir := filepath.Join(pr.HostPath, provision.ProvisionStateDirName)
+	if err := provision.PrepareStateDir(stateDir, provision.DefaultOwnerID(layout.UID), provision.DefaultOwnerID(layout.GID), false); err != nil {
+		cleanup()
+		return storageErr("provisioning state directory", err)
+	}
+
+	err = provision.ProvisionShared(provision.ProvisionInput{
+		Ctx:         ctx,
+		Resolved:    provision.ResolvedWorkspace{HostPath: res.HostPath},
+		ProjectID:   project.ID,
+		Mode:        store.SharingModeSharedPlain,
+		GitClone:    sharedWorkspaceCloneConfig(project),
+		CloneToken:  s.resolveCloneToken(ctx, project),
+		NFSUID:      layout.UID,
+		NFSGID:      layout.GID,
+		SentinelDir: stateDir,
+		LegacyDir:   res.HostPath,
+	})
+	if err != nil {
+		s.projectsLogger().Warn("shared workspace provisioning failed",
+			"project_id", project.ID, "error", err.Error())
+		cleanup()
+		return sharedWorkspaceCloneError(err)
+	}
+	return nil
+}
+
+// sharedWorkspaceCloneError maps a provisioning failure to a *util.GitError
+// with the classified kind and fixed text (no host path, no git output), so
+// the create handler keeps its status mapping and guidance.
+func sharedWorkspaceCloneError(err error) error {
+	kind := util.ClassifyGitError(err.Error()).Kind
+	msg := "the repository could not be cloned into the shared workspace"
+	switch kind {
+	case util.GitErrAuth:
+		msg = "the repository did not accept the project's git credential, or it needs one"
+	case util.GitErrNotFound:
+		msg = "repository or branch not found (a private repository also reports this without access)"
+	case util.GitErrNetwork:
+		msg = "the repository could not be reached"
+	}
+	return &util.GitError{Kind: kind, Message: msg}
+}
+
 // updateSharedProjectSlugFile rewrites <ProjectRoot>/.scion/project-slug
 // with newSlug when that directory exists (it is created at project create
 // or by the storage migration; a rename never creates it). Best-effort:
@@ -1246,13 +1356,17 @@ func (s *Server) updateSharedProjectSlugFile(project *store.Project, newSlug str
 // project structure on top; if the clone fails, the workspace directory is
 // cleaned up and an error is returned (unchanged).
 //
-// On a shared backend the hub does not clone: the workspace is the tree
-// agents mount, and it is provisioned (cloned, under the provisioning lock,
-// with its sentinel) by the first agent that starts, as for any shared
-// workspace. The hub only seeds the project configuration at
-// <ProjectRoot(uuid)>/.scion (design-v4 §P1a).
+// On a shared backend the hub provisions the uuid workspace agents mount
+// (provisionSharedWorkspace: the provisioning lock, the clone and the
+// sentinel, exactly as the Kubernetes init container does, so every broker
+// and pod then takes the reuse path) and seeds the project configuration
+// at <ProjectRoot(uuid)>/.scion (design-v7 §P1a). Nothing is seeded into
+// the workspace. fs-cleanup-arch ruling on ptone/scion#5813 rev-1 #1.
 func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store.Project) error {
 	if s.workspaceBackendShared() {
+		if err := s.provisionSharedWorkspace(ctx, project); err != nil {
+			return err
+		}
 		scionDir, err := s.ensureProjectConfigDir(project, false)
 		if err != nil {
 			return err

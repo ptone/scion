@@ -22,12 +22,14 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -354,28 +356,6 @@ func TestCreateProject_SharedBackendUnmounted_RollsBack(t *testing.T) {
 	}
 }
 
-// TestCreateSharedWorkspaceProject_SharedBackend_NoHubClone: on a shared
-// backend the hub does not clone a shared-workspace project into the tree
-// agents mount (the first agent provisions it under the provisioning lock);
-// it only seeds the project configuration at the project root.
-func TestCreateSharedWorkspaceProject_SharedBackend_NoHubClone(t *testing.T) {
-	f := newWorkspaceLayoutFixture(t)
-	f.useNFS()
-
-	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{
-		Name: "Shared Git NFS", GitRemote: "github.com/test/shared-git-nfs", WorkspaceMode: store.WorkspaceModeShared,
-	})
-	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
-	var project store.Project
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
-	require.True(t, project.IsSharedWorkspace(), "fixture check")
-
-	_, err := os.Stat(filepath.Join(f.shareBase, "projects", project.ID, "workspace"))
-	assert.True(t, os.IsNotExist(err), "the hub does not populate the shared workspace")
-	_, err = os.Stat(filepath.Join(f.shareBase, "projects", project.ID, ".scion", "settings.yaml"))
-	assert.NoError(t, err, "the project configuration is seeded at the project root")
-}
-
 // TestAlignClonedProjectIdentities_SharedBackendLeavesWorkspaceScion: on a
 // shared backend a .scion in the workspace is repository content (design-v7
 // §P1a rule 2); the hub's cloned-identity alignment does not run there and
@@ -492,4 +472,91 @@ func TestEnsureProjectConfigIdentities_LocalBackendUnaffected(t *testing.T) {
 	f.srv.checkProjectConfigIdentityHealth(checks)
 	_, ok := checks[projectConfigIdentityHealthKey]
 	assert.False(t, ok, "no identity check on the local backend")
+}
+
+// newSourceRepo makes a local git repository with one commit (README.md)
+// on branch main, usable as a project's clone-url label.
+func newSourceRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	run := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1",
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v: %s", args, out)
+	}
+	run("init", "-q", "-b", "main")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("hello\n"), 0o644))
+	run("add", "README.md")
+	run("-c", "commit.gpgsign=false", "commit", "-q", "-m", "init")
+	return dir
+}
+
+// TestCreateSharedWorkspaceProject_SharedBackend_HubProvisionsUUIDWorkspace
+// pins the fs-cleanup-arch ruling on rev-1 #1: on a shared backend the hub
+// provisions the uuid workspace at project create through
+// provision.ProvisionShared with the init container's layout (sentinel in
+// <ProjectRoot>/provision), so a Docker or co-located broker's first agent
+// finds a cloned workspace; nothing is seeded into the workspace; and an
+// existing sentinel means no second clone.
+func TestCreateSharedWorkspaceProject_SharedBackend_HubProvisionsUUIDWorkspace(t *testing.T) {
+	f := newWorkspaceLayoutFixture(t)
+	f.useNFS()
+	src := newSourceRepo(t)
+
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{
+		Name: "Shared Git NFS", GitRemote: "github.com/test/shared-git-nfs", WorkspaceMode: store.WorkspaceModeShared,
+		Labels: map[string]string{store.LabelCloneURL: src, store.LabelDefaultBranch: "main"},
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	var project store.Project
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
+	require.True(t, project.IsSharedWorkspace(), "fixture check")
+
+	projectRoot := filepath.Join(f.shareBase, "projects", project.ID)
+	ws := filepath.Join(projectRoot, "workspace")
+	assert.FileExists(t, filepath.Join(ws, "README.md"), "the hub cloned into the uuid workspace agents mount")
+	assert.DirExists(t, filepath.Join(ws, ".git"))
+	assert.FileExists(t, filepath.Join(projectRoot, provision.ProvisionStateDirName, provision.ProvisionSentinelFile),
+		"the sentinel is where the init container and brokers look, so they take the reuse path")
+	_, err := os.Stat(filepath.Join(ws, ".scion"))
+	assert.True(t, os.IsNotExist(err), "nothing is seeded into the workspace")
+	assert.FileExists(t, filepath.Join(projectRoot, ".scion", "settings.yaml"), "the project configuration is at the project root")
+
+	// The co-located (embedded) broker's first agent is given the
+	// provisioned workspace.
+	b := addProviderBroker(t, f.s, project.ID, "embedded")
+	f.srv.SetEmbeddedBrokerID(b.ID)
+	agent := &store.Agent{ID: "aaaaaaaa-0000-4000-8000-0000000000e1", ProjectID: project.ID, RuntimeBrokerID: b.ID, AppliedConfig: &store.AgentAppliedConfig{}}
+	require.NoError(t, f.srv.populateAgentConfig(context.Background(), agent, &project, nil))
+	assert.Equal(t, ws, agent.AppliedConfig.Workspace)
+
+	// An existing sentinel: provisioning again changes nothing (no re-clone).
+	require.NoError(t, os.Remove(filepath.Join(ws, "README.md")))
+	require.NoError(t, f.srv.provisionSharedWorkspace(context.Background(), &project))
+	_, err = os.Stat(filepath.Join(ws, "README.md"))
+	assert.True(t, os.IsNotExist(err), "a provisioned workspace is never cloned again")
+}
+
+// TestCreateSharedWorkspaceProject_SharedBackend_CloneFailureRollsBack: a
+// clone that fails rolls the create back with a fixed-text error (no host
+// path) and removes the project tree the create made.
+func TestCreateSharedWorkspaceProject_SharedBackend_CloneFailureRollsBack(t *testing.T) {
+	f := newWorkspaceLayoutFixture(t)
+	f.useNFS()
+	missing := filepath.Join(t.TempDir(), "no-such-repo")
+
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{
+		Name: "Bad Clone NFS", GitRemote: "github.com/test/bad-clone-nfs", WorkspaceMode: store.WorkspaceModeShared,
+		Labels: map[string]string{store.LabelCloneURL: missing},
+	})
+	require.GreaterOrEqual(t, rec.Code, 400, "body: %s", rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), f.shareBase, "no host path in the error")
+	assert.NotContains(t, rec.Body.String(), missing, "no clone source path in the error")
+	entries, err := os.ReadDir(filepath.Join(f.shareBase, "projects"))
+	if err == nil {
+		assert.Empty(t, entries, "the failed create leaves no project tree")
+	}
 }
