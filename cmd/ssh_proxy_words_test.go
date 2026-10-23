@@ -81,9 +81,20 @@ func TestSSHWindowsForm_RefusesEndpointShellSpecialChars(t *testing.T) {
 	stubVSCode(t)
 	require.NoError(t, sshConfigMain(context.Background(), env, nil, true))
 	require.NoError(t, vscodeMain(context.Background(), env, "a/b-c", vscodeDefaultFolder, false))
+	setTestTempDir(t, testPrivateTempDir(t))
 	_, cleanup, err := prepareSSH(context.Background(), env, "a/b-c", nil)
 	require.NoError(t, err)
 	cleanup()
+}
+
+// setTestTempDir points TMPDIR, TMP and TEMP (os.TempDir on every OS) at
+// dir for the rest of the test.
+func setTestTempDir(t *testing.T, dir string) {
+	t.Helper()
+	for _, k := range []string{"TMPDIR", "TMP", "TEMP"} {
+		t.Setenv(k, dir)
+	}
+	require.Equal(t, filepath.Clean(dir), filepath.Clean(os.TempDir()))
 }
 
 // With the Windows form, a scion executable path with a character outside
@@ -274,11 +285,8 @@ func TestPrepareSSH_RefusalMakesNoTempDir(t *testing.T) {
 	env, _, _ := newSSHTestEnv(t, t.TempDir(), hub)
 	badExe := filepath.Join(t.TempDir(), "a&b", "scion")
 	goodExe := testAbsExe(t)
-	tmp := t.TempDir()
-	for _, k := range []string{"TMPDIR", "TMP", "TEMP"} {
-		t.Setenv(k, tmp)
-	}
-	require.Equal(t, filepath.Clean(tmp), filepath.Clean(os.TempDir()))
+	tmp := testPrivateTempDir(t)
+	setTestTempDir(t, tmp)
 	entries := func() int {
 		des, err := os.ReadDir(tmp)
 		require.NoError(t, err)

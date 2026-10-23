@@ -61,3 +61,7 @@ Also fixed after the first Windows run: the new tests use a host-absolute scion 
   - Both refusal tests add the six runes, with the marks after a base letter. Other combining marks stay accepted; the control is `Jose` + U+0301.
 - **Nit.** The `checkVSCodeBatchArgs` doc comment is re-wrapped.
 - **Optional, adopted.** `TestPrepareSSH_RefusalMakesNoTempDir` asserts that the error names the refused character.
+
+## Windows CI follow-up (test-only)
+
+The success controls of `prepareSSH` in two new tests failed on windows-latest. The runner's TMP directory carries an inheritable CREATOR OWNER entry, which the private-file check correctly refuses for the per-run known-hosts directory. These controls now point TMP/TEMP at a private directory: `privateHome` on Windows (as in `TestSSHPrepare_SpaceInTempWindows`), and `t.TempDir` elsewhere. No product code changed.
