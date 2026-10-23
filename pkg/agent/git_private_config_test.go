@@ -16,6 +16,7 @@ package agent
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -37,7 +38,7 @@ func TestSeedPrivateGitConfig_RedactsAndWritesRegularFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dest, err := seedPrivateGitConfig(base, agentDir)
+	dest, err := seedPrivateGitConfig(base, agentDir, "agent-x")
 	if err != nil {
 		t.Fatalf("seedPrivateGitConfig: %v", err)
 	}
@@ -69,27 +70,27 @@ func TestSeedPrivateGitConfig_RedactsAndWritesRegularFile(t *testing.T) {
 
 // Re-seeding replaces any stale file, including a symlink an earlier run or the
 // agent could have left in the seed location: the result is always a fresh,
-// broker-written regular file (P2/P3).
+// broker-written regular file.
 func TestSeedPrivateGitConfig_ReplacesSymlink(t *testing.T) {
 	agentDir := t.TempDir()
 	base := filepath.Join(t.TempDir(), "config")
 	if err := os.WriteFile(base, []byte("[core]\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	// Plant a symlink where the seed will be written.
+	// Put a symlink where the seed will be written.
 	gitDir := filepath.Join(agentDir, "git")
 	if err := os.MkdirAll(gitDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	evil := filepath.Join(t.TempDir(), "evil")
-	if err := os.WriteFile(evil, []byte("owned"), 0644); err != nil {
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.WriteFile(outside, []byte("original"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(evil, filepath.Join(gitDir, "config")); err != nil {
+	if err := os.Symlink(outside, filepath.Join(gitDir, "config")); err != nil {
 		t.Fatal(err)
 	}
 
-	dest, err := seedPrivateGitConfig(base, agentDir)
+	dest, err := seedPrivateGitConfig(base, agentDir, "agent-x")
 	if err != nil {
 		t.Fatalf("seedPrivateGitConfig: %v", err)
 	}
@@ -98,21 +99,95 @@ func TestSeedPrivateGitConfig_ReplacesSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	if fi.Mode()&os.ModeSymlink != 0 {
-		t.Error("seed must replace a planted symlink with a regular file")
+		t.Error("seed must replace a pre-existing symlink with a regular file")
 	}
 	// The pointed-to file is untouched (rename replaced the link, did not follow it).
-	if b, _ := os.ReadFile(evil); string(b) != "owned" {
+	if b, _ := os.ReadFile(outside); string(b) != "original" {
 		t.Error("seeding followed the symlink and overwrote its target")
 	}
 }
 
-func TestSeedPrivateGitConfig_MissingBaseSeedsEmpty(t *testing.T) {
+func TestSeedPrivateGitConfig_MissingBaseSeedsUpstreamOnly(t *testing.T) {
 	agentDir := t.TempDir()
-	dest, err := seedPrivateGitConfig(filepath.Join(t.TempDir(), "nope"), agentDir)
+	dest, err := seedPrivateGitConfig(filepath.Join(t.TempDir(), "nope"), agentDir, "agent-x")
 	if err != nil {
 		t.Fatalf("seedPrivateGitConfig with a missing base should succeed, got: %v", err)
 	}
-	if b, err := os.ReadFile(dest); err != nil || len(b) != 0 {
-		t.Errorf("missing base should seed an empty config, got %q (err %v)", string(b), err)
+	b, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No base content, but the upstream + autoSetupRemote pre-seed is always present.
+	s := string(b)
+	if !strings.Contains(s, "autoSetupRemote = true") || !strings.Contains(s, `[branch "agent-x"]`) {
+		t.Errorf("missing base should still seed the upstream pre-seed, got %q", s)
+	}
+	if strings.Contains(s, "[core]") || strings.Contains(s, "[remote") {
+		t.Errorf("missing base must not invent base config, got %q", s)
+	}
+}
+
+// The pre-seeded branch upstream + push.autoSetupRemote must let `git push -u`
+// for the agent's own branch exit 0 WITHOUT writing the (read-only) repo config:
+// git finds the upstream already set and skips the write. This is the mitigation
+// that keeps normal push flows working while the repository config is read-only.
+func TestSeedPrivateGitConfig_PushUExitsZeroNoWrite(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(root, "gc"))
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+	t.Setenv("SCION_HOST_UID", "")
+	if err := os.WriteFile(filepath.Join(root, "gc"), []byte("[user]\n\temail=a@b.c\n\tname=A\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run := func(dir string, args ...string) {
+		t.Helper()
+		c := exec.Command("git", args...)
+		c.Dir = dir
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	// A base repo whose .git/config has an origin; seed the private copy for
+	// branch agent-x, then install it as the working repo's .git/config.
+	bare := filepath.Join(root, "bare.git")
+	run(root, "init", "-q", "--bare", bare)
+	repo := filepath.Join(root, "repo")
+	run(root, "init", "-q", "-b", "agent-x", repo)
+	run(repo, "remote", "add", "origin", bare)
+	agentDir := t.TempDir()
+	dest, err := seedPrivateGitConfig(filepath.Join(repo, ".git", "config"), agentDir, "agent-x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seeded, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(seeded), "autoSetupRemote") || !strings.Contains(string(seeded), `[branch "agent-x"]`) {
+		t.Fatalf("seed missing upstream/autoSetupRemote:\n%s", seeded)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".git", "config"), seeded, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "f.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(repo, "add", ".")
+	run(repo, "-c", "core.hooksPath="+os.DevNull, "commit", "-q", "-m", "x")
+
+	before, _ := os.ReadFile(filepath.Join(repo, ".git", "config"))
+	cmd := exec.Command("git", "push", "-u", "origin", "agent-x")
+	cmd.Dir = repo
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git push -u should exit 0 with the upstream pre-seeded, got: %v\n%s", err, out)
+	}
+	after, _ := os.ReadFile(filepath.Join(repo, ".git", "config"))
+	if string(before) != string(after) {
+		t.Errorf("push -u modified the repo config despite the pre-seeded upstream:\nbefore:\n%s\nafter:\n%s", before, after)
 	}
 }

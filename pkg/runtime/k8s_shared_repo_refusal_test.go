@@ -17,12 +17,13 @@ package runtime
 import (
 	"context"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// The exact neutral end-state message (D237). Hard-coded here (not referencing
+// The exact neutral end-state message. Hard-coded here (not referencing
 // the constant) so a change to the wording is caught by this test.
 const wantK8sRefusal = "Kubernetes does not support git projects that share one repository across agents " +
 	"(worktree-per-agent or shared-workspace on NFS). Re-create the agent as clone-per-agent, " +
@@ -73,7 +74,13 @@ func TestRun_RefusesSharedRepoShape(t *testing.T) {
 		for _, cfg := range []RunConfig{nfsWorktreeConfig("wt"), nfsBaseConfig("shared")} {
 			cfg.Resume = resume
 			r := newNFSTestK8sRuntime()
-			_, err := r.Run(context.Background(), cfg)
+			// The refusal is at the top of Run, before any pod wait. Bound the
+			// call with a short deadline so that if the refusal were ever skipped,
+			// the test fails fast instead of hanging on the fake pod until the
+			// package-level timeout.
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_, err := r.Run(ctx, cfg)
+			cancel()
 			if err == nil {
 				t.Fatalf("Run(resume=%v, %s) succeeded; want refusal", resume, cfg.Name)
 			}
@@ -100,7 +107,7 @@ func TestBuildPod_DoesNotRefuseSharedRepoShape(t *testing.T) {
 	}
 }
 
-// C4: the read-only admin subPath mounts for the agent container.
+// The read-only admin subPath mounts for the agent container.
 func TestK8sGitAdminReadOnlyMounts(t *testing.T) {
 	got := k8sGitAdminReadOnlyMounts("projects/p/workspace/.git", "agent-1")
 	want := []corev1.VolumeMount{

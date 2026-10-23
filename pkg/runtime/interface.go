@@ -93,15 +93,17 @@ type RunConfig struct {
 	// PrivateGitConfigSource is the host path to the per-agent private copy of
 	// the repository's .git/config, seeded by the broker into the agent's
 	// (broker-owned, agent-scoped) state dir. For git-backed worktree and
-	// shared-plain layouts on docker/podman/k8s it is bound as a single file,
-	// read-write, over the container's .git/config, so in-container git stays
-	// fully usable (push -u, git config --local) while writes never reach the
-	// host repository or sibling agents (E-X2 PR 2, P1). Immediately before the
-	// bind the source is re-checked (regular file, not a symlink, link count 1,
-	// broker-owned); a missing or unsafe source refuses the start (P2). The
-	// broker never reads this file back as configuration (P3). Empty when the
-	// layout does not use a private config (clone-per-agent, empty-per-agent,
-	// or the Apple read-only-.git layout, which cannot bind single files).
+	// shared-plain layouts on docker/podman it is bound as a single file,
+	// read-only, over the container's .git/config, so in-container git reads a
+	// credential-stripped config and never writes the host repository's or a
+	// sibling agent's config. The copy is pre-seeded with the agent's own branch
+	// upstream and push.autoSetupRemote so `git push` / `git push -u` succeed
+	// without a config write. Immediately before the bind the source is
+	// re-checked (regular file, not a symlink, link count 1, broker-owned); a
+	// missing or unsafe source refuses the start. The broker never reads this
+	// file back as configuration. Empty when the layout does not use a private
+	// config (clone-per-agent, empty-per-agent, or the Apple read-only-.git
+	// layout, which cannot bind single files).
 	PrivateGitConfigSource string
 
 	// RuntimeName is set by the calling runtime adapter (docker/podman/apple)

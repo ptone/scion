@@ -93,6 +93,68 @@ func TestRedactGitConfigSecrets(t *testing.T) {
 	}
 }
 
+// Covers the additional URL-valued keys and subsections: lfs.url / lfs.pushurl,
+// remote.*.lfsurl / lfspushurl, an http.<base> subsection, http.*.cookiefile,
+// and a URL-valued key whose value does not parse but carries userinfo.
+func TestRedactGitConfigSecrets_URLKeyCoverage(t *testing.T) {
+	in := strings.Join([]string{
+		"[lfs]",
+		"\turl = https://alice:s3cret@lfs.example/lfs",
+		"[lfs]",
+		"\tpushurl = https://alice:s3cret@lfs.example/push",
+		"[remote \"origin\"]",
+		"\tlfsurl = https://bob:pw@lfs.example/o/r",
+		"\tlfspushurl = https://bob:pw@lfs.example/o/push",
+		"[http \"https://carol:tok@host.example\"]",
+		"\tsslVerify = true",
+		"[http \"https://host.example\"]",
+		"\tcookiefile = /home/alice/.gitcookies",
+		"[remote \"weird\"]",
+		"\turl = ht!tp://dave:pw@broken.example/x",
+		"",
+	}, "\n")
+
+	out, stripped, err := RedactGitConfigSecrets([]byte(in))
+	if err != nil {
+		t.Fatalf("RedactGitConfigSecrets: %v", err)
+	}
+	outStr := string(out)
+
+	for _, bad := range []string{"s3cret", "bob:pw", "carol:tok", "dave:pw", ".gitcookies", "cookiefile"} {
+		if strings.Contains(outStr, bad) {
+			t.Errorf("redacted config still contains %q:\n%s", bad, outStr)
+		}
+	}
+	// The scrubbed LFS and http subsection URLs survive without userinfo.
+	for _, keep := range []string{"https://lfs.example/lfs", "https://lfs.example/o/r", "https://host.example"} {
+		if !strings.Contains(outStr, keep) {
+			t.Errorf("redacted config dropped expected scrubbed URL %q:\n%s", keep, outStr)
+		}
+	}
+	// The unparseable-with-userinfo key is dropped entirely.
+	if strings.Contains(outStr, "broken.example") {
+		t.Errorf("an unparseable URL value with userinfo must be dropped:\n%s", outStr)
+	}
+	for _, want := range []string{
+		"lfs.url", "lfs.pushurl", "remote.origin.lfsurl", "remote.origin.lfspushurl",
+		"http.https://host.example.cookiefile", "remote.weird.url",
+	} {
+		found := false
+		for _, s := range stripped {
+			if s == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected %q in stripped keys, got %v", want, stripped)
+		}
+	}
+	if _, err := parseGitConfigFile(out); err != nil {
+		t.Errorf("redacted config does not re-parse: %v\n%s", err, outStr)
+	}
+}
+
 func TestRedactGitConfigSecrets_ParseErrorFailsClosed(t *testing.T) {
 	if _, _, err := RedactGitConfigSecrets([]byte("[lfs\n\tbroken")); err == nil {
 		t.Error("an unparseable config should return an error (fail closed), got nil")

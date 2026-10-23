@@ -338,12 +338,20 @@ safe stops the command rather than being ignored.
 Your own git commands in your checkout are not affected. Scion also mounts the repository's git
 metadata into agents so that an agent cannot change what git does for you or for other agents: the
 hooks and admin directories (`.git/hooks`, `.git/info`, `.git/objects/info`, and other agents'
-worktree admin directories) are read-only, and each agent gets its own **private copy of
-`.git/config`**, bound read-write over the shared one. In-container git stays fully flexible —
-`git config --local`, `git push -u`, `branch --set-upstream-to` and the like all work inside the
-agent, and their writes land only in the agent's own copy, never in your checkout or another agent's.
-On the Apple runtime, which cannot bind a single private file, the agent's `.git` is read-only
-instead, so in-container `git config --local` and `git push -u` upstream recording do not persist.
+worktree admin directories) are read-only, and each agent gets its own **private, read-only copy of
+`.git/config`** in place of the shared one. The private copy has credential-bearing settings
+stripped and is pre-seeded so that `git push` and `git push -u origin <branch>` for the agent's own
+branch succeed without needing to write the config. Personal git preferences inside the agent go in
+the agent's own global git config, which is writable, not in the repository config. On the Apple
+runtime agents read the repository's git config directly; keep credentials out of repository git
+config (use a credential helper). The Apple runtime also mounts the whole `.git` read-only (only the
+agent's own worktree admin dir, objects, refs and logs are writable), so in-container operations that
+rewrite shared `.git` root files — `git pack-refs` / `git gc`, deleting a packed-only branch, or
+fetching into a shallow clone — do not work inside an Apple agent.
+
+This applies to the worktree-per-agent layout, where each agent has its own worktree. In the
+shared-workspace layout agents share one working tree and the `.git` root stays writable, so the
+cross-agent protection is limited to the read-only admin surface above.
 
 On Kubernetes, git projects that share one repository across agents (worktree-per-agent or
 shared-workspace on NFS) are not supported: use a clone-per-agent workspace, where each agent gets

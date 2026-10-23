@@ -312,6 +312,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 	if err := os.MkdirAll(repoWorktreeWorkspace, 0755); err != nil {
 		t.Fatal(err)
 	}
+	setupWorktreeAdmin(t, repoRoot, "test-agent", repoWorktreeWorkspace)
 
 	tests := []struct {
 		name    string
@@ -845,6 +846,7 @@ func TestBuildCommonRunArgs_HubNativeWorktreeWorkspace(t *testing.T) {
 	if err := os.MkdirAll(workspace, 0755); err != nil {
 		t.Fatal(err)
 	}
+	setupWorktreeAdmin(t, repoRoot, "agent-1", workspace)
 
 	_, err := buildCommonRunArgs(RunConfig{
 		Harness:                &harness.Generic{},
@@ -1268,7 +1270,7 @@ func TestWriteRuntimeDebugFile_NoSecretsInFile(t *testing.T) {
 }
 
 func TestOutsideRepoRootFallbackRefusedWhenNotRegisteredWorktree(t *testing.T) {
-	// E-X2 PR 2 (I-5): a workspace outside the repo root that is not a registered
+	// A workspace outside the repo root that is not a registered
 	// worktree of it is refused — the whole repo root is never mounted read-write
 	// any more (which previously required a /repo-root/.scion tmpfs shadow).
 	repoRoot := t.TempDir()
@@ -1282,10 +1284,10 @@ func TestOutsideRepoRootFallbackRefusedWhenNotRegisteredWorktree(t *testing.T) {
 		Workspace:    "/some/external/workspace", // outside repo root, unregistered
 	})
 	if err == nil {
-		t.Fatal("expected buildCommonRunArgs to refuse an unregistered outside-repo-root workspace (I-5), got nil")
+		t.Fatal("expected buildCommonRunArgs to refuse an unregistered outside-repo-root workspace, got nil")
 	}
-	if !strings.Contains(err.Error(), "I-5") {
-		t.Errorf("expected an I-5 refusal error, got: %v", err)
+	if !strings.Contains(err.Error(), "refusing to mount the whole repository") {
+		t.Errorf("expected an outside-repo-root refusal error, got: %v", err)
 	}
 }
 
@@ -1297,6 +1299,7 @@ func TestScionDirNotShadowedWhenWorkspaceInsideRepo(t *testing.T) {
 	if err := os.MkdirAll(workspace, 0755); err != nil {
 		t.Fatal(err)
 	}
+	setupWorktreeAdmin(t, repoRoot, "test", workspace)
 	args, err := buildCommonRunArgs(RunConfig{
 		Harness:                &harness.Generic{},
 		Name:                   "test-agent",
@@ -1350,12 +1353,33 @@ func setupHubManagedBaseRepo(t *testing.T, agentName string) (repoRoot, workspac
 	if err := os.MkdirAll(workspace, 0755); err != nil {
 		t.Fatalf("failed to create workspace: %v", err)
 	}
+	// The broker-trusted worktree-admin resolver reads the common dir's
+	// worktrees/<name>/gitdir back-link (not the agent-writable gitfile), so set
+	// up a matching admin dir pointing back at this workspace's .git.
+	setupWorktreeAdmin(t, repoRoot, agentName, workspace)
 	return repoRoot, workspace
+}
+
+// setupWorktreeAdmin creates .git/worktrees/<adminName>/gitdir (pointing at
+// <workspace>/.git) and the workspace's own .git gitfile, so trustedWorktreeAdminName
+// resolves <adminName> for <workspace>.
+func setupWorktreeAdmin(t *testing.T, repoRoot, adminName, workspace string) {
+	t.Helper()
+	admin := filepath.Join(repoRoot, ".git", "worktrees", adminName)
+	if err := os.MkdirAll(admin, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(admin, "gitdir"), []byte(filepath.Join(workspace, ".git")+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, ".git"), []byte("gitdir: "+admin+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // seedTestPrivateGitConfig writes a broker-owned, regular private-config file in
 // a temp dir and returns its path, for use as RunConfig.PrivateGitConfigSource in
-// worktree/shared-plain/fallback tests (E-X2 PR 2). Without it buildCommonRunArgs
+// worktree/shared-plain/fallback tests. Without it buildCommonRunArgs
 // refuses those layouts on the bind-mount runtimes.
 func seedTestPrivateGitConfig(t *testing.T) string {
 	t.Helper()
@@ -1408,26 +1432,23 @@ func TestNarrowGitAdminMounts_HubNativeDocker(t *testing.T) {
 		t.Errorf("expected read-only objects/info mount %q, got: %s", wantObjInfo, argStr)
 	}
 
-	// .git/config is NOT read-only: the per-agent private copy is bound
-	// read-write over it instead, so in-container git config writes keep working.
-	if strings.Contains(argStr, ":/repo-root/.git/config:ro") {
-		t.Errorf("config must not be bound read-only (private copy is used), got: %s", argStr)
-	}
-	wantPriv := fmt.Sprintf("-v %s:/repo-root/.git/config ", priv)
+	// .git/config is the per-agent private copy, bound READ-ONLY.
+	wantPriv := fmt.Sprintf("-v %s:/repo-root/.git/config:ro", priv)
 	if !strings.Contains(argStr, wantPriv) {
-		t.Errorf("expected the private config bound read-write over .git/config %q, got: %s", wantPriv, argStr)
+		t.Errorf("expected the private config bound read-only over .git/config %q, got: %s", wantPriv, argStr)
 	}
 
-	// config.worktree was never created for this agent, so it must not be
-	// mounted (mounting a nonexistent source would make Docker create an
-	// empty file on the host).
-	if strings.Contains(argStr, "config.worktree") {
-		t.Errorf("did not expect a config.worktree mount when the file does not exist, got: %s", argStr)
+	// config.worktree is bound read-only (create-first), so writes fail.
+	if !strings.Contains(argStr, ":/repo-root/.git/config.worktree:ro") {
+		t.Errorf("expected a read-only config.worktree mount, got: %s", argStr)
+	}
+	if !strings.Contains(argStr, ":/repo-root/.git/worktrees/agent-1/config.worktree:ro") {
+		t.Errorf("expected the own worktree config.worktree bound read-only, got: %s", argStr)
 	}
 }
 
 func TestNarrowGitAdminMounts_AppliesToLinkedProject(t *testing.T) {
-	// E-X2 PR 2: the narrowing now applies to linked projects too (previously it
+	// The narrowing now applies to linked projects too (previously it
 	// was hub-native-only). The container must not be able to write the linked
 	// checkout's hooks/info, and its config is served from the private copy.
 	home := t.TempDir()
@@ -1445,6 +1466,7 @@ func TestNarrowGitAdminMounts_AppliesToLinkedProject(t *testing.T) {
 	if err := os.MkdirAll(workspace, 0755); err != nil {
 		t.Fatalf("failed to create workspace: %v", err)
 	}
+	setupWorktreeAdmin(t, repoRoot, "agent-1", workspace)
 
 	priv := seedTestPrivateGitConfig(t)
 	args, err := buildCommonRunArgs(RunConfig{
@@ -1468,16 +1490,13 @@ func TestNarrowGitAdminMounts_AppliesToLinkedProject(t *testing.T) {
 			t.Errorf("linked project must get the narrowed read-only mount %q, got: %s", want, argStr)
 		}
 	}
-	if strings.Contains(argStr, ":/repo-root/.git/config:ro") {
-		t.Errorf("config must not be read-only (private copy), got: %s", argStr)
-	}
-	if want := fmt.Sprintf("-v %s:/repo-root/.git/config ", priv); !strings.Contains(argStr, want) {
-		t.Errorf("expected private config bind %q, got: %s", want, argStr)
+	if want := fmt.Sprintf("-v %s:/repo-root/.git/config:ro", priv); !strings.Contains(argStr, want) {
+		t.Errorf("expected private config bound read-only %q, got: %s", want, argStr)
 	}
 }
 
 func TestNarrowGitAdminMounts_AppliesToPodman(t *testing.T) {
-	// E-X2 PR 2: podman now gets the same narrowing as docker (rw base .git,
+	// Podman now gets the same narrowing as docker (rw base .git,
 	// read-only hooks/info, private config over .git/config).
 	repoRoot, workspace := setupHubManagedBaseRepo(t, "agent-1")
 	priv := seedTestPrivateGitConfig(t)
@@ -1501,13 +1520,13 @@ func TestNarrowGitAdminMounts_AppliesToPodman(t *testing.T) {
 			t.Errorf("podman must get the read-only mount %q, got: %s", want, argStr)
 		}
 	}
-	if want := fmt.Sprintf("-v %s:/repo-root/.git/config ", priv); !strings.Contains(argStr, want) {
-		t.Errorf("podman must get the private config bind %q, got: %s", want, argStr)
+	if want := fmt.Sprintf("-v %s:/repo-root/.git/config:ro", priv); !strings.Contains(argStr, want) {
+		t.Errorf("podman must get the private config bound read-only %q, got: %s", want, argStr)
 	}
 }
 
 func TestAppleWorktreeGitMounts_ReadOnlyGitWithRwOverlays(t *testing.T) {
-	// E-X2 PR 2 P4: on the Apple runtime (which cannot bind single files) the
+	// On the Apple runtime (which cannot bind single files) the
 	// whole .git is bound read-only and only objects/refs/logs and the agent's
 	// own worktree admin dir are overlaid read-write; .git/config is read-only by
 	// inheritance, so there is no private-config bind (and none is required).
@@ -1541,9 +1560,11 @@ func TestAppleWorktreeGitMounts_ReadOnlyGitWithRwOverlays(t *testing.T) {
 	if want := fmt.Sprintf("-v %s:/repo-root/.git/objects/info:ro", filepath.Join(gitDir, "objects", "info")); !strings.Contains(argStr, want) {
 		t.Errorf("expected read-only objects/info %q, got: %s", want, argStr)
 	}
-	// No private-config bind on Apple.
-	if strings.Contains(argStr, "/repo-root/.git/config ") && !strings.Contains(argStr, ":/repo-root/.git:ro") {
-		t.Errorf("Apple must not bind a private .git/config, got: %s", argStr)
+	// No private-config bind on Apple: no -v argument targets /repo-root/.git/config.
+	for _, a := range args {
+		if strings.HasSuffix(a, ":/repo-root/.git/config") || strings.HasSuffix(a, ":/repo-root/.git/config:ro") {
+			t.Errorf("Apple must not bind a private .git/config, got arg: %s", a)
+		}
 	}
 }
 
@@ -1568,6 +1589,7 @@ func TestNarrowGitAdminMounts_CreatesMissingHooksAndInfoDirs(t *testing.T) {
 	if err := os.MkdirAll(workspace, 0755); err != nil {
 		t.Fatal(err)
 	}
+	setupWorktreeAdmin(t, repoRoot, "agent-1", workspace)
 	if _, err := os.Stat(filepath.Join(gitDir, "hooks")); err == nil {
 		t.Fatal("test setup invariant broken: hooks/ should not exist yet")
 	}
@@ -1649,8 +1671,8 @@ func TestNarrowSharerRegistryMounts_HubNativeDocker(t *testing.T) {
 			t.Errorf("expected read-only mount %q to still apply, got: %s", want, argStr)
 		}
 	}
-	if strings.Contains(argStr, ":/repo-root/.git/config:ro") {
-		t.Errorf("config must not be read-only (private copy is used), got: %s", argStr)
+	if !strings.Contains(argStr, ":/repo-root/.git/config:ro") {
+		t.Errorf("config must be bound read-only (private copy), got: %s", argStr)
 	}
 }
 
@@ -1699,7 +1721,7 @@ func TestNarrowSharerRegistryMounts_LocalDocker(t *testing.T) {
 	}
 	argStr := strings.Join(args, " ")
 
-	// E-X2 PR 2: the admin surface now applies to a local base too (hooks/info
+	// The admin surface now applies to a local base too (hooks/info
 	// read-only, config via the private copy).
 	for _, sub := range []string{"hooks", "info"} {
 		want := fmt.Sprintf("-v %s:/repo-root/.git/%s:ro", filepath.Join(gitDir, sub), sub)
@@ -1707,8 +1729,8 @@ func TestNarrowSharerRegistryMounts_LocalDocker(t *testing.T) {
 			t.Errorf("local base must now get the read-only mount %q, got: %s", want, argStr)
 		}
 	}
-	if strings.Contains(argStr, ":/repo-root/.git/config:ro") {
-		t.Errorf("config must not be read-only (private copy), got: %s", argStr)
+	if !strings.Contains(argStr, ":/repo-root/.git/config:ro") {
+		t.Errorf("config must be bound read-only (private copy), got: %s", argStr)
 	}
 
 	// The sharer-registry and back-link paths apply to a local base as before.
@@ -1804,7 +1826,7 @@ func TestNarrowSharerRegistryMounts_LocalRealAgentLayout(t *testing.T) {
 }
 
 func TestNarrowSharerRegistryMounts_AppliesToPodman(t *testing.T) {
-	// E-X2 PR 2: the sharer-registry narrowing now applies to podman (and docker),
+	// The sharer-registry narrowing now applies to podman (and docker),
 	// not docker-only. (Apple uses the read-only-.git layout, covered separately.)
 	repoRoot, workspace := setupHubManagedBaseRepo(t, "agent-1")
 	args, err := buildCommonRunArgs(RunConfig{
@@ -1827,15 +1849,17 @@ func TestNarrowSharerRegistryMounts_AppliesToPodman(t *testing.T) {
 	}
 }
 
-func TestNarrowSharerRegistryMounts_SkipsMissingBackLink(t *testing.T) {
-	// The admin back-link file is written once by `git worktree add` before
-	// this worktree's container ever starts. A base with no worktrees yet
-	// legitimately has none — skip-if-missing, like config.worktree, not a
-	// create-first fail-open gap like the sharer-registry directory.
+func TestWorktreeGitMounts_RefusedWhenBackLinkMissing(t *testing.T) {
+	// The broker-trusted admin name is resolved from the common dir's
+	// worktrees/<name>/gitdir back-link. Without it, the admin dir for this
+	// workspace cannot be identified, so the start is refused (fail closed).
 	repoRoot, workspace := setupHubManagedBaseRepo(t, "agent-1")
-	// Deliberately do NOT create .git/worktrees/agent-1/gitdir.
+	// Remove the back-link the helper created.
+	if err := os.RemoveAll(filepath.Join(repoRoot, ".git", "worktrees", "agent-1")); err != nil {
+		t.Fatal(err)
+	}
 
-	args, err := buildCommonRunArgs(RunConfig{
+	_, err := buildCommonRunArgs(RunConfig{
 		Harness:                &harness.Generic{},
 		Name:                   "test-agent",
 		UnixUsername:           "scion",
@@ -1845,18 +1869,8 @@ func TestNarrowSharerRegistryMounts_SkipsMissingBackLink(t *testing.T) {
 		Workspace:              workspace,
 		PrivateGitConfigSource: seedTestPrivateGitConfig(t),
 	})
-	if err != nil {
-		t.Fatalf("buildCommonRunArgs failed: %v", err)
-	}
-	argStr := strings.Join(args, " ")
-
-	if strings.Contains(argStr, "/gitdir:ro") {
-		t.Errorf("did not expect a gitdir back-link mount when the file does not exist, got: %s", argStr)
-	}
-	// The sharer-registry directory mount must still apply independently.
-	wantSharers := fmt.Sprintf("-v %s:/repo-root/.git/scion-sharers:ro", filepath.Join(repoRoot, ".git", "scion-sharers"))
-	if !strings.Contains(argStr, wantSharers) {
-		t.Errorf("expected the sharer-registry mount regardless of the back-link file, got: %s", argStr)
+	if err == nil {
+		t.Fatal("expected a refusal when the worktree admin back-link is missing, got nil")
 	}
 }
 
@@ -2373,6 +2387,7 @@ func TestBuildCommonRunArgs_ResolvesSymlinkedRepoRoot_WorktreeSubdir(t *testing.
 	if err := os.MkdirAll(workspace, 0755); err != nil {
 		t.Fatal(err)
 	}
+	setupWorktreeAdmin(t, realRepoRoot, "test-agent", workspace)
 
 	repoRootLink := filepath.Join(t.TempDir(), "repo-link")
 	if err := os.Symlink(realRepoRoot, repoRootLink); err != nil {

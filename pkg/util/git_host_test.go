@@ -1556,7 +1556,7 @@ func addTestCredentialHelper(t *testing.T, serverURL string) {
 	_ = f.Close()
 }
 
-// G-6: lfsOptionForLinkedCheckout reads the .lfsconfig of the ref being checked
+// lfsOptionForLinkedCheckout reads the .lfsconfig of the ref being checked
 // out, not the root's HEAD. A branch that adds an endpoint is skipped even when
 // HEAD has none; a branch with none (and an http origin) is pinned.
 func TestLfsOptionForLinkedCheckout_ReadsBranchRef(t *testing.T) {
@@ -1587,7 +1587,7 @@ func TestLfsOptionForLinkedCheckout_ReadsBranchRef(t *testing.T) {
 	}
 }
 
-// G-5: the git-lfs endpoint is pinned from the broker-recorded origin, not the
+// The git-lfs endpoint is pinned from the broker-recorded origin, not the
 // live remote.origin.url. When the live origin no longer matches the recorded
 // one (an agent repointed it), the smudge is skipped rather than pinned.
 func TestLfsOptionForLinkedCheckout_RecordedOrigin(t *testing.T) {

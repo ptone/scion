@@ -1983,10 +1983,13 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			worktreeBranch = api.Slugify(agentName)
 		}
 
-		// G-5: pin the git-lfs endpoint from the broker-recorded origin (the hub
+		// Pin the git-lfs endpoint from the broker-recorded origin (the hub
 		// project's repository), not the live, agent-writable remote.origin.url.
-		recordedOrigin := ""
-		if gitClone != nil {
+		// On the linked-checkout route GitClone is cleared, so the recorded origin
+		// arrives via the context; fall back to GitClone for the clone/hub-native
+		// paths.
+		recordedOrigin := api.RecordedOriginFromContext(ctx)
+		if recordedOrigin == "" && gitClone != nil {
 			recordedOrigin = gitClone.URL
 		}
 		if err := util.CreateWorktreeWithOrigin(agentWorkspace, worktreeBranch, recordedOrigin); err != nil {
@@ -4151,10 +4154,13 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 					targetBranch = api.Slugify(agentName)
 				}
 				removeWorkspaceWorktreeEntry(agentWorkspace)
-				// G-5: pin the git-lfs endpoint from the broker-recorded origin.
-				recordedOrigin := ""
-				if gc := api.GitCloneFromContext(ctx); gc != nil {
-					recordedOrigin = gc.URL
+				// Pin the git-lfs endpoint from the broker-recorded origin
+				// (context on the linked route; GitClone fallback otherwise).
+				recordedOrigin := api.RecordedOriginFromContext(ctx)
+				if recordedOrigin == "" {
+					if gc := api.GitCloneFromContext(ctx); gc != nil {
+						recordedOrigin = gc.URL
+					}
 				}
 				if err := util.CreateWorktreeWithOrigin(agentWorkspace, targetBranch, recordedOrigin); err != nil {
 					slog.Warn("GetAgent: could not recreate the missing worktree; continuing without a workspace",

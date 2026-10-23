@@ -19,32 +19,33 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 // maxPrivateGitConfigSize caps how much of a base .git/config is copied into the
 // per-agent private copy. A real repository config is a few KiB; the cap bounds
-// a pathological base (and the agent, which can grow its own copy once mounted —
-// the broker never reads it back, P3) rather than defining a security boundary.
+// a pathological base (the broker never reads this copy back) rather than
+// defining a security boundary.
 const maxPrivateGitConfigSize = 1 << 20 // 1 MiB
 
 // seedPrivateGitConfig writes a per-agent private copy of the repository's
 // .git/config into the agent's (broker-owned, agent-scoped) state dir and
-// returns its path, for the runtime to bind read-write as a single file over the
-// container's .git/config (E-X2 PR 2, P1/P2/P8).
+// returns its path, for the runtime to bind read-only as a single file over the
+// container's .git/config.
 //
 // It reads the base config (absent → empty), strips credential-bearing keys
-// (util.RedactGitConfigSecrets, P8), and writes the result atomically with an
-// O_EXCL temp file + rename (P2) at <agentDir>/git/config, mode 0600, owned by
-// this broker process. The broker never reads this file back as configuration
-// (P3); the runtime re-checks it (regular file, not a symlink, link count 1,
+// (util.RedactGitConfigSecrets), and writes the result atomically with an
+// O_EXCL temp file + rename at <agentDir>/git/config, mode 0600, owned by
+// this broker process. The broker never reads this file back as configuration;
+// the runtime re-checks it (regular file, not a symlink, link count 1,
 // broker-owned) immediately before binding.
 //
 // The returned path is always a fresh, broker-written regular file: any stale
 // file (including one an earlier agent run left, or a symlink) is replaced by the
 // rename.
-func seedPrivateGitConfig(baseConfigPath, agentDir string) (string, error) {
+func seedPrivateGitConfig(baseConfigPath, agentDir, branch string) (string, error) {
 	if agentDir == "" {
 		return "", fmt.Errorf("seed private git config: empty agent dir")
 	}
@@ -64,6 +65,14 @@ func seedPrivateGitConfig(baseConfigPath, agentDir string) (string, error) {
 	if len(stripped) > 0 {
 		util.Debugf("seedPrivateGitConfig: stripped credential-bearing keys from the private copy: %v", stripped)
 	}
+
+	// The repository config is read-only to the agent (the copy is bound
+	// read-only), so `git push -u` / `git config --local` cannot persist. Pre-seed
+	// the agent's own branch upstream and push.autoSetupRemote so that `git push`
+	// and `git push -u <origin> <branch>` find the upstream already set and exit 0
+	// without attempting a write. Personal preferences go in the agent's writable
+	// global git config in the agent home.
+	redacted = append(redacted, privateConfigUpstreamSeed(branch)...)
 
 	tmp, err := os.CreateTemp(gitDir, "config.*.tmp") // O_EXCL
 	if err != nil {
@@ -87,6 +96,24 @@ func seedPrivateGitConfig(baseConfigPath, agentDir string) (string, error) {
 		return "", fmt.Errorf("seed private git config: rename: %w", err)
 	}
 	return dest, nil
+}
+
+// privateConfigUpstreamSeed returns the git config text appended to the private
+// read-only repository config so normal push flows exit 0 without a write:
+// push.autoSetupRemote=true, and (when branch is known) the agent's own branch
+// upstream set to origin. branch is an agent slug (git-safe), so it needs no
+// escaping; an empty branch appends only the push setting.
+func privateConfigUpstreamSeed(branch string) []byte {
+	var b strings.Builder
+	b.WriteString("\n[push]\n\tautoSetupRemote = true\n")
+	if branch != "" {
+		b.WriteString("[branch \"")
+		b.WriteString(branch)
+		b.WriteString("\"]\n\tremote = origin\n\tmerge = refs/heads/")
+		b.WriteString(branch)
+		b.WriteString("\n")
+	}
+	return []byte(b.String())
 }
 
 // readBaseGitConfig reads up to maxPrivateGitConfigSize bytes of the base

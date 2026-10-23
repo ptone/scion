@@ -24,15 +24,18 @@ import (
 // RedactGitConfigSecrets parses a git config file and returns an equivalent
 // config with credential-bearing material removed, together with the names of
 // the keys it changed (never their values). It is used to seed a per-agent
-// private .git/config (E-X2 PR 2, P8) so a copy of a linked checkout's host
+// private .git/config so a copy of a linked checkout's host
 // config does not carry the host user's credentials into the agent.
 //
 // It strips:
 //   - every credential.* key (the git credential-helper configuration),
-//   - every http.<url>.extraheader (authorization headers), and
+//   - every http.<url>.extraheader (authorization headers),
+//   - every http.<url>.cookiefile (a path to stored session cookies),
 //   - userinfo (user[:password]) from http(s) URL values in remote.*.url /
-//     remote.*.pushurl / url.*.insteadof / url.*.pushinsteadof and from the
-//     subsection of a url.<base>.* entry.
+//     remote.*.pushurl / remote.*.lfsurl / remote.*.lfspushurl / lfs.url /
+//     lfs.pushurl / url.*.insteadof / url.*.pushinsteadof and from the
+//     subsection of a url.<base>.* or http.<base>.* entry, and
+//   - any URL-valued key whose value cannot be parsed but carries userinfo.
 //
 // The returned config is re-serialised from the parsed variables: comments are
 // not preserved, but every retained key/value (including multi-valued keys and
@@ -57,20 +60,27 @@ func RedactGitConfigSecrets(raw []byte) (out []byte, stripped []string, err erro
 			note(v.Key())
 			continue
 		}
-		// http.<url>.extraheader — drop entirely.
-		if v.Section == "http" && v.Name == "extraheader" {
+		// http.<url>.extraheader / http.<url>.cookiefile — drop entirely.
+		if v.Section == "http" && (v.Name == "extraheader" || v.Name == "cookiefile") {
 			note(v.Key())
 			continue
 		}
-		// Userinfo in URL-valued keys — rewrite the value.
+		// Userinfo in URL-valued keys — rewrite the value, or drop the key when
+		// the value cannot be parsed but still carries userinfo.
 		if isURLValuedKey(v) {
-			if clean, changed := stripURLUserinfo(v.Value); changed {
+			clean, changed, drop := sanitizeURLValue(v.Value)
+			if drop {
+				note(v.Key())
+				continue
+			}
+			if changed {
 				note(v.Key())
 				v.Value = clean
 			}
 		}
-		// Userinfo in a url.<base>.* subsection (the base is the URL).
-		if v.Section == "url" && v.HasSubsection {
+		// Userinfo in a url.<base>.* or http.<base>.* subsection (the base is the
+		// URL that keys the section).
+		if (v.Section == "url" || v.Section == "http") && v.HasSubsection {
 			if clean, changed := stripURLUserinfo(v.Subsection); changed {
 				note(v.Key())
 				v.Subsection = clean
@@ -85,12 +95,46 @@ func RedactGitConfigSecrets(raw []byte) (out []byte, stripped []string, err erro
 // userinfo should be scrubbed.
 func isURLValuedKey(v gitConfigVar) bool {
 	switch {
-	case v.Section == "remote" && (v.Name == "url" || v.Name == "pushurl"):
+	case v.Section == "remote" && (v.Name == "url" || v.Name == "pushurl" || v.Name == "lfsurl" || v.Name == "lfspushurl"):
+		return true
+	case v.Section == "lfs" && (v.Name == "url" || v.Name == "pushurl"):
 		return true
 	case v.Section == "url" && (v.Name == "insteadof" || v.Name == "pushinsteadof"):
 		return true
 	}
 	return false
+}
+
+// sanitizeURLValue strips userinfo from a parseable http(s) URL value. When the
+// value cannot be parsed but still carries userinfo (an "@" before the path), it
+// signals drop so the caller removes the whole key rather than leak it. Non-URL
+// or non-http(s) values (e.g. scp-style git@host:path) are returned unchanged.
+func sanitizeURLValue(s string) (clean string, changed, drop bool) {
+	t := strings.TrimSpace(s)
+	u, err := url.Parse(t)
+	if err == nil {
+		if (u.Scheme != "http" && u.Scheme != "https") || u.User == nil {
+			return s, false, false
+		}
+		u.User = nil
+		return u.String(), true, false
+	}
+	if hasUserinfoBeforePath(t) {
+		return "", false, true
+	}
+	return s, false, false
+}
+
+// hasUserinfoBeforePath reports whether s has an "@" before the first "/" of its
+// path (ignoring the scheme's "://"), i.e. it looks like it carries userinfo.
+func hasUserinfoBeforePath(s string) bool {
+	if i := strings.Index(s, "://"); i >= 0 {
+		s = s[i+3:]
+	}
+	if j := strings.IndexByte(s, '/'); j >= 0 {
+		s = s[:j]
+	}
+	return strings.IndexByte(s, '@') >= 0
 }
 
 // stripURLUserinfo removes any user[:password]@ userinfo from an http(s) URL,

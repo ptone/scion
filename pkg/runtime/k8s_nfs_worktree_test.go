@@ -41,7 +41,7 @@ func TestBuildPod_NFSWorktree_MountsAndEnv(t *testing.T) {
 
 	main := pod.Spec.Containers[0]
 	assert.Equal(t, "/repo-root/worktrees/agent-1", main.WorkingDir)
-	// The two base mounts plus the E-X2 read-only admin narrowing (C4): hooks,
+	// The two base mounts plus the read-only admin narrowing: hooks,
 	// info, objects/info and worktrees read-only, with the agent's own
 	// worktrees/agent-1 re-mounted read-write. (This worktree shape is refused at
 	// Run today; buildPod still constructs it, with the narrowing, for the

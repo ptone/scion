@@ -742,7 +742,7 @@ func TestK8sCreateSecretProviderClass_RecreateOnAlreadyExists(t *testing.T) {
 func TestRun_NFSWorktree_AsyncPath(t *testing.T) {
 	r := newNFSTestK8sRuntime()
 	// Clone-per-agent (an allowed shape): the worktree-per-agent shape is refused
-	// at Run on Kubernetes (D237), so this async-launch-path test uses a shape
+	// at Run on Kubernetes, so this async-launch-path test uses a shape
 	// that actually builds a pod.
 	cfg := nfsAgentDirConfig("scion-wt-async")
 	rec := &hookRecorder{}

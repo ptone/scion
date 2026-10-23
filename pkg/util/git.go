@@ -296,7 +296,7 @@ func IsIgnored(dir, path string) bool {
 
 // CreateWorktree creates a new git worktree at the specified path with a new
 // branch, with no broker-recorded origin for the git-lfs endpoint pin (the
-// endpoint is derived from the live remote.origin.url, the pre-G-5 behaviour).
+// endpoint is derived from the live remote.origin.url).
 // Prefer CreateWorktreeWithOrigin from broker/hub start paths, which pass the
 // recorded origin.
 func CreateWorktree(path, branch string) error {
@@ -307,7 +307,7 @@ func CreateWorktree(path, branch string) error {
 // for the project (the hub project's repository). It is used to pin the git-lfs
 // endpoint from a trusted source rather than the live, agent-writable
 // remote.origin.url, and to skip the smudge when the live origin no longer
-// matches the recorded one (G-5). Pass "" when no recorded origin is available.
+// matches the recorded one. Pass "" when no recorded origin is available.
 func CreateWorktreeWithOrigin(path, branch, recordedOrigin string) error {
 	// Guard: refuse to create worktrees inside an agent container.
 	// SCION_HOST_UID is set by the runtime when launching containers.
@@ -393,12 +393,12 @@ type lfsCheckoutOption struct {
 //     will not use; either way we do not pin and never contact it).
 //
 // recordedOrigin is the broker-recorded origin for the project. The live
-// remote.origin.url is agent-writable in the shared repository config until PR 2's
+// remote.origin.url is agent-writable in the shared repository config until the
 // config narrowing applies, and host-side CreateWorktree runs before the
 // container in any case, so the endpoint is derived from the recorded origin and
-// we refuse to pin when the live origin has been pointed elsewhere (G-5). When
+// we refuse to pin when the live origin has been pointed elsewhere. When
 // recordedOrigin is empty (no hub record available) we fall back to the live
-// origin, the pre-G-5 behaviour.
+// origin.
 func lfsOptionForLinkedCheckout(root, branch, recordedOrigin string) lfsCheckoutOption {
 	// Read the .lfsconfig of the ref actually being checked out: the existing
 	// branch when it already exists, otherwise HEAD (a new branch is created
@@ -414,7 +414,7 @@ func lfsOptionForLinkedCheckout(root, branch, recordedOrigin string) lfsCheckout
 	if lfsConfigNamesEndpoint(root, ref) {
 		return lfsCheckoutOption{skipSmudge: true}
 	}
-	// G-5: derive from the broker-recorded origin, never trust the live origin
+	// Derive from the broker-recorded origin, never trust the live origin
 	// alone. If a recorded origin is present but the live origin no longer
 	// normalises to it, the repository the agent points at is not the one the
 	// hub recorded — skip rather than pin.

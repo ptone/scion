@@ -24,7 +24,7 @@ import (
 	"testing"
 )
 
-// The Kubernetes shared-repository refusal (D237) lives in Run, the single
+// The Kubernetes shared-repository refusal lives in Run, the single
 // production caller of buildPod, so every start / restart / wake / reincarnate /
 // reconcile path that reaches a pod goes through it. This guard fails if any
 // non-test function other than Run calls buildPod, so a new caller cannot skip
@@ -68,6 +68,6 @@ func TestBuildPodHasOnlyRunAsCaller(t *testing.T) {
 	}
 	if len(callers) > 0 {
 		t.Errorf("buildPod is called outside Run by %v; route the call through Run or apply "+
-			"k8sSharedRepoShapeRefusal there too, so the D237 refusal is not skipped", callers)
+			"k8sSharedRepoShapeRefusal there too, so the refusal is not skipped", callers)
 	}
 }

@@ -261,6 +261,11 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		// do not read Depth from the ctx copy.
 		ctx = api.ContextWithGitClone(ctx, opts.GitClone)
 	}
+	if opts.RecordedOriginURL != "" {
+		// Linked-checkout route: GitClone was cleared, so the recorded origin is
+		// carried separately for the git-lfs endpoint pin.
+		ctx = api.ContextWithRecordedOrigin(ctx, opts.RecordedOriginURL)
+	}
 	if opts.FreshProvision {
 		ctx = api.ContextWithFreshProvision(ctx)
 	}
@@ -2405,7 +2410,7 @@ authDone:
 		}
 	}
 
-	// E-X2 PR 2 (P1/P2/P8): for git-backed worktree / shared-plain / fallback
+	// For git-backed worktree / shared-plain / fallback
 	// layouts on the bind-mount runtimes (docker/podman/apple), seed a per-agent
 	// private copy of the repository's .git/config in the agent's state dir, for
 	// the runtime to bind read-write over the container's .git/config so in-container
@@ -2418,7 +2423,14 @@ authDone:
 	case "docker", "podman", "container", "apple-container":
 		if repoRoot != "" {
 			if fi, statErr := os.Stat(filepath.Join(repoRoot, ".git")); statErr == nil && fi.IsDir() {
-				src, seedErr := seedPrivateGitConfig(filepath.Join(repoRoot, ".git", "config"), agentDir)
+				// The agent's own branch (worktree-per-agent uses the slugified
+				// agent name when no explicit branch) is pre-seeded as the upstream
+				// so push/push -u exit 0 without writing the read-only config.
+				seedBranch := opts.Branch
+				if seedBranch == "" {
+					seedBranch = api.Slugify(opts.Name)
+				}
+				src, seedErr := seedPrivateGitConfig(filepath.Join(repoRoot, ".git", "config"), agentDir, seedBranch)
 				if seedErr != nil {
 					return nil, fmt.Errorf("seed private git config for agent %q: %w", opts.Name, seedErr)
 				}
