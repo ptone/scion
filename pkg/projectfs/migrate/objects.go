@@ -21,7 +21,31 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
+
+// LegacyObjectPrefix is the directory prefix of a hub-managed project's
+// retired object-storage workspace copy, the only objects M3 deletes:
+// [hubs/<hubID>/]workspaces/<projectID>/<legacy dir>/. The per-agent
+// prefixes beside it (workspaces/<projectID>/<agentID>/, used by the CLI
+// bootstrap and scion sync) are live and never match it. It returns ""
+// (which CleanObjects refuses) for an ID that is not a single safe path
+// element.
+func LegacyObjectPrefix(hubID, projectID string) string {
+	if !safeObjectElement(projectID) || (hubID != "" && !safeObjectElement(hubID)) {
+		return ""
+	}
+	p := "workspaces/" + projectID + "/" + projectkeys.LegacyProjectWorkspaceObjectDir + "/"
+	if hubID != "" {
+		p = "hubs/" + hubID + "/" + p
+	}
+	return p
+}
+
+func safeObjectElement(s string) bool {
+	return s != "" && s != "." && s != ".." && !strings.ContainsAny(s, "/\\\x00")
+}
 
 // ObjectStore is the slice of the hub's object storage M3 needs.
 type ObjectStore interface {

@@ -28,6 +28,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
 const (
@@ -65,7 +66,7 @@ func (f *fakeObjects) DeletePrefix(_ context.Context, prefix string) error {
 	return nil
 }
 
-func objectPrefix(id string) string { return "hubs/h1/workspaces/" + id + "/project-copy/" }
+func objectPrefix(id string) string { return LegacyObjectPrefix("h1", id) }
 
 type hubFixture struct {
 	share, global string
@@ -451,5 +452,49 @@ func TestRun_VolumeBackendLegacyRoot(t *testing.T) {
 	// Fail closed: a volume backend without a mount root is an error.
 	if _, err := Run(context.Background(), HubInput{Workspace: projectfs.Layout{Backend: projectfs.BackendGKESharedVolume}, GlobalDir: global}, opts(true)); err == nil {
 		t.Fatal("want an error for a volume backend without a mount root")
+	}
+}
+
+func TestLegacyObjectPrefix(t *testing.T) {
+	if got, want := LegacyObjectPrefix("h1", pid1), "hubs/h1/workspaces/"+pid1+"/"+projectkeys.LegacyProjectWorkspaceObjectDir+"/"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	if got, want := LegacyObjectPrefix("", pid1), "workspaces/"+pid1+"/"+projectkeys.LegacyProjectWorkspaceObjectDir+"/"; got != want {
+		t.Fatalf("no hub ID: got %q, want %q", got, want)
+	}
+	for _, c := range [][2]string{{"h1", ""}, {"h1", ".."}, {"h1", "a/b"}, {"a/b", pid1}, {"..", pid1}} {
+		if got := LegacyObjectPrefix(c[0], c[1]); got != "" {
+			t.Fatalf("%q: got %q, want refusal", c, got)
+		}
+	}
+}
+
+// M3 deletes only the project-level legacy copy: the live per-agent
+// prefixes beside it (CLI bootstrap, scion sync), a sibling project whose
+// ID shares a prefix, and other hubs' objects survive.
+func TestRun_M3LeavesPerAgentAndSiblingObjects(t *testing.T) {
+	f := newHubFixture(t)
+	writeTree(t, f.share, map[string]string{"hub-projects/p1/a": "1"})
+	keep := []string{
+		"hubs/h1/workspaces/" + pid1 + "/agent-1/file",
+		"hubs/h1/workspaces/" + pid1 + "/" + projectkeys.LegacyProjectWorkspaceObjectDir + "-extra/file",
+		"hubs/h1/workspaces/" + pid1 + "x/" + projectkeys.LegacyProjectWorkspaceObjectDir + "/file",
+		"hubs/h2/workspaces/" + pid1 + "/" + projectkeys.LegacyProjectWorkspaceObjectDir + "/file",
+	}
+	for _, k := range keep {
+		f.objects.objects[k] = true
+	}
+	f.objects.objects[objectPrefix(pid1)+"file"] = true
+	rep, err := Run(context.Background(), f.input(ProjectRef{ID: pid1, Slug: "p1"}), opts(false))
+	if err != nil || rep.Failed() || rep.Objects[0].Outcome != ObjectsDeleted {
+		t.Fatalf("err=%v failed=%t objects=%s", err, rep.Failed(), rep.Objects[0].Outcome)
+	}
+	for _, k := range keep {
+		if !f.objects.objects[k] {
+			t.Fatalf("M3 deleted %s", k)
+		}
+	}
+	if f.objects.objects[objectPrefix(pid1)+"file"] {
+		t.Fatal("legacy copy not deleted")
 	}
 }

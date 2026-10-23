@@ -100,7 +100,7 @@ func (s *Server) projectStorageMigrateInput(ctx context.Context, withObjects boo
 		hubID := s.HubID()
 		in.Objects = storageObjects{stor}
 		in.ObjectPrefix = func(projectID string) string {
-			return storage.DirPrefix(storage.ProjectWorkspaceStoragePath(hubID, projectID))
+			return migrate.LegacyObjectPrefix(hubID, projectID)
 		}
 	}
 	return in, nil
