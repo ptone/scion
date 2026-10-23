@@ -1,7 +1,11 @@
 # Packages whose tests run on the windows-latest job (.github/workflows/windows.yml).
 # One package per line; '#' starts a comment. No wildcards ("./...").
-# NEVER ./pkg/hub or a ./pkg/hub/... package: the unsharded pkg/hub test
-# compile needs about 12 GiB (the job fails if such a line appears).
+# NEVER ./pkg/hub itself (or a ./pkg/hub/... wildcard), and never a package
+# whose test binary links pkg/hub's tests: the unsharded pkg/hub test compile needs
+# about 12 GiB (the job fails on a ./pkg/hub or ./pkg/hub/... line).
+# ./pkg/hub/<sub> packages that do not link pkg/hub are allowed. ./cmd links
+# pkg/hub production code only (never its tests), as on Linux, and is the
+# only listed package that links pkg/hub at all.
 # A package left off for a Windows-environment reason gets a one-line reason
 # here; nothing is skipped.
 ./pkg/util/privatefs
@@ -64,7 +68,6 @@
 ./pkg/hub/imagecheck
 ./pkg/hub/internal/hubtestutil
 ./pkg/hub/permissions
-./pkg/integration/runtime
 ./pkg/labels
 ./pkg/lifecyclehooks
 ./pkg/messages
@@ -111,6 +114,7 @@
 # ./pkg/brokerregistration: broker instance-directory locking is unsupported on Windows (the broker is gated on Windows).
 # ./pkg/config/pgprovider: every test needs Postgres (-tags integration) and skips without it.
 # ./pkg/hub/authzop: the catalog report and mutation-classification guards compare unequal on a Windows checkout; Linux-only hub guard.
+# ./pkg/integration/runtime: links pkg/hub production code; server-side integration runtime, not on a windowsAllowed path.
 # ./pkg/preflight: two settings-profile check tests fail on Windows (not diagnosed; hub-side upgrade preflight, follow-up).
 # ./pkg/sciontool/autoexpose: TestReconciler_IPv6OnlyListenerRegisteredAsLoopback skips without /proc/net/tcp6 (in-container tool).
 # ./pkg/sciontool/conduit: the sciontool agent log cannot be opened on Windows (in-container tool), and the IPv6-only loopback fallback fails.

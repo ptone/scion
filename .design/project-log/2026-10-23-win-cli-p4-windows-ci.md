@@ -8,7 +8,7 @@
 
 - **Candidates re-derived at 1904c8826.** `GOOS=windows go list` over `./...` found 156 packages with tests. The F§5 marker scan was re-run over each package's Windows test files (unix syscalls, pty, symlinks, mode asserts, Chmod, POSIX path literals, `exec.Command("sh"|"git"…)`, GOOS checks). Result: F§5's 71 marker-free packages, all still present, plus 18 new marker-free packages (for example pkg/brokerclient, pkg/preflight, pkg/testutil, the hack/ tools). That makes 89 candidates.
 - **Triage on windows-latest** (a temporary commit, rewritten out of the branch): the 88 buildable candidates ran in one `go test`. The 89th, `deploy/terraform/tools/settingscheck`, is test-only, and `go build` refuses it.
-- **Result.** 75 packages are ON as plain lines, `./pkg/artifacts` is ON as an anchored line, and 14 are OFF with a one-line reason each in `.github/windows-test-packages.txt`. Confirming run 39842612067: 87 packages, 5194 tests passed, 0 skips; job 12m58s (build+vet 6m07s, tests 2m47s). The pkg/hub guard and the workflow are unchanged.
+- **Result** (after r1: 74 packages are ON as plain lines and 15 are OFF). Before r1: 75 packages were ON as plain lines, `./pkg/artifacts` is ON as an anchored line, and 14 are OFF with a one-line reason each in `.github/windows-test-packages.txt`. Confirming run 39842612067: 87 packages, 5194 tests passed, 0 skips; job 12m58s (build+vet 6m07s, tests 2m47s). The pkg/hub guard and the workflow are unchanged.
 - **One test-side fix:** `pkg/util/otlptls`. The load errors quote paths with `%q`, which doubles the backslashes of a Windows path. The test now accepts the raw or the quoted form.
 - **Anchors.** `./cmd` and `./pkg/config` already name every `_windows_test.go` test in those packages, so they are unchanged. `./pkg/artifacts` is anchored to the four reference parse/encode tests, because the allowlisted `message --artifact` uses that code.
 
@@ -16,7 +16,7 @@
 
 - **Packages with any skip stay OFF.** That covers the Postgres-only tests, the Chromium probe and `/proc/net/tcp6`. Hiding a skip with `-skip` or a narrower `-run` would break the zero-skip rule in spirit. The exception is `pkg/artifacts`: the anchored tests are exactly the code a Windows command reaches.
 - **OFF packages reachable from a windowsAllowed command:** only `pkg/artifacts`, through `message`, now covered. `pkg/wsclient` is linked into scion.exe, but only `attach` uses it, and `attach` is not allowlisted. The remaining linked OFF packages (harnesses, brokerregistration, authzop, pgprovider, testinfra, autoexpose) are reached only from gated server, broker or agent-mode commands.
-- **`pkg/integration/runtime` is ON.** Its test binary links pkg/hub as a non-test dependency only, the same as `cmd`. No allowlisted package compiles pkg/hub's own tests.
+- **`pkg/integration/runtime` is OFF (review r1, finding 1).** It passed on Windows. It links pkg/hub production code (`hub.NewAdminSignalListener`), and it is server-side, so it is not on a windowsAllowed path. Keeping it off leaves `./cmd` as the only listed package that links pkg/hub at all. No listed package compiles pkg/hub's own tests.
 
 ## Release zips (item 2): held on `win-cli/p4zips`
 
@@ -35,3 +35,9 @@
 - `pkg/preflight`: two profile-check tests fail on Windows (not diagnosed; hub-side).
 - Several repo guards (`hack/checktimeliterals`, `pkg/hub/authzop` catalog, `harnesses` vendored-lib, the `pkg/artifacts` fixture) compare unequal on a Windows checkout, probably because of CRLF line endings or a path difference. They are Linux-only guards.
 - D4 (unchanged): full `cmd` and `config` suites on Windows.
+
+## Review r1 (APPROVE, win-cli-rev-p4ci-r1)
+
+- **Finding 1, adopted.** `./pkg/integration/runtime` moved OFF, with the reason in the file.
+- **Finding 2, adopted.** The allowlist header now states the real rule: never `./pkg/hub` itself, and never a package whose test binary links pkg/hub's tests. `./pkg/hub/<sub>` packages that do not link pkg/hub are allowed. `./cmd` links pkg/hub production code only. The job's guard is unchanged.
+- **Finding 3, kept as is.** The follow-up stays listed under open issues above.
