@@ -35,6 +35,8 @@ Every quoted message on the page was matched to its source string
 - shell completion on Windows: an unsupported command completes to nothing,
   not even file names, and `scion project <TAB>` offers no subcommands while
   `scion project use` still runs (`completeGated` in `cmd/platform_gate.go`).
+- verifying a downloaded zip against the release's `SHA256SUMS`, which the
+  release job writes over every asset with `sha256sum` (`build-release.yml`).
 
 ## Open
 
