@@ -2381,3 +2381,119 @@ describe('on a touch-primary device, the open request holds the on-screen keyboa
     expect(document.activeElement).toBe(button);
   });
 });
+
+describe('a finger tap on a quick-switcher button holds the on-screen keyboard on any device', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    for (const proxy of document.querySelectorAll('input[data-palette-keyboard-proxy]')) {
+      proxy.remove();
+    }
+  });
+
+  /**
+   * A phone that does not match TOUCH_PRIMARY_QUERY: several Android phones
+   * report hover support or a fine pointer.
+   */
+  function stubNotTouchPrimary(): void {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn((query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }))
+    );
+  }
+
+  /** The page's own quick-switcher button at the bottom of the spaces rail. */
+  async function footerButton(page: any): Promise<HTMLButtonElement> {
+    await page.updateComplete;
+    const button = page.shadowRoot.querySelector(
+      '.v2-rail > .palette-footer > .palette-footer-btn'
+    ) as HTMLButtonElement | null;
+    expect(button).not.toBeNull();
+    return button!;
+  }
+
+  /** The deepest focused element as the click finished dispatching, in the same task. */
+  function focusAtClickEnd(button: HTMLButtonElement): () => Element | null {
+    let focused: Element | null = null;
+    button.addEventListener('click', () => {
+      let el: Element | null = document.activeElement;
+      while (el?.shadowRoot?.activeElement) el = el.shadowRoot.activeElement;
+      focused = el;
+    });
+    return () => focused;
+  }
+
+  function isTextInput(el: Element | null): boolean {
+    return el instanceof HTMLInputElement && el.type === 'text';
+  }
+
+  it('a touch click gives a text field focus within the tap, before any await', async () => {
+    stubNotTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    const button = await footerButton(page);
+    const focusedInTap = focusAtClickEnd(button);
+
+    button.dispatchEvent(
+      new PointerEvent('click', { pointerType: 'touch', bubbles: true, composed: true })
+    );
+
+    // Read synchronously, in the click's own task: no awaited tick.
+    expect(isTextInput(focusedInTap())).toBe(true);
+    expect(focusedInTap()).toBe(document.querySelector('input[data-palette-keyboard-proxy]'));
+    expect(page._paletteInvoker).toBe(button);
+    expect(page._paletteOpenByTouch).toBe(false);
+    await vi.waitFor(() => expect(page.v2PaletteOpen).toBe(true));
+  });
+
+  it('a touch pointerdown before a click that carries no pointerType counts as a tap', async () => {
+    stubNotTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    const button = await footerButton(page);
+    const focusedInTap = focusAtClickEnd(button);
+
+    button.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'touch', bubbles: true }));
+    button.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+
+    expect(isTextInput(focusedInTap())).toBe(true);
+    expect(page._paletteFooterPointerType).toBe('');
+    await vi.waitFor(() => expect(page.v2PaletteOpen).toBe(true));
+  });
+
+  it('a mouse click on a desktop leaves focus on the button, as before', async () => {
+    stubNotTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    const button = await footerButton(page);
+    const focusedInTap = focusAtClickEnd(button);
+
+    button.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'mouse', bubbles: true }));
+    button.dispatchEvent(
+      new PointerEvent('click', { pointerType: 'mouse', bubbles: true, composed: true })
+    );
+
+    expect(focusedInTap()).toBe(button);
+    expect(document.querySelector('input[data-palette-keyboard-proxy]')).toBeNull();
+    await vi.waitFor(() => expect(page.v2PaletteOpen).toBe(true));
+  });
+
+  it('Cmd/Ctrl+K after a stray touch pointerdown does not hold the keyboard on a desktop', async () => {
+    stubNotTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    const button = await footerButton(page);
+    // A pointerdown whose click never came (the finger slid off) must not
+    // leak into the next open.
+    button.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'touch', bubbles: true }));
+
+    page._handleGlobalKeydown(makeKeydownEvent({ metaKey: true }));
+
+    expect(document.querySelector('input[data-palette-keyboard-proxy]')).toBeNull();
+    await vi.waitFor(() => expect(page.v2PaletteOpen).toBe(true));
+  });
+});

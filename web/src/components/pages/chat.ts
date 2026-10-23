@@ -107,7 +107,7 @@ import {
 import { openTerminal, terminalHref, agentGraphHref } from '../../client/open-terminal.js';
 import { hasOpenModalDescendant, isOpenModalElement } from '../shared/open-modal.js';
 import { deepActiveElement } from '../shared/deep-active-element.js';
-import { PaletteTypeahead } from '../shared/palette/palette-typeahead.js';
+import { PaletteTypeahead, primaryPointerIsTouch } from '../shared/palette/palette-typeahead.js';
 import '../shared/chat/chat-thread.js';
 import type { PeerAgentResolvedDetail } from '../shared/chat/chat-thread.js';
 import { ChatPanelHistory, type ChatPanel } from './chat-panel-history.js';
@@ -784,7 +784,21 @@ export class ScionPageChat extends LitElement {
    * {@link PaletteTypeahead}). Started in `_openPalette`, before the
    * first open's lazy import, or when a press queues a reopen.
    */
-  private readonly _paletteTypeahead = new PaletteTypeahead();
+  private readonly _paletteTypeahead = new PaletteTypeahead({
+    holdsKeyboard: () => this._paletteOpenByTouch || primaryPointerIsTouch(),
+  });
+  /**
+   * True only while a quick-switcher button tapped with a finger sends its
+   * open request (see `_handlePaletteFooterClick`), so the type-ahead holds
+   * the on-screen keyboard for that tap even on a phone that does not match
+   * the touch-primary query: several Android phones report hover support or
+   * a fine pointer. Without the hidden field taking focus inside the tap,
+   * the query input takes focus only after the palette shows, too late for
+   * the browser to open the keyboard.
+   */
+  private _paletteOpenByTouch = false;
+  /** The `pointerType` of the latest `pointerdown` on a quick-switcher button, until its click. */
+  private _paletteFooterPointerType = '';
   /**
    * Bumped synchronously at the start of every `_openPalette` call (fresh or
    * dequeued). `_retargetPaletteInvokerToNewComposer` captures this value
@@ -6328,6 +6342,7 @@ export class ScionPageChat extends LitElement {
           aria-haspopup="dialog"
           aria-keyshortcuts=${isTouch ? nothing : keyShortcuts}
           title=${isTouch ? nothing : `Quick switcher (${shortcutLabel})`}
+          @pointerdown=${this._handlePaletteFooterPointerDown}
           @click=${this._handlePaletteFooterClick}
         >
           <sl-icon name="compass" aria-hidden="true"></sl-icon>
@@ -6349,10 +6364,24 @@ export class ScionPageChat extends LitElement {
    */
   private _handlePaletteFooterClick(e: Event): void {
     const btn = e.currentTarget as HTMLElement;
+    // A click is a PointerEvent in current engines; the pointerdown record
+    // covers one that is not.
+    const byTouch =
+      (e as PointerEvent).pointerType === 'touch' || this._paletteFooterPointerType === 'touch';
+    this._paletteFooterPointerType = '';
     btn.focus({ preventScroll: true });
-    btn.dispatchEvent(
-      new CustomEvent(CHAT_PALETTE_OPEN_REQUEST_EVENT, { bubbles: true, composed: true })
-    );
+    this._paletteOpenByTouch = byTouch;
+    try {
+      btn.dispatchEvent(
+        new CustomEvent(CHAT_PALETTE_OPEN_REQUEST_EVENT, { bubbles: true, composed: true })
+      );
+    } finally {
+      this._paletteOpenByTouch = false;
+    }
+  }
+
+  private _handlePaletteFooterPointerDown(e: PointerEvent): void {
+    this._paletteFooterPointerType = e.pointerType;
   }
 
   /** The left rail: the space rail once loaded, else a spinner or a load error. */
