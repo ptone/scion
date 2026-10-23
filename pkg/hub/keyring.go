@@ -39,10 +39,15 @@ const (
 // hub-local (signingKeySourceIsHubLocal): the test admin tier refuses it.
 const SigningKeySourceKeyring = "keyring"
 
+// keyringReleaseCheck refuses keyring files this release does not support
+// (keyring.Keyring.CheckSessionPilot). A variable so tests can build
+// servers on versioned rings; production never changes it.
+var keyringReleaseCheck = (*keyring.Keyring).CheckSessionPilot
+
 // validateKeyringConfig checks a keyring-mode ServerConfig
 // (ptone/scion#1530 Phase 1): the keyring must satisfy this release's
 // session pilot limits, SharedSigningSecret must be its "legacy" signing
-// entry (every purpose but the web session cookies still uses it), and
+// entry (every purpose not yet on the signing ring still uses it), and
 // explicit agent/user JWT signing keys are refused, so no purpose is
 // partly rotated. Legacy mode (no keyring file) is unchanged: explicit
 // signing keys keep their precedence.
@@ -51,7 +56,7 @@ func validateKeyringConfig(cfg ServerConfig) error {
 	if k == nil || k.Source() != keyring.SourceFile {
 		return nil
 	}
-	if err := k.CheckSessionPilot(); err != nil {
+	if err := keyringReleaseCheck(k); err != nil {
 		return err
 	}
 	if legacy, _ := k.Signing().LegacySecret(); cfg.SharedSigningSecret != legacy {
