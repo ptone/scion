@@ -1110,11 +1110,13 @@ func (s *Server) initHubManagedProject(project *store.Project) error {
 // seedSharedProjectIdentity writes the project-id and project-slug files
 // into a shared-backend project configuration directory; a no-op on the
 // local backend, whose .scion keeps its existing form.
+// A project-id naming another project is left unchanged and reported
+// (ensureProjectConfigIdentity); the create goes on.
 func (s *Server) seedSharedProjectIdentity(project *store.Project, scionDir string) error {
 	if !s.workspaceBackendShared() {
 		return nil
 	}
-	if err := writeProjectConfigIdentity(scionDir, project); err != nil {
+	if _, err := s.ensureProjectConfigIdentity(project); err != nil {
 		s.projectsLogger().Warn("failed to write the project identity files on shared workspace storage",
 			"project_id", project.ID, "error", err)
 		return fmt.Errorf("project configuration: %w", errWorkspaceStorageUnavailable)
@@ -1153,24 +1155,6 @@ func (s *Server) ensureProjectConfigDir(project *store.Project, createWorkspace 
 		return "", fmt.Errorf("failed to create .scion directory: %w", err)
 	}
 	return scionDir, nil
-}
-
-// writeProjectConfigIdentity writes the project-id and project-slug files
-// of a shared-backend project configuration directory (design-v7 §P1a;
-// project-slug: fs-cleanup-arch P3b Q7). The files are written through an
-// os.Root opened on scionDir, so an entry that is a symbolic link leading
-// out of it is refused rather than followed. Mode 0644, like project-id
-// elsewhere.
-func writeProjectConfigIdentity(scionDir string, project *store.Project) error {
-	root, err := os.OpenRoot(scionDir)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = root.Close() }()
-	if err := writeRootFile(root, projectkeys.ProjectIDFile, project.ID+"\n"); err != nil {
-		return err
-	}
-	return writeProjectSlugFile(root, project.Slug)
 }
 
 // writeProjectSlugFile writes the project-slug file in root.

@@ -179,6 +179,9 @@ func (s *Server) healthChecks(ctx context.Context) map[string]string {
 	// Check co-located broker registration when this Hub expects one
 	s.checkColocatedBrokerHealth(checks)
 
+	// Project configuration identity on shared backends (non-critical).
+	s.checkProjectConfigIdentityHealth(checks)
+
 	// Audit log writer (non-critical: degraded, never unhealthy).
 	s.checkAuditWriterHealth(checks)
 

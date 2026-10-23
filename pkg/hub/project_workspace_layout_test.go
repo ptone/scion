@@ -409,3 +409,87 @@ func TestProjectWorkspaceFiles_MigrationNoticeAbsentByDefault(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 	assert.NotContains(t, rec.Body.String(), "migrationNotice")
 }
+
+// TestEnsureProjectConfigIdentities_StartupPass pins the hub-start pass
+// (fs-cleanup-arch P3b Q8): for an existing shared-backend project with no
+// <ProjectRoot>/.scion it creates project-id and project-slug; a second
+// pass changes nothing; a stale project-slug is rewritten to the current
+// slug.
+func TestEnsureProjectConfigIdentities_StartupPass(t *testing.T) {
+	f := newWorkspaceLayoutFixture(t)
+	f.useNFS()
+	project := &store.Project{ID: "aaaaaaaa-0000-4000-8000-0000000000d1", Name: "Existing", Slug: "existing"}
+	require.NoError(t, f.s.CreateProject(context.Background(), project))
+	cfgDir := filepath.Join(f.shareBase, "projects", project.ID, ".scion")
+	_, err := os.Stat(cfgDir)
+	require.True(t, os.IsNotExist(err), "fixture check: no project configuration yet")
+
+	counts := f.srv.ensureProjectConfigIdentities(context.Background())
+	assert.Equal(t, 1, counts.ensured)
+	assert.Zero(t, counts.mismatched+counts.failed+counts.notReached)
+	read := func(name string) string {
+		data, err := os.ReadFile(filepath.Join(cfgDir, name))
+		require.NoError(t, err, name)
+		return string(data)
+	}
+	assert.Equal(t, project.ID+"\n", read(projectkeys.ProjectIDFile))
+	assert.Equal(t, "existing\n", read(projectkeys.ProjectSlugFile))
+
+	counts = f.srv.ensureProjectConfigIdentities(context.Background())
+	assert.Equal(t, 1, counts.ensured, "idempotent")
+	assert.Equal(t, project.ID+"\n", read(projectkeys.ProjectIDFile))
+
+	require.NoError(t, os.WriteFile(filepath.Join(cfgDir, projectkeys.ProjectSlugFile), []byte("stale\n"), 0o644))
+	f.srv.ensureProjectConfigIdentities(context.Background())
+	assert.Equal(t, "existing\n", read(projectkeys.ProjectSlugFile), "project-slug is content: rewritten to the current slug")
+
+	checks := map[string]string{}
+	f.srv.checkProjectConfigIdentityHealth(checks)
+	assert.Equal(t, HealthStatusHealthy, checks[projectConfigIdentityHealthKey])
+}
+
+// TestEnsureProjectConfigIdentities_MismatchLeftAndReported: a project-id
+// naming another project is never overwritten; it is reported (counts,
+// degraded health check naming the project), and project-slug is left
+// alone too.
+func TestEnsureProjectConfigIdentities_MismatchLeftAndReported(t *testing.T) {
+	f := newWorkspaceLayoutFixture(t)
+	f.useNFS()
+	project := &store.Project{ID: "aaaaaaaa-0000-4000-8000-0000000000d2", Name: "Mismatch", Slug: "mismatch"}
+	require.NoError(t, f.s.CreateProject(context.Background(), project))
+	cfgDir := filepath.Join(f.shareBase, "projects", project.ID, ".scion")
+	require.NoError(t, os.MkdirAll(cfgDir, 0o755))
+	other := "bbbbbbbb-0000-4000-8000-0000000000d3"
+	require.NoError(t, os.WriteFile(filepath.Join(cfgDir, projectkeys.ProjectIDFile), []byte(other+"\n"), 0o644))
+
+	counts := f.srv.ensureProjectConfigIdentities(context.Background())
+	assert.Equal(t, 1, counts.mismatched)
+	assert.Zero(t, counts.ensured)
+	data, err := os.ReadFile(filepath.Join(cfgDir, projectkeys.ProjectIDFile))
+	require.NoError(t, err)
+	assert.Equal(t, other+"\n", string(data), "a differing project-id is never overwritten")
+	_, err = os.Stat(filepath.Join(cfgDir, projectkeys.ProjectSlugFile))
+	assert.True(t, os.IsNotExist(err), "nothing else is written for a mismatched project")
+
+	checks := map[string]string{}
+	f.srv.checkProjectConfigIdentityHealth(checks)
+	assert.Contains(t, checks[projectConfigIdentityHealthKey], HealthStatusDegraded)
+	assert.Contains(t, checks[projectConfigIdentityHealthKey], project.ID)
+	assert.NotContains(t, checks[projectConfigIdentityHealthKey], f.shareBase, "no host path")
+	assert.Equal(t, HealthStatusDegraded, deriveHealthStatus(checks), "a mismatch degrades, never fails, health")
+}
+
+// TestEnsureProjectConfigIdentities_LocalBackendUnaffected: on the local
+// backend the pass does nothing and adds no health check.
+func TestEnsureProjectConfigIdentities_LocalBackendUnaffected(t *testing.T) {
+	f := newWorkspaceLayoutFixture(t)
+	_, workspacePath := createTestHubManagedProject(t, f.srv, "Local Identity")
+	counts := f.srv.ensureProjectConfigIdentities(context.Background())
+	assert.Equal(t, projectConfigIdentityCounts{}, counts)
+	_, err := os.Stat(filepath.Join(workspacePath, ".scion", projectkeys.ProjectSlugFile))
+	assert.True(t, os.IsNotExist(err))
+	checks := map[string]string{}
+	f.srv.checkProjectConfigIdentityHealth(checks)
+	_, ok := checks[projectConfigIdentityHealthKey]
+	assert.False(t, ok, "no identity check on the local backend")
+}

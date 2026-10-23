@@ -1721,6 +1721,10 @@ type Server struct {
 	// nfsCleanupWG tracks background NFS project tree removals started by
 	// project delete (startHubNFSProjectTreeCleanup), so tests can wait.
 	nfsCleanupWG sync.WaitGroup
+	// projectConfigIdentity records shared-backend projects whose
+	// <ProjectRoot>/.scion/project-id names another project
+	// (project_config_identity health check).
+	projectConfigIdentity projectConfigIdentityState
 
 	// startupLayer1 holds the startup values ApplySnapshot reverts to when
 	// a saved Layer-1 setting is cleared (recordStartupLayer1Values).
@@ -6601,6 +6605,11 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// project ID as the workspace project identity of hub-cloned projects
 	// created with a locally generated one.
 	s.startClonedProjectIdentityAlignment(ctx)
+
+	// Ensure project-id and project-slug in every shared-backend project's
+	// configuration (<ProjectRoot>/.scion), in the background (never
+	// blocks start or readiness; design-v7 §P1a, P3b Q8).
+	s.startProjectConfigIdentityEnsure(ctx)
 
 	// Plan the project storage migration in the background so the Files
 	// tab notice is known early (never blocks start or readiness).
