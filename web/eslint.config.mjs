@@ -282,12 +282,13 @@ export default defineConfig([
         },
         {
           // Lit property bindings (.innerHTML=${…}), a srcdoc attribute
-          // binding (any case) or setAttribute('srcdoc' | 'on…'), object
+          // binding (any case), setAttribute / setAttributeNS with 'srcdoc',
+          // an 'on…' name or a name not written out as a literal, object
           // keys (Object.assign(el, { innerHTML })), and
           // write() on a document reached through another object
           // (window.document.write).
           selector:
-            "TemplateElement[value.raw=/\\.(innerHTML|outerHTML|srcdoc)\\s*=/], TemplateElement[value.raw=/\\bsrcdoc\\s*=\\s*[\"']?$/i], CallExpression[callee.property.name='setAttribute'][arguments.0.value=/^(srcdoc|on)/i], Property[key.name=/^(innerHTML|outerHTML|srcdoc)$/], Property[key.value=/^(innerHTML|outerHTML|srcdoc)$/], CallExpression[callee.object.property.name='document'][callee.property.name=/^(write|writeln)$/]",
+            "TemplateElement[value.raw=/\\.(innerHTML|outerHTML|srcdoc)\\s*=/], TemplateElement[value.raw=/\\bsrcdoc\\s*=\\s*[\"']?$/i], CallExpression[callee.property.name='setAttribute'][arguments.0.value=/^(srcdoc|on)/i], CallExpression[callee.property.name='setAttribute'][arguments.0.type!='Literal'], CallExpression[callee.property.name='setAttributeNS'][arguments.1.value=/^(srcdoc|on)/i], CallExpression[callee.property.name='setAttributeNS'][arguments.1.type!='Literal'], Property[key.name=/^(innerHTML|outerHTML|srcdoc)$/], Property[key.value=/^(innerHTML|outerHTML|srcdoc)$/], CallExpression[callee.object.property.name='document'][callee.property.name=/^(write|writeln)$/]",
           message: 'The review editor must not turn strings into HTML (see eslint.config.mjs).',
         },
         {

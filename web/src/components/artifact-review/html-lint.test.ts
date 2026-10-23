@@ -70,6 +70,11 @@ describe('review editor HTML lint rule', () => {
     ["setAttribute('srcdoc')", "el.setAttribute('srcdoc', s);"],
     ["setAttribute('onclick')", "el.setAttribute('onclick', s);"],
     ["setAttribute('ONLOAD')", "el.setAttribute('ONLOAD', s);"],
+    ['setAttribute with a name from a variable', 'el.setAttribute(name, s);'],
+    ['setAttribute with a template name', 'el.setAttribute(`on${x}`, s);'],
+    ["setAttributeNS(ns, 'onload')", "el.setAttributeNS(null, 'onload', s);"],
+    ["setAttributeNS(ns, 'SRCDOC')", "el.setAttributeNS(null, 'SRCDOC', s);"],
+    ['setAttributeNS with a name from a variable', 'el.setAttributeNS(null, name, s);'],
     ['globalThis.document.writeln', 'globalThis.document.writeln(s);'],
   ])('catches %s', async (_name, code) => {
     expect(await htmlErrors(code)).toBeGreaterThan(0);
@@ -82,6 +87,7 @@ describe('review editor HTML lint rule', () => {
     ['a write method on another object', 'stream.write(s);'],
     ['write on another member', 'window.stream.write(s);'],
     ["setAttribute('title')", "el.setAttribute('title', s);"],
+    ["setAttributeNS(ns, 'href')", "el.setAttributeNS(null, 'href', s);"],
     ['a srcdoc word in template text', 'html`<p>srcdoc is an attribute</p>`;'],
   ])('allows %s', async (_name, code) => {
     expect(await htmlErrors(code)).toBe(0);
