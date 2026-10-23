@@ -24,10 +24,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -678,6 +681,41 @@ func stripJSONComments(data []byte) []byte {
 	return out
 }
 
+// vscodeOnWindows selects the Windows launcher check (checkVSCodeBatchArgs).
+// It is a variable so tests can exercise it on every OS.
+var vscodeOnWindows = runtime.GOOS == "windows"
+
+// vscodeArg is one argument passed to the VS Code CLI, with the flag it
+// belongs to for error messages.
+type vscodeArg struct{ flag, value string }
+
+// checkVSCodeBatchArgs validates the arguments for a VS Code CLI that is a
+// .cmd or .bat file on Windows (VS Code's own bin\code.cmd is). Windows
+// runs such a file through cmd.exe, and os/exec does not escape arguments
+// for cmd.exe, so each argument may contain only ASCII letters and digits,
+// @+=:,./_-, backslashes, spaces, and non-ASCII letters, digits and
+// combining marks. Any other character is an error naming the argument,
+// before VS Code is started. A CLI that is not a .cmd or .bat, and every
+// other OS, is not affected.
+func checkVSCodeBatchArgs(bin string, args []vscodeArg) error {
+	if !vscodeOnWindows {
+		return nil
+	}
+	ext := strings.ToLower(filepath.Ext(bin))
+	if ext != ".cmd" && ext != ".bat" {
+		return nil
+	}
+	for _, a := range args {
+		for _, r := range a.value {
+			if isSSHWordSafe(r) || r == ' ' || r == '\\' || (r >= utf8.RuneSelf && (unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsMark(r))) {
+				continue
+			}
+			return tunnelclient.Errorf(tunnelclient.ExitError, "%s %q contains %q, which cannot be passed to the VS Code launcher %s (a %s file run by cmd.exe); use a profile and home path, and a --path, with only letters, digits, spaces and -._ characters", a.flag, a.value, r, bin, ext)
+		}
+	}
+	return nil
+}
+
 // launchVSCode runs the VS Code CLI on host and folder with the scion user
 // data directory. Any failure to find or start it is exit 1.
 func launchVSCode(ctx context.Context, env *sshCommandEnv, p vscodePaths, host, folder string) error {
@@ -686,6 +724,11 @@ func launchVSCode(ctx context.Context, env *sshCommandEnv, p vscodePaths, host, 
 		return tunnelclient.Errorf(tunnelclient.ExitError, "VS Code CLI %s not found on PATH", vscodeCodeBinary)
 	}
 	args := []string{vscodeUserDataFlag, p.userData(), "--remote", "ssh-remote+" + host, folder}
+	if err := checkVSCodeBatchArgs(bin, []vscodeArg{
+		{vscodeUserDataFlag, p.userData()}, {"--remote", args[3]}, {"--path", folder},
+	}); err != nil {
+		return err
+	}
 	if err := vscodeRunCode(ctx, bin, args, env.stdout, env.stderr); err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {

@@ -16,6 +16,8 @@ package cmd
 
 import (
 	"context"
+	"io"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -143,4 +145,98 @@ func TestRenderSSHHostBlock_WindowsFormIPv6Endpoint(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, block, ` --hub "http://[::1]:9810" --project p a`+"\n")
 	assert.Equal(t, "http://[::1]:9810", vscodeBlockHub(block))
+}
+
+// useVSCodeLauncher makes the VS Code CLI a real file named name in a
+// temporary directory and records the runs, with the Windows launcher
+// check on.
+func useVSCodeLauncher(t *testing.T, name string) (bin string, runs *[][]string) {
+	t.Helper()
+	orig, origLook, origRun := vscodeOnWindows, vscodeLookPath, vscodeRunCode
+	t.Cleanup(func() { vscodeOnWindows, vscodeLookPath, vscodeRunCode = orig, origLook, origRun })
+	vscodeOnWindows = true
+	bin = filepath.Join(t.TempDir(), name)
+	require.NoError(t, os.WriteFile(bin, []byte("@echo off\r\n"), 0o700))
+	var got [][]string
+	vscodeLookPath = func(string) (string, error) { return bin, nil }
+	vscodeRunCode = func(_ context.Context, b string, args []string, _, _ io.Writer) error {
+		got = append(got, append([]string{b}, args...))
+		return nil
+	}
+	return bin, &got
+}
+
+// With the Windows launcher check, a .cmd or .bat VS Code CLI is not
+// started when an argument (the user data directory under the home, or
+// --path) has a character outside the allowlist; the error names the
+// argument. Controls: a plain home starts the .cmd, and a home with '&'
+// starts a CLI that is not a .cmd.
+func TestVSCode_ValidatesArgumentsForCmdLauncher(t *testing.T) {
+	// The unix ProxyCommand form, so only the launcher check refuses (the
+	// Windows form would refuse these homes in the vscode block first).
+	setSSHQuoteForWindows(t, false)
+	hub := twoProjectHub(t, "tok")
+	for _, launcher := range []string{"code.cmd", "CODE.BAT"} {
+		for _, dir := range []string{"a&b", "a%b", "a^b", "a(b)", "a!b"} {
+			_, runs := useVSCodeLauncher(t, launcher)
+			env, _, _ := newSSHTestEnv(t, filepath.Join(t.TempDir(), dir), hub)
+			require.NoError(t, os.MkdirAll(env.home, 0o700))
+			stubVSCodePreflight(t)
+			err := vscodeMain(context.Background(), env, "a/b-c", vscodeDefaultFolder, false)
+			require.Error(t, err, dir)
+			assert.Contains(t, err.Error(), vscodeUserDataFlag, dir)
+			assert.Contains(t, err.Error(), "cannot be passed to the VS Code launcher", dir)
+			assert.Empty(t, *runs, dir)
+		}
+		_, runs := useVSCodeLauncher(t, launcher)
+		env, _, _ := newSSHTestEnv(t, t.TempDir(), hub)
+		stubVSCodePreflight(t)
+		err := vscodeMain(context.Background(), env, "a/b-c", "/work&x", false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--path", launcher)
+		assert.Empty(t, *runs, launcher)
+
+		bin, runs := useVSCodeLauncher(t, launcher)
+		env, _, _ = newSSHTestEnv(t, t.TempDir(), hub)
+		stubVSCodePreflight(t)
+		require.NoError(t, vscodeMain(context.Background(), env, "a/b-c", vscodeDefaultFolder, false), launcher)
+		require.Len(t, *runs, 1)
+		assert.Equal(t, bin, (*runs)[0][0])
+	}
+
+	_, runs := useVSCodeLauncher(t, "code.exe")
+	env, _, _ := newSSHTestEnv(t, filepath.Join(t.TempDir(), "a&b"), hub)
+	require.NoError(t, os.MkdirAll(env.home, 0o700))
+	stubVSCodePreflight(t)
+	require.NoError(t, vscodeMain(context.Background(), env, "a/b-c", vscodeDefaultFolder, false))
+	assert.Len(t, *runs, 1, "a CLI that is not a .cmd is not checked")
+}
+
+// stubVSCodePreflight replaces only the vscode preflight tunnel.
+func stubVSCodePreflight(t *testing.T) {
+	t.Helper()
+	orig := vscodePreflight
+	t.Cleanup(func() { vscodePreflight = orig })
+	vscodePreflight = func(context.Context, string, string, string, io.Writer) error { return nil }
+}
+
+// checkVSCodeBatchArgs is off on other OSes and for a CLI that is not a
+// .cmd or .bat; on the Windows form it accepts paths with backslashes,
+// spaces and non-ASCII letters.
+func TestCheckVSCodeBatchArgs(t *testing.T) {
+	orig := vscodeOnWindows
+	t.Cleanup(func() { vscodeOnWindows = orig })
+	bad := []vscodeArg{{"--path", "/a&b"}}
+	vscodeOnWindows = false
+	require.NoError(t, checkVSCodeBatchArgs(`C:\VS Code\bin\code.cmd`, bad))
+	vscodeOnWindows = true
+	require.NoError(t, checkVSCodeBatchArgs(`C:\VS Code\Code.exe`, bad))
+	require.Error(t, checkVSCodeBatchArgs(`C:\VS Code\bin\code.cmd`, bad))
+	require.NoError(t, checkVSCodeBatchArgs(`C:\VS Code\bin\code.cmd`, []vscodeArg{
+		{vscodeUserDataFlag, `C:\Users\José Núñez\.scion\vscode\user-data`},
+		{"--remote", "ssh-remote+scion.hub.p.a"}, {"--path", "/workspace/sub_dir-1"},
+	}))
+	for _, c := range []string{`"`, "%", "^", "&", "|", "<", ">", "(", ")", "!", "\n", "'", ";", "$", "`"} {
+		require.Error(t, checkVSCodeBatchArgs(`C:\VS Code\bin\code.cmd`, []vscodeArg{{"--path", "/a" + c + "b"}}), "%q", c)
+	}
 }
