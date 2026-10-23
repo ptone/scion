@@ -168,7 +168,7 @@ const loadQuickPalette = () => import('../shared/palette/quick-palette.js');
 /** Longest wait for an idle moment before the quick switcher preloads on a touch device. */
 const PALETTE_PRELOAD_IDLE_TIMEOUT_MS = 5000;
 /** When the quick switcher preloads on a touch device without requestIdleCallback. */
-const PALETTE_PRELOAD_FALLBACK_DELAY_MS = 2000;
+const PALETTE_PRELOAD_FALLBACK_DELAY_MS = 2500;
 
 /**
  * How long a successfully-loaded People or Threads group stays fresh across
@@ -811,6 +811,8 @@ export class ScionPageChat extends LitElement {
    * the browser to open the keyboard.
    */
   private _paletteOpenByTouch = false;
+  /** Imports the quick switcher module (a field, so a test can make it fail). */
+  private _loadQuickPalette: () => Promise<unknown> = loadQuickPalette;
   /** Cancels the idle-time preload of the quick switcher, while one is scheduled. */
   private _cancelPalettePreload: (() => void) | null = null;
   /**
@@ -5051,12 +5053,6 @@ export class ScionPageChat extends LitElement {
     await this._openPalette();
   }
 
-  /** Opens the mounted palette and focuses its query input synchronously (see `_openPalette`). */
-  private _openPaletteInTap(): void {
-    const palette = this._switcherEl as ScionQuickPalette | undefined;
-    palette?.openAndFocusNow();
-  }
-
   /**
    * On a touch-primary device, imports and mounts the quick switcher (closed)
    * once the page is idle, so a tap can open it and focus its query input
@@ -5068,12 +5064,12 @@ export class ScionPageChat extends LitElement {
     const run = (): void => {
       this._cancelPalettePreload = null;
       if (!this.isConnected || this.v2SwitcherLoaded) return;
-      loadQuickPalette().then(
+      this._loadQuickPalette().then(
         () => {
           if (this.isConnected) this.v2SwitcherLoaded = true;
         },
-        // The first open imports it again and reports a failure itself.
-        () => {}
+        // The first open imports it again, and fails loudly if it still can't.
+        (err: unknown) => console.debug('[chat] quick switcher preload failed', err)
       );
     };
     const idle = (window as { requestIdleCallback?: typeof requestIdleCallback })
@@ -5115,7 +5111,7 @@ export class ScionPageChat extends LitElement {
       this._paletteTypeahead.start();
       const mountedAtStart = this.v2SwitcherLoaded;
       if (!this.v2SwitcherLoaded) {
-        await loadQuickPalette();
+        await this._loadQuickPalette();
         this.v2SwitcherLoaded = true;
         // Let <scion-quick-palette> mount and render with open=false first.
         // Shoelace's dialog reacts to `open` transitioning false -> true to
@@ -5135,7 +5131,9 @@ export class ScionPageChat extends LitElement {
       // which is the only focus a home-screen web app on iOS opens the
       // on-screen keyboard for. A first tap before the palette loaded keeps
       // the hidden field that the type-ahead focused above.
-      if (this._paletteOpenByTouch && mountedAtStart) this._openPaletteInTap();
+      if (this._paletteOpenByTouch && mountedAtStart) {
+        (this._switcherEl as ScionQuickPalette | undefined)?.openAndFocusNow();
+      }
       this._startPaletteVisibilityWatchdog();
       this._loadPaletteGroupsOnOpen();
     } catch (err) {
