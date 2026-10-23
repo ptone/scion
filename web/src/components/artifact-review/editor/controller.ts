@@ -21,7 +21,9 @@
  */
 
 import { keymap } from '@milkdown/prose/keymap';
-import type { Node } from '@milkdown/prose/model';
+import { Fragment } from '@milkdown/prose/model';
+import type { Node, Slice } from '@milkdown/prose/model';
+import { Transform } from '@milkdown/prose/transform';
 import { NodeSelection, Plugin, PluginKey, TextSelection } from '@milkdown/prose/state';
 import type { Transaction } from '@milkdown/prose/state';
 import type { EditorView } from '@milkdown/prose/view';
@@ -35,7 +37,7 @@ import { containerClass, policyPlugin } from './policy.js';
 import type { HintKind } from './policy.js';
 import { addComment, commentNumber, editComment, planComment, selectedComment } from './review.js';
 import type { RenderContext } from './safe-render.js';
-import { COMMENT } from './schema.js';
+import { COMMENT, CRITIC_MARK_NAMES } from './schema.js';
 import { ReviewSession } from './session.js';
 import { reconcileComposition, snapshotComposition, trackPlugin } from './track.js';
 import type { CompositionSnapshot } from './track.js';
@@ -164,6 +166,10 @@ export class ReviewController {
           if (!view.composing && event.keyCode !== 229) this.syncSelection();
           return false;
         },
+        // A copy puts the editor's own Markdown of the selection on the
+        // clipboard (marks of the review left out), so a paste, which reads
+        // text as Markdown, gets back what was copied.
+        clipboardTextSerializer: (slice): string => this.sliceMarkdown(slice),
         handleDoubleClickOn: (_view, pos, node): boolean => {
           if (node.type.name !== COMMENT) return false;
           void this.editNote(pos);
@@ -214,6 +220,28 @@ export class ReviewController {
         },
       }),
     });
+  }
+
+  /** The Markdown of a slice, without review marks or comments. */
+  sliceMarkdown(slice: Slice): string {
+    const schema = this.core.view.state.schema;
+    let content = slice.content;
+    let inline = true;
+    content.forEach((n) => {
+      if (!n.isInline) inline = false;
+    });
+    if (inline) content = Fragment.from(schema.nodes.paragraph.create(null, content));
+    const doc = schema.topNodeType.createAndFill(null, content);
+    if (!doc) return slice.content.textBetween(0, slice.content.size, '\n\n');
+    const tr = new Transform(doc);
+    for (const name of CRITIC_MARK_NAMES) tr.removeMark(0, tr.doc.content.size, schema.marks[name]);
+    const comments: number[] = [];
+    tr.doc.descendants((n, pos) => {
+      if (n.type.name === COMMENT) comments.push(pos);
+      return true;
+    });
+    for (const pos of comments.reverse()) tr.delete(pos, pos + 1);
+    return this.core.serialize(tr.doc).replace(/\n+$/, '');
   }
 
   /** Snapshots the document as a composition starts. */

@@ -366,6 +366,37 @@ describe('paste and drop never reach the default paths (S5)', () => {
   });
 });
 
+describe("copying from the editor (S5, the editor's own copies)", () => {
+  /** What a copy of [from, to) puts on the clipboard as text. */
+  function copied(c: ReviewController, from: number, to: number): string {
+    const slice = c.view.state.doc.slice(from, to);
+    return c.view.someProp('clipboardTextSerializer', (f) => f(slice, c.view)) ?? '';
+  }
+  const inner = (c: ReviewController): [number, number] => [
+    1,
+    c.view.state.doc.firstChild!.nodeSize - 1,
+  ];
+
+  it('copies Markdown, so escaped characters paste back literally', async () => {
+    const c = await open('a\\*b\\*c\n');
+    const text = copied(c, ...inner(c));
+    expect(text).toBe('a\\*b\\*c');
+    const d = await open('x\n');
+    d.view.dom.dispatchEvent(pasteEvent({ 'text/plain': text }));
+    expect(d.view.dom.querySelector('em')).toBeNull();
+    expect(d.flush()).toBe('{++a\\*b\\*c++}x\n');
+  });
+
+  it('copies link text with its link, and leaves review marks out', async () => {
+    const c = await open('see [docs](https://ok.example/) {++new++}{>>n<<}\n');
+    const text = copied(c, ...inner(c));
+    expect(text).toBe('see [docs](https://ok.example/) new');
+    const d = await open('x\n');
+    d.view.dom.dispatchEvent(pasteEvent({ 'text/plain': 'see [docs](https://ok.example/)' }));
+    expect(d.view.dom.querySelector('a')?.getAttribute('href')).toBe('https://ok.example/');
+  });
+});
+
 describe('sentinel characters in the text (S6)', () => {
   it('keeps them as text and still reads real marks', async () => {
     const chars = SENTINEL_CANDIDATES.slice(0, 10).join('');
