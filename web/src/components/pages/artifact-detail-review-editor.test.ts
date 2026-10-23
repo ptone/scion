@@ -355,6 +355,26 @@ describe('artifact page: graphical review editor experiment', () => {
     expect(apply).toHaveBeenCalledWith('comment');
   });
 
+  it('keeps the graphical review, and Save takes its text, if the experiment turns off mid-review', async () => {
+    mockFetch();
+    const el = await mount(true);
+    await startReview(el);
+    const editor = $<FakeReviewEditor>(el, 'scion-review-editor')!;
+    editor.next = 'We {++really ++}ship in Q3.\n';
+    window.__SCION_FEATURES__ = { 'hub.artifacts': true, 'web.artifact_review_editor': false };
+    el.requestUpdate();
+    await settle(el);
+    // The layout of the review that is open does not change.
+    expect($(el, 'scion-review-editor')).toBe(editor);
+    expect($(el, 'sl-badge.reviewing')).not.toBeNull();
+    await (el as unknown as { saveReview(): Promise<void> }).saveReview();
+    await settle(el);
+    expect((el as unknown as { reviewText: string }).reviewText).toBe(
+      'We {++really ++}ship in Q3.\n'
+    );
+    expect(writes.length).toBeGreaterThan(0);
+  });
+
   it('stops Save and the switch to Source when the editor cannot write its text', async () => {
     mockFetch();
     const el = await mount(true);

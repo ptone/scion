@@ -300,6 +300,12 @@ export class ScionPageArtifactDetail extends LitElement {
   /** The version a failed Edit publish left pending; the next attempt resumes it. */
   private editPending: PendingPublish | null = null;
   @state() private reviewing = false;
+  /**
+   * Whether the current review opened in the graphical review page. Set
+   * when the review starts, so the page keeps its layout (and Save keeps
+   * taking the editor's text) even if the experiment changes mid-review.
+   */
+  @state() private reviewGraphical = false;
   @state() private reviewText = '';
   @state() private reviewNote = '';
   @state() private reviewBusy = false;
@@ -1076,7 +1082,8 @@ export class ScionPageArtifactDetail extends LitElement {
     this.reviewError = null;
     this.criticView = 'marks';
     this.reviewing = true;
-    if (this.graphicalReview) {
+    this.reviewGraphical = this.graphicalReview;
+    if (this.reviewGraphical) {
       this.clearHint();
       this.reviewView = storedReviewView();
       if (this.reviewView === 'graphical') void this.ensureEditor();
@@ -1179,7 +1186,7 @@ export class ScionPageArtifactDetail extends LitElement {
     const v = this.data?.version;
     const f = this.entry;
     if (!v || !f) return;
-    if (this.graphicalReview && this.reviewView === 'graphical' && !this.takeGraphicalText())
+    if (this.reviewGraphical && this.reviewView === 'graphical' && !this.takeGraphicalText())
       return;
     this.reviewBusy = true;
     this.reviewError = null;
@@ -1397,7 +1404,7 @@ export class ScionPageArtifactDetail extends LitElement {
       ${this.editing
         ? this.renderEditor()
         : this.reviewing
-          ? this.graphicalReview
+          ? this.reviewGraphical
             ? this.renderGraphicalReview()
             : this.renderReview()
           : html`${this.renderReviewNotice()}${this.renderReviewBanner()}${this.renderTabs()}`}
@@ -1541,7 +1548,7 @@ export class ScionPageArtifactDetail extends LitElement {
             </sl-badge>`
           : nothing}
         ${a.ownerDeleted ? ownerDeletedBadge(a.ownerKind) : nothing}
-        ${this.reviewing && this.graphicalReview
+        ${this.reviewing && this.reviewGraphical
           ? html`<sl-badge class="reviewing" pill>
               <sl-icon name="chat-text"></sl-icon>&nbsp;Reviewing
             </sl-badge>`
