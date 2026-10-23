@@ -35,17 +35,23 @@ import {
   docMarkRanges,
   docMarkRuns,
   earlierKept,
-  markKey,
+  keyedMarks,
   marksReadBack,
-  ownRuns,
   sameRuns,
   textMarkRuns,
 } from './guard.js';
 import type { MarkRun } from './guard.js';
-import { consumedAsInSource, docStrings, makeBaseline, savePreserving } from './preserve.js';
+import {
+  consumedAsInSource,
+  docStrings,
+  makeBaseline,
+  savePreserving,
+  sentinelInDefinition,
+} from './preserve.js';
 import type { Baseline } from './preserve.js';
 import { COMMENT, CRITIC_MARK_NAMES } from './schema.js';
 import { LOAD_META } from './track.js';
+import type { HintKind } from './policy.js';
 
 export class ReviewSession {
   private source = '';
@@ -61,6 +67,12 @@ export class ReviewSession {
   private earlier: { start: number; key: string }[] = [];
   /** The source offset of each top-level block. */
   private starts: number[] = [];
+  /**
+   * Blocks of units whose marks could not be told apart (ownMarks could
+   * not align them): the reviewer's own marks there look earlier, so a
+   * refusal there shows the generic hint, never the earlier-review one.
+   */
+  private ownerUnknown = new Set<number>();
 
   constructor(private readonly core: Core) {}
 
@@ -83,13 +95,15 @@ export class ReviewSession {
     if (!a) return false;
     const loaded = loadDocument(md, parse, schema, a);
     if (!loaded) return false;
-    if (!consumedAsInSource(md, a, parseMd, loaded.doc.childCount, loaded.consumed)) return false;
+    if (sentinelInDefinition(md, a, this.core.parseMdRaw)) return false;
+    const held = consumedAsInSource(md, a, parseMd, loaded.doc.childCount, loaded.consumed);
+    if (!held) return false;
     const base = makeBaseline(md, loaded.doc, parseMd, a);
-    const readOnly = this.readOnlyUnits(md, loaded, base);
+    const readOnly = this.readOnlyUnits(md, loaded, base, held);
     if (!readOnly) return false;
     const own =
       baseline === undefined || !base
-        ? { doc: loaded.doc, mine: new Set<number>() }
+        ? { doc: loaded.doc, mine: new Set<number>(), unknown: new Set<number>() }
         : this.ownMarks(loaded.doc, md, baseline, base, readOnly);
     const doc = own.doc;
     const tr = view.state.tr.replaceWith(0, view.state.doc.content.size, doc.content);
@@ -99,10 +113,11 @@ export class ReviewSession {
     this.baseline = makeBaseline(md, view.state.doc, parseMd, a);
     this.source = md;
     this.readOnly = readOnly;
-    this.earlier = parseCritic(md)
-      .filter((x) => x.kind !== 'text' && !own.mine.has(x.start))
-      .map((x) => ({ start: x.start, key: markKey(x) }));
+    this.earlier = keyedMarks(md)
+      .filter((m) => !m.starts.every((st) => own.mine.has(st)))
+      .map((m) => ({ start: m.start, key: m.key }));
     this.starts = this.baseline ? blockStarts(this.baseline) : [];
+    this.ownerUnknown = own.unknown;
     this.dirty = false;
     return true;
   }
@@ -111,11 +126,18 @@ export class ReviewSession {
    * The text part of the load invariant, per unit (blocks joined by a
    * spanning mark): the document's marks (kind, text, note, in order) must
    * be the critic parser's marks of the unit's source range, read in the
-   * whole text. Where they differ because tokens stay text (inside code or
-   * attributes), the unit is read-only and saved from its source; where
-   * they differ for no such reason, null (the editor does not open).
+   * whole text. A unit holding tokens kept as text (held: in code or an
+   * attribute, or a mark around nothing) is read-only and saved from its
+   * source, and its other marks must still match exactly (the parser's
+   * marks minus the held ones). Any other difference: null (the editor
+   * does not open).
    */
-  private readOnlyUnits(md: string, loaded: LoadedDoc, base: Baseline | null): Set<number> | null {
+  private readOnlyUnits(
+    md: string,
+    loaded: LoadedDoc,
+    base: Baseline | null,
+    held: ReadonlySet<number>
+  ): Set<number> | null {
     const out = new Set(loaded.attributeBlocks);
     if (!base) return out;
     const { schema } = this.core;
@@ -125,15 +147,12 @@ export class ReviewSession {
       k = j;
       const nodes: Node[] = [];
       for (let q = i; q <= j; q++) nodes.push(base.nodes[q]);
-      const unit = schema.topNodeType.create(null, nodes);
+      const runs = docMarkRuns(schema.topNodeType.create(null, nodes));
       const end = starts[j] + base.blocks[j].src.length;
-      const want = textMarkRuns(md, this.core.plain, starts[i], end);
-      if (sameRuns(docMarkRuns(unit), want, true)) continue;
-      let reason = false;
-      for (let q = i; q <= j; q++) {
-        if (loaded.attributeBlocks.has(q) || loaded.literalBlocks.has(q)) reason = true;
-      }
-      if (!reason) return null;
+      const plain = this.core.plain;
+      if (sameRuns(runs, textMarkRuns(md, plain, starts[i], end), true)) continue;
+      // The only differences allowed are the held tokens.
+      if (!sameRuns(runs, textMarkRuns(md, plain, starts[i], end, held), true)) return null;
       for (let q = i; q <= j; q++) out.add(q);
     }
     return out;
@@ -147,7 +166,8 @@ export class ReviewSession {
    * offset of the clean reading (a review never moves that offset: its
    * insertions are not in it, its deletions and highlights keep their
    * text). Units are aligned one by one; read-only units are skipped.
-   * Returns the document and the source offsets of the marks it made mine.
+   * Returns the document, the source offsets of the marks it made mine,
+   * and the blocks of the units it could not align (unknown).
    */
   private ownMarks(
     doc: Node,
@@ -155,8 +175,9 @@ export class ReviewSession {
     baseline: string,
     base: Baseline,
     readOnly: Set<number>
-  ): { doc: Node; mine: Set<number> } {
+  ): { doc: Node; mine: Set<number>; unknown: Set<number> } {
     const mine = new Set<number>();
+    const unknown = new Set<number>();
     const earlier = new Map<string, number>();
     for (const x of cleanKeyed(baseline)) earlier.set(x.key, (earlier.get(x.key) ?? 0) + 1);
     const segs = cleanKeyed(md);
@@ -178,7 +199,10 @@ export class ReviewSession {
         const b = blockOf(r);
         return b >= i && b <= j;
       });
-      if (unitSegs.length !== unitRanges.length) continue;
+      if (unitSegs.length !== unitRanges.length) {
+        for (let q = i; q <= j; q++) unknown.add(q);
+        continue;
+      }
       unitSegs.forEach((seg, n) => {
         const left = earlier.get(seg.key) ?? 0;
         if (left > 0) {
@@ -189,7 +213,7 @@ export class ReviewSession {
         for (const r of unitRanges[n]) markMine(tr, r.from, r.to);
       });
     }
-    return { doc: tr.doc, mine };
+    return { doc: tr.doc, mine, unknown };
   }
 
   private unitRange(first: number, last: number): [number, number] {
@@ -227,7 +251,7 @@ export class ReviewSession {
       return (
         !!r &&
         clean(r.md) === clean(this.source) &&
-        earlierKept(this.earlierOf(), r.md, ownRuns(doc))
+        earlierKept(this.earlierOf(), r.md, docMarkRuns(doc))
       );
     }
     const [i, j] = this.unitRange(first, last);
@@ -241,7 +265,7 @@ export class ReviewSession {
     const md = saveDoc(unit, serialize, schema, a).replace(/\n+$/, '');
     if (clean(md) !== clean(src)) return false;
     if (marksReadBack(unit, md, this.core.plain) !== null) return false;
-    return earlierKept(this.earlierOf(i, j), md, ownRuns(unit));
+    return earlierKept(this.earlierOf(i, j), md, docMarkRuns(unit));
   }
 
   /**
@@ -277,6 +301,16 @@ export class ReviewSession {
     return null;
   }
 
+  /**
+   * The hint for an edit refused in block because it touches a mark the
+   * reviewer did not add: the earlier-review hint, or the generic one in a
+   * read-only unit and where own and earlier marks could not be told apart
+   * (so the wording is never wrong for the reviewer).
+   */
+  earlierHint(block: number): HintKind {
+    return this.ownerUnknown.has(block) || this.readOnly.has(block) ? 'generic' : 'earlier';
+  }
+
   /** The read-only top-level blocks, in order. */
   readOnlyBlocks(): number[] {
     return [...this.readOnly].sort((x, y) => x - y);
@@ -301,7 +335,17 @@ export class ReviewSession {
     const doc = view.state.doc;
     const r = savePreserving(doc, this.baseline, serialize, schema, this.readOnly);
     // The save invariant: no earlier mark or note changes.
-    if (!r || !earlierKept(this.earlierOf(), r.md, ownRuns(doc))) return null;
+    if (!r) return null;
+    // The save invariant, per unit the serializer wrote: no earlier mark
+    // or note changes.
+    for (const u of r.units) {
+      const kids: Node[] = [];
+      if (u.i < 0) doc.forEach((n) => kids.push(n));
+      else for (let k = u.i; k <= u.j; k++) kids.push(doc.child(k));
+      const runs = docMarkRuns(this.core.schema.topNodeType.create(null, kids));
+      const before = u.i < 0 ? this.earlierOf() : this.earlierOf(u.i, u.j);
+      if (!earlierKept(before, u.md, runs)) return null;
+    }
     return r.md;
   }
 }

@@ -32,11 +32,13 @@ import type { Node, Schema } from '@milkdown/prose/model';
 import {
   chooseAlphabet,
   criticToSentinelText,
+  readTag,
   sentinelSet,
 } from '../../../utils/critic-sentinels.js';
 import type { SentinelAlphabet } from '../../../utils/critic-sentinels.js';
 import { saveDoc } from './bridge.js';
 import type { Consumed } from './bridge.js';
+import type { MdNode as MdTreeNode } from './create.js';
 
 interface Block {
   src: string;
@@ -68,7 +70,7 @@ export function makeBaseline(
   parseMd: (s: string) => { children: MdNode[] },
   a: SentinelAlphabet
 ): Baseline | null {
-  const { text, starts, ends } = criticToSentinelText(md, a);
+  const { text, starts, ends } = criticToSentinelText(md, a, true);
   const kids = parseMd(text).children;
   if (
     kids.length === 0 ||
@@ -132,15 +134,17 @@ export function savePreserving(
   serialize: (d: Node) => string,
   schema: Schema,
   verbatim: ReadonlySet<number> = new Set()
-): { md: string; rewritten: number } | null {
+): SaveResult | null {
   const a = chooseAlphabet(docStrings(doc));
   if (!a) return null;
   if (!base || doc.childCount !== base.blocks.length) {
     if (verbatim.size > 0) return null;
-    return { md: saveDoc(doc, serialize, schema, a), rewritten: doc.childCount };
+    const whole = saveDoc(doc, serialize, schema, a);
+    return { md: whole, rewritten: doc.childCount, units: [{ i: -1, j: -1, md: whole }] };
   }
   let md = base.lead;
   let rewritten = 0;
+  const units: SaveResult['units'] = [];
   let i = 0;
   while (i < base.blocks.length) {
     let j = i;
@@ -157,27 +161,44 @@ export function savePreserving(
       const kids: Node[] = [];
       for (let k = i; k <= j; k++) kids.push(doc.child(k));
       rewritten += kids.length;
-      md += saveDoc(schema.topNodeType.create(null, kids), serialize, schema, a).replace(
+      const unit = saveDoc(schema.topNodeType.create(null, kids), serialize, schema, a).replace(
         /\n+$/,
         ''
       );
+      units.push({ i, j, md: unit });
+      md += unit;
     }
     md += base.blocks[j].after;
     i = j + 1;
   }
-  return { md, rewritten };
+  return { md, rewritten, units };
+}
+
+/** What savePreserving wrote. */
+export interface SaveResult {
+  md: string;
+  rewritten: number;
+  /**
+   * The units written by the serializer (blocks i..j and their text); the
+   * whole document as i = j = -1 when the blocks do not line up.
+   */
+  units: { i: number; j: number; md: string }[];
 }
 
 /**
- * The load invariant (I1) on what the sentinel pass consumed: every
- * sentinel of md's sentinel form lies inside a top-level block of the
- * Markdown parser's reading (none in the gaps between blocks, where link
- * reference definitions are), and for every top-level block the sentinels
- * consumed while visiting it are exactly the sentinels of that block's
- * source, in order, each comment with its own note. Whatever construct
- * moves a mark or a note (a definition copied to its references, text
- * moved by a parser extension), the editor then refuses to open rather
- * than show it in another place.
+ * The load invariant (I1), positional, on what the sentinel pass consumed
+ * (md opened in the tagged sentinel form, where each note sentinel carries
+ * its comment's ordinal):
+ * - every sentinel lies inside a top-level block of the Markdown parser's
+ *   reading (none in the gaps between blocks, where link reference
+ *   definitions are);
+ * - for every top-level block, the sentinels consumed while visiting it
+ *   are exactly that block's sentinels, in order, and each note was taken
+ *   by its own ordinal: the note the critic parser reads at that
+ *   sentinel's source offset, not the next one in sequence.
+ * Returns the source offsets of the tokens kept as text (in code or an
+ * attribute, or a mark around nothing), or null when the check fails (the
+ * editor then does not open).
  */
 export function consumedAsInSource(
   md: string,
@@ -185,8 +206,8 @@ export function consumedAsInSource(
   parseMd: (s: string) => { children: MdNode[] },
   blockCount: number,
   consumed: Consumed[]
-): boolean {
-  const { text, notes } = criticToSentinelText(md, a);
+): Set<number> | null {
+  const { text, starts } = criticToSentinelText(md, a, true);
   const sentinels = sentinelSet(a);
   const kids = parseMd(text).children;
   const any = [...text].some((c) => sentinels.has(c));
@@ -194,26 +215,63 @@ export function consumedAsInSource(
     kids.length !== blockCount ||
     kids.some((k) => k.position?.start.offset === undefined || k.position?.end.offset === undefined)
   ) {
-    return !any && consumed.length === 0;
+    return !any && consumed.length === 0 ? new Set() : null;
   }
-  const want: Consumed[][] = kids.map(() => []);
-  let note = 0;
+  const want: { ch: string; ordinal?: number; at: number }[][] = kids.map(() => []);
+  let ordinal = 0;
   let k = 0;
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
     if (!sentinels.has(c)) continue;
     while (k < kids.length && kids[k].position!.end.offset! <= i) k++;
-    if (k >= kids.length || kids[k].position!.start.offset! > i) return false;
-    want[k].push(c === a.note ? { block: k, ch: c, note: notes[note++] } : { block: k, ch: c });
+    if (k >= kids.length || kids[k].position!.start.offset! > i) return null;
+    if (c === a.note) {
+      want[k].push({ ch: c, ordinal: ordinal++, at: starts[i] });
+      i += readTag(text, i, a)?.digits ?? 0;
+    } else {
+      want[k].push({ ch: c, at: starts[i] });
+    }
   }
   const got: Consumed[][] = kids.map(() => []);
   for (const x of consumed) {
-    if (x.block < 0 || x.block >= got.length) return false;
+    if (x.block < 0 || x.block >= got.length) return null;
     got[x.block].push(x);
   }
-  return want.every(
-    (w, b) =>
-      w.length === got[b].length &&
-      w.every((x, i) => x.ch === got[b][i].ch && x.note === got[b][i].note)
-  );
+  const held = new Set<number>();
+  for (let b = 0; b < want.length; b++) {
+    if (want[b].length !== got[b].length) return null;
+    for (let i = 0; i < want[b].length; i++) {
+      const w = want[b][i];
+      const g = got[b][i];
+      if (w.ch !== g.ch || w.ordinal !== g.ordinal) return null;
+      if (g.held) held.add(w.at);
+    }
+  }
+  return held;
+}
+
+/**
+ * Whether a sentinel of md's tagged sentinel form lies inside a link
+ * reference definition at any depth (inside a block quote or a list item
+ * too), read from the Markdown parser's tree before its transforms (which
+ * copy definitions onto references and drop them).
+ */
+export function sentinelInDefinition(
+  md: string,
+  a: SentinelAlphabet,
+  parseRaw: (s: string) => MdTreeNode
+): boolean {
+  const { text } = criticToSentinelText(md, a, true);
+  const sentinels = sentinelSet(a);
+  const hit = (n: MdTreeNode): boolean => {
+    if (n.type === 'definition') {
+      const from = n.position?.start.offset;
+      const to = n.position?.end.offset;
+      if (from === undefined || to === undefined) return true;
+      for (let i = from; i < to; i++) if (sentinels.has(text[i])) return true;
+      return false;
+    }
+    return (n.children ?? []).some(hit);
+  };
+  return hit(parseRaw(text));
 }

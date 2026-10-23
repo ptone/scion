@@ -32,6 +32,7 @@ import { Transform } from '@milkdown/prose/transform';
 
 import {
   criticToSentinelText,
+  readTag,
   sentinelSet,
   sentinelTextToCritic,
   tokenOf,
@@ -42,8 +43,12 @@ import type { MarkKey } from './schema.js';
 
 interface Edit {
   pos: number;
+  /** Characters replaced (a note sentinel and its ordinal tag); 1 when absent. */
+  len?: number;
   note?: string;
   literal?: string;
+  /** The consumed entry for this sentinel, marked held when it stays text. */
+  entry?: Consumed;
 }
 
 /** Attribute names in the order their text appears in the Markdown source. */
@@ -66,11 +71,6 @@ export interface SentinelResult {
    */
   attributeBlocks: Set<number>;
   /**
-   * Top-level blocks where a sentinel became literal text (inside code,
-   * a mark around no markable text, or a token whose partner was in code).
-   */
-  literalBlocks: Set<number>;
-  /**
    * Every sentinel the pass consumed, in the order it visited them, with
    * the top-level block it was in and, for a comment, the note it took.
    */
@@ -82,6 +82,10 @@ export interface Consumed {
   block: number;
   ch: string;
   note?: string;
+  /** A note sentinel's ordinal tag (its comment's index in the source), -1 when missing. */
+  ordinal?: number;
+  /** The token stays text (inside code or an attribute, or a mark around nothing). */
+  held?: boolean;
 }
 
 /**
@@ -131,13 +135,18 @@ export function applySentinels(
   let noteIdx = 0;
   const attributeBlocks = new Set<number>();
   const consumed: Consumed[] = [];
-  const takeNote = (block: number, ch: string): string => {
-    const note = notes[noteIdx++] ?? '';
-    consumed.push({ block, ch, note });
-    return note;
+  // A note is taken by the ordinal tag after its sentinel (its own place
+  // in the source), never by the order the parse visits it in.
+  const takeNote = (block: number, ch: string, ordinal: number, held = false): Consumed => {
+    noteIdx++;
+    const entry: Consumed = { block, ch, note: notes[ordinal] ?? '', ordinal, held };
+    consumed.push(entry);
+    return entry;
   };
-  const take = (block: number, ch: string): void => {
-    consumed.push({ block, ch });
+  const take = (block: number, ch: string, held = false): Consumed => {
+    const entry: Consumed = { block, ch, held };
+    consumed.push(entry);
+    return entry;
   };
   const attrEdits: (() => void)[] = [];
   // Restores the sentinels of attrs (in ATTR_ORDER), consuming notes;
@@ -153,13 +162,19 @@ export function applySentinels(
     for (const name of names) {
       const v = attrs[name];
       if (typeof v !== 'string' || ![...v].some((c) => sentinels.has(c))) continue;
-      out[name] = [...v]
-        .map((c) => {
-          if (c === a.note) return `{>>${takeNote(block, c)}<<}`;
-          if (sentinels.has(c)) take(block, c);
-          return tok(c);
-        })
-        .join('');
+      let restored = '';
+      for (let i = 0; i < v.length; i++) {
+        const c = v[i];
+        if (c === a.note) {
+          const tag = readTag(v, i, a);
+          restored += `{>>${takeNote(block, c, tag?.ordinal ?? -1, true).note}<<}`;
+          i += tag?.digits ?? 0;
+          continue;
+        }
+        if (sentinels.has(c)) take(block, c, true);
+        restored += tok(c);
+      }
+      out[name] = restored;
       changed = true;
     }
     return changed ? out : null;
@@ -202,17 +217,26 @@ export function applySentinels(
       const c = t[i];
       if (!sentinels.has(c)) continue;
       const p = pos + i;
-      if (c !== a.note) take(block, c);
+      if (c === a.note) {
+        const tag = readTag(t, i, a);
+        const len = 1 + (tag?.digits ?? 0);
+        const entry = takeNote(block, c, tag?.ordinal ?? -1, code);
+        i += len - 1;
+        if (code) edits.push({ pos: p, len, literal: `{>>${entry.note}<<}`, entry });
+        else edits.push({ pos: p, len, note: entry.note!, entry });
+        continue;
+      }
+      const entry = take(block, c);
       if (code) {
-        if (c === a.note) edits.push({ pos: p, literal: `{>>${takeNote(block, c)}<<}` });
-        else edits.push({ pos: p, literal: tok(c) });
+        entry.held = true;
+        edits.push({ pos: p, literal: tok(c), entry });
         continue;
       }
       const key = open.get(c);
       if (key && state === null) {
         state = key;
         runStart = p + 1;
-        openEdit = { pos: p };
+        openEdit = { pos: p, entry };
         sepEdit = null;
         pending = [];
         edits.push(openEdit);
@@ -220,11 +244,11 @@ export function applySentinels(
         pending.push({ from: runStart, to: p, key: 'subOld' });
         state = 'subNew';
         runStart = p + 1;
-        sepEdit = { pos: p };
+        sepEdit = { pos: p, entry };
         edits.push(sepEdit);
       } else if (state !== null && c === closeOf[state]) {
         pending.push({ from: runStart, to: p, key: state });
-        const closeEdit: Edit = { pos: p };
+        const closeEdit: Edit = { pos: p, entry };
         edits.push(closeEdit);
         if (pending.some((r) => markable(r.from, r.to))) {
           ranges.push(...pending);
@@ -234,11 +258,9 @@ export function applySentinels(
           closeEdit.literal = tok(c);
         }
         state = null;
-      } else if (c === a.note) {
-        edits.push({ pos: p, note: takeNote(block, c) });
       } else {
         // Its partner was inside code: keep the token as written.
-        edits.push({ pos: p, literal: tok(c) });
+        edits.push({ pos: p, literal: tok(c), entry });
       }
     }
     // A link's target and title follow its text in the source: restore
@@ -273,21 +295,19 @@ export function applySentinels(
   for (const r of ranges) {
     if (r.to > r.from) tr.addMark(r.from, r.to, schema.marks[MARKS[r.key]].create());
   }
-  const literalBlocks = new Set<number>();
-  for (const e of edits) {
-    if (e.literal !== undefined) literalBlocks.add(doc0.resolve(e.pos).index(0));
-  }
+  for (const e of edits) if (e.literal !== undefined && e.entry) e.entry.held = true;
   for (const e of edits.reverse()) {
+    const end = e.pos + (e.len ?? 1);
     if (e.literal !== undefined) {
       const marks = tr.doc.resolve(e.pos + 1).marks();
-      tr.replaceWith(e.pos, e.pos + 1, schema.text(e.literal, marks));
+      tr.replaceWith(e.pos, end, schema.text(e.literal, marks));
     } else if (e.note !== undefined) {
-      tr.replaceWith(e.pos, e.pos + 1, schema.nodes[COMMENT].create({ note: e.note }));
+      tr.replaceWith(e.pos, end, schema.nodes[COMMENT].create({ note: e.note }));
     } else {
-      tr.delete(e.pos, e.pos + 1);
+      tr.delete(e.pos, end);
     }
   }
-  return { notesUsed: noteIdx, attributeBlocks, literalBlocks, consumed };
+  return { notesUsed: noteIdx, attributeBlocks, consumed };
 }
 
 interface Item {
@@ -428,7 +448,6 @@ export function sentinelLeft(doc: Node, a: SentinelAlphabet): boolean {
 export interface LoadedDoc {
   doc: Node;
   attributeBlocks: Set<number>;
-  literalBlocks: Set<number>;
   consumed: Consumed[];
 }
 
@@ -443,14 +462,14 @@ export function loadDocument(
   schema: Schema,
   a: SentinelAlphabet
 ): LoadedDoc | null {
-  const { text, notes } = criticToSentinelText(md, a);
+  // The tagged form: each note sentinel carries its comment's ordinal.
+  const { text, notes } = criticToSentinelText(md, a, true);
   const tr = new Transform(parse(text));
   const r = applySentinels(tr, schema, notes, a);
   if (r.notesUsed !== notes.length || sentinelLeft(tr.doc, a)) return null;
   return {
     doc: tr.doc,
     attributeBlocks: r.attributeBlocks,
-    literalBlocks: r.literalBlocks,
     consumed: r.consumed,
   };
 }

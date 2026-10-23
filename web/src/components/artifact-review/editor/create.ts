@@ -49,6 +49,13 @@ export interface MdRoot {
   children: { position?: { start: { offset?: number }; end: { offset?: number } } }[];
 }
 
+/** A node of the Markdown parser's tree, with its type and children. */
+export interface MdNode {
+  type: string;
+  position?: { start: { offset?: number }; end: { offset?: number } };
+  children?: MdNode[];
+}
+
 export interface Core {
   view: EditorView;
   schema: Schema;
@@ -57,6 +64,8 @@ export interface Core {
   /** The text a fragment of inline Markdown shows (marks compare by it). */
   plain(md: string): string;
   parseMd(md: string): MdRoot;
+  /** The Markdown parser's tree before its transforms (link reference definitions still in place). */
+  parseMdRaw(md: string): MdNode;
   destroy(): Promise<void>;
 }
 
@@ -75,7 +84,7 @@ export interface CoreOptions {
  * table repair (tables are not edited in this version), marks cleared
  * around line breaks, and typing between two inline atoms (the browser's
  * own input path records it). Every other preset plugin is listed in
- * KEPT_PLUGINS (editor.test.ts), so an upgrade that adds one fails a test.
+ * KEPT_PLUGINS (track.test.ts), so an upgrade that adds one fails a test.
  */
 export const DROPPED_PLUGIN =
   /^(MILKDOWN_HEADING_ID|MILKDOWN_KEEP_LIST_ORDER|MILKDOWN_KEEP_TABLE_ALIGN_PLUGIN|MILKDOWN_HARDBREAK_MARKS|MILKDOWN_INLINE_NODES_CURSOR|selectingCells)\$\d*$/;
@@ -116,6 +125,7 @@ export async function createCore(opts: CoreOptions): Promise<Core> {
       // quotes) inline, as it is inside a mark.
       plain: (md: string): string => parser(`a ${md}`).textContent.slice(2),
       parseMd: (md: string): MdRoot => remark.runSync(remark.parse(md), md) as unknown as MdRoot,
+      parseMdRaw: (md: string): MdNode => remark.parse(md) as unknown as MdNode,
       destroy: async (): Promise<void> => {
         await editor.destroy();
       },

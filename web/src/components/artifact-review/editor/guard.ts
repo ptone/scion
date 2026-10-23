@@ -183,11 +183,12 @@ export function textMarkRuns(
   text: string,
   plain: (md: string) => string,
   from = 0,
-  to = Infinity
+  to = Infinity,
+  skip: ReadonlySet<number> = new Set()
 ): MarkRun[] {
   const out: MarkRun[] = [];
   for (const s of parseCritic(text)) {
-    if (s.kind === 'text' || s.start < from || s.start >= to) continue;
+    if (s.kind === 'text' || s.start < from || s.start >= to || skip.has(s.start)) continue;
     if (s.kind === 'comment') out.push({ kind: 'comment', text: s.text });
     else if (s.kind === 'substitution') {
       out.push({ kind: 'substitution', text: plain(s.text), next: plain(s.next ?? '') });
@@ -237,22 +238,55 @@ export function markKey(x: { kind: string; text: string; next?: string }): strin
   return `${x.kind}\u0000${x.text}\u0000${x.next ?? ''}`;
 }
 
-/**
- * The save invariant (I2): every earlier mark and note (before, as
- * markKey, in source order) appears unchanged and in the same order in
- * out, and out has exactly own other marks (the reviewer's own, counted in
- * the document).
- */
-export function earlierKept(before: string[], out: string, own: number): boolean {
-  const after = parseCritic(out)
-    .filter((x) => x.kind !== 'text')
-    .map(markKey);
-  let p = 0;
-  for (const k of after) if (p < before.length && k === before[p]) p++;
-  return p === before.length && after.length - before.length === own;
+/** A mark of a text as the save invariant compares it. */
+export interface KeyedMark {
+  key: string;
+  /** Source offset of the mark (of the highlight, for a folded pair). */
+  start: number;
+  /** Source offsets of every segment folded into it. */
+  starts: number[];
 }
 
-/** The number of this session's own mark runs and comments in a document. */
-export function ownRuns(doc: Node): number {
-  return docMarkRuns(doc).filter((r) => r.mine).length;
+/**
+ * The marks of md in order, as the save invariant compares them: a
+ * highlight directly followed by a comment is ONE mark (the comment is
+ * that highlight's note), so a note placed between them changes the key.
+ */
+export function keyedMarks(md: string): KeyedMark[] {
+  const segs = parseCritic(md).filter((x) => x.kind !== 'text');
+  const out: KeyedMark[] = [];
+  for (let i = 0; i < segs.length; i++) {
+    const s = segs[i];
+    const n = segs[i + 1];
+    if (s.kind === 'highlight' && n?.kind === 'comment' && n.start === s.end) {
+      out.push({
+        key: `${markKey(s)}\u0000${markKey(n)}`,
+        start: s.start,
+        starts: [s.start, n.start],
+      });
+      i++;
+      continue;
+    }
+    out.push({ key: markKey(s), start: s.start, starts: [s.start] });
+  }
+  return out;
+}
+
+/**
+ * The save invariant (I2), exact: out's marks are aligned index by index
+ * with the document's runs (runs, as the read-back compares them); the
+ * marks whose runs are this session's own are dropped, and what is left
+ * must equal before (the earlier marks, keyed by keyedMarks) exactly. A
+ * folded highlight and comment count as own only when both are. Returns
+ * false when out's marks do not align with runs.
+ */
+export function earlierKept(before: string[], out: string, runs: MarkRun[]): boolean {
+  const segs = parseCritic(out).filter((x) => x.kind !== 'text');
+  if (segs.length !== runs.length) return false;
+  const mineAt = new Map<number, boolean>();
+  segs.forEach((s, i) => mineAt.set(s.start, runs[i].mine === true));
+  const kept = keyedMarks(out)
+    .filter((m) => !m.starts.every((st) => mineAt.get(st)))
+    .map((m) => m.key);
+  return kept.length === before.length && kept.every((k, i) => k === before[i]);
 }

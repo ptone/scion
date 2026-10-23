@@ -192,11 +192,19 @@ export function touchesEarlier(doc: Node, from: number, to: number): boolean {
   return kb === ka || (kb === 'subOld' && ka === 'subNew');
 }
 
+/**
+ * The hint for an edit refused because it would change a mark the
+ * reviewer did not add, by top-level block: 'earlier', or 'generic' where
+ * the editor could not tell the reviewer's own marks from earlier ones.
+ */
+export type EarlierHint = (block: number) => HintKind;
+
 /** Decides a transaction: allow it, or refuse it with a hint. */
 export function decide(
   tr: Transaction,
   before: EditorState,
-  unitOk: UnitCheck = () => true
+  unitOk: UnitCheck = () => true,
+  earlierHint: EarlierHint = () => 'earlier'
 ): HintKind | null {
   if (isExempt(tr)) return null;
   const cls = classify(tr, before);
@@ -204,7 +212,9 @@ export function decide(
   if (rule.action === 'refuse') return rule.hint;
   // A tracked class is a single ReplaceStep (classify).
   const step = tr.steps[0] as ReplaceStep & { from: number; to: number };
-  if (touchesEarlier(before.doc, step.from, step.to)) return 'earlier';
+  if (touchesEarlier(before.doc, step.from, step.to)) {
+    return earlierHint(before.doc.resolve(step.from).index(0));
+  }
   // The edit will be tracked: check that the tracked result keeps the clean reading.
   const tracked = trackTransaction(tr, before);
   if (!tracked) return 'generic';
@@ -219,11 +229,15 @@ export function decide(
 export const policyKey = new PluginKey('criticPolicy');
 
 /** The suggest-mode filter. onRefuse is told the hint of each refused edit. */
-export function policyPlugin(onRefuse: (hint: HintKind) => void, unitOk?: UnitCheck): Plugin {
+export function policyPlugin(
+  onRefuse: (hint: HintKind) => void,
+  unitOk?: UnitCheck,
+  earlierHint?: EarlierHint
+): Plugin {
   return new Plugin({
     key: policyKey,
     filterTransaction(tr, state): boolean {
-      const hint = decide(tr, state, unitOk);
+      const hint = decide(tr, state, unitOk, earlierHint);
       if (hint === null) return true;
       onRefuse(hint);
       return false;

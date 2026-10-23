@@ -38,7 +38,7 @@
 
 import { parseCritic } from './critic.js';
 
-/** The ten sentinels of one document. */
+/** The twelve sentinels of one document. */
 export interface SentinelAlphabet {
   insOpen: string;
   insClose: string;
@@ -50,6 +50,13 @@ export interface SentinelAlphabet {
   hlOpen: string;
   hlClose: string;
   note: string;
+  /**
+   * Binary digits that, in the form the editor opens (tagged), follow
+   * each note sentinel with that comment's ordinal, so the editor takes
+   * every note from its own place in the source.
+   */
+  tag0: string;
+  tag1: string;
 }
 
 const ROLES: (keyof SentinelAlphabet)[] = [
@@ -63,6 +70,8 @@ const ROLES: (keyof SentinelAlphabet)[] = [
   'hlOpen',
   'hlClose',
   'note',
+  'tag0',
+  'tag1',
 ];
 
 /**
@@ -79,14 +88,14 @@ export const SENTINEL_CANDIDATES: readonly string[] = [
 ].map((c) => String.fromCodePoint(c));
 
 /**
- * The alphabet for md: the first ten candidates md does not contain, or
- * null when fewer than ten are free (the editor then does not open).
+ * The alphabet for md: the first twelve candidates md does not contain,
+ * or null when fewer than twelve are free (the editor then does not open).
  */
 export function chooseAlphabet(md: string): SentinelAlphabet | null {
   return alphabetOf(SENTINEL_CANDIDATES.filter((c) => !md.includes(c)));
 }
 
-/** The alphabet made of the first ten of chars, or null when there are fewer. */
+/** The alphabet made of the first twelve of chars, or null when there are fewer. */
 export function alphabetOf(chars: readonly string[]): SentinelAlphabet | null {
   if (chars.length < ROLES.length) return null;
   const a = {} as SentinelAlphabet;
@@ -102,13 +111,14 @@ export function alphabetOf(chars: readonly string[]): SentinelAlphabet | null {
  * The sentinel form drops comment notes, so text the parser keeps literal
  * in md (inside raw HTML or indented code that a note opens) can decode in
  * the sentinel form, for example a character reference to a candidate.
- * So a probe alphabet (the last ten candidates free in md) builds the
+ * So a probe alphabet (the last twelve candidates free in md) builds the
  * sentinel form first; every candidate the parser yields from it, other
  * than the probe's own, came from the source and is excluded. Swapping one
  * candidate for another does not change how the text parses (all are
  * punctuation with no Markdown meaning), so the real sentinel form parses
  * the same way. shown(text) returns every string the parser yields for
- * text. Needs twenty free candidates; null otherwise.
+ * text (the tagged form, as the editor opens it). Needs twenty-four free
+ * candidates; null otherwise.
  */
 export function chooseOpeningAlphabet(
   md: string,
@@ -118,7 +128,7 @@ export function chooseOpeningAlphabet(
   if (free.length < 2 * ROLES.length) return null;
   const probeChars = free.slice(-ROLES.length);
   const probe = alphabetOf(probeChars)!;
-  const yielded = shown(criticToSentinelText(md, probe).text);
+  const yielded = shown(criticToSentinelText(md, probe, true).text);
   return alphabetOf(free.slice(0, -ROLES.length).filter((c) => !yielded.includes(c)));
 }
 
@@ -153,8 +163,16 @@ export interface SentinelText {
   ends: number[];
 }
 
-/** Converts md to its sentinel form under alphabet a. */
-export function criticToSentinelText(md: string, a: SentinelAlphabet): SentinelText {
+/**
+ * Converts md to its sentinel form under alphabet a. With tagged, each
+ * note sentinel is followed by the comment's ordinal (0, 1, …) in binary
+ * digits tag0/tag1, which stand for no source text.
+ */
+export function criticToSentinelText(
+  md: string,
+  a: SentinelAlphabet,
+  tagged = false
+): SentinelText {
   const out: string[] = [];
   const notes: string[] = [];
   const starts: number[] = [];
@@ -198,11 +216,34 @@ export function criticToSentinelText(md: string, a: SentinelAlphabet): SentinelT
       }
       case 'comment':
         put(a.note, s.start, s.end);
+        if (tagged) {
+          for (const d of notes.length.toString(2)) put(d === '0' ? a.tag0 : a.tag1, s.end, s.end);
+        }
         notes.push(s.text);
         break;
     }
   }
   return { text: out.join(''), notes, starts, ends };
+}
+
+/**
+ * Reads the ordinal tag that follows a note sentinel at text[at] (tagged
+ * form): the ordinal and the number of digits, or null when there is none.
+ */
+export function readTag(
+  text: string,
+  at: number,
+  a: SentinelAlphabet
+): { ordinal: number; digits: number } | null {
+  let n = 0;
+  let digits = 0;
+  for (let i = at + 1; i < text.length; i++) {
+    const c = text[i];
+    if (c !== a.tag0 && c !== a.tag1) break;
+    n = n * 2 + (c === a.tag1 ? 1 : 0);
+    digits++;
+  }
+  return digits ? { ordinal: n, digits } : null;
 }
 
 /** Converts sentinel text back to CriticMarkup, taking comment notes in order. */

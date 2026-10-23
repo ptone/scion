@@ -518,6 +518,9 @@ describe('sentinel characters in the text (S6)', () => {
     ['[a][r] [b][r] {>>X<<}\n\n[r]: /p "{>>R<<}"\n[q]: /p "{>>Q<<}"', 'refuses'],
     ['see <http://a.example/{>>A<<}> here {>>B<<}\n\n[u]: /x "{>>C<<}"', 'refuses'],
     ['[u]: /x "{++"\n\nhello ++} world', 'refuses'],
+    // A definition inside the same block quote or list item as its reference.
+    ['> [t][r] {>>B<<}\n>\n> [r]: /p "{>>A<<}"', 'refuses'],
+    ['- [t][r] {>>B<<}\n\n  [r]: /p "{>>A<<}"', 'refuses'],
     // A link whose text ends in an image: its target is not restored, so
     // the document does not open (kept deliberately; it fails safe).
     ['[![b](i.png)](https://x.example/{++y++}) and {++real two++}', 'refuses'],
@@ -536,6 +539,10 @@ describe('sentinel characters in the text (S6)', () => {
     const c = await open(md, hints);
     expect(c.readOnlyBlocks()).toEqual([0, 1, 2]);
     const dom = c.view.dom;
+    // The marks inside attributes show as written, each with its own note.
+    const raw = Array.from(dom.querySelectorAll('code.raw-html')).map((e) => e.textContent);
+    expect(raw.join('\n')).toContain('{>>one<<}');
+    expect(raw.join('\n')).toContain('{>>two<<}');
     const labels = Array.from(dom.querySelectorAll('.critic-comment')).map((e) =>
       e.getAttribute('aria-label')
     );

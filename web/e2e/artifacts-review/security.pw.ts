@@ -40,11 +40,15 @@ import {
 const MARKER = 'window.__pwned=1';
 
 /**
- * Request types only the app shell makes (its web font stylesheet and font
- * files); artifact content can request images at most, so an artifact
- * image on a font host still counts.
+ * The app shell's own web fonts (the page the hub serves links them,
+ * pkg/hub/web.go): a stylesheet from fonts.googleapis.com and font files
+ * from fonts.gstatic.com. Only those requests, of those types, are not
+ * artifact content; any other foreign request counts, whatever its type.
  */
-const SHELL_TYPES = new Set(['font', 'stylesheet']);
+const SHELL_FONTS: Record<string, Set<string>> = {
+  'fonts.googleapis.com': new Set(['stylesheet']),
+  'fonts.gstatic.com': new Set(['font']),
+};
 
 const FIXTURE = [
   '# Fixture',
@@ -201,7 +205,7 @@ test('artifact text renders only as the rules allow, and a paste is read as plai
     if (u.startsWith('data:') || u.startsWith('blob:') || u.startsWith('about:')) return;
     const url = new URL(u);
     // The app shell's own web fonts are not artifact content.
-    if (SHELL_TYPES.has(r.resourceType())) return;
+    if (SHELL_FONTS[url.hostname]?.has(r.resourceType())) return;
     if (url.origin !== origin) foreign.push(u);
   });
   page.on('dialog', (d) => {
@@ -342,6 +346,8 @@ const REFUSED = [
   '[a][r] [b][r] {>>X<<}\n\n[r]: /p "{>>R<<}"\n[q]: /p "{>>Q<<}"\n',
   'see <http://a.example/{>>A<<}> here {>>B<<}\n\n[u]: /x "{>>C<<}"\n',
   '[u]: /x "{++"\n\nhello ++} world\n',
+  '> [t][r] {>>B<<}\n>\n> [r]: /p "{>>A<<}"\n',
+  '- [t][r] {>>B<<}\n\n  [r]: /p "{>>A<<}"\n',
   '[![b](img/dot.png)](https://x.example/{++y++}) and {++real two++}\n',
 ];
 

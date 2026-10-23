@@ -131,7 +131,7 @@ export class ReviewController {
       render: opts.render,
       plugins: () => [
         pastePlugin((md) => parse(md), onRefuse),
-        policyPlugin(onRefuse, unitOk),
+        policyPlugin(onRefuse, unitOk, (block) => this.session.earlierHint(block)),
         trackPlugin(),
         this.uiPlugin(),
         keymap({
@@ -351,7 +351,8 @@ export class ReviewController {
       if (container === 'code') return 'code';
       if (container) return 'list-table';
       // The same hint as for typing at that place.
-      if (touchesEarlier(before, at, at)) return 'earlier';
+      if (touchesEarlier(before, at, at))
+        return this.session.earlierHint(before.resolve(at).index(0));
       const i = doc.resolve(pos).index(0);
       return this.session.unitOk(doc, i, i) ? null : 'generic';
     });

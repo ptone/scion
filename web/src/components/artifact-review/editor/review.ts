@@ -82,7 +82,8 @@ export function planComment(state: EditorState): CommentPlan | { refuse: HintKin
 /**
  * Where a note placed at pos goes so it does not split a mark: pos itself,
  * or the end of the critic run pos is strictly inside (a replacement's two
- * sides are one run), after the comment of a highlight run.
+ * sides are one run), after the comment of a highlight run; at the seam
+ * between a highlight and its comment, after that comment.
  */
 export function afterRun(state: EditorState, pos: number): number {
   const $p = state.doc.resolve(pos);
@@ -90,6 +91,8 @@ export function afterRun(state: EditorState, pos: number): number {
   const before = $p.nodeBefore;
   const after = $p.nodeAfter;
   if (!before || !after) return pos;
+  // At the seam between a highlight and its comment: after the comment.
+  if (after.type.name === COMMENT && markKeyOf(before.marks) === 'hl') return pos + 1;
   const same = (a: string | null, b: string | null): boolean =>
     !!a && !!b && (a === b || (a === 'subOld' && b === 'subNew'));
   let key = runKeyOf(before.marks);

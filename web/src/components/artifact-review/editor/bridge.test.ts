@@ -23,8 +23,9 @@ import { loadDoc, loadDocument, saveDoc, sentinelLeft } from './bridge.js';
 import type { Consumed } from './bridge.js';
 import { consumedAsInSource } from './preserve.js';
 import { MARKS } from './schema.js';
-import type { Core } from './create.js';
-import { docMarkKinds, earlierKept, markKey, marksReadBack, textMarkKinds } from './guard.js';
+import type { Core, MdNode } from './create.js';
+import { docMarkKinds, earlierKept, keyedMarks, marksReadBack, textMarkKinds } from './guard.js';
+import type { MarkRun } from './guard.js';
 import { parseCritic, projectCritic } from '../../../utils/critic.js';
 import { ReviewSession } from './session.js';
 import { corpus, destroyCores, makeCore } from './__fixtures__/core.js';
@@ -194,32 +195,150 @@ describe('load invariant (I1)', () => {
     const a = chooseAlphabet(md)!;
     const loaded = loadDocument(md, core.parse, core.schema, a)!;
     const ok = (c: Consumed[]): boolean =>
-      consumedAsInSource(md, a, core.parseMd, loaded.doc.childCount, c);
+      consumedAsInSource(md, a, core.parseMd, loaded.doc.childCount, c) !== null;
     expect(ok(loaded.consumed)).toBe(true);
-    const notes = loaded.consumed.map((x) => ({ ...x }));
-    const withNotes = notes.filter((x) => x.note !== undefined);
-    const first = withNotes[0].note!;
-    withNotes[0].note = withNotes[1].note!;
-    withNotes[1].note = first;
-    expect(ok(notes)).toBe(false);
+    // Each note must be the one at its own source place (its ordinal).
+    const swapped = loaded.consumed.map((x) => ({ ...x }));
+    const withNotes = swapped.filter((x) => x.ordinal !== undefined);
+    const first = withNotes[0].ordinal!;
+    withNotes[0].ordinal = withNotes[1].ordinal!;
+    withNotes[1].ordinal = first;
+    expect(ok(swapped)).toBe(false);
     expect(ok(loaded.consumed.map((x, i) => (i === 0 ? { ...x, block: 1 } : x)))).toBe(false);
     expect(ok(loaded.consumed.slice(1))).toBe(false);
     expect(ok([...loaded.consumed, loaded.consumed[0]])).toBe(false);
   });
 });
 
+describe('load invariant (I1), read-only units', () => {
+  // A block with a mark token inside a link title is read-only; its other
+  // marks must still be the critic parser's.
+  const md = '[l](u "{++x++}") and {++real++}\n';
+
+  it('opens the read-only unit with the real parser', () => {
+    const s = new ReviewSession(core);
+    expect(s.load(md)).toBe(true);
+    expect(s.readOnlyBlocks()).toEqual([0]);
+  });
+
+  it('refuses when a broken parser changes the text of a mark in an editable unit', () => {
+    const src = 'one {++real++} two\n';
+    expect(new ReviewSession(core).load(src)).toBe(true);
+    const broken = { ...core, parse: (t: string): Node => core.parse(t.replace('real', 'fake')) };
+    expect(new ReviewSession(broken).load(src)).toBe(false);
+  });
+
+  it('refuses when a broken parser changes another mark of that unit', () => {
+    const broken = { ...core, parse: (t: string): Node => core.parse(t.replace('real', 'fake')) };
+    expect(new ReviewSession(broken).load(md)).toBe(false);
+  });
+});
+
+describe('load invariant (I1), notes by place', () => {
+  // A link reference definition inside the same block quote or list item
+  // as its reference: the parser copies its title (with a note) onto the
+  // link, before later text of the same block.
+  const nested = [
+    '> [t][r] {>>B<<}\n>\n> [r]: /p "{>>A<<}"\n',
+    '- [t][r] {>>B<<}\n\n  [r]: /p "{>>A<<}"\n',
+  ];
+
+  it('refuses a definition holding a note at any depth', () => {
+    for (const md of nested) expect(new ReviewSession(core).load(md), md).toBe(false);
+  });
+
+  it('refuses a mark token between blocks with the definition check off', () => {
+    // An unused definition holding an insertion's opening token.
+    const md = '[u]: /x "{++"\n\nhello ++} world\n';
+    expect(new ReviewSession(core).load(md)).toBe(false);
+    const s = new ReviewSession({
+      ...core,
+      parseMdRaw: (): MdNode => ({ type: 'root', children: [] }),
+    });
+    expect(s.load(md)).toBe(false);
+  });
+
+  it('refuses the same documents by the note ordinals alone (definition check off)', () => {
+    for (const md of nested) {
+      const s = new ReviewSession({
+        ...core,
+        parseMdRaw: (): MdNode => ({ type: 'root', children: [] }),
+      });
+      expect(s.load(md), md).toBe(false);
+    }
+  });
+
+  it('takes every note from its own place: a tag that says otherwise refuses', () => {
+    const md = 'one {>>A<<} two {>>B<<}\n';
+    const a = chooseAlphabet(md)!;
+    // A parser that swaps the two ordinal tags (the notes would swap).
+    const swapTags = (t: string): Node => {
+      const i = t.indexOf(a.note);
+      const j = t.indexOf(a.note, i + 1);
+      const chars = [...t];
+      [chars[i + 1], chars[j + 1]] = [chars[j + 1], chars[i + 1]];
+      return core.parse(chars.join(''));
+    };
+    const loaded = loadDocument(md, swapTags, core.schema, a)!;
+    expect(loaded).not.toBeNull();
+    const labels: string[] = [];
+    loaded.doc.descendants((n) => {
+      if (n.type.name === 'critic_comment') labels.push(String(n.attrs.note));
+      return true;
+    });
+    expect(labels).toEqual(['B', 'A']);
+    expect(
+      consumedAsInSource(md, a, core.parseMd, loaded.doc.childCount, loaded.consumed)
+    ).toBeNull();
+    // Positive control: the real parser.
+    const real = loadDocument(md, core.parse, core.schema, a)!;
+    expect(
+      consumedAsInSource(md, a, core.parseMd, real.doc.childCount, real.consumed)
+    ).not.toBeNull();
+  });
+});
+
 describe('save invariant (I2)', () => {
-  it('earlierKept: earlier marks unchanged and in order, plus exactly the own ones', () => {
-    const before = parseCritic('a {++x++} b {>>n<<}')
+  // The document's runs for out, as the read-back aligns them: only the
+  // count and which runs are the reviewer's own matter here.
+  const runs = (out: string, mine: boolean[]): MarkRun[] =>
+    parseCritic(out)
       .filter((x) => x.kind !== 'text')
-      .map(markKey);
-    expect(earlierKept(before, 'a {++x++} b {>>n<<}', 0)).toBe(true);
-    expect(earlierKept(before, 'a {++x++} {--b--} {>>n<<}{>>mine<<}', 2)).toBe(true);
-    expect(earlierKept(before, 'a {++y++} b {>>n<<}', 0)).toBe(false);
-    expect(earlierKept(before, 'a {++x++} b {>>m<<}', 0)).toBe(false);
-    expect(earlierKept(before, 'a b {>>n<<}{++x++}', 0)).toBe(false);
-    expect(earlierKept(before, 'a {++x++} b {>>n<<}{++z++}', 0)).toBe(false);
-    expect(earlierKept(before, 'a {++x++} b', 1)).toBe(false);
+      .map((x, i) => ({ kind: x.kind as MarkRun['kind'], text: '', mine: mine[i] }));
+  const keys = (md: string): string[] => keyedMarks(md).map((m) => m.key);
+  const kept = (before: string, out: string, mine: boolean[]): boolean =>
+    earlierKept(keys(before), out, runs(out, mine));
+
+  it('earlierKept: the earlier marks exactly, once the own ones are dropped', () => {
+    const src = 'a {++x++} b {==h==}{>>n<<}';
+    expect(kept(src, src, [false, false, false])).toBe(true);
+    expect(
+      kept(src, 'a {++x++} {--b--} {==h==}{>>n<<}{>>mine<<}', [false, true, false, false, true])
+    ).toBe(true);
+    expect(kept(src, 'a {++y++} b {==h==}{>>n<<}', [false, false, false])).toBe(false);
+    expect(kept(src, 'a {++x++} b {==h==}{>>m<<}', [false, false, false])).toBe(false);
+    expect(kept(src, 'a b {==h==}{>>n<<}{++x++}', [false, false, false])).toBe(false);
+    expect(kept(src, 'a {++x++} b {==h==}{>>n<<}{++z++}', [false, false, false, false])).toBe(
+      false
+    );
+    expect(kept(src, 'a {++x++} b', [false])).toBe(false);
+    // Not aligned with the document's runs.
+    expect(earlierKept(keys(src), src, runs(src, [false, false, false]).slice(1))).toBe(false);
+  });
+
+  it('earlierKept: a highlight and its comment are one mark', () => {
+    // A note placed between an earlier highlight and its comment.
+    expect(kept('{==x==}{>>n<<}', '{==x==}{>>m<<}{>>n<<}', [false, true, false])).toBe(false);
+    // Positive control: the own note after the pair.
+    expect(kept('{==x==}{>>n<<}', '{==x==}{>>n<<}{>>m<<}', [false, false, true])).toBe(true);
+    // An own note joined to an earlier lone highlight changes that mark.
+    expect(kept('{==x==} y', '{==x==}{>>m<<} y', [false, true])).toBe(false);
+  });
+
+  it("earlierKept: an own mark with an earlier mark's key does not stand in for it", () => {
+    expect(kept('a {++x++}', 'a {++y++} {++x++}', [false, true])).toBe(false);
+    // Positive control: an own mark beside an unchanged identical earlier one.
+    expect(kept('a {++x++}', 'a {++x++} {++x++}', [false, true])).toBe(true);
   });
 
   // An edit beside an earlier insertion whose text a broken serializer
@@ -232,6 +351,35 @@ describe('save invariant (I2)', () => {
     v.dispatch(v.state.tr.insert(end, c.schema.text(' Z', [mark])));
     s.markDirty();
   };
+
+  it('refuses when the serializer rewrites the earlier mark and writes the own one like it', () => {
+    // The own insertion is an emphasised x, as the earlier one is; the
+    // broken serializer rewrites only the first.
+    const src = 'a {++*x*++} b\n';
+    const broken = {
+      ...core,
+      serialize: (d: Node): string => core.serialize(d).replace('*x*', '_x_'),
+    };
+    const s = new ReviewSession(broken);
+    expect(s.load(src)).toBe(true);
+    const v = core.view;
+    const end = v.state.doc.child(0).nodeSize - 1;
+    const ins = core.schema.marks[MARKS.ins].create({ mine: true });
+    const em = core.schema.marks.emphasis.create();
+    v.dispatch(v.state.tr.insert(end, core.schema.text('x', [em, ins])));
+    s.markDirty();
+    expect(s.unitOk(v.state.doc, 0, 0)).toBe(false);
+    expect(s.save()).toBeNull();
+    // Positive control: the real serializer.
+    const ok = new ReviewSession(core);
+    expect(ok.load(src)).toBe(true);
+    v.dispatch(
+      v.state.tr.insert(v.state.doc.child(0).nodeSize - 1, core.schema.text('x', [em, ins]))
+    );
+    ok.markDirty();
+    expect(ok.unitOk(v.state.doc, 0, 0)).toBe(true);
+    expect(ok.save()).toBe('a {++*x*++} b{++*x*++}\n');
+  });
 
   it('saves the edit with the real serializer', () => {
     const s = new ReviewSession(core);

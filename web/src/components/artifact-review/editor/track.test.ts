@@ -23,6 +23,7 @@ import type { Transaction } from '@milkdown/prose/state';
 import { onlyMarksChanged, projectCritic } from '../../../utils/critic.js';
 import { ReviewController, scrollToHeading } from './controller.js';
 import type { NoteRequest } from './controller.js';
+import { decide } from './policy.js';
 import type { HintKind } from './policy.js';
 import { corpus, renderContext } from './__fixtures__/core.js';
 
@@ -199,6 +200,31 @@ describe('track changes (inline)', () => {
     // Positive control: the next block takes edits; the first is written as it was.
     type(c, 'Z', posOf(c, 'next'));
     expect(text(c)).toBe('a {++++} b\n\n{++Z++}next para\n');
+  });
+
+  it('a refusal in a read-only unit uses the generic hint, even beside a mark', async () => {
+    const md = 'a {++++} b {++x++} c\n';
+    const { c, hints } = await open(md);
+    expect(c.readOnlyBlocks()).toEqual([0]);
+    backspace(c, posOf(c, 'x', 1));
+    type(c, 'Q', posOf(c, ' c'));
+    expect(hints).toEqual(['generic', 'generic']);
+    expect(text(c)).toBe(md);
+  });
+
+  it('the policy takes the earlier-mark hint from the session, by block', async () => {
+    const { c } = await open('a {++big ++}dog\n');
+    const v = c.view;
+    const p = posOf(c, 'big', 1);
+    const tr = v.state.tr.insertText('X', p);
+    const blocks: number[] = [];
+    const hint = decide(tr, v.state, undefined, (block) => {
+      blocks.push(block);
+      return 'generic';
+    });
+    expect(hint).toBe('generic');
+    expect(blocks).toEqual([0]);
+    expect(decide(v.state.tr.insertText('X', p), v.state)).toBe('earlier');
   });
 
   it('one undo reverts a deletion and a replacement', async () => {
@@ -499,6 +525,8 @@ describe('comments', () => {
       ['a {~~old~>new~~} z\n', 'new', 2, 'a {~~old~>new~~}{>>a note<<} z\n'],
       ['a {~~old~>new~~} z\n', 'old', 1, 'a {~~old~>new~~}{>>a note<<} z\n'],
       ['a {==ab==}{>>theirs<<} z\n', 'ab', 1, 'a {==ab==}{>>theirs<<}{>>a note<<} z\n'],
+      // At the seam between a highlight and its comment, earlier or own.
+      ['a {==ab==}{>>theirs<<} z\n', 'ab', 2, 'a {==ab==}{>>theirs<<}{>>a note<<} z\n'],
     ];
     for (const [md, needle, offset, want] of cases) {
       const { c } = await open(md);
@@ -506,6 +534,19 @@ describe('comments', () => {
       await c.comment();
       expect(text(c), md).toBe(want);
     }
+    // A selection inside an earlier highlight that ends at the seam.
+    const sel = await open('a {==ab==}{>>theirs<<} z\n');
+    select(sel.c, posOf(sel.c, 'ab', 1), posOf(sel.c, 'ab', 2));
+    await sel.c.comment();
+    expect(text(sel.c)).toBe('a {==ab==}{>>theirs<<}{>>a note<<} z\n');
+    // An own highlight and its comment are kept together too.
+    const own = await open('one two z\n');
+    select(own.c, posOf(own.c, 'two'), posOf(own.c, 'two', 3));
+    await own.c.comment();
+    select(own.c, posOf(own.c, 'two', 3));
+    own.answer.note = 'second';
+    await own.c.comment();
+    expect(text(own.c)).toBe('one {==two==}{>>a note<<}{>>second<<} z\n');
     // Positive control: at a plain caret the note goes at the caret.
     const { c } = await open('one two\n');
     select(c, posOf(c, 'two', 1));
@@ -588,6 +629,27 @@ describe('comments', () => {
       return true;
     });
     expect(mine).toBe(true);
+  });
+
+  it("an own mark with an earlier mark's text does not let the earlier one move", async () => {
+    // The serializer writes an insertion inside link text as a link inside
+    // an insertion ({++[b](u)++}): the earlier mark would change. The own
+    // b typed after z has the earlier mark's old key, and must not stand
+    // in for it.
+    const md = '[a {++b++}](https://e.example) z {>>n<<}\n';
+    const { c, hints } = await open(md);
+    type(c, 'b', posOf(c, ' z', 2));
+    expect(hints).toEqual(['generic']);
+    expect(text(c)).toBe(md);
+    select(c, posOf(c, 'a ', 2));
+    await c.comment();
+    expect(hints).toEqual(['generic', 'generic']);
+    expect(text(c)).toBe(md);
+    // Positive control: the same edit beside an insertion outside a link.
+    const ok = await open('a {++b++} z {>>n<<}\n');
+    type(ok.c, 'b', posOf(ok.c, ' z', 2));
+    expect(ok.hints).toEqual([]);
+    expect(text(ok.c)).toBe('a {++b++} z{++b++} {>>n<<}\n');
   });
 
   it('does not edit a comment already in the text', async () => {

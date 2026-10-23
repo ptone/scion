@@ -21,6 +21,7 @@ import {
   chooseAlphabet,
   chooseOpeningAlphabet,
   criticToSentinelText,
+  readTag,
   sentinelSet,
   sentinelTextToCritic,
 } from './critic-sentinels.js';
@@ -35,13 +36,14 @@ describe('sentinel alphabet', () => {
     const used = SENTINEL_CANDIDATES.slice(0, 12).join('');
     const a = chooseAlphabet(`text ${used} more`)!;
     for (const c of sentinelSet(a)) expect(used.includes(c)).toBe(false);
-    expect(sentinelSet(a).size).toBe(10);
+    expect(sentinelSet(a).size).toBe(12);
   });
 
-  it('gives no alphabet when fewer than ten candidates are free', () => {
-    expect(chooseAlphabet(SENTINEL_CANDIDATES.slice(4).join(''))).toBeNull();
+  it('gives no alphabet when fewer than twelve candidates are free', () => {
+    const n = SENTINEL_CANDIDATES.length;
+    expect(chooseAlphabet(SENTINEL_CANDIDATES.slice(0, n - 11).join(''))).toBeNull();
     // Positive control: one more free candidate is enough.
-    expect(chooseAlphabet(SENTINEL_CANDIDATES.slice(10).join(''))).not.toBeNull();
+    expect(chooseAlphabet(SENTINEL_CANDIDATES.slice(0, n - 12).join(''))).not.toBeNull();
   });
 });
 
@@ -61,8 +63,8 @@ describe('opening alphabet (probe)', () => {
     expect(chooseOpeningAlphabet(md, (t) => t)!.insOpen).toBe(C[0]);
   });
 
-  it('builds the probe form from the last ten free candidates, which a decoded probe character cannot reach', () => {
-    const probe = C.slice(-10);
+  it('builds the probe form from the last twelve free candidates, which a decoded probe character cannot reach', () => {
+    const probe = C.slice(-12);
     let probeText = '';
     const shown = (t: string): string => {
       probeText = t;
@@ -73,13 +75,36 @@ describe('opening alphabet (probe)', () => {
     // The probe form uses only probe characters for the marks.
     expect(probeText).toContain(probe[0]);
     expect(probeText).toContain(probe[9]);
+    // The probe form is tagged: the note's ordinal 0 follows its sentinel.
+    expect(probeText).toContain(probe[9] + probe[10]);
     for (const c of sentinelSet(a)) expect(probe.includes(c)).toBe(false);
     expect(a.insOpen).toBe(C[0]);
   });
 
-  it('needs twenty free candidates', () => {
-    expect(chooseOpeningAlphabet(C.slice(C.length - 19).join(''), (t) => t)).not.toBeNull();
-    expect(chooseOpeningAlphabet(C.slice(0, C.length - 19).join(''), (t) => t)).toBeNull();
+  it('needs twenty-four free candidates', () => {
+    expect(chooseOpeningAlphabet(C.slice(0, C.length - 24).join(''), (t) => t)).not.toBeNull();
+    expect(chooseOpeningAlphabet(C.slice(0, C.length - 23).join(''), (t) => t)).toBeNull();
+  });
+});
+
+describe('tagged sentinel text', () => {
+  it('follows each note sentinel with its ordinal in binary, standing for no source text', () => {
+    const md = 'a {>>one<<} b {>>two<<} c {>>three<<}';
+    const a = chooseAlphabet(md)!;
+    const s = criticToSentinelText(md, a, true);
+    const tags = (t: string): number[] => {
+      const out: number[] = [];
+      for (let i = 0; i < t.length; i++) if (t[i] === a.note) out.push(readTag(t, i, a)!.ordinal);
+      return out;
+    };
+    expect(tags(s.text)).toEqual([0, 1, 2]);
+    expect(s.text).toContain(a.note + a.tag1 + a.tag0);
+    for (let i = 0; i < s.text.length; i++) {
+      if (s.text[i] === a.tag0 || s.text[i] === a.tag1) expect(s.starts[i]).toBe(s.ends[i]);
+    }
+    // Untagged by default.
+    expect(criticToSentinelText(md, a).text.includes(a.tag0)).toBe(false);
+    expect(readTag('x', 0, a)).toBeNull();
   });
 });
 
