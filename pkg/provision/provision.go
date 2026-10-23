@@ -2830,7 +2830,11 @@ func runGitClone(ctx context.Context, in ProvisionInput) error {
 	}
 	args = append(args, gc.URL, in.Resolved.HostPath)
 
-	cmd := exec.CommandContext(ctx, "git", args...)
+	// Run the clone with the host-side git hardening pins (no repository hooks,
+	// no pager, restricted transports, no submodule recursion, …) ahead of the
+	// subcommand, so a cloned repository's config cannot change what this host
+	// git invocation does.
+	cmd := exec.CommandContext(ctx, "git", append(util.HostGitArgs(), args...)...)
 	// Skip the LFS smudge on the clone's checkout, so git-lfs never contacts an
 	// endpoint named in the cloned tracked .lfsconfig with the host's
 	// credentials; agents fetch LFS objects in-container. This path also runs
