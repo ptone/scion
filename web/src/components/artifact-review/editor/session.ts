@@ -260,7 +260,7 @@ export class ReviewSession {
     if (clean(md) !== clean(src)) return 'generic';
     if (marksReadBack(unit, md, this.core.plain) !== null) return 'generic';
     // The written unit must open again as it is shown (for example, an
-    // escaped autolink-looking text must not become a link that takes in
+    // backslashed autolink-looking text must not become a link that takes in
     // a mark's closing token).
     if (!this.reopens(md)) return 'generic';
     const runs = docMarkRuns(unit);
