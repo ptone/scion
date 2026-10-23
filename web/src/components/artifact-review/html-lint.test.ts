@@ -75,6 +75,11 @@ describe('review editor HTML lint rule', () => {
     ["setAttributeNS(ns, 'onload')", "el.setAttributeNS(null, 'onload', s);"],
     ["setAttributeNS(ns, 'SRCDOC')", "el.setAttributeNS(null, 'SRCDOC', s);"],
     ['setAttributeNS with a name from a variable', 'el.setAttributeNS(null, name, s);'],
+    ["computed el['setAttribute']", "el['setAttribute']('title', s);"],
+    ["computed el['setAttributeNS']", "el['setAttributeNS'](null, 'href', s);"],
+    ["window.document['write']", "window.document['write'](s);"],
+    ["window['document'].write", "window['document'].write(s);"],
+    ["window['document']['writeln']", "window['document']['writeln'](s);"],
     ['globalThis.document.writeln', 'globalThis.document.writeln(s);'],
   ])('catches %s', async (_name, code) => {
     expect(await htmlErrors(code)).toBeGreaterThan(0);
@@ -88,6 +93,7 @@ describe('review editor HTML lint rule', () => {
     ['write on another member', 'window.stream.write(s);'],
     ["setAttribute('title')", "el.setAttribute('title', s);"],
     ["setAttributeNS(ns, 'href')", "el.setAttributeNS(null, 'href', s);"],
+    ["computed el['getAttribute']", "el['getAttribute']('title');"],
     ['a srcdoc word in template text', 'html`<p>srcdoc is an attribute</p>`;'],
   ])('allows %s', async (_name, code) => {
     expect(await htmlErrors(code)).toBe(0);

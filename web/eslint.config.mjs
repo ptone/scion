@@ -283,12 +283,13 @@ export default defineConfig([
         {
           // Lit property bindings (.innerHTML=${…}), a srcdoc attribute
           // binding (any case), setAttribute / setAttributeNS with 'srcdoc',
-          // an 'on…' name or a name not written out as a literal, object
+          // an 'on…' name or a name not written out as a literal (or called
+          // as el['setAttribute']), object
           // keys (Object.assign(el, { innerHTML })), and
           // write() on a document reached through another object
           // (window.document.write).
           selector:
-            "TemplateElement[value.raw=/\\.(innerHTML|outerHTML|srcdoc)\\s*=/], TemplateElement[value.raw=/\\bsrcdoc\\s*=\\s*[\"']?$/i], CallExpression[callee.property.name='setAttribute'][arguments.0.value=/^(srcdoc|on)/i], CallExpression[callee.property.name='setAttribute'][arguments.0.type!='Literal'], CallExpression[callee.property.name='setAttributeNS'][arguments.1.value=/^(srcdoc|on)/i], CallExpression[callee.property.name='setAttributeNS'][arguments.1.type!='Literal'], Property[key.name=/^(innerHTML|outerHTML|srcdoc)$/], Property[key.value=/^(innerHTML|outerHTML|srcdoc)$/], CallExpression[callee.object.property.name='document'][callee.property.name=/^(write|writeln)$/]",
+            "TemplateElement[value.raw=/\\.(innerHTML|outerHTML|srcdoc)\\s*=/], TemplateElement[value.raw=/\\bsrcdoc\\s*=\\s*[\"']?$/i], CallExpression[callee.property.name='setAttribute'][arguments.0.value=/^(srcdoc|on)/i], CallExpression[callee.property.name='setAttribute'][arguments.0.type!='Literal'], CallExpression[callee.property.name='setAttributeNS'][arguments.1.value=/^(srcdoc|on)/i], CallExpression[callee.property.name='setAttributeNS'][arguments.1.type!='Literal'], Property[key.name=/^(innerHTML|outerHTML|srcdoc)$/], Property[key.value=/^(innerHTML|outerHTML|srcdoc)$/], CallExpression[callee.object.property.name='document'][callee.property.name=/^(write|writeln)$/], CallExpression[callee.property.value=/^setAttribute(NS)?$/], CallExpression[callee.object.property.name='document'][callee.property.value=/^(write|writeln)$/], CallExpression[callee.object.property.value='document'][callee.property.name=/^(write|writeln)$/], CallExpression[callee.object.property.value='document'][callee.property.value=/^(write|writeln)$/]",
           message: 'The review editor must not turn strings into HTML (see eslint.config.mjs).',
         },
         {
