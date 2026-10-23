@@ -830,11 +830,12 @@ export class ScionQuickPalette extends LitElement {
    * paint, and its `sl-initial-focus` finds the input already focused).
    *
    * Needs the element mounted and rendered closed first, so Shoelace sees a
-   * real false -> true transition. Returns whether the query input has focus;
-   * where it does not, the open still goes ahead at the next update.
+   * real false -> true transition. Where the input cannot take focus here,
+   * the open still goes ahead at the next update and the host's hidden field
+   * keeps focus until the usual hand-off.
    */
-  openAndFocusNow(): boolean {
-    if (!this.hasUpdated || !this.isConnected) return false;
+  openAndFocusNow(): void {
+    if (!this.hasUpdated || !this.isConnected) return;
     this.open = true;
     this.performUpdate();
     const dialog = this.renderRoot.querySelector('sl-dialog') as
@@ -843,15 +844,22 @@ export class ScionQuickPalette extends LitElement {
     // Shoelace's dialog, once upgraded and rendered: run its open now.
     if (dialog?.hasUpdated && typeof dialog.performUpdate === 'function') {
       dialog.performUpdate();
+      // Relies on Shoelace 2.x internals: the dialog's base part carries the
+      // `hidden` attribute while closed, and its own open clears it only after
+      // awaiting its animations. If a Shoelace upgrade changes that, the input
+      // stays hidden and the focus below does nothing; the e2e checks that the
+      // query input has focus as the tap ends (e2e/chat-mobile/
+      // palette-tap-focus.pw.ts, and e2e/chat-palette/touch-keyboard.pw.ts,
+      // which also runs on WebKit) then fail instead of passing on the
+      // hidden-field fallback.
       const base = dialog.shadowRoot?.querySelector<HTMLElement>('[part~="base"]');
       if (base) base.hidden = false;
     }
     const input = this.paletteInputEl;
-    if (!input) return false;
+    if (!input) return;
     input.focus({ preventScroll: true });
     // A focus event applied any type-ahead; none fires in a window without focus.
     this.applyTypeahead();
-    return this.shadowRoot?.activeElement === input;
   }
 
   private handlePaletteInitialFocus(e: Event): void {

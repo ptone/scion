@@ -2798,3 +2798,98 @@ describe('quick switcher preload', () => {
     expect(idle.cancel).toHaveBeenCalledWith(7);
   });
 });
+
+describe('quick switcher preload without requestIdleCallback, and after a failed import', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    for (const proxy of document.querySelectorAll('input[data-palette-keyboard-proxy]')) {
+      proxy.remove();
+    }
+  });
+
+  function stubTouchPrimary(): void {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn((query: string) => ({
+        matches: query === TOUCH_PRIMARY_QUERY,
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }))
+    );
+  }
+
+  /** The preload's own timer: the setTimeout call made with its 2.5 s fallback delay. */
+  function preloadTimer(spy: { mock: { calls: unknown[][]; results: { value: unknown }[] } }): {
+    callback: () => void;
+    id: unknown;
+  } {
+    const i = spy.mock.calls.findIndex((call) => call[1] === 2500);
+    expect(i, 'a 2500 ms timer was scheduled').toBeGreaterThanOrEqual(0);
+    return { callback: spy.mock.calls[i][0] as () => void, id: spy.mock.results[i].value };
+  }
+
+  it('without requestIdleCallback (Safari) the preload runs from a fallback timer', async () => {
+    stubTouchPrimary();
+    vi.stubGlobal('requestIdleCallback', undefined);
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+
+    const timer = preloadTimer(setTimeoutSpy);
+    expect(page.v2SwitcherLoaded).toBe(false);
+    timer.callback();
+
+    await vi.waitFor(() => expect(page.v2SwitcherLoaded).toBe(true));
+  });
+
+  it('leaving the page clears the preload timer', () => {
+    stubTouchPrimary();
+    vi.stubGlobal('requestIdleCallback', undefined);
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    const timer = preloadTimer(setTimeoutSpy);
+
+    page.remove();
+
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(timer.id);
+  });
+
+  it('a failed preload import is retried by the first open', async () => {
+    stubTouchPrimary();
+    let idleCallback: (() => void) | null = null;
+    vi.stubGlobal(
+      'requestIdleCallback',
+      vi.fn((cb: () => void) => {
+        idleCallback = cb;
+        return 1;
+      })
+    );
+    vi.stubGlobal('cancelIdleCallback', vi.fn());
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {});
+    const page = createEligiblePage();
+    const realLoad = page._loadQuickPalette;
+    const load = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockImplementation(() => realLoad());
+    page._loadQuickPalette = load;
+    document.body.appendChild(page);
+
+    expect(idleCallback).not.toBeNull();
+    idleCallback!();
+    await vi.waitFor(() =>
+      expect(debug).toHaveBeenCalledWith('[chat] quick switcher preload failed', expect.any(Error))
+    );
+    expect(page.v2SwitcherLoaded).toBe(false);
+
+    await page.togglePalette({ mode: 'open' });
+
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(page.v2SwitcherLoaded).toBe(true);
+    expect(page.v2PaletteOpen).toBe(true);
+  });
+});

@@ -128,3 +128,24 @@ test('@static desktop: the switcher does not preload', async ({ page }, testInfo
   await page.waitForTimeout(3_000);
   await expect(page.locator('scion-quick-palette')).toHaveCount(0);
 });
+
+test('@static phone: Escape after an in-tap open closes the switcher and releases focus', async ({
+  page,
+}, testInfo) => {
+  test.skip(isDesktop(testInfo.project.name), 'touch only');
+  await openChatRail(page);
+  await expect(page.locator('scion-quick-palette')).toHaveCount(1, { timeout: 10_000 });
+  await recordFocusAtClickEnd(page);
+  await railButton(page).tap();
+  expect((await focusAtClickEnd(page))!.paletteInput).toBe(true);
+
+  await page.keyboard.press('Escape');
+  await expect(paletteDialog(page)).toBeHidden();
+  // Focus goes back to the button that opened it.
+  await expect(railButton(page)).toBeFocused();
+  // The dialog's focus trap is released: Tab moves on from the button rather
+  // than back into the closed switcher.
+  await page.keyboard.press('Tab');
+  expect(await paletteInputHasFocus(page)).toBe(false);
+  await expect(railButton(page)).not.toBeFocused();
+});
