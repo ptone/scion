@@ -20,7 +20,7 @@
 # ./pkg/brokercredentials: the Windows-reachable read (the write path and
 # multistore are gated).
 ./pkg/brokercredentials -run=^(TestWindowsBrokerCredentials_RefusesUsersReadableFile|TestWindowsBrokerCredentials_RefusesSymlink|TestWindowsBrokerCredentials_MissingIsNotFound|TestStore_Load|TestStore_LoadNotFound|TestStore_LoadValidation)$
-# ./pkg/agent: row X3 only (the rest is gated agent provisioning).
+# ./pkg/agent: rows X3 and L1 only (the rest is gated agent provisioning).
 ./pkg/agent -run=^(TestWindowsResolutionCache_NewDirAndFilePrivate|TestWindowsResolutionCache_RepairsOwnedTooOpenFile|TestWindowsResolutionCache_ForeignOwnedFileWarnedNotRepaired|TestWindowsResolutionCache_TooOpenDirWarnedNotRepaired|TestWindowsHostState_Unsupported)$
 ./pkg/hubprofile
 # ./cmd: anchored to the Windows-relevant tests (design §5.2; the full
