@@ -25,16 +25,24 @@
 
 import { test, expect, type Locator, type Page } from '@playwright/test';
 import { setupApiMocks } from './mock-api.js';
-import {
-  expectTapHoldsKeyboard,
-  focusAtClickEnd,
-  paletteInputHasFocus,
-  recordFocusAtClickEnd,
-  slowPaletteModule,
-} from '../palette-focus.js';
+import { focusAtClickEnd, paletteInputHasFocus, recordFocusAtClickEnd } from '../palette-focus.js';
 
-/** Long enough that a tap right after the page loads lands before the preload finishes. */
-const SLOW_MODULE_MS = 2500;
+/**
+ * Holds every request for the palette module until the returned function is
+ * called, so a tap made before that lands before the preload (or the first
+ * open's import) can finish, whatever the timing.
+ */
+async function holdPaletteModule(page: Page): Promise<() => void> {
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route(/\/quick-palette\.ts(\?|$)/, async (route) => {
+    await released;
+    await route.continue();
+  });
+  return release;
+}
 
 test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
@@ -87,14 +95,16 @@ test('once preloaded, a tap focuses the query input inside the tap', async ({ pa
 test('a tap before the preload finishes holds the keyboard with the hidden field', async ({
   page,
 }) => {
-  await slowPaletteModule(page, SLOW_MODULE_MS);
+  const releaseModule = await holdPaletteModule(page);
   await gotoShell(page);
   await expect(page.locator('scion-quick-palette')).toHaveCount(0);
-  await expectTapHoldsKeyboard(page, async () => {
-    const focused = await tapAndReadFocus(page);
-    expect(focused.keyboardProxy, 'the hidden field had focus within the tap').toBe(true);
-  });
+  const focused = await tapAndReadFocus(page);
+  expect(focused.textField).toBe(true);
+  expect(focused.keyboardProxy, 'the hidden field had focus within the tap').toBe(true);
+  releaseModule();
   await expect(paletteDialog(page)).toBeVisible();
+  await expect.poll(() => paletteInputHasFocus(page)).toBe(true);
+  await expect(page.locator('input[data-palette-keyboard-proxy]')).toHaveCount(0);
 });
 
 test('a later tap, with the palette already loaded, focuses the query input inside the tap', async ({
@@ -115,10 +125,11 @@ test('a later tap, with the palette already loaded, focuses the query input insi
 test('typing straight after the tap becomes the query, while the palette module loads', async ({
   page,
 }) => {
-  await slowPaletteModule(page, SLOW_MODULE_MS);
+  const releaseModule = await holdPaletteModule(page);
   await gotoShell(page);
   await paletteButton(page).tap();
   await page.keyboard.type('ali');
+  releaseModule();
 
   await expect(paletteDialog(page)).toBeVisible();
   await expect.poll(() => paletteInputHasFocus(page)).toBe(true);
