@@ -19,14 +19,14 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/secret/envelope"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret/secretenvelope"
 )
 
 func TestDecryptFailureKind(t *testing.T) {
 	for want, err := range map[string]error{
-		FailureUnknownVersion:       envelope.ErrUnknownVersion,
-		FailureMalformed:            fmt.Errorf("wrapped: %w", envelope.ErrMalformed),
-		FailureMissingKeyID:         envelope.ErrMissingKeyID,
+		FailureUnknownVersion:       secretenvelope.ErrUnknownVersion,
+		FailureMalformed:            fmt.Errorf("wrapped: %w", secretenvelope.ErrMalformed),
+		FailureMissingKeyID:         secretenvelope.ErrMissingKeyID,
 		FailureUnknownKeyID:         ErrUnknownKeyID,
 		FailureDecrypt:              fmt.Errorf("decrypting secret value: %w", ErrDecrypt),
 		FailurePlaintextNotAdmitted: ErrPlaintextNotAdmitted,

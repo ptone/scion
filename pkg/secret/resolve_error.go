@@ -20,7 +20,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/secret/envelope"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret/secretenvelope"
 )
 
 // ErrResolveDecrypt matches (errors.Is) a *ResolveDecryptError: secret
@@ -43,11 +43,11 @@ const (
 // DecryptFailureKind classifies a ValueCipher or envelope error.
 func DecryptFailureKind(err error) string {
 	switch {
-	case errors.Is(err, envelope.ErrUnknownVersion):
+	case errors.Is(err, secretenvelope.ErrUnknownVersion):
 		return FailureUnknownVersion
-	case errors.Is(err, envelope.ErrMalformed):
+	case errors.Is(err, secretenvelope.ErrMalformed):
 		return FailureMalformed
-	case errors.Is(err, envelope.ErrMissingKeyID):
+	case errors.Is(err, secretenvelope.ErrMissingKeyID):
 		return FailureMissingKeyID
 	case errors.Is(err, ErrUnknownKeyID):
 		return FailureUnknownKeyID
