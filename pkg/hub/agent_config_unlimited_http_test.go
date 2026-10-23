@@ -86,19 +86,19 @@ func TestAgentConfigPatch_UnlimitedCountByBroker(t *testing.T) {
 			require.NotNil(t, stored.AppliedConfig.CreateInputs.InlineConfig)
 			assert.Equal(t, api.IntPtr(0), stored.AppliedConfig.CreateInputs.InlineConfig.MaxTurns, "a reincarnation replays Unlimited")
 
-			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", nil)
-			require.Less(t, rec.Code, 300, rec.Body.String())
-			starts := disp.snapshot()
-			require.Len(t, starts, 1)
-			assert.Equal(t, api.IntPtr(0), starts[0].inline.MaxTurns, "the start dispatches Unlimited")
-			assert.NotContains(t, starts[0].inline.ClearedFields, "max_turns")
-
 			// Resending the stored Unlimited is an echo: no change, no list.
 			resp, code, body = patchAgentBody(t, srv, agent.ID, map[string]interface{}{
 				"config": map[string]interface{}{"max_turns": 0},
 			})
 			require.Equal(t, http.StatusOK, code, body)
 			assert.Empty(t, resp.Disposition.Applied)
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", nil)
+			require.Less(t, rec.Code, 300, rec.Body.String())
+			starts := disp.snapshot()
+			require.Len(t, starts, 1)
+			assert.Equal(t, api.IntPtr(0), starts[0].inline.MaxTurns, "the start dispatches Unlimited")
+			assert.NotContains(t, starts[0].inline.ClearedFields, "max_turns")
 		})
 	}
 
