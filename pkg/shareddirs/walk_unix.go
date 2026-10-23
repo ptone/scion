@@ -82,6 +82,35 @@ func EnsureLeaf(hostBase, rel string) (leafFd int, alreadyExisted bool, err erro
 	return fd, false, nil
 }
 
+// EnsurePrivateDir race-freely creates (or verifies) the directory chain
+// rel under hostBase with the same O_NOFOLLOW component walk as EnsureLeaf
+// (missing intermediates created 0o755 and fchmod'd to 0o2755), but
+// finalizes a newly created leaf at 0o2755 with no default ACL and no
+// group-write bit. It is for directories only Scion components write, such
+// as a project's configuration directory beside its workspace
+// (<subpath_root>/<projectID>/.scion), never for a directory agents write
+// into.
+//
+// On a chmod failure of a leaf this call created, the leaf is removed
+// before returning the error, as EnsureLeaf does. Returns the leaf's open
+// fd (caller must close via CloseFd) and whether it already existed.
+func EnsurePrivateDir(hostBase, rel string) (leafFd int, alreadyExisted bool, err error) {
+	parentFd, leafName, fd, existed, walkErr := createViaComponentWalk(hostBase, rel, 0o2755)
+	if walkErr != nil {
+		return -1, false, walkErr
+	}
+	if !existed {
+		if chmodErr := unix.Fchmod(fd, 0o2755); chmodErr != nil {
+			_ = CloseFd(fd)
+			_ = unix.Unlinkat(parentFd, leafName, unix.AT_REMOVEDIR)
+			_ = unix.Close(parentFd)
+			return -1, false, fmt.Errorf("chmod directory: %w", chmodErr)
+		}
+	}
+	_ = unix.Close(parentFd)
+	return fd, existed, nil
+}
+
 // chmodLeaf and setLeafDefaultACL are indirected through package vars purely
 // so a test can inject a failure (EINVAL, EPERM) at either finalization step
 // and verify EnsureLeaf's rollback -- removing the leaf it just created, but

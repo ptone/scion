@@ -100,9 +100,6 @@ allowed_paths=(
   # its storage path. The literal is the point of the negative tests.
   "^pkg/hub/harness_config_scope_validation_test.go$"
   "^pkg/hub/httpdispatcher_test.go$"
-  # Asserts the project cache/sync-status responses no longer emit a groveId
-  # key alongside projectId. The literal is the point of the negative tests.
-  "^pkg/hub/project_cache_test.go$"
   # Regression test for SSE subject authorization default-deny: proves a
   # non-member is denied on the legacy grove.* subjects and other unknown
   # namespaces.

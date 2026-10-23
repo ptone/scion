@@ -21,7 +21,6 @@ import (
 	"maps"
 	"net/http"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -166,13 +165,12 @@ func dispatchWorkspaceMode(project *store.Project) string {
 	return label
 }
 
-// syncsHubProjectWorkspace reports whether agents of project mount the hub's
-// project workspace directory, so the hub keeps it in sync with remote
-// brokers (GCS upload on create, sync-back on stop/sync). True for
+// mountsHubProjectWorkspace reports whether agents of project mount the
+// project workspace the hub serves (projectWorkspaceResolved). True for
 // hub-managed (non-git) and shared-workspace git projects; false for
 // per-agent git modes and for empty-per-agent, whose per-agent directories
 // are private and broker-local (design #2703).
-func syncsHubProjectWorkspace(project *store.Project) bool {
+func mountsHubProjectWorkspace(project *store.Project) bool {
 	if project == nil || project.IsEmptyPerAgent() {
 		return false
 	}
@@ -270,13 +268,26 @@ func (s *Server) requireEmptyPerAgentBrokerCapabilityForAgent(ctx context.Contex
 	return s.requireEmptyPerAgentBrokerCapability(ctx, w, project, agent.RuntimeBrokerID)
 }
 
-// remoteBrokerNeedsGCSMessage is the create error for an agent dispatched to
-// a remote broker with no local path for the project, on a hub whose storage
-// provider cannot carry the workspace upload (ptone/scion#3765). It is used
-// only for projects without a git remote: a project with a git remote is
-// dispatched without the upload instead.
-func remoteBrokerNeedsGCSMessage(provider storage.Provider) string {
-	return fmt.Sprintf("cannot send the project workspace to a remote runtime broker: "+
-		"hub storage is %q; use GCS hub storage, add a git remote to the project, "+
-		"or link the project at a local path on that broker", provider)
+// remoteBrokerWorkspaceRefusal decides whether a remote (non-embedded)
+// runtime broker can run an agent of a project whose agents mount the hub's
+// project workspace (mountsHubProjectWorkspace). The broker can when it has
+// a linked local path for the project, or when the hub's workspace storage
+// is a shared backend and the broker reports the same backend in its
+// heartbeat descriptor. Otherwise it returns the 409 message (topology T6:
+// remote broker, no shared storage; design-v4 OQ3).
+func (s *Server) remoteBrokerWorkspaceRefusal(ctx context.Context, project *store.Project, brokerID string) (string, bool) {
+	if provider, err := s.store.GetProjectProvider(ctx, project.ID, brokerID); err == nil && provider.LocalPath != "" {
+		return "", false
+	}
+	const tail = "; use a co-located runtime broker, configure shared workspace storage (nfs) on the hub and the broker, " +
+		"or use a per-agent workspace mode (clone-per-agent)"
+	if !s.workspaceBackendShared() {
+		return "this project's shared workspace lives on the hub's local disk, which a remote runtime broker cannot reach" + tail, true
+	}
+	hubBackend := s.config.WorkspaceStorageConfig.Backend
+	broker, err := s.store.GetRuntimeBroker(ctx, brokerID)
+	if err != nil || broker == nil || broker.WorkspaceStorage == nil || broker.WorkspaceStorage.Backend != hubBackend {
+		return fmt.Sprintf("the runtime broker does not report the hub's shared workspace storage (%s)", hubBackend) + tail, true
+	}
+	return "", false
 }

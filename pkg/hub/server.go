@@ -486,11 +486,11 @@ type ServerConfig struct {
 	Mode string
 
 	// WorkspaceStorageConfig selects the workspace storage backend for
-	// hub-managed project workspaces. When Backend is "nfs",
-	// "cloudrun-volume" or "gke-shared-volume", hubManagedProjectPath returns
-	// a path on the configured durable mount instead of the node-local home
-	// directory.
-	// Nil or Backend=="" / "local" preserves the legacy ephemeral behavior.
+	// hub-managed project workspaces; the hub builds its workspace Layout
+	// from it (workspaceLayout). With Backend "nfs", "cloudrun-volume" or
+	// "gke-shared-volume" the hub serves the same projects/<uuid>/workspace
+	// tree agents mount. Nil or Backend=="" / "local" keeps the local,
+	// slug-keyed layout (~/.scion/projects/<slug>).
 	WorkspaceStorageConfig *config.V1WorkspaceStorageConfig
 
 	// SharedDirStorageConfig is the hub's server.shared_dir_storage, read
@@ -2289,11 +2289,6 @@ type Server struct {
 	// server.hub.perf_trace is on; nil otherwise.
 	perfTraceLog *slog.Logger
 
-	// hubWorkspaceDownload replaces gcp.SyncFromGCS for downloads of a
-	// workspace upload into a hub workspace when set (tests only). Guarded
-	// by mu; see setHubWorkspaceDownloader and hubWorkspaceDownloader.
-	hubWorkspaceDownload func(ctx context.Context, bucket, prefix, localPath string) error
-
 	// templateSourceFetcher downloads template sources for reimport. nil
 	// selects the default fetcher (newTemplateSourceFetcher); tests replace it.
 	templateSourceFetcher templateSourceFetcher
@@ -2384,11 +2379,6 @@ type Server struct {
 	// chatLinkStore is the DB-backed chat link code store (nil when entClient is nil).
 	// When non-nil, Telegram/Discord/Teams link services delegate to it.
 	chatLinkStore *ChatLinkStore
-
-	// warnedEphemeralProjects holds the project slugs already reported as being
-	// served from ephemeral local storage, keeping that warning to one line per
-	// slug on a request path. See warnEphemeralProjectPath.
-	warnedEphemeralProjects sync.Map
 
 	// storageMigrationNotice caches the dry-run plan of the project storage
 	// migration behind the Files tab notice (workspace_migration_notice.go).
@@ -5244,7 +5234,6 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 	}
 	stopRunID := agent.RunID
 	if agent.RuntimeBrokerID != "" {
-		s.syncWorkspaceOnStop(ctx, agent)
 		// As for suspend, record work in an ephemeral workspace that
 		// the suspend discards, so the next start reports it. There is
 		// no response to carry a warning (ptone/scion#4387).

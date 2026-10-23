@@ -2144,9 +2144,7 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 
 	// Write a workspace marker so in-container CLI
 	// can discover the project context and use the Hub API.
-	// A workspace a hub keeps as its own on this host keeps the hub's
-	// identity entry.
-	if req.ProjectID != "" && req.ProjectSlug != "" && !hubWorkspaceRecordExists(req.ProjectSlug) {
+	if req.ProjectID != "" && req.ProjectSlug != "" {
 		if writeErr := config.WriteWorkspaceMarker(workspaceDir, req.ProjectID, req.ProjectSlug, req.ProjectSlug); writeErr != nil {
 			s.agentLifecycleLog.Warn("Failed to write workspace marker", "agent_id", req.ID, "project_id", req.ProjectID, "error", writeErr)
 		}
