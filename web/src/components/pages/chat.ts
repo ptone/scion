@@ -788,7 +788,7 @@ export class ScionPageChat extends LitElement {
     holdsKeyboard: () => this._paletteOpenByTouch || primaryPointerIsTouch(),
   });
   /**
-   * True only while a quick-switcher button tapped with a finger sends its
+   * True only while a quick-switcher button tapped with a finger or a pen sends its
    * open request (see `_handlePaletteFooterClick`), so the type-ahead holds
    * the on-screen keyboard for that tap even on a phone that does not match
    * the touch-primary query: several Android phones report hover support or
@@ -6373,11 +6373,14 @@ export class ScionPageChat extends LitElement {
     // ('' for one raised by Enter or Space). Only a click that is not one
     // falls back to the latest pointerdown, and only if it came from a
     // pointer (detail 0 marks a keyboard click).
+    // A pen counts as a finger: stylus phones are among those that report
+    // hover support.
+    const isTap = (type: string | undefined): boolean => type === 'touch' || type === 'pen';
     const clickType = (e as Partial<PointerEvent>).pointerType;
     const byTouch =
       clickType !== undefined
-        ? clickType === 'touch'
-        : (e as MouseEvent).detail > 0 && this._paletteFooterPointerType === 'touch';
+        ? isTap(clickType)
+        : (e as MouseEvent).detail > 0 && isTap(this._paletteFooterPointerType);
     this._paletteFooterPointerType = '';
     btn.focus({ preventScroll: true });
     this._paletteOpenByTouch = byTouch;
