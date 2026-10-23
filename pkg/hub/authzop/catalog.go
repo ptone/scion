@@ -256,6 +256,8 @@ var EntryPointExemptions = []EntryPointExemption{
 	{Pattern: "/api/v1/gcp-service-accounts/mint", Kind: ExemptionAuthenticationOnly, Reason: "Hub-scope GCP SA minting, inline policy check in handler", Owner: "route_metadata.go"},
 	// Cross-project messaging — inline authorization.
 	{Pattern: "/api/v1/metrics/session/", Kind: ExemptionAuthenticationOnly, Reason: "Session metrics, self-service", Owner: "route_metadata.go"},
+	{Pattern: "/api/v1/users/me/visitor-grants", Kind: ExemptionAuthenticationOnly, Reason: "List a project visitor's own visitor grants, self-service; any other caller gets 404", Owner: "route_metadata.go"},
+	{Pattern: "/api/v1/users/me/visitor-dms", Kind: ExemptionAuthenticationOnly, Reason: "List a project visitor's own DMs with agents it may message, self-service; any other caller gets 404", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/principals/", Kind: ExemptionAuthenticationOnly, Reason: "Resolve principal display name, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/conduit/grant-keys", Kind: ExemptionAuthenticationOnly, Reason: "Conduit grant public keys, authenticated read-only, experiment-gated", Owner: "route_metadata.go"},
 	// Artifact share links (hub.artifacts experiment): reads authenticated
@@ -408,15 +410,13 @@ var MutationClassifications = []MutationClassification{
 	// -----------------------------------------------------------------------
 	// pkg/hub/access_constraint_governance*.go — transactional governance
 	// PR #1445 moved store mutations from handlers to the governance layer.
-	// Audited creates run in the dedicated transactional helper; updates,
-	// deletes, compensations, and role-binding changes remain in the core file.
+	// Audited creates and updates run in the dedicated transactional helpers
+	// with their history row; deletes and role-binding changes remain in the
+	// core file.
 	// -----------------------------------------------------------------------
 	{File: "pkg/hub/access_constraint_governance_auditevent.go", Function: "createAccessConstraintWithAudit", Symbol: "CreateAccessConstraint", OperationID: "access.constraint.create"},
-	{File: "pkg/hub/access_constraint_governance.go", Function: "CommitBoundaryChange", Symbol: "UpdateAccessConstraint", OperationID: "access.constraint.update"},
+	{File: "pkg/hub/access_constraint_governance_auditevent.go", Function: "updateAccessConstraintWithAudit", Symbol: "UpdateAccessConstraint", OperationID: "access.constraint.update"},
 	{File: "pkg/hub/access_constraint_governance.go", Function: "CommitBoundaryChange", Symbol: "DeleteAccessConstraint", OperationID: "access.constraint.delete"},
-	{File: "pkg/hub/access_constraint_governance.go", Function: "compensateAuditFailure", Symbol: "CreateAccessConstraint", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Governance compensating action: restores constraint after audit failure", Scope: "pkg/hub/access_constraint_governance.go"}},
-	{File: "pkg/hub/access_constraint_governance.go", Function: "compensateAuditFailure", Symbol: "UpdateAccessConstraint", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Governance compensating action: restores constraint after audit failure", Scope: "pkg/hub/access_constraint_governance.go"}},
-	{File: "pkg/hub/access_constraint_governance.go", Function: "compensateAuditFailure", Symbol: "DeleteAccessConstraint", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Governance compensating action: restores constraint after audit failure", Scope: "pkg/hub/access_constraint_governance.go"}},
 	{File: "pkg/hub/access_constraint_governance.go", Function: "ReplaceRoleBinding", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "role binding replacement in one transaction; exported GovernanceService method with no non-test caller, so a route that wires it must guard it with access_constraint.admin; when the replace removes or moves an admin binding it runs the lockout check under the admin-guard lock", Scope: "pkg/hub/access_constraint_governance.go"}},
 	{File: "pkg/hub/access_constraint_governance.go", Function: "ReplaceRoleBinding", Symbol: "DeleteRoleBinding", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "role binding replacement in one transaction; exported GovernanceService method with no non-test caller, so a route that wires it must guard it with access_constraint.admin; when the replace removes or moves an admin binding it runs the lockout check under the admin-guard lock", Scope: "pkg/hub/access_constraint_governance.go"}},
 
@@ -424,7 +424,6 @@ var MutationClassifications = []MutationClassification{
 	// pkg/hub/access_constraint_recovery.go — constraint recovery operations
 	// -----------------------------------------------------------------------
 	{File: "pkg/hub/access_constraint_recovery.go", Function: "RecoverAll", Symbol: "UpdateAccessConstraint", Exemption: &MutationExemption{Kind: ExemptionHubAdmin, Reason: "Constraint recovery: re-enables constraints disabled by audit failure", Scope: "pkg/hub/access_constraint_recovery.go"}},
-	{File: "pkg/hub/access_constraint_recovery.go", Function: "rollbackDisable", Symbol: "UpdateAccessConstraint", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Constraint recovery rollback: restores constraint on disable failure", Scope: "pkg/hub/access_constraint_recovery.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/handlers_groups.go — group CRUD and membership
@@ -629,8 +628,7 @@ var MutationClassifications = []MutationClassification{
 	// -----------------------------------------------------------------------
 	// pkg/hub/admin_user_invite.go — hub admin: user invite
 	// -----------------------------------------------------------------------
-	{File: "pkg/hub/admin_user_invite.go", Function: "createPendingUserTx", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Shared pending-user creation core: called by handleAdminUserInvite (user.admin.invite, route guard user.invite) and handleProvisionUser (user.admin.provision, session-only gate plus live user.invite on the hub user collection, inside WithTx with the user_provision mutation audit); creates only status=invited records and never modifies an existing record", Scope: "pkg/hub/admin_user_invite.go"}},
-	{File: "pkg/hub/admin_user_invite.go", Function: "handleAdminUserInviteBulk", Symbol: "CreateUser", OperationID: "user.admin.invite"},
+	{File: "pkg/hub/admin_user_invite.go", Function: "createPendingUserTx", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Shared pending-user creation core: called by handleAdminUserInvite (user.admin.invite, route guard user.invite), handleProvisionUser (user.admin.provision, session-only gate plus live user.invite on the hub user collection, inside WithTx with the user_provision mutation audit) and, through inviteBatchUserStep, handleAdminUserInviteBulk (user.admin.invite, route guard user.invite, one WithTx per address); creates only status=invited records and never modifies an existing record", Scope: "pkg/hub/admin_user_invite.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/handlers_chat_secrets.go — chat integration secrets
@@ -713,9 +711,9 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/lifecycle_hook_executor.go", Function: "resolveIdentityAndToken", Symbol: "GenerateAccessToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Pre-start hook: generates GCP token for hook execution", Scope: "pkg/hub/lifecycle_hook_executor.go"}},
 
 	// -----------------------------------------------------------------------
-	// pkg/hub/maintenance_executors.go — maintenance operations
+	// pkg/hub/maintenance/maintenance_executors.go — maintenance operations
 	// -----------------------------------------------------------------------
-	{File: "pkg/hub/maintenance_executors.go", Function: "Run", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionHubAdmin, Reason: "Maintenance executor reads secrets, hub-admin operation", Scope: "pkg/hub/maintenance_executors.go"}},
+	{File: "pkg/hub/maintenance/maintenance_executors.go", Function: "Run", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionHubAdmin, Reason: "Maintenance executor reads secrets, hub-admin operation", Scope: "pkg/hub/maintenance/maintenance_executors.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/system_identity.go
@@ -763,6 +761,7 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/httpdispatcher.go", Function: "DispatchAgentDelete", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "HTTP dispatcher agent delete dispatch, infrastructure adapter", Scope: "pkg/hub/httpdispatcher.go"}},
 	{File: "pkg/hub/httpdispatcher.go", Function: "deletePreviousRuns", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "HTTP dispatcher run-scoped delete of an agent's previous runs, part of DispatchAgentDelete, infrastructure adapter", Scope: "pkg/hub/httpdispatcher.go"}},
 	{File: "pkg/hub/move_dispatch.go", Function: "DispatchAgentDeleteLocalOnly", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "move dispatcher source-broker local-only agent delete during reincarnate --broker, infrastructure adapter", Scope: "pkg/hub/move_dispatch.go"}},
+	{File: "pkg/hub/move_dispatch.go", Function: "DispatchAgentDeleteRecreated", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "move dispatcher target-broker rollback delete of a failed forced move during reincarnate --broker, infrastructure adapter", Scope: "pkg/hub/move_dispatch.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/store/entadapter/ — store layer implementation

@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/eventstreams"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -1624,7 +1625,9 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 						// replacement.
 						hbExitReason := state.ExitReason(agentHB.ExitReason)
 						isDisruption := hbExitReason == state.ExitReasonPreempted || hbExitReason == state.ExitReasonEvicted
-						if isDisruption && !store.IsHaltEvidence(agent.ExitReason) {
+						// Starting -> running clears the prior run's exit fields in the store.
+						if isDisruption && (!store.IsHaltEvidence(agent.ExitReason) ||
+							(curPhase == state.PhaseStarting && hbPhase == state.PhaseRunning)) {
 							statusUpdate.ExitReason = agentHB.ExitReason
 						}
 					}
@@ -1701,7 +1704,8 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				// touching the phase or message derived from ContainerStatus.
 				hbExitReason := state.ExitReason(agentHB.ExitReason)
 				isDisruption := hbExitReason == state.ExitReasonPreempted || hbExitReason == state.ExitReasonEvicted
-				if isDisruption && !store.IsHaltEvidence(agent.ExitReason) {
+				if isDisruption && (!store.IsHaltEvidence(agent.ExitReason) ||
+					(agent.Phase == string(state.PhaseStarting) && statusUpdate.Phase == string(state.PhaseRunning))) {
 					statusUpdate.ExitReason = agentHB.ExitReason
 				}
 			}
@@ -1792,8 +1796,10 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				// Publish SSE event so the frontend receives activity updates.
 				// A row soft-deleted between the slug lookup and this re-read
 				// (a delete finishing concurrently) publishes nothing.
+				// Counted as trigger=heartbeat (ptone/scion#5228); the
+				// publish itself is unchanged.
 				if updated, err := s.store.GetAgent(ctx, agent.ID); err == nil && updated.DeletedAt.IsZero() {
-					s.events.PublishAgentStatus(ctx, updated)
+					s.events.PublishAgentStatus(eventstreams.WithHeartbeatTrigger(ctx), updated)
 					if statusResult.Halted {
 						s.onAgentHalted(ctx, updated, statusResult.HaltedFrom)
 					}

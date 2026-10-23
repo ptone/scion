@@ -60,6 +60,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubtracing"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/reapermetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/ssemetrics"
 	scionplugin "github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin/grpcbroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
@@ -319,6 +320,16 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	// 6. Check ports
 	if err := checkServerPorts(cfg); err != nil {
 		return err
+	}
+	// The web server's listener checks (dev auth bind, then the web base
+	// URL; ptone/scion#5364) run here, before the store, dev auth and the
+	// hub are initialised. The base URL is resolved once, here.
+	var webBase resolvedWebBaseURL
+	if enableWeb {
+		webBase, err = webStartupPreflight(cfg, currentServerEndpointMode(), globalSettingsFileLabel())
+		if err != nil {
+			return err
+		}
 	}
 
 	// Log server mode
@@ -654,7 +665,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	// 12. Start Web
 	var webSrv *hub.WebServer
 	if enableWeb {
-		webSrv, err = initWebServer(ctx, cfg, hubSrv, devAuthToken, adminMode, maintenanceMessage, requestLogger, hubDBRec)
+		webSrv, err = initWebServer(ctx, cfg, hubSrv, devAuthToken, webBase, adminMode, maintenanceMessage, requestLogger, hubDBRec)
 		if err != nil {
 			return err
 		}
@@ -2841,6 +2852,14 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		hubSrv.SetReaperMetrics(reaperRec)
 	}
 
+	// Events streams and published events (ptone/scion#5228). The web
+	// server's stream registry picks the recorder up in initWebServer.
+	if sseRec, err := ssemetrics.New(mp); err != nil {
+		log.Printf("WARNING: hub events stream metrics disabled: %v", err)
+	} else {
+		hubSrv.SetEventStreamMetrics(sseRec)
+	}
+
 	if authzRec, err := hub.NewOTelConduitStreamAuthzMetrics(mp); err != nil {
 		log.Printf("WARNING: hub conduit stream authz metrics disabled: %v", err)
 	} else {
@@ -2857,6 +2876,12 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 	}
 	if err := hubSrv.RegisterBrokerPresenceMetrics(mp); err != nil {
 		log.Printf("WARNING: hub broker presence metrics disabled: %v", err)
+	}
+
+	if drainRec, err := hub.NewOTelConduitIngressDrainMetrics(mp); err != nil {
+		log.Printf("WARNING: hub conduit ingress drain metrics disabled: %v", err)
+	} else {
+		hubSrv.SetConduitIngressDrainMetrics(drainRec)
 	}
 
 	if refreshRec, err := hub.NewOTelConduitAgentRefreshMetrics(mp); err != nil {
@@ -2943,6 +2968,10 @@ func wireCloudLoggingHealth(hubSrv *hub.Server, cs *logging.CloudWriteStats) {
 func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, endpoints hub.HubEndpoints, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger, artifactLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
 	hubCfg := buildHubServerConfig(cfg, endpoints.Operator, devAuthToken, adminEmailList, adminMode, maintenanceMessage, secretBackend)
 	hubCfg.HubEndpoints = &endpoints
+	// server.shared_dir_storage, read once from the global settings file
+	// through the same env-free loader the brokers use, so the hub's
+	// shared-dir browser and the agents resolve shared dirs from one source.
+	hubCfg.SharedDirStorageConfig, hubCfg.SharedDirStorageError = config.LoadHubSharedDirStorage()
 	warnNonConformingHubName(cfg.Hub.HubName)
 
 	// In hosted mode every replica must share the same session secret for
@@ -3651,31 +3680,28 @@ var startPostgresCommandBus = func(ctx context.Context, dsn string, ownsLocally 
 // initWebServer creates and configures the Web server. The provided context is
 // threaded to the event publisher so that the Postgres LISTEN/NOTIFY goroutine
 // is cancelled cleanly on shutdown, preventing connection leaks.
-func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server, devAuthToken string, adminMode bool, maintenanceMessage string, requestLogger *slog.Logger, dbRec dbmetrics.Recorder) (*hub.WebServer, error) {
-	webHost := cfg.Hub.Host
-	if webHost == "" {
-		webHost = "0.0.0.0"
-	}
+func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server, devAuthToken string, base resolvedWebBaseURL, adminMode bool, maintenanceMessage string, requestLogger *slog.Logger, dbRec dbmetrics.Recorder) (*hub.WebServer, error) {
+	webHost := webListenHost(cfg)
 
 	// Refuse to start when dev auth is enabled on a non-loopback interface.
 	// Dev auth auto-logs in every request as admin — exposing it on a public
-	// address would create an unauthenticated admin endpoint.
+	// address would create an unauthenticated admin endpoint. Startup runs
+	// the same check earlier (webStartupPreflight); this one stays as
+	// defense in depth.
 	if devAuthToken != "" && !hub.IsLoopbackHost(webHost) {
-		return nil, fmt.Errorf(
-			"dev auth cannot be enabled when the server is bound to a non-loopback address (%s). "+
-				"Dev auth auto-logs in all requests as admin and must only be used on localhost. "+
-				"Either bind to 127.0.0.1/::1/localhost (--host 127.0.0.1) or disable dev auth", webHost)
+		return nil, devAuthBindError(webHost)
 	}
+
+	// The web base URL was resolved once at startup (webStartupPreflight;
+	// operator inputs only, never the settings database). The listener
+	// check runs again here as defense in depth.
+	if err := checkWebBaseURLListener(base, webHost, webPort); err != nil {
+		return nil, err
+	}
+	baseURL := base.URL
 
 	// Allow env var overrides for session/OAuth config
 	sessionSecret := resolveSessionSecret()
-	baseURL := webBaseURL
-	if baseURL == "" {
-		baseURL = os.Getenv("SCION_SERVER_BASE_URL")
-	}
-	if baseURL == "" {
-		baseURL = fmt.Sprintf("http://localhost:%d", webPort)
-	}
 
 	// Construct proxy authenticator for the web server when auth mode is "proxy".
 	// This mirrors the construction in initHubServer — both need the same authenticator.
@@ -3768,6 +3794,7 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 	if hubSrv != nil {
 		hubSrv.SetEventPublisher(eventPub)
 		startSettingsPropagation(ctx, hubSrv, eventPub)
+		webSrv.SetEventStreamMetrics(hubSrv.EventStreamMetrics())
 		webSrv.SetAccessSettingsProvider(hubSrv)
 		webSrv.SetProfilingSettingsProvider(hubSrv)
 		webSrv.SetOAuthService(hubSrv.GetOAuthService())
@@ -4050,19 +4077,21 @@ func refuseErrorRuntimeAtStartup(rt runtime.Runtime) error {
 	return fmt.Errorf("runtime broker: configured substrate runtime failed config validation: %w", er.Err)
 }
 
-// resolveBrokerDefaultRuntime resolves the broker's default runtime with
-// getRuntime (runtime.GetRuntime in production), applies
-// refuseErrorRuntimeAtStartup, and logs the runtime the broker will use. It
-// is the first step of startRuntimeBroker; the returned runtime is the one
-// the broker's manager is built on, so the refusal cannot be skipped without
-// also losing the runtime itself.
-func resolveBrokerDefaultRuntime(getRuntime func(projectPath, profileName string) runtime.Runtime, logf func(format string, args ...interface{})) (runtime.Runtime, error) {
-	rt := getRuntime(serverRuntimeProjectPath, "")
+// resolveBrokerDefaultRuntime resolves the broker's default runtime and its
+// build record with getRuntime (runtime.GetRuntimeWithRecord in
+// production), applies refuseErrorRuntimeAtStartup, and logs the runtime
+// the broker will use. It is the first step of startRuntimeBroker; the
+// returned runtime is the one the broker's manager is built on, so the
+// refusal cannot be skipped without also losing the runtime itself. A
+// refused runtime returns a nil runtime and the zero record; otherwise the
+// record is getRuntime's, unchanged.
+func resolveBrokerDefaultRuntime(getRuntime func(projectPath, profileName string) (runtime.Runtime, config.RuntimeBuildRecord), logf func(format string, args ...interface{})) (runtime.Runtime, config.RuntimeBuildRecord, error) {
+	rt, rec := getRuntime(serverRuntimeProjectPath, "")
 	if err := refuseErrorRuntimeAtStartup(rt); err != nil {
-		return nil, err
+		return nil, config.RuntimeBuildRecord{}, err
 	}
 	logf("Runtime broker using runtime: %s", rt.Name())
-	return rt, nil
+	return rt, rec, nil
 }
 
 func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.GlobalConfig, hubSrv *hub.Server, webSrv *hub.WebServer, s store.Store, hubEndpoint string, hubEndpointSrc hubEndpointSource, devAuthToken string, brokerSettings *config.Settings, brokerDefaultProfile *string, globalDir string, requestLogger, messageLogger *slog.Logger, wg *sync.WaitGroup, errCh chan error, shutdownContext func() (context.Context, context.CancelFunc)) error {
@@ -4094,7 +4123,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		})
 	}
 	warnUnhostedFlatIdentities(globalDir)
-	rt, err := resolveBrokerDefaultRuntime(runtime.GetRuntime, log.Printf)
+	rt, rtRecord, err := resolveBrokerDefaultRuntime(runtime.GetRuntimeWithRecord, log.Printf)
 	if err != nil {
 		return err
 	}
@@ -4341,8 +4370,12 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		// A failed registration leaves it disabled: the overlay is unchanged.
 		enableColocatedProfileReferences(ctx, hubSrv)
 	}
+	// Kubernetes placement defaults: sibling runtime entries must agree.
+	// Logged, never fatal; after the overlay install so it sees the stored
+	// runtimes.
+	checkPlacementSiblingsAtStartup(cfg, log.Printf)
 
-	rhSrv := runtimebroker.New(rhCfg, mgr, rt)
+	rhSrv := runtimebroker.New(rhCfg, mgr, rt, rtRecord)
 	// The broker phase of the process's graceful shutdown bounds the
 	// broker's own (ptone/scion#5054).
 	rhSrv.SetShutdownContext(shutdownContext)
@@ -4355,11 +4388,11 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	// engine without a full server restart (fixes onboarding wizard flow).
 	if hubSrv != nil && colocatedBrokerRegistered {
 		hubSrv.SetRuntimeReloadFunc(func() bool {
-			newRT := runtime.GetRuntime(serverRuntimeProjectPath, "")
+			newRT, rec := runtime.GetRuntimeWithRecord(serverRuntimeProjectPath, "")
 			if newRT.Name() == rhSrv.RuntimeName() {
 				return false
 			}
-			rhSrv.SwapRuntime(newRT)
+			rhSrv.SwapRuntime(newRT, rec)
 			hubSrv.SetLocalImageChecker(newRT)
 			return true
 		})

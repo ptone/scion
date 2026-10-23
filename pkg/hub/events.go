@@ -23,6 +23,9 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/harness"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/eventstreams"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/ssemetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
@@ -206,6 +209,17 @@ type AgentStatusEvent struct {
 	// ProvisionedOnly is the computed provisionedOnly view (ptone/scion#2929).
 	// No omitempty: false must reach the web to clear a merged true.
 	ProvisionedOnly bool `json:"provisionedOnly"`
+	// HarnessVendor and ModelSize are the agent list's badge fields, with
+	// the same names and values (see agentEventBadges).
+	// HarnessVendor is omitempty: the harness cannot change after create,
+	// and an event cannot resolve the vendor of an older agent that names
+	// its harness only through a harness-config reference, so an omitted
+	// key keeps the value merged from a list fetch.
+	// ModelSize has no omitempty: a model PATCH or a reincarnation can
+	// change or clear it, and it is always known from the record, so ""
+	// must reach the web to clear a merged size.
+	HarnessVendor string `json:"harnessVendor,omitempty"`
+	ModelSize     string `json:"modelSize"`
 }
 
 // AgentCreatedEvent is published when an agent is created.
@@ -241,6 +255,20 @@ type AgentCreatedEvent struct {
 	// "provisioned, not started" without a refetch. No omitempty, as on
 	// the status event: a false must clear a value merged onto an existing row.
 	ProvisionedOnly bool `json:"provisionedOnly"`
+	// HarnessVendor and ModelSize are the agent list's badge fields, so a
+	// new row shows its badges without a refetch (see agentEventBadges).
+	HarnessVendor string `json:"harnessVendor,omitempty"`
+	ModelSize     string `json:"modelSize,omitempty"`
+}
+
+// agentEventBadges returns the harness vendor and model size an agent event
+// carries. Events are built from the agent record alone, with no store
+// access, so the harness comes from storedAgentHarness: an agent created
+// before the harness was stamped, naming its harness only through a
+// harness-config reference, gets no vendor here (the key is omitted, so a
+// merged value from a list fetch is kept).
+func agentEventBadges(agent *store.Agent) (vendor, size string) {
+	return harness.Vendor(storedAgentHarness(agent)), agentModelSize(agent)
 }
 
 // AgentDeletedEvent is published when an agent is deleted.
@@ -391,6 +419,27 @@ type DispatchDoneEvent struct {
 // one place guarantees both backends publish identical subjects and payloads.
 type eventBuilder struct {
 	sink func(subject string, event interface{})
+	// heartbeatSink, when set, is the sink for agent status events
+	// published with an eventstreams.WithHeartbeatTrigger context: it
+	// delivers exactly like sink and counts the event as trigger=heartbeat.
+	heartbeatSink func(subject string, event interface{})
+	// published counts scion.hub.events.published; the embedding
+	// publisher calls it once per event it publishes.
+	published eventstreams.PublishCounter
+}
+
+// SetPublishMetrics wires the scion.hub.events.published counter
+// (ptone/scion#5228). Nil disables it.
+func (p *eventBuilder) SetPublishMetrics(rec ssemetrics.Recorder) {
+	p.published.SetMetrics(rec)
+}
+
+// statusSink returns the sink for an agent status event published with ctx.
+func (p *eventBuilder) statusSink(ctx context.Context) func(subject string, event interface{}) {
+	if p.heartbeatSink != nil && eventstreams.Trigger(ctx) == ssemetrics.TriggerHeartbeat {
+		return p.heartbeatSink
+	}
+	return p.sink
 }
 
 // ChannelEventPublisher is an in-process event publisher that fans out events
@@ -420,6 +469,9 @@ func NewChannelEventPublisher() *ChannelEventPublisher {
 		log:         logging.Subsystem("hub.events"),
 	}
 	p.sink = p.publish
+	p.heartbeatSink = func(subject string, event interface{}) {
+		p.publishTriggered(subject, event, ssemetrics.TriggerHeartbeat)
+	}
 	return p
 }
 
@@ -458,6 +510,12 @@ func (p *ChannelEventPublisher) Subscribe(patterns ...string) (<-chan Event, fun
 // publish marshals the event to JSON and fans out to matching subscribers.
 // Sends are non-blocking: events are dropped if a subscriber's buffer is full.
 func (p *ChannelEventPublisher) publish(subject string, event interface{}) {
+	p.publishTriggered(subject, event, ssemetrics.TriggerChange)
+}
+
+// publishTriggered is publish, counting the event on
+// scion.hub.events.published with the given trigger.
+func (p *ChannelEventPublisher) publishTriggered(subject string, event interface{}, trigger string) {
 	data, err := json.Marshal(event)
 	if err != nil {
 		p.logger().Error("Failed to marshal event", "subject", subject, "error", err)
@@ -472,6 +530,7 @@ func (p *ChannelEventPublisher) publish(subject string, event interface{}) {
 	if p.closed {
 		return
 	}
+	p.published.Count(subject, trigger)
 
 	matched := 0
 	for pattern, subs := range p.subscribers {
@@ -523,7 +582,10 @@ func (p *ChannelEventPublisher) Close() {
 
 // PublishAgentStatus publishes an agent status event to both agent-specific
 // and project-scoped subjects (dual-publish pattern).
-func (p *eventBuilder) PublishAgentStatus(_ context.Context, agent *store.Agent) {
+//
+// An agent status event published with an eventstreams.WithHeartbeatTrigger
+// context counts as trigger=heartbeat on scion.hub.events.published.
+func (p *eventBuilder) PublishAgentStatus(ctx context.Context, agent *store.Agent) {
 	now := time.Now()
 	evt := AgentStatusEvent{
 		AgentID:         agent.ID,
@@ -540,6 +602,7 @@ func (p *eventBuilder) PublishAgentStatus(_ context.Context, agent *store.Agent)
 		Deletion:        deletionViewForCaller(agent, now, false),
 		ProvisionedOnly: store.ComputeAgentProvisionedOnly(agent),
 	}
+	evt.HarnessVendor, evt.ModelSize = agentEventBadges(agent)
 	if !agent.LastActivityEvent.IsZero() {
 		evt.LastActivityEvent = agent.LastActivityEvent.UTC().Format("2006-01-02T15:04:05Z07:00")
 	}
@@ -557,9 +620,10 @@ func (p *eventBuilder) PublishAgentStatus(_ context.Context, agent *store.Agent)
 	// Always set, even when every field is zero (for example before
 	// StartedAt during provisioning), so a cleared message is sent as "".
 	evt.Detail = &detail
-	p.sink("agent."+agent.ID+".status", evt)
+	sink := p.statusSink(ctx)
+	sink("agent."+agent.ID+".status", evt)
 	if agent.ProjectID != "" {
-		p.sink("project."+agent.ProjectID+".agent.status", evt)
+		sink("project."+agent.ProjectID+".agent.status", evt)
 	}
 }
 
@@ -596,6 +660,7 @@ func newAgentCreatedEvent(agent *store.Agent) AgentCreatedEvent {
 		Launch:          store.ComputeAgentLaunch(agent, time.Now()),
 		ProvisionedOnly: store.ComputeAgentProvisionedOnly(agent),
 	}
+	evt.HarnessVendor, evt.ModelSize = agentEventBadges(agent)
 	if !agent.Created.IsZero() {
 		evt.Created = agent.Created.UTC().Format("2006-01-02T15:04:05Z07:00")
 	}

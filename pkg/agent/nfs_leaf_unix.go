@@ -35,17 +35,25 @@ func isNFSLeafPermissionError(err error) bool {
 // reports whether the leaf was created now or already carries
 // nfsLeafGroupAccessBits.
 func ensureNFSLeaf(hostBase, rel string) (prepared bool, err error) {
+	prepared, _, err = ensureNFSLeafClaim(hostBase, rel)
+	return prepared, err
+}
+
+// ensureNFSLeafClaim is ensureNFSLeaf that also reports whether this call
+// created the leaf directory (shareddirs.EnsureLeaf's own report, not a
+// separate check).
+func ensureNFSLeafClaim(hostBase, rel string) (prepared, created bool, err error) {
 	leafFd, existed, err := shareddirs.EnsureLeaf(hostBase, rel)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	defer func() { _ = shareddirs.CloseFd(leafFd) }()
 	if !existed {
-		return true, nil
+		return true, true, nil
 	}
 	var st unix.Stat_t
 	if err := unix.Fstat(leafFd, &st); err != nil {
-		return false, fmt.Errorf("stat existing directory: %w", err)
+		return false, false, fmt.Errorf("stat existing directory: %w", err)
 	}
-	return st.Mode&nfsLeafGroupAccessBits == nfsLeafGroupAccessBits, nil
+	return st.Mode&nfsLeafGroupAccessBits == nfsLeafGroupAccessBits, false, nil
 }
