@@ -584,3 +584,80 @@ func assertNoCompletionPlaceholder(t *testing.T, root *cobra.Command) {
 		assert.NotEqual(t, cobra.ShellCompRequestCmd, c.Name(), "completeGated must remove its placeholder")
 	}
 }
+
+// allowedAncestorHooks walks the tree under root and, for every command the
+// Windows gate refuses (its path is not in windowsAllowed, as gateCommands
+// decides), checks each ancestor below root that is allowed on Windows: an
+// allowed ancestor keeps its persistent hooks, and cobra runs the nearest
+// persistent pre-run hook only, so a hook there would run instead of root's
+// refusing hook for the gated descendant. It returns the number of (gated
+// command, allowed ancestor) pairs checked and one message per hook found.
+func allowedAncestorHooks(root *cobra.Command) (pairs int, found []string) {
+	var walk func(cmd *cobra.Command, prefix string, allowedAncestors []*cobra.Command, ancestorPaths []string)
+	walk = func(cmd *cobra.Command, prefix string, allowedAncestors []*cobra.Command, ancestorPaths []string) {
+		for _, child := range cmd.Commands() {
+			path := child.Name()
+			if prefix != "" {
+				path = prefix + "." + path
+			}
+			if !windowsAllowed[path] {
+				for i, a := range allowedAncestors {
+					pairs++
+					for _, h := range []struct {
+						name string
+						set  bool
+					}{
+						{"PersistentPreRun", a.PersistentPreRun != nil},
+						{"PersistentPreRunE", a.PersistentPreRunE != nil},
+						{"PersistentPostRun", a.PersistentPostRun != nil},
+						{"PersistentPostRunE", a.PersistentPostRunE != nil},
+					} {
+						if h.set {
+							found = append(found, fmt.Sprintf("%s (allowed on Windows) has %s, which would run instead of root's hook for the gated %s",
+								strings.ReplaceAll(ancestorPaths[i], ".", " "), h.name, strings.ReplaceAll(path, ".", " ")))
+						}
+					}
+				}
+			}
+			nextAllowed, nextPaths := allowedAncestors, ancestorPaths
+			if windowsAllowed[path] {
+				nextAllowed = append(append([]*cobra.Command(nil), allowedAncestors...), child)
+				nextPaths = append(append([]string(nil), ancestorPaths...), path)
+			}
+			walk(child, path, nextAllowed, nextPaths)
+		}
+	}
+	walk(root, "", nil, nil)
+	return pairs, found
+}
+
+// TestWindowsGate_NoPersistentHooksOnAllowedAncestorsOfGatedCommands: on the
+// real command tree, no command allowed on Windows that has a gated
+// descendant defines a persistent hook (root excluded: its hook is the one
+// that refuses). The gate clears hooks only on gated commands, so such a
+// hook would replace root's refusal for the gated descendant. The control
+// plants a PersistentPreRunE on hub (allowed, with gated descendants such
+// as hub secret migrate) in a copied tree and shows the check reports it.
+func TestWindowsGate_NoPersistentHooksOnAllowedAncestorsOfGatedCommands(t *testing.T) {
+	pairs, found := allowedAncestorHooks(rootCmd)
+	t.Logf("checked %d (gated command, allowed ancestor) pairs", pairs)
+	assert.NotZero(t, pairs, "the real tree must have gated commands below allowed ancestors (otherwise the check is vacuous)")
+	assert.Empty(t, found, "allowed ancestors of gated commands must have no persistent hooks")
+
+	root, _ := gateTestTree(t)
+	require.True(t, windowsAllowed["hub"], "control: hub is allowed")
+	require.False(t, windowsAllowed["hub.secret.migrate"], "control: hub secret migrate is gated")
+	hub := resolveCommandPath(root, "hub")
+	require.NotNil(t, hub)
+	require.NotNil(t, resolveCommandPath(root, "hub.secret.migrate"))
+	_, before := allowedAncestorHooks(root)
+	require.Empty(t, before, "control: the copied tree carries no hooks before the plant")
+	hub.PersistentPreRunE = func(*cobra.Command, []string) error { return nil }
+
+	cpairs, after := allowedAncestorHooks(root)
+	assert.NotZero(t, cpairs)
+	require.NotEmpty(t, after, "control: a hook planted on hub must be reported")
+	joined := strings.Join(after, "\n")
+	assert.Contains(t, joined, "hub (allowed on Windows) has PersistentPreRunE")
+	assert.Contains(t, joined, "the gated hub secret migrate")
+}

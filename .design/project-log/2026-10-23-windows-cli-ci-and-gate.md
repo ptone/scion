@@ -101,3 +101,18 @@ with zero skips; each package left off has a one-line reason in the file.
   skip-worktree or assume-unchanged index entries; a dirty-tree,
   config-key, skip-worktree and deleted-cwd plant is checked before each
   run.
+
+## Guard: no persistent hooks on allowed ancestors of gated commands
+
+The gate clears persistent hooks only on gated commands. An allowed command
+that has gated descendants (hub above hub secret migrate, for example) keeps
+its hooks, and cobra runs the nearest persistent pre-run hook only, so a hook
+there would run instead of root's refusing hook for the gated descendant.
+TestWindowsGate_NoPersistentHooksOnAllowedAncestorsOfGatedCommands walks the
+real command tree and, for every gated command, checks each allowed ancestor
+below root (root's hook is the refusing one) for PersistentPreRun(E) and
+PersistentPostRun(E). It asserts that it checked a non-zero number of pairs
+and names the command and hook on failure. Its control plants a
+PersistentPreRunE on hub in a copied tree and shows the check reports it.
+The test is part of the Windows job's ./cmd anchor. No allowed ancestor in
+today's tree has such a hook.
