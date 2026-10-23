@@ -599,10 +599,14 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	} else if config.Workspace != "" {
 		registerMount(config.Workspace, "/workspace", false, true)
 		addArg("--workdir", "/workspace")
-		// A workspace that holds a project configuration directory (a project
-		// that keeps its .scion directory in place, or an explicit workspace
-		// pointing at one) gets that .scion mounted read-only, as in the
-		// shared-workspace layout above. The agent's own workspace
+		// A workspace that holds a project configuration directory (a
+		// project that keeps its .scion directory in place, or an explicit
+		// workspace pointing at one) gets it read-only, with its agents
+		// root masked, as in the shared-workspace layout above: on
+		// Docker/Podman the broker creates the agents dir first (the
+		// read-only mount leaves the runtime no way to create the mount
+		// point), so the mask is always present; Apple masks only an
+		// existing agents dir. The agent's own workspace
 		// (AgentOwnWorkspace) is left as is.
 		if !config.AgentOwnWorkspace {
 			src, tgt, ok, err := workspaceProjectConfigMount(config.Workspace, "/workspace", config.RuntimeName != appleContainerRuntimeName)
@@ -611,17 +615,15 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			}
 			if ok {
 				registerMount(src, tgt, true, true)
-			}
-			// Keep that project's in-project agents directory, which holds other
-			// agents' own directories, out of the plain workspace view. The mask
-			// shadows <workspace>/.scion/agents even before it exists (except where
-			// the runtime cannot create the mount point itself, Apple), so agent
-			// directories created after this container starts stay hidden
-			// (plainWorkspaceAgentsMaskTarget); it resolves to the same target as
-			// the read-only mount's agents root.
-			requirePlainAgentsDir := config.RuntimeName == appleContainerRuntimeName
-			if target, ok := plainWorkspaceAgentsMaskTarget(config, "/workspace", requirePlainAgentsDir); ok {
-				sharedWorkspaceAgentsMask = target
+				if config.RuntimeName != appleContainerRuntimeName && isDir(src) {
+					if err := os.MkdirAll(filepath.Join(src, "agents"), 0o755); err != nil {
+						runtimeLog().Warn("Could not create the in-project agents dir for its mask",
+							"agent", config.Name, "error", err)
+					}
+				}
+				if isDir(filepath.Join(src, "agents")) {
+					sharedWorkspaceAgentsMask = path.Join(tgt, "agents")
+				}
 			}
 		}
 	}
