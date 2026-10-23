@@ -2600,6 +2600,9 @@ describe('a finger tap on a quick-switcher button holds the on-screen keyboard o
     // type-ahead starts again: the tap must not still count.
     page._handleGlobalKeydown(makeKeydownEvent({ metaKey: true }));
 
+    // The press really asked for a reopen, so the type-ahead did start again.
+    expect(page._palettePendingReopen || page.v2PaletteOpen).toBe(true);
+    expect(page._paletteTypeahead.isCapturing).toBe(true);
     expect(document.querySelector('input[data-palette-keyboard-proxy]')).toBeNull();
   });
 
