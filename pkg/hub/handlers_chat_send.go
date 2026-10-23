@@ -141,27 +141,24 @@ func chatSendPath(key string) string {
 	return "/api/v1/chat/conversations/" + key + "/messages"
 }
 
-// chatPostAction is the project action a user's account needs to post
-// into the chat threads of a project (ptone/scion#5518). Read access to
-// the project reads its threads; it does not post in them. These chat
-// writes do not check it yet: thread create; thread rename, default-agent
-// change and delete; project attachment upload; message edit and delete;
-// thread posts sent through the agent message endpoint's thread key. They
-// are tracked in ptone/scion#5519.
-const chatPostAction = ActionChatPost
-
 // chatSendPostDenied is the refusal for a sender who may read a thread
-// but may not post in it. It is a 403, not "Thread not found": the
-// sender can already see the thread.
-func chatSendPostDenied() *chatSendError {
+// but may not post in it (chatThreadAccess). It is a 403, not "Thread not
+// found": the sender can already see the thread. details.reason is the
+// resolver's reason: read_only (the account lacks project.chat_post) or
+// token_scope (the access token may not write chat in the project).
+func chatSendPostDenied(reason string) *chatSendError {
+	details := map[string]interface{}{
+		"resource_type": "project",
+		"denied_action": string(ActionChatPost),
+	}
+	if reason != "" {
+		details["reason"] = reason
+	}
 	return newChatSendError(http.StatusForbidden, ErrCodeChatPostDenied,
-		"You can read this thread but not post in it", map[string]interface{}{
-			"resource_type": "project",
-			"denied_action": string(chatPostAction),
-		})
+		"You can read this thread but not post in it", details)
 }
 
-// chatPostIdentity is the identity whose account decides chatPostAction:
+// chatPostIdentity is the identity whose account decides project.chat_post:
 // the holder of a user access token, the caller otherwise. A token keeps
 // needing only inbox:write for a send; the post permission is a property
 // of the account the token acts for, so it is checked on that account and
@@ -175,29 +172,24 @@ func chatPostIdentity(user UserIdentity) UserIdentity {
 	return user
 }
 
-// chatMayPost decides whether user's account may post into the chat
-// threads of project.
-func (s *Server) chatMayPost(ctx context.Context, user UserIdentity, project *store.Project) Decision {
-	return s.authzService.CheckAccess(ctx, chatPostIdentity(user), projectResource(project), chatPostAction)
-}
-
 // authorizeChatSend runs the conversation access checks of a chat send:
 // for a DM, a well-formed key naming the sender as a participant; for a
-// topic, an existing topic whose current project exists, grants the
-// sender read access and lets the sender's account post (chatMayPost).
-// It needs no request, so every caller of sendChatMessage runs the same
-// checks.
+// topic, an existing topic whose current project exists and on which
+// chatThreadAccess allows the sender to post. It needs no request, so
+// every caller of sendChatMessage runs the same checks.
 //
-// A sender who may not use the conversation gets the same answer as for a
+// A sender who may not read the topic gets the same answer as for a
 // conversation that does not exist ("Thread not found"); the reason is
 // written to the server log only. A sender who may read a topic but not
-// post in it gets 403 chat_post_denied.
+// post in it gets 403 chat_post_denied with the resolver's reason
+// (read_only, or token_scope for an access token without inbox:write for
+// the topic's project).
 func (s *Server) authorizeChatSend(ctx context.Context, user UserIdentity, key string) (*chatSendTarget, *chatSendError) {
 	return s.authorizeChatConversation(ctx, user, key, true)
 }
 
-// authorizeChatSendRead runs the checks of authorizeChatSend without the
-// post check, for routes that act only on the sender's own rows of a
+// authorizeChatSendRead runs the checks of authorizeChatSend but needs only
+// chatThreadAccess's read action, for routes that act only on the sender's own rows of a
 // conversation it can read (listing its scheduled messages).
 func (s *Server) authorizeChatSendRead(ctx context.Context, user UserIdentity, key string) (*chatSendTarget, *chatSendError) {
 	return s.authorizeChatConversation(ctx, user, key, false)
@@ -240,8 +232,17 @@ func (s *Server) authorizeChatConversation(ctx context.Context, user UserIdentit
 		return nil, chatSendNotFound("Thread")
 	}
 	resource := projectResource(project)
-	decision := s.authzService.CheckAccess(ctx, user, resource, ActionRead)
-	if !decision.Allowed {
+	// The single chat decision point for a topic (chatThreadAccess). A user
+	// caller is never refused with an error.
+	access, err := s.chatThreadAccess(ctx, user, chatThreadRef{Key: key, Project: project})
+	if err != nil {
+		// An internal caller error (errChatThreadUnresolved) or a store
+		// fault: the common error path's 500, as writeErrorFromErr answers.
+		slog.WarnContext(ctx, "chat send: thread access check failed", "key", key, "error", err)
+		return nil, newChatSendError(http.StatusInternalServerError, ErrCodeInternalError, "Internal server error", nil)
+	}
+	if !access.Can(ChatActionRead) {
+		decision := access.readDenial
 		logReq := (&http.Request{URL: &url.URL{Path: chatSendPath(key)}}).WithContext(ctx)
 		logAuthzDenial(logReq, user, resource, ActionRead, decision.Reason)
 		// The details a 403 used to carry stay in the log only.
@@ -255,12 +256,10 @@ func (s *Server) authorizeChatConversation(ctx context.Context, user UserIdentit
 		slog.InfoContext(ctx, "chat send refused as not found", logAttrs...)
 		return nil, chatSendRefusedAsNotFound("Thread")
 	}
-	if requirePost {
-		if post := s.chatMayPost(ctx, user, project); !post.Allowed {
-			logReq := (&http.Request{URL: &url.URL{Path: chatSendPath(key)}}).WithContext(ctx)
-			logAuthzDenial(logReq, user, resource, chatPostAction, post.Reason)
-			return nil, chatSendPostDenied()
-		}
+	if requirePost && !access.Can(ChatActionPost) {
+		logReq := (&http.Request{URL: &url.URL{Path: chatSendPath(key)}}).WithContext(ctx)
+		logAuthzDenial(logReq, user, resource, ActionChatPost, access.postDenial.Reason)
+		return nil, chatSendPostDenied(access.Reason)
 	}
 	target.ProjectID = topic.ProjectID
 	target.Topic = topic
