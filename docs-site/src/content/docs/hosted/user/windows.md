@@ -78,17 +78,17 @@ With `--write`, scion installs one include file and one known-hosts file per Hub
 
 | File | Contents |
 | :--- | :--- |
-| `%USERPROFILE%\.ssh\config` | gains one line at the top, `Include ~/.ssh/config.d/scion-*`, if it is not there yet |
+| `%USERPROFILE%\.ssh\config` | gains one line at the top, `Include ~/.ssh/config.d/scion-*`, unless that line already appears before the first `Host` or `Match` line |
 | `%USERPROFILE%\.ssh\config.d\scion-<hub>` | a `Host` block per agent |
 | `%USERPROFILE%\.scion\ssh\known_hosts-<hub>` | the pinned host keys |
 
-`<hub>` is a label derived from the Hub's host name: its first DNS label (`hub` for `https://hub.example.com`), or the whole host when another Hub already uses that label. Each agent is then reachable as `scion.<hub>.<project>.<agent>`:
+`<hub>` is a label derived from the Hub's host name: its first DNS label (`hub` for `https://hub.example.com`; for an IP address or `localhost`, the whole host and any non-default port), or the whole host and any non-default port when another Hub already uses that label. Each agent is then reachable as `scion.<hub>.<project>.<agent>`:
 
 ```powershell
 ssh scion.hub.my-project.my-agent
 ```
 
-Without an agent argument every agent on the Hub is included, and blocks of agents that no longer exist are removed; if the listing fails or is incomplete, nothing is written. With an agent, only that agent's block is updated. `~/.ssh/config` is rewritten only when it lacks the `Include` line.
+Without an agent argument every agent on the Hub is included, and blocks of agents that no longer exist are removed; if the listing fails or is incomplete, nothing is written. With an agent, only that agent's block is updated. `~/.ssh/config` is rewritten only when that line is missing from the top section, before the first `Host` or `Match` line. An `Include` line further down applies only to the `Host` or `Match` block above it, so it does not count.
 
 Each `Host` block's `ProxyCommand` records the absolute path of `scion.exe`, quoted so that both the Windows OpenSSH client and Git for Windows' `ssh` read it as one word, spaces included. **If you move `scion.exe`, run `scion ssh-config --write` again.**
 
@@ -123,6 +123,8 @@ scion writes the path of `scion.exe` and the Hub endpoint into each `ProxyComman
   scion executable path "<path>" contains '&', which a Windows ssh ProxyCommand cannot carry as written
   ```
 
+  A few non-ASCII characters are refused too: modifier letters and the accents or letters that Windows can convert to ASCII punctuation (for example a combining tilde or grave accent).
+
   For `scion.exe`, move it to a folder whose path uses only these characters. For `scion vscode`, the message names the `known-hosts path` instead; `scion ssh` and `scion ssh-config` do not write your profile path into a `ProxyCommand`.
 
 - **The Hub endpoint** may contain only ASCII letters, digits, `-`, `.`, `_`, `:` and `/`, plus `[` and `]` around an IPv6 address, and no user name, query or fragment. This applies on every OS, not just Windows:
@@ -133,7 +135,7 @@ scion writes the path of `scion.exe` and the Hub endpoint into each `ProxyComman
 
   Write an internationalized host name in its `xn--` form.
 
-- **Arguments for VS Code's `code.cmd`.** When `code` is a `.cmd` or `.bat` file, the VS Code user data folder (under your user profile), the `--remote` value and `--path` may contain only letters and digits (including non-ASCII letters), spaces, backslashes, `~` and `@ + = : , . / _ -`. Otherwise `scion vscode` fails before VS Code starts (the agent's entries in `%USERPROFILE%\.scion\vscode` are already written):
+- **Arguments for VS Code's `code.cmd`.** When `code` is a `.cmd` or `.bat` file, the VS Code user data folder (under your user profile), the `--remote` value and `--path` may contain only letters and digits (including non-ASCII letters, with the same exceptions as above), spaces, backslashes, `~` and `@ + = : , . / _ -`. Otherwise `scion vscode` fails before VS Code starts (the agent's entries in `%USERPROFILE%\.scion\vscode` are already written):
 
   ```
   --path "<dir>" contains '&', which cannot be passed to the VS Code launcher <code> (a .cmd file run by cmd.exe); use a home directory and a --path with only letters, digits, spaces and the characters @+=:,./_-~\
@@ -270,7 +272,7 @@ scion will not write through a hard link, because the same file also lives somew
 ### A volume without ACLs
 
 ```
-cannot store private file under <folder>: the volume (FAT32) does not support access control lists, so the file cannot be protected
+cannot store private file under <folder>: the volume (FAT32) does not support access control lists, so the file cannot be protected: the volume does not support access control lists
 ```
 
 FAT, FAT32, exFAT and some network shares cannot store ACLs, so scion cannot protect a private file there and refuses to create one; there is no fallback. Checking an existing file there can also fail with `has no owner in its security descriptor`. Keep `%USERPROFILE%\.scion` and `%USERPROFILE%\.ssh` (and any link targets) on an NTFS volume.

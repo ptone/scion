@@ -28,6 +28,10 @@ Every quoted message on the page was matched to its source string
 - the argument check for a `.cmd`/`.bat` VS Code launcher
   (`checkVSCodeBatchArgs`), which runs after the vscode files are written;
 - `scion ssh` exit 143 when the console closes (`sshEndSignals` on Windows).
+- the `Include` line counts only before the first `Host` or `Match` line
+  (`hasSSHIncludeLine`), the Hub label rule for an IP address or `localhost`
+  (`sshHubLabelCandidates`), and the non-ASCII characters the word allowlists
+  refuse (`isNonASCIIWordRune`).
 
 ## Open
 
