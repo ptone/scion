@@ -15,8 +15,10 @@
 package agent
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -34,6 +36,115 @@ func eval(t *testing.T, p string) string {
 		t.Fatalf("EvalSymlinks(%q): %v", p, err)
 	}
 	return r
+}
+
+// TestDetectRepoRoot_ExplicitWorkspaceSkipsGitDetection is the regression guard:
+// an explicit --workspace inside a git repo must return "" (plain mount), not the
+// repo root — otherwise the whole repo, including sibling dirs, leaks in.
+func TestDetectRepoRoot_ExplicitWorkspaceSkipsGitDetection(t *testing.T) {
+	root := t.TempDir()
+	setupGitRepo(t, root)
+	subA := filepath.Join(root, "subA")
+	if err := os.MkdirAll(subA, 0755); err != nil {
+		t.Fatalf("mkdir subA: %v", err)
+	}
+
+	// Explicit workspace = a subdir inside the repo -> no repo-root detection.
+	if got := mustDetectRepoRoot(t, true, subA, root); got != "" {
+		t.Fatalf("explicit workspace inside repo: got repoRoot %q, want \"\"", got)
+	}
+
+	// Explicit workspace = the repo root itself -> still plain-mounted, "".
+	if got := mustDetectRepoRoot(t, true, root, root); got != "" {
+		t.Fatalf("explicit workspace at repo root: got repoRoot %q, want \"\"", got)
+	}
+}
+
+// TestDetectRepoRoot_ExplicitWorkspaceResume covers resume/restart: opts.Workspace
+// is empty but the persisted ExplicitWorkspace flag re-derives explicit=true, so
+// the recovered explicit path must stay plain-mounted rather than widening to the
+// enclosing repo — for both a subdir and the repo root itself.
+func TestDetectRepoRoot_ExplicitWorkspaceResume(t *testing.T) {
+	root := t.TempDir()
+	setupGitRepo(t, root)
+	subA := filepath.Join(root, "subA")
+	if err := os.MkdirAll(subA, 0755); err != nil {
+		t.Fatalf("mkdir subA: %v", err)
+	}
+
+	// Explicit subdir recovered as effectiveWorkspace on resume -> "".
+	if got := mustDetectRepoRoot(t, true, subA, root); got != "" {
+		t.Fatalf("resume explicit subdir workspace: got repoRoot %q, want \"\"", got)
+	}
+
+	// Explicit repo root recovered as effectiveWorkspace on resume -> "".
+	if got := mustDetectRepoRoot(t, true, root, root); got != "" {
+		t.Fatalf("resume explicit repo-root workspace: got repoRoot %q, want \"\"", got)
+	}
+}
+
+// TestDetectRepoRoot_ExplicitPlainWorkspace confirms a non-git explicit
+// workspace is unaffected (unchanged behavior).
+func TestDetectRepoRoot_ExplicitPlainWorkspace(t *testing.T) {
+	dir := t.TempDir() // plain dir, no git
+	if got := mustDetectRepoRoot(t, true, dir, dir); got != "" {
+		t.Fatalf("explicit plain workspace: got repoRoot %q, want \"\"", got)
+	}
+}
+
+// TestDetectRepoRoot_AutoDetectFromWorkspace is the counterpart regression
+// guard: with NO explicit workspace, git auto-detection still runs and resolves
+// the repository root from the effective workspace.
+func TestDetectRepoRoot_AutoDetectFromWorkspace(t *testing.T) {
+	root := t.TempDir()
+	setupGitRepo(t, root)
+	subA := filepath.Join(root, "subA")
+	if err := os.MkdirAll(subA, 0755); err != nil {
+		t.Fatalf("mkdir subA: %v", err)
+	}
+
+	// explicit == false -> detection runs; effective workspace is subA,
+	// which is inside the repo, so repoRoot is the repository root.
+	got := eval(t, mustDetectRepoRoot(t, false, subA, root))
+	if want := eval(t, root); got != want {
+		t.Fatalf("auto-detect from workspace: got repoRoot %q, want %q", got, want)
+	}
+}
+
+// TestDetectRepoRoot_AutoDetectFromProjectDir confirms the fallback branch: no
+// explicit workspace and no workspace path, but a git project dir -> repoRoot
+// resolves from the project dir. A non-git workspace outside the project's
+// repository is not widened to it: it gets a plain mount.
+func TestDetectRepoRoot_AutoDetectFromProjectDir(t *testing.T) {
+	root := t.TempDir()
+	setupGitRepo(t, root)
+
+	got := eval(t, mustDetectRepoRoot(t, false, "", root))
+	if want := eval(t, root); got != want {
+		t.Fatalf("auto-detect from project dir: got repoRoot %q, want %q", got, want)
+	}
+
+	var logs strings.Builder
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(old)
+
+	plain := t.TempDir() // effective workspace, not a git repo, outside root
+	if got := mustDetectRepoRoot(t, false, plain, root); got != "" {
+		t.Fatalf("plain workspace outside the project repository: got repoRoot %q, want \"\"", got)
+	}
+	if out := logs.String(); !strings.Contains(out, "Workspace is outside the project's repository; mounting the workspace only") {
+		t.Errorf("expected a warning naming the layout, got: %s", out)
+	}
+}
+
+// TestDetectRepoRoot_NoGitAnywhere confirms the fully non-git case returns "".
+func TestDetectRepoRoot_NoGitAnywhere(t *testing.T) {
+	ws := t.TempDir()
+	proj := t.TempDir()
+	if got := mustDetectRepoRoot(t, false, ws, proj); got != "" {
+		t.Fatalf("no git anywhere: got repoRoot %q, want \"\"", got)
+	}
 }
 
 // createRealWorktree creates root/worktrees/<name> as a genuine git worktree

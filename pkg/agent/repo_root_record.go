@@ -28,11 +28,13 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
-// Sources of a repository root record (provisionedWorktreeStateFile). A
-// record is written only when agentDir is outside every mount of the agent
-// (agentDirOutsideAgentMounts), so its source also records that it was
-// written under that condition. A record without one of these sources
-// (written by an older version) is not used.
+// Sources of a repository root record (provisionedWorktreeStateFile). A record
+// is written only when agentDir is outside every mount of the agent
+// (agentDirOutsideAgentMounts), so its source also records that it was written
+// under that condition. Source is recorded on write and used by
+// writeRepoRootRecord's idempotence check, but the start read path no longer
+// gates on it: a record is reconciled with the derived root regardless of
+// source, so records predating Source stay usable.
 const (
 	// repoRootSourceBroker: the broker provisioned the agent's worktree
 	// and passed its base on ctx (api.ContextWithProvisionedWorktreeRepoRoot).
@@ -40,8 +42,10 @@ const (
 	// repoRootSourceProvision: ProvisionAgent recorded the project's
 	// repository root (trustedProjectRepoRoot) for a git project.
 	repoRootSourceProvision = "provision"
-	// repoRootSourceBackfill: Start recorded trustedProjectRepoRoot for an
-	// agent provisioned before records were written.
+	// repoRootSourceBackfill: a legacy source. Start used to record
+	// trustedProjectRepoRoot for an agent provisioned before records were
+	// written; that start-time backfill is no longer done, but the value is
+	// still accepted on read for records written by older versions.
 	repoRootSourceBackfill = "backfill"
 )
 
@@ -235,81 +239,159 @@ type startRepoRootInput struct {
 	ctxRepoRoot string // the broker's signal for this dispatch, if any
 	explicit    bool   // an explicit-workspace start
 	volumes     []api.VolumeMount
+	settings    *config.VersionedSettings
 }
 
-// resolveStartRepoRoot returns the repository root Start passes to the
-// runtime, and the broker value (if any) the workspace-backend step must
-// re-check. Nothing is derived from the workspace's own git metadata:
-//  1. A broker signal on ctx is used once validatedWorktreeRepoRoot
-//     confirms it against the workspace.
-//  2. Otherwise agentDir's record is read (readRepoRootRecord). It is used
-//     only while agentDir is outside every mount of the agent now
-//     (agentDirOutsideAgentMounts), computed for the root it names:
-//     - a broker record once validatedWorktreeRepoRoot confirms it;
-//     - a provision or backfill record only when its root still equals
-//     trustedProjectRepoRoot(projectDir), and not on an explicit-workspace
-//     start.
-//  3. With no usable record, an explicit-workspace start, or a project
-//     that is not a git project, gets "".
-//  4. Otherwise (a git project provisioned before records were written),
-//     when the workspace is the per-agent directory <agentDir>/workspace,
-//     trustedProjectRepoRoot is recorded as a backfill record, when
-//     agentDir is outside every mount of the agent, and used. If the walk
-//     finds no root, or the record cannot be written, the result is "".
+// recordStatus is the tri-state result of reading the agent's on-disk
+// repository root record for the start-time intersection.
+type recordStatus int
+
+const (
+	// recordMissing: no record on disk, or one that is not trusted because
+	// agentDir is under an agent mount. Treated as absent.
+	recordMissing recordStatus = iota
+	// recordPresent: a trusted, readable on-disk record.
+	recordPresent
+	// recordUnreadable: a record present on disk, outside every agent mount,
+	// that cannot be read or is malformed. The start is refused.
+	recordUnreadable
+)
+
+// repoRootRecordState is the on-disk record (R) that the intersection
+// reconciles with the derived root (D).
+type repoRootRecordState struct {
+	status recordStatus
+	root   string // set only when status is recordPresent
+}
+
+// repoRootRecordMax caps how much of the repository root record is read. The
+// record is a small JSON object; anything larger is treated as unreadable.
+const repoRootRecordMax = 4096
+
+// resolveStartRepoRoot returns the repository root Start passes to the runtime,
+// together with the on-disk record and the candidate it used, so Start can
+// re-run the same composition after a workspace backend changes the workspace.
+// The result is always the derived root (or ""), or a refusal:
 //
-// The explicit flag can only lower the result to "".
-func resolveStartRepoRoot(in startRepoRootInput) (repoRoot, brokerCandidate string) {
-	if in.ctxRepoRoot != "" {
-		return validatedWorktreeRepoRoot(in.ctxRepoRoot, in.workspace), in.ctxRepoRoot
+//   - the candidate is the broker signal (ctx) or, when there is none, the
+//     recorded root; it is the input to the derived root, as the upstream
+//     broker-known-path derivation computes it on main, except that an
+//     untrusted record (one under an agent mount) is not a candidate.
+//   - R is the on-disk record only (never ctx), read tri-state: a record under
+//     an agent mount, or none, is missing; a present record that cannot be read
+//     or is malformed is unreadable.
+//   - reconcileRepoRoot applies the decision table: the full root is mounted
+//     only when a present record equals the derived root; a mismatch or an
+//     unreadable record refuses the start; a missing or untrusted record uses
+//     the derived root unchanged.
+func resolveStartRepoRoot(in startRepoRootInput) (repoRoot string, rec repoRootRecordState, candidate string, err error) {
+	rec = readRepoRootRecordState(in.agentName, in.agentDir, in.workspace, in.volumes)
+	candidate = in.ctxRepoRoot
+	if candidate == "" && rec.status == recordPresent {
+		candidate = rec.root
 	}
-	rec, ok := readRepoRootRecord(in.agentDir)
-	if ok {
-		if !agentDirOutsideAgentMounts(in.agentDir, agentMountSources(in.workspace, rec.RepoRoot, in.volumes)) {
-			slog.Warn("start: the agent directory is inside one of the agent's mounts; its repository root record is not used",
-				"agent", in.agentName)
-			return "", ""
+	repoRoot, err = composeRepoRoot(in.agentName, candidate, rec, in.workspace, in.projectDir, in.explicit, in.settings)
+	return repoRoot, rec, candidate, err
+}
+
+// composeRepoRoot computes the derived root the way the upstream broker-known-
+// path derivation does on main — validatedWorktreeRepoRoot(candidate, ws),
+// falling back to detectRepoRoot when that is empty — and then applies the
+// fail-closed record intersection (reconcileRepoRoot). The root is taken only
+// from broker-known paths (the candidate, the workspace path and the project's
+// own root); git is used only to check those paths, never to source the root
+// from the workspace's own metadata.
+func composeRepoRoot(agentName, candidate string, rec repoRootRecordState, workspace, projectDir string, explicit bool, settings *config.VersionedSettings) (string, error) {
+	derived := validatedWorktreeRepoRoot(candidate, workspace)
+	var detectErr error
+	if derived == "" {
+		derived, detectErr = detectRepoRoot(explicit, workspace, projectDir, settings)
+	}
+	return reconcileRepoRoot(agentName, derived, detectErr, rec)
+}
+
+// readRepoRootRecordState reads the on-disk record R, guarding first: when
+// agentDir is under any agent mount the record is one an agent could reach or
+// write, so it is treated as missing whatever its contents (never a refusal).
+// A record outside every agent mount is then read: absent is missing; present
+// but unreadable or malformed is unreadable; otherwise present. The broker ctx
+// signal is not a record; the caller uses it as the candidate.
+func readRepoRootRecordState(agentName, agentDir, workspace string, volumes []api.VolumeMount) repoRootRecordState {
+	recPath := filepath.Join(agentDir, provisionedWorktreeStateFile)
+	reachable := !agentDirOutsideAgentMounts(agentDir, agentMountSources(workspace, "", volumes))
+	// Decide existence with Lstat before opening anything: an absent record is
+	// missing with no log; a reachable record is missing whatever it is.
+	if _, err := os.Lstat(recPath); err != nil {
+		if os.IsNotExist(err) {
+			return repoRootRecordState{status: recordMissing}
 		}
-		if rec.Source == repoRootSourceBroker {
-			return validatedWorktreeRepoRoot(rec.RepoRoot, in.workspace), rec.RepoRoot
+		if reachable {
+			slog.Warn("start: the agent directory is inside one of the agent's mounts; its repository root record is not used", "agent", agentName)
+			return repoRootRecordState{status: recordMissing}
 		}
-		if in.explicit {
-			return "", ""
+		return repoRootRecordState{status: recordUnreadable}
+	}
+	// Guard before reading, on the root-independent mount sources: a record an
+	// agent could reach is missing whatever its contents, so a corrupt record or
+	// a FIFO placed there can neither refuse the start nor block the broker.
+	if reachable {
+		slog.Warn("start: the repository root record is inside one of the agent's mounts; it is not used", "agent", agentName)
+		return repoRootRecordState{status: recordMissing}
+	}
+	// Read with O_NOFOLLOW, O_NONBLOCK, regular-file-only and a size cap, so a
+	// symlink or FIFO at the path cannot redirect or block the read.
+	data, err := util.ReadSmallRegularFile(recPath, repoRootRecordMax)
+	if err != nil {
+		return repoRootRecordState{status: recordUnreadable}
+	}
+	var state provisionedWorktreeState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return repoRootRecordState{status: recordUnreadable}
+	}
+	// Source does not gate trust: the agentDir guard and the equality check
+	// against the derived root do. Ignoring Source keeps records written before
+	// Source existed usable on upgrade. A record with no root is malformed.
+	if state.RepoRoot == "" {
+		return repoRootRecordState{status: recordUnreadable}
+	}
+	// With the record's own root known, the guard can add the recorded
+	// repository's mount to the sources, which can only tighten it.
+	if !agentDirOutsideAgentMounts(agentDir, agentMountSources(workspace, state.RepoRoot, volumes)) {
+		slog.Warn("start: the agent directory is inside the recorded repository's mount; the record is not used", "agent", agentName)
+		return repoRootRecordState{status: recordMissing}
+	}
+	return repoRootRecordState{status: recordPresent, root: state.RepoRoot}
+}
+
+// reconcileRepoRoot is the fail-closed intersection of the broker-known-path
+// derivation D (derived, detectErr) and the record R (rec). It is the single
+// place the mismatch/unreadable policy lives, so it can be changed in one spot.
+// The decision table:
+//
+//  1. D refuses (detectErr): refuse, whatever R is.
+//  2. D is a plain mount (derived == ""): plain mount, whatever R is.
+//  3. D is a full root X and R is missing or untrusted: use X.
+//  4. D is a full root X and R is present and readable: use X when R equals X,
+//     otherwise refuse (R must not name a different root).
+//  5. D is a full root X and R is present but unreadable or malformed: refuse.
+func reconcileRepoRoot(agentName, derived string, detectErr error, rec repoRootRecordState) (string, error) {
+	if detectErr != nil {
+		return "", detectErr
+	}
+	if derived == "" {
+		return "", nil
+	}
+	switch rec.status {
+	case recordMissing:
+		return derived, nil
+	case recordPresent:
+		if samePath(rec.root, derived) {
+			return derived, nil
 		}
-		// A provision or backfill record is honoured only when its root
-		// still equals the trusted walk from the project directory. The
-		// provenance field is not a proof — anything that can write the
-		// record can write the source too — so the root is checked against
-		// the project here, not trusted on the source alone. The walk runs
-		// no git and reads no config or environment.
-		if !samePath(rec.RepoRoot, trustedProjectRepoRoot(in.projectDir)) {
-			slog.Warn("start: the recorded repository root does not match the project; it is not used",
-				"agent", in.agentName)
-			return "", ""
-		}
-		return rec.RepoRoot, ""
+		return "", fmt.Errorf("agent %q: the recorded repository root %q does not match the repository root %q derived from the project; refusing to start", agentName, rec.root, derived)
+	default: // recordUnreadable
+		return "", fmt.Errorf("agent %q: the repository root record is present but could not be read; refusing to start (derived repository root %q)", agentName, derived)
 	}
-	if in.explicit || !isGitWorkspaceProject(in.projectDir) {
-		return "", ""
-	}
-	// Backfill only the per-agent workspace directory, the one place
-	// ProvisionAgent creates a git project's worktree. An agent attached to
-	// a worktree elsewhere, or with an explicit workspace whose persisted
-	// flag was lost, gets no repository root.
-	if !samePath(in.workspace, filepath.Join(in.agentDir, "workspace")) {
-		return "", ""
-	}
-	root := trustedProjectRepoRoot(in.projectDir)
-	if root == "" {
-		return "", ""
-	}
-	if err := writeRepoRootRecord(in.agentDir, root, repoRootSourceBackfill, agentMountSources(in.workspace, root, in.volumes)); err != nil {
-		slog.Warn("start: repository root not recorded; the agent starts without a repository root mount",
-			"agent", in.agentName, "reason", err)
-		return "", ""
-	}
-	slog.Info("start: recorded the project's repository root for an agent provisioned without one",
-		"agent", in.agentName, "repo_root", root)
-	return root, ""
 }
 
 // refuseWorkspaceInAgentsDir rejects an explicit workspace that is the
