@@ -17,7 +17,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { chooseAlphabet } from '../../../utils/critic-sentinels.js';
-import { loadDoc, saveDoc } from './bridge.js';
+import { loadDoc, saveDoc, sentinelLeft } from './bridge.js';
 import type { Core } from './create.js';
 import { docMarkKinds, marksReadBack, textMarkKinds } from './guard.js';
 import { projectCritic } from '../../../utils/critic.js';
@@ -133,5 +133,24 @@ describe('corpus round trip', () => {
       if (!same) bad.push(c.name);
     }
     expect(bad).toEqual(RESERIALIZE_DIFFERS);
+  });
+});
+
+describe('load-time safety net', () => {
+  it('finds an alphabet character left in text, a node attribute or a mark attribute', () => {
+    const a = chooseAlphabet('x')!;
+    const { schema } = core.view.state;
+    const doc = (
+      inline: ReturnType<typeof schema.text>[]
+    ): ReturnType<typeof schema.topNodeType.create> =>
+      schema.topNodeType.create(null, [schema.nodes.paragraph.create(null, inline)]);
+    expect(sentinelLeft(doc([schema.text('plain')]), a)).toBe(false);
+    expect(sentinelLeft(doc([schema.text(`a${a.note}b`)]), a)).toBe(true);
+    const link = schema.marks.link.create({ href: `https://x.example/${a.insOpen}` });
+    expect(sentinelLeft(doc([schema.text('l', [link])]), a)).toBe(true);
+    const img = schema.nodes.image.create({ src: 'a.png', alt: `x${a.hlClose}` });
+    expect(
+      sentinelLeft(schema.topNodeType.create(null, [schema.nodes.paragraph.create(null, [img])]), a)
+    ).toBe(true);
   });
 });

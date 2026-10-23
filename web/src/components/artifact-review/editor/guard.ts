@@ -32,7 +32,7 @@
 import type { Node } from '@milkdown/prose/model';
 
 import { parseCritic } from '../../../utils/critic.js';
-import { COMMENT, markKeyOf, runKeyOf } from './schema.js';
+import { COMMENT, isMine, markKeyOf, runKeyOf } from './schema.js';
 import type { MarkKey } from './schema.js';
 
 /** The clean reading of a node: what the text is with every mark rejected. */
@@ -80,6 +80,8 @@ export interface MarkRun {
   text: string;
   /** A replacement's new side. */
   next?: string;
+  /** Added in this editing session (document runs only). */
+  mine?: boolean;
 }
 
 const KIND_OF: Record<MarkKey, MarkRun['kind']> = {
@@ -101,7 +103,7 @@ export function docMarkRuns(doc: Node): MarkRun[] {
   let side: 'text' | 'next' = 'text';
   doc.descendants((n) => {
     if (n.type.name === COMMENT) {
-      out.push({ kind: 'comment', text: String(n.attrs.note) });
+      out.push({ kind: 'comment', text: String(n.attrs.note), mine: n.attrs.mine === true });
       prev = null;
       cur = null;
       return false;
@@ -119,7 +121,7 @@ export function docMarkRuns(doc: Node): MarkRun[] {
         side = 'next';
         cur.next = '';
       } else {
-        cur = { kind: KIND_OF[k], text: '' };
+        cur = { kind: KIND_OF[k], text: '', mine: isMine(n.marks) };
         side = 'text';
         if (k === 'subOld' || k === 'subNew') cur.next = '';
         if (k === 'subNew') side = 'next';
@@ -131,6 +133,33 @@ export function docMarkRuns(doc: Node): MarkRun[] {
       if (side === 'next') cur.next = (cur.next ?? '') + t;
       else cur.text += t;
     }
+    prev = run;
+    return false;
+  });
+  return out;
+}
+
+/**
+ * The document ranges of each mark run, in the order of docMarkRuns (a
+ * replacement's two sides are one run; a run may span blocks).
+ */
+export function docMarkRanges(doc: Node): { from: number; to: number }[][] {
+  const out: { from: number; to: number }[][] = [];
+  let prev: string | null = null;
+  doc.descendants((n, pos) => {
+    if (n.type.name === COMMENT) {
+      out.push([{ from: pos, to: pos + 1 }]);
+      prev = null;
+      return false;
+    }
+    if (n.isBlock) return true;
+    const run = runKeyOf(n.marks);
+    if (run === null) {
+      prev = null;
+      return false;
+    }
+    if (run !== prev && !(prev === 'subOld' && run === 'subNew')) out.push([]);
+    out[out.length - 1].push({ from: pos, to: pos + n.nodeSize });
     prev = run;
     return false;
   });
@@ -166,6 +195,20 @@ export function textMarkRuns(text: string, plain: (md: string) => string): MarkR
 // as Markdown text and as the editor's text.
 const squash = (t: string): string => t.replace(/\s+/g, '');
 
+/** Whether two mark sequences agree (kinds; texts when plain; notes exactly). */
+export function sameRuns(d: MarkRun[], t: MarkRun[], texts: boolean): boolean {
+  return (
+    d.length === t.length &&
+    d.every((r, i) => {
+      const o = t[i];
+      if (r.kind !== o.kind) return false;
+      if (!texts) return true;
+      if (r.kind === 'comment') return r.text === o.text;
+      return squash(r.text) === squash(o.text) && squash(r.next ?? '') === squash(o.next ?? '');
+    })
+  );
+}
+
 /**
  * Whether the saved text reads back as the document's marks: the same
  * kinds in the same order and, when plain is given (it reads a mark's
@@ -181,14 +224,5 @@ export function marksReadBack(
   const t = plain
     ? textMarkRuns(text, plain)
     : textMarkKinds(text).map((kind) => ({ kind, text: '' }) as MarkRun);
-  const same =
-    d.length === t.length &&
-    d.every((r, i) => {
-      const o = t[i];
-      if (r.kind !== o.kind) return false;
-      if (!plain) return true;
-      if (r.kind === 'comment') return r.text === o.text;
-      return squash(r.text) === squash(o.text) && squash(r.next ?? '') === squash(o.next ?? '');
-    });
-  return same ? null : { doc: d, text: t };
+  return sameRuns(d, t, !!plain) ? null : { doc: d, text: t };
 }

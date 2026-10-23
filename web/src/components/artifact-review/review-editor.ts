@@ -64,6 +64,11 @@ export class ScionReviewEditor extends LitElement {
   @property({ type: Number }) seq = 0;
   @property({ type: String }) entryPath = '';
   @property({ attribute: false }) files: ArtifactFile[] = [];
+  /**
+   * The version's own text: marks in content that it does not have are the
+   * reviewer's own (kept as theirs across a switch to Source and back).
+   */
+  @property({ type: String }) baseline = '';
   /** Shown as the author of comments already in the text. */
   @property({ type: String }) noteAuthor = '';
 
@@ -148,7 +153,7 @@ export class ScionReviewEditor extends LitElement {
     if (!this.controller) return;
     this.clearTimer();
     this.known = text;
-    if (this.controller.load(text)) {
+    if (this.controller.load(text, this.baseline || undefined)) {
       this.emit('review-ready', {});
     } else {
       this.emit('review-load-failed', {});

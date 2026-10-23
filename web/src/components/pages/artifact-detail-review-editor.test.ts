@@ -315,6 +315,27 @@ describe('artifact page: graphical review editor experiment', () => {
     expect($(el, '.g-work scion-code-editor.review-editor')).not.toBeNull();
   });
 
+  it('keeps one live region mounted, and the earlier-review hint has no Source pointer', async () => {
+    mockFetch();
+    const el = await mount(true);
+    await startReview(el);
+    const region = $(el, '.hint-region')!;
+    expect(region.getAttribute('role')).toBe('status');
+    expect(region.getAttribute('aria-live')).toBe('polite');
+    expect($(el, '.hint-strip')).toBeNull();
+    const editor = $<FakeReviewEditor>(el, 'scion-review-editor')!;
+    editor.dispatchEvent(
+      new CustomEvent('review-hint', { detail: { kind: 'earlier' }, bubbles: true, composed: true })
+    );
+    await settle(el);
+    // The same element announces the hint.
+    expect($(el, '.hint-region')).toBe(region);
+    const strip = region.querySelector('.hint-strip')!;
+    expect(strip.textContent).toContain('This suggestion is from an earlier review.');
+    expect(strip.textContent).toContain('You can comment on it.');
+    expect(byText(el, '.hint-strip sl-button', 'Open Source view')).toBeUndefined();
+  });
+
   it('Ctrl+Alt+M comments in the source view', async () => {
     mockFetch();
     window.localStorage.setItem('scion:artifact-review-view', 'source');

@@ -297,6 +297,30 @@ export function trackPlugin(): Plugin {
   });
 }
 
+/**
+ * Where two fragments differ: [start, endNow) in now replaces [start,
+ * endOld) in old. findDiffEnd can report ends before findDiffStart when
+ * the changed text repeats its neighbour ("item" to "ittem"); both ends
+ * are then moved past start by the same amount. Null when equal.
+ */
+export function diffRange(
+  now: Fragment,
+  old: Fragment
+): { start: number; endNow: number; endOld: number } | null {
+  const start = now.findDiffStart(old);
+  if (start === null) return null;
+  const end = now.findDiffEnd(old);
+  if (!end) return null;
+  let endNow = end.a;
+  let endOld = end.b;
+  const overlap = start - Math.min(endNow, endOld);
+  if (overlap > 0) {
+    endNow += overlap;
+    endOld += overlap;
+  }
+  return { start, endNow, endOld };
+}
+
 /** The state before a composition: the whole document and the textblock at the selection. */
 export interface CompositionSnapshot {
   doc: Node;
@@ -337,13 +361,9 @@ export function reconcileComposition(
     return tr;
   };
   const restore = (why: string): string => {
-    const start = state.doc.content.findDiffStart(snap.doc.content);
-    const end = state.doc.content.findDiffEnd(snap.doc.content);
-    if (start !== null && end) {
-      const endNow = Math.max(end.a, start);
-      const endOld = Math.max(end.b, start);
-      view.dispatch(tag(state.tr.replace(start, endNow, snap.doc.slice(start, endOld))));
-    }
+    const d = diffRange(state.doc.content, snap.doc.content);
+    if (d)
+      view.dispatch(tag(state.tr.replace(d.start, d.endNow, snap.doc.slice(d.start, d.endOld))));
     return why;
   };
   if (state.doc.eq(snap.doc)) return null;
@@ -360,17 +380,9 @@ export function reconcileComposition(
   ) {
     return restore('generic');
   }
-  const start = now.content.findDiffStart(block.node.content);
-  if (start === null) return null;
-  const end = now.content.findDiffEnd(block.node.content);
-  if (!end) return null;
-  let { a: endNow, b: endOld } = end;
-  // findDiffEnd may overlap findDiffStart when text repeats.
-  const overlap = start - Math.min(endNow, endOld);
-  if (overlap > 0) {
-    endNow += overlap;
-    endOld += overlap;
-  }
+  const d = diffRange(now.content, block.node.content);
+  if (!d) return null;
+  const { start, endNow, endOld } = d;
   // Only insertions are recorded in this version: a composition that
   // removed text (or replaced a selection) is undone.
   if (endOld > start) return restore('generic');

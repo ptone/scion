@@ -31,7 +31,6 @@ import type { EditorView } from '@milkdown/prose/view';
 import { artifactLinkTarget } from '../../../client/artifact-preview.js';
 import { createCore } from './create.js';
 import type { Core } from './create.js';
-import { marksReadBack } from './guard.js';
 import { guardTransfers, pastePlugin } from './paste.js';
 import { containerClass, policyPlugin } from './policy.js';
 import type { HintKind } from './policy.js';
@@ -103,6 +102,8 @@ export class ReviewController {
   private loading = false;
   private readonly uiKey = new PluginKey<unknown>('criticUi');
   private composing: CompositionSnapshot | null = null;
+  private ended: CompositionSnapshot | null = null;
+  private endedTimer: ReturnType<typeof setTimeout> | null = null;
   private unguard: () => void = () => {};
 
   private constructor(private readonly opts: ControllerOptions) {}
@@ -164,6 +165,13 @@ export class ReviewController {
         // browser has not reported its latest move yet.
         handleKeyDown: (view, event): boolean => {
           if (!view.composing && event.keyCode !== 229) this.syncSelection();
+          // Comment by the key's position (KeyM), so layouts where
+          // Ctrl+Alt (AltGr) + M types a character still comment.
+          if ((event.ctrlKey || event.metaKey) && event.altKey && event.code === 'KeyM') {
+            event.preventDefault();
+            void this.comment();
+            return true;
+          }
           return false;
         },
         // A copy puts the editor's own Markdown of the selection on the
@@ -201,8 +209,7 @@ export class ReviewController {
             return false;
           },
           compositionend: (): boolean => {
-            // After ProseMirror has applied the composition's last change.
-            setTimeout(() => this.endComposition(), 0);
+            this.endComposition();
             return false;
           },
         },
@@ -244,20 +251,53 @@ export class ReviewController {
     return this.core.serialize(tr.doc).replace(/\n+$/, '');
   }
 
-  /** Snapshots the document as a composition starts. */
+  /**
+   * Snapshots the document as a composition starts. A composition that
+   * ended but is not settled yet (its settle step is deferred one tick) is
+   * settled first, so back-to-back compositions (Korean syllables, some
+   * Android keyboards) each get their own snapshot.
+   */
   beginComposition(): void {
-    this.composing = snapshotComposition(this.core.view.state);
+    this.settleComposition();
+    // Still composing in the view (settle kept the older snapshot): that
+    // snapshot covers this composition too.
+    this.composing ??= snapshotComposition(this.core.view.state);
   }
 
   /**
-   * Records the finished composition as an insertion, or restores the
-   * document from before it (with a hint) when it cannot be recorded.
+   * At compositionend: takes the snapshot now and settles it one tick
+   * later, after ProseMirror has applied the composition's last change.
    */
   endComposition(): void {
     const snap = this.composing;
     this.composing = null;
     if (!snap) return;
+    this.settleComposition();
+    this.ended = snap;
+    this.endedTimer = setTimeout(() => {
+      this.endedTimer = null;
+      this.settleComposition();
+    }, 0);
+  }
+
+  /**
+   * Records the ended composition as an insertion, or restores the
+   * document from before it (with a hint) when it cannot be recorded.
+   * Never runs while a composition is in progress.
+   */
+  settleComposition(): void {
+    if (this.endedTimer) clearTimeout(this.endedTimer);
+    this.endedTimer = null;
+    const snap = this.ended;
+    this.ended = null;
+    if (!snap) return;
     const view = this.core.view;
+    if (view.composing) {
+      // A new composition is running in the same block: keep the oldest
+      // snapshot, so its end settles both.
+      this.composing = snap;
+      return;
+    }
     const id: unknown = this.uiKey.getState(view.state);
     const refused = reconcileComposition(view, snap, id, (doc, pos) => {
       const container = containerClass(view.state.doc.resolve(pos + 1));
@@ -270,10 +310,10 @@ export class ReviewController {
   }
 
   /** Opens md; false when it cannot be shown in this editor. */
-  load(md: string): boolean {
+  load(md: string, baseline?: string): boolean {
     this.loading = true;
     try {
-      return this.session.load(md);
+      return this.session.load(md, baseline);
     } finally {
       this.loading = false;
     }
@@ -287,10 +327,15 @@ export class ReviewController {
   flush(): string | null {
     const text = this.session.save();
     if (text !== null && this.session.isDirty) {
-      const diff = marksReadBack(this.core.view.state.doc, text, this.core.plain);
+      const diff = this.session.marksCheck();
       if (diff) console.error('review editor: saved marks read back differently', diff);
     }
     return text;
+  }
+
+  /** Top-level blocks that are read-only and saved from their source. */
+  readOnlyBlocks(): number[] {
+    return this.session.readOnlyBlocks();
   }
 
   get dirty(): boolean {
@@ -369,7 +414,10 @@ export class ReviewController {
     if (note === null) return;
     // The document may have changed while the dialog was open: the comment
     // must still be at pos, unchanged.
-    if (view.state.doc !== docBefore && view.state.doc.nodeAt(pos) !== node) return;
+    if (view.state.doc !== docBefore && view.state.doc.nodeAt(pos) !== node) {
+      this.opts.onHint('generic');
+      return;
+    }
     const tr = editComment(view.state, pos, note);
     if (tr) this.dispatchChecked(tr, pos);
   }
@@ -382,7 +430,7 @@ export class ReviewController {
   private dispatchChecked(tr: Transaction, pos: number): void {
     const view = this.core.view;
     const i = view.state.doc.resolve(Math.min(pos, view.state.doc.content.size)).index(0);
-    if (!this.session.unitOk(tr.doc, i, i)) {
+    if (!this.session.unitOk(tr.doc, i, i, false)) {
       this.opts.onHint('generic');
       return;
     }
@@ -403,6 +451,7 @@ export class ReviewController {
   }
 
   async destroy(): Promise<void> {
+    if (this.endedTimer) clearTimeout(this.endedTimer);
     this.unguard();
     await this.core.destroy();
   }

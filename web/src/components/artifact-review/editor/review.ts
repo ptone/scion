@@ -80,7 +80,11 @@ export function addComment(state: EditorState, plan: CommentPlan, note: string):
   const schema = state.schema;
   const tr = state.tr;
   if (plan.highlight) {
-    tr.addMark(plan.highlight.from, plan.highlight.to, schema.marks[MARKS.hl].create());
+    tr.addMark(
+      plan.highlight.from,
+      plan.highlight.to,
+      schema.marks[MARKS.hl].create({ mine: true })
+    );
   }
   tr.insert(plan.at, schema.nodes[COMMENT].create({ note, mine: true }));
   tr.setSelection(TextSelection.create(tr.doc, plan.at + 1));
@@ -126,11 +130,13 @@ export function editComment(state: EditorState, pos: number, note: string): Tran
     const hl = state.schema.marks[MARKS.hl];
     let start = pos;
     const parentStart = $p.start();
-    // Walk back over the highlight run that ends at the comment.
+    // Walk back over this session's own highlight run that ends at the
+    // comment (an earlier reviewer's highlight stays).
     while (start > parentStart) {
       const before = tr.doc.resolve(start).nodeBefore;
-      if (!before || !hl.isInSet(before.marks)) break;
-      start -= before.nodeSize;
+      const m = before ? hl.isInSet(before.marks) : undefined;
+      if (!m || m.attrs.mine !== true) break;
+      start -= before!.nodeSize;
     }
     if (start < pos) tr.removeMark(start, pos, hl);
   } else {

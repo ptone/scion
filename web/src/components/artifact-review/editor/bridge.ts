@@ -46,17 +46,40 @@ interface Edit {
   literal?: string;
 }
 
+/** Attribute names in the order their text appears in the Markdown source. */
+const ATTR_ORDER: Record<string, string[]> = {
+  image: ['alt', 'src', 'title'],
+  link: ['href', 'title'],
+  code_block: ['language'],
+  html: ['value'],
+};
+
+/** What applySentinels found besides the marks. */
+export interface SentinelResult {
+  /** Notes consumed (every comment, in text, code or an attribute). */
+  notesUsed: number;
+  /**
+   * Top-level blocks holding a token inside an attribute (a link target or
+   * title, an image's alt, source or title, raw HTML, a code language). The
+   * critic parser reads a mark there, which is not a mark in the editor, so
+   * these blocks are read-only and always saved from their source.
+   */
+  attributeBlocks: Set<number>;
+}
+
 /**
  * Turns the sentinels of tr.doc into marks and comment nodes. A run may
  * cross block boundaries; the mark goes on every textblock in between that
  * allows it. A run that covers no markable text keeps its tokens as text.
+ * Sentinels inside attributes become their tokens again (a comment with
+ * its note), consuming notes in source order.
  */
 export function applySentinels(
   tr: Transform,
   schema: Schema,
   notes: string[],
   a: SentinelAlphabet
-): void {
+): SentinelResult {
   const tokenMap = tokenOf(a);
   const tok = (c: string): string => tokenMap.get(c) ?? c;
   const sentinels = sentinelSet(a);
@@ -89,6 +112,27 @@ export function applySentinels(
   const ranges: { from: number; to: number; key: MarkKey }[] = [];
   const edits: Edit[] = [];
   let noteIdx = 0;
+  const attributeBlocks = new Set<number>();
+  const attrEdits: (() => void)[] = [];
+  // Restores the sentinels of attrs (in ATTR_ORDER), consuming notes;
+  // returns the new attrs, or null when none held a sentinel.
+  const restoreAttrs = (
+    typeName: string,
+    attrs: Record<string, unknown>
+  ): Record<string, unknown> | null => {
+    const names = ATTR_ORDER[typeName] ?? Object.keys(attrs);
+    let changed = false;
+    const out: Record<string, unknown> = { ...attrs };
+    for (const name of names) {
+      const v = attrs[name];
+      if (typeof v !== 'string' || ![...v].some((c) => sentinels.has(c))) continue;
+      out[name] = [...v]
+        .map((c) => (c === a.note ? `{>>${notes[noteIdx++] ?? ''}<<}` : tok(c)))
+        .join('');
+      changed = true;
+    }
+    return changed ? out : null;
+  };
   const markable = (from: number, to: number): boolean => {
     let ok = false;
     tr.doc.nodesBetween(from, to, (n, pos, parent) => {
@@ -105,8 +149,20 @@ export function applySentinels(
     });
     return ok;
   };
-  tr.doc.descendants((node, pos, parent) => {
-    if (!node.isText) return true;
+  const doc0 = tr.doc;
+  doc0.descendants((node, pos, parent, index) => {
+    if (!node.isText) {
+      // Atoms (images, raw HTML) and a code block's language come before
+      // their text in the source.
+      const attrs = restoreAttrs(node.type.name, node.attrs);
+      if (attrs) {
+        attributeBlocks.add(doc0.resolve(pos).index(0));
+        attrEdits.push(() => {
+          tr.setNodeMarkup(pos, undefined, attrs, node.marks);
+        });
+      }
+      return true;
+    }
     const t = node.text ?? '';
     const code = !parent?.type.allowsMarkType(insType);
     for (let i = 0; i < t.length; i++) {
@@ -151,8 +207,30 @@ export function applySentinels(
         edits.push({ pos: p, literal: tok(c) });
       }
     }
+    // A link's target and title follow its text in the source: restore
+    // them at the end of the link's run.
+    const next = parent?.maybeChild(index + 1);
+    for (const m of node.marks) {
+      if (!ATTR_ORDER[m.type.name] || (next && m.isInSet(next.marks))) continue;
+      const attrs = restoreAttrs(m.type.name, m.attrs);
+      if (!attrs) continue;
+      attributeBlocks.add(doc0.resolve(pos).index(0));
+      let start = pos;
+      for (let k = index - 1; k >= 0; k--) {
+        const prev = parent!.child(k);
+        if (!m.isInSet(prev.marks)) break;
+        start -= prev.nodeSize;
+      }
+      const end = pos + node.nodeSize;
+      attrEdits.push(() => {
+        tr.removeMark(start, end, m);
+        tr.addMark(start, end, m.type.create(attrs));
+      });
+    }
     return false;
   });
+  // Attribute changes keep every position, so they go first.
+  for (const f of attrEdits) f();
   const endState = state as MarkKey | null;
   if (endState !== null && openEdit) {
     (openEdit as Edit).literal = tok(openOf[endState]);
@@ -171,6 +249,7 @@ export function applySentinels(
       tr.delete(e.pos, e.pos + 1);
     }
   }
+  return { notesUsed: noteIdx, attributeBlocks };
 }
 
 interface Item {
@@ -292,41 +371,53 @@ export function docToSentinels(
   return { doc: tr.doc, notes };
 }
 
-/**
- * Whether a sentinel landed in an attribute (a token inside a link target
- * or title, an image source, raw HTML, an HTML comment, a code block's
- * language). The critic parser reads a mark there, but the editor would
- * show the token as part of the attribute, and a comment's note could not
- * be matched to its place: such a document is not opened in the editor.
- */
-function sentinelInAttribute(doc: Node, a: SentinelAlphabet): boolean {
+/** Whether any character of the alphabet is left in the document's strings. */
+export function sentinelLeft(doc: Node, a: SentinelAlphabet): boolean {
   const sentinels = sentinelSet(a);
-  const has = (attrs: Record<string, unknown>): boolean =>
-    Object.values(attrs).some((v) => typeof v === 'string' && [...v].some((c) => sentinels.has(c)));
+  const has = (v: unknown): boolean =>
+    typeof v === 'string' && [...v].some((c) => sentinels.has(c));
   let found = false;
   doc.descendants((node) => {
     if (found) return false;
-    if (has(node.attrs) || node.marks.some((m) => has(m.attrs))) found = true;
+    if ((node.isText && has(node.text)) || Object.values(node.attrs).some(has)) found = true;
+    for (const m of node.marks) if (Object.values(m.attrs).some(has)) found = true;
     return !found;
   });
   return found;
 }
 
+/** A loaded document and the top-level blocks holding tokens in attributes. */
+export interface LoadedDoc {
+  doc: Node;
+  attributeBlocks: Set<number>;
+}
+
 /**
  * Parses Markdown with CriticMarkup into a document, or null when it
- * cannot be shown faithfully (a mark token inside an attribute).
+ * cannot be shown faithfully: a note not placed, or a sentinel left
+ * anywhere (the load-time safety net).
  */
+export function loadDocument(
+  md: string,
+  parse: (s: string) => Node,
+  schema: Schema,
+  a: SentinelAlphabet
+): LoadedDoc | null {
+  const { text, notes } = criticToSentinelText(md, a);
+  const tr = new Transform(parse(text));
+  const r = applySentinels(tr, schema, notes, a);
+  if (r.notesUsed !== notes.length || sentinelLeft(tr.doc, a)) return null;
+  return { doc: tr.doc, attributeBlocks: r.attributeBlocks };
+}
+
+/** loadDocument's document alone (tests and checks). */
 export function loadDoc(
   md: string,
   parse: (s: string) => Node,
   schema: Schema,
   a: SentinelAlphabet
 ): Node | null {
-  const { text, notes } = criticToSentinelText(md, a);
-  const tr = new Transform(parse(text));
-  if (sentinelInAttribute(tr.doc, a)) return null;
-  applySentinels(tr, schema, notes, a);
-  return tr.doc;
+  return loadDocument(md, parse, schema, a)?.doc ?? null;
 }
 
 /** Serializes a document to Markdown with CriticMarkup. */

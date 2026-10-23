@@ -167,6 +167,7 @@ export type ReviewHint =
   | 'list-table'
   | 'break'
   | 'paste-multi'
+  | 'earlier'
   | 'generic'
   | 'load-failed';
 
@@ -192,6 +193,10 @@ export const REVIEW_HINT_TEXT: Record<ReviewHint, { title: string; body: string 
   'paste-multi': {
     title: "Pasting several paragraphs isn't supported here yet.",
     body: 'Paste one paragraph at a time, or use the Source view.',
+  },
+  earlier: {
+    title: 'This suggestion is from an earlier review.',
+    body: 'You can comment on it.',
   },
   generic: {
     title: "That change can't be recorded as a suggestion.",
@@ -2129,15 +2134,26 @@ export class ScionPageArtifactDetail extends LitElement {
       ${this.renderDiscarded()}`;
   }
 
-  /** The hint strip under the graphical review toolbar. */
-  private renderGraphicalHint(): TemplateResult | typeof nothing {
+  /**
+   * The hint strip under the graphical review toolbar: an always-mounted
+   * live region (role=status), filled when there is a hint, so screen
+   * readers announce each one.
+   */
+  private renderGraphicalHint(): TemplateResult {
+    return html`<div class="hint-region" role="status" aria-live="polite">
+      ${this.renderHintStrip()}
+    </div>`;
+  }
+
+  /** The current hint, inside the live region. */
+  private renderHintStrip(): TemplateResult | typeof nothing {
     const hint = this.graphicalHint;
     if (!hint) return nothing;
     const t = REVIEW_HINT_TEXT[hint];
     const icon =
       hint === 'image' ? 'image' : hint === 'load-failed' ? 'exclamation-triangle' : 'slash-circle';
     const action =
-      hint === 'image' || hint === 'load-failed'
+      hint === 'image' || hint === 'load-failed' || hint === 'earlier'
         ? nothing
         : html`<div class="hint-actions">
             <sl-button size="small" @click=${(): void => this.setReviewView('source')}>
@@ -2145,7 +2161,7 @@ export class ScionPageArtifactDetail extends LitElement {
               Open Source view
             </sl-button>
           </div>`;
-    return html`<div class="hint-strip ${hint === 'load-failed' ? 'warning' : ''}" role="status">
+    return html`<div class="hint-strip ${hint === 'load-failed' ? 'warning' : ''}">
       <sl-icon class="hint-icon" name=${icon}></sl-icon>
       <div class="hint-text"><strong>${t.title}</strong> ${t.body}${action}</div>
       <sl-icon-button
@@ -2180,10 +2196,18 @@ export class ScionPageArtifactDetail extends LitElement {
         <div class="g-toolbar" role="toolbar" aria-label="Review tools">
           ${graphical
             ? html`<sl-tooltip content="A review records every edit as a suggestion">
-                  <sl-switch size="small" checked disabled class="track">
-                    <span class="lbl">Track changes</span
-                    ><span class="narrow" aria-hidden="true">Track</span>
-                  </sl-switch>
+                  <!-- A disabled switch takes no focus: the wrapper does, so the
+                       tooltip is reachable by keyboard. -->
+                  <span
+                    class="track-wrap"
+                    tabindex="0"
+                    aria-label="Track changes: on. A review records every edit as a suggestion."
+                  >
+                    <sl-switch size="small" checked disabled class="track" aria-hidden="true">
+                      <span class="lbl">Track changes</span
+                      ><span class="narrow" aria-hidden="true">Track</span>
+                    </sl-switch>
+                  </span>
                 </sl-tooltip>
                 <span class="sep"></span>
                 <sl-tooltip content="Comment on the selection (Ctrl+Alt+M)">
@@ -2283,6 +2307,7 @@ export class ScionPageArtifactDetail extends LitElement {
             ? this.editorLoad === 'ready'
               ? html`<scion-review-editor
                   .content=${this.reviewText}
+                  .baseline=${lfText(this.text)}
                   .artifactId=${this.artifactId}
                   .seq=${v.seq}
                   .entryPath=${f.path}

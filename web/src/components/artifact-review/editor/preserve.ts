@@ -116,18 +116,22 @@ export function docStrings(doc: Node): string {
 /**
  * Saves doc, writing every unit of blocks unchanged since load from its
  * source and serializing the others (a unit with a mark that spans blocks
- * is serialized as a whole, so the mark stays one run). Returns null when
- * no sentinel alphabet is free for the edited text.
+ * is serialized as a whole, so the mark stays one run). Units holding a
+ * block of verbatim are always written from their source. Returns null when
+ * no sentinel alphabet is free for the edited text, or when blocks were
+ * added or removed while verbatim is not empty.
  */
 export function savePreserving(
   doc: Node,
   base: Baseline | null,
   serialize: (d: Node) => string,
-  schema: Schema
+  schema: Schema,
+  verbatim: ReadonlySet<number> = new Set()
 ): { md: string; rewritten: number } | null {
   const a = chooseAlphabet(docStrings(doc));
   if (!a) return null;
   if (!base || doc.childCount !== base.blocks.length) {
+    if (verbatim.size > 0) return null;
     return { md: saveDoc(doc, serialize, schema, a), rewritten: doc.childCount };
   }
   let md = base.lead;
@@ -138,6 +142,7 @@ export function savePreserving(
     while (j + 1 < base.blocks.length && base.blocks[j + 1].unit === base.blocks[i].unit) j++;
     let same = true;
     for (let k = i; k <= j; k++) if (doc.child(k) !== base.nodes[k]) same = false;
+    for (let k = i; k <= j; k++) if (verbatim.has(k)) same = true;
     if (same) {
       for (let k = i; k <= j; k++) {
         md += base.blocks[k].src;

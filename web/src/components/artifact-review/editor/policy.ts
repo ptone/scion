@@ -36,6 +36,7 @@ import {
 } from '@milkdown/prose/transform';
 
 import { cleanUnchanged } from './guard.js';
+import { COMMENT, isMine, markKeyOf, runKeyOf } from './schema.js';
 import { inlineContent, isExempt, trackTransaction } from './track.js';
 
 /** The hint shown when an edit is refused. */
@@ -46,6 +47,7 @@ export type HintKind =
   | 'list-table'
   | 'break'
   | 'paste-multi'
+  | 'earlier'
   | 'generic';
 
 /** Classes of document-changing transactions. */
@@ -152,6 +154,39 @@ export function classify(tr: Transaction, before: EditorState): EditClass {
  */
 export type UnitCheck = (doc: Node, first: number, last: number) => boolean;
 
+/**
+ * Whether a replace from..to (in doc) would change a mark or comment of an
+ * earlier review: it deletes an earlier insertion, replacement new side,
+ * highlighted text or comment, or it inserts inside an earlier mark's run
+ * (between the two sides of an earlier replacement included). Deleting
+ * text an earlier review already marked as deleted changes nothing.
+ */
+export function touchesEarlier(doc: Node, from: number, to: number): boolean {
+  let hit = false;
+  if (to > from) {
+    doc.nodesBetween(from, to, (n) => {
+      if (hit || !n.isInline) return !hit;
+      if (n.type.name === COMMENT) {
+        if (n.attrs.mine !== true) hit = true;
+        return false;
+      }
+      const k = markKeyOf(n.marks);
+      if ((k === 'ins' || k === 'subNew' || k === 'hl') && !isMine(n.marks)) hit = true;
+      return false;
+    });
+    if (hit) return true;
+  }
+  const $a = doc.resolve(from);
+  const $b = doc.resolve(to);
+  const before = $a.nodeBefore;
+  const after = $b.nodeAfter;
+  if (!before || !after || !$a.parent.isTextblock) return false;
+  const kb = runKeyOf(before.marks);
+  const ka = runKeyOf(after.marks);
+  if (!kb || !ka || isMine(before.marks) || isMine(after.marks)) return false;
+  return kb === ka || (kb === 'subOld' && ka === 'subNew');
+}
+
 /** Decides a transaction: allow it, or refuse it with a hint. */
 export function decide(
   tr: Transaction,
@@ -162,10 +197,12 @@ export function decide(
   const cls = classify(tr, before);
   const rule = POLICY[cls];
   if (rule.action === 'refuse') return rule.hint;
+  // A tracked class is a single ReplaceStep (classify).
+  const step = tr.steps[0] as ReplaceStep & { from: number; to: number };
+  if (touchesEarlier(before.doc, step.from, step.to)) return 'earlier';
   // The edit will be tracked: check that the tracked result keeps the clean reading.
   const tracked = trackTransaction(tr, before);
   if (!tracked) return 'generic';
-  const step = tr.steps[0] as ReplaceStep & { from: number; to: number };
   const after = tracked.transform.doc;
   if (!cleanUnchanged(before.doc, after, step.from, step.to)) return 'generic';
   const first = before.doc.resolve(step.from).index(0);

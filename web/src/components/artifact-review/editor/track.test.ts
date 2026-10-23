@@ -155,7 +155,7 @@ describe('track changes (inline)', () => {
     backspace(c, posOf(c, 'big', 2));
     const p = posOf(c, 'dog', 3);
     deleteRange(c, p, p + 1);
-    expect(hints).toEqual(['generic', 'generic']);
+    expect(hints).toEqual(['earlier', 'earlier']);
     expect(text(c)).toBe('a {++big ++}dog{>>note<<}\n');
   });
 
@@ -165,6 +165,16 @@ describe('track changes (inline)', () => {
     type(c, 'Y', posOf(c, 'old', 3));
     type(c, 'W', posOf(c, 'hl', 2));
     expect(text(c)).toBe('a {++big++}{++X++} {--old--}{++Y++} {==hl==}{++W++} z\n');
+  });
+
+  it('typing inside an earlier replacement or highlight is refused, with the earlier hint', async () => {
+    const md = 'a {~~old~>new~~} {==hl==}{>>n<<} z\n';
+    const { c, hints } = await open(md);
+    type(c, 'X', posOf(c, 'old', 1));
+    type(c, 'Y', posOf(c, 'new', 1));
+    type(c, 'W', posOf(c, 'hl', 1));
+    expect(hints).toEqual(['earlier', 'earlier', 'earlier']);
+    expect(text(c)).toBe(md);
   });
 
   it('one undo reverts a deletion and a replacement', async () => {
@@ -305,6 +315,118 @@ describe('comments', () => {
     expect(text(c)).toBe('one two three\n');
   });
 
+  it('deleting an own note next to an earlier highlight keeps the earlier one', async () => {
+    const { c, answer } = await open('a {==x==}y z\n');
+    const p = posOf(c, 'y');
+    select(c, p, p + 1);
+    answer.note = 'mine';
+    await c.comment();
+    expect(text(c)).toBe('a {==x==}{==y==}{>>mine<<} z\n');
+    let pos = -1;
+    c.view.state.doc.descendants((n, q) => {
+      if (n.type.name === 'critic_comment') pos = q;
+      return true;
+    });
+    answer.note = '';
+    await c.editNote(pos);
+    expect(text(c)).toBe('a {==x==}y z\n');
+  });
+
+  it("keeps the reviewer's own comment theirs after a reload with the version's text", async () => {
+    const { c, asked, answer, hints } = await open('one two\n');
+    c.load('one {>>mine<<}two {>>earlier<<}\n', 'one two {>>earlier<<}\n');
+    const comments: number[] = [];
+    c.view.state.doc.descendants((n, q) => {
+      if (n.type.name === 'critic_comment') comments.push(q);
+      return true;
+    });
+    expect(c.view.state.doc.nodeAt(comments[0])?.attrs.mine).toBe(true);
+    expect(c.view.state.doc.nodeAt(comments[1])?.attrs.mine).toBe(false);
+    answer.note = 'edited';
+    await c.editNote(comments[0]);
+    expect(asked).toHaveLength(1);
+    expect(text(c)).toBe('one {>>edited<<}two {>>earlier<<}\n');
+    await c.editNote(comments[1] + 0);
+    expect(hints).toEqual(['generic']);
+  });
+
+  it('a key acts on the selection the browser shows, even before the editor saw the move', async () => {
+    const { c, hints } = await open('one two\n');
+    select(c, 1);
+    const textNode = c.view.dom.querySelector('p')!.firstChild!;
+    document.getSelection()!.setBaseAndExtent(textNode, 4, textNode, 7);
+    // Bold on the selected word: refused with the formatting hint. On the
+    // editor's stale empty selection it would do nothing.
+    c.view.dom.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'b',
+        code: 'KeyB',
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      })
+    );
+    expect(c.view.state.selection.from).toBe(5);
+    expect(c.view.state.selection.to).toBe(8);
+    expect(hints).toEqual(['format']);
+    expect(text(c)).toBe('one two\n');
+  });
+
+  it('Ctrl+Alt+M also comments by the key name (a layout with M elsewhere)', async () => {
+    const { c, asked } = await open('one two\n');
+    select(c, posOf(c, 'two'));
+    c.view.dom.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'm',
+        code: 'Semicolon',
+        ctrlKey: true,
+        altKey: true,
+        bubbles: true,
+        cancelable: true,
+      })
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(asked).toHaveLength(1);
+    expect(text(c)).toBe('one {>>a note<<}two\n');
+  });
+
+  it('Ctrl+Alt+M comments by the key position, at the caret the browser shows', async () => {
+    const { c, asked } = await open('one two\n');
+    select(c, 1);
+    // The browser moved the caret before 'two' without the editor seeing it.
+    const textNode = c.view.dom.querySelector('p')!.firstChild!;
+    document.getSelection()!.collapse(textNode, 4);
+    // A layout where Ctrl+Alt+M types another character: key differs, code is KeyM.
+    const e = new KeyboardEvent('keydown', {
+      key: 'µ',
+      code: 'KeyM',
+      ctrlKey: true,
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    c.view.dom.dispatchEvent(e);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(e.defaultPrevented).toBe(true);
+    expect(asked).toHaveLength(1);
+    expect(text(c)).toBe('one {>>a note<<}two\n');
+    // Another key with the same modifiers does nothing.
+    const other = new KeyboardEvent('keydown', {
+      key: 'n',
+      code: 'KeyN',
+      ctrlKey: true,
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    c.view.dom.dispatchEvent(other);
+    await Promise.resolve();
+    expect(other.defaultPrevented).toBe(false);
+    expect(asked).toHaveLength(1);
+  });
+
   it('does not edit a comment already in the text', async () => {
     const { c, hints, asked } = await open('one {==two==}{>>old<<} three\n');
     let pos = -1;
@@ -370,6 +492,7 @@ describe('composition (IME) input', () => {
     if (time !== undefined) tr.setTime(time);
     v.dispatch(tr);
     c.endComposition();
+    c.settleComposition();
   }
 
   it('records a composed word as an insertion', async () => {
@@ -425,8 +548,138 @@ describe('composition (IME) input', () => {
     tr.setMeta('composition', 9);
     c.view.dispatch(tr);
     c.endComposition();
+    c.settleComposition();
     expect(hints).toEqual(['generic']);
     expect(text(c)).toBe('one\n\ntwo\n');
+  });
+});
+
+describe('composition timing', () => {
+  const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
+
+  function composeStep(c: ReviewController, at: number, t: string, id: number): void {
+    const v = c.view;
+    const tr = v.state.tr.insertText(t, at);
+    tr.setMeta('composition', id);
+    v.dispatch(tr);
+  }
+
+  it('settles one tick after compositionend, through the DOM events', async () => {
+    const { c, hints } = await open('a dog\n');
+    const p = posOf(c, 'dog');
+    select(c, p);
+    c.view.dom.dispatchEvent(new CompositionEvent('compositionstart'));
+    composeStep(c, p, '犬', 3);
+    c.view.dom.dispatchEvent(new CompositionEvent('compositionend'));
+    // ProseMirror may still apply the last change before the next tick.
+    expect(c.flush()).toBe('a 犬dog\n');
+    await tick();
+    expect(hints).toEqual([]);
+    expect(text(c)).toBe('a {++犬++}dog\n');
+  });
+
+  it('records back-to-back compositions, the second starting before the first settles', async () => {
+    const { c, hints } = await open('a dog\n');
+    const p = posOf(c, 'dog');
+    select(c, p);
+    c.view.dom.dispatchEvent(new CompositionEvent('compositionstart'));
+    composeStep(c, p, '大', 4);
+    c.view.dom.dispatchEvent(new CompositionEvent('compositionend'));
+    c.view.dom.dispatchEvent(new CompositionEvent('compositionstart'));
+    // The first composition was settled before the second snapshot.
+    expect(c.flush()).toBe('a {++大++}dog\n');
+    const q = posOf(c, 'dog');
+    composeStep(c, q, 'きい', 5);
+    c.view.dom.dispatchEvent(new CompositionEvent('compositionend'));
+    await tick();
+    expect(hints).toEqual([]);
+    expect(text(c)).toBe('a {++大きい++}dog\n');
+  });
+
+  it('does not settle while the view is still composing', async () => {
+    const { c, hints } = await open('a dog\n');
+    const p = posOf(c, 'dog');
+    select(c, p);
+    c.beginComposition();
+    composeStep(c, p, '犬', 6);
+    let composing = true;
+    Object.defineProperty(c.view, 'composing', { get: () => composing, configurable: true });
+    c.endComposition();
+    await tick();
+    expect(c.flush()).toBe('a 犬dog\n');
+    // A new compositionstart keeps the older snapshot, which covers both.
+    c.beginComposition();
+    composeStep(c, posOf(c, 'dog'), '猫', 7);
+    composing = false;
+    c.endComposition();
+    await tick();
+    expect(hints).toEqual([]);
+    expect(text(c)).toBe('a {++犬猫++}dog\n');
+  });
+
+  it('restores exactly when the composed letter repeats its neighbour, in a list and in code', async () => {
+    const md = '- item\n\n```\ncoode\n```\n';
+    const { c, hints } = await open(md);
+    const before = c.view.state.doc;
+    const li = posOf(c, 'item', 2);
+    select(c, li);
+    c.beginComposition();
+    composeStep(c, li, 't', 8);
+    c.endComposition();
+    c.settleComposition();
+    const code = posOf(c, 'coode', 2);
+    select(c, code);
+    c.beginComposition();
+    composeStep(c, code, 'o', 9);
+    c.endComposition();
+    c.settleComposition();
+    expect(hints).toEqual(['list-table', 'code']);
+    expect(c.view.state.doc.eq(before)).toBe(true);
+    expect(text(c)).toBe(md);
+  });
+
+  it('restores a composition inside an earlier insertion (it would split that mark)', async () => {
+    const md = 'a {++big++} dog\n';
+    const { c, hints } = await open(md);
+    const before = c.view.state.doc;
+    const p = posOf(c, 'big', 1);
+    select(c, p);
+    c.beginComposition();
+    composeStep(c, p, '犬', 12);
+    c.endComposition();
+    c.settleComposition();
+    expect(hints).toEqual(['generic']);
+    expect(c.view.state.doc.eq(before)).toBe(true);
+    expect(text(c)).toBe(md);
+  });
+
+  it('restores exactly when a composition removes one of a doubled letter', async () => {
+    const { c, hints } = await open('hello world\n');
+    const before = c.view.state.doc;
+    const p = posOf(c, 'hello', 3);
+    select(c, p);
+    c.beginComposition();
+    const tr = c.view.state.tr.delete(p, p + 1);
+    tr.setMeta('composition', 10);
+    c.view.dispatch(tr);
+    c.endComposition();
+    c.settleComposition();
+    expect(hints).toEqual(['generic']);
+    expect(c.view.state.doc.eq(before)).toBe(true);
+  });
+
+  it('records a composed letter that repeats its neighbour as one insertion', async () => {
+    const { c } = await open('helo\n');
+    const p = posOf(c, 'helo', 3);
+    select(c, p);
+    c.beginComposition();
+    composeStep(c, p, 'l', 11);
+    c.endComposition();
+    c.settleComposition();
+    const out = text(c);
+    expect(out.match(/\{\+\+l\+\+\}/g)?.length).toBe(1);
+    expect(projectCritic(out, 'accept')).toBe('hello\n');
+    expect(projectCritic(out, 'clean')).toBe('helo\n');
   });
 });
 

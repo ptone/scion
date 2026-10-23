@@ -19,6 +19,7 @@ import { describe, expect, it } from 'vitest';
 import {
   SENTINEL_CANDIDATES,
   chooseAlphabet,
+  chooseOpeningAlphabet,
   criticToSentinelText,
   sentinelSet,
   sentinelTextToCritic,
@@ -41,6 +42,44 @@ describe('sentinel alphabet', () => {
     expect(chooseAlphabet(SENTINEL_CANDIDATES.slice(4).join(''))).toBeNull();
     // Positive control: one more free candidate is enough.
     expect(chooseAlphabet(SENTINEL_CANDIDATES.slice(10).join(''))).not.toBeNull();
+  });
+});
+
+describe('opening alphabet (probe)', () => {
+  const C = SENTINEL_CANDIDATES;
+
+  it('excludes what the parser yields from the probe form, when the source has no candidate', () => {
+    // A stand-in parser that decodes one reference, as Markdown would in
+    // text a note hid in the source.
+    const shown = (t: string): string => t.replace('&#x2E00;', C[0]);
+    const md = '{>><b title="<<} &#x2E00; ">';
+    expect(md.split('').some((c) => C.includes(c))).toBe(false);
+    const a = chooseOpeningAlphabet(md, shown)!;
+    expect(sentinelSet(a).has(C[0])).toBe(false);
+    expect(a.insOpen).toBe(C[1]);
+    // Positive control: without the decoded reference, the first candidate is used.
+    expect(chooseOpeningAlphabet(md, (t) => t)!.insOpen).toBe(C[0]);
+  });
+
+  it('builds the probe form from the last ten free candidates, which a decoded probe character cannot reach', () => {
+    const probe = C.slice(-10);
+    let probeText = '';
+    const shown = (t: string): string => {
+      probeText = t;
+      return t.replace('&#x2CFF;', C.at(-1)!);
+    };
+    const md = 'a {>>n<<} &#x2CFF; {++b++}';
+    const a = chooseOpeningAlphabet(md, shown)!;
+    // The probe form uses only probe characters for the marks.
+    expect(probeText).toContain(probe[0]);
+    expect(probeText).toContain(probe[9]);
+    for (const c of sentinelSet(a)) expect(probe.includes(c)).toBe(false);
+    expect(a.insOpen).toBe(C[0]);
+  });
+
+  it('needs twenty free candidates', () => {
+    expect(chooseOpeningAlphabet(C.slice(C.length - 19).join(''), (t) => t)).not.toBeNull();
+    expect(chooseOpeningAlphabet(C.slice(0, C.length - 19).join(''), (t) => t)).toBeNull();
   });
 });
 

@@ -94,6 +94,23 @@ const FIXTURE = [
   '',
   'References &#x2E00;fake&#x2E01; and &#x2E11; stay text, with {==hl==}{>>first note<<} and {>>second note<<}.',
   '',
+  // The last candidates make the first (probe) alphabet.
+  '{>><b title="<<} &#x2CFF;probe&#x2CFE; ">',
+  '',
+  // Marks the critic parser reads inside attributes stay as written (their
+  // blocks are read-only), and the notes after them stay in place.
+  '<div title="{>>one<<}">',
+  'block',
+  '</div>',
+  '',
+  'Tag <b title="{>>two<<}">b</b> here.',
+  '',
+  '![alt {>>three<<}](img/dot.png)',
+  '',
+  '[lnk](https://lnk.invalid/{++x++}) beside text.',
+  '',
+  'Then {==x==}{>>note B<<} after them.',
+  '',
 ].join('\n');
 
 interface Facts {
@@ -230,12 +247,31 @@ test('artifact text renders only as the rules allow, and a paste is read as plai
     'Comment: a\n\n    ',
     'Comment: first note',
     'Comment: second note',
+    'Comment: <b title="',
+    'Comment: note B',
   ]);
+  expect(f.text).toContain('\u2CFFprobe\u2CFE');
   expect(f.text).toContain('\u2E00fake\u2E01 and \u2E11 stay text');
   expect(f.text).toContain('\u2E00hidden\u2E01 \u2E11');
   expect(f.text).toContain('\u2E00indented\u2E01');
   // The document round-trips unchanged.
   expect(await editorText(page)).toBe(FIXTURE);
+
+  // Typing in a block with a mark inside an attribute is refused.
+  await page.locator('scion-review-editor .ProseMirror p', { hasText: 'Tag' }).click();
+  await page.keyboard.press('End');
+  await page.keyboard.type('Q');
+  await expect(page.locator('scion-page-artifact-detail .hint-strip')).toContainText(
+    "That change can't be recorded as a suggestion."
+  );
+  expect(await editorText(page)).toBe(FIXTURE);
+  // Typing after them is recorded, and they are written as they were.
+  await page.locator('scion-review-editor .ProseMirror p', { hasText: 'after them' }).click();
+  await page.keyboard.press('End');
+  await page.keyboard.type(' Z');
+  await expect
+    .poll(() => editorText(page))
+    .toBe(FIXTURE.replace('after them.', 'after them.{++ Z++}'));
 
   // A paste whose HTML and plain text disagree inserts the plain text.
   await page.locator('scion-review-editor .ProseMirror p', { hasText: 'Sentinels' }).click();
@@ -277,6 +313,7 @@ test('artifact text renders only as the rules allow, and a paste is read as plai
     }, html);
   }
   await expect.poll(() => editorText(page)).toContain('marks stay marks.{++pasted words++}');
+  expect(await editorText(page)).toContain('after them.{++ Z++}');
   const after = await facts(page);
   expect(after.onAttrs).toEqual([]);
   expect(after.badHrefs).toEqual([]);

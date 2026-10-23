@@ -29,6 +29,7 @@ import { parseCritic } from '../../../utils/critic.js';
 import { SENTINEL_CANDIDATES } from '../../../utils/critic-sentinels.js';
 import { ReviewController } from './controller.js';
 import { docMarkKinds } from './guard.js';
+import { LOAD_META } from './track.js';
 import type { HintKind } from './policy.js';
 import { ALLOWED_ATTRIBUTES, ALLOWED_TAGS, HARDENED } from './safe-render.js';
 import { renderContext } from './__fixtures__/core.js';
@@ -346,6 +347,10 @@ describe('paste and drop never reach the default paths (S5)', () => {
     expect(event.defaultPrevented).toBe(true);
     expect(c.flush()).toBe('one {++words++}two\n');
     expect(v.dom.querySelector('img')).toBeNull();
+    // The pasted insertion survives the end of the composition.
+    c.endComposition();
+    c.settleComposition();
+    expect(c.flush()).toBe('one {++words++}two\n');
   });
 
   it('refuses a drop with no position and any drag over the editor', async () => {
@@ -435,10 +440,27 @@ describe('sentinel characters in the text (S6)', () => {
   // indented code that a comment note opens) decode in the sentinel form,
   // where the note is gone. They must stay text too.
   const hidden = [
-    ['raw HTML in a note', '{>><b title="<<} &#x2E00;fake&#x2E01; ">', '<b title="'],
-    ['indented code in a note', 'x {>>a\n\n    <<} &#x2E00;fake&#x2E01;', 'a\n\n    '],
+    [
+      'raw HTML in a note',
+      '{>><b title="<<} &#x2E00;fake&#x2E01; ">',
+      '<b title="',
+      '\u2E00fake\u2E01',
+    ],
+    [
+      'indented code in a note',
+      'x {>>a\n\n    <<} &#x2E00;fake&#x2E01;',
+      'a\n\n    ',
+      '\u2E00fake\u2E01',
+    ],
+    // The last candidates make the probe alphabet.
+    [
+      'raw HTML in a note, probe characters',
+      '{>><b title="<<} &#x2CFF;fake&#x2CFE; ">',
+      '<b title="',
+      '\u2CFFfake\u2CFE',
+    ],
   ];
-  for (const [name, frag, note] of hidden) {
+  for (const [name, frag, note, shown] of hidden) {
     it(`keeps references hidden by ${name} as text, beside real marks`, async () => {
       const md = `${frag}\n\nand {++real++} with {==hl==}{>>real note<<}\n`;
       const c = await open(md);
@@ -449,7 +471,7 @@ describe('sentinel characters in the text (S6)', () => {
         e.getAttribute('aria-label')
       );
       expect(labels).toEqual([`Comment: ${note}`, 'Comment: real note']);
-      expect(dom.textContent).toContain('\u2E00fake\u2E01');
+      expect(dom.textContent).toContain(shown);
       expect(c.flush()).toBe(md);
     });
   }
@@ -465,58 +487,146 @@ describe('sentinel characters in the text (S6)', () => {
   });
 
   // Other constructs a note can open or close around a reference. Either
-  // the editor refuses to open the document (a mark token inside an
-  // attribute: raw HTML, an HTML comment, a link target or title), or its
-  // marks are exactly the critic parser's and the text saves byte for byte.
-  const constructs: [string, 'opens' | 'refuses'][] = [
-    ['<!-- {>>x<<} &#x2E00;f&#x2E01; &#x2E11; -->', 'refuses'],
-    ['{>><!--<<} &#x2E00;f&#x2E01; &#x2E11; -->', 'opens'],
-    ['[l](<{>>x<<}&#x2E00;f&#x2E01;&#x2E11;>)', 'refuses'],
-    ['[l](u "{>>x<<} &#x2E00;f&#x2E01; &#x2E11;")', 'refuses'],
-    ['[l](u "{>>"<<} &#x2E00;f&#x2E01; &#x2E11;")', 'refuses'],
+  // the document's marks are exactly the critic parser's ('marks'), or the
+  // parser reads a mark token inside an attribute (raw HTML, an HTML
+  // comment, a link target or title, an image's alt or source), which the
+  // editor keeps as written: that block is read-only and saved from its
+  // source, and the marks after it are still the parser's ('attribute').
+  // In both, the text saves byte for byte, before and after an edit. A
+  // note read both in a link's text and in its target does not open
+  // ('refuses'): the notes would not line up.
+  const constructs: [string, 'marks' | 'attribute' | 'refuses'][] = [
+    ['<!-- {>>x<<} &#x2E00;f&#x2E01; &#x2E11; -->', 'attribute'],
+    ['{>><!--<<} &#x2E00;f&#x2E01; &#x2E11; -->', 'marks'],
+    ['[l](<{>>x<<}&#x2E00;f&#x2E01;&#x2E11;>)', 'attribute'],
+    ['[l](u "{>>x<<} &#x2E00;f&#x2E01; &#x2E11;")', 'attribute'],
+    ['[l](u "{>>"<<} &#x2E00;f&#x2E01; &#x2E11;")', 'attribute'],
     ['<http://a.example/{>>x<<}&#x2E00;f&#x2E01;&#x2E11;>', 'refuses'],
-    ['`{>>x<<} &#x2E00;f&#x2E01; &#x2E11;`', 'opens'],
-    ['{>>`<<} &#x2E00;f&#x2E01; &#x2E11;`', 'opens'],
-    ['a {>>x\n===<<} &#x2E00;f&#x2E01; &#x2E11;', 'opens'],
-    ['| a {>>x | b<<} | &#x2E00;f&#x2E01; &#x2E11; |\n|---|---|\n| 1 | 2 |', 'opens'],
-    ['{>>x\n```\n<<} &#x2E00;f&#x2E01; &#x2E11;\n```', 'opens'],
-    ['[r]: u "{>>x<<} &#x2E00;f&#x2E01; &#x2E11;"\n\n[r]', 'refuses'],
-    ['[l](u "{++x++}") and {++real two++}', 'refuses'],
-    ['<span title="{--x--}">s</span> and {++real two++}', 'refuses'],
-    ['![i]({++x++}.png) and {++real two++}', 'refuses'],
+    ['`{>>x<<} &#x2E00;f&#x2E01; &#x2E11;`', 'marks'],
+    ['{>>`<<} &#x2E00;f&#x2E01; &#x2E11;`', 'marks'],
+    ['a {>>x\n===<<} &#x2E00;f&#x2E01; &#x2E11;', 'marks'],
+    ['| a {>>x | b<<} | &#x2E00;f&#x2E01; &#x2E11; |\n|---|---|\n| 1 | 2 |', 'marks'],
+    ['{>>x\n```\n<<} &#x2E00;f&#x2E01; &#x2E11;\n```', 'marks'],
+    ['[r]: u "{>>x<<} &#x2E00;f&#x2E01; &#x2E11;"\n\n[r]', 'attribute'],
+    ['[l](u "{++x++}") and {++real two++}', 'attribute'],
+    ['<span title="{--x--}">s</span> and {++real two++}', 'attribute'],
+    ['![i]({++x++}.png) and {++real two++}', 'attribute'],
+    ['![{>>alt note<<}](a.png) and {++real two++}', 'attribute'],
+    ['[l](https://a.example/{++x++}.html) and {++real two++}', 'attribute'],
+    ['<div title="{>>html note<<}">\nblock\n</div>', 'attribute'],
   ];
+  it('keeps comments in an HTML block, a tag attribute and an image alt as written, and the notes after them in place', async () => {
+    const md =
+      '<div title="{>>one<<}">\nblock\n</div>\n\nText <b title="{>>two<<}">b</b> here.\n\n' +
+      '![alt {>>three<<}](a.png)\n\nThen {==x==}{>>note B<<} end.\n';
+    const hints: HintKind[] = [];
+    const c = await open(md, hints);
+    expect(c.readOnlyBlocks()).toEqual([0, 1, 2]);
+    const dom = c.view.dom;
+    const labels = Array.from(dom.querySelectorAll('.critic-comment')).map((e) =>
+      e.getAttribute('aria-label')
+    );
+    expect(labels).toEqual(['Comment: note B']);
+    expect(dom.querySelector('mark.critic-hl, .critic-hl')?.textContent).toBe('x');
+    expect(docMarkKinds(c.view.state.doc)).toEqual(['highlight', 'comment']);
+    expect(c.flush()).toBe(md);
+    const v = c.view;
+    // Typing in the paragraph with the tag is refused.
+    let here = -1;
+    v.state.doc.descendants((n, pos) => {
+      if (here < 0 && n.isText && n.text!.includes(' here')) here = pos + n.text!.indexOf(' here');
+      return here < 0;
+    });
+    v.dispatch(v.state.tr.insertText('Q', here));
+    expect(hints).toEqual(['generic']);
+    // Typing in the last paragraph is recorded; the blocks before it are written as they were.
+    let end = -1;
+    v.state.doc.descendants((n, pos) => {
+      if (end < 0 && n.isText && n.text!.includes(' end.')) end = pos + n.text!.indexOf(' end.');
+      return end < 0;
+    });
+    v.dispatch(v.state.tr.insertText(' Z', end));
+    expect(c.flush()).toBe(md.replace(' end.', '{++ Z++} end.'));
+  });
+
+  it('writes a read-only block from its source even if a change reaches it', async () => {
+    const md = '![{>>alt note<<}](a.png) and text\n\nand {++real++}\n';
+    const c = await open(md);
+    expect(c.readOnlyBlocks()).toEqual([0]);
+    const v = c.view;
+    let at = -1;
+    v.state.doc.child(0).descendants((n, pos) => {
+      if (at < 0 && n.isText) at = pos + 1;
+      return at < 0;
+    });
+    // A transaction the review policy does not see (as at load).
+    v.dispatch(v.state.tr.insertText('Q', at + 1).setMeta(LOAD_META, true));
+    expect(v.state.doc.child(0).textContent).toContain('Q');
+    v.dispatch(v.state.tr.insertText('Z', v.state.doc.child(0).nodeSize + 1));
+    expect(c.flush()).toBe('![{>>alt note<<}](a.png) and text\n\n{++Z++}and {++real++}\n');
+  });
+
   for (const [frag, expected] of constructs) {
     it(`references around a note, ${expected}: ${JSON.stringify(frag).slice(0, 40)}`, async () => {
       const md = `${frag}\n\nand {++real++} with {==hl==}{>>real note<<}\n`;
       const root = document.createElement('div');
       document.body.append(root);
+      const hints: HintKind[] = [];
       const c = await ReviewController.create({
         root,
         render: () => renderContext,
         askNote: () => Promise.resolve('n'),
-        onHint: () => {},
+        onHint: (h) => hints.push(h),
         onChange: () => {},
       });
       made.push(c);
       const opened = c.load(md);
-      expect(opened ? 'opens' : 'refuses').toBe(expected);
-      if (!opened) return;
-      // The editor's marks are exactly what the critic parser reads: the
-      // same kinds in order, and the comments with the parser's notes.
-      const dom = c.view.dom;
-      expect(docMarkKinds(c.view.state.doc)).toEqual(
-        parseCritic(md)
-          .filter((x) => x.kind !== 'text')
-          .map((x) => x.kind)
+      expect(opened ? (c.readOnlyBlocks().length ? 'attribute' : 'marks') : 'refuses').toBe(
+        expected
       );
-      const want = parseCritic(md)
-        .filter((x) => x.kind === 'comment')
-        .map((x) => `Comment: ${x.text}`);
+      if (!opened) return;
+      const dom = c.view.dom;
+      const segs = parseCritic(md).filter((x) => x.kind !== 'text');
       const labels = Array.from(dom.querySelectorAll('.critic-comment')).map(
         (e) => e.getAttribute('aria-label') ?? ''
       );
-      expect(labels).toEqual(want);
+      const want = segs.filter((x) => x.kind === 'comment').map((x) => `Comment: ${x.text}`);
+      if (expected === 'marks') {
+        // The same kinds in order, and the comments with the parser's notes.
+        expect(docMarkKinds(c.view.state.doc)).toEqual(segs.map((x) => x.kind));
+        expect(labels).toEqual(want);
+      } else {
+        // The marks the editor shows are the parser's last ones (those
+        // after the read-only block), with their notes.
+        const kinds = docMarkKinds(c.view.state.doc);
+        expect(segs.slice(-kinds.length).map((x) => x.kind)).toEqual(kinds);
+        expect(want.slice(-labels.length)).toEqual(labels);
+        expect(labels.at(-1)).toBe('Comment: real note');
+        expect(c.readOnlyBlocks()).toEqual([0]);
+        // Typing in the read-only block is refused, with the generic hint.
+        let first = -1;
+        c.view.state.doc.child(0).descendants((n, pos) => {
+          if (first < 0 && n.isText) first = pos + 1;
+          return first < 0;
+        });
+        if (first >= 0) {
+          const v = c.view;
+          v.dispatch(v.state.tr.insertText('Q', first + 1));
+          expect(hints).toEqual(['generic']);
+        }
+      }
       expect(c.flush()).toBe(md);
+      // An edit in the last paragraph (when it is one, not code): the
+      // blocks before it are written as they were.
+      let at = -1;
+      c.view.state.doc.descendants((n, pos) => {
+        if (at < 0 && n.isText && n.text!.startsWith('and ')) at = pos;
+        return at < 0;
+      });
+      if (at < 0) return;
+      const v = c.view;
+      v.dispatch(v.state.tr.insertText('Z', at));
+      expect(c.flush()).toBe(md.replace('\n\nand {++real++}', '\n\n{++Z++}and {++real++}'));
     });
   }
 });

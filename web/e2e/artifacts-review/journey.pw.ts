@@ -274,6 +274,13 @@ test('edits become suggestions, comments work by button and shortcut, and the re
     });
     await cdp.send('Input.insertText', { text: '日本' });
     await expect.poll(() => editorText(page)).toContain('{++日本++}');
+    // Two compositions back to back (the second starts before the first
+    // one's deferred end step): both are recorded.
+    await cdp.send('Input.imeSetComposition', { text: 'か', selectionStart: 1, selectionEnd: 1 });
+    await cdp.send('Input.insertText', { text: '下' });
+    await cdp.send('Input.imeSetComposition', { text: 'き', selectionStart: 1, selectionEnd: 1 });
+    await cdp.send('Input.insertText', { text: '木' });
+    await expect.poll(() => editorText(page)).toContain('{++日本下木++}');
     await cdp.detach();
   }
 
