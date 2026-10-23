@@ -24,7 +24,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -37,7 +36,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
-	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
@@ -1040,48 +1038,6 @@ func (s *Server) createProjectMembersGroup(ctx context.Context, project *store.P
 	// All authorization routes through AK1 kernel using RoleBindings.
 }
 
-// hubManagedProjectPath returns the filesystem path for a hub-managed project workspace,
-// under projects/<slug>.
-//
-// When the server has a workspace storage config with backend "nfs",
-// "cloudrun-volume" or "gke-shared-volume", the durable volume-backed path is
-// returned instead. A backward-compatible fallback checks the durable path
-// first, then the legacy local path, so existing local deployments continue to
-// work when durable storage is first configured. If either check times out,
-// it returns an error wrapping errWorkspaceStorageUnavailable and no path (see
-// resolveDurableOrLegacyPath); HTTP handlers map that to 503.
-func (s *Server) hubManagedProjectPath(slug string) (string, error) {
-	if err := validateProjectSlug(slug); err != nil {
-		return "", err
-	}
-
-	wsCfg := s.config.WorkspaceStorageConfig
-
-	// --- NFS backend ---
-	if wsCfg != nil && wsCfg.Backend == "nfs" && wsCfg.NFS != nil && len(wsCfg.NFS.Shares) > 0 {
-		nfsPath := filepath.Join(workspaceMountRoot(wsCfg), "hub-projects", slug)
-		return s.resolveDurableOrLegacyPath(slug, nfsPath, false)
-	}
-
-	// --- Cloud Run volume and GKE shared volume backends ---
-	if volPath, ok, err := s.volumeBackedProjectPath(wsCfg, slug); err != nil {
-		return "", err
-	} else if ok {
-		return volPath, nil
-	}
-
-	// --- Default: local ephemeral path (existing behavior) ---
-	return localProjectPath(slug)
-}
-
-// hubManagedProjectPath is the package-level backward-compatible wrapper used by
-// callers that don't have access to a Server (e.g. resolveHubProjectSharedDirPath).
-// It always returns the local path. Server-method callers should prefer
-// s.hubManagedProjectPath for durable-storage awareness.
-func hubManagedProjectPath(slug string) (string, error) {
-	return localProjectPath(slug)
-}
-
 // validateProjectSlug accepts only slugs that name a single directory directly
 // under a projects root: non-empty, free of path separators, ":" and "..",
 // not ".", and unchanged by path cleaning. The character rules apply the same
@@ -1099,8 +1055,9 @@ func validateProjectSlug(slug string) error {
 	return nil
 }
 
-// localProjectPath returns the local filesystem path for a hub-managed
-// project workspace under ~/.scion/projects/<slug>.
+// localProjectPath returns the local-backend path of a hub-managed project
+// workspace, ~/.scion/projects/<slug> (projectWorkspaceResolved on the local
+// backend).
 func localProjectPath(slug string) (string, error) {
 	if err := validateProjectSlug(slug); err != nil {
 		return "", err
@@ -1112,167 +1069,76 @@ func localProjectPath(slug string) (string, error) {
 	return filepath.Join(globalDir, "projects", slug), nil
 }
 
-// workspaceContentTimeout bounds the directory read in probeWorkspaceContent.
-// It mirrors the 2s mount check in checkWorkspaceStorageHealth. It is a
-// package-level var so tests can shorten it.
-var workspaceContentTimeout = 2 * time.Second
-
-// workspaceReadDir is the directory read used by probeWorkspaceContent. It is
-// a package-level var so tests can inject a read that hangs.
-var workspaceReadDir = os.ReadDir
-
-// workspaceReadResult is the outcome of one directory read.
-type workspaceReadResult struct {
-	entries []os.DirEntry
-	err     error
-}
-
-// workspaceProbesInFlight maps a directory to its in-flight
-// *inFlightCall[workspaceReadResult], one directory read shared by every
-// probeWorkspaceContent call for that directory. On a hung mount a read
-// never returns and its goroutine holds an OS thread in the syscall.
-// Without deduplication every request would add one more stuck thread (and
-// Go aborts the process at its thread limit). With it, there is at most one
-// stuck read per directory: later probes wait on the existing read, with
-// their own timeout, instead of starting a new one.
-var workspaceProbesInFlight sync.Map
-
-// probeWorkspaceContent reports whether dir exists and contains meaningful
-// workspace files beyond just infrastructure directories.
-//
-// dir may be on a network-backed mount (NFS, Filestore, a Cloud Run or GKE
-// volume). A hung mount would block a bare os.ReadDir indefinitely, and this
-// runs on the request path, so the read runs in a goroutine bounded by
-// workspaceContentTimeout. This is the same guard checkWorkspaceStorageHealth
-// applies to os.Stat on the same mount. Concurrent probes of the same
-// directory share one read (see workspaceProbesInFlight); a probe that joins
-// an in-flight read can see a result up to one read old.
-//
-// On timeout it returns (false, errWorkspaceStorageUnavailable). The read keeps
-// running until it returns, then removes itself from
-// workspaceProbesInFlight. A read error (missing dir, permission) is not an
-// error here. It means "no content" and returns (false, nil).
-func probeWorkspaceContent(dir string) (bool, error) {
-	call := joinOrStartInFlight(&workspaceProbesInFlight, dir, func() (func() workspaceReadResult, func()) {
-		readDir := workspaceReadDir
-		return func() workspaceReadResult {
-			entries, err := readDir(dir)
-			return workspaceReadResult{entries: entries, err: err}
-		}, nil
-	})
-
-	timer := time.NewTimer(workspaceContentTimeout)
-	defer timer.Stop()
-
-	select {
-	case <-call.done:
-	case <-timer.C:
-		return false, errWorkspaceStorageUnavailable
-	}
-	res := call.res
-	if res.err != nil {
-		return false, nil
-	}
-	for _, e := range res.entries {
-		switch e.Name() {
-		case "shared-dirs", ".scion":
-			continue
-		default:
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-// resolveDurableOrLegacyPath picks between a project's durable path and its
-// legacy local path: the durable path if it has content, else the legacy
-// local path if that has content, else the durable path (new projects go to
-// durable storage). warnEphemeral logs when the legacy local path is chosen
-// on a platform where it is container-ephemeral.
-//
-// If either probe times out, the right answer is unknown: a legacy project
-// may live at the local path, and returning the durable path would route it
-// to an empty directory (a write splits the project, a delete removes the
-// wrong directory). It also would not unblock the request, because callers
-// do I/O on the returned path right away. So a timeout is an error and no
-// path is returned.
-func (s *Server) resolveDurableOrLegacyPath(slug, durablePath string, warnEphemeral bool) (string, error) {
-	has, err := probeWorkspaceContent(durablePath)
-	if err != nil {
-		return "", s.workspaceProbeError(slug, err)
-	}
-	if has {
-		return durablePath, nil
-	}
-	// Fallback: check legacy local path for backward compatibility.
-	if localPath, lerr := localProjectPath(slug); lerr == nil {
-		has, err := probeWorkspaceContent(localPath)
-		if err != nil {
-			return "", s.workspaceProbeError(slug, err)
-		}
-		if has {
-			if warnEphemeral {
-				s.warnEphemeralProjectPath(slug)
-			}
-			return localPath, nil
-		}
-	}
-	// Neither has content: return the durable path.
-	return durablePath, nil
-}
-
-// workspaceProbeError logs a timed-out workspace probe and wraps err with the
-// project slug only. The error text can reach stored, API-visible fields
-// (e.g. a scheduled event's error), so it must not carry the filesystem path.
-// It still matches errWorkspaceStorageUnavailable.
-//
-// The log line carries the probe timeout and a fixed error class only: no
-// project ID is in scope here (callers resolve by slug), and the slug, path
-// and error text are left out of the log.
-func (s *Server) workspaceProbeError(slug string, err error) error {
-	s.projectsLogger().Warn("Workspace storage did not respond; not resolving project path",
-		"error_class", fsErrorClass(err), "timeout", workspaceContentTimeout)
-	return fmt.Errorf("workspace content check for project %q: %w", slug, err)
-}
-
 // writeWorkspaceStorageUnavailable writes a 503 and returns true when err is
-// a workspace storage timeout (errWorkspaceStorageUnavailable). Otherwise it
-// writes nothing and returns false. The response does not include the path.
+// a workspace storage failure (errWorkspaceStorageUnavailable: the hub's
+// shared workspace storage cannot be used). Otherwise it writes nothing and
+// returns false. The response does not include the path.
 func writeWorkspaceStorageUnavailable(w http.ResponseWriter, err error) bool {
 	if !errors.Is(err, errWorkspaceStorageUnavailable) {
 		return false
 	}
 	writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
-		"Workspace storage is not responding; try again later", nil)
+		"Workspace storage is not available; try again later", nil)
 	return true
 }
 
-// initHubManagedProject initializes the filesystem workspace for a hub-managed project.
-// It creates the workspace directory and seeds the .scion project structure with
-// hub connection settings. Unlike regular projects, hub-managed projects store
-// settings directly in the .scion directory (no split storage or marker files).
+// initHubManagedProject seeds the project configuration of a hub-managed
+// project: settings.yaml with the hub connection settings.
+//
+// On the local workspace backend this is ~/.scion/projects/<slug>/.scion,
+// inside the workspace directory it also creates (unchanged). On a shared
+// backend it is <ProjectRoot(uuid)>/.scion beside workspace/ (design-v4
+// §P1a), which no agent mounts; the workspace itself is created by the
+// first agent or the first Files-tab write. Unlike linked projects,
+// hub-managed projects keep their settings directly in that directory (no
+// split storage or marker files).
+//
+// A shared workspace storage the hub cannot use returns an error wrapping
+// errWorkspaceStorageUnavailable; callers roll the create back.
 func (s *Server) initHubManagedProject(project *store.Project) error {
-	workspacePath, err := s.hubManagedProjectPath(project.Slug)
+	scionDir, err := s.ensureProjectConfigDir(project, true)
 	if err != nil {
 		return err
 	}
+	return s.seedHubProjectSettings(project, scionDir)
+}
 
-	if err := os.MkdirAll(workspacePath, 0755); err != nil {
-		return fmt.Errorf("failed to create project workspace directory: %w", err)
+// ensureProjectConfigDir creates the hub-managed project's configuration
+// directory (projectConfigDir) and returns it. On the local backend it also
+// creates the workspace directory holding it when createWorkspace is set.
+func (s *Server) ensureProjectConfigDir(project *store.Project, createWorkspace bool) (string, error) {
+	layout, err := s.workspaceLayout()
+	if err != nil {
+		return "", err
 	}
-
+	if layout.Backend.Shared() {
+		dir, err := layout.EnsureProjectConfigDir(project.ID)
+		if err != nil {
+			s.projectsLogger().Warn("failed to create project configuration directory on shared workspace storage",
+				"project_id", project.ID, "error", err)
+			return "", fmt.Errorf("project configuration: %w", errWorkspaceStorageUnavailable)
+		}
+		return dir, nil
+	}
+	workspacePath, err := localProjectPath(project.Slug)
+	if err != nil {
+		return "", err
+	}
+	if createWorkspace {
+		if err := os.MkdirAll(workspacePath, 0755); err != nil {
+			return "", fmt.Errorf("failed to create project workspace directory: %w", err)
+		}
+	}
 	scionDir := filepath.Join(workspacePath, ".scion")
 	if err := os.MkdirAll(scionDir, 0755); err != nil {
-		return fmt.Errorf("failed to create .scion directory: %w", err)
+		return "", fmt.Errorf("failed to create .scion directory: %w", err)
 	}
-	if _, err := s.recordHubWorkspace(project); err != nil {
-		s.projectsLogger().Warn("failed to write hub workspace record",
-			append([]any{"project_id", project.ID}, alignErrorAttrs(err)...)...)
-	}
+	return scionDir, nil
+}
 
-	// Seed default settings.yaml directly in scionDir. Hub-native projects
-	// bypass InitProject (which uses split storage for git repos) and keep
-	// all configuration in-place.
+// seedHubProjectSettings seeds the default settings.yaml in scionDir when
+// it has none and writes the hub connection settings into it.
+func (s *Server) seedHubProjectSettings(project *store.Project, scionDir string) error {
 	settingsPath := filepath.Join(scionDir, "settings.yaml")
 	if _, err := os.Stat(settingsPath); os.IsNotExist(err) {
 		defaultSettings, err := config.GetProjectDefaultSettingsYAML()
@@ -1285,10 +1151,14 @@ func (s *Server) initHubManagedProject(project *store.Project) error {
 			return fmt.Errorf("failed to seed settings.yaml: %w", err)
 		}
 	}
+	s.writeHubConnectionSettings(project, scionDir)
+	return nil
+}
 
-	// Write hub connection settings into the seeded settings file.
-	// hub.project_id is the one v1 key for the project ID (the other
-	// project-ID key names map to it).
+// writeHubConnectionSettings writes the hub connection settings into the
+// project settings in scionDir (best-effort, logged). hub.project_id is the
+// one v1 key for the project ID (the other project-ID key names map to it).
+func (s *Server) writeHubConnectionSettings(project *store.Project, scionDir string) {
 	settingsUpdates := map[string]string{
 		"hub.enabled":                     "true",
 		"hub.endpoint":                    s.HubEndpointFor(HubEndpointForProjectSettings),
@@ -1300,16 +1170,30 @@ func (s *Server) initHubManagedProject(project *store.Project) error {
 				"project_id", project.ID, "key", key, "error", err.Error())
 		}
 	}
-
-	return nil
 }
 
-// cloneSharedWorkspaceProject performs the host-side git clone for a shared-workspace
-// git project. It clones the repository into the hub-native workspace path and
-// seeds the .scion project structure on top. If the clone fails, the workspace
-// directory is cleaned up and an error is returned.
+// cloneSharedWorkspaceProject prepares a shared-workspace git project.
+//
+// On the local workspace backend it performs the host-side git clone into
+// the hub-managed workspace (~/.scion/projects/<slug>) and seeds the .scion
+// project structure on top; if the clone fails, the workspace directory is
+// cleaned up and an error is returned (unchanged).
+//
+// On a shared backend the hub does not clone: the workspace is the tree
+// agents mount, and it is provisioned (cloned, under the provisioning lock,
+// with its sentinel) by the first agent that starts, as for any shared
+// workspace. The hub only seeds the project configuration at
+// <ProjectRoot(uuid)>/.scion (design-v4 §P1a).
 func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store.Project) error {
-	workspacePath, err := s.hubManagedProjectPath(project.Slug)
+	if s.workspaceBackendShared() {
+		scionDir, err := s.ensureProjectConfigDir(project, false)
+		if err != nil {
+			return err
+		}
+		return s.seedHubProjectSettings(project, scionDir)
+	}
+
+	workspacePath, err := localProjectPath(project.Slug)
 	if err != nil {
 		return err
 	}
@@ -1356,26 +1240,8 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 		s.projectsLogger().Warn("failed to initialize .scion in cloned workspace",
 			"project_id", project.ID, "error", err.Error())
 	}
-	if _, err := s.recordHubWorkspace(project); err != nil {
-		s.projectsLogger().Warn("failed to write hub workspace record for cloned workspace",
-			append([]any{"project_id", project.ID}, alignErrorAttrs(err)...)...)
-	}
 
-	// Write hub connection settings
-	// hub.project_id is the one v1 key for the project ID (the other
-	// project-ID key names map to it).
-	settingsUpdates := map[string]string{
-		"hub.enabled":                     "true",
-		"hub.endpoint":                    s.HubEndpointFor(HubEndpointForProjectSettings),
-		projectkeys.ConfigHubProjectIDKey: project.ID,
-	}
-	for key, value := range settingsUpdates {
-		if err := config.UpdateSetting(scionDir, key, value, false); err != nil {
-			s.projectsLogger().Warn("failed to update shared-workspace project setting",
-				"project_id", project.ID, "key", key, "error", err.Error())
-		}
-	}
-
+	s.writeHubConnectionSettings(project, scionDir)
 	return nil
 }
 
@@ -1460,82 +1326,6 @@ func (s *Server) resolveCloneToken(ctx context.Context, project *store.Project) 
 	}
 
 	return ""
-}
-
-// syncWorkspaceOnStop triggers a best-effort workspace sync-back for hub-managed projects
-// on remote brokers before the agent is stopped. It uploads the workspace from the
-// broker to GCS via the control channel, then downloads from GCS to the Hub filesystem.
-//
-// The whole sync-back, upload and download together, is bounded by
-// stopSyncBackTimeout, its share of the stop's write budget
-// (ptone/scion#4210). A sync-back that runs out of time is handled like any
-// other sync-back failure: it is logged and the stop goes on. It also adds a
-// warning to the stop's response, since the hub workspace may then lack the
-// agent's latest changes, or hold part of them.
-func (s *Server) syncWorkspaceOnStop(ctx context.Context, agent *store.Agent) {
-	if agent.ProjectID == "" || agent.RuntimeBrokerID == "" {
-		return
-	}
-	warnCtx := ctx
-	ctx, cancel := context.WithTimeout(ctx, stopSyncBackTimeout())
-	defer cancel()
-	warnIfTimedOut := func(err error) {
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			addDispatchWarnings(warnCtx, stopSyncBackTimedOutWarning)
-		}
-	}
-
-	// Project not found, not hub-native/shared-workspace, empty-per-agent,
-	// or an embedded or colocated broker: no sync-back
-	// (hubWorkspaceNeedsSyncBack).
-	project, ok, _ := s.hubWorkspaceNeedsSyncBack(ctx, agent)
-	if !ok {
-		return
-	}
-
-	stor := s.GetStorage()
-	cc := s.GetControlChannelManager()
-	if stor == nil || cc == nil {
-		return
-	}
-
-	storagePath := storage.ProjectWorkspaceStoragePath(s.HubID(), project.ID)
-
-	// Tunnel upload request to the broker
-	uploadReq := RuntimeBrokerWorkspaceUploadRequest{
-		Slug:        agent.Slug,
-		StoragePath: storagePath,
-	}
-	var uploadResp RuntimeBrokerWorkspaceUploadResponse
-	// A placement refusal only skips the sync-back (logged below): the stop
-	// itself is guarded by its own pre-check and the dispatcher backstop.
-	if err := tunnelAgentWorkspaceRequest(ctx, s.store, cc, agent, "POST", "/api/v1/workspace/upload", uploadReq, &uploadResp); err != nil {
-		s.agentLifecycleLog.Warn("syncWorkspaceOnStop: failed to upload workspace from broker",
-			"agent_id", agent.ID,
-			"agent", agent.Name, "project_id", project.ID, "error", err,
-			"timeout", stopSyncBackTimeout())
-		warnIfTimedOut(err)
-		return
-	}
-
-	// Download from GCS to Hub filesystem
-	workspacePath, err := s.hubManagedProjectPath(project.Slug)
-	if err != nil {
-		s.agentLifecycleLog.Warn("syncWorkspaceOnStop: failed to get project path", "agent_id", agent.ID, "error", err)
-		return
-	}
-
-	if err := s.syncHubWorkspaceFromGCS(ctx, stor.Bucket(), storagePath+"/files", workspacePath); err != nil {
-		s.agentLifecycleLog.Warn("syncWorkspaceOnStop: GCS download failed",
-			"agent_id", agent.ID,
-			"project_id", project.ID, "error", err,
-			"timeout", stopSyncBackTimeout())
-		warnIfTimedOut(err)
-	} else {
-		s.agentLifecycleLog.Info("syncWorkspaceOnStop: workspace synced back to Hub",
-			"agent_id", agent.ID,
-			"project_id", project.ID, "path", workspacePath)
-	}
 }
 
 func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
@@ -3409,22 +3199,26 @@ func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project,
 	// source of authority; project-scoped RoleBindings are scope-keyed by
 	// project ID (not slug), so no rename is needed.
 
-	// Migrate hub-managed project filesystem paths (best-effort).
-	// Derive newPath from oldPath's parent so the renamed workspace stays
-	// alongside the original.
-	if oldPath, err := s.hubManagedProjectPath(oldSlug); err == nil {
-		if _, statErr := os.Stat(oldPath); statErr == nil {
-			newPath := filepath.Join(filepath.Dir(oldPath), newSlug)
-			if _, statErr := os.Stat(newPath); os.IsNotExist(statErr) {
-				if err := os.Rename(oldPath, newPath); err != nil {
-					s.projectsLogger().Warn("failed to rename project workspace directory",
-						"project_id", project.ID, "old_path", oldPath, "new_path", newPath, "error", err)
+	// Migrate the hub-managed project workspace directory (best-effort).
+	// Only the local workspace backend keys it by slug
+	// (~/.scion/projects/<slug>); on a shared backend the project tree is
+	// keyed by project ID and nothing moves. Derive newPath from oldPath's
+	// parent so the renamed workspace stays alongside the original.
+	if !s.workspaceBackendShared() {
+		if oldPath, err := localProjectPath(oldSlug); err == nil {
+			if _, statErr := os.Stat(oldPath); statErr == nil {
+				newPath := filepath.Join(filepath.Dir(oldPath), newSlug)
+				if _, statErr := os.Stat(newPath); os.IsNotExist(statErr) {
+					if err := os.Rename(oldPath, newPath); err != nil {
+						s.projectsLogger().Warn("failed to rename project workspace directory",
+							"project_id", project.ID, "old_path", oldPath, "new_path", newPath, "error", err)
+					}
 				}
 			}
+		} else {
+			s.projectsLogger().Warn("could not resolve project workspace directory; skipping rename, the directory may keep the old slug",
+				"project_id", project.ID, "slug", oldSlug, "new_slug", newSlug, "error", err)
 		}
-	} else {
-		s.projectsLogger().Warn("could not resolve project workspace directory; skipping rename, the directory may keep the old slug",
-			"project_id", project.ID, "slug", oldSlug, "new_slug", newSlug, "error", err)
 	}
 
 	// Migrate the project config directory (~/.scion/project-configs/<slug>__<short-uuid>/).
@@ -3452,20 +3246,6 @@ func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project,
 			}
 		}
 	}
-
-	// The old slug is now unreachable, so its ephemeral-path warning
-	// suppression can never be consulted again — drop it, or a later project
-	// reusing the slug inherits the suppression and never warns.
-	//
-	// As in deleteProject, the invariant is that this follows the last
-	// hubManagedProjectPath(oldSlug) call, not that it follows the last read
-	// of oldSlug — reads that resolve no path cannot re-record. That call
-	// above re-records it on gke-shared-volume, where the resolution takes
-	// the warning path, so an eviction placed before it is undone by it.
-	// Nothing reads oldSlug after this point today, but that is incidental;
-	// the resolution is the thing to order against. Best-effort even here: a
-	// resolution already in flight on another goroutine can re-insert it.
-	s.warnedEphemeralProjects.Delete(oldSlug)
 }
 
 func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string) {
@@ -3594,7 +3374,11 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 	// provider is filtered by brokerUsesSlugProjectDir.
 	s.cleanupBrokerProjectDirectoriesFromInputs(ctx, project, inputs.providers)
 
-	// Effect 5: Filesystem cleanup (hub-managed projects).
+	// Effect 5: Filesystem cleanup (hub-managed projects). On the local
+	// workspace backend the hub-managed workspace is ~/.scion/projects/<slug>;
+	// on a shared backend the project tree (workspace and project
+	// configuration under ProjectRoot) is removed by the ID-keyed tree
+	// cleanup below.
 	if (project.GitRemote == "" || project.IsSharedWorkspace()) && project.Slug != "" {
 		projectPath := s.removeHubManagedProjectDir(projectID, project.Slug)
 		s.removeEmbeddedBrokerProjectDir(project.Slug, projectPath)
@@ -3608,9 +3392,6 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 	// broker (skipped by Effect 3), linked-path providers and brokers
 	// without a provider row.
 	s.startHubNFSProjectTreeCleanup(projectID)
-
-	// Effect 6: Clear ephemeral project warning suppression.
-	s.warnedEphemeralProjects.Delete(project.Slug)
 
 	// Effect 7: Clean up external project config directory.
 	if project.Slug != "" && project.ID != "" {
@@ -3632,19 +3413,24 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 }
 
 // removeHubManagedProjectDir removes the hub-managed workspace directory of a
-// deleted project, subject to removeProjectDirUnderProjectsRoot. When the slug
-// does not name a direct child of a projects root, or the directory cannot be
-// resolved, nothing is removed and a warning is logged.
+// deleted project on the local workspace backend, ~/.scion/projects/<slug>,
+// only when it is a direct child of that projects root. On a shared backend
+// it removes nothing (the project tree is keyed by project ID and removed by
+// startHubNFSProjectTreeCleanup). When the slug fails the slug rule or the
+// path cannot be resolved, nothing is removed and a warning is logged.
 //
-// It returns the resolved hub-managed path, or "" when the slug fails the slug
-// rule or the path cannot be resolved.
+// It returns the local path it was asked to remove, or "" when nothing was
+// considered.
 func (s *Server) removeHubManagedProjectDir(projectID, slug string) string {
+	if s.workspaceBackendShared() {
+		return ""
+	}
 	if err := validateProjectSlug(slug); err != nil {
 		s.projectsLogger().Warn("hub-managed project directory not removed: it is not a direct child of a projects root",
 			"project_id", projectID, "error", err)
 		return ""
 	}
-	projectPath, err := s.hubManagedProjectPath(slug)
+	projectPath, err := localProjectPath(slug)
 	if err != nil {
 		s.projectsLogger().Warn("could not resolve hub-managed project directory; skipping removal, the directory may be left behind",
 			"project_id", projectID)
@@ -3655,11 +3441,15 @@ func (s *Server) removeHubManagedProjectDir(projectID, slug string) string {
 }
 
 // removeProjectDirUnderProjectsRoot removes projectPath only when it is a
-// direct child of one of the projects roots the server resolves hub-managed
-// project directories under. Any other path is left in place and a warning is
-// logged; no other path is tried instead.
+// direct child of the local projects root (~/.scion/projects). Any other
+// path is left in place and a warning is logged; no other path is tried
+// instead.
 func (s *Server) removeProjectDirUnderProjectsRoot(projectID, projectPath string) {
-	if !isDirectChildOfAny(projectPath, s.hubManagedProjectsRoots()) {
+	var roots []string
+	if globalDir, err := config.GetGlobalDir(); err == nil {
+		roots = append(roots, filepath.Join(globalDir, "projects"))
+	}
+	if !isDirectChildOfAny(projectPath, roots) {
 		s.projectsLogger().Warn("hub-managed project directory not removed: it is not a direct child of a projects root",
 			"project_id", projectID)
 		return
@@ -3668,40 +3458,6 @@ func (s *Server) removeProjectDirUnderProjectsRoot(projectID, projectPath string
 		s.projectsLogger().Warn("failed to remove hub-managed project directory",
 			"project_id", projectID, "error_class", fsErrorClass(err))
 	}
-}
-
-// hubManagedProjectsRoots returns the projects roots that hubManagedProjectPath
-// resolves hub-managed project directories under for the current workspace
-// storage configuration: the local ~/.scion/projects root, which is always a
-// possible result (directly or as a fallback), and the configured backend's
-// hub-projects root, if any.
-func (s *Server) hubManagedProjectsRoots() []string {
-	var roots []string
-	if globalDir, err := config.GetGlobalDir(); err == nil {
-		roots = append(roots, filepath.Join(globalDir, "projects"))
-	}
-
-	wsCfg := s.config.WorkspaceStorageConfig
-	if wsCfg == nil {
-		return roots
-	}
-	switch {
-	case wsCfg.Backend == "nfs" && wsCfg.NFS != nil && len(wsCfg.NFS.Shares) > 0:
-		if mountRoot := workspaceMountRoot(wsCfg); mountRoot != "" {
-			roots = append(roots, filepath.Join(mountRoot, "hub-projects"))
-		}
-	case wsCfg.Backend == "cloudrun-volume" && wsCfg.CloudRunVolume != nil:
-		if mountRoot := workspaceMountRoot(wsCfg); mountRoot != "" {
-			subPathRoot := config.SubPathRootOrDefault(wsCfg.CloudRunVolume.SubPathRoot)
-			roots = append(roots, filepath.Join(mountRoot, subPathRoot, "hub-projects"))
-		}
-	case wsCfg.Backend == "gke-shared-volume" && wsCfg.GKESharedVolume != nil:
-		if mountRoot := workspaceMountRoot(wsCfg); mountRoot != "" {
-			subPathRoot := config.SubPathRootOrDefault(wsCfg.GKESharedVolume.SubPathRoot)
-			roots = append(roots, filepath.Join(mountRoot, subPathRoot, "hub-projects"))
-		}
-	}
-	return roots
 }
 
 // isDirectChildOfAny reports whether target, once cleaned, is a direct child

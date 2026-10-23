@@ -1514,7 +1514,7 @@ func resolveHubProjectSharedDirPath(project *store.Project, dirName string) (str
 	if err != nil {
 		return "", err
 	}
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := localProjectPath(project.Slug)
 	if err != nil {
 		return "", err
 	}
@@ -1683,8 +1683,7 @@ func cleanEmptyDirs(root *os.Root, targetDir string) {
 // project workspace. Membership in this set is what routes a request through
 // handleProjectWorkspaceRoutes, and therefore through its authorization gate.
 func isProjectWorkspaceSubPath(subPath string) bool {
-	return subPath == "sync/status" ||
-		subPath == "workspace" ||
+	return subPath == "workspace" ||
 		strings.HasPrefix(subPath, "workspace/")
 }
 
@@ -1730,18 +1729,6 @@ func (s *Server) handleProjectWorkspaceRoutes(w http.ResponseWriter, r *http.Req
 	}
 
 	switch {
-	case subPath == "sync/status":
-		s.handleProjectSyncStatus(w, r, project)
-
-	case subPath == "workspace/cache/refresh":
-		s.handleProjectCacheRefresh(w, r, project)
-
-	case subPath == "workspace/cache/status":
-		s.handleProjectCacheStatus(w, r, project)
-
-	case subPath == "workspace/cache/notify":
-		s.handleProjectCacheNotify(w, r, project)
-
 	case subPath == "workspace/pull":
 		s.handleProjectWorkspacePull(w, r, project)
 

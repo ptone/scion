@@ -362,6 +362,22 @@ func (l Layout) ProjectRoot(projectID string) (Resolved, error) {
 	return l.shared(filepath.Join(root, projectID), Mount{}), nil
 }
 
+// ProjectConfigDirName is the name of a project's configuration directory.
+const ProjectConfigDirName = ".scion"
+
+// ProjectConfig resolves a project's configuration directory on a shared
+// backend: <SubPathRoot>/<projectID>/.scion, beside workspace/ and inside
+// no Mount (design-v4 §P1a rule 1). Hub-seeded: project settings, the hub
+// connection and project identity. A .scion inside the workspace is
+// repository content and never supplies those.
+func (l Layout) ProjectConfig(projectID string) (Resolved, error) {
+	pr, err := l.ProjectRoot(projectID)
+	if err != nil {
+		return Resolved{}, err
+	}
+	return l.shared(filepath.Join(pr.RelPath, ProjectConfigDirName), Mount{}), nil
+}
+
 // AgentRoot resolves an agent's directory on a shared backend:
 // <SubPathRoot>/<projectID>/agents/<agent slug>.
 func (l Layout) AgentRoot(projectID, agent string) (Resolved, error) {
