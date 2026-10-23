@@ -34,6 +34,7 @@ import (
 func TestUnlimitedCountRefusal(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	_, fault := installBrokerReadFault(t, srv)
 	ctx := context.Background()
 	agent := newReincarnateTestAgent(t, s, project, broker, nil)
 	base := &api.ScionConfig{MaxTurns: api.IntPtr(5)}
@@ -70,7 +71,7 @@ func TestUnlimitedCountRefusal(t *testing.T) {
 
 	// A failing broker read is a 503 (errBrokerLookup), and an edit that
 	// sets no count limit to 0 never looks the broker up.
-	srv.store = failingBrokerReadStore{Store: s}
+	fault.Arm()
 	_, err = srv.unlimitedCountRefusal(ctx, agent, unlimited, base)
 	assert.ErrorIs(t, err, errBrokerLookup)
 	got, err = srv.unlimitedCountRefusal(ctx, agent, &api.ScionConfig{Model: "m"}, base)
@@ -78,12 +79,27 @@ func TestUnlimitedCountRefusal(t *testing.T) {
 	assert.Nil(t, got)
 }
 
-// failingBrokerReadStore is a store whose runtime broker reads fail with a
-// store error (not "not found").
-type failingBrokerReadStore struct{ store.Store }
+// brokerReadFaultStore makes runtime broker reads fail with a store error
+// (not "not found") once its switch is armed; before that it delegates.
+type brokerReadFaultStore struct {
+	store.Store
+	fault *storeFaultSwitch
+}
 
-func (failingBrokerReadStore) GetRuntimeBroker(context.Context, string) (*store.RuntimeBroker, error) {
+func (b *brokerReadFaultStore) GetRuntimeBroker(ctx context.Context, id string) (*store.RuntimeBroker, error) {
+	if !b.fault.Active() {
+		return b.Store.GetRuntimeBroker(ctx, id)
+	}
 	return nil, errors.New("store unavailable")
+}
+
+// installBrokerReadFault installs brokerReadFaultStore on srv through the
+// store fault switch (no srv.store reassignment in the test).
+func installBrokerReadFault(t *testing.T, srv *Server) (*brokerReadFaultStore, *storeFaultSwitch) {
+	t.Helper()
+	return installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *brokerReadFaultStore {
+		return &brokerReadFaultStore{Store: inner, fault: f}
+	})
 }
 
 // TestWarnUnlimitedUnsupported_DispatchWarning: a create or start that

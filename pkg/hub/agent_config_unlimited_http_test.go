@@ -510,8 +510,9 @@ func TestHTTPAgentDispatcher_UnlimitedWarningOnCreateAndStart(t *testing.T) {
 func TestAgentConfigPatch_UnlimitedLookupErrorWritesNothing(t *testing.T) {
 	disp := &inlineCaptureDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher()}
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	_, fault := installBrokerReadFault(t, srv)
 	agent := newEditTestAgent(t, s, project, broker, state.PhaseStopped)
-	srv.store = failingBrokerReadStore{Store: s}
+	fault.Arm()
 
 	_, code, body := patchAgentBody(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{"max_turns": 0}})
 	require.Equal(t, http.StatusServiceUnavailable, code, body)
