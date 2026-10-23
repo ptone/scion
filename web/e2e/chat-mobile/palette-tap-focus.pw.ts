@@ -103,3 +103,28 @@ test('@static desktop: a mouse click focuses the query input, with no hidden fie
   await expect(paletteDialog(page)).toBeVisible();
   await expect.poll(() => paletteInputHasFocus(page)).toBe(true);
 });
+
+test('@static phone: once the switcher has preloaded, a tap focuses its query input inside the tap', async ({
+  page,
+}, testInfo) => {
+  test.skip(isDesktop(testInfo.project.name), 'touch only');
+  await openChatRail(page);
+  // A touch-primary device mounts the switcher, closed, once the page is idle.
+  await expect(page.locator('scion-quick-palette')).toHaveCount(1, { timeout: 10_000 });
+  await recordFocusAtClickEnd(page);
+  await railButton(page).tap();
+  const focused = await focusAtClickEnd(page);
+  expect(focused, 'a click reached the page').not.toBeNull();
+  expect(focused!.paletteInput, 'the query input had focus within the tap').toBe(true);
+  await expect(paletteDialog(page)).toBeVisible();
+  expect(await paletteInputHasFocus(page)).toBe(true);
+  await expect(page.locator('input[data-palette-keyboard-proxy]')).toHaveCount(0);
+});
+
+test('@static desktop: the switcher does not preload', async ({ page }, testInfo) => {
+  test.skip(!isDesktop(testInfo.project.name), 'desktop only');
+  await openChatRail(page);
+  // Longer than the preload's fallback delay; a desktop never schedules it.
+  await page.waitForTimeout(3_000);
+  await expect(page.locator('scion-quick-palette')).toHaveCount(0);
+});

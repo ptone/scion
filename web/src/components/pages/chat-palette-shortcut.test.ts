@@ -2621,3 +2621,180 @@ describe('a finger tap on a quick-switcher button holds the on-screen keyboard o
     await vi.waitFor(() => expect(page.v2PaletteOpen).toBe(true));
   });
 });
+
+describe('with the quick switcher mounted, a tap focuses its query input inside the tap', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    for (const proxy of document.querySelectorAll('input[data-palette-keyboard-proxy]')) {
+      proxy.remove();
+    }
+  });
+
+  /** No preload here (a device that does not match TOUCH_PRIMARY_QUERY): the test mounts it. */
+  function stubNotTouchPrimary(): void {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn((query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }))
+    );
+  }
+
+  /** An eligible page with the palette imported and mounted closed, as the preload leaves it. */
+  async function pageWithMountedPalette(): Promise<{
+    page: any;
+    palette: any;
+    button: HTMLButtonElement;
+    input: HTMLInputElement;
+  }> {
+    stubNotTouchPrimary();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    await import('../shared/palette/quick-palette.js');
+    page.v2SwitcherLoaded = true;
+    await page.updateComplete;
+    const palette = page.shadowRoot.querySelector('scion-quick-palette');
+    expect(palette).not.toBeNull();
+    await palette.updateComplete;
+    expect(palette.open).toBe(false);
+    const button = page.shadowRoot.querySelector(
+      '.v2-rail > .palette-footer > .palette-footer-btn'
+    ) as HTMLButtonElement;
+    const input = palette.shadowRoot.querySelector('#palette-query-input') as HTMLInputElement;
+    expect(input).not.toBeNull();
+    return { page, palette, button, input };
+  }
+
+  function deepActive(): Element | null {
+    let el: Element | null = document.activeElement;
+    while (el?.shadowRoot?.activeElement) el = el.shadowRoot.activeElement;
+    return el;
+  }
+
+  /** What had focus, and how often the input's focus() ran, as the click finished dispatching. */
+  function recordAtClickEnd(
+    button: HTMLButtonElement,
+    focusSpy: { mock: { calls: unknown[] } }
+  ): () => { focused: Element | null; focusCalls: number } {
+    let at = { focused: null as Element | null, focusCalls: -1 };
+    button.addEventListener('click', () => {
+      at = { focused: deepActive(), focusCalls: focusSpy.mock.calls.length };
+    });
+    return () => at;
+  }
+
+  it('a touch click with the palette mounted focuses the query input before the click returns', async () => {
+    const { page, palette, button, input } = await pageWithMountedPalette();
+    const focusSpy = vi.spyOn(input, 'focus');
+    const atClickEnd = recordAtClickEnd(button, focusSpy);
+
+    button.dispatchEvent(
+      new PointerEvent('click', { pointerType: 'touch', bubbles: true, composed: true })
+    );
+
+    // Read in the click's own task: no awaited tick.
+    expect(atClickEnd().focusCalls).toBeGreaterThan(0);
+    expect(atClickEnd().focused).toBe(input);
+    expect(palette.open).toBe(true);
+    expect(page.v2PaletteOpen).toBe(true);
+    expect(document.querySelector('input[data-palette-keyboard-proxy]')).toBeNull();
+  });
+
+  it('a mouse click with the palette mounted leaves focus on the button until the dialog shows', async () => {
+    const { page, button, input } = await pageWithMountedPalette();
+    const focusSpy = vi.spyOn(input, 'focus');
+    const atClickEnd = recordAtClickEnd(button, focusSpy);
+
+    button.dispatchEvent(
+      new PointerEvent('click', { pointerType: 'mouse', bubbles: true, composed: true })
+    );
+
+    expect(atClickEnd().focusCalls).toBe(0);
+    expect(atClickEnd().focused).toBe(button);
+    await vi.waitFor(() => expect(page.v2PaletteOpen).toBe(true));
+  });
+
+  it('Cmd/Ctrl+K with the palette mounted does not focus the query input inside the keydown', async () => {
+    const { page, input } = await pageWithMountedPalette();
+    const focusSpy = vi.spyOn(input, 'focus');
+
+    page._handleGlobalKeydown(makeKeydownEvent({ metaKey: true }));
+
+    expect(focusSpy).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(page.v2PaletteOpen).toBe(true));
+  });
+});
+
+describe('quick switcher preload', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function stubTouchPrimary(isTouch: boolean): void {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn((query: string) => ({
+        matches: query === TOUCH_PRIMARY_QUERY && isTouch,
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }))
+    );
+  }
+
+  /** Captures the idle callback instead of running it. */
+  function stubIdleCallback(): { run: () => void; request: any; cancel: any } {
+    let callback: (() => void) | null = null;
+    const request = vi.fn((cb: () => void) => {
+      callback = cb;
+      return 7;
+    });
+    const cancel = vi.fn();
+    vi.stubGlobal('requestIdleCallback', request);
+    vi.stubGlobal('cancelIdleCallback', cancel);
+    return { run: () => callback?.(), request, cancel };
+  }
+
+  it('a touch-primary device preloads the palette when idle, mounted closed', async () => {
+    stubTouchPrimary(true);
+    const idle = stubIdleCallback();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+
+    expect(idle.request).toHaveBeenCalledTimes(1);
+    expect(page.v2SwitcherLoaded).toBe(false);
+    idle.run();
+
+    await vi.waitFor(() => expect(page.v2SwitcherLoaded).toBe(true));
+    await page.updateComplete;
+    const palette = page.shadowRoot.querySelector('scion-quick-palette');
+    expect(palette).not.toBeNull();
+    expect(palette.open).toBe(false);
+  });
+
+  it('a desktop does not preload the palette', async () => {
+    stubTouchPrimary(false);
+    const idle = stubIdleCallback();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    await page.updateComplete;
+
+    expect(idle.request).not.toHaveBeenCalled();
+    expect(page.v2SwitcherLoaded).toBe(false);
+    expect(page.shadowRoot.querySelector('scion-quick-palette')).toBeNull();
+  });
+
+  it('leaving the page cancels a scheduled palette preload', () => {
+    stubTouchPrimary(true);
+    const idle = stubIdleCallback();
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+
+    page.remove();
+
+    expect(idle.cancel).toHaveBeenCalledWith(7);
+  });
+});
