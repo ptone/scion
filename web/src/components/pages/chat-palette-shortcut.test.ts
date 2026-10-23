@@ -2577,7 +2577,9 @@ describe('a finger tap on a quick-switcher button holds the on-screen keyboard o
 
     // The browser cancelled the press (the page scrolled): no click for it.
     button.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'touch', bubbles: true }));
-    button.dispatchEvent(new PointerEvent('pointercancel', { pointerType: 'touch', bubbles: true }));
+    button.dispatchEvent(
+      new PointerEvent('pointercancel', { pointerType: 'touch', bubbles: true })
+    );
     button.dispatchEvent(new MouseEvent('click', { detail: 1, bubbles: true, composed: true }));
 
     expect(focusedInTap()).toBe(button);
