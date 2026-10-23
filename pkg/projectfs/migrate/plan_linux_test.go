@@ -1301,10 +1301,130 @@ func TestRun_M3IgnoresLockLitter(t *testing.T) {
 		"projects/" + pid1 + "/workspace/.scion-provision.lock/owner": "x",
 		"projects/" + pid1 + "/workspace/.scion-provisioned":          "x",
 		"projects/" + pid1 + "/workspace/" + GitMigratingName + "/x":  "x",
+		"projects/" + pid1 + "/workspace/" + CopyTempPrefix + "ab12":  "x",
 	})
 	f.objects.objects[objectPrefix(pid1)+"a"] = true
 	rep, err := Run(context.Background(), f.input(ProjectRef{ID: pid1, Slug: "p1"}), opts(false))
 	if err != nil || rep.Objects[0].Outcome != ObjectsKept {
 		t.Fatalf("err=%v objects=%s", err, rep.Objects[0].Outcome)
+	}
+}
+
+// Review round 4, finding 1: a truncated file in the temp .git (from a
+// killed earlier run) differs from the source: the temp dir is NOT renamed
+// into .git, the project stays pending, M3 keeps its objects.
+func TestRun_TruncatedFileInTempGitBlocksRename(t *testing.T) {
+	forceRename(t, nil, syscall.EINVAL)
+	f := newHubFixture(t)
+	writeTree(t, f.share, gitRepoFiles())
+	ws := filepath.Join(f.share, "projects", pid1, "workspace")
+	writeTree(t, ws, map[string]string{GitMigratingName + "/objects/05/obj": "bl"}) // truncated "blob"
+	f.objects.objects[objectPrefix(pid1)+"a"] = true
+	rep, err := Run(context.Background(), f.input(ProjectRef{ID: pid1, Slug: "p1", Git: true}), opts(false))
+	if err != nil || !rep.Failed() || len(rep.PendingProjects()) != 1 {
+		t.Fatalf("err=%v failed=%t", err, rep.Failed())
+	}
+	assertAbsent(t, filepath.Join(ws, ".git"))
+	if readFile(t, filepath.Join(ws, GitMigratingName, "objects/05/obj")) != "bl" {
+		t.Fatal("the temp dir must be left for inspection")
+	}
+	var b bytes.Buffer
+	rep.WriteLog(&b)
+	if !strings.Contains(b.String(), ".git copy incomplete") || rep.Objects[0].Outcome != ObjectsKept {
+		t.Fatalf("objects=%s log:\n%s", rep.Objects[0].Outcome, b.String())
+	}
+	if readFile(t, filepath.Join(f.share, legacyHubProjectsDir, "p1/.git/HEAD")) != "ref: refs/heads/main" {
+		t.Fatal("source must stay in place")
+	}
+}
+
+// A run killed in the middle of copying a file leaves no partial file
+// under its final name (only a temp file); the next run removes the temp
+// litter and completes; litter never counts as workspace content.
+func TestRun_KilledCopyLeavesNoPartialFinalFile(t *testing.T) {
+	forceRename(t, nil, syscall.EINVAL)
+	f := newHubFixture(t)
+	writeTree(t, f.share, map[string]string{
+		legacyHubProjectsDir + "/p1/.scion/project-id": pid1,
+		legacyHubProjectsDir + "/p1/big.bin":           strings.Repeat("x", 4096),
+	})
+	ws := filepath.Join(f.share, "projects", pid1, "workspace")
+	old := copyCrashHook
+	copyCrashHook = func(name string) error {
+		if name == "big.bin" {
+			return errSimulatedKill
+		}
+		return nil
+	}
+	in := f.input(ProjectRef{ID: pid1, Slug: "p1"})
+	rep, _ := Run(context.Background(), in, opts(false))
+	copyCrashHook = old
+	if !rep.Failed() {
+		t.Fatal("the killed run must not succeed")
+	}
+	assertAbsent(t, filepath.Join(ws, "big.bin"))
+	entries, err := os.ReadDir(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	litter := 0
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), CopyTempPrefix) {
+			litter++
+		}
+	}
+	if litter != 1 {
+		t.Fatalf("want one temp file left by the kill, got %d (%v)", litter, entries)
+	}
+	if rep.Projects[0].WorkspacePopulated {
+		t.Fatal("temp litter counted as workspace content")
+	}
+	// The next run cleans the litter and completes.
+	rep, err = Run(context.Background(), in, opts(false))
+	if err != nil || rep.Failed() {
+		t.Fatalf("re-run: err=%v failed=%t", err, rep.Failed())
+	}
+	if readFile(t, filepath.Join(ws, "big.bin")) != strings.Repeat("x", 4096) {
+		t.Fatal("not copied on the re-run")
+	}
+	entries, _ = os.ReadDir(ws)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), CopyTempPrefix) {
+			t.Fatalf("temp litter left: %s", e.Name())
+		}
+	}
+}
+
+// Review round 4, finding 2: a legacy tree holding only .scion is kept
+// aside once its configuration is copied; re-runs neither take the lock
+// again nor report conflicts after the target settings are edited.
+func TestRun_ScionOnlyTreeKeptAside(t *testing.T) {
+	f := newHubFixture(t)
+	writeTree(t, f.share, map[string]string{legacyHubProjectsDir + "/p1/.scion/settings.yaml": idSettings(pid1)})
+	lk := &fakeLock{}
+	in := f.input(ProjectRef{ID: pid1, Slug: "p1"})
+	in.ProvisionLock = lk.lock
+	rep, err := Run(context.Background(), in, opts(false))
+	if err != nil || rep.Failed() {
+		t.Fatalf("run 1: err=%v failed=%t", err, rep.Failed())
+	}
+	assertAbsent(t, filepath.Join(f.share, legacyHubProjectsDir, "p1"))
+	if readFile(t, filepath.Join(f.share, legacyHubProjectsDir, "p1"+backupSuffix, ".scion/settings.yaml")) != idSettings(pid1) {
+		t.Fatal("the legacy tree was not kept aside")
+	}
+	// The operator edits the project configuration.
+	if err := os.WriteFile(filepath.Join(f.share, "projects", pid1, ".scion/settings.yaml"), []byte("edited\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for run := 2; run <= 3; run++ {
+		rep, err := Run(context.Background(), in, opts(false))
+		var b bytes.Buffer
+		rep.WriteLog(&b)
+		if err != nil || rep.Failed() || rep.Moves() != 0 || strings.Contains(b.String(), "CONFLICT") {
+			t.Fatalf("run %d: err=%v failed=%t moves=%d\n%s", run, err, rep.Failed(), rep.Moves(), b.String())
+		}
+	}
+	if len(lk.dirs) != 1 {
+		t.Fatalf("lock taken %d times; re-runs must not lock", len(lk.dirs))
 	}
 }

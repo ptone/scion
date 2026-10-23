@@ -19,6 +19,8 @@ package migrate
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -626,6 +628,9 @@ func (m *merger) mergeDir(src, dst int, rel string, depth int) {
 		m.errs = append(m.errs, fmt.Errorf("read %q: %w", relOrDot(rel), err))
 		return
 	}
+	if dst >= 0 && !m.dryRun {
+		removeCopyTemps(dst)
+	}
 	gitLast := false
 	for _, name := range names {
 		p := filepath.Join(rel, name)
@@ -709,7 +714,9 @@ func (m *merger) mergeGit(src, dst int) {
 			m.errs = append(m.errs, err)
 			return
 		}
-		if err := unix.Mkdirat(dst, GitMigratingName, uint32(st.Mode&0o777)); err != nil && !errors.Is(err, unix.EEXIST) {
+		// Exclusive: a temp dir that appears between the check and here is
+		// not ours to merge into (resuming happens by name, below).
+		if err := unix.Mkdirat(dst, GitMigratingName, uint32(st.Mode&0o777)); err != nil {
 			m.errs = append(m.errs, fmt.Errorf("create %s: %w", GitMigratingName, err))
 			return
 		}
@@ -724,10 +731,16 @@ func (m *merger) mergeGit(src, dst int) {
 		return
 	}
 	defer closeFd(tmp)
-	before := len(m.errs)
+	before, beforeConflicts := len(m.errs), len(m.res.Conflicts)
 	m.mergeDir(childSrc, tmp, ".git", 1)
 	if len(m.errs) > before || m.dryRun || (m.ctx != nil && m.ctx.Err() != nil) {
 		return // incomplete: a re-run resumes into the temp dir
+	}
+	if n := len(m.res.Conflicts) - beforeConflicts; n > 0 {
+		// The temp copy differs from the source (review round 4, finding
+		// 1): never rename an inconsistent .git into place.
+		m.errs = append(m.errs, fmt.Errorf(".git copy incomplete: %d entries in %s differ from the source; not renamed into place (inspect or remove %s, then run again)", n, GitMigratingName, GitMigratingName))
+		return
 	}
 	if k, err := kindAt(dst, ".git"); err != nil || k != kindAbsent {
 		m.res.Conflicts = append(m.res.Conflicts, ".git")
@@ -735,8 +748,12 @@ func (m *merger) mergeGit(src, dst int) {
 	}
 	err = renameNoReplace(dst, GitMigratingName, dst, ".git")
 	if errors.Is(err, errNoAtomicRename) {
-		// NFS: a plain rename onto an absent name is atomic; the absent
-		// check above ran under the provisioning locks.
+		// NFS has no RENAME_NOREPLACE. A plain rename(2) is atomic; it
+		// fails on a non-empty .git (ENOTEMPTY/EEXIST: a conflict below)
+		// and replaces only an EMPTY .git directory that a writer taking no
+		// lock created after the absent check above. Nothing is lost then:
+		// the result is the complete repository. Provisioners are excluded
+		// by the locks the caller holds.
 		err = unix.Renameat(dst, GitMigratingName, dst, ".git")
 	}
 	if err != nil {
@@ -842,10 +859,27 @@ func (m *merger) mergeFile(src, dst int, name, p string, st *unix.Stat_t) {
 	}
 }
 
-// copyFile copies the regular file srcName to a NEW file dstName (O_EXCL:
-// an existing target, even one created concurrently, is never touched and
-// is reported as a conflict). Permission bits (no setuid/setgid/sticky)
-// and the modification time are kept. A partial copy is removed.
+// CopyTempPrefix starts the name of a file being copied (review round 4,
+// finding 1): copyFile writes, fsyncs and only then places the file under
+// its final name, so a killed run never leaves a partial file under a
+// final name. Leftover temp files are removed by the next run's copy walk
+// and are never workspace content.
+const CopyTempPrefix = ".scion-migrate-tmp-"
+
+// copyCrashHook runs after the temp file is written, before it is placed;
+// a test seam that can simulate a killed run (errSimulatedKill: return at
+// once, leaving the temp file, as a killed process would).
+var copyCrashHook = func(dstName string) error { return nil }
+
+var errSimulatedKill = errors.New("simulated kill")
+
+// copyFile copies the regular file srcName to a NEW file dstName. It writes
+// a temp sibling (CopyTempPrefix, O_EXCL, no-follow), fsyncs it, and places
+// it with no-replace semantics (renameat2(RENAME_NOREPLACE), or linkat +
+// unlink where that is unavailable): an existing target, even one created
+// concurrently, is never touched and is reported as a conflict, and the
+// final name never holds a partial file. Permission bits (no
+// setuid/setgid/sticky) and the modification time are kept.
 func copyFile(srcDir int, srcName string, dstDir int, dstName string, st *unix.Stat_t) (conflict bool, err error) {
 	sfd, err := unix.Openat(srcDir, srcName, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
 	if err != nil {
@@ -861,30 +895,73 @@ func copyFile(srcDir int, srcName string, dstDir int, dstName string, st *unix.S
 		return false, errors.New("source file changed while copying")
 	}
 	perm := uint32(fst.Mode & 0o777)
-	dfd, err := unix.Openat(dstDir, dstName, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, perm)
-	if err != nil {
-		if errors.Is(err, unix.EEXIST) {
-			return true, nil
+	var tmpName string
+	var dfd int
+	for attempt := 0; ; attempt++ {
+		var rnd [8]byte
+		if _, err := rand.Read(rnd[:]); err != nil {
+			return false, err
 		}
-		return false, fmt.Errorf("create target file: %w", err)
+		tmpName = CopyTempPrefix + hex.EncodeToString(rnd[:])
+		dfd, err = unix.Openat(dstDir, tmpName, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, perm)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, unix.EEXIST) || attempt > 3 {
+			return false, fmt.Errorf("create temp file: %w", err)
+		}
 	}
-	df := os.NewFile(uintptr(dfd), dstName)
+	df := os.NewFile(uintptr(dfd), tmpName)
 	_, cerr := io.Copy(df, sf)
 	if cerr == nil {
 		cerr = unix.Fchmod(dfd, perm)
 	}
 	if cerr == nil {
-		ts := []unix.Timespec{fst.Atim, fst.Mtim}
-		cerr = unix.UtimesNanoAt(dstDir, dstName, ts, unix.AT_SYMLINK_NOFOLLOW)
+		cerr = df.Sync()
 	}
 	if closeErr := df.Close(); cerr == nil {
 		cerr = closeErr
 	}
+	if cerr == nil {
+		ts := []unix.Timespec{fst.Atim, fst.Mtim}
+		cerr = unix.UtimesNanoAt(dstDir, tmpName, ts, unix.AT_SYMLINK_NOFOLLOW)
+	}
+	if cerr == nil {
+		if herr := copyCrashHook(dstName); errors.Is(herr, errSimulatedKill) {
+			return false, herr // as if killed: the temp file stays
+		}
+	}
 	if cerr != nil {
-		_ = unix.Unlinkat(dstDir, dstName, 0)
+		_ = unix.Unlinkat(dstDir, tmpName, 0)
 		return false, fmt.Errorf("copy file: %w", cerr)
 	}
+	if err := renameFileNoReplace(dstDir, tmpName, dstDir, dstName); err != nil {
+		_ = unix.Unlinkat(dstDir, tmpName, 0)
+		if errors.Is(err, unix.EEXIST) {
+			return true, nil
+		}
+		return false, fmt.Errorf("place copied file: %w", err)
+	}
 	return false, nil
+}
+
+// removeCopyTemps removes leftover copy temp files (CopyTempPrefix,
+// regular files only) from a target directory: a killed earlier run's
+// partial copies. Nothing else is ever removed.
+func removeCopyTemps(dir int) {
+	names, err := readDirNames(dir)
+	if err != nil {
+		return
+	}
+	for _, n := range names {
+		if !strings.HasPrefix(n, CopyTempPrefix) {
+			continue
+		}
+		var st unix.Stat_t
+		if err := unix.Fstatat(dir, n, &st, unix.AT_SYMLINK_NOFOLLOW); err == nil && st.Mode&unix.S_IFMT == unix.S_IFREG {
+			_ = unix.Unlinkat(dir, n, 0)
+		}
+	}
 }
 
 // sameContent reports whether two regular files have the same bytes.

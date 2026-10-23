@@ -359,7 +359,7 @@ func MigrateProject(ctx context.Context, in ProjectInput, opts Options) ProjectR
 			for _, n := range names {
 				// Provisioning lock litter and a legacy sentinel are not
 				// workspace content.
-				if !strings.HasPrefix(n, ".scion-provision") && n != GitMigratingName {
+				if !strings.HasPrefix(n, ".scion-provision") && !strings.HasPrefix(n, CopyTempPrefix) && n != GitMigratingName {
 					content++
 				}
 			}
@@ -627,6 +627,18 @@ func (rep *ProjectReport) workspace(step Step, src Tree, in ProjectInput, copyOn
 		content = content || !isInfraEntry(n)
 	}
 	if !ok || !content {
+		hasScion := false
+		for _, n := range names {
+			hasScion = hasScion || n == ".scion"
+		}
+		if ok && hasScion && !copyOnly {
+			// Only configuration/infra entries (step 4 copied what
+			// belongs to the project configuration): keep the tree aside
+			// like any migrated source, so its .scion is not left live
+			// and re-runs neither relock nor re-report it (review round 4,
+			// finding 2).
+			rep.keepAside(step, src, opts)
+		}
 		return
 	}
 	if target == nil {
@@ -661,6 +673,31 @@ func (rep *ProjectReport) workspace(step Step, src Tree, in ProjectInput, copyOn
 		}
 	}
 	rep.Results = append(rep.Results, Move(spec, opts))
+}
+
+// keepAside renames a legacy source that holds no workspace content to
+// <name>.migrated-<ts>, as the copy path does for every migrated source.
+func (rep *ProjectReport) keepAside(step Step, src Tree, opts Options) {
+	res := Result{Step: step, Source: src.String()}
+	if opts.DryRun {
+		res.Outcome = OutcomeWouldMerge
+		rep.Results = append(rep.Results, res)
+		return
+	}
+	parent, name, ok, err := openParent(src, false)
+	if err != nil || !ok {
+		res.Outcome, res.Err = OutcomeFailed, fmt.Errorf("keep source aside: %v", err)
+		rep.Results = append(rep.Results, res)
+		return
+	}
+	defer closeFd(parent)
+	backup, err := renameToBackup(parent, name, opts)
+	if err != nil {
+		res.Outcome, res.Err = OutcomeFailed, err
+	} else {
+		res.Outcome, res.Backup = OutcomeMerged, filepath.Join(filepath.Dir(src.String()), backup)
+	}
+	rep.Results = append(rep.Results, res)
 }
 
 // workspaceExcludes lists the entries of a legacy workspace source that

@@ -100,6 +100,19 @@ Files tab. This adds the one-shot maintenance migration
   - Non-git projects: a partial tree can be adopted by a first start.
     Nothing is lost, and the next run converges (accepted). An optional
     in-progress marker is a follow-up on #5834.
+- **Crash-safe copies** (review round 4, finding 1).
+  - `copyFile` writes a temp sibling (`.scion-migrate-tmp-<rand>`, O_EXCL,
+    no-follow), fsyncs it, and places it with no-replace semantics
+    (NOREPLACE, or linkat + unlink). A killed run never leaves a partial
+    file under a final name.
+  - The next run's copy walk removes leftover temp files (regular files
+    with that prefix only). They never count as workspace content.
+  - mergeGit renames `.git.scion-migrating` in only if its merge produced
+    no conflict. Otherwise the project stays pending with ".git copy
+    incomplete".
+  - A legacy tree holding a `.scion` but no workspace content is kept aside
+    (`.migrated-<ts>`) after step 4 copied its configuration (round 4,
+    finding 2).
 - **Step 4 copies, never moves:** the legacy tree keeps its identity
   markers until the workspace move completes and the whole source becomes
   `<name>.migrated-<ts>`. Moving them would make an interrupted run
@@ -211,7 +224,11 @@ Files tab. This adds the one-shot maintenance migration
   - `.git` copied last and renamed in when complete; interrupted mid-`.git`
     leaves no `.git`, and a re-run resumes; run-stop versus lost-lock
     reporting; a copy of a hard-linked source is chowned; M3 ignores lock
-    litter.
+    litter;
+  - a truncated file in the temp `.git` blocks the rename (pending); a
+    simulated kill mid-copy leaves no final-named partial file and the
+    re-run cleans the litter; a `.scion`-only tree is kept aside and
+    re-runs neither lock nor report conflicts.
 - `pkg/provision`: `TestWorkspaceProvisionLockDirs`, `TestWithWorkspaceProvisionLocks`
   (refuses missing dirs), `TestWithWorkspaceProvisionLocks_ExcludesEveryProvisioner`
   (real `acquireProvisionLock` for the Cloud Run shape (no SentinelDir) and the
