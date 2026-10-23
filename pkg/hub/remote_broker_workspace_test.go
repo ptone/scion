@@ -137,10 +137,34 @@ func TestCreateAgent_RemoteBroker_SharedStorage_DispatchesUUIDWorkspace(t *testi
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 	require.NotNil(t, disp.capturedAgent, "the agent must be dispatched")
 	require.NotNil(t, disp.capturedAgent.AppliedConfig)
-	assert.Equal(t, filepath.Join(mountRoot, "share1", "projects", project.ID, "workspace"),
-		disp.capturedAgent.AppliedConfig.Workspace, "the workspace is the uuid tree agents mount")
+	assert.Empty(t, disp.capturedAgent.AppliedConfig.Workspace,
+		"the hub's mount path is not sent to a remote broker: it resolves the workspace through its own mount of the share")
 	assert.Empty(t, disp.capturedAgent.AppliedConfig.WorkspaceStoragePath, "no GCS copy of the workspace")
 	assert.Empty(t, disp.capturedAgent.AppliedConfig.WorkspaceStorageBucket)
+}
+
+// TestCreateAgent_EmbeddedBroker_SharedStorage_SendsExistingUUIDWorkspace:
+// the co-located (embedded) broker shares the hub's mount, so it is given
+// the uuid workspace path, which the hub creates if missing (the hub no
+// longer creates a workspace copy at project create).
+func TestCreateAgent_EmbeddedBroker_SharedStorage_SendsExistingUUIDWorkspace(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	clearCreateAgentProviderPath(t, s, project)
+	srv.SetEmbeddedBrokerID(project.DefaultRuntimeBrokerID)
+	mountRoot := t.TempDir()
+	srv.config.WorkspaceStorageConfig = nfsConfig(mountRoot)
+	require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share1"), 0o755))
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name: "embedded-shared-agent", ProjectID: project.ID,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	require.NotNil(t, disp.capturedAgent, "the agent must be dispatched")
+	want := filepath.Join(mountRoot, "share1", "projects", project.ID, "workspace")
+	assert.Equal(t, want, disp.capturedAgent.AppliedConfig.Workspace, "the workspace is the uuid tree agents mount")
+	assert.DirExists(t, want, "the hub creates the workspace leaf before dispatch")
 }
 
 func TestCreateAgent_BrokerWithLocalPath_Dispatches(t *testing.T) {
