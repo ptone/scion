@@ -126,6 +126,11 @@ test('toggling views without an edit never changes the text', async ({ page }) =
     files: { 'index.md': Buffer.from(DOC) },
   });
   await openArtifact(page, project, a.id);
+  // Reading (not reviewing) keeps the isolated preview frame with the experiment on.
+  await expect(
+    page.locator('scion-page-artifact-detail scion-artifact-markdown-frame')
+  ).toBeVisible();
+  await expect(page.locator('scion-review-editor')).toHaveCount(0);
   await startGraphicalReview(page);
   expect(await editorText(page)).toBe(DOC);
   await page.locator('sl-radio-button[value="source"]').click();
