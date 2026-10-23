@@ -291,8 +291,8 @@ func windowsRefusal(cmd *cobra.Command) error {
 // argument: cobra also accepts global flags before __complete (--debug, or
 // --project with its value). A hidden placeholder with the same names is
 // added for the lookup and removed again; the request is one only when
-// root.Find resolves args to it, and Find's remaining arguments are then
-// exactly the ones cobra's completion code receives.
+// root.Find resolves args to a command of that name, and Find's remaining
+// arguments are then exactly the ones cobra's completion code receives.
 func completeGated(root *cobra.Command, args []string, out io.Writer) bool {
 	placeholder := &cobra.Command{
 		Use:                cobra.ShellCompRequestCmd,
@@ -304,7 +304,13 @@ func completeGated(root *cobra.Command, args []string, out io.Writer) bool {
 	root.AddCommand(placeholder)
 	defer root.RemoveCommand(placeholder)
 	found, rest, err := root.Find(args)
-	if err != nil || found != placeholder || len(rest) == 0 {
+	if err != nil || len(rest) == 0 {
+		return false
+	}
+	// By name, as cobra decides it: a command of that name already on root
+	// (cobra's own, or any other) is a completion request too, so the
+	// check fails closed rather than handing the request to cobra.
+	if name := found.Name(); name != cobra.ShellCompRequestCmd && name != cobra.ShellCompNoDescRequestCmd {
 		return false
 	}
 	// The last argument is the word being completed; cobra resolves the

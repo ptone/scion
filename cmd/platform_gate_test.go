@@ -491,6 +491,9 @@ func TestWindowsGate_CompletionSkipsGatedCommands(t *testing.T) {
 		// as a completion request, so the gate must too.
 		{"--debug", cobra.ShellCompRequestCmd, "server", "start", "--probe", ""},
 		{"--project", "x", cobra.ShellCompRequestCmd, "server", "start", ""},
+		{"-g", "x", cobra.ShellCompRequestCmd, "server", "start", ""},
+		{"--project=x", cobra.ShellCompRequestCmd, "server", "start", ""},
+		{"--debug", cobra.ShellCompNoDescRequestCmd, "server", "start", "--probe", ""},
 	} {
 		t.Run("gated "+strings.Join(args, " "), func(t *testing.T) {
 			root, _ := gateTestTree(t)
@@ -543,6 +546,25 @@ func TestWindowsGate_CompletionSkipsGatedCommands(t *testing.T) {
 			assert.Contains(t, out.String(), "-candidate")
 		})
 	}
+
+	// A command named __complete already on root (cobra adds its own while
+	// it executes): the request is still recognised by name, so a gated
+	// target is still answered by the gate and its probe does not run.
+	t.Run("gated with a __complete command already on root", func(t *testing.T) {
+		root, _ := gateTestTree(t)
+		applyPlatformRestrictions(root, "windows")
+		var called []string
+		completionProbes(t, root, &called, probed...)
+		existing := &cobra.Command{Use: cobra.ShellCompRequestCmd, Hidden: true, DisableFlagParsing: true, Run: func(*cobra.Command, []string) {}}
+		root.AddCommand(existing)
+		var out bytes.Buffer
+		require.True(t, completeGated(root, []string{cobra.ShellCompRequestCmd, "server", "start", "--probe", ""}, &out),
+			"a completion request must be recognised by name, whichever __complete command Find returns")
+		assert.Equal(t, fmt.Sprintf(":%d\n", cobra.ShellCompDirectiveNoFileComp), out.String())
+		assert.Empty(t, called, "no completion function of a gated command may run")
+		root.RemoveCommand(existing)
+		assertNoCompletionPlaceholder(t, root)
+	})
 
 	// Not a completion request: never answered by the gate.
 	root, _ := gateTestTree(t)

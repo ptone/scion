@@ -53,9 +53,11 @@ with zero skips; each package left off has a one-line reason in the file.
   cobra runs, so for any request cobra would treat as a completion request
   the command's `ValidArgsFunction` and the completion functions registered
   for its flags do not run. The request is recognised as cobra recognises
-  it: a temporary hidden placeholder named `__complete` is resolved with
-  `root.Find`, so global flags before `__complete` (`--debug`,
-  `--project <name>`) are covered too. `Execute` calls it right after the
+  it: with a temporary hidden placeholder named `__complete` on root,
+  `root.Find` must resolve the arguments to a command of that name (matched
+  by name, so an existing `__complete` command counts too), and global flags
+  before `__complete` (`--debug`, `--project <name>`, `-g <name>`,
+  `--project=<name>`) are covered. `Execute` calls it right after the
   platform restrictions; off Windows nothing is gated, so it never answers.
   The directive line is printed (and nothing else) because without it the
   completion scripts fall back to file completion.
@@ -87,13 +89,9 @@ with zero skips; each package left off has a one-line reason in the file.
 - `pkg/plugin/grpcbroker` hit the 10-minute go test timeout once on
   windows-latest; the next runs passed. The goroutine dump (from that run's
   test.json artifact) shows
-  `TestGoogleIDTokenValidator_AllCallersCanceledFetchStillStops` blocked on its unbounded `<-requestStarted` receive
-  (tokenvalidator_test.go): no handler goroutine and no fetch goroutine were
-  left, so the first JWKS fetch returned without reaching the test server
-  and the test waited forever. The hang is in that test's wait, outside the
-  Windows file-protection code; a bounded wait in the test is the follow-up.
-- Local gate series for this branch: drafted (not run): gofmt and
-  winsec-guard, Linux tests of pkg/config, urlredact and otlptls,
-  GOOS=windows vet of the changed packages, and the named cmd gate tests. The full ./cmd suite is
-  proposed to rest on fork CI (Linux Build & Test, and the Windows job's
-  ./cmd anchor).
+  `TestGoogleIDTokenValidator_AllCallersCanceledFetchStillStops` blocked on
+  its unbounded `<-requestStarted` receive (tokenvalidator_test.go): no
+  handler goroutine and no fetch goroutine were left, so the first JWKS fetch
+  returned without reaching the test server and the test waited forever. The
+  hang is in that test's wait, outside the Windows file-protection code; a
+  bounded wait in the test is the follow-up.
