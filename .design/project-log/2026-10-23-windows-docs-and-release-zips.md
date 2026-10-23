@@ -36,7 +36,7 @@ Every quoted message on the page was matched to its source string
   not even file names, and `scion project <TAB>` offers no subcommands while
   `scion project use` still runs (`completeGated` in `cmd/platform_gate.go`).
 - verifying a downloaded zip against the release's `SHA256SUMS`, which the
-  release job writes over every asset with `sha256sum` (`build-release.yml`).
+  release job writes over every file it builds with `sha256sum` (`build-release.yml`).
 
 ## Open
 
