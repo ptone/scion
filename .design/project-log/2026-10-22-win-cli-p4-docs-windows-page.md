@@ -58,3 +58,13 @@ Design: win-cli-design.md (sha256 7cb5d107…), §7 and §8 Phase 4 ("Docs page"
   (`run\tunnels` itself is refused); `hub auth` added to the list; "deliberately added to the Windows allowlist".
 - 8 kept as plain wording (EM: docs merge only with or after the p4ci release-matrix change).
 - FYI: "For example:" added before the SSH refusal excerpts (the intermediate-directory form is `open <dir>: not private: ...`).
+
+## Batch update after p3fix (integration aa5e88676)
+
+- Rebased onto win-cli/integration aa5e88676 with no conflicts.
+- Credentials paragraph rewritten to match the merged pkg/credentials/notice.go. Read paths print `Warning: <refusal with fix hint>`
+  on stderr once per process. `hub auth login` over a refused file warns that it replaces the file and that other hubs need a fresh
+  login. Both texts are quoted from the code.
+- `scion use` is supported (allowlist `use` and `project.use`, but no `project` parent). "Choosing the agent" now has the
+  lookup order from cmd/invocation_target.go: --project, then the linked directory project, then the `scion use` project, then a unique
+  name. The supported list notes that `scion project` itself stays refused.

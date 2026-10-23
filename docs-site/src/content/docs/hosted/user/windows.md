@@ -135,7 +135,7 @@ The Windows build runs these commands, and nothing else. The list is an allowlis
 - **Agents over the Hub:** `list`, `ssh`, `ssh-config`, `vscode`, `tunnel`, `tunnel status`
 - **Messages:** `message`, `message channels`, `messages`, `messages read`
 - **Conversations:** `conversation` and `conversation list`, `messages`, `create`, `get`, `get-message`, `set-default`, `participants`, `join`, `leave`, `catch-up`; `conversation group` and its `list`, `get`, `create`, `rename`, `delete`, `add`, `remove`
-- **Project selection:** `use`, `project use` <!-- TODO(p3fix): final names -->
+- **Project selection:** `use`, and its alias `project use`. The `project` command itself and its other subcommands are not supported, so `scion project` on its own is refused.
 - **Configuration:** `config` and `config list`, `set`, `get`, `unset`, `validate`, `migrate`, `dir`, `cd-config`, `cd-project`, `schema`
 - **Hub list and login:** `hub`, `hub add`, `hub list`, `hub rename`, `hub remove`, `hub status`, `hub shadow`, `hub auth`, `hub auth login`, `hub auth logout`, `hub auth federation-token`
 - **Hub projects and linking:** `hub projects`, `hub projects info`, `create`, `delete`; `hub link`, `hub unlink`, `hub enable`, `hub disable`
@@ -191,13 +191,19 @@ The other refusals are about file protection. Most of them include the path and 
 
 ### `credentials.json` is readable by others
 
-scion does not read a credentials file other accounts can access. Commands then behave as if you were not logged in to any Hub, and most of them do not say why. To see the reason, run `scion hub auth logout`, which fails with:
+scion does not read a credentials file other accounts can access, so you are not logged in to any Hub. Commands that need a login print the reason on stderr (once per command):
 
 ```
-failed to remove credentials: failed to read credentials file: refusing to read credentials from C:\Users\<you>\.scion\credentials.json: not private: ... grants access to <SID> (mask 0x...); ... Delete the file and log in again with 'scion hub auth login'; logins to other hubs stored in it must be repeated too
+Warning: failed to read credentials file: refusing to read credentials from C:\Users\<you>\.scion\credentials.json: not private: ... grants access to <SID> (mask 0x...); ... Delete the file and log in again with 'scion hub auth login'; logins to other hubs stored in it must be repeated too
 ```
 
-Delete the file and run `scion hub auth login` again; the new file is created with an owner-only ACL. The file holds the logins of every Hub you use, so log in to your other Hubs again too. (Logging in without deleting the file first also replaces it, with the same result: only the Hub you just logged in to is kept.)
+Delete the file and run `scion hub auth login` again; the new file is created with an owner-only ACL. The file holds the logins of every Hub you use, so log in to your other Hubs again too.
+
+If you log in without deleting the file first, scion replaces it and says so:
+
+```
+Warning: the credentials file C:\Users\<you>\.scion\credentials.json is not private, so it was not read. It is being replaced by a private file holding only this login; logins to other hubs stored in it must be repeated with 'scion hub auth login'.
+```
 
 ### A private file has a foreign ACE or owner
 
