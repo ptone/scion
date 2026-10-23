@@ -691,10 +691,10 @@ type vscodeArg struct{ flag, value string }
 // .cmd or .bat file on Windows (VS Code's own bin\code.cmd is). Windows
 // runs such a file through cmd.exe, and os/exec does not escape arguments
 // for cmd.exe, so each argument may contain only ASCII letters and digits,
-// @+=:,./_-, backslashes, '~' (8.3 short names), spaces, and non-ASCII
-// letters (except modifier letters), digits and combining marks. Any other character is an error naming the argument,
-// before VS Code is started. A CLI that is not a .cmd or .bat, and every
-// other OS, is not affected.
+// @+=:,./_-, backslashes, '~' (8.3 short names), spaces, and the non-ASCII
+// letters, digits and combining marks isNonASCIIWordRune accepts. Any other
+// character is an error naming the argument, before VS Code is started. A
+// CLI that is not a .cmd or .bat, and every other OS, is not affected.
 func checkVSCodeBatchArgs(bin string, args []vscodeArg) error {
 	if !vscodeOnWindows {
 		return nil

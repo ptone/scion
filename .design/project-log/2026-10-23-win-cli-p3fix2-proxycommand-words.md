@@ -47,9 +47,17 @@ The new tests are added to the Windows job's `./cmd` anchor.
 
 ## Review r1 (APPROVE, win-cli-rev-p3fix2-r1): all four items adopted
 
-1. Both allowlists (the ProxyCommand words and the VS Code .cmd arguments) now exclude modifier letters (Unicode Lm) through a shared `isNonASCIIWordRune`. Some of them become ASCII punctuation under a best-fit code page conversion. Modifier symbols (Sk) stay excluded. U+02B9, U+02BA, U+02BC and U+02C6 are added to both refusal tests.
+1. Both allowlists (the ProxyCommand words and the VS Code .cmd arguments) go through a shared `isNonASCIIWordRune`. At r1 it excluded modifier letters (Unicode Lm), and U+02B9, U+02BA, U+02BC and U+02C6 were added to both refusal tests. That alone did not cover every rune the best-fit tables map to punctuation; see review r2.
 2. `checkVSCodeBatchArgs` allows `~` (it is literal for cmd.exe), with an 8.3 control (`C:\Users\FIRSTN~1\...`). `%` stays refused.
 3. The .cmd refusal hint now lists exactly what the check allows.
 4. `TestPrepareSSH_RefusalMakesNoTempDir`: on a refusal, `scion ssh` makes no temporary directory (TMPDIR/TMP/TEMP redirected to an empty directory). Control: a successful prepare makes one, and its cleanup removes it.
 
 Also fixed after the first Windows run: the new tests use a host-absolute scion path. `sshTestExe` is a unix path, which is not absolute on Windows.
+
+## Review r2 (REQUEST CHANGES, one Required): fixed
+
+- **Required 1.** `isNonASCIIWordRune` now also refuses an explicit set, `sshBestFitPunct`. The set is two letters, U+01C0 (to `|`) and U+01C3 (to `!`), and four combining marks: U+0300 (to a backtick), U+0302 (to `^`), U+0303 (to `~`) and U+030E (to `"`). The comment names the source: Microsoft's WindowsBestFit tables (unicode.org MAPPINGS/VENDORS/MICSFT/WindowsBestFit, code pages 874, 932, 936, 949, 950 and 1250-1258). It also states that Lm and these runes are refused because they map to ASCII punctuation.
+  - Coverage is exactly what the reviewer's table check covers: every non-ASCII entry in those tables whose target is an ASCII character the allowlists refuse is Lm, Sk, P, S, Zs, or in this set. Entries mapping to `_` (U+0331, U+0332) are harmless and stay accepted.
+  - Both refusal tests add the six runes, with the marks after a base letter. Other combining marks stay accepted; the control is `Jose` + U+0301.
+- **Nit.** The `checkVSCodeBatchArgs` doc comment is re-wrapped.
+- **Optional, adopted.** `TestPrepareSSH_RefusalMakesNoTempDir` asserts that the error names the refused character.

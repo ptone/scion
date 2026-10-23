@@ -249,6 +249,12 @@ func TestCheckVSCodeBatchArgs(t *testing.T) {
 	for _, c := range []string{`"`, "%", "^", "&", "|", "<", ">", "(", ")", "!", "\n", "'", ";", "$", "`", "\u02b9", "\u02ba", "\u02bc", "\u02c6"} {
 		require.Error(t, checkVSCodeBatchArgs(`C:\VS Code\bin\code.cmd`, []vscodeArg{{"--path", "/a" + c + "b"}}), "%q", c)
 	}
+	// Letters and combining marks that best-fit to ASCII punctuation (marks
+	// after a base letter); other combining marks stay accepted.
+	for _, c := range []string{"\u01c0", "\u01c3", "\u0300", "\u0302", "\u0303", "\u030e"} {
+		require.Error(t, checkVSCodeBatchArgs(`C:\VS Code\bin\code.cmd`, []vscodeArg{{vscodeUserDataFlag, `C:\Users\a` + c + `b`}}), "%q", c)
+	}
+	require.NoError(t, checkVSCodeBatchArgs(`C:\VS Code\bin\code.cmd`, []vscodeArg{{vscodeUserDataFlag, "C:\\Users\\Jose\u0301"}}))
 }
 
 // testAbsExe returns an absolute scion path on the host OS (sshTestExe is a
@@ -282,6 +288,7 @@ func TestPrepareSSH_RefusalMakesNoTempDir(t *testing.T) {
 	env.exe = badExe
 	_, cleanup, err := prepareSSH(context.Background(), env, "a/b-c", nil)
 	require.Error(t, err)
+	assert.ErrorContains(t, err, "&")
 	assert.Nil(t, cleanup, "no cleanup: nothing was made")
 	assert.Equal(t, 0, entries(), "no temporary directory on refusal")
 
