@@ -2415,10 +2415,7 @@ func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *st
 		}
 		return nil, err
 	}
-	res, err = d.finalizeEnv(ctx, agent, env, false, true)
-	// A names-write refusal relayed from the owner node names this
-	// finalize's action.
-	return res, userSuppliedKeysUnrecordedFor(err, finalizeActionVerb(ctx))
+	return d.finalizeEnv(ctx, agent, env, false, true)
 }
 
 // finalizeEnv implements DispatchFinalizeEnv. TZ in the caller env is
@@ -2532,7 +2529,10 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 	}
 	resp, envReqs, launch, err := d.dispatchLaunching(ctx, agent, endpoint, req, true, send)
 	if errors.Is(err, ErrLifecycleDeferred) {
-		return d.deferredFinalizeEnv(ctx, agent, env)
+		// A names-write refusal relayed from the owner node names this
+		// finalize's action.
+		deferred, err := d.deferredFinalizeEnv(ctx, agent, env)
+		return deferred, userSuppliedKeysUnrecordedFor(err, finalizeActionVerb(ctx))
 	}
 	if err != nil {
 		return nil, err

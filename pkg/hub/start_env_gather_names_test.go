@@ -250,3 +250,20 @@ func TestUserSuppliedKeysUnrecorded_CrossNodeIsNotActedOn(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), userSuppliedKeysUnrecordedMessage("started"), "the requester's action picks the verb")
 	assert.True(t, isConfirmedStartNotActedOnError(relayed))
 }
+
+// A names-write refusal from the owner node, relayed to the requester
+// through the hand-off, names the requester's action.
+func TestDispatchFinalizeEnv_OwnerNamesWriteFaultNamesTheRequesterAction(t *testing.T) {
+	f := newCrossNodeFixture(t, nil, true)
+	f.requester.client = &mockRuntimeBrokerClient{returnErr: ErrLifecycleDeferred}
+	f.ownerDisp.finalizeErr = &userSuppliedKeysWriteError{verb: "created", err: errors.New("FAKE-owner-store-detail")}
+
+	_, err := f.requester.DispatchFinalizeEnv(withPreserveWorkspace(crossNodeCtx(t)), f.agent, map[string]string{"FAKE_HANDOFF_KEY": "FAKE-value"})
+	require.ErrorIs(t, err, errUserSuppliedKeysUnrecorded)
+	assert.Equal(t, userSuppliedKeysUnrecordedMessage("started"), err.Error(), "the requester's action")
+	assert.True(t, isConfirmedStartNotActedOnError(err))
+	rec := httptest.NewRecorder()
+	require.True(t, writeUserSuppliedKeysUnrecordedError(rec, err))
+	assert.Contains(t, rec.Body.String(), "the agent was not started")
+	assert.NotContains(t, rec.Body.String(), "FAKE-owner-store-detail")
+}
