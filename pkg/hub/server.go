@@ -3329,6 +3329,10 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// A restored agent whose root user is no longer admitted to its project
 	// comes back held (ptone/scion#3433).
 	srv.registerMembershipRestoreHook()
+	// Agent delete, restore and the reincarnation claim revoke the agent's
+	// delegation grants in their own transaction
+	// (.design/agent-delegation.md §16.1).
+	srv.registerAgentDelegationLifecycleHooks()
 
 	// Wire the proxy user provisioner (wraps provisionUser with 60s cache)
 	if cfg.ProxyAuth != nil {
@@ -5345,6 +5349,9 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 	// suspendAgent's HTTP-path behavior.
 	s.releaseBrokerQuota(ctx, agent)
 	releaseClaim()
+	// As for suspendAgent: the agent's delegation grants end with the
+	// suspension, best effort (.design/agent-delegation.md §16.3).
+	s.revokeAgentDelegationGrantsBestEffort(ctx, store.AgentDelegationGrantFilter{AgentID: agent.ID}, revokeReasonAgentSuspended)
 	s.events.PublishAgentStatus(ctx, agent)
 	return true
 }
@@ -6708,6 +6715,10 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// Start the scheduled chat message sweeper (exits when ctx is cancelled).
 	s.startScheduledSendSweeper(ctx)
 
+	// Starred messages need a chat store with the star capability; report
+	// a misconfiguration at startup (requests answer 503 meanwhile).
+	s.validateMessageStarStore()
+
 	// Start the migration of personal chat thread groups into project
 	// thread groups (ptone/scion#4424). It exits when ctx is cancelled.
 	s.startThreadGroupMigrationSweeper(ctx)
@@ -7389,6 +7400,9 @@ func (s *Server) registerRoutes() {
 		s.mux.HandleFunc("/api/v1/chat/user-prefs", s.guarded("/api/v1/chat/user-prefs", s.chatRoute(s.handleChatUserPrefs)))
 		s.mux.HandleFunc("/api/v1/chat/presence", s.guarded("/api/v1/chat/presence", s.chatRoute(s.handleChatPresence)))
 		s.mux.HandleFunc("/api/v1/chat/search", s.guarded("/api/v1/chat/search", s.chatRoute(s.handleChatSearch)))
+		// Starred messages (web.chat_starred_messages; 404 while off).
+		s.mux.HandleFunc("/api/v1/chat/stars", s.guarded("/api/v1/chat/stars", s.chatRoute(s.handleChatStars)))
+		s.mux.HandleFunc("/api/v1/chat/stars/", s.guarded("/api/v1/chat/stars/", s.chatRoute(s.handleChatStarRoutes)))
 		s.mux.HandleFunc("/api/v1/chat/attachments", s.guarded("/api/v1/chat/attachments", s.chatAttachmentRoute(s.handleChatAttachments)))
 		s.mux.HandleFunc("/api/v1/chat/attachments/", s.guarded("/api/v1/chat/attachments/", s.chatAttachmentRoute(s.handleChatAttachmentByID)))
 	}
