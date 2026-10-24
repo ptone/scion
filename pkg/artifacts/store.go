@@ -167,6 +167,18 @@ type Artifact struct {
 	// OrphanedAt is when the owner liveness reconciler found the owner
 	// gone, or nil while the owner is live (or was never checked).
 	OrphanedAt *time.Time
+	// SponsorRef is, for an artifact owned by an agent in a project scope,
+	// the id of the user at the root of the agent's recorded delegation
+	// chain when the artifact was created (ptone/scion#6028): the agent's
+	// delegating user, as SponsorRecorder answered at creation or the
+	// sponsor backfill recorded later for an older artifact. It is ""
+	// when nothing was recorded: a user-owned artifact, an attachment, an
+	// artifact created before sponsors were recorded and not backfilled,
+	// or one whose delegating user could not be resolved. The creation-time
+	// value stands: nothing updates a recorded value. It never gives
+	// access by itself; the steward and review clauses check the user
+	// again on every request.
+	SponsorRef string
 	// MessageProjectID is, for an attachment bound to a message, the project
 	// of that message as the hub derived it at bind time (ptone/scion#4596):
 	// nil while unknown (an unbound upload, or a row bound before migration
