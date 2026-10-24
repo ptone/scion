@@ -1001,6 +1001,12 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			log.Printf("Warning: failed to load settings; message broker is not started: %v", err)
 		}
 
+		// Watch the broker plugin sessions: a lost session is respawned
+		// (hub-managed) or re-dialled (self-managed) with backoff, and the
+		// plugin's fan-out spoke is then replaced (hooks wired by
+		// SetPluginManager).
+		pluginMgr.StartSupervisor(ctx)
+
 		hubSrv.StartNotificationDispatcher()
 		hubSrv.InitPresenceManager()
 	}

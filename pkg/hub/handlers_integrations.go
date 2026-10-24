@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -672,7 +673,7 @@ func (s *Server) handleUpdateIntegrationConfig(w http.ResponseWriter, r *http.Re
 			slog.Warn("Config saved but plugin activation failed (likely still missing required fields)",
 				"plugin", name, "error", err)
 		} else {
-			s.refreshBrokerSpoke(mgr, name)
+			_ = s.refreshBrokerSpoke(mgr, name) // logged inside
 			slog.Info("Plugin activated after config update", "plugin", name)
 		}
 	}
@@ -715,7 +716,7 @@ func (s *Server) handleRestartIntegration(w http.ResponseWriter, r *http.Request
 	// plugin process. The old spoke wraps a dead connection from the killed
 	// process. refreshBrokerSpoke replaces an existing spoke or adds a new
 	// one if none existed (e.g. first install before a full hub restart).
-	s.refreshBrokerSpoke(mgr, name)
+	_ = s.refreshBrokerSpoke(mgr, name) // logged inside; wiring is validated below
 
 	// Post-restart validation: check that the plugin is wired into the FanOut.
 	warnings := s.validateIntegrationWiring(name)
@@ -830,7 +831,7 @@ func (s *Server) handleUpdateIntegration(w http.ResponseWriter, r *http.Request,
 		slog.Warn("Plugin rebuilt but reconfigure failed", "plugin", name, "error", err)
 	}
 
-	s.refreshBrokerSpoke(mgr, name)
+	_ = s.refreshBrokerSpoke(mgr, name) // logged inside
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -1477,9 +1478,55 @@ func allSecretConfigKeys(name string) map[string]bool {
 	return keys
 }
 
+// brokerSupervisionWiring is implemented by plugin managers that supervise
+// broker plugin sessions (*plugin.Manager).
+type brokerSupervisionWiring interface {
+	SetBrokerConfigProvider(plugin.BrokerConfigProvider)
+	OnBrokerRestart(plugin.BrokerRestartHook)
+}
+
+// registerBrokerSupervision wires the plugin supervisor to the hub: a
+// restarted or re-dialled broker plugin is configured with the same merged
+// config an admin restart uses (file config, secrets, hub credentials),
+// and its fan-out spoke is then replaced, which replays the subscriptions.
+func (s *Server) registerBrokerSupervision(m IntegrationManager) {
+	w, ok := m.(brokerSupervisionWiring)
+	if !ok {
+		return
+	}
+	w.SetBrokerConfigProvider(func(ctx context.Context, name string) (map[string]string, error) {
+		return s.resolveIntegrationMergedConfig(ctx, m, name), nil
+	})
+	w.OnBrokerRestart(func(name string) error {
+		return s.refreshBrokerSpoke(m, name)
+	})
+}
+
+// brokerSupervisionReader is implemented by plugin managers that supervise
+// broker plugin sessions (*plugin.Manager).
+type brokerSupervisionReader interface {
+	BrokerSupervision(name string) (plugin.SupervisionStatus, bool)
+}
+
 // getIntegrationStatus queries health and info from the plugin manager.
+// A plugin whose session the supervisor reports lost is degraded (while a
+// restart is pending) or unhealthy (after repeated failed attempts) and not
+// connected, without calling the plugin.
 func getIntegrationStatus(mgr IntegrationManager, name string) *IntegrationStatus {
 	status := &IntegrationStatus{}
+
+	if sr, ok := mgr.(brokerSupervisionReader); ok {
+		if sup, ok := sr.BrokerSupervision(name); ok && sup.State != plugin.SupervisionRunning {
+			status.Health = HealthStatusDegraded
+			if sup.State == plugin.SupervisionFailing {
+				status.Health = HealthStatusUnhealthy
+			}
+			status.Connected = false
+			status.Message = fmt.Sprintf("plugin session lost; restarting (attempt %d, %d messages dropped this outage)",
+				sup.Attempt, sup.DroppedThisOutage)
+			return status
+		}
+	}
 
 	version, channelID, capabilities, err := mgr.BrokerInfo(name)
 	if err != nil {
@@ -1581,6 +1628,15 @@ func (s *Server) getPluginHubCreds(ctx context.Context, name string) map[string]
 				creds["project_slug_map"] = string(jsonBytes)
 			}
 		}
+	}
+
+	// transport_mode + transport_audience: so plugins can authenticate
+	// with IAP-protected hub endpoints, as injected at startup.
+	if s.transportMode != "" {
+		creds["transport_mode"] = s.transportMode
+	}
+	if s.transportAudience != "" {
+		creds["transport_audience"] = s.transportAudience
 	}
 
 	// database_driver + database_url: only for Postgres backends.
@@ -1734,29 +1790,35 @@ func (s *Server) ensureBrokerSpoke(mgr IntegrationManager, name string) {
 		ChannelID: channelID,
 	}
 	if err := fanout.AddSpoke(spoke); err != nil {
-		slog.Error("ensureBrokerSpoke: failed to add spoke", "plugin", name, "error", err)
+		// Either the spoke already exists, or it was added and replaying
+		// subscriptions onto it failed.
+		slog.Error("ensureBrokerSpoke: adding spoke failed or was incomplete", "plugin", name, "error", err)
 	} else {
 		slog.Info("Wired broker plugin as FanOut spoke after admin operation", "plugin", name)
 	}
 }
 
 // refreshBrokerSpoke replaces the stale fan-out eventbus spoke for a broker
-// plugin after its process has been restarted (e.g. UpdatePlugin). The old
-// spoke wraps a dead RPC connection; this swaps in a fresh one.
-func (s *Server) refreshBrokerSpoke(mgr IntegrationManager, name string) {
+// plugin after its process has been restarted (e.g. UpdatePlugin, or the
+// plugin supervisor after a lost session). The old spoke wraps a dead RPC
+// connection; this swaps in a fresh one and replays the fan-out
+// subscriptions onto it, which is what starts a chat plugin's gateway or
+// polling again. A replay failure is returned (and logged at ERROR); the
+// spoke is replaced either way.
+func (s *Server) refreshBrokerSpoke(mgr IntegrationManager, name string) error {
 	proxy := s.GetMessageBrokerProxy()
 	if proxy == nil {
-		return
+		return nil
 	}
 	fanout, ok := proxy.bus.(*eventbus.FanOutEventBus)
 	if !ok {
-		return
+		return nil
 	}
 
 	newBus, err := mgr.GetBroker(name)
 	if err != nil {
 		slog.Error("Failed to get broker for spoke refresh", "plugin", name, "error", err)
-		return
+		return fmt.Errorf("get broker %q: %w", name, err)
 	}
 
 	var observer bool
@@ -1777,18 +1839,24 @@ func (s *Server) refreshBrokerSpoke(mgr IntegrationManager, name string) {
 		Observer:  observer,
 		ChannelID: channelID,
 	}
-	if err := fanout.ReplaceSpoke(name, spoke); err != nil {
+	err = fanout.ReplaceSpoke(name, spoke)
+	if errors.Is(err, eventbus.ErrSpokeNotFound) {
 		// No existing spoke — the plugin was activated after startup (e.g. it
 		// failed to load at boot and was configured via the admin UI). Add it.
 		if addErr := fanout.AddSpoke(spoke); addErr != nil {
-			slog.Error("Failed to replace or add broker spoke", "plugin", name,
+			slog.Error("Failed to add broker spoke", "plugin", name,
 				"replace_error", err, "add_error", addErr)
-		} else {
-			slog.Info("Added broker spoke for newly activated plugin", "plugin", name)
+			return fmt.Errorf("add spoke %q: %w", name, addErr)
 		}
-	} else {
-		slog.Info("Replaced broker spoke after plugin restart", "plugin", name)
+		slog.Info("Added broker spoke for newly activated plugin", "plugin", name)
+		return nil
 	}
+	if err != nil {
+		slog.Error("Broker spoke replaced, but replaying subscriptions failed", "plugin", name, "error", err)
+		return err
+	}
+	slog.Info("Replaced broker spoke after plugin restart", "plugin", name)
+	return nil
 }
 
 // requirePostgres is a feature gate for Mode 3 (HA) endpoints that require
