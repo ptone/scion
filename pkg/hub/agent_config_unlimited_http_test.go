@@ -21,7 +21,9 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -292,9 +294,21 @@ func TestAgentPendingConfig_UnlimitedWaitsForCapableBroker(t *testing.T) {
 	}
 
 	t.Run("start fold", func(t *testing.T) {
-		srv, s, disp, agent := setup(t)
+		srv, s, disp, agent := heldEditsFixture(t, state.PhaseRunning)
+		// Count the fold's compare-and-set writes (UpdateAgentConfig), so the
+		// test tells the early return from an idempotent write. Installed
+		// before any request, so no background write races the swap.
+		writes, _ := installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *agentConfigWriteCounter {
+			return &agentConfigWriteCounter{Store: inner}
+		})
+		setBrokerCapabilities(t, s, agent.RuntimeBrokerID, &store.BrokerCapabilities{Reprovision: true, UnlimitedCountLimits: true})
+		patchPending(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{"max_turns": 0, "model": "held-model"}})
+		setBrokerCapabilities(t, s, agent.RuntimeBrokerID, &store.BrokerCapabilities{Reprovision: true})
+
 		pendingLifecycleWarnings(t, srv, agent.ID, "stop")
+		before := writes.n.Load()
 		warnings := pendingLifecycleWarnings(t, srv, agent.ID, "start")
+		assert.Equal(t, int64(1), writes.n.Load()-before, "the first start folds model in one compare-and-set write (positive control for the counter)")
 		starts := disp.snapshot()
 		require.Len(t, starts, 1)
 		assert.Equal(t, "held-model", starts[0].inline.Model)
@@ -317,7 +331,9 @@ func TestAgentPendingConfig_UnlimitedWaitsForCapableBroker(t *testing.T) {
 		// warning is repeated, and max_turns stays out of the
 		// held-for-reincarnation warning.
 		pendingLifecycleWarnings(t, srv, agent.ID, "stop")
+		before = writes.n.Load()
 		warnings = pendingLifecycleWarnings(t, srv, agent.ID, "start")
+		assert.Equal(t, int64(0), writes.n.Load()-before, "the early return makes no compare-and-set write")
 		starts = disp.snapshot()
 		require.Len(t, starts, 2)
 		assert.Equal(t, "held-model", starts[1].inline.Model)
@@ -328,8 +344,14 @@ func TestAgentPendingConfig_UnlimitedWaitsForCapableBroker(t *testing.T) {
 		require.NotNil(t, again.PendingConfig)
 		assert.Equal(t, stored.PendingConfig.Config, again.PendingConfig.Config, "the early return writes no pending change")
 		assert.Equal(t, api.IntPtr(3), again.AppliedConfig.InlineConfig.MaxTurns)
-		applied = pendingAudits(t, s, agent.ID, mutationTypeAgentPendingConfigApplied, 1)
-		assert.Len(t, applied, 1, "the early return records no application")
+		// Audits are written asynchronously, so wait out a window in which
+		// a second "applied" record would land, rather than reading once.
+		assert.Never(t, func() bool {
+			recs, _, err := s.ListMutationAudits(context.Background(), store.MutationAuditFilter{
+				MutationType: mutationTypeAgentPendingConfigApplied, TargetID: agent.ID, Limit: 20,
+			})
+			return err != nil || len(recs) != 1
+		}, 500*time.Millisecond, 20*time.Millisecond, "the early return records no application (exactly one applied audit)")
 	})
 
 	t.Run("no-container PATCH fold", func(t *testing.T) {
@@ -412,18 +434,26 @@ func TestAgentConfigPatch_RetiredConfigureBodyMeansUnlimited(t *testing.T) {
 }
 
 // assertNoHeldForReincarnate checks that no warning is the
-// held-for-reincarnation one and, in particular, that none names label (the
-// warning's form of a key, e.g. "max turns" for config.max_turns). The
-// positive control pins that form, so the label check cannot pass vacuously.
+// held-for-reincarnation one, so none names label (the warning's form of a
+// key, e.g. "max turns" for config.max_turns). The positive control builds
+// that warning for label with the production formatter, so a change of its
+// form fails here instead of letting the check pass vacuously.
 func assertNoHeldForReincarnate(t *testing.T, warnings []string, label string) {
 	t.Helper()
 	require.Contains(t, heldForReincarnateWarning([]string{"config." + strings.ReplaceAll(label, " ", "_")}), heldReincarnateWarningPrefix+label)
-	for _, w := range warnings {
-		if strings.HasPrefix(w, heldReincarnateWarningPrefix) {
-			assert.NotContains(t, w, label, "held-for-reincarnation warning: %q", w)
-		}
-	}
 	assert.False(t, containsSubstring(warnings, heldReincarnateWarningPrefix), "%v", warnings)
+}
+
+// agentConfigWriteCounter counts UpdateAgentConfig calls (the pending
+// fold's and the discard's compare-and-set write) and changes nothing else.
+type agentConfigWriteCounter struct {
+	store.Store
+	n atomic.Int64
+}
+
+func (c *agentConfigWriteCounter) UpdateAgentConfig(ctx context.Context, agentID string, expectedVersion int64, applied *store.AgentAppliedConfig, pending *store.AgentPendingConfig) (int64, error) {
+	c.n.Add(1)
+	return c.Store.UpdateAgentConfig(ctx, agentID, expectedVersion, applied, pending)
 }
 
 // containsSubstring reports whether any of list contains sub.

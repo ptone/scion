@@ -79,26 +79,26 @@ func TestUnlimitedCountRefusal(t *testing.T) {
 	assert.Nil(t, got)
 }
 
-// brokerReadFaultStore makes runtime broker reads fail with a store error
+// brokerReadSwitchStore makes runtime broker reads fail with a store error
 // (not "not found") once its switch is armed; before that it delegates.
-type brokerReadFaultStore struct {
+type brokerReadSwitchStore struct {
 	store.Store
 	fault *storeFaultSwitch
 }
 
-func (b *brokerReadFaultStore) GetRuntimeBroker(ctx context.Context, id string) (*store.RuntimeBroker, error) {
+func (b *brokerReadSwitchStore) GetRuntimeBroker(ctx context.Context, id string) (*store.RuntimeBroker, error) {
 	if !b.fault.Active() {
 		return b.Store.GetRuntimeBroker(ctx, id)
 	}
 	return nil, errors.New("store unavailable")
 }
 
-// installBrokerReadFault installs brokerReadFaultStore on srv through the
+// installBrokerReadFault installs brokerReadSwitchStore on srv through the
 // store fault switch (no srv.store reassignment in the test).
-func installBrokerReadFault(t *testing.T, srv *Server) (*brokerReadFaultStore, *storeFaultSwitch) {
+func installBrokerReadFault(t *testing.T, srv *Server) (*brokerReadSwitchStore, *storeFaultSwitch) {
 	t.Helper()
-	return installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *brokerReadFaultStore {
-		return &brokerReadFaultStore{Store: inner, fault: f}
+	return installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *brokerReadSwitchStore {
+		return &brokerReadSwitchStore{Store: inner, fault: f}
 	})
 }
 
