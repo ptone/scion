@@ -465,6 +465,12 @@ type fillProbeDispatcher struct {
 	// and on the agent handed to the dispatch, at dispatch time.
 	storedHash     string
 	dispatchedHash string
+	// storedVersion is the agent row's state version at dispatch time;
+	// storedModel and dispatchedModel are the inline model on the row and on
+	// the dispatched agent (a held edit folded at start, ptone/scion#3976).
+	storedVersion   int64
+	storedModel     string
+	dispatchedModel string
 	// stops counts stop dispatches (a restart's stop leg).
 	stops int
 }
@@ -481,11 +487,18 @@ func (d *fillProbeDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		return err
 	}
 	d.storedBroker = row.RuntimeBrokerID
+	d.storedVersion = row.StateVersion
 	if row.AppliedConfig != nil {
 		d.storedHash = row.AppliedConfig.TemplateHash
+		if row.AppliedConfig.InlineConfig != nil {
+			d.storedModel = row.AppliedConfig.InlineConfig.Model
+		}
 	}
 	if agent.AppliedConfig != nil {
 		d.dispatchedHash = agent.AppliedConfig.TemplateHash
+		if agent.AppliedConfig.InlineConfig != nil {
+			d.dispatchedModel = agent.AppliedConfig.InlineConfig.Model
+		}
 	}
 	// The gate reads the template's current row, as the hub does.
 	tmpl, err := d.srv.store.GetTemplate(ctx, d.tmpl.ID)
@@ -1266,7 +1279,7 @@ func TestRepin_NothingToRepin_NoWrite(t *testing.T) {
 
 // A concurrent write to the agent between the handler's read and the
 // re-pin makes the re-pin's compare-and-set fail: the start, restart or
-// resume answers 409 version_conflict, nothing is dispatched (a restart
+// resume answers 409 template_pin_conflict, nothing is dispatched (a restart
 // does not even stop the agent), and the concurrent write survives.
 func TestRepin_ConcurrentWrite_409NoDispatch(t *testing.T) {
 	for _, p := range repinPaths {
@@ -1280,7 +1293,7 @@ func TestRepin_ConcurrentWrite_409NoDispatch(t *testing.T) {
 			fault.Arm()
 
 			rec := p.run(t, f, a)
-			requireAPIError(t, rec, http.StatusConflict, ErrCodeVersionConflict)
+			requireAPIError(t, rec, http.StatusConflict, ErrCodeTemplatePinConflict)
 			assert.Zero(t, f.disp.starts, "nothing is dispatched")
 			assert.Zero(t, f.disp.stops, "a restart does not stop the agent")
 			assert.True(t, racing.raced, "the concurrent write ran")
@@ -1363,7 +1376,7 @@ func requireWakeReadinessTimeout(t *testing.T, dmErr *AgentDMError) {
 }
 
 // A direct-message wake re-pins like a start, and a lost compare-and-set
-// answers the sender 409 version_conflict with nothing dispatched.
+// answers the sender 409 template_pin_conflict with nothing dispatched.
 func TestRepin_Wake(t *testing.T) {
 	ctx := context.Background()
 	// The fake dispatcher never reports the woken agent ready, so the
@@ -1399,7 +1412,7 @@ func TestRepin_Wake(t *testing.T) {
 		_, dmErr := f.srv.wakeAgentForDM(ctx, cur)
 		require.NotNil(t, dmErr)
 		assert.Equal(t, http.StatusConflict, dmErr.HTTPStatus)
-		assert.Equal(t, ErrCodeVersionConflict, dmErr.Code)
+		assert.Equal(t, ErrCodeTemplatePinConflict, dmErr.Code)
 		assert.Zero(t, f.disp.starts, "nothing is dispatched")
 		got, err := f.store.GetAgent(ctx, a.ID)
 		require.NoError(t, err)
@@ -1434,4 +1447,283 @@ func TestDispatchBoundRead_AnyPhaseReads_SoftDeletedRefused(t *testing.T) {
 	gone.DeletedAt = time.Now()
 	require.NoError(t, f.store.UpdateAgent(ctx, gone))
 	assert.Equal(t, http.StatusNotFound, f.asBroker(t, http.MethodGet, templateGetFor(f.userTmpl.ID, gone.ID)).Code)
+}
+
+// ============================================================================
+// The re-pin and the held-edit fold at start (ptone/scion#5770, after
+// upstream ptone/scion#3976): under the start claim the fold runs
+// first, then the re-pin compares and sets on the state version the fold
+// refreshed. Every test here turns held edits on.
+// ============================================================================
+
+const heldModel = "held-model"
+
+// holdModelEdit stores a pending (held) edit of config.model on the agent
+// and returns the agent row as stored.
+func (f *resumeFillFixture) holdModelEdit(t *testing.T, a *store.Agent) *store.Agent {
+	t.Helper()
+	ctx := context.Background()
+	cur, err := f.store.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	pending := &store.AgentPendingConfig{
+		Config:           map[string]json.RawMessage{"model": json.RawMessage(strconv.Quote(heldModel))},
+		SavedBy:          f.owner.ID,
+		SavedAt:          time.Now(),
+		BaseStateVersion: cur.StateVersion,
+	}
+	_, err = f.store.UpdateAgentConfig(ctx, cur.ID, cur.StateVersion, cur.AppliedConfig, pending)
+	require.NoError(t, err)
+	got, err := f.store.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	require.False(t, got.PendingConfig.IsEmpty(), "fixture: the edit is held")
+	return got
+}
+
+// requireFolded asserts the held model edit was applied to the row and
+// removed from its pending config.
+func requireFolded(t *testing.T, got *store.Agent) {
+	t.Helper()
+	require.NotNil(t, got.AppliedConfig)
+	require.NotNil(t, got.AppliedConfig.InlineConfig)
+	assert.Equal(t, heldModel, got.AppliedConfig.InlineConfig.Model, "the held edit is applied")
+	if got.PendingConfig != nil {
+		assert.NotContains(t, got.PendingConfig.Config, "model", "the applied key leaves the pending config")
+	}
+}
+
+// A held edit and a template edit, then a start: the fold applies the held
+// edit and the re-pin records the current hash on the version the fold
+// refreshed; the dispatch carries both.
+func TestRepin_AfterHeldFold_PinsAndDispatchesFolded(t *testing.T) {
+	f := setupResumeFill(t)
+	setHeldEditsExperiment(t, f.srv, true)
+	a := f.userTemplateAgent(t, "repin-fold", string(state.PhaseStopped), f.broker.ID)
+	held := f.holdModelEdit(t, a)
+	f.editTemplate(t, repinNewHash)
+
+	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil)
+	require.Less(t, rec.Code, 300, rec.Body.String())
+	require.Equal(t, 1, f.disp.starts)
+	assert.Equal(t, held.StateVersion+2, f.disp.storedVersion, "the fold, then the re-pin, each move the row once before the dispatch")
+	assert.Equal(t, repinNewHash, f.disp.storedHash)
+	assert.Equal(t, repinNewHash, f.disp.dispatchedHash)
+	assert.Equal(t, heldModel, f.disp.storedModel)
+	assert.Equal(t, heldModel, f.disp.dispatchedModel, "the dispatch carries the folded edit")
+	got, err := f.store.GetAgent(context.Background(), a.ID)
+	require.NoError(t, err)
+	requireFolded(t, got)
+	assert.Equal(t, repinNewHash, got.AppliedConfig.TemplateHash)
+}
+
+// The same with a synchronous restart: the restart re-pins before its stop
+// leg, its start leg folds, and the start leg's own re-pin finds the hash
+// current and writes nothing.
+func TestRepin_RestartWithHeldFold(t *testing.T) {
+	f := setupResumeFill(t)
+	setHeldEditsExperiment(t, f.srv, true)
+	a := f.userTemplateAgent(t, "repin-fold-restart", string(state.PhaseRunning), f.broker.ID)
+	held := f.holdModelEdit(t, a)
+	f.editTemplate(t, repinNewHash)
+
+	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents/"+a.ID+"/restart", nil)
+	require.Less(t, rec.Code, 300, rec.Body.String())
+	require.Equal(t, 1, f.disp.stops)
+	require.Equal(t, 1, f.disp.starts)
+	assert.Equal(t, held.StateVersion+2, f.disp.storedVersion, "the pre-stop re-pin and the fold each move the row once; the start leg's re-pin writes nothing")
+	assert.Equal(t, repinNewHash, f.disp.storedHash)
+	assert.Equal(t, repinNewHash, f.disp.dispatchedHash)
+	assert.Equal(t, heldModel, f.disp.dispatchedModel)
+	got, err := f.store.GetAgent(context.Background(), a.ID)
+	require.NoError(t, err)
+	requireFolded(t, got)
+	assert.Equal(t, repinNewHash, got.AppliedConfig.TemplateHash)
+}
+
+// The template has no PATCH surface: a PATCH naming it, at the top level or
+// inside config, changes neither the template identity nor the pending
+// config, so no held edit can carry a template change.
+func TestHeldEdit_TemplateHasNoPatchSurface(t *testing.T) {
+	f := setupResumeFill(t)
+	setHeldEditsExperiment(t, f.srv, true)
+	a := f.userTemplateAgent(t, "repin-tmpl-patch", string(state.PhaseRunning), f.broker.ID)
+	body := map[string]interface{}{
+		"template":     "other-template",
+		"config":       map[string]interface{}{"template": "other-template"},
+		"stateVersion": a.StateVersion,
+	}
+	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPatch, "/api/v1/agents/"+a.ID, body)
+	// The status upstream returns for this body (captured from a run; no
+	// refusal is asserted).
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	got, err := f.store.GetAgent(context.Background(), a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, f.tmpl.ID, got.AppliedConfig.TemplateID, "the template identity is unchanged")
+	assert.Equal(t, dispatchReadHash, got.AppliedConfig.TemplateHash, "the template hash is unchanged")
+	if got.PendingConfig != nil {
+		assert.NotContains(t, got.PendingConfig.Config, "template", "no template key is held")
+	}
+}
+
+// A start of a running agent (not a restart) keeps its container, so its
+// held edits stay held, but it still hydrates the template for its env
+// fallback: the re-pin runs, so the broker's read with the current hash is
+// allowed.
+func TestRepin_RunningStart_NoFold_StillRepins(t *testing.T) {
+	t.Run("precondition: a container-creating start folds", func(t *testing.T) {
+		f := setupResumeFill(t)
+		setHeldEditsExperiment(t, f.srv, true)
+		a := f.userTemplateAgent(t, "repin-nofold-pre", string(state.PhaseStopped), f.broker.ID)
+		f.holdModelEdit(t, a)
+		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil)
+		require.Less(t, rec.Code, 300, rec.Body.String())
+		got, err := f.store.GetAgent(context.Background(), a.ID)
+		require.NoError(t, err)
+		requireFolded(t, got)
+	})
+	t.Run("running start", func(t *testing.T) {
+		f := setupResumeFill(t)
+		setHeldEditsExperiment(t, f.srv, true)
+		a := f.userTemplateAgent(t, "repin-nofold", string(state.PhaseRunning), f.broker.ID)
+		f.holdModelEdit(t, a)
+		f.editTemplate(t, repinNewHash)
+
+		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil)
+		require.Less(t, rec.Code, 300, rec.Body.String())
+		require.Equal(t, 1, f.disp.starts)
+		assert.Equal(t, repinNewHash, f.disp.storedHash, "the re-pin runs on a container-keeping start")
+		assert.True(t, f.disp.storedAllowed, "the broker's read with the current hash is allowed")
+		got, err := f.store.GetAgent(context.Background(), a.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got.PendingConfig)
+		assert.Contains(t, got.PendingConfig.Config, "model", "a container-keeping start leaves its held edits held")
+	})
+}
+
+// staleBeforeFoldStore commits another writer's whole-row update at the
+// fold's first UpdateAgentConfig and answers that call with a version
+// conflict, so the fold retries on the newer row and commits without
+// refreshing the caller's copy: the caller is stale for the re-pin.
+type staleBeforeFoldStore struct {
+	store.Store
+	fault *storeFaultSwitch
+	raced bool
+}
+
+func (r *staleBeforeFoldStore) UpdateAgentConfig(ctx context.Context, agentID string, expectedVersion int64, applied *store.AgentAppliedConfig, pending *store.AgentPendingConfig) (int64, error) {
+	if r.fault.Active() && !r.raced {
+		r.raced = true
+		cur, err := r.Store.GetAgent(ctx, agentID)
+		if err != nil {
+			return 0, err
+		}
+		cur.Message = "concurrent write"
+		if err := r.Store.UpdateAgent(ctx, cur); err != nil {
+			return 0, err
+		}
+		return 0, store.ErrVersionConflict
+	}
+	return r.Store.UpdateAgentConfig(ctx, agentID, expectedVersion, applied, pending)
+}
+
+// A caller made stale before the fold, with a template edit: the fold
+// commits the held edit, then the re-pin loses its compare-and-set on the
+// caller's version: 409 template_pin_conflict, nothing dispatched, the
+// claim released, and a retry starts.
+func TestRepin_StaleCaller_FoldCommitted_409TemplatePinConflict(t *testing.T) {
+	f := setupResumeFill(t)
+	setHeldEditsExperiment(t, f.srv, true)
+	a := f.userTemplateAgent(t, "repin-stale-fold", string(state.PhaseStopped), f.broker.ID)
+	f.holdModelEdit(t, a)
+	f.editTemplate(t, repinNewHash)
+	racing, fault := installStoreFault(t, f.srv, func(inner store.Store, fault *storeFaultSwitch) *staleBeforeFoldStore {
+		return &staleBeforeFoldStore{Store: inner, fault: fault}
+	})
+	fault.Arm()
+
+	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil)
+	requireAPIError(t, rec, http.StatusConflict, ErrCodeTemplatePinConflict)
+	assert.True(t, racing.raced, "the concurrent write ran before the fold")
+	assert.Zero(t, f.disp.starts, "nothing is dispatched")
+	got, err := f.store.GetAgent(context.Background(), a.ID)
+	require.NoError(t, err)
+	requireFolded(t, got)
+	assert.Equal(t, "concurrent write", got.Message)
+	assert.Equal(t, dispatchReadHash, got.AppliedConfig.TemplateHash, "nothing is re-recorded")
+	assert.Empty(t, got.StartClaimID, "the refused start releases its start claim")
+
+	rec = doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil)
+	require.Less(t, rec.Code, 300, "the retry starts: %s", rec.Body.String())
+	assert.Equal(t, 1, f.disp.starts)
+	assert.Equal(t, repinNewHash, f.disp.storedHash)
+}
+
+// A write racing the re-pin after the fold refreshed the caller: the fold's
+// edit is committed and the re-pin loses: 409 template_pin_conflict with
+// nothing dispatched.
+func TestRepin_RaceAfterFold_409(t *testing.T) {
+	f := setupResumeFill(t)
+	setHeldEditsExperiment(t, f.srv, true)
+	a := f.userTemplateAgent(t, "repin-race-fold", string(state.PhaseStopped), f.broker.ID)
+	f.holdModelEdit(t, a)
+	f.editTemplate(t, repinNewHash)
+	racing, fault := installStoreFault(t, f.srv, func(inner store.Store, fault *storeFaultSwitch) *racingPinWriteStore {
+		return &racingPinWriteStore{Store: inner, fault: fault}
+	})
+	fault.Arm()
+
+	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil)
+	requireAPIError(t, rec, http.StatusConflict, ErrCodeTemplatePinConflict)
+	assert.True(t, racing.raced)
+	assert.Zero(t, f.disp.starts, "nothing is dispatched")
+	got, err := f.store.GetAgent(context.Background(), a.ID)
+	require.NoError(t, err)
+	requireFolded(t, got)
+	assert.Equal(t, dispatchReadHash, got.AppliedConfig.TemplateHash)
+	assert.Empty(t, got.StartClaimID)
+}
+
+// foldConflictStore answers the first pendingFoldAttempts UpdateAgentConfig
+// calls with a version conflict once its switch is armed, so one start's
+// fold exhausts its attempts; later calls pass through.
+type foldConflictStore struct {
+	store.Store
+	fault *storeFaultSwitch
+	calls int
+}
+
+func (r *foldConflictStore) UpdateAgentConfig(ctx context.Context, agentID string, expectedVersion int64, applied *store.AgentAppliedConfig, pending *store.AgentPendingConfig) (int64, error) {
+	if r.fault.Active() && r.calls < pendingFoldAttempts {
+		r.calls++
+		return 0, store.ErrVersionConflict
+	}
+	return r.Store.UpdateAgentConfig(ctx, agentID, expectedVersion, applied, pending)
+}
+
+// The fold giving up after its compare-and-set attempts keeps upstream's
+// answer, 502 runtime_error; the claim is released and nothing is
+// dispatched, so the next start is not refused.
+func TestStart_FoldExhausted_502RuntimeError_Released(t *testing.T) {
+	f := setupResumeFill(t)
+	setHeldEditsExperiment(t, f.srv, true)
+	a := f.userTemplateAgent(t, "repin-fold-exhausted", string(state.PhaseStopped), f.broker.ID)
+	f.holdModelEdit(t, a)
+	conflicts, fault := installStoreFault(t, f.srv, func(inner store.Store, fault *storeFaultSwitch) *foldConflictStore {
+		return &foldConflictStore{Store: inner, fault: fault}
+	})
+	fault.Arm()
+
+	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil)
+	requireAPIError(t, rec, http.StatusBadGateway, ErrCodeRuntimeError)
+	assert.Equal(t, pendingFoldAttempts, conflicts.calls, "the fold tried each of its attempts")
+	assert.Zero(t, f.disp.starts, "nothing is dispatched")
+	got, err := f.store.GetAgent(context.Background(), a.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got.StartClaimID, "the refused start releases its start claim")
+	require.NotNil(t, got.PendingConfig)
+	assert.Contains(t, got.PendingConfig.Config, "model", "nothing was folded")
+
+	// The wrapper conflicts only for those attempts.
+	rec = doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil)
+	require.Less(t, rec.Code, 300, "the next start is not refused by a held claim: %s", rec.Body.String())
+	assert.Equal(t, 1, f.disp.starts)
 }
