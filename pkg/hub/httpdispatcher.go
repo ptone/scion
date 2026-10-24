@@ -798,18 +798,21 @@ func agentNoAuth(agent *store.Agent) bool {
 // clone-per-agent workspaces, and without it a no-auth agent's git clone
 // fails (#1165). The project-scoped token is tried first, then the owner's
 // user-scoped token, mirroring the cascade in resolveCloneToken. A lookup
-// error is logged and treated as absence.
+// error, or a token noAuthGitHubTokenDeliverable rejects, is treated as
+// absence.
 func (d *HTTPAgentDispatcher) injectNoAuthGitHubToken(ctx context.Context, agent *store.Agent, env map[string]string, classifications *map[string]api.EnvKind) {
 	if agent.ProjectID == "" || d.secretBackend == nil {
 		return
 	}
+	delivered := false
 	ghSecret, err := d.secretBackend.Get(ctx, "GITHUB_TOKEN", secret.ScopeProject, agent.ProjectID)
 	if err != nil {
 		if d.debug {
 			d.log.Debug("NoAuth: failed to resolve GITHUB_TOKEN from project secrets",
 				"agent_id", agent.ID, "project_id", agent.ProjectID, "error", err)
 		}
-	} else if ghSecret != nil && ghSecret.Value != "" {
+	} else if d.noAuthGitHubTokenDeliverable(ctx, agent, ghSecret) {
+		delivered = true
 		env["GITHUB_TOKEN"] = ghSecret.Value
 		// From secret store → secret-fetchable.
 		classifyEnv(classifications, "GITHUB_TOKEN", api.EnvKindSecretFetchable)
@@ -820,16 +823,16 @@ func (d *HTTPAgentDispatcher) injectNoAuthGitHubToken(ctx context.Context, agent
 	}
 
 	// Fall back to the creating user's profile-level GITHUB_TOKEN. Users who
-	// store GITHUB_TOKEN at user/profile scope only (no project-scoped token)
-	// would otherwise still have no token (#1165).
-	if (ghSecret == nil || ghSecret.Value == "") && agent.OwnerID != "" {
+	// store GITHUB_TOKEN at user/profile scope only (no deliverable
+	// project-scoped token) would otherwise still have no token (#1165).
+	if !delivered && agent.OwnerID != "" {
 		ghSecret, err = d.secretBackend.Get(ctx, "GITHUB_TOKEN", secret.ScopeUser, agent.OwnerID)
 		if err != nil {
 			if d.debug {
 				d.log.Debug("NoAuth: failed to resolve GITHUB_TOKEN from user secrets",
 					"agent_id", agent.ID, "owner_id", agent.OwnerID, "error", err)
 			}
-		} else if ghSecret != nil && ghSecret.Value != "" {
+		} else if d.noAuthGitHubTokenDeliverable(ctx, agent, ghSecret) {
 			env["GITHUB_TOKEN"] = ghSecret.Value
 			// From secret store → secret-fetchable.
 			classifyEnv(classifications, "GITHUB_TOKEN", api.EnvKindSecretFetchable)
@@ -839,6 +842,45 @@ func (d *HTTPAgentDispatcher) injectNoAuthGitHubToken(ctx context.Context, agent
 			}
 		}
 	}
+}
+
+// isEnvSecretType reports whether t is the environment secret type (an
+// empty type counts as environment).
+func isEnvSecretType(t string) bool {
+	return t == store.SecretTypeEnvironment || t == ""
+}
+
+// reservedTargetEnvSecret reports whether sv is an environment-type secret
+// whose target is reserved for scion's own control-plane env vars;
+// resolveSecrets drops such secrets.
+func reservedTargetEnvSecret(sv secret.SecretWithValue) bool {
+	return isEnvSecretType(sv.SecretType) && secret.IsReservedEnvTarget(sv.Target)
+}
+
+// deferredAsNeeded reports whether sv is an as-needed environment-type
+// secret, which resolveSecrets leaves to the as-needed pass instead of
+// delivering it.
+func deferredAsNeeded(sv secret.SecretWithValue) bool {
+	return sv.InjectionMode == store.InjectionModeAsNeeded && isEnvSecretType(sv.SecretType)
+}
+
+// noAuthGitHubTokenDeliverable reports whether sv, a secret named
+// GITHUB_TOKEN read by name for a no-auth agent, is one normal resolution
+// would deliver as env["GITHUB_TOKEN"]: resolveSecrets keeps it (not a
+// reserved target, not deferred as needed, a scope the test-admin policy
+// allows) and the first-pass env merge places it under GITHUB_TOKEN (an
+// environment-type secret whose target is GITHUB_TOKEN).
+func (d *HTTPAgentDispatcher) noAuthGitHubTokenDeliverable(ctx context.Context, agent *store.Agent, sv *secret.SecretWithValue) bool {
+	if sv == nil || sv.Value == "" {
+		return false
+	}
+	if !isEnvSecretType(sv.SecretType) || sv.Target != "GITHUB_TOKEN" {
+		return false
+	}
+	if reservedTargetEnvSecret(*sv) || deferredAsNeeded(*sv) {
+		return false
+	}
+	return len(d.restrictTestAdminRootedSecrets(ctx, agent, []secret.SecretWithValue{*sv})) == 1
 }
 
 // buildCreateRequest is buildCreateRequestFor with
@@ -5249,7 +5291,7 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 		// drop any environment-type secret whose target is reserved for
 		// scion's own control-plane env vars before it is attached to the
 		// dispatch request at all, in either injection mode.
-		if (sv.SecretType == store.SecretTypeEnvironment || sv.SecretType == "") && secret.IsReservedEnvTarget(sv.Target) {
+		if reservedTargetEnvSecret(sv) {
 			if d.debug {
 				d.log.Debug("resolveSecrets: dropping reserved-target secret", "name", sv.Name, "target", sv.Target, "scope", sv.Scope)
 			}
@@ -5259,7 +5301,7 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 		// two-pass env-gather flow). File-type and variable-type secrets
 		// should always be placed regardless of injection mode — the
 		// as_needed concept does not apply to them.
-		if sv.InjectionMode == store.InjectionModeAsNeeded && (sv.SecretType == store.SecretTypeEnvironment || sv.SecretType == "") {
+		if deferredAsNeeded(sv) {
 			// Collect the target key name so the broker's autodetect can
 			// consider it when selecting auth type (closes #1447).
 			target := sv.Target
