@@ -26,6 +26,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/urlorigin"
 )
 
 // Transport provides HTTP transport with standard behaviors.
@@ -86,6 +88,9 @@ func WithAuth(auth Authenticator) TransportOption {
 }
 
 // NewTransport creates a new Transport with the given base URL and options.
+// The base URL host is written in ASCII, with an internationalized name in
+// its punycode form: a host with a non-ASCII byte has no origin, so no
+// request is treated as a request to the hub.
 func NewTransport(baseURL string, opts ...TransportOption) *Transport {
 	t := &Transport{
 		BaseURL: strings.TrimSuffix(baseURL, "/"),
@@ -443,28 +448,17 @@ func parseOrigin(rawURL string) origin {
 	return o
 }
 
-// originOf returns the origin of u, with the host lower-cased (url.Parse
-// already lower-cases the scheme) and the default port (80 for http, 443 for
-// https) filled in when u has none.
+// originOf returns the origin of u as urlorigin.Of gives it (host
+// lower-cased, default port 80 for http and 443 for https filled in), for an
+// http or https URL. ok is false for any other scheme, for a URL with no host
+// and for a host with a non-ASCII byte, which is never the hub origin, so a
+// redirect hop to such a host has the cross-origin headers removed.
 func originOf(u *url.URL) (o origin, ok bool) {
-	if u == nil {
+	so, ok := urlorigin.Of(u)
+	if !ok || (so.Scheme != "http" && so.Scheme != "https") {
 		return origin{}, false
 	}
-	o.scheme = u.Scheme
-	o.host = strings.ToLower(u.Hostname())
-	o.port = u.Port()
-	if o.port == "" {
-		switch o.scheme {
-		case "http":
-			o.port = "80"
-		case "https":
-			o.port = "443"
-		}
-	}
-	if (o.scheme != "http" && o.scheme != "https") || o.host == "" {
-		return origin{}, false
-	}
-	return o, true
+	return origin{scheme: so.Scheme, host: so.Host, port: so.Port}, true
 }
 
 // sameOrigin reports whether u has the origin want.

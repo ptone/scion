@@ -185,7 +185,9 @@ type client struct {
 	testIdentityDelegs    *testIdentityDelegationService
 }
 
-// New creates a new Hub API client.
+// New creates a new Hub API client. The base URL host is written in ASCII,
+// with an internationalized name in its punycode form (see
+// apiclient.NewTransport).
 func New(baseURL string, opts ...Option) (Client, error) {
 	c := &client{
 		transport: apiclient.NewTransport(baseURL),

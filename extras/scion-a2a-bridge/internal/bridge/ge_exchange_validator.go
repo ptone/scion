@@ -128,10 +128,12 @@ func WithGETransportAuth(src transportauth.TokenSource, mode transportauth.Heade
 	}
 }
 
-// WithGEHTTPClient overrides the HTTP client (for testing).
+// WithGEHTTPClient overrides the HTTP client (for testing). The validator
+// uses a copy of client, so client itself is left as it is.
 func WithGEHTTPClient(client *http.Client) GEValidatorOption {
 	return func(v *GEExchangeValidator) {
-		v.httpClient = client
+		c := *client
+		v.httpClient = &c
 	}
 }
 
@@ -164,21 +166,55 @@ func NewGEExchangeValidator(hubEndpoint string, cfg GEExchangeConfig, log *slog.
 		opt(v)
 	}
 
-	// Compose transport auth into the HTTP client's transport if configured.
+	// Compose transport auth into the HTTP client's transport if configured,
+	// inside the hub origin transport.
+	inner := unwrapHubOrigin(v.httpClient.Transport)
 	if v.transportSrc != nil {
-		base := http.DefaultTransport
-		if v.httpClient.Transport != nil {
-			base = v.httpClient.Transport
+		if inner == nil {
+			inner = http.DefaultTransport
 		}
-		v.httpClient.Transport = transportauth.Wrap(base, v.transportSrc, v.transportMode)
+		inner = transportauth.Wrap(inner, v.transportSrc, v.transportMode)
 	}
+	v.setHubOriginTransport(inner)
 
 	return v
 }
 
-// SetHTTPClient sets a custom HTTP client (for testing).
+// setHubOriginTransport makes a hubOriginTransport around inner the HTTP
+// client's outermost transport, so that the client sends requests only to
+// the hub origin: a redirect within it is followed, any other is refused
+// before inner (and any transport auth it adds) sees it.
+func (v *GEExchangeValidator) setHubOriginTransport(inner http.RoundTripper) {
+	v.httpClient.Transport = newHubOriginTransport(inner, v.hubEndpoint)
+}
+
+// unwrapHubOrigin returns t without its outer hubOriginTransport layers.
+func unwrapHubOrigin(t http.RoundTripper) http.RoundTripper {
+	for {
+		guard, ok := t.(*hubOriginTransport)
+		if !ok {
+			return t
+		}
+		t = guard.base
+	}
+}
+
+// innerTransport returns the HTTP client's transport inside its
+// hubOriginTransport, or http.DefaultTransport when it has none.
+func (v *GEExchangeValidator) innerTransport() http.RoundTripper {
+	if t := unwrapHubOrigin(v.httpClient.Transport); t != nil {
+		return t
+	}
+	return http.DefaultTransport
+}
+
+// SetHTTPClient sets a custom HTTP client (for testing). The validator uses a
+// copy of client, given the same hub origin transport as the default one, so
+// client itself is left as it is.
 func (v *GEExchangeValidator) SetHTTPClient(client *http.Client) {
-	v.httpClient = client
+	c := *client
+	v.httpClient = &c
+	v.setHubOriginTransport(unwrapHubOrigin(c.Transport))
 }
 
 // SetTransportAuth applies transport auth (Cloud Run / IAP invoker headers)
@@ -186,11 +222,7 @@ func (v *GEExchangeValidator) SetHTTPClient(client *http.Client) {
 func (v *GEExchangeValidator) SetTransportAuth(src transportauth.TokenSource, mode transportauth.HeaderMode) {
 	v.transportSrc = src
 	v.transportMode = mode
-	base := http.DefaultTransport
-	if v.httpClient.Transport != nil {
-		base = v.httpClient.Transport
-	}
-	v.httpClient.Transport = transportauth.Wrap(base, src, mode)
+	v.setHubOriginTransport(transportauth.Wrap(v.innerTransport(), src, mode))
 }
 
 // InvalidateCache increments the config version, causing all existing cache
@@ -275,7 +307,9 @@ func (v *GEExchangeValidator) exchange(ctx context.Context, credential string, c
 
 	resp, err := v.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("exchange request failed: %w", err)
+		// The url.Error text quotes the request URL or a refused redirect
+		// target; errors.Is still matches errHubOtherOrigin.
+		return nil, fmt.Errorf("exchange request failed: %w", errWithoutURL(err))
 	}
 	defer resp.Body.Close()
 

@@ -70,8 +70,11 @@ func NewUATValidator(hubEndpoint string, ttl time.Duration) *UATValidator {
 	}
 	return &UATValidator{
 		hubEndpoint: hubEndpoint,
+		// The client sends requests only to the hub origin; a redirect
+		// within it is followed, any other is refused.
 		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
+			Transport: newHubOriginTransport(nil, hubEndpoint),
+			Timeout:   10 * time.Second,
 		},
 		ttl:   ttl,
 		cache: make(map[[32]byte]*uatCacheEntry),
@@ -105,7 +108,9 @@ func (v *UATValidator) Validate(ctx context.Context, token string) (*CallerIdent
 
 	resp, err := v.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("call auth/me: %w", err)
+		// The url.Error text quotes the request URL or a refused redirect
+		// target; errors.Is still matches errHubOtherOrigin.
+		return nil, fmt.Errorf("call auth/me: %w", errWithoutURL(err))
 	}
 	defer resp.Body.Close()
 

@@ -149,27 +149,32 @@ func (s *Server) fetchCachedOIDC(ctx context.Context, cacheKey, hubURL string) (
 	fetchFromHub := func() ([]byte, error) {
 		client := s.bridge.oidcHTTPClient()
 
+		// The errors name the document by its cache key and never quote a
+		// URL, so the endpoint's user information and a refused redirect
+		// target stay out of the logs. A transport error and a body read
+		// error have the fixed text of hubTransportError, so they quote
+		// nothing the hub or the network sent.
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, hubURL, nil)
 		if err != nil {
-			return nil, fmt.Errorf("creating request for %s: %w", hubURL, err)
+			return nil, fmt.Errorf("create request for hub OIDC document %s: %w", cacheKey, errWithoutURL(err))
 		}
 
 		resp, err := client.Do(req)
 		if err != nil {
-			return nil, fmt.Errorf("GET %s: %w", hubURL, err)
+			return nil, fmt.Errorf("fetch hub OIDC document %s: %w", cacheKey, errWithoutURL(err))
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("GET %s: status %d", hubURL, resp.StatusCode)
+			return nil, fmt.Errorf("fetch hub OIDC document %s: status %d", cacheKey, resp.StatusCode)
 		}
 
 		body, err := io.ReadAll(io.LimitReader(resp.Body, oidcProxyMaxBody+1))
 		if err != nil {
-			return nil, fmt.Errorf("reading response from %s: %w", hubURL, err)
+			return nil, fmt.Errorf("read hub OIDC document %s: %w", cacheKey, errWithoutURL(err))
 		}
 		if int64(len(body)) > oidcProxyMaxBody {
-			return nil, fmt.Errorf("response from %s exceeded maximum size of %d bytes", hubURL, oidcProxyMaxBody)
+			return nil, fmt.Errorf("hub OIDC document %s exceeded maximum size of %d bytes", cacheKey, oidcProxyMaxBody)
 		}
 
 		return body, nil
@@ -224,6 +229,8 @@ func rewriteJWKSURI(body []byte, bridgeExternalURL string) ([]byte, error) {
 // oidcHTTPClient returns a shared HTTP client configured with the bridge's
 // transport auth (IAP / Cloud Run invoker) for reaching the hub's OIDC
 // endpoints. The client is created once and reused for connection pooling.
+// It sends requests only to the configured hub origin: a redirect within it
+// is followed, any other is refused before transport auth is added.
 func (b *Bridge) oidcHTTPClient() *http.Client {
 	b.oidcClientOnce.Do(func() {
 		transport := http.DefaultTransport
@@ -231,7 +238,7 @@ func (b *Bridge) oidcHTTPClient() *http.Client {
 			transport = transportauth.Wrap(transport, b.transportSrc, b.transportMode)
 		}
 		b.oidcClient = &http.Client{
-			Transport: transport,
+			Transport: newHubOriginTransport(transport, b.config.Hub.Endpoint),
 			Timeout:   10 * time.Second,
 		}
 	})

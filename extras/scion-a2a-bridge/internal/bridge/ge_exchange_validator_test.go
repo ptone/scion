@@ -846,8 +846,11 @@ func TestGEExchangeValidator_SetHTTPClient(t *testing.T) {
 	custom := &http.Client{Timeout: 30 * time.Second}
 	v.SetHTTPClient(custom)
 
-	if v.httpClient != custom {
-		t.Error("SetHTTPClient did not replace the HTTP client")
+	if v.httpClient.Timeout != 30*time.Second {
+		t.Errorf("validator client Timeout = %v, want the custom client's 30s", v.httpClient.Timeout)
+	}
+	if custom.Transport != nil {
+		t.Errorf("SetHTTPClient set the caller's client Transport to %T", custom.Transport)
 	}
 }
 

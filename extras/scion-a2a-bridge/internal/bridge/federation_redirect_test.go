@@ -19,6 +19,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -33,6 +34,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/urlorigin"
 )
 
 const (
@@ -441,6 +443,100 @@ func TestFederationCallSites_IPv6HubOrigin(t *testing.T) {
 	}
 }
 
+// followedRedirectStatuses are the redirect statuses http.Client follows.
+var followedRedirectStatuses = []int{
+	http.StatusMovedPermanently,
+	http.StatusFound,
+	http.StatusSeeOther,
+	http.StatusTemporaryRedirect,
+	http.StatusPermanentRedirect,
+}
+
+// TestFederationCallSites_UnicodeFoldHostRedirectRefused has the hub redirect
+// a federation call to a host on the hub port that folds onto the hub's host
+// name under strings.ToLower. Each call site must dial only the hub, must
+// send the federation token only on the first hub request, must not reach
+// the redirect target, and must fail with errFederationOtherOrigin. The
+// "U+0130 for i" Location also carries user information. A federatedUserGet
+// error quotes no URL. A callerHubClient error names the refused request URL
+// as the shared hub client reports it, so for that call site the text is
+// checked for the user information and the federation token instead.
+func TestFederationCallSites_UnicodeFoldHostRedirectRefused(t *testing.T) {
+	const user, password = "redir-user", "s3cret-pw"
+	for site, call := range federationCallSites {
+		for caseName, target := range unicodeFoldTargets {
+			for _, status := range followedRedirectStatuses {
+				t.Run(fmt.Sprintf("%s/%s/%d", site, caseName, status), func(t *testing.T) {
+					serverTLS, dials := installDialRecordingTransport(t)
+					var mu sync.Mutex
+					var hopTokens []string // token header of each redirected request
+					var hub *redirectHub
+					hub = newRedirectHubAt(t, serverTLS, unicodeHubName, status, func(r *http.Request) string {
+						mu.Lock()
+						hopTokens = append(hopTokens, r.Header.Get(FederationTokenHeader))
+						mu.Unlock()
+						loc := target(r, hub.port)
+						if caseName == "U+0130 for i" {
+							loc = strings.Replace(loc, "https://", "https://"+user+":"+password+"@", 1)
+						}
+						return loc
+					}, func(w http.ResponseWriter, r *http.Request) {
+						w.Header().Set("Content-Type", "application/json")
+						_, _ = io.WriteString(w, `{}`)
+					})
+
+					err := call(t, newFederationTestBridge(t, hub.endpoint))
+
+					hubAddr := net.JoinHostPort(unicodeHubName, hub.port)
+					for _, addr := range dials.dialed() {
+						if addr != hubAddr {
+							t.Errorf("dialed %q, want only the hub %q", addr, hubAddr)
+						}
+					}
+					got := hub.requests()
+					if len(got) != 0 {
+						t.Errorf("redirect target on the hub port received %d requests, want 0", len(got))
+					}
+					for i, req := range got {
+						if tok := req.header.Get(FederationTokenHeader); tok != "" {
+							t.Errorf("redirect target request %d carried %s", i, FederationTokenHeader)
+						}
+					}
+					mu.Lock()
+					tokens := append([]string(nil), hopTokens...)
+					mu.Unlock()
+					if len(tokens) != 1 {
+						t.Errorf("hub redirected %d requests, want 1", len(tokens))
+					}
+					for i, tok := range tokens {
+						if i == 0 && tok != testFederationToken {
+							t.Errorf("first hub request %s = %q, want %q", FederationTokenHeader, tok, testFederationToken)
+						}
+						if i > 0 && tok != "" {
+							t.Errorf("hub request %d carried %s", i, FederationTokenHeader)
+						}
+					}
+					if n := hub.handled.Load(); n != 1 {
+						t.Errorf("hub handled %d requests, want 1", n)
+					}
+					if !errors.Is(err, errFederationOtherOrigin) {
+						t.Fatalf("call error = %v, want errFederationOtherOrigin", err)
+					}
+					msg := err.Error()
+					for _, text := range []string{user, password, testFederationToken} {
+						if strings.Contains(msg, text) {
+							t.Errorf("error %q includes %q", msg, text)
+						}
+					}
+					if site == "federatedUserGet" && strings.Contains(msg, "://") {
+						t.Errorf("error %q quotes a URL", msg)
+					}
+				})
+			}
+		}
+	}
+}
+
 // countingRoundTripper counts the requests it is given and answers 200.
 type countingRoundTripper struct{ calls atomic.Int32 }
 
@@ -521,7 +617,7 @@ func TestFederationHeaderTransport_OtherHostnameSamePortRefused(t *testing.T) {
 	}
 }
 
-func TestCanonicalHostPort(t *testing.T) {
+func TestOriginHostPortOfHubEndpoints(t *testing.T) {
 	cases := []struct {
 		raw, want string
 	}{
@@ -545,8 +641,9 @@ func TestCanonicalHostPort(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := canonicalHostPort(u); got != tc.want {
-			t.Errorf("canonicalHostPort(%s) = %q, want %q", tc.raw, got, tc.want)
+		o, _ := urlorigin.Of(u)
+		if got := net.JoinHostPort(o.Host, o.Port); got != tc.want {
+			t.Errorf("host:port of %s = %q, want %q", tc.raw, got, tc.want)
 		}
 	}
 }

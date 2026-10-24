@@ -173,6 +173,7 @@ bridge:
 # Scion Hub credentials
 hub:
   # The HTTP API endpoint of your Scion Hub.
+  # The bridge's credential checks (hubUAT/hubBearer and geGoogle) and OIDC discovery and JWKS requests follow redirects only within this endpoint's scheme, host and port; a redirect to any other origin fails the request.
   endpoint: "https://hub.example.com"
 
   # Hub administrator email the bridge authenticates as for background operations.
