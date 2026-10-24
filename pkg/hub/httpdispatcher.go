@@ -30,6 +30,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -1877,7 +1878,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 // secrets, which the broker's provision does not read and every start
 // resolves again (failing closed there). A resolution error in the as-needed
 // pass, after the broker reports needed keys, does fail the provision with a
-// *secretResolutionError: a start does not resolve as-needed keys
+// *secretResolutionError: a plain start does not gather as-needed keys
 // (ptone/scion#5959).
 func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent *store.Agent) error {
 	return d.dispatchProvision(ctx, agent, "DispatchAgentProvision", false, "", "")
@@ -1931,6 +1932,9 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 	defer func() {
 		if err != nil && sent && (answered || !errors.Is(err, ErrLifecycleDeferred)) {
 			err = provisionSent(err)
+		}
+		if err == nil {
+			markConfigDelivered(agent)
 		}
 	}()
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
@@ -2044,11 +2048,13 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 			asNeededEnv, asErr = d.resolveAsNeededForKeys(ctx, agent, envReqs.Needs, envReqs.Alternatives)
 			if asErr != nil {
 				// The as-needed pass is the exception to
-				// continueOnSecretResolutionError: a start never resolves
-				// as-needed keys (the provisioned config carries them),
-				// so a provision or reprovision whose broker needs them
-				// fails here with the fixed message rather than leaving a
-				// config without them (ptone/scion#5959).
+				// continueOnSecretResolutionError: as-needed values reach an
+				// agent only at a create, or at a first start routed through
+				// create-with-gather (startRoutesThroughCreate); nothing
+				// persists them, and a plain start or restart does not
+				// gather them (ptone/scion#6101). So a provision or
+				// reprovision whose broker needs them fails here with the
+				// fixed message (ptone/scion#5959).
 				var resErr *secretResolutionError
 				if reprovision && errors.As(asErr, &resErr) {
 					resErr.Verb = "reprovisioned"
@@ -2168,7 +2174,12 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 // DispatchAgentCreateWithGather creates an agent with env-gather support.
 // If the broker returns 202 with env requirements, it returns the requirements
 // as the first value instead of an error.
-func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (_ *CreateDispatchResult, err error) {
+func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (res *CreateDispatchResult, err error) {
+	defer func() {
+		if err == nil {
+			markConfigDeliveredOnSuccess(agent, res)
+		}
+	}()
 	dispatchStart := time.Now()
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return nil, err
@@ -2331,7 +2342,12 @@ func (e *ErrEnvStillMissing) Error() string {
 // at highest precedence, instead of calling the broker's stateful finalize-env
 // action. This makes the finalize HA-safe: the replay can land on any broker
 // replica because it carries the complete request state.
-func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) (*CreateDispatchResult, error) {
+func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) (res *CreateDispatchResult, err error) {
+	defer func() {
+		if err == nil {
+			markConfigDeliveredOnSuccess(agent, res)
+		}
+	}()
 	// Flat placement backstop: the first pass pinned the agent, so this
 	// refuses only a pin corrupted between the two passes.
 	if err := d.placementBackstop(ctx, agent); err != nil {
@@ -3511,6 +3527,155 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 // (suspended → resume). It is DispatchAgentStartWithOptions with no options
 // (always synchronous); both call dispatchAgentStart directly, so neither is
 // a guarded call site of the other.
+// markConfigDelivered sets ConfigDelivered on agent's applied config in
+// memory (ptone/scion#6096). Like the resolved env a provision merges into
+// AppliedConfig, it is persisted by the caller's own write of the agent after
+// the dispatch; a caller that writes no config leaves it unset, so the next
+// start of the agent re-gathers (startRoutesThroughCreate), which is the
+// safe direction.
+func markConfigDelivered(agent *store.Agent) {
+	if agent == nil {
+		return
+	}
+	if agent.AppliedConfig == nil {
+		agent.AppliedConfig = &store.AgentAppliedConfig{}
+	}
+	agent.AppliedConfig.ConfigDelivered = true
+}
+
+// markConfigDeliveredOnSuccess marks agent only for a create or finalize the
+// broker completed synchronously with no outstanding needs: not for a
+// result that still carries needs, and not for one accepted for an
+// asynchronous launch, which has not completed yet.
+func markConfigDeliveredOnSuccess(agent *store.Agent, res *CreateDispatchResult) {
+	if res.AcceptedLaunch() != nil {
+		return
+	}
+	if envReqs := res.EnvRequirements(); envReqs != nil && len(envReqs.Needs) > 0 {
+		return
+	}
+	markConfigDelivered(agent)
+}
+
+// startRoutesThroughCreate reports whether a start of agent must go through
+// create-with-gather (DispatchAgentCreate) instead of a plain start, and why.
+// A plain start does not gather env (buildStartEnv never resolves as-needed
+// keys, and the broker's start has no env-gather), so an agent whose config
+// was never delivered would start without the as-needed values it needs
+// (ptone/scion#6096). Plain start is kept when:
+//   - the applied config records a delivered config (ConfigDelivered), or
+//   - the agent predates the marker and has run history together with a
+//     phase only a successful start reaches (running, stopped, suspended or
+//     halted): a legacy row that already started counts as provisioned
+//     (coordinator-2 ruling; a run ID alone is not enough, because beginRun
+//     records it before the broker call), or
+//   - the agent has no as-needed entries in its scopes, so there is nothing
+//     to gather.
+//
+// A resumed start always has run history and is never routed. An agent
+// with an ancestry (whose progeny entries are not listed here) counts as
+// having as-needed entries. A failed lookup returns err, a
+// *secretResolutionError the caller returns as a failed start, so an unknown
+// never plain-starts.
+func (d *HTTPAgentDispatcher) startRoutesThroughCreate(ctx context.Context, agent *store.Agent, resume bool) (route bool, why string, err error) {
+	if resume || agent == nil {
+		return false, "", nil
+	}
+	if agent.AppliedConfig != nil && agent.AppliedConfig.ConfigDelivered {
+		return false, "", nil
+	}
+	if (agent.RunID != "" || len(agent.PreviousRunIDs) > 0) && startedPhase(agent.Phase) {
+		return false, "", nil
+	}
+	return d.hasAsNeededEntries(ctx, agent)
+}
+
+// startedPhase reports whether phase is one only a successful start reaches.
+func startedPhase(phase string) bool {
+	switch state.Phase(phase) {
+	case state.PhaseRunning, state.PhaseStopped, state.PhaseSuspended, state.PhaseHalted:
+		return true
+	}
+	return false
+}
+
+// hasAsNeededEntries reports whether any env var or secret in agent's scopes
+// is injected as needed (an agent with an ancestry counts as having them).
+// A lookup error is returned as the *secretResolutionError a start returns
+// for the same read in buildStartEnv: the fixed message, with the read
+// error kept for the server log.
+func (d *HTTPAgentDispatcher) hasAsNeededEntries(ctx context.Context, agent *store.Agent) (bool, string, error) {
+	if len(agent.Ancestry) > 1 {
+		return true, "progeny entries", nil
+	}
+	for _, filter := range d.envScopesForDispatch(ctx, agent) {
+		vars, err := d.store.ListEnvVars(ctx, filter)
+		if err != nil {
+			return false, "", &secretResolutionError{Verb: "started", Source: resolutionSourceEnvSettings,
+				Err: fmt.Errorf("list %s env vars: %w", filter.Scope, err)}
+		}
+		for _, v := range vars {
+			if v.InjectionMode == store.InjectionModeAsNeeded {
+				return true, "as-needed env var", nil
+			}
+		}
+	}
+	if d.secretBackend == nil {
+		return false, "", nil
+	}
+	type scopeRef struct{ scope, id string }
+	scopes := []scopeRef{{secret.ScopeHub, d.secretBackend.HubID()}}
+	if agent.RuntimeBrokerID != "" {
+		scopes = append(scopes, scopeRef{secret.ScopeRuntimeBroker, agent.RuntimeBrokerID})
+	}
+	if agent.ProjectID != "" {
+		scopes = append(scopes, scopeRef{secret.ScopeProject, agent.ProjectID})
+	}
+	if agent.OwnerID != "" {
+		scopes = append(scopes, scopeRef{secret.ScopeUser, agent.OwnerID})
+	}
+	for _, sc := range scopes {
+		metas, err := d.secretBackend.List(ctx, secret.Filter{Scope: sc.scope, ScopeID: sc.id})
+		if err != nil {
+			return false, "", &secretResolutionError{Verb: "started", Err: fmt.Errorf("list %s secrets: %w", sc.scope, err)}
+		}
+		for _, m := range metas {
+			if m.InjectionMode == store.InjectionModeAsNeeded {
+				return true, "as-needed secret", nil
+			}
+		}
+	}
+	return false, "", nil
+}
+
+// startThroughCreate starts agent through DispatchAgentCreate (create with
+// env-gather): the broker reuses an existing agent directory, so a
+// provisioned agent keeps its files and config, and the create's resolved
+// env, including the as-needed values, reaches the started container. It
+// fails closed like the create: the fixed resolution message, the keyless
+// unmet-needs error, or the dispatch error, with nothing started. A task
+// given to the start is the create's task for this dispatch only.
+func (d *HTTPAgentDispatcher) startThroughCreate(ctx context.Context, agent *store.Agent, task string) (*StartDispatchResult, error) {
+	if task != "" && agent.AppliedConfig != nil {
+		saved := agent.AppliedConfig.Task
+		agent.AppliedConfig.Task = task
+		defer func() { agent.AppliedConfig.Task = saved }()
+	}
+	created, err := d.DispatchAgentCreate(ctx, agent)
+	if err != nil {
+		// A resolution error reads as the start it is.
+		var resErr *secretResolutionError
+		if errors.As(err, &resErr) {
+			resErr.Verb = "started"
+		}
+		return nil, err
+	}
+	if launch := created.AcceptedLaunch(); launch != nil {
+		return &StartDispatchResult{Launch: launch}, nil
+	}
+	return nil, nil
+}
+
 func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) error {
 	_, err := d.dispatchAgentStart(ctx, agent, task, resume, StartDispatchOptions{})
 	return err
@@ -3530,6 +3695,22 @@ func (d *HTTPAgentDispatcher) DispatchAgentStartWithOptions(ctx context.Context,
 // DispatchAgentStartWithOptions. The result is non-nil only for a start a
 // broker accepted as an asynchronous launch (here or on the owner node).
 func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool, opts StartDispatchOptions) (_ *StartDispatchResult, err error) {
+	route, why, routeErr := d.startRoutesThroughCreate(ctx, agent, resume)
+	if routeErr != nil {
+		if secretResolutionSourceOf(routeErr) == resolutionSourceEnvSettings {
+			d.log.WarnContext(ctx, "DispatchAgentStart: failed to read stored env settings; agent not started",
+				"agent_id", agent.ID, "error", errors.Unwrap(routeErr))
+		} else {
+			d.log.WarnContext(ctx, "DispatchAgentStart: failed to resolve secrets; agent not started",
+				"agent_id", agent.ID, "error", errors.Unwrap(routeErr))
+		}
+		return nil, routeErr
+	}
+	if route {
+		d.log.InfoContext(ctx, "start of an agent without a delivered config goes through create-with-gather",
+			"agent_id", agent.ID, "reason", why)
+		return d.startThroughCreate(ctx, agent, task)
+	}
 	ctx, span := tracer.Start(ctx, "hub.dispatch.start")
 	defer span.End()
 	// The broker reads the hub's agent ID (api.AgentIDQueryParam) on every
