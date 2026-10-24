@@ -1407,6 +1407,11 @@ type BrokerCapabilities struct {
 	// sends start launch fields only to a broker that is not known to lack
 	// it.
 	AsyncStart bool `json:"asyncStart,omitempty"`
+	// StartEnvGather indicates the broker runs the env-gather preflight on
+	// a start sent with gatherEnv and answers unmet required keys with a
+	// needs report before starting anything (ptone/scion#6101). The hub
+	// sends gatherEnv only to a broker that reports it.
+	StartEnvGather bool `json:"startEnvGather,omitempty"`
 	// EmptyPerAgentWorkspace indicates the broker can provision the
 	// empty-per-agent workspace sharing mode (private empty directory per
 	// agent on non-git projects). The hub refuses to dispatch such agents to

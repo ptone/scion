@@ -111,6 +111,11 @@ var dispatchHubSentinels = []struct {
 }{
 	{"delete_in_progress", store.ErrDeleteInProgress},
 	{"launch_invalid_phase", ErrLaunchInvalidPhase},
+	// A start's env-gather failures (ptone/scion#6101): the requester's
+	// handler answers them with its own status and the action's verb.
+	{"start_env_unmet", errStartEnvUnmet},
+	{"broker_lacks_start_env_gather", errBrokerLacksStartEnvGather},
+	{"start_env_gather_capability_unknown", errStartEnvGatherCapabilityUnknown},
 }
 
 // dispatchHubError is a failure the executing node returned with hub
