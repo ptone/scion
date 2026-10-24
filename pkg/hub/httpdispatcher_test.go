@@ -5928,6 +5928,10 @@ func TestHTTPAgentDispatcher_BuildStartEnv_StartAndRestartProduceIdenticalEnv(t 
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
 			Env:           map[string]string{"CONFIG_VAR": "config-value"},
+			// A delivered config: this compares the plain start's env with
+			// the restart's, so the start must not be routed through
+			// create-with-gather for the as_needed var (ptone/scion#6096).
+			ConfigDelivered: true,
 		},
 	}
 
