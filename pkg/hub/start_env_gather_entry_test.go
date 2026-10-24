@@ -409,3 +409,38 @@ func TestLifecycleHTTP_RestartPrecheckStandingRefusal(t *testing.T) {
 	assert.False(t, client.stopCalled, "refused before the stop leg")
 	assert.False(t, client.startCalled || client.restartCalled)
 }
+
+// R2: the marker write carries the user-supplied key names an env finalize
+// recorded, on a row without the marker and on one that already has it.
+func TestPersistConfigDelivered_CarriesUserSuppliedKeyNames(t *testing.T) {
+	for _, markedBefore := range []bool{false, true} {
+		f := newRunDispatchFixture(t)
+		if markedBefore {
+			f.agent.AppliedConfig.ConfigDelivered = true
+			require.NoError(t, f.store.UpdateAgent(context.Background(), f.agent))
+		}
+		stored, err := f.store.GetAgent(context.Background(), f.agent.ID)
+		require.NoError(t, err)
+		stored.AppliedConfig.UserSuppliedEnvKeys = []string{"FAKE_USER_KEY"} // recorded by this dispatch's finalize
+		persistConfigDelivered(context.Background(), f.store, slog.Default(), stored)
+		got, err := f.store.GetAgent(context.Background(), f.agent.ID)
+		require.NoError(t, err)
+		assert.True(t, got.AppliedConfig.ConfigDelivered, "markedBefore=%v", markedBefore)
+		assert.Equal(t, []string{"FAKE_USER_KEY"}, got.AppliedConfig.UserSuppliedEnvKeys, "markedBefore=%v", markedBefore)
+	}
+}
+
+// R4: a routed start the create routing refuses (a broker without
+// PreserveWorkspaceCreate) returns that refusal; it never falls through to
+// the old-broker 412 or to a plain start.
+func TestRoutedStartRefusal_DoesNotFallThrough(t *testing.T) {
+	f, gc := newGatherStartFixture(t, false, plainStarted, nil)
+	setBrokerCaps(t, f.store, &store.RuntimeBroker{ID: f.agent.RuntimeBrokerID}, &store.BrokerCapabilities{})
+	neverStarted(f)
+	seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
+	err := f.d.DispatchAgentStart(context.Background(), f.agent, "", false)
+	require.ErrorIs(t, err, errBrokerLacksPreserveWorkspace)
+	assert.NotErrorIs(t, err, errBrokerLacksStartEnvGather)
+	assert.Empty(t, gc.calls, "no plain start")
+	assert.False(t, f.client.createCalled, "nothing sent")
+}
