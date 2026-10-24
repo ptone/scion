@@ -285,3 +285,50 @@ func TestGCPBackend_Resolve_ProgenyAccessErrorFails(t *testing.T) {
 		}
 	})
 }
+
+// A record with no stored reference resolves by computed name: the
+// hub-prefixed name, then the legacy one. When the prefixed name is absent
+// and the legacy read fails for another reason (IAM narrowed to the hub
+// prefix before migration), Resolve reports that reason, not not_found.
+func TestGCPBackend_Resolve_LegacyFallbackReportsRealKind(t *testing.T) {
+	seed := func(t *testing.T) (*GCPBackend, *failAccessSMClient) {
+		b, fake := newFailClosedBackend(t)
+		if err := b.store.CreateSecret(context.Background(), &store.Secret{
+			ID: tid("failclosed-legacy-kind"), Key: "OLD_KEY",
+			SecretType: store.SecretTypeEnvironment, Scope: ScopeUser, ScopeID: "user-1",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		legacyName := b.legacyGCPSecretName("OLD_KEY", ScopeUser, "user-1")
+		seedMockSecret(t, fake.mockSMClient, b.projectID, legacyName, "FAKE-old-value")
+		fake.failPrefix = fmt.Sprintf("projects/%s/secrets/%s", b.projectID, legacyName)
+		return b, fake
+	}
+	for _, tc := range []struct {
+		code codes.Code
+		kind string
+	}{
+		{codes.PermissionDenied, FailurePermissionDenied},
+		{codes.Unavailable, FailureUnavailable},
+	} {
+		t.Run(tc.kind, func(t *testing.T) {
+			b, fake := seed(t)
+			fake.errFn = func(context.Context) error { return status.Error(tc.code, fakeSMDetail) }
+			resolved, err := b.Resolve(context.Background(), "user-1", "", "", nil)
+			assertAccessFailure(t, resolved, err, ScopeUser, "OLD_KEY", tc.kind, "FAKE-old-value")
+		})
+	}
+
+	// Get's DB-less recovery keeps its contract: a prefixed NotFound is
+	// store.ErrNotFound whatever the legacy read returns (callers such as
+	// signing-key bootstrap rely on it).
+	t.Run("Get without DB record still not found", func(t *testing.T) {
+		b, fake := newFailClosedBackend(t)
+		legacyName := b.legacyGCPSecretName("NO_RECORD_KEY", ScopeHub, "test-hub-id")
+		fake.failPrefix = fmt.Sprintf("projects/%s/secrets/%s", b.projectID, legacyName)
+		fake.errFn = func(context.Context) error { return status.Error(codes.PermissionDenied, fakeSMDetail) }
+		if _, err := b.Get(context.Background(), "NO_RECORD_KEY", ScopeHub, "test-hub-id"); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("Get err = %v, want store.ErrNotFound", err)
+		}
+	})
+}
