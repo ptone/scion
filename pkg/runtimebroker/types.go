@@ -113,6 +113,12 @@ type BrokerCapabilities struct {
 	// move: it provisions the agent with a fresh workspace after confirming
 	// it has no files for the agent.
 	AgentMoveRecreate bool `json:"agentMoveRecreate,omitempty"`
+	// PreserveWorkspaceCreate indicates this broker honours
+	// CreateAgentRequest.PreserveWorkspace: a create carrying it never clears
+	// an existing workspace. The hub routes a start through
+	// create-with-gather only to a broker that reports it
+	// (ptone/scion#6096).
+	PreserveWorkspaceCreate bool `json:"preserveWorkspaceCreate,omitempty"`
 	// ReprovisionEmptyPerAgent indicates this broker's reprovision reuses an
 	// empty-per-agent agent's private workspace in place (same-broker
 	// `scion reincarnate`, miller79/scion#167). Set on every runtime: the
@@ -317,6 +323,16 @@ type CreateAgentRequest struct {
 	// while preserving the agent's home directory and clone-per-agent
 	// workspace. Ignored when ProvisionOnly is false.
 	Reprovision bool `json:"reprovision,omitempty"`
+	// PreserveWorkspace marks a full create (create and start) of an agent
+	// that may already have files on this broker: the hub sends it for a
+	// start it routes through create-with-gather (ptone/scion#6096). The
+	// create then never clears an existing workspace for a fresh clone
+	// (opts.FreshProvision stays false), which a create otherwise does for
+	// a leftover same-named agent directory. It does not re-render the
+	// agent's config (no Reprovision semantics), and it is refused together
+	// with ProvisionOnly or Reprovision. The routing decision is the hub's;
+	// the broker only honours the flag.
+	PreserveWorkspace bool `json:"preserveWorkspace,omitempty"`
 	// SharedDirBackendChanges asks a Reprovision to change the recorded
 	// shared-dir storage backend of the named shared dirs (dir name to
 	// "nfs" or "local"; `scion reincarnate --shared-dir-backend`). Only the agent's

@@ -49,6 +49,9 @@ func StaticCapabilities(rt scionrt.Runtime, nodeImageRegistry string) *hubclient
 		// has no files for the agent before provisioning it with a fresh
 		// workspace (ptone/scion#5441).
 		AgentMoveRecreate: true,
+		// This broker honours preserveWorkspace on a create: it never
+		// clears an existing workspace for it (ptone/scion#6096).
+		PreserveWorkspaceCreate: true,
 		// This broker's reprovision reuses an empty-per-agent workspace in
 		// place (miller79/scion#167).
 		ReprovisionEmptyPerAgent: true,
@@ -120,6 +123,7 @@ func StaticCapabilityNames(rt scionrt.Runtime) []string {
 	add(c.EmptyPerAgentWorkspace, "emptyPerAgentWorkspace")
 	add(c.AgentMove, "agentMove")
 	add(c.AgentMoveRecreate, "agentMoveRecreate")
+	add(c.PreserveWorkspaceCreate, "preserveWorkspaceCreate")
 	add(c.ReprovisionEmptyPerAgent, "reprovisionEmptyPerAgent")
 	add(c.ChangedFields, "changedFields")
 	add(c.ClearedFields, "clearedFields")
