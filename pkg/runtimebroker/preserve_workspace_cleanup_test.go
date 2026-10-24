@@ -57,6 +57,9 @@ func gitPreserveT(t *testing.T, dir string, args ...string) string {
 // file in the workspace. It returns the repository root and the workspace.
 func seedAgentWorktree(t *testing.T, projectPath, agentDir string) (string, string) {
 	t.Helper()
+	// The broker's own host git calls read the user's global git config
+	// through HOME: an empty HOME keeps the cleanup independent of it.
+	t.Setenv("HOME", t.TempDir())
 	repo := filepath.Dir(projectPath)
 	gitPreserveT(t, repo, "init", "-q")
 	if err := os.WriteFile(filepath.Join(repo, "README"), []byte("fake\n"), 0o644); err != nil {
@@ -139,7 +142,8 @@ func TestCreateStartFailure_PlainCreateStillCleansUp(t *testing.T) {
 		t.Fatalf("a plain create's failure should clean up the agent's files (stat err %v)", err)
 	}
 	if out := gitPreserveT(t, repo, "branch", "--list", "same-name"); out != "" {
-		t.Errorf("a plain create's failure should delete the agent branch (git branch --list: %q)", out)
+		t.Errorf("a plain create's failure should delete the agent branch (git branch --list: %q; worktrees:\n%s)",
+			out, gitPreserveT(t, repo, "worktree", "list", "--porcelain"))
 	}
 }
 
