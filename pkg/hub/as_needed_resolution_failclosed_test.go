@@ -343,6 +343,12 @@ func TestProvisionGather_AsNeededResolutionErrorFails(t *testing.T) {
 		require.Error(t, err)
 		assert.ErrorIs(t, err, secret.ErrResolveAccess)
 		assert.Equal(t, 1, *calls)
+		// The agent has an as-needed secret: on a broker whose start and
+		// restart can gather it, both reach secret resolution and fail
+		// there; on one that cannot, the restart is refused with 412 before
+		// it (ptone/scion#6101).
+		setBrokerCaps(t, f.store, &store.RuntimeBroker{ID: f.agent.RuntimeBrokerID},
+			&store.BrokerCapabilities{StartEnvGather: true, PreserveWorkspaceCreate: true})
 		assertStartsFailClosed(t, f, secret.ErrResolveAccess)
 	})
 }
