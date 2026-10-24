@@ -1,0 +1,196 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !no_sqlite
+
+package hub
+
+import (
+	"context"
+	"net/http"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+)
+
+// Attachment-only chat sends (ptone/scion#6146): a send with attachments
+// and no text is stored with an empty body on every send path; a send
+// with neither stays a 400.
+
+// requireAttachmentOnlyStored asserts that message id is stored with an
+// empty body and that history shows it, not deleted, with attachment
+// attID.
+func (f *sendFixture) requireAttachmentOnlyStored(t *testing.T, user *store.User, key, id, attID string) {
+	t.Helper()
+	stored, err := f.st.GetMessage(context.Background(), id)
+	require.NoError(t, err)
+	require.Equal(t, "", stored.Msg)
+	h := f.history(t, user, key)
+	found := false
+	for _, m := range h.Messages {
+		if m.ID == id {
+			found = true
+		}
+	}
+	require.True(t, found, "history lists the attachment-only message")
+	refs := h.MessageAttachments[id]
+	require.Len(t, refs, 1)
+	require.Equal(t, attID, refs[0].ID)
+}
+
+// TestWebSend_AttachmentOnly_UserDM: a user-to-user DM with an attachment
+// and no text is stored (it was a 500), for an artifact upload and for an
+// AttachmentStore upload.
+func TestWebSend_AttachmentOnly_UserDM(t *testing.T) {
+	f := newSendFixture(t)
+	dm := dmKeyFor(t, "user", f.ua.ID, "user", f.uc.ID)
+
+	id := f.uploadAs(t, f.ua, "", "photo.txt", "bytes")
+	got := f.send(t, f.ua, dm, map[string]interface{}{"content": "", "attachments": []string{id}})
+	require.Equal(t, http.StatusCreated, got.status, got.body)
+	resp := f.sendResponse(t, got)
+	require.Equal(t, "", resp.Content)
+	require.Len(t, resp.Attachments, 1)
+	f.requireBound(t, id, resp.ID)
+	f.requireAttachmentOnlyStored(t, f.ua, dm, resp.ID, id)
+
+	legacy := f.attach(t, "", f.ua.ID, "legacy.txt")
+	got = f.send(t, f.ua, dm, map[string]interface{}{"content": "  ", "attachments": []string{legacy}})
+	require.Equal(t, http.StatusCreated, got.status, got.body)
+	resp = f.sendResponse(t, got)
+	f.requireAttachmentOnlyStored(t, f.ua, dm, resp.ID, legacy)
+}
+
+// TestWebSend_AttachmentOnly_Thread: a thread message with an attachment
+// and no text, addressed to no agent, is stored.
+func TestWebSend_AttachmentOnly_Thread(t *testing.T) {
+	f := newSendFixture(t)
+	id := f.uploadAs(t, f.ua, f.projA.ID, "notes.txt", "bytes")
+	got := f.send(t, f.ua, f.topicA, map[string]interface{}{"content": "", "attachments": []string{id}})
+	require.Equal(t, http.StatusCreated, got.status, got.body)
+	resp := f.sendResponse(t, got)
+	require.Equal(t, "", resp.Content)
+	f.requireBound(t, id, resp.ID)
+	f.requireAttachmentOnlyStored(t, f.ua, f.topicA, resp.ID, id)
+}
+
+// TestWebSend_AttachmentOnly_AgentRouted: an attachment-only send that
+// reaches an agent (topic default agent, and an agent DM) is stored and
+// dispatched with the attachment listed for delivery (it was a 400 from
+// envelope validation).
+func TestWebSend_AttachmentOnly_AgentRouted(t *testing.T) {
+	f := newSendFixture(t)
+	require.NoError(t, f.wcs.UpdateTopic(context.Background(), f.topicA, TopicUpdate{DefaultAgent: &f.target.Slug}))
+	agentDM := dmKeyFor(t, "user", f.ua.ID, "agent", f.target.ID)
+	for _, key := range []string{f.topicA, agentDM} {
+		id := f.uploadAs(t, f.ua, f.projA.ID, "web.txt", "web bytes")
+		got := f.send(t, f.ua, key, map[string]interface{}{"content": "", "attachments": []string{id}})
+		require.Equal(t, http.StatusCreated, got.status, "%s: %s", key, got.body)
+		resp := f.sendResponse(t, got)
+		require.Equal(t, "", resp.Content)
+		f.requireBound(t, id, resp.ID)
+		call := f.lastDispatch(t, f.target)
+		require.Len(t, call.StructuredMessage.AttachmentDeliveries, 1, key)
+		require.Equal(t, id, call.StructuredMessage.AttachmentDeliveries[0].ArtifactID)
+		require.Equal(t, resp.ID, call.StructuredMessage.AttachmentDeliveries[0].MessageID)
+		f.requireAttachmentOnlyStored(t, f.ua, key, resp.ID, id)
+	}
+}
+
+// TestWebSend_NoContentNoAttachmentsRefused: a send with neither text nor
+// attachments stays a 400 on every path, and nothing is stored.
+func TestWebSend_NoContentNoAttachmentsRefused(t *testing.T) {
+	f := newSendFixture(t)
+	require.NoError(t, f.wcs.UpdateTopic(context.Background(), f.topicA, TopicUpdate{DefaultAgent: &f.target.Slug}))
+	keys := []string{
+		dmKeyFor(t, "user", f.ua.ID, "user", f.uc.ID),
+		dmKeyFor(t, "user", f.ua.ID, "agent", f.target.ID),
+		f.topicA,
+	}
+	for _, key := range keys {
+		for _, body := range []map[string]interface{}{
+			{"content": ""},
+			{"content": " \n\t "},
+			{"content": "", "attachments": []string{}},
+		} {
+			got := f.send(t, f.ua, key, body)
+			require.Equal(t, http.StatusBadRequest, got.status, "%s: %s", key, got.body)
+			require.Contains(t, got.body, "content or attachments required")
+		}
+	}
+	require.Equal(t, 0, f.countStored(t, ""))
+}
+
+// TestChatHistory_AttachmentOnlyReplyPreview: a reply to an
+// attachment-only message previews it as "Attachment", not as empty text.
+func TestChatHistory_AttachmentOnlyReplyPreview(t *testing.T) {
+	f := newSendFixture(t)
+	dm := dmKeyFor(t, "user", f.ua.ID, "user", f.uc.ID)
+	id := f.uploadAs(t, f.ua, "", "photo.txt", "bytes")
+	got := f.send(t, f.ua, dm, map[string]interface{}{"content": "", "attachments": []string{id}})
+	require.Equal(t, http.StatusCreated, got.status, got.body)
+	parent := f.sendResponse(t, got)
+
+	got = f.send(t, f.uc, dm, map[string]interface{}{"content": "nice", "reply_to_id": parent.ID})
+	require.Equal(t, http.StatusCreated, got.status, got.body)
+
+	h := f.history(t, f.uc, dm)
+	preview, ok := h.ReplyPreviews[parent.ID]
+	require.True(t, ok, "history carries a preview of the replied-to message")
+	require.Equal(t, chatAttachmentOnlyPreview, preview.Content)
+}
+
+// TestChatHistoryMessageDeleted: the deleted flag of the extension row
+// decides; an empty body counts as deleted only when the extension rows
+// could not be read.
+func TestChatHistoryMessageDeleted(t *testing.T) {
+	now := time.Now()
+	empty := store.Message{ID: "m1", Msg: ""}
+	text := store.Message{ID: "m2", Msg: "hi"}
+	exts := map[string]*WebChatMessageExt{"m3": {DeletedAt: &now}}
+	deleted := store.Message{ID: "m3", Msg: ""}
+
+	require.False(t, chatHistoryMessageDeleted(empty, exts, true), "attachment-only message is live")
+	require.False(t, chatHistoryMessageDeleted(empty, nil, true), "no extension rows: live")
+	require.False(t, chatHistoryMessageDeleted(text, exts, true))
+	require.True(t, chatHistoryMessageDeleted(deleted, exts, true))
+	require.True(t, chatHistoryMessageDeleted(empty, nil, false), "unknown: an empty body fails closed")
+	require.False(t, chatHistoryMessageDeleted(text, nil, false))
+}
+
+// TestChatSendValidationEnvelope: an attachment-only agent send passes
+// envelope validation through a copy that names its attachments; the
+// message itself is unchanged, and an empty send without attachments is
+// still refused.
+func TestChatSendValidationEnvelope(t *testing.T) {
+	msg := &messages.StructuredMessage{
+		Version: messages.Version, Sender: "user:a", Recipient: "agent:b",
+		Type: messages.TypeInstruction, Channel: "web", ThreadID: "t",
+	}
+	require.Error(t, messaging.ValidateLegacyMessage(chatSendValidationEnvelope(msg, nil)))
+
+	refs := []AttachmentRef{{ID: "att-1"}, {ID: "att-2"}}
+	v := chatSendValidationEnvelope(msg, refs)
+	require.NoError(t, messaging.ValidateLegacyMessage(v))
+	require.Equal(t, []string{"att-1", "att-2"}, v.Attachments)
+	require.Empty(t, msg.Attachments, "the message itself is not changed")
+
+	msg.Msg = "text"
+	require.Same(t, msg, chatSendValidationEnvelope(msg, refs), "a message with text is validated as is")
+}
