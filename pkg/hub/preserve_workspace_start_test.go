@@ -32,6 +32,8 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 )
 
 // A start routed through create-with-gather (ptone/scion#6096) never clears
@@ -604,29 +606,210 @@ func TestRoutedStart_OtherBackstopsRunFirst(t *testing.T) {
 	})
 }
 
-// A routed start whose broker record is missing at the capability check
-// fails with the fixed, keyless 503 message, sends nothing, and counts as a
-// start that was not acted on.
-func TestRoutedStart_BrokerRecordUnreadableIs503(t *testing.T) {
-	f := newRunDispatchFixture(t)
-	neverStarted(f)
-	seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
-	recordCreates(f)
-	f.agent.RuntimeBrokerID = tid("broker-missing")
+// fakeBrokerReadError is an injected broker-record read failure (not
+// store.ErrNotFound) whose text must never reach a client.
+const fakeBrokerReadError = "fake broker store failure: connection refused to 10.0.0.9"
 
-	err := f.d.DispatchAgentStart(context.Background(), f.agent, "", false)
+// failingBrokerReads wraps st so every broker-record read fails with
+// fakeBrokerReadError (brokerReadErrStore with no fault switch).
+func failingBrokerReads(st store.Store) store.Store {
+	return &brokerReadErrStore{Store: st, err: errors.New(fakeBrokerReadError)}
+}
+
+// mintCountingGen counts the agent credentials a dispatcher signs.
+type mintCountingGen struct {
+	AgentTokenGenerator
+	mints int
+}
+
+func (g *mintCountingGen) SignAgentToken(grant AgentTokenGrant, runID string) (string, *store.AgentCredential, error) {
+	g.mints++
+	return g.AgentTokenGenerator.SignAgentToken(grant, runID)
+}
+
+// assertBrokerReadRefusal checks a broker-record read refusal for verb: the
+// sentinel, the fixed message, no raw store text, not acted on, and the 503
+// body the handlers write.
+func assertBrokerReadRefusal(t *testing.T, err error, verb string) {
+	t.Helper()
 	require.ErrorIs(t, err, errBrokerRecordUnreadable)
-	assert.Equal(t, errBrokerRecordUnreadable.Error(), err.Error(), "the fixed message only")
-	assert.False(t, f.client.createCalled, "no create is sent")
+	assert.Contains(t, err.Error(), brokerRecordUnreadableMessage(verb))
+	assert.NotContains(t, err.Error(), "10.0.0.9", "no raw store text")
 	assert.True(t, isConfirmedStartNotActedOnError(err))
-
 	rec := httptest.NewRecorder()
 	require.True(t, writePreserveWorkspaceCapabilityError(rec, fmt.Errorf("wrapped: %w", err)))
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 	var body ErrorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.Equal(t, ErrCodeUnavailable, body.Error.Code)
-	assert.Equal(t, errBrokerRecordUnreadable.Error(), body.Error.Message)
+	assert.NotContains(t, rec.Body.String(), "10.0.0.9", "no raw store text")
+}
+
+// A start or restart whose broker record cannot be read fails with the
+// fixed, keyless 503 message for its action, sends and mints nothing and
+// writes nothing: a non-NotFound read failure injected at the placement
+// backstop (the one read every guard step judges), and a record missing at
+// the routed start's capability check.
+func TestRoutedStart_BrokerRecordUnreadableIs503(t *testing.T) {
+	setup := func(t *testing.T) (*runDispatchFixture, *mintCountingGen, int64) {
+		f := newRunDispatchFixture(t)
+		neverStarted(f)
+		seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
+		recordCreates(f)
+		gen := &mintCountingGen{AgentTokenGenerator: runTokenGenerator{svc: f.svc}}
+		f.d.SetTokenGenerator(gen)
+		stored, err := f.store.GetAgent(context.Background(), f.agent.ID)
+		require.NoError(t, err)
+		return f, gen, stored.StateVersion
+	}
+	nothingDone := func(t *testing.T, f *runDispatchFixture, gen *mintCountingGen, version int64) {
+		t.Helper()
+		assert.False(t, f.client.createCalled, "no create is sent")
+		assert.False(t, f.client.startCalled, "no plain start")
+		assert.False(t, f.client.restartCalled, "no restart")
+		assert.Equal(t, 0, gen.mints, "no credential is minted")
+		stored, err := f.store.GetAgent(context.Background(), f.agent.ID)
+		require.NoError(t, err)
+		assert.Equal(t, version, stored.StateVersion, "nothing is written")
+	}
+	t.Run("start: read fails at the placement backstop", func(t *testing.T) {
+		f, gen, v := setup(t)
+		f.d.store = failingBrokerReads(f.store)
+		err := f.d.DispatchAgentStart(context.Background(), f.agent, "", false)
+		assertBrokerReadRefusal(t, err, "started")
+		assert.Equal(t, brokerRecordUnreadableMessage("started"), err.Error())
+		nothingDone(t, f, gen, v)
+	})
+	t.Run("restart start leg: the message is the restart's", func(t *testing.T) {
+		f, gen, v := setup(t)
+		f.d.store = failingBrokerReads(f.store)
+		err := f.d.DispatchAgentStart(withRestartStartLeg(context.Background()), f.agent, "", false)
+		assertBrokerReadRefusal(t, err, "restarted")
+		assert.Equal(t, brokerRecordUnreadableMessage("restarted"), err.Error())
+		nothingDone(t, f, gen, v)
+	})
+	t.Run("restart: the message is the restart's", func(t *testing.T) {
+		f, gen, v := setup(t)
+		f.d.store = failingBrokerReads(f.store)
+		err := f.d.DispatchAgentRestart(context.Background(), f.agent)
+		assertBrokerReadRefusal(t, err, "restarted")
+		assert.Equal(t, brokerRecordUnreadableMessage("restarted"), err.Error())
+		nothingDone(t, f, gen, v)
+	})
+	t.Run("record missing at the capability check", func(t *testing.T) {
+		f, gen, _ := setup(t)
+		f.agent.RuntimeBrokerID = tid("broker-missing")
+		err := f.d.DispatchAgentStart(context.Background(), f.agent, "", false)
+		assertBrokerReadRefusal(t, err, "started")
+		assert.False(t, f.client.createCalled, "no create is sent")
+		assert.Equal(t, 0, gen.mints, "no credential is minted")
+	})
+}
+
+// Through the HTTP lifecycle API: a start whose broker record cannot be
+// read answers 503 with the fixed body, no raw store text, nothing sent,
+// and the agent stays stopped.
+func TestLifecycleHTTP_BrokerRecordUnreadableIs503(t *testing.T) {
+	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	project, broker := newEmptyPerAgentHandlerProject(t, s, "route-read-err", true)
+	grantPreserveWorkspaceCreate(t, s, broker.ID)
+	agent := newQuotaTestAgent(t, s, broker, project, "route-read-err", state.PhaseStopped)
+	require.NoError(t, s.CreateEnvVar(context.Background(), &store.EnvVar{
+		ID: uuid.NewString(), Key: failClosedKey, Value: failClosedValue,
+		Scope: store.ScopeProject, ScopeID: project.ID, InjectionMode: store.InjectionModeAsNeeded,
+	}))
+	client := &mockRuntimeBrokerClient{}
+	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(failingBrokerReads(s), client, false, slog.Default()))
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", nil)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	var body ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, ErrCodeUnavailable, body.Error.Code)
+	assert.Equal(t, brokerRecordUnreadableMessage("started"), body.Error.Message)
+	assert.NotContains(t, rec.Body.String(), "10.0.0.9", "no raw store text")
+	assert.False(t, client.createCalled || client.startCalled, "nothing is sent")
+	stored, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseStopped), stored.Phase, "the agent stays stopped")
+}
+
+// On the owner node, a routed start's create or finalize_env whose broker
+// record cannot be read is refused with the same fixed message before
+// anything runs, with no raw store text.
+func TestCrossNode_OwnerBrokerRecordUnreadable(t *testing.T) {
+	for _, op := range []string{"create", "finalize_env"} {
+		t.Run(op, func(t *testing.T) {
+			f := newCrossNodeFixture(t, nil, false)
+			f.owner.store = failingBrokerReads(f.store)
+			var raw []byte
+			var err error
+			if op == "create" {
+				raw, err = json.Marshal(&CreateWithGatherDispatchArgs{Synchronous: true, PreserveWorkspace: true, Task: "fake-routed-task"})
+				require.NoError(t, err)
+				_, err = f.owner.execDispatchCreate(context.Background(), store.BrokerDispatch{AgentID: f.agent.ID, Args: string(raw)})
+			} else {
+				raw, err = json.Marshal(&FinalizeEnvDispatchArgs{Synchronous: true, PreserveWorkspace: true, Task: "fake-routed-task"})
+				require.NoError(t, err)
+				_, err = f.owner.execDispatchFinalizeEnv(context.Background(), store.BrokerDispatch{AgentID: f.agent.ID, Args: string(raw)})
+			}
+			assertBrokerReadRefusal(t, err, "started")
+			f.ownerDisp.recMu.Lock()
+			defer f.ownerDisp.recMu.Unlock()
+			assert.Nil(t, f.ownerDisp.createAsyncOptIn, "no create ran")
+			assert.Nil(t, f.ownerDisp.finalizeAsyncOptIn, "no finalize ran")
+		})
+	}
+}
+
+// The owner node runs the requester's start backstops before applying a
+// routed start (with the hub's real dispatcher): a standing refusal wins
+// over an old broker's 412, an agent with no broker assigned is refused,
+// and nothing is sent or minted.
+func TestCrossNode_OwnerRunsStartGuardsFirst(t *testing.T) {
+	setup := func(t *testing.T) (*Server, *mockRuntimeBrokerClient, *HTTPAgentDispatcher, *store.Agent, store.Store) {
+		cs := entadapter.NewCompositeStore(enttest.NewClient(t))
+		owner := &Server{store: cs, instanceID: "hub-owner-" + uuid.NewString()[:8], agentLifecycleLog: slog.Default()}
+		client := &mockRuntimeBrokerClient{}
+		hd := NewHTTPAgentDispatcherWithClient(cs, client, false, slog.Default())
+		owner.SetDispatcher(hd)
+		hd.SetRequiredStandingCheck(func(context.Context, *store.Agent) error { return nil })
+		agent := seedAgentWithBrokerID(t, cs, uuid.NewString())
+		return owner, client, hd, agent, cs
+	}
+	args := func(t *testing.T) string {
+		raw, err := json.Marshal(&CreateWithGatherDispatchArgs{Synchronous: true, PreserveWorkspace: true})
+		require.NoError(t, err)
+		return string(raw)
+	}
+	t.Run("standing refusal wins over the capability refusal", func(t *testing.T) {
+		owner, client, hd, agent, _ := setup(t)
+		hd.SetRequiredStandingCheck(func(context.Context, *store.Agent) error { return errors.New("fake hold") })
+		gen := &mintCountingGen{AgentTokenGenerator: runTokenGenerator{}}
+		hd.SetTokenGenerator(gen)
+		_, err := owner.execDispatchCreate(context.Background(), store.BrokerDispatch{AgentID: agent.ID, Args: args(t)})
+		require.ErrorIs(t, err, ErrAgentNotInStanding)
+		assert.NotErrorIs(t, err, errBrokerLacksPreserveWorkspace)
+		assert.False(t, client.createCalled, "nothing is sent")
+		assert.Equal(t, 0, gen.mints, "no credential is minted")
+	})
+	t.Run("no runtime broker assigned", func(t *testing.T) {
+		owner, client, _, agent, cs := setup(t)
+		stored, err := cs.GetAgent(context.Background(), agent.ID)
+		require.NoError(t, err)
+		stored.RuntimeBrokerID = ""
+		require.NoError(t, cs.UpdateAgent(context.Background(), stored))
+		_, err = owner.execDispatchCreate(context.Background(), store.BrokerDispatch{AgentID: agent.ID, Args: args(t)})
+		require.ErrorIs(t, err, errNoRuntimeBrokerAssigned)
+		assert.False(t, client.createCalled, "nothing is sent")
+	})
+	t.Run("an old broker is refused after the guards pass", func(t *testing.T) {
+		owner, client, _, agent, _ := setup(t)
+		_, err := owner.execDispatchCreate(context.Background(), store.BrokerDispatch{AgentID: agent.ID, Args: args(t)})
+		require.ErrorIs(t, err, errBrokerLacksPreserveWorkspace)
+		assert.False(t, client.createCalled, "nothing is sent")
+	})
 }
 
 // The owner's refusal of a routed start's finalize_env (or create) crosses

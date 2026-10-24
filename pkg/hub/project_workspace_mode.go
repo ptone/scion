@@ -278,11 +278,23 @@ func writePreserveWorkspaceCapabilityError(w http.ResponseWriter, err error) boo
 	case errors.Is(err, errBrokerLacksPreserveWorkspace):
 		writeError(w, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability, errBrokerLacksPreserveWorkspace.Error(), nil)
 	case errors.Is(err, errBrokerRecordUnreadable):
-		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, errBrokerRecordUnreadable.Error(), nil)
+		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, brokerRecordUnreadableText(err), nil)
 	default:
 		return false
 	}
 	return true
+}
+
+// brokerRecordUnreadableText is the fixed message for err, an
+// errBrokerRecordUnreadable error: its action's message when err carries a
+// *brokerRecordReadError, otherwise (a refusal relayed from another hub
+// node, always a routed start's) the start's.
+func brokerRecordUnreadableText(err error) string {
+	var readErr *brokerRecordReadError
+	if errors.As(err, &readErr) {
+		return readErr.Error()
+	}
+	return errBrokerRecordUnreadable.Error()
 }
 
 // requireEmptyPerAgentBrokerCapability is the handler-side gate: it loads

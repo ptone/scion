@@ -119,13 +119,14 @@ func TestCreateStartFailure_PreserveWorkspaceKeepsWorkspaceAndBranch(t *testing.
 }
 
 // The control: without preserveWorkspace the same failure still cleans up
-// the agent's files, so the test above reaches the cleanup branch.
+// the agent's files and deletes its branch, so the test above reaches the
+// cleanup branch.
 func TestCreateStartFailure_PlainCreateStillCleansUp(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Fatalf("git is required: %v", err)
 	}
 	srv, mgr, projectPath, agentDir := newSyncStartTestServer(t)
-	_, workspace := seedAgentWorktree(t, projectPath, agentDir)
+	repo, workspace := seedAgentWorktree(t, projectPath, agentDir)
 
 	mgr.starts <- func(context.Context, api.StartOptions) (*api.AgentInfo, error) {
 		return nil, errors.New("fake image pull failed")
@@ -136,6 +137,9 @@ func TestCreateStartFailure_PlainCreateStillCleansUp(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(workspace, preserveCleanupFile)); !os.IsNotExist(err) {
 		t.Fatalf("a plain create's failure should clean up the agent's files (stat err %v)", err)
+	}
+	if out := gitPreserveT(t, repo, "branch", "--list", "same-name"); out != "" {
+		t.Errorf("a plain create's failure should delete the agent branch (git branch --list: %q)", out)
 	}
 }
 
