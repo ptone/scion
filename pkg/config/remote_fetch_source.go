@@ -391,7 +391,8 @@ func canonicalProxyAddr(p *url.URL) string {
 			port = "80"
 		}
 	}
-	return net.JoinHostPort(p.Hostname(), port)
+	// http.Transport dials the IDNA (lowercase ASCII) form of the host.
+	return net.JoinHostPort(strings.ToLower(p.Hostname()), port)
 }
 
 // maxFetchRedirects bounds redirects for remote template downloads.
