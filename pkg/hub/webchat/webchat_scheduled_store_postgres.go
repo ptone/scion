@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hub
+package webchat
 
 import (
 	"context"
@@ -67,7 +67,7 @@ func (s *pgWebChatStore) initScheduledMessages() error {
 	if _, err := s.db.Exec(pgScheduledMessageDDL); err != nil {
 		return fmt.Errorf("webchat store: create scheduled message table: %w", err)
 	}
-	if err := s.markMigrationCompleted(scheduledMessageTableMigration); err != nil {
+	if err := s.markMigrationCompleted(ScheduledMessageTableMigration); err != nil {
 		return fmt.Errorf("webchat store: record scheduled message migration: %w", err)
 	}
 	return nil

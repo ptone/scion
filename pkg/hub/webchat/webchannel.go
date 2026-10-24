@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hub
+package webchat
 
 import (
 	"context"
@@ -91,7 +91,7 @@ func (b *webChannelBus) Publish(ctx context.Context, topic string, msg *messages
 			// Registry rows may not exist yet when the agent speaks first in
 			// a DM. TouchDMActivity is a plain UPDATE, so register the
 			// participants before touching or the write is a silent no-op.
-			registerDMParticipants(ctx, b.store, msg.ThreadID)
+			RegisterDMParticipants(ctx, b.store, msg.ThreadID)
 
 			// DM thread — update both participant rows.
 			if err := b.store.TouchDMActivity(ctx, msg.ThreadID, ""); err != nil {
@@ -216,14 +216,14 @@ func identityFromTopic(topic string, msg *messages.StructuredMessage) (userID, p
 	return userID, projectID, agentID, true
 }
 
-// registerDMParticipants upserts one webchat_dm row per participant of a DM
+// RegisterDMParticipants upserts one webchat_dm row per participant of a DM
 // conversation key (dm:<kind1>:<id1>:<kind2>:<id2>). It is a no-op for a nil
 // store or a malformed key.
 //
 // Registration must happen before any TouchDMActivity call: TouchDMActivity is
 // a plain UPDATE and silently affects zero rows when the registry rows do not
 // exist yet — which is the case when an agent is the first to speak in a DM.
-func registerDMParticipants(ctx context.Context, wcs WebChatStore, key string) {
+func RegisterDMParticipants(ctx context.Context, wcs WebChatStore, key string) {
 	if wcs == nil {
 		return
 	}

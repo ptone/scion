@@ -14,22 +14,24 @@
 
 package hub
 
-import (
-	"testing"
+// Aliases for symbols moved to
+// github.com/GoogleCloudPlatform/scion/pkg/hub/webchat
+// by hack/pkgmove, so existing references in package hub keep compiling.
 
-	"github.com/stretchr/testify/require"
+import (
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/webchat"
 )
 
-// TestDMPromotedEvent verifies the DMPromotedEvent struct serialization.
-func TestDMPromotedEvent(t *testing.T) {
-	evt := DMPromotedEvent{
-		OldConversationKey: "dm:agent:a1:user:u1",
-		NewTopic: WebChatTopic{
-			ID:        "topic-1",
-			ProjectID: "proj-1",
-			Name:      "Test Thread",
-		},
-	}
-	require.Equal(t, "dm:agent:a1:user:u1", evt.OldConversationKey)
-	require.Equal(t, "topic-1", evt.NewTopic.ID)
+const (
+	scheduledMessageTableMigration = webchat.ScheduledMessageTableMigration
+)
+
+func generateSnippet(p0 string, p1 string, p2 int) string {
+	return webchat.GenerateSnippet(p0, p1, p2)
+}
+
+func sqliteScheduledTime(p0 time.Time) string {
+	return webchat.SqliteScheduledTime(p0)
 }

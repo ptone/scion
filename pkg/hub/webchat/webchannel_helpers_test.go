@@ -14,7 +14,7 @@
 
 //go:build !no_sqlite
 
-package hub
+package webchat
 
 import (
 	"database/sql"

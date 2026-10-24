@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hub
+package webchat
 
 import (
 	"context"
@@ -72,7 +72,7 @@ type ScheduledChatMessage struct {
 }
 
 // ScheduledMessageStore persists scheduled chat messages. Both webchat
-// store dialects implement it; obtain it with scheduledMessageStoreFrom.
+// store dialects implement it; obtain it with ScheduledMessageStoreFrom.
 //
 // Every per-message read and mutation that a user can reach takes the
 // sender's user ID and matches it, so one user can never see or change
@@ -158,24 +158,24 @@ type ScheduledMessageStore interface {
 	DeleteScheduledMessagesForSender(ctx context.Context, senderUserID string) (int64, error)
 }
 
-// scheduledMessageStoreFrom returns the scheduled-message store behind a
+// ScheduledMessageStoreFrom returns the scheduled-message store behind a
 // webchat store, or nil when it has none (test doubles).
-func scheduledMessageStoreFrom(wcs WebChatStore) ScheduledMessageStore {
+func ScheduledMessageStoreFrom(wcs WebChatStore) ScheduledMessageStore {
 	if sms, ok := wcs.(ScheduledMessageStore); ok {
 		return sms
 	}
 	return nil
 }
 
-// scheduledMessageTableMigration names the webchat_migrations row that
+// ScheduledMessageTableMigration names the webchat_migrations row that
 // records the creation of webchat_scheduled_message.
-const scheduledMessageTableMigration = "scheduled_message_table"
+const ScheduledMessageTableMigration = "scheduled_message_table"
 
 // ---------------------------------------------------------------------------
 // SQLite implementation
 // ---------------------------------------------------------------------------
 
-// sqliteScheduledTime formats a time in the canonical webchat TEXT form
+// SqliteScheduledTime formats a time in the canonical webchat TEXT form
 // (UTC RFC 3339 with trimmed fractional seconds), like the other webchat_*
 // tables.
 //
@@ -185,7 +185,7 @@ const scheduledMessageTableMigration = "scheduled_message_table"
 // and compare correctly as strings. A message is never due before its
 // fire time; it can be due up to one second after it (then picked up by the
 // next sweep tick).
-func sqliteScheduledTime(t time.Time) string {
+func SqliteScheduledTime(t time.Time) string {
 	return t.UTC().Format(time.RFC3339Nano)
 }
 
@@ -240,7 +240,7 @@ func (s *sqliteWebChatStore) initScheduledMessages() error {
 	if _, err := s.db.Exec(sqliteScheduledMessageDDL); err != nil {
 		return fmt.Errorf("webchat store: create scheduled message table: %w", err)
 	}
-	done, err := s.migrationCompleted(scheduledMessageTableMigration)
+	done, err := s.migrationCompleted(ScheduledMessageTableMigration)
 	if err != nil {
 		return fmt.Errorf("webchat store: scheduled message migration: %w", err)
 	}
@@ -248,7 +248,7 @@ func (s *sqliteWebChatStore) initScheduledMessages() error {
 		return nil
 	}
 	const query = `INSERT INTO webchat_migrations (name, completed_at) VALUES (?, ?) ON CONFLICT (name) DO NOTHING`
-	if _, err := s.db.Exec(query, scheduledMessageTableMigration, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if _, err := s.db.Exec(query, ScheduledMessageTableMigration, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return fmt.Errorf("webchat store: record scheduled message migration: %w", err)
 	}
 	return nil
@@ -286,8 +286,8 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (sender_user_id, idempotency_key) DO NOTHING
 `
 	res, err := s.db.ExecContext(ctx, query, m.ID, m.SenderUserID, m.ConversationKey, nullableString(m.ProjectID),
-		m.Content, nullableString(m.ReplyToID), m.IdempotencyKey, sqliteScheduledTime(scheduledFireTime(m.FireAt)), m.Status,
-		sqliteScheduledTime(m.CreatedAt), sqliteScheduledTime(m.UpdatedAt))
+		m.Content, nullableString(m.ReplyToID), m.IdempotencyKey, SqliteScheduledTime(scheduledFireTime(m.FireAt)), m.Status,
+		SqliteScheduledTime(m.CreatedAt), SqliteScheduledTime(m.UpdatedAt))
 	if err != nil {
 		return nil, false, fmt.Errorf("webchat store: create scheduled message: %w", err)
 	}
@@ -376,7 +376,7 @@ func (s *sqliteWebChatStore) CancelScheduledMessage(ctx context.Context, senderU
 	return execOneRow("cancel scheduled message")(s.db.ExecContext(ctx,
 		`UPDATE webchat_scheduled_message SET status = ?, updated_at = ?
 		  WHERE id = ? AND sender_user_id = ? AND status = ?`,
-		ScheduledMessageCancelled, sqliteScheduledTime(now), id, senderUserID, ScheduledMessagePending))
+		ScheduledMessageCancelled, SqliteScheduledTime(now), id, senderUserID, ScheduledMessagePending))
 }
 
 func (s *sqliteWebChatStore) ListDueScheduledMessages(ctx context.Context, now time.Time, limit int) ([]ScheduledChatMessage, error) {
@@ -389,7 +389,7 @@ func (s *sqliteWebChatStore) ListDueScheduledMessages(ctx context.Context, now t
 		  ) AS due
 		  WHERE sender_rank = 1
 		  ORDER BY fire_at, id LIMIT ?`,
-		ScheduledMessagePending, sqliteScheduledTime(now.UTC().Truncate(time.Second)), limit)
+		ScheduledMessagePending, SqliteScheduledTime(now.UTC().Truncate(time.Second)), limit)
 	if err != nil {
 		return nil, fmt.Errorf("webchat store: list due scheduled messages: %w", err)
 	}
@@ -401,7 +401,7 @@ func (s *sqliteWebChatStore) NextDueScheduledMessage(ctx context.Context, sender
 		`SELECT `+sqliteScheduledColumns+` FROM webchat_scheduled_message
 		  WHERE sender_user_id = ? AND status = ? AND fire_at <= ?
 		  ORDER BY fire_at, id LIMIT 1`,
-		senderUserID, ScheduledMessagePending, sqliteScheduledTime(now.UTC().Truncate(time.Second))))
+		senderUserID, ScheduledMessagePending, SqliteScheduledTime(now.UTC().Truncate(time.Second))))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -412,7 +412,7 @@ func (s *sqliteWebChatStore) NextDueScheduledMessage(ctx context.Context, sender
 }
 
 func (s *sqliteWebChatStore) ClaimScheduledMessage(ctx context.Context, id string, now time.Time) (bool, error) {
-	ts := sqliteScheduledTime(now)
+	ts := SqliteScheduledTime(now)
 	return execOneRow("claim scheduled message")(s.db.ExecContext(ctx,
 		`UPDATE webchat_scheduled_message SET status = ?, claimed_at = ?, updated_at = ?
 		  WHERE id = ? AND status = ?`,
@@ -423,21 +423,21 @@ func (s *sqliteWebChatStore) ReleaseScheduledMessage(ctx context.Context, id str
 	return execOneRow("release scheduled message")(s.db.ExecContext(ctx,
 		`UPDATE webchat_scheduled_message SET status = ?, claimed_at = NULL, updated_at = ?
 		  WHERE id = ? AND status = ? AND claimed_at = ?`,
-		ScheduledMessagePending, sqliteScheduledTime(now), id, ScheduledMessageSending, sqliteScheduledTime(claimedAt)))
+		ScheduledMessagePending, SqliteScheduledTime(now), id, ScheduledMessageSending, SqliteScheduledTime(claimedAt)))
 }
 
 func (s *sqliteWebChatStore) MarkScheduledMessageSent(ctx context.Context, id, messageID string, claimedAt, now time.Time) (bool, error) {
 	return execOneRow("mark scheduled message sent")(s.db.ExecContext(ctx,
 		`UPDATE webchat_scheduled_message SET status = ?, message_id = ?, updated_at = ?
 		  WHERE id = ? AND status = ? AND claimed_at = ?`,
-		ScheduledMessageSent, messageID, sqliteScheduledTime(now), id, ScheduledMessageSending, sqliteScheduledTime(claimedAt)))
+		ScheduledMessageSent, messageID, SqliteScheduledTime(now), id, ScheduledMessageSending, SqliteScheduledTime(claimedAt)))
 }
 
 func (s *sqliteWebChatStore) MarkScheduledMessageFailed(ctx context.Context, id, reason string, claimedAt, now time.Time) (bool, error) {
 	return execOneRow("mark scheduled message failed")(s.db.ExecContext(ctx,
 		`UPDATE webchat_scheduled_message SET status = ?, failure_reason = ?, updated_at = ?
 		  WHERE id = ? AND status = ? AND claimed_at = ?`,
-		ScheduledMessageFailed, reason, sqliteScheduledTime(now), id, ScheduledMessageSending, sqliteScheduledTime(claimedAt)))
+		ScheduledMessageFailed, reason, SqliteScheduledTime(now), id, ScheduledMessageSending, SqliteScheduledTime(claimedAt)))
 }
 
 func (s *sqliteWebChatStore) SendNowScheduledMessage(ctx context.Context, senderUserID, id string, fireAt, now time.Time) (bool, error) {
@@ -445,7 +445,7 @@ func (s *sqliteWebChatStore) SendNowScheduledMessage(ctx context.Context, sender
 		`UPDATE webchat_scheduled_message
 		    SET status = ?, fire_at = ?, failure_reason = NULL, message_id = NULL, claimed_at = NULL, updated_at = ?
 		  WHERE id = ? AND sender_user_id = ? AND status = ? AND failure_reason IN (?, ?)`,
-		ScheduledMessagePending, sqliteScheduledTime(scheduledFireTime(fireAt)), sqliteScheduledTime(now),
+		ScheduledMessagePending, SqliteScheduledTime(scheduledFireTime(fireAt)), SqliteScheduledTime(now),
 		id, senderUserID, ScheduledMessageFailed, ScheduledFailureMissed, ScheduledFailureInterrupted))
 }
 
@@ -453,7 +453,7 @@ func (s *sqliteWebChatStore) DismissScheduledMessage(ctx context.Context, sender
 	return execOneRow("dismiss scheduled message")(s.db.ExecContext(ctx,
 		`UPDATE webchat_scheduled_message SET status = ?, updated_at = ?
 		  WHERE id = ? AND sender_user_id = ? AND status = ?`,
-		ScheduledMessageCancelled, sqliteScheduledTime(now), id, senderUserID, ScheduledMessageFailed))
+		ScheduledMessageCancelled, SqliteScheduledTime(now), id, senderUserID, ScheduledMessageFailed))
 }
 
 func (s *sqliteWebChatStore) ListStuckScheduledMessages(ctx context.Context, claimedBefore time.Time, limit int) ([]ScheduledChatMessage, error) {
@@ -492,8 +492,8 @@ func (s *sqliteWebChatStore) MarkScheduledMessageInterrupted(ctx context.Context
 	return execOneRow("mark scheduled message interrupted")(s.db.ExecContext(ctx,
 		`UPDATE webchat_scheduled_message SET status = ?, failure_reason = ?, updated_at = ?
 		  WHERE id = ? AND status = ? AND claimed_at = ?`,
-		ScheduledMessageFailed, ScheduledFailureInterrupted, sqliteScheduledTime(now),
-		id, ScheduledMessageSending, sqliteScheduledTime(claimedAt)))
+		ScheduledMessageFailed, ScheduledFailureInterrupted, SqliteScheduledTime(now),
+		id, ScheduledMessageSending, SqliteScheduledTime(claimedAt)))
 }
 
 func (s *sqliteWebChatStore) PurgeScheduledMessages(ctx context.Context, finalBefore, failedBefore time.Time) (int64, error) {
@@ -502,8 +502,8 @@ func (s *sqliteWebChatStore) PurgeScheduledMessages(ctx context.Context, finalBe
 	res, err := s.db.ExecContext(ctx,
 		`DELETE FROM webchat_scheduled_message
 		  WHERE (status IN (?, ?) AND updated_at < ?) OR (status = ? AND updated_at < ?)`,
-		ScheduledMessageSent, ScheduledMessageCancelled, sqliteScheduledTime(finalBefore.UTC().Truncate(time.Second)),
-		ScheduledMessageFailed, sqliteScheduledTime(failedBefore.UTC().Truncate(time.Second)))
+		ScheduledMessageSent, ScheduledMessageCancelled, SqliteScheduledTime(finalBefore.UTC().Truncate(time.Second)),
+		ScheduledMessageFailed, SqliteScheduledTime(failedBefore.UTC().Truncate(time.Second)))
 	return scheduledRowsAffected(res, err, "purge scheduled messages")
 }
 

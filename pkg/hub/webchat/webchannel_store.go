@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hub
+package webchat
 
 import (
 	"context"
@@ -1723,7 +1723,7 @@ SELECT id, project_id, COALESCE(thread_id, ''), sender, msg, created
 			return nil, "", fmt.Errorf("webchat store: scan search result: %w", err)
 		}
 		r.Timestamp = parseSQLiteTime(createdStr)
-		r.Snippet = generateSnippet(r.Content, filter.Query, 80)
+		r.Snippet = GenerateSnippet(r.Content, filter.Query, 80)
 		results = append(results, r)
 	}
 	if err := rows.Err(); err != nil {
@@ -2382,10 +2382,10 @@ func nullableString(s string) interface{} {
 	return s
 }
 
-// generateSnippet extracts a snippet around the first case-insensitive match
+// GenerateSnippet extracts a snippet around the first case-insensitive match
 // of query in content, with approximately contextLen characters of context.
 // The match is wrapped in <mark> tags for client-side highlighting.
-func generateSnippet(content, query string, contextLen int) string {
+func GenerateSnippet(content, query string, contextLen int) string {
 	if query == "" || content == "" {
 		return truncateSnippet(content, contextLen)
 	}

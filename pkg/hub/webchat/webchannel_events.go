@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hub
+package webchat
 
 // TopicEvent is published on project.<id>.chat.topic when a topic is
 // created, updated, or deleted. It carries the action and the full

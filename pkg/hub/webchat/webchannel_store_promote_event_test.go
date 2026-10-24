@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hub
+package webchat
 
 import (
 	"testing"
@@ -20,23 +20,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestParseSQLiteTime(t *testing.T) {
-	tests := []struct {
-		name  string
-		input string
-		zero  bool
-	}{
-		{"empty", "", true},
-		{"RFC3339Nano", "2026-01-01T00:00:00Z", false},
-		{"RFC3339Nano with nanos", "2026-01-01T00:00:00.123456789Z", false},
-		{"SQLite format with tz", "2026-01-01 00:00:00.000000000-07:00", false},
-		{"SQLite format no tz", "2026-01-01 00:00:00.000000000", false},
-		{"garbage", "not-a-time", true},
+// TestDMPromotedEvent verifies the DMPromotedEvent struct serialization.
+func TestDMPromotedEvent(t *testing.T) {
+	evt := DMPromotedEvent{
+		OldConversationKey: "dm:agent:a1:user:u1",
+		NewTopic: WebChatTopic{
+			ID:        "topic-1",
+			ProjectID: "proj-1",
+			Name:      "Test Thread",
+		},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := parseSQLiteTime(tt.input)
-			require.Equal(t, tt.zero, result.IsZero(), "input: %q", tt.input)
-		})
-	}
+	require.Equal(t, "dm:agent:a1:user:u1", evt.OldConversationKey)
+	require.Equal(t, "topic-1", evt.NewTopic.ID)
 }

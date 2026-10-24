@@ -14,7 +14,7 @@
 
 //go:build !no_sqlite
 
-package hub
+package webchat
 
 // DEF-157 tests: PromoteDM must write a derived external_ref via
 // messaging.ThreadConversationExternalRef, not ''.
