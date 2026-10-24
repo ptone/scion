@@ -76,20 +76,22 @@ func (nb NamedEventBus) boundedObserver() bool {
 	return nb.Observer && !nb.inProcess()
 }
 
-// spokeState tracks the observer call still running after its Publish
-// stopped waiting for it (the overrun), and how many publishes were skipped
-// because of it.
+// spokeState counts the observer calls still running after their Publish
+// stopped waiting for them (overruns), and how many publishes were skipped
+// because of them.
 type spokeState struct {
 	mu       sync.Mutex
-	overrun  *observerCall
+	overruns int
 	skipped  int64
 	lastWarn time.Time
 }
 
 // observerCall is one call to a bounded observer spoke. done is closed,
-// under spokeState.mu, when the call returns.
+// under spokeState.mu, when the call returns; overran is set, under the
+// same lock, when its Publish stopped waiting for it first.
 type observerCall struct {
-	done chan struct{}
+	done    chan struct{}
+	overran bool
 }
 
 // Default publish bounds of a FanOutEventBus.
@@ -115,9 +117,11 @@ const observerSkipWarnInterval = 10 * time.Second
 // SpokePublishTimeout. Publish waits for non-observer and in-process spokes
 // until they return. It waits for an out-of-process observer spoke at most
 // ObserverWait; that call runs on a ctx detached from the caller's
-// cancellation and bounded by ObserverCallTimeout. While such a call is
-// still running after its Publish returned, later publishes skip that spoke
-// (at most one overrun per spoke) and are counted.
+// cancellation and bounded by ObserverCallTimeout. While any such call is
+// still running after its Publish returned (an overrun), later publishes
+// skip that spoke and are counted. The overruns of one spoke are the calls
+// that were already running when the first of them overran, so their
+// number is bounded by the publishes started within one ObserverWait.
 type FanOutEventBus struct {
 	mu    sync.RWMutex
 	buses []NamedEventBus
@@ -136,6 +140,7 @@ type FanOutEventBus struct {
 
 // NewFanOutEventBus creates a FanOutEventBus that delegates to the given children.
 func NewFanOutEventBus(buses []NamedEventBus, log *slog.Logger) *FanOutEventBus {
+	buses = append([]NamedEventBus(nil), buses...)
 	for i := range buses {
 		buses[i].state = &spokeState{}
 	}
@@ -218,9 +223,10 @@ func (f *FanOutEventBus) publishSpokes(ctx context.Context, topic string, msg *m
 			case <-o.call.done:
 				results[o.idx].err = *o.errp
 			default:
-				// Still running: it becomes the spoke's overrun, and
-				// later publishes skip the spoke until it returns.
-				o.state.overrun = o.call
+				// Still running: an overrun. Later publishes skip the
+				// spoke until every overrun has returned.
+				o.call.overran = true
+				o.state.overruns++
 				f.log.Warn("observer publish still running after wait bound",
 					"bus", spokes[o.idx].Name, "topic", topic, "wait", f.ObserverWait)
 			}
@@ -233,14 +239,16 @@ func (f *FanOutEventBus) publishSpokes(ctx context.Context, topic string, msg *m
 
 // startObserverCall starts a call to a bounded observer spoke, or returns a
 // nil call when the spoke still has an overrun (the publish is skipped and
-// counted). The call's error is stored in *errp before done is closed.
+// counted). Calls started concurrently, before any of them overran, all
+// run; once one overruns, no new call starts until every overrun has
+// returned. The call's error is stored in *errp before done is closed.
 func (f *FanOutEventBus) startObserverCall(ctx context.Context, topic string, msg *messages.StructuredMessage, nb NamedEventBus) (*observerCall, *error) {
 	st := nb.state
 	if st == nil {
 		st = &spokeState{}
 	}
 	st.mu.Lock()
-	if st.overrun != nil {
+	if st.overruns > 0 {
 		st.skipped++
 		skipped := st.skipped
 		warn := time.Since(st.lastWarn) >= observerSkipWarnInterval
@@ -264,9 +272,9 @@ func (f *FanOutEventBus) startObserverCall(ctx context.Context, topic string, ms
 		err := nb.Bus.Publish(callCtx, topic, msg)
 		st.mu.Lock()
 		*errp = err
-		overran := st.overrun == call
+		overran := call.overran
 		if overran {
-			st.overrun = nil
+			st.overruns--
 		}
 		close(call.done)
 		st.mu.Unlock()

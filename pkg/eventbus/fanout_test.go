@@ -1109,3 +1109,129 @@ func TestFanOut_ReplaceSpokeReturnsReplayError(t *testing.T) {
 		t.Fatalf("AddSpoke = %v, HasSpoke = %v; want replay error and the spoke added", err, f.HasSpoke("other"))
 	}
 }
+
+// tokenBus is an EventBus whose Publish blocks until it takes a token.
+type tokenBus struct {
+	tokens  chan struct{}
+	started chan struct{}
+	ended   chan struct{}
+	calls   atomic.Int32
+}
+
+func newTokenBus() *tokenBus {
+	return &tokenBus{tokens: make(chan struct{}, 64), started: make(chan struct{}, 64), ended: make(chan struct{}, 64)}
+}
+
+func (b *tokenBus) Publish(ctx context.Context, _ string, _ *messages.StructuredMessage) error {
+	b.calls.Add(1)
+	b.started <- struct{}{}
+	defer func() { b.ended <- struct{}{} }()
+	select {
+	case <-b.tokens:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (b *tokenBus) Subscribe(string, EventHandler) (Subscription, error) {
+	return &stubSubscription{}, nil
+}
+
+func (b *tokenBus) Close() error { return nil }
+
+func TestFanOut_ConcurrentOverrunsSkipUntilAllReturn(t *testing.T) {
+	const n = 10
+	hung := newTokenBus()
+	f := newBoundedFanOut([]NamedEventBus{{Name: "relay", Bus: hung, Observer: true}})
+	f.ObserverWait = 500 * time.Millisecond
+	msg := messages.NewInstruction("user:alice", "agent:bot", "hi")
+
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = f.Publish(context.Background(), "test.topic", msg)
+		}()
+	}
+	for i := 0; i < n; i++ {
+		<-hung.started
+	}
+	wg.Wait() // every Publish stopped waiting: n overruns
+
+	publish := func() {
+		if err := f.Publish(context.Background(), "test.topic", msg); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+	}
+	publish()
+	if got := hung.calls.Load(); got != n {
+		t.Fatalf("calls = %d after the overruns started, want %d", got, n)
+	}
+
+	// The skip lasts until every overrun has returned, not just one.
+	for i := 0; i < n-1; i++ {
+		hung.tokens <- struct{}{}
+		<-hung.ended
+	}
+	publish()
+	if got := hung.calls.Load(); got != n {
+		t.Fatalf("calls = %d with one overrun left, want %d", got, n)
+	}
+	if got := f.ObserverSkipped("relay"); got != 2 {
+		t.Fatalf("ObserverSkipped = %d, want 2", got)
+	}
+
+	hung.tokens <- struct{}{}
+	<-hung.ended
+	hung.tokens <- struct{}{} // for the next call
+	publish()
+	if got := hung.calls.Load(); got != n+1 {
+		t.Fatalf("calls = %d after all overruns returned, want %d", got, n+1)
+	}
+}
+
+// recordingHandler is a slog.Handler that keeps the records it handles.
+type recordingHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *recordingHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *recordingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, r.Clone())
+	return nil
+}
+
+func (h *recordingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *recordingHandler) WithGroup(string) slog.Handler      { return h }
+
+func TestFanOut_DefaultCapLogsError(t *testing.T) {
+	hung := newBlockingBus()
+	defer close(hung.release)
+	rec := &recordingHandler{}
+	f := NewFanOutEventBus([]NamedEventBus{{Name: "relay", Bus: hung}}, slog.New(rec))
+	f.SpokePublishTimeout = 50 * time.Millisecond
+	_ = f.Publish(context.Background(), "test.topic", messages.NewInstruction("user:alice", "agent:bot", "hi"))
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	found := 0
+	for _, r := range rec.records {
+		if r.Level != slog.LevelError || r.Message != "spoke publish hit the default timeout" {
+			continue
+		}
+		attrs := map[string]string{}
+		r.Attrs(func(a slog.Attr) bool { attrs[a.Key] = a.Value.String(); return true })
+		if attrs["bus"] == "relay" && attrs["topic"] == "test.topic" {
+			found++
+		}
+	}
+	if found != 1 {
+		t.Fatalf("got %d default-timeout ERROR records with bus and topic, want 1", found)
+	}
+}
