@@ -59,7 +59,8 @@ func WithTimeout(d time.Duration) TransportOption {
 
 // WithRetry configures automatic retry behavior for Do: up to maxRetries
 // further attempts after a transport error or a 5xx response, waiting wait
-// between attempts. Retries are off by default (MaxRetries 0). A retry
+// between attempts. Retries are off by default (MaxRetries 0); negative
+// values also disable retries, without skipping the initial request. A retry
 // replays the whole request, body included, so only enable this for
 // transports whose Do callers are idempotent; DoNoRetry is never retried.
 // Pinning non-idempotent callers is tracked in ptone/scion#2955.
@@ -103,6 +104,27 @@ func NewTransport(baseURL string, opts ...TransportOption) *Transport {
 	return t
 }
 
+// requestTimeoutKey is the context key of WithRequestTimeout.
+type requestTimeoutKey struct{}
+
+// WithRequestTimeout returns a copy of ctx under which a Transport sends its
+// requests with client timeout d instead of its HTTPClient's Timeout. It
+// is for the few calls that can legitimately outlast the usual timeout,
+// such as a synchronous agent create; other requests keep theirs. A d of
+// zero or less leaves the usual timeout in place.
+func WithRequestTimeout(ctx context.Context, d time.Duration) context.Context {
+	return context.WithValue(ctx, requestTimeoutKey{}, d)
+}
+
+// requestTimeoutFrom returns the client timeout WithRequestTimeout set on
+// ctx, if any (a positive duration). Do and DoNoRetry each send with their
+// own copy of the client and apply it to that copy, so the Transport's
+// HTTPClient is never changed.
+func requestTimeoutFrom(ctx context.Context) (time.Duration, bool) {
+	d, ok := ctx.Value(requestTimeoutKey{}).(time.Duration)
+	return d, ok && d > 0
+}
+
 // Do executes an HTTP request with configured behaviors.
 // Handles retries, timeout, and wraps errors.
 //
@@ -128,9 +150,11 @@ func (t *Transport) Do(ctx context.Context, req *http.Request) (*http.Response, 
 	var err error
 
 	client := t.hubScopedClient()
+	if d, ok := requestTimeoutFrom(ctx); ok {
+		client.Timeout = d
+	}
 	canRewind := bodyRewindable(req)
-	attempts := t.MaxRetries + 1
-	for i := 0; i < attempts; i++ {
+	for i := 0; ; i++ {
 		if i > 0 {
 			timer := time.NewTimer(t.RetryWait)
 			select {
@@ -275,6 +299,10 @@ func (t *Transport) prepare(req *http.Request) error {
 	}
 	if t.Auth != nil {
 		if err := t.Auth.ApplyAuth(req); err != nil {
+			// The HTTP client will not receive req, so it cannot close the body.
+			if req.Body != nil {
+				_ = req.Body.Close()
+			}
 			return fmt.Errorf("failed to apply auth: %w", err)
 		}
 	}
@@ -307,6 +335,9 @@ func (t *Transport) DoNoRetry(ctx context.Context, req *http.Request) (*http.Res
 	once := *base
 	once.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
+	}
+	if d, ok := requestTimeoutFrom(ctx); ok {
+		once.Timeout = d
 	}
 
 	resp, err := once.Do(req.WithContext(ctx))
@@ -595,7 +626,7 @@ func (t *Transport) doJSONVia(ctx context.Context, send func(context.Context, *h
 }
 
 // DecodeResponse reads and decodes a JSON response body.
-// If the response indicates an error (status >= 400), it returns an APIError.
+// A non-2xx response returns an APIError.
 // A 204 No Content returns (nil, nil).
 func DecodeResponse[T any](resp *http.Response) (*T, error) {
 	return decode[T](resp, false)
@@ -618,7 +649,7 @@ func DecodeRequired[T any](resp *http.Response) (*T, error) {
 func decode[T any](resp *http.Response, required bool) (*T, error) {
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return nil, ParseErrorResponse(resp)
 	}
 

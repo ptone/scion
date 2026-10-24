@@ -1659,14 +1659,16 @@ func (b *Bridge) callerHubClient(caller *CallerIdentity) (hubclient.Client, erro
 			base = transportauth.Wrap(base, b.transportSrc, b.transportMode)
 		}
 
+		fedTransport, err := newFederationHeaderTransport(base, caller.RawToken, b.config.Hub.Endpoint)
+		if err != nil {
+			return nil, err
+		}
+
 		// WithHTTPClient must come before WithAuthenticator so that the
 		// federation header transport is set as the base before auth wraps it.
 		opts := []hubclient.Option{
 			hubclient.WithHTTPClient(&http.Client{
-				Transport: &federationHeaderTransport{
-					base:  base,
-					token: caller.RawToken,
-				},
+				Transport: fedTransport,
 			}),
 			hubclient.WithAuthenticator(mintAuth),
 		}

@@ -63,7 +63,7 @@ import (
 // Returns the fresh config, any warnings to surface on the plan (e.g. the
 // legacy-fallback notice), and an error only for a genuine failure (missing
 // AppliedConfig, or a workspace storage timeout from deriveAgentConfig,
-// which wraps errWorkspaceContentTimeout).
+// which wraps errWorkspaceStorageUnavailable).
 func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent, project *store.Project, imageRegistry string) (*store.AgentAppliedConfig, []string, error) {
 	return s.buildPatchedAppliedConfig(ctx, agent, project, fixedImageRegistry(imageRegistry), nil)
 }
@@ -496,6 +496,9 @@ func legacyCreateInputsFromAppliedConfig(old *store.AgentAppliedConfig) (*store.
 		// provisions afresh, so the new generation starts with no clears
 		// (ptone/scion#3906).
 		inline.ClearedFields = nil
+		// So does changed_fields: the reprovision renders every
+		// provision-rendered key afresh (ptone/scion#3982).
+		inline.ChangedFields = nil
 
 		if len(inline.Skills) > 0 {
 			refs := make([]string, 0, len(inline.Skills))
