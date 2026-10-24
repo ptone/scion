@@ -5951,6 +5951,12 @@ func TestHTTPAgentDispatcher_BuildStartEnv_StartAndRestartProduceIdenticalEnv(t 
 	}
 	startEnv := mockClient.lastResolvedEnv
 
+	// A broker restart refuses an agent with as-needed entries until it
+	// can gather them (ptone/scion#6101, design r17 L-1), so the restart is
+	// compared without the as_needed var, which neither path injects.
+	if err := memStore.DeleteEnvVar(ctx, "AS_NEEDED_VAR", "project", tid("project-golden")); err != nil {
+		t.Fatalf("failed to delete the as_needed env var: %v", err)
+	}
 	if err := dispatcher.DispatchAgentRestart(ctx, agent); err != nil {
 		t.Fatalf("DispatchAgentRestart failed: %v", err)
 	}
