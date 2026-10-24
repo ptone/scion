@@ -458,10 +458,16 @@ func TestCrossNode_RoutedStartReplayHandedOffAsFinalizeEnv(t *testing.T) {
 			ID: uuid.NewString(), Key: failClosedKey, Value: failClosedValue,
 			Scope: store.ScopeHub, ScopeID: hubID, InjectionMode: store.InjectionModeAsNeeded,
 		}))
-		stored, err := f.store.GetAgent(context.Background(), f.agent.ID)
+		// Only CreateAgent writes the async-launch opt-in (UpdateAgent
+		// leaves it as it is), so the opted-in agent is created with it.
+		opted := &store.Agent{
+			ID: uuid.NewString(), Name: "test-agent-optin", Slug: "ta-" + uuid.NewString()[:8],
+			ProjectID: f.agent.ProjectID, RuntimeBrokerID: f.agent.RuntimeBrokerID, LaunchAsyncOptIn: true,
+		}
+		require.NoError(t, f.store.CreateAgent(context.Background(), opted))
+		stored, err := f.store.GetAgent(context.Background(), opted.ID)
 		require.NoError(t, err)
-		stored.LaunchAsyncOptIn = true
-		require.NoError(t, f.store.UpdateAgent(context.Background(), stored))
+		require.True(t, stored.LaunchAsyncOptIn, "the stored row is opted in")
 		f.agent = stored
 		return f, &calls
 	}
@@ -600,6 +606,9 @@ func TestRoutedStart_OtherBackstopsRunFirst(t *testing.T) {
 		f := newRunDispatchFixture(t)
 		neverStarted(f)
 		seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
+		// A create launch begins only on a stored row in phase created
+		// (neverStarted sets the phase on the in-memory copy only).
+		require.NoError(t, f.store.UpdateAgentStatus(context.Background(), f.agent.ID, store.AgentStatusUpdate{Phase: string(state.PhaseCreated)}))
 		stale := *f.agent
 		seedLaunch(t, f.store, f.agent, seedInFlight)
 		recordCreates(f)
@@ -1029,7 +1038,10 @@ func TestStartPreChecks_BrokerRecordUnreadableIs503(t *testing.T) {
 		})
 		fault.Arm()
 		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/restart", nil)
-		assert.Equal(t, 1, counting.reads, "the restart placement pre-check is the only broker read: nothing reads it after the refusal")
+		// Two reads: the broker availability check (brokerReachable, which
+		// lets a failed read through) and the restart placement pre-check,
+		// which refuses. Nothing reads the broker record after the refusal.
+		assert.Equal(t, 2, counting.reads, "the availability check and the placement pre-check are the only broker reads")
 		assert.NotContains(t, rec.Body.String(), "10.0.0.9", "no raw store text")
 		require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
 		var body ErrorResponse
