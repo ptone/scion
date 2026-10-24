@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config/pgprovider"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationupdate"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -2691,4 +2692,140 @@ func TestUpdateIntegration_SelfManaged_DevModeRebuild_SourceExists(t *testing.T)
 	if strings.Contains(rr.Body.String(), "go build") {
 		t.Error("response should not leak internal build details")
 	}
+}
+
+// --- broker plugin supervision ---
+
+// supervisionStatusManager is a mockIntegrationManager that also reports
+// supervisor state, as *plugin.Manager does.
+type supervisionStatusManager struct {
+	*mockIntegrationManager
+	status map[string]plugin.SupervisionStatus
+}
+
+func (m *supervisionStatusManager) BrokerSupervision(name string) (plugin.SupervisionStatus, bool) {
+	st, ok := m.status[name]
+	return st, ok
+}
+
+func TestGetIntegrationStatus_SupervisionStates(t *testing.T) {
+	mgr := &supervisionStatusManager{mockIntegrationManager: newMockIntegrationManager(), status: map[string]plugin.SupervisionStatus{
+		"telegram": {State: plugin.SupervisionRestarting, Attempt: 2, DroppedThisOutage: 7},
+		"discord":  {State: plugin.SupervisionFailing, Attempt: 6},
+		"slack":    {State: plugin.SupervisionRunning},
+	}}
+	mgr.infoErr = fmt.Errorf("plugin RPCs must not be called while the session is lost")
+
+	st := getIntegrationStatus(mgr, "telegram")
+	assert.Equal(t, HealthStatusDegraded, st.Health)
+	assert.False(t, st.Connected)
+	assert.Contains(t, st.Message, "attempt 2")
+	assert.Contains(t, st.Message, "7 messages dropped")
+
+	st = getIntegrationStatus(mgr, "discord")
+	assert.Equal(t, HealthStatusUnhealthy, st.Health)
+	assert.False(t, st.Connected)
+
+	// Running (and unsupervised) plugins are queried as before.
+	mgr.infoErr = nil
+	for _, name := range []string{"slack", "unsupervised"} {
+		st = getIntegrationStatus(mgr, name)
+		assert.Equal(t, HealthStatusHealthy, st.Health, name)
+		assert.True(t, st.Connected, name)
+	}
+}
+
+func TestGetPluginHubCreds_TransportKeys(t *testing.T) {
+	srv, _ := testServer(t)
+	creds := srv.getPluginHubCreds(context.Background(), "discord")
+	assert.NotContains(t, creds, "transport_mode")
+	assert.NotContains(t, creds, "transport_audience")
+
+	srv.transportMode = "iap"
+	srv.transportAudience = "/projects/1/global/backendServices/2"
+	creds = srv.getPluginHubCreds(context.Background(), "discord")
+	assert.Equal(t, "iap", creds["transport_mode"])
+	assert.Equal(t, "/projects/1/global/backendServices/2", creds["transport_audience"])
+}
+
+// replayFailingBus is an EventBus whose Subscribe fails.
+type replayFailingBus struct{}
+
+func (replayFailingBus) Publish(context.Context, string, *messages.StructuredMessage) error {
+	return nil
+}
+
+func (replayFailingBus) Subscribe(string, eventbus.EventHandler) (eventbus.Subscription, error) {
+	return nil, fmt.Errorf("plugin session lost")
+}
+
+func (replayFailingBus) Close() error { return nil }
+
+func TestRefreshBrokerSpoke_ReturnsReplayError(t *testing.T) {
+	mgr := newMockIntegrationManager()
+	mgr.plugins["discord"] = map[string]string{}
+	mgr.brokers = map[string]eventbus.EventBus{"discord": replayFailingBus{}}
+
+	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
+		{Name: "inprocess", Bus: eventbus.NewInProcessEventBus(slog.Default())},
+		{Name: "discord", Bus: eventbus.NewInProcessEventBus(slog.Default())},
+	}, slog.Default())
+	_, err := fanout.Subscribe("agent.>", func(context.Context, string, *messages.StructuredMessage) {})
+	require.NoError(t, err)
+	srv := &Server{authzService: NewAuthzService(nil, slog.Default())}
+	srv.SetMessageBrokerProxy(NewMessageBrokerProxy(fanout, nil, nil, nil, slog.Default()))
+
+	err = srv.refreshBrokerSpoke(mgr, "discord")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "plugin session lost")
+	assert.True(t, fanout.HasSpoke("discord"))
+
+	// A missing spoke is added (no subscription to replay fails here).
+	mgr.brokers["telegram"] = eventbus.NewInProcessEventBus(slog.Default())
+	require.NoError(t, srv.refreshBrokerSpoke(mgr, "telegram"))
+	assert.True(t, fanout.HasSpoke("telegram"))
+}
+
+// supervisionWiringRecorder is a mockIntegrationManager that records the
+// supervisor wiring the hub registers, as *plugin.Manager accepts it.
+type supervisionWiringRecorder struct {
+	*mockIntegrationManager
+	provider plugin.BrokerConfigProvider
+	hooks    []plugin.BrokerRestartHook
+}
+
+func (m *supervisionWiringRecorder) SetBrokerConfigProvider(p plugin.BrokerConfigProvider) {
+	m.provider = p
+}
+
+func (m *supervisionWiringRecorder) OnBrokerRestart(h plugin.BrokerRestartHook) {
+	m.hooks = append(m.hooks, h)
+}
+
+func TestSetPluginManager_WiresBrokerSupervision(t *testing.T) {
+	rec := &supervisionWiringRecorder{mockIntegrationManager: newMockIntegrationManager()}
+	rec.plugins["discord"] = map[string]string{"bot_token": "inline"}
+	newBus := eventbus.NewInProcessEventBus(slog.Default())
+	rec.brokers = map[string]eventbus.EventBus{"discord": newBus}
+
+	srv, _ := testServer(t)
+	srv.transportMode = "iap"
+	srv.transportAudience = "aud"
+	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
+		{Name: "inprocess", Bus: eventbus.NewInProcessEventBus(slog.Default())},
+		{Name: "discord", Bus: eventbus.NewInProcessEventBus(slog.Default())},
+	}, slog.Default())
+	srv.SetMessageBrokerProxy(NewMessageBrokerProxy(fanout, nil, nil, nil, slog.Default()))
+	srv.SetPluginManager(rec)
+
+	require.NotNil(t, rec.provider, "config provider registered")
+	cfg, err := rec.provider(context.Background(), "discord")
+	require.NoError(t, err)
+	assert.Equal(t, "inline", cfg["bot_token"], "plugin config carried")
+	assert.Equal(t, "discord", cfg["plugin_name"], "hub credentials added")
+	assert.Equal(t, "iap", cfg["transport_mode"])
+
+	require.Len(t, rec.hooks, 1, "restart hook registered")
+	require.NoError(t, rec.hooks[0]("discord"))
+	assert.True(t, fanout.HasSpoke("discord"))
 }
