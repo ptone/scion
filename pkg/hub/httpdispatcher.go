@@ -2315,11 +2315,7 @@ func (d *HTTPAgentDispatcher) deferredCreateWithGather(ctx context.Context, agen
 	// An agent this node opted out of async launch for the dispatch (a
 	// routed start) is created synchronously on the owner too.
 	synchronous, preserve, task := routedStartDispatchFlags(ctx, agent)
-	args := &CreateWithGatherDispatchArgs{
-		Synchronous:       synchronous,
-		PreserveWorkspace: preserve,
-		Task:              task,
-	}
+	args := &CreateWithGatherDispatchArgs{Synchronous: synchronous, PreserveWorkspace: preserve, Task: task}
 	result, err := d.deferredDataOpResult(ctx, agent, "create", args)
 	if err != nil {
 		return nil, err
@@ -2538,12 +2534,7 @@ func (d *HTTPAgentDispatcher) deferredFinalizeEnv(ctx context.Context, agent *st
 	// A routed start's replay can be handed off here after a local needs
 	// report: its decisions travel like the create's (ptone/scion#6096).
 	synchronous, preserve, task := routedStartDispatchFlags(ctx, agent)
-	args := &FinalizeEnvDispatchArgs{
-		Env:               env,
-		Synchronous:       synchronous,
-		PreserveWorkspace: preserve,
-		Task:              task,
-	}
+	args := &FinalizeEnvDispatchArgs{Env: env, Synchronous: synchronous, PreserveWorkspace: preserve, Task: task}
 	result, err := d.deferredDataOpResult(ctx, agent, "finalize_env", args)
 	if err != nil {
 		return nil, err
