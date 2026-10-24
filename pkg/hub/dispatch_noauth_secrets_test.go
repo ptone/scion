@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"testing"
 
@@ -101,27 +102,33 @@ func seedNoAuthSecrets(t *testing.T, f *runDispatchFixture, b *secret.LocalBacke
 }
 
 // startPaths are the two dispatches that use buildStartEnv. env returns the
-// env the broker received; secrets returns the secrets it received (restart
-// sends none on the wire).
+// env the broker received; sent returns everything the broker received in
+// the call (env, secrets for a start, and the extras), formatted, so a test
+// can check that no secret value reached the broker by any field. A restart
+// has no secrets parameter; its env and extras are what it sends.
 var startPaths = []struct {
 	name     string
 	dispatch func(ctx context.Context, f *runDispatchFixture) error
 	env      func(f *runDispatchFixture) map[string]string
-	secrets  func(f *runDispatchFixture) []ResolvedSecret
+	sent     func(f *runDispatchFixture) string
 }{
 	{
 		name: "start",
 		dispatch: func(ctx context.Context, f *runDispatchFixture) error {
 			return f.d.DispatchAgentStart(ctx, f.agent, "", false)
 		},
-		env:     func(f *runDispatchFixture) map[string]string { return f.client.lastResolvedEnv },
-		secrets: func(f *runDispatchFixture) []ResolvedSecret { return f.client.lastStartResolvedSecrets },
+		env: func(f *runDispatchFixture) map[string]string { return f.client.lastResolvedEnv },
+		sent: func(f *runDispatchFixture) string {
+			return fmt.Sprintf("%v %+v %+v", f.client.lastResolvedEnv, f.client.lastStartResolvedSecrets, f.client.lastStartExtras)
+		},
 	},
 	{
 		name:     "restart",
 		dispatch: func(ctx context.Context, f *runDispatchFixture) error { return f.d.DispatchAgentRestart(ctx, f.agent) },
 		env:      func(f *runDispatchFixture) map[string]string { return f.client.lastRestartResolvedEnv },
-		secrets:  func(f *runDispatchFixture) []ResolvedSecret { return nil },
+		sent: func(f *runDispatchFixture) string {
+			return fmt.Sprintf("%v %+v", f.client.lastRestartResolvedEnv, f.client.lastRestartExtras)
+		},
 	},
 }
 
@@ -148,7 +155,12 @@ func assertNoAuthStartPath(t *testing.T, ghScope, wantGH string) {
 			env := p.env(f)
 			require.NotNil(t, env, "the broker was called")
 			assertNoAuthEnvWithheld(t, env, p.name)
-			assert.Empty(t, p.secrets(f), "%s sends no secrets", p.name)
+			sent := p.sent(f)
+			assert.NotContains(t, sent, noAuthLLMValue, "%s sends no environment secret by any field", p.name)
+			assert.NotContains(t, sent, noAuthFileValue, "%s sends no file secret by any field", p.name)
+			if p.name == "start" {
+				assert.Empty(t, f.client.lastStartResolvedSecrets, "start sends no secrets")
+			}
 			assert.Equal(t, wantGH, env["GITHUB_TOKEN"], "GITHUB_TOKEN is still delivered")
 		})
 	}
@@ -195,7 +207,7 @@ func TestBuildStartEnv_WithoutNoAuth_DeliversSecrets(t *testing.T) {
 			assert.Equal(t, noAuthGHProjectVal, env["GITHUB_TOKEN"])
 			if p.name == "start" {
 				var names []string
-				for _, s := range p.secrets(f) {
+				for _, s := range f.client.lastStartResolvedSecrets {
 					names = append(names, s.Name)
 				}
 				assert.Contains(t, names, noAuthFileName, "start sends the file secret")
@@ -716,4 +728,37 @@ func TestNoAuthGitHubToken_DeliveredOnceOnItsModesPass(t *testing.T) {
 			})
 		}
 	}
+}
+
+// The no-auth GITHUB_TOKEN lookup tries the project scope first and the
+// owner's user scope only when the project has no deliverable token (the
+// ruled order, mirroring resolveCloneToken's clone-token cascade). This is
+// deliberately unlike normal resolution, where a user-scope secret
+// outranks a project-scope one of the same name: with both present, a
+// no-auth agent gets the project token, on the first pass and on the
+// as-needed pass.
+func TestNoAuthGitHubToken_ProjectScopeBeforeUserScope(t *testing.T) {
+	t.Run("first pass", func(t *testing.T) {
+		f, b := newNoAuthFixture(t, true)
+		setNoAuthSecret(t, f, b, noAuthSecret{name: "GITHUB_TOKEN", value: noAuthGHProjectVal,
+			typ: store.SecretTypeEnvironment, target: "GITHUB_TOKEN", scope: store.ScopeProject})
+		setNoAuthSecret(t, f, b, noAuthSecret{name: "GITHUB_TOKEN", value: noAuthGHUserVal,
+			typ: store.SecretTypeEnvironment, target: "GITHUB_TOKEN", scope: store.ScopeUser})
+		for path, got := range noAuthGHEnvs(t, f) {
+			require.NotNil(t, got, path)
+			assert.Equal(t, noAuthGHProjectVal, *got, "%s: the project token wins", path)
+		}
+	})
+	t.Run("as-needed pass", func(t *testing.T) {
+		f, b := newNoAuthFixture(t, true)
+		setNoAuthSecret(t, f, b, noAuthSecret{name: "GITHUB_TOKEN", value: noAuthGHProjectVal,
+			typ: store.SecretTypeEnvironment, target: "GITHUB_TOKEN", scope: store.ScopeProject,
+			mode: store.InjectionModeAsNeeded})
+		setNoAuthSecret(t, f, b, noAuthSecret{name: "GITHUB_TOKEN", value: noAuthGHUserVal,
+			typ: store.SecretTypeEnvironment, target: "GITHUB_TOKEN", scope: store.ScopeUser,
+			mode: store.InjectionModeAsNeeded})
+		got, err := f.d.resolveAsNeededForKeys(context.Background(), f.agent, []string{"GITHUB_TOKEN"}, nil)
+		require.NoError(t, err)
+		assert.Equal(t, noAuthGHProjectVal, got["GITHUB_TOKEN"], "the project token wins")
+	})
 }
