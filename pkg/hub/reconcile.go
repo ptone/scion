@@ -262,6 +262,11 @@ func (s *Server) execDispatchStart(ctx context.Context, d store.BrokerDispatch) 
 		opts.Async = args.Async
 		opts.Kind = args.Kind
 		opts.PriorPhase = args.PriorPhase
+		if args.NoRoute {
+			// The requesting node already decided this is a plain start
+			// (ptone/scion#6096).
+			ctx = withoutStartRouting(ctx)
+		}
 	}
 	ctx, warns := withDispatchWarnings(ctx)
 	// A dispatcher that takes start options gets the intent's options (and
@@ -655,6 +660,18 @@ func (s *Server) execDispatchCreate(ctx context.Context, d store.BrokerDispatch)
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
 		return "", fmt.Errorf("no dispatcher available")
+	}
+	if d.Args != "" {
+		var args CreateWithGatherDispatchArgs
+		if err := json.Unmarshal([]byte(d.Args), &args); err != nil {
+			return "", fmt.Errorf("unmarshal create args: %w", err)
+		}
+		if args.Synchronous {
+			// The requester created this agent synchronously (for example
+			// a start routed through create-with-gather): do not begin an
+			// asynchronous create launch here (ptone/scion#6096).
+			agent.LaunchAsyncOptIn = false
+		}
 	}
 	ctx, warns := withDispatchWarnings(ctx)
 	// The requesting node keeps the agent when its wait for this

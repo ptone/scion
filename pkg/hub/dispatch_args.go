@@ -37,6 +37,11 @@ type StartDispatchArgs struct {
 	// the owner cannot read the prior phase from the row.
 	Kind       string `json:"kind,omitempty"`
 	PriorPhase string `json:"priorPhase,omitempty"`
+	// NoRoute says the requesting node already decided this start is a
+	// plain start (it ran startRoutesThroughCreate, or the start is a
+	// restart's start leg): the owner must not route it through
+	// create-with-gather again (ptone/scion#6096).
+	NoRoute bool `json:"noRoute,omitempty"`
 }
 
 // RestartDispatchArgs is intentionally empty — the owner's
@@ -124,7 +129,16 @@ type FinalizeEnvDispatchArgs struct {
 
 // CreateWithGatherDispatchArgs is intentionally empty — the owner rebuilds the
 // full RemoteCreateAgentRequest from the shared store (same pattern as start).
-type CreateWithGatherDispatchArgs struct{}
+type CreateWithGatherDispatchArgs struct {
+	// Synchronous asks the owner to run the create synchronously (no
+	// asynchronous launch), as the requesting node would: set for a create
+	// whose agent the requester had opted out of async launch for this
+	// dispatch, such as a start routed through create-with-gather, which
+	// must not begin a create launch on a row the start claim moved to
+	// starting (ptone/scion#6096). An owner that does not know it runs the
+	// create by its own rules.
+	Synchronous bool `json:"synchronous,omitempty"`
+}
 
 // CheckPromptResult is serialized into broker_dispatch.result by the owner.
 type CheckPromptResult struct {

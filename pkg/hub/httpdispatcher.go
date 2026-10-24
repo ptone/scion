@@ -2307,7 +2307,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 
 // deferredCreateWithGather handles a cross-node create-with-gather via durable dispatch.
 func (d *HTTPAgentDispatcher) deferredCreateWithGather(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
-	result, err := d.deferredDataOpResult(ctx, agent, "create", &CreateWithGatherDispatchArgs{})
+	// An agent this node opted out of async launch for the dispatch (a
+	// routed start) is created synchronously on the owner too.
+	result, err := d.deferredDataOpResult(ctx, agent, "create", &CreateWithGatherDispatchArgs{Synchronous: !agent.LaunchAsyncOptIn})
 	if err != nil {
 		return nil, err
 	}
@@ -3569,22 +3571,32 @@ func markConfigDeliveredOnSuccess(agent *store.Agent, res *CreateDispatchResult)
 	markConfigDelivered(agent)
 }
 
-// restartStartLegKey marks a start dispatch that is a restart's start leg
-// (withRestartStartLeg).
-type restartStartLegKey struct{}
+// noStartRoutingKey marks a start dispatch that must not be routed through
+// create-with-gather (withoutStartRouting).
+type noStartRoutingKey struct{}
+
+// withoutStartRouting marks ctx so the start is a plain start: a restart's
+// start leg (withRestartStartLeg), or a start intent whose requesting node
+// already made the routing decision (StartDispatchArgs.NoRoute).
+func withoutStartRouting(ctx context.Context) context.Context {
+	return context.WithValue(ctx, noStartRoutingKey{}, true)
+}
 
 // withRestartStartLeg marks ctx as a restart's start leg. A restart is not
 // routed through create-with-gather: a plain restart does not gather
 // as-needed values, which ptone/scion#6101 tracks.
 func withRestartStartLeg(ctx context.Context) context.Context {
-	return context.WithValue(ctx, restartStartLegKey{}, true)
+	return withoutStartRouting(ctx)
 }
 
-func isRestartStartLeg(ctx context.Context, opts StartDispatchOptions) bool {
+// startRoutingSuppressed reports whether the start must stay plain: a
+// restart's start leg (marked, or an async start of kind restart) or a
+// start whose routing was decided on the requesting node.
+func startRoutingSuppressed(ctx context.Context, opts StartDispatchOptions) bool {
 	if opts.Kind == store.LaunchKindRestart {
 		return true
 	}
-	v, _ := ctx.Value(restartStartLegKey{}).(bool)
+	v, _ := ctx.Value(noStartRoutingKey{}).(bool)
 	return v
 }
 
@@ -3599,7 +3611,8 @@ func isRestartStartLeg(ctx context.Context, opts StartDispatchOptions) bool {
 //     and cleared by any provision), or
 //   - the agent has no as-needed entries in its scopes, so there is nothing
 //     to gather, or
-//   - the start is resumed, or is a restart's start leg (isRestartStartLeg):
+//   - the start is resumed, or is a restart's start leg, or arrives from a
+//     requesting node that already decided it (startRoutingSuppressed):
 //     restart stays a plain restart, ptone/scion#6101.
 //
 // There is no legacy exception: no stored field reliably shows that a run
@@ -3614,7 +3627,7 @@ func isRestartStartLeg(ctx context.Context, opts StartDispatchOptions) bool {
 // *secretResolutionError the caller returns as a failed start, so an unknown
 // never plain-starts.
 func (d *HTTPAgentDispatcher) startRoutesThroughCreate(ctx context.Context, agent *store.Agent, resume bool, opts StartDispatchOptions) (route bool, why string, err error) {
-	if resume || agent == nil || isRestartStartLeg(ctx, opts) {
+	if resume || agent == nil || startRoutingSuppressed(ctx, opts) {
 		return false, "", nil
 	}
 	if agent.AppliedConfig != nil && agent.AppliedConfig.ConfigDelivered {
@@ -4052,9 +4065,13 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 		revokeEligible = false
 		// The owning node mints and records its own run ID.
 		d.revertRun(ctx, agent, runID, previousRunID)
+		// This node already decided the start is a plain start
+		// (startRoutesThroughCreate ran above), so the owner must not route
+		// it again: it cannot see a restart's start-leg marker.
 		args := &StartDispatchArgs{
-			Task:   task,
-			Resume: resume,
+			Task:    task,
+			Resume:  resume,
+			NoRoute: true,
 		}
 		if opts.Async {
 			// The owner applies its own dispatcher rules; the requester
