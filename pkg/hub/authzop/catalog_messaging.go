@@ -183,7 +183,7 @@ var messagingOperations = []OperationSpec{
 	{
 		ID:          "inbox.conversation.create",
 		Domain:      "inbox",
-		Description: "Create a group conversation in a project. Needs project:read on the project; a token also needs inbox:write for it",
+		Description: "Create a group conversation in a project. Order: project:read on the project, then (for a token) inbox:write for it, then for a user the create_group action of chat-space-access (project.chat_post on the account; 403 chat_post_denied with details.chat_action create_group and reason read_only without it), all before anything is minted. Agents are not decided by chat-space-access; their message-mode join check follows",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/conversations", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/conversations/", Method: "POST"},
@@ -198,6 +198,7 @@ var messagingOperations = []OperationSpec{
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestConversationCreateToken_RequiresInboxWriteAndProjectRead"},
+			{Package: "pkg/hub", Function: "TestChatCreateConversation_RequiresCreateGroupAction"},
 		},
 		Bearer: AdmitOn(BearerTargetProjectBody, BearerBoundaryProject, BearerBoundaryHub),
 	},
