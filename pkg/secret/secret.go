@@ -241,6 +241,11 @@ type SecretBackend interface {
 	// The opts parameter is optional; pass nil for the current behavior.
 	// When opts.AgentAncestry is present, user-scoped secrets marked allowProgeny
 	// whose creator appears in the ancestry chain are included in the result.
+	// Resolution is all or nothing: a secret whose value cannot be read fails
+	// the whole call, with ErrResolveDecrypt (a stored value that cannot be
+	// decrypted) or ErrResolveAccess (a value the backend cannot return),
+	// never a partial set. Internal secrets and progeny secrets the policy
+	// refuses are skipped, not read.
 	Resolve(ctx context.Context, userID, projectID, brokerID string, opts *ResolveOpts) ([]SecretWithValue, error)
 
 	// HubID returns the hub instance ID used for hub-scoped secret namespacing.

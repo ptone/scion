@@ -562,6 +562,9 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 			if writeEmptyPerAgentCapabilityError(w, err) {
 				return
 			}
+			if writePreserveWorkspaceCapabilityError(w, err) {
+				return
+			}
 			if relayDispatchRefusal(w, err) {
 				return
 			}

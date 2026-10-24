@@ -111,6 +111,10 @@ var dispatchHubSentinels = []struct {
 }{
 	{"delete_in_progress", store.ErrDeleteInProgress},
 	{"launch_invalid_phase", ErrLaunchInvalidPhase},
+	// The owner's refusal of a routed start's create or finalize_env
+	// (ptone/scion#6096): the originating node answers 412 or 503.
+	{"broker_lacks_preserve_workspace", errBrokerLacksPreserveWorkspace},
+	{"broker_record_unreadable", errBrokerRecordUnreadable},
 }
 
 // dispatchHubError is a failure the executing node returned with hub

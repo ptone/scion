@@ -97,23 +97,22 @@ func TestCreateAgent_ProvisionOnlySkillResolutionFailure(t *testing.T) {
 	}
 }
 
-// TestCreateAgent_ProvisionOnlyOtherFailureStaysWarning pins that only the
-// skill resolution failure changed: any other provision error still yields
-// 201 with a warning and keeps the record.
-func TestCreateAgent_ProvisionOnlyOtherFailureStaysWarning(t *testing.T) {
+// TestCreateAgent_ProvisionOnlyPreSendFailureFailsCreate: an error returned
+// before any provision request left the hub (not marked errProvisionSent)
+// also fails the provision-only create and removes the row, because a later
+// start does not gather env and the broker would provision the agent on the
+// fly without its as-needed values (ptone/scion#6096).
+func TestCreateAgent_ProvisionOnlyPreSendFailureFailsCreate(t *testing.T) {
 	tests := []struct {
 		name string
 		err  error
 	}{
-		{name: "plain error", err: errors.New("connection refused")},
-		{name: "broker 404 not_found", err: &brokerStatusError{
-			StatusCode: http.StatusNotFound,
-			Body:       `{"error":{"code":"not_found","message":"Failed to provision agent: template not found"}}`,
-		}},
-		{name: "broker 500", err: &brokerStatusError{StatusCode: http.StatusInternalServerError, Body: "boom"}},
+		{name: "no broker assigned", err: errNoRuntimeBrokerAssigned},
+		{name: "broker endpoint lookup failed before sending", err: errors.New("runtime broker endpoint not found")},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			require.False(t, errors.Is(tc.err, errProvisionSent), "a pre-send case must not be marked sent")
 			disp := &skillFailDispatcher{provisionErr: tc.err}
 			srv, s, project := setupCreateAgentServer(t, disp)
 
@@ -124,15 +123,13 @@ func TestCreateAgent_ProvisionOnlyOtherFailureStaysWarning(t *testing.T) {
 				ProvisionOnly: true,
 			})
 
-			require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-			var resp CreateAgentResponse
-			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-			require.NotNil(t, resp.Agent)
-			require.NotEmpty(t, resp.Warnings)
-			assert.Contains(t, resp.Warnings[0], "Failed to provision on runtime broker")
-			_, err := s.GetAgent(context.Background(), resp.Agent.ID)
-			assert.NoError(t, err, "the record is kept")
-			assert.False(t, disp.deleteCalled)
+			require.GreaterOrEqual(t, rec.Code, 400, rec.Body.String())
+			require.NotNil(t, disp.provisionedAgent)
+			agentID := disp.provisionedAgent.ID
+			_, err := s.GetAgent(context.Background(), agentID)
+			assert.ErrorIs(t, err, store.ErrNotFound, "the record is deleted")
+			rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agentID+"/start", nil)
+			assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 		})
 	}
 }

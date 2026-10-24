@@ -265,6 +265,16 @@ func (b *GCPBackend) accessLatestVersionByPath(ctx context.Context, smPath strin
 	if err != nil {
 		return "", err
 	}
+	return payloadValue(resp)
+}
+
+// payloadValue returns the secret value of a successful AccessSecretVersion
+// response, or ErrEmptyPayload when the response or its payload is missing
+// (ptone/scion#6090). It never maps a missing payload to an empty value.
+func payloadValue(resp *smpb.AccessSecretVersionResponse) (string, error) {
+	if resp == nil || resp.Payload == nil {
+		return "", ErrEmptyPayload
+	}
 	return string(resp.Payload.Data), nil
 }
 
@@ -307,6 +317,15 @@ func (b *GCPBackend) Set(ctx context.Context, input *SetSecretInput) (bool, *Sec
 	secret := toStoreSecret(input)
 	secret.EncryptedValue = "" // Don't store value in DB
 	secret.SecretRef = "gcpsm:" + fullName
+	// A reference-only update of a Hub-internal record keeps its existing
+	// local backup ciphertext (ptone/scion#1530 §6): the Hub maintains that
+	// backup itself, and erasing it here would leave the key with no local
+	// copy until the Hub rewrites it. User secrets stay reference-only.
+	if secret.SecretType == store.SecretTypeInternal {
+		if existing, err := b.store.GetSecret(ctx, input.Name, input.Scope, input.ScopeID); err == nil && existing.EncryptedValue != "" {
+			secret.EncryptedValue = existing.EncryptedValue
+		}
+	}
 
 	created, err := b.store.UpsertSecret(ctx, secret)
 	if err != nil {
@@ -533,11 +552,14 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID st
 				secretRef = smPath
 			} else {
 				var smName string
-				value, smName, err = b.accessSecretByComputedName(ctx, s.Key, sc.scope, sc.scopeID)
+				value, smName, err = b.resolveByComputedName(ctx, s.Key, sc.scope, sc.scopeID)
 				secretRef = fmt.Sprintf("projects/%s/secrets/%s", b.projectID, smName)
 			}
 			if err != nil {
-				continue
+				// Fail closed (ptone/scion#5959): never resolve a partial
+				// set. A NotFound here is a dangling reference (a DB record
+				// with no readable Secret Manager copy), not an absence.
+				return nil, newResolveAccessError(s.Key, sc.scope, err)
 			}
 
 			secretType := s.SecretType
@@ -606,11 +628,13 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID st
 				secretRef = smPath
 			} else {
 				var smName string
-				value, smName, err = b.accessSecretByComputedName(ctx, s.Key, s.Scope, s.ScopeID)
+				value, smName, err = b.resolveByComputedName(ctx, s.Key, s.Scope, s.ScopeID)
 				secretRef = fmt.Sprintf("projects/%s/secrets/%s", b.projectID, smName)
 			}
 			if err != nil {
-				continue
+				// A progeny secret the policy allowed is as referenced as
+				// a scoped one: fail closed here too.
+				return nil, newResolveAccessError(s.Key, s.Scope, err)
 			}
 
 			secretType := s.SecretType
@@ -660,7 +684,7 @@ func (b *GCPBackend) accessLatestVersion(ctx context.Context, smSecretName strin
 	if err != nil {
 		return "", err
 	}
-	return string(resp.Payload.Data), nil
+	return payloadValue(resp)
 }
 
 // AccessSecretValueByRef retrieves a secret value using a full GCP SM resource path.
@@ -673,7 +697,7 @@ func (b *GCPBackend) AccessSecretValueByRef(ctx context.Context, smPath string) 
 	if err != nil {
 		return "", fmt.Errorf("failed to access secret at %s: %w", smPath, err)
 	}
-	return string(resp.Payload.Data), nil
+	return payloadValue(resp)
 }
 
 // secretNamePrefix returns the hub-scoped prefix prepended to every GCP SM
@@ -761,6 +785,20 @@ func (b *GCPBackend) legacyGCPSecretName(name, scope, scopeID string) string {
 // read, or a Resolve() pass over a record that predates SecretRef being
 // persisted). Returns the value and the GCP SM secret ID that resolved it.
 func (b *GCPBackend) accessSecretByComputedName(ctx context.Context, name, scope, scopeID string) (value, smName string, err error) {
+	return b.accessByComputedName(ctx, name, scope, scopeID, false)
+}
+
+// resolveByComputedName is accessSecretByComputedName for Resolve: when the
+// prefixed name is NotFound and the legacy read fails for another reason
+// (for example PermissionDenied once IAM is narrowed to the hub prefix), it
+// returns the legacy error, so the failure is classified by its real cause
+// rather than as not_found (ptone/scion#5959). Get and Fetch keep the
+// prefixed NotFound: their callers read it as store.ErrNotFound.
+func (b *GCPBackend) resolveByComputedName(ctx context.Context, name, scope, scopeID string) (value, smName string, err error) {
+	return b.accessByComputedName(ctx, name, scope, scopeID, true)
+}
+
+func (b *GCPBackend) accessByComputedName(ctx context.Context, name, scope, scopeID string, reportLegacyErr bool) (value, smName string, err error) {
 	prefixedName := b.gcpSecretName(name, scope, scopeID)
 	value, err = b.accessLatestVersion(ctx, prefixedName)
 	if err == nil {
@@ -773,6 +811,9 @@ func (b *GCPBackend) accessSecretByComputedName(ctx context.Context, name, scope
 	legacyName := b.legacyGCPSecretName(name, scope, scopeID)
 	value, legacyErr := b.accessLatestVersion(ctx, legacyName)
 	if legacyErr != nil {
+		if reportLegacyErr && status.Code(legacyErr) != codes.NotFound {
+			return "", "", legacyErr
+		}
 		// Neither name resolved; surface the prefixed-name error since that is
 		// the current/expected name.
 		return "", "", err

@@ -49,6 +49,10 @@ func newRunDispatchFixture(t *testing.T) *runDispatchFixture {
 	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
 		ID: tid("broker-run"), Name: "run-broker", Slug: "run-broker",
 		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
+		// A current broker: a start routed through create-with-gather
+		// needs PreserveWorkspaceCreate (ptone/scion#6096). The rest is
+		// what a nil set already implies.
+		Capabilities: &store.BrokerCapabilities{Attach: true, AsyncLaunch: true, AsyncStart: true, PreserveWorkspaceCreate: true},
 	}))
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
 		ProjectID: tid("project-run"), BrokerID: tid("broker-run"), BrokerName: "run-broker",

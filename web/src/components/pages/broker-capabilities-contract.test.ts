@@ -48,6 +48,7 @@ const UNDECLARED_ALLOWED: readonly string[] = [
   'clearedFields',
   'emptyPerAgentWorkspace',
   'nodeImageRegistry',
+  'preserveWorkspaceCreate',
   'reprovision',
   'reprovisionEmptyPerAgent',
   'startsInFlight',
