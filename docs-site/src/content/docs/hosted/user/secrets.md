@@ -455,6 +455,7 @@ When this field is non-empty, Scion creates secrets with **user-managed** replic
 When GCP Secret Manager is configured, Scion uses a **hybrid storage** model:
 - **Metadata** (name, type, scope) is stored in the Hub database.
 - **Secret values** are stored in GCP Secret Manager with automatic versioning.
+- **Resolution fails closed.** When an agent is created or started, every secret that applies to it (from the broker, hub, project and user scopes, plus any progeny secret that is shared with it) must be readable from Secret Manager. If any one can't be read, the whole resolution fails. Causes include permission denied, a secret deleted in Secret Manager while its Hub record remains, a disabled or destroyed latest version, Secret Manager being unavailable, or a timeout. The agent is not started with the remaining secrets. Instead, the request fails with the [fixed `503` message](#security--audit-logging) (`agent secrets could not be resolved; …`). The Hub's server log names the scope and key of the secret that failed and the kind of failure, never its value. Fix the IAM grant or restore the secret, or remove the stale Hub record with `scion hub secret clear KEY` (with the matching scope flag), and then retry.
 
 #### IAM Permissions and Secret Naming
 
