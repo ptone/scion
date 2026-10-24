@@ -65,8 +65,11 @@ func getStarPage(t *testing.T, f *starFixture, srv *Server, userID, key string, 
 // stripped generations, a flipped byte and a retired generation get the
 // uniform invalid_cursor. At sign_until a page that needs a continuation is
 // refused with 500 and no cursor (errCapabilityIssuanceClosed, as on the
-// other list endpoints), while a complete first page still works. No key
-// material reaches the logs or the body.
+// other list endpoints), while a complete first page still works. With
+// emit=legacy the replicas issue ID-less c1. cursors and still resume each
+// other's, and a c1. cursor sealed by a legacy-mode replica (no keyring)
+// resumes after the upgrade to a versioned ring. No key material reaches the
+// logs or the body.
 func TestCapabilityKeyring_ChatStarsCursor(t *testing.T) {
 	allowVersionedRings(t)
 	f := newStarFixture(t, true)
@@ -138,6 +141,43 @@ func TestCapabilityKeyring_ChatStarsCursor(t *testing.T) {
 	assertInvalidCursor(t, rec)
 	rec, _ = getStarPage(t, f, b, f.admin, f.topicA, "limit=1")
 	assert.Equal(t, http.StatusOK, rec.Code, "a fresh first page always works")
+
+	// emit=legacy: mid-rollout replicas that still issue ID-less (c1.)
+	// cursors resume each other's in both directions, caller-bound.
+	lclk := &krClock{t: krT0}
+	la, lb := capRollout(t, "legacy")
+	ra := starRingReplica(t, f, la, lclk)
+	rb := starRingReplica(t, f, lb, lclk)
+	for _, dir := range []struct {
+		name     string
+		from, to *Server
+	}{{"legacy A to B", ra, rb}, {"legacy B to A", rb, ra}} {
+		rec, q1 := getStarPage(t, f, dir.from, f.admin, f.topicA, "limit=1")
+		require.Equal(t, http.StatusOK, rec.Code, "%s: %s", dir.name, rec.Body.String())
+		require.True(t, strings.HasPrefix(q1.NextCursor, listCursorPrefix), "%s: %s", dir.name, q1.NextCursor)
+		rec, q2 := getStarPage(t, f, dir.to, f.admin, f.topicA, "limit=1", "cursor="+url.QueryEscape(q1.NextCursor))
+		require.Equal(t, http.StatusOK, rec.Code, "%s: %s", dir.name, rec.Body.String())
+		require.Len(t, q2.Items, 1, dir.name)
+		assert.NotEqual(t, q1.Items[0].MessageID, q2.Items[0].MessageID, dir.name)
+		rec, _ = getStarPage(t, f, dir.to, f.owner, f.topicA, "limit=1", "cursor="+url.QueryEscape(q1.NextCursor))
+		assertInvalidCursor(t, rec)
+	}
+
+	// Legacy-replica upgrade: a c1. cursor sealed by a legacy-mode replica
+	// (no keyring) resumes on a versioned ring replica, whose own
+	// continuation is versioned.
+	uclk := &krClock{t: krT0}
+	_, ub := capRollout(t, "versioned")
+	legacy := starRingReplica(t, f, nil, uclk)
+	upgraded := starRingReplica(t, f, ub, uclk)
+	rec, l1 := getStarPage(t, f, legacy, f.admin, f.topicA, "limit=1")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.True(t, strings.HasPrefix(l1.NextCursor, listCursorPrefix), l1.NextCursor)
+	rec, l2 := getStarPage(t, f, upgraded, f.admin, f.topicA, "limit=1", "cursor="+url.QueryEscape(l1.NextCursor))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Len(t, l2.Items, 1)
+	assert.NotEqual(t, l1.Items[0].MessageID, l2.Items[0].MessageID)
+	assert.True(t, strings.HasPrefix(l2.NextCursor, "c2.gen2."), l2.NextCursor)
 
 	// Issuance closed: no cursor is minted, and the page is refused.
 	cclk := &krClock{t: krT0.Add(time.Hour)}
