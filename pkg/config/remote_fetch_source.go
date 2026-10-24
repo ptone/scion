@@ -191,8 +191,11 @@ func validateRemoteFetchSource(uri string) error {
 		if u.Host != "github.com" {
 			return errors.New("GitHub source host must be github.com")
 		}
-		_, err = parseGitHubURL(uri)
-		return err
+		// parseGitHubURL's errors repeat the URL; report the shape only.
+		if _, err := parseGitHubURL(uri); err != nil {
+			return errors.New("GitHub source must have the form https://github.com/<owner>/<repo>[/tree/<ref>/<path>]")
+		}
+		return nil
 	case RemoteTypeArchive:
 		u, err := url.Parse(uri)
 		if err != nil {

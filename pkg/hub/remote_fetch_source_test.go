@@ -28,13 +28,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// hubNetworkSourceForms are endpoint-parameter and internal-address sources.
-var hubNetworkSourceForms = map[string]string{
-	"gcs metadata endpoint":   ":gcs,endpoint=http://169.254.169.254:bucket/x",
-	"archive metadata http":   "http://169.254.169.254/latest/x.tar.gz",
-	"archive metadata https":  "https://169.254.169.254/x.tar.gz",
-	"archive mapped metadata": "https://[::ffff:169.254.169.254]/x.tar.gz",
-	"archive loopback":        "https://127.0.0.1/x.tar.gz",
+// hubNetworkSourceForms are endpoint-parameter and internal-address
+// sources, with the refusal text the hub must answer with.
+var hubNetworkSourceForms = map[string]hubRefusal{
+	"gcs metadata endpoint":   {":gcs,endpoint=http://169.254.169.254:bucket/x", "must not carry connection-string parameters"},
+	"archive metadata http":   {"http://169.254.169.254/latest/x.tar.gz", "archive source must use https"},
+	"archive metadata https":  {"https://169.254.169.254/x.tar.gz", "source host must be a public address"},
+	"archive mapped metadata": {"https://[::ffff:169.254.169.254]/x.tar.gz", "source host must be a public address"},
+	"archive loopback":        {"https://127.0.0.1/x.tar.gz", "source host must be a public address"},
 }
 
 // The same endpoints refuse endpoint-parameter and internal-address
@@ -46,9 +47,10 @@ func TestHubRemoteSourceRefusal_NetworkForms(t *testing.T) {
 		fetched++
 		return nil
 	}))
-	for name, uri := range hubNetworkSourceForms {
+	for name, tc := range hubNetworkSourceForms {
+		uri := tc.uri
 		t.Run(name, func(t *testing.T) {
-			assertHubSourceRefused(t, uri)
+			assertHubSourceRefused(t, uri, tc.want)
 
 			srv, s := testInstallSourceServer(t)
 			rec := doRequest(t, srv, http.MethodPost, "/api/v1/resources/import", ImportResourcesRequest{

@@ -123,6 +123,23 @@ func TestParseRcloneRemote_ErrorsDoNotRepeatSource(t *testing.T) {
 	}
 }
 
+func TestValidateRemoteFetchSource_ErrorsDoNotRepeatSource(t *testing.T) {
+	for _, uri := range []string{
+		"https://github.com/SECRETVALUE",
+		"https://github.com/",
+		"https://x:SECRETVALUE@github.com/o/r/tree/main/t",
+		"http://github.com/SECRETVALUE/r/tree/main/t",
+		"https://SECRETVALUE.example/t.tgz?x=SECRETVALUE",
+		"https://127.0.0.1/SECRETVALUE.tgz",
+		"https://example.com/SECRETVALUE",
+		":gcs,endpoint=SECRETVALUE:b/x",
+	} {
+		err := ValidateRemoteFetchSource(uri)
+		require.ErrorIs(t, err, ErrRemoteSourceNotAccepted, uri)
+		assert.NotContains(t, err.Error(), "SECRETVALUE", uri)
+	}
+}
+
 func TestParseRcloneRemote_NamesRefusedBackend(t *testing.T) {
 	_, err := ParseRcloneRemote(":local:/etc")
 	require.Error(t, err)
