@@ -1,5 +1,3 @@
-//go:build !unix
-
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,19 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !unix
+
 package util
 
-import (
-	"errors"
-	"fmt"
-	"path/filepath"
-)
+import "errors"
 
-// unlinkInDir always fails with errors.ErrUnsupported. The unix version
-// removes name through a descriptor on dir (unlinkat), so the kernel never
-// resolves name as a path; this platform has no equivalent here, and its
-// callers are broker-side, which is not supported on this platform. There
-// is no path-based fallback.
-func unlinkInDir(dir, name string) error {
-	return fmt.Errorf("unlink %s: %w on this platform", filepath.Join(dir, name), errors.ErrUnsupported)
+// mkfifoForTest reports that FIFOs are unsupported here, so tests that need
+// one skip.
+func mkfifoForTest(_ string, _ uint32) error {
+	return errors.New("mkfifo is not supported on this platform")
 }

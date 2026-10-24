@@ -1,5 +1,3 @@
-//go:build unix
-
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build unix
+
 package util
 
 import (
@@ -22,13 +22,15 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// unlinkInDir removes name from dir through an fd on dir (unlinkat), so the
-// kernel never resolves name as a path.
-func unlinkInDir(dir, name string) error {
+// unlinkAt removes the entry name from directory dir with unlinkat(2) on an
+// open fd of dir, so the kernel does not resolve the full path. attempted is
+// false when dir could not be opened; err is the unlinkat result otherwise.
+func unlinkAt(dir, name string) (attempted bool, err error) {
 	dirFD, err := syscall.Open(dir, syscall.O_RDONLY, 0)
 	if err != nil {
-		return err
+		return false, err
 	}
-	defer func() { _ = syscall.Close(dirFD) }()
-	return unix.Unlinkat(dirFD, name, 0)
+	err = unix.Unlinkat(dirFD, name, 0)
+	_ = syscall.Close(dirFD)
+	return true, err
 }
