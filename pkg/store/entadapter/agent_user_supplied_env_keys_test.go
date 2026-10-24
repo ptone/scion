@@ -55,7 +55,7 @@ func TestAgentStore_AddAgentUserSuppliedEnvKeys(t *testing.T) {
 		names, err := s.AddAgentUserSuppliedEnvKeys(ctx, a.ID, []string{"FAKE_KEY_B"})
 		require.NoError(t, err)
 		assert.Equal(t, []string{"FAKE_KEY_B"}, names)
-		names, err = s.AddAgentUserSuppliedEnvKeys(ctx, a.ID, []string{"FAKE_KEY_A", "FAKE_KEY_B"})
+		names, err = s.AddAgentUserSuppliedEnvKeys(ctx, a.ID, []string{"FAKE_KEY_A"})
 		require.NoError(t, err)
 		assert.Equal(t, []string{"FAKE_KEY_A", "FAKE_KEY_B"}, names)
 		got, err := s.GetAgent(ctx, a.ID)

@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -27,6 +28,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -181,4 +183,22 @@ func TestDispatchFinalizeEnv_OwnerHandOffKeepsTheNames(t *testing.T) {
 	stale.StateVersion = reloadAgent(t, f.store, f.agent.ID).StateVersion
 	require.NoError(t, f.store.UpdateAgent(context.Background(), stale))
 	assert.Equal(t, []string{"FAKE_HANDOFF_KEY"}, reloadAgent(t, f.store, f.agent.ID).AppliedConfig.UserSuppliedEnvKeys)
+}
+
+// H-18 (i), HTTP: the env submit handler answers a failed names write with
+// the fixed keyless 503.
+func TestSubmitAgentEnv_NamesWriteFaultIs503(t *testing.T) {
+	disp := &finalizeEnvErrDispatcher{err: fmt.Errorf("finalize: %w", &userSuppliedKeysWriteError{err: errors.New("FAKE-names-write-detail")})}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	agent := &store.Agent{
+		ID: tid("agent-env-names-503"), Name: "env-names-503", Slug: "env-names-503",
+		ProjectID: project.ID, RuntimeBrokerID: project.DefaultRuntimeBrokerID, Phase: string(state.PhaseProvisioning),
+	}
+	require.NoError(t, s.CreateAgent(context.Background(), agent))
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents/"+agent.Slug+"/env",
+		SubmitEnvRequest{Env: map[string]string{"FAKE_USER_KEY": "FAKE-value"}})
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), errUserSuppliedKeysUnrecorded.Error())
+	assert.NotContains(t, rec.Body.String(), "FAKE-names-write-detail", "no store text in the body")
+	assert.NotContains(t, rec.Body.String(), "FAKE_USER_KEY", "the body names no key")
 }
