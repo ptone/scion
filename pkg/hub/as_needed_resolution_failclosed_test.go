@@ -168,6 +168,18 @@ func (b *nthResolveFailingBackend) Resolve(context.Context, string, string, stri
 	return nil, b.err
 }
 
+// asNeededCauses are the resolution errors the as-needed pass meets: a
+// backend access error, an undecryptable value and a store error.
+var asNeededCauses = []struct {
+	name string
+	err  error
+}{
+	{"access", &secret.ResolveAccessError{Key: failClosedKey, Scope: "project", Kind: secret.FailurePermissionDenied,
+		Err: status.Error(codes.PermissionDenied, failClosedSMError+" "+failClosedSMPath)}},
+	{"decrypt", &secret.ResolveDecryptError{Failures: []secret.ResolveFailure{{Key: failClosedKey, Scope: "project", Kind: secret.FailureDecrypt}}}},
+	{"store", errFakeListSecrets},
+}
+
 // A gather dispatch whose as-needed pass fails does not replay the create:
 // the broker is called once (the needs report) and never sent a request
 // built from a partial secret set.
@@ -184,21 +196,9 @@ func TestGatherDispatch_AsNeededResolutionErrorFailsClosed(t *testing.T) {
 			_, err := f.d.DispatchFinalizeEnv(ctx, f.agent, nil)
 			return err
 		}},
-		{"provision", func(ctx context.Context, f *runDispatchFixture) error {
-			return f.d.DispatchAgentProvision(ctx, f.agent)
-		}},
-	}
-	causes := []struct {
-		name string
-		err  error
-	}{
-		{"access", &secret.ResolveAccessError{Key: failClosedKey, Scope: "project", Kind: secret.FailurePermissionDenied,
-			Err: status.Error(codes.PermissionDenied, failClosedSMError+" "+failClosedSMPath)}},
-		{"decrypt", &secret.ResolveDecryptError{Failures: []secret.ResolveFailure{{Key: failClosedKey, Scope: "project", Kind: secret.FailureDecrypt}}}},
-		{"store", errFakeListSecrets},
 	}
 	for _, dc := range dispatches {
-		for _, cc := range causes {
+		for _, cc := range asNeededCauses {
 			t.Run(dc.name+"/"+cc.name, func(t *testing.T) {
 				f := newRunDispatchFixture(t)
 				f.d.SetSecretBackend(&nthResolveFailingBackend{err: cc.err})
@@ -225,7 +225,7 @@ func TestGatherDispatch_AsNeededResolutionErrorFailsClosed(t *testing.T) {
 // with the fixed message wrapping ErrResolveAccess and sends nothing to the
 // broker: the agent never starts with a partial secret set.
 func TestDispatch_GCPAccessErrorFailsClosed(t *testing.T) {
-	for _, tc := range runDispatches[:5] {
+	for _, tc := range runDispatches {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newRunDispatchFixture(t)
 			f.d.SetSecretBackend(newDeniedGCPBackend(t, f.store, f.agent.ProjectID))
@@ -241,4 +241,78 @@ func TestDispatch_GCPAccessErrorFailsClosed(t *testing.T) {
 			assert.False(t, called, "nothing is sent to the broker")
 		})
 	}
+}
+
+// gatherNeedsClient makes f's broker report failClosedKey as needed on
+// every create-with-gather call and returns the call counter.
+func gatherNeedsClient(f *runDispatchFixture) *int {
+	calls := 0
+	f.client.createWithGatherFunc = func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+		calls++
+		return nil, &RemoteEnvRequirementsResponse{AgentID: req.ID, Needs: []string{failClosedKey}}, nil
+	}
+	return &calls
+}
+
+// assertStartsFailClosed checks that a start and a restart of f's agent
+// fail on cause with the fixed message and send nothing to the broker: the
+// secrets a provision went on without are resolved again at start time.
+func assertStartsFailClosed(t *testing.T, f *runDispatchFixture, cause error) {
+	t.Helper()
+	for _, tc := range runDispatches {
+		if tc.name != "start" && tc.name != "restart" {
+			continue
+		}
+		err := tc.dispatch(context.Background(), f)
+		require.Error(t, err, tc.name)
+		assert.ErrorIs(t, err, cause, tc.name)
+		var resErr *secretResolutionError
+		require.ErrorAs(t, err, &resErr, tc.name)
+		assertNoFailClosedDetail(t, err.Error(), tc.name+" error text")
+		_, _, called := tc.sent(f)
+		assert.False(t, called, "%s sends nothing to the broker", tc.name)
+	}
+}
+
+// Provision keeps the continueOnSecretResolutionError policy in its
+// as-needed pass too: it starts nothing, so it goes on without as-needed
+// values, sends no replay and succeeds; the later start and restart
+// resolve again and fail closed. A reprovision, which the reincarnation
+// start leg follows directly, fails on the still-missing env instead.
+func TestProvisionGather_AsNeededResolutionErrorContinues(t *testing.T) {
+	for _, cc := range asNeededCauses {
+		t.Run("provision/"+cc.name, func(t *testing.T) {
+			f := newRunDispatchFixture(t)
+			f.d.SetSecretBackend(&nthResolveFailingBackend{err: cc.err})
+			calls := gatherNeedsClient(f)
+
+			require.NoError(t, f.d.DispatchAgentProvision(context.Background(), f.agent))
+			assert.Equal(t, 1, *calls, "no replay carries as-needed values")
+			require.NotNil(t, f.client.lastCreateReq)
+			assert.NotContains(t, f.client.lastCreateReq.ResolvedEnv, failClosedKey)
+			assertStartsFailClosed(t, f, cc.err)
+		})
+		t.Run("reprovision/"+cc.name, func(t *testing.T) {
+			f := newRunDispatchFixture(t)
+			f.d.SetSecretBackend(&nthResolveFailingBackend{err: cc.err})
+			calls := gatherNeedsClient(f)
+
+			err := f.d.DispatchAgentReprovision(context.Background(), f.agent)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "required env still missing after reprovision")
+			assert.Equal(t, 1, *calls, "no replay carries as-needed values")
+		})
+	}
+
+	// The same GCP access error end to end: the provision succeeds, the
+	// start fails with ErrResolveAccess.
+	t.Run("provision then start, real GCP backend", func(t *testing.T) {
+		f := newRunDispatchFixture(t)
+		f.d.SetSecretBackend(newDeniedGCPBackend(t, f.store, f.agent.ProjectID))
+		calls := gatherNeedsClient(f)
+
+		require.NoError(t, f.d.DispatchAgentProvision(context.Background(), f.agent))
+		assert.Equal(t, 1, *calls)
+		assertStartsFailClosed(t, f, secret.ErrResolveAccess)
+	})
 }
