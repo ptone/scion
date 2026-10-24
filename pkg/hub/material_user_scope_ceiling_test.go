@@ -14,8 +14,9 @@
 
 //go:build !no_sqlite
 
-// Package hub — F follow-up 2 precondition: what step 10 decides for a
-// user-scope secret.use today. Check 8 (authorizeRuntimeUserItem) may route
+// Package hub — ptone/scion#2129: what step 10 decides for a user-scope
+// secret.use today, the precondition for routing check 8 through a
+// permission decision. Check 8 (authorizeRuntimeUserItem) may route
 // through Decide(secret.use, ActionUse) only if step 10 admits an agent whose
 // recorded ceiling allows secret.use and denies one whose ceiling does not.
 package hub
@@ -97,14 +98,17 @@ func (f *userScopeCeilingFixture) readStatus(t *testing.T) (int, string) {
 }
 
 // TestAgentSecretRead_UserScopeSecretUseStep10Characterization pins today's
-// outcomes (the follow-up 2 proof). For both a principal ceiling and a
-// bounded ceiling that leaves out secret.use:
+// outcomes, the proof that check 8 cannot yet route through
+// Decide(secret.use). For both a principal ceiling and a bounded ceiling
+// that leaves out secret.use:
 //   - the runtime read is admitted: check 8 consults no ceiling;
 //   - the progeny relationship accepts (secret.use, ActionUse);
-//   - step 10 denies the decision. For the principal ceiling the reason is
-//     that the delegating user does not hold secret.use: step 10 runs the
-//     generic delegator-authority check, not a user-material ceiling, so it
-//     would deny today's ordinary allow case.
+//   - step 10 denies the decision with ceiling_delegator_lacks_permission:
+//     the delegating user does not hold secret.use. Step 10 runs the
+//     generic delegator-authority check, not a user-material ceiling, and
+//     that check comes before the hop's effect ceiling, so the bounded case
+//     is not yet denied by its ceiling either. For the principal ceiling
+//     this would deny today's ordinary allow case.
 //
 // Routing check 8 through Decide(secret.use) with today's step 10 would
 // therefore deny every user-scope read by an agent with a recorded edge
@@ -131,6 +135,8 @@ func TestAgentSecretRead_UserScopeSecretUseStep10Characterization(t *testing.T) 
 			require.True(t, r.Accepted, "the progeny relationship admits the pair before step 10")
 			require.False(t, d.Allowed, "step 10 denies secret.use; reason %q", d.Reason)
 			require.Equal(t, DeniedByDelegationCeiling, d.DeniedBy, "reason %q", d.Reason)
+			require.Equal(t, DenyCauseCeilingDelegatorLacksPermission, d.DenyCause,
+				"today's cause is the delegator check in both cases; reason %q", d.Reason)
 			if tc.ceiling.Kind == store.EffectCeilingPrincipal {
 				require.Contains(t, d.Reason, "does not hold secret.use",
 					"the principal-ceiling deny is the generic delegator check, not a user-material ceiling")
