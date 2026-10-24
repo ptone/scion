@@ -2386,8 +2386,21 @@ func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *st
 		}
 	}()
 	// Flat placement backstop: the first pass pinned the agent, so this
-	// refuses only a pin corrupted between the two passes.
+	// refuses only a pin corrupted between the two passes. A failed
+	// broker-record read that is not a refusal is the fixed 503
+	// (errBrokerRecordUnreadable): "started" for a routed start's finalize,
+	// "created" for the finalize of a create (ptone/scion#6096).
 	if err := d.placementBackstop(ctx, agent); err != nil {
+		verb := "created"
+		if preserveWorkspaceRequested(ctx) {
+			verb = "started"
+		}
+		err = placementBackstopStartError(err, verb)
+		var readErr *brokerRecordReadError
+		if errors.As(err, &readErr) {
+			d.log.WarnContext(ctx, "DispatchFinalizeEnv: failed to read the agent's runtime broker; nothing sent",
+				"agent_id", agent.ID, "broker_id", agent.RuntimeBrokerID, "error", readErr.err)
+		}
 		return nil, err
 	}
 	return d.finalizeEnv(ctx, agent, env, false)

@@ -965,3 +965,101 @@ func TestCrossNode_OwnerRefusalCrossesBackAsSentinel(t *testing.T) {
 		}
 	}
 }
+
+// newSharedModeHandlerProject is newEmptyPerAgentHandlerProject for a
+// project that is not empty-per-agent, so a restart reaches the placement
+// pre-check without the empty-per-agent capability read in front of it.
+func newSharedModeHandlerProject(t *testing.T, s store.Store, suffix string) (*store.Project, *store.RuntimeBroker) {
+	t.Helper()
+	ctx := context.Background()
+	broker := &store.RuntimeBroker{
+		ID: tid("broker-shm-" + suffix), Name: "shm-broker-" + suffix, Slug: "shm-broker-" + suffix,
+		Endpoint: "http://localhost:9802", Status: store.BrokerStatusOnline,
+		Capabilities: &store.BrokerCapabilities{Attach: true, AsyncLaunch: true, AsyncStart: true, PreserveWorkspaceCreate: true},
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	project := &store.Project{ID: tid("proj-shm-" + suffix), Name: "shm-" + suffix, Slug: "shm-" + suffix}
+	require.NoError(t, s.CreateProject(ctx, project))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: project.ID, BrokerID: broker.ID, BrokerName: broker.Name, Status: broker.Status,
+	}))
+	project.DefaultRuntimeBrokerID = broker.ID
+	require.NoError(t, s.UpdateProject(ctx, project))
+	return project, broker
+}
+
+// The restart placement pre-check (handlers_agent_lifecycle.go, the read
+// behind the empty-per-agent check) and startAgentCore's placement read
+// each map a failed broker-record read to the fixed 503 for their action,
+// with the read failure injected on the server's own store.
+func TestStartPreChecks_BrokerRecordUnreadableIs503(t *testing.T) {
+	setup := func(t *testing.T, name string, phase state.Phase) (*Server, *mockRuntimeBrokerClient, *store.Agent, store.Store, *storeFaultSwitch) {
+		srv, s := testServer(t)
+		grantDevUserRuntimeBrokerAccess(t, s)
+		project, broker := newSharedModeHandlerProject(t, s, name)
+		agent := newQuotaTestAgent(t, s, broker, project, name, phase)
+		client := &mockRuntimeBrokerClient{}
+		srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default()))
+		_, fault := installStoreFault(t, srv, brokerReadFaultWrap(errors.New(fakeBrokerReadError)))
+		return srv, client, agent, s, fault
+	}
+	t.Run("restart on a project that is not empty-per-agent", func(t *testing.T) {
+		srv, client, agent, s, fault := setup(t, "pre-restart", state.PhaseRunning)
+		fault.Arm()
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/restart", nil)
+		assert.NotContains(t, rec.Body.String(), "10.0.0.9", "no raw store text")
+		require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+		var body ErrorResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		assert.Equal(t, ErrCodeUnavailable, body.Error.Code)
+		assert.Equal(t, brokerRecordUnreadableMessage("restarted"), body.Error.Message)
+		assert.False(t, client.stopCalled || client.restartCalled || client.startCalled, "nothing is sent")
+		stored, err := s.GetAgent(context.Background(), agent.ID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseRunning), stored.Phase, "the agent is not stopped")
+	})
+	for _, tc := range []struct {
+		kind store.StartClaimKind
+		verb string
+	}{
+		{store.StartClaimUser, "started"},
+		{store.StartClaimRestart, "restarted"},
+	} {
+		t.Run("startAgentCore, claim kind "+string(tc.kind), func(t *testing.T) {
+			srv, client, agent, _, fault := setup(t, "core-"+string(tc.kind), state.PhaseStopped)
+			fault.Arm()
+			err := srv.startAgentCore(context.Background(), agent, StartOpts{Kind: tc.kind})
+			assertBrokerReadRefusal(t, err, tc.verb)
+			assert.Equal(t, brokerRecordUnreadableMessage(tc.verb), err.Error())
+			assert.False(t, client.startCalled || client.createCalled, "nothing is sent")
+		})
+	}
+}
+
+// The finalize's own placement backstop maps a failed broker-record read to
+// the fixed 503: "started" for a routed start's finalize (the owner's kept
+// backstop re-read), "created" for the finalize of a create.
+func TestFinalizeEnv_BackstopReadErrorIs503(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ctx  func() context.Context
+		verb string
+	}{
+		{"routed start's finalize", func() context.Context { return withPreserveWorkspace(context.Background()) }, "started"},
+		{"create's finalize", context.Background, "created"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRunDispatchFixture(t)
+			recordCreates(f)
+			f.d.store = failingBrokerReads(f.store)
+			_, err := f.d.DispatchFinalizeEnv(tc.ctx(), f.agent, map[string]string{"FAKE_GATHERED": "fake"})
+			assertBrokerReadRefusal(t, err, tc.verb)
+			assert.Equal(t, brokerRecordUnreadableMessage(tc.verb), err.Error())
+			assert.False(t, f.client.createCalled, "nothing is sent")
+			rec := httptest.NewRecorder()
+			require.True(t, writePreserveWorkspaceCapabilityError(rec, err))
+			assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+			assert.NotContains(t, rec.Body.String(), "10.0.0.9")
+		})
+	}
+}
