@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"maps"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -535,10 +536,13 @@ func TestNoAuthGitHubToken_TestAdminScopeWithheld(t *testing.T) {
 	otherProject := tid("tsa-noauth-other")
 	taProject(t, s, otherProject, issuer.ID)
 
-	gh := func(scope, value string) *secret.SecretWithValue {
+	ghMode := func(scope, value, mode string) *secret.SecretWithValue {
 		return &secret.SecretWithValue{SecretMeta: secret.SecretMeta{Name: "GITHUB_TOKEN",
 			SecretType: store.SecretTypeEnvironment, Target: "GITHUB_TOKEN", Scope: scope,
-			InjectionMode: store.InjectionModeAlways}, Value: value}
+			InjectionMode: mode}, Value: value}
+	}
+	gh := func(scope, value string) *secret.SecretWithValue {
+		return ghMode(scope, value, store.InjectionModeAlways)
 	}
 	cases := []struct {
 		name      string
@@ -573,5 +577,143 @@ func TestNoAuthGitHubToken_TestAdminScopeWithheld(t *testing.T) {
 			d.injectNoAuthGitHubToken(ctx, agent, env, &cls)
 			assert.Equal(t, tc.want, env["GITHUB_TOKEN"])
 		})
+		// The same clamp on the as-needed pass, for an as-needed token.
+		t.Run(tc.name+" (as-needed pass)", func(t *testing.T) {
+			backend := &mockGitTokenSecretBackend{getScopedResponses: map[string]*secret.SecretWithValue{
+				"GITHUB_TOKEN:" + secret.ScopeProject: ghMode(secret.ScopeProject, noAuthGHProjectVal, store.InjectionModeAsNeeded),
+			}}
+			if tc.user {
+				backend.getScopedResponses["GITHUB_TOKEN:"+secret.ScopeUser] = ghMode(secret.ScopeUser, noAuthGHUserVal, store.InjectionModeAsNeeded)
+			}
+			d := NewHTTPAgentDispatcherWithClient(s, &mockRuntimeBrokerClient{}, false, nil)
+			d.SetHubID("test-hub")
+			d.SetAuthzService(srv.authzService)
+			d.SetSecretBackend(backend)
+			agent := &store.Agent{ID: generateID(), Name: "tsa-noauth", ProjectID: tc.projectID,
+				OwnerID: tc.rootID, Ancestry: []string{tc.rootID},
+				AppliedConfig: &store.AgentAppliedConfig{NoAuth: true}}
+
+			got, err := d.resolveAsNeededForKeys(ctx, agent, []string{"GITHUB_TOKEN"}, nil)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got["GITHUB_TOKEN"])
+		})
+	}
+}
+
+// An as-needed GITHUB_TOKEN reaches a no-auth agent through the as-needed
+// pass (resolveAsNeededForKeys), strictly under that key and with the same
+// filter as the first pass, and nothing else is resolved for it there.
+func TestResolveAsNeededForKeys_NoAuth_GitHubTokenOnly(t *testing.T) {
+	keys := []string{"GITHUB_TOKEN", failClosedKey, noAuthGHOtherTarget}
+	asNeededGH := func(f *runDispatchFixture, b *secret.LocalBackend, typ, target, scope, value string) {
+		setNoAuthSecret(t, f, b, noAuthSecret{name: "GITHUB_TOKEN", value: value, typ: typ, target: target,
+			scope: scope, mode: store.InjectionModeAsNeeded})
+	}
+	t.Run("as-needed GITHUB_TOKEN delivered, no other secret", func(t *testing.T) {
+		f, b := newNoAuthFixture(t, true)
+		seedAsNeededSecret(t, f, b)
+		asNeededGH(f, b, store.SecretTypeEnvironment, "GITHUB_TOKEN", store.ScopeProject, noAuthGHProjectVal)
+		// A failing secret list: the exemption reads GITHUB_TOKEN by name only.
+		f.d.SetSecretBackend(secret.NewLocalBackend(failListSecretsStore{f.store}, noAuthHubID, noAuthBackendSecret))
+
+		got, err := f.d.resolveAsNeededForKeys(context.Background(), f.agent, keys, nil)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"GITHUB_TOKEN": noAuthGHProjectVal}, got, "only GITHUB_TOKEN")
+	})
+	t.Run("target-restricted GITHUB_TOKEN not delivered", func(t *testing.T) {
+		for _, r := range []struct{ name, typ, target string }{
+			{"other target", store.SecretTypeEnvironment, noAuthGHOtherTarget},
+			{"file", store.SecretTypeFile, "~/.fake-noauth/gh-token"},
+		} {
+			t.Run(r.name, func(t *testing.T) {
+				f, b := newNoAuthFixture(t, true)
+				asNeededGH(f, b, r.typ, r.target, store.ScopeProject, noAuthGHProjectVal)
+
+				got, err := f.d.resolveAsNeededForKeys(context.Background(), f.agent, keys, nil)
+				require.NoError(t, err)
+				assert.Empty(t, got, "a GITHUB_TOKEN for another target is not delivered under any key")
+			})
+		}
+	})
+	t.Run("project token restricted: user-scope token delivered", func(t *testing.T) {
+		f, b := newNoAuthFixture(t, true)
+		asNeededGH(f, b, store.SecretTypeEnvironment, noAuthGHOtherTarget, store.ScopeProject, noAuthGHProjectVal)
+		asNeededGH(f, b, store.SecretTypeEnvironment, "GITHUB_TOKEN", store.ScopeUser, noAuthGHUserVal)
+
+		got, err := f.d.resolveAsNeededForKeys(context.Background(), f.agent, keys, nil)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"GITHUB_TOKEN": noAuthGHUserVal}, got)
+	})
+	t.Run("auth control", func(t *testing.T) {
+		f, b := newNoAuthFixture(t, false)
+		seedAsNeededSecret(t, f, b)
+		asNeededGH(f, b, store.SecretTypeEnvironment, "GITHUB_TOKEN", store.ScopeProject, noAuthGHProjectVal)
+
+		got, err := f.d.resolveAsNeededForKeys(context.Background(), f.agent, keys, nil)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"GITHUB_TOKEN": noAuthGHProjectVal, failClosedKey: failClosedValue}, got)
+	})
+}
+
+// A no-auth agent's GITHUB_TOKEN is delivered exactly once, on the pass of
+// its injection mode: an eager (always) token on the first request, an
+// as-needed one only on the replay that answers the broker's need. The
+// broker reports each key the request does not carry as needed.
+func TestNoAuthGitHubToken_DeliveredOnceOnItsModesPass(t *testing.T) {
+	paths := []struct {
+		name     string
+		prepare  func(f *runDispatchFixture)
+		dispatch func(ctx context.Context, f *runDispatchFixture) error
+	}{
+		{"create with env gather", nil, func(ctx context.Context, f *runDispatchFixture) error {
+			_, err := f.d.DispatchAgentCreateWithGather(ctx, f.agent)
+			return err
+		}},
+		{"provision", nil, func(ctx context.Context, f *runDispatchFixture) error {
+			return f.d.DispatchAgentProvision(ctx, f.agent)
+		}},
+		{"start", neverStarted, func(ctx context.Context, f *runDispatchFixture) error {
+			return f.d.DispatchAgentStart(ctx, f.agent, "", false)
+		}},
+	}
+	for _, mode := range []string{store.InjectionModeAlways, store.InjectionModeAsNeeded} {
+		for _, p := range paths {
+			t.Run(mode+"/"+p.name, func(t *testing.T) {
+				f, b := newNoAuthFixture(t, true)
+				if p.prepare != nil {
+					p.prepare(f)
+				}
+				setNoAuthSecret(t, f, b, noAuthSecret{name: "GITHUB_TOKEN", value: noAuthGHProjectVal,
+					typ: store.SecretTypeEnvironment, target: "GITHUB_TOKEN", scope: store.ScopeProject, mode: mode})
+				var sent []map[string]string
+				f.client.createWithGatherFunc = func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+					sent = append(sent, maps.Clone(req.ResolvedEnv))
+					if req.ResolvedEnv["GITHUB_TOKEN"] == "" {
+						return nil, &RemoteEnvRequirementsResponse{AgentID: req.ID, Needs: []string{"GITHUB_TOKEN"}}, nil
+					}
+					return &RemoteAgentResponse{Agent: &RemoteAgentInfo{ID: req.ID, Slug: req.Slug, Name: req.Name},
+						Created: true, Reprovisioned: req.Reprovision}, nil, nil
+				}
+
+				require.NoError(t, p.dispatch(context.Background(), f))
+				if mode == store.InjectionModeAlways {
+					if p.name == "start" {
+						// No as-needed entries: a plain start, first pass only.
+						assert.True(t, f.client.startCalled, "a plain start")
+						assert.Empty(t, sent, "no create")
+						assert.Equal(t, noAuthGHProjectVal, f.client.lastResolvedEnv["GITHUB_TOKEN"], "delivered on the first pass")
+						return
+					}
+					require.Len(t, sent, 1, "delivered on the first request; no replay")
+					assert.Equal(t, noAuthGHProjectVal, sent[0]["GITHUB_TOKEN"], "delivered on the first pass")
+					return
+				}
+				require.Len(t, sent, 2, "the needs report and one replay")
+				_, eager := sent[0]["GITHUB_TOKEN"]
+				assert.False(t, eager, "an as-needed GITHUB_TOKEN is not delivered on the first pass")
+				assert.Equal(t, noAuthGHProjectVal, sent[1]["GITHUB_TOKEN"], "delivered on the as-needed pass")
+				assert.False(t, f.client.startCalled, "a routed start, not a plain one")
+			})
+		}
 	}
 }
