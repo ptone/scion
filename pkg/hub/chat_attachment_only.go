@@ -36,3 +36,8 @@ func chatHistoryMessageDeleted(msg store.Message, exts map[string]*WebChatMessag
 	ext, ok := exts[msg.ID]
 	return ok && ext != nil && ext.DeletedAt != nil
 }
+
+// errMentionCopyNeedsText is the mention result error of a message without
+// text: mention copies carry the text only, so an attachment-only message
+// is not copied to the agents it mentions.
+const errMentionCopyNeedsText = "a message without text is not copied to mentioned agents"

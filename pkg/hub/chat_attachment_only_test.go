@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -193,4 +194,88 @@ func TestChatSendValidationEnvelope(t *testing.T) {
 
 	msg.Msg = "text"
 	require.Same(t, msg, chatSendValidationEnvelope(msg, refs), "a message with text is validated as is")
+}
+
+// TestChatHistory_DeletedAttachmentOnlyMessage: once an attachment-only
+// message is deleted, history marks it deleted and a reply previews it as
+// "[deleted]", not as an attachment.
+func TestChatHistory_DeletedAttachmentOnlyMessage(t *testing.T) {
+	f := newSendFixture(t)
+	dm := dmKeyFor(t, "user", f.ua.ID, "user", f.uc.ID)
+	id := f.uploadAs(t, f.ua, "", "photo.txt", "bytes")
+	got := f.send(t, f.ua, dm, map[string]interface{}{"content": "", "attachments": []string{id}})
+	require.Equal(t, http.StatusCreated, got.status, got.body)
+	parent := f.sendResponse(t, got)
+	got = f.send(t, f.uc, dm, map[string]interface{}{"content": "nice", "reply_to_id": parent.ID})
+	require.Equal(t, http.StatusCreated, got.status, got.body)
+
+	rec := doRequestAsUser(t, f.srv, f.ua, http.MethodDelete, "/api/v1/chat/conversations/"+dm+"/messages/"+parent.ID, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	h := f.history(t, f.uc, dm)
+	ext := h.MessageExtensions[parent.ID]
+	require.NotNil(t, ext, "history carries the deleted message's extension row")
+	require.NotNil(t, ext.DeletedAt)
+	require.Equal(t, "[deleted]", h.ReplyPreviews[parent.ID].Content)
+}
+
+// TestBroadcast_EmptyBodyRefused: a project broadcast without text is a
+// 400 on the direct and the message-broker path, for an agent and a user
+// sender, and nothing is stored or dispatched (the messages store accepts
+// an empty body since ptone/scion#6146).
+func TestBroadcast_EmptyBodyRefused(t *testing.T) {
+	f := newSendFixture(t)
+	path := "/api/v1/projects/" + f.projA.ID + "/broadcast"
+	body := BroadcastMessageRequest{StructuredMessage: &messages.StructuredMessage{
+		Version: messages.Version, Timestamp: time.Now().UTC().Format(time.RFC3339), Type: messages.TypeInstruction,
+	}}
+	check := func(rec *httptest.ResponseRecorder) {
+		t.Helper()
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		require.Contains(t, rec.Body.String(), "msg is required")
+	}
+	check(f.agentRequest(t, f.sender, jsonRequest(t, path, body)))
+	check(doRequestAsUser(t, f.srv, f.ua, http.MethodPost, path, body))
+	f.withBrokerProxy(t)
+	check(f.agentRequest(t, f.sender, jsonRequest(t, path, body)))
+	require.Empty(t, f.disp.getCalls(), "nothing is dispatched")
+	require.Equal(t, 0, f.countStored(""), "nothing is stored")
+}
+
+// TestMentions_NoTextNotCopied: a message without text is not copied to
+// the agents it mentions explicitly, on both mention paths; each mention
+// reports why, and nothing is dispatched to the mentioned agent.
+func TestMentions_NoTextNotCopied(t *testing.T) {
+	f := newSendFixture(t)
+	ctx := agentCtx(context.Background(), f.sender)
+	msg := &messages.StructuredMessage{
+		Version: messages.Version, Sender: "agent:" + f.sender.Slug, SenderID: f.sender.ID,
+		Recipient: "agent:" + f.target.Slug, RecipientID: f.target.ID, Type: messages.TypeInstruction,
+		Attachments: []string{"/scratch/shot.png"},
+	}
+	res := f.srv.processMentions(ctx, []string{f.aa.Slug}, f.target, msg, "", "")
+	require.Len(t, res, 1)
+	require.Equal(t, f.aa.Slug, res[0].Slug)
+	require.Equal(t, "error", res[0].Status)
+	require.Equal(t, errMentionCopyNeedsText, res[0].Error)
+
+	res = f.srv.fanOutAgentMentions(ctx, agentMentionFanoutInput{
+		Sender: f.sender, SenderIdent: GetAgentIdentityFromContext(ctx), Primary: f.target,
+		Type: messages.TypeInstruction, Explicit: []string{f.aa.Slug}, ParentMessageID: "parent-message-id",
+	})
+	require.Len(t, res, 1)
+	require.Equal(t, f.aa.Slug, res[0].Slug)
+	require.Equal(t, "error", res[0].Status)
+	require.Equal(t, errMentionCopyNeedsText, res[0].Error)
+
+	for _, c := range f.disp.getCalls() {
+		require.False(t, c.Agent != nil && c.Agent.ID == f.aa.ID, "nothing is dispatched to the mentioned agent")
+	}
+	require.Equal(t, 0, f.countStored(""), "no mention copy is stored")
+
+	// Control: with text, the mention is not refused for want of text.
+	msg.Msg = "see this"
+	res = f.srv.processMentions(ctx, []string{f.aa.Slug}, f.target, msg, "", "")
+	require.Len(t, res, 1)
+	require.NotEqual(t, errMentionCopyNeedsText, res[0].Error)
 }
