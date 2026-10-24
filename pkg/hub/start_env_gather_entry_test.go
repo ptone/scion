@@ -223,6 +223,24 @@ func TestDispatchAgentRestart_CapableBrokerWithAsNeededEntriesIs412(t *testing.T
 	}
 }
 
+// H-25 (L-T1): a progeny agent (an ancestry beyond its creator) counts as
+// having as-needed entries, which cannot be listed cheaply: with none of
+// its own, its broker /restart on a capable broker is refused the same way.
+func TestDispatchAgentRestart_ProgenyOnCapableBrokerIs412(t *testing.T) {
+	f, gc := newGatherStartFixture(t, true, plainStarted, nil)
+	f.agent.Ancestry = []string{f.agent.OwnerID, tid("agent-progeny-parent")}
+	runBefore := f.agent.RunID
+	err := f.d.DispatchAgentRestart(context.Background(), f.agent)
+	require.ErrorIs(t, err, errRestartGatherPending)
+	assert.True(t, isConfirmedStartNotActedOnError(err))
+	assert.False(t, f.client.stopCalled, "nothing stopped")
+	assertNothingSent(t, f, gc, runBefore)
+	rec := httptest.NewRecorder()
+	require.True(t, writeStartEnvGatherError(rec, err, api.AgentActionRestart))
+	assert.Equal(t, http.StatusPreconditionFailed, rec.Code)
+	assert.Contains(t, rec.Body.String(), errRestartGatherPending.Error())
+}
+
 // H-25: the broker /restart of an agent without as-needed entries is a
 // plain restart as before, on an old and on a capable broker.
 func TestDispatchAgentRestart_PlainWhenNothingToRefuse(t *testing.T) {
