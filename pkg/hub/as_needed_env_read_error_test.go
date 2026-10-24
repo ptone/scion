@@ -119,18 +119,21 @@ func TestAsNeededEnvRead_GatherPathsReturnFixedMessage(t *testing.T) {
 	}
 }
 
-// Provision applies continueOnSecretResolutionError to this error too: it
-// sends no replay and succeeds, and the later start and restart return the
-// fixed env settings message without calling the broker. A reprovision
-// returns its still-missing env error.
-func TestAsNeededEnvRead_ProvisionContinuesStartFails(t *testing.T) {
+// Provision and reprovision return the fixed env settings message when
+// their as-needed pass cannot read the stored env vars, and send no replay;
+// a start and a restart then return the fixed message without calling the
+// broker.
+func TestAsNeededEnvRead_ProvisionReturnsFixedMessage(t *testing.T) {
 	t.Run("provision", func(t *testing.T) {
 		f, calls := newAsNeededEnvReadFixture(t)
-		require.NoError(t, f.d.DispatchAgentProvision(context.Background(), f.agent))
+		err := f.d.DispatchAgentProvision(context.Background(), f.agent)
+		require.Error(t, err)
+		var readErr *storedEnvReadError
+		require.ErrorAs(t, err, &readErr)
+		assert.Equal(t, envReadFixedMessage("created"), err.Error())
 		assert.Equal(t, 1, *calls, "no replay is sent")
-		assert.Contains(t, f.logs.String(), "provisioning without as-needed values")
 
-		err := f.d.DispatchAgentStart(context.Background(), f.agent, "", false)
+		err = f.d.DispatchAgentStart(context.Background(), f.agent, "", false)
 		require.Error(t, err)
 		assert.Equal(t, envReadFixedMessage("started"), err.Error())
 		err = f.d.DispatchAgentRestart(context.Background(), f.agent)
@@ -143,7 +146,8 @@ func TestAsNeededEnvRead_ProvisionContinuesStartFails(t *testing.T) {
 		f, calls := newAsNeededEnvReadFixture(t)
 		err := f.d.DispatchAgentReprovision(context.Background(), f.agent)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "required env still missing after reprovision")
+		assert.Equal(t, envReadFixedMessage("reprovisioned"), err.Error())
+		assertNoEnvReadDetail(t, err.Error(), "the error text")
 		assert.Equal(t, 1, *calls, "no replay is sent")
 	})
 }
