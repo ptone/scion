@@ -138,6 +138,16 @@ type CreateWithGatherDispatchArgs struct {
 	// starting (ptone/scion#6096). An owner that does not know it runs the
 	// create by its own rules.
 	Synchronous bool `json:"synchronous,omitempty"`
+	// PreserveWorkspace asks the owner to send the create with
+	// PreserveWorkspace (withPreserveWorkspace): set for a start the
+	// requester routed through create-with-gather, whose broker must keep
+	// the agent's existing workspace (ptone/scion#6096). The owner checks
+	// the broker's PreserveWorkspaceCreate capability again before sending.
+	PreserveWorkspace bool `json:"preserveWorkspace,omitempty"`
+	// Task is the routed start's task (set only with PreserveWorkspace): the
+	// requester holds it on its in-memory copy of the agent only, so the
+	// owner, which re-reads the agent from the store, takes it from here.
+	Task string `json:"task,omitempty"`
 }
 
 // CheckPromptResult is serialized into broker_dispatch.result by the owner.

@@ -111,6 +111,11 @@ type ownerErrDispatcher struct {
 	// createAsyncOptIn records the agent's LaunchAsyncOptIn when the
 	// owner's last create ran; nil when no create ran.
 	createAsyncOptIn *bool
+	// createPreserveWorkspace and createTask record whether the owner's
+	// last create ran with withPreserveWorkspace, and the agent's task
+	// then.
+	createPreserveWorkspace bool
+	createTask              string
 }
 
 // ownerSignalBus delivers the requesting node's signal to the owner node,
@@ -283,6 +288,11 @@ func (d *ownerErrDispatcher) DispatchAgentCreateWithGather(ctx context.Context, 
 	d.recMu.Lock()
 	optIn := a.LaunchAsyncOptIn
 	d.createAsyncOptIn = &optIn
+	d.createPreserveWorkspace = preserveWorkspaceRequested(ctx)
+	d.createTask = ""
+	if a.AppliedConfig != nil {
+		d.createTask = a.AppliedConfig.Task
+	}
 	d.recMu.Unlock()
 	_, _ = d.lifecycleTestDispatcher.DispatchAgentCreateWithGather(ctx, a)
 	if d.createResult != nil {

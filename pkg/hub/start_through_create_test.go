@@ -60,6 +60,7 @@ func TestDispatchAgentStart_UndeliveredConfigGoesThroughCreate(t *testing.T) {
 		f := newRunDispatchFixture(t)
 		neverStarted(f)
 		seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
+		grantPreserveWorkspaceCreate(t, f.store, f.agent.RuntimeBrokerID)
 		calls := gatherNeedsClient(f)
 
 		require.NoError(t, f.d.DispatchAgentStart(context.Background(), f.agent, "", false))
@@ -73,6 +74,7 @@ func TestDispatchAgentStart_UndeliveredConfigGoesThroughCreate(t *testing.T) {
 		f := newRunDispatchFixture(t)
 		neverStarted(f)
 		seedAsNeededEnv(t, f, "FAKE_OTHER_KEY", "fake-other-value")
+		grantPreserveWorkspaceCreate(t, f.store, f.agent.RuntimeBrokerID)
 		f.client.createWithGatherFunc = func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
 			return nil, &RemoteEnvRequirementsResponse{AgentID: req.ID, Needs: []string{"FAKE_UNRESOLVABLE_KEY"}}, nil
 		}
@@ -91,6 +93,7 @@ func TestDispatchAgentStart_UndeliveredConfigGoesThroughCreate(t *testing.T) {
 		f.agent.Phase = string(state.PhaseProvisioning)
 		require.NotEmpty(t, f.agent.RunID)
 		seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
+		grantPreserveWorkspaceCreate(t, f.store, f.agent.RuntimeBrokerID)
 		gatherNeedsClient(f)
 
 		require.NoError(t, f.d.DispatchAgentStart(context.Background(), f.agent, "", false))
@@ -119,12 +122,14 @@ func TestDispatchAgentStart_DeliveredOrNoAsNeededStartsPlain(t *testing.T) {
 			neverStarted(f)
 			f.agent.AppliedConfig.ConfigDelivered = true
 			seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
+			grantPreserveWorkspaceCreate(t, f.store, f.agent.RuntimeBrokerID)
 		}},
 		{"no as-needed entries", func(t *testing.T, f *runDispatchFixture) {
 			neverStarted(f)
 		}},
 		{"resumed start", func(t *testing.T, f *runDispatchFixture) {
 			seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
+			grantPreserveWorkspaceCreate(t, f.store, f.agent.RuntimeBrokerID)
 		}},
 	}
 	for _, tc := range cases {
@@ -147,6 +152,7 @@ func TestDispatchAgentStart_LegacyRowWithoutMarkerIsRouted(t *testing.T) {
 	f.agent.Phase = string(state.PhaseStopped)
 	require.NotEmpty(t, f.agent.RunID)
 	seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
+	grantPreserveWorkspaceCreate(t, f.store, f.agent.RuntimeBrokerID)
 	gatherNeedsClient(f)
 
 	require.NoError(t, f.d.DispatchAgentStart(context.Background(), f.agent, "", false))
@@ -166,6 +172,7 @@ func TestDispatchAgentStart_RoutedStartIsSynchronous(t *testing.T) {
 		return AsyncLaunchSettings{Enabled: true, Timeout: time.Minute}
 	}
 	seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
+	grantPreserveWorkspaceCreate(t, f.store, f.agent.RuntimeBrokerID)
 	sawAsync := false
 	f.client.createWithGatherFunc = func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
 		if req.AsyncLaunch {
@@ -212,6 +219,7 @@ func TestCrossNode_StartRoutingDecidedOnRequester(t *testing.T) {
 		stored.LaunchAsyncOptIn = true
 		require.NoError(t, f.store.UpdateAgent(context.Background(), stored))
 		f.agent = stored
+		grantPreserveWorkspaceCreate(t, f.store, f.agent.RuntimeBrokerID)
 
 		_ = f.requester.DispatchAgentStart(crossNodeCtx(t), f.agent, "", false)
 		f.ownerDisp.recMu.Lock()
@@ -228,6 +236,7 @@ func TestDispatchAgentRestart_NotRouted(t *testing.T) {
 		f := newRunDispatchFixture(t)
 		neverStarted(f)
 		seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
+		grantPreserveWorkspaceCreate(t, f.store, f.agent.RuntimeBrokerID)
 		require.NoError(t, f.d.DispatchAgentRestart(context.Background(), f.agent))
 		assert.True(t, f.client.restartCalled)
 		assert.False(t, f.client.createCalled)
@@ -236,6 +245,7 @@ func TestDispatchAgentRestart_NotRouted(t *testing.T) {
 		f := newRunDispatchFixture(t)
 		neverStarted(f)
 		seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
+		grantPreserveWorkspaceCreate(t, f.store, f.agent.RuntimeBrokerID)
 		require.NoError(t, f.d.DispatchAgentStart(withRestartStartLeg(context.Background()), f.agent, "", false))
 		assert.True(t, f.client.startCalled, "a plain start leg")
 		assert.False(t, f.client.createCalled)
@@ -244,6 +254,7 @@ func TestDispatchAgentRestart_NotRouted(t *testing.T) {
 		f := newRunDispatchFixture(t)
 		neverStarted(f)
 		seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
+		grantPreserveWorkspaceCreate(t, f.store, f.agent.RuntimeBrokerID)
 		_, err := f.d.DispatchAgentStartWithOptions(context.Background(), f.agent, "", false, StartDispatchOptions{Kind: store.LaunchKindRestart})
 		require.NoError(t, err)
 		assert.False(t, f.client.createCalled)
@@ -258,6 +269,7 @@ func TestLifecycleHTTP_StartRoutedRestartNot(t *testing.T) {
 		srv, s := testServer(t)
 		grantDevUserRuntimeBrokerAccess(t, s)
 		project, broker := newEmptyPerAgentHandlerProject(t, s, name, true)
+		grantPreserveWorkspaceCreate(t, s, broker.ID)
 		agent := newQuotaTestAgent(t, s, broker, project, name, phase)
 		require.NoError(t, s.CreateEnvVar(context.Background(), &store.EnvVar{
 			ID: uuid.NewString(), Key: failClosedKey, Value: failClosedValue,
@@ -337,6 +349,7 @@ func TestDispatchAgentStart_AfterProvisionGathersAgain(t *testing.T) {
 		f := newRunDispatchFixture(t)
 		neverStarted(f)
 		seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
+		grantPreserveWorkspaceCreate(t, f.store, f.agent.RuntimeBrokerID)
 		calls := gatherNeedsClient(f)
 
 		require.NoError(t, f.d.DispatchAgentProvision(context.Background(), f.agent))
@@ -355,6 +368,7 @@ func TestDispatchAgentStart_AfterProvisionGathersAgain(t *testing.T) {
 		f := newRunDispatchFixture(t)
 		f.agent.Phase = string(state.PhaseStopped) // ran before: legacy proof alone would plain-start
 		seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
+		grantPreserveWorkspaceCreate(t, f.store, f.agent.RuntimeBrokerID)
 		calls := gatherNeedsClient(f)
 
 		require.NoError(t, f.d.DispatchAgentReprovision(context.Background(), f.agent))
@@ -371,6 +385,7 @@ func TestDispatchAgentStart_AfterProvisionGathersAgain(t *testing.T) {
 		f.agent.Phase = string(state.PhaseStopped)
 		f.agent.AppliedConfig.ConfigDelivered = true
 		seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
+		grantPreserveWorkspaceCreate(t, f.store, f.agent.RuntimeBrokerID)
 		gatherNeedsClient(f)
 
 		require.NoError(t, f.d.DispatchAgentReprovision(context.Background(), f.agent))
