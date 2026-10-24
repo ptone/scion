@@ -82,7 +82,7 @@ var startEntryPoints = []entryPoint{
 			StartDispatchOptions{Async: true, Kind: store.LaunchKindStart, PriorPhase: string(state.PhaseSuspended)})
 		return err
 	}},
-	{"DispatchAgentRestart (broker /restart)", func(t *testing.T, f *runDispatchFixture) error {
+	{"DispatchAgentRestart (broker restart endpoint)", func(t *testing.T, f *runDispatchFixture) error {
 		return f.d.DispatchAgentRestart(context.Background(), f.agent)
 	}},
 	{"lifecycle restart pre-check", func(t *testing.T, f *runDispatchFixture) error {
