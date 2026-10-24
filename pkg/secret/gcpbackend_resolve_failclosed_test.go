@@ -165,8 +165,8 @@ func TestGCPBackend_Resolve_DanglingStoredRefFails(t *testing.T) {
 	if !strings.HasPrefix(rec.SecretRef, "gcpsm:") {
 		t.Fatalf("Set did not store a gcpsm: ref: %q", rec.SecretRef)
 	}
-	fake.mockSMClient.mu.Lock()
-	delete(fake.mockSMClient.versions, strings.TrimPrefix(rec.SecretRef, "gcpsm:"))
+	fake.mockSMClient.mu.Lock() // the embedded client's lock, not the wrapper's
+	delete(fake.versions, strings.TrimPrefix(rec.SecretRef, "gcpsm:"))
 	fake.mockSMClient.mu.Unlock()
 
 	resolved, err := b.Resolve(context.Background(), "", "project-1", "", nil)
