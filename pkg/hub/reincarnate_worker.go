@@ -876,6 +876,13 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// image. The record's NewAppliedConfig and the completion write below
 	// both persist fresh.
 	copyBrokerEcho(fresh, agent.AppliedConfig, true)
+	// A start leg routed through create-with-gather delivered the config
+	// and recorded ConfigDelivered on the row (ptone/scion#6096): keep it
+	// through the completion write below, which writes fresh, so the next
+	// start is plain. Only the success path sets it; nothing here clears it.
+	if agent.AppliedConfig != nil && agent.AppliedConfig.ConfigDelivered {
+		fresh.ConfigDelivered = true
+	}
 
 	// Step: complete. Design §3.4 Amendment A6: CAS the record to
 	// completed FIRST. Only the winner may write the agent row — otherwise a
