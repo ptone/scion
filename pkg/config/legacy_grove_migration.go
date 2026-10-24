@@ -44,6 +44,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/internal/writesonread"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -402,7 +403,13 @@ var renameDir = func(oldname, newname string) error {
 // own symlink, and moves on without reporting anything either way. Never
 // returns an error that should abort startup; every problem is reported via
 // report instead.
+//
+// It does nothing while internal/writesonread is set: a read-only command
+// leaves the layout as it is.
 func MigrateLegacyGlobalLayout(scionHome string, report Reporter) {
+	if writesonread.Disabled() {
+		return
+	}
 	for _, root := range legacyGlobalRoots {
 		migrateLegacyGlobalRoot(scionHome, root, report)
 	}
@@ -424,7 +431,14 @@ var migrateLegacyGlobalLayoutOnce sync.Once
 // but only the first call in the process has any effect. Mirrors
 // WarnRemovedLegacyEnvOnce, which the same two boot hooks already share for
 // the same reason.
+//
+// While internal/writesonread is set it returns without using up the
+// Once, so a process that sets the switch never makes a later boot
+// migration in the same process a silent no-op.
 func MigrateLegacyGlobalLayoutOnce(scionHome string, report Reporter) {
+	if writesonread.Disabled() {
+		return
+	}
 	migrateLegacyGlobalLayoutOnce.Do(func() {
 		MigrateLegacyGlobalLayout(scionHome, report)
 	})
@@ -702,11 +716,13 @@ func gitTracked(path string) bool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), gitTrackedTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "-C", filepath.Dir(abs), "ls-files", "--error-unmatch", filepath.Base(abs))
+	// The settings file can sit in a checkout agents can write, so git runs
+	// with the host-side settings (no repository hooks or monitor).
+	cmd := exec.CommandContext(ctx, "git", append(util.HostGitArgs(), "-C", filepath.Dir(abs), "ls-files", "--error-unmatch", filepath.Base(abs))...)
 	// This can run while the server loads its config, before it clears
 	// server secrets from its own env, so the child gets an env without
 	// them.
-	cmd.Env = util.EnvWithoutAgentRefusedNames(os.Environ())
+	cmd.Env = util.HostGitEnv(util.EnvWithoutAgentRefusedNames(os.Environ()))
 	return cmd.Run() == nil
 }
 
@@ -919,6 +935,11 @@ func migrateLegacyYAMLKeysLocked(file, path string, renames []legacyYAMLKeyRenam
 		return nil // no legacy keys present (or malformed YAML): no write
 	}
 	overrides := legacyValueOverrides(actions)
+	if writesonread.Disabled() {
+		// A read-only command: keep the legacy value in memory, as for a
+		// busy lock below, and leave the file (and its directory) as it is.
+		return overrides
+	}
 
 	if uid, ok := fileOwnerUID(info); ok && uid != geteuid() {
 		reportActionsSkipped(report, st, actions, path, "owned by another user")
