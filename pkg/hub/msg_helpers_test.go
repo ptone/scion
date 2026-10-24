@@ -165,7 +165,8 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	// httpdispatcher.go: the dispatcher's create sends every create through
 	// create-with-gather (ptone/scion#6096). It is the implementation of
 	// the DispatchAgentCreate primitive, whose call sites are classified
-	// above (dispatchAgentEventHandler, handleWorkspaceSyncToFinalize).
+	// here (dispatchAgentEventHandler, handleWorkspaceSyncToFinalize and
+	// startThroughCreate).
 	{file: "httpdispatcher.go", function: "DispatchAgentCreate", symbol: "DispatchAgentCreateWithGather",
 		class: "exempt", reason: "primitive implementation: DispatchAgentCreate's own body; its call sites are classified"},
 

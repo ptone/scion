@@ -124,6 +124,9 @@ func TestCreateStartFailure_PreserveWorkspaceKeepsWorkspaceAndBranch(t *testing.
 	if out := gitPreserveT(t, repo, "branch", "--list", "same-name"); !strings.Contains(out, "same-name") {
 		t.Errorf("the agent branch was deleted (git branch --list: %q)", out)
 	}
+	if out := gitPreserveT(t, repo, "worktree", "list", "--porcelain"); !strings.Contains(out, workspace) {
+		t.Errorf("the worktree entry was removed (worktrees:\n%s)", out)
+	}
 }
 
 // The control: without preserveWorkspace the same failure still cleans up

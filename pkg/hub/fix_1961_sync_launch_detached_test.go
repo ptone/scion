@@ -402,9 +402,14 @@ func TestSyncLaunch_OwnDeadline_RemainingSites(t *testing.T) {
 			wantCalls: 1,
 		},
 		{
-			// Every provision-only failure fails the create (ptone/scion#6096):
-			// a later start does not gather env, so a provision that timed
-			// out is rolled back, not kept with a warning.
+			// Every provision-only failure fails the create (the
+			// ptone/scion#6096 fold: G1, a failure after the send boundary
+			// fails the create; G3, the same fail-create on the cross-node
+			// path, with the broker delete as the DeleteRuntime). The fold
+			// does not name the unknown-outcome timeout itself; coordinator-2
+			// ruled (18:43Z) that a sync-dispatch timeout on a provision-only
+			// create rolls back the row and sends the broker delete, so a
+			// possibly provisioned agent is cleaned up (fail-closed).
 			name: "provision-only-timeout-fails-create",
 			setup: func(t *testing.T, _ store.Store, project *store.Project) (string, string, any) {
 				return http.MethodPost, "/api/v1/agents", CreateAgentRequest{Name: "own-deadline-provision", ProjectID: project.ID, ProvisionOnly: true}
@@ -415,6 +420,7 @@ func TestSyncLaunch_OwnDeadline_RemainingSites(t *testing.T) {
 				require.NotNil(t, disp.capturedAgent)
 				_, err := s.GetAgent(context.Background(), disp.capturedAgent.ID)
 				assert.ErrorIs(t, err, store.ErrNotFound, "a provision that timed out fails the create and removes the row")
+				assert.True(t, disp.deleteCalled, "the rollback sends the broker delete")
 			},
 		},
 		{
