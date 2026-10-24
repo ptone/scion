@@ -91,7 +91,9 @@ func TestCreateAgent_PreserveWorkspaceRefusals(t *testing.T) {
 	}{
 		{"non-boolean value", `{"name": "a", "id": "id-a", "slug": "a", "preserveWorkspace": "yes", "config": {"template": "claude"}}`},
 		{"with provisionOnly", `{"name": "a", "id": "id-a", "slug": "a", "preserveWorkspace": true, "provisionOnly": true, "config": {"template": "claude"}}`},
-		{"with reprovision", `{"name": "a", "id": "id-a", "slug": "a", "preserveWorkspace": true, "provisionOnly": true, "reprovision": true, "config": {"template": "claude"}}`},
+		// Reprovision alone (no provisionOnly), so the reprovision arm of the
+		// refusal is pinned on its own.
+		{"with reprovision", `{"name": "a", "id": "id-a", "slug": "a", "preserveWorkspace": true, "reprovision": true, "config": {"template": "claude"}}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, mgr := newTestServerWithProvisionCapture()
