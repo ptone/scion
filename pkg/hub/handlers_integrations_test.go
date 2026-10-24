@@ -2725,6 +2725,7 @@ func TestGetIntegrationStatus_SupervisionStates(t *testing.T) {
 	st = getIntegrationStatus(mgr, "discord")
 	assert.Equal(t, HealthStatusUnhealthy, st.Health)
 	assert.False(t, st.Connected)
+	assert.Contains(t, st.Message, "repeatedly failing to restart")
 
 	// Running (and unsupervised) plugins are queried as before.
 	mgr.infoErr = nil
@@ -2746,6 +2747,11 @@ func TestGetPluginHubCreds_TransportKeys(t *testing.T) {
 	creds = srv.getPluginHubCreds(context.Background(), "discord")
 	assert.Equal(t, "iap", creds["transport_mode"])
 	assert.Equal(t, "/projects/1/global/backendServices/2", creds["transport_audience"])
+
+	// The same values startup injects.
+	mode, audience := srv.PluginTransportAuth()
+	assert.Equal(t, creds["transport_mode"], mode)
+	assert.Equal(t, creds["transport_audience"], audience)
 }
 
 // replayFailingBus is an EventBus whose Subscribe fails.
