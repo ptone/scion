@@ -217,8 +217,6 @@ func TestIdentityMappingDispatchError_MismatchWithoutKSANames(t *testing.T) {
 		`The requested Kubernetes service account does not match the one mapped to GCP service account "`+testMappingAccount+`" on profile "gke" of broker "broker-a".`), ime.Message)
 }
 
-// A provision-only create that fails for a mapping refusal stays a 201 and
-// carries the hub's coded message in its warning, not the broker's text.
 // A provision-only create whose broker refuses the identity mapping (a
 // broker response, so after the provision reached it) fails the create and
 // answers the hub's coded message, not the raw broker body
@@ -423,4 +421,34 @@ func TestIdentityMappingDispatchError_MismatchDiscoveredSource(t *testing.T) {
 	assert.Contains(t, mapped.Message, `does not match "mapped-ksa", the one mapped to GCP service account`)
 	assert.Contains(t, mapped.Message, "change kubernetes_service_account_mappings")
 	assert.NotContains(t, mapped.Details, api.BrokerErrDetailKSASource)
+}
+
+// A provision-only create refused by the hub's own identity precheck
+// (before any request left the hub, so not marked errProvisionSent) stays a
+// 201 and carries the hub's coded message in its warning, not raw text
+// (ptone/scion#4024).
+func TestCreateAgent_ProvisionOnlyPreSendIdentityPrecheckWarning(t *testing.T) {
+	precheck := &identityNotMappedPrecheck{Account: testMappingAccount, Profile: "gke", Broker: testMappingBroker}
+	require.False(t, errors.Is(precheck, errProvisionSent), "the precheck refusal is pre-send")
+	disp := &skillFailDispatcher{provisionErr: precheck}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:          "provision-only-precheck",
+		ProjectID:     project.ID,
+		ProvisionOnly: true,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var resp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	var warning string
+	for _, w := range resp.Warnings {
+		if strings.HasPrefix(w, api.ProvisionFailedWarningPrefix) {
+			warning = w
+		}
+	}
+	require.NotEmpty(t, warning, "warnings: %v", resp.Warnings)
+	assert.Contains(t, warning, ErrCodeIdentityNotMapped+": ")
+	require.NotNil(t, resp.Agent)
+	_, err := s.GetAgent(context.Background(), resp.Agent.ID)
+	assert.NoError(t, err, "the record is kept")
 }

@@ -17,6 +17,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -644,12 +645,18 @@ func TestProvisionGather_UnmetNeedsAndCrossNode(t *testing.T) {
 				calls++
 				return nil, &RemoteEnvRequirementsResponse{AgentID: req.ID, Needs: []string{"FAKE_UNRESOLVABLE_KEY"}}, nil
 			}
+			var logged bytes.Buffer
+			f.d.log = slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelWarn}))
 			err := dispatch(f)
 			require.Error(t, err)
 			assert.ErrorIs(t, err, errProvisionEnvUnmet)
 			assert.ErrorIs(t, err, errProvisionSent)
 			assert.NotContains(t, err.Error(), "FAKE_UNRESOLVABLE_KEY", "the error names no key")
 			assert.Equal(t, 1, calls)
+			// The log line carries the count only, no key name.
+			assert.Contains(t, logged.String(), "required environment values still unavailable after the provision")
+			assert.Contains(t, logged.String(), "count=1")
+			assert.NotContains(t, logged.String(), "FAKE_UNRESOLVABLE_KEY", "the log names no key")
 		})
 		t.Run(fmt.Sprintf("reprovision=%v/replay answered with needs again", reprovision), func(t *testing.T) {
 			f := newRunDispatchFixture(t)
@@ -675,7 +682,25 @@ func TestProvisionGather_UnmetNeedsAndCrossNode(t *testing.T) {
 		err := f.d.DispatchAgentProvision(context.Background(), f.agent)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, ErrLifecycleDeferred)
-		assert.False(t, errors.Is(err, errProvisionSent), "a deferral sends nothing")
+		assert.False(t, errors.Is(err, errProvisionSent), "a first-request deferral sends nothing")
+	})
+	// A deferral of the replay comes after a send; it still returns
+	// ErrLifecycleDeferred, which the provision-only create handler fails.
+	t.Run("replay deferred", func(t *testing.T) {
+		f := newRunDispatchFixture(t)
+		f.d.SetSecretBackend(&switchableBackend{})
+		calls := 0
+		f.client.createWithGatherFunc = func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+			calls++
+			if calls == 1 {
+				return nil, &RemoteEnvRequirementsResponse{AgentID: req.ID, Needs: []string{failClosedKey}}, nil
+			}
+			return nil, nil, ErrLifecycleDeferred
+		}
+		err := f.d.DispatchAgentProvision(context.Background(), f.agent)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrLifecycleDeferred)
+		assert.Equal(t, 2, calls, "the needs report and the deferred replay")
 	})
 }
 
