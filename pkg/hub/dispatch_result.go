@@ -115,7 +115,7 @@ var dispatchHubSentinels = []struct {
 	// handler answers them with its own status and the action's verb.
 	{"start_env_unmet", errStartEnvUnmet},
 	{"broker_lacks_start_env_gather", errBrokerLacksStartEnvGather},
-	{"broker_capability_unavailable", errBrokerCapabilityUnavailable},
+	{"broker_record_unreadable", errBrokerRecordUnreadable},
 }
 
 // dispatchHubError is a failure the executing node returned with hub

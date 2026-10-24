@@ -22,6 +22,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -31,6 +32,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -133,12 +135,29 @@ func TestStartEntryPoints_OldBroker412AndMissingBroker503(t *testing.T) {
 			assert.True(t, isConfirmedStartNotActedOnError(err))
 			assertNothingSent(t, f, gc, runBefore)
 		})
+		t.Run(ep.name+"/broker read error: 503", func(t *testing.T) {
+			// The record is first read by the placement backstop: its read
+			// error is the same fixed 503, with no store text.
+			f, gc := newGatherStartFixture(t, true, plainStarted, func(s store.Store) store.Store { return failBrokerReadStore{s} })
+			seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
+			runBefore := f.agent.RunID
+			err := ep.run(t, f)
+			require.ErrorIs(t, err, errBrokerRecordUnreadable)
+			assert.NotContains(t, err.Error(), "FAKE-broker-read-detail", "no store text in the error")
+			assert.True(t, isConfirmedStartNotActedOnError(err))
+			rec := httptest.NewRecorder()
+			require.True(t, writeStartEnvGatherError(rec, err, api.AgentActionRestart))
+			assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+			assert.NotContains(t, rec.Body.String(), "FAKE-broker-read-detail", "no store text in the body")
+			assert.Contains(t, rec.Body.String(), "the agent's runtime broker record could not be read; the agent was not restarted", "the restart verb")
+			assertNothingSent(t, f, gc, runBefore)
+		})
 		t.Run(ep.name+"/missing broker record: 503", func(t *testing.T) {
 			f, gc := newGatherStartFixture(t, true, plainStarted, nil)
 			f.agent.RuntimeBrokerID = tid("broker-missing-" + uuid.NewString()[:8])
 			runBefore := f.agent.RunID
 			err := ep.run(t, f)
-			require.ErrorIs(t, err, errBrokerCapabilityUnavailable)
+			require.ErrorIs(t, err, errBrokerRecordUnreadable)
 			assert.True(t, isConfirmedStartNotActedOnError(err))
 			assertNothingSent(t, f, gc, runBefore)
 		})
@@ -198,7 +217,19 @@ func TestStartEntryPoints_EmptyBrokerIDRefusedBeforeCapabilityRead(t *testing.T)
 func TestStartEntryPoints_GuardRefusalWinsOver412(t *testing.T) {
 	errStanding := errors.New("FAKE standing refusal")
 	for _, ep := range startEntryPoints[:4] {
-		t.Run(ep.name, func(t *testing.T) {
+		t.Run(ep.name+"/placement", func(t *testing.T) {
+			f, gc := newGatherStartFixture(t, false, plainStarted, nil)
+			seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
+			// A pin without its broker: an incomplete pin, refused by the
+			// placement backstop.
+			f.agent.PinnedRuntimeTargetID = "fake-target"
+			err := ep.run(t, f)
+			var conflict *PlacementConflictError
+			require.ErrorAs(t, err, &conflict)
+			assert.NotErrorIs(t, err, errBrokerLacksStartEnvGather, "the placement backstop answers first")
+			assert.Empty(t, gc.calls)
+		})
+		t.Run(ep.name+"/standing", func(t *testing.T) {
 			f, gc := newGatherStartFixture(t, false, plainStarted, nil)
 			seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
 			f.d.requiredStandingCheck = func(context.Context, *store.Agent) error { return errStanding }
@@ -225,7 +256,7 @@ func TestLifecycleHTTP_RestartPrecheck503BeforeStop(t *testing.T) {
 	var body ErrorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.Equal(t, ErrCodeUnavailable, body.Error.Code)
-	assert.Equal(t, "the agent's runtime broker could not be checked; the agent was not restarted", body.Error.Message)
+	assert.Equal(t, "the agent's runtime broker record could not be read; the agent was not restarted", body.Error.Message)
 	assert.False(t, client.stopCalled, "refused before the stop leg")
 	assert.False(t, client.startCalled || client.restartCalled)
 }
@@ -240,7 +271,7 @@ func TestLifecycleHTTP_StartEnvGatherErrors(t *testing.T) {
 	}{
 		{errStartEnvUnmet, http.StatusUnprocessableEntity, ErrCodeMissingEnvVars},
 		{errBrokerLacksStartEnvGather, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability},
-		{errBrokerCapabilityUnavailable, http.StatusServiceUnavailable, ErrCodeUnavailable},
+		{errBrokerRecordUnreadable, http.StatusServiceUnavailable, ErrCodeUnavailable},
 	}
 	for _, tc := range cases {
 		for _, action := range []string{"start", "restart"} {
@@ -285,7 +316,7 @@ func TestCreateAgent_ExistingAgentStartEnvGatherErrors(t *testing.T) {
 	}{
 		{errStartEnvUnmet, http.StatusUnprocessableEntity, ErrCodeMissingEnvVars},
 		{errBrokerLacksStartEnvGather, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability},
-		{errBrokerCapabilityUnavailable, http.StatusServiceUnavailable, ErrCodeUnavailable},
+		{errBrokerRecordUnreadable, http.StatusServiceUnavailable, ErrCodeUnavailable},
 	}
 	for _, tc := range cases {
 		for _, ph := range phases {
@@ -358,4 +389,23 @@ func TestStartGather_EchoBackstopStopIsHandedOff(t *testing.T) {
 	var args StopDispatchArgs
 	require.NoError(t, json.Unmarshal([]byte(stopArgs[0]), &args))
 	assert.Equal(t, minted, args.RunID, "the stop targets the minted run")
+}
+
+// N2: the lifecycle restart pre-check answers a standing refusal as the
+// start leg answers it (502 with the reason), before the stop leg.
+func TestLifecycleHTTP_RestartPrecheckStandingRefusal(t *testing.T) {
+	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	project, broker := newEmptyPerAgentHandlerProject(t, s, "precheck-standing", true)
+	agent := newQuotaTestAgent(t, s, broker, project, "precheck-standing", state.PhaseRunning)
+	client := &mockRuntimeBrokerClient{}
+	d := NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default())
+	d.requiredStandingCheck = func(context.Context, *store.Agent) error { return errors.New("FAKE standing reason") }
+	srv.SetDispatcher(d)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/restart", nil)
+	require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "FAKE standing reason")
+	assert.False(t, client.stopCalled, "refused before the stop leg")
+	assert.False(t, client.startCalled || client.restartCalled)
 }

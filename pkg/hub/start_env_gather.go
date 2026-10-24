@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
@@ -45,20 +46,32 @@ var errStartEnvUnmet = errors.New("required environment values are unavailable a
 // start cannot gather them. Handlers answer 412.
 var errBrokerLacksStartEnvGather = errors.New("the agent's runtime broker must be upgraded before it can start agents that use as-needed values")
 
-// errBrokerCapabilityUnavailable is returned when the agent's broker
-// record cannot be read to tell whether its start can gather env: the start
-// fails rather than being sent as a start that may lack the agent's
-// as-needed values. Handlers answer 503 with brokerCapabilityUnavailableMessage.
-var errBrokerCapabilityUnavailable = errors.New("the agent's runtime broker could not be checked")
+// errBrokerRecordUnreadable is returned when the agent's broker record
+// cannot be read, or does not exist, at any step of a start or restart
+// dispatch: the start fails rather than being sent as a start that may lack
+// the agent's as-needed values (design r9 §0.3). Handlers answer 503 with
+// brokerRecordUnreadableMessage. Same name, text and semantics as #5959's
+// sentinel, which replaces this declaration on the rebase.
+var errBrokerRecordUnreadable = errors.New("the agent's runtime broker record could not be read; the agent was not started")
 
-// brokerCapabilityUnavailableMessage is the fixed user-facing text for
-// errBrokerCapabilityUnavailable.
-func brokerCapabilityUnavailableMessage(action string) string {
-	done := "started"
+// brokerRecordReadError is errBrokerRecordUnreadable carrying the
+// store error that caused it. Its text is the fixed message only, so no
+// caller that prints the error shows the store's text; the store error stays
+// reachable through errors.Is/As for the server log.
+type brokerRecordReadError struct{ err error }
+
+func (e *brokerRecordReadError) Error() string { return errBrokerRecordUnreadable.Error() }
+func (e *brokerRecordReadError) Unwrap() []error {
+	return []error{errBrokerRecordUnreadable, e.err}
+}
+
+// brokerRecordUnreadableMessage is the fixed user-facing text for
+// errBrokerRecordUnreadable.
+func brokerRecordUnreadableMessage(action string) string {
 	if action == api.AgentActionRestart {
-		done = "restarted"
+		return strings.TrimSuffix(errBrokerRecordUnreadable.Error(), "started") + "restarted"
 	}
-	return errBrokerCapabilityUnavailable.Error() + "; the agent was not " + done
+	return errBrokerRecordUnreadable.Error()
 }
 
 // startEnvGatherEchoMissingError is a start sent with gatherEnv that the
@@ -95,15 +108,15 @@ func startEnvUnmetMessage(action string) string {
 // failed with one of the start env-gather errors and reports whether it
 // did: 422 missing_env_vars for errStartEnvUnmet, 412 for
 // errBrokerLacksStartEnvGather (also when the broker started without the
-// echo), 503 for errBrokerCapabilityUnavailable.
+// echo), 503 for errBrokerRecordUnreadable.
 func writeStartEnvGatherError(w http.ResponseWriter, err error, action string) bool {
 	switch {
 	case errors.Is(err, errStartEnvUnmet):
 		writeError(w, http.StatusUnprocessableEntity, ErrCodeMissingEnvVars, startEnvUnmetMessage(action), nil)
 	case errors.Is(err, errBrokerLacksStartEnvGather):
 		writeError(w, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability, errBrokerLacksStartEnvGather.Error(), nil)
-	case errors.Is(err, errBrokerCapabilityUnavailable):
-		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, brokerCapabilityUnavailableMessage(action), nil)
+	case errors.Is(err, errBrokerRecordUnreadable):
+		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, brokerRecordUnreadableMessage(action), nil)
 	default:
 		return false
 	}
@@ -111,22 +124,33 @@ func writeStartEnvGatherError(w http.ResponseWriter, err error, action string) b
 }
 
 // startEnvGatherCapable reports whether agent's broker reports
-// startEnvGather. A broker record that cannot be read, or does not exist,
-// is an error (errBrokerCapabilityUnavailable, 503), never an answer: the
-// start fails with nothing sent (G-2a). An agent with no assigned broker is
-// not capable; requireRuntimeBrokerAssigned refuses its start.
+// startEnvGather (startEnvGatherCapableFrom with no record read yet).
 func (d *HTTPAgentDispatcher) startEnvGatherCapable(ctx context.Context, agent *store.Agent) (bool, error) {
+	return d.startEnvGatherCapableFrom(ctx, agent, nil)
+}
+
+// startEnvGatherCapableFrom reports whether agent's broker reports
+// startEnvGather, from broker when the dispatch guards already read it
+// (startDispatchGuards), else from the store. A broker record that cannot be
+// read, or does not exist, is an error (errBrokerRecordUnreadable, 503),
+// never an answer: the start fails with nothing sent (G-2a, C3). An agent
+// with no assigned broker is not capable; requireRuntimeBrokerAssigned
+// refuses its start before this is reached.
+func (d *HTTPAgentDispatcher) startEnvGatherCapableFrom(ctx context.Context, agent *store.Agent, broker *store.RuntimeBroker) (bool, error) {
 	if agent == nil || agent.RuntimeBrokerID == "" || d.store == nil {
 		return false, nil
 	}
-	broker, err := d.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
-	if err == nil && broker == nil {
-		err = store.ErrNotFound
-	}
-	if err != nil {
-		d.log.WarnContext(ctx, "start: failed to read the agent's runtime broker; agent not started",
-			"agent_id", agent.ID, "broker_id", agent.RuntimeBrokerID, "error", err)
-		return false, fmt.Errorf("%w: %w", errBrokerCapabilityUnavailable, err)
+	if broker == nil || broker.ID != agent.RuntimeBrokerID {
+		var err error
+		broker, err = d.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
+		if err == nil && broker == nil {
+			err = store.ErrNotFound
+		}
+		if err != nil {
+			d.log.WarnContext(ctx, "start: failed to read the agent's runtime broker; agent not started",
+				"agent_id", agent.ID, "broker_id", agent.RuntimeBrokerID, "error", err)
+			return false, &brokerRecordReadError{err: err}
+		}
 	}
 	return broker.Capabilities != nil && broker.Capabilities.StartEnvGather, nil
 }
@@ -135,9 +159,11 @@ func (d *HTTPAgentDispatcher) startEnvGatherCapable(ctx context.Context, agent *
 // broker without startEnvGather makes before anything is minted or sent:
 // errBrokerLacksStartEnvGather when the agent has as-needed entries, the
 // lookup's *secretResolutionError when they cannot be read, else nil (the
-// start goes on as a plain start). capable brokers return nil.
-func (d *HTTPAgentDispatcher) startEnvGatherRefusal(ctx context.Context, agent *store.Agent, verb string) error {
-	capable, err := d.startEnvGatherCapable(ctx, agent)
+// start goes on as a plain start). broker is the record the dispatch guards
+// read, if any. A broker record that cannot be read or does not exist is
+// errBrokerRecordUnreadable. Capable brokers return nil.
+func (d *HTTPAgentDispatcher) startEnvGatherRefusal(ctx context.Context, agent *store.Agent, broker *store.RuntimeBroker, verb string) error {
+	capable, err := d.startEnvGatherCapableFrom(ctx, agent, broker)
 	if err != nil || capable {
 		return err
 	}
@@ -167,10 +193,11 @@ type restartEnvGatherPrechecker interface {
 // (startDispatchGuards), then the capability check (a read error or a
 // missing record, or an old broker with as-needed entries).
 func (d *HTTPAgentDispatcher) RestartEnvGatherPrecheck(ctx context.Context, agent *store.Agent) error {
-	if err := d.startDispatchGuards(ctx, agent, "lifecycle restart"); err != nil {
+	broker, err := d.startDispatchGuards(ctx, agent, "lifecycle restart")
+	if err != nil {
 		return err
 	}
-	return d.startEnvGatherRefusal(ctx, agent, "restarted")
+	return d.startEnvGatherRefusal(ctx, agent, broker, "restarted")
 }
 
 // startGatherSend is one start send of a gathering start; final marks the

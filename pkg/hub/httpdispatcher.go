@@ -3890,88 +3890,51 @@ func (d *HTTPAgentDispatcher) DispatchAgentStartWithOptions(ctx context.Context,
 	return d.dispatchAgentStart(ctx, agent, task, resume, opts)
 }
 
-// dispatchAgentStart is the start dispatch behind DispatchAgentStart and
-// DispatchAgentStartWithOptions. The result is non-nil only for a start a
-// broker accepted as an asynchronous launch (here or on the owner node).
-func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool, opts StartDispatchOptions) (_ *StartDispatchResult, err error) {
-	// The dispatch guards come first (startDispatchGuards), then the
-	// capability switch (ptone/scion#6101): no refusal mints or sends
-	// anything. A broker that reports startEnvGather gathers as-needed
-	// values at every start (startGather), so the create routing below is
-	// not used for it. A broker record that cannot be read, or does not
-	// exist, fails the start.
-	if err := d.startDispatchGuards(ctx, agent, "DispatchAgentStart"); err != nil {
-		return nil, err
-	}
-	gatherEnv, capErr := d.startEnvGatherCapable(ctx, agent)
-	if capErr != nil {
-		return nil, capErr
-	}
-	if gatherEnv {
-		// The gathering start is synchronous: the env-gather replay is
-		// not wired into an asynchronous launch, and an asynchronous
-		// start must not skip the gather. The cleared option also reaches
-		// the owner node of a cross-node hand-off (StartDispatchArgs.Async).
-		opts.Async = false
-		return d.dispatchAgentStartSent(ctx, agent, task, resume, opts, true)
-	}
-	route, why, routeErr := d.startRoutesThroughCreate(ctx, agent, resume, opts)
-	if routeErr != nil {
-		if secretResolutionSourceOf(routeErr) == resolutionSourceEnvSettings {
-			d.log.WarnContext(ctx, "DispatchAgentStart: failed to read stored env settings; agent not started",
-				"agent_id", agent.ID, "error", errors.Unwrap(routeErr))
-		} else {
-			d.log.WarnContext(ctx, "DispatchAgentStart: failed to resolve secrets; agent not started",
-				"agent_id", agent.ID, "error", errors.Unwrap(routeErr))
-		}
-		return nil, routeErr
-	}
-	if route {
-		d.log.InfoContext(ctx, "start of an agent without a delivered config goes through create-with-gather",
-			"agent_id", agent.ID, "reason", why)
-		return d.startThroughCreate(ctx, agent, task)
-	}
-	// A plain start on this broker cannot gather as-needed values: an
-	// agent that has them is refused before anything is minted or sent
-	// (ptone/scion#6101).
-	has, _, hasErr := d.hasAsNeededEntries(ctx, agent, "started")
-	if hasErr != nil {
-		return nil, hasErr
-	}
-	if has {
-		d.log.WarnContext(ctx, "DispatchAgentStart: the agent's broker cannot gather as-needed values; agent not started",
-			"agent_id", agent.ID, "broker_id", agent.RuntimeBrokerID)
-		return nil, errBrokerLacksStartEnvGather
-	}
-	return d.dispatchAgentStartSent(ctx, agent, task, resume, opts, false)
-}
-
 // startDispatchGuards runs the guards every start and restart dispatch runs
-// first, in this order, before the capability switch and before anything is
-// minted or sent (ptone/scion#6101):
+// first, in this order, before the capability check and before anything is
+// minted or sent (ptone/scion#6101, design r6 §4.5.1):
 //   - the flat placement backstop: a stale pin is refused for every caller;
 //   - the standing guard (ptone/scion#3433): no broker call for an agent
 //     that is held or not in good standing;
 //   - the launch guard: no broker call while a create launch is in flight,
 //     or after one did not complete;
 //   - requireRuntimeBrokerAssigned.
-func (d *HTTPAgentDispatcher) startDispatchGuards(ctx context.Context, agent *store.Agent, caller string) error {
-	if _, err := checkAgentPinnedPlacement(ctx, d.store, agent); err != nil {
-		return err
+//
+// It returns the broker record the placement backstop read (nil when it read
+// none, or the record does not exist), so the capability check reads it only
+// once. A broker record the placement backstop could not read is
+// errBrokerRecordUnreadable (503), as for the capability check itself:
+// a store error, unlike a placement refusal, says nothing about the agent.
+func (d *HTTPAgentDispatcher) startDispatchGuards(ctx context.Context, agent *store.Agent, caller string) (*store.RuntimeBroker, error) {
+	broker, err := checkAgentPinnedPlacement(ctx, d.store, agent)
+	if err != nil {
+		var conflict *PlacementConflictError
+		if errors.As(err, &conflict) || errors.Is(err, errNoRuntimeBrokerAssigned) {
+			return nil, err
+		}
+		d.log.WarnContext(ctx, caller+": failed to read the agent's runtime broker; agent not started",
+			"agent_id", agent.ID, "broker_id", agent.RuntimeBrokerID, "error", err)
+		return nil, &brokerRecordReadError{err: err}
 	}
 	if err := d.dispatchStandingError(ctx, agent); err != nil {
-		return err
+		return nil, err
 	}
 	if err := d.launchGuardError(ctx, agent, caller); err != nil {
-		return err
+		return nil, err
 	}
-	return requireRuntimeBrokerAssigned(agent)
+	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+		return nil, err
+	}
+	return broker, nil
 }
 
-// dispatchAgentStartSent is dispatchAgentStart after its capability switch
-// and routing: the start sent to the broker. With gatherEnv the start is
-// sent with env-gather and completed by startGather (ptone/scion#6101).
-func (d *HTTPAgentDispatcher) dispatchAgentStartSent(ctx context.Context, agent *store.Agent, task string, resume bool, opts StartDispatchOptions, gatherEnv bool) (_ *StartDispatchResult, err error) {
+// dispatchAgentStart is the start dispatch behind DispatchAgentStart and
+// DispatchAgentStartWithOptions. The result is non-nil only for a start a
+// broker accepted as an asynchronous launch (here or on the owner node).
+func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool, opts StartDispatchOptions) (_ *StartDispatchResult, err error) {
+	// A routed start's create runs on the caller's ctx, as a create does,
+	// not on the start span's ctx with the start-only agent ID query.
+	createCtx := ctx
 	ctx, span := tracer.Start(ctx, "hub.dispatch.start")
 	defer span.End()
 	// The broker reads the hub's agent ID (api.AgentIDQueryParam) on every
@@ -3983,8 +3946,63 @@ func (d *HTTPAgentDispatcher) dispatchAgentStartSent(ctx context.Context, agent 
 		attribute.String("scion.broker.id", agent.RuntimeBrokerID),
 	)
 
-	// The dispatch guards (startDispatchGuards) ran in dispatchAgentStart,
-	// before the capability switch.
+	// The dispatch guards come first (startDispatchGuards), then the
+	// capability switch (ptone/scion#6101, design r6 §4.5.1): no refusal
+	// mints or sends anything. A broker that reports startEnvGather
+	// gathers as-needed values at every start (startGather), so it is not
+	// routed through create. A broker record that cannot be read, or does
+	// not exist, fails the start (503).
+	broker, err := d.startDispatchGuards(ctx, agent, "DispatchAgentStart")
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	gatherEnv, capErr := d.startEnvGatherCapableFrom(ctx, agent, broker)
+	if capErr != nil {
+		span.SetStatus(codes.Error, capErr.Error())
+		return nil, capErr
+	}
+	if gatherEnv {
+		// The gathering start is synchronous: the env-gather replay is
+		// not wired into an asynchronous launch, and an asynchronous
+		// start must not skip the gather. The cleared option also reaches
+		// the owner node of a cross-node hand-off (StartDispatchArgs.Async).
+		opts.Async = false
+	} else {
+		route, why, routeErr := d.startRoutesThroughCreate(createCtx, agent, resume, opts)
+		if routeErr != nil {
+			if secretResolutionSourceOf(routeErr) == resolutionSourceEnvSettings {
+				d.log.WarnContext(ctx, "DispatchAgentStart: failed to read stored env settings; agent not started",
+					"agent_id", agent.ID, "error", errors.Unwrap(routeErr))
+			} else {
+				d.log.WarnContext(ctx, "DispatchAgentStart: failed to resolve secrets; agent not started",
+					"agent_id", agent.ID, "error", errors.Unwrap(routeErr))
+			}
+			span.SetStatus(codes.Error, routeErr.Error())
+			return nil, routeErr
+		}
+		if route {
+			d.log.InfoContext(ctx, "start of an agent without a delivered config goes through create-with-gather",
+				"agent_id", agent.ID, "reason", why)
+			span.SetAttributes(attribute.Bool("scion.start.routed_through_create", true))
+			return d.startThroughCreate(createCtx, agent, task)
+		}
+		// A plain start on this broker cannot gather as-needed values: an
+		// agent that has them is refused before anything is minted or
+		// sent (ptone/scion#6101).
+		has, _, hasErr := d.hasAsNeededEntries(ctx, agent, "started")
+		if hasErr != nil {
+			span.SetStatus(codes.Error, hasErr.Error())
+			return nil, hasErr
+		}
+		if has {
+			d.log.WarnContext(ctx, "DispatchAgentStart: the agent's broker cannot gather as-needed values; agent not started",
+				"agent_id", agent.ID, "broker_id", agent.RuntimeBrokerID)
+			span.SetStatus(codes.Error, errBrokerLacksStartEnvGather.Error())
+			return nil, errBrokerLacksStartEnvGather
+		}
+	}
+
 	endpoint, err := d.getProvisioningBrokerEndpoint(ctx, agent)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
@@ -4387,10 +4405,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	// yet, so on a broker without startEnvGather an agent that has them is
 	// refused (412), and a broker record that cannot be read fails the
 	// restart (503), before anything is minted or sent.
-	if err := d.startDispatchGuards(ctx, agent, "DispatchAgentRestart"); err != nil {
+	broker, err := d.startDispatchGuards(ctx, agent, "DispatchAgentRestart")
+	if err != nil {
 		return err
 	}
-	if err := d.startEnvGatherRefusal(ctx, agent, "restarted"); err != nil {
+	if err := d.startEnvGatherRefusal(ctx, agent, broker, "restarted"); err != nil {
 		return err
 	}
 	ctx = withRecordedRuntime(ctx, agent.Runtime)

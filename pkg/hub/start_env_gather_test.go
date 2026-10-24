@@ -423,7 +423,7 @@ func TestStartGather_CapabilityReadErrorFails503(t *testing.T) {
 	runBefore := f.agent.RunID
 
 	err := f.d.DispatchAgentStart(context.Background(), f.agent, "", false)
-	require.ErrorIs(t, err, errBrokerCapabilityUnavailable)
+	require.ErrorIs(t, err, errBrokerRecordUnreadable)
 	assert.Empty(t, gc.calls, "nothing sent, never a plain start")
 	assert.False(t, f.client.createCalled)
 	assert.Equal(t, runBefore, f.agent.RunID, "nothing minted")
@@ -444,7 +444,7 @@ func TestStartGather_BrokerRowNotFoundFails503(t *testing.T) {
 	runBefore := f.agent.RunID
 
 	err := f.d.DispatchAgentStart(context.Background(), f.agent, "", true)
-	require.ErrorIs(t, err, errBrokerCapabilityUnavailable)
+	require.ErrorIs(t, err, errBrokerRecordUnreadable)
 	assert.Empty(t, gc.calls)
 	assert.False(t, f.client.createCalled)
 	assert.Equal(t, runBefore, f.agent.RunID, "nothing minted")
@@ -461,7 +461,7 @@ func TestStartEnvGatherErrors_HandlerAnswers(t *testing.T) {
 		{errStartEnvUnmet, api.AgentActionStart, http.StatusUnprocessableEntity, ErrCodeMissingEnvVars, "started"},
 		{errStartEnvUnmet, api.AgentActionRestart, http.StatusUnprocessableEntity, ErrCodeMissingEnvVars, "restarted"},
 		{errBrokerLacksStartEnvGather, api.AgentActionStart, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability, ""},
-		{errBrokerCapabilityUnavailable, api.AgentActionStart, http.StatusServiceUnavailable, ErrCodeUnavailable, ""},
+		{errBrokerRecordUnreadable, api.AgentActionStart, http.StatusServiceUnavailable, ErrCodeUnavailable, ""},
 	}
 	for _, tc := range cases {
 		rec := httptest.NewRecorder()
@@ -479,7 +479,7 @@ func TestStartEnvGatherErrors_HandlerAnswers(t *testing.T) {
 }
 
 func TestStartEnvGatherErrors_CrossNodeRoundTrip(t *testing.T) {
-	for _, sentinel := range []error{errStartEnvUnmet, errBrokerLacksStartEnvGather, errBrokerCapabilityUnavailable} {
+	for _, sentinel := range []error{errStartEnvUnmet, errBrokerLacksStartEnvGather, errBrokerRecordUnreadable} {
 		execErr := errors.Join(errors.New("dispatch start"), sentinel)
 		row := &store.BrokerDispatch{Op: "start", Error: execErr.Error(), Result: dispatchFailureResult(execErr)}
 		got := dispatchFailureError(row)

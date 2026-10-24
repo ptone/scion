@@ -297,7 +297,7 @@ func isConfirmedStartNotActedOnError(err error) bool {
 	// replay was answered with a needs report; or the start was refused
 	// before anything was sent. Not when the broker started a run without
 	// the envGathered echo: that start was acted on (and stopped).
-	if errors.Is(err, errStartEnvUnmet) || errors.Is(err, errBrokerCapabilityUnavailable) ||
+	if errors.Is(err, errStartEnvUnmet) || errors.Is(err, errBrokerRecordUnreadable) ||
 		(errors.Is(err, errBrokerLacksStartEnvGather) && !isStartEnvGatherEchoMissing(err)) {
 		return true
 	}

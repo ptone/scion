@@ -1921,6 +1921,8 @@ func (s *Server) writeRestartPrecheckError(ctx context.Context, w http.ResponseW
 	case writeStartEnvGatherError(w, err, api.AgentActionRestart):
 	case writeRuntimeTargetRefusal(w, err):
 	default:
-		writeErrorFromErr(w, err, "")
+		// As the start leg answers any other dispatch failure (a standing
+		// refusal among them): 502 with the reason.
+		RuntimeError(w, "Failed to dispatch to runtime broker: "+err.Error())
 	}
 }
