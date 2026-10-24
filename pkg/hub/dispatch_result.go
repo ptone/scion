@@ -118,6 +118,10 @@ var dispatchHubSentinels = []struct {
 	// handler answers them with its own status and the action's verb.
 	{"start_env_unmet", errStartEnvUnmet},
 	{"broker_lacks_start_env_gather", errBrokerLacksStartEnvGather},
+	// A start the broker answered as started without the envGathered
+	// echo: acted on (the run was started, then stopped), so the
+	// requester must not read it as the pre-send refusal.
+	{"start_env_gather_echo_missing", errStartEnvGatherEchoMissing},
 	{"broker_record_unreadable", errBrokerRecordUnreadable},
 }
 
