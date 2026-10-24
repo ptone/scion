@@ -304,9 +304,32 @@ func TestAgentPendingConfig_UnlimitedWaitsForCapableBroker(t *testing.T) {
 		assert.Equal(t, "0", string(stored.PendingConfig.Config["max_turns"]))
 		assert.NotContains(t, stored.PendingConfig.Config, "model")
 		assert.True(t, containsSubstring(warnings, "config.max_turns: Unlimited waits for a runtime broker that supports it"), "%v", warnings)
+		// A waiting Unlimited is not reincarnation-only: the start's
+		// held-for-reincarnation warning leaves config.max_turns out (and,
+		// with nothing else left pending, is not sent at all).
+		assertNoHeldForReincarnate(t, warnings, "max turns")
 		applied := pendingAudits(t, s, agent.ID, mutationTypeAgentPendingConfigApplied, 1)
 		keys, _ := pendingAuditSummary(t, applied[0])
 		assert.Equal(t, []string{"config.model"}, keys)
+
+		// A second start with only the waiting Unlimited pending takes the
+		// fold's early return: nothing is applied or written, the waiting
+		// warning is repeated, and max_turns stays out of the
+		// held-for-reincarnation warning.
+		pendingLifecycleWarnings(t, srv, agent.ID, "stop")
+		warnings = pendingLifecycleWarnings(t, srv, agent.ID, "start")
+		starts = disp.snapshot()
+		require.Len(t, starts, 2)
+		assert.Equal(t, "held-model", starts[1].inline.Model)
+		assert.Equal(t, api.IntPtr(3), starts[1].inline.MaxTurns, "the second start still keeps the limit it can apply")
+		assert.True(t, containsSubstring(warnings, "config.max_turns: Unlimited waits for a runtime broker that supports it"), "%v", warnings)
+		assertNoHeldForReincarnate(t, warnings, "max turns")
+		again := pendingReloadAgent(t, s, agent.ID)
+		require.NotNil(t, again.PendingConfig)
+		assert.Equal(t, stored.PendingConfig.Config, again.PendingConfig.Config, "the early return writes no pending change")
+		assert.Equal(t, api.IntPtr(3), again.AppliedConfig.InlineConfig.MaxTurns)
+		applied = pendingAudits(t, s, agent.ID, mutationTypeAgentPendingConfigApplied, 1)
+		assert.Len(t, applied, 1, "the early return records no application")
 	})
 
 	t.Run("no-container PATCH fold", func(t *testing.T) {
@@ -386,6 +409,21 @@ func TestAgentConfigPatch_RetiredConfigureBodyMeansUnlimited(t *testing.T) {
 			})
 		})
 	}
+}
+
+// assertNoHeldForReincarnate checks that no warning is the
+// held-for-reincarnation one and, in particular, that none names label (the
+// warning's form of a key, e.g. "max turns" for config.max_turns). The
+// positive control pins that form, so the label check cannot pass vacuously.
+func assertNoHeldForReincarnate(t *testing.T, warnings []string, label string) {
+	t.Helper()
+	require.Contains(t, heldForReincarnateWarning([]string{"config." + strings.ReplaceAll(label, " ", "_")}), heldReincarnateWarningPrefix+label)
+	for _, w := range warnings {
+		if strings.HasPrefix(w, heldReincarnateWarningPrefix) {
+			assert.NotContains(t, w, label, "held-for-reincarnation warning: %q", w)
+		}
+	}
+	assert.False(t, containsSubstring(warnings, heldReincarnateWarningPrefix), "%v", warnings)
 }
 
 // containsSubstring reports whether any of list contains sub.
