@@ -405,3 +405,173 @@ func TestDispatchAgentStart_NoAuth_ThroughCreateAsNeededSecretNotDelivered(t *te
 			assert.False(t, f.client.startCalled, "nothing started")
 		})
 }
+
+// The GITHUB_TOKEN a no-auth agent still gets is read by name, so it gets
+// the checks normal resolution applies: it is delivered only when
+// resolveSecrets and the env merge would put the same value in
+// env["GITHUB_TOKEN"].
+
+const noAuthGHOtherTarget = "FAKE_NOAUTH_OTHER_TARGET"
+
+// noAuthGHVariants are GITHUB_TOKEN secrets in the agent's project scope;
+// delivered says whether normal resolution puts the value in
+// env["GITHUB_TOKEN"].
+var noAuthGHVariants = []struct {
+	name      string
+	typ       string
+	target    string
+	mode      string
+	delivered bool
+}{
+	{"environment, target GITHUB_TOKEN, always", store.SecretTypeEnvironment, "GITHUB_TOKEN", store.InjectionModeAlways, true},
+	{"environment, other target", store.SecretTypeEnvironment, noAuthGHOtherTarget, store.InjectionModeAlways, false},
+	{"environment, empty target", store.SecretTypeEnvironment, "", store.InjectionModeAlways, false},
+	{"file", store.SecretTypeFile, "~/.fake-noauth/gh-token", store.InjectionModeAlways, false},
+	{"file, target GITHUB_TOKEN", store.SecretTypeFile, "GITHUB_TOKEN", store.InjectionModeAlways, false},
+	{"variable", store.SecretTypeVariable, "GITHUB_TOKEN", store.InjectionModeAlways, false},
+	{"internal", store.SecretTypeInternal, "GITHUB_TOKEN", store.InjectionModeAlways, false},
+	{"environment, target GITHUB_TOKEN, as needed", store.SecretTypeEnvironment, "GITHUB_TOKEN", store.InjectionModeAsNeeded, false},
+}
+
+// noAuthGHEnvs returns env["GITHUB_TOKEN"] (and whether it is set) as
+// create, start and restart build it for f's agent.
+func noAuthGHEnvs(t *testing.T, f *runDispatchFixture) map[string]*string {
+	t.Helper()
+	ctx := context.Background()
+	out := map[string]*string{}
+	pick := func(env map[string]string) *string {
+		if v, ok := env["GITHUB_TOKEN"]; ok {
+			return &v
+		}
+		return nil
+	}
+	req, err := f.d.buildCreateRequest(ctx, f.agent, "TestNoAuthGitHubToken")
+	require.NoError(t, err)
+	out["create"] = pick(req.ResolvedEnv)
+	for _, site := range []mintSite{mintSiteStart, mintSiteRestart} {
+		res, err := f.d.buildStartEnv(ctx, f.agent, "TestNoAuthGitHubToken", site)
+		require.NoError(t, err, site)
+		out[string(site)] = pick(res.env)
+	}
+	return out
+}
+
+func TestNoAuthGitHubToken_TargetRestrictedNotDelivered(t *testing.T) {
+	restricted := []struct{ name, typ, target string }{
+		{"other target", store.SecretTypeEnvironment, noAuthGHOtherTarget},
+		{"empty target", store.SecretTypeEnvironment, ""},
+		{"file", store.SecretTypeFile, "~/.fake-noauth/gh-token"},
+	}
+	for _, r := range restricted {
+		t.Run(r.name, func(t *testing.T) {
+			f, b := newNoAuthFixture(t, true)
+			setNoAuthSecret(t, f, b, noAuthSecret{name: "GITHUB_TOKEN", value: noAuthGHProjectVal,
+				typ: r.typ, target: r.target, scope: store.ScopeProject})
+			for path, got := range noAuthGHEnvs(t, f) {
+				assert.Nil(t, got, "%s: a target-restricted GITHUB_TOKEN is not delivered", path)
+			}
+			req, err := f.d.buildCreateRequest(context.Background(), f.agent, "TestNoAuthGitHubToken")
+			require.NoError(t, err)
+			for k, v := range req.ResolvedEnv {
+				assert.NotEqual(t, noAuthGHProjectVal, v, "the token value is under %s", k)
+			}
+		})
+		t.Run(r.name+", user-scope token deliverable", func(t *testing.T) {
+			f, b := newNoAuthFixture(t, true)
+			setNoAuthSecret(t, f, b, noAuthSecret{name: "GITHUB_TOKEN", value: noAuthGHProjectVal,
+				typ: r.typ, target: r.target, scope: store.ScopeProject})
+			setNoAuthSecret(t, f, b, noAuthSecret{name: "GITHUB_TOKEN", value: noAuthGHUserVal,
+				typ: store.SecretTypeEnvironment, target: "GITHUB_TOKEN", scope: store.ScopeUser})
+			for path, got := range noAuthGHEnvs(t, f) {
+				require.NotNil(t, got, "%s: the user-scope token is delivered", path)
+				assert.Equal(t, noAuthGHUserVal, *got, path)
+			}
+		})
+	}
+}
+
+func TestNoAuthGitHubToken_AsNeededNotInjectedEagerly(t *testing.T) {
+	f, b := newNoAuthFixture(t, true)
+	setNoAuthSecret(t, f, b, noAuthSecret{name: "GITHUB_TOKEN", value: noAuthGHProjectVal,
+		typ: store.SecretTypeEnvironment, target: "GITHUB_TOKEN", scope: store.ScopeProject,
+		mode: store.InjectionModeAsNeeded})
+	for path, got := range noAuthGHEnvs(t, f) {
+		assert.Nil(t, got, "%s: an as-needed GITHUB_TOKEN is not injected eagerly", path)
+	}
+}
+
+func TestNoAuthGitHubToken_MatchesNormalResolution(t *testing.T) {
+	for _, v := range noAuthGHVariants {
+		t.Run(v.name, func(t *testing.T) {
+			delivered := map[bool]map[string]*string{}
+			for _, noAuth := range []bool{false, true} {
+				f, b := newNoAuthFixture(t, noAuth)
+				setNoAuthSecret(t, f, b, noAuthSecret{name: "GITHUB_TOKEN", value: noAuthGHProjectVal,
+					typ: v.typ, target: v.target, scope: store.ScopeProject, mode: v.mode})
+				delivered[noAuth] = noAuthGHEnvs(t, f)
+			}
+			for path, normal := range delivered[false] {
+				gotNormal := normal != nil && *normal == noAuthGHProjectVal
+				assert.Equal(t, v.delivered, gotNormal, "%s: normal resolution", path)
+				noAuth := delivered[true][path]
+				gotNoAuth := noAuth != nil && *noAuth == noAuthGHProjectVal
+				assert.Equal(t, gotNormal, gotNoAuth, "%s: no-auth delivers GITHUB_TOKEN exactly when normal resolution does", path)
+			}
+		})
+	}
+}
+
+// The test-admin scope clamp normal resolution applies
+// (restrictTestAdminRootedSecrets) also applies to the no-auth GITHUB_TOKEN:
+// an agent rooted at a test admin identity outside its projects gets no
+// project-scoped token, but its own user-scoped one.
+func TestNoAuthGitHubToken_TestAdminScopeWithheld(t *testing.T) {
+	srv, s, _ := tsaServer(t)
+	ctx := context.Background()
+	issuer := taUser(t, s, "tsa-noauth-iss", store.SystemRoleSuperAdmin)
+	root := tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin).Identity.ID
+	ownProject := tid("tsa-noauth-own")
+	taProject(t, s, ownProject, root)
+	otherProject := tid("tsa-noauth-other")
+	taProject(t, s, otherProject, issuer.ID)
+
+	gh := func(scope, value string) *secret.SecretWithValue {
+		return &secret.SecretWithValue{SecretMeta: secret.SecretMeta{Name: "GITHUB_TOKEN",
+			SecretType: store.SecretTypeEnvironment, Target: "GITHUB_TOKEN", Scope: scope,
+			InjectionMode: store.InjectionModeAlways}, Value: value}
+	}
+	cases := []struct {
+		name      string
+		rootID    string
+		projectID string
+		user      bool
+		want      string
+	}{
+		{"test admin root outside its projects: project token withheld", root, otherProject, false, ""},
+		{"test admin root outside its projects: own user token delivered", root, otherProject, true, noAuthGHUserVal},
+		{"test admin root in its own project: project token delivered", root, ownProject, false, noAuthGHProjectVal},
+		{"human root: project token delivered", issuer.ID, otherProject, false, noAuthGHProjectVal},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := &mockGitTokenSecretBackend{getScopedResponses: map[string]*secret.SecretWithValue{
+				"GITHUB_TOKEN:" + secret.ScopeProject: gh(secret.ScopeProject, noAuthGHProjectVal),
+			}}
+			if tc.user {
+				backend.getScopedResponses["GITHUB_TOKEN:"+secret.ScopeUser] = gh(secret.ScopeUser, noAuthGHUserVal)
+			}
+			d := NewHTTPAgentDispatcherWithClient(s, &mockRuntimeBrokerClient{}, false, nil)
+			d.SetHubID("test-hub")
+			d.SetAuthzService(srv.authzService)
+			d.SetSecretBackend(backend)
+			agent := &store.Agent{ID: generateID(), Name: "tsa-noauth", ProjectID: tc.projectID,
+				OwnerID: tc.rootID, Ancestry: []string{tc.rootID},
+				AppliedConfig: &store.AgentAppliedConfig{NoAuth: true}}
+
+			env := map[string]string{}
+			var cls map[string]api.EnvKind
+			d.injectNoAuthGitHubToken(ctx, agent, env, &cls)
+			assert.Equal(t, tc.want, env["GITHUB_TOKEN"])
+		})
+	}
+}
