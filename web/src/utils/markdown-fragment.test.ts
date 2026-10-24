@@ -61,6 +61,10 @@ const SAMPLES = [
   'raw <template>tags</template> stay text, <b>so does this</b>',
   '> quoted\n\nafter',
   '   leading spaces',
+  '[x](javascript:alert(1)) and [y](JaVaScRiPt:alert(1))',
+  '[d](data:text/html,<b>x</b>) and ![i](data:text/html,x)',
+  '[v](vbscript:msgbox) and [ok](mailto:a@example.com)',
+  '<a href="javascript:alert(1)">raw</a> <img src=x onerror=alert(1)>',
 ];
 
 describe('renderFragment', () => {
@@ -72,8 +76,12 @@ describe('renderFragment', () => {
 
   it('produces the same markup as render with critic marks', () => {
     const md = 'Keep {++this++} and {--that--}, {==see==}{>>a note<<}';
-    const options = { criticMarks: true, criticAuthor: 'Ada' };
-    expect(serialize(renderer.renderFragment(md, options))).toBe(renderer.render(md, options));
+    for (const criticAuthor of ['Ada', 'A "quoted" <b>name</b> & co', "it's <img src=x>"]) {
+      const options = { criticMarks: true, criticAuthor };
+      expect(serialize(renderer.renderFragment(md, options)), criticAuthor).toBe(
+        renderer.render(md, options)
+      );
+    }
   });
 
   it('returns nodes owned by this document', () => {

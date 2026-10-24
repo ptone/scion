@@ -75,11 +75,23 @@ function record(sink: string, value: unknown): string {
   return String(value);
 }
 
+/** Each wrapped descriptor, by owner and name, so none is wrapped twice. */
+const wrapped = new Set<string>();
+const owners = new Map<object, number>();
+
+function ownerKey(owner: object, name: string): string {
+  if (!owners.has(owner)) owners.set(owner, owners.size);
+  return `${owners.get(owner)}:${name}`;
+}
+
 /** Wrap a setter wherever it is defined on the prototype chain. */
-function wrapSetter(proto: object, name: string, sink: string): void {
-  for (let p: object | null = proto; p; p = Object.getPrototypeOf(p)) {
+function wrapSetter(proto: object | undefined, name: string, sink: string): void {
+  for (let p: object | null = proto ?? null; p; p = Object.getPrototypeOf(p) as object | null) {
     const desc = Object.getOwnPropertyDescriptor(p, name);
     if (desc?.set) {
+      const key = ownerKey(p, name);
+      if (wrapped.has(key)) return;
+      wrapped.add(key);
       const set = desc.set;
       Object.defineProperty(p, name, {
         ...desc,
@@ -92,11 +104,14 @@ function wrapSetter(proto: object, name: string, sink: string): void {
   }
 }
 
-/** Wrap a method whose first argument is markup. */
-function wrapMethod(proto: object, name: string, sink: string, argIndex = 0): void {
-  for (let p: object | null = proto; p; p = Object.getPrototypeOf(p)) {
+/** Wrap a method whose argument at argIndex is markup. */
+function wrapMethod(proto: object | undefined, name: string, sink: string, argIndex = 0): void {
+  for (let p: object | null = proto ?? null; p; p = Object.getPrototypeOf(p) as object | null) {
     const desc = Object.getOwnPropertyDescriptor(p, name);
     if (typeof desc?.value === 'function') {
+      const key = ownerKey(p, name);
+      if (wrapped.has(key)) return;
+      wrapped.add(key);
       const fn = desc.value as (...args: unknown[]) => unknown;
       Object.defineProperty(p, name, {
         ...desc,
@@ -110,11 +125,18 @@ function wrapMethod(proto: object, name: string, sink: string, argIndex = 0): vo
   }
 }
 
+// Every markup-parsing API the test DOM has; ones it lacks are skipped.
 wrapSetter(HTMLTemplateElement.prototype, 'innerHTML', 'Element.innerHTML');
 wrapSetter(HTMLElement.prototype, 'innerHTML', 'Element.innerHTML');
 wrapSetter(HTMLElement.prototype, 'outerHTML', 'Element.outerHTML');
 wrapSetter(ShadowRoot.prototype, 'innerHTML', 'ShadowRoot.innerHTML');
+wrapSetter(HTMLIFrameElement.prototype, 'srcdoc', 'HTMLIFrameElement.srcdoc');
 wrapMethod(HTMLElement.prototype, 'insertAdjacentHTML', 'Element.insertAdjacentHTML', 1);
+wrapMethod(HTMLElement.prototype, 'setHTMLUnsafe', 'Element.setHTMLUnsafe');
+wrapMethod(ShadowRoot.prototype, 'setHTMLUnsafe', 'ShadowRoot.setHTMLUnsafe');
+wrapMethod(Document.prototype, 'write', 'Document.write');
+wrapMethod(Document.prototype, 'writeln', 'Document.writeln');
+wrapMethod(Document, 'parseHTMLUnsafe', 'Document.parseHTMLUnsafe');
 wrapMethod(DOMParser.prototype, 'parseFromString', 'DOMParser.parseFromString');
 wrapMethod(Range.prototype, 'createContextualFragment', 'Range.createContextualFragment');
 
@@ -128,6 +150,10 @@ const BODY = [
   '',
   '```',
   'go test ./pkg/... @not-a-mention',
+  '```',
+  '',
+  '```go',
+  'func main() {}',
   '```',
   '',
   '| a | b |',
@@ -147,6 +173,21 @@ async function settle(el: ScionChatMessage): Promise<void> {
   // renderContent() awaits the renderer, then re-renders.
   for (let i = 0; i < 5; i++) await Promise.resolve();
   await el.updateComplete;
+  await editorsReady(el);
+}
+
+/**
+ * Waits until every code block editor in the message has mounted its
+ * CodeMirror view: each editor loads CodeMirror, then clears its mount
+ * point and builds the view.
+ */
+async function editorsReady(el: ScionChatMessage): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    const editors = Array.from(el.shadowRoot?.querySelectorAll('scion-code-editor') ?? []);
+    if (editors.every((ed) => ed.shadowRoot?.querySelector('.editor-mount .cm-editor'))) return;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  throw new Error('a code block editor did not mount');
 }
 
 async function mount(body: string): Promise<ScionChatMessage> {
@@ -180,6 +221,7 @@ describe('chat message markup boundary', () => {
     const content = el.shadowRoot?.querySelector('.md-content');
     expect(content?.querySelector('.mention')?.textContent).toBe('@lead');
     expect(content?.querySelector('.gh-ref-link')?.textContent).toBe('owner/repo#12');
+    expect(content?.querySelectorAll('scion-code-editor')).toHaveLength(1);
     expect(content?.querySelector('a[href="https://example.com/docs"]')?.getAttribute('rel')).toBe(
       'noopener noreferrer'
     );
@@ -190,13 +232,25 @@ describe('chat message markup boundary', () => {
     const el = await mount('Hello');
     sinkState.calls.length = 0;
 
-    const steps = ['Hello @lead', 'Hello @lead, see', BODY];
+    const steps = [
+      'Hello @lead',
+      'Hello @lead, see the draft',
+      'Hello @lead, see\n\n```go\nfunc draft() {}\n```',
+      BODY,
+    ];
     for (const step of steps) {
       el.body = step;
       await settle(el);
     }
 
-    expect(el.shadowRoot?.querySelector('.md-content .mention')?.textContent).toBe('@lead');
+    const contents = el.shadowRoot?.querySelectorAll('.md-content') ?? [];
+    expect(contents).toHaveLength(1);
+    const content = contents[0];
+    expect(content.querySelector('.mention')?.textContent).toBe('@lead');
+    expect(content.querySelector('table')).not.toBeNull();
+    expect(content.querySelector('a[href="https://example.com/docs"]')).not.toBeNull();
+    expect(content.querySelectorAll('scion-code-editor')).toHaveLength(1);
+    expect(content.textContent).not.toContain('draft');
     expect(flagged()).toEqual([]);
     // One parse per body change, and only through the sanitizer's own policy.
     expect(sinkState.calls).toEqual(
@@ -235,6 +289,8 @@ describe('chat message markup boundary', () => {
     expect(container?.getAttribute('part')).toBe('container');
     expect(container?.querySelector('h1')?.textContent).toBe('Notes');
     expect(flagged()).toEqual([]);
+    // Parsed once on mount, not once per lifecycle callback.
+    expect(sinkState.calls.filter((c) => c.policy === 'dompurify')).toHaveLength(1);
   });
 
   it('opens an inter-agent message preview with no plain-string markup parsing', async () => {

@@ -212,11 +212,11 @@ export class ScionMarkdownPreview extends LitElement {
     }
   `;
 
-  override connectedCallback(): void {
-    super.connectedCallback();
-    void this.renderMarkdown();
-  }
+  /** Counts renders, so only the latest one's result is shown. */
+  private renderTaskId = 0;
 
+  // The first update reports content and sameOriginImages as changed, so
+  // this also renders on mount.
   override updated(changed: Map<string, unknown>): void {
     if (changed.has('content') || changed.has('sameOriginImages')) {
       void this.renderMarkdown();
@@ -224,11 +224,13 @@ export class ScionMarkdownPreview extends LitElement {
   }
 
   private async renderMarkdown(): Promise<void> {
+    const taskId = ++this.renderTaskId;
     this.loading = true;
     this.error = null;
 
     try {
       const renderer = await getMarkdownRenderer();
+      if (taskId !== this.renderTaskId) return;
       const fragment = renderer.renderFragment(this.content, {
         sameOriginImagesOnly: this.sameOriginImages,
       });
@@ -238,10 +240,11 @@ export class ScionMarkdownPreview extends LitElement {
       container.append(fragment);
       this.renderedContent = container;
     } catch (err) {
+      if (taskId !== this.renderTaskId) return;
       console.error('Failed to render markdown:', err);
       this.error = 'Failed to render markdown preview';
     } finally {
-      this.loading = false;
+      if (taskId === this.renderTaskId) this.loading = false;
     }
   }
 
