@@ -416,6 +416,8 @@ const noAuthGHOtherTarget = "FAKE_NOAUTH_OTHER_TARGET"
 // noAuthGHVariants are GITHUB_TOKEN secrets in the agent's project scope;
 // delivered says whether normal resolution puts the value in
 // env["GITHUB_TOKEN"].
+// There is no empty-target row: the secret backend stores a secret with no
+// target under its name as the target, so such a secret is the first row.
 var noAuthGHVariants = []struct {
 	name      string
 	typ       string
@@ -425,7 +427,6 @@ var noAuthGHVariants = []struct {
 }{
 	{"environment, target GITHUB_TOKEN, always", store.SecretTypeEnvironment, "GITHUB_TOKEN", store.InjectionModeAlways, true},
 	{"environment, other target", store.SecretTypeEnvironment, noAuthGHOtherTarget, store.InjectionModeAlways, false},
-	{"environment, empty target", store.SecretTypeEnvironment, "", store.InjectionModeAlways, false},
 	{"file", store.SecretTypeFile, "~/.fake-noauth/gh-token", store.InjectionModeAlways, false},
 	{"file, target GITHUB_TOKEN", store.SecretTypeFile, "GITHUB_TOKEN", store.InjectionModeAlways, false},
 	{"variable", store.SecretTypeVariable, "GITHUB_TOKEN", store.InjectionModeAlways, false},
@@ -459,7 +460,6 @@ func noAuthGHEnvs(t *testing.T, f *runDispatchFixture) map[string]*string {
 func TestNoAuthGitHubToken_TargetRestrictedNotDelivered(t *testing.T) {
 	restricted := []struct{ name, typ, target string }{
 		{"other target", store.SecretTypeEnvironment, noAuthGHOtherTarget},
-		{"empty target", store.SecretTypeEnvironment, ""},
 		{"file", store.SecretTypeFile, "~/.fake-noauth/gh-token"},
 	}
 	for _, r := range restricted {
