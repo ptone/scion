@@ -60,6 +60,11 @@ func seedAgentWorktree(t *testing.T, projectPath, agentDir string) (string, stri
 	// The broker's own host git calls read the user's global git config
 	// through HOME: an empty HOME keeps the cleanup independent of it.
 	t.Setenv("HOME", t.TempDir())
+	// Inside an agent container (SCION_HOST_UID set) the cleanup
+	// deliberately leaves git's worktree entry alone, so the branch it
+	// still has checked out is kept (pkg/util RemoveWorktreeEntryIn). These
+	// tests are about the host broker: clear it.
+	t.Setenv("SCION_HOST_UID", "")
 	repo := filepath.Dir(projectPath)
 	gitPreserveT(t, repo, "init", "-q")
 	if err := os.WriteFile(filepath.Join(repo, "README"), []byte("fake\n"), 0o644); err != nil {
