@@ -984,19 +984,21 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// start claim, the run intent and the stop leg: a refused
 			// restart never stops the agent. A failed broker-record read is
 			// the fixed 503 for the restart.
-			if err := s.startPlacementPreCheck(ctx, agent, "restarted"); err != nil {
-				if !writeRuntimeTargetRefusal(w, err) && !writePreserveWorkspaceCapabilityError(w, err) {
-					writeErrorFromErr(w, err, "")
+			placedBroker, placeErr := s.startPlacementPreCheckBroker(ctx, agent, "restarted")
+			if placeErr != nil {
+				if !writeRuntimeTargetRefusal(w, placeErr) && !writePreserveWorkspaceCapabilityError(w, placeErr) {
+					writeErrorFromErr(w, placeErr, "")
 				}
 				return
 			}
 			// Refuse before the stop leg when the start leg could not
 			// gather the agent's as-needed values (a broker without
 			// startEnvGather, for an agent that has them) or the broker
-			// record cannot be read: the agent is left as it was
-			// (ptone/scion#6101).
+			// record is missing: the agent is left as it was
+			// (ptone/scion#6101). It judges the record the placement
+			// pre-check above read; nothing is read again.
 			if pc, ok := dispatcher.(restartEnvGatherPrechecker); ok {
-				if err := pc.RestartEnvGatherPrecheck(ctx, agent); err != nil {
+				if err := pc.RestartEnvGatherPrecheck(ctx, agent, placedBroker); err != nil {
 					s.writeRestartPrecheckError(ctx, w, agent, err)
 					return
 				}
