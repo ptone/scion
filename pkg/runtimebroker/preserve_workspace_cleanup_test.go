@@ -237,3 +237,30 @@ func TestCreateAgent_PreserveWorkspaceDownloadsIntoAbsentWorkspace(t *testing.T)
 		t.Errorf("downloads = %d, want 1 into the absent workspace", *downloads)
 	}
 }
+
+// Inside an agent container (SCION_HOST_UID set), where a host worktree can
+// look missing while it is in use, the failed-create cleanup leaves git's
+// worktree entry and the branch it has checked out in place: nothing of the
+// agent's history is lost.
+func TestCreateStartFailure_InAgentContainerKeepsWorktreeEntryAndBranch(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Fatalf("git is required: %v", err)
+	}
+	srv, mgr, projectPath, agentDir := newSyncStartTestServer(t)
+	repo, workspace := seedAgentWorktree(t, projectPath, agentDir)
+	t.Setenv("SCION_HOST_UID", "1000")
+
+	mgr.starts <- func(context.Context, api.StartOptions) (*api.AgentInfo, error) {
+		return nil, errors.New("fake image pull failed")
+	}
+	w := createSyncWithBody(srv, fmt.Sprintf(`{"id": "agent-a-id", "name": "same-name", "projectPath": %q, "config": {"task": "t"}}`, projectPath))
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusInternalServerError, w.Body.String())
+	}
+	if out := gitPreserveT(t, repo, "branch", "--list", "same-name"); !strings.Contains(out, "same-name") {
+		t.Errorf("the agent branch must be kept inside an agent container (git branch --list: %q)", out)
+	}
+	if out := gitPreserveT(t, repo, "worktree", "list", "--porcelain"); !strings.Contains(out, "worktree "+workspace) {
+		t.Errorf("git's worktree entry for %s must be kept inside an agent container; worktrees:\n%s", workspace, out)
+	}
+}
