@@ -1478,6 +1478,17 @@ func allSecretConfigKeys(name string) map[string]bool {
 	return keys
 }
 
+// PluginTransportAuth returns the transport auth mode and the resolved OIDC
+// audience that broker plugins use to call IAP-protected hub endpoints, or
+// empty strings when transport auth is not configured. Startup credential
+// injection and the plugin restart paths both use it, so a restarted
+// plugin gets the same values it got at boot. Both are set at
+// construction, together with the transport minter, which startup creates
+// whenever a transport mode other than "none" is configured.
+func (s *Server) PluginTransportAuth() (mode, audience string) {
+	return s.transportMode, s.transportAudience
+}
+
 // brokerSupervisionWiring is implemented by plugin managers that supervise
 // broker plugin sessions (*plugin.Manager).
 type brokerSupervisionWiring interface {
@@ -1524,6 +1535,10 @@ func getIntegrationStatus(mgr IntegrationManager, name string) *IntegrationStatu
 			status.Connected = false
 			status.Message = fmt.Sprintf("plugin session lost; restarting (attempt %d, %d messages dropped this outage)",
 				sup.Attempt, sup.DroppedThisOutage)
+			if sup.State == plugin.SupervisionFailing {
+				status.Message = fmt.Sprintf("plugin session lost; repeatedly failing to restart (attempt %d, %d messages dropped this outage)",
+					sup.Attempt, sup.DroppedThisOutage)
+			}
 			return status
 		}
 	}
@@ -1631,12 +1646,12 @@ func (s *Server) getPluginHubCreds(ctx context.Context, name string) map[string]
 	}
 
 	// transport_mode + transport_audience: so plugins can authenticate
-	// with IAP-protected hub endpoints, as injected at startup.
-	if s.transportMode != "" {
-		creds["transport_mode"] = s.transportMode
-	}
-	if s.transportAudience != "" {
-		creds["transport_audience"] = s.transportAudience
+	// with IAP-protected hub endpoints; the same values startup injects.
+	if mode, audience := s.PluginTransportAuth(); mode != "" {
+		creds["transport_mode"] = mode
+		if audience != "" {
+			creds["transport_audience"] = audience
+		}
 	}
 
 	// database_driver + database_url: only for Postgres backends.
