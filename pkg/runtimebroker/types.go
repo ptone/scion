@@ -143,6 +143,11 @@ type BrokerCapabilities struct {
 	// create/start/restart as policy above everything. A hub may stop writing those values into
 	// InlineConfig only for a broker that reports this (ptone/scion#4222).
 	TemplateTiers bool `json:"templateTiers,omitempty"`
+	// StartEnvGather indicates the broker runs create's env-gather
+	// preflight on a start sent with gatherEnv: a needs report
+	// (envRequirements, markerOnly) before anything starts, envGatherFinal
+	// on the replay, and the envGathered echo (ptone/scion#6101).
+	StartEnvGather bool `json:"startEnvGather,omitempty"`
 }
 
 // ProjectInfo is a summary of a project registered on this broker.
@@ -579,6 +584,11 @@ type CreateAgentResponse struct {
 	// LaunchInstanceID is this broker process's launch-owner identity,
 	// generated once at broker start. The Hub stores it as launch_owner.
 	LaunchInstanceID string `json:"launchInstanceId,omitempty"`
+	// EnvGathered is set on a start's answer whenever the request carried
+	// gatherEnv: the broker ran the env-gather preflight, or skipped it for
+	// noAuth as create does (ptone/scion#6101). A hub that sent gatherEnv
+	// reads an answer without it as coming from a broker without the path.
+	EnvGathered bool `json:"envGathered,omitempty"`
 }
 
 // EnvRequirementsResponse is returned by the broker when GatherEnv is true

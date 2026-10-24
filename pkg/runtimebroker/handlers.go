@@ -321,6 +321,9 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			// Hub telemetry defaults and policy are separate tiers
 			// (ptone/scion#4218).
 			TemplateTiers: true,
+			// A start sent with gatherEnv runs the env-gather preflight
+			// (ptone/scion#6101).
+			StartEnvGather: true,
 		},
 		Profiles:         s.buildInfoProfiles(runtimeType),
 		WorkspaceStorage: s.workspaceStorageDescriptor(),
@@ -3281,6 +3284,19 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		LaunchID               string `json:"launchId,omitempty"`
 		LaunchTimeoutSeconds   int    `json:"launchTimeoutSeconds,omitempty"`
 		LaunchKeepaliveSeconds int    `json:"launchKeepaliveSeconds,omitempty"`
+		// GatherEnv asks for create's env-gather preflight before the
+		// start (ptone/scion#6101): unmet required keys are answered with
+		// a needs report (202, envRequirements) and nothing is started.
+		// EnvGatherFinal marks the hub's replay, on which keys required
+		// only as passthrough markers may stay unmet. NoAuth skips the
+		// preflight, as on create. HarnessAuth, RequiredSecrets and
+		// AvailableAsNeededKeys are the preflight inputs, as on create.
+		GatherEnv             bool                 `json:"gatherEnv,omitempty"`
+		EnvGatherFinal        bool                 `json:"envGatherFinal,omitempty"`
+		NoAuth                bool                 `json:"noAuth,omitempty"`
+		HarnessAuth           string               `json:"harnessAuth,omitempty"`
+		RequiredSecrets       []api.RequiredSecret `json:"requiredSecrets,omitempty"`
+		AvailableAsNeededKeys []string             `json:"availableAsNeededKeys,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&startReq); err != nil {
@@ -3300,6 +3316,47 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		span.SetStatus(codes.Error, refusal.code)
 		refusal.write(w)
 		return
+	}
+	// Env-gather (ptone/scion#6101), before the start registers, resolves
+	// its context or touches the runtime, so a needs answer leaves nothing
+	// behind. The answer to a start sent with gatherEnv always carries the
+	// envGathered echo, also when noAuth skips the preflight: the hub reads
+	// a missing echo as a broker without this path.
+	var gatherPrehydrated prehydratedBundle
+	if startReq.GatherEnv && !startReq.NoAuth {
+		needs, pre, sce := s.startEnvGather(ctx, r, startEnvGatherInputs{
+			Name:                  id,
+			AgentID:               r.URL.Query().Get(api.AgentIDQueryParam),
+			ProjectPath:           startReq.ProjectPath,
+			ProjectSlug:           startReq.ProjectSlug,
+			TemplateName:          startReq.TemplateName,
+			TemplateID:            startReq.TemplateID,
+			TemplateHash:          startReq.TemplateHash,
+			HarnessConfig:         startReq.HarnessConfig,
+			HarnessConfigID:       startReq.HarnessConfigID,
+			HarnessConfigHash:     startReq.HarnessConfigHash,
+			Profile:               startReq.Profile,
+			HarnessAuth:           startReq.HarnessAuth,
+			ResolvedEnv:           startReq.ResolvedEnv,
+			ResolvedSecrets:       startReq.ResolvedSecrets,
+			RequiredSecrets:       startReq.RequiredSecrets,
+			AvailableAsNeededKeys: startReq.AvailableAsNeededKeys,
+			InlineConfig:          startReq.InlineConfig,
+			SharedWorkspace:       startReq.SharedWorkspace,
+			EnvGatherFinal:        startReq.EnvGatherFinal,
+		})
+		if sce != nil {
+			span.SetStatus(codes.Error, startContextSpanText(sce))
+			s.writeStartContextError(w, sce, "start agent", "agent_id", id)
+			return
+		}
+		if needs != nil {
+			s.agentLifecycleLog.Info("Agent start needs environment values; nothing started",
+				"agent_id", id, "project_id", projectID, "count", len(needs.Needs), "final", startReq.EnvGatherFinal)
+			writeJSON(w, http.StatusAccepted, needs)
+			return
+		}
+		gatherPrehydrated = pre
 	}
 	// Record the run on the tracked start, so a run-scoped stop for another
 	// run leaves this start alone (ptone/scion#2550).
@@ -3483,6 +3540,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		HubProfile:               startReq.Profile,
 		HTTPRequest:              r,
 		Operation:                opHTTPStart,
+		// Only the harness-config hydration the env-gather preflight did,
+		// never its template (see startEnvGather).
+		Prehydrated: gatherPrehydrated,
 	})
 	if err != nil {
 		if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
@@ -3725,8 +3785,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 
 	agentResp := AgentInfoToResponse(*agentInfo)
 	writeJSON(w, http.StatusAccepted, CreateAgentResponse{
-		Agent:   &agentResp,
-		Created: false,
+		Agent:       &agentResp,
+		Created:     false,
+		EnvGathered: startReq.GatherEnv,
 	})
 }
 

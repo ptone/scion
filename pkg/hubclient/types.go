@@ -398,6 +398,10 @@ type BrokerCapabilities struct {
 	// that implement the async start (design wave 3, D2) set it in their
 	// heartbeat and registration. Mirrors store.BrokerCapabilities.AsyncStart.
 	AsyncStart bool `json:"asyncStart,omitempty"`
+	// StartEnvGather indicates the broker runs the env-gather preflight on
+	// a start sent with gatherEnv (ptone/scion#6101). Mirrors
+	// store.BrokerCapabilities.StartEnvGather.
+	StartEnvGather bool `json:"startEnvGather,omitempty"`
 	// EmptyPerAgentWorkspace indicates the broker can provision the
 	// empty-per-agent workspace sharing mode (design #2703;
 	// store.BrokerCapabilities.EmptyPerAgentWorkspace is its counterpart).
