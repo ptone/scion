@@ -2903,19 +2903,21 @@ func (s *Server) createAgentInProject(
 					return
 				}
 				if errors.Is(err, ErrLifecycleDeferred) {
-					// The agent's broker is served by another hub node,
-					// which provision-only dispatch does not support. A
+					// The agent's broker is not connected to this hub node:
+					// another node holds it, or no node does (the broker
+					// client defers both alike), and provision-only dispatch
+					// supports neither. A
 					// first-request deferral sends nothing; a deferral of the
 					// replay (or of the retry after a hash repair) comes
 					// after a send. Either way the provision did not
 					// complete on any node, so the agent must not be left to
 					// start (ptone/scion#6096). Fail the create with a fixed
 					// message.
-					s.agentLifecycleLog.Warn("Provision-only create failed: broker served by another hub node",
+					s.agentLifecycleLog.Warn("Provision-only create failed: broker not connected to this hub node",
 						"agent_id", agent.ID, "agent", agent.Name, "broker", agent.RuntimeBrokerID)
 					failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() {
 						writeError(w, http.StatusBadGateway, ErrCodeRuntimeError,
-							"Failed to dispatch to runtime broker: a provision-only create is not supported for a broker served by another hub node", nil)
+							"Failed to dispatch to runtime broker: a provision-only create needs the agent's runtime broker to be connected to this hub node (it is connected to another node or not connected)", nil)
 					})
 					return
 				}
