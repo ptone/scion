@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -35,8 +36,8 @@ import (
 // created. When d has no authorization service, a fresh one on s is wired
 // in. It returns the service d uses.
 //
-// The root is the agent's first ancestry entry, else its owner, else a
-// user derived from the agent ID.
+// The root is the agent's first ancestry entry, else its owner; when that
+// is empty or not a UUID, a user derived from the agent ID.
 func grantLaunchDelivery(t *testing.T, s store.Store, d *HTTPAgentDispatcher, agent *store.Agent) *AuthzService {
 	t.Helper()
 	ctx := context.Background()
@@ -48,7 +49,11 @@ func grantLaunchDelivery(t *testing.T, s store.Store, d *HTTPAgentDispatcher, ag
 	if len(agent.Ancestry) > 0 {
 		root = agent.Ancestry[0]
 	}
-	if root == "" {
+	// Store user IDs are UUIDs; a fixture whose owner is a plain label
+	// gets a derived root user instead (the agent's empty ancestry lets
+	// its recorded chain alone name the root).
+	if _, err := uuid.Parse(root); err != nil {
+		require.Empty(t, agent.Ancestry, "a non-UUID ancestry root cannot be stored")
 		root = tid("launch-root-" + agent.ID)
 	}
 	if _, err := s.GetUser(ctx, root); err != nil {
