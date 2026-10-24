@@ -36,6 +36,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1243,6 +1244,52 @@ func TestCapabilityKeyring_DeliveryIssuanceClosed(t *testing.T) {
 	ok := redeemOn(c, f.brokerID, before)
 	require.Equal(t, http.StatusOK, ok.Code, ok.Body.String())
 	assertNoCapabilityKeyMaterial(t, logs.String(), before)
+}
+
+// TestCapabilityKeyring_DeliveryWithProjectionStillSigned: a deliverable
+// plan entry that carries a scratchpad projection (applyProjection) is
+// issued a versioned capability like any other: it redeems on the other
+// replica with the file bytes, and the same token with its payload altered
+// is refused without spending the nonce. The projection is plan metadata;
+// the signed payload is unchanged by it.
+func TestCapabilityKeyring_DeliveryWithProjectionStillSigned(t *testing.T) {
+	allowVersionedRings(t)
+	f := setupCapDeliveryFixture(t)
+	clk := &krClock{t: krT0}
+	ka, kb := capRollout(t, "versioned")
+	a := f.replica(t, ka, clk)
+	b := f.replica(t, kb, clk)
+	plan := append([]messages.AttachmentPlanEntry(nil), f.call.StructuredMessage.AttachmentPlan...)
+	require.Len(t, plan, 1)
+	require.Equal(t, messages.AttachmentDeliverable, plan[0].State)
+	plan[0].Delivery.ProjectedPath = "/test-only/shared/.attachments/" + plan[0].Delivery.ArtifactID + "/report.txt"
+	plan[0].Delivery.ProjectedMount = "test-only-shared"
+	applyProjection(&plan[0])
+	require.Equal(t, plan[0].Delivery.ProjectedPath, plan[0].ProjectedPath)
+	wire := a.attachmentDelivery().Issue(context.Background(), f.call.Agent, f.call.Agent.RuntimeBrokerID, plan)
+	require.Len(t, wire, 1)
+	token := tokenOf(t, wire[0])
+	require.True(t, strings.HasPrefix(token, "ad2.gen1."), token)
+	parts := strings.Split(token, ".")
+	require.Len(t, parts, 4)
+	// Alter one byte of the decoded payload and re-encode it, so the altered
+	// token stays well-formed and its refusal comes from the MAC check.
+	payload, err := base64.RawURLEncoding.Strict().DecodeString(parts[2])
+	require.NoError(t, err)
+	payload[len(payload)/2] ^= 0x01
+	altered := "ad2.gen1." + base64.RawURLEncoding.EncodeToString(payload) + "." + parts[3]
+	ap := strings.Split(altered, ".")
+	require.Len(t, ap, 4)
+	require.NotEqual(t, parts[2], ap[2])
+	_, err = base64.RawURLEncoding.Strict().DecodeString(ap[2])
+	require.NoError(t, err, "the altered payload is valid base64url")
+	unknown := redeemOn(b, f.brokerID, "not-a-token")
+	got := redeemOn(b, f.brokerID, altered)
+	assert.Equal(t, http.StatusNotFound, got.Code)
+	assert.Equal(t, unknown.Body.String(), got.Body.String())
+	ok := redeemOn(b, f.brokerID, token)
+	require.Equal(t, http.StatusOK, ok.Code, ok.Body.String())
+	assert.Equal(t, "file bytes", ok.Body.String())
 }
 
 // TestCapabilityKeyring_DeliveryOtherSigningErrorsLogEveryAttempt: only
