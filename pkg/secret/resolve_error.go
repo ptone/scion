@@ -118,8 +118,14 @@ const (
 	FailureFailedPrecondition = "failed_precondition"
 	FailureDeadlineExceeded   = "deadline_exceeded"
 	FailureCanceled           = "canceled"
+	FailureEmptyPayload       = "empty_payload"
 	FailureAccess             = "access_failed"
 )
+
+// ErrEmptyPayload is returned when the secret backend reports success but
+// returns no payload (ptone/scion#6090). It is an access failure, never an
+// empty value.
+var ErrEmptyPayload = errors.New("secret backend returned no payload")
 
 // AccessFailureKind classifies a secret backend read error: a context error
 // or a gRPC status code.
@@ -129,6 +135,8 @@ func AccessFailureKind(err error) string {
 		return FailureCanceled
 	case errors.Is(err, context.DeadlineExceeded):
 		return FailureDeadlineExceeded
+	case errors.Is(err, ErrEmptyPayload):
+		return FailureEmptyPayload
 	}
 	switch status.Code(err) {
 	case codes.NotFound:

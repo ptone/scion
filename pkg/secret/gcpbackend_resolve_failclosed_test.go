@@ -332,3 +332,68 @@ func TestGCPBackend_Resolve_LegacyFallbackReportsRealKind(t *testing.T) {
 		}
 	})
 }
+
+// nilPayloadSMClient answers AccessSecretVersion for names under prefix
+// with a nil error and a response carrying no payload (or no response at
+// all when nilResp), as a misbehaving server or test double could.
+type nilPayloadSMClient struct {
+	*mockSMClient
+	prefix  string
+	nilResp bool
+}
+
+func (c *nilPayloadSMClient) AccessSecretVersion(ctx context.Context, req *secretmanagerpb.AccessSecretVersionRequest) (*secretmanagerpb.AccessSecretVersionResponse, error) {
+	if strings.HasPrefix(req.Name, c.prefix) {
+		if c.nilResp {
+			return nil, nil
+		}
+		return &secretmanagerpb.AccessSecretVersionResponse{Name: req.Name}, nil
+	}
+	return c.mockSMClient.AccessSecretVersion(ctx, req)
+}
+
+// A Secret Manager success with no payload is an access failure
+// (ptone/scion#6090): Resolve returns ErrResolveAccess with kind
+// empty_payload naming the key, and nothing panics, on the stored-ref
+// path, the computed-name path and the by-ref read.
+func TestGCPBackend_NilPayloadIsAccessFailure(t *testing.T) {
+	for _, nilResp := range []bool{false, true} {
+		t.Run(fmt.Sprintf("nilResp=%v", nilResp), func(t *testing.T) {
+			s, err := newTestStore(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Migrate(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			fake := &nilPayloadSMClient{mockSMClient: newMockSMClient(), nilResp: nilResp}
+			b := NewGCPBackendWithClient(s, fake, "test-project", "test-hub-id")
+
+			// Stored-ref path.
+			mustSet(t, b, &SetSecretInput{Name: "REF_KEY", Value: "FAKE-ref-value", Scope: ScopeProject, ScopeID: "project-1"})
+			fake.prefix = smFullName(b, "REF_KEY", ScopeProject, "project-1")
+			resolved, err := b.Resolve(context.Background(), "", "project-1", "", nil)
+			assertAccessFailure(t, resolved, err, ScopeProject, "REF_KEY", FailureEmptyPayload, "FAKE-ref-value")
+			if !errors.Is(err, ErrEmptyPayload) {
+				t.Fatalf("err = %v, want it to wrap ErrEmptyPayload", err)
+			}
+			if _, err := b.AccessSecretValueByRef(context.Background(), fake.prefix); !errors.Is(err, ErrEmptyPayload) {
+				t.Fatalf("AccessSecretValueByRef err = %v, want ErrEmptyPayload", err)
+			}
+			if _, err := b.Get(context.Background(), "REF_KEY", ScopeProject, "project-1"); !errors.Is(err, ErrEmptyPayload) {
+				t.Fatalf("Get err = %v, want ErrEmptyPayload", err)
+			}
+
+			// Computed-name path (no stored reference).
+			if err := b.store.CreateSecret(context.Background(), &store.Secret{
+				ID: tid(fmt.Sprintf("nil-payload-computed-%v", nilResp)), Key: "COMPUTED_KEY",
+				SecretType: store.SecretTypeEnvironment, Scope: ScopeUser, ScopeID: "user-1",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			fake.prefix = smFullName(b, "COMPUTED_KEY", ScopeUser, "user-1")
+			resolved, err = b.Resolve(context.Background(), "user-1", "", "", nil)
+			assertAccessFailure(t, resolved, err, ScopeUser, "COMPUTED_KEY", FailureEmptyPayload)
+		})
+	}
+}
