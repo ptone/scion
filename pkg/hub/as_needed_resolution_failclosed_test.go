@@ -449,3 +449,49 @@ func TestCreateAgent_ProvisionOnlySecretResolutionFailure(t *testing.T) {
 	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agentID+"/start", nil)
 	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 }
+
+// A forced move whose provision on the target returns a secret resolution
+// error (after the needs report, so marked sent) rolls back to the source
+// like any target provision failure, with the fixed message recorded and
+// no backend detail; no agent is left on the target to start.
+func TestReincarnateForceMove_SecretResolutionErrorRollsBack(t *testing.T) {
+	f := setupForceMoveFixture(t, true, nil)
+	prepareForceMoveWorker(t, f)
+	f.disp.mu.Lock()
+	f.disp.moveProvisionErr = provisionSent(&secretResolutionError{Verb: "created", Err: asNeededCauses[0].err})
+	f.disp.mu.Unlock()
+
+	before := seedGenerationOneTask(t, f)
+
+	r, a := startForceMove(t, f)
+	assertForceRolledBack(t, f, r, a, "", store.AgentReincarnationStateProvisioning, before.AppliedConfig.Task)
+	assert.Contains(t, r.Error, "provision on the target broker failed: agent secrets could not be resolved")
+	assertNoFailClosedDetail(t, r.Error, "the reincarnation error")
+}
+
+// A reincarnation whose start leg fails after a successful reprovision, and
+// whose best-effort re-render of the previous config then returns a secret
+// resolution error, keeps the original error and the gen N+1 config the
+// disk holds (the re-render's needs report wrote nothing).
+func TestReincarnateAgent_RerenderSecretResolutionErrorKeepsOriginalError(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.startErr = definitiveStartErr()
+	disp.rerenderErr = &secretResolutionError{Verb: "reprovisioned", Err: asNeededCauses[0].err}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	assert.Contains(t, r.Error, "start failed: runtime broker returned error 409")
+	assert.NotContains(t, r.Error, "agent secrets could not be resolved", "the re-render failure must not mask the original error")
+
+	calls, _ := disp.reprovisionSnapshot()
+	assert.Equal(t, 2, calls, "one reprovision, one re-render attempt")
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Contains(t, final.AppliedConfig.Task, "[SCION REINCARNATION]", "the row keeps the gen N+1 config the disk holds")
+}
