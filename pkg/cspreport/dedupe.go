@@ -47,7 +47,8 @@ import (
 // reports hold (each entry holds two bounded violations' worth of text,
 // without samples).
 // Summary records are not charged to the record limiter: there is at most
-// one per record written, plus one per tracked violation per interval.
+// one per record written (an entry starts with a written record and gives
+// at most one summary).
 //
 // A Dedupe is safe for concurrent use. A nil *Dedupe collapses nothing.
 type Dedupe struct {

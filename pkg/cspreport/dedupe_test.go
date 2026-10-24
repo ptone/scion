@@ -432,14 +432,17 @@ func TestRepeatsInOneRequestAreCollapsed(t *testing.T) {
 }
 
 // TestDedupeIsBounded: however many violations arrive, at most maxKeys
-// are tracked, and each new one is still logged.
+// are tracked, each new one is still logged, and the entries kept are the
+// newest ones (early removal is oldest first).
 func TestDedupeIsBounded(t *testing.T) {
 	var buf bytes.Buffer
 	clock := &fakeClock{t: time.Unix(1_700_000_000, 0)}
 	const maxKeys = 4
 	h, _ := dedupeHandler(&buf, clock, 10*time.Minute, maxKeys)
 	const n = 100
+	start := clock.t
 	for i := 0; i < n; i++ {
+		clock.t = start.Add(time.Duration(i) * time.Second)
 		body := strings.ReplaceAll(safariReportToBody, "/chat/c1", fmt.Sprintf("/chat/c%d", i))
 		if rec := post(h, "application/csp-report", body); rec.Code != http.StatusNoContent {
 			t.Fatalf("report %d: status = %d, want 204", i, rec.Code)
@@ -451,11 +454,15 @@ func TestDedupeIsBounded(t *testing.T) {
 	if got := records(t, &buf); len(got) != n {
 		t.Fatalf("%d records for %d distinct violations, want %d", len(got), n, n)
 	}
+	for i := n - maxKeys; i < n; i++ {
+		if !h.Dedupe.tracks(fmt.Sprintf("/chat/c%d", i)) {
+			t.Fatalf("/chat/c%d is not tracked; want the %d newest entries kept", i, maxKeys)
+		}
+	}
 
 	// Entries whose interval is over are removed first: after the
 	// interval, a full table is emptied down to the new entry (one that was
-	// never tracked, so the result does not depend on which entries the
-	// early removals picked).
+	// never tracked).
 	clock.t = clock.t.Add(10 * time.Minute)
 	if rec := post(h, "application/csp-report", strings.ReplaceAll(safariReportToBody, "/chat/c1", "/chat/new")); rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want 204", rec.Code)
@@ -720,4 +727,33 @@ func TestSummaryOnRefusedAndDroppedReports(t *testing.T) {
 			t.Fatalf("a's summaries %d and dropped-count records %d, want 1 and 1", sums, dropped)
 		}
 	})
+}
+
+// tracks reports whether an entry's key ends with suffix (its page path).
+func (d *Dedupe) tracks(suffix string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for k := range d.entries {
+		if strings.HasSuffix(k, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestOldestEntryTieBreak: entries whose records were written at the same
+// time are removed in key order, so the choice does not depend on map
+// order.
+func TestOldestEntryTieBreak(t *testing.T) {
+	var buf bytes.Buffer
+	clock := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	h, _ := dedupeHandler(&buf, clock, 10*time.Minute, 2)
+	// Same time for all three; the keys differ only in the page path, and
+	// ".../chat/a" sorts before ".../chat/b".
+	post(h, "application/csp-report", pageReport("b"))
+	post(h, "application/csp-report", pageReport("a"))
+	post(h, "application/csp-report", pageReport("c"))
+	if h.Dedupe.tracks("/chat/a") || !h.Dedupe.tracks("/chat/b") || !h.Dedupe.tracks("/chat/c") {
+		t.Fatalf("after a full-table insert at one time, want a removed (smallest key) and b, c kept")
+	}
 }
