@@ -415,6 +415,13 @@ type AgentAppliedConfig struct {
 	// routed through create-with-gather.
 	ConfigDelivered bool `json:"configDelivered,omitempty"`
 
+	// UserSuppliedEnvKeys lists the NAMES (never values) of the env keys
+	// the user supplied at create through env finalize (the CLI's gathered
+	// values), sorted and deduplicated; the latest finalize replaces it. A
+	// start that cannot get one of these keys from the hub fails rather
+	// than dropping it as an optional passthrough marker (ptone/scion#6101).
+	UserSuppliedEnvKeys []string `json:"userSuppliedEnvKeys,omitempty"`
+
 	Image         string            `json:"image,omitempty"`
 	HarnessConfig string            `json:"harnessConfig,omitempty"`
 	HarnessAuth   string            `json:"harnessAuth,omitempty"` // Late-binding override for auth_selected_type
@@ -1407,6 +1414,11 @@ type BrokerCapabilities struct {
 	// sends start launch fields only to a broker that is not known to lack
 	// it.
 	AsyncStart bool `json:"asyncStart,omitempty"`
+	// StartEnvGather indicates the broker runs the env-gather preflight on
+	// a start sent with gatherEnv and answers unmet required keys with a
+	// needs report before starting anything (ptone/scion#6101). The hub
+	// sends gatherEnv only to a broker that reports it.
+	StartEnvGather bool `json:"startEnvGather,omitempty"`
 	// EmptyPerAgentWorkspace indicates the broker can provision the
 	// empty-per-agent workspace sharing mode (private empty directory per
 	// agent on non-git projects). The hub refuses to dispatch such agents to

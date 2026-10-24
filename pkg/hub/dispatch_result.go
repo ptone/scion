@@ -114,6 +114,10 @@ var dispatchHubSentinels = []struct {
 	// The owner's refusal of a routed start's create or finalize_env
 	// (ptone/scion#6096): the originating node answers 412 or 503.
 	{"broker_lacks_preserve_workspace", errBrokerLacksPreserveWorkspace},
+	// A start's env-gather failures (ptone/scion#6101): the requester's
+	// handler answers them with its own status and the action's verb.
+	{"start_env_unmet", errStartEnvUnmet},
+	{"broker_lacks_start_env_gather", errBrokerLacksStartEnvGather},
 	{"broker_record_unreadable", errBrokerRecordUnreadable},
 }
 

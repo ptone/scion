@@ -261,11 +261,14 @@ func (t *brokerHTTPTransport) StartAgent(ctx context.Context, brokerID, brokerEn
 		return nil, brokerHTTPError(resp)
 	}
 
-	var result RemoteAgentResponse
+	// A start sent with gatherEnv may be answered with a needs report
+	// (ptone/scion#6101), also as HTTP 202: startAnswer tells it apart
+	// from the start's own answer by its envRequirements key.
+	var result startAnswer
 	if err := t.decodeResponseWithSnippet(resp, &result); err != nil {
 		return nil, err
 	}
-	return &result, nil
+	return result.response(), nil
 }
 
 func (t *brokerHTTPTransport) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, runID string) error {
