@@ -54,13 +54,20 @@ var errBrokerLacksStartEnvGather = errors.New("the agent's runtime broker must b
 type startEnvGatherEchoMissingError struct{}
 
 func (startEnvGatherEchoMissingError) Error() string { return errBrokerLacksStartEnvGather.Error() }
-func (startEnvGatherEchoMissingError) Unwrap() error { return errBrokerLacksStartEnvGather }
+func (startEnvGatherEchoMissingError) Unwrap() []error {
+	return []error{errBrokerLacksStartEnvGather, errStartEnvGatherEchoMissing}
+}
 
-// isStartEnvGatherEchoMissing reports whether err is or wraps a
-// startEnvGatherEchoMissingError.
+// errStartEnvGatherEchoMissing marks a startEnvGatherEchoMissingError, and
+// crosses nodes as its own hub sentinel (start_env_gather_echo_missing), so
+// a requesting node also reads the start as acted on (the owner started a
+// run and stopped it), not as the pre-send refusal.
+var errStartEnvGatherEchoMissing = errors.New("the agent's runtime broker started the agent without gathering its environment")
+
+// isStartEnvGatherEchoMissing reports whether err is, wraps or was relayed
+// from another node as a startEnvGatherEchoMissingError.
 func isStartEnvGatherEchoMissing(err error) bool {
-	var e startEnvGatherEchoMissingError
-	return errors.As(err, &e)
+	return errors.Is(err, errStartEnvGatherEchoMissing)
 }
 
 // startEnvUnmetMessage is the fixed user-facing text for errStartEnvUnmet.
@@ -169,12 +176,13 @@ type startGatherSend func(ctx context.Context, final bool) (*RemoteAgentResponse
 // added to resolvedEnv (classified secret, never plain, so nothing persists
 // them); a required (not marker-only) key that cannot be resolved fails
 // with errStartEnvUnmet before any replay, a resolution error with the
-// *secretResolutionError (verb "started"). A replay that still reports
+// *secretResolutionError naming verb ("started", or "restarted" for a
+// restart's start leg). A replay that still reports
 // needs fails with errStartEnvUnmet. A started answer without the
 // envGathered echo is stopped (stopRun) and fails with
 // startEnvGatherEchoMissingError. Errors of the sends are returned as they
 // are (a cross-node hand-off included).
-func (d *HTTPAgentDispatcher) startGather(ctx context.Context, agent *store.Agent, resp *RemoteAgentResponse, err error,
+func (d *HTTPAgentDispatcher) startGather(ctx context.Context, agent *store.Agent, verb string, resp *RemoteAgentResponse, err error,
 	resolvedEnv map[string]string, classifications *map[string]api.EnvKind,
 	send startGatherSend, stopRun func(ctx context.Context)) (*RemoteAgentResponse, error) {
 	if err != nil {
@@ -185,13 +193,13 @@ func (d *HTTPAgentDispatcher) startGather(ctx context.Context, agent *store.Agen
 	}
 	needs := resp.EnvNeeds
 	takeTZGatherNeed(needs)
-	resolved, err := d.asNeededPass(ctx, agent, needs, "started")
+	resolved, err := d.asNeededPass(ctx, agent, needs, verb)
 	if err != nil {
 		return nil, err
 	}
 	userSupplied := userSuppliedKeys(agent)
 	if n := countUnresolved(hardNeeds(needs, userSupplied), resolved); n > 0 {
-		d.log.WarnContext(ctx, "start: required environment values unavailable; agent not started",
+		d.log.WarnContext(ctx, "start: required environment values unavailable; agent not "+verb,
 			"agent_id", agent.ID, "count", n)
 		return nil, errStartEnvUnmet
 	}
@@ -204,7 +212,7 @@ func (d *HTTPAgentDispatcher) startGather(ctx context.Context, agent *store.Agen
 		return resp, err
 	}
 	if resp != nil && resp.EnvNeeds != nil {
-		d.log.WarnContext(ctx, "start: required environment values still unavailable after the as-needed pass; agent not started",
+		d.log.WarnContext(ctx, "start: required environment values still unavailable after the as-needed pass; agent not "+verb,
 			"agent_id", agent.ID, "count", len(hardNeeds(resp.EnvNeeds, userSupplied)))
 		return nil, errStartEnvUnmet
 	}
@@ -273,21 +281,23 @@ func recordUserSuppliedEnvKeys(agent *store.Agent, env map[string]string) {
 		}
 		agent.AppliedConfig = &store.AgentAppliedConfig{}
 	}
-	if len(keys) == 0 {
-		keys = nil
-	}
+	// An empty, non-nil list records "this finalize supplied none", so a
+	// marker-only write (persistConfigDelivered) clears names an earlier
+	// finalize left; it is omitted from the stored JSON either way.
 	agent.AppliedConfig.UserSuppliedEnvKeys = keys
 }
 
 // deliveredUserSuppliedKeys returns a copy of the user-supplied env key
 // names recorded on agent's in-memory applied config (by an env finalize of
-// this dispatch, or as read), or nil when there are none, for the marker
-// write (persistConfigDelivered).
+// this dispatch, or as read), or nil when none were recorded, for the
+// marker write (persistConfigDelivered). A finalize that supplied no keys
+// recorded an empty list: the copy is then empty but not nil, and the
+// marker write clears older names.
 func deliveredUserSuppliedKeys(agent *store.Agent) []string {
-	if agent == nil || agent.AppliedConfig == nil || len(agent.AppliedConfig.UserSuppliedEnvKeys) == 0 {
+	if agent == nil || agent.AppliedConfig == nil || agent.AppliedConfig.UserSuppliedEnvKeys == nil {
 		return nil
 	}
-	return append([]string(nil), agent.AppliedConfig.UserSuppliedEnvKeys...)
+	return append([]string{}, agent.AppliedConfig.UserSuppliedEnvKeys...)
 }
 
 // userSuppliedKeys returns the agent's user-supplied env key names as a set.
