@@ -5867,6 +5867,9 @@ func TestHTTPAgentDispatcher_BuildStartEnv_StartAndRestartProduceIdenticalEnv(t 
 		Slug:     "golden-broker",
 		Endpoint: "http://localhost:9800",
 		Status:   store.BrokerStatusOnline,
+		// A broker whose start gathers env: on one without it, a start of
+		// an agent with as-needed entries is refused (ptone/scion#6101).
+		Capabilities: &store.BrokerCapabilities{StartEnvGather: true},
 	}
 	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
 		t.Fatalf("failed to create runtime broker: %v", err)
@@ -5909,7 +5912,12 @@ func TestHTTPAgentDispatcher_BuildStartEnv_StartAndRestartProduceIdenticalEnv(t 
 		t.Fatalf("failed to set as_needed env var: %v", err)
 	}
 
-	mockClient := &mockRuntimeBrokerClient{}
+	// The start answers as a broker that ran the env-gather preflight
+	// with nothing missing.
+	mockClient := &mockRuntimeBrokerClient{startReturnResp: &RemoteAgentResponse{
+		Agent:       &RemoteAgentInfo{ID: "golden-agent", Name: "golden-agent", Phase: string(state.PhaseRunning)},
+		EnvGathered: true,
+	}}
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 	dispatcher.SetSecretBackend(&mockSecretBackend{
 		secrets: []secret.SecretWithValue{
