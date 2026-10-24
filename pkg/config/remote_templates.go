@@ -29,12 +29,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/config/configmap"
 	"github.com/rclone/rclone/fs/sync"
 	// Import rclone backends for remote template support
 	// GCS and local are already imported in gcp/storage.go
@@ -166,15 +166,41 @@ func isArchiveURL(uri string) bool {
 		strings.HasSuffix(lower, ".zip")
 }
 
+// RemoteFetchCredentials selects which credentials a remote template fetch
+// may use for storage backends that authenticate (currently gcs).
+type RemoteFetchCredentials int
+
+const (
+	// RemoteFetchAnonymous fetches without any process-held credential:
+	// only public sources are readable. It is the zero value, so a caller
+	// that does not choose gets it. The hub and runtime brokers always use
+	// it, because they fetch on behalf of other principals.
+	RemoteFetchAnonymous RemoteFetchCredentials = iota
+	// RemoteFetchCallerCredentials lets the backend use the default
+	// credentials of the running process (for gcs, Application Default
+	// Credentials). Only the CLI uses it, where those credentials belong
+	// to the user who runs the command.
+	RemoteFetchCallerCredentials
+)
+
+// RemoteFetchOptions configures FetchRemoteTemplate.
+type RemoteFetchOptions struct {
+	// GitHubToken is sent for GitHub folder sources only (e.g. a GitHub App
+	// installation token). Empty means unauthenticated.
+	GitHubToken string
+	// Credentials selects the credential mode for storage backends.
+	Credentials RemoteFetchCredentials
+}
+
 // FetchRemoteTemplate fetches a template from a remote URI and caches it locally.
 // Returns the local path to the cached template.
-// An optional authToken can be provided for authenticated GitHub access (e.g.
-// a GitHub App installation token). Pass "" when no auth is needed.
-func FetchRemoteTemplate(ctx context.Context, uri string, authToken ...string) (string, error) {
-	token := ""
-	if len(authToken) > 0 {
-		token = authToken[0]
+// The source is checked with ValidateRemoteFetchSource before the cache or
+// the network is touched.
+func FetchRemoteTemplate(ctx context.Context, uri string, opts RemoteFetchOptions) (string, error) {
+	if err := ValidateRemoteFetchSource(uri); err != nil {
+		return "", fmt.Errorf("remote template source not accepted: %w", err)
 	}
+	token := opts.GitHubToken
 	cacheDir, err := remoteCacheDir()
 	if err != nil {
 		return "", fmt.Errorf("failed to get cache directory: %w", err)
@@ -204,7 +230,7 @@ func FetchRemoteTemplate(ctx context.Context, uri string, authToken ...string) (
 			return "", fmt.Errorf("failed to fetch archive: %w", err)
 		}
 	case RemoteTypeRclone:
-		if err := fetchRclone(ctx, uri, templateCachePath); err != nil {
+		if err := fetchRclone(ctx, uri, templateCachePath, opts.Credentials); err != nil {
 			return "", fmt.Errorf("failed to fetch via rclone: %w", err)
 		}
 	default:
@@ -404,7 +430,10 @@ func fetchGitHubTarball(ctx context.Context, parts *GitHubURLParts, destPath str
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	// http.DefaultClient's transport is kept (tests replace it); redirects
+	// must stay on https GitHub hosts.
+	client := &http.Client{Transport: http.DefaultClient.Transport, CheckRedirect: githubCheckRedirect}
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to download tarball: %w", err)
 	}
@@ -706,7 +735,7 @@ func fetchArchive(ctx context.Context, uri string, destPath string) error {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := newArchiveHTTPClient().Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to download archive: %w", err)
 	}
@@ -975,17 +1004,47 @@ func sanitizePath(name string) string {
 	return name
 }
 
-// fetchRclone fetches a template using rclone from a remote storage location.
-func fetchRclone(ctx context.Context, uri string, destPath string) error {
-	// uri is expected to be in rclone format, e.g., :gcs:bucket/path or :s3:bucket/path
-	srcFs, err := fs.NewFs(ctx, uri)
+// RcloneFetchFunc copies an accepted rclone source into destPath.
+type RcloneFetchFunc func(ctx context.Context, remote RcloneRemote, creds RemoteFetchCredentials, destPath string) error
+
+// rcloneFetch is the copy step behind fetchRclone; tests replace it with
+// SetRcloneFetchForTest.
+var rcloneFetch RcloneFetchFunc = execRcloneFetch
+
+// SetRcloneFetchForTest replaces the rclone copy step and returns a restore
+// func. It lets tests outside this package observe the source and the
+// credential mode that a fetch would use, without network access.
+//
+// TEST-ONLY: never call this from production code. It mutates package-global
+// state and is not safe for use from parallel tests.
+func SetRcloneFetchForTest(fn RcloneFetchFunc) (restore func()) {
+	prev := rcloneFetch
+	rcloneFetch = fn
+	return func() { rcloneFetch = prev }
+}
+
+// fetchRclone fetches a template from an allowlisted rclone source. The
+// source is parsed and checked before any rclone code sees it.
+func fetchRclone(ctx context.Context, uri string, destPath string, creds RemoteFetchCredentials) error {
+	remote, err := ParseRcloneRemote(uri)
 	if err != nil {
-		return fmt.Errorf("failed to create source fs for %s: %w", uri, err)
+		return err
+	}
+	return rcloneFetch(ctx, remote, creds, destPath)
+}
+
+// execRcloneFetch builds the source Fs from a configuration fixed in code
+// (never from the source string, the environment or an rclone config file)
+// and syncs it into destPath.
+func execRcloneFetch(ctx context.Context, remote RcloneRemote, creds RemoteFetchCredentials, destPath string) error {
+	srcFs, err := newRcloneSourceFs(ctx, remote, creds)
+	if err != nil {
+		return err
 	}
 
 	dstFs, err := fs.NewFs(ctx, destPath)
 	if err != nil {
-		return fmt.Errorf("failed to create destination fs for %s: %w", destPath, err)
+		return fmt.Errorf("failed to create destination fs: %w", err)
 	}
 
 	// Sync from remote to local
@@ -994,6 +1053,45 @@ func fetchRclone(ctx context.Context, uri string, destPath string) error {
 	}
 
 	return nil
+}
+
+// newRcloneSourceFs creates the backend Fs for an accepted rclone source.
+func newRcloneSourceFs(ctx context.Context, remote RcloneRemote, creds RemoteFetchCredentials) (fs.Fs, error) {
+	rule, ok := allowedRcloneBackends[remote.Backend]
+	if !ok {
+		return nil, fmt.Errorf("rclone backend %q is not accepted for remote templates", remote.Backend)
+	}
+	info, err := fs.Find(remote.Backend)
+	if err != nil {
+		return nil, fmt.Errorf("rclone backend %q is not available: %w", remote.Backend, err)
+	}
+	srcFs, err := info.NewFs(ctx, ":"+remote.Backend, remote.Path, rcloneFetchConfig(info.Options, rule, creds))
+	if err != nil {
+		return nil, fmt.Errorf("failed to open %s source: %w", remote.Backend, err)
+	}
+	return srcFs, nil
+}
+
+// rcloneFetchConfig returns the complete backend configuration for a fetch:
+// the backend's option defaults, plus the rule's anonymous options in
+// RemoteFetchAnonymous mode. Nothing is read from the environment or from an
+// rclone config file.
+func rcloneFetchConfig(options fs.Options, rule rcloneBackendRule, creds RemoteFetchCredentials) configmap.Simple {
+	m := configmap.Simple{}
+	for i := range options {
+		if options[i].Default == nil {
+			continue
+		}
+		o := options[i].Copy()
+		o.Value = nil
+		m[o.Name] = o.String()
+	}
+	if creds != RemoteFetchCallerCredentials {
+		for k, v := range rule.anonymousOptions {
+			m[k] = v
+		}
+	}
+	return m
 }
 
 // CleanRemoteTemplateCache cleans up the remote template cache.
@@ -1015,33 +1113,9 @@ func CleanRemoteTemplateCache() error {
 // - Hub bucket/prefix configuration
 // - Fallback chain: local project -> hub project -> hub global -> error
 
-// ValidateRemoteURI performs basic validation on a remote template URI.
+// ValidateRemoteURI checks that uri is a remote template source that may be
+// fetched. It is the same check FetchRemoteTemplate applies; see
+// ValidateRemoteFetchSource.
 func ValidateRemoteURI(uri string) error {
-	if !IsRemoteURI(uri) {
-		return fmt.Errorf("not a remote URI: %s", uri)
-	}
-
-	remoteType := DetectRemoteType(uri)
-
-	switch remoteType {
-	case RemoteTypeGitHub:
-		// Validate GitHub URL format
-		_, err := parseGitHubURL(uri)
-		return err
-
-	case RemoteTypeArchive:
-		// Validate URL format
-		_, err := url.Parse(uri)
-		return err
-
-	case RemoteTypeRclone:
-		// Basic validation - should match :backend:path format
-		if !regexp.MustCompile(`^:\w+:.+`).MatchString(uri) {
-			return fmt.Errorf("invalid rclone URI format: %s (expected :backend:path)", uri)
-		}
-		return nil
-
-	default:
-		return fmt.Errorf("unsupported remote URI type: %s", uri)
-	}
+	return ValidateRemoteFetchSource(uri)
 }

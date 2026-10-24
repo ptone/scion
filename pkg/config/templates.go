@@ -228,8 +228,16 @@ func FindTemplate(name string) (*Template, error) {
 }
 
 // FindTemplateWithContext finds a template by name, supporting remote URIs.
-// Remote templates are fetched and cached locally before being returned.
+// Remote templates are fetched and cached locally before being returned,
+// in RemoteFetchAnonymous mode.
 func FindTemplateWithContext(ctx context.Context, name string) (*Template, error) {
+	return FindTemplateWithCredentials(ctx, name, RemoteFetchAnonymous)
+}
+
+// FindTemplateWithCredentials is FindTemplateWithContext with an explicit
+// credential mode for remote template sources. Only the CLI passes
+// RemoteFetchCallerCredentials.
+func FindTemplateWithCredentials(ctx context.Context, name string, creds RemoteFetchCredentials) (*Template, error) {
 	// 0. Check if name is a remote URI (URL or rclone connection string)
 	if IsRemoteURI(name) {
 		// Validate the URI format
@@ -238,7 +246,7 @@ func FindTemplateWithContext(ctx context.Context, name string) (*Template, error
 		}
 
 		// Fetch the remote template to local cache
-		cachedPath, err := FetchRemoteTemplate(ctx, name)
+		cachedPath, err := FetchRemoteTemplate(ctx, name, RemoteFetchOptions{Credentials: creds})
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch remote template: %w", err)
 		}
@@ -473,9 +481,10 @@ func FindTemplateInProjectPath(name, projectPath string) (*Template, error) {
 		return FindTemplate(name)
 	}
 
-	// Remote URIs and absolute paths bypass project resolution
+	// Remote URIs and absolute paths bypass project resolution. This path
+	// runs in runtime brokers, which fetch on behalf of other principals.
 	if IsRemoteURI(name) {
-		return FindTemplateWithContext(context.Background(), name)
+		return FindTemplateWithCredentials(context.Background(), name, RemoteFetchAnonymous)
 	}
 	if filepath.IsAbs(name) {
 		if info, err := os.Stat(name); err == nil && info.IsDir() {

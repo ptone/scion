@@ -203,8 +203,8 @@ func (s *Server) importFromRemote(ctx context.Context, projectID, sourceURL, sco
 // of the discovered dirs; dirs it drops must be appended to skipped. noMatch is
 // the error message returned when the selection keeps no dirs.
 func (s *Server) importFromRemoteSelected(ctx context.Context, projectID, sourceURL, scope string, kind resourceImportKind, progress importProgressFunc, selectDirs func([]resourceDir, []skippedDir) ([]resourceDir, []skippedDir), noMatch string) ([]string, error) {
-	if !config.IsRemoteURI(sourceURL) {
-		return nil, fmt.Errorf("source must be a remote URI (http://, https://, or rclone)")
+	if err := config.ValidateRemoteFetchSource(sourceURL); err != nil {
+		return nil, fmt.Errorf("source not accepted: %w", err)
 	}
 	if s.GetStorage() == nil {
 		return nil, fmt.Errorf("%s storage is not configured", kind.noun)
@@ -295,8 +295,14 @@ func checkResourceDirsContent(dirs []resourceDir, kind resourceImportKind) error
 // applies to both resource kinds (templates and harness-configs) and to skill
 // directory discovery. The caller owns the returned cache path and must
 // remove it.
+//
+// Storage backends are always accessed anonymously: the hub fetches on
+// behalf of the caller and must not lend it the hub's own credentials.
 func (s *Server) fetchRemoteForImport(ctx context.Context, scope, scopeID, sourceURL string) (string, error) {
-	return config.FetchRemoteTemplate(ctx, sourceURL, s.importCredential(ctx, scope, scopeID, sourceURL))
+	return config.FetchRemoteTemplate(ctx, sourceURL, config.RemoteFetchOptions{
+		GitHubToken: s.importCredential(ctx, scope, scopeID, sourceURL),
+		Credentials: config.RemoteFetchAnonymous,
+	})
 }
 
 // importCredential returns the GitHub credential for fetching sourceURL into
@@ -629,8 +635,8 @@ func applySlugFilter(dirs []resourceDir, skipped []skippedDir, slug string) ([]r
 // fetch authenticates with the credentials of scope and scopeID (see
 // importCredential).
 func (s *Server) discoverFromRemote(ctx context.Context, scope, scopeID, sourceURL string, kind resourceImportKind) ([]string, []string, error) {
-	if !config.IsRemoteURI(sourceURL) {
-		return nil, nil, fmt.Errorf("source must be a remote URI (http://, https://, or rclone)")
+	if err := config.ValidateRemoteFetchSource(sourceURL); err != nil {
+		return nil, nil, fmt.Errorf("source not accepted: %w", err)
 	}
 	if s.GetStorage() == nil {
 		return nil, nil, fmt.Errorf("%s storage is not configured", kind.noun)

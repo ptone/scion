@@ -73,6 +73,7 @@ func tarGzFilesServer(t *testing.T, files map[string]string) *httptest.Server {
 		_, _ = w.Write(archive)
 	}))
 	t.Cleanup(srv.Close)
+	t.Cleanup(config.AllowArchiveServerForTest(srv.URL))
 	return srv
 }
 

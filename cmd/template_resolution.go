@@ -113,7 +113,7 @@ func ResolveTemplateForHub(ctx context.Context, hubCtx *HubContext, templateName
 	}
 
 	// Step 2: Check if template exists locally
-	localTemplate, _ := config.FindTemplate(name)
+	localTemplate, _ := findLocalTemplate(name)
 
 	// Case 1: Template exists on Hub
 	if hubTemplate != nil {
@@ -147,6 +147,13 @@ func validateTemplateScope(scope string) error {
 	default:
 		return fmt.Errorf("unknown template scope %q (valid: global, project, user)", scope)
 	}
+}
+
+// findLocalTemplate resolves a template on this machine for the CLI. A
+// remote template source is fetched with the user's own storage credentials,
+// since the CLI runs as the user.
+func findLocalTemplate(name string) (*config.Template, error) {
+	return config.FindTemplateWithCredentials(context.Background(), name, config.RemoteFetchCallerCredentials)
 }
 
 // parseTemplateScope extracts scope prefix from template name.
