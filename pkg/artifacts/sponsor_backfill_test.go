@@ -266,8 +266,15 @@ func TestSponsorBackfillLedgerName(t *testing.T) {
 	if !slices.IsSorted(names) {
 		t.Errorf("migration names out of order: %v", names)
 	}
-	if last := names[len(names)-1]; last >= migrationSponsorBackfill {
-		t.Errorf("latest DDL migration %q is at or past the backfill's number; the next DDL is 0013", last)
+	// Compare the numeric prefixes: a DDL step numbered 0012 under any
+	// name would reuse the backfill's number.
+	if last := names[len(names)-1]; last[:4] >= migrationSponsorBackfill[:4] {
+		t.Errorf("latest DDL migration %q is at or past the backfill's number %s; the next DDL is 0013", last, migrationSponsorBackfill[:4])
+	}
+	for _, n := range names {
+		if n[:4] == migrationSponsorBackfill[:4] {
+			t.Errorf("DDL migration %q uses the backfill's number %s", n, migrationSponsorBackfill[:4])
+		}
 	}
 	forEachBackend(t, func(t *testing.T, db *sql.DB, st Store, _ func() *sql.DB) {
 		ctx := context.Background()
