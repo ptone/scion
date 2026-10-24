@@ -382,7 +382,7 @@ func TestDispatchBoundRead_HydratesUserTemplateOverHMAC(t *testing.T) {
 				tmpl := commitTemplateContent(t, f.store, id, func(tm *store.Template) {
 					tm.StoragePath, tm.StorageBucket = storagePath, "b"
 					tm.Files = []store.TemplateFile{{Path: "scion-agent.yaml", Size: int64(len(content)), Hash: transfer.HashBytes(content)}}
-					tm.ContentHash = computeContentHash(tm.Files)
+					tm.ContentHash = f.srv.computeContentHash(tm.Files)
 				})
 				return tmpl.ContentHash
 			}

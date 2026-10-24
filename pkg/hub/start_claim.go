@@ -87,7 +87,7 @@ func startOutcomeOf(err error) startOutcome {
 		return startReleased
 	case errors.Is(err, ErrLaunchInFlight), errors.As(err, &incomplete), errors.As(err, &stillMissing),
 		errors.Is(err, ErrLaunchInvalidPhase),
-		errors.Is(err, errStartRunNotBegun), errors.Is(err, errStartRepinRefused),
+		errors.Is(err, errStartRunNotBegun), errors.Is(err, errPendingConfigFold), errors.Is(err, errStartRepinRefused),
 		errors.As(err, &tokenErr), errors.Is(err, errBrokerLacksEmptyPerAgent),
 		isBrokerRuntimeUnavailable(err), isBrokerDraining(err), errors.Is(err, errStartClaimLost), errors.Is(err, store.ErrDeleteInProgress):
 		return startReleased
@@ -503,11 +503,15 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 	// (ptone/scion#3819). A provisioned agent has no previous run, and a
 	// start of a running agent (other than a restart's start leg) keeps
 	// the running pod, so its workspace is not re-cloned.
-	hadEphemeral := !provisioned && hasEphemeralWorkspace(agent) &&
-		(agent.Phase != string(state.PhaseRunning) || opts.Kind == store.StartClaimRestart)
+	createsContainer := agent.Phase != string(state.PhaseRunning) || opts.Kind == store.StartClaimRestart
+	hadEphemeral := !provisioned && hasEphemeralWorkspace(agent) && createsContainer
 	supersedesQueuedStop := agent.ContainerStatus == containerStatusStopQueued
 	sd := opts.Dispatch
 	callerDeadline, hasCallerDeadline := ctx.Deadline()
+	// stillHeld are the pending config keys a container-creating start left
+	// pending (the provision-rendered keys the agent's broker does not
+	// re-render at start), reported once the start succeeded.
+	var stillHeld []string
 	// accepted: a broker accepted the start as an asynchronous launch.
 	accepted := false
 	err := s.withStartClaim(ctx, agent, opts.Kind, opts.Existing, func(ctx context.Context, fence func() error) (bool, error) {
@@ -523,12 +527,31 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 			sd.rollback(ctx)
 			return false, err
 		}
+		// Held config edits (ptone/scion#3976) are applied here, under the
+		// claim and after the fence, so the dispatch below sends them; a
+		// save racing this fold fails its compare-and-set. Only a start
+		// that creates a container applies them: a start of a running
+		// agent (other than a restart's start leg) keeps the running
+		// container, so its held edits stay held.
+		if createsContainer {
+			held, err := s.foldPendingConfigAtStart(ctx, agent, startFoldTrigger(opts))
+			if err != nil {
+				sd.rollback(ctx)
+				return false, err
+			}
+			stillHeld = held
+		}
 		// A start, restart or resume follows the current version of the
 		// agent's user-scoped template, re-recorded before the dispatch,
 		// which the launch then stays pinned to (ptone/scion#5770). It runs
-		// only here, under the start claim, so a start the claim refuses
-		// never re-pins under another start's launch. Nothing was
-		// dispatched on a failure.
+		// here, under the start claim and after the held-edit fold, so a
+		// start the claim refuses never re-pins under another start's
+		// launch, and the re-pin compares and sets on the state version
+		// the fold refreshed (the fold never changes the template; the
+		// template has no edit surface). It runs for every claimed start:
+		// a start that keeps a running container still hydrates the
+		// template for its env fallback. Nothing was dispatched on a
+		// failure.
 		if err := s.repinUserTemplateForStart(ctx, agent); err != nil {
 			sd.rollback(ctx)
 			return false, fmt.Errorf("%w: %w", errStartRepinRefused, err)
@@ -611,6 +634,7 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 	}
 	if err == nil || errors.Is(err, errStartedStatusWrite) {
 		s.addEphemeralWorkspaceStartWarning(ctx, agent, hadEphemeral)
+		s.noteHeldForReincarnate(ctx, agent, stillHeld)
 	}
 	if supersedesQueuedStop && (err == nil || errors.Is(err, errStartedStatusWrite)) {
 		// A start handed off to an asynchronous launch is still launching:
@@ -749,8 +773,17 @@ func startDidNotHappen(err error) bool {
 	var incomplete *AgentCreateIncompleteError
 	return errors.As(err, &quotaErr) || errors.As(err, &stillMissing) || errors.As(err, &tokenErr) ||
 		errors.Is(err, errBrokerLacksEmptyPerAgent) || errors.As(err, &incomplete) ||
-		(errors.Is(err, errStartRunNotBegun) && !errors.Is(err, store.ErrDeleteInProgress)) ||
+		startRunNotBegunOutsideDelete(err) ||
 		errors.Is(err, ErrLaunchInvalidPhase) || isConfirmedStartNotActedOnError(err)
+}
+
+// startRunNotBegunOutsideDelete reports whether err is a start whose run
+// could not be begun before the request was sent (errStartRunNotBegun), for
+// a reason other than a delete holding the agent row
+// (store.ErrDeleteInProgress), which then owns the row. Both
+// startDidNotHappen and reincarnationStartLeftNoContainer use it.
+func startRunNotBegunOutsideDelete(err error) bool {
+	return errors.Is(err, errStartRunNotBegun) && !errors.Is(err, store.ErrDeleteInProgress)
 }
 
 // settleFailedProvisionedStart returns an agent whose start did not happen

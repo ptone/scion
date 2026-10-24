@@ -112,6 +112,12 @@ type Agent struct {
 	// Applied configuration (stored as JSON)
 	AppliedConfig *AgentAppliedConfig `json:"appliedConfig,omitempty"`
 
+	// PendingConfig holds config edits the hub stored instead of applying
+	// (see AgentPendingConfig); nil when there are none. UpdateAgent writes
+	// it with the rest of the row; UpdateAgentConfig writes it with the
+	// applied config alone.
+	PendingConfig *AgentPendingConfig `json:"pendingConfig,omitempty"`
+
 	// Timestamps
 	Created           time.Time `json:"created"`
 	Updated           time.Time `json:"updated"`
@@ -2415,6 +2421,19 @@ const (
 	MessageDispatchNoRecipient = "no_recipient"
 )
 
+// MessageEnteredPendingLogMsg is the text of the one structured log line
+// written whenever a message row is persisted in dispatch_state "pending"
+// (ptone/scion#4827). The line carries message_id, sender, recipient, type
+// (messages.LogType) and creation_path, and never the body. The hub call
+// sites and the store-level default share this text so a row reported by
+// the stuck-pending sweep can be traced to its writer with one search.
+const MessageEnteredPendingLogMsg = "message dispatch: row entered pending"
+
+// MessagePendingPathStoreDefault is the creation_path logged when a writer
+// left Message.DispatchState empty and the store schema default ("pending")
+// applied. No current hub writer should reach it.
+const MessagePendingPathStoreDefault = "store_default"
+
 // MessageExpiredStuckPendingReason is the exact DispatchFailureReason the
 // stuck-message sweep (pkg/hub/sweep.go's brokerMessageSweepHandler) writes
 // when ExpireStuckPendingMessages flips a stuck-pending row to "failed". The
@@ -3327,6 +3346,14 @@ type Message struct {
 	// humans and legacy records. Names are display metadata; IDs are authority.
 	SenderProjectID    *string `json:"senderProjectId,omitempty"`
 	RecipientProjectID *string `json:"recipientProjectId,omitempty"`
+
+	// AuthorizingUserID and DelegationGrantID attribute a message sent
+	// with an agent delegated credential (.design/agent-delegation.md
+	// §14.5): the user who issued the grant and the grant. Sender and
+	// SenderID name the actor agent, never the issuer. Empty for every
+	// other message.
+	AuthorizingUserID string `json:"authorizingUserId,omitempty"`
+	DelegationGrantID string `json:"delegationGrantId,omitempty"`
 
 	// DispatchState tracks cross-node delivery of the message to the broker:
 	// pending|dispatched|failed. The message row is its own durable dispatch
