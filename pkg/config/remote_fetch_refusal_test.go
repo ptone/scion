@@ -24,26 +24,38 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// localSourceFixture creates a directory holding a template and returns the
-// rclone source forms that would name it through a host-path or wrapping
-// backend (hostForms), plus endpoint and internal-address forms
-// (networkForms). Network forms are only passed to checks that do no I/O,
-// so these tests never open a connection.
-func localSourceFixture(t *testing.T) (hostForms, networkForms map[string]string) {
+// refusalCase is a source and the refusal text it must produce.
+type refusalCase struct{ uri, want string }
+
+// Refusal texts, as produced by ValidateRemoteFetchSource.
+const (
+	wantBackendLocal  = `rclone backend "local" is not accepted`
+	wantNoParameters  = "must not carry connection-string parameters"
+	wantArchiveHTTPS  = "archive source must use https"
+	wantPublicAddress = "source host must be a public address"
+)
+
+// localSourceFixture creates a directory holding a template and returns
+// sources naming it through a host-path or wrapping backend, plus a loopback
+// archive URL (hostForms: these go through every resolver; the loopback form
+// can at most attempt a local connection), and endpoint-parameter and
+// metadata-address forms (networkForms: passed only to checks that do no
+// I/O).
+func localSourceFixture(t *testing.T) (hostForms, networkForms map[string]refusalCase) {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "host-dir")
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "tpl"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "tpl", "scion-agent.yaml"), []byte("schema_version: \"1\"\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "marker.txt"), []byte("host file"), 0o644))
-	hostForms = map[string]string{
-		"local":          ":local:" + dir,
-		"alias":          ":alias,remote=" + dir + ":",
-		"crypt on local": ":crypt,remote=" + dir + ",password=x:",
+	hostForms = map[string]refusalCase{
+		"local":            {":local:" + dir, wantBackendLocal},
+		"alias":            {":alias,remote=" + dir + ":", wantNoParameters},
+		"crypt on local":   {":crypt,remote=" + dir + ",password=x:", wantNoParameters},
+		"archive loopback": {"https://127.0.0.1/x.tgz", wantPublicAddress},
 	}
-	networkForms = map[string]string{
-		"gcs metadata": ":gcs,endpoint=http://169.254.169.254:bucket/x",
-		"archive meta": "http://169.254.169.254/latest/x.tar.gz",
-		"archive loop": "https://127.0.0.1/x.tgz",
+	networkForms = map[string]refusalCase{
+		"gcs metadata": {":gcs,endpoint=http://169.254.169.254:bucket/x", wantNoParameters},
+		"archive meta": {"http://169.254.169.254/latest/x.tar.gz", wantArchiveHTTPS},
 	}
 	return hostForms, networkForms
 }
@@ -72,20 +84,20 @@ func TestRemoteSourceRefusal_ValidateAndResolve(t *testing.T) {
 
 	// The resolvers call ValidateRemoteURI before fetching, so this check
 	// covers network forms on the resolver paths too.
-	for name, uri := range networkForms {
+	for name, tc := range networkForms {
 		t.Run(name, func(t *testing.T) {
-			assert.Error(t, ValidateRemoteURI(uri), "CLI and resolver pre-check")
+			assert.ErrorContains(t, ValidateRemoteURI(tc.uri), tc.want, "CLI and resolver pre-check")
 		})
 	}
-	for name, uri := range hostForms {
+	for name, tc := range hostForms {
 		t.Run(name, func(t *testing.T) {
-			assert.Error(t, ValidateRemoteURI(uri), "CLI pre-check")
-			_, err := FindTemplateWithContext(context.Background(), uri)
-			assert.Error(t, err, "shared resolver")
-			_, err = FindTemplateInProjectPath(uri, projectDir)
-			assert.Error(t, err, "broker resolver")
-			_, err = GetTemplateChainInProject(uri, projectDir)
-			assert.Error(t, err, "broker template chain")
+			assert.ErrorContains(t, ValidateRemoteURI(tc.uri), tc.want, "CLI pre-check")
+			_, err := FindTemplateWithContext(context.Background(), tc.uri)
+			assert.ErrorContains(t, err, tc.want, "shared resolver")
+			_, err = FindTemplateInProjectPath(tc.uri, projectDir)
+			assert.ErrorContains(t, err, tc.want, "broker resolver")
+			_, err = GetTemplateChainInProject(tc.uri, projectDir)
+			assert.ErrorContains(t, err, tc.want, "broker template chain")
 		})
 	}
 	assertNoHostCopy(t, home)

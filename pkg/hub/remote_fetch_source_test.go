@@ -50,12 +50,20 @@ func TestHubRemoteSourceRefusal_NetworkForms(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			assertHubSourceRefused(t, uri)
 
-			srv, _ := testInstallSourceServer(t)
+			srv, s := testInstallSourceServer(t)
 			rec := doRequest(t, srv, http.MethodPost, "/api/v1/resources/import", ImportResourcesRequest{
 				Kind: "template", Scope: "global", SourceURL: uri,
 			})
 			require.Equal(t, http.StatusBadRequest, rec.Code)
 			assert.Equal(t, "validation_error", reimportErrorCode(t, rec.Body.Bytes()))
+			assert.Contains(t, rec.Body.String(), config.ErrRemoteSourceNotAccepted.Error())
+			project := createRemoteSourceProject(t, s)
+			for _, route := range hubRemoteSourceProjectRoutes {
+				rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/"+route,
+					map[string]interface{}{"sourceUrl": uri})
+				require.Equal(t, http.StatusBadRequest, rec.Code, route)
+				assert.Equal(t, "validation_error", reimportErrorCode(t, rec.Body.Bytes()), route)
+			}
 		})
 	}
 	assert.Zero(t, fetched)
@@ -80,6 +88,11 @@ func TestHubRemoteFetch_UsesAnonymousCredentials(t *testing.T) {
 
 	srv, s := testInstallSourceServer(t)
 	hc := installClaudeViaHub(t, srv, s, installPinnedClaudeURL)
+	project := createRemoteSourceProject(t, s)
+	for _, route := range hubRemoteSourceProjectRoutes {
+		_ = doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/"+route,
+			map[string]interface{}{"sourceUrl": src})
+	}
 	for _, kind := range []string{"template", "harness-config"} {
 		_ = doRequest(t, srv, http.MethodPost, "/api/v1/resources/import", ImportResourcesRequest{
 			Kind: kind, Scope: "global", SourceURL: src,
@@ -91,7 +104,7 @@ func TestHubRemoteFetch_UsesAnonymousCredentials(t *testing.T) {
 	_ = doRequest(t, srv, http.MethodPost, "/api/v1/harness-configs/"+hc.ID+"/reimport",
 		map[string]interface{}{"sourceUrl": src})
 
-	require.Len(t, calls, 5, "import and discover for both kinds, plus reimport")
+	require.Len(t, calls, 9, "project import and discover (4 routes), global import and discover for both kinds, plus reimport")
 	for i, c := range calls {
 		assert.Equal(t, config.RemoteFetchAnonymous, c, "call %d", i)
 	}

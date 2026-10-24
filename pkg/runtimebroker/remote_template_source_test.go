@@ -57,6 +57,10 @@ func TestBrokerTemplateResolution_RemoteSources(t *testing.T) {
 			req := CreateAgentRequest{Config: &CreateAgentConfig{Template: ref}, ProjectPath: projectPath}
 			assert.Nil(t, envGatherTemplate(req, ""))
 			assert.Nil(t, templateChainPaths(ref, projectPath))
+			// Both helpers drop the error; the resolver they call refuses
+			// the source itself.
+			_, err := config.GetTemplateChainInProject(ref, projectPath)
+			assert.ErrorIs(t, err, config.ErrRemoteSourceNotAccepted)
 		})
 	}
 	assert.Empty(t, calls, "a refused source must never reach rclone")

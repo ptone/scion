@@ -24,9 +24,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// cliRefusedSources returns host-path, wrapping and endpoint-parameter
-// sources naming a host directory that holds a template.
-func cliRefusedSources(t *testing.T) (home string, sources map[string]string) {
+// cliRefusal is a source and the refusal text it must produce.
+type cliRefusal struct{ uri, want string }
+
+// cliRefusedSources returns host-path, wrapping, endpoint-parameter and
+// loopback-archive sources, the first three naming a host directory that
+// holds a template.
+func cliRefusedSources(t *testing.T) (home string, sources map[string]cliRefusal) {
 	t.Helper()
 	home = t.TempDir()
 	t.Setenv("HOME", home)
@@ -35,13 +39,14 @@ func cliRefusedSources(t *testing.T) (home string, sources map[string]string) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "tpl", "scion-agent.yaml"), []byte("schema_version: \"1\"\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "tpl", "config.yaml"), []byte("harness: claude\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "marker.txt"), []byte("host file"), 0o644))
-	return home, map[string]string{
-		"local":          ":local:" + dir,
-		"alias":          ":alias,remote=" + dir + ":",
-		"crypt on local": ":crypt,remote=" + dir + ",password=x:",
-		// Refused by the pre-check before any I/O. Archive URLs with an
-		// internal address are covered in pkg/config, without I/O.
-		"gcs metadata": ":gcs,endpoint=http://169.254.169.254:bucket/x",
+	const noParams = "must not carry connection-string parameters"
+	return home, map[string]cliRefusal{
+		"local":          {":local:" + dir, `rclone backend "local" is not accepted`},
+		"alias":          {":alias,remote=" + dir + ":", noParams},
+		"crypt on local": {":crypt,remote=" + dir + ",password=x:", noParams},
+		"gcs metadata":   {":gcs,endpoint=http://169.254.169.254:bucket/x", noParams},
+		// At most a local connection attempt; refused before it.
+		"archive loopback": {"https://127.0.0.1/x.tgz", "source host must be a public address"},
 	}
 }
 
@@ -65,7 +70,7 @@ func TestRunTemplateImport_RefusesRemoteSources(t *testing.T) {
 	t.Cleanup(func() { globalMode = oldGlobal })
 	globalMode = false
 
-	for name, src := range sources {
+	for name, tc := range sources {
 		t.Run(name, func(t *testing.T) {
 			command := &cobra.Command{}
 			command.Flags().Bool("all", true, "")
@@ -74,8 +79,8 @@ func TestRunTemplateImport_RefusesRemoteSources(t *testing.T) {
 			command.Flags().String("harness", "", "")
 			command.Flags().String("name", "", "")
 			var runErr error
-			_ = captureStdout(t, func() { runErr = runTemplateImport(command, []string{src}) })
-			assert.Error(t, runErr)
+			_ = captureStdout(t, func() { runErr = runTemplateImport(command, []string{tc.uri}) })
+			assert.ErrorContains(t, runErr, tc.want)
 		})
 	}
 	assertNoCLIHostCopy(t, home)
@@ -86,17 +91,17 @@ func TestRunTemplateImport_RefusesRemoteSources(t *testing.T) {
 // nothing.
 func TestResolveInstallSource_RefusesRemoteSources(t *testing.T) {
 	home, sources := cliRefusedSources(t)
-	for name, src := range sources {
+	for name, tc := range sources {
 		t.Run(name, func(t *testing.T) {
 			var err error
 			_ = captureStdout(t, func() {
 				var cleanup func()
-				_, cleanup, err = resolveInstallSource(src)
+				_, cleanup, err = resolveInstallSource(tc.uri)
 				if cleanup != nil {
 					cleanup()
 				}
 			})
-			assert.Error(t, err)
+			assert.ErrorContains(t, err, tc.want)
 		})
 	}
 	assertNoCLIHostCopy(t, home)

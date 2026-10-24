@@ -19,6 +19,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"net/url"
 	"os"
@@ -136,8 +137,8 @@ func TestParseRcloneRemote_NamesRefusedBackend(t *testing.T) {
 func TestValidateRemoteFetchSource(t *testing.T) {
 	for _, tc := range refusedRemoteSources {
 		t.Run("refused/"+tc.name, func(t *testing.T) {
-			assert.Error(t, ValidateRemoteFetchSource(tc.uri))
-			assert.Error(t, ValidateRemoteURI(tc.uri))
+			assert.ErrorIs(t, ValidateRemoteFetchSource(tc.uri), ErrRemoteSourceNotAccepted)
+			assert.ErrorIs(t, ValidateRemoteURI(tc.uri), ErrRemoteSourceNotAccepted)
 		})
 	}
 	for _, uri := range acceptedRemoteSources {
@@ -172,8 +173,7 @@ func TestFetchRemoteTemplate_RefusesBeforeFetching(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, opts := range []RemoteFetchOptions{{}, {Credentials: RemoteFetchCallerCredentials}} {
 				_, err := FetchRemoteTemplate(context.Background(), tc.uri, opts)
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), "not accepted")
+				require.ErrorIs(t, err, ErrRemoteSourceNotAccepted)
 			}
 		})
 	}
@@ -313,6 +313,7 @@ func TestIsPublicAddr(t *testing.T) {
 		"::1", "::", "fe80::1", "fc00::1", "fd00:ec2::254", "ff02::1",
 		"::ffff:127.0.0.1", "::ffff:169.254.169.254", "64:ff9b::a9fe:a9fe",
 		"2002:a9fe:a9fe::1", "2001:db8::1", "fec0::1",
+		"::a9fe:a9fe", "::7f00:1", "::808:808", // IPv4-compatible (::/96)
 	} {
 		assert.False(t, isPublicAddr(netip.MustParseAddr(s)), s)
 	}
@@ -372,13 +373,13 @@ func TestFetchArchive_DialTimeAddressCheck(t *testing.T) {
 	for _, host := range []string{"metadata.example", "loopback.example", "mixed.example", "v6.example"} {
 		uri := "https://" + host + "/t.tgz"
 		require.NoError(t, ValidateRemoteFetchSource(uri), "the name alone looks public")
-		err := fetchArchive(context.Background(), uri, t.TempDir())
+		err := fetchArchive(context.Background(), uri, t.TempDir(), RemoteFetchAnonymous)
 		require.Error(t, err, host)
 		assert.ErrorIs(t, err, errNonPublicAddress, host)
 	}
 	assert.Empty(t, *dialed, "no connection may be attempted to a non-public address")
 
-	err := fetchArchive(context.Background(), "https://public.example/t.tgz", t.TempDir())
+	err := fetchArchive(context.Background(), "https://public.example/t.tgz", t.TempDir(), RemoteFetchAnonymous)
 	require.Error(t, err)
 	assert.Equal(t, []string{"8.8.8.8:443"}, *dialed, "the checked address is the one dialed")
 }
@@ -403,7 +404,7 @@ func TestArchiveCheckRedirect(t *testing.T) {
 	assert.Error(t, githubCheckRedirect(mk("https://codeload.github.com:8443/x"), ghVia))
 	assert.Error(t, githubCheckRedirect(mk("https://169.254.169.254/x"), ghVia))
 
-	c := newArchiveHTTPClient()
+	c := newArchiveHTTPClient(RemoteFetchAnonymous)
 	require.NotNil(t, c.CheckRedirect)
 }
 
@@ -414,10 +415,75 @@ func TestArchiveClient_RedirectTargetCheckedAtDial(t *testing.T) {
 		t.Setenv(k, "")
 	}
 	dialed := stubArchiveNet(t, map[string][]string{"internal.example": {"10.0.0.7"}})
-	c := newArchiveHTTPClient()
-	// Simulate the transport step of a followed redirect.
-	tr := c.Transport.(*http.Transport)
+	tr := newArchiveHTTPClient(RemoteFetchAnonymous).Transport.(*http.Transport)
 	_, err := tr.DialContext(context.Background(), "tcp", "internal.example:443")
 	assert.ErrorIs(t, err, errNonPublicAddress)
 	assert.Empty(t, *dialed)
+}
+
+// A real redirect from a source server to an internal address is followed
+// through the dial-time check and refused; a redirect to http is refused by
+// the redirect policy. Nothing is dialed.
+func TestFetchArchive_RealRedirectToInternalRefused(t *testing.T) {
+	dialed := stubArchiveNet(t, map[string][]string{
+		"internal.example": {"10.0.0.7"},
+		"metadata.example": {"169.254.169.254"},
+	})
+	for _, tc := range []struct{ name, target string }{
+		{"https to private", "https://internal.example/t.tgz"},
+		{"https to metadata", "https://metadata.example/t.tgz"},
+		{"https to metadata literal", "https://169.254.169.254/t.tgz"},
+		{"http downgrade", "http://internal.example/t.tgz"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hits := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits++
+				http.Redirect(w, r, tc.target, http.StatusFound)
+			}))
+			t.Cleanup(srv.Close)
+			t.Cleanup(AllowArchiveServerForTest(srv.URL))
+
+			err := fetchArchive(context.Background(), srv.URL+"/t.tgz", t.TempDir(), RemoteFetchAnonymous)
+			require.Error(t, err)
+			assert.Equal(t, 1, hits, "the source server answered with the redirect")
+			if strings.HasPrefix(tc.target, "http://") {
+				assert.Contains(t, err.Error(), "non-https")
+			} else {
+				assert.ErrorIs(t, err, errNonPublicAddress)
+			}
+		})
+	}
+	assert.Empty(t, *dialed, "no connection to the redirect target")
+}
+
+// Hub and broker (anonymous mode) never use a proxy, so the dial-time check
+// sees the destination. The CLI (caller mode) may use the environment's
+// proxy, but the target is still resolved and checked first.
+func TestArchiveClient_ProxyUse(t *testing.T) {
+	stubArchiveNet(t, map[string][]string{
+		"internal.example": {"10.0.0.7"},
+		"public.example":   {"8.8.8.8"},
+	})
+	prev := archiveEnvProxy
+	t.Cleanup(func() { archiveEnvProxy = prev })
+	proxyURL, _ := url.Parse("http://Proxy.Corp.example:3128")
+	archiveEnvProxy = func(*http.Request) (*url.URL, error) { return proxyURL, nil }
+
+	anon := newArchiveHTTPClient(RemoteFetchAnonymous).Transport.(*http.Transport)
+	assert.Nil(t, anon.Proxy, "no proxy for hub and broker fetches")
+
+	caller := newArchiveHTTPClient(RemoteFetchCallerCredentials).Transport.(*http.Transport)
+	require.NotNil(t, caller.Proxy)
+	req := func(s string) *http.Request {
+		r, err := http.NewRequest(http.MethodGet, s, nil)
+		require.NoError(t, err)
+		return r
+	}
+	_, err := caller.Proxy(req("https://internal.example/t.tgz"))
+	assert.ErrorIs(t, err, errNonPublicAddress, "the target is checked before the proxy is used")
+	got, err := caller.Proxy(req("https://public.example/t.tgz"))
+	require.NoError(t, err)
+	assert.Equal(t, proxyURL, got)
+	assert.Equal(t, "proxy.corp.example:3128", canonicalProxyAddr(proxyURL))
 }

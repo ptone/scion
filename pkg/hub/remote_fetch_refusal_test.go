@@ -18,12 +18,14 @@ package hub
 
 import (
 	"bytes"
+	"context"
 	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -57,12 +59,33 @@ func storedMarker(stor *mockStorage) bool {
 	return false
 }
 
-// assertHubSourceRefused posts sourceURL to the import, discover and
-// reimport endpoints and expects a 400 each time, with nothing stored.
+// hubRemoteSourceProjectRoutes are the project-scoped import and discover
+// routes that take a sourceUrl.
+var hubRemoteSourceProjectRoutes = []string{
+	"import-templates", "import-harness-configs", "discover-templates", "discover-harness-configs",
+}
+
+// createRemoteSourceProject stores a project for the project-scoped routes.
+func createRemoteSourceProject(t *testing.T, s store.Store) *store.Project {
+	t.Helper()
+	project := &store.Project{
+		ID:        tid("project-remote-source"),
+		Name:      "remote-source",
+		Slug:      "remote-source",
+		GitRemote: "https://github.com/test/remote-source",
+	}
+	require.NoError(t, s.CreateProject(context.Background(), project))
+	return project
+}
+
+// assertHubSourceRefused posts sourceURL to the global and project-scoped
+// import and discover endpoints and to reimport, and expects a 400 each
+// time, with nothing stored.
 func assertHubSourceRefused(t *testing.T, sourceURL string) {
 	t.Helper()
 	srv, s := testInstallSourceServer(t)
 	hc := installClaudeViaHub(t, srv, s, installPinnedClaudeURL)
+	project := createRemoteSourceProject(t, s)
 	stor := srv.GetStorage().(*mockStorage)
 	before := storageSnapshot(stor)
 
@@ -76,6 +99,12 @@ func assertHubSourceRefused(t *testing.T, sourceURL string) {
 			"kind": kind, "scope": "global", "sourceUrl": sourceURL,
 		})
 		assert.Equal(t, http.StatusBadRequest, rec.Code, "discover %s: %s", kind, rec.Body.String())
+	}
+
+	for _, route := range hubRemoteSourceProjectRoutes {
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/"+route,
+			map[string]interface{}{"sourceUrl": sourceURL})
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "project %s: %s", route, rec.Body.String())
 	}
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/harness-configs/"+hc.ID+"/reimport",
