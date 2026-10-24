@@ -4549,10 +4549,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	// The start backstops (startGuards: placement on one read of the
 	// broker record, standing, launch guard, broker assignment) with the
 	// restart's verb for a failed broker-record read, and a missing record
-	// the same fixed 503; then the capability check on that record
-	// (ptone/scion#6101): a restart cannot gather as-needed values yet, so
-	// on a broker without startEnvGather an agent that has them is refused
-	// (412), before anything is minted or sent.
+	// the same fixed 503; then the env-gather check on that record
+	// (ptone/scion#6101): a broker restart cannot gather as-needed values
+	// yet, so an agent that has them is refused (412) before anything is
+	// stopped, minted or sent: errBrokerLacksStartEnvGather on a broker
+	// without startEnvGather, errRestartGatherPending on one with it.
 	placedBroker, err := d.startGuards(ctx, agent, "restarted", "DispatchAgentRestart")
 	if err != nil {
 		return err
@@ -4560,7 +4561,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	if placedBroker == nil {
 		return &brokerRecordReadError{verb: "restarted", err: store.ErrNotFound}
 	}
-	if err := d.startEnvGatherRefusal(ctx, agent, placedBroker, "restarted"); err != nil {
+	if err := d.brokerRestartEnvRefusal(ctx, agent, placedBroker); err != nil {
 		return err
 	}
 	ctx = withDispatchBroker(ctx, placedBroker)

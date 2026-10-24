@@ -33,6 +33,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -172,32 +173,107 @@ func TestStartEntryPoints_OldBroker412AndMissingBroker503(t *testing.T) {
 	}
 }
 
-// F1: the broker /restart path names the restart in a lookup error.
+// F1 and H-25 (design r17): the broker /restart path names the restart in
+// a lookup error (the 503 "restarted"), on an old and on a capable broker.
 func TestDispatchAgentRestart_AsNeededLookupErrorNamesTheRestart(t *testing.T) {
-	f, gc := newGatherStartFixture(t, false, plainStarted, func(s store.Store) store.Store {
-		return &envReadErrStore{Store: s}
-	})
-	err := f.d.DispatchAgentRestart(context.Background(), f.agent)
-	require.Error(t, err)
-	var resErr *secretResolutionError
-	require.ErrorAs(t, err, &resErr)
-	assert.Equal(t, "restarted", resErr.Verb)
-	assert.Equal(t, envReadFixedMessage("restarted"), err.Error())
-	assert.Empty(t, gc.calls)
-	assert.False(t, f.client.restartCalled)
+	for _, capable := range []bool{false, true} {
+		f, gc := newGatherStartFixture(t, capable, plainStarted, func(s store.Store) store.Store {
+			return &envReadErrStore{Store: s}
+		})
+		err := f.d.DispatchAgentRestart(context.Background(), f.agent)
+		require.Error(t, err, "capable=%v", capable)
+		var resErr *secretResolutionError
+		require.ErrorAs(t, err, &resErr)
+		assert.Equal(t, "restarted", resErr.Verb)
+		assert.Equal(t, envReadFixedMessage("restarted"), err.Error())
+		assert.Empty(t, gc.calls)
+		assert.False(t, f.client.restartCalled)
+		assert.False(t, f.client.stopCalled)
+	}
 }
 
-// The broker /restart of an agent without as-needed entries, or on a
-// capable broker, is a plain restart as before (P1 gathers on start only).
+// H-25 (design r17 §9, L-1): on a capable broker the broker /restart of an
+// agent with as-needed entries (DispatchAgentRestart, reached by a queued
+// restart row, on this node or on the owner node) is refused with the
+// keyless 412 errRestartGatherPending: nothing minted, sent or stopped.
+func TestDispatchAgentRestart_CapableBrokerWithAsNeededEntriesIs412(t *testing.T) {
+	for _, ep := range startEntryPoints {
+		if ep.name != "DispatchAgentRestart (broker restart endpoint)" && ep.name != "owner node execDispatchRestart" {
+			continue
+		}
+		t.Run(ep.name, func(t *testing.T) {
+			f, gc := newGatherStartFixture(t, true, plainStarted, nil)
+			seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
+			runBefore := f.agent.RunID
+			err := ep.run(t, f)
+			require.ErrorIs(t, err, errRestartGatherPending)
+			assert.NotErrorIs(t, err, errBrokerLacksStartEnvGather, "not the upgrade refusal")
+			assert.True(t, isConfirmedStartNotActedOnError(err))
+			assert.False(t, f.client.stopCalled, "nothing stopped")
+			assertNothingSent(t, f, gc, runBefore)
+			rec := httptest.NewRecorder()
+			require.True(t, writeStartEnvGatherError(rec, err, api.AgentActionRestart))
+			assert.Equal(t, http.StatusPreconditionFailed, rec.Code)
+			var body ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			assert.Equal(t, ErrCodeUnsupportedCapability, body.Error.Code)
+			assert.Equal(t, "this agent uses as-needed values, which a restart cannot deliver yet; stop and start the agent instead", body.Error.Message)
+			assert.NotContains(t, rec.Body.String(), failClosedKey, "the body names no key")
+		})
+	}
+}
+
+// H-25: the broker /restart of an agent without as-needed entries is a
+// plain restart as before, on an old and on a capable broker.
 func TestDispatchAgentRestart_PlainWhenNothingToRefuse(t *testing.T) {
 	for _, capable := range []bool{false, true} {
 		f, _ := newGatherStartFixture(t, capable, plainStarted, nil)
-		if capable {
-			seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
-		}
 		require.NoError(t, f.d.DispatchAgentRestart(context.Background(), f.agent))
 		assert.True(t, f.client.restartCalled, "capable=%v", capable)
 	}
+}
+
+// The lifecycle restart is not refused (design r17 §9): on a capable
+// broker its pre-check passes for an agent with as-needed entries, and its
+// start leg gathers them.
+func TestLifecycleRestart_CapableBrokerStillGathers(t *testing.T) {
+	f, gc := newGatherStartFixture(t, true, replayDelivers(failClosedKey), nil)
+	seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
+	broker, err := checkAgentPinnedPlacement(context.Background(), f.d.store, f.agent)
+	require.NoError(t, err)
+	require.NoError(t, f.d.RestartEnvGatherPrecheck(context.Background(), f.agent, broker))
+	require.NoError(t, f.d.DispatchAgentStart(withRestartStartLeg(context.Background()), f.agent, "", false))
+	require.Len(t, gc.calls, 2, "the needs report and the replay")
+	assert.True(t, gc.calls[0].extras.GatherEnv)
+	assert.Equal(t, failClosedValue, gc.calls[1].env[failClosedKey])
+	assert.False(t, f.client.restartCalled, "not the broker restart")
+}
+
+// H-26 (design r17, L-2): the lifecycle restart pre-check's 412 through
+// the real HTTP router, before the stop leg: an old broker and an agent
+// with as-needed entries.
+func TestLifecycleHTTP_RestartPrecheck412BeforeStop(t *testing.T) {
+	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	project, broker := newEmptyPerAgentHandlerProject(t, s, "precheck-412", true)
+	setBrokerCaps(t, s, broker, &store.BrokerCapabilities{PreserveWorkspaceCreate: true})
+	agent := newQuotaTestAgent(t, s, broker, project, "precheck-412", state.PhaseRunning)
+	require.NoError(t, s.CreateEnvVar(context.Background(), &store.EnvVar{
+		ID: uuid.NewString(), Key: failClosedKey, Value: failClosedValue,
+		Scope: store.ScopeProject, ScopeID: project.ID, InjectionMode: store.InjectionModeAsNeeded,
+	}))
+	client := &mockRuntimeBrokerClient{}
+	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default()))
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/restart", nil)
+	require.Equal(t, http.StatusPreconditionFailed, rec.Code, rec.Body.String())
+	var body ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, ErrCodeUnsupportedCapability, body.Error.Code)
+	assert.Equal(t, errBrokerLacksStartEnvGather.Error(), body.Error.Message)
+	assert.NotContains(t, rec.Body.String(), failClosedKey, "the body names no key")
+	assert.False(t, client.stopCalled, "refused before the stop leg")
+	assert.False(t, client.startCalled || client.restartCalled || client.createCalled, "nothing sent")
 }
 
 // H-21: an empty broker ID is refused by requireRuntimeBrokerAssigned on
@@ -525,8 +601,8 @@ func TestStartGather_OneBrokerRecordReadPerDispatchChain(t *testing.T) {
 			func(f *runDispatchFixture) error {
 				return f.d.DispatchAgentStart(context.Background(), f.agent, "", false)
 			}, nil},
-		{"broker restart", true, plainStarted,
-			func(f *runDispatchFixture) error { return f.d.DispatchAgentRestart(context.Background(), f.agent) }, nil},
+		{"broker restart (refused: as-needed entries, design r17 L-1)", true, plainStarted,
+			func(f *runDispatchFixture) error { return f.d.DispatchAgentRestart(context.Background(), f.agent) }, errRestartGatherPending},
 		{"old broker 412", false, plainStarted,
 			func(f *runDispatchFixture) error {
 				return f.d.DispatchAgentStart(context.Background(), f.agent, "", true)

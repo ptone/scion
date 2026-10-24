@@ -478,7 +478,7 @@ func TestStartEnvGatherErrors_HandlerAnswers(t *testing.T) {
 }
 
 func TestStartEnvGatherErrors_CrossNodeRoundTrip(t *testing.T) {
-	for _, sentinel := range []error{errStartEnvUnmet, errBrokerLacksStartEnvGather, errBrokerRecordUnreadable} {
+	for _, sentinel := range []error{errStartEnvUnmet, errBrokerLacksStartEnvGather, errBrokerRecordUnreadable, errRestartGatherPending} {
 		execErr := errors.Join(errors.New("dispatch start"), sentinel)
 		row := &store.BrokerDispatch{Op: "start", Error: execErr.Error(), Result: dispatchFailureResult(execErr)}
 		got := dispatchFailureError(row)
