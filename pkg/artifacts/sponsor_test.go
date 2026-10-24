@@ -322,3 +322,32 @@ func mustJSON(t *testing.T, v any) []byte {
 	}
 	return b
 }
+
+// TestSponsorForOnlyAgentsInProjectScope pins sponsorFor's own conditions,
+// which the routes cannot reach on their own: only an agent creating in a
+// project scope is looked up.
+func TestSponsorForOnlyAgentsInProjectScope(t *testing.T) {
+	f := newFixture(t, false)
+	h := withSponsorHost(f)
+	h.setUser(agentA.ref, "user-delegator")
+	h.setUser(userU.ref, "user-wrong")
+	ctx := context.Background()
+	for _, c := range []struct {
+		name, kind, ref, scopeKind, want string
+	}{
+		{"agent, project scope", PrincipalKindAgent, agentA.ref, ScopeKindProject, "user-delegator"},
+		{"agent, upload scope", PrincipalKindAgent, agentA.ref, ScopeKindUpload, ""},
+		{"agent, message scope", PrincipalKindAgent, agentA.ref, ScopeKindMessage, ""},
+		{"user, project scope", PrincipalKindUser, userU.ref, ScopeKindProject, ""},
+		{"agent without id", PrincipalKindAgent, "", ScopeKindProject, ""},
+	} {
+		if got := f.svc.sponsorFor(ctx, c.kind, c.ref, c.scopeKind); got != c.want {
+			t.Errorf("%s: sponsorFor = %q, want %q", c.name, got, c.want)
+		}
+	}
+	h.smu.Lock()
+	defer h.smu.Unlock()
+	if len(h.queries) != 1 || h.queries[0] != agentA.ref {
+		t.Errorf("DelegatingUser asked %v, want only the agent in a project scope", h.queries)
+	}
+}
