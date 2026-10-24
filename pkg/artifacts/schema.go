@@ -365,6 +365,14 @@ CREATE INDEX IF NOT EXISTS idx_artifact_event_artifact
     ON artifact_event (artifact_id, at);
 `
 
+// migrationSponsorBackfill is the ledger name the sponsor backfill
+// (BackfillSponsors, ptone/scion#6028) records in artifact_migrations when
+// it completes. It is NOT a schema step and is not in migrations: Init
+// never runs or records it, because the backfill needs the host's
+// delegation lookup and runs from the hub's maintenance pass. It shares
+// the ledger's numbering, so the next DDL migration is 0013, never 0012.
+const migrationSponsorBackfill = "0012_sponsor_backfill"
+
 // migrationVersionFailReason records why a version stopped being pending
 // without becoming ready (ptone/scion#4577): artifact_version.fail_reason,
 // one of the FailReason codes. The column is nullable and nothing is

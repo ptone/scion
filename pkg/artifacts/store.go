@@ -525,6 +525,27 @@ type Store interface {
 	// is left.
 	SetOwnerOrphaned(ctx context.Context, owner Owner, orphaned bool, now time.Time, limit int) ([]ArtifactRef, error)
 
+	// SponsorBackfillDone reports whether the sponsor backfill
+	// (BackfillSponsors) has completed on this database: its ledger name,
+	// migrationSponsorBackfill, is recorded in artifact_migrations.
+	SponsorBackfillDone(ctx context.Context) (bool, error)
+
+	// ListUnsponsoredAgents returns up to limit distinct agent ids, in
+	// order and strictly greater than after ("" = from the start), that
+	// own a live artifact in a project scope with no recorded sponsor
+	// (sponsor_ref NULL).
+	ListUnsponsoredAgents(ctx context.Context, after string, limit int) ([]string, error)
+
+	// SetAgentSponsor records userID as the sponsor of every artifact of
+	// agent agentID in a project scope that has none recorded, and returns
+	// how many it changed. It never changes a recorded sponsor, and never
+	// touches a deleted artifact.
+	SetAgentSponsor(ctx context.Context, agentID, userID string) (int, error)
+
+	// MarkSponsorBackfillDone records migrationSponsorBackfill in
+	// artifact_migrations at now. Recording it again is not an error.
+	MarkSponsorBackfillDone(ctx context.Context, now time.Time) error
+
 	// ListEvents returns the artifact_event rows of an artifact, oldest
 	// first.
 	ListEvents(ctx context.Context, artifactID string) ([]Event, error)

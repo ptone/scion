@@ -388,3 +388,82 @@ func TestArtifactUnrecordedDelegatorFallsBackToLive(t *testing.T) {
 	assert.False(t, resp.CanShare, "live fallback after delete")
 	assert.False(t, resp.CanGrantReview, "live fallback after delete")
 }
+
+// sponsorSeedArtifact stores a published artifact owned by agentID in home
+// with nothing recorded, as an artifact created before sponsors were.
+func sponsorSeedArtifact(t *testing.T, st artifacts.Store, agentID, home string) string {
+	t.Helper()
+	now := time.Now()
+	a := &artifacts.Artifact{ID: uuid.NewString(), ScopeKind: artifacts.ScopeKindProject, ScopeRef: home,
+		OwnerKind: artifacts.PrincipalKindAgent, OwnerRef: agentID, Title: "old", CreatedAt: now, UpdatedAt: now}
+	v := &artifacts.Version{ID: uuid.NewString(), ArtifactID: a.ID, Seq: 1, Kind: artifacts.VersionKindPublish,
+		EntryPath: "old.md", TotalBytes: 1, FileCount: 1, CreatedAt: now, State: artifacts.VersionStateReady}
+	require.NoError(t, st.CreatePublished(context.Background(), a, v,
+		[]artifacts.File{{VersionID: v.ID, Path: "old.md", Size: 1, SHA256: uuid.NewString(), MediaType: "text/markdown"}}, nil))
+	return a.ID
+}
+
+func sponsorOf(t *testing.T, st artifacts.Store, id string) string {
+	t.Helper()
+	a, err := st.GetArtifact(context.Background(), id)
+	require.NoError(t, err)
+	return a.SponsorRef
+}
+
+// TestArtifactSponsorBackfillOnHub: the maintenance pass records the
+// delegating user on the older artifacts of live agents, leaves those of a
+// deleted agent and of an agent with no delegation unrecorded, and records
+// the backfill as done.
+func TestArtifactSponsorBackfillOnHub(t *testing.T) {
+	f := newReviewGrantFixture(t)
+	st, _ := enableArtifactsForTest(t, f.srv)
+	ctx := context.Background()
+	live := sponsorSeedArtifact(t, st, f.agent.ID, f.home)
+	child := sponsorSeedArtifact(t, st, f.child.ID, f.home)
+	deleted := sponsorSeedArtifact(t, st, f.sibling.ID, f.home)
+	noEdge := sponsorSeedArtifact(t, st, f.noEdge.ID, f.home)
+	softDeleteAgentForSponsor(t, f.s, f.sibling.ID)
+
+	f.srv.reapArtifactVersions(ctx)
+	assert.Equal(t, f.delegator, sponsorOf(t, st, live), "live agent")
+	assert.Equal(t, f.delegator, sponsorOf(t, st, child), "agent-spawned agent")
+	assert.Equal(t, "", sponsorOf(t, st, deleted), "soft-deleted agent")
+	assert.Equal(t, "", sponsorOf(t, st, noEdge), "agent with no delegation")
+	done, err := st.SponsorBackfillDone(ctx)
+	require.NoError(t, err)
+	assert.True(t, done)
+
+	// Backfilled, the delegating user keeps the clauses after a purge.
+	purgeAgentForSponsor(t, f.s, f.agent.ID)
+	code, resp := sponsorArtifactResponse(t, f.srv, f.user(f.delegator), live)
+	require.Equal(t, http.StatusOK, code)
+	assert.True(t, resp.CanShare)
+	assert.True(t, resp.CanGrantReview)
+}
+
+// TestArtifactSponsorBackfillLookupFault: a store fault while resolving an
+// agent stops the backfill without recording it done; an agent that
+// resolves to no one (a provenance denial) does not, and a later pass
+// completes.
+func TestArtifactSponsorBackfillLookupFault(t *testing.T) {
+	f := newReviewGrantFixture(t)
+	st, _ := enableArtifactsForTest(t, f.srv)
+	ctx := context.Background()
+	live := sponsorSeedArtifact(t, st, f.agent.ID, f.home)
+	noEdge := sponsorSeedArtifact(t, st, f.noEdge.ID, f.home)
+
+	faulty := hostOverStore(&sponsorFaultStore{Store: f.s, failEdgesFor: f.agent.ID}, false)
+	res, err := artifacts.BackfillSponsors(ctx, st, faulty.DelegatingUser, 10, time.Now())
+	require.ErrorIs(t, err, errSponsorStoreFault)
+	assert.False(t, res.Done)
+	done, err := st.SponsorBackfillDone(ctx)
+	require.NoError(t, err)
+	assert.False(t, done, "a lookup fault must not record the backfill done")
+	assert.Equal(t, "", sponsorOf(t, st, live))
+
+	res, err = artifacts.BackfillSponsors(ctx, st, hostOverStore(f.s, false).DelegatingUser, 10, time.Now())
+	require.NoError(t, err)
+	assert.True(t, res.Done)
+	assert.Equal(t, f.delegator, sponsorOf(t, st, live))
+	assert.Equal(t, "", sponsorOf(t, st, noEdge), "a denial records nothing and does not block completion")
+}

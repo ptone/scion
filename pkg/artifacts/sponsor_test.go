@@ -20,7 +20,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -74,11 +76,16 @@ func (f *fixture) sponsorOf(id string) string {
 	return a.SponsorRef
 }
 
-// sponsorColumn reads artifact.sponsor_ref directly, distinguishing NULL.
+// sponsorColumn reads artifact.sponsor_ref directly, distinguishing NULL,
+// on a SQLite or (pgx) Postgres database.
 func sponsorColumn(t *testing.T, db *sql.DB, id string) sql.NullString {
 	t.Helper()
+	q := `SELECT sponsor_ref FROM artifact WHERE id = ?`
+	if strings.Contains(fmt.Sprintf("%T", db.Driver()), "stdlib") {
+		q = `SELECT sponsor_ref FROM artifact WHERE id = $1`
+	}
 	var v sql.NullString
-	if err := db.QueryRow(`SELECT sponsor_ref FROM artifact WHERE id = ?`, id).Scan(&v); err != nil {
+	if err := db.QueryRow(q, id).Scan(&v); err != nil {
 		t.Fatalf("read sponsor_ref of %s: %v", id, err)
 	}
 	return v
