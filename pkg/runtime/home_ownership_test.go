@@ -758,7 +758,7 @@ func TestDockerRuntime_RepairAgentHomeOwnershipSweepFailures(t *testing.T) {
 		{"listing fails", func(o *fakeRepairOpts) { o.psFails = true }, nil, "Could not list leftover"},
 		{"invalid id", func(o *fakeRepairOpts) { o.psOut = "not-an-id" }, nil, "Ignoring unexpected leftover"},
 		{"overlong invalid id", func(o *fakeRepairOpts) { o.psOut = strings.Repeat("z", 64) + "TAILTAIL" }, nil, "(72 bytes total)"},
-		{"invalid ids mixed with a valid one", func(o *fakeRepairOpts) { o.psOut = "bad1\n0123456789ab\nbad2\nbad3\nbad4" }, []string{"rm -f 0123456789ab"}, "count=4"},
+		{"invalid ids mixed with a valid one", func(o *fakeRepairOpts) { o.psOut = "bad1\n0123456789ab\nbad2\nbad3\nbad-4-x" }, []string{"rm -f 0123456789ab"}, "count=4"},
 		{"removal fails", func(o *fakeRepairOpts) { o.psOut = "0123456789ab"; o.rmFails = true }, []string{"rm -f 0123456789ab"}, "Could not remove leftover"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -786,7 +786,9 @@ func TestDockerRuntime_RepairAgentHomeOwnershipSweepFailures(t *testing.T) {
 			if strings.Contains(logs.String(), "TAILTAIL") {
 				t.Errorf("log quotes the tail of an overlong rejected id: %s", logs.String())
 			}
-			if strings.Contains(logs.String(), "bad4") {
+			// bad-4-x is not hex, so the random hex helper name logged
+			// alongside can never contain it.
+			if strings.Contains(logs.String(), "bad-4-x") {
 				t.Errorf("log quotes more than the first three rejected ids: %s", logs.String())
 			}
 		})
