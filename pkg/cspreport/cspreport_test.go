@@ -533,7 +533,10 @@ const markerReports = `[` +
 	`"blockedURL":"https://user:` + secretMarker + `@files.example/dl/report.pdf?token=` + secretMarker + `#` + secretMarker + `",` +
 	`"sourceFile":"wss://` + secretMarker + `@hub.example/ws#` + secretMarker + `","lineNumber":7}},` +
 	`{"type":"csp-violation","body":{"effectiveDirective":"script-src-elem","blockedURL":"blob:https://hub.example/` + secretMarker + `",` +
-	`"sourceFile":"javascript:` + secretMarker + `","sample":"` + secretMarker + `"}}` +
+	`"sourceFile":"javascript:` + secretMarker + `","sample":"` + secretMarker + `"}},` +
+	`{"type":"csp-violation","body":{"effectiveDirective":"img-src",` +
+	`"blockedURL":"//u:` + secretMarker + `@cdn.example/i.png?t=` + secretMarker + `#` + secretMarker + `",` +
+	`"sourceFile":"https://hub.example/projects","lineNumber":2}}` +
 	`]`
 
 func TestSamplesAndURLDataAreNotLoggedByDefault(t *testing.T) {
@@ -553,8 +556,8 @@ func TestSamplesAndURLDataAreNotLoggedByDefault(t *testing.T) {
 		t.Fatalf("the log holds the planted marker:\n%s", raw)
 	}
 	got := records(t, &buf)
-	if len(got) != 5 {
-		t.Fatalf("got %d records, want 5: %v", len(got), got)
+	if len(got) != 6 {
+		t.Fatalf("got %d records, want 6: %v", len(got), got)
 	}
 	// Positive control: the fields that locate the cause are kept.
 	want := []map[string]any{
@@ -564,6 +567,7 @@ func TestSamplesAndURLDataAreNotLoggedByDefault(t *testing.T) {
 		{"directive": "connect-src", "blocked_uri": "https://files.example/dl/report.pdf",
 			"source_file": "wss://hub.example/ws", "line": float64(7)},
 		{"directive": "script-src-elem", "blocked_uri": "blob:", "source_file": "javascript:"},
+		{"directive": "img-src", "blocked_uri": "//cdn.example/i.png", "source_file": "https://hub.example/projects", "line": float64(2)},
 		{"directive": "script-src-elem", "blocked_uri": "inline", "source_file": "https://hub.example/chat", "line": float64(3)},
 	}
 	for i, w := range want {
@@ -588,8 +592,8 @@ func TestRawSamplesAreLoggedOnlyWhenTurnedOn(t *testing.T) {
 		t.Fatalf("status = %d, want 204", rec.Code)
 	}
 	got := records(t, &buf)
-	if len(got) != 4 {
-		t.Fatalf("got %d records, want 4", len(got))
+	if len(got) != 5 {
+		t.Fatalf("got %d records, want 5", len(got))
 	}
 	if s, _ := got[0]["sample"].(string); s != "Element innerHTML|<p>"+secretMarker+" hello</p>" {
 		t.Errorf("sample = %q, want the Trusted Types sample", s)
@@ -631,6 +635,8 @@ func TestReduceURL(t *testing.T) {
 		{"javascript:alert(1)", "javascript:"},
 		{"about:blank", "about:"},
 		{"user:pw@host/x", "user:"},
+		{"//user:pass@host.example/path?x#y", "//host.example/path"},
+		{"//host.example/a.js", "//host.example/a.js"},
 		{"", ""},
 	} {
 		if got := reduceURL(c.in); got != c.want {
@@ -658,6 +664,38 @@ func TestSinkName(t *testing.T) {
 	} {
 		if got := sinkName(c.directive, c.sample); got != c.want {
 			t.Errorf("sinkName(%q, %q) = %q, want %q", c.directive, c.sample, got, c.want)
+		}
+	}
+}
+
+func TestLegacyScriptSampleFollowsSetting(t *testing.T) {
+	// Through the handler (content type, body read, parse, log): the older
+	// single-report form's script-sample is absent from the log with the
+	// setting off, and is the logged sample with it on.
+	legacy := `{"csp-report":{"effective-directive":"script-src-elem","blocked-uri":"inline",` +
+		`"source-file":"https://hub.example/chat","line-number":3,"script-sample":"` + secretMarker + `"}}`
+	for _, on := range []bool{false, true} {
+		var buf bytes.Buffer
+		h := &Handler{Log: recordingLog(&buf), RawSamples: on}
+		if rec := post(h, "application/csp-report", legacy); rec.Code != http.StatusNoContent {
+			t.Fatalf("RawSamples=%v: status = %d, want 204", on, rec.Code)
+		}
+		raw := buf.String()
+		got := records(t, &buf)
+		if len(got) != 1 {
+			t.Fatalf("RawSamples=%v: got %d records, want 1", on, len(got))
+		}
+		if on {
+			if got[0]["sample"] != secretMarker {
+				t.Errorf("RawSamples=true: sample = %v, want %q", got[0]["sample"], secretMarker)
+			}
+			continue
+		}
+		if strings.Contains(raw, secretMarker) {
+			t.Errorf("RawSamples=false: the log holds the marker:\n%s", raw)
+		}
+		if _, ok := got[0]["sample"]; ok {
+			t.Errorf("RawSamples=false: record has a sample")
 		}
 	}
 }

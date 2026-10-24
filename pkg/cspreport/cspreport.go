@@ -339,7 +339,9 @@ func sinkName(directive, sample string) string {
 // reduceURL keeps what is needed to find the code behind a report and
 // drops what can carry data:
 //   - a value without a scheme (a keyword such as "inline", "eval" or
-//     "trusted-types-sink") is kept without its query and fragment;
+//     "trusted-types-sink", or a path) is kept without its query and
+//     fragment; a scheme-relative value ("//host/path") also loses its
+//     user information;
 //   - an http, https, ws or wss URL keeps its scheme, host and path; the
 //     user information, query and fragment are dropped;
 //   - any other scheme (data:, blob:, javascript:, ...) is reduced to the
@@ -349,7 +351,11 @@ func sinkName(directive, sample string) string {
 func reduceURL(s string) string {
 	scheme, rest, ok := splitScheme(s)
 	if !ok {
-		return withoutQuery(s)
+		s = withoutQuery(s)
+		if strings.HasPrefix(s, "//") {
+			return "//" + withoutUserInfo(s[2:])
+		}
+		return s
 	}
 	switch strings.ToLower(scheme) {
 	case "http", "https", "ws", "wss":
@@ -360,14 +366,20 @@ func reduceURL(s string) string {
 	if !strings.HasPrefix(rest, "//") {
 		return strings.ToLower(scheme) + ":"
 	}
-	authority, path := rest[2:], ""
-	if i := strings.IndexByte(authority, '/'); i >= 0 {
-		authority, path = authority[:i], authority[i:]
+	return scheme + "://" + withoutUserInfo(rest[2:])
+}
+
+// withoutUserInfo takes "authority/path" (the part after "//") and drops
+// the user information from the authority.
+func withoutUserInfo(s string) string {
+	authority, path := s, ""
+	if i := strings.IndexByte(s, '/'); i >= 0 {
+		authority, path = s[:i], s[i:]
 	}
 	if i := strings.LastIndexByte(authority, '@'); i >= 0 {
 		authority = authority[i+1:]
 	}
-	return scheme + "://" + authority + path
+	return authority + path
 }
 
 // splitScheme splits s at the colon after a URL scheme (an ASCII letter,
