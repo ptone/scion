@@ -758,3 +758,55 @@ func TestReincarnateForceMove_DeferralAfterSendCleansTarget(t *testing.T) {
 	assertForceRolledBack(t, f, r, a, "", store.AgentReincarnationStateProvisioning, before.AppliedConfig.Task)
 	assert.Zero(t, f.disp.startCalls, "no start runs on the target")
 }
+
+// DispatchAgentCreate (the scheduler's and the workspace-upload's
+// create-and-start) runs the env-gather dispatch: an as-needed value the
+// broker asks for is resolved and delivered on the replay, and a need that
+// stays unmet fails the create with errProvisionEnvUnmet, naming no key,
+// and revokes the credential it issued (ptone/scion#6096).
+func TestDispatchAgentCreate_GathersAsNeededValues(t *testing.T) {
+	t.Run("resolvable need is delivered", func(t *testing.T) {
+		f := newRunDispatchFixture(t)
+		f.d.SetSecretBackend(&switchableBackend{})
+		calls := gatherNeedsClient(f)
+
+		_, err := f.d.DispatchAgentCreate(context.Background(), f.agent)
+		require.NoError(t, err)
+		assert.Equal(t, 2, *calls, "the needs report and the replay")
+		require.NotNil(t, f.client.lastCreateReq)
+		assert.Equal(t, failClosedValue, f.client.lastCreateReq.ResolvedEnv[failClosedKey], "the replay carries the as-needed value")
+	})
+	t.Run("unmet need fails the create", func(t *testing.T) {
+		f := newRunDispatchFixture(t)
+		f.d.SetSecretBackend(&switchableBackend{})
+		calls := 0
+		f.client.createWithGatherFunc = func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+			calls++
+			return nil, &RemoteEnvRequirementsResponse{AgentID: req.ID, Needs: []string{"FAKE_UNRESOLVABLE_KEY"}}, nil
+		}
+
+		created, err := f.d.DispatchAgentCreate(context.Background(), f.agent)
+		require.Error(t, err)
+		assert.Nil(t, created)
+		assert.ErrorIs(t, err, errProvisionEnvUnmet)
+		assert.NotContains(t, err.Error(), "FAKE_UNRESOLVABLE_KEY", "the error names no key")
+		assert.Equal(t, 1, calls, "nothing resolved, so no replay")
+		_, _, called := sentCreate(f)
+		assert.True(t, called, "only the needs report was sent")
+		got, gerr := f.store.GetAgent(context.Background(), f.agent.ID)
+		require.NoError(t, gerr)
+		assert.NotEmpty(t, got.RunID)
+	})
+	t.Run("resolution error fails the create", func(t *testing.T) {
+		f := newRunDispatchFixture(t)
+		f.d.SetSecretBackend(&nthResolveFailingBackend{err: asNeededCauses[0].err})
+		gatherNeedsClient(f)
+
+		_, err := f.d.DispatchAgentCreate(context.Background(), f.agent)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, asNeededCauses[0].err)
+		var resErr *secretResolutionError
+		require.ErrorAs(t, err, &resErr)
+		assert.Equal(t, fixedCreateSecretMessage, err.Error())
+	})
+}

@@ -467,10 +467,12 @@ func (m *mockRuntimeBrokerClient) CreateAgentWithGather(ctx context.Context, bro
 	}
 	return &RemoteAgentResponse{
 		Agent: &RemoteAgentInfo{
-			ID:    req.ID,
-			Slug:  req.Slug,
-			Name:  req.Name,
-			Phase: string(state.PhaseRunning),
+			ID:              req.ID,
+			ContainerID:     "container-123",
+			Slug:            req.Slug,
+			Name:            req.Name,
+			Phase:           string(state.PhaseRunning),
+			ContainerStatus: "Up 5 seconds",
 		},
 		Created: true,
 		// Reprovisioned mirrors a real (non-stale) broker's echo: it only
