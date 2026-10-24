@@ -81,7 +81,7 @@ func TestCopyDirExcludingGit_NeverFollowsLinks(t *testing.T) {
 	t.Run("sub-path", func(t *testing.T) {
 		dst := filepath.Join(parent, "dst-sub")
 		require.NoError(t, os.MkdirAll(dst, 0o755))
-		require.NoError(t, copyDirExcludingGit(repo, "templates/foo/", dst))
+		require.NoError(t, copyDirExcludingGit(repo, "templates/foo/", dst, templateBudget()))
 		assert.Equal(t, linkedRepoTemplateFiles, readTree(t, dst))
 		assertRegularOnly(t, dst)
 		info, err := os.Stat(filepath.Join(dst, "bin", "run.sh"))
@@ -93,7 +93,7 @@ func TestCopyDirExcludingGit_NeverFollowsLinks(t *testing.T) {
 	t.Run("whole repo", func(t *testing.T) {
 		dst := filepath.Join(parent, "dst-all")
 		require.NoError(t, os.MkdirAll(dst, 0o755))
-		require.NoError(t, copyDirExcludingGit(repo, "", dst))
+		require.NoError(t, copyDirExcludingGit(repo, "", dst, templateBudget()))
 		want := map[string]string{"README.md": "# repo\n"}
 		for k, v := range linkedRepoTemplateFiles {
 			want["templates/foo/"+k] = v
@@ -132,7 +132,7 @@ func TestCopyDirExcludingGit_RefusesLinkedOrEscapingSubPath(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dst := t.TempDir()
-			err := copyDirExcludingGit(repo, tt.sub, dst)
+			err := copyDirExcludingGit(repo, tt.sub, dst, templateBudget())
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErr)
 			assert.Empty(t, readTree(t, dst), "nothing is copied on error")
