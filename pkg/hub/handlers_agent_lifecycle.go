@@ -990,6 +990,17 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				}
 				return
 			}
+			// Refuse before the stop leg when the start leg could not
+			// gather the agent's as-needed values (a broker without
+			// startEnvGather, for an agent that has them) or the broker
+			// record cannot be read: the agent is left as it was
+			// (ptone/scion#6101).
+			if pc, ok := dispatcher.(restartEnvGatherPrechecker); ok {
+				if err := pc.RestartEnvGatherPrecheck(ctx, agent); err != nil {
+					s.writeRestartPrecheckError(ctx, w, agent, err)
+					return
+				}
+			}
 			// Check the broker cap before the start claim, the run intent
 			// write and the stop leg (ptone/scion#2010): a restart refused
 			// at the cap must leave the agent as it was, with its container
@@ -1198,6 +1209,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			return
 		}
 		if writeSecretResolutionError(w, dispatchErr) {
+			return
+		}
+		if writeStartEnvGatherError(w, dispatchErr, action) {
 			return
 		}
 		if writeEmptyPerAgentCapabilityError(w, dispatchErr) {
@@ -1894,4 +1908,30 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 		Scope:        scope,
 		Results:      results,
 	})
+}
+
+// writeRestartPrecheckError answers a lifecycle restart refused by its
+// pre-check (RestartEnvGatherPrecheck) before the stop leg: the start leg's
+// dispatch guards (a launch, a runtime target refusal, standing), the
+// stored-env or secret read error, or the env-gather capability refusal,
+// each as the start leg's own failure would be answered (ptone/scion#6101).
+func (s *Server) writeRestartPrecheckError(ctx context.Context, w http.ResponseWriter, agent *store.Agent, err error) {
+	if refusal := s.launchRefusalFromError(ctx, agent.ID, err); refusal != nil {
+		if !refusal.InFlight {
+			refusal.write(w)
+			return
+		}
+		s.writeLaunchingAgent(ctx, w, agent, []string{launchRestartNotPerformedWarning})
+		return
+	}
+	switch {
+	case writeSecretResolutionError(w, err):
+	case writeStartEnvGatherError(w, err, api.AgentActionRestart):
+	case writePreserveWorkspaceCapabilityError(w, err):
+	case writeRuntimeTargetRefusal(w, err):
+	default:
+		// As the start leg answers any other dispatch failure (a standing
+		// refusal among them): 502 with the reason.
+		RuntimeError(w, "Failed to dispatch to runtime broker: "+err.Error())
+	}
 }
