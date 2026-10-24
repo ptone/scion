@@ -285,8 +285,14 @@ func TestAgentPendingConfig_LegacyCountClear(t *testing.T) {
 // warning, no applied audit) and at the fold of a PATCH to an agent with no
 // container (a PATCH warning); other pending keys are applied.
 func TestAgentPendingConfig_UnlimitedWaitsForCapableBroker(t *testing.T) {
-	setup := func(t *testing.T) (*Server, store.Store, *inlineCaptureDispatcher, *store.Agent) {
+	// setup saves a pending Unlimited while the broker can apply it, then
+	// takes the capability away. beforeRequests, when set, runs on the new
+	// server before any request (to install a store wrapper race-free).
+	setup := func(t *testing.T, beforeRequests func(*Server)) (*Server, store.Store, *inlineCaptureDispatcher, *store.Agent) {
 		srv, s, disp, agent := heldEditsFixture(t, state.PhaseRunning)
+		if beforeRequests != nil {
+			beforeRequests(srv)
+		}
 		setBrokerCapabilities(t, s, agent.RuntimeBrokerID, &store.BrokerCapabilities{Reprovision: true, UnlimitedCountLimits: true})
 		patchPending(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{"max_turns": 0, "model": "held-model"}})
 		setBrokerCapabilities(t, s, agent.RuntimeBrokerID, &store.BrokerCapabilities{Reprovision: true})
@@ -294,16 +300,15 @@ func TestAgentPendingConfig_UnlimitedWaitsForCapableBroker(t *testing.T) {
 	}
 
 	t.Run("start fold", func(t *testing.T) {
-		srv, s, disp, agent := heldEditsFixture(t, state.PhaseRunning)
 		// Count the fold's compare-and-set writes (UpdateAgentConfig), so the
 		// test tells the early return from an idempotent write. Installed
 		// before any request, so no background write races the swap.
-		writes, _ := installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *agentConfigWriteCounter {
-			return &agentConfigWriteCounter{Store: inner}
+		var writes *agentConfigWriteCounter
+		srv, s, disp, agent := setup(t, func(srv *Server) {
+			writes, _ = installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *agentConfigWriteCounter {
+				return &agentConfigWriteCounter{Store: inner}
+			})
 		})
-		setBrokerCapabilities(t, s, agent.RuntimeBrokerID, &store.BrokerCapabilities{Reprovision: true, UnlimitedCountLimits: true})
-		patchPending(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{"max_turns": 0, "model": "held-model"}})
-		setBrokerCapabilities(t, s, agent.RuntimeBrokerID, &store.BrokerCapabilities{Reprovision: true})
 
 		pendingLifecycleWarnings(t, srv, agent.ID, "stop")
 		before := writes.n.Load()
@@ -355,7 +360,7 @@ func TestAgentPendingConfig_UnlimitedWaitsForCapableBroker(t *testing.T) {
 	})
 
 	t.Run("no-container PATCH fold", func(t *testing.T) {
-		srv, s, _, agent := setup(t)
+		srv, s, _, agent := setup(t, nil)
 		row := pendingReloadAgent(t, s, agent.ID)
 		row.Phase = string(state.PhaseStopped)
 		require.NoError(t, s.UpdateAgent(context.Background(), row))
