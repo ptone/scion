@@ -621,7 +621,7 @@ func TestCreateAgent_ProvisionOnlyUnmetNeedsAndCrossNodeFailCreate(t *testing.T)
 	t.Run("cross-node", func(t *testing.T) {
 		failedProvisionOnlyCreate(t, fmt.Errorf("DispatchAgentProvision not supported for cross-node broker: %w", ErrLifecycleDeferred),
 			http.StatusBadGateway, ErrCodeRuntimeError,
-			"Failed to dispatch to runtime broker: a provision-only create needs the agent's runtime broker to be connected to this hub node (it is connected to another node or not connected)")
+			"Failed to dispatch to runtime broker: a provision-only create needs the agent's runtime broker to be reachable from this hub node (it is connected to another node, or to no node and has no HTTP endpoint)")
 	})
 }
 

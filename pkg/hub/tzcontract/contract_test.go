@@ -82,8 +82,8 @@ func TestTimestampContract(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // registerBroker registers and joins a runtime broker record so that the hub
-// accepts agent creation. No broker process runs: dispatches to it fail, and
-// the test only relies on writes that happen before a dispatch.
+// accepts agent creation. No broker process runs: the record's endpoint is an
+// in-test fake broker (startFakeBroker), so dispatches to it succeed.
 func registerBroker(t *testing.T, h *hubProc, b backend) {
 	t.Helper()
 	reg := h.mustJSON("POST", "/api/v1/brokers", map[string]any{
@@ -105,7 +105,16 @@ func registerBroker(t *testing.T, h *hubProc, b backend) {
 	if b.isSQLite() {
 		query = "UPDATE runtime_brokers SET endpoint = ? WHERE id = ?"
 	}
-	execOne(t, b.openDB(t), query, endpoint, brokerID)
+	db := b.openDB(t)
+	if b.isSQLite() {
+		// This is the only write to the database while the hub runs: wait
+		// out the hub's own transactions rather than fail on SQLITE_BUSY.
+		if _, err := db.Exec("PRAGMA busy_timeout = 10000"); err != nil {
+			t.Fatalf("set busy_timeout: %v", err)
+		}
+	}
+	execOne(t, db, query, endpoint, brokerID)
+	_ = db.Close() // released now; the t.Cleanup close is then a no-op
 }
 
 // startFakeBroker starts a broker stand-in on loopback, closed when the
