@@ -825,56 +825,80 @@ func agentNoAuth(agent *store.Agent) bool {
 	return agent != nil && agent.AppliedConfig != nil && agent.AppliedConfig.NoAuth
 }
 
+// noAuthGitHubTokenPass names the dispatch pass on which a no-auth agent's
+// GITHUB_TOKEN is looked up.
+type noAuthGitHubTokenPass int
+
+const (
+	// noAuthFirstPass is the first pass of create, start and restart: an
+	// eagerly injected GITHUB_TOKEN is delivered, an as-needed one is not.
+	noAuthFirstPass noAuthGitHubTokenPass = iota
+	// noAuthAsNeededPass is the as-needed pass (resolveAsNeededForKeys),
+	// answering a broker's GITHUB_TOKEN need: the token is delivered
+	// whatever its injection mode, since the broker reports the need only
+	// when the first pass did not deliver it.
+	noAuthAsNeededPass
+)
+
 // injectNoAuthGitHubToken adds GITHUB_TOKEN to env for a no-auth agent,
 // which otherwise gets no secrets from the secret store. GITHUB_TOKEN is
 // unrelated to LLM auth: it enables repository clone/pull in
 // clone-per-agent workspaces, and without it a no-auth agent's git clone
-// fails (#1165). The project-scoped token is tried first, then the owner's
-// user-scoped token, mirroring the cascade in resolveCloneToken. A lookup
-// error, or a token noAuthGitHubTokenDeliverable rejects, is treated as
-// absence.
+// fails (#1165). This is the first pass (noAuthFirstPass); an as-needed
+// GITHUB_TOKEN reaches the agent through the as-needed pass instead.
 func (d *HTTPAgentDispatcher) injectNoAuthGitHubToken(ctx context.Context, agent *store.Agent, env map[string]string, classifications *map[string]api.EnvKind) {
-	if agent.ProjectID == "" || d.secretBackend == nil {
-		return
+	if value, ok := d.noAuthGitHubToken(ctx, agent, noAuthFirstPass); ok {
+		env["GITHUB_TOKEN"] = value
+		// From secret store → secret-fetchable.
+		classifyEnv(classifications, "GITHUB_TOKEN", api.EnvKindSecretFetchable)
 	}
-	delivered := false
+}
+
+// noAuthGitHubToken returns the GITHUB_TOKEN a no-auth agent gets on pass,
+// if any. The project-scoped token is tried first, then the owner's
+// user-scoped token, mirroring the cascade in resolveCloneToken. A lookup
+// error, or a token noAuthGitHubTokenDeliverable rejects for pass, is
+// treated as absence.
+func (d *HTTPAgentDispatcher) noAuthGitHubToken(ctx context.Context, agent *store.Agent, pass noAuthGitHubTokenPass) (string, bool) {
+	if agent.ProjectID == "" || d.secretBackend == nil {
+		return "", false
+	}
 	ghSecret, err := d.secretBackend.Get(ctx, "GITHUB_TOKEN", secret.ScopeProject, agent.ProjectID)
 	if err != nil {
 		if d.debug {
 			d.log.Debug("NoAuth: failed to resolve GITHUB_TOKEN from project secrets",
 				"agent_id", agent.ID, "project_id", agent.ProjectID, "error", err)
 		}
-	} else if d.noAuthGitHubTokenDeliverable(ctx, agent, ghSecret) {
-		delivered = true
-		env["GITHUB_TOKEN"] = ghSecret.Value
-		// From secret store → secret-fetchable.
-		classifyEnv(classifications, "GITHUB_TOKEN", api.EnvKindSecretFetchable)
+	} else if d.noAuthGitHubTokenDeliverable(ctx, agent, ghSecret, pass) {
 		if d.debug {
 			d.log.Debug("NoAuth: resolved GITHUB_TOKEN from project secrets for git operations",
 				"agent_id", agent.ID, "project_id", agent.ProjectID)
 		}
+		return ghSecret.Value, true
 	}
 
 	// Fall back to the creating user's profile-level GITHUB_TOKEN. Users who
 	// store GITHUB_TOKEN at user/profile scope only (no deliverable
 	// project-scoped token) would otherwise still have no token (#1165).
-	if !delivered && agent.OwnerID != "" {
-		ghSecret, err = d.secretBackend.Get(ctx, "GITHUB_TOKEN", secret.ScopeUser, agent.OwnerID)
-		if err != nil {
-			if d.debug {
-				d.log.Debug("NoAuth: failed to resolve GITHUB_TOKEN from user secrets",
-					"agent_id", agent.ID, "owner_id", agent.OwnerID, "error", err)
-			}
-		} else if d.noAuthGitHubTokenDeliverable(ctx, agent, ghSecret) {
-			env["GITHUB_TOKEN"] = ghSecret.Value
-			// From secret store → secret-fetchable.
-			classifyEnv(classifications, "GITHUB_TOKEN", api.EnvKindSecretFetchable)
-			if d.debug {
-				d.log.Debug("NoAuth: resolved GITHUB_TOKEN from user secrets for git operations",
-					"agent_id", agent.ID, "owner_id", agent.OwnerID)
-			}
-		}
+	if agent.OwnerID == "" {
+		return "", false
 	}
+	ghSecret, err = d.secretBackend.Get(ctx, "GITHUB_TOKEN", secret.ScopeUser, agent.OwnerID)
+	if err != nil {
+		if d.debug {
+			d.log.Debug("NoAuth: failed to resolve GITHUB_TOKEN from user secrets",
+				"agent_id", agent.ID, "owner_id", agent.OwnerID, "error", err)
+		}
+		return "", false
+	}
+	if !d.noAuthGitHubTokenDeliverable(ctx, agent, ghSecret, pass) {
+		return "", false
+	}
+	if d.debug {
+		d.log.Debug("NoAuth: resolved GITHUB_TOKEN from user secrets for git operations",
+			"agent_id", agent.ID, "owner_id", agent.OwnerID)
+	}
+	return ghSecret.Value, true
 }
 
 // isEnvSecretType reports whether t is the environment secret type (an
@@ -899,18 +923,20 @@ func deferredAsNeeded(sv secret.SecretWithValue) bool {
 
 // noAuthGitHubTokenDeliverable reports whether sv, a secret named
 // GITHUB_TOKEN read by name for a no-auth agent, is one normal resolution
-// would deliver as env["GITHUB_TOKEN"]: the first-pass env merge places it
-// under GITHUB_TOKEN (an environment-type secret whose target is
-// GITHUB_TOKEN, which is not a reserved target) and resolveSecrets keeps it
-// (not deferred as needed, a scope the test-admin policy allows).
-func (d *HTTPAgentDispatcher) noAuthGitHubTokenDeliverable(ctx context.Context, agent *store.Agent, sv *secret.SecretWithValue) bool {
+// would deliver as env["GITHUB_TOKEN"] on pass: an environment-type secret
+// whose target is GITHUB_TOKEN (which is not a reserved target), from a
+// scope the test-admin policy allows (restrictTestAdminRootedSecrets). On
+// the first pass it must also not be deferred as needed (resolveSecrets
+// leaves such a secret to the as-needed pass); the as-needed pass applies
+// no injection-mode check.
+func (d *HTTPAgentDispatcher) noAuthGitHubTokenDeliverable(ctx context.Context, agent *store.Agent, sv *secret.SecretWithValue, pass noAuthGitHubTokenPass) bool {
 	if sv == nil || sv.Value == "" {
 		return false
 	}
 	if !isEnvSecretType(sv.SecretType) || sv.Target != "GITHUB_TOKEN" {
 		return false
 	}
-	if deferredAsNeeded(*sv) {
+	if pass == noAuthFirstPass && deferredAsNeeded(*sv) {
 		return false
 	}
 	return len(d.restrictTestAdminRootedSecrets(ctx, agent, []secret.SecretWithValue{*sv})) == 1
@@ -3089,8 +3115,8 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 	// Only environment-type secrets can be mapped to env key=value pairs.
 	// A no-auth agent gets no secrets from the secret store on this pass
 	// either, matching the first pass (buildCreateRequestFor and
-	// buildStartEnv); every caller (provision, create with env gather,
-	// finalize env) inherits this.
+	// buildStartEnv), except GITHUB_TOKEN (step 3); every caller
+	// (provision, create with env gather, finalize env) inherits this.
 	if d.secretBackend != nil && !agentNoAuth(agent) {
 		var resolveOpts *secret.ResolveOpts
 		if len(agent.Ancestry) > 1 && d.authzService != nil {
@@ -3183,6 +3209,23 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 				if _, alreadySet := result[resultKey]; !alreadySet {
 					result[resultKey] = sv.Value
 				}
+			}
+		}
+	}
+
+	// 3. A no-auth agent's GITHUB_TOKEN, strictly that key: the same
+	// exemption and filter as its first pass (injectNoAuthGitHubToken), with
+	// no injection-mode check, so an as-needed GITHUB_TOKEN, which the first
+	// pass does not deliver, reaches the agent here, once. No other secret
+	// is resolved for a no-auth agent on this pass (step 2 above).
+	if _, needed := keySet["GITHUB_TOKEN"]; needed && agentNoAuth(agent) {
+		resultKey := "GITHUB_TOKEN"
+		if canonical, isAlt := altToCanonical[resultKey]; isAlt {
+			resultKey = canonical
+		}
+		if _, alreadySet := result[resultKey]; !alreadySet {
+			if value, ok := d.noAuthGitHubToken(ctx, agent, noAuthAsNeededPass); ok {
+				result[resultKey] = value
 			}
 		}
 	}
