@@ -17,7 +17,6 @@
 package hub
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -544,9 +543,13 @@ func TestStartTransports_ReadNeedsReport(t *testing.T) {
 	})
 	t.Run("control channel", func(t *testing.T) {
 		for _, body := range []string{needs, started} {
-			var a startAnswer
-			require.NoError(t, json.NewDecoder(bytes.NewBufferString(body)).Decode(&a))
-			check(t, a.response(), body == needs)
+			runOverHubTunnels(t, func(t *testing.T, tr hubTunnelTransport) {
+				tunnel := &mockControlChannelTunnel{connected: true, status: http.StatusAccepted, body: []byte(body)}
+				client := &ControlChannelBrokerClient{manager: tr.wrap(t, tunnel)}
+				resp, err := client.StartAgent(context.Background(), "b", "unused", "a", "p", "", "", "", "", "", "", nil, nil, nil, nil, false, false, StartExtras{GatherEnv: true})
+				require.NoError(t, err)
+				check(t, resp, body == needs)
+			})
 		}
 	})
 }
