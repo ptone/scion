@@ -135,17 +135,25 @@ func (d *HTTPAgentDispatcher) startEnvGatherRefusal(ctx context.Context, agent *
 // env-gather reasons. HTTPAgentDispatcher implements it; other dispatchers
 // (test fakes) skip the check.
 type restartEnvGatherPrechecker interface {
-	RestartEnvGatherPrecheck(ctx context.Context, agent *store.Agent) error
+	RestartEnvGatherPrecheck(ctx context.Context, agent *store.Agent, broker *store.RuntimeBroker) error
 }
 
 // RestartEnvGatherPrecheck is run by the lifecycle restart before its stop
 // leg, so a restart its start leg would refuse leaves the agent untouched.
-// It runs the start leg's checks in the same order: the dispatch guards
-// (startGuards), then the capability check (a read error or a
-// missing record, or an old broker with as-needed entries).
-func (d *HTTPAgentDispatcher) RestartEnvGatherPrecheck(ctx context.Context, agent *store.Agent) error {
-	broker, err := d.startGuards(ctx, agent, "restarted", "lifecycle restart")
-	if err != nil {
+// broker is the record the handler's placement pre-check read
+// (startPlacementPreCheckBroker), which already ran the placement backstop
+// on it; this runs the remaining start guards in the same order (standing,
+// launch guard, broker assignment) and the capability check on that record
+// (design r12 §4.5.1): a missing record is the fixed 503 for the restart, an
+// old broker with as-needed entries the 412. It reads no broker record.
+func (d *HTTPAgentDispatcher) RestartEnvGatherPrecheck(ctx context.Context, agent *store.Agent, broker *store.RuntimeBroker) error {
+	if err := d.dispatchStandingError(ctx, agent); err != nil {
+		return err
+	}
+	if err := d.launchGuardError(ctx, agent, "lifecycle restart"); err != nil {
+		return err
+	}
+	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
 	return d.startEnvGatherRefusal(ctx, agent, broker, "restarted")
