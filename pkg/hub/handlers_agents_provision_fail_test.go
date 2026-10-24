@@ -97,23 +97,24 @@ func TestCreateAgent_ProvisionOnlySkillResolutionFailure(t *testing.T) {
 	}
 }
 
-// TestCreateAgent_ProvisionOnlyOtherFailureStaysWarning pins that only the
-// skill resolution failure changed: any other provision error still yields
-// 201 with a warning and keeps the record.
-func TestCreateAgent_ProvisionOnlyOtherFailureStaysWarning(t *testing.T) {
+// TestCreateAgent_ProvisionOnlyPreSendFailureStaysWarning pins the one
+// provision-only failure that keeps the record: an error returned before any
+// provision request left the hub (not marked errProvisionSent), so no broker
+// was contacted. It still yields 201 with a warning. A failure after the
+// provision reached the broker fails the create
+// (TestCreateAgent_ProvisionOnlyFailureAfterSendFailsCreate,
+// ptone/scion#6096).
+func TestCreateAgent_ProvisionOnlyPreSendFailureStaysWarning(t *testing.T) {
 	tests := []struct {
 		name string
 		err  error
 	}{
-		{name: "plain error", err: errors.New("connection refused")},
-		{name: "broker 404 not_found", err: &brokerStatusError{
-			StatusCode: http.StatusNotFound,
-			Body:       `{"error":{"code":"not_found","message":"Failed to provision agent: template not found"}}`,
-		}},
-		{name: "broker 500", err: &brokerStatusError{StatusCode: http.StatusInternalServerError, Body: "boom"}},
+		{name: "no broker assigned", err: errNoRuntimeBrokerAssigned},
+		{name: "broker endpoint lookup failed before sending", err: errors.New("runtime broker endpoint not found")},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			require.False(t, errors.Is(tc.err, errProvisionSent), "a pre-send case must not be marked sent")
 			disp := &skillFailDispatcher{provisionErr: tc.err}
 			srv, s, project := setupCreateAgentServer(t, disp)
 

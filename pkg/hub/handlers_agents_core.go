@@ -2897,6 +2897,34 @@ func (s *Server) createAgentInProject(
 					failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
 					return
 				}
+				if errors.Is(err, errProvisionEnvUnmet) {
+					// The broker still reported needed environment keys at
+					// the end of the provision, and a start does not gather
+					// env, so the agent cannot start with its config
+					// (ptone/scion#6096). Fail the create with a fixed
+					// message that names no key.
+					s.agentLifecycleLog.Warn("Provision-only create failed: required environment values still unavailable",
+						"agent_id", agent.ID, "agent", agent.Name, "broker", agent.RuntimeBrokerID)
+					failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() {
+						writeError(w, http.StatusUnprocessableEntity, ErrCodeMissingEnvVars,
+							"Cannot create agent: required environment values are still unavailable after the provision", nil)
+					})
+					return
+				}
+				if errors.Is(err, ErrLifecycleDeferred) {
+					// The agent's broker is served by another hub node,
+					// which provision-only dispatch does not support: no as-
+					// needed pass ran on any node, so the agent must not be
+					// left to start (ptone/scion#6096). Fail the create with
+					// a fixed message.
+					s.agentLifecycleLog.Warn("Provision-only create failed: broker served by another hub node",
+						"agent_id", agent.ID, "agent", agent.Name, "broker", agent.RuntimeBrokerID)
+					failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() {
+						writeError(w, http.StatusBadGateway, ErrCodeRuntimeError,
+							"Failed to dispatch to runtime broker: a provision-only create is not supported for a broker served by another hub node", nil)
+					})
+					return
+				}
 				if errors.Is(err, errProvisionSent) {
 					// The provision reached the broker (its first request,
 					// the needs report or the replay with the as-needed
@@ -2912,11 +2940,12 @@ func (s *Server) createAgentInProject(
 					failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
 					return
 				}
-				// Any other error was returned before a provision request
-				// left the hub (dispatchProvision marks every error after
-				// its send boundary with errProvisionSent), so the broker
-				// holds nothing from this create: the create keeps the row
-				// with a warning, as before.
+				// Pre-send: any other error was returned before a provision
+				// request left the hub (dispatchProvision marks every error
+				// after its send boundary with errProvisionSent, and the
+				// cross-node deferral is handled above), so no broker was
+				// contacted for this create: it keeps the row with a
+				// warning, as before.
 				// A Kubernetes identity mapping refusal reads as the
 				// hub's coded message, not the raw broker body
 				// (ptone/scion#4024).

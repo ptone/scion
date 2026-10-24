@@ -1930,6 +1930,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent 
 	return d.dispatchProvision(ctx, agent, "DispatchAgentProvision", false, "", "")
 }
 
+// errProvisionEnvUnmet is returned by a provision, move provision or
+// reprovision whose broker still reports needed environment keys at the end
+// (ptone/scion#6096). Its text names no key and no value.
+var errProvisionEnvUnmet = errors.New("required environment values are still unavailable after the provision")
+
 // DispatchAgentReprovision re-renders an EXISTING agent's on-disk config
 // (scion-agent.json, agent-info.json, home dotfiles, skills) on the runtime
 // broker from the agent's current AppliedConfig, for a `scion reincarnate`
@@ -2116,10 +2121,6 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 				return err2
 			}
 			takeTZGatherNeed(envReqs2)
-			if envReqs2 != nil && len(envReqs2.Needs) > 0 {
-				d.log.Warn(callerName+": env vars still missing after second pass",
-					"agent", agent.Name, "needs", envReqs2.Needs)
-			}
 			if resp2 != nil {
 				d.applyBrokerResponse(ctx, agent, resp2)
 			}
@@ -2128,17 +2129,25 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 		}
 	}
 
-	// Design §3.4 Amendment A2.3: for a reprovision specifically, a final 202-with-Needs (env
-	// still missing) or a missing 201 response is a hard failure, never
-	// "warn and continue". DispatchAgentProvision's more forgiving behavior
-	// exists because a follow-up start re-gathers env on that path; the
+	// A final 202-with-Needs (keys still unmet after the replay, or no
+	// replay because none of them resolved) is an error for every caller: a
+	// start never gathers env (buildStartEnv does not resolve as-needed
+	// keys), so a provision, move or reprovision that ends here did not
+	// deliver the config the broker asked for (Design §3.4 Amendment A2.3
+	// for a reprovision; ptone/scion#6096 for the others). The error names
+	// no key; the log carries only the count.
+	if finalNeeds != nil && len(finalNeeds.Needs) > 0 {
+		d.log.WarnContext(ctx, callerName+": required environment values still unavailable after the provision",
+			"agent_id", agent.ID, "count", len(finalNeeds.Needs))
+		return fmt.Errorf("%s: %w", callerName, errProvisionEnvUnmet)
+	}
+
+	// Design §3.4 Amendment A2.3: for a reprovision specifically, a missing
+	// 201 response is also a hard failure, never "warn and continue": the
 	// reincarnate worker goes straight from this call to DispatchAgentStart,
 	// so "warn and continue" here would silently start the new generation on
-	// an incomplete or unreplaced config and still report AC-1 success.
+	// an unreplaced config and still report AC-1 success.
 	if reprovision {
-		if finalNeeds != nil && len(finalNeeds.Needs) > 0 {
-			return fmt.Errorf("%s: required env still missing after reprovision: %v", callerName, finalNeeds.Needs)
-		}
 		if finalResp == nil {
 			return fmt.Errorf("%s: broker returned no confirmation for the reprovision request", callerName)
 		}

@@ -502,7 +502,7 @@ func TestReincarnateAgent_RerenderSecretResolutionErrorKeepsOriginalError(t *tes
 // the broker files and the agent row are removed, and a start of the agent
 // afterwards answers 404 (ptone/scion#6096). An error from before any
 // request left the hub still keeps the row with a warning
-// (TestCreateAgent_ProvisionOnlyOtherFailureStaysWarning).
+// (TestCreateAgent_ProvisionOnlyPreSendFailureStaysWarning).
 func TestCreateAgent_ProvisionOnlyFailureAfterSendFailsCreate(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -512,6 +512,8 @@ func TestCreateAgent_ProvisionOnlyFailureAfterSendFailsCreate(t *testing.T) {
 		{"replay transport failure", provisionSent(errors.New("dial tcp 10.0.0.9:9800: connection refused")), http.StatusBadGateway},
 		// 0: any error status the dispatch error maps to (never a 201).
 		{"broker 500 after the needs report", provisionSent(&brokerStatusError{StatusCode: http.StatusInternalServerError, Body: "boom"}), 0},
+		{"broker 404 after the needs report", provisionSent(&brokerStatusError{StatusCode: http.StatusNotFound,
+			Body: `{"error":{"code":"not_found","message":"Failed to provision agent: template not found"}}`}), http.StatusNotFound},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			disp := &skillFailDispatcher{provisionErr: tc.err}
@@ -572,4 +574,124 @@ func TestProvisionGather_ReplayTransportFailureIsMarkedSent(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errProvisionSent)
 	assert.Equal(t, 2, calls, "the needs report and the failed replay")
+}
+
+// failedProvisionOnlyCreate runs a provision-only create whose provision
+// returns provisionErr and checks the outcome every post-send failure
+// shares: the wanted status and message, the agent row and broker files
+// removed, and a start afterwards answering 404 (ptone/scion#6096).
+func failedProvisionOnlyCreate(t *testing.T, provisionErr error, wantStatus int, wantCode, wantMessage string) {
+	t.Helper()
+	disp := &skillFailDispatcher{provisionErr: provisionErr}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:          "post-send-fail-agent",
+		ProjectID:     project.ID,
+		Task:          "some task",
+		ProvisionOnly: true,
+	})
+	require.Equal(t, wantStatus, rec.Code, rec.Body.String())
+	var body ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, wantCode, body.Error.Code)
+	assert.Equal(t, wantMessage, body.Error.Message)
+	assert.Empty(t, body.Error.Details, "no key names or other details")
+	assert.NotContains(t, rec.Body.String(), failClosedKey)
+
+	require.NotNil(t, disp.provisionedAgent)
+	agentID := disp.provisionedAgent.ID
+	_, err := s.GetAgent(context.Background(), agentID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "the failed agent record is deleted")
+	assert.True(t, disp.deleteCalled, "the broker-side files are cleaned up")
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agentID+"/start", nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+}
+
+// Unmet needs at the end of the provision fail the create with a fixed
+// message that names no key, and a cross-node provision (deferred, so no
+// as-needed pass ran on any node) fails it with a fixed message too.
+func TestCreateAgent_ProvisionOnlyUnmetNeedsAndCrossNodeFailCreate(t *testing.T) {
+	t.Run("unmet needs", func(t *testing.T) {
+		failedProvisionOnlyCreate(t, provisionSent(fmt.Errorf("DispatchAgentProvision: %w", errProvisionEnvUnmet)),
+			http.StatusUnprocessableEntity, ErrCodeMissingEnvVars,
+			"Cannot create agent: required environment values are still unavailable after the provision")
+	})
+	t.Run("cross-node", func(t *testing.T) {
+		failedProvisionOnlyCreate(t, fmt.Errorf("DispatchAgentProvision not supported for cross-node broker: %w", ErrLifecycleDeferred),
+			http.StatusBadGateway, ErrCodeRuntimeError,
+			"Failed to dispatch to runtime broker: a provision-only create is not supported for a broker served by another hub node")
+	})
+}
+
+// With the real dispatcher, a provision, move provision or reprovision whose
+// broker still reports needed keys at the end returns errProvisionEnvUnmet,
+// marked errProvisionSent, whether no replay was possible (nothing resolved)
+// or the replay was answered with needs again; and a cross-node provision
+// returns the deferral unmarked.
+func TestProvisionGather_UnmetNeedsAndCrossNode(t *testing.T) {
+	for _, reprovision := range []bool{false, true} {
+		dispatch := func(f *runDispatchFixture) error {
+			if reprovision {
+				return f.d.DispatchAgentReprovision(context.Background(), f.agent)
+			}
+			return f.d.DispatchAgentProvision(context.Background(), f.agent)
+		}
+		t.Run(fmt.Sprintf("reprovision=%v/nothing resolved, no replay", reprovision), func(t *testing.T) {
+			f := newRunDispatchFixture(t)
+			f.d.SetSecretBackend(&switchableBackend{})
+			calls := 0
+			f.client.createWithGatherFunc = func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+				calls++
+				return nil, &RemoteEnvRequirementsResponse{AgentID: req.ID, Needs: []string{"FAKE_UNRESOLVABLE_KEY"}}, nil
+			}
+			err := dispatch(f)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, errProvisionEnvUnmet)
+			assert.ErrorIs(t, err, errProvisionSent)
+			assert.NotContains(t, err.Error(), "FAKE_UNRESOLVABLE_KEY", "the error names no key")
+			assert.Equal(t, 1, calls)
+		})
+		t.Run(fmt.Sprintf("reprovision=%v/replay answered with needs again", reprovision), func(t *testing.T) {
+			f := newRunDispatchFixture(t)
+			f.d.SetSecretBackend(&switchableBackend{})
+			calls := 0
+			f.client.createWithGatherFunc = func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+				calls++
+				return nil, &RemoteEnvRequirementsResponse{AgentID: req.ID, Needs: []string{failClosedKey}}, nil
+			}
+			err := dispatch(f)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, errProvisionEnvUnmet)
+			assert.ErrorIs(t, err, errProvisionSent)
+			assert.Equal(t, 2, calls, "the needs report and one replay")
+		})
+	}
+	t.Run("cross-node provision", func(t *testing.T) {
+		f := newRunDispatchFixture(t)
+		f.d.SetSecretBackend(&switchableBackend{})
+		f.client.createWithGatherFunc = func(context.Context, string, string, *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+			return nil, nil, ErrLifecycleDeferred
+		}
+		err := f.d.DispatchAgentProvision(context.Background(), f.agent)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrLifecycleDeferred)
+		assert.False(t, errors.Is(err, errProvisionSent), "a deferral sends nothing")
+	})
+}
+
+// A forced move whose target provision ends with unmet needs rolls back to
+// the source instead of starting on the target (ptone/scion#6096).
+func TestReincarnateForceMove_UnmetNeedsRollsBack(t *testing.T) {
+	f := setupForceMoveFixture(t, true, nil)
+	prepareForceMoveWorker(t, f)
+	f.disp.mu.Lock()
+	f.disp.moveProvisionErr = provisionSent(fmt.Errorf("DispatchAgentProvisionForMove: %w", errProvisionEnvUnmet))
+	f.disp.mu.Unlock()
+
+	before := seedGenerationOneTask(t, f)
+
+	r, a := startForceMove(t, f)
+	assertForceRolledBack(t, f, r, a, "", store.AgentReincarnationStateProvisioning, before.AppliedConfig.Task)
+	assert.Contains(t, r.Error, "provision on the target broker failed: DispatchAgentProvisionForMove: required environment values are still unavailable after the provision")
+	assert.Zero(t, f.disp.startCalls, "no start runs on the target")
 }
