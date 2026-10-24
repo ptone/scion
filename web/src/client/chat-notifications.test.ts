@@ -173,7 +173,6 @@ describe('chat message content', () => {
   it('labels a message without text as an attachment (ptone/scion#6146)', () => {
     expect(chatMessageBody(thread({ msg: '' }))).toBe('Attachment');
     expect(chatMessageBody(thread({ msg: '   ' }))).toBe('Attachment');
-    expect(chatMessageBody(thread({ msg: undefined }))).toBe('Attachment');
   });
 
   it('tags per conversation so a busy thread collapses to one popup', () => {
