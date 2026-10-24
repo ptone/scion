@@ -230,3 +230,41 @@ func TestOverlayProfileRuntime_GatherEnvCreateReportsProfileFirst(t *testing.T) 
 		})
 	}
 }
+
+// An agent without image provenance whose Hub-sent profile is a stored
+// profile with a missing runtime fails start, restart and resume with the
+// saved-profile error and the profile_unresolved details, and never runs
+// on the default runtime, including when agent-info.json records that the
+// agent last ran there.
+func TestOverlayProfileRuntime_HubSentProfileFailsWithoutFallback(t *testing.T) {
+	for _, op := range []struct {
+		name, action string
+		body         func(f *lifecycleFixture) map[string]any
+	}{
+		{name: "start", action: "start", body: func(f *lifecycleFixture) map[string]any {
+			return map[string]any{"projectPath": f.projectPath, "hubEndpoint": lifecycleHubEndpoint, "profile": danglingProfile}
+		}},
+		{name: "resume", action: "start", body: func(f *lifecycleFixture) map[string]any {
+			return map[string]any{"projectPath": f.projectPath, "hubEndpoint": lifecycleHubEndpoint, "profile": danglingProfile, "resume": true}
+		}},
+		{name: "restart", action: "restart", body: func(f *lifecycleFixture) map[string]any {
+			return map[string]any{"hubEndpoint": lifecycleHubEndpoint, "profile": danglingProfile}
+		}},
+	} {
+		t.Run(op.name, func(t *testing.T) {
+			f := newLifecycleFixture(t)
+			installDanglingOverlay(t, false)
+			const name = "hub-sent-dangling-agent"
+			writeSavedAgentInfo(t, f.projectPath, name, danglingProfile, "docker")
+			f.defaultMgr.agents = append(f.defaultMgr.agents, lifecycleAgent(name, f.projectPath, ""))
+
+			w := lifecyclePost(t, f.srv, "/api/v1/agents/"+name+"/"+op.action, op.body(f))
+			assertDispatchRefused(t, w, "saved runtime profile cannot be resolved", `runtime "gke" not found for profile "dangling"`)
+			if strings.Contains(w.Body.String(), "provisioned with") {
+				t.Errorf("refusal names a provisioned profile, want the Hub-sent one: %s", w.Body.String())
+			}
+			assertProfileUnresolvedDetails(t, w, danglingProfile)
+			f.assertNoRuntimeUsed(t)
+		})
+	}
+}
