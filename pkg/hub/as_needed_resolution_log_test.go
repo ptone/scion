@@ -28,7 +28,7 @@ import (
 
 // The server-side log of a fail-closed resolution names the secret's scope,
 // key and failure kind, and carries no value, Secret Manager path or backend
-// message: on the as-needed pass, the provision-continue path and a start.
+// message: on the as-needed pass, a provision and a start.
 func TestFailClosedResolution_LogNamesKeyNotDetail(t *testing.T) {
 	const want = "project/" + failClosedKey + " (permission_denied)"
 	capture := func(f *runDispatchFixture) *bytes.Buffer {
@@ -51,13 +51,13 @@ func TestFailClosedResolution_LogNamesKeyNotDetail(t *testing.T) {
 		require.Error(t, err)
 		check(t, buf.String(), "failing the as-needed pass")
 	})
-	t.Run("provision continues", func(t *testing.T) {
+	t.Run("provision", func(t *testing.T) {
 		f := newRunDispatchFixture(t)
 		f.d.SetSecretBackend(newDeniedGCPBackend(t, f.store, f.agent.ProjectID))
 		gatherNeedsClient(f)
 		buf := capture(f)
-		require.NoError(t, f.d.DispatchAgentProvision(context.Background(), f.agent))
-		check(t, buf.String(), "provisioning without as-needed values")
+		require.Error(t, f.d.DispatchAgentProvision(context.Background(), f.agent))
+		check(t, buf.String(), "failing the as-needed pass")
 	})
 	t.Run("start", func(t *testing.T) {
 		f := newRunDispatchFixture(t)
