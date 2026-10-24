@@ -29,7 +29,9 @@
 #                                         for idempotent inserts; Postgres uses
 #                                         ON CONFLICT ... DO NOTHING (same line).
 #
+# pkgmove:ref-ok temporary for the move: the post-move commit of this change points it at pkg/hub/webchat and drops this marker.
 #   EXEMPTION (Option C, tranche C): pkg/hub/webchannel_store.go and
+# pkgmove:ref-ok temporary for the move: the post-move commit of this change points it at pkg/hub/webchat and drops this marker.
 #   pkg/hub/webchannel_store_postgres.go may contain raw INSERT INTO
 #   conversations when the statement mints kind='group'. These files perform
 #   an atomic topic+conversation dual-write inside an explicit tx; the store
@@ -189,6 +191,7 @@ if [[ -s "$tmp" ]]; then
     norm_file="${file#./}"
 
     # Exemption applies ONLY to these two files in pkg/hub/
+    # pkgmove:ref-ok temporary for the move: the post-move commit of this change points it at pkg/hub/webchat and drops this marker.
     if [[ "$norm_file" = "pkg/hub/webchannel_store.go" || "$norm_file" = "pkg/hub/webchannel_store_postgres.go" ]]; then
       # Extract the SQL statement: from the INSERT keyword through the
       # closing backtick (end of Go raw string literal), cap at 20 lines.

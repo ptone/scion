@@ -90,7 +90,9 @@ func TestFindingText(t *testing.T) {
 	for _, k := range []string{
 		"pkg/hub/format.go|formatViolations|t.Format(time.RFC3339)",
 		"pkg/hub/format.go|(package)|time.Now().Format(time.RFC3339)",
+		// pkgmove:ref-ok the key names the checker's own fixture testdata/src/pkg/hub/webchannel_store.go, not the moved file.
 		"pkg/hub/webchannel_store.go|store.violations|ExecContext arg at",
+		// pkgmove:ref-ok the key names the checker's own fixture testdata/src/pkg/hub/webchannel_store.go, not the moved file.
 		"pkg/hub/webchannel_store.go|store.violations|ExecContext arg now",
 		"pkg/store/predicates.go|predicates|sql.GT(\"created\", cursor)",
 	} {
