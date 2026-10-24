@@ -109,31 +109,43 @@ func TestDispatchAgentStart_UndeliveredConfigGoesThroughCreate(t *testing.T) {
 	})
 }
 
+// Starts the routing leaves to a plain start: an agent without as-needed
+// entries starts plain; on a broker without startEnvGather, an agent with
+// as-needed entries (a delivered row, a resume) is refused with 412 before
+// anything is sent, since a plain start would lack its as-needed values
+// (ptone/scion#6101).
 func TestDispatchAgentStart_DeliveredOrNoAsNeededStartsPlain(t *testing.T) {
 	cases := []struct {
-		name  string
-		setup func(t *testing.T, f *runDispatchFixture)
+		name    string
+		setup   func(t *testing.T, f *runDispatchFixture)
+		refused bool
 	}{
 		{"delivered marker", func(t *testing.T, f *runDispatchFixture) {
 			neverStarted(f)
 			f.agent.AppliedConfig.ConfigDelivered = true
 			seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
-		}},
+		}, true},
 		{"no as-needed entries", func(t *testing.T, f *runDispatchFixture) {
 			neverStarted(f)
-		}},
+		}, false},
 		{"resumed start", func(t *testing.T, f *runDispatchFixture) {
 			seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
-		}},
+		}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newRunDispatchFixture(t)
 			tc.setup(t, f)
 			resume := tc.name == "resumed start"
-			require.NoError(t, f.d.DispatchAgentStart(context.Background(), f.agent, "", resume))
-			assert.True(t, f.client.startCalled, "a plain start, as before")
+			err := f.d.DispatchAgentStart(context.Background(), f.agent, "", resume)
 			assert.False(t, f.client.createCalled, "no create")
+			if tc.refused {
+				require.ErrorIs(t, err, errBrokerLacksStartEnvGather)
+				assert.False(t, f.client.startCalled, "nothing sent")
+				return
+			}
+			require.NoError(t, err)
+			assert.True(t, f.client.startCalled, "a plain start, as before")
 		})
 	}
 }
@@ -182,12 +194,16 @@ func TestDispatchAgentRestart_NotRouted(t *testing.T) {
 		assert.True(t, f.client.restartCalled)
 		assert.False(t, f.client.createCalled)
 	})
+	// A restart's start leg is not routed either; on a broker without
+	// startEnvGather an agent with as-needed entries is refused with 412
+	// (ptone/scion#6101).
 	t.Run("restart start leg (start claim marker)", func(t *testing.T) {
 		f := newRunDispatchFixture(t)
 		neverStarted(f)
 		seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
-		require.NoError(t, f.d.DispatchAgentStart(withRestartStartLeg(context.Background()), f.agent, "", false))
-		assert.True(t, f.client.startCalled, "a plain start leg")
+		err := f.d.DispatchAgentStart(withRestartStartLeg(context.Background()), f.agent, "", false)
+		require.ErrorIs(t, err, errBrokerLacksStartEnvGather)
+		assert.False(t, f.client.startCalled, "nothing sent")
 		assert.False(t, f.client.createCalled)
 	})
 	t.Run("restart start leg (async restart kind)", func(t *testing.T) {
@@ -195,7 +211,7 @@ func TestDispatchAgentRestart_NotRouted(t *testing.T) {
 		neverStarted(f)
 		seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
 		_, err := f.d.DispatchAgentStartWithOptions(context.Background(), f.agent, "", false, StartDispatchOptions{Kind: store.LaunchKindRestart})
-		require.NoError(t, err)
+		require.ErrorIs(t, err, errBrokerLacksStartEnvGather)
 		assert.False(t, f.client.createCalled)
 	})
 }
@@ -218,10 +234,14 @@ func TestLifecycleHTTP_StartRoutedRestartNot(t *testing.T) {
 		return srv, client, agent
 	}
 	t.Run("restart", func(t *testing.T) {
+		// On a broker without startEnvGather the restart of an agent with
+		// as-needed entries is refused before its stop leg: the agent is
+		// left as it was (ptone/scion#6101).
 		srv, client, agent := setup(t, "route-restart", state.PhaseRunning)
 		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/restart", nil)
-		require.Less(t, rec.Code, 300, rec.Body.String())
-		assert.True(t, client.startCalled || client.restartCalled, "the restart reached the broker")
+		require.Equal(t, http.StatusPreconditionFailed, rec.Code, rec.Body.String())
+		assert.False(t, client.stopCalled, "refused before the stop leg")
+		assert.False(t, client.startCalled || client.restartCalled, "nothing started")
 		assert.False(t, client.createCalled, "a restart is not routed through create (ptone/scion#6101)")
 	})
 	t.Run("start", func(t *testing.T) {
