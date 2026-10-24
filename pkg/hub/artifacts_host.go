@@ -216,7 +216,8 @@ var _ artifacts.ReviewGrantClauser = (*artifactHost)(nil)
 //     longer admitted to the agent's project resolves to no one). The
 //     agent's stored owner or creator links are never consulted.
 //
-// The first clause that holds is named: artifacts.ReviewClauseProjectAdmin,
+// A home project that no longer exists gives no one this authority. The
+// first clause that holds is named: artifacts.ReviewClauseProjectAdmin,
 // checked first, then artifacts.ReviewClauseDelegatingUser. Only users are
 // answered; every other identity, a missing authz service, and every lookup
 // error answer "".
@@ -226,6 +227,13 @@ func (h *artifactHost) ReviewGrantClause(ctx context.Context, ownerAgentID, home
 	}
 	userID := artifactCallerUserID(ctx)
 	if userID == "" {
+		return ""
+	}
+	// A deleted home project gives no review authority, as it has no
+	// stewards: a system role would otherwise still pass the admin clause,
+	// and admission the recorded clause, for a project id that no longer
+	// exists. A lookup failure answers "".
+	if exists, err := h.ScopesExist(ctx, []string{homeScope}); err != nil || !exists[homeScope] {
 		return ""
 	}
 	if h.AdministersScope(ctx, homeScope) {

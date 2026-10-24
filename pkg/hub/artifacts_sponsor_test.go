@@ -257,6 +257,19 @@ func TestArtifactHostRecordedDelegator(t *testing.T) {
 		assert.Equal(t, "", g.reviewRecorded(h, g.user(g.delegator), g.agent.ID, g.home, g.delegator), "review clause")
 		assert.False(t, h.recordedDelegator(context.Background(), g.delegator, g.delegator, g.home), "recordedDelegator")
 	})
+	// A recorded user with a hub-wide system role: a super-admin passes the
+	// admin clause and is admitted anywhere, so only the home-exists check
+	// at the top of the review clause ends it once the home is deleted.
+	t.Run("home project deleted, system-role sponsor", func(t *testing.T) {
+		g := newReviewGrantFixture(t)
+		h := newArtifactHost(g.srv)
+		super := tid("sp-super")
+		createRS3SuperAdmin(t, g.s, super)
+		require.NotEqual(t, "", g.reviewRecorded(h, g.user(super), g.agent.ID, g.home, super), "before the delete")
+		require.NoError(t, g.s.DeleteProject(context.Background(), g.home))
+		assert.Equal(t, "", g.reviewRecorded(h, g.user(super), g.agent.ID, g.home, super), "review clause")
+		assert.Equal(t, "", g.stewardRecorded(h, g.user(super), g.agent.ID, g.home, super), "steward clause")
+	})
 }
 
 // TestArtifactHostRecordedDelegatorChecks drives recordedDelegator
