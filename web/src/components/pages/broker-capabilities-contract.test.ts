@@ -51,6 +51,7 @@ const UNDECLARED_ALLOWED: readonly string[] = [
   'preserveWorkspaceCreate',
   'reprovision',
   'reprovisionEmptyPerAgent',
+  'startEnvGather',
   'startsInFlight',
   'templateTiers',
 ];
