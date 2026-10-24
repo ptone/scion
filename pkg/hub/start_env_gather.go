@@ -94,6 +94,8 @@ func writeStartEnvGatherError(w http.ResponseWriter, err error, action string) b
 		writeError(w, http.StatusUnprocessableEntity, ErrCodeMissingEnvVars, startEnvUnmetMessage(action), nil)
 	case errors.Is(err, errBrokerLacksStartEnvGather):
 		writeError(w, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability, errBrokerLacksStartEnvGather.Error(), nil)
+	case errors.Is(err, errRestartGatherPending):
+		writeError(w, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability, errRestartGatherPending.Error(), nil)
 	default:
 		return false
 	}
@@ -133,6 +135,41 @@ func (d *HTTPAgentDispatcher) startEnvGatherRefusal(ctx context.Context, agent *
 		d.log.WarnContext(ctx, "start: the agent's broker cannot gather as-needed values; agent not "+verb,
 			"agent_id", agent.ID, "broker_id", agent.RuntimeBrokerID)
 		return errBrokerLacksStartEnvGather
+	}
+	return nil
+}
+
+// errRestartGatherPending is returned, before anything is stopped, minted or
+// sent, for a broker restart (DispatchAgentRestart, including a queued
+// restart run by the owner node) of an agent that has as-needed entries,
+// on a broker that reports startEnvGather: the broker restart cannot
+// gather as-needed values yet (ptone/scion#6101 P2 adds it), so it is
+// refused rather than restarted without them. Handlers answer 412 with its
+// fixed, keyless text (design r17 §9, L-1). A broker without
+// startEnvGather answers errBrokerLacksStartEnvGather instead. The
+// lifecycle restart is not affected: its start leg gathers.
+var errRestartGatherPending = errors.New("this agent uses as-needed values, which a restart cannot deliver yet; stop and start the agent instead")
+
+// brokerRestartEnvRefusal is the env-gather check of a broker restart of
+// agent, on broker (the record the restart's guards read), before anything
+// is minted or sent: the start check (startEnvGatherRefusal) first, then,
+// on a capable broker, errRestartGatherPending when the agent has as-needed
+// entries; nil when it has none.
+func (d *HTTPAgentDispatcher) brokerRestartEnvRefusal(ctx context.Context, agent *store.Agent, broker *store.RuntimeBroker) error {
+	if err := d.startEnvGatherRefusal(ctx, agent, broker, "restarted"); err != nil {
+		return err
+	}
+	if capable, _ := startEnvGatherCapableOn(broker, "restarted"); !capable {
+		return nil
+	}
+	has, _, err := d.hasAsNeededEntries(ctx, agent, "restarted")
+	if err != nil {
+		return err
+	}
+	if has {
+		d.log.WarnContext(ctx, "restart: a broker restart cannot gather as-needed values; agent not restarted",
+			"agent_id", agent.ID, "broker_id", agent.RuntimeBrokerID)
+		return errRestartGatherPending
 	}
 	return nil
 }
