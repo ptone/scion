@@ -270,11 +270,18 @@ func writeEmptyPerAgentCapabilityError(w http.ResponseWriter, err error) bool {
 // writePreserveWorkspaceCapabilityError writes the 412 response for err if
 // it is errBrokerLacksPreserveWorkspace (the fixed, keyless upgrade message;
 // nothing was sent to the broker) and reports whether it did.
+//
+// A routed start whose broker record is missing or unreadable at that
+// check (errBrokerRecordUnreadable) answers 503 with its fixed message.
 func writePreserveWorkspaceCapabilityError(w http.ResponseWriter, err error) bool {
-	if !errors.Is(err, errBrokerLacksPreserveWorkspace) {
+	switch {
+	case errors.Is(err, errBrokerLacksPreserveWorkspace):
+		writeError(w, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability, errBrokerLacksPreserveWorkspace.Error(), nil)
+	case errors.Is(err, errBrokerRecordUnreadable):
+		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, errBrokerRecordUnreadable.Error(), nil)
+	default:
 		return false
 	}
-	writeError(w, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability, errBrokerLacksPreserveWorkspace.Error(), nil)
 	return true
 }
 

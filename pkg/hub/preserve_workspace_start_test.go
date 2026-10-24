@@ -603,3 +603,28 @@ func TestRoutedStart_OtherBackstopsRunFirst(t *testing.T) {
 		assert.False(t, f.client.createCalled, "no create is sent")
 	})
 }
+
+// A routed start whose broker record is missing at the capability check
+// fails with the fixed, keyless 503 message, sends nothing, and counts as a
+// start that was not acted on.
+func TestRoutedStart_BrokerRecordUnreadableIs503(t *testing.T) {
+	f := newRunDispatchFixture(t)
+	neverStarted(f)
+	seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
+	recordCreates(f)
+	f.agent.RuntimeBrokerID = tid("broker-missing")
+
+	err := f.d.DispatchAgentStart(context.Background(), f.agent, "", false)
+	require.ErrorIs(t, err, errBrokerRecordUnreadable)
+	assert.Equal(t, errBrokerRecordUnreadable.Error(), err.Error(), "the fixed message only")
+	assert.False(t, f.client.createCalled, "no create is sent")
+	assert.True(t, isConfirmedStartNotActedOnError(err))
+
+	rec := httptest.NewRecorder()
+	require.True(t, writePreserveWorkspaceCapabilityError(rec, fmt.Errorf("wrapped: %w", err)))
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	var body ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, ErrCodeUnavailable, body.Error.Code)
+	assert.Equal(t, errBrokerRecordUnreadable.Error(), body.Error.Message)
+}
