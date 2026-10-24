@@ -159,10 +159,13 @@ func chatSendPostDenied(reason string) *chatSendError {
 }
 
 // chatActionDenied is the refusal for a caller who may read a thread but
-// may not take action in it (chatThreadAccess). It has the shape of
-// chatSendPostDenied, with the refused action in details.chat_action:
-// every thread write needs project.chat_post, and a user access token
-// without inbox:write for the project loses them all (reason token_scope).
+// may not take action in it (chatThreadAccess): 403 chat_post_denied, the
+// shape of chatSendPostDenied, with the refused action in
+// details.chat_action and the resolver's reason. Every thread write needs
+// project.chat_post, so on the routes that use it the reason is read_only:
+// each of them refuses a user access token without inbox:write for the
+// project with its own token check (plain 403) before the resolver runs,
+// so token_scope does not reach this refusal in Phase 1.
 func chatActionDenied(action, reason string) *chatSendError {
 	details := map[string]interface{}{
 		"resource_type": "project",
@@ -172,11 +175,8 @@ func chatActionDenied(action, reason string) *chatSendError {
 	if reason != "" {
 		details["reason"] = reason
 	}
-	message := "You can read this thread but not change it"
-	if reason == ChatReasonTokenScope {
-		message = "This access token may not write chat in this project"
-	}
-	return newChatSendError(http.StatusForbidden, ErrCodeChatPostDenied, message, details)
+	return newChatSendError(http.StatusForbidden, ErrCodeChatPostDenied,
+		"You can read this thread but not change it", details)
 }
 
 // requireChatThreadAction decides with chatThreadAccess whether user may
@@ -210,10 +210,15 @@ func (s *Server) requireChatThreadAction(w http.ResponseWriter, r *http.Request,
 }
 
 // requireChatMessageAction applies requireChatThreadAction to a message of
-// the conversation key: a topic message needs action in the topic, and a
-// topic or project that cannot be read answers as a missing thread. A DM
-// message passes: a DM is not decided by the chat resolvers (its sender
-// and key participation decide it).
+// the conversation key: a topic message needs action in the topic. It runs
+// after the route's token re-check (authorizeChatTokenMessageTarget), which
+// refuses a user access token with a plain 403 when the topic is missing
+// or deleted, or when the token lacks project read or inbox:write for the
+// topic's project. So the missing-thread answer here (404, nothing
+// changed) reaches sessions: a session sender who can no longer read the
+// topic's project, or whose message is in a deleted topic or under a key
+// that is no topic. A DM message passes: a DM is not decided by the chat
+// resolvers (its sender and key participation decide it).
 func (s *Server) requireChatMessageAction(w http.ResponseWriter, r *http.Request, user UserIdentity, wcs WebChatStore, key, action string) bool {
 	if strings.HasPrefix(key, "dm:") {
 		return true
