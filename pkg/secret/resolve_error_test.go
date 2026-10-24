@@ -104,3 +104,9 @@ func TestResolveAccessError_TypedAndRedacted(t *testing.T) {
 		t.Fatal("Unwrap must reach a context cause")
 	}
 }
+
+func TestAccessFailureKind_EmptyPayload(t *testing.T) {
+	if got := AccessFailureKind(fmt.Errorf("x: %w", ErrEmptyPayload)); got != FailureEmptyPayload {
+		t.Fatalf("AccessFailureKind(ErrEmptyPayload) = %q, want %q", got, FailureEmptyPayload)
+	}
+}

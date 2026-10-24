@@ -265,6 +265,16 @@ func (b *GCPBackend) accessLatestVersionByPath(ctx context.Context, smPath strin
 	if err != nil {
 		return "", err
 	}
+	return payloadValue(resp)
+}
+
+// payloadValue returns the secret value of a successful AccessSecretVersion
+// response, or ErrEmptyPayload when the response or its payload is missing
+// (ptone/scion#6090). It never maps a missing payload to an empty value.
+func payloadValue(resp *smpb.AccessSecretVersionResponse) (string, error) {
+	if resp == nil || resp.Payload == nil {
+		return "", ErrEmptyPayload
+	}
 	return string(resp.Payload.Data), nil
 }
 
@@ -674,7 +684,7 @@ func (b *GCPBackend) accessLatestVersion(ctx context.Context, smSecretName strin
 	if err != nil {
 		return "", err
 	}
-	return string(resp.Payload.Data), nil
+	return payloadValue(resp)
 }
 
 // AccessSecretValueByRef retrieves a secret value using a full GCP SM resource path.
@@ -687,7 +697,7 @@ func (b *GCPBackend) AccessSecretValueByRef(ctx context.Context, smPath string) 
 	if err != nil {
 		return "", fmt.Errorf("failed to access secret at %s: %w", smPath, err)
 	}
-	return string(resp.Payload.Data), nil
+	return payloadValue(resp)
 }
 
 // secretNamePrefix returns the hub-scoped prefix prepended to every GCP SM
