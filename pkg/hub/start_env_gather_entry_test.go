@@ -441,24 +441,19 @@ func TestLifecycleHTTP_RestartPrecheckStandingRefusal(t *testing.T) {
 	assert.False(t, client.startCalled || client.restartCalled)
 }
 
-// R2: the marker write carries the user-supplied key names an env finalize
-// recorded, on a row without the marker and on one that already has it.
-func TestPersistConfigDelivered_CarriesUserSuppliedKeyNames(t *testing.T) {
-	for _, markedBefore := range []bool{false, true} {
-		f := newRunDispatchFixture(t)
-		if markedBefore {
-			f.agent.AppliedConfig.ConfigDelivered = true
-			require.NoError(t, f.store.UpdateAgent(context.Background(), f.agent))
-		}
-		stored, err := f.store.GetAgent(context.Background(), f.agent.ID)
-		require.NoError(t, err)
-		stored.AppliedConfig.UserSuppliedEnvKeys = []string{"FAKE_USER_KEY"} // recorded by this dispatch's finalize
-		persistConfigDelivered(context.Background(), f.store, slog.Default(), stored)
-		got, err := f.store.GetAgent(context.Background(), f.agent.ID)
-		require.NoError(t, err)
-		assert.True(t, got.AppliedConfig.ConfigDelivered, "markedBefore=%v", markedBefore)
-		assert.Equal(t, []string{"FAKE_USER_KEY"}, got.AppliedConfig.UserSuppliedEnvKeys, "markedBefore=%v", markedBefore)
-	}
+// R2: the marker write leaves the stored user-supplied key names alone: it
+// writes only the marker, whatever the in-memory copy holds.
+func TestPersistConfigDelivered_KeepsUserSuppliedKeyNames(t *testing.T) {
+	f := newRunDispatchFixture(t)
+	stale, err := f.store.GetAgent(context.Background(), f.agent.ID)
+	require.NoError(t, err)
+	_, err = f.store.AddAgentUserSuppliedEnvKeys(context.Background(), f.agent.ID, []string{"FAKE_USER_KEY"})
+	require.NoError(t, err)
+	persistConfigDelivered(context.Background(), f.store, slog.Default(), stale)
+	got, err := f.store.GetAgent(context.Background(), f.agent.ID)
+	require.NoError(t, err)
+	assert.True(t, got.AppliedConfig.ConfigDelivered)
+	assert.Equal(t, []string{"FAKE_USER_KEY"}, got.AppliedConfig.UserSuppliedEnvKeys)
 }
 
 // R4: a routed start the create routing refuses (a broker without
@@ -589,21 +584,4 @@ func TestStartEnvGatherEchoMissing_CrossNodeIsActedOn(t *testing.T) {
 	preGot := dispatchFailureError(&store.BrokerDispatch{Op: "start", Error: pre.Error(), Result: dispatchFailureResult(pre)})
 	assert.False(t, isStartEnvGatherEchoMissing(preGot))
 	assert.True(t, isConfirmedStartNotActedOnError(preGot))
-}
-
-// rev-3 N4: a later env finalize that supplied no keys clears the names an
-// earlier one left, also on the marker-only write.
-func TestPersistConfigDelivered_ClearsUserSuppliedKeysAfterAnEmptyFinalize(t *testing.T) {
-	f := newRunDispatchFixture(t)
-	f.agent.AppliedConfig.ConfigDelivered = true
-	f.agent.AppliedConfig.UserSuppliedEnvKeys = []string{"FAKE_OLD_KEY"}
-	require.NoError(t, f.store.UpdateAgent(context.Background(), f.agent))
-	stored, err := f.store.GetAgent(context.Background(), f.agent.ID)
-	require.NoError(t, err)
-	recordUserSuppliedEnvKeys(stored, map[string]string{}) // a finalize that supplied none
-	persistConfigDelivered(context.Background(), f.store, slog.Default(), stored)
-	got, err := f.store.GetAgent(context.Background(), f.agent.ID)
-	require.NoError(t, err)
-	assert.Empty(t, got.AppliedConfig.UserSuppliedEnvKeys)
-	assert.True(t, got.AppliedConfig.ConfigDelivered)
 }

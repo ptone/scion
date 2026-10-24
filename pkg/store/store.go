@@ -588,6 +588,9 @@ type AgentStore interface {
 	// Returns ErrNotFound if agent doesn't exist.
 	// Returns ErrVersionConflict if the version doesn't match.
 	// It never writes soft_delete_op_id (see SetAgentSoftDeleteOpID).
+	// It keeps every stored AppliedConfig.UserSuppliedEnvKeys name: the
+	// written list is the union of the stored and the given names, computed
+	// in the same transaction as the write (see AddAgentUserSuppliedEnvKeys).
 	UpdateAgent(ctx context.Context, agent *Agent) error
 
 	// UpdateAgentConfig writes only the agent's applied config (and its
@@ -598,7 +601,8 @@ type AgentStore interface {
 	// a start claim) can persist a config change from its own copy of the
 	// agent without writing that copy's stale status back. Returns the new
 	// state version; ErrNotFound if the agent doesn't exist or is
-	// soft-deleted; ErrVersionConflict if the version doesn't match.
+	// soft-deleted; ErrVersionConflict if the version doesn't match. Like
+	// UpdateAgent, it keeps every stored UserSuppliedEnvKeys name.
 	UpdateAgentConfig(ctx context.Context, agentID string, expectedVersion int64, applied *AgentAppliedConfig, pending *AgentPendingConfig) (int64, error)
 
 	// SetAgentSoftDeleteOpID sets the agent's soft_delete_op_id to opID, or
@@ -874,14 +878,18 @@ type AgentStore interface {
 	// through create-with-gather again. Do not add a version bump here.
 	SetAgentConfigDelivered(ctx context.Context, id string) (written bool, err error)
 
-	// SetAgentUserSuppliedEnvKeys sets AgentAppliedConfig.UserSuppliedEnvKeys
-	// (names of env keys, never values) in an agent's applied config to keys,
-	// or removes the key when keys is empty, and changes nothing else, under
-	// the same conditional, retried, field-level write as
-	// SetAgentConfigDelivered (ptone/scion#6101). It returns written=false,
-	// with no error, when the agent does not exist or already holds exactly
-	// keys.
-	SetAgentUserSuppliedEnvKeys(ctx context.Context, id string, keys []string) (written bool, err error)
+	// AddAgentUserSuppliedEnvKeys adds keys (names of env keys, never values)
+	// to AgentAppliedConfig.UserSuppliedEnvKeys in an agent's applied config:
+	// the stored list becomes the sorted union of the stored names and keys,
+	// so concurrent additions never drop each other's names, and nothing
+	// else changes (no other applied-config key, no other column, not
+	// state_version). The read-merge-write is conditional on the applied
+	// config being unchanged since its read in the same transaction,
+	// row-locked where the dialect supports it, and retried a bounded number
+	// of times, like SetAgentConfigDelivered (ptone/scion#6101). It returns
+	// the stored list after the call; nil, with no error, when the agent does
+	// not exist.
+	AddAgentUserSuppliedEnvKeys(ctx context.Context, id string, keys []string) (names []string, err error)
 
 	// FindOrphanedAgents returns agents whose RuntimeBrokerID references a broker
 	// that is offline or does not exist, and who are not in terminal states

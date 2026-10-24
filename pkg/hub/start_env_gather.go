@@ -258,16 +258,10 @@ func (d *HTTPAgentDispatcher) checkEnvGatheredEcho(ctx context.Context, agent *s
 	return nil, startEnvGatherEchoMissingError{}
 }
 
-// recordUserSuppliedEnvKeys records, in memory, the names of the env keys
-// a successful env finalize delivered (sorted, deduplicated, names only),
-// replacing any earlier list: the keys of env after finalizeEnv's own
-// sanitizing, which drops reserved control-plane targets
-// (secret.IsReservedEnvTarget) and TZ. The caller's own write of the agent
-// persists it, as for ConfigDelivered.
-func recordUserSuppliedEnvKeys(agent *store.Agent, env map[string]string) {
-	if agent == nil {
-		return
-	}
+// userSuppliedKeyNames returns the sorted names of the env keys an env
+// finalize submits (env after finalizeEnv's own sanitizing, which drops
+// reserved control-plane targets and TZ): never values, never nil.
+func userSuppliedKeyNames(env map[string]string) []string {
 	keys := make([]string, 0, len(env))
 	for k := range env {
 		if k != "" && k != agentTZEnvKey && !secret.IsReservedEnvTarget(k) {
@@ -275,29 +269,58 @@ func recordUserSuppliedEnvKeys(agent *store.Agent, env map[string]string) {
 		}
 	}
 	sort.Strings(keys)
-	if agent.AppliedConfig == nil {
-		if len(keys) == 0 {
-			return
-		}
-		agent.AppliedConfig = &store.AgentAppliedConfig{}
-	}
-	// An empty, non-nil list records "this finalize supplied none", so a
-	// marker-only write (persistConfigDelivered) clears names an earlier
-	// finalize left; it is omitted from the stored JSON either way.
-	agent.AppliedConfig.UserSuppliedEnvKeys = keys
+	return keys
 }
 
-// deliveredUserSuppliedKeys returns a copy of the user-supplied env key
-// names recorded on agent's in-memory applied config (by an env finalize of
-// this dispatch, or as read), or nil when none were recorded, for the
-// marker write (persistConfigDelivered). A finalize that supplied no keys
-// recorded an empty list: the copy is then empty but not nil, and the
-// marker write clears older names.
-func deliveredUserSuppliedKeys(agent *store.Agent) []string {
-	if agent == nil || agent.AppliedConfig == nil || agent.AppliedConfig.UserSuppliedEnvKeys == nil {
-		return nil
+// errUserSuppliedKeysUnrecorded is returned by an env finalize whose
+// write-ahead of the user-supplied env key names
+// (store.AddAgentUserSuppliedEnvKeys) failed: nothing was minted or sent
+// and nothing started, and handlers answer 503 with its fixed, keyless text
+// (design r16 §4.4.2, coordinator-2 15:25Z).
+var errUserSuppliedKeysUnrecorded = errors.New("the agent's environment requirements could not be recorded; the agent was not created")
+
+// userSuppliedKeysWriteError is errUserSuppliedKeysUnrecorded carrying the
+// store error for the server log only: Error() is the fixed text, and it
+// unwraps to the sentinel alone, so no caller maps it by the store error
+// (a not-found or a version conflict) instead of the 503.
+type userSuppliedKeysWriteError struct{ err error }
+
+func (e *userSuppliedKeysWriteError) Error() string { return errUserSuppliedKeysUnrecorded.Error() }
+func (e *userSuppliedKeysWriteError) Unwrap() error { return errUserSuppliedKeysUnrecorded }
+
+// writeUserSuppliedKeysUnrecordedError writes the 503 for err if it is an
+// errUserSuppliedKeysUnrecorded error and reports whether it did.
+func writeUserSuppliedKeysUnrecordedError(w http.ResponseWriter, err error) bool {
+	if !errors.Is(err, errUserSuppliedKeysUnrecorded) {
+		return false
 	}
-	return append([]string{}, agent.AppliedConfig.UserSuppliedEnvKeys...)
+	writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, errUserSuppliedKeysUnrecorded.Error(), nil)
+	return true
+}
+
+// recordUserSuppliedKeyNames is the env finalize's write-ahead
+// (ptone/scion#6101, design r16 §4.4.2): it adds the names of the keys env
+// submits to the agent's stored UserSuppliedEnvKeys (field-level, sorted
+// union with the stored names) before anything is minted or sent. A write
+// error is returned as a *userSuppliedKeysWriteError (the fixed 503). On
+// success, agent's in-memory list is set to the stored union, so a caller's
+// whole-row write of the agent after the finalize carries the same names
+// rather than reverting them.
+func (d *HTTPAgentDispatcher) recordUserSuppliedKeyNames(ctx context.Context, agent *store.Agent, env map[string]string) error {
+	names := userSuppliedKeyNames(env)
+	stored, err := d.store.AddAgentUserSuppliedEnvKeys(ctx, agent.ID, names)
+	if err != nil {
+		d.log.WarnContext(ctx, "DispatchFinalizeEnv: failed to record the user-supplied env key names; agent not created",
+			"agent_id", agent.ID, "count", len(names), "error", err)
+		return &userSuppliedKeysWriteError{err: err}
+	}
+	if len(stored) > 0 {
+		if agent.AppliedConfig == nil {
+			agent.AppliedConfig = &store.AgentAppliedConfig{}
+		}
+		agent.AppliedConfig.UserSuppliedEnvKeys = stored
+	}
+	return nil
 }
 
 // userSuppliedKeys returns the agent's user-supplied env key names as a set.

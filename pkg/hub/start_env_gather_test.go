@@ -681,10 +681,17 @@ func TestDispatchFinalizeEnv_RecordsUserSuppliedKeyNamesOnly(t *testing.T) {
 		}
 	}
 
-	// A later finalize replaces the list.
+	// A later finalize adds to the list (union), in memory and stored; one
+	// that submits no keys removes none.
 	_, err = f.d.DispatchFinalizeEnv(context.Background(), f.agent, map[string]string{"FAKE_USER_KEY_C": sentinel})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"FAKE_USER_KEY_C"}, f.agent.AppliedConfig.UserSuppliedEnvKeys)
+	union := []string{"FAKE_USER_KEY_A", "FAKE_USER_KEY_B", "FAKE_USER_KEY_C"}
+	assert.Equal(t, union, f.agent.AppliedConfig.UserSuppliedEnvKeys)
+	_, err = f.d.DispatchFinalizeEnv(context.Background(), f.agent, map[string]string{})
+	require.NoError(t, err)
+	stored, err = f.store.GetAgent(context.Background(), f.agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, union, stored.AppliedConfig.UserSuppliedEnvKeys)
 }
 
 func TestStartGather_ReplayHandOffAndTransportError(t *testing.T) {
