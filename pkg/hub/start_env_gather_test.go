@@ -83,11 +83,13 @@ func needsAnswer(needs []string, markerOnly ...string) *RemoteAgentResponse {
 
 // newGatherStartFixture is a runDispatchFixture whose broker reports
 // startEnvGather (capable) or not, with the dispatcher on a scripted client.
+// Either way the broker reports PreserveWorkspaceCreate, so a broker without
+// startEnvGather is one that #5959's create routing may use.
 // st, when set, wraps the fixture's store for the dispatcher.
 func newGatherStartFixture(t *testing.T, capable bool, answer func(n int, c gatherStartCall) (*RemoteAgentResponse, error), st func(store.Store) store.Store) (*runDispatchFixture, *gatherStartClient) {
 	t.Helper()
 	f := newRunDispatchFixture(t)
-	setBrokerCaps(t, f.store, &store.RuntimeBroker{ID: f.agent.RuntimeBrokerID}, &store.BrokerCapabilities{StartEnvGather: capable})
+	setBrokerCaps(t, f.store, &store.RuntimeBroker{ID: f.agent.RuntimeBrokerID}, &store.BrokerCapabilities{StartEnvGather: capable, PreserveWorkspaceCreate: true})
 	gc := &gatherStartClient{mockRuntimeBrokerClient: f.client, answer: answer}
 	var ds store.Store = f.store
 	if st != nil {

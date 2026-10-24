@@ -193,7 +193,10 @@ func TestRoutedStart_BrokerWithoutCapabilityIsRefused(t *testing.T) {
 }
 
 // After a delivered routed start the stored row carries the marker, so a
-// start of the reloaded row is plain.
+// start of the reloaded row is not routed again. On a broker without
+// startEnvGather that start is refused (412) rather than sent plain: a plain
+// start would recreate the container without the agent's as-needed values
+// (ptone/scion#6101).
 func TestRoutedStart_PersistsMarkerSoNextStartIsPlain(t *testing.T) {
 	f := newRunDispatchFixture(t)
 	neverStarted(f)
@@ -209,8 +212,9 @@ func TestRoutedStart_PersistsMarkerSoNextStartIsPlain(t *testing.T) {
 	require.True(t, stored.AppliedConfig.ConfigDelivered, "the marker is on the stored row")
 
 	f.client.createCalled = false
-	require.NoError(t, f.d.DispatchAgentStart(context.Background(), stored, "", false))
-	assert.True(t, f.client.startCalled, "the second start is plain")
+	err = f.d.DispatchAgentStart(context.Background(), stored, "", false)
+	require.ErrorIs(t, err, errBrokerLacksStartEnvGather)
+	assert.False(t, f.client.startCalled, "no plain start without the as-needed values")
 	assert.False(t, f.client.createCalled, "the second start is not routed")
 	assert.Len(t, *reqs, 2, "no further create")
 }
