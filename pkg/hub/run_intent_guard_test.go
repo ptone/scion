@@ -53,8 +53,16 @@ const (
 )
 
 // How a function whose run intent is recorded by another function (its
-// recordedBy) is tied to that recorder. The guard checks every link of the
-// checked kinds, so a missing or renamed call fails it.
+// recordedBy) is tied to that recorder. For the checked kinds the guard
+// checks that each step's call is present, so a missing or renamed call
+// fails it.
+//
+// Only the existence of each call edge is checked: a selector call whose
+// method name matches, anywhere in the caller's body, including inside
+// nested function literals. The guard does not check the order of a call
+// relative to the record, that the lifecycle dispatch sits inside the
+// closure handed to the next step, or that a closure holding the call is
+// ever invoked. Those remain for review.
 const (
 	// linkRecorderCalls: the recorder calls this function, after it
 	// recorded the intent this function dispatches under.
@@ -305,7 +313,9 @@ func TestLifecycleDispatchCallsRecordRunIntent(t *testing.T) {
 // rule.recordedBy, against funcs (as parseHubFuncs returns it). It returns
 // one message per problem. A call is matched by the callee's name only (the
 // method name for Recv.Name, whatever the receiver), as selectorCallNames
-// records it, so the callee of every checked step must be a method.
+// records it, so the callee of every checked step must be a method. Only
+// the presence of each call is checked; see the link* kinds for what is
+// not.
 func recorderLinkErrors(funcs map[string]map[string]int, name string, rule lifecycleDispatchRule) []string {
 	var errs []string
 	reported := map[string]bool{}
@@ -383,6 +393,8 @@ func TestRecorderLinkErrors(t *testing.T) {
 		"S.hop":      {"recorder": 1},
 		"S.direct":   {"recorder": 1},
 		"S.viaBad":   {"callee": 1},
+		"S.wrapper":  {"inner": 1},
+		"m/X.inner":  {"recorder": 1},
 		"S.lost":     {"DispatchAgentStart": 1},
 		"plain":      {"DispatchAgentDelete": 1},
 	}
@@ -392,6 +404,10 @@ func TestRecorderLinkErrors(t *testing.T) {
 	withHops := func(hops ...string) lifecycleDispatchRule {
 		r := rec(linkCallsRecorder)
 		r.hops = hops
+		return r
+	}
+	withLink := func(r lifecycleDispatchRule, hops []string, reason string) lifecycleDispatchRule {
+		r.hops, r.reason = hops, reason
 		return r
 	}
 	handed := rec(linkHandedOff)
@@ -418,6 +434,14 @@ func TestRecorderLinkErrors(t *testing.T) {
 		{"unknown link", "S.callee", rec("calls"), `unknown link "calls"`},
 		{"link without recordedBy", "S.callee", lifecycleDispatchRule{kind: intentRecorded, link: linkRecorderCalls}, "no recordedBy"},
 		{"recordedBy on a non-recording kind", "S.callee", lifecycleDispatchRule{kind: intentExecutor, recordedBy: "S.recorder", link: linkRecorderCalls}, "its kind is"},
+		{"recorder calls with hops", "S.callee", withLink(rec(linkRecorderCalls), []string{"S.hop"}, ""), "takes no hops or reason"},
+		{"recorder calls with reason", "S.callee", withLink(rec(linkRecorderCalls), nil, "why"), "takes no hops or reason"},
+		{"calls recorder with reason", "S.direct", withLink(rec(linkCallsRecorder), nil, "why"), "takes no reason"},
+		{"handed off with hops", "plain", withLink(rec(linkHandedOff), []string{"S.hop"}, "why"), "takes no hops"},
+		{"handed off with blank reason", "plain", withLink(rec(linkHandedOff), nil, " \t"), "needs a reason"},
+		{"link step in a subpackage", "S.wrapper", withLink(rec(linkCallsRecorder), []string{"m/X.inner"}, ""), "is not a method of this package"},
+		{"link step with no receiver", "S.direct", lifecycleDispatchRule{kind: intentRecorded, recordedBy: ".recorder", link: linkCallsRecorder}, "is not a method of this package"},
+		{"recorder missing", "S.callee", lifecycleDispatchRule{kind: intentRecorded, recordedBy: "S.gone", link: linkRecorderCalls}, "no function S.gone"},
 	}
 	for _, tc := range cases {
 		errs := recorderLinkErrors(funcs, tc.name, tc.rule)
