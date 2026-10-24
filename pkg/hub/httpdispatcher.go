@@ -2374,6 +2374,7 @@ func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *st
 	defer func() {
 		if err == nil {
 			markConfigDeliveredOnSuccess(agent, res)
+			recordUserSuppliedEnvKeys(agent, env)
 		}
 	}()
 	// Flat placement backstop: the first pass pinned the agent, so this

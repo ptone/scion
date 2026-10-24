@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -43,11 +44,21 @@ var errStartEnvUnmet = errors.New("required environment values are unavailable a
 // start cannot gather them. Handlers answer 412.
 var errBrokerLacksStartEnvGather = errors.New("the agent's runtime broker must be upgraded before it can start agents that use as-needed values")
 
-// errStartEnvGatherCapabilityUnknown is returned when the agent's broker
+// errBrokerCapabilityUnavailable is returned when the agent's broker
 // record cannot be read to tell whether its start can gather env: the start
 // fails rather than being sent as a start that may lack the agent's
-// as-needed values. Handlers answer 503.
-var errStartEnvGatherCapabilityUnknown = errors.New("the agent's runtime broker capabilities could not be read; the agent was not started")
+// as-needed values. Handlers answer 503 with brokerCapabilityUnavailableMessage.
+var errBrokerCapabilityUnavailable = errors.New("the agent's runtime broker could not be checked")
+
+// brokerCapabilityUnavailableMessage is the fixed user-facing text for
+// errBrokerCapabilityUnavailable.
+func brokerCapabilityUnavailableMessage(action string) string {
+	done := "started"
+	if action == api.AgentActionRestart {
+		done = "restarted"
+	}
+	return errBrokerCapabilityUnavailable.Error() + "; the agent was not " + done
+}
 
 // startEnvGatherEchoMissingError is a start sent with gatherEnv that the
 // broker answered as started without the envGathered echo: the broker does
@@ -83,15 +94,15 @@ func startEnvUnmetMessage(action string) string {
 // failed with one of the start env-gather errors and reports whether it
 // did: 422 missing_env_vars for errStartEnvUnmet, 412 for
 // errBrokerLacksStartEnvGather (also when the broker started without the
-// echo), 503 for errStartEnvGatherCapabilityUnknown.
+// echo), 503 for errBrokerCapabilityUnavailable.
 func writeStartEnvGatherError(w http.ResponseWriter, err error, action string) bool {
 	switch {
 	case errors.Is(err, errStartEnvUnmet):
 		writeError(w, http.StatusUnprocessableEntity, ErrCodeMissingEnvVars, startEnvUnmetMessage(action), nil)
 	case errors.Is(err, errBrokerLacksStartEnvGather):
 		writeError(w, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability, errBrokerLacksStartEnvGather.Error(), nil)
-	case errors.Is(err, errStartEnvGatherCapabilityUnknown):
-		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, errStartEnvGatherCapabilityUnknown.Error(), nil)
+	case errors.Is(err, errBrokerCapabilityUnavailable):
+		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, brokerCapabilityUnavailableMessage(action), nil)
 	default:
 		return false
 	}
@@ -99,24 +110,24 @@ func writeStartEnvGatherError(w http.ResponseWriter, err error, action string) b
 }
 
 // startEnvGatherCapable reports whether agent's broker reports
-// startEnvGather. A broker record that cannot be read is an error
-// (errStartEnvGatherCapabilityUnknown), never an answer. An agent with no
-// assigned broker, or whose broker record does not exist, is not capable:
-// its start then fails at the broker lookup the dispatch does anyway.
+// startEnvGather. A broker record that cannot be read, or does not exist,
+// is an error (errBrokerCapabilityUnavailable, 503), never an answer: the
+// start fails with nothing sent (G-2a). An agent with no assigned broker is
+// not capable; requireRuntimeBrokerAssigned refuses its start.
 func (d *HTTPAgentDispatcher) startEnvGatherCapable(ctx context.Context, agent *store.Agent) (bool, error) {
 	if agent == nil || agent.RuntimeBrokerID == "" || d.store == nil {
 		return false, nil
 	}
 	broker, err := d.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-		return false, nil
-	case err != nil:
+	if err == nil && broker == nil {
+		err = store.ErrNotFound
+	}
+	if err != nil {
 		d.log.WarnContext(ctx, "start: failed to read the agent's runtime broker; agent not started",
 			"agent_id", agent.ID, "broker_id", agent.RuntimeBrokerID, "error", err)
-		return false, fmt.Errorf("%w: %w", errStartEnvGatherCapabilityUnknown, err)
+		return false, fmt.Errorf("%w: %w", errBrokerCapabilityUnavailable, err)
 	}
-	return broker != nil && broker.Capabilities != nil && broker.Capabilities.StartEnvGather, nil
+	return broker.Capabilities != nil && broker.Capabilities.StartEnvGather, nil
 }
 
 // startEnvGatherRefusal is the check a start or restart of agent on a
@@ -182,18 +193,12 @@ func (d *HTTPAgentDispatcher) startGather(ctx context.Context, agent *store.Agen
 	}
 	needs := resp.EnvNeeds
 	takeTZGatherNeed(needs)
-	var resolved map[string]string
-	if len(needs.Needs) > 0 {
-		resolved, err = d.resolveAsNeededForKeys(ctx, agent, needs.Needs, needs.Alternatives)
-		if err != nil {
-			var resErr *secretResolutionError
-			if errors.As(err, &resErr) {
-				resErr.Verb = "started"
-			}
-			return nil, err
-		}
+	resolved, err := d.asNeededPass(ctx, agent, needs, "started")
+	if err != nil {
+		return nil, err
 	}
-	if n := countUnresolved(hardNeeds(needs), resolved); n > 0 {
+	userSupplied := userSuppliedKeys(agent)
+	if n := countUnresolved(hardNeeds(needs, userSupplied), resolved); n > 0 {
 		d.log.WarnContext(ctx, "start: required environment values unavailable; agent not started",
 			"agent_id", agent.ID, "count", n)
 		return nil, errStartEnvUnmet
@@ -208,17 +213,36 @@ func (d *HTTPAgentDispatcher) startGather(ctx context.Context, agent *store.Agen
 	}
 	if resp != nil && resp.EnvNeeds != nil {
 		d.log.WarnContext(ctx, "start: required environment values still unavailable after the as-needed pass; agent not started",
-			"agent_id", agent.ID, "count", len(hardNeeds(resp.EnvNeeds)))
+			"agent_id", agent.ID, "count", len(hardNeeds(resp.EnvNeeds, userSupplied)))
 		return nil, errStartEnvUnmet
 	}
 	resp, err = d.checkEnvGatheredEcho(ctx, agent, resp, stopRun)
 	if err != nil {
 		return resp, err
 	}
-	if n := countUnresolved(needs.MarkerOnly, resolved); n > 0 {
+	if n := countUnresolved(optionalNeeds(needs, userSupplied), resolved); n > 0 {
 		addDispatchWarnings(ctx, fmt.Sprintf("%d optional environment value(s) were not available on the hub and were omitted", n))
 	}
 	return resp, nil
+}
+
+// asNeededPass resolves the needs of reqs from the agent's as-needed env
+// vars and secrets (resolveAsNeededForKeys). verb names the action a
+// *secretResolutionError reports ("started", "restarted", ...). The values
+// are returned for the dispatch's request only; nothing stores them.
+func (d *HTTPAgentDispatcher) asNeededPass(ctx context.Context, agent *store.Agent, reqs *RemoteEnvRequirementsResponse, verb string) (map[string]string, error) {
+	if reqs == nil || len(reqs.Needs) == 0 {
+		return nil, nil
+	}
+	resolved, err := d.resolveAsNeededForKeys(ctx, agent, reqs.Needs, reqs.Alternatives)
+	if err != nil {
+		var resErr *secretResolutionError
+		if errors.As(err, &resErr) {
+			resErr.Verb = verb
+		}
+		return nil, err
+	}
+	return resolved, nil
 }
 
 // checkEnvGatheredEcho returns resp when it carries the envGathered echo.
@@ -234,8 +258,49 @@ func (d *HTTPAgentDispatcher) checkEnvGatheredEcho(ctx context.Context, agent *s
 	return nil, startEnvGatherEchoMissingError{}
 }
 
-// hardNeeds returns the needs of reqs that are not marker-only.
-func hardNeeds(reqs *RemoteEnvRequirementsResponse) []string {
+// recordUserSuppliedEnvKeys records, in memory, the names of the env keys
+// a successful env finalize submitted (sorted, deduplicated, names only;
+// TZ, which the finalize drops, excluded), replacing any earlier list. The
+// caller's own write of the agent persists it, as for ConfigDelivered.
+func recordUserSuppliedEnvKeys(agent *store.Agent, env map[string]string) {
+	if agent == nil {
+		return
+	}
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		if k != "" && k != agentTZEnvKey {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	if agent.AppliedConfig == nil {
+		if len(keys) == 0 {
+			return
+		}
+		agent.AppliedConfig = &store.AgentAppliedConfig{}
+	}
+	if len(keys) == 0 {
+		keys = nil
+	}
+	agent.AppliedConfig.UserSuppliedEnvKeys = keys
+}
+
+// userSuppliedKeys returns the agent's user-supplied env key names as a set.
+func userSuppliedKeys(agent *store.Agent) map[string]struct{} {
+	if agent == nil || agent.AppliedConfig == nil {
+		return nil
+	}
+	set := make(map[string]struct{}, len(agent.AppliedConfig.UserSuppliedEnvKeys))
+	for _, k := range agent.AppliedConfig.UserSuppliedEnvKeys {
+		set[k] = struct{}{}
+	}
+	return set
+}
+
+// hardNeeds returns the needs of reqs a start may not leave unmet: the
+// needs that are not marker-only, plus the marker-only needs the user
+// supplied at create (userSupplied, by the key or one of its alternatives).
+func hardNeeds(reqs *RemoteEnvRequirementsResponse, userSupplied map[string]struct{}) []string {
 	if reqs == nil {
 		return nil
 	}
@@ -245,11 +310,40 @@ func hardNeeds(reqs *RemoteEnvRequirementsResponse) []string {
 	}
 	var out []string
 	for _, k := range reqs.Needs {
-		if _, ok := marker[k]; !ok {
+		if _, isMarker := marker[k]; !isMarker || suppliedByUser(k, reqs.Alternatives[k], userSupplied) {
 			out = append(out, k)
 		}
 	}
 	return out
+}
+
+// optionalNeeds returns the marker-only needs of reqs the user did not
+// supply at create: a start may leave these unmet.
+func optionalNeeds(reqs *RemoteEnvRequirementsResponse, userSupplied map[string]struct{}) []string {
+	if reqs == nil {
+		return nil
+	}
+	var out []string
+	for _, k := range reqs.MarkerOnly {
+		if !suppliedByUser(k, reqs.Alternatives[k], userSupplied) {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// suppliedByUser reports whether key, or one of its alternatives, is in
+// userSupplied.
+func suppliedByUser(key string, alternatives []string, userSupplied map[string]struct{}) bool {
+	if _, ok := userSupplied[key]; ok {
+		return true
+	}
+	for _, alt := range alternatives {
+		if _, ok := userSupplied[alt]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // countUnresolved counts the keys with no non-empty value in resolved.

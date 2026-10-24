@@ -424,7 +424,7 @@ func TestStartGather_CapabilityReadErrorFails503(t *testing.T) {
 	runBefore := f.agent.RunID
 
 	err := f.d.DispatchAgentStart(context.Background(), f.agent, "", false)
-	require.ErrorIs(t, err, errStartEnvGatherCapabilityUnknown)
+	require.ErrorIs(t, err, errBrokerCapabilityUnavailable)
 	assert.Empty(t, gc.calls, "nothing sent, never a plain start")
 	assert.False(t, f.client.createCalled)
 	assert.Equal(t, runBefore, f.agent.RunID, "nothing minted")
@@ -435,21 +435,20 @@ func TestStartGather_CapabilityReadErrorFails503(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), "FAKE-broker-read-detail")
 }
 
-func TestStartGather_BrokerRowNotFoundIsNotCapable(t *testing.T) {
-	// A broker row that does not exist is "not capable", not 503: the
-	// start fails closed at the broker lookup, with nothing sent.
+func TestStartGather_BrokerRowNotFoundFails503(t *testing.T) {
+	// A broker record that does not exist fails closed like a read error:
+	// 503, nothing minted or sent, never a plain start (G-2a).
 	f, gc := newGatherStartFixture(t, true, func(int, gatherStartCall) (*RemoteAgentResponse, error) {
 		return startedAnswer(true), nil
 	}, nil)
 	f.agent.RuntimeBrokerID = tid("broker-missing")
+	runBefore := f.agent.RunID
 
-	capable, err := f.d.startEnvGatherCapable(context.Background(), f.agent)
-	require.NoError(t, err)
-	assert.False(t, capable)
-	err = f.d.DispatchAgentStart(context.Background(), f.agent, "", true)
-	require.Error(t, err)
-	assert.NotErrorIs(t, err, errStartEnvGatherCapabilityUnknown)
+	err := f.d.DispatchAgentStart(context.Background(), f.agent, "", true)
+	require.ErrorIs(t, err, errBrokerCapabilityUnavailable)
 	assert.Empty(t, gc.calls)
+	assert.False(t, f.client.createCalled)
+	assert.Equal(t, runBefore, f.agent.RunID, "nothing minted")
 }
 
 func TestStartEnvGatherErrors_HandlerAnswers(t *testing.T) {
@@ -463,7 +462,7 @@ func TestStartEnvGatherErrors_HandlerAnswers(t *testing.T) {
 		{errStartEnvUnmet, api.AgentActionStart, http.StatusUnprocessableEntity, ErrCodeMissingEnvVars, "started"},
 		{errStartEnvUnmet, api.AgentActionRestart, http.StatusUnprocessableEntity, ErrCodeMissingEnvVars, "restarted"},
 		{errBrokerLacksStartEnvGather, api.AgentActionStart, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability, ""},
-		{errStartEnvGatherCapabilityUnknown, api.AgentActionStart, http.StatusServiceUnavailable, ErrCodeUnavailable, ""},
+		{errBrokerCapabilityUnavailable, api.AgentActionStart, http.StatusServiceUnavailable, ErrCodeUnavailable, ""},
 	}
 	for _, tc := range cases {
 		rec := httptest.NewRecorder()
@@ -481,7 +480,7 @@ func TestStartEnvGatherErrors_HandlerAnswers(t *testing.T) {
 }
 
 func TestStartEnvGatherErrors_CrossNodeRoundTrip(t *testing.T) {
-	for _, sentinel := range []error{errStartEnvUnmet, errBrokerLacksStartEnvGather, errStartEnvGatherCapabilityUnknown} {
+	for _, sentinel := range []error{errStartEnvUnmet, errBrokerLacksStartEnvGather, errBrokerCapabilityUnavailable} {
 		execErr := errors.Join(errors.New("dispatch start"), sentinel)
 		row := &store.BrokerDispatch{Op: "start", Error: execErr.Error(), Result: dispatchFailureResult(execErr)}
 		got := dispatchFailureError(row)
@@ -523,6 +522,24 @@ func TestStartTransports_ReadNeedsReport(t *testing.T) {
 			srv.Close()
 			require.NoError(t, err)
 			check(t, resp, body == needs)
+		}
+	})
+	t.Run("hybrid and authenticated delegate", func(t *testing.T) {
+		for _, body := range []string{needs, started} {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusAccepted)
+				_, _ = w.Write([]byte(body))
+			}))
+			hybrid := NewHybridBrokerClient(nil, NewHTTPRuntimeBrokerClient(), nil, false)
+			hybrid.SetStatelessLocalBrokers([]string{"b"}) // routed to HTTP
+			auth := &AuthenticatedBrokerClient{transport: newBrokerHTTPTransport(false, nil)}
+			for _, c := range []RuntimeBrokerClient{hybrid, auth} {
+				resp, err := c.StartAgent(context.Background(), "b", srv.URL, "a", "p", "", "", "", "", "", "", nil, nil, nil, nil, false, false, StartExtras{GatherEnv: true})
+				require.NoError(t, err)
+				check(t, resp, body == needs)
+			}
+			srv.Close()
 		}
 	})
 	t.Run("control channel", func(t *testing.T) {
@@ -587,4 +604,137 @@ func TestCrossNodeStart_CarriesTaskAndStaysSync(t *testing.T) {
 	require.NotNil(t, args)
 	assert.Equal(t, "fake-cross-node-task", args.Task, "the start's task crosses nodes")
 	assert.False(t, args.Async, "the gathering start stays synchronous on the owner")
+}
+
+func TestStartGather_UserSuppliedMarkerKeyIsRequired(t *testing.T) {
+	// G-7: a marker-only key the user supplied at create (recorded by name
+	// in UserSuppliedEnvKeys) is required at start: unmet, the start fails
+	// with the keyless 422 and no replay. Not supplied, it stays optional.
+	const marker = "FAKE_USER_MARKER_KEY"
+	t.Run("user supplied: 422, no replay", func(t *testing.T) {
+		f, gc := newGatherStartFixture(t, true, replayDelivers(marker, marker), nil)
+		f.agent.AppliedConfig.UserSuppliedEnvKeys = []string{marker}
+		err := f.d.DispatchAgentStart(context.Background(), f.agent, "", false)
+		require.ErrorIs(t, err, errStartEnvUnmet)
+		assert.Len(t, gc.calls, 1, "no replay")
+		rec := httptest.NewRecorder()
+		require.True(t, writeStartEnvGatherError(rec, err, api.AgentActionRestart))
+		assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+		assert.NotContains(t, rec.Body.String(), marker, "the 422 body names no key")
+	})
+	t.Run("supplied under an alternative name: 422", func(t *testing.T) {
+		f, gc := newGatherStartFixture(t, true, func(n int, _ gatherStartCall) (*RemoteAgentResponse, error) {
+			r := needsAnswer([]string{marker}, marker)
+			r.EnvNeeds.Alternatives = map[string][]string{marker: {"FAKE_USER_MARKER_ALT"}}
+			return r, nil
+		}, nil)
+		f.agent.AppliedConfig.UserSuppliedEnvKeys = []string{"FAKE_USER_MARKER_ALT"}
+		require.ErrorIs(t, f.d.DispatchAgentStart(context.Background(), f.agent, "", false), errStartEnvUnmet)
+		assert.Len(t, gc.calls, 1)
+	})
+	t.Run("not user supplied: started with the count warning", func(t *testing.T) {
+		f, gc := newGatherStartFixture(t, true, replayDelivers(marker, marker), nil)
+		f.agent.AppliedConfig.UserSuppliedEnvKeys = []string{"FAKE_OTHER_KEY"}
+		ctx, warns := withDispatchWarnings(context.Background())
+		require.NoError(t, f.d.DispatchAgentStart(ctx, f.agent, "", false))
+		assert.Len(t, gc.calls, 2)
+		assert.Len(t, warns.Warnings(), 1)
+	})
+}
+
+func TestDispatchFinalizeEnv_RecordsUserSuppliedKeyNamesOnly(t *testing.T) {
+	// G-7 condition (a): the finalize records the submitted key names, and
+	// no submitted value reaches the applied config, the stored row or the
+	// hub log.
+	const sentinel = "FAKE-user-supplied-value-sentinel"
+	f := newRunDispatchFixture(t)
+	logs := &captureHandler{}
+	f.d.log = slog.New(logs)
+	_, err := f.d.DispatchFinalizeEnv(context.Background(), f.agent, map[string]string{
+		"FAKE_USER_KEY_B": sentinel, "FAKE_USER_KEY_A": sentinel + "-2", agentTZEnvKey: "Asia/Tokyo",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"FAKE_USER_KEY_A", "FAKE_USER_KEY_B"}, f.agent.AppliedConfig.UserSuppliedEnvKeys,
+		"sorted names, TZ excluded")
+
+	applied, err := json.Marshal(f.agent.AppliedConfig)
+	require.NoError(t, err)
+	assert.NotContains(t, string(applied), sentinel, "no value in the applied config")
+
+	require.NoError(t, f.store.UpdateAgent(context.Background(), f.agent))
+	stored, err := f.store.GetAgent(context.Background(), f.agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"FAKE_USER_KEY_A", "FAKE_USER_KEY_B"}, stored.AppliedConfig.UserSuppliedEnvKeys)
+	row, err := json.Marshal(stored)
+	require.NoError(t, err)
+	assert.NotContains(t, string(row), sentinel, "no value in the stored row")
+
+	logs.mu.Lock()
+	defer logs.mu.Unlock()
+	for _, r := range logs.recs {
+		assert.NotContains(t, r.msg, sentinel)
+		for _, v := range r.attrs {
+			assert.NotContains(t, fmt.Sprint(v), sentinel, "no value in the hub log")
+		}
+	}
+
+	// A later finalize replaces the list.
+	_, err = f.d.DispatchFinalizeEnv(context.Background(), f.agent, map[string]string{"FAKE_USER_KEY_C": sentinel})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"FAKE_USER_KEY_C"}, f.agent.AppliedConfig.UserSuppliedEnvKeys)
+}
+
+func TestStartGather_ReplayHandOffAndTransportError(t *testing.T) {
+	// H-20: a replay that the client hands to the owner node is deferred
+	// like any start (the owner gathers again; the intent carries no env);
+	// a replay that fails in transport is not taken as "not acted on".
+	t.Run("replay deferred", func(t *testing.T) {
+		f, gc := newGatherStartFixture(t, true, func(n int, _ gatherStartCall) (*RemoteAgentResponse, error) {
+			if n == 1 {
+				return needsAnswer([]string{failClosedKey}), nil
+			}
+			return nil, ErrLifecycleDeferred
+		}, nil)
+		seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		err := f.d.DispatchAgentStart(ctx, f.agent, "fake-task", false)
+		require.Error(t, err, "no owner answers in this fixture")
+		assert.Len(t, gc.calls, 2)
+		pending, lerr := f.store.ListPendingDispatch(context.Background(), f.agent.RuntimeBrokerID)
+		require.NoError(t, lerr)
+		for _, row := range pending {
+			assert.NotContains(t, row.Args, failClosedValue, "the hand-off carries no env value")
+		}
+	})
+	t.Run("replay transport error", func(t *testing.T) {
+		transportErr := errors.New("FAKE replay read timeout")
+		f, _ := newGatherStartFixture(t, true, func(n int, _ gatherStartCall) (*RemoteAgentResponse, error) {
+			if n == 1 {
+				return needsAnswer([]string{failClosedKey}), nil
+			}
+			return nil, transportErr
+		}, nil)
+		seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
+		err := f.d.DispatchAgentStart(context.Background(), f.agent, "", false)
+		require.ErrorIs(t, err, transportErr)
+		assert.False(t, isConfirmedStartNotActedOnError(err), "an ambiguous replay failure keeps today's classification")
+	})
+}
+
+func TestStartGather_ResumeOnCapableBrokerGathersOrFailsKeyless(t *testing.T) {
+	// H-19 (design r5 C2): a resume on a capable broker gathers too, and
+	// can now fail with the keyless 422 where it used to start without the
+	// values; nothing is started and no launch is begun.
+	f, gc := newGatherStartFixture(t, true, func(int, gatherStartCall) (*RemoteAgentResponse, error) {
+		return needsAnswer([]string{"FAKE_UNRESOLVABLE_KEY"}), nil
+	}, nil)
+	f.agent.LaunchAsyncOptIn = true
+	res, err := f.d.DispatchAgentStartWithOptions(context.Background(), f.agent, "", true,
+		StartDispatchOptions{Async: true, Kind: store.LaunchKindStart, PriorPhase: string(state.PhaseSuspended)})
+	require.ErrorIs(t, err, errStartEnvUnmet)
+	assert.Nil(t, res.AcceptedLaunch())
+	require.Len(t, gc.calls, 1)
+	assert.True(t, gc.calls[0].extras.GatherEnv)
+	assert.False(t, gc.calls[0].extras.AsyncLaunch)
 }
