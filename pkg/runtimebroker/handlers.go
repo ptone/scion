@@ -1074,11 +1074,6 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	var hydratedTemplatePath, hydratedHCPath string
 	var tplHydrated, hcHydrated bool
 	if req.GatherEnv && !req.NoAuth {
-		// Build a preliminary merged env for env-gather evaluation. Shared
-		// with extractRequiredEnvKeys's own requestEnv so both checks start
-		// from the identical presence-aware base (see buildRequestEnv).
-		env := buildRequestEnv(req)
-
 		// Hydrate a Hub-managed template before extracting required keys.
 		// launch's own dispatch path (start_context.go) does the same
 		// hydration and replaces opts.Template with the result before
@@ -1144,121 +1139,25 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		required, secretInfo, alternatives, settingsEnv := s.extractRequiredEnvKeys(req, hydratedTemplatePath, hydratedHCPath)
-		// Fold in the settings/harness-config-directory env
-		// extractRequiredEnvKeys resolved (its withDir, minus whatever
-		// requestEnv already decided — see settingsEnvSatisfied there), but
-		// only to fill genuine gaps: env above is requestEnv, which already
-		// reflects what outranks settings/dir for the pod, so an existing
-		// entry — even an empty one — must not be overwritten here.
-		for k, v := range settingsEnv {
-			if _, exists := env[k]; !exists {
-				env[k] = v
+		res := s.evaluateEnvGather(req, hydratedTemplatePath, hydratedHCPath)
+		if len(res.Needs) > 0 {
+			resp := EnvRequirementsResponse{
+				AgentID:         attemptKey,
+				Required:        res.Required,
+				HubHas:          res.HubHas,
+				Needs:           res.Needs,
+				SecretInfo:      res.SecretInfo,
+				Alternatives:    res.Alternatives,
+				EnvRequirements: true,
+				MarkerOnly:      res.MarkerOnly,
 			}
-		}
-		if s.config.Debug {
-			s.envSecretLog.Debug("Env-gather: evaluating env completeness",
-				"gatherEnv", req.GatherEnv,
-				"projectPath", req.ProjectPath,
-				"requiredKeys", len(required),
-				"required", required,
-			)
-		}
-		if len(required) > 0 {
-			// Build lookup set of keys satisfied by resolved secrets
-			secretTargets := make(map[string]struct{})
-			for _, s := range req.ResolvedSecrets {
-				if s.Type == "environment" || s.Type == "" {
-					target := s.Target
-					if target == "" {
-						target = s.Name
-					}
-					if target != "" {
-						secretTargets[target] = struct{}{}
-					}
-				}
-				if s.Type == "file" {
-					secretTargets[s.Name] = struct{}{}
-				}
+			if attempt != nil {
+				s.dispatchAttemptsMu.Lock()
+				s.completeAttempt(attempt, dispatchAttemptSucceeded, http.StatusAccepted, nil, &resp, "")
+				s.dispatchAttemptsMu.Unlock()
 			}
-
-			if s.config.Debug {
-				targetKeys := make([]string, 0, len(secretTargets))
-				for k := range secretTargets {
-					targetKeys = append(targetKeys, k)
-				}
-				s.envSecretLog.Debug("Env-gather: resolved secret targets available",
-					"secretTargetKeys", targetKeys,
-					"resolvedSecretsCount", len(req.ResolvedSecrets),
-				)
-			}
-
-			var hubHas, needs []string
-			for _, key := range required {
-				val, hasVal := env[key]
-				if hasVal && val != "" {
-					hubHas = append(hubHas, key)
-				} else if _, fromSecret := secretTargets[key]; fromSecret {
-					hubHas = append(hubHas, key)
-				} else {
-					needs = append(needs, key)
-				}
-			}
-
-			if len(needs) > 0 {
-				if s.config.Debug {
-					s.envSecretLog.Debug("Env-gather: returning 202 with requirements",
-						"required", required,
-						"hubHas", hubHas,
-						"needs", needs,
-					)
-				}
-
-				// Build SecretInfo for needed keys only
-				var respSecretInfo map[string]api.SecretKeyInfo
-				for _, key := range needs {
-					if info, ok := secretInfo[key]; ok {
-						if respSecretInfo == nil {
-							respSecretInfo = make(map[string]api.SecretKeyInfo)
-						}
-						respSecretInfo[key] = info
-					}
-				}
-
-				// Build alternatives for needed keys only
-				var respAlternatives map[string][]string
-				for _, key := range needs {
-					if alts, ok := alternatives[key]; ok {
-						if respAlternatives == nil {
-							respAlternatives = make(map[string][]string)
-						}
-						respAlternatives[key] = alts
-					}
-				}
-
-				resp := EnvRequirementsResponse{
-					AgentID:      attemptKey,
-					Required:     required,
-					HubHas:       hubHas,
-					Needs:        needs,
-					SecretInfo:   respSecretInfo,
-					Alternatives: respAlternatives,
-				}
-				if attempt != nil {
-					s.dispatchAttemptsMu.Lock()
-					s.completeAttempt(attempt, dispatchAttemptSucceeded, http.StatusAccepted, nil, &resp, "")
-					s.dispatchAttemptsMu.Unlock()
-				}
-				writeJSON(w, http.StatusAccepted, resp)
-				return
-			}
-
-			if s.config.Debug {
-				s.envSecretLog.Debug("Env-gather: all required keys satisfied, proceeding with start",
-					"required", required,
-					"hubHas", hubHas,
-				)
-			}
+			writeJSON(w, http.StatusAccepted, resp)
+			return
 		}
 	}
 
@@ -5930,7 +5829,31 @@ func (s *Server) checkAgentPrompt(w http.ResponseWriter, r *http.Request, id, pr
 // directories of the same name are consulted only when no hydrated copy was
 // supplied.
 func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplatePath string, hydratedHarnessConfigPath ...string) ([]string, map[string]api.SecretKeyInfo, map[string][]string, map[string]string) {
+	keys, secretInfo, alternatives, settingsEnv, _ := s.extractRequiredEnvKeysWithOrigins(req, hydratedTemplatePath, hydratedHarnessConfigPath...)
+	return keys, secretInfo, alternatives, settingsEnv
+}
+
+// envKeyOrigin records which phases of extractRequiredEnvKeysWithOrigins
+// required a key. A key can have several.
+type envKeyOrigin uint8
+
+const (
+	// originMarker: an empty-value settings harness_configs env entry or a
+	// profile harness override env key (Phase 2), a passthrough marker.
+	originMarker envKeyOrigin = 1 << iota
+	// originAuth: an auth key group (Phase 1) or an auth file (Phase 1b).
+	originAuth
+	// originDeclared: a settings, profile or template secret declaration
+	// (3b, 3c, 3d).
+	originDeclared
+)
+
+// extractRequiredEnvKeysWithOrigins is extractRequiredEnvKeys, also
+// returning the origins of each required key. Only the broker computes
+// origins; no request field sets them (ptone/scion#6101).
+func (s *Server) extractRequiredEnvKeysWithOrigins(req CreateAgentRequest, hydratedTemplatePath string, hydratedHarnessConfigPath ...string) ([]string, map[string]api.SecretKeyInfo, map[string][]string, map[string]string, map[string]envKeyOrigin) {
 	required := make(map[string]struct{})
+	origins := make(map[string]envKeyOrigin)
 	alternatives := make(map[string][]string)
 	// settingsEnvSatisfied holds the non-empty env values that settings
 	// (harness_configs/harness_overrides) and the harness-config directory
@@ -6279,6 +6202,7 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 					// Add the canonical (first) key as required
 					canonicalKey := group[0]
 					required[canonicalKey] = struct{}{}
+					origins[canonicalKey] |= originAuth
 					secretInfo[canonicalKey] = api.SecretKeyInfo{Source: "auth"}
 					// Record alternative key names so the hub can match
 					// as_needed env vars stored under non-canonical names.
@@ -6343,6 +6267,7 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 					// GOOGLE_APPLICATION_CREDENTIALS at startup).
 					if !altEnvKeySatisfied(req.ResolvedEnv, as.AlternativeEnvKeys) {
 						required[as.Key] = struct{}{}
+						origins[as.Key] |= originAuth
 						secretInfo[as.Key] = api.SecretKeyInfo{
 							Description: as.Description,
 							Source:      "auth",
@@ -6361,6 +6286,7 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 		overrideEnvKeys, _ := settings.TierAllHarnessOverrideEnvKeys(profileName)
 		for k := range overrideEnvKeys {
 			required[k] = struct{}{}
+			origins[k] |= originMarker
 		}
 
 		// Get harness config env keys
@@ -6368,6 +6294,7 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 			for k, v := range hcfg.Env {
 				if v == "" {
 					required[k] = struct{}{}
+					origins[k] |= originMarker
 				}
 			}
 		}
@@ -6387,6 +6314,7 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 		for _, hcfg := range settings.HarnessConfigs {
 			for _, sec := range hcfg.Secrets {
 				required[sec.Key] = struct{}{}
+				origins[sec.Key] |= originDeclared
 				secretInfo[sec.Key] = api.SecretKeyInfo{
 					Description: sec.Description,
 					Source:      "settings",
@@ -6399,6 +6327,7 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 		tierSecrets, _ := settings.TierSecrets(profileName)
 		for _, sec := range tierSecrets {
 			required[sec.Key] = struct{}{}
+			origins[sec.Key] |= originDeclared
 			secretInfo[sec.Key] = api.SecretKeyInfo{
 				Description: sec.Description,
 				Source:      "settings",
@@ -6410,6 +6339,7 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 	// 3d: Template secrets (from request or local template)
 	for _, sec := range req.RequiredSecrets {
 		required[sec.Key] = struct{}{}
+		origins[sec.Key] |= originDeclared
 		secretInfo[sec.Key] = api.SecretKeyInfo{
 			Description: sec.Description,
 			Source:      "template",
@@ -6423,6 +6353,7 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 		if cfg, err := tmpl.LoadConfig(); err == nil && cfg != nil {
 			for _, sec := range cfg.Secrets {
 				required[sec.Key] = struct{}{}
+				origins[sec.Key] |= originDeclared
 				if _, exists := secretInfo[sec.Key]; !exists {
 					secretInfo[sec.Key] = api.SecretKeyInfo{
 						Description: sec.Description,
@@ -6440,6 +6371,7 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 	for k := range required {
 		if agent.IsHubOnlyEnvKey(k) {
 			delete(required, k)
+			delete(origins, k)
 		}
 	}
 	for k := range secretInfo {
@@ -6457,7 +6389,152 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 	for k := range required {
 		keys = append(keys, k)
 	}
-	return keys, secretInfo, alternatives, settingsEnvSatisfied
+	return keys, secretInfo, alternatives, settingsEnvSatisfied, origins
+}
+
+// envGatherResult is the env-gather preflight's verdict on a request
+// (evaluateEnvGather). SecretInfo and Alternatives cover only the keys in
+// Needs. MarkerOnly lists the keys in Needs whose only origin is a
+// passthrough marker (originMarker).
+type envGatherResult struct {
+	Required     []string
+	HubHas       []string
+	Needs        []string
+	MarkerOnly   []string
+	SecretInfo   map[string]api.SecretKeyInfo
+	Alternatives map[string][]string
+}
+
+// evaluateEnvGather scores req's required env keys against what the request
+// supplies: create's env-gather preflight, shared by create and start
+// (ptone/scion#6101). hydratedTemplatePath and hydratedHCPath are the
+// hub-hydrated template and harness-config directories, "" when none. A key
+// is satisfied by a non-empty value in the request env (buildRequestEnv,
+// filled with the settings and harness-config-directory env
+// extractRequiredEnvKeys resolved) or by a resolved environment or file
+// secret targeting it; every other required key is a need.
+func (s *Server) evaluateEnvGather(req CreateAgentRequest, hydratedTemplatePath, hydratedHCPath string) envGatherResult {
+	// A preliminary merged env, shared with extractRequiredEnvKeys's own
+	// requestEnv so both checks start from the identical presence-aware
+	// base (see buildRequestEnv).
+	env := buildRequestEnv(req)
+	required, secretInfo, alternatives, settingsEnv, origins := s.extractRequiredEnvKeysWithOrigins(req, hydratedTemplatePath, hydratedHCPath)
+	// Fold in the settings/harness-config-directory env
+	// extractRequiredEnvKeys resolved (its withDir, minus whatever
+	// requestEnv already decided — see settingsEnvSatisfied there), but
+	// only to fill genuine gaps: env above is requestEnv, which already
+	// reflects what outranks settings/dir for the pod, so an existing
+	// entry — even an empty one — must not be overwritten here.
+	for k, v := range settingsEnv {
+		if _, exists := env[k]; !exists {
+			env[k] = v
+		}
+	}
+	if s.config.Debug {
+		s.envSecretLog.Debug("Env-gather: evaluating env completeness",
+			"gatherEnv", req.GatherEnv,
+			"projectPath", req.ProjectPath,
+			"requiredKeys", len(required),
+			"required", required,
+		)
+	}
+	if len(required) > 0 {
+		// Build lookup set of keys satisfied by resolved secrets
+		secretTargets := make(map[string]struct{})
+		for _, s := range req.ResolvedSecrets {
+			if s.Type == "environment" || s.Type == "" {
+				target := s.Target
+				if target == "" {
+					target = s.Name
+				}
+				if target != "" {
+					secretTargets[target] = struct{}{}
+				}
+			}
+			if s.Type == "file" {
+				secretTargets[s.Name] = struct{}{}
+			}
+		}
+
+		if s.config.Debug {
+			targetKeys := make([]string, 0, len(secretTargets))
+			for k := range secretTargets {
+				targetKeys = append(targetKeys, k)
+			}
+			s.envSecretLog.Debug("Env-gather: resolved secret targets available",
+				"secretTargetKeys", targetKeys,
+				"resolvedSecretsCount", len(req.ResolvedSecrets),
+			)
+		}
+
+		var hubHas, needs []string
+		for _, key := range required {
+			val, hasVal := env[key]
+			if hasVal && val != "" {
+				hubHas = append(hubHas, key)
+			} else if _, fromSecret := secretTargets[key]; fromSecret {
+				hubHas = append(hubHas, key)
+			} else {
+				needs = append(needs, key)
+			}
+		}
+
+		if len(needs) > 0 {
+			if s.config.Debug {
+				s.envSecretLog.Debug("Env-gather: returning 202 with requirements",
+					"required", required,
+					"hubHas", hubHas,
+					"needs", needs,
+				)
+			}
+
+			// Build SecretInfo for needed keys only
+			var respSecretInfo map[string]api.SecretKeyInfo
+			for _, key := range needs {
+				if info, ok := secretInfo[key]; ok {
+					if respSecretInfo == nil {
+						respSecretInfo = make(map[string]api.SecretKeyInfo)
+					}
+					respSecretInfo[key] = info
+				}
+			}
+
+			// Build alternatives for needed keys only
+			var respAlternatives map[string][]string
+			for _, key := range needs {
+				if alts, ok := alternatives[key]; ok {
+					if respAlternatives == nil {
+						respAlternatives = make(map[string][]string)
+					}
+					respAlternatives[key] = alts
+				}
+			}
+
+			var markerOnly []string
+			for _, key := range needs {
+				if origins[key] == originMarker {
+					markerOnly = append(markerOnly, key)
+				}
+			}
+			return envGatherResult{
+				Required:     required,
+				HubHas:       hubHas,
+				Needs:        needs,
+				MarkerOnly:   markerOnly,
+				SecretInfo:   respSecretInfo,
+				Alternatives: respAlternatives,
+			}
+		}
+
+		if s.config.Debug {
+			s.envSecretLog.Debug("Env-gather: all required keys satisfied, proceeding with start",
+				"required", required,
+				"hubHas", hubHas,
+			)
+		}
+		return envGatherResult{Required: required, HubHas: hubHas}
+	}
+	return envGatherResult{}
 }
 
 // buildRequestEnv returns req.ResolvedEnv overridden per-key by req.Config.Env
