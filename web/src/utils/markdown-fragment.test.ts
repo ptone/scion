@@ -37,6 +37,7 @@ vi.mock('dompurify', async (importOriginal) => {
 });
 
 import { getMarkdownRenderer, type MarkdownRenderer } from './markdown.js';
+import { disallowedLeft } from './__fixtures__/disallowed-markup.js';
 
 let renderer: MarkdownRenderer;
 
@@ -120,6 +121,20 @@ describe('renderFragment', () => {
     expect(out).not.toContain('elsewhere.example');
     expect(out).toContain('remote alt');
     expect(out).toContain('src="/x.png"');
+  });
+
+  it('leaves nothing disallowed from markdown that tries it', () => {
+    const md = [
+      '[a](javascript:alert(1)) [b](JaVaScRiPt:alert(1)) [c](data:text/html,x)',
+      '![d](javascript:alert(1)) ![e](https://elsewhere.example/e.png "x\\" onerror=\\"alert(1)")',
+      '<script>alert(1)</script> <img src=x onerror=alert(1)> <a href="javascript:alert(1)">f</a>',
+      '<javascript:alert(1)> [g](<javascript:alert(1)>)',
+    ].join('\n\n');
+    for (const options of [{}, { sameOriginImagesOnly: true }, { criticMarks: true }]) {
+      expect(disallowedLeft(renderer.renderFragment(md, options)), JSON.stringify(options)).toEqual(
+        []
+      );
+    }
   });
 
   it('sanitizes once, with the default configuration plus the node result', () => {
