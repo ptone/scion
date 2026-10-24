@@ -306,7 +306,10 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			// it has no files for the agent before provisioning it with a
 			// fresh workspace (ptone/scion#5441).
 			AgentMoveRecreate: true,
-			StartsInFlight:    s.startsInFlight != nil,
+			// This broker honours preserveWorkspace on a create
+			// (ptone/scion#6096).
+			PreserveWorkspaceCreate: true,
+			StartsInFlight:          s.startsInFlight != nil,
 			// This broker's reprovision reuses an empty-per-agent
 			// workspace in place (miller79/scion#167).
 			ReprovisionEmptyPerAgent: true,
@@ -808,6 +811,14 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	var req CreateAgentRequest
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+	// preserveWorkspace is a full create of an agent that may already have
+	// files here (a hub start routed through create-with-gather); it never
+	// combines with a provision-only or reprovision request
+	// (ptone/scion#6096).
+	if req.PreserveWorkspace && (req.ProvisionOnly || req.Reprovision) {
+		BadRequest(w, "preserveWorkspace cannot be combined with provisionOnly or reprovision")
 		return
 	}
 
@@ -1534,6 +1545,13 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		opts.FreshProvision = false
 		opts.SharedDirBackendChanges = req.SharedDirBackendChanges
 		opts.AllowEmptySharedDir = req.AllowEmptySharedDir
+	}
+	// A create the hub marked preserveWorkspace (a routed start of an agent
+	// that may already have files here) must not clear an existing
+	// workspace: FreshProvision stays false. Nothing else changes; this is
+	// not a reprovision (ptone/scion#6096).
+	if req.PreserveWorkspace {
+		opts.FreshProvision = false
 	}
 	s.agentLifecycleLog.Info("Agent dispatch: buildStartContext complete",
 		"agent_id", req.ID, "name", req.Name, "elapsed", time.Since(buildCtxStart).String())
