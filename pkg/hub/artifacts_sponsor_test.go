@@ -121,21 +121,24 @@ func TestArtifactHostDelegatingUser(t *testing.T) {
 		assert.Equal(t, c.want, got, name)
 	}
 
-	t.Run("soft-deleted agent is a denial", func(t *testing.T) {
-		softDeleteAgentForSponsor(t, f.s, f.sibling.ID)
-		got, err := host.DelegatingUser(ctx, f.sibling.ID)
-		require.NoError(t, err)
-		assert.Equal(t, "", got)
-	})
 	t.Run("lookup fault is an error", func(t *testing.T) {
 		faulty := hostOverStore(&sponsorFaultStore{Store: f.s, failEdgesFor: f.agent.ID}, false)
 		got, err := faulty.DelegatingUser(ctx, f.agent.ID)
 		require.ErrorIs(t, err, errSponsorStoreFault)
 		assert.Equal(t, "", got)
+		// An agent whose chain passes through the faulted one fails too.
+		_, err = faulty.DelegatingUser(ctx, f.child.ID)
+		require.ErrorIs(t, err, errSponsorStoreFault)
 		// The same host resolves an agent whose lookups succeed.
-		got, err = faulty.DelegatingUser(ctx, f.child.ID)
+		got, err = faulty.DelegatingUser(ctx, f.sibling.ID)
 		require.NoError(t, err)
-		assert.Equal(t, f.delegator, got)
+		assert.Equal(t, f.member, got)
+	})
+	t.Run("soft-deleted agent is a denial", func(t *testing.T) {
+		softDeleteAgentForSponsor(t, f.s, f.sibling.ID)
+		got, err := host.DelegatingUser(ctx, f.sibling.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "", got)
 	})
 	t.Run("no authz service", func(t *testing.T) {
 		_, err := newArtifactHost(&Server{}).DelegatingUser(ctx, f.agent.ID)
@@ -235,10 +238,10 @@ func TestArtifactHostRecordedDelegatorChecks(t *testing.T) {
 
 	t.Run("dev user needs dev-local authority", func(t *testing.T) {
 		createDCUser(t, f.s, DevUserID, "dev@test.com", f.home, store.ProjectRoleMember)
-		require.False(t, f.srv.authzService.devLocalAuthorityEnabled(), "test server has dev auth off")
-		assert.False(t, newArtifactHost(f.srv).recordedDelegator(ctx, DevUserID, DevUserID, f.home), "dev auth off")
-		assert.True(t, hostOverStore(f.s, true).recordedDelegator(ctx, DevUserID, DevUserID, f.home), "dev auth on")
-		assert.Equal(t, "", f.reviewRecorded(newArtifactHost(f.srv), f.user(DevUserID), f.agent.ID, f.home, DevUserID))
+		assert.False(t, hostOverStore(f.s, false).recordedDelegator(ctx, DevUserID, DevUserID, f.home), "dev-local authority off")
+		assert.True(t, hostOverStore(f.s, true).recordedDelegator(ctx, DevUserID, DevUserID, f.home), "dev-local authority on")
+		// Any other user is unaffected by the setting.
+		assert.True(t, hostOverStore(f.s, false).recordedDelegator(ctx, f.delegator, f.delegator, f.home), "other user, dev-local authority off")
 	})
 	t.Run("user lookup fault fails closed", func(t *testing.T) {
 		require.True(t, hostOverStore(f.s, false).recordedDelegator(ctx, f.delegator, f.delegator, f.home), "without the fault")
@@ -434,6 +437,7 @@ func TestArtifactSponsorBackfillOnHub(t *testing.T) {
 	assert.True(t, done)
 
 	// Backfilled, the delegating user keeps the clauses after a purge.
+	softDeleteAgentForSponsor(t, f.s, f.agent.ID)
 	purgeAgentForSponsor(t, f.s, f.agent.ID)
 	code, resp := sponsorArtifactResponse(t, f.srv, f.user(f.delegator), live)
 	require.Equal(t, http.StatusOK, code)
