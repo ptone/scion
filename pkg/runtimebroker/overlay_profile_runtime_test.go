@@ -120,9 +120,10 @@ func TestOverlayProfileRuntime_DefaultProfileCreateRefused(t *testing.T) {
 	f.assertNoRuntimeUsed(t)
 }
 
-// A saved profile whose stored runtime is missing fails start, restart and
-// resume with no fallback, even when the agent last ran on the default
-// runtime.
+// A provisioned profile whose stored runtime is missing fails start,
+// restart and resume with the saved-profile error and never runs on the
+// default runtime, including when agent-info.json records that the agent
+// last ran there.
 func TestOverlayProfileRuntime_SavedProfileFailsWithoutFallback(t *testing.T) {
 	for _, op := range overlayDispatches() {
 		t.Run(op.name, func(t *testing.T) {
@@ -130,6 +131,7 @@ func TestOverlayProfileRuntime_SavedProfileFailsWithoutFallback(t *testing.T) {
 			installDanglingOverlay(t, false)
 			const name = "saved-dangling-agent"
 			writeSavedAgentInfo(t, f.projectPath, name, danglingProfile, "docker")
+			writeProvisionedProfile(t, f.projectPath, name, danglingProfile)
 			f.defaultMgr.agents = append(f.defaultMgr.agents, lifecycleAgent(name, f.projectPath, ""))
 
 			w := op.run(t, f, name)
