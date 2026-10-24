@@ -25,6 +25,27 @@ import tseslint from 'typescript-eslint';
 
 const tsconfigRootDir = import.meta.dirname;
 
+// Full-page navigations go through loadPage() or navigateTo() in
+// src/client/navigation.ts (ptone/scion#5535): writing a path to
+// window.location (href, assign, replace) directly drops the base path the
+// UI needs when served under a proxy prefix. Any write is flagged, not only
+// a literal absolute path, since the target is often built elsewhere.
+// Used in two config blocks below: a later block's no-restricted-syntax
+// replaces an earlier one's, so the components block repeats these.
+const locationWriteRestrictions = [
+  {
+    selector: [
+      'AssignmentExpression[left.type="MemberExpression"][left.property.name="href"][left.object.name="location"]',
+      'AssignmentExpression[left.type="MemberExpression"][left.property.name="href"][left.object.property.name="location"]',
+      'AssignmentExpression[left.type="MemberExpression"][left.property.name="location"]',
+      'CallExpression[callee.type="MemberExpression"][callee.property.name=/^(assign|replace)$/][callee.object.name="location"]',
+      'CallExpression[callee.type="MemberExpression"][callee.property.name=/^(assign|replace)$/][callee.object.property.name="location"]',
+    ].join(', '),
+    message:
+      'Use loadPage() (full page load) or navigateTo() (client-side) from client/navigation.js; a raw window.location write drops the base path.',
+  },
+];
+
 // Rules shared by every linted file.
 const sharedRules = {
   '@typescript-eslint/explicit-function-return-type': 'warn',
@@ -121,12 +142,13 @@ export default defineConfig([
   // Playwright suites. The suites that load src share one lint-only TS
   // project (e2e/tsconfig.eslint.json) so ESLint builds one program for
   // them, not one per suite. Each suite's tsconfig.json still owns its
-  // typecheck. terminal-lifecycle and terminal-owner do not load src and
-  // keep their own project.
+  // typecheck. terminal-lifecycle, terminal-owner and port-proxy do not
+  // load src and keep their own project.
   project(
     [
       'e2e/agent-store-count/*.ts',
       'e2e/artifacts-access/*.ts',
+      'e2e/artifacts-agent-owned/*.ts',
       'e2e/artifacts-review/*.ts',
       'e2e/chat/*.ts',
       'e2e/chat-file-preview/*.ts',
@@ -159,6 +181,7 @@ export default defineConfig([
   ),
   project(['e2e/terminal-lifecycle/*.ts'], './e2e/terminal-lifecycle/tsconfig.json'),
   project(['e2e/terminal-owner/*.ts'], './e2e/terminal-owner/tsconfig.json'),
+  project(['e2e/port-proxy/*.ts'], './e2e/port-proxy/tsconfig.json'),
   project(['e2e-perf/budgets/*.ts'], './e2e-perf/budgets/tsconfig.json'),
   // The review editor is its own TS project (see its tsconfig.json).
   project(
@@ -182,6 +205,16 @@ export default defineConfig([
       '@typescript-eslint/no-unsafe-return': 'off',
       '@typescript-eslint/unbound-method': 'off',
       '@typescript-eslint/no-unnecessary-type-assertion': 'off',
+    },
+  },
+
+  // No raw window.location writes outside navigation.ts (see
+  // locationWriteRestrictions). Tests are exempt: they stub location.
+  {
+    files: ['src/**/*.ts'],
+    ignores: ['src/**/*.test.ts', 'src/client/navigation.ts'],
+    rules: {
+      'no-restricted-syntax': ['error', ...locationWriteRestrictions],
     },
   },
 
@@ -220,6 +253,7 @@ export default defineConfig([
       // no-restricted-imports does not see.
       'no-restricted-syntax': [
         'error',
+        ...locationWriteRestrictions,
         {
           selector:
             'MemberExpression[property.name=/^(push|replace)State$/], MemberExpression[property.value=/^(push|replace)State$/], MemberExpression[property.type="TemplateLiteral"][property.quasis.0.value.cooked=/^(push|replace)State$/], ObjectPattern > Property[key.name=/^(push|replace)State$/], ObjectPattern > Property[key.value=/^(push|replace)State$/]',
@@ -236,12 +270,42 @@ export default defineConfig([
     },
   },
 
+  // Requests go through apiFetch() in src/client/api.ts (ptone/scion#353):
+  // credentials, the hub clock sample and the global 401/403 handling (or
+  // `authErrors: 'caller'` to opt out) live in one place. A direct fetch()
+  // needs an explicit, commented exception (eslint-disable-next-line ...
+  // -- reason). Covers all of src: client, components, utils, lib and
+  // shared (ptone/scion#5641). Tests and fixtures stub fetch and are
+  // exempt.
+  {
+    files: ['src/**/*.ts'],
+    ignores: ['src/**/*.test.ts', 'src/**/__fixtures__/**'],
+    rules: {
+      'no-restricted-globals': [
+        'error',
+        {
+          name: 'fetch',
+          message:
+            "Use apiFetch() from client/api.js (with authErrors: 'caller' to handle 401/403 yourself); a direct fetch() needs a commented eslint-disable exception.",
+        },
+      ],
+      'no-restricted-properties': [
+        'error',
+        ...['window', 'globalThis', 'self'].map((object) => ({
+          object,
+          property: 'fetch',
+          message: 'Use apiFetch() from client/api.js instead of a direct fetch().',
+        })),
+      ],
+    },
+  },
+
   // The review editor renders artifact text in the page (ptone/scion#5913):
   // it builds DOM only through ProseMirror's renderers and text bindings,
   // so no string reaches the DOM as HTML from these files. The navigation
-  // rules of the block above are repeated, because a later
-  // no-restricted-syntax or no-restricted-imports entry replaces an
-  // earlier one for the same files.
+  // rules of the blocks above (location writes, history writes, imports of
+  // client/main) are repeated, because a later no-restricted-syntax or
+  // no-restricted-imports entry replaces an earlier one for the same files.
   {
     files: ['src/components/artifact-review/**/*.ts'],
     ignores: ['src/components/artifact-review/**/*.test.ts'],
@@ -270,6 +334,7 @@ export default defineConfig([
       ],
       'no-restricted-syntax': [
         'error',
+        ...locationWriteRestrictions,
         {
           selector:
             'MemberExpression[property.name=/^(innerHTML|outerHTML|insertAdjacentHTML|srcdoc|setHTMLUnsafe|createContextualFragment|parseFromString)$/], MemberExpression[property.value=/^(innerHTML|outerHTML|insertAdjacentHTML|srcdoc|setHTMLUnsafe|createContextualFragment|parseFromString)$/]',

@@ -99,3 +99,35 @@ describe('review editor HTML lint rule', () => {
     expect(await htmlErrors(code)).toBe(0);
   });
 });
+
+// The review editor's block repeats the app-wide navigation rules (a later
+// no-restricted-syntax entry replaces an earlier one), so a page navigation
+// from these files still goes through client/navigation.js.
+async function navigationErrors(code: string): Promise<number> {
+  const rule = await syntaxRule('src/components/artifact-review/editor/controller.ts');
+  const messages = new Linter().verify(code, {
+    languageOptions: { ecmaVersion: 'latest', sourceType: 'module' },
+    rules: { 'no-restricted-syntax': rule! },
+  });
+  return messages.filter((m) => m.message.includes('client/navigation.js')).length;
+}
+
+describe('review editor navigation lint rules', () => {
+  it.each([
+    ['location.href assignment', 'location.href = u;'],
+    ['window.location.href assignment', 'window.location.href = u;'],
+    ['location assignment', 'window.location = u;'],
+    ['location.assign', 'location.assign(u);'],
+    ['window.location.replace', 'window.location.replace(u);'],
+    ['history.pushState', "history.pushState({}, '', u);"],
+  ])('catches %s', async (_name, code) => {
+    expect(await navigationErrors(code)).toBeGreaterThan(0);
+  });
+
+  it.each([
+    ['reading location.href', 'const h = location.href;'],
+    ['an assign method on another object', 'Object.assign(a, b);'],
+  ])('allows %s', async (_name, code) => {
+    expect(await navigationErrors(code)).toBe(0);
+  });
+});
