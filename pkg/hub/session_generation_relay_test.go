@@ -127,10 +127,8 @@ func TestSessionGen_ConduitRelayAdmit_AuthctxVisibleInAdmission(t *testing.T) {
 	assert.Equal(t, row, got[0].gen, "the value is the users row's generation")
 }
 
-// Fails if a second non-test call to authctx.WithSessionGeneration is added
-// anywhere in this module (nested modules and hidden directories, such as
-// agent worktrees under .scion, are not scanned): the JWT bearer arm in pkg/hub/auth.go is the only
-// place that may record a session generation.
+// Fails if a second non-test call to authctx.WithSessionGeneration is added in this module (nested modules and hidden directories,
+// such as agent worktrees under .scion, are not scanned): the JWT bearer arm in pkg/hub/auth.go is the only place that may record a session generation.
 func TestSessionGen_AuthctxSetterSingleCallSite(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	require.NoError(t, err)
@@ -139,6 +137,8 @@ func TestSessionGen_AuthctxSetterSingleCallSite(t *testing.T) {
 
 	var sites []string
 	fset := token.NewFileSet()
+	// pkgmove:scan-covers pkg/hub/...
+	// recursive walk of the whole module: skips only dot, testdata, vendor and node_modules directories and nested modules, so it covers every package directory below pkg/hub.
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
