@@ -3,9 +3,13 @@
 #
 # Verifies that the guard correctly:
 #   1. Passes with no violations (baseline)
+# pkgmove:ref-ok temporary for the move: the post-move commit of this change points it at pkg/hub/webchat and drops this marker.
 #   2. Exempts INSERT INTO conversations with kind='group' in webchannel_store.go
+# pkgmove:ref-ok temporary for the move: the post-move commit of this change points it at pkg/hub/webchat and drops this marker.
 #   3. Rejects INSERT INTO conversations with kind='direct' in webchannel_store.go
+# pkgmove:ref-ok temporary for the move: the post-move commit of this change points it at pkg/hub/webchat and drops this marker.
 #   4. Rejects AddParticipant calls in webchannel_store.go (fully barred surface)
+# pkgmove:ref-ok temporary for the move: the post-move commit of this change points it at pkg/hub/webchat and drops this marker.
 #   5. Exempts INSERT INTO conversations with kind='group' in webchannel_store_postgres.go
 #   6. Rejects INSERT INTO conversations with kind='group' in a non-exempted pkg/hub file
 #   7. Exempts single-line kind='group' INSERT (Case A regression)
@@ -24,7 +28,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 GUARD="./hack/check-conversation-upsert-guard.sh"
+# pkgmove:ref-ok temporary for the move: the post-move commit of this change points it at pkg/hub/webchat and drops this marker.
 SQLITE="pkg/hub/webchannel_store.go"
+# pkgmove:ref-ok temporary for the move: the post-move commit of this change points it at pkg/hub/webchat and drops this marker.
 POSTGRES="pkg/hub/webchannel_store_postgres.go"
 INJECT_OTHER="pkg/hub/c1_negative_test_inject.go"
 
@@ -76,6 +82,7 @@ run_test() {
 # --- Test 1: Baseline — guard passes with no injections ---
 run_test "baseline: no violations" 0
 
+# pkgmove:ref-ok temporary for the move: the post-move commit of this change points it at pkg/hub/webchat and drops this marker.
 # --- Test 2: kind='group' INSERT in webchannel_store.go — EXEMPTED (exit 0) ---
 cat >>"$SQLITE" <<'INJECT'
 
@@ -85,8 +92,10 @@ func c1TestGroupInsertSqlite() {
 		VALUES (?, ?, 'group', 'native')`, id, pid)
 }
 INJECT
+# pkgmove:ref-ok temporary for the move: the post-move commit of this change points it at pkg/hub/webchat and drops this marker.
 run_test "kind='group' INSERT in webchannel_store.go is exempted" 0
 
+# pkgmove:ref-ok temporary for the move: the post-move commit of this change points it at pkg/hub/webchat and drops this marker.
 # --- Test 3: kind='direct' INSERT in webchannel_store.go — NOT EXEMPTED (exit 1) ---
 cat >>"$SQLITE" <<'INJECT'
 
@@ -96,8 +105,10 @@ func c1TestDirectInsertSqlite() {
 		Values (?, ?, 'direct', 'native')`, id, pid)
 }
 INJECT
+# pkgmove:ref-ok temporary for the move: the post-move commit of this change points it at pkg/hub/webchat and drops this marker.
 run_test "kind='direct' INSERT in webchannel_store.go is rejected" 1
 
+# pkgmove:ref-ok temporary for the move: the post-move commit of this change points it at pkg/hub/webchat and drops this marker.
 # --- Test 4: AddParticipant in webchannel_store.go — NOT EXEMPTED (exit 1) ---
 cat >>"$SQLITE" <<'INJECT'
 
@@ -106,8 +117,10 @@ func c1TestAddParticipant() {
 	s.store.AddParticipant(ctx, conv.ID, userID)
 }
 INJECT
+# pkgmove:ref-ok temporary for the move: the post-move commit of this change points it at pkg/hub/webchat and drops this marker.
 run_test "AddParticipant in webchannel_store.go is rejected" 1
 
+# pkgmove:ref-ok temporary for the move: the post-move commit of this change points it at pkg/hub/webchat and drops this marker.
 # --- Test 5: kind='group' INSERT in webchannel_store_postgres.go — EXEMPTED (exit 0) ---
 cat >>"$POSTGRES" <<'INJECT'
 
@@ -117,6 +130,7 @@ func c1TestGroupInsertPostgres() {
 		VALUES ($1, $2, 'group', 'native')`, id, pid)
 }
 INJECT
+# pkgmove:ref-ok temporary for the move: the post-move commit of this change points it at pkg/hub/webchat and drops this marker.
 run_test "kind='group' INSERT in webchannel_store_postgres.go is exempted" 0
 
 # --- Test 6: kind='group' INSERT in a NON-exempted hub file — NOT EXEMPTED (exit 1) ---
