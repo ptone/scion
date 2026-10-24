@@ -2913,10 +2913,13 @@ func (s *Server) createAgentInProject(
 				}
 				if errors.Is(err, ErrLifecycleDeferred) {
 					// The agent's broker is served by another hub node,
-					// which provision-only dispatch does not support: no as-
-					// needed pass ran on any node, so the agent must not be
-					// left to start (ptone/scion#6096). Fail the create with
-					// a fixed message.
+					// which provision-only dispatch does not support. A
+					// first-request deferral sends nothing; a deferral of the
+					// replay (or of the retry after a hash repair) comes
+					// after a send. Either way the provision did not
+					// complete on any node, so the agent must not be left to
+					// start (ptone/scion#6096). Fail the create with a fixed
+					// message.
 					s.agentLifecycleLog.Warn("Provision-only create failed: broker served by another hub node",
 						"agent_id", agent.ID, "agent", agent.Name, "broker", agent.RuntimeBrokerID)
 					failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() {
