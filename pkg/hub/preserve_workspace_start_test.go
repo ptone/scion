@@ -1018,9 +1018,18 @@ func TestStartPreChecks_BrokerRecordUnreadableIs503(t *testing.T) {
 		return srv, client, agent, s, fault
 	}
 	t.Run("restart on a project that is not empty-per-agent", func(t *testing.T) {
-		srv, client, agent, s, fault := setup(t, "pre-restart", state.PhaseRunning)
+		srv, s := testServer(t)
+		grantDevUserRuntimeBrokerAccess(t, s)
+		project, broker := newSharedModeHandlerProject(t, s, "pre-restart")
+		agent := newQuotaTestAgent(t, s, broker, project, "pre-restart", state.PhaseRunning)
+		client := &mockRuntimeBrokerClient{}
+		srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default()))
+		counting, fault := installStoreFault(t, srv, func(inner store.Store, fault *storeFaultSwitch) *countingBrokerReadErrStore {
+			return &countingBrokerReadErrStore{Store: inner, fault: fault}
+		})
 		fault.Arm()
 		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/restart", nil)
+		assert.Equal(t, 1, counting.reads, "the restart placement pre-check is the only broker read: nothing reads it after the refusal")
 		assert.NotContains(t, rec.Body.String(), "10.0.0.9", "no raw store text")
 		require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
 		var body ErrorResponse
@@ -1138,4 +1147,20 @@ func TestCrossNode_OwnerFinalizeBackstopReadOnlyIs503(t *testing.T) {
 	assertBrokerReadRefusal(t, err, "started")
 	assert.Equal(t, 2, reads.reads, "the guards' read succeeded; the finalize backstop's failed")
 	assert.False(t, client.createCalled, "nothing is sent")
+}
+
+// countingBrokerReadErrStore fails every broker-record read with
+// fakeBrokerReadError while fault is armed, and counts those reads.
+type countingBrokerReadErrStore struct {
+	store.Store
+	fault *storeFaultSwitch
+	reads int
+}
+
+func (s *countingBrokerReadErrStore) GetRuntimeBroker(ctx context.Context, id string) (*store.RuntimeBroker, error) {
+	if s.fault.Active() {
+		s.reads++
+		return nil, errors.New(fakeBrokerReadError)
+	}
+	return s.Store.GetRuntimeBroker(ctx, id)
 }

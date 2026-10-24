@@ -862,6 +862,13 @@ type AgentStore interface {
 	// transaction, and is retried a bounded number of times when it
 	// changed. It returns written=false, with no error, when the agent does
 	// not exist or the marker was already set.
+	//
+	// Not bumping state_version is deliberate: a version bump would make
+	// every concurrent compare-and-set writer of the row fail. The cost is
+	// that a stale whole-config writer (UpdateAgent, UpdateAgentConfig, the
+	// pending-config fold, a reincarnation step) can write the marker back
+	// to false; that is safe, because a start without the marker is routed
+	// through create-with-gather again. Do not add a version bump here.
 	SetAgentConfigDelivered(ctx context.Context, id string) (written bool, err error)
 
 	// FindOrphanedAgents returns agents whose RuntimeBrokerID references a broker
