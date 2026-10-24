@@ -85,12 +85,12 @@ function ownerKey(owner: object, name: string): string {
 }
 
 /** Wrap a setter wherever it is defined on the prototype chain. */
-function wrapSetter(proto: object | undefined, name: string, sink: string): void {
+function wrapSetter(proto: object | undefined, name: string, sink: string): boolean {
   for (let p: object | null = proto ?? null; p; p = Object.getPrototypeOf(p) as object | null) {
     const desc = Object.getOwnPropertyDescriptor(p, name);
     if (desc?.set) {
       const key = ownerKey(p, name);
-      if (wrapped.has(key)) return;
+      if (wrapped.has(key)) return true;
       wrapped.add(key);
       const set = desc.set;
       Object.defineProperty(p, name, {
@@ -99,18 +99,19 @@ function wrapSetter(proto: object | undefined, name: string, sink: string): void
           set.call(this, record(sink, value));
         },
       });
-      return;
+      return true;
     }
   }
+  return false;
 }
 
 /** Wrap a method whose argument at argIndex is markup. */
-function wrapMethod(proto: object | undefined, name: string, sink: string, argIndex = 0): void {
+function wrapMethod(proto: object | undefined, name: string, sink: string, argIndex = 0): boolean {
   for (let p: object | null = proto ?? null; p; p = Object.getPrototypeOf(p) as object | null) {
     const desc = Object.getOwnPropertyDescriptor(p, name);
     if (typeof desc?.value === 'function') {
       const key = ownerKey(p, name);
-      if (wrapped.has(key)) return;
+      if (wrapped.has(key)) return true;
       wrapped.add(key);
       const fn = desc.value as (...args: unknown[]) => unknown;
       Object.defineProperty(p, name, {
@@ -120,25 +121,62 @@ function wrapMethod(proto: object | undefined, name: string, sink: string, argIn
           return fn.apply(this, args);
         },
       });
-      return;
+      return true;
     }
   }
+  return false;
 }
 
-// Every markup-parsing API the test DOM has; ones it lacks are skipped.
-wrapSetter(HTMLTemplateElement.prototype, 'innerHTML', 'Element.innerHTML');
-wrapSetter(HTMLElement.prototype, 'innerHTML', 'Element.innerHTML');
-wrapSetter(HTMLElement.prototype, 'outerHTML', 'Element.outerHTML');
-wrapSetter(ShadowRoot.prototype, 'innerHTML', 'ShadowRoot.innerHTML');
-wrapSetter(HTMLIFrameElement.prototype, 'srcdoc', 'HTMLIFrameElement.srcdoc');
-wrapMethod(HTMLElement.prototype, 'insertAdjacentHTML', 'Element.insertAdjacentHTML', 1);
-wrapMethod(HTMLElement.prototype, 'setHTMLUnsafe', 'Element.setHTMLUnsafe');
-wrapMethod(ShadowRoot.prototype, 'setHTMLUnsafe', 'ShadowRoot.setHTMLUnsafe');
-wrapMethod(Document.prototype, 'write', 'Document.write');
-wrapMethod(Document.prototype, 'writeln', 'Document.writeln');
-wrapMethod(Document, 'parseHTMLUnsafe', 'Document.parseHTMLUnsafe');
-wrapMethod(DOMParser.prototype, 'parseFromString', 'DOMParser.parseFromString');
-wrapMethod(Range.prototype, 'createContextualFragment', 'Range.createContextualFragment');
+// Every markup-parsing API; `missing` lists the ones the test DOM lacks.
+const sinkWrappers: [string, () => boolean][] = [
+  [
+    'HTMLTemplateElement.innerHTML',
+    () => wrapSetter(HTMLTemplateElement.prototype, 'innerHTML', 'Element.innerHTML'),
+  ],
+  [
+    'HTMLElement.innerHTML',
+    () => wrapSetter(HTMLElement.prototype, 'innerHTML', 'Element.innerHTML'),
+  ],
+  [
+    'HTMLElement.outerHTML',
+    () => wrapSetter(HTMLElement.prototype, 'outerHTML', 'Element.outerHTML'),
+  ],
+  [
+    'ShadowRoot.innerHTML',
+    () => wrapSetter(ShadowRoot.prototype, 'innerHTML', 'ShadowRoot.innerHTML'),
+  ],
+  [
+    'HTMLIFrameElement.srcdoc',
+    () => wrapSetter(HTMLIFrameElement.prototype, 'srcdoc', 'HTMLIFrameElement.srcdoc'),
+  ],
+  [
+    'Element.insertAdjacentHTML',
+    () => wrapMethod(HTMLElement.prototype, 'insertAdjacentHTML', 'Element.insertAdjacentHTML', 1),
+  ],
+  [
+    'Element.setHTMLUnsafe',
+    () => wrapMethod(HTMLElement.prototype, 'setHTMLUnsafe', 'Element.setHTMLUnsafe'),
+  ],
+  [
+    'ShadowRoot.setHTMLUnsafe',
+    () => wrapMethod(ShadowRoot.prototype, 'setHTMLUnsafe', 'ShadowRoot.setHTMLUnsafe'),
+  ],
+  ['Document.write', () => wrapMethod(Document.prototype, 'write', 'Document.write')],
+  ['Document.writeln', () => wrapMethod(Document.prototype, 'writeln', 'Document.writeln')],
+  [
+    'Document.parseHTMLUnsafe',
+    () => wrapMethod(Document, 'parseHTMLUnsafe', 'Document.parseHTMLUnsafe'),
+  ],
+  [
+    'DOMParser.parseFromString',
+    () => wrapMethod(DOMParser.prototype, 'parseFromString', 'DOMParser.parseFromString'),
+  ],
+  [
+    'Range.createContextualFragment',
+    () => wrapMethod(Range.prototype, 'createContextualFragment', 'Range.createContextualFragment'),
+  ],
+];
+const missingSinks = sinkWrappers.filter(([, wrap]) => !wrap()).map(([name]) => name);
 
 // Imported after the stand-in is installed, so the libraries see it.
 await import('./chat-message.js');
@@ -182,12 +220,15 @@ async function settle(el: ScionChatMessage): Promise<void> {
  * point and builds the view.
  */
 async function editorsReady(el: ScionChatMessage): Promise<void> {
-  for (let i = 0; i < 200; i++) {
-    const editors = Array.from(el.shadowRoot?.querySelectorAll('scion-code-editor') ?? []);
-    if (editors.every((ed) => ed.shadowRoot?.querySelector('.editor-mount .cm-editor'))) return;
-    await new Promise((r) => setTimeout(r, 10));
-  }
-  throw new Error('a code block editor did not mount');
+  await vi.waitFor(
+    () => {
+      const editors = Array.from(el.shadowRoot?.querySelectorAll('scion-code-editor') ?? []);
+      if (!editors.every((ed) => ed.shadowRoot?.querySelector('.editor-mount .cm-editor'))) {
+        throw new Error('a code block editor has not mounted yet');
+      }
+    },
+    { timeout: 2000, interval: 10 }
+  );
 }
 
 async function mount(body: string): Promise<ScionChatMessage> {
@@ -249,13 +290,29 @@ describe('chat message markup boundary', () => {
     expect(content.querySelector('.mention')?.textContent).toBe('@lead');
     expect(content.querySelector('table')).not.toBeNull();
     expect(content.querySelector('a[href="https://example.com/docs"]')).not.toBeNull();
-    expect(content.querySelectorAll('scion-code-editor')).toHaveLength(1);
+    const editors = content.querySelectorAll<HTMLElement & { content: string }>(
+      'scion-code-editor'
+    );
+    expect(editors).toHaveLength(1);
+    // Code in an editor is not in textContent; the editor holds the final block.
+    expect(editors[0].content).toContain('func main()');
+    expect(editors[0].content).not.toContain('draft');
     expect(content.textContent).not.toContain('draft');
     expect(flagged()).toEqual([]);
     // One parse per body change, and only through the sanitizer's own policy.
     expect(sinkState.calls).toEqual(
       steps.map(() => ({ sink: 'DOMParser.parseFromString', policy: 'dompurify' }))
     );
+  });
+
+  it('counts every markup-parsing API the test DOM has', () => {
+    // The test DOM lacks these, so the browsers that have them are not
+    // counted here. Update the list if a test DOM upgrade adds one.
+    expect(missingSinks).toEqual([
+      'Element.setHTMLUnsafe',
+      'Document.writeln',
+      'Document.parseHTMLUnsafe',
+    ]);
   });
 
   it('creates no policy of its own: only the libraries that parse markup do', () => {

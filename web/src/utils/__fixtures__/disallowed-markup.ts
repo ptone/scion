@@ -45,6 +45,7 @@ export const DISALLOWED_CASES: readonly { name: string; html: string; mutation?:
   {
     name: 'mathml mglyph/style nesting',
     html: '<math><mtext><table><mglyph><style><img src="/x.png" onerror="alert(1)"></style></mglyph></table></mtext></math>',
+    mutation: true,
   },
   {
     name: 'svg/style namespace confusion',
@@ -56,6 +57,14 @@ export const DISALLOWED_CASES: readonly { name: string; html: string; mutation?:
     html: '<form><math><mtext></form><form><mglyph><style></math><img src="/x.png" onerror="alert(1)">',
     mutation: true,
   },
+  { name: 'iframe srcdoc', html: '<iframe srcdoc="<script>alert(1)</script>"></iframe>' },
+  { name: 'vbscript: href', html: '<a href="vbscript:msgbox(1)">v</a>' },
+  { name: 'base element', html: '<base href="https://elsewhere.example/"><a href="x">b</a>' },
+  {
+    name: 'meta refresh',
+    html: '<meta http-equiv="refresh" content="0;url=javascript:alert(1)"><p>m</p>',
+  },
+  { name: 'object data', html: '<object data="javascript:alert(1)"></object>' },
   {
     name: 'noscript/style nesting',
     html: '<noscript><style></noscript><img src="/x.png" onerror="alert(1)">',
@@ -67,8 +76,9 @@ export function disallowedLeft(root: ParentNode): string[] {
   const problems: string[] = [];
   for (const el of Array.from(root.querySelectorAll('*'))) {
     const tag = el.localName.toLowerCase();
-    if (['script', 'iframe', 'object', 'embed', 'noscript'].includes(tag))
+    if (['script', 'iframe', 'object', 'embed', 'noscript', 'base', 'meta'].includes(tag)) {
       problems.push(`<${tag}>`);
+    }
     for (const attr of Array.from(el.attributes)) {
       const name = attr.name.toLowerCase();
       // Drop spaces and control characters, as browsers do when reading a URL.
@@ -77,8 +87,10 @@ export function disallowedLeft(root: ParentNode): string[] {
         .join('')
         .toLowerCase();
       if (name.startsWith('on')) problems.push(`${tag}[${name}]`);
-      if (/(^|:)href$|^src$|^action$|^formaction$/.test(name)) {
+      if (name === 'srcdoc') problems.push(`${tag}[srcdoc]`);
+      if (/(^|:)href$|^src$|^action$|^formaction$|^data$/.test(name)) {
         if (value.startsWith('javascript:')) problems.push(`${tag}[${name}=javascript:]`);
+        if (value.startsWith('vbscript:')) problems.push(`${tag}[${name}=vbscript:]`);
         if (value.startsWith('data:') && !(tag === 'img' && value.startsWith('data:image/'))) {
           problems.push(`${tag}[${name}=data:]`);
         }

@@ -23,8 +23,11 @@
 
 import { test, expect } from '@playwright/test';
 import type { CaseResult } from './markdown-sanitize-fixture.js';
+import { DISALLOWED_CASES } from '../../src/utils/__fixtures__/disallowed-markup.js';
 
 test('renderFragment removes disallowed markup in a real browser', async ({ page }) => {
+  // Only the renderer is under test; the fixture page's API calls are not needed.
+  await page.route('**/api/**', (route) => route.abort());
   await page.goto('/e2e/chat-file-preview/fixture.html');
   const results: CaseResult[] = await page.evaluate(async () => {
     // Resolved by the page, which Vite serves from the web root.
@@ -33,7 +36,7 @@ test('renderFragment removes disallowed markup in a real browser', async ({ page
     return mod.runDisallowedCases();
   });
 
-  expect(results.length).toBeGreaterThan(10);
+  expect(results.map((r) => r.name)).toEqual(DISALLOWED_CASES.map((c) => c.name));
   for (const r of results) {
     // Each case is disallowed as written (once parsed, or after a round trip).
     expect([...r.rawParsed, ...r.rawRoundTrip], `${r.name}: input`).not.toEqual([]);
