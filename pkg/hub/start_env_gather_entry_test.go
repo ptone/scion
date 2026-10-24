@@ -447,7 +447,7 @@ func TestPersistConfigDelivered_KeepsUserSuppliedKeyNames(t *testing.T) {
 	f := newRunDispatchFixture(t)
 	stale, err := f.store.GetAgent(context.Background(), f.agent.ID)
 	require.NoError(t, err)
-	_, err = f.store.AddAgentUserSuppliedEnvKeys(context.Background(), f.agent.ID, []string{"FAKE_USER_KEY"})
+	_, _, err = f.store.AddAgentUserSuppliedEnvKeys(context.Background(), f.agent.ID, []string{"FAKE_USER_KEY"})
 	require.NoError(t, err)
 	persistConfigDelivered(context.Background(), f.store, slog.Default(), stale)
 	got, err := f.store.GetAgent(context.Background(), f.agent.ID)

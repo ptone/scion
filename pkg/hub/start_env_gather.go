@@ -276,17 +276,60 @@ func userSuppliedKeyNames(env map[string]string) []string {
 // write-ahead of the user-supplied env key names
 // (store.AddAgentUserSuppliedEnvKeys) failed: nothing was minted or sent
 // and nothing started, and handlers answer 503 with its fixed, keyless text
-// (design r16 §4.4.2, coordinator-2 15:25Z).
-var errUserSuppliedKeysUnrecorded = errors.New("the agent's environment requirements could not be recorded; the agent was not created")
+// (design r16 §4.4.2, coordinator-2 15:25Z). The text names the finalize's
+// action (userSuppliedKeysUnrecordedMessage, finalizeActionVerb); its own
+// text is a create's.
+var errUserSuppliedKeysUnrecorded = errors.New(userSuppliedKeysUnrecordedMessage("created"))
 
-// userSuppliedKeysWriteError is errUserSuppliedKeysUnrecorded carrying the
-// store error for the server log only: Error() is the fixed text, and it
-// unwraps to the sentinel alone, so no caller maps it by the store error
-// (a not-found or a version conflict) instead of the 503.
-type userSuppliedKeysWriteError struct{ err error }
+// userSuppliedKeysUnrecordedMessage is the fixed message for verb
+// ("created", "started" or "restarted").
+func userSuppliedKeysUnrecordedMessage(verb string) string {
+	return "the agent's environment requirements could not be recorded; the agent was not " + verb
+}
 
-func (e *userSuppliedKeysWriteError) Error() string { return errUserSuppliedKeysUnrecorded.Error() }
+// finalizeActionVerb is the action an env finalize's fixed refusal messages
+// name, as its placement backstop does: "created" for a create's finalize,
+// "started" for a start routed through create-with-gather, and "restarted"
+// for a restart's start leg.
+func finalizeActionVerb(ctx context.Context) string {
+	if !preserveWorkspaceRequested(ctx) {
+		return "created"
+	}
+	return startActionVerb(ctx, StartDispatchOptions{})
+}
+
+// userSuppliedKeysWriteError is errUserSuppliedKeysUnrecorded for an action
+// (verb, "created" when empty), carrying the store error for the server log
+// only: Error() is the fixed message, and it unwraps to the sentinel alone,
+// so no caller maps it by the store error (a not-found or a version
+// conflict) instead of the 503.
+type userSuppliedKeysWriteError struct {
+	verb string
+	err  error
+}
+
+func (e *userSuppliedKeysWriteError) Error() string {
+	if e.verb == "" {
+		return errUserSuppliedKeysUnrecorded.Error()
+	}
+	return userSuppliedKeysUnrecordedMessage(e.verb)
+}
 func (e *userSuppliedKeysWriteError) Unwrap() error { return errUserSuppliedKeysUnrecorded }
+
+// userSuppliedKeysUnrecordedFor returns err with the fixed message for verb
+// when err carries errUserSuppliedKeysUnrecorded (for example an owner
+// node's refusal relayed back by a deferred finalize, whose rebuilt error
+// does not carry the action), and err unchanged otherwise.
+func userSuppliedKeysUnrecordedFor(err error, verb string) error {
+	if err == nil || !errors.Is(err, errUserSuppliedKeysUnrecorded) {
+		return err
+	}
+	var writeErr *userSuppliedKeysWriteError
+	if errors.As(err, &writeErr) && writeErr.verb == verb {
+		return err
+	}
+	return &userSuppliedKeysWriteError{verb: verb, err: err}
+}
 
 // writeUserSuppliedKeysUnrecordedError writes the 503 for err if it is an
 // errUserSuppliedKeysUnrecorded error and reports whether it did.
@@ -294,7 +337,12 @@ func writeUserSuppliedKeysUnrecordedError(w http.ResponseWriter, err error) bool
 	if !errors.Is(err, errUserSuppliedKeysUnrecorded) {
 		return false
 	}
-	writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, errUserSuppliedKeysUnrecorded.Error(), nil)
+	text := errUserSuppliedKeysUnrecorded.Error()
+	var writeErr *userSuppliedKeysWriteError
+	if errors.As(err, &writeErr) {
+		text = writeErr.Error()
+	}
+	writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, text, nil)
 	return true
 }
 
@@ -308,11 +356,11 @@ func writeUserSuppliedKeysUnrecordedError(w http.ResponseWriter, err error) bool
 // rather than reverting them.
 func (d *HTTPAgentDispatcher) recordUserSuppliedKeyNames(ctx context.Context, agent *store.Agent, env map[string]string) error {
 	names := userSuppliedKeyNames(env)
-	stored, err := d.store.AddAgentUserSuppliedEnvKeys(ctx, agent.ID, names)
+	stored, _, err := d.store.AddAgentUserSuppliedEnvKeys(ctx, agent.ID, names)
 	if err != nil {
 		d.log.WarnContext(ctx, "DispatchFinalizeEnv: failed to record the user-supplied env key names; agent not created",
 			"agent_id", agent.ID, "count", len(names), "error", err)
-		return &userSuppliedKeysWriteError{err: err}
+		return &userSuppliedKeysWriteError{verb: finalizeActionVerb(ctx), err: err}
 	}
 	if len(stored) > 0 {
 		if agent.AppliedConfig == nil {

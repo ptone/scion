@@ -43,8 +43,8 @@ type namesWriteFaultStore struct {
 	err error
 }
 
-func (s namesWriteFaultStore) AddAgentUserSuppliedEnvKeys(context.Context, string, []string) ([]string, error) {
-	return nil, s.err
+func (s namesWriteFaultStore) AddAgentUserSuppliedEnvKeys(context.Context, string, []string) ([]string, bool, error) {
+	return nil, false, s.err
 }
 
 // H-18 (i): a failed names write fails the finalize with the fixed keyless
@@ -97,7 +97,7 @@ func TestStartGather_RecordedNameNotRequiredHasNoEffect(t *testing.T) {
 	f, gc := newGatherStartFixture(t, true, func(int, gatherStartCall) (*RemoteAgentResponse, error) {
 		return startedAnswer(true), nil
 	}, nil)
-	_, err := f.store.AddAgentUserSuppliedEnvKeys(context.Background(), f.agent.ID, []string{"FAKE_NO_LONGER_REQUIRED_KEY"})
+	_, _, err := f.store.AddAgentUserSuppliedEnvKeys(context.Background(), f.agent.ID, []string{"FAKE_NO_LONGER_REQUIRED_KEY"})
 	require.NoError(t, err)
 	agent := reloadAgent(t, f.store, f.agent.ID)
 	require.NoError(t, f.d.DispatchAgentStart(withRestartStartLeg(context.Background()), agent, "", false))
@@ -201,4 +201,52 @@ func TestSubmitAgentEnv_NamesWriteFaultIs503(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), errUserSuppliedKeysUnrecorded.Error())
 	assert.NotContains(t, rec.Body.String(), "FAKE-names-write-detail", "no store text in the body")
 	assert.NotContains(t, rec.Body.String(), "FAKE_USER_KEY", "the body names no key")
+}
+
+// The names-write 503 names the finalize's action: a create's, a start's
+// routed through create-with-gather, or a restart's start leg.
+func TestDispatchFinalizeEnv_NamesWriteFaultNamesTheAction(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ctx  func(context.Context) context.Context
+		verb string
+	}{
+		{"create", func(ctx context.Context) context.Context { return ctx }, "created"},
+		{"routed start", withPreserveWorkspace, "started"},
+		{"restart start leg", func(ctx context.Context) context.Context { return withPreserveWorkspace(withRestartStartLeg(ctx)) }, "restarted"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRunDispatchFixture(t)
+			d := NewHTTPAgentDispatcherWithClient(namesWriteFaultStore{Store: f.store, err: errors.New("FAKE-names-write-detail")}, f.client, false, slog.Default())
+			d.SetTokenGenerator(runTokenGenerator{svc: f.svc})
+			_, err := d.DispatchFinalizeEnv(tc.ctx(context.Background()), f.agent, map[string]string{"FAKE_USER_KEY": "FAKE-value"})
+			require.ErrorIs(t, err, errUserSuppliedKeysUnrecorded)
+			assert.Equal(t, userSuppliedKeysUnrecordedMessage(tc.verb), err.Error())
+			rec := httptest.NewRecorder()
+			require.True(t, writeUserSuppliedKeysUnrecordedError(rec, err))
+			assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+			assert.Contains(t, rec.Body.String(), "the agent was not "+tc.verb)
+			assert.False(t, f.client.createCalled, "nothing sent")
+		})
+	}
+}
+
+// An owner node's names-write refusal crosses back to the requester as the
+// same sentinel: the requester's errors.Is holds, it is not acted on (the
+// owner sent nothing), and the requester's 503 names the requester's action.
+func TestUserSuppliedKeysUnrecorded_CrossNodeIsNotActedOn(t *testing.T) {
+	local := fmt.Errorf("dispatch finalize_env: %w", &userSuppliedKeysWriteError{verb: "created", err: errors.New("FAKE-owner-store-detail")})
+	require.True(t, isConfirmedStartNotActedOnError(local))
+	row := &store.BrokerDispatch{Op: "finalize_env", Error: local.Error(), Result: dispatchFailureResult(local)}
+	got := dispatchFailureError(row)
+	require.ErrorIs(t, got, errUserSuppliedKeysUnrecorded, "the sentinel crosses")
+	assert.True(t, isConfirmedStartNotActedOnError(got), "the owner sent nothing: not acted on")
+	assert.NotContains(t, got.Error(), "FAKE-owner-store-detail", "no store text crosses")
+
+	relayed := userSuppliedKeysUnrecordedFor(got, "started")
+	rec := httptest.NewRecorder()
+	require.True(t, writeUserSuppliedKeysUnrecordedError(rec, relayed))
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Contains(t, rec.Body.String(), userSuppliedKeysUnrecordedMessage("started"), "the requester's action picks the verb")
+	assert.True(t, isConfirmedStartNotActedOnError(relayed))
 }

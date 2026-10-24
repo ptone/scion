@@ -45,27 +45,27 @@ var addUserSuppliedEnvKeysHook func(ctx context.Context, tx *ent.Tx, id uuid.UUI
 // locked where the dialect supports it, conditional on the stored applied
 // config being unchanged; a miss is retried, as SetAgentConfigDelivered
 // does.
-func (s *AgentStore) AddAgentUserSuppliedEnvKeys(ctx context.Context, id string, keys []string) ([]string, error) {
+func (s *AgentStore) AddAgentUserSuppliedEnvKeys(ctx context.Context, id string, keys []string) ([]string, bool, error) {
 	uid, err := parseUUID(id)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	for attempt := 0; attempt < configDeliveredAttempts; attempt++ {
-		names, done, err := s.addAgentUserSuppliedEnvKeysOnce(ctx, uid, keys)
+		names, written, done, err := s.addAgentUserSuppliedEnvKeysOnce(ctx, uid, keys)
 		if err != nil || done {
-			return names, err
+			return names, written, err
 		}
 	}
-	return nil, fmt.Errorf("add user-supplied env key names for agent %s: applied config changed concurrently", id)
+	return nil, false, fmt.Errorf("add user-supplied env key names for agent %s: applied config changed concurrently", id)
 }
 
 // addAgentUserSuppliedEnvKeysOnce is one AddAgentUserSuppliedEnvKeys
 // attempt. done is false only when the applied config changed between the
-// read and the write.
-func (s *AgentStore) addAgentUserSuppliedEnvKeysOnce(ctx context.Context, uid uuid.UUID, keys []string) (names []string, done bool, err error) {
+// read and the write; written reports that this attempt stored the list.
+func (s *AgentStore) addAgentUserSuppliedEnvKeysOnce(ctx context.Context, uid uuid.UUID, keys []string) (names []string, written, done bool, err error) {
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
-		return nil, true, err
+		return nil, false, true, err
 	}
 	defer func() { _ = tx.Rollback() }()
 	q := tx.Agent.Query().Where(agent.IDEQ(uid), agent.DeletedAtIsNil())
@@ -75,14 +75,14 @@ func (s *AgentStore) addAgentUserSuppliedEnvKeysOnce(ctx context.Context, uid uu
 	row, err := q.Select(agent.FieldAppliedConfig).Only(ctx)
 	if err != nil {
 		if ent.IsNotFound(err) {
-			return nil, true, nil
+			return nil, false, true, nil
 		}
-		return nil, true, mapError(err)
+		return nil, false, true, mapError(err)
 	}
 	raw := map[string]json.RawMessage{}
 	if row.AppliedConfig != "" {
 		if err := json.Unmarshal([]byte(row.AppliedConfig), &raw); err != nil {
-			return nil, true, fmt.Errorf("add user-supplied env key names for agent %s: %w", uid, err)
+			return nil, false, true, fmt.Errorf("add user-supplied env key names for agent %s: %w", uid, err)
 		}
 		if raw == nil { // the stored value was the JSON literal null
 			raw = map[string]json.RawMessage{}
@@ -91,21 +91,21 @@ func (s *AgentStore) addAgentUserSuppliedEnvKeysOnce(ctx context.Context, uid uu
 	var stored []string
 	if v, ok := raw[userSuppliedEnvKeysField]; ok && len(v) > 0 && string(v) != "null" {
 		if err := json.Unmarshal(v, &stored); err != nil {
-			return nil, true, fmt.Errorf("add user-supplied env key names for agent %s: %w", uid, err)
+			return nil, false, true, fmt.Errorf("add user-supplied env key names for agent %s: %w", uid, err)
 		}
 	}
 	merged := unionSorted(stored, keys)
 	if slices.Equal(merged, stored) {
-		return stored, true, nil
+		return stored, false, true, nil
 	}
 	value, err := json.Marshal(merged)
 	if err != nil {
-		return nil, true, err
+		return nil, false, true, err
 	}
 	raw[userSuppliedEnvKeysField] = value
 	updated, err := json.Marshal(raw)
 	if err != nil {
-		return nil, true, err
+		return nil, false, true, err
 	}
 	if addUserSuppliedEnvKeysHook != nil {
 		addUserSuppliedEnvKeysHook(ctx, tx, uid)
@@ -115,15 +115,15 @@ func (s *AgentStore) addAgentUserSuppliedEnvKeysOnce(ctx context.Context, uid uu
 		SetAppliedConfig(string(updated)).
 		Save(ctx)
 	if err != nil {
-		return nil, true, mapError(err)
+		return nil, false, true, mapError(err)
 	}
 	if n == 0 {
-		return nil, false, nil
+		return nil, false, false, nil
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, true, err
+		return nil, false, true, err
 	}
-	return merged, true, nil
+	return merged, true, true, nil
 }
 
 // unionSorted returns the sorted, deduplicated union of a and b, without
@@ -187,7 +187,9 @@ func (s *AgentStore) saveKeepingUserSuppliedKeys(ctx context.Context, client *en
 			return 0, nil
 		}
 	}
-	return 0, fmt.Errorf("update agent %s: applied config changed concurrently", uid)
+	// Unreachable where the row is locked (Postgres) or the store has one
+	// connection (SQLite); a conflict, so callers that retry one retry this.
+	return 0, fmt.Errorf("update agent %s: applied config changed concurrently: %w", uid, store.ErrVersionConflict)
 }
 
 // readAppliedConfig reads the raw applied_config of the agent row uid,
