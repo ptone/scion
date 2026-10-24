@@ -2066,7 +2066,21 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 			var asErr error
 			asNeededEnv, asErr = d.resolveAsNeededForKeys(ctx, agent, envReqs.Needs, envReqs.Alternatives)
 			if asErr != nil {
-				return asErr
+				var resErr *secretResolutionError
+				if !errors.As(asErr, &resErr) {
+					return asErr
+				}
+				// continueOnSecretResolutionError, as for the first pass:
+				// the provision starts nothing, so it goes on without
+				// as-needed values and the broker's needs stay unmet. A
+				// later start resolves the secrets again and fails closed
+				// there; a reprovision fails below on the still-missing
+				// env (ptone/scion#5959).
+				// Log the typed cause: its text names scope, key and kind,
+				// never a value or backend detail.
+				d.log.WarnContext(ctx, callerName+": as-needed secret resolution failed; provisioning without as-needed values",
+					"agent_id", agent.ID, "error", resErr.Err)
+				asNeededEnv = nil
 			}
 		}
 		if len(asNeededEnv) > 0 || tzNeeded {
@@ -3013,14 +3027,15 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 		resolved, err := d.secretBackend.Resolve(
 			ctx, agent.OwnerID, agent.ProjectID, agent.RuntimeBrokerID, resolveOpts)
 		if err != nil {
-			// Any resolution error fails the pass, as in resolveSecrets: a
+			// Any resolution error fails the pass, as in resolveSecrets
+			// (dispatchProvision alone goes on without the values): a
 			// secret that could not be decrypted (ErrResolveDecrypt,
 			// ptone/scion#1530 §5) or read from the backend
 			// (ErrResolveAccess), or a store error, must never be answered
 			// as if the secret were missing (ptone/scion#5959). Only the
 			// fixed message leaves the hub; the typed error stays in Err
 			// for errors.Is and the server log.
-			d.log.WarnContext(ctx, "resolveAsNeededForKeys: failed to resolve secrets; agent not created",
+			d.log.WarnContext(ctx, "resolveAsNeededForKeys: failed to resolve secrets; failing the as-needed pass",
 				"agent_id", agent.ID, "error", err)
 			return nil, &secretResolutionError{Verb: "created", Err: err}
 		}
