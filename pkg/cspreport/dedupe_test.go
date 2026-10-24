@@ -383,7 +383,7 @@ func TestRequestBoundCountsAfterCollapsing(t *testing.T) {
 	}
 	got := records(t, &buf)
 	if len(got) != maxRecordsPerRequest+1 || got[maxRecordsPerRequest]["msg"] != DroppedLogMessage || got[maxRecordsPerRequest]["dropped"] != float64(5) {
-		t.Fatalf("distinct: %d records, want %d and a dropped count of 5", len(got), maxRecordsPerRequest)
+		t.Fatalf("distinct: %d records, want %d (%d reports and a dropped count of 5)", len(got), maxRecordsPerRequest+1, maxRecordsPerRequest)
 	}
 	if h.Dedupe.size() != 1+maxRecordsPerRequest {
 		t.Fatalf("%d entries tracked, want %d (dropped reports are not tracked)", h.Dedupe.size(), 1+maxRecordsPerRequest)
@@ -538,4 +538,186 @@ func TestNilDedupeLogsEveryReport(t *testing.T) {
 	if got := records(t, &buf); len(got) != 3 {
 		t.Fatalf("%d records, want 3", len(got))
 	}
+}
+
+// pageReport is a report of its own violation for each page path.
+func pageReport(page string) string {
+	return strings.ReplaceAll(safariReportToBody, "/chat/c1", "/chat/"+page)
+}
+
+// summaryPaths returns the document_path of every summary record in buf.
+func summaryPaths(t *testing.T, buf *bytes.Buffer) []string {
+	t.Helper()
+	var out []string
+	for _, r := range records(t, buf) {
+		if r["msg"] == RepeatsLogMessage {
+			p, _ := r["document_path"].(string)
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// TestFullTableRemovesFinishedEntries: a new violation that finds the
+// table full removes every entry whose interval is over, with their
+// summaries, before any other entry, even between the once-per-interval
+// checks.
+func TestFullTableRemovesFinishedEntries(t *testing.T) {
+	var buf bytes.Buffer
+	start := time.Unix(1_700_000_000, 0)
+	clock := &fakeClock{t: start}
+	h, _ := dedupeHandler(&buf, clock, 10*time.Minute, 4)
+	post(h, "application/csp-report", pageReport("x")) // the first check runs here
+	clock.t = start.Add(time.Minute)
+	post(h, "application/csp-report", pageReport("a"))
+	post(h, "application/csp-report", pageReport("a"))
+	clock.t = start.Add(2 * time.Minute)
+	post(h, "application/csp-report", pageReport("b"))
+	clock.t = start.Add(3 * time.Minute)
+	post(h, "application/csp-report", pageReport("c"))
+	// The next check: x's interval is over (no repeats, no summary); d
+	// takes its place. The table is full again: a, b, c, d.
+	clock.t = start.Add(10 * time.Minute)
+	post(h, "application/csp-report", pageReport("d"))
+	records(t, &buf)
+	if h.Dedupe.size() != 4 {
+		t.Fatalf("%d entries tracked, want 4", h.Dedupe.size())
+	}
+	// a and b are now over, but the next check is not due until minute 20.
+	clock.t = start.Add(12 * time.Minute)
+	post(h, "application/csp-report", pageReport("e"))
+	if got := summaryPaths(t, &buf); len(got) != 1 || got[0] != "/projects/p1/chat/a" {
+		t.Fatalf("summaries = %v, want one for /projects/p1/chat/a", got)
+	}
+	if h.Dedupe.size() != 3 {
+		t.Fatalf("%d entries tracked, want 3 (a and b removed, e added)", h.Dedupe.size())
+	}
+}
+
+// TestFullTableRemovesOldestEntry: when no entry's interval is over, the
+// entry with the oldest record is removed to make room.
+func TestFullTableRemovesOldestEntry(t *testing.T) {
+	var buf bytes.Buffer
+	start := time.Unix(1_700_000_000, 0)
+	clock := &fakeClock{t: start}
+	h, _ := dedupeHandler(&buf, clock, 10*time.Minute, 2)
+	post(h, "application/csp-report", pageReport("a"))
+	clock.t = start.Add(time.Minute)
+	post(h, "application/csp-report", pageReport("b"))
+	clock.t = start.Add(2 * time.Minute)
+	post(h, "application/csp-report", pageReport("c"))
+	records(t, &buf)
+	// b is still tracked: its repeat is collapsed. a was removed: its
+	// report is logged again.
+	post(h, "application/csp-report", pageReport("b"))
+	if got := records(t, &buf); len(got) != 0 {
+		t.Fatalf("records for a repeat of b = %v, want none", got)
+	}
+	// Adding a back removes the oldest entry again, now b (with its repeat,
+	// so its summary comes first), not c.
+	post(h, "application/csp-report", pageReport("a"))
+	got := records(t, &buf)
+	if len(got) != 2 || got[0]["msg"] != RepeatsLogMessage || got[0]["document_path"] != "/projects/p1/chat/b" ||
+		got[1]["msg"] != LogMessage || got[1]["document_path"] != "/projects/p1/chat/a" {
+		t.Fatalf("records for a = %v, want b's summary, then a's report logged again", got)
+	}
+}
+
+// TestFinishedIntervalsAreCheckedOncePerInterval: the check for finished
+// intervals on any report runs at most once per interval, so an entry
+// whose interval ends just after a check gets its summary at the next
+// check, up to about one interval later.
+func TestFinishedIntervalsAreCheckedOncePerInterval(t *testing.T) {
+	var buf bytes.Buffer
+	start := time.Unix(1_700_000_000, 0)
+	clock := &fakeClock{t: start}
+	h, _ := dedupeHandler(&buf, clock, 10*time.Minute, 16)
+	post(h, "application/csp-report", pageReport("a")) // check at minute 0; a logged at 0
+	post(h, "application/csp-report", pageReport("a"))
+	clock.t = start.Add(9 * time.Minute)
+	post(h, "application/csp-report", pageReport("x")) // no check (9 < 10); x logged at 9
+	post(h, "application/csp-report", pageReport("x"))
+	clock.t = start.Add(10 * time.Minute)
+	post(h, "application/csp-report", pageReport("y")) // check at 10: a is over, x is not
+	if got := summaryPaths(t, &buf); len(got) != 1 || got[0] != "/projects/p1/chat/a" {
+		t.Fatalf("summaries at minute 10 = %v, want a's", got)
+	}
+	// x is over at minute 19, but the next check is due at minute 20.
+	clock.t = start.Add(19 * time.Minute)
+	post(h, "application/csp-report", pageReport("z"))
+	if got := summaryPaths(t, &buf); len(got) != 0 {
+		t.Fatalf("summaries at minute 19 = %v, want none (next check at 20)", got)
+	}
+	clock.t = start.Add(20 * time.Minute)
+	post(h, "application/csp-report", pageReport("w"))
+	if got := summaryPaths(t, &buf); len(got) != 1 || got[0] != "/projects/p1/chat/x" {
+		t.Fatalf("summaries at minute 20 = %v, want x's", got)
+	}
+}
+
+// TestSummaryOnRefusedAndDroppedReports: a summary found while handling a
+// report that is then refused (429) or dropped (past the per-request
+// bound) is still written.
+func TestSummaryOnRefusedAndDroppedReports(t *testing.T) {
+	start := time.Unix(1_700_000_000, 0)
+	t.Run("refused", func(t *testing.T) {
+		var buf bytes.Buffer
+		clock := &fakeClock{t: start}
+		d := NewDedupe(10*time.Minute, 16)
+		d.now = clock.now
+		allow := true
+		h := &Handler{Log: recordingLog(&buf), Dedupe: d, AllowRecord: func() (bool, int) { return allow, 1 }}
+		post(h, "application/csp-report", pageReport("a"))
+		post(h, "application/csp-report", pageReport("a"))
+		records(t, &buf)
+		clock.t = start.Add(10 * time.Minute)
+		allow = false
+		if rec := post(h, "application/csp-report", pageReport("b")); rec.Code != http.StatusTooManyRequests {
+			t.Fatalf("status = %d, want 429", rec.Code)
+		}
+		if got := summaryPaths(t, &buf); len(got) != 1 || got[0] != "/projects/p1/chat/a" {
+			t.Fatalf("summaries = %v, want a's", got)
+		}
+	})
+	t.Run("dropped", func(t *testing.T) {
+		var buf bytes.Buffer
+		clock := &fakeClock{t: start}
+		h, _ := dedupeHandler(&buf, clock, 10*time.Minute, 64)
+		post(h, "application/csp-report", pageReport("x")) // check at minute 0
+		clock.t = start.Add(time.Minute)
+		post(h, "application/csp-report", pageReport("a")) // a logged at 1
+		post(h, "application/csp-report", pageReport("a"))
+		clock.t = start.Add(10 * time.Minute)
+		post(h, "application/csp-report", pageReport("y")) // check at 10: a not over yet
+		records(t, &buf)
+		// Minute 12: a is over and no check is due before 20. One request
+		// holds 10 new violations and then a's return, past the bound: a's
+		// report is dropped, and its summary is written.
+		clock.t = start.Add(12 * time.Minute)
+		parts := make([]string, 0, maxRecordsPerRequest+1)
+		for i := 0; i < maxRecordsPerRequest; i++ {
+			parts = append(parts, fmt.Sprintf(`{"type":"csp-violation","body":{"effectiveDirective":"d%d"}}`, i))
+		}
+		a := pageReport("a")
+		parts = append(parts, a)
+		if rec := post(h, "application/reports+json", "["+strings.Join(parts, ",")+"]"); rec.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204", rec.Code)
+		}
+		var sums, dropped int
+		for _, r := range records(t, &buf) {
+			switch r["msg"] {
+			case RepeatsLogMessage:
+				if r["document_path"] == "/projects/p1/chat/a" && r["repeats"] == float64(1) {
+					sums++
+				}
+			case DroppedLogMessage:
+				if r["dropped"] == float64(1) {
+					dropped++
+				}
+			}
+		}
+		if sums != 1 || dropped != 1 {
+			t.Fatalf("a's summaries %d and dropped-count records %d, want 1 and 1", sums, dropped)
+		}
+	})
 }

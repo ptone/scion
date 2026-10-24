@@ -32,15 +32,20 @@ import (
 // record follows (RepeatsLogMessage): the count, when the first record was
 // written, and the latest repeat with when it arrived. So the records show
 // the first and the latest report of each violation, and every repeat is
-// counted. Summaries are written while reports keep arriving: Dedupe has no
-// timer, and checks for finished intervals at most once per interval, when
-// a report reaches the table full, and when the same violation comes back.
+// counted. Dedupe has no timer, so summaries are written while reports keep
+// arriving: when the same violation comes back after its interval; when
+// any report arrives and the last check for finished intervals is at least
+// one interval old (so a summary can come up to about one more interval
+// late, about two intervals after the first record at worst); and when a
+// new violation arrives with the table full. The counts are kept in memory
+// only: repeats not yet summarized are not kept across a restart.
 //
 // At most maxKeys violations are tracked: when a new one arrives with the
 // table full, the entries whose interval is over are removed, and if none
-// is, one other entry is removed early; an entry removed with repeats still
-// gets its summary. Memory stays bounded whatever the reports hold (each
-// entry holds two bounded violations' worth of text, without samples).
+// is, the entry with the oldest record is removed early; an entry removed
+// with repeats still gets its summary. Memory stays bounded whatever the
+// reports hold (each entry holds two bounded violations' worth of text,
+// without samples).
 // Summary records are not charged to the record limiter: there is at most
 // one per record written, plus one per tracked violation per interval.
 //
@@ -148,12 +153,9 @@ func (d *Dedupe) admit(v Violation, canWrite bool, allowRecord func() (bool, int
 	}
 	if len(d.entries) >= d.maxKeys {
 		summaries = d.removeFinished(now, summaries)
-		for k, e := range d.entries {
-			if len(d.entries) < d.maxKeys {
-				break
-			}
-			summaries = d.remove(k, e, summaries)
-		}
+	}
+	if len(d.entries) >= d.maxKeys {
+		summaries = d.removeOldest(summaries)
 	}
 	d.entries[key] = &dedupeEntry{logged: now}
 	return verdictWrite, summaries, 0
@@ -168,6 +170,22 @@ func (d *Dedupe) removeFinished(now time.Time, summaries []repeatSummary) []repe
 		}
 	}
 	return summaries
+}
+
+// removeOldest removes the entry whose record is the oldest, appending its
+// summary when it has repeats. d.mu is held.
+func (d *Dedupe) removeOldest(summaries []repeatSummary) []repeatSummary {
+	var oldestKey string
+	var oldest *dedupeEntry
+	for k, e := range d.entries {
+		if oldest == nil || e.logged.Before(oldest.logged) || (e.logged.Equal(oldest.logged) && k < oldestKey) {
+			oldestKey, oldest = k, e
+		}
+	}
+	if oldest == nil {
+		return summaries
+	}
+	return d.remove(oldestKey, oldest, summaries)
 }
 
 // remove removes entry e (key k), appending its summary when it has

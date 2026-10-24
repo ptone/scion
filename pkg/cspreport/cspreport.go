@@ -29,11 +29,12 @@
 // path of the page. The report's sample, which can hold the start of page
 // content such as a chat message, is left out unless Handler.RawSamples is
 // set. With Handler.Dedupe, repeats of the same violation are collapsed
-// into one record per interval, and the next record of that violation
-// also shows the latest repeat (see Dedupe and repeatAttrs).
+// into one record per interval, and a summary record (RepeatsLogMessage)
+// later counts them and shows the latest (see Dedupe and repeatAttrs).
 package cspreport
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -178,7 +179,8 @@ reports:
 	for _, v := range violations {
 		verdict, summaries, retry := h.Dedupe.admit(v, written < maxRecordsPerRequest, h.allowRecord)
 		for i := range summaries {
-			log.LogAttrs(r.Context(), slog.LevelInfo, RepeatsLogMessage, repeatAttrs(&summaries[i])...)
+			// A summary belongs to earlier requests, not this one.
+			log.LogAttrs(context.Background(), slog.LevelInfo, RepeatsLogMessage, repeatAttrs(&summaries[i])...)
 		}
 		switch verdict {
 		case verdictRepeat:

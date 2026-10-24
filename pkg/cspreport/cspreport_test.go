@@ -478,6 +478,8 @@ func TestPackageStoresNothing(t *testing.T) {
 		"net/http": true, "strconv": true, "strings": true, "unicode": true, "unicode/utf8": true,
 		// Dedupe keeps its counts in memory only.
 		"sync": true, "time": true,
+		// Summary records are logged without a request's context.
+		"context": true,
 	}
 	if len(pkg.Imports) == 0 {
 		t.Fatal("no imports read; the check would pass vacuously")
