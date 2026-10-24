@@ -2940,11 +2940,13 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 	for _, filter := range d.envScopesForDispatch(ctx, agent) {
 		vars, err := d.store.ListEnvVars(ctx, filter)
 		if err != nil {
-			if d.debug {
-				d.log.Warn("resolveAsNeededForKeys: failed to list env vars",
-					"scope", filter.Scope, "scope_id", filter.ScopeID, "error", err)
-			}
-			continue
+			// Propagate the read error with the fixed env settings
+			// resolution message (ptone/scion#6089). The logged error
+			// names the scope and a classification only.
+			readErr := newStoredEnvReadError(filter.Scope, err)
+			d.log.WarnContext(ctx, "resolveAsNeededForKeys: failed to read stored env settings; failing the as-needed pass",
+				"agent_id", agent.ID, "error", readErr)
+			return nil, &secretResolutionError{Verb: "created", Source: resolutionSourceEnvSettings, Err: readErr}
 		}
 		for _, v := range vars {
 			if v.InjectionMode != store.InjectionModeAsNeeded {
