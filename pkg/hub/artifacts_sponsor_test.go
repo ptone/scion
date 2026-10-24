@@ -246,8 +246,9 @@ func TestArtifactHostRecordedDelegator(t *testing.T) {
 	})
 	// Deleting the home project ends both clauses. The store delete removes
 	// only the project row, so the recorded user's role binding in the home
-	// is left behind and would still admit it: the home-exists check is
-	// what ends the review clause.
+	// is left behind and would still admit it: the home-exists checks end
+	// the clauses (each clause's own check, and recordedDelegator's, which
+	// the direct call below pins).
 	t.Run("home project deleted", func(t *testing.T) {
 		g := newReviewGrantFixture(t)
 		h := newArtifactHost(g.srv)
@@ -265,7 +266,9 @@ func TestArtifactHostRecordedDelegator(t *testing.T) {
 		h := newArtifactHost(g.srv)
 		super := tid("sp-super")
 		createRS3SuperAdmin(t, g.s, super)
-		require.NotEqual(t, "", g.reviewRecorded(h, g.user(super), g.agent.ID, g.home, super), "before the delete")
+		// The precondition the top check is pinned against: before the
+		// delete the super-admin answers through the admin clause.
+		require.Equal(t, artifacts.ReviewClauseProjectAdmin, g.reviewRecorded(h, g.user(super), g.agent.ID, g.home, super), "before the delete")
 		require.NoError(t, g.s.DeleteProject(context.Background(), g.home))
 		assert.Equal(t, "", g.reviewRecorded(h, g.user(super), g.agent.ID, g.home, super), "review clause")
 		assert.Equal(t, "", g.stewardRecorded(h, g.user(super), g.agent.ID, g.home, super), "steward clause")

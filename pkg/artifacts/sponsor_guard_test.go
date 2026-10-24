@@ -24,8 +24,8 @@ import (
 	"testing"
 )
 
-// sponsorRefSites is every non-test, non-comment source line in pkg/artifacts
-// and pkg/hub (recursively) that names the recorded delegating user, either
+// sponsorRefSites is every non-test, non-comment source line under pkg/ and
+// cmd/ (recursively) that names the recorded delegating user, either
 // the artifact.sponsor_ref column or the Artifact.SponsorRef field
 // (ptone/scion#6028). Each is reviewed and has a role:
 //   - write: the only two writers of a value, createArtifact (its INSERT
@@ -38,8 +38,12 @@ import (
 //   - ddl: the 0007_orphans column definition.
 //
 // A new line, a changed line or a removed one fails TestSponsorRefWriteSites.
-// A phase that adds a writer (for example clearing the value on an ownership
+// A change that adds a writer (for example clearing the value on an ownership
 // transfer) adds it here, with its role, in the same change.
+//
+// The check is textual. It does not see a write that never names the field
+// or the column, such as copying a whole Artifact value (*a = *other) into
+// a create; code review covers that case.
 var sponsorRefSites = []struct{ file, line, role string }{
 	{"pkg/artifacts/grants.go", "clause = clauser.ReviewGrantClause(ctx, a.OwnerRef, a.ScopeRef, a.SponsorRef)", "pass"},
 	{"pkg/artifacts/grants.go", "} else if authority, ok := s.host.(ReviewGrantAuthority); !ok || !authority.MayGrantReview(ctx, a.OwnerRef, a.ScopeRef, a.SponsorRef) {", "pass"},
@@ -62,15 +66,16 @@ var sponsorRefSites = []struct{ file, line, role string }{
 
 // TestSponsorRefWriteSites pins the single write path of the recorded
 // delegating user at the source level: the lines naming sponsor_ref or
-// SponsorRef outside tests and comments, in pkg/artifacts and in pkg/hub
-// (every subdirectory of both), are exactly sponsorRefSites. The boundary
+// SponsorRef outside tests and comments, anywhere under pkg/ and cmd/
+// (every subdirectory), are exactly sponsorRefSites. The boundary
 // tests (TestSponsorRequestCannotSupply) pin the request channels; this
 // pins that no other code writes the value.
 func TestSponsorRefWriteSites(t *testing.T) {
 	root := filepath.Join("..", "..")
 	var got []string
-	for _, dir := range []string{"pkg/artifacts", "pkg/hub"} {
-		// scan-coverage:exempt recursive walk of pkg/artifacts and pkg/hub, every subdirectory
+	for _, dir := range []string{"pkg", "cmd"} {
+		// pkgmove:scan-covers pkg/hub/...
+		// recursive walk of pkg/ (pkg/hub included) and cmd/, no SkipDir except testdata
 		err := filepath.WalkDir(filepath.Join(root, dir), func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
