@@ -170,12 +170,15 @@ func (c *ControlChannelBrokerClient) StartAgent(ctx context.Context, brokerID, b
 		return nil, err
 	}
 
-	var result RemoteAgentResponse
+	// A start sent with gatherEnv may be answered with a needs report
+	// (ptone/scion#6101); startAnswer reads both bodies and tells them
+	// apart, so a needs report is never read as a started agent.
+	var result startAnswer
 	if err := json.Unmarshal(resp.Body, &result); err != nil {
 		return nil, nil
 	}
 
-	return &result, nil
+	return result.response(), nil
 }
 
 // StopAgent stops an agent via control channel.

@@ -1051,22 +1051,8 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 		}
 	}
 
-	// Include the template's secret declarations for broker env-gather,
-	// from the template's job config (its stripped AgentConfig snapshot,
-	// ptone/scion#4222), not the row's API-written Config.
-	if agent.AppliedConfig != nil && agent.AppliedConfig.TemplateID != "" {
-		if jc := d.templateJobConfig(ctx, agent.AppliedConfig.TemplateID); jc != nil && len(jc.Secrets) > 0 {
-			req.RequiredSecrets = make([]api.RequiredSecret, len(jc.Secrets))
-			for i, s := range jc.Secrets {
-				req.RequiredSecrets[i] = api.RequiredSecret{
-					Key:         s.Key,
-					Description: s.Description,
-					Type:        s.Type,
-					Target:      s.Target,
-				}
-			}
-		}
-	}
+	// Include the template's secret declarations for broker env-gather.
+	req.RequiredSecrets = d.requiredSecretsFor(ctx, agent)
 
 	// Resolve Hub-registry skills as the agent's creator. The broker's own
 	// identity cannot read non-public skills (#1784).
@@ -1834,6 +1820,32 @@ func (d *HTTPAgentDispatcher) swapRunID(ctx context.Context, agent *store.Agent,
 	}
 	d.log.Debug("Dispatcher: "+what,
 		"agent_id", agent.ID, "minted_run_id", minted, "run_id", to)
+}
+
+// requiredSecretsFor returns the secret declarations of agent's Hub
+// template for the broker's env-gather preflight, from the template's job
+// config (its stripped AgentConfig snapshot, ptone/scion#4222), not the
+// row's API-written Config. Nil when the agent has no Hub template or the
+// template declares none. Create and a start that gathers env send the same
+// list (ptone/scion#6101).
+func (d *HTTPAgentDispatcher) requiredSecretsFor(ctx context.Context, agent *store.Agent) []api.RequiredSecret {
+	if agent.AppliedConfig == nil || agent.AppliedConfig.TemplateID == "" {
+		return nil
+	}
+	jc := d.templateJobConfig(ctx, agent.AppliedConfig.TemplateID)
+	if jc == nil || len(jc.Secrets) == 0 {
+		return nil
+	}
+	out := make([]api.RequiredSecret, len(jc.Secrets))
+	for i, s := range jc.Secrets {
+		out[i] = api.RequiredSecret{
+			Key:         s.Key,
+			Description: s.Description,
+			Type:        s.Type,
+			Target:      s.Target,
+		}
+	}
+	return out
 }
 
 // DispatchAgentCreate creates and starts an agent on the runtime broker. It
@@ -3245,6 +3257,11 @@ type startEnvResult struct {
 	// experiments is the dispatch experiment set read for this start; the
 	// caller sends it to the broker so both see the same set.
 	experiments []string
+	// asNeededKeys are the as-needed secret targets resolveSecrets listed,
+	// sent as availableAsNeededKeys on a start that gathers env, as create
+	// sends them, so the broker's auth autodetect sees the same keys
+	// (ptone/scion#6101).
+	asNeededKeys []string
 }
 
 // buildStartEnv assembles the full resolved environment used to start or
@@ -3340,7 +3357,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	// lookup and before any agent or transport token is minted below, so
 	// nothing reaches the broker and there is nothing to revoke. Absence is
 	// not an error: an agent with no secrets resolves to an empty list.
-	resolvedSecrets, _, err := d.resolveSecrets(ctx, agent)
+	resolvedSecrets, asNeededKeys, err := d.resolveSecrets(ctx, agent)
 	if err != nil {
 		d.log.WarnContext(ctx, caller+": failed to resolve secrets; agent not "+startedVerb,
 			"agent_id", agent.ID, "error", err)
@@ -3533,6 +3550,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 		workspace:       wsSpec,
 		tokenGrant:      tokenGrant,
 		experiments:     experiments,
+		asNeededKeys:    asNeededKeys,
 	}, nil
 }
 
@@ -3744,7 +3762,7 @@ func (d *HTTPAgentDispatcher) startRoutesThroughCreate(ctx context.Context, agen
 	if agent.AppliedConfig != nil && agent.AppliedConfig.ConfigDelivered {
 		return false, "", nil
 	}
-	return d.hasAsNeededEntries(ctx, agent)
+	return d.hasAsNeededEntries(ctx, agent, "started")
 }
 
 // hasAsNeededEntries reports whether any env var or secret in agent's scopes
@@ -3752,14 +3770,16 @@ func (d *HTTPAgentDispatcher) startRoutesThroughCreate(ctx context.Context, agen
 // A lookup error is returned as the *secretResolutionError a start returns
 // for the same read in buildStartEnv: the fixed message, with the read
 // error kept for the server log.
-func (d *HTTPAgentDispatcher) hasAsNeededEntries(ctx context.Context, agent *store.Agent) (bool, string, error) {
+//
+// verb is the action the error names ("started" or "restarted").
+func (d *HTTPAgentDispatcher) hasAsNeededEntries(ctx context.Context, agent *store.Agent, verb string) (bool, string, error) {
 	if len(agent.Ancestry) > 1 {
 		return true, "progeny entries", nil
 	}
 	for _, filter := range d.envScopesForDispatch(ctx, agent) {
 		vars, err := d.store.ListEnvVars(ctx, filter)
 		if err != nil {
-			return false, "", &secretResolutionError{Verb: "started", Source: resolutionSourceEnvSettings,
+			return false, "", &secretResolutionError{Verb: verb, Source: resolutionSourceEnvSettings,
 				Err: fmt.Errorf("list %s env vars: %w", filter.Scope, err)}
 		}
 		for _, v := range vars {
@@ -3785,7 +3805,7 @@ func (d *HTTPAgentDispatcher) hasAsNeededEntries(ctx context.Context, agent *sto
 	for _, sc := range scopes {
 		metas, err := d.secretBackend.List(ctx, secret.Filter{Scope: sc.scope, ScopeID: sc.id})
 		if err != nil {
-			return false, "", &secretResolutionError{Verb: "started", Err: fmt.Errorf("list %s secrets: %w", sc.scope, err)}
+			return false, "", &secretResolutionError{Verb: verb, Err: fmt.Errorf("list %s secrets: %w", sc.scope, err)}
 		}
 		for _, m := range metas {
 			if m.InjectionMode == store.InjectionModeAsNeeded {
@@ -3870,6 +3890,22 @@ func (d *HTTPAgentDispatcher) DispatchAgentStartWithOptions(ctx context.Context,
 // DispatchAgentStartWithOptions. The result is non-nil only for a start a
 // broker accepted as an asynchronous launch (here or on the owner node).
 func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool, opts StartDispatchOptions) (_ *StartDispatchResult, err error) {
+	// Capability switch, before anything else (ptone/scion#6101). A broker
+	// that reports startEnvGather gathers as-needed values at every start
+	// (startGather), so the create routing below is not used for it. A
+	// broker record that cannot be read fails the start.
+	gatherEnv, capErr := d.startEnvGatherCapable(ctx, agent)
+	if capErr != nil {
+		return nil, capErr
+	}
+	if gatherEnv {
+		// The gathering start is synchronous: the env-gather replay is
+		// not wired into an asynchronous launch, and an asynchronous
+		// start must not skip the gather. The cleared option also reaches
+		// the owner node of a cross-node hand-off (StartDispatchArgs.Async).
+		opts.Async = false
+		return d.dispatchAgentStartSent(ctx, agent, task, resume, opts, true)
+	}
 	route, why, routeErr := d.startRoutesThroughCreate(ctx, agent, resume, opts)
 	if routeErr != nil {
 		if secretResolutionSourceOf(routeErr) == resolutionSourceEnvSettings {
@@ -3886,6 +3922,25 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 			"agent_id", agent.ID, "reason", why)
 		return d.startThroughCreate(ctx, agent, task)
 	}
+	// A plain start on this broker cannot gather as-needed values: an
+	// agent that has them is refused before anything is minted or sent
+	// (ptone/scion#6101).
+	has, _, hasErr := d.hasAsNeededEntries(ctx, agent, "started")
+	if hasErr != nil {
+		return nil, hasErr
+	}
+	if has {
+		d.log.WarnContext(ctx, "DispatchAgentStart: the agent's broker cannot gather as-needed values; agent not started",
+			"agent_id", agent.ID, "broker_id", agent.RuntimeBrokerID)
+		return nil, errBrokerLacksStartEnvGather
+	}
+	return d.dispatchAgentStartSent(ctx, agent, task, resume, opts, false)
+}
+
+// dispatchAgentStartSent is dispatchAgentStart after its capability switch
+// and routing: the start sent to the broker. With gatherEnv the start is
+// sent with env-gather and completed by startGather (ptone/scion#6101).
+func (d *HTTPAgentDispatcher) dispatchAgentStartSent(ctx context.Context, agent *store.Agent, task string, resume bool, opts StartDispatchOptions, gatherEnv bool) (_ *StartDispatchResult, err error) {
 	ctx, span := tracer.Start(ctx, "hub.dispatch.start")
 	defer span.End()
 	// The broker reads the hub's agent ID (api.AgentIDQueryParam) on every
@@ -4097,6 +4152,16 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 	if d.creatorSkillPreResolver != nil {
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
 	}
+	if gatherEnv {
+		// The env-gather preflight inputs create sends (ptone/scion#6101).
+		extras.GatherEnv = true
+		extras.RequiredSecrets = d.requiredSecretsFor(ctx, agent)
+		extras.AvailableAsNeededKeys = startEnv.asNeededKeys
+		if agent.AppliedConfig != nil {
+			extras.NoAuth = agent.AppliedConfig.NoAuth
+			extras.HarnessAuth = agent.AppliedConfig.HarnessAuth
+		}
+	}
 
 	runID, previousRunID, token, recorded, err := d.beginRun(ctx, agent, startEnv.tokenGrant)
 	if err != nil {
@@ -4111,8 +4176,10 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 	// send is one start send, including the hash-mismatch repair and
 	// resend, so one asynchronous launch spans both attempts (design L7).
 	// A non-nil f adds the launch fields.
+	envGatherFinal := false
 	send := func(ctx context.Context, f *launchFields) (*RemoteAgentResponse, error) {
 		ex := extras
+		ex.EnvGatherFinal = envGatherFinal
 		if f != nil {
 			ex.AsyncLaunch = true
 			ex.LaunchID = f.LaunchID
@@ -4166,6 +4233,22 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 		}
 	default:
 		resp, err = send(ctx, nil)
+		if gatherEnv {
+			resp, err = d.startGather(ctx, agent, resp, err, resolvedEnv, &envClassifications,
+				func(ctx context.Context, final bool) (*RemoteAgentResponse, error) {
+					envGatherFinal = final
+					return send(ctx, nil)
+				},
+				func(ctx context.Context) {
+					// The broker started a run without gathering env:
+					// stop that run (best effort; the failed start is
+					// settled below either way).
+					if stopErr := d.client.StopAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, runID); stopErr != nil {
+						d.log.WarnContext(ctx, "DispatchAgentStart: stopping the run started without env-gather failed",
+							"agent_id", agent.ID, "run_id", runID, "error", stopErr)
+					}
+				})
+		}
 	}
 	if accepted != nil {
 		// The broker accepted the start as an asynchronous launch (or its

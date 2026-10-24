@@ -1523,6 +1523,8 @@ func (s *Server) handleExistingAgent(
 				// Response written.
 			case writeSecretResolutionError(w, err):
 				// 503: the agent's secrets or stored env settings could not be read; nothing was sent.
+			case writeStartEnvGatherError(w, err, api.AgentActionStart):
+				// 422/412/503: the start's env-gather failed closed (ptone/scion#6101).
 			case writeEmptyPerAgentCapabilityError(w, err):
 				// 412 already written (design #2703 D3).
 			case relayDispatchRefusal(w, err):
@@ -1681,6 +1683,8 @@ func (s *Server) handleExistingAgent(
 					// Response written.
 				case writeSecretResolutionError(w, err):
 					// 503: the agent's secrets or stored env settings could not be read; nothing was sent.
+				case writeStartEnvGatherError(w, err, api.AgentActionStart):
+					// 422/412/503: the start's env-gather failed closed (ptone/scion#6101).
 				case writeEmptyPerAgentCapabilityError(w, err):
 					// 412 already written (design #2703 D3).
 				case relayDispatchRefusal(w, err):
@@ -1933,6 +1937,8 @@ func (s *Server) handleExistingAgent(
 				// Response written.
 			case writeSecretResolutionError(w, err):
 				// 503: the agent's secrets or stored env settings could not be read; nothing was sent.
+			case writeStartEnvGatherError(w, err, api.AgentActionStart):
+				// 422/412/503: the start's env-gather failed closed (ptone/scion#6101).
 			case writeEmptyPerAgentCapabilityError(w, err):
 				// 412 already written (design #2703 D3).
 			case relayDispatchRefusal(w, err):

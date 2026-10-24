@@ -292,6 +292,15 @@ func isConfirmedStartNotActedOnError(err error) bool {
 	if isSecretResolutionError(err) {
 		return true
 	}
+	// A start's env-gather failures (ptone/scion#6101): the broker answered
+	// a needs report and started nothing, and no replay was sent or the
+	// replay was answered with a needs report; or the start was refused
+	// before anything was sent. Not when the broker started a run without
+	// the envGathered echo: that start was acted on (and stopped).
+	if errors.Is(err, errStartEnvUnmet) || errors.Is(err, errStartEnvGatherCapabilityUnknown) ||
+		(errors.Is(err, errBrokerLacksStartEnvGather) && !isStartEnvGatherEchoMissing(err)) {
+		return true
+	}
 	// A flat Runtime Broker refusal is raised before anything is sent.
 	var refusal *RuntimeTargetRefusal
 	if errors.As(err, &refusal) {

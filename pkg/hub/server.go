@@ -860,6 +860,20 @@ type StartExtras struct {
 	// (wire key previousProjectIds; see previousProjectIDs). Set on start
 	// and restart; empty sends nothing.
 	PreviousProjectIDs []string
+	// GatherEnv asks the broker to run the env-gather preflight on this
+	// start and to answer a needs report (HTTP 202 with envRequirements)
+	// instead of starting when required keys are unmet (ptone/scion#6101).
+	// EnvGatherFinal marks the replay after the hub's as-needed pass: the
+	// broker may then start with marker-only keys unmet. NoAuth,
+	// HarnessAuth, RequiredSecrets and AvailableAsNeededKeys are the
+	// preflight inputs create sends in its request. Sent only to a broker
+	// that reports startEnvGather; zero values send nothing.
+	GatherEnv             bool
+	EnvGatherFinal        bool
+	NoAuth                bool
+	HarnessAuth           string
+	RequiredSecrets       []api.RequiredSecret
+	AvailableAsNeededKeys []string
 }
 
 // applyStartExtras writes extras onto payload as flat top-level wire keys.
@@ -957,6 +971,24 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if extras.LaunchKeepaliveSeconds > 0 {
 		payload["launchKeepaliveSeconds"] = extras.LaunchKeepaliveSeconds
+	}
+	if extras.GatherEnv {
+		payload["gatherEnv"] = true
+	}
+	if extras.EnvGatherFinal {
+		payload["envGatherFinal"] = true
+	}
+	if extras.NoAuth {
+		payload["noAuth"] = true
+	}
+	if extras.HarnessAuth != "" {
+		payload["harnessAuth"] = extras.HarnessAuth
+	}
+	if len(extras.RequiredSecrets) > 0 {
+		payload["requiredSecrets"] = extras.RequiredSecrets
+	}
+	if len(extras.AvailableAsNeededKeys) > 0 {
+		payload["availableAsNeededKeys"] = extras.AvailableAsNeededKeys
 	}
 }
 
@@ -1681,6 +1713,39 @@ type RemoteAgentResponse struct {
 	LaunchPending    bool   `json:"launchPending,omitempty"`
 	LaunchID         string `json:"launchId,omitempty"`
 	LaunchInstanceID string `json:"launchInstanceId,omitempty"`
+
+	// EnvGathered mirrors runtimebroker.CreateAgentResponse.EnvGathered: a
+	// broker sets it on a start answer whenever the request carried
+	// gatherEnv (ptone/scion#6101). A start the hub sent with gatherEnv
+	// whose answer lacks it came from a broker without the env-gather start
+	// path (startGather's echo check).
+	EnvGathered bool `json:"envGathered,omitempty"`
+
+	// EnvNeeds is set by the start transports, never decoded from the
+	// wire: the broker answered a gatherEnv start with a needs report
+	// (envRequirements) and started nothing. Agent is then nil.
+	EnvNeeds *RemoteEnvRequirementsResponse `json:"-"`
+}
+
+// startAnswer is the body of a broker start answer, which is either a
+// start's own CreateAgentResponse or, for a start sent with gatherEnv, a
+// needs report (EnvRequirementsResponse). The two bodies share no JSON key,
+// so one decode reads both; envRequirements tells them apart.
+type startAnswer struct {
+	RemoteAgentResponse
+	RemoteEnvRequirementsResponse
+}
+
+// response returns the start answer a as the response callers read. A
+// needs report is returned as a response carrying only EnvNeeds, so no
+// caller can read it as a started agent.
+func (a *startAnswer) response() *RemoteAgentResponse {
+	if a.EnvRequirements {
+		needs := a.RemoteEnvRequirementsResponse
+		return &RemoteAgentResponse{EnvNeeds: &needs}
+	}
+	resp := a.RemoteAgentResponse
+	return &resp
 }
 
 // RemoteEnvRequirementsResponse is returned by the broker when env gather is needed.
@@ -1700,6 +1765,12 @@ type RemoteEnvRequirementsResponse struct {
 	Needs        []string                 `json:"needs"`
 	SecretInfo   map[string]SecretKeyInfo `json:"secretInfo,omitempty"`
 	Alternatives map[string][]string      `json:"alternatives,omitempty"` // Maps canonical key in Needs to alternative key names from the same any_of group
+	// EnvRequirements and MarkerOnly mirror the broker's
+	// EnvRequirementsResponse fields (ptone/scion#6101): the needs-report
+	// discriminator, and the needs whose only origin is a passthrough
+	// marker, as the broker computed them.
+	EnvRequirements bool     `json:"envRequirements,omitempty"`
+	MarkerOnly      []string `json:"markerOnly,omitempty"`
 }
 
 // RemoteAgentInfo contains agent information from a remote runtime broker.

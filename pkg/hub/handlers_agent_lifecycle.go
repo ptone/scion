@@ -985,6 +985,19 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				}
 				return
 			}
+			// Refuse before the stop leg when the start leg could not
+			// gather the agent's as-needed values (a broker without
+			// startEnvGather, for an agent that has them) or the broker
+			// record cannot be read: the agent is left as it was
+			// (ptone/scion#6101).
+			if pc, ok := dispatcher.(restartEnvGatherPrechecker); ok {
+				if err := pc.RestartEnvGatherPrecheck(ctx, agent); err != nil {
+					if !writeSecretResolutionError(w, err) && !writeStartEnvGatherError(w, err, api.AgentActionRestart) {
+						writeErrorFromErr(w, err, "")
+					}
+					return
+				}
+			}
 			// Check the broker cap before the start claim, the run intent
 			// write and the stop leg (ptone/scion#2010): a restart refused
 			// at the cap must leave the agent as it was, with its container
@@ -1193,6 +1206,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			return
 		}
 		if writeSecretResolutionError(w, dispatchErr) {
+			return
+		}
+		if writeStartEnvGatherError(w, dispatchErr, action) {
 			return
 		}
 		if writeEmptyPerAgentCapabilityError(w, dispatchErr) {
