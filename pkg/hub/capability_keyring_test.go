@@ -1266,6 +1266,7 @@ func TestCapabilityKeyring_DeliveryWithProjectionStillSigned(t *testing.T) {
 	plan[0].Delivery.ProjectedMount = "test-only-shared"
 	applyProjection(&plan[0])
 	require.Equal(t, plan[0].Delivery.ProjectedPath, plan[0].ProjectedPath)
+	require.Equal(t, "test-only-shared", plan[0].ProjectedMount)
 	wire := a.attachmentDelivery().Issue(context.Background(), f.call.Agent, f.call.Agent.RuntimeBrokerID, plan)
 	require.Len(t, wire, 1)
 	token := tokenOf(t, wire[0])
@@ -1276,7 +1277,21 @@ func TestCapabilityKeyring_DeliveryWithProjectionStillSigned(t *testing.T) {
 	// token stays well-formed and its refusal comes from the MAC check.
 	payload, err := base64.RawURLEncoding.Strict().DecodeString(parts[2])
 	require.NoError(t, err)
-	payload[len(payload)/2] ^= 0x01
+	// The signed payload carries only the capability fields; the projection
+	// is not part of it.
+	var fields map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(payload, &fields))
+	keys := make([]string, 0, len(fields))
+	for k := range fields {
+		keys = append(keys, k)
+	}
+	assert.ElementsMatch(t, []string{"a", "m", "g", "b", "e", "n"}, keys)
+	assert.NotContains(t, string(payload), "test-only-shared")
+	// Flip a byte inside the artifact ID value (never the nonce), so the
+	// refusal below cannot depend on the field lengths.
+	at := bytes.Index(payload, []byte(`"a":"`))
+	require.GreaterOrEqual(t, at, 0)
+	payload[at+5] ^= 0x01
 	altered := "ad2.gen1." + base64.RawURLEncoding.EncodeToString(payload) + "." + parts[3]
 	ap := strings.Split(altered, ".")
 	require.Len(t, ap, 4)
