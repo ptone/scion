@@ -127,8 +127,9 @@ func TestCreateStartFailure_PreserveWorkspaceKeepsWorkspaceAndBranch(t *testing.
 }
 
 // The control: without preserveWorkspace the same failure still cleans up
-// the agent's files and deletes its branch, so the test above reaches the
-// cleanup branch.
+// the agent's files, so the test above reaches the cleanup branch. The
+// branch is kept either way: the failed-start cleanup never deletes a
+// branch (agent.DeleteStartFailureFiles).
 func TestCreateStartFailure_PlainCreateStillCleansUp(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Fatalf("git is required: %v", err)
@@ -146,9 +147,11 @@ func TestCreateStartFailure_PlainCreateStillCleansUp(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(workspace, preserveCleanupFile)); !os.IsNotExist(err) {
 		t.Fatalf("a plain create's failure should clean up the agent's files (stat err %v)", err)
 	}
-	if out := gitPreserveT(t, repo, "branch", "--list", "same-name"); out != "" {
-		t.Errorf("a plain create's failure should delete the agent branch (git branch --list: %q; worktrees:\n%s)",
-			out, gitPreserveT(t, repo, "worktree", "list", "--porcelain"))
+	if out := gitPreserveT(t, repo, "worktree", "list", "--porcelain"); strings.Contains(out, workspace) {
+		t.Errorf("a plain create's failure should remove the worktree entry (worktrees:\n%s)", out)
+	}
+	if out := gitPreserveT(t, repo, "branch", "--list", "same-name"); !strings.Contains(out, "same-name") {
+		t.Errorf("the failed-start cleanup deleted the agent branch (git branch --list: %q)", out)
 	}
 }
 
