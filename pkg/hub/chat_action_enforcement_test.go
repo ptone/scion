@@ -22,6 +22,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -44,7 +46,7 @@ func assertChatActionDenied(t *testing.T, rec *httptest.ResponseRecorder, action
 	assert.Equal(t, ChatReasonReadOnly, details["reason"])
 }
 
-// topicName reads a thread's stored name and default agent; ok is false
+// topicState reads a thread's stored name and default agent; ok is false
 // when the thread no longer exists.
 func (f *chatFixture) topicState(t *testing.T, key string) (name, defaultAgent string, ok bool) {
 	t.Helper()
@@ -261,4 +263,94 @@ func TestChatMessageDelete_DeleteOwnAction(t *testing.T) {
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		assert.Empty(t, content(id), "a retracted message is redacted")
 	}
+}
+
+// formerPoster creates a user who may read and post in projectID through
+// one role binding, and returns it with a function that deletes the
+// binding (the user is removed from the project).
+func (f *chatFixture) formerPoster(t *testing.T, projectID string) (string, func()) {
+	t.Helper()
+	ctx := context.Background()
+	id := f.plainUser(t)
+	rd, err := f.s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name: "chat-poster-" + uuid.NewString()[:8], ScopeType: store.RoleScopeProject,
+		Permissions: []string{"project.read", "project.list", "project.chat_post"},
+	})
+	require.NoError(t, err)
+	rb, err := f.s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      id,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+	return id, func() { require.NoError(t, f.s.DeleteRoleBinding(ctx, rb.ID)) }
+}
+
+// TestChatMessageEdit_SenderWithoutProjectRead_NotFound: editing one's own
+// thread message needs the thread to be readable now. A sender removed from
+// the project, and a message of a deleted thread, get the missing-thread
+// answer (404), and the message is unchanged.
+func TestChatMessageEdit_SenderWithoutProjectRead_NotFound(t *testing.T) {
+	f := newChatFixture(t)
+	ctx := context.Background()
+	content := func(id string) string {
+		t.Helper()
+		m, err := f.s.GetMessage(ctx, id)
+		require.NoError(t, err)
+		return m.Msg
+	}
+	poster, remove := f.formerPoster(t, f.projA)
+	// Control: before the removal the poster edits its message.
+	control := f.chatMessage(t, "user:"+poster, poster, f.topicA, f.projA, "control")
+	rec := f.session(t, poster, http.MethodPut, chatConversationPath(f.topicA, "messages/"+control), map[string]string{"content": "control edited"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	mine := f.chatMessage(t, "user:"+poster, poster, f.topicA, f.projA, "before removal")
+	remove()
+	rec = f.session(t, poster, http.MethodPut, chatConversationPath(f.topicA, "messages/"+mine), map[string]string{"content": "after removal"})
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "Thread not found")
+	assert.Equal(t, "before removal", content(mine), "a refused edit leaves the message unchanged")
+
+	gone := f.topic(t, f.projA)
+	memberMsg := f.chatMessage(t, "user:"+f.member, f.member, gone, f.projA, "in a deleted thread")
+	require.NoError(t, f.wcs.DeleteTopic(ctx, gone))
+	rec = f.session(t, f.member, http.MethodPut, chatConversationPath(gone, "messages/"+memberMsg), map[string]string{"content": "edited"})
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	assert.Equal(t, "in a deleted thread", content(memberMsg))
+}
+
+// TestChatMessageDelete_SenderWithoutProjectRead_NotFound: deleting one's
+// own thread message (delete_own) needs the thread to be readable now. A
+// sender removed from the project, and a message of a deleted thread, get
+// the missing-thread answer (404), and the message is not redacted.
+func TestChatMessageDelete_SenderWithoutProjectRead_NotFound(t *testing.T) {
+	f := newChatFixture(t)
+	ctx := context.Background()
+	content := func(id string) string {
+		t.Helper()
+		m, err := f.s.GetMessage(ctx, id)
+		require.NoError(t, err)
+		return m.Msg
+	}
+	poster, remove := f.formerPoster(t, f.projA)
+	// Control: before the removal the poster deletes a message of its own.
+	control := f.chatMessage(t, "user:"+poster, poster, f.topicA, f.projA, "control")
+	rec := f.session(t, poster, http.MethodDelete, chatConversationPath(f.topicA, "messages/"+control), nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	mine := f.chatMessage(t, "user:"+poster, poster, f.topicA, f.projA, "before removal")
+	remove()
+	rec = f.session(t, poster, http.MethodDelete, chatConversationPath(f.topicA, "messages/"+mine), nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "Thread not found")
+	assert.Equal(t, "before removal", content(mine), "a refused delete leaves the message in place")
+
+	gone := f.topic(t, f.projA)
+	memberMsg := f.chatMessage(t, "user:"+f.member, f.member, gone, f.projA, "in a deleted thread")
+	require.NoError(t, f.wcs.DeleteTopic(ctx, gone))
+	rec = f.session(t, f.member, http.MethodDelete, chatConversationPath(gone, "messages/"+memberMsg), nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	assert.Equal(t, "in a deleted thread", content(memberMsg))
 }
