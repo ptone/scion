@@ -1252,7 +1252,7 @@ func (s *Server) existingAgentFlatChecks(ctx context.Context, w http.ResponseWri
 	case existingBranchStart:
 		if a.RuntimeBrokerID != "" {
 			if err := s.lifecyclePlacementCheck(ctx, a, req.Profile, req.ExpectedRuntimeTargetID); err != nil {
-				if !writeRuntimeTargetRefusal(w, err) {
+				if !writeRuntimeTargetRefusal(w, err) && !writePreserveWorkspaceCapabilityError(w, err) {
 					writeErrorFromErr(w, err, "")
 				}
 				return existingAgentErrored, true

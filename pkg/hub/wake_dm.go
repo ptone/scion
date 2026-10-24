@@ -390,7 +390,7 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			if errors.Is(err, errBrokerRecordUnreadable) {
 				return nil, &AgentDMError{
 					Code:       ErrCodeUnavailable,
-					Message:    errBrokerRecordUnreadable.Error(),
+					Message:    brokerRecordUnreadableText(err),
 					HTTPStatus: http.StatusServiceUnavailable,
 				}
 			}

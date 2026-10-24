@@ -835,7 +835,10 @@ func (s *Server) profileDefaultSAUnlessPinned(ctx context.Context, agent *store.
 func (s *Server) lifecyclePlacementCheck(ctx context.Context, agent *store.Agent, explicitProfile, expectedRuntimeTargetID string) error {
 	broker, err := s.pinnedPlacementBroker(ctx, agent)
 	if err != nil {
-		return err
+		// A failed broker-record read that is not a refusal is the fixed
+		// 503 for the start (errBrokerRecordUnreadable), nothing sent
+		// (ptone/scion#6096).
+		return placementBackstopStartError(err, "started")
 	}
 	if expectedRuntimeTargetID != "" {
 		actual := ""
