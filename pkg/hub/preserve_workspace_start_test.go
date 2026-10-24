@@ -628,3 +628,36 @@ func TestRoutedStart_BrokerRecordUnreadableIs503(t *testing.T) {
 	assert.Equal(t, ErrCodeUnavailable, body.Error.Code)
 	assert.Equal(t, errBrokerRecordUnreadable.Error(), body.Error.Message)
 }
+
+// The owner's refusal of a routed start's finalize_env (or create) crosses
+// back to the requesting node as the same sentinel, so the requester's
+// handler answers 412 (capability) or 503 (broker record) with the fixed
+// message, and the refusal counts as a start that was not acted on.
+func TestCrossNode_OwnerRefusalCrossesBackAsSentinel(t *testing.T) {
+	for _, tc := range []struct {
+		sentinel error
+		status   int
+		code     string
+	}{
+		{errBrokerLacksPreserveWorkspace, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability},
+		{errBrokerRecordUnreadable, http.StatusServiceUnavailable, ErrCodeUnavailable},
+	} {
+		for _, op := range []string{"finalize_env", "create"} {
+			t.Run(op+" "+tc.code, func(t *testing.T) {
+				ownerErr := fmt.Errorf("dispatch %s: %w", op, tc.sentinel)
+				row := &store.BrokerDispatch{Op: op, Error: ownerErr.Error(), Result: dispatchFailureResult(ownerErr)}
+				err := dispatchFailureError(row)
+				require.ErrorIs(t, err, tc.sentinel)
+				assert.True(t, isConfirmedStartNotActedOnError(err))
+
+				rec := httptest.NewRecorder()
+				require.True(t, writePreserveWorkspaceCapabilityError(rec, err))
+				assert.Equal(t, tc.status, rec.Code)
+				var body ErrorResponse
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+				assert.Equal(t, tc.code, body.Error.Code)
+				assert.Equal(t, tc.sentinel.Error(), body.Error.Message, "the fixed message only")
+			})
+		}
+	}
+}
