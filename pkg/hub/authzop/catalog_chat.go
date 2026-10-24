@@ -404,7 +404,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.message.edit",
 		Domain:      "chat",
-		Description: "Edit one of the caller's chat messages. Only the author edits, and only before an agent replies. A token needs inbox:write, and the message's conversation is re-checked: project:read for a thread, the DM rule for a DM. A thread message then needs the edit_own action of chat-thread-access (project.chat_post on the account; 403 chat_post_denied with details.chat_action edit_own and reason read_only without it); a DM message is not decided by it",
+		Description: "Edit one of the caller's chat messages. Only the author edits, and only before an agent replies. A token needs inbox:write, and the message's conversation is re-checked for it first: for a thread, project:read and inbox:write for the thread's project, with a plain 403 when either is missing or the thread is missing or deleted; for a DM, the DM rule. A thread message is then decided by chat-thread-access: project:read on the thread's project now (a session sender who lost it, or a session's message of a deleted thread or of a key that is no thread, gets the missing-thread answer, 404), then the edit_own action (project.chat_post on the account; 403 chat_post_denied with details.chat_action edit_own and reason read_only without it). A DM message is not decided by it",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/conversations/{id}/messages/{messageId}", Method: "PUT"},
 		},
@@ -419,13 +419,14 @@ var chatOperations = []OperationSpec{
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestChatMessageEdit_RechecksTargetConversation"},
 			{Package: "pkg/hub", Function: "TestChatMessageEdit_RequiresEditOwnAction"},
+			{Package: "pkg/hub", Function: "TestChatMessageEdit_SenderWithoutProjectRead_NotFound"},
 		},
 		Bearer: AdmitOn(BearerTargetConversationRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "chat.message.delete",
 		Domain:      "chat",
-		Description: "Delete one of the caller's chat messages (soft delete). Only the author deletes, and only before an agent replies. A token needs inbox:write, and the message's conversation is re-checked: project:read for a thread, the DM rule for a DM. A thread message then needs the delete_own action of chat-thread-access, which every reader of the thread holds (a token without inbox:write for the project does not); a DM message is not decided by it",
+		Description: "Delete one of the caller's chat messages (soft delete). Only the author deletes, and only before an agent replies. A token needs inbox:write, and the message's conversation is re-checked for it first: for a thread, project:read and inbox:write for the thread's project, with a plain 403 when either is missing or the thread is missing or deleted; for a DM, the DM rule. A thread message is then decided by chat-thread-access: project:read on the thread's project now (a session sender who lost it, or a session's message of a deleted thread or of a key that is no thread, gets the missing-thread answer, 404), then the delete_own action, which every reader of the thread holds. A DM message is not decided by it",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/conversations/{id}/messages/{messageId}", Method: "DELETE"},
 		},
@@ -440,6 +441,7 @@ var chatOperations = []OperationSpec{
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestChatMessageEdit_RechecksTargetConversation"},
 			{Package: "pkg/hub", Function: "TestChatMessageDelete_DeleteOwnAction"},
+			{Package: "pkg/hub", Function: "TestChatMessageDelete_SenderWithoutProjectRead_NotFound"},
 		},
 		Bearer: AdmitOn(BearerTargetConversationRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
