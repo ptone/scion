@@ -1831,8 +1831,15 @@ func (d *HTTPAgentDispatcher) swapRunID(ctx context.Context, agent *store.Agent,
 		"agent_id", agent.ID, "minted_run_id", minted, "run_id", to)
 }
 
-// DispatchAgentCreate creates and starts an agent on the runtime broker.
-func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *store.Agent) (_ *CreateDispatchResult, err error) {
+// DispatchAgentCreate creates and starts an agent on the runtime broker. It
+// runs the env-gather two-pass dispatch (DispatchAgentCreateWithGather), so
+// as-needed values the broker asks for are resolved and delivered; its
+// callers (the scheduler and the workspace-upload create) have no env-gather
+// round trip with a client, so a create whose broker still needs keys after
+// the as-needed pass fails with errProvisionEnvUnmet instead of starting the
+// agent without them, and a resolution error fails with its
+// *secretResolutionError (ptone/scion#6096).
+func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
 	ctx, span := tracer.Start(ctx, "hub.dispatch.create")
 	defer span.End()
 	span.SetAttributes(
@@ -1840,78 +1847,24 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 		attribute.String("scion.broker.id", agent.RuntimeBrokerID),
 	)
 
-	if err := requireRuntimeBrokerAssigned(agent); err != nil {
-		span.SetStatus(codes.Error, err.Error())
-		return nil, err
-	}
-
-	endpoint, err := d.getProvisioningBrokerEndpoint(ctx, agent)
+	created, err := d.DispatchAgentCreateWithGather(ctx, agent)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
-
-	// Hub check before dispatch (ptone/scion#3329 phase 4b): no token,
-	// no run and no broker call for a GCP identity the broker's recent,
-	// complete report says is not mapped on the agent's profile.
-	if err := d.kubernetesIdentityPrecheck(ctx, agent); err != nil {
+	if envReqs := created.EnvRequirements(); envReqs != nil && len(envReqs.Needs) > 0 {
+		// DispatchAgentCreateWithGather returns remaining needs as a value,
+		// so its revoke-on-error defer did not fire: revoke the credential
+		// it issued here. The broker answered with a needs report and
+		// created nothing.
+		d.log.WarnContext(ctx, "DispatchAgentCreate: required environment values still unavailable after the as-needed pass",
+			"agent_id", agent.ID, "count", len(envReqs.Needs))
+		revokeAgentCredentialsBestEffort(ctx, d.store, agent.ID, agentCredentialRevokeReasonCreateFailed)
+		err = fmt.Errorf("DispatchAgentCreate: %w", errProvisionEnvUnmet)
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
-
-	req, err := d.buildCreateRequestFor(ctx, agent, "DispatchAgentCreate", failOnSecretResolutionError)
-	if err != nil {
-		span.SetStatus(codes.Error, err.Error())
-		return nil, err
-	}
-	// buildCreateRequest authorizes the agent token (only when a token
-	// generator is configured; with none it carries on without one); a
-	// denial has already returned above, before any broker request.
-	// beginRun signs it and records its credential with the run, or
-	// records neither. Any failure after that must revoke the credential,
-	// but only if this call actually issued one — see
-	// revokeAgentCredentialsBestEffort's doc comment.
-	issued := false
-	defer func() {
-		// A caller that keeps the agent on an unknown outcome keeps the
-		// credential too: the broker may still be starting the agent with
-		// it (ptone/scion#4817; keepCredentialOnDispatchError).
-		if err != nil && issued && !keepCredentialOnDispatchError(ctx, err) {
-			revokeAgentCredentialsBestEffort(ctx, d.store, agent.ID, agentCredentialRevokeReasonCreateFailed)
-		}
-	}()
-
-	runID, _, token, recorded, err := d.beginRun(ctx, agent, req.tokenGrant)
-	if err != nil {
-		span.SetStatus(codes.Error, err.Error())
-		return nil, err
-	}
-	req.RunID = runID
-	req.AgentToken = token
-	issued = token != ""
-
-	send := func(ctx context.Context, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
-		resp, err := d.client.CreateAgent(ctx, agent.RuntimeBrokerID, endpoint, req)
-		if isHashMismatchError(err) {
-			if repairErr := d.repairHashMismatch(ctx, agent, err); repairErr == nil {
-				resp, err = d.client.CreateAgent(ctx, agent.RuntimeBrokerID, endpoint, req)
-			}
-		}
-		return resp, nil, err
-	}
-	resp, _, launch, err := d.dispatchLaunching(ctx, agent, endpoint, req, false, send)
-	if err != nil {
-		span.SetStatus(codes.Error, err.Error())
-		return nil, err
-	}
-	if launch != nil {
-		d.applyAcceptedLaunchResponse(ctx, agent, resp)
-		return &CreateDispatchResult{Launch: launch}, nil
-	}
-
-	d.applyBrokerResponse(ctx, agent, resp)
-	d.settleLandedRun(ctx, agent, runID, recorded, resp)
-	return nil, nil
+	return created, nil
 }
 
 // DispatchAgentProvision provisions an agent on the runtime broker without starting it.
