@@ -20,7 +20,7 @@ GOLANGCI_LINT         ?= $(GOLANGCI_LINT_PATCHED)
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-sqlite-nonhub test-cmd-sqlite test-fast-ci test-launch-store-postgres test-store-postgres test-store-postgres-others test-store-postgres-env-check test-store-postgres-integrationtest test-store-postgres-entadapter test-store-postgres-tail testpart-selftest test-hub-postgres test-hub-postgres-env-check test-hub-postgres-default test-hub-postgres-integration hub-postgres-integration-shards test-webchat-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage hubshard-parity build-hub-shard test-hub-shard test-hub-shards vet-hub-shard vet lint lint-ci vet-integration vet-integration-ci vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-hub-store-reassign check-store-delete-callers check-scan-coverage check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-image-go-dirs check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-debug-defaults check-sqlite-coverage sqlite-ci-pkgs check-extras-go-images check-custom golangci-lint golangci-lint-build golangci-lint-split-selftest web web-budget web-typecheck web-lint web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check tidy-check
+.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-sqlite-nonhub test-cmd-sqlite test-fast-ci test-launch-store-postgres test-store-postgres test-store-postgres-others test-store-postgres-env-check test-store-postgres-integrationtest test-store-postgres-entadapter test-store-postgres-tail testpart-selftest test-hub-postgres test-hub-postgres-env-check test-hub-postgres-default test-hub-postgres-integration hub-postgres-integration-shards test-webchat-postgres test-webchat-pkg-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage hubshard-parity build-hub-shard test-hub-shard test-hub-shards vet-hub-shard vet lint lint-ci vet-integration vet-integration-ci vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-hub-store-reassign check-store-delete-callers check-scan-coverage check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-image-go-dirs check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-debug-defaults check-sqlite-coverage sqlite-ci-pkgs check-extras-go-images check-custom golangci-lint golangci-lint-build golangci-lint-split-selftest web web-budget web-typecheck web-lint web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check tidy-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -604,7 +604,7 @@ HUB_INTEGRATION_POSTGRES_TESTS := TestProjectDeletionService_LockOrderNoDeadlock
 ## test-hub-postgres: Run the pkg/hub Postgres tests of shard SHARD=K (SHARD=all: every shard holding one)
 # Requires SCION_TEST_POSTGRES_URL (integration tests) and
 # SCION_TEST_POSTGRES_DSN (web chat and conduit tests). Runs
-# WEBCHAT_POSTGRES_TESTS and CONDUIT_AUTHZ_POSTGRES_TESTS (default tags)
+# WEBCHAT_HUB_POSTGRES_TESTS and CONDUIT_AUTHZ_POSTGRES_TESTS (default tags)
 # and HUB_INTEGRATION_POSTGRES_TESTS (-tags integration) that live in the
 # shard; hack/hubshard -locate fails if a listed test no longer exists.
 # CI runs the two halves in different jobs. test-hub-postgres-default runs
@@ -626,9 +626,9 @@ test-hub-postgres-env-check:
 		exit 1; \
 	fi
 
-## test-hub-postgres-default: The default-tag half of test-hub-postgres (WEBCHAT_POSTGRES_TESTS, CONDUIT_AUTHZ_POSTGRES_TESTS) for SHARD=K
+## test-hub-postgres-default: The default-tag half of test-hub-postgres (WEBCHAT_HUB_POSTGRES_TESTS, CONDUIT_AUTHZ_POSTGRES_TESTS) for SHARD=K
 test-hub-postgres-default: test-hub-postgres-env-check
-	@./hack/hubshard/shard.sh postgres $(SHARD) "" $(WEBCHAT_POSTGRES_TESTS) $(CONDUIT_AUTHZ_POSTGRES_TESTS)
+	@./hack/hubshard/shard.sh postgres $(SHARD) "" $(WEBCHAT_HUB_POSTGRES_TESTS) $(CONDUIT_AUTHZ_POSTGRES_TESTS)
 
 ## test-hub-postgres-integration: The -tags integration half of test-hub-postgres (HUB_INTEGRATION_POSTGRES_TESTS) for SHARD=K
 test-hub-postgres-integration: test-hub-postgres-env-check
@@ -640,15 +640,18 @@ hub-postgres-integration-shards:
 	@located=$$(./hack/hubshard/hubshard.sh -tags integration -locate $(HUB_INTEGRATION_POSTGRES_TESTS)) || exit 1; \
 	echo "$$located" | awk '{print $$2}' | sort -nu
 
-## test-webchat-postgres: Run the pkg/hub web chat store Postgres tests against a real server
+## test-webchat-postgres: Run the web chat store Postgres tests against a real server
 # Requires SCION_TEST_POSTGRES_DSN (a pgx connection string). The selected
 # tests self-skip without it, so the target fails if the variable is unset,
-# if any selected test skips, or if any test listed in
-# WEBCHAT_POSTGRES_TESTS reports no PASS line. Each test runs in its
-# pkg/hub shard (hack/hubshard/shard.sh postgres); CI runs them in the
-# pkg/hub shard jobs (test-hub-postgres-default). The tests drop and recreate the
-# webchat_* tables, so point the DSN at a scratch database. go test output
-# is streamed with tee (shard.sh runs under bash pipefail) so a step killed
+# if any selected test skips, or if any listed test reports no PASS line.
+# The store tests live in pkg/hub/webchat (WEBCHAT_POSTGRES_TESTS, run by
+# test-webchat-pkg-postgres; CI runs that in the T1 Launch Store PostgreSQL
+# Tests (other packages) job). The scheduled-send test that stays in pkg/hub
+# (WEBCHAT_HUB_POSTGRES_TESTS) runs in its pkg/hub shard
+# (hack/hubshard/shard.sh postgres); CI runs it in the pkg/hub shard jobs
+# (test-hub-postgres-default). The tests drop and recreate the webchat_*
+# tables, so point the DSN at a scratch database. go test output is
+# streamed with tee (shard.sh runs under bash pipefail) so a step killed
 # mid-run still shows what ran (ptone/scion#4083).
 WEBCHAT_POSTGRES_TESTS := TestListTopicsByProjects_Postgres \
 	TestC4Fix_Postgres_FreshDB \
@@ -656,19 +659,42 @@ WEBCHAT_POSTGRES_TESTS := TestListTopicsByProjects_Postgres \
 	TestC4Fix_Postgres_Idempotent \
 	TestC4Fix_Postgres_PreExistingDB_Idempotent \
 	TestUnreadMentionKeys_Postgres \
-	TestScheduledStore_Postgres \
 	TestWebChatStore_Postgres_MessagesInOtherSchema \
 	TestWebChatStore_Postgres_ThreadMigrationsWaitForMessagesTable \
 	TestWebChatStore_Postgres_ThreadMigrationsRunOnce \
 	TestUserPrefsThreadGroupsMarker_Postgres \
 	TestUserPrefsThreadGroupsMigratedAt_Postgres_PreExistingDB
+WEBCHAT_HUB_POSTGRES_TESTS := TestScheduledStore_Postgres
 
 test-webchat-postgres:
 	@if [ -z "$$SCION_TEST_POSTGRES_DSN" ]; then \
 		echo "ERROR: SCION_TEST_POSTGRES_DSN is not set -- the Postgres tests would silently skip instead of running." >&2; \
 		exit 1; \
 	fi
-	@./hack/hubshard/shard.sh postgres all "" $(WEBCHAT_POSTGRES_TESTS)
+	@./hack/hubshard/shard.sh postgres all "" $(WEBCHAT_HUB_POSTGRES_TESTS)
+	@$(MAKE) --no-print-directory test-webchat-pkg-postgres
+
+## test-webchat-pkg-postgres: Run the pkg/hub/webchat store Postgres tests (WEBCHAT_POSTGRES_TESTS) against a real server
+# Requires SCION_TEST_POSTGRES_DSN; fails if it is unset, if any selected
+# test (or subtest) skips, or if any listed test reports no PASS line.
+test-webchat-pkg-postgres:
+	@if [ -z "$$SCION_TEST_POSTGRES_DSN" ]; then \
+		echo "ERROR: SCION_TEST_POSTGRES_DSN is not set -- the Postgres tests would silently skip instead of running." >&2; \
+		exit 1; \
+	fi
+	@log=$$(mktemp) || exit 1; \
+	regex="^($$(echo $(WEBCHAT_POSTGRES_TESTS) | tr ' ' '|'))\$$"; \
+	go test -count=1 -timeout 20m -v -run "$$regex" ./pkg/hub/webchat > "$$log" 2>&1; \
+	status=$$?; \
+	cat "$$log"; \
+	if [ $$status -ne 0 ]; then rm -f "$$log"; exit $$status; fi; \
+	if grep -qE '^[[:space:]]*--- SKIP' "$$log"; then \
+		echo "ERROR: one or more pkg/hub/webchat Postgres tests were skipped -- see '--- SKIP' lines above." >&2; rm -f "$$log"; exit 1; \
+	fi; \
+	for t in $(WEBCHAT_POSTGRES_TESTS); do \
+		grep -qE "^[[:space:]]*--- PASS: $$t( |\$$)" "$$log" || { echo "ERROR: $$t did not pass." >&2; rm -f "$$log"; exit 1; }; \
+	done; \
+	rm -f "$$log"
 
 ## test-conduit-authz-postgres: Run the conduit user-stream re-check tests (criterion 16b, P tier) against a real Postgres server
 # Requires SCION_TEST_POSTGRES_DSN (a pgx connection string). Two hub nodes
