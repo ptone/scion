@@ -797,9 +797,19 @@ func (s *Server) checkPinnedPlacement(agent *store.Agent) error {
 // goes to the server log only), so no raw store text reaches a client
 // (coordinator-2 13:53Z/14:17Z, ptone/scion#6096).
 func (s *Server) startPlacementPreCheck(ctx context.Context, agent *store.Agent, verb string) error {
-	_, err := s.pinnedPlacementBroker(ctx, agent)
+	_, err := s.startPlacementPreCheckBroker(ctx, agent, verb)
+	return err
+}
+
+// startPlacementPreCheckBroker is startPlacementPreCheck returning the
+// broker record it read (nil when the agent has none, or an unpinned
+// agent's row is missing), so a later pre-check of the same request judges
+// that record instead of reading it again (ptone/scion#6101: the lifecycle
+// restart's env-gather capability pre-check).
+func (s *Server) startPlacementPreCheckBroker(ctx context.Context, agent *store.Agent, verb string) (*store.RuntimeBroker, error) {
+	broker, err := s.pinnedPlacementBroker(ctx, agent)
 	if err == nil {
-		return nil
+		return broker, nil
 	}
 	err = placementBackstopStartError(err, verb)
 	var readErr *brokerRecordReadError
@@ -807,7 +817,7 @@ func (s *Server) startPlacementPreCheck(ctx context.Context, agent *store.Agent,
 		s.agentLifecycleLog.Warn("start pre-check: failed to read the agent's runtime broker; nothing started",
 			"agent_id", agent.ID, "broker_id", agent.RuntimeBrokerID, "action", verb, "error", readErr.err)
 	}
-	return err
+	return nil, err
 }
 
 // pinnedPlacementBroker is checkPinnedPlacement returning the agent's
