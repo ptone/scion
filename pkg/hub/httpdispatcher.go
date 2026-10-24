@@ -895,10 +895,10 @@ func deferredAsNeeded(sv secret.SecretWithValue) bool {
 
 // noAuthGitHubTokenDeliverable reports whether sv, a secret named
 // GITHUB_TOKEN read by name for a no-auth agent, is one normal resolution
-// would deliver as env["GITHUB_TOKEN"]: resolveSecrets keeps it (not a
-// reserved target, not deferred as needed, a scope the test-admin policy
-// allows) and the first-pass env merge places it under GITHUB_TOKEN (an
-// environment-type secret whose target is GITHUB_TOKEN).
+// would deliver as env["GITHUB_TOKEN"]: the first-pass env merge places it
+// under GITHUB_TOKEN (an environment-type secret whose target is
+// GITHUB_TOKEN, which is not a reserved target) and resolveSecrets keeps it
+// (not deferred as needed, a scope the test-admin policy allows).
 func (d *HTTPAgentDispatcher) noAuthGitHubTokenDeliverable(ctx context.Context, agent *store.Agent, sv *secret.SecretWithValue) bool {
 	if sv == nil || sv.Value == "" {
 		return false
@@ -906,7 +906,7 @@ func (d *HTTPAgentDispatcher) noAuthGitHubTokenDeliverable(ctx context.Context, 
 	if !isEnvSecretType(sv.SecretType) || sv.Target != "GITHUB_TOKEN" {
 		return false
 	}
-	if reservedTargetEnvSecret(*sv) || deferredAsNeeded(*sv) {
+	if deferredAsNeeded(*sv) {
 		return false
 	}
 	return len(d.restrictTestAdminRootedSecrets(ctx, agent, []secret.SecretWithValue{*sv})) == 1
