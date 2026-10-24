@@ -546,7 +546,10 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID st
 				secretRef = fmt.Sprintf("projects/%s/secrets/%s", b.projectID, smName)
 			}
 			if err != nil {
-				continue
+				// Fail closed (ptone/scion#5959): never resolve a partial
+				// set. A NotFound here is a dangling reference (a DB record
+				// with no readable Secret Manager copy), not an absence.
+				return nil, newResolveAccessError(s.Key, sc.scope, err)
 			}
 
 			secretType := s.SecretType
@@ -619,7 +622,9 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID st
 				secretRef = fmt.Sprintf("projects/%s/secrets/%s", b.projectID, smName)
 			}
 			if err != nil {
-				continue
+				// A progeny secret the policy allowed is as referenced as
+				// a scoped one: fail closed here too.
+				return nil, newResolveAccessError(s.Key, s.Scope, err)
 			}
 
 			secretType := s.SecretType
