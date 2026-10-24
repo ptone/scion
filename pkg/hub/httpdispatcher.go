@@ -2334,7 +2334,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 			}
 		}
 		if len(asNeededEnv) > 0 || tzNeeded {
-			finalized, err := d.finalizeEnv(ctx, agent, asNeededEnv, tzNeeded)
+			finalized, err := d.finalizeEnv(ctx, agent, asNeededEnv, tzNeeded, false)
 			if err == nil {
 				// All needs satisfied by as_needed entries. finalized carries
 				// Launch when that send was accepted for asynchronous launch.
@@ -2395,7 +2395,6 @@ func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *st
 	defer func() {
 		if err == nil {
 			markConfigDeliveredOnSuccess(agent, res)
-			recordUserSuppliedEnvKeys(agent, env)
 		}
 	}()
 	// Flat placement backstop: the first pass pinned the agent, so this
@@ -2416,14 +2415,19 @@ func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *st
 		}
 		return nil, err
 	}
-	return d.finalizeEnv(ctx, agent, env, false)
+	return d.finalizeEnv(ctx, agent, env, false, true)
 }
 
 // finalizeEnv implements DispatchFinalizeEnv. TZ in the caller env is
 // dropped: only the resolver writes TZ. answerTZ sends the resolver's
 // gather answer for TZ (UTC rather than no TZ) because the broker listed TZ
 // as needed; a TZ need reported by this replay is answered the same way.
-func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string, answerTZ bool) (_ *CreateDispatchResult, err error) {
+//
+// recordNames marks a finalize of the user's submission (DispatchFinalizeEnv):
+// after the guards and before anything is minted or sent, it records the
+// submitted key names (recordUserSuppliedKeyNames, write-ahead). The
+// as-needed replay of a create (DispatchAgentCreateWithGather) records none.
+func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string, answerTZ, recordNames bool) (_ *CreateDispatchResult, err error) {
 	// Defense in depth for a caller-supplied env map that does not go through
 	// the submitAgentEnv reserved-target check (or reaches this dispatch path
 	// some other way): never let it override a scion control-plane env var.
@@ -2459,6 +2463,15 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 	// can be minutes old, and this pass mints a token and records a run.
 	if err := d.kubernetesIdentityPrecheck(ctx, agent); err != nil {
 		return nil, err
+	}
+
+	// Write-ahead of the user-supplied env key names (ptone/scion#6101):
+	// after the guards above, before the run is minted or anything sent; a
+	// failure is the fixed 503 with nothing sent.
+	if recordNames {
+		if err := d.recordUserSuppliedKeyNames(ctx, agent, env); err != nil {
+			return nil, err
+		}
 	}
 
 	req, err := d.buildCreateRequestFor(ctx, agent, "DispatchFinalizeEnv", failOnSecretResolutionError)
@@ -3799,25 +3812,12 @@ func preserveWorkspaceCapability(broker *store.RuntimeBroker) error {
 // concurrent config update nor a concurrent runtime-target write
 // (SetAgentRuntimeTarget, which does not bump state_version) is lost, and
 // agent's in-memory copy (which may hold a start's task override) is never
-// written, except its list of user-supplied env key names, which is written
-// field-level too (store.SetAgentUserSuppliedEnvKeys). A failure is logged
-// and leaves the marker unset: the next start is routed again, which is
-// safe.
+// written. A failure is logged and leaves the marker unset: the next start is
+// routed again, which is safe.
 func persistConfigDelivered(ctx context.Context, st store.Store, log *slog.Logger, agent *store.Agent) {
 	if _, err := st.SetAgentConfigDelivered(ctx, agent.ID); err != nil {
 		log.WarnContext(ctx, "failed to record the agent's delivered config; the next start gathers again",
 			"agent_id", agent.ID, "error", err)
-	}
-	// The names of the env keys the user supplied at create
-	// (UserSuppliedEnvKeys, names only, never values) are written the same
-	// field-level way when this dispatch recorded them (an env finalize;
-	// an empty list clears older names), so a node that writes only the
-	// marker does not lose them (ptone/scion#6101).
-	if keys := deliveredUserSuppliedKeys(agent); keys != nil {
-		if _, err := st.SetAgentUserSuppliedEnvKeys(ctx, agent.ID, keys); err != nil {
-			log.WarnContext(ctx, "failed to record the names of the user-supplied env keys; a later start treats them as optional",
-				"agent_id", agent.ID, "error", err)
-		}
 	}
 }
 

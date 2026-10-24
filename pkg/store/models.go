@@ -417,9 +417,11 @@ type AgentAppliedConfig struct {
 
 	// UserSuppliedEnvKeys lists the NAMES (never values) of the env keys
 	// the user supplied at create through env finalize (the CLI's gathered
-	// values), sorted and deduplicated; the latest finalize replaces it. A
-	// start that cannot get one of these keys from the hub fails rather
-	// than dropping it as an optional passthrough marker (ptone/scion#6101).
+	// values), sorted and deduplicated. The list only grows: each finalize
+	// adds its keys (AddAgentUserSuppliedEnvKeys), and the whole-row writers
+	// (UpdateAgent, UpdateAgentConfig) keep every stored name. A start that
+	// cannot get one of these keys from the hub fails rather than dropping it
+	// as an optional passthrough marker (ptone/scion#6101).
 	UserSuppliedEnvKeys []string `json:"userSuppliedEnvKeys,omitempty"`
 
 	Image         string            `json:"image,omitempty"`

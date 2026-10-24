@@ -122,6 +122,9 @@ var dispatchHubSentinels = []struct {
 	// echo: acted on (the run was started, then stopped), so the
 	// requester must not read it as the pre-send refusal.
 	{"start_env_gather_echo_missing", errStartEnvGatherEchoMissing},
+	// An env finalize whose write-ahead of the user-supplied key names
+	// failed: nothing was sent; the requester answers the fixed 503.
+	{"user_supplied_keys_unrecorded", errUserSuppliedKeysUnrecorded},
 	{"broker_record_unreadable", errBrokerRecordUnreadable},
 }
 
