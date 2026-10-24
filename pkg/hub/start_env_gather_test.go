@@ -603,10 +603,11 @@ func TestCrossNodeStart_CarriesTaskAndStaysSync(t *testing.T) {
 	_, err := f.requester.DispatchAgentStartWithOptions(crossNodeCtx(t), f.agent, "fake-cross-node-task", false,
 		StartDispatchOptions{Async: true, Kind: store.LaunchKindStart, PriorPhase: string(state.PhaseStopped)})
 	<-done
-	require.ErrorIs(t, err, errStartEnvUnmet)
 	require.NotNil(t, args)
 	assert.Equal(t, "fake-cross-node-task", args.Task, "the start's task crosses nodes")
 	assert.False(t, args.Async, "the gathering start stays synchronous on the owner")
+	assert.True(t, args.NoRoute, "the requester decided the routing")
+	require.ErrorIs(t, err, errStartEnvUnmet)
 }
 
 func TestStartGather_UserSuppliedMarkerKeyIsRequired(t *testing.T) {
