@@ -322,6 +322,7 @@ func TestMessageStarStore_SQLite(t *testing.T) {
 	require.NotNil(t, env.stars)
 	testMessageStarStoreContract(t, env)
 	testMessageStarLifecycleContract(t, env)
+	testStarredHistoryContract(t, env)
 }
 
 // TestMessageStarStore_SQLite_FixedWidthTime pins the SQLite TEXT form:
@@ -430,4 +431,5 @@ CREATE TRIGGER star_promote_fails BEFORE DELETE ON webchat_dm FOR EACH ROW EXECU
 	require.NotNil(t, env.stars)
 	testMessageStarStoreContract(t, env)
 	testMessageStarLifecycleContract(t, env)
+	testStarredHistoryContract(t, env)
 }
