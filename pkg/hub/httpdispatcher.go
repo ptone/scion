@@ -3012,53 +3012,52 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 
 		resolved, err := d.secretBackend.Resolve(
 			ctx, agent.OwnerID, agent.ProjectID, agent.RuntimeBrokerID, resolveOpts)
-		if err == nil {
-			resolved = d.restrictTestAdminRootedSecrets(ctx, agent, resolved)
-		}
-		if errors.Is(err, secret.ErrResolveDecrypt) {
-			// A stored secret could not be decrypted: never answer the
-			// broker's needs as if it were missing (ptone/scion#1530 §5).
-			return nil, err
-		}
 		if err != nil {
-			if d.debug {
-				d.log.Warn("resolveAsNeededForKeys: failed to resolve secrets", "error", err)
+			// Any resolution error fails the pass, as in resolveSecrets: a
+			// secret that could not be decrypted (ErrResolveDecrypt,
+			// ptone/scion#1530 §5) or read from the backend
+			// (ErrResolveAccess), or a store error, must never be answered
+			// as if the secret were missing (ptone/scion#5959). Only the
+			// fixed message leaves the hub; the typed error stays in Err
+			// for errors.Is and the server log.
+			d.log.WarnContext(ctx, "resolveAsNeededForKeys: failed to resolve secrets; agent not created",
+				"agent_id", agent.ID, "error", err)
+			return nil, &secretResolutionError{Verb: "created", Err: err}
+		}
+		resolved = d.restrictTestAdminRootedSecrets(ctx, agent, resolved)
+		// Iterate in reverse: resolved is ordered lowest-precedence first
+		// (runtime_broker < hub < project < user), so walking backwards
+		// lets higher-precedence secrets win.
+		for i := len(resolved) - 1; i >= 0; i-- {
+			sv := resolved[i]
+			if sv.InjectionMode != store.InjectionModeAsNeeded {
+				continue
 			}
-		} else {
-			// Iterate in reverse: resolved is ordered lowest-precedence first
-			// (runtime_broker < hub < project < user), so walking backwards
-			// lets higher-precedence secrets win.
-			for i := len(resolved) - 1; i >= 0; i-- {
-				sv := resolved[i]
-				if sv.InjectionMode != store.InjectionModeAsNeeded {
-					continue
-				}
-				// Only environment-type secrets map to env vars.
-				if sv.SecretType != store.SecretTypeEnvironment && sv.SecretType != "" {
-					continue
-				}
-				target := sv.Target
-				if target == "" {
-					target = sv.Name
-				}
-				// Defense in depth, matching resolveSecrets: never satisfy an
-				// as-needed request for a scion control-plane env var from a
-				// stored secret.
-				if secret.IsReservedEnvTarget(target) {
-					continue
-				}
-				if _, needed := keySet[target]; needed {
-					// Store under the canonical key if this was an alternative match
-					resultKey := target
-					if canonical, isAlt := altToCanonical[target]; isAlt {
-						if _, already := result[canonical]; already {
-							continue // canonical key already matched; don't overwrite
-						}
-						resultKey = canonical
+			// Only environment-type secrets map to env vars.
+			if sv.SecretType != store.SecretTypeEnvironment && sv.SecretType != "" {
+				continue
+			}
+			target := sv.Target
+			if target == "" {
+				target = sv.Name
+			}
+			// Defense in depth, matching resolveSecrets: never satisfy an
+			// as-needed request for a scion control-plane env var from a
+			// stored secret.
+			if secret.IsReservedEnvTarget(target) {
+				continue
+			}
+			if _, needed := keySet[target]; needed {
+				// Store under the canonical key if this was an alternative match
+				resultKey := target
+				if canonical, isAlt := altToCanonical[target]; isAlt {
+					if _, already := result[canonical]; already {
+						continue // canonical key already matched; don't overwrite
 					}
-					if _, alreadySet := result[resultKey]; !alreadySet {
-						result[resultKey] = sv.Value
-					}
+					resultKey = canonical
+				}
+				if _, alreadySet := result[resultKey]; !alreadySet {
+					result[resultKey] = sv.Value
 				}
 			}
 		}
