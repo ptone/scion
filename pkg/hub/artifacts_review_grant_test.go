@@ -98,7 +98,7 @@ func (f reviewGrantFixture) user(id string) Identity {
 }
 
 func (f reviewGrantFixture) may(host *artifactHost, identity Identity, agentID, home string) bool {
-	return host.MayGrantReview(contextWithIdentity(context.Background(), identity), agentID, home)
+	return host.MayGrantReview(contextWithIdentity(context.Background(), identity), agentID, home, "")
 }
 
 // TestArtifactHostMayGrantReview: the delegating user (root of the live
@@ -148,7 +148,7 @@ func TestArtifactHostMayGrantReview(t *testing.T) {
 			if tc.identity != nil {
 				ctx = contextWithIdentity(ctx, tc.identity)
 			}
-			assert.Equal(t, tc.want, host.MayGrantReview(ctx, tc.agentID, tc.home))
+			assert.Equal(t, tc.want, host.MayGrantReview(ctx, tc.agentID, tc.home, ""))
 		})
 	}
 }
@@ -243,8 +243,8 @@ func TestArtifactHostReviewGrantClause(t *testing.T) {
 			if tc.identity != nil {
 				ctx = contextWithIdentity(ctx, tc.identity)
 			}
-			assert.Equal(t, tc.want, host.ReviewGrantClause(ctx, tc.agentID, tc.home))
-			assert.Equal(t, tc.want != "", host.MayGrantReview(ctx, tc.agentID, tc.home), "MayGrantReview agrees")
+			assert.Equal(t, tc.want, host.ReviewGrantClause(ctx, tc.agentID, tc.home, ""))
+			assert.Equal(t, tc.want != "", host.MayGrantReview(ctx, tc.agentID, tc.home, ""), "MayGrantReview agrees")
 		})
 	}
 }
@@ -261,7 +261,7 @@ func TestArtifactHostReviewGrantClauseAuditsOnce(t *testing.T) {
 	ctx := contextWithIdentity(context.Background(), f.user(f.delegator))
 	emitter := &recordingDecisionAuditEmitter{}
 	f.srv.authzService.SetDecisionAuditEmitter(emitter)
-	require.Equal(t, artifacts.ReviewClauseDelegatingUser, host.ReviewGrantClause(ctx, f.agent.ID, f.home))
+	require.Equal(t, artifacts.ReviewClauseDelegatingUser, host.ReviewGrantClause(ctx, f.agent.ID, f.home, ""))
 	require.Len(t, emitter.records, 1, "one decision for a delegating user's review clause")
 	r := emitter.records[0]
 	assert.Equal(t, "deny", r.Result)
@@ -272,7 +272,7 @@ func TestArtifactHostReviewGrantClauseAuditsOnce(t *testing.T) {
 
 	// MayGrantReview, the same evaluation, records the same one decision.
 	emitter.records = nil
-	require.True(t, host.MayGrantReview(ctx, f.agent.ID, f.home))
+	require.True(t, host.MayGrantReview(ctx, f.agent.ID, f.home, ""))
 	require.Len(t, emitter.records, 1)
 	assert.Equal(t, "deny", emitter.records[0].Result)
 }

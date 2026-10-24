@@ -188,8 +188,8 @@ func (h *artifactHost) Authorize(ctx context.Context, scopeRef, permission strin
 
 // MayGrantReview implements artifacts.ReviewGrantAuthority:
 // ReviewGrantClause != "".
-func (h *artifactHost) MayGrantReview(ctx context.Context, ownerAgentID, homeScope string) bool {
-	return h.ReviewGrantClause(ctx, ownerAgentID, homeScope) != ""
+func (h *artifactHost) MayGrantReview(ctx context.Context, ownerAgentID, homeScope, sponsorRef string) bool {
+	return h.ReviewGrantClause(ctx, ownerAgentID, homeScope, sponsorRef) != ""
 }
 
 var _ artifacts.ReviewGrantClauser = (*artifactHost)(nil)
@@ -215,7 +215,7 @@ var _ artifacts.ReviewGrantClauser = (*artifactHost)(nil)
 // checked first, then artifacts.ReviewClauseDelegatingUser. Only users are
 // answered; every other identity, a missing authz service, and every lookup
 // error answer "".
-func (h *artifactHost) ReviewGrantClause(ctx context.Context, ownerAgentID, homeScope string) string {
+func (h *artifactHost) ReviewGrantClause(ctx context.Context, ownerAgentID, homeScope, _ string) string {
 	if h.server == nil || h.server.authzService == nil || ownerAgentID == "" || homeScope == "" {
 		return ""
 	}
