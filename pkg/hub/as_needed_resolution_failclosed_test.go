@@ -67,7 +67,7 @@ func newDeniedGCPBackend(t *testing.T, s store.Store, projectID string) *secret.
 		SecretType: store.SecretTypeEnvironment, InjectionMode: store.InjectionModeAsNeeded,
 		Scope: store.ScopeProject, ScopeID: projectID, SecretRef: "gcpsm:" + failClosedSMPath,
 	}))
-	return secret.NewGCPBackendWithClient(s, deniedSMClient{}, "fake-sm-project", "test-hub-failclosed")
+	return secret.NewGCPBackendWithClient(s, &deniedSMClient{}, "fake-sm-project", "test-hub-failclosed")
 }
 
 // assertNoFailClosedDetail checks that text carries no secret key, value,
