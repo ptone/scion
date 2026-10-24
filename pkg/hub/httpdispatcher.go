@@ -3773,51 +3773,20 @@ func preserveWorkspaceCapability(broker *store.RuntimeBroker) error {
 	return nil
 }
 
-// configDeliveredPersistAttempts bounds persistConfigDelivered's
-// compare-and-set retries.
-const configDeliveredPersistAttempts = 5
-
 // persistConfigDelivered stores ConfigDelivered for agent after a routed
 // start delivered its config, so the next start is plain. It writes only the
-// marker: it re-reads the row and sets the marker on the stored applied
-// config (never agent's in-memory copy, which may hold a start's task
-// override or be stale), compare-and-set on the stored state version, and
-// retries on a conflict. agent's StateVersion follows the write only when it
-// was the version written over, so a caller's later compare-and-set still
-// sees any other change. A failure is logged and leaves the marker unset:
-// the next start is routed again, which is safe.
+// marker, field-level (store.SetAgentConfigDelivered): no other
+// applied-config key, no other column and not state_version, so neither a
+// concurrent config update nor a concurrent runtime-target write
+// (SetAgentRuntimeTarget, which does not bump state_version) is lost, and
+// agent's in-memory copy (which may hold a start's task override) is never
+// written. A failure is logged and leaves the marker unset: the next start is
+// routed again, which is safe.
 func persistConfigDelivered(ctx context.Context, st store.Store, log *slog.Logger, agent *store.Agent) {
-	for attempt := 0; attempt < configDeliveredPersistAttempts; attempt++ {
-		stored, err := st.GetAgent(ctx, agent.ID)
-		if err != nil {
-			log.WarnContext(ctx, "failed to read the agent to record its delivered config; the next start gathers again",
-				"agent_id", agent.ID, "error", err)
-			return
-		}
-		if stored.AppliedConfig != nil && stored.AppliedConfig.ConfigDelivered {
-			return
-		}
-		applied := stored.AppliedConfig
-		if applied == nil {
-			applied = &store.AgentAppliedConfig{}
-		}
-		applied.ConfigDelivered = true
-		version, err := st.UpdateAgentConfig(ctx, stored.ID, stored.StateVersion, applied, stored.PendingConfig)
-		if errors.Is(err, store.ErrVersionConflict) {
-			continue
-		}
-		if err != nil {
-			log.WarnContext(ctx, "failed to record the agent's delivered config; the next start gathers again",
-				"agent_id", agent.ID, "error", err)
-			return
-		}
-		if agent.StateVersion == stored.StateVersion {
-			agent.StateVersion = version
-		}
-		return
+	if _, err := st.SetAgentConfigDelivered(ctx, agent.ID); err != nil {
+		log.WarnContext(ctx, "failed to record the agent's delivered config; the next start gathers again",
+			"agent_id", agent.ID, "error", err)
 	}
-	log.WarnContext(ctx, "failed to record the agent's delivered config after repeated conflicts; the next start gathers again",
-		"agent_id", agent.ID)
 }
 
 // routedStartDispatchFlags returns what a create or finalize_env handed to

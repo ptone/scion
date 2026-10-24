@@ -221,20 +221,20 @@ func TestRoutedStart_PersistsMarkerSoNextStartIsPlain(t *testing.T) {
 }
 
 // concurrentConfigStore runs mutate once, just before the first marker
-// write (an UpdateAgentConfig setting ConfigDelivered) it forwards: a config
-// update that lands between the marker write's read and its compare-and-set.
+// write (SetAgentConfigDelivered) it forwards: a concurrent write that lands
+// after the start read the row and before the marker is written.
 type concurrentConfigStore struct {
 	store.Store
 	mutate func()
 	done   bool
 }
 
-func (s *concurrentConfigStore) UpdateAgentConfig(ctx context.Context, agentID string, expectedVersion int64, applied *store.AgentAppliedConfig, pending *store.AgentPendingConfig) (int64, error) {
-	if !s.done && applied != nil && applied.ConfigDelivered {
+func (s *concurrentConfigStore) SetAgentConfigDelivered(ctx context.Context, id string) (bool, error) {
+	if !s.done {
 		s.done = true
 		s.mutate()
 	}
-	return s.Store.UpdateAgentConfig(ctx, agentID, expectedVersion, applied, pending)
+	return s.Store.SetAgentConfigDelivered(ctx, id)
 }
 
 // The marker write writes only the marker: a config update that lands
@@ -265,37 +265,51 @@ func TestRoutedStart_MarkerWriteKeepsConcurrentConfigUpdate(t *testing.T) {
 	assert.Equal(t, "task", f.agent.AppliedConfig.Task, "the in-memory override is restored")
 }
 
-// The caller's state version follows the marker write only when the
-// caller's copy was the version written over; a stale copy keeps its
-// version, so the caller's own compare-and-set still sees the other write.
-func TestPersistConfigDelivered_StateVersion(t *testing.T) {
-	t.Run("current copy follows", func(t *testing.T) {
+// The marker write is field-level (store.SetAgentConfigDelivered): it sets
+// only the marker and leaves state_version alone, so a concurrent
+// runtime-target write (SetAgentRuntimeTarget, which does not bump
+// state_version either) is never lost, in either order, and neither is the
+// marker (coordinator-2 15:09Z item 2).
+func TestPersistConfigDelivered_FieldLevel(t *testing.T) {
+	const fakeTarget = "kubernetes|context=fake|namespace=fake"
+	read := func(t *testing.T, f *runDispatchFixture) *store.Agent {
+		t.Helper()
+		a, err := f.store.GetAgent(context.Background(), f.agent.ID)
+		require.NoError(t, err)
+		return a
+	}
+	t.Run("runtime target written between the start's read and the marker write", func(t *testing.T) {
 		f := newRunDispatchFixture(t)
-		cur, err := f.store.GetAgent(context.Background(), f.agent.ID)
-		require.NoError(t, err)
-		persistConfigDelivered(context.Background(), f.store, slog.Default(), cur)
-		stored, err := f.store.GetAgent(context.Background(), f.agent.ID)
-		require.NoError(t, err)
-		assert.True(t, stored.AppliedConfig.ConfigDelivered)
-		assert.Equal(t, stored.StateVersion, cur.StateVersion)
+		before := read(t, f)
+		st := &concurrentConfigStore{Store: f.store, mutate: func() {
+			cur := read(t, f)
+			written, err := f.store.SetAgentRuntimeTarget(context.Background(), cur.ID, cur.StateVersion, fakeTarget, "")
+			require.NoError(t, err)
+			require.True(t, written)
+		}}
+		persistConfigDelivered(context.Background(), st, slog.Default(), before)
+		after := read(t, f)
+		assert.True(t, after.AppliedConfig.ConfigDelivered, "the marker landed")
+		assert.Equal(t, fakeTarget, after.AppliedConfig.RuntimeTarget, "the concurrent runtime target is kept")
+		assert.Equal(t, before.StateVersion, after.StateVersion, "neither write bumps state_version")
 	})
-	t.Run("stale copy keeps its version", func(t *testing.T) {
+	t.Run("runtime target written after the marker", func(t *testing.T) {
 		f := newRunDispatchFixture(t)
-		stale, err := f.store.GetAgent(context.Background(), f.agent.ID)
+		persistConfigDelivered(context.Background(), f.store, slog.Default(), read(t, f))
+		cur := read(t, f)
+		written, err := f.store.SetAgentRuntimeTarget(context.Background(), cur.ID, cur.StateVersion, fakeTarget, "")
 		require.NoError(t, err)
-		staleVersion := stale.StateVersion
-		cur, err := f.store.GetAgent(context.Background(), f.agent.ID)
+		require.True(t, written, "the marker write left state_version alone")
+		after := read(t, f)
+		assert.True(t, after.AppliedConfig.ConfigDelivered, "the marker is kept")
+		assert.Equal(t, fakeTarget, after.AppliedConfig.RuntimeTarget)
+	})
+	t.Run("an already-set marker writes nothing", func(t *testing.T) {
+		f := newRunDispatchFixture(t)
+		persistConfigDelivered(context.Background(), f.store, slog.Default(), read(t, f))
+		written, err := f.store.SetAgentConfigDelivered(context.Background(), f.agent.ID)
 		require.NoError(t, err)
-		cur.AppliedConfig.Profile = "fake-other-write"
-		_, err = f.store.UpdateAgentConfig(context.Background(), cur.ID, cur.StateVersion, cur.AppliedConfig, cur.PendingConfig)
-		require.NoError(t, err)
-
-		persistConfigDelivered(context.Background(), f.store, slog.Default(), stale)
-		stored, err := f.store.GetAgent(context.Background(), f.agent.ID)
-		require.NoError(t, err)
-		assert.True(t, stored.AppliedConfig.ConfigDelivered)
-		assert.Equal(t, "fake-other-write", stored.AppliedConfig.Profile)
-		assert.Equal(t, staleVersion, stale.StateVersion, "a stale copy does not follow")
+		assert.False(t, written)
 	})
 }
 
@@ -757,16 +771,16 @@ func TestLifecycleHTTP_BrokerRecordUnreadableIs503(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, string(state.PhaseRunning), stored.Phase, "the agent is not stopped")
 	})
-	t.Run("message wake", func(t *testing.T) {
-		srv, client, agent, _, fault := setup(t, "read-err-wake", state.PhaseSuspended)
+	t.Run("message wake, through the router", func(t *testing.T) {
+		srv, client, agent, s, fault := setup(t, "read-err-wake", state.PhaseSuspended)
 		fault.Arm()
-		_, dmErr := srv.wakeAgentForDM(context.Background(), agent)
-		require.NotNil(t, dmErr)
-		assert.Equal(t, http.StatusServiceUnavailable, dmErr.HTTPStatus)
-		assert.Equal(t, ErrCodeUnavailable, dmErr.Code)
-		assert.Equal(t, brokerRecordUnreadableMessage("started"), dmErr.Message)
-		assert.NotContains(t, dmErr.Message, "10.0.0.9", "no raw store text")
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/message",
+			map[string]interface{}{"message": "fake wake", "wake": true})
+		checkHTTP(t, rec, "started")
 		assert.False(t, client.createCalled || client.startCalled, "nothing is sent")
+		stored, err := s.GetAgent(context.Background(), agent.ID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseSuspended), stored.Phase, "the agent stays suspended")
 	})
 }
 
@@ -1062,4 +1076,66 @@ func TestFinalizeEnv_BackstopReadErrorIs503(t *testing.T) {
 			assert.NotContains(t, rec.Body.String(), "10.0.0.9")
 		})
 	}
+}
+
+// The create-existing start step (existingAgentFlatChecks, the create
+// endpoint's branch that starts an existing agent in place on its own
+// Runtime Broker) maps a failed broker-record read to the fixed 503, with
+// the read failure injected on the server's own store.
+func TestCreateExistingStart_BrokerRecordUnreadableIs503(t *testing.T) {
+	srv, s := testServer(t)
+	project, broker := newSharedModeHandlerProject(t, s, "create-existing")
+	agent := newQuotaTestAgent(t, s, broker, project, "create-existing", state.PhaseCreated)
+	_, fault := installStoreFault(t, srv, brokerReadFaultWrap(errors.New(fakeBrokerReadError)))
+	fault.Arm()
+
+	rec := httptest.NewRecorder()
+	a := agent
+	res, done := srv.existingAgentFlatChecks(context.Background(), rec, &a, broker.ID, CreateAgentRequest{Name: agent.Name})
+	require.True(t, done, "a response was written")
+	assert.Equal(t, existingAgentErrored, res)
+	assert.NotContains(t, rec.Body.String(), "10.0.0.9", "no raw store text")
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	var body ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, ErrCodeUnavailable, body.Error.Code)
+	assert.Equal(t, brokerRecordUnreadableMessage("started"), body.Error.Message)
+}
+
+// brokerReadAfterStore fails every broker-record read after the first ok
+// ones with fakeBrokerReadError.
+type brokerReadAfterStore struct {
+	store.Store
+	ok    int
+	reads int
+}
+
+func (s *brokerReadAfterStore) GetRuntimeBroker(ctx context.Context, id string) (*store.RuntimeBroker, error) {
+	s.reads++
+	if s.reads > s.ok {
+		return nil, errors.New(fakeBrokerReadError)
+	}
+	return s.Store.GetRuntimeBroker(ctx, id)
+}
+
+// On the owner node, with only the routed finalize's own placement backstop
+// read failing (the start guards' read succeeds first), the finalize_env is
+// refused with the fixed 503 for the start, no raw store text, nothing sent.
+func TestCrossNode_OwnerFinalizeBackstopReadOnlyIs503(t *testing.T) {
+	cs := entadapter.NewCompositeStore(enttest.NewClient(t))
+	owner := &Server{store: cs, instanceID: "hub-owner-" + uuid.NewString()[:8], agentLifecycleLog: slog.Default()}
+	client := &mockRuntimeBrokerClient{}
+	reads := &brokerReadAfterStore{Store: cs, ok: 1}
+	hd := NewHTTPAgentDispatcherWithClient(reads, client, false, slog.Default())
+	owner.SetDispatcher(hd)
+	hd.SetRequiredStandingCheck(func(context.Context, *store.Agent) error { return nil })
+	agent := seedAgentWithBrokerID(t, cs, uuid.NewString())
+	grantPreserveWorkspaceCreate(t, cs, agent.RuntimeBrokerID)
+
+	raw, err := json.Marshal(&FinalizeEnvDispatchArgs{Synchronous: true, PreserveWorkspace: true})
+	require.NoError(t, err)
+	_, err = owner.execDispatchFinalizeEnv(context.Background(), store.BrokerDispatch{AgentID: agent.ID, Args: string(raw)})
+	assertBrokerReadRefusal(t, err, "started")
+	assert.Equal(t, 2, reads.reads, "the guards' read succeeded; the finalize backstop's failed")
+	assert.False(t, client.createCalled, "nothing is sent")
 }

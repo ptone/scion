@@ -856,6 +856,17 @@ type AgentStore interface {
 	// agent does not exist.
 	SetAgentRuntimeTarget(ctx context.Context, id string, expectedVersion int64, target, candidate string) (written bool, err error)
 
+	// SetAgentConfigDelivered sets AgentAppliedConfig.ConfigDelivered in an
+	// agent's applied config and changes nothing else: no other
+	// applied-config key, no other column, and not state_version, so a
+	// concurrent field-level write (SetAgentRuntimeTarget) or config write
+	// is never lost to it (ptone/scion#6096). The write is conditional on
+	// the applied config being unchanged since its read in the same
+	// transaction, and is retried a bounded number of times when it
+	// changed. It returns written=false, with no error, when the agent does
+	// not exist or the marker was already set.
+	SetAgentConfigDelivered(ctx context.Context, id string) (written bool, err error)
+
 	// FindOrphanedAgents returns agents whose RuntimeBrokerID references a broker
 	// that is offline or does not exist, and who are not in terminal states
 	// (stopped, error). Agents assigned to the given currentBrokerID are excluded.
