@@ -3617,13 +3617,27 @@ func preserveWorkspaceRequested(ctx context.Context) bool {
 // rather than sent (ptone/scion#6096).
 var errBrokerLacksPreserveWorkspace = errors.New("this agent cannot be started until its runtime broker is upgraded: the broker cannot deliver the agent's environment while keeping its workspace")
 
+// errBrokerRecordUnreadable is the fixed message of a routed start whose
+// broker record is missing or cannot be read when its capability is
+// checked: nothing was sent, and handlers answer 503 (ptone/scion#6096).
+var errBrokerRecordUnreadable = errors.New("the agent's runtime broker record could not be read; the agent was not started")
+
+// brokerRecordReadError is errBrokerRecordUnreadable with the store error,
+// which is kept for the server log only: Error() is the fixed message.
+type brokerRecordReadError struct{ err error }
+
+func (e *brokerRecordReadError) Error() string { return errBrokerRecordUnreadable.Error() }
+func (e *brokerRecordReadError) Unwrap() []error {
+	return []error{errBrokerRecordUnreadable, e.err}
+}
+
 // checkPreserveWorkspaceCreate returns errBrokerLacksPreserveWorkspace
 // unless agent's broker advertises PreserveWorkspaceCreate. A broker that
 // cannot be read fails the start too.
 func checkPreserveWorkspaceCreate(ctx context.Context, st store.Store, agent *store.Agent) error {
 	broker, err := st.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
 	if err != nil {
-		return fmt.Errorf("read the agent's runtime broker: %w", err)
+		return &brokerRecordReadError{err: err}
 	}
 	if broker.Capabilities == nil || !broker.Capabilities.PreserveWorkspaceCreate {
 		return errBrokerLacksPreserveWorkspace
@@ -3824,6 +3838,11 @@ func (d *HTTPAgentDispatcher) startThroughCreate(ctx context.Context, agent *sto
 	// The create must keep the agent's workspace: refuse, with nothing
 	// sent, on a broker that would ignore the flag and clear it.
 	if err := checkPreserveWorkspaceCreate(ctx, d.store, agent); err != nil {
+		var readErr *brokerRecordReadError
+		if errors.As(err, &readErr) {
+			d.log.WarnContext(ctx, "DispatchAgentStart: failed to read the agent's runtime broker; agent not started",
+				"agent_id", agent.ID, "broker_id", agent.RuntimeBrokerID, "error", readErr.err)
+		}
 		return nil, err
 	}
 	ctx = withPreserveWorkspace(ctx)
