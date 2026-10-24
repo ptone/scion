@@ -38,7 +38,8 @@ export class ScionMarkdownPreview extends LitElement {
   @property({ type: Boolean, attribute: 'same-origin-images' })
   sameOriginImages = false;
 
-  @state() private renderedHtml = '';
+  /** The rendered `.preview-container` element, built once per content. */
+  @state() private renderedContent: HTMLElement | null = null;
   @state() private loading = true;
   @state() private error: string | null = null;
 
@@ -228,9 +229,14 @@ export class ScionMarkdownPreview extends LitElement {
 
     try {
       const renderer = await getMarkdownRenderer();
-      this.renderedHtml = renderer.render(this.content, {
+      const fragment = renderer.renderFragment(this.content, {
         sameOriginImagesOnly: this.sameOriginImages,
       });
+      const container = document.createElement('div');
+      container.className = 'preview-container';
+      container.setAttribute('part', 'container');
+      container.append(fragment);
+      this.renderedContent = container;
     } catch (err) {
       console.error('Failed to render markdown:', err);
       this.error = 'Failed to render markdown preview';
@@ -253,11 +259,7 @@ export class ScionMarkdownPreview extends LitElement {
       `;
     }
 
-    return html`<div
-      class="preview-container"
-      part="container"
-      .innerHTML=${this.renderedHtml}
-    ></div>`;
+    return this.renderedContent ?? html`<div class="preview-container" part="container"></div>`;
   }
 }
 
