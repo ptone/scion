@@ -558,3 +558,48 @@ func TestRoutedStart_StandingBackstopRunsFirst(t *testing.T) {
 		})
 	}
 }
+
+// Each of the other start backstops also runs before routing: a stale pin
+// (placement), an in-flight create launch (launch guard) and an agent with
+// no Runtime Broker assigned are refused with their own errors, never the
+// capability refusal, and nothing is sent.
+func TestRoutedStart_OtherBackstopsRunFirst(t *testing.T) {
+	t.Run("placement: stale pin", func(t *testing.T) {
+		f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+		a := f.stalePinnedAgent(t, "routed-stale", string(state.PhaseStopped))
+		require.NoError(t, f.s.CreateEnvVar(context.Background(), &store.EnvVar{
+			ID: uuid.NewString(), Key: failClosedKey, Value: failClosedValue,
+			Scope: store.ScopeProject, ScopeID: a.ProjectID, InjectionMode: store.InjectionModeAsNeeded,
+		}))
+		disp := NewHTTPAgentDispatcherWithClient(f.s, f.client, false, slog.Default())
+		err := disp.DispatchAgentStart(context.Background(), a, "", false)
+		var refusal *RuntimeTargetRefusal
+		require.ErrorAs(t, err, &refusal)
+		assert.Equal(t, ErrCodeRuntimeTargetPinStale, refusal.Code)
+		assert.NotErrorIs(t, err, errBrokerLacksPreserveWorkspace)
+		assert.False(t, f.client.createCalled, "no create is sent")
+		assert.False(t, f.client.startCalled)
+	})
+	t.Run("launch guard: create launch in flight", func(t *testing.T) {
+		f := newRunDispatchFixture(t)
+		neverStarted(f)
+		seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
+		stale := *f.agent
+		seedLaunch(t, f.store, f.agent, seedInFlight)
+		recordCreates(f)
+		err := f.d.DispatchAgentStart(context.Background(), &stale, "", false)
+		require.ErrorIs(t, err, ErrLaunchInFlight)
+		assert.False(t, f.client.createCalled, "no create is sent")
+	})
+	t.Run("no runtime broker assigned", func(t *testing.T) {
+		f := newRunDispatchFixture(t)
+		neverStarted(f)
+		seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
+		recordCreates(f)
+		f.agent.RuntimeBrokerID = ""
+		err := f.d.DispatchAgentStart(context.Background(), f.agent, "", false)
+		require.ErrorIs(t, err, errNoRuntimeBrokerAssigned)
+		assert.NotErrorIs(t, err, errBrokerLacksPreserveWorkspace)
+		assert.False(t, f.client.createCalled, "no create is sent")
+	})
+}
