@@ -2877,7 +2877,7 @@ func (s *Server) createAgentInProject(
 				}
 				if isSecretResolutionError(err) {
 					// The as-needed values the broker asked for could not be
-					// resolved, and a start does not resolve them, so the
+					// resolved, and a plain start does not gather them, so the
 					// agent cannot start from this provision
 					// (ptone/scion#5959). Fail the create as above: remove the
 					// broker files and the agent row, and answer the fixed
@@ -2924,7 +2924,7 @@ func (s *Server) createAgentInProject(
 					// the needs report or the replay with the as-needed
 					// values) and then failed, for example the replay in
 					// transport. The broker may hold files without the
-					// as-needed values, and a start does not resolve them,
+					// as-needed values, and a plain start does not gather them,
 					// so the agent must not stay startable
 					// (ptone/scion#6096). Fail the create as above: remove
 					// the broker files and the agent row, and answer the
@@ -2937,10 +2937,10 @@ func (s *Server) createAgentInProject(
 				// Any other provision error, including one returned before a
 				// provision request left the hub (no broker assigned, the
 				// identity precheck, the broker endpoint lookup), also fails
-				// the create: a later start does not gather env, and the
-				// broker would provision the agent on the fly without its
-				// as-needed values, so no provision-only create that did not
-				// provision may leave a startable row (ptone/scion#6096).
+				// the create, so no provision-only create that did not
+				// provision leaves a row behind (ptone/scion#6096): a plain
+				// start does not gather env, and the broker would provision
+				// the agent on the fly without its as-needed values.
 				s.agentLifecycleLog.Warn("Provision-only create failed: provision did not complete",
 					"agent_id", agent.ID, "agent", agent.Name, "broker", agent.RuntimeBrokerID, "error", err)
 				failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { dispatchCreateErrorResponse(w, err, agent.ID) })

@@ -405,6 +405,13 @@ type ExposedPort struct {
 
 // AgentAppliedConfig stores the effective configuration of an agent.
 type AgentAppliedConfig struct {
+	// ConfigDelivered records that a create, env finalize, provision or
+	// reprovision completed and delivered the agent's config to its broker,
+	// including any as-needed values the broker asked for
+	// (ptone/scion#6096). A start of an agent without it is routed through
+	// create-with-gather unless its run history shows a successful start.
+	ConfigDelivered bool `json:"configDelivered,omitempty"`
+
 	Image         string            `json:"image,omitempty"`
 	HarnessConfig string            `json:"harnessConfig,omitempty"`
 	HarnessAuth   string            `json:"harnessAuth,omitempty"` // Late-binding override for auth_selected_type
