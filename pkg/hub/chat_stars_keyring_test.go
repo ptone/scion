@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -97,6 +98,7 @@ func TestCapabilityKeyring_ChatStarsCursor(t *testing.T) {
 	require.Len(t, p3.Items, 1)
 	assert.ElementsMatch(t, ids, []string{p1.Items[0].MessageID, p2.Items[0].MessageID, p3.Items[0].MessageID}, "each star once, across replicas")
 	assert.Empty(t, p3.NextCursor)
+	assert.NotContains(t, rec.Body.String(), `"nextCursor"`, "the last page carries no cursor key")
 
 	// Bound to the caller and the conversation.
 	rec, _ = getStarPage(t, f, b, f.owner, f.topicA, "limit=1", "cursor="+url.QueryEscape(p1.NextCursor))
@@ -105,6 +107,14 @@ func TestCapabilityKeyring_ChatStarsCursor(t *testing.T) {
 	assertInvalidCursor(t, rec)
 
 	body := strings.TrimPrefix(p1.NextCursor, "c2.gen1.")
+	// A flipped byte inside the sealed body (not a base64 character swap,
+	// which can decode to the same bytes).
+	raw, err := base64.RawURLEncoding.DecodeString(body)
+	require.NoError(t, err)
+	require.NotEmpty(t, raw)
+	raw[len(raw)/2] ^= 0x01
+	flipped := "c2.gen1." + base64.RawURLEncoding.EncodeToString(raw)
+	require.NotEqual(t, p1.NextCursor, flipped)
 	for name, c := range map[string]string{
 		"unknown kid":     "c2.gen9." + body,
 		"swapped kid":     "c2.gen2." + body,
@@ -112,7 +122,7 @@ func TestCapabilityKeyring_ChatStarsCursor(t *testing.T) {
 		"no kid":          "c2." + body,
 		"empty kid":       "c2.." + body,
 		"unknown version": "c3.gen1." + body,
-		"flipped byte":    p1.NextCursor[:len(p1.NextCursor)-2] + "AA",
+		"flipped byte":    flipped,
 	} {
 		rec, _ := getStarPage(t, f, b, f.admin, f.topicA, "limit=1", "cursor="+url.QueryEscape(c))
 		require.Equal(t, http.StatusBadRequest, rec.Code, name)
@@ -140,5 +150,6 @@ func TestCapabilityKeyring_ChatStarsCursor(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Len(t, all.Items, 3)
 	assert.Empty(t, all.NextCursor)
+	assert.NotContains(t, rec.Body.String(), `"nextCursor"`, "a complete page carries no cursor key")
 	assertNoCapabilityKeyMaterial(t, logs.String()+out+rec.Body.String())
 }
