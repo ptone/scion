@@ -559,6 +559,11 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 			s.asyncStartAllowed()
 		var res *StartDispatchResult
 		dispatch := func(c context.Context) error {
+			if opts.Kind == store.StartClaimRestart {
+				// A restart's start leg stays a plain restart: it is not
+				// routed through create-with-gather (ptone/scion#6101).
+				c = withRestartStartLeg(c)
+			}
 			if async {
 				kind := store.LaunchKindStart
 				if opts.Kind == store.StartClaimRestart {
