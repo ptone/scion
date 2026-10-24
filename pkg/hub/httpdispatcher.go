@@ -1934,7 +1934,7 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 			err = provisionSent(err)
 		}
 		if err == nil {
-			markConfigDelivered(agent)
+			markAsNeededPending(agent)
 		}
 	}()
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
@@ -3527,12 +3527,13 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 // (suspended → resume). It is DispatchAgentStartWithOptions with no options
 // (always synchronous); both call dispatchAgentStart directly, so neither is
 // a guarded call site of the other.
-// markConfigDelivered sets ConfigDelivered on agent's applied config in
-// memory (ptone/scion#6096). Like the resolved env a provision merges into
-// AppliedConfig, it is persisted by the caller's own write of the agent after
-// the dispatch; a caller that writes no config leaves it unset, so the next
-// start of the agent re-gathers (startRoutesThroughCreate), which is the
-// safe direction.
+// markConfigDelivered sets ConfigDelivered (and clears AsNeededPending) on
+// agent's applied config in memory, for a create or env finalize that
+// started the agent with its config (ptone/scion#6096). Like the resolved
+// env a provision merges into AppliedConfig, it is persisted by the caller's
+// own write of the agent after the dispatch; a caller that writes no config
+// leaves it unset, so the next start of the agent re-gathers
+// (startRoutesThroughCreate), which is the safe direction.
 func markConfigDelivered(agent *store.Agent) {
 	if agent == nil {
 		return
@@ -3541,6 +3542,22 @@ func markConfigDelivered(agent *store.Agent) {
 		agent.AppliedConfig = &store.AgentAppliedConfig{}
 	}
 	agent.AppliedConfig.ConfigDelivered = true
+	agent.AppliedConfig.AsNeededPending = false
+}
+
+// markAsNeededPending records, in memory like markConfigDelivered, that a
+// provision, move provision or reprovision completed without starting the
+// agent: the as-needed values it resolved went only into that provision
+// request, so the next start must gather them again (ptone/scion#6096).
+func markAsNeededPending(agent *store.Agent) {
+	if agent == nil {
+		return
+	}
+	if agent.AppliedConfig == nil {
+		agent.AppliedConfig = &store.AgentAppliedConfig{}
+	}
+	agent.AppliedConfig.ConfigDelivered = false
+	agent.AppliedConfig.AsNeededPending = true
 }
 
 // markConfigDeliveredOnSuccess marks agent only for a create or finalize the
@@ -3564,13 +3581,19 @@ func markConfigDeliveredOnSuccess(agent *store.Agent, res *CreateDispatchResult)
 // was never delivered would start without the as-needed values it needs
 // (ptone/scion#6096). Plain start is kept when:
 //   - the applied config records a delivered config (ConfigDelivered), or
-//   - the agent predates the marker and has run history together with a
-//     phase only a successful start reaches (running, stopped, suspended or
-//     halted): a legacy row that already started counts as provisioned
-//     (coordinator-2 ruling; a run ID alone is not enough, because beginRun
-//     records it before the broker call), or
+//   - no provision is pending (AsNeededPending unset) and the agent predates
+//     the marker with run history together with a phase only a successful
+//     start reaches (running, stopped, suspended or halted): a legacy row
+//     that already started counts as provisioned (coordinator-2 ruling; a
+//     run ID alone is not enough, because beginRun records it before the
+//     broker call), or
 //   - the agent has no as-needed entries in its scopes, so there is nothing
 //     to gather.
+//
+// A provision, move provision or reprovision sets AsNeededPending, so the
+// start after it (a provision-only agent's first start, a move's start on
+// the target, a reincarnation's start leg) is routed even when the agent's
+// run history shows earlier starts.
 //
 // A resumed start always has run history and is never routed. An agent
 // with an ancestry (whose progeny entries are not listed here) counts as
@@ -3581,10 +3604,14 @@ func (d *HTTPAgentDispatcher) startRoutesThroughCreate(ctx context.Context, agen
 	if resume || agent == nil {
 		return false, "", nil
 	}
-	if agent.AppliedConfig != nil && agent.AppliedConfig.ConfigDelivered {
-		return false, "", nil
+	pending := false
+	if agent.AppliedConfig != nil {
+		if agent.AppliedConfig.ConfigDelivered {
+			return false, "", nil
+		}
+		pending = agent.AppliedConfig.AsNeededPending
 	}
-	if (agent.RunID != "" || len(agent.PreviousRunIDs) > 0) && startedPhase(agent.Phase) {
+	if !pending && (agent.RunID != "" || len(agent.PreviousRunIDs) > 0) && startedPhase(agent.Phase) {
 		return false, "", nil
 	}
 	return d.hasAsNeededEntries(ctx, agent)
