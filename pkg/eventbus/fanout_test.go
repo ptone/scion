@@ -844,3 +844,268 @@ func TestFanOutEventBus_SubscribeNilHandler(t *testing.T) {
 		t.Errorf("rejected pattern replayed onto new spoke: %v", replayed)
 	}
 }
+
+// blockingBus is an EventBus whose Publish blocks until release is closed
+// or its ctx ends, and records the ctx it was called with.
+type blockingBus struct {
+	release chan struct{}
+	started chan struct{}
+	calls   atomic.Int32
+	mu      sync.Mutex
+	ctxs    []context.Context
+	ended   chan error
+}
+
+func newBlockingBus() *blockingBus {
+	return &blockingBus{
+		release: make(chan struct{}),
+		started: make(chan struct{}, 16),
+		ended:   make(chan error, 16),
+	}
+}
+
+func (b *blockingBus) Publish(ctx context.Context, _ string, _ *messages.StructuredMessage) error {
+	b.calls.Add(1)
+	b.mu.Lock()
+	b.ctxs = append(b.ctxs, ctx)
+	b.mu.Unlock()
+	b.started <- struct{}{}
+	var err error
+	select {
+	case <-b.release:
+	case <-ctx.Done():
+		err = ctx.Err()
+	}
+	b.ended <- err
+	return err
+}
+
+func (b *blockingBus) Subscribe(string, EventHandler) (Subscription, error) {
+	return &stubSubscription{}, nil
+}
+
+func (b *blockingBus) Close() error { return nil }
+
+// inProcessBlockingBus is a blockingBus marked in-process.
+type inProcessBlockingBus struct{ *blockingBus }
+
+func (inProcessBlockingBus) InProcessSpoke() {}
+
+func newBoundedFanOut(buses []NamedEventBus) *FanOutEventBus {
+	f := NewFanOutEventBus(buses, slog.Default())
+	f.ObserverWait = 50 * time.Millisecond
+	f.ObserverCallTimeout = 2 * time.Second
+	f.SpokePublishTimeout = 5 * time.Second
+	return f
+}
+
+func TestFanOut_HungObserverBoundedByTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		channel string
+	}{
+		{name: "broadcast"},
+		{name: "channel", channel: "relay"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inproc := newStubEventBus()
+			hung := newBlockingBus()
+			defer close(hung.release)
+			f := newBoundedFanOut([]NamedEventBus{
+				{Name: InProcessBusName, Bus: inproc},
+				{Name: "relay", Bus: hung, Observer: true},
+			})
+			msg := messages.NewInstruction("user:alice", "agent:bot", "hello")
+			msg.Channel = tc.channel
+
+			start := time.Now()
+			if err := f.Publish(context.Background(), "test.topic", msg); err != nil {
+				t.Fatalf("Publish: %v", err)
+			}
+			if d := time.Since(start); d > time.Second {
+				t.Fatalf("Publish took %v, want about the 50ms observer wait", d)
+			}
+			inproc.mu.Lock()
+			n := len(inproc.published)
+			inproc.mu.Unlock()
+			if n != 1 {
+				t.Fatalf("inprocess got %d messages, want 1", n)
+			}
+		})
+	}
+}
+
+func TestFanOut_NonObserverStillAwaited(t *testing.T) {
+	slow := newBlockingBus()
+	f := newBoundedFanOut([]NamedEventBus{{Name: "relay", Bus: slow}})
+	done := make(chan error, 1)
+	go func() {
+		done <- f.Publish(context.Background(), "test.topic", messages.NewInstruction("user:alice", "agent:bot", "hi"))
+	}()
+	<-slow.started
+	select {
+	case err := <-done:
+		t.Fatalf("Publish returned %v before the non-observer spoke finished", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(slow.release)
+	if err := <-done; err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+}
+
+func TestFanOut_ObserverOverrunNotCancelledByCaller(t *testing.T) {
+	hung := newBlockingBus()
+	f := newBoundedFanOut([]NamedEventBus{{Name: "relay", Bus: hung, Observer: true}})
+	f.ObserverCallTimeout = 300 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := f.Publish(ctx, "test.topic", messages.NewInstruction("user:alice", "agent:bot", "hi")); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	cancel()
+	select {
+	case err := <-hung.ended:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("observer call ended with %v, want its own deadline", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("observer call did not end at its own deadline")
+	}
+	hung.mu.Lock()
+	callCtx := hung.ctxs[0]
+	hung.mu.Unlock()
+	if _, ok := callCtx.Deadline(); !ok {
+		t.Fatal("observer call ctx has no deadline")
+	}
+}
+
+func TestFanOut_ObserverSingleOverrunSkipsAndCounts(t *testing.T) {
+	hung := newBlockingBus()
+	f := newBoundedFanOut([]NamedEventBus{{Name: "relay", Bus: hung, Observer: true}})
+	msg := messages.NewInstruction("user:alice", "agent:bot", "hi")
+
+	if err := f.Publish(context.Background(), "test.topic", msg); err != nil {
+		t.Fatalf("first Publish: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := f.Publish(context.Background(), "test.topic", msg); err != nil {
+			t.Fatalf("Publish %d: %v", i, err)
+		}
+	}
+	if got := hung.calls.Load(); got != 1 {
+		t.Fatalf("observer called %d times while overrunning, want 1", got)
+	}
+	if got := f.ObserverSkipped("relay"); got != 3 {
+		t.Fatalf("ObserverSkipped = %d, want 3", got)
+	}
+
+	// Once the overrun returns, the spoke is called again.
+	close(hung.release)
+	<-hung.ended
+	if err := f.Publish(context.Background(), "test.topic", msg); err != nil {
+		t.Fatalf("Publish after overrun: %v", err)
+	}
+	if got := hung.calls.Load(); got != 2 {
+		t.Fatalf("observer called %d times after the overrun ended, want 2", got)
+	}
+}
+
+func TestFanOut_ConcurrentInTimeObserverCallsNotSkipped(t *testing.T) {
+	obs := newStubEventBus()
+	f := newBoundedFanOut([]NamedEventBus{{Name: "relay", Bus: obs, Observer: true}})
+	f.ObserverWait = 2 * time.Second
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = f.Publish(context.Background(), "test.topic", messages.NewInstruction("user:alice", "agent:bot", "hi"))
+		}()
+	}
+	wg.Wait()
+	obs.mu.Lock()
+	n := len(obs.published)
+	obs.mu.Unlock()
+	if n != 20 || f.ObserverSkipped("relay") != 0 {
+		t.Fatalf("published %d, skipped %d; want 20 and 0", n, f.ObserverSkipped("relay"))
+	}
+}
+
+func TestFanOut_InProcessSpokesStaySynchronous(t *testing.T) {
+	slow := newBlockingBus()
+	f := newBoundedFanOut([]NamedEventBus{
+		{Name: "web", Bus: inProcessBlockingBus{slow}, Observer: true},
+	})
+	done := make(chan error, 1)
+	go func() {
+		done <- f.Publish(context.Background(), "test.topic", messages.NewInstruction("user:alice", "agent:bot", "hi"))
+	}()
+	<-slow.started
+	select {
+	case err := <-done:
+		t.Fatalf("Publish returned %v before the in-process observer finished", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	close(slow.release)
+	if err := <-done; err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+}
+
+func TestFanOut_DefaultCapWhenNoDeadline(t *testing.T) {
+	hung := newBlockingBus()
+	f := newBoundedFanOut([]NamedEventBus{{Name: InProcessBusName, Bus: hung}})
+	f.SpokePublishTimeout = 100 * time.Millisecond
+	err := f.Publish(context.Background(), "test.topic", messages.NewInstruction("user:alice", "agent:bot", "hi"))
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, ErrInProcessPublish) {
+		t.Fatalf("Publish = %v, want the default-cap deadline wrapped in ErrInProcessPublish", err)
+	}
+
+	// A caller deadline is used as is.
+	hung2 := newBlockingBus()
+	close(hung2.release)
+	f2 := newBoundedFanOut([]NamedEventBus{{Name: InProcessBusName, Bus: hung2}})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+	if err := f2.Publish(ctx, "test.topic", messages.NewInstruction("user:alice", "agent:bot", "hi")); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	want, _ := ctx.Deadline()
+	got, _ := hung2.ctxs[0].Deadline()
+	if !got.Equal(want) {
+		t.Fatalf("spoke deadline %v, want the caller's %v", got, want)
+	}
+}
+
+func TestFanOut_ReplaceSpokeReturnsReplayError(t *testing.T) {
+	f := NewFanOutEventBus([]NamedEventBus{
+		{Name: InProcessBusName, Bus: newStubEventBus()},
+		{Name: "relay", Bus: newStubEventBus()},
+	}, slog.Default())
+	if _, err := f.Subscribe("agent.>", func(context.Context, string, *messages.StructuredMessage) {}); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
+	failing := newStubEventBus()
+	failing.subscribeFunc = func(string, EventHandler) (Subscription, error) {
+		return nil, errors.New("session lost")
+	}
+	err := f.ReplaceSpoke("relay", NamedEventBus{Name: "relay", Bus: failing})
+	if err == nil || errors.Is(err, ErrSpokeNotFound) || !strings.Contains(err.Error(), "session lost") {
+		t.Fatalf("ReplaceSpoke = %v, want the replay error", err)
+	}
+	if !f.HasSpoke("relay") {
+		t.Fatal("spoke not replaced")
+	}
+
+	err = f.ReplaceSpoke("missing", NamedEventBus{Name: "missing", Bus: newStubEventBus()})
+	if !errors.Is(err, ErrSpokeNotFound) {
+		t.Fatalf("ReplaceSpoke(missing) = %v, want ErrSpokeNotFound", err)
+	}
+
+	err = f.AddSpoke(NamedEventBus{Name: "other", Bus: failing})
+	if err == nil || !f.HasSpoke("other") {
+		t.Fatalf("AddSpoke = %v, HasSpoke = %v; want replay error and the spoke added", err, f.HasSpoke("other"))
+	}
+}
