@@ -5965,18 +5965,19 @@ func TestHTTPAgentDispatcher_BuildStartEnv_StartAndRestartProduceIdenticalEnv(t 
 	}
 	restartEnv := mockClient.lastRestartResolvedEnv
 
-	// Sanity: the fixture actually exercises config, storage, secret and
-	// as_needed vars, on both paths.
+	// Sanity: the fixture actually exercises config, storage and secret
+	// vars on both paths, and the as_needed var on the start path (the
+	// restart runs after it is deleted).
 	for _, env := range []map[string]string{startEnv, restartEnv} {
 		assert.Equal(t, "config-value", env["CONFIG_VAR"])
 		assert.Equal(t, "project-value", env["PROJECT_VAR"])
 		assert.Equal(t, "user-value", env["USER_VAR"])
 		assert.Equal(t, "secret-value", env["SECRET_API_KEY"])
-		_, hasAsNeeded := env["AS_NEEDED_VAR"]
-		assert.False(t, hasAsNeeded, "as_needed var must not be injected")
 		_, hasFileSecret := env["CLAUDE_AUTH"]
 		assert.False(t, hasFileSecret, "non-environment secret must not be injected into env")
 	}
+	_, hasAsNeeded := startEnv["AS_NEEDED_VAR"]
+	assert.False(t, hasAsNeeded, "as_needed var must not be injected by the start")
 
 	// The golden assertion: start and restart assemble byte-identical env,
 	// because both now go through the single shared buildStartEnv.
