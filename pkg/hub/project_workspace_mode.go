@@ -267,6 +267,17 @@ func writeEmptyPerAgentCapabilityError(w http.ResponseWriter, err error) bool {
 	return true
 }
 
+// writePreserveWorkspaceCapabilityError writes the 412 response for err if
+// it is errBrokerLacksPreserveWorkspace (the fixed, keyless upgrade message;
+// nothing was sent to the broker) and reports whether it did.
+func writePreserveWorkspaceCapabilityError(w http.ResponseWriter, err error) bool {
+	if !errors.Is(err, errBrokerLacksPreserveWorkspace) {
+		return false
+	}
+	writeError(w, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability, errBrokerLacksPreserveWorkspace.Error(), nil)
+	return true
+}
+
 // requireEmptyPerAgentBrokerCapability is the handler-side gate: it loads
 // brokerID and writes a 412 when the project is empty-per-agent and the
 // broker lacks the capability. Returns false when a response was written.

@@ -387,6 +387,14 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 					HTTPStatus: http.StatusServiceUnavailable,
 				}
 			}
+			if errors.Is(err, errBrokerLacksPreserveWorkspace) {
+				// Refused before anything was sent (ptone/scion#6096).
+				return nil, &AgentDMError{
+					Code:       ErrCodeUnsupportedCapability,
+					Message:    errBrokerLacksPreserveWorkspace.Error(),
+					HTTPStatus: http.StatusPreconditionFailed,
+				}
+			}
 			if errors.Is(err, errBrokerLacksEmptyPerAgent) {
 				// Fail closed like the other dispatch sites (design #2703 D3).
 				return nil, &AgentDMError{
