@@ -97,14 +97,12 @@ func TestCreateAgent_ProvisionOnlySkillResolutionFailure(t *testing.T) {
 	}
 }
 
-// TestCreateAgent_ProvisionOnlyPreSendFailureStaysWarning pins the one
-// provision-only failure that keeps the record: an error returned before any
-// provision request left the hub (not marked errProvisionSent), so no broker
-// was contacted. It still yields 201 with a warning. A failure after the
-// provision reached the broker fails the create
-// (TestCreateAgent_ProvisionOnlyFailureAfterSendFailsCreate,
-// ptone/scion#6096).
-func TestCreateAgent_ProvisionOnlyPreSendFailureStaysWarning(t *testing.T) {
+// TestCreateAgent_ProvisionOnlyPreSendFailureFailsCreate: an error returned
+// before any provision request left the hub (not marked errProvisionSent)
+// also fails the provision-only create and removes the row, because a later
+// start does not gather env and the broker would provision the agent on the
+// fly without its as-needed values (ptone/scion#6096).
+func TestCreateAgent_ProvisionOnlyPreSendFailureFailsCreate(t *testing.T) {
 	tests := []struct {
 		name string
 		err  error
@@ -125,15 +123,13 @@ func TestCreateAgent_ProvisionOnlyPreSendFailureStaysWarning(t *testing.T) {
 				ProvisionOnly: true,
 			})
 
-			require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-			var resp CreateAgentResponse
-			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-			require.NotNil(t, resp.Agent)
-			require.NotEmpty(t, resp.Warnings)
-			assert.Contains(t, resp.Warnings[0], "Failed to provision on runtime broker")
-			_, err := s.GetAgent(context.Background(), resp.Agent.ID)
-			assert.NoError(t, err, "the record is kept")
-			assert.False(t, disp.deleteCalled)
+			require.GreaterOrEqual(t, rec.Code, 400, rec.Body.String())
+			require.NotNil(t, disp.provisionedAgent)
+			agentID := disp.provisionedAgent.ID
+			_, err := s.GetAgent(context.Background(), agentID)
+			assert.ErrorIs(t, err, store.ErrNotFound, "the record is deleted")
+			rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agentID+"/start", nil)
+			assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 		})
 	}
 }
