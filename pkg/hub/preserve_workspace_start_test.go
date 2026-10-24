@@ -632,9 +632,11 @@ func (g *mintCountingGen) SignAgentToken(grant AgentTokenGrant, runID string) (s
 // body the handlers write.
 func assertBrokerReadRefusal(t *testing.T, err error, verb string) {
 	t.Helper()
+	require.Error(t, err)
+	// First and non-fatal, so a raw store error is reported as such.
+	assert.NotContains(t, err.Error(), "10.0.0.9", "no raw store text")
 	require.ErrorIs(t, err, errBrokerRecordUnreadable)
 	assert.Contains(t, err.Error(), brokerRecordUnreadableMessage(verb))
-	assert.NotContains(t, err.Error(), "10.0.0.9", "no raw store text")
 	assert.True(t, isConfirmedStartNotActedOnError(err))
 	rec := httptest.NewRecorder()
 	require.True(t, writePreserveWorkspaceCapabilityError(rec, fmt.Errorf("wrapped: %w", err)))
@@ -729,12 +731,13 @@ func TestLifecycleHTTP_BrokerRecordUnreadableIs503(t *testing.T) {
 	}
 	checkHTTP := func(t *testing.T, rec *httptest.ResponseRecorder, verb string) {
 		t.Helper()
+		// First and non-fatal, so a raw store error is reported as such.
+		assert.NotContains(t, rec.Body.String(), "10.0.0.9", "no raw store text")
 		require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
 		var body ErrorResponse
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 		assert.Equal(t, ErrCodeUnavailable, body.Error.Code)
 		assert.Equal(t, brokerRecordUnreadableMessage(verb), body.Error.Message)
-		assert.NotContains(t, rec.Body.String(), "10.0.0.9", "no raw store text")
 	}
 	t.Run("start", func(t *testing.T) {
 		srv, client, agent, s, fault := setup(t, "read-err-start", state.PhaseStopped)
