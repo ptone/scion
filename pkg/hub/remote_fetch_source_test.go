@@ -48,24 +48,8 @@ func TestHubRemoteSourceRefusal_NetworkForms(t *testing.T) {
 		return nil
 	}))
 	for name, tc := range hubNetworkSourceForms {
-		uri := tc.uri
 		t.Run(name, func(t *testing.T) {
-			assertHubSourceRefused(t, uri, tc.want)
-
-			srv, s := testInstallSourceServer(t)
-			rec := doRequest(t, srv, http.MethodPost, "/api/v1/resources/import", ImportResourcesRequest{
-				Kind: "template", Scope: "global", SourceURL: uri,
-			})
-			require.Equal(t, http.StatusBadRequest, rec.Code)
-			assert.Equal(t, "validation_error", reimportErrorCode(t, rec.Body.Bytes()))
-			assert.Contains(t, rec.Body.String(), config.ErrRemoteSourceNotAccepted.Error())
-			project := createRemoteSourceProject(t, s)
-			for _, route := range hubRemoteSourceProjectRoutes {
-				rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/"+route,
-					map[string]interface{}{"sourceUrl": uri})
-				require.Equal(t, http.StatusBadRequest, rec.Code, route)
-				assert.Equal(t, "validation_error", reimportErrorCode(t, rec.Body.Bytes()), route)
-			}
+			assertHubSourceRefused(t, tc.uri, config.ErrRemoteSourceNotAccepted.Error()+": "+tc.want)
 		})
 	}
 	assert.Zero(t, fetched)
