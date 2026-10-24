@@ -318,8 +318,8 @@ var (
 // resolvePublic resolves host and returns its addresses only if every one
 // of them is public.
 func resolvePublic(ctx context.Context, host string) ([]netip.Addr, error) {
-	if err := validatePublicHost(host); err != nil {
-		return nil, err
+	if validatePublicHost(host) != nil {
+		return nil, errNonPublicAddress
 	}
 	addrs, err := archiveLookup(ctx, host)
 	if err != nil {
