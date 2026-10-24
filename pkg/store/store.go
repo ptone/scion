@@ -871,6 +871,15 @@ type AgentStore interface {
 	// through create-with-gather again. Do not add a version bump here.
 	SetAgentConfigDelivered(ctx context.Context, id string) (written bool, err error)
 
+	// SetAgentUserSuppliedEnvKeys sets AgentAppliedConfig.UserSuppliedEnvKeys
+	// (names of env keys, never values) in an agent's applied config to keys,
+	// or removes the key when keys is empty, and changes nothing else, under
+	// the same conditional, retried, field-level write as
+	// SetAgentConfigDelivered (ptone/scion#6101). It returns written=false,
+	// with no error, when the agent does not exist or already holds exactly
+	// keys.
+	SetAgentUserSuppliedEnvKeys(ctx context.Context, id string, keys []string) (written bool, err error)
+
 	// FindOrphanedAgents returns agents whose RuntimeBrokerID references a broker
 	// that is offline or does not exist, and who are not in terminal states
 	// (stopped, error). Agents assigned to the given currentBrokerID are excluded.

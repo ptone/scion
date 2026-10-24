@@ -3799,15 +3799,27 @@ func preserveWorkspaceCapability(broker *store.RuntimeBroker) error {
 // concurrent config update nor a concurrent runtime-target write
 // (SetAgentRuntimeTarget, which does not bump state_version) is lost, and
 // agent's in-memory copy (which may hold a start's task override) is never
-// written. A failure is logged and leaves the marker unset: the next start is
-// routed again, which is safe. For the same reason the write deliberately
-// does not bump state_version (see store.SetAgentConfigDelivered): a stale
-// whole-config writer may clear the marker again, which only re-routes the
-// next start.
+// written, except its list of user-supplied env key names, which is written
+// field-level too (store.SetAgentUserSuppliedEnvKeys). A failure is logged
+// and leaves the marker unset: the next start is routed again, which is
+// safe. For the same reason the write deliberately does not bump
+// state_version (see store.SetAgentConfigDelivered): a stale whole-config
+// writer may clear the marker again, which only re-routes the next start.
 func persistConfigDelivered(ctx context.Context, st store.Store, log *slog.Logger, agent *store.Agent) {
 	if _, err := st.SetAgentConfigDelivered(ctx, agent.ID); err != nil {
 		log.WarnContext(ctx, "failed to record the agent's delivered config; the next start gathers again",
 			"agent_id", agent.ID, "error", err)
+	}
+	// The names of the env keys the user supplied at create
+	// (UserSuppliedEnvKeys, names only, never values) are written the same
+	// field-level way when this dispatch recorded them (an env finalize;
+	// an empty list clears older names), so a node that writes only the
+	// marker does not lose them (ptone/scion#6101).
+	if keys := deliveredUserSuppliedKeys(agent); keys != nil {
+		if _, err := st.SetAgentUserSuppliedEnvKeys(ctx, agent.ID, keys); err != nil {
+			log.WarnContext(ctx, "failed to record the names of the user-supplied env keys; a later start treats them as optional",
+				"agent_id", agent.ID, "error", err)
+		}
 	}
 }
 
