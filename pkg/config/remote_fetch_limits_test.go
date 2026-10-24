@@ -132,6 +132,23 @@ func TestExtractTarGz_ScanRefusesTooManyEntries(t *testing.T) {
 	assert.Zero(t, dirFileCount(t, dest))
 }
 
+// The tar scan allows one entry more than the limit (a common root
+// directory is stripped, not written), but the write path enforces the
+// limit on its own: an archive WITHOUT a common root holding maxEntries+1
+// entries is refused.
+func TestExtractTarGz_RootlessArchiveAtLimitPlusOne(t *testing.T) {
+	var entries []tarEntry
+	for i := 0; i < 6; i++ {
+		entries = append(entries, tarEntry{typ: tar.TypeReg, name: fmt.Sprintf("f%d.txt", i), body: "x"})
+	}
+	tgz := writeArchive(t, buildTarGz(t, entries), "rootless.tar.gz")
+	require.NoError(t, extractTarGz(tgz, t.TempDir(), &fetchBudget{maxBytes: 1 << 20, maxEntries: 6}))
+	dest := t.TempDir()
+	err := extractTarGz(tgz, dest, &fetchBudget{maxBytes: 1 << 20, maxEntries: 5})
+	assert.ErrorIs(t, err, ErrRemoteTemplateTooLarge)
+	assert.LessOrEqual(t, dirFileCount(t, dest), 5, "never more than the limit is written")
+}
+
 func TestCopyDirExcludingGit_Limits(t *testing.T) {
 	src := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(src, "tpl", "sub"), 0o755))

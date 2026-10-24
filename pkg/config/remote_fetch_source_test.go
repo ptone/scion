@@ -331,6 +331,8 @@ func TestIsPublicAddr(t *testing.T) {
 		"::ffff:127.0.0.1", "::ffff:169.254.169.254", "64:ff9b::a9fe:a9fe",
 		"2002:a9fe:a9fe::1", "2001:db8::1", "fec0::1",
 		"::a9fe:a9fe", "::7f00:1", "::808:808", // IPv4-compatible (::/96)
+		"::ffff:0:a9fe:a9fe", "::ffff:0:808:808", // IPv4-translated (::ffff:0:0:0/96)
+		"64:ff9b::808:808", // NAT64 (64:ff9b::/96)
 	} {
 		assert.False(t, isPublicAddr(netip.MustParseAddr(s)), s)
 	}
@@ -503,4 +505,41 @@ func TestArchiveClient_ProxyUse(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, proxyURL, got)
 	assert.Equal(t, "proxy.corp.example:3128", canonicalProxyAddr(proxyURL))
+}
+
+// Fetch-stage errors (download failures, refused redirects) do not repeat
+// the source URL or a redirect target.
+func TestFetchErrors_DoNotRepeatURL(t *testing.T) {
+	stubArchiveNet(t, map[string][]string{"public.example": {"8.8.8.8"}})
+	err := fetchArchive(context.Background(), "https://public.example/SECRETPATH/t.tgz?k=SECRETVALUE", t.TempDir(), RemoteFetchAnonymous)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "SECRET")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://SECRETHOST.example/SECRETPATH.tgz", http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(AllowArchiveServerForTest(srv.URL))
+	err = fetchArchive(context.Background(), srv.URL+"/SECRETPATH.tgz", t.TempDir(), RemoteFetchAnonymous)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "non-https")
+	assert.NotContains(t, err.Error(), "SECRET")
+
+	old := http.DefaultClient.Transport
+	t.Cleanup(func() { http.DefaultClient.Transport = old })
+	http.DefaultClient.Transport = remoteTemplatesRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("stub transport failure")
+	})
+	err = fetchGitHubTarball(context.Background(), &GitHubURLParts{Owner: "SECRETOWNER", Repo: "SECRETREPO", Branch: "main"}, t.TempDir(), "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "stub transport failure")
+	assert.NotContains(t, err.Error(), "SECRET")
+}
+
+func TestWithoutRequestURL(t *testing.T) {
+	inner := errors.New("boom")
+	err := withoutRequestURL(&url.Error{Op: "Get", URL: "https://SECRET.example/x", Err: &url.Error{Op: "Get", URL: "https://SECRET2.example/", Err: inner}})
+	assert.Equal(t, "Get: Get: boom", err.Error())
+	assert.ErrorIs(t, err, inner)
+	assert.Equal(t, inner, withoutRequestURL(inner))
 }

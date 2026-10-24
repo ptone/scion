@@ -481,3 +481,14 @@ func AllowArchiveServerForTest(rawURL string) (restore func()) {
 		archiveTestAddrs.Delete(addr)
 	}
 }
+
+// withoutRequestURL drops the request URL that net/http puts in a
+// *url.Error ("Get \"<url>\": ..."), keeping the operation and the
+// underlying error, so fetch errors do not repeat the source string.
+func withoutRequestURL(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return fmt.Errorf("%s: %w", ue.Op, withoutRequestURL(ue.Err))
+	}
+	return err
+}

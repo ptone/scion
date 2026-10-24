@@ -47,6 +47,7 @@ func cliRefusedSources(t *testing.T) (home string, sources map[string]cliRefusal
 		"gcs metadata":   {":gcs,endpoint=http://169.254.169.254:bucket/x", noParams},
 		// At most a local connection attempt; refused before it.
 		"archive loopback": {"https://127.0.0.1/x.tgz", "source host must be a public address"},
+		"archive metadata": {"https://169.254.169.254/latest/x.tgz", "source host must be a public address"},
 	}
 }
 

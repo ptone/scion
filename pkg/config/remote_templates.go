@@ -528,7 +528,7 @@ func fetchGitHubTarball(ctx context.Context, parts *GitHubURLParts, destPath str
 	client := &http.Client{Transport: http.DefaultClient.Transport, CheckRedirect: githubCheckRedirect}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to download tarball: %w", err)
+		return fmt.Errorf("failed to download tarball: %w", withoutRequestURL(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -961,7 +961,7 @@ func fetchArchive(ctx context.Context, uri string, destPath string, creds Remote
 
 	resp, err := newArchiveHTTPClient(creds).Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to download archive: %w", err)
+		return fmt.Errorf("failed to download archive: %w", withoutRequestURL(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -982,7 +982,7 @@ func fetchArchive(ctx context.Context, uri string, destPath string, creds Remote
 		return extractTarGz(tmpPath, destPath, templateBudget())
 	}
 
-	return fmt.Errorf("unsupported archive format: %s", uri)
+	return errors.New("unsupported archive format")
 }
 
 // extractZip extracts a zip archive to the destination path.
