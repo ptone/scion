@@ -583,8 +583,9 @@ func (h *artifactHost) ScopesExist(ctx context.Context, refs []string) (map[stri
 	if len(refs) == 0 {
 		return out, nil
 	}
-	// No server or no store: fail closed with an error (every caller treats an error as "cannot tell", and the
-	// steward and review clauses deny on it), never a nil dereference.
+	// No server or no store: fail closed with an error, never a nil
+	// dereference. Every caller treats an error as "cannot tell", and the
+	// steward and review clauses deny on it.
 	if h.server == nil || h.server.store == nil {
 		slog.WarnContext(ctx, "artifacts: scope existence check without a store")
 		return nil, errors.New("artifacts: scope existence check: no store")
