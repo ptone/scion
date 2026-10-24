@@ -3755,7 +3755,14 @@ func persistConfigDelivered(ctx context.Context, st store.Store, log *slog.Logge
 				"agent_id", agent.ID, "error", err)
 			return
 		}
-		if stored.AppliedConfig != nil && stored.AppliedConfig.ConfigDelivered {
+		// The names of the env keys the user supplied at create
+		// (UserSuppliedEnvKeys, names only) are written with the marker
+		// when this dispatch recorded them (an env finalize), so a node
+		// that persists only the marker does not lose them
+		// (ptone/scion#6101).
+		keys := deliveredUserSuppliedKeys(agent)
+		if stored.AppliedConfig != nil && stored.AppliedConfig.ConfigDelivered &&
+			(keys == nil || slices.Equal(stored.AppliedConfig.UserSuppliedEnvKeys, keys)) {
 			return
 		}
 		applied := stored.AppliedConfig
@@ -3763,6 +3770,9 @@ func persistConfigDelivered(ctx context.Context, st store.Store, log *slog.Logge
 			applied = &store.AgentAppliedConfig{}
 		}
 		applied.ConfigDelivered = true
+		if keys != nil {
+			applied.UserSuppliedEnvKeys = keys
+		}
 		version, err := st.UpdateAgentConfig(ctx, stored.ID, stored.StateVersion, applied, stored.PendingConfig)
 		if errors.Is(err, store.ErrVersionConflict) {
 			continue

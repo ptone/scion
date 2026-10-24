@@ -271,6 +271,17 @@ func recordUserSuppliedEnvKeys(agent *store.Agent, env map[string]string) {
 	agent.AppliedConfig.UserSuppliedEnvKeys = keys
 }
 
+// deliveredUserSuppliedKeys returns a copy of the user-supplied env key
+// names recorded on agent's in-memory applied config (by an env finalize of
+// this dispatch, or as read), or nil when there are none, for the marker
+// write (persistConfigDelivered).
+func deliveredUserSuppliedKeys(agent *store.Agent) []string {
+	if agent == nil || agent.AppliedConfig == nil || len(agent.AppliedConfig.UserSuppliedEnvKeys) == 0 {
+		return nil
+	}
+	return append([]string(nil), agent.AppliedConfig.UserSuppliedEnvKeys...)
+}
+
 // userSuppliedKeys returns the agent's user-supplied env key names as a set.
 func userSuppliedKeys(agent *store.Agent) map[string]struct{} {
 	if agent == nil || agent.AppliedConfig == nil {
