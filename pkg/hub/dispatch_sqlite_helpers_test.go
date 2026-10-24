@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -102,6 +103,14 @@ type ownerErrDispatcher struct {
 	createResult *CreateDispatchResult
 	// finalizeErr, when set, is what finalize_env returns instead of err.
 	finalizeErr error
+
+	recMu sync.Mutex
+	// startRoutingSuppressed records whether the owner's last start ran
+	// with start routing suppressed (ptone/scion#6096).
+	startRoutingSuppressed bool
+	// createAsyncOptIn records the agent's LaunchAsyncOptIn when the
+	// owner's last create ran; nil when no create ran.
+	createAsyncOptIn *bool
 }
 
 // ownerSignalBus delivers the requesting node's signal to the owner node,
@@ -249,6 +258,9 @@ func (c *deferredDataOpTestClient) CreateAgentWithGather(_ context.Context, brok
 }
 
 func (d *ownerErrDispatcher) DispatchAgentStart(ctx context.Context, a *store.Agent, task string, resume bool) error {
+	d.recMu.Lock()
+	d.startRoutingSuppressed = startRoutingSuppressed(ctx, StartDispatchOptions{})
+	d.recMu.Unlock()
 	if d.beforeStart != nil {
 		d.beforeStart()
 	}
@@ -268,6 +280,10 @@ func (d *ownerErrDispatcher) DispatchCheckAgentPrompt(ctx context.Context, a *st
 	return false, d.err
 }
 func (d *ownerErrDispatcher) DispatchAgentCreateWithGather(ctx context.Context, a *store.Agent) (*CreateDispatchResult, error) {
+	d.recMu.Lock()
+	optIn := a.LaunchAsyncOptIn
+	d.createAsyncOptIn = &optIn
+	d.recMu.Unlock()
 	_, _ = d.lifecycleTestDispatcher.DispatchAgentCreateWithGather(ctx, a)
 	if d.createResult != nil {
 		return d.createResult, nil

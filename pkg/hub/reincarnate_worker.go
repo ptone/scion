@@ -1067,6 +1067,11 @@ func (s *Server) rerenderPreviousConfig(ctx context.Context, dispatcher AgentDis
 		return false
 	}
 	cfg := *previous
+	// previous may carry ConfigDelivered=true. A successful re-render is a
+	// reprovision, which clears it; when the row is restored to previous
+	// without one, the marker comes back although the previous generation's
+	// as-needed values are not persisted anywhere a later plain start reads.
+	// That later start is restart-class: ptone/scion#6101.
 	// previous's own shared dir backend change, if any, was confirmed when
 	// that generation was reprovisioned; a re-render must not repeat it.
 	// Pinned by TestReincarnateAgent_SharedDirBackends_RerenderStripsStoredChange

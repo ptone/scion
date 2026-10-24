@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -155,20 +156,69 @@ func TestDispatchAgentStart_LegacyRowWithoutMarkerIsRouted(t *testing.T) {
 }
 
 // A routed start is always a synchronous create, even for an agent opted
-// into asynchronous launches.
+// into asynchronous launches with async launch enabled on the hub: no send
+// asks the broker for an asynchronous launch.
 func TestDispatchAgentStart_RoutedStartIsSynchronous(t *testing.T) {
 	f := newRunDispatchFixture(t)
 	neverStarted(f)
 	f.agent.LaunchAsyncOptIn = true
+	f.d.asyncLaunchSettings = func() AsyncLaunchSettings {
+		return AsyncLaunchSettings{Enabled: true, Timeout: time.Minute}
+	}
 	seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
-	gatherNeedsClient(f)
+	sawAsync := false
+	f.client.createWithGatherFunc = func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+		if req.AsyncLaunch {
+			sawAsync = true
+		}
+		if req.ResolvedEnv[failClosedKey] != "" {
+			return &RemoteAgentResponse{Agent: &RemoteAgentInfo{ID: req.ID, Slug: req.Slug, Name: req.Name}, Created: true}, nil, nil
+		}
+		return nil, &RemoteEnvRequirementsResponse{AgentID: req.ID, Needs: []string{failClosedKey}}, nil
+	}
 
 	res, err := f.d.DispatchAgentStartWithOptions(context.Background(), f.agent, "", false, StartDispatchOptions{Async: true, Kind: store.LaunchKindStart})
 	require.NoError(t, err)
+	assert.False(t, sawAsync, "no send asks for an asynchronous launch")
 	assert.Nil(t, res.AcceptedLaunch(), "no launch: the routed create is synchronous")
 	require.NotNil(t, f.client.lastCreateReq)
 	assert.Equal(t, failClosedValue, f.client.lastCreateReq.ResolvedEnv[failClosedKey])
 	assert.True(t, f.agent.LaunchAsyncOptIn, "the agent's opt-in is restored")
+}
+
+// Across nodes: a start the requesting node decided is plain (a restart's
+// start leg) is not routed again on the owner, and a routed start's
+// create runs synchronously on the owner although the stored agent is opted
+// into asynchronous launches.
+func TestCrossNode_StartRoutingDecidedOnRequester(t *testing.T) {
+	t.Run("restart start leg stays plain on the owner", func(t *testing.T) {
+		f := newCrossNodeFixture(t, nil, true)
+		_ = f.requester.DispatchAgentStart(withRestartStartLeg(crossNodeCtx(t)), f.agent, "", false)
+		f.ownerDisp.recMu.Lock()
+		defer f.ownerDisp.recMu.Unlock()
+		assert.True(t, f.ownerDisp.startRoutingSuppressed, "the owner received the start intent with routing suppressed")
+	})
+	t.Run("routed start creates synchronously on the owner", func(t *testing.T) {
+		const hubID = "hub-routed-sync"
+		f := newCrossNodeFixture(t, nil, true)
+		f.requester.client = &mockRuntimeBrokerClient{returnErr: ErrLifecycleDeferred}
+		f.requester.SetHubID(hubID)
+		require.NoError(t, f.store.CreateEnvVar(context.Background(), &store.EnvVar{
+			ID: uuid.NewString(), Key: failClosedKey, Value: failClosedValue,
+			Scope: store.ScopeHub, ScopeID: hubID, InjectionMode: store.InjectionModeAsNeeded,
+		}))
+		stored, err := f.store.GetAgent(context.Background(), f.agent.ID)
+		require.NoError(t, err)
+		stored.LaunchAsyncOptIn = true
+		require.NoError(t, f.store.UpdateAgent(context.Background(), stored))
+		f.agent = stored
+
+		_ = f.requester.DispatchAgentStart(crossNodeCtx(t), f.agent, "", false)
+		f.ownerDisp.recMu.Lock()
+		defer f.ownerDisp.recMu.Unlock()
+		require.NotNil(t, f.ownerDisp.createAsyncOptIn, "the routed start reached the owner as a create")
+		assert.False(t, *f.ownerDisp.createAsyncOptIn, "the owner creates synchronously")
+	})
 }
 
 // A restart is not routed: a plain restart does not gather as-needed values
