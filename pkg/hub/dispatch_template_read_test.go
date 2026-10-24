@@ -443,7 +443,7 @@ func TestRewriteLocalTemplateDownloadURLs_AgentID(t *testing.T) {
 }
 
 // ============================================================================
-// Resume fill (ptone/scion#5770 C4-3): a resume or restart that assigns a
+// Resume fill (ptone/scion#5770): a resume or restart that assigns a
 // Runtime Broker to an agent with none persists it before dispatch, so the
 // start's hydration passes the dispatch-bound read.
 // ============================================================================
@@ -897,7 +897,7 @@ func TestReincarnate_UserTemplate_ChangedSinceDispatch_409(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "changed since the agent was dispatched; reincarnate cannot keep it: re-create the agent, or restore the template to the version the agent was dispatched with and reincarnate again")
 }
 
-// R3-A regression guard: a global-template agent whose creator agent is
+// Regression guard: a global-template agent whose creator agent is
 // deleted still reincarnates exactly as on main (the creator gate applies to
 // user scope only).
 func TestReincarnate_GlobalTemplate_CreatorAgentDeleted_Unchanged(t *testing.T) {
@@ -921,7 +921,7 @@ func TestReincarnate_GlobalTemplate_CreatorAgentDeleted_Unchanged(t *testing.T) 
 	assert.Equal(t, twin.ID, fresh.TemplateID, "a global template with a gone creator reincarnates as on main")
 }
 
-// R3-A regression guard: a project-template agent whose creator user is
+// Regression guard: a project-template agent whose creator user is
 // deactivated still reincarnates as on main.
 func TestReincarnate_ProjectTemplate_CreatorDeactivated_Unchanged(t *testing.T) {
 	srv, s, project, broker := setupReincarnateTestServer(t, newReincarnateTestDispatcher())
@@ -943,7 +943,7 @@ func TestReincarnate_ProjectTemplate_CreatorDeactivated_Unchanged(t *testing.T) 
 	assert.Equal(t, projTmpl.ID, fresh.TemplateID)
 }
 
-// C4-1: once the owner deletes their user template, the recorded ID no
+// Once the owner deletes their user template, the recorded ID no
 // longer resolves and main's slug path runs: here it picks the same-named
 // global template. Pinned on purpose (ptone/scion#5776 tracks the slug
 // path).
@@ -986,7 +986,7 @@ func (s *templateLookupErrStore) GetTemplate(ctx context.Context, id string) (*s
 	return s.Store.GetTemplate(ctx, id)
 }
 
-// C4-2: a store error other than NotFound fails the rebuild: no swap onto
+// A store error other than NotFound fails the rebuild: no swap onto
 // the global twin, nothing written, nothing dispatched.
 func TestReincarnate_TemplateStoreError_FailsWithoutSwap(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
