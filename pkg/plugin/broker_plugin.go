@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/rpc"
 	"sync"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -282,6 +283,9 @@ type BrokerRPCClient struct {
 // connection to the plugin failed (rpc.ErrShutdown, io.EOF,
 // io.ErrUnexpectedEOF, yamux session errors, ...), as opposed to an error
 // returned by the plugin itself (rpc.ServerError) or a caller ctx ending.
+// A local encoding error of the request also counts: it is rare, and costs
+// one dropped-publish count and one supervisor Ping, never a restart by
+// itself.
 func isTransportError(err error) bool {
 	if err == nil {
 		return false
@@ -310,6 +314,20 @@ func NewBrokerRPCClient(client *rpc.Client) *BrokerRPCClient {
 
 func (c *BrokerRPCClient) Configure(config map[string]string) error {
 	return c.observe("Configure", "", "", c.client.Call("Plugin.Configure", &ConfigureArgs{Config: config}, &struct{}{}))
+}
+
+// configureWithin is Configure, giving up after timeout (the RPC itself is
+// not cancelled; its late reply is discarded).
+func (c *BrokerRPCClient) configureWithin(config map[string]string, timeout time.Duration) error {
+	call := c.client.Go("Plugin.Configure", &ConfigureArgs{Config: config}, &struct{}{}, make(chan *rpc.Call, 1))
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-call.Done:
+		return c.observe("Configure", "", "", call.Error)
+	case <-timer.C:
+		return fmt.Errorf("plugin Configure did not answer within %v", timeout)
+	}
 }
 
 // Publish sends msg to the plugin. It returns ctx.Err() when ctx ends

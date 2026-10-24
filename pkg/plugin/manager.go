@@ -314,7 +314,7 @@ func (m *Manager) loadPluginWithConfig(dp DiscoveredPlugin, cfg map[string]strin
 			if brokerClient.hostCallbacksAvailable {
 				config[hostCallbacksConfigKey] = "true"
 			}
-			if err := brokerClient.Configure(config); err != nil {
+			if err := brokerClient.configureWithin(config, restartStepTimeout); err != nil {
 				if !dp.SelfManaged {
 					client.Kill()
 				}
@@ -325,6 +325,15 @@ func (m *Manager) loadPluginWithConfig(dp DiscoveredPlugin, cfg map[string]strin
 
 	key := dp.Type + ":" + dp.Name
 	m.mu.Lock()
+	if m.stopping.Load() {
+		// Shutdown has begun (and may already have reset the maps): do
+		// not store a client it will never stop.
+		m.mu.Unlock()
+		if !dp.SelfManaged {
+			client.Kill()
+		}
+		return fmt.Errorf("plugin manager is shutting down; not storing plugin %s/%s", dp.Type, dp.Name)
+	}
 	// Kill any existing plugin with the same key (only if not self-managed)
 	if existing, ok := m.clients[key]; ok {
 		if !m.selfManaged[key] {
@@ -464,7 +473,9 @@ func (m *Manager) Reconnect(pluginType, name string) error {
 	provider := m.sup.provider
 	m.sup.mu.Unlock()
 	if provider != nil {
-		resolved, err := provider(context.Background(), name)
+		pctx, cancel := context.WithTimeout(context.Background(), restartStepTimeout)
+		resolved, err := provider(pctx, name)
+		cancel()
 		if err != nil {
 			return fmt.Errorf("resolve config for plugin %s/%s: %w", pluginType, name, err)
 		}
@@ -479,7 +490,7 @@ func (m *Manager) Reconnect(pluginType, name string) error {
 		return err
 	}
 	m.supervisedLoaded(key)
-	return m.runRestartHooks(name)
+	return m.runRestartHooksWithin(name, restartStepTimeout)
 }
 
 // GetBroker returns an eventbus.EventBus backed by the named broker plugin.
