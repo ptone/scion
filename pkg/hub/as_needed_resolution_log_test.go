@@ -69,10 +69,13 @@ func TestFailClosedResolution_LogNamesKeyNotDetail(t *testing.T) {
 }
 
 // assertNoFailClosedDetailExceptKey is assertNoFailClosedDetail for the
-// server log, which may name the key but nothing else.
+// server log, which may name the key but carries no value, Secret Manager
+// resource path of the secret or backend message. (The log may hold the
+// hub-prefix IAM grant hint of a PermissionError, a condition template
+// rather than a secret's path, so a bare "projects/" is not checked.)
 func assertNoFailClosedDetailExceptKey(t *testing.T, text, what string) {
 	t.Helper()
-	for _, f := range []string{failClosedValue, failClosedSMPath, failClosedSMError, "projects/", fakeResolveBackendError} {
+	for _, f := range []string{failClosedValue, failClosedSMPath, failClosedSMError, fakeResolveBackendError} {
 		assert.NotContains(t, text, f, "%s must not contain %q", what, f)
 	}
 }
