@@ -424,10 +424,10 @@ func TestIdentityMappingDispatchError_MismatchDiscoveredSource(t *testing.T) {
 }
 
 // A provision-only create refused by the hub's own identity precheck
-// (before any request left the hub, so not marked errProvisionSent) stays a
-// 201 and carries the hub's coded message in its warning, not raw text
-// (ptone/scion#4024).
-func TestCreateAgent_ProvisionOnlyPreSendIdentityPrecheckWarning(t *testing.T) {
+// (before any request left the hub, so not marked errProvisionSent) fails
+// the create with the hub's coded message, not raw text
+// (ptone/scion#4024, ptone/scion#6096).
+func TestCreateAgent_ProvisionOnlyPreSendIdentityPrecheckFailsCreate(t *testing.T) {
 	precheck := &identityNotMappedPrecheck{Account: testMappingAccount, Profile: "gke", Broker: testMappingBroker}
 	require.False(t, errors.Is(precheck, errProvisionSent), "the precheck refusal is pre-send")
 	disp := &skillFailDispatcher{provisionErr: precheck}
@@ -437,18 +437,11 @@ func TestCreateAgent_ProvisionOnlyPreSendIdentityPrecheckWarning(t *testing.T) {
 		ProjectID:     project.ID,
 		ProvisionOnly: true,
 	})
-	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-	var resp CreateAgentResponse
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	var resp ErrorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	var warning string
-	for _, w := range resp.Warnings {
-		if strings.HasPrefix(w, api.ProvisionFailedWarningPrefix) {
-			warning = w
-		}
-	}
-	require.NotEmpty(t, warning, "warnings: %v", resp.Warnings)
-	assert.Contains(t, warning, ErrCodeIdentityNotMapped+": ")
-	require.NotNil(t, resp.Agent)
-	_, err := s.GetAgent(context.Background(), resp.Agent.ID)
-	assert.NoError(t, err, "the record is kept")
+	assert.Equal(t, ErrCodeIdentityNotMapped, resp.Error.Code)
+	require.NotNil(t, disp.provisionedAgent)
+	_, err := s.GetAgent(context.Background(), disp.provisionedAgent.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "the record is deleted")
 }

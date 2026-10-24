@@ -502,8 +502,8 @@ func TestReincarnateAgent_RerenderSecretResolutionErrorKeepsOriginalError(t *tes
 // failing in transport, or a broker error status) fails the create: no 201,
 // the broker files and the agent row are removed, and a start of the agent
 // afterwards answers 404 (ptone/scion#6096). An error from before any
-// request left the hub still keeps the row with a warning
-// (TestCreateAgent_ProvisionOnlyPreSendFailureStaysWarning).
+// request left the hub fails the create too
+// (TestCreateAgent_ProvisionOnlyPreSendFailureFailsCreate).
 func TestCreateAgent_ProvisionOnlyFailureAfterSendFailsCreate(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -515,6 +515,7 @@ func TestCreateAgent_ProvisionOnlyFailureAfterSendFailsCreate(t *testing.T) {
 		{"broker 500 after the needs report", provisionSent(&brokerStatusError{StatusCode: http.StatusInternalServerError, Body: "boom"}), 0},
 		{"broker 404 after the needs report", provisionSent(&brokerStatusError{StatusCode: http.StatusNotFound,
 			Body: `{"error":{"code":"not_found","message":"Failed to provision agent: template not found"}}`}), http.StatusNotFound},
+		{"no confirmation from the broker", provisionSent(errors.New("DispatchAgentProvision: broker returned no confirmation for the provision request")), http.StatusBadGateway},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			disp := &skillFailDispatcher{provisionErr: tc.err}
@@ -700,8 +701,29 @@ func TestProvisionGather_UnmetNeedsAndCrossNode(t *testing.T) {
 		err := f.d.DispatchAgentProvision(context.Background(), f.agent)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, ErrLifecycleDeferred)
+		assert.ErrorIs(t, err, errProvisionSent, "a deferral after an answered request is marked sent")
 		assert.Equal(t, 2, calls, "the needs report and the deferred replay")
 	})
+	// A broker that answers with neither a response nor needs confirmed no
+	// provisioned config: an error for every caller, marked sent.
+	for _, reprovision := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reprovision=%v/no confirmation", reprovision), func(t *testing.T) {
+			f := newRunDispatchFixture(t)
+			f.d.SetSecretBackend(&switchableBackend{})
+			f.client.createWithGatherFunc = func(context.Context, string, string, *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+				return nil, nil, nil
+			}
+			var err error
+			if reprovision {
+				err = f.d.DispatchAgentReprovision(context.Background(), f.agent)
+			} else {
+				err = f.d.DispatchAgentProvision(context.Background(), f.agent)
+			}
+			require.Error(t, err)
+			assert.ErrorIs(t, err, errProvisionSent)
+			assert.Contains(t, err.Error(), "broker returned no confirmation for the provision request")
+		})
+	}
 }
 
 // A forced move whose target provision ends with unmet needs rolls back to
@@ -718,5 +740,21 @@ func TestReincarnateForceMove_UnmetNeedsRollsBack(t *testing.T) {
 	r, a := startForceMove(t, f)
 	assertForceRolledBack(t, f, r, a, "", store.AgentReincarnationStateProvisioning, before.AppliedConfig.Task)
 	assert.Contains(t, r.Error, "provision on the target broker failed: DispatchAgentProvisionForMove: required environment values are still unavailable after the provision")
+	assert.Zero(t, f.disp.startCalls, "no start runs on the target")
+}
+
+// A forced move whose target provision is deferred after an answered request
+// (marked sent) rolls back and removes the target's files.
+func TestReincarnateForceMove_DeferralAfterSendCleansTarget(t *testing.T) {
+	f := setupForceMoveFixture(t, true, nil)
+	prepareForceMoveWorker(t, f)
+	f.disp.mu.Lock()
+	f.disp.moveProvisionErr = provisionSent(fmt.Errorf("DispatchAgentProvisionForMove not supported for cross-node broker: %w", ErrLifecycleDeferred))
+	f.disp.mu.Unlock()
+
+	before := seedGenerationOneTask(t, f)
+
+	r, a := startForceMove(t, f)
+	assertForceRolledBack(t, f, r, a, "", store.AgentReincarnationStateProvisioning, before.AppliedConfig.Task)
 	assert.Zero(t, f.disp.startCalls, "no start runs on the target")
 }
