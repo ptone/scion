@@ -116,6 +116,12 @@ type ownerErrDispatcher struct {
 	// then.
 	createPreserveWorkspace bool
 	createTask              string
+	// finalizeAsyncOptIn, finalizePreserveWorkspace and finalizeTask record
+	// the same for the owner's last finalize_env; finalizeAsyncOptIn is nil
+	// when no finalize ran.
+	finalizeAsyncOptIn        *bool
+	finalizePreserveWorkspace bool
+	finalizeTask              string
 }
 
 // ownerSignalBus delivers the requesting node's signal to the owner node,
@@ -301,6 +307,15 @@ func (d *ownerErrDispatcher) DispatchAgentCreateWithGather(ctx context.Context, 
 	return nil, d.err
 }
 func (d *ownerErrDispatcher) DispatchFinalizeEnv(ctx context.Context, a *store.Agent, env map[string]string) (*CreateDispatchResult, error) {
+	d.recMu.Lock()
+	optIn := a.LaunchAsyncOptIn
+	d.finalizeAsyncOptIn = &optIn
+	d.finalizePreserveWorkspace = preserveWorkspaceRequested(ctx)
+	d.finalizeTask = ""
+	if a.AppliedConfig != nil {
+		d.finalizeTask = a.AppliedConfig.Task
+	}
+	d.recMu.Unlock()
 	_, _ = d.lifecycleTestDispatcher.DispatchFinalizeEnv(ctx, a, env)
 	if d.finalizeErr != nil {
 		return nil, d.finalizeErr

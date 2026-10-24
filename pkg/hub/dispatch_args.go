@@ -122,9 +122,16 @@ type DeleteIntentTarget struct {
 // dispatch row is sufficient for the owner to run the local check.
 type CheckPromptDispatchArgs struct{}
 
-// FinalizeEnvDispatchArgs carries the gathered env vars for cross-node finalize.
+// FinalizeEnvDispatchArgs carries the gathered env vars for cross-node
+// finalize, and, for the replay of a start routed through
+// create-with-gather, the same decisions CreateWithGatherDispatchArgs
+// carries (ptone/scion#6096).
 type FinalizeEnvDispatchArgs struct {
 	Env map[string]string `json:"env,omitempty"`
+	// Synchronous, PreserveWorkspace and Task: see CreateWithGatherDispatchArgs.
+	Synchronous       bool   `json:"synchronous,omitempty"`
+	PreserveWorkspace bool   `json:"preserveWorkspace,omitempty"`
+	Task              string `json:"task,omitempty"`
 }
 
 // CreateWithGatherDispatchArgs is intentionally empty — the owner rebuilds the

@@ -2314,15 +2314,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 func (d *HTTPAgentDispatcher) deferredCreateWithGather(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
 	// An agent this node opted out of async launch for the dispatch (a
 	// routed start) is created synchronously on the owner too.
-	// A routed start's task override and its preserve-workspace flag live
-	// only on this node (the agent's in-memory config and ctx), so they
-	// travel in the args.
+	synchronous, preserve, task := routedStartDispatchFlags(ctx, agent)
 	args := &CreateWithGatherDispatchArgs{
-		Synchronous:       !agent.LaunchAsyncOptIn,
-		PreserveWorkspace: preserveWorkspaceRequested(ctx),
-	}
-	if args.PreserveWorkspace && agent.AppliedConfig != nil {
-		args.Task = agent.AppliedConfig.Task
+		Synchronous:       synchronous,
+		PreserveWorkspace: preserve,
+		Task:              task,
 	}
 	result, err := d.deferredDataOpResult(ctx, agent, "create", args)
 	if err != nil {
@@ -2539,7 +2535,16 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 // The owner's result carries Launch when its send was accepted for
 // asynchronous launch.
 func (d *HTTPAgentDispatcher) deferredFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) (*CreateDispatchResult, error) {
-	result, err := d.deferredDataOpResult(ctx, agent, "finalize_env", &FinalizeEnvDispatchArgs{Env: env})
+	// A routed start's replay can be handed off here after a local needs
+	// report: its decisions travel like the create's (ptone/scion#6096).
+	synchronous, preserve, task := routedStartDispatchFlags(ctx, agent)
+	args := &FinalizeEnvDispatchArgs{
+		Env:               env,
+		Synchronous:       synchronous,
+		PreserveWorkspace: preserve,
+		Task:              task,
+	}
+	result, err := d.deferredDataOpResult(ctx, agent, "finalize_env", args)
 	if err != nil {
 		return nil, err
 	}
@@ -3682,6 +3687,20 @@ func persistConfigDelivered(ctx context.Context, st store.Store, log *slog.Logge
 		"agent_id", agent.ID)
 }
 
+// routedStartDispatchFlags returns what a create or finalize_env handed to
+// the owner node must carry for a start routed through create-with-gather
+// (ptone/scion#6096): synchronous when this node opted the agent out of an
+// asynchronous launch for the dispatch, the preserve-workspace flag from
+// ctx, and, only with that flag, the start's task, which this node holds on
+// its in-memory copy of the agent alone.
+func routedStartDispatchFlags(ctx context.Context, agent *store.Agent) (synchronous, preserve bool, task string) {
+	preserve = preserveWorkspaceRequested(ctx)
+	if preserve && agent.AppliedConfig != nil {
+		task = agent.AppliedConfig.Task
+	}
+	return !agent.LaunchAsyncOptIn, preserve, task
+}
+
 // noStartRoutingKey marks a start dispatch that must not be routed through
 // create-with-gather (withoutStartRouting).
 type noStartRoutingKey struct{}
@@ -3870,22 +3889,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentStartWithOptions(ctx context.Context,
 // DispatchAgentStartWithOptions. The result is non-nil only for a start a
 // broker accepted as an asynchronous launch (here or on the owner node).
 func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool, opts StartDispatchOptions) (_ *StartDispatchResult, err error) {
-	route, why, routeErr := d.startRoutesThroughCreate(ctx, agent, resume, opts)
-	if routeErr != nil {
-		if secretResolutionSourceOf(routeErr) == resolutionSourceEnvSettings {
-			d.log.WarnContext(ctx, "DispatchAgentStart: failed to read stored env settings; agent not started",
-				"agent_id", agent.ID, "error", errors.Unwrap(routeErr))
-		} else {
-			d.log.WarnContext(ctx, "DispatchAgentStart: failed to resolve secrets; agent not started",
-				"agent_id", agent.ID, "error", errors.Unwrap(routeErr))
-		}
-		return nil, routeErr
-	}
-	if route {
-		d.log.InfoContext(ctx, "start of an agent without a delivered config goes through create-with-gather",
-			"agent_id", agent.ID, "reason", why)
-		return d.startThroughCreate(ctx, agent, task)
-	}
+	// A routed start's create runs on the caller's ctx, as a create does,
+	// not on the start span's ctx with the start-only agent ID query.
+	createCtx := ctx
 	ctx, span := tracer.Start(ctx, "hub.dispatch.start")
 	defer span.End()
 	// The broker reads the hub's agent ID (api.AgentIDQueryParam) on every
@@ -3923,6 +3929,31 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
+	}
+
+	// Routing (ptone/scion#6096) comes after the placement, standing and
+	// launch backstops and the broker assignment check above, so a routed
+	// start is refused by them exactly like a plain one (a hold placed
+	// during a reincarnation's reprovision, a delete that claimed the row,
+	// a stale pin); the routed start's capability check
+	// (startThroughCreate) runs after them too.
+	route, why, routeErr := d.startRoutesThroughCreate(createCtx, agent, resume, opts)
+	if routeErr != nil {
+		if secretResolutionSourceOf(routeErr) == resolutionSourceEnvSettings {
+			d.log.WarnContext(ctx, "DispatchAgentStart: failed to read stored env settings; agent not started",
+				"agent_id", agent.ID, "error", errors.Unwrap(routeErr))
+		} else {
+			d.log.WarnContext(ctx, "DispatchAgentStart: failed to resolve secrets; agent not started",
+				"agent_id", agent.ID, "error", errors.Unwrap(routeErr))
+		}
+		span.SetStatus(codes.Error, routeErr.Error())
+		return nil, routeErr
+	}
+	if route {
+		d.log.InfoContext(ctx, "start of an agent without a delivered config goes through create-with-gather",
+			"agent_id", agent.ID, "reason", why)
+		span.SetAttributes(attribute.Bool("scion.start.routed_through_create", true))
+		return d.startThroughCreate(createCtx, agent, task)
 	}
 
 	endpoint, err := d.getProvisioningBrokerEndpoint(ctx, agent)

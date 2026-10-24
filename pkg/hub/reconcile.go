@@ -619,6 +619,33 @@ func (s *Server) execDispatchCheckPrompt(ctx context.Context, d store.BrokerDisp
 	return string(result), nil
 }
 
+// applyRoutedStartArgs applies, on the owner node, the decisions a
+// requester's create or finalize_env carries for a start it routed through
+// create-with-gather (ptone/scion#6096): synchronous clears the agent's
+// async-launch opt-in for this dispatch (no create launch begins on a row
+// the start claim moved to starting); preserve re-checks the broker's
+// PreserveWorkspaceCreate capability (errBrokerLacksPreserveWorkspace,
+// nothing sent) and marks ctx so the request keeps the workspace; task, set
+// only with preserve, is the start's task for this dispatch, never stored.
+func (s *Server) applyRoutedStartArgs(ctx context.Context, agent *store.Agent, synchronous, preserve bool, task string) (context.Context, error) {
+	if synchronous {
+		agent.LaunchAsyncOptIn = false
+	}
+	if !preserve {
+		return ctx, nil
+	}
+	if err := checkPreserveWorkspaceCreate(ctx, s.store, agent); err != nil {
+		return ctx, err
+	}
+	if task != "" {
+		if agent.AppliedConfig == nil {
+			agent.AppliedConfig = &store.AgentAppliedConfig{}
+		}
+		agent.AppliedConfig.Task = task
+	}
+	return withPreserveWorkspace(ctx), nil
+}
+
 func (s *Server) execDispatchFinalizeEnv(ctx context.Context, d store.BrokerDispatch) (string, error) {
 	agent, err := s.resolveDispatchAgent(ctx, d)
 	if err != nil {
@@ -629,12 +656,18 @@ func (s *Server) execDispatchFinalizeEnv(ctx context.Context, d store.BrokerDisp
 		return "", fmt.Errorf("no dispatcher available")
 	}
 	var env map[string]string
+	preserve := false
 	if d.Args != "" {
 		args, err := UnmarshalFinalizeEnvArgs(d.Args)
 		if err != nil {
 			return "", fmt.Errorf("unmarshal finalize_env args: %w", err)
 		}
 		env = args.Env
+		preserve = args.PreserveWorkspace
+		ctx, err = s.applyRoutedStartArgs(ctx, agent, args.Synchronous, args.PreserveWorkspace, args.Task)
+		if err != nil {
+			return "", fmt.Errorf("dispatch finalize_env: %w", err)
+		}
 	}
 	ctx, warns := withDispatchWarnings(ctx)
 	// The requesting node keeps the agent when its wait for this
@@ -644,6 +677,11 @@ func (s *Server) execDispatchFinalizeEnv(ctx context.Context, d store.BrokerDisp
 	finalized, err := dispatcher.DispatchFinalizeEnv(withKeepCredentialOnUnknownOutcome(ctx), agent, env)
 	if err != nil {
 		return "", fmt.Errorf("dispatch finalize_env: %w", err)
+	}
+	if preserve && createDelivered(finalized) {
+		// The requester's routed start delivered the config here: record
+		// the marker on the stored row (only the marker).
+		persistConfigDelivered(ctx, s.store, s.agentLifecycleLog, agent)
 	}
 	result, err := json.Marshal(FinalizeEnvResult{Success: true, Launch: finalized.AcceptedLaunch(), Warnings: warns.Warnings()})
 	if err != nil {
@@ -667,27 +705,10 @@ func (s *Server) execDispatchCreate(ctx context.Context, d store.BrokerDispatch)
 		if err := json.Unmarshal([]byte(d.Args), &args); err != nil {
 			return "", fmt.Errorf("unmarshal create args: %w", err)
 		}
-		if args.Synchronous {
-			// The requester created this agent synchronously (for example
-			// a start routed through create-with-gather): do not begin an
-			// asynchronous create launch here (ptone/scion#6096).
-			agent.LaunchAsyncOptIn = false
-		}
-		if args.PreserveWorkspace {
-			// A start the requester routed through create-with-gather: the
-			// create keeps the agent's workspace, and is refused, nothing
-			// sent, on a broker that would ignore the flag (ptone/scion#6096).
-			if err := checkPreserveWorkspaceCreate(ctx, s.store, agent); err != nil {
-				return "", fmt.Errorf("dispatch create: %w", err)
-			}
-			preserve = true
-			ctx = withPreserveWorkspace(ctx)
-			if args.Task != "" {
-				if agent.AppliedConfig == nil {
-					agent.AppliedConfig = &store.AgentAppliedConfig{}
-				}
-				agent.AppliedConfig.Task = args.Task
-			}
+		preserve = args.PreserveWorkspace
+		ctx, err = s.applyRoutedStartArgs(ctx, agent, args.Synchronous, args.PreserveWorkspace, args.Task)
+		if err != nil {
+			return "", fmt.Errorf("dispatch create: %w", err)
 		}
 	}
 	ctx, warns := withDispatchWarnings(ctx)

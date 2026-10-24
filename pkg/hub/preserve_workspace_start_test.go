@@ -19,8 +19,11 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/google/uuid"
@@ -362,4 +365,196 @@ func TestCrossNode_RoutedStartCarriesPreserveWorkspaceAndTask(t *testing.T) {
 		defer f.ownerDisp.recMu.Unlock()
 		assert.Nil(t, f.ownerDisp.createAsyncOptIn, "no create ran on the owner")
 	})
+}
+
+// Through the HTTP lifecycle API: a routed start on a broker without the
+// capability answers 412 with the fixed, keyless upgrade message, sends
+// nothing, and leaves the agent stopped.
+func TestLifecycleHTTP_RoutedStartOnOldBrokerIs412(t *testing.T) {
+	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	project, broker := newEmptyPerAgentHandlerProject(t, s, "route-old-broker", true)
+	agent := newQuotaTestAgent(t, s, broker, project, "route-old-broker", state.PhaseStopped)
+	require.NoError(t, s.CreateEnvVar(context.Background(), &store.EnvVar{
+		ID: uuid.NewString(), Key: failClosedKey, Value: failClosedValue,
+		Scope: store.ScopeProject, ScopeID: project.ID, InjectionMode: store.InjectionModeAsNeeded,
+	}))
+	client := &mockRuntimeBrokerClient{}
+	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default()))
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", nil)
+	require.Equal(t, http.StatusPreconditionFailed, rec.Code, rec.Body.String())
+	var body ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, ErrCodeUnsupportedCapability, body.Error.Code)
+	assert.Equal(t, errBrokerLacksPreserveWorkspace.Error(), body.Error.Message, "the fixed message only")
+	assert.NotContains(t, rec.Body.String(), failClosedKey)
+	assert.False(t, client.createCalled, "no create is sent")
+	assert.False(t, client.startCalled, "no plain start")
+
+	stored, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseStopped), stored.Phase, "the agent stays stopped")
+}
+
+// The writer maps only errBrokerLacksPreserveWorkspace (wrapped or not) to
+// 412 with the fixed message, and the refusal counts as a start that did not
+// happen: nothing was sent, so the start claim releases and a reincarnation
+// start leg left no container.
+func TestPreserveWorkspaceRefusal_MappingAndClassification(t *testing.T) {
+	wrapped := fmt.Errorf("dispatch create: %w", errBrokerLacksPreserveWorkspace)
+	rec := httptest.NewRecorder()
+	require.True(t, writePreserveWorkspaceCapabilityError(rec, wrapped))
+	assert.Equal(t, http.StatusPreconditionFailed, rec.Code)
+	var body ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, ErrCodeUnsupportedCapability, body.Error.Code)
+	assert.Equal(t, errBrokerLacksPreserveWorkspace.Error(), body.Error.Message)
+	assert.False(t, writePreserveWorkspaceCapabilityError(httptest.NewRecorder(), errors.New("other")))
+
+	assert.True(t, isConfirmedStartNotActedOnError(wrapped))
+	assert.True(t, startDidNotHappen(wrapped))
+	assert.Equal(t, startReleased, startOutcomeOf(wrapped))
+	assert.True(t, reincarnationStartLeftNoContainer(wrapped))
+}
+
+// Across nodes, the replay leg: the routed start's needs report goes out
+// locally and its replay is handed to the owner as a finalize_env intent.
+// The intent carries the preserve flag, the task and the synchronous
+// decision; the owner re-checks the capability, keeps the workspace and
+// records the marker.
+func TestCrossNode_RoutedStartReplayHandedOffAsFinalizeEnv(t *testing.T) {
+	const hubID = "hub-routed-finalize"
+	setup := func(t *testing.T) (*crossNodeFixture, *int) {
+		f := newCrossNodeFixture(t, nil, true)
+		calls := 0
+		f.requester.client = &mockRuntimeBrokerClient{
+			createWithGatherFunc: func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+				calls++
+				if calls == 1 {
+					return nil, &RemoteEnvRequirementsResponse{AgentID: req.ID, Needs: []string{failClosedKey}}, nil
+				}
+				return nil, nil, ErrLifecycleDeferred
+			},
+		}
+		f.requester.SetHubID(hubID)
+		require.NoError(t, f.store.CreateEnvVar(context.Background(), &store.EnvVar{
+			ID: uuid.NewString(), Key: failClosedKey, Value: failClosedValue,
+			Scope: store.ScopeHub, ScopeID: hubID, InjectionMode: store.InjectionModeAsNeeded,
+		}))
+		stored, err := f.store.GetAgent(context.Background(), f.agent.ID)
+		require.NoError(t, err)
+		stored.LaunchAsyncOptIn = true
+		require.NoError(t, f.store.UpdateAgent(context.Background(), stored))
+		f.agent = stored
+		return f, &calls
+	}
+	t.Run("flags cross and the owner records the marker", func(t *testing.T) {
+		f, calls := setup(t)
+		grantPreserveWorkspaceCreate(t, f.store, f.agent.RuntimeBrokerID)
+
+		_ = f.requester.DispatchAgentStart(crossNodeCtx(t), f.agent, "fake-routed-task", false)
+		require.Equal(t, 2, *calls, "the local needs report, then the deferred replay")
+		f.ownerDisp.recMu.Lock()
+		optIn, preserve, task := f.ownerDisp.finalizeAsyncOptIn, f.ownerDisp.finalizePreserveWorkspace, f.ownerDisp.finalizeTask
+		createRan := f.ownerDisp.createAsyncOptIn != nil
+		f.ownerDisp.recMu.Unlock()
+		require.NotNil(t, optIn, "the replay reached the owner as a finalize_env")
+		assert.False(t, createRan, "no create intent")
+		assert.True(t, preserve, "the owner's finalize keeps the workspace")
+		assert.Equal(t, "fake-routed-task", task, "the start's task reaches the owner's finalize")
+		assert.False(t, *optIn, "the owner's finalize is synchronous")
+		stored, err := f.store.GetAgent(context.Background(), f.agent.ID)
+		require.NoError(t, err)
+		require.NotNil(t, stored.AppliedConfig)
+		assert.True(t, stored.AppliedConfig.ConfigDelivered)
+		assert.NotEqual(t, "fake-routed-task", stored.AppliedConfig.Task, "the task override is not stored")
+	})
+	t.Run("the owner persists the marker after a routed finalize", func(t *testing.T) {
+		f, _ := setup(t)
+		grantPreserveWorkspaceCreate(t, f.store, f.agent.RuntimeBrokerID)
+		raw, err := json.Marshal(&FinalizeEnvDispatchArgs{Synchronous: true, PreserveWorkspace: true, Task: "fake-routed-task"})
+		require.NoError(t, err)
+		_, err = f.owner.execDispatchFinalizeEnv(context.Background(), store.BrokerDispatch{AgentID: f.agent.ID, Args: string(raw)})
+		require.NoError(t, err)
+		stored, err := f.store.GetAgent(context.Background(), f.agent.ID)
+		require.NoError(t, err)
+		require.NotNil(t, stored.AppliedConfig)
+		assert.True(t, stored.AppliedConfig.ConfigDelivered, "the owner recorded the marker")
+	})
+	t.Run("a plain finalize leaves the row to the requester", func(t *testing.T) {
+		f, _ := setup(t)
+		raw, err := json.Marshal(&FinalizeEnvDispatchArgs{Env: map[string]string{"FAKE_GATHERED": "fake"}})
+		require.NoError(t, err)
+		_, err = f.owner.execDispatchFinalizeEnv(context.Background(), store.BrokerDispatch{AgentID: f.agent.ID, Args: string(raw)})
+		require.NoError(t, err)
+		f.ownerDisp.recMu.Lock()
+		defer f.ownerDisp.recMu.Unlock()
+		assert.False(t, f.ownerDisp.finalizePreserveWorkspace)
+		require.NotNil(t, f.ownerDisp.finalizeAsyncOptIn)
+		assert.True(t, *f.ownerDisp.finalizeAsyncOptIn, "a plain finalize keeps the stored opt-in")
+	})
+	t.Run("the owner refuses without the capability", func(t *testing.T) {
+		f, _ := setup(t)
+		raw, err := json.Marshal(&FinalizeEnvDispatchArgs{Synchronous: true, PreserveWorkspace: true, Task: "fake-routed-task"})
+		require.NoError(t, err)
+		_, err = f.owner.execDispatchFinalizeEnv(context.Background(), store.BrokerDispatch{AgentID: f.agent.ID, Args: string(raw)})
+		require.ErrorIs(t, err, errBrokerLacksPreserveWorkspace)
+		f.ownerDisp.recMu.Lock()
+		defer f.ownerDisp.recMu.Unlock()
+		assert.Nil(t, f.ownerDisp.finalizeAsyncOptIn, "no finalize ran on the owner")
+	})
+}
+
+// Every other intent a start can be handed off as cannot reach a create on
+// the owner: a deferred plain start carries NoRoute (routing was decided
+// on the requester), and the owner's start, stop, restart, delete and
+// check_prompt executors never run a create or finalize.
+func TestCrossNode_OtherIntentsNeverCreateOnOwner(t *testing.T) {
+	t.Run("a deferred plain start carries NoRoute", func(t *testing.T) {
+		f := newCrossNodeFixture(t, nil, true)
+		_ = f.requester.DispatchAgentStart(crossNodeCtx(t), f.agent, "", false)
+		f.ownerDisp.recMu.Lock()
+		defer f.ownerDisp.recMu.Unlock()
+		assert.True(t, f.ownerDisp.startRoutingSuppressed, "the owner's start is plain")
+		assert.Nil(t, f.ownerDisp.createAsyncOptIn)
+	})
+	for _, op := range []string{"start", "stop", "restart", "delete", "check_prompt"} {
+		t.Run("owner "+op, func(t *testing.T) {
+			f := newCrossNodeFixture(t, nil, false)
+			_, _ = f.owner.executeDispatch(context.Background(), store.BrokerDispatch{Op: op, AgentID: f.agent.ID, Args: "{}"})
+			f.ownerDisp.recMu.Lock()
+			defer f.ownerDisp.recMu.Unlock()
+			assert.Nil(t, f.ownerDisp.createAsyncOptIn, "no create on the owner")
+			assert.Nil(t, f.ownerDisp.finalizeAsyncOptIn, "no finalize on the owner")
+		})
+	}
+}
+
+// The dispatcher's start backstops run before routing: a routed start of
+// an agent that fails the standing check (for example held during a
+// reincarnation's reprovision) is refused with the standing error, not the
+// capability refusal, and nothing is sent.
+func TestRoutedStart_StandingBackstopRunsFirst(t *testing.T) {
+	for _, capable := range []bool{true, false} {
+		t.Run(fmt.Sprintf("capable broker %v", capable), func(t *testing.T) {
+			f := newRunDispatchFixture(t)
+			neverStarted(f)
+			seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
+			if !capable {
+				b, err := f.store.GetRuntimeBroker(context.Background(), f.agent.RuntimeBrokerID)
+				require.NoError(t, err)
+				b.Capabilities = nil
+				require.NoError(t, f.store.UpdateRuntimeBroker(context.Background(), b))
+			}
+			recordCreates(f)
+			f.d.SetRequiredStandingCheck(func(context.Context, *store.Agent) error { return errors.New("fake hold") })
+
+			err := f.d.DispatchAgentStart(context.Background(), f.agent, "[SCION REINCARNATION] fake preamble", false)
+			require.ErrorIs(t, err, ErrAgentNotInStanding)
+			assert.NotErrorIs(t, err, errBrokerLacksPreserveWorkspace)
+			assert.False(t, f.client.createCalled, "no create is sent")
+			assert.False(t, f.client.startCalled, "no plain start")
+		})
+	}
 }
