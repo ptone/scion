@@ -45,6 +45,29 @@ beforeAll(async () => {
   renderer = await getMarkdownRenderer();
 });
 
+describe('disallowedLeft', () => {
+  function check(html: string): string[] {
+    const tpl = document.createElement('template');
+    tpl.innerHTML = html;
+    return disallowedLeft(tpl.content);
+  }
+
+  it('reports a srcdoc attribute on any element', () => {
+    expect(check('<div srcdoc="x"></div>')).toEqual(['div[srcdoc]']);
+  });
+
+  it('reports script and non-image data URLs in a data attribute on any element', () => {
+    expect(check('<div data="javascript:alert(1)"></div>')).toEqual(['div[data=javascript:]']);
+    expect(check('<div data="data:text/html,x"></div>')).toEqual(['div[data=data:]']);
+  });
+
+  it('leaves data-* attributes and ordinary content alone', () => {
+    expect(
+      check('<div data-x="javascript:alert(1)" data-y="data:text/html,x"><p>ok</p></div>')
+    ).toEqual([]);
+  });
+});
+
 describe('renderFragment removes disallowed markup', () => {
   for (const { name, html, mutation } of DISALLOWED_CASES) {
     it(name, () => {

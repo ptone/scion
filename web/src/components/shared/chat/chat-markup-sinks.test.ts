@@ -306,8 +306,10 @@ describe('chat message markup boundary', () => {
   });
 
   it('counts every markup-parsing API the test DOM has', () => {
-    // The test DOM lacks these, so the browsers that have them are not
-    // counted here. Update the list if a test DOM upgrade adds one.
+    // The test DOM lacks these, so calls to them are not counted in this
+    // suite. A test DOM upgrade that adds one fails this check (the safe
+    // direction): add its wrapper's name to the counted set by updating
+    // the list.
     expect(missingSinks).toEqual([
       'Element.setHTMLUnsafe',
       'Document.writeln',
