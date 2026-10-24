@@ -3495,6 +3495,9 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		if writeEmptyPerAgentCapabilityError(w, err) {
 			return
 		}
+		if writePreserveWorkspaceCapabilityError(w, err) {
+			return
+		}
 		var stillMissing *ErrEnvStillMissing
 		if errors.As(err, &stillMissing) {
 			MissingEnvVars(w, stillMissing.Requirements.Needs,

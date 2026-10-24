@@ -257,6 +257,10 @@ func TestCreateStartFailure_InAgentContainerKeepsWorktreeEntryAndBranch(t *testi
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusInternalServerError, w.Body.String())
 	}
+	// The cleanup ran: the agent's files are gone.
+	if _, err := os.Stat(filepath.Join(workspace, preserveCleanupFile)); !os.IsNotExist(err) {
+		t.Fatalf("the failed-create cleanup should have removed the agent's files (stat err %v)", err)
+	}
 	if out := gitPreserveT(t, repo, "branch", "--list", "same-name"); !strings.Contains(out, "same-name") {
 		t.Errorf("the agent branch must be kept inside an agent container (git branch --list: %q)", out)
 	}
