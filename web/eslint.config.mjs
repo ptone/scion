@@ -30,8 +30,8 @@ const tsconfigRootDir = import.meta.dirname;
 // window.location (href, assign, replace) directly drops the base path the
 // UI needs when served under a proxy prefix. Any write is flagged, not only
 // a literal absolute path, since the target is often built elsewhere.
-// Used in two config blocks below: a later block's no-restricted-syntax
-// replaces an earlier one's, so the components block repeats these.
+// Used in several config blocks below: a later block's no-restricted-syntax
+// replaces an earlier one's, so each later block repeats these.
 const locationWriteRestrictions = [
   {
     selector: [
