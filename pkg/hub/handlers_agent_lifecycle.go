@@ -1202,6 +1202,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		if writeEmptyPerAgentCapabilityError(w, dispatchErr) {
 			return
 		}
+		if writePreserveWorkspaceCapabilityError(w, dispatchErr) {
+			return
+		}
 		// A flat Runtime Broker refusal is a definite start failure that no
 		// retry can fix: settle it by recording the refusal message on the
 		// agent, then relay the refusal.
