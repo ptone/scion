@@ -346,6 +346,8 @@ func capabilitiesFromStrings(names []string) *store.BrokerCapabilities {
 			caps.StartsInFlight = true
 		case "templatetiers", "template_tiers":
 			caps.TemplateTiers = true
+		case "startenvgather", "start_env_gather":
+			caps.StartEnvGather = true
 		}
 	}
 	return caps
