@@ -3783,7 +3783,10 @@ func (d *HTTPAgentDispatcher) hasAsNeededEntries(ctx context.Context, agent *sto
 				Err: fmt.Errorf("list %s env vars: %w", filter.Scope, err)}
 		}
 		for _, v := range vars {
-			if v.InjectionMode == store.InjectionModeAsNeeded {
+			// TZ is never gathered (resolveAsNeededForKeys drops it; the
+			// agent TZ resolver supplies it), so an as-needed TZ entry is
+			// nothing to gather (ptone/scion#6101).
+			if v.InjectionMode == store.InjectionModeAsNeeded && v.Key != agentTZEnvKey {
 				return true, "as-needed env var", nil
 			}
 		}
@@ -3808,7 +3811,7 @@ func (d *HTTPAgentDispatcher) hasAsNeededEntries(ctx context.Context, agent *sto
 			return false, "", &secretResolutionError{Verb: verb, Err: fmt.Errorf("list %s secrets: %w", sc.scope, err)}
 		}
 		for _, m := range metas {
-			if m.InjectionMode == store.InjectionModeAsNeeded {
+			if m.InjectionMode == store.InjectionModeAsNeeded && m.Target != agentTZEnvKey {
 				return true, "as-needed secret", nil
 			}
 		}
