@@ -334,7 +334,7 @@ func recorderLinkErrors(funcs map[string]map[string]int, name string, rule lifec
 	if rule.kind != intentRecorded {
 		errs = append(errs, fmt.Sprintf("%s sets recordedBy but its kind is %q, not %q", name, rule.kind, intentRecorded))
 	}
-	// calls reports whether caller calls callee; it adds a message if not.
+	// calls adds a message unless caller calls callee.
 	calls := func(caller, callee string) {
 		callNames, ok := funcs[caller]
 		if !ok {
@@ -433,6 +433,8 @@ func TestRecorderLinkErrors(t *testing.T) {
 		{"missing link", "S.callee", rec(""), "but no link"},
 		{"unknown link", "S.callee", rec("calls"), `unknown link "calls"`},
 		{"link without recordedBy", "S.callee", lifecycleDispatchRule{kind: intentRecorded, link: linkRecorderCalls}, "no recordedBy"},
+		{"hops without recordedBy", "S.callee", lifecycleDispatchRule{kind: intentRecorded, hops: []string{"S.hop"}}, "no recordedBy"},
+		{"reason without recordedBy", "S.callee", lifecycleDispatchRule{kind: intentRecorded, reason: "why"}, "no recordedBy"},
 		{"recordedBy on a non-recording kind", "S.callee", lifecycleDispatchRule{kind: intentExecutor, recordedBy: "S.recorder", link: linkRecorderCalls}, "its kind is"},
 		{"recorder calls with hops", "S.callee", withLink(rec(linkRecorderCalls), []string{"S.hop"}, ""), "takes no hops or reason"},
 		{"recorder calls with reason", "S.callee", withLink(rec(linkRecorderCalls), nil, "why"), "takes no hops or reason"},
