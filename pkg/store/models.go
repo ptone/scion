@@ -407,18 +407,13 @@ type ExposedPort struct {
 type AgentAppliedConfig struct {
 	// ConfigDelivered records that a create or env finalize completed and
 	// started the agent with its config, including any as-needed values the
-	// broker asked for (ptone/scion#6096). A provision does not set it: it
-	// starts nothing, and the as-needed values it resolves are not persisted
-	// anywhere a later start reads. A start of an agent without it is routed
-	// through create-with-gather unless its run history shows a successful
-	// start and AsNeededPending is unset.
+	// broker asked for (ptone/scion#6096). Only a synchronous, needs-free
+	// create-with-gather or env finalize sets it; a provision, move
+	// provision or reprovision clears it, because it starts nothing and the
+	// as-needed values it resolves are not persisted anywhere a later start
+	// reads. A start of an agent with as-needed entries and without it is
+	// routed through create-with-gather.
 	ConfigDelivered bool `json:"configDelivered,omitempty"`
-	// AsNeededPending records that a provision, move provision or
-	// reprovision completed after which no start has delivered as-needed
-	// values yet: the next start of the agent is routed through
-	// create-with-gather whatever its run history (ptone/scion#6096). It is
-	// cleared when ConfigDelivered is set.
-	AsNeededPending bool `json:"asNeededPending,omitempty"`
 
 	Image         string            `json:"image,omitempty"`
 	HarnessConfig string            `json:"harnessConfig,omitempty"`

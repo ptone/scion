@@ -18,6 +18,8 @@ package hub
 
 import (
 	"context"
+	"log/slog"
+	"net/http"
 	"testing"
 
 	"github.com/google/uuid"
@@ -50,7 +52,6 @@ func neverStarted(f *runDispatchFixture) {
 	f.agent.PreviousRunIDs = nil
 	f.agent.Phase = string(state.PhaseCreated)
 	f.agent.AppliedConfig.ConfigDelivered = false
-	f.agent.AppliedConfig.AsNeededPending = false
 }
 
 func TestDispatchAgentStart_UndeliveredConfigGoesThroughCreate(t *testing.T) {
@@ -95,16 +96,6 @@ func TestDispatchAgentStart_UndeliveredConfigGoesThroughCreate(t *testing.T) {
 		assert.False(t, f.client.startCalled, "never a plain start")
 		assert.True(t, f.client.createCalled)
 	})
-	t.Run("provision-only row (created, delivered marker absent): routed", func(t *testing.T) {
-		f := newRunDispatchFixture(t)
-		neverStarted(f)
-		seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
-		gatherNeedsClient(f)
-
-		require.NoError(t, f.d.DispatchAgentStart(context.Background(), f.agent, "", false))
-		assert.False(t, f.client.startCalled)
-		assert.True(t, f.client.createCalled)
-	})
 	t.Run("lookup error: fails closed with the fixed start message", func(t *testing.T) {
 		f := newRunDispatchFixture(t)
 		neverStarted(f)
@@ -118,7 +109,7 @@ func TestDispatchAgentStart_UndeliveredConfigGoesThroughCreate(t *testing.T) {
 	})
 }
 
-func TestDispatchAgentStart_DeliveredOrLegacyOrNoAsNeededStartsPlain(t *testing.T) {
+func TestDispatchAgentStart_DeliveredOrNoAsNeededStartsPlain(t *testing.T) {
 	cases := []struct {
 		name  string
 		setup func(t *testing.T, f *runDispatchFixture)
@@ -128,62 +119,142 @@ func TestDispatchAgentStart_DeliveredOrLegacyOrNoAsNeededStartsPlain(t *testing.
 			f.agent.AppliedConfig.ConfigDelivered = true
 			seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
 		}},
-		{"legacy row with run history and a successful start", func(t *testing.T, f *runDispatchFixture) {
-			f.agent.Phase = string(state.PhaseStopped)
-			require.NotEmpty(t, f.agent.RunID)
-			seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
-		}},
 		{"no as-needed entries", func(t *testing.T, f *runDispatchFixture) {
 			neverStarted(f)
+		}},
+		{"resumed start", func(t *testing.T, f *runDispatchFixture) {
+			seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
 		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newRunDispatchFixture(t)
 			tc.setup(t, f)
-			require.NoError(t, f.d.DispatchAgentStart(context.Background(), f.agent, "", false))
+			resume := tc.name == "resumed start"
+			require.NoError(t, f.d.DispatchAgentStart(context.Background(), f.agent, "", resume))
 			assert.True(t, f.client.startCalled, "a plain start, as before")
 			assert.False(t, f.client.createCalled, "no create")
 		})
 	}
 }
 
+// A legacy row without the marker is routed even when its run history and
+// phase look like an earlier start: no stored field reliably shows that a
+// run landed (the stop action writes stopped either way).
+func TestDispatchAgentStart_LegacyRowWithoutMarkerIsRouted(t *testing.T) {
+	f := newRunDispatchFixture(t)
+	f.agent.Phase = string(state.PhaseStopped)
+	require.NotEmpty(t, f.agent.RunID)
+	seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
+	gatherNeedsClient(f)
+
+	require.NoError(t, f.d.DispatchAgentStart(context.Background(), f.agent, "", false))
+	assert.False(t, f.client.startCalled, "never a plain start without the marker")
+	require.NotNil(t, f.client.lastCreateReq)
+	assert.Equal(t, failClosedValue, f.client.lastCreateReq.ResolvedEnv[failClosedKey])
+}
+
+// A routed start is always a synchronous create, even for an agent opted
+// into asynchronous launches.
+func TestDispatchAgentStart_RoutedStartIsSynchronous(t *testing.T) {
+	f := newRunDispatchFixture(t)
+	neverStarted(f)
+	f.agent.LaunchAsyncOptIn = true
+	seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
+	gatherNeedsClient(f)
+
+	res, err := f.d.DispatchAgentStartWithOptions(context.Background(), f.agent, "", false, StartDispatchOptions{Async: true, Kind: store.LaunchKindStart})
+	require.NoError(t, err)
+	assert.Nil(t, res.AcceptedLaunch(), "no launch: the routed create is synchronous")
+	require.NotNil(t, f.client.lastCreateReq)
+	assert.Equal(t, failClosedValue, f.client.lastCreateReq.ResolvedEnv[failClosedKey])
+	assert.True(t, f.agent.LaunchAsyncOptIn, "the agent's opt-in is restored")
+}
+
 // A restart is not routed: a plain restart does not gather as-needed values
 // (ptone/scion#6101).
 func TestDispatchAgentRestart_NotRouted(t *testing.T) {
-	f := newRunDispatchFixture(t)
-	neverStarted(f)
-	seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
-	require.NoError(t, f.d.DispatchAgentRestart(context.Background(), f.agent))
-	assert.True(t, f.client.restartCalled)
-	assert.False(t, f.client.createCalled)
+	t.Run("DispatchAgentRestart", func(t *testing.T) {
+		f := newRunDispatchFixture(t)
+		neverStarted(f)
+		seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
+		require.NoError(t, f.d.DispatchAgentRestart(context.Background(), f.agent))
+		assert.True(t, f.client.restartCalled)
+		assert.False(t, f.client.createCalled)
+	})
+	t.Run("restart start leg (start claim marker)", func(t *testing.T) {
+		f := newRunDispatchFixture(t)
+		neverStarted(f)
+		seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
+		require.NoError(t, f.d.DispatchAgentStart(withRestartStartLeg(context.Background()), f.agent, "", false))
+		assert.True(t, f.client.startCalled, "a plain start leg")
+		assert.False(t, f.client.createCalled)
+	})
+	t.Run("restart start leg (async restart kind)", func(t *testing.T) {
+		f := newRunDispatchFixture(t)
+		neverStarted(f)
+		seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
+		_, err := f.d.DispatchAgentStartWithOptions(context.Background(), f.agent, "", false, StartDispatchOptions{Kind: store.LaunchKindRestart})
+		require.NoError(t, err)
+		assert.False(t, f.client.createCalled)
+	})
+}
+
+// Through the HTTP lifecycle API with the real dispatcher: a restart stays a
+// plain restart, and a start of an agent without the marker that has
+// as-needed entries goes through create-with-gather.
+func TestLifecycleHTTP_StartRoutedRestartNot(t *testing.T) {
+	setup := func(t *testing.T, name string, phase state.Phase) (*Server, *mockRuntimeBrokerClient, *store.Agent) {
+		srv, s := testServer(t)
+		grantDevUserRuntimeBrokerAccess(t, s)
+		project, broker := newEmptyPerAgentHandlerProject(t, s, name, true)
+		agent := newQuotaTestAgent(t, s, broker, project, name, phase)
+		require.NoError(t, s.CreateEnvVar(context.Background(), &store.EnvVar{
+			ID: uuid.NewString(), Key: failClosedKey, Value: failClosedValue,
+			Scope: store.ScopeProject, ScopeID: project.ID, InjectionMode: store.InjectionModeAsNeeded,
+		}))
+		client := &mockRuntimeBrokerClient{}
+		srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default()))
+		return srv, client, agent
+	}
+	t.Run("restart", func(t *testing.T) {
+		srv, client, agent := setup(t, "route-restart", state.PhaseRunning)
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/restart", nil)
+		require.Less(t, rec.Code, 300, rec.Body.String())
+		assert.True(t, client.startCalled || client.restartCalled, "the restart reached the broker")
+		assert.False(t, client.createCalled, "a restart is not routed through create (ptone/scion#6101)")
+	})
+	t.Run("start", func(t *testing.T) {
+		srv, client, agent := setup(t, "route-start", state.PhaseStopped)
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", nil)
+		require.Less(t, rec.Code, 300, rec.Body.String())
+		assert.True(t, client.createCalled, "the start went through create-with-gather")
+		assert.False(t, client.startCalled, "no plain start")
+	})
 }
 
 // The marker is set only on a completed create or provision: not when the
 // broker's needs stay unmet, not on a failed provision.
 func TestConfigDeliveredMarker(t *testing.T) {
-	t.Run("provision success sets pending, not delivered", func(t *testing.T) {
+	t.Run("provision success clears the marker", func(t *testing.T) {
 		// A provision starts nothing, and the as-needed values it resolves
 		// go only into that provision request.
 		f := newRunDispatchFixture(t)
 		f.agent.AppliedConfig.ConfigDelivered = true
 		require.NoError(t, f.d.DispatchAgentProvision(context.Background(), f.agent))
 		assert.False(t, f.agent.AppliedConfig.ConfigDelivered)
-		assert.True(t, f.agent.AppliedConfig.AsNeededPending)
 	})
-	t.Run("reprovision success sets pending, not delivered", func(t *testing.T) {
+	t.Run("reprovision success clears the marker", func(t *testing.T) {
 		f := newRunDispatchFixture(t)
+		f.agent.AppliedConfig.ConfigDelivered = true
 		require.NoError(t, f.d.DispatchAgentReprovision(context.Background(), f.agent))
 		assert.False(t, f.agent.AppliedConfig.ConfigDelivered)
-		assert.True(t, f.agent.AppliedConfig.AsNeededPending)
 	})
-	t.Run("create success marks delivered and clears pending", func(t *testing.T) {
+	t.Run("create success marks delivered", func(t *testing.T) {
 		f := newRunDispatchFixture(t)
-		f.agent.AppliedConfig.AsNeededPending = true
 		_, err := f.d.DispatchAgentCreateWithGather(context.Background(), f.agent)
 		require.NoError(t, err)
 		assert.True(t, f.agent.AppliedConfig.ConfigDelivered)
-		assert.False(t, f.agent.AppliedConfig.AsNeededPending)
 	})
 	t.Run("create with remaining needs does not mark", func(t *testing.T) {
 		f := newRunDispatchFixture(t)
@@ -205,11 +276,12 @@ func TestConfigDeliveredMarker(t *testing.T) {
 	})
 }
 
-// End to end with the real dispatcher: the start after a provision-only
-// create, after a reprovision (the reincarnation start leg) and after any
-// provision that left AsNeededPending (a move's start on the target) is
-// routed through create-with-gather, and the as-needed value reaches that
-// start's request, even when the agent's run history shows earlier starts.
+// End to end with the real dispatcher, with the marker as the provision path
+// leaves it (never hand-set to false): the start after a provision-only
+// create, after a reprovision (the reincarnation start leg) and after a
+// provision that follows a delivered create (a move's start on the target)
+// is routed through create-with-gather, and the as-needed value reaches that
+// start's request.
 func TestDispatchAgentStart_AfterProvisionGathersAgain(t *testing.T) {
 	t.Run("provision-only create, then start", func(t *testing.T) {
 		f := newRunDispatchFixture(t)
@@ -228,7 +300,6 @@ func TestDispatchAgentStart_AfterProvisionGathersAgain(t *testing.T) {
 		assert.False(t, f.client.lastCreateReq.ProvisionOnly, "the start goes through a create that starts the agent")
 		assert.Equal(t, failClosedValue, f.client.lastCreateReq.ResolvedEnv[failClosedKey], "the as-needed value reaches the start")
 		assert.True(t, f.agent.AppliedConfig.ConfigDelivered)
-		assert.False(t, f.agent.AppliedConfig.AsNeededPending)
 	})
 	t.Run("reprovision, then the start leg", func(t *testing.T) {
 		f := newRunDispatchFixture(t)
@@ -245,13 +316,16 @@ func TestDispatchAgentStart_AfterProvisionGathersAgain(t *testing.T) {
 		require.NotNil(t, f.client.lastCreateReq)
 		assert.Equal(t, failClosedValue, f.client.lastCreateReq.ResolvedEnv[failClosedKey])
 	})
-	t.Run("pending provision overrides legacy proof (move start on the target)", func(t *testing.T) {
+	t.Run("delivered agent, then reprovision (move or reincarnation), then start", func(t *testing.T) {
 		f := newRunDispatchFixture(t)
 		f.agent.Phase = string(state.PhaseStopped)
-		f.agent.AppliedConfig.AsNeededPending = true
+		f.agent.AppliedConfig.ConfigDelivered = true
 		seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
 		gatherNeedsClient(f)
 
+		require.NoError(t, f.d.DispatchAgentReprovision(context.Background(), f.agent))
+		require.False(t, f.agent.AppliedConfig.ConfigDelivered, "the provision cleared the marker")
+		f.client.createCalled, f.client.lastCreateReq = false, nil
 		require.NoError(t, f.d.DispatchAgentStart(context.Background(), f.agent, "", false))
 		assert.False(t, f.client.startCalled)
 		assert.True(t, f.client.createCalled)
