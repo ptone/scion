@@ -204,7 +204,12 @@ func TestArtifactHostMayGrantReview_ChainLive(t *testing.T) {
 	})
 	t.Run("chain lookup fails", func(t *testing.T) {
 		f := newReviewGrantFixture(t)
-		faulty := &Server{authzService: NewAuthzService(&faultStore{Store: f.s, edges: true}, slog.Default())}
+		// The host has a store holding the home project row (so the clause's home-exists check passes) and an
+		// authorization service whose delegation-edge lookup fails. The healthy control shows the same shape of
+		// host answers the delegating user; only the edge lookup fault takes the clause away.
+		healthy := newArtifactHost(&Server{store: f.s, authzService: NewAuthzService(f.s, slog.Default())})
+		require.True(t, f.may(healthy, f.user(f.delegator), f.agent.ID, f.home), "control: healthy edge lookup")
+		faulty := &Server{store: f.s, authzService: NewAuthzService(&faultStore{Store: f.s, edges: true}, slog.Default())}
 		host := newArtifactHost(faulty)
 		assert.False(t, f.may(host, f.user(f.delegator), f.agent.ID, f.home))
 	})

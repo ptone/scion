@@ -575,10 +575,19 @@ var _ artifacts.ScopeChecker = (*artifactHost)(nil)
 // exists while the store has it and it is not soft-deleted
 // (messagesExist). The maintenance pass asks about at most one page of
 // message refs at a time.
+//
+// A host without a server or a store answers an error for any non-empty
+// refs, never a panic; callers treat it as a failed lookup.
 func (h *artifactHost) ScopesExist(ctx context.Context, refs []string) (map[string]bool, error) {
 	out := make(map[string]bool, len(refs))
-	if h.server == nil || len(refs) == 0 {
+	if len(refs) == 0 {
 		return out, nil
+	}
+	// No server or no store: fail closed with an error (every caller treats an error as "cannot tell", and the
+	// steward and review clauses deny on it), never a nil dereference.
+	if h.server == nil || h.server.store == nil {
+		slog.WarnContext(ctx, "artifacts: scope existence check without a store")
+		return nil, errors.New("artifacts: scope existence check: no store")
 	}
 	var projects, messages []string
 	for _, ref := range refs {

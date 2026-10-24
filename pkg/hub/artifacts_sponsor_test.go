@@ -526,3 +526,44 @@ func TestArtifactSponsorBackfillLookupFault(t *testing.T) {
 	assert.Equal(t, f.delegator, sponsorOf(t, st, live))
 	assert.Equal(t, "", sponsorOf(t, st, noEdge), "a denial records nothing and does not block completion")
 }
+
+// TestArtifactHostStorelessFailsClosed: a host whose server has an
+// authorization service but no store answers no clause from either clause
+// and an error from ScopesExist, and never panics (a panic is recovered and
+// reported as a failure, so a missing nil guard fails this test rather
+// than crashing the binary).
+func TestArtifactHostStorelessFailsClosed(t *testing.T) {
+	f := newReviewGrantFixture(t)
+	host := newArtifactHost(&Server{authzService: NewAuthzService(f.s, slog.Default())})
+	ctx := contextWithIdentity(context.Background(), f.user(f.delegator))
+	call := func(name string, fn func() string) string {
+		t.Helper()
+		var got string
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("%s panicked on a store-less host: %v", name, r)
+					got = "panic"
+				}
+			}()
+			got = fn()
+		}()
+		return got
+	}
+	assert.Equal(t, "", call("StewardClause", func() string {
+		return host.StewardClause(ctx, f.agent.ID, f.home, f.delegator, false)
+	}), "StewardClause")
+	assert.Equal(t, "", call("ReviewGrantClause", func() string {
+		return host.ReviewGrantClause(ctx, f.agent.ID, f.home, f.delegator)
+	}), "ReviewGrantClause")
+	assert.Equal(t, "", call("ScopesExist", func() string {
+		exists, err := host.ScopesExist(ctx, []string{f.home})
+		if err == nil || exists[f.home] {
+			return "no error"
+		}
+		return ""
+	}), "ScopesExist answers an error and no project")
+	exists, err := host.ScopesExist(ctx, nil)
+	require.NoError(t, err, "no refs needs no store")
+	assert.Empty(t, exists)
+}
