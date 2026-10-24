@@ -84,10 +84,16 @@ func newFakeBroker() *fakeBroker {
 	return &fakeBroker{subs: map[string]bool{}, block: make(chan struct{})}
 }
 
+// fakeTokenFailConfigure makes the fake broker's Configure fail.
+const fakeTokenFailConfigure = "fail-configure"
+
 func (f *fakeBroker) Configure(cfg map[string]string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.configures++
+	if cfg["token"] == fakeTokenFailConfigure {
+		return errors.New("configure refused")
+	}
 	f.token = cfg["token"]
 	return nil
 }
@@ -222,10 +228,20 @@ type hubManagedFixture struct {
 
 func newHubManagedFixture(t *testing.T) *hubManagedFixture {
 	t.Helper()
+	return newHubManagedFixtureWithInterval(t, 0)
+}
+
+// newHubManagedFixtureWithInterval is newHubManagedFixture with the given
+// supervisor check interval (0 keeps the shortened default).
+func newHubManagedFixtureWithInterval(t *testing.T, interval time.Duration) *hubManagedFixture {
+	t.Helper()
 	if runtime.GOOS != "linux" {
 		t.Skip("helper-process plugin tests need Linux")
 	}
 	shortenSupervisorTiming(t)
+	if interval > 0 {
+		supervisorCheckInterval = interval
+	}
 	t.Setenv(supervisorHelperEnv, "1")
 
 	fx := &hubManagedFixture{m: NewManager(slog.New(slog.NewTextHandler(io.Discard, nil)))}
@@ -368,6 +384,7 @@ type selfManagedServer struct {
 	addr  string
 	mu    sync.Mutex
 	conns []net.Conn
+	lis   net.Listener
 }
 
 type trackingListener struct {
@@ -387,9 +404,25 @@ func (l trackingListener) Accept() (net.Conn, error) {
 
 func startSelfManagedServer(t *testing.T) *selfManagedServer {
 	t.Helper()
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	s := &selfManagedServer{impl: newFakeBroker(), addr: lis.Addr().String()}
+	s := &selfManagedServer{impl: newFakeBroker(), addr: "127.0.0.1:0"}
+	require.NoError(t, s.listen())
+	t.Cleanup(func() {
+		close(s.impl.block)
+		s.stop()
+	})
+	return s
+}
+
+// listen starts serving on s.addr (the first call picks a free port).
+func (s *selfManagedServer) listen() error {
+	lis, err := net.Listen("tcp", s.addr)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.lis = lis
+	s.addr = lis.Addr().String()
+	s.mu.Unlock()
 	stdoutR, _ := io.Pipe()
 	stderrR, _ := io.Pipe()
 	srv := &goplugin.RPCServer{
@@ -399,12 +432,20 @@ func startSelfManagedServer(t *testing.T) *selfManagedServer {
 		DoneCh:  make(chan struct{}),
 	}
 	go srv.Serve(trackingListener{Listener: lis, s: s})
-	t.Cleanup(func() {
-		close(s.impl.block)
+	return nil
+}
+
+// stop closes the listener and every connection, as a plugin process
+// that went away does.
+func (s *selfManagedServer) stop() {
+	s.mu.Lock()
+	lis := s.lis
+	s.lis = nil
+	s.mu.Unlock()
+	if lis != nil {
 		_ = lis.Close()
-		s.dropConns()
-	})
-	return s
+	}
+	s.dropConns()
 }
 
 func (s *selfManagedServer) dropConns() {
@@ -684,4 +725,207 @@ func TestSupervisor_StopsOnShutdown(t *testing.T) {
 	st, _ := m.BrokerSupervision("fake")
 	assert.Equal(t, SupervisionRestarting, st.State)
 	assert.Equal(t, 0, st.Attempt, "no attempt made after shutdown began")
+}
+
+// setFailingAfter lowers failingAfter for a test.
+func setFailingAfter(t *testing.T, n int) {
+	t.Helper()
+	old := failingAfter
+	failingAfter = n
+	t.Cleanup(func() { failingAfter = old })
+}
+
+func TestSupervisor_FailedLoadIsRetriedSelfManaged(t *testing.T) {
+	setFailingAfter(t, 2)
+	s := startSelfManagedServer(t)
+	m, hooks := newSelfManagedManager(t, s)
+
+	// The plugin goes away and stays away: every re-dial fails.
+	s.stop()
+	waitFor(t, 30*time.Second, "repeated failed re-dials reaching failing", func() bool {
+		st, _ := m.BrokerSupervision("ext")
+		return st.State == SupervisionFailing && st.Attempt > 2
+	})
+	assert.Equal(t, int32(0), hooks.Load())
+
+	// It comes back on the same address: the next attempt succeeds.
+	require.NoError(t, s.listen())
+	waitRestarted(t, m, "ext", 1)
+	assert.Equal(t, "provided", fakeHealth(t, m, "ext")["token"])
+	assert.Equal(t, int32(1), hooks.Load())
+}
+
+func TestSupervisor_FailedLoadIsRetriedHubManaged(t *testing.T) {
+	setFailingAfter(t, 2)
+	fx := newHubManagedFixture(t)
+	var failing atomic.Bool
+	failing.Store(true)
+	fx.m.SetBrokerConfigProvider(func(_ context.Context, name string) (map[string]string, error) {
+		if failing.Load() {
+			return map[string]string{"token": fakeTokenFailConfigure}, nil
+		}
+		return map[string]string{"token": "provided-" + name}, nil
+	})
+
+	require.Error(t, fx.publish(fakeTopicExit))
+	waitFor(t, 30*time.Second, "respawns failing in Configure reaching failing", func() bool {
+		st, _ := fx.m.BrokerSupervision("fake")
+		return st.State == SupervisionFailing && st.Attempt > 2
+	})
+
+	failing.Store(false)
+	waitRestarted(t, fx.m, "fake", 1)
+	assert.Equal(t, "provided-fake", fakeHealth(t, fx.m, "fake")["token"])
+	assert.NoError(t, fx.publish("agent.bot.message"))
+}
+
+func TestSupervisor_FailedReconnectIsRecovered(t *testing.T) {
+	s := startSelfManagedServer(t)
+	m, _ := newSelfManagedManager(t, s)
+
+	s.stop()
+	require.Error(t, m.Reconnect(PluginTypeBroker, "ext"), "re-dial to a stopped plugin fails")
+	waitFor(t, 30*time.Second, "the supervisor taking over the failed reconnect", func() bool {
+		st, _ := m.BrokerSupervision("ext")
+		return st.State != SupervisionRunning
+	})
+	require.NoError(t, s.listen())
+	waitRestarted(t, m, "ext", 1)
+}
+
+func TestSupervisor_RecoversThroughKicksAlone(t *testing.T) {
+	// No periodic check within the test: recovery must come from the kick
+	// chain (transport error -> probe -> lost -> attempt).
+	fx := newHubManagedFixtureWithInterval(t, time.Hour)
+	require.Error(t, fx.publish(fakeTopicExit))
+	waitRestarted(t, fx.m, "fake", 1)
+}
+
+// freezingRelay forwards TCP connections to target; freeze makes every
+// connection open at that moment stop forwarding without closing, as a
+// hung session does. Connections accepted later forward normally.
+type freezingRelay struct {
+	lis    net.Listener
+	target string
+	mu     sync.Mutex
+	frozen []chan struct{}
+	conns  []net.Conn
+}
+
+func startFreezingRelay(t *testing.T, target string) *freezingRelay {
+	t.Helper()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	r := &freezingRelay{lis: lis, target: target}
+	go func() {
+		for {
+			c, err := lis.Accept()
+			if err != nil {
+				return
+			}
+			up, err := net.Dial("tcp", target)
+			if err != nil {
+				_ = c.Close()
+				continue
+			}
+			stop := make(chan struct{})
+			r.mu.Lock()
+			r.frozen = append(r.frozen, stop)
+			r.conns = append(r.conns, c, up)
+			r.mu.Unlock()
+			go relayCopy(up, c, stop)
+			go relayCopy(c, up, stop)
+		}
+	}()
+	t.Cleanup(func() {
+		_ = lis.Close()
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		for _, c := range r.conns {
+			_ = c.Close()
+		}
+	})
+	return r
+}
+
+// relayCopy copies src to dst until src fails or stop is closed; after
+// stop it keeps reading and discards, so the peer sees no close.
+func relayCopy(dst, src net.Conn, stop chan struct{}) {
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := src.Read(buf)
+		if err != nil {
+			return
+		}
+		select {
+		case <-stop:
+			continue
+		default:
+		}
+		if _, err := dst.Write(buf[:n]); err != nil {
+			return
+		}
+	}
+}
+
+func (r *freezingRelay) freeze() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, c := range r.frozen {
+		close(c)
+	}
+	r.frozen = nil
+}
+
+func TestSupervisor_HungSessionNeedsConsecutivePingTimeouts(t *testing.T) {
+	s := startSelfManagedServer(t)
+	relay := startFreezingRelay(t, s.addr)
+	shortenSupervisorTiming(t)
+	supervisorPingTimeout = 300 * time.Millisecond
+
+	m := NewManager(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(m.Shutdown)
+	require.NoError(t, m.LoadOne(PluginTypeBroker, "ext", PluginEntry{
+		SelfManaged: true,
+		Address:     relay.lis.Addr().String(),
+	}, ""))
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	m.StartSupervisor(ctx)
+
+	relay.freeze()
+	key := PluginTypeBroker + ":ext"
+	waitFor(t, 10*time.Second, "one Ping timeout", func() bool {
+		m.sup.mu.Lock()
+		defer m.sup.mu.Unlock()
+		return m.sup.plugins[key].pingTimeouts >= 1
+	})
+	st, _ := m.BrokerSupervision("ext")
+	if supervisorPingTimeouts > 1 {
+		assert.Equal(t, 0, st.Restarts, "a single Ping timeout does not restart")
+	}
+	waitRestarted(t, m, "ext", 1)
+}
+
+func TestSupervisor_NoAttemptAfterShutdownBegins(t *testing.T) {
+	shortenSupervisorTiming(t)
+	m := NewManager(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	key := PluginTypeBroker + ":fake"
+	lost := &goplugin.Client{}
+	m.clients[key] = lost
+	m.configs[key] = DiscoveredPlugin{Name: "fake", Type: PluginTypeBroker}
+	m.supervisedLoaded(key)
+	m.markLost(key, lost, "plugin session lost")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m.BeginShutdown()
+	m.StartSupervisor(ctx)
+	for i := 0; i < 5; i++ {
+		m.kickSupervisor()
+		time.Sleep(supervisorCheckInterval)
+	}
+	st, _ := m.BrokerSupervision("fake")
+	assert.Equal(t, 0, st.Attempt, "no attempt once shutdown has begun")
+	assert.Equal(t, SupervisionRestarting, st.State)
 }

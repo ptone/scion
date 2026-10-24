@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"os"
 	"sync"
 	"time"
 
@@ -83,6 +84,10 @@ var (
 	failingAfter = 5
 	// dropWarnInterval rate-limits the dropped-publish warning per plugin.
 	dropWarnInterval = 10 * time.Second
+	// restartStepTimeout bounds each step of a restart attempt that calls
+	// out (config provider, plugin Configure, restart hooks), so an
+	// attempt always ends and releases the plugin's restart lock.
+	restartStepTimeout = 60 * time.Second
 )
 
 // backoffDelay returns the delay before restart attempt n (n >= 1):
@@ -299,20 +304,35 @@ func (m *Manager) superviseOnce(ctx context.Context) {
 	}
 	var jobs []job
 
+	kick := false
 	m.mu.RLock()
 	m.sup.mu.Lock()
 	for key, sp := range m.sup.plugins {
-		client, ok := m.clients[key]
-		if !ok || sp.busy {
+		if sp.busy {
+			continue
+		}
+		client, hasClient := m.clients[key]
+		if _, hasConfig := m.configs[key]; !hasConfig && !hasClient {
+			// Unloaded (for example by Shutdown): nothing to supervise.
+			delete(m.sup.plugins, key)
 			continue
 		}
 		self := m.selfManaged[key]
 		switch sp.status.State {
 		case SupervisionRunning:
+			if !hasClient {
+				// A load failed after the client was dropped (Reconnect
+				// or an admin restart): recover it like a lost session.
+				m.markLostLocked(sp, key, nil, "plugin not loaded", now)
+				kick = true
+				continue
+			}
 			sp.resetAttemptsIfStable(now)
 			sp.busy = true
 			jobs = append(jobs, job{key: key, client: client, self: self})
 		default:
+			// A plugin whose last attempt failed to load has no client;
+			// it is retried from its stored config.
 			if now.Before(sp.nextAttempt) {
 				continue
 			}
@@ -322,23 +342,32 @@ func (m *Manager) superviseOnce(ctx context.Context) {
 	}
 	m.sup.mu.Unlock()
 	m.mu.RUnlock()
+	if kick {
+		m.kickSupervisor()
+	}
 
 	for _, j := range jobs {
 		go func() {
+			lost := false
 			defer func() {
 				m.sup.mu.Lock()
 				if sp, ok := m.sup.plugins[j.key]; ok {
 					sp.busy = false
 				}
 				m.sup.mu.Unlock()
+				// Kick only once busy is cleared, so the next pass can
+				// start the attempt at once.
+				if lost {
+					m.kickSupervisor()
+				}
 			}()
 			if j.attempt {
 				m.restartAttempt(ctx, j.key)
 				return
 			}
-			if lost, reason := m.probe(j.key, j.client, j.self); lost {
+			var reason string
+			if lost, reason = m.probe(j.key, j.client, j.self); lost {
 				m.markLost(j.key, j.client, reason)
-				m.kickSupervisor()
 			}
 		}()
 	}
@@ -397,6 +426,12 @@ func (m *Manager) markLost(key string, client *goplugin.Client, reason string) {
 		m.sup.mu.Unlock()
 		return
 	}
+	m.markLostLocked(sp, key, client, reason, now)
+	m.sup.mu.Unlock()
+}
+
+// markLostLocked is markLost for a running plugin's record; m.sup.mu is held.
+func (m *Manager) markLostLocked(sp *supervised, key string, client *goplugin.Client, reason string, now time.Time) {
 	sp.status.State = SupervisionRestarting
 	sp.status.Since = now
 	sp.status.LastError = reason
@@ -408,7 +443,6 @@ func (m *Manager) markLost(key string, client *goplugin.Client, reason string) {
 	} else {
 		sp.nextAttempt = now.Add(backoffDelay(sp.status.Attempt+1, m.sup.jitter()))
 	}
-	m.sup.mu.Unlock()
 	m.logger.Warn("Broker plugin connection lost; restart scheduled", "plugin", key, "reason", reason)
 }
 
@@ -453,7 +487,9 @@ func (m *Manager) restartAttempt(ctx context.Context, key string) {
 
 	cfg := dp.Config
 	if provider != nil {
-		resolved, err := provider(ctx, dp.Name)
+		pctx, cancel := context.WithTimeout(ctx, restartStepTimeout)
+		resolved, err := provider(pctx, dp.Name)
+		cancel()
 		if err != nil {
 			m.attemptFailed(key, attempt, fmt.Errorf("resolve config: %w", err))
 			return
@@ -467,7 +503,10 @@ func (m *Manager) restartAttempt(ctx context.Context, key string) {
 		m.attemptFailed(key, attempt, err)
 		return
 	}
-	if err := m.runRestartHooks(dp.Name); err != nil {
+	if m.stopping.Load() {
+		return
+	}
+	if err := m.runRestartHooksWithin(dp.Name, restartStepTimeout); err != nil {
 		m.attemptFailed(key, attempt, fmt.Errorf("restart hook: %w", err))
 		return
 	}
@@ -481,8 +520,11 @@ func (m *Manager) restartAttempt(ctx context.Context, key string) {
 }
 
 // closeStaleClient drops a lost client. A hub-managed plugin's process is
-// killed (Kill closes the RPC, waits briefly, then kills it). A
-// self-managed plugin's connection is closed; its process is not touched.
+// killed at once (its session is gone or hung, so no graceful Quit is
+// attempted first), then the client is cleaned up. A self-managed plugin's
+// client is only dropped: closing it would send the plugin a Quit request,
+// and the hub does not own that process. Its dead or hung session ends on
+// its own (yamux keepalive).
 func (m *Manager) closeStaleClient(key string, lost *goplugin.Client, self bool) {
 	if lost == nil {
 		return
@@ -494,10 +536,14 @@ func (m *Manager) closeStaleClient(key string, lost *goplugin.Client, self bool)
 	}
 	m.mu.Unlock()
 	if self {
-		if cp, err := lost.Client(); err == nil {
-			_ = cp.Close()
-		}
 		return
+	}
+	// Only a process not yet reaped is signalled, so the pid cannot have
+	// been reused.
+	if rc := lost.ReattachConfig(); rc != nil && rc.Pid > 0 && !lost.Exited() {
+		if p, err := os.FindProcess(rc.Pid); err == nil {
+			_ = p.Kill()
+		}
 	}
 	lost.Kill()
 }
@@ -546,6 +592,23 @@ func (m *Manager) runRestartHooks(name string) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// runRestartHooksWithin runs the restart hooks, giving up after timeout. A
+// hook still running then (for example a subscription replay on a plugin
+// that does not answer) finishes in the background; the next attempt
+// replaces that plugin, which fails its pending calls.
+func (m *Manager) runRestartHooksWithin(name string, timeout time.Duration) error {
+	done := make(chan error, 1)
+	go func() { done <- m.runRestartHooks(name) }()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		return fmt.Errorf("restart hooks did not finish within %v", timeout)
+	}
 }
 
 // restartLock returns the per-plugin lock that serializes supervisor
