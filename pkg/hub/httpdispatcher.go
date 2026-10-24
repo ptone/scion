@@ -835,6 +835,11 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 	if agent.IsPinned() {
 		req.ExpectedRuntimeTargetID = agent.PinnedRuntimeTargetID
 	}
+	// A start routed through create-with-gather keeps the agent's existing
+	// workspace (ptone/scion#6096). The decision is the hub's
+	// (startThroughCreate, or the owner's execDispatchCreate for a
+	// requester's routed start); the broker only honours the flag.
+	req.PreserveWorkspace = preserveWorkspaceRequested(ctx)
 
 	// Propagate attach mode from applied config
 	if agent.AppliedConfig != nil {
@@ -2309,7 +2314,17 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 func (d *HTTPAgentDispatcher) deferredCreateWithGather(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
 	// An agent this node opted out of async launch for the dispatch (a
 	// routed start) is created synchronously on the owner too.
-	result, err := d.deferredDataOpResult(ctx, agent, "create", &CreateWithGatherDispatchArgs{Synchronous: !agent.LaunchAsyncOptIn})
+	// A routed start's task override and its preserve-workspace flag live
+	// only on this node (the agent's in-memory config and ctx), so they
+	// travel in the args.
+	args := &CreateWithGatherDispatchArgs{
+		Synchronous:       !agent.LaunchAsyncOptIn,
+		PreserveWorkspace: preserveWorkspaceRequested(ctx),
+	}
+	if args.PreserveWorkspace && agent.AppliedConfig != nil {
+		args.Task = agent.AppliedConfig.Task
+	}
+	result, err := d.deferredDataOpResult(ctx, agent, "create", args)
 	if err != nil {
 		return nil, err
 	}
@@ -3562,13 +3577,109 @@ func clearConfigDelivered(agent *store.Agent) {
 // result that still carries needs, and not for one accepted for an
 // asynchronous launch, which has not completed yet.
 func markConfigDeliveredOnSuccess(agent *store.Agent, res *CreateDispatchResult) {
+	if createDelivered(res) {
+		markConfigDelivered(agent)
+	}
+}
+
+// createDelivered reports whether a successful create or finalize result
+// delivered the config: completed synchronously (no accepted launch) with
+// no outstanding needs.
+func createDelivered(res *CreateDispatchResult) bool {
 	if res.AcceptedLaunch() != nil {
-		return
+		return false
 	}
 	if envReqs := res.EnvRequirements(); envReqs != nil && len(envReqs.Needs) > 0 {
+		return false
+	}
+	return true
+}
+
+// preserveWorkspaceKey marks a create dispatch that must keep the agent's
+// existing workspace (withPreserveWorkspace).
+type preserveWorkspaceKey struct{}
+
+// withPreserveWorkspace marks ctx so every create request built under it
+// carries PreserveWorkspace: the broker keeps an existing workspace instead
+// of clearing it for a fresh provision. Set for a start routed through
+// create-with-gather, which must never clear the workspace of an agent that
+// has one (ptone/scion#6096).
+func withPreserveWorkspace(ctx context.Context) context.Context {
+	return context.WithValue(ctx, preserveWorkspaceKey{}, true)
+}
+
+// preserveWorkspaceRequested reports whether ctx carries withPreserveWorkspace.
+func preserveWorkspaceRequested(ctx context.Context) bool {
+	v, _ := ctx.Value(preserveWorkspaceKey{}).(bool)
+	return v
+}
+
+// errBrokerLacksPreserveWorkspace is returned, before anything is sent, for
+// a start that must go through create-with-gather when the agent's broker
+// does not advertise PreserveWorkspaceCreate. An older broker ignores the
+// flag and would clear the agent's workspace, so the start is refused
+// rather than sent (ptone/scion#6096).
+var errBrokerLacksPreserveWorkspace = errors.New("this agent cannot be started until its runtime broker is upgraded: the broker cannot deliver the agent's environment while keeping its workspace")
+
+// checkPreserveWorkspaceCreate returns errBrokerLacksPreserveWorkspace
+// unless agent's broker advertises PreserveWorkspaceCreate. A broker that
+// cannot be read fails the start too.
+func checkPreserveWorkspaceCreate(ctx context.Context, st store.Store, agent *store.Agent) error {
+	broker, err := st.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
+	if err != nil {
+		return fmt.Errorf("read the agent's runtime broker: %w", err)
+	}
+	if broker.Capabilities == nil || !broker.Capabilities.PreserveWorkspaceCreate {
+		return errBrokerLacksPreserveWorkspace
+	}
+	return nil
+}
+
+// configDeliveredPersistAttempts bounds persistConfigDelivered's
+// compare-and-set retries.
+const configDeliveredPersistAttempts = 5
+
+// persistConfigDelivered stores ConfigDelivered for agent after a routed
+// start delivered its config, so the next start is plain. It writes only the
+// marker: it re-reads the row and sets the marker on the stored applied
+// config (never agent's in-memory copy, which may hold a start's task
+// override or be stale), compare-and-set on the stored state version, and
+// retries on a conflict. agent's StateVersion follows the write only when it
+// was the version written over, so a caller's later compare-and-set still
+// sees any other change. A failure is logged and leaves the marker unset:
+// the next start is routed again, which is safe.
+func persistConfigDelivered(ctx context.Context, st store.Store, log *slog.Logger, agent *store.Agent) {
+	for attempt := 0; attempt < configDeliveredPersistAttempts; attempt++ {
+		stored, err := st.GetAgent(ctx, agent.ID)
+		if err != nil {
+			log.WarnContext(ctx, "failed to read the agent to record its delivered config; the next start gathers again",
+				"agent_id", agent.ID, "error", err)
+			return
+		}
+		if stored.AppliedConfig != nil && stored.AppliedConfig.ConfigDelivered {
+			return
+		}
+		applied := stored.AppliedConfig
+		if applied == nil {
+			applied = &store.AgentAppliedConfig{}
+		}
+		applied.ConfigDelivered = true
+		version, err := st.UpdateAgentConfig(ctx, stored.ID, stored.StateVersion, applied, stored.PendingConfig)
+		if errors.Is(err, store.ErrVersionConflict) {
+			continue
+		}
+		if err != nil {
+			log.WarnContext(ctx, "failed to record the agent's delivered config; the next start gathers again",
+				"agent_id", agent.ID, "error", err)
+			return
+		}
+		if agent.StateVersion == stored.StateVersion {
+			agent.StateVersion = version
+		}
 		return
 	}
-	markConfigDelivered(agent)
+	log.WarnContext(ctx, "failed to record the agent's delivered config after repeated conflicts; the next start gathers again",
+		"agent_id", agent.ID)
 }
 
 // noStartRoutingKey marks a start dispatch that must not be routed through
@@ -3618,10 +3729,10 @@ func startRoutingSuppressed(ctx context.Context, opts StartDispatchOptions) bool
 // There is no legacy exception: no stored field reliably shows that a run
 // landed (beginRun records a run ID before the broker call, the stop action
 // writes phase stopped either way, and status writes stamp last_seen), so an
-// agent without the marker that has as-needed entries is routed. Routing is
-// safe for an agent that already has files on its broker: the broker reuses
-// an existing agent directory on a create (pkg/agent
-// TestBrokerModeStart_ExistingAgentDirIsReusedAndRequestEnvReachesContainer).
+// agent without the marker that has as-needed entries is routed. The routed
+// create carries PreserveWorkspace, so the broker keeps the workspace of an
+// agent that already has one, and it is sent only to a broker that
+// advertises PreserveWorkspaceCreate (startThroughCreate).
 // An agent with an ancestry (whose progeny entries are not listed here)
 // counts as having as-needed entries. A failed lookup returns err, a
 // *secretResolutionError the caller returns as a failed start, so an unknown
@@ -3692,7 +3803,20 @@ func (d *HTTPAgentDispatcher) hasAsNeededEntries(ctx context.Context, agent *sto
 // fails closed like the create: the fixed resolution message, the keyless
 // unmet-needs error, or the dispatch error, with nothing started. A task
 // given to the start is the create's task for this dispatch only.
+//
+// The create carries PreserveWorkspace (withPreserveWorkspace), so the
+// broker keeps the agent's existing workspace, and is refused with
+// errBrokerLacksPreserveWorkspace, nothing sent, when the agent's broker
+// does not advertise PreserveWorkspaceCreate. A delivered create records
+// ConfigDelivered on the stored row (persistConfigDelivered), so the next
+// start is plain.
 func (d *HTTPAgentDispatcher) startThroughCreate(ctx context.Context, agent *store.Agent, task string) (*StartDispatchResult, error) {
+	// The create must keep the agent's workspace: refuse, with nothing
+	// sent, on a broker that would ignore the flag and clear it.
+	if err := checkPreserveWorkspaceCreate(ctx, d.store, agent); err != nil {
+		return nil, err
+	}
+	ctx = withPreserveWorkspace(ctx)
 	// The routed create is always synchronous: an asynchronous create
 	// launch would begin a create launch on a row the start claim already
 	// moved to starting, and the start path does not carry a create
@@ -3701,7 +3825,10 @@ func (d *HTTPAgentDispatcher) startThroughCreate(ctx context.Context, agent *sto
 		agent.LaunchAsyncOptIn = false
 		defer func() { agent.LaunchAsyncOptIn = true }()
 	}
-	if task != "" && agent.AppliedConfig != nil {
+	if task != "" {
+		if agent.AppliedConfig == nil {
+			agent.AppliedConfig = &store.AgentAppliedConfig{}
+		}
 		saved := agent.AppliedConfig.Task
 		agent.AppliedConfig.Task = task
 		defer func() { agent.AppliedConfig.Task = saved }()
@@ -3717,6 +3844,9 @@ func (d *HTTPAgentDispatcher) startThroughCreate(ctx context.Context, agent *sto
 	}
 	if launch := created.AcceptedLaunch(); launch != nil {
 		return &StartDispatchResult{Launch: launch}, nil
+	}
+	if agent.AppliedConfig != nil && agent.AppliedConfig.ConfigDelivered {
+		persistConfigDelivered(ctx, d.store, d.log, agent)
 	}
 	return nil, nil
 }

@@ -661,6 +661,7 @@ func (s *Server) execDispatchCreate(ctx context.Context, d store.BrokerDispatch)
 	if dispatcher == nil {
 		return "", fmt.Errorf("no dispatcher available")
 	}
+	preserve := false
 	if d.Args != "" {
 		var args CreateWithGatherDispatchArgs
 		if err := json.Unmarshal([]byte(d.Args), &args); err != nil {
@@ -672,6 +673,22 @@ func (s *Server) execDispatchCreate(ctx context.Context, d store.BrokerDispatch)
 			// asynchronous create launch here (ptone/scion#6096).
 			agent.LaunchAsyncOptIn = false
 		}
+		if args.PreserveWorkspace {
+			// A start the requester routed through create-with-gather: the
+			// create keeps the agent's workspace, and is refused, nothing
+			// sent, on a broker that would ignore the flag (ptone/scion#6096).
+			if err := checkPreserveWorkspaceCreate(ctx, s.store, agent); err != nil {
+				return "", fmt.Errorf("dispatch create: %w", err)
+			}
+			preserve = true
+			ctx = withPreserveWorkspace(ctx)
+			if args.Task != "" {
+				if agent.AppliedConfig == nil {
+					agent.AppliedConfig = &store.AgentAppliedConfig{}
+				}
+				agent.AppliedConfig.Task = args.Task
+			}
+		}
 	}
 	ctx, warns := withDispatchWarnings(ctx)
 	// The requesting node keeps the agent when its wait for this
@@ -682,6 +699,12 @@ func (s *Server) execDispatchCreate(ctx context.Context, d store.BrokerDispatch)
 	created, err := dispatcher.DispatchAgentCreateWithGather(withKeepCredentialOnUnknownOutcome(ctx), agent)
 	if err != nil {
 		return "", fmt.Errorf("dispatch create: %w", err)
+	}
+	if preserve && createDelivered(created) {
+		// The requester's routed start delivered the config here: record
+		// the marker on the stored row (only the marker), so the next
+		// start is plain.
+		persistConfigDelivered(ctx, s.store, s.agentLifecycleLog, agent)
 	}
 	cr := CreateWithGatherResult{EnvRequirements: created.EnvRequirements(), Launch: created.AcceptedLaunch(), Warnings: warns.Warnings()}
 	result, err := json.Marshal(cr)
