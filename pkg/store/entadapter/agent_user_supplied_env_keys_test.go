@@ -53,12 +53,14 @@ func TestAgentStore_AddAgentUserSuppliedEnvKeys(t *testing.T) {
 
 	t.Run("adds only names, as a sorted union", func(t *testing.T) {
 		a := create(t, "names-union")
-		names, _, err := s.AddAgentUserSuppliedEnvKeys(ctx, a.ID, []string{"FAKE_KEY_B"})
+		names, written, err := s.AddAgentUserSuppliedEnvKeys(ctx, a.ID, []string{"FAKE_KEY_B"})
 		require.NoError(t, err)
 		assert.Equal(t, []string{"FAKE_KEY_B"}, names)
-		names, _, err = s.AddAgentUserSuppliedEnvKeys(ctx, a.ID, []string{"FAKE_KEY_A"})
+		assert.True(t, written)
+		names, written, err = s.AddAgentUserSuppliedEnvKeys(ctx, a.ID, []string{"FAKE_KEY_A"})
 		require.NoError(t, err)
 		assert.Equal(t, []string{"FAKE_KEY_A", "FAKE_KEY_B"}, names)
+		assert.True(t, written)
 		got, err := s.GetAgent(ctx, a.ID)
 		require.NoError(t, err)
 		assert.Equal(t, []string{"FAKE_KEY_A", "FAKE_KEY_B"}, got.AppliedConfig.UserSuppliedEnvKeys)
@@ -74,18 +76,21 @@ func TestAgentStore_AddAgentUserSuppliedEnvKeys(t *testing.T) {
 		calls := 0
 		addUserSuppliedEnvKeysHook = func(context.Context, *ent.Tx, uuid.UUID) { calls++ }
 		defer func() { addUserSuppliedEnvKeysHook = nil }()
-		names, _, err := s.AddAgentUserSuppliedEnvKeys(ctx, a.ID, []string{"FAKE_KEY"})
+		names, written, err := s.AddAgentUserSuppliedEnvKeys(ctx, a.ID, []string{"FAKE_KEY"})
 		require.NoError(t, err)
 		assert.Equal(t, []string{"FAKE_KEY"}, names)
-		names, _, err = s.AddAgentUserSuppliedEnvKeys(ctx, a.ID, nil)
+		assert.False(t, written, "the same names: no write")
+		names, written, err = s.AddAgentUserSuppliedEnvKeys(ctx, a.ID, nil)
 		require.NoError(t, err)
 		assert.Equal(t, []string{"FAKE_KEY"}, names, "nothing to add keeps the stored names")
+		assert.False(t, written, "no names: no write")
 		assert.Zero(t, calls, "no write attempted")
 	})
 	t.Run("a missing agent writes nothing", func(t *testing.T) {
-		names, _, err := s.AddAgentUserSuppliedEnvKeys(ctx, uuid.NewString(), []string{"FAKE_KEY"})
+		names, written, err := s.AddAgentUserSuppliedEnvKeys(ctx, uuid.NewString(), []string{"FAKE_KEY"})
 		require.NoError(t, err)
 		assert.Nil(t, names)
+		assert.False(t, written)
 	})
 	t.Run("a config changed after the read is retried, the union recomputed", func(t *testing.T) {
 		a := create(t, "names-retry")

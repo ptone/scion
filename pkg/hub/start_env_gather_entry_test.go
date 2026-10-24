@@ -596,17 +596,28 @@ func TestStartGather_OneBrokerRecordReadPerDispatchChain(t *testing.T) {
 		answer  func(int, gatherStartCall) (*RemoteAgentResponse, error)
 		run     func(f *runDispatchFixture) error
 		wantErr error
+		noEntry bool // the agent has no as-needed entries
 	}{
 		{"capable start with needs and replay", true, replayDelivers(failClosedKey),
 			func(f *runDispatchFixture) error {
 				return f.d.DispatchAgentStart(context.Background(), f.agent, "", false)
-			}, nil},
+			}, nil, false},
 		{"broker restart (refused: as-needed entries, design r17 L-1)", true, plainStarted,
-			func(f *runDispatchFixture) error { return f.d.DispatchAgentRestart(context.Background(), f.agent) }, errRestartGatherPending},
+			func(f *runDispatchFixture) error { return f.d.DispatchAgentRestart(context.Background(), f.agent) }, errRestartGatherPending, false},
+		{"broker restart sent (no as-needed entries)", true, plainStarted,
+			func(f *runDispatchFixture) error {
+				if err := f.d.DispatchAgentRestart(context.Background(), f.agent); err != nil {
+					return err
+				}
+				if !f.client.restartCalled {
+					return errors.New("the restart was not sent")
+				}
+				return nil
+			}, nil, true},
 		{"old broker 412", false, plainStarted,
 			func(f *runDispatchFixture) error {
 				return f.d.DispatchAgentStart(context.Background(), f.agent, "", true)
-			}, errBrokerLacksStartEnvGather},
+			}, errBrokerLacksStartEnvGather, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -614,7 +625,9 @@ func TestStartGather_OneBrokerRecordReadPerDispatchChain(t *testing.T) {
 			f, _ := newGatherStartFixture(t, tc.capable, tc.answer, func(s store.Store) store.Store {
 				return countBrokerReadsStore{Store: s, reads: reads}
 			})
-			seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
+			if !tc.noEntry {
+				seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
+			}
 			err := tc.run(f)
 			if tc.wantErr != nil {
 				require.ErrorIs(t, err, tc.wantErr)
