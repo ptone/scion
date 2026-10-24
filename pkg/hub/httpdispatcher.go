@@ -1919,9 +1919,13 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 // that as_needed env vars (e.g. GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_REGION) are
 // resolved before auth provisioning runs on the broker.
 //
-// A secret resolution error does not fail a provision: it is logged and the
-// agent is provisioned without injected secrets. The broker's provision does
-// not read them, and a later start resolves them again and fails there.
+// A secret resolution error in the first pass does not fail a provision: it
+// is logged and the agent is provisioned without injected always-mode
+// secrets, which the broker's provision does not read and every start
+// resolves again (failing closed there). A resolution error in the as-needed
+// pass, after the broker reports needed keys, does fail the provision with a
+// *secretResolutionError: a start does not resolve as-needed keys
+// (ptone/scion#5959).
 func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent *store.Agent) error {
 	return d.dispatchProvision(ctx, agent, "DispatchAgentProvision", false, "", "")
 }
@@ -1934,10 +1938,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent 
 // calling this — buildCreateRequest below reads directly from it, the same
 // way it does for a brand new agent.
 //
-// A secret resolution error does not fail a reprovision: it is logged and
-// the config is re-rendered without injected secrets. The reprovision does
-// not read them, and the reincarnate worker's start leg (DispatchAgentStart)
-// resolves them again and fails closed there.
+// As for DispatchAgentProvision, a first-pass secret resolution error does
+// not fail a reprovision (the reincarnate worker's start leg resolves the
+// always-mode secrets again and fails closed there), but an as-needed pass
+// resolution error does, with a *secretResolutionError whose verb is
+// "reprovisioned" (ptone/scion#5959).
 //
 // Unlike DispatchAgentProvision, this always sets Reprovision on the wire
 // request, which tells the broker to overwrite the persisted config rather
