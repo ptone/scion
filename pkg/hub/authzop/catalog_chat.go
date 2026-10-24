@@ -131,7 +131,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.thread.create",
 		Domain:      "chat",
-		Description: "Create a thread in a chat space. Needs project:read on the space's project; a token also needs inbox:write for it",
+		Description: "Create a thread in a chat space. Order: project:read on the space's project, then (for a token) inbox:write for it (plain 403), then, before the body is validated and before any write, a default agent on create needs the set_default_agent action of chat-thread-access and the thread needs the create_thread action of chat-space-access (both project.chat_post on the account; 403 chat_post_denied with details.chat_action and reason read_only without it)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/spaces/{id}/threads", Method: "POST"},
 		},
@@ -145,6 +145,8 @@ var chatOperations = []OperationSpec{
 		DenialCodes:      []DenialCode{DenialForbidden, DenialResourceNotFound},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestChatWriteToken_RequiresInboxWrite"},
+			{Package: "pkg/hub", Function: "TestChatCreateThread_RequiresCreateThreadAction"},
+			{Package: "pkg/hub", Function: "TestChatCreateThread_DefaultAgentNeedsSetDefaultAgent"},
 		},
 		Bearer: AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
 	},

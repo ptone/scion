@@ -158,8 +158,9 @@ func chatSendPostDenied(reason string) *chatSendError {
 		"You can read this thread but not post in it", details)
 }
 
-// chatActionDenied is the refusal for a caller who may read a thread but
-// may not take action in it (chatThreadAccess): 403 chat_post_denied, the
+// chatActionDenied is the refusal for a caller who may read a thread (or a
+// chat space) but may not take action in it (chatThreadAccess,
+// chatSpaceAccess): 403 chat_post_denied, the
 // shape of chatSendPostDenied, with the refused action in
 // details.chat_action and the resolver's reason. Every thread write needs
 // project.chat_post, so on the routes that use it the reason is read_only:
@@ -175,8 +176,11 @@ func chatActionDenied(action, reason string) *chatSendError {
 	if reason != "" {
 		details["reason"] = reason
 	}
-	return newChatSendError(http.StatusForbidden, ErrCodeChatPostDenied,
-		"You can read this thread but not change it", details)
+	message := "You can read this thread but not change it"
+	if action == ChatActionCreateThread || action == ChatActionCreateGroup {
+		message = "You can read this project's chat but not create threads or groups in it"
+	}
+	return newChatSendError(http.StatusForbidden, ErrCodeChatPostDenied, message, details)
 }
 
 // requireChatThreadAction decides with chatThreadAccess whether user may
@@ -202,6 +206,31 @@ func (s *Server) requireChatThreadAction(w http.ResponseWriter, r *http.Request,
 	for _, action := range actions {
 		if !access.Can(action) {
 			logAuthzDenial(r, user, projectResource(thread.Project), ActionChatPost, access.postDenial.Reason)
+			chatActionDenied(action, access.Reason).write(w)
+			return false
+		}
+	}
+	return true
+}
+
+// requireChatSpaceAction decides with chatSpaceAccess whether user may
+// take every one of actions in project's chat space (create_thread,
+// create_group), and writes the refusal when not: a caller who may not read
+// the project gets 404 notFound (the reason is logged), one who may read it
+// but not take an action 403 chat_post_denied naming the action. Callers run
+// it before any write or event. The routes that use it refuse a user access
+// token without inbox:write for the project with their own token check
+// first, so the reason here is read_only.
+func (s *Server) requireChatSpaceAction(w http.ResponseWriter, r *http.Request, user UserIdentity, project *store.Project, notFound string, actions ...string) bool {
+	access := s.chatSpaceAccess(r.Context(), user, project)
+	if !access.Can(ChatActionRead) {
+		logAuthzDenial(r, user, projectResource(project), ActionRead, access.readDenial.Reason)
+		NotFound(w, notFound)
+		return false
+	}
+	for _, action := range actions {
+		if !access.Can(action) {
+			logAuthzDenial(r, user, projectResource(project), ActionChatPost, access.postDenial.Reason)
 			chatActionDenied(action, access.Reason).write(w)
 			return false
 		}

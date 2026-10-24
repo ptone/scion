@@ -709,6 +709,21 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request, proj
 		return
 	}
 
+	// What the caller may do: a default agent on create needs
+	// set_default_agent in a thread of the space (chatThreadAccess), decided
+	// first, so a caller who could not set it afterwards cannot set it here;
+	// creating the thread is the space's create_thread action
+	// (chatSpaceAccess). Both are decided after the token checks above and
+	// before the body is validated, so a refused caller learns nothing about
+	// names or agents and nothing is written.
+	if strings.TrimSpace(body.DefaultAgent) != "" &&
+		!s.requireChatThreadAction(w, r, user, chatThreadRef{Project: project}, "Project", ChatActionSetDefaultAgent) {
+		return
+	}
+	if !s.requireChatSpaceAction(w, r, user, project, "Project", ChatActionCreateThread) {
+		return
+	}
+
 	validatedName, err := validateThreadName(body.Name)
 	if err != nil {
 		ValidationError(w, err.Error(), nil)

@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -353,4 +354,125 @@ func TestChatMessageDelete_SenderWithoutProjectRead_NotFound(t *testing.T) {
 	rec = f.session(t, f.member, http.MethodDelete, chatConversationPath(gone, "messages/"+memberMsg), nil)
 	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 	assert.Equal(t, "in a deleted thread", content(memberMsg))
+}
+
+// assertPlainTokenForbidden checks a token refusal from a route's own token
+// check: 403 forbidden, not the resolver's chat_post_denied.
+func assertPlainTokenForbidden(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Equal(t, ErrCodeForbidden, errorCode(t, rec), "the route's token check answers first, not the resolver")
+}
+
+// topicCount counts the live threads of a project's chat space (a group
+// conversation mints one too).
+func (f *chatFixture) topicCount(t *testing.T, projectID string) int {
+	t.Helper()
+	topics, err := f.wcs.ListTopics(context.Background(), projectID)
+	require.NoError(t, err)
+	return len(topics)
+}
+
+// TestChatCreateThread_RequiresCreateThreadAction: creating a thread is the
+// space's create_thread action. A viewer is refused with 403
+// chat_post_denied naming create_thread and no thread is created; a token
+// without inbox:write is refused; a member and an owner create threads.
+func TestChatCreateThread_RequiresCreateThreadAction(t *testing.T) {
+	f := newChatFixture(t)
+	viewer := f.chatViewer(t, f.projA)
+	path := "/api/v1/chat/spaces/" + f.projA + "/threads"
+	before := f.topicCount(t, f.projA)
+
+	assertChatActionDenied(t, f.session(t, viewer, http.MethodPost, path, map[string]string{"name": "viewer-thread"}), ChatActionCreateThread)
+	assert.Equal(t, before, f.topicCount(t, f.projA), "a refused create writes no thread")
+
+	readOnly := f.mint(t, f.member, projectBoundary(f.projA), "project:read")
+	assertPlainTokenForbidden(t, f.call(t, readOnly, http.MethodPost, path, map[string]string{"name": "token-thread"}))
+	assert.Equal(t, before, f.topicCount(t, f.projA))
+	// The token check runs before the space decision: a viewer's token
+	// without inbox:write gets the plain forbidden, not chat_post_denied.
+	viewerReadOnly := f.mint(t, viewer, projectBoundary(f.projA), "project:read")
+	assertPlainTokenForbidden(t, f.call(t, viewerReadOnly, http.MethodPost, path, map[string]string{"name": "viewer-ro-thread"}))
+	assert.Equal(t, before, f.topicCount(t, f.projA))
+
+	// A viewer's token with inbox:write passes the token checks and is
+	// refused by the space decision.
+	viewerToken := f.mint(t, viewer, projectBoundary(f.projA), "project:read", "inbox:write")
+	assertChatActionDenied(t, f.call(t, viewerToken, http.MethodPost, path, map[string]string{"name": "viewer-token-thread"}), ChatActionCreateThread)
+	assert.Equal(t, before, f.topicCount(t, f.projA))
+
+	rec := f.session(t, f.member, http.MethodPost, path, map[string]string{"name": "member-thread"})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	rec = f.session(t, f.owner, http.MethodPost, path, map[string]string{"name": "owner-thread"})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	assert.Equal(t, before+2, f.topicCount(t, f.projA))
+}
+
+// TestChatCreateThread_DefaultAgentNeedsSetDefaultAgent: a default agent on
+// create is decided as set_default_agent, before create_thread, so a caller
+// who could not set it afterwards is refused naming set_default_agent and no
+// thread is created. A member creates a thread with a default agent.
+func TestChatCreateThread_DefaultAgentNeedsSetDefaultAgent(t *testing.T) {
+	f := newChatFixture(t)
+	viewer := f.chatViewer(t, f.projA)
+	path := "/api/v1/chat/spaces/" + f.projA + "/threads"
+	before := f.topicCount(t, f.projA)
+
+	rec := f.session(t, viewer, http.MethodPost, path, map[string]string{"name": "viewer-da", "defaultAgent": f.agentA.Slug})
+	assertChatActionDenied(t, rec, ChatActionSetDefaultAgent)
+	assert.Equal(t, before, f.topicCount(t, f.projA), "a refused create writes no thread")
+
+	// Decided before validation: an unknown agent gives the viewer the
+	// same refusal, not a validation error that would reveal the agent
+	// does not exist.
+	rec = f.session(t, viewer, http.MethodPost, path, map[string]string{"name": "viewer-da-unknown", "defaultAgent": "no-such-agent"})
+	assertChatActionDenied(t, rec, ChatActionSetDefaultAgent)
+	assert.Equal(t, before, f.topicCount(t, f.projA))
+
+	rec = f.session(t, f.member, http.MethodPost, path, map[string]string{"name": "member-da", "defaultAgent": f.agentA.Slug})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var created WebChatTopic
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+	_, da, ok := f.topicState(t, created.ID)
+	require.True(t, ok)
+	assert.Equal(t, f.agentA.Slug, da)
+}
+
+// TestChatCreateConversation_RequiresCreateGroupAction: creating a group
+// conversation is the space's create_group action. A viewer is refused with
+// 403 chat_post_denied naming create_group and nothing is minted (no
+// conversation thread); a token without inbox:write is refused; a member
+// and an owner create groups.
+func TestChatCreateConversation_RequiresCreateGroupAction(t *testing.T) {
+	f := newChatFixture(t)
+	viewer := f.chatViewer(t, f.projA)
+	path := "/api/v1/conversations"
+	body := func(name string) map[string]string {
+		return map[string]string{"displayName": name, "projectId": f.projA}
+	}
+	before := f.topicCount(t, f.projA)
+
+	assertChatActionDenied(t, f.session(t, viewer, http.MethodPost, path, body("viewer-group")), ChatActionCreateGroup)
+	assert.Equal(t, before, f.topicCount(t, f.projA), "a refused create mints nothing")
+
+	readOnly := f.mint(t, f.member, projectBoundary(f.projA), "project:read")
+	assertPlainTokenForbidden(t, f.call(t, readOnly, http.MethodPost, path, body("token-group")))
+	assert.Equal(t, before, f.topicCount(t, f.projA))
+	// The token check runs before the space decision: a viewer's token
+	// without inbox:write gets the plain forbidden, not chat_post_denied.
+	viewerReadOnly := f.mint(t, viewer, projectBoundary(f.projA), "project:read")
+	assertPlainTokenForbidden(t, f.call(t, viewerReadOnly, http.MethodPost, path, body("viewer-ro-group")))
+	assert.Equal(t, before, f.topicCount(t, f.projA))
+
+	// A viewer's token with inbox:write passes the token checks and is
+	// refused by the space decision.
+	viewerToken := f.mint(t, viewer, projectBoundary(f.projA), "project:read", "inbox:write")
+	assertChatActionDenied(t, f.call(t, viewerToken, http.MethodPost, path, body("viewer-token-group")), ChatActionCreateGroup)
+	assert.Equal(t, before, f.topicCount(t, f.projA))
+
+	rec := f.session(t, f.member, http.MethodPost, path, body("member-group"))
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	rec = f.session(t, f.owner, http.MethodPost, path, body("owner-group"))
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	assert.Equal(t, before+2, f.topicCount(t, f.projA))
 }

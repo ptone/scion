@@ -119,7 +119,7 @@
 - [inbox.channels.list](#inboxchannelslist) — List the registered message channels: static capability metadata with no records
 - [inbox.capabilities.read](#inboxcapabilitiesread) — Read the hub messaging capabilities: static capability metadata with no records
 - [inbox.conversation.list](#inboxconversationlist) — List the caller's conversations. A group conversation is listed only while the caller can read it (project:read on its project, or the participant rule for a group with no project; a token is checked as its user); a participant row alone does not list it. A token lists only conversations inside its boundary, and a direct conversation with an agent only with agent:read on that agent; the project group union also needs project:read
-- [inbox.conversation.create](#inboxconversationcreate) — Create a group conversation in a project. Needs project:read on the project; a token also needs inbox:write for it
+- [inbox.conversation.create](#inboxconversationcreate) — Create a group conversation in a project. Order: project:read on the project, then (for a token) inbox:write for it, then for a user the create_group action of chat-space-access (project.chat_post on the account; 403 chat_post_denied with details.chat_action create_group and reason read_only without it), all before anything is minted. Agents are not decided by chat-space-access; their message-mode join check follows
 - [project.conversation.read](#projectconversationread) — Read a group conversation, its messages and one message. Needs project:read on the conversation's project; a group with no project needs participation, and a token needs inbox:read on a hub boundary for it
 - [inbox.conversation.direct.read](#inboxconversationdirectread) — Read a direct conversation, its messages and one message. A token needs inbox:read for the peer agent's project and agent:read on the peer agent; a direct conversation between users needs a hub boundary
 - [inbox.conversation.defaultagent.set](#inboxconversationdefaultagentset) — Set the default agent of a group conversation. Needs project:read on the conversation's project; a token also needs inbox:write for it. A user on a project conversation then needs the set_default_agent action of chat-thread-access (project.chat_post on the account; 403 chat_post_denied with details.chat_action set_default_agent and reason read_only without it), decided before the body is read; agents and groups with no project are not decided by it
@@ -147,7 +147,7 @@
 - [chat.space.list](#chatspacelist) — List the chat spaces: the projects the caller can read. A project token lists only its boundary project; the caller's rail preferences need inbox:read on a hub boundary
 - [chat.unreadcount.read](#chatunreadcountread) — Count the caller's conversations with unread messages. A token needs inbox:read; threads count only in projects it can read and DMs only where the DM rule passes
 - [chat.thread.list](#chatthreadlist) — List the threads of a chat space. Needs project:read on the space's project; each thread carries _capabilities, what the caller may do in it (chat-thread-access)
-- [chat.thread.create](#chatthreadcreate) — Create a thread in a chat space. Needs project:read on the space's project; a token also needs inbox:write for it
+- [chat.thread.create](#chatthreadcreate) — Create a thread in a chat space. Order: project:read on the space's project, then (for a token) inbox:write for it (plain 403), then, before the body is validated and before any write, a default agent on create needs the set_default_agent action of chat-thread-access and the thread needs the create_thread action of chat-space-access (both project.chat_post on the account; 403 chat_post_denied with details.chat_action and reason read_only without it)
 - [chat.space.members.read](#chatspacemembersread) — List the members of a chat space. Needs project:read on the space's project; agent rows also need the agent list scope
 - [chat.space.markread](#chatspacemarkread) — Mark every thread of a chat space read for the caller. Needs project:read on the space's project; a token also needs inbox:write for it
 - [chat.space.emoji.update](#chatspaceemojiupdate) — Set or clear the emoji of a chat space. Needs project:update on the space's project
@@ -4799,7 +4799,7 @@
 
 **Domain:** inbox
 
-**Description:** Create a group conversation in a project. Needs project:read on the project; a token also needs inbox:write for it
+**Description:** Create a group conversation in a project. Order: project:read on the project, then (for a token) inbox:write for it, then for a user the create_group action of chat-space-access (project.chat_post on the account; 403 chat_post_denied with details.chat_action create_group and reason read_only without it), all before anything is minted. Agents are not decided by chat-space-access; their message-mode join check follows
 
 ### Entry Points
 
@@ -4825,6 +4825,7 @@
 ### Tests
 
 - `pkg/hub:TestConversationCreateToken_RequiresInboxWriteAndProjectRead`
+- `pkg/hub:TestChatCreateConversation_RequiresCreateGroupAction`
 
 ---
 
@@ -5741,7 +5742,7 @@
 
 **Domain:** chat
 
-**Description:** Create a thread in a chat space. Needs project:read on the space's project; a token also needs inbox:write for it
+**Description:** Create a thread in a chat space. Order: project:read on the space's project, then (for a token) inbox:write for it (plain 403), then, before the body is validated and before any write, a default agent on create needs the set_default_agent action of chat-thread-access and the thread needs the create_thread action of chat-space-access (both project.chat_post on the account; 403 chat_post_denied with details.chat_action and reason read_only without it)
 
 ### Entry Points
 
@@ -5766,6 +5767,8 @@
 ### Tests
 
 - `pkg/hub:TestChatWriteToken_RequiresInboxWrite`
+- `pkg/hub:TestChatCreateThread_RequiresCreateThreadAction`
+- `pkg/hub:TestChatCreateThread_DefaultAgentNeedsSetDefaultAgent`
 
 ---
 
