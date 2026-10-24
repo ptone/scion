@@ -712,7 +712,7 @@ func TestResumeFill_FailedStartKeepsFill(t *testing.T) {
 }
 
 // ============================================================================
-// ptone/scion#5770 slice 1b: reincarnate and move keep a user-scoped
+// ptone/scion#5770: reincarnate and move keep a user-scoped
 // TemplateID that still exists, authorized for the agent's creator, and
 // refuse (409 template_unavailable) rather than silently swap it for a
 // same-named project or global template. Global and project TemplateIDs,
@@ -1014,7 +1014,7 @@ func TestReincarnate_TemplateStoreError_FailsWithoutSwap(t *testing.T) {
 	assert.Zero(t, disp.reprovisionCalls)
 }
 
-// ptone/scion#5770 slice 2: the dispatchBoundCatalogRead capability, and the
+// ptone/scion#5770: the dispatchBoundCatalogRead capability, and the
 // 412 for a user-scoped template on a broker known to lack it.
 
 func TestCapabilitiesFromStrings_DispatchBoundCatalogRead(t *testing.T) {
