@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -52,10 +53,10 @@ func TestAgentStore_AddAgentUserSuppliedEnvKeys(t *testing.T) {
 
 	t.Run("adds only names, as a sorted union", func(t *testing.T) {
 		a := create(t, "names-union")
-		names, err := s.AddAgentUserSuppliedEnvKeys(ctx, a.ID, []string{"FAKE_KEY_B"})
+		names, _, err := s.AddAgentUserSuppliedEnvKeys(ctx, a.ID, []string{"FAKE_KEY_B"})
 		require.NoError(t, err)
 		assert.Equal(t, []string{"FAKE_KEY_B"}, names)
-		names, err = s.AddAgentUserSuppliedEnvKeys(ctx, a.ID, []string{"FAKE_KEY_A"})
+		names, _, err = s.AddAgentUserSuppliedEnvKeys(ctx, a.ID, []string{"FAKE_KEY_A"})
 		require.NoError(t, err)
 		assert.Equal(t, []string{"FAKE_KEY_A", "FAKE_KEY_B"}, names)
 		got, err := s.GetAgent(ctx, a.ID)
@@ -68,27 +69,27 @@ func TestAgentStore_AddAgentUserSuppliedEnvKeys(t *testing.T) {
 	})
 	t.Run("the same or no names write nothing", func(t *testing.T) {
 		a := create(t, "names-same")
-		_, err := s.AddAgentUserSuppliedEnvKeys(ctx, a.ID, []string{"FAKE_KEY"})
+		_, _, err := s.AddAgentUserSuppliedEnvKeys(ctx, a.ID, []string{"FAKE_KEY"})
 		require.NoError(t, err)
 		calls := 0
 		addUserSuppliedEnvKeysHook = func(context.Context, *ent.Tx, uuid.UUID) { calls++ }
 		defer func() { addUserSuppliedEnvKeysHook = nil }()
-		names, err := s.AddAgentUserSuppliedEnvKeys(ctx, a.ID, []string{"FAKE_KEY"})
+		names, _, err := s.AddAgentUserSuppliedEnvKeys(ctx, a.ID, []string{"FAKE_KEY"})
 		require.NoError(t, err)
 		assert.Equal(t, []string{"FAKE_KEY"}, names)
-		names, err = s.AddAgentUserSuppliedEnvKeys(ctx, a.ID, nil)
+		names, _, err = s.AddAgentUserSuppliedEnvKeys(ctx, a.ID, nil)
 		require.NoError(t, err)
 		assert.Equal(t, []string{"FAKE_KEY"}, names, "nothing to add keeps the stored names")
 		assert.Zero(t, calls, "no write attempted")
 	})
 	t.Run("a missing agent writes nothing", func(t *testing.T) {
-		names, err := s.AddAgentUserSuppliedEnvKeys(ctx, uuid.NewString(), []string{"FAKE_KEY"})
+		names, _, err := s.AddAgentUserSuppliedEnvKeys(ctx, uuid.NewString(), []string{"FAKE_KEY"})
 		require.NoError(t, err)
 		assert.Nil(t, names)
 	})
 	t.Run("a config changed after the read is retried, the union recomputed", func(t *testing.T) {
 		a := create(t, "names-retry")
-		_, err := s.AddAgentUserSuppliedEnvKeys(ctx, a.ID, []string{"FAKE_EARLIER_KEY"})
+		_, _, err := s.AddAgentUserSuppliedEnvKeys(ctx, a.ID, []string{"FAKE_EARLIER_KEY"})
 		require.NoError(t, err)
 		calls := 0
 		addUserSuppliedEnvKeysHook = func(ctx context.Context, tx *ent.Tx, id uuid.UUID) {
@@ -99,7 +100,7 @@ func TestAgentStore_AddAgentUserSuppliedEnvKeys(t *testing.T) {
 			}
 		}
 		defer func() { addUserSuppliedEnvKeysHook = nil }()
-		names, err := s.AddAgentUserSuppliedEnvKeys(ctx, a.ID, []string{"FAKE_MY_KEY"})
+		names, _, err := s.AddAgentUserSuppliedEnvKeys(ctx, a.ID, []string{"FAKE_MY_KEY"})
 		require.NoError(t, err)
 		assert.Equal(t, 2, calls, "the miss is retried once")
 		assert.Equal(t, []string{"FAKE_EARLIER_KEY", "FAKE_MY_KEY"}, names, "the retry re-read the stored names")
@@ -131,7 +132,7 @@ func TestAgentStore_WholeRowWritesKeepUserSuppliedEnvKeys(t *testing.T) {
 		require.NoError(t, s.CreateAgent(ctx, a))
 		got, err := s.GetAgent(ctx, a.ID)
 		require.NoError(t, err)
-		_, err = s.AddAgentUserSuppliedEnvKeys(ctx, a.ID, []string{"FAKE_ADDED_KEY"})
+		_, _, err = s.AddAgentUserSuppliedEnvKeys(ctx, a.ID, []string{"FAKE_ADDED_KEY"})
 		require.NoError(t, err)
 		return got
 	}
@@ -216,6 +217,19 @@ func TestAgentStore_WholeRowWritesKeepUserSuppliedEnvKeys(t *testing.T) {
 			assert.Equal(t, []string{"FAKE_ADDED_KEY", "FAKE_LATE_KEY", "FAKE_OWN_KEY"}, stored(t, a.ID).UserSuppliedEnvKeys)
 		})
 	}
+	t.Run("an applied config that keeps changing is a version conflict", func(t *testing.T) {
+		a := staleCopy(t, "keep-churn")
+		calls := 0
+		keepUserSuppliedKeysHook = func(ctx context.Context, client *ent.Client, id uuid.UUID) {
+			calls++
+			require.NoError(t, client.Agent.UpdateOneID(id).
+				SetAppliedConfig(fmt.Sprintf(`{"image":"example/image:%d","userSuppliedEnvKeys":["FAKE_ADDED_KEY"]}`, calls)).
+				Exec(ctx))
+		}
+		defer func() { keepUserSuppliedKeysHook = nil }()
+		assert.ErrorIs(t, s.UpdateAgent(ctx, a), store.ErrVersionConflict)
+		assert.Equal(t, configDeliveredAttempts, calls, "bounded retries")
+	})
 	t.Run("configDelivered is written as given", func(t *testing.T) {
 		a := staleCopy(t, "keep-delivered")
 		written, err := s.SetAgentConfigDelivered(ctx, a.ID)
