@@ -2234,6 +2234,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ResolvesEnvFromStorage(t *testin
 		},
 	}
 
+	grantLaunchDelivery(t, memStore, dispatcher, agent)
 	err := dispatcher.DispatchAgentStart(ctx, agent, "", false)
 	if err != nil {
 		t.Fatalf("DispatchAgentStart failed: %v", err)
@@ -2316,6 +2317,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ConfigEnvTakesPrecedence(t *test
 		},
 	}
 
+	grantLaunchDelivery(t, memStore, dispatcher, agent)
 	err := dispatcher.DispatchAgentStart(ctx, agent, "", false)
 	if err != nil {
 		t.Fatalf("DispatchAgentStart failed: %v", err)
@@ -2384,6 +2386,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_StorageOverridesEmptyConfigEnv(t
 		},
 	}
 
+	grantLaunchDelivery(t, memStore, dispatcher, agent)
 	err := dispatcher.DispatchAgentStart(ctx, agent, "", false)
 	if err != nil {
 		t.Fatalf("DispatchAgentStart failed: %v", err)

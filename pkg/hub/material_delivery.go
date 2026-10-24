@@ -144,8 +144,9 @@ func envVarDeliveryKind(v store.EnvVar) MaterialKind {
 // paths, with every project-, hub- and broker-scope row authorized under
 // the delivery credential before it is used. The scopes, their order, the
 // as_needed and reserved-target skips, the progeny pass and the error
-// contract are resolveEnvFromStorage's. A credential that cannot be minted
-// is an error, like a store read error.
+// contract are resolveEnvFromStorage's; TZ rows, which buildStartEnv
+// discards, are skipped. A credential that cannot be minted is an error,
+// like a store read error.
 func (d *HTTPAgentDispatcher) selectDeliveryEnv(ctx context.Context, sel *deliverySelector, agent *store.Agent) (map[string]string, map[string]bool, error) {
 	result := make(map[string]string)
 	plain := make(map[string]bool)
@@ -163,6 +164,12 @@ func (d *HTTPAgentDispatcher) selectDeliveryEnv(ctx context.Context, sel *delive
 				continue
 			}
 			if secret.IsReservedEnvTarget(v.Key) {
+				continue
+			}
+			// The agent TZ resolver owns TZ: buildStartEnv never takes it
+			// from stored env, so a TZ row is neither authorized nor
+			// returned.
+			if v.Key == agentTZEnvKey {
 				continue
 			}
 			if filter.Scope != store.ScopeUser {
@@ -186,7 +193,7 @@ func (d *HTTPAgentDispatcher) selectDeliveryEnv(ctx context.Context, sel *delive
 			return nil, nil, fmt.Errorf("list progeny env vars: %w", err)
 		}
 		for _, v := range progenyVars {
-			if secret.IsReservedEnvTarget(v.Key) {
+			if secret.IsReservedEnvTarget(v.Key) || v.Key == agentTZEnvKey {
 				continue
 			}
 			if _, exists := result[v.Key]; exists {
