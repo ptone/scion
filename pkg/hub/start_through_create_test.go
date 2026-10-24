@@ -249,8 +249,11 @@ func TestDispatchAgentRestart_NotRouted(t *testing.T) {
 		neverStarted(f)
 		seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
 		grantPreserveWorkspaceCreate(t, f.store, f.agent.RuntimeBrokerID)
-		require.NoError(t, f.d.DispatchAgentRestart(context.Background(), f.agent))
-		assert.True(t, f.client.restartCalled)
+		// Not routed; on a broker without startEnvGather an agent with
+		// as-needed entries is refused with 412, nothing sent
+		// (ptone/scion#6101).
+		require.ErrorIs(t, f.d.DispatchAgentRestart(context.Background(), f.agent), errBrokerLacksStartEnvGather)
+		assert.False(t, f.client.restartCalled)
 		assert.False(t, f.client.createCalled)
 	})
 	// A restart's start leg is not routed either; on a broker without

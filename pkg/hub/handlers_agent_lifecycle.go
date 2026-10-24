@@ -992,9 +992,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// (ptone/scion#6101).
 			if pc, ok := dispatcher.(restartEnvGatherPrechecker); ok {
 				if err := pc.RestartEnvGatherPrecheck(ctx, agent); err != nil {
-					if !writeSecretResolutionError(w, err) && !writeStartEnvGatherError(w, err, api.AgentActionRestart) {
-						writeErrorFromErr(w, err, "")
-					}
+					s.writeRestartPrecheckError(ctx, w, agent, err)
 					return
 				}
 			}
@@ -1902,4 +1900,27 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 		Scope:        scope,
 		Results:      results,
 	})
+}
+
+// writeRestartPrecheckError answers a lifecycle restart refused by its
+// pre-check (RestartEnvGatherPrecheck) before the stop leg: the start leg's
+// dispatch guards (a launch, a runtime target refusal, standing), the
+// stored-env or secret read error, or the env-gather capability refusal,
+// each as the start leg's own failure would be answered (ptone/scion#6101).
+func (s *Server) writeRestartPrecheckError(ctx context.Context, w http.ResponseWriter, agent *store.Agent, err error) {
+	if refusal := s.launchRefusalFromError(ctx, agent.ID, err); refusal != nil {
+		if !refusal.InFlight {
+			refusal.write(w)
+			return
+		}
+		s.writeLaunchingAgent(ctx, w, agent, []string{launchRestartNotPerformedWarning})
+		return
+	}
+	switch {
+	case writeSecretResolutionError(w, err):
+	case writeStartEnvGatherError(w, err, api.AgentActionRestart):
+	case writeRuntimeTargetRefusal(w, err):
+	default:
+		writeErrorFromErr(w, err, "")
+	}
 }

@@ -30,7 +30,9 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 )
 
 // A start sent with gatherEnv runs create's env-gather preflight before it
@@ -186,6 +188,13 @@ func TestStartEnvGather_UnmetAuthKeyAnswersNeedsAndStartsNothing(t *testing.T) {
 	}
 	if g.mgr.StartCalls() != 0 {
 		t.Error("Start was called on a needs answer")
+	}
+	// Nothing is left behind: no name registration, no tracked start.
+	if keys := g.srv.launchRegistry.keys(); len(keys) != 0 {
+		t.Errorf("launch registrations left behind: %v", keys)
+	}
+	if keys := g.srv.startsInFlight.keys(); len(keys) != 0 {
+		t.Errorf("tracked starts left behind: %v", keys)
 	}
 }
 
@@ -516,5 +525,56 @@ func TestStaticCapabilities_ReportStartEnvGather(t *testing.T) {
 	}
 	if !found {
 		t.Error("StaticCapabilityNames lacks startEnvGather")
+	}
+}
+
+func TestStartEnvGather_ScoresHydratedTemplateWithoutHandingItToLaunch(t *testing.T) {
+	// Q-C: the preflight scores the hub template a start names (its bundled
+	// harness-config sets GOOGLE_CLOUD_PROJECT, so that key is not a need),
+	// but the hydration it did is not handed to launch as a template: an
+	// existing agent starts from its own state.
+	unsetHostGCPEnv(t)
+	hc := "harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n" + claudeAuthBlock
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude", hc, "schema_version: \"1\"\n")
+	stor, err := storage.NewLocal(storage.Config{Provider: storage.ProviderLocal, LocalPath: t.TempDir(), Bucket: "local"})
+	if err != nil {
+		t.Fatalf("NewLocal: %v", err)
+	}
+	hydratedDir := stor.ObjectFSPath(storage.TemplateStoragePath("", "global", "", "mytpl"))
+	writeHarnessConfigDirAt(t, filepath.Join(hydratedDir, "harness-configs", "claude"),
+		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\nenv:\n  GOOGLE_CLOUD_PROJECT: hydrated-proj\n"+claudeAuthBlock)
+	if err := os.WriteFile(filepath.Join(hydratedDir, "scion-agent.yaml"), []byte("harness_config: claude\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv.hubMu.Lock()
+	srv.hubConnections["hub-1"] = &HubConnection{
+		Name: "hub-1", IsColocated: true, LocalStorage: stor,
+		HubClient: &stubHubClient{templates: &stubTemplateService{
+			getFunc: func(ctx context.Context, ref string) (*hubclient.Template, error) {
+				return &hubclient.Template{ID: "tpl-uuid", Slug: "mytpl", Scope: "global"}, nil
+			},
+		}},
+		Hydrator: newTestHydrator(t),
+	}
+	srv.hubMu.Unlock()
+
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/agent-b13/start", nil)
+	r.Header.Set("X-Scion-Hub-Connection", "hub-1")
+	needs, pre, sce := srv.startEnvGather(context.Background(), r, startEnvGatherInputs{
+		Name: "agent-b13", ProjectPath: projectDir, TemplateName: "mytpl", TemplateID: "tpl-uuid", HarnessConfig: "claude",
+	})
+	if sce != nil {
+		t.Fatalf("hydration failed: %v", sce)
+	}
+	if needs == nil {
+		t.Fatal("want a needs answer (the region key stays unmet)")
+	}
+	for _, k := range needs.Needs {
+		if k == "GOOGLE_CLOUD_PROJECT" {
+			t.Errorf("the preflight did not score the hydrated template: needs=%v", needs.Needs)
+		}
+	}
+	if pre.TemplateDone || pre.TemplatePath != "" {
+		t.Errorf("the hydrated template was handed to launch: %+v", pre)
 	}
 }

@@ -22,6 +22,7 @@ import (
 	"sort"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -161,9 +162,14 @@ type restartEnvGatherPrechecker interface {
 }
 
 // RestartEnvGatherPrecheck is run by the lifecycle restart before its stop
-// leg, so a restart its start leg would refuse leaves the agent untouched:
-// the capability read error, or an old broker with as-needed entries.
+// leg, so a restart its start leg would refuse leaves the agent untouched.
+// It runs the start leg's checks in the same order: the dispatch guards
+// (startDispatchGuards), then the capability check (a read error or a
+// missing record, or an old broker with as-needed entries).
 func (d *HTTPAgentDispatcher) RestartEnvGatherPrecheck(ctx context.Context, agent *store.Agent) error {
+	if err := d.startDispatchGuards(ctx, agent, "lifecycle restart"); err != nil {
+		return err
+	}
 	return d.startEnvGatherRefusal(ctx, agent, "restarted")
 }
 
@@ -259,16 +265,18 @@ func (d *HTTPAgentDispatcher) checkEnvGatheredEcho(ctx context.Context, agent *s
 }
 
 // recordUserSuppliedEnvKeys records, in memory, the names of the env keys
-// a successful env finalize submitted (sorted, deduplicated, names only;
-// TZ, which the finalize drops, excluded), replacing any earlier list. The
-// caller's own write of the agent persists it, as for ConfigDelivered.
+// a successful env finalize delivered (sorted, deduplicated, names only),
+// replacing any earlier list: the keys of env after finalizeEnv's own
+// sanitizing, which drops reserved control-plane targets
+// (secret.IsReservedEnvTarget) and TZ. The caller's own write of the agent
+// persists it, as for ConfigDelivered.
 func recordUserSuppliedEnvKeys(agent *store.Agent, env map[string]string) {
 	if agent == nil {
 		return
 	}
 	keys := make([]string, 0, len(env))
 	for k := range env {
-		if k != "" && k != agentTZEnvKey {
+		if k != "" && k != agentTZEnvKey && !secret.IsReservedEnvTarget(k) {
 			keys = append(keys, k)
 		}
 	}
