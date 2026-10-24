@@ -370,7 +370,7 @@ In every scope the first match wins, and with no match the fetch is unauthentica
 
 Reimporting an existing template (`POST /api/v1/templates/{id}/reimport`) uses the same lookup order for the template's own scope: a project template's project credentials and App token, a global template's Hub credentials, and a user template's credentials only when you are that user. With a credential, the Hub requests the archive from `api.github.com` and sends the credential only there.
 
-Only GitHub folder URLs use a credential. Archive URLs (`.tar.gz`, `.tgz`, `.zip`, including `github.com/.../archive/...` links), rclone sources and other hosts are always fetched without one.
+Only GitHub folder URLs use a credential. Archive URLs (`.tar.gz`, `.tgz`, `.zip`, including `github.com/.../archive/...` links), `:gcs:` sources and other hosts are always fetched without one. See [Remote template sources](/local/templates/#remote-template-sources) for the accepted source forms.
 
 ### Injection Mode Behavior
 
