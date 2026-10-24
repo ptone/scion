@@ -262,6 +262,8 @@ func TestCredentialLinkInQueryRedacted(t *testing.T) {
 		"next=%2Fapi%2Fv1%2F%70ortview%2F" + tok + "&x=%zz",
 		"x=%&next=%2Fapi%2Fv1%2F%61rtifacts%2Fview%2F" + tok,
 		"next=%2Fapi%2Fv1%2F%70ortview%2F" + tok + ";x=%zz",
+		"next=/api/v1/attachment-deliveries/" + tok,
+		"next=%2Fapi%2Fv1%2Fattachment%2Ddeliveries%2F" + tok,
 	}
 	for _, q := range queries {
 		if got := RedactQuery(q); got != "REDACTED" {
@@ -343,6 +345,8 @@ func TestSubPath(t *testing.T) {
 		"/x/%70ortview/" + tok,
 		"/api/v1/artifacts/view/" + tok + "/i.html",
 		"/x/%zz/" + tok,
+		"/api/v1/attachment-deliveries/" + tok,
+		"/x/attachment%2Ddeliveries/" + tok,
 	} {
 		if got := SubPath(p); got != RedactedPath {
 			t.Errorf("SubPath(%q) = %q", p, got)

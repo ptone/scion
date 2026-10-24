@@ -104,6 +104,13 @@ func pathMentions(p, word string) bool {
 	return found || undecoded
 }
 
+// stillEncoded reports whether p, lowercased and percent-decoded up to
+// maxUnescapeRounds times, still holds a '%' when decoding stops.
+func stillEncoded(p string) bool {
+	_, undecoded := scanPath(p, "\x00")
+	return undecoded
+}
+
 // scanPath decodes p (lowercased) up to maxUnescapeRounds times. found
 // reports whether word appears at any step; undecoded whether a '%' is
 // left when decoding stops.
@@ -123,26 +130,34 @@ func scanPath(p, word string) (found, undecoded bool) {
 }
 
 // credentialQuery reports whether a raw query (or fragment) may carry an
-// artifact or port view URL: the same any-spelling rule as artifactPath
-// and portViewPath, applied to the whole query and to each key and value
+// artifact, port view or attachment delivery URL (mentionsCredentialRoute),
+// applied to the whole query and to each key and value
 // on its own ('&', ';' and '=' separate them), so a key or value that does
 // not decode (a match by pathMentions) cannot hide another.
 func credentialQuery(rawQuery string) bool {
-	if pathMentions(rawQuery, "artifacts") || pathMentions(rawQuery, "portview") {
+	if mentionsCredentialRoute(rawQuery) {
 		return true
 	}
 	for _, part := range strings.FieldsFunc(rawQuery, func(r rune) bool { return r == '&' || r == ';' || r == '=' }) {
-		if pathMentions(part, "artifacts") || pathMentions(part, "portview") {
+		if mentionsCredentialRoute(part) {
 			return true
 		}
 	}
 	return false
 }
 
+// mentionsCredentialRoute reports whether s may name a URL of a route that
+// carries a capability in its path: an artifact, port view or attachment
+// delivery URL (pathMentions for each route word).
+func mentionsCredentialRoute(s string) bool {
+	return pathMentions(s, "artifacts") || pathMentions(s, "portview") || pathMentions(s, "attachment-deliveries")
+}
+
 // deliveryPath reports whether the URL path p (decoded or escaped) may
 // belong to the attachment delivery route, whose path carries a delivery
 // capability. Like artifactPath it recognises any spelling: any path that
-// mentions "attachment-deliveries" after decoding counts.
+// mentions "attachment-deliveries" after decoding counts, and so does one
+// that still holds a '%' when decoding stops (pathMentions).
 func deliveryPath(p string) bool { return pathMentions(p, "attachment-deliveries") }
 
 // isDeliveryURL applies deliveryPath to both forms of u's path.
@@ -181,7 +196,7 @@ func redactedPath(u *url.URL) string {
 		return RedactedPortViewPath
 	case word("attachment-deliveries"):
 		return RedactedDeliveryPath
-	case isArtifactURL(u) || isPortViewURL(u) || isDeliveryURL(u):
+	case stillEncoded(u.Path) || stillEncoded(u.EscapedPath()):
 		// Still encoded when decoding stopped: neither route can be told.
 		return RedactedPath
 	}
@@ -191,7 +206,7 @@ func redactedPath(u *url.URL) string {
 // IsCredentialURL reports whether a request for u must not be recorded
 // with its path or query, for example in a trace: an artifact path
 // (artifactPath), a port view path (portViewPath), an attachment delivery
-// path (deliveryPath), or a query that names an artifact or port view URL
+// path (deliveryPath), or a query that names any of them
 // (credentialQuery). It shares its predicates with RequestPath,
 // RedactQuery and RedactURL.
 func IsCredentialURL(u *url.URL) bool {
@@ -250,10 +265,10 @@ func RedactReferer(referer string) string {
 }
 
 // SubPath returns p, the path a proxied request is sent with to an agent
-// port, for a log line: RedactedPath when it may name an artifact or
-// port view URL (the rule of artifactPath and portViewPath), p otherwise.
+// port, for a log line: RedactedPath when it may name an artifact, port
+// view or attachment delivery URL (mentionsCredentialRoute), p otherwise.
 func SubPath(p string) string {
-	if pathMentions(p, "artifacts") || pathMentions(p, "portview") {
+	if mentionsCredentialRoute(p) {
 		return RedactedPath
 	}
 	return p

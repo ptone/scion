@@ -295,6 +295,21 @@ func TestPortView_PortLinkUnchanged(t *testing.T) {
 		require.True(t, f.srv.redirectToPortView(rec, mk(f.launched.OwnerID), f.launched, exposed), "positive control")
 		assert.Equal(t, http.StatusFound, rec.Code)
 	})
+	t.Run("page view refused, port link served end to end", func(t *testing.T) {
+		// The port link admits the owner (auth and the port access check
+		// read their own stores); the page view identity lookup reads
+		// s.store, which fails here, so no page link is created and the
+		// port link serves the page.
+		fs := &conduitFaultStore{Store: f.srv.store}
+		orig := f.srv.store
+		f.srv.store = fs
+		t.Cleanup(func() { f.srv.store = orig })
+		fs.failGetUser.Store(true)
+		res := f.send(t, http.MethodGet, link, withBearer(navHeader(), f.userToken), nil)
+		require.Equal(t, http.StatusOK, res.status, res.body)
+		assert.Equal(t, "hello /page.html?", res.body)
+		assert.Empty(t, res.header.Values("Location"))
+	})
 	t.Run("port not on loopback", func(t *testing.T) {
 		ctx := context.Background()
 		other := f.app.port + 1
