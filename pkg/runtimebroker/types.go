@@ -592,6 +592,17 @@ type EnvRequirementsResponse struct {
 	Needs        []string                     `json:"needs"`
 	SecretInfo   map[string]api.SecretKeyInfo `json:"secretInfo,omitempty"`
 	Alternatives map[string][]string          `json:"alternatives,omitempty"` // Maps canonical key in Needs to alternative key names from the same any_of group
+	// EnvRequirements is always true in this body. A start answers both a
+	// needs report and a success with HTTP 202, so this field tells the
+	// two apart: a start's success body (CreateAgentResponse) never has it
+	// (ptone/scion#6101).
+	EnvRequirements bool `json:"envRequirements"`
+	// MarkerOnly lists the keys in Needs whose only origin is an
+	// empty-value settings or profile env entry (a passthrough marker): no
+	// auth group, auth file or secret declaration requires them. The broker
+	// computes it; a start's final pass (envGatherFinal) may leave these
+	// keys unmet.
+	MarkerOnly []string `json:"markerOnly,omitempty"`
 }
 
 // ============================================================================
