@@ -181,19 +181,6 @@ func (s *Server) fanOutAgentMentions(ctx context.Context, in agentMentionFanoutI
 	if len(names) == 0 {
 		return nil
 	}
-	// Only explicit mentions can name agents on a message without text. A
-	// copy of such a message (an attachment-only one, ptone/scion#6146) is
-	// still useful when it delivers the parent's artifact attachments
-	// (ParentAttachments); with none, it would reach the agents empty, so
-	// it is not made and each name reports why.
-	if in.Msg == "" && len(in.ParentAttachments) == 0 {
-		results := make([]messages.MentionResult, 0, len(names))
-		for _, name := range names {
-			results = append(results, messages.MentionResult{Slug: name, Status: "error", Error: errMentionCopyNeedsText})
-		}
-		return results
-	}
-
 	primarySlug := ""
 	if in.Primary != nil && in.Primary.ProjectID == in.Sender.ProjectID {
 		primarySlug = in.Primary.Slug
@@ -244,6 +231,22 @@ func (s *Server) fanOutAgentMentions(ctx context.Context, in agentMentionFanoutI
 	results = s.dropHumanMentionResults(ctx, in.Sender.ProjectID, results, in.HumanMembers)
 	if len(results) == 0 {
 		return nil
+	}
+
+	// Only explicit mentions can name agents on a message without text. A
+	// copy of such a message (an attachment-only one, ptone/scion#6146) is
+	// still useful when it delivers the parent's artifact attachments
+	// (ParentAttachments); with none, it would reach the agents empty, so
+	// it is not made. Resolution has already dropped the primary, self- and
+	// human mentions and marked unknown names; each mention that would have
+	// been delivered reports why instead.
+	if in.Msg == "" && len(in.ParentAttachments) == 0 {
+		for i := range results {
+			if results[i].Status == "delivered" {
+				results[i].Status, results[i].Error = "error", errMentionCopyNeedsText
+			}
+		}
+		return results
 	}
 
 	// Bound the whole call well under a typical client's own request

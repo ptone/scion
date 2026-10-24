@@ -305,3 +305,52 @@ func TestMentionCopy_NoTextWithParentAttachmentsDelivered(t *testing.T) {
 	require.Equal(t, id, call.StructuredMessage.AttachmentDeliveries[0].ArtifactID)
 	require.Equal(t, primary, call.StructuredMessage.AttachmentDeliveries[0].MessageID)
 }
+
+// TestMentionFanout_NoTextKeepsResolution: on a message without text or
+// parent attachments, the fan-out still resolves names as usual: the
+// primary never appears, a human address is dropped, an unknown name is
+// not_found, and only the agent that would have been delivered to reports
+// the no-text error (nothing is dispatched).
+func TestMentionFanout_NoTextKeepsResolution(t *testing.T) {
+	f := newSendFixture(t)
+	ctx := agentCtx(context.Background(), f.sender)
+	res := f.srv.fanOutAgentMentions(ctx, agentMentionFanoutInput{
+		Sender: f.sender, SenderIdent: GetAgentIdentityFromContext(ctx), Primary: f.target,
+		Type:     messages.TypeInstruction,
+		Explicit: []string{f.target.Slug, "someone@example.com", "no-such-agent", f.aa.Slug},
+	})
+	got := map[string]messages.MentionResult{}
+	for _, r := range res {
+		got[r.Slug] = r
+	}
+	require.Len(t, res, 2, "%+v", res)
+	require.Equal(t, "not_found", got["no-such-agent"].Status)
+	require.Equal(t, "error", got[f.aa.Slug].Status)
+	require.Equal(t, errMentionCopyNeedsText, got[f.aa.Slug].Error)
+	for _, c := range f.disp.getCalls() {
+		require.False(t, c.Agent != nil && c.Agent.ID == f.aa.ID, "nothing is dispatched to the mentioned agent")
+	}
+}
+
+// TestAgentSend_AttachmentOnlyWithMention: an agent sends a message with no
+// text, an inline path attachment, an uploaded attachment and an explicit
+// mention, through the message route: the message is stored with an empty
+// body, and the mention copy is delivered with the uploaded attachment.
+func TestAgentSend_AttachmentOnlyWithMention(t *testing.T) {
+	f, c := newMentionFixture(t)
+	id := f.upload(t, f.sender, "x.txt", "x")
+	body := f.messageBody(f.target, "", []string{id})
+	body.StructuredMessage.Attachments = []string{"/scion-volumes/scratchpad/.attachments/snd/m1/notes.txt"}
+	body.Mentions = []string{c.Slug}
+	rec := f.agentRequest(t, f.sender, jsonRequest(t, "/api/v1/agents/"+f.target.ID+"/message", body))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	primary := messageIDOf(t, rec)
+	stored, err := f.st.GetMessage(context.Background(), primary)
+	require.NoError(t, err)
+	require.Equal(t, "", stored.Msg)
+	require.Equal(t, addresseeDelivered, addresseeState(t, f.st, primary, c))
+	call := f.lastDispatch(t, c)
+	require.Len(t, call.StructuredMessage.AttachmentDeliveries, 1)
+	require.Equal(t, id, call.StructuredMessage.AttachmentDeliveries[0].ArtifactID)
+	require.Equal(t, primary, call.StructuredMessage.AttachmentDeliveries[0].MessageID)
+}
