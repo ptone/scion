@@ -1966,13 +1966,17 @@ func (d *HTTPAgentDispatcher) DispatchAgentReprovision(ctx context.Context, agen
 func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *store.Agent, callerName string, reprovision bool, expectNFSWorkspace, moveReincarnationID string) (err error) {
 	// sent is set at the send boundary below. Every error returned once it
 	// is set is marked errProvisionSent (provisionSent), except a deferred
-	// route (ErrLifecycleDeferred), which sends nothing; an error returned
-	// before it is never marked. A forced move removes files on the target
-	// only for a marked error (moveTargetUntouched), so an early return
-	// added here later stays safe.
+	// route (ErrLifecycleDeferred) on the first request, which sends
+	// nothing. A deferral after the broker answered an earlier request (the
+	// replay, or the retry after a hash-mismatch repair) comes after a send
+	// and is marked like any other error (answered). An error returned
+	// before the send boundary is never marked. A forced move removes files
+	// on the target only for a marked error (moveTargetUntouched), so an
+	// early return added here later stays safe.
 	sent := false
+	answered := false
 	defer func() {
-		if err != nil && sent && !errors.Is(err, ErrLifecycleDeferred) {
+		if err != nil && sent && (answered || !errors.Is(err, ErrLifecycleDeferred)) {
 			err = provisionSent(err)
 		}
 	}()
@@ -2049,9 +2053,15 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 	sent = true
 	resp, envReqs, err := d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
 	if isHashMismatchError(err) {
+		// The broker answered (with a hash mismatch), so a deferral of the
+		// retry comes after a send.
+		answered = true
 		if repairErr := d.repairHashMismatch(ctx, agent, err); repairErr == nil {
 			resp, envReqs, err = d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
 		}
+	}
+	if err == nil {
+		answered = true
 	}
 	if errors.Is(err, ErrLifecycleDeferred) {
 		// deferredCreateWithGather dispatches via DispatchAgentCreateWithGather which
@@ -2142,15 +2152,16 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 		return fmt.Errorf("%s: %w", callerName, errProvisionEnvUnmet)
 	}
 
-	// Design §3.4 Amendment A2.3: for a reprovision specifically, a missing
-	// 201 response is also a hard failure, never "warn and continue": the
-	// reincarnate worker goes straight from this call to DispatchAgentStart,
-	// so "warn and continue" here would silently start the new generation on
-	// an unreplaced config and still report AC-1 success.
+	// A missing 201 response is a hard failure for every caller, never "warn
+	// and continue": the broker confirmed no provisioned config, a start
+	// does not gather env, and the reincarnate worker goes straight from a
+	// reprovision to DispatchAgentStart, so continuing would leave an agent
+	// startable on an undelivered or unreplaced config (Design §3.4
+	// Amendment A2.3 for a reprovision; ptone/scion#6096 for the others).
+	if finalResp == nil {
+		return fmt.Errorf("%s: broker returned no confirmation for the provision request", callerName)
+	}
 	if reprovision {
-		if finalResp == nil {
-			return fmt.Errorf("%s: broker returned no confirmation for the reprovision request", callerName)
-		}
 		// Design §3.4 Amendment A2.2(a): mandatory echo. An old broker has no concept of
 		// Reprovision, so it silently ran a plain Provision and returned 201
 		// with Reprovisioned unset — the persisted config was NOT replaced,

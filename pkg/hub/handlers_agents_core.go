@@ -2874,11 +2874,8 @@ func (s *Server) createAgentInProject(
 					// same way a full create does: remove the broker files and
 					// the agent row, and relay the broker's status. No revoke
 					// here: DispatchAgentProvision already revoked any
-					// credential it minted on this error return. A secret
-					// resolution error and any error after the provision
-					// reached the broker fail the create too (below); only
-					// an error before any request left the hub stays a
-					// warning.
+					// credential it minted on this error return. Every other
+					// provision error fails the create too (below).
 					s.agentLifecycleLog.Warn("Provision-only create failed: required skill could not be resolved",
 						"agent_id", agent.ID, "agent", agent.Name, "broker", agent.RuntimeBrokerID, "error", err)
 					failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
@@ -2943,16 +2940,17 @@ func (s *Server) createAgentInProject(
 					failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
 					return
 				}
-				// Pre-send: any other error was returned before a provision
-				// request left the hub (dispatchProvision marks every error
-				// after its send boundary with errProvisionSent, and the
-				// cross-node deferral is handled above), so no broker was
-				// contacted for this create: it keeps the row with a
-				// warning, as before.
-				// A Kubernetes identity mapping refusal reads as the
-				// hub's coded message, not the raw broker body
-				// (ptone/scion#4024).
-				warnings = append(warnings, api.ProvisionFailedWarningPrefix+dispatchFailureText(err))
+				// Any other provision error, including one returned before a
+				// provision request left the hub (no broker assigned, the
+				// identity precheck, the broker endpoint lookup), also fails
+				// the create: a later start does not gather env, and the
+				// broker would provision the agent on the fly without its
+				// as-needed values, so no provision-only create that did not
+				// provision may leave a startable row (ptone/scion#6096).
+				s.agentLifecycleLog.Warn("Provision-only create failed: provision did not complete",
+					"agent_id", agent.ID, "agent", agent.Name, "broker", agent.RuntimeBrokerID, "error", err)
+				failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
+				return
 			} else {
 				agent.Phase = string(state.PhaseCreated)
 				if err := s.updateAgentAfterDispatch(ctx, agent); err != nil {
