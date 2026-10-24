@@ -182,9 +182,11 @@ func (s *Server) fanOutAgentMentions(ctx context.Context, in agentMentionFanoutI
 		return nil
 	}
 	// Only explicit mentions can name agents on a message without text. A
-	// copy carries the text only, so such a message (an attachment-only
-	// one, ptone/scion#6146) is not copied; each name reports why.
-	if in.Msg == "" {
+	// copy of such a message (an attachment-only one, ptone/scion#6146) is
+	// still useful when it delivers the parent's artifact attachments
+	// (ParentAttachments); with none, it would reach the agents empty, so
+	// it is not made and each name reports why.
+	if in.Msg == "" && len(in.ParentAttachments) == 0 {
 		results := make([]messages.MentionResult, 0, len(names))
 		for _, name := range names {
 			results = append(results, messages.MentionResult{Slug: name, Status: "error", Error: errMentionCopyNeedsText})

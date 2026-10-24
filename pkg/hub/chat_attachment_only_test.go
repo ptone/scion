@@ -239,12 +239,13 @@ func TestBroadcast_EmptyBodyRefused(t *testing.T) {
 	f.withBrokerProxy(t)
 	check(f.agentRequest(t, f.sender, jsonRequest(t, path, body)))
 	require.Empty(t, f.disp.getCalls(), "nothing is dispatched")
-	require.Equal(t, 0, f.countStored(""), "nothing is stored")
+	require.Equal(t, 0, f.countStored(t, ""), "nothing is stored")
 }
 
-// TestMentions_NoTextNotCopied: a message without text is not copied to
-// the agents it mentions explicitly, on both mention paths; each mention
-// reports why, and nothing is dispatched to the mentioned agent.
+// TestMentions_NoTextNotCopied: a message without text and without parent
+// attachments is not copied to the agents it mentions explicitly, on both
+// mention paths; each mention reports why, and nothing is dispatched to
+// the mentioned agent.
 func TestMentions_NoTextNotCopied(t *testing.T) {
 	f := newSendFixture(t)
 	ctx := agentCtx(context.Background(), f.sender)
@@ -271,11 +272,36 @@ func TestMentions_NoTextNotCopied(t *testing.T) {
 	for _, c := range f.disp.getCalls() {
 		require.False(t, c.Agent != nil && c.Agent.ID == f.aa.ID, "nothing is dispatched to the mentioned agent")
 	}
-	require.Equal(t, 0, f.countStored(""), "no mention copy is stored")
+	require.Equal(t, 0, f.countStored(t, ""), "no mention copy is stored")
 
 	// Control: with text, the mention is not refused for want of text.
 	msg.Msg = "see this"
 	res = f.srv.processMentions(ctx, []string{f.aa.Slug}, f.target, msg, "", "")
 	require.Len(t, res, 1)
 	require.NotEqual(t, errMentionCopyNeedsText, res[0].Error)
+}
+
+// TestMentionCopy_NoTextWithParentAttachmentsDelivered: an agent's message
+// without text that mentions an agent explicitly is copied when the copy
+// delivers the parent's attachments: the mention is delivered and the copy
+// lists the attachment.
+func TestMentionCopy_NoTextWithParentAttachmentsDelivered(t *testing.T) {
+	f, c := newMentionFixture(t)
+	id := f.upload(t, f.sender, "x.txt", "x")
+	rec := f.message(t, f.sender, f.target, "primary", id)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	primary := messageIDOf(t, rec)
+
+	in := mentionInput(t, f, primary)
+	in.Msg = ""
+	in.Primary = f.target
+	in.Explicit = []string{c.Slug}
+	res := f.srv.fanOutAgentMentions(context.Background(), in)
+	require.Len(t, res, 1)
+	require.Equal(t, c.Slug, res[0].Slug)
+	require.Equal(t, "delivered", res[0].Status, res[0].Error)
+	call := f.lastDispatch(t, c)
+	require.Len(t, call.StructuredMessage.AttachmentDeliveries, 1)
+	require.Equal(t, id, call.StructuredMessage.AttachmentDeliveries[0].ArtifactID)
+	require.Equal(t, primary, call.StructuredMessage.AttachmentDeliveries[0].MessageID)
 }

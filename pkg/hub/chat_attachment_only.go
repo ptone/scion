@@ -38,6 +38,7 @@ func chatHistoryMessageDeleted(msg store.Message, exts map[string]*WebChatMessag
 }
 
 // errMentionCopyNeedsText is the mention result error of a message without
-// text: mention copies carry the text only, so an attachment-only message
-// is not copied to the agents it mentions.
+// text whose mention copy would carry nothing: processMentions copies the
+// text only, and fanOutAgentMentions copies the text plus the parent's
+// artifact attachments, so with neither the copy is not made.
 const errMentionCopyNeedsText = "a message without text is not copied to mentioned agents"
