@@ -49,6 +49,12 @@ type Manager struct {
 	// logged as an error (ptone/scion#4869).
 	stopping atomic.Bool
 
+	// sup supervises the loaded broker plugins (see StartSupervisor).
+	sup *supervisor
+	// restartLocks holds a *sync.Mutex per "type:name" that serializes
+	// supervisor restarts with the admin restart and update paths.
+	restartLocks sync.Map
+
 	// NewGRPCBrokerAdapter creates a GRPCBrokerClient for a given plugin entry.
 	// Injected at startup to avoid an import cycle with pkg/plugin/grpcbroker.
 	NewGRPCBrokerAdapter func(entry PluginEntry, logger *slog.Logger) (GRPCBrokerClient, error)
@@ -69,6 +75,7 @@ func NewManager(logger *slog.Logger) *Manager {
 		pluginEntries:   make(map[string]PluginEntry),
 		logger:          logger,
 		brokerCallbacks: &HostCallbacksForwarder{},
+		sup:             newSupervisor(),
 	}
 }
 
@@ -226,8 +233,23 @@ func (m *Manager) loadGRPCPlugin(pluginType, name string, entry PluginEntry) err
 	return nil
 }
 
-// loadPlugin starts a plugin process (or connects to a self-managed one) and stores its client.
+// loadPlugin starts a plugin process (or connects to a self-managed one),
+// configures it with dp.Config and stores its client. A loaded broker
+// plugin is supervised as running.
 func (m *Manager) loadPlugin(dp DiscoveredPlugin) error {
+	if err := m.loadPluginWithConfig(dp, dp.Config); err != nil {
+		return err
+	}
+	if dp.Type == PluginTypeBroker {
+		m.supervisedLoaded(dp.Type + ":" + dp.Name)
+	}
+	return nil
+}
+
+// loadPluginWithConfig is loadPlugin, except that the plugin is configured
+// with cfg while dp (with its own Config) is what is stored for the key.
+// It does not update the supervision state.
+func (m *Manager) loadPluginWithConfig(dp DiscoveredPlugin, cfg map[string]string) error {
 	var protocolVersion uint
 	var pluginMap map[string]goplugin.Plugin
 
@@ -284,7 +306,8 @@ func (m *Manager) loadPlugin(dp DiscoveredPlugin) error {
 	// For broker plugins, configure them immediately
 	if dp.Type == PluginTypeBroker {
 		if brokerClient, ok := raw.(*BrokerRPCClient); ok {
-			config := dp.Config
+			brokerClient.onTransportError = m.transportErrorHandler(dp.Type + ":" + dp.Name)
+			config := cfg
 			if config == nil {
 				config = make(map[string]string)
 			}
@@ -418,25 +441,52 @@ func (m *Manager) Get(pluginType, name string) (interface{}, error) {
 
 // Reconnect reloads a self-managed plugin by establishing a fresh connection
 // to its RPC address. This is used when a self-managed plugin process restarts
-// and the existing connection is dead.
+// and the existing connection is dead. The plugin is configured with the
+// config from the BrokerConfigProvider when one is set (otherwise its stored
+// config), and the restart hooks run afterwards so the fan-out spoke uses
+// the new connection.
 func (m *Manager) Reconnect(pluginType, name string) error {
 	key := pluginType + ":" + name
+	lock := m.restartLock(key)
+	lock.Lock()
+	defer lock.Unlock()
+
 	m.mu.RLock()
 	dp, ok := m.configs[key]
+	old := m.clients[key]
+	self := m.selfManaged[key]
 	m.mu.RUnlock()
 	if !ok {
 		return fmt.Errorf("no stored config for plugin %s/%s (not self-managed?)", pluginType, name)
 	}
+	cfg := dp.Config
+	m.sup.mu.Lock()
+	provider := m.sup.provider
+	m.sup.mu.Unlock()
+	if provider != nil {
+		resolved, err := provider(context.Background(), name)
+		if err != nil {
+			return fmt.Errorf("resolve config for plugin %s/%s: %w", pluginType, name, err)
+		}
+		cfg = resolved
+	}
 	m.logger.Info("Reconnecting to self-managed plugin",
 		"type", pluginType, "name", name, "address", dp.Address)
-	return m.loadPlugin(dp)
+	if self {
+		m.closeStaleClient(key, old, true)
+	}
+	if err := m.loadPluginWithConfig(dp, cfg); err != nil {
+		return err
+	}
+	m.supervisedLoaded(key)
+	return m.runRestartHooks(name)
 }
 
 // GetBroker returns an eventbus.EventBus backed by the named broker plugin.
-// For self-managed plugins, it returns a reconnecting adapter that automatically
-// re-establishes the connection if the plugin process restarts.
-// For gRPC mode plugins, it returns the GRPCBrokerAdapter directly (which has
-// its own reconnection logic).
+// A lost connection to a hub-managed or self-managed plugin is recovered by
+// the supervisor (see StartSupervisor), whose restart hooks replace the
+// fan-out spoke. For gRPC mode plugins, it returns the GRPCBrokerAdapter
+// directly (which has its own reconnection logic).
 func (m *Manager) GetBroker(name string) (eventbus.EventBus, error) {
 	key := PluginTypeBroker + ":" + name
 	m.mu.RLock()
@@ -457,11 +507,7 @@ func (m *Manager) GetBroker(name string) (eventbus.EventBus, error) {
 		return nil, fmt.Errorf("plugin %s is not a broker plugin", name)
 	}
 
-	rpcAdapter := NewBrokerPluginAdapter(rpcClient)
-	if m.IsSelfManaged(PluginTypeBroker, name) {
-		return newReconnectingBrokerAdapter(m, name, rpcAdapter, m.logger), nil
-	}
-	return rpcAdapter, nil
+	return NewBrokerPluginAdapter(rpcClient), nil
 }
 
 // ConfigureBroker re-configures a loaded broker plugin by merging extra
@@ -520,6 +566,9 @@ func (m *Manager) ConfigureBroker(name string, extra map[string]string) error {
 // own their process). For gRPC/HA adapters, it pushes the config directly.
 func (m *Manager) RestartBrokerPlugin(name string, cfg map[string]string) error {
 	key := PluginTypeBroker + ":" + name
+	lock := m.restartLock(key)
+	lock.Lock()
+	defer lock.Unlock()
 
 	m.mu.Lock()
 	dp, ok := m.configs[key]
@@ -835,6 +884,10 @@ func (m *Manager) UpdatePlugin(name string, repoPath string) error {
 	}
 	defer func() { _ = os.Remove(tmpBinaryPath) }()
 
+	lock := m.restartLock(key)
+	lock.Lock()
+	defer lock.Unlock()
+
 	m.mu.Lock()
 	if client, hasClient := m.clients[key]; hasClient {
 		delete(m.dispensed, key)
@@ -932,6 +985,10 @@ func (m *Manager) Shutdown() {
 	m.configs = make(map[string]DiscoveredPlugin)
 	m.configFiles = make(map[string]string)
 	m.pluginEntries = make(map[string]PluginEntry)
+
+	m.sup.mu.Lock()
+	m.sup.plugins = make(map[string]*supervised)
+	m.sup.mu.Unlock()
 
 	goplugin.CleanupClients()
 }
