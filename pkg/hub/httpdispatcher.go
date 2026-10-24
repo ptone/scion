@@ -30,7 +30,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -1934,7 +1933,7 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 			err = provisionSent(err)
 		}
 		if err == nil {
-			markAsNeededPending(agent)
+			clearConfigDelivered(agent)
 		}
 	}()
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
@@ -3527,13 +3526,13 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 // (suspended → resume). It is DispatchAgentStartWithOptions with no options
 // (always synchronous); both call dispatchAgentStart directly, so neither is
 // a guarded call site of the other.
-// markConfigDelivered sets ConfigDelivered (and clears AsNeededPending) on
-// agent's applied config in memory, for a create or env finalize that
-// started the agent with its config (ptone/scion#6096). Like the resolved
-// env a provision merges into AppliedConfig, it is persisted by the caller's
-// own write of the agent after the dispatch; a caller that writes no config
-// leaves it unset, so the next start of the agent re-gathers
-// (startRoutesThroughCreate), which is the safe direction.
+// markConfigDelivered sets ConfigDelivered on agent's applied config in
+// memory, for a create or env finalize that started the agent with its
+// config (ptone/scion#6096). Like the resolved env a provision merges into
+// AppliedConfig, it is persisted by the caller's own write of the agent after
+// the dispatch; a caller that writes no config leaves it unset, so the next
+// start of the agent gathers again (startRoutesThroughCreate), which is the
+// safe direction.
 func markConfigDelivered(agent *store.Agent) {
 	if agent == nil {
 		return
@@ -3542,22 +3541,18 @@ func markConfigDelivered(agent *store.Agent) {
 		agent.AppliedConfig = &store.AgentAppliedConfig{}
 	}
 	agent.AppliedConfig.ConfigDelivered = true
-	agent.AppliedConfig.AsNeededPending = false
 }
 
-// markAsNeededPending records, in memory like markConfigDelivered, that a
-// provision, move provision or reprovision completed without starting the
-// agent: the as-needed values it resolved went only into that provision
-// request, so the next start must gather them again (ptone/scion#6096).
-func markAsNeededPending(agent *store.Agent) {
-	if agent == nil {
+// clearConfigDelivered clears ConfigDelivered in memory, like
+// markConfigDelivered, after a provision, move provision or reprovision: it
+// starts nothing, and the as-needed values it resolved went only into that
+// provision request, so the next start must gather them again
+// (ptone/scion#6096).
+func clearConfigDelivered(agent *store.Agent) {
+	if agent == nil || agent.AppliedConfig == nil {
 		return
 	}
-	if agent.AppliedConfig == nil {
-		agent.AppliedConfig = &store.AgentAppliedConfig{}
-	}
 	agent.AppliedConfig.ConfigDelivered = false
-	agent.AppliedConfig.AsNeededPending = true
 }
 
 // markConfigDeliveredOnSuccess marks agent only for a create or finalize the
@@ -3574,56 +3569,58 @@ func markConfigDeliveredOnSuccess(agent *store.Agent, res *CreateDispatchResult)
 	markConfigDelivered(agent)
 }
 
+// restartStartLegKey marks a start dispatch that is a restart's start leg
+// (withRestartStartLeg).
+type restartStartLegKey struct{}
+
+// withRestartStartLeg marks ctx as a restart's start leg. A restart is not
+// routed through create-with-gather: a plain restart does not gather
+// as-needed values, which ptone/scion#6101 tracks.
+func withRestartStartLeg(ctx context.Context) context.Context {
+	return context.WithValue(ctx, restartStartLegKey{}, true)
+}
+
+func isRestartStartLeg(ctx context.Context, opts StartDispatchOptions) bool {
+	if opts.Kind == store.LaunchKindRestart {
+		return true
+	}
+	v, _ := ctx.Value(restartStartLegKey{}).(bool)
+	return v
+}
+
 // startRoutesThroughCreate reports whether a start of agent must go through
 // create-with-gather (DispatchAgentCreate) instead of a plain start, and why.
 // A plain start does not gather env (buildStartEnv never resolves as-needed
 // keys, and the broker's start has no env-gather), so an agent whose config
 // was never delivered would start without the as-needed values it needs
 // (ptone/scion#6096). Plain start is kept when:
-//   - the applied config records a delivered config (ConfigDelivered), or
-//   - no provision is pending (AsNeededPending unset) and the agent predates
-//     the marker with run history together with a phase only a successful
-//     start reaches (running, stopped, suspended or halted): a legacy row
-//     that already started counts as provisioned (coordinator-2 ruling; a
-//     run ID alone is not enough, because beginRun records it before the
-//     broker call), or
+//   - the applied config records a delivered config (ConfigDelivered, set
+//     only by a synchronous, needs-free create-with-gather or env finalize
+//     and cleared by any provision), or
 //   - the agent has no as-needed entries in its scopes, so there is nothing
-//     to gather.
+//     to gather, or
+//   - the start is resumed, or is a restart's start leg (isRestartStartLeg):
+//     restart stays a plain restart, ptone/scion#6101.
 //
-// A provision, move provision or reprovision sets AsNeededPending, so the
-// start after it (a provision-only agent's first start, a move's start on
-// the target, a reincarnation's start leg) is routed even when the agent's
-// run history shows earlier starts.
-//
-// A resumed start always has run history and is never routed. An agent
-// with an ancestry (whose progeny entries are not listed here) counts as
-// having as-needed entries. A failed lookup returns err, a
+// There is no legacy exception: no stored field reliably shows that a run
+// landed (beginRun records a run ID before the broker call, the stop action
+// writes phase stopped either way, and status writes stamp last_seen), so an
+// agent without the marker that has as-needed entries is routed. Routing is
+// safe for an agent that already has files on its broker: the broker reuses
+// an existing agent directory on a create (pkg/agent
+// TestBrokerModeStart_ExistingAgentDirIsReusedAndRequestEnvReachesContainer).
+// An agent with an ancestry (whose progeny entries are not listed here)
+// counts as having as-needed entries. A failed lookup returns err, a
 // *secretResolutionError the caller returns as a failed start, so an unknown
 // never plain-starts.
-func (d *HTTPAgentDispatcher) startRoutesThroughCreate(ctx context.Context, agent *store.Agent, resume bool) (route bool, why string, err error) {
-	if resume || agent == nil {
+func (d *HTTPAgentDispatcher) startRoutesThroughCreate(ctx context.Context, agent *store.Agent, resume bool, opts StartDispatchOptions) (route bool, why string, err error) {
+	if resume || agent == nil || isRestartStartLeg(ctx, opts) {
 		return false, "", nil
 	}
-	pending := false
-	if agent.AppliedConfig != nil {
-		if agent.AppliedConfig.ConfigDelivered {
-			return false, "", nil
-		}
-		pending = agent.AppliedConfig.AsNeededPending
-	}
-	if !pending && (agent.RunID != "" || len(agent.PreviousRunIDs) > 0) && startedPhase(agent.Phase) {
+	if agent.AppliedConfig != nil && agent.AppliedConfig.ConfigDelivered {
 		return false, "", nil
 	}
 	return d.hasAsNeededEntries(ctx, agent)
-}
-
-// startedPhase reports whether phase is one only a successful start reaches.
-func startedPhase(phase string) bool {
-	switch state.Phase(phase) {
-	case state.PhaseRunning, state.PhaseStopped, state.PhaseSuspended, state.PhaseHalted:
-		return true
-	}
-	return false
 }
 
 // hasAsNeededEntries reports whether any env var or secret in agent's scopes
@@ -3683,6 +3680,14 @@ func (d *HTTPAgentDispatcher) hasAsNeededEntries(ctx context.Context, agent *sto
 // unmet-needs error, or the dispatch error, with nothing started. A task
 // given to the start is the create's task for this dispatch only.
 func (d *HTTPAgentDispatcher) startThroughCreate(ctx context.Context, agent *store.Agent, task string) (*StartDispatchResult, error) {
+	// The routed create is always synchronous: an asynchronous create
+	// launch would begin a create launch on a row the start claim already
+	// moved to starting, and the start path does not carry a create
+	// launch's result.
+	if agent.LaunchAsyncOptIn {
+		agent.LaunchAsyncOptIn = false
+		defer func() { agent.LaunchAsyncOptIn = true }()
+	}
 	if task != "" && agent.AppliedConfig != nil {
 		saved := agent.AppliedConfig.Task
 		agent.AppliedConfig.Task = task
@@ -3722,7 +3727,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStartWithOptions(ctx context.Context,
 // DispatchAgentStartWithOptions. The result is non-nil only for a start a
 // broker accepted as an asynchronous launch (here or on the owner node).
 func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool, opts StartDispatchOptions) (_ *StartDispatchResult, err error) {
-	route, why, routeErr := d.startRoutesThroughCreate(ctx, agent, resume)
+	route, why, routeErr := d.startRoutesThroughCreate(ctx, agent, resume, opts)
 	if routeErr != nil {
 		if secretResolutionSourceOf(routeErr) == resolutionSourceEnvSettings {
 			d.log.WarnContext(ctx, "DispatchAgentStart: failed to read stored env settings; agent not started",
