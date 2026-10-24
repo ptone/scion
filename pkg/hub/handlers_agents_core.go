@@ -3500,6 +3500,9 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		if writePreserveWorkspaceCapabilityError(w, err) {
 			return
 		}
+		if writeUserSuppliedKeysUnrecordedError(w, err) {
+			return
+		}
 		var stillMissing *ErrEnvStillMissing
 		if errors.As(err, &stillMissing) {
 			MissingEnvVars(w, stillMissing.Requirements.Needs,

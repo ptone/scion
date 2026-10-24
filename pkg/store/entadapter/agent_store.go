@@ -544,18 +544,27 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 	newVersion := expectedVersion + 1
 
 	if a.Phase != "running" {
-		// Fast path, unchanged from before T1: one statement, no
-		// transaction. Rows whose write never touches phase=running (the
-		// overwhelming majority of UpdateAgent calls) pay nothing extra and
-		// gain no new error path (design t1-async-create-v11.md §3.3: "the
-		// same transaction runs" applies only to a running write).
-		update, err := buildAgentUpdate(s.client.Agent, uid, a, expectedVersion, newVersion, now)
+		// Fast path: one CAS statement, plus the applied-config read in the
+		// same transaction that keeps the stored user-supplied key names
+		// (saveKeepingUserSuppliedKeys, ptone/scion#6101). A write that never
+		// touches phase=running gains no launch-state step (design
+		// t1-async-create-v11.md §3.3: "the same transaction runs" applies
+		// only to a running write).
+		affected, err := s.inAgentWriteTx(ctx, func(client *ent.Client) (int, error) {
+			return s.saveKeepingUserSuppliedKeys(ctx, client, uid, a.AppliedConfig, func(applied *store.AgentAppliedConfig, unchanged predicate.Agent) (int, error) {
+				update, err := buildAgentUpdate(client.Agent, uid, a, applied, expectedVersion, newVersion, now)
+				if err != nil {
+					return 0, err
+				}
+				n, err := update.Where(unchanged).Save(ctx)
+				if err != nil {
+					return 0, mapError(err)
+				}
+				return n, nil
+			})
+		})
 		if err != nil {
 			return err
-		}
-		affected, err := update.Save(ctx)
-		if err != nil {
-			return mapError(err)
 		}
 		if affected == 0 {
 			return agentUpdateConflictError(ctx, s.client.Agent, uid)
@@ -673,17 +682,26 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 
 // tryRunningFastPath attempts the single-statement CAS for a phase=running
 // write, excluding rows with an active launch (agent_store.go's UpdateAgent
-// running branch). It reports whether the statement matched a row; it never
-// opens a transaction.
+// running branch). It reports whether the statement matched a row. It runs
+// no launch-state step; its only transaction is the one that keeps the
+// stored user-supplied key names (saveKeepingUserSuppliedKeys).
 func (s *AgentStore) tryRunningFastPath(ctx context.Context, uid uuid.UUID, a *store.Agent, expectedVersion, newVersion int64, now time.Time) (bool, error) {
-	update, err := buildAgentUpdate(s.client.Agent, uid, a, expectedVersion, newVersion, now)
+	affected, err := s.inAgentWriteTx(ctx, func(client *ent.Client) (int, error) {
+		return s.saveKeepingUserSuppliedKeys(ctx, client, uid, a.AppliedConfig, func(applied *store.AgentAppliedConfig, unchanged predicate.Agent) (int, error) {
+			update, err := buildAgentUpdate(client.Agent, uid, a, applied, expectedVersion, newVersion, now)
+			if err != nil {
+				return 0, err
+			}
+			update.Where(unchanged, agent.Or(agent.LaunchStateIsNil(), agent.LaunchStateNEQ(store.LaunchStateActive)))
+			n, err := update.Save(ctx)
+			if err != nil {
+				return 0, mapError(err)
+			}
+			return n, nil
+		})
+	})
 	if err != nil {
 		return false, err
-	}
-	update.Where(agent.Or(agent.LaunchStateIsNil(), agent.LaunchStateNEQ(store.LaunchStateActive)))
-	affected, err := update.Save(ctx)
-	if err != nil {
-		return false, mapError(err)
 	}
 	return affected == 1, nil
 }
@@ -767,13 +785,19 @@ func injectAgentRunningRace(point string) {
 // store.ErrNotFound / store.ErrVersionConflict, without touching
 // launch_state, when the CAS did not match a row.
 func (s *AgentStore) updateAgentRunningTx(ctx context.Context, client *ent.Client, uid uuid.UUID, a *store.Agent, expectedVersion, newVersion int64, now time.Time) error {
-	update, err := buildAgentUpdate(client.Agent, uid, a, expectedVersion, newVersion, now)
+	affected, err := s.saveKeepingUserSuppliedKeys(ctx, client, uid, a.AppliedConfig, func(applied *store.AgentAppliedConfig, unchanged predicate.Agent) (int, error) {
+		update, err := buildAgentUpdate(client.Agent, uid, a, applied, expectedVersion, newVersion, now)
+		if err != nil {
+			return 0, err
+		}
+		n, err := update.Where(unchanged).Save(ctx)
+		if err != nil {
+			return 0, mapError(err)
+		}
+		return n, nil
+	})
 	if err != nil {
 		return err
-	}
-	affected, err := update.Save(ctx)
-	if err != nil {
-		return mapError(err)
 	}
 	if affected == 0 {
 		return agentUpdateConflictError(ctx, client.Agent, uid)
@@ -803,7 +827,9 @@ func (s *AgentStore) updateAgentRunningTx(ctx context.Context, client *ent.Clien
 // buildAgentUpdate constructs the CAS update statement shared by both the
 // fast path and the running-write transactional path. ac is either
 // s.client.Agent or a tx-scoped client's Agent — both are *ent.AgentClient.
-func buildAgentUpdate(ac *ent.AgentClient, uid uuid.UUID, a *store.Agent, expectedVersion, newVersion int64, now time.Time) (*ent.AgentUpdate, error) {
+// applied is written in place of a.AppliedConfig: a's config with the
+// stored user-supplied key names kept (saveKeepingUserSuppliedKeys).
+func buildAgentUpdate(ac *ent.AgentClient, uid uuid.UUID, a *store.Agent, applied *store.AgentAppliedConfig, expectedVersion, newVersion int64, now time.Time) (*ent.AgentUpdate, error) {
 	update := ac.Update().
 		Where(agent.IDEQ(uid), agent.StateVersionEQ(expectedVersion)).
 		SetSlug(a.Slug).
@@ -852,7 +878,7 @@ func buildAgentUpdate(ac *ent.AgentClient, uid uuid.UUID, a *store.Agent, expect
 	} else {
 		update.ClearAnnotations()
 	}
-	if cfg := marshalAppliedConfig(a.AppliedConfig); cfg != "" {
+	if cfg := marshalAppliedConfig(applied); cfg != "" {
 		update.SetAppliedConfig(cfg)
 	} else {
 		update.ClearAppliedConfig()
@@ -864,7 +890,7 @@ func buildAgentUpdate(ac *ent.AgentClient, uid uuid.UUID, a *store.Agent, expect
 	// and ReconcileHarnessConfigColumn's doc (ptone/scion#2146).
 	// AppliedConfig=nil (cleared above) still yields "" here, which is
 	// exactly the sentinel this row should carry, not NULL.
-	update.SetHarnessConfig(harnessConfigOf(a.AppliedConfig))
+	update.SetHarnessConfig(harnessConfigOf(applied))
 	if a.LastSeen.IsZero() {
 		update.ClearLastSeen()
 	} else {
@@ -1995,23 +2021,35 @@ func (s *AgentStore) UpdateAgentConfig(ctx context.Context, agentID string, expe
 		return 0, err
 	}
 	newVersion := expectedVersion + 1
-	update := s.client.Agent.Update().
-		Where(agent.IDEQ(uid), agent.StateVersionEQ(expectedVersion), agent.DeletedAtIsNil()).
-		SetStateVersion(newVersion).
-		SetUpdated(time.Now()).
-		// Always set, never NULL: see buildAgentUpdate.
-		SetHarnessConfig(harnessConfigOf(applied))
-	if cfg := marshalAppliedConfig(applied); cfg != "" {
-		update.SetAppliedConfig(cfg)
-	} else {
-		update.ClearAppliedConfig()
-	}
-	if err := setPendingConfig(update.Mutation(), pending); err != nil {
-		return 0, err
-	}
-	affected, err := update.Save(ctx)
+	now := time.Now()
+	// The CAS and the applied-config read that keeps the stored
+	// user-supplied key names share one transaction
+	// (saveKeepingUserSuppliedKeys, ptone/scion#6101).
+	affected, err := s.inAgentWriteTx(ctx, func(client *ent.Client) (int, error) {
+		return s.saveKeepingUserSuppliedKeys(ctx, client, uid, applied, func(applied *store.AgentAppliedConfig, unchanged predicate.Agent) (int, error) {
+			update := client.Agent.Update().
+				Where(agent.IDEQ(uid), agent.StateVersionEQ(expectedVersion), agent.DeletedAtIsNil(), unchanged).
+				SetStateVersion(newVersion).
+				SetUpdated(now).
+				// Always set, never NULL: see buildAgentUpdate.
+				SetHarnessConfig(harnessConfigOf(applied))
+			if cfg := marshalAppliedConfig(applied); cfg != "" {
+				update.SetAppliedConfig(cfg)
+			} else {
+				update.ClearAppliedConfig()
+			}
+			if err := setPendingConfig(update.Mutation(), pending); err != nil {
+				return 0, err
+			}
+			n, err := update.Save(ctx)
+			if err != nil {
+				return 0, mapError(err)
+			}
+			return n, nil
+		})
+	})
 	if err != nil {
-		return 0, mapError(err)
+		return 0, err
 	}
 	if affected == 0 {
 		row, err := s.client.Agent.Get(ctx, uid)
