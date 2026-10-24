@@ -884,9 +884,9 @@ type AgentStore interface {
 	// config being unchanged since its read in the same transaction,
 	// row-locked where the dialect supports it, and retried a bounded number
 	// of times, like SetAgentConfigDelivered (ptone/scion#6101). It returns
-	// the stored list after the call; nil, with no error, when the agent does
-	// not exist.
-	AddAgentUserSuppliedEnvKeys(ctx context.Context, id string, keys []string) (names []string, err error)
+	// the stored list after the call (union) and whether this call wrote it;
+	// nil and written=false, with no error, when the agent does not exist.
+	AddAgentUserSuppliedEnvKeys(ctx context.Context, id string, keys []string) (union []string, written bool, err error)
 
 	// FindOrphanedAgents returns agents whose RuntimeBrokerID references a broker
 	// that is offline or does not exist, and who are not in terminal states
