@@ -495,3 +495,81 @@ func TestReincarnateAgent_RerenderSecretResolutionErrorKeepsOriginalError(t *tes
 	require.NoError(t, err)
 	assert.Contains(t, final.AppliedConfig.Task, "[SCION REINCARNATION]", "the row keeps the gen N+1 config the disk holds")
 }
+
+// A provision-only create whose provision fails after it reached the broker
+// (an error marked errProvisionSent: the replay with the as-needed values
+// failing in transport, or a broker error status) fails the create: no 201,
+// the broker files and the agent row are removed, and a start of the agent
+// afterwards answers 404 (ptone/scion#6096). An error from before any
+// request left the hub still keeps the row with a warning
+// (TestCreateAgent_ProvisionOnlyOtherFailureStaysWarning).
+func TestCreateAgent_ProvisionOnlyFailureAfterSendFailsCreate(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		err        error
+		wantStatus int
+	}{
+		{"replay transport failure", provisionSent(errors.New("dial tcp 10.0.0.9:9800: connection refused")), http.StatusBadGateway},
+		// 0: any error status the dispatch error maps to (never a 201).
+		{"broker 500 after the needs report", provisionSent(&brokerStatusError{StatusCode: http.StatusInternalServerError, Body: "boom"}), 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			disp := &skillFailDispatcher{provisionErr: tc.err}
+			srv, s, project := setupCreateAgentServer(t, disp)
+			logs := &levelCapturingHandler{}
+			srv.agentLifecycleLog = slog.New(logs)
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+				Name:          "sent-fail-agent",
+				ProjectID:     project.ID,
+				Task:          "some task",
+				ProvisionOnly: true,
+			})
+			if tc.wantStatus != 0 {
+				require.Equal(t, tc.wantStatus, rec.Code, rec.Body.String())
+			} else {
+				require.GreaterOrEqual(t, rec.Code, 400, rec.Body.String())
+			}
+
+			require.NotNil(t, disp.provisionedAgent, "provision must have been dispatched")
+			agentID := disp.provisionedAgent.ID
+			_, err := s.GetAgent(context.Background(), agentID)
+			assert.ErrorIs(t, err, store.ErrNotFound, "the failed agent record is deleted")
+			assert.True(t, disp.deleteCalled, "the broker-side files are cleaned up")
+
+			found := false
+			logs.mu.Lock()
+			for _, r := range logs.records {
+				if r.Level == slog.LevelWarn && r.Message == "Provision-only create failed after the provision reached the broker" {
+					found = true
+				}
+			}
+			logs.mu.Unlock()
+			assert.True(t, found, "the failure is logged at WARN")
+
+			rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agentID+"/start", nil)
+			assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+		})
+	}
+}
+
+// With the real dispatcher, a replay that fails in transport after the
+// broker's needs report returns an error marked errProvisionSent, which the
+// provision-only create handler turns into a failed create.
+func TestProvisionGather_ReplayTransportFailureIsMarkedSent(t *testing.T) {
+	f := newRunDispatchFixture(t)
+	f.d.SetSecretBackend(&switchableBackend{})
+	calls := 0
+	f.client.createWithGatherFunc = func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+		calls++
+		if calls == 1 {
+			return nil, &RemoteEnvRequirementsResponse{AgentID: req.ID, Needs: []string{failClosedKey}}, nil
+		}
+		return nil, nil, errors.New("dial tcp 10.0.0.9:9800: connection refused")
+	}
+
+	err := f.d.DispatchAgentProvision(context.Background(), f.agent)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errProvisionSent)
+	assert.Equal(t, 2, calls, "the needs report and the failed replay")
+}

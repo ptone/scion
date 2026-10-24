@@ -2874,9 +2874,11 @@ func (s *Server) createAgentInProject(
 					// same way a full create does: remove the broker files and
 					// the agent row, and relay the broker's status. No revoke
 					// here: DispatchAgentProvision already revoked any
-					// credential it minted on this error return. Other
-					// provision failures, except a secret resolution error
-					// (below), stay warnings.
+					// credential it minted on this error return. A secret
+					// resolution error and any error after the provision
+					// reached the broker fail the create too (below); only
+					// an error before any request left the hub stays a
+					// warning.
 					s.agentLifecycleLog.Warn("Provision-only create failed: required skill could not be resolved",
 						"agent_id", agent.ID, "agent", agent.Name, "broker", agent.RuntimeBrokerID, "error", err)
 					failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
@@ -2895,6 +2897,26 @@ func (s *Server) createAgentInProject(
 					failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
 					return
 				}
+				if errors.Is(err, errProvisionSent) {
+					// The provision reached the broker (its first request,
+					// the needs report or the replay with the as-needed
+					// values) and then failed, for example the replay in
+					// transport. The broker may hold files without the
+					// as-needed values, and a start does not resolve them,
+					// so the agent must not stay startable
+					// (ptone/scion#6096). Fail the create as above: remove
+					// the broker files and the agent row, and answer the
+					// dispatch error.
+					s.agentLifecycleLog.Warn("Provision-only create failed after the provision reached the broker",
+						"agent_id", agent.ID, "agent", agent.Name, "broker", agent.RuntimeBrokerID, "error", err)
+					failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
+					return
+				}
+				// Any other error was returned before a provision request
+				// left the hub (dispatchProvision marks every error after
+				// its send boundary with errProvisionSent), so the broker
+				// holds nothing from this create: the create keeps the row
+				// with a warning, as before.
 				// A Kubernetes identity mapping refusal reads as the
 				// hub's coded message, not the raw broker body
 				// (ptone/scion#4024).
