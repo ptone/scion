@@ -117,7 +117,7 @@ type projectImportOptions struct {
 // the streaming path), after their authorization checks.
 func writeRemoteSourceNotAccepted(w http.ResponseWriter, sourceURL string) bool {
 	if err := config.ValidateRemoteFetchSource(sourceURL); err != nil {
-		ValidationError(w, "sourceUrl not accepted: "+err.Error(), nil)
+		ValidationError(w, err.Error(), nil)
 		return true
 	}
 	return false

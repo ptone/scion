@@ -30,6 +30,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -198,7 +199,7 @@ type RemoteFetchOptions struct {
 // the network is touched.
 func FetchRemoteTemplate(ctx context.Context, uri string, opts RemoteFetchOptions) (string, error) {
 	if err := ValidateRemoteFetchSource(uri); err != nil {
-		return "", fmt.Errorf("remote template source not accepted: %w", err)
+		return "", err
 	}
 	token := opts.GitHubToken
 	cacheDir, err := remoteCacheDir()
@@ -226,7 +227,7 @@ func FetchRemoteTemplate(ctx context.Context, uri string, opts RemoteFetchOption
 			return "", fmt.Errorf("failed to fetch GitHub folder: %w", err)
 		}
 	case RemoteTypeArchive:
-		if err := fetchArchive(ctx, uri, templateCachePath); err != nil {
+		if err := fetchArchive(ctx, uri, templateCachePath, opts.Credentials); err != nil {
 			return "", fmt.Errorf("failed to fetch archive: %w", err)
 		}
 	case RemoteTypeRclone:
@@ -719,7 +720,7 @@ func copyDirExcludingGit(src, dst string) error {
 }
 
 // fetchArchive downloads and extracts a compressed archive.
-func fetchArchive(ctx context.Context, uri string, destPath string) error {
+func fetchArchive(ctx context.Context, uri string, destPath string, creds RemoteFetchCredentials) error {
 	// Download the archive to a temp file
 	tmpFile, err := os.CreateTemp("", "scion-archive-*")
 	if err != nil {
@@ -735,7 +736,7 @@ func fetchArchive(ctx context.Context, uri string, destPath string) error {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	resp, err := newArchiveHTTPClient().Do(req)
+	resp, err := newArchiveHTTPClient(creds).Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to download archive: %w", err)
 	}
@@ -1015,9 +1016,12 @@ var rcloneFetch RcloneFetchFunc = execRcloneFetch
 // func. It lets tests outside this package observe the source and the
 // credential mode that a fetch would use, without network access.
 //
-// TEST-ONLY: never call this from production code. It mutates package-global
+// TEST-ONLY: it panics outside a test binary. It mutates package-global
 // state and is not safe for use from parallel tests.
 func SetRcloneFetchForTest(fn RcloneFetchFunc) (restore func()) {
+	if !testing.Testing() {
+		panic("SetRcloneFetchForTest called outside a test binary")
+	}
 	prev := rcloneFetch
 	rcloneFetch = fn
 	return func() { rcloneFetch = prev }

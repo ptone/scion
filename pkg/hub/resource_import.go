@@ -204,7 +204,7 @@ func (s *Server) importFromRemote(ctx context.Context, projectID, sourceURL, sco
 // the error message returned when the selection keeps no dirs.
 func (s *Server) importFromRemoteSelected(ctx context.Context, projectID, sourceURL, scope string, kind resourceImportKind, progress importProgressFunc, selectDirs func([]resourceDir, []skippedDir) ([]resourceDir, []skippedDir), noMatch string) ([]string, error) {
 	if err := config.ValidateRemoteFetchSource(sourceURL); err != nil {
-		return nil, fmt.Errorf("source not accepted: %w", err)
+		return nil, err
 	}
 	if s.GetStorage() == nil {
 		return nil, fmt.Errorf("%s storage is not configured", kind.noun)
@@ -636,7 +636,7 @@ func applySlugFilter(dirs []resourceDir, skipped []skippedDir, slug string) ([]r
 // importCredential).
 func (s *Server) discoverFromRemote(ctx context.Context, scope, scopeID, sourceURL string, kind resourceImportKind) ([]string, []string, error) {
 	if err := config.ValidateRemoteFetchSource(sourceURL); err != nil {
-		return nil, nil, fmt.Errorf("source not accepted: %w", err)
+		return nil, nil, err
 	}
 	if s.GetStorage() == nil {
 		return nil, nil, fmt.Errorf("%s storage is not configured", kind.noun)

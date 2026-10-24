@@ -27,6 +27,7 @@ import (
 	"strings"
 	gosync "sync"
 	"syscall"
+	"testing"
 	"time"
 
 	"github.com/rclone/rclone/fs/fspath"
@@ -148,6 +149,9 @@ func validateGCSPath(path string) error {
 	return nil
 }
 
+// ErrRemoteSourceNotAccepted wraps every refusal from ValidateRemoteFetchSource.
+var ErrRemoteSourceNotAccepted = errors.New("remote template source not accepted")
+
 // ValidateRemoteFetchSource checks that uri is a remote template source that
 // may be fetched:
 //   - rclone sources: see ParseRcloneRemote;
@@ -156,8 +160,16 @@ func validateGCSPath(path string) error {
 //     literal or localhost. The resolved address of every connection is also
 //     checked when the archive is downloaded (see checkPublicDialAddress).
 //
-// Error messages never repeat the source string.
+// Every error wraps ErrRemoteSourceNotAccepted. Error messages never repeat
+// the source string.
 func ValidateRemoteFetchSource(uri string) error {
+	if err := validateRemoteFetchSource(uri); err != nil {
+		return fmt.Errorf("%w: %w", ErrRemoteSourceNotAccepted, err)
+	}
+	return nil
+}
+
+func validateRemoteFetchSource(uri string) error {
 	if !IsRemoteURI(uri) {
 		return errors.New("not a remote template source")
 	}
@@ -237,7 +249,7 @@ var nonGlobalPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("fec0::/10"),          // site-local (deprecated)
 	netip.MustParsePrefix("::ffff:0:0:0/96"),    // IPv4-translated
 	netip.MustParsePrefix("64:ff9b::/96"),       // NAT64 (embeds IPv4)
-	netip.MustParsePrefix("::/128"),             // unspecified
+	netip.MustParsePrefix("::/96"),              // IPv4-compatible (deprecated), incl. :: and ::1
 	netip.MustParsePrefix("169.254.169.254/32"), // cloud metadata (also link-local)
 }
 
@@ -294,6 +306,9 @@ var (
 			return checkPublicDialAddress(address)
 		},
 	}).DialContext
+	// archiveEnvProxy selects the proxy in RemoteFetchCallerCredentials
+	// mode.
+	archiveEnvProxy           = http.ProxyFromEnvironment
 	archiveProxyDial dialFunc = (&net.Dialer{
 		Timeout:   30 * time.Second,
 		KeepAlive: 30 * time.Second,
@@ -327,27 +342,28 @@ func resolvePublic(ctx context.Context, host string) ([]netip.Addr, error) {
 // connection goes to a checked address (so a DNS answer that changes after
 // the check is never used). Redirects must stay on https.
 //
-// When the environment configures an HTTP proxy, connections to the proxy
-// itself are not checked (the proxy is set by whoever runs the process); the
-// target host is still resolved and checked before the request is handed to
-// the proxy.
-func newArchiveHTTPClient() *http.Client {
+// In RemoteFetchAnonymous mode (hub and broker) no proxy is used, so the
+// dial-time check always sees the real destination. In
+// RemoteFetchCallerCredentials mode (the CLI, acting as the user) an HTTP
+// proxy from the environment is honoured: the connection to the proxy is
+// not checked, and the target host is resolved and checked before the
+// request is handed to the proxy, which then makes the final connection.
+func newArchiveHTTPClient(creds RemoteFetchCredentials) *http.Client {
 	t := http.DefaultTransport.(*http.Transport).Clone()
-	envProxy := t.Proxy
+	t.Proxy = nil
 	var proxyAddrs gosync.Map
-	t.Proxy = func(r *http.Request) (*url.URL, error) {
-		if envProxy == nil {
-			return nil, nil
+	if creds == RemoteFetchCallerCredentials {
+		t.Proxy = func(r *http.Request) (*url.URL, error) {
+			p, err := archiveEnvProxy(r)
+			if err != nil || p == nil {
+				return p, err
+			}
+			if _, err := resolvePublic(r.Context(), r.URL.Hostname()); err != nil {
+				return nil, err
+			}
+			proxyAddrs.Store(canonicalProxyAddr(p), struct{}{})
+			return p, nil
 		}
-		p, err := envProxy(r)
-		if err != nil || p == nil {
-			return p, err
-		}
-		if _, err := resolvePublic(r.Context(), r.URL.Hostname()); err != nil {
-			return nil, err
-		}
-		proxyAddrs.Store(canonicalProxyAddr(p), struct{}{})
-		return p, nil
 	}
 	t.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 		if _, ok := proxyAddrs.Load(address); ok {
@@ -444,8 +460,11 @@ var (
 // that exact scheme, host and port are let through. It returns a restore
 // func.
 //
-// TEST-ONLY: never call this from production code.
+// TEST-ONLY: it panics outside a test binary.
 func AllowArchiveServerForTest(rawURL string) (restore func()) {
+	if !testing.Testing() {
+		panic("AllowArchiveServerForTest called outside a test binary")
+	}
 	u, err := url.Parse(rawURL)
 	if err != nil || u.Host == "" {
 		panic("AllowArchiveServerForTest: invalid server URL")
