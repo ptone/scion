@@ -82,6 +82,12 @@ type mockManager struct {
 	// and capture its arguments, without needing a real AgentManager/tmux.
 	sendKeysFunc func(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error
 
+	// beforeProvision, when set, runs at the start of Provision (for
+	// example to leave agent files behind before provisionErr).
+	beforeProvision func(opts api.StartOptions)
+	// beforeStart, when set, runs at the start of Start.
+	beforeStart func(opts api.StartOptions)
+
 	// preflightErr, when set, is returned by Preflight (e.g.
 	// config.ErrTemplateNotFound, for the async-create admission 404 case).
 	preflightErr      error
@@ -96,6 +102,9 @@ type mockManager struct {
 }
 
 func (m *mockManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	if m.beforeProvision != nil {
+		m.beforeProvision(opts)
+	}
 	if m.provisionErr != nil {
 		return nil, m.provisionErr
 	}
@@ -122,6 +131,9 @@ func (m *mockManager) Reprovision(ctx context.Context, opts api.StartOptions) (*
 }
 
 func (m *mockManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
+	if m.beforeStart != nil {
+		m.beforeStart(opts)
+	}
 	m.mu.Lock()
 	m.startCalls++
 	m.lastStartOpts = opts
@@ -171,7 +183,7 @@ func (m *mockManager) Start(ctx context.Context, opts api.StartOptions) (*api.Ag
 	return agent, nil
 }
 
-func (m *mockManager) Stop(ctx context.Context, agentID, projectPath, runID string) error {
+func (m *mockManager) Stop(ctx context.Context, agentID, projectPath, projectID, runID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stopCalls++
@@ -191,7 +203,7 @@ func (m *mockManager) StopTarget(ctx context.Context, ref runtime.RunRef) error 
 	return m.stopErr
 }
 
-func (m *mockManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+func (m *mockManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath, projectID string, removeBranch bool) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.lastDeleteProjectPath = projectPath
