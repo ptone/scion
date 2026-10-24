@@ -44,6 +44,22 @@ type sponsorFaultStore struct {
 	store.Store
 	failEdgesFor string
 	failUser     string
+	failProject  string
+	failBindings bool
+}
+
+func (s *sponsorFaultStore) ListRoleBindingsForPrincipals(ctx context.Context, principals []store.PrincipalRef, scopeTypes, scopeIDs []string) ([]*store.RoleBinding, error) {
+	if s.failBindings {
+		return nil, errSponsorStoreFault
+	}
+	return s.Store.ListRoleBindingsForPrincipals(ctx, principals, scopeTypes, scopeIDs)
+}
+
+func (s *sponsorFaultStore) GetProject(ctx context.Context, id string) (*store.Project, error) {
+	if id == s.failProject {
+		return nil, errSponsorStoreFault
+	}
+	return s.Store.GetProject(ctx, id)
 }
 
 func (s *sponsorFaultStore) GetDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string) ([]*store.DelegationEdge, error) {
@@ -53,9 +69,16 @@ func (s *sponsorFaultStore) GetDelegationEdgesForDelegate(ctx context.Context, d
 	return s.Store.GetDelegationEdgesForDelegate(ctx, delegateType, delegateID)
 }
 
+// GetUser fails for failUser, returning the real, active user together
+// with the error, so code that ignored the error would go on with an
+// active user and be caught by an assertion rather than a nil dereference.
 func (s *sponsorFaultStore) GetUser(ctx context.Context, id string) (*store.User, error) {
 	if id == s.failUser {
-		return nil, errSponsorStoreFault
+		u, err := s.Store.GetUser(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		return u, errSponsorStoreFault
 	}
 	return s.Store.GetUser(ctx, id)
 }
@@ -221,17 +244,25 @@ func TestArtifactHostRecordedDelegator(t *testing.T) {
 		assert.Equal(t, "", g.stewardRecorded(h, g.user(g.delegator), g.agent.ID, g.home, g.delegator))
 		assert.Equal(t, "", g.reviewRecorded(h, g.user(g.delegator), g.agent.ID, g.home, g.delegator))
 	})
+	// Deleting the home project ends both clauses. The store delete removes
+	// only the project row, so the recorded user's role binding in the home
+	// is left behind and would still admit it: the home-exists check is
+	// what ends the review clause.
 	t.Run("home project deleted", func(t *testing.T) {
 		g := newReviewGrantFixture(t)
 		h := newArtifactHost(g.srv)
+		require.Equal(t, artifacts.ReviewClauseDelegatingUser, g.reviewRecorded(h, g.user(g.delegator), g.agent.ID, g.home, g.delegator))
 		require.NoError(t, g.s.DeleteProject(context.Background(), g.home))
-		assert.Equal(t, "", g.stewardRecorded(h, g.user(g.delegator), g.agent.ID, g.home, g.delegator))
+		assert.Equal(t, "", g.stewardRecorded(h, g.user(g.delegator), g.agent.ID, g.home, g.delegator), "steward clause")
+		assert.Equal(t, "", g.reviewRecorded(h, g.user(g.delegator), g.agent.ID, g.home, g.delegator), "review clause")
+		assert.False(t, h.recordedDelegator(context.Background(), g.delegator, g.delegator, g.home), "recordedDelegator")
 	})
 }
 
 // TestArtifactHostRecordedDelegatorChecks drives recordedDelegator
 // directly: the local development user counts only while local-development
-// authority is enabled, and a failed user lookup answers false.
+// authority is enabled, and a failed user, home project or admission
+// lookup answers false.
 func TestArtifactHostRecordedDelegatorChecks(t *testing.T) {
 	f := newReviewGrantFixture(t)
 	ctx := context.Background()
@@ -246,6 +277,14 @@ func TestArtifactHostRecordedDelegatorChecks(t *testing.T) {
 	t.Run("user lookup fault fails closed", func(t *testing.T) {
 		require.True(t, hostOverStore(f.s, false).recordedDelegator(ctx, f.delegator, f.delegator, f.home), "without the fault")
 		faulty := hostOverStore(&sponsorFaultStore{Store: f.s, failUser: f.delegator}, false)
+		assert.False(t, faulty.recordedDelegator(ctx, f.delegator, f.delegator, f.home))
+	})
+	t.Run("admission lookup fault fails closed", func(t *testing.T) {
+		faulty := hostOverStore(&sponsorFaultStore{Store: f.s, failBindings: true}, false)
+		assert.False(t, faulty.recordedDelegator(ctx, f.delegator, f.delegator, f.home))
+	})
+	t.Run("home project lookup fault fails closed", func(t *testing.T) {
+		faulty := hostOverStore(&sponsorFaultStore{Store: f.s, failProject: f.home}, false)
 		assert.False(t, faulty.recordedDelegator(ctx, f.delegator, f.delegator, f.home))
 	})
 	t.Run("missing user", func(t *testing.T) {

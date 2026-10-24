@@ -332,7 +332,8 @@ func (h *artifactHost) liveDelegator(ctx context.Context, userID, ownerAgentID, 
 
 // recordedDelegator reports whether userID, the caller, is the delegating
 // user recorded on an artifact (sponsorRef, ptone/scion#6028) and still
-// stands as one: the user exists and is active; when it is the local
+// stands as one: the home project homeScope exists; the user exists and is
+// active; when it is the local
 // development user, local-development authority is enabled on this
 // server; and it is admitted to the artifact's current home homeScope for
 // artifact.manage (ProjectAdmissionForClass, evaluated for that user with
@@ -351,6 +352,16 @@ func (h *artifactHost) recordedDelegator(ctx context.Context, userID, sponsorRef
 	}
 	authz := h.server.authzService
 	if authz.store == nil {
+		return false
+	}
+	// A deleted home project ends the clause (as it ends every steward
+	// clause): admission alone does not show that the project exists (a
+	// system role, or role bindings not yet removed, may still admit to a
+	// deleted project's id).
+	if project, err := authz.store.GetProject(ctx, homeScope); err != nil || project == nil {
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			slog.WarnContext(ctx, "artifacts: home project lookup for the recorded delegating user failed", "error", err)
+		}
 		return false
 	}
 	user, err := authz.store.GetUser(ctx, sponsorRef)
