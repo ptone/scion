@@ -310,6 +310,7 @@ func TestMessageStarStore_SQLite(t *testing.T) {
 	require.NotNil(t, env.stars)
 	testMessageStarStoreContract(t, env)
 	testMessageStarLifecycleContract(t, env)
+	testStarredHistoryContract(t, env)
 }
 
 // TestMessageStarStore_SQLite_FixedWidthTime pins the SQLite TEXT form:
@@ -409,4 +410,5 @@ VALUES ($1, $2, $3, $4, $5, $6, 'user:x@test.com')`, id, created, channel, threa
 	require.NotNil(t, env.stars)
 	testMessageStarStoreContract(t, env)
 	testMessageStarLifecycleContract(t, env)
+	testStarredHistoryContract(t, env)
 }

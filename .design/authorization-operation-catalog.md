@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 355
+**Operations:** 356
 
 ## Table of Contents
 
@@ -186,6 +186,7 @@
 - [chat.star.read](#chatstarread) — Read the current detail of one of the caller's stars. Needs project:read on the message's thread now; a token also needs inbox:read for its project. 404 while web.chat_starred_messages is off
 - [chat.star.state](#chatstarstate) — Report which of up to 200 messages the caller starred, keeping only live messages in threads the caller can read now; a token keeps only threads whose project it may read under inbox:read. 404 while web.chat_starred_messages is off
 - [chat.star.list](#chatstarlist) — List the caller's stars in one thread, newest first, with a sealed cursor. Needs project:read on the thread's project; a token also needs inbox:read for it. 404 while web.chat_starred_messages is off
+- [chat.conversation.history.starred](#chatconversationhistorystarred) — Read only the caller's starred messages of one conversation (?starred=true), in history order with a sealed cursor bound to the conversation, the caller and the filter. Needs the conversation's normal read access (project:read on a thread's project, participation in a DM) and inbox:read: a token needs inbox:read for the thread's or peer agent's project, or a hub boundary for a DM between users. An around target must itself be starred. 404 while web.chat_starred_messages is off, never unfiltered history
 - [chat.star.remove](#chatstarremove) — Remove the caller's own star of a message; always 204. No message or conversation lookup; a project token removes only a star whose stored project is inside its boundary. 404 while web.chat_starred_messages is off
 - [chat.attachment.upload.project](#chatattachmentuploadproject) — Upload chat attachments to a space. Needs project:read on the space's project; a token also needs inbox:write for it
 - [chat.attachment.upload.noproject](#chatattachmentuploadnoproject) — Upload project-less chat attachments, reachable only through the messages that reference them. A federated caller is refused. A token needs inbox:write on a hub boundary
@@ -7007,6 +7008,39 @@
 
 - `pkg/hub:TestChatStars_TokenSelectors`
 - `pkg/hub:TestChatStars_ListPaginates`
+
+---
+
+## chat.conversation.history.starred
+
+**Domain:** chat
+
+**Description:** Read only the caller's starred messages of one conversation (?starred=true), in history order with a sealed cursor bound to the conversation, the caller and the filter. Needs the conversation's normal read access (project:read on a thread's project, participation in a DM) and inbox:read: a token needs inbox:read for the thread's or peer agent's project, or a hub boundary for a DM between users. An around target must itself be starred. 404 while web.chat_starred_messages is off, never unfiltered history
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/conversations/{id}/messages` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `conversation_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** conversation-project
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatStarredHistory_TokenSelectors`
+- `pkg/hub:TestChatStarredHistory_GateAndValidation`
 
 ---
 
