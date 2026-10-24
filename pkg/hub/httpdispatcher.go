@@ -3302,7 +3302,8 @@ type startEnvResult struct {
 // buildStartEnv assembles the full resolved environment used to start or
 // restart an agent on the runtime broker: applied-config env, model/
 // thinking-level overrides, Hub-storage env (user/project/hub/broker scopes,
-// plus progeny), type-aware secrets (environment-type ones merged into env),
+// plus progeny), type-aware secrets (environment-type ones merged into env;
+// none for a no-auth agent except GITHUB_TOKEN, as in create),
 // agent identity and hub-connectivity vars, workspace sharing mode and
 // git-ness, GCP identity vars, a fresh Hub auth token, a transport token, and
 // any GitHub App lifecycle token.
@@ -3392,18 +3393,28 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	// lookup and before any agent or transport token is minted below, so
 	// nothing reaches the broker and there is nothing to revoke. Absence is
 	// not an error: an agent with no secrets resolves to an empty list.
-	resolvedSecrets, _, err := d.resolveSecrets(ctx, agent)
-	if err != nil {
-		d.log.WarnContext(ctx, caller+": failed to resolve secrets; agent not "+startedVerb,
-			"agent_id", agent.ID, "error", err)
-		return startEnvResult{}, &secretResolutionError{Verb: startedVerb, Err: err}
-	}
-	resolvedSecrets = d.dropTZTargetedSecrets(ctx, agent, resolvedSecrets)
-	for _, s := range resolvedSecrets {
-		if (s.Type == "environment" || s.Type == "") && s.Target != "" {
-			if existing, exists := resolvedEnv[s.Target]; !exists || existing == "" {
-				resolvedEnv[s.Target] = s.Value
-				classifyEnv(&envClassifications, s.Target, api.EnvKindSecretFetchable)
+	//
+	// A no-auth agent gets no secrets from the secret store except
+	// GITHUB_TOKEN, exactly as buildCreateRequestFor does for create: no
+	// environment-type secrets in env and no file or variable secrets for
+	// the broker.
+	var resolvedSecrets []ResolvedSecret
+	if agentNoAuth(agent) {
+		d.injectNoAuthGitHubToken(ctx, agent, resolvedEnv, &envClassifications)
+	} else {
+		resolvedSecrets, _, err = d.resolveSecrets(ctx, agent)
+		if err != nil {
+			d.log.WarnContext(ctx, caller+": failed to resolve secrets; agent not "+startedVerb,
+				"agent_id", agent.ID, "error", err)
+			return startEnvResult{}, &secretResolutionError{Verb: startedVerb, Err: err}
+		}
+		resolvedSecrets = d.dropTZTargetedSecrets(ctx, agent, resolvedSecrets)
+		for _, s := range resolvedSecrets {
+			if (s.Type == "environment" || s.Type == "") && s.Target != "" {
+				if existing, exists := resolvedEnv[s.Target]; !exists || existing == "" {
+					resolvedEnv[s.Target] = s.Value
+					classifyEnv(&envClassifications, s.Target, api.EnvKindSecretFetchable)
+				}
 			}
 		}
 	}
