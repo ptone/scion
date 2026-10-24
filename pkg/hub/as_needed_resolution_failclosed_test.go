@@ -406,3 +406,46 @@ func TestReincarnateAgent_AsNeededResolutionErrorRestoresPrevious(t *testing.T) 
 	assert.Equal(t, "old-image:v1", final.AppliedConfig.Image, "the previous config is restored on the row")
 	assertNoFailClosedDetail(t, final.Message, "the agent message")
 }
+
+// A provision-only create whose provision returns a secret resolution error
+// answers the fixed 503, removes the broker files and the agent row like a
+// failed skill resolution, and logs at WARN; no row is left to start.
+func TestCreateAgent_ProvisionOnlySecretResolutionFailure(t *testing.T) {
+	disp := &skillFailDispatcher{provisionErr: fakeSecretResolutionErr("created")}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	logs := &levelCapturingHandler{}
+	srv.agentLifecycleLog = slog.New(logs)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:          "secret-fail-agent",
+		ProjectID:     project.ID,
+		Task:          "some task",
+		ProvisionOnly: true,
+	})
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	var body ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, ErrCodeUnavailable, body.Error.Code)
+	assert.Equal(t, fixedCreateSecretMessage, body.Error.Message)
+	assertNoSecretResolutionDetail(t, rec.Body.String(), "the API body")
+
+	require.NotNil(t, disp.provisionedAgent, "provision must have been dispatched")
+	agentID := disp.provisionedAgent.ID
+	_, err := s.GetAgent(context.Background(), agentID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "the failed agent record is deleted")
+	assert.True(t, disp.deleteCalled, "the broker-side files are cleaned up")
+
+	found := false
+	logs.mu.Lock()
+	for _, r := range logs.records {
+		if r.Level == slog.LevelWarn && r.Message == "Provision-only create failed: agent secrets could not be resolved" {
+			found = true
+		}
+	}
+	logs.mu.Unlock()
+	assert.True(t, found, "the failure is logged at WARN")
+
+	// A start after the failed create finds no agent to start.
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agentID+"/start", nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+}

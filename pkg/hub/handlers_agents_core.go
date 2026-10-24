@@ -2875,8 +2875,22 @@ func (s *Server) createAgentInProject(
 					// the agent row, and relay the broker's status. No revoke
 					// here: DispatchAgentProvision already revoked any
 					// credential it minted on this error return. Other
-					// provision failures stay warnings.
+					// provision failures, except a secret resolution error
+					// (below), stay warnings.
 					s.agentLifecycleLog.Warn("Provision-only create failed: required skill could not be resolved",
+						"agent_id", agent.ID, "agent", agent.Name, "broker", agent.RuntimeBrokerID, "error", err)
+					failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
+					return
+				}
+				if isSecretResolutionError(err) {
+					// The as-needed values the broker asked for could not be
+					// resolved, and a start does not resolve them, so the
+					// agent cannot start from this provision
+					// (ptone/scion#5959). Fail the create as above: remove the
+					// broker files and the agent row, and answer the fixed
+					// 503. DispatchAgentProvision already revoked any
+					// credential it minted on this error return.
+					s.agentLifecycleLog.Warn("Provision-only create failed: agent secrets could not be resolved",
 						"agent_id", agent.ID, "agent", agent.Name, "broker", agent.RuntimeBrokerID, "error", err)
 					failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
 					return
