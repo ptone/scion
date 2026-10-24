@@ -1,0 +1,181 @@
+{
+  "available as-needed key drives auth autodetect": {
+    "status": 202,
+    "required": [
+      "GOOGLE_CLOUD_PROJECT",
+      "GOOGLE_CLOUD_REGION",
+      "gcloud-adc"
+    ],
+    "needs": [
+      "GOOGLE_CLOUD_PROJECT",
+      "GOOGLE_CLOUD_REGION",
+      "gcloud-adc"
+    ],
+    "secretInfo": {
+      "GOOGLE_CLOUD_PROJECT": {
+        "source": "auth"
+      },
+      "GOOGLE_CLOUD_REGION": {
+        "source": "auth"
+      },
+      "gcloud-adc": {
+        "description": "Google Cloud Application Default Credentials (ADC) file for vertex-ai authentication",
+        "source": "auth",
+        "type": "file"
+      }
+    },
+    "alternatives": {
+      "GOOGLE_CLOUD_REGION": [
+        "CLOUD_ML_REGION",
+        "GOOGLE_CLOUD_LOCATION"
+      ]
+    }
+  },
+  "claude auth key needed": {
+    "status": 202,
+    "required": [
+      "ANTHROPIC_API_KEY"
+    ],
+    "needs": [
+      "ANTHROPIC_API_KEY"
+    ],
+    "secretInfo": {
+      "ANTHROPIC_API_KEY": {
+        "source": "auth"
+      }
+    }
+  },
+  "claude vertex-ai needs region and ADC file, with alternatives": {
+    "status": 202,
+    "required": [
+      "GOOGLE_CLOUD_REGION",
+      "gcloud-adc"
+    ],
+    "needs": [
+      "GOOGLE_CLOUD_REGION",
+      "gcloud-adc"
+    ],
+    "secretInfo": {
+      "GOOGLE_CLOUD_REGION": {
+        "source": "auth"
+      },
+      "gcloud-adc": {
+        "description": "Google Cloud Application Default Credentials (ADC) file for vertex-ai authentication",
+        "source": "auth",
+        "type": "file"
+      }
+    },
+    "alternatives": {
+      "GOOGLE_CLOUD_REGION": [
+        "CLOUD_ML_REGION",
+        "GOOGLE_CLOUD_LOCATION"
+      ]
+    }
+  },
+  "gemini api-key any_of group": {
+    "status": 202,
+    "required": [
+      "GEMINI_API_KEY"
+    ],
+    "needs": [
+      "GEMINI_API_KEY"
+    ],
+    "secretInfo": {
+      "GEMINI_API_KEY": {
+        "source": "auth"
+      }
+    },
+    "alternatives": {
+      "GEMINI_API_KEY": [
+        "GOOGLE_API_KEY"
+      ]
+    }
+  },
+  "gemini auth-file chosen by harnessAuth": {
+    "status": 201
+  },
+  "harness secrets, profile secrets and profile override marker": {
+    "status": 202,
+    "required": [
+      "HC_SECRET",
+      "OVERRIDE_MARKER",
+      "PROFILE_SECRET"
+    ],
+    "needs": [
+      "HC_SECRET",
+      "OVERRIDE_MARKER",
+      "PROFILE_SECRET"
+    ],
+    "secretInfo": {
+      "HC_SECRET": {
+        "description": "harness secret",
+        "source": "settings",
+        "type": "file"
+      },
+      "OVERRIDE_MARKER": {
+        "source": "settings"
+      },
+      "PROFILE_SECRET": {
+        "description": "profile secret",
+        "source": "settings"
+      }
+    }
+  },
+  "no gatherEnv skips the preflight": {
+    "status": 201
+  },
+  "noAuth skips the preflight": {
+    "status": 201
+  },
+  "request required secrets, one also a settings marker": {
+    "status": 202,
+    "required": [
+      "API_KEY",
+      "SECRET_TOKEN",
+      "TPL_SECRET"
+    ],
+    "needs": [
+      "API_KEY",
+      "SECRET_TOKEN",
+      "TPL_SECRET"
+    ],
+    "secretInfo": {
+      "API_KEY": {
+        "source": "settings"
+      },
+      "SECRET_TOKEN": {
+        "description": "declared",
+        "source": "template"
+      },
+      "TPL_SECRET": {
+        "description": "tpl",
+        "source": "template",
+        "type": "environment"
+      }
+    }
+  },
+  "settings markers, all satisfied": {
+    "status": 201
+  },
+  "settings markers, one from the hub": {
+    "status": 202,
+    "required": [
+      "API_KEY",
+      "SECRET_TOKEN"
+    ],
+    "hubHas": [
+      "API_KEY"
+    ],
+    "needs": [
+      "SECRET_TOKEN"
+    ],
+    "secretInfo": {
+      "SECRET_TOKEN": {
+        "source": "settings"
+      }
+    }
+  },
+  "settings markers, satisfied by config env and a secret target": {
+    "status": 201
+  }
+}
