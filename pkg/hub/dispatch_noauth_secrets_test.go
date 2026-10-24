@@ -102,10 +102,14 @@ func seedNoAuthSecrets(t *testing.T, f *runDispatchFixture, b *secret.LocalBacke
 }
 
 // startPaths are the two dispatches that use buildStartEnv. env returns the
-// env the broker received; sent returns everything the broker received in
-// the call (env, secrets for a start, and the extras), formatted, so a test
-// can check that no secret value reached the broker by any field. A restart
-// has no secrets parameter; its env and extras are what it sends.
+// env the broker received; sent returns what the broker received in the
+// call for the agent (env, secrets for a start, and the extras), formatted,
+// so a test can check that no secret value reached it by any of those
+// fields. A restart has no secrets parameter; its env and extras are what
+// it sends. The extras' ProvisionCredentials are left out: every start,
+// restart and create sends the project's secrets there for broker-side
+// skill resolution, never into the container env, whatever the no-auth
+// setting (sentToAgentPath).
 var startPaths = []struct {
 	name     string
 	dispatch func(ctx context.Context, f *runDispatchFixture) error
@@ -119,7 +123,7 @@ var startPaths = []struct {
 		},
 		env: func(f *runDispatchFixture) map[string]string { return f.client.lastResolvedEnv },
 		sent: func(f *runDispatchFixture) string {
-			return fmt.Sprintf("%v %+v %+v", f.client.lastResolvedEnv, f.client.lastStartResolvedSecrets, f.client.lastStartExtras)
+			return fmt.Sprintf("%v %+v %+v", f.client.lastResolvedEnv, f.client.lastStartResolvedSecrets, sentToAgentPath(f.client.lastStartExtras))
 		},
 	},
 	{
@@ -127,9 +131,16 @@ var startPaths = []struct {
 		dispatch: func(ctx context.Context, f *runDispatchFixture) error { return f.d.DispatchAgentRestart(ctx, f.agent) },
 		env:      func(f *runDispatchFixture) map[string]string { return f.client.lastRestartResolvedEnv },
 		sent: func(f *runDispatchFixture) string {
-			return fmt.Sprintf("%v %+v", f.client.lastRestartResolvedEnv, f.client.lastRestartExtras)
+			return fmt.Sprintf("%v %+v", f.client.lastRestartResolvedEnv, sentToAgentPath(f.client.lastRestartExtras))
 		},
 	},
+}
+
+// sentToAgentPath returns extras without ProvisionCredentials, the
+// broker-only skill-resolution credentials (see startPaths).
+func sentToAgentPath(extras StartExtras) StartExtras {
+	extras.ProvisionCredentials = nil
+	return extras
 }
 
 // assertNoAuthEnvWithheld checks that env carries no value of the stored
