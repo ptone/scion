@@ -23,8 +23,9 @@ import (
 )
 
 // errTemplatePinConflict is a re-pin that lost its compare-and-set because
-// the agent changed since it was read. writeStartClaimError answers it with
-// 409 version_conflict; nothing is dispatched.
+// the agent changed since it was read. writeStartClaimError and the DM wake
+// answer it with 409 template_pin_conflict; nothing is dispatched. It still
+// wraps store.ErrVersionConflict for errors.Is callers.
 var errTemplatePinConflict = fmt.Errorf("agent changed while its template was re-recorded; retry: %w", store.ErrVersionConflict)
 
 // errStartRepinRefused wraps any re-pin failure inside a claimed start

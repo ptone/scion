@@ -1044,9 +1044,11 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// claim, so a restart that another start refuses never re-pins
 			// under that start's launch, and before the stop leg, so a lost
 			// compare-and-set leaves the agent running rather than stopped
-			// and never restarted. The start leg's own re-pin is then a
-			// no-op. A refusal undoes the capacity hold; the deferred
-			// release above finishes the claim.
+			// and never restarted. The start leg's own re-pin (after its
+			// held-edit fold) is then a no-op, unless a template commit
+			// lands during the stop leg; it then re-pins again, and may
+			// answer 409 after the stop. A refusal undoes the capacity
+			// hold; the deferred release above finishes the claim.
 			if err := s.repinUserTemplateForStart(ctx, agent); err != nil {
 				sd.rollback(ctx)
 				if !s.writeStartClaimError(ctx, w, err, agent.ID) {

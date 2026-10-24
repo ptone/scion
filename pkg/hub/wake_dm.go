@@ -339,7 +339,7 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 				// compare-and-set (ptone/scion#5770): the agent changed
 				// since it was read, and nothing was dispatched.
 				return nil, &AgentDMError{
-					Code:       ErrCodeVersionConflict,
+					Code:       ErrCodeTemplatePinConflict,
 					Message:    "Failed to wake agent: " + errTemplatePinConflict.Error(),
 					HTTPStatus: http.StatusConflict,
 				}
