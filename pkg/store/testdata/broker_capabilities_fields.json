@@ -13,6 +13,7 @@
     "preserveWorkspaceCreate",
     "reprovision",
     "reprovisionEmptyPerAgent",
+    "startEnvGather",
     "startsInFlight",
     "sync",
     "templateTiers",
