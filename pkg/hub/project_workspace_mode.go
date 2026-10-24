@@ -313,10 +313,13 @@ func (s *Server) requireEmptyPerAgentBrokerCapability(ctx context.Context, w htt
 }
 
 // requireEmptyPerAgentBrokerCapabilityForAgent is
-// requireEmptyPerAgentBrokerCapability for an existing agent: it loads the
-// agent's project and checks its assigned broker. A project lookup error
-// fails closed; a missing project has nothing to gate.
-func (s *Server) requireEmptyPerAgentBrokerCapabilityForAgent(ctx context.Context, w http.ResponseWriter, agent *store.Agent) bool {
+// requireEmptyPerAgentBrokerCapability for an existing agent's start-type
+// action (verb names it): it loads the agent's project and checks its
+// assigned broker. A project lookup error fails closed; a missing project
+// has nothing to gate. A failed read of the broker record is the fixed
+// 503 errBrokerRecordUnreadable for verb (ptone/scion#6096), the store
+// error logged only.
+func (s *Server) requireEmptyPerAgentBrokerCapabilityForAgent(ctx context.Context, w http.ResponseWriter, agent *store.Agent, verb string) bool {
 	if agent.ProjectID == "" {
 		return true
 	}
@@ -328,7 +331,16 @@ func (s *Server) requireEmptyPerAgentBrokerCapabilityForAgent(ctx context.Contex
 		writeErrorFromErr(w, err, "")
 		return false
 	}
-	return s.requireEmptyPerAgentBrokerCapability(ctx, w, project, agent.RuntimeBrokerID)
+	if !project.IsEmptyPerAgent() || agent.RuntimeBrokerID == "" {
+		return true
+	}
+	broker, err := s.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
+	if err != nil {
+		s.agentLifecycleLog.Warn("start pre-check: failed to read the agent's runtime broker; nothing started",
+			"agent_id", agent.ID, "broker_id", agent.RuntimeBrokerID, "action", verb, "error", err)
+		return !writePreserveWorkspaceCapabilityError(w, &brokerRecordReadError{verb: verb, err: err})
+	}
+	return !writeEmptyPerAgentCapabilityError(w, checkEmptyPerAgentBrokerCapability(project, broker))
 }
 
 // workspaceOnRemoteBrokers reports whether project's workspace lives on

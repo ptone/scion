@@ -790,6 +790,26 @@ func (s *Server) checkPinnedPlacement(agent *store.Agent) error {
 	return err
 }
 
+// startPlacementPreCheck is the flat placement pre-check for a start-type
+// action (start, restart, wake; verb names it): a stale pin is refused as
+// before, and a failed broker-record read that is not a refusal is
+// errBrokerRecordUnreadable for verb (503, fixed message; the store error
+// goes to the server log only), so no raw store text reaches a client
+// (coordinator-2 13:53Z/14:17Z, ptone/scion#6096).
+func (s *Server) startPlacementPreCheck(ctx context.Context, agent *store.Agent, verb string) error {
+	_, err := s.pinnedPlacementBroker(ctx, agent)
+	if err == nil {
+		return nil
+	}
+	err = placementBackstopStartError(err, verb)
+	var readErr *brokerRecordReadError
+	if errors.As(err, &readErr) {
+		s.agentLifecycleLog.Warn("start pre-check: failed to read the agent's runtime broker; nothing started",
+			"agent_id", agent.ID, "broker_id", agent.RuntimeBrokerID, "action", verb, "error", readErr.err)
+	}
+	return err
+}
+
 // pinnedPlacementBroker is checkPinnedPlacement returning the agent's
 // Runtime Broker row (nil when it has none or an unpinned agent's row is
 // missing).

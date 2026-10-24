@@ -267,6 +267,11 @@ func (s *Server) execDispatchStart(ctx context.Context, d store.BrokerDispatch) 
 			// (ptone/scion#6096).
 			ctx = withoutStartRouting(ctx)
 		}
+		if args.RestartLeg {
+			// A restart's start leg on the requester: the owner's refusals
+			// name the restart (ptone/scion#6096).
+			ctx = withRestartStartLeg(ctx)
+		}
 	}
 	ctx, warns := withDispatchWarnings(ctx)
 	// A dispatcher that takes start options gets the intent's options (and
@@ -621,21 +626,30 @@ func (s *Server) execDispatchCheckPrompt(ctx context.Context, d store.BrokerDisp
 
 // applyRoutedStartArgs applies, on the owner node, the decisions a
 // requester's create or finalize_env carries for a start it routed through
-// create-with-gather (ptone/scion#6096): synchronous clears the agent's
-// async-launch opt-in for this dispatch (no create launch begins on a row
-// the start claim moved to starting); preserve re-checks the broker's
-// PreserveWorkspaceCreate capability (errBrokerLacksPreserveWorkspace,
-// nothing sent) and marks ctx so the request keeps the workspace; task, set
-// only with preserve, is the start's task for this dispatch, never stored.
+// create-with-gather (ptone/scion#6096). With preserve, the start backstops
+// and the PreserveWorkspaceCreate capability run first
+// (routedStartOwnerGuards: a refusal, nothing applied or sent), and ctx
+// carries the broker record they read and the preserve-workspace mark.
+// Then synchronous clears the agent's async-launch opt-in for this dispatch
+// (no create launch begins on a row the start claim moved to starting);
+// task, set only with preserve, is the start's task for this dispatch,
+// never stored.
 func (s *Server) applyRoutedStartArgs(ctx context.Context, agent *store.Agent, synchronous, preserve bool, task string) (context.Context, error) {
+	if preserve {
+		// The start backstops and the capability run first, on one read
+		// of the broker record, before anything of the routed start is
+		// applied; the rest of the owner's chain judges that same record.
+		broker, err := s.routedStartOwnerGuards(ctx, agent)
+		if err != nil {
+			return ctx, err
+		}
+		ctx = withDispatchBroker(ctx, broker)
+	}
 	if synchronous {
 		agent.LaunchAsyncOptIn = false
 	}
 	if !preserve {
 		return ctx, nil
-	}
-	if err := s.routedStartOwnerGuards(ctx, agent); err != nil {
-		return ctx, err
 	}
 	if task != "" {
 		if agent.AppliedConfig == nil {
@@ -646,33 +660,37 @@ func (s *Server) applyRoutedStartArgs(ctx context.Context, agent *store.Agent, s
 	return withPreserveWorkspace(ctx), nil
 }
 
+// startGuarder is the dispatcher side of the start backstops
+// (HTTPAgentDispatcher.startGuards): one read of the broker record, then
+// placement, standing, launch guard and broker assignment, returning the
+// record read.
+type startGuarder interface {
+	startGuards(ctx context.Context, agent *store.Agent, verb, op string) (*store.RuntimeBroker, error)
+}
+
+// errNoStartGuards refuses a routed start on an owner node whose
+// dispatcher cannot run the start backstops: fail closed, nothing sent.
+var errNoStartGuards = errors.New("routed start refused: this hub node's dispatcher cannot run the start guards")
+
 // routedStartOwnerGuards runs, on the owner node, the requester's start
 // backstops for a routed start's create or finalize_env, in the same order
-// and on one read of the broker record (HTTPAgentDispatcher.startGuards:
-// placement, standing, launch guard, broker assignment), then judges the
-// PreserveWorkspaceCreate capability on that same record. A dispatcher
-// that is not an *HTTPAgentDispatcher (test doubles only; the hub always
-// attaches one, with its standing check) gets the placement read, the
-// broker assignment and the capability.
-func (s *Server) routedStartOwnerGuards(ctx context.Context, agent *store.Agent) error {
-	var broker *store.RuntimeBroker
-	if hd, ok := s.GetDispatcher().(*HTTPAgentDispatcher); ok && hd != nil {
-		b, err := hd.startGuards(ctx, agent, "started", "routed start (owner)")
-		if err != nil {
-			return err
-		}
-		broker = b
-	} else {
-		b, err := checkAgentPinnedPlacement(ctx, s.store, agent)
-		if err != nil {
-			return placementBackstopStartError(err, "started")
-		}
-		if err := requireRuntimeBrokerAssigned(agent); err != nil {
-			return err
-		}
-		broker = b
+// and on one read of the broker record (startGuards: placement, standing,
+// launch guard, broker assignment), then judges the PreserveWorkspaceCreate
+// capability on that same record, and returns it for the rest of the
+// owner's dispatch chain. A dispatcher without the start guards refuses.
+func (s *Server) routedStartOwnerGuards(ctx context.Context, agent *store.Agent) (*store.RuntimeBroker, error) {
+	g, ok := s.GetDispatcher().(startGuarder)
+	if !ok || g == nil {
+		return nil, errNoStartGuards
 	}
-	return preserveWorkspaceCapability(broker)
+	broker, err := g.startGuards(ctx, agent, "started", "routed start (owner)")
+	if err != nil {
+		return nil, err
+	}
+	if err := preserveWorkspaceCapability(broker); err != nil {
+		return nil, err
+	}
+	return broker, nil
 }
 
 func (s *Server) execDispatchFinalizeEnv(ctx context.Context, d store.BrokerDispatch) (string, error) {

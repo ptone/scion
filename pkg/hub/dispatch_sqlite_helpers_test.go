@@ -122,6 +122,26 @@ type ownerErrDispatcher struct {
 	finalizeAsyncOptIn        *bool
 	finalizePreserveWorkspace bool
 	finalizeTask              string
+	// startVerb records the action the owner's last start names in its
+	// refusals (startActionVerb).
+	startVerb string
+	// st is the store the double's start guards read the broker record
+	// from (startGuarder); newCrossNodeFixture sets it.
+	st store.Store
+}
+
+// startGuards is the double's start backstops (startGuarder): the
+// placement read with the hub's read-error mapping, then the broker
+// assignment. The hub's real dispatcher adds standing and the launch guard.
+func (d *ownerErrDispatcher) startGuards(ctx context.Context, agent *store.Agent, verb, _ string) (*store.RuntimeBroker, error) {
+	broker, err := checkAgentPinnedPlacement(ctx, d.st, agent)
+	if err != nil {
+		return nil, placementBackstopStartError(err, verb)
+	}
+	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+		return nil, err
+	}
+	return broker, nil
 }
 
 // ownerSignalBus delivers the requesting node's signal to the owner node,
@@ -139,7 +159,7 @@ func newCrossNodeFixture(t *testing.T, ownerErr error, signalOwner bool) *crossN
 	events := NewChannelEventPublisher()
 	t.Cleanup(events.Close)
 
-	disp := &ownerErrDispatcher{err: ownerErr}
+	disp := &ownerErrDispatcher{err: ownerErr, st: cs}
 	owner := &Server{
 		store:             cs,
 		instanceID:        "hub-owner-" + uuid.NewString()[:8],
@@ -271,6 +291,7 @@ func (c *deferredDataOpTestClient) CreateAgentWithGather(_ context.Context, brok
 func (d *ownerErrDispatcher) DispatchAgentStart(ctx context.Context, a *store.Agent, task string, resume bool) error {
 	d.recMu.Lock()
 	d.startRoutingSuppressed = startRoutingSuppressed(ctx, StartDispatchOptions{})
+	d.startVerb = startActionVerb(ctx, StartDispatchOptions{})
 	d.recMu.Unlock()
 	if d.beforeStart != nil {
 		d.beforeStart()

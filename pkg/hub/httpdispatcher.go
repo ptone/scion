@@ -645,6 +645,32 @@ func (d *HTTPAgentDispatcher) getBrokerEndpoint(ctx context.Context, brokerID st
 	return broker.Endpoint, nil
 }
 
+// dispatchBrokerKey carries, within one start or restart dispatch chain,
+// the broker record the start guards read (withDispatchBroker).
+type dispatchBrokerKey struct{}
+
+// withDispatchBroker marks ctx with broker, the record the start guards
+// read, so the rest of the dispatch chain (the send's endpoint and
+// empty-per-agent check, the async eligibility checks, a routed start's
+// create and finalize) judges that same record instead of reading it again
+// (coordinator-2 14:17Z (b), ptone/scion#6096). The placement backstop's
+// own read is the chain's one read; it is never skipped.
+func withDispatchBroker(ctx context.Context, broker *store.RuntimeBroker) context.Context {
+	if broker == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, dispatchBrokerKey{}, broker)
+}
+
+// dispatchBroker returns the dispatch chain's broker record when ctx
+// carries one for brokerID (withDispatchBroker), and otherwise reads it.
+func (d *HTTPAgentDispatcher) dispatchBroker(ctx context.Context, brokerID string) (*store.RuntimeBroker, error) {
+	if b, _ := ctx.Value(dispatchBrokerKey{}).(*store.RuntimeBroker); b != nil && b.ID == brokerID {
+		return b, nil
+	}
+	return d.store.GetRuntimeBroker(ctx, brokerID)
+}
+
 // getProvisioningBrokerEndpoint is getBrokerEndpoint for dispatches that
 // (re-)provision or start an agent (create, provision, finalize-env, start,
 // restart). It additionally fails closed when the agent's project is
@@ -653,11 +679,14 @@ func (d *HTTPAgentDispatcher) getBrokerEndpoint(ctx context.Context, brokerID st
 // receives the mode. A project lookup error also fails closed; only a
 // missing project skips the check. Stop, delete and other non-provisioning
 // dispatches keep using getBrokerEndpoint.
+//
+// Within a start or restart dispatch chain it uses the broker record the
+// start guards read (dispatchBroker), so the chain reads the record once.
 func (d *HTTPAgentDispatcher) getProvisioningBrokerEndpoint(ctx context.Context, agent *store.Agent) (string, error) {
 	if err := d.checkShutdownGate(); err != nil {
 		return "", err
 	}
-	broker, err := d.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
+	broker, err := d.dispatchBroker(ctx, agent.RuntimeBrokerID)
 	if err != nil {
 		return "", fmt.Errorf("failed to get runtime broker: %w", err)
 	}
@@ -3650,6 +3679,22 @@ func (e *brokerRecordReadError) Unwrap() []error {
 	return []error{errBrokerRecordUnreadable, e.err}
 }
 
+// brokerRecordUnreadableFor returns err with errBrokerRecordUnreadable's
+// fixed message for verb when err carries the sentinel (for example an
+// owner node's refusal relayed back by a deferred start, whose rebuilt
+// error does not carry the action), and err unchanged otherwise.
+func brokerRecordUnreadableFor(err error, verb string) error {
+	if err == nil || !errors.Is(err, errBrokerRecordUnreadable) {
+		return err
+	}
+	var readErr *brokerRecordReadError
+	if errors.As(err, &readErr) && readErr.verb == verb {
+		return err
+	}
+	relayed := &brokerRecordReadError{verb: verb, err: err}
+	return relayed
+}
+
 // placementBackstopStartError returns err, an error from a start's or
 // restart's placement backstop, unchanged when it is a refusal (a placement
 // conflict or no broker assigned), and otherwise, a failed broker-record
@@ -4005,10 +4050,19 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 	// and beginRun: placement on one read of the broker record, standing,
 	// launch guard, broker assignment.
 	placedBroker, err := d.startGuards(ctx, agent, startActionVerb(ctx, opts), "DispatchAgentStart")
+	if err == nil && placedBroker == nil {
+		// The guards passed with no record: an unpinned agent whose broker
+		// row is missing (an empty broker ID was refused). The fixed 503,
+		// never the send's raw "not found".
+		err = &brokerRecordReadError{verb: startActionVerb(ctx, opts), err: store.ErrNotFound}
+	}
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
+	// The rest of this dispatch chain judges the record the guards read.
+	ctx = withDispatchBroker(ctx, placedBroker)
+	createCtx = withDispatchBroker(createCtx, placedBroker)
 
 	// Routing (ptone/scion#6096) comes after the placement, standing and
 	// launch backstops and the broker assignment check above, so a routed
@@ -4307,11 +4361,14 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 		d.revertRun(ctx, agent, runID, previousRunID)
 		// This node already decided the start is a plain start
 		// (startRoutesThroughCreate ran above), so the owner must not route
-		// it again: it cannot see a restart's start-leg marker.
+		// it again. A restart's start leg says so, so the owner's refusals
+		// name the restart.
+		verb := startActionVerb(ctx, opts)
 		args := &StartDispatchArgs{
-			Task:    task,
-			Resume:  resume,
-			NoRoute: true,
+			Task:       task,
+			Resume:     resume,
+			NoRoute:    true,
+			RestartLeg: verb == "restarted",
 		}
 		if opts.Async {
 			// The owner applies its own dispatcher rules; the requester
@@ -4320,7 +4377,8 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 			args.Kind = opts.launchKind()
 			args.PriorPhase = opts.PriorPhase
 		}
-		return d.deferredStart(ctx, agent, args)
+		res, derr := d.deferredStart(ctx, agent, args)
+		return res, brokerRecordUnreadableFor(derr, verb)
 	}
 	if err != nil && !isConfirmedStartNotActedOnError(err) {
 		// The failure does not fall into one of the known-safe cases (the
@@ -4399,28 +4457,17 @@ func (d *HTTPAgentDispatcher) DispatchAgentStop(ctx context.Context, agent *stor
 // It generates a fresh auth token so the restarted container has valid
 // Hub credentials, preventing auth loss across container restarts.
 func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *store.Agent) error {
-	// Flat placement backstop (see DispatchAgentStart). A failed
-	// broker-record read that is not a refusal is the fixed 503 for the
-	// restart (errBrokerRecordUnreadable), nothing sent.
-	if _, err := checkAgentPinnedPlacement(ctx, d.store, agent); err != nil {
-		err = placementBackstopStartError(err, "restarted")
-		var readErr *brokerRecordReadError
-		if errors.As(err, &readErr) {
-			d.log.WarnContext(ctx, "DispatchAgentRestart: failed to read the agent's runtime broker; nothing sent",
-				"agent_id", agent.ID, "broker_id", agent.RuntimeBrokerID, "error", readErr.err)
-		}
+	// The start backstops (startGuards; see DispatchAgentStart), with the
+	// restart's verb for a failed broker-record read, and a missing record
+	// the same fixed 503.
+	placedBroker, err := d.startGuards(ctx, agent, "restarted", "DispatchAgentRestart")
+	if err != nil {
 		return err
 	}
-	// Standing guard (ptone/scion#3433), then the start guard.
-	if err := d.dispatchStandingError(ctx, agent); err != nil {
-		return err
+	if placedBroker == nil {
+		return &brokerRecordReadError{verb: "restarted", err: store.ErrNotFound}
 	}
-	if err := d.launchGuardError(ctx, agent, "DispatchAgentRestart"); err != nil {
-		return err
-	}
-	if err := requireRuntimeBrokerAssigned(agent); err != nil {
-		return err
-	}
+	ctx = withDispatchBroker(ctx, placedBroker)
 	ctx = withRecordedRuntime(ctx, agent.Runtime)
 
 	endpoint, err := d.getProvisioningBrokerEndpoint(ctx, agent)
@@ -4513,7 +4560,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	if errors.Is(err, ErrLifecycleDeferred) {
 		// The owning node mints and records its own run ID.
 		d.revertRun(ctx, agent, runID, previousRunID)
-		return d.deferredRestart(ctx, agent)
+		return brokerRecordUnreadableFor(d.deferredRestart(ctx, agent), "restarted")
 	}
 	d.settleFailedRun(ctx, agent, runID, previousRunID, err)
 	if err != nil {

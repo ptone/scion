@@ -706,33 +706,124 @@ func TestRoutedStart_BrokerRecordUnreadableIs503(t *testing.T) {
 	})
 }
 
-// Through the HTTP lifecycle API: a start whose broker record cannot be
-// read answers 503 with the fixed body, no raw store text, nothing sent,
-// and the agent stays stopped.
+// Through the HTTP entry points, with the read failure injected on the
+// server's own store (the first read of every request): /start answers 503
+// "started", /restart 503 "restarted", and a message wake 503 "started", each
+// with the fixed body, no raw store text, nothing sent, and the agent left
+// as it was.
 func TestLifecycleHTTP_BrokerRecordUnreadableIs503(t *testing.T) {
-	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
-	project, broker := newEmptyPerAgentHandlerProject(t, s, "route-read-err", true)
-	grantPreserveWorkspaceCreate(t, s, broker.ID)
-	agent := newQuotaTestAgent(t, s, broker, project, "route-read-err", state.PhaseStopped)
-	require.NoError(t, s.CreateEnvVar(context.Background(), &store.EnvVar{
-		ID: uuid.NewString(), Key: failClosedKey, Value: failClosedValue,
-		Scope: store.ScopeProject, ScopeID: project.ID, InjectionMode: store.InjectionModeAsNeeded,
-	}))
-	client := &mockRuntimeBrokerClient{}
-	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(failingBrokerReads(s), client, false, slog.Default()))
+	setup := func(t *testing.T, name string, phase state.Phase) (*Server, *mockRuntimeBrokerClient, *store.Agent, store.Store, *storeFaultSwitch) {
+		srv, s := testServer(t)
+		grantDevUserRuntimeBrokerAccess(t, s)
+		project, broker := newEmptyPerAgentHandlerProject(t, s, name, true)
+		grantPreserveWorkspaceCreate(t, s, broker.ID)
+		agent := newQuotaTestAgent(t, s, broker, project, name, phase)
+		require.NoError(t, s.CreateEnvVar(context.Background(), &store.EnvVar{
+			ID: uuid.NewString(), Key: failClosedKey, Value: failClosedValue,
+			Scope: store.ScopeProject, ScopeID: project.ID, InjectionMode: store.InjectionModeAsNeeded,
+		}))
+		client := &mockRuntimeBrokerClient{}
+		srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default()))
+		_, fault := installStoreFault(t, srv, brokerReadFaultWrap(errors.New(fakeBrokerReadError)))
+		return srv, client, agent, s, fault
+	}
+	checkHTTP := func(t *testing.T, rec *httptest.ResponseRecorder, verb string) {
+		t.Helper()
+		require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+		var body ErrorResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		assert.Equal(t, ErrCodeUnavailable, body.Error.Code)
+		assert.Equal(t, brokerRecordUnreadableMessage(verb), body.Error.Message)
+		assert.NotContains(t, rec.Body.String(), "10.0.0.9", "no raw store text")
+	}
+	t.Run("start", func(t *testing.T) {
+		srv, client, agent, s, fault := setup(t, "read-err-start", state.PhaseStopped)
+		fault.Arm()
+		checkHTTP(t, doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", nil), "started")
+		assert.False(t, client.createCalled || client.startCalled, "nothing is sent")
+		stored, err := s.GetAgent(context.Background(), agent.ID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseStopped), stored.Phase, "the agent stays stopped")
+	})
+	t.Run("restart", func(t *testing.T) {
+		srv, client, agent, s, fault := setup(t, "read-err-restart", state.PhaseRunning)
+		fault.Arm()
+		checkHTTP(t, doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/restart", nil), "restarted")
+		assert.False(t, client.stopCalled || client.restartCalled || client.startCalled || client.createCalled, "nothing is sent")
+		stored, err := s.GetAgent(context.Background(), agent.ID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseRunning), stored.Phase, "the agent is not stopped")
+	})
+	t.Run("message wake", func(t *testing.T) {
+		srv, client, agent, _, fault := setup(t, "read-err-wake", state.PhaseSuspended)
+		fault.Arm()
+		_, dmErr := srv.wakeAgentForDM(context.Background(), agent)
+		require.NotNil(t, dmErr)
+		assert.Equal(t, http.StatusServiceUnavailable, dmErr.HTTPStatus)
+		assert.Equal(t, ErrCodeUnavailable, dmErr.Code)
+		assert.Equal(t, brokerRecordUnreadableMessage("started"), dmErr.Message)
+		assert.NotContains(t, dmErr.Message, "10.0.0.9", "no raw store text")
+		assert.False(t, client.createCalled || client.startCalled, "nothing is sent")
+	})
+}
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", nil)
-	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
-	var body ErrorResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	assert.Equal(t, ErrCodeUnavailable, body.Error.Code)
-	assert.Equal(t, brokerRecordUnreadableMessage("started"), body.Error.Message)
-	assert.NotContains(t, rec.Body.String(), "10.0.0.9", "no raw store text")
-	assert.False(t, client.createCalled || client.startCalled, "nothing is sent")
-	stored, err := s.GetAgent(context.Background(), agent.ID)
-	require.NoError(t, err)
-	assert.Equal(t, string(state.PhaseStopped), stored.Phase, "the agent stays stopped")
+// A plain (not routed) start or restart of an unpinned agent whose broker
+// row is missing answers the fixed 503 for its action, never the send's raw
+// "not found": the dispatch chain judges the guards' record.
+func TestDispatchStart_MissingBrokerRecordIs503(t *testing.T) {
+	setup := func(t *testing.T) *runDispatchFixture {
+		f := newRunDispatchFixture(t)
+		f.agent.RuntimeBrokerID = tid("broker-missing")
+		return f
+	}
+	t.Run("start", func(t *testing.T) {
+		f := setup(t)
+		err := f.d.DispatchAgentStart(context.Background(), f.agent, "", false)
+		assertBrokerReadRefusal(t, err, "started")
+		assert.Equal(t, brokerRecordUnreadableMessage("started"), err.Error())
+		assert.NotContains(t, err.Error(), "failed to get runtime broker")
+		assert.False(t, f.client.startCalled)
+	})
+	t.Run("restart", func(t *testing.T) {
+		f := setup(t)
+		err := f.d.DispatchAgentRestart(context.Background(), f.agent)
+		assertBrokerReadRefusal(t, err, "restarted")
+		assert.Equal(t, brokerRecordUnreadableMessage("restarted"), err.Error())
+		assert.False(t, f.client.restartCalled)
+	})
+}
+
+// A restart's start leg handed to the owner node keeps its mark: the
+// owner's start names the restart, and an owner refusal for a failed
+// broker-record read reaches the requester as the restart's fixed message.
+func TestCrossNode_RestartLegVerbCrosses(t *testing.T) {
+	t.Run("the owner sees the restart leg", func(t *testing.T) {
+		f := newCrossNodeFixture(t, nil, true)
+		_ = f.requester.DispatchAgentStart(withRestartStartLeg(crossNodeCtx(t)), f.agent, "", false)
+		f.ownerDisp.recMu.Lock()
+		defer f.ownerDisp.recMu.Unlock()
+		assert.Equal(t, "restarted", f.ownerDisp.startVerb)
+	})
+	t.Run("a plain start stays a start", func(t *testing.T) {
+		f := newCrossNodeFixture(t, nil, true)
+		_ = f.requester.DispatchAgentStart(crossNodeCtx(t), f.agent, "", false)
+		f.ownerDisp.recMu.Lock()
+		defer f.ownerDisp.recMu.Unlock()
+		assert.Equal(t, "started", f.ownerDisp.startVerb)
+	})
+	t.Run("an owner read refusal reads as the restart", func(t *testing.T) {
+		ownerErr := &brokerRecordReadError{verb: "restarted", err: errors.New(fakeBrokerReadError)}
+		f := newCrossNodeFixture(t, ownerErr, true)
+		err := f.requester.DispatchAgentStart(withRestartStartLeg(crossNodeCtx(t)), f.agent, "", false)
+		require.ErrorIs(t, err, errBrokerRecordUnreadable)
+		assert.Equal(t, brokerRecordUnreadableMessage("restarted"), err.Error())
+		assert.NotContains(t, err.Error(), "10.0.0.9")
+		rec := httptest.NewRecorder()
+		require.True(t, writePreserveWorkspaceCapabilityError(rec, err))
+		var body ErrorResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		assert.Equal(t, brokerRecordUnreadableMessage("restarted"), body.Error.Message)
+	})
 }
 
 // On the owner node, a routed start's create or finalize_env whose broker
@@ -742,7 +833,7 @@ func TestCrossNode_OwnerBrokerRecordUnreadable(t *testing.T) {
 	for _, op := range []string{"create", "finalize_env"} {
 		t.Run(op, func(t *testing.T) {
 			f := newCrossNodeFixture(t, nil, false)
-			f.owner.store = failingBrokerReads(f.store)
+			f.ownerDisp.st = failingBrokerReads(f.store)
 			var raw []byte
 			var err error
 			if op == "create" {
@@ -803,6 +894,33 @@ func TestCrossNode_OwnerRunsStartGuardsFirst(t *testing.T) {
 		_, err = owner.execDispatchCreate(context.Background(), store.BrokerDispatch{AgentID: agent.ID, Args: args(t)})
 		require.ErrorIs(t, err, errNoRuntimeBrokerAssigned)
 		assert.False(t, client.createCalled, "nothing is sent")
+	})
+	t.Run("broker record read fails: the fixed 503, nothing sent or minted", func(t *testing.T) {
+		owner, client, _, agent, cs := setup(t)
+		hd := NewHTTPAgentDispatcherWithClient(failingBrokerReads(cs), client, false, slog.Default())
+		owner.SetDispatcher(hd)
+		hd.SetRequiredStandingCheck(func(context.Context, *store.Agent) error { return nil })
+		gen := &mintCountingGen{AgentTokenGenerator: runTokenGenerator{}}
+		hd.SetTokenGenerator(gen)
+		for _, op := range []string{"create", "finalize_env"} {
+			var err error
+			if op == "create" {
+				_, err = owner.execDispatchCreate(context.Background(), store.BrokerDispatch{AgentID: agent.ID, Args: args(t)})
+			} else {
+				raw, merr := json.Marshal(&FinalizeEnvDispatchArgs{Synchronous: true, PreserveWorkspace: true})
+				require.NoError(t, merr)
+				_, err = owner.execDispatchFinalizeEnv(context.Background(), store.BrokerDispatch{AgentID: agent.ID, Args: string(raw)})
+			}
+			assertBrokerReadRefusal(t, err, "started")
+		}
+		assert.False(t, client.createCalled, "nothing is sent")
+		assert.Equal(t, 0, gen.mints, "no credential is minted")
+	})
+	t.Run("a dispatcher without the start guards refuses", func(t *testing.T) {
+		owner, _, _, agent, _ := setup(t)
+		owner.SetDispatcher(&lifecycleTestDispatcher{})
+		_, err := owner.execDispatchCreate(context.Background(), store.BrokerDispatch{AgentID: agent.ID, Args: args(t)})
+		require.ErrorIs(t, err, errNoStartGuards)
 	})
 	t.Run("an old broker is refused after the guards pass", func(t *testing.T) {
 		owner, client, _, agent, _ := setup(t)

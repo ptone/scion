@@ -485,7 +485,11 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 	// start claim (a restart's, taken before its stop leg), which nothing
 	// else will finish. It is released, whatever the error: no start of
 	// this leg was dispatched, so none can be running.
-	if err := s.checkPinnedPlacement(agent); err != nil {
+	verb := "started"
+	if opts.Kind == store.StartClaimRestart {
+		verb = "restarted"
+	}
+	if err := s.startPlacementPreCheck(ctx, agent, verb); err != nil {
 		opts.Dispatch.rollback(ctx)
 		if opts.Existing != nil {
 			opts.Existing.finish(startReleased)

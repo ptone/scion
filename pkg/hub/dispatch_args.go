@@ -42,6 +42,11 @@ type StartDispatchArgs struct {
 	// restart's start leg): the owner must not route it through
 	// create-with-gather again (ptone/scion#6096).
 	NoRoute bool `json:"noRoute,omitempty"`
+	// RestartLeg says the start is a restart's start leg (the requester's
+	// withRestartStartLeg mark, or an asynchronous start of kind restart):
+	// the owner marks ctx the same way, so its refusals name the restart
+	// (startActionVerb, ptone/scion#6096).
+	RestartLeg bool `json:"restartLeg,omitempty"`
 }
 
 // RestartDispatchArgs is intentionally empty — the owner's
