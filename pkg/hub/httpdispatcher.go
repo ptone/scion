@@ -4395,7 +4395,7 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 	default:
 		resp, err = send(ctx, nil)
 		if gatherEnv {
-			resp, err = d.startGather(ctx, agent, resp, err, resolvedEnv, &envClassifications,
+			resp, err = d.startGather(ctx, agent, verb, resp, err, resolvedEnv, &envClassifications,
 				func(ctx context.Context, final bool) (*RemoteAgentResponse, error) {
 					envGatherFinal = final
 					return send(ctx, nil)

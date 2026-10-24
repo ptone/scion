@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -249,14 +250,17 @@ func TestStartEntryPoints_GuardRefusalWinsOver412(t *testing.T) {
 }
 
 // F2: the lifecycle restart pre-check's 503 through the HTTP API, before
-// the stop leg.
+// the stop leg: the server's own store cannot read the broker record (the
+// request's pre-check reads it once; design r12).
 func TestLifecycleHTTP_RestartPrecheck503BeforeStop(t *testing.T) {
 	srv, s := testServer(t)
+	wrapped, fault := installStoreFault(t, srv, brokerReadFaultWrap(errors.New("FAKE-broker-read-detail")))
 	grantDevUserRuntimeBrokerAccess(t, s)
 	project, broker := newEmptyPerAgentHandlerProject(t, s, "precheck-503", true)
 	agent := newQuotaTestAgent(t, s, broker, project, "precheck-503", state.PhaseRunning)
 	client := &mockRuntimeBrokerClient{}
-	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(failBrokerReadStore{s}, client, false, slog.Default()))
+	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(wrapped, client, false, slog.Default()))
+	fault.Arm()
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/restart", nil)
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
@@ -264,8 +268,28 @@ func TestLifecycleHTTP_RestartPrecheck503BeforeStop(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.Equal(t, ErrCodeUnavailable, body.Error.Code)
 	assert.Equal(t, "the agent's runtime broker record could not be read; the agent was not restarted", body.Error.Message)
+	assert.NotContains(t, rec.Body.String(), "FAKE-broker-read-detail")
 	assert.False(t, client.stopCalled, "refused before the stop leg")
 	assert.False(t, client.startCalled || client.restartCalled)
+}
+
+// rev-3 L3: the HTTP start's own pre-checks read the broker record on the
+// server's store and pass; the dispatcher's start guards cannot read it.
+// The start answers the same fixed 503, with nothing sent.
+func TestLifecycleHTTP_StartGuardsBrokerReadFaultIs503(t *testing.T) {
+	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	project, broker := newEmptyPerAgentHandlerProject(t, s, "guards-503", true)
+	setBrokerCaps(t, s, broker, &store.BrokerCapabilities{StartEnvGather: true, PreserveWorkspaceCreate: true})
+	agent := newQuotaTestAgent(t, s, broker, project, "guards-503", state.PhaseStopped)
+	client := &mockRuntimeBrokerClient{}
+	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(failBrokerReadStore{s}, client, false, slog.Default()))
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", nil)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "the agent's runtime broker record could not be read; the agent was not started")
+	assert.NotContains(t, rec.Body.String(), "FAKE-broker-read-detail")
+	assert.False(t, client.startCalled || client.createCalled, "nothing sent")
 }
 
 // F2: the lifecycle start and restart answer a start env-gather failure
@@ -529,4 +553,57 @@ func TestStartGather_OneBrokerRecordReadPerDispatchChain(t *testing.T) {
 			assert.Equal(t, int32(1), reads.Load(), "one broker-record read for the dispatch chain")
 		})
 	}
+}
+
+// rev-3 L1: on a capable broker, a restart's start leg whose as-needed
+// pass cannot read the stored env names the restart.
+func TestStartGather_RestartLegResolutionErrorNamesTheRestart(t *testing.T) {
+	armed := &atomic.Bool{}
+	f, gc := newGatherStartFixture(t, true, func(int, gatherStartCall) (*RemoteAgentResponse, error) {
+		armed.Store(true)
+		return needsAnswer([]string{failClosedKey}), nil
+	}, func(s store.Store) store.Store { return toggleEnvReadErrStore{Store: s, armed: armed} })
+	err := f.d.DispatchAgentStart(withRestartStartLeg(context.Background()), f.agent, "", false)
+	require.Error(t, err)
+	var resErr *secretResolutionError
+	require.ErrorAs(t, err, &resErr)
+	assert.Equal(t, "restarted", resErr.Verb)
+	assert.Equal(t, envReadFixedMessage("restarted"), err.Error())
+	assert.Len(t, gc.calls, 1, "no replay")
+}
+
+// rev-3 L2: a start the broker answered without the envGathered echo
+// crosses nodes as its own sentinel, and the requester reads it as acted
+// on: not "not acted on", the outcome unconfirmed.
+func TestStartEnvGatherEchoMissing_CrossNodeIsActedOn(t *testing.T) {
+	local := fmt.Errorf("dispatch start: %w", startEnvGatherEchoMissingError{})
+	require.False(t, isConfirmedStartNotActedOnError(local))
+	row := &store.BrokerDispatch{Op: "start", Error: local.Error(), Result: dispatchFailureResult(local)}
+	got := dispatchFailureError(row)
+	assert.ErrorIs(t, got, errBrokerLacksStartEnvGather)
+	assert.True(t, isStartEnvGatherEchoMissing(got), "the echo-missing kind crosses")
+	assert.False(t, isConfirmedStartNotActedOnError(got), "the owner started a run: acted on")
+	assert.Equal(t, startUnconfirmed, startOutcomeOf(got))
+	// The pre-send refusal still crosses as not acted on.
+	pre := fmt.Errorf("dispatch start: %w", errBrokerLacksStartEnvGather)
+	preGot := dispatchFailureError(&store.BrokerDispatch{Op: "start", Error: pre.Error(), Result: dispatchFailureResult(pre)})
+	assert.False(t, isStartEnvGatherEchoMissing(preGot))
+	assert.True(t, isConfirmedStartNotActedOnError(preGot))
+}
+
+// rev-3 N4: a later env finalize that supplied no keys clears the names an
+// earlier one left, also on the marker-only write.
+func TestPersistConfigDelivered_ClearsUserSuppliedKeysAfterAnEmptyFinalize(t *testing.T) {
+	f := newRunDispatchFixture(t)
+	f.agent.AppliedConfig.ConfigDelivered = true
+	f.agent.AppliedConfig.UserSuppliedEnvKeys = []string{"FAKE_OLD_KEY"}
+	require.NoError(t, f.store.UpdateAgent(context.Background(), f.agent))
+	stored, err := f.store.GetAgent(context.Background(), f.agent.ID)
+	require.NoError(t, err)
+	recordUserSuppliedEnvKeys(stored, map[string]string{}) // a finalize that supplied none
+	persistConfigDelivered(context.Background(), f.store, slog.Default(), stored)
+	got, err := f.store.GetAgent(context.Background(), f.agent.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got.AppliedConfig.UserSuppliedEnvKeys)
+	assert.True(t, got.AppliedConfig.ConfigDelivered)
 }
