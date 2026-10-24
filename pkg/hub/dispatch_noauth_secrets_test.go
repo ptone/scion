@@ -265,3 +265,143 @@ func TestBuildStartEnv_NoAuth_DoesNotResolveSecrets(t *testing.T) {
 		}
 	}
 }
+
+// The as-needed pass (resolveAsNeededForKeys) resolves no secrets for a
+// no-auth agent either, on every path that runs it: create with env gather,
+// provision, finalize env, and a first start routed through create. The
+// broker reports failClosedKey as needed (gatherNeedsClient) and the only
+// source for it is an as-needed environment secret.
+
+func seedAsNeededSecret(t *testing.T, f *runDispatchFixture, b *secret.LocalBackend) {
+	t.Helper()
+	setNoAuthSecret(t, f, b, noAuthSecret{name: failClosedKey, value: failClosedValue,
+		typ: store.SecretTypeEnvironment, target: failClosedKey, scope: store.ScopeProject,
+		mode: store.InjectionModeAsNeeded})
+}
+
+// assertAsNeededPath runs dispatch for a no-auth agent and for a control
+// agent without no-auth. The no-auth dispatch sends the broker one request
+// (no replay) that does not carry the as-needed value, and noAuthOutcome
+// checks how the path reports the unmet need. The control dispatch succeeds
+// and its replay carries the value.
+func assertAsNeededPath(t *testing.T, prepare func(f *runDispatchFixture),
+	dispatch func(ctx context.Context, f *runDispatchFixture) error,
+	noAuthOutcome func(t *testing.T, f *runDispatchFixture, err error)) {
+	t.Helper()
+	t.Run("no-auth", func(t *testing.T) {
+		f, b := newNoAuthFixture(t, true)
+		if prepare != nil {
+			prepare(f)
+		}
+		seedAsNeededSecret(t, f, b)
+		setNoAuthSecret(t, f, b, noAuthSecret{name: "GITHUB_TOKEN", value: noAuthGHProjectVal,
+			typ: store.SecretTypeEnvironment, target: "GITHUB_TOKEN", scope: store.ScopeProject})
+		calls := gatherNeedsClient(f)
+
+		err := dispatch(context.Background(), f)
+		assert.Equal(t, 1, *calls, "the needs report only; no replay with the secret")
+		require.NotNil(t, f.client.lastCreateReq)
+		_, ok := f.client.lastCreateReq.ResolvedEnv[failClosedKey]
+		assert.False(t, ok, "the as-needed secret is not delivered")
+		for k, v := range f.client.lastCreateReq.ResolvedEnv {
+			assert.NotEqual(t, failClosedValue, v, "the as-needed secret value is under %s", k)
+		}
+		assert.Equal(t, noAuthGHProjectVal, f.client.lastCreateReq.ResolvedEnv["GITHUB_TOKEN"], "GITHUB_TOKEN is still delivered")
+		if err != nil {
+			assert.NotContains(t, err.Error(), failClosedValue)
+		}
+		noAuthOutcome(t, f, err)
+	})
+	t.Run("auth control", func(t *testing.T) {
+		f, b := newNoAuthFixture(t, false)
+		if prepare != nil {
+			prepare(f)
+		}
+		seedAsNeededSecret(t, f, b)
+		calls := gatherNeedsClient(f)
+
+		require.NoError(t, dispatch(context.Background(), f))
+		assert.Equal(t, 2, *calls, "the needs report and the replay")
+		require.NotNil(t, f.client.lastCreateReq)
+		assert.Equal(t, failClosedValue, f.client.lastCreateReq.ResolvedEnv[failClosedKey], "the replay carries the as-needed value")
+	})
+}
+
+func TestResolveAsNeededForKeys_NoAuth_SkipsSecrets(t *testing.T) {
+	const envKey, envValue = "FAKE_NOAUTH_ASNEEDED_VAR", "FAKE-noauth-asneeded-var-value"
+	keys := []string{failClosedKey, envKey}
+
+	t.Run("no-auth", func(t *testing.T) {
+		f, b := newNoAuthFixture(t, true)
+		seedAsNeededSecret(t, f, b)
+		seedAsNeededEnv(t, f, envKey, envValue)
+		// A secret list that fails: the pass must not list secrets at all.
+		f.d.SetSecretBackend(secret.NewLocalBackend(failListSecretsStore{f.store}, noAuthHubID, noAuthBackendSecret))
+
+		got, err := f.d.resolveAsNeededForKeys(context.Background(), f.agent, keys, nil)
+		require.NoError(t, err, "no secret resolution is attempted")
+		_, ok := got[failClosedKey]
+		assert.False(t, ok, "the as-needed secret is not resolved")
+		assert.Equal(t, envValue, got[envKey], "stored as-needed env vars are unchanged")
+	})
+	t.Run("auth control", func(t *testing.T) {
+		f, b := newNoAuthFixture(t, false)
+		seedAsNeededSecret(t, f, b)
+		seedAsNeededEnv(t, f, envKey, envValue)
+
+		got, err := f.d.resolveAsNeededForKeys(context.Background(), f.agent, keys, nil)
+		require.NoError(t, err)
+		assert.Equal(t, failClosedValue, got[failClosedKey])
+		assert.Equal(t, envValue, got[envKey])
+	})
+}
+
+func TestDispatchAgentCreateWithGather_NoAuth_AsNeededSecretNotDelivered(t *testing.T) {
+	var res *CreateDispatchResult
+	assertAsNeededPath(t, nil,
+		func(ctx context.Context, f *runDispatchFixture) error {
+			var err error
+			res, err = f.d.DispatchAgentCreateWithGather(ctx, f.agent)
+			return err
+		},
+		func(t *testing.T, _ *runDispatchFixture, err error) {
+			require.NoError(t, err)
+			envReqs := res.EnvRequirements()
+			require.NotNil(t, envReqs, "the need is reported as unmet")
+			assert.Contains(t, envReqs.Needs, failClosedKey)
+		})
+}
+
+func TestDispatchAgentProvision_NoAuth_AsNeededSecretNotDelivered(t *testing.T) {
+	assertAsNeededPath(t, nil,
+		func(ctx context.Context, f *runDispatchFixture) error {
+			return f.d.DispatchAgentProvision(ctx, f.agent)
+		},
+		func(t *testing.T, _ *runDispatchFixture, err error) {
+			assert.ErrorIs(t, err, errProvisionEnvUnmet)
+		})
+}
+
+func TestDispatchFinalizeEnv_NoAuth_AsNeededSecretNotDelivered(t *testing.T) {
+	assertAsNeededPath(t, nil,
+		func(ctx context.Context, f *runDispatchFixture) error {
+			_, err := f.d.DispatchFinalizeEnv(ctx, f.agent, nil)
+			return err
+		},
+		func(t *testing.T, _ *runDispatchFixture, err error) {
+			var missing *ErrEnvStillMissing
+			require.ErrorAs(t, err, &missing, "the need is reported as still missing")
+			assert.Contains(t, missing.Requirements.Needs, failClosedKey)
+		})
+}
+
+func TestDispatchAgentStart_NoAuth_ThroughCreateAsNeededSecretNotDelivered(t *testing.T) {
+	assertAsNeededPath(t, neverStarted,
+		func(ctx context.Context, f *runDispatchFixture) error {
+			return f.d.DispatchAgentStart(ctx, f.agent, "", false)
+		},
+		func(t *testing.T, f *runDispatchFixture, err error) {
+			assert.ErrorIs(t, err, errProvisionEnvUnmet)
+			assert.False(t, f.client.startCalled, "nothing started")
+		})
+}
