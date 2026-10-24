@@ -191,7 +191,7 @@ func TestStartEnvGather_UnmetAuthKeyAnswersNeedsAndStartsNothing(t *testing.T) {
 
 func TestStartEnvGather_NeedsAnswerComesBeforeProjectRecovery(t *testing.T) {
 	// A start naming no project would recover its project path from the
-	// agent's container (a runtime List); a needs answer comes first.
+	// agent's container (a manager List); a needs answer comes first.
 	g := newStartGatherServer(t, startGatherSettings)
 	// With no project named, the preflight reads the broker's global
 	// settings, as create does.
@@ -207,8 +207,11 @@ func TestStartEnvGather_NeedsAnswerComesBeforeProjectRecovery(t *testing.T) {
 	}
 	w := g.start(t, "agent-b1b", map[string]any{"gatherEnv": true, "projectPath": nil})
 	decodeNeeds(t, w)
-	if n := g.lists.Load(); n != 0 {
-		t.Errorf("runtime List called %d times before the needs answer", n)
+	g.mgr.mu.Lock()
+	listed := g.mgr.lastListFilter != nil
+	g.mgr.mu.Unlock()
+	if listed || g.lists.Load() != 0 {
+		t.Error("the agent's containers were listed (project-path recovery) before the needs answer")
 	}
 	if g.mgr.StartCalls() != 0 {
 		t.Error("Start was called on a needs answer")
