@@ -35,6 +35,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"regexp"
@@ -82,15 +84,63 @@ func TestTimestampContract(t *testing.T) {
 // registerBroker registers and joins a runtime broker record so that the hub
 // accepts agent creation. No broker process runs: dispatches to it fail, and
 // the test only relies on writes that happen before a dispatch.
-func registerBroker(t *testing.T, h *hubProc) {
+func registerBroker(t *testing.T, h *hubProc, b backend) {
 	t.Helper()
 	reg := h.mustJSON("POST", "/api/v1/brokers", map[string]any{
 		"name": "tzcontract-broker", "autoProvide": true,
 	}, 200, 201)
+	brokerID := str(reg, "brokerId")
 	h.mustJSON("POST", "/api/v1/brokers/join", map[string]any{
-		"brokerId": str(reg, "brokerId"), "joinToken": str(reg, "joinToken"),
+		"brokerId": brokerID, "joinToken": str(reg, "joinToken"),
 		"hostname": "tzcontract", "version": "test",
 	}, 200, 201)
+	// The broker never opens a control channel. A provision-only create
+	// whose broker no hub node can reach fails (ptone/scion#6096), so the
+	// broker gets the endpoint of an in-test fake broker: the hub then
+	// sends the create over HTTP and the agent row is made through the real
+	// API. No hub API sets a broker's endpoint, so it is written through
+	// the harness's database handle.
+	endpoint := startFakeBroker(t)
+	query := "UPDATE runtime_brokers SET endpoint = $1 WHERE id = $2"
+	if b.isSQLite() {
+		query = "UPDATE runtime_brokers SET endpoint = ? WHERE id = ?"
+	}
+	execOne(t, b.openDB(t), query, endpoint, brokerID)
+}
+
+// startFakeBroker starts a broker stand-in on loopback, closed when the
+// test ends. It accepts every agent create (201 with the agent the request
+// names) and answers any other request 200 with an empty object. It returns
+// the base URL.
+func startFakeBroker(t *testing.T) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/agents" {
+			var req struct {
+				ID   string `json:"id"`
+				Slug string `json:"slug"`
+				Name string `json:"name"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, `{"error":{"code":"bad_request","message":"bad body"}}`, http.StatusBadRequest)
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"agent":   map[string]any{"id": req.ID, "slug": req.Slug, "name": req.Name},
+				"created": true,
+			})
+			return
+		}
+		_, _ = w.Write([]byte("{}"))
+	}))
+	t.Cleanup(srv.Close)
+	u, err := url.Parse(srv.URL)
+	if err != nil || u.Hostname() != "127.0.0.1" {
+		t.Fatalf("fake broker is not on loopback: %q (%v)", srv.URL, err)
+	}
+	return srv.URL
 }
 
 // createProject creates a project and checks its create-time stamps.
@@ -107,9 +157,9 @@ func createProject(t *testing.T, h *hubProc, name string) string {
 	return str(p, "id")
 }
 
-// createRunningAgent creates an agent record (provision only; the dispatch
-// to the absent broker fails and is reported as a warning) and reports it
-// running with activity "working". It returns the agent ID and the window of
+// createRunningAgent creates an agent record (provision only, sent to the
+// fake broker registerBroker set up) and reports it running with activity
+// "working". It returns the agent ID and the window of
 // the status write.
 func createRunningAgent(t *testing.T, h *hubProc, projectID, name string) (string, window) {
 	t.Helper()
@@ -231,7 +281,7 @@ func runTokyoContract(t *testing.T, b backend) {
 	home := t.TempDir()
 	h := startHub(t, b, tzTokyo, home)
 
-	registerBroker(t, h)
+	registerBroker(t, h, b)
 	projectID := createProject(t, h, "tzcontract")
 	agentID, _ := createRunningAgent(t, h, projectID, "tzc-agent")
 
@@ -241,7 +291,7 @@ func runTokyoContract(t *testing.T, b backend) {
 		sse := h.subscribe("agent." + agentID + ".message")
 		w := openWindow()
 		// The message is stored and published before the hub dispatches it
-		// to the (absent) broker, whose retry runs for 30s. Do not wait.
+		// to the broker (the fake broker answers at once). Do not wait.
 		h.doWithTimeout("POST", "/api/v1/agents/"+agentID+"/message",
 			map[string]any{"message": "tz contract agent message"}, 3*time.Second)
 		ev := sse.wait(t, ".message", func(d map[string]any) bool {
@@ -520,7 +570,7 @@ func runKathmanduThresholds(t *testing.T, b backend) {
 	home := t.TempDir()
 	h := startHub(t, b, tzKathmandu, home)
 
-	registerBroker(t, h)
+	registerBroker(t, h, b)
 	projectID := createProject(t, h, "tzcontract-ktm")
 	staleID, _ := createRunningAgent(t, h, projectID, "tzc-stale")
 	stalledID, _ := createRunningAgent(t, h, projectID, "tzc-stalled")
