@@ -125,6 +125,7 @@ var dispatchHubSentinels = []struct {
 	// An env finalize whose write-ahead of the user-supplied key names
 	// failed: nothing was sent; the requester answers the fixed 503.
 	{"user_supplied_keys_unrecorded", errUserSuppliedKeysUnrecorded},
+	{"restart_gather_pending", errRestartGatherPending},
 	{"broker_record_unreadable", errBrokerRecordUnreadable},
 }
 
