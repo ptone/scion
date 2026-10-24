@@ -656,6 +656,19 @@ func TestResolveAsNeededForKeys_NoAuth_GitHubTokenOnly(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, map[string]string{"GITHUB_TOKEN": noAuthGHUserVal}, got)
 	})
+	t.Run("GITHUB_TOKEN as an alternative key", func(t *testing.T) {
+		// The broker needs a canonical key that GITHUB_TOKEN satisfies as an
+		// alternative: the value is stored under the canonical key, as step 2
+		// does for other agents.
+		f, b := newNoAuthFixture(t, true)
+		asNeededGH(f, b, store.SecretTypeEnvironment, "GITHUB_TOKEN", store.ScopeProject, noAuthGHProjectVal)
+		const canonical = "FAKE_NOAUTH_CANONICAL_GH_KEY"
+
+		got, err := f.d.resolveAsNeededForKeys(context.Background(), f.agent, []string{canonical},
+			map[string][]string{canonical: {"GITHUB_TOKEN"}})
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{canonical: noAuthGHProjectVal}, got)
+	})
 	t.Run("auth control", func(t *testing.T) {
 		f, b := newNoAuthFixture(t, false)
 		seedAsNeededSecret(t, f, b)
