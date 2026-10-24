@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -243,20 +244,24 @@ func TestDispatch_GCPAccessErrorFailsClosed(t *testing.T) {
 	}
 }
 
-// gatherNeedsClient makes f's broker report failClosedKey as needed on
-// every create-with-gather call and returns the call counter.
+// gatherNeedsClient makes f's broker report failClosedKey as needed on a
+// create-with-gather call whose request does not carry it, and accept the
+// call (a provisioned agent) when it does. It returns the call counter.
 func gatherNeedsClient(f *runDispatchFixture) *int {
 	calls := 0
 	f.client.createWithGatherFunc = func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
 		calls++
+		if req.ResolvedEnv[failClosedKey] != "" {
+			return &RemoteAgentResponse{Agent: &RemoteAgentInfo{ID: req.ID, Slug: req.Slug, Name: req.Name},
+				Created: true, Reprovisioned: req.Reprovision}, nil, nil
+		}
 		return nil, &RemoteEnvRequirementsResponse{AgentID: req.ID, Needs: []string{failClosedKey}}, nil
 	}
 	return &calls
 }
 
 // assertStartsFailClosed checks that a start and a restart of f's agent
-// fail on cause with the fixed message and send nothing to the broker: the
-// secrets a provision went on without are resolved again at start time.
+// fail on cause with the fixed message and send nothing to the broker.
 func assertStartsFailClosed(t *testing.T, f *runDispatchFixture, cause error) {
 	t.Helper()
 	for _, tc := range runDispatches {
@@ -274,22 +279,41 @@ func assertStartsFailClosed(t *testing.T, f *runDispatchFixture, cause error) {
 	}
 }
 
-// Provision keeps the continueOnSecretResolutionError policy in its
-// as-needed pass too: it starts nothing, so it goes on without as-needed
-// values, sends no replay and succeeds; the later start and restart
-// resolve again and fail closed. A reprovision, which the reincarnation
-// start leg follows directly, fails on the still-missing env instead.
-func TestProvisionGather_AsNeededResolutionErrorContinues(t *testing.T) {
+// switchableBackend resolves one as-needed environment secret for
+// failClosedKey, or fails every Resolve with err while failing is set.
+type switchableBackend struct {
+	mockSecretBackend
+	err     error
+	failing bool
+}
+
+func (b *switchableBackend) Resolve(context.Context, string, string, string, *secret.ResolveOpts) ([]secret.SecretWithValue, error) {
+	if b.failing {
+		return nil, b.err
+	}
+	return []secret.SecretWithValue{{SecretMeta: secret.SecretMeta{Name: failClosedKey, Target: failClosedKey,
+		SecretType: store.SecretTypeEnvironment, InjectionMode: store.InjectionModeAsNeeded, Scope: secret.ScopeProject},
+		Value: failClosedValue}}, nil
+}
+
+// A start does not resolve as-needed keys, so provision and reprovision
+// return the fixed message when their as-needed pass meets a resolution
+// error, and send no replay: no provisioned config is left without the
+// values the broker asked for. Start and restart still return the fixed
+// message while the error persists.
+func TestProvisionGather_AsNeededResolutionErrorFails(t *testing.T) {
 	for _, cc := range asNeededCauses {
 		t.Run("provision/"+cc.name, func(t *testing.T) {
 			f := newRunDispatchFixture(t)
 			f.d.SetSecretBackend(&nthResolveFailingBackend{err: cc.err})
 			calls := gatherNeedsClient(f)
 
-			require.NoError(t, f.d.DispatchAgentProvision(context.Background(), f.agent))
-			assert.Equal(t, 1, *calls, "no replay carries as-needed values")
-			require.NotNil(t, f.client.lastCreateReq)
-			assert.NotContains(t, f.client.lastCreateReq.ResolvedEnv, failClosedKey)
+			err := f.d.DispatchAgentProvision(context.Background(), f.agent)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, cc.err)
+			assert.Equal(t, fixedCreateSecretMessage, err.Error())
+			assertFixedCreate503(t, err)
+			assert.Equal(t, 1, *calls, "no replay is sent")
 			assertStartsFailClosed(t, f, cc.err)
 		})
 		t.Run("reprovision/"+cc.name, func(t *testing.T) {
@@ -299,20 +323,86 @@ func TestProvisionGather_AsNeededResolutionErrorContinues(t *testing.T) {
 
 			err := f.d.DispatchAgentReprovision(context.Background(), f.agent)
 			require.Error(t, err)
-			assert.Contains(t, err.Error(), "required env still missing after reprovision")
-			assert.Equal(t, 1, *calls, "no replay carries as-needed values")
+			assert.ErrorIs(t, err, cc.err)
+			var resErr *secretResolutionError
+			require.ErrorAs(t, err, &resErr)
+			assert.Equal(t, "agent secrets could not be resolved; the agent was not reprovisioned", err.Error())
+			assertNoFailClosedDetail(t, err.Error(), "the error text")
+			assert.Equal(t, 1, *calls, "no replay is sent")
 		})
 	}
 
-	// The same GCP access error end to end: the provision succeeds, the
-	// start fails with ErrResolveAccess.
-	t.Run("provision then start, real GCP backend", func(t *testing.T) {
+	// The same GCP access error end to end.
+	t.Run("provision, real GCP backend", func(t *testing.T) {
 		f := newRunDispatchFixture(t)
 		f.d.SetSecretBackend(newDeniedGCPBackend(t, f.store, f.agent.ProjectID))
 		calls := gatherNeedsClient(f)
 
-		require.NoError(t, f.d.DispatchAgentProvision(context.Background(), f.agent))
+		err := f.d.DispatchAgentProvision(context.Background(), f.agent)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, secret.ErrResolveAccess)
 		assert.Equal(t, 1, *calls)
 		assertStartsFailClosed(t, f, secret.ErrResolveAccess)
 	})
+}
+
+// A failed provision is retried once the backend is healthy again: the
+// retry's replay carries the as-needed value, so the provisioned config
+// has it.
+func TestProvisionGather_HealedBackendCarriesAsNeededValues(t *testing.T) {
+	for _, reprovision := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reprovision=%v", reprovision), func(t *testing.T) {
+			f := newRunDispatchFixture(t)
+			b := &switchableBackend{err: asNeededCauses[0].err, failing: true}
+			f.d.SetSecretBackend(b)
+			calls := gatherNeedsClient(f)
+			dispatch := func() error {
+				if reprovision {
+					return f.d.DispatchAgentReprovision(context.Background(), f.agent)
+				}
+				return f.d.DispatchAgentProvision(context.Background(), f.agent)
+			}
+
+			require.Error(t, dispatch(), "the first attempt meets the error")
+			assert.Equal(t, 1, *calls)
+
+			b.failing = false
+			require.NoError(t, dispatch(), "the retry succeeds")
+			assert.Equal(t, 3, *calls, "the retry sends the needs report and one replay")
+			require.NotNil(t, f.client.lastCreateReq)
+			assert.Equal(t, failClosedValue, f.client.lastCreateReq.ResolvedEnv[failClosedKey], "the replay carries the as-needed value")
+		})
+	}
+}
+
+// A reincarnation whose reprovision leg returns the as-needed resolution
+// error fails before any start: the previous config is re-rendered and
+// restored on the row, and the recorded error and agent message carry the
+// fixed message only.
+func TestReincarnateAgent_AsNeededResolutionErrorRestoresPrevious(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.reprovisionErr = &secretResolutionError{Verb: "reprovisioned", Err: asNeededCauses[0].err}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	assert.Contains(t, r.Error, "reprovision failed: agent secrets could not be resolved; the agent was not reprovisioned")
+	assertNoFailClosedDetail(t, r.Error, "the reincarnation error")
+
+	calls, cfgs := disp.reprovisionSnapshot()
+	require.Equal(t, 2, calls, "one reprovision, one re-render of the previous config")
+	require.NotNil(t, r.PreviousAppliedConfig)
+	assert.Equal(t, *reincarnationRecoveryConfig(r.PreviousAppliedConfig, r.ToGeneration, r.Handoff, store.AgentReincarnationStateProvisioning), cfgs[1])
+	assert.Zero(t, disp.startCalls, "no start runs after the failed reprovision")
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, final.Generation)
+	assert.Equal(t, "old-image:v1", final.AppliedConfig.Image, "the previous config is restored on the row")
+	assertNoFailClosedDetail(t, final.Message, "the agent message")
 }

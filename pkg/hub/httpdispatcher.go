@@ -779,7 +779,9 @@ const (
 	failOnSecretResolutionError secretResolutionPolicy = iota
 	// continueOnSecretResolutionError logs the error and builds the request
 	// without secrets (or without the stored env settings): provision and
-	// reprovision only (see dispatchProvision).
+	// reprovision only (see dispatchProvision). It covers this first pass
+	// only; the as-needed pass that follows a broker's needs report still
+	// fails the provision or reprovision (ptone/scion#5959).
 	continueOnSecretResolutionError
 )
 
@@ -1983,11 +1985,13 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 		return err
 	}
 
-	// Provision and reprovision keep going on a secret resolution error:
-	// the broker's provision never reads the resolved secrets, and the
-	// agent cannot start without them anyway, because every start
-	// (including reincarnate's start leg after a reprovision) resolves
-	// them again in buildStartEnv and fails closed there.
+	// Provision and reprovision keep going on a first-pass secret
+	// resolution error: the broker's provision never reads the resolved
+	// always-mode secrets, and every start (including reincarnate's start
+	// leg after a reprovision) resolves them again in buildStartEnv and
+	// fails closed there. As-needed values are different: a start does not
+	// resolve them, so the as-needed pass below fails the provision on a
+	// resolution error (ptone/scion#5959).
 	req, err := d.buildCreateRequestFor(ctx, agent, callerName, continueOnSecretResolutionError)
 	if err != nil {
 		return err
@@ -2066,21 +2070,17 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 			var asErr error
 			asNeededEnv, asErr = d.resolveAsNeededForKeys(ctx, agent, envReqs.Needs, envReqs.Alternatives)
 			if asErr != nil {
+				// The as-needed pass is the exception to
+				// continueOnSecretResolutionError: a start never resolves
+				// as-needed keys (the provisioned config carries them),
+				// so a provision or reprovision whose broker needs them
+				// fails here with the fixed message rather than leaving a
+				// config without them (ptone/scion#5959).
 				var resErr *secretResolutionError
-				if !errors.As(asErr, &resErr) {
-					return asErr
+				if reprovision && errors.As(asErr, &resErr) {
+					resErr.Verb = "reprovisioned"
 				}
-				// continueOnSecretResolutionError, as for the first pass:
-				// the provision starts nothing, so it goes on without
-				// as-needed values and the broker's needs stay unmet. A
-				// later start resolves the secrets again and fails closed
-				// there; a reprovision fails below on the still-missing
-				// env (ptone/scion#5959).
-				// Log the typed cause: its text names scope, key and kind,
-				// never a value or backend detail.
-				d.log.WarnContext(ctx, callerName+": as-needed secret resolution failed; provisioning without as-needed values",
-					"agent_id", agent.ID, "error", resErr.Err)
-				asNeededEnv = nil
+				return asErr
 			}
 		}
 		if len(asNeededEnv) > 0 || tzNeeded {
@@ -3029,8 +3029,7 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 		resolved, err := d.secretBackend.Resolve(
 			ctx, agent.OwnerID, agent.ProjectID, agent.RuntimeBrokerID, resolveOpts)
 		if err != nil {
-			// Any resolution error fails the pass, as in resolveSecrets
-			// (dispatchProvision alone goes on without the values): a
+			// Any resolution error fails the pass, as in resolveSecrets: a
 			// secret that could not be decrypted (ErrResolveDecrypt,
 			// ptone/scion#1530 §5) or read from the backend
 			// (ErrResolveAccess), or a store error, must never be answered
