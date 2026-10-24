@@ -7,6 +7,7 @@
 ./pkg/util/privatefs
 ./pkg/util/pathcanon
 ./pkg/util/filelock
+./pkg/util -run=^(TestHostGitRunsNoHooksWindows)$
 ./pkg/tunnelclient
 ./pkg/credentials
 ./pkg/apiclient
