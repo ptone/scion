@@ -60,6 +60,9 @@ func StaticCapabilities(rt scionrt.Runtime, nodeImageRegistry string) *hubclient
 		// This broker redeems attachment delivery capabilities and writes
 		// the files into the agent's home (ptone/scion#4596).
 		AttachmentDelivery: true,
+		// A start sent with gatherEnv runs the env-gather preflight
+		// (ptone/scion#6101).
+		StartEnvGather: true,
 	}
 }
 
@@ -124,5 +127,6 @@ func StaticCapabilityNames(rt scionrt.Runtime) []string {
 	add(c.ChangedFields, "changedFields")
 	add(c.ClearedFields, "clearedFields")
 	add(c.AttachmentDelivery, "attachmentDelivery")
+	add(c.StartEnvGather, "startEnvGather")
 	return names
 }
