@@ -3030,7 +3030,11 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 
 	// 2. Check secrets (all scopes via backend.Resolve).
 	// Only environment-type secrets can be mapped to env key=value pairs.
-	if d.secretBackend != nil {
+	// A no-auth agent gets no secrets from the secret store on this pass
+	// either, matching the first pass (buildCreateRequestFor and
+	// buildStartEnv); every caller (provision, create with env gather,
+	// finalize env) inherits this.
+	if d.secretBackend != nil && !agentNoAuth(agent) {
 		var resolveOpts *secret.ResolveOpts
 		if len(agent.Ancestry) > 1 && d.authzService != nil {
 			agentID := agent.ID
