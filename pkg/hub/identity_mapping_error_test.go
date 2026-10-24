@@ -219,27 +219,28 @@ func TestIdentityMappingDispatchError_MismatchWithoutKSANames(t *testing.T) {
 
 // A provision-only create that fails for a mapping refusal stays a 201 and
 // carries the hub's coded message in its warning, not the broker's text.
-func TestCreateAgent_ProvisionOnlyWarningUsesIdentityMappingMessage(t *testing.T) {
-	disp := &skillFailDispatcher{provisionErr: brokerNotMappedErr()}
-	srv, _, project := setupCreateAgentServer(t, disp)
+// A provision-only create whose broker refuses the identity mapping (a
+// broker response, so after the provision reached it) fails the create and
+// answers the hub's coded message, not the raw broker body
+// (ptone/scion#4024, ptone/scion#6096).
+func TestCreateAgent_ProvisionOnlyIdentityMappingRefusalFailsCreate(t *testing.T) {
+	disp := &skillFailDispatcher{provisionErr: provisionSent(brokerNotMappedErr())}
+	srv, s, project := setupCreateAgentServer(t, disp)
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:          "provision-only-idmap",
 		ProjectID:     project.ID,
 		ProvisionOnly: true,
 	})
-	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-	var resp CreateAgentResponse
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	var resp ErrorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	var warning string
-	for _, w := range resp.Warnings {
-		if strings.HasPrefix(w, api.ProvisionFailedWarningPrefix) {
-			warning = w
-		}
-	}
-	require.NotEmpty(t, warning, "warnings: %v", resp.Warnings)
-	assert.Contains(t, warning, ErrCodeIdentityNotMapped+": ")
-	assert.Contains(t, warning, `on profile "gke" of broker "broker-a"`)
-	assert.NotContains(t, warning, "broker operator text")
+	assert.Equal(t, ErrCodeIdentityNotMapped, resp.Error.Code)
+	assert.Contains(t, resp.Error.Message, `on profile "gke" of broker "broker-a"`)
+	assert.NotContains(t, rec.Body.String(), "broker operator text")
+	require.NotNil(t, disp.provisionedAgent)
+	_, err := s.GetAgent(context.Background(), disp.provisionedAgent.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "the failed agent record is deleted")
+	assert.True(t, disp.deleteCalled, "the broker-side files are cleaned up")
 }
 
 // Without a profile the message names the runtime entry, and without a
