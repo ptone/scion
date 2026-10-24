@@ -201,8 +201,9 @@ func dedupeHandler(buf *bytes.Buffer, clock *fakeClock, interval time.Duration, 
 }
 
 // TestRepeatsAreCollapsed: repeats of one violation within the interval
-// answer 204 and are not logged or charged to the record limiter; the
-// first report after the interval is logged with the count of repeats.
+// answer 204 and are not logged or charged to the record limiter; after
+// the interval a summary record counts them and shows the latest one, and
+// the next report is logged again.
 func TestRepeatsAreCollapsed(t *testing.T) {
 	var buf bytes.Buffer
 	clock := &fakeClock{t: time.Unix(1_700_000_000, 0)}
@@ -242,8 +243,150 @@ func TestRepeatsAreCollapsed(t *testing.T) {
 		t.Fatalf("after the interval: status = %d, want 204", rec.Code)
 	}
 	got := records(t, &buf)
-	if len(got) != 1 || got[0]["repeats"] != float64(50) {
-		t.Fatalf("records after the interval = %v, want one with repeats=50", got)
+	if len(got) != 2 {
+		t.Fatalf("records after the interval = %v, want a summary and a record", got)
+	}
+	// The summary: 49 single-object repeats and the array one; the latest
+	// repeat is the array report, so its fields are shown.
+	sum := got[0]
+	if sum["msg"] != RepeatsLogMessage || sum["repeats"] != float64(50) ||
+		sum["document_path"] != "/projects/p1/chat/c1" || sum["sink"] != "Element innerHTML" || sum["line"] != float64(42) {
+		t.Fatalf("summary = %v, want %s with repeats=50 and the array report's fields", sum, RepeatsLogMessage)
+	}
+	if got[1]["msg"] != LogMessage || got[1]["line"] != float64(0) {
+		t.Fatalf("record after the summary = %v, want the new report", got[1])
+	}
+}
+
+// TestSummaryShowsFirstAndLatest: when the first report of a violation
+// differs from the later ones in the fields outside the key, the records
+// show both: the record holds the first, the summary the latest, with when
+// each was seen.
+func TestSummaryShowsFirstAndLatest(t *testing.T) {
+	var buf bytes.Buffer
+	start := time.Unix(1_700_000_000, 0).UTC()
+	clock := &fakeClock{t: start}
+	h, _ := dedupeHandler(&buf, clock, 10*time.Minute, 16)
+	report := func(path string, line int) string {
+		return fmt.Sprintf(`{"type":"csp-violation","body":{"documentURL":"https://hub.example/p",`+
+			`"effectiveDirective":"img-src","blockedURL":"https://cdn.example/%s","sourceFile":"https://hub.example/m.js","lineNumber":%d}}`, path, line)
+	}
+	post(h, "application/csp-report", report("first.png", 1))
+	for i := 0; i < 3; i++ {
+		clock.t = clock.t.Add(time.Minute)
+		post(h, "application/csp-report", report("later.png", 7))
+	}
+	latest := clock.t
+	clock.t = start.Add(10 * time.Minute)
+	// Another violation's report (another directive): it finds the first
+	// one's interval over.
+	post(h, "application/csp-report", strings.Replace(report("x", 1), `"img-src"`, `"font-src"`, 1))
+	got := records(t, &buf)
+	if len(got) != 3 || got[0]["blocked_uri"] != "https://cdn.example/first.png" || got[0]["line"] != float64(1) || got[2]["directive"] != "font-src" {
+		t.Fatalf("records = %v, want the first report's record first", got)
+	}
+	sum := got[1]
+	if sum["msg"] != RepeatsLogMessage || sum["repeats"] != float64(3) ||
+		sum["blocked_uri"] != "https://cdn.example/later.png" || sum["line"] != float64(7) ||
+		sum["first_logged"] != start.Format(time.RFC3339) || sum["latest_seen"] != latest.Format(time.RFC3339) {
+		t.Fatalf("summary = %v, want repeats=3, the later report's fields, first_logged %s and latest_seen %s",
+			sum, start.Format(time.RFC3339), latest.Format(time.RFC3339))
+	}
+}
+
+// TestSummaryWithoutReturn: a violation that does not come back still gets
+// its summary once its interval is over and any report arrives; one
+// without repeats gets none.
+func TestSummaryWithoutReturn(t *testing.T) {
+	var buf bytes.Buffer
+	clock := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	h, _ := dedupeHandler(&buf, clock, 10*time.Minute, 16)
+	for i := 0; i < 4; i++ {
+		post(h, "application/csp-report", safariReportToBody)
+	}
+	post(h, "application/csp-report", strings.ReplaceAll(safariReportToBody, "/chat/c1", "/chat/c2"))
+	records(t, &buf)
+	clock.t = clock.t.Add(10 * time.Minute)
+	post(h, "application/csp-report", strings.ReplaceAll(safariReportToBody, "/chat/c1", "/chat/c3"))
+	var sums []map[string]any
+	for _, r := range records(t, &buf) {
+		if r["msg"] == RepeatsLogMessage {
+			sums = append(sums, r)
+		}
+	}
+	if len(sums) != 1 || sums[0]["repeats"] != float64(3) || sums[0]["document_path"] != "/projects/p1/chat/c1" {
+		t.Fatalf("summaries = %v, want one for /projects/p1/chat/c1 with repeats=3", sums)
+	}
+	if h.Dedupe.size() != 1 {
+		t.Fatalf("%d entries tracked after the sweep, want 1", h.Dedupe.size())
+	}
+}
+
+// TestSummaryOnEarlyRemoval: an entry removed early to make room still
+// gets its summary, so no repeat goes uncounted.
+func TestSummaryOnEarlyRemoval(t *testing.T) {
+	var buf bytes.Buffer
+	clock := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	h, _ := dedupeHandler(&buf, clock, 10*time.Minute, 1)
+	post(h, "application/csp-report", safariReportToBody)
+	post(h, "application/csp-report", safariReportToBody)
+	post(h, "application/csp-report", strings.ReplaceAll(safariReportToBody, "/chat/c1", "/chat/c2"))
+	got := records(t, &buf)
+	if len(got) != 3 || got[1]["msg"] != RepeatsLogMessage || got[1]["repeats"] != float64(1) || got[2]["msg"] != LogMessage {
+		t.Fatalf("records = %v, want a record, the removed entry's summary (repeats=1), then the new record", got)
+	}
+}
+
+// TestSummaryLeavesSampleOut: with RawSamples on, a report record holds
+// its sample, but a summary never holds the latest repeat's.
+func TestSummaryLeavesSampleOut(t *testing.T) {
+	const marker = "Secret41aa"
+	var buf bytes.Buffer
+	clock := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	h, _ := dedupeHandler(&buf, clock, 10*time.Minute, 16)
+	h.RawSamples = true
+	body := `{"type":"csp-violation","body":{"documentURL":"https://hub.example/a","effectiveDirective":"script-src",` +
+		`"blockedURL":"inline","sample":"%s"}}`
+	post(h, "application/csp-report", fmt.Sprintf(body, "first"))
+	post(h, "application/csp-report", fmt.Sprintf(body, marker))
+	clock.t = clock.t.Add(10 * time.Minute)
+	post(h, "application/csp-report", fmt.Sprintf(body, "next"))
+	out := buf.String()
+	got := records(t, bytes.NewBufferString(out))
+	if len(got) != 3 || got[0]["sample"] != "first" || got[1]["msg"] != RepeatsLogMessage || got[2]["sample"] != "next" {
+		t.Fatalf("records = %v, want a record with its sample, a summary, a record with its sample", got)
+	}
+	if _, ok := got[1]["sample"]; ok || strings.Contains(out, marker) {
+		t.Fatalf("a summary holds a sample: %s", out)
+	}
+}
+
+// TestRequestBoundCountsAfterCollapsing: repeats in one request are
+// collapsed before the per-request bound, so identical reports past it are
+// not counted as dropped; distinct ones past it are.
+func TestRequestBoundCountsAfterCollapsing(t *testing.T) {
+	var buf bytes.Buffer
+	clock := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	h, asked := dedupeHandler(&buf, clock, 10*time.Minute, 64)
+	if rec := post(h, "application/reports+json", manyReports(maxRecordsPerRequest+5)); rec.Code != http.StatusNoContent {
+		t.Fatalf("identical: status = %d, want 204", rec.Code)
+	}
+	if got := records(t, &buf); len(got) != 1 || got[0]["msg"] != LogMessage || *asked != 1 {
+		t.Fatalf("identical: records %v and %d limiter calls, want one record and 1 call", got, *asked)
+	}
+	parts := make([]string, maxRecordsPerRequest+5)
+	for i := range parts {
+		parts[i] = fmt.Sprintf(`{"type":"csp-violation","body":{"effectiveDirective":"d%d"}}`, i)
+	}
+	if rec := post(h, "application/reports+json", "["+strings.Join(parts, ",")+"]"); rec.Code != http.StatusNoContent {
+		t.Fatalf("distinct: status = %d, want 204", rec.Code)
+	}
+	got := records(t, &buf)
+	if len(got) != maxRecordsPerRequest+1 || got[maxRecordsPerRequest]["msg"] != DroppedLogMessage || got[maxRecordsPerRequest]["dropped"] != float64(5) {
+		t.Fatalf("distinct: %d records, want %d and a dropped count of 5", len(got), maxRecordsPerRequest)
+	}
+	if h.Dedupe.size() != 1+maxRecordsPerRequest {
+		t.Fatalf("%d entries tracked, want %d (dropped reports are not tracked)", h.Dedupe.size(), 1+maxRecordsPerRequest)
 	}
 }
 
@@ -310,9 +453,11 @@ func TestDedupeIsBounded(t *testing.T) {
 	}
 
 	// Entries whose interval is over are removed first: after the
-	// interval, a full table is emptied down to the new entry.
+	// interval, a full table is emptied down to the new entry (one that was
+	// never tracked, so the result does not depend on which entries the
+	// early removals picked).
 	clock.t = clock.t.Add(10 * time.Minute)
-	if rec := post(h, "application/csp-report", safariReportToBody); rec.Code != http.StatusNoContent {
+	if rec := post(h, "application/csp-report", strings.ReplaceAll(safariReportToBody, "/chat/c1", "/chat/new")); rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want 204", rec.Code)
 	}
 	if size := h.Dedupe.size(); size != 1 {

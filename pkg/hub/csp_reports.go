@@ -32,8 +32,9 @@ import (
 // record on the hub.csp-reports logger, and nothing is persisted in
 // application storage. The report's sample is logged only with
 // server.hub.csp_report_raw_samples (off by default). Repeats of one
-// violation are collapsed into one record per cspReportDedupeInterval
-// (cspreport.Dedupe), and answered with 204.
+// violation are collapsed into one record per cspReportDedupeInterval and
+// answered with 204; a csp_violation_repeats record then counts them and
+// shows the latest (cspreport.Dedupe).
 //
 // Two token buckets bound the log volume, reusing geExchangeRateLimiter and
 // geExchangeClientIP (ge_exchange_ratelimit.go) as externalBearerRateLimiter

@@ -27,13 +27,22 @@ import (
 // origin of their blocked URI and their page path match.
 //
 // The first report of a violation is logged; the repeats within the next
-// interval are counted and not logged. The first report after the interval
-// is logged again, with the count of the repeats since the previous record
-// as "repeats". At most maxKeys violations are tracked: when a new one
-// arrives with the table full, the entries whose interval is over are
-// removed, and if none is, one other entry is removed. So memory stays
-// bounded whatever the reports hold, and the record limiter still bounds
-// what is logged.
+// interval are counted and not logged, and the latest of them is kept.
+// When the violation's interval is over and it had repeats, one summary
+// record follows (RepeatsLogMessage): the count, when the first record was
+// written, and the latest repeat with when it arrived. So the records show
+// the first and the latest report of each violation, and every repeat is
+// counted. Summaries are written while reports keep arriving: Dedupe has no
+// timer, and checks for finished intervals at most once per interval, when
+// a report reaches the table full, and when the same violation comes back.
+//
+// At most maxKeys violations are tracked: when a new one arrives with the
+// table full, the entries whose interval is over are removed, and if none
+// is, one other entry is removed early; an entry removed with repeats still
+// gets its summary. Memory stays bounded whatever the reports hold (each
+// entry holds two bounded violations' worth of text, without samples).
+// Summary records are not charged to the record limiter: there is at most
+// one per record written, plus one per tracked violation per interval.
 //
 // A Dedupe is safe for concurrent use. A nil *Dedupe collapses nothing.
 type Dedupe struct {
@@ -43,13 +52,26 @@ type Dedupe struct {
 
 	mu      sync.Mutex
 	entries map[string]*dedupeEntry
+	swept   time.Time
 }
 
 // dedupeEntry is the state of one violation: when its record was written,
-// and the repeats counted since.
+// and the repeats counted since, with the latest of them.
 type dedupeEntry struct {
-	logged  time.Time
-	repeats int
+	logged     time.Time
+	repeats    int
+	latest     Violation
+	latestSeen time.Time
+}
+
+// repeatSummary describes the repeats of one violation collapsed after its
+// record: how many, when that record was written (First), and the latest
+// repeat (Latest, without its sample) and when it arrived.
+type repeatSummary struct {
+	Count      int
+	First      time.Time
+	Latest     Violation
+	LatestSeen time.Time
 }
 
 // NewDedupe returns a Dedupe that logs each violation at most once per
@@ -77,57 +99,85 @@ const (
 	// verdictRefused: the record limiter refused; nothing is recorded, so
 	// a later report of the same violation is still logged.
 	verdictRefused
+	// verdictDropped: not a repeat, but the request may write no more
+	// records; nothing is recorded and the limiter is not asked.
+	verdictDropped
 )
 
-// admit decides whether the report with key is written. allowRecord is
-// asked only for a report that is not a repeat. On verdictWrite, repeats
-// is the count of repeats collapsed since the previous record of key; on
-// verdictRefused, retry is the limiter's Retry-After.
-func (d *Dedupe) admit(key string, allowRecord func() (bool, int)) (v verdict, repeats, retry int) {
+// admit decides whether the report v is written. A report that is not a
+// repeat is dropped when canWrite is false; otherwise allowRecord is asked
+// (under the Dedupe lock: it must not block or call back into the handler).
+// On verdictRefused, retry is the limiter's Retry-After. summaries holds
+// the repeat summaries of the violations whose interval was found over, or
+// that were removed, during this call; they are returned with every
+// verdict.
+func (d *Dedupe) admit(v Violation, canWrite bool, allowRecord func() (bool, int)) (vd verdict, summaries []repeatSummary, retry int) {
 	if d == nil {
-		if ok, retry := allowRecord(); !ok {
-			return verdictRefused, 0, retry
+		if !canWrite {
+			return verdictDropped, nil, 0
 		}
-		return verdictWrite, 0, 0
+		if ok, retry := allowRecord(); !ok {
+			return verdictRefused, nil, retry
+		}
+		return verdictWrite, nil, 0
 	}
+	key := v.key()
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	now := d.now()
-	e, seen := d.entries[key]
-	if seen && now.Sub(e.logged) < d.interval {
-		e.repeats++
-		return verdictRepeat, 0, 0
+	if now.Sub(d.swept) >= d.interval {
+		d.swept = now
+		summaries = d.removeFinished(now, summaries)
+	}
+	if e, seen := d.entries[key]; seen {
+		if now.Sub(e.logged) < d.interval {
+			e.repeats++
+			e.latest, e.latestSeen = v, now
+			// The sample is never kept: it is logged, at most, with the
+			// report's own record.
+			e.latest.Sample = ""
+			return verdictRepeat, summaries, 0
+		}
+		summaries = d.remove(key, e, summaries)
+	}
+	if !canWrite {
+		return verdictDropped, summaries, 0
 	}
 	if ok, retry := allowRecord(); !ok {
-		return verdictRefused, 0, retry
-	}
-	if seen {
-		repeats = e.repeats
-		e.logged, e.repeats = now, 0
-		return verdictWrite, repeats, 0
+		return verdictRefused, summaries, retry
 	}
 	if len(d.entries) >= d.maxKeys {
-		d.evict(now)
-	}
-	d.entries[key] = &dedupeEntry{logged: now}
-	return verdictWrite, 0, 0
-}
-
-// evict makes room for one entry: it removes every entry whose interval
-// is over, and when none is, one other entry. d.mu is held.
-func (d *Dedupe) evict(now time.Time) {
-	for k, e := range d.entries {
-		if now.Sub(e.logged) >= d.interval {
-			delete(d.entries, k)
+		summaries = d.removeFinished(now, summaries)
+		for k, e := range d.entries {
+			if len(d.entries) < d.maxKeys {
+				break
+			}
+			summaries = d.remove(k, e, summaries)
 		}
 	}
-	if len(d.entries) < d.maxKeys {
-		return
+	d.entries[key] = &dedupeEntry{logged: now}
+	return verdictWrite, summaries, 0
+}
+
+// removeFinished removes every entry whose interval is over, appending the
+// summaries of those with repeats. d.mu is held.
+func (d *Dedupe) removeFinished(now time.Time, summaries []repeatSummary) []repeatSummary {
+	for k, e := range d.entries {
+		if now.Sub(e.logged) >= d.interval {
+			summaries = d.remove(k, e, summaries)
+		}
 	}
-	for k := range d.entries {
-		delete(d.entries, k)
-		return
+	return summaries
+}
+
+// remove removes entry e (key k), appending its summary when it has
+// repeats. d.mu is held.
+func (d *Dedupe) remove(k string, e *dedupeEntry, summaries []repeatSummary) []repeatSummary {
+	delete(d.entries, k)
+	if e.repeats > 0 {
+		summaries = append(summaries, repeatSummary{Count: e.repeats, First: e.logged, Latest: e.latest, LatestSeen: e.latestSeen})
 	}
+	return summaries
 }
 
 // size returns the number of tracked violations.
