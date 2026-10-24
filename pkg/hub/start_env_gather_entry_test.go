@@ -88,7 +88,14 @@ var startEntryPoints = []entryPoint{
 		return f.d.DispatchAgentRestart(context.Background(), f.agent)
 	}},
 	{"lifecycle restart pre-check", "restarted", func(t *testing.T, f *runDispatchFixture) error {
-		return f.d.RestartEnvGatherPrecheck(context.Background(), f.agent)
+		// As the lifecycle restart: the placement pre-check reads the
+		// record (startPlacementPreCheckBroker), the env-gather pre-check
+		// judges it.
+		broker, err := checkAgentPinnedPlacement(context.Background(), f.d.store, f.agent)
+		if err != nil {
+			return placementBackstopStartError(err, "restarted")
+		}
+		return f.d.RestartEnvGatherPrecheck(context.Background(), f.agent, broker)
 	}},
 	{"owner node execDispatchStart", "started", func(t *testing.T, f *runDispatchFixture) error {
 		require.NoError(t, f.store.UpdateAgent(context.Background(), f.agent))
@@ -443,4 +450,83 @@ func TestRoutedStartRefusal_DoesNotFallThrough(t *testing.T) {
 	assert.NotErrorIs(t, err, errBrokerLacksStartEnvGather)
 	assert.Empty(t, gc.calls, "no plain start")
 	assert.False(t, f.client.createCalled, "nothing sent")
+}
+
+// H-24b (design r11 §0.3): with the server's own store failing every
+// broker-record read, the HTTP start and restart of an agent with as-needed
+// entries on a capable broker answer the fixed 503 naming the action, send
+// nothing, and the restart does not stop the agent.
+func TestLifecycleHTTP_ServerStoreBrokerReadFaultIs503(t *testing.T) {
+	for _, action := range []string{"start", "restart"} {
+		t.Run(action, func(t *testing.T) {
+			srv, s := testServer(t)
+			wrapped, fault := installStoreFault(t, srv, brokerReadFaultWrap(errors.New("FAKE-server-broker-read-detail")))
+			grantDevUserRuntimeBrokerAccess(t, s)
+			project, broker := newEmptyPerAgentHandlerProject(t, s, "h24b-"+action, true)
+			setBrokerCaps(t, s, broker, &store.BrokerCapabilities{StartEnvGather: true, PreserveWorkspaceCreate: true})
+			phase := state.PhaseStopped
+			if action == "restart" {
+				phase = state.PhaseRunning
+			}
+			agent := newQuotaTestAgent(t, s, broker, project, "h24b-"+action, phase)
+			require.NoError(t, s.CreateEnvVar(context.Background(), &store.EnvVar{
+				ID: uuid.NewString(), Key: failClosedKey, Value: failClosedValue,
+				Scope: store.ScopeProject, ScopeID: project.ID, InjectionMode: store.InjectionModeAsNeeded,
+			}))
+			client := &mockRuntimeBrokerClient{}
+			srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(wrapped, client, false, slog.Default()))
+			fault.Arm()
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/"+action, nil)
+			require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+			verb := "started"
+			if action == "restart" {
+				verb = "restarted"
+			}
+			assert.Contains(t, rec.Body.String(), "the agent's runtime broker record could not be read; the agent was not "+verb)
+			assert.NotContains(t, rec.Body.String(), "FAKE-server-broker-read-detail", "no store text in the body")
+			assert.False(t, client.stopCalled, "nothing stopped")
+			assert.False(t, client.startCalled || client.restartCalled || client.createCalled, "nothing sent")
+		})
+	}
+}
+
+// H-24b read count: a dispatch chain reads the broker record once (the
+// start guards); the capability check and the sends, the env-gather replay
+// included, reuse that record.
+func TestStartGather_OneBrokerRecordReadPerDispatchChain(t *testing.T) {
+	cases := []struct {
+		name    string
+		capable bool
+		answer  func(int, gatherStartCall) (*RemoteAgentResponse, error)
+		run     func(f *runDispatchFixture) error
+		wantErr error
+	}{
+		{"capable start with needs and replay", true, replayDelivers(failClosedKey),
+			func(f *runDispatchFixture) error {
+				return f.d.DispatchAgentStart(context.Background(), f.agent, "", false)
+			}, nil},
+		{"broker restart", true, plainStarted,
+			func(f *runDispatchFixture) error { return f.d.DispatchAgentRestart(context.Background(), f.agent) }, nil},
+		{"old broker 412", false, plainStarted,
+			func(f *runDispatchFixture) error {
+				return f.d.DispatchAgentStart(context.Background(), f.agent, "", true)
+			}, errBrokerLacksStartEnvGather},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reads := &atomic.Int32{}
+			f, _ := newGatherStartFixture(t, tc.capable, tc.answer, func(s store.Store) store.Store {
+				return countBrokerReadsStore{Store: s, reads: reads}
+			})
+			seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
+			err := tc.run(f)
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, int32(1), reads.Load(), "one broker-record read for the dispatch chain")
+		})
+	}
 }
