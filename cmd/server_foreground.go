@@ -2809,6 +2809,9 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		WebSessionKeySource: webSessionKeySource(resolveSessionSecret()),
 		// The server keyring file, or nil (legacy single-secret mode).
 		Keyring: serverKeyringFromFile(),
+		// A set server.keyring_file makes hub.New refuse to start without
+		// the file keyring (never a fallback to legacy signing keys).
+		KeyringConfigured: cfg.KeyringFile != "",
 		// When SCION_REQUIRE_STABLE_SIGNING_KEY is truthy, the hub refuses to
 		// start rather than silently mint a new signing key it cannot resolve
 		// (which would invalidate every live token after, e.g., a redeploy onto a
