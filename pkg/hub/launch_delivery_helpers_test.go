@@ -77,6 +77,15 @@ func grantLaunchDelivery(t *testing.T, s store.Store, d *HTTPAgentDispatcher, ag
 		if row.Name == "" {
 			row.Name = row.Slug
 		}
+		// The store keeps only UUID principals; a plain-label owner or
+		// creator is stored as the root. The caller's own copy, which the
+		// dispatch reads, keeps its label.
+		if _, err := uuid.Parse(row.OwnerID); row.OwnerID != "" && err != nil {
+			row.OwnerID = root
+		}
+		if _, err := uuid.Parse(row.CreatedBy); row.CreatedBy != "" && err != nil {
+			row.CreatedBy = root
+		}
 		require.NoError(t, s.CreateAgent(ctx, &row))
 	}
 	hdEdge(t, s, store.DelegationPrincipalUser, root, agent.ID, agent.ProjectID, nil)
