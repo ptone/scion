@@ -93,6 +93,12 @@ var lifecycleDispatchCallers = map[string]lifecycleDispatchRule{
 	// The start-claim reaper stops a container an unconfirmed start left
 	// running past its hold; the agent's intent is left as it is.
 	"Server.stopUnconfirmedStart": {kind: intentUnchanged},
+	// The start env-gather echo backstop (ptone/scion#6101) stops the run
+	// this same start minted when the broker started it without the
+	// envGathered echo, and the start then fails. Like any failed start,
+	// the dispatcher leaves run intent to the start claim that recorded it
+	// (Server.withStartClaim).
+	"HTTPAgentDispatcher.dispatchAgentStart": {kind: intentUnchanged},
 	// The backstop stops an agent whose intent is already stopped.
 	"Server.stopForStoppedIntent": {kind: intentUnchanged},
 	// Removes a run that landed after its agent was deleted or a delete
