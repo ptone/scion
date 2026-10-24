@@ -1308,7 +1308,9 @@ func TestHTTPAgentDispatcher_DispatchAgentProvision_TwoPassSuccess(t *testing.T)
 
 func TestHTTPAgentDispatcher_DispatchAgentProvision_TwoPassNoResolution(t *testing.T) {
 	// Scenario: first pass returns envReqs with needs, but no as_needed vars
-	// match. No second pass should occur and no error should be returned.
+	// match. No second pass occurs, and the provision fails with
+	// errProvisionEnvUnmet (a start does not gather env, so the agent must
+	// not be left without them; ptone/scion#6096).
 	ctx := context.Background()
 	memStore := createTestStore(t)
 
@@ -1330,8 +1332,11 @@ func TestHTTPAgentDispatcher_DispatchAgentProvision_TwoPassNoResolution(t *testi
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	err := dispatcher.DispatchAgentProvision(ctx, agent)
-	if err != nil {
-		t.Fatalf("DispatchAgentProvision returned unexpected error: %v", err)
+	if !errors.Is(err, errProvisionEnvUnmet) {
+		t.Fatalf("DispatchAgentProvision err = %v, want errProvisionEnvUnmet", err)
+	}
+	if strings.Contains(err.Error(), "MISSING_VAR") {
+		t.Errorf("the error must not name the key: %v", err)
 	}
 
 	// Only one call — no second pass because resolution returned nothing.
@@ -5923,6 +5928,10 @@ func TestHTTPAgentDispatcher_BuildStartEnv_StartAndRestartProduceIdenticalEnv(t 
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
 			Env:           map[string]string{"CONFIG_VAR": "config-value"},
+			// A delivered config: this compares the plain start's env with
+			// the restart's, so the start must not be routed through
+			// create-with-gather for the as_needed var (ptone/scion#6096).
+			ConfigDelivered: true,
 		},
 	}
 

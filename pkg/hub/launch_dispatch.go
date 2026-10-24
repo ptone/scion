@@ -160,7 +160,7 @@ func (d *HTTPAgentDispatcher) asyncLaunchEligible(ctx context.Context, agent *st
 	if settings.Timeout <= 0 {
 		return settings, false
 	}
-	if broker, err := d.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID); err == nil && broker != nil && broker.Capabilities != nil && !broker.Capabilities.AsyncLaunch {
+	if broker, err := d.dispatchBroker(ctx, agent.RuntimeBrokerID); err == nil && broker != nil && broker.Capabilities != nil && !broker.Capabilities.AsyncLaunch {
 		return settings, false
 	}
 	return settings, true
@@ -188,7 +188,7 @@ func (d *HTTPAgentDispatcher) asyncStartEligible(ctx context.Context, agent *sto
 	if !settings.Enabled || settings.Timeout < minAsyncStartLaunchTimeout {
 		return settings, false
 	}
-	if broker, err := d.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID); err == nil && broker != nil && broker.Capabilities != nil && !broker.Capabilities.AsyncStart {
+	if broker, err := d.dispatchBroker(ctx, agent.RuntimeBrokerID); err == nil && broker != nil && broker.Capabilities != nil && !broker.Capabilities.AsyncStart {
 		return settings, false
 	}
 	return settings, true

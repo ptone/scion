@@ -162,6 +162,20 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	{file: "workspace_handlers.go", function: "handleWorkspaceSyncToFinalize", symbol: "DispatchAgentCreate",
 		class: "guarded", reason: "workspace agent creation with project authorization"},
 
+	// httpdispatcher.go: the dispatcher's create sends every create through
+	// create-with-gather (ptone/scion#6096). It is the implementation of
+	// the DispatchAgentCreate primitive, whose call sites are classified
+	// above (dispatchAgentEventHandler, handleWorkspaceSyncToFinalize).
+	{file: "httpdispatcher.go", function: "DispatchAgentCreate", symbol: "DispatchAgentCreateWithGather",
+		class: "exempt", reason: "primitive implementation: DispatchAgentCreate's own body; its call sites are classified"},
+
+	// httpdispatcher.go: a start of an agent whose config was never
+	// delivered is sent as a create (ptone/scion#6096). startThroughCreate
+	// is reached only from dispatchAgentStart, behind DispatchAgentStart and
+	// DispatchAgentStartWithOptions, whose call sites are classified above.
+	{file: "httpdispatcher.go", function: "startThroughCreate", symbol: "DispatchAgentCreate",
+		class: "exempt", reason: "dispatcher-internal: a start sent as a create, reached only through DispatchAgentStart, whose call sites are classified"},
+
 	// notification_sweep.go: retryDispatch — UNGUARDED notification retry.
 	// The periodic sweep and the broker-connect drain (both via retryBatch)
 	// and the exported RetryDispatch wrapper reach the call only through

@@ -2343,12 +2343,14 @@ func getLocalBrokerID() string {
 // moved-workspace check), like "reprovision". So is
 // "reprovisionEmptyPerAgent" (in-place empty-per-agent reprovision,
 // miller79/scion#167); the hub checks runtime suitability separately.
+// "preserveWorkspaceCreate" (a create that keeps an existing workspace,
+// ptone/scion#6096) is a property of the binary too.
 func brokerRegistrationCapabilities() []string {
 	// asyncLaunch and asyncStart match the broker's heartbeat
 	// (runtimebroker.StaticCapabilities), so the Hub knows them from the
 	// join on, before the first heartbeat (ptone/scion#2918,
 	// ptone/scion#4669).
-	return []string{"sync", "attach", "reprovision", "asyncLaunch", "asyncStart", "emptyPerAgentWorkspace", "agentMove", "agentMoveRecreate", "reprovisionEmptyPerAgent"}
+	return []string{"sync", "attach", "reprovision", "asyncLaunch", "asyncStart", "emptyPerAgentWorkspace", "agentMove", "agentMoveRecreate", "preserveWorkspaceCreate", "reprovisionEmptyPerAgent"}
 }
 
 // buildBrokerProfiles builds BrokerProfile objects from settings.Profiles.

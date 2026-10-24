@@ -402,16 +402,19 @@ func TestSyncLaunch_OwnDeadline_RemainingSites(t *testing.T) {
 			wantCalls: 1,
 		},
 		{
-			name: "provision-only-keeps-row",
+			// Every provision-only failure fails the create (ptone/scion#6096):
+			// a later start does not gather env, so a provision that timed
+			// out is rolled back, not kept with a warning.
+			name: "provision-only-timeout-fails-create",
 			setup: func(t *testing.T, _ store.Store, project *store.Project) (string, string, any) {
 				return http.MethodPost, "/api/v1/agents", CreateAgentRequest{Name: "own-deadline-provision", ProjectID: project.ID, ProvisionOnly: true}
 			},
 			wantCalls: 1,
 			check: func(t *testing.T, s store.Store, disp *launchProbeDispatcher, rec *httptest.ResponseRecorder) {
-				assert.Less(t, rec.Code, 300, rec.Body.String())
+				assert.GreaterOrEqual(t, rec.Code, 500, rec.Body.String())
 				require.NotNil(t, disp.capturedAgent)
 				_, err := s.GetAgent(context.Background(), disp.capturedAgent.ID)
-				assert.NoError(t, err, "a provision that timed out keeps the row (a warning, as before)")
+				assert.ErrorIs(t, err, store.ErrNotFound, "a provision that timed out fails the create and removes the row")
 			},
 		},
 		{

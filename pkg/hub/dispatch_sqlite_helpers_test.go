@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -102,6 +103,45 @@ type ownerErrDispatcher struct {
 	createResult *CreateDispatchResult
 	// finalizeErr, when set, is what finalize_env returns instead of err.
 	finalizeErr error
+
+	recMu sync.Mutex
+	// startRoutingSuppressed records whether the owner's last start ran
+	// with start routing suppressed (ptone/scion#6096).
+	startRoutingSuppressed bool
+	// createAsyncOptIn records the agent's LaunchAsyncOptIn when the
+	// owner's last create ran; nil when no create ran.
+	createAsyncOptIn *bool
+	// createPreserveWorkspace and createTask record whether the owner's
+	// last create ran with withPreserveWorkspace, and the agent's task
+	// then.
+	createPreserveWorkspace bool
+	createTask              string
+	// finalizeAsyncOptIn, finalizePreserveWorkspace and finalizeTask record
+	// the same for the owner's last finalize_env; finalizeAsyncOptIn is nil
+	// when no finalize ran.
+	finalizeAsyncOptIn        *bool
+	finalizePreserveWorkspace bool
+	finalizeTask              string
+	// startVerb records the action the owner's last start names in its
+	// refusals (startActionVerb).
+	startVerb string
+	// st is the store the double's start guards read the broker record
+	// from (startGuarder); newCrossNodeFixture sets it.
+	st store.Store
+}
+
+// startGuards is the double's start backstops (startGuarder): the
+// placement read with the hub's read-error mapping, then the broker
+// assignment. The hub's real dispatcher adds standing and the launch guard.
+func (d *ownerErrDispatcher) startGuards(ctx context.Context, agent *store.Agent, verb, _ string) (*store.RuntimeBroker, error) {
+	broker, err := checkAgentPinnedPlacement(ctx, d.st, agent)
+	if err != nil {
+		return nil, placementBackstopStartError(err, verb)
+	}
+	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+		return nil, err
+	}
+	return broker, nil
 }
 
 // ownerSignalBus delivers the requesting node's signal to the owner node,
@@ -119,7 +159,7 @@ func newCrossNodeFixture(t *testing.T, ownerErr error, signalOwner bool) *crossN
 	events := NewChannelEventPublisher()
 	t.Cleanup(events.Close)
 
-	disp := &ownerErrDispatcher{err: ownerErr}
+	disp := &ownerErrDispatcher{err: ownerErr, st: cs}
 	owner := &Server{
 		store:             cs,
 		instanceID:        "hub-owner-" + uuid.NewString()[:8],
@@ -249,6 +289,10 @@ func (c *deferredDataOpTestClient) CreateAgentWithGather(_ context.Context, brok
 }
 
 func (d *ownerErrDispatcher) DispatchAgentStart(ctx context.Context, a *store.Agent, task string, resume bool) error {
+	d.recMu.Lock()
+	d.startRoutingSuppressed = startRoutingSuppressed(ctx, StartDispatchOptions{})
+	d.startVerb = startActionVerb(ctx, StartDispatchOptions{})
+	d.recMu.Unlock()
 	if d.beforeStart != nil {
 		d.beforeStart()
 	}
@@ -268,6 +312,15 @@ func (d *ownerErrDispatcher) DispatchCheckAgentPrompt(ctx context.Context, a *st
 	return false, d.err
 }
 func (d *ownerErrDispatcher) DispatchAgentCreateWithGather(ctx context.Context, a *store.Agent) (*CreateDispatchResult, error) {
+	d.recMu.Lock()
+	optIn := a.LaunchAsyncOptIn
+	d.createAsyncOptIn = &optIn
+	d.createPreserveWorkspace = preserveWorkspaceRequested(ctx)
+	d.createTask = ""
+	if a.AppliedConfig != nil {
+		d.createTask = a.AppliedConfig.Task
+	}
+	d.recMu.Unlock()
 	_, _ = d.lifecycleTestDispatcher.DispatchAgentCreateWithGather(ctx, a)
 	if d.createResult != nil {
 		return d.createResult, nil
@@ -275,6 +328,15 @@ func (d *ownerErrDispatcher) DispatchAgentCreateWithGather(ctx context.Context, 
 	return nil, d.err
 }
 func (d *ownerErrDispatcher) DispatchFinalizeEnv(ctx context.Context, a *store.Agent, env map[string]string) (*CreateDispatchResult, error) {
+	d.recMu.Lock()
+	optIn := a.LaunchAsyncOptIn
+	d.finalizeAsyncOptIn = &optIn
+	d.finalizePreserveWorkspace = preserveWorkspaceRequested(ctx)
+	d.finalizeTask = ""
+	if a.AppliedConfig != nil {
+		d.finalizeTask = a.AppliedConfig.Task
+	}
+	d.recMu.Unlock()
 	_, _ = d.lifecycleTestDispatcher.DispatchFinalizeEnv(ctx, a, env)
 	if d.finalizeErr != nil {
 		return nil, d.finalizeErr
