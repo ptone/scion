@@ -18,12 +18,15 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
@@ -148,5 +151,97 @@ func TestBrokerHTTPTransport_LoopbackEndpointReached(t *testing.T) {
 	_ = resp.Body.Close()
 	if hits.Load() != 1 {
 		t.Errorf("broker received %d requests, want 1", hits.Load())
+	}
+}
+
+// Keystrokes to a broker go through the same transport rule as every other
+// broker request: none to a plain http non-loopback endpoint, reported as
+// not dispatched.
+func TestBrokerHTTPTransport_ExecuteKeysRefusesPlaintextNonLoopbackEndpoint(t *testing.T) {
+	tr := newBrokerHTTPTransport(false, nil)
+	_, err := tr.ExecuteKeys(context.Background(), "b1", "http://192.0.2.10:9800", "agent-1", agentkeys.BrokerRequest{ProjectID: "p1"})
+	if !errors.Is(err, agentkeys.ErrNotDispatched) {
+		t.Errorf("ExecuteKeys error = %v, want agentkeys.ErrNotDispatched", err)
+	}
+	if !errors.Is(err, config.ErrPlaintextNonLoopback) {
+		t.Errorf("ExecuteKeys error = %v, want config.ErrPlaintextNonLoopback", err)
+	}
+}
+
+// The route()-driven HTTP fallback (no control channel here, no live
+// affinity owner) to a stored non-loopback http endpoint fails closed, for
+// lifecycle dispatch and for keys.
+func TestHybridBrokerClient_RouteHTTPRefusesPlaintextNonLoopbackEndpoint(t *testing.T) {
+	mgr := NewControlChannelManager(DefaultControlChannelConfig(), slog.Default())
+	c := NewHybridBrokerClient(mgr, NewHTTPRuntimeBrokerClient(), nil, false)
+	c.SetAffinityLookup(func(context.Context, string) (string, bool) { return "", false })
+	const endpoint = "http://192.0.2.10:9800"
+	if got := c.route(context.Background(), "b-remote-replica", endpoint); got != routeHTTP {
+		t.Fatalf("route = %v, want routeHTTP (the fallback under test)", got)
+	}
+	_, err := c.StartAgent(context.Background(), "b-remote-replica", endpoint, "agent-1", "project-1", "", "", "", "", "", "", nil, nil, nil, nil, false, false, StartExtras{})
+	if !errors.Is(err, config.ErrPlaintextNonLoopback) {
+		t.Errorf("StartAgent error = %v, want config.ErrPlaintextNonLoopback", err)
+	}
+	_, err = c.ExecuteKeys(context.Background(), "b-remote-replica", endpoint, "agent-1", agentkeys.BrokerRequest{ProjectID: "project-1"})
+	if !errors.Is(err, config.ErrPlaintextNonLoopback) {
+		t.Errorf("ExecuteKeys error = %v, want config.ErrPlaintextNonLoopback", err)
+	}
+}
+
+// The main broker client follows a redirect only on the same host and only
+// to a target the transport rule accepts: a broker response cannot make the
+// hub resend a signed body to another host or to a plaintext network host.
+func TestBrokerHTTPTransport_RedirectPolicy(t *testing.T) {
+	var otherHits atomic.Int32
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		otherHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer other.Close()
+	// The same server under another host name: a different host to the client.
+	otherByName := strings.Replace(other.URL, "127.0.0.1", "localhost", 1)
+
+	broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/same":
+			http.Redirect(w, r, "/final", http.StatusTemporaryRedirect)
+		case "/final":
+			w.WriteHeader(http.StatusOK)
+		case "/cross-host":
+			http.Redirect(w, r, otherByName+"/x", http.StatusTemporaryRedirect)
+		case "/plaintext-network":
+			http.Redirect(w, r, "http://192.0.2.10:9800/x", http.StatusTemporaryRedirect)
+		}
+	}))
+	defer broker.Close()
+	tr := newBrokerHTTPTransport(false, nil)
+
+	resp, err := tr.doRequest(context.Background(), "b1", http.MethodPost, broker.URL+"/same", []byte(`{}`))
+	if err != nil {
+		t.Fatalf("same-host redirect: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("same-host redirect status = %d, want 200", resp.StatusCode)
+	}
+
+	resp, err = tr.doRequest(context.Background(), "b1", http.MethodPost, broker.URL+"/cross-host", []byte(`{"agentToken":"x"}`))
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "another host") {
+		t.Errorf("cross-host redirect error = %v, want a refusal", err)
+	}
+	if otherHits.Load() != 0 {
+		t.Errorf("the other host received %d requests, want none", otherHits.Load())
+	}
+
+	resp, err = tr.doRequest(context.Background(), "b1", http.MethodPost, broker.URL+"/plaintext-network", []byte(`{}`))
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if err == nil {
+		t.Error("redirect to a plaintext network host was followed, want a refusal")
 	}
 }
