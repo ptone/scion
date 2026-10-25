@@ -497,3 +497,37 @@ test('findSourceMap prefers the map next to the chunk, then dist/sourcemaps, els
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('requiredStrings: every marker string must be in the chunks of the prefix', () => {
+  const texts = {
+    'assets/review-editor-a1.js': 'x("raw-html");',
+    'assets/review-editor-b2.js': 'new P("criticPolicy")',
+    'assets/main.js': 'image-placeholder',
+  };
+  const check = (requiredStrings, files = Object.keys(texts)) =>
+    checkBudget({
+      manifest,
+      budget: budget({
+        files: {},
+        entryClosure: undefined,
+        requiredChunks: [],
+        forbiddenModules: [],
+        requiredStrings,
+      }),
+      readFile: (f) => (f in texts ? Buffer.from(texts[f]) : null),
+      listFiles: () => files,
+      readMapModules: () => [],
+    });
+  // Strings from either chunk of the prefix count; comment keys are skipped.
+  const ok = check({ $comment: 'why', 'assets/review-editor-': ['raw-html', 'criticPolicy'] });
+  assert.deepEqual(ok.failures, []);
+  assert.ok(ok.report.includes('required strings in assets/review-editor-*.js: 2 of 2 present'));
+  // A string only in another chunk is missing here.
+  assert.deepEqual(check({ 'assets/review-editor-': ['raw-html', 'image-placeholder'] }).failures, [
+    'assets/review-editor-*.js: missing required string "image-placeholder"',
+  ]);
+  // No chunk of the prefix at all.
+  assert.deepEqual(check({ 'assets/review-editor-': ['raw-html'] }, ['assets/main.js']).failures, [
+    'no chunk matching assets/review-editor-*.js',
+  ]);
+});

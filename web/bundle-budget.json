@@ -32,6 +32,19 @@
       "assets/markdown-"
     ]
   },
+  "$comment-requiredStrings": "Marker strings of the review editor's safety and input modules (ptone/scion#5914): raw HTML shown as text, links and images rendered by the artifact rules, paste handling, the suggest-mode policy and tracking. The build drops plugin code nothing uses, so this proves these modules are in the production chunks, which the unit tests (run on the source) cannot.",
+  "requiredStrings": {
+    "assets/review-editor-": [
+      "raw-html",
+      "inert-link",
+      "noopener noreferrer",
+      "image-placeholder",
+      "criticPaste",
+      "paste-multi",
+      "criticPolicy",
+      "criticTrack"
+    ]
+  },
   "requiredChunks": [
     "assets/terminal-workspace-",
     "assets/lang-css-",

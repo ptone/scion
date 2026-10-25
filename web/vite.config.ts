@@ -168,10 +168,16 @@ function packageChunk(id: string): string | undefined {
 }
 
 /**
- * Milkdown's plugin factories (@milkdown/utils): each returns a new plugin
- * object and has no other effect, so Rollup may drop a call whose plugin
- * nothing uses. Milkdown's presets are one module each, and without this
- * every command, keymap and input rule they define stays in the bundle.
+ * Milkdown's plugin factories (@milkdown/utils), and withMeta, which only
+ * labels a plugin for Milkdown's inspector: each returns a plugin object
+ * and has no other effect, so Rollup may drop a call whose plugin nothing
+ * uses. Milkdown's presets are one module each, and without this every
+ * command, keymap and input rule they define stays in the review editor's
+ * chunk. Rollup matches these names in every module, so add a name only
+ * after checking that no package uses it for a call with an effect; and
+ * any plugin the editor needs must be reached by a use, not by a side
+ * effect, or it is dropped. bundle-budget.json requiredStrings checks that
+ * the editor's rendering and input modules are in the built chunk.
  */
 const MILKDOWN_PLUGIN_FACTORIES = [
     '$command',

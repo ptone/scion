@@ -40,6 +40,10 @@
  *                         large one through a shared helper);
  *   - requiredChunks:     chunk file name prefixes that must exist (proves a
  *                         lazy split still happens);
+ *   - requiredStrings:    per chunk file name prefix, strings that must
+ *                         appear in its chunks (together): marker strings
+ *                         of modules that must survive tree shaking, such as
+ *                         the review editor's rendering and input rules;
  *   - forbiddenModules:   source modules that must not be in the static
  *                         closure of the given routes, by base name
  *                         (pattern) or by full path (pathPattern, for
@@ -277,6 +281,20 @@ export function checkBudget({ manifest, budget, readFile, listFiles, readMapModu
     const found = built.filter((f) => f.startsWith(prefix) && f.endsWith('.js'));
     report.push(`required chunk ${prefix}*.js: ${found.length ? found.join(', ') : 'none'}`);
     if (!found.length) failures.push(`no chunk matching ${prefix}*.js`);
+  }
+
+  for (const [prefix, strings] of Object.entries(budget.requiredStrings ?? {})) {
+    if (prefix.startsWith('$')) continue;
+    const found = built.filter((f) => f.startsWith(prefix) && f.endsWith('.js'));
+    const text = found.map((f) => readFile(f)?.toString('utf-8') ?? '').join('\n');
+    const missing = strings.filter((x) => !text.includes(x));
+    report.push(
+      `required strings in ${prefix}*.js: ${strings.length - missing.length} of ${strings.length} present`
+    );
+    if (!found.length) failures.push(`no chunk matching ${prefix}*.js`);
+    else
+      for (const x of missing)
+        failures.push(`${prefix}*.js: missing required string ${JSON.stringify(x)}`);
   }
 
   for (const rule of budget.forbiddenModules ?? []) {
