@@ -144,6 +144,28 @@ hub:
   #
   adminEmails: []
 
+  # Proxy configuration, rendered as server.trusted_proxies: the peers whose
+  # X-Forwarded-Proto header the hub honours. Remote Runtime Brokers that
+  # reach the hub through a TLS-terminating proxy need it to list that
+  # proxy's source addresses. Only the immediate peer is compared.
+  #
+  # The default is the Google front end ranges. This chart targets
+  # container-native load balancing through a network endpoint group (see
+  # service below), so a GKE Ingress or a Gateway on the global external
+  # Application Load Balancer connects to the pod from these ranges, the same
+  # ones its health checks use. Replace them for another tier:
+  #
+  #   regional or internal Application Load Balancer: the region's
+  #     proxy-only subnet range
+  #   ingress-nginx or another in-cluster proxy: the pod range the proxy
+  #     runs in
+  #
+  # IPs or CIDRs only. Catch-all and very wide entries (IPv4 shorter than /8,
+  # IPv6 shorter than /16) are refused at render, as the hub refuses them at
+  # startup. An empty list renders no key, and the hub then trusts no
+  # forwarded protocol.
+  trustedProxies: ["35.191.0.0/16", "130.211.0.0/22"]
+
   # REQUIRED, and deliberately without a default. The external URL the hub is
   # reached at, scheme and host, no trailing path. Absence is not an error in
   # the hub - it warns once and falls back to http://localhost:<port>, which
@@ -423,6 +445,7 @@ config:
   #   database.maxOpenConns      ->  server.database.max_open_conns
   #   hub.hubId                  ->  server.hub.hub_id
   #   hub.name                   ->  server.hub.hub_name
+  #   hub.trustedProxies         ->  server.trusted_proxies
   #   rbac.agentNamespace        ->  runtimes.kubernetes.namespace
   #   runtime.listAllNamespaces  ->  runtimes.kubernetes.list_all_namespaces
   #   runtime.namespace          ->  runtimes.kubernetes.namespace
@@ -438,7 +461,7 @@ config:
   # mutates every value in this file, renders, and requires each one that only
   # moves the settings document to appear here with the key it actually moved.
   # If you are reading this in a fork whose chart has drifted, run that script
-  # rather than trusting these eleven lines. The same list is printed on install by
+  # rather than trusting these twelve lines. The same list is printed on install by
   # NOTES.txt, from a single definition in templates/_helpers.tpl.
   #
   # Not listed, because they refuse rather than go quiet: config.extra,

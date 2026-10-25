@@ -387,6 +387,29 @@ These are the chart's selector labels, and the chart's tests pin them. Labels in
 `hub.podLabels` cannot override them.
 :::
 
+### Proxy configuration
+
+`hub.trustedProxies` is rendered as `server.trusted_proxies`: the peers whose
+`X-Forwarded-Proto` header the hub honours. Remote Runtime Brokers that reach
+the hub through your TLS-terminating load balancer need the load balancer's
+source addresses listed. The hub compares only the immediate peer.
+
+The default is the Google front end ranges, `35.191.0.0/16` and
+`130.211.0.0/22`. These are the addresses a GKE Ingress or a Gateway on the global
+external Application Load Balancer uses to reach the pods through a NEG. Replace
+them if a different tier fronts the hub:
+
+| Tier in front of the hub | `hub.trustedProxies` |
+|---|---|
+| GKE Ingress, or Gateway on the global external Application Load Balancer (default) | `35.191.0.0/16`, `130.211.0.0/22` |
+| Regional external or internal Application Load Balancer | the region's proxy-only subnet range |
+| ingress-nginx or another in-cluster proxy | the pod range the proxy runs in |
+
+Entries are IPs or CIDRs. Catch-all and very wide entries (IPv4 shorter than
+`/8`, IPv6 shorter than `/16`) fail the render. An empty list renders no key,
+and the hub then trusts no forwarded protocol. Under `config.existingSecret`,
+put `server.trusted_proxies` in your own settings file.
+
 The readiness and startup probes target `/readyz` on the hub's web port
 (`hub.webPort`, default 8080). The path cannot be changed. The liveness probe is
 off by default. When `probes.liveness.enabled` is `true`, it is a TCP check on

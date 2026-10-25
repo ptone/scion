@@ -119,6 +119,11 @@
           "items": {"type": "string", "pattern": "^[^\\s,]+@[^\\s,]+$"},
           "description": "Email addresses auto-promoted to the admin role, rendered as server.hub.admin_emails in settings.yaml (V1ServerHubConfig, pkg/config/settings_v1.go). One address per entry: an entry containing a comma is refused, because the hub comma-splits a one-element list but keeps commas literal in a longer one, so the same entry would mean different things depending on its neighbours. Empty omits the key."
         },
+        "trustedProxies": {
+          "type": "array",
+          "items": {"type": "string", "pattern": "^[0-9A-Fa-f:.]+(/[0-9]{1,3})?$"},
+          "description": "Proxy configuration: the peers whose X-Forwarded-Proto the hub honours, rendered as server.trusted_proxies in settings.yaml. Each entry is an IP or a CIDR. Defaults to the Google front end ranges that a GKE Ingress or Gateway on the global external Application Load Balancer connects from. Catch-all and very wide entries (IPv4 shorter than /8, IPv6 shorter than /16) are refused at render. Empty omits the key."
+        },
         "baseUrl": {
           "type": "string",
           "pattern": "^https://[^\\s/]+(/[^\\s]*)?$",

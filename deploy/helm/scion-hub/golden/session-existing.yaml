@@ -74,6 +74,9 @@ stringData:
       mode: hosted
       storage:
         provider: local
+      trusted_proxies:
+      - 35.191.0.0/16
+      - 130.211.0.0/22
 ---
 # Source: scion-hub/templates/configmap-env.yaml
 apiVersion: v1
@@ -252,7 +255,7 @@ spec:
       annotations:
         scion.io/hub-id: "ci-session-existing"
         checksum/env-config: 5dea6cae7c1ea7088b56c4858aebeac9c610a872066bb3465184dbf939393912
-        checksum/settings: 556186542ed0f83b2c9799a90bb4d28d9f7ebd16ea3f6bc53a1adb69336affce
+        checksum/settings: 194ce88c19b6b61b5a2ec47b4c9eb02639294edf6551ada538f20dbccfce9c46
     spec:
       serviceAccountName: scion-scion-hub
       securityContext:

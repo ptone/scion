@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=208   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 14 (workspaceStorage.nfs: eleven refusals, one acceptance, two rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check).
+EXPECTED_TOTAL=215   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 14 (workspaceStorage.nfs: eleven refusals, one acceptance, two rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check) + 7 (hub.trustedProxies: five refusals, one acceptance, one rendered-shape check).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -981,6 +981,35 @@ else
   failed=$((failed + 1))
 fi
 unset _ae _ad
+
+echo "== hub.trustedProxies =="
+# Proxy configuration. The hub refuses catch-all and very wide entries at
+# startup, so the chart refuses the same ones at render rather than ship a pod
+# that crash-loops; a non-IP entry is refused by the schema.
+reject "trustedProxies 0.0.0.0/0" "is wider than /8" --set 'hub.trustedProxies={0.0.0.0/0}'
+reject "trustedProxies IPv4 /7" "is wider than /8" --set 'hub.trustedProxies={10.0.0.0/7}'
+reject "trustedProxies ::/0" "is wider than /16" --set 'hub.trustedProxies={::/0}'
+reject "trustedProxies IPv4-mapped /96" "is wider than /104" --set 'hub.trustedProxies={::ffff:0:0/96}'
+reject "trustedProxies hostname, schema layer" "hub.trustedProxies.0" --set 'hub.trustedProxies={proxy.example.invalid}'
+accept "trustedProxies IPv4 /8" --set 'hub.trustedProxies={10.0.0.0/8}'
+executed=$((executed + 1))
+_tp_default="$(render --show-only templates/secret-settings.yaml)"
+_tp_custom="$(render --set 'hub.trustedProxies={10.20.0.0/16}' --show-only templates/secret-settings.yaml)"
+_tp_empty="$(render --set-json 'hub.trustedProxies=[]' --show-only templates/secret-settings.yaml)"
+if ! printf '%s\n' "$_tp_default" "$_tp_custom" "$_tp_empty" | grep -c '^kind: Secret$' | grep -qx 3; then
+  echo "FAIL  server.trusted_proxies shape: a render produced no settings Secret, so nothing was inspected"
+  failed=$((failed + 1))
+elif [ "$(printf '%s\n' "$_tp_default" | sed -n '/^ *trusted_proxies:$/,/^[^-]*:/p' | grep -cE '^ +- ')" = 2 ] \
+  && printf '%s\n' "$_tp_default" | grep -A2 -E '^ +trusted_proxies:$' | grep -qE '^ +- 35\.191\.0\.0/16$' \
+  && printf '%s\n' "$_tp_default" | grep -A2 -E '^ +trusted_proxies:$' | grep -qE '^ +- 130\.211\.0\.0/22$' \
+  && [ "$(printf '%s\n' "$_tp_custom" | grep -A2 -E '^ +trusted_proxies:$' | grep -E '^ +- ')" = "      - 10.20.0.0/16" ] \
+  && ! printf '%s\n' "$_tp_empty" | grep -q 'trusted_proxies'; then
+  echo "ok    hub.trustedProxies renders server.trusted_proxies (default: the two Google front end ranges); empty renders no key"
+else
+  echo "FAIL  server.trusted_proxies shape: the default or custom list did not render as expected, or an empty list rendered the key"
+  failed=$((failed + 1))
+fi
+unset _tp_default _tp_custom _tp_empty
 
 echo "== secrets.backend =="
 # local renders nothing; gcpsm renders server.secrets and needs a project. The

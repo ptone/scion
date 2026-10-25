@@ -102,6 +102,9 @@ stringData:
       storage:
         bucket: ci-settings-hub-blobs
         provider: gcs
+      trusted_proxies:
+      - 35.191.0.0/16
+      - 130.211.0.0/22
 ---
 # Source: scion-hub/templates/configmap-env.yaml
 apiVersion: v1
@@ -280,7 +283,7 @@ spec:
       annotations:
         scion.io/hub-id: "ci-settings"
         checksum/env-config: 7bef406d2c6ecfeffeb8f657fcd823ce4215f6de5dee53152102ac5a066100bd
-        checksum/settings: d2600bf42bc5915e93a5d281534176514d179bbdd251ac01971b816f13b594ff
+        checksum/settings: 840b27acad2d8afc456572c6f297cb16c883b3ecb4363a59795c8780e245686d
     spec:
       serviceAccountName: scion-scion-hub
       securityContext:

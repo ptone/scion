@@ -2023,6 +2023,9 @@ PROBE_TPL
 cat >"$WORK/settings-leaves.py" <<'PROBE_PY'
 import sys
 stack, out = [], []
+# A key with no inline value, at depth: the owner of an indentless sequence
+# (toYaml writes "key:" and its "- item" lines at the same indent).
+open_key = None
 for raw in sys.stdin:
     line = raw.rstrip('\n')
     if not line.strip() or line.lstrip().startswith('#'):
@@ -2033,13 +2036,15 @@ for raw in sys.stdin:
         sys.exit(2)
     depth, body = indent // 2, line.strip()
     if body.startswith('- '):
-        out.append('.'.join(stack[:depth]) + '[]=' + body[2:])
+        owner = stack[:depth + 1] if open_key == depth else stack[:depth]
+        out.append('.'.join(owner) + '[]=' + body[2:])
         continue
     if ':' not in body:
         sys.stderr.write('unparsed line: %r\n' % line)
         sys.exit(2)
     key, _, val = body.partition(':')
     stack = stack[:depth] + [key]
+    open_key = None if val.strip() else depth
     if val.strip():
         out.append('.'.join(stack) + '=' + val.strip())
 print('\n'.join(out))
@@ -2079,6 +2084,7 @@ declare -A PROBE_MUTATION=(
   [auth.oauth.web.github.clientId]='--set-string|auth.oauth.web.github.clientId=probe-gh-id|--set-string|auth.oauth.web.github.clientSecret=probe-gh-secret'
   [auth.oauth.web.github.clientSecret]='--set-string|auth.oauth.web.github.clientId=probe-gh-id|--set-string|auth.oauth.web.github.clientSecret=probe-gh-secret2'
   [hub.adminEmails]='--set|hub.adminEmails={probe-admin@example.com}'
+  [hub.trustedProxies]='--set|hub.trustedProxies={10.20.0.0/16}'
   # hub.hubClass is an enum ("" or test). hub.testIdentities.enabled=true needs
   # hub.hubClass: test to render at all (the render guard), so it carries it.
   [hub.hubClass]='--set-string|hub.hubClass=test'
@@ -2510,8 +2516,10 @@ else
     fi
 
     # Not refused, so it must be documented - with the key it actually moved.
+    # A list item is booked on the list's own key (server.trusted_proxies, not
+    # server.trusted_proxies[]): that is the key the operator writes.
     for key in $(diff "$WORK/probe-base.settings" "$WORK/probe-mut.settings" \
-                   | sed -n 's/^[<>] \([^=]*\)=.*/\1/p' | sort -u); do
+                   | sed -n 's/^[<>] \([^=]*\)=.*/\1/p' | sed 's/\[\]$//' | sort -u); do
       printf '%s %s\n' "$leaf" "$key" >>"$WORK/probe-observed.txt"
     done
   done <"$WORK/probe-leaves.txt"

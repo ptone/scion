@@ -2538,6 +2538,7 @@ the same runtimes.kubernetes.namespace.
   database.maxOpenConns      ->  server.database.max_open_conns
   hub.hubId                  ->  server.hub.hub_id
   hub.name                   ->  server.hub.hub_name
+  hub.trustedProxies         ->  server.trusted_proxies
   rbac.agentNamespace        ->  runtimes.kubernetes.namespace
   runtime.listAllNamespaces  ->  runtimes.kubernetes.list_all_namespaces
   runtime.namespace          ->  runtimes.kubernetes.namespace
@@ -3419,6 +3420,37 @@ nothing, so it is refused rather than discarded.
     "broker" (dict "host" "127.0.0.1" "port" (int (include "scion-hub.brokerPort" .)) "auto_provide" true) }}
 {{- if $oauthWeb }}
 {{- $server = set $server "oauth" (dict "web" $oauthWeb) }}
+{{- end }}
+
+{{- /*
+server.trusted_proxies from hub.trustedProxies: the proxy configuration, the
+peers whose X-Forwarded-Proto the hub honours. Omitted when empty. The hub
+refuses to start on an entry that is not an IP or CIDR and on catch-all or very
+wide prefixes (IPv4 shorter than /8, IPv6 shorter than /16, an IPv4-mapped IPv6
+range wider than an IPv4 /8), so the same entries are refused here, at render,
+instead of as a crash-looping pod.
+*/}}
+{{- $trustedProxies := list }}
+{{- range (dig "trustedProxies" (list) .Values.hub) }}
+{{- $entry := trim (toString .) }}
+{{- if not (regexMatch "^[0-9A-Fa-f:.]+(/[0-9]{1,3})?$" $entry) }}
+{{- fail (printf "hub.trustedProxies entry %s is not an IP address or a CIDR." (include "scion-hub.diagValue" (toString .))) }}
+{{- end }}
+{{- if contains "/" $entry }}
+{{- $bits := int (last (splitList "/" $entry)) }}
+{{- $minBits := 8 }}
+{{- if contains ":" $entry }}
+{{- $minBits = 16 }}
+{{- if hasPrefix "::ffff:" (lower $entry) }}{{- $minBits = 104 }}{{- end }}
+{{- end }}
+{{- if lt $bits $minBits }}
+{{- fail (printf "hub.trustedProxies entry %s is wider than /%d. A range that wide trusts a forwarded protocol from almost anyone, and the hub refuses it at startup. List the proxy's own source range." $entry $minBits) }}
+{{- end }}
+{{- end }}
+{{- $trustedProxies = append $trustedProxies $entry }}
+{{- end }}
+{{- if $trustedProxies }}
+{{- $server = set $server "trusted_proxies" $trustedProxies }}
 {{- end }}
 
 {{- /*
