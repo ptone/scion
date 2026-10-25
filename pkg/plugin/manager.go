@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	goplugin "github.com/hashicorp/go-plugin"
@@ -279,28 +280,45 @@ func (m *Manager) loadPluginWithConfig(dp DiscoveredPlugin, cfg map[string]strin
 		})
 	}
 
-	// Connect to the plugin process and get the RPC client
-	rpcClient, err := client.Client()
-	if err != nil {
-		if !dp.SelfManaged {
-			client.Kill()
-		}
-		return fmt.Errorf("failed to connect to plugin %s/%s: %w", dp.Type, dp.Name, err)
-	}
-
-	// Dispense the plugin interface
+	// Connect to the plugin and dispense its interface, bounded so that a
+	// session that hangs right after the dial cannot block the caller (a
+	// restart attempt holds the plugin's restart lock).
 	var dispenseName string
 	switch dp.Type {
 	case PluginTypeBroker:
 		dispenseName = BrokerPluginName
 	}
-
-	raw, err := rpcClient.Dispense(dispenseName)
-	if err != nil {
-		if !dp.SelfManaged {
-			client.Kill()
+	type dispenseResult struct {
+		raw interface{}
+		err error
+	}
+	res := make(chan dispenseResult, 1)
+	go func() {
+		rpcClient, err := client.Client()
+		if err != nil {
+			res <- dispenseResult{err: fmt.Errorf("failed to connect to plugin %s/%s: %w", dp.Type, dp.Name, err)}
+			return
 		}
-		return fmt.Errorf("failed to dispense plugin %s/%s: %w", dp.Type, dp.Name, err)
+		raw, err := rpcClient.Dispense(dispenseName)
+		if err != nil {
+			res <- dispenseResult{err: fmt.Errorf("failed to dispense plugin %s/%s: %w", dp.Type, dp.Name, err)}
+			return
+		}
+		res <- dispenseResult{raw: raw}
+	}()
+	var raw interface{}
+	timer := time.NewTimer(restartStepTimeout)
+	select {
+	case r := <-res:
+		timer.Stop()
+		if r.err != nil {
+			m.discardClient(client, nil, dp.SelfManaged)
+			return r.err
+		}
+		raw = r.raw
+	case <-timer.C:
+		m.discardClient(client, nil, dp.SelfManaged)
+		return fmt.Errorf("plugin %s/%s did not connect within %v", dp.Type, dp.Name, restartStepTimeout)
 	}
 
 	// For broker plugins, configure them immediately
@@ -315,9 +333,7 @@ func (m *Manager) loadPluginWithConfig(dp DiscoveredPlugin, cfg map[string]strin
 				config[hostCallbacksConfigKey] = "true"
 			}
 			if err := brokerClient.configureWithin(config, restartStepTimeout); err != nil {
-				if !dp.SelfManaged {
-					client.Kill()
-				}
+				m.discardClient(client, raw, dp.SelfManaged)
 				return fmt.Errorf("failed to configure broker plugin %s: %w", dp.Name, err)
 			}
 		}
@@ -329,9 +345,7 @@ func (m *Manager) loadPluginWithConfig(dp DiscoveredPlugin, cfg map[string]strin
 		// Shutdown has begun (and may already have reset the maps): do
 		// not store a client it will never stop.
 		m.mu.Unlock()
-		if !dp.SelfManaged {
-			client.Kill()
-		}
+		m.discardClient(client, raw, dp.SelfManaged)
 		return fmt.Errorf("plugin manager is shutting down; not storing plugin %s/%s", dp.Type, dp.Name)
 	}
 	// Kill any existing plugin with the same key (only if not self-managed)
@@ -489,8 +503,23 @@ func (m *Manager) Reconnect(pluginType, name string) error {
 	if err := m.loadPluginWithConfig(dp, cfg); err != nil {
 		return err
 	}
+	if m.stopping.Load() {
+		return fmt.Errorf("plugin manager is shutting down")
+	}
+	if err := m.runRestartHooksWithin(name, restartStepTimeout); err != nil {
+		// The new connection is up but its spoke is not refreshed: leave
+		// it to the supervisor, which replaces it with backoff.
+		m.sup.mu.Lock()
+		attempt := 0
+		if sp, ok := m.sup.plugins[key]; ok {
+			attempt = sp.status.Attempt
+		}
+		m.sup.mu.Unlock()
+		m.attemptFailed(key, attempt, fmt.Errorf("restart hook: %w", err))
+		return err
+	}
 	m.supervisedLoaded(key)
-	return m.runRestartHooksWithin(name, restartStepTimeout)
+	return nil
 }
 
 // GetBroker returns an eventbus.EventBus backed by the named broker plugin.
