@@ -32,7 +32,7 @@ Only `scion-agent.yaml` is required for Scion to recognize the directory as a te
 
 ### `scion-agent.yaml`
 
-The config file drives the role. Fields that point at content — `agent_instructions`, `system_prompt` — accept **either a filename** (resolved relative to the template directory) **or inline text**. The convention is to keep prose in separate `.md` files:
+The config file drives the role. Fields that point at content — `agent_instructions`, `system_prompt` — accept **either a filename** (resolved relative to the template directory) **or inline text**. A filename must stay inside the template directory and name a regular file; a symbolic link is refused rather than followed. The convention is to keep prose in separate `.md` files:
 
 ```yaml
 schema_version: "1"
@@ -128,8 +128,10 @@ scion start my-review
 scion start coord --type gh://scion-frontiers/agent-team/templates/coordinator
 
 # Run from a locally cloned checkout
-scion start coord --type ./templates/coordinator
+scion start coord --type "$PWD/templates/coordinator"
 ```
+
+An absolute path is read by the CLI on your own machine: the CLI uploads that template to the Hub or sends its name, never the path. A Hub or Runtime Broker does not accept a host path as a template reference.
 
 ### Which harness-config is used
 
@@ -244,9 +246,13 @@ Scion ships a built-in **`team-creation`** skill for generating coordinated mult
 When you reference a template by bare name, Scion searches in this order and uses the first match:
 
 1. **Remote URI** (GitHub URL / deep path, archive, or rclone) — fetched and cached.
-2. **Absolute path** to a template directory.
+2. **Absolute path** to a template directory (CLI on your own machine only).
 3. **Project** templates (`.scion/templates/`).
 4. **Global** templates (`~/.scion/templates/`).
+
+A template name may contain `/` to reach a nested directory, but it must stay inside the project or global templates directory: a name that leaves it (such as `../other`) is refused. A template directory reached through a symbolic link is not used.
+
+On a Hub (agent create, scheduled and recurring dispatches) and on a Runtime Broker, a template reference must be a template name, a relative path that stays inside the templates directories, or an accepted remote source (below); an absolute path is refused with a validation error. A template's files are never read through a symbolic link: links in its `home/` and `skills/` directories are skipped when they are copied into an agent, and a prompt file or config file that is a link stops provisioning with an error.
 
 #### Remote template sources
 
