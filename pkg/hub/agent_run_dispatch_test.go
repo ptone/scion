@@ -93,6 +93,10 @@ var runDispatches = []struct {
 	name     string
 	dispatch func(ctx context.Context, f *runDispatchFixture) error
 	sent     func(f *runDispatchFixture) (token, runID string, called bool)
+	// brokerRestart marks the broker restart (DispatchAgentRestart), which
+	// refuses an agent with as-needed entries before resolving any secret
+	// (ptone/scion#6101).
+	brokerRestart bool
 }{
 	{
 		name: "create",
@@ -128,8 +132,9 @@ var runDispatches = []struct {
 		},
 	},
 	{
-		name:     "restart",
-		dispatch: func(ctx context.Context, f *runDispatchFixture) error { return f.d.DispatchAgentRestart(ctx, f.agent) },
+		name:          "restart",
+		brokerRestart: true,
+		dispatch:      func(ctx context.Context, f *runDispatchFixture) error { return f.d.DispatchAgentRestart(ctx, f.agent) },
 		sent: func(f *runDispatchFixture) (string, string, bool) {
 			return f.client.lastRestartResolvedEnv["SCION_AUTH_TOKEN"], f.client.lastRestartExtras.RunID, f.client.restartCalled
 		},

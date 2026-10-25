@@ -236,7 +236,7 @@ func TestDispatch_GCPAccessErrorFailsClosed(t *testing.T) {
 
 			err := tc.dispatch(context.Background(), f)
 			require.Error(t, err)
-			if tc.name == "restart" {
+			if tc.brokerRestart {
 				assertBrokerRestartRefused(t, f, tc.sent, err, errBrokerLacksStartEnvGather)
 				return
 			}
@@ -267,8 +267,6 @@ func gatherNeedsClient(f *runDispatchFixture) *int {
 	return &calls
 }
 
-// assertStartsFailClosed checks that a start and a restart of f's agent
-// fail on cause with the fixed message and send nothing to the broker.
 // assertBrokerRestartRefused checks a broker restart of an agent with an
 // as-needed entry: refused with the keyless refusal want before any secret
 // is resolved (no resolution error, no backend detail), and nothing sent.
@@ -283,6 +281,8 @@ func assertBrokerRestartRefused(t *testing.T, f *runDispatchFixture, sent func(*
 	assert.False(t, called, "the refused restart sends nothing to the broker")
 }
 
+// assertStartsFailClosed checks that a start and a restart of f's agent
+// fail on cause with the fixed message and send nothing to the broker.
 func assertStartsFailClosed(t *testing.T, f *runDispatchFixture, cause error) {
 	t.Helper()
 	for _, tc := range runDispatches {
@@ -370,8 +370,8 @@ func TestProvisionGather_AsNeededResolutionErrorFails(t *testing.T) {
 		setBrokerCaps(t, f.store, &store.RuntimeBroker{ID: f.agent.RuntimeBrokerID},
 			&store.BrokerCapabilities{StartEnvGather: true, PreserveWorkspaceCreate: true})
 		for _, tc := range runDispatches {
-			switch tc.name {
-			case "start":
+			switch {
+			case tc.name == "start": // as assertStartsFailClosed selects it
 				err := tc.dispatch(context.Background(), f)
 				require.Error(t, err)
 				assert.ErrorIs(t, err, secret.ErrResolveAccess)
@@ -380,7 +380,7 @@ func TestProvisionGather_AsNeededResolutionErrorFails(t *testing.T) {
 				assertNoFailClosedDetail(t, err.Error(), "start error text")
 				_, _, called := tc.sent(f)
 				assert.False(t, called, "start sends nothing to the broker")
-			case "restart":
+			case tc.brokerRestart:
 				assertBrokerRestartRefused(t, f, tc.sent, tc.dispatch(context.Background(), f), errRestartGatherPending)
 			}
 		}

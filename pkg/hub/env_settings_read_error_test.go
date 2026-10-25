@@ -315,11 +315,12 @@ func TestEnvReadError_HubLogNamesScopeOnly(t *testing.T) {
 	assert.NotContains(t, logs, "fake-stored-value")
 }
 
-// Absence is not an error: with no failing reads, create, start, restart
-// and an agent with ancestry but no progeny settings all reach the broker,
-// and the stored setting is sent. The agent has no delivered config and an
-// ancestry, so its start goes through create-with-gather
-// (ptone/scion#6096).
+// Absence is not an error: with no failing reads, an agent with ancestry but
+// no progeny settings reaches the broker on start and create, and the stored
+// setting is sent. The agent has no delivered config and an ancestry, so its
+// start goes through create-with-gather (ptone/scion#6096). Its broker
+// restart is refused, because the ancestry counts as as-needed entries the
+// broker cannot gather (ptone/scion#6101); without the ancestry it restarts.
 func TestEnvReadError_NoReadErrorStartsNormally(t *testing.T) {
 	f := newEnvReadFixture(t, nil)
 	f.agent.Ancestry = []string{f.agent.OwnerID, tid("parent-envread")}
@@ -334,9 +335,11 @@ func TestEnvReadError_NoReadErrorStartsNormally(t *testing.T) {
 	// same agent without an ancestry restarts normally.
 	require.ErrorIs(t, f.d.DispatchAgentRestart(ctx, f.agent), errBrokerLacksStartEnvGather)
 	assert.False(t, f.client.restartCalled, "the refused restart sends nothing")
+	ancestry := f.agent.Ancestry
 	f.agent.Ancestry = nil
 	require.NoError(t, f.d.DispatchAgentRestart(ctx, f.agent))
 	assert.True(t, f.client.restartCalled)
+	f.agent.Ancestry = ancestry
 	f.client.createCalled = false
 	_, err := f.d.DispatchAgentCreate(ctx, f.agent)
 	require.NoError(t, err)
