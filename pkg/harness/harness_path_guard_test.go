@@ -60,16 +60,11 @@ func checkNoRawFSOnUntrustedPaths(f *ast.File) []string {
 			return true
 		}
 		for _, arg := range call.Args {
+			// Every identifier in the argument, including the selected name
+			// of a selector (c.configDirPath), is visited exactly once.
 			ast.Inspect(arg, func(m ast.Node) bool {
-				var name string
-				switch m := m.(type) {
-				case *ast.Ident:
-					name = m.Name
-				case *ast.SelectorExpr:
-					name = m.Sel.Name
-				}
-				if untrustedPathNames[name] {
-					problems = append(problems, "os."+sel.Sel.Name+" on "+name)
+				if id, ok := m.(*ast.Ident); ok && untrustedPathNames[id.Name] {
+					problems = append(problems, "os."+sel.Sel.Name+" on "+id.Name)
 				}
 				return true
 			})
