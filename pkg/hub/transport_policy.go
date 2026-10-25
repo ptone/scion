@@ -27,7 +27,7 @@ import (
 // secret, and the control channel and the broker conduit session carry the
 // secrets of every agent the broker runs. The hub serves them only on a
 // request that arrived over an encrypted channel or from this host
-// (confidentialArrival); every other request is refused before anything
+// (config.ConfidentialArrival); every other request is refused before anything
 // secret is produced. The broker side refuses the same hubs before sending
 // anything (config.CheckHubTransport); this is the hub's own check, for a
 // broker that does not.
@@ -43,7 +43,7 @@ const transportRefusalMessage = "This request carries broker credentials and mus
 	config.TrustedProxiesKey + " so the hub trusts its X-Forwarded-Proto header."
 
 // requireConfidentialArrival writes the transport refusal (403) and returns
-// false when r did not arrive confidentially (confidentialArrival with the
+// false when r did not arrive confidentially (config.ConfidentialArrival with the
 // hub's server.trusted_proxies).
 func (s *Server) requireConfidentialArrival(w http.ResponseWriter, r *http.Request) bool {
 	if config.ConfidentialArrival(r, s.transportTrustedNets) {

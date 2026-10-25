@@ -47,7 +47,7 @@ Proxy ingress needs HMAC relay-peer authentication (`server.hub.conduit.peer_aut
 A relay reads its own configuration file, never the hub's. It needs:
 
 - `server.relay.hub_internal_url`: the hub internal API, reachable only inside the cluster or VPC.
-- `server.relay.public_url`: the URL dialers reach this relay at. The relay admits a conduit dial on its public listener only over TLS, from its own host, or from a TLS-terminating proxy listed in `server.trusted_proxies` (empty by default, so no proxy is trusted); any other dial gets `403` `transport_not_confidential` before admission.
+- `server.relay.public_url`: the URL dialers reach this relay at. The relay admits a conduit dial on its public listener only over TLS, from its own host, or from a TLS-terminating proxy listed in `server.trusted_proxies` (empty by default, so no proxy is trusted); any other dial gets `403` `transport_not_confidential` before admission. A relay behind a TLS terminator works only when the terminator's addresses are listed in `server.trusted_proxies`, which is empty by default.
 - `server.hub.conduit.peer_secret`: the same secret the hubs use.
 - `server.hub.conduit.internal_listen`, and `internal_advertise` where the bound address is not reachable: the relay internal API that the hubs and other relays call.
 - `database.url`: a relay-scoped database role.

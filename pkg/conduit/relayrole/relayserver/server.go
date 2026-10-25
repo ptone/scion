@@ -350,6 +350,8 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	s.PublicAddr = publicLn.Addr()
 	mux := http.NewServeMux()
 	mux.Handle(relayrole.ConduitPath, requireConfidentialArrival(role, cfg.TrustedProxies, log))
+	// /healthz carries no credential and no state, so it is served
+	// without the arrival check, for load balancer and platform probes.
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	s.public = &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go s.serve(s.public, publicLn, "relay public listener")
