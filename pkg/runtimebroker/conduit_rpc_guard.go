@@ -219,7 +219,11 @@ func (g *conduitRPCGuard) check(ctx context.Context, req *wsprotocol.RequestEnve
 	if !apiclient.VerifyHMAC(key, apiclient.BuildCanonicalString(r, timestamp, nonce), sigBytes) {
 		return unauth("invalid signature")
 	}
-	if !g.seen.add(nonce+"\n"+signature, requestTime.Add(g.maxSkew), now) {
+	// Recorded only after the signature verifies, so only a key holder can
+	// use up a nonce. The key is the nonce: it is covered by the
+	// signature, so unlike the signature header text (whose base64 decoder
+	// ignores unused bits and CR/LF) it has only one accepted spelling.
+	if !g.seen.add(nonce, requestTime.Add(g.maxSkew), now) {
 		return unauth("request already served")
 	}
 	return nil
