@@ -928,6 +928,13 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// (ptone/scion#3032).
 	copyBrokerEcho(fresh, agent.AppliedConfig, true)
 	startEcho := reincarnationStartEchoOf(beforeStart, agentStartEchoFields(agent))
+	// A start leg routed through create-with-gather delivered the config
+	// and recorded ConfigDelivered on the row (ptone/scion#6096): keep it
+	// through the completion write below, which writes fresh, so the next
+	// start is plain. Only the success path sets it; nothing here clears it.
+	if agent.AppliedConfig != nil && agent.AppliedConfig.ConfigDelivered {
+		fresh.ConfigDelivered = true
+	}
 
 	// Step: complete. Design §3.4 Amendment A6: CAS the record to
 	// completed FIRST. Only the winner may write the agent row — otherwise a
@@ -1113,6 +1120,11 @@ func (s *Server) rerenderPreviousConfig(ctx context.Context, dispatcher AgentDis
 		return false
 	}
 	cfg := *previous
+	// previous may carry ConfigDelivered=true. A successful re-render is a
+	// reprovision, which clears it; when the row is restored to previous
+	// without one, the marker comes back although the previous generation's
+	// as-needed values are not persisted anywhere a later plain start reads.
+	// That later start is restart-class: ptone/scion#6101.
 	agent.AppliedConfig = &cfg
 	if err := dispatcher.DispatchAgentReprovision(rctx, agent); err != nil {
 		s.agentLifecycleLog.Warn("reincarnation failed: best-effort re-render of the previous config failed; the on-disk agent config may be partly the new generation",

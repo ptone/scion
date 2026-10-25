@@ -154,7 +154,15 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 		// Flat placement pre-check, before the start claim, the
 		// reservation and the run intent: a stale pin is refused with its
 		// own status and details.
-		if err := s.checkPinnedPlacement(agent); err != nil {
+		if err := s.startPlacementPreCheck(ctx, agent, "started"); err != nil {
+			if errors.Is(err, errBrokerRecordUnreadable) {
+				// A failed broker-record read: the fixed 503, no store text.
+				return nil, &AgentDMError{
+					Code:       ErrCodeUnavailable,
+					Message:    brokerRecordUnreadableText(err),
+					HTTPStatus: http.StatusServiceUnavailable,
+				}
+			}
 			return nil, runtimeTargetDMError(err)
 		}
 
@@ -385,6 +393,21 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 					Code:       ErrCodeUnavailable,
 					Message:    secretErr.Error(),
 					HTTPStatus: http.StatusServiceUnavailable,
+				}
+			}
+			if errors.Is(err, errBrokerRecordUnreadable) {
+				return nil, &AgentDMError{
+					Code:       ErrCodeUnavailable,
+					Message:    brokerRecordUnreadableText(err),
+					HTTPStatus: http.StatusServiceUnavailable,
+				}
+			}
+			if errors.Is(err, errBrokerLacksPreserveWorkspace) {
+				// Refused before anything was sent (ptone/scion#6096).
+				return nil, &AgentDMError{
+					Code:       ErrCodeUnsupportedCapability,
+					Message:    errBrokerLacksPreserveWorkspace.Error(),
+					HTTPStatus: http.StatusPreconditionFailed,
 				}
 			}
 			if errors.Is(err, errBrokerLacksEmptyPerAgent) {

@@ -2874,17 +2874,85 @@ func (s *Server) createAgentInProject(
 					// same way a full create does: remove the broker files and
 					// the agent row, and relay the broker's status. No revoke
 					// here: DispatchAgentProvision already revoked any
-					// credential it minted on this error return. Other
-					// provision failures stay warnings.
+					// credential it minted on this error return. Every other
+					// provision error fails the create too (below).
 					s.agentLifecycleLog.Warn("Provision-only create failed: required skill could not be resolved",
 						"agent_id", agent.ID, "agent", agent.Name, "broker", agent.RuntimeBrokerID, "error", err)
 					failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
 					return
 				}
-				// A Kubernetes identity mapping refusal reads as the
-				// hub's coded message, not the raw broker body
-				// (ptone/scion#4024).
-				warnings = append(warnings, api.ProvisionFailedWarningPrefix+dispatchFailureText(err))
+				if isSecretResolutionError(err) {
+					// The as-needed values the broker asked for could not be
+					// resolved, and a plain start does not gather them, so the
+					// agent cannot start from this provision
+					// (ptone/scion#5959). Fail the create as above: remove the
+					// broker files and the agent row, and answer the fixed
+					// 503. DispatchAgentProvision already revoked any
+					// credential it minted on this error return.
+					s.agentLifecycleLog.Warn("Provision-only create failed: agent secrets could not be resolved",
+						"agent_id", agent.ID, "agent", agent.Name, "broker", agent.RuntimeBrokerID, "error", err)
+					failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
+					return
+				}
+				if errors.Is(err, errProvisionEnvUnmet) {
+					// The broker still reported needed environment keys at
+					// the end of the provision, and a start does not gather
+					// env, so the agent cannot start with its config
+					// (ptone/scion#6096). Fail the create with a fixed
+					// message that names no key.
+					s.agentLifecycleLog.Warn("Provision-only create failed: required environment values still unavailable",
+						"agent_id", agent.ID, "agent", agent.Name, "broker", agent.RuntimeBrokerID)
+					failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() {
+						writeError(w, http.StatusUnprocessableEntity, ErrCodeMissingEnvVars,
+							"Cannot create agent: required environment values are still unavailable after the provision", nil)
+					})
+					return
+				}
+				if errors.Is(err, ErrLifecycleDeferred) {
+					// The agent's broker is not reachable from this hub node:
+					// another node holds it, or no node does and it has no
+					// HTTP endpoint (the broker client defers both alike),
+					// and provision-only dispatch supports neither. A
+					// first-request deferral sends nothing; a deferral of the
+					// replay (or of the retry after a hash repair) comes
+					// after a send. Either way the provision did not
+					// complete on any node, so the agent must not be left to
+					// start (ptone/scion#6096). Fail the create with a fixed
+					// message.
+					s.agentLifecycleLog.Warn("Provision-only create failed: broker not reachable from this hub node",
+						"agent_id", agent.ID, "agent", agent.Name, "broker", agent.RuntimeBrokerID)
+					failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() {
+						writeError(w, http.StatusBadGateway, ErrCodeRuntimeError,
+							"Failed to dispatch to runtime broker: a provision-only create needs the agent's runtime broker to be reachable from this hub node (it is connected to another node, or to no node and has no HTTP endpoint)", nil)
+					})
+					return
+				}
+				if errors.Is(err, errProvisionSent) {
+					// The provision reached the broker (its first request,
+					// the needs report or the replay with the as-needed
+					// values) and then failed, for example the replay in
+					// transport. The broker may hold files without the
+					// as-needed values, and a plain start does not gather them,
+					// so the agent must not stay startable
+					// (ptone/scion#6096). Fail the create as above: remove
+					// the broker files and the agent row, and answer the
+					// dispatch error.
+					s.agentLifecycleLog.Warn("Provision-only create failed after the provision reached the broker",
+						"agent_id", agent.ID, "agent", agent.Name, "broker", agent.RuntimeBrokerID, "error", err)
+					failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
+					return
+				}
+				// Any other provision error, including one returned before a
+				// provision request left the hub (no broker assigned, the
+				// identity precheck, the broker endpoint lookup), also fails
+				// the create, so no provision-only create that did not
+				// provision leaves a row behind (ptone/scion#6096): a plain
+				// start does not gather env, and the broker would provision
+				// the agent on the fly without its as-needed values.
+				s.agentLifecycleLog.Warn("Provision-only create failed: provision did not complete",
+					"agent_id", agent.ID, "agent", agent.Name, "broker", agent.RuntimeBrokerID, "error", err)
+				failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
+				return
 			} else {
 				agent.Phase = string(state.PhaseCreated)
 				if err := s.updateAgentAfterDispatch(ctx, agent); err != nil {
@@ -3427,6 +3495,9 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 			return
 		}
 		if writeEmptyPerAgentCapabilityError(w, err) {
+			return
+		}
+		if writePreserveWorkspaceCapabilityError(w, err) {
 			return
 		}
 		var stillMissing *ErrEnvStillMissing

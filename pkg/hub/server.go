@@ -1438,6 +1438,11 @@ type RemoteCreateAgentRequest struct {
 	// catalog rather than reused (`scion reincarnate`, design §3.4). See
 	// runtimebroker.CreateAgentRequest.Reprovision, the wire twin this maps to.
 	Reprovision bool `json:"reprovision,omitempty"`
+	// PreserveWorkspace marks a full create that must keep the agent's
+	// existing workspace: a start the hub routed through create-with-gather
+	// (ptone/scion#6096). Sent only to a broker that advertises
+	// PreserveWorkspaceCreate. See runtimebroker.CreateAgentRequest.PreserveWorkspace.
+	PreserveWorkspace bool `json:"preserveWorkspace,omitempty"`
 	// ExpectExistingNFSWorkspace mirrors
 	// runtimebroker.CreateAgentRequest.ExpectExistingNFSWorkspace: on a
 	// ProvisionOnly request for an agent moved from another broker, the

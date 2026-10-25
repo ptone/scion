@@ -290,6 +290,11 @@ func isConfirmedStartNotActedOnError(err error) bool {
 	if isSecretResolutionError(err) {
 		return true
 	}
+	// A routed start refused for a broker without PreserveWorkspaceCreate
+	// stops before any token is minted or anything is sent (ptone/scion#6096).
+	if errors.Is(err, errBrokerLacksPreserveWorkspace) || errors.Is(err, errBrokerRecordUnreadable) {
+		return true
+	}
 	// A flat Runtime Broker refusal is raised before anything is sent.
 	var refusal *RuntimeTargetRefusal
 	if errors.As(err, &refusal) {

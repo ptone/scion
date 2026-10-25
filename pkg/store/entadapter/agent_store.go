@@ -2503,6 +2503,90 @@ func (s *AgentStore) SetAgentRuntimeTarget(ctx context.Context, id string, expec
 	return true, nil
 }
 
+// setConfigDeliveredHook, when set by a test, runs inside each
+// SetAgentConfigDelivered attempt between the read and the conditional
+// write, with the attempt's transaction.
+var setConfigDeliveredHook func(ctx context.Context, tx *ent.Tx, id uuid.UUID)
+
+// configDeliveredAttempts bounds SetAgentConfigDelivered's retries when the
+// applied config changes between an attempt's read and write.
+const configDeliveredAttempts = 5
+
+// SetAgentConfigDelivered implements store.AgentStore. See the interface
+// for the contract. Each attempt reads the applied config and writes it
+// back with only the configDelivered key set, in one transaction with the
+// row locked where the dialect supports it, conditional on the stored
+// applied config being unchanged; a miss is retried.
+func (s *AgentStore) SetAgentConfigDelivered(ctx context.Context, id string) (bool, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return false, err
+	}
+	for attempt := 0; attempt < configDeliveredAttempts; attempt++ {
+		written, done, err := s.setAgentConfigDeliveredOnce(ctx, uid)
+		if err != nil || done {
+			return written, err
+		}
+	}
+	return false, fmt.Errorf("set config delivered for agent %s: applied config changed concurrently", id)
+}
+
+// setAgentConfigDeliveredOnce is one SetAgentConfigDelivered attempt. done
+// is false only when the applied config changed between the read and the
+// write.
+func (s *AgentStore) setAgentConfigDeliveredOnce(ctx context.Context, uid uuid.UUID) (written, done bool, err error) {
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return false, true, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	q := tx.Agent.Query().Where(agent.IDEQ(uid), agent.DeletedAtIsNil())
+	if s.usesRowLocks() {
+		q = q.ForUpdate()
+	}
+	row, err := q.Select(agent.FieldAppliedConfig).Only(ctx)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return false, true, nil
+		}
+		return false, true, mapError(err)
+	}
+	raw := map[string]json.RawMessage{}
+	if row.AppliedConfig != "" {
+		if err := json.Unmarshal([]byte(row.AppliedConfig), &raw); err != nil {
+			return false, true, fmt.Errorf("set config delivered for agent %s: %w", uid, err)
+		}
+		if raw == nil { // the stored value was the JSON literal null
+			raw = map[string]json.RawMessage{}
+		}
+	}
+	if v, ok := raw["configDelivered"]; ok && string(v) == "true" {
+		return false, true, nil
+	}
+	raw["configDelivered"] = json.RawMessage("true")
+	updated, err := json.Marshal(raw)
+	if err != nil {
+		return false, true, err
+	}
+	if setConfigDeliveredHook != nil {
+		setConfigDeliveredHook(ctx, tx, uid)
+	}
+	n, err := tx.Agent.Update().
+		Where(agent.IDEQ(uid), agent.DeletedAtIsNil(), appliedConfigUnchanged(row.AppliedConfig)).
+		SetAppliedConfig(string(updated)).
+		Save(ctx)
+	if err != nil {
+		return false, true, mapError(err)
+	}
+	if n == 0 {
+		return false, false, nil
+	}
+	if err := tx.Commit(); err != nil {
+		return false, true, err
+	}
+	return true, true, nil
+}
+
 // stalledExcluded lists the activities that disqualify a running agent from
 // being marked "stalled" (terminal, already-stalled, or intentionally waiting).
 var stalledExcluded = []string{"completed", "limits_exceeded", "blocked", "stalled", "offline", "waiting_for_input"}

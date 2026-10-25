@@ -15,7 +15,9 @@
 package hub
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"net/http"
 )
 
@@ -108,3 +110,31 @@ func writeSecretResolutionError(w http.ResponseWriter, err error) bool {
 	writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, e.Error(), nil)
 	return true
 }
+
+// storedEnvReadError is the cause a *secretResolutionError carries when the
+// as-needed pass cannot read the stored env vars of a scope. Error() names
+// the scope and a classification only (canceled, deadline_exceeded or
+// store_error), never the store's message, a key or a value; the store
+// error stays reachable through Unwrap.
+type storedEnvReadError struct {
+	Scope string
+	Kind  string
+	Err   error
+}
+
+func newStoredEnvReadError(scope string, err error) *storedEnvReadError {
+	kind := "store_error"
+	switch {
+	case errors.Is(err, context.Canceled):
+		kind = "canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		kind = "deadline_exceeded"
+	}
+	return &storedEnvReadError{Scope: scope, Kind: kind, Err: err}
+}
+
+func (e *storedEnvReadError) Error() string {
+	return fmt.Sprintf("list %s env vars failed (%s)", e.Scope, e.Kind)
+}
+
+func (e *storedEnvReadError) Unwrap() error { return e.Err }

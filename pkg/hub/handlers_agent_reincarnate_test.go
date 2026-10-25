@@ -1876,6 +1876,37 @@ func TestReincarnateAgent_StartEchoPersistedAtCompletion(t *testing.T) {
 	}
 }
 
+// A start leg that delivered the config (a start routed through
+// create-with-gather marks the agent ConfigDelivered, ptone/scion#6096)
+// keeps the marker through the completion write, so the next start is
+// plain; a start leg that did not deliver leaves it unset.
+func TestReincarnateAgent_CompletionKeepsDeliveredMarker(t *testing.T) {
+	for _, delivered := range []bool{true, false} {
+		t.Run(fmt.Sprintf("delivered %v", delivered), func(t *testing.T) {
+			disp := newReincarnateTestDispatcher()
+			disp.startEcho = func(cfg *store.AgentAppliedConfig) {
+				if delivered {
+					cfg.ConfigDelivered = true
+				}
+			}
+			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+			agent := newReincarnateTestAgent(t, s, project, broker, nil)
+			self := agentIdentityFor(agent.ID, project.ID)
+
+			rec := httptest.NewRecorder()
+			srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{}), agent.ID)
+			require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+			r := waitForReincarnationSettled(t, s, agent.ID)
+			require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
+			final, err := s.GetAgent(context.Background(), agent.ID)
+			require.NoError(t, err)
+			require.NotNil(t, final.AppliedConfig)
+			assert.Equal(t, delivered, final.AppliedConfig.ConfigDelivered)
+		})
+	}
+}
+
 // TestDispatchImageRegistry_ReadsTheHTTPDispatcher proves the reincarnate
 // path reads the registry from the HTTP dispatcher itself, the value it
 // rewrites images with at send time, for the agent's broker and saved
