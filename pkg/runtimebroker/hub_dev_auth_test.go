@@ -17,7 +17,8 @@ package runtimebroker
 import (
 	"bytes"
 	"context"
-	"errors"
+	"crypto/tls"
+	"crypto/x509"
 	"log/slog"
 	"net"
 	"net/http"
@@ -44,9 +45,32 @@ type recordedRequest struct {
 // headers of every request it receives.
 func devAuthTestHub(t *testing.T) (*httptest.Server, func() []recordedRequest) {
 	t.Helper()
+	return devAuthTestHubWith(t, httptest.NewServer)
+}
+
+// remoteHubHost is the non-loopback name the tests give a remote hub. It is
+// one of the names in httptest's TLS certificate, so a TLS fake hub serves it
+// with a certificate the client accepts (hubURLAs trusts it).
+const remoteHubHost = "example.com"
+
+// devAuthTestHubFor is devAuthTestHub for a hub addressed as host: a
+// loopback host gets a plain http hub, any other host a TLS hub, since the
+// broker refuses a plain http hub on a network host
+// (config.CheckHubTransport) and these tests are about what reaches a hub
+// the broker does connect to.
+func devAuthTestHubFor(t *testing.T, host string) (*httptest.Server, func() []recordedRequest) {
+	t.Helper()
+	if config.IsLoopbackHost(host) {
+		return devAuthTestHub(t)
+	}
+	return devAuthTestHubWith(t, httptest.NewTLSServer)
+}
+
+func devAuthTestHubWith(t *testing.T, newServer func(http.Handler) *httptest.Server) (*httptest.Server, func() []recordedRequest) {
+	t.Helper()
 	var mu sync.Mutex
 	var seen []recordedRequest
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		seen = append(seen, recordedRequest{
 			authorization: r.Header.Get("Authorization"),
@@ -84,6 +108,15 @@ func hubURLAs(t *testing.T, srv *httptest.Server, host string) string {
 	}
 	tr := base.Clone()
 	tr.Proxy = nil
+	scheme := "http"
+	if cert := srv.Certificate(); cert != nil {
+		// A TLS fake hub: trust its certificate (it names example.com,
+		// 127.0.0.1 and ::1).
+		pool := x509.NewCertPool()
+		pool.AddCert(cert)
+		tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+		scheme = "https"
+	}
 	prevDial := base.DialContext
 	if prevDial == nil {
 		var d net.Dialer
@@ -97,7 +130,7 @@ func hubURLAs(t *testing.T, srv *httptest.Server, host string) string {
 	}
 	http.DefaultTransport = tr
 	t.Cleanup(func() { http.DefaultTransport = orig })
-	return "http://" + hostPort
+	return scheme + "://" + hostPort
 }
 
 // devTokenEnv sets a made-up dev token and clears every other source of a
@@ -135,21 +168,6 @@ func firstRequest(t *testing.T, client hubclient.Client, seen func() []recordedR
 		t.Fatal("the hub received no request")
 	}
 	return got[0]
-}
-
-// refusedPlaintextRemote reports whether a hub connection to a non-loopback
-// http hub was refused by the transport rule (config.CheckHubTransport)
-// before anything was sent; such a hub never sees the dev token, or any
-// other credential.
-func refusedPlaintextRemote(t *testing.T, label string, err error, seen func() []recordedRequest) bool {
-	t.Helper()
-	if !errors.Is(err, config.ErrPlaintextNonLoopback) {
-		return false
-	}
-	if got := seen(); len(got) != 0 {
-		t.Errorf("%s: refused connection, but the hub received %+v", label, got)
-	}
-	return true
 }
 
 // isLocalhostEndpoint is the rule for the broker's dev token. These are the
@@ -264,22 +282,15 @@ func TestCreateHubConnectionFromConfig_DevTokenOnlyForLoopbackHub(t *testing.T) 
 		{"127.0.0.1", "", "Bearer " + testDevToken},
 		{"localhost", "", "Bearer " + testDevToken},
 		{"::1", "", "Bearer " + testDevToken},
-		{"hub.example.test", "", ""},
-		{"hub.example.test", "made-up-hub-token", "Bearer made-up-hub-token"},
+		{remoteHubHost, "", ""},
+		{remoteHubHost, "made-up-hub-token", "Bearer made-up-hub-token"},
 		{"127.0.0.1", "made-up-hub-token", "Bearer made-up-hub-token"},
 	}
 	for _, tc := range cases {
-		srv, seen := devAuthTestHub(t)
+		srv, seen := devAuthTestHubFor(t, tc.host)
 		endpoint := hubURLAs(t, srv, tc.host)
 		s := &Server{config: ServerConfig{HubEndpoint: endpoint, HubToken: tc.hubToken}}
 		conn, err := s.createHubConnectionFromConfig()
-		if tc.host == "hub.example.test" {
-			// A plaintext network hub is refused outright.
-			if !refusedPlaintextRemote(t, endpoint, err, seen) {
-				t.Errorf("hub %s: error = %v, want the transport refusal", endpoint, err)
-			}
-			continue
-		}
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -305,15 +316,19 @@ func TestCreateHubConnection_DevTokenOnlyForLoopbackHub(t *testing.T) {
 		want       string
 	}{
 		{"creds-local", "127.0.0.1", "localhost", brokercredentials.AuthModeDevAuth, "Bearer " + testDevToken},
-		{"creds-remote", "hub.example.test", "", brokercredentials.AuthModeDevAuth, ""},
-		{"creds-remote-config-local", "hub.example.test", "localhost", brokercredentials.AuthModeDevAuth, ""},
+		{"creds-remote", remoteHubHost, "", brokercredentials.AuthModeDevAuth, ""},
+		{"creds-remote-config-local", remoteHubHost, "localhost", brokercredentials.AuthModeDevAuth, ""},
 		{"config-local", "", "localhost", brokercredentials.AuthModeDevAuth, "Bearer " + testDevToken},
-		{"config-remote", "", "hub.example.test", brokercredentials.AuthModeDevAuth, ""},
+		{"config-remote", "", remoteHubHost, brokercredentials.AuthModeDevAuth, ""},
 		{"creds-local-nosecret", "::1", "localhost", "", "Bearer " + testDevToken},
-		{"config-remote-nosecret", "", "hub.example.test", "", ""},
+		{"config-remote-nosecret", "", remoteHubHost, "", ""},
 	}
 	for _, tc := range cases {
-		srv, seen := devAuthTestHub(t)
+		dialed := tc.credsHost
+		if dialed == "" {
+			dialed = tc.configHost
+		}
+		srv, seen := devAuthTestHubFor(t, dialed)
 		creds := &brokercredentials.BrokerCredentials{Name: tc.name, BrokerID: "rb-test", AuthMode: tc.mode}
 		s := &Server{}
 		if tc.credsHost != "" {
@@ -323,13 +338,6 @@ func TestCreateHubConnection_DevTokenOnlyForLoopbackHub(t *testing.T) {
 			s.config.HubEndpoint = hubURLAs(t, srv, tc.configHost)
 		}
 		conn, err := s.createHubConnection(tc.name, creds)
-		if tc.credsHost == "hub.example.test" || (tc.credsHost == "" && tc.configHost == "hub.example.test") {
-			// The dialed hub is a plaintext network hub: refused outright.
-			if !refusedPlaintextRemote(t, tc.name, err, seen) {
-				t.Errorf("%s: error = %v, want the transport refusal", tc.name, err)
-			}
-			continue
-		}
 		if err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
@@ -353,21 +361,15 @@ func TestCreateHubConnectionFromConfig_DevHubTokenOnlyForLoopbackHub(t *testing.
 		hubToken string
 		want     string
 	}{
-		{"dev-remote", "hub.example.test", testDevToken, ""},
+		{"dev-remote", remoteHubHost, testDevToken, ""},
 		{"dev-ipv4", "127.0.0.1", testDevToken, "Bearer " + testDevToken},
 		{"dev-localhost", "localhost", testDevToken, "Bearer " + testDevToken},
-		{"operator-remote", "hub.example.test", "made-up-hub-token", "Bearer made-up-hub-token"},
+		{"operator-remote", remoteHubHost, "made-up-hub-token", "Bearer made-up-hub-token"},
 	}
 	for _, tc := range cases {
-		srv, seen := devAuthTestHub(t)
+		srv, seen := devAuthTestHubFor(t, tc.host)
 		s := &Server{config: ServerConfig{HubEndpoint: hubURLAs(t, srv, tc.host), HubToken: tc.hubToken}}
 		conn, err := s.createHubConnectionFromConfig()
-		if tc.host == "hub.example.test" {
-			if !refusedPlaintextRemote(t, tc.name, err, seen) {
-				t.Errorf("%s: error = %v, want the transport refusal", tc.name, err)
-			}
-			continue
-		}
 		if err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
@@ -380,10 +382,8 @@ func TestCreateHubConnectionFromConfig_DevHubTokenOnlyForLoopbackHub(t *testing.
 	if strings.Contains(out, testDevToken) {
 		t.Errorf("logs contain the dev token:\n%s", out)
 	}
-	// The remote cases are refused by the transport rule before the dev
-	// token decision, so the not-sent line is not logged for them.
-	if n := strings.Count(out, "the dev token is used only for a local hub; it is not sent"); n != 0 {
-		t.Errorf("not-sent log line appeared %d times, want 0 (remote plaintext hubs are refused first):\n%s", n, out)
+	if n := strings.Count(out, "the dev token is used only for a local hub; it is not sent"); n != 1 {
+		t.Errorf("not-sent log line appeared %d times, want 1 (the remote dev case):\n%s", n, out)
 	}
 }
 
@@ -398,19 +398,13 @@ func TestCreateHubConnectionFromConfig_PrefixedHubTokenOnlyForLoopbackHub(t *tes
 		host string
 		want string
 	}{
-		{"prefixed-remote", "hub.example.test", ""},
+		{"prefixed-remote", remoteHubHost, ""},
 		{"prefixed-localhost", "localhost", "Bearer " + tok},
 	}
 	for _, tc := range cases {
-		srv, seen := devAuthTestHub(t)
+		srv, seen := devAuthTestHubFor(t, tc.host)
 		s := &Server{config: ServerConfig{HubEndpoint: hubURLAs(t, srv, tc.host), HubToken: tok}}
 		conn, err := s.createHubConnectionFromConfig()
-		if tc.host == "hub.example.test" {
-			if !refusedPlaintextRemote(t, tc.name, err, seen) {
-				t.Errorf("%s: error = %v, want the transport refusal", tc.name, err)
-			}
-			continue
-		}
 		if err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
