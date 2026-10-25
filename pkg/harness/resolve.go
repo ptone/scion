@@ -67,6 +67,12 @@ func Resolve(_ context.Context, opts ResolveOptions) (*ResolvedHarness, error) {
 
 	declared := declaredConfig(opts.Name, hcDir, opts.Settings, opts.ProfileName)
 	entry := withBundleReady(declared)
+	// The merged entry can also come from settings or a profile override,
+	// which LoadHarnessConfigDir never sees: its path fields are checked
+	// here too, so none of them can name a path outside the agent home.
+	if err := config.ValidateHarnessPathFields(entry); err != nil {
+		return nil, fmt.Errorf("harness-config %q: %w", opts.Name, err)
+	}
 
 	// 1. Container-script harness (provisioner block present)
 	if entry.Provisioner != nil {

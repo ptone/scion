@@ -18,6 +18,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -69,6 +70,14 @@ func TestStart_LegacyAgentInfoTemplateIsNeverAHostDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Positive control: the legacy read-back path is reached. With
+	// agent-info.json naming alpha, alpha's bundled harness-config is used.
+	rewriteAgentInfo(t, projectScionDir, func(raw map[string]any) { raw["template"] = "alpha" })
+	_, info = startCapturingRun(t, api.StartOptions{Name: "test-agent", Template: "alpha", ProjectPath: projectScionDir})
+	if info == nil || info.HarnessConfigRevision != alpha {
+		t.Fatalf("legacy read-back control: harness-config revision = %v, want alpha's %q", info, alpha)
+	}
+
 	rel, err := filepath.Rel(filepath.Join(globalScionDir, "templates"), outsideDir)
 	if err != nil {
 		t.Fatal(err)
@@ -91,9 +100,15 @@ func TestStart_LegacyAgentInfoTemplateIsNeverAHostDirectory(t *testing.T) {
 				return "mock-id", nil
 			},
 		}
-		info, _ := NewManager(mockRT).Start(context.Background(), api.StartOptions{
+		info, startErr := NewManager(mockRT).Start(context.Background(), api.StartOptions{
 			Name: "test-agent", Template: "alpha", ProjectPath: projectScionDir, BrokerMode: true, NoAuth: true,
 		})
+		// The refused name loads no template bundle, so no harness-config
+		// image resolves: the start fails with exactly that error, never
+		// for an unrelated reason and never by loading the outside bundle.
+		if startErr == nil || !strings.Contains(startErr.Error(), "no container image resolved") {
+			t.Fatalf("agent-info.json template %q: start error = %v, want the no-image error of a refused name", ref, startErr)
+		}
 		if info != nil && info.HarnessConfigRevision == outside {
 			t.Fatalf("agent-info.json template %q loaded the harness-config bundled in a directory outside the template roots", ref)
 		}

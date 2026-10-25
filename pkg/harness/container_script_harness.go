@@ -151,13 +151,16 @@ func (c *ContainerScriptHarness) GetHarnessEmbedsFS() (embed.FS, string) {
 // HasSystemPrompt reports whether the harness has a native system prompt file
 // staged in the agent home. Container-script harnesses always advertise the
 // declared file path; the script writes the file during pre-start.
+//
+// The file is looked up inside the agent home only, without following
+// symbolic links (readHomeFile); a system_prompt_file that leaves the home
+// never counts.
 func (c *ContainerScriptHarness) HasSystemPrompt(agentHome string) bool {
 	if c.entry.SystemPromptFile == "" {
 		return false
 	}
-	target := filepath.Join(agentHome, c.entry.SystemPromptFile)
-	_, err := os.Stat(target)
-	return err == nil
+	_, ok := readHomeFile(agentHome, c.entry.SystemPromptFile)
+	return ok
 }
 
 // AdvancedCapabilities returns the configured capability matrix from
@@ -249,16 +252,19 @@ func (c *ContainerScriptHarness) readSystemPrompt() string {
 	// Prefer the staged input written by InjectSystemPrompt; fall back to the
 	// harness-native location (e.g. .claude/system-prompt.md) which may exist
 	// on resume when the staged inputs directory has been cleaned up.
-	paths := []string{
-		filepath.Join(c.agentHome, ".scion", "harness", "inputs", "system-prompt.md"),
-	}
+	//
+	// The agent can write its home, so both files are read inside the home
+	// only, without following symbolic links (readHomeFile): a link planted
+	// there, or a system_prompt_file that leaves the home, is never read on
+	// the broker host.
+	rels := []string{path.Join(".scion", "harness", "inputs", "system-prompt.md")}
 	if c.entry.SystemPromptFile != "" {
-		paths = append(paths, filepath.Join(c.agentHome, c.entry.SystemPromptFile))
+		rels = append(rels, c.entry.SystemPromptFile)
 	}
 
-	for _, p := range paths {
-		data, err := os.ReadFile(p)
-		if err != nil {
+	for _, rel := range rels {
+		data, ok := readHomeFile(c.agentHome, rel)
+		if !ok {
 			continue
 		}
 		content := strings.TrimSpace(string(data))
@@ -267,6 +273,29 @@ func (c *ContainerScriptHarness) readSystemPrompt() string {
 		}
 	}
 	return ""
+}
+
+// maxHomePromptBytes bounds a system prompt file read from the agent home.
+const maxHomePromptBytes = 4 << 20
+
+// readHomeFile reads rel, a path relative to the agent home, through a
+// handle confined to the home (pkg/agenthome): a path that leaves the home,
+// a linked component or a linked or non-regular file is not read. ok is
+// false when the file is absent or refused.
+func readHomeFile(agentHome, rel string) (data []byte, ok bool) {
+	if agentHome == "" || !filepath.IsLocal(rel) {
+		return nil, false
+	}
+	home, err := agenthome.Open(agentHome)
+	if err != nil {
+		return nil, false
+	}
+	defer func() { _ = home.Close() }()
+	data, err = home.ReadFile(filepath.ToSlash(rel), maxHomePromptBytes)
+	if err != nil {
+		return nil, false
+	}
+	return data, true
 }
 
 // GetEnv returns the templated env for the harness.
@@ -537,17 +566,17 @@ func (c *ContainerScriptHarness) Provision(ctx context.Context, agentName, agent
 		}
 	}
 
-	// Copy config.yaml from the harness-config root into the bundle.
-	if err := copyHarnessConfigFile(filepath.Join(c.configDirPath, "config.yaml"), home, path.Join(bundleRel, "config.yaml"), 0644); err != nil {
+	// Copy config.yaml from the harness-config root into the bundle. The
+	// harness-config files are read inside the harness-config directory only,
+	// as regular files, without following symbolic links
+	// (copyHarnessConfigFile).
+	if _, err := copyHarnessConfigFile(c.configDirPath, "config.yaml", home, path.Join(bundleRel, "config.yaml"), 0644, true); err != nil {
 		return fmt.Errorf("stage config.yaml: %w", err)
 	}
 
 	// Copy provision.py if present in the harness-config dir.
-	provisionSrc := filepath.Join(c.configDirPath, "provision.py")
-	if fileExistsHelper(provisionSrc) {
-		if err := copyHarnessConfigFile(provisionSrc, home, path.Join(bundleRel, "provision.py"), 0755); err != nil {
-			return fmt.Errorf("stage provision.py: %w", err)
-		}
+	if _, err := copyHarnessConfigFile(c.configDirPath, "provision.py", home, path.Join(bundleRel, "provision.py"), 0755, false); err != nil {
+		return fmt.Errorf("stage provision.py: %w", err)
 	}
 
 	// Stage capture_auth.py and capture-auth-config.json into the bundle.
@@ -556,11 +585,8 @@ func (c *ContainerScriptHarness) Provision(ctx context.Context, agentName, agent
 	}
 
 	// Copy dialect.yaml if present.
-	dialectSrc := filepath.Join(c.configDirPath, "dialect.yaml")
-	if fileExistsHelper(dialectSrc) {
-		if err := copyHarnessConfigFile(dialectSrc, home, path.Join(bundleRel, "dialect.yaml"), 0644); err != nil {
-			return fmt.Errorf("stage dialect.yaml: %w", err)
-		}
+	if _, err := copyHarnessConfigFile(c.configDirPath, "dialect.yaml", home, path.Join(bundleRel, "dialect.yaml"), 0644, false); err != nil {
+		return fmt.Errorf("stage dialect.yaml: %w", err)
 	}
 
 	// Stage scion_harness.py next to provision.py so the in-container script
@@ -1194,12 +1220,11 @@ func (c *ContainerScriptHarness) stageHarnessLib(home *agenthome.Home) error {
 	var staged []byte
 	switch libMode {
 	case "vendored":
-		src := filepath.Join(c.configDirPath, "scion_harness.py")
-		if !fileExistsHelper(src) {
+		data, found, err := config.ReadConfinedFile(c.configDirPath, "scion_harness.py")
+		if err == nil && !found {
 			return fmt.Errorf("stage scion_harness.py: provisioner.lib is %q but %s does not exist — "+
-				"run 'go generate ./harnesses/' or include scion_harness.py in the harness bundle", libMode, src)
+				"run 'go generate ./harnesses/' or include scion_harness.py in the harness bundle", libMode, filepath.Join(c.configDirPath, "scion_harness.py"))
 		}
-		data, err := os.ReadFile(src)
 		if err == nil {
 			err = home.WriteFile(dst, data, 0644)
 		}
@@ -1329,15 +1354,26 @@ exec sciontool harness provision --manifest "%s/manifest.json"
 	return home.WriteFile(provisionHookRel, []byte(wrapper), 0755)
 }
 
-// copyHarnessConfigFile copies src, a file of the harness-config directory,
-// to dstRel in the agent home with mode, confined to the home. dstRel's
-// parent must exist.
-func copyHarnessConfigFile(src string, home *agenthome.Home, dstRel string, mode os.FileMode) error {
-	data, err := os.ReadFile(src)
+// copyHarnessConfigFile copies name, a file of the harness-config directory
+// configDir, to dstRel in the agent home with mode, confined to the home.
+// dstRel's parent must exist. The source is read inside configDir only, as a
+// regular file, without following symbolic links (config.ReadConfinedFile):
+// a harness-config bundle can come from a template, so a link to a host file
+// is refused (an error wrapping config.ErrTemplateContentRefused), never
+// copied. An absent file is an error when required, and otherwise reports
+// copied false.
+func copyHarnessConfigFile(configDir, name string, home *agenthome.Home, dstRel string, mode os.FileMode, required bool) (copied bool, err error) {
+	data, found, err := config.ReadConfinedFile(configDir, name)
 	if err != nil {
-		return err
+		return false, err
 	}
-	return home.WriteFile(dstRel, data, mode)
+	if !found {
+		if required {
+			return false, fmt.Errorf("%s: %w", name, os.ErrNotExist)
+		}
+		return false, nil
+	}
+	return true, home.WriteFile(dstRel, data, mode)
 }
 
 func fileExistsHelper(path string) bool {
@@ -1409,11 +1445,8 @@ func stageCaptureAuthAssets(home *agenthome.Home, configDirPath string, authMeta
 		}
 	}
 
-	captureAuthSrc := filepath.Join(configDirPath, "capture_auth.py")
-	if fileExistsHelper(captureAuthSrc) {
-		if err := copyHarnessConfigFile(captureAuthSrc, home, path.Join(bundleRel, "capture_auth.py"), 0755); err != nil {
-			return fmt.Errorf("stage capture_auth.py: %w", err)
-		}
+	if _, err := copyHarnessConfigFile(configDirPath, "capture_auth.py", home, path.Join(bundleRel, "capture_auth.py"), 0755, false); err != nil {
+		return fmt.Errorf("stage capture_auth.py: %w", err)
 	}
 
 	if authMeta == nil || len(authMeta.Types) == 0 {

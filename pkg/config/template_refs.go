@@ -26,10 +26,13 @@ import (
 )
 
 // TemplateRefContext says who a template reference comes from, which decides
-// what forms it may take.
+// what forms it may take. Every caller of FindTemplateInProjectPath and
+// GetTemplateChainInProject passes it explicitly.
 //
-// The zero value is TemplateRefRemote, so a caller that does not choose gets
-// the confined behaviour.
+// The only context is TemplateRefRemote, the zero value. The local CLI
+// resolves its own references (absolute directories included) through
+// FindTemplate and FindTemplateWithCallerCredentials, which only cmd/ may
+// call.
 type TemplateRefContext int
 
 const (
@@ -40,9 +43,6 @@ const (
 	// (filepath.IsLocal) resolved inside the project or global template
 	// directory. Absolute paths are refused.
 	TemplateRefRemote TemplateRefContext = iota
-	// templateRefLocal is a reference the CLI resolves for its own use on
-	// its own host. An absolute directory is accepted as well.
-	templateRefLocal
 )
 
 // ErrTemplateRefNotAllowed marks a template reference that is refused
@@ -251,4 +251,73 @@ func readTemplateConfigFile(dir string) (data []byte, name string, found bool, e
 		}
 	}
 	return nil, "", false, nil
+}
+
+// ReadConfinedFile reads name (a local relative path) inside dir without
+// following symbolic links, as the template file reads do (readTemplateFile):
+// the lookup goes through an os.Root opened at dir, every component is
+// checked with Lstat, and only a regular file that is still the same file
+// when opened is read. found is false, with a nil error, when the file is
+// absent. A symbolic link, a non-regular file or a name that leaves dir is
+// an error wrapping ErrTemplateContentRefused. It is for files that come from
+// a template or a harness-config directory (for example the files a
+// container-script harness stages into the agent home).
+func ReadConfinedFile(dir, name string) (data []byte, found bool, err error) {
+	data, state, err := readTemplateFile(dir, name)
+	switch state {
+	case templateFileRegular:
+		return data, true, nil
+	case templateFileRefused:
+		return nil, false, err
+	default:
+		return nil, false, err
+	}
+}
+
+// ValidateHarnessPathFields checks every harness-config field that names a
+// path in the agent home, because a harness-config bundle can come from a
+// template (or a hub upload) and its values are untrusted. Each must be empty
+// or a local relative path (filepath.IsLocal, and not "."), so it can never
+// name a path outside the agent home:
+//
+//   - system_prompt_file, instructions_file, skills_dir, config_dir;
+//   - mcp.global_config_file, mcp.project_config_file;
+//   - auth.types.<t>.required_files[].target_suffix, which by convention
+//     starts with "/" (relative to the home); the rest must be local.
+//
+// Fields audited and not paths: provisioner.lib (a mode), provisioner.command
+// and no_auth.command (argv run in the container), dialect, env and
+// env_template, auth.autodetect (secret names to auth types). volumes are a
+// separate item.
+func ValidateHarnessPathFields(entry HarnessConfigEntry) error {
+	type field struct{ key, val string }
+	fields := []field{
+		{"system_prompt_file", entry.SystemPromptFile},
+		{"instructions_file", entry.InstructionsFile},
+		{"skills_dir", entry.SkillsDir},
+		{"config_dir", entry.ConfigDir},
+	}
+	if entry.MCP != nil {
+		fields = append(fields,
+			field{"mcp.global_config_file", entry.MCP.GlobalConfigFile},
+			field{"mcp.project_config_file", entry.MCP.ProjectConfigFile})
+	}
+	for _, f := range fields {
+		if f.val != "" && !isLocalTemplateName(f.val) {
+			return fmt.Errorf("%s %q must be a relative path inside the agent home", f.key, f.val)
+		}
+	}
+	if entry.Auth != nil {
+		for typeName, t := range entry.Auth.Types {
+			for _, rf := range t.RequiredFiles {
+				if rf.TargetSuffix == "" {
+					continue
+				}
+				if !isLocalTemplateName(strings.TrimLeft(rf.TargetSuffix, "/")) {
+					return fmt.Errorf("auth.types.%s.required_files %q: target_suffix %q must be a path inside the agent home", typeName, rf.Name, rf.TargetSuffix)
+				}
+			}
+		}
+	}
+	return nil
 }

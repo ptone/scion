@@ -2402,7 +2402,14 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	templateHomeCopied := false
 	for _, tpl := range chain {
 		templateHome := filepath.Join(tpl.Path, "home")
-		if info, err := os.Stat(templateHome); err == nil && info.IsDir() {
+		info, err := os.Lstat(templateHome)
+		if err == nil && info.Mode()&os.ModeSymlink != 0 {
+			// Template content is regular files only: a linked home/ is
+			// skipped, never copied.
+			slog.Warn("Skipping a template home directory that is a symbolic link", "template", templateRef(tpl))
+			continue
+		}
+		if err == nil && info.IsDir() {
 			if err := util.CopyDir(templateHome, agentHome); err != nil {
 				return "", "", nil, fmt.Errorf("failed to copy template home %s: %w", templateRef(tpl), err)
 			}
@@ -2479,7 +2486,10 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 	h := resolved.Harness
 	util.Debugf("ProvisionAgent: harness implementation=%s for harness=%q", resolved.Implementation, finalScionCfg.Harness)
-	skillsDir := h.SkillsDir()
+	skillsDir, err := harnessSkillsDir(h)
+	if err != nil {
+		return "", "", nil, err
+	}
 	// templateSkillNames records which skill directory names the current
 	// template chain provides, independent of what may already be on disk
 	// from a previous provisioning of this same agent home. Platform-skill
@@ -2491,9 +2501,18 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if skillsDir != "" {
 		skillsDest := filepath.Join(agentHome, skillsDir)
 
-		// Copy skills from each template in the chain (overlay behavior)
+		// Copy skills from each template in the chain (overlay behavior). A
+		// template's skills/ that is a symbolic link is skipped, never
+		// listed or copied (template content is regular files only).
 		for _, tpl := range chain {
 			tplSkills := filepath.Join(tpl.Path, "skills")
+			info, err := os.Lstat(tplSkills)
+			if err != nil || !info.IsDir() {
+				if err == nil && info.Mode()&os.ModeSymlink != 0 {
+					slog.Warn("Skipping a template skills directory that is a symbolic link", "template", templateRef(tpl))
+				}
+				continue
+			}
 			if entries, err := os.ReadDir(tplSkills); err == nil {
 				for _, e := range entries {
 					if e.IsDir() {
@@ -2501,8 +2520,12 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 					}
 				}
 			}
-			if info, err := os.Stat(tplSkills); err == nil && info.IsDir() {
-				if err := os.MkdirAll(skillsDest, 0755); err != nil {
+			{
+				// The skills directory is created through a handle
+				// confined to the agent home, which the agent can write:
+				// a linked component is refused, so the copy below never
+				// lands outside the home.
+				if err := mkdirInHome(agentHome, skillsDir); err != nil {
 					return "", "", nil, fmt.Errorf("failed to create skills dir: %w", err)
 				}
 				if err := util.CopyDir(tplSkills, skillsDest); err != nil {
@@ -4973,7 +4996,10 @@ func injectPromptFiles(h api.Harness, agentHome string, chain []*config.Template
 // start-time re-render (rerenderProvisionedFiles). Required skills fail
 // closed. It returns the record, nil when nothing was installed.
 func resolveAndInstallSkills(ctx context.Context, agentName, projectDir string, h api.Harness, agentHome string, skills []api.SkillReference) (*SkillResolutionRecord, error) {
-	skillsDir := h.SkillsDir()
+	skillsDir, err := harnessSkillsDir(h)
+	if err != nil {
+		return nil, err
+	}
 	// Optional scion-platform:// entries are display-only: Step 3a2 installs
 	// those skills, so they are left out of resolution rather than logged as
 	// skipped on every start (ptone/scion#5431).

@@ -17,11 +17,15 @@ package harness
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
@@ -144,40 +148,58 @@ func (d *DeclarativeGenericHarness) GetEnv(agentName, agentHome, unixUsername st
 
 func (d *DeclarativeGenericHarness) GetTelemetryEnv() map[string]string { return nil }
 
+// HasSystemPrompt reports whether system_prompt_file exists in the agent
+// home. It is looked up inside the home only, without following symbolic
+// links (readHomeFile).
 func (d *DeclarativeGenericHarness) HasSystemPrompt(agentHome string) bool {
 	if d.entry.SystemPromptFile == "" {
 		return false
 	}
-	_, err := os.Stat(filepath.Join(agentHome, d.entry.SystemPromptFile))
-	return err == nil
+	_, ok := readHomeFile(agentHome, d.entry.SystemPromptFile)
+	return ok
 }
 
 func (d *DeclarativeGenericHarness) Provision(_ context.Context, _, _, _, _ string) error {
 	return nil
 }
 
+// InjectAgentInstructions writes content to instructions_file (default
+// agents.md) in the agent home, removing a file in the same directory whose
+// name differs only in case. instructions_file comes from config.yaml, which
+// a template can bundle, so every access goes through a handle confined to
+// the agent home (pkg/agenthome): a path that leaves the home is refused, and
+// a link at a component or at the file is never followed or written through.
 func (d *DeclarativeGenericHarness) InjectAgentInstructions(agentHome string, content []byte) error {
 	target := d.entry.InstructionsFile
 	if target == "" {
 		target = "agents.md"
 	}
-	full := filepath.Join(agentHome, target)
-	dir := filepath.Dir(full)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("create instructions dir: %w", err)
+	home, rel, err := openHomeTarget(agentHome, target, "instructions_file")
+	if err != nil {
+		return err
 	}
-	base := filepath.Base(target)
-	entries, err := os.ReadDir(dir)
-	if err == nil {
+	defer func() { _ = home.Close() }()
+	dir := path.Dir(rel)
+	if dir != "." {
+		if err := home.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("create instructions dir: %w", err)
+		}
+	}
+	base := path.Base(rel)
+	if entries, err := readHomeDir(agentHome, dir); err == nil {
 		for _, e := range entries {
 			if !e.IsDir() && strings.EqualFold(e.Name(), base) && e.Name() != base {
-				_ = os.Remove(filepath.Join(dir, e.Name()))
+				_ = home.Remove(path.Join(dir, e.Name()))
 			}
 		}
 	}
-	return os.WriteFile(full, content, 0644)
+	return home.WriteFile(rel, content, 0644)
 }
 
+// InjectSystemPrompt writes the system prompt as system_prompt_mode says:
+// prepended to instructions_file, or written to system_prompt_file (default
+// .scion/system_prompt.md). Both paths come from config.yaml and every access
+// is confined to the agent home, as for InjectAgentInstructions.
 func (d *DeclarativeGenericHarness) InjectSystemPrompt(agentHome string, content []byte) error {
 	switch d.entry.SystemPromptMode {
 	case "none":
@@ -187,29 +209,66 @@ func (d *DeclarativeGenericHarness) InjectSystemPrompt(agentHome string, content
 		if instr == "" {
 			instr = "agents.md"
 		}
-		full := filepath.Join(agentHome, instr)
-		header := fmt.Sprintf("# System Prompt\n\n%s\n\n---\n\n", string(content))
-		existing, err := os.ReadFile(full)
-		if err != nil && !os.IsNotExist(err) {
+		home, rel, err := openHomeTarget(agentHome, instr, "instructions_file")
+		if err != nil {
 			return err
 		}
-		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+		defer func() { _ = home.Close() }()
+		header := fmt.Sprintf("# System Prompt\n\n%s\n\n---\n\n", string(content))
+		existing, err := home.ReadFile(rel, maxHomePromptBytes)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
+		}
+		if dir := path.Dir(rel); dir != "." {
+			if err := home.MkdirAll(dir, 0755); err != nil {
+				return err
+			}
 		}
 		merged := append([]byte(header), existing...)
-		return os.WriteFile(full, merged, 0644)
+		return home.WriteFile(rel, merged, 0644)
 	default:
 		// "native" or empty → write to declared file or fall back.
 		target := d.entry.SystemPromptFile
 		if target == "" {
 			target = filepath.Join(".scion", "system_prompt.md")
 		}
-		full := filepath.Join(agentHome, target)
-		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+		home, rel, err := openHomeTarget(agentHome, target, "system_prompt_file")
+		if err != nil {
 			return err
 		}
-		return os.WriteFile(full, content, 0644)
+		defer func() { _ = home.Close() }()
+		if dir := path.Dir(rel); dir != "." {
+			if err := home.MkdirAll(dir, 0755); err != nil {
+				return err
+			}
+		}
+		return home.WriteFile(rel, content, 0644)
 	}
+}
+
+// openHomeTarget opens the agent home (creating it) for a file named by the
+// config.yaml field key, and returns the file's slash-separated path in the
+// home. A value that is not a local relative path is refused.
+func openHomeTarget(agentHome, target, key string) (*agenthome.Home, string, error) {
+	if !filepath.IsLocal(target) || filepath.Clean(target) == "." {
+		return nil, "", fmt.Errorf("%s %q must be a relative path inside the agent home", key, target)
+	}
+	home, err := agenthome.OpenCreate(agentHome, 0755)
+	if err != nil {
+		return nil, "", err
+	}
+	return home, path.Clean(filepath.ToSlash(target)), nil
+}
+
+// readHomeDir lists dir, a slash-separated path in the agent home, through an
+// os.Root opened on the home, so the listing never leaves the home.
+func readHomeDir(agentHome, dir string) ([]fs.DirEntry, error) {
+	r, err := os.OpenRoot(agentHome)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = r.Close() }()
+	return fs.ReadDir(r.FS(), dir)
 }
 
 // ResolveAuth defers to the legacy passthrough behavior — DeclarativeGeneric

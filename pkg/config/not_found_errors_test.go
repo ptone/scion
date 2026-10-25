@@ -47,36 +47,29 @@ func TestTemplateNotFoundError_FromLookup(t *testing.T) {
 		}
 	})
 
-	// The local CLI's absolute directories (templateRefLocal); a remote
-	// lookup refuses them before looking (template_refs_test.go).
+	// An absolute path is refused before any lookup. The message names the
+	// display name only (the base name; "" for a content-hash cache
+	// directory), never the host path.
 	t.Run("absolute path", func(t *testing.T) {
 		abs := filepath.Join(t.TempDir(), "broker-only", "secret-tpl")
-		_, err := FindTemplateInProjectPath(abs, projectPath, templateRefLocal)
-		var tplErr *TemplateNotFoundError
-		if !errors.As(err, &tplErr) || !errors.Is(err, ErrTemplateNotFound) {
-			t.Fatalf("error %v does not match the typed error and the sentinel", err)
+		_, err := FindTemplateInProjectPath(abs, projectPath, TemplateRefRemote)
+		if !errors.Is(err, ErrTemplateRefNotAllowed) {
+			t.Fatalf("error %v is not ErrTemplateRefNotAllowed", err)
 		}
-		if tplErr.Name != "secret-tpl" {
-			t.Errorf("Name = %q, want the base name secret-tpl", tplErr.Name)
-		}
-		if strings.Contains(tplErr.Name, "broker-only") || strings.Contains(tplErr.Name, string(filepath.Separator)) {
-			t.Errorf("Name %q carries a path", tplErr.Name)
-		}
-		if want := fmt.Sprintf("template path %s not found or not a directory: %v", abs, ErrTemplateNotFound); err.Error() != want {
-			t.Errorf("Error() = %q, want the unchanged text %q", err.Error(), want)
+		if !strings.Contains(err.Error(), `"secret-tpl"`) || strings.Contains(err.Error(), "broker-only") {
+			t.Errorf("error %q must name the base name only", err.Error())
 		}
 	})
 
 	t.Run("content-hash cache directory", func(t *testing.T) {
 		hash := "sha256:" + strings.Repeat("ab", 32)
 		abs := filepath.Join(t.TempDir(), "cache", hash)
-		_, err := FindTemplateInProjectPath(abs, projectPath, templateRefLocal)
-		var tplErr *TemplateNotFoundError
-		if !errors.As(err, &tplErr) {
-			t.Fatalf("error %v is not a *TemplateNotFoundError", err)
+		_, err := FindTemplateInProjectPath(abs, projectPath, TemplateRefRemote)
+		if !errors.Is(err, ErrTemplateRefNotAllowed) {
+			t.Fatalf("error %v is not ErrTemplateRefNotAllowed", err)
 		}
-		if tplErr.Name != "" {
-			t.Errorf("Name = %q, want empty: a content hash is not a template name", tplErr.Name)
+		if strings.Contains(err.Error(), hash) {
+			t.Errorf("error %q must not name the content hash", err.Error())
 		}
 	})
 

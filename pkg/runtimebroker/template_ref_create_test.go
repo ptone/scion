@@ -158,3 +158,34 @@ func TestCreateAgent_TunneledRequestRefusesTemplateRefsOutsideTheTemplateRoots(t
 	}
 	assert.Equal(t, 0, fx.mgr.StartCalls())
 }
+
+// buildStartContext refuses the request's template reference itself, before
+// any directory or file side effect, independently of createAgent's earlier
+// check (start and restart reach it without createAgent).
+func TestBuildStartContext_RefusesTemplateRefsOutsideTheTemplateRoots(t *testing.T) {
+	fx := newTemplateRefCreateFixture(t)
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+	for name, ref := range fx.refusedTemplateRefs(t) {
+		t.Run(name, func(t *testing.T) {
+			projectPath := filepath.Join(t.TempDir(), "not-created")
+			sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+				Name:        "refused",
+				AgentID:     "uuid-refused",
+				RunID:       "run-refused",
+				ProjectPath: projectPath,
+				Config:      &CreateAgentConfig{Template: ref},
+				HTTPRequest: httptest.NewRequest(http.MethodPost, "/api/v1/agents", nil),
+				Operation:   opCreate,
+			})
+			require.Nil(t, sc)
+			var sce *startContextError
+			require.ErrorAs(t, err, &sce)
+			assert.Equal(t, http.StatusBadRequest, sce.Status)
+			assert.Contains(t, sce.Message, "template reference not allowed")
+			_, statErr := os.Stat(projectPath)
+			assert.True(t, os.IsNotExist(statErr), "no directory is created for a refused reference")
+		})
+	}
+}

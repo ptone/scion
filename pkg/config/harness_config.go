@@ -165,6 +165,12 @@ func LoadHarnessConfigDir(dirPath string) (*HarnessConfigDir, error) {
 		return nil, fmt.Errorf("failed to parse config.yaml: %w", err)
 	}
 
+	// Path fields name files in the agent home and may come from a template
+	// bundle: they must stay inside the home.
+	if err := ValidateHarnessPathFields(entry); err != nil {
+		return nil, fmt.Errorf("invalid config.yaml: %w", err)
+	}
+
 	// The schema cannot express ordering or duration ranges; enforce them
 	// here so a bad block fails at load like any other schema error.
 	if err := entry.Thinking.Validate(); err != nil {
@@ -198,10 +204,16 @@ func LoadHarnessConfigDir(dirPath string) (*HarnessConfigDir, error) {
 }
 
 // ParseHarnessConfigYAML unmarshals raw config.yaml bytes into a
-// HarnessConfigEntry without validation or path resolution.
+// HarnessConfigEntry without schema validation or path resolution.
+//
+// The path fields are checked (ValidateHarnessPathFields): a harness-config
+// whose path fields leave the agent home does not parse.
 func ParseHarnessConfigYAML(data []byte) (HarnessConfigEntry, error) {
 	var entry HarnessConfigEntry
 	if err := yaml.Unmarshal(data, &entry); err != nil {
+		return HarnessConfigEntry{}, err
+	}
+	if err := ValidateHarnessPathFields(entry); err != nil {
 		return HarnessConfigEntry{}, err
 	}
 	return entry, nil

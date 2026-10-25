@@ -449,7 +449,10 @@ func rerenderSkills(ctx context.Context, in rerenderInputs) error {
 	if record == nil {
 		return nil
 	}
-	skillsDir := in.Harness.SkillsDir()
+	skillsDir, err := harnessSkillsDir(in.Harness)
+	if err != nil {
+		return err
+	}
 	resolved := map[string]bool{}
 	for _, e := range record.Skills {
 		name := path.Base(e.InstalledPath)

@@ -144,10 +144,7 @@ func TestFindTemplate_LocalAcceptsAbsoluteDir(t *testing.T) {
 	tpl, err := FindTemplate(fx.outsideDir)
 	require.NoError(t, err)
 	assert.Equal(t, fx.outsideDir, tpl.Path)
-	tpl, err = FindTemplateInProjectPath(fx.outsideDir, "", templateRefLocal)
-	require.NoError(t, err)
-	assert.Equal(t, fx.outsideDir, tpl.Path)
-	tpl, err = FindTemplateInProjectPath(fx.outsideDir, fx.projectDir, templateRefLocal)
+	tpl, err = FindTemplateWithContext(context.Background(), fx.outsideDir)
 	require.NoError(t, err)
 	assert.Equal(t, fx.outsideDir, tpl.Path)
 
@@ -320,4 +317,27 @@ func TestResolveContentInChain_UnnameableFirstSegmentStaysInline(t *testing.T) {
 			assert.Equal(t, field, string(got))
 		})
 	}
+}
+
+// Harness-config path fields that leave the agent home do not load.
+func TestLoadHarnessConfigDir_RefusesPathFieldsOutsideHome(t *testing.T) {
+	for field, line := range map[string]string{
+		"skills_dir":         "skills_dir: ../skills",
+		"system_prompt_file": "system_prompt_file: ../prompt.md",
+		"instructions_file":  "instructions_file: /abs/agents.md",
+		"config_dir":         "config_dir: ../cfg",
+		"target_suffix":      "auth:\n  types:\n    k:\n      required_files:\n        - name: f\n          target_suffix: /../../f.json",
+	} {
+		dir := filepath.Join(t.TempDir(), "hc")
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("harness: generic\n"+line+"\n"), 0o644))
+		_, err := LoadHarnessConfigDir(dir)
+		assert.Error(t, err, field)
+	}
+	// Local values still load.
+	dir := filepath.Join(t.TempDir(), "hc")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("harness: generic\nskills_dir: .x/skills\nsystem_prompt_file: .x/system.md\n"), 0o644))
+	_, err := LoadHarnessConfigDir(dir)
+	assert.NoError(t, err)
 }

@@ -23,6 +23,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -209,4 +211,52 @@ func TestDispatchAgentEventHandler_RefusesStoredTemplateRefsOutsideTheTemplateRo
 			assert.Nil(t, findMockAgent(ms, "stored-agent"), "no agent is created")
 		})
 	}
+}
+
+// A hub operational default_template that is not an accepted template
+// reference degrades like an unusable hub default: the create succeeds with
+// no template and a warning names the setting. (A request-supplied reference
+// is refused, TestAgentCreate_RefusesTemplateRefsOutsideTheTemplateRoots.)
+func TestCreateAgent_HubDefaultTemplateRefOutsideTheRoots_Degrades(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupLadderServer(t, disp)
+	logs := captureHarnessLogs(srv)
+	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultTemplate: "/home/user/.scion"})
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "hub-default-host-path",
+		ProjectID: project.ID,
+		Task:      "do something",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var resp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Agent)
+	agent, err := s.GetAgent(context.Background(), resp.Agent.ID)
+	require.NoError(t, err)
+	assert.Empty(t, agent.Template, "the refused hub default is cleared, never dispatched")
+	require.Len(t, logs.hubDefaultTemplateWarnings(), 1)
+}
+
+// The scheduler-dispatch mirror of the hub-default degradation.
+func TestDispatchAgentEventHandler_HubDefaultTemplateRefOutsideTheRoots_Degrades(t *testing.T) {
+	ms := newMockStore()
+	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
+	creatorID := seedFullRoleDispatchCreator(ms, "project-1")
+	srv := newEventHandlerTestServer(ms)
+	logs := captureHarnessLogs(srv)
+	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultTemplate: "/home/user/.scion"})
+
+	err := srv.dispatchAgentEventHandler()(context.Background(), withMockAgentRevision(store.ScheduledEvent{
+		ID:        "dispatch-hub-host-path-1",
+		ProjectID: "project-1",
+		EventType: "dispatch_agent",
+		Payload:   `{"agentName":"sched-hub-host-path","task":"Do the thing"}`,
+		CreatedBy: creatorID,
+	}, creatorID))
+	require.NoError(t, err)
+	created := findMockAgent(ms, "sched-hub-host-path")
+	require.NotNil(t, created, "agent was not created")
+	assert.Empty(t, created.Template, "the refused hub default is cleared, never dispatched")
+	require.Len(t, logs.hubDefaultTemplateWarnings(), 1)
 }
