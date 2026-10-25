@@ -49,7 +49,10 @@ func TestHubRemoteSourceRefusal_NetworkForms(t *testing.T) {
 	}))
 	for name, tc := range hubNetworkSourceForms {
 		t.Run(name, func(t *testing.T) {
-			assertHubSourceRefused(t, tc.uri, config.ErrRemoteSourceNotAccepted.Error()+": "+tc.want)
+			// The refusal reason follows the sentinel text, possibly after a
+			// qualifier ("rclone source ..."), so the two are checked apart.
+			assertHubSourceRefused(t, tc.uri, config.ErrRemoteSourceNotAccepted.Error())
+			assertHubSourceRefused(t, tc.uri, tc.want)
 		})
 	}
 	assert.Zero(t, fetched)
