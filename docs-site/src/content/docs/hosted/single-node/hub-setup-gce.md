@@ -246,3 +246,12 @@ If TLS is terminated by an upstream load balancer, reverse proxy, or appliance (
 **Option C — Identity-Aware Proxy (GCP)**
 
 For GCP deployments, you can front the Hub with [Identity-Aware Proxy (IAP)](/scion/hosted/ha/auth-proxy-iap/) instead of managing certificates directly. IAP handles both TLS and user authentication at the network edge. The IAP guide covers HA deployments but the same pattern works for a single VM behind an internal load balancer.
+
+### Proxy configuration
+
+`server.trusted_proxies` lists the peers whose forwarded protocol header (`X-Forwarded-Proto`) the Hub honours. Remote Runtime Brokers that reach the Hub through a TLS-terminating proxy need that proxy listed.
+
+- With Caddy on the VM (the default, and Option A), `gce-start-hub.sh --full` writes `127.0.0.1` and `::1`, because Caddy proxies to `localhost:8080`. If you install your own Caddyfile, keep the upstream on `localhost`.
+- With `--no-tls` (Option B or C), the script writes no list. Add your terminator's source addresses yourself, as IPs or CIDRs, under `server:` in `settings.yaml` or as a comma-separated `SCION_SERVER_TRUSTEDPROXIES` in `hub.env`. Catch-all entries (`0.0.0.0/0`, `::/0`) are refused. The terminator must overwrite `X-Forwarded-Proto`, not append to it. For a GCP external Application Load Balancer the source ranges are `35.191.0.0/16` and `130.211.0.0/22`; for a regional or internal Application Load Balancer, use the region's proxy-only subnet.
+
+A fast deploy (without `--full`) does not rewrite `settings.yaml`, so run `--full` once to pick up the default on an existing Hub.
