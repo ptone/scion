@@ -562,7 +562,8 @@ func TestInjectedAgentTokenException(t *testing.T) {
 //
 // A method is named "<file>:<receiver type>.<method>". Raw net/http requests
 // that set a credential themselves (server_onboarding.go) are outside this
-// scan; their path tests cover them.
+// scan except where htpGuardedLocal lists their wrappers; their path tests
+// cover them.
 var htpGuarded = map[string][]string{
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient.New":                     {"broker.go:getHubClientForConnection", "broker_join.go:newUnauthenticatedHubClient"},
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient.NewTransport":            {"ssh_hostkey.go:newSSHHubConn"},
@@ -577,11 +578,19 @@ var htpGuarded = map[string][]string{
 // htpGuardedLocal lists the package-level cmd wrappers that do NOT apply the
 // transport rule themselves, each with the only places that may reference
 // them; those places check first (or, for newUnauthenticatedHubClient, its
-// caller applies checkBrokerHubURL and the client sends no user credential).
+// caller applies checkBrokerHubURL and the client sends no user credential;
+// for the onboarding status request, the caller applies
+// quickstartStatusAllowed).
 // Tests may still replace attachToAgentFn (test files are not scanned).
 var htpGuardedLocal = map[string][]string{
 	"attachToAgentFn":             {"attach.go:attachHubSession"},
 	"newUnauthenticatedHubClient": {"broker_join.go:runBrokerJoin"},
+	// The workstation onboarding status request carries the server's token:
+	// fetchOnboardingStatus only through the quickstartOnboardingStatus seam,
+	// and that only from printWorkstationQuickstart, after
+	// quickstartStatusAllowed.
+	"fetchOnboardingStatus":      {"server_onboarding.go:var quickstartOnboardingStatus"},
+	"quickstartOnboardingStatus": {"server_daemon.go:printWorkstationQuickstart"},
 }
 
 // TestHubClientConstructionGoesThroughTransportRule fails when a cmd file

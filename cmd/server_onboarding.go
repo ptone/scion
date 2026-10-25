@@ -183,11 +183,16 @@ func quickstartStatusAllowed(baseURL string) bool {
 // Test seams for printWorkstationQuickstart, so unit tests never wait on or
 // talk to a real server.
 var (
-	quickstartWaitReady        = waitForServerReady
-	quickstartReadyTimeout     = 20 * time.Second
-	quickstartOnboardingStatus = func(baseURL, token string) (onboardingStatusResult, error) {
-		return fetchOnboardingStatus(&http.Client{Timeout: 5 * time.Second}, baseURL, token)
-	}
+	quickstartWaitReady      = waitForServerReady
+	quickstartReadyTimeout   = 20 * time.Second
 	quickstartBrowserAllowed = browserAutoOpenAllowed
 	quickstartOpenBrowser    = util.OpenBrowser
 )
+
+// quickstartOnboardingStatus sends the server's token to baseURL. It does not
+// apply the transport rule itself; its caller checks quickstartStatusAllowed
+// first (the hub constructor source scan in hub_transport_policy_test.go keeps
+// it so).
+var quickstartOnboardingStatus = func(baseURL, token string) (onboardingStatusResult, error) {
+	return fetchOnboardingStatus(&http.Client{Timeout: 5 * time.Second}, baseURL, token)
+}
