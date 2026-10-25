@@ -380,7 +380,7 @@ func TestBrokerAuthz_AutoProvideRegistration_StatusSeesProviderImmediately(t *te
 
 	// Phase 2: POST /api/v1/brokers/join — unauthenticated, the join token is
 	// the credential.
-	joinRec := doRequestNoAuth(t, srv, http.MethodPost, "/api/v1/brokers/join",
+	joinRec := doRequestNoAuthLoopback(t, srv, http.MethodPost, "/api/v1/brokers/join",
 		BrokerJoinRequest{
 			BrokerID:  createResp.BrokerID,
 			JoinToken: createResp.JoinToken,
@@ -438,7 +438,7 @@ func autoProvideBrokerWithProject(t *testing.T, srv *Server, owner *store.User, 
 	require.NoError(t, json.NewDecoder(createRec.Body).Decode(&createResp))
 	setBrokerAutoProvide(t, srv.store, createResp.BrokerID, true)
 
-	joinRec := doRequestNoAuth(t, srv, http.MethodPost, "/api/v1/brokers/join",
+	joinRec := doRequestNoAuthLoopback(t, srv, http.MethodPost, "/api/v1/brokers/join",
 		BrokerJoinRequest{
 			BrokerID:  createResp.BrokerID,
 			JoinToken: createResp.JoinToken,

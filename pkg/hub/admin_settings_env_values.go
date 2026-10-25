@@ -202,8 +202,9 @@ func serverConfigResponseFromSettings(vs *config.VersionedSettings) ServerConfig
 // API-writable, so a client that echoes the body back must not send them;
 // nor is the relay-peer secret ever returned, nor the proxy driver settings
 // (WS2), nor the server keyring file path and its world-readable override
-// (ptone/scion#1530). Both tiers' GET builders and the env_values view use
-// it, so the three cannot drift.
+// (ptone/scion#1530), nor server.trusted_proxies (the transport policy's
+// trust set). Both tiers' GET builders and the env_values view use it, so
+// the three cannot drift.
 func hideNeverShownServerKeys(srv *config.V1ServerConfig) {
 	if srv == nil {
 		return
@@ -218,6 +219,7 @@ func hideNeverShownServerKeys(srv *config.V1ServerConfig) {
 	hideNeverAPIWritableProxyKeys(srv)
 	srv.KeyringFile = ""
 	srv.KeyringFileAllowWorldReadable = false
+	srv.TrustedProxies = nil
 }
 
 // shownEnvValue returns the value the GET may show for the environment

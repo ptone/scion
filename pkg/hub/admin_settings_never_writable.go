@@ -35,7 +35,8 @@ import (
 // sessions behind the proxy), the relay-peer secret (design §3.9:
 // never stored in the database or returned by the API), and the server
 // keyring file path (ptone/scion#1530: the keyring is a deploy-time secret
-// input read once at startup) and its operator-only world-readable override.
+// input read once at startup) and its operator-only world-readable override,
+// and server.trusted_proxies (the transport policy's trust set).
 // A key matches itself and every key nested under it.
 var neverAPIWritableSettingsKeys = []string{
 	config.HubClassKey,
@@ -45,6 +46,10 @@ var neverAPIWritableSettingsKeys = []string{
 	config.ConduitPeerSecretKey,
 	config.KeyringFileKey,
 	config.KeyringFileAllowWorldReadableKey,
+	// The hub-broker transport policy's trusted proxy list: it decides
+	// whose X-Forwarded-Proto is trusted, so its trust set must not grow
+	// through the API.
+	config.TrustedProxiesKey,
 }
 
 // withoutNeverAPIWritableKeys returns keys without every never-API-writable
