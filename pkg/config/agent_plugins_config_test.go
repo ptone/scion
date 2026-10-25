@@ -93,11 +93,11 @@ func TestSettingsSchema_LocalExperimentsAndCapability(t *testing.T) {
 		t.Errorf("bad local_experiments name accepted: errs=%v err=%v", errs, err)
 	}
 	hc := "harness: generic\nimage: scion-base:test\ncapabilities:\n  agent_plugins: { support: \"partial\", reason: \"x\" }\n"
-	errs, err = ValidateHarnessConfig([]byte(hc))
+	errs, _, err = ValidateHarnessConfig([]byte(hc))
 	if err != nil || len(errs) != 0 {
 		t.Errorf("agent_plugins capability: errs=%v err=%v", errs, err)
 	}
-	errs, err = ValidateHarnessConfig([]byte("harness: generic\nimage: scion-base:test\ncapabilities:\n  agent_plugins: { support: \"maybe\" }\n"))
+	errs, _, err = ValidateHarnessConfig([]byte("harness: generic\nimage: scion-base:test\ncapabilities:\n  agent_plugins: { support: \"maybe\" }\n"))
 	if err != nil || len(errs) == 0 {
 		t.Errorf("bad support level accepted: errs=%v err=%v", errs, err)
 	}

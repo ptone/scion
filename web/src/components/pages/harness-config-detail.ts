@@ -82,6 +82,8 @@ interface HarnessConfigReimportResult {
   count?: number;
   harnessConfigs?: string[] | null;
   failed?: Array<{ name: string; reason: string }>;
+  /** Non-fatal problems with configs that were imported; absent on older hubs. */
+  warnings?: Array<{ name: string; reason: string }> | null;
 }
 
 /** The fields of a maintenance run that the image build polling reads. */
@@ -157,6 +159,9 @@ export class ScionPageHarnessConfigDetail extends LitElement {
 
   @state()
   private reimportError = '';
+
+  @state()
+  private reimportWarning = '';
 
   @state()
   private deleteDialogOpen = false;
@@ -296,6 +301,10 @@ export class ScionPageHarnessConfigDetail extends LitElement {
     }
     .reimport-status.error {
       color: var(--sl-color-danger-600);
+    }
+    .reimport-status.warning {
+      color: var(--sl-color-warning-700);
+      white-space: pre-line;
     }
 
     .build-error {
@@ -652,6 +661,9 @@ export class ScionPageHarnessConfigDetail extends LitElement {
         </div>
         ${this.reimportStatus
           ? html`<p slot="meta" class="reimport-status success">${this.reimportStatus}</p>`
+          : ''}
+        ${this.reimportWarning
+          ? html`<p slot="meta" class="reimport-status warning">${this.reimportWarning}</p>`
           : ''}
         ${this.reimportError
           ? html`<p slot="meta" class="reimport-status error">${this.reimportError}</p>`
@@ -1233,6 +1245,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
     this.reimportRunning = true;
     this.reimportStatus = '';
     this.reimportError = '';
+    this.reimportWarning = '';
 
     try {
       const response = await apiFetch(`/api/v1/harness-configs/${this.harnessConfig.id}/reimport`, {
@@ -1250,6 +1263,11 @@ export class ScionPageHarnessConfigDetail extends LitElement {
       const result = (await response.json()) as HarnessConfigReimportResult | null;
       const count = result?.count ?? result?.harnessConfigs?.length ?? 0;
       const failed: Array<{ name: string; reason: string }> = result?.failed ?? [];
+      const warnings = result?.warnings ?? [];
+      if (warnings.length > 0) {
+        const lines = warnings.map((w) => `${w.name}: ${w.reason}`).join('\n');
+        this.reimportWarning = `Refreshed (with warnings): ${lines}`;
+      }
 
       if (failed.length > 0) {
         const reasons = failed
@@ -1259,7 +1277,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
         if (count > 0) {
           this.reimportStatus = `${count} config(s) updated, but some failed.`;
         }
-      } else {
+      } else if (warnings.length === 0) {
         this.reimportStatus = `Refreshed successfully (${count} config${count !== 1 ? 's' : ''} updated).`;
       }
       await this.loadHarnessConfig();
