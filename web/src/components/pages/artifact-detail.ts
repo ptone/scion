@@ -108,6 +108,8 @@ import { ownerDeletedBadge, ownerDeletedStyles } from '../shared/artifact-owner-
 import '../shared/code-editor.js';
 import './not-found.js';
 import { loadReviewEditor, preloadReviewEditor } from '../artifact-review/review-editor-loader.js';
+import { showConfirm } from '../shared/confirm-dialog.js';
+import { countTopLevelBlocks } from '../../utils/markdown-blocks.js';
 import type { ReviewEditorElement } from '../artifact-review/review-editor-loader.js';
 
 type Tab = 'preview' | 'files' | 'history';
@@ -157,11 +159,24 @@ export const REVIEW_VIEW_KEY = 'scion:artifact-review-view';
 export const REVIEW_HINT_MS = 8000;
 
 /**
- * Markdown larger than this (in bytes) opens Review in the Source view,
- * with a notice: the graphical view is slow to open for such documents. The
- * reviewer can still switch to it.
+ * Markdown over either of these (UTF-8 bytes, top-level blocks) opens
+ * Review in the Source view, with a notice: the graphical view takes a
+ * while to open for such documents. The reviewer can still switch to it,
+ * after a confirmation.
  */
-export const LARGE_REVIEW_BYTES = 50_000;
+export const LARGE_REVIEW_BYTES = 200_000;
+export const LARGE_REVIEW_BLOCKS = 4_000;
+
+/**
+ * Markdown over either of these is too large for the graphical view: it
+ * is not offered, since opening it could use more memory than the page
+ * has.
+ */
+export const MAX_GRAPHICAL_BYTES = 500_000;
+export const MAX_GRAPHICAL_BLOCKS = 10_000;
+
+/** How a document's size bears on the graphical review page. */
+export type ReviewSize = 'normal' | 'large' | 'too-large';
 
 /** The views of the graphical review page. */
 export type ReviewView = 'graphical' | 'source';
@@ -181,7 +196,8 @@ export type ReviewHint =
   | 'code-run'
   | 'generic'
   | 'load-failed'
-  | 'large';
+  | 'large'
+  | 'too-large';
 
 /** Text of each hint: a bold first sentence and a second one. */
 export const REVIEW_HINT_TEXT: Record<ReviewHint, { title: string; body: string }> = {
@@ -236,14 +252,43 @@ export const REVIEW_HINT_TEXT: Record<ReviewHint, { title: string; body: string 
     body: 'It opened in the Source view.',
   },
   large: {
-    title: 'This document is large; the graphical view may be slow.',
-    body: 'It opened in the Source view. You can still switch to Graphical.',
+    title: 'This document is large, so it opened in the Source view.',
+    body: '',
+  },
+  'too-large': {
+    title: 'This document is too large for the graphical view.',
+    body: '',
   },
 };
 
-/** Whether text is too large to open Review in the graphical view (LARGE_REVIEW_BYTES). */
-export function isLargeReview(text: string): boolean {
-  return new TextEncoder().encode(text).length > LARGE_REVIEW_BYTES;
+/** The confirmation before the graphical view opens a large document. */
+export const LARGE_REVIEW_CONFIRM =
+  'Opening the graphical view may take a few seconds for a document this size. Continue?';
+
+/** The view toggle's tooltip when the graphical view is not offered. */
+export const TOO_LARGE_TOOLTIP = 'Too large for the graphical view.';
+
+/**
+ * The size class of text for the graphical review page. Bytes are exact;
+ * blocks are counted by the app's Markdown lexer, which is close to the
+ * editor's own count but not always equal (approximate by design), and only
+ * for text within MAX_GRAPHICAL_BYTES. A count that fails counts as large:
+ * the Source view opens, and the reviewer can still switch.
+ */
+export async function reviewSize(
+  text: string,
+  countBlocks: (md: string) => Promise<number> = countTopLevelBlocks
+): Promise<ReviewSize> {
+  const bytes = new TextEncoder().encode(text).length;
+  if (bytes > MAX_GRAPHICAL_BYTES) return 'too-large';
+  let blocks: number;
+  try {
+    blocks = await countBlocks(text);
+  } catch {
+    return 'large';
+  }
+  if (blocks > MAX_GRAPHICAL_BLOCKS) return 'too-large';
+  return bytes > LARGE_REVIEW_BYTES || blocks > LARGE_REVIEW_BLOCKS ? 'large' : 'normal';
 }
 
 /** The view a reviewer last chose; graphical unless they chose source. */
@@ -383,6 +428,12 @@ export class ScionPageArtifactDetail extends LitElement {
   @state() private reviewView: ReviewView = 'graphical';
   /** The editor chunk: not requested, loading, loaded, or failed. */
   @state() private editorLoad: 'idle' | 'loading' | 'ready' | 'failed' = 'idle';
+  /** The size class of the text under review; null while it is worked out. */
+  @state() private reviewSize: ReviewSize | null = null;
+  /** The reviewer confirmed opening this large document in the graphical view. */
+  private largeConfirmed = false;
+  /** Counts reviews started, so a size worked out for an earlier one is dropped. */
+  private reviewRuns = 0;
   /** The hint shown under the toolbar of the graphical review page. */
   @state() private graphicalHint: ReviewHint | null = null;
   private hintTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1124,14 +1175,54 @@ export class ScionPageArtifactDetail extends LitElement {
     if (this.reviewGraphical) {
       this.clearHint();
       this.reviewView = storedReviewView();
-      // Not stored: the reviewer's own choice stays for smaller documents.
-      if (this.reviewView === 'graphical' && isLargeReview(this.reviewText)) {
-        this.reviewView = 'source';
-        this.showHint('large');
-      }
-      if (this.reviewView === 'graphical') void this.ensureEditor();
+      this.reviewSize = null;
+      this.largeConfirmed = false;
+      void this.sizeReview(this.reviewText, ++this.reviewRuns);
     }
   };
+
+  /**
+   * Works out the size class of the text under review, then opens the
+   * remembered view: a large document opens in the Source view with a
+   * notice, and a too large one cannot use the graphical view. The view
+   * this picks is not stored, so the reviewer's own choice stays for other
+   * documents.
+   */
+  private async sizeReview(text: string, run: number): Promise<void> {
+    const size = await reviewSize(text);
+    if (run !== this.reviewRuns || !this.reviewing) return;
+    this.reviewSize = size;
+    if (size === 'too-large') {
+      this.reviewView = 'source';
+      this.showHint('too-large');
+    } else if (size === 'large' && this.reviewView === 'graphical') {
+      this.reviewView = 'source';
+      this.showHint('large');
+    }
+    if (this.reviewView === 'graphical') void this.ensureEditor();
+  }
+
+  /**
+   * A view chosen with the toggle: the graphical view of a large document
+   * opens after a confirmation (once per review), and a too large one does
+   * not open at all.
+   */
+  private chooseReviewView(next: ReviewView): void {
+    if (next === 'graphical' && this.reviewSize === 'too-large') return;
+    if (next === 'graphical' && this.reviewSize === 'large' && !this.largeConfirmed) {
+      void showConfirm(LARGE_REVIEW_CONFIRM, {
+        title: 'Large document',
+        confirmText: 'Open graphical view',
+        variant: 'primary',
+      }).then((ok) => {
+        if (!ok || !this.reviewing) return;
+        this.largeConfirmed = true;
+        this.setReviewView('graphical');
+      });
+      return;
+    }
+    this.setReviewView(next);
+  }
 
   /** The graphical review page is on (experiment web.artifact_review_editor). */
   private get graphicalReview(): boolean {
@@ -2211,7 +2302,7 @@ export class ScionPageArtifactDetail extends LitElement {
         ? 'image'
         : hint === 'load-failed'
           ? 'exclamation-triangle'
-          : hint === 'source-own' || hint === 'large'
+          : hint === 'source-own' || hint === 'large' || hint === 'too-large'
             ? 'info-circle'
             : 'slash-circle';
     const action =
@@ -2219,7 +2310,8 @@ export class ScionPageArtifactDetail extends LitElement {
       hint === 'load-failed' ||
       hint === 'earlier' ||
       hint === 'source-own' ||
-      hint === 'large'
+      hint === 'large' ||
+      hint === 'too-large'
         ? nothing
         : html`<div class="hint-actions">
             <sl-button size="small" @click=${(): void => this.setReviewView('source')}>
@@ -2316,7 +2408,11 @@ export class ScionPageArtifactDetail extends LitElement {
                 </sl-tooltip>
                 ${this.reviewHint ? html`<span class="hint">${this.reviewHint}</span>` : nothing}`}
           <span class="spacer"></span>
-          <sl-tooltip content="Undo history is kept per view and resets when you switch">
+          <sl-tooltip
+            content=${this.reviewSize === 'too-large'
+              ? TOO_LARGE_TOOLTIP
+              : 'Undo history is kept per view and resets when you switch'}
+          >
             <sl-radio-group
               size="small"
               label="View"
@@ -2324,12 +2420,12 @@ export class ScionPageArtifactDetail extends LitElement {
               value=${this.reviewView}
               @sl-change=${(e: Event): void => {
                 const group = e.target as HTMLElement & { value: string };
-                this.setReviewView(group.value as ReviewView);
+                this.chooseReviewView(group.value as ReviewView);
                 // A refused switch puts the control back.
                 if (group.value !== this.reviewView) group.value = this.reviewView;
               }}
             >
-              <sl-radio-button value="graphical">
+              <sl-radio-button value="graphical" ?disabled=${this.reviewSize === 'too-large'}>
                 <sl-icon slot="prefix" name="file-earmark-richtext"></sl-icon>
                 <span class="lbl">Graphical</span>
               </sl-radio-button>
@@ -2373,7 +2469,7 @@ export class ScionPageArtifactDetail extends LitElement {
         ${this.renderGraphicalHint()}
         <div class="g-work">
           ${graphical
-            ? this.editorLoad === 'ready'
+            ? this.editorLoad === 'ready' && this.reviewSize !== null
               ? html`<scion-review-editor
                   .content=${this.reviewText}
                   .artifactId=${this.artifactId}

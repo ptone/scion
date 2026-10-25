@@ -45,6 +45,7 @@ import type { Baseline } from './preserve.js';
 import { ReviewSession, codeNeighbours } from './session.js';
 import { corpus, destroyCores, makeCore, sweepDocs } from './__fixtures__/core.js';
 import { largeDoc } from './__fixtures__/large-doc.js';
+import { countTopLevelBlocks } from '../../../utils/markdown-blocks.js';
 
 let core: Core;
 beforeAll(async () => {
@@ -438,4 +439,43 @@ describe('the text a save writes', () => {
     expect(joinFlat(parts)).toBe(parts.reduce((x, y) => x + y, ''));
     expect(joinFlat([])).toBe('');
   });
+});
+
+describe('the page counts top-level blocks as the editor does', () => {
+  /**
+   * The page sizes a document with the app's Markdown lexer before the
+   * editor loads (approximate by design). The documents where the two
+   * counts differ are listed here, so a drift between them shows.
+   */
+  const KNOWN_DIFFERENCES: Record<string, [lexer: number, editor: number]> = {
+    // A tab after a closing fence, and a code span the lexer reads across
+    // a line of spaces: the lexer sees one block where the editor sees two.
+    'corpus:closing fence may have a trailing tab': [1, 2],
+    'corpus:code span stops at a line of spaces': [1, 2],
+    // The editor shows an empty document as one empty paragraph.
+    'corpus:empty': [0, 1],
+    // The lexer counts link reference definitions; the editor has no block for them.
+    'sweep:reference links': [5, 3],
+  };
+
+  it('agrees on the corpus, the sweep documents and the 200 kB documents', async () => {
+    const named = [
+      ...corpus.map((c) => [`corpus:${c.name}`, c.in] as const),
+      ...sweepDocs.map((d) => [`sweep:${d.name}`, d.in] as const),
+      ['large:plain', largeDoc(false)] as const,
+      ['large:hazardous', largeDoc(true)] as const,
+    ];
+    const differences: Record<string, [number, number]> = {};
+    let same = 0;
+    for (const [name, md] of named) {
+      const s = new ReviewSession(core);
+      if (!s.load(md)) continue;
+      const editor = core.view.state.doc.childCount;
+      const lexer = await countTopLevelBlocks(md);
+      if (lexer === editor) same++;
+      else differences[name] = [lexer, editor];
+    }
+    expect(differences).toEqual(KNOWN_DIFFERENCES);
+    expect(same).toBeGreaterThan(80);
+  }, 120_000);
 });

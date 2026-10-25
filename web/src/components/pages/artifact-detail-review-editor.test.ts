@@ -32,14 +32,23 @@ const loader = vi.hoisted(() => ({
   load: vi.fn(() => Promise.resolve()),
   preload: vi.fn(),
 }));
+const confirm = vi.hoisted(() => ({ asked: [] as string[], answer: true }));
+vi.mock('../shared/confirm-dialog.js', () => ({
+  showConfirm: (message: string): Promise<boolean> => {
+    confirm.asked.push(message);
+    return Promise.resolve(confirm.answer);
+  },
+}));
 vi.mock('../artifact-review/review-editor-loader.js', () => ({
   loadReviewEditor: loader.load,
   preloadReviewEditor: loader.preload,
 }));
 
 const ID = '5f1c2d3e-0000-4000-8000-000000000002';
-/** The page's large-document threshold, read once the page module loads. */
+/** The page's large-document limits, read once the page module loads. */
 let LARGE_REVIEW_BYTES = 0;
+let LARGE_REVIEW_BLOCKS = 0;
+let MAX_GRAPHICAL_BYTES = 0;
 const TEXT = 'We ship in Q3.\n';
 
 /** Stand-in for <scion-review-editor>: records calls, returns a set text. */
@@ -171,7 +180,8 @@ describe('artifact page: graphical review editor experiment', () => {
       window as unknown as { happyDOM?: { settings: { disableIframePageLoading: boolean } } }
     ).happyDOM;
     if (hd) hd.settings.disableIframePageLoading = true;
-    ({ LARGE_REVIEW_BYTES } = await import('./artifact-detail.js'));
+    ({ LARGE_REVIEW_BYTES, LARGE_REVIEW_BLOCKS, MAX_GRAPHICAL_BYTES } =
+      await import('./artifact-detail.js'));
   }, 30_000);
 
   beforeEach(() => {
@@ -179,6 +189,8 @@ describe('artifact page: graphical review editor experiment', () => {
     loader.load.mockImplementation(() => Promise.resolve());
     loader.preload.mockReset();
     window.localStorage.clear();
+    confirm.asked.length = 0;
+    confirm.answer = true;
   });
 
   afterEach(() => {
@@ -267,8 +279,8 @@ describe('artifact page: graphical review editor experiment', () => {
     expect($(el, '.hint-strip')!.textContent).toContain('The graphical view could not be loaded.');
   });
 
-  it('opens a large document in the source view with a notice, and can still switch', async () => {
-    // One byte over the threshold: the page counts bytes, and é is two.
+  it('opens a large document in the source view with a notice; Graphical asks first', async () => {
+    // One byte over the soft limit: the page counts bytes, and é is two.
     const large = 'é'.repeat(LARGE_REVIEW_BYTES / 2) + 'a';
     expect(new TextEncoder().encode(large).length).toBe(LARGE_REVIEW_BYTES + 1);
     mockFetch(large);
@@ -278,19 +290,61 @@ describe('artifact page: graphical review editor experiment', () => {
     expect($(el, 'scion-review-editor')).toBeNull();
     expect($(el, '.g-work scion-code-editor.review-editor')).not.toBeNull();
     const strip = $(el, '.hint-strip')!;
-    expect(strip.textContent).toContain('This document is large; the graphical view may be slow.');
+    expect(strip.textContent).toContain('This document is large, so it opened in the Source view.');
     expect(strip.textContent).not.toContain('Open Source view');
     expect($(el, '.hint-region')!.getAttribute('role')).toBe('status');
+    expect($(el, 'sl-radio-button[value="graphical"]')!.hasAttribute('disabled')).toBe(false);
     // The reviewer's own choice is not changed.
     expect(window.localStorage.getItem('scion:artifact-review-view')).toBeNull();
+    // Cancel keeps the Source view.
+    confirm.answer = false;
+    await chooseView(el, 'graphical');
+    expect(confirm.asked).toEqual([
+      'Opening the graphical view may take a few seconds for a document this size. Continue?',
+    ]);
+    expect(loader.load).not.toHaveBeenCalled();
+    expect($(el, '.g-work scion-code-editor.review-editor')).not.toBeNull();
+    // Continue opens it, and switching back and forth does not ask again.
+    confirm.answer = true;
     await chooseView(el, 'graphical');
     expect(loader.load).toHaveBeenCalledTimes(1);
-    const editor = $<FakeReviewEditor>(el, 'scion-review-editor')!;
-    expect(editor.content).toBe(large);
-    expect($(el, '.hint-strip')).toBeNull();
+    expect($<FakeReviewEditor>(el, 'scion-review-editor')!.content).toBe(large);
+    await chooseView(el, 'source');
+    await chooseView(el, 'graphical');
+    expect(confirm.asked.length).toBe(2);
+    expect($(el, 'scion-review-editor')).not.toBeNull();
   });
 
-  it('opens a document at the threshold in the graphical view', async () => {
+  it('a document too large for the graphical view cannot switch to it', async () => {
+    const huge = 'a'.repeat(MAX_GRAPHICAL_BYTES) + '\n';
+    mockFetch(huge);
+    const el = await mount(true);
+    await startReview(el);
+    expect(loader.load).not.toHaveBeenCalled();
+    expect($(el, '.g-work scion-code-editor.review-editor')).not.toBeNull();
+    expect($(el, '.hint-strip')!.textContent).toContain(
+      'This document is too large for the graphical view.'
+    );
+    expect($(el, 'sl-radio-button[value="graphical"]')!.hasAttribute('disabled')).toBe(true);
+    expect($(el, '.g-toolbar sl-tooltip:has(sl-radio-group)')!.getAttribute('content')).toBe(
+      'Too large for the graphical view.'
+    );
+    // Even a change event from the toggle does not open it.
+    await chooseView(el, 'graphical');
+    expect(confirm.asked).toEqual([]);
+    expect(loader.load).not.toHaveBeenCalled();
+    expect($(el, 'scion-review-editor')).toBeNull();
+  });
+
+  it('counts top-level blocks too: over the soft limit opens the source view', async () => {
+    mockFetch('p\n\n'.repeat(LARGE_REVIEW_BLOCKS + 1));
+    const el = await mount(true);
+    await startReview(el);
+    expect(loader.load).not.toHaveBeenCalled();
+    expect($(el, '.hint-strip')!.textContent).toContain('This document is large');
+  });
+
+  it('opens a document at the limits in the graphical view', async () => {
     const edge = 'a'.repeat(LARGE_REVIEW_BYTES - 1) + '\n';
     expect(new TextEncoder().encode(edge).length).toBe(LARGE_REVIEW_BYTES);
     mockFetch(edge);
