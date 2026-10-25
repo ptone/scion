@@ -1151,7 +1151,10 @@ func printWorkstationQuickstart(settingsMissingBeforeStart bool, globalDir strin
 		// then the hub is not asked and nothing is opened.
 		msg, serverUp := quickstartReadyMessage(quickstartWaitReady(displayHost, wPort, quickstartReadyTimeout))
 		status, statusErr := onboardingStatusResult{}, errOnboardingStatusNotAsked
-		if serverUp && hubEnabled {
+		// The transport rule: the token is sent only over a loopback (or
+		// TLS) connection. For another bind host the status is not asked
+		// and the settings-file signal below is used.
+		if serverUp && hubEnabled && quickstartStatusAllowed(baseURL) {
 			// The token is sent only to the local server's status endpoint,
 			// never printed: the settings token if one is set, else the
 			// token file's contents.

@@ -23,6 +23,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -170,6 +171,13 @@ func browserAutoOpenAllowed() bool {
 // in, for tests.
 func browserAutoOpenAllowedFor(noBrowserEnv string, interactive, headless bool) bool {
 	return noBrowserEnv == "" && interactive && !headless
+}
+
+// quickstartStatusAllowed reports whether the onboarding status request,
+// which carries the server's dev or settings token, may be sent to baseURL:
+// only when the hub transport rule accepts it (a loopback or TLS URL).
+func quickstartStatusAllowed(baseURL string) bool {
+	return hubsync.CheckUserHubTransport(baseURL) == nil
 }
 
 // Test seams for printWorkstationQuickstart, so unit tests never wait on or
