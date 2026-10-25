@@ -402,7 +402,8 @@ func TestLimitedStream(t *testing.T) {
 }
 
 // Directories created implicitly as parents are charged as entries, once
-// each, for tar, zip and the sub-path copy.
+// each, for tar and zip; the sub-path copy charges its directories through
+// the same helper (TestCopyDirExcludingGit_Limits).
 func TestExtract_ImplicitParentDirsCharged(t *testing.T) {
 	// 6 directories (a, a/b, a/b/c, x, x/y, x/y/z) + 2 files = 8 entries;
 	// two top-level directories, so no common root is stripped.
