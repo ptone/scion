@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=215   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 14 (workspaceStorage.nfs: eleven refusals, one acceptance, two rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check) + 7 (hub.trustedProxies: five refusals, one acceptance, one rendered-shape check).
+EXPECTED_TOTAL=219   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 14 (workspaceStorage.nfs: eleven refusals, one acceptance, two rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check) + 7 (hub.trustedProxies: five refusals, one acceptance, one rendered-shape check) + 4 (server.trusted_proxies on the merged document: config.extra catch-all, non-IP word, IPv4 prefix cap, non-canonical mapped range).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -992,6 +992,13 @@ reject "trustedProxies ::/0" "is wider than /16" --set 'hub.trustedProxies={::/0
 reject "trustedProxies IPv4-mapped /96" "is wider than /104" --set 'hub.trustedProxies={::ffff:0:0/96}'
 reject "trustedProxies hostname, schema layer" "hub.trustedProxies.0" --set 'hub.trustedProxies={proxy.example.invalid}'
 accept "trustedProxies IPv4 /8" --set 'hub.trustedProxies={10.0.0.0/8}'
+# The merged document is checked too, so config.extra is held to the same
+# rules; the address forms and prefix caps are the hub's own.
+reject "trusted_proxies 0.0.0.0/0 through config.extra" "server.trusted_proxies entry 0.0.0.0/0 is wider than /8" \
+  --set-json 'hub.trustedProxies=[]' --set-json 'config.extra={"server":{"trusted_proxies":["0.0.0.0/0"]}}'
+reject "trustedProxies hex-only word" "hub.trustedProxies entry \"abc\" is not an IP address or a CIDR" --set 'hub.trustedProxies={abc}'
+reject "trustedProxies IPv4 /33" "has a prefix longer than /32" --set 'hub.trustedProxies={1.2.3.4/33}'
+reject "trustedProxies non-canonical IPv4-mapped /96" "is wider than /104" --set 'hub.trustedProxies={0:0:0:0:0:ffff:0:0/96}'
 executed=$((executed + 1))
 _tp_default="$(render --show-only templates/secret-settings.yaml)"
 _tp_custom="$(render --set 'hub.trustedProxies={10.20.0.0/16}' --show-only templates/secret-settings.yaml)"

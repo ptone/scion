@@ -3433,20 +3433,7 @@ instead of as a crash-looping pod.
 {{- $trustedProxies := list }}
 {{- range (dig "trustedProxies" (list) .Values.hub) }}
 {{- $entry := trim (toString .) }}
-{{- if not (regexMatch "^[0-9A-Fa-f:.]+(/[0-9]{1,3})?$" $entry) }}
-{{- fail (printf "hub.trustedProxies entry %s is not an IP address or a CIDR." (include "scion-hub.diagValue" (toString .))) }}
-{{- end }}
-{{- if contains "/" $entry }}
-{{- $bits := int (last (splitList "/" $entry)) }}
-{{- $minBits := 8 }}
-{{- if contains ":" $entry }}
-{{- $minBits = 16 }}
-{{- if hasPrefix "::ffff:" (lower $entry) }}{{- $minBits = 104 }}{{- end }}
-{{- end }}
-{{- if lt $bits $minBits }}
-{{- fail (printf "hub.trustedProxies entry %s is wider than /%d. A range that wide trusts a forwarded protocol from almost anyone, and the hub refuses it at startup. List the proxy's own source range." $entry $minBits) }}
-{{- end }}
-{{- end }}
+{{- include "scion-hub.assertTrustedProxyEntry" (dict "entry" $entry "source" "hub.trustedProxies") }}
 {{- $trustedProxies = append $trustedProxies $entry }}
 {{- end }}
 {{- if $trustedProxies }}
@@ -3565,6 +3552,7 @@ forces a chart fork. Merged before the assertions run, not after. */}}
 {{- $rendered := toYaml $doc }}
 {{- include "scion-hub.assertSettings" (dict "root" . "rendered" $rendered "hubId" $hubId) }}
 {{- include "scion-hub.assertNoExtraCollision" (dict "preMerge" $preMerge "extra" .Values.config.extra) }}
+{{- include "scion-hub.assertTrustedProxies" (dict "doc" $doc) }}
 {{- /* config.extra is an arbitrary subtree the operator controls, so it can put
 a credential at a path no redaction list names - a DSN at server.database.url
 was measured doing exactly that, landing in the Secret AND moving the
@@ -4421,5 +4409,101 @@ it, so the guards run even when the settings Secret is not rendered.
     "subpathRoot" $subpathRoot
     "mountPath" (printf "%s/%s" $mountRoot $shareId) }}
 {{- toYaml $out }}
+{{- end }}
+{{- end }}
+
+{{/*
+One server.trusted_proxies entry, checked the way the hub checks it at startup,
+so a bad entry fails the render instead of crash-looping the pod. dict: entry
+(trimmed), source (the value or settings key named in the error).
+
+IPv4 must be a dotted quad, octets 0-255, prefix /8 to /32. IPv6 must be a
+well-formed address (hex groups of up to four digits, at most one "::", an
+optional dotted-quad tail), prefix /16 to /128. An IPv4-mapped IPv6 range, in
+any spelling with ffff after zero groups, must be no wider than an IPv4 /8, so
+/104 at most.
+*/}}
+{{- define "scion-hub.assertTrustedProxyEntry" -}}
+{{- $entry := .entry }}
+{{- $src := .source }}
+{{- $bad := printf "%s entry %s is not an IP address or a CIDR." $src (include "scion-hub.diagValue" $entry) }}
+{{- $parts := splitList "/" $entry }}
+{{- if gt (len $parts) 2 }}{{- fail $bad }}{{- end }}
+{{- $addr := first $parts }}
+{{- $hasBits := eq (len $parts) 2 }}
+{{- $bitsStr := "" }}
+{{- if $hasBits }}
+{{- $bitsStr = last $parts }}
+{{- if not (regexMatch "^[0-9]{1,3}$" $bitsStr) }}{{- fail $bad }}{{- end }}
+{{- end }}
+{{- $maxBits := 32 }}
+{{- $minBits := 8 }}
+{{- if contains ":" $addr }}
+{{- $maxBits = 128 }}
+{{- $minBits = 16 }}
+{{- $v6 := $addr }}
+{{- $tailGroups := 0 }}
+{{- if contains "." $v6 }}
+{{- $tail := last (splitList ":" $v6) }}
+{{- if not (regexMatch "^[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}$" $tail) }}{{- fail $bad }}{{- end }}
+{{- range (splitList "." $tail) }}{{- if gt (int .) 255 }}{{- fail $bad }}{{- end }}{{- end }}
+{{- $v6 = trimSuffix $tail $v6 }}
+{{- $tailGroups = 2 }}
+{{- if not (hasSuffix ":" $v6) }}{{- fail $bad }}{{- end }}
+{{- if not (hasSuffix "::" $v6) }}{{- $v6 = trimSuffix ":" $v6 }}{{- end }}
+{{- end }}
+{{- $dbl := sub (len (splitList "::" $v6)) 1 }}
+{{- if gt $dbl 1 }}{{- fail $bad }}{{- end }}
+{{- if regexMatch ":::" $v6 }}{{- fail $bad }}{{- end }}
+{{- $groups := 0 }}
+{{- range (splitList ":" $v6) }}
+{{- if . }}
+{{- if not (regexMatch "^[0-9A-Fa-f]{1,4}$" .) }}{{- fail $bad }}{{- end }}
+{{- $groups = add1 $groups }}
+{{- end }}
+{{- end }}
+{{- $groups = add $groups $tailGroups }}
+{{- if or (and (eq $dbl 0) (ne $groups 8)) (and (eq $dbl 1) (ge $groups 8)) }}{{- fail $bad }}{{- end }}
+{{- if and (eq $dbl 0) (or (hasPrefix ":" $v6) (and (hasSuffix ":" $v6) (eq $tailGroups 0))) }}{{- fail $bad }}{{- end }}
+{{- if regexMatch "^(0{0,4}:){1,7}:?ffff:" (lower $addr) }}{{- $minBits = 104 }}{{- end }}
+{{- else }}
+{{- if not (regexMatch "^[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}$" $addr) }}{{- fail $bad }}{{- end }}
+{{- range (splitList "." $addr) }}{{- if gt (int .) 255 }}{{- fail $bad }}{{- end }}{{- end }}
+{{- end }}
+{{- if $hasBits }}
+{{- $bits := int $bitsStr }}
+{{- if gt $bits $maxBits }}
+{{- fail (printf "%s entry %s has a prefix longer than /%d." $src $entry $maxBits) }}
+{{- end }}
+{{- if lt $bits $minBits }}
+{{- fail (printf "%s entry %s is wider than /%d. A range that wide trusts a forwarded protocol from almost anyone, and the hub refuses it at startup. List the proxy's own source range." $src $entry $minBits) }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+server.trusted_proxies on the MERGED settings document, so an entry that
+arrives through config.extra is held to the same rules as hub.trustedProxies.
+The hub accepts a list, each item also split on commas, or a comma-separated
+string; anything else is refused.
+*/}}
+{{- define "scion-hub.assertTrustedProxies" -}}
+{{- $server := dig "server" (dict) .doc }}
+{{- if and (kindIs "map" $server) (hasKey $server "trusted_proxies") }}
+{{- $raw := index $server "trusted_proxies" }}
+{{- $items := list }}
+{{- if kindIs "string" $raw }}
+{{- $items = splitList "," $raw }}
+{{- else if kindIs "slice" $raw }}
+{{- range $raw }}{{- $items = concat $items (splitList "," (toString .)) }}{{- end }}
+{{- else if not (kindIs "invalid" $raw) }}
+{{- fail (printf "server.trusted_proxies is %s; it must be a list of IPs or CIDRs." (include "scion-hub.diagValue" (toString $raw))) }}
+{{- end }}
+{{- range $items }}
+{{- $e := trim . }}
+{{- if $e }}
+{{- include "scion-hub.assertTrustedProxyEntry" (dict "entry" $e "source" "server.trusted_proxies") }}
+{{- end }}
+{{- end }}
 {{- end }}
 {{- end }}
