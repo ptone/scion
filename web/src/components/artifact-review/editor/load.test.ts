@@ -22,16 +22,22 @@
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { chooseOpeningAlphabet, probeOpeningAlphabet } from '../../../utils/critic-sentinels.js';
+import {
+  chooseOpeningAlphabet,
+  criticToSentinelText,
+  probeOpeningAlphabet,
+} from '../../../utils/critic-sentinels.js';
 import { parseCritic } from '../../../utils/critic.js';
 import { loadDocument } from './bridge.js';
-import type { Core } from './create.js';
+import { definitionNodes } from './create.js';
+import type { Core, MdRead } from './create.js';
 import { TextMarks } from './guard.js';
 import type { MarkRun } from './guard.js';
-import { docStrings, makeBaseline } from './preserve.js';
+import { consumedAsInSource, docStrings, makeBaseline, sentinelInDefinition } from './preserve.js';
 import type { Baseline } from './preserve.js';
 import { ReviewSession, codeNeighbours } from './session.js';
 import { corpus, destroyCores, makeCore, sweepDocs } from './__fixtures__/core.js';
+import { largeDoc } from './__fixtures__/large-doc.js';
 
 let core: Core;
 beforeAll(async () => {
@@ -176,5 +182,182 @@ describe('opening alphabet without the probe', () => {
       n++;
     }
     expect(n).toBeGreaterThan(100);
+  });
+});
+
+/** The tagged sentinel form md opens with (what the load checks read), or null. */
+function taggedOf(md: string): string | null {
+  const a = chooseOpeningAlphabet(md, () => '');
+  return a ? criticToSentinelText(md, a, true).text : null;
+}
+
+/** A deep copy, to compare a tree with what it was. */
+const snapshot = <T>(x: T): T => structuredClone(x);
+
+describe('one reading of Markdown for every load check', () => {
+  const large = [largeDoc(false), largeDoc(true)];
+
+  it('gives the document, the tree and the definitions the separate parses give', () => {
+    let n = 0;
+    for (const md of [...docs, ...large]) {
+      for (const text of [md, taggedOf(md)]) {
+        if (text === null) continue;
+        const r = core.read(text);
+        expect(r.doc.eq(core.parse(text)), text.slice(0, 80)).toBe(true);
+        expect(r.tree).toEqual(core.parseMd(text));
+        expect(r.definitions).toEqual(definitionNodes(core.parseMdRaw(text)));
+        n++;
+      }
+    }
+    expect(n).toBeGreaterThan(200);
+  }, 120_000);
+
+  it('building the document does not change the tree, and no check changes it', () => {
+    const withDefinition = '[t][r] {++x++}\n\n> [s]: /q\n\n[r]: /p "title"\n';
+    let n = 0;
+    for (const md of [...docs, withDefinition, ...large]) {
+      const a = chooseOpeningAlphabet(md, () => '');
+      if (!a) continue;
+      const text = criticToSentinelText(md, a, true).text;
+      const r = core.read(text);
+      // A fresh parse is what the tree was before the document was built.
+      const fresh = core.parseMd(text);
+      expect(r.tree).toEqual(fresh);
+      const tree = snapshot(r.tree);
+      const defs = snapshot(r.definitions);
+      const loaded = loadDocument(md, () => r.doc, core.schema, a);
+      if (!loaded) continue;
+      sentinelInDefinition(md, a, r.definitions);
+      expect(r.definitions).toEqual(defs);
+      consumedAsInSource(md, a, () => r.tree, loaded.doc.childCount, loaded.consumed);
+      expect(r.tree).toEqual(tree);
+      makeBaseline(md, loaded.doc, () => r.tree, a);
+      expect(r.tree).toEqual(tree);
+      expect(r.definitions).toEqual(defs);
+      n++;
+    }
+    expect(n).toBeGreaterThan(100);
+  }, 120_000);
+
+  it('a whole load leaves every reading as it was read', () => {
+    const reads: { r: MdRead; tree: unknown; defs: unknown }[] = [];
+    const watching: Core = {
+      ...core,
+      read: (t: string): MdRead => {
+        const r = core.read(t);
+        reads.push({ r, tree: snapshot(r.tree), defs: snapshot(r.definitions) });
+        return r;
+      },
+    };
+    for (const md of [...docs, ...large]) {
+      reads.length = 0;
+      new ReviewSession(watching).load(md);
+      expect(reads.length).toBeGreaterThan(0);
+      for (const { r, tree, defs } of reads) {
+        expect(r.tree).toEqual(tree);
+        expect(r.definitions).toEqual(defs);
+      }
+    }
+  }, 120_000);
+
+  it('reads each distinct text once per load', () => {
+    const texts: string[] = [];
+    const counting: Core = {
+      ...core,
+      read: (t: string): MdRead => {
+        texts.push(t);
+        return core.read(t);
+      },
+    };
+    // Without a numeric character reference: the sentinel form alone.
+    const md = 'one {++two++} [t][r]\n\n[r]: /p\n';
+    expect(new ReviewSession(counting).load(md)).toBe(true);
+    expect(texts).toEqual([taggedOf(md)]);
+    // With one, the probe reads the source and its own sentinel form too.
+    texts.length = 0;
+    expect(new ReviewSession(counting).load(`&#65; ${md}`)).toBe(true);
+    expect(texts.length).toBe(3);
+    expect(new Set(texts).size).toBe(3);
+  });
+});
+
+describe('the baseline of a load', () => {
+  it('is the one a fresh build from the opened document gives', () => {
+    let n = 0;
+    for (const md of [...docs, largeDoc(true)]) {
+      const s = new ReviewSession(core);
+      if (!s.load(md)) continue;
+      const a = chooseOpeningAlphabet(md, () => '')!;
+      const fresh = makeBaseline(md, core.view.state.doc, core.parseMd, a);
+      const base = (s as unknown as { baseline: Baseline | null }).baseline;
+      expect(base).toEqual(fresh);
+      if (base) {
+        // Blocks are matched by identity with the opened document's.
+        base.nodes.forEach((node, k) => expect(node).toBe(core.view.state.doc.child(k)));
+        expect(base.written.size).toBe(0);
+      }
+      n++;
+    }
+    expect(n).toBeGreaterThan(100);
+  }, 120_000);
+});
+
+describe('link reference definitions of the opening text', () => {
+  // A reference link whose definition is in another block, and no numeric
+  // character reference: the load does not read the source itself.
+  const md = 'See [the plan][p] and {++more++} text.\n\nOther words here.\n\n[p]: /plan "Plan"\n';
+  const defsOf = (s: ReviewSession): string | null =>
+    (s as unknown as { definitions: string | null }).definitions;
+
+  /** Types X after "See" as an insertion and saves. */
+  const editAndSave = (s: ReviewSession): string | null => {
+    const v = core.view;
+    const ins = core.schema.marks.critic_ins.create({ mine: true });
+    const at = 4;
+    v.dispatch(v.state.tr.insertText('X', at).addMark(at, at + 1, ins));
+    s.markDirty();
+    return s.save();
+  };
+
+  const idle = (): Promise<void> => new Promise((r) => setTimeout(r, 20));
+
+  it('are read when the browser is idle after the load', async () => {
+    const s = new ReviewSession(core);
+    expect(s.load(md)).toBe(true);
+    expect(defsOf(s)).toBeNull();
+    await idle();
+    expect(defsOf(s)).toBe('[p]: /plan "Plan"');
+  });
+
+  it('an edit before then saves what it saves after', async () => {
+    const early = new ReviewSession(core);
+    expect(early.load(md)).toBe(true);
+    expect(defsOf(early)).toBeNull();
+    const before = editAndSave(early);
+    expect(defsOf(early)).toBe('[p]: /plan "Plan"');
+
+    const late = new ReviewSession(core);
+    expect(late.load(md)).toBe(true);
+    await idle();
+    expect(defsOf(late)).toBe('[p]: /plan "Plan"');
+    const after = editAndSave(late);
+
+    expect(before).not.toBeNull();
+    expect(before).toBe(after);
+    expect(before).toContain('{++X++}');
+  });
+
+  it("a later load drops the earlier one's pending reading", async () => {
+    const s = new ReviewSession(core);
+    expect(s.load(md)).toBe(true);
+    expect(s.load('No references here {++x++}.\n')).toBe(true);
+    await idle();
+    expect(defsOf(s)).toBe('');
+  });
+
+  it('come from the source reading when the load has one', () => {
+    const s = new ReviewSession(core);
+    expect(s.load(`&#65; ${md}`)).toBe(true);
+    expect(defsOf(s)).toBe('[p]: /plan "Plan"');
   });
 });

@@ -35,12 +35,15 @@ const DIRECT = [
   '@milkdown/preset-commonmark',
   '@milkdown/preset-gfm',
   '@milkdown/prose',
+  // The editor builds a document from a Markdown tree it has already parsed
+  // (ParserState), as Milkdown's own parser does; @milkdown/core ships it.
+  '@milkdown/transformer',
   '@milkdown/utils',
 ];
 
 /** Milkdown import specifiers the editor may use (the prose subpaths exactly). */
 const ALLOWED_IMPORT =
-  /^@milkdown\/(core|ctx|utils|preset-commonmark|preset-gfm|plugin-history|prose\/(model|state|view|transform|commands|history|keymap))$/;
+  /^@milkdown\/(core|ctx|utils|preset-commonmark|preset-gfm|plugin-history|transformer|prose\/(model|state|view|transform|commands|history|keymap))$/;
 
 /** Packages that come only through Milkdown: never imported by name. */
 const TRANSITIVE = /^(prosemirror-|remark|micromark|mdast-|unified)/;

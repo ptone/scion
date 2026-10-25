@@ -548,25 +548,22 @@ export function consumedAsInSource(
 /**
  * Whether a sentinel of md's tagged sentinel form lies inside a link
  * reference definition at any depth (inside a block quote or a list item
- * too), read from the Markdown parser's tree before its transforms (which
- * copy definitions onto references and drop them).
+ * too). definitions are the sentinel form's definitions as the Markdown
+ * parser reads them before its transforms (which copy definitions onto
+ * references and drop them): definitionNodes, or MdRead.definitions.
  */
 export function sentinelInDefinition(
   md: string,
   a: SentinelAlphabet,
-  parseRaw: (s: string) => MdTreeNode
+  definitions: readonly MdTreeNode[]
 ): boolean {
   const { text } = criticToSentinelText(md, a, true);
   const sentinels = sentinelSet(a);
-  const hit = (n: MdTreeNode): boolean => {
-    if (n.type === 'definition') {
-      const from = n.position?.start.offset;
-      const to = n.position?.end.offset;
-      if (from === undefined || to === undefined) return true;
-      for (let i = from; i < to; i++) if (sentinels.has(text[i])) return true;
-      return false;
-    }
-    return (n.children ?? []).some(hit);
-  };
-  return hit(parseRaw(text));
+  return definitions.some((n) => {
+    const from = n.position?.start.offset;
+    const to = n.position?.end.offset;
+    if (from === undefined || to === undefined) return true;
+    for (let i = from; i < to; i++) if (sentinels.has(text[i])) return true;
+    return false;
+  });
 }
