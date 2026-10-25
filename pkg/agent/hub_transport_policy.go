@@ -42,8 +42,9 @@ const agentHubTransportFix = "give agents an https:// hub endpoint (a TLS-termin
 const hostGatewayTarget = "host-gateway"
 
 // hostLocalAlias is a host alias accepted for a runtime. requiresMapping is
-// set for a name the runtime does not resolve itself, which is host-local
-// only through the broker's own name:host-gateway entry.
+// set for a name that is host-local only through a name:host-gateway entry
+// in the container's --add-host list, because the runtime does not always
+// resolve it itself.
 type hostLocalAlias struct {
 	name            string
 	requiresMapping bool
@@ -55,17 +56,21 @@ type hostLocalAlias struct {
 // every endpoint this policy accepts. Runtimes not listed have no host-local
 // alias: they run agents off the hub's host (kubernetes, substrate, cloudrun)
 // or are unknown, and fail closed.
-//   - docker: host.docker.internal (Docker Desktop resolves it; on Linux the
-//     agent manager maps it to host-gateway, runtime.BridgeExtraHosts), and
-//     scion-hub.internal, which the co-located broker maps to host-gateway
-//     (colocatedExtraHosts in pkg/runtimebroker).
+//   - docker: host.docker.internal and scion-hub.internal, each only with
+//     its host-gateway entry. Docker Engine on Linux does not resolve
+//     host.docker.internal itself; the agent manager maps it
+//     (runtime.BridgeExtraHosts, which matches the canonical lower-case
+//     spelling only), and the co-located broker maps scion-hub.internal
+//     (colocatedExtraHosts in pkg/runtimebroker). Without the entry the
+//     name would go to the container's DNS resolver.
 //   - podman: host.containers.internal, which Podman maps to the host.
 //   - container (Apple): host.containers.internal, through the DNS rule the
 //     server installs (runtime.AppleDNSHostname). Apple strips --add-host,
-//     so no mapped name counts there.
+//     so an alias there must never require a mapping
+//     (TestAppleAliasesNeedNoMapping).
 var hostLocalAliasesByRuntime = map[string][]hostLocalAlias{
 	"docker": {
-		{name: "host.docker.internal"},
+		{name: "host.docker.internal", requiresMapping: true},
 		{name: "scion-hub.internal", requiresMapping: true},
 	},
 	"podman":    {{name: "host.containers.internal"}},
@@ -111,8 +116,11 @@ func isAgentHubEndpointEnvKey(key string) bool {
 }
 
 // checkAgentHubEndpoint returns nil when rawURL may be given to an agent on
-// runtimeName, and otherwise config.CheckHubTransport's error, which names
-// the URL with its credentials redacted.
+// runtimeName. Otherwise it returns an error wrapping
+// config.ErrPlaintextNonLoopback that names the URL with its credentials
+// redacted: for http/ws, its own text (the remedy is agentHubTransportFix);
+// for anything else (another scheme, an unparsable URL, no host),
+// config.CheckHubTransport's.
 func checkAgentHubEndpoint(runtimeName string, extraHosts []string, rawURL string) error {
 	transportErr := config.CheckHubTransport(rawURL)
 	if transportErr == nil {
@@ -130,23 +138,27 @@ func checkAgentHubEndpoint(runtimeName string, extraHosts []string, rawURL strin
 	if isHostLocalAgentHubHost(runtimeName, u.Hostname(), extraHosts) {
 		return nil
 	}
-	return transportErr
+	return fmt.Errorf("%w: %s uses %s to host %q, which is neither a loopback address nor a host alias of this runtime, "+
+		"so the agent's hub credential would cross the network unencrypted",
+		config.ErrPlaintextNonLoopback, config.RedactURL(rawURL), strings.ToLower(u.Scheme), u.Hostname())
 }
 
 // isHostLocalAgentHubHost reports whether host, in a container on
 // runtimeName, names the container's own host, so plaintext to it never
-// leaves that host. Names are matched literally (case-insensitive, a
-// trailing dot ignored) and never resolved.
+// leaves that host. Names are matched literally (case-insensitive, no
+// trailing dot) and never resolved.
 //   - cloudrun-sandbox: an IPv4 link-local literal (169.254.0.0/16), the
 //     launcher address the broker gives sandboxes on its own instance.
 //   - docker, podman, container: a host alias from hostLocalAliasesByRuntime.
 //     An IP literal is never host-local here: with a remote Docker daemon the
 //     broker cannot tell whose interface an address is, while an alias always
-//     resolves on the container's own host. When extraHosts maps the alias,
-//     the mapping must be to host-gateway; any other target refuses it.
+//     resolves on the container's own host. An alias that requires a
+//     mapping is accepted only with a name:host-gateway entry in extraHosts;
+//     for any alias, an entry with another target refuses it. A trailing dot
+//     is not accepted: an absolute name may skip /etc/hosts and go to DNS.
 //   - every other runtime, including an unknown one: never.
 func isHostLocalAgentHubHost(runtimeName, host string, extraHosts []string) bool {
-	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	host = strings.ToLower(host)
 	if host == "" {
 		return false
 	}
@@ -161,11 +173,12 @@ func isHostLocalAgentHubHost(runtimeName, host string, extraHosts []string) bool
 		if host != alias.name {
 			continue
 		}
-		target, mapped := extraHostTarget(extraHosts, host)
 		if runtimeName == "container" {
-			// Apple drops --add-host, so a mapping neither helps nor hurts.
+			// Apple drops --add-host, so a mapping neither helps nor hurts;
+			// its aliases never require one (TestAppleAliasesNeedNoMapping).
 			return !alias.requiresMapping
 		}
+		target, mapped := extraHostTarget(extraHosts, host)
 		if mapped {
 			return target == hostGatewayTarget
 		}
@@ -176,14 +189,15 @@ func isHostLocalAgentHubHost(runtimeName, host string, extraHosts []string) bool
 
 // extraHostTarget returns the target of the first --add-host entry
 // ("name:target") for host, the entry the runtime applies (mergeExtraHosts
-// keeps the first entry per name).
+// keeps the first entry per name). Names compare case-insensitively, as
+// /etc/hosts lookups do; host is already lower case.
 func extraHostTarget(extraHosts []string, host string) (string, bool) {
 	for _, h := range extraHosts {
 		name, target, ok := strings.Cut(h, ":")
 		if !ok {
 			continue
 		}
-		if strings.TrimSuffix(strings.ToLower(name), ".") == host {
+		if strings.ToLower(name) == host {
 			return strings.ToLower(target), true
 		}
 	}

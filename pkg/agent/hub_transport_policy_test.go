@@ -44,13 +44,16 @@ func TestCheckAgentHubTransport(t *testing.T) {
 		// Host-local aliases on local runtimes.
 		{name: "docker host.docker.internal mapped", runtime: "docker", extraHosts: []string{"host.docker.internal:host-gateway"},
 			env: []string{"SCION_HUB_ENDPOINT=http://host.docker.internal:8080", "SCION_HUB_URL=http://host.docker.internal:8080"}},
-		{name: "docker host.docker.internal native", runtime: "docker", env: []string{"SCION_HUB_ENDPOINT=http://host.docker.internal:8080"}},
-		{name: "docker alias mixed case", runtime: "docker", env: []string{"SCION_HUB_ENDPOINT=http://Host.Docker.Internal:8080"}},
+		{name: "docker alias mixed case mapped", runtime: "docker", extraHosts: []string{"host.docker.internal:host-gateway"},
+			env: []string{"SCION_HUB_ENDPOINT=http://Host.Docker.Internal:8080"}},
+		{name: "docker alias mapped with mixed-case entry", runtime: "docker", extraHosts: []string{"Host.Docker.Internal:Host-Gateway"},
+			env: []string{"SCION_HUB_ENDPOINT=http://host.docker.internal:8080"}},
 		{name: "docker scion-hub.internal mapped", runtime: "docker", extraHosts: hostGateway, env: []string{"SCION_HUB_ENDPOINT=http://scion-hub.internal:8080"}},
 		{name: "podman host.containers.internal", runtime: "podman", env: []string{"SCION_HUB_ENDPOINT=http://host.containers.internal:8080"}},
 		{name: "apple host.containers.internal", runtime: "container", env: []string{"SCION_HUB_ENDPOINT=http://host.containers.internal:8080"}},
 		{name: "cloudrun-sandbox link-local", runtime: "cloudrun-sandbox", env: []string{"SCION_HUB_ENDPOINT=http://169.254.1.2:8080"}},
-		{name: "docker ws alias", runtime: "docker", env: []string{"SCION_HUB_ENDPOINT=ws://host.docker.internal:8080"}},
+		{name: "docker ws alias", runtime: "docker", extraHosts: []string{"host.docker.internal:host-gateway"},
+			env: []string{"SCION_HUB_ENDPOINT=ws://host.docker.internal:8080"}},
 
 		// Refused: network-exposed runtimes.
 		{name: "kubernetes in-cluster http", runtime: "kubernetes", env: []string{"SCION_HUB_ENDPOINT=http://scion-hub.scion.svc.cluster.local:8080"}, wantErr: true},
@@ -70,6 +73,14 @@ func TestCheckAgentHubTransport(t *testing.T) {
 		{name: "docker IP mapped to host-gateway", runtime: "docker", extraHosts: []string{"10.0.0.5:host-gateway"}, env: []string{"SCION_HUB_ENDPOINT=http://10.0.0.5:8080"}, wantErr: true},
 		{name: "docker domain mapped to host-gateway", runtime: "docker", extraHosts: []string{"hub.example.com:host-gateway"}, env: []string{"SCION_HUB_ENDPOINT=http://hub.example.com"}, wantErr: true},
 		{name: "docker link-local", runtime: "docker", env: []string{"SCION_HUB_ENDPOINT=http://169.254.1.2:8080"}, wantErr: true},
+		{name: "docker host.docker.internal unmapped", runtime: "docker", env: []string{"SCION_HUB_ENDPOINT=http://host.docker.internal:8080"}, wantErr: true},
+		{name: "docker alias mixed case unmapped", runtime: "docker", env: []string{"SCION_HUB_ENDPOINT=http://Host.Docker.Internal:8080"}, wantErr: true},
+		{name: "docker alias trailing dot mapped", runtime: "docker", extraHosts: []string{"host.docker.internal:host-gateway"},
+			env: []string{"SCION_HUB_ENDPOINT=http://host.docker.internal.:8080"}, wantErr: true},
+		{name: "docker alias trailing dot with trailing-dot entry", runtime: "docker", extraHosts: []string{"host.docker.internal.:host-gateway"},
+			env: []string{"SCION_HUB_ENDPOINT=http://host.docker.internal.:8080"}, wantErr: true},
+		{name: "podman alias trailing dot", runtime: "podman", env: []string{"SCION_HUB_ENDPOINT=http://host.containers.internal.:8080"}, wantErr: true},
+		{name: "apple alias trailing dot", runtime: "container", env: []string{"SCION_HUB_ENDPOINT=http://host.containers.internal.:8080"}, wantErr: true},
 		{name: "docker scion-hub.internal unmapped", runtime: "docker", env: []string{"SCION_HUB_ENDPOINT=http://scion-hub.internal:8080"}, wantErr: true},
 		{name: "docker scion-hub.internal mapped to IP", runtime: "docker", extraHosts: []string{"scion-hub.internal:10.0.0.5"}, env: []string{"SCION_HUB_ENDPOINT=http://scion-hub.internal:8080"}, wantErr: true},
 		{name: "docker alias mapped to IP", runtime: "docker", extraHosts: []string{"host.docker.internal:10.0.0.5"}, env: []string{"SCION_HUB_ENDPOINT=http://host.docker.internal:8080"}, wantErr: true},
@@ -114,6 +125,9 @@ func TestCheckAgentHubTransport(t *testing.T) {
 			if !strings.Contains(err.Error(), `"`+tt.runtime+`" runtime`) {
 				t.Errorf("error %q does not name the runtime", err)
 			}
+			if !strings.Contains(err.Error(), agentHubTransportFix) {
+				t.Errorf("error %q does not name the remedy", err)
+			}
 		})
 	}
 }
@@ -133,6 +147,36 @@ func TestCheckAgentHubTransportRedactsCredentials(t *testing.T) {
 		if !strings.Contains(err.Error(), "SCION_HUB_ENDPOINT") {
 			t.Errorf("refusal %q does not name the env key", err)
 		}
+	}
+}
+
+// TestAppleAliasesNeedNoMapping pins that no Apple container alias requires
+// a host-gateway mapping: Apple drops --add-host, so such an alias could
+// never be accepted.
+func TestAppleAliasesNeedNoMapping(t *testing.T) {
+	for _, a := range hostLocalAliasesByRuntime["container"] {
+		if a.requiresMapping {
+			t.Errorf("Apple container alias %q requires a mapping", a.name)
+		}
+	}
+}
+
+// TestCheckAgentHubTransportPlaintextMessage pins the refusal text for a
+// plaintext endpoint: it names the redacted URL, the scheme and the host,
+// and gives one remedy.
+func TestCheckAgentHubTransportPlaintextMessage(t *testing.T) {
+	err := checkAgentHubTransport("a1", "kubernetes", nil, []string{"SCION_HUB_URL=http://scion-hub:8080"})
+	if err == nil {
+		t.Fatal("accepted, want a refusal")
+	}
+	msg := err.Error()
+	for _, want := range []string{`cannot start agent "a1"`, "SCION_HUB_URL", "http://scion-hub:8080", `uses http to host "scion-hub"`, "neither a loopback address nor a host alias", agentHubTransportFix} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("refusal %q does not contain %q", msg, want)
+		}
+	}
+	if strings.Contains(msg, "SSH port forward") {
+		t.Errorf("refusal %q carries the broker-channel remedy text", msg)
 	}
 }
 

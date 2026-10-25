@@ -106,6 +106,11 @@ func TestStart_HubTransportRefusesLocalRuntimeNetworkHost(t *testing.T) {
 		{"podman", "http://172.17.0.1:8080"},
 		{"container", "http://192.168.64.1:8080"},
 		{"cloudrun-sandbox", "http://10.1.2.3:8080"},
+		// A non-canonical spelling of the Docker alias gets neither host
+		// networking nor the host-gateway entry (both match the canonical
+		// lower-case name only), so it would go to the container's DNS.
+		{"docker", "http://Host.Docker.Internal:8080"},
+		{"docker", "http://host.docker.internal.:8080"},
 	} {
 		t.Run(tc.runtime+" "+tc.endpoint, func(t *testing.T) {
 			cfg, err := startHubTransportFixture(t, tc.runtime, tc.endpoint, "", "", nil)
