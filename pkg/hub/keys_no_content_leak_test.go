@@ -101,7 +101,7 @@ func TestExecuteKeys_NoContentLeak_HTTP(t *testing.T) {
 			signer:     failingSigner{},
 			debug:      true,
 		}}
-		_, err := client.ExecuteKeys(context.Background(), "broker-1", "http://example.invalid", "test-agent", sentinelKeysRequest())
+		_, err := client.ExecuteKeys(context.Background(), "broker-1", stubBrokerEndpoint, "test-agent", sentinelKeysRequest())
 		assertNoSentinelLeak(t, err, log, agentkeys.OutcomeKeysUnavailable)
 		// A signing failure is proven pre-send: the request never reaches
 		// keysClient.Do, so the pre-send debug line must NOT appear either.

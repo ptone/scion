@@ -462,7 +462,7 @@ func TestBrokerHTTPTransport_ExecuteKeys_ClearsGetBody(t *testing.T) {
 		keysClient: &http.Client{Transport: spy},
 	}
 
-	_, err := transport.ExecuteKeys(context.Background(), "broker-1", "http://example.invalid", "test-agent", agentkeys.BrokerRequest{OperationID: "op-1", ExecuteBefore: time.Now().Add(time.Minute)})
+	_, err := transport.ExecuteKeys(context.Background(), "broker-1", stubBrokerEndpoint, "test-agent", agentkeys.BrokerRequest{OperationID: "op-1", ExecuteBefore: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatalf("ExecuteKeys failed: %v", err)
 	}
@@ -510,7 +510,7 @@ func TestBrokerHTTPTransport_ExecuteKeys_ClearsGetBodyOnSignedPath(t *testing.T)
 		signer:     signer,
 	}
 
-	_, err := transport.ExecuteKeys(context.Background(), "broker-1", "http://example.invalid", "test-agent", agentkeys.BrokerRequest{OperationID: "op-1", ExecuteBefore: time.Now().Add(time.Minute)})
+	_, err := transport.ExecuteKeys(context.Background(), "broker-1", stubBrokerEndpoint, "test-agent", agentkeys.BrokerRequest{OperationID: "op-1", ExecuteBefore: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatalf("ExecuteKeys failed: %v", err)
 	}
@@ -537,7 +537,7 @@ func TestBrokerHTTPTransport_ExecuteKeys_SignerFailureIsNotDispatched(t *testing
 		signer:     failingSigner{},
 	}
 
-	_, err := transport.ExecuteKeys(context.Background(), "broker-1", "http://example.invalid", "test-agent", agentkeys.BrokerRequest{ExecuteBefore: time.Now().Add(time.Minute)})
+	_, err := transport.ExecuteKeys(context.Background(), "broker-1", stubBrokerEndpoint, "test-agent", agentkeys.BrokerRequest{ExecuteBefore: time.Now().Add(time.Minute)})
 	if !errors.Is(err, agentkeys.ErrNotDispatched) {
 		t.Fatalf("expected agentkeys.ErrNotDispatched, got %v", err)
 	}
@@ -558,7 +558,7 @@ func TestHTTPRuntimeBrokerClient_ExecuteKeys_PendingDialIsNotDispatched(t *testi
 		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 		defer cancel()
 
-		_, err := client.ExecuteKeys(ctx, tid("broker-1"), "http://broker.invalid:9800", "test-agent", agentkeys.BrokerRequest{OperationID: "op-1", ExecuteBefore: time.Now().Add(time.Minute)})
+		_, err := client.ExecuteKeys(ctx, tid("broker-1"), stubBrokerEndpoint, "test-agent", agentkeys.BrokerRequest{OperationID: "op-1", ExecuteBefore: time.Now().Add(time.Minute)})
 		if !errors.Is(err, agentkeys.ErrNotDispatched) {
 			t.Fatalf("expected agentkeys.ErrNotDispatched, got %v", err)
 		}
@@ -573,7 +573,7 @@ func TestHTTPRuntimeBrokerClient_ExecuteKeys_PendingDialIsNotDispatched(t *testi
 	t.Run("client timeout", func(t *testing.T) {
 		client, dials := pendingDialKeysClient(t, 200*time.Millisecond)
 
-		_, err := client.ExecuteKeys(context.Background(), tid("broker-1"), "http://broker.invalid:9800", "test-agent", agentkeys.BrokerRequest{OperationID: "op-1", ExecuteBefore: time.Now().Add(time.Minute)})
+		_, err := client.ExecuteKeys(context.Background(), tid("broker-1"), stubBrokerEndpoint, "test-agent", agentkeys.BrokerRequest{OperationID: "op-1", ExecuteBefore: time.Now().Add(time.Minute)})
 		if !errors.Is(err, agentkeys.ErrNotDispatched) {
 			t.Fatalf("expected agentkeys.ErrNotDispatched, got %v", err)
 		}
