@@ -17,6 +17,7 @@ package runtimebroker
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
@@ -27,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
@@ -133,6 +135,21 @@ func firstRequest(t *testing.T, client hubclient.Client, seen func() []recordedR
 		t.Fatal("the hub received no request")
 	}
 	return got[0]
+}
+
+// refusedPlaintextRemote reports whether a hub connection to a non-loopback
+// http hub was refused by the transport rule (config.CheckHubTransport)
+// before anything was sent; such a hub never sees the dev token, or any
+// other credential.
+func refusedPlaintextRemote(t *testing.T, label string, err error, seen func() []recordedRequest) bool {
+	t.Helper()
+	if !errors.Is(err, config.ErrPlaintextNonLoopback) {
+		return false
+	}
+	if got := seen(); len(got) != 0 {
+		t.Errorf("%s: refused connection, but the hub received %+v", label, got)
+	}
+	return true
 }
 
 // isLocalhostEndpoint is the rule for the broker's dev token. These are the
@@ -256,6 +273,13 @@ func TestCreateHubConnectionFromConfig_DevTokenOnlyForLoopbackHub(t *testing.T) 
 		endpoint := hubURLAs(t, srv, tc.host)
 		s := &Server{config: ServerConfig{HubEndpoint: endpoint, HubToken: tc.hubToken}}
 		conn, err := s.createHubConnectionFromConfig()
+		if tc.host == "hub.example.test" {
+			// A plaintext network hub is refused outright.
+			if !refusedPlaintextRemote(t, endpoint, err, seen) {
+				t.Errorf("hub %s: error = %v, want the transport refusal", endpoint, err)
+			}
+			continue
+		}
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -299,6 +323,13 @@ func TestCreateHubConnection_DevTokenOnlyForLoopbackHub(t *testing.T) {
 			s.config.HubEndpoint = hubURLAs(t, srv, tc.configHost)
 		}
 		conn, err := s.createHubConnection(tc.name, creds)
+		if tc.credsHost == "hub.example.test" || (tc.credsHost == "" && tc.configHost == "hub.example.test") {
+			// The dialed hub is a plaintext network hub: refused outright.
+			if !refusedPlaintextRemote(t, tc.name, err, seen) {
+				t.Errorf("%s: error = %v, want the transport refusal", tc.name, err)
+			}
+			continue
+		}
 		if err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
@@ -331,6 +362,12 @@ func TestCreateHubConnectionFromConfig_DevHubTokenOnlyForLoopbackHub(t *testing.
 		srv, seen := devAuthTestHub(t)
 		s := &Server{config: ServerConfig{HubEndpoint: hubURLAs(t, srv, tc.host), HubToken: tc.hubToken}}
 		conn, err := s.createHubConnectionFromConfig()
+		if tc.host == "hub.example.test" {
+			if !refusedPlaintextRemote(t, tc.name, err, seen) {
+				t.Errorf("%s: error = %v, want the transport refusal", tc.name, err)
+			}
+			continue
+		}
 		if err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
@@ -343,8 +380,10 @@ func TestCreateHubConnectionFromConfig_DevHubTokenOnlyForLoopbackHub(t *testing.
 	if strings.Contains(out, testDevToken) {
 		t.Errorf("logs contain the dev token:\n%s", out)
 	}
-	if n := strings.Count(out, "the dev token is used only for a local hub; it is not sent"); n != 1 {
-		t.Errorf("not-sent log line appeared %d times, want 1 (the remote dev case):\n%s", n, out)
+	// The remote cases are refused by the transport rule before the dev
+	// token decision, so the not-sent line is not logged for them.
+	if n := strings.Count(out, "the dev token is used only for a local hub; it is not sent"); n != 0 {
+		t.Errorf("not-sent log line appeared %d times, want 0 (remote plaintext hubs are refused first):\n%s", n, out)
 	}
 }
 
@@ -366,6 +405,12 @@ func TestCreateHubConnectionFromConfig_PrefixedHubTokenOnlyForLoopbackHub(t *tes
 		srv, seen := devAuthTestHub(t)
 		s := &Server{config: ServerConfig{HubEndpoint: hubURLAs(t, srv, tc.host), HubToken: tok}}
 		conn, err := s.createHubConnectionFromConfig()
+		if tc.host == "hub.example.test" {
+			if !refusedPlaintextRemote(t, tc.name, err, seen) {
+				t.Errorf("%s: error = %v, want the transport refusal", tc.name, err)
+			}
+			continue
+		}
 		if err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
