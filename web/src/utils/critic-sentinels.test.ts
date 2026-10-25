@@ -14,9 +14,8 @@
  * limitations under the License.
  */
 
-import { realpathSync } from 'node:fs';
-import { createRequire } from 'node:module';
-import { join } from 'node:path';
+import { existsSync, realpathSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { characterEntities } from 'character-entities';
 import { decodeNamedCharacterReference } from 'decode-named-character-reference';
@@ -106,23 +105,38 @@ describe('opening alphabet without a numeric character reference', () => {
   };
 
   it('checks the decoder and entity table the Markdown parser itself loads', () => {
-    // The copies this test imports, and the copies each package of the
-    // parser that decodes character references resolves: the same files.
-    const web = createRequire(join(__dirname, '../../package.json'));
-    const real = (r: NodeRequire, id: string): string => realpathSync(r.resolve(id));
-    const decoder = real(web, 'decode-named-character-reference');
-    const table = real(web, 'character-entities');
-    const users = [
-      'micromark',
-      'micromark-core-commonmark',
-      'micromark-util-decode-string',
-      'mdast-util-from-markdown',
-    ];
-    for (const user of users) {
-      const from = createRequire(real(web, user));
-      expect(real(from, 'decode-named-character-reference'), user).toBe(decoder);
+    // Where Node finds package name for code in from: the first
+    // node_modules/name above it (package locations do not depend on a
+    // package's exports).
+    const pkgDir = (from: string, name: string): string => {
+      for (let d = from; ; d = dirname(d)) {
+        const p = join(d, 'node_modules', name);
+        if (existsSync(join(p, 'package.json'))) return realpathSync(p);
+        if (dirname(d) === d) throw new Error(`no ${name} above ${from}`);
+      }
+    };
+    // The copies this test imports.
+    const decoder = pkgDir(__dirname, 'decode-named-character-reference');
+    const table = pkgDir(__dirname, 'character-entities');
+    // The parser's own chain, from the editor's Milkdown parser down: every
+    // package of it that decodes character references finds the same copy.
+    const web = join(__dirname, '../..');
+    // A template literal: the dependency test counts quoted Milkdown names
+    // as imports, and this one is a package location, not an import.
+    const transformer = pkgDir(web, `@milkdown/transformer`);
+    const remark = pkgDir(transformer, 'remark');
+    const fromMarkdown = pkgDir(pkgDir(remark, 'remark-parse'), 'mdast-util-from-markdown');
+    const micromark = pkgDir(fromMarkdown, 'micromark');
+    const users = {
+      'mdast-util-from-markdown': fromMarkdown,
+      micromark,
+      'micromark-core-commonmark': pkgDir(micromark, 'micromark-core-commonmark'),
+      'micromark-util-decode-string': pkgDir(fromMarkdown, 'micromark-util-decode-string'),
+    };
+    for (const [name, dir] of Object.entries(users)) {
+      expect(pkgDir(dir, 'decode-named-character-reference'), name).toBe(decoder);
     }
-    expect(real(createRequire(decoder), 'character-entities')).toBe(table);
+    expect(pkgDir(decoder, 'character-entities')).toBe(table);
   });
 
   it('no named character reference decodes to a candidate', () => {

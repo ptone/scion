@@ -434,6 +434,8 @@ export class ScionPageArtifactDetail extends LitElement {
   private largeConfirmed = false;
   /** Counts reviews started, so a size worked out for an earlier one is dropped. */
   private reviewRuns = 0;
+  /** A choice of the graphical view is being sized or confirmed (one at a time). */
+  private choosingGraphical = false;
   /** The hint shown under the toolbar of the graphical review page. */
   @state() private graphicalHint: ReviewHint | null = null;
   private hintTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1213,50 +1215,62 @@ export class ScionPageArtifactDetail extends LitElement {
       this.setReviewView(next);
       return;
     }
+    // One choice at a time: another click while this one is sized or
+    // confirmed does nothing (no second confirmation).
+    if (this.choosingGraphical) return;
+    this.choosingGraphical = true;
+    void this.chooseGraphical().finally(() => {
+      this.choosingGraphical = false;
+    });
+  }
+
+  /** chooseReviewView('graphical'), sized by the current text. */
+  private async chooseGraphical(): Promise<void> {
     const run = this.reviewRuns;
-    const text = this.reviewText;
-    // Bytes first, without waiting: over the ceiling nothing else matters.
-    if (new TextEncoder().encode(text).length > MAX_GRAPHICAL_BYTES) {
-      this.reviewSize = 'too-large';
-      this.showHint('too-large');
-      return;
-    }
-    void reviewSize(text).then((size) => {
-      if (run !== this.reviewRuns || !this.reviewing) return;
-      // Edited while it was being sized: size the text as it is now.
-      if (this.reviewText !== text) {
-        this.chooseReviewView('graphical');
+    for (;;) {
+      const text = this.reviewText;
+      // Bytes first, without waiting: over the ceiling nothing else matters.
+      if (new TextEncoder().encode(text).length > MAX_GRAPHICAL_BYTES) {
+        this.reviewSize = 'too-large';
+        this.showHint('too-large');
         return;
       }
+      const size = await reviewSize(text);
+      if (run !== this.reviewRuns || !this.reviewing) return;
+      // Edited while it was being sized: size the text as it is now.
+      if (this.reviewText !== text) continue;
       this.reviewSize = size;
       if (size === 'too-large') {
         this.showHint('too-large');
         return;
       }
       if (size === 'large' && !this.largeConfirmed) {
-        void showConfirm(LARGE_REVIEW_CONFIRM, {
+        const ok = await showConfirm(LARGE_REVIEW_CONFIRM, {
           title: 'Large document',
           confirmText: 'Open graphical view',
           variant: 'primary',
-        }).then((ok) => {
-          if (!ok || run !== this.reviewRuns || !this.reviewing) return;
-          this.largeConfirmed = true;
-          this.setReviewView('graphical');
         });
-        return;
+        if (!ok || run !== this.reviewRuns || !this.reviewing) return;
+        // Edited while the question was open: size it again.
+        if (this.reviewText !== text) continue;
+        this.largeConfirmed = true;
       }
       this.setReviewView('graphical');
-    });
+      return;
+    }
   }
 
   /**
-   * Sizes the text as it is now, so the toggle reflects it (disabled over
-   * the ceiling); the view and the hints are left as they are.
+   * After a pause in typing in the Source view: the toggle follows the
+   * byte ceiling (disabled over it). Bytes only, so typing in a large
+   * document never waits for a block count; blocks are counted when the
+   * graphical view is chosen. The view and the hints are left as they are.
    */
-  private async refreshReviewSize(text: string, run: number): Promise<void> {
-    const size = await reviewSize(text);
-    if (run !== this.reviewRuns || !this.reviewing || this.reviewText !== text) return;
-    this.reviewSize = size;
+  private refreshReviewSize(text: string): void {
+    const bytes = new TextEncoder().encode(text).length;
+    if (bytes > MAX_GRAPHICAL_BYTES) this.reviewSize = 'too-large';
+    else if (this.reviewSize === 'too-large')
+      this.reviewSize = bytes > LARGE_REVIEW_BYTES ? 'large' : 'normal';
   }
 
   /** The graphical review page is on (experiment web.artifact_review_editor). */
@@ -1413,6 +1427,13 @@ export class ScionPageArtifactDetail extends LitElement {
     this.expandedGaps = new Set();
     this.versionsNext = 0;
     this.clearPreviewTimer();
+    // A size or confirmation still pending is for the text being
+    // discarded: drop it, and keep the graphical editor hidden until the
+    // reloaded text is sized.
+    if (this.reviewGraphical) {
+      this.reviewRuns++;
+      this.reviewSize = null;
+    }
     await this.load();
     if (!this.reviewing) return;
     // discarded is the buffer of the review just refused. After a second
@@ -1481,7 +1502,7 @@ export class ScionPageArtifactDetail extends LitElement {
     this.previewTimer = setTimeout(() => {
       this.previewTimer = null;
       this.reviewPreview = this.reviewText;
-      if (this.reviewGraphical) void this.refreshReviewSize(this.reviewText, this.reviewRuns);
+      if (this.reviewGraphical) this.refreshReviewSize(this.reviewText);
     }, REVIEW_PREVIEW_DELAY_MS);
   }
 

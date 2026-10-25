@@ -46,6 +46,20 @@ vi.mock('../shared/confirm-dialog.js', () => ({
     return Promise.resolve(confirm.answer);
   },
 }));
+/** The block count: real, or held until released (to act while a size is pending). */
+const blocks = vi.hoisted(() => ({ defer: false, pending: [] as (() => void)[] }));
+vi.mock('../../utils/markdown-blocks.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../../utils/markdown-blocks.js')>();
+  return {
+    countTopLevelBlocks: (md: string): Promise<number> =>
+      blocks.defer
+        ? // Counted now, handed over when released.
+          real
+            .countTopLevelBlocks(md)
+            .then((n) => new Promise<number>((r) => blocks.pending.push(() => r(n))))
+        : real.countTopLevelBlocks(md),
+  };
+});
 vi.mock('../artifact-review/review-editor-loader.js', () => ({
   loadReviewEditor: loader.load,
   preloadReviewEditor: loader.preload,
@@ -56,6 +70,7 @@ const ID = '5f1c2d3e-0000-4000-8000-000000000002';
 let LARGE_REVIEW_BYTES = 0;
 let LARGE_REVIEW_BLOCKS = 0;
 let MAX_GRAPHICAL_BYTES = 0;
+let MAX_GRAPHICAL_BLOCKS = 0;
 const TEXT = 'We ship in Q3.\n';
 
 /** Stand-in for <scion-review-editor>: records calls, returns a set text. */
@@ -196,7 +211,7 @@ describe('artifact page: graphical review editor experiment', () => {
       window as unknown as { happyDOM?: { settings: { disableIframePageLoading: boolean } } }
     ).happyDOM;
     if (hd) hd.settings.disableIframePageLoading = true;
-    ({ LARGE_REVIEW_BYTES, LARGE_REVIEW_BLOCKS, MAX_GRAPHICAL_BYTES } =
+    ({ LARGE_REVIEW_BYTES, LARGE_REVIEW_BLOCKS, MAX_GRAPHICAL_BYTES, MAX_GRAPHICAL_BLOCKS } =
       await import('./artifact-detail.js'));
   }, 30_000);
 
@@ -208,6 +223,8 @@ describe('artifact page: graphical review editor experiment', () => {
     confirm.asked.length = 0;
     confirm.answer = true;
     confirm.defer = false;
+    blocks.defer = false;
+    blocks.pending.length = 0;
   });
 
   afterEach(() => {
@@ -465,6 +482,145 @@ describe('artifact page: graphical review editor experiment', () => {
     expect(loader.load).not.toHaveBeenCalled();
     expect($(el, 'scion-review-editor')).toBeNull();
     expect($(el, '.g-work scion-code-editor.review-editor')).not.toBeNull();
+  });
+
+  /** Lets every held block count finish, one at a time. */
+  const releaseBlocks = async (el: ScionPageArtifactDetail): Promise<void> => {
+    blocks.defer = false;
+    while (blocks.pending.length) {
+      blocks.pending.shift()!();
+      await settle(el);
+    }
+  };
+
+  it('two quick choices of the graphical view ask once', async () => {
+    mockFetch('é'.repeat(LARGE_REVIEW_BYTES / 2) + 'a');
+    const el = await mount(true);
+    await startReview(el);
+    blocks.defer = true;
+    await chooseView(el, 'graphical');
+    await chooseView(el, 'graphical');
+    // Both counts finish together (one would be the second choice's).
+    blocks.defer = false;
+    for (const f of blocks.pending.splice(0)) f();
+    await settle(el);
+    expect(confirm.asked.length).toBe(1);
+    expect(loader.load).toHaveBeenCalledTimes(1);
+  });
+
+  it('text edited while it is sized is sized again', async () => {
+    window.localStorage.setItem('scion:artifact-review-view', 'source');
+    mockFetch();
+    const el = await mount(true);
+    await startReview(el);
+    blocks.defer = true;
+    await chooseView(el, 'graphical');
+    // While the small text is sized, it grows past the soft limit.
+    await typeSource(el, TEXT + '{++' + 'x'.repeat(LARGE_REVIEW_BYTES) + '++}');
+    confirm.answer = false;
+    await releaseBlocks(el);
+    expect(confirm.asked.length).toBe(1);
+    expect(loader.load).not.toHaveBeenCalled();
+    expect($(el, '.g-work scion-code-editor.review-editor')).not.toBeNull();
+  });
+
+  it('over the block ceiling with few bytes, the graphical view does not open when chosen', async () => {
+    window.localStorage.setItem('scion:artifact-review-view', 'source');
+    mockFetch();
+    const el = await mount(true);
+    await startReview(el);
+    const many = 'p\n\n'.repeat(MAX_GRAPHICAL_BLOCKS + 1);
+    expect(new TextEncoder().encode(many).length).toBeLessThan(LARGE_REVIEW_BYTES);
+    await typeSource(el, many);
+    // Typing pauses look at bytes only: the toggle stays enabled.
+    await previewPause();
+    await settle(el);
+    expect($(el, 'sl-radio-button[value="graphical"]')!.hasAttribute('disabled')).toBe(false);
+    // Choosing counts the blocks.
+    await chooseView(el, 'graphical');
+    expect(confirm.asked).toEqual([]);
+    expect(loader.load).not.toHaveBeenCalled();
+    expect($(el, '.hint-strip')!.textContent).toContain(
+      'This document is too large for the graphical view.'
+    );
+    expect($(el, 'sl-radio-button[value="graphical"]')!.hasAttribute('disabled')).toBe(true);
+  });
+
+  it('text changed while the confirmation is open is sized again before anything opens', async () => {
+    window.localStorage.setItem('scion:artifact-review-view', 'source');
+    mockFetch();
+    const el = await mount(true);
+    await startReview(el);
+    await typeSource(el, TEXT + '{++' + 'x'.repeat(LARGE_REVIEW_BYTES) + '++}');
+    confirm.defer = true;
+    await chooseView(el, 'graphical');
+    expect(confirm.asked.length).toBe(1);
+    // While the question is open the text grows past the ceiling.
+    await typeSource(el, TEXT + '{++' + 'x'.repeat(MAX_GRAPHICAL_BYTES) + '++}');
+    confirm.release(true);
+    await settle(el);
+    expect(loader.load).not.toHaveBeenCalled();
+    expect($(el, 'scion-review-editor')).toBeNull();
+    expect($(el, '.hint-strip')!.textContent).toContain(
+      'This document is too large for the graphical view.'
+    );
+  });
+
+  it('a choice still being sized when a stale review restarts opens nothing', async () => {
+    window.localStorage.setItem('scion:artifact-review-view', 'source');
+    let body = TEXT;
+    let reloading = false;
+    const large = 'é'.repeat(LARGE_REVIEW_BYTES / 2) + 'a';
+    mockFetch(TEXT, {
+      // While the reload fetches the new text, the pending choice's block
+      // count finishes: it must not open the graphical view on the text
+      // being discarded.
+      body: () => {
+        if (reloading) {
+          reloading = false;
+          blocks.defer = false;
+          for (const f of blocks.pending.splice(0)) f();
+        }
+        return body;
+      },
+      write: (method, url, m) => {
+        if (url.endsWith('/finalize')) {
+          body = large;
+          reloading = true;
+          return new Response(
+            JSON.stringify({ error: { code: 'stale_review', message: 'stale' } }),
+            { status: 409 }
+          );
+        }
+        if (method === 'PUT') return new Response(null, { status: 204 });
+        return new Response(
+          JSON.stringify({
+            artifact: m.artifact,
+            version: { seq: 2 },
+            upload: { required: ['plan.md'] },
+          }),
+          { status: 201 }
+        );
+      },
+    });
+    const el = await mount(true);
+    await startReview(el);
+    await typeSource(el, 'We {++really ++}ship in Q3.\n');
+    blocks.defer = true;
+    await chooseView(el, 'graphical');
+    byText(el, '.edit-footer sl-button', 'Save review')!.click();
+    await settle(el, 40);
+    expect(writes.some((w) => w.endsWith('/finalize'))).toBe(true);
+    await releaseBlocks(el);
+    // The pending choice was for the discarded text: nothing opened; the
+    // reloaded text is sized on its own (large: the Source view).
+    expect(loader.load).not.toHaveBeenCalled();
+    expect($(el, 'scion-review-editor')).toBeNull();
+    const code = $<HTMLElement & { content: string }>(
+      el,
+      '.g-work scion-code-editor.review-editor'
+    )!;
+    expect(code.content).toBe(large);
   });
 
   it('a review restarted on a larger current version is sized again', async () => {
