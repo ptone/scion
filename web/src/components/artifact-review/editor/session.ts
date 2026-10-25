@@ -94,6 +94,17 @@ export class ReviewSession {
    * pair across the blocks) holds a backtick (see changesCode).
    */
   private codeNeighbours: boolean[] = [];
+  /**
+   * Whether the opening text holds a literal opener (attribute-held tokens
+   * included) or a backtick shared across the blocks of a line run: then
+   * an edit can change how tokens pair across units, which the per-unit
+   * checks cannot see, and unitCheck also runs the whole-text check
+   * (design E7). Suggest mode cannot create either, so it is set once per
+   * load; when unsure, it is true.
+   */
+  private hazardous = true;
+  /** The clean reading of the opening text, as the hub compares it. */
+  private cleanSource = '';
 
   constructor(private readonly core: Core) {}
 
@@ -145,6 +156,13 @@ export class ReviewSession {
     this.literalOpeners = literalOpeners(md);
     this.definitions = definitionsOf(md, this.core.parseMdRaw);
     this.codeNeighbours = this.baseline ? codeNeighbours(this.baseline) : [];
+    this.hazardous =
+      !this.baseline ||
+      this.literalOpeners.size > 0 ||
+      held.size > 0 ||
+      readOnly.size > 0 ||
+      this.codeNeighbours.some((x) => x);
+    this.cleanSource = normalizeCritic(projectCritic(md, 'clean'));
     this.dirty = false;
     return true;
   }
@@ -256,8 +274,43 @@ export class ReviewSession {
     // a mark's closing token).
     if (!this.reopens(md)) return 'generic';
     const runs = docMarkRuns(unit);
-    if (earlierKept(this.earlierOf(i, j), md, runs)) return null;
-    return earlierKept(this.earlierOf(i, j, false), md, runs, false) ? 'moved' : 'generic';
+    if (!earlierKept(this.earlierOf(i, j), md, runs)) {
+      return earlierKept(this.earlierOf(i, j, false), md, runs, false) ? 'moved' : 'generic';
+    }
+    if (this.hazardous && !this.wholeTextOk(doc)) return 'generic';
+    return null;
+  }
+
+  /**
+   * Design E7: whether the text save would write for doc reads, as a
+   * whole, as the hub reads it: the same clean text as the opening text,
+   * and the critic parser's mark kinds over the whole text equal to the
+   * document's (the tokens kept as text in read-only units aside). Save
+   * checks the mark texts too.
+   */
+  private wholeTextOk(doc: Node): boolean {
+    const { schema, serialize } = this.core;
+    const r = savePreserving(
+      doc,
+      this.baseline,
+      serialize,
+      schema,
+      this.parseInDocument,
+      this.readOnly
+    );
+    if (!r) return false;
+    if (normalizeCritic(projectCritic(r.md, 'clean')) !== this.cleanSource) return false;
+    const held = this.heldIn(r.units);
+    const kinds = parseCritic(r.md)
+      .filter((x) => x.kind !== 'text' && !held.has(x.start))
+      .map((x) => x.kind);
+    const want = docMarkRuns(doc).map((x) => x.kind);
+    return kinds.length === want.length && kinds.every((k, n) => k === want[n]);
+  }
+
+  /** Whether the opened text is hazardous (design E7): the per-edit whole-text check runs. */
+  get isHazardous(): boolean {
+    return this.hazardous;
   }
 
   /** Whether md opens in the editor (the load checks, without showing it). */

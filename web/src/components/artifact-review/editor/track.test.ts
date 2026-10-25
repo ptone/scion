@@ -427,6 +427,43 @@ describe('refused edits in suggest mode', () => {
     expect(text(l.c)).toBe(list);
   });
 
+  it('refuses breaking a closer that a literal replacement opener does not reach yet', async () => {
+    // {~~ has a ~~} in block 1 with no ~> between them; typing inside that
+    // ~~} lets the {~~ reach the ~> and ~~} of block 2.
+    const md = 'Use {~~ to start.\n\nMid ~~} here.\n\nThen ~> and ~~} end.\n';
+    const { c, hints } = await open(md);
+    type(c, 'X', posOf(c, '~~}', 2));
+    expect(hints).toEqual(['generic']);
+    expect(text(c)).toBe(md);
+    // The same in the opener's own block.
+    const own = 'Use {~~ to ~~} start.\n\nThen ~> and ~~} end.\n';
+    const o = await open(own);
+    type(o.c, 'X', posOf(o.c, '~~}', 2));
+    expect(o.hints).toEqual(['generic']);
+    expect(text(o.c)).toBe(own);
+    // Positive control: other text in block 1 is taken.
+    type(c, 'Y', posOf(c, 'here'));
+    expect(text(c)).toBe('Use {~~ to start.\n\nMid ~~} {++Y++}here.\n\nThen ~> and ~~} end.\n');
+  });
+
+  it('takes a separator typed in a block wholly before a literal replacement opener', async () => {
+    const md = 'Some text here.\n\nUse {~~ to start.\n\nAnd ~~} to end.\n';
+    const { c, hints } = await open(md);
+    type(c, '~>', posOf(c, 'text'));
+    expect(hints).toEqual([]);
+    expect(text(c)).toBe('Some {++\\~>++}text here.\n\nUse {~~ to start.\n\nAnd ~~} to end.\n');
+  });
+
+  it('refuses an edit that turns a line into something that looks like a fence', async () => {
+    // The first line looks like a fence opener (the backtick in its info
+    // string makes it text): an edit before it changes the fence-line count.
+    const md = '``` a`b\n{++x++}\n';
+    const { c, hints } = await open(md);
+    type(c, 'X', 1);
+    expect(hints).toEqual(['code-run']);
+    expect(text(c)).toBe(md);
+  });
+
   it('refuses a backtick typed next to a link definition whose title holds one', async () => {
     // The definition's title is in the same lines as the paragraph: the
     // critic parser would pair its backtick with a typed one.
@@ -460,6 +497,14 @@ describe('refused edits in suggest mode', () => {
     const out = text(c);
     expect(onlyMarksChanged(out, projectCritic(md, 'clean'))).toBe(true);
     expect(parseCritic(out).filter((x) => x.kind === 'insertion')).toHaveLength(2);
+    // Two backticks at a time, too.
+    const two = await open(md);
+    type(two.c, '``', posOf(two.c, 'a key'));
+    type(two.c, '``', posOf(two.c, 'two'));
+    expect(two.hints).toEqual([]);
+    const out2 = text(two.c);
+    expect(onlyMarksChanged(out2, projectCritic(md, 'clean'))).toBe(true);
+    expect(parseCritic(out2).filter((x) => x.kind === 'insertion')).toHaveLength(2);
   });
 
   it('refuses a backtick typed above a table row holding a lone backtick', async () => {
@@ -1217,6 +1262,89 @@ describe('preset plugins', () => {
       if (hints.length) noisy.push(`${doc.name}: ${hints.join(',')}`);
     }
     expect(noisy).toEqual([]);
+  });
+});
+
+describe('whole-text check for hazardous documents (design E7)', () => {
+  /** Switches off the fast first-line checks, so only the whole-text check is left. */
+  function firstLineOff(c: ReviewController): void {
+    const session = (c as unknown as { session: Record<string, unknown> }).session;
+    session.addsCloser = (): boolean => false;
+    session.changesCode = (): boolean => false;
+  }
+
+  const cases: [string, string, string, string][] = [
+    ['a closer after a literal opener', 'Note: {++ stays literal.\n\n- one\n- two\n', 'two', 'X'],
+    [
+      'a separator after a literal replacement opener',
+      'Use {~~ to start.\n\nSome text here.\n\nAnd ~~} to end.\n',
+      'text',
+      '~>',
+    ],
+    ['a backtick in a line run with one', 'Press the ` key:\n- one\n- two\n', 'two', '`'],
+    [
+      "a separator in the opener's own block",
+      'Use {~~ to start.\n\nSome text here.\n\nAnd ~~} to end.\n',
+      'start',
+      '~>',
+    ],
+    [
+      'a backtick next to a definition with one',
+      '[k]: /keys "the ` key"\nPress a key.\n',
+      'a key',
+      '`',
+    ],
+  ];
+  for (const [name, md, at, typed] of cases) {
+    it(`refuses ${name} with the first-line checks off`, async () => {
+      const { c, hints } = await open(md);
+      expect(c.isHazardous).toBe(true);
+      firstLineOff(c);
+      type(c, typed, posOf(c, at));
+      expect(hints).toEqual(['generic']);
+      expect(text(c)).toBe(md);
+    });
+  }
+
+  it('refuses breaking a closer a literal replacement opener does not reach yet', async () => {
+    const md = 'Use {~~ to start.\n\nMid ~~} here.\n\nThen ~> and ~~} end.\n';
+    const { c, hints } = await open(md);
+    firstLineOff(c);
+    type(c, 'X', posOf(c, '~~}', 2));
+    expect(hints).toEqual(['generic']);
+    expect(text(c)).toBe(md);
+  });
+
+  it('takes edits that change no pairing in a hazardous document', async () => {
+    // A literal {++: a deletion after it adds no ++}.
+    const lit = 'Note: {++ stays literal.\n\n- one\n- two\n';
+    const a = await open(lit);
+    expect(a.c.isHazardous).toBe(true);
+    backspace(a.c, posOf(a.c, 'two', 1));
+    expect(a.hints).toEqual([]);
+    expect(text(a.c)).toBe('Note: {++ stays literal.\n\n- one\n- {--t--}wo\n');
+    // A backtick shared in a line run: plain text typed there is taken.
+    const run = 'Press the ` key:\n- one\n- two\n';
+    const b = await open(run);
+    expect(b.c.isHazardous).toBe(true);
+    type(b.c, 'Z', posOf(b.c, 'two'));
+    expect(b.hints).toEqual([]);
+    expect(text(b.c)).toBe('Press the ` key:\n- one\n- {++Z++}two\n');
+  });
+
+  it('keeps a document that is not hazardous at load so through a sequence of edits', async () => {
+    const md = 'Plain text here.\n\n- one\n- two\n\n| a | b |\n|---|---|\n| c | d |\n';
+    const { c, hints } = await open(md);
+    expect(c.isHazardous).toBe(false);
+    type(c, '{++', posOf(c, 'text'));
+    type(c, '`', posOf(c, 'two'));
+    type(c, '~>', posOf(c, 'one'));
+    backspace(c, posOf(c, 'd', 1));
+    expect(hints).toEqual([]);
+    expect(c.isHazardous).toBe(false);
+    const out = text(c);
+    expect(onlyMarksChanged(out, projectCritic(md, 'clean'))).toBe(true);
+    expect(parseCritic(out).filter((x) => x.kind !== 'text')).toHaveLength(4);
   });
 });
 
