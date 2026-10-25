@@ -1180,3 +1180,49 @@ func (s *countingBrokerReadErrStore) GetRuntimeBroker(ctx context.Context, id st
 	}
 	return s.Store.GetRuntimeBroker(ctx, id)
 }
+
+// A routed start whose replay fails after the gather (ptone/scion#6101 on
+// top of ptone/scion#6096): the needs report and the replay both carry
+// PreserveWorkspace, the start fails, and the hub keeps the agent. It sends
+// no delete (the broker skips its own start-failure cleanup for a
+// preserveWorkspace create), keeps the row, and does not record
+// ConfigDelivered, so the next start is routed again.
+func TestRoutedStart_ReplayFailureKeepsTheAgent(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"broker runtime error on the replay", &brokerStatusError{StatusCode: 500, Body: `{"error":{"code":"runtime_error","message":"fake image pull failed"}}`}},
+		{"transport error on the replay", errors.New("FAKE replay connection reset")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRunDispatchFixture(t)
+			f.agent.Phase = string(state.PhaseStopped)
+			neverStarted(f)
+			seedAsNeededEnv(t, f, failClosedKey, failClosedValue)
+			grantPreserveWorkspaceCreate(t, f.store, f.agent.RuntimeBrokerID)
+			var reqs []*RemoteCreateAgentRequest
+			f.client.createWithGatherFunc = func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+				reqs = append(reqs, req)
+				if req.ResolvedEnv[failClosedKey] != "" {
+					return nil, nil, tc.err
+				}
+				return nil, &RemoteEnvRequirementsResponse{AgentID: req.ID, Needs: []string{failClosedKey}}, nil
+			}
+
+			err := f.d.DispatchAgentStart(context.Background(), f.agent, "", false)
+			require.Error(t, err, "the replay failed, so the start fails")
+			require.Len(t, reqs, 2, "the needs report and the replay")
+			for i, req := range reqs {
+				assert.True(t, req.PreserveWorkspace, "create request %d must keep the workspace", i)
+			}
+			assert.Equal(t, failClosedValue, reqs[1].ResolvedEnv[failClosedKey], "the replay carried the gathered value")
+			assert.False(t, f.client.deleteCalled, "no delete: the agent and its workspace are kept")
+			assert.False(t, f.client.startCalled, "no plain start")
+			got, gerr := f.store.GetAgent(context.Background(), f.agent.ID)
+			require.NoError(t, gerr, "the agent row is kept")
+			require.NotNil(t, got.AppliedConfig)
+			assert.False(t, got.AppliedConfig.ConfigDelivered, "a failed routed start does not record the marker")
+		})
+	}
+}
