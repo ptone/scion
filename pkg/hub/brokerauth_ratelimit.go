@@ -73,7 +73,8 @@ const (
 	brokerAuthPairFailureRate  = 0.2
 	brokerAuthPairFailureBurst = 30
 
-	// brokerAuthMaxEntries bounds every map the policy keeps: bucket maps,
+	// brokerAuthMaxEntries bounds every map the policy keeps (the pair bucket
+	// map gets twice it): bucket maps,
 	// the established set and the failure log's dedup and source maps.
 	brokerAuthMaxEntries = 10000
 
@@ -188,10 +189,15 @@ func newBrokerAuthRequestPolicy() *brokerAuthRequestPolicy {
 		l.cleanupInterval = brokerAuthMaintenanceInterval
 		return l
 	}
+	// A pair's bucket can outlive its established entry by up to
+	// brokerAuthBucketMaxAge, so the pair bucket map gets twice the bound
+	// of the established set: a full map would refuse an established pair.
+	pairs := newBuckets(brokerAuthPairFailureRate, brokerAuthPairFailureBurst)
+	pairs.maxEntries = 2 * brokerAuthMaxEntries
 	return &brokerAuthRequestPolicy{
 		perKey:         newBuckets(brokerAuthKeyFailureRate, brokerAuthKeyFailureBurst),
 		global:         newBuckets(brokerAuthGlobalFailureRate, brokerAuthGlobalFailureBurst),
-		pairs:          newBuckets(brokerAuthPairFailureRate, brokerAuthPairFailureBurst),
+		pairs:          pairs,
 		established:    make(map[string]time.Time),
 		maxEstablished: brokerAuthMaxEntries,
 		establishedTTL: brokerAuthEstablishedTTL,
