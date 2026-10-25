@@ -47,33 +47,50 @@ func parseForwardedProto(raw string) (string, error) {
 	}
 }
 
-// setForwardedProto replaces whatever forwarded protocol the client sent
-// with the scheme this hop actually received: https when the proxy itself
-// terminated TLS, otherwise frontEndProto (the scheme of the platform front
-// end, FORWARDED_PROTO). A client-supplied X-Forwarded-Proto or Forwarded
-// header never reaches the backend: the Scion hub trusts X-Forwarded-Proto
-// from a proxy listed in server.trusted_proxies, so passing a client's value
-// through would let any client claim https.
-func setForwardedProto(req *http.Request, frontEndProto string) {
-	req.Header.Del("Forwarded")
-	req.Header.Del("X-Forwarded-Proto")
-	proto := frontEndProto
+// forwardedProtoFor is the scheme the proxy reports for req: https when the
+// proxy itself terminated TLS on this connection, otherwise frontEndProto
+// (FORWARDED_PROTO, the scheme of the platform front end). It is the single
+// place that decides the reported scheme.
+func forwardedProtoFor(req *http.Request, frontEndProto string) string {
 	if req.TLS != nil {
-		proto = "https"
+		return "https"
 	}
-	req.Header.Set("X-Forwarded-Proto", proto)
+	return frontEndProto
+}
+
+// setForwardingHeaders makes the proxy a clean trust boundary: every
+// forwarding header the client sent is removed, and the proxy states only
+// what it observed itself. The Scion hub trusts X-Forwarded-Proto from a
+// proxy listed in server.trusted_proxies, so a client value passed through
+// would let any client claim https.
+//   - Forwarded, X-Forwarded-Proto, X-Forwarded-For and X-Forwarded-Host
+//     from the client are dropped, whatever their number or form.
+//   - X-Forwarded-Proto is set, unconditionally, to forwardedProtoFor.
+//   - X-Forwarded-Host is set to servedHost, the Host this request arrived
+//     with.
+//   - X-Forwarded-For is left absent here; httputil.ReverseProxy then sets
+//     it to the immediate peer's address alone.
+func setForwardingHeaders(req *http.Request, frontEndProto, servedHost string) {
+	for _, h := range []string{"Forwarded", "X-Forwarded-Proto", "X-Forwarded-For", "X-Forwarded-Host"} {
+		req.Header.Del(h)
+	}
+	req.Header.Set("X-Forwarded-Proto", forwardedProtoFor(req, frontEndProto))
+	if servedHost != "" {
+		req.Header.Set("X-Forwarded-Host", servedHost)
+	}
 }
 
 // newProxy creates a ReverseProxy that forwards traffic to targetURL,
 // preserving and logging Google Identity-Aware Proxy (IAP) headers and
-// reporting frontEndProto as the forwarded protocol (setForwardedProto).
+// replacing every client forwarding header (setForwardingHeaders).
 func newProxy(targetURL *url.URL, frontEndProto string) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
+			servedHost := req.Host
 			req.URL.Scheme = targetURL.Scheme
 			req.URL.Host = targetURL.Host
 			req.Host = targetURL.Host
-			setForwardedProto(req, frontEndProto)
+			setForwardingHeaders(req, frontEndProto, servedHost)
 
 			// Ensure all IAP headers are explicitly preserved and logged
 			iapJWT := req.Header.Get("X-Goog-IAP-JWT-Assertion")
@@ -168,7 +185,7 @@ func main() {
 	log.Printf("Starting Cloud Run IAP Reverse Proxy...")
 	log.Printf("  Listening on port: %s", port)
 	log.Printf("  Proxying to:       %s", targetURL.String())
-	log.Printf("  Forwarded proto:   %s (client-supplied X-Forwarded-Proto and Forwarded are replaced)", frontEndProto)
+	log.Printf("  Forwarded proto:   %s (client-supplied Forwarded and X-Forwarded-* headers are replaced)", frontEndProto)
 
 	mux := newMux(targetURL, frontEndProto)
 
