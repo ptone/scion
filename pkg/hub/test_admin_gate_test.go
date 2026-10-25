@@ -682,7 +682,7 @@ func TestTestAdminBroker_RemoteRegistrationRefusedWhileTierOn(t *testing.T) {
 		assert.Contains(t, rec.Body.String(), ErrCodeTestAdminRemoteBrokerRefused)
 	}
 
-	rec := doRequestNoAuth(t, srv, http.MethodPost, "/api/v1/brokers/join",
+	rec := doRequestNoAuthLoopback(t, srv, http.MethodPost, "/api/v1/brokers/join",
 		map[string]interface{}{"brokerId": tiaRemoteBrokerID, "joinToken": "synthetic-join-token"})
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), ErrCodeTestAdminRemoteBrokerRefused)

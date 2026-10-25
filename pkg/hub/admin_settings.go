@@ -482,6 +482,8 @@ func buildServerConfigFileResponse() (*ServerConfigResponse, error) {
 	if resp.Server != nil {
 		resp.Server.KeyringFile = ""
 		resp.Server.KeyringFileAllowWorldReadable = false
+		// And the transport policy's trusted proxy list.
+		resp.Server.TrustedProxies = nil
 	}
 
 	// Env overrides — detect SCION_SERVER_* env vars so the admin UI can

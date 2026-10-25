@@ -241,6 +241,8 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	if resp.Server != nil {
 		resp.Server.KeyringFile = ""
 		resp.Server.KeyringFileAllowWorldReadable = false
+		// And the transport policy's trusted proxy list.
+		resp.Server.TrustedProxies = nil
 	}
 
 	// Build section metadata from the cache.

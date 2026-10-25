@@ -153,7 +153,7 @@ func TestBrokerAudit_SelfRotationRecordsBrokerCredential(t *testing.T) {
 	audit := installBrokerAuditCapture(srv)
 	broker, key := newOnboardingSigningBroker(t, s, "audit-self-rotate")
 
-	rec := doBrokerSignedRequest(t, srv, broker.ID, key, "", http.MethodPost, "/api/v1/brokers/"+broker.ID+"/rotate-secret", nil)
+	rec := doBrokerSignedRequestLoopback(t, srv, broker.ID, key, "", http.MethodPost, "/api/v1/brokers/"+broker.ID+"/rotate-secret", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 	events := brokerAuditEventsOfType(audit, BrokerAuthEventRotate)

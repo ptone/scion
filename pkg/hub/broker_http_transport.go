@@ -33,6 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -102,6 +103,14 @@ func newBrokerHTTPTransport(debug bool, signer brokerRequestSigner) *brokerHTTPT
 func (t *brokerHTTPTransport) doRequest(ctx context.Context, brokerID, method, endpoint string, body []byte) (*http.Response, error) {
 	if endpoint == "" || !strings.Contains(endpoint, "://") {
 		return nil, fmt.Errorf("runtime broker %q has no HTTP endpoint configured (control channel may be required): %w", brokerID, errStartRequestNotSent)
+	}
+	// Transport policy: requests to a broker carry agent tokens and secrets,
+	// so they are never sent over plain http to a non-loopback endpoint
+	// (for example another hub replica's co-located broker registered with
+	// a non-loopback server.broker.host). Nothing is sent, so the request
+	// is reported as not sent.
+	if err := config.CheckHubTransport(endpoint); err != nil {
+		return nil, fmt.Errorf("runtime broker %q: refusing its HTTP endpoint: %w (%w)", brokerID, err, errStartRequestNotSent)
 	}
 
 	var reader io.Reader
