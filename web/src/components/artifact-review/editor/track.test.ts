@@ -1354,12 +1354,18 @@ describe('whole-text check for hazardous documents (design E7)', () => {
       const { c, hints } = await open(md);
       expect(c.isHazardous).toBe(true);
       firstLineOff(c);
+      // The text after the edits that were taken: the refused one leaves it.
+      let before = md;
       for (const [k, [at, offset, typed]] of edits.entries()) {
         type(c, typed, posOf(c, at, offset));
         expect(hints).toEqual(k < edits.length - 1 ? [] : ['generic']);
+        if (k < edits.length - 1) {
+          before = text(c);
+          expect(before).not.toBe(md);
+          expect(onlyMarksChanged(before, projectCritic(md, 'clean'))).toBe(true);
+        }
       }
-      if (edits.length === 1) expect(text(c)).toBe(md);
-      else expect(onlyMarksChanged(text(c), projectCritic(md, 'clean'))).toBe(true);
+      expect(text(c)).toBe(before);
     });
 
     it(`takes ${name} with no check left, and the save then refuses it`, async () => {
