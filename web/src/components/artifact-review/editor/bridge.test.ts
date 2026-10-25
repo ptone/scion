@@ -377,6 +377,30 @@ describe('save invariant (I2)', () => {
     expect(ok.save()).toBe('a {++x++} b{++ Z++}\n');
   });
 
+  it("refuses the save when a block written from its source no longer holds the document's marks", () => {
+    // Block 0 holds a mark token inside a link title, so it is read-only
+    // and always written from its source. A mark put there anyway (no
+    // policy here) would vanish from the saved text: only the whole-text
+    // read-back sees it.
+    const src = '[l](u "{++x++}") and {++real++}\n\nsecond para\n';
+    const s = new ReviewSession(core);
+    expect(s.load(src)).toBe(true);
+    expect(s.readOnlyBlocks()).toEqual([0]);
+    const v = core.view;
+    const mark = core.schema.marks[MARKS.ins].create({ mine: true });
+    v.dispatch(v.state.tr.insert(v.state.doc.child(0).nodeSize - 1, core.schema.text('Z', [mark])));
+    s.markDirty();
+    expect(s.save()).toBeNull();
+    // Positive control: the same mark in block 1 saves, with block 0 (and
+    // its token in the title) written from its source.
+    const ok = new ReviewSession(core);
+    expect(ok.load(src)).toBe(true);
+    const end = v.state.doc.child(0).nodeSize + v.state.doc.child(1).nodeSize - 1;
+    v.dispatch(v.state.tr.insert(end, core.schema.text('Z', [mark])));
+    ok.markDirty();
+    expect(ok.save()).toBe('[l](u "{++x++}") and {++real++}\n\nsecond para{++Z++}\n');
+  });
+
   it('refuses the save when a literal opener in an earlier block would take the new closer', () => {
     const src = 'Note: {++ stays literal.\n\nlater text\n';
     const s = new ReviewSession(core);

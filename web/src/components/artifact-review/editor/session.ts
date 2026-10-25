@@ -88,6 +88,12 @@ export class ReviewSession {
    * own resolves its reference links as it does in the document.
    */
   private definitions = '';
+  /**
+   * Per top-level block: whether another block in its line run (blocks
+   * with no blank line between them, whose backticks the critic parser can
+   * pair across the blocks) holds a backtick (see changesCode).
+   */
+  private codeNeighbours: boolean[] = [];
 
   constructor(private readonly core: Core) {}
 
@@ -138,6 +144,7 @@ export class ReviewSession {
     this.held = held;
     this.literalOpeners = literalOpeners(md);
     this.definitions = definitionsOf(md, this.core.parseMdRaw);
+    this.codeNeighbours = this.baseline ? codeNeighbours(this.baseline) : [];
     this.dirty = false;
     return true;
   }
@@ -242,6 +249,7 @@ export class ReviewSession {
     if (md === null) return 'generic';
     if (clean(md) !== clean(src)) return 'generic';
     if (this.addsCloser(i, j, md)) return 'generic';
+    if (this.changesCode(doc, i, j, md)) return 'code-run';
     if (marksReadBack(unit, md, this.core.plain) !== null) return 'generic';
     // The written unit must open again as it is shown (for example, an
     // backslashed autolink-looking text must not become a link that takes in
@@ -333,6 +341,7 @@ export class ReviewSession {
       const unit = schema.topNodeType.create(null, kids);
       if (marksReadBack(unit, u.md, this.core.plain) !== null) return null;
       if (u.i >= 0 && this.addsCloser(u.i, u.j, u.md)) return null;
+      if (u.i >= 0 && this.changesCode(doc, u.i, u.j, u.md)) return null;
       const runs = docMarkRuns(unit);
       const before = u.i < 0 ? this.earlierOf() : this.earlierOf(u.i, u.j);
       if (!earlierKept(before, u.md, runs)) return null;
@@ -349,10 +358,12 @@ export class ReviewSession {
 
   /**
    * Whether the written text md of units i..j holds more closers of a
-   * mark kind than their source, for a kind whose first literal opener
-   * comes before them: the critic parser would end a mark at that opener
-   * with the new closer, over text outside these units. Closers inside
-   * the code the critic parser reads in md (or the source) are not counted.
+   * mark kind than their source (for a replacement, more closers or more
+   * ~> separators), for a kind whose first literal opener comes before
+   * them: the critic parser would read a mark from that opener with the
+   * new token, over text outside these units (a {~~ followed by a ~~} but
+   * no ~> is literal until a ~> appears between them). Tokens inside the
+   * code the critic parser reads in md (or the source) are not counted.
    */
   private addsCloser(i: number, j: number, md: string): boolean {
     const base = this.baseline;
@@ -360,7 +371,39 @@ export class ReviewSession {
     const src = unitSource(base, i, j);
     for (const [close, at] of this.literalOpeners) {
       if (at >= this.starts[i]) continue;
-      if (countOutsideCode(md, close) > countOutsideCode(src, close)) return true;
+      for (const token of close === '~~}' ? [close, '~>'] : [close]) {
+        if (countOutsideCode(md, token) > countOutsideCode(src, token)) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Whether the written text md of units i..j of doc could change how the
+   * critic parser pairs backticks with text outside it (its code ranges
+   * depend only on backtick runs, their backslashes, and blank and fence
+   * lines, and suggest mode adds no blank line): its fence-opener lines
+   * differ from its source's, or its backtick runs differ while another
+   * block of its line run holds a backtick, or, for a list or table, while
+   * an item or row it did not change holds one (the per-unit checks read
+   * the unit alone, so they cannot see such a pairing).
+   */
+  private changesCode(doc: Node, i: number, j: number, md: string): boolean {
+    const base = this.baseline;
+    if (!base) return false;
+    const src = unitSource(base, i, j);
+    if (fenceLines(md) !== fenceLines(src)) return true;
+    if (backtickRuns(md) === backtickRuns(src)) return false;
+    for (let k = i; k <= j; k++) {
+      if (this.codeNeighbours[k]) return true;
+      const subs = base.blocks[k].subs;
+      const was = base.nodes[k];
+      const now = doc.child(k);
+      if (!subs || now.childCount !== was.childCount) continue;
+      for (let c = 0; c < subs.length; c++) {
+        if (now.child(c) !== was.child(c)) continue;
+        if (base.blocks[k].src.slice(subs[c].from, subs[c].to).includes('`')) return true;
+      }
     }
     return false;
   }
@@ -382,6 +425,48 @@ export class ReviewSession {
     }
     return out;
   }
+}
+
+/**
+ * The backtick runs of text in order, each as its length and whether an
+ * odd number of backslashes comes before it ("e"), comma-separated.
+ */
+function backtickRuns(text: string): string {
+  const out: string[] = [];
+  for (const m of text.matchAll(/`+/g)) {
+    let k = m.index ?? 0;
+    let slashes = 0;
+    while (k > 0 && text[k - 1] === '\\') {
+      slashes++;
+      k--;
+    }
+    out.push(`${m[0].length}${slashes % 2 ? 'e' : ''}`);
+  }
+  return out.join(',');
+}
+
+/** The lines of text that would open (or close) a fenced code block. */
+function fenceLines(text: string): number {
+  return text.split('\n').filter((l) => /^ {0,3}(`{3,}|~{3,})/.test(l)).length;
+}
+
+/**
+ * Per top-level block of base: whether another block of its line run
+ * holds a backtick. A line run is a sequence of blocks with no blank line
+ * in the source between them.
+ */
+function codeNeighbours(base: Baseline): boolean[] {
+  const n = base.blocks.length;
+  const run: number[] = [];
+  let r = 0;
+  for (let k = 0; k < n; k++) {
+    run.push(r);
+    if (/\n[ \t]*\r?\n/.test(base.blocks[k].after.replace(/\r\n/g, '\n'))) r++;
+  }
+  const ticks = base.blocks.map((b) => b.src.includes('`'));
+  return base.blocks.map((_, k) =>
+    base.blocks.some((_, m) => m !== k && run[m] === run[k] && ticks[m])
+  );
 }
 
 /** The opener of each mark kind, by its closer. */

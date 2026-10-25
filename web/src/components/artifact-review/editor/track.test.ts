@@ -374,21 +374,51 @@ describe('refused edits in suggest mode', () => {
     expect(text(ok.c)).toBe('- one\n- {++X++}two\n\nNote: {++ stays literal.\n');
   });
 
-  it('keeps marks right when a backtick is typed above a row holding a lone backtick', async () => {
-    // The critic parser pairs backticks across the lines of a table; the
-    // edited row is checked within its table, so the result is either
-    // refused or reads back as the document.
+  it('refuses a separator a literal replacement opener in an earlier block would take', async () => {
+    // A {~~ with a later ~~} but no ~> is literal; a ~> typed between them
+    // would make the critic parser read one replacement from the {~~.
+    const md = 'Use {~~ to start.\n\nSome text here.\n\nAnd ~~} to end.\n';
+    const { c, hints } = await open(md);
+    type(c, '~>', posOf(c, 'text'));
+    expect(hints).toEqual(['generic']);
+    expect(text(c)).toBe(md);
+    // Positive control: other text typed in the same block is taken.
+    type(c, 'X', posOf(c, 'text'));
+    expect(hints).toEqual(['generic']);
+    expect(text(c)).toBe('Use {~~ to start.\n\nSome {++X++}text here.\n\nAnd ~~} to end.\n');
+  });
+
+  it('refuses a backtick typed in a block whose line run holds one in another block', async () => {
+    // The paragraph and the list have no blank line between them: the
+    // critic parser would pair the paragraph's backtick with one typed in
+    // the list, and the insertion's tokens would be code.
+    const { c, hints } = await open('Press the ` key:\n- one\n- two\n');
+    type(c, '`', posOf(c, 'two'));
+    expect(hints).toEqual(['code-run']);
+    expect(text(c)).toBe('Press the ` key:\n- one\n- two\n');
+    // Positive control: plain text in the same run is taken.
+    type(c, 'X', posOf(c, 'two'));
+    expect(text(c)).toBe('Press the ` key:\n- one\n- {++X++}two\n');
+    // Positive control: with a blank line, the blocks are separate runs.
+    const ok = await open('Press the ` key:\n\n- one\n- two\n');
+    type(ok.c, '`', posOf(ok.c, 'two'));
+    expect(ok.hints).toEqual([]);
+    expect(
+      onlyMarksChanged(text(ok.c), projectCritic('Press the ` key:\n\n- one\n- two\n', 'clean'))
+    ).toBe(true);
+  });
+
+  it('refuses a backtick typed above a table row holding a lone backtick', async () => {
+    // The critic parser pairs backticks across the lines of a table; a
+    // backtick typed in one row, with another row holding one, is refused.
     const md = '| a | b |\n|---|---|\n| x | y |\n| ` | z |\n';
     const { c, hints } = await open(md);
     type(c, '`', posOf(c, 'x', 1));
-    const out = text(c);
-    if (hints.length) {
-      expect(hints).toEqual(['generic']);
-      expect(out).toBe(md);
-    } else {
-      expect(onlyMarksChanged(out, projectCritic(md, 'clean'))).toBe(true);
-      expect(projectCritic(out, 'accept')).not.toBe(projectCritic(md, 'accept'));
-    }
+    expect(hints).toEqual(['code-run']);
+    expect(text(c)).toBe(md);
+    // Positive control: other text in the same row is taken.
+    type(c, 'W', posOf(c, 'x', 1));
+    expect(text(c)).toBe('| a | b |\n|---|---|\n| x{++W++} | y |\n| ` | z |\n');
   });
 
   it('edits a block with a reference link, keeping the reference', async () => {
@@ -950,11 +980,10 @@ describe('composition timing', () => {
     c.view.dom.dispatchEvent(new CompositionEvent('compositionstart'));
     composeStep(c, p, '犬', 3);
     c.view.dom.dispatchEvent(new CompositionEvent('compositionend'));
-    // ProseMirror may still apply the last change before the next tick.
-    // Not settled yet: the composed text is not marked, so it cannot be
-    // saved as a review.
+    // The settle step waits a tick (ProseMirror may still apply the last
+    // change); a flush before then (Save, a switch to Source) settles first.
     expect(c.view.state.doc.textContent).toBe('a 犬dog');
-    expect(c.flush()).toBeNull();
+    expect(c.flush()).toBe('a {++犬++}dog\n');
     await tick();
     expect(hints).toEqual([]);
     expect(text(c)).toBe('a {++犬++}dog\n');
