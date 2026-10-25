@@ -128,10 +128,11 @@ export function chooseOpeningAlphabet(
   const free = SENTINEL_CANDIDATES.filter((c) => !md.includes(c));
   if (free.length < 2 * ROLES.length) return null;
   // The parser yields a candidate that is not in its input only by
-  // decoding a numeric character reference: escapes are ASCII, and no named
-  // reference decodes to a candidate (critic-sentinels.test.ts checks the
-  // installed table). Without one, the probe would exclude nothing but its
-  // own characters, so its result is known without parsing.
+  // decoding a numeric character reference: a backslash only keeps ASCII
+  // punctuation literal, and no named reference decodes to a candidate
+  // (critic-sentinels.test.ts checks the installed table). Without one, the
+  // probe would exclude nothing but its own characters, so its result is
+  // known without parsing.
   if (!md.includes('&#')) return alphabetOf(free.slice(0, -ROLES.length));
   return probeOpeningAlphabet(md, shown);
 }

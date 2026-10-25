@@ -126,7 +126,7 @@ describe('opening alphabet without a numeric character reference', () => {
   });
 
   it('runs the probe when the source holds one, in any form', () => {
-    for (const md of ['&#x2E00;', 'a &#11776; b', '&#65;', '{>>&#<<}', '&#']) {
+    for (const md of ['&#x2E00;', 'a &#42; b', '&#65;', '{>>&#<<}', '&#']) {
       let ran = false;
       chooseOpeningAlphabet(md, (t) => {
         ran = true;
