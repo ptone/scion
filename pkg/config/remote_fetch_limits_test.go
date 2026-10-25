@@ -16,11 +16,13 @@ package config
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -402,7 +404,8 @@ func TestLimitedStream(t *testing.T) {
 }
 
 // Directories created implicitly as parents are charged as entries, once
-// each, for tar, zip and the sub-path copy.
+// each, for tar and zip; the sub-path copy charges its directories through
+// the same helper (TestCopyDirExcludingGit_Limits).
 func TestExtract_ImplicitParentDirsCharged(t *testing.T) {
 	// 6 directories (a, a/b, a/b/c, x, x/y, x/y/z) + 2 files = 8 entries;
 	// two top-level directories, so no common root is stripped.
@@ -434,6 +437,27 @@ func TestExtract_ImplicitParentDirsCharged(t *testing.T) {
 	require.NoError(t, b.mkdirAll(root, "p", 0o755))
 	require.NoError(t, b.mkdirAll(root, filepath.Join("p", "q", "s"), 0o755))
 	assert.Equal(t, 4, b.entries)
+}
+
+// A zip whose central directory declares huge sizes (up to the maximum
+// uint64) is refused from the central directory, without the sum wrapping.
+func TestExtractZip_HugeDeclaredSizesRefused(t *testing.T) {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for _, name := range []string{"a", "b"} {
+		w, err := zw.CreateRaw(&zip.FileHeader{
+			Name: name, Method: zip.Store,
+			CompressedSize64: 1, UncompressedSize64: math.MaxUint64, CRC32: 0,
+		})
+		require.NoError(t, err)
+		_, err = w.Write([]byte("x"))
+		require.NoError(t, err)
+	}
+	require.NoError(t, zw.Close())
+	zipPath := writeArchive(t, buf.Bytes(), "huge.zip")
+	dest := t.TempDir()
+	assert.ErrorIs(t, extractZip(zipPath, dest, &fetchBudget{maxBytes: 1 << 20, maxEntries: 100}), ErrRemoteTemplateTooLarge)
+	assert.Zero(t, dirFileCount(t, dest))
 }
 
 // The zip central directory is checked against the limits before any

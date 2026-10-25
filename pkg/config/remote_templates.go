@@ -1003,10 +1003,11 @@ func extractZip(zipPath, destPath string, budget *fetchBudget) error {
 	}
 	var declared uint64
 	for _, f := range r.File {
-		declared += f.UncompressedSize64
-		if declared > uint64(budget.maxBytes) {
+		// Compare before adding, so a huge declared size cannot wrap.
+		if f.UncompressedSize64 > uint64(budget.maxBytes)-declared {
 			return fmt.Errorf("%w: more than %d bytes", ErrRemoteTemplateTooLarge, budget.maxBytes)
 		}
+		declared += f.UncompressedSize64
 	}
 
 	root, err := os.OpenRoot(destPath)
@@ -1117,10 +1118,11 @@ func extractTarGz(tarGzPath, destPath string, budget *fetchBudget) error {
 			return fmt.Errorf("%w: more than %d files and directories", ErrRemoteTemplateTooLarge, budget.maxEntries)
 		}
 		if header.Size > 0 {
-			declared += header.Size
-			if declared > budget.maxBytes {
+			// Compare before adding, so a huge declared size cannot wrap.
+			if header.Size > budget.maxBytes-declared {
 				return fmt.Errorf("%w: more than %d bytes", ErrRemoteTemplateTooLarge, budget.maxBytes)
 			}
+			declared += header.Size
 		}
 		if header.Typeflag == tar.TypeDir || header.Typeflag == tar.TypeReg || header.Typeflag == tar.TypeSymlink {
 			entries = append(entries, header.Name)
