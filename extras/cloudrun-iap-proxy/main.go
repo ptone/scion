@@ -35,8 +35,9 @@ import (
 // On Cloud Run the platform front end terminates TLS and the proxy serves
 // plain http, so it reports http: it cannot verify the front end's TLS, and
 // a Scion hub that lists this proxy in server.trusted_proxies therefore
-// refuses broker join, secret rotation and broker connections through it
-// (agent and web traffic are not affected; brokers reach the hub directly).
+// refuses broker registration and join-token minting, broker join, secret
+// rotation and broker connections through it (agent and web traffic are not
+// affected; brokers reach the hub directly).
 func forwardedProtoFor(req *http.Request) string {
 	if req.TLS != nil {
 		return "https"
