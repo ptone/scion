@@ -28,14 +28,52 @@ import (
 	"golang.org/x/net/http2/h2c"
 )
 
+// defaultForwardedProto is the scheme the proxy reports to the backend when
+// FORWARDED_PROTO is unset: Cloud Run's front end terminates TLS before a
+// request reaches the container.
+const defaultForwardedProto = "https"
+
+// parseForwardedProto validates FORWARDED_PROTO, the scheme of the front end
+// that terminates client connections in front of this proxy ("https" or
+// "http"; empty means defaultForwardedProto).
+func parseForwardedProto(raw string) (string, error) {
+	switch v := strings.ToLower(strings.TrimSpace(raw)); v {
+	case "":
+		return defaultForwardedProto, nil
+	case "https", "http":
+		return v, nil
+	default:
+		return "", fmt.Errorf("FORWARDED_PROTO must be https or http, got %q", raw)
+	}
+}
+
+// setForwardedProto replaces whatever forwarded protocol the client sent
+// with the scheme this hop actually received: https when the proxy itself
+// terminated TLS, otherwise frontEndProto (the scheme of the platform front
+// end, FORWARDED_PROTO). A client-supplied X-Forwarded-Proto or Forwarded
+// header never reaches the backend: the Scion hub trusts X-Forwarded-Proto
+// from a proxy listed in server.trusted_proxies, so passing a client's value
+// through would let any client claim https.
+func setForwardedProto(req *http.Request, frontEndProto string) {
+	req.Header.Del("Forwarded")
+	req.Header.Del("X-Forwarded-Proto")
+	proto := frontEndProto
+	if req.TLS != nil {
+		proto = "https"
+	}
+	req.Header.Set("X-Forwarded-Proto", proto)
+}
+
 // newProxy creates a ReverseProxy that forwards traffic to targetURL,
-// preserving and logging Google Identity-Aware Proxy (IAP) headers.
-func newProxy(targetURL *url.URL) *httputil.ReverseProxy {
+// preserving and logging Google Identity-Aware Proxy (IAP) headers and
+// reporting frontEndProto as the forwarded protocol (setForwardedProto).
+func newProxy(targetURL *url.URL, frontEndProto string) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
 			req.URL.Scheme = targetURL.Scheme
 			req.URL.Host = targetURL.Host
 			req.Host = targetURL.Host
+			setForwardedProto(req, frontEndProto)
 
 			// Ensure all IAP headers are explicitly preserved and logged
 			iapJWT := req.Header.Get("X-Goog-IAP-JWT-Assertion")
@@ -67,8 +105,8 @@ func newProxy(targetURL *url.URL) *httputil.ReverseProxy {
 }
 
 // newMux returns an http.ServeMux configured with health check and reverse proxy endpoints.
-func newMux(targetURL *url.URL) *http.ServeMux {
-	proxy := newProxy(targetURL)
+func newMux(targetURL *url.URL, frontEndProto string) *http.ServeMux {
+	proxy := newProxy(targetURL, frontEndProto)
 	mux := http.NewServeMux()
 
 	// Cloud Run health check probe
@@ -117,6 +155,11 @@ func main() {
 		log.Fatalf("Configuration error: %v", err)
 	}
 
+	frontEndProto, err := parseForwardedProto(os.Getenv("FORWARDED_PROTO"))
+	if err != nil {
+		log.Fatalf("Configuration error: %v", err)
+	}
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -125,8 +168,9 @@ func main() {
 	log.Printf("Starting Cloud Run IAP Reverse Proxy...")
 	log.Printf("  Listening on port: %s", port)
 	log.Printf("  Proxying to:       %s", targetURL.String())
+	log.Printf("  Forwarded proto:   %s (client-supplied X-Forwarded-Proto and Forwarded are replaced)", frontEndProto)
 
-	mux := newMux(targetURL)
+	mux := newMux(targetURL, frontEndProto)
 
 	// Wrap handler with h2c for HTTP/2 cleartext support on Cloud Run
 	h2s := &http2.Server{}
