@@ -1002,7 +1002,9 @@ func TestFanOut_ObserverSingleOverrunSkipsAndCounts(t *testing.T) {
 
 	// Once the overrun returns, the spoke is called again.
 	close(hung.release)
-	<-hung.ended
+	if err := <-hung.ended; err != nil {
+		t.Fatalf("overrun call ended with %v, want nil after release", err)
+	}
 	waitOverruns(t, f, "relay", 0)
 	if err := f.Publish(context.Background(), "test.topic", msg); err != nil {
 		t.Fatalf("Publish after overrun: %v", err)

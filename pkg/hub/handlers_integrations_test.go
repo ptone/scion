@@ -462,6 +462,8 @@ func TestRestartIntegration_WithSpokeWired(t *testing.T) {
 	// Create a FanOutEventBus with a discord spoke.
 	inproc := eventbus.NewInProcessEventBus(slog.Default())
 	discordBus := eventbus.NewInProcessEventBus(slog.Default())
+	// The restarted plugin's bus, which the spoke refresh installs.
+	mgr.brokers = map[string]eventbus.EventBus{"discord": eventbus.NewInProcessEventBus(slog.Default())}
 	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
 		{Name: "inprocess", Bus: inproc},
 		{Name: "discord", Bus: discordBus},
@@ -2769,6 +2771,25 @@ func (replayFailingBus) Subscribe(string, eventbus.EventHandler) (eventbus.Subsc
 
 func (replayFailingBus) Close() error { return nil }
 
+// replayAcceptingBus is an EventBus whose Subscribe accepts any pattern,
+// including the nil handler the fan-out passes to non-inprocess spokes, as
+// plugin adapters do.
+type replayAcceptingBus struct{}
+
+func (replayAcceptingBus) Publish(context.Context, string, *messages.StructuredMessage) error {
+	return nil
+}
+
+func (replayAcceptingBus) Subscribe(string, eventbus.EventHandler) (eventbus.Subscription, error) {
+	return replayAcceptingSub{}, nil
+}
+
+func (replayAcceptingBus) Close() error { return nil }
+
+type replayAcceptingSub struct{}
+
+func (replayAcceptingSub) Unsubscribe() error { return nil }
+
 func TestRefreshBrokerSpoke_ReturnsReplayError(t *testing.T) {
 	mgr := newMockIntegrationManager()
 	mgr.plugins["discord"] = map[string]string{}
@@ -2776,7 +2797,7 @@ func TestRefreshBrokerSpoke_ReturnsReplayError(t *testing.T) {
 
 	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
 		{Name: "inprocess", Bus: eventbus.NewInProcessEventBus(slog.Default())},
-		{Name: "discord", Bus: eventbus.NewInProcessEventBus(slog.Default())},
+		{Name: "discord", Bus: replayAcceptingBus{}},
 	}, slog.Default())
 	_, err := fanout.Subscribe("agent.>", func(context.Context, string, *messages.StructuredMessage) {})
 	require.NoError(t, err)
@@ -2789,7 +2810,7 @@ func TestRefreshBrokerSpoke_ReturnsReplayError(t *testing.T) {
 	assert.True(t, fanout.HasSpoke("discord"))
 
 	// A missing spoke is added (no subscription to replay fails here).
-	mgr.brokers["telegram"] = eventbus.NewInProcessEventBus(slog.Default())
+	mgr.brokers["telegram"] = replayAcceptingBus{}
 	require.NoError(t, srv.refreshBrokerSpoke(mgr, "telegram"))
 	assert.True(t, fanout.HasSpoke("telegram"))
 }
@@ -2812,7 +2833,7 @@ func (m *supervisionWiringRecorder) OnBrokerRestart(h plugin.BrokerRestartHook) 
 
 func TestSetPluginManager_WiresBrokerSupervision(t *testing.T) {
 	rec := &supervisionWiringRecorder{mockIntegrationManager: newMockIntegrationManager()}
-	rec.plugins["discord"] = map[string]string{"bot_token": "inline"}
+	rec.plugins["discord"] = map[string]string{"guild_id": "inline"}
 	newBus := eventbus.NewInProcessEventBus(slog.Default())
 	rec.brokers = map[string]eventbus.EventBus{"discord": newBus}
 
@@ -2821,7 +2842,7 @@ func TestSetPluginManager_WiresBrokerSupervision(t *testing.T) {
 	srv.transportAudience = "aud"
 	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
 		{Name: "inprocess", Bus: eventbus.NewInProcessEventBus(slog.Default())},
-		{Name: "discord", Bus: eventbus.NewInProcessEventBus(slog.Default())},
+		{Name: "discord", Bus: replayAcceptingBus{}},
 	}, slog.Default())
 	srv.SetMessageBrokerProxy(NewMessageBrokerProxy(fanout, nil, nil, nil, slog.Default()))
 	srv.SetPluginManager(rec)
@@ -2829,7 +2850,7 @@ func TestSetPluginManager_WiresBrokerSupervision(t *testing.T) {
 	require.NotNil(t, rec.provider, "config provider registered")
 	cfg, err := rec.provider(context.Background(), "discord")
 	require.NoError(t, err)
-	assert.Equal(t, "inline", cfg["bot_token"], "plugin config carried")
+	assert.Equal(t, "inline", cfg["guild_id"], "plugin config carried")
 	assert.Equal(t, "discord", cfg["plugin_name"], "hub credentials added")
 	assert.Equal(t, "iap", cfg["transport_mode"])
 
@@ -2845,7 +2866,7 @@ func TestRestartIntegration_ReportsSpokeRefreshFailure(t *testing.T) {
 
 	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
 		{Name: "inprocess", Bus: eventbus.NewInProcessEventBus(slog.Default())},
-		{Name: "discord", Bus: eventbus.NewInProcessEventBus(slog.Default())},
+		{Name: "discord", Bus: replayAcceptingBus{}},
 	}, slog.Default())
 	_, err := fanout.Subscribe("agent.>", func(context.Context, string, *messages.StructuredMessage) {})
 	require.NoError(t, err)
@@ -2896,11 +2917,18 @@ func (hmacWriteFailStore) CreateBrokerSecret(context.Context, *store.BrokerSecre
 	return errors.New("database is locked")
 }
 
-// listProjectsFailStore is a store whose ListProjects fails.
-type listProjectsFailStore struct{ store.Store }
+// listProjectsFailStore is a store whose ListProjects fails while its fault
+// switch is armed.
+type listProjectsFailStore struct {
+	store.Store
+	fault *storeFaultSwitch
+}
 
-func (listProjectsFailStore) ListProjects(context.Context, store.ProjectFilter, store.ListOptions) (*store.ListResult[store.Project], error) {
-	return nil, errors.New("database is locked")
+func (l *listProjectsFailStore) ListProjects(ctx context.Context, f store.ProjectFilter, o store.ListOptions) (*store.ListResult[store.Project], error) {
+	if l.fault.Active() {
+		return nil, errors.New("database is locked")
+	}
+	return l.Store.ListProjects(ctx, f, o)
 }
 
 func TestSupervisionConfigProvider_ReportsUnreadableInputs(t *testing.T) {
@@ -2925,8 +2953,11 @@ func TestSupervisionConfigProvider_ReportsUnreadableInputs(t *testing.T) {
 			t.Cleanup(svc.Close)
 			srv.brokerAuthService = svc
 		}},
-		{name: "project list failure", wantErr: "project slug map", setup: func(_ *testing.T, srv *Server, st store.Store, _ *supervisionWiringRecorder) {
-			srv.store = listProjectsFailStore{st}
+		{name: "project list failure", wantErr: "project slug map", setup: func(t *testing.T, srv *Server, _ store.Store, _ *supervisionWiringRecorder) {
+			_, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *listProjectsFailStore {
+				return &listProjectsFailStore{Store: inner, fault: f}
+			})
+			fault.Arm()
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
