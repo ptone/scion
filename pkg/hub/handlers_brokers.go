@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -682,7 +683,7 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 	// the token is consumed. Its token has crossed the network in the clear,
 	// so it is revoked when it is the broker's pending token (and only
 	// then: a wrong token revokes nothing).
-	if !confidentialArrival(r, s.transportTrustedNets) {
+	if !config.ConfidentialArrival(r, s.transportTrustedNets) {
 		revoked, revokeErr := s.brokerAuthService.RevokeExposedJoinToken(r.Context(), req.BrokerID, req.JoinToken)
 		if revokeErr != nil {
 			slog.Error("Failed to revoke a join token sent without TLS", "brokerID", req.BrokerID, "error", revokeErr)
