@@ -39,8 +39,8 @@ import (
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/accounting"
 	"github.com/rclone/rclone/fs/config/configmap"
+	"github.com/rclone/rclone/fs/operations"
 	"github.com/rclone/rclone/fs/rc"
-	"github.com/rclone/rclone/fs/sync"
 	"github.com/rclone/rclone/fs/walk"
 	// Import rclone backends for remote template support
 	// GCS and local are already imported in gcp/storage.go
@@ -837,14 +837,11 @@ func copyDirExcludingGit(baseDir, subPath, dst string, budget *fetchBudget) erro
 			if d.Name() == ".git" {
 				return iofs.SkipDir
 			}
-			if err := budget.entry(); err != nil {
-				return err
-			}
 			info, err := d.Info()
 			if err != nil {
 				return err
 			}
-			return dstRoot.MkdirAll(rel, dirPerm(info.Mode()))
+			return budget.mkdirAll(dstRoot, rel, dirPerm(info.Mode()))
 		case d.Type().IsRegular():
 			return copyRegularFileNoFollow(srcRoot, srcName, dstRoot, rel, budget)
 		default:
@@ -919,10 +916,8 @@ func writeFileInRoot(root *os.Root, name string, r io.Reader, mode iofs.FileMode
 	if err := budget.entry(); err != nil {
 		return err
 	}
-	if dir := filepath.Dir(name); dir != "." {
-		if err := root.MkdirAll(dir, 0755); err != nil {
-			return err
-		}
+	if err := budget.mkdirAll(root, filepath.Dir(name), 0755); err != nil {
+		return err
 	}
 	out, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode.Perm())
 	if err != nil {
@@ -999,6 +994,21 @@ func extractZip(zipPath, destPath string, budget *fetchBudget) error {
 	}
 	defer func() { _ = r.Close() }()
 
+	// Check the central directory against the limits before writing
+	// anything (one extra entry for a stripped common root directory). The
+	// declared sizes are checked by archive/zip when the entries are read,
+	// and the bytes written are limited again by budget.
+	if len(r.File) > budget.maxEntries+1 {
+		return fmt.Errorf("%w: more than %d files and directories", ErrRemoteTemplateTooLarge, budget.maxEntries)
+	}
+	var declared uint64
+	for _, f := range r.File {
+		declared += f.UncompressedSize64
+		if declared > uint64(budget.maxBytes) {
+			return fmt.Errorf("%w: more than %d bytes", ErrRemoteTemplateTooLarge, budget.maxBytes)
+		}
+	}
+
 	root, err := os.OpenRoot(destPath)
 	if err != nil {
 		return fmt.Errorf("failed to open destination directory: %w", err)
@@ -1033,10 +1043,7 @@ func extractZip(zipPath, destPath string, budget *fetchBudget) error {
 
 		mode := f.Mode()
 		if mode.IsDir() {
-			if err := budget.entry(); err != nil {
-				return err
-			}
-			if err := root.MkdirAll(name, dirPerm(mode)); err != nil {
+			if err := budget.mkdirAll(root, name, dirPerm(mode)); err != nil {
 				return err
 			}
 			continue
@@ -1067,8 +1074,11 @@ func extractZip(zipPath, destPath string, budget *fetchBudget) error {
 // every write goes through an os.Root opened at destPath, so all writes stay
 // inside it.
 //
-// Every directory and file written is charged to budget, and the scan for a
-// common root counts headers against the same entry limit.
+// Limits: every directory and file written is charged to budget. The first
+// pass counts every header against the entry limit and sums the declared
+// entry sizes against the byte limit, before anything is written. Both
+// passes read the decompressed stream through budget.tarStreamLimit, so
+// skipped entry bodies and header records are bounded too.
 func extractTarGz(tarGzPath, destPath string, budget *fetchBudget) error {
 	f, err := os.Open(tarGzPath)
 	if err != nil {
@@ -1087,8 +1097,10 @@ func extractTarGz(tarGzPath, destPath string, budget *fetchBudget) error {
 	// metadata entries must be skipped or they break common-root detection
 	// (GitHub tarballs start with a pax_global_header entry whose name
 	// does not share the repo-root prefix).
-	tarReader := tar.NewReader(gzr)
+	tarReader := tar.NewReader(&limitedStream{r: gzr, limit: budget.tarStreamLimit()})
 	var entries []string
+	headers := 0
+	var declared int64
 	for {
 		header, err := tarReader.Next()
 		if err == io.EOF {
@@ -1097,13 +1109,21 @@ func extractTarGz(tarGzPath, destPath string, budget *fetchBudget) error {
 		if err != nil {
 			return fmt.Errorf("failed to read tar header: %w", err)
 		}
+		// Every header counts, whatever its type. Two more than the entry
+		// limit are allowed: the common root directory (stripped, not
+		// written) and a pax global header.
+		headers++
+		if headers > budget.maxEntries+2 {
+			return fmt.Errorf("%w: more than %d files and directories", ErrRemoteTemplateTooLarge, budget.maxEntries)
+		}
+		if header.Size > 0 {
+			declared += header.Size
+			if declared > budget.maxBytes {
+				return fmt.Errorf("%w: more than %d bytes", ErrRemoteTemplateTooLarge, budget.maxBytes)
+			}
+		}
 		if header.Typeflag == tar.TypeDir || header.Typeflag == tar.TypeReg || header.Typeflag == tar.TypeSymlink {
 			entries = append(entries, header.Name)
-			// One more than the entry limit: the scan also sees the
-			// common root directory, which is stripped and not written.
-			if len(entries) > budget.maxEntries+1 {
-				return fmt.Errorf("%w: more than %d files and directories", ErrRemoteTemplateTooLarge, budget.maxEntries)
-			}
 		}
 	}
 
@@ -1129,7 +1149,7 @@ func extractTarGz(tarGzPath, destPath string, budget *fetchBudget) error {
 	}
 	defer func() { _ = gzr.Close() }()
 
-	tarReader = tar.NewReader(gzr)
+	tarReader = tar.NewReader(&limitedStream{r: gzr, limit: budget.tarStreamLimit()})
 
 	root, err := os.OpenRoot(destPath)
 	if err != nil {
@@ -1164,10 +1184,7 @@ func extractTarGz(tarGzPath, destPath string, budget *fetchBudget) error {
 
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := budget.entry(); err != nil {
-				return err
-			}
-			if err := root.MkdirAll(name, dirPerm(os.FileMode(header.Mode))); err != nil {
+			if err := budget.mkdirAll(root, name, dirPerm(os.FileMode(header.Mode))); err != nil {
 				return err
 			}
 		case tar.TypeReg:
@@ -1277,21 +1294,24 @@ func execRcloneFetch(ctx context.Context, remote RcloneRemote, creds RemoteFetch
 // rcloneFetchSeq numbers the per-fetch rclone stats groups.
 var rcloneFetchSeq atomic.Uint64
 
-// rcloneCopyLimited syncs srcFs into destPath within the template fetch
-// limits: the source listing is counted first (entries and sizes), and the
-// sync runs with a hard transfer cutoff at the byte limit, so an object that
-// grows after the listing cannot exceed it either. The cutoff is counted in
-// a stats group of this fetch only, removed afterwards.
+// rcloneCopyLimited copies srcFs into destPath within the template fetch
+// limits. The source is listed once and checked (entry count, sizes, and
+// object names that must be local relative paths); then exactly the listed
+// objects are copied, so nothing added to the source after the listing is
+// fetched. The copy runs with a hard transfer cutoff at the byte limit, so
+// an object that grows after the listing cannot exceed it either.
 func rcloneCopyLimited(ctx context.Context, srcFs fs.Fs, destPath string) error {
-	if err := checkRcloneSourceSize(ctx, srcFs); err != nil {
+	objs, err := listRcloneSource(ctx, srcFs)
+	if err != nil {
 		return err
 	}
-	return rcloneSyncLimited(ctx, srcFs, destPath)
+	return rcloneCopyObjects(ctx, objs, destPath)
 }
 
-// rcloneSyncLimited syncs srcFs into destPath with a hard transfer cutoff at
-// the template byte limit, counted in a stats group of this call only.
-func rcloneSyncLimited(ctx context.Context, srcFs fs.Fs, destPath string) error {
+// rcloneCopyObjects copies objs into destPath with a hard transfer cutoff at
+// the template byte limit, counted in a stats group of this call only
+// (rclone's default stats group is process-wide).
+func rcloneCopyObjects(ctx context.Context, objs []fs.Object, destPath string) error {
 	dstFs, err := fs.NewFs(ctx, destPath)
 	if err != nil {
 		return fmt.Errorf("failed to create destination fs: %w", err)
@@ -1304,38 +1324,60 @@ func rcloneSyncLimited(ctx context.Context, srcFs fs.Fs, destPath string) error 
 	ci.MaxTransfer = fs.SizeSuffix(remoteFetchMaxBytes)
 	ci.CutoffMode = fs.CutoffModeHard
 
-	if err := sync.Sync(ctx, dstFs, srcFs, false); err != nil {
-		if errors.Is(err, accounting.ErrorMaxTransferLimitReached) {
-			return fmt.Errorf("%w: more than %d bytes", ErrRemoteTemplateTooLarge, remoteFetchMaxBytes)
+	for _, o := range objs {
+		if _, err := operations.Copy(ctx, dstFs, nil, o.Remote(), o); err != nil {
+			if errors.Is(err, accounting.ErrorMaxTransferLimitReached) {
+				return fmt.Errorf("%w: more than %d bytes", ErrRemoteTemplateTooLarge, remoteFetchMaxBytes)
+			}
+			return fmt.Errorf("rclone copy failed: %w", err)
 		}
-		return fmt.Errorf("rclone sync failed: %w", err)
 	}
 	return nil
 }
 
-// checkRcloneSourceSize lists srcFs recursively and refuses it once it
-// passes the template entry or byte limit.
-func checkRcloneSourceSize(ctx context.Context, srcFs fs.Fs) error {
+// listRcloneSource lists srcFs recursively and returns its objects. It
+// refuses the source once it passes the template entry or byte limit, or
+// when an object name is not a local relative path.
+func listRcloneSource(ctx context.Context, srcFs fs.Fs) ([]fs.Object, error) {
 	budget := templateBudget()
+	var objs []fs.Object
 	err := walk.ListR(ctx, srcFs, "", true, -1, walk.ListAll, func(entries fs.DirEntries) error {
 		for _, e := range entries {
 			if err := budget.entry(); err != nil {
 				return err
 			}
-			if o, ok := e.(fs.Object); ok && o.Size() > 0 {
+			if err := checkRcloneEntryName(e.Remote()); err != nil {
+				return err
+			}
+			o, ok := e.(fs.Object)
+			if !ok {
+				continue
+			}
+			if o.Size() > 0 {
 				budget.bytes += o.Size()
 				if budget.bytes > budget.maxBytes {
 					return fmt.Errorf("%w: more than %d bytes", ErrRemoteTemplateTooLarge, budget.maxBytes)
 				}
 			}
+			objs = append(objs, o)
 		}
 		return nil
 	})
 	if err != nil {
-		if errors.Is(err, ErrRemoteTemplateTooLarge) {
-			return err
+		if errors.Is(err, ErrRemoteTemplateTooLarge) || errors.Is(err, errRemoteContentRefused) {
+			return nil, err
 		}
-		return fmt.Errorf("failed to list source: %w", err)
+		return nil, fmt.Errorf("failed to list source: %w", err)
+	}
+	return objs, nil
+}
+
+// checkRcloneEntryName refuses a listed entry name that is not a local
+// relative path (absolute, "..", or with a backslash), so a copy can only
+// write inside the destination.
+func checkRcloneEntryName(remote string) error {
+	if remote == "" || strings.Contains(remote, "\\") || !filepath.IsLocal(filepath.FromSlash(remote)) {
+		return fmt.Errorf("source entry name is not a relative path: %w", errRemoteContentRefused)
 	}
 	return nil
 }

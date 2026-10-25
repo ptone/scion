@@ -17,6 +17,7 @@ package config
 import (
 	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
@@ -296,20 +297,164 @@ func TestRcloneCopyLimited_ListingLimits(t *testing.T) {
 	}
 }
 
-// The rclone sync itself runs with a hard cutoff at the byte limit (the
-// guard for a source that grows after the listing), counted per fetch: two
-// fetches each under the limit both succeed.
-func TestRcloneSyncLimited_HardCutoffPerFetch(t *testing.T) {
-	setFetchLimitsForTest(t, 1000, 100, 1<<20, 100, 1<<20)
-	big := localRcloneSource(t, 1, 5000)
-	assert.ErrorIs(t, rcloneSyncLimited(context.Background(), big, t.TempDir()), ErrRemoteTemplateTooLarge)
+// listForTest lists src with the limits raised, for tests of the copy step.
+func listForTest(t *testing.T, src fs.Fs) []fs.Object {
+	t.Helper()
+	pb, pe := remoteFetchMaxBytes, remoteFetchMaxEntries
+	remoteFetchMaxBytes, remoteFetchMaxEntries = 1<<30, 1<<20
+	defer func() { remoteFetchMaxBytes, remoteFetchMaxEntries = pb, pe }()
+	objs, err := listRcloneSource(context.Background(), src)
+	require.NoError(t, err)
+	return objs
+}
 
-	small := localRcloneSource(t, 1, 600)
+// The rclone copy itself runs with a hard cutoff at the byte limit (the
+// guard for an object that grows after the listing), counted per fetch: a
+// run of fetches each under the limit all succeed.
+func TestRcloneCopyObjects_HardCutoffPerFetch(t *testing.T) {
+	big := listForTest(t, localRcloneSource(t, 1, 5000))
+	small := listForTest(t, localRcloneSource(t, 1, 600))
+	setFetchLimitsForTest(t, 1000, 100, 1<<20, 100, 1<<20)
+	assert.ErrorIs(t, rcloneCopyObjects(context.Background(), big, t.TempDir()), ErrRemoteTemplateTooLarge)
+
 	for i := 0; i < 3; i++ {
 		dest := t.TempDir()
-		require.NoError(t, rcloneSyncLimited(context.Background(), small, dest), "fetch %d", i)
+		require.NoError(t, rcloneCopyObjects(context.Background(), small, dest), "fetch %d", i)
 		assert.Equal(t, 1, dirFileCount(t, dest))
 	}
+}
+
+// Only the listed objects are copied: an object added to the source after
+// the listing is not fetched, so the entry count cannot grow past the
+// checked listing.
+func TestRcloneCopyObjects_OnlyListedObjects(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "a"), []byte("a"), 0o644))
+	src, err := fs.NewFs(context.Background(), dir)
+	require.NoError(t, err)
+	objs := listForTest(t, src)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "late"), []byte("late"), 0o644))
+
+	dest := t.TempDir()
+	require.NoError(t, rcloneCopyObjects(context.Background(), objs, dest))
+	assert.FileExists(t, filepath.Join(dest, "a"))
+	assert.NoFileExists(t, filepath.Join(dest, "late"))
+}
+
+func TestCheckRcloneEntryName(t *testing.T) {
+	for _, ok := range []string{"a", "a/b", "dir/file.txt", ".hidden"} {
+		assert.NoError(t, checkRcloneEntryName(ok), ok)
+	}
+	for _, bad := range []string{"", "..", "../x", "a/../../x", "/etc/passwd", `a\b`, `..\x`} {
+		assert.ErrorIs(t, checkRcloneEntryName(bad), errRemoteContentRefused, bad)
+	}
+}
+
+// The tar scan counts every header, whatever its type, and sums the
+// declared sizes, before anything is written.
+func TestExtractTarGz_ScanCountsEveryHeaderAndDeclaredSize(t *testing.T) {
+	var fifos []tarEntry
+	for i := 0; i < 50; i++ {
+		fifos = append(fifos, tarEntry{typ: tar.TypeFifo, name: fmt.Sprintf("p%02d", i)})
+	}
+	flood := writeArchive(t, buildTarGz(t, fifos), "fifos.tar.gz")
+	dest := t.TempDir()
+	assert.ErrorIs(t, extractTarGz(flood, dest, &fetchBudget{maxBytes: 1 << 20, maxEntries: 10}), ErrRemoteTemplateTooLarge)
+	assert.Zero(t, dirFileCount(t, dest))
+
+	big := writeArchive(t, buildTarGz(t, []tarEntry{
+		{typ: tar.TypeReg, name: "small.txt", body: "x"},
+		{typ: tar.TypeReg, name: "big.bin", body: strings.Repeat("b", 5000)},
+	}), "big.tar.gz")
+	dest = t.TempDir()
+	assert.ErrorIs(t, extractTarGz(big, dest, &fetchBudget{maxBytes: 1000, maxEntries: 100}), ErrRemoteTemplateTooLarge)
+	assert.Zero(t, dirFileCount(t, dest), "refused in the scan, before any write")
+}
+
+// Header records (here a large pax record) count toward the decompressed
+// stream limit, so data that is never written is bounded too.
+func TestExtractTarGz_StreamLimitBoundsHeaderRecords(t *testing.T) {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	require.NoError(t, tw.WriteHeader(&tar.Header{
+		Typeflag: tar.TypeReg, Name: "f.txt", Size: 1, Mode: 0o644, Format: tar.FormatPAX,
+		PAXRecords: map[string]string{"comment": strings.Repeat("c", 200<<10)},
+	}))
+	_, err := tw.Write([]byte("x"))
+	require.NoError(t, err)
+	require.NoError(t, tw.Close())
+	require.NoError(t, gz.Close())
+	tgz := writeArchive(t, buf.Bytes(), "pax.tar.gz")
+
+	// Limit: 1 MiB + 102 * 16 KiB, well above the 200 KiB record.
+	require.NoError(t, extractTarGz(tgz, t.TempDir(), &fetchBudget{maxBytes: 1 << 20, maxEntries: 100}))
+	// Limit: 10 + 3 * 16 KiB, below the record.
+	assert.ErrorIs(t, extractTarGz(tgz, t.TempDir(), &fetchBudget{maxBytes: 10, maxEntries: 1}), ErrRemoteTemplateTooLarge)
+}
+
+func TestLimitedStream(t *testing.T) {
+	data, err := io.ReadAll(&limitedStream{r: strings.NewReader("0123456789"), limit: 10})
+	require.NoError(t, err, "a stream that ends exactly at the limit reads to EOF")
+	assert.Equal(t, "0123456789", string(data))
+	_, err = io.ReadAll(&limitedStream{r: strings.NewReader("0123456789A"), limit: 10})
+	assert.ErrorIs(t, err, ErrRemoteTemplateTooLarge)
+}
+
+// Directories created implicitly as parents are charged as entries, once
+// each, for tar, zip and the sub-path copy.
+func TestExtract_ImplicitParentDirsCharged(t *testing.T) {
+	// 6 directories (a, a/b, a/b/c, x, x/y, x/y/z) + 2 files = 8 entries;
+	// two top-level directories, so no common root is stripped.
+	names := []string{"a/b/c/f1", "x/y/z/f2"}
+	var tes []tarEntry
+	var zes []zipEntry
+	for _, n := range names {
+		tes = append(tes, tarEntry{typ: tar.TypeReg, name: n, body: "1"})
+		zes = append(zes, zipEntry{name: n, body: "1", mode: 0o644})
+	}
+	tgz := writeArchive(t, buildTarGz(t, tes), "deep.tar.gz")
+	zipPath := writeArchive(t, buildZip(t, zes), "deep.zip")
+	for name, fn := range map[string]func(string, *fetchBudget) error{
+		"tar": func(d string, b *fetchBudget) error { return extractTarGz(tgz, d, b) },
+		"zip": func(d string, b *fetchBudget) error { return extractZip(zipPath, d, b) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.NoError(t, fn(t.TempDir(), &fetchBudget{maxBytes: 1 << 20, maxEntries: 8}))
+			assert.ErrorIs(t, fn(t.TempDir(), &fetchBudget{maxBytes: 1 << 20, maxEntries: 7}), ErrRemoteTemplateTooLarge)
+		})
+	}
+
+	// The same budget instance charges a directory once, explicit or not.
+	b := &fetchBudget{maxBytes: 1 << 20, maxEntries: 100}
+	root, err := os.OpenRoot(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = root.Close() })
+	require.NoError(t, b.mkdirAll(root, filepath.Join("p", "q", "r"), 0o755))
+	require.NoError(t, b.mkdirAll(root, "p", 0o755))
+	require.NoError(t, b.mkdirAll(root, filepath.Join("p", "q", "s"), 0o755))
+	assert.Equal(t, 4, b.entries)
+}
+
+// The zip central directory is checked against the limits before any
+// entry is written.
+func TestExtractZip_CentralDirectoryChecked(t *testing.T) {
+	var many []zipEntry
+	for i := 0; i < 50; i++ {
+		many = append(many, zipEntry{name: fmt.Sprintf("f%02d", i), body: "1", mode: 0o644})
+	}
+	zipPath := writeArchive(t, buildZip(t, many), "many.zip")
+	dest := t.TempDir()
+	assert.ErrorIs(t, extractZip(zipPath, dest, &fetchBudget{maxBytes: 1 << 20, maxEntries: 10}), ErrRemoteTemplateTooLarge)
+	assert.Zero(t, dirFileCount(t, dest))
+
+	bigPath := writeArchive(t, buildZip(t, []zipEntry{
+		{name: "a", body: "1", mode: 0o644},
+		{name: "b", body: strings.Repeat("b", 5000), mode: 0o644},
+	}), "big.zip")
+	dest = t.TempDir()
+	assert.ErrorIs(t, extractZip(bigPath, dest, &fetchBudget{maxBytes: 1000, maxEntries: 100}), ErrRemoteTemplateTooLarge)
+	assert.Zero(t, dirFileCount(t, dest), "refused from the central directory, before any write")
 }
 
 // Through FetchRemoteTemplate, an rclone source over the limits aborts the

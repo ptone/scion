@@ -543,3 +543,16 @@ func TestWithoutRequestURL(t *testing.T) {
 	assert.ErrorIs(t, err, inner)
 	assert.Equal(t, inner, withoutRequestURL(inner))
 }
+
+// A DNS failure does not name the source host.
+func TestResolvePublic_DNSErrorWithoutHost(t *testing.T) {
+	prev := archiveLookup
+	t.Cleanup(func() { archiveLookup = prev })
+	archiveLookup = func(context.Context, string) ([]netip.Addr, error) {
+		return nil, &net.DNSError{Err: "no such host", Name: "SECRETHOST.example", IsNotFound: true}
+	}
+	_, err := resolvePublic(context.Background(), "SECRETHOST.example")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no such host")
+	assert.NotContains(t, err.Error(), "SECRET")
+}

@@ -326,7 +326,12 @@ func resolvePublic(ctx context.Context, host string) ([]netip.Addr, error) {
 	}
 	addrs, err := archiveLookup(ctx, host)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve source host: %w", err)
+		// A *net.DNSError names the host; keep only its reason.
+		var dnsErr *net.DNSError
+		if errors.As(err, &dnsErr) {
+			return nil, fmt.Errorf("failed to resolve source host: %s", dnsErr.Err)
+		}
+		return nil, errors.New("failed to resolve source host")
 	}
 	if len(addrs) == 0 {
 		return nil, errors.New("source host has no addresses")
