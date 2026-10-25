@@ -17,6 +17,7 @@
 package cmd
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -116,8 +117,10 @@ func TestTrustedProxies_LoadPathBindsTransportListOnly(t *testing.T) {
 			t.Cleanup(resetServerFlags)
 			resetServerFlags()
 			t.Setenv("SCION_SERVER_MODE", "")
-			t.Setenv("SCION_SERVER_TRUSTEDPROXIES", "")
-			t.Setenv("SCION_SERVER_TRUSTED_PROXIES", "")
+			for _, k := range []string{"SCION_SERVER_TRUSTEDPROXIES", "SCION_SERVER_TRUSTED_PROXIES"} {
+				t.Setenv(k, "") // restored after the test
+				require.NoError(t, os.Unsetenv(k))
+			}
 			writeServerSettings(t, tc.file)
 			for k, v := range tc.env {
 				t.Setenv(k, v)
