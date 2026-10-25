@@ -674,7 +674,9 @@ func TestStart_TemplateEnvFromTemplateEnvSource(t *testing.T) {
 	}
 	// Create from the hydrated cache dir, as the broker does on create.
 	env, _ := startTemplateEnv(t, context.Background(), project, "hosted", func(o *api.StartOptions) {
-		o.Template, o.TemplateName = hashDir, "web-dev"
+		// The broker keeps the request's template name and carries the
+		// hydrated directory in TemplateDir.
+		o.Template, o.TemplateDir, o.TemplateName = "web-dev", hashDir, "web-dev"
 	})
 	assertEnv(t, env, "TPL_HOSTED", "cached")
 

@@ -104,7 +104,10 @@ func TestBuildStartContext_ReusesPrehydratedTemplate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildStartContext: %v (a second template hydration was attempted?)", err)
 	}
-	if sc.Opts.Template != prehydrated {
-		t.Fatalf("launch template = %q, want the prehydrated %q", sc.Opts.Template, prehydrated)
+	if sc.Opts.TemplateDir != prehydrated {
+		t.Fatalf("launch template dir = %q, want the prehydrated %q", sc.Opts.TemplateDir, prehydrated)
+	}
+	if sc.Opts.Template != "hub-template" {
+		t.Fatalf("launch template = %q, want the request's name hub-template", sc.Opts.Template)
 	}
 }

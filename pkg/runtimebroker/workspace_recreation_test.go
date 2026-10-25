@@ -93,7 +93,8 @@ func TestApplyStartTemplateIdentity_MissingStateHydratesTemplate(t *testing.T) {
 
 	err := f.apply(startContextInputs{TemplateID: "tpl-uuid", TemplateHash: "sha256:abc"}, conn, "web-dev")
 	require.NoError(t, err)
-	assert.Equal(t, wantDir, f.opts.Template, "the recreated agent must be provisioned from its own template")
+	assert.Equal(t, wantDir, f.opts.TemplateDir, "the recreated agent must be provisioned from its own template")
+	assert.Empty(t, f.opts.Template, "the hydrated directory never goes into the template name")
 }
 
 // When the agent's broker-side state survived, the start is left exactly as
@@ -109,6 +110,7 @@ func TestApplyStartTemplateIdentity_SurvivingStateIsUnchanged(t *testing.T) {
 	err := f.apply(startContextInputs{TemplateID: "tpl-uuid", TemplateHash: "sha256:abc"}, conn, "web-dev")
 	require.NoError(t, err)
 	assert.Empty(t, f.opts.Template)
+	assert.Empty(t, f.opts.TemplateDir)
 }
 
 // A hydration failure while the agent has to be provisioned again fails the
@@ -124,6 +126,7 @@ func TestApplyStartTemplateIdentity_HydrationFailureFailsStart(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, sce.Status)
 	assert.True(t, sce.IsHubError)
 	assert.Empty(t, f.opts.Template)
+	assert.Empty(t, f.opts.TemplateDir)
 }
 
 // An older Hub sends no template identity: the start behaves as before (no
@@ -136,6 +139,7 @@ func TestApplyStartTemplateIdentity_NoIdentityKeepsPreviousBehaviour(t *testing.
 
 	require.NoError(t, f.apply(startContextInputs{}, conn, "web-dev"))
 	assert.Empty(t, f.opts.Template)
+	assert.Empty(t, f.opts.TemplateDir)
 }
 
 // ptone/scion#4524: on a start whose agent state survived, the agent's Hub
@@ -148,6 +152,7 @@ func TestApplyStartTemplateEnvSource_SurvivingStateSetsEnvSourceOnly(t *testing.
 	f.srv.applyStartTemplateEnvSource(context.Background(), startContextInputs{TemplateID: "tpl-uuid", TemplateHash: "sha256:abc"}, &f.opts, conn, "web-dev")
 	assert.Equal(t, wantDir, f.opts.TemplateEnvSource)
 	assert.Empty(t, f.opts.Template, "the env source must never become the agent's template")
+	assert.Empty(t, f.opts.TemplateDir)
 }
 
 // A hydration failure never fails the start: the env source stays unset and
@@ -159,6 +164,7 @@ func TestApplyStartTemplateEnvSource_HydrationFailureIsNotFatal(t *testing.T) {
 	f.srv.applyStartTemplateEnvSource(context.Background(), startContextInputs{TemplateID: "tpl-uuid", TemplateHash: "sha256:abc"}, &f.opts, conn, "web-dev")
 	assert.Empty(t, f.opts.TemplateEnvSource)
 	assert.Empty(t, f.opts.Template)
+	assert.Empty(t, f.opts.TemplateDir)
 }
 
 // recordTemplateHash writes broker-side image provenance recording hash as
@@ -190,6 +196,7 @@ func TestApplyStartTemplateEnvSource_CacheHitStillResolvesLive(t *testing.T) {
 	assert.NotEqual(t, cachedDir, f.opts.TemplateEnvSource, "the create-time cached copy must not be used")
 	assert.Positive(t, asked, "the Hub must be asked for the current template")
 	assert.Empty(t, f.opts.Template)
+	assert.Empty(t, f.opts.TemplateDir)
 }
 
 // An older Hub sends no template identity: the template hash recorded at
@@ -211,6 +218,7 @@ func TestApplyStartTemplateEnvSource_OlderHubCacheHitSetsEnvSource(t *testing.T)
 	f.srv.applyStartTemplateEnvSource(context.Background(), startContextInputs{}, &f.opts, conn, "web-dev")
 	assert.Equal(t, cachedDir, f.opts.TemplateEnvSource)
 	assert.Empty(t, f.opts.Template)
+	assert.Empty(t, f.opts.TemplateDir)
 }
 
 // A cache miss leaves the env source unset, silently: the agent manager
@@ -232,6 +240,7 @@ func TestApplyStartTemplateEnvSource_OlderHubCacheMissLeavesUnset(t *testing.T) 
 	f.srv.applyStartTemplateEnvSource(context.Background(), startContextInputs{}, &f.opts, conn, "web-dev")
 	assert.Empty(t, f.opts.TemplateEnvSource, "cache miss: the env source stays unset")
 	assert.Empty(t, f.opts.Template)
+	assert.Empty(t, f.opts.TemplateDir)
 }
 
 func TestRestartAgentConfig_NilWithoutInputs(t *testing.T) {

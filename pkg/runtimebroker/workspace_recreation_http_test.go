@@ -97,7 +97,8 @@ func TestStartAgent_MissingStateProvisionsFromHubTemplate(t *testing.T) {
 
 	postStart(t, srv, "gone-agent", projectDir)
 	require.Equal(t, 1, mgr.startCalls)
-	assert.Equal(t, templateDir, mgr.lastStartOpts.Template)
+	assert.Equal(t, templateDir, mgr.lastStartOpts.TemplateDir)
+	assert.Empty(t, mgr.lastStartOpts.Template, "the hydrated directory never goes into the template name")
 	assert.Equal(t, "web-dev", mgr.lastStartOpts.TemplateName)
 }
 
@@ -116,6 +117,7 @@ func TestStartAgent_SurvivingStateKeepsTemplateUnset(t *testing.T) {
 	postStart(t, srv, "kept-agent", projectDir)
 	require.Equal(t, 1, mgr.startCalls)
 	assert.Empty(t, mgr.lastStartOpts.Template)
+	assert.Empty(t, mgr.lastStartOpts.TemplateDir)
 	_, set := mgr.lastStartOpts.Env["SCION_TEMPLATE"]
 	assert.False(t, set)
 	// The template is resolved for its env fallback only (ptone/scion#4524):
@@ -193,6 +195,7 @@ func TestRestartAgent_LiveContainerAndSurvivingStateUnchanged(t *testing.T) {
 	assert.Equal(t, projectDir, opts.ProjectPath, "the request's project wins over the container's recorded path")
 	assert.False(t, opts.FreshProvision)
 	assert.Empty(t, opts.Template)
+	assert.Empty(t, opts.TemplateDir)
 	// The template is resolved for its env fallback only (ptone/scion#4524).
 	assert.NotEmpty(t, opts.TemplateEnvSource, "the template env source must be resolved on a restart")
 }
@@ -223,6 +226,7 @@ func TestRestartAgent_LiveContainerAndSurvivingStateUnchanged_HubNative(t *testi
 	assert.Equal(t, projectPath, opts.ProjectPath, "the project is resolved from the slug")
 	assert.False(t, opts.FreshProvision)
 	assert.Empty(t, opts.Template)
+	assert.Empty(t, opts.TemplateDir)
 	// The template is resolved for its env fallback only (ptone/scion#4524).
 	assert.NotEmpty(t, opts.TemplateEnvSource, "the template env source must be resolved on a restart")
 }

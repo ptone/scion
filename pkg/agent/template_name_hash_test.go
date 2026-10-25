@@ -216,7 +216,7 @@ func TestProvisionAgent_HashTemplateDirRecordsSlug(t *testing.T) {
 			if tt.slug != "" {
 				ctx = api.ContextWithTemplateName(ctx, tt.slug)
 			}
-			agentHome, _, _, err := ProvisionAgent(ctx, "hydrated-agent", cacheDir, "", "", scionDir, "", "", "", "")
+			agentHome, _, _, err := ProvisionAgent(api.ContextWithTemplateDir(ctx, cacheDir), "hydrated-agent", cacheDir, "", "", scionDir, "", "", "", "")
 			if err != nil {
 				t.Fatalf("ProvisionAgent: %v", err)
 			}
@@ -383,7 +383,7 @@ profiles:
 			}
 
 			if _, err := mgr.Start(context.Background(), api.StartOptions{
-				Name: "hash-agent", Template: hashDir, TemplateName: tt.slug,
+				Name: "hash-agent", TemplateDir: hashDir, TemplateName: tt.slug,
 				ProjectPath: projectScionDir, NoAuth: true,
 			}); err != nil {
 				t.Fatalf("create Start: %v", err)
@@ -466,7 +466,7 @@ func TestProvisionAndReprovision_HashTemplateRecordsSlug(t *testing.T) {
 
 	mgr := NewManager(&runtime.MockRuntime{})
 	if _, err := mgr.Provision(context.Background(), api.StartOptions{
-		Name: agentName, Template: hashDir, TemplateName: "web-dev",
+		Name: agentName, TemplateDir: hashDir, TemplateName: "web-dev",
 		ProjectPath: scionDir, BrokerMode: true, GitClone: gc,
 	}); err != nil {
 		t.Fatalf("Provision: %v", err)
@@ -478,7 +478,7 @@ func TestProvisionAndReprovision_HashTemplateRecordsSlug(t *testing.T) {
 	// Reprovision requires a real clone in the workspace.
 	_ = os.MkdirAll(filepath.Join(scionDir, "agents", agentName, "workspace", ".git"), 0o755)
 	if _, err := mgr.Reprovision(context.Background(), api.StartOptions{
-		Name: agentName, Template: hashDir, TemplateName: "web-dev-v2",
+		Name: agentName, TemplateDir: hashDir, TemplateName: "web-dev-v2",
 		ProjectPath: scionDir, BrokerMode: true, GitClone: gc,
 	}); err != nil {
 		t.Fatalf("Reprovision: %v", err)

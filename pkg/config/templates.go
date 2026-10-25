@@ -730,6 +730,12 @@ func findOrHydrateDefaultTemplate(projectPath string, refCtx TemplateRefContext)
 // refCtx says where name comes from, as for FindTemplateInProjectPath; the
 // default layer is looked up the same way.
 func GetTemplateChainInProject(name, projectPath string, refCtx TemplateRefContext) ([]*Template, error) {
+	// No template name is the default chain. (An empty name used to be
+	// joined onto the template directory and resolve to the directory itself,
+	// a layer without config: in effect the default chain.)
+	if name == "" {
+		name = "default"
+	}
 	if name == "default" {
 		tpl, err := findOrHydrateDefaultTemplate(projectPath, refCtx)
 		if err != nil {

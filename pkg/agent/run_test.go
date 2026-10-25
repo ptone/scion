@@ -513,7 +513,7 @@ profiles:
 
 	_, err := mgr.Start(context.Background(), api.StartOptions{
 		Name:        "test-agent",
-		Template:    hydratedTplDir, // absolute path, simulating hydrated template
+		TemplateDir: hydratedTplDir, // broker-hydrated template directory
 		ProjectPath: projectScionDir,
 		NoAuth:      true,
 	})

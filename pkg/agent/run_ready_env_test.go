@@ -122,7 +122,7 @@ profiles:
 			}
 
 			if _, err := mgr.Start(context.Background(), api.StartOptions{
-				Name: "ready-agent", Template: tplDir, ProjectPath: projectScionDir, NoAuth: true,
+				Name: "ready-agent", TemplateDir: tplDir, ProjectPath: projectScionDir, NoAuth: true,
 			}); err != nil {
 				t.Fatalf("create Start: %v", err)
 			}
