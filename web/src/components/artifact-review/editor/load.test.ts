@@ -361,3 +361,33 @@ describe('link reference definitions of the opening text', () => {
     expect(defsOf(s)).toBe('[p]: /plan "Plan"');
   });
 });
+
+describe('opening a 200 kB document', () => {
+  /**
+   * The load budget in happy-dom, well above its usual time (about 2 s
+   * where the browser takes about 1.2 s) so a slow machine does not fail
+   * it, and well below what reading the whole text again for every block,
+   * or parsing it several times, would take.
+   */
+  const BUDGET_MS = 6000;
+
+  it.each([false, true])(
+    'opens within the load budget (hazardous: %s)',
+    (hazard) => {
+      const md = largeDoc(hazard);
+      expect(md.length).toBeGreaterThan(200_000);
+      const times: number[] = [];
+      for (let k = 0; k < 3; k++) {
+        const s = new ReviewSession(core);
+        const t0 = performance.now();
+        expect(s.load(md)).toBe(true);
+        times.push(performance.now() - t0);
+        expect(s.isHazardous).toBe(hazard);
+      }
+      times.sort((a, b) => a - b);
+      expect(core.view.state.doc.childCount).toBeGreaterThan(3500);
+      expect(times[1]).toBeLessThan(BUDGET_MS);
+    },
+    120_000
+  );
+});
