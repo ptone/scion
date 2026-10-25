@@ -211,9 +211,8 @@ type MultiKeyBrokerAuthMiddleware struct {
 	enabled              bool
 	// seen remembers the signed requests already served (by their verified
 	// signature bytes), until their timestamps leave the accepted window, so
-	// each is served once. It is
-	// this middleware's own set, not the conduit guard's: a conduit request
-	// passes the guard and then this middleware.
+	// each is served once. It is this middleware's own set, not the conduit
+	// guard's: a conduit request passes the guard and then this middleware.
 	seen *seenOnce
 }
 

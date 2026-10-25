@@ -242,12 +242,21 @@ func signedHeaderListed(list, name string) bool {
 	return false
 }
 
-// seenOnce remembers keys until their expiry: a key is refused while now
-// is not after its expiry. Expired keys are dropped on each add, so it
-// holds at most the keys of one acceptance window.
+// seenOnce remembers keys until their expiry: a key is refused while it is
+// held. Expired keys are dropped on each add, so it holds at most the keys
+// of one acceptance window.
+//
+// Callers pass the now they checked the request against, which can be
+// older than another caller's now (a request body read after the check,
+// or scheduling). So add also refuses any key whose expiry is before the
+// latest now it has swept with: such a key may already have been dropped,
+// and accepting it could serve the same request twice. Only a request at
+// the very edge of its window is refused this way, which is the safe side.
 type seenOnce struct {
 	mu   sync.Mutex
 	keys map[string]time.Time
+	// sweptTo is the latest now any add has swept with.
+	sweptTo time.Time
 }
 
 func newSeenOnce() *seenOnce { return &seenOnce{keys: map[string]time.Time{}} }
@@ -256,10 +265,16 @@ func newSeenOnce() *seenOnce { return &seenOnce{keys: map[string]time.Time{}} }
 func (s *seenOnce) add(key string, expiry, now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if now.After(s.sweptTo) {
+		s.sweptTo = now
+	}
 	for k, exp := range s.keys {
-		if now.After(exp) {
+		if s.sweptTo.After(exp) {
 			delete(s.keys, k)
 		}
+	}
+	if s.sweptTo.After(expiry) {
+		return false
 	}
 	if _, ok := s.keys[key]; ok {
 		return false

@@ -420,6 +420,19 @@ func TestSeenOnce_EvictsAfterWindow(t *testing.T) {
 	assert.Equal(t, 2, n)
 }
 
+// TestSeenOnce_RefusesExpiryBeforeSweep: a key whose expiry is before a
+// time another add already swept with is refused, even if that add dropped
+// it: the caller's own now can be older than the sweep.
+func TestSeenOnce_RefusesExpiryBeforeSweep(t *testing.T) {
+	s := newSeenOnce()
+	t0 := time.Date(2026, 10, 25, 0, 0, 0, 0, time.UTC)
+	assert.True(t, s.add("a", t0, t0.Add(-time.Second)), "first use, inside the window")
+	assert.True(t, s.add("b", t0.Add(10*time.Second), t0.Add(time.Nanosecond)), "another key, after a's expiry")
+	assert.False(t, s.add("a", t0, t0), "a again, checked at its expiry but after the sweep that dropped it")
+	assert.False(t, s.add("c", t0, t0), "a new key whose expiry is before the sweep")
+	assert.True(t, s.add("d", t0.Add(time.Nanosecond), t0), "a key expiring exactly at the sweep time")
+}
+
 // passAllChecker serves every request (handler tests that are not about
 // the guard).
 type passAllChecker struct{}
@@ -480,6 +493,9 @@ func TestConduitRPCGuard_RepeatAtWindowEdgeRefused(t *testing.T) {
 	var nowNanos atomic.Int64
 	g := newGuardFixture(t, "inc-1", conduit.BrokerRPCs(), func(guard *conduitRPCGuard) {
 		guard.now = func() time.Time { return time.Unix(0, nowNanos.Load()) }
+		// Its own set: the injected clock must not move the process-wide
+		// set's sweep time for other tests.
+		guard.seen = newSeenOnce()
 	})
 	const path = "/api/v1/images/status"
 	headers := g.signedHeaders(t, http.MethodGet, path, "", nil, signOpts{})

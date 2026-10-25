@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/base64"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -815,6 +816,60 @@ func TestBrokerAuth_ReframedNonceRefused(t *testing.T) {
 			}
 			if got := tg.served.Load(); got != 1 {
 				t.Errorf("handler served %d requests, want 1", got)
+			}
+		})
+	}
+}
+
+// TestBrokerAuth_SlowBodyRepeatRefused: a copy of a served request that
+// passes the clock skew check just before its window ends, but whose body
+// arrives only after another request swept past the window, is refused.
+func TestBrokerAuth_SlowBodyRepeatRefused(t *testing.T) {
+	secret := []byte("repeat-test-secret-32bytes!!!!!!")
+	const skew = 3 * time.Second
+	for _, tg := range brokerAuthTargets(secret, skew) {
+		t.Run(tg.name, func(t *testing.T) {
+			t.Parallel()
+			signed := newRepeatTestRequest()
+			signRequest(signed, "broker-1", secret)
+			ts, err := strconv.ParseInt(signed.Header.Get(apiclient.HeaderTimestamp), 10, 64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			windowEnd := time.Unix(ts, 0).Add(skew)
+
+			if rr := serveOnce(tg.handler, copyOfSigned(signed)); rr.Code != http.StatusOK {
+				t.Fatalf("first request: got %d, want 200 (%s)", rr.Code, rr.Body.String())
+			}
+
+			// The copy passes the clock skew check 1.5s before its window
+			// ends; its body is held until released.
+			time.Sleep(time.Until(windowEnd.Add(-1500 * time.Millisecond)))
+			pr, pw := io.Pipe()
+			slow := httptest.NewRequest(http.MethodPost, repeatTestPath, pr)
+			slow.ContentLength = int64(len(repeatTestBody))
+			slow.Header = signed.Header.Clone()
+			done := make(chan *httptest.ResponseRecorder, 1)
+			go func() { done <- serveOnce(tg.handler, slow) }()
+
+			// Another request, after the copy's window has ended.
+			time.Sleep(time.Until(windowEnd.Add(500 * time.Millisecond)))
+			other := newRepeatTestRequest()
+			signRequest(other, "broker-1", secret)
+			if rr := serveOnce(tg.handler, other); rr.Code != http.StatusOK {
+				t.Fatalf("other request: got %d, want 200 (%s)", rr.Code, rr.Body.String())
+			}
+
+			if _, err := pw.Write(repeatTestBody); err != nil {
+				t.Fatal(err)
+			}
+			_ = pw.Close()
+			rr := <-done
+			if rr.Code != http.StatusUnauthorized || !strings.Contains(rr.Body.String(), "request already served") {
+				t.Fatalf("slow copy: got %d %q, want 401 request already served", rr.Code, rr.Body.String())
+			}
+			if got := tg.served.Load(); got != 2 {
+				t.Errorf("handler served %d requests, want 2", got)
 			}
 		})
 	}
