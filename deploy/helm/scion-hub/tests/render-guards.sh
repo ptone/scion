@@ -1011,7 +1011,7 @@ reject "trustedProxies IPv4-mapped /128" "Use the plain IPv4 form" --set 'hub.tr
 reject "trustedProxies leading single colon with ::" "entry \":1::\" is not an IP address or a CIDR" --set 'hub.trustedProxies={:1::}'
 reject "trustedProxies leading single colon, :: in the middle" "entry \":1::2\" is not an IP address or a CIDR" --set 'hub.trustedProxies={:1::2}'
 reject "trustedProxies trailing single colon with ::" "entry \"1::2:\" is not an IP address or a CIDR" --set 'hub.trustedProxies={1::2:}'
-reject "trusted_proxies as a string through config.extra" "a non-list value here makes it skip the entire server block" \
+reject "trusted_proxies as a string through config.extra" "a non-list value here is a decode error that makes it skip the entire server block" \
   --set-json 'hub.trustedProxies=[]' --set-json 'config.extra={"server":{"trusted_proxies":"10.0.0.0/8"}}'
 # Octets are written without leading zeros, as the hub parses them. Prefixes
 # are too, which is stricter than the hub but keeps Sprig's int from reading a

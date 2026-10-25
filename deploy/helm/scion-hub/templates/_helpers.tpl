@@ -4434,9 +4434,9 @@ Mirrors parseTrustedProxy (pkg/config/trusted_proxies.go in the hub):
 - An IPv4-mapped IPv6 address (any spelling with ffff after zero groups) is
   accepted only without a prefix. With a prefix it is an IPv4-mapped range,
   which the hub refuses because it never matches a peer, so the plain IPv4
-  form is required. The spelling test also catches ffff in any group after
-  leading zero groups, inside the reserved ::/8 block, which the hub would
-  accept; that is deliberately stricter.
+  form is required. The spelling test also catches ffff in any group but the
+  last, after leading zero groups, inside the reserved ::/8 block, which the
+  hub would accept; that is deliberately stricter.
 - Prefixes are also written without leading zeros. That is stricter than the
   hub, and avoids Sprig's int reading a leading zero as octal.
 */}}
@@ -4505,10 +4505,10 @@ Mirrors parseTrustedProxy (pkg/config/trusted_proxies.go in the hub):
 {{/*
 server.trusted_proxies on the MERGED settings document, so an entry that
 arrives through config.extra is held to the same rules as hub.trustedProxies.
-The settings file must carry a list. The hub decodes the server block
-strictly (loadServerFromSettingsFile, yaml.v3 into a []string field), and a
-non-list value makes it skip the entire server block, silently falling back to
-its defaults. Each item is split on commas as the hub splits it, and empty
+The settings file must carry a list. The hub decodes the server block as one
+unit (loadServerFromSettingsFile, yaml.v3 into a []string field), and a
+non-list value here is a decode error that makes it skip the entire server
+block, silently falling back to its defaults. Each item is split on commas as the hub splits it, and empty
 items are dropped as the hub drops them.
 */}}
 {{- define "scion-hub.assertTrustedProxies" -}}
@@ -4519,7 +4519,7 @@ items are dropped as the hub drops them.
 {{- if kindIs "slice" $raw }}
 {{- range $raw }}{{- $items = concat $items (splitList "," (toString .)) }}{{- end }}
 {{- else if not (kindIs "invalid" $raw) }}
-{{- fail (printf "server.trusted_proxies is %s; it must be a YAML list of IPs or CIDRs. The hub decodes the server block strictly, and a non-list value here makes it skip the entire server block. Write a YAML list, or set the entries with hub.trustedProxies." (include "scion-hub.diagValue" (toString $raw))) }}
+{{- fail (printf "server.trusted_proxies is %s; it must be a YAML list of IPs or CIDRs. The hub decodes the server block as one unit; a non-list value here is a decode error that makes it skip the entire server block. Write a YAML list, or set the entries with hub.trustedProxies." (include "scion-hub.diagValue" (toString $raw))) }}
 {{- end }}
 {{- range $items }}
 {{- $e := trim . }}
