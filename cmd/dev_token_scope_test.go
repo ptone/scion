@@ -16,6 +16,8 @@ package cmd
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -31,15 +33,32 @@ import (
 // Authorization header of every request.
 func authHeaderHub(t *testing.T) (*httptest.Server, func() []string) {
 	t.Helper()
+	return newRecordingHub(t, false)
+}
+
+// authHeaderHubTLS is authHeaderHub served over TLS (httptest's certificate).
+func authHeaderHubTLS(t *testing.T) (*httptest.Server, func() []string) {
+	t.Helper()
+	return newRecordingHub(t, true)
+}
+
+// newRecordingHub starts the recording hub, over TLS when withTLS is set.
+func newRecordingHub(t *testing.T, withTLS bool) (*httptest.Server, func() []string) {
+	t.Helper()
 	var mu sync.Mutex
 	var seen []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		seen = append(seen, r.Header.Get("Authorization"))
 		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{}`))
 	}))
+	if withTLS {
+		srv.StartTLS()
+	} else {
+		srv.Start()
+	}
 	t.Cleanup(srv.Close)
 	return srv, func() []string {
 		mu.Lock()
@@ -68,50 +87,81 @@ func hostnameURL(t *testing.T, srv *httptest.Server) string {
 	tr := base.Clone()
 	tr.Proxy = nil
 	var d net.Dialer
+	prev := base.DialContext // an earlier hostnameURL's routing, if any
 	tr.DialContext = func(ctx context.Context, network, a string) (net.Conn, error) {
 		if a == hostPort {
 			a = addr
 		}
+		if prev != nil {
+			return prev(ctx, network, a)
+		}
 		return d.DialContext(ctx, network, a)
+	}
+	scheme := "http"
+	if srv.TLS != nil {
+		// Trust the test server's certificate, which names example.com.
+		pool := x509.NewCertPool()
+		pool.AddCert(srv.Certificate())
+		tr.TLSClientConfig = &tls.Config{RootCAs: pool, ServerName: "example.com"}
+		scheme = "https"
 	}
 	http.DefaultTransport = tr
 	t.Cleanup(func() { http.DefaultTransport = orig })
-	return "http://" + hostPort
+	return scheme + "://" + hostPort
 }
 
-// With only a dev token, the REST hub client sends it to a loopback hub,
-// while a plain http hub under a non-loopback host name is refused by the
-// transport rule before any request (so it never sees the dev token).
+// With only a dev token, the REST hub client sends it to a loopback hub and
+// sends no credential to an https hub under a non-loopback host name (the
+// dev-token loopback gate), while a plain http hub under that name is refused
+// by the transport rule before any request.
 func TestHubClientForEndpoint_DevTokenOnlyForLoopback(t *testing.T) {
 	setupContextTest(t)
 	t.Setenv("SCION_DEV_TOKEN", "placeholder-dev-token")
 	other, otherSeen := authHeaderHub(t)
+	secure, secureSeen := authHeaderHubTLS(t)
 	local, localSeen := authHeaderHub(t)
 
 	_, err := hubClientForEndpoint(&config.Settings{}, hostnameURL(t, other))
 	require.ErrorIs(t, err, config.ErrPlaintextNonLoopback)
-	client, err := hubClientForEndpoint(&config.Settings{}, local.URL)
+	assert.Empty(t, otherSeen(), "the plain http non-loopback hub received a request")
+
+	client, err := hubClientForEndpoint(&config.Settings{}, hostnameURL(t, secure))
 	require.NoError(t, err)
 	_, _ = client.Auth().Me(context.Background())
-	assert.Empty(t, otherSeen(), "the non-loopback hub received a request")
-	got := localSeen()
+	got := secureSeen()
+	require.NotEmpty(t, got, "the https non-loopback hub received no request")
+	assert.Empty(t, got[0], "the https non-loopback hub got a credential from the REST client")
+
+	client, err = hubClientForEndpoint(&config.Settings{}, local.URL)
+	require.NoError(t, err)
+	_, _ = client.Auth().Me(context.Background())
+	got = localSeen()
 	require.NotEmpty(t, got)
 	assert.Equal(t, "Bearer placeholder-dev-token", got[0])
 }
 
-// With only a dev token, the completion client sends it to a loopback hub,
-// and a plain http hub under a non-loopback host name gets no request.
+// With only a dev token, the completion client sends it to a loopback hub and
+// sends no credential to an https hub under a non-loopback host name (its own
+// dev-token loopback gate), and a plain http hub under that name gets no
+// request.
 func TestFetchHubAgents_DevTokenOnlyForLoopback(t *testing.T) {
 	setupContextTest(t)
 	t.Setenv("SCION_DEV_TOKEN", "placeholder-dev-token")
 	other, otherSeen := authHeaderHub(t)
+	secure, secureSeen := authHeaderHubTLS(t)
 	local, localSeen := authHeaderHub(t)
 
 	_, err := fetchHubAgents(context.Background(), hostnameURL(t, other), &config.Settings{})
 	require.ErrorIs(t, err, config.ErrPlaintextNonLoopback)
+	assert.Empty(t, otherSeen(), "the plain http non-loopback hub received a request")
+
+	_, _ = fetchHubAgents(context.Background(), hostnameURL(t, secure), &config.Settings{})
+	got := secureSeen()
+	require.NotEmpty(t, got, "the https non-loopback hub received no request")
+	assert.Empty(t, got[0], "the https non-loopback hub got a credential from the completion client")
+
 	_, _ = fetchHubAgents(context.Background(), local.URL, &config.Settings{})
-	assert.Empty(t, otherSeen(), "the non-loopback hub received a request")
-	got := localSeen()
+	got = localSeen()
 	require.NotEmpty(t, got)
 	assert.Equal(t, "Bearer placeholder-dev-token", got[0])
 }
