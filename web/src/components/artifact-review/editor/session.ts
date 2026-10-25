@@ -24,7 +24,14 @@
 import type { Node } from '@milkdown/prose/model';
 import { EditorState, TextSelection } from '@milkdown/prose/state';
 
-import { criticCodeRanges, normalizeCritic, projectCritic } from '../../../utils/critic.js';
+import {
+  criticCodeRanges,
+  normalizeCritic,
+  onlyMarksChanged,
+  parseCritic,
+  projectCritic,
+} from '../../../utils/critic.js';
+import type { CriticRange } from '../../../utils/critic.js';
 
 import { chooseOpeningAlphabet } from '../../../utils/critic-sentinels.js';
 import { loadDocument } from './bridge.js';
@@ -61,8 +68,32 @@ export class ReviewSession {
    * editor does not read as the critic parser does (design 4.2, item 3).
    */
   private readOnly = new Set<number>();
+  /** The source offset of each top-level block of the opening text. */
+  private starts: number[] = [];
+  /**
+   * Source offsets of the mark tokens the critic parser reads but the
+   * editor keeps as text (in code or an attribute, or a mark around
+   * nothing); they lie in read-only units.
+   */
+  private held: ReadonlySet<number> = new Set();
+  /**
+   * Per mark kind (by its closer): the source offset of the first opener
+   * of that kind the critic parser leaves as text. It found no closer
+   * after it, so a closer of that kind written after it would end a mark
+   * there instead (see addsCloser).
+   */
+  private literalOpeners = new Map<string, number>();
+  /**
+   * The source's link reference definitions, so that a unit read on its
+   * own resolves its reference links as it does in the document.
+   */
+  private definitions = '';
 
   constructor(private readonly core: Core) {}
+
+  /** Parses Markdown with the document's link reference definitions. */
+  private readonly parseInDocument = (md: string): Node =>
+    this.core.parse(this.definitions ? `${md}\n\n${this.definitions}\n` : md);
 
   /**
    * Opens md in the editor. Returns false (and leaves the editor empty)
@@ -103,6 +134,10 @@ export class ReviewSession {
     this.baseline = makeBaseline(md, view.state.doc, parseMd, a);
     this.source = md;
     this.readOnly = readOnly;
+    this.starts = this.baseline ? blockStarts(this.baseline) : [];
+    this.held = held;
+    this.literalOpeners = literalOpeners(md);
+    this.definitions = definitionsOf(md, this.core.parseMdRaw);
     this.dirty = false;
     return true;
   }
@@ -203,9 +238,10 @@ export class ReviewSession {
     const kids: Node[] = [];
     for (let k = i; k <= j; k++) kids.push(doc.child(k));
     const unit = schema.topNodeType.create(null, kids);
-    const md = writeUnit(doc, base, i, j, serialize, schema, this.core.parse);
+    const md = writeUnit(doc, base, i, j, serialize, schema, this.parseInDocument);
     if (md === null) return 'generic';
     if (clean(md) !== clean(src)) return 'generic';
+    if (this.addsCloser(i, j, md)) return 'generic';
     if (marksReadBack(unit, md, this.core.plain) !== null) return 'generic';
     // The written unit must open again as it is shown (for example, an
     // backslashed autolink-looking text must not become a link that takes in
@@ -280,7 +316,14 @@ export class ReviewSession {
     if (!this.dirty) return this.source;
     const { view, schema, serialize } = this.core;
     const doc = view.state.doc;
-    const r = savePreserving(doc, this.baseline, serialize, schema, this.core.parse, this.readOnly);
+    const r = savePreserving(
+      doc,
+      this.baseline,
+      serialize,
+      schema,
+      this.parseInDocument,
+      this.readOnly
+    );
     if (!r) return null;
     for (const u of r.units) {
       if (!u.written) continue;
@@ -289,12 +332,125 @@ export class ReviewSession {
       else for (let k = u.i; k <= u.j; k++) kids.push(doc.child(k));
       const unit = schema.topNodeType.create(null, kids);
       if (marksReadBack(unit, u.md, this.core.plain) !== null) return null;
+      if (u.i >= 0 && this.addsCloser(u.i, u.j, u.md)) return null;
       const runs = docMarkRuns(unit);
       const before = u.i < 0 ? this.earlierOf() : this.earlierOf(u.i, u.j);
       if (!earlierKept(before, u.md, runs)) return null;
     }
+    // The whole text, as the hub reads it (design 4.6 items 2 and 3): the
+    // same clean text as the opening text, and the marks the critic parser
+    // reads in it, over the whole text, are the document's (the tokens
+    // kept as text in read-only units aside).
+    if (!onlyMarksChanged(r.md, projectCritic(this.source, 'clean'))) return null;
+    const runs = textMarkRuns(r.md, this.core.plain, 0, Infinity, this.heldIn(r.units));
+    if (!sameRuns(docMarkRuns(doc), runs, true)) return null;
     return r.md;
   }
+
+  /**
+   * Whether the written text md of units i..j holds more closers of a
+   * mark kind than their source, for a kind whose first literal opener
+   * comes before them: the critic parser would end a mark at that opener
+   * with the new closer, over text outside these units. Closers inside
+   * the code the critic parser reads in md (or the source) are not counted.
+   */
+  private addsCloser(i: number, j: number, md: string): boolean {
+    const base = this.baseline;
+    if (!base || this.literalOpeners.size === 0) return false;
+    const src = unitSource(base, i, j);
+    for (const [close, at] of this.literalOpeners) {
+      if (at >= this.starts[i]) continue;
+      if (countOutsideCode(md, close) > countOutsideCode(src, close)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * The offsets in the saved text of the held tokens, from savePreserving's
+   * units: they lie in read-only units, which are written from their source.
+   */
+  private heldIn(
+    units: readonly { i: number; md: string; at: number; written: boolean }[]
+  ): Set<number> {
+    const out = new Set<number>();
+    if (this.held.size === 0) return out;
+    for (const u of units) {
+      if (u.written || u.i < 0) continue;
+      const from = this.starts[u.i];
+      const to = from + u.md.length;
+      for (const h of this.held) if (h >= from && h < to) out.add(u.at + h - from);
+    }
+    return out;
+  }
+}
+
+/** The opener of each mark kind, by its closer. */
+const OPENERS: [open: string, close: string][] = [
+  ['{++', '++}'],
+  ['{--', '--}'],
+  ['{~~', '~~}'],
+  ['{==', '==}'],
+  ['{>>', '<<}'],
+];
+
+/** Whether p lies in one of ranges (in order, not overlapping). */
+function inRanges(ranges: readonly CriticRange[], p: number): boolean {
+  let lo = 0;
+  let hi = ranges.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (ranges[mid].end <= p) lo = mid + 1;
+    else if (ranges[mid].start > p) hi = mid - 1;
+    else return true;
+  }
+  return false;
+}
+
+/** The occurrences of s in text outside the code the critic parser reads there. */
+function countOutsideCode(text: string, s: string): number {
+  const code = criticCodeRanges(text);
+  let n = 0;
+  for (let i = text.indexOf(s); i >= 0; i = text.indexOf(s, i + 1)) if (!inRanges(code, i)) n++;
+  return n;
+}
+
+/**
+ * Per mark kind (by its closer), the offset of the first opener of that
+ * kind the critic parser leaves as text in md (outside its code).
+ */
+function literalOpeners(md: string): Map<string, number> {
+  const code = criticCodeRanges(md);
+  const out = new Map<string, number>();
+  for (const seg of parseCritic(md)) {
+    if (seg.kind !== 'text') continue;
+    const text = md.slice(seg.start, seg.end);
+    for (const [open, close] of OPENERS) {
+      if (out.has(close)) continue;
+      for (let i = text.indexOf(open); i >= 0; i = text.indexOf(open, i + 1)) {
+        if (!inRanges(code, seg.start + i)) {
+          out.set(close, seg.start + i);
+          break;
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/** The link reference definitions of md, one per line, in order. */
+function definitionsOf(md: string, parseRaw: Core['parseMdRaw']): string {
+  const out: string[] = [];
+  const walk = (n: ReturnType<Core['parseMdRaw']>): void => {
+    if (n.type === 'definition') {
+      const from = n.position?.start.offset;
+      const to = n.position?.end.offset;
+      if (from !== undefined && to !== undefined) out.push(md.slice(from, to));
+      return;
+    }
+    for (const k of n.children ?? []) walk(k);
+  };
+  walk(parseRaw(md));
+  return out.join('\n');
 }
 
 /** The source offset of each top-level block. */

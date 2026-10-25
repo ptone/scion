@@ -21,7 +21,7 @@ import type { Node } from '@milkdown/prose/model';
 
 import { loadDoc, loadDocument, saveDoc, sentinelLeft } from './bridge.js';
 import type { Consumed } from './bridge.js';
-import { consumedAsInSource } from './preserve.js';
+import { consumedAsInSource, makeBaseline } from './preserve.js';
 import { MARKS } from './schema.js';
 import type { Core, MdNode } from './create.js';
 import { docMarkKinds, earlierKept, keyedMarks, marksReadBack, textMarkKinds } from './guard.js';
@@ -355,6 +355,51 @@ describe('save invariant (I2)', () => {
     s.markDirty();
   };
 
+  it('refuses the save when the whole text changes outside marks', () => {
+    // A serializer that adds plain text to the edited paragraph: its marks
+    // still read back, so only the whole-text clean check sees it.
+    const src = 'a {++x++} b\n';
+    const broken = {
+      ...core,
+      serialize: (d: Node): string => {
+        const t = core.serialize(d);
+        return t.includes('Z') ? t.replace(' b', ' b more') : t;
+      },
+    };
+    const s = new ReviewSession(broken);
+    expect(s.load(src)).toBe(true);
+    edit(s, broken);
+    expect(s.save()).toBeNull();
+    // Positive control: the real serializer.
+    const ok = new ReviewSession(core);
+    expect(ok.load(src)).toBe(true);
+    edit(ok, core);
+    expect(ok.save()).toBe('a {++x++} b{++ Z++}\n');
+  });
+
+  it('refuses the save when a literal opener in an earlier block would take the new closer', () => {
+    const src = 'Note: {++ stays literal.\n\nlater text\n';
+    const s = new ReviewSession(core);
+    expect(s.load(src)).toBe(true);
+    const v = core.view;
+    const mark = core.schema.marks[MARKS.ins].create({ mine: true });
+    const end = v.state.doc.child(0).nodeSize + v.state.doc.child(1).nodeSize - 1;
+    v.dispatch(v.state.tr.insert(end, core.schema.text(' Z', [mark])));
+    s.markDirty();
+    expect(s.unitCheck(v.state.doc, 1, 1)).toBe('generic');
+    expect(s.save()).toBeNull();
+    // Positive control: the same insertion in a block before the literal
+    // opener.
+    const ok = new ReviewSession(core);
+    const src2 = 'earlier text\n\nNote: {++ stays literal.\n';
+    expect(ok.load(src2)).toBe(true);
+    v.dispatch(
+      v.state.tr.insert(v.state.doc.child(0).nodeSize - 1, core.schema.text(' Z', [mark]))
+    );
+    ok.markDirty();
+    expect(ok.save()).toBe('earlier text{++ Z++}\n\nNote: {++ stays literal.\n');
+  });
+
   it('refuses when the serializer rewrites the earlier mark and writes the own one like it', () => {
     // The own insertion is an emphasised x, as the earlier one is; the
     // broken serializer rewrites only the first, and only in the edited
@@ -430,5 +475,29 @@ describe('save invariant (I2)', () => {
     edit(s, broken);
     expect(s.unitOk(core.view.state.doc, 0, 0)).toBe(false);
     expect(s.save()).toBeNull();
+  });
+});
+
+describe('baseline units', () => {
+  const baseline = (md: string): ReturnType<typeof makeBaseline> => {
+    const a = chooseAlphabet(md)!;
+    const loaded = loadDocument(md, core.parse, core.schema, a)!;
+    return makeBaseline(md, loaded.doc, core.parseMd, a);
+  };
+
+  it('splits a list into items and a table into rows', () => {
+    const list = baseline('* one\n* two\n')!;
+    expect(list.blocks[0].subs).toEqual([
+      { from: 0, to: 5 },
+      { from: 6, to: 11 },
+    ]);
+    const table = baseline('| a | b |\n|---|---|\n| c | d |\n')!;
+    expect(table.blocks[0].subs?.length).toBe(2);
+  });
+
+  it('does not split a list with a mark across two of its items', () => {
+    const b = baseline('- a {++x\n- y++} b\n- c\n')!;
+    expect(b.blocks).toHaveLength(1);
+    expect(b.blocks[0].subs).toBeUndefined();
   });
 });

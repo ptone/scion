@@ -355,6 +355,54 @@ describe('refused edits in suggest mode', () => {
     expect(text(ok.c)).toBe('# The {++X++}key\nPress {++x++} then\n');
   });
 
+  it('refuses a mark whose closer a literal opener in an earlier block would take', async () => {
+    // The critic parser reads from the literal {++ to the first ++} after
+    // it: an insertion typed in a later block would end a mark there.
+    const md = 'Note: {++ stays literal.\n\n- one\n- two\n';
+    const { c, hints } = await open(md);
+    type(c, 'X', posOf(c, 'two'));
+    expect(hints).toEqual(['generic']);
+    expect(text(c)).toBe(md);
+    // Positive control: a deletion has another closer.
+    backspace(c, posOf(c, 'two', 1));
+    expect(hints).toEqual(['generic']);
+    expect(text(c)).toBe('Note: {++ stays literal.\n\n- one\n- {--t--}wo\n');
+    // Positive control: an insertion before the literal opener.
+    const ok = await open('- one\n- two\n\nNote: {++ stays literal.\n');
+    type(ok.c, 'X', posOf(ok.c, 'two'));
+    expect(ok.hints).toEqual([]);
+    expect(text(ok.c)).toBe('- one\n- {++X++}two\n\nNote: {++ stays literal.\n');
+  });
+
+  it('keeps marks right when a backtick is typed above a row holding a lone backtick', async () => {
+    // The critic parser pairs backticks across the lines of a table; the
+    // edited row is checked within its table, so the result is either
+    // refused or reads back as the document.
+    const md = '| a | b |\n|---|---|\n| x | y |\n| ` | z |\n';
+    const { c, hints } = await open(md);
+    type(c, '`', posOf(c, 'x', 1));
+    const out = text(c);
+    if (hints.length) {
+      expect(hints).toEqual(['generic']);
+      expect(out).toBe(md);
+    } else {
+      expect(onlyMarksChanged(out, projectCritic(md, 'clean'))).toBe(true);
+      expect(projectCritic(out, 'accept')).not.toBe(projectCritic(md, 'accept'));
+    }
+  });
+
+  it('edits a block with a reference link, keeping the reference', async () => {
+    const md =
+      'See [the guide][g] for {++more++} detail.\n\n- item with [a ref][g]\n\n[g]: https://example.com/guide\n';
+    const { c, hints } = await open(md);
+    type(c, 'X', posOf(c, 'detail'));
+    type(c, 'Y', posOf(c, 'item'));
+    expect(hints).toEqual([]);
+    expect(text(c)).toBe(
+      'See [the guide][g] for {++more++} {++X++}detail.\n\n- {++Y++}item with [a ref][g]\n\n[g]: https://example.com/guide\n'
+    );
+  });
+
   it('an edit with no exact place in the source is refused', async () => {
     // The source writes & as a character reference and the serializer as
     // the character: typing right after it has no place in the source
@@ -903,7 +951,10 @@ describe('composition timing', () => {
     composeStep(c, p, '犬', 3);
     c.view.dom.dispatchEvent(new CompositionEvent('compositionend'));
     // ProseMirror may still apply the last change before the next tick.
-    expect(c.flush()).toBe('a 犬dog\n');
+    // Not settled yet: the composed text is not marked, so it cannot be
+    // saved as a review.
+    expect(c.view.state.doc.textContent).toBe('a 犬dog');
+    expect(c.flush()).toBeNull();
     await tick();
     expect(hints).toEqual([]);
     expect(text(c)).toBe('a {++犬++}dog\n');
@@ -937,7 +988,10 @@ describe('composition timing', () => {
     Object.defineProperty(c.view, 'composing', { get: () => composing, configurable: true });
     c.endComposition();
     await tick();
-    expect(c.flush()).toBe('a 犬dog\n');
+    // Not settled yet: the composed text is not marked, so it cannot be
+    // saved as a review.
+    expect(c.view.state.doc.textContent).toBe('a 犬dog');
+    expect(c.flush()).toBeNull();
     // A new compositionstart keeps the older snapshot, which covers both.
     c.beginComposition();
     composeStep(c, posOf(c, 'dog'), '猫', 7);
