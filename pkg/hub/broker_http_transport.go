@@ -96,13 +96,18 @@ func brokerEndpointTransportError(brokerID, endpoint string) error {
 }
 
 // checkBrokerRedirect is the main broker client's redirect policy. A
-// redirect is followed only to the host of the original request and only
-// when the target passes the transport policy, so a broker response cannot
-// make the hub resend a signed request body (agent tokens, secrets) to
-// another host or over plain http to a network host.
+// redirect is followed only to the host of the original request, never from
+// https to another scheme (even on a loopback host, where the transport
+// policy alone would accept http), and only when the target passes the
+// transport policy. So a broker response cannot make the hub resend a signed
+// request body (agent tokens, secrets) to another host, over a downgraded
+// scheme, or over plain http to a network host.
 func checkBrokerRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= 10 {
 		return errors.New("stopped after 10 redirects")
+	}
+	if len(via) > 0 && strings.EqualFold(via[0].URL.Scheme, "https") && !strings.EqualFold(req.URL.Scheme, "https") {
+		return fmt.Errorf("refusing a broker redirect that downgrades https to %s", req.URL.Scheme)
 	}
 	if len(via) > 0 && !strings.EqualFold(req.URL.Host, via[0].URL.Host) {
 		return fmt.Errorf("refusing a broker redirect to another host (%s)", req.URL.Host)

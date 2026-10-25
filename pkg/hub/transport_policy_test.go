@@ -245,3 +245,80 @@ func TestBrokerHTTPTransport_RedirectPolicy(t *testing.T) {
 		t.Error("redirect to a plaintext network host was followed, want a refusal")
 	}
 }
+
+// The redirect policy never follows a same-host redirect that downgrades the
+// scheme from https, on a network host (where the transport rule also
+// refuses plain http) and on a loopback host (where it would accept it); an
+// https same-host redirect and a plain-http loopback same-host redirect are
+// followed.
+func TestCheckBrokerRedirect_RefusesSchemeDowngrade(t *testing.T) {
+	hop := func(raw string) *http.Request {
+		r, err := http.NewRequest(http.MethodPost, raw, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	for _, tc := range []struct {
+		from, to string
+		ok       bool
+	}{
+		{"https://hub.example.com:9800/a", "http://hub.example.com:9800/b", false},
+		{"https://127.0.0.1:9800/a", "http://127.0.0.1:9800/b", false},
+		{"https://[::1]:9800/a", "http://[::1]:9800/b", false},
+		{"https://hub.example.com:9800/a", "https://hub.example.com:9800/b", true},
+		{"http://127.0.0.1:9800/a", "http://127.0.0.1:9800/b", true},
+	} {
+		err := checkBrokerRedirect(hop(tc.to), []*http.Request{hop(tc.from)})
+		if tc.ok && err != nil {
+			t.Errorf("%s -> %s: %v, want followed", tc.from, tc.to, err)
+		}
+		if !tc.ok && (err == nil || !strings.Contains(err.Error(), "downgrades https")) {
+			t.Errorf("%s -> %s: error = %v, want a downgrade refusal", tc.from, tc.to, err)
+		}
+	}
+	// A later hop is compared with the original request, so https -> https ->
+	// http is refused too.
+	err := checkBrokerRedirect(hop("http://127.0.0.1:9800/c"), []*http.Request{hop("https://127.0.0.1:9800/a"), hop("https://127.0.0.1:9800/b")})
+	if err == nil || !strings.Contains(err.Error(), "downgrades https") {
+		t.Errorf("two-hop downgrade: error = %v, want a refusal", err)
+	}
+}
+
+// End to end through the hub's broker client: a TLS broker that answers with
+// a same-host redirect to http is not followed.
+func TestBrokerHTTPTransport_RedirectDowngradeRefused(t *testing.T) {
+	broker := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/down" {
+			http.Redirect(w, r, "http://"+r.Host+"/plain", http.StatusTemporaryRedirect)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer broker.Close()
+	// The hub's broker client wraps http.DefaultTransport at construction; make
+	// it trust the test broker's certificate for this test.
+	orig := http.DefaultTransport
+	base, ok := orig.(*http.Transport)
+	if !ok {
+		t.Fatal("http.DefaultTransport is not an *http.Transport")
+	}
+	tr := base.Clone()
+	tr.TLSClientConfig = broker.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+	http.DefaultTransport = tr
+	t.Cleanup(func() { http.DefaultTransport = orig })
+
+	bt := newBrokerHTTPTransport(false, nil)
+	resp, err := bt.doRequest(context.Background(), "b1", http.MethodPost, broker.URL+"/ok", []byte(`{}`))
+	if err != nil {
+		t.Fatalf("control: plain TLS request: %v", err)
+	}
+	_ = resp.Body.Close()
+	resp, err = bt.doRequest(context.Background(), "b1", http.MethodPost, broker.URL+"/down", []byte(`{"agentToken":"x"}`))
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "downgrades https") {
+		t.Errorf("downgrade redirect error = %v, want a refusal", err)
+	}
+}
