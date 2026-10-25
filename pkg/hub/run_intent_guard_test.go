@@ -109,6 +109,18 @@ var lifecycleDispatchCallers = map[string]lifecycleDispatchRule{
 	// soft-deleted row cannot take a running intent, and the readers of
 	// run intent skip soft-deleted rows (ptone/scion#4744).
 	"Server.settleRetainedFiles": {kind: intentUnchanged},
+	// The dispatcher's create sends the create through create-with-gather
+	// (ptone/scion#6096). Its callers keep the intent right:
+	// dispatchAgentEventHandler and handleWorkspaceSyncToFinalize record it
+	// through withStartClaim, and startThroughCreate carries out a start
+	// whose caller recorded it.
+	"HTTPAgentDispatcher.DispatchAgentCreate": {kind: intentUnchanged},
+	// A start of an agent whose config was never delivered is sent as a
+	// create (ptone/scion#6096), inside dispatchAgentStart. It keeps the
+	// intent of the start it carries out: every caller of DispatchAgentStart
+	// is listed here with its own rule (startAgentCore records through
+	// withStartClaim, execDispatchStart replays a queued intent, and so on).
+	"HTTPAgentDispatcher.startThroughCreate": {kind: intentUnchanged},
 }
 
 // funcDeclKey names a function declaration as Recv.Name, or Name for a

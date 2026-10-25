@@ -623,6 +623,13 @@ func (c *reportingCreateClient) CreateAgent(ctx context.Context, brokerID, broke
 	return &RemoteAgentResponse{Agent: &RemoteAgentInfo{ID: req.ID, Slug: req.Slug, Phase: "running", RunID: c.runID}, Created: true}, nil
 }
 
+// CreateAgentWithGather is the create DispatchAgentCreate sends
+// (ptone/scion#6096): it answers like CreateAgent, with no needs report.
+func (c *reportingCreateClient) CreateAgentWithGather(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+	resp, err := c.CreateAgent(ctx, brokerID, brokerEndpoint, req)
+	return resp, nil, err
+}
+
 // Create adopts the run ID the broker reports for the entry, as start does.
 func TestRunID_CreateAdoptsBrokerRunID(t *testing.T) {
 	ctx := context.Background()
