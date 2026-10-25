@@ -498,11 +498,11 @@ test('findSourceMap prefers the map next to the chunk, then dist/sourcemaps, els
   }
 });
 
-test('requiredStrings: every marker string must be in the chunks of the prefix', () => {
+test('requiredStrings: each marker occurs exactly once in the build, in a chunk of the prefix', () => {
   const texts = {
-    'assets/review-editor-a1.js': 'x("raw-html");',
+    'assets/review-editor-a1.js': 'x("raw-html");x("twice");x("twice")',
     'assets/review-editor-b2.js': 'new P("criticPolicy")',
-    'assets/main.js': 'image-placeholder',
+    'assets/main.js': 'image-placeholder;criticPolicy-copy-elsewhere',
   };
   const check = (requiredStrings, files = Object.keys(texts)) =>
     checkBudget({
@@ -519,15 +519,28 @@ test('requiredStrings: every marker string must be in the chunks of the prefix',
       readMapModules: () => [],
     });
   // Strings from either chunk of the prefix count; comment keys are skipped.
-  const ok = check({ $comment: 'why', 'assets/review-editor-': ['raw-html', 'criticPolicy'] });
+  const ok = check({ $comment: 'why', 'assets/review-editor-': ['raw-html'] });
   assert.deepEqual(ok.failures, []);
-  assert.ok(ok.report.includes('required strings in assets/review-editor-*.js: 2 of 2 present'));
-  // A string only in another chunk is missing here.
-  assert.deepEqual(check({ 'assets/review-editor-': ['raw-html', 'image-placeholder'] }).failures, [
-    'assets/review-editor-*.js: missing required string "image-placeholder"',
-  ]);
+  assert.ok(
+    ok.report.includes(
+      'required strings in assets/review-editor-*.js: 1 of 1 present, each exactly once in the build'
+    )
+  );
+  // Missing; only in another chunk; twice; once in the prefix and once elsewhere.
+  assert.deepEqual(
+    check({
+      'assets/review-editor-': ['nowhere', 'image-placeholder', 'twice', 'criticPolicy'],
+    }).failures,
+    [
+      'assets/review-editor-*.js: missing required string "nowhere"',
+      'assets/review-editor-*.js: required string "image-placeholder" occurs 1 time(s), in assets/main.js; EXPECT once, in assets/review-editor-*.js',
+      'assets/review-editor-*.js: required string "twice" occurs 2 time(s), in assets/review-editor-a1.js; EXPECT once, in assets/review-editor-*.js',
+      'assets/review-editor-*.js: required string "criticPolicy" occurs 2 time(s), in assets/review-editor-b2.js, assets/main.js; EXPECT once, in assets/review-editor-*.js',
+    ]
+  );
   // No chunk of the prefix at all.
   assert.deepEqual(check({ 'assets/review-editor-': ['raw-html'] }, ['assets/main.js']).failures, [
+    'assets/review-editor-*.js: missing required string "raw-html"',
     'no chunk matching assets/review-editor-*.js',
   ]);
 });
