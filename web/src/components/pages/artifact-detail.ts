@@ -156,6 +156,13 @@ export const REVIEW_VIEW_KEY = 'scion:artifact-review-view';
 /** How long a refusal hint stays up without a new edit. */
 export const REVIEW_HINT_MS = 8000;
 
+/**
+ * Markdown larger than this (in bytes) opens Review in the Source view,
+ * with a notice: the graphical view is slow to open for such documents. The
+ * reviewer can still switch to it.
+ */
+export const LARGE_REVIEW_BYTES = 50_000;
+
 /** The views of the graphical review page. */
 export type ReviewView = 'graphical' | 'source';
 
@@ -173,7 +180,8 @@ export type ReviewHint =
   | 'composing'
   | 'code-run'
   | 'generic'
-  | 'load-failed';
+  | 'load-failed'
+  | 'large';
 
 /** Text of each hint: a bold first sentence and a second one. */
 export const REVIEW_HINT_TEXT: Record<ReviewHint, { title: string; body: string }> = {
@@ -227,7 +235,16 @@ export const REVIEW_HINT_TEXT: Record<ReviewHint, { title: string; body: string 
     title: 'The graphical view could not be loaded.',
     body: 'It opened in the Source view.',
   },
+  large: {
+    title: 'This document is large; the graphical view may be slow.',
+    body: 'It opened in the Source view. You can still switch to Graphical.',
+  },
 };
+
+/** Whether text is too large to open Review in the graphical view (LARGE_REVIEW_BYTES). */
+export function isLargeReview(text: string): boolean {
+  return new TextEncoder().encode(text).length > LARGE_REVIEW_BYTES;
+}
 
 /** The view a reviewer last chose; graphical unless they chose source. */
 export function storedReviewView(): ReviewView {
@@ -1107,6 +1124,11 @@ export class ScionPageArtifactDetail extends LitElement {
     if (this.reviewGraphical) {
       this.clearHint();
       this.reviewView = storedReviewView();
+      // Not stored: the reviewer's own choice stays for smaller documents.
+      if (this.reviewView === 'graphical' && isLargeReview(this.reviewText)) {
+        this.reviewView = 'source';
+        this.showHint('large');
+      }
       if (this.reviewView === 'graphical') void this.ensureEditor();
     }
   };
@@ -2189,11 +2211,15 @@ export class ScionPageArtifactDetail extends LitElement {
         ? 'image'
         : hint === 'load-failed'
           ? 'exclamation-triangle'
-          : hint === 'source-own'
+          : hint === 'source-own' || hint === 'large'
             ? 'info-circle'
             : 'slash-circle';
     const action =
-      hint === 'image' || hint === 'load-failed' || hint === 'earlier' || hint === 'source-own'
+      hint === 'image' ||
+      hint === 'load-failed' ||
+      hint === 'earlier' ||
+      hint === 'source-own' ||
+      hint === 'large'
         ? nothing
         : html`<div class="hint-actions">
             <sl-button size="small" @click=${(): void => this.setReviewView('source')}>
