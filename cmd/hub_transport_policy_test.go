@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -218,6 +219,8 @@ func TestUserHubPaths_RefusePlaintextNonLoopbackBeforeAnyRequest(t *testing.T) {
 			return hubResponds(endpoint, true)
 		},
 		"P4 hub credential verification": func(t *testing.T, endpoint string) error {
+			// hubAccepts reports no error, only ok; the error below is made
+			// here. What kills this case is assertNoRequests (zero requests).
 			if _, ok := hubAccepts(endpoint, htpHubToken, false); ok {
 				return nil
 			}
@@ -255,6 +258,9 @@ func TestUserHubPaths_RefusePlaintextNonLoopbackBeforeAnyRequest(t *testing.T) {
 			return err
 		},
 		"P8 ssh command env reads no credential": func(t *testing.T, endpoint string) error {
+			// The env builder returns no error for a refused hub; the check is
+			// that no credential was read (t.Fatal below) and no request was
+			// sent (assertNoRequests). The error returned is made here.
 			hubEndpoint, hubSource = endpoint, "" // --hub flag
 			env, err := defaultSSHCommandEnv()
 			if err != nil {
@@ -279,6 +285,8 @@ func TestUserHubPaths_RefusePlaintextNonLoopbackBeforeAnyRequest(t *testing.T) {
 			return attachHubSession(context.Background(), &HubContext{Endpoint: endpoint}, hubAttachTarget{Name: "a", ID: "a"})
 		},
 		"P10 onboarding status": func(t *testing.T, endpoint string) error {
+			// quickstartStatusAllowed returns a bool; the error is made here,
+			// and assertNoRequests checks that nothing was sent.
 			if quickstartStatusAllowed(endpoint) {
 				return nil
 			}
@@ -402,14 +410,14 @@ func htpAgentEnv(t *testing.T) string {
 // link-local host;
 // a user credential is refused in every mode, including inside an agent.
 func TestInjectedAgentTokenException(t *testing.T) {
-	t.Run("all three conditions: only the agent token is sent", func(t *testing.T) {
+	t.Run("all conditions: only the agent token is sent", func(t *testing.T) {
 		htpAgentEnv(t)
 		t.Setenv("SCION_TRANSPORT_MODE", "iap")
 		t.Setenv("SCION_TRANSPORT_TOKEN", htpTransportToken)
 		hub := newHTPHub(t)
 		htpRouteDials(t, hub)
 		for _, run := range []func() error{
-			func() error { // P1
+			func() error { // P1 through getHubClient (the invocation hub)
 				c, err := getHubClient(nil)
 				if err != nil {
 					return err
@@ -417,7 +425,9 @@ func TestInjectedAgentTokenException(t *testing.T) {
 				_, err = c.Health(context.Background())
 				return err
 			},
-			func() error { // P2
+			func() error { // P1 for an explicit endpoint (hubClientAndAuthSourceForEndpoint); the
+				// P2 positive case (createHubClient) is pkg/hubsync's
+				// TestCreateHubClient_UserCredentialsGatedInsideAgent "agent token" case.
 				c, _, err := hubClientAndAuthSourceForEndpoint(nil, htpInjected)
 				if err != nil {
 					return err
@@ -507,22 +517,48 @@ func TestInjectedAgentTokenException(t *testing.T) {
 	})
 }
 
-// htpAllowedHubClientNew lists the cmd files that may call hubclient.New
-// directly: the broker-side clients, which apply config.CheckHubTransport
-// themselves (D289). Every other hub client in cmd goes through
-// newUserHubClient.
-var htpAllowedHubClientNew = map[string]bool{
-	"broker.go":      true,
-	"broker_join.go": true,
+// htpGuarded lists the constructors and dialers that send or receive a hub
+// credential (import path, then name), each with the only places in cmd that
+// may reference it: "<file>:<enclosing function>" or "<file>:var <name>" for a
+// package-level variable. Every such place applies the transport rule first
+// or is gated by its only caller:
+//   - broker.go getHubClientForConnection and broker_join.go
+//     newUnauthenticatedHubClient: broker-side clients that apply
+//     config.CheckHubTransport themselves (D289; the latter's only caller is
+//     gated by checkBrokerHubURL);
+//   - newUserHubClient (the CLI's constructor) and
+//     hubClientAndAuthSourceForEndpoint (the injected agent-token exception);
+//   - ssh_hostkey.go newSSHHubConn and tunnel.go tunnelClientConfig/runTunnel:
+//     checkUserHubTransport first;
+//   - attach.go var attachToAgentFn and vscode.go var vscodePreflight:
+//     function values whose callers (attachHubSession; tunnelClientConfig
+//     inside vscodePreflight) check first.
+var htpGuarded = map[string][]string{
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient.New":                     {"broker.go:getHubClientForConnection", "broker_join.go:newUnauthenticatedHubClient"},
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient.NewTransport":            {"ssh_hostkey.go:newSSHHubConn"},
+	"github.com/GoogleCloudPlatform/scion/pkg/wsclient.AttachToAgent":            {"attach.go:var attachToAgentFn"},
+	"github.com/GoogleCloudPlatform/scion/pkg/wsclient.NewPTYClient":             nil,
+	"github.com/GoogleCloudPlatform/scion/pkg/tunnelclient.Run":                  {"tunnel.go:runTunnel", "vscode.go:var vscodePreflight"},
+	"github.com/GoogleCloudPlatform/scion/pkg/tunnelclient.Config":               {"tunnel.go:tunnelClientConfig"},
+	"github.com/GoogleCloudPlatform/scion/pkg/hubsync.NewUserHubClient":          {"hub_transport_policy.go:newUserHubClient"},
+	"github.com/GoogleCloudPlatform/scion/pkg/hubsync.NewInjectedAgentHubClient": {"hub.go:hubClientAndAuthSourceForEndpoint"},
 }
 
 // TestHubClientConstructionGoesThroughTransportRule fails when a cmd file
-// builds a hub client or raw hub transport outside the transport rule.
+// references a guarded hub constructor or dialer (a call, a function value or
+// a composite literal; through any import name) outside its allowed places,
+// imports a guarded package with a dot import, or when an allowed place no
+// longer references it (a stale entry).
 func TestHubClientConstructionGoesThroughTransportRule(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
+	guardedPkgs := map[string]bool{}
+	for k := range htpGuarded {
+		guardedPkgs[k[:strings.LastIndex(k, ".")]] = true
+	}
+	seen := map[string]bool{}
 	fset := token.NewFileSet()
 	scanned := 0
 	for _, file := range files {
@@ -534,31 +570,80 @@ func TestHubClientConstructionGoesThroughTransportRule(t *testing.T) {
 			t.Fatalf("parse %s: %v", file, err)
 		}
 		scanned++
-		ast.Inspect(f, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
+		local := map[string]string{} // import name in this file -> import path
+		for _, im := range f.Imports {
+			path, err := strconv.Unquote(im.Path.Value)
+			if err != nil {
+				t.Fatalf("%s: import path %s: %v", file, im.Path.Value, err)
+			}
+			name := path[strings.LastIndex(path, "/")+1:]
+			if im.Name != nil {
+				name = im.Name.Name
+			}
+			if name == "." && guardedPkgs[path] {
+				t.Errorf("%s: dot import of %s hides its constructors from this guard", file, path)
+			}
+			local[name] = path
+		}
+		for _, decl := range f.Decls {
+			var places []string
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				places = []string{file + ":" + d.Name.Name}
+			case *ast.GenDecl:
+				for _, spec := range d.Specs {
+					if vs, ok := spec.(*ast.ValueSpec); ok {
+						for _, n := range vs.Names {
+							places = append(places, file+":var "+n.Name)
+						}
+					}
+				}
+				if len(places) == 0 {
+					places = []string{file + ":(declaration)"}
+				}
+			}
+			ast.Inspect(decl, func(n ast.Node) bool {
+				sel, ok := n.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				id, ok := sel.X.(*ast.Ident)
+				if !ok {
+					return true
+				}
+				path, ok := local[id.Name]
+				if !ok {
+					return true
+				}
+				key := path + "." + sel.Sel.Name
+				allowed, guarded := htpGuarded[key]
+				if !guarded {
+					return true
+				}
+				for _, place := range places {
+					ok := false
+					for _, a := range allowed {
+						if a == place {
+							ok = true
+							seen[key+" "+a] = true
+						}
+					}
+					if !ok {
+						t.Errorf("%s: %s referenced in %s, outside the transport rule's allowed places %v", fset.Position(sel.Pos()), key, place, allowed)
+					}
+				}
 				return true
-			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok {
-				return true
-			}
-			pkg, ok := sel.X.(*ast.Ident)
-			if !ok {
-				return true
-			}
-			switch {
-			case pkg.Name == "hubclient" && sel.Sel.Name == "New" && !htpAllowedHubClientNew[file]:
-				t.Errorf("%s: hubclient.New outside the transport rule; use newUserHubClient", fset.Position(call.Pos()))
-			case pkg.Name == "apiclient" && sel.Sel.Name == "NewTransport" && file != "ssh_hostkey.go":
-				t.Errorf("%s: apiclient.NewTransport outside the transport rule; check checkUserHubTransport first and list the file here", fset.Position(call.Pos()))
-			case pkg.Name == "wsclient" && strings.HasPrefix(sel.Sel.Name, "Attach") && sel.Sel.Name != "AttachOption" && file != "attach.go":
-				t.Errorf("%s: wsclient.%s outside attach.go (attachHubSession applies the transport rule)", fset.Position(call.Pos()), sel.Sel.Name)
-			}
-			return true
-		})
+			})
+		}
 	}
 	if scanned < 50 {
 		t.Fatalf("scanned %d cmd files; the scan did not find the package sources", scanned)
+	}
+	for key, allowed := range htpGuarded {
+		for _, a := range allowed {
+			if !seen[key+" "+a] {
+				t.Errorf("stale allowed place %s for %s: it no longer references it", a, key)
+			}
+		}
 	}
 }
