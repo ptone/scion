@@ -4519,7 +4519,7 @@ items are dropped as the hub drops them.
 {{- if kindIs "slice" $raw }}
 {{- range $raw }}{{- $items = concat $items (splitList "," (toString .)) }}{{- end }}
 {{- else if not (kindIs "invalid" $raw) }}
-{{- fail (printf "server.trusted_proxies is %s; it must be a YAML list of IPs or CIDRs. The hub decodes the server block strictly, and a non-list value here makes it skip the entire server block." (include "scion-hub.diagValue" (toString $raw))) }}
+{{- fail (printf "server.trusted_proxies is %s; it must be a YAML list of IPs or CIDRs. The hub decodes the server block strictly, and a non-list value here makes it skip the entire server block. Write a YAML list, or set the entries with hub.trustedProxies." (include "scion-hub.diagValue" (toString $raw))) }}
 {{- end }}
 {{- range $items }}
 {{- $e := trim . }}
