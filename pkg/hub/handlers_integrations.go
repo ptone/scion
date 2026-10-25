@@ -652,6 +652,7 @@ func (s *Server) handleUpdateIntegrationConfig(w http.ResponseWriter, r *http.Re
 	// Reconfigure the running integration with updated config.
 	// For HA integrations the DB write + NOTIFY is the reconfigure path —
 	// pushing a hub-side merge over gRPC would race with the DB-backed reload.
+	var activationWarnings []string
 	if loaded {
 		if !isHA {
 			if err := s.reconfigureIntegration(r.Context(), mgr, name); err != nil {
@@ -673,12 +674,18 @@ func (s *Server) handleUpdateIntegrationConfig(w http.ResponseWriter, r *http.Re
 			slog.Warn("Config saved but plugin activation failed (likely still missing required fields)",
 				"plugin", name, "error", err)
 		} else {
-			_ = s.refreshBrokerSpoke(mgr, name) // logged inside
+			if err := s.refreshBrokerSpoke(mgr, name); err != nil { // also logged inside
+				activationWarnings = append(activationWarnings, fmt.Sprintf("plugin %q activated, but its message routing was not fully restored: %v", name, err))
+			}
 			slog.Info("Plugin activated after config update", "plugin", name)
 		}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	resp := map[string]interface{}{"status": "ok"}
+	if len(activationWarnings) > 0 {
+		resp["warnings"] = activationWarnings
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleRestartIntegration(w http.ResponseWriter, r *http.Request, name string) {
@@ -716,10 +723,13 @@ func (s *Server) handleRestartIntegration(w http.ResponseWriter, r *http.Request
 	// plugin process. The old spoke wraps a dead connection from the killed
 	// process. refreshBrokerSpoke replaces an existing spoke or adds a new
 	// one if none existed (e.g. first install before a full hub restart).
-	_ = s.refreshBrokerSpoke(mgr, name) // logged inside; wiring is validated below
+	refreshErr := s.refreshBrokerSpoke(mgr, name) // also logged inside
 
 	// Post-restart validation: check that the plugin is wired into the FanOut.
 	warnings := s.validateIntegrationWiring(name)
+	if refreshErr != nil {
+		warnings = append(warnings, fmt.Sprintf("plugin %q restarted, but its message routing was not fully restored: %v", name, refreshErr))
+	}
 
 	response := map[string]interface{}{
 		"status": "ok",
@@ -831,9 +841,12 @@ func (s *Server) handleUpdateIntegration(w http.ResponseWriter, r *http.Request,
 		slog.Warn("Plugin rebuilt but reconfigure failed", "plugin", name, "error", err)
 	}
 
-	_ = s.refreshBrokerSpoke(mgr, name) // logged inside
+	resp := map[string]interface{}{"status": "ok"}
+	if err := s.refreshBrokerSpoke(mgr, name); err != nil { // also logged inside
+		resp["warnings"] = []string{fmt.Sprintf("plugin %q updated, but its message routing was not fully restored: %v", name, err)}
+	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleInstallIntegration(w http.ResponseWriter, r *http.Request, name string) {

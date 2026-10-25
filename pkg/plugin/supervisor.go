@@ -88,6 +88,10 @@ var (
 	// out (config provider, plugin Configure, restart hooks), so an
 	// attempt always ends and releases the plugin's restart lock.
 	restartStepTimeout = 60 * time.Second
+	// gracefulStopTimeout bounds a graceful stop of a hub-managed plugin
+	// (go-plugin's Kill sends a Quit request with no deadline first);
+	// past it the process is killed.
+	gracefulStopTimeout = 5 * time.Second
 )
 
 // backoffDelay returns the delay after restart attempt n (n >= 1):
@@ -553,9 +557,10 @@ func (m *Manager) closeStaleClient(key string, lost *goplugin.Client) {
 }
 
 // replaceClient is the one path by which a plugin's current client is taken
-// out of service: by the supervisor, Reconnect, an admin restart or
-// update, or a load that supersedes it (Shutdown discards its clients the
-// same way). It removes the client stored for key, if it is expect (or any
+// out of service by the supervisor, Reconnect, or an admin restart or
+// update. A load that supersedes a client and Shutdown, which take their
+// clients out under the lock themselves, discard them through
+// discardClient the same way. It removes the client stored for key, if it is expect (or any
 // client when expect is nil), and discards it (see discardClient). It
 // reports whether a client was removed.
 func (m *Manager) replaceClient(key string, expect *goplugin.Client, graceful bool) bool {
@@ -591,9 +596,12 @@ func (m *Manager) replaceClient(key string, expect *goplugin.Client, graceful bo
 // re-dial, until the plugin process exits, together with any Ping or
 // connect goroutine still blocked on it.
 //
-// A hub-managed plugin is stopped: gracefully (a Quit request, then a kill
-// after a short wait) when graceful is set, otherwise its process is killed
-// at once first (a lost session may be hung, and a Quit would wait on it).
+// A hub-managed plugin is stopped. When graceful is set, go-plugin's Kill
+// (a Quit request, then a kill after a short wait) gets gracefulStopTimeout;
+// if it has not returned by then (a hung session never answers the Quit),
+// the process is killed, which ends the session and the pending Quit.
+// Otherwise the process is killed at once first (a lost session may be
+// hung). Either way the stop is bounded.
 func (m *Manager) discardClient(client *goplugin.Client, raw interface{}, self, graceful bool) {
 	if bc, ok := raw.(*BrokerRPCClient); ok {
 		bc.discard()
@@ -601,16 +609,38 @@ func (m *Manager) discardClient(client *goplugin.Client, raw interface{}, self, 
 	if self {
 		return
 	}
-	// Only a process not yet reaped is signalled, so the pid cannot have
-	// been reused.
 	if !graceful {
-		if rc := client.ReattachConfig(); rc != nil && rc.Pid > 0 && !client.Exited() {
-			if p, err := os.FindProcess(rc.Pid); err == nil {
-				_ = p.Kill()
-			}
+		killPluginProcess(client)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		client.Kill()
+	}()
+	timer := time.NewTimer(gracefulStopTimeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return
+	case <-timer.C:
+	}
+	m.logger.Warn("Plugin did not stop within the graceful timeout; killing it", "timeout", gracefulStopTimeout)
+	killPluginProcess(client)
+	select {
+	case <-done:
+	case <-time.After(gracefulStopTimeout):
+		m.logger.Error("Plugin client cleanup did not finish after its process was killed")
+	}
+}
+
+// killPluginProcess kills a hub-managed plugin's process. Only a process
+// not yet reaped is signalled, so the pid cannot have been reused.
+func killPluginProcess(client *goplugin.Client) {
+	if rc := client.ReattachConfig(); rc != nil && rc.Pid > 0 && !client.Exited() {
+		if p, err := os.FindProcess(rc.Pid); err == nil {
+			_ = p.Kill()
 		}
 	}
-	client.Kill()
 }
 
 // attemptFailed schedules the next attempt backoffDelay(attempt) later:

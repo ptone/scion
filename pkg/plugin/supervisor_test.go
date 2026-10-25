@@ -201,14 +201,15 @@ func severSockets() {
 // whose cleanup (run first) waits for the supervisor to stop reading them.
 func shortenSupervisorTiming(t *testing.T) {
 	t.Helper()
-	oldCheck, oldPing, oldInit, oldMax, oldStep := supervisorCheckInterval, supervisorPingTimeout, backoffInitial, backoffMax, restartStepTimeout
+	oldCheck, oldPing, oldInit, oldMax, oldStep, oldStop := supervisorCheckInterval, supervisorPingTimeout, backoffInitial, backoffMax, restartStepTimeout, gracefulStopTimeout
 	supervisorCheckInterval = 50 * time.Millisecond
 	supervisorPingTimeout = time.Second
 	backoffInitial = 20 * time.Millisecond
 	backoffMax = 200 * time.Millisecond
 	restartStepTimeout = 5 * time.Second
+	gracefulStopTimeout = time.Second
 	t.Cleanup(func() {
-		supervisorCheckInterval, supervisorPingTimeout, backoffInitial, backoffMax, restartStepTimeout = oldCheck, oldPing, oldInit, oldMax, oldStep
+		supervisorCheckInterval, supervisorPingTimeout, backoffInitial, backoffMax, restartStepTimeout, gracefulStopTimeout = oldCheck, oldPing, oldInit, oldMax, oldStep, oldStop
 	})
 }
 
@@ -1171,6 +1172,15 @@ func TestClientReplacementPaths_NeverClosePlugin(t *testing.T) {
 		{name: "admin RestartBrokerPlugin", counted: true, refresh: true, replace: func(t *testing.T, m *Manager, _ *selfManagedServer) {
 			require.NoError(t, m.RestartBrokerPlugin("ext", map[string]string{"token": "admin"}))
 		}},
+		{name: "superseding LoadOne", counted: true, refresh: true, replace: func(t *testing.T, m *Manager, s *selfManagedServer) {
+			require.NoError(t, m.LoadOne(PluginTypeBroker, "ext", PluginEntry{SelfManaged: true, Address: s.addr}, ""))
+		}},
+		{name: "admin RestartBrokerPlugin failing to load", counted: true, refresh: false, replace: func(t *testing.T, m *Manager, _ *selfManagedServer) {
+			require.Error(t, m.RestartBrokerPlugin("ext", map[string]string{"token": fakeTokenFailConfigure}))
+			// No client is left; the supervisor recovers it from the
+			// stored config (and its hook refreshes the spoke).
+			waitRestarted(t, m, "ext", 1)
+		}},
 		{name: "Shutdown", replace: func(_ *testing.T, m *Manager, _ *selfManagedServer) {
 			m.Shutdown()
 		}},
@@ -1198,6 +1208,72 @@ func TestClientReplacementPaths_NeverClosePlugin(t *testing.T) {
 				assert.Equal(t, before.DroppedTotal+1, after.DroppedTotal, "a publish through the old client is a counted drop")
 			}
 			assert.Equal(t, 0, s.impl.closeCount(), "the shared plugin instance never received Close")
+		})
+	}
+}
+
+// hubManagedPid returns the pid of the fixture plugin's current process.
+func hubManagedPid(t *testing.T, fx *hubManagedFixture) int {
+	t.Helper()
+	pid, err := strconv.Atoi(fakeHealth(t, fx.m, "fake")["pid"])
+	require.NoError(t, err)
+	return pid
+}
+
+func TestClientReplacementPaths_HubManagedAdminRestart(t *testing.T) {
+	fx := newHubManagedFixture(t)
+	oldPid := hubManagedPid(t, fx)
+	oldBus, err := fx.m.GetBroker("fake")
+	require.NoError(t, err)
+
+	require.NoError(t, fx.m.RestartBrokerPlugin("fake", map[string]string{"token": "admin"}))
+	nb, err := fx.m.GetBroker("fake")
+	require.NoError(t, err)
+	require.NoError(t, fx.fanout.ReplaceSpoke("fake", eventbus.NamedEventBus{Name: "fake", Bus: nb}))
+
+	waitFor(t, 10*time.Second, "old plugin process gone", func() bool { return processGone(oldPid) })
+	assert.NotEqual(t, oldPid, hubManagedPid(t, fx))
+	assert.NoError(t, fx.publish("agent.bot.message"))
+	assert.Equal(t, "agent.>", fakeHealth(t, fx.m, "fake")["subs"])
+	assert.NoError(t, oldBus.Close(), "closing the old adapter is a no-op")
+}
+
+// TestDiscardClient_BoundedStopOfHungPlugin stops the plugin process
+// (SIGSTOP), so its session hangs without the process exiting, and checks
+// that the graceful stop of the admin restart and of Shutdown is bounded.
+func TestDiscardClient_BoundedStopOfHungPlugin(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		stop func(t *testing.T, fx *hubManagedFixture)
+	}{
+		{name: "admin RestartBrokerPlugin", stop: func(t *testing.T, fx *hubManagedFixture) {
+			require.NoError(t, fx.m.RestartBrokerPlugin("fake", map[string]string{"token": "admin"}))
+			nb, err := fx.m.GetBroker("fake")
+			require.NoError(t, err)
+			require.NoError(t, fx.fanout.ReplaceSpoke("fake", eventbus.NamedEventBus{Name: "fake", Bus: nb}))
+			assert.NoError(t, fx.publish("agent.bot.message"), "the new client publishes")
+		}},
+		{name: "Shutdown", stop: func(_ *testing.T, fx *hubManagedFixture) {
+			fx.m.Shutdown()
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newHubManagedFixtureWithInterval(t, time.Hour)
+			pid := hubManagedPid(t, fx)
+			require.NoError(t, syscall.Kill(pid, syscall.SIGSTOP))
+			t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGCONT) })
+
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				tc.stop(t, fx)
+			}()
+			select {
+			case <-done:
+			case <-time.After(15 * time.Second):
+				t.Fatal("stopping a hung plugin did not finish within 15 s")
+			}
+			waitFor(t, 10*time.Second, "hung plugin process killed", func() bool { return processGone(pid) })
 		})
 	}
 }

@@ -2835,3 +2835,39 @@ func TestSetPluginManager_WiresBrokerSupervision(t *testing.T) {
 	require.NoError(t, rec.hooks[0]("discord"))
 	assert.True(t, fanout.HasSpoke("discord"))
 }
+
+func TestRestartIntegration_ReportsSpokeRefreshFailure(t *testing.T) {
+	mgr := newMockIntegrationManager()
+	mgr.plugins["discord"] = map[string]string{}
+	mgr.brokers = map[string]eventbus.EventBus{"discord": replayFailingBus{}}
+
+	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
+		{Name: "inprocess", Bus: eventbus.NewInProcessEventBus(slog.Default())},
+		{Name: "discord", Bus: eventbus.NewInProcessEventBus(slog.Default())},
+	}, slog.Default())
+	_, err := fanout.Subscribe("agent.>", func(context.Context, string, *messages.StructuredMessage) {})
+	require.NoError(t, err)
+
+	srv, st := testServer(t)
+	srv.pluginManager = mgr
+	srv.SetMessageBrokerProxy(NewMessageBrokerProxy(fanout, nil, nil, nil, slog.Default()))
+	createTestUserWithRole(t, st, tid("restart-refresh-admin"), "restart-refresh@example.com", "admin", store.SystemRoleSuperAdmin)
+	admin := NewAuthenticatedUser(tid("restart-refresh-admin"), "restart-refresh@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/discord/restart", nil)
+	req = req.WithContext(integSessionContext(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	warnings, ok := resp["warnings"].([]interface{})
+	require.True(t, ok, "warnings expected, got %v", resp)
+	found := false
+	for _, w := range warnings {
+		if strings.Contains(fmt.Sprint(w), "message routing was not fully restored") {
+			found = true
+		}
+	}
+	assert.True(t, found, "refresh failure reported in %v", warnings)
+}
