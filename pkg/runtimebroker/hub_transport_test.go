@@ -122,3 +122,21 @@ func TestHubConnectionReinitialize_RefusesPlaintextNonLoopbackHub(t *testing.T) 
 		t.Errorf("hub received %d requests after the refusal, want none", got-before)
 	}
 }
+
+// HubClientForCredentials (the flat-instance activation validation) builds
+// no client for credentials naming a plain http hub on a network host, and
+// still builds one for a loopback or https hub.
+func TestHubClientForCredentials_RefusesPlaintextNonLoopbackHub(t *testing.T) {
+	client, err := HubClientForCredentials(transportTestCreds("old", "http://192.0.2.10:8080"))
+	if !errors.Is(err, config.ErrPlaintextNonLoopback) {
+		t.Fatalf("HubClientForCredentials error = %v, want config.ErrPlaintextNonLoopback", err)
+	}
+	if client != nil {
+		t.Error("a client was returned for a refused hub")
+	}
+	for _, endpoint := range []string{"http://127.0.0.1:8080", "https://hub.example.test"} {
+		if _, err := HubClientForCredentials(transportTestCreds("ok", endpoint)); err != nil {
+			t.Errorf("HubClientForCredentials(%s) = %v, want nil", endpoint, err)
+		}
+	}
+}
