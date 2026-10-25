@@ -827,9 +827,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			resume := rest == string(state.PhaseSuspended) || forcedRecovery
 			// Flat placement pre-check: a stale pin is refused before the
 			// reservation, the run intent and any credential or run-ID
-			// write.
-			if err := s.checkPinnedPlacement(agent); err != nil {
-				if !writeRuntimeTargetRefusal(w, err) {
+			// write; a failed broker-record read is the fixed 503.
+			if err := s.startPlacementPreCheck(ctx, agent, "started"); err != nil {
+				if !writeRuntimeTargetRefusal(w, err) && !writePreserveWorkspaceCapabilityError(w, err) {
 					writeErrorFromErr(w, err, "")
 				}
 				return
@@ -977,14 +977,15 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// Refuse before the stop leg: otherwise a broker without
 			// the empty-per-agent capability would have the agent
 			// stopped and then the start refused (design #2703 D3).
-			if !s.requireEmptyPerAgentBrokerCapabilityForAgent(ctx, w, agent) {
+			if !s.requireEmptyPerAgentBrokerCapabilityForAgent(ctx, w, agent, "restarted") {
 				return
 			}
 			// Flat placement pre-check, before the broker cap check, the
 			// start claim, the run intent and the stop leg: a refused
-			// restart never stops the agent.
-			if err := s.checkPinnedPlacement(agent); err != nil {
-				if !writeRuntimeTargetRefusal(w, err) {
+			// restart never stops the agent. A failed broker-record read is
+			// the fixed 503 for the restart.
+			if err := s.startPlacementPreCheck(ctx, agent, "restarted"); err != nil {
+				if !writeRuntimeTargetRefusal(w, err) && !writePreserveWorkspaceCapabilityError(w, err) {
 					writeErrorFromErr(w, err, "")
 				}
 				return
@@ -1200,6 +1201,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			return
 		}
 		if writeEmptyPerAgentCapabilityError(w, dispatchErr) {
+			return
+		}
+		if writePreserveWorkspaceCapabilityError(w, dispatchErr) {
 			return
 		}
 		// A flat Runtime Broker refusal is a definite start failure that no

@@ -552,6 +552,13 @@ func (c *schedRefusingClient) CreateAgent(ctx context.Context, brokerID, endpoin
 	return nil, errors.New("broker unavailable")
 }
 
+// CreateAgentWithGather is the create DispatchAgentCreate sends
+// (ptone/scion#6096): it answers like CreateAgent, with no needs report.
+func (c *schedRefusingClient) CreateAgentWithGather(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+	resp, err := c.CreateAgent(ctx, brokerID, brokerEndpoint, req)
+	return resp, nil, err
+}
+
 func (c *schedRefusingClient) DeleteAgent(_ context.Context, _, _, _, _ string, opts DeleteAgentOptions) error {
 	c.mu.Lock()
 	c.deletes = append(c.deletes, opts.RunID)

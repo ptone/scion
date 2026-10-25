@@ -175,6 +175,7 @@ func storeBrokerCapabilities(c *hubclient.BrokerCapabilities) *store.BrokerCapab
 		EmptyPerAgentWorkspace:   c.EmptyPerAgentWorkspace,
 		AgentMove:                c.AgentMove,
 		AgentMoveRecreate:        c.AgentMoveRecreate,
+		PreserveWorkspaceCreate:  c.PreserveWorkspaceCreate,
 		ReprovisionEmptyPerAgent: c.ReprovisionEmptyPerAgent,
 		ChangedFields:            c.ChangedFields,
 		ClearedFields:            c.ClearedFields,
