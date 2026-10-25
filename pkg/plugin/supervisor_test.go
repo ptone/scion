@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// These tests use Linux process facilities (/proc, SIGSTOP).
+
+//go:build linux
+
 package plugin
 
 import (
@@ -1318,7 +1322,7 @@ func TestShutdown_DiscardsPluginStartedByInFlightAttempt(t *testing.T) {
 		fx.m.Shutdown()
 		close(shutdownDone)
 	}()
-	time.Sleep(100 * time.Millisecond)
+	waitFor(t, 5*time.Second, "shutdown begun", fx.m.stopping.Load)
 	close(release) // the attempt now starts a new plugin process
 	select {
 	case <-shutdownDone:

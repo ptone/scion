@@ -1620,7 +1620,8 @@ func (s *Server) getPluginHubCreds(ctx context.Context, name string) map[string]
 }
 
 // getPluginHubCredsChecked is getPluginHubCreds that also reports a failure
-// to read the HMAC key (the map then lacks hmac_key).
+// to read the HMAC key or the project list (the map then lacks hmac_key or
+// project_slug_map).
 func (s *Server) getPluginHubCredsChecked(ctx context.Context, name string) (map[string]string, error) {
 	var credsErr error
 	creds := make(map[string]string)
@@ -1652,6 +1653,7 @@ func (s *Server) getPluginHubCredsChecked(ctx context.Context, name string) (map
 	if s.store != nil {
 		if projects, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 500}); err != nil {
 			slog.Warn("Failed to list projects for plugin slug map", "plugin", name, "error", err)
+			credsErr = errors.Join(credsErr, fmt.Errorf("project slug map: %w", err))
 		} else {
 			slugMap := make(map[string]string, len(projects.Items))
 			for _, p := range projects.Items {
@@ -1697,10 +1699,12 @@ func (s *Server) resolveIntegrationMergedConfig(ctx context.Context, mgr Integra
 
 // resolveIntegrationMergedConfigChecked is resolveIntegrationMergedConfig
 // that also reports the inputs it could not read: the config file, a
-// mapped secret (a missing secret is not an error), or the HMAC key. The
-// map is the same either way; it is complete only when the error is nil.
-// The plugin supervisor uses it, so an unattended restart retries rather
-// than starting a plugin with a partial config.
+// mapped secret (a missing secret is not an error), the HMAC key or the
+// project list. The map is the same either way; it is complete only when
+// the error is nil. The plugin supervisor and Reconnect use it (through the
+// plugin manager's config provider), so an unattended restart retries, and
+// a self-managed plugin's reconnect reports the error, rather than starting
+// the plugin with a partial config.
 func (s *Server) resolveIntegrationMergedConfigChecked(ctx context.Context, mgr IntegrationManager, name string) (map[string]string, error) {
 	var errs []error
 	pluginCfg := mgr.GetPluginConfig("broker", name)

@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -34,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
@@ -2872,19 +2874,71 @@ func TestRestartIntegration_ReportsSpokeRefreshFailure(t *testing.T) {
 	assert.True(t, found, "refresh failure reported in %v", warnings)
 }
 
+// secretGetStub is a secret backend whose Get returns err.
+type secretGetStub struct {
+	secret.SecretBackend
+	err error
+}
+
+func (b secretGetStub) Get(context.Context, string, string, string) (*secret.SecretWithValue, error) {
+	return nil, b.err
+}
+
+// hmacWriteFailStore is a store with no broker secret whose broker secret
+// write fails.
+type hmacWriteFailStore struct{ store.Store }
+
+func (hmacWriteFailStore) GetBrokerSecret(context.Context, string) (*store.BrokerSecret, error) {
+	return nil, store.ErrNotFound
+}
+
+func (hmacWriteFailStore) CreateBrokerSecret(context.Context, *store.BrokerSecret) error {
+	return errors.New("database is locked")
+}
+
 func TestSupervisionConfigProvider_ReportsUnreadableInputs(t *testing.T) {
-	rec := &supervisionWiringRecorder{mockIntegrationManager: newMockIntegrationManager()}
-	bad := filepath.Join(t.TempDir(), "discord.yaml")
-	require.NoError(t, os.WriteFile(bad, []byte("bot_token: [unterminated\n"), 0o600))
-	rec.plugins["discord"] = map[string]string{"config_file": bad}
+	for _, tc := range []struct {
+		name    string
+		setup   func(t *testing.T, srv *Server, st store.Store, rec *supervisionWiringRecorder)
+		wantErr string // "" means no error
+	}{
+		{name: "unreadable config file", wantErr: "resolve config file", setup: func(t *testing.T, _ *Server, _ store.Store, rec *supervisionWiringRecorder) {
+			bad := filepath.Join(t.TempDir(), "discord.yaml")
+			require.NoError(t, os.WriteFile(bad, []byte("bot_token: [unterminated\n"), 0o600))
+			rec.plugins["discord"] = map[string]string{"config_file": bad}
+		}},
+		{name: "secret backend failure", wantErr: "load secret for", setup: func(_ *testing.T, srv *Server, _ store.Store, _ *supervisionWiringRecorder) {
+			srv.secretBackend = secretGetStub{err: errors.New("backend down")}
+		}},
+		{name: "missing secret is not an error", setup: func(_ *testing.T, srv *Server, _ store.Store, _ *supervisionWiringRecorder) {
+			srv.secretBackend = secretGetStub{err: store.ErrNotFound}
+		}},
+		{name: "hmac key failure", wantErr: "hmac key", setup: func(_ *testing.T, srv *Server, st store.Store, _ *supervisionWiringRecorder) {
+			srv.brokerAuthService = NewBrokerAuthService(DefaultBrokerAuthConfig(), hmacWriteFailStore{st})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &supervisionWiringRecorder{mockIntegrationManager: newMockIntegrationManager()}
+			rec.plugins["discord"] = map[string]string{}
+			srv, st := testServer(t)
+			srv.brokerAuthService = nil
+			tc.setup(t, srv, st, rec)
+			srv.SetPluginManager(rec)
+			require.NotNil(t, rec.provider)
 
-	srv, _ := testServer(t)
-	srv.SetPluginManager(rec)
-	require.NotNil(t, rec.provider)
-	_, err := rec.provider(context.Background(), "discord")
-	require.Error(t, err, "an unreadable config file fails the supervisor's restart attempt")
-	assert.Contains(t, err.Error(), "resolve config file")
+			cfg, err := rec.provider(context.Background(), "discord")
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err, "an unreadable input fails the restart attempt")
+				assert.Contains(t, err.Error(), tc.wantErr)
+			}
+			assert.Equal(t, "discord", cfg["plugin_name"])
 
-	// The admin paths keep their lenient behaviour.
-	assert.NotNil(t, srv.resolveIntegrationMergedConfig(context.Background(), rec, "discord"))
+			// The admin paths' lenient resolver returns the same map and no error.
+			lenient := srv.resolveIntegrationMergedConfig(context.Background(), rec, "discord")
+			assert.Equal(t, cfg["plugin_name"], lenient["plugin_name"])
+			assert.Equal(t, cfg["hub_url"], lenient["hub_url"])
+		})
+	}
 }
