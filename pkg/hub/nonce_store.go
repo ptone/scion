@@ -67,6 +67,37 @@ func (s *NonceCacheStore) CheckAndStore(ctx context.Context, nonce string, ttl t
 	return true, nil // nonce is new
 }
 
+// RecordUntil records key once across every hub replica sharing the
+// database, for a request that is accepted until acceptUntil. It returns
+// true if key is new, and false if key is already recorded or this
+// replica's clock is already past acceptUntil (a request whose processing
+// outlasted its window is refused, which is the safe side).
+//
+// The row is kept until acceptUntil plus retain. PurgeExpired may run on
+// another replica, on that replica's clock: with retain set to the
+// timestamp tolerance, a row is purged only after every replica whose
+// clock is within that tolerance has stopped accepting the request, so a
+// purge cannot come before a late duplicate. Duplicates are refused by the
+// unique constraint, as in CheckAndStore; any other error is returned
+// (callers fail closed).
+func (s *NonceCacheStore) RecordUntil(ctx context.Context, key string, acceptUntil time.Time, retain time.Duration) (bool, error) {
+	if time.Now().After(acceptUntil) {
+		return false, nil
+	}
+	_, err := s.client.NonceCache.
+		Create().
+		SetNonce(key).
+		SetExpiresAt(acceptUntil.Add(retain)).
+		Save(ctx)
+	if err != nil {
+		if ent.IsConstraintError(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
 // PurgeExpired deletes all nonce entries where expires_at < now and returns
 // the number of rows removed for observability.
 func (s *NonceCacheStore) PurgeExpired(ctx context.Context) (int, error) {

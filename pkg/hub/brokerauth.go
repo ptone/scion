@@ -22,6 +22,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -42,9 +43,14 @@ type BrokerAuthConfig struct {
 	Enabled bool
 	// MaxClockSkew is the maximum allowed time difference between client and server.
 	MaxClockSkew time.Duration
-	// EnableNonceCache enables replay attack prevention via nonce caching.
+	// EnableNonceCache enables replay prevention: each verified request is
+	// recorded until the end of its acceptance window and refused if it is
+	// presented again (see recordServed).
 	EnableNonceCache bool
-	// NonceCacheTTL is how long nonces are cached (should be > MaxClockSkew).
+	// NonceCacheTTL sets how often the in-memory cache sweeps expired
+	// entries (every NonceCacheTTL/2). An entry's lifetime is not set by
+	// it: each entry is held until its request's timestamp plus
+	// MaxClockSkew.
 	NonceCacheTTL time.Duration
 	// JoinTokenExpiry is how long join tokens remain valid.
 	JoinTokenExpiry time.Duration
@@ -95,15 +101,28 @@ func (s *BrokerAuthService) admitBroker(ctx context.Context, brokerID string) er
 	return s.brokerAdmission(ctx, brokerID)
 }
 
-// NonceCache provides replay attack prevention by caching used nonces.
+// NonceCache remembers the broker requests already served, in memory, for
+// a hub without a database. Each key is held until its expiry; a cleanup
+// goroutine drops expired keys every ttl/2.
+//
+// Callers pass the now they checked the request's timestamp against, which
+// can be older than another caller's now or the sweep's (the body is read
+// and the secret looked up after the check). So Add also refuses any key
+// whose expiry is before sweptTo, the latest time a sweep or an Add has
+// used: such a key may already have been dropped, and accepting it could
+// serve the same request twice. Only a request at the very edge of its
+// window is refused this way, which is the safe side.
 type NonceCache struct {
-	mu     sync.RWMutex
+	mu sync.Mutex
+	// nonces maps a request key (brokerReplayKey) to its expiry.
 	nonces map[string]time.Time
-	ttl    time.Duration
-	done   chan struct{}
+	// sweptTo is the latest now any sweep or Add has used.
+	sweptTo time.Time
+	ttl     time.Duration
+	done    chan struct{}
 }
 
-// NewNonceCache creates a new nonce cache.
+// NewNonceCache creates a new nonce cache that sweeps every ttl/2.
 func NewNonceCache(ttl time.Duration) *NonceCache {
 	nc := &NonceCache{
 		nonces: make(map[string]time.Time),
@@ -125,19 +144,44 @@ func (nc *NonceCache) Stop() {
 	}
 }
 
-// Add adds a nonce to the cache. Returns false if nonce already exists.
-func (nc *NonceCache) Add(nonce string) bool {
+// Add records key until expiry and reports whether it was new. now is the
+// time the request was checked against. A key whose expiry is before the
+// latest now seen (sweptTo) is refused; a key whose expiry equals it is
+// still accepted once.
+func (nc *NonceCache) Add(key string, expiry, now time.Time) bool {
 	nc.mu.Lock()
 	defer nc.mu.Unlock()
 
-	if _, exists := nc.nonces[nonce]; exists {
+	if now.After(nc.sweptTo) {
+		nc.sweptTo = now
+	}
+	if nc.sweptTo.After(expiry) {
 		return false
 	}
-	nc.nonces[nonce] = time.Now()
+	if _, exists := nc.nonces[key]; exists {
+		return false
+	}
+	nc.nonces[key] = expiry
 	return true
 }
 
-// cleanup periodically removes expired nonces.
+// sweep drops the keys whose expiry is before now (or before sweptTo, if
+// that is later).
+func (nc *NonceCache) sweep(now time.Time) {
+	nc.mu.Lock()
+	defer nc.mu.Unlock()
+
+	if now.After(nc.sweptTo) {
+		nc.sweptTo = now
+	}
+	for key, expiry := range nc.nonces {
+		if nc.sweptTo.After(expiry) {
+			delete(nc.nonces, key)
+		}
+	}
+}
+
+// cleanup periodically removes expired keys.
 func (nc *NonceCache) cleanup() {
 	ticker := time.NewTicker(nc.ttl / 2)
 	defer ticker.Stop()
@@ -147,14 +191,7 @@ func (nc *NonceCache) cleanup() {
 		case <-nc.done:
 			return
 		case <-ticker.C:
-			nc.mu.Lock()
-			cutoff := time.Now().Add(-nc.ttl)
-			for nonce, addedAt := range nc.nonces {
-				if addedAt.Before(cutoff) {
-					delete(nc.nonces, nonce)
-				}
-			}
-			nc.mu.Unlock()
+			nc.sweep(time.Now())
 		}
 	}
 }
@@ -983,33 +1020,14 @@ func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http
 		return nil, fmt.Errorf("%w: %w", errBrokerAuthMalformedTimestamp, err)
 	}
 
+	now := time.Now()
 	requestTime := time.Unix(ts, 0)
-	clockSkew := time.Since(requestTime)
+	clockSkew := now.Sub(requestTime)
 	if clockSkew < 0 {
 		clockSkew = -clockSkew
 	}
 	if clockSkew > s.config.MaxClockSkew {
 		return nil, fmt.Errorf("%w (skew: %v)", errBrokerAuthClockSkew, clockSkew)
-	}
-
-	// Validate nonce if enabled — use DB-backed store for multi-instance
-	// replay protection when configured; otherwise use in-memory cache.
-	// DB errors are fail-closed (request is rejected, not silently passed).
-	// Defence-in-depth: guard against empty nonce reaching the DB store.
-	if s.config.EnableNonceCache && nonce != "" {
-		if s.nonceStore != nil {
-			isNew, err := s.nonceStore.CheckAndStore(ctx, nonce, s.config.NonceCacheTTL)
-			if err != nil {
-				return nil, fmt.Errorf("%w: %w", errBrokerAuthNonceCheck, err)
-			}
-			if !isNew {
-				return nil, errBrokerAuthReplay
-			}
-		} else if s.nonces != nil {
-			if !s.nonces.Add(nonce) {
-				return nil, errBrokerAuthReplay
-			}
-		}
 	}
 
 	// Get the broker's secret
@@ -1040,7 +1058,53 @@ func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http
 		return nil, errBrokerAuthInvalidSignature
 	}
 
+	if err := s.recordServed(ctx, expectedSig, requestTime, now); err != nil {
+		return nil, err
+	}
+
 	return NewBrokerIdentity(brokerID), nil
+}
+
+// brokerReplayKey is the key a verified broker request is recorded under:
+// "broker-sig:" and the hex of its verified HMAC. Every request with the
+// same canonical bytes has the same HMAC, so a request whose headers are
+// framed differently (for example a nonce that takes in a signed-header
+// line) still has one key. The key is printable and of fixed length (a text
+// column on every database accepts it), and the prefix keeps it apart from
+// other keys in the shared nonce table.
+func brokerReplayKey(sig []byte) string {
+	return "broker-sig:" + hex.EncodeToString(sig)
+}
+
+// recordServed records a broker request whose signature has been verified,
+// so the same request is served at most once. It must be called only after
+// the HMAC check succeeds: unauthenticated requests are never recorded.
+//
+// sig is the verified HMAC. The record is held until requestTime plus
+// MaxClockSkew, the last time the timestamp check accepts the request; now
+// is the time that check used. The DB-backed store (shared by every hub
+// replica) is used when configured, the in-memory cache otherwise. DB
+// errors are fail-closed.
+func (s *BrokerAuthService) recordServed(ctx context.Context, sig []byte, requestTime, now time.Time) error {
+	if !s.config.EnableNonceCache {
+		return nil
+	}
+	key := brokerReplayKey(sig)
+	acceptUntil := requestTime.Add(s.config.MaxClockSkew)
+	if s.nonceStore != nil {
+		isNew, err := s.nonceStore.RecordUntil(ctx, key, acceptUntil, s.config.MaxClockSkew)
+		if err != nil {
+			return fmt.Errorf("%w: %w", errBrokerAuthNonceCheck, err)
+		}
+		if !isNew {
+			return errBrokerAuthReplay
+		}
+		return nil
+	}
+	if s.nonces != nil && !s.nonces.Add(key, acceptUntil, now) {
+		return errBrokerAuthReplay
+	}
+	return nil
 }
 
 // buildCanonicalString builds the canonical string for HMAC signing.
@@ -1251,8 +1315,9 @@ func (s *BrokerAuthService) validateWithSecret(ctx context.Context, r *http.Requ
 		return nil, fmt.Errorf("%w: %w", errBrokerAuthMalformedTimestamp, err)
 	}
 
+	now := time.Now()
 	requestTime := time.Unix(ts, 0)
-	clockSkew := time.Since(requestTime)
+	clockSkew := now.Sub(requestTime)
 	if clockSkew < 0 {
 		clockSkew = -clockSkew
 	}
@@ -1269,24 +1334,9 @@ func (s *BrokerAuthService) validateWithSecret(ctx context.Context, r *http.Requ
 		return nil, errBrokerAuthInvalidSignature
 	}
 
-	// Only add nonce to cache after successful validation — use DB-backed
-	// store for multi-instance replay protection when configured; otherwise
-	// use in-memory cache. DB errors are fail-closed.
-	// Defence-in-depth: guard against empty nonce reaching the DB store.
-	if s.config.EnableNonceCache && nonce != "" {
-		if s.nonceStore != nil {
-			isNew, err := s.nonceStore.CheckAndStore(ctx, nonce, s.config.NonceCacheTTL)
-			if err != nil {
-				return nil, fmt.Errorf("%w: %w", errBrokerAuthNonceCheck, err)
-			}
-			if !isNew {
-				return nil, errBrokerAuthReplay
-			}
-		} else if s.nonces != nil {
-			if !s.nonces.Add(nonce) {
-				return nil, errBrokerAuthReplay
-			}
-		}
+	// Record only after the signature verified (see recordServed).
+	if err := s.recordServed(ctx, expectedSig, requestTime, now); err != nil {
+		return nil, err
 	}
 
 	return NewBrokerIdentity(brokerID), nil
