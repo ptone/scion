@@ -38,9 +38,13 @@ import (
 // is owned by the caller's user. Re-registration additionally requires that
 // user to be the broker's creator, or a super-admin presenting an
 // interactive session or dev credential. Turning on auto-provide
-// additionally requires broker.auto_provide. Registration never associates
-// the broker with a project. The route is RouteBrokerHMAC, so these checks
-// run in the handler.
+// additionally requires broker.auto_provide. Because the response carries a
+// join token, the request must also arrive over TLS, from this host, or from a
+// listed proxy reporting https (requireConfidentialArrival, after the
+// authorization checks and before any lookup or mutation); otherwise it gets
+// 403 transport_not_confidential and no token is minted or replaced.
+// Registration never associates the broker with a project. The route is
+// RouteBrokerHMAC, so these checks run in the handler.
 func (s *Server) handleBrokersEndpoint(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w, http.MethodPost)

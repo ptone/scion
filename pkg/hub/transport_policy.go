@@ -27,7 +27,8 @@ import (
 // Hub-broker transport policy, hub side.
 //
 // The broker join and secret rotation responses carry the broker's HMAC
-// secret, and the control channel and the broker conduit session carry the
+// secret, broker registration and join-token re-mint (POST
+// /api/v1/brokers) return a join token, and the control channel and the broker conduit session carry the
 // secrets of every agent the broker runs. The hub serves them only on a
 // request that arrived over an encrypted channel or from this host
 // (confidentialArrival); every other request is refused before anything
