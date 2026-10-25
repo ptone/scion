@@ -312,6 +312,10 @@ describe('edit sweep', () => {
       }
       report('independent', t);
       expect(t.failures).toEqual([]);
+      // Every taken edit had its locality checked, and no text edit in a
+      // list or a table was refused as a change to its structure.
+      expect(t.noLocality).toBe(0);
+      expect(t.refused['list-table'] ?? 0).toBe(0);
       // The sweep exercised edits of every kind on every fixture.
       expect(t.applied).toBeGreaterThan(docs.length);
       for (const d of sweepDocs) expect(t.notOpened).not.toContain(`sweep: ${d.name}`);
