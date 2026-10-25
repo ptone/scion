@@ -49,6 +49,7 @@ export type HintKind =
   | 'paste-multi'
   | 'earlier'
   | 'moved'
+  | 'code-run'
   | 'generic';
 
 /**

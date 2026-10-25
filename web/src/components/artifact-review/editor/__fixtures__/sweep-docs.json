@@ -1,5 +1,5 @@
 {
-  "comment": "Documents for the edit sweep (sweep.test.ts) beside the shared CriticMarkup corpus: lists with star, plus and odd-numbered markers, tables with alignment colons, backslashed pipes and uneven padding, nested and quoted lists, syntax the serializer writes differently from the source, a mark across list items, a CRLF document, literal openers of every mark kind, reference links, and a sample review.",
+  "comment": "Documents for the edit sweep (sweep.test.ts) beside the shared CriticMarkup corpus: lists with star, plus and odd-numbered markers, tables with alignment colons, backslashed pipes and uneven padding, nested and quoted lists, syntax the serializer writes differently from the source, a mark across list items, a CRLF document, literal openers of every mark kind, a literal replacement opener with a later closer, blocks sharing a line run, reference links, and a sample review.",
   "cases": [
     {
       "name": "review sample",
@@ -35,11 +35,19 @@
     },
     {
       "name": "literal openers of every kind",
-      "in": "- first item with {++a real insertion++}\n- second item with {--a real deletion--}\n\nNotes: {++ an opener, {-- another, {~~ a third, {== a fourth and {>> a fifth stay literal.\n\n- third item\n- fourth item\n\n| col | val |\n|-----|-----|\n| text | more |\n\nA closing paragraph with words.\n"
+      "in": "A plain opening paragraph with some words.\n\n- first item with {++a real insertion++}\n- second item with {--a real deletion--}\n\nNotes: {++ an opener, {-- another, {~~ a third, {== a fourth and {>> a fifth stay literal.\n\n- third item\n- fourth item\n\n| col | val |\n|-----|-----|\n| text | more |\n\nA closing paragraph with words.\n"
     },
     {
       "name": "reference links",
       "in": "See [the guide][g] and [another][h] for {++more++} detail.\n\n* item with [a ref][g]\n* plain item\n\n| link | note |\n|------|------|\n| [cell ref][h] | text |\n\n[g]: https://example.com/guide\n[h]: https://example.com/other \"Other\"\n"
+    },
+    {
+      "name": "blocks sharing a line run",
+      "in": "# Title with a ` tick\nA paragraph right under it.\n\nPress the ` key:\n- one item\n- two item\n\nA separate paragraph with `code` in it.\n"
+    },
+    {
+      "name": "a literal replacement opener with a later closer",
+      "in": "Use {~~ to start.\n\nSome text here.\n\nAnd ~~} to end.\n\nA closing paragraph.\n"
     }
   ]
 }

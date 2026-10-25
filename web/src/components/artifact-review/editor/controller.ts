@@ -404,9 +404,14 @@ export class ReviewController {
   /**
    * The current text, serializing only after an edit; null when it cannot
    * be written faithfully (every unit written must read back as the
-   * document and keep every earlier mark, design 4.6 item 3 and E5).
+   * document and keep every earlier mark, design 4.6 item 3 and E5). A
+   * composition that has ended but whose settle step is still pending is
+   * settled first, so Save or a switch to Source right after it keeps the
+   * composed text as a suggestion; while a composition runs, the text
+   * cannot be written (null).
    */
   flush(): string | null {
+    if (this.ended && !this.core.view.composing) this.settleComposition();
     return this.session.save();
   }
 

@@ -170,6 +170,7 @@ export type ReviewHint =
   | 'earlier'
   | 'moved'
   | 'source-own'
+  | 'code-run'
   | 'generic'
   | 'load-failed';
 
@@ -208,6 +209,10 @@ export const REVIEW_HINT_TEXT: Record<ReviewHint, { title: string; body: string 
     title:
       "Suggestions you've made so far become read-only in the graphical view after you switch to Source.",
     body: 'You can still change them there.',
+  },
+  'code-run': {
+    title: 'That edit would change code that continues on the lines next to it.',
+    body: 'Use the Source view to change backticks here.',
   },
   generic: {
     title: "That change can't be recorded as a suggestion.",
