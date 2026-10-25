@@ -408,3 +408,39 @@ func TestEnsureHubReady_PlaintextNonLoopbackRefusedBeforeAnyRequest(t *testing.T
 	}
 	assertNoRequests(t, hub)
 }
+
+// TestNewInjectedAgentHubClient_InjectedHostMustBeHostAddress checks the
+// host-class condition: even when it is exactly the injected value, an
+// endpoint qualifies only when its host is a host alias or an IPv4
+// link-local address (loopback is accepted by the rule itself).
+func TestNewInjectedAgentHubClient_InjectedHostMustBeHostAddress(t *testing.T) {
+	for endpoint, want := range map[string]bool{
+		"http://host.docker.internal:9810":      true,
+		"http://HOST.CONTAINERS.INTERNAL:9810":  true,
+		"http://scion-hub.internal:9810":        true,
+		"http://169.254.169.2:8080":             true,
+		"http://10.0.0.1:9810":                  false,
+		"http://hub.example.com":                false,
+		"http://scion-hub.internal.example.com": false,
+		"http://[fe80::1]:9810":                 false,
+		"http://192.168.1.10:9810":              false,
+	} {
+		t.Run(endpoint, func(t *testing.T) {
+			agentEnv(t, endpoint)
+			hub := newCountingHub(t)
+			routeDialsTo(t, hub.Listener.Addr().String())
+
+			c, ok := NewInjectedAgentHubClient(endpoint, 5*time.Second)
+			if ok != want {
+				t.Fatalf("NewInjectedAgentHubClient(%s) ok = %v, want %v", endpoint, ok, want)
+			}
+			if !ok {
+				assertNoRequests(t, hub)
+				return
+			}
+			if _, err := c.Health(context.Background()); err != nil {
+				t.Fatalf("Health: %v", err)
+			}
+		})
+	}
+}

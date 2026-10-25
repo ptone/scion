@@ -16,7 +16,10 @@ package hubsync
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -69,6 +72,24 @@ func isInjectedHubEndpoint(endpoint string) bool {
 	return false
 }
 
+// isAgentHostAddress reports whether endpoint's host is an address through
+// which an agent container reaches its own host: a literal loopback
+// address, a host alias (config.IsAgentHostAliasHost) or an IPv4
+// link-local address (169.254.0.0/16, as on cloudrun-sandbox). Names are
+// never resolved.
+func isAgentHostAddress(endpoint string) bool {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if config.IsLoopbackHost(host) || config.IsAgentHostAliasHost(host) {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.To4() != nil && ip.IsLinkLocalUnicast()
+}
+
 // injectedAgentToken returns the agent token the Runtime Broker gave this
 // container: the canonical token file, else SCION_AUTH_TOKEN (the order
 // selectHubCredential uses).
@@ -91,6 +112,9 @@ func injectedAgentToken() string {
 //   - this process runs in a hub-managed agent (config.IsHubManagedAgent);
 //   - endpoint is exactly the injected SCION_HUB_ENDPOINT or SCION_HUB_URL
 //     value;
+//   - its host is a container-to-host address (isAgentHostAddress: a
+//     loopback address, a host alias such as host.docker.internal, or an
+//     IPv4 link-local address), never any other injected host;
 //   - an agent token is present in the injected source (token file or
 //     SCION_AUTH_TOKEN).
 //
@@ -104,7 +128,7 @@ func NewInjectedAgentHubClient(endpoint string, timeout time.Duration) (c hubcli
 	if config.CheckHubTransport(endpoint) == nil {
 		return nil, false
 	}
-	if !config.IsHubManagedAgent() || !isInjectedHubEndpoint(endpoint) {
+	if !config.IsHubManagedAgent() || !isInjectedHubEndpoint(endpoint) || !isAgentHostAddress(endpoint) {
 		return nil, false
 	}
 	token := injectedAgentToken()

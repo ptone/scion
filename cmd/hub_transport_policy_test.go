@@ -387,8 +387,9 @@ func htpAgentEnv(t *testing.T) string {
 }
 
 // TestInjectedAgentTokenException covers the one exception (sec-review-3's
-// three conditions): allowed only for a hub-managed agent AND the
-// broker-injected agent-token source AND exactly the injected endpoint;
+// conditions): allowed only for a hub-managed agent AND the broker-injected
+// agent-token source AND exactly the injected endpoint AND a host alias or
+// link-local host;
 // a user credential is refused in every mode, including inside an agent.
 func TestInjectedAgentTokenException(t *testing.T) {
 	t.Run("all three conditions: only the agent token is sent", func(t *testing.T) {
@@ -460,6 +461,10 @@ func TestInjectedAgentTokenException(t *testing.T) {
 		},
 		"endpoint is another non-loopback host": func(t *testing.T) string {
 			return htpRefused
+		},
+		"injected endpoint is not a container-to-host address": func(t *testing.T) string {
+			t.Setenv("SCION_HUB_ENDPOINT", "http://10.0.0.1:9810")
+			return "http://10.0.0.1:9810"
 		},
 	}
 	for name, setup := range negatives {
