@@ -76,11 +76,12 @@ export interface Baseline {
   written: Map<Node, { text: string; toSource: Edit[] | null }>;
   /**
    * writeUnit's result per current first node of a unit, with the unit's
-   * nodes: nodes do not change, so the same nodes give the same text (the
-   * whole-document check of a hazardous document reads every edited unit
-   * on each edit).
+   * position and nodes: nodes do not change, so the same nodes at the same
+   * place give the same text (the whole-document check of a hazardous
+   * document reads every edited unit on each edit). The serializer, schema
+   * and parser a session passes are the same for every call on a baseline.
    */
-  units: WeakMap<Node, { nodes: Node[]; md: string | null }>;
+  units: WeakMap<Node, { i: number; nodes: Node[]; md: string | null }>;
 }
 
 interface MdNode {
@@ -356,11 +357,16 @@ export function writeUnit(
   const nodes: Node[] = [];
   for (let k = i; k <= j; k++) nodes.push(doc.child(k));
   const hit = base.units.get(nodes[0]);
-  if (hit && hit.nodes.length === nodes.length && hit.nodes.every((n, k) => n === nodes[k])) {
+  if (
+    hit &&
+    hit.i === i &&
+    hit.nodes.length === nodes.length &&
+    hit.nodes.every((n, k) => n === nodes[k])
+  ) {
     return hit.md;
   }
   const md = writeUnitAnew(doc, base, i, j, serialize, schema, parse);
-  base.units.set(nodes[0], { nodes, md });
+  base.units.set(nodes[0], { i, nodes, md });
   return md;
 }
 

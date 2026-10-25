@@ -497,6 +497,19 @@ describe('refused edits in suggest mode', () => {
     const out = text(c);
     expect(onlyMarksChanged(out, projectCritic(md, 'clean'))).toBe(true);
     expect(parseCritic(out).filter((x) => x.kind === 'insertion')).toHaveLength(2);
+    // Two backticks in one block and one in the next, in both orders.
+    for (const [first, second] of [
+      ['``', '`'],
+      ['`', '``'],
+    ]) {
+      const mixed = await open(md);
+      type(mixed.c, first, posOf(mixed.c, 'a key'));
+      type(mixed.c, second, posOf(mixed.c, 'two'));
+      expect(mixed.hints).toEqual([]);
+      const o = text(mixed.c);
+      expect(onlyMarksChanged(o, projectCritic(md, 'clean'))).toBe(true);
+      expect(parseCritic(o).filter((x) => x.kind === 'insertion')).toHaveLength(2);
+    }
     // Two backticks at a time, too.
     const two = await open(md);
     type(two.c, '``', posOf(two.c, 'a key'));
@@ -1273,47 +1286,93 @@ describe('whole-text check for hazardous documents (design E7)', () => {
     session.changesCode = (): boolean => false;
   }
 
-  const cases: [string, string, string, string][] = [
-    ['a closer after a literal opener', 'Note: {++ stays literal.\n\n- one\n- two\n', 'two', 'X'],
+  /** Forces the hazard flag off, so the per-edit whole-text check does not run. */
+  function hazardOff(c: ReviewController): void {
+    (c as unknown as { session: Record<string, unknown> }).session.hazardous = false;
+  }
+
+  // Each case: a document and its edits ([text, offset in it, typed]); every
+  // edit but the last changes no pairing on its own.
+  const cases: [string, string, [string, number, string][]][] = [
+    [
+      'a closer after a literal opener',
+      'Note: {++ stays literal.\n\n- one\n- two\n',
+      [['two', 0, 'X']],
+    ],
     [
       'a separator after a literal replacement opener',
       'Use {~~ to start.\n\nSome text here.\n\nAnd ~~} to end.\n',
-      'text',
-      '~>',
+      [['text', 0, '~>']],
     ],
-    ['a backtick in a line run with one', 'Press the ` key:\n- one\n- two\n', 'two', '`'],
+    ['a backtick in a line run with one', 'Press the ` key:\n- one\n- two\n', [['two', 0, '`']]],
     [
       "a separator in the opener's own block",
       'Use {~~ to start.\n\nSome text here.\n\nAnd ~~} to end.\n',
-      'start',
-      '~>',
+      [['start', 0, '~>']],
     ],
     [
       'a backtick next to a definition with one',
       '[k]: /keys "the ` key"\nPress a key.\n',
-      'a key',
-      '`',
+      [['a key', 0, '`']],
+    ],
+    [
+      'a broken closer the opener does not reach yet',
+      'Use {~~ to start.\n\nMid ~~} here.\n\nThen ~> and ~~} end.\n',
+      [['~~}', 2, 'X']],
+    ],
+    [
+      "a broken closer in the opener's own block",
+      'Use {~~ to ~~} start.\n\nThen ~> and ~~} end.\n',
+      [['~~}', 2, 'X']],
+    ],
+    [
+      'a broken closer in a list item',
+      '- Use {~~ a\n- b ~~} c\n\nThen ~> and ~~} end.\n',
+      [['~~}', 2, 'X']],
+    ],
+    // A pairing that needs two edits in two blocks: the check must read the
+    // block edited earlier as save writes it.
+    [
+      'a broken closer, then a separator in a later block',
+      'Use {~~ to start.\n\nMid ~~} here.\n\nThen and ~~} end.\n',
+      [
+        ['~~}', 2, 'X'],
+        ['and', 0, '~>'],
+      ],
+    ],
+    [
+      'a broken separator, then a new one before the closer',
+      'Use {~~ to start.\n\nSay hi ~~} then ~> bye.\n',
+      [
+        ['~>', 1, 'X'],
+        ['hi', 0, '~>'],
+      ],
     ],
   ];
-  for (const [name, md, at, typed] of cases) {
+  for (const [name, md, edits] of cases) {
     it(`refuses ${name} with the first-line checks off`, async () => {
       const { c, hints } = await open(md);
       expect(c.isHazardous).toBe(true);
       firstLineOff(c);
-      type(c, typed, posOf(c, at));
-      expect(hints).toEqual(['generic']);
-      expect(text(c)).toBe(md);
+      for (const [k, [at, offset, typed]] of edits.entries()) {
+        type(c, typed, posOf(c, at, offset));
+        expect(hints).toEqual(k < edits.length - 1 ? [] : ['generic']);
+      }
+      if (edits.length === 1) expect(text(c)).toBe(md);
+      else expect(onlyMarksChanged(text(c), projectCritic(md, 'clean'))).toBe(true);
+    });
+
+    it(`takes ${name} with no check left, and the save then refuses it`, async () => {
+      // Control: without the first line and without the whole-text check,
+      // every edit is taken and only save's own whole-text check stops it.
+      const { c, hints } = await open(md);
+      firstLineOff(c);
+      hazardOff(c);
+      for (const [at, offset, typed] of edits) type(c, typed, posOf(c, at, offset));
+      expect(hints).toEqual([]);
+      expect(c.flush()).toBeNull();
     });
   }
-
-  it('refuses breaking a closer a literal replacement opener does not reach yet', async () => {
-    const md = 'Use {~~ to start.\n\nMid ~~} here.\n\nThen ~> and ~~} end.\n';
-    const { c, hints } = await open(md);
-    firstLineOff(c);
-    type(c, 'X', posOf(c, '~~}', 2));
-    expect(hints).toEqual(['generic']);
-    expect(text(c)).toBe(md);
-  });
 
   it('takes edits that change no pairing in a hazardous document', async () => {
     // A literal {++: a deletion after it adds no ++}.
@@ -1341,10 +1400,13 @@ describe('whole-text check for hazardous documents (design E7)', () => {
     type(c, '~>', posOf(c, 'one'));
     backspace(c, posOf(c, 'd', 1));
     expect(hints).toEqual([]);
-    expect(c.isHazardous).toBe(false);
     const out = text(c);
     expect(onlyMarksChanged(out, projectCritic(md, 'clean'))).toBe(true);
     expect(parseCritic(out).filter((x) => x.kind !== 'text')).toHaveLength(4);
+    // The saved text, opened again, is still not hazardous: the edits
+    // created no literal opener and no shared backtick.
+    const again = await open(out);
+    expect(again.c.isHazardous).toBe(false);
   });
 });
 
