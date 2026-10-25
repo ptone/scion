@@ -268,6 +268,9 @@ export const LARGE_REVIEW_CONFIRM =
 /** The view toggle's tooltip when the graphical view is not offered. */
 export const TOO_LARGE_TOOLTIP = 'Too large for the graphical view.';
 
+/** The view toggle's tooltip while the document's size is being checked. */
+export const SIZING_TOOLTIP = 'Checking the document size...';
+
 /**
  * The size class of text for the graphical review page. Bytes are exact;
  * blocks are counted by the app's Markdown lexer, which is close to the
@@ -435,7 +438,11 @@ export class ScionPageArtifactDetail extends LitElement {
   /** Counts reviews started, so a size worked out for an earlier one is dropped. */
   private reviewRuns = 0;
   /** A choice of the graphical view is being sized or confirmed (one at a time). */
-  private choosingGraphical = false;
+  @state() private choosingGraphical = false;
+  /** Counts choices of the graphical view, so a stale one cannot release a newer one. */
+  private choiceToken = 0;
+  /** The too-large size came from the block count (the bytes are within the ceiling). */
+  private tooLargeByBlocks = false;
   /** The hint shown under the toolbar of the graphical review page. */
   @state() private graphicalHint: ReviewHint | null = null;
   private hintTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1179,6 +1186,7 @@ export class ScionPageArtifactDetail extends LitElement {
       this.reviewView = storedReviewView();
       this.reviewSize = null;
       this.largeConfirmed = false;
+      this.releaseChoice();
       void this.sizeReview(this.reviewText, ++this.reviewRuns);
     }
   };
@@ -1193,7 +1201,7 @@ export class ScionPageArtifactDetail extends LitElement {
   private async sizeReview(text: string, run: number): Promise<void> {
     const size = await reviewSize(text);
     if (run !== this.reviewRuns || !this.reviewing) return;
-    this.reviewSize = size;
+    this.setReviewSize(size, text);
     if (size === 'too-large') {
       this.reviewView = 'source';
       this.showHint('too-large');
@@ -1215,13 +1223,28 @@ export class ScionPageArtifactDetail extends LitElement {
       this.setReviewView(next);
       return;
     }
-    // One choice at a time: another click while this one is sized or
-    // confirmed does nothing (no second confirmation).
-    if (this.choosingGraphical) return;
+    // Not while the text is still being sized (a review starting or
+    // restarting), and one choice at a time: another click while one is
+    // sized or confirmed does nothing (no second confirmation).
+    if (this.reviewSize === null || this.choosingGraphical) return;
+    const token = ++this.choiceToken;
     this.choosingGraphical = true;
     void this.chooseGraphical().finally(() => {
-      this.choosingGraphical = false;
+      if (token === this.choiceToken) this.choosingGraphical = false;
     });
+  }
+
+  /** Ends any choice of the graphical view still pending (Cancel, a new or restarted review). */
+  private releaseChoice(): void {
+    this.choiceToken++;
+    this.choosingGraphical = false;
+  }
+
+  /** Records the size class of text, and whether a too-large one came from its blocks. */
+  private setReviewSize(size: ReviewSize, text: string): void {
+    this.reviewSize = size;
+    this.tooLargeByBlocks =
+      size === 'too-large' && new TextEncoder().encode(text).length <= MAX_GRAPHICAL_BYTES;
   }
 
   /** chooseReviewView('graphical'), sized by the current text. */
@@ -1231,7 +1254,7 @@ export class ScionPageArtifactDetail extends LitElement {
       const text = this.reviewText;
       // Bytes first, without waiting: over the ceiling nothing else matters.
       if (new TextEncoder().encode(text).length > MAX_GRAPHICAL_BYTES) {
-        this.reviewSize = 'too-large';
+        this.setReviewSize('too-large', text);
         this.showHint('too-large');
         return;
       }
@@ -1239,7 +1262,7 @@ export class ScionPageArtifactDetail extends LitElement {
       if (run !== this.reviewRuns || !this.reviewing) return;
       // Edited while it was being sized: size the text as it is now.
       if (this.reviewText !== text) continue;
-      this.reviewSize = size;
+      this.setReviewSize(size, text);
       if (size === 'too-large') {
         this.showHint('too-large');
         return;
@@ -1263,14 +1286,25 @@ export class ScionPageArtifactDetail extends LitElement {
   /**
    * After a pause in typing in the Source view: the toggle follows the
    * byte ceiling (disabled over it). Bytes only, so typing in a large
-   * document never waits for a block count; blocks are counted when the
-   * graphical view is chosen. The view and the hints are left as they are.
+   * document does not wait for a block count; blocks are counted when the
+   * graphical view is chosen. A too-large size that came from the block
+   * count is kept until the blocks are counted again, here: the toggle is
+   * disabled, so this is the only place that can find the text smaller.
+   * The view and the hints are left as they are.
    */
   private refreshReviewSize(text: string): void {
     const bytes = new TextEncoder().encode(text).length;
-    if (bytes > MAX_GRAPHICAL_BYTES) this.reviewSize = 'too-large';
-    else if (this.reviewSize === 'too-large')
-      this.reviewSize = bytes > LARGE_REVIEW_BYTES ? 'large' : 'normal';
+    if (bytes > MAX_GRAPHICAL_BYTES) {
+      this.setReviewSize('too-large', text);
+    } else if (this.reviewSize === 'too-large' && this.tooLargeByBlocks) {
+      const run = this.reviewRuns;
+      void reviewSize(text).then((size) => {
+        if (run !== this.reviewRuns || !this.reviewing || this.reviewText !== text) return;
+        this.setReviewSize(size, text);
+      });
+    } else if (this.reviewSize === 'too-large') {
+      this.setReviewSize(bytes > LARGE_REVIEW_BYTES ? 'large' : 'normal', text);
+    }
   }
 
   /** The graphical review page is on (experiment web.artifact_review_editor). */
@@ -1433,6 +1467,7 @@ export class ScionPageArtifactDetail extends LitElement {
     if (this.reviewGraphical) {
       this.reviewRuns++;
       this.reviewSize = null;
+      this.releaseChoice();
     }
     await this.load();
     if (!this.reviewing) return;
@@ -1481,6 +1516,7 @@ export class ScionPageArtifactDetail extends LitElement {
   /** Leaves Review mode without saving. */
   private cancelReview = (): void => {
     this.clearPreviewTimer();
+    this.releaseChoice();
     this.reviewing = false;
     this.discardedReview = null;
   };
@@ -2474,7 +2510,9 @@ export class ScionPageArtifactDetail extends LitElement {
           <sl-tooltip
             content=${this.reviewSize === 'too-large'
               ? TOO_LARGE_TOOLTIP
-              : 'Undo history is kept per view and resets when you switch'}
+              : this.reviewSize === null || this.choosingGraphical
+                ? SIZING_TOOLTIP
+                : 'Undo history is kept per view and resets when you switch'}
           >
             <sl-radio-group
               size="small"
@@ -2488,7 +2526,12 @@ export class ScionPageArtifactDetail extends LitElement {
                 if (group.value !== this.reviewView) group.value = this.reviewView;
               }}
             >
-              <sl-radio-button value="graphical" ?disabled=${this.reviewSize === 'too-large'}>
+              <sl-radio-button
+                value="graphical"
+                ?disabled=${this.reviewSize === null ||
+                this.reviewSize === 'too-large' ||
+                this.choosingGraphical}
+              >
                 <sl-icon slot="prefix" name="file-earmark-richtext"></sl-icon>
                 <span class="lbl">Graphical</span>
               </sl-radio-button>

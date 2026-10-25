@@ -121,9 +121,9 @@ describe('opening alphabet without a numeric character reference', () => {
     // The parser's own chain, from the editor's Milkdown parser down: every
     // package of it that decodes character references finds the same copy.
     const web = join(__dirname, '../..');
-    // A template literal: the dependency test counts quoted Milkdown names
-    // as imports, and this one is a package location, not an import.
-    const transformer = pkgDir(web, `@milkdown/transformer`);
+    // A package location, not an import: listed in dependencies.test.ts's
+    // NOT_IMPORTS.
+    const transformer = pkgDir(web, '@milkdown/transformer');
     const remark = pkgDir(transformer, 'remark');
     const fromMarkdown = pkgDir(pkgDir(remark, 'remark-parse'), 'mdast-util-from-markdown');
     const micromark = pkgDir(fromMarkdown, 'micromark');

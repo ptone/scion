@@ -138,6 +138,8 @@ function mockFetch(
   text = TEXT,
   opts: {
     body?: () => string;
+    /** The entry file's response (held until it resolves, when it is a promise). */
+    files?: () => Response | Promise<Response> | null;
     write?: (method: string, url: string, m: ArtifactResponse) => Response;
   } = {}
 ): void {
@@ -160,6 +162,8 @@ function mockFetch(
         return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
       }
       if (url.includes('/files/')) {
+        const held = opts.files?.();
+        if (held) return Promise.resolve(held);
         return Promise.resolve(new Response(opts.body ? opts.body() : text, { status: 200 }));
       }
       return Promise.resolve(new Response(JSON.stringify(m), { status: 200 }));
@@ -486,6 +490,8 @@ describe('artifact page: graphical review editor experiment', () => {
 
   /** Lets every held block count finish, one at a time. */
   const releaseBlocks = async (el: ScionPageArtifactDetail): Promise<void> => {
+    // A held count joins the queue once it is computed: wait for it.
+    for (let i = 0; i < 50 && !blocks.pending.length; i++) await settle(el, 1);
     blocks.defer = false;
     while (blocks.pending.length) {
       blocks.pending.shift()!();
@@ -621,6 +627,199 @@ describe('artifact page: graphical review editor experiment', () => {
       '.g-work scion-code-editor.review-editor'
     )!;
     expect(code.content).toBe(large);
+  });
+
+  /** A review save that finalizes as stale: the current version then reads large. */
+  const staleSave =
+    (onFinalize: () => void) =>
+    (method: string, url: string, m: ArtifactResponse): Response => {
+      if (url.endsWith('/finalize')) {
+        onFinalize();
+        return new Response(JSON.stringify({ error: { code: 'stale_review', message: 'stale' } }), {
+          status: 409,
+        });
+      }
+      if (method === 'PUT') return new Response(null, { status: 204 });
+      return new Response(
+        JSON.stringify({
+          artifact: m.artifact,
+          version: { seq: 2 },
+          upload: { required: ['plan.md'] },
+        }),
+        { status: 201 }
+      );
+    };
+  /** The view toggle's Graphical button and its tooltip. */
+  const graphicalButton = (el: ScionPageArtifactDetail): HTMLElement =>
+    $(el, 'sl-radio-button[value="graphical"]')!;
+  const toggleTip = (el: ScionPageArtifactDetail): string | null =>
+    $(el, '.g-toolbar sl-tooltip:has(sl-radio-group)')!.getAttribute('content');
+
+  it('shows a pending toggle while the size is checked, at the start and when choosing', async () => {
+    window.localStorage.setItem('scion:artifact-review-view', 'source');
+    blocks.defer = true;
+    mockFetch();
+    const el = await mount(true);
+    await startReview(el);
+    expect(graphicalButton(el).hasAttribute('disabled')).toBe(true);
+    expect(toggleTip(el)).toBe('Checking the document size...');
+    await releaseBlocks(el);
+    expect(graphicalButton(el).hasAttribute('disabled')).toBe(false);
+    expect(toggleTip(el)).toBe('Undo history is kept per view and resets when you switch');
+    blocks.defer = true;
+    await chooseView(el, 'graphical');
+    expect(graphicalButton(el).hasAttribute('disabled')).toBe(true);
+    expect(toggleTip(el)).toBe('Checking the document size...');
+    await releaseBlocks(el);
+    expect(loader.load).toHaveBeenCalledTimes(1);
+  });
+
+  it('a choice still pending does not hold back the next review', async () => {
+    window.localStorage.setItem('scion:artifact-review-view', 'source');
+    mockFetch();
+    const el = await mount(true);
+    await startReview(el);
+    blocks.defer = true;
+    await chooseView(el, 'graphical');
+    byText(el, '.edit-footer sl-button', 'Cancel')!.click();
+    await settle(el);
+    blocks.defer = false;
+    await startReview(el);
+    // The earlier choice's count is still held; the new review can choose.
+    expect(blocks.pending.length).toBe(1);
+    await chooseView(el, 'graphical');
+    expect(loader.load).toHaveBeenCalledTimes(1);
+    expect($(el, 'scion-review-editor')).not.toBeNull();
+    await releaseBlocks(el);
+  });
+
+  it('a too-large size from the block count stays until the blocks are counted again', async () => {
+    window.localStorage.setItem('scion:artifact-review-view', 'source');
+    mockFetch();
+    const el = await mount(true);
+    await startReview(el);
+    const many = 'p\n\n'.repeat(MAX_GRAPHICAL_BLOCKS + 1);
+    await typeSource(el, many);
+    await chooseView(el, 'graphical');
+    expect(graphicalButton(el).hasAttribute('disabled')).toBe(true);
+    // Still over the block ceiling (few bytes): the pause keeps it.
+    await typeSource(el, many + 'q\n');
+    await previewPause();
+    await settle(el);
+    expect(graphicalButton(el).hasAttribute('disabled')).toBe(true);
+    // Back under it: the pause counts the blocks again and enables it.
+    await typeSource(el, TEXT);
+    await previewPause();
+    await settle(el);
+    expect(graphicalButton(el).hasAttribute('disabled')).toBe(false);
+  }, 30_000);
+
+  it('a choice made while a stale review reloads does nothing', async () => {
+    window.localStorage.setItem('scion:artifact-review-view', 'source');
+    let body = TEXT;
+    let release: () => void = () => {};
+    let hold = false;
+    const large = 'é'.repeat(LARGE_REVIEW_BYTES / 2) + 'a';
+    mockFetch(TEXT, {
+      // The reload's fetch of the new text is held until released below.
+      files: () =>
+        hold
+          ? new Promise<Response>((r) => {
+              hold = false;
+              release = (): void => r(new Response(body, { status: 200 }));
+            })
+          : null,
+      body: () => body,
+      write: staleSave(() => {
+        body = large;
+        hold = true;
+      }),
+    });
+    const el = await mount(true);
+    await startReview(el);
+    await typeSource(el, 'We {++really ++}ship in Q3.\n');
+    byText(el, '.edit-footer sl-button', 'Save review')!.click();
+    await settle(el, 40);
+    // The reload waits for its text. A choice of the graphical view arrives
+    // now (the toggle itself may not be on the page), and its block count
+    // finishes before the reload does.
+    blocks.defer = true;
+    (el as unknown as { chooseReviewView: (v: string) => void }).chooseReviewView('graphical');
+    await releaseBlocks(el);
+    expect(confirm.asked).toEqual([]);
+    expect(loader.load).not.toHaveBeenCalled();
+    release();
+    await settle(el, 40);
+    expect(loader.load).not.toHaveBeenCalled();
+    const code = $<HTMLElement & { content: string }>(
+      el,
+      '.g-work scion-code-editor.review-editor'
+    )!;
+    expect(code.content).toBe(large);
+  });
+
+  it('a pending choice is dropped by a stale review restart, whatever finishes first', async () => {
+    window.localStorage.setItem('scion:artifact-review-view', 'source');
+    let body = TEXT;
+    let release: () => void = () => {};
+    let hold = false;
+    const large = 'é'.repeat(LARGE_REVIEW_BYTES / 2) + 'a';
+    mockFetch(TEXT, {
+      // The reload's fetch of the new text is held until released below.
+      files: () =>
+        hold
+          ? new Promise<Response>((r) => {
+              hold = false;
+              release = (): void => r(new Response(body, { status: 200 }));
+            })
+          : null,
+      body: () => body,
+      write: staleSave(() => {
+        body = large;
+        hold = true;
+      }),
+    });
+    const el = await mount(true);
+    await startReview(el);
+    await typeSource(el, 'We {++really ++}ship in Q3.\n');
+    blocks.defer = true;
+    await chooseView(el, 'graphical');
+    byText(el, '.edit-footer sl-button', 'Save review')!.click();
+    await settle(el, 40);
+    // The reload is waiting for its text; the pending choice's count finishes now.
+    await releaseBlocks(el);
+    expect(loader.load).not.toHaveBeenCalled();
+    release();
+    await settle(el, 40);
+    await releaseBlocks(el);
+    expect(loader.load).not.toHaveBeenCalled();
+    expect($(el, 'scion-review-editor')).toBeNull();
+    const code = $<HTMLElement & { content: string }>(
+      el,
+      '.g-work scion-code-editor.review-editor'
+    )!;
+    expect(code.content).toBe(large);
+  });
+
+  it('still large after an edit while the confirmation is open, it asks again', async () => {
+    window.localStorage.setItem('scion:artifact-review-view', 'source');
+    mockFetch();
+    const el = await mount(true);
+    await startReview(el);
+    const large = TEXT + '{++' + 'x'.repeat(LARGE_REVIEW_BYTES) + '++}';
+    await typeSource(el, large);
+    confirm.defer = true;
+    await chooseView(el, 'graphical');
+    expect(confirm.asked.length).toBe(1);
+    await typeSource(el, large + 'more');
+    confirm.release(true);
+    await settle(el);
+    expect(confirm.asked.length).toBe(2);
+    expect(loader.load).not.toHaveBeenCalled();
+    confirm.release(true);
+    await settle(el);
+    expect(loader.load).toHaveBeenCalledTimes(1);
+    expect($<FakeReviewEditor>(el, 'scion-review-editor')!.content).toBe(large + 'more');
   });
 
   it('a review restarted on a larger current version is sized again', async () => {
