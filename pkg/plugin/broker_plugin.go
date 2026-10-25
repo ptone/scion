@@ -276,8 +276,10 @@ type BrokerRPCClient struct {
 	// fails with a transport error: the session or connection is gone or
 	// broken, as opposed to an error the plugin returned. method is the
 	// RPC method; for Publish, topic and recipient identify the dropped
-	// message.
-	onTransportError func(method, topic, recipient string, err error)
+	// message. stale is true when the client was already discarded: the
+	// failure then says nothing new about the plugin's session, but a
+	// failed Publish is still a dropped message.
+	onTransportError func(method, topic, recipient string, stale bool, err error)
 
 	// stale is set by discard: the connection was closed locally because
 	// the client was replaced or abandoned.
@@ -286,8 +288,8 @@ type BrokerRPCClient struct {
 
 // discard closes the connection locally (no RPC is sent to the plugin) and
 // marks the client stale: pending and later calls fail with
-// rpc.ErrShutdown, Close becomes a no-op, and its errors are no longer
-// reported as transport errors.
+// rpc.ErrShutdown, Close becomes a no-op, and its transport errors are
+// reported as stale (counted as drops, no supervisor check).
 func (c *BrokerRPCClient) discard() {
 	if c.stale.Swap(true) {
 		return
@@ -316,8 +318,8 @@ func isTransportError(err error) bool {
 // observe reports a transport error of a call to onTransportError and
 // returns err unchanged.
 func (c *BrokerRPCClient) observe(method, topic, recipient string, err error) error {
-	if c.onTransportError != nil && !c.stale.Load() && isTransportError(err) {
-		c.onTransportError(method, topic, recipient, err)
+	if c.onTransportError != nil && isTransportError(err) {
+		c.onTransportError(method, topic, recipient, c.stale.Load(), err)
 	}
 	return err
 }

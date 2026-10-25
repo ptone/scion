@@ -147,8 +147,10 @@ type supervisor struct {
 	hooks    []BrokerRestartHook
 	kick     chan struct{}
 	started  bool
-	now      func() time.Time
-	jitter   func() float64
+	// wg counts the supervisor loop and its probe and attempt goroutines.
+	wg     sync.WaitGroup
+	now    func() time.Time
+	jitter func() float64
 }
 
 func newSupervisor() *supervisor {
@@ -202,9 +204,11 @@ func (m *Manager) StartSupervisor(ctx context.Context) {
 		return
 	}
 	m.sup.started = true
+	m.sup.wg.Add(1)
 	m.sup.mu.Unlock()
 
 	go func() {
+		defer m.sup.wg.Done()
 		ticker := time.NewTicker(supervisorCheckInterval)
 		defer ticker.Stop()
 		for {
@@ -220,6 +224,12 @@ func (m *Manager) StartSupervisor(ctx context.Context) {
 			m.superviseOnce(ctx)
 		}
 	}()
+}
+
+// waitSupervisorStopped waits until the supervisor loop has returned (its
+// ctx ended or shutdown began) and its probes and attempts have finished.
+func (m *Manager) waitSupervisorStopped() {
+	m.sup.wg.Wait()
 }
 
 // kickSupervisor asks for an immediate check without blocking.
@@ -255,14 +265,18 @@ func (m *Manager) supervisedLoaded(key string) {
 }
 
 // transportErrorHandler returns the BrokerRPCClient transport-error callback
-// for the plugin key: it counts a failed Publish as dropped and kicks the
-// supervisor, which then checks the session (a kick alone never restarts).
-func (m *Manager) transportErrorHandler(key string) func(method, topic, recipient string, err error) {
-	return func(method, topic, recipient string, err error) {
+// for the plugin key: it counts a failed Publish as dropped (also on a
+// discarded client, which a fan-out spoke keeps using until the plugin is
+// restarted) and, for a client still in use, kicks the supervisor, which
+// then checks the session (a kick alone never restarts).
+func (m *Manager) transportErrorHandler(key string) func(method, topic, recipient string, stale bool, err error) {
+	return func(method, topic, recipient string, stale bool, err error) {
 		if method == "Publish" {
 			m.recordDrop(key, topic, recipient)
 		}
-		m.kickSupervisor()
+		if !stale {
+			m.kickSupervisor()
+		}
 	}
 }
 
@@ -347,7 +361,9 @@ func (m *Manager) superviseOnce(ctx context.Context) {
 	}
 
 	for _, j := range jobs {
+		m.sup.wg.Add(1)
 		go func() {
+			defer m.sup.wg.Done()
 			lost := false
 			defer func() {
 				m.sup.mu.Lock()
@@ -506,7 +522,7 @@ func (m *Manager) restartAttempt(ctx context.Context, key string) {
 	}
 
 	m.logger.Info("Restarting broker plugin", "plugin", key, "attempt", attempt, "self_managed", self)
-	m.closeStaleClient(key, lost, self)
+	m.closeStaleClient(key, lost)
 	if err := m.loadPluginWithConfig(dp, cfg); err != nil {
 		m.attemptFailed(key, attempt, err)
 		return
@@ -527,36 +543,58 @@ func (m *Manager) restartAttempt(ctx context.Context, key string) {
 	m.logger.Info("Broker plugin restarted", "plugin", key, "attempt", attempt)
 }
 
-// closeStaleClient drops a lost client from the maps and discards it (see
-// discardClient).
-func (m *Manager) closeStaleClient(key string, lost *goplugin.Client, self bool) {
+// closeStaleClient replaces a lost client (see replaceClient), without a
+// graceful stop: its session is gone or hung.
+func (m *Manager) closeStaleClient(key string, lost *goplugin.Client) {
 	if lost == nil {
 		return
 	}
-	var raw interface{}
+	m.replaceClient(key, lost, false)
+}
+
+// replaceClient is the one path by which a plugin's current client is taken
+// out of service: by the supervisor, Reconnect, an admin restart or
+// update, or a load that supersedes it (Shutdown discards its clients the
+// same way). It removes the client stored for key, if it is expect (or any
+// client when expect is nil), and discards it (see discardClient). It
+// reports whether a client was removed.
+func (m *Manager) replaceClient(key string, expect *goplugin.Client, graceful bool) bool {
 	m.mu.Lock()
-	if m.clients[key] == lost {
-		raw = m.dispensed[key]
-		delete(m.clients, key)
-		delete(m.dispensed, key)
+	client, ok := m.clients[key]
+	if !ok || (expect != nil && client != expect) {
+		m.mu.Unlock()
+		return false
 	}
+	raw := m.dispensed[key]
+	self := m.selfManaged[key]
+	delete(m.clients, key)
+	delete(m.dispensed, key)
 	m.mu.Unlock()
-	m.discardClient(lost, raw, self)
+	m.discardClient(client, raw, self, graceful)
+	return true
 }
 
 // discardClient makes a client that is being replaced or abandoned unable to
-// reach the plugin again. raw is its dispensed interface, if known.
+// reach the plugin again. raw is its dispensed interface, if known. It
+// never holds a Manager lock.
 //
-// A hub-managed plugin's process is killed at once (its session may be
-// hung, so no graceful Quit is attempted first), then the client is cleaned
-// up. A self-managed plugin's process is not the hub's: no Quit request is
-// sent. Instead its dispensed broker connection is closed locally and
-// marked stale, so an old fan-out adapter wrapping it can no longer send
-// Publish, Subscribe or Close to the plugin instance that every connection
-// shares. The client's control session is left to end on its own (go-plugin
-// offers no way to close it without a Quit request); a healthy one stays
-// open, one per re-dial, until the plugin process exits.
-func (m *Manager) discardClient(client *goplugin.Client, raw interface{}, self bool) {
+// Its dispensed broker connection is closed locally (no RPC is sent) and
+// marked stale, so a fan-out adapter still wrapping it can no longer send
+// Publish, Subscribe or Close to the plugin; for a self-managed plugin that
+// instance is shared by every connection, so an old adapter's Close would
+// otherwise close it for the new connection too. Its failed publishes are
+// still counted as drops.
+//
+// A self-managed plugin's process is not the hub's: nothing more is done.
+// Its control session is left to end on its own (go-plugin offers no way to
+// close it without a Quit request); a healthy one stays open, one per
+// re-dial, until the plugin process exits, together with any Ping or
+// connect goroutine still blocked on it.
+//
+// A hub-managed plugin is stopped: gracefully (a Quit request, then a kill
+// after a short wait) when graceful is set, otherwise its process is killed
+// at once first (a lost session may be hung, and a Quit would wait on it).
+func (m *Manager) discardClient(client *goplugin.Client, raw interface{}, self, graceful bool) {
 	if bc, ok := raw.(*BrokerRPCClient); ok {
 		bc.discard()
 	}
@@ -565,9 +603,11 @@ func (m *Manager) discardClient(client *goplugin.Client, raw interface{}, self b
 	}
 	// Only a process not yet reaped is signalled, so the pid cannot have
 	// been reused.
-	if rc := client.ReattachConfig(); rc != nil && rc.Pid > 0 && !client.Exited() {
-		if p, err := os.FindProcess(rc.Pid); err == nil {
-			_ = p.Kill()
+	if !graceful {
+		if rc := client.ReattachConfig(); rc != nil && rc.Pid > 0 && !client.Exited() {
+			if p, err := os.FindProcess(rc.Pid); err == nil {
+				_ = p.Kill()
+			}
 		}
 	}
 	client.Kill()

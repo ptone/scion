@@ -312,12 +312,21 @@ func (m *Manager) loadPluginWithConfig(dp DiscoveredPlugin, cfg map[string]strin
 	case r := <-res:
 		timer.Stop()
 		if r.err != nil {
-			m.discardClient(client, nil, dp.SelfManaged)
+			m.discardClient(client, nil, dp.SelfManaged, false)
 			return r.err
 		}
 		raw = r.raw
 	case <-timer.C:
-		m.discardClient(client, nil, dp.SelfManaged)
+		m.discardClient(client, nil, dp.SelfManaged, false)
+		// A connect that succeeds later must not leave a live dispensed
+		// connection behind.
+		go func() {
+			if r := <-res; r.raw != nil {
+				if bc, ok := r.raw.(*BrokerRPCClient); ok {
+					bc.discard()
+				}
+			}
+		}()
 		return fmt.Errorf("plugin %s/%s did not connect within %v", dp.Type, dp.Name, restartStepTimeout)
 	}
 
@@ -333,7 +342,7 @@ func (m *Manager) loadPluginWithConfig(dp DiscoveredPlugin, cfg map[string]strin
 				config[hostCallbacksConfigKey] = "true"
 			}
 			if err := brokerClient.configureWithin(config, restartStepTimeout); err != nil {
-				m.discardClient(client, raw, dp.SelfManaged)
+				m.discardClient(client, raw, dp.SelfManaged, false)
 				return fmt.Errorf("failed to configure broker plugin %s: %w", dp.Name, err)
 			}
 		}
@@ -345,16 +354,13 @@ func (m *Manager) loadPluginWithConfig(dp DiscoveredPlugin, cfg map[string]strin
 		// Shutdown has begun (and may already have reset the maps): do
 		// not store a client it will never stop.
 		m.mu.Unlock()
-		m.discardClient(client, raw, dp.SelfManaged)
+		m.discardClient(client, raw, dp.SelfManaged, false)
 		return fmt.Errorf("plugin manager is shutting down; not storing plugin %s/%s", dp.Type, dp.Name)
 	}
-	// Kill any existing plugin with the same key (only if not self-managed)
-	if existing, ok := m.clients[key]; ok {
-		if !m.selfManaged[key] {
-			existing.Kill()
-		}
-		delete(m.dispensed, key)
-	}
+	// Take out any existing client with the same key; it is discarded
+	// below, outside the lock.
+	existing, existingRaw := m.clients[key], m.dispensed[key]
+	existingSelf := m.selfManaged[key]
 	m.clients[key] = client
 	m.selfManaged[key] = dp.SelfManaged
 	m.configs[key] = dp
@@ -369,6 +375,9 @@ func (m *Manager) loadPluginWithConfig(dp DiscoveredPlugin, cfg map[string]strin
 	m.dispensed[key] = raw
 	m.mu.Unlock()
 
+	if existing != nil {
+		m.discardClient(existing, existingRaw, existingSelf, true)
+	}
 	return nil
 }
 
@@ -477,7 +486,6 @@ func (m *Manager) Reconnect(pluginType, name string) error {
 	m.mu.RLock()
 	dp, ok := m.configs[key]
 	old := m.clients[key]
-	self := m.selfManaged[key]
 	m.mu.RUnlock()
 	if !ok {
 		return fmt.Errorf("no stored config for plugin %s/%s (not self-managed?)", pluginType, name)
@@ -497,9 +505,7 @@ func (m *Manager) Reconnect(pluginType, name string) error {
 	}
 	m.logger.Info("Reconnecting to self-managed plugin",
 		"type", pluginType, "name", name, "address", dp.Address)
-	if self {
-		m.closeStaleClient(key, old, true)
-	}
+	m.replaceClient(key, old, true)
 	if err := m.loadPluginWithConfig(dp, cfg); err != nil {
 		return err
 	}
@@ -509,9 +515,11 @@ func (m *Manager) Reconnect(pluginType, name string) error {
 	if err := m.runRestartHooksWithin(name, restartStepTimeout); err != nil {
 		// The new connection is up but its spoke is not refreshed: leave
 		// it to the supervisor, which replaces it with backoff.
+		// Counted as an attempt, like a supervisor attempt.
 		m.sup.mu.Lock()
 		attempt := 0
 		if sp, ok := m.sup.plugins[key]; ok {
+			sp.status.Attempt++
 			attempt = sp.status.Attempt
 		}
 		m.sup.mu.Unlock()
@@ -622,16 +630,13 @@ func (m *Manager) RestartBrokerPlugin(name string, cfg map[string]string) error 
 		return fmt.Errorf("broker plugin not loaded: %s", name)
 	}
 
-	// Kill the old process first to avoid port/database/resource conflicts
-	// when the new process starts up and runs its Configure phase.
-	if client, hasClient := m.clients[key]; hasClient {
-		if !m.selfManaged[key] {
-			client.Kill()
-		}
-		delete(m.clients, key)
-		delete(m.dispensed, key)
-	}
 	m.mu.Unlock()
+
+	// Replace the old client first to avoid port/database/resource
+	// conflicts when the new process starts up and runs its Configure
+	// phase (a self-managed plugin's old connection is discarded so it can
+	// never close the plugin instance; see discardClient).
+	m.replaceClient(key, nil, true)
 
 	// Update the stored config so the new process starts with it.
 	dp.Config = cfg
@@ -928,13 +933,7 @@ func (m *Manager) UpdatePlugin(name string, repoPath string) error {
 	lock.Lock()
 	defer lock.Unlock()
 
-	m.mu.Lock()
-	if client, hasClient := m.clients[key]; hasClient {
-		delete(m.dispensed, key)
-		delete(m.clients, key)
-		client.Kill()
-	}
-	m.mu.Unlock()
+	m.replaceClient(key, nil, true)
 
 	if err := os.Rename(tmpBinaryPath, binaryPath); err != nil {
 		return fmt.Errorf("failed to move new binary into place for plugin %q: %w", name, err)
@@ -999,24 +998,19 @@ func (m *Manager) BeginShutdown() {
 // gRPC adapters are closed (connection terminated, remote process unaffected).
 func (m *Manager) Shutdown() {
 	m.stopping.Store(true)
+
+	type held struct {
+		key    string
+		client *goplugin.Client
+		raw    interface{}
+		self   bool
+	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	clients := make([]held, 0, len(m.clients))
 	for key, client := range m.clients {
-		if m.selfManaged[key] {
-			m.logger.Info("Disconnecting self-managed plugin", "plugin", key)
-		} else {
-			m.logger.Info("Shutting down plugin", "plugin", key)
-		}
-		client.Kill()
+		clients = append(clients, held{key: key, client: client, raw: m.dispensed[key], self: m.selfManaged[key]})
 	}
-
-	for key, adapter := range m.grpcAdapters {
-		m.logger.Info("Closing gRPC broker adapter", "plugin", key)
-		if err := adapter.Close(); err != nil {
-			m.logger.Error("Failed to close gRPC adapter", "plugin", key, "error", err)
-		}
-	}
+	adapters := m.grpcAdapters
 
 	m.clients = make(map[string]*goplugin.Client)
 	m.dispensed = make(map[string]interface{})
@@ -1025,10 +1019,28 @@ func (m *Manager) Shutdown() {
 	m.configs = make(map[string]DiscoveredPlugin)
 	m.configFiles = make(map[string]string)
 	m.pluginEntries = make(map[string]PluginEntry)
+	m.mu.Unlock()
 
 	m.sup.mu.Lock()
 	m.sup.plugins = make(map[string]*supervised)
 	m.sup.mu.Unlock()
+
+	// Outside the lock: a graceful Kill can wait on a slow plugin.
+	for _, h := range clients {
+		if h.self {
+			m.logger.Info("Disconnecting self-managed plugin", "plugin", h.key)
+		} else {
+			m.logger.Info("Shutting down plugin", "plugin", h.key)
+		}
+		m.discardClient(h.client, h.raw, h.self, true)
+	}
+
+	for key, adapter := range adapters {
+		m.logger.Info("Closing gRPC broker adapter", "plugin", key)
+		if err := adapter.Close(); err != nil {
+			m.logger.Error("Failed to close gRPC adapter", "plugin", key, "error", err)
+		}
+	}
 
 	goplugin.CleanupClients()
 }

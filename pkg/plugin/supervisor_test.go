@@ -196,17 +196,34 @@ func severSockets() {
 	}
 }
 
-// shortenSupervisorTiming makes the supervisor fast for a test.
+// shortenSupervisorTiming makes the supervisor fast for a test. Its
+// cleanup restores the values; register it before startSupervisorForTest,
+// whose cleanup (run first) waits for the supervisor to stop reading them.
 func shortenSupervisorTiming(t *testing.T) {
 	t.Helper()
-	oldCheck, oldPing, oldInit, oldMax := supervisorCheckInterval, supervisorPingTimeout, backoffInitial, backoffMax
+	oldCheck, oldPing, oldInit, oldMax, oldStep := supervisorCheckInterval, supervisorPingTimeout, backoffInitial, backoffMax, restartStepTimeout
 	supervisorCheckInterval = 50 * time.Millisecond
 	supervisorPingTimeout = time.Second
 	backoffInitial = 20 * time.Millisecond
 	backoffMax = 200 * time.Millisecond
+	restartStepTimeout = 5 * time.Second
 	t.Cleanup(func() {
-		supervisorCheckInterval, supervisorPingTimeout, backoffInitial, backoffMax = oldCheck, oldPing, oldInit, oldMax
+		supervisorCheckInterval, supervisorPingTimeout, backoffInitial, backoffMax, restartStepTimeout = oldCheck, oldPing, oldInit, oldMax, oldStep
 	})
+}
+
+// startSupervisorForTest starts m's supervisor and stops it, waiting for
+// its goroutines, at the end of the test.
+func startSupervisorForTest(t *testing.T, m *Manager) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		m.BeginShutdown()
+		m.kickSupervisor()
+		m.waitSupervisorStopped()
+	})
+	m.StartSupervisor(ctx)
 }
 
 // fakeHealth returns the fake broker's HealthCheck details through the
@@ -301,9 +318,7 @@ func newHubManagedFixtureWithInterval(t *testing.T, interval time.Duration) *hub
 		}
 		return fx.fanout.ReplaceSpoke(name, eventbus.NamedEventBus{Name: name, Bus: nb})
 	})
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	fx.m.StartSupervisor(ctx)
+	startSupervisorForTest(t, fx.m)
 	return fx
 }
 
@@ -503,9 +518,7 @@ func newSelfManagedManager(t *testing.T, s *selfManagedServer) (*Manager, *atomi
 	})
 	hooks := &atomic.Int32{}
 	m.OnBrokerRestart(func(string) error { hooks.Add(1); return nil })
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	m.StartSupervisor(ctx)
+	startSupervisorForTest(t, m)
 	return m, hooks
 }
 
@@ -607,7 +620,7 @@ func TestBrokerPluginAdapter_TransportErrorKicks(t *testing.T) {
 	client := startTestBrokerRPCServer(t, impl)
 	var calls []string
 	var mu sync.Mutex
-	client.onTransportError = func(method, topic, _ string, err error) {
+	client.onTransportError = func(method, topic, _ string, _ bool, err error) {
 		mu.Lock()
 		defer mu.Unlock()
 		calls = append(calls, method+" "+topic)
@@ -927,9 +940,7 @@ func TestSupervisor_HungSessionNeedsConsecutivePingTimeouts(t *testing.T) {
 		SelfManaged: true,
 		Address:     relay.lis.Addr().String(),
 	}, ""))
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	m.StartSupervisor(ctx)
+	startSupervisorForTest(t, m)
 
 	relay.freeze()
 	key := PluginTypeBroker + ":ext"
@@ -962,7 +973,11 @@ func TestSupervisor_NoAttemptAfterShutdownBegins(t *testing.T) {
 
 	// The supervisor runs, shutdown begins, then the attempt becomes due.
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	t.Cleanup(func() {
+		cancel()
+		m.kickSupervisor()
+		m.waitSupervisorStopped()
+	})
 	m.StartSupervisor(ctx)
 	time.Sleep(3 * supervisorCheckInterval)
 	m.BeginShutdown()
@@ -1019,9 +1034,12 @@ func spokeHook(m *Manager, fanout *eventbus.FanOutEventBus, failFirst int32, cal
 
 // newSelfManagedFanout loads the self-managed plugin "ext" at addr behind a
 // fan-out bus with one subscription, and wires spokeHook.
-func newSelfManagedFanout(t *testing.T, addr string, failFirst int32) (*Manager, *eventbus.FanOutEventBus, *atomic.Int32) {
+func newSelfManagedFanout(t *testing.T, addr string, failFirst int32, setup ...func()) (*Manager, *eventbus.FanOutEventBus, *atomic.Int32) {
 	t.Helper()
 	shortenSupervisorTiming(t)
+	for _, f := range setup {
+		f()
+	}
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
 	m := NewManager(quiet)
 	t.Cleanup(m.Shutdown)
@@ -1036,9 +1054,7 @@ func newSelfManagedFanout(t *testing.T, addr string, failFirst int32) (*Manager,
 	require.NoError(t, err)
 	calls := &atomic.Int32{}
 	m.OnBrokerRestart(spokeHook(m, fanout, failFirst, calls))
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	m.StartSupervisor(ctx)
+	startSupervisorForTest(t, m)
 	return m, fanout, calls
 }
 
@@ -1060,8 +1076,9 @@ func TestSupervisor_SelfManagedStaleSessionNeverClosesPlugin(t *testing.T) {
 func TestSupervisor_HungSelfManagedSessionNeverClosesPlugin(t *testing.T) {
 	s := startSelfManagedServer(t)
 	relay := startFreezingRelay(t, s.addr)
-	m, fanout, _ := newSelfManagedFanout(t, relay.lis.Addr().String(), 0)
-	supervisorPingTimeout = 200 * time.Millisecond
+	m, fanout, _ := newSelfManagedFanout(t, relay.lis.Addr().String(), 0, func() {
+		supervisorPingTimeout = 200 * time.Millisecond
+	})
 
 	relay.freeze()
 	waitRestarted(t, m, "ext", 1)
@@ -1081,4 +1098,106 @@ func TestReconnect_HookFailureLeavesPluginToSupervisor(t *testing.T) {
 	waitRestarted(t, m, "ext", 1)
 	assert.GreaterOrEqual(t, calls.Load(), int32(2), "the supervisor ran the hook again")
 	assert.Equal(t, 0, s.impl.closeCount())
+}
+
+// publishThrough publishes one message through the fan-out and ignores the
+// result (a dropped publish returns an error).
+func publishThrough(fanout *eventbus.FanOutEventBus) {
+	_ = fanout.Publish(context.Background(), "agent.bot.message", messages.NewInstruction("user:a", "agent:b", "hi"))
+}
+
+func TestSupervisor_OutageDropsCountedHubManaged(t *testing.T) {
+	fx := newHubManagedFixture(t)
+	fx.m.SetBrokerConfigProvider(func(context.Context, string) (map[string]string, error) {
+		return map[string]string{"token": fakeTokenFailConfigure}, nil // every respawn fails
+	})
+	require.Error(t, fx.publish(fakeTopicExit))
+	waitFor(t, 30*time.Second, "the old client discarded by failed attempts", func() bool {
+		st, _ := fx.m.BrokerSupervision("fake")
+		return st.Attempt >= 2
+	})
+
+	before, _ := fx.m.BrokerSupervision("fake")
+	for i := 0; i < 3; i++ {
+		publishThrough(fx.fanout)
+	}
+	after, _ := fx.m.BrokerSupervision("fake")
+	assert.Equal(t, before.DroppedThisOutage+3, after.DroppedThisOutage)
+	assert.Equal(t, before.DroppedTotal+3, after.DroppedTotal)
+}
+
+func TestSupervisor_OutageDropsCountedSelfManaged(t *testing.T) {
+	s := startSelfManagedServer(t)
+	m, fanout, _ := newSelfManagedFanout(t, s.addr, 0)
+	s.stop()
+	waitFor(t, 30*time.Second, "the old client discarded by failed attempts", func() bool {
+		st, _ := m.BrokerSupervision("ext")
+		return st.Attempt >= 2
+	})
+
+	before, _ := m.BrokerSupervision("ext")
+	for i := 0; i < 3; i++ {
+		publishThrough(fanout)
+	}
+	after, _ := m.BrokerSupervision("ext")
+	assert.Equal(t, before.DroppedThisOutage+3, after.DroppedThisOutage)
+	assert.Equal(t, before.DroppedTotal+3, after.DroppedTotal)
+}
+
+// TestClientReplacementPaths_NeverClosePlugin replaces a self-managed
+// plugin's client through every path and refreshes the fan-out spoke as
+// the hub does: the plugin instance, shared by all connections, never
+// receives Close, the new connection works, and a publish through the old
+// adapter is counted as a drop. (UpdatePlugin refuses self-managed
+// plugins; it shares replaceClient with RestartBrokerPlugin.)
+func TestClientReplacementPaths_NeverClosePlugin(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		replace func(t *testing.T, m *Manager, s *selfManagedServer)
+		// counted reports whether drops are still counted afterwards
+		// (Shutdown forgets every plugin).
+		counted bool
+		// refresh: the hub refreshes the spoke itself after this path
+		// (the supervisor and Reconnect paths do it in the restart hook).
+		refresh bool
+	}{
+		{name: "supervisor re-dial", counted: true, replace: func(t *testing.T, m *Manager, s *selfManagedServer) {
+			s.dropConns()
+			waitRestarted(t, m, "ext", 1)
+		}},
+		{name: "Reconnect", counted: true, replace: func(t *testing.T, m *Manager, _ *selfManagedServer) {
+			require.NoError(t, m.Reconnect(PluginTypeBroker, "ext"))
+		}},
+		{name: "admin RestartBrokerPlugin", counted: true, refresh: true, replace: func(t *testing.T, m *Manager, _ *selfManagedServer) {
+			require.NoError(t, m.RestartBrokerPlugin("ext", map[string]string{"token": "admin"}))
+		}},
+		{name: "Shutdown", replace: func(_ *testing.T, m *Manager, _ *selfManagedServer) {
+			m.Shutdown()
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := startSelfManagedServer(t)
+			m, fanout, _ := newSelfManagedFanout(t, s.addr, 0)
+			oldBus, err := m.GetBroker("ext")
+			require.NoError(t, err)
+
+			tc.replace(t, m, s)
+			if nb, err := m.GetBroker("ext"); err == nil {
+				if tc.refresh {
+					// handleRestartIntegration's refreshBrokerSpoke.
+					require.NoError(t, fanout.ReplaceSpoke("ext", eventbus.NamedEventBus{Name: "ext", Bus: nb}))
+				}
+				assert.NoError(t, fanout.Publish(context.Background(), "agent.bot.message", messages.NewInstruction("user:a", "agent:b", "hi")))
+				assert.Equal(t, "agent.>", fakeHealth(t, m, "ext")["subs"])
+			}
+			before, _ := m.BrokerSupervision("ext")
+			assert.Error(t, oldBus.Publish(context.Background(), "agent.x", messages.NewInstruction("user:a", "agent:b", "hi")))
+			assert.NoError(t, oldBus.Close(), "closing an old adapter is a no-op")
+			if tc.counted {
+				after, _ := m.BrokerSupervision("ext")
+				assert.Equal(t, before.DroppedTotal+1, after.DroppedTotal, "a publish through the old client is a counted drop")
+			}
+			assert.Equal(t, 0, s.impl.closeCount(), "the shared plugin instance never received Close")
+		})
+	}
 }
