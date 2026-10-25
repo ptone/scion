@@ -31,6 +31,7 @@ import type { EditorView } from '@milkdown/prose/view';
 import { artifactLinkTarget } from '../../../client/artifact-preview.js';
 import { createCore } from './create.js';
 import type { Core } from './create.js';
+import { reviewKeymap } from './keymap.js';
 import { guardTransfers, pastePlugin } from './paste.js';
 import { containerClass, policyPlugin, touchesEarlier } from './policy.js';
 import type { HintKind } from './policy.js';
@@ -125,6 +126,7 @@ export class ReviewController {
     const onRefuse = (hint: HintKind): void => opts.onHint(hint);
     const unitCheck = (doc: Node, first: number, last: number): HintKind | null =>
       this.session.unitCheck(doc, first, last);
+    const keys = reviewKeymap(onRefuse);
     let parse: (md: string) => Node = () => {
       throw new Error('editor not ready');
     };
@@ -137,6 +139,7 @@ export class ReviewController {
         trackPlugin(),
         this.uiPlugin(),
         keymap({
+          ...keys,
           'Mod-Alt-m': () => {
             void this.comment();
             return true;
@@ -145,9 +148,9 @@ export class ReviewController {
             void this.comment();
             return true;
           },
-          Enter: (state) => {
+          Enter: (state, dispatch, view) => {
             const c = selectedComment(state);
-            if (!c) return false;
+            if (!c) return keys.Enter(state, dispatch, view);
             void this.editNote(c.pos);
             return true;
           },

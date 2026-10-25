@@ -1030,6 +1030,83 @@ describe('preset plugins', () => {
   });
 });
 
+describe('review keymap', () => {
+  function press(c: ReviewController, key: string, mods: Partial<KeyboardEventInit> = {}): boolean {
+    // keyCode: ProseMirror reads it for shifted and Alt shortcuts.
+    const keyCode = key.length === 1 ? key.toUpperCase().charCodeAt(0) : 0;
+    const e = new KeyboardEvent('keydown', {
+      key,
+      keyCode,
+      bubbles: true,
+      cancelable: true,
+      ...mods,
+    });
+    c.view.dom.dispatchEvent(e);
+    return e.defaultPrevented;
+  }
+
+  it('formatting and block shortcuts change nothing and show the formatting hint', async () => {
+    const { c, hints } = await open('one two\n');
+    select(c, posOf(c, 'two'), posOf(c, 'two', 3));
+    const shortcuts: [string, Partial<KeyboardEventInit>][] = [
+      ['b', { ctrlKey: true }],
+      ['i', { ctrlKey: true }],
+      ['e', { ctrlKey: true }],
+      ['x', { ctrlKey: true, altKey: true }],
+      ['1', { ctrlKey: true, altKey: true }],
+      ['0', { ctrlKey: true, altKey: true }],
+      ['7', { ctrlKey: true, altKey: true }],
+      ['8', { ctrlKey: true, altKey: true }],
+      ['c', { ctrlKey: true, altKey: true }],
+      ['B', { ctrlKey: true, shiftKey: true }],
+    ];
+    for (const [key, mods] of shortcuts) expect(press(c, key, mods)).toBe(true);
+    expect(hints).toEqual(shortcuts.map(() => 'format'));
+    expect(text(c)).toBe('one two\n');
+    expect(c.dirty).toBe(false);
+  });
+
+  it('Shift-Enter is refused like a paragraph break', async () => {
+    const { c, hints } = await open('one two\n');
+    select(c, posOf(c, 'two'));
+    expect(press(c, 'Enter', { shiftKey: true })).toBe(true);
+    expect(hints).toEqual(['break']);
+    expect(c.dirty).toBe(false);
+  });
+
+  it('Tab and Shift-Tab move between table cells without changing the text', async () => {
+    const md = '| a | b |\n| - | - |\n| c | d |\n';
+    const { c, hints } = await open(md);
+    select(c, posOf(c, 'a'));
+    expect(press(c, 'Tab')).toBe(true);
+    expect(c.view.state.selection.$from.parent.textContent).toBe('b');
+    expect(press(c, 'Tab')).toBe(true);
+    expect(c.view.state.selection.$from.parent.textContent).toBe('c');
+    expect(press(c, 'Tab', { shiftKey: true })).toBe(true);
+    expect(c.view.state.selection.$from.parent.textContent).toBe('b');
+    expect(hints).toEqual([]);
+    expect(text(c)).toBe(md);
+  });
+
+  it('Enter in a table and Tab in a list are refused with the list and table hint', async () => {
+    const { c, hints } = await open('| a | b |\n| - | - |\n| c | d |\n\n- one\n- two\n');
+    select(c, posOf(c, 'c', 1));
+    expect(press(c, 'Enter')).toBe(true);
+    select(c, posOf(c, 'two'));
+    expect(press(c, 'Tab')).toBe(true);
+    expect(press(c, 'Tab', { shiftKey: true })).toBe(true);
+    expect(hints).toEqual(['list-table', 'list-table', 'list-table']);
+    expect(c.dirty).toBe(false);
+  });
+
+  it('Tab outside lists and tables is left to the browser', async () => {
+    const { c, hints } = await open('one two\n');
+    select(c, posOf(c, 'two'));
+    expect(press(c, 'Tab')).toBe(false);
+    expect(hints).toEqual([]);
+  });
+});
+
 describe('fragment links', () => {
   it('Mod-click on a #fragment link moves to the heading', async () => {
     const { c } = await open('[go](#second-part)\n\n# First\n\n## Second part\n');
