@@ -2326,8 +2326,17 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Generate HMAC credentials for the broker if broker auth service is available
-		// (deprecated flow only - new flow gets secrets from /brokers/join)
-		if s.brokerAuthService != nil {
+		// (deprecated flow only - new flow gets secrets from /brokers/join).
+		// Transport policy: the response would carry the broker's HMAC
+		// secret (an existing one is returned unchanged), so it is produced
+		// only on a request that arrived over TLS or from this host
+		// (confidentialArrival), as for join and rotate. Otherwise the
+		// project and broker are still registered, with no secret in the
+		// response; the broker gets its secret by joining.
+		if !confidentialArrival(r, s.transportTrustedNets) {
+			slog.Warn("Project register: broker secret withheld; the request did not arrive over TLS or from this host",
+				"brokerID", broker.ID, "remote_addr", r.RemoteAddr)
+		} else if s.brokerAuthService != nil {
 			var err error
 			secretKey, err = s.brokerAuthService.GenerateAndStoreSecret(ctx, broker.ID)
 			if err != nil {

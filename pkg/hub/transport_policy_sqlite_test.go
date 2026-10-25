@@ -305,3 +305,60 @@ func TestNeverAPIWritable_TrustedProxies(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	assert.NotContains(t, rr.Body.String(), "trusted_proxies")
 }
+
+// The deprecated embedded-broker branch of project register returns the
+// broker's HMAC secret (an existing secret unchanged). From a network peer
+// over plain http the registration still succeeds but carries no secret and
+// changes no stored secret; from a loopback peer the secret is returned.
+func TestProjectRegisterEmbeddedBroker_SecretOnlyOnConfidentialArrival(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	owner := newHubMemberUser(t, s, "tp-register-owner")
+	broker := registerBrokerTestExistingBroker(t, s, "tp-register-broker", owner.ID)
+	key := seedBrokerSecret(t, s, broker.ID)
+	body := RegisterProjectRequest{
+		Name:   "tp-register-project",
+		Broker: &RegisterProjectBrokerInfo{ID: broker.ID, Name: broker.Name, Version: "2.0.0"},
+	}
+
+	// doRequestAsUser sends from httptest's default network peer.
+	rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/projects/register", body)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var resp RegisterProjectResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Empty(t, resp.SecretKey, "no broker secret over a non-confidential arrival")
+	assert.NotContains(t, rec.Body.String(), string(key))
+	stored, err := s.GetBrokerSecret(ctx, broker.ID)
+	require.NoError(t, err)
+	assert.True(t, bytes.Equal(key, stored.SecretKey), "the stored secret is unchanged")
+
+	rec = doRequestAsUserLoopback(t, srv, owner, http.MethodPost, "/api/v1/projects/register", body)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	resp = RegisterProjectResponse{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.NotEmpty(t, resp.SecretKey, "a loopback (co-located) registration still gets the secret")
+}
+
+// server.trusted_proxies is refused by the DB-backed settings write path too,
+// on a hosted (DB) hub and on a workstation hub: no DB row is written and
+// settings.yaml does not gain the key.
+func TestNeverAPIWritable_TrustedProxiesRefusedInDBAndWorkstationMode(t *testing.T) {
+	for _, workstation := range []bool{false, true} {
+		for name, body := range map[string]string{
+			"nested":      `{"server":{"trusted_proxies":["10.0.0.0/8"]}}`,
+			"flat dotted": `{"server.trusted_proxies":["10.0.0.0/8"]}`,
+		} {
+			t.Run(map[bool]string{false: "db", true: "workstation"}[workstation]+"/"+name, func(t *testing.T) {
+				settingsPath := workstationHome(t)
+				srv, st, _ := newSQLiteHubInMode(t, workstation, nil)
+				before := hubSettingRevisions(t, st)
+				rr := putServerConfig(t, srv, body)
+				assert.Equal(t, []string{config.TrustedProxiesKey}, tiaErrorKeys(t, rr))
+				data, err := os.ReadFile(settingsPath)
+				require.NoError(t, err)
+				assert.NotContains(t, string(data), "trusted_proxies")
+				assert.Equal(t, before, hubSettingRevisions(t, st), "a refused PUT writes no DB row")
+			})
+		}
+	}
+}
