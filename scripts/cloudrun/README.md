@@ -29,9 +29,9 @@ Key properties:
 - The default runtime is Cloud Run Instances (`runtimes.cloudrun.type: cloudrun`).
 - Only the co-located broker serves this hub. Remote Runtime Brokers are not
   accepted: broker join, secret rotation, the broker control channel and the
-  broker's conduit connection need a direct TLS connection to the hub or a proxy listed in
-  `server.trusted_proxies`, and Cloud Run's front end is not listed. Run remote
-  brokers against a GKE (Helm chart) hub instead.
+  broker's conduit connection need a direct TLS connection to the hub or a
+  proxy listed in `server.trusted_proxies`, and Cloud Run's front end is not
+  listed. Run remote brokers against a GKE (Helm chart) hub instead.
 
 ## Prerequisites
 
