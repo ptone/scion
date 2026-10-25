@@ -82,7 +82,7 @@ Controls the central Hub API server.
 
 #### CORS (`server.hub.cors`)
 
-The web UI calls the Hub API on its own origin (the Hub API is served on the web server under `/api/v1/`), and the CLI, agents and Runtime Brokers are not browsers, so none of them needs CORS. Hub CORS is therefore off by default, and the Hub sends no CORS headers.
+The web UI calls the Hub API on its own origin (the Hub API is served on the web server under `/api/v1/`), and the CLI, agents and Runtime Brokers are not browsers, so none of them needs CORS. Hub CORS is therefore off by default, and the Hub sends no CORS headers (apart from the static, credential-free `401` on agent port-proxy routes, which any origin may read; see [Port Forwarding](/scion/hosted/user/port-forwarding/)).
 
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
