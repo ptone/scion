@@ -1395,5 +1395,44 @@ class CopilotAgentPluginsTest(BaseTelemetryTest):
         # --version 10s default and install 15s default, both capped to 3s.
         self.assertEqual(self.cli.timeouts, [3.0, 3.0])
 
+
+class CopilotHooksTest(unittest.TestCase):
+    """_write_hooks registers every Copilot event Scion maps (ptone/scion#4408)."""
+
+    def _written_hooks(self) -> dict:
+        with tempfile.TemporaryDirectory() as home:
+            provision._write_hooks(home)
+            with open(os.path.join(home, ".copilot", "hooks", "scion.json")) as f:
+                return json.load(f)
+
+    def test_post_tool_use_failure_registered(self):
+        data = self._written_hooks()
+        self.assertEqual(data["version"], 1)
+        self.assertEqual(
+            data["hooks"]["postToolUseFailure"],
+            [
+                {
+                    "type": "command",
+                    "bash": "sciontool hook postToolUseFailure --dialect=copilot",
+                }
+            ],
+        )
+
+    def test_every_registered_event_has_dialect_mapping(self):
+        # dialect.yaml is parsed with a regex (no PyYAML in the image): the
+        # mapping keys are the two-space-indented keys under "mappings:", up
+        # to the next column-0 key (e.g. a later "responses:" section).
+        dialect_path = os.path.join(os.path.dirname(__file__), "dialect.yaml")
+        with open(dialect_path) as f:
+            text = f.read()
+        body = text.split("\nmappings:\n", 1)[1]
+        body = re.split(r"^[A-Za-z_]", body, maxsplit=1, flags=re.MULTILINE)[0]
+        mapped = set(re.findall(r"^  ([A-Za-z]+):\s*$", body, re.MULTILINE))
+        registered = set(self._written_hooks()["hooks"])
+        self.assertIn("postToolUse", mapped)
+        self.assertIn("postToolUseFailure", mapped)
+        self.assertEqual(registered - mapped, set())
+
+
 if __name__ == "__main__":
     unittest.main()

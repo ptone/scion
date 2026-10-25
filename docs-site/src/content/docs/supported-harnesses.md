@@ -194,7 +194,7 @@ An active GitHub Copilot subscription is required at runtime.
 - **Config directory**: `~/.copilot/` (settings in `settings.json`, trusted folders in `config.json`).
 - **Instructions**: `agent_instructions` and `system_prompt` are projected into `.github/copilot-instructions.md`. Copilot has no native system-prompt flag, so the system prompt is *prepended to the instructions file*.
 - **MCP**: `~/.copilot/mcp-config.json`. Project-scoped MCP servers are not supported (they are demoted to global).
-- **Hooks**: Copilot lifecycle hooks (`sessionStart`, `userPromptSubmitted`, `preToolUse`, `postToolUse` and others) are wired to `sciontool hook --dialect=copilot`, mapped by the harness's `dialect.yaml`.
+- **Hooks**: Copilot lifecycle hooks (`sessionStart`, `userPromptSubmitted`, `preToolUse`, `postToolUse` and others) are wired to `sciontool hook --dialect=copilot`, mapped by the harness's `dialect.yaml`. `postToolUseFailure` is registered too, so failed tool calls are reported as failed tool-end events with Copilot's error message.
 - **Model aliases**: `small` → `claude-haiku-4.5`, `medium` → `claude-sonnet-4.5`, `large` → `claude-opus-4.8`.
 - **OpenTelemetry**: When telemetry is enabled, Scion sets `COPILOT_OTEL_ENABLED`, `COPILOT_OTEL_EXPORTER_TYPE=otlp-http`, and standard `OTEL_*` env vars that always point at sciontool's local OTLP/HTTP receiver (port `4318`), so Copilot's logs are redacted and identity-stamped like any other harness's. For local debugging only, `SCION_COPILOT_OTEL_ENDPOINT` overrides the endpoint. It bypasses sciontool's redaction and identity stamping, so never point it at anything but a local collector.
 

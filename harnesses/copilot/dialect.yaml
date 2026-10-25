@@ -44,6 +44,15 @@ mappings:
       tool_output: toolResult.textResultForLlm
       # resultType is a string; only "success" counts as a successful tool.
       success: toolResult.resultType
+  # Failed tools arrive here instead of postToolUse, with error as a string.
+  postToolUseFailure:
+    event: tool-end
+    fields:
+      session_id: sessionId
+      tool_name: toolName
+      tool_input: toolArgs
+      error: error
+      # success is deliberately unmapped: it stays false (a failed tool).
 
   # Error events.
   errorOccurred:
