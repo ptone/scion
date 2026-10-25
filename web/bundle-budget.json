@@ -32,15 +32,13 @@
       "assets/markdown-"
     ]
   },
-  "$comment-requiredStrings": "Marker strings of the review editor's safety and input modules (ptone/scion#5914): raw HTML shown as text, links and images rendered by the artifact rules, paste handling, the suggest-mode policy and tracking. The build drops plugin code nothing uses, so this proves these modules are in the production chunks, which the unit tests (run on the source) cannot.",
+  "$comment-requiredStrings": "Marker strings of the review editor's safety and input modules (ptone/scion#5914), each a literal that occurs in exactly one source file, its module (artifact-review/bundle-markers.test.ts checks this): safe-render.ts's schema renderers (the Symbol that tags every renderer it replaces, raw HTML's included), its image placeholder and its link renderer; the paste plugin; the suggest-mode policy; the tracking plugin. The build drops plugin code nothing uses, so this proves these modules are in the production chunks, which the unit tests (run on the source) cannot.",
   "requiredStrings": {
     "assets/review-editor-": [
-      "raw-html",
+      "hardened",
+      "image-placeholder failed",
       "inert-link",
-      "noopener noreferrer",
-      "image-placeholder",
       "criticPaste",
-      "paste-multi",
       "criticPolicy",
       "criticTrack"
     ]
