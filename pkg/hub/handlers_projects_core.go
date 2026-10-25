@@ -2333,7 +2333,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		// (confidentialArrival), as for join and rotate. Otherwise the
 		// project and broker are still registered, with no secret in the
 		// response; the broker gets its secret by joining.
-		if !confidentialArrival(r, s.transportTrustedNets) {
+		if !config.ConfidentialArrival(r, s.transportTrustedNets) {
 			slog.Warn("Project register: broker secret withheld; the request did not arrive over TLS or from this host",
 				"brokerID", broker.ID, "remote_addr", r.RemoteAddr)
 		} else if s.brokerAuthService != nil {
