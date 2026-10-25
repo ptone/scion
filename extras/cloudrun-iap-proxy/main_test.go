@@ -232,6 +232,9 @@ func TestProxyReplacesClientForwardingHeaders(t *testing.T) {
 			req.Header.Set("Forwarded", "for=198.51.100.7;proto=https")
 			req.Header.Set("X-Forwarded-For", "198.51.100.7")
 			req.Header.Set("X-Forwarded-Host", "attacker.example")
+			// A client naming the proxy's own headers as hop-by-hop must not
+			// be able to strip them.
+			req.Header.Set("Connection", "X-Forwarded-Proto, X-Forwarded-Host, X-Forwarded-For")
 			req.Host = "hub.example.com"
 			req.RemoteAddr = "203.0.113.9:4321"
 			rr := httptest.NewRecorder()
