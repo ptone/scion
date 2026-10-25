@@ -193,10 +193,11 @@ func TestProxyErrorReturns502(t *testing.T) {
 	}
 }
 
-// A client-supplied forwarded protocol never reaches the backend: the proxy
-// replaces X-Forwarded-Proto with the front end's scheme and drops Forwarded,
-// whatever the client sent.
-func TestProxyReplacesClientForwardedProto(t *testing.T) {
+// No client-supplied forwarding header reaches the backend: the proxy sets
+// X-Forwarded-Proto to the scheme of this connection, X-Forwarded-For to the
+// immediate peer and X-Forwarded-Host to the served host, and drops
+// Forwarded, whatever the client sent.
+func TestProxyReplacesClientForwardingHeaders(t *testing.T) {
 	for name, tc := range map[string]struct {
 		frontEnd string
 		tls      bool
@@ -208,11 +209,12 @@ func TestProxyReplacesClientForwardedProto(t *testing.T) {
 		"default front end (https)": {frontEnd: defaultForwardedProto, want: "https"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			var gotProto []string
-			var gotForwarded []string
+			var gotProto, gotForwarded, gotFor, gotHost []string
 			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				gotProto = r.Header.Values("X-Forwarded-Proto")
 				gotForwarded = r.Header.Values("Forwarded")
+				gotFor = r.Header.Values("X-Forwarded-For")
+				gotHost = r.Header.Values("X-Forwarded-Host")
 				w.WriteHeader(http.StatusOK)
 			}))
 			defer backend.Close()
@@ -231,6 +233,10 @@ func TestProxyReplacesClientForwardedProto(t *testing.T) {
 			req.Header.Add("X-Forwarded-Proto", "https")
 			req.Header.Add("X-Forwarded-Proto", "ftp")
 			req.Header.Set("Forwarded", "for=198.51.100.7;proto=https")
+			req.Header.Set("X-Forwarded-For", "198.51.100.7")
+			req.Header.Set("X-Forwarded-Host", "attacker.example")
+			req.Host = "hub.example.com"
+			req.RemoteAddr = "203.0.113.9:4321"
 			rr := httptest.NewRecorder()
 			newMux(backendURL, tc.frontEnd).ServeHTTP(rr, req)
 			if rr.Code != http.StatusOK {
@@ -241,6 +247,12 @@ func TestProxyReplacesClientForwardedProto(t *testing.T) {
 			}
 			if len(gotForwarded) != 0 {
 				t.Errorf("backend Forwarded = %q, want none (client value dropped)", gotForwarded)
+			}
+			if len(gotFor) != 1 || gotFor[0] != "203.0.113.9" {
+				t.Errorf("backend X-Forwarded-For = %q, want exactly the immediate peer [203.0.113.9]", gotFor)
+			}
+			if len(gotHost) != 1 || gotHost[0] != "hub.example.com" {
+				t.Errorf("backend X-Forwarded-Host = %q, want exactly the served host [hub.example.com]", gotHost)
 			}
 		})
 	}
