@@ -1607,6 +1607,10 @@ type V1ServerConfig struct {
 	// world-readable keyring file (server.keyring_file_allow_world_readable).
 	// See GlobalConfig.KeyringFileAllowWorldReadable.
 	KeyringFileAllowWorldReadable bool `json:"keyring_file_allow_world_readable,omitempty" yaml:"keyring_file_allow_world_readable,omitempty" koanf:"keyring_file_allow_world_readable"`
+	// TrustedProxies lists the TLS-terminating proxies whose
+	// X-Forwarded-Proto the hub trusts for its hub-broker transport check
+	// (server.trusted_proxies, TrustedProxiesKey). See GlobalConfig.TrustedProxies.
+	TrustedProxies []string `json:"trusted_proxies,omitempty" yaml:"trusted_proxies,omitempty" koanf:"trusted_proxies"`
 
 	// Maintenance holds binary auto-update and deployment tier settings.
 	Maintenance *V1MaintenanceConfig `json:"maintenance,omitempty" yaml:"maintenance,omitempty" koanf:"maintenance"`
@@ -4336,6 +4340,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 	if v1.KeyringFileAllowWorldReadable {
 		gc.KeyringFileAllowWorldReadable = true
 	}
+	if len(v1.TrustedProxies) > 0 {
+		gc.TrustedProxies = append([]string(nil), v1.TrustedProxies...)
+	}
 
 	// Hub server config
 	if v1.Hub != nil {
@@ -4801,6 +4808,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		KeyringFile: gc.KeyringFile,
 
 		KeyringFileAllowWorldReadable: gc.KeyringFileAllowWorldReadable,
+		TrustedProxies:                append([]string(nil), gc.TrustedProxies...),
 	}
 
 	// Hub server config
