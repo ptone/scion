@@ -190,12 +190,33 @@ const (
 )
 
 // RemoteFetchOptions configures FetchRemoteTemplate.
+//
+// The credential mode is unexported: its zero value is RemoteFetchAnonymous,
+// and the only way to request RemoteFetchCallerCredentials is
+// CallerCredentialFetchOptions, which only cmd/ may call (a guard test
+// enforces that). Code outside this package can therefore not set the mode
+// with a literal, an assignment or a conversion.
 type RemoteFetchOptions struct {
 	// GitHubToken is sent for GitHub folder sources only (e.g. a GitHub App
 	// installation token). Empty means unauthenticated.
 	GitHubToken string
-	// Credentials selects the credential mode for storage backends.
-	Credentials RemoteFetchCredentials
+	// credentials selects the credential mode for storage backends.
+	credentials RemoteFetchCredentials
+}
+
+// CallerCredentialFetchOptions returns fetch options that let storage
+// backends use the default credentials of the running process
+// (RemoteFetchCallerCredentials). Only the CLI may use it, where those
+// credentials belong to the user who runs the command; the hub and runtime
+// brokers fetch anonymously (the zero RemoteFetchOptions). gitHubToken is as
+// for RemoteFetchOptions.GitHubToken.
+func CallerCredentialFetchOptions(gitHubToken string) RemoteFetchOptions {
+	return RemoteFetchOptions{GitHubToken: gitHubToken, credentials: RemoteFetchCallerCredentials}
+}
+
+// Credentials returns the credential mode the options select.
+func (o RemoteFetchOptions) Credentials() RemoteFetchCredentials {
+	return o.credentials
 }
 
 // FetchRemoteTemplate fetches a template from a remote URI and caches it locally.
@@ -231,11 +252,11 @@ func FetchRemoteTemplate(ctx context.Context, uri string, opts RemoteFetchOption
 			fetchErr = fmt.Errorf("failed to fetch GitHub folder: %w", err)
 		}
 	case RemoteTypeArchive:
-		if err := fetchArchive(ctx, uri, templateCachePath, opts.Credentials); err != nil {
+		if err := fetchArchive(ctx, uri, templateCachePath, opts.credentials); err != nil {
 			fetchErr = fmt.Errorf("failed to fetch archive: %w", err)
 		}
 	case RemoteTypeRclone:
-		if err := fetchRclone(ctx, uri, templateCachePath, opts.Credentials); err != nil {
+		if err := fetchRclone(ctx, uri, templateCachePath, opts.credentials); err != nil {
 			fetchErr = fmt.Errorf("failed to fetch via rclone: %w", err)
 		}
 	default:
@@ -432,6 +453,9 @@ func redactedRepoName(repoURL string) string {
 // TEST-ONLY: never call this from production code. It mutates package-global
 // state and is not safe for use from parallel tests.
 func SetGitLsRemoteForTest(fn GitLsRemoteFunc) (restore func()) {
+	if !testing.Testing() {
+		panic("SetGitLsRemoteForTest called outside a test binary")
+	}
 	prev := gitLsRemote
 	gitLsRemote = fn
 	return func() { gitLsRemote = prev }
@@ -668,6 +692,9 @@ var sparseGitCheckout GitSparseCheckoutFunc = execSparseGitCheckout
 // TEST-ONLY: never call this from production code. It mutates package-global
 // state and is not safe for use from parallel tests.
 func SetGitSparseCheckoutForTest(fn GitSparseCheckoutFunc) (restore func()) {
+	if !testing.Testing() {
+		panic("SetGitSparseCheckoutForTest called outside a test binary")
+	}
 	prev := sparseGitCheckout
 	sparseGitCheckout = fn
 	return func() { sparseGitCheckout = prev }
@@ -681,6 +708,9 @@ func SetGitSparseCheckoutForTest(fn GitSparseCheckoutFunc) (restore func()) {
 //
 // TEST-ONLY: never call this from production code.
 func ProductionGitSparseCheckoutForTest() GitSparseCheckoutFunc {
+	if !testing.Testing() {
+		panic("ProductionGitSparseCheckoutForTest called outside a test binary")
+	}
 	return execSparseGitCheckout
 }
 

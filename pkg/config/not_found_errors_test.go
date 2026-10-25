@@ -31,7 +31,7 @@ func TestTemplateNotFoundError_FromLookup(t *testing.T) {
 	projectPath := t.TempDir()
 
 	t.Run("plain name", func(t *testing.T) {
-		_, err := FindTemplateInProjectPath("missing-tpl", projectPath)
+		_, err := FindTemplateInProjectPath("missing-tpl", projectPath, TemplateRefRemote)
 		var tplErr *TemplateNotFoundError
 		if !errors.As(err, &tplErr) {
 			t.Fatalf("error %v (%T) is not a *TemplateNotFoundError", err, err)
@@ -47,9 +47,11 @@ func TestTemplateNotFoundError_FromLookup(t *testing.T) {
 		}
 	})
 
+	// The local CLI's absolute directories (TemplateRefLocal); a remote
+	// lookup refuses them before looking (template_refs_test.go).
 	t.Run("absolute path", func(t *testing.T) {
 		abs := filepath.Join(t.TempDir(), "broker-only", "secret-tpl")
-		_, err := FindTemplateInProjectPath(abs, projectPath)
+		_, err := FindTemplateInProjectPath(abs, projectPath, TemplateRefLocal)
 		var tplErr *TemplateNotFoundError
 		if !errors.As(err, &tplErr) || !errors.Is(err, ErrTemplateNotFound) {
 			t.Fatalf("error %v does not match the typed error and the sentinel", err)
@@ -68,7 +70,7 @@ func TestTemplateNotFoundError_FromLookup(t *testing.T) {
 	t.Run("content-hash cache directory", func(t *testing.T) {
 		hash := "sha256:" + strings.Repeat("ab", 32)
 		abs := filepath.Join(t.TempDir(), "cache", hash)
-		_, err := FindTemplateInProjectPath(abs, projectPath)
+		_, err := FindTemplateInProjectPath(abs, projectPath, TemplateRefLocal)
 		var tplErr *TemplateNotFoundError
 		if !errors.As(err, &tplErr) {
 			t.Fatalf("error %v is not a *TemplateNotFoundError", err)
@@ -79,7 +81,7 @@ func TestTemplateNotFoundError_FromLookup(t *testing.T) {
 	})
 
 	t.Run("wrapped", func(t *testing.T) {
-		_, inner := FindTemplateInProjectPath("missing-tpl", projectPath)
+		_, inner := FindTemplateInProjectPath("missing-tpl", projectPath, TemplateRefRemote)
 		err := fmt.Errorf("failed to load template: %w", inner)
 		var tplErr *TemplateNotFoundError
 		if !errors.As(err, &tplErr) || !errors.Is(err, ErrTemplateNotFound) || tplErr.Name != "missing-tpl" {

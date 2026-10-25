@@ -270,6 +270,18 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
+	// The request's template reference is checked before any directory or
+	// file side effect (createAgent checks it too, earlier): it is never a
+	// host directory. Hydrated directories travel in opts.TemplateDir.
+	if in.Config != nil {
+		if err := config.ValidateRemoteTemplateRef(in.Config.Template); err != nil {
+			return nil, &startContextError{
+				Status:  http.StatusBadRequest,
+				Message: err.Error(),
+			}
+		}
+	}
+
 	ctx, span := tracer.Start(ctx, "broker.agent.provision")
 	defer span.End()
 	span.SetAttributes(attribute.String("scion.agent.name", in.Name))
@@ -966,9 +978,12 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	}
 
 	// --- Template hydration ---
+	// opts.Template keeps the reference as the request named it; the
+	// directory hydration produces travels separately in opts.TemplateDir,
+	// the only form in which a template directory is trusted.
 	if in.Prehydrated.TemplateDone {
 		if in.Prehydrated.TemplatePath != "" {
-			opts.Template = in.Prehydrated.TemplatePath
+			opts.TemplateDir = in.Prehydrated.TemplatePath
 		}
 	} else if hubConn != nil && in.Config != nil {
 		templatePath, err := s.hydrateTemplate(ctx, in.Config, hubConn)
@@ -982,7 +997,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 			}
 		}
 		if templatePath != "" {
-			opts.Template = templatePath
+			opts.TemplateDir = templatePath
 			if s.config.Debug {
 				s.agentLifecycleLog.Debug("Using hydrated template", "agent_id", in.AgentID, "path", templatePath)
 			}
@@ -1045,7 +1060,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	}
 
 	// --- Template identity on start and restart ---
-	if in.Operation != opCreate && opts.Template == "" {
+	if in.Operation != opCreate && opts.Template == "" && opts.TemplateDir == "" {
 		if err := s.applyStartTemplateIdentity(ctx, in, &opts, hubConn, templateSlug); err != nil {
 			span.SetStatus(codes.Error, err.Error())
 			return nil, err
@@ -1053,7 +1068,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	}
 
 	// --- Template env source on start and restart (ptone/scion#4524) ---
-	if in.Operation != opCreate && opts.Template == "" {
+	if in.Operation != opCreate && opts.Template == "" && opts.TemplateDir == "" {
 		s.applyStartTemplateEnvSource(ctx, in, &opts, hubConn, templateSlug)
 	}
 
@@ -2712,13 +2727,13 @@ func (s *Server) applyStartTemplateEnvSource(ctx context.Context, in startContex
 // template) it returns at once, without looking at the filesystem.
 //
 // When the agent's broker-side state survived the stop, it does nothing:
-// nothing is hydrated and opts.Template stays unset (an explicit template
+// nothing is hydrated and opts.Template and opts.TemplateDir stay unset (an explicit template
 // path would change how an existing agent's image and harness-config are
 // resolved), so the agent starts from its own state exactly as before.
 //
 // When the agent has to be provisioned again (its state directory is gone,
 // as on a runtime or broker that keeps nothing across a stop), the template
-// is hydrated the way create hydrates it, and opts.Template is set to the
+// is hydrated the way create hydrates it, and opts.TemplateDir is set to the
 // hydrated path, so the recreated agent gets its own template instead of the
 // default one. A hydration failure fails the start with the same error create
 // returns. Without a Hub connection the start is left as before.
@@ -2750,7 +2765,7 @@ func (s *Server) applyStartTemplateIdentity(ctx context.Context, in startContext
 		}
 	}
 	if templatePath != "" {
-		opts.Template = templatePath
+		opts.TemplateDir = templatePath
 		s.agentLifecycleLog.Info("Start: agent state missing, provisioning from the agent's Hub template",
 			"agent_id", in.AgentID, "template", templateSlug)
 	}

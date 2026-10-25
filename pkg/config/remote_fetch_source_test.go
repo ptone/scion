@@ -188,7 +188,7 @@ func TestFetchRemoteTemplate_RefusesBeforeFetching(t *testing.T) {
 
 	for _, tc := range refusedRemoteSources {
 		t.Run(tc.name, func(t *testing.T) {
-			for _, opts := range []RemoteFetchOptions{{}, {Credentials: RemoteFetchCallerCredentials}} {
+			for _, opts := range []RemoteFetchOptions{{}, CallerCredentialFetchOptions("")} {
 				_, err := FetchRemoteTemplate(context.Background(), tc.uri, opts)
 				require.ErrorIs(t, err, ErrRemoteSourceNotAccepted)
 			}
@@ -205,9 +205,9 @@ func TestFetchRemoteTemplate_RcloneCredentialMode(t *testing.T) {
 
 	_, err := FetchRemoteTemplate(context.Background(), ":gcs:my-bucket/t", RemoteFetchOptions{})
 	require.NoError(t, err)
-	_, err = FetchRemoteTemplate(context.Background(), ":gcs:my-bucket/t", RemoteFetchOptions{Credentials: RemoteFetchAnonymous})
+	_, err = FetchRemoteTemplate(context.Background(), ":gcs:my-bucket/t", RemoteFetchOptions{GitHubToken: ""})
 	require.NoError(t, err)
-	_, err = FetchRemoteTemplate(context.Background(), ":gcs:my-bucket/t", RemoteFetchOptions{Credentials: RemoteFetchCallerCredentials})
+	_, err = FetchRemoteTemplate(context.Background(), ":gcs:my-bucket/t", CallerCredentialFetchOptions(""))
 	require.NoError(t, err)
 
 	assert.Equal(t, []RemoteFetchCredentials{RemoteFetchAnonymous, RemoteFetchAnonymous, RemoteFetchCallerCredentials}, *calls,
@@ -217,8 +217,7 @@ func TestFetchRemoteTemplate_RcloneCredentialMode(t *testing.T) {
 // The broker resolves templates through FindTemplateInProjectPath and
 // GetTemplateChainInProject: both must refuse the sources and fetch
 // anonymously. FindTemplateWithContext (shared) defaults to anonymous; only
-// FindTemplateWithCredentials with an explicit caller mode uses caller
-// credentials.
+// FindTemplateWithCallerCredentials uses caller credentials.
 func TestTemplateResolution_RemoteSourceRulesAndCredentialMode(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	calls := recordRcloneFetch(t)
@@ -227,24 +226,24 @@ func TestTemplateResolution_RemoteSourceRulesAndCredentialMode(t *testing.T) {
 
 	for _, tc := range refusedRemoteSources {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := FindTemplateInProjectPath(tc.uri, projectDir)
+			_, err := FindTemplateInProjectPath(tc.uri, projectDir, TemplateRefRemote)
 			assert.Error(t, err)
-			_, err = GetTemplateChainInProject(tc.uri, projectDir)
+			_, err = GetTemplateChainInProject(tc.uri, projectDir, TemplateRefRemote)
 			assert.Error(t, err)
-			_, err = FindTemplateInProjectPath(tc.uri, "")
+			_, err = FindTemplateInProjectPath(tc.uri, "", TemplateRefRemote)
 			assert.Error(t, err)
-			_, err = FindTemplateWithCredentials(context.Background(), tc.uri, RemoteFetchCallerCredentials)
+			_, err = FindTemplateWithCallerCredentials(context.Background(), tc.uri)
 			assert.Error(t, err)
 		})
 	}
 	require.Empty(t, *calls, "a refused source must never reach rclone")
 
 	const src = ":gcs:my-bucket/t"
-	_, err := FindTemplateInProjectPath(src, projectDir)
+	_, err := FindTemplateInProjectPath(src, projectDir, TemplateRefRemote)
 	require.NoError(t, err)
-	_, err = GetTemplateChainInProject(src, projectDir)
+	_, err = GetTemplateChainInProject(src, projectDir, TemplateRefRemote)
 	require.NoError(t, err)
-	_, err = FindTemplateInProjectPath(src, "")
+	_, err = FindTemplateInProjectPath(src, "", TemplateRefRemote)
 	require.NoError(t, err)
 	_, err = FindTemplateWithContext(context.Background(), src)
 	require.NoError(t, err)
@@ -255,7 +254,7 @@ func TestTemplateResolution_RemoteSourceRulesAndCredentialMode(t *testing.T) {
 	}, *calls)
 
 	*calls = nil
-	_, err = FindTemplateWithCredentials(context.Background(), src, RemoteFetchCallerCredentials)
+	_, err = FindTemplateWithCallerCredentials(context.Background(), src)
 	require.NoError(t, err)
 	assert.Equal(t, []RemoteFetchCredentials{RemoteFetchCallerCredentials}, *calls)
 }

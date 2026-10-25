@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -389,6 +390,11 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 	if payload == "" && req.EventType == "dispatch_agent" {
 		if req.AgentName == "" {
 			ValidationError(w, "agentName is required for dispatch_agent events", nil)
+			return
+		}
+		// Same template rule as a raw payload (validateScheduledEventPayloadJSON).
+		if err := config.ValidateRemoteTemplateRef(req.Template); err != nil {
+			ValidationError(w, err.Error(), nil)
 			return
 		}
 		p := DispatchAgentEventPayload{

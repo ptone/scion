@@ -524,7 +524,7 @@ func TestFindTemplateInProjectPath(t *testing.T) {
 	}
 
 	t.Run("project template found when projectPath is provided", func(t *testing.T) {
-		tpl, err := FindTemplateInProjectPath("my-tpl", projectPath)
+		tpl, err := FindTemplateInProjectPath("my-tpl", projectPath, TemplateRefRemote)
 		if err != nil {
 			t.Fatalf("FindTemplateInProjectPath failed: %v", err)
 		}
@@ -537,7 +537,7 @@ func TestFindTemplateInProjectPath(t *testing.T) {
 	})
 
 	t.Run("falls back to global when project has no template", func(t *testing.T) {
-		tpl, err := FindTemplateInProjectPath("my-tpl", filepath.Join(tmpDir, "empty-project"))
+		tpl, err := FindTemplateInProjectPath("my-tpl", filepath.Join(tmpDir, "empty-project"), TemplateRefRemote)
 		if err != nil {
 			t.Fatalf("FindTemplateInProjectPath failed: %v", err)
 		}
@@ -551,7 +551,7 @@ func TestFindTemplateInProjectPath(t *testing.T) {
 
 	t.Run("falls back to FindTemplate when projectPath is empty", func(t *testing.T) {
 		// With empty projectPath and CWD having no .scion, should fall back to global
-		tpl, err := FindTemplateInProjectPath("my-tpl", "")
+		tpl, err := FindTemplateInProjectPath("my-tpl", "", TemplateRefRemote)
 		if err != nil {
 			t.Fatalf("FindTemplateInProjectPath failed: %v", err)
 		}
@@ -561,7 +561,7 @@ func TestFindTemplateInProjectPath(t *testing.T) {
 	})
 
 	t.Run("returns error when template not found anywhere", func(t *testing.T) {
-		_, err := FindTemplateInProjectPath("nonexistent", projectPath)
+		_, err := FindTemplateInProjectPath("nonexistent", projectPath, TemplateRefRemote)
 		if err == nil {
 			t.Fatal("expected error for nonexistent template, got nil")
 		}
@@ -577,8 +577,8 @@ func TestFindTemplateInProjectPath(t *testing.T) {
 		}
 	})
 
-	t.Run("absolute path bypasses project resolution", func(t *testing.T) {
-		tpl, err := FindTemplateInProjectPath(globalTplDir, projectPath)
+	t.Run("absolute path bypasses project resolution (local CLI)", func(t *testing.T) {
+		tpl, err := FindTemplateInProjectPath(globalTplDir, projectPath, TemplateRefLocal)
 		if err != nil {
 			t.Fatalf("FindTemplateInProjectPath failed: %v", err)
 		}
@@ -606,7 +606,7 @@ func TestFindTemplateInProjectPath_GitProjectInRepoTemplates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tpl, err := FindTemplateInProjectPath("my-tpl", projectDir)
+	tpl, err := FindTemplateInProjectPath("my-tpl", projectDir, TemplateRefRemote)
 	if err != nil {
 		t.Fatalf("FindTemplateInProjectPath failed: %v", err)
 	}
@@ -642,7 +642,7 @@ func TestGetTemplateChainInProject(t *testing.T) {
 
 	// No default template exists on disk, so it is hydrated from the embedded
 	// copy into the global templates dir and prepended to the chain.
-	chain, err := GetTemplateChainInProject("test-tpl", projectPath)
+	chain, err := GetTemplateChainInProject("test-tpl", projectPath, TemplateRefRemote)
 	if err != nil {
 		t.Fatalf("GetTemplateChainInProject failed: %v", err)
 	}
@@ -686,7 +686,7 @@ func TestGetTemplateChainInProjectWithDefault(t *testing.T) {
 	}
 
 	// Non-default template should produce a 2-link chain: [default, custom]
-	chain, err := GetTemplateChainInProject("custom", projectPath)
+	chain, err := GetTemplateChainInProject("custom", projectPath, TemplateRefRemote)
 	if err != nil {
 		t.Fatalf("GetTemplateChainInProject failed: %v", err)
 	}
@@ -701,7 +701,7 @@ func TestGetTemplateChainInProjectWithDefault(t *testing.T) {
 	}
 
 	// Default template itself should produce a 1-link chain: [default]
-	chain, err = GetTemplateChainInProject("default", projectPath)
+	chain, err = GetTemplateChainInProject("default", projectPath, TemplateRefRemote)
 	if err != nil {
 		t.Fatalf("GetTemplateChainInProject for default failed: %v", err)
 	}
@@ -730,7 +730,7 @@ func TestGetTemplateChainInProject_HydratesDefaultFromEmbedded(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	chain, err := GetTemplateChainInProject("my-custom", "")
+	chain, err := GetTemplateChainInProject("my-custom", "", TemplateRefRemote)
 	if err != nil {
 		t.Fatalf("GetTemplateChainInProject failed: %v", err)
 	}
@@ -758,7 +758,7 @@ func TestGetTemplateChainInProject_HydratesDefaultWhenPrimary(t *testing.T) {
 	t.Chdir(tmpDir)
 
 	// No templates at all — default should be hydrated from the embedded copy.
-	chain, err := GetTemplateChainInProject("default", "")
+	chain, err := GetTemplateChainInProject("default", "", TemplateRefRemote)
 	if err != nil {
 		t.Fatalf("GetTemplateChainInProject failed: %v", err)
 	}
@@ -790,7 +790,7 @@ func TestGetTemplateChainInProject_ExistingDefaultIsNotReseeded(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	chain, err := GetTemplateChainInProject("default", "")
+	chain, err := GetTemplateChainInProject("default", "", TemplateRefRemote)
 	if err != nil {
 		t.Fatalf("GetTemplateChainInProject failed: %v", err)
 	}
@@ -845,7 +845,7 @@ func TestGetTemplateChainInProject_ConcurrentHydration(t *testing.T) {
 				go func(idx int) {
 					defer wg.Done()
 					start.Wait()
-					chain, err := GetTemplateChainInProject("default", "")
+					chain, err := GetTemplateChainInProject("default", "", TemplateRefRemote)
 					errs[idx] = err
 					chains[idx] = chain
 					if err == nil && len(chain) == 1 {
@@ -2274,7 +2274,14 @@ func TestFindTemplateContentHashDirHasNoName(t *testing.T) {
 	finders := map[string]func(string) (*Template, error){
 		"FindTemplate": FindTemplate,
 		"FindTemplateInProjectPath": func(name string) (*Template, error) {
-			return FindTemplateInProjectPath(name, projectPath)
+			return FindTemplateInProjectPath(name, projectPath, TemplateRefLocal)
+		},
+		"GetTemplateChainForDir": func(dir string) (*Template, error) {
+			chain, err := GetTemplateChainForDir(dir, projectPath)
+			if err != nil {
+				return nil, err
+			}
+			return chain[len(chain)-1], nil
 		},
 	}
 	for fname, find := range finders {

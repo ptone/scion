@@ -296,12 +296,12 @@ func checkResourceDirsContent(dirs []resourceDir, kind resourceImportKind) error
 // directory discovery. The caller owns the returned cache path and must
 // remove it.
 //
-// Storage backends are always accessed anonymously: the hub fetches on
-// behalf of the caller and must not lend it the hub's own credentials.
+// Storage backends are always accessed anonymously (the zero credential mode
+// of RemoteFetchOptions): the hub fetches on behalf of the caller and must not
+// lend it the hub's own credentials.
 func (s *Server) fetchRemoteForImport(ctx context.Context, scope, scopeID, sourceURL string) (string, error) {
 	return config.FetchRemoteTemplate(ctx, sourceURL, config.RemoteFetchOptions{
 		GitHubToken: s.importCredential(ctx, scope, scopeID, sourceURL),
-		Credentials: config.RemoteFetchAnonymous,
 	})
 }
 

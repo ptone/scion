@@ -94,9 +94,9 @@ func TestRemoteSourceRefusal_ValidateAndResolve(t *testing.T) {
 			assert.ErrorContains(t, ValidateRemoteURI(tc.uri), tc.want, "CLI pre-check")
 			_, err := FindTemplateWithContext(context.Background(), tc.uri)
 			assert.ErrorContains(t, err, tc.want, "shared resolver")
-			_, err = FindTemplateInProjectPath(tc.uri, projectDir)
+			_, err = FindTemplateInProjectPath(tc.uri, projectDir, TemplateRefRemote)
 			assert.ErrorContains(t, err, tc.want, "broker resolver")
-			_, err = GetTemplateChainInProject(tc.uri, projectDir)
+			_, err = GetTemplateChainInProject(tc.uri, projectDir, TemplateRefRemote)
 			assert.ErrorContains(t, err, tc.want, "broker template chain")
 		})
 	}

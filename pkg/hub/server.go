@@ -6072,6 +6072,20 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			templateFromImplicitDefault = true
 		}
 
+		// The payload was checked when the event or schedule was created
+		// (validateScheduledEventPayloadJSON); a row stored before that check,
+		// or written another way, is checked again here, before anything is
+		// resolved or dispatched: a template is never a host directory. A
+		// hub-default name that fails degrades like an unusable hub default.
+		if err := config.ValidateRemoteTemplateRef(payload.Template); err != nil {
+			if !templateFromHubDefault {
+				return fmt.Errorf("dispatch_agent payload: %w", err)
+			}
+			s.warnHubDefaultTemplateUnusable(ctx, payload.Template, evt.ProjectID, "not an accepted template reference")
+			payload.Template = ""
+			agent.Template = ""
+		}
+
 		// Resolve template if specified. tmpl outlives the block so that
 		// populateAgentConfig can stamp TemplateID/TemplateHash (and the
 		// template defaults) exactly as on the agent-create path; without them

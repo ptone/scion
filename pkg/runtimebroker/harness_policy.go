@@ -211,10 +211,11 @@ func harnessPolicyInputForStart(opts api.StartOptions, agentName string) harness
 			Profile:       opts.Profile,
 		},
 	}
-	var hydratedTemplatePath string
-	if filepath.IsAbs(opts.Template) {
-		hydratedTemplatePath = opts.Template
-	} else {
+	// A template directory is trusted only in opts.TemplateDir, where the
+	// broker records its own hydration result; opts.Template is the
+	// reference as the request named it.
+	hydratedTemplatePath := opts.TemplateDir
+	if hydratedTemplatePath == "" {
 		req.Config.Template = opts.Template
 	}
 	return harnessPolicyInput{
@@ -273,13 +274,13 @@ func (s *Server) lookupHarnessConfigDirForPolicy(req CreateAgentRequest, hydrate
 
 	// The template chain is resolved against the project path as given, as
 	// launch resolves it; the project tier uses the resolved project dir.
-	templateForChain := hydratedTemplatePath
-	if templateForChain == "" && req.Config != nil {
-		templateForChain = req.Config.Template
+	templateRef := ""
+	if req.Config != nil {
+		templateRef = req.Config.Template
 	}
 	if projectDir != "" {
 		tier := harnessConfigProjectTier(req.ProjectPath)
-		hcDir, err := config.ResolveHarnessConfigDir("", name, tier, templateChainPaths(templateForChain, req.ProjectPath)...)
+		hcDir, err := config.ResolveHarnessConfigDir("", name, tier, templateChainPaths(hydratedTemplatePath, templateRef, req.ProjectPath)...)
 		if err == nil && hcDir != nil {
 			return name, []config.HarnessConfigEntry{hcDir.Config}, hcDir, true, nil
 		}
@@ -339,17 +340,26 @@ func harnessConfigProjectTier(projectPath string) string {
 	return harnessConfigProjectDir(projectPath)
 }
 
-// templateChainPaths returns the on-disk paths of template's chain resolved
+// templateChainPaths returns the on-disk paths of a template chain resolved
 // against searchPath, in merge order, for use as the template-bundled tier of
-// config.ResolveHarnessConfigDir. template may be a slug or an absolute
-// (hydrated) path; an empty searchPath resolves as config.GetTemplateChainInProject
-// does for it (global templates). Returns nil when template is empty or the
-// chain does not resolve.
-func templateChainPaths(template, searchPath string) []string {
-	if template == "" {
+// config.ResolveHarnessConfigDir. hydratedDir, when set, is a template
+// directory the broker hydrated itself and is loaded as a directory
+// (config.GetTemplateChainForDir); otherwise template, the reference from the
+// request, is resolved as a remote reference (never a host directory). An
+// empty searchPath resolves as config.GetTemplateChainInProject does for it
+// (global templates only). Returns nil when there is no template or the chain
+// does not resolve.
+func templateChainPaths(hydratedDir, template, searchPath string) []string {
+	var chain []*config.Template
+	var err error
+	switch {
+	case hydratedDir != "":
+		chain, err = config.GetTemplateChainForDir(hydratedDir, searchPath)
+	case template != "":
+		chain, err = config.GetTemplateChainInProject(template, searchPath, config.TemplateRefRemote)
+	default:
 		return nil
 	}
-	chain, err := config.GetTemplateChainInProject(template, searchPath)
 	if err != nil {
 		return nil
 	}

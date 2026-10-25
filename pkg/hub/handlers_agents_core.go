@@ -32,6 +32,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
@@ -1515,6 +1516,15 @@ func (s *Server) createAgentInProject(
 	if !validateGCPIdentityRequest(w, req.GCPIdentity) {
 		return
 	}
+	// The request's template reference, before any persistence or the
+	// existing-agent handling below: a template name or ID, a relative path
+	// inside the template directories, or an accepted remote source; never a
+	// host directory (config.ValidateRemoteTemplateRef). Default names are
+	// checked where they are filled in.
+	if err := config.ValidateRemoteTemplateRef(req.Template); err != nil {
+		ValidationError(w, err.Error(), nil)
+		return
+	}
 
 	// Verify project exists and get its configuration
 	project, err := s.store.GetProject(ctx, projectID)
@@ -1858,6 +1868,20 @@ func (s *Server) createAgentInProject(
 	if req.Template == "" {
 		req.Template = "default"
 		templateFromImplicitDefault = true
+	}
+
+	// The template reference after defaults are filled in, checked again
+	// before the store lookup (the request's own value was checked on entry),
+	// so an unresolved reference can never be passed through to a broker that
+	// has local access as a host directory. A hub-default name that fails the
+	// check degrades like an unusable hub default; any other is refused.
+	if err := config.ValidateRemoteTemplateRef(req.Template); err != nil {
+		if !templateFromHubDefault {
+			ValidationError(w, err.Error(), nil)
+			return
+		}
+		s.warnHubDefaultTemplateUnusable(ctx, req.Template, projectID, "not an accepted template reference")
+		req.Template = ""
 	}
 
 	// Resolve template if specified - the client may pass either a template ID or name

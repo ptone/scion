@@ -15,6 +15,10 @@
 package util
 
 import (
+	"fmt"
+	"io"
+	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,39 +29,123 @@ import (
 // Source directory must exist. Python bytecode artifacts (__pycache__ directories
 // and .pyc files) are skipped to avoid propagating stale, potentially root-owned
 // bytecode into agent homes.
+//
+// Only directories and regular files are copied, and symbolic links are never
+// followed:
+//   - src itself must be a real directory (not a symbolic link);
+//   - the walk goes through an os.Root opened at src, so it cannot leave src;
+//   - each regular file is opened only after an Lstat confirms it is a
+//     regular file, and the opened file must be that same file
+//     (os.SameFile);
+//   - symbolic links, devices, sockets and pipes are skipped with a warning.
+//
+// Writes go through an os.Root opened at dst (created if missing), so a
+// symbolic link already present in dst cannot redirect a write outside dst.
 func CopyDir(src string, dst string) error {
-	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+	info, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&fs.ModeSymlink != 0 {
+		return fmt.Errorf("copy source %s is a symbolic link", src)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("copy source %s is not a directory", src)
+	}
+	srcRoot, err := os.OpenRoot(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = srcRoot.Close() }()
+
+	if err := os.MkdirAll(dst, info.Mode().Perm()); err != nil {
+		return err
+	}
+	dstRoot, err := os.OpenRoot(dst)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dstRoot.Close() }()
+
+	return fs.WalkDir(srcRoot.FS(), ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
+		name := filepath.FromSlash(p)
+		base := d.Name()
 
-		base := filepath.Base(path)
-
-		if info.IsDir() && base == "__pycache__" {
-			return filepath.SkipDir
-		}
-		if !info.IsDir() && strings.HasSuffix(base, ".pyc") {
+		switch {
+		case d.IsDir():
+			if base == "__pycache__" {
+				return fs.SkipDir
+			}
+			if name == "." {
+				return nil
+			}
+			dinfo, err := d.Info()
+			if err != nil {
+				return err
+			}
+			return dstRoot.MkdirAll(name, dinfo.Mode().Perm())
+		case d.Type().IsRegular():
+			if strings.HasSuffix(base, ".pyc") {
+				return nil
+			}
+			return copyRegularFileInRoots(srcRoot, dstRoot, name)
+		default:
+			slog.Warn("Skipping non-regular file while copying a directory", "path", p, "type", d.Type().String())
 			return nil
 		}
-
-		rel, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
-		}
-
-		target := filepath.Join(dst, rel)
-
-		if info.IsDir() {
-			return os.MkdirAll(target, info.Mode())
-		}
-
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-
-		return os.WriteFile(target, data, info.Mode())
 	})
+}
+
+// copyRegularFileInRoots copies the regular file name from srcRoot to the
+// same name in dstRoot. It skips anything that is not a regular file when
+// inspected, and refuses a file that is not that same file once opened.
+func copyRegularFileInRoots(srcRoot, dstRoot *os.Root, name string) error {
+	linfo, err := srcRoot.Lstat(name)
+	if err != nil {
+		return err
+	}
+	if !linfo.Mode().IsRegular() {
+		slog.Warn("Skipping non-regular file while copying a directory", "path", filepath.ToSlash(name), "type", linfo.Mode().Type().String())
+		return nil
+	}
+	in, err := srcRoot.Open(name)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+	oinfo, err := in.Stat()
+	if err != nil {
+		return err
+	}
+	if !oinfo.Mode().IsRegular() || !os.SameFile(linfo, oinfo) {
+		return fmt.Errorf("file %s changed while it was copied", filepath.ToSlash(name))
+	}
+	if dir := filepath.Dir(name); dir != "." {
+		if err := dstRoot.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+	// A symbolic link already at the destination (for example one an agent
+	// left in its home) is replaced by the copied file, never written
+	// through: only the link itself is removed. dstRoot refuses any path that
+	// would still leave dst.
+	if dinfo, err := dstRoot.Lstat(name); err == nil && dinfo.Mode()&fs.ModeSymlink != 0 {
+		if err := dstRoot.Remove(name); err != nil {
+			return err
+		}
+	}
+	out, err := dstRoot.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, linfo.Mode().Perm())
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 // CopyFile copies a single file from src to dst.

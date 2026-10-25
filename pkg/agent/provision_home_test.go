@@ -122,7 +122,7 @@ func TestProvisionAgentEmptyChainAppliesEmbeddedHome(t *testing.T) {
 	runCmd(t, tmpDir, "git", "commit", "-m", "initial commit")
 
 	// Mock HOME to a location with NO templates directory — this forces
-	// GetTemplateChainInProject("default", ...) to return an empty chain.
+	// GetTemplateChainInProject("default", ..., config.TemplateRefRemote) to return an empty chain.
 	_ = os.Setenv("HOME", tmpDir)
 	defer func() { _ = os.Setenv("HOME", oldWd) }()
 

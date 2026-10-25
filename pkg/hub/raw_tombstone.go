@@ -24,6 +24,7 @@ import (
 	"net/http"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/google/uuid"
@@ -244,6 +245,12 @@ func (s *Server) validateScheduledPayloadShape(w http.ResponseWriter, payload st
 // Payload of "{}" decodes cleanly here and is persisted, with the
 // "message is required" check only ever applied on the separate
 // convenience-field branch in handlers_scheduled_events.go.)
+//
+// One field-level check is made here, because it is a safety rule rather
+// than a requirement: a dispatch_agent payload's template must pass
+// config.ValidateRemoteTemplateRef (a template name, a relative path inside
+// the template directories, or an accepted remote source; never a host
+// directory). It writes a 400 that names the rule and returns false.
 func (s *Server) validateScheduledEventPayloadJSON(w http.ResponseWriter, eventType, payload string) bool {
 	if payload == "" {
 		return true
@@ -256,6 +263,15 @@ func (s *Server) validateScheduledEventPayloadJSON(w http.ResponseWriter, eventT
 	case "dispatch_agent":
 		var p DispatchAgentEventPayload
 		decodeErr = json.Unmarshal([]byte(payload), &p)
+		// The template a dispatch will use is checked here, where every
+		// route that accepts a raw payload (event create, schedule create
+		// and schedule update) passes: it is never a host directory.
+		if decodeErr == nil {
+			if err := config.ValidateRemoteTemplateRef(p.Template); err != nil {
+				ValidationError(w, err.Error(), nil)
+				return false
+			}
+		}
 	default:
 		// Every caller validates eventType against the closed
 		// {message, dispatch_agent} set before reaching here, so this branch

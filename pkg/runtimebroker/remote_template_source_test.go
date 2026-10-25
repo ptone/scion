@@ -56,10 +56,10 @@ func TestBrokerTemplateResolution_RemoteSources(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			req := CreateAgentRequest{Config: &CreateAgentConfig{Template: ref}, ProjectPath: projectPath}
 			assert.Nil(t, envGatherTemplate(req, ""))
-			assert.Nil(t, templateChainPaths(ref, projectPath))
+			assert.Nil(t, templateChainPaths("", ref, projectPath))
 			// Both helpers drop the error; the resolver they call refuses
 			// the source itself.
-			_, err := config.GetTemplateChainInProject(ref, projectPath)
+			_, err := config.GetTemplateChainInProject(ref, projectPath, config.TemplateRefRemote)
 			assert.ErrorIs(t, err, config.ErrRemoteSourceNotAccepted)
 		})
 	}
@@ -74,6 +74,6 @@ func TestBrokerTemplateResolution_RemoteSources(t *testing.T) {
 	const src = ":gcs:my-bucket/t"
 	req := CreateAgentRequest{Config: &CreateAgentConfig{Template: src}, ProjectPath: projectPath}
 	require.NotNil(t, envGatherTemplate(req, ""))
-	require.NotEmpty(t, templateChainPaths(src, projectPath))
+	require.NotEmpty(t, templateChainPaths("", src, projectPath))
 	assert.Equal(t, []config.RemoteFetchCredentials{config.RemoteFetchAnonymous, config.RemoteFetchAnonymous}, calls)
 }

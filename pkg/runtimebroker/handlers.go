@@ -866,6 +866,16 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		ValidationError(w, "moveReincarnationId is only valid on a provision-only request", nil)
 		return
 	}
+	// A template reference from a request is a template name, a relative
+	// path inside the template directories, or an accepted remote source;
+	// never a host directory (config.ValidateRemoteTemplateRef). Checked
+	// before any preflight, hydration or file work.
+	if req.Config != nil {
+		if err := config.ValidateRemoteTemplateRef(req.Config.Template); err != nil {
+			ValidationError(w, err.Error(), nil)
+			return
+		}
+	}
 
 	// Flat Runtime Broker target checks (target required, mismatch,
 	// explicit profile) run after decode and validation and before
@@ -1092,7 +1102,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 
 		// Hydrate a Hub-managed template before extracting required keys.
 		// launch's own dispatch path (start_context.go) does the same
-		// hydration and replaces opts.Template with the result before
+		// hydration and records the result in opts.TemplateDir before
 		// ProvisionAgent resolves the harness-config template chain from
 		// it — so scoring the on-disk slug here instead could score a
 		// stale local template of the same name that launch will never
@@ -6059,20 +6069,21 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 		// doesn't score a project/global `env:` block launch will not use.
 		//
 		// For a hub-dispatched agent, launch resolves the chain from the
-		// hydrated template's local path, not the slug (start_context.go
-		// replaces opts.Template with it before ProvisionAgent builds the
+		// hydrated template's local directory, not the slug (start_context.go
+		// records it in opts.TemplateDir before ProvisionAgent builds the
 		// chain) — a hub-managed template of the same name as a stale local
 		// one would otherwise be invisible here. hydratedTemplatePath is
-		// that same path, hydrated by the caller (createAgent) alongside
+		// that same directory, hydrated by the caller (createAgent) alongside
 		// the harness-config hydration below; it replaces the slug
-		// whenever the caller supplied one, and GetTemplateChainInProject
-		// resolves an absolute path directly (FindTemplateInProjectPath),
-		// so this does not depend on the slug matching anything on disk.
-		templateForChain := hydratedTemplatePath
-		if templateForChain == "" && req.Config != nil {
-			templateForChain = req.Config.Template
+		// whenever the caller supplied one, and is loaded as a directory
+		// (config.GetTemplateChainForDir), so this does not depend on the
+		// slug matching anything on disk. The slug itself is resolved as a
+		// remote reference, never as a host directory.
+		templateRef := ""
+		if req.Config != nil {
+			templateRef = req.Config.Template
 		}
-		harnessConfigTemplatePaths := templateChainPaths(templateForChain, harnessConfigSearchPath)
+		harnessConfigTemplatePaths := templateChainPaths(hydratedTemplatePath, templateRef, harnessConfigSearchPath)
 		// Resolve through the shared resolver launch uses
 		// (config.ResolveHarnessConfigDir, via resolveHarnessConfigDir in
 		// pkg/agent/provision.go and harness.Resolve): a hydrated hub-managed
@@ -9131,7 +9142,7 @@ func envGatherTemplate(req CreateAgentRequest, hydratedTemplatePath string) *con
 	if req.Config == nil || req.Config.Template == "" || req.ProjectPath == "" {
 		return nil
 	}
-	tmpl, err := config.FindTemplateInProjectPath(req.Config.Template, req.ProjectPath)
+	tmpl, err := config.FindTemplateInProjectPath(req.Config.Template, req.ProjectPath, config.TemplateRefRemote)
 	if err != nil {
 		return nil
 	}

@@ -1206,6 +1206,25 @@ func HarnessConfigPathFromContext(ctx context.Context) string {
 	return v
 }
 
+type templateDirContextKey struct{}
+
+// ContextWithTemplateDir records the template directory the runtime broker
+// produced itself for this dispatch (a hydrated hub template, a
+// local-storage template or the template cache; see StartOptions.TemplateDir).
+// Provisioning loads the template chain from it with
+// config.GetTemplateChainForDir instead of resolving the template name. It is
+// never set from a request field.
+func ContextWithTemplateDir(ctx context.Context, dir string) context.Context {
+	return context.WithValue(ctx, templateDirContextKey{}, dir)
+}
+
+// TemplateDirFromContext returns the broker-produced template directory from
+// the context, or "" if none was set.
+func TemplateDirFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(templateDirContextKey{}).(string)
+	return v
+}
+
 type templateNameContextKey struct{}
 
 // ContextWithTemplateName records the human-friendly template slug for the
@@ -1345,10 +1364,20 @@ func HubAgentDefaultsFromContext(ctx context.Context) *HubAgentDefaults {
 }
 
 type StartOptions struct {
-	Name              string
-	Task              string
-	Template          string
-	TemplateName      string // Human-friendly template slug (overrides Template for labels when hydration replaces Template with a cache path)
+	Name string
+	Task string
+	// Template is the template reference as the request named it (a name,
+	// a relative path inside the template directories, or an accepted remote
+	// source). It is never trusted as a host directory; see TemplateDir.
+	Template     string
+	TemplateName string // Human-friendly template slug (overrides Template for labels)
+	// TemplateDir is the template directory the runtime broker produced
+	// itself for this dispatch (a hydrated hub template, a local-storage
+	// template or the template cache). It is set only by the broker from its
+	// own hydration result, never from a request, and is never serialized.
+	// When set, the template chain is loaded from it
+	// (config.GetTemplateChainForDir) instead of resolving Template.
+	TemplateDir       string `json:"-"`
 	Profile           string
 	HarnessConfig     string
 	HarnessConfigPath string // Resolved local dir for the harness-config (set when hydrated from the Hub); bypasses on-disk FindHarnessConfigDir lookup

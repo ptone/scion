@@ -898,6 +898,9 @@ func buildProvisionContext(ctx context.Context, opts api.StartOptions) (context.
 	if opts.HarnessConfigPath != "" {
 		ctx = api.ContextWithHarnessConfigPath(ctx, opts.HarnessConfigPath)
 	}
+	if opts.TemplateDir != "" {
+		ctx = api.ContextWithTemplateDir(ctx, opts.TemplateDir)
+	}
 	if opts.TemplateName != "" {
 		ctx = api.ContextWithTemplateName(ctx, opts.TemplateName)
 	}
@@ -1427,6 +1430,21 @@ type resolvedTemplate struct {
 	TemplateWarnings []string
 }
 
+// provisionTemplateChain returns the template chain provisioning uses: the
+// template directory the runtime broker produced itself for this dispatch
+// (api.TemplateDirFromContext, from StartOptions.TemplateDir) when there is
+// one, otherwise templateName resolved as a remote reference
+// (config.TemplateRefRemote: a template name, a relative path inside the
+// template directories, or an accepted remote source; never a host
+// directory). pkg/agent runs only inside the runtime broker, so it never
+// resolves a reference in the local CLI's context.
+func provisionTemplateChain(ctx context.Context, templateName, projectPath string) ([]*config.Template, error) {
+	if dir := api.TemplateDirFromContext(ctx); dir != "" {
+		return config.GetTemplateChainForDir(dir, projectPath)
+	}
+	return config.GetTemplateChainInProject(templateName, projectPath, config.TemplateRefRemote)
+}
+
 // resolveTemplateAndHarnessConfig resolves templateName's template chain and
 // the agent's harness-config, merging template (and, when supplied, inline)
 // config along the way. It performs no provisioning, clone, file write or
@@ -1446,7 +1464,7 @@ type resolvedTemplate struct {
 // dir for provisioning, launch (Start's harness.Resolve) and the runtime
 // broker's policy gate.
 func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessConfig, projectPath, projectDir, profileName string, settings *config.VersionedSettings, inlineCfg *api.ScionConfig) (*resolvedTemplate, error) {
-	chain, err := config.GetTemplateChainInProject(templateName, projectPath)
+	chain, err := provisionTemplateChain(ctx, templateName, projectPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load template: %w", err)
 	}
@@ -4580,7 +4598,11 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	if hydratedTemplate {
 		err = config.NewTemplateNotFoundError(effectiveTemplate, fmt.Sprintf("template %q was loaded from a content-addressed cache (%s)", effectiveTemplate, templateRecord.TemplateHash))
 	} else {
-		chain, err = config.GetTemplateChainInProject(effectiveTemplate, projectPath)
+		// effectiveTemplate is the settings default or a name read back from
+		// the agent's own records (provenance, or agent-info.json in the
+		// agent home for a legacy agent, which the agent can write): it is
+		// resolved as a remote reference, never as a host directory.
+		chain, err = config.GetTemplateChainInProject(effectiveTemplate, projectPath, config.TemplateRefRemote)
 	}
 	if err != nil {
 		util.Debugf("GetAgent: template chain for %q not found: %v, returning agentCfg only (harness=%q image=%q)",
@@ -4834,8 +4856,14 @@ func injectPromptFiles(h api.Harness, agentHome string, chain []*config.Template
 		// where a template author creates the file but forgets to reference it
 		// in scion-agent.yaml.
 		if finalScionCfg.AgentInstructions == "" {
-			conventionPath := filepath.Join(lastTpl.Path, "agents.md")
-			if _, err := os.Stat(conventionPath); err == nil {
+			// The confined check (config.TemplateFileExists) reports a
+			// refused entry (a symbolic link, a non-regular file) as an
+			// error, so it is neither skipped silently nor injected as text.
+			present, err := config.TemplateFileExists(lastTpl.Path, "agents.md")
+			if err != nil {
+				return false, fmt.Errorf("failed to resolve agent_instructions: %w", err)
+			}
+			if present {
 				util.Debugf("ProvisionAgent: agent_instructions not set in config, auto-detected agents.md in template %s", lastTpl.Path)
 				finalScionCfg.AgentInstructions = "agents.md"
 			}
@@ -4876,8 +4904,14 @@ func injectPromptFiles(h api.Harness, agentHome string, chain []*config.Template
 		// Step 5: Inject system prompt
 		// Convention-based auto-detection for system prompt as well.
 		if finalScionCfg.SystemPrompt == "" {
-			conventionPath := filepath.Join(lastTpl.Path, "system-prompt.md")
-			if _, err := os.Stat(conventionPath); err == nil {
+			// The confined check (config.TemplateFileExists) reports a
+			// refused entry (a symbolic link, a non-regular file) as an
+			// error, so it is neither skipped silently nor injected as text.
+			present, err := config.TemplateFileExists(lastTpl.Path, "system-prompt.md")
+			if err != nil {
+				return false, fmt.Errorf("failed to resolve system_prompt: %w", err)
+			}
+			if present {
 				util.Debugf("ProvisionAgent: system_prompt not set in config, auto-detected system-prompt.md in template %s", lastTpl.Path)
 				finalScionCfg.SystemPrompt = "system-prompt.md"
 			}

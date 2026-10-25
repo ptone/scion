@@ -375,3 +375,87 @@ func TestRemoveAllSafe_WithDanglingSymlink(t *testing.T) {
 		t.Error("expected target to be fully removed")
 	}
 }
+
+// CopyDir copies regular files and directories only: a symbolic link to a
+// file outside the source is not copied, a symbolic link to a directory is
+// not descended, and a symbolic-link source is refused.
+func TestCopyDirDoesNotFollowSymlinks(t *testing.T) {
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("outside content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "regular.txt"), []byte("ok"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(src, "link.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(src, "linkdir")); err != nil {
+		t.Fatal(err)
+	}
+
+	dst := filepath.Join(t.TempDir(), "dst")
+	if err := CopyDir(src, dst); err != nil {
+		t.Fatalf("CopyDir: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dst, "regular.txt"))
+	if err != nil || string(got) != "ok" {
+		t.Fatalf("regular file not copied: %q, %v", got, err)
+	}
+	if info, err := os.Stat(filepath.Join(dst, "regular.txt")); err != nil || info.Mode().Perm() != 0640 {
+		t.Fatalf("regular file mode not kept: %v, %v", info, err)
+	}
+	for _, name := range []string{"link.txt", "linkdir", filepath.Join("linkdir", "secret.txt")} {
+		if _, err := os.Lstat(filepath.Join(dst, name)); !os.IsNotExist(err) {
+			t.Errorf("%s must not be copied (err=%v)", name, err)
+		}
+	}
+
+	linkSrc := filepath.Join(t.TempDir(), "home")
+	if err := os.Symlink(outside, linkSrc); err != nil {
+		t.Fatal(err)
+	}
+	if err := CopyDir(linkSrc, filepath.Join(t.TempDir(), "dst2")); err == nil {
+		t.Fatal("CopyDir must refuse a symbolic-link source")
+	}
+}
+
+// A symbolic link already present in the destination cannot redirect a
+// write outside it.
+func TestCopyDirDoesNotWriteThroughDestinationSymlinks(t *testing.T) {
+	outside := t.TempDir()
+	target := filepath.Join(outside, "target.txt")
+	if err := os.WriteFile(target, []byte("original"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, ".bashrc"), []byte("from template"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	dst := t.TempDir()
+	if err := os.Symlink(target, filepath.Join(dst, ".bashrc")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := CopyDir(src, dst); err != nil {
+		t.Fatalf("CopyDir: %v", err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "original" {
+		t.Fatalf("write went through a destination symlink: %q", got)
+	}
+	info, err := os.Lstat(filepath.Join(dst, ".bashrc"))
+	if err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("destination link not replaced by the copied file: %v, %v", info, err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dst, ".bashrc")); string(got) != "from template" {
+		t.Fatalf("copied content = %q", got)
+	}
+}

@@ -74,21 +74,12 @@ type Template struct {
 // If field is empty, returns nil, nil.
 // If a file at t.Path/field exists, reads and returns its content.
 // Otherwise, returns field as inline content bytes.
+//
+// The file is read as ResolveContentInChain reads it: inside t.Path only,
+// regular files only, without following symbolic links. A refused file is
+// an error wrapping ErrTemplateContentRefused, never inline content.
 func (t *Template) ResolveContent(field string) ([]byte, error) {
-	if field == "" {
-		return nil, nil
-	}
-
-	filePath := filepath.Join(t.Path, field)
-	if _, err := os.Stat(filePath); err == nil {
-		data, err := os.ReadFile(filePath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read content file %s: %w", filePath, err)
-		}
-		return data, nil
-	}
-
-	return []byte(field), nil
+	return ResolveContentInChain([]*Template{t}, field)
 }
 
 // ResolveContentInChain resolves a template field value by searching the
@@ -98,20 +89,33 @@ func (t *Template) ResolveContent(field string) ([]byte, error) {
 // if it doesn't exist in the custom template's directory. Only falls back
 // to treating the field as inline content if no template in the chain
 // contains the file.
+//
+// A field that is not a local relative path (filepath.IsLocal: absolute, or
+// leaving the template directory) is never looked up as a file; it is inline
+// content. A file is read inside its template directory only, as a regular
+// file, without following symbolic links (readTemplateFile). The first
+// template in which the file is present decides: a refused entry (a symbolic
+// link, a non-regular file) is an error wrapping ErrTemplateContentRefused
+// and is never treated as inline content.
 func ResolveContentInChain(chain []*Template, field string) ([]byte, error) {
 	if field == "" {
 		return nil, nil
 	}
+	if !isLocalTemplateName(field) {
+		return []byte(field), nil
+	}
 
 	// Walk chain in reverse (most specific first) looking for the file
 	for i := len(chain) - 1; i >= 0; i-- {
-		filePath := filepath.Join(chain[i].Path, field)
-		if _, err := os.Stat(filePath); err == nil {
-			data, err := os.ReadFile(filePath)
-			if err != nil {
-				return nil, fmt.Errorf("failed to read content file %s: %w", filePath, err)
-			}
+		data, state, err := readTemplateFile(chain[i].Path, field)
+		switch state {
+		case templateFileRegular:
 			return data, nil
+		case templateFileRefused:
+			return nil, fmt.Errorf("template %s: %w", templateRef(chain[i]), err)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("template %s: %w", templateRef(chain[i]), err)
 		}
 	}
 
@@ -119,21 +123,29 @@ func ResolveContentInChain(chain []*Template, field string) ([]byte, error) {
 	return []byte(field), nil
 }
 
+// templateRef names a template in error messages: its name, or its directory
+// base name when it has none.
+func templateRef(t *Template) string {
+	if t.Name != "" {
+		return t.Name
+	}
+	return filepath.Base(t.Path)
+}
+
+// LoadConfig reads the template's scion-agent config (YAML first, then
+// JSON). The file is read inside the template directory only, as a regular
+// file, without following symbolic links; a refused file is an error, never
+// "no config".
 func (t *Template) LoadConfig() (*api.ScionConfig, error) {
-	// Try YAML first, then JSON
-	configPath := GetScionAgentConfigPath(t.Path)
-	if configPath == "" {
+	data, configName, found, err := readTemplateConfigFile(t.Path)
+	if err != nil {
+		return nil, fmt.Errorf("template %s: %w", templateRef(t), err)
+	}
+	if !found {
 		// No config file found, return empty config
 		return &api.ScionConfig{}, nil
 	}
-
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return &api.ScionConfig{}, nil
-		}
-		return nil, err
-	}
+	configPath := filepath.Join(t.Path, configName)
 
 	var cfg api.ScionConfig
 	ext := filepath.Ext(configPath)
@@ -223,73 +235,83 @@ func normalizeYAMLMappingKeys(node *yaml.Node) {
 	}
 }
 
+// FindTemplate finds a template for the local CLI, on its own host
+// (TemplateRefLocal): a remote URI (fetched anonymously), an absolute
+// directory, or a name in the project or global template directory.
 func FindTemplate(name string) (*Template, error) {
 	return FindTemplateWithContext(context.Background(), name)
 }
 
-// FindTemplateWithContext finds a template by name, supporting remote URIs.
-// Remote templates are fetched and cached locally before being returned,
-// in RemoteFetchAnonymous mode.
+// FindTemplateWithContext is FindTemplate with a context. Remote templates
+// are fetched and cached locally before being returned, in
+// RemoteFetchAnonymous mode.
 func FindTemplateWithContext(ctx context.Context, name string) (*Template, error) {
-	return FindTemplateWithCredentials(ctx, name, RemoteFetchAnonymous)
+	return findLocalTemplate(ctx, name, RemoteFetchOptions{})
 }
 
-// FindTemplateWithCredentials is FindTemplateWithContext with an explicit
-// credential mode for remote template sources. Only the CLI passes
-// RemoteFetchCallerCredentials.
-func FindTemplateWithCredentials(ctx context.Context, name string, creds RemoteFetchCredentials) (*Template, error) {
+// FindTemplateWithCallerCredentials is FindTemplate for the CLI, where a
+// remote template source is fetched with the user's own storage
+// credentials (CallerCredentialFetchOptions). Only cmd/ may call it; a guard
+// test enforces that.
+func FindTemplateWithCallerCredentials(ctx context.Context, name string) (*Template, error) {
+	return findLocalTemplate(ctx, name, CallerCredentialFetchOptions(""))
+}
+
+// findLocalTemplate resolves name for the local CLI (TemplateRefLocal).
+// Relative names are confined to the template directories as for every
+// caller; only absolute directories are accepted in addition.
+func findLocalTemplate(ctx context.Context, name string, fetchOpts RemoteFetchOptions) (*Template, error) {
 	// 0. Check if name is a remote URI (URL or rclone connection string)
 	if IsRemoteURI(name) {
-		// Validate the URI format
-		if err := ValidateRemoteURI(name); err != nil {
-			return nil, fmt.Errorf("invalid remote template URI: %w", err)
-		}
-
-		// Fetch the remote template to local cache
-		cachedPath, err := FetchRemoteTemplate(ctx, name, RemoteFetchOptions{Credentials: creds})
-		if err != nil {
-			return nil, fmt.Errorf("failed to fetch remote template: %w", err)
-		}
-
-		// Derive a short name from the URI for display purposes
-		shortName := DeriveTemplateName(name)
-
-		return &Template{Name: shortName, Path: cachedPath}, nil
+		return fetchRemoteTemplateRef(ctx, name, fetchOpts)
 	}
 
 	// 1. Check if name is an absolute path
 	if filepath.IsAbs(name) {
 		return TemplateFromDir(name)
 	}
+	if !isLocalTemplateName(name) {
+		return nil, templateRefNotAllowedError(name)
+	}
 
 	// 2. Check project-local templates
-	projectTemplatesDir, err := GetProjectTemplatesDir()
-	if err == nil {
-		path := filepath.Join(projectTemplatesDir, name)
-		if info, err := os.Stat(path); err == nil && info.IsDir() {
+	if projectTemplatesDir, err := GetProjectTemplatesDir(); err == nil {
+		if path, ok := findDirInRoot(projectTemplatesDir, name); ok {
 			return &Template{Name: name, Path: path}, nil
 		}
 	}
 
 	// 3. Check global templates
-	globalTemplatesDir, err := GetGlobalTemplatesDir()
-	if err == nil {
-		path := filepath.Join(globalTemplatesDir, name)
-		if info, err := os.Stat(path); err == nil && info.IsDir() {
+	if globalTemplatesDir, err := GetGlobalTemplatesDir(); err == nil {
+		if path, ok := findDirInRoot(globalTemplatesDir, name); ok {
 			return &Template{Name: name, Path: path}, nil
 		}
 	}
 
-	// TODO: Future enhancement - when operating with a remote hub system,
-	// simple template names could also be resolved to remote storage locations:
-	// <bucket-name>/<scion-prefix>/<project-id>/templates/<template-name>
-	// This would enable shared templates across teams/organizations.
-
 	return nil, fmt.Errorf("template %s not found", name)
 }
 
+// fetchRemoteTemplateRef fetches a remote template reference through
+// FetchRemoteTemplate, which validates the source before anything else.
+func fetchRemoteTemplateRef(ctx context.Context, name string, fetchOpts RemoteFetchOptions) (*Template, error) {
+	// Validate the URI format
+	if err := ValidateRemoteURI(name); err != nil {
+		return nil, fmt.Errorf("invalid remote template URI: %w", err)
+	}
+
+	// Fetch the remote template to local cache
+	cachedPath, err := FetchRemoteTemplate(ctx, name, fetchOpts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch remote template: %w", err)
+	}
+
+	// Derive a short name from the URI for display purposes
+	return &Template{Name: DeriveTemplateName(name), Path: cachedPath}, nil
+}
+
 // FindTemplateInScope finds a template by name in a specific scope only.
-// Scope must be "global" or "project". Returns nil if not found in that scope.
+// Scope must be "global" or "project". Returns nil if not found in that scope,
+// or if name is not a local relative path.
 func FindTemplateInScope(name, scope string) *Template {
 	var dir string
 	var err error
@@ -307,8 +329,7 @@ func FindTemplateInScope(name, scope string) *Template {
 		return nil
 	}
 
-	path := filepath.Join(dir, name)
-	if info, err := os.Stat(path); err == nil && info.IsDir() {
+	if path, ok := findDirInRoot(dir, name); ok {
 		return &Template{Name: name, Path: path, Scope: scope}
 	}
 
@@ -475,37 +496,55 @@ func GetTemplateChain(name string) ([]*Template, error) {
 
 // FindTemplateInProjectPath finds a template by name, using a specific project path
 // for project-scoped template resolution instead of relying on CWD.
-// When projectPath is empty, it falls back to FindTemplate (CWD-based resolution).
-func FindTemplateInProjectPath(name, projectPath string) (*Template, error) {
-	if projectPath == "" {
+//
+// refCtx says where the reference comes from (see TemplateRefContext):
+//
+//   - TemplateRefRemote (the zero value): a remote URI is fetched through
+//     FetchRemoteTemplate in anonymous mode; any other reference must be a
+//     local relative path (filepath.IsLocal) and is resolved inside the
+//     project templates directory, then the global templates directory,
+//     through an os.Root (findDirInRoot). With an empty projectPath only the
+//     global templates directory is searched. An absolute path, or a
+//     relative path that leaves the template directory, is refused with
+//     ErrTemplateRefNotAllowed.
+//   - TemplateRefLocal: an absolute directory is accepted as well, and an
+//     empty projectPath falls back to FindTemplate (CWD-based resolution).
+func FindTemplateInProjectPath(name, projectPath string, refCtx TemplateRefContext) (*Template, error) {
+	if refCtx == TemplateRefLocal && projectPath == "" {
 		return FindTemplate(name)
 	}
 
-	// Remote URIs and absolute paths bypass project resolution. This path
-	// runs in runtime brokers, which fetch on behalf of other principals.
+	// Remote URIs bypass project resolution. Every caller here other than
+	// the CLI runs in runtime brokers, which fetch on behalf of other
+	// principals, so the fetch is always anonymous.
 	if IsRemoteURI(name) {
-		return FindTemplateWithCredentials(context.Background(), name, RemoteFetchAnonymous)
+		return fetchRemoteTemplateRef(context.Background(), name, RemoteFetchOptions{})
 	}
 	if filepath.IsAbs(name) {
+		if refCtx != TemplateRefLocal {
+			return nil, templateRefNotAllowedError(name)
+		}
 		if info, err := os.Stat(name); err == nil && info.IsDir() {
 			return &Template{Name: templateNameFromDir(name), Path: name}, nil
 		}
 		return nil, NewTemplateNotFoundError(name, fmt.Sprintf("template path %s not found or not a directory", name))
 	}
+	if !isLocalTemplateName(name) {
+		return nil, templateRefNotAllowedError(name)
+	}
 
 	// Check project-specific templates directory (in-repo .scion/templates/ for git projects)
-	if root := projectTemplatesRoot(projectPath); root != "" {
-		path := filepath.Join(root, "templates", name)
-		if info, err := os.Stat(path); err == nil && info.IsDir() {
-			return &Template{Name: name, Path: path, Scope: "project"}, nil
+	if projectPath != "" {
+		if root := projectTemplatesRoot(projectPath); root != "" {
+			if path, ok := findDirInRoot(filepath.Join(root, "templates"), name); ok {
+				return &Template{Name: name, Path: path, Scope: "project"}, nil
+			}
 		}
 	}
 
 	// Fall back to global templates
-	globalTemplatesDir, err := GetGlobalTemplatesDir()
-	if err == nil {
-		path := filepath.Join(globalTemplatesDir, name)
-		if info, err := os.Stat(path); err == nil && info.IsDir() {
+	if globalTemplatesDir, err := GetGlobalTemplatesDir(); err == nil {
+		if path, ok := findDirInRoot(globalTemplatesDir, name); ok {
 			return &Template{Name: name, Path: path, Scope: "global"}, nil
 		}
 	}
@@ -628,8 +667,8 @@ func LegacyProjectTemplatesWarning(projectPath string) string {
 // directory plus rename covers cross-process races.
 var defaultHydrationMu sync.Mutex
 
-func findOrHydrateDefaultTemplate(projectPath string) (*Template, error) {
-	tpl, err := FindTemplateInProjectPath("default", projectPath)
+func findOrHydrateDefaultTemplate(projectPath string, refCtx TemplateRefContext) (*Template, error) {
+	tpl, err := FindTemplateInProjectPath("default", projectPath, refCtx)
 	if err == nil {
 		return tpl, nil
 	}
@@ -643,7 +682,7 @@ func findOrHydrateDefaultTemplate(projectPath string) (*Template, error) {
 	defer defaultHydrationMu.Unlock()
 
 	// Another goroutine may have hydrated while we waited.
-	if tpl, rErr := FindTemplateInProjectPath("default", projectPath); rErr == nil {
+	if tpl, rErr := FindTemplateInProjectPath("default", projectPath, refCtx); rErr == nil {
 		return tpl, nil
 	}
 
@@ -680,16 +719,19 @@ func findOrHydrateDefaultTemplate(projectPath string) (*Template, error) {
 		util.Debugf("failed to publish hydrated default template: %v", rErr)
 	}
 
-	return FindTemplateInProjectPath("default", projectPath)
+	return FindTemplateInProjectPath("default", projectPath, refCtx)
 }
 
 // GetTemplateChainInProject returns a list of templates in inheritance order,
 // using a specific project path for template resolution instead of CWD.
 // For non-default templates, the default template is automatically prepended
 // to the chain so that common home files and config are inherited.
-func GetTemplateChainInProject(name, projectPath string) ([]*Template, error) {
+//
+// refCtx says where name comes from, as for FindTemplateInProjectPath; the
+// default layer is looked up the same way.
+func GetTemplateChainInProject(name, projectPath string, refCtx TemplateRefContext) ([]*Template, error) {
 	if name == "default" {
-		tpl, err := findOrHydrateDefaultTemplate(projectPath)
+		tpl, err := findOrHydrateDefaultTemplate(projectPath, refCtx)
 		if err != nil {
 			// When the default template cannot be resolved, proceed without it
 			// (e.g. hub-dispatched agents on brokers with no local templates)
@@ -698,22 +740,37 @@ func GetTemplateChainInProject(name, projectPath string) ([]*Template, error) {
 		return []*Template{tpl}, nil
 	}
 
-	var chain []*Template
-
-	// For non-default templates, prepend the default template as a base layer
-	defaultTpl, err := findOrHydrateDefaultTemplate(projectPath)
-	if err == nil {
-		chain = append(chain, defaultTpl)
-	}
-	// If the default template cannot be resolved, proceed without it
-
-	tpl, err := FindTemplateInProjectPath(name, projectPath)
+	tpl, err := FindTemplateInProjectPath(name, projectPath, refCtx)
 	if err != nil {
 		return nil, err
 	}
-	chain = append(chain, tpl)
+	return withDefaultLayer(tpl, projectPath, refCtx), nil
+}
 
-	return chain, nil
+// GetTemplateChainForDir returns the template chain for a template directory
+// the runtime broker produced itself: a hydrated hub template, a
+// local-storage template or the template cache. dir is never a name or a
+// reference from a request; callers take it from the broker's own
+// hydration result (api.StartOptions.TemplateDir, TemplateEnvSource) only.
+// The default template is prepended as for GetTemplateChainInProject.
+func GetTemplateChainForDir(dir, projectPath string) ([]*Template, error) {
+	tpl, err := TemplateFromDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	return withDefaultLayer(tpl, projectPath, TemplateRefRemote), nil
+}
+
+// withDefaultLayer returns the chain for tpl: the default template (when it
+// resolves) as the base layer, then tpl.
+func withDefaultLayer(tpl *Template, projectPath string, refCtx TemplateRefContext) []*Template {
+	var chain []*Template
+	// For non-default templates, prepend the default template as a base layer
+	if defaultTpl, err := findOrHydrateDefaultTemplate(projectPath, refCtx); err == nil {
+		chain = append(chain, defaultTpl)
+	}
+	// If the default template cannot be resolved, proceed without it
+	return append(chain, tpl)
 }
 
 func CreateTemplate(name string, global bool) error {

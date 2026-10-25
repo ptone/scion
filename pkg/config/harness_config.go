@@ -144,9 +144,13 @@ func LoadHarnessConfigDir(dirPath string) (*HarnessConfigDir, error) {
 		return nil, fmt.Errorf("harness-config path is not a directory: %s", absPath)
 	}
 
-	configPath := filepath.Join(absPath, "config.yaml")
-	data, err := os.ReadFile(configPath)
-	if err != nil {
+	// config.yaml is read inside the directory only, as a regular file,
+	// without following symbolic links (readTemplateFile).
+	data, state, err := readTemplateFile(absPath, "config.yaml")
+	switch {
+	case state == templateFileAbsent && err == nil:
+		return nil, fmt.Errorf("failed to read config.yaml: %w", os.ErrNotExist)
+	case err != nil:
 		return nil, fmt.Errorf("failed to read config.yaml: %w", err)
 	}
 
@@ -208,9 +212,18 @@ func ParseHarnessConfigYAML(data []byte) (HarnessConfigEntry, error) {
 // Optional templatePaths specify template directories whose harness-configs/
 // subdirectories are checked first (highest precedence), per the harness-agnostic
 // template design (§3.4).
+//
+// name must be a local relative path (filepath.IsLocal); each directory is
+// looked up through an os.Root (findDirInRoot), so a name never leaves the
+// harness-configs/ directory it is searched in. Any other name is reported
+// as not found.
 func FindHarnessConfigDir(name string, projectPath string, templatePaths ...string) (*HarnessConfigDir, error) {
 	// Track which directories were searched so the error message is actionable.
 	var searched []string
+
+	if !isLocalTemplateName(name) {
+		return nil, &HarnessConfigNotFoundError{Name: name, Searched: searched}
+	}
 
 	// Check template-level first (highest precedence).
 	// If the directory exists but is invalid (e.g. missing config.yaml),
@@ -218,7 +231,7 @@ func FindHarnessConfigDir(name string, projectPath string, templatePaths ...stri
 	for _, tplPath := range templatePaths {
 		tplHarnessConfigDir := filepath.Join(tplPath, harnessConfigsDirName, name)
 		searched = append(searched, tplHarnessConfigDir)
-		if info, err := os.Stat(tplHarnessConfigDir); err == nil && info.IsDir() {
+		if _, ok := findDirInRoot(filepath.Join(tplPath, harnessConfigsDirName), name); ok {
 			if hcDir, err := LoadHarnessConfigDir(tplHarnessConfigDir); err == nil {
 				hcDir.Source = HarnessConfigSourceTemplateBundled
 				return hcDir, nil
@@ -232,7 +245,7 @@ func FindHarnessConfigDir(name string, projectPath string, templatePaths ...stri
 	if projectPath != "" && !isHubWorkspaceRootWithoutScion(projectPath) {
 		projectHarnessConfigDir := filepath.Join(projectPath, harnessConfigsDirName, name)
 		searched = append(searched, projectHarnessConfigDir)
-		if info, err := os.Stat(projectHarnessConfigDir); err == nil && info.IsDir() {
+		if _, ok := findDirInRoot(filepath.Join(projectPath, harnessConfigsDirName), name); ok {
 			if hcDir, err := LoadHarnessConfigDir(projectHarnessConfigDir); err == nil {
 				hcDir.Source = HarnessConfigSourceBrokerLocal
 				return hcDir, nil
@@ -245,7 +258,7 @@ func FindHarnessConfigDir(name string, projectPath string, templatePaths ...stri
 	if err == nil {
 		globalHarnessConfigDir := filepath.Join(globalDir, harnessConfigsDirName, name)
 		searched = append(searched, globalHarnessConfigDir)
-		if info, err := os.Stat(globalHarnessConfigDir); err == nil && info.IsDir() {
+		if _, ok := findDirInRoot(filepath.Join(globalDir, harnessConfigsDirName), name); ok {
 			if hcDir, err := LoadHarnessConfigDir(globalHarnessConfigDir); err == nil {
 				hcDir.Source = HarnessConfigSourceBrokerLocal
 				return hcDir, nil

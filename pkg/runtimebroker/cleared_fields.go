@@ -97,7 +97,7 @@ func (s *Server) clearedFieldsInheritance(ctx context.Context, projectPath, proj
 		templateRef = vs.DefaultTemplate
 	}
 	defaultRef := templateRef
-	var hash string
+	var hash, templateDir string
 	// Read confined to the agent home (agenthome.ReadAgentInfo).
 	if data, err := agenthome.ReadAgentInfo(config.GetAgentHomePath(projectDir, agentName)); err == nil {
 		var info api.AgentInfo
@@ -135,9 +135,17 @@ func (s *Server) clearedFieldsInheritance(ctx context.Context, projectPath, proj
 		if !ok {
 			return nil, errors.New("template not in the cache")
 		}
-		templateRef = dir
+		templateDir = dir
 	}
-	chain, err := config.GetTemplateChainInProject(templateRef, projectPath)
+	// A cached directory is the broker's own; a name (settings default, or
+	// read back from the agent's records) is resolved as a remote reference.
+	var chain []*config.Template
+	var err error
+	if templateDir != "" {
+		chain, err = config.GetTemplateChainForDir(templateDir, projectPath)
+	} else {
+		chain, err = config.GetTemplateChainInProject(templateRef, projectPath, config.TemplateRefRemote)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("resolve template chain: %w", err)
 	}

@@ -374,9 +374,9 @@ func TestNotFoundResourceText(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	// The caller named no template, so resolution looked up "default";
 	// that is the name the real lookup records on its error.
-	_, defaultErr := config.FindTemplateInProjectPath("default", t.TempDir())
+	_, defaultErr := config.FindTemplateInProjectPath("default", t.TempDir(), config.TemplateRefRemote)
 	if !errors.Is(defaultErr, config.ErrTemplateNotFound) {
-		t.Fatalf("FindTemplateInProjectPath(default) error = %v, want ErrTemplateNotFound", defaultErr)
+		t.Fatalf("FindTemplateInProjectPath(default, config.TemplateRefRemote) error = %v, want ErrTemplateNotFound", defaultErr)
 	}
 	cases := []struct {
 		name string

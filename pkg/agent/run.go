@@ -276,6 +276,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	if opts.HarnessConfigPath != "" {
 		ctx = api.ContextWithHarnessConfigPath(ctx, opts.HarnessConfigPath)
 	}
+	if opts.TemplateDir != "" {
+		ctx = api.ContextWithTemplateDir(ctx, opts.TemplateDir)
+	}
 	if opts.TemplateName != "" {
 		ctx = api.ContextWithTemplateName(ctx, opts.TemplateName)
 	}
@@ -385,11 +388,11 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 
 	// Resolve the template chain unconditionally: it drives both the
 	// harness-config-dir search below and the explicit-image detection
-	// further down. Prefer opts.Template when it is an absolute path (e.g.
-	// hydrated template cache path from the broker). The display name stored
-	// in finalScionCfg.Info.Template (e.g. "web-dev") may not resolve in the
-	// project, but the original opts.Template path points to the actual
-	// template directory containing harness-configs/.
+	// further down. Prefer opts.TemplateDir when the broker set it (the
+	// hydrated template directory it produced itself). The display name
+	// stored in finalScionCfg.Info.Template (e.g. "web-dev") may not resolve
+	// in the project, but that directory is the actual template directory
+	// containing harness-configs/.
 	//
 	// Image provenance (including the provisioned profile and template) is
 	// recorded broker-side, in the agent dir; see image_provenance.go. For
@@ -429,9 +432,15 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// recorded value instead of dropping to Hub settings or the file
 	// default, as an agent with no template name does.
 	templateUnresolvable := false
+	// templateDir is the template directory the runtime broker produced
+	// itself for this dispatch (StartOptions.TemplateDir); it is loaded as a
+	// directory. Every template name, from the request or the agent's own
+	// records, is resolved as a remote reference (never as a host
+	// directory).
 	templateName := ""
-	if opts.Template != "" && filepath.IsAbs(opts.Template) {
-		templateName = opts.Template
+	templateDir := opts.TemplateDir
+	if templateDir != "" {
+		templateName = templateDir
 	}
 	if templateName == "" && hydrated {
 		templateUnresolvable = true
@@ -450,7 +459,14 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	var templatePaths []string
 	var templateChain []*config.Template
 	if templateName != "" {
-		if chain, err := config.GetTemplateChainInProject(templateName, opts.ProjectPath); err == nil {
+		var chain []*config.Template
+		var err error
+		if templateDir != "" {
+			chain, err = config.GetTemplateChainForDir(templateDir, opts.ProjectPath)
+		} else {
+			chain, err = config.GetTemplateChainInProject(templateName, opts.ProjectPath, config.TemplateRefRemote)
+		}
+		if err == nil {
 			templateChain = chain
 			for _, tpl := range chain {
 				templatePaths = append(templatePaths, tpl.Path)
@@ -685,7 +701,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// opts.TemplateEnvSource for the template env only.
 	envChain := templateChain
 	if envChain == nil && opts.TemplateEnvSource != "" {
-		if chain, err := config.GetTemplateChainInProject(opts.TemplateEnvSource, opts.ProjectPath); err == nil {
+		// TemplateEnvSource is a directory the broker hydrated itself.
+		if chain, err := config.GetTemplateChainForDir(opts.TemplateEnvSource, opts.ProjectPath); err == nil {
 			envChain = chain
 		} else {
 			util.Debugf("template env: source %q could not be resolved: %v", opts.TemplateEnvSource, err)
@@ -902,26 +919,31 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	var noAuthConfig *config.HarnessNoAuthConfig
 	if harnessConfigName != "" {
 		var resolveTemplatePaths []string
-		if opts.Template != "" && (filepath.IsAbs(opts.Template) || !hydrated) {
-			tplName := opts.Template
-			if !filepath.IsAbs(tplName) {
-				// For an agent with broker-side image provenance, the
-				// template recorded there (provisioning's own record) stands
-				// in for agent-info.json's template when choosing the template
-				// whose bundled harness-config this resolves, so the choice is
-				// resolved from broker-side agent state (ptone/scion#1799).
-				// provenance was read above, failing the start if the record
-				// is unusable. A legacy agent keeps agent-info.json's value.
-				switch {
-				case provenance != nil:
-					if provenance.Template != "" {
-						tplName = provenance.Template
-					}
-				case finalScionCfg != nil && finalScionCfg.Info != nil && finalScionCfg.Info.Template != "":
-					tplName = finalScionCfg.Info.Template
+		if opts.TemplateDir != "" {
+			if chain, err := config.GetTemplateChainForDir(opts.TemplateDir, opts.ProjectPath); err == nil {
+				for _, tpl := range chain {
+					resolveTemplatePaths = append(resolveTemplatePaths, tpl.Path)
 				}
 			}
-			if chain, err := config.GetTemplateChainInProject(tplName, opts.ProjectPath); err == nil {
+		} else if opts.Template != "" && !hydrated {
+			tplName := opts.Template
+			// For an agent with broker-side image provenance, the
+			// template recorded there (provisioning's own record) stands
+			// in for agent-info.json's template when choosing the template
+			// whose bundled harness-config this resolves, so the choice is
+			// resolved from broker-side agent state (ptone/scion#1799).
+			// provenance was read above, failing the start if the record
+			// is unusable. A legacy agent keeps agent-info.json's value.
+			// Either name is resolved as a remote reference.
+			switch {
+			case provenance != nil:
+				if provenance.Template != "" {
+					tplName = provenance.Template
+				}
+			case finalScionCfg != nil && finalScionCfg.Info != nil && finalScionCfg.Info.Template != "":
+				tplName = finalScionCfg.Info.Template
+			}
+			if chain, err := config.GetTemplateChainInProject(tplName, opts.ProjectPath, config.TemplateRefRemote); err == nil {
 				for _, tpl := range chain {
 					resolveTemplatePaths = append(resolveTemplatePaths, tpl.Path)
 				}

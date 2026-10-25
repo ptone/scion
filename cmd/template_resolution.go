@@ -153,7 +153,7 @@ func validateTemplateScope(scope string) error {
 // remote template source is fetched with the user's own storage credentials,
 // since the CLI runs as the user.
 func findLocalTemplate(name string) (*config.Template, error) {
-	return config.FindTemplateWithCredentials(context.Background(), name, config.RemoteFetchCallerCredentials)
+	return config.FindTemplateWithCallerCredentials(context.Background(), name)
 }
 
 // parseTemplateScope extracts scope prefix from template name.
