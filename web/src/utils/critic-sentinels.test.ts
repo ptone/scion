@@ -14,6 +14,9 @@
  * limitations under the License.
  */
 
+import { realpathSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { characterEntities } from 'character-entities';
 import { decodeNamedCharacterReference } from 'decode-named-character-reference';
@@ -101,6 +104,26 @@ describe('opening alphabet without a numeric character reference', () => {
   const never = (): string => {
     throw new Error('the probe ran');
   };
+
+  it('checks the decoder and entity table the Markdown parser itself loads', () => {
+    // The copies this test imports, and the copies each package of the
+    // parser that decodes character references resolves: the same files.
+    const web = createRequire(join(__dirname, '../../package.json'));
+    const real = (r: NodeRequire, id: string): string => realpathSync(r.resolve(id));
+    const decoder = real(web, 'decode-named-character-reference');
+    const table = real(web, 'character-entities');
+    const users = [
+      'micromark',
+      'micromark-core-commonmark',
+      'micromark-util-decode-string',
+      'mdast-util-from-markdown',
+    ];
+    for (const user of users) {
+      const from = createRequire(real(web, user));
+      expect(real(from, 'decode-named-character-reference'), user).toBe(decoder);
+    }
+    expect(real(createRequire(decoder), 'character-entities')).toBe(table);
+  });
 
   it('no named character reference decodes to a candidate', () => {
     const names = Object.keys(characterEntities);

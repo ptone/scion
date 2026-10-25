@@ -55,12 +55,17 @@ afterAll(destroyCores);
 
 const docs = [...corpus.map((c) => c.in), ...sweepDocs.map((d) => d.in)];
 
-/** The baseline md opens with, or null. */
-function baselineOf(md: string): Baseline | null {
-  const a = chooseOpeningAlphabet(
+/** The alphabet md opens with: chosen as load chooses it, with the real parser. */
+function loadAlphabet(md: string): ReturnType<typeof chooseOpeningAlphabet> {
+  return chooseOpeningAlphabet(
     md,
     (text) => `${docStrings(core.parse(md))}\n${docStrings(core.parse(text))}`
   );
+}
+
+/** The baseline md opens with, or null. */
+function baselineOf(md: string): Baseline | null {
+  const a = loadAlphabet(md);
   if (!a) return null;
   const loaded = loadDocument(md, core.parse, core.schema, a);
   return loaded ? makeBaseline(md, loaded.doc, core.parseMd, a) : null;
@@ -195,7 +200,7 @@ describe('opening alphabet without the probe', () => {
 
 /** The tagged sentinel form md opens with (what the load checks read), or null. */
 function taggedOf(md: string): string | null {
-  const a = chooseOpeningAlphabet(md, () => '');
+  const a = loadAlphabet(md);
   return a ? criticToSentinelText(md, a, true).text : null;
 }
 
@@ -224,7 +229,7 @@ describe('one reading of Markdown for every load check', () => {
     const withDefinition = '[t][r] {++x++}\n\n> [s]: /q\n\n[r]: /p "title"\n';
     let n = 0;
     for (const md of [...docs, withDefinition, ...large]) {
-      const a = chooseOpeningAlphabet(md, () => '');
+      const a = loadAlphabet(md);
       if (!a) continue;
       const text = criticToSentinelText(md, a, true).text;
       const r = core.read(text);
@@ -295,7 +300,7 @@ describe('the baseline of a load', () => {
     for (const md of [...docs, largeDoc(true)]) {
       const s = new ReviewSession(core);
       if (!s.load(md)) continue;
-      const a = chooseOpeningAlphabet(md, () => '')!;
+      const a = loadAlphabet(md)!;
       const fresh = makeBaseline(md, core.view.state.doc, core.parseMd, a);
       const base = (s as unknown as { baseline: Baseline | null }).baseline;
       expect(base).toEqual(fresh);
@@ -355,7 +360,7 @@ describe('link reference definitions of the opening text', () => {
     expect(before).toContain('{++X++}');
   });
 
-  it("a later load drops the earlier one's pending reading", async () => {
+  it("after a later load, they are the later text's", async () => {
     const s = new ReviewSession(core);
     expect(s.load(md)).toBe(true);
     expect(s.load('No references here {++x++}.\n')).toBe(true);
@@ -378,12 +383,22 @@ describe('opening a 200 kB document', () => {
    * or parsing it several times, would take.
    */
   const BUDGET_MS = 6000;
+  /**
+   * With a numeric character reference the load also parses the source
+   * and the alphabet's probe form (design E9): about 4.7 s here.
+   */
+  const BUDGET_WITH_PROBE_MS = 12000;
 
-  it.each([false, true])(
-    'opens within the load budget (hazardous: %s)',
-    (hazard) => {
-      const md = largeDoc(hazard);
+  it.each([
+    ['plain', false, false],
+    ['with a literal opener', true, false],
+    ['with a numeric reference and a definition', false, true],
+  ])(
+    'opens within the load budget (%s)',
+    (_, hazard, refs) => {
+      const md = largeDoc(hazard, refs);
       expect(md.length).toBeGreaterThan(200_000);
+      expect(md.includes('&#')).toBe(refs);
       const times: number[] = [];
       for (let k = 0; k < 3; k++) {
         const s = new ReviewSession(core);
@@ -391,12 +406,16 @@ describe('opening a 200 kB document', () => {
         expect(s.load(md)).toBe(true);
         times.push(performance.now() - t0);
         expect(s.isHazardous).toBe(hazard);
+        // With a numeric reference the load reads the source itself (the
+        // alphabet's probe), and takes the definitions from that reading.
+        const defs = (s as unknown as { definitions: string | null }).definitions;
+        expect(defs).toBe(refs ? '[guide]: https://example.com/guide "Guide"' : null);
       }
       times.sort((a, b) => a - b);
       expect(core.view.state.doc.childCount).toBeGreaterThan(3500);
-      expect(times[1]).toBeLessThan(BUDGET_MS);
+      expect(times[1]).toBeLessThan(refs ? BUDGET_WITH_PROBE_MS : BUDGET_MS);
     },
-    120_000
+    180_000
   );
 });
 
