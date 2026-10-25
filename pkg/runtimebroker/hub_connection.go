@@ -554,6 +554,13 @@ func (hc *HubConnection) reinitialize(ctx context.Context, server *Server, creds
 	// Stop existing services. stop takes hc.mu itself.
 	hc.stop()
 
+	// New credentials may name another hub; the transport rule applies to
+	// it before anything is sent (createHubConnection does the same).
+	if err := config.CheckHubTransport(creds.HubEndpoint); err != nil {
+		hc.setStatus(ConnectionStatusError)
+		return fmt.Errorf("hub connection %q: %w", hc.Name, err)
+	}
+
 	// Update credentials
 	hc.mu.Lock()
 	hc.Credentials = creds
