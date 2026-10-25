@@ -35,11 +35,14 @@ export interface Edit {
 }
 
 /**
- * The most differences diff works through before giving up. Blocks and
- * list items are small, and an edit adds a few dozen characters; a larger
- * difference is not worth patching (the caller falls back).
+ * The most differences diff works through before giving up (the caller
+ * then falls back). An edit adds a few dozen characters, and the
+ * difference between a unit's source and the serializer's text of it is a
+ * few characters per normalized spot; list items and table rows are units
+ * of their own, so a block rarely comes near this. The walk back keeps
+ * about D * D 32-bit numbers, so the cap bounds that at about 4 MB.
  */
-export const MAX_DIFF = 4000;
+export const MAX_DIFF = 1000;
 
 /**
  * The edits turning a into b, in order and not overlapping, or null when
@@ -63,6 +66,8 @@ export function diff(a: string, b: string, maxD = MAX_DIFF): Edit[] | null {
   const m = B.length;
   if (n === 0 && m === 0) return [];
   if (n === 0 || m === 0) return [{ from: pre, to: pre + n, insert: B }];
+  // The difference is at least the difference in length.
+  if (Math.abs(n - m) > maxD) return null;
   const max = Math.min(n + m, maxD);
   // v[k] for diagonals -d..d, kept per d for the walk back (O(D^2) memory).
   const trace: Int32Array[] = [];
@@ -189,15 +194,20 @@ function mapBack(rs: readonly Region[], p: number, side: 'before' | 'after'): nu
 /**
  * The three-way patch: original with the edit from base to now applied,
  * where base and now are the serializer's text of the same block before
- * and after the edit and original is the block's source. Returns null
- * when the patch does not apply cleanly: an edit of diff(base, now) starts
- * or ends inside text the serializer wrote differently from the source,
- * or a diff is too large.
+ * and after the edit and original is the block's source. toOriginal is
+ * diff(original, base), when the caller has it already (it does not
+ * change while the block is edited). Returns null when the patch does not
+ * apply cleanly: an edit of diff(base, now) starts or ends inside text the
+ * serializer wrote differently from the source, or a diff is too large.
  */
-export function rebase(original: string, base: string, now: string): string | null {
+export function rebase(
+  original: string,
+  base: string,
+  now: string,
+  toOriginal: Edit[] | null = diff(original, base)
+): string | null {
   if (base === now) return original;
   if (original === base) return now;
-  const toOriginal = diff(original, base);
   const edits = diff(base, now);
   if (!toOriginal || !edits) return null;
   const rs = regions(toOriginal);

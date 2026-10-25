@@ -52,6 +52,19 @@ describe('diff', () => {
     expect(diff(a, b)).toEqual([{ from: 5001, to: 5001, insert: '{++Z++}' }]);
   });
 
+  it('gives up at once when the lengths alone differ by more than the cap', () => {
+    expect(diff(`${'x'.repeat(3000)}y`, 'zz', 1000)).toBeNull();
+    expect(diff(`${'x'.repeat(30)}y`, 'zz', 1000)).not.toBeNull();
+  });
+
+  it('takes a diff of the source computed earlier', () => {
+    const original = '* one\n* two';
+    const base = '- one\n- two';
+    const toOriginal = diff(original, base);
+    expect(rebase(original, base, '- one\n- t{++X++}wo', toOriginal)).toBe('* one\n* t{++X++}wo');
+    expect(rebase(original, base, '- one\n- t{++X++}wo', null)).toBeNull();
+  });
+
   it('gives up past the cap', () => {
     const r = rng(3);
     const a = randomText(r, 400, 'abcdefgh');

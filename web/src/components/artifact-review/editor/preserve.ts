@@ -45,7 +45,8 @@ import {
 } from '../../../utils/critic-sentinels.js';
 import type { SentinelAlphabet } from '../../../utils/critic-sentinels.js';
 import { saveDoc } from './bridge.js';
-import { rebase } from './diff.js';
+import { diff, rebase } from './diff.js';
+import type { Edit } from './diff.js';
 import type { Consumed } from './bridge.js';
 import type { MdNode as MdTreeNode } from './create.js';
 
@@ -67,6 +68,12 @@ export interface Baseline {
   blocks: Block[];
   /** The top-level nodes as loaded, by position. */
   nodes: Node[];
+  /**
+   * Per load-time unit or item or row node: the serializer's text of it
+   * and the diff from its source to that text, which do not change while
+   * it is edited (computed on its first edit).
+   */
+  written: Map<Node, { text: string; toSource: Edit[] | null }>;
 }
 
 interface MdNode {
@@ -131,7 +138,7 @@ export function makeBaseline(
   const lead = md.slice(0, mdStart(spans[0][0]));
   const nodes: Node[] = [];
   doc.forEach((n) => nodes.push(n));
-  return { lead, blocks, nodes };
+  return { lead, blocks, nodes, written: new Map() };
 }
 
 /**
@@ -236,7 +243,8 @@ function sameInline(a: Node, b: Node): boolean {
 
 /**
  * The three-way patch of one unit: src (the unit's source) with the edit
- * from before to after applied, where both are the serializer's text. The
+ * from before to after applied, where both are the serializer's text
+ * (before with its diff from src, from the baseline's cache). The
  * patch is kept only when it reads (in context: the text around it, as
  * Markdown) with the same inline content as after; otherwise, and when it
  * does not apply cleanly, the result is after, which the guard then judges
@@ -246,14 +254,34 @@ function sameInline(a: Node, b: Node): boolean {
  */
 function patch(
   src: string,
-  before: string,
+  before: { text: string; toSource: Edit[] | null },
   after: string,
   parse: (md: string) => Node,
   context: (unit: string) => string = (unit) => unit
 ): string {
-  const r = rebase(src, before, after);
+  const r = rebase(src, before.text, after, before.toSource);
   if (r === null || r === after) return after;
   return sameInline(parse(context(r)), parse(context(after))) ? r : after;
+}
+
+/**
+ * The serializer's text of the load-time node key (write() computes it)
+ * and its diff from src, from base's cache or computed and cached now;
+ * null when write() gives null.
+ */
+function cached(
+  base: Baseline,
+  key: Node,
+  src: string,
+  write: () => string | null
+): { text: string; toSource: Edit[] | null } | null {
+  const hit = base.written.get(key);
+  if (hit) return hit;
+  const text = write();
+  if (text === null) return null;
+  const entry = { text, toSource: diff(src, text) };
+  base.written.set(key, entry);
+  return entry;
 }
 
 /**
@@ -264,6 +292,7 @@ function patch(
  * or row lies in src. Null when an item or row cannot be written alone.
  */
 function writeChildren(
+  base: Baseline,
   was: Node,
   now: Node,
   src: string,
@@ -277,7 +306,10 @@ function writeChildren(
   let at = 0;
   for (let c = 0; c < subs.length; c++) {
     if (now.child(c) === was.child(c)) continue;
-    const before = serializeChild(was, was.child(c), c, serialize, schema, free);
+    const slice = src.slice(subs[c].from, subs[c].to);
+    const before = cached(base, was.child(c), slice, () =>
+      serializeChild(was, was.child(c), c, serialize, schema, free)
+    );
     const after = serializeChild(was, now.child(c), c, serialize, schema, free);
     if (before === null || after === null) return null;
     // A row reads as a row only under its table's header and delimiter
@@ -288,7 +320,6 @@ function writeChildren(
         : c === 0
           ? (row: string): string => row + src.slice(subs[0].to, subs[1].to)
           : (row: string): string => src.slice(0, subs[1].from) + row;
-    const slice = src.slice(subs[c].from, subs[c].to);
     out += src.slice(at, subs[c].from) + patch(slice, before, after, parse, context);
     at = subs[c].to;
   }
@@ -325,17 +356,18 @@ export function writeUnit(
     now.childCount === was.childCount &&
     now.childCount === subs.length
   ) {
-    const out = writeChildren(was, now, base.blocks[i].src, subs, serialize, schema, parse);
+    const out = writeChildren(base, was, now, base.blocks[i].src, subs, serialize, schema, parse);
     if (out !== null) return out;
   }
   const wasNodes = base.nodes.slice(i, j + 1);
   const nowNodes: Node[] = [];
   for (let k = i; k <= j; k++) nowNodes.push(doc.child(k));
   const free = [...wasNodes, ...nowNodes];
-  const before = serializeBlocks(wasNodes, serialize, schema, free);
+  const src = unitSource(base, i, j);
+  const before = cached(base, was, src, () => serializeBlocks(wasNodes, serialize, schema, free));
   const after = serializeBlocks(nowNodes, serialize, schema, free);
   if (before === null || after === null) return null;
-  return patch(unitSource(base, i, j), before, after, parse);
+  return patch(src, before, after, parse);
 }
 
 /** The source text of blocks i..j. */
