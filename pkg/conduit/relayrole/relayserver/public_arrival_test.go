@@ -62,6 +62,13 @@ func refusedForTransport(rec *httptest.ResponseRecorder) bool {
 	return rec.Code == http.StatusForbidden && strings.Contains(rec.Body.String(), ErrCodeTransportNotConfidential)
 }
 
+// reachedAdmission reports whether the dial got past the arrival check to
+// the relay's admission: this test relay has no reachable hub, so
+// admission answers 503 unavailable (upstream_unreachable).
+func reachedAdmission(rec *httptest.ResponseRecorder) bool {
+	return rec.Code == http.StatusServiceUnavailable && strings.Contains(rec.Body.String(), "upstream_unreachable")
+}
+
 // TestPublicListenerRefusesPlaintextArrival: a conduit dial on the relay's
 // public listener that did not arrive over TLS, from this host, or from a
 // trusted proxy that terminated TLS is refused with 403 before admission or
@@ -99,6 +106,9 @@ func TestPublicListenerRefusesPlaintextArrival(t *testing.T) {
 				if got := refusedForTransport(rec); got != tc.refused {
 					t.Errorf("%s: refused = %v (HTTP %d %q), want %v", tc.name, got, rec.Code, rec.Body.String(), tc.refused)
 				}
+				if !tc.refused && !reachedAdmission(rec) {
+					t.Errorf("%s: an admitted dial did not reach admission (HTTP %d %q)", tc.name, rec.Code, rec.Body.String())
+				}
 			}
 		})
 	}
@@ -133,6 +143,9 @@ func TestPublicListenerTrustsListedProxyOnly(t *testing.T) {
 		rec := publicDial(t, s, tc.remote, false, hdr)
 		if got := refusedForTransport(rec); got != tc.refused {
 			t.Errorf("%s: refused = %v (HTTP %d %q), want %v", tc.name, got, rec.Code, rec.Body.String(), tc.refused)
+		}
+		if !tc.refused && !reachedAdmission(rec) {
+			t.Errorf("%s: an admitted dial did not reach admission (HTTP %d %q)", tc.name, rec.Code, rec.Body.String())
 		}
 	}
 }

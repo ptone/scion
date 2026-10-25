@@ -29,7 +29,7 @@ import (
 // Peers used by the transport policy tests. httptest.NewRequest gives a
 // request the network peer 192.0.2.1, which the hub-broker transport policy
 // refuses for broker join, secret rotation, the control channel and the
-// broker conduit session (confidentialArrival). Tests of those endpoints
+// broker conduit session (config.ConfidentialArrival). Tests of those endpoints
 // that are not about the transport send from tpLoopbackPeer, a client on
 // the hub's host, through the *Loopback helpers below.
 const (

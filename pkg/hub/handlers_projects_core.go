@@ -2330,7 +2330,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		// Transport policy: the response would carry the broker's HMAC
 		// secret (an existing one is returned unchanged), so it is produced
 		// only on a request that arrived over TLS or from this host
-		// (confidentialArrival), as for join and rotate. Otherwise the
+		// (config.ConfidentialArrival), as for join and rotate. Otherwise the
 		// project and broker are still registered, with no secret in the
 		// response; the broker gets its secret by joining.
 		if !config.ConfidentialArrival(r, s.transportTrustedNets) {
