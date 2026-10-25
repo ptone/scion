@@ -78,7 +78,7 @@ func TestParseTargetURL(t *testing.T) {
 
 func TestHealthCheck(t *testing.T) {
 	target, _ := url.Parse("http://127.0.0.1:9999")
-	handler := newMux(target, defaultForwardedProto)
+	handler := newMux(target)
 
 	req := httptest.NewRequest(http.MethodGet, "/proxy-healthz", nil)
 	rr := httptest.NewRecorder()
@@ -135,7 +135,7 @@ func TestProxyForwardingAndIAPHeaders(t *testing.T) {
 		t.Fatalf("failed to parse backend url: %v", err)
 	}
 
-	handler := newMux(backendURL, defaultForwardedProto)
+	handler := newMux(backendURL)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents?filter=active", strings.NewReader("sample-payload"))
 	req.Header.Set("X-Goog-IAP-JWT-Assertion", "test-iap-jwt-token")
@@ -181,7 +181,7 @@ func TestProxyForwardingAndIAPHeaders(t *testing.T) {
 func TestProxyErrorReturns502(t *testing.T) {
 	// Point to unreachable local port
 	target, _ := url.Parse("http://127.0.0.1:54321")
-	handler := newMux(target, defaultForwardedProto)
+	handler := newMux(target)
 
 	req := httptest.NewRequest(http.MethodGet, "/some-route", nil)
 	rr := httptest.NewRecorder()
@@ -199,14 +199,11 @@ func TestProxyErrorReturns502(t *testing.T) {
 // Forwarded, whatever the client sent.
 func TestProxyReplacesClientForwardingHeaders(t *testing.T) {
 	for name, tc := range map[string]struct {
-		frontEnd string
-		tls      bool
-		want     string
+		tls  bool
+		want string
 	}{
-		"https front end":           {frontEnd: "https", want: "https"},
-		"http front end":            {frontEnd: "http", want: "http"},
-		"proxy terminated TLS":      {frontEnd: "http", tls: true, want: "https"},
-		"default front end (https)": {frontEnd: defaultForwardedProto, want: "https"},
+		"plain http connection (Cloud Run)": {want: "http"},
+		"proxy terminated TLS":              {tls: true, want: "https"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var gotProto, gotForwarded, gotFor, gotHost []string
@@ -238,7 +235,7 @@ func TestProxyReplacesClientForwardingHeaders(t *testing.T) {
 			req.Host = "hub.example.com"
 			req.RemoteAddr = "203.0.113.9:4321"
 			rr := httptest.NewRecorder()
-			newMux(backendURL, tc.frontEnd).ServeHTTP(rr, req)
+			newMux(backendURL).ServeHTTP(rr, req)
 			if rr.Code != http.StatusOK {
 				t.Fatalf("status = %d", rr.Code)
 			}
@@ -255,19 +252,5 @@ func TestProxyReplacesClientForwardingHeaders(t *testing.T) {
 				t.Errorf("backend X-Forwarded-Host = %q, want exactly the served host [hub.example.com]", gotHost)
 			}
 		})
-	}
-}
-
-func TestParseForwardedProto(t *testing.T) {
-	for in, want := range map[string]string{"": "https", "https": "https", "HTTP": "http", " http ": "http"} {
-		got, err := parseForwardedProto(in)
-		if err != nil || got != want {
-			t.Errorf("parseForwardedProto(%q) = %q, %v; want %q", in, got, err, want)
-		}
-	}
-	for _, in := range []string{"ftp", "https, http", "wss"} {
-		if _, err := parseForwardedProto(in); err == nil {
-			t.Errorf("parseForwardedProto(%q) accepted, want an error", in)
-		}
 	}
 }
