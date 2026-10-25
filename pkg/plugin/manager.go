@@ -312,12 +312,12 @@ func (m *Manager) loadPluginWithConfig(dp DiscoveredPlugin, cfg map[string]strin
 	case r := <-res:
 		timer.Stop()
 		if r.err != nil {
-			m.discardClient(client, nil, dp.SelfManaged, false)
+			m.discardClient(dp.Type+":"+dp.Name, client, nil, dp.SelfManaged, false)
 			return r.err
 		}
 		raw = r.raw
 	case <-timer.C:
-		m.discardClient(client, nil, dp.SelfManaged, false)
+		m.discardClient(dp.Type+":"+dp.Name, client, nil, dp.SelfManaged, false)
 		// A connect that succeeds later must not leave a live dispensed
 		// connection behind.
 		go func() {
@@ -342,7 +342,7 @@ func (m *Manager) loadPluginWithConfig(dp DiscoveredPlugin, cfg map[string]strin
 				config[hostCallbacksConfigKey] = "true"
 			}
 			if err := brokerClient.configureWithin(config, restartStepTimeout); err != nil {
-				m.discardClient(client, raw, dp.SelfManaged, false)
+				m.discardClient(dp.Type+":"+dp.Name, client, raw, dp.SelfManaged, false)
 				return fmt.Errorf("failed to configure broker plugin %s: %w", dp.Name, err)
 			}
 		}
@@ -354,7 +354,7 @@ func (m *Manager) loadPluginWithConfig(dp DiscoveredPlugin, cfg map[string]strin
 		// Shutdown has begun (and may already have reset the maps): do
 		// not store a client it will never stop.
 		m.mu.Unlock()
-		m.discardClient(client, raw, dp.SelfManaged, false)
+		m.discardClient(dp.Type+":"+dp.Name, client, raw, dp.SelfManaged, false)
 		return fmt.Errorf("plugin manager is shutting down; not storing plugin %s/%s", dp.Type, dp.Name)
 	}
 	// Take out any existing client with the same key; it is discarded
@@ -376,7 +376,7 @@ func (m *Manager) loadPluginWithConfig(dp DiscoveredPlugin, cfg map[string]strin
 	m.mu.Unlock()
 
 	if existing != nil {
-		m.discardClient(existing, existingRaw, existingSelf, true)
+		m.discardClient(key, existing, existingRaw, existingSelf, true)
 	}
 	return nil
 }
@@ -998,6 +998,20 @@ func (m *Manager) BeginShutdown() {
 // gRPC adapters are closed (connection terminated, remote process unaffected).
 func (m *Manager) Shutdown() {
 	m.stopping.Store(true)
+	// Let the supervisor see the stop, and wait (bounded) for an attempt in
+	// progress: a client it loads now is discarded when it would be stored,
+	// so its plugin process does not outlive the hub.
+	m.kickSupervisor()
+	supDone := make(chan struct{})
+	go func() {
+		m.waitSupervisorStopped()
+		close(supDone)
+	}()
+	select {
+	case <-supDone:
+	case <-time.After(2 * gracefulStopTimeout):
+		m.logger.Warn("Plugin supervisor still busy at shutdown; continuing", "waited", 2*gracefulStopTimeout)
+	}
 
 	type held struct {
 		key    string
@@ -1025,15 +1039,21 @@ func (m *Manager) Shutdown() {
 	m.sup.plugins = make(map[string]*supervised)
 	m.sup.mu.Unlock()
 
-	// Outside the lock: a graceful Kill can wait on a slow plugin.
+	// Outside the lock, all at once: each graceful stop is bounded.
+	var stops sync.WaitGroup
 	for _, h := range clients {
 		if h.self {
 			m.logger.Info("Disconnecting self-managed plugin", "plugin", h.key)
 		} else {
 			m.logger.Info("Shutting down plugin", "plugin", h.key)
 		}
-		m.discardClient(h.client, h.raw, h.self, true)
+		stops.Add(1)
+		go func() {
+			defer stops.Done()
+			m.discardClient(h.key, h.client, h.raw, h.self, true)
+		}()
 	}
+	stops.Wait()
 
 	for key, adapter := range adapters {
 		m.logger.Info("Closing gRPC broker adapter", "plugin", key)

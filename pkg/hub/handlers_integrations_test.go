@@ -2871,3 +2871,20 @@ func TestRestartIntegration_ReportsSpokeRefreshFailure(t *testing.T) {
 	}
 	assert.True(t, found, "refresh failure reported in %v", warnings)
 }
+
+func TestSupervisionConfigProvider_ReportsUnreadableInputs(t *testing.T) {
+	rec := &supervisionWiringRecorder{mockIntegrationManager: newMockIntegrationManager()}
+	bad := filepath.Join(t.TempDir(), "discord.yaml")
+	require.NoError(t, os.WriteFile(bad, []byte("bot_token: [unterminated\n"), 0o600))
+	rec.plugins["discord"] = map[string]string{"config_file": bad}
+
+	srv, _ := testServer(t)
+	srv.SetPluginManager(rec)
+	require.NotNil(t, rec.provider)
+	_, err := rec.provider(context.Background(), "discord")
+	require.Error(t, err, "an unreadable config file fails the supervisor's restart attempt")
+	assert.Contains(t, err.Error(), "resolve config file")
+
+	// The admin paths keep their lenient behaviour.
+	assert.NotNil(t, srv.resolveIntegrationMergedConfig(context.Background(), rec, "discord"))
+}

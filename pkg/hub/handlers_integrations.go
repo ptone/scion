@@ -1519,7 +1519,7 @@ func (s *Server) registerBrokerSupervision(m IntegrationManager) {
 		return
 	}
 	w.SetBrokerConfigProvider(func(ctx context.Context, name string) (map[string]string, error) {
-		return s.resolveIntegrationMergedConfig(ctx, m, name), nil
+		return s.resolveIntegrationMergedConfigChecked(ctx, m, name)
 	})
 	w.OnBrokerRestart(func(name string) error {
 		return s.refreshBrokerSpoke(m, name)
@@ -1615,6 +1615,14 @@ func releasePluginBuildLock(name string) {
 // relying on the plugin manager's config map, which may be stale or empty
 // after a process restart.
 func (s *Server) getPluginHubCreds(ctx context.Context, name string) map[string]string {
+	creds, _ := s.getPluginHubCredsChecked(ctx, name)
+	return creds
+}
+
+// getPluginHubCredsChecked is getPluginHubCreds that also reports a failure
+// to read the HMAC key (the map then lacks hmac_key).
+func (s *Server) getPluginHubCredsChecked(ctx context.Context, name string) (map[string]string, error) {
+	var credsErr error
 	creds := make(map[string]string)
 
 	// hub_url: from the server config (same value that startup resolves).
@@ -1631,6 +1639,7 @@ func (s *Server) getPluginHubCreds(ctx context.Context, name string) map[string]
 	if authSvc := s.GetBrokerAuthService(); authSvc != nil {
 		if secretKey, err := authSvc.GenerateAndStoreSecret(ctx, brokerID); err != nil {
 			slog.Error("Failed to generate or retrieve HMAC key", "plugin", name, "error", err)
+			credsErr = fmt.Errorf("hmac key: %w", err)
 		} else {
 			creds["hmac_key"] = secretKey
 		}
@@ -1673,7 +1682,7 @@ func (s *Server) getPluginHubCreds(ctx context.Context, name string) map[string]
 		creds["database_url"] = s.databaseDSN
 	}
 
-	return creds
+	return creds, credsErr
 }
 
 // resolveIntegrationMergedConfig builds the full merged config map for a plugin
@@ -1682,6 +1691,18 @@ func (s *Server) getPluginHubCreds(ctx context.Context, name string) map[string]
 // map is ready to be pushed to the plugin via ReplaceBrokerConfig or
 // RestartBrokerPlugin.
 func (s *Server) resolveIntegrationMergedConfig(ctx context.Context, mgr IntegrationManager, name string) map[string]string {
+	merged, _ := s.resolveIntegrationMergedConfigChecked(ctx, mgr, name)
+	return merged
+}
+
+// resolveIntegrationMergedConfigChecked is resolveIntegrationMergedConfig
+// that also reports the inputs it could not read: the config file, a
+// mapped secret (a missing secret is not an error), or the HMAC key. The
+// map is the same either way; it is complete only when the error is nil.
+// The plugin supervisor uses it, so an unattended restart retries rather
+// than starting a plugin with a partial config.
+func (s *Server) resolveIntegrationMergedConfigChecked(ctx context.Context, mgr IntegrationManager, name string) (map[string]string, error) {
+	var errs []error
 	pluginCfg := mgr.GetPluginConfig("broker", name)
 
 	// Re-read config file if one is configured. Prefer the immutable
@@ -1703,6 +1724,7 @@ func (s *Server) resolveIntegrationMergedConfig(ctx context.Context, mgr Integra
 	merged, err := config.ResolvePluginConfig(configFile, inlineToPass)
 	if err != nil {
 		slog.Error("Failed to resolve config for integration", "plugin", name, "error", err)
+		errs = append(errs, fmt.Errorf("resolve config file: %w", err))
 		merged = make(map[string]string)
 	}
 
@@ -1713,6 +1735,9 @@ func (s *Server) resolveIntegrationMergedConfig(ctx context.Context, mgr Integra
 			continue
 		}
 		val, err := s.LoadChatIntegrationSecret(ctx, m.SecretKey)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			errs = append(errs, fmt.Errorf("load secret for %s: %w", m.ConfigKey, err))
+		}
 		if err != nil || val == "" {
 			continue
 		}
@@ -1733,7 +1758,10 @@ func (s *Server) resolveIntegrationMergedConfig(ctx context.Context, mgr Integra
 	// and apply as OVERRIDE. The manager's cached config may be stale or
 	// empty (e.g. after process restart), so we recompute these values the
 	// same way server_foreground.go does at startup.
-	hubCreds := s.getPluginHubCreds(ctx, name)
+	hubCreds, credsErr := s.getPluginHubCredsChecked(ctx, name)
+	if credsErr != nil {
+		errs = append(errs, credsErr)
+	}
 	for k, v := range hubCreds {
 		if v != "" {
 			merged[k] = v
@@ -1747,7 +1775,7 @@ func (s *Server) resolveIntegrationMergedConfig(ctx context.Context, mgr Integra
 		merged["config_file"] = configFile
 	}
 
-	return merged
+	return merged, errors.Join(errs...)
 }
 
 // reconfigureIntegration reloads config for a plugin and calls ReplaceBrokerConfig

@@ -43,6 +43,10 @@ import (
 // (see TestMain). Its value is irrelevant.
 const supervisorHelperEnv = "PLUGIN_SUPERVISOR_TEST_HELPER"
 
+// supervisorPidDirEnv, when set, makes each fake plugin process record its
+// pid as a file in that directory.
+const supervisorPidDirEnv = "PLUGIN_SUPERVISOR_TEST_PIDDIR"
+
 // Publish topics the fake broker plugin acts on.
 const (
 	fakeTopicExit  = "test.exit"  // exit the plugin process
@@ -53,6 +57,9 @@ const (
 
 func TestMain(m *testing.M) {
 	if os.Getenv(supervisorHelperEnv) != "" {
+		if dir := os.Getenv(supervisorPidDirEnv); dir != "" {
+			_ = os.WriteFile(dir+"/"+strconv.Itoa(os.Getpid()), nil, 0o600)
+		}
 		goplugin.Serve(&goplugin.ServeConfig{
 			HandshakeConfig: goplugin.HandshakeConfig{
 				ProtocolVersion:  BrokerPluginProtocolVersion,
@@ -1244,17 +1251,29 @@ func TestClientReplacementPaths_HubManagedAdminRestart(t *testing.T) {
 func TestDiscardClient_BoundedStopOfHungPlugin(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		stop func(t *testing.T, fx *hubManagedFixture)
+		// stop runs off the test goroutine, so it reports failure as an
+		// error instead of failing the test itself.
+		stop func(fx *hubManagedFixture) error
 	}{
-		{name: "admin RestartBrokerPlugin", stop: func(t *testing.T, fx *hubManagedFixture) {
-			require.NoError(t, fx.m.RestartBrokerPlugin("fake", map[string]string{"token": "admin"}))
+		{name: "admin RestartBrokerPlugin", stop: func(fx *hubManagedFixture) error {
+			if err := fx.m.RestartBrokerPlugin("fake", map[string]string{"token": "admin"}); err != nil {
+				return fmt.Errorf("RestartBrokerPlugin: %w", err)
+			}
 			nb, err := fx.m.GetBroker("fake")
-			require.NoError(t, err)
-			require.NoError(t, fx.fanout.ReplaceSpoke("fake", eventbus.NamedEventBus{Name: "fake", Bus: nb}))
-			assert.NoError(t, fx.publish("agent.bot.message"), "the new client publishes")
+			if err != nil {
+				return fmt.Errorf("GetBroker: %w", err)
+			}
+			if err := fx.fanout.ReplaceSpoke("fake", eventbus.NamedEventBus{Name: "fake", Bus: nb}); err != nil {
+				return fmt.Errorf("ReplaceSpoke: %w", err)
+			}
+			if err := fx.publish("agent.bot.message"); err != nil {
+				return fmt.Errorf("publish through the new client: %w", err)
+			}
+			return nil
 		}},
-		{name: "Shutdown", stop: func(_ *testing.T, fx *hubManagedFixture) {
+		{name: "Shutdown", stop: func(fx *hubManagedFixture) error {
 			fx.m.Shutdown()
+			return nil
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1263,17 +1282,74 @@ func TestDiscardClient_BoundedStopOfHungPlugin(t *testing.T) {
 			require.NoError(t, syscall.Kill(pid, syscall.SIGSTOP))
 			t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGCONT) })
 
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				tc.stop(t, fx)
-			}()
+			done := make(chan error, 1)
+			go func() { done <- tc.stop(fx) }()
 			select {
-			case <-done:
+			case err := <-done:
+				require.NoError(t, err)
 			case <-time.After(15 * time.Second):
 				t.Fatal("stopping a hung plugin did not finish within 15 s")
 			}
 			waitFor(t, 10*time.Second, "hung plugin process killed", func() bool { return processGone(pid) })
 		})
 	}
+}
+
+func TestShutdown_DiscardsPluginStartedByInFlightAttempt(t *testing.T) {
+	pidDir := t.TempDir()
+	t.Setenv(supervisorPidDirEnv, pidDir)
+	fx := newHubManagedFixtureWithInterval(t, time.Hour)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	fx.m.SetBrokerConfigProvider(func(_ context.Context, name string) (map[string]string, error) {
+		once.Do(func() { close(entered) })
+		<-release
+		return map[string]string{"token": "provided-" + name}, nil
+	})
+
+	require.Error(t, fx.publish(fakeTopicExit))
+	select {
+	case <-entered: // the attempt is in progress
+	case <-time.After(10 * time.Second):
+		t.Fatal("restart attempt did not start")
+	}
+	shutdownDone := make(chan struct{})
+	go func() {
+		fx.m.Shutdown()
+		close(shutdownDone)
+	}()
+	time.Sleep(100 * time.Millisecond)
+	close(release) // the attempt now starts a new plugin process
+	select {
+	case <-shutdownDone:
+	case <-time.After(20 * time.Second):
+		t.Fatal("Shutdown did not return")
+	}
+
+	// When Shutdown returns, the attempt has finished: the process it
+	// started exists and has already been killed.
+	entries, err := os.ReadDir(pidDir)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(entries), 2, "the boot process and the one the attempt started, by the time Shutdown returns")
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		require.NoError(t, err)
+		waitFor(t, 2*time.Second, fmt.Sprintf("plugin process %d dead", pid), func() bool { return processDead(pid) })
+	}
+	fx.m.mu.RLock()
+	assert.Empty(t, fx.m.clients, "no client stored after shutdown")
+	fx.m.mu.RUnlock()
+}
+
+// processDead reports whether pid has exited (it may not be reaped yet).
+func processDead(pid int) bool {
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return true
+	}
+	// The state follows the parenthesized command name.
+	if i := strings.LastIndexByte(string(b), ')'); i >= 0 && i+2 < len(b) {
+		return b[i+2] == 'Z' || b[i+2] == 'X'
+	}
+	return false
 }

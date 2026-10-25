@@ -556,13 +556,13 @@ func (m *Manager) closeStaleClient(key string, lost *goplugin.Client) {
 	m.replaceClient(key, lost, false)
 }
 
-// replaceClient is the one path by which a plugin's current client is taken
-// out of service by the supervisor, Reconnect, or an admin restart or
-// update. A load that supersedes a client and Shutdown, which take their
-// clients out under the lock themselves, discard them through
-// discardClient the same way. It removes the client stored for key, if it is expect (or any
-// client when expect is nil), and discards it (see discardClient). It
-// reports whether a client was removed.
+// replaceClient is the one path by which a plugin's current client is
+// taken out of service by the supervisor, Reconnect, or an admin restart
+// or update. A load that supersedes a client and Shutdown, which take
+// their clients out under the lock themselves, discard them through
+// discardClient the same way. It removes the client stored for key if it
+// is expect (or any client when expect is nil), discards it (see
+// discardClient), and reports whether a client was removed.
 func (m *Manager) replaceClient(key string, expect *goplugin.Client, graceful bool) bool {
 	m.mu.Lock()
 	client, ok := m.clients[key]
@@ -575,7 +575,7 @@ func (m *Manager) replaceClient(key string, expect *goplugin.Client, graceful bo
 	delete(m.clients, key)
 	delete(m.dispensed, key)
 	m.mu.Unlock()
-	m.discardClient(client, raw, self, graceful)
+	m.discardClient(key, client, raw, self, graceful)
 	return true
 }
 
@@ -602,7 +602,7 @@ func (m *Manager) replaceClient(key string, expect *goplugin.Client, graceful bo
 // the process is killed, which ends the session and the pending Quit.
 // Otherwise the process is killed at once first (a lost session may be
 // hung). Either way the stop is bounded.
-func (m *Manager) discardClient(client *goplugin.Client, raw interface{}, self, graceful bool) {
+func (m *Manager) discardClient(key string, client *goplugin.Client, raw interface{}, self, graceful bool) {
 	if bc, ok := raw.(*BrokerRPCClient); ok {
 		bc.discard()
 	}
@@ -624,12 +624,14 @@ func (m *Manager) discardClient(client *goplugin.Client, raw interface{}, self, 
 		return
 	case <-timer.C:
 	}
-	m.logger.Warn("Plugin did not stop within the graceful timeout; killing it", "timeout", gracefulStopTimeout)
-	killPluginProcess(client)
+	if graceful {
+		m.logger.Warn("Plugin did not stop within the graceful timeout; killing it", "plugin", key, "timeout", gracefulStopTimeout)
+		killPluginProcess(client)
+	}
 	select {
 	case <-done:
 	case <-time.After(gracefulStopTimeout):
-		m.logger.Error("Plugin client cleanup did not finish after its process was killed")
+		m.logger.Error("Plugin client did not finish stopping after its process was killed", "plugin", key, "timeout", gracefulStopTimeout)
 	}
 }
 
