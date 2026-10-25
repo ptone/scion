@@ -310,12 +310,14 @@ func TestResolveContentInChain_LongOrNonDirectoryInlineTextStaysInline(t *testin
 func TestResolveContentInChain_UnnameableFirstSegmentStaysInline(t *testing.T) {
 	tplDir := t.TempDir()
 	chain := []*Template{{Name: "t", Path: tplDir}}
-	for _, field := range []string{
-		strings.Repeat("a", 300) + "/rest",
-		"inline\x00text",
+	for name, field := range map[string]string{
+		"segment over the name length limit": strings.Repeat("a", 300) + "/rest",
+		"NUL byte":                           "inline\x00text",
 	} {
-		got, err := ResolveContentInChain(chain, field)
-		require.NoError(t, err, "field %q", field)
-		assert.Equal(t, field, string(got))
+		t.Run(name, func(t *testing.T) {
+			got, err := ResolveContentInChain(chain, field)
+			require.NoError(t, err)
+			assert.Equal(t, field, string(got))
+		})
 	}
 }
