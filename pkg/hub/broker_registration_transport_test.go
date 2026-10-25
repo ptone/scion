@@ -35,6 +35,13 @@ import (
 // TLS the hub terminated.
 func registerFrom(t *testing.T, srv *Server, user *store.User, remote string, headers map[string]string, withTLS bool, name string) *httptest.ResponseRecorder {
 	t.Helper()
+	return registerFromHost(t, srv, user, remote, headers, "", withTLS, name)
+}
+
+// registerFromHost is registerFrom with the request's Host set to host (when
+// not empty).
+func registerFromHost(t *testing.T, srv *Server, user *store.User, remote string, headers map[string]string, host string, withTLS bool, name string) *httptest.ResponseRecorder {
+	t.Helper()
 	token, _, _, err := srv.userTokenService.GenerateTokenPair(user.ID, user.Email, user.DisplayName, user.Role, ClientTypeWeb)
 	require.NoError(t, err)
 	body, err := json.Marshal(CreateBrokerRegistrationRequest{
@@ -49,6 +56,9 @@ func registerFrom(t *testing.T, srv *Server, user *store.User, remote string, he
 	req.RemoteAddr = remote
 	for k, v := range headers {
 		req.Header.Set(k, v)
+	}
+	if host != "" {
+		req.Host = host
 	}
 	if withTLS {
 		req.TLS = &tls.ConnectionState{}
@@ -69,25 +79,27 @@ func assertNoRegistrationIssued(t *testing.T, rec *httptest.ResponseRecorder) {
 
 // A registration requested by a network peer over plain http is refused:
 // no join token in the response and no broker row created. A forwarded
-// protocol from an unlisted peer does not count.
+// protocol from an unlisted peer does not count, nor does a loopback Host
+// header or a loopback X-Forwarded-For (the peer address alone decides), and a
+// loopback peer that relays (a forwarding header present) is judged as a
+// proxy, of which none is listed.
 func TestBrokerRegistration_PlaintextNetworkPeerGetsNoJoinToken(t *testing.T) {
-	for name, headers := range map[string]map[string]string{
-		"plain http":                        nil,
-		"forged X-Forwarded-Proto":          {"X-Forwarded-Proto": "https"},
-		"forged Forwarded proto":            {"Forwarded": "proto=https"},
-		"loopback peer is not a proxy here": nil,
+	for name, tc := range map[string]struct {
+		remote  string
+		headers map[string]string
+		host    string
+	}{
+		"plain http":                        {remote: tpNetworkPeer},
+		"forged X-Forwarded-Proto":          {remote: tpNetworkPeer, headers: map[string]string{"X-Forwarded-Proto": "https"}},
+		"forged Forwarded proto":            {remote: tpNetworkPeer, headers: map[string]string{"Forwarded": "proto=https"}},
+		"loopback Host header":              {remote: tpNetworkPeer, host: "localhost"},
+		"loopback X-Forwarded-For":          {remote: tpNetworkPeer, headers: map[string]string{"X-Forwarded-For": "127.0.0.1"}},
+		"loopback peer is not a proxy here": {remote: tpLoopbackPeer, headers: map[string]string{"X-Forwarded-For": "198.51.100.7", "X-Forwarded-Proto": "https"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv, s := testServer(t)
 			user := newHubMemberUser(t, s, "tp-reg-refused")
-			remote := tpNetworkPeer
-			if name == "loopback peer is not a proxy here" {
-				// A loopback peer that relays (forwarding header present)
-				// is judged as a proxy, and none is listed.
-				remote = tpLoopbackPeer
-				headers = map[string]string{"X-Forwarded-For": "198.51.100.7", "X-Forwarded-Proto": "https"}
-			}
-			assertNoRegistrationIssued(t, registerFrom(t, srv, user, remote, headers, false, "tp-reg-refused"))
+			assertNoRegistrationIssued(t, registerFromHost(t, srv, user, tc.remote, tc.headers, tc.host, false, "tp-reg-refused"))
 			existing, err := srv.brokerAuthService.FindExistingBroker(context.Background(), "tp-reg-refused", "", nil)
 			require.NoError(t, err)
 			assert.Nil(t, existing, "no broker row is created for a refused registration")
