@@ -31,7 +31,6 @@ A lightweight Go reverse proxy designed to run on Google Cloud Run to front inte
 |----------------------|-------------|---------|----------|
 | `TARGET_URL` | Destination backend URL (e.g., `http://10.128.0.2:8080`) | — | **Yes** |
 | `PORT` | Listening port for the proxy server | `8080` | No |
-| `FORWARDED_PROTO` | Scheme of the front end that terminates client connections in front of the proxy (`https` or `http`). The proxy sends it to the backend as `X-Forwarded-Proto`, replacing any `Forwarded` or `X-Forwarded-*` header the client sent (it sets `X-Forwarded-For` to its immediate peer and `X-Forwarded-Host` to the host it served), so a client cannot claim TLS it did not use (the Scion Hub trusts this header from a proxy listed in `server.trusted_proxies`). Cloud Run's front end terminates TLS, so the default fits a Cloud Run deployment. | `https` | No |
 
 ## Deployment
 
@@ -79,3 +78,9 @@ Run proxy locally against a local backend:
 ```bash
 TARGET_URL="http://localhost:8080" PORT=9000 go run .
 ```
+
+## Forwarded headers
+
+The proxy is a trust boundary for the Scion Hub: it removes every `Forwarded` and `X-Forwarded-*` header a client sends and states only what it observed. `X-Forwarded-Proto` is the scheme the proxy served on that connection: `https` only when it terminated TLS itself, otherwise `http`. `X-Forwarded-For` is its immediate peer, and `X-Forwarded-Host` is the host it served.
+
+On Cloud Run the platform front end terminates TLS and the proxy serves plain HTTP, so it reports `http`. The proxy cannot verify the front end's TLS, so a Hub that lists this proxy in `server.trusted_proxies` refuses Runtime Broker join, secret rotation and broker connections that come through it. Agent and web traffic are not affected. Runtime Brokers authenticate with HMAC and normally reach the Hub directly, not through the IAP front door.
