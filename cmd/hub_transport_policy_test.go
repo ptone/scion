@@ -296,7 +296,17 @@ func TestUserHubPaths_RefusePlaintextNonLoopbackBeforeAnyRequest(t *testing.T) {
 				htpEnv(t, endpoint, true)
 				hub := newHTPHub(t)
 				htpRouteDials(t, hub)
-				assertTransportRefusal(t, paths[name](t, endpoint))
+				err := paths[name](t, endpoint)
+				if strings.Contains(endpoint, "@") && err != nil && !errors.Is(err, config.ErrPlaintextNonLoopback) {
+					// Some paths refuse URL user info before the transport
+					// rule; that refusal also sends nothing. It must not
+					// echo the user info either.
+					if strings.Contains(err.Error(), htpUserinfoSecret) {
+						t.Fatalf("refusal echoes URL user info: %v", err)
+					}
+				} else {
+					assertTransportRefusal(t, err)
+				}
 				hub.assertNoRequests(t)
 			})
 		}

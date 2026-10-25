@@ -79,42 +79,39 @@ func hostnameURL(t *testing.T, srv *httptest.Server) string {
 	return "http://" + hostPort
 }
 
-// With only a dev token, the REST hub client sends it to a loopback hub
-// and sends no credential to a hub under a non-loopback host name.
+// With only a dev token, the REST hub client sends it to a loopback hub,
+// while a plain http hub under a non-loopback host name is refused by the
+// transport rule before any request (so it never sees the dev token).
 func TestHubClientForEndpoint_DevTokenOnlyForLoopback(t *testing.T) {
 	setupContextTest(t)
 	t.Setenv("SCION_DEV_TOKEN", "placeholder-dev-token")
 	other, otherSeen := authHeaderHub(t)
 	local, localSeen := authHeaderHub(t)
 
-	for _, endpoint := range []string{hostnameURL(t, other), local.URL} {
-		client, err := hubClientForEndpoint(&config.Settings{}, endpoint)
-		require.NoError(t, err)
-		_, _ = client.Auth().Me(context.Background())
-	}
-	got := otherSeen()
-	require.NotEmpty(t, got, "the non-loopback hub received no request")
-	assert.Empty(t, got[0], "the non-loopback hub got a credential from the REST client")
-	got = localSeen()
+	_, err := hubClientForEndpoint(&config.Settings{}, hostnameURL(t, other))
+	require.ErrorIs(t, err, config.ErrPlaintextNonLoopback)
+	client, err := hubClientForEndpoint(&config.Settings{}, local.URL)
+	require.NoError(t, err)
+	_, _ = client.Auth().Me(context.Background())
+	assert.Empty(t, otherSeen(), "the non-loopback hub received a request")
+	got := localSeen()
 	require.NotEmpty(t, got)
 	assert.Equal(t, "Bearer placeholder-dev-token", got[0])
 }
 
-// With only a dev token, the completion client sends it to a loopback hub
-// and sends no credential to a hub under a non-loopback host name.
+// With only a dev token, the completion client sends it to a loopback hub,
+// and a plain http hub under a non-loopback host name gets no request.
 func TestFetchHubAgents_DevTokenOnlyForLoopback(t *testing.T) {
 	setupContextTest(t)
 	t.Setenv("SCION_DEV_TOKEN", "placeholder-dev-token")
 	other, otherSeen := authHeaderHub(t)
 	local, localSeen := authHeaderHub(t)
 
-	for _, endpoint := range []string{hostnameURL(t, other), local.URL} {
-		_, _ = fetchHubAgents(context.Background(), endpoint, &config.Settings{})
-	}
-	got := otherSeen()
-	require.NotEmpty(t, got, "the non-loopback hub received no request")
-	assert.Empty(t, got[0], "the non-loopback hub got a credential from the completion client")
-	got = localSeen()
+	_, err := fetchHubAgents(context.Background(), hostnameURL(t, other), &config.Settings{})
+	require.ErrorIs(t, err, config.ErrPlaintextNonLoopback)
+	_, _ = fetchHubAgents(context.Background(), local.URL, &config.Settings{})
+	assert.Empty(t, otherSeen(), "the non-loopback hub received a request")
+	got := localSeen()
 	require.NotEmpty(t, got)
 	assert.Equal(t, "Bearer placeholder-dev-token", got[0])
 }
