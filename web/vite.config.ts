@@ -167,6 +167,28 @@ function packageChunk(id: string): string | undefined {
     return PACKAGE_CHUNKS.find(([, re]) => re.test(id))?.[0];
 }
 
+/**
+ * Milkdown's plugin factories (@milkdown/utils): each returns a new plugin
+ * object and has no other effect, so Rollup may drop a call whose plugin
+ * nothing uses. Milkdown's presets are one module each, and without this
+ * every command, keymap and input rule they define stays in the bundle.
+ */
+const MILKDOWN_PLUGIN_FACTORIES = [
+    '$command',
+    '$ctx',
+    '$inputRule',
+    '$markAttr',
+    '$markSchema',
+    '$node',
+    '$nodeAttr',
+    '$nodeSchema',
+    '$pasteRule',
+    '$prose',
+    '$remark',
+    '$useKeymap',
+    'withMeta',
+];
+
 export default defineConfig({
     root: '.',
     publicDir: 'public',
@@ -188,6 +210,12 @@ export default defineConfig({
         rollupOptions: {
             input: {
                 main: resolve(__dirname, 'src/client/main.ts'),
+            },
+            // Milkdown's plugin factories build a plugin object and nothing
+            // else, so a plugin the review editor does not use (the presets'
+            // commands, keymaps and input rules) is left out of its chunk.
+            treeshake: {
+                manualPureFunctions: MILKDOWN_PLUGIN_FACTORIES,
             },
             output: {
                 // Use consistent naming for SSR compatibility
