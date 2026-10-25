@@ -801,6 +801,25 @@ describe('composition (IME) input', () => {
     expect(c.view.state.doc.eq(before)).toBe(true);
   });
 
+  it('a refused composition in an unedited document leaves it unedited', async () => {
+    const { c, hints } = await open('a dog\n');
+    const p = posOf(c, 'dog');
+    compose(c, p, (tr) => tr.insertText('犬', p, p + 3));
+    expect(hints).toEqual(['generic']);
+    expect(c.dirty).toBe(false);
+    expect(text(c)).toBe('a dog\n');
+  });
+
+  it('a refused composition after an edit keeps the document edited', async () => {
+    const { c, hints } = await open('a dog\n');
+    type(c, 'big ', posOf(c, 'dog'));
+    const p = posOf(c, 'dog');
+    compose(c, p, (tr) => tr.insertText('犬', p, p + 3));
+    expect(hints).toEqual(['generic']);
+    expect(c.dirty).toBe(true);
+    expect(text(c)).toBe('a {++big ++}dog\n');
+  });
+
   it('undoes a composition in a list item or a code block, with their hints', async () => {
     const { c, hints } = await open('- item\n\n```\ncode\n```\n');
     const before = c.view.state.doc;

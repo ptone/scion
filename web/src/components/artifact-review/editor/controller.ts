@@ -366,11 +366,12 @@ export class ReviewController {
       return this.session.unitCheck(doc, i, i);
     });
     if (refused) this.opts.onHint(refused as HintKind);
-    if (view.state.doc === docBefore && docBefore.eq(snap.doc)) {
-      // The composition changed nothing: the document is as before it, and
-      // no change was reported while it ran.
+    if (view.state.doc.eq(snap.doc)) {
+      // The document has the content it had before the composition (it
+      // changed nothing, or it was restored): it is as edited as it was
+      // then. Compared by content, since a restore builds a new document.
       this.session.setDirty(this.dirtyAt.get(snap) ?? true);
-      this.opts.onChange();
+      if (view.state.doc === docBefore) this.opts.onChange();
     }
   }
 
