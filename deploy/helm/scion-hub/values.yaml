@@ -162,8 +162,8 @@ hub:
   #
   # IPs or CIDRs only. Catch-all and very wide entries (IPv4 shorter than /8,
   # IPv6 shorter than /16) and IPv4-mapped IPv6 ranges (use the plain IPv4
-  # form) are refused at render, as the hub refuses them at startup. An empty list renders no key, and the hub then trusts no
-  # forwarded protocol.
+  # form) are refused at render, as the hub refuses them at startup. An empty
+  # list renders no key, and the hub then trusts no forwarded protocol.
   trustedProxies: ["35.191.0.0/16", "130.211.0.0/22"]
 
   # REQUIRED, and deliberately without a default. The external URL the hub is

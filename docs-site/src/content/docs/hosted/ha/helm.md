@@ -407,9 +407,9 @@ them if a different tier fronts the hub:
 
 Entries are IPs or CIDRs. Catch-all and very wide entries (IPv4 shorter than
 `/8`, IPv6 shorter than `/16`) and IPv4-mapped IPv6 ranges such as
-`::ffff:10.0.0.0/104` (write `10.0.0.0/8` instead) fail the render. An empty list renders no key,
-and the hub then trusts no forwarded protocol. Under `config.existingSecret`,
-put `server.trusted_proxies` in your own settings file.
+`::ffff:10.0.0.0/104` (write `10.0.0.0/8` instead) fail the render. An empty
+list renders no key, and the hub then trusts no forwarded protocol. Under
+`config.existingSecret`, put `server.trusted_proxies` in your own settings file.
 
 The readiness and startup probes target `/readyz` on the hub's web port
 (`hub.webPort`, default 8080). The path cannot be changed. The liveness probe is
