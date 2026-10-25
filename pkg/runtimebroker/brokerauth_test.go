@@ -485,14 +485,14 @@ func brokerAuthTargets(secret []byte, skew time.Duration) []brokerAuthTarget {
 	}
 }
 
-const replayTestPath = "/api/v1/agents/a1/stop"
+const repeatTestPath = "/api/v1/agents/a1/stop"
 
-var replayTestBody = []byte(`{"projectId":"p1"}`)
+var repeatTestBody = []byte(`{"projectId":"p1"}`)
 
-// newReplayTestRequest returns an unsigned POST with the fixed test path
+// newRepeatTestRequest returns an unsigned POST with the fixed test path
 // and body.
-func newReplayTestRequest() *http.Request {
-	req := httptest.NewRequest(http.MethodPost, replayTestPath, bytes.NewReader(replayTestBody))
+func newRepeatTestRequest() *http.Request {
+	req := httptest.NewRequest(http.MethodPost, repeatTestPath, bytes.NewReader(repeatTestBody))
 	req.Header.Set("Content-Type", "application/json")
 	return req
 }
@@ -500,7 +500,7 @@ func newReplayTestRequest() *http.Request {
 // copyOfSigned returns a new request with the same method, path, body and
 // headers as signed: the exact same signed request, sent again.
 func copyOfSigned(signed *http.Request) *http.Request {
-	req := newReplayTestRequest()
+	req := newRepeatTestRequest()
 	req.Header = signed.Header.Clone()
 	return req
 }
@@ -517,7 +517,7 @@ func TestBrokerAuth_ExactRepeatRefused(t *testing.T) {
 	secret := []byte("repeat-test-secret-32bytes!!!!!!")
 	for _, tg := range brokerAuthTargets(secret, 5*time.Minute) {
 		t.Run(tg.name, func(t *testing.T) {
-			signed := newReplayTestRequest()
+			signed := newRepeatTestRequest()
 			signRequest(signed, "broker-1", secret)
 			again := copyOfSigned(signed)
 
@@ -545,7 +545,7 @@ func TestBrokerAuth_FreshNonceSameContentAccepted(t *testing.T) {
 	for _, tg := range brokerAuthTargets(secret, 5*time.Minute) {
 		t.Run(tg.name, func(t *testing.T) {
 			for i := 0; i < 3; i++ {
-				req := newReplayTestRequest()
+				req := newRepeatTestRequest()
 				signRequest(req, "broker-1", secret)
 				if rr := serveOnce(tg.handler, req); rr.Code != http.StatusOK {
 					t.Fatalf("request %d: got %d, want 200 (%s)", i, rr.Code, rr.Body.String())
@@ -568,7 +568,7 @@ func TestBrokerAuth_RepeatRefusedUntilWindowEnds(t *testing.T) {
 	for _, tg := range brokerAuthTargets(secret, skew) {
 		t.Run(tg.name, func(t *testing.T) {
 			t.Parallel()
-			signed := newReplayTestRequest()
+			signed := newRepeatTestRequest()
 			signRequest(signed, "broker-1", secret)
 			ts, err := strconv.ParseInt(signed.Header.Get(apiclient.HeaderTimestamp), 10, 64)
 			if err != nil {
@@ -605,7 +605,7 @@ func TestBrokerAuth_MissingNonceRefused(t *testing.T) {
 	secret := []byte("repeat-test-secret-32bytes!!!!!!")
 	for _, tg := range brokerAuthTargets(secret, 5*time.Minute) {
 		t.Run(tg.name, func(t *testing.T) {
-			req := newReplayTestRequest()
+			req := newRepeatTestRequest()
 			signRequestWithNonce(req, "broker-1", secret, "")
 			rr := serveOnce(tg.handler, req)
 			if rr.Code != http.StatusUnauthorized {
@@ -629,13 +629,13 @@ func TestBrokerAuth_BadSignatureDoesNotUseNonce(t *testing.T) {
 	for _, tg := range brokerAuthTargets(secret, 5*time.Minute) {
 		t.Run(tg.name, func(t *testing.T) {
 			nonce := randomTestNonce()
-			bad := newReplayTestRequest()
+			bad := newRepeatTestRequest()
 			signRequestWithNonce(bad, "broker-1", []byte("other-secret-32bytes!!!!!!!!!!!!"), nonce)
 			if rr := serveOnce(tg.handler, bad); rr.Code != http.StatusUnauthorized {
 				t.Fatalf("wrongly signed request: got %d, want 401", rr.Code)
 			}
 
-			good := newReplayTestRequest()
+			good := newRepeatTestRequest()
 			signRequestWithNonce(good, "broker-1", secret, nonce)
 			if rr := serveOnce(tg.handler, good); rr.Code != http.StatusOK {
 				t.Fatalf("correctly signed request: got %d, want 200 (%s)", rr.Code, rr.Body.String())
@@ -652,13 +652,13 @@ func TestBrokerAuth_ConcurrentRepeatsServedOnce(t *testing.T) {
 	const n = 32
 	for _, tg := range brokerAuthTargets(secret, 5*time.Minute) {
 		t.Run(tg.name, func(t *testing.T) {
-			signed := newReplayTestRequest()
+			signed := newRepeatTestRequest()
 			signRequest(signed, "broker-1", secret)
 			copies := make([]*http.Request, n)
 			distinct := make([]*http.Request, n)
 			for i := range copies {
 				copies[i] = copyOfSigned(signed)
-				distinct[i] = newReplayTestRequest()
+				distinct[i] = newRepeatTestRequest()
 				signRequest(distinct[i], "broker-1", secret)
 			}
 
@@ -693,6 +693,68 @@ func TestBrokerAuth_ConcurrentRepeatsServedOnce(t *testing.T) {
 			}
 			if got := tg.served.Load(); got != n+1 {
 				t.Errorf("handler served %d requests, want %d", got, n+1)
+			}
+		})
+	}
+}
+
+// respelledSignatures returns the other spellings of the base64 signature
+// sig that decode to the same bytes: the last data character before the
+// padding carries unused low bits, which the decoder ignores.
+func respelledSignatures(t *testing.T, sig string) []string {
+	t.Helper()
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+	want, err := base64.StdEncoding.DecodeString(sig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := strings.TrimRight(sig, "=")
+	last := len(i) - 1
+	pos := strings.IndexByte(alphabet, i[last])
+	if pos < 0 {
+		t.Fatalf("unexpected signature character %q", i[last])
+	}
+	var out []string
+	for low := 0; low < 4; low++ {
+		c := alphabet[(pos&^3)|low]
+		if c == i[last] {
+			continue
+		}
+		alt := sig[:last] + string(c) + sig[last+1:]
+		got, err := base64.StdEncoding.DecodeString(alt)
+		if err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("spelling %q does not decode to the same signature bytes", alt)
+		}
+		out = append(out, alt)
+	}
+	if len(out) != 3 {
+		t.Fatalf("got %d other spellings, want 3", len(out))
+	}
+	return out
+}
+
+// TestBrokerAuth_RespelledSignatureRefused: the same signed request with
+// its signature header written in another base64 spelling of the same
+// bytes is the same request, and is refused after the first is served.
+func TestBrokerAuth_RespelledSignatureRefused(t *testing.T) {
+	secret := []byte("repeat-test-secret-32bytes!!!!!!")
+	for _, tg := range brokerAuthTargets(secret, 5*time.Minute) {
+		t.Run(tg.name, func(t *testing.T) {
+			signed := newRepeatTestRequest()
+			signRequest(signed, "broker-1", secret)
+			if rr := serveOnce(tg.handler, copyOfSigned(signed)); rr.Code != http.StatusOK {
+				t.Fatalf("first request: got %d, want 200 (%s)", rr.Code, rr.Body.String())
+			}
+			for _, alt := range respelledSignatures(t, signed.Header.Get(apiclient.HeaderSignature)) {
+				req := copyOfSigned(signed)
+				req.Header.Set(apiclient.HeaderSignature, alt)
+				rr := serveOnce(tg.handler, req)
+				if rr.Code != http.StatusUnauthorized || !strings.Contains(rr.Body.String(), "request already served") {
+					t.Errorf("signature spelled %q: got %d %q, want 401 request already served", alt, rr.Code, rr.Body.String())
+				}
+			}
+			if got := tg.served.Load(); got != 1 {
+				t.Errorf("handler served %d requests, want 1", got)
 			}
 		})
 	}

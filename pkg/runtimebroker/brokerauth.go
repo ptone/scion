@@ -71,8 +71,9 @@ func DefaultBrokerAuthConfig() BrokerAuthConfig {
 // This verifies that requests from the Hub are properly signed.
 type BrokerAuthMiddleware struct {
 	config BrokerAuthConfig
-	// seen remembers the signed requests already served, until their
-	// timestamps leave the accepted window, so each is served once.
+	// seen remembers the nonces of the signed requests already served,
+	// until their timestamps leave the accepted window, so each is served
+	// once.
 	seen *seenOnce
 }
 
@@ -162,7 +163,9 @@ func (m *BrokerAuthMiddleware) Middleware(next http.Handler) http.Handler {
 		}
 
 		// Serve each signed request once while its timestamp is accepted.
-		if !m.seen.add(nonce+"\n"+signature, requestTime.Add(m.config.MaxClockSkew), now) {
+		// The key is the nonce: it is covered by the signature, so unlike
+		// the signature header text it has only one accepted spelling.
+		if !m.seen.add(nonce, requestTime.Add(m.config.MaxClockSkew), now) {
 			m.writeError(w, "request already served")
 			return
 		}
@@ -204,8 +207,9 @@ type MultiKeyBrokerAuthMiddleware struct {
 	maxClockSkew         time.Duration
 	allowUnauthenticated bool
 	enabled              bool
-	// seen remembers the signed requests already served, until their
-	// timestamps leave the accepted window, so each is served once. It is
+	// seen remembers the nonces of the signed requests already served,
+	// until their timestamps leave the accepted window, so each is served
+	// once. It is
 	// this middleware's own set, not the conduit guard's: a conduit request
 	// passes the guard and then this middleware.
 	seen *seenOnce
@@ -322,8 +326,10 @@ func (m *MultiKeyBrokerAuthMiddleware) ServeWith(w http.ResponseWriter, r *http.
 	for _, entry := range keys {
 		if apiclient.VerifyHMAC(entry.secretKey, canonical, sigBytes) {
 			// Serve each signed request once while its timestamp is
-			// accepted.
-			if !m.seen.add(nonce+"\n"+signature, requestTime.Add(maxSkew), now) {
+			// accepted. The key is the nonce: it is covered by the
+			// signature, so unlike the signature header text it has only
+			// one accepted spelling.
+			if !m.seen.add(nonce, requestTime.Add(maxSkew), now) {
 				m.writeError(w, "request already served")
 				return
 			}
