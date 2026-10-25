@@ -357,11 +357,16 @@ describe('save invariant (I2)', () => {
 
   it('refuses when the serializer rewrites the earlier mark and writes the own one like it', () => {
     // The own insertion is an emphasised x, as the earlier one is; the
-    // broken serializer rewrites only the first.
+    // broken serializer rewrites only the first, and only in the edited
+    // text (a rewrite in the text before the edit too would cancel out in
+    // the three-way patch).
     const src = 'a {++*x*++} b\n';
     const broken = {
       ...core,
-      serialize: (d: Node): string => core.serialize(d).replace('*x*', '_x_'),
+      serialize: (d: Node): string => {
+        const t = core.serialize(d);
+        return t.split('*x*').length > 2 ? t.replace('*x*', '_x_') : t;
+      },
     };
     const s = new ReviewSession(broken);
     expect(s.load(src)).toBe(true);
@@ -411,9 +416,14 @@ describe('save invariant (I2)', () => {
   });
 
   it('refuses the edit and the save when the serializer rewrites the earlier mark', () => {
+    // Only in the edited text: a rewrite of the text before the edit too
+    // would cancel out in the three-way patch.
     const broken = {
       ...core,
-      serialize: (d: Node): string => core.serialize(d).replace(/\*/g, '_'),
+      serialize: (d: Node): string => {
+        const t = core.serialize(d);
+        return t.includes('Z') ? t.replace(/\*/g, '_') : t;
+      },
     };
     const s = new ReviewSession(broken);
     expect(s.load(md)).toBe(true);

@@ -24,10 +24,10 @@
 import type { Node } from '@milkdown/prose/model';
 import { EditorState, TextSelection } from '@milkdown/prose/state';
 
-import { normalizeCritic, projectCritic } from '../../../utils/critic.js';
+import { criticCodeRanges, normalizeCritic, projectCritic } from '../../../utils/critic.js';
 
-import { chooseAlphabet, chooseOpeningAlphabet } from '../../../utils/critic-sentinels.js';
-import { loadDocument, saveDoc } from './bridge.js';
+import { chooseOpeningAlphabet } from '../../../utils/critic-sentinels.js';
+import { loadDocument } from './bridge.js';
 import type { LoadedDoc } from './bridge.js';
 import type { Core } from './create.js';
 import {
@@ -44,6 +44,9 @@ import {
   makeBaseline,
   savePreserving,
   sentinelInDefinition,
+  unitRange,
+  unitSource,
+  writeUnit,
 } from './preserve.js';
 import type { Baseline } from './preserve.js';
 import type { HintKind } from './policy.js';
@@ -125,7 +128,7 @@ export class ReviewSession {
     const { schema } = this.core;
     const starts = blockStarts(base);
     for (let k = 0; k < base.blocks.length; k++) {
-      const [i, j] = unitRangeOf(base, k, k);
+      const [i, j] = unitRange(base, k, k);
       k = j;
       const nodes: Node[] = [];
       for (let q = i; q <= j; q++) nodes.push(base.nodes[q]);
@@ -137,15 +140,32 @@ export class ReviewSession {
       if (!sameRuns(runs, textMarkRuns(md, plain, starts[i], end, held), true)) return null;
       for (let q = i; q <= j; q++) out.add(q);
     }
+    // Code the critic parser reads across the edge of a block (a code span
+    // it runs on past the end of a heading, for example): the hub would
+    // read a token typed in that block as code text, not as a mark, so the
+    // units it touches are read-only (design 4.2, item 3).
+    // Both lists are in source order: one walk over the blocks.
+    const endOf = (k: number): number => starts[k] + base.blocks[k].src.length;
+    let first = 0;
+    for (const r of criticCodeRanges(md)) {
+      let to = r.end;
+      while (to > r.start && (md[to - 1] === '\n' || md[to - 1] === '\r')) to--;
+      while (first < base.blocks.length && endOf(first) <= r.start) first++;
+      let last = first;
+      while (last < base.blocks.length && starts[last] < to) last++;
+      // Blocks first..last-1 overlap the range; it is fine within one.
+      if (
+        last === first ||
+        (last === first + 1 && starts[first] <= r.start && to <= endOf(first))
+      ) {
+        continue;
+      }
+      for (let k = first; k < last; k++) {
+        const [i, j] = unitRange(base, k, k);
+        for (let q = i; q <= j; q++) out.add(q);
+      }
+    }
     return out;
-  }
-
-  private unitRange(first: number, last: number): [number, number] {
-    return unitRangeOf(this.baseline!, first, last);
-  }
-
-  private unitSource(i: number, j: number): string {
-    return unitSourceOf(this.baseline!, i, j);
   }
 
   /**
@@ -156,34 +176,35 @@ export class ReviewSession {
    */
   private earlierOf(i?: number, j?: number, withPlace = true): string[] {
     const whole = i === undefined || j === undefined;
-    const src = whole ? this.source : this.unitSource(i, j);
+    const src = whole ? this.source : unitSource(this.baseline!, i, j);
     return keyedMarks(src, () => false, withPlace).map((m) => m.key);
   }
 
   /**
    * Whether the top-level blocks first..last of doc (the units they belong
-   * to) would save as text the hub accepts and the reviewer meant: the
-   * same clean text as their source, marks that read back as the
-   * document's, and every earlier mark and note of the source unchanged,
-   * in order and in its place (earlierKept). Returns null when they would,
-   * 'moved' when only an earlier mark's place would change, and 'generic'
-   * otherwise (also for a read-only unit, or blocks that no longer line up
-   * with the opening text).
+   * to) would save as text the hub accepts and the reviewer meant. The
+   * text checked is exactly what save writes for them (writeUnit: the
+   * three-way patch, item and row units): it must have the same clean
+   * text as their source, marks that read back as the document's, open
+   * again as shown, and keep every earlier mark and note of the source
+   * unchanged, in order and in its place (earlierKept). Returns null when
+   * it would, 'moved' when only an earlier mark's place would change, and
+   * 'generic' otherwise (also for a read-only unit, or blocks that no
+   * longer line up with the opening text).
    */
   unitCheck(doc: Node, first: number, last: number): HintKind | null {
     const { schema, serialize } = this.core;
     const clean = (t: string): string => normalizeCritic(projectCritic(t, 'clean'));
     const base = this.baseline;
     if (!base || doc.childCount !== base.blocks.length) return 'generic';
-    const [i, j] = this.unitRange(first, last);
+    const [i, j] = unitRange(base, first, last);
     for (let k = i; k <= j; k++) if (this.readOnly.has(k)) return 'generic';
-    const src = this.unitSource(i, j);
+    const src = unitSource(base, i, j);
     const kids: Node[] = [];
     for (let k = i; k <= j; k++) kids.push(doc.child(k));
     const unit = schema.topNodeType.create(null, kids);
-    const a = chooseAlphabet(docStrings(unit));
-    if (!a) return 'generic';
-    const md = saveDoc(unit, serialize, schema, a).replace(/\n+$/, '');
+    const md = writeUnit(doc, base, i, j, serialize, schema, this.core.parse);
+    if (md === null) return 'generic';
     if (clean(md) !== clean(src)) return 'generic';
     if (marksReadBack(unit, md, this.core.plain) !== null) return 'generic';
     // The written unit must open again as it is shown (for example, an
@@ -259,7 +280,7 @@ export class ReviewSession {
     if (!this.dirty) return this.source;
     const { view, schema, serialize } = this.core;
     const doc = view.state.doc;
-    const r = savePreserving(doc, this.baseline, serialize, schema, this.readOnly);
+    const r = savePreserving(doc, this.baseline, serialize, schema, this.core.parse, this.readOnly);
     if (!r) return null;
     for (const u of r.units) {
       if (!u.written) continue;
@@ -285,20 +306,4 @@ function blockStarts(base: Baseline): number[] {
     at += b.src.length + b.after.length;
   }
   return out;
-}
-
-/** The unit (blocks joined by a spanning mark) around blocks first..last. */
-function unitRangeOf(base: Baseline, first: number, last: number): [number, number] {
-  let i = first;
-  let j = last;
-  while (i > 0 && base.blocks[i - 1].unit === base.blocks[i].unit) i--;
-  while (j + 1 < base.blocks.length && base.blocks[j + 1].unit === base.blocks[j].unit) j++;
-  return [i, j];
-}
-
-/** The source text of blocks i..j. */
-function unitSourceOf(base: Baseline, i: number, j: number): string {
-  let src = '';
-  for (let k = i; k <= j; k++) src += base.blocks[k].src + (k < j ? base.blocks[k].after : '');
-  return src;
 }

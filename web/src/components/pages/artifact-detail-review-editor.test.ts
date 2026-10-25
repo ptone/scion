@@ -320,7 +320,7 @@ describe('artifact page: graphical review editor experiment', () => {
     );
     await settle(el);
     expect($(el, '.hint-strip')!.textContent).toContain(
-      "Lists and tables can't take suggestions here yet."
+      "List and table structure can't be changed in a suggestion."
     );
     byText(el, '.hint-strip sl-button', 'Open Source view')!.click();
     await settle(el);

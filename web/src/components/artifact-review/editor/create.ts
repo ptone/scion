@@ -126,6 +126,10 @@ export async function createCore(opts: CoreOptions): Promise<Core> {
     .config((ctx) => {
       ctx.set(rootCtx, opts.root);
       ctx.update(remarkStringifyOptionsCtx, (o) => ({ ...o, bullet: '-' as const }));
+      // Table rows are written without padding to a common column width,
+      // so the text of a row depends on that row alone and an edit in one
+      // row lands in that row's source (preserve.ts).
+      ctx.set(remarkGFMPlugin.options.key, { tablePipeAlign: false });
       ctx.update(editorStateOptionsCtx, (prev) => (options): ReturnType<typeof prev> => {
         const o = prev(options);
         const ours = opts.plugins ? opts.plugins(o.schema ?? ctx.get(schemaCtx)) : [];

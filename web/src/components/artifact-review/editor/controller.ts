@@ -356,9 +356,9 @@ export class ReviewController {
     const docBefore = view.state.doc;
     const id: unknown = this.uiKey.getState(view.state);
     const refused = reconcileComposition(view, snap, id, (doc, pos, at, before) => {
-      const container = containerClass(view.state.doc.resolve(pos + 1));
-      if (container === 'code') return 'code';
-      if (container) return 'list-table';
+      // Composed text in a list item or a table cell is an insertion like
+      // any other; code takes no suggestions.
+      if (containerClass(view.state.doc.resolve(pos + 1)) === 'code') return 'code';
       // The same hint as for typing at that place.
       if (touchesEarlier(before, at, at))
         return this.session.earlierHint(before.resolve(at).index(0));
