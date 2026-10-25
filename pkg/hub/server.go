@@ -213,7 +213,7 @@ type ServerConfig struct {
 	TrustedProxies []string
 	// TransportTrustedProxies is server.trusted_proxies: the IPs/CIDRs of
 	// the TLS-terminating proxies whose X-Forwarded-Proto the hub-broker
-	// transport policy trusts (confidentialArrival). It is read by that
+	// transport policy trusts (config.ConfidentialArrival). It is read by that
 	// policy only, never by TrustedProxies' users (proxy header login,
 	// client IP rate limits). Empty means a forwarded protocol is never
 	// trusted. The server command validates it at startup
@@ -2472,7 +2472,7 @@ type Server struct {
 	cspReportLimiter *cspReportLimiter
 
 	// transportTrustedNets is ServerConfig.TransportTrustedProxies, parsed
-	// once in New (confidentialArrival).
+	// once in New (config.ConfidentialArrival).
 	transportTrustedNets []*net.IPNet
 
 	// experiments is the compiled feature-flag registry (pkg/experiments).
