@@ -1003,6 +1003,7 @@ func TestFanOut_ObserverSingleOverrunSkipsAndCounts(t *testing.T) {
 	// Once the overrun returns, the spoke is called again.
 	close(hung.release)
 	<-hung.ended
+	waitOverruns(t, f, "relay", 0)
 	if err := f.Publish(context.Background(), "test.topic", msg); err != nil {
 		t.Fatalf("Publish after overrun: %v", err)
 	}
@@ -1175,6 +1176,7 @@ func TestFanOut_ConcurrentOverrunsSkipUntilAllReturn(t *testing.T) {
 		hung.tokens <- struct{}{}
 		<-hung.ended
 	}
+	waitOverruns(t, f, "relay", 1)
 	publish()
 	if got := hung.calls.Load(); got != n {
 		t.Fatalf("calls = %d with one overrun left, want %d", got, n)
@@ -1185,6 +1187,7 @@ func TestFanOut_ConcurrentOverrunsSkipUntilAllReturn(t *testing.T) {
 
 	hung.tokens <- struct{}{}
 	<-hung.ended
+	waitOverruns(t, f, "relay", 0)
 	hung.tokens <- struct{}{} // for the next call
 	publish()
 	if got := hung.calls.Load(); got != n+1 {
@@ -1234,4 +1237,32 @@ func TestFanOut_DefaultCapLogsError(t *testing.T) {
 	if found != 1 {
 		t.Fatalf("got %d default-timeout ERROR records with bus and topic, want 1", found)
 	}
+}
+
+// waitOverruns waits until the named spoke's overrun count is want. A
+// bus's Publish returns before the fan-out goroutine records the end of an
+// overrun, so tests wait for the count rather than for Publish.
+func waitOverruns(t *testing.T, f *FanOutEventBus, name string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		f.mu.RLock()
+		var st *spokeState
+		for _, nb := range f.buses {
+			if nb.Name == name {
+				st = nb.state
+			}
+		}
+		f.mu.RUnlock()
+		if st != nil {
+			st.mu.Lock()
+			got := st.overruns
+			st.mu.Unlock()
+			if got == want {
+				return
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("spoke %q overruns did not reach %d", name, want)
 }
