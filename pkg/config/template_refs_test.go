@@ -303,3 +303,19 @@ func TestResolveContentInChain_LongOrNonDirectoryInlineTextStaysInline(t *testin
 	_, err = ResolveContentInChain(chain, "linked.md")
 	assert.ErrorIs(t, err, ErrTemplateContentRefused)
 }
+
+// Inline text whose first path segment cannot be a file name stops the
+// lookup at the first step: a segment over the name length limit
+// (ENAMETOOLONG) or a NUL byte (EINVAL). It is inline content, not refused.
+func TestResolveContentInChain_UnnameableFirstSegmentStaysInline(t *testing.T) {
+	tplDir := t.TempDir()
+	chain := []*Template{{Name: "t", Path: tplDir}}
+	for _, field := range []string{
+		strings.Repeat("a", 300) + "/rest",
+		"inline\x00text",
+	} {
+		got, err := ResolveContentInChain(chain, field)
+		require.NoError(t, err, "field %q", field)
+		assert.Equal(t, field, string(got))
+	}
+}
