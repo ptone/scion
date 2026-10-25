@@ -29,6 +29,13 @@ Helper scripts for deploying and tearing down a Scion Hub on a single
   --project my-gcp-project
 ```
 
+## Remote brokers
+
+Only the broker inside the Instance serves this hub. Remote Runtime Brokers are
+not accepted: broker join, secret rotation and the broker control channel need a
+direct TLS connection to the hub or a proxy listed in `server.trusted_proxies`,
+and Cloud Run's front end is not listed.
+
 ## Teardown does not remove IAP access
 
 `teardown.sh` deletes the Cloud Run Instance and nothing else. **IAP access
