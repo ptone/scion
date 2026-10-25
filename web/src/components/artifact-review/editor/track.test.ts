@@ -20,7 +20,7 @@ import { splitBlock, toggleMark } from '@milkdown/prose/commands';
 import { TextSelection } from '@milkdown/prose/state';
 import type { Transaction } from '@milkdown/prose/state';
 
-import { onlyMarksChanged, projectCritic } from '../../../utils/critic.js';
+import { onlyMarksChanged, parseCritic, projectCritic } from '../../../utils/critic.js';
 import { ReviewController, scrollToHeading } from './controller.js';
 import type { NoteRequest } from './controller.js';
 import { decide } from './policy.js';
@@ -406,6 +406,60 @@ describe('refused edits in suggest mode', () => {
     expect(
       onlyMarksChanged(text(ok.c), projectCritic('Press the ` key:\n\n- one\n- two\n', 'clean'))
     ).toBe(true);
+  });
+
+  it('refuses a separator typed after a literal replacement opener in the same block', async () => {
+    // The {~~ in block 0 has a ~~} in block 2: a ~> after the {~~ in block 0
+    // would make one replacement from block 0 to block 2.
+    const md = 'Use {~~ to start.\n\nSome text here.\n\nAnd ~~} to end.\n';
+    const { c, hints } = await open(md);
+    type(c, '~>', posOf(c, 'start'));
+    expect(hints).toEqual(['generic']);
+    expect(text(c)).toBe(md);
+    // Positive control: other text in that block is taken.
+    type(c, 'X', posOf(c, 'start'));
+    expect(text(c)).toBe('Use {~~ to {++X++}start.\n\nSome text here.\n\nAnd ~~} to end.\n');
+    // The same with the {~~ in a list item and the ~> typed in the next one.
+    const list = '- Use {~~ to start\n- some text\n\nAnd ~~} to end.\n';
+    const l = await open(list);
+    type(l.c, '~>', posOf(l.c, 'text'));
+    expect(l.hints).toEqual(['generic']);
+    expect(text(l.c)).toBe(list);
+  });
+
+  it('refuses a backtick typed next to a link definition whose title holds one', async () => {
+    // The definition's title is in the same lines as the paragraph: the
+    // critic parser would pair its backtick with a typed one.
+    const md = '[k]: /keys "the ` key"\nPress a key.\n';
+    const { c, hints } = await open(md);
+    type(c, '`', posOf(c, 'a key'));
+    expect(hints).toEqual(['code-run']);
+    expect(text(c)).toBe(md);
+    // Positive control: the same definition without a backtick.
+    const plain = '[k]: /keys "the key"\nPress a key.\n';
+    const ok = await open(plain);
+    type(ok.c, '`', posOf(ok.c, 'a key'));
+    expect(ok.hints).toEqual([]);
+    expect(onlyMarksChanged(text(ok.c), projectCritic(plain, 'clean'))).toBe(true);
+    // The same with the definition between two blocks of one line run.
+    const between = '# Keys\n[k]: /keys "the ` key"\n- one\n- two\n';
+    const b = await open(between);
+    type(b.c, '`', posOf(b.c, 'two'));
+    expect(b.hints).toEqual(['code-run']);
+    expect(text(b.c)).toBe(between);
+  });
+
+  it('keeps backticks typed in two blocks of one line run from pairing', async () => {
+    // Nothing in the run holds a backtick at load, so neither edit is
+    // refused; typed backticks are written so that they never open code.
+    const md = 'Press a key:\n- one\n- two\n';
+    const { c, hints } = await open(md);
+    type(c, '`', posOf(c, 'a key'));
+    type(c, '`', posOf(c, 'two'));
+    expect(hints).toEqual([]);
+    const out = text(c);
+    expect(onlyMarksChanged(out, projectCritic(md, 'clean'))).toBe(true);
+    expect(parseCritic(out).filter((x) => x.kind === 'insertion')).toHaveLength(2);
   });
 
   it('refuses a backtick typed above a table row holding a lone backtick', async () => {
@@ -1020,6 +1074,7 @@ describe('composition timing', () => {
     // Not settled yet: the composed text is not marked, so it cannot be
     // saved as a review.
     expect(c.view.state.doc.textContent).toBe('a 犬dog');
+    expect(c.isComposing).toBe(true);
     expect(c.flush()).toBeNull();
     // A new compositionstart keeps the older snapshot, which covers both.
     c.beginComposition();
