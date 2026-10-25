@@ -80,6 +80,14 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Transport policy: the response carries a join token, so a request
+	// that did not arrive over TLS or from this host
+	// (confidentialArrival) is refused before any lookup or mutation. No
+	// token is minted or replaced for it.
+	if !s.requireConfidentialArrival(w, r) {
+		return
+	}
+
 	// Parse request
 	var req CreateBrokerRegistrationRequest
 	if err := readJSON(r, &req); err != nil {
