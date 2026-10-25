@@ -434,8 +434,8 @@ configure it to authenticate through IAP using the Cloud Run proxy URL.
 
 Remote Runtime Brokers (brokers on another machine, as opposed to the one
 co-located in the Hub process) must connect to the Hub directly, not through
-the Cloud Run IAP proxy. Broker join, secret rotation and the broker control
-channel are not accepted through the proxy. Web, CLI and agent traffic are
+the Cloud Run IAP proxy. Broker join, secret rotation, the broker control
+channel and the broker's conduit connection are not accepted through the proxy. Web, CLI and agent traffic are
 unaffected.
 
 This deployment has no direct TLS endpoint for the Hub: the VM has no public

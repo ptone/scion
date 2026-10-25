@@ -32,8 +32,8 @@ Helper scripts for deploying and tearing down a Scion Hub on a single
 ## Remote brokers
 
 Only the broker inside the Instance serves this hub. Remote Runtime Brokers are
-not accepted: broker join, secret rotation and the broker control channel need a
-direct TLS connection to the hub or a proxy listed in `server.trusted_proxies`,
+not accepted: broker join, secret rotation, the broker control channel and the
+broker's conduit connection need a direct TLS connection to the hub or a proxy listed in `server.trusted_proxies`,
 and Cloud Run's front end is not listed.
 
 ## Teardown does not remove IAP access
