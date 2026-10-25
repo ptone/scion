@@ -195,3 +195,28 @@ func TestHubCORS_NeverAllowsCredentials(t *testing.T) {
 		})
 	}
 }
+
+// The startup warning fires only for an explicit wildcard with CORS enabled.
+func TestHubCORSWildcardWarning_OnlyExplicitWildcardWithCORSOn(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		enabled  bool
+		origins  []string
+		wantWarn bool
+	}{
+		{"off with wildcard", false, []string{"*"}, false},
+		{"on with a listed origin", true, []string{"https://a.example.test"}, false},
+		{"on with a listed origin and wildcard", true, []string{"https://a.example.test", "*"}, true},
+		{"on with no origins", true, []string{}, false},
+		{"off with no origins", false, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultServerConfig()
+			cfg.CORSEnabled = tc.enabled
+			cfg.CORSAllowedOrigins = tc.origins
+			if got := corsWildcardWarning(cfg) != ""; got != tc.wantWarn {
+				t.Errorf("warning = %q, want warning %v", corsWildcardWarning(cfg), tc.wantWarn)
+			}
+		})
+	}
+}

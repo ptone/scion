@@ -94,8 +94,12 @@ The web UI calls the Hub API on its own origin (the Hub API is served on the web
 
 The Hub never sends `Access-Control-Allow-Credentials`, so a browser does not send cookies or other credentials on a cross-origin request to the Hub and does not expose a credentialed response to the calling page.
 
+Env: `SCION_SERVER_HUB_CORS_ENABLED`, `SCION_SERVER_HUB_CORS_ALLOWEDORIGINS` (comma-separated), `SCION_SERVER_HUB_CORS_ALLOWEDMETHODS`, `SCION_SERVER_HUB_CORS_ALLOWEDHEADERS` and `SCION_SERVER_HUB_CORS_MAXAGE`.
+
 :::note[Upgrade note]
 Earlier releases enabled Hub CORS by default for every origin. A deployment that serves a browser client from a different origin than the Hub must now set `server.hub.cors.enabled: true` and list that origin in `allowed_origins`.
+
+If `settings.yaml` already contains a `server.hub.cors` block with `allowed_origins: ["*"]` (for example, one written by an earlier settings migration), the Hub keeps it and logs a warning at startup. Remove the block, or list specific origins.
 :::
 
 #### Conduit (`server.hub.conduit`)
