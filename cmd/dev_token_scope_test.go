@@ -33,17 +33,17 @@ import (
 // Authorization header of every request.
 func authHeaderHub(t *testing.T) (*httptest.Server, func() []string) {
 	t.Helper()
-	return newRecordingHub(t, false)
+	return newAuthHeaderHub(t, false)
 }
 
 // authHeaderHubTLS is authHeaderHub served over TLS (httptest's certificate).
 func authHeaderHubTLS(t *testing.T) (*httptest.Server, func() []string) {
 	t.Helper()
-	return newRecordingHub(t, true)
+	return newAuthHeaderHub(t, true)
 }
 
-// newRecordingHub starts the recording hub, over TLS when withTLS is set.
-func newRecordingHub(t *testing.T, withTLS bool) (*httptest.Server, func() []string) {
+// newAuthHeaderHub starts the recording hub, over TLS when withTLS is set.
+func newAuthHeaderHub(t *testing.T, withTLS bool) (*httptest.Server, func() []string) {
 	t.Helper()
 	var mu sync.Mutex
 	var seen []string

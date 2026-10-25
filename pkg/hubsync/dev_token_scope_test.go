@@ -32,17 +32,17 @@ import (
 // header of every request.
 func authRecordingHub(t *testing.T) (*httptest.Server, func() []string) {
 	t.Helper()
-	return newRecordingHub(t, false)
+	return newAuthRecordingHub(t, false)
 }
 
 // authRecordingHubTLS is authRecordingHub served over TLS (httptest's certificate).
 func authRecordingHubTLS(t *testing.T) (*httptest.Server, func() []string) {
 	t.Helper()
-	return newRecordingHub(t, true)
+	return newAuthRecordingHub(t, true)
 }
 
-// newRecordingHub starts the recording hub, over TLS when withTLS is set.
-func newRecordingHub(t *testing.T, withTLS bool) (*httptest.Server, func() []string) {
+// newAuthRecordingHub starts the recording hub, over TLS when withTLS is set.
+func newAuthRecordingHub(t *testing.T, withTLS bool) (*httptest.Server, func() []string) {
 	t.Helper()
 	var mu sync.Mutex
 	var seen []string
