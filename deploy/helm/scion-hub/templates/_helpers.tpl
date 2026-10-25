@@ -2450,6 +2450,15 @@ and comes from hub.hubClass only (config.extra is refused for the same reason in
 assertSettings); under config.existingSecret it belongs in the operator's file.
 Refused in every form, literal or valueFrom, matched case-insensitively.
 */}}
+{{- /*
+SCION_SERVER_TRUSTEDPROXIES (and its alias SCION_SERVER_TRUSTED_PROXIES) binds
+to server.trusted_proxies over the rendered settings.yaml, so it would replace
+the proxy configuration without this chart's checks seeing it. Refused in every
+form, matched case-insensitively.
+*/}}
+{{- if has (upper $name) (list "SCION_SERVER_TRUSTEDPROXIES" "SCION_SERVER_TRUSTED_PROXIES") }}
+{{- fail (printf "hub.extraEnv may not set %s: it would override server.trusted_proxies over the rendered settings.yaml, bypassing the chart's checks on it. Set the proxy configuration with hub.trustedProxies (or in your own settings file under config.existingSecret)." $name) }}
+{{- end }}
 {{- if eq (upper $name) "SCION_SERVER_HUB_CLASS" }}
 {{- fail "hub.extraEnv may not set SCION_SERVER_HUB_CLASS: it would override server.hub.class, an input of the hub's --test-mode gate, without the chart seeing it. Set the hub class with hub.hubClass (or in your own settings file under config.existingSecret)." }}
 {{- end }}
@@ -4417,7 +4426,8 @@ One server.trusted_proxies entry, checked the way the hub checks it at startup,
 so a bad entry fails the render instead of crash-looping the pod. dict: entry
 (trimmed), source (the value or settings key named in the error).
 
-IPv4 must be a dotted quad, octets 0-255, prefix /8 to /32. IPv6 must be a
+IPv4 must be a dotted quad, octets 0-255 without leading zeros, prefix /8 to /32
+(written without a leading zero). IPv6 must be a
 well-formed address (hex groups of up to four digits, at most one "::", an
 optional dotted-quad tail), prefix /16 to /128. An IPv4-mapped IPv6 range, in
 any spelling with ffff after zero groups, must be no wider than an IPv4 /8, so
@@ -4434,8 +4444,10 @@ any spelling with ffff after zero groups, must be no wider than an IPv4 /8, so
 {{- $bitsStr := "" }}
 {{- if $hasBits }}
 {{- $bitsStr = last $parts }}
-{{- if not (regexMatch "^[0-9]{1,3}$" $bitsStr) }}{{- fail $bad }}{{- end }}
+{{- if not (regexMatch "^(0|[1-9][0-9]{0,2})$" $bitsStr) }}{{- fail $bad }}{{- end }}
 {{- end }}
+{{- /* Octets 0-255 with no leading zero: Go refuses 010.0.0.1, and Sprig's int would read it as octal. */}}
+{{- $quad := "^(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$" }}
 {{- $maxBits := 32 }}
 {{- $minBits := 8 }}
 {{- if contains ":" $addr }}
@@ -4445,8 +4457,7 @@ any spelling with ffff after zero groups, must be no wider than an IPv4 /8, so
 {{- $tailGroups := 0 }}
 {{- if contains "." $v6 }}
 {{- $tail := last (splitList ":" $v6) }}
-{{- if not (regexMatch "^[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}$" $tail) }}{{- fail $bad }}{{- end }}
-{{- range (splitList "." $tail) }}{{- if gt (int .) 255 }}{{- fail $bad }}{{- end }}{{- end }}
+{{- if not (regexMatch $quad $tail) }}{{- fail $bad }}{{- end }}
 {{- $v6 = trimSuffix $tail $v6 }}
 {{- $tailGroups = 2 }}
 {{- if not (hasSuffix ":" $v6) }}{{- fail $bad }}{{- end }}
@@ -4467,16 +4478,15 @@ any spelling with ffff after zero groups, must be no wider than an IPv4 /8, so
 {{- if and (eq $dbl 0) (or (hasPrefix ":" $v6) (and (hasSuffix ":" $v6) (eq $tailGroups 0))) }}{{- fail $bad }}{{- end }}
 {{- if regexMatch "^(0{0,4}:){1,7}:?ffff:" (lower $addr) }}{{- $minBits = 104 }}{{- end }}
 {{- else }}
-{{- if not (regexMatch "^[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}$" $addr) }}{{- fail $bad }}{{- end }}
-{{- range (splitList "." $addr) }}{{- if gt (int .) 255 }}{{- fail $bad }}{{- end }}{{- end }}
+{{- if not (regexMatch $quad $addr) }}{{- fail $bad }}{{- end }}
 {{- end }}
 {{- if $hasBits }}
 {{- $bits := int $bitsStr }}
 {{- if gt $bits $maxBits }}
-{{- fail (printf "%s entry %s has a prefix longer than /%d." $src $entry $maxBits) }}
+{{- fail (printf "%s entry %s has a prefix longer than /%d." $src (include "scion-hub.diagValue" $entry) $maxBits) }}
 {{- end }}
 {{- if lt $bits $minBits }}
-{{- fail (printf "%s entry %s is wider than /%d. A range that wide trusts a forwarded protocol from almost anyone, and the hub refuses it at startup. List the proxy's own source range." $src $entry $minBits) }}
+{{- fail (printf "%s entry %s is wider than /%d. A range that wide trusts a forwarded protocol from almost anyone, and the hub refuses it at startup. List the proxy's own source range." $src (include "scion-hub.diagValue" $entry) $minBits) }}
 {{- end }}
 {{- end }}
 {{- end }}
