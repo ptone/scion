@@ -429,6 +429,11 @@ export class ReviewController {
     return this.session.isDirty;
   }
 
+  /** Whether an input method composition is running in the view. */
+  get isComposing(): boolean {
+    return this.core.view.composing || this.composing !== null;
+  }
+
   /**
    * Takes the browser's selection into the editor state when it moved
    * without the editor seeing it yet (a shortcut pressed right after a

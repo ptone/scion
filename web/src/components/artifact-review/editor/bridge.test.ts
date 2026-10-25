@@ -27,7 +27,7 @@ import type { Core, MdNode } from './create.js';
 import { docMarkKinds, earlierKept, keyedMarks, marksReadBack, textMarkKinds } from './guard.js';
 import type { MarkRun } from './guard.js';
 import { parseCritic, projectCritic } from '../../../utils/critic.js';
-import { ReviewSession } from './session.js';
+import { ReviewSession, backtickRuns, fenceLines } from './session.js';
 import { corpus, destroyCores, makeCore } from './__fixtures__/core.js';
 
 let core: Core;
@@ -523,5 +523,20 @@ describe('baseline units', () => {
     const b = baseline('- a {++x\n- y++} b\n- c\n')!;
     expect(b.blocks).toHaveLength(1);
     expect(b.blocks[0].subs).toBeUndefined();
+  });
+});
+
+describe('code signature', () => {
+  it('counts the lines that would open or close a fence', () => {
+    expect(fenceLines('text\n```js\ncode\n```\nmore')).toBe(2);
+    expect(fenceLines('   ~~~\n    ```')).toBe(1); // four spaces is indented code
+    expect(fenceLines('a ``` b\n``x')).toBe(0);
+    expect(fenceLines('{++```++}')).toBe(0); // a typed run after a token is not at a line start
+  });
+
+  it('lists backtick runs with their lengths and backslashes', () => {
+    expect(backtickRuns('a `b` ``c``')).toBe('1,1,2,2');
+    expect(backtickRuns('a \\` b \\\\` c')).toBe('1e,1');
+    expect(backtickRuns('no ticks')).toBe('');
   });
 });

@@ -360,19 +360,25 @@ export class ReviewSession {
    * Whether the written text md of units i..j holds more closers of a
    * mark kind than their source (for a replacement, more closers or more
    * ~> separators), for a kind whose first literal opener comes before
-   * them: the critic parser would read a mark from that opener with the
-   * new token, over text outside these units (a {~~ followed by a ~~} but
-   * no ~> is literal until a ~> appears between them). Tokens inside the
-   * code the critic parser reads in md (or the source) are not counted.
+   * them (for a ~>, before their end: in these units or earlier): the
+   * critic parser would read a mark from that opener with the new token,
+   * over text outside these units (a {~~ followed by a ~~} but no ~> is
+   * literal until a ~> appears between them). Tokens inside the code the
+   * critic parser reads in md (or the source) are not counted.
    */
   private addsCloser(i: number, j: number, md: string): boolean {
     const base = this.baseline;
     if (!base || this.literalOpeners.size === 0) return false;
     const src = unitSource(base, i, j);
+    const end = this.starts[j] + base.blocks[j].src.length;
     for (const [close, at] of this.literalOpeners) {
-      if (at >= this.starts[i]) continue;
-      for (const token of close === '~~}' ? [close, '~>'] : [close]) {
-        if (countOutsideCode(md, token) > countOutsideCode(src, token)) return true;
+      // A closer in the opener's own unit is seen by the unit's own checks;
+      // a ~> there is not, as the ~~} it needs lies in a later unit.
+      if (at < this.starts[i] && countOutsideCode(md, close) > countOutsideCode(src, close)) {
+        return true;
+      }
+      if (close === '~~}' && at < end && countOutsideCode(md, '~>') > countOutsideCode(src, '~>')) {
+        return true;
       }
     }
     return false;
@@ -431,7 +437,7 @@ export class ReviewSession {
  * The backtick runs of text in order, each as its length and whether an
  * odd number of backslashes comes before it ("e"), comma-separated.
  */
-function backtickRuns(text: string): string {
+export function backtickRuns(text: string): string {
   const out: string[] = [];
   for (const m of text.matchAll(/`+/g)) {
     let k = m.index ?? 0;
@@ -446,14 +452,17 @@ function backtickRuns(text: string): string {
 }
 
 /** The lines of text that would open (or close) a fenced code block. */
-function fenceLines(text: string): number {
+export function fenceLines(text: string): number {
   return text.split('\n').filter((l) => /^ {0,3}(`{3,}|~{3,})/.test(l)).length;
 }
 
 /**
  * Per top-level block of base: whether another block of its line run
- * holds a backtick. A line run is a sequence of blocks with no blank line
- * in the source between them.
+ * holds a backtick, or the source between blocks of the run (or before its
+ * first block) does: link reference definitions live there, and the critic
+ * parser pairs their backticks too. A line run is a sequence of blocks with
+ * no blank line in the source between them; text between blocks that holds
+ * a backtick counts for the runs on both sides of it, blank line or not.
  */
 function codeNeighbours(base: Baseline): boolean[] {
   const n = base.blocks.length;
@@ -464,8 +473,16 @@ function codeNeighbours(base: Baseline): boolean[] {
     if (/\n[ \t]*\r?\n/.test(base.blocks[k].after.replace(/\r\n/g, '\n'))) r++;
   }
   const ticks = base.blocks.map((b) => b.src.includes('`'));
-  return base.blocks.map((_, k) =>
-    base.blocks.some((_, m) => m !== k && run[m] === run[k] && ticks[m])
+  const gapTicks = new Set<number>();
+  if (n > 0 && base.lead.includes('`')) gapTicks.add(run[0]);
+  for (let k = 0; k < n; k++) {
+    if (!base.blocks[k].after.includes('`')) continue;
+    gapTicks.add(run[k]);
+    if (k + 1 < n) gapTicks.add(run[k + 1]);
+  }
+  return base.blocks.map(
+    (_, k) =>
+      gapTicks.has(run[k]) || base.blocks.some((_, m) => m !== k && run[m] === run[k] && ticks[m])
   );
 }
 
