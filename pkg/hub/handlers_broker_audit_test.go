@@ -62,7 +62,7 @@ func TestBrokerAudit_HubTokenRegistrationRecordsCredential(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	rec := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestWithTokenLoopback(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name: "audit-hubtoken-broker",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
@@ -93,7 +93,7 @@ func TestBrokerAudit_SessionReregistrationRecordsCredential(t *testing.T) {
 	owner := newHubMemberUser(t, s, "audit-session-owner")
 	broker := createReregistrationTestBroker(t, s, "audit-session-broker", owner.ID)
 
-	rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestAsUserLoopback(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name: broker.Name,
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
@@ -118,7 +118,7 @@ func TestBrokerAudit_DeniedRegistrationRecordsNoEvent(t *testing.T) {
 	other := newHubMemberUser(t, s, "audit-denied-other")
 	broker := createReregistrationTestBroker(t, s, "audit-denied-broker", owner.ID)
 
-	rec := doRequestAsUser(t, srv, other, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+	rec := doRequestAsUserLoopback(t, srv, other, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		Name: broker.Name,
 	})
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())

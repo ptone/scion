@@ -59,7 +59,7 @@ func TestBrokerOnboarding_BrokerOnBehalfOfNotAdmittedForReregistration(t *testin
 	target := createReregistrationTestBroker(t, s, "onboarding-ck1-target", owner.ID)
 	signer, key := newOnboardingSigningBroker(t, s, "ck1")
 
-	rec := doBrokerSignedRequest(t, srv, signer.ID, key, admin.Email, http.MethodPost, "/api/v1/brokers",
+	rec := doBrokerSignedRequestLoopback(t, srv, signer.ID, key, admin.Email, http.MethodPost, "/api/v1/brokers",
 		CreateBrokerRegistrationRequest{
 			Name:        target.Name,
 			AutoProvide: true,
@@ -102,7 +102,7 @@ func TestBrokerOnboarding_BrokerOnBehalfOfNotAdmittedForRegistration(t *testing.
 	signer, key := newOnboardingSigningBroker(t, s, "ck3")
 
 	const brokerName = "onboarding-ck3-new-broker"
-	rec := doBrokerSignedRequest(t, srv, signer.ID, key, member.Email, http.MethodPost, "/api/v1/brokers",
+	rec := doBrokerSignedRequestLoopback(t, srv, signer.ID, key, member.Email, http.MethodPost, "/api/v1/brokers",
 		CreateBrokerRegistrationRequest{Name: brokerName})
 
 	assert.Equal(t, http.StatusForbidden, rec.Code,

@@ -367,7 +367,7 @@ func TestBrokerAuthz_AutoProvideRegistration_StatusSeesProviderImmediately(t *te
 
 	// Phase 1: POST /api/v1/brokers — create the broker registration, then
 	// turn auto-provide on in the store.
-	createRec := doRequestAsUser(t, srv, operator, http.MethodPost, "/api/v1/brokers",
+	createRec := doRequestAsUserLoopback(t, srv, operator, http.MethodPost, "/api/v1/brokers",
 		CreateBrokerRegistrationRequest{
 			Name: "status-broker",
 		})
@@ -431,7 +431,7 @@ func TestBrokerAuthz_AutoProvideRegistration_StatusSeesProviderImmediately(t *te
 func autoProvideBrokerWithProject(t *testing.T, srv *Server, owner *store.User, brokerName, projectName, gitRemote string) (brokerID string, project *store.Project) {
 	t.Helper()
 
-	createRec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/brokers",
+	createRec := doRequestAsUserLoopback(t, srv, owner, http.MethodPost, "/api/v1/brokers",
 		CreateBrokerRegistrationRequest{Name: brokerName})
 	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
 	var createResp CreateBrokerRegistrationResponse
