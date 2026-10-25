@@ -30,7 +30,7 @@ import (
 // WebSocket or raw hub connection is preceded by checkUserHubTransport. Both
 // apply config.CheckHubTransport (through pkg/hubsync) before any credential
 // is read or attached and before anything is sent. The only exception is
-// hubsync.NewInjectedAgentHubClient (see getHubClientWithAuthSource).
+// hubsync.NewInjectedAgentHubClient (see hubClientAndAuthSourceForEndpoint).
 // TestHubClientConstructionGoesThroughTransportRule keeps new hub clients in
 // cmd from bypassing this.
 
@@ -54,11 +54,16 @@ func checkUserHubTransport(endpoint string) error {
 	return nil
 }
 
-// hubTransportRefusal adds the origin of endpoint to a transport refusal;
-// any other error is returned unchanged.
+// hubTransportRefusal adds the origin of the refused endpoint to a transport
+// refusal; any other error is returned unchanged. The refused endpoint is the
+// one the refusal carries (hubsync.TransportRefusalError), else endpoint.
 func hubTransportRefusal(endpoint string, err error) error {
 	if err == nil || !errors.Is(err, config.ErrPlaintextNonLoopback) {
 		return err
+	}
+	var refused *hubsync.TransportRefusalError
+	if errors.As(err, &refused) && refused.Endpoint != "" {
+		endpoint = refused.Endpoint
 	}
 	return fmt.Errorf("hub endpoint from %s: %w", hubEndpointOrigin(endpoint), err)
 }
@@ -79,7 +84,7 @@ func hubEndpointOrigin(endpoint string) string {
 	if name := hubListEntryName(endpoint); name != "" {
 		return "hub list entry " + strconv.Quote(name)
 	}
-	return "the command line or hub list"
+	return "the hub selected for this command"
 }
 
 // hubListEntryName returns the name of the hub list entry for endpoint, or

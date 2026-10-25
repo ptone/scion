@@ -36,10 +36,24 @@ import (
 // redacted.
 func CheckUserHubTransport(endpoint string) error {
 	if err := config.CheckHubTransport(endpoint); err != nil {
-		return fmt.Errorf("refusing to send hub credentials: %w", err)
+		return &TransportRefusalError{Endpoint: endpoint, Err: err}
 	}
 	return nil
 }
+
+// TransportRefusalError is the refusal CheckUserHubTransport returns. Endpoint
+// is the hub URL that was refused, as given, so a caller can name where it came
+// from; Error never shows it (the wrapped rule error shows it redacted).
+type TransportRefusalError struct {
+	Endpoint string
+	Err      error
+}
+
+func (e *TransportRefusalError) Error() string {
+	return fmt.Sprintf("refusing to send hub credentials: %v", e.Err)
+}
+
+func (e *TransportRefusalError) Unwrap() error { return e.Err }
 
 // NewUserHubClient is the hub client constructor of the CLI's user paths.
 // It applies CheckUserHubTransport before anything else: a refused endpoint
@@ -76,7 +90,10 @@ func isInjectedHubEndpoint(endpoint string) bool {
 // which an agent container reaches its own host: a literal loopback
 // address, a host alias (config.IsAgentHostAliasHost) or an IPv4
 // link-local address (169.254.0.0/16, as on cloudrun-sandbox). Names are
-// never resolved.
+// never resolved. The loopback case never decides the exception for http or
+// ws, which the transport rule already accepts for a loopback host (so
+// NewInjectedAgentHubClient returns before calling this); it is kept so the
+// list matches the broker side's (D302) container-to-host address set.
 func isAgentHostAddress(endpoint string) bool {
 	u, err := url.Parse(endpoint)
 	if err != nil || u.Host == "" {

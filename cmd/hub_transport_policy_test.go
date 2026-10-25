@@ -37,6 +37,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/tunnelclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsclient"
@@ -386,6 +387,19 @@ func TestHubTransportRefusal_NamesTheSetting(t *testing.T) {
 			t.Errorf("refusal %q does not name the --hub flag", err)
 		}
 	})
+}
+
+// The origin names the endpoint the refusal carries, not the one the caller
+// passed (EnsureHubReady may refuse another endpoint than the invocation hub).
+func TestHubTransportRefusal_NamesTheRefusedEndpoint(t *testing.T) {
+	htpEnv(t, htpRefused, false)
+	t.Setenv("SCION_HUB_ENDPOINT", htpRefused)
+	refusal := hubsync.CheckUserHubTransport(htpRefused)
+	err := hubTransportRefusal("http://other.example.com:1", refusal)
+	assertTransportRefusal(t, err)
+	if !strings.Contains(err.Error(), "hub endpoint from SCION_HUB_ENDPOINT") {
+		t.Errorf("refusal %q does not name SCION_HUB_ENDPOINT", err)
+	}
 }
 
 // htpAgentEnv sets up a hub-managed agent: SCION_AGENT_ID, the injected

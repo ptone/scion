@@ -444,3 +444,26 @@ func TestNewInjectedAgentHubClient_InjectedHostMustBeHostAddress(t *testing.T) {
 		})
 	}
 }
+
+// The refusal carries the endpoint it refused (for the caller's origin label)
+// and never shows its user info.
+func TestCheckUserHubTransport_RefusalCarriesEndpoint(t *testing.T) {
+	endpoint := "http://user:" + tpUserinfoSecret + "@10.0.0.1:9810"
+	err := CheckUserHubTransport(endpoint)
+	var refused *TransportRefusalError
+	if !errors.As(err, &refused) {
+		t.Fatalf("error %v is not a *TransportRefusalError", err)
+	}
+	if refused.Endpoint != endpoint {
+		t.Errorf("Endpoint = %q, want the refused endpoint", refused.Endpoint)
+	}
+	if !errors.Is(err, config.ErrPlaintextNonLoopback) {
+		t.Errorf("error %v does not wrap ErrPlaintextNonLoopback", err)
+	}
+	if strings.Contains(err.Error(), tpUserinfoSecret) {
+		t.Errorf("refusal echoes URL user info: %v", err)
+	}
+	if err := CheckUserHubTransport("https://hub.example.com"); err != nil {
+		t.Errorf("https endpoint refused: %v", err)
+	}
+}
