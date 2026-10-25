@@ -748,7 +748,7 @@ func AuditableBrokerAuthMiddleware(svc *BrokerAuthService, logger AuditLogger) f
 					_ = logger.LogBrokerAuthEvent(r.Context(), event)
 				}
 
-				writeBrokerAuthError(w, err.Error())
+				writeBrokerAuthFailure(w, err)
 				return
 			}
 
