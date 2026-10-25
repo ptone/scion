@@ -33,7 +33,14 @@ import { definitionNodes } from './create.js';
 import type { Core, MdRead } from './create.js';
 import { TextMarks } from './guard.js';
 import type { MarkRun } from './guard.js';
-import { consumedAsInSource, docStrings, makeBaseline, sentinelInDefinition } from './preserve.js';
+import {
+  consumedAsInSource,
+  docStrings,
+  joinFlat,
+  makeBaseline,
+  savePreserving,
+  sentinelInDefinition,
+} from './preserve.js';
 import type { Baseline } from './preserve.js';
 import { ReviewSession, codeNeighbours } from './session.js';
 import { corpus, destroyCores, makeCore, sweepDocs } from './__fixtures__/core.js';
@@ -390,4 +397,45 @@ describe('opening a 200 kB document', () => {
     },
     120_000
   );
+});
+
+describe('the text a save writes', () => {
+  it('is its units and separators in order, each where the save says it is', () => {
+    let n = 0;
+    for (const md of [...docs, largeDoc(true)]) {
+      const s = new ReviewSession(core);
+      if (!s.load(md)) continue;
+      const v = core.view;
+      // An edit in the first text block, so one unit is written.
+      let at = -1;
+      v.state.doc.descendants((node, pos) => {
+        if (at < 0 && node.isTextblock && node.type.allowsMarkType(core.schema.marks.critic_ins)) {
+          at = pos + 1;
+        }
+        return at < 0;
+      });
+      if (at < 0) continue;
+      const ins = core.schema.marks.critic_ins.create({ mine: true });
+      v.dispatch(v.state.tr.insertText('X', at).addMark(at, at + 1, ins));
+      const base = (s as unknown as { baseline: Baseline | null }).baseline;
+      const r = savePreserving(v.state.doc, base, core.serialize, core.schema, core.parse);
+      if (!r || !base) continue;
+      let text = base.lead;
+      for (const u of r.units) {
+        expect(u.at).toBe(text.length);
+        expect(r.md.slice(u.at, u.at + u.md.length)).toBe(u.md);
+        text += u.md;
+        if (u.i >= 0) text += base.blocks[u.j].after;
+      }
+      expect(r.md).toBe(text);
+      n++;
+    }
+    expect(n).toBeGreaterThan(50);
+  }, 120_000);
+
+  it('joins its parts as concatenation does', () => {
+    const parts = ['a', '', 'bc', '\n\n', 'd'.repeat(1000), '{++x++}'];
+    expect(joinFlat(parts)).toBe(parts.reduce((x, y) => x + y, ''));
+    expect(joinFlat([])).toBe('');
+  });
 });
