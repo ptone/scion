@@ -92,7 +92,7 @@ The web UI calls the Hub API on its own origin (the Hub API is served on the web
 | `allowed_headers` | list | `Authorization, Content-Type, X-Scion-Broker-Token, X-Scion-Agent-Token, X-API-Key` | Headers sent in `Access-Control-Allow-Headers` for an allowed origin. |
 | `max_age` | int | `3600` | Preflight cache lifetime in seconds. |
 
-The Hub never sends `Access-Control-Allow-Credentials`, so a browser does not send cookies or other credentials on a cross-origin request to the Hub and does not expose a credentialed response to the calling page.
+The Hub never sends `Access-Control-Allow-Credentials`, so a browser does not expose the response to a credentialed cross-origin request to the calling page, and refuses a credentialed request that needs a preflight. This is not protection against cross-site request forgery; the session cookie's `SameSite` setting governs which requests carry it.
 
 Env: `SCION_SERVER_HUB_CORS_ENABLED`, `SCION_SERVER_HUB_CORS_ALLOWEDORIGINS` (comma-separated), `SCION_SERVER_HUB_CORS_ALLOWEDMETHODS`, `SCION_SERVER_HUB_CORS_ALLOWEDHEADERS` and `SCION_SERVER_HUB_CORS_MAXAGE`.
 
