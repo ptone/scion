@@ -4434,9 +4434,9 @@ Mirrors parseTrustedProxy (pkg/config/trusted_proxies.go in the hub):
 - An IPv4-mapped IPv6 address (any spelling with ffff after zero groups) is
   accepted only without a prefix. With a prefix it is an IPv4-mapped range,
   which the hub refuses because it never matches a peer, so the plain IPv4
-  form is required. The spelling test also catches ffff in group 7 inside the
-  reserved ::/8 block, which the hub would accept; that is deliberately
-  stricter.
+  form is required. The spelling test also catches ffff in any group after
+  leading zero groups, inside the reserved ::/8 block, which the hub would
+  accept; that is deliberately stricter.
 - Prefixes are also written without leading zeros. That is stricter than the
   hub, and avoids Sprig's int reading a leading zero as octal.
 */}}
@@ -4482,7 +4482,9 @@ Mirrors parseTrustedProxy (pkg/config/trusted_proxies.go in the hub):
 {{- end }}
 {{- $groups = add $groups $tailGroups }}
 {{- if or (and (eq $dbl 0) (ne $groups 8)) (and (eq $dbl 1) (ge $groups 8)) }}{{- fail $bad }}{{- end }}
-{{- if and (eq $dbl 0) (or (hasPrefix ":" $v6) (and (hasSuffix ":" $v6) (eq $tailGroups 0))) }}{{- fail $bad }}{{- end }}
+{{- /* A stray single colon at either end, whatever the "::" count: ":1::", ":1::2", "1::2:". */}}
+{{- if and (hasPrefix ":" $v6) (not (hasPrefix "::" $v6)) }}{{- fail $bad }}{{- end }}
+{{- if and (eq $tailGroups 0) (hasSuffix ":" $v6) (not (hasSuffix "::" $v6)) }}{{- fail $bad }}{{- end }}
 {{- if and $hasBits (regexMatch "^(0{0,4}:){1,7}:?ffff:" (lower $addr)) }}
 {{- fail (printf "%s entry %s is an IPv4-mapped IPv6 range, which never matches a peer and which the hub refuses at startup. Use the plain IPv4 form, for example 10.0.0.0/8 rather than ::ffff:10.0.0.0/104." $src (include "scion-hub.diagValue" $entry)) }}
 {{- end }}
@@ -4503,9 +4505,11 @@ Mirrors parseTrustedProxy (pkg/config/trusted_proxies.go in the hub):
 {{/*
 server.trusted_proxies on the MERGED settings document, so an entry that
 arrives through config.extra is held to the same rules as hub.trustedProxies.
-The settings file must carry a list (the hub's field is a []string and does
-not decode a scalar). Each item is split on commas as the hub splits it, and
-empty items are dropped as the hub drops them.
+The settings file must carry a list. The hub decodes the server block
+strictly (loadServerFromSettingsFile, yaml.v3 into a []string field), and a
+non-list value makes it skip the entire server block, silently falling back to
+its defaults. Each item is split on commas as the hub splits it, and empty
+items are dropped as the hub drops them.
 */}}
 {{- define "scion-hub.assertTrustedProxies" -}}
 {{- $server := dig "server" (dict) .doc }}
@@ -4515,7 +4519,7 @@ empty items are dropped as the hub drops them.
 {{- if kindIs "slice" $raw }}
 {{- range $raw }}{{- $items = concat $items (splitList "," (toString .)) }}{{- end }}
 {{- else if not (kindIs "invalid" $raw) }}
-{{- fail (printf "server.trusted_proxies is %s; it must be a YAML list of IPs or CIDRs. The hub cannot read a single string here; a comma-separated string works only in the SCION_SERVER_TRUSTEDPROXIES environment variable." (include "scion-hub.diagValue" (toString $raw))) }}
+{{- fail (printf "server.trusted_proxies is %s; it must be a YAML list of IPs or CIDRs. The hub decodes the server block strictly, and a non-list value here makes it skip the entire server block." (include "scion-hub.diagValue" (toString $raw))) }}
 {{- end }}
 {{- range $items }}
 {{- $e := trim . }}
