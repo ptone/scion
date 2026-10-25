@@ -37,7 +37,10 @@ const stubBrokerEndpoint = "http://127.0.0.1:1"
 
 // failingSigner always fails, for testing that a signing failure — proven to
 // occur before anything is sent — classifies as agentkeys.ErrNotDispatched.
-type failingSigner struct{}
+// It counts its calls, so a test can prove the signer actually ran: a request
+// refused before signing (for example by the transport policy) leaves calls
+// at 0.
+type failingSigner struct{ calls int }
 
 // pendingDialKeysClient returns an HTTPRuntimeBrokerClient whose keys
 // transport dials through a stub that never connects: each dial blocks until
@@ -72,6 +75,7 @@ func pendingDialKeysClient(t *testing.T, clientTimeout time.Duration) (*HTTPRunt
 	return client, &dials
 }
 
-func (failingSigner) Sign(context.Context, *http.Request, string) error {
+func (s *failingSigner) Sign(context.Context, *http.Request, string) error {
+	s.calls++
 	return errors.New("boom: no broker secret")
 }

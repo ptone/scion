@@ -531,15 +531,19 @@ func TestBrokerHTTPTransport_ExecuteKeys_ClearsGetBodyOnSignedPath(t *testing.T)
 // when signing fails.
 func TestBrokerHTTPTransport_ExecuteKeys_SignerFailureIsNotDispatched(t *testing.T) {
 	spy := &spyRoundTripper{}
+	signer := &failingSigner{}
 	transport := &brokerHTTPTransport{
 		client:     &http.Client{Transport: spy},
 		keysClient: &http.Client{Transport: spy},
-		signer:     failingSigner{},
+		signer:     signer,
 	}
 
 	_, err := transport.ExecuteKeys(context.Background(), "broker-1", stubBrokerEndpoint, "test-agent", agentkeys.BrokerRequest{ExecuteBefore: time.Now().Add(time.Minute)})
 	if !errors.Is(err, agentkeys.ErrNotDispatched) {
 		t.Fatalf("expected agentkeys.ErrNotDispatched, got %v", err)
+	}
+	if signer.calls != 1 {
+		t.Fatalf("expected the signer to run exactly once, got %d calls", signer.calls)
 	}
 	if spy.calls != 0 {
 		t.Fatalf("expected zero HTTP calls when signing fails, got %d", spy.calls)

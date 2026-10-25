@@ -91,8 +91,7 @@ func newAgentKeysRouteFixture(t *testing.T) *agentKeysRouteFixture {
 	// keys_unavailable, since that determination is
 	// s.GetDispatcher() == nil, not anything about the target agent.
 	// The endpoint is stubBrokerEndpoint (loopback): the hub-broker transport
-	// policy accepts it, so a test that dials it through a stub
-	// (TestExecuteAgentKeys_NeverDispatchedHTTPRouteIsUnavailable) reaches the
+	// policy accepts it, so a test that dials it through a stub reaches the
 	// dial instead of the plaintext non-loopback refusal.
 	broker := &store.RuntimeBroker{
 		ID: tid("agentkeys-route-broker"), Name: "agentkeys-route-broker", Slug: "agentkeys-route-broker",
