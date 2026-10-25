@@ -172,6 +172,12 @@ func relayServerConfig(ctx context.Context, cfg *config.GlobalConfig, db *relayd
 	}
 	slog.Info("Conduit relay-peer authentication", "mode", mode)
 	podIP := os.Getenv("POD_IP")
+	// The public listener trusts a forwarded protocol only from the
+	// operator's server.trusted_proxies; empty (the default) trusts none.
+	trusted, err := config.ParseTrustedProxies(cfg.TrustedProxies)
+	if err != nil {
+		return relayserver.Config{}, err
+	}
 	return relayserver.Config{
 		InstanceID:     id,
 		PublicURL:      cfg.Relay.PublicURL,
@@ -182,6 +188,7 @@ func relayServerConfig(ctx context.Context, cfg *config.GlobalConfig, db *relayd
 			return conduitAdvertiseEndpoint(cfg.Hub.Conduit.InternalAdvertise, bound, podIP)
 		},
 		PeerAuth:         auth,
+		TrustedProxies:   trusted,
 		Registry:         db.Registry,
 		Experiment:       db.Settings,
 		Events:           db.Events(),
