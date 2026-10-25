@@ -35,8 +35,8 @@ const (
 //   - an entry that is neither an IP nor a CIDR (an empty entry included),
 //   - an IPv4 range wider than /8 or an IPv6 range wider than /16, so
 //     0.0.0.0/0 and ::/0 are refused,
-//   - an IPv4-mapped IPv6 range (::ffff:0:0/96 and its subranges) wider than
-//     the IPv4 /8 it maps to.
+//   - an IPv4-mapped IPv6 range (::ffff:0:0/96 and its subranges), which can
+//     never match a peer; the IPv4 form is required.
 //
 // A nil or empty list returns no networks and no error: the hub then never
 // trusts a forwarded protocol.
@@ -66,11 +66,11 @@ func parseTrustedProxy(entry string) (*net.IPNet, error) {
 				return nil, fmt.Errorf("is wider than an IPv4 /%d; list the proxy's own addresses", minTrustedProxyPrefixV4)
 			}
 		case ip.To4() != nil:
-			// An IPv4-mapped IPv6 range (::ffff:a.b.c.d/n): Go keeps a 128-bit
-			// mask, and the range covers IPv4 /(n-96).
-			if ones-96 < minTrustedProxyPrefixV4 {
-				return nil, fmt.Errorf("is wider than an IPv4 /%d; list the proxy's own addresses", minTrustedProxyPrefixV4)
-			}
+			// An IPv4-mapped IPv6 range (::ffff:a.b.c.d/n). Go keeps a
+			// 128-bit mask, and such a network never contains a peer
+			// address (IPNet.Contains compares a 4-byte peer with a
+			// 16-byte network), so the entry would silently match nothing.
+			return nil, fmt.Errorf("is an IPv4-mapped IPv6 range, which never matches a peer; use the IPv4 form (for example %s)", ipv4MappedHint(ip, ones))
 		default:
 			if ones < minTrustedProxyPrefixV6 {
 				return nil, fmt.Errorf("is wider than an IPv6 /%d; list the proxy's own addresses", minTrustedProxyPrefixV6)
@@ -86,4 +86,14 @@ func parseTrustedProxy(entry string) (*net.IPNet, error) {
 		return &net.IPNet{IP: v4, Mask: net.CIDRMask(32, 32)}, nil
 	}
 	return &net.IPNet{IP: ip, Mask: net.CIDRMask(128, 128)}, nil
+}
+
+// ipv4MappedHint is the IPv4 form of an IPv4-mapped IPv6 range, for the
+// refusal message.
+func ipv4MappedHint(ip net.IP, ones int) string {
+	v4 := ip.To4()
+	if ones < 96 {
+		return v4.String() + "/0"
+	}
+	return (&net.IPNet{IP: v4.Mask(net.CIDRMask(ones-96, 32)), Mask: net.CIDRMask(ones-96, 32)}).String()
 }

@@ -1166,7 +1166,7 @@ type GlobalConfig struct {
 	// SCION_SERVER_TRUSTEDPROXIES, comma-separated). The hub trusts
 	// X-Forwarded-Proto: https only from a peer in this list, and only for
 	// its hub-broker transport check; empty means never. Validated at
-	// startup (ValidateTrustedProxies). Operator-controlled only: never
+	// startup (ParseTrustedProxies). Operator-controlled only: never
 	// returned or accepted by the settings API.
 	TrustedProxies []string `json:"trustedProxies,omitempty" yaml:"trustedProxies,omitempty" koanf:"trustedProxies"`
 
@@ -2436,7 +2436,7 @@ func normalizeListSettings(gc *GlobalConfig) {
 	}
 	// server.trusted_proxies: each item split on commas and trimmed, as the
 	// CORS lists are, so a comma-separated env value or file entry works.
-	// ValidateTrustedProxies checks the result at startup.
+	// ParseTrustedProxies checks the result at startup.
 	gc.TrustedProxies = normalizeCORSList(gc.TrustedProxies)
 }
 

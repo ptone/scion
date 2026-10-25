@@ -23,7 +23,7 @@ import (
 )
 
 func TestParseTrustedProxies_Accepts(t *testing.T) {
-	nets, err := ParseTrustedProxies([]string{"10.0.0.0/8", "192.0.2.7", " 2001:db8::/32 ", "2001:db8::1", "127.0.0.1", "::ffff:10.0.0.0/104"})
+	nets, err := ParseTrustedProxies([]string{"10.0.0.0/8", "192.0.2.7", " 2001:db8::/32 ", "2001:db8::1", "127.0.0.1", "::ffff:10.0.0.7"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,6 +59,8 @@ func TestParseTrustedProxies_Refuses(t *testing.T) {
 		"2001::/15",
 		"::ffff:0:0/96",
 		"::ffff:10.0.0.0/103",
+		"::ffff:10.0.0.0/104",
+		"::ffff:10.20.0.0/112",
 		"proxy.example.com",
 		"10.0.0.0/33",
 		"10.0.0.1-10.0.0.9",
@@ -138,5 +140,21 @@ func TestTrustedProxies_LoadFromFileAndEnv(t *testing.T) {
 				t.Errorf("after both conversions TrustedProxies = %q, want %q", back.TrustedProxies, tc.want)
 			}
 		})
+	}
+}
+
+// An IPv4-mapped IPv6 range never matches a peer, so it is refused with a
+// hint at the IPv4 form; a bare IPv4-mapped address is taken as its IPv4 /32.
+func TestParseTrustedProxies_IPv4MappedRangeRefusedWithHint(t *testing.T) {
+	_, err := ParseTrustedProxies([]string{"::ffff:10.20.0.0/112"})
+	if err == nil || !strings.Contains(err.Error(), "10.20.0.0/16") {
+		t.Errorf("error = %v, want a refusal naming the IPv4 form 10.20.0.0/16", err)
+	}
+	nets, err := ParseTrustedProxies([]string{"::ffff:10.0.0.7"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !nets[0].Contains(net.ParseIP("10.0.0.7")) {
+		t.Error("a bare IPv4-mapped address does not match its IPv4 peer")
 	}
 }
