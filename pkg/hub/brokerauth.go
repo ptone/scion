@@ -85,6 +85,9 @@ type BrokerAuthService struct {
 	// Server.testAdminBrokerAdmission, which refuses every broker other than
 	// the co-located one while the test admin tier is on.
 	brokerAdmission func(ctx context.Context, brokerID string) error
+	// requestPolicy is the failure budget and failed-auth log in front of
+	// every signature check (brokerauth_ratelimit.go).
+	requestPolicy *brokerAuthRequestPolicy
 }
 
 // admitBroker applies brokerAdmission, if any.
@@ -167,6 +170,7 @@ func NewBrokerAuthService(config BrokerAuthConfig, s store.Store) *BrokerAuthSer
 		config:             config,
 		store:              s,
 		onBehalfOfResolver: s, // store.Store satisfies OnBehalfOfResolver
+		requestPolicy:      newBrokerAuthRequestPolicy(),
 	}
 	if config.EnableNonceCache {
 		svc.nonces = NewNonceCache(config.NonceCacheTTL)
@@ -1463,8 +1467,12 @@ func BrokerAuthMiddleware(svc *BrokerAuthService) func(http.Handler) http.Handle
 			}
 
 			// Validate HMAC signature
-			identity, err := svc.ValidateBrokerSignature(r.Context(), r)
+			identity, err := svc.validateBrokerRequest(r)
 			if err != nil {
+				if retry, limited := brokerAuthRetryAfter(err); limited {
+					writeBrokerAuthRateLimited(w, retry)
+					return
+				}
 				writeBrokerAuthError(w, err.Error())
 				return
 			}

@@ -135,6 +135,10 @@ func TestBrokerEnvelope_T5_ProductionConstructor(t *testing.T) {
 func TestBrokerEnvelope_T6_StatusUnchangedWithWriterBlockedAndFull(t *testing.T) {
 	capture := &decisionLogCapture{block: make(chan struct{}), entered: make(chan struct{}, 1)}
 	srv, s := newDecisionLogServer(t, capture)
+	// This test fills the audit queue with one failure per request, so the
+	// broker request policy (failure budget and failed-auth dedup, tested in
+	// brokerauth_ratelimit_test.go) is off here.
+	srv.brokerAuthService.requestPolicy = nil
 	// Registered after the server's Shutdown cleanup, so it runs first.
 	t.Cleanup(func() {
 		close(capture.block)

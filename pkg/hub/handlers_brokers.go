@@ -239,7 +239,7 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 	if resp.GCPHostSet {
 		kv = append(kv, "gcp_host_set", "true")
 	}
-	LogRegistrationEvent(r.Context(), s.auditLogger, resp.BrokerID, req.Name, user.ID(), getClientIP(r),
+	LogRegistrationEvent(r.Context(), s.auditLogger, resp.BrokerID, req.Name, user.ID(), s.brokerAuthService.brokerClientIP(r),
 		operation, mergeBrokerAuditDetails(details, kv...))
 
 	writeJSON(w, http.StatusCreated, resp)
@@ -677,7 +677,7 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 
 	// Test admin tier: only the co-located broker may complete a join.
 	if s.refuseTestAdminBrokerRegistration(w, req.BrokerID) {
-		LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), false, ErrTestAdminRemoteBrokerRefused.Error(), auditevent.BrokerFailureRefused)
+		LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, s.brokerAuthService.brokerClientIP(r), false, ErrTestAdminRemoteBrokerRefused.Error(), auditevent.BrokerFailureRefused)
 		return
 	}
 
@@ -696,7 +696,7 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 	resp, err := s.brokerAuthService.CompleteBrokerJoin(r.Context(), req, hubEndpoint)
 	if err != nil {
 		// Log failed join attempt
-		LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), false, err.Error(), brokerJoinFailureCode(err))
+		LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, s.brokerAuthService.brokerClientIP(r), false, err.Error(), brokerJoinFailureCode(err))
 
 		if writeRuntimeTargetRefusal(w, err) {
 			return
@@ -717,7 +717,7 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Log successful join
-	LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), true, "", "")
+	LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, s.brokerAuthService.brokerClientIP(r), true, "", "")
 	s.conduitBrokerCredentialChanged(req.BrokerID)
 	// Record the reservations of the agents the broker still runs (a broker
 	// registered again under the same ID), now that its row is written and
@@ -833,7 +833,7 @@ func (s *Server) handleBrokerRotateSecret(w http.ResponseWriter, r *http.Request
 		actorID = brokerIdent.BrokerID()
 		actorType = "broker"
 	}
-	LogRotateEvent(r.Context(), s.auditLogger, brokerID, actorID, actorType, getClientIP(r), brokerAuditCredentialDetails(r.Context()))
+	LogRotateEvent(r.Context(), s.auditLogger, brokerID, actorID, actorType, s.brokerAuthService.brokerClientIP(r), brokerAuditCredentialDetails(r.Context()))
 
 	writeJSON(w, http.StatusOK, resp)
 }

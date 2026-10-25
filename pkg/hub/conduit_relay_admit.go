@@ -99,7 +99,9 @@ func (s *Server) hubAdmit(w http.ResponseWriter, r *http.Request, peer string, b
 		return
 	}
 	u := &url.URL{Scheme: "http", Host: req.Host, Path: "/api/v1/conduit", RawQuery: req.RawQuery}
-	fwd, err := http.NewRequestWithContext(r.Context(), http.MethodGet, u.String(), nil)
+	// The broker signature check keys its failure budget on the relay
+	// instance, not on the fixed RemoteAddr below.
+	fwd, err := http.NewRequestWithContext(withBrokerAuthRelaySource(r.Context(), peer), http.MethodGet, u.String(), nil)
 	if err != nil {
 		http.Error(w, "invalid admit request", http.StatusBadRequest)
 		return

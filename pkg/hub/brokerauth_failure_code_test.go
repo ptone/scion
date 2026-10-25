@@ -88,6 +88,9 @@ func unsignedBrokerRequest(brokerID, timestamp, nonce string) *http.Request {
 
 func TestBrokerAuthFailure_Q3_ResponseBodiesUnchangedAndClassified(t *testing.T) {
 	svc, s := setupTestBrokerAuthService(t)
+	// One event per failure is pinned here; the failed-auth dedup of the
+	// broker request policy has its own tests (brokerauth_ratelimit_test.go).
+	svc.requestPolicy = nil
 	brokerID, signReq := setupSignedBrokerRequest(t, svc, s)
 	now := strconv.FormatInt(time.Now().Unix(), 10)
 	revokedID := seedBrokerWithSecretState(t, s, store.BrokerSecretStatusRevoked, time.Time{})

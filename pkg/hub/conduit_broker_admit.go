@@ -59,8 +59,14 @@ func (s *Server) authenticateBrokerUpgrade(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "Broker authentication not enabled", nil)
 		return "", false
 	}
-	if _, err := s.brokerAuthService.ValidateBrokerSignature(r.Context(), r); err != nil {
-		slog.Error("HMAC validation failed for broker", "brokerID", brokerID, "error", err)
+	if _, err := s.brokerAuthService.validateBrokerRequest(r); err != nil {
+		if retry, limited := brokerAuthRetryAfter(err); limited {
+			writeBrokerAuthRateLimited(w, retry)
+			return "", false
+		}
+		if s.brokerAuthService.admitFailureEvent(r, string(brokerAuthFailureCode(err))) {
+			slog.Error("HMAC validation failed for broker", "brokerID", brokerID, "error", err)
+		}
 		writeError(w, http.StatusUnauthorized, ErrCodeBrokerAuthFailed, "Invalid broker signature", nil)
 		return "", false
 	}

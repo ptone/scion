@@ -731,20 +731,26 @@ func AuditableBrokerAuthMiddleware(svc *BrokerAuthService, logger AuditLogger) f
 			// Create base event
 			event := &BrokerAuthEvent{
 				BrokerID:  brokerID,
-				IPAddress: getClientIP(r),
+				IPAddress: svc.brokerClientIP(r),
 				UserAgent: r.UserAgent(),
 				Timestamp: time.Now(),
 			}
 
-			// Validate HMAC signature
-			identity, err := svc.ValidateBrokerSignature(r.Context(), r)
+			// Validate HMAC signature, behind the failure budget. A request
+			// the budget refuses writes no event; it is counted in the
+			// request policy's summary.
+			identity, err := svc.validateBrokerRequest(r)
 			if err != nil {
+				if retry, limited := brokerAuthRetryAfter(err); limited {
+					writeBrokerAuthRateLimited(w, retry)
+					return
+				}
 				event.EventType = BrokerAuthEventAuthFailure
 				event.Success = false
 				event.FailReason = err.Error()
 				event.FailureCode = brokerAuthFailureCode(err)
 
-				if logger != nil {
+				if logger != nil && svc.admitFailureEvent(r, string(event.FailureCode)) {
 					_ = logger.LogBrokerAuthEvent(r.Context(), event)
 				}
 
@@ -780,28 +786,6 @@ func AuditableBrokerAuthMiddleware(svc *BrokerAuthService, logger AuditLogger) f
 			serveAfterAuth(w, next, r.WithContext(ctx))
 		})
 	}
-}
-
-// getClientIP extracts the client IP address from the request.
-func getClientIP(r *http.Request) string {
-	// Check X-Forwarded-For first
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		// Take the first IP in the chain
-		for i := 0; i < len(xff); i++ {
-			if xff[i] == ',' {
-				return xff[:i]
-			}
-		}
-		return xff
-	}
-
-	// Check X-Real-IP
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		return xri
-	}
-
-	// Fall back to RemoteAddr
-	return r.RemoteAddr
 }
 
 // brokerAuditCredentialDetails returns the credential attribution recorded

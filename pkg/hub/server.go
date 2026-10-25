@@ -6714,6 +6714,9 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	if s.cspReportLimiter != nil {
 		s.cspReportLimiter.StartCleanup(ctx)
 	}
+	if s.brokerAuthService != nil {
+		s.brokerAuthService.StartRequestPolicy(ctx)
+	}
 
 	// Start OIDC key cleanup loop to remove expired rotated keys from JWKS.
 	if s.oidcKeyManager != nil {

@@ -153,6 +153,25 @@ func (l *geExchangeRateLimiter) Allow(clientIP string) (bool, int) {
 	return false, retrySeconds
 }
 
+// Refund returns the token an allowed Allow call took for clientIP, up to
+// burst. It does nothing when clientIP has no bucket (cleaned up since).
+// Callers refund only a call that was allowed, so a request that ends up
+// not being charged (for example a broker request whose signature checks
+// out) costs nothing net.
+func (l *geExchangeRateLimiter) Refund(clientIP string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	b, ok := l.buckets[clientIP]
+	if !ok {
+		return
+	}
+	b.tokens++
+	if b.tokens > float64(l.burst) {
+		b.tokens = float64(l.burst)
+	}
+}
+
 // Cleanup removes entries older than maxAge.
 func (l *geExchangeRateLimiter) Cleanup(now time.Time) {
 	l.mu.Lock()
