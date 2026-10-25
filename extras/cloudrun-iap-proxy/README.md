@@ -31,6 +31,7 @@ A lightweight Go reverse proxy designed to run on Google Cloud Run to front inte
 |----------------------|-------------|---------|----------|
 | `TARGET_URL` | Destination backend URL (e.g., `http://10.128.0.2:8080`) | — | **Yes** |
 | `PORT` | Listening port for the proxy server | `8080` | No |
+| `FORWARDED_PROTO` | Scheme of the front end that terminates client connections in front of the proxy (`https` or `http`). The proxy sends it to the backend as `X-Forwarded-Proto`, replacing any `X-Forwarded-Proto` or `Forwarded` header the client sent, so a client cannot claim TLS it did not use (the Scion Hub trusts this header from a proxy listed in `server.trusted_proxies`). Cloud Run's front end terminates TLS, so the default fits a Cloud Run deployment. | `https` | No |
 
 ## Deployment
 

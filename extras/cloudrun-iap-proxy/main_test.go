@@ -15,6 +15,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -77,7 +78,7 @@ func TestParseTargetURL(t *testing.T) {
 
 func TestHealthCheck(t *testing.T) {
 	target, _ := url.Parse("http://127.0.0.1:9999")
-	handler := newMux(target)
+	handler := newMux(target, defaultForwardedProto)
 
 	req := httptest.NewRequest(http.MethodGet, "/proxy-healthz", nil)
 	rr := httptest.NewRecorder()
@@ -134,7 +135,7 @@ func TestProxyForwardingAndIAPHeaders(t *testing.T) {
 		t.Fatalf("failed to parse backend url: %v", err)
 	}
 
-	handler := newMux(backendURL)
+	handler := newMux(backendURL, defaultForwardedProto)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents?filter=active", strings.NewReader("sample-payload"))
 	req.Header.Set("X-Goog-IAP-JWT-Assertion", "test-iap-jwt-token")
@@ -180,7 +181,7 @@ func TestProxyForwardingAndIAPHeaders(t *testing.T) {
 func TestProxyErrorReturns502(t *testing.T) {
 	// Point to unreachable local port
 	target, _ := url.Parse("http://127.0.0.1:54321")
-	handler := newMux(target)
+	handler := newMux(target, defaultForwardedProto)
 
 	req := httptest.NewRequest(http.MethodGet, "/some-route", nil)
 	rr := httptest.NewRecorder()
@@ -189,5 +190,72 @@ func TestProxyErrorReturns502(t *testing.T) {
 
 	if rr.Code != http.StatusBadGateway {
 		t.Fatalf("expected 502 Bad Gateway, got %d", rr.Code)
+	}
+}
+
+// A client-supplied forwarded protocol never reaches the backend: the proxy
+// replaces X-Forwarded-Proto with the front end's scheme and drops Forwarded,
+// whatever the client sent.
+func TestProxyReplacesClientForwardedProto(t *testing.T) {
+	for name, tc := range map[string]struct {
+		frontEnd string
+		tls      bool
+		want     string
+	}{
+		"https front end":           {frontEnd: "https", want: "https"},
+		"http front end":            {frontEnd: "http", want: "http"},
+		"proxy terminated TLS":      {frontEnd: "http", tls: true, want: "https"},
+		"default front end (https)": {frontEnd: defaultForwardedProto, want: "https"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var gotProto []string
+			var gotForwarded []string
+			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotProto = r.Header.Values("X-Forwarded-Proto")
+				gotForwarded = r.Header.Values("Forwarded")
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer backend.Close()
+			backendURL, err := url.Parse(backend.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/brokers/join", nil)
+			req.TLS = nil
+			if tc.tls {
+				req.TLS = &tls.ConnectionState{}
+			}
+			// What a client might send to claim TLS it did not use, or to
+			// contradict the proxy.
+			req.Header.Add("X-Forwarded-Proto", "https")
+			req.Header.Add("X-Forwarded-Proto", "ftp")
+			req.Header.Set("Forwarded", "for=198.51.100.7;proto=https")
+			rr := httptest.NewRecorder()
+			newMux(backendURL, tc.frontEnd).ServeHTTP(rr, req)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d", rr.Code)
+			}
+			if len(gotProto) != 1 || gotProto[0] != tc.want {
+				t.Errorf("backend X-Forwarded-Proto = %q, want exactly [%q]", gotProto, tc.want)
+			}
+			if len(gotForwarded) != 0 {
+				t.Errorf("backend Forwarded = %q, want none (client value dropped)", gotForwarded)
+			}
+		})
+	}
+}
+
+func TestParseForwardedProto(t *testing.T) {
+	for in, want := range map[string]string{"": "https", "https": "https", "HTTP": "http", " http ": "http"} {
+		got, err := parseForwardedProto(in)
+		if err != nil || got != want {
+			t.Errorf("parseForwardedProto(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"ftp", "https, http", "wss"} {
+		if _, err := parseForwardedProto(in); err == nil {
+			t.Errorf("parseForwardedProto(%q) accepted, want an error", in)
+		}
 	}
 }
