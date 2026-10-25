@@ -430,6 +430,29 @@ authentication is needed — the agents are co-located with the Hub.
 To use the `scion` CLI from your local machine against the deployed Hub,
 configure it to authenticate through IAP using the Cloud Run proxy URL.
 
+### Remote Runtime Broker access
+
+Remote Runtime Brokers (brokers on another machine, as opposed to the one
+co-located in the Hub process) must connect to the Hub directly, not through
+the Cloud Run IAP proxy. Broker join, secret rotation and the broker control
+channel are not accepted through the proxy. Web, CLI and agent traffic are
+unaffected.
+
+This deployment has no direct TLS endpoint for the Hub: the VM has no public
+IP, and the Hub serves plain HTTP on port 8080 to the proxy only. A broker
+reaches the Hub over a loopback address through an SSH local forward (the
+existing IAP SSH firewall rule already permits it):
+
+```bash
+gcloud compute ssh scion-hub-my-hub \
+  --zone=us-central1-b --project=PROJECT_ID \
+  --tunnel-through-iap -- -N -L 18080:127.0.0.1:8080
+```
+
+Then use `http://127.0.0.1:18080` as the broker's Hub URL. The forward must
+stay up for as long as the broker is connected, and the broker host's identity
+needs SSH access to the VM through IAP.
+
 ### SSH access (via gcloud)
 
 Since the VM has no public IP, use `gcloud compute ssh` to connect:
