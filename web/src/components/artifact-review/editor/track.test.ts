@@ -1091,6 +1091,33 @@ describe('lists and tables keep their source', () => {
     expect(text(c)).toBe('* one\n* two {++X++}words\n* three\n\n+ plus\n');
   });
 
+  it('patches one item of a long list the editor writes differently', async () => {
+    // The editor writes every * bullet as - and every &amp; as &: across
+    // the whole list that is more difference than the patch works
+    // through, so only the item is patched.
+    const items = Array.from({ length: 300 }, (_, i) => `* &amp; &amp; &amp; &amp; item ${i}`);
+    const md = `${items.join('\n')}\n`;
+    const { c, hints } = await open(md);
+    type(c, 'X', posOf(c, 'item 200'));
+    expect(hints).toEqual([]);
+    items[200] = '* &amp; &amp; &amp; &amp; {++X++}item 200';
+    expect(text(c)).toBe(`${items.join('\n')}\n`);
+  });
+
+  it('refuses structure edits in lists and tables with the list and table hint', async () => {
+    const md = '- one\n- two\n\n| a | b |\n|---|---|\n| c | d |\n';
+    const { c, hints } = await open(md);
+    // A deletion across two items, and across two cells.
+    deleteRange(c, posOf(c, 'one', 1), posOf(c, 'two', 1));
+    deleteRange(c, posOf(c, 'c'), posOf(c, 'd', 1));
+    // A split in an item (Enter).
+    select(c, posOf(c, 'one', 1));
+    splitBlock(c.view.state, c.view.dispatch);
+    expect(hints).toEqual(['list-table', 'list-table', 'list-table']);
+    expect(c.dirty).toBe(false);
+    expect(text(c)).toBe(md);
+  });
+
   it('keeps the numbers of an ordered list and of a nested one', async () => {
     const md = '3. three\n7. seven\n10. ten\n    1. nested one\n    1. nested two\n';
     const { c } = await open(md);
