@@ -17,6 +17,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -43,25 +44,31 @@ func forwardedProtoFor(req *http.Request) string {
 	return "http"
 }
 
-// setForwardingHeaders makes the proxy a clean trust boundary: every
-// forwarding header the client sent is removed, and the proxy states only
-// what it observed itself. The Scion hub trusts X-Forwarded-Proto from a
-// proxy listed in server.trusted_proxies, so a client value passed through
-// would let any client claim https.
-//   - Forwarded, X-Forwarded-Proto, X-Forwarded-For and X-Forwarded-Host
-//     from the client are dropped, whatever their number or form.
-//   - X-Forwarded-Proto is set, unconditionally, to forwardedProtoFor.
-//   - X-Forwarded-Host is set to servedHost, the Host this request arrived
-//     with.
-//   - X-Forwarded-For is left absent here; httputil.ReverseProxy then sets
-//     it to the immediate peer's address alone.
-func setForwardingHeaders(req *http.Request, servedHost string) {
+// setForwardingHeaders makes the proxy a clean trust boundary on out, the
+// outbound request, from in, the request the proxy received. Every forwarding
+// header the client sent is removed and the proxy states only what it
+// observed itself; the Scion hub trusts X-Forwarded-Proto from a proxy listed
+// in server.trusted_proxies, so a client value passed through would let any
+// client claim https.
+//   - Forwarded, X-Forwarded-Proto, X-Forwarded-For and X-Forwarded-Host are
+//     removed from out, whatever their number or form.
+//   - X-Forwarded-Proto is set to forwardedProtoFor(in).
+//   - X-Forwarded-Host is set to in.Host, the host this request arrived with.
+//   - X-Forwarded-For is set to the immediate peer's address alone.
+//
+// It runs in ReverseProxy.Rewrite, which runs after the hop-by-hop headers
+// (including those a client names in Connection) are removed from out, so a
+// client cannot strip the values set here.
+func setForwardingHeaders(out, in *http.Request) {
 	for _, h := range []string{"Forwarded", "X-Forwarded-Proto", "X-Forwarded-For", "X-Forwarded-Host"} {
-		req.Header.Del(h)
+		out.Header.Del(h)
 	}
-	req.Header.Set("X-Forwarded-Proto", forwardedProtoFor(req))
-	if servedHost != "" {
-		req.Header.Set("X-Forwarded-Host", servedHost)
+	out.Header.Set("X-Forwarded-Proto", forwardedProtoFor(in))
+	if in.Host != "" {
+		out.Header.Set("X-Forwarded-Host", in.Host)
+	}
+	if peer, _, err := net.SplitHostPort(in.RemoteAddr); err == nil && peer != "" {
+		out.Header.Set("X-Forwarded-For", peer)
 	}
 }
 
@@ -70,32 +77,21 @@ func setForwardingHeaders(req *http.Request, servedHost string) {
 // replacing every client forwarding header (setForwardingHeaders).
 func newProxy(targetURL *url.URL) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
-		Director: func(req *http.Request) {
-			servedHost := req.Host
-			req.URL.Scheme = targetURL.Scheme
-			req.URL.Host = targetURL.Host
-			req.Host = targetURL.Host
-			setForwardingHeaders(req, servedHost)
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			out := pr.Out
+			out.URL.Scheme = targetURL.Scheme
+			out.URL.Host = targetURL.Host
+			out.Host = targetURL.Host
+			setForwardingHeaders(out, pr.In)
 
-			// Ensure all IAP headers are explicitly preserved and logged
-			iapJWT := req.Header.Get("X-Goog-IAP-JWT-Assertion")
-			iapEmail := req.Header.Get("X-Goog-Authenticated-User-Email")
-			iapID := req.Header.Get("X-Goog-Authenticated-User-Id")
-
+			// IAP headers pass through unchanged (Rewrite keeps every
+			// non-hop-by-hop header); log whether they are present.
+			iapJWT := out.Header.Get("X-Goog-IAP-JWT-Assertion")
+			iapEmail := out.Header.Get("X-Goog-Authenticated-User-Email")
 			if iapJWT != "" || iapEmail != "" {
-				log.Printf("[Proxy] %s %s | IAP Auth Header Present | Email: %q | JWT Len: %d", req.Method, req.URL.Path, iapEmail, len(iapJWT))
+				log.Printf("[Proxy] %s %s | IAP Auth Header Present | Email: %q | JWT Len: %d", out.Method, out.URL.Path, iapEmail, len(iapJWT))
 			} else {
-				log.Printf("[Proxy] %s %s | No IAP Auth Header Present", req.Method, req.URL.Path)
-			}
-
-			if iapJWT != "" {
-				req.Header.Set("X-Goog-IAP-JWT-Assertion", iapJWT)
-			}
-			if iapEmail != "" {
-				req.Header.Set("X-Goog-Authenticated-User-Email", iapEmail)
-			}
-			if iapID != "" {
-				req.Header.Set("X-Goog-Authenticated-User-Id", iapID)
+				log.Printf("[Proxy] %s %s | No IAP Auth Header Present", out.Method, out.URL.Path)
 			}
 		},
 		FlushInterval: 100 * time.Millisecond,
