@@ -21,6 +21,7 @@ import (
 	"compress/gzip"
 	"context"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"math"
 	"net/http"
@@ -439,15 +440,19 @@ func TestExtract_ImplicitParentDirsCharged(t *testing.T) {
 	assert.Equal(t, 4, b.entries)
 }
 
-// A zip whose central directory declares huge sizes (up to the maximum
-// uint64) is refused from the central directory, without the sum wrapping.
+// A zip whose central directory declares a huge size after a small entry is
+// refused from the central directory: the sum of declared sizes cannot wrap
+// (with a plain sum, 1 + MaxUint64 wraps to 0 and "a" would be written).
 func TestExtractZip_HugeDeclaredSizesRefused(t *testing.T) {
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
-	for _, name := range []string{"a", "b"} {
+	for _, e := range []struct {
+		name string
+		size uint64
+	}{{"a", 1}, {"b", math.MaxUint64}} {
 		w, err := zw.CreateRaw(&zip.FileHeader{
-			Name: name, Method: zip.Store,
-			CompressedSize64: 1, UncompressedSize64: math.MaxUint64, CRC32: 0,
+			Name: e.name, Method: zip.Store,
+			CompressedSize64: 1, UncompressedSize64: e.size, CRC32: crc32.ChecksumIEEE([]byte("x")),
 		})
 		require.NoError(t, err)
 		_, err = w.Write([]byte("x"))
@@ -457,6 +462,26 @@ func TestExtractZip_HugeDeclaredSizesRefused(t *testing.T) {
 	zipPath := writeArchive(t, buf.Bytes(), "huge.zip")
 	dest := t.TempDir()
 	assert.ErrorIs(t, extractZip(zipPath, dest, &fetchBudget{maxBytes: 1 << 20, maxEntries: 100}), ErrRemoteTemplateTooLarge)
+	assert.Zero(t, dirFileCount(t, dest), "refused before any entry is written")
+}
+
+// A tar header declaring a huge size after a small entry is refused by the
+// scan as too large: the sum of declared sizes cannot wrap (with a plain
+// sum, 1 + MaxInt64 goes negative and the scan would go on reading).
+func TestExtractTarGz_HugeDeclaredSizeRefused(t *testing.T) {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	require.NoError(t, tw.WriteHeader(&tar.Header{Typeflag: tar.TypeReg, Name: "a", Size: 1, Mode: 0o644}))
+	_, err := tw.Write([]byte("x"))
+	require.NoError(t, err)
+	require.NoError(t, tw.WriteHeader(&tar.Header{Typeflag: tar.TypeReg, Name: "b", Size: math.MaxInt64, Mode: 0o644, Format: tar.FormatPAX}))
+	// The body is never written: WriteHeader has already written the header
+	// blocks, and the archive ends there (tw is deliberately not closed).
+	require.NoError(t, gz.Close())
+	tgz := writeArchive(t, buf.Bytes(), "huge.tar.gz")
+	dest := t.TempDir()
+	assert.ErrorIs(t, extractTarGz(tgz, dest, &fetchBudget{maxBytes: 1 << 20, maxEntries: 100}), ErrRemoteTemplateTooLarge)
 	assert.Zero(t, dirFileCount(t, dest))
 }
 
