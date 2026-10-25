@@ -285,13 +285,13 @@ func TestPrepareEffectiveSettingsPathEdits(t *testing.T) {
 		{Path: []string{"server", "log_format"}, Value: ""},                             // absent == "": no effect
 		{Path: []string{"server", "database", "driver"}, Value: ""},                     // creates an empty block: no effect
 		{Path: []string{"server", "hub", "port"}, Value: 9999},                          // effect
-		{Path: []string{"server", "hub", "cors", "allowed_origins"}, Value: []string{}}, // nil -> [] has effect
+		{Path: []string{"server", "hub", "cors", "allowed_methods"}, Value: []string{}}, // nil -> [] has effect
 	})
 	unlock()
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"server.hub.cors.allowed_origins", "server.hub.port"}
+	want := []string{"server.hub.cors.allowed_methods", "server.hub.port"}
 	got := append([]string{}, staged.Changed...)
 	sort.Strings(got)
 	if fmt.Sprint(got) != fmt.Sprint(want) {

@@ -2340,6 +2340,9 @@ func TestInvalidJSON(t *testing.T) {
 
 func TestCORSHeaders(t *testing.T) {
 	srv, _ := testServer(t)
+	// Hub CORS is off by default; opt in with the listed origin.
+	srv.config.CORSEnabled = true
+	srv.config.CORSAllowedOrigins = []string{"http://localhost:3000"}
 
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	req.Header.Set("Origin", "http://localhost:3000")
@@ -2359,6 +2362,9 @@ func TestCORSHeaders(t *testing.T) {
 
 func TestCORSPreflight(t *testing.T) {
 	srv, _ := testServer(t)
+	// Hub CORS is off by default; opt in with the listed origin.
+	srv.config.CORSEnabled = true
+	srv.config.CORSAllowedOrigins = []string{"http://localhost:3000"}
 
 	req := httptest.NewRequest(http.MethodOptions, "/api/v1/agents", nil)
 	req.Header.Set("Origin", "http://localhost:3000")

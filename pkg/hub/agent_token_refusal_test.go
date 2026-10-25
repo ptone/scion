@@ -141,6 +141,10 @@ func serveAuditRoute(h http.Handler, set func(*http.Request)) rawResponse {
 // authentication are kept and nothing authentication set is.
 func TestUniformRefusalResponsesOnAuditRoute(t *testing.T) {
 	srv, s, _, project := setupCredentialTestServer(t)
+	// Hub CORS is off by default; opt in for the request origin, so the
+	// CORS headers set before authentication are part of the comparison.
+	srv.config.CORSEnabled = true
+	srv.config.CORSAllowedOrigins = []string{"https://outer.example"}
 	enforceRunScopeForRefusals(srv, s)
 	cases := agentTokenRefusalCases(t, srv, s, project)
 	h := withTestOuterHeader(srv.Handler())

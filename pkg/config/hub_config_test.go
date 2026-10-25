@@ -53,8 +53,11 @@ func TestDefaultGlobalConfig(t *testing.T) {
 		t.Errorf("expected WriteTimeout 60s, got %v", cfg.Hub.WriteTimeout)
 	}
 
-	if !cfg.Hub.CORSEnabled {
-		t.Error("expected CORS to be enabled by default")
+	if cfg.Hub.CORSEnabled {
+		t.Error("expected Hub CORS to be disabled by default")
+	}
+	if len(cfg.Hub.CORSAllowedOrigins) != 0 {
+		t.Errorf("expected no Hub CORS origins by default, got %q", cfg.Hub.CORSAllowedOrigins)
 	}
 
 	if cfg.Database.Driver != "sqlite" {
@@ -103,7 +106,7 @@ func TestLoadGlobalConfigFromFile(t *testing.T) {
 hub:
   port: 8080
   host: "127.0.0.1"
-  corsEnabled: false
+  corsEnabled: true
 
 database:
   driver: postgres
@@ -129,8 +132,8 @@ logFormat: json # ignored
 		t.Errorf("expected Hub host '127.0.0.1', got %q", cfg.Hub.Host)
 	}
 
-	if cfg.Hub.CORSEnabled {
-		t.Error("expected CORS to be disabled")
+	if !cfg.Hub.CORSEnabled {
+		t.Error("expected CORS to be enabled by the file (the default is off)")
 	}
 
 	if cfg.Database.Driver != "postgres" {
@@ -1843,9 +1846,11 @@ func TestLoadGlobalConfig_ListFieldNormalization(t *testing.T) {
 			get: hubOrigins, want: []string{"https://a", "https://b"}},
 		{name: "env single origin trimmed", env: map[string]string{"SCION_SERVER_HUB_CORSALLOWEDORIGINS": "  https://only.example  "},
 			get: hubOrigins, want: []string{"https://only.example"}},
-		// An exported but empty variable is unset: the default stays.
-		{name: "env empty origin unset", env: map[string]string{"SCION_SERVER_HUB_CORSALLOWEDORIGINS": ""},
-			get: hubOrigins, want: []string{"*"}},
+		// An exported but empty variable is unset: the default stays. (The
+		// methods list, since the origins default is empty.)
+		{name: "env empty methods unset", env: map[string]string{"SCION_SERVER_HUB_CORSALLOWEDMETHODS": ""},
+			get:  func(gc *GlobalConfig) []string { return gc.Hub.CORSAllowedMethods },
+			want: []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}},
 		{name: "env hub methods", env: map[string]string{"SCION_SERVER_HUB_CORSALLOWEDMETHODS": "GET,POST"},
 			get: func(gc *GlobalConfig) []string { return gc.Hub.CORSAllowedMethods }, want: []string{"GET", "POST"}},
 		{name: "env hub headers", env: map[string]string{"SCION_SERVER_HUB_CORSALLOWEDHEADERS": "X-A, X-B"},

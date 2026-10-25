@@ -268,11 +268,12 @@ func TestWorkstation_PutServerConfig_ClearsFromPresence(t *testing.T) {
 			fileKeys: []string{"server.storage"},
 		},
 		{
-			// No cors block in the file: an absent block means CORS on, so
-			// the explicit false must create the block.
-			name:     "hub CORS off without a cors block",
-			body:     `{"server":{"hub":{"cors":{"enabled":false}}}}`,
-			want:     map[string]interface{}{"server.hub.cors.enabled": false},
+			// No cors block in the file: Hub CORS is off by default, so an
+			// absent block means CORS off and the explicit true must create
+			// the block.
+			name:     "hub CORS on without a cors block",
+			body:     `{"server":{"hub":{"cors":{"enabled":true}}}}`,
+			want:     map[string]interface{}{"server.hub.cors.enabled": true},
 			fileKeys: []string{"server.hub.cors.enabled"},
 		},
 		{
@@ -694,12 +695,13 @@ func TestHosted_PutServerConfig_Layer0EchoIgnored(t *testing.T) {
 	}
 }
 
-// The explicit false must take effect, not only appear in the file: the
-// loaded config has CORS off.
-func TestWorkstation_PutServerConfig_CORSOffTakesEffect(t *testing.T) {
+// An explicit value that differs from the default must take effect, not only
+// appear in the file: Hub CORS is off by default, so an explicit true turns
+// it on; broker CORS is on by default, so an explicit false turns it off.
+func TestWorkstation_PutServerConfig_CORSExplicitValueTakesEffect(t *testing.T) {
 	workstationHome(t) // no cors block
 	srv, _, _ := newSQLiteHubInMode(t, true, nil)
-	rr := putServerConfig(t, srv, `{"server":{"hub":{"cors":{"enabled":false}},"broker":{"cors":{"enabled":false}}}}`)
+	rr := putServerConfig(t, srv, `{"server":{"hub":{"cors":{"enabled":true}},"broker":{"cors":{"enabled":false}}}}`)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
 	}
@@ -707,8 +709,11 @@ func TestWorkstation_PutServerConfig_CORSOffTakesEffect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gc.Hub.CORSEnabled || gc.RuntimeBroker.CORSEnabled {
-		t.Errorf("CORS still on after an explicit false: hub=%v broker=%v", gc.Hub.CORSEnabled, gc.RuntimeBroker.CORSEnabled)
+	if !gc.Hub.CORSEnabled {
+		t.Errorf("Hub CORS still off after an explicit true")
+	}
+	if gc.RuntimeBroker.CORSEnabled {
+		t.Errorf("broker CORS still on after an explicit false")
 	}
 }
 

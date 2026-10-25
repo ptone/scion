@@ -86,6 +86,7 @@ In production mode, Scion mandates the use of TLS for all network traffic.
 - **HTTPS Enforcement**: The Hub server rejects non-HTTPS requests (unless configured for local development or behind a trusted TLS-terminating proxy).
 - **Security Headers**: Standard headers such as `Strict-Transport-Security` (HSTS), `X-Frame-Options`, and `Content-Security-Policy` are enforced.
 - **mTLS (Future)**: Support for Mutual TLS between Hub and Runtime Brokers is planned for high-security environments.
+- **Cross-Origin Requests (CORS)**: The Hub sends no CORS headers by default; the web UI calls the Hub API on its own origin. Operators can allow specific origins with [`server.hub.cors`](/scion/reference/server-config/#cors-serverhubcors). The Hub never sends `Access-Control-Allow-Credentials`.
 
 ### 2.2 WebSocket Security
 

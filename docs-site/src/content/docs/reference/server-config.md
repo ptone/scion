@@ -82,10 +82,21 @@ Controls the central Hub API server.
 
 #### CORS (`server.hub.cors`)
 
+The web UI calls the Hub API on its own origin (the Hub API is served on the web server under `/api/v1/`), and the CLI, agents and Runtime Brokers are not browsers, so none of them needs CORS. Hub CORS is therefore off by default, and the Hub sends no CORS headers.
+
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `enabled` | bool | `true` | Enable CORS. |
-| `allowed_origins` | list | `["*"]` | Allowed origins. |
+| `enabled` | bool | `false` | Enable CORS on the Hub API. A missing `server.hub.cors` block means off. |
+| `allowed_origins` | list | `[]` | Origins allowed to call the Hub cross-origin. Enabling CORS without listing origins allows none. `"*"` allows every origin; the Hub logs a warning at startup when it is set. |
+| `allowed_methods` | list | `GET, POST, PUT, PATCH, DELETE, OPTIONS` | Methods sent in `Access-Control-Allow-Methods` for an allowed origin. |
+| `allowed_headers` | list | `Authorization, Content-Type, X-Scion-Broker-Token, X-Scion-Agent-Token, X-API-Key` | Headers sent in `Access-Control-Allow-Headers` for an allowed origin. |
+| `max_age` | int | `3600` | Preflight cache lifetime in seconds. |
+
+The Hub never sends `Access-Control-Allow-Credentials`, so a browser does not send cookies or other credentials on a cross-origin request to the Hub and does not expose a credentialed response to the calling page.
+
+:::note[Upgrade note]
+Earlier releases enabled Hub CORS by default for every origin. A deployment that serves a browser client from a different origin than the Hub must now set `server.hub.cors.enabled: true` and list that origin in `allowed_origins`.
+:::
 
 #### Conduit (`server.hub.conduit`)
 

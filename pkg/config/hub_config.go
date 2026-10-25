@@ -1292,8 +1292,8 @@ func DefaultGlobalConfig() GlobalConfig {
 			Host:               "0.0.0.0",
 			ReadTimeout:        30 * time.Second,
 			WriteTimeout:       60 * time.Second,
-			CORSEnabled:        true,
-			CORSAllowedOrigins: []string{"*"},
+			CORSEnabled:        false, // off by default with no origins: the web UI calls the Hub same-origin (opt in with server.hub.cors)
+			CORSAllowedOrigins: []string{},
 			CORSAllowedMethods: []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 			CORSAllowedHeaders: []string{"Authorization", "Content-Type", "X-Scion-Broker-Token", "X-Scion-Agent-Token", "X-API-Key"},
 			CORSMaxAge:         3600,

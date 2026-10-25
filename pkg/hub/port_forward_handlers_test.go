@@ -403,6 +403,10 @@ func TestAgentPortProxyResponseIsSandboxed(t *testing.T) {
 // hub's own CORS middleware (never duplicated by the agent's copies).
 func TestAgentPortProxyResponseDoesNotRelayHubOriginStateHeaders(t *testing.T) {
 	srv, s := testServer(t)
+	// Hub CORS is off by default; opt in for the request origin so the
+	// hub-owned CORS headers below are present.
+	srv.config.CORSEnabled = true
+	srv.config.CORSAllowedOrigins = []string{"https://hub.example"}
 	hubHTTP := httptest.NewServer(srv.Handler())
 	t.Cleanup(hubHTTP.Close)
 

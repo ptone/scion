@@ -609,8 +609,8 @@ func DefaultServerConfig() ServerConfig {
 		Host:               "0.0.0.0",
 		ReadTimeout:        30 * time.Second,
 		WriteTimeout:       60 * time.Second,
-		CORSEnabled:        true,
-		CORSAllowedOrigins: []string{"*"},
+		CORSEnabled:        false, // off by default: the web UI calls the Hub same-origin (opt in with server.hub.cors)
+		CORSAllowedOrigins: []string{},
 		CORSAllowedMethods: []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		CORSAllowedHeaders: []string{
 			"Authorization", "Content-Type",
@@ -2530,6 +2530,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		return nil, err
 	}
 	for _, warning := range sharedDirLayoutWarnings(cfg.WorkspaceStorageConfig, cfg.SharedDirStorageConfig) {
+		slog.Warn(warning)
+	}
+	if warning := corsWildcardWarning(cfg); warning != "" {
 		slog.Warn(warning)
 	}
 	// The test-identity expiry and feature checks run in the auth
@@ -7622,7 +7625,26 @@ func traceableRequest(r *http.Request) bool {
 	return !logging.IsCredentialURL(r.URL)
 }
 
-// corsMiddleware adds CORS headers.
+// corsWildcardWarning returns the startup warning for a Hub whose CORS
+// settings allow every origin, or "" when they do not. CORS is off by
+// default with no allowed origins; a wildcard is only ever set explicitly.
+func corsWildcardWarning(cfg ServerConfig) string {
+	if !cfg.CORSEnabled {
+		return ""
+	}
+	for _, o := range cfg.CORSAllowedOrigins {
+		if o == "*" {
+			return `Hub CORS allows every origin (server.hub.cors.allowed_origins contains "*"); list the origins that need cross-origin access instead`
+		}
+	}
+	return ""
+}
+
+// corsMiddleware adds CORS headers for allowed origins. It never sends
+// Access-Control-Allow-Credentials: the allowed origin is echoed (also for
+// a configured "*"), so credentials would extend to every allowed origin.
+// Allowing credentials needs an explicit, non-wildcard origin list and a
+// separate change.
 func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")

@@ -40,10 +40,11 @@ func TestServerEnvValues_FalseIsFalse(t *testing.T) {
 	assert.Equal(t, false, k.Get("server.hub.auto_suspend_stalled"))
 	assert.Equal(t, false, k.Get("telemetry.enabled"))
 
-	t.Setenv("SCION_SERVER_HUB_CORS_ENABLED", "false")
+	// Hub CORS is off by default, so the env turns it on.
+	t.Setenv("SCION_SERVER_HUB_CORS_ENABLED", "true")
 	gc, err := LoadGlobalConfig(t.TempDir())
 	require.NoError(t, err)
-	assert.False(t, gc.Hub.CORSEnabled)
+	assert.True(t, gc.Hub.CORSEnabled)
 
 	// A value that does not parse stays a string in the loaders;
 	// ValidateServerEnv rejects it at startup.
