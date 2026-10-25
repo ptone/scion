@@ -445,8 +445,8 @@ func TestNewInjectedAgentHubClient_InjectedHostMustBeHostAddress(t *testing.T) {
 	}
 }
 
-// The refusal carries the endpoint it refused (for the caller's origin label)
-// and never shows its user info.
+// The refusal carries the endpoint it refused, redacted (for the caller's origin
+// label), and never shows its user info.
 func TestCheckUserHubTransport_RefusalCarriesEndpoint(t *testing.T) {
 	endpoint := "http://user:" + tpUserinfoSecret + "@10.0.0.1:9810"
 	err := CheckUserHubTransport(endpoint)
@@ -454,8 +454,11 @@ func TestCheckUserHubTransport_RefusalCarriesEndpoint(t *testing.T) {
 	if !errors.As(err, &refused) {
 		t.Fatalf("error %v is not a *TransportRefusalError", err)
 	}
-	if refused.Endpoint != endpoint {
-		t.Errorf("Endpoint = %q, want the refused endpoint", refused.Endpoint)
+	if refused.Endpoint != config.RedactURL(endpoint) {
+		t.Errorf("Endpoint = %q, want the refused endpoint redacted", refused.Endpoint)
+	}
+	if strings.Contains(refused.Endpoint, tpUserinfoSecret) {
+		t.Errorf("Endpoint %q holds the URL's user info", refused.Endpoint)
 	}
 	if !errors.Is(err, config.ErrPlaintextNonLoopback) {
 		t.Errorf("error %v does not wrap ErrPlaintextNonLoopback", err)

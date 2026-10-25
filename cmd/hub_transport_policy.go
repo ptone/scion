@@ -71,9 +71,12 @@ func hubTransportRefusal(endpoint string, err error) error {
 // hubEndpointOrigin names the setting endpoint came from: the source of
 // this invocation's hub (--hub flag, SCION_HUB_ENDPOINT or SCION_HUB_URL,
 // directory link, current context) when it is that hub, else the hub list
-// entry with that endpoint, else a generic label.
+// entry with that endpoint, else a generic label. endpoint may be redacted
+// (hubsync.TransportRefusalError carries the redacted form), so both sides are
+// compared redacted; hub list entries hold no user info or query.
 func hubEndpointOrigin(endpoint string) string {
-	if h := resolveCLIHub(); h.Endpoint != "" && h.Endpoint == endpoint {
+	endpoint = config.RedactURL(endpoint)
+	if h := resolveCLIHub(); h.Endpoint != "" && config.RedactURL(h.Endpoint) == endpoint {
 		if h.Source == useSourceContext || h.Source == useSourceDirectory {
 			if name := hubListEntryName(endpoint); name != "" {
 				return h.Label + " (hub list entry " + strconv.Quote(name) + ")"

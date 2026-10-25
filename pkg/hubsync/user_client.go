@@ -36,14 +36,15 @@ import (
 // redacted.
 func CheckUserHubTransport(endpoint string) error {
 	if err := config.CheckHubTransport(endpoint); err != nil {
-		return &TransportRefusalError{Endpoint: endpoint, Err: err}
+		return &TransportRefusalError{Endpoint: config.RedactURL(endpoint), Err: err}
 	}
 	return nil
 }
 
 // TransportRefusalError is the refusal CheckUserHubTransport returns. Endpoint
-// is the hub URL that was refused, as given, so a caller can name where it came
-// from; Error never shows it (the wrapped rule error shows it redacted).
+// is the refused hub URL with its user info and credential query parameters
+// redacted (config.RedactURL), so a caller can name where it came from and no
+// later log or serialisation of the error can show a secret from the URL.
 type TransportRefusalError struct {
 	Endpoint string
 	Err      error
