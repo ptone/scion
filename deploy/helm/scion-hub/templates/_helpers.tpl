@@ -4508,8 +4508,8 @@ arrives through config.extra is held to the same rules as hub.trustedProxies.
 The settings file must carry a list. The hub decodes the server block as one
 unit (loadServerFromSettingsFile, yaml.v3 into a []string field), and a
 non-list value here is a decode error that makes it skip the entire server
-block, silently falling back to its defaults. Each item is split on commas as the hub splits it, and empty
-items are dropped as the hub drops them.
+block, silently falling back to its defaults. Each item is split on commas as
+the hub splits it, and empty items are dropped as the hub drops them.
 */}}
 {{- define "scion-hub.assertTrustedProxies" -}}
 {{- $server := dig "server" (dict) .doc }}
