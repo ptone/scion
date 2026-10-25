@@ -1146,6 +1146,7 @@ func TestFanOut_ConcurrentOverrunsSkipUntilAllReturn(t *testing.T) {
 	hung := newTokenBus()
 	f := newBoundedFanOut([]NamedEventBus{{Name: "relay", Bus: hung, Observer: true}})
 	f.ObserverWait = 500 * time.Millisecond
+	f.ObserverCallTimeout = time.Minute // the overruns end only when released
 	msg := messages.NewInstruction("user:alice", "agent:bot", "hi")
 
 	var wg sync.WaitGroup
@@ -1157,7 +1158,11 @@ func TestFanOut_ConcurrentOverrunsSkipUntilAllReturn(t *testing.T) {
 		}()
 	}
 	for i := 0; i < n; i++ {
-		<-hung.started
+		select {
+		case <-hung.started:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("only %d of %d observer calls started", i, n)
+		}
 	}
 	wg.Wait() // every Publish stopped waiting: n overruns
 
