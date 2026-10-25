@@ -28,15 +28,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// policyClock is a settable clock for the request policy.
-type policyClock struct{ t time.Time }
+// bapClock is a settable clock for the request policy.
+type bapClock struct{ t time.Time }
 
-func (c *policyClock) now() time.Time          { return c.t }
-func (c *policyClock) advance(d time.Duration) { c.t = c.t.Add(d) }
+func (c *bapClock) now() time.Time          { return c.t }
+func (c *bapClock) advance(d time.Duration) { c.t = c.t.Add(d) }
 
-func newClockedPolicy(t *testing.T) (*brokerAuthRequestPolicy, *policyClock, *bytes.Buffer) {
+func newBAPClockedPolicy(t *testing.T) (*brokerAuthRequestPolicy, *bapClock, *bytes.Buffer) {
 	t.Helper()
-	clock := &policyClock{t: time.Date(2026, 10, 25, 3, 0, 0, 0, time.UTC)}
+	clock := &bapClock{t: time.Date(2026, 10, 25, 3, 0, 0, 0, time.UTC)}
 	p := newBrokerAuthRequestPolicy()
 	p.setNow(clock.now)
 	var buf bytes.Buffer
@@ -44,7 +44,7 @@ func newClockedPolicy(t *testing.T) (*brokerAuthRequestPolicy, *policyClock, *by
 	return p, clock, &buf
 }
 
-func policyRequest(remoteAddr string) *http.Request {
+func bapRequest(remoteAddr string) *http.Request {
 	r := httptest.NewRequest(http.MethodGet, "/api/v1/runtime-brokers", nil)
 	r.RemoteAddr = remoteAddr
 	return r
@@ -54,7 +54,7 @@ func TestGEExchangeRateLimiter_RefundReturnsToken(t *testing.T) {
 	l := newGEExchangeRateLimiter()
 	l.rate = 0.0001
 	l.burst = 2
-	clock := &policyClock{t: time.Unix(1_800_000_000, 0)}
+	clock := &bapClock{t: time.Unix(1_800_000_000, 0)}
 	l.nowFunc = clock.now
 
 	ok, _ := l.Allow("a")
@@ -83,8 +83,8 @@ func TestGEExchangeRateLimiter_RefundReturnsToken(t *testing.T) {
 }
 
 func TestBrokerAuthRequestPolicy_RefundOnValidRequest(t *testing.T) {
-	p, _, _ := newClockedPolicy(t)
-	r := policyRequest("192.0.2.1:1000")
+	p, _, _ := newBAPClockedPolicy(t)
+	r := bapRequest("192.0.2.1:1000")
 	// Far more valid requests than any burst: each one is refunded.
 	for i := 0; i < 10*brokerAuthGlobalFailureBurst; i++ {
 		res, ok, _ := p.reserve(r, "broker-a")
@@ -92,7 +92,7 @@ func TestBrokerAuthRequestPolicy_RefundOnValidRequest(t *testing.T) {
 		p.complete(res, true)
 	}
 	// Failures are charged: the per-key burst is spent, then refused.
-	r2 := policyRequest("192.0.2.2:1000")
+	r2 := bapRequest("192.0.2.2:1000")
 	for i := 0; i < brokerAuthKeyFailureBurst; i++ {
 		res, ok, _ := p.reserve(r2, "broker-x")
 		require.True(t, ok, "failure %d", i)
@@ -104,13 +104,13 @@ func TestBrokerAuthRequestPolicy_RefundOnValidRequest(t *testing.T) {
 }
 
 func TestBrokerAuthRequestPolicy_GlobalRefusalReturnsPerKeyToken(t *testing.T) {
-	p, _, _ := newClockedPolicy(t)
+	p, _, _ := newBAPClockedPolicy(t)
 	for i := 0; i < brokerAuthGlobalFailureBurst; i++ {
-		res, ok, _ := p.reserve(policyRequest(fmt.Sprintf("198.51.100.%d:1", i%200+1)), "b")
+		res, ok, _ := p.reserve(bapRequest(fmt.Sprintf("198.51.100.%d:1", i%200+1)), "b")
 		require.True(t, ok)
 		p.complete(res, false)
 	}
-	r := policyRequest("192.0.2.77:1")
+	r := bapRequest("192.0.2.77:1")
 	for i := 0; i < 3*brokerAuthKeyFailureBurst; i++ {
 		_, ok, _ := p.reserve(r, "b")
 		require.False(t, ok, "the global budget is spent")
@@ -122,8 +122,8 @@ func TestBrokerAuthRequestPolicy_GlobalRefusalReturnsPerKeyToken(t *testing.T) {
 }
 
 func TestBrokerAuthRequestPolicy_EstablishedPairExpires(t *testing.T) {
-	p, clock, _ := newClockedPolicy(t)
-	r := policyRequest("192.0.2.5:1")
+	p, clock, _ := newBAPClockedPolicy(t)
+	r := bapRequest("192.0.2.5:1")
 	res, ok, _ := p.reserve(r, "broker-a")
 	require.True(t, ok)
 	require.False(t, res.viaPair)
@@ -143,28 +143,28 @@ func TestBrokerAuthRequestPolicy_EstablishedPairExpires(t *testing.T) {
 }
 
 func TestBrokerAuthRequestPolicy_ClientKey(t *testing.T) {
-	p, _, _ := newClockedPolicy(t)
+	p, _, _ := newBAPClockedPolicy(t)
 
-	r := policyRequest("192.0.2.9:4444")
+	r := bapRequest("192.0.2.9:4444")
 	r.Header.Set("X-Forwarded-For", "203.0.113.1")
 	r.Header.Set("X-Real-IP", "203.0.113.2")
 	assert.Equal(t, "192.0.2.9", p.clientKey(r), "forwarded headers from an unlisted peer are ignored")
 	assert.Equal(t, "192.0.2.9", p.clientIP(r))
 
-	r6 := policyRequest("[2001:db8:1:2:3:4:5:6]:4444")
+	r6 := bapRequest("[2001:db8:1:2:3:4:5:6]:4444")
 	assert.Equal(t, "2001:db8:1:2::/64", p.clientKey(r6), "IPv6 sources are keyed by /64")
 	assert.Equal(t, "2001:db8:1:2:3:4:5:6", p.clientIP(r6), "the audit address is the full peer")
 
-	mapped := policyRequest("[::ffff:192.0.2.9]:4444")
+	mapped := bapRequest("[::ffff:192.0.2.9]:4444")
 	assert.Equal(t, "192.0.2.9", p.clientKey(mapped))
 
-	relay := policyRequest(conduitRelayAdmitRemoteAddr)
+	relay := bapRequest(conduitRelayAdmitRemoteAddr)
 	relay = relay.WithContext(withBrokerAuthRelaySource(relay.Context(), "relay-7"))
 	assert.Equal(t, "relay:relay-7", p.clientKey(relay), "a relay admission is keyed by its relay instance")
 }
 
 func TestBrokerAuthFailureLog_DedupCapAndSummary(t *testing.T) {
-	p, clock, buf := newClockedPolicy(t)
+	p, clock, buf := newBAPClockedPolicy(t)
 	f := p.failures
 
 	assert.True(t, f.admit("192.0.2.1", "broker-a", "invalid_signature"), "the first failure is written")
@@ -202,7 +202,7 @@ func TestBrokerAuthFailureLog_DedupCapAndSummary(t *testing.T) {
 }
 
 func TestBrokerAuthFailureLog_HubWideCap(t *testing.T) {
-	p, _, _ := newClockedPolicy(t)
+	p, _, _ := newBAPClockedPolicy(t)
 	written := 0
 	for i := 0; i < 1000; i++ {
 		if p.failures.admit(fmt.Sprintf("src-%d", i), "b", "invalid_signature") {
@@ -214,7 +214,7 @@ func TestBrokerAuthFailureLog_HubWideCap(t *testing.T) {
 }
 
 func TestBrokerAuthRequestPolicy_BoundedUnderChurn(t *testing.T) {
-	p, clock, _ := newClockedPolicy(t)
+	p, clock, _ := newBAPClockedPolicy(t)
 	const maxN = 50
 	p.perKey.maxEntries = maxN
 	p.pairs.maxEntries = maxN
@@ -223,7 +223,7 @@ func TestBrokerAuthRequestPolicy_BoundedUnderChurn(t *testing.T) {
 	p.global.burst = 1 << 30 // isolate the per-key and set bounds
 
 	for i := 0; i < 20*maxN; i++ {
-		r := policyRequest(fmt.Sprintf("10.%d.%d.%d:1", i/65536, (i/256)%256, i%256))
+		r := bapRequest(fmt.Sprintf("10.%d.%d.%d:1", i/65536, (i/256)%256, i%256))
 		res, ok, _ := p.reserve(r, fmt.Sprintf("b-%d", i))
 		if ok {
 			p.complete(res, i%2 == 0)

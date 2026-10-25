@@ -42,27 +42,27 @@ import (
 // the middleware and service API, so they also build against a tree
 // without the policy.
 
-// secretReadCountingStore counts broker secret reads.
-type secretReadCountingStore struct {
+// bapSecretReadCountingStore counts broker secret reads.
+type bapSecretReadCountingStore struct {
 	store.Store
 	reads atomic.Int64
 }
 
-func (c *secretReadCountingStore) GetBrokerSecret(ctx context.Context, brokerID string) (*store.BrokerSecret, error) {
+func (c *bapSecretReadCountingStore) GetBrokerSecret(ctx context.Context, brokerID string) (*store.BrokerSecret, error) {
 	c.reads.Add(1)
 	return c.Store.GetBrokerSecret(ctx, brokerID)
 }
 
-// policyTestBroker is a broker with an active secret that can sign
+// bapTestBroker is a broker with an active secret that can sign
 // requests from a chosen client address.
-type policyTestBroker struct {
+type bapTestBroker struct {
 	id     string
 	secret []byte
 	svc    *BrokerAuthService
 	nonce  atomic.Int64
 }
 
-func newPolicyTestBroker(t *testing.T, svc *BrokerAuthService, s store.Store) *policyTestBroker {
+func newBAPTestBroker(t *testing.T, svc *BrokerAuthService, s store.Store) *bapTestBroker {
 	t.Helper()
 	ctx := context.Background()
 	id := uuid.New().String()
@@ -75,11 +75,11 @@ func newPolicyTestBroker(t *testing.T, svc *BrokerAuthService, s store.Store) *p
 		BrokerID: id, SecretKey: secret,
 		Algorithm: store.BrokerSecretAlgorithmHMACSHA256, Status: store.BrokerSecretStatusActive,
 	}))
-	return &policyTestBroker{id: id, secret: secret, svc: svc}
+	return &bapTestBroker{id: id, secret: secret, svc: svc}
 }
 
 // signed returns a validly signed request from remoteAddr.
-func (b *policyTestBroker) signed(remoteAddr string) *http.Request {
+func (b *bapTestBroker) signed(remoteAddr string) *http.Request {
 	n := b.nonce.Add(1)
 	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
 	nonce := fmt.Sprintf("policy-%s-%d", b.id[:8], n)
@@ -94,38 +94,38 @@ func (b *policyTestBroker) signed(remoteAddr string) *http.Request {
 	return req
 }
 
-// badSignature returns a request for brokerID from remoteAddr whose
+// bapBadSignature returns a request for brokerID from remoteAddr whose
 // signature does not verify. Every request has a fresh nonce, so without a
 // budget each one reaches the secret read and the HMAC.
-var badSignatureNonce atomic.Int64
+var bapBadSignatureNonce atomic.Int64
 
-func badSignature(brokerID, remoteAddr string) *http.Request {
+func bapBadSignature(brokerID, remoteAddr string) *http.Request {
 	req := unsignedBrokerRequest(brokerID, strconv.FormatInt(time.Now().Unix(), 10),
-		fmt.Sprintf("policy-bad-%d", badSignatureNonce.Add(1)))
+		fmt.Sprintf("policy-bad-%d", bapBadSignatureNonce.Add(1)))
 	req.RemoteAddr = remoteAddr
 	return req
 }
 
-func policyTestAddr(i int) string {
+func bapTestAddr(i int) string {
 	return fmt.Sprintf("198.51.%d.%d:40000", (i/250)%250, i%250+1)
 }
 
-type policyTestServer struct {
+type bapTestServer struct {
 	svc    *BrokerAuthService
-	counts *secretReadCountingStore
+	counts *bapSecretReadCountingStore
 	audit  *mockAuditLogger
 	h      http.Handler
 	served atomic.Int64
 }
 
-func newPolicyTestServer(t *testing.T) *policyTestServer {
+func newBAPTestServer(t *testing.T) *bapTestServer {
 	t.Helper()
 	base, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
-	counts := &secretReadCountingStore{Store: base}
+	counts := &bapSecretReadCountingStore{Store: base}
 	svc := NewBrokerAuthService(DefaultBrokerAuthConfig(), counts)
 	t.Cleanup(svc.Close)
-	ts := &policyTestServer{svc: svc, counts: counts, audit: &mockAuditLogger{}}
+	ts := &bapTestServer{svc: svc, counts: counts, audit: &mockAuditLogger{}}
 	ts.h = AuditableBrokerAuthMiddleware(svc, ts.audit)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		ts.served.Add(1)
 		w.WriteHeader(http.StatusOK)
@@ -133,13 +133,13 @@ func newPolicyTestServer(t *testing.T) *policyTestServer {
 	return ts
 }
 
-func (ts *policyTestServer) do(req *http.Request) *httptest.ResponseRecorder {
+func (ts *bapTestServer) do(req *http.Request) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
 	ts.h.ServeHTTP(rec, req)
 	return rec
 }
 
-func (ts *policyTestServer) failureEvents() int {
+func (ts *bapTestServer) failureEvents() int {
 	n := 0
 	for _, e := range ts.audit.brokerEvents {
 		if e.EventType == BrokerAuthEventAuthFailure {
@@ -150,14 +150,14 @@ func (ts *policyTestServer) failureEvents() int {
 }
 
 func TestBrokerAuthPolicy_SingleSourceBurstIsRefusedBeforeSecretRead(t *testing.T) {
-	ts := newPolicyTestServer(t)
-	broker := newPolicyTestBroker(t, ts.svc, ts.counts)
+	ts := newBAPTestServer(t)
+	broker := newBAPTestBroker(t, ts.svc, ts.counts)
 	const addr = "192.0.2.10:5555"
 
 	var refused int
 	var firstRefusal *httptest.ResponseRecorder
 	for i := 0; i < 200; i++ {
-		rec := ts.do(badSignature(broker.id, addr))
+		rec := ts.do(bapBadSignature(broker.id, addr))
 		switch rec.Code {
 		case http.StatusUnauthorized:
 		case http.StatusTooManyRequests:
@@ -183,19 +183,19 @@ func TestBrokerAuthPolicy_SingleSourceBurstIsRefusedBeforeSecretRead(t *testing.
 	assert.Equal(t, int64(200), reads+int64(refused), "every request is either checked or refused")
 
 	before := ts.counts.reads.Load()
-	ts.do(badSignature(broker.id, addr))
+	ts.do(bapBadSignature(broker.id, addr))
 	assert.Equal(t, before, ts.counts.reads.Load(), "a refused request must not read the broker secret")
 }
 
 func TestBrokerAuthPolicy_DistributedBurstHitsGlobalLimit(t *testing.T) {
-	ts := newPolicyTestServer(t)
-	broker := newPolicyTestBroker(t, ts.svc, ts.counts)
+	ts := newBAPTestServer(t)
+	broker := newBAPTestBroker(t, ts.svc, ts.counts)
 
 	// 40 sources x 10 failures: each source stays inside its own burst.
 	var refused int
 	for round := 0; round < 10; round++ {
 		for src := 0; src < 40; src++ {
-			if ts.do(badSignature(broker.id, policyTestAddr(src))).Code == http.StatusTooManyRequests {
+			if ts.do(bapBadSignature(broker.id, bapTestAddr(src))).Code == http.StatusTooManyRequests {
 				refused++
 			}
 		}
@@ -205,9 +205,9 @@ func TestBrokerAuthPolicy_DistributedBurstHitsGlobalLimit(t *testing.T) {
 }
 
 func TestBrokerAuthPolicy_EstablishedBrokerPassesDuringFlood(t *testing.T) {
-	ts := newPolicyTestServer(t)
-	established := newPolicyTestBroker(t, ts.svc, ts.counts)
-	newcomer := newPolicyTestBroker(t, ts.svc, ts.counts)
+	ts := newBAPTestServer(t)
+	established := newBAPTestBroker(t, ts.svc, ts.counts)
+	newcomer := newBAPTestBroker(t, ts.svc, ts.counts)
 	const brokerAddr = "203.0.113.20:7000"
 
 	require.Equal(t, http.StatusOK, ts.do(established.signed(brokerAddr)).Code)
@@ -216,7 +216,7 @@ func TestBrokerAuthPolicy_EstablishedBrokerPassesDuringFlood(t *testing.T) {
 	// budget refuses, then probe at once, before it refills.
 	drained := false
 	for i := 0; i < 1000 && !drained; i++ {
-		drained = ts.do(badSignature(established.id, policyTestAddr(i%80))).Code == http.StatusTooManyRequests
+		drained = ts.do(bapBadSignature(established.id, bapTestAddr(i%80))).Code == http.StatusTooManyRequests
 	}
 	require.True(t, drained, "the flood must reach the global limit")
 	require.Equal(t, http.StatusTooManyRequests, ts.do(newcomer.signed("203.0.113.99:7000")).Code,
@@ -230,20 +230,20 @@ func TestBrokerAuthPolicy_EstablishedBrokerPassesDuringFlood(t *testing.T) {
 
 func TestBrokerAuthPolicy_FailedAuthAuditVolumeIsBounded(t *testing.T) {
 	t.Run("one source", func(t *testing.T) {
-		ts := newPolicyTestServer(t)
-		broker := newPolicyTestBroker(t, ts.svc, ts.counts)
+		ts := newBAPTestServer(t)
+		broker := newBAPTestBroker(t, ts.svc, ts.counts)
 		for i := 0; i < 1000; i++ {
-			ts.do(badSignature(broker.id, "192.0.2.30:1000"))
+			ts.do(bapBadSignature(broker.id, "192.0.2.30:1000"))
 		}
 		// One full event per (source, broker, failure code) per window.
 		assert.Equal(t, 1, ts.failureEvents())
 	})
 	t.Run("many sources", func(t *testing.T) {
-		ts := newPolicyTestServer(t)
-		broker := newPolicyTestBroker(t, ts.svc, ts.counts)
+		ts := newBAPTestServer(t)
+		broker := newBAPTestBroker(t, ts.svc, ts.counts)
 		start := time.Now()
 		for src := 0; src < 300; src++ {
-			ts.do(badSignature(broker.id, policyTestAddr(src)))
+			ts.do(bapBadSignature(broker.id, bapTestAddr(src)))
 		}
 		// The hub-wide cap: a burst of 50 plus 5/s while the test runs.
 		limit := 50 + int(5*time.Since(start).Seconds()) + 1
@@ -253,9 +253,9 @@ func TestBrokerAuthPolicy_FailedAuthAuditVolumeIsBounded(t *testing.T) {
 }
 
 func TestBrokerAuthPolicy_LowRateFailureIsLogged(t *testing.T) {
-	ts := newPolicyTestServer(t)
-	broker := newPolicyTestBroker(t, ts.svc, ts.counts)
-	rec := ts.do(badSignature(broker.id, "192.0.2.40:1000"))
+	ts := newBAPTestServer(t)
+	broker := newBAPTestBroker(t, ts.svc, ts.counts)
+	rec := ts.do(bapBadSignature(broker.id, "192.0.2.40:1000"))
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
 	require.Equal(t, 1, ts.failureEvents())
 	e := ts.audit.brokerEvents[0]
@@ -266,9 +266,9 @@ func TestBrokerAuthPolicy_LowRateFailureIsLogged(t *testing.T) {
 
 func TestBrokerAuthPolicy_ForwardedHeaderFromUnlistedPeerIsIgnored(t *testing.T) {
 	t.Run("audit address", func(t *testing.T) {
-		ts := newPolicyTestServer(t)
-		broker := newPolicyTestBroker(t, ts.svc, ts.counts)
-		req := badSignature(broker.id, "192.0.2.50:1000")
+		ts := newBAPTestServer(t)
+		broker := newBAPTestBroker(t, ts.svc, ts.counts)
+		req := bapBadSignature(broker.id, "192.0.2.50:1000")
 		req.Header.Set("X-Forwarded-For", "203.0.113.7")
 		req.Header.Set("X-Real-IP", "203.0.113.8")
 		ts.do(req)
@@ -276,12 +276,12 @@ func TestBrokerAuthPolicy_ForwardedHeaderFromUnlistedPeerIsIgnored(t *testing.T)
 		assert.Equal(t, "192.0.2.50", ts.audit.brokerEvents[0].IPAddress)
 	})
 	t.Run("budget key", func(t *testing.T) {
-		ts := newPolicyTestServer(t)
-		broker := newPolicyTestBroker(t, ts.svc, ts.counts)
+		ts := newBAPTestServer(t)
+		broker := newBAPTestBroker(t, ts.svc, ts.counts)
 		var refused int
 		for i := 0; i < 100; i++ {
-			req := badSignature(broker.id, "192.0.2.51:1000")
-			req.Header.Set("X-Forwarded-For", policyTestAddr(i)[:len(policyTestAddr(i))-len(":40000")])
+			req := bapBadSignature(broker.id, "192.0.2.51:1000")
+			req.Header.Set("X-Forwarded-For", bapTestAddr(i)[:len(bapTestAddr(i))-len(":40000")])
 			if ts.do(req).Code == http.StatusTooManyRequests {
 				refused++
 			}
@@ -291,14 +291,14 @@ func TestBrokerAuthPolicy_ForwardedHeaderFromUnlistedPeerIsIgnored(t *testing.T)
 }
 
 func TestBrokerAuthPolicy_UpgradeRefusedBeforeHandshake(t *testing.T) {
-	ts := newPolicyTestServer(t)
-	broker := newPolicyTestBroker(t, ts.svc, ts.counts)
+	ts := newBAPTestServer(t)
+	broker := newBAPTestBroker(t, ts.svc, ts.counts)
 	srv := &Server{brokerAuthService: ts.svc}
 	const addr = "192.0.2.60:1000"
 	var last *httptest.ResponseRecorder
 	for i := 0; i < 100; i++ {
 		last = httptest.NewRecorder()
-		if _, ok := srv.authenticateBrokerUpgrade(last, badSignature(broker.id, addr)); ok {
+		if _, ok := srv.authenticateBrokerUpgrade(last, bapBadSignature(broker.id, addr)); ok {
 			t.Fatal("a bad signature must not authenticate")
 		}
 	}
@@ -308,20 +308,20 @@ func TestBrokerAuthPolicy_UpgradeRefusedBeforeHandshake(t *testing.T) {
 
 func TestBrokerAuthPolicy_LegitimateTrafficIsNotRefused(t *testing.T) {
 	t.Run("steady load from one broker", func(t *testing.T) {
-		ts := newPolicyTestServer(t)
-		broker := newPolicyTestBroker(t, ts.svc, ts.counts)
+		ts := newBAPTestServer(t)
+		broker := newBAPTestBroker(t, ts.svc, ts.counts)
 		for i := 0; i < 2000; i++ {
 			rec := ts.do(broker.signed("203.0.113.30:9000"))
 			require.Equal(t, http.StatusOK, rec.Code, "request %d: %s", i, rec.Body.String())
 		}
 	})
 	t.Run("reconnect wave, sequential", func(t *testing.T) {
-		ts := newPolicyTestServer(t)
+		ts := newBAPTestServer(t)
 		// More brokers than the global burst: each valid request is
 		// refunded, so none is refused.
 		for i := 0; i < 400; i++ {
-			b := newPolicyTestBroker(t, ts.svc, ts.counts)
-			rec := ts.do(b.signed(policyTestAddr(i)))
+			b := newBAPTestBroker(t, ts.svc, ts.counts)
+			rec := ts.do(b.signed(bapTestAddr(i)))
 			require.Equal(t, http.StatusOK, rec.Code, "broker %d: %s", i, rec.Body.String())
 		}
 	})
@@ -329,16 +329,16 @@ func TestBrokerAuthPolicy_LegitimateTrafficIsNotRefused(t *testing.T) {
 	// its signature is checked, so a wave is never refused while fewer than
 	// the burst (30 per source, 200 hub-wide) are checked at once.
 	concurrentWave := func(t *testing.T, n int, addr func(i int) string) {
-		ts := newPolicyTestServer(t)
-		brokers := make([]*policyTestBroker, n)
+		ts := newBAPTestServer(t)
+		brokers := make([]*bapTestBroker, n)
 		for i := range brokers {
-			brokers[i] = newPolicyTestBroker(t, ts.svc, ts.counts)
+			brokers[i] = newBAPTestBroker(t, ts.svc, ts.counts)
 		}
 		var wg sync.WaitGroup
 		var refused atomic.Int64
 		for i, b := range brokers {
 			wg.Add(1)
-			go func(i int, b *policyTestBroker) {
+			go func(i int, b *bapTestBroker) {
 				defer wg.Done()
 				for j := 0; j < 5; j++ {
 					rec := httptest.NewRecorder()
@@ -353,7 +353,7 @@ func TestBrokerAuthPolicy_LegitimateTrafficIsNotRefused(t *testing.T) {
 		assert.Zero(t, refused.Load())
 	}
 	t.Run("reconnect wave, concurrent, distinct addresses", func(t *testing.T) {
-		concurrentWave(t, 150, policyTestAddr)
+		concurrentWave(t, 150, bapTestAddr)
 	})
 	t.Run("reconnect wave, concurrent, brokers behind one address", func(t *testing.T) {
 		concurrentWave(t, 25, func(int) string { return "203.0.113.40:9000" })
