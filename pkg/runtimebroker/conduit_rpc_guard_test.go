@@ -370,6 +370,36 @@ func TestConduitRPCGuard_RespelledSignatureRefused(t *testing.T) {
 	assert.Len(t, g.served(), 1, "one signed request is served once")
 }
 
+// TestConduitRPCGuard_ReframedNonceRefused: the same signed request with a
+// signed header line moved into its nonce (same canonical input, same
+// signature, different nonce text; the session header stays listed) is
+// refused by the guard itself, with nothing else behind it.
+func TestConduitRPCGuard_ReframedNonceRefused(t *testing.T) {
+	g := newGuardFixtureBehind(t, "inc-1", conduit.BrokerRPCs(), func(h http.Handler) http.Handler { return h })
+	const path = "/api/v1/agents/a1/exec"
+	body := []byte(`{"command":["true"]}`)
+	signed, reframed := reframedTestHeaders(t, func() *http.Request {
+		req, err := http.NewRequest(http.MethodPost, "http://runtime-broker"+path, bytes.NewReader(body))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(conduit.BrokerRPCSessionHeader, g.sessionID)
+		return req
+	}, guardBrokerID, []byte(guardKey), conduit.BrokerRPCSessionHeader)
+	flat := func(h http.Header) map[string]string {
+		out := map[string]string{}
+		for k := range h {
+			out[k] = h.Get(k)
+		}
+		return out
+	}
+
+	assert.Equal(t, int32(http.StatusOK), g.call(t, http.MethodPost, path, "", flat(signed), body).GetStatus(), "first use")
+	resp := g.call(t, http.MethodPost, path, "", flat(reframed), body)
+	assert.Equal(t, int32(http.StatusUnauthorized), resp.GetStatus(), "re-framed request")
+	assert.Contains(t, string(resp.GetBody()), "request already served", "re-framed request")
+	assert.Len(t, g.served(), 1, "one signed request is served once")
+}
+
 // TestSeenOnce_EvictsAfterWindow: a key is refused until its expiry,
 // inclusive, and dropped once now is after it, so the store holds one
 // window at most.

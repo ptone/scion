@@ -759,3 +759,63 @@ func TestBrokerAuth_RespelledSignatureRefused(t *testing.T) {
 		})
 	}
 }
+
+// reframedTestHeaders returns the headers of a request signed by secret
+// with signed headers "Content-Type;<last>", and a copy whose nonce takes
+// in the signed Content-Type line and whose signed headers list only
+// <last>. Both have the same canonical signed input, which the function
+// asserts, so the copy carries the same valid signature.
+func reframedTestHeaders(t *testing.T, newReq func() *http.Request, brokerID string, secret []byte, last string) (signed, reframed http.Header) {
+	t.Helper()
+	req := newReq()
+	req.Header.Set(apiclient.HeaderSignedHeaders, "Content-Type;"+last)
+	if err := (&apiclient.HMACAuth{BrokerID: brokerID, SecretKey: secret}).ApplyAuth(req); err != nil {
+		t.Fatal(err)
+	}
+	signed = req.Header.Clone()
+
+	reframed = signed.Clone()
+	reframed[apiclient.HeaderNonce] = []string{signed.Get(apiclient.HeaderNonce) + "\ncontent-type:" + signed.Get("Content-Type")}
+	reframed[apiclient.HeaderSignedHeaders] = []string{last}
+
+	canonical := func(h http.Header) []byte {
+		r := newReq()
+		r.Header = h
+		return apiclient.BuildCanonicalString(r, h.Get(apiclient.HeaderTimestamp), h.Get(apiclient.HeaderNonce))
+	}
+	if !bytes.Equal(canonical(signed), canonical(reframed)) {
+		t.Fatal("the re-framed request does not have the same canonical signed input")
+	}
+	return signed, reframed
+}
+
+// TestBrokerAuth_ReframedNonceRefused: the same signed request with a
+// signed header line moved into its nonce (same canonical input, same
+// signature, different nonce text) is refused after the first is served.
+func TestBrokerAuth_ReframedNonceRefused(t *testing.T) {
+	secret := []byte("repeat-test-secret-32bytes!!!!!!")
+	for _, tg := range brokerAuthTargets(secret, 5*time.Minute) {
+		t.Run(tg.name, func(t *testing.T) {
+			signed, reframed := reframedTestHeaders(t, func() *http.Request {
+				req := newRepeatTestRequest()
+				req.Header.Set("X-A", "a-value")
+				return req
+			}, "broker-1", secret, "X-A")
+
+			first := newRepeatTestRequest()
+			first.Header = signed
+			if rr := serveOnce(tg.handler, first); rr.Code != http.StatusOK {
+				t.Fatalf("first request: got %d, want 200 (%s)", rr.Code, rr.Body.String())
+			}
+			again := newRepeatTestRequest()
+			again.Header = reframed
+			rr := serveOnce(tg.handler, again)
+			if rr.Code != http.StatusUnauthorized || !strings.Contains(rr.Body.String(), "request already served") {
+				t.Fatalf("re-framed request: got %d %q, want 401 request already served", rr.Code, rr.Body.String())
+			}
+			if got := tg.served.Load(); got != 1 {
+				t.Errorf("handler served %d requests, want 1", got)
+			}
+		})
+	}
+}

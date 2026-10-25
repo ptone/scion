@@ -220,10 +220,12 @@ func (g *conduitRPCGuard) check(ctx context.Context, req *wsprotocol.RequestEnve
 		return unauth("invalid signature")
 	}
 	// Recorded only after the signature verifies, so only a key holder can
-	// use up a nonce. The key is the nonce: it is covered by the
-	// signature, so unlike the signature header text (whose base64 decoder
-	// ignores unused bits and CR/LF) it has only one accepted spelling.
-	if !g.seen.add(nonce, requestTime.Add(g.maxSkew), now) {
+	// add entries. The key is the verified signature bytes: they depend only
+	// on the canonical signed input, so every header encoding of one signed
+	// request (signature text spellings, which the base64 decoder accepts
+	// with other unused bits or CR/LF; a nonce that takes in a signed header
+	// line) has the same key.
+	if !g.seen.add(string(sigBytes), requestTime.Add(g.maxSkew), now) {
 		return unauth("request already served")
 	}
 	return nil
