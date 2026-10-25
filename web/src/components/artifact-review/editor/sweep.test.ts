@@ -274,15 +274,21 @@ async function check(
   return out;
 }
 
+/**
+ * With SWEEP_REPORT set, prints a summary; with SWEEP_OUT=<prefix> too,
+ * writes <prefix>.<label>.summary.txt (the summary), .refusals.txt (every
+ * refused edit and its hint) and .json (every taken edit's opening and
+ * saved text, for a check with the hub's own parser).
+ */
 function report(label: string, t: Tally): void {
   if (!process.env.SWEEP_REPORT) return;
-  console.info(
-    `${label}: ${t.opened} opened, ${t.notOpened.length} not opened, ${t.applied} taken, refused ${JSON.stringify(t.refused)}, ${t.noOps} edits that change nothing, ${t.noLocality} without a locality check`
-  );
-  if (process.env.SWEEP_OUT)
-    writeFileSync(`${process.env.SWEEP_OUT}.${label}.refusals.txt`, t.refusals.join('\n'));
-  if (process.env.SWEEP_OUT)
-    writeFileSync(`${process.env.SWEEP_OUT}.${label}.json`, JSON.stringify(t.outputs));
+  const summary = `${label}: ${t.opened} opened, ${t.notOpened.length} not opened, ${t.applied} taken, refused ${JSON.stringify(t.refused)}, ${t.noOps} edits that change nothing, ${t.noLocality} without a locality check`;
+  console.info(summary);
+  const out = process.env.SWEEP_OUT;
+  if (!out) return;
+  writeFileSync(`${out}.${label}.summary.txt`, `${summary}\n`);
+  writeFileSync(`${out}.${label}.refusals.txt`, t.refusals.join('\n'));
+  writeFileSync(`${out}.${label}.json`, JSON.stringify(t.outputs));
 }
 
 describe('edit sweep', () => {
