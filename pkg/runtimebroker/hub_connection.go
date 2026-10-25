@@ -707,6 +707,11 @@ func HubClientForCredentials(creds *brokercredentials.BrokerCredentials) (hubcli
 	if creds == nil || creds.SecretKey == "" {
 		return nil, fmt.Errorf("hub credentials have no secret")
 	}
+	// The transport rule createHubConnection applies: credentials written
+	// before it existed may name a plain http network hub.
+	if err := config.CheckHubTransport(creds.HubEndpoint); err != nil {
+		return nil, fmt.Errorf("hub credentials: %w", err)
+	}
 	secretKey, err := base64.StdEncoding.DecodeString(creds.SecretKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode secret key: %w", err)
