@@ -95,3 +95,44 @@ func TestWarnColocatedBrokerEndpointTransport(t *testing.T) {
 		})
 	}
 }
+
+// The binding of the key to its field, through the real load path: with ONLY
+// server.trusted_proxies set (from settings.yaml, from the canonical env
+// name, or from its alias), the server's loaded config passes the startup
+// check and the hub config built from it carries the list as
+// TransportTrustedProxies while the legacy TrustedProxies (proxy header
+// login, client IP rate limits) stays empty. initHubServer passes this
+// hub.ServerConfig to hub.New; no code in cmd sets TrustedProxies.
+func TestTrustedProxies_LoadPathBindsTransportListOnly(t *testing.T) {
+	for name, tc := range map[string]struct {
+		file string
+		env  map[string]string
+	}{
+		"settings.yaml": {file: "schema_version: \"1\"\nserver:\n  trusted_proxies:\n    - 10.20.0.0/16\n    - 192.0.2.7\n"},
+		"env canonical": {file: "schema_version: \"1\"\n", env: map[string]string{"SCION_SERVER_TRUSTEDPROXIES": "10.20.0.0/16, 192.0.2.7"}},
+		"env alias":     {file: "schema_version: \"1\"\n", env: map[string]string{"SCION_SERVER_TRUSTED_PROXIES": "10.20.0.0/16,192.0.2.7"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Cleanup(resetServerFlags)
+			resetServerFlags()
+			t.Setenv("SCION_SERVER_MODE", "")
+			t.Setenv("SCION_SERVER_TRUSTEDPROXIES", "")
+			t.Setenv("SCION_SERVER_TRUSTED_PROXIES", "")
+			writeServerSettings(t, tc.file)
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+
+			cfg, err := loadAndReconcileConfig(serverStartCmd)
+			require.NoError(t, err)
+			assert.Equal(t, []string{"10.20.0.0/16", "192.0.2.7"}, cfg.TrustedProxies, "GlobalConfig")
+
+			enableHub = true
+			require.NoError(t, validateServerPreflight(cfg))
+
+			sc := buildHubServerConfig(cfg, "", "", nil, false, "", nil)
+			assert.Equal(t, []string{"10.20.0.0/16", "192.0.2.7"}, sc.TransportTrustedProxies, "hub transport policy list")
+			assert.Empty(t, sc.TrustedProxies, "the legacy trusted proxy list must stay empty")
+		})
+	}
+}
