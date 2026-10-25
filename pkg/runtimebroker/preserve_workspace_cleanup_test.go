@@ -274,3 +274,61 @@ func TestCreateStartFailure_InAgentContainerKeepsWorktreeEntryAndBranch(t *testi
 		t.Errorf("git's worktree entry for %s must be kept inside an agent container; worktrees:\n%s", workspace, out)
 	}
 }
+
+// A preserveWorkspace create that gathers env first (ptone/scion#6101 on
+// top of ptone/scion#6096): the first pass answers 202 with an unmet
+// required key and touches nothing, and the final replay with the key whose
+// Start fails still keeps the agent's workspace, files, worktree entry and
+// branch. The failed-start cleanup is skipped on the replay exactly as on a
+// single-pass preserveWorkspace create.
+func TestCreateStartFailureAfterEnvGather_PreserveWorkspaceKeepsWorkspaceAndBranch(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Fatalf("git is required: %v", err)
+	}
+	srv, mgr, projectPath, agentDir := newSyncStartTestServer(t)
+	repo, workspace := seedAgentWorktree(t, projectPath, agentDir)
+	survives := func(t *testing.T, when string) {
+		t.Helper()
+		got, err := os.ReadFile(filepath.Join(workspace, preserveCleanupFile))
+		if err != nil {
+			t.Fatalf("%s: the workspace file was removed: %v", when, err)
+		}
+		if string(got) != preserveCleanupContent {
+			t.Errorf("%s: workspace file = %q, want %q", when, got, preserveCleanupContent)
+		}
+		if owner := readAgentOwner(agentDir); owner != "agent-a" {
+			t.Errorf("%s: the agent's files were removed (owner file %q)", when, owner)
+		}
+		if out := gitPreserveT(t, repo, "branch", "--list", "same-name"); !strings.Contains(out, "same-name") {
+			t.Errorf("%s: the agent branch was deleted (git branch --list: %q)", when, out)
+		}
+		if out := gitPreserveT(t, repo, "worktree", "list", "--porcelain"); !strings.Contains(out, workspace) {
+			t.Errorf("%s: the worktree entry was removed (worktrees:\n%s)", when, out)
+		}
+	}
+
+	// Pass 1: gatherEnv with an unmet required key: a needs answer, no Start.
+	w := createSyncWithBody(srv, fmt.Sprintf(`{"id": "agent-a-id", "name": "same-name", "projectPath": %q, "preserveWorkspace": true, "gatherEnv": true, "requiredSecrets": [{"key": "FAKE_REQUIRED_KEY", "description": "fake"}], "config": {"task": "t"}}`, projectPath))
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("pass 1 status = %d, want %d (a needs answer): %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "FAKE_REQUIRED_KEY") {
+		t.Fatalf("pass 1 did not report the unmet key: %s", w.Body.String())
+	}
+	survives(t, "after the needs answer")
+
+	// Pass 2: the final replay with the key; its Start fails.
+	var sawFresh bool
+	mgr.starts <- func(_ context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
+		sawFresh = opts.FreshProvision
+		return nil, errors.New("fake image pull failed")
+	}
+	w = createSyncWithBody(srv, fmt.Sprintf(`{"id": "agent-a-id", "name": "same-name", "projectPath": %q, "preserveWorkspace": true, "gatherEnv": true, "envGatherFinal": true, "requiredSecrets": [{"key": "FAKE_REQUIRED_KEY", "description": "fake"}], "resolvedEnv": {"FAKE_REQUIRED_KEY": "fake-value"}, "config": {"task": "t"}}`, projectPath))
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("replay status = %d, want %d (the Start failed): %s", w.Code, http.StatusInternalServerError, w.Body.String())
+	}
+	if sawFresh {
+		t.Error("a preserveWorkspace replay must not set FreshProvision")
+	}
+	survives(t, "after the failed replay")
+}
