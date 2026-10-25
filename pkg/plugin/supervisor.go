@@ -90,7 +90,7 @@ var (
 	restartStepTimeout = 60 * time.Second
 )
 
-// backoffDelay returns the delay before restart attempt n (n >= 1):
+// backoffDelay returns the delay after restart attempt n (n >= 1):
 // backoffInitial doubled per attempt, capped at backoffMax, with jitter r in
 // [0, 1) scaling it by 0.8 to 1.2.
 func backoffDelay(n int, r float64) time.Duration {
@@ -108,7 +108,7 @@ func backoffDelay(n int, r float64) time.Duration {
 }
 
 // supervised is the supervisor's record of one broker plugin, keyed like
-// Manager.clients. Fields are guarded by Manager.supMu.
+// Manager.clients. Fields are guarded by Manager.sup.mu.
 type supervised struct {
 	status SupervisionStatus
 
@@ -414,12 +414,19 @@ func (m *Manager) probe(key string, client *goplugin.Client, self bool) (bool, s
 	}
 }
 
-// markLost moves a running plugin to restarting. The first attempt after a
-// loss is due at once when the attempt counter is 0; otherwise it waits the
-// backoff for the next attempt (a plugin that keeps dying soon after each
-// restart keeps backing off).
+// markLost moves a running plugin to restarting, unless client is no
+// longer its current client (already replaced). The first attempt after a
+// loss is due at once when the attempt counter is 0; otherwise it waits
+// backoffDelay(Attempt), so a plugin that keeps dying soon after each
+// restart keeps backing off.
 func (m *Manager) markLost(key string, client *goplugin.Client, reason string) {
 	now := m.sup.now()
+	m.mu.RLock()
+	current := m.clients[key]
+	m.mu.RUnlock()
+	if current != client {
+		return // already replaced: not a loss of the current client
+	}
 	m.sup.mu.Lock()
 	sp, ok := m.sup.plugins[key]
 	if !ok || sp.status.State != SupervisionRunning {
@@ -441,7 +448,7 @@ func (m *Manager) markLostLocked(sp *supervised, key string, client *goplugin.Cl
 	if sp.status.Attempt == 0 {
 		sp.nextAttempt = now
 	} else {
-		sp.nextAttempt = now.Add(backoffDelay(sp.status.Attempt+1, m.sup.jitter()))
+		sp.nextAttempt = now.Add(backoffDelay(sp.status.Attempt, m.sup.jitter()))
 	}
 	m.logger.Warn("Broker plugin connection lost; restart scheduled", "plugin", key, "reason", reason)
 }
@@ -470,16 +477,17 @@ func (m *Manager) restartAttempt(ctx context.Context, key string) {
 		return
 	}
 	lost := sp.lostClient
+	if hasClient && current != lost {
+		// Already replaced (an admin Restart, Update or Reconnect): no
+		// attempt is made or counted.
+		m.sup.mu.Unlock()
+		m.supervisedLoaded(key)
+		return
+	}
 	sp.status.Attempt++
 	attempt := sp.status.Attempt
 	provider := m.sup.provider
 	m.sup.mu.Unlock()
-
-	if hasClient && current != lost {
-		// Already replaced (an admin Restart or Update): nothing to do.
-		m.supervisedLoaded(key)
-		return
-	}
 	if !hasConfig {
 		m.attemptFailed(key, attempt, errors.New("no stored plugin config"))
 		return
@@ -519,36 +527,54 @@ func (m *Manager) restartAttempt(ctx context.Context, key string) {
 	m.logger.Info("Broker plugin restarted", "plugin", key, "attempt", attempt)
 }
 
-// closeStaleClient drops a lost client. A hub-managed plugin's process is
-// killed at once (its session is gone or hung, so no graceful Quit is
-// attempted first), then the client is cleaned up. A self-managed plugin's
-// client is only dropped: closing it would send the plugin a Quit request,
-// and the hub does not own that process. Its dead or hung session ends on
-// its own (yamux keepalive).
+// closeStaleClient drops a lost client from the maps and discards it (see
+// discardClient).
 func (m *Manager) closeStaleClient(key string, lost *goplugin.Client, self bool) {
 	if lost == nil {
 		return
 	}
+	var raw interface{}
 	m.mu.Lock()
 	if m.clients[key] == lost {
+		raw = m.dispensed[key]
 		delete(m.clients, key)
 		delete(m.dispensed, key)
 	}
 	m.mu.Unlock()
+	m.discardClient(lost, raw, self)
+}
+
+// discardClient makes a client that is being replaced or abandoned unable to
+// reach the plugin again. raw is its dispensed interface, if known.
+//
+// A hub-managed plugin's process is killed at once (its session may be
+// hung, so no graceful Quit is attempted first), then the client is cleaned
+// up. A self-managed plugin's process is not the hub's: no Quit request is
+// sent. Instead its dispensed broker connection is closed locally and
+// marked stale, so an old fan-out adapter wrapping it can no longer send
+// Publish, Subscribe or Close to the plugin instance that every connection
+// shares. The client's control session is left to end on its own (go-plugin
+// offers no way to close it without a Quit request); a healthy one stays
+// open, one per re-dial, until the plugin process exits.
+func (m *Manager) discardClient(client *goplugin.Client, raw interface{}, self bool) {
+	if bc, ok := raw.(*BrokerRPCClient); ok {
+		bc.discard()
+	}
 	if self {
 		return
 	}
 	// Only a process not yet reaped is signalled, so the pid cannot have
 	// been reused.
-	if rc := lost.ReattachConfig(); rc != nil && rc.Pid > 0 && !lost.Exited() {
+	if rc := client.ReattachConfig(); rc != nil && rc.Pid > 0 && !client.Exited() {
 		if p, err := os.FindProcess(rc.Pid); err == nil {
 			_ = p.Kill()
 		}
 	}
-	lost.Kill()
+	client.Kill()
 }
 
-// attemptFailed schedules the next attempt with backoff.
+// attemptFailed schedules the next attempt backoffDelay(attempt) later:
+// 1 s after the first failed attempt, doubling up to backoffMax.
 func (m *Manager) attemptFailed(key string, attempt int, err error) {
 	now := m.sup.now()
 	m.mu.RLock()
@@ -573,7 +599,7 @@ func (m *Manager) attemptFailed(key string, attempt int, err error) {
 	// The plugin may have been reloaded before a hook failed; restart
 	// whatever client is current next time.
 	sp.lostClient = current
-	delay := backoffDelay(attempt+1, m.sup.jitter())
+	delay := backoffDelay(attempt, m.sup.jitter())
 	sp.nextAttempt = now.Add(delay)
 	m.sup.mu.Unlock()
 	m.logger.Warn("Broker plugin restart attempt failed",

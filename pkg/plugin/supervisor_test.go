@@ -78,6 +78,10 @@ type fakeBroker struct {
 	subs       map[string]bool
 	published  int
 	block      chan struct{}
+	// closed is set by Close and makes Subscribe and Publish fail, as in
+	// the real chat plugins (a closed broker stays closed).
+	closed bool
+	closes int
 }
 
 func newFakeBroker() *fakeBroker {
@@ -99,6 +103,12 @@ func (f *fakeBroker) Configure(cfg map[string]string) error {
 }
 
 func (f *fakeBroker) Publish(_ context.Context, topic string, _ *messages.StructuredMessage) error {
+	f.mu.Lock()
+	closed := f.closed
+	f.mu.Unlock()
+	if closed {
+		return errors.New("broker is closed")
+	}
 	switch topic {
 	case fakeTopicExit:
 		os.Exit(3)
@@ -120,6 +130,9 @@ func (f *fakeBroker) Publish(_ context.Context, topic string, _ *messages.Struct
 func (f *fakeBroker) Subscribe(pattern string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.closed {
+		return errors.New("broker is closed")
+	}
 	f.subs[pattern] = true
 	return nil
 }
@@ -131,7 +144,19 @@ func (f *fakeBroker) Unsubscribe(pattern string) error {
 	return nil
 }
 
-func (f *fakeBroker) Close() error { return nil }
+func (f *fakeBroker) Close() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.closed = true
+	f.closes++
+	return nil
+}
+
+func (f *fakeBroker) closeCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.closes
+}
 
 func (f *fakeBroker) GetInfo() (*PluginInfo, error) {
 	return &PluginInfo{Name: "fake", Version: "1.0.0"}, nil
@@ -658,11 +683,15 @@ func TestSupervisor_BackoffCapAndReset(t *testing.T) {
 	sp := m.sup.plugins[key]
 	assert.Equal(t, clock.now(), sp.nextAttempt)
 
-	// Failed attempts back off 2 s, 4 s, ... up to 5 min; failing after 5.
+	// Failed attempts back off 1 s, 2 s, 4 s, ... up to 5 min; failing
+	// after 5.
 	for attempt := 1; attempt <= 12; attempt++ {
 		sp.status.Attempt = attempt
 		m.attemptFailed(key, attempt, errors.New("boom"))
-		assert.Equal(t, backoffDelay(attempt+1, 0.5), sp.nextAttempt.Sub(clock.now()), "after attempt %d", attempt)
+		if attempt == 1 {
+			assert.Equal(t, time.Second, sp.nextAttempt.Sub(clock.now()), "first retry after backoffInitial")
+		}
+		assert.Equal(t, backoffDelay(attempt, 0.5), sp.nextAttempt.Sub(clock.now()), "after attempt %d", attempt)
 		if attempt >= failingAfter {
 			assert.Equal(t, SupervisionFailing, sp.status.State)
 		} else {
@@ -803,12 +832,14 @@ func TestSupervisor_RecoversThroughKicksAlone(t *testing.T) {
 
 // freezingRelay forwards TCP connections to target; freeze makes every
 // connection open at that moment stop forwarding without closing, as a
-// hung session does. Connections accepted later forward normally.
+// hung session does, and unfreeze makes them forward again (the bytes sent
+// meanwhile are lost). Connections accepted later forward normally.
 type freezingRelay struct {
 	lis    net.Listener
 	target string
 	mu     sync.Mutex
-	frozen []chan struct{}
+	open   []*atomic.Bool // per connection: frozen
+	frozen []*atomic.Bool
 	conns  []net.Conn
 }
 
@@ -828,9 +859,9 @@ func startFreezingRelay(t *testing.T, target string) *freezingRelay {
 				_ = c.Close()
 				continue
 			}
-			stop := make(chan struct{})
+			stop := &atomic.Bool{}
 			r.mu.Lock()
-			r.frozen = append(r.frozen, stop)
+			r.open = append(r.open, stop)
 			r.conns = append(r.conns, c, up)
 			r.mu.Unlock()
 			go relayCopy(up, c, stop)
@@ -848,19 +879,17 @@ func startFreezingRelay(t *testing.T, target string) *freezingRelay {
 	return r
 }
 
-// relayCopy copies src to dst until src fails or stop is closed; after
-// stop it keeps reading and discards, so the peer sees no close.
-func relayCopy(dst, src net.Conn, stop chan struct{}) {
+// relayCopy copies src to dst until src fails; while frozen it keeps
+// reading and discards, so the peer sees no close.
+func relayCopy(dst, src net.Conn, frozen *atomic.Bool) {
 	buf := make([]byte, 32*1024)
 	for {
 		n, err := src.Read(buf)
 		if err != nil {
 			return
 		}
-		select {
-		case <-stop:
+		if frozen.Load() {
 			continue
-		default:
 		}
 		if _, err := dst.Write(buf[:n]); err != nil {
 			return
@@ -871,10 +900,19 @@ func relayCopy(dst, src net.Conn, stop chan struct{}) {
 func (r *freezingRelay) freeze() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for _, c := range r.frozen {
-		close(c)
+	for _, f := range r.open {
+		f.Store(true)
 	}
-	r.frozen = nil
+	r.frozen = r.open
+	r.open = nil
+}
+
+func (r *freezingRelay) unfreeze() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, f := range r.frozen {
+		f.Store(false)
+	}
 }
 
 func TestSupervisor_HungSessionNeedsConsecutivePingTimeouts(t *testing.T) {
@@ -902,7 +940,8 @@ func TestSupervisor_HungSessionNeedsConsecutivePingTimeouts(t *testing.T) {
 	})
 	st, _ := m.BrokerSupervision("ext")
 	if supervisorPingTimeouts > 1 {
-		assert.Equal(t, 0, st.Restarts, "a single Ping timeout does not restart")
+		assert.Equal(t, SupervisionRunning, st.State, "a single Ping timeout does not mark the session lost")
+		assert.Equal(t, 0, st.Restarts)
 	}
 	waitRestarted(t, m, "ext", 1)
 }
@@ -910,22 +949,136 @@ func TestSupervisor_HungSessionNeedsConsecutivePingTimeouts(t *testing.T) {
 func TestSupervisor_NoAttemptAfterShutdownBegins(t *testing.T) {
 	shortenSupervisorTiming(t)
 	m := NewManager(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	clock := &fakeClock{t: time.Unix(1_000_000, 0)}
+	m.sup.now = clock.now
 	key := PluginTypeBroker + ":fake"
 	lost := &goplugin.Client{}
 	m.clients[key] = lost
 	m.configs[key] = DiscoveredPlugin{Name: "fake", Type: PluginTypeBroker}
 	m.supervisedLoaded(key)
+	m.sup.plugins[key].status.Attempt = 3 // the next attempt waits its backoff
 	m.markLost(key, lost, "plugin session lost")
+	require.True(t, m.sup.plugins[key].nextAttempt.After(clock.now()))
 
+	// The supervisor runs, shutdown begins, then the attempt becomes due.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	m.BeginShutdown()
 	m.StartSupervisor(ctx)
+	time.Sleep(3 * supervisorCheckInterval)
+	m.BeginShutdown()
+	clock.advance(time.Hour)
 	for i := 0; i < 5; i++ {
 		m.kickSupervisor()
 		time.Sleep(supervisorCheckInterval)
 	}
 	st, _ := m.BrokerSupervision("fake")
-	assert.Equal(t, 0, st.Attempt, "no attempt once shutdown has begun")
+	assert.Equal(t, 3, st.Attempt, "no attempt once shutdown has begun")
 	assert.Equal(t, SupervisionRestarting, st.State)
+}
+
+func TestSupervisor_MarkLostIgnoresReplacedClient(t *testing.T) {
+	m := NewManager(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	key := PluginTypeBroker + ":fake"
+	old, current := &goplugin.Client{}, &goplugin.Client{}
+	m.clients[key] = current
+	m.supervisedLoaded(key)
+
+	m.markLost(key, old, "plugin session lost")
+	st, _ := m.BrokerSupervision("fake")
+	assert.Equal(t, SupervisionRunning, st.State)
+	assert.Equal(t, 0, st.Attempt)
+
+	// A replaced client found at attempt time is not counted either.
+	m.markLost(key, current, "plugin session lost")
+	m.clients[key] = &goplugin.Client{}
+	m.restartAttempt(context.Background(), key)
+	st, _ = m.BrokerSupervision("fake")
+	assert.Equal(t, SupervisionRunning, st.State)
+	assert.Equal(t, 0, st.Attempt)
+}
+
+// spokeHook returns a restart hook that replaces the plugin's spoke in
+// fanout, as the hub's does, and fails the first failFirst calls after
+// replacing it (as a failed subscription replay does).
+func spokeHook(m *Manager, fanout *eventbus.FanOutEventBus, failFirst int32, calls *atomic.Int32) BrokerRestartHook {
+	return func(name string) error {
+		n := calls.Add(1)
+		nb, err := m.GetBroker(name)
+		if err != nil {
+			return err
+		}
+		if err := fanout.ReplaceSpoke(name, eventbus.NamedEventBus{Name: name, Bus: nb}); err != nil {
+			return err
+		}
+		if n <= failFirst {
+			return errors.New("subscription replay failed")
+		}
+		return nil
+	}
+}
+
+// newSelfManagedFanout loads the self-managed plugin "ext" at addr behind a
+// fan-out bus with one subscription, and wires spokeHook.
+func newSelfManagedFanout(t *testing.T, addr string, failFirst int32) (*Manager, *eventbus.FanOutEventBus, *atomic.Int32) {
+	t.Helper()
+	shortenSupervisorTiming(t)
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	m := NewManager(quiet)
+	t.Cleanup(m.Shutdown)
+	require.NoError(t, m.LoadOne(PluginTypeBroker, "ext", PluginEntry{SelfManaged: true, Address: addr}, ""))
+	bus, err := m.GetBroker("ext")
+	require.NoError(t, err)
+	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
+		{Name: eventbus.InProcessBusName, Bus: eventbus.NewInProcessEventBus(quiet)},
+		{Name: "ext", Bus: bus},
+	}, quiet)
+	_, err = fanout.Subscribe("agent.>", func(context.Context, string, *messages.StructuredMessage) {})
+	require.NoError(t, err)
+	calls := &atomic.Int32{}
+	m.OnBrokerRestart(spokeHook(m, fanout, failFirst, calls))
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	m.StartSupervisor(ctx)
+	return m, fanout, calls
+}
+
+func TestSupervisor_SelfManagedStaleSessionNeverClosesPlugin(t *testing.T) {
+	s := startSelfManagedServer(t)
+	m, fanout, calls := newSelfManagedFanout(t, s.addr, 1)
+
+	s.dropConns()
+	// Attempt 1 re-dials and its hook fails after replacing the spoke;
+	// attempt 2 replaces the client the failed attempt left, whose
+	// session is still healthy.
+	waitRestarted(t, m, "ext", 1)
+	require.GreaterOrEqual(t, calls.Load(), int32(2))
+	assert.Equal(t, 0, s.impl.closeCount(), "the shared plugin instance was never closed")
+	assert.NoError(t, fanout.Publish(context.Background(), "agent.bot.message", messages.NewInstruction("user:a", "agent:b", "hi")))
+	assert.Equal(t, "agent.>", fakeHealth(t, m, "ext")["subs"])
+}
+
+func TestSupervisor_HungSelfManagedSessionNeverClosesPlugin(t *testing.T) {
+	s := startSelfManagedServer(t)
+	relay := startFreezingRelay(t, s.addr)
+	m, fanout, _ := newSelfManagedFanout(t, relay.lis.Addr().String(), 0)
+	supervisorPingTimeout = 200 * time.Millisecond
+
+	relay.freeze()
+	waitRestarted(t, m, "ext", 1)
+	relay.unfreeze()
+	time.Sleep(20 * supervisorCheckInterval)
+	assert.Equal(t, 0, s.impl.closeCount(), "nothing queued on the hung session closed the plugin")
+	assert.NoError(t, fanout.Publish(context.Background(), "agent.bot.message", messages.NewInstruction("user:a", "agent:b", "hi")))
+}
+
+func TestReconnect_HookFailureLeavesPluginToSupervisor(t *testing.T) {
+	s := startSelfManagedServer(t)
+	m, _, calls := newSelfManagedFanout(t, s.addr, 1)
+
+	require.Error(t, m.Reconnect(PluginTypeBroker, "ext"))
+	st, _ := m.BrokerSupervision("ext")
+	assert.NotEqual(t, SupervisionRunning, st.State, "a failed hook does not report running")
+	waitRestarted(t, m, "ext", 1)
+	assert.GreaterOrEqual(t, calls.Load(), int32(2), "the supervisor ran the hook again")
+	assert.Equal(t, 0, s.impl.closeCount())
 }

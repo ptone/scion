@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/rpc"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
@@ -277,6 +278,21 @@ type BrokerRPCClient struct {
 	// RPC method; for Publish, topic and recipient identify the dropped
 	// message.
 	onTransportError func(method, topic, recipient string, err error)
+
+	// stale is set by discard: the connection was closed locally because
+	// the client was replaced or abandoned.
+	stale atomic.Bool
+}
+
+// discard closes the connection locally (no RPC is sent to the plugin) and
+// marks the client stale: pending and later calls fail with
+// rpc.ErrShutdown, Close becomes a no-op, and its errors are no longer
+// reported as transport errors.
+func (c *BrokerRPCClient) discard() {
+	if c.stale.Swap(true) {
+		return
+	}
+	_ = c.client.Close()
 }
 
 // isTransportError reports whether err from an RPC call means the
@@ -300,7 +316,7 @@ func isTransportError(err error) bool {
 // observe reports a transport error of a call to onTransportError and
 // returns err unchanged.
 func (c *BrokerRPCClient) observe(method, topic, recipient string, err error) error {
-	if c.onTransportError != nil && isTransportError(err) {
+	if c.onTransportError != nil && !c.stale.Load() && isTransportError(err) {
 		c.onTransportError(method, topic, recipient, err)
 	}
 	return err
@@ -367,7 +383,12 @@ func (c *BrokerRPCClient) Unsubscribe(pattern string) error {
 	return c.observe("Unsubscribe", "", "", c.client.Call("Plugin.Unsubscribe", &UnsubscribeArgs{Pattern: pattern}, &struct{}{}))
 }
 
+// Close asks the plugin to close. On a stale (discarded) client it does
+// nothing: the plugin instance is shared with its replacement connection.
 func (c *BrokerRPCClient) Close() error {
+	if c.stale.Load() {
+		return nil
+	}
 	return c.client.Call("Plugin.Close", struct{}{}, &struct{}{})
 }
 
