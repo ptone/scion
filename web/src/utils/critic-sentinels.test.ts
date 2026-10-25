@@ -15,12 +15,15 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { characterEntities } from 'character-entities';
+import { decodeNamedCharacterReference } from 'decode-named-character-reference';
 
 import {
   SENTINEL_CANDIDATES,
   chooseAlphabet,
   chooseOpeningAlphabet,
   criticToSentinelText,
+  probeOpeningAlphabet,
   readTag,
   sentinelSet,
   sentinelTextToCritic,
@@ -84,6 +87,61 @@ describe('opening alphabet (probe)', () => {
   it('needs twenty-four free candidates', () => {
     expect(chooseOpeningAlphabet(C.slice(0, C.length - 24).join(''), (t) => t)).not.toBeNull();
     expect(chooseOpeningAlphabet(C.slice(0, C.length - 23).join(''), (t) => t)).toBeNull();
+    // With a numeric character reference too.
+    const ref = '&#x41;';
+    expect(
+      chooseOpeningAlphabet(ref + C.slice(0, C.length - 24).join(''), (t) => t)
+    ).not.toBeNull();
+    expect(chooseOpeningAlphabet(ref + C.slice(0, C.length - 23).join(''), (t) => t)).toBeNull();
+  });
+});
+
+describe('opening alphabet without a numeric character reference', () => {
+  const C = SENTINEL_CANDIDATES;
+  const never = (): string => {
+    throw new Error('the probe ran');
+  };
+
+  it('no named character reference decodes to a candidate', () => {
+    const names = Object.keys(characterEntities);
+    expect(names.length).toBeGreaterThan(2000);
+    for (const name of names) {
+      const decoded = decodeNamedCharacterReference(name);
+      expect(decoded, name).not.toBe(false);
+      for (const c of decoded as string) expect(C.includes(c), name).toBe(false);
+    }
+  });
+
+  it('chooses without the probe, as the probe would with nothing to exclude', () => {
+    const docs = [
+      'plain text',
+      'R&amp;D {++and++} &copy; &nbsp; & # done',
+      `${C[0]}${C[5]} {>>note<<} {~~a~>b~~}`,
+      C.slice(0, C.length - 24).join(''),
+      '& #x2E00; &x2E00; #&',
+    ];
+    for (const md of docs) {
+      expect(chooseOpeningAlphabet(md, never), md).toEqual(probeOpeningAlphabet(md, (t) => t));
+    }
+  });
+
+  it('runs the probe when the source holds one, in any form', () => {
+    for (const md of ['&#x2E00;', 'a &#11776; b', '&#65;', '{>>&#<<}', '&#']) {
+      let ran = false;
+      chooseOpeningAlphabet(md, (t) => {
+        ran = true;
+        return t;
+      });
+      expect(ran, md).toBe(true);
+    }
+  });
+
+  it('the sentinel form has a numeric character reference only where the source has one', () => {
+    for (const md of ['&{>>n<<}#x2E00;', '&{++x++}#65;', '&{~~a~>b~~}#1;', '{==&==}#x41;']) {
+      expect(md.includes('&#'), md).toBe(false);
+      const a = chooseAlphabet(md)!;
+      expect(criticToSentinelText(md, a, true).text.includes('&#'), md).toBe(false);
+    }
   });
 });
 

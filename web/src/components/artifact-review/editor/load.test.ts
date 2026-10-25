@@ -22,7 +22,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { chooseOpeningAlphabet } from '../../../utils/critic-sentinels.js';
+import { chooseOpeningAlphabet, probeOpeningAlphabet } from '../../../utils/critic-sentinels.js';
 import { parseCritic } from '../../../utils/critic.js';
 import { loadDocument } from './bridge.js';
 import type { Core } from './create.js';
@@ -57,12 +57,13 @@ describe('marks of a range, from one reading of the whole text', () => {
   const fresh = (md: string, from: number, to: number, skip: Set<number>): MarkRun[] =>
     parseCritic(md)
       .filter((s) => s.kind !== 'text' && s.start >= from && s.start < to && !skip.has(s.start))
-      .map((s) =>
-        s.kind === 'comment'
-          ? { kind: 'comment', text: s.text }
-          : s.kind === 'substitution'
-            ? { kind: 'substitution', text: core.plain(s.text), next: core.plain(s.next ?? '') }
-            : { kind: s.kind, text: core.plain(s.text) }
+      .map(
+        (s): MarkRun =>
+          s.kind === 'comment'
+            ? { kind: 'comment', text: s.text }
+            : s.kind === 'substitution'
+              ? { kind: 'substitution', text: core.plain(s.text), next: core.plain(s.next ?? '') }
+              : { kind: s.kind as MarkRun['kind'], text: core.plain(s.text) }
       );
 
   it('gives every range the marks a fresh read of the whole text gives it', () => {
@@ -150,5 +151,30 @@ describe('the text of marks', () => {
     seen.length = 0;
     expect(s.load(md)).toBe(true);
     expect([...seen].sort()).toEqual(['x', 'y']);
+  });
+});
+
+describe('opening alphabet without the probe', () => {
+  const shown =
+    (md: string) =>
+    (text: string): string =>
+      `${docStrings(core.parse(md))}\n${docStrings(core.parse(text))}`;
+
+  it('is the alphabet the probe chooses with the real parser', () => {
+    const named = [
+      'R&amp;D {++and++} &copy; &nbsp; &lt;b&gt; {>>&hellip;<<}\n',
+      '[a](u "&quot;{++x++}&quot;") &emsp;&ensp; `&amp;`\n',
+      '<span title="&mdash;">{==x==}</span>{>>&rarr;<<}\n',
+    ];
+    let n = 0;
+    for (const md of [...docs, ...named]) {
+      if (md.includes('&#')) continue;
+      expect(
+        chooseOpeningAlphabet(md, () => ''),
+        md
+      ).toEqual(probeOpeningAlphabet(md, shown(md)));
+      n++;
+    }
+    expect(n).toBeGreaterThan(100);
   });
 });
