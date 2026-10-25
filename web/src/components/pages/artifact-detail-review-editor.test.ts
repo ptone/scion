@@ -32,10 +32,17 @@ const loader = vi.hoisted(() => ({
   load: vi.fn(() => Promise.resolve()),
   preload: vi.fn(),
 }));
-const confirm = vi.hoisted(() => ({ asked: [] as string[], answer: true }));
+const confirm = vi.hoisted(() => ({
+  asked: [] as string[],
+  answer: true,
+  /** When set, the answer waits until release is called. */
+  defer: false,
+  release: (_: boolean): void => {},
+}));
 vi.mock('../shared/confirm-dialog.js', () => ({
   showConfirm: (message: string): Promise<boolean> => {
     confirm.asked.push(message);
+    if (confirm.defer) return new Promise<boolean>((r) => (confirm.release = r));
     return Promise.resolve(confirm.answer);
   },
 }));
@@ -112,7 +119,13 @@ function meta(text = TEXT): ArtifactResponse {
 
 const writes: string[] = [];
 
-function mockFetch(text = TEXT): void {
+function mockFetch(
+  text = TEXT,
+  opts: {
+    body?: () => string;
+    write?: (method: string, url: string, m: ArtifactResponse) => Response;
+  } = {}
+): void {
   const m = meta(text);
   writes.length = 0;
   vi.stubGlobal(
@@ -121,6 +134,7 @@ function mockFetch(text = TEXT): void {
       const url = requestUrl(input);
       if (init?.method && init.method !== 'GET') {
         writes.push(`${init.method} ${url}`);
+        if (opts.write) return Promise.resolve(opts.write(init.method, url, m));
         return Promise.resolve(new Response('{}', { status: 500 }));
       }
       if (url.endsWith('/grants')) {
@@ -130,7 +144,9 @@ function mockFetch(text = TEXT): void {
         const body = { versions: [{ ...m.version!, files: [] }], discarded: [] };
         return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
       }
-      if (url.includes('/files/')) return Promise.resolve(new Response(text, { status: 200 }));
+      if (url.includes('/files/')) {
+        return Promise.resolve(new Response(opts.body ? opts.body() : text, { status: 200 }));
+      }
       return Promise.resolve(new Response(JSON.stringify(m), { status: 200 }));
     })
   );
@@ -191,6 +207,7 @@ describe('artifact page: graphical review editor experiment', () => {
     window.localStorage.clear();
     confirm.asked.length = 0;
     confirm.answer = true;
+    confirm.defer = false;
   });
 
   afterEach(() => {
@@ -362,6 +379,143 @@ describe('artifact page: graphical review editor experiment', () => {
     await startReview(el);
     expect($(el, '.g-work scion-code-editor.review-editor')).not.toBeNull();
     expect($(el, '.hint-strip')).toBeNull();
+  });
+
+  /** Types text into the Source view's editor (its content-changed event). */
+  const typeSource = async (el: ScionPageArtifactDetail, content: string): Promise<void> => {
+    $(el, '.g-work scion-code-editor.review-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content } })
+    );
+    await settle(el);
+  };
+  /** Waits out the Source view's preview pause. */
+  const previewPause = (): Promise<void> => new Promise((r) => setTimeout(r, 300));
+
+  it('text that grows past the soft limit in the Source view asks before the graphical view opens', async () => {
+    window.localStorage.setItem('scion:artifact-review-view', 'source');
+    mockFetch();
+    const el = await mount(true);
+    await startReview(el);
+    expect($(el, '.g-work scion-code-editor.review-editor')).not.toBeNull();
+    const large = TEXT + '{++' + 'x'.repeat(LARGE_REVIEW_BYTES) + '++}';
+    await typeSource(el, large);
+    confirm.answer = false;
+    await chooseView(el, 'graphical');
+    expect(confirm.asked).toEqual([
+      'Opening the graphical view may take a few seconds for a document this size. Continue?',
+    ]);
+    expect(loader.load).not.toHaveBeenCalled();
+    expect($(el, '.g-work scion-code-editor.review-editor')).not.toBeNull();
+    confirm.answer = true;
+    await chooseView(el, 'graphical');
+    expect(loader.load).toHaveBeenCalledTimes(1);
+    expect($<FakeReviewEditor>(el, 'scion-review-editor')!.content).toBe(large);
+  });
+
+  it('text that grows past the ceiling in the Source view cannot open the graphical view', async () => {
+    window.localStorage.setItem('scion:artifact-review-view', 'source');
+    mockFetch();
+    const el = await mount(true);
+    await startReview(el);
+    expect($(el, 'sl-radio-button[value="graphical"]')!.hasAttribute('disabled')).toBe(false);
+    await typeSource(el, TEXT + '{++' + 'x'.repeat(MAX_GRAPHICAL_BYTES) + '++}');
+    await chooseView(el, 'graphical');
+    expect(confirm.asked).toEqual([]);
+    expect(loader.load).not.toHaveBeenCalled();
+    expect($(el, 'scion-review-editor')).toBeNull();
+    expect($(el, '.hint-strip')!.textContent).toContain(
+      'This document is too large for the graphical view.'
+    );
+    expect($(el, 'sl-radio-button[value="graphical"]')!.hasAttribute('disabled')).toBe(true);
+  });
+
+  it('the toggle follows the text as it is edited in the Source view', async () => {
+    window.localStorage.setItem('scion:artifact-review-view', 'source');
+    mockFetch();
+    const el = await mount(true);
+    await startReview(el);
+    const graphical = (): HTMLElement => $(el, 'sl-radio-button[value="graphical"]')!;
+    expect(graphical().hasAttribute('disabled')).toBe(false);
+    await typeSource(el, TEXT + '{++' + 'x'.repeat(MAX_GRAPHICAL_BYTES) + '++}');
+    await previewPause();
+    await settle(el);
+    expect(graphical().hasAttribute('disabled')).toBe(true);
+    await typeSource(el, TEXT);
+    await previewPause();
+    await settle(el);
+    expect(graphical().hasAttribute('disabled')).toBe(false);
+    await chooseView(el, 'graphical');
+    expect(confirm.asked).toEqual([]);
+    expect(loader.load).toHaveBeenCalledTimes(1);
+  });
+
+  it('a confirmation answered after the review was left and started again does nothing', async () => {
+    mockFetch('é'.repeat(LARGE_REVIEW_BYTES / 2) + 'a');
+    const el = await mount(true);
+    await startReview(el);
+    confirm.defer = true;
+    await chooseView(el, 'graphical');
+    expect(confirm.asked.length).toBe(1);
+    // Leave Review mode and start it again, then answer the old question.
+    byText(el, '.edit-footer sl-button', 'Cancel')!.click();
+    await settle(el);
+    await startReview(el);
+    confirm.release(true);
+    await settle(el);
+    expect(loader.load).not.toHaveBeenCalled();
+    expect($(el, 'scion-review-editor')).toBeNull();
+    expect($(el, '.g-work scion-code-editor.review-editor')).not.toBeNull();
+  });
+
+  it('a review restarted on a larger current version is sized again', async () => {
+    let body = TEXT;
+    const large = 'é'.repeat(LARGE_REVIEW_BYTES / 2) + 'a';
+    mockFetch(TEXT, {
+      body: () => body,
+      // A review save: create, upload, then finalize, which finds a newer
+      // version (with large text) and refuses the review as stale.
+      write: (method, url, m) => {
+        if (url.endsWith('/finalize')) {
+          body = large;
+          return new Response(
+            JSON.stringify({ error: { code: 'stale_review', message: 'stale' } }),
+            { status: 409 }
+          );
+        }
+        if (method === 'PUT') return new Response(null, { status: 204 });
+        return new Response(
+          JSON.stringify({
+            artifact: m.artifact,
+            version: { seq: 2 },
+            upload: { required: ['plan.md'] },
+          }),
+          { status: 201 }
+        );
+      },
+    });
+    const el = await mount(true);
+    await startReview(el);
+    const editor = $<FakeReviewEditor>(el, 'scion-review-editor')!;
+    editor.next = 'We {++really ++}ship in Q3.\n';
+    editor.dispatchEvent(
+      new CustomEvent('review-change', {
+        detail: { text: editor.next },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await settle(el);
+    byText(el, '.edit-footer sl-button', 'Save review')!.click();
+    await settle(el, 40);
+    expect(writes.some((w) => w.endsWith('/finalize'))).toBe(true);
+    // The reloaded text is large: the Source view, with the notice.
+    expect($(el, 'scion-review-editor')).toBeNull();
+    const code = $<HTMLElement & { content: string }>(
+      el,
+      '.g-work scion-code-editor.review-editor'
+    )!;
+    expect(code.content).toBe(large);
+    expect($(el, '.hint-strip')!.textContent).toContain('This document is large');
   });
 
   it('toggles to the source view with the editor text, and remembers the choice', async () => {

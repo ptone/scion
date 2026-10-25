@@ -1203,25 +1203,60 @@ export class ScionPageArtifactDetail extends LitElement {
   }
 
   /**
-   * A view chosen with the toggle: the graphical view of a large document
+   * A view chosen with the toggle. The graphical view is sized by the text
+   * as it is now (Source view edits can make it larger): a large document
    * opens after a confirmation (once per review), and a too large one does
    * not open at all.
    */
   private chooseReviewView(next: ReviewView): void {
-    if (next === 'graphical' && this.reviewSize === 'too-large') return;
-    if (next === 'graphical' && this.reviewSize === 'large' && !this.largeConfirmed) {
-      void showConfirm(LARGE_REVIEW_CONFIRM, {
-        title: 'Large document',
-        confirmText: 'Open graphical view',
-        variant: 'primary',
-      }).then((ok) => {
-        if (!ok || !this.reviewing) return;
-        this.largeConfirmed = true;
-        this.setReviewView('graphical');
-      });
+    if (next !== 'graphical') {
+      this.setReviewView(next);
       return;
     }
-    this.setReviewView(next);
+    const run = this.reviewRuns;
+    const text = this.reviewText;
+    // Bytes first, without waiting: over the ceiling nothing else matters.
+    if (new TextEncoder().encode(text).length > MAX_GRAPHICAL_BYTES) {
+      this.reviewSize = 'too-large';
+      this.showHint('too-large');
+      return;
+    }
+    void reviewSize(text).then((size) => {
+      if (run !== this.reviewRuns || !this.reviewing) return;
+      // Edited while it was being sized: size the text as it is now.
+      if (this.reviewText !== text) {
+        this.chooseReviewView('graphical');
+        return;
+      }
+      this.reviewSize = size;
+      if (size === 'too-large') {
+        this.showHint('too-large');
+        return;
+      }
+      if (size === 'large' && !this.largeConfirmed) {
+        void showConfirm(LARGE_REVIEW_CONFIRM, {
+          title: 'Large document',
+          confirmText: 'Open graphical view',
+          variant: 'primary',
+        }).then((ok) => {
+          if (!ok || run !== this.reviewRuns || !this.reviewing) return;
+          this.largeConfirmed = true;
+          this.setReviewView('graphical');
+        });
+        return;
+      }
+      this.setReviewView('graphical');
+    });
+  }
+
+  /**
+   * Sizes the text as it is now, so the toggle reflects it (disabled over
+   * the ceiling); the view and the hints are left as they are.
+   */
+  private async refreshReviewSize(text: string, run: number): Promise<void> {
+    const size = await reviewSize(text);
+    if (run !== this.reviewRuns || !this.reviewing || this.reviewText !== text) return;
+    this.reviewSize = size;
   }
 
   /** The graphical review page is on (experiment web.artifact_review_editor). */
@@ -1393,6 +1428,12 @@ export class ScionPageArtifactDetail extends LitElement {
     this.reviewText = lfText(this.text);
     this.reviewPreview = this.reviewText;
     this.discardedReview = discarded;
+    // The current version may be larger: size it as a new review does.
+    if (this.reviewGraphical) {
+      this.reviewSize = null;
+      this.largeConfirmed = false;
+      void this.sizeReview(this.reviewText, ++this.reviewRuns);
+    }
   }
 
   /**
@@ -1440,6 +1481,7 @@ export class ScionPageArtifactDetail extends LitElement {
     this.previewTimer = setTimeout(() => {
       this.previewTimer = null;
       this.reviewPreview = this.reviewText;
+      if (this.reviewGraphical) void this.refreshReviewSize(this.reviewText, this.reviewRuns);
     }, REVIEW_PREVIEW_DELAY_MS);
   }
 
