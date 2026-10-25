@@ -223,9 +223,11 @@ func TestGatherDispatch_AsNeededResolutionErrorFailsClosed(t *testing.T) {
 	}
 }
 
-// A start, restart or create whose GCP-backed secrets cannot be read fails
-// with the fixed message wrapping ErrResolveAccess and sends nothing to the
-// broker: the agent never starts with a partial secret set.
+// A start or create whose GCP-backed secrets cannot be read fails with the
+// fixed message wrapping ErrResolveAccess and sends nothing to the broker:
+// the agent never starts with a partial secret set. The broker restart is
+// refused before any resolution: the secret is as-needed, and the fixture's
+// broker cannot gather (the keyless 412, ptone/scion#6101 H-25).
 func TestDispatch_GCPAccessErrorFailsClosed(t *testing.T) {
 	for _, tc := range runDispatches {
 		t.Run(tc.name, func(t *testing.T) {
@@ -234,6 +236,10 @@ func TestDispatch_GCPAccessErrorFailsClosed(t *testing.T) {
 
 			err := tc.dispatch(context.Background(), f)
 			require.Error(t, err)
+			if tc.name == "restart" {
+				assertBrokerRestartRefused(t, f, tc.sent, err, errBrokerLacksStartEnvGather)
+				return
+			}
 			assert.ErrorIs(t, err, secret.ErrResolveAccess)
 			var resErr *secretResolutionError
 			require.ErrorAs(t, err, &resErr)
@@ -263,6 +269,20 @@ func gatherNeedsClient(f *runDispatchFixture) *int {
 
 // assertStartsFailClosed checks that a start and a restart of f's agent
 // fail on cause with the fixed message and send nothing to the broker.
+// assertBrokerRestartRefused checks a broker restart of an agent with an
+// as-needed entry: refused with the keyless refusal want before any secret
+// is resolved (no resolution error, no backend detail), and nothing sent.
+func assertBrokerRestartRefused(t *testing.T, f *runDispatchFixture, sent func(*runDispatchFixture) (string, string, bool), err, want error) {
+	t.Helper()
+	require.ErrorIs(t, err, want)
+	var resErr *secretResolutionError
+	assert.False(t, errors.As(err, &resErr), "refused before secret resolution")
+	assert.True(t, isConfirmedStartNotActedOnError(err))
+	assertNoFailClosedDetail(t, err.Error(), "the restart refusal")
+	_, _, called := sent(f)
+	assert.False(t, called, "the refused restart sends nothing to the broker")
+}
+
 func assertStartsFailClosed(t *testing.T, f *runDispatchFixture, cause error) {
 	t.Helper()
 	for _, tc := range runDispatches {
@@ -343,13 +363,27 @@ func TestProvisionGather_AsNeededResolutionErrorFails(t *testing.T) {
 		require.Error(t, err)
 		assert.ErrorIs(t, err, secret.ErrResolveAccess)
 		assert.Equal(t, 1, *calls)
-		// The agent has an as-needed secret: on a broker whose start and
-		// restart can gather it, both reach secret resolution and fail
-		// there; on one that cannot, the restart is refused with 412 before
-		// it (ptone/scion#6101).
+		// The agent has an as-needed secret. On a broker whose start can
+		// gather it, the start reaches secret resolution and fails there;
+		// the broker restart is refused before it (errRestartGatherPending,
+		// ptone/scion#6101 design r17 §9 L-1).
 		setBrokerCaps(t, f.store, &store.RuntimeBroker{ID: f.agent.RuntimeBrokerID},
 			&store.BrokerCapabilities{StartEnvGather: true, PreserveWorkspaceCreate: true})
-		assertStartsFailClosed(t, f, secret.ErrResolveAccess)
+		for _, tc := range runDispatches {
+			switch tc.name {
+			case "start":
+				err := tc.dispatch(context.Background(), f)
+				require.Error(t, err)
+				assert.ErrorIs(t, err, secret.ErrResolveAccess)
+				var resErr *secretResolutionError
+				require.ErrorAs(t, err, &resErr)
+				assertNoFailClosedDetail(t, err.Error(), "start error text")
+				_, _, called := tc.sent(f)
+				assert.False(t, called, "start sends nothing to the broker")
+			case "restart":
+				assertBrokerRestartRefused(t, f, tc.sent, tc.dispatch(context.Background(), f), errRestartGatherPending)
+			}
+		}
 	})
 }
 

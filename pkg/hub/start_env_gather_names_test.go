@@ -60,8 +60,8 @@ func TestDispatchFinalizeEnv_NamesWriteFaultIs503AndSendsNothing(t *testing.T) {
 	require.ErrorIs(t, err, errUserSuppliedKeysUnrecorded)
 	assert.NotContains(t, err.Error(), "FAKE-names-write-detail", "no store text in the error")
 	assert.False(t, f.client.createCalled, "nothing sent")
-	after, err := f.store.GetAgent(context.Background(), f.agent.ID)
-	require.NoError(t, err)
+	after, getErr := f.store.GetAgent(context.Background(), f.agent.ID)
+	require.NoError(t, getErr)
 	assert.Equal(t, before.RunID, after.RunID, "no run minted")
 
 	rec := httptest.NewRecorder()
@@ -255,6 +255,10 @@ func TestUserSuppliedKeysUnrecorded_CrossNodeIsNotActedOn(t *testing.T) {
 // through the hand-off, names the requester's action.
 func TestDispatchFinalizeEnv_OwnerNamesWriteFaultNamesTheRequesterAction(t *testing.T) {
 	f := newCrossNodeFixture(t, nil, true)
+	// A routed (preserveWorkspace) finalize is judged against the broker's
+	// PreserveWorkspaceCreate capability before the finalize runs: grant it,
+	// so the owner's names-write refusal is what comes back.
+	grantPreserveWorkspaceCreate(t, f.store, f.agent.RuntimeBrokerID)
 	f.requester.client = &mockRuntimeBrokerClient{returnErr: ErrLifecycleDeferred}
 	f.ownerDisp.finalizeErr = &userSuppliedKeysWriteError{verb: "created", err: errors.New("FAKE-owner-store-detail")}
 

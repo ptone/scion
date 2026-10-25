@@ -71,6 +71,11 @@ func ownerServer(f *runDispatchFixture) *Server {
 		events:            NewChannelEventPublisher(),
 	}
 	srv.SetDispatcher(f.d)
+	// SetDispatcher installs the hub's real standing check, which this bare
+	// server (no authz service) cannot pass. These entry points test the
+	// env-gather refusals, which run after the standing guard (startGuards),
+	// so the owner's standing is passed, as in the cross-node owner tests.
+	f.d.SetRequiredStandingCheck(func(context.Context, *store.Agent) error { return nil })
 	return srv
 }
 
@@ -274,7 +279,10 @@ func TestLifecycleHTTP_RestartPrecheck412BeforeStop(t *testing.T) {
 	srv, s := testServer(t)
 	grantDevUserRuntimeBrokerAccess(t, s)
 	project, broker := newEmptyPerAgentHandlerProject(t, s, "precheck-412", true)
-	setBrokerCaps(t, s, broker, &store.BrokerCapabilities{PreserveWorkspaceCreate: true})
+	// setBrokerCaps replaces the record's capabilities: keep the
+	// empty-per-agent workspace capability the project's mode requires, so
+	// the restart reaches the env-gather pre-check.
+	setBrokerCaps(t, s, broker, &store.BrokerCapabilities{PreserveWorkspaceCreate: true, EmptyPerAgentWorkspace: true})
 	agent := newQuotaTestAgent(t, s, broker, project, "precheck-412", state.PhaseRunning)
 	require.NoError(t, s.CreateEnvVar(context.Background(), &store.EnvVar{
 		ID: uuid.NewString(), Key: failClosedKey, Value: failClosedValue,
@@ -525,8 +533,9 @@ func TestLifecycleHTTP_RestartPrecheckStandingRefusal(t *testing.T) {
 	agent := newQuotaTestAgent(t, s, broker, project, "precheck-standing", state.PhaseRunning)
 	client := &mockRuntimeBrokerClient{}
 	d := NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default())
-	d.requiredStandingCheck = func(context.Context, *store.Agent) error { return errors.New("FAKE standing reason") }
 	srv.SetDispatcher(d)
+	// After SetDispatcher, which installs the hub's own standing check.
+	d.SetRequiredStandingCheck(func(context.Context, *store.Agent) error { return errors.New("FAKE standing reason") })
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/restart", nil)
 	require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
