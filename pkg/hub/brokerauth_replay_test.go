@@ -242,10 +242,9 @@ func TestBrokerSeenRecord_ExactRepeatRefused(t *testing.T) {
 	}
 }
 
-// reframeSeenRecordRequest returns a copy of req (signed with one signed
-// header, name: value, and nonce) whose nonce takes in the signed-header
-// line and whose signed-header list is empty. Its canonical bytes, and so
-// its signature, are those of req.
+// reframeSeenRecordRequest returns a copy of req (signed with nonce and
+// one signed header, name: value) whose headers are arranged differently
+// but whose canonical bytes, and so its signature, are those of req.
 func reframeSeenRecordRequest(t *testing.T, svc *BrokerAuthService, req *http.Request, nonce, name, value string) *http.Request {
 	t.Helper()
 	timestamp := req.Header.Get(HeaderTimestamp)
@@ -264,8 +263,8 @@ func reframeSeenRecordRequest(t *testing.T, svc *BrokerAuthService, req *http.Re
 }
 
 // TestBrokerSeenRecord_ReframedRequestRefused: a copy of a served request
-// whose nonce takes in its signed-header line has the same canonical
-// bytes and signature, and is refused as a repeat.
+// with differently arranged headers but the same canonical bytes and
+// signature is refused as a repeat.
 func TestBrokerSeenRecord_ReframedRequestRefused(t *testing.T) {
 	const hdr = "X-Scion-Seen-Test"
 	for _, m := range seenRecordFixtures(t) {

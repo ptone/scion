@@ -1067,11 +1067,10 @@ func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http
 
 // brokerReplayKey is the key a verified broker request is recorded under:
 // "broker-sig:" and the hex of its verified HMAC. Every request with the
-// same canonical bytes has the same HMAC, so a request whose headers are
-// framed differently (for example a nonce that takes in a signed-header
-// line) still has one key. The key is printable and of fixed length (a text
-// column on every database accepts it), and the prefix keeps it apart from
-// other keys in the shared nonce table.
+// same canonical bytes has the same HMAC, so all header encodings of one
+// signed request share one key. The key is printable and of fixed length
+// (a text column on every database accepts it), and the prefix keeps it
+// apart from other keys in the shared nonce table.
 func brokerReplayKey(sig []byte) string {
 	return "broker-sig:" + hex.EncodeToString(sig)
 }
