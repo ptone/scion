@@ -103,7 +103,9 @@ type conduitRPCGuard struct {
 }
 
 // conduitSeenRequests remembers served requests for the whole broker
-// process, across sessions and hub connections.
+// process, across sessions and hub connections. A guard with an injected
+// clock must use its own set (newSeenOnce): add moves the set's sweep time
+// to the latest now it sees.
 var conduitSeenRequests = newSeenOnce()
 
 // NewConduitBrokerRPCHandler returns the RPC handler for the broker

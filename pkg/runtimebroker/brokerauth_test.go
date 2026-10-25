@@ -846,6 +846,7 @@ func TestBrokerAuth_SlowBodyRepeatRefused(t *testing.T) {
 			// ends; its body is held until released.
 			time.Sleep(time.Until(windowEnd.Add(-1500 * time.Millisecond)))
 			pr, pw := io.Pipe()
+			t.Cleanup(func() { _ = pw.CloseWithError(io.ErrUnexpectedEOF) })
 			slow := httptest.NewRequest(http.MethodPost, repeatTestPath, pr)
 			slow.ContentLength = int64(len(repeatTestBody))
 			slow.Header = signed.Header.Clone()
