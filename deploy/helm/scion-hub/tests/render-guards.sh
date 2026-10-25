@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=224   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 14 (workspaceStorage.nfs: eleven refusals, one acceptance, two rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check) + 7 (hub.trustedProxies: five refusals, one acceptance, one rendered-shape check) + 4 (server.trusted_proxies on the merged document: config.extra catch-all, non-IP word, IPv4 prefix cap, non-canonical mapped range) + 5 (leading-zero octets in a plain address, at its end and in an IPv6 tail, a leading-zero prefix, and the SCION_SERVER_TRUSTED_PROXIES extraEnv refusal).
+EXPECTED_TOTAL=228   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 14 (workspaceStorage.nfs: eleven refusals, one acceptance, two rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check) + 7 (hub.trustedProxies: five refusals, one acceptance, one rendered-shape check) + 4 (server.trusted_proxies on the merged document: config.extra catch-all, non-IP word, IPv4 prefix cap, non-canonical mapped range) + 5 (leading-zero octets in a plain address, at its end and in an IPv6 tail, a leading-zero prefix, and the SCION_SERVER_TRUSTED_PROXIES extraEnv refusal) + 4 (IPv4-mapped /104 and /128 refused, a string server.trusted_proxies refused, the canonical env name in lower case).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -959,6 +959,8 @@ reject "SCION_SERVER_SECRETS_BACKEND" "SCION_SERVER_SECRETS_* are refused" \
   --set 'hub.extraEnv[0].name=SCION_SERVER_SECRETS_BACKEND' --set 'hub.extraEnv[0].value=gcpsm'
 reject "SCION_SERVER_TRUSTED_PROXIES" "Set the proxy configuration with hub.trustedProxies" \
   --set 'hub.extraEnv[0].name=SCION_SERVER_TRUSTED_PROXIES' --set 'hub.extraEnv[0].value=10.0.0.0/8'
+reject "scion_server_trustedproxies, lower case" "Set the proxy configuration with hub.trustedProxies" \
+  --set 'hub.extraEnv[0].name=scion_server_trustedproxies' --set 'hub.extraEnv[0].value=10.0.0.0/8'
 
 echo "== hub.adminEmails =="
 # One address per entry. The hub comma-splits a one-element list only, so a
@@ -991,7 +993,7 @@ echo "== hub.trustedProxies =="
 reject "trustedProxies 0.0.0.0/0" "is wider than /8" --set 'hub.trustedProxies={0.0.0.0/0}'
 reject "trustedProxies IPv4 /7" "is wider than /8" --set 'hub.trustedProxies={10.0.0.0/7}'
 reject "trustedProxies ::/0" "is wider than /16" --set 'hub.trustedProxies={::/0}'
-reject "trustedProxies IPv4-mapped /96" "is wider than /104" --set 'hub.trustedProxies={::ffff:0:0/96}'
+reject "trustedProxies IPv4-mapped /96" "is an IPv4-mapped IPv6 range" --set 'hub.trustedProxies={::ffff:0:0/96}'
 reject "trustedProxies hostname, schema layer" "hub.trustedProxies.0" --set 'hub.trustedProxies={proxy.example.invalid}'
 accept "trustedProxies IPv4 /8" --set 'hub.trustedProxies={10.0.0.0/8}'
 # The merged document is checked too, so config.extra is held to the same
@@ -1000,9 +1002,16 @@ reject "trusted_proxies 0.0.0.0/0 through config.extra" "server.trusted_proxies 
   --set-json 'hub.trustedProxies=[]' --set-json 'config.extra={"server":{"trusted_proxies":["0.0.0.0/0"]}}'
 reject "trustedProxies hex-only word" "hub.trustedProxies entry \"abc\" is not an IP address or a CIDR" --set 'hub.trustedProxies={abc}'
 reject "trustedProxies IPv4 /33" "has a prefix longer than /32" --set 'hub.trustedProxies={1.2.3.4/33}'
-reject "trustedProxies non-canonical IPv4-mapped /96" "is wider than /104" --set 'hub.trustedProxies={0:0:0:0:0:ffff:0:0/96}'
-# Octets and prefixes are written without leading zeros, as the hub parses them
-# (and as Sprig's int would not: it reads a leading zero as octal).
+reject "trustedProxies non-canonical IPv4-mapped /96" "is an IPv4-mapped IPv6 range" --set 'hub.trustedProxies={0:0:0:0:0:ffff:0:0/96}'
+# The hub refuses an IPv4-mapped range at any prefix (it never matches a peer),
+# so the plain IPv4 form is required; a mapped address without a prefix is fine.
+reject "trustedProxies IPv4-mapped /104" "Use the plain IPv4 form" --set 'hub.trustedProxies={::ffff:10.0.0.0/104}'
+reject "trustedProxies IPv4-mapped /128" "Use the plain IPv4 form" --set 'hub.trustedProxies={::ffff:10.1.2.3/128}'
+reject "trusted_proxies as a string through config.extra" "it must be a YAML list of IPs or CIDRs" \
+  --set-json 'hub.trustedProxies=[]' --set-json 'config.extra={"server":{"trusted_proxies":"10.0.0.0/8"}}'
+# Octets are written without leading zeros, as the hub parses them. Prefixes
+# are too, which is stricter than the hub but keeps Sprig's int from reading a
+# leading zero as octal.
 reject "trustedProxies leading-zero first octet" "entry \"010.0.0.1\" is not an IP address or a CIDR" --set 'hub.trustedProxies={010.0.0.1}'
 reject "trustedProxies leading-zero last octet" "entry \"1.2.3.099\" is not an IP address or a CIDR" --set 'hub.trustedProxies={1.2.3.099}'
 reject "trustedProxies leading-zero octet in an IPv6 dotted tail" "entry \"::ffff:1.2.3.04\" is not an IP address or a CIDR" --set 'hub.trustedProxies={::ffff:1.2.3.04}'

@@ -406,7 +406,8 @@ them if a different tier fronts the hub:
 | ingress-nginx or another in-cluster proxy | the pod range the proxy runs in |
 
 Entries are IPs or CIDRs. Catch-all and very wide entries (IPv4 shorter than
-`/8`, IPv6 shorter than `/16`) fail the render. An empty list renders no key,
+`/8`, IPv6 shorter than `/16`) and IPv4-mapped IPv6 ranges such as
+`::ffff:10.0.0.0/104` (write `10.0.0.0/8` instead) fail the render. An empty list renders no key,
 and the hub then trusts no forwarded protocol. Under `config.existingSecret`,
 put `server.trusted_proxies` in your own settings file.
 

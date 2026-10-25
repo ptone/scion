@@ -2444,13 +2444,6 @@ environment is still the chart's.
 {{- fail "hub.extraEnv may not set SCION_ACTIVE_PROFILE: the hub loads SCION_* environment variables over settings.yaml (LoadVersionedSettings, pkg/config/settings_v1.go), so it would replace active_profile and change which profile's image_registry the hub resolves, without the chart's registry check seeing it. Set active_profile through config.extra instead; the chart renders active_profile: default, so changing it there is refused as a collision until the chart supports it." }}
 {{- end }}
 {{- /*
-SCION_SERVER_HUB_CLASS binds to server.hub.class through the same env layer, over
-the rendered settings.yaml. The class is an input of the hub's --test-mode gate
-and comes from hub.hubClass only (config.extra is refused for the same reason in
-assertSettings); under config.existingSecret it belongs in the operator's file.
-Refused in every form, literal or valueFrom, matched case-insensitively.
-*/}}
-{{- /*
 SCION_SERVER_TRUSTEDPROXIES (and its alias SCION_SERVER_TRUSTED_PROXIES) binds
 to server.trusted_proxies over the rendered settings.yaml, so it would replace
 the proxy configuration without this chart's checks seeing it. Refused in every
@@ -2459,6 +2452,13 @@ form, matched case-insensitively.
 {{- if has (upper $name) (list "SCION_SERVER_TRUSTEDPROXIES" "SCION_SERVER_TRUSTED_PROXIES") }}
 {{- fail (printf "hub.extraEnv may not set %s: it would override server.trusted_proxies over the rendered settings.yaml, bypassing the chart's checks on it. Set the proxy configuration with hub.trustedProxies (or in your own settings file under config.existingSecret)." $name) }}
 {{- end }}
+{{- /*
+SCION_SERVER_HUB_CLASS binds to server.hub.class through the same env layer, over
+the rendered settings.yaml. The class is an input of the hub's --test-mode gate
+and comes from hub.hubClass only (config.extra is refused for the same reason in
+assertSettings); under config.existingSecret it belongs in the operator's file.
+Refused in every form, literal or valueFrom, matched case-insensitively.
+*/}}
 {{- if eq (upper $name) "SCION_SERVER_HUB_CLASS" }}
 {{- fail "hub.extraEnv may not set SCION_SERVER_HUB_CLASS: it would override server.hub.class, an input of the hub's --test-mode gate, without the chart seeing it. Set the hub class with hub.hubClass (or in your own settings file under config.existingSecret)." }}
 {{- end }}
@@ -3435,8 +3435,8 @@ nothing, so it is refused rather than discarded.
 server.trusted_proxies from hub.trustedProxies: the proxy configuration, the
 peers whose X-Forwarded-Proto the hub honours. Omitted when empty. The hub
 refuses to start on an entry that is not an IP or CIDR and on catch-all or very
-wide prefixes (IPv4 shorter than /8, IPv6 shorter than /16, an IPv4-mapped IPv6
-range wider than an IPv4 /8), so the same entries are refused here, at render,
+wide prefixes (IPv4 shorter than /8, IPv6 shorter than /16) and on any
+IPv4-mapped IPv6 range, so the same entries are refused here, at render,
 instead of as a crash-looping pod.
 */}}
 {{- $trustedProxies := list }}
@@ -4426,12 +4426,19 @@ One server.trusted_proxies entry, checked the way the hub checks it at startup,
 so a bad entry fails the render instead of crash-looping the pod. dict: entry
 (trimmed), source (the value or settings key named in the error).
 
-IPv4 must be a dotted quad, octets 0-255 without leading zeros, prefix /8 to /32
-(written without a leading zero). IPv6 must be a
-well-formed address (hex groups of up to four digits, at most one "::", an
-optional dotted-quad tail), prefix /16 to /128. An IPv4-mapped IPv6 range, in
-any spelling with ffff after zero groups, must be no wider than an IPv4 /8, so
-/104 at most.
+Mirrors parseTrustedProxy (pkg/config/trusted_proxies.go in the hub):
+- IPv4 must be a dotted quad with octets 0-255, prefix /8 to /32. Octets are
+  written without leading zeros, as the hub parses them.
+- IPv6 must be a well-formed address (hex groups of up to four digits, at most
+  one "::", an optional dotted-quad tail), prefix /16 to /128.
+- An IPv4-mapped IPv6 address (any spelling with ffff after zero groups) is
+  accepted only without a prefix. With a prefix it is an IPv4-mapped range,
+  which the hub refuses because it never matches a peer, so the plain IPv4
+  form is required. The spelling test also catches ffff in group 7 inside the
+  reserved ::/8 block, which the hub would accept; that is deliberately
+  stricter.
+- Prefixes are also written without leading zeros. That is stricter than the
+  hub, and avoids Sprig's int reading a leading zero as octal.
 */}}
 {{- define "scion-hub.assertTrustedProxyEntry" -}}
 {{- $entry := .entry }}
@@ -4476,7 +4483,9 @@ any spelling with ffff after zero groups, must be no wider than an IPv4 /8, so
 {{- $groups = add $groups $tailGroups }}
 {{- if or (and (eq $dbl 0) (ne $groups 8)) (and (eq $dbl 1) (ge $groups 8)) }}{{- fail $bad }}{{- end }}
 {{- if and (eq $dbl 0) (or (hasPrefix ":" $v6) (and (hasSuffix ":" $v6) (eq $tailGroups 0))) }}{{- fail $bad }}{{- end }}
-{{- if regexMatch "^(0{0,4}:){1,7}:?ffff:" (lower $addr) }}{{- $minBits = 104 }}{{- end }}
+{{- if and $hasBits (regexMatch "^(0{0,4}:){1,7}:?ffff:" (lower $addr)) }}
+{{- fail (printf "%s entry %s is an IPv4-mapped IPv6 range, which never matches a peer and which the hub refuses at startup. Use the plain IPv4 form, for example 10.0.0.0/8 rather than ::ffff:10.0.0.0/104." $src (include "scion-hub.diagValue" $entry)) }}
+{{- end }}
 {{- else }}
 {{- if not (regexMatch $quad $addr) }}{{- fail $bad }}{{- end }}
 {{- end }}
@@ -4494,20 +4503,19 @@ any spelling with ffff after zero groups, must be no wider than an IPv4 /8, so
 {{/*
 server.trusted_proxies on the MERGED settings document, so an entry that
 arrives through config.extra is held to the same rules as hub.trustedProxies.
-The hub accepts a list, each item also split on commas, or a comma-separated
-string; anything else is refused.
+The settings file must carry a list (the hub's field is a []string and does
+not decode a scalar). Each item is split on commas as the hub splits it, and
+empty items are dropped as the hub drops them.
 */}}
 {{- define "scion-hub.assertTrustedProxies" -}}
 {{- $server := dig "server" (dict) .doc }}
 {{- if and (kindIs "map" $server) (hasKey $server "trusted_proxies") }}
 {{- $raw := index $server "trusted_proxies" }}
 {{- $items := list }}
-{{- if kindIs "string" $raw }}
-{{- $items = splitList "," $raw }}
-{{- else if kindIs "slice" $raw }}
+{{- if kindIs "slice" $raw }}
 {{- range $raw }}{{- $items = concat $items (splitList "," (toString .)) }}{{- end }}
 {{- else if not (kindIs "invalid" $raw) }}
-{{- fail (printf "server.trusted_proxies is %s; it must be a list of IPs or CIDRs." (include "scion-hub.diagValue" (toString $raw))) }}
+{{- fail (printf "server.trusted_proxies is %s; it must be a YAML list of IPs or CIDRs. The hub cannot read a single string here; a comma-separated string works only in the SCION_SERVER_TRUSTEDPROXIES environment variable." (include "scion-hub.diagValue" (toString $raw))) }}
 {{- end }}
 {{- range $items }}
 {{- $e := trim . }}
