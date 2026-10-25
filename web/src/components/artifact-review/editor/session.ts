@@ -43,6 +43,7 @@ import {
   keyedMarks,
   marksReadBack,
   sameRuns,
+  TextMarks,
   textMarkRuns,
 } from './guard.js';
 import {
@@ -187,6 +188,18 @@ export class ReviewSession {
     if (!base) return out;
     const { schema } = this.core;
     const starts = blockStarts(base);
+    // The whole text is read once; each unit takes the marks of its range.
+    const marks = new TextMarks(md);
+    // plain is a function of its input alone: each distinct text is read once.
+    const shown = new Map<string, string>();
+    const plain = (t: string): string => {
+      let v = shown.get(t);
+      if (v === undefined) {
+        v = this.core.plain(t);
+        shown.set(t, v);
+      }
+      return v;
+    };
     for (let k = 0; k < base.blocks.length; k++) {
       const [i, j] = unitRange(base, k, k);
       k = j;
@@ -194,10 +207,9 @@ export class ReviewSession {
       for (let q = i; q <= j; q++) nodes.push(base.nodes[q]);
       const runs = docMarkRuns(schema.topNodeType.create(null, nodes));
       const end = starts[j] + base.blocks[j].src.length;
-      const plain = this.core.plain;
-      if (sameRuns(runs, textMarkRuns(md, plain, starts[i], end), true)) continue;
+      if (sameRuns(runs, marks.runs(plain, starts[i], end), true)) continue;
       // The only differences allowed are the held tokens.
-      if (!sameRuns(runs, textMarkRuns(md, plain, starts[i], end, held), true)) return null;
+      if (!sameRuns(runs, marks.runs(plain, starts[i], end, held), true)) return null;
       for (let q = i; q <= j; q++) out.add(q);
     }
     // Code the critic parser reads across the edge of a block (a code span
@@ -517,7 +529,7 @@ export function fenceLines(text: string): number {
  * no blank line in the source between them; text between blocks that holds
  * a backtick counts for the runs on both sides of it, blank line or not.
  */
-function codeNeighbours(base: Baseline): boolean[] {
+export function codeNeighbours(base: Baseline): boolean[] {
   const n = base.blocks.length;
   const run: number[] = [];
   let r = 0;
@@ -526,6 +538,9 @@ function codeNeighbours(base: Baseline): boolean[] {
     if (/\n[ \t]*\r?\n/.test(base.blocks[k].after.replace(/\r\n/g, '\n'))) r++;
   }
   const ticks = base.blocks.map((b) => b.src.includes('`'));
+  // Per line run, how many of its blocks hold a backtick.
+  const runTicks = new Map<number, number>();
+  for (let k = 0; k < n; k++) if (ticks[k]) runTicks.set(run[k], (runTicks.get(run[k]) ?? 0) + 1);
   const gapTicks = new Set<number>();
   if (n > 0 && base.lead.includes('`')) gapTicks.add(run[0]);
   for (let k = 0; k < n; k++) {
@@ -534,8 +549,7 @@ function codeNeighbours(base: Baseline): boolean[] {
     if (k + 1 < n) gapTicks.add(run[k + 1]);
   }
   return base.blocks.map(
-    (_, k) =>
-      gapTicks.has(run[k]) || base.blocks.some((_, m) => m !== k && run[m] === run[k] && ticks[m])
+    (_, k) => gapTicks.has(run[k]) || (runTicks.get(run[k]) ?? 0) > (ticks[k] ? 1 : 0)
   );
 }
 
