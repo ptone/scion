@@ -15,12 +15,14 @@
 package agent
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 // A legacy agent (no broker-side provenance record) falls back to the
@@ -76,9 +78,27 @@ func TestStart_LegacyAgentInfoTemplateIsNeverAHostDirectory(t *testing.T) {
 		// A restart that names the template, as a local start can: the
 		// legacy agent's recorded name then chooses the template whose
 		// bundled harness-config is resolved.
-		_, info = startCapturingRun(t, api.StartOptions{Name: "test-agent", Template: "alpha", ProjectPath: projectScionDir})
+		// Refusing the name can leave the start without a harness-config
+		// image, so a start error is acceptable here; loading the
+		// outside directory's bundle is not.
+		var captured runtime.RunConfig
+		mockRT := &runtime.MockRuntime{
+			ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+				return []api.AgentInfo{}, nil
+			},
+			RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+				captured = cfg
+				return "mock-id", nil
+			},
+		}
+		info, _ := NewManager(mockRT).Start(context.Background(), api.StartOptions{
+			Name: "test-agent", Template: "alpha", ProjectPath: projectScionDir, BrokerMode: true, NoAuth: true,
+		})
 		if info != nil && info.HarnessConfigRevision == outside {
 			t.Fatalf("agent-info.json template %q loaded the harness-config bundled in a directory outside the template roots", ref)
+		}
+		if captured.Image == "outside-user-image:v1" {
+			t.Fatalf("agent-info.json template %q selected the image of a directory outside the template roots", ref)
 		}
 	}
 }
