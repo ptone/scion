@@ -280,6 +280,28 @@ type VolumeMount struct {
 	Mode       string `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`                      // Mount options
 	Server     string `json:"server,omitempty" yaml:"server,omitempty" koanf:"server"`                // NFS: server host/IP
 	VolumeName string `json:"volume_name,omitempty" yaml:"volume_name,omitempty" koanf:"volume_name"` // Cloud Run / GKE volume name
+
+	// operatorOrigin marks a volume that came from the broker operator's own
+	// configuration (WithOperatorOrigin). It is unexported so that no
+	// decoder (JSON, YAML, koanf) can set it from a request, a stored agent
+	// config, a harness-config or a settings file, and it is never persisted.
+	// The runtime applies the broker volume-source policy to every volume
+	// without it.
+	operatorOrigin bool
+}
+
+// WithOperatorOrigin returns a copy of v marked as coming from the broker
+// operator's own configuration: the global settings file, a global
+// harness-config directory, or a mount the broker generates itself. Only
+// in-process code that read v from one of those sources may call it.
+func (v VolumeMount) WithOperatorOrigin() VolumeMount {
+	v.operatorOrigin = true
+	return v
+}
+
+// OperatorOrigin reports whether v was marked by WithOperatorOrigin.
+func (v VolumeMount) OperatorOrigin() bool {
+	return v.operatorOrigin
 }
 
 // Validate checks that a VolumeMount has the required fields and valid values.

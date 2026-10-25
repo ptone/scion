@@ -1768,6 +1768,25 @@
           "type": ["array", "null"],
           "items": { "$ref": "#/$defs/runtimeBrokerInstance" },
           "description": "Flat (single-target) Runtime Broker instances hosted by this process, each with a unique key. Empty or absent means legacy hosting. This release accepts docker entries. Read from the global settings file only."
+        },
+        "volume_sources": {
+          "type": ["object", "null"],
+          "description": "Volume-source policy: the host paths that requester-supplied volumes (an agent's inline config, a project's settings, a project, hub or template harness-config) may bind-mount on Docker, Podman and Apple container brokers. Empty means none. Volumes from the global settings file and global harness-configs are not subject to it. Read from the global settings file only.",
+          "additionalProperties": false,
+          "properties": {
+            "allow": {
+              "type": ["array", "null"],
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["path"],
+                "properties": {
+                  "path": { "type": "string", "description": "Absolute host path, or one starting with ~/. A volume source at or below it is allowed." },
+                  "writable": { "type": "boolean", "default": false, "description": "Permit a writable mount. Without it a matching volume is mounted read-only." }
+                }
+              }
+            }
+          }
         }
       }
     },

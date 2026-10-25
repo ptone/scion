@@ -2074,6 +2074,30 @@ type V1BrokerConfig struct {
 	// Read only through LoadGlobalConfig / LoadRuntimeBrokerInstances; project
 	// settings never configure instances.
 	Instances []V1RuntimeBrokerInstanceConfig `json:"instances,omitempty" yaml:"instances,omitempty" koanf:"instances"`
+	// VolumeSources is the broker's volume-source policy: the host paths a
+	// requester-supplied volume (an agent's own inline config, a project's
+	// settings, a project, hub or template harness-config) may bind-mount.
+	// Empty means none may. Volumes from the global settings file and
+	// global harness-configs are not subject to it. Read from the global
+	// settings file only, on each agent start.
+	VolumeSources *V1VolumeSourcesConfig `json:"volume_sources,omitempty" yaml:"volume_sources,omitempty" koanf:"volume_sources"`
+}
+
+// V1VolumeSourcesConfig is server.broker.volume_sources.
+type V1VolumeSourcesConfig struct {
+	// Allow lists the host directories (or files) a requester-supplied
+	// volume source may be at or below.
+	Allow []V1VolumeSourceAllow `json:"allow,omitempty" yaml:"allow,omitempty" koanf:"allow"`
+}
+
+// V1VolumeSourceAllow is one server.broker.volume_sources.allow entry.
+type V1VolumeSourceAllow struct {
+	// Path is an absolute host path, or one starting with ~/ (the broker
+	// user's home).
+	Path string `json:"path" yaml:"path" koanf:"path"`
+	// Writable permits a writable mount at or below Path. Without it a
+	// matching volume is mounted read-only.
+	Writable bool `json:"writable,omitempty" yaml:"writable,omitempty" koanf:"writable"`
 }
 
 // V1RuntimeBrokerInstanceConfig is one flat Runtime Broker instance.

@@ -71,7 +71,10 @@ var settingsNotStoredKeys = map[string]string{
 // pkg/hub/system_handlers.go) and by server startup (LoadGlobalConfig,
 // which reads a file other than the global one only when an explicit
 // --config path names it). A project's own copy is never read.
-var settingsGlobalOnlyPrefixes = []string{"server.auth."}
+// server.broker.volume_sources (the broker volume-source policy) is read
+// from the global settings file only (pkg/agent loadVolumeSourcePolicy), so
+// a project's settings cannot widen it.
+var settingsGlobalOnlyPrefixes = []string{"server.auth.", "server.broker.volume_sources"}
 
 // ValidateSettingWrite reports whether key may be written to a settings
 // file at the given layer (global true for the global settings file, false
