@@ -315,12 +315,12 @@ describe('refused edits in suggest mode', () => {
     expect(hints).toEqual(['format']);
   });
 
-  it('typing in a list item or a table is refused in this version', async () => {
+  it('typing in a list item or a table cell is recorded', async () => {
     const { c, hints } = await open('- item\n\n| a |\n|---|\n| cell |\n');
     type(c, 'X', posOf(c, 'item'));
     type(c, 'X', posOf(c, 'cell'));
-    expect(text(c)).toBe('- item\n\n| a |\n|---|\n| cell |\n');
-    expect(hints).toEqual(['list-table', 'list-table']);
+    expect(text(c)).toBe('- {++X++}item\n\n| a |\n|---|\n| {++X++}cell |\n');
+    expect(hints).toEqual([]);
   });
 
   it('typing in a code block is refused', async () => {
@@ -330,19 +330,46 @@ describe('refused edits in suggest mode', () => {
     expect(hints).toEqual(['code']);
   });
 
-  it('an edit whose save would change text outside marks is refused', async () => {
-    // The serializer writes this paragraph without its backslash, which
-    // would change the text outside marks, so the edit is refused.
-    const md = 'a \\# b c\n';
-    const { c, hints } = await open(md);
+  it('an edit keeps the source of text the serializer writes differently', async () => {
+    // The serializer writes this paragraph without its backslash; the
+    // edit lands in the source, backslash kept.
+    const { c, hints } = await open('a \\# b c\n');
     type(c, 'X', posOf(c, 'b c'));
+    expect(hints).toEqual([]);
+    expect(text(c)).toBe('a \\# {++X++}b c\n');
+  });
+
+  it('refuses typing in a block the hub reads as code running on from it', async () => {
+    // The critic parser reads a code span from the heading's backtick into
+    // the next paragraph (Markdown does not): a token typed in the heading
+    // would be code text to the hub.
+    const md = '# The ` key\nPress {++x++} then `';
+    const { c, hints } = await open(md);
+    type(c, 'X', posOf(c, 'key'));
     expect(hints).toEqual(['generic']);
     expect(text(c)).toBe(md);
-    // Positive control: the same edit in a paragraph the serializer keeps.
-    const ok = await open('a b c\n');
-    type(ok.c, 'X', posOf(ok.c, 'b c'));
+    // Positive control: the same heading without the run.
+    const ok = await open('# The key\nPress {++x++} then\n');
+    type(ok.c, 'X', posOf(ok.c, 'key'));
     expect(ok.hints).toEqual([]);
-    expect(text(ok.c)).toBe('a {++X++}b c\n');
+    expect(text(ok.c)).toBe('# The {++X++}key\nPress {++x++} then\n');
+  });
+
+  it('an edit with no exact place in the source is refused', async () => {
+    // The source writes & as a character reference and the serializer as
+    // the character: typing right after it has no place in the source
+    // (inside the reference would change the text), so the editor falls
+    // back to the serializer's text, which changes the text outside
+    // marks, and refuses.
+    const md = 'a &amp; b\n';
+    const { c, hints } = await open(md);
+    type(c, 'X', posOf(c, '& b', 1));
+    expect(hints).toEqual(['generic']);
+    expect(text(c)).toBe(md);
+    // Positive control: an edit away from the reference lands in the source.
+    type(c, 'X', posOf(c, 'b'));
+    expect(hints).toEqual(['generic']);
+    expect(text(c)).toBe('a &amp; {++X++}b\n');
   });
 });
 
@@ -718,17 +745,18 @@ describe('comments', () => {
   });
 
   it('refuses a comment whose save would change text outside marks', async () => {
-    const { c, hints } = await open('a \\# b c\n');
-    select(c, posOf(c, 'b c'));
+    const { c, hints } = await open('a &amp; b\n');
+    select(c, posOf(c, '& b', 1));
     await c.comment();
     expect(hints).toEqual(['generic']);
-    expect(text(c)).toBe('a \\# b c\n');
-    // Positive control: the same comment in a paragraph the serializer keeps.
-    const ok = await open('a b c\n');
+    expect(text(c)).toBe('a &amp; b\n');
+    // Positive control: a comment in a paragraph the serializer writes
+    // differently lands in the source.
+    const ok = await open('a \\# b c\n');
     select(ok.c, posOf(ok.c, 'b c'));
     await ok.c.comment();
     expect(ok.hints).toEqual([]);
-    expect(text(ok.c)).toBe('a {>>a note<<}b c\n');
+    expect(text(ok.c)).toBe('a \\# {>>a note<<}b c\n');
   });
 
   it('refuses a note that would end the comment early', async () => {
@@ -740,12 +768,17 @@ describe('comments', () => {
     expect(text(c)).toBe('one two\n');
   });
 
-  it('refuses a comment inside a list in this version', async () => {
-    const { c, hints } = await open('- item\n');
-    select(c, posOf(c, 'item'));
+  it('comments in a list item and in a table cell', async () => {
+    const { c, hints } = await open('* item one\n\n| a | b |\n|:-|-:|\n| cell | x |\n');
+    const p = posOf(c, 'one');
+    select(c, p, p + 3);
     await c.comment();
-    expect(hints).toEqual(['list-table']);
-    expect(text(c)).toBe('- item\n');
+    select(c, posOf(c, 'cell', 4));
+    await c.comment();
+    expect(hints).toEqual([]);
+    expect(text(c)).toBe(
+      '* item {==one==}{>>a note<<}\n\n| a | b |\n|:-|-:|\n| cell{>>a note<<} | x |\n'
+    );
   });
 });
 
@@ -820,15 +853,17 @@ describe('composition (IME) input', () => {
     expect(text(c)).toBe('a {++big ++}dog\n');
   });
 
-  it('undoes a composition in a list item or a code block, with their hints', async () => {
-    const { c, hints } = await open('- item\n\n```\ncode\n```\n');
+  it('records a composition in a list item and a table cell, and undoes one in a code block', async () => {
+    const { c, hints } = await open('- item\n\n| a |\n|---|\n| cell |\n\n```\ncode\n```\n');
     const before = c.view.state.doc;
     const li = posOf(c, 'item');
     compose(c, li, (tr) => tr.insertText('X', li), Date.now() - 2000);
+    const cell = posOf(c, 'cell');
+    compose(c, cell, (tr) => tr.insertText('Z', cell), Date.now() - 2000);
     const code = posOf(c, 'code');
     compose(c, code, (tr) => tr.insertText('Y', code));
-    expect(hints).toEqual(['list-table', 'code']);
-    expect(text(c)).toBe('- item\n\n```\ncode\n```\n');
+    expect(hints).toEqual(['code']);
+    expect(text(c)).toBe('- {++X++}item\n\n| a |\n|---|\n| {++Z++}cell |\n\n```\ncode\n```\n');
     while (undo(c.view.state, c.view.dispatch)) {
       // back to the start
     }
@@ -925,10 +960,9 @@ describe('composition timing', () => {
     expect(text(c)).toBe('a {++犬++}dog\n');
   });
 
-  it('restores exactly when the composed letter repeats its neighbour, in a list and in code', async () => {
+  it('records a composed letter that repeats its neighbour in a list, and restores it exactly in code', async () => {
     const md = '- item\n\n```\ncoode\n```\n';
     const { c, hints } = await open(md);
-    const before = c.view.state.doc;
     const li = posOf(c, 'item', 2);
     select(c, li);
     c.beginComposition();
@@ -941,9 +975,8 @@ describe('composition timing', () => {
     composeStep(c, code, 'o', 9);
     c.endComposition();
     c.settleComposition();
-    expect(hints).toEqual(['list-table', 'code']);
-    expect(c.view.state.doc.eq(before)).toBe(true);
-    expect(text(c)).toBe(md);
+    expect(hints).toEqual(['code']);
+    expect(text(c)).toBe('- it{++t++}em\n\n```\ncoode\n```\n');
   });
 
   it('restores a composition inside an earlier insertion, with the earlier-review hint', async () => {
@@ -1046,6 +1079,91 @@ describe('preset plugins', () => {
       if (hints.length) noisy.push(`${doc.name}: ${hints.join(',')}`);
     }
     expect(noisy).toEqual([]);
+  });
+});
+
+describe('lists and tables keep their source', () => {
+  it('an edit in one item leaves the other items and the markers as written', async () => {
+    const md = '* one\n* two words\n* three\n\n+ plus\n';
+    const { c, hints } = await open(md);
+    type(c, 'X', posOf(c, 'words'));
+    expect(hints).toEqual([]);
+    expect(text(c)).toBe('* one\n* two {++X++}words\n* three\n\n+ plus\n');
+  });
+
+  it('keeps the numbers of an ordered list and of a nested one', async () => {
+    const md = '3. three\n7. seven\n10. ten\n    1. nested one\n    1. nested two\n';
+    const { c } = await open(md);
+    const p = posOf(c, 'seven');
+    type(c, 'Y', p, p + 1);
+    type(c, 'Z', posOf(c, 'two'));
+    expect(text(c)).toBe(
+      '3. three\n7. {~~s~>Y~~}even\n10. ten\n    1. nested one\n    1. nested {++Z++}two\n'
+    );
+  });
+
+  it('keeps a loose list loose and a quoted list quoted', async () => {
+    const md = '- loose one\n\n- loose two\n\n> - quoted item\n> - another\n';
+    const { c } = await open(md);
+    type(c, 'X', posOf(c, 'two'));
+    type(c, 'Y', posOf(c, 'another'));
+    expect(text(c)).toBe(
+      '- loose one\n\n- loose {++X++}two\n\n> - quoted item\n> - {++Y++}another\n'
+    );
+  });
+
+  it('an edit in one row leaves the other rows, the alignment and the padding as written', async () => {
+    const md = '| Left | Center | Right |\n|:-----|:------:|------:|\n| a | c | 1 |\n|d|ee|2|\n';
+    const { c, hints } = await open(md);
+    type(c, 'long text', posOf(c, 'ee'));
+    expect(hints).toEqual([]);
+    expect(text(c)).toBe(
+      '| Left | Center | Right |\n|:-----|:------:|------:|\n| a | c | 1 |\n|d|{++long text++}ee|2|\n'
+    );
+  });
+
+  it('edits the header row in place', async () => {
+    const md = '| Name   | Value |\n| ------ | ----- |\n| x      | 1     |\n';
+    const { c } = await open(md);
+    type(c, 'Full ', posOf(c, 'Name'));
+    expect(text(c)).toBe('| {++Full ++}Name   | Value |\n| ------ | ----- |\n| x      | 1     |\n');
+  });
+
+  it('keeps a backslashed pipe in a cell, beside the edit and inside it', async () => {
+    const md = '| a | b |\n|---|---|\n| x \\| y | z |\n';
+    const { c, hints } = await open(md);
+    type(c, 'W', posOf(c, 'z'));
+    expect(text(c)).toBe('| a | b |\n|---|---|\n| x \\| y | {++W++}z |\n');
+    // A replacement that takes in the backslashed pipe.
+    const p = posOf(c, '| y');
+    type(c, 'V', p - 1, p + 3);
+    expect(hints).toEqual([]);
+    expect(text(c)).toBe('| a | b |\n|---|---|\n| x{~~ \\| y~>V~~} | {++W++}z |\n');
+  });
+
+  it('writes a list with a mark across two items as one unit', async () => {
+    const md = '- a {++x\n- y++} b\n- c\n';
+    const { c, hints } = await open(md);
+    type(c, 'Z', posOf(c, 'c'));
+    expect(hints).toEqual([]);
+    expect(text(c)).toBe('- a {++x\n- y++} b\n- {++Z++}c\n');
+  });
+
+  it('refuses an edit in a block the serializer rewrites in too many places to patch', async () => {
+    // Every &amp; is written as &, which is more difference than the patch
+    // works through: the serializer's text is used, it changes the text
+    // outside marks, and the edit is refused.
+    const big = `${'&amp; '.repeat(1500)}end\n`;
+    const { c, hints } = await open(big);
+    type(c, 'X', posOf(c, 'end'));
+    expect(hints).toEqual(['generic']);
+    expect(text(c)).toBe(big);
+    // Positive control: the same edit with a few of them.
+    const small = `${'&amp; '.repeat(5)}end\n`;
+    const ok = await open(small);
+    type(ok.c, 'X', posOf(ok.c, 'end'));
+    expect(ok.hints).toEqual([]);
+    expect(text(ok.c)).toBe(`${'&amp; '.repeat(5)}{++X++}end\n`);
   });
 });
 

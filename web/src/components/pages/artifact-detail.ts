@@ -185,8 +185,8 @@ export const REVIEW_HINT_TEXT: Record<ReviewHint, { title: string; body: string 
     body: 'A review can only use images already in this version.',
   },
   'list-table': {
-    title: "Lists and tables can't take suggestions here yet.",
-    body: 'Edit them in the Source view.',
+    title: "List and table structure can't be changed in a suggestion.",
+    body: 'You can edit the text in them; use the Source view to add, remove or move items, rows or columns.',
   },
   break: {
     title: "Paragraph breaks can't be suggested here yet.",
