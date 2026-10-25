@@ -377,6 +377,18 @@ func TestHubTransportRefusal_NamesTheSetting(t *testing.T) {
 			t.Errorf("refusal %q does not name SCION_HUB_ENDPOINT", err)
 		}
 	})
+	t.Run("environment with user info", func(t *testing.T) {
+		// The refusal carries the endpoint redacted; the origin still matches.
+		withInfo := "http://user:" + htpUserinfoSecret + "@10.0.0.1:9810"
+		htpEnv(t, withInfo, false)
+		t.Setenv("SCION_HUB_ENDPOINT", withInfo)
+		t.Setenv("SCION_HUB_TOKEN", htpHubToken)
+		_, err := getHubClient(nil)
+		assertTransportRefusal(t, err)
+		if !strings.Contains(err.Error(), "hub endpoint from SCION_HUB_ENDPOINT") {
+			t.Errorf("refusal %q does not name SCION_HUB_ENDPOINT", err)
+		}
+	})
 	t.Run("flag", func(t *testing.T) {
 		htpEnv(t, htpRefused, false)
 		t.Setenv("SCION_HUB_TOKEN", htpHubToken)
@@ -547,6 +559,10 @@ func TestInjectedAgentTokenException(t *testing.T) {
 //   - attach.go var attachToAgentFn and vscode.go var vscodePreflight:
 //     function values whose callers (attachHubSession; tunnelClientConfig
 //     inside vscodePreflight) check first.
+//
+// A method is named "<file>:<receiver type>.<method>". Raw net/http requests
+// that set a credential themselves (server_onboarding.go) are outside this
+// scan; their path tests cover them.
 var htpGuarded = map[string][]string{
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient.New":                     {"broker.go:getHubClientForConnection", "broker_join.go:newUnauthenticatedHubClient"},
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient.NewTransport":            {"ssh_hostkey.go:newSSHHubConn"},
@@ -558,11 +574,22 @@ var htpGuarded = map[string][]string{
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync.NewInjectedAgentHubClient": {"hub.go:hubClientAndAuthSourceForEndpoint"},
 }
 
+// htpGuardedLocal lists the package-level cmd wrappers that do NOT apply the
+// transport rule themselves, each with the only places that may reference
+// them; those places check first (or, for newUnauthenticatedHubClient, its
+// caller applies checkBrokerHubURL and the client sends no user credential).
+// Tests may still replace attachToAgentFn (test files are not scanned).
+var htpGuardedLocal = map[string][]string{
+	"attachToAgentFn":             {"attach.go:attachHubSession"},
+	"newUnauthenticatedHubClient": {"broker_join.go:runBrokerJoin"},
+}
+
 // TestHubClientConstructionGoesThroughTransportRule fails when a cmd file
 // references a guarded hub constructor or dialer (a call, a function value or
 // a composite literal; through any import name) outside its allowed places,
-// imports a guarded package with a dot import, or when an allowed place no
-// longer references it (a stale entry).
+// imports a guarded package with a dot import, references a guarded local
+// wrapper (htpGuardedLocal) outside its allowed places, or when an allowed
+// place no longer references it (a stale entry).
 func TestHubClientConstructionGoesThroughTransportRule(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
@@ -603,7 +630,19 @@ func TestHubClientConstructionGoesThroughTransportRule(t *testing.T) {
 			var places []string
 			switch d := decl.(type) {
 			case *ast.FuncDecl:
-				places = []string{file + ":" + d.Name.Name}
+				name := d.Name.Name
+				if d.Recv != nil && len(d.Recv.List) == 1 {
+					rt := d.Recv.List[0].Type
+					if st, ok := rt.(*ast.StarExpr); ok {
+						rt = st.X
+					}
+					if id, ok := rt.(*ast.Ident); ok {
+						name = id.Name + "." + name
+					} else {
+						name = "(receiver)." + name
+					}
+				}
+				places = []string{file + ":" + name}
 			case *ast.GenDecl:
 				for _, spec := range d.Specs {
 					if vs, ok := spec.(*ast.ValueSpec); ok {
@@ -616,11 +655,44 @@ func TestHubClientConstructionGoesThroughTransportRule(t *testing.T) {
 					places = []string{file + ":(declaration)"}
 				}
 			}
+			declNames := map[*ast.Ident]bool{} // the declared names themselves are not references
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				declNames[d.Name] = true
+			case *ast.GenDecl:
+				for _, spec := range d.Specs {
+					if vs, ok := spec.(*ast.ValueSpec); ok {
+						for _, n := range vs.Names {
+							declNames[n] = true
+						}
+					}
+				}
+			}
+			selNames := map[*ast.Ident]bool{} // x.Name selectors are fields or package members, not locals
 			ast.Inspect(decl, func(n ast.Node) bool {
+				if id, ok := n.(*ast.Ident); ok && !declNames[id] && !selNames[id] {
+					if allowed, guarded := htpGuardedLocal[id.Name]; guarded {
+						key := "cmd." + id.Name
+						for _, place := range places {
+							ok := false
+							for _, a := range allowed {
+								if a == place {
+									ok = true
+									seen[key+" "+a] = true
+								}
+							}
+							if !ok {
+								t.Errorf("%s: %s referenced in %s, outside its allowed places %v (it does not apply the transport rule itself)", fset.Position(id.Pos()), id.Name, place, allowed)
+							}
+						}
+					}
+					return true
+				}
 				sel, ok := n.(*ast.SelectorExpr)
 				if !ok {
 					return true
 				}
+				selNames[sel.Sel] = true
 				id, ok := sel.X.(*ast.Ident)
 				if !ok {
 					return true
@@ -657,6 +729,13 @@ func TestHubClientConstructionGoesThroughTransportRule(t *testing.T) {
 		for _, a := range allowed {
 			if !seen[key+" "+a] {
 				t.Errorf("stale allowed place %s for %s: it no longer references it", a, key)
+			}
+		}
+	}
+	for name, allowed := range htpGuardedLocal {
+		for _, a := range allowed {
+			if !seen["cmd."+name+" "+a] {
+				t.Errorf("stale allowed place %s for %s: it no longer references it", a, name)
 			}
 		}
 	}
