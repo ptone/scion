@@ -31,6 +31,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -422,7 +423,7 @@ func requestBaseURLWith(r *http.Request, trusted []*net.IPNet) string {
 	if r.TLS != nil {
 		scheme = "https"
 	}
-	if peer := remotePeerIP(r); peer != nil && len(trusted) > 0 && ipInNets(peer, trusted) {
+	if peer := config.RemotePeerIP(r); peer != nil && len(trusted) > 0 && config.IPInNets(peer, trusted) {
 		if vals := r.Header.Values("X-Forwarded-Host"); len(vals) == 1 {
 			if h := strings.TrimSpace(vals[0]); h != "" && !strings.Contains(h, ",") {
 				host = h
