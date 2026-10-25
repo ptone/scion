@@ -16,11 +16,14 @@ package hubsync
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
 // authRecordingHub starts a hub on 127.0.0.1 that records the Authorization
@@ -108,27 +111,26 @@ func TestSelectHubCredential_DevTokenOnlyForLoopback(t *testing.T) {
 }
 
 // End to end: the client createHubClient builds sends the dev token to a
-// loopback hub and nothing to a hub under a non-loopback host name.
+// loopback hub, while a plain http hub under a non-loopback host name is
+// refused by the transport rule before any request (so it never sees the
+// dev token either).
 func TestCreateHubClient_DevAuthOnlyForLoopbackHub(t *testing.T) {
 	devTokenOnlyEnv(t)
 	other, otherSeen := authRecordingHub(t)
 	local, localSeen := authRecordingHub(t)
 
-	for _, endpoint := range []string{hostnameURL(t, other), local.URL} {
-		client, _, err := createHubClient(nil, endpoint)
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, _ = client.Auth().Me(context.Background())
+	if _, _, err := createHubClient(nil, hostnameURL(t, other)); !errors.Is(err, config.ErrPlaintextNonLoopback) {
+		t.Fatalf("createHubClient(non-loopback http) error = %v, want the transport refusal", err)
 	}
-	got := otherSeen()
-	if len(got) == 0 {
-		t.Fatal("the non-loopback hub received no request")
+	client, _, err := createHubClient(nil, local.URL)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got[0] != "" {
-		t.Errorf("non-loopback hub got Authorization %q, want none", got[0])
+	_, _ = client.Auth().Me(context.Background())
+	if got := otherSeen(); len(got) != 0 {
+		t.Errorf("the non-loopback hub received %d request(s), want none", len(got))
 	}
-	got = localSeen()
+	got := localSeen()
 	if len(got) == 0 || got[0] != "Bearer placeholder-dev-token" {
 		t.Errorf("loopback hub got Authorization %q, want the dev token", got)
 	}
