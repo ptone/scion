@@ -110,6 +110,9 @@ func TestStart_HubTransportRefusesLocalRuntimeNetworkHost(t *testing.T) {
 		// networking nor the host-gateway entry (both match the canonical
 		// lower-case name only), so it would go to the container's DNS.
 		{"docker", "http://Host.Docker.Internal:8080"},
+		// A trailing dot gets host networking, whose rewrite yields
+		// "localhost.", which is not a literal loopback host; this row
+		// guards that path, not the alias rule (the alias table covers it).
 		{"docker", "http://host.docker.internal.:8080"},
 	} {
 		t.Run(tc.runtime+" "+tc.endpoint, func(t *testing.T) {
