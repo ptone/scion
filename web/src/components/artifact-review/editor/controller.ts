@@ -429,6 +429,11 @@ export class ReviewController {
     return this.session.isDirty;
   }
 
+  /** Whether the opened text gets the whole-text check on every edit (design E7). */
+  get isHazardous(): boolean {
+    return this.session.isHazardous;
+  }
+
   /** Whether an input method composition is running in the view. */
   get isComposing(): boolean {
     return this.core.view.composing || this.composing !== null;

@@ -74,6 +74,13 @@ export interface Baseline {
    * it is edited (computed on its first edit).
    */
   written: Map<Node, { text: string; toSource: Edit[] | null }>;
+  /**
+   * writeUnit's result per current first node of a unit, with the unit's
+   * nodes: nodes do not change, so the same nodes give the same text (the
+   * whole-document check of a hazardous document reads every edited unit
+   * on each edit).
+   */
+  units: WeakMap<Node, { nodes: Node[]; md: string | null }>;
 }
 
 interface MdNode {
@@ -138,7 +145,7 @@ export function makeBaseline(
   const lead = md.slice(0, mdStart(spans[0][0]));
   const nodes: Node[] = [];
   doc.forEach((n) => nodes.push(n));
-  return { lead, blocks, nodes, written: new Map() };
+  return { lead, blocks, nodes, written: new Map(), units: new WeakMap() };
 }
 
 /**
@@ -346,6 +353,27 @@ export function writeUnit(
   let same = true;
   for (let k = i; k <= j; k++) if (doc.child(k) !== base.nodes[k]) same = false;
   if (same) return unitSource(base, i, j);
+  const nodes: Node[] = [];
+  for (let k = i; k <= j; k++) nodes.push(doc.child(k));
+  const hit = base.units.get(nodes[0]);
+  if (hit && hit.nodes.length === nodes.length && hit.nodes.every((n, k) => n === nodes[k])) {
+    return hit.md;
+  }
+  const md = writeUnitAnew(doc, base, i, j, serialize, schema, parse);
+  base.units.set(nodes[0], { nodes, md });
+  return md;
+}
+
+/** writeUnit without its cache. */
+function writeUnitAnew(
+  doc: Node,
+  base: Baseline,
+  i: number,
+  j: number,
+  serialize: (d: Node) => string,
+  schema: Schema,
+  parse: (md: string) => Node
+): string | null {
   const was = base.nodes[i];
   const now = doc.child(i);
   const subs = base.blocks[i].subs;
