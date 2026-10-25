@@ -2896,6 +2896,13 @@ func (hmacWriteFailStore) CreateBrokerSecret(context.Context, *store.BrokerSecre
 	return errors.New("database is locked")
 }
 
+// listProjectsFailStore is a store whose ListProjects fails.
+type listProjectsFailStore struct{ store.Store }
+
+func (listProjectsFailStore) ListProjects(context.Context, store.ProjectFilter, store.ListOptions) (*store.ListResult[store.Project], error) {
+	return nil, errors.New("database is locked")
+}
+
 func TestSupervisionConfigProvider_ReportsUnreadableInputs(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -2913,8 +2920,13 @@ func TestSupervisionConfigProvider_ReportsUnreadableInputs(t *testing.T) {
 		{name: "missing secret is not an error", setup: func(_ *testing.T, srv *Server, _ store.Store, _ *supervisionWiringRecorder) {
 			srv.secretBackend = secretGetStub{err: store.ErrNotFound}
 		}},
-		{name: "hmac key failure", wantErr: "hmac key", setup: func(_ *testing.T, srv *Server, st store.Store, _ *supervisionWiringRecorder) {
-			srv.brokerAuthService = NewBrokerAuthService(DefaultBrokerAuthConfig(), hmacWriteFailStore{st})
+		{name: "hmac key failure", wantErr: "hmac key", setup: func(t *testing.T, srv *Server, st store.Store, _ *supervisionWiringRecorder) {
+			svc := NewBrokerAuthService(DefaultBrokerAuthConfig(), hmacWriteFailStore{st})
+			t.Cleanup(svc.Close)
+			srv.brokerAuthService = svc
+		}},
+		{name: "project list failure", wantErr: "project slug map", setup: func(_ *testing.T, srv *Server, st store.Store, _ *supervisionWiringRecorder) {
+			srv.store = listProjectsFailStore{st}
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
