@@ -236,7 +236,7 @@ func normalizeYAMLMappingKeys(node *yaml.Node) {
 }
 
 // FindTemplate finds a template for the local CLI, on its own host
-// (TemplateRefLocal): a remote URI (fetched anonymously), an absolute
+// (templateRefLocal): a remote URI (fetched anonymously), an absolute
 // directory, or a name in the project or global template directory.
 func FindTemplate(name string) (*Template, error) {
 	return FindTemplateWithContext(context.Background(), name)
@@ -257,7 +257,7 @@ func FindTemplateWithCallerCredentials(ctx context.Context, name string) (*Templ
 	return findLocalTemplate(ctx, name, CallerCredentialFetchOptions(""))
 }
 
-// findLocalTemplate resolves name for the local CLI (TemplateRefLocal).
+// findLocalTemplate resolves name for the local CLI (templateRefLocal).
 // Relative names are confined to the template directories as for every
 // caller; only absolute directories are accepted in addition.
 func findLocalTemplate(ctx context.Context, name string, fetchOpts RemoteFetchOptions) (*Template, error) {
@@ -507,10 +507,10 @@ func GetTemplateChain(name string) ([]*Template, error) {
 //     global templates directory is searched. An absolute path, or a
 //     relative path that leaves the template directory, is refused with
 //     ErrTemplateRefNotAllowed.
-//   - TemplateRefLocal: an absolute directory is accepted as well, and an
+//   - templateRefLocal: an absolute directory is accepted as well, and an
 //     empty projectPath falls back to FindTemplate (CWD-based resolution).
 func FindTemplateInProjectPath(name, projectPath string, refCtx TemplateRefContext) (*Template, error) {
-	if refCtx == TemplateRefLocal && projectPath == "" {
+	if refCtx == templateRefLocal && projectPath == "" {
 		return FindTemplate(name)
 	}
 
@@ -521,7 +521,7 @@ func FindTemplateInProjectPath(name, projectPath string, refCtx TemplateRefConte
 		return fetchRemoteTemplateRef(context.Background(), name, RemoteFetchOptions{})
 	}
 	if filepath.IsAbs(name) {
-		if refCtx != TemplateRefLocal {
+		if refCtx != templateRefLocal {
 			return nil, templateRefNotAllowedError(name)
 		}
 		if info, err := os.Stat(name); err == nil && info.IsDir() {

@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // TemplateRefContext says who a template reference comes from, which decides
@@ -39,9 +40,9 @@ const (
 	// (filepath.IsLocal) resolved inside the project or global template
 	// directory. Absolute paths are refused.
 	TemplateRefRemote TemplateRefContext = iota
-	// TemplateRefLocal is a reference the CLI resolves for its own use on
+	// templateRefLocal is a reference the CLI resolves for its own use on
 	// its own host. An absolute directory is accepted as well.
-	TemplateRefLocal
+	templateRefLocal
 )
 
 // ErrTemplateRefNotAllowed marks a template reference that is refused
@@ -119,6 +120,17 @@ func findDirInRoot(root, name string) (string, bool) {
 	return filepath.Join(root, name), true
 }
 
+// absentLookupError reports whether a lookup error means the file is simply
+// not there: it does not exist, a path component is not a directory, or the
+// name cannot be a file name on this system (too long, or invalid). Such a
+// field is inline content, as it was before files were read through os.Root.
+func absentLookupError(err error) bool {
+	return errors.Is(err, iofs.ErrNotExist) ||
+		errors.Is(err, syscall.ENOTDIR) ||
+		errors.Is(err, syscall.ENAMETOOLONG) ||
+		errors.Is(err, syscall.EINVAL)
+}
+
 // templateFileState is the result of looking up one file in a template
 // directory.
 type templateFileState int
@@ -146,7 +158,7 @@ func readTemplateFile(dir, name string) ([]byte, templateFileState, error) {
 	}
 	r, err := os.OpenRoot(dir)
 	if err != nil {
-		if errors.Is(err, iofs.ErrNotExist) {
+		if absentLookupError(err) {
 			return nil, templateFileAbsent, nil
 		}
 		return nil, templateFileAbsent, err
@@ -159,7 +171,7 @@ func readTemplateFile(dir, name string) ([]byte, templateFileState, error) {
 	for i, part := range parts {
 		cur = filepath.Join(cur, part)
 		info, err := r.Lstat(cur)
-		if errors.Is(err, iofs.ErrNotExist) {
+		if absentLookupError(err) {
 			return nil, templateFileAbsent, nil
 		}
 		if err != nil {

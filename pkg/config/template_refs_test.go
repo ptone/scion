@@ -18,6 +18,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -143,10 +144,10 @@ func TestFindTemplate_LocalAcceptsAbsoluteDir(t *testing.T) {
 	tpl, err := FindTemplate(fx.outsideDir)
 	require.NoError(t, err)
 	assert.Equal(t, fx.outsideDir, tpl.Path)
-	tpl, err = FindTemplateInProjectPath(fx.outsideDir, "", TemplateRefLocal)
+	tpl, err = FindTemplateInProjectPath(fx.outsideDir, "", templateRefLocal)
 	require.NoError(t, err)
 	assert.Equal(t, fx.outsideDir, tpl.Path)
-	tpl, err = FindTemplateInProjectPath(fx.outsideDir, fx.projectDir, TemplateRefLocal)
+	tpl, err = FindTemplateInProjectPath(fx.outsideDir, fx.projectDir, templateRefLocal)
 	require.NoError(t, err)
 	assert.Equal(t, fx.outsideDir, tpl.Path)
 
@@ -271,4 +272,34 @@ func TestFindTemplateWithCallerCredentials_Mode(t *testing.T) {
 	_, err = FindTemplateWithCallerCredentials(context.Background(), ":gcs:my-bucket/t")
 	require.NoError(t, err)
 	assert.Equal(t, []RemoteFetchCredentials{RemoteFetchAnonymous, RemoteFetchCallerCredentials}, *calls)
+}
+
+// Inline content that cannot be a file name on this system (a path segment
+// over the name length limit) or that goes through a regular file stays
+// inline content: the lookup reports it absent, not refused.
+func TestResolveContentInChain_LongOrNonDirectoryInlineTextStaysInline(t *testing.T) {
+	tplDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tplDir, "agents.md"), []byte("file"), 0o644))
+	chain := []*Template{{Name: "t", Path: tplDir}}
+
+	longSegment := strings.Repeat("a", 300)
+	for _, field := range []string{
+		longSegment,
+		"You are a reviewer/" + longSegment,
+		"agents.md/not-a-directory",
+		strings.Repeat("word/", 900) + "end",
+	} {
+		got, err := ResolveContentInChain(chain, field)
+		require.NoError(t, err, "field of %d bytes", len(field))
+		assert.Equal(t, field, string(got))
+	}
+
+	present, err := TemplateFileExists(tplDir, longSegment)
+	require.NoError(t, err)
+	assert.False(t, present)
+
+	// A refused entry is still refused.
+	require.NoError(t, os.Symlink(filepath.Join(tplDir, "agents.md"), filepath.Join(tplDir, "linked.md")))
+	_, err = ResolveContentInChain(chain, "linked.md")
+	assert.ErrorIs(t, err, ErrTemplateContentRefused)
 }

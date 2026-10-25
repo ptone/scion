@@ -47,11 +47,11 @@ func TestTemplateNotFoundError_FromLookup(t *testing.T) {
 		}
 	})
 
-	// The local CLI's absolute directories (TemplateRefLocal); a remote
+	// The local CLI's absolute directories (templateRefLocal); a remote
 	// lookup refuses them before looking (template_refs_test.go).
 	t.Run("absolute path", func(t *testing.T) {
 		abs := filepath.Join(t.TempDir(), "broker-only", "secret-tpl")
-		_, err := FindTemplateInProjectPath(abs, projectPath, TemplateRefLocal)
+		_, err := FindTemplateInProjectPath(abs, projectPath, templateRefLocal)
 		var tplErr *TemplateNotFoundError
 		if !errors.As(err, &tplErr) || !errors.Is(err, ErrTemplateNotFound) {
 			t.Fatalf("error %v does not match the typed error and the sentinel", err)
@@ -70,7 +70,7 @@ func TestTemplateNotFoundError_FromLookup(t *testing.T) {
 	t.Run("content-hash cache directory", func(t *testing.T) {
 		hash := "sha256:" + strings.Repeat("ab", 32)
 		abs := filepath.Join(t.TempDir(), "cache", hash)
-		_, err := FindTemplateInProjectPath(abs, projectPath, TemplateRefLocal)
+		_, err := FindTemplateInProjectPath(abs, projectPath, templateRefLocal)
 		var tplErr *TemplateNotFoundError
 		if !errors.As(err, &tplErr) {
 			t.Fatalf("error %v is not a *TemplateNotFoundError", err)

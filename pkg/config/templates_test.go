@@ -578,7 +578,7 @@ func TestFindTemplateInProjectPath(t *testing.T) {
 	})
 
 	t.Run("absolute path bypasses project resolution (local CLI)", func(t *testing.T) {
-		tpl, err := FindTemplateInProjectPath(globalTplDir, projectPath, TemplateRefLocal)
+		tpl, err := FindTemplateInProjectPath(globalTplDir, projectPath, templateRefLocal)
 		if err != nil {
 			t.Fatalf("FindTemplateInProjectPath failed: %v", err)
 		}
@@ -2274,7 +2274,7 @@ func TestFindTemplateContentHashDirHasNoName(t *testing.T) {
 	finders := map[string]func(string) (*Template, error){
 		"FindTemplate": FindTemplate,
 		"FindTemplateInProjectPath": func(name string) (*Template, error) {
-			return FindTemplateInProjectPath(name, projectPath, TemplateRefLocal)
+			return FindTemplateInProjectPath(name, projectPath, templateRefLocal)
 		},
 		"GetTemplateChainForDir": func(dir string) (*Template, error) {
 			chain, err := GetTemplateChainForDir(dir, projectPath)
