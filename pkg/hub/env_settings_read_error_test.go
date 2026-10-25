@@ -328,6 +328,13 @@ func TestEnvReadError_NoReadErrorStartsNormally(t *testing.T) {
 	require.NoError(t, f.d.DispatchAgentStart(ctx, f.agent, "", false))
 	require.True(t, f.client.createCalled, "the start went through create-with-gather")
 	assert.Equal(t, "fake-stored-value", f.client.lastCreateReq.ResolvedEnv["FAKE_STORED_KEY"])
+	// The ancestry also counts as as-needed entries (progeny), so the
+	// broker restart on this broker, which cannot gather them, is refused
+	// with the keyless 412 before anything is sent (ptone/scion#6101). The
+	// same agent without an ancestry restarts normally.
+	require.ErrorIs(t, f.d.DispatchAgentRestart(ctx, f.agent), errBrokerLacksStartEnvGather)
+	assert.False(t, f.client.restartCalled, "the refused restart sends nothing")
+	f.agent.Ancestry = nil
 	require.NoError(t, f.d.DispatchAgentRestart(ctx, f.agent))
 	assert.True(t, f.client.restartCalled)
 	f.client.createCalled = false

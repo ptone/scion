@@ -578,7 +578,11 @@ func TestCapabilitiesFromStrings_StartEnvGather(t *testing.T) {
 func TestCrossNodeStart_CarriesTaskAndStaysSync(t *testing.T) {
 	// The requester's capable start is handed to the owner node with the
 	// start's task and without the asynchronous option; the owner's failure
-	// comes back as the same sentinel.
+	// comes back as the same sentinel. The owner's failure is written to the
+	// row with no done event, so the requester finds it by its row poll
+	// (shortened as in the other cross-node row tests; the default 10 s
+	// poll is longer than crossNodeCtx).
+	setLifecycleTimings(t, 0, 50*time.Millisecond, 0)
 	f := newCrossNodeFixture(t, nil, false)
 	setBrokerCaps(t, f.store, &store.RuntimeBroker{ID: f.agent.RuntimeBrokerID}, &store.BrokerCapabilities{StartEnvGather: true, AsyncLaunch: true, AsyncStart: true})
 	f.requester.SetAsyncLaunchSettingsProvider(func() AsyncLaunchSettings {
@@ -672,14 +676,19 @@ func TestDispatchFinalizeEnv_RecordsUserSuppliedKeyNamesOnly(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(row), sentinel, "no value in the stored row")
 
-	logs.mu.Lock()
-	defer logs.mu.Unlock()
-	for _, r := range logs.recs {
-		assert.NotContains(t, r.msg, sentinel)
-		for _, v := range r.attrs {
-			assert.NotContains(t, fmt.Sprint(v), sentinel, "no value in the hub log")
+	// The capture lock is held only for this scan: the finalizes below log
+	// through the same handler, and a lock held until the test returns
+	// would block their first log line.
+	func() {
+		logs.mu.Lock()
+		defer logs.mu.Unlock()
+		for _, r := range logs.recs {
+			assert.NotContains(t, r.msg, sentinel)
+			for _, v := range r.attrs {
+				assert.NotContains(t, fmt.Sprint(v), sentinel, "no value in the hub log")
+			}
 		}
-	}
+	}()
 
 	// A later finalize adds to the list (union), in memory and stored; one
 	// that submits no keys removes none.
