@@ -369,3 +369,46 @@ func TestBrokerSeenRecord_SharedStoreAcrossInstances(t *testing.T) {
 		})
 	}
 }
+
+// TestBrokerSeenRecord_DistinctRequestSameNonceServed: the record is keyed
+// on the verified signature, not the nonce. A different request (another
+// body) that carries a served request's nonce has its own canonical bytes
+// and needs its own valid signature from the broker's secret; it is served
+// once, and its own exact repeat is refused.
+func TestBrokerSeenRecord_DistinctRequestSameNonceServed(t *testing.T) {
+	for _, m := range seenRecordFixtures(t) {
+		for _, v := range seenRecordValidators {
+			t.Run(m.mode.name+"/"+v.name, func(t *testing.T) {
+				fx := m.fx
+				nonce := "shared-nonce-" + v.name
+				now := time.Now()
+				first := signSeenRecordRequest(fx.svc, fx.brokerID, fx.secret, now, nonce, nil, nil)
+				other := signSeenRecordRequestBody(fx.svc, fx.brokerID, fx.secret, now, nonce, []byte(`{"seen":"other"}`))
+				require.NotEqual(t, first.Header.Get(HeaderSignature), other.Header.Get(HeaderSignature))
+				otherAgain := cloneSeenRecordRequest(t, other)
+
+				_, err := v.validate(fx.svc, first)
+				require.NoError(t, err)
+				before := m.mode.count(t)
+				_, err = v.validate(fx.svc, other)
+				require.NoError(t, err, "a different signed request with the same nonce is served")
+				require.Equal(t, before+1, m.mode.count(t))
+				_, err = v.validate(fx.svc, otherAgain)
+				require.True(t, errors.Is(err, errBrokerAuthReplay), "its exact repeat is refused, got %v", err)
+			})
+		}
+	}
+}
+
+// signSeenRecordRequestBody is signSeenRecordRequest with a given body and
+// no signed headers.
+func signSeenRecordRequestBody(svc *BrokerAuthService, brokerID string, secret []byte, ts time.Time, nonce string, body []byte) *http.Request {
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runtime-brokers/heartbeat", bytes.NewReader(body))
+	timestamp := strconv.FormatInt(ts.Unix(), 10)
+	req.Header.Set(HeaderBrokerID, brokerID)
+	req.Header.Set(HeaderTimestamp, timestamp)
+	req.Header.Set(HeaderNonce, nonce)
+	canonical := svc.buildCanonicalString(req, timestamp, nonce)
+	req.Header.Set(HeaderSignature, base64.StdEncoding.EncodeToString(computeHMAC(secret, canonical)))
+	return req
+}
