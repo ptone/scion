@@ -110,6 +110,25 @@ The final health check verifies the TLS certificate of `https://<HUB_DOMAIN>`.
 For a self-signed or test certificate only, add `--insecure-health-check`.
 Run `gce-start-hub.sh --help` for all options.
 
+### Proxy configuration
+
+`server.trusted_proxies` in the Hub's `settings.yaml` lists the peers whose
+`X-Forwarded-Proto` header the Hub honours. Remote Runtime Brokers that reach a
+Hub through a TLS-terminating proxy need that proxy listed.
+
+- **With Caddy (the default):** `gce-start-hub.sh --full` writes
+  `127.0.0.1` and `::1`. Caddy runs on the VM and proxies to `localhost:8080`,
+  so the Hub sees it as a loopback peer. Nothing else is trusted.
+- **With `--no-tls`:** the script cannot know the upstream terminator's
+  addresses, so it writes no list. Add the terminator's source addresses
+  (IPs or CIDRs, never `0.0.0.0/0` or `::/0`) yourself, either under `server:`
+  in `settings.yaml` or as a comma-separated `SCION_SERVER_TRUSTEDPROXIES` in
+  `hub.env`. The terminator must overwrite `X-Forwarded-Proto`, not append to
+  it.
+
+The fast deploy (without `--full`) does not rewrite `settings.yaml`. Run
+`--full` once to pick up this default on an existing hub.
+
 To wipe the hub database on restart:
 
 ```bash

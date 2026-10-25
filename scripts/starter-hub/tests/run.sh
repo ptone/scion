@@ -395,6 +395,44 @@ test_full_no_tls_skips_caddy() {
     done
 }
 
+# --- gce-start-hub.sh --full proxy configuration (server.trusted_proxies) ---
+
+test_full_tls_settings_trust_loopback_caddy_only() {
+    local settings
+    fresh_state
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}")
+    run_script gce-start-hub.sh --full
+    assert_eq 0 "$RC" "full deploy passes"
+    settings="$(cat "${STUB_SCP_DIR}/scion-settings.yaml")"
+    assert_contains "$settings" $'server:\n  mode: production\n' "server block still opens with mode"
+    assert_contains "$settings" $'\n  trusted_proxies:\n    - "127.0.0.1"\n    - "::1"\n' \
+        "Caddy's loopback peers are listed under server"
+    assert_eq 1 "$(grep -c 'trusted_proxies' <<<"$settings")" "trusted_proxies is written once"
+    assert_eq 2 "$(sed -n '/^  trusted_proxies:$/,/^[^ ]/p' <<<"$settings" | grep -c '^    - ')" \
+        "exactly the two loopback entries, nothing wider"
+    assert_contains "$settings" $'    - "::1"\ntelemetry:\n' "telemetry stays a top-level key after the list"
+}
+
+test_full_no_tls_settings_write_no_trusted_proxies() {
+    local mode
+    for mode in flag env; do
+        fresh_state
+        if [[ "$mode" == flag ]]; then
+            EXTRA_ENV=(HUB_BASE_URL=https://hub.internal.example.test)
+            run_script gce-start-hub.sh --full --no-tls
+        else
+            EXTRA_ENV=(SKIP_TLS=true HUB_BASE_URL=https://hub.internal.example.test)
+            run_script gce-start-hub.sh --full
+        fi
+        assert_eq 0 "$RC" "${mode}: --full without TLS completes"
+        assert_not_contains "$(cat "${STUB_SCP_DIR}/scion-settings.yaml")" "trusted_proxies" \
+            "${mode}: no proxy list is guessed for an unknown terminator"
+        assert_contains "$(cat "${STUB_SCP_DIR}/scion-settings.yaml")" $'  mode: production\ntelemetry:\n' \
+            "${mode}: settings layout is otherwise unchanged"
+        assert_contains "$OUT" "No server.trusted_proxies written (--no-tls)" "${mode}: says what to set"
+    done
+}
+
 test_start_hub_help_mentions_new_flags() {
     fresh_state
     EXTRA_ENV=()

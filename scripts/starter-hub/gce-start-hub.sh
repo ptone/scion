@@ -177,12 +177,26 @@ if $FULL_DEPLOY; then
     else
         ACTIVE_PROFILE="local"
     fi
+    # server.trusted_proxies: the peers whose X-Forwarded-Proto the hub
+    # honours. With TLS, Caddy on this VM terminates it and proxies to
+    # localhost:8080, so the hub sees Caddy as a loopback peer. With
+    # --no-tls the upstream terminator's addresses are not known here:
+    # nothing is written, and the operator sets them (README, "Proxy
+    # configuration").
+    TRUSTED_PROXIES_YAML=""
+    if [[ "${SKIP_TLS}" != "true" ]]; then
+        TRUSTED_PROXIES_YAML='  # Caddy on this VM (reverse_proxy localhost:8080) is the only proxy.
+  trusted_proxies:
+    - "127.0.0.1"
+    - "::1"
+'
+    fi
     cat <<SETTINGS_EOF > "$UPLOAD_DIR/scion-settings.yaml"
 schema_version: "1"
 active_profile: ${ACTIVE_PROFILE}
 server:
   mode: production
-telemetry:
+${TRUSTED_PROXIES_YAML}telemetry:
   enabled: true
   cloud:
     enabled: true
@@ -228,6 +242,7 @@ SETTINGS_EOF
     # Caddyfile
     if [[ "${SKIP_TLS}" == "true" ]]; then
         substep "Skipping Caddyfile (--no-tls)"
+        substep "No server.trusted_proxies written (--no-tls): set it to your TLS terminator's addresses; see README, \"Proxy configuration\""
     else
         cat <<EOF > "$UPLOAD_DIR/Caddyfile"
 ${HUB_DOMAIN} {
