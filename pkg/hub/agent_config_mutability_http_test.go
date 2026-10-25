@@ -357,7 +357,9 @@ func TestGetAgent_Editability(t *testing.T) {
 		agent := newEditTestAgent(t, s, project, broker, state.PhaseStopped)
 		ed := getAgentEditability(t, srv, nil, agent.ID)
 		assert.Equal(t, "stopped", ed.Phase)
-		assert.Equal(t, FieldEditState{Tier: EditTierContainer, Disposition: EditNow, ClearNeedsReincarnate: true}, ed.Fields["config.max_turns"])
+		// The test broker does not advertise unlimitedCountLimits, so the
+		// count limit is flagged UnlimitedUnsupported (ptone/scion#5605).
+		assert.Equal(t, FieldEditState{Tier: EditTierContainer, Disposition: EditNow, ClearNeedsReincarnate: true, UnlimitedUnsupported: true}, ed.Fields["config.max_turns"])
 		assert.Equal(t, EditReincarnate, ed.Fields["agentRole"].Disposition)
 		assert.Equal(t, EditTierPrincipal, ed.Fields["agentRole"].Tier)
 		assert.Equal(t, EditReincarnate, ed.Fields["config.system_prompt"].Disposition)
