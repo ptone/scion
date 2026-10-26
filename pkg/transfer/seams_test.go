@@ -170,6 +170,8 @@ func TestSeamScanFiles(t *testing.T) {
 		"extras/sub/go.mod":                      "module example.com/sub\n",
 		"extras/sub/d.go":                        "package sub\n",
 		"pkg/testdata/e.go":                      "package testdata\n",
+		"web/node_modules/x/g.go":                "package x\n",
+		"vendor/example.com/v/h.go":              "package v\n",
 		"cmd/f.go":                               "package main\n",
 	} {
 		p := filepath.Join(root, filepath.FromSlash(rel))
