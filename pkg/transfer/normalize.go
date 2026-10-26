@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"testing"
 	"unicode/utf8"
 )
 
@@ -126,9 +127,13 @@ var normalizeBeforeRead atomic.Pointer[func(dir, rel string)]
 // path), and returns a function that removes it. Tests in other packages use
 // it to change the tree in the middle of a normalization.
 //
-// TEST-ONLY: never call this from production code. It mutates package-global
-// state and is not safe for use from parallel tests.
+// TEST-ONLY: it panics outside a test binary (testing.Testing), and
+// TestTestOnlySeamsUnusedInProduction fails if a non-test file calls it. It
+// mutates package-global state and is not safe for use from parallel tests.
 func SetNormalizeBeforeReadForTest(f func(dir, rel string)) (restore func()) {
+	if !testing.Testing() {
+		panic("transfer.SetNormalizeBeforeReadForTest called outside a test binary")
+	}
 	prev := normalizeBeforeRead.Swap(&f)
 	return func() { normalizeBeforeRead.Store(prev) }
 }
