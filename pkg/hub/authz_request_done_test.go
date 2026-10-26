@@ -666,14 +666,21 @@ func TestAuthzRequestDone_DeadlineComparison(t *testing.T) {
 	logs := captureRequestDoneDefaultLog(t)
 	const warn = "agent standing lookup failed"
 
-	reqCtx, cancelReq := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	// Absolute deadlines from one base, so a stall between the calls
+	// cannot make the shorter child inherit the request's deadline.
+	base := time.Now()
+	reqCtx, cancelReq := context.WithDeadline(context.Background(), base.Add(20*time.Millisecond))
 	defer cancelReq()
 	ctx, note := withAuthzStoppedNote(reqCtx)
 	require.NotNil(t, note)
-	shorter, cancelShorter := context.WithTimeout(ctx, time.Nanosecond)
+	shorter, cancelShorter := context.WithDeadline(ctx, base.Add(time.Nanosecond))
 	defer cancelShorter()
 	longer, cancelLonger := context.WithTimeout(ctx, time.Hour)
 	defer cancelLonger()
+	rd, _ := reqCtx.Deadline()
+	sd, ok := shorter.Deadline()
+	require.True(t, ok)
+	require.True(t, sd.Before(rd), "the shorter child has its own, earlier deadline")
 	<-shorter.Done()
 	<-reqCtx.Done()
 	<-longer.Done()
