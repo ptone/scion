@@ -34,11 +34,15 @@ var (
 	// seamAssignNames are package variables replaced by tests: no assignment
 	// outside a _test.go file (their declarations are not assignments).
 	seamAssignNames = map[string]bool{"normalizeTempSuffix": true, "removeAllCache": true}
-	// seamHookNames are atomic test hooks: no Store or Swap outside a
-	// _test.go file, except inside the function named in seamHookOwners.
+	// seamHookNames are atomic test hooks: no Store, Swap or CompareAndSwap
+	// outside a _test.go file, except inside the function named in
+	// seamHookOwners.
 	seamHookNames  = map[string]bool{"normalizeBeforeRead": true, "walkRootBeforeOpenDir": true, "openRegularAfterLstat": true, "afterDirLstatHook": true}
 	seamHookOwners = map[string]string{"normalizeBeforeRead": "SetNormalizeBeforeReadForTest"}
 )
+
+// hookSetters are the atomic.Pointer methods that set a hook.
+var hookSetters = map[string]bool{"Store": true, "Swap": true, "CompareAndSwap": true}
 
 // checkSeamUse returns a problem for every use of a test-only seam in one
 // non-test Go source file.
@@ -71,7 +75,7 @@ func checkSeamUse(fset *token.FileSet, filename string, src any) ([]string, erro
 				if seamCallNames[name(x.Fun)] {
 					report(x, "calls the test-only "+name(x.Fun))
 				}
-				if sel, ok := x.Fun.(*ast.SelectorExpr); ok && (sel.Sel.Name == "Store" || sel.Sel.Name == "Swap") {
+				if sel, ok := x.Fun.(*ast.SelectorExpr); ok && hookSetters[sel.Sel.Name] {
 					if h := name(sel.X); seamHookNames[h] && seamHookOwners[h] != owner {
 						report(x, "sets the test hook "+h)
 					}
@@ -106,8 +110,14 @@ func TestTestOnlySeamsUnusedInProduction(t *testing.T) {
 			return err
 		}
 		if d.IsDir() {
+			// Dot-directories below the root are skipped: in a workstation
+			// checkout .scion/agents holds other agents' worktrees (other
+			// branches), and .git is not source.
+			if p != root && strings.HasPrefix(d.Name(), ".") {
+				return filepath.SkipDir
+			}
 			switch d.Name() {
-			case ".git", "node_modules", "vendor", "testdata":
+			case "node_modules", "vendor", "testdata":
 				return filepath.SkipDir
 			}
 			return nil
@@ -147,6 +157,7 @@ func TestCheckSeamUse(t *testing.T) {
 		{"assign cache removal", "package config\nfunc f() { removeAllCache = nil }\n", 1},
 		{"store hook", "package transfer\nfunc f() { walkRootBeforeOpenDir.Store(nil) }\n", 1},
 		{"swap hook", "package hub\nfunc f() { afterDirLstatHook.Swap(nil) }\n", 1},
+		{"compare-and-swap hook", "package transfer\nfunc f() { openRegularAfterLstat.CompareAndSwap(nil, nil) }\n", 1},
 		{"owner may set its hook", "package transfer\nfunc SetNormalizeBeforeReadForTest() { normalizeBeforeRead.Swap(nil); func() { normalizeBeforeRead.Store(nil) }() }\n", 0},
 		{"another function may not", "package transfer\nfunc g() { normalizeBeforeRead.Store(nil) }\n", 1},
 		{"declarations and loads", "package transfer\nvar normalizeTempSuffix = func() {}\nvar removeAllCache = 1\nfunc f() { _ = walkRootBeforeOpenDir.Load() }\n", 0},
