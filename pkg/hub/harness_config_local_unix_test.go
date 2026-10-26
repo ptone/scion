@@ -338,8 +338,9 @@ func TestReimportHarnessConfigNewStore_LinkedConfigYAMLRefused(t *testing.T) {
 	}
 }
 
-// The directory itself replaced between openRealDirRoot's Lstat and its open:
-// a FIFO does not block the open and a link is not followed; both fail.
+// The directory itself (or its parent) replaced between openRealDirRoot's
+// Lstat and its open: a FIFO does not block the open and a link is refused;
+// all fail.
 // Checked through openRealDirRoot, collectFiles and the pre-collection loader.
 func TestOpenRealDirRoot_DirectorySwappedAfterLstat(t *testing.T) {
 	swaps := map[string]func(t *testing.T, dir string){
@@ -348,6 +349,17 @@ func TestOpenRealDirRoot_DirectorySwappedAfterLstat(t *testing.T) {
 				t.Error(err)
 			}
 			if err := syscall.Mkfifo(dir, 0o600); err != nil {
+				t.Errorf("mkfifo: %v", err)
+			}
+		},
+		"parent FIFO": func(t *testing.T, dir string) {
+			parent := filepath.Dir(dir)
+			moved := parent + ".moved"
+			if err := os.Rename(parent, moved); err != nil {
+				t.Error(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(moved) })
+			if err := syscall.Mkfifo(parent, 0o600); err != nil {
 				t.Errorf("mkfifo: %v", err)
 			}
 		},
@@ -385,7 +397,7 @@ func TestOpenRealDirRoot_DirectorySwappedAfterLstat(t *testing.T) {
 		for cname, call := range calls {
 			t.Run(sname+" "+cname, func(t *testing.T) {
 				dir := filepath.Join(writeCollectedTestTree(t, map[string]string{"claude-x/config.yaml": "harness: claude\n"}), "claude-x")
-				if sname == "FIFO" {
+				if sname != "link" {
 					// mkfifo support is checked once, outside the hook.
 					mkfifoOrSkip(t, filepath.Join(t.TempDir(), "probe"))
 				}

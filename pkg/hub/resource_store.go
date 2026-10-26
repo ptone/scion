@@ -197,8 +197,9 @@ func (s *Server) harnessConfigStore(harness string) *ResourceStore {
 	}
 }
 
-// afterCollectHook, when set (tests only), runs between the collection of a
-// resource directory and the opening of its root.
+// afterCollectHook, when set (tests only), runs in collectFiles between the
+// collection (through the root) and the check that dir still names the
+// directory the root was opened at.
 var afterCollectHook atomic.Pointer[func(dir string)]
 
 // requireConfigName makes the harness-config persistence check that the
@@ -223,9 +224,27 @@ func (rs *ResourceStore) requireConfigName() {
 // within's root has at rs.withinPath, reached without following a link.
 // The caller must close the root (cd.root).
 func (rs *ResourceStore) collectFiles(dir string) (*collectedDir, error) {
+	return rs.openAndCollect(dir, false)
+}
+
+// normalizeAndCollect is collectFiles with the line-ending normalization
+// first: the directory's text files are normalized in place through the same
+// root (transfer.NormalizeRoot) before they are collected, so neither step
+// reopens the directory or a file by path.
+func (rs *ResourceStore) normalizeAndCollect(dir string) (*collectedDir, error) {
+	return rs.openAndCollect(dir, true)
+}
+
+func (rs *ResourceStore) openAndCollect(dir string, normalize bool) (*collectedDir, error) {
 	root, at, err := openRealDirRoot(dir)
 	if err != nil {
 		return nil, err
+	}
+	if normalize {
+		if err := transfer.NormalizeRoot(root); err != nil {
+			_ = root.Close()
+			return nil, fmt.Errorf("normalize dir: %w", err)
+		}
 	}
 	// The collection walks, stats and hashes through the root, so the
 	// directory is not reopened by path.
@@ -257,10 +276,13 @@ func (rs *ResourceStore) collectFiles(dir string) (*collectedDir, error) {
 var afterDirLstatHook atomic.Pointer[func(dir string)]
 
 // openRealDirRoot opens an os.Root at dir, which must be a directory and not
-// a link (os.Lstat). The directory is opened through its parent
-// (os.Root.OpenRoot: openat with O_NOFOLLOW and O_DIRECTORY), so a link
-// swapped in after the Lstat is not followed and a FIFO swapped in does not
-// block the open. The root must be the directory the Lstat saw (os.SameFile
+// a link (os.Lstat). The parent and then the directory (os.Root.OpenRoot)
+// are opened with a trailing path separator, so the kernel resolves each as
+// a directory: a FIFO or other non-directory swapped in after the Lstat fails
+// with ENOTDIR without being opened, so it cannot block. (Neither os.OpenRoot
+// nor Root.OpenRoot passes O_DIRECTORY or O_NONBLOCK for the last component.)
+// The trailing separator also makes the kernel follow a link swapped in for
+// the directory, so the root must be the directory the Lstat saw (os.SameFile
 // with root.Stat(".")); otherwise errCollectedDirChanged. It returns the
 // root, which the caller must close, and the directory's FileInfo as seen
 // through the root.
@@ -280,18 +302,19 @@ func openRealDirRoot(dir string) (*os.Root, os.FileInfo, error) {
 		return nil, nil, fmt.Errorf("%s is not a directory", dir)
 	}
 	parentDir, base := filepath.Dir(abs), filepath.Base(abs)
-	if base == string(filepath.Separator) || base == "." || base == ".." {
+	if base == string(filepath.Separator) {
 		return nil, nil, fmt.Errorf("%s: no parent directory to open it through", dir)
 	}
+	sep := string(filepath.Separator)
 	if hook := afterDirLstatHook.Load(); hook != nil {
 		(*hook)(dir)
 	}
-	parent, err := os.OpenRoot(parentDir)
+	parent, err := os.OpenRoot(parentDir + sep)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open parent of %s: %w", dir, err)
 	}
 	defer func() { _ = parent.Close() }()
-	root, err := parent.OpenRoot(base)
+	root, err := parent.OpenRoot(base + sep)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open dir root %s: %w", dir, err)
 	}
@@ -337,11 +360,12 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 		return false, fmt.Errorf("storage backend is not configured")
 	}
 
+	var cd *collectedDir
 	if rs.within != nil {
 		// A harness-config bundled in a template: it must be the template's
 		// own subdirectory before anything reads or writes it. It is not
-		// normalized again by path: the template's bootstrap normalized the
-		// whole tree before collecting it.
+		// normalized again: the template's bootstrap normalized the whole
+		// tree before collecting it.
 		got, err := os.Lstat(dir)
 		if err != nil {
 			return false, err
@@ -349,12 +373,14 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 		if err := rs.checkWithin(got, dir); err != nil {
 			return false, err
 		}
-	} else if err := transfer.NormalizeDir(dir); err != nil {
-		return false, fmt.Errorf("normalize dir: %w", err)
-	}
-	cd, err := rs.collectFiles(dir)
-	if err != nil {
-		return false, err
+		if cd, err = rs.collectFiles(dir); err != nil {
+			return false, err
+		}
+	} else {
+		var err error
+		if cd, err = rs.normalizeAndCollect(dir); err != nil {
+			return false, err
+		}
 	}
 	defer func() { _ = cd.root.Close() }()
 	files, root := cd.files, cd.root
