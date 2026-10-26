@@ -1422,7 +1422,7 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 	targetID := hc.ID
 	kind.newStore = func(dir string) (*ResourceStore, error) {
 		// The same config.yaml validation as an import.
-		if _, err := config.LoadHarnessConfigDir(dir); err != nil {
+		if _, err := loadLocalHarnessConfigDir(dir); err != nil {
 			return nil, err
 		}
 		return s.targetHarnessConfigStore(targetID), nil
