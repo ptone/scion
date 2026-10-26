@@ -99,6 +99,7 @@ func replaceTarget(path string, newMode fs.FileMode) (string, fs.FileMode, error
 	}
 	mode := newMode
 	if f, err := os.OpenFile(target, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0); err == nil {
+		afterLinkCheckOpen(target)
 		fi, serr := f.Stat()
 		if serr == nil {
 			serr = checkSingleLinkInfo(target, fi)

@@ -95,6 +95,26 @@ var ErrNoACLs = errors.New("the volume does not support access control lists")
 // seen from here. A link count that cannot be read is refused too.
 var ErrHardLinked = errors.New("file has more than one name (hard link)")
 
+// ErrReplacedConcurrently is returned (wrapped) when a file was opened to
+// check its link count, but every time it was opened, its name had already
+// been removed or given to another file.
+var ErrReplacedConcurrently = errors.New("file was replaced or removed while it was being checked")
+
+// replacedAttempts bounds how many times an open and link-count check runs
+// while the opened file keeps turning out to have no names.
+const replacedAttempts = 5
+
+// testHookAfterLinkCheckOpen, when set (tests only), runs after a file has
+// been opened for its link-count check and before the count is read. Tests
+// use it to replace or remove the file at that moment.
+var testHookAfterLinkCheckOpen func(name string)
+
+func afterLinkCheckOpen(name string) {
+	if testHookAfterLinkCheckOpen != nil {
+		testHookAfterLinkCheckOpen(name)
+	}
+}
+
 // TreeOptions configure OpenTree.
 type TreeOptions struct {
 	// CreateAnchor creates the anchor and any missing parent directories.
