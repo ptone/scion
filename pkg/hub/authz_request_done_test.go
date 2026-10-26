@@ -141,16 +141,28 @@ func requestDoneNoteField(n *authzStoppedNote, field string) string {
 // requestDoneStore counts reads and can run a hook on GetAgent.
 type requestDoneStore struct {
 	store.Store
-	mu     sync.Mutex
-	counts map[string]int
-	// onGetAgent, when set, runs before GetAgent and may return an error
-	// instead of reading.
+	// fault gates the wrapper: until it is armed, every call delegates and
+	// nothing is counted, so the fixture's setup (installed before it,
+	// installStoreFault) is invisible to the counts.
+	fault      *storeFaultSwitch
+	mu         sync.Mutex
+	counts     map[string]int
 	onGetAgent func(ctx context.Context) error
 }
 
 func (s *requestDoneStore) note(op string) {
+	if !s.fault.Active() {
+		return
+	}
 	s.mu.Lock()
 	s.counts[op]++
+	s.mu.Unlock()
+}
+
+// setOnGetAgent sets the GetAgent hook (nil clears it).
+func (s *requestDoneStore) setOnGetAgent(h func(ctx context.Context) error) {
+	s.mu.Lock()
+	s.onGetAgent = h
 	s.mu.Unlock()
 }
 
@@ -172,8 +184,11 @@ func (s *requestDoneStore) total() int {
 
 func (s *requestDoneStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
 	s.note("GetAgent")
-	if s.onGetAgent != nil {
-		if err := s.onGetAgent(ctx); err != nil {
+	s.mu.Lock()
+	h := s.onGetAgent
+	s.mu.Unlock()
+	if h != nil && s.fault.Active() {
+		if err := h(ctx); err != nil {
 			return nil, err
 		}
 	}
@@ -210,19 +225,15 @@ func (s *requestDoneStore) ListRoleBindingsForPrincipals(ctx context.Context, p 
 	return s.Store.ListRoleBindingsForPrincipals(ctx, p, st, sid)
 }
 
-// installRequestDoneStore routes the server's and the authz service's
-// reads through a counting store for the test.
-func installRequestDoneStore(t *testing.T, srv *Server, inner store.Store) *requestDoneStore {
+// newRequestDoneFixture is newMSFixture with the counting store installed
+// on srv.store before any setup (installStoreFault, through
+// newMSFixtureWithStoreFault); the test arms the switch where it starts
+// counting.
+func newRequestDoneFixture(t *testing.T, name string) (*msFixture, *requestDoneStore, *storeFaultSwitch) {
 	t.Helper()
-	rs := &requestDoneStore{Store: inner, counts: map[string]int{}}
-	origSrv, origAuthz := srv.store, srv.authzService.store
-	srv.store = rs
-	srv.authzService.store = rs
-	t.Cleanup(func() {
-		srv.store = origSrv
-		srv.authzService.store = origAuthz
+	return newMSFixtureWithStoreFault(t, name, func(inner store.Store, fs *storeFaultSwitch) *requestDoneStore {
+		return &requestDoneStore{Store: inner, fault: fs, counts: map[string]int{}}
 	})
-	return rs
 }
 
 // Once the request context has ended, no decision resolves the caller's
@@ -411,9 +422,9 @@ func TestAuthzRequestDone_CapabilityBatchesStopAndDeny(t *testing.T) {
 // request: later checks of the same agent refuse without a read and log
 // no WARN; a live ctx sharing the memo evaluates again.
 func TestAuthzRequestDone_StandingRememberedAndDenies(t *testing.T) {
-	f := newMSFixture(t, "reqdone-standing")
+	f, rs, fault := newRequestDoneFixture(t, "reqdone-standing")
 	logs := captureRequestDoneDefaultLog(t)
-	rs := installRequestDoneStore(t, f.srv, f.s)
+	fault.Arm()
 
 	parent := withStandingMemo(context.Background())
 	reqCtx, cancel := context.WithCancel(parent)
@@ -422,10 +433,10 @@ func TestAuthzRequestDone_StandingRememberedAndDenies(t *testing.T) {
 	require.NotNil(t, note)
 	// The request ends while the agent row is read, as when a client gives
 	// up during a slow read.
-	rs.onGetAgent = func(c context.Context) error {
+	rs.setOnGetAgent(func(c context.Context) error {
 		cancel()
 		return fmt.Errorf("agent read: %w", c.Err())
-	}
+	})
 
 	const n = 50
 	for i := 0; i < n; i++ {
@@ -446,17 +457,17 @@ func TestAuthzRequestDone_StandingRememberedAndDenies(t *testing.T) {
 	assert.Equal(t, 1, rs.countOf("GetAgent"))
 
 	// A live ctx sharing the memo is not served the remembered refusal.
-	rs.onGetAgent = nil
+	rs.setOnGetAgent(nil)
 	require.NoError(t, f.srv.agentStanding(parent, f.agentA.ID))
 	assert.Equal(t, 2, rs.countOf("GetAgent"))
 }
 
 // A store fault on a live request is still a WARN and still recomputed.
 func TestAuthzRequestDone_LiveFaultStillWarns(t *testing.T) {
-	f := newMSFixture(t, "reqdone-fault")
+	f, rs, fault := newRequestDoneFixture(t, "reqdone-fault")
 	logs := captureRequestDoneDefaultLog(t)
-	rs := installRequestDoneStore(t, f.srv, f.s)
-	rs.onGetAgent = func(context.Context) error { return context.DeadlineExceeded }
+	fault.Arm()
+	rs.setOnGetAgent(func(context.Context) error { return context.DeadlineExceeded })
 
 	ctx := withStandingMemo(context.Background())
 	for i := 0; i < 3; i++ {
@@ -469,7 +480,7 @@ func TestAuthzRequestDone_LiveFaultStillWarns(t *testing.T) {
 // countReachableAgents stops on an ended request: no check runs and no
 // agent is counted.
 func TestAuthzRequestDone_CountReachableAgentsStops(t *testing.T) {
-	f := newMSFixture(t, "reqdone-reach")
+	f, rs, fault := newRequestDoneFixture(t, "reqdone-reach")
 	for i := 0; i < 10; i++ {
 		f.userAgent(fmt.Sprintf("reach-%d", i), f.userID)
 	}
@@ -484,7 +495,7 @@ func TestAuthzRequestDone_CountReachableAgentsStops(t *testing.T) {
 		agents.Items[i].MessageMode = store.MessageModeProject
 	}
 	logs := captureRequestDoneDefaultLog(t)
-	rs := installRequestDoneStore(t, f.srv, f.s)
+	fault.Arm()
 
 	require.Positive(t, f.srv.countReachableAgents(withStandingMemo(context.Background()), &sender, agents.Items),
 		"the sender reaches agents while the request is live")
