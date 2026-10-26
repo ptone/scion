@@ -31,7 +31,7 @@ import (
 )
 
 // webchatTopicDDL is the schema for the webchat_topic table, used in tests.
-// Matches the production DDL in pkg/hub/webchannel_store_postgres.go:74.
+// Matches the production DDL in pkg/hub/webchat/webchannel_store_postgres.go (webchat_topic DDL).
 const webchatTopicDDL = `
 CREATE TABLE IF NOT EXISTS webchat_topic (
     id            TEXT PRIMARY KEY,

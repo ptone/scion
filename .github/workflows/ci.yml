@@ -1315,6 +1315,16 @@ jobs:
           SCION_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
         run: make test-store-postgres-others
 
+      # The web chat store (pkg/hub/webchat) is not an Ent store either (it
+      # creates its own webchat_* tables at Init), so it has its own Postgres
+      # SQL and Postgres tests (WEBCHAT_POSTGRES_TESTS). Every listed test
+      # must pass and none may skip.
+      - name: Run web chat store Postgres tests (pkg/hub/webchat)
+        if: ${{ !cancelled() }}
+        env:
+          SCION_TEST_POSTGRES_DSN: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
+        run: make test-webchat-pkg-postgres
+
       # The pkg/artifacts store is likewise not an Ent store (it creates its
       # own artifact_* tables at Init), so it has its own Postgres SQL. Its
       # store tests run once per dialect; this step adds the Postgres pass.

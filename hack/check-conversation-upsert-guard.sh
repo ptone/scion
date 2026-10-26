@@ -29,10 +29,8 @@
 #                                         for idempotent inserts; Postgres uses
 #                                         ON CONFLICT ... DO NOTHING (same line).
 #
-# pkgmove:ref-ok temporary for the move: the post-move commit of this change points it at pkg/hub/webchat and drops this marker.
-#   EXEMPTION (Option C, tranche C): pkg/hub/webchannel_store.go and
-# pkgmove:ref-ok temporary for the move: the post-move commit of this change points it at pkg/hub/webchat and drops this marker.
-#   pkg/hub/webchannel_store_postgres.go may contain raw INSERT INTO
+#   EXEMPTION (Option C, tranche C): pkg/hub/webchat/webchannel_store.go and
+#   pkg/hub/webchat/webchannel_store_postgres.go may contain raw INSERT INTO
 #   conversations when the statement mints kind='group'. These files perform
 #   an atomic topic+conversation dual-write inside an explicit tx; the store
 #   methods take ctx, not tx, so they cannot participate in the webchat
@@ -153,7 +151,7 @@ fi
 # INSERT OR REPLACE INTO, with optional quoting on the table name, and
 # case-insensitive to catch any casing variant.
 # Allowed in pkg/store/ unconditionally.
-# Allowed in pkg/hub/webchannel_store{,_postgres}.go ONLY when the INSERT
+# Allowed in pkg/hub/webchat/webchannel_store{,_postgres}.go ONLY when the INSERT
 # mints kind='group' (Option C). The kind literal must appear in the
 # same SQL statement (bounded by the Go raw string backtick delimiter).
 # Pattern uses POSIX ERE (-E flag). Do not rewrite with BRE alternation (\|)
@@ -190,9 +188,8 @@ if [[ -s "$tmp" ]]; then
     # any format change causes the exemption to NOT apply (fail-closed).
     norm_file="${file#./}"
 
-    # Exemption applies ONLY to these two files in pkg/hub/
-    # pkgmove:ref-ok temporary for the move: the post-move commit of this change points it at pkg/hub/webchat and drops this marker.
-    if [[ "$norm_file" = "pkg/hub/webchannel_store.go" || "$norm_file" = "pkg/hub/webchannel_store_postgres.go" ]]; then
+    # Exemption applies ONLY to these two files in pkg/hub/webchat/
+    if [[ "$norm_file" = "pkg/hub/webchat/webchannel_store.go" || "$norm_file" = "pkg/hub/webchat/webchannel_store_postgres.go" ]]; then
       # Extract the SQL statement: from the INSERT keyword through the
       # closing backtick (end of Go raw string literal), cap at 20 lines.
       # On the first line, strip everything before INSERT so the opening
@@ -238,7 +235,7 @@ if [[ -s "$tmp" ]]; then
     printf '%s' "$violations" >&2
     echo >&2
     printf 'Raw SQL conversation inserts are only allowed in pkg/store/.\n' >&2
-    printf "Exception: pkg/hub/webchannel_store{,_postgres}.go may INSERT\n" >&2
+    printf "Exception: pkg/hub/webchat/webchannel_store{,_postgres}.go may INSERT\n" >&2
     printf "with kind='group' (Option C — see script header).\n" >&2
     rc=1
   fi
