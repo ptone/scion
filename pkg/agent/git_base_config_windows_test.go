@@ -24,7 +24,8 @@ import (
 
 // TestWindowsGitBaseConfig_Unsupported checks that the base git config read
 // fails closed on Windows with errors.ErrUnsupported on an existing file, and
-// that seedPrivateGitConfig returns the refusal and writes no private config.
+// that seedPrivateGitConfig returns the refusal and creates nothing under the
+// agent dir.
 func TestWindowsGitBaseConfig_Unsupported(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "config")
 	if err := os.WriteFile(base, []byte("[core]\n\tbare = false\n"), 0o600); err != nil {
@@ -39,7 +40,7 @@ func TestWindowsGitBaseConfig_Unsupported(t *testing.T) {
 	if !errors.Is(err, errors.ErrUnsupported) || dest != "" {
 		t.Fatalf("seedPrivateGitConfig = %q, %v; want empty, ErrUnsupported", dest, err)
 	}
-	if _, err := os.Lstat(filepath.Join(agentDir, "git", "config")); !os.IsNotExist(err) {
-		t.Fatalf("private config written after a refusal: %v", err)
+	if _, err := os.Lstat(filepath.Join(agentDir, "git")); !os.IsNotExist(err) {
+		t.Fatalf("git dir created after a refusal: %v", err)
 	}
 }
