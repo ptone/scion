@@ -93,6 +93,41 @@ func checkSeamUse(fset *token.FileSet, filename string, src any) ([]string, erro
 	return problems, nil
 }
 
+// seamScanFiles returns the non-test Go files of the module rooted at root
+// that the seam guard scans. It skips dot-directories below the root (a
+// workstation checkout keeps other agents' worktrees, on other branches,
+// under .scion/agents; .git is not source), directories holding their own
+// go.mod (other modules), and node_modules, vendor and testdata.
+func seamScanFiles(root string) ([]string, error) {
+	var files []string
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if p == root {
+				return nil
+			}
+			if strings.HasPrefix(d.Name(), ".") {
+				return filepath.SkipDir
+			}
+			switch d.Name() {
+			case "node_modules", "vendor", "testdata":
+				return filepath.SkipDir
+			}
+			if _, err := os.Lstat(filepath.Join(p, "go.mod")); err == nil {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Type().IsRegular() && strings.HasSuffix(p, ".go") && !strings.HasSuffix(p, "_test.go") {
+			files = append(files, p)
+		}
+		return nil
+	})
+	return files, err
+}
+
 // No non-test Go file in the module calls or sets a test-only seam of this
 // change.
 func TestTestOnlySeamsUnusedInProduction(t *testing.T) {
@@ -103,43 +138,59 @@ func TestTestOnlySeamsUnusedInProduction(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
 		t.Fatalf("module root not found at %s: %v", root, err)
 	}
-	fset := token.NewFileSet()
-	scanned := 0
-	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			// Dot-directories below the root are skipped: in a workstation
-			// checkout .scion/agents holds other agents' worktrees (other
-			// branches), and .git is not source.
-			if p != root && strings.HasPrefix(d.Name(), ".") {
-				return filepath.SkipDir
-			}
-			switch d.Name() {
-			case "node_modules", "vendor", "testdata":
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !d.Type().IsRegular() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
-			return nil
-		}
-		problems, err := checkSeamUse(fset, p, nil)
-		if err != nil {
-			return err
-		}
-		scanned++
-		for _, pr := range problems {
-			t.Error(pr)
-		}
-		return nil
-	})
+	files, err := seamScanFiles(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if scanned < 100 {
-		t.Fatalf("scanned only %d non-test Go files under %s", scanned, root)
+	if len(files) < 100 {
+		t.Fatalf("scanned only %d non-test Go files under %s", len(files), root)
+	}
+	fset := token.NewFileSet()
+	for _, p := range files {
+		problems, err := checkSeamUse(fset, p, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, pr := range problems {
+			t.Error(pr)
+		}
+	}
+}
+
+// The scan selects the module's own non-test Go files: not other agents'
+// worktrees under a dot-directory, not nested modules, not tests.
+func TestSeamScanFiles(t *testing.T) {
+	root := t.TempDir()
+	for rel, content := range map[string]string{
+		"go.mod":                                 "module example.com/m\n",
+		"pkg/a.go":                               "package pkg\n",
+		"pkg/a_test.go":                          "package pkg\n",
+		".scion/agents/other/workspace/pkg/b.go": "package pkg\n",
+		".git/c.go":                              "package git\n",
+		"extras/sub/go.mod":                      "module example.com/sub\n",
+		"extras/sub/d.go":                        "package sub\n",
+		"pkg/testdata/e.go":                      "package testdata\n",
+		"cmd/f.go":                               "package main\n",
+	} {
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files, err := seamScanFiles(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, p := range files {
+		rel, _ := filepath.Rel(root, p)
+		got = append(got, filepath.ToSlash(rel))
+	}
+	if want := []string{"cmd/f.go", "pkg/a.go"}; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("scanned %v, want %v", got, want)
 	}
 }
 
