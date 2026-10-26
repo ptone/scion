@@ -15,8 +15,12 @@
 package transfer
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -106,45 +110,11 @@ func (b *ManifestBuilder) CollectFiles() ([]FileInfo, error) {
 			return nil
 		}
 
-		// Check exclude patterns
-		if b.shouldExclude(relPath, d.IsDir()) {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
+		fi, err := b.visit(relPath, d, path, func() (string, error) { return HashFile(path) })
+		if err != nil || fi == nil {
+			return err
 		}
-
-		// Only regular files can be transferred. Opening a FIFO can block,
-		// and symlinks, sockets and devices are not transferable file content.
-		if !d.Type().IsRegular() {
-			if b.OnSkip != nil && !d.IsDir() {
-				b.OnSkip(relPath)
-			}
-			return nil
-		}
-
-		// Get file info
-		info, err := d.Info()
-		if err != nil {
-			return fmt.Errorf("failed to get file info for %s: %w", relPath, err)
-		}
-
-		// Compute hash
-		hash, err := HashFile(path)
-		if err != nil {
-			return fmt.Errorf("failed to hash file %s: %w", relPath, err)
-		}
-
-		// Get file mode
-		mode := fmt.Sprintf("%04o", info.Mode().Perm())
-
-		files = append(files, FileInfo{
-			Path:     relPath,
-			FullPath: path,
-			Size:     info.Size(),
-			Hash:     hash,
-			Mode:     mode,
-		})
+		files = append(files, *fi)
 
 		return nil
 	})
@@ -159,6 +129,96 @@ func (b *ManifestBuilder) CollectFiles() ([]FileInfo, error) {
 	})
 
 	return files, nil
+}
+
+// visit applies the collection rules to one walked entry: relPath is its
+// slash-separated path relative to the base (never "."), fullPath the path
+// recorded in FileInfo.FullPath, and hash computes the content hash of a
+// regular file. An excluded directory returns fs.SkipDir and an excluded
+// file nothing. Only regular files are collected: opening a FIFO can block,
+// and symlinks, sockets and devices are not transferable file content, so
+// they return nothing (reported to OnSkip). A regular file returns its
+// FileInfo.
+func (b *ManifestBuilder) visit(relPath string, d fs.DirEntry, fullPath string, hash func() (string, error)) (*FileInfo, error) {
+	if b.shouldExclude(relPath, d.IsDir()) {
+		if d.IsDir() {
+			return nil, fs.SkipDir
+		}
+		return nil, nil
+	}
+	if !d.Type().IsRegular() {
+		if b.OnSkip != nil && !d.IsDir() {
+			b.OnSkip(relPath)
+		}
+		return nil, nil
+	}
+	info, err := d.Info()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get file info for %s: %w", relPath, err)
+	}
+	h, err := hash()
+	if err != nil {
+		return nil, fmt.Errorf("failed to hash file %s: %w", relPath, err)
+	}
+	return &FileInfo{
+		Path:     relPath,
+		FullPath: fullPath,
+		Size:     info.Size(),
+		Hash:     h,
+		Mode:     fmt.Sprintf("%04o", info.Mode().Perm()),
+	}, nil
+}
+
+// CollectFilesFromRoot is CollectFiles for a directory already opened as
+// root: the walk, each entry's stat and the hashing all go through root, so
+// the directory is not reopened by path (a directory or link swapped in at
+// basePath after root was opened is never walked). basePath is the
+// directory's path; it is used only for FileInfo.FullPath. The exclude and
+// regular-file rules are CollectFiles'. A file is hashed through
+// OpenRegularFile, so one that is no longer a regular file when it is opened
+// fails the collection instead of being followed.
+func CollectFilesFromRoot(root *os.Root, basePath string, excludePatterns []string) ([]FileInfo, error) {
+	b := NewManifestBuilder(basePath)
+	if excludePatterns != nil {
+		b.ExcludePatterns = append(b.ExcludePatterns, excludePatterns...)
+	}
+	var files []FileInfo
+	err := fs.WalkDir(root.FS(), ".", func(relPath string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if relPath == "." {
+			return nil
+		}
+		rel := filepath.FromSlash(relPath)
+		fi, err := b.visit(relPath, d, filepath.Join(basePath, rel), func() (string, error) { return hashRootFile(root, rel) })
+		if err != nil || fi == nil {
+			return err
+		}
+		files = append(files, *fi)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].Path < files[j].Path
+	})
+	return files, nil
+}
+
+// hashRootFile is HashFile for rel, read through root with OpenRegularFile.
+func hashRootFile(root *os.Root, rel string) (string, error) {
+	f, _, err := OpenRegularFile(root, rel)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, f); err != nil {
+		return "", err
+	}
+	return HashPrefix + hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
 // shouldExclude checks if a path should be excluded.
