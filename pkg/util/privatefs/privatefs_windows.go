@@ -821,7 +821,10 @@ func (t *Tree) OpenPrivate(rel string, flag int) (*os.File, error) {
 			return err
 		}
 		f = os.NewFile(uintptr(h), t.display(rel))
-		afterLinkCheckOpen(f.Name())
+		if write {
+			// Only a write open checks the link count (verifyOrRepair).
+			afterLinkCheckOpen(f.Name())
+		}
 		// A file opened for writing whose name went after the open
 		// (errNoNames) is opened again.
 		if err := verifyOrRepair(f, write); err != nil {

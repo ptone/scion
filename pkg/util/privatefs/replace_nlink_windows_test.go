@@ -19,26 +19,39 @@ package privatefs
 import (
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
-// replaceHook counts the calls of testHookAfterLinkCheckOpen and records
-// whether this volume could replace a file that is open elsewhere.
+// replaceHook counts the calls of testHookAfterLinkCheckOpen and keeps the
+// first error of the replacing writer.
 type replaceHook struct {
-	calls       int
-	unsupported bool
+	calls int
+	err   error
 }
 
-// skipIfUnsupported skips the test if the volume has no POSIX-semantics
-// rename over an open file (the classic rename fails), so the replace the
-// test needs could not happen.
-func (h *replaceHook) skipIfUnsupported(t *testing.T) {
+// checkReplaced fails the test if the replacing writer failed. The one
+// exception is a volume without a POSIX-semantics rename: renameHandle then
+// falls back to the classic rename, which refuses to replace a file that
+// is open elsewhere. Only that refusal skips the test (with the error);
+// any other error is a failure.
+func (h *replaceHook) checkReplaced(t *testing.T) {
 	t.Helper()
-	if h.unsupported {
-		t.Skip("no POSIX-semantics rename over an open file on this volume")
+	if h.err == nil {
+		return
 	}
+	var pe *fs.PathError
+	if errors.As(h.err, &pe) && pe.Op == "rename" &&
+		(errors.Is(h.err, windows.ERROR_ACCESS_DENIED) ||
+			errors.Is(h.err, windows.ERROR_NOT_SUPPORTED) ||
+			errors.Is(h.err, windows.ERROR_INVALID_PARAMETER)) {
+		t.Skipf("no POSIX-semantics rename over an open file on this volume: %v", h.err)
+	}
+	t.Fatalf("replacing the file during the check: %v", h.err)
 }
 
 // replaceDuringCheck installs testHookAfterLinkCheckOpen so that, on the
@@ -59,12 +72,10 @@ func replaceDuringCheck(t *testing.T, dir, rel string, replace func(call int) bo
 		inHook = true
 		defer func() { inHook = false }()
 		h.calls++
-		if h.unsupported || !replace(h.calls) {
+		if h.err != nil || !replace(h.calls) {
 			return
 		}
-		if err := other.WriteFile(rel, []byte("other writer"), Private); err != nil {
-			h.unsupported = true
-		}
+		h.err = other.WriteFile(rel, []byte("other writer"), Private)
 	}
 	t.Cleanup(func() { testHookAfterLinkCheckOpen = nil })
 	return h
@@ -84,7 +95,7 @@ func TestCheckReplaceTarget_WindowsTargetReplacedWhileCheckedIsReopened(t *testi
 	writeTarget(t, dir, "config")
 	h := replaceDuringCheck(t, dir, "config", func(call int) bool { return call == 1 })
 	err := CheckReplaceTarget(filepath.Join(dir, "config"))
-	h.skipIfUnsupported(t)
+	h.checkReplaced(t)
 	if err != nil {
 		t.Fatalf("CheckReplaceTarget after a concurrent replace: %v", err)
 	}
@@ -98,7 +109,7 @@ func TestCheckReplaceTarget_WindowsTargetKeepsChangingIsRefused(t *testing.T) {
 	writeTarget(t, dir, "config")
 	h := replaceDuringCheck(t, dir, "config", func(int) bool { return true })
 	err := CheckReplaceTarget(filepath.Join(dir, "config"))
-	h.skipIfUnsupported(t)
+	h.checkReplaced(t)
 	if !errors.Is(err, ErrReplacedConcurrently) {
 		t.Fatalf("got %v, want ErrReplacedConcurrently", err)
 	}
@@ -117,7 +128,7 @@ func TestTreeCreate_WindowsTargetReplacedWhileCheckedIsReopened(t *testing.T) {
 	tr := treeAt(t, dir)
 	defer func() { _ = tr.Close() }()
 	f, err := tr.Create("data", false, Inherit)
-	h.skipIfUnsupported(t)
+	h.checkReplaced(t)
 	if err != nil {
 		t.Fatalf("Create after a concurrent replace: %v", err)
 	}
@@ -137,7 +148,7 @@ func TestOpenPrivate_WindowsTargetReplacedWhileCheckedIsReopened(t *testing.T) {
 	tr := treeAt(t, dir)
 	defer func() { _ = tr.Close() }()
 	f, err := tr.OpenPrivate("secret", os.O_RDWR)
-	h.skipIfUnsupported(t)
+	h.checkReplaced(t)
 	if err != nil {
 		t.Fatalf("OpenPrivate after a concurrent replace: %v", err)
 	}
@@ -147,5 +158,25 @@ func TestOpenPrivate_WindowsTargetReplacedWhileCheckedIsReopened(t *testing.T) {
 	}
 	if b, _ := io.ReadAll(f); string(b) != "other writer" {
 		t.Fatalf("OpenPrivate returned a handle on %q, want the replacement", b)
+	}
+}
+
+func TestTreeCreatePrivate_WindowsTargetReplacedWhileCheckedIsReopened(t *testing.T) {
+	dir := t.TempDir()
+	writeTarget(t, dir, "secret")
+	h := replaceDuringCheck(t, dir, "secret", func(call int) bool { return call == 1 })
+	tr := treeAt(t, dir)
+	defer func() { _ = tr.Close() }()
+	f, err := tr.Create("secret", false, Private)
+	h.checkReplaced(t)
+	if err != nil {
+		t.Fatalf("Create(Private) after a concurrent replace: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	if h.calls != 2 {
+		t.Fatalf("link check opened the target %d times, want 2 (one retry)", h.calls)
+	}
+	if b, _ := io.ReadAll(f); string(b) != "other writer" {
+		t.Fatalf("Create(Private) returned a handle on %q, want the replacement", b)
 	}
 }

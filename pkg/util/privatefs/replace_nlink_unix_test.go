@@ -63,7 +63,9 @@ func TestReplaceFollowing_TargetReplacedWhileCheckedIsReopened(t *testing.T) {
 			renameOver(t, name, "other writer")
 		}
 	})
-	if err := ReplaceFollowing(p, []byte("mine"), 0o600, ".tmp-"); err != nil {
+	// newMode (0644) differs from both the stale file's mode (0640) and
+	// the replacement's (0600).
+	if err := ReplaceFollowing(p, []byte("mine"), 0o644, ".tmp-"); err != nil {
 		t.Fatalf("ReplaceFollowing after a concurrent replace: %v", err)
 	}
 	if *calls != 2 {
@@ -72,7 +74,8 @@ func TestReplaceFollowing_TargetReplacedWhileCheckedIsReopened(t *testing.T) {
 	if b, _ := os.ReadFile(p); string(b) != "mine" {
 		t.Fatalf("content %q", b)
 	}
-	// The mode comes from the file that was checked (the replacement).
+	// The mode comes from the file that was checked again (the
+	// replacement), not from the stale file and not from newMode.
 	if fi, _ := os.Stat(p); fi.Mode().Perm() != 0o600 {
 		t.Fatalf("mode %v, want the replacement's 0600", fi.Mode().Perm())
 	}

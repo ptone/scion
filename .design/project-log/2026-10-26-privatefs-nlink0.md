@@ -51,3 +51,19 @@ link.
 fails differently: a `.tmp-*` directory ends up nested in the final message
 directory. pkg/runtimebroker does not use privatefs. It is tracked
 separately.
+
+## Review round
+
+- Windows tests: the replacing writer's error is kept. The test skips only
+  when the classic rename refuses to replace an open file
+  (`ERROR_ACCESS_DENIED`, `ERROR_NOT_SUPPORTED` or `ERROR_INVALID_PARAMETER`
+  from the rename), and the skip message shows the error. Any other error
+  fails the test. The Windows CI job fails on any skip, so these tests must
+  PASS there.
+- Added a Windows `Tree.Create(Private)` replaced-once test (the
+  `verifyOrRepair` path inside `Create`).
+- The unix replaced-once test passes a `newMode` (0644) that differs from
+  the replacement's mode, so it shows the mode comes from the file that was
+  checked again.
+- `OpenPrivate` calls the test hook only for write opens, the only opens
+  that check the link count.
