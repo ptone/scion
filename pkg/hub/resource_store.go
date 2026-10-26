@@ -213,30 +213,35 @@ func (rs *ResourceStore) requireConfigName() {
 	}
 }
 
-// collectFiles collects the files of a resource directory, applying the
-// kind's exclude patterns on top of transfer.DefaultExcludePatterns, and
-// opens an os.Root at dir through which every later read of a collected file
-// goes. dir must be a directory, not a link, and the root must be opened at
-// the same directory that was collected (compared by os.SameFile before the
-// collection and after the open); a directory replaced in between fails the
+// collectFiles opens an os.Root at dir (openRealDirRoot) and collects the
+// files of the resource directory through it, applying the kind's exclude
+// patterns on top of transfer.DefaultExcludePatterns; every later read of a
+// collected file goes through the same root. dir must be a directory, not a
+// link, and must still name the directory the root was opened at after the
+// collection (os.SameFile); a directory replaced in between fails the
 // operation. With rs.within set, the root must also be the directory
 // within's root has at rs.withinPath, reached without following a link.
 // The caller must close the root (cd.root).
 func (rs *ResourceStore) collectFiles(dir string) (*collectedDir, error) {
-	var files []transfer.FileInfo
-	root, at, err := openRealDirRoot(dir, func() error {
-		var err error
-		files, err = transfer.CollectFiles(dir, rs.excludePatterns)
-		if err != nil {
-			return err
-		}
-		if hook := afterCollectHook.Load(); hook != nil {
-			(*hook)(dir)
-		}
-		return nil
-	})
+	root, at, err := openRealDirRoot(dir)
 	if err != nil {
 		return nil, err
+	}
+	// The collection walks, stats and hashes through the root, so the
+	// directory is not reopened by path.
+	files, err := transfer.CollectFilesFromRoot(root, dir, rs.excludePatterns)
+	if err != nil {
+		_ = root.Close()
+		return nil, err
+	}
+	if hook := afterCollectHook.Load(); hook != nil {
+		(*hook)(dir)
+	}
+	// dir must still name the directory that was collected.
+	now, err := os.Lstat(dir)
+	if err != nil || !os.SameFile(now, at) {
+		_ = root.Close()
+		return nil, fmt.Errorf("%s %w", dir, errCollectedDirChanged)
 	}
 	if rs.within != nil {
 		if err := rs.checkWithin(at, dir); err != nil {
@@ -247,14 +252,24 @@ func (rs *ResourceStore) collectFiles(dir string) (*collectedDir, error) {
 	return newCollectedDir(dir, root, files), nil
 }
 
-// openRealDirRoot opens an os.Root at dir, which must be a directory and
-// not a link (os.Lstat), after running between (for example the
-// collection). The root must be opened at the same directory the Lstat saw
-// (os.SameFile with root.Stat(".")); a directory replaced in between fails
-// with errCollectedDirChanged. It returns the root, which the caller must
-// close, and the directory's FileInfo as seen through the root.
-func openRealDirRoot(dir string, between func() error) (*os.Root, os.FileInfo, error) {
-	before, err := os.Lstat(dir)
+// afterDirLstatHook, when set (tests only), runs between openRealDirRoot's
+// Lstat and its open.
+var afterDirLstatHook atomic.Pointer[func(dir string)]
+
+// openRealDirRoot opens an os.Root at dir, which must be a directory and not
+// a link (os.Lstat). The directory is opened through its parent
+// (os.Root.OpenRoot: openat with O_NOFOLLOW and O_DIRECTORY), so a link
+// swapped in after the Lstat is not followed and a FIFO swapped in does not
+// block the open. The root must be the directory the Lstat saw (os.SameFile
+// with root.Stat(".")); otherwise errCollectedDirChanged. It returns the
+// root, which the caller must close, and the directory's FileInfo as seen
+// through the root.
+func openRealDirRoot(dir string) (*os.Root, os.FileInfo, error) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	before, err := os.Lstat(abs)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -264,12 +279,19 @@ func openRealDirRoot(dir string, between func() error) (*os.Root, os.FileInfo, e
 	if !before.IsDir() {
 		return nil, nil, fmt.Errorf("%s is not a directory", dir)
 	}
-	if between != nil {
-		if err := between(); err != nil {
-			return nil, nil, err
-		}
+	parentDir, base := filepath.Dir(abs), filepath.Base(abs)
+	if base == string(filepath.Separator) || base == "." || base == ".." {
+		return nil, nil, fmt.Errorf("%s: no parent directory to open it through", dir)
 	}
-	root, err := os.OpenRoot(dir)
+	if hook := afterDirLstatHook.Load(); hook != nil {
+		(*hook)(dir)
+	}
+	parent, err := os.OpenRoot(parentDir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open parent of %s: %w", dir, err)
+	}
+	defer func() { _ = parent.Close() }()
+	root, err := parent.OpenRoot(base)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open dir root %s: %w", dir, err)
 	}

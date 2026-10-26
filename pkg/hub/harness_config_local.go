@@ -75,7 +75,7 @@ func readLocalHarnessConfigRootFile(root *os.Root, name string) ([]byte, error) 
 // readLocalHarnessConfigFile reads the top-level file name of the
 // harness-config directory dir, confined as described above.
 func readLocalHarnessConfigFile(dir, name string) ([]byte, error) {
-	root, _, err := openRealDirRoot(dir, nil)
+	root, _, err := openRealDirRoot(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -92,7 +92,7 @@ func loadLocalHarnessConfigDir(dir string) (*config.HarnessConfigDir, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve path: %w", err)
 	}
-	root, _, err := openRealDirRoot(absPath, nil)
+	root, _, err := openRealDirRoot(absPath)
 	if err != nil {
 		return nil, err
 	}

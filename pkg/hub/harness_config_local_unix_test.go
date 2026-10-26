@@ -337,3 +337,75 @@ func TestReimportHarnessConfigNewStore_LinkedConfigYAMLRefused(t *testing.T) {
 		t.Errorf("regular config.yaml: store %v, err %v; want a store", rs, err)
 	}
 }
+
+// The directory itself replaced between openRealDirRoot's Lstat and its open:
+// a FIFO does not block the open and a link is not followed; both fail.
+// Checked through openRealDirRoot, collectFiles and the pre-collection loader.
+func TestOpenRealDirRoot_DirectorySwappedAfterLstat(t *testing.T) {
+	swaps := map[string]func(t *testing.T, dir string){
+		"FIFO": func(t *testing.T, dir string) {
+			if err := os.RemoveAll(dir); err != nil {
+				t.Error(err)
+			}
+			if err := syscall.Mkfifo(dir, 0o600); err != nil {
+				t.Errorf("mkfifo: %v", err)
+			}
+		},
+		"link": func(t *testing.T, dir string) {
+			other := writeCollectedTestTree(t, map[string]string{"config.yaml": "harness: claude\n"})
+			if err := os.RemoveAll(dir); err != nil {
+				t.Error(err)
+			}
+			if err := os.Symlink(other, dir); err != nil {
+				t.Error(err)
+			}
+		},
+	}
+	calls := map[string]func(dir string) error{
+		"openRealDirRoot": func(dir string) error {
+			root, _, err := openRealDirRoot(dir)
+			if root != nil {
+				_ = root.Close()
+			}
+			return err
+		},
+		"collectFiles": func(dir string) error {
+			cd, err := (&ResourceStore{}).collectFiles(dir)
+			if cd != nil {
+				_ = cd.root.Close()
+			}
+			return err
+		},
+		"loadLocalHarnessConfigDir": func(dir string) error {
+			_, err := loadLocalHarnessConfigDir(dir)
+			return err
+		},
+	}
+	for sname, swap := range swaps {
+		for cname, call := range calls {
+			t.Run(sname+" "+cname, func(t *testing.T) {
+				dir := filepath.Join(writeCollectedTestTree(t, map[string]string{"claude-x/config.yaml": "harness: claude\n"}), "claude-x")
+				if sname == "FIFO" {
+					// mkfifo support is checked once, outside the hook.
+					mkfifoOrSkip(t, filepath.Join(t.TempDir(), "probe"))
+				}
+				hook := func(string) { swap(t, dir) }
+				afterDirLstatHook.Store(&hook)
+				t.Cleanup(func() { afterDirLstatHook.Store(nil) })
+				returnsPromptly(t, func() {
+					if err := call(dir); err == nil {
+						t.Errorf("%s succeeded on a directory replaced by a %s after the Lstat", cname, sname)
+					}
+				})
+			})
+		}
+	}
+	t.Run("control", func(t *testing.T) {
+		dir := filepath.Join(writeCollectedTestTree(t, map[string]string{"claude-x/config.yaml": "harness: claude\n"}), "claude-x")
+		for cname, call := range calls {
+			if err := call(dir); err != nil {
+				t.Errorf("%s on an unchanged directory: %v", cname, err)
+			}
+		}
+	})
+}
