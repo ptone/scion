@@ -705,7 +705,7 @@ test-webchat-pkg-postgres:
 	@log=$$(mktemp) || exit 1; \
 	regex="^($$(echo $(WEBCHAT_POSTGRES_TESTS) | tr ' ' '|'))\$$"; \
 	{ go test -count=1 -timeout 20m -v -run "$$regex" ./pkg/hub/webchat 2>&1; echo $$? > "$$log.rc"; } | tee "$$log"; \
-	status=$$(cat "$$log.rc"); rm -f "$$log.rc"; \
+	status=$$(cat "$$log.rc" 2>/dev/null); status=$${status:-1}; rm -f "$$log.rc"; \
 	if [ "$$status" != 0 ]; then rm -f "$$log"; exit $$status; fi; \
 	if grep -qE '^[[:space:]]*--- SKIP' "$$log"; then \
 		echo "ERROR: one or more pkg/hub/webchat Postgres tests were skipped -- see '--- SKIP' lines above." >&2; rm -f "$$log"; exit 1; \
