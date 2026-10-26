@@ -656,3 +656,67 @@ func TestAuthzRequestDone_DetachedAndAfterEmit(t *testing.T) {
 	assert.Equal(t, 2, logs.count(slog.LevelWarn, warn), "a stopped check after the summary is a WARN")
 	assert.Equal(t, 1, requestDoneNoteCount(note2), "never counted after the summary")
 }
+
+// Deadlines are compared: under a request with deadline D2, a check whose
+// own, shorter timeout D1 ran out keeps its WARN and is not counted, even
+// once the request's deadline has passed too; a check with a longer
+// timeout inherits D2 and is counted when the request's deadline ends it.
+func TestAuthzRequestDone_DeadlineComparison(t *testing.T) {
+	f := newMSFixture(t, "reqdone-dl")
+	logs := captureRequestDoneDefaultLog(t)
+	const warn = "agent standing lookup failed"
+
+	reqCtx, cancelReq := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancelReq()
+	ctx, note := withAuthzStoppedNote(reqCtx)
+	require.NotNil(t, note)
+	shorter, cancelShorter := context.WithTimeout(ctx, time.Nanosecond)
+	defer cancelShorter()
+	longer, cancelLonger := context.WithTimeout(ctx, time.Hour)
+	defer cancelLonger()
+	<-shorter.Done()
+	<-reqCtx.Done()
+	<-longer.Done()
+	require.ErrorIs(t, reqCtx.Err(), context.DeadlineExceeded)
+	require.ErrorIs(t, shorter.Err(), context.DeadlineExceeded)
+	require.ErrorIs(t, longer.Err(), context.DeadlineExceeded)
+
+	require.Error(t, f.srv.agentStanding(shorter, f.agentA.ID))
+	assert.Equal(t, 1, logs.count(slog.LevelWarn, warn), "a shorter own deadline keeps the WARN")
+	assert.Zero(t, requestDoneNoteCount(note), "and is not counted")
+
+	require.Error(t, f.srv.agentStanding(longer, f.agentA.ID))
+	assert.Equal(t, 1, logs.count(slog.LevelWarn, warn), "the request's own deadline is not a WARN")
+	assert.Equal(t, 1, requestDoneNoteCount(note), "and is counted")
+	assert.Equal(t, "deadline", requestDoneNoteField(note, "class"))
+}
+
+// A remembered request-end refusal is not served to a detached check that
+// ended on its own bound: it evaluates again and keeps its WARN.
+func TestAuthzRequestDone_StandingMemoNotServedToDetached(t *testing.T) {
+	f := newMSFixture(t, "reqdone-memo-det")
+	logs := captureRequestDoneDefaultLog(t)
+	const warn = "agent standing lookup failed"
+
+	reqCtx, cancelReq := context.WithCancel(withStandingMemo(context.Background()))
+	ctx, note := withAuthzStoppedNote(reqCtx)
+	require.NotNil(t, note)
+	cancelReq()
+	require.Error(t, f.srv.agentStanding(ctx, f.agentA.ID))
+	require.Equal(t, 1, requestDoneNoteCount(note), "the request-end refusal is counted and remembered")
+	require.Zero(t, logs.count(slog.LevelWarn, warn))
+
+	detached, cancelDetached := context.WithTimeout(context.WithoutCancel(ctx), time.Nanosecond)
+	defer cancelDetached()
+	<-detached.Done()
+	err := f.srv.agentStanding(detached, f.agentA.ID)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, context.DeadlineExceeded), "evaluated for the detached ctx, not served the remembered cancellation: %v", err)
+	assert.Equal(t, 1, logs.count(slog.LevelWarn, warn), "the detached check's own deadline keeps its WARN")
+	assert.Equal(t, 1, requestDoneNoteCount(note), "and is not counted")
+
+	// The request's own later checks are still served from the memo.
+	require.Error(t, f.srv.agentStanding(ctx, f.agentA.ID))
+	assert.Equal(t, 1, requestDoneNoteCount(note))
+	assert.Equal(t, 1, logs.count(slog.LevelWarn, warn))
+}

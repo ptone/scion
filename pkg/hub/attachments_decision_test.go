@@ -17,12 +17,8 @@
 package hub
 
 import (
-	"bytes"
 	"context"
-	"log/slog"
 	"net/http"
-	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -290,10 +286,7 @@ func (c *cancelAfterListAttachmentStore) ListMessageAttachments(ctx context.Cont
 // stops: no message gets refs and no per-message decision runs.
 func TestHistory_StopsDecisionsAfterRequestEnds(t *testing.T) {
 	d := newDecisionFixture(t)
-	logs := &historyStopLogBuffer{}
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	logs := captureRequestDoneDefaultLog(t)
 
 	liveBefore := d.faults.messageGets(d.dmMsg)
 	live := d.srv.mergeArtifactAttachments(d.sessionContext(d.ua), []string{d.dmMsg}, nil)
@@ -307,23 +300,5 @@ func TestHistory_StopsDecisionsAfterRequestEnds(t *testing.T) {
 	merged := d.srv.mergeArtifactAttachments(ctx, []string{d.dmMsg}, nil)
 	require.Empty(t, merged[d.dmMsg], "no refs after the request ends")
 	require.Zero(t, d.faults.messageGets(d.dmMsg)-before, "no per-message decision after the request ends")
-	require.False(t, logs.contains("artifacts: attachment message lookup failed"), "no message lookup failure is logged")
-}
-
-// historyStopLogBuffer is a log sink safe for concurrent writes.
-type historyStopLogBuffer struct {
-	mu sync.Mutex
-	b  bytes.Buffer
-}
-
-func (l *historyStopLogBuffer) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.b.Write(p)
-}
-
-func (l *historyStopLogBuffer) contains(s string) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return strings.Contains(l.b.String(), s)
+	require.Empty(t, logs.find("artifacts: attachment message lookup failed"), "no message lookup failure is logged")
 }

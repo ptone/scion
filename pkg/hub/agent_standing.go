@@ -147,16 +147,18 @@ func (s *Server) agentStanding(ctx context.Context, agentID string) error {
 		memo.mu.Lock()
 		res, ok := memo.results[agentID]
 		memo.mu.Unlock()
-		// A remembered request-end refusal serves only a ctx that has
-		// ended too: a live ctx sharing the memo (a sub-operation's own
-		// cancelled child wrote it) evaluates again.
-		if ok && (ctx.Err() != nil || !errors.Is(res, context.Canceled) && !errors.Is(res, context.DeadlineExceeded)) {
+		// A remembered request-end refusal serves only a ctx that the
+		// request's end stopped too (authzStoppedByRequestEnd). Any other
+		// ctx sharing the memo, live or ended on its own bound (a detached
+		// check), evaluates again, so its own fault keeps its WARN.
+		requestEnd := errors.Is(res, context.Canceled) || errors.Is(res, context.DeadlineExceeded)
+		if ok && (!requestEnd || authzStoppedByRequestEnd(ctx, res)) {
 			return res
 		}
 	}
 	var err error
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		// The request has ended: refuse without a lookup.
+		// ctx has ended: refuse without a lookup.
 		err = fmt.Errorf("agent standing: %w", ctxErr)
 	} else {
 		err = s.evaluateAgentStanding(ctx, agentID)
