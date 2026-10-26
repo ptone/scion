@@ -363,16 +363,31 @@ func TestSubPath(t *testing.T) {
 // TestStillEncodedPathRedactedNeutral: a path that keeps an undecodable
 // sequence is logged as RedactedPath, not as an artifact or port view
 // path, and is not traced.
+//
+// A NUL byte that appears at some decoding step does not end the check:
+// the path is still judged by what is left when decoding stops.
 func TestStillEncodedPathRedactedNeutral(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/api/v1/agents/a1/x%2525zz", nil)
-	if got := RequestPath(r); got != RedactedPath {
-		t.Errorf("RequestPath = %q, want %q", got, RedactedPath)
+	for _, p := range []string{
+		"/api/v1/agents/a1/x%2525zz",
+		"/api/v1/agents/a1/x%00%2525zz",
+		"/api/v1/agents/a1/x%2500%252525zz",
+	} {
+		r := httptest.NewRequest(http.MethodGet, p, nil)
+		if got := RequestPath(r); got != RedactedPath {
+			t.Errorf("RequestPath(%q) = %q, want %q", p, got, RedactedPath)
+		}
+		if got := RedactURL(r.URL); got != RedactedPath {
+			t.Errorf("RedactURL(%q) = %q, want %q", p, got, RedactedPath)
+		}
+		if !IsCredentialURL(r.URL) {
+			t.Errorf("IsCredentialURL(%q) = false", p)
+		}
 	}
-	if got := RedactURL(r.URL); got != RedactedPath {
-		t.Errorf("RedactURL = %q, want %q", got, RedactedPath)
+	if !stillEncoded("x\x00%zz") {
+		t.Error(`stillEncoded("x\x00%zz") = false`)
 	}
-	if !IsCredentialURL(r.URL) {
-		t.Error("IsCredentialURL = false")
+	if stillEncoded("x\x00y") {
+		t.Error(`stillEncoded("x\x00y") = true`)
 	}
 }
 

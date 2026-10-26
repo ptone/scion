@@ -109,17 +109,18 @@ func pathMentions(p, word string) bool {
 // stillEncoded reports whether p, lowercased and percent-decoded up to
 // maxUnescapeRounds times, still holds a '%' when decoding stops.
 func stillEncoded(p string) bool {
-	_, undecoded := scanPath(p, "\x00")
+	_, undecoded := scanPath(p, "")
 	return undecoded
 }
 
 // scanPath decodes p (lowercased) up to maxUnescapeRounds times. found
 // reports whether word appears at any step; undecoded whether a '%' is
-// left when decoding stops.
+// left when decoding stops. An empty word looks for nothing: found is
+// false and every round runs, so undecoded always reflects the end.
 func scanPath(p, word string) (found, undecoded bool) {
 	s := strings.ToLower(p)
 	for range maxUnescapeRounds {
-		if strings.Contains(s, word) {
+		if word != "" && strings.Contains(s, word) {
 			return true, false
 		}
 		u, err := url.PathUnescape(s)
@@ -128,7 +129,7 @@ func scanPath(p, word string) (found, undecoded bool) {
 		}
 		s = strings.ToLower(u)
 	}
-	return strings.Contains(s, word), strings.Contains(s, "%")
+	return word != "" && strings.Contains(s, word), strings.Contains(s, "%")
 }
 
 // credentialQuery reports whether a raw query (or fragment) may carry an

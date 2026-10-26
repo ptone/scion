@@ -1173,7 +1173,7 @@ func TestPortView_SigningRingEndToEnd(t *testing.T) {
 	require.True(t, strings.HasPrefix(capability, "v2.gen1."), capability)
 	served := f.send(t, http.MethodGet, view.String(), subHeader(), nil)
 	require.Equal(t, http.StatusOK, served.status, served.body)
-	assert.Equal(t, "hello /dir/index.html", served.body)
+	assert.Equal(t, "hello /dir/index.html?", served.body)
 }
 
 // TestPortView_IssuanceClosedServesPortLink: once the active generation
