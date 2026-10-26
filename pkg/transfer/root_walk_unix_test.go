@@ -141,7 +141,7 @@ func TestNormalizeRoot_FileSwappedAfterTypeCheck(t *testing.T) {
 		}
 		root := openTestRoot(t, dir)
 		p := filepath.Join(dir, "a.txt")
-		hook := func(rel string) {
+		hook := func(_, rel string) {
 			if rel != "a.txt" {
 				return
 			}
@@ -169,7 +169,7 @@ func TestNormalizeRoot_FileSwappedAfterTypeCheck(t *testing.T) {
 		writeReadTestFile(t, dir, "a.txt", "mine\r\n")
 		root := openTestRoot(t, dir)
 		p := filepath.Join(dir, "a.txt")
-		hook := func(rel string) {
+		hook := func(_, rel string) {
 			if rel != "a.txt" {
 				return
 			}

@@ -421,3 +421,34 @@ func TestOpenRealDirRoot_DirectorySwappedAfterLstat(t *testing.T) {
 		}
 	})
 }
+
+// The reads before collection are capped at maxHarnessConfigFileSize, as the
+// hub's other harness-config file reads are: an oversized config.yaml fails
+// the load, and an oversized sidecar is recorded as invalid for its size
+// (Agent Plugins unsupported) instead of being read in full.
+func TestLoadLocalHarnessConfigDir_OversizedFilesRefused(t *testing.T) {
+	pad := strings.Repeat("# padding line to exceed the harness-config size cap\n", maxHarnessConfigFileSize/50+1)
+	t.Run("config.yaml", func(t *testing.T) {
+		dir := filepath.Join(writeCollectedTestTree(t, map[string]string{
+			"claude-big/config.yaml": "harness: claude\n" + pad,
+		}), "claude-big")
+		hc, err := loadLocalHarnessConfigDir(dir)
+		if !errors.Is(err, errLocalHarnessConfigTooLarge) {
+			t.Fatalf("loaded %+v, err %v; want the size refusal", hc, err)
+		}
+	})
+	t.Run("sidecar", func(t *testing.T) {
+		dir := filepath.Join(writeCollectedTestTree(t, map[string]string{
+			"claude-big/config.yaml":                       "harness: claude\n",
+			"claude-big/" + config.AgentPluginsSidecarFile: pad,
+		}), "claude-big")
+		hc, err := loadLocalHarnessConfigDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sc := hc.Config.AgentPluginsSidecar
+		if sc == nil || !strings.Contains(sc.Reason, errLocalHarnessConfigTooLarge.Error()) {
+			t.Errorf("sidecar = %+v, want it recorded as invalid for its size", sc)
+		}
+	})
+}

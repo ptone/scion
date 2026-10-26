@@ -115,8 +115,23 @@ func NormalizeDir(dir string) error {
 }
 
 // normalizeBeforeRead, when set (tests only), runs in NormalizeRoot after a
-// file's entry was found to be a regular file and before it is opened.
-var normalizeBeforeRead atomic.Pointer[func(rel string)]
+// file's entry was found to be a regular file and before it is opened, with
+// the root's directory (os.Root.Name, without a trailing separator) and the
+// file's slash-separated path.
+var normalizeBeforeRead atomic.Pointer[func(dir, rel string)]
+
+// SetNormalizeBeforeReadForTest installs f to run in NormalizeRoot after a
+// file's entry was found to be a regular file and before the file is opened
+// (dir is the normalized root's directory, rel the file's slash-separated
+// path), and returns a function that removes it. Tests in other packages use
+// it to change the tree in the middle of a normalization.
+//
+// TEST-ONLY: never call this from production code. It mutates package-global
+// state and is not safe for use from parallel tests.
+func SetNormalizeBeforeReadForTest(f func(dir, rel string)) (restore func()) {
+	prev := normalizeBeforeRead.Swap(&f)
+	return func() { normalizeBeforeRead.Store(prev) }
+}
 
 // normalizeTempSuffix returns the random suffix of a temporary file name
 // (replaced in tests to force name collisions).
@@ -159,7 +174,7 @@ func NormalizeRoot(root *os.Root) error {
 // normalizeRootFile normalizes the regular file rel of root in place.
 func normalizeRootFile(root *os.Root, rel string) error {
 	if hook := normalizeBeforeRead.Load(); hook != nil {
-		(*hook)(filepath.ToSlash(rel))
+		(*hook)(strings.TrimRight(root.Name(), string(filepath.Separator)), filepath.ToSlash(rel))
 	}
 	f, info, err := OpenRegularFile(root, rel)
 	if errors.Is(err, ErrNotRegularFile) {

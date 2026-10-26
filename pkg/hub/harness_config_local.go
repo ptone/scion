@@ -54,12 +54,18 @@ func (e *notRegularLocalFile) Is(target error) bool {
 	return target == errNotRegularLocalFile || target == fs.ErrNotExist
 }
 
+// errLocalHarnessConfigTooLarge reports a harness-config file read before
+// collection that is larger than maxHarnessConfigFileSize.
+var errLocalHarnessConfigTooLarge = fmt.Errorf("larger than the %d-byte harness-config file limit", maxHarnessConfigFileSize)
+
 // readLocalHarnessConfigRootFile reads the top-level file name through root
 // with transfer.OpenRegularFile: Lstat, a non-blocking open (a FIFO swapped
 // in after the Lstat does not block), then fstat and SameFile on the opened
 // file. A link or another non-regular file reads as absent
 // (notRegularLocalFile). A file replaced between the Lstat and the open
-// fails the read.
+// fails the read, and so does a file larger than maxHarnessConfigFileSize
+// (errLocalHarnessConfigTooLarge; at most that many bytes plus one are read,
+// as the hub's other harness-config file reads do).
 func readLocalHarnessConfigRootFile(root *os.Root, name string) ([]byte, error) {
 	f, _, err := transfer.OpenRegularFile(root, name)
 	if errors.Is(err, transfer.ErrNotRegularFile) {
@@ -69,7 +75,14 @@ func readLocalHarnessConfigRootFile(root *os.Root, name string) ([]byte, error) 
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
-	return io.ReadAll(f)
+	data, err := io.ReadAll(io.LimitReader(f, maxHarnessConfigFileSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxHarnessConfigFileSize {
+		return nil, fmt.Errorf("%s: %w", name, errLocalHarnessConfigTooLarge)
+	}
+	return data, nil
 }
 
 // readLocalHarnessConfigFile reads the top-level file name of the
