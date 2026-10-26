@@ -232,9 +232,9 @@ func TestBuildAgentEditability_HeldIsNotAvailableYet(t *testing.T) {
 				Disposition:           EditLocked,
 				SessionSensitive:      wantSessionSensitive[key],
 				ClearNeedsReincarnate: true,
-				// No broker capabilities here, so a count limit is
+				// No broker capabilities here, so the count limit is
 				// flagged: Unlimited cannot be promised (ptone/scion#5605).
-				UnlimitedUnsupported: unlimitedCountFieldKeys[key],
+				UnlimitedUnsupported: key == "config.max_turns",
 				Reason:               editReasonRunning,
 			}, ed.Fields[key], "%s in %s", key, phase)
 		}
