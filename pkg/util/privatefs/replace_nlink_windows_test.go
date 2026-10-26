@@ -91,7 +91,10 @@ func writeTarget(t *testing.T, dir, rel string) {
 }
 
 func TestCheckReplaceTarget_WindowsTargetReplacedWhileCheckedIsReopened(t *testing.T) {
-	dir := t.TempDir()
+	// CheckReplaceTarget refuses a parent directory that other users can
+	// change before it opens the target, so the directory is made private
+	// (replaceDir), as in the other CheckReplaceTarget tests.
+	dir := replaceDir(t)
 	writeTarget(t, dir, "config")
 	h := replaceDuringCheck(t, dir, "config", func(call int) bool { return call == 1 })
 	err := CheckReplaceTarget(filepath.Join(dir, "config"))
@@ -105,7 +108,10 @@ func TestCheckReplaceTarget_WindowsTargetReplacedWhileCheckedIsReopened(t *testi
 }
 
 func TestCheckReplaceTarget_WindowsTargetKeepsChangingIsRefused(t *testing.T) {
-	dir := t.TempDir()
+	// CheckReplaceTarget refuses a parent directory that other users can
+	// change before it opens the target, so the directory is made private
+	// (replaceDir), as in the other CheckReplaceTarget tests.
+	dir := replaceDir(t)
 	writeTarget(t, dir, "config")
 	h := replaceDuringCheck(t, dir, "config", func(int) bool { return true })
 	err := CheckReplaceTarget(filepath.Join(dir, "config"))
