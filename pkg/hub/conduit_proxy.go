@@ -225,7 +225,8 @@ func isResponseHeaderTimeout(err error) bool {
 // the tunnel path. policy is the surface's: the page view surface
 // (policy.portView) also removes the request headers in
 // portViewStrippedRequestHeader and applies portViewModifyResponse, and
-// each surface logs its own caller string.
+// each surface logs its own caller string. Every surface removes the front
+// proxy's identity headers (stripFrontProxyIdentityHeaders).
 func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent *store.Agent, port int, proxyPath string, conn net.Conn, policy portProxyPolicy) {
 	start := time.Now()
 	reqPath := "/" + strings.TrimPrefix(proxyPath, "/")

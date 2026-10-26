@@ -491,16 +491,17 @@ func portLinkSubpath(escPath string) (string, bool) {
 
 // portViewStrippedRequestHeader reports whether a request header is
 // removed before a page view request reaches the app: the hub's own
-// credential headers (sensitiveHeader) and the identity headers a front
-// proxy or a federated caller may add.
+// credential headers (sensitiveHeader) and the identity headers a
+// federated caller or a forwarding hub may add. The front proxy's identity
+// headers are removed on every port proxy surface
+// (stripFrontProxyIdentityHeaders).
 func portViewStrippedRequestHeader(k string) bool {
 	if sensitiveHeader(k) {
 		return true
 	}
 	switch strings.ToLower(k) {
-	case strings.ToLower(FederationTokenHeader), strings.ToLower(IAPAssertionHeader),
-		"x-forwarded-user-id", "x-forwarded-user-email", "x-forwarded-user-name", "x-forwarded-user-role",
-		"x-goog-authenticated-user-email", "x-goog-authenticated-user-id":
+	case strings.ToLower(FederationTokenHeader),
+		"x-forwarded-user-id", "x-forwarded-user-email", "x-forwarded-user-name", "x-forwarded-user-role":
 		return true
 	default:
 		return false

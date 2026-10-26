@@ -1205,3 +1205,36 @@ func TestPortView_IssuanceClosedServesPortLink(t *testing.T) {
 	served := f.send(t, http.MethodGet, view.String(), subHeader(), nil)
 	require.Equal(t, http.StatusOK, served.status, served.body)
 }
+
+// TestPortView_StripsFrontProxyAssertionHeaders: on the page view surface,
+// the front proxy's identity headers do not reach the agent's app: the
+// built-in names and the configured provider's own (non-default) header
+// name. Other headers do.
+func TestPortView_StripsFrontProxyAssertionHeaders(t *testing.T) {
+	const custom = "X-Custom-Assn"
+	f := newPortViewFixture(t, nil)
+	f.startAgent(t)
+	prev := f.srv.authConfig.ProxyAuthenticator
+	t.Cleanup(func() { f.srv.authConfig.ProxyAuthenticator = prev })
+	f.srv.authConfig.ProxyAuthenticator = configuredHeaderStubAuthenticator{header: custom}
+
+	for len(f.app.got) > 0 {
+		<-f.app.got
+	}
+	h := subHeader()
+	for _, name := range []string{custom, DefaultJWTHeader, IAPAssertionHeader, "X-Goog-Authenticated-User-Email", "X-Goog-Authenticated-User-Id"} {
+		h.Set(name, "assertion")
+	}
+	h.Set("X-Keep", "kept")
+	res := f.send(t, http.MethodGet, f.viewURL(f.ownerCap(), "probe"), h, nil)
+	require.Equal(t, http.StatusOK, res.status, res.body)
+	select {
+	case r := <-f.app.got:
+		for _, name := range []string{custom, DefaultJWTHeader, IAPAssertionHeader, "X-Goog-Authenticated-User-Email", "X-Goog-Authenticated-User-Id"} {
+			assert.Empty(t, r.Header.Values(name), "%s reached the app", name)
+		}
+		assert.Equal(t, "kept", r.Header.Get("X-Keep"))
+	case <-time.After(10 * time.Second):
+		t.Fatal("the request did not reach the app")
+	}
+}
