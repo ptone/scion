@@ -272,9 +272,10 @@ type ProvisionInput struct {
 	// URL: with HostCloneGitArgs ahead of the subcommand and
 	// GIT_ALLOW_PROTOCOL limited to HostCloneProtocols, so only the https,
 	// ssh and git transports can be used (no local path, file://, ext:: or
-	// other helper transport) and no hook, fsmonitor or pager runs. The hub
-	// sets it when it clones a project's shared workspace at create; the
-	// caller also checks the URL first (CheckHostCloneURL).
+	// other helper transport) and no hook, fsmonitor or pager runs. The hub,
+	// the broker and the Cloud Run runtime set it for their host-side
+	// clones. Independently of it, ProvisionShared refuses any GitClone.URL
+	// that CheckHostCloneURL refuses.
 	HostGitHardened bool
 
 	// NFSUID and NFSGID are the stable NFS ownership values (default 1000:1000).
@@ -503,6 +504,12 @@ func ProvisionShared(in ProvisionInput) error {
 	}
 	if in.ProjectID == "" {
 		return fmt.Errorf("ProvisionShared: ProjectID is required")
+	}
+	// The clone URL is checked before anything else, for every caller and
+	// also when the workspace is already provisioned: only an https, ssh or
+	// git URL is accepted.
+	if err := checkProvisionCloneURL(in); err != nil {
+		return fmt.Errorf("ProvisionShared: %w", err)
 	}
 
 	sentinelDir := resolveSentinelDir(in)
@@ -2842,8 +2849,11 @@ func removeCloneTempDirs(dir string) error {
 // rejected credential.
 func runGitClone(ctx context.Context, in ProvisionInput) error {
 	gc := in.GitClone
+	// A test's registered local fixture (AllowLocalCloneFixture) is cloned
+	// without the hardened settings, which refuse local paths.
+	hardened := in.HostGitHardened && !isLocalCloneFixture(gc.URL)
 	var args []string
-	if in.HostGitHardened {
+	if hardened {
 		args = append(args, HostCloneGitArgs()...)
 	} else {
 		// Non-hardened clones still carry the base host-side git pins unconditionally
@@ -2885,7 +2895,7 @@ func runGitClone(ctx context.Context, in ProvisionInput) error {
 	// http.followRedirects=false and the protocol allow list are applied as fixed
 	// args by HostCloneGitArgs when HostGitHardened (the hub project-create clone).
 	env := append(util.HostGitEnv(os.Environ()), "GIT_TERMINAL_PROMPT=0", "GIT_LFS_SKIP_SMUDGE=1")
-	if in.HostGitHardened {
+	if hardened {
 		env = append(env, "GIT_ALLOW_PROTOCOL="+HostCloneProtocols)
 	}
 	// Decide which token, if any, is offered. A project-supplied CloneToken is

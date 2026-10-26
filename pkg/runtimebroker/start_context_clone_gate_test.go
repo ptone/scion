@@ -1,0 +1,159 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package runtimebroker
+
+import (
+	"context"
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+)
+
+// recordProvisionSharedWorktree wraps provisionSharedWorktree (still the
+// real provision.ProvisionShared underneath) and records every input and
+// the error it returned.
+func recordProvisionSharedWorktree(t *testing.T) (*[]provision.ProvisionInput, *[]error) {
+	t.Helper()
+	var inputs []provision.ProvisionInput
+	var errs []error
+	orig := provisionSharedWorktree
+	provisionSharedWorktree = func(in provision.ProvisionInput) error {
+		err := orig(in)
+		inputs = append(inputs, in)
+		errs = append(errs, err)
+		return err
+	}
+	t.Cleanup(func() { provisionSharedWorktree = orig })
+	return &inputs, &errs
+}
+
+func requireWorktreeEligible(t *testing.T) {
+	t.Helper()
+	if eligible, reason := runtime.WorktreeModeEligible(); !eligible {
+		t.Fatalf("this test needs worktree mode (git 2.48 or later): %s", reason)
+	}
+}
+
+// unregisteredBareRepo returns a bare repository path that is not a
+// registered clone fixture.
+func unregisteredBareRepo(t *testing.T) string {
+	t.Helper()
+	bare := filepath.Join(t.TempDir(), "other.git")
+	if out, err := exec.Command("git", "init", "--bare", "-b", "main", bare).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %s", out)
+	}
+	return bare
+}
+
+func tryProvisionWorktreeWithURL(t *testing.T, srv *Server, projectPath, cloneURL string) (bool, error) {
+	t.Helper()
+	ok, _, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+		Name: "agent-1", AgentID: "agent-1",
+		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		Config:        &CreateAgentConfig{GitClone: &api.GitCloneConfig{URL: cloneURL, Branch: "main"}},
+	}, &api.StartOptions{}, map[string]string{}, srv.runtime.Name())
+	return ok, err
+}
+
+// The broker's host-side shared-base clone is hardened and its URL is
+// checked by provision.ProvisionShared: a local path, file://, http://, a
+// <transport>::<address> URL and a value starting with "-" are refused
+// before anything is cloned (the dispatch falls back to the in-container
+// clone), and every call is made with HostGitHardened set.
+func TestTryProvisionWorktree_RefusesHostCloneURLs(t *testing.T) {
+	requireWorktreeEligible(t)
+	bare := unregisteredBareRepo(t)
+	for name, cloneURL := range map[string]string{
+		"local path":   bare,
+		"file":         "file://" + bare,
+		"http":         "http://git.example.com/org/repo.git",
+		"transport":    "ext::sh -c touch% /tmp/x",
+		"leading dash": "--upload-pack=touch /tmp/x",
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := DefaultServerConfig()
+			cfg.StateDir = t.TempDir()
+			srv := newTestServerForStartContext(t, cfg)
+			inputs, errs := recordProvisionSharedWorktree(t)
+			projectPath := filepath.Join(t.TempDir(), "proj")
+			if err := os.MkdirAll(projectPath, 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			ok, err := tryProvisionWorktreeWithURL(t, srv, projectPath, cloneURL)
+			if err != nil || ok {
+				t.Fatalf("tryProvisionWorktree: ok=%v err=%v, want the clone-per-agent fallback", ok, err)
+			}
+			if len(*inputs) != 1 {
+				t.Fatalf("provisioning ran %d times, want 1", len(*inputs))
+			}
+			if !(*inputs)[0].HostGitHardened {
+				t.Error("the broker's host-side clone must be hardened (HostGitHardened)")
+			}
+			if !errors.Is((*errs)[0], provision.ErrHostCloneURLRefused) {
+				t.Errorf("provisioning error = %v, want the clone URL refused", (*errs)[0])
+			}
+			if _, statErr := os.Stat(filepath.Join(projectPath, "workspace", ".git")); !os.IsNotExist(statErr) {
+				t.Errorf("nothing may be cloned for a refused URL (stat .git: %v)", statErr)
+			}
+		})
+	}
+}
+
+// Pins HostGitHardened on the broker's provisioning input, both as built
+// and as passed to provision.ProvisionShared on a successful start.
+func TestTryProvisionWorktree_HostCloneHardened(t *testing.T) {
+	requireWorktreeEligible(t)
+	result := resolveWorktreeProvision(worktreeProvisionInput{
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		GitClone:      &api.GitCloneConfig{URL: "https://github.com/org/repo.git"},
+		ProjectPath:   t.TempDir(),
+		ProjectID:     "proj-1",
+		AgentID:       "agent-1",
+	})
+	if !result.ShouldProvision {
+		t.Fatalf("expected ShouldProvision, reason: %s", result.Reason)
+	}
+	if !result.ProvisionInput.HostGitHardened {
+		t.Error("resolveWorktreeProvision must set HostGitHardened")
+	}
+
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+	inputs, errs := recordProvisionSharedWorktree(t)
+	projectPath := filepath.Join(t.TempDir(), "proj")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := tryProvisionWorktreeWithURL(t, srv, projectPath, initBareRepoWithCommit(t))
+	if err != nil || !ok {
+		t.Fatalf("tryProvisionWorktree with a registered fixture: ok=%v err=%v", ok, err)
+	}
+	if len(*inputs) != 1 || (*errs)[0] != nil {
+		t.Fatalf("provisioning calls = %d, errors = %v", len(*inputs), *errs)
+	}
+	if !(*inputs)[0].HostGitHardened {
+		t.Error("the broker's host-side clone must be hardened (HostGitHardened)")
+	}
+}

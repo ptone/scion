@@ -216,7 +216,7 @@ func TestHostCloneGitArgs_PinsTransports(t *testing.T) {
 // a file:// URL is refused by git itself and populates nothing.
 func TestRunGitClone_HardenedRefusesLocalTransports(t *testing.T) {
 	isolateGitConfig(t)
-	bare := initBareGitRepo(t)
+	bare := newBareGitRepo(t)
 	depth := 0
 	for _, src := range []string{bare, "file://" + bare} {
 		dest := filepath.Join(t.TempDir(), "ws")
