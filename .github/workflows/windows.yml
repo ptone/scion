@@ -52,6 +52,16 @@ on:
   push:
     branches: [ main ]
 
+# One run per PR: a new push to the same PR cancels the superseded run, as
+# in ci.yml (same block; github.workflow is "Windows", so the group never
+# collides with ci.yml's). Runs on main are never cancelled: outside
+# pull_request the group is the unique run_id, not github.ref, because
+# GitHub cancels an older pending run in a shared group even when
+# cancel-in-progress is false.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
