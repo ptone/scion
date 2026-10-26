@@ -17,8 +17,11 @@
 package transfer
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"syscall"
 	"testing"
 )
@@ -34,9 +37,12 @@ func openTestRoot(t *testing.T, dir string) *os.Root {
 	return root
 }
 
-// A subdirectory replaced by a FIFO or a link between the walk reading its
-// entry and opening it fails the walk without blocking, in both users of the
-// walk; an unchanged tree walks normally.
+// A subdirectory replaced between the walk reading its entry and opening it
+// fails the walk without blocking, in both users of the walk: by a FIFO
+// (ENOTDIR, never opened); by a link (the trailing separator follows it, and
+// the SameFile check refuses it: ErrDirReplaced); by another directory inside
+// the root (only the SameFile check refuses it: ErrDirReplaced). An
+// unchanged tree walks normally.
 func TestWalkRoot_SubdirectorySwappedDuringWalk(t *testing.T) {
 	swaps := map[string]func(t *testing.T, p string){
 		"FIFO": func(t *testing.T, p string) {
@@ -56,6 +62,13 @@ func TestWalkRoot_SubdirectorySwappedDuringWalk(t *testing.T) {
 			if err := os.Symlink(outside, p); err != nil {
 				t.Error(err)
 			}
+		},
+		"replaced": func(t *testing.T, p string) {
+			moved := p + ".moved"
+			if err := os.Rename(p, moved); err != nil {
+				t.Error(err)
+			}
+			writeReadTestFile(t, p, "new.txt", "new\r\n")
 		},
 	}
 	walks := map[string]func(root *os.Root, dir string) error{
@@ -87,8 +100,11 @@ func TestWalkRoot_SubdirectorySwappedDuringWalk(t *testing.T) {
 				walkRootBeforeOpenDir.Store(&hook)
 				t.Cleanup(func() { walkRootBeforeOpenDir.Store(nil) })
 				within(t, func() {
-					if err := walk(root, dir); err == nil {
+					err := walk(root, dir)
+					if err == nil {
 						t.Errorf("%s succeeded with sub replaced by a %s during the walk", wname, sname)
+					} else if sname != "FIFO" && !errors.Is(err, ErrDirReplaced) {
+						t.Errorf("%s with sub replaced by a %s: err = %v, want ErrDirReplaced (the SameFile refusal)", wname, sname, err)
 					}
 				})
 			})
@@ -208,5 +224,125 @@ func TestNormalizeDir_LinkedDirectoryLeftAlone(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(filepath.Join(target, "a.txt")); string(got) != "x\r\n" {
 		t.Errorf("the target of a linked directory was normalized: %q", got)
+	}
+}
+
+// walkRoot follows fs.WalkDir's SkipDir and SkipAll rules: SkipDir from a
+// directory skips its contents, SkipDir from a file skips the rest of its
+// directory, and SkipAll ends the walk without an error.
+func TestWalkRoot_SkipSemanticsMatchWalkDir(t *testing.T) {
+	dir := t.TempDir()
+	for _, rel := range []string{"a/x", "a/y", "a/z", "b/w", "c/v", "d"} {
+		writeReadTestFile(t, dir, rel, rel)
+	}
+	for name, decide := range map[string]func(rel string) error{
+		"SkipDir from a directory": func(rel string) error {
+			if rel == "b" {
+				return fs.SkipDir
+			}
+			return nil
+		},
+		"SkipDir from a file": func(rel string) error {
+			if rel == "a/y" {
+				return fs.SkipDir
+			}
+			return nil
+		},
+		"SkipAll": func(rel string) error {
+			if rel == "b/w" {
+				return fs.SkipAll
+			}
+			return nil
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var want []string
+			werr := fs.WalkDir(os.DirFS(dir), ".", func(rel string, d fs.DirEntry, err error) error {
+				if err != nil || rel == "." {
+					return err
+				}
+				want = append(want, rel)
+				return decide(rel)
+			})
+			var got []string
+			gerr := walkRoot(openTestRoot(t, dir), func(rel string, d fs.DirEntry) error {
+				got = append(got, rel)
+				return decide(rel)
+			})
+			if werr != nil || gerr != nil {
+				t.Fatalf("errors: fs.WalkDir %v, walkRoot %v; want nil", werr, gerr)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("walkRoot visited %v, fs.WalkDir %v", got, want)
+			}
+		})
+	}
+}
+
+// The temporary file name is retried on a collision (O_EXCL): an existing
+// entry with the chosen name is never followed or overwritten, and the walk
+// gives up after normalizeTempTries collisions.
+func TestNormalizeRoot_TemporaryNameCollisionRetried(t *testing.T) {
+	setSuffixes := func(t *testing.T, names ...string) {
+		i := 0
+		orig := normalizeTempSuffix
+		normalizeTempSuffix = func() (string, error) {
+			n := names[len(names)-1]
+			if i < len(names) {
+				n = names[i]
+			}
+			i++
+			return n, nil
+		}
+		t.Cleanup(func() { normalizeTempSuffix = orig })
+	}
+	t.Run("one collision", func(t *testing.T) {
+		dir := t.TempDir()
+		writeReadTestFile(t, dir, "a.txt", "x\r\n")
+		writeReadTestFile(t, dir, ".scion-normalize.tmp-taken", "kept\n")
+		setSuffixes(t, "taken", "free")
+		if err := NormalizeRoot(openTestRoot(t, dir)); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := os.ReadFile(filepath.Join(dir, "a.txt")); string(got) != "x\n" {
+			t.Errorf("a.txt = %q, want normalized", got)
+		}
+		if got, _ := os.ReadFile(filepath.Join(dir, ".scion-normalize.tmp-taken")); string(got) != "kept\n" {
+			t.Errorf("the colliding entry was changed: %q", got)
+		}
+		if _, err := os.Lstat(filepath.Join(dir, ".scion-normalize.tmp-free")); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("the temporary file was left behind: %v", err)
+		}
+	})
+	t.Run("every name collides", func(t *testing.T) {
+		dir := t.TempDir()
+		writeReadTestFile(t, dir, "a.txt", "x\r\n")
+		writeReadTestFile(t, dir, ".scion-normalize.tmp-taken", "kept\n")
+		setSuffixes(t, "taken")
+		if err := NormalizeRoot(openTestRoot(t, dir)); !errors.Is(err, fs.ErrExist) {
+			t.Errorf("err = %v, want the collision error after %d tries", err, normalizeTempTries)
+		}
+		if got, _ := os.ReadFile(filepath.Join(dir, "a.txt")); string(got) != "x\r\n" {
+			t.Errorf("a.txt = %q, want unchanged", got)
+		}
+	})
+}
+
+// NormalizeDir on a regular file normalizes that file (binary extensions
+// excepted), as the walk by path did.
+func TestNormalizeDir_RegularFile(t *testing.T) {
+	dir := t.TempDir()
+	writeReadTestFile(t, dir, "a.txt", "x\r\n")
+	writeReadTestFile(t, dir, "b.png", "x\r\n")
+	for _, n := range []string{"a.txt", "b.png"} {
+		if err := NormalizeDir(filepath.Join(dir, n)); err != nil {
+			t.Fatalf("%s: %v", n, err)
+		}
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "a.txt")); string(got) != "x\n" {
+		t.Errorf("a.txt = %q, want normalized", got)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "b.png")); string(got) != "x\r\n" {
+		t.Errorf("b.png = %q, want unchanged (binary extension)", got)
 	}
 }

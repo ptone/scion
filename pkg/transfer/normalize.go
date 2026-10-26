@@ -72,15 +72,29 @@ var binaryExtensions = map[string]bool{
 }
 
 // NormalizeDir normalizes line endings (CRLF to LF) in place in the regular
-// text files under dir (NormalizeRoot). dir must be a directory and not a
-// link; a link or another non-directory is left alone, as the walk by path
-// that this replaces did. The directory is opened with a trailing path
-// separator, so a FIFO swapped in for it fails instead of blocking, and it
-// must be the directory the Lstat saw.
+// text files under dir (NormalizeRoot), as the walk by path it replaces did
+// for each kind of dir:
+//   - a directory (not a link) is opened with a trailing path separator, so
+//     a FIFO swapped in for it fails instead of blocking, must be the
+//     directory the Lstat saw, and is normalized through that root;
+//   - a regular file is normalized alone (unless its extension is a binary
+//     one), read and written through its parent directory's root;
+//   - a link or any other entry is left alone.
 func NormalizeDir(dir string) error {
 	before, err := os.Lstat(dir)
 	if err != nil {
 		return err
+	}
+	if before.Mode().IsRegular() {
+		if binaryExtensions[strings.ToLower(filepath.Ext(dir))] {
+			return nil
+		}
+		parent, err := os.OpenRoot(filepath.Dir(dir) + string(filepath.Separator))
+		if err != nil {
+			return err
+		}
+		defer func() { _ = parent.Close() }()
+		return normalizeRootFile(parent, filepath.Base(dir))
 	}
 	if !before.IsDir() {
 		return nil
@@ -103,6 +117,19 @@ func NormalizeDir(dir string) error {
 // normalizeBeforeRead, when set (tests only), runs in NormalizeRoot after a
 // file's entry was found to be a regular file and before it is opened.
 var normalizeBeforeRead atomic.Pointer[func(rel string)]
+
+// normalizeTempSuffix returns the random suffix of a temporary file name
+// (replaced in tests to force name collisions).
+var normalizeTempSuffix = func() (string, error) {
+	var rnd [8]byte
+	if _, err := rand.Read(rnd[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(rnd[:]), nil
+}
+
+// normalizeTempTries is how many temporary names are tried before giving up.
+const normalizeTempTries = 10
 
 // NormalizeRoot walks root (walkRoot) and normalizes line endings (CRLF to
 // LF) in place in its regular text files. Binary files (by extension or
@@ -154,17 +181,17 @@ func normalizeRootFile(root *os.Root, rel string) error {
 	// symlink, so the temporary file gets a random name and O_EXCL.
 	var tmp *os.File
 	var tmpRel string
-	for try := 0; ; try++ {
-		var rnd [8]byte
-		if _, err := rand.Read(rnd[:]); err != nil {
+	for try := 1; ; try++ {
+		suffix, err := normalizeTempSuffix()
+		if err != nil {
 			return err
 		}
-		tmpRel = filepath.Join(filepath.Dir(rel), ".scion-normalize.tmp-"+hex.EncodeToString(rnd[:]))
+		tmpRel = filepath.Join(filepath.Dir(rel), ".scion-normalize.tmp-"+suffix)
 		tmp, err = root.OpenFile(tmpRel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err == nil {
 			break
 		}
-		if !errors.Is(err, fs.ErrExist) || try >= 9 {
+		if !errors.Is(err, fs.ErrExist) || try >= normalizeTempTries {
 			return err
 		}
 	}

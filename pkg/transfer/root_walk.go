@@ -35,8 +35,10 @@ var walkRootBeforeOpenDir atomic.Pointer[func(rel string)]
 
 // walkRoot walks the tree of root depth-first in lexical order, calling fn
 // for every entry below the root (rel is slash-separated, never "."), in the
-// manner of fs.WalkDir. If fn returns fs.SkipDir for a directory, the walk
-// does not descend into it; any other error stops the walk and is returned.
+// manner of fs.WalkDir: if fn returns fs.SkipDir for a directory, the walk
+// does not descend into it; fs.SkipDir for a non-directory skips the rest of
+// that entry's directory; fs.SkipAll stops the walk and walkRoot returns nil;
+// any other error stops the walk and is returned.
 //
 // Each subdirectory is opened through root with a trailing path separator,
 // so the kernel resolves it as a directory: a FIFO or other non-directory
@@ -51,7 +53,10 @@ func walkRoot(root *os.Root, fn func(rel string, d fs.DirEntry) error) error {
 	if err != nil {
 		return err
 	}
-	return walkRootDir(root, ".", f, fn)
+	if err := walkRootDir(root, ".", f, fn); err != nil && !errors.Is(err, fs.SkipAll) {
+		return err
+	}
+	return nil
 }
 
 // walkRootDir reads the open directory f (rel, already checked) and walks
@@ -69,8 +74,11 @@ func walkRootDir(root *os.Root, rel string, f *os.File, fn func(rel string, d fs
 			child = path.Join(rel, e.Name())
 		}
 		if err := fn(child, e); err != nil {
-			if errors.Is(err, fs.SkipDir) && e.IsDir() {
-				continue
+			if errors.Is(err, fs.SkipDir) {
+				if e.IsDir() {
+					continue
+				}
+				return nil // skip the rest of this directory
 			}
 			return err
 		}
