@@ -41,7 +41,7 @@ PR 2 (Windows CLI phase 4) follow-up items, one commit each.
    every listed package fails the job if any test binary other than
    `cmd.test` depends on `pkg/hub`. Planted `./pkg/integration/runtime`
    (links pkg/hub) and `./pkg/brokerregistration` (links it only through its
-   tests) both fail it; the real list passes (92 test binaries).
+   tests) both fail it; the real list passes (91 test binaries).
 
 10. `./pkg/runtime` left off the Windows list (EM decision): its test
     package does not build for Windows. Eight untagged test files use

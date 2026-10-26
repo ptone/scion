@@ -114,8 +114,9 @@ jobs:
       # pkg/hub; the guard above sees only ./pkg/hub lines. One compile-free
       # go list over every listed package prints each test binary (the
       # <pkg>.test main package) with its full dependency list; a test
-      # binary that depends on pkg/hub (plain, or recompiled for that test)
-      # fails the job. ./cmd is the one documented exception: its test
+      # binary that depends on pkg/hub fails the job (a pkg/hub recompiled
+      # for that test prints as "pkg/hub [x.test]"; awk splits on spaces, so
+      # its first word matches too). ./cmd is the one documented exception: its test
       # binary links pkg/hub production code (never pkg/hub's tests).
       - name: Allowlist guard (no test binary links pkg/hub)
         shell: bash
@@ -127,7 +128,7 @@ jobs:
           mod=github.com/GoogleCloudPlatform/scion
           bad=$(printf '%s\n' "$deps" | awk -v hub="$mod/pkg/hub" -v exempt="$mod/cmd.test" '
             $1 ~ /\.test$/ && $1 != exempt {
-              for (i = 2; i <= NF; i++) if ($i == hub || index($i, hub " [") == 1) { print $1; break }
+              for (i = 2; i <= NF; i++) if ($i == hub) { print $1; break }
             }')
           if [ -n "$bad" ]; then
             printf '::error::%s lists a package whose test binary links pkg/hub: %s\n' "$list" $bad; exit 1
