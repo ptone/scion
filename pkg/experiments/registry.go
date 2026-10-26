@@ -151,6 +151,13 @@ const AttachmentArtifacts = "hub.attachment_artifacts"
 // the delivery sweeper, which holds pending messages while it is off.
 const ChatScheduledSend = "web.chat_scheduled_send"
 
+// ChatStarredMessages gates starred messages in native web chat: the
+// message Star/Unstar action, the private starred indicator and the
+// conversation header's starred-message list in the web UI, and the hub's
+// /api/v1/chat/stars routes (404 while off). Stored stars are kept while
+// it is off.
+const ChatStarredMessages = "web.chat_starred_messages"
+
 // AuthorizationDecisionAuditV2 gates decision logging (remaining-audit P1).
 // It is the only activation control and stays default-off; turning it on
 // needs explicit owner approval.
@@ -187,8 +194,10 @@ const AgentEditHeld = "hub.agent_edit_held"
 const AgentDelegation = "hub.agent_delegation"
 
 // FederationProjectVisitors gates project access for users of trusted
-// external issuers (ptone/scion#4603). While it is off, a verified
-// federated user token always yields the same federated user identity as
+// external issuers (ptone/scion#4603). It has both layers: the web layer
+// shows the project Visitors tab and the per-issuer visitor access switch,
+// and the server layer gates the hub behaviour below. While it is off, a
+// verified federated user token always yields the same federated user identity as
 // before; while it is on, a token whose (issuer, subject) is linked to an
 // active federated account yields that account's visitor identity. It also
 // gates POST /api/v1/auth/federation-token (404 while off), where this
@@ -256,6 +265,12 @@ const SecretRotation = "server.secret_rotation"
 // ptone/scion#5995 makes it the default and removes the gate.
 const ContentHashV2 = "hub.content_hash_v2"
 
+// ArtifactReviewEditor gates the graphical review editor for Markdown
+// artifacts (ptone/scion#5913). It is web-only: every save goes through the
+// unchanged review publish, and the hub's review checks are the same
+// whether or not it is on.
+const ArtifactReviewEditor = "web.artifact_review_editor"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
@@ -285,9 +300,9 @@ var compiled = []Experiment{
 	{
 		Name:        FederationProjectVisitors,
 		Title:       "Project visitors from trusted issuers",
-		Description: "Lets a user of a trusted external issuer who is linked to a local federated account act as that account (a project visitor), and lets this hub's users obtain short-lived user access credentials for the peer hubs in server.oidc.user_token_audiences, and accepts user access credentials from peer hub issuers that have accept_user_tokens. While off, federated user tokens behave exactly as before, no user access credentials are issued, no user access credentials are accepted from peer hubs, and stored accounts are kept.",
+		Description: "Lets a user of a trusted external issuer who is linked to a local federated account act as that account (a project visitor), and lets this hub's users obtain short-lived user access credentials for the peer hubs in server.oidc.user_token_audiences, and accepts user access credentials from peer hub issuers that have accept_user_tokens. While off, federated user tokens behave exactly as before, no user access credentials are issued, no user access credentials are accepted from peer hubs, and stored accounts are kept. Web layer: shows the project Visitors tab and the visitor access switch on Admin > Federation. Server layer: the project visitor grant and rule routes (404 while off), visitor identities and user access credentials; the hub checks it on every request, whatever the UI shows.",
 		Default:     false,
-		Layers:      []Layer{LayerServer},
+		Layers:      []Layer{LayerWeb, LayerServer},
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#4603",
 		Owner:       "federation",
@@ -396,6 +411,17 @@ var compiled = []Experiment{
 		ReviewBy:    "2027-01-31",
 	},
 	{
+		Name:        ChatStarredMessages,
+		Title:       "Starred messages in chat",
+		Description: "Lets each user star chat messages privately and find them again from the conversation header. Gates the Star message action, the starred indicator and the header list (LayerWeb) and the hub's starred-message routes, which answer 404 while it is off (LayerServer). Stars are stored per user and are never shown to anyone else; turning it off keeps them.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb, LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#5797",
+		Owner:       "native-chat",
+		ReviewBy:    "2027-01-31",
+	},
+	{
 		Name:        AgentEdit,
 		Title:       "Edit agent",
 		Description: "On the Edit agent page, adds a view that groups the fields by when an edit applies (next start or resume, held, needs a reincarnation, immediately, fixed) and a summary strip counting them. The page and its by-function view are always available.",
@@ -438,6 +464,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#5235",
 		Owner:       "web",
 		ReviewBy:    "2027-01-22",
+	},
+	{
+		Name:        ArtifactReviewEditor,
+		Title:       "Graphical review editor",
+		Description: "Opens a Markdown artifact review in a graphical editor that shows marks inline, records typing, deleting and replacing as suggestions, and has a Graphical and Source toggle. Needs hub.artifacts. Web only; the hub saves and checks reviews the same way whether or not it is on. Do not turn it on before the page script policy (ptone/scion#5912) is deployed on the hub.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#5913",
+		Owner:       "artifacts",
+		ReviewBy:    "2027-01-21",
 	},
 	{
 		Name:        AgentPlugins,

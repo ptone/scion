@@ -92,7 +92,8 @@ type HubServerConfig struct {
 	// Defaults to sha256(hostname)[:12] if not set.
 	HubID string `json:"hubId" yaml:"hubId" koanf:"hubId"`
 
-	// HubName is a human-readable display name for this hub in HA deployments.
+	// HubName names this hub in HA deployments: a lowercase DNS label
+	// (HubNamePattern) used in log labels, telemetry and secret labels.
 	// All nodes in a cluster should share the same hub_name.
 	// Defaults to os.Hostname() if not set.
 	HubName string `json:"hubName,omitempty" yaml:"hubName,omitempty" koanf:"hubName"`
@@ -177,6 +178,11 @@ type HubServerConfig struct {
 	// authorization store-call and decision-audit counts, DB pool waits).
 	// Off by default; observe only; read at startup.
 	PerfTrace bool `json:"perfTrace" yaml:"perfTrace" koanf:"perfTrace"`
+
+	// CSPReportRawSamples adds each browser policy report's sample to its
+	// csp_violation log record. Off by default (a sample can hold page
+	// content); for diagnosis; read at startup.
+	CSPReportRawSamples bool `json:"cspReportRawSamples" yaml:"cspReportRawSamples" koanf:"cspReportRawSamples"`
 
 	// MembershipSweepReportOnly puts the membership-standing sweep in
 	// report-only mode: it logs and audits the agents it would hold and
@@ -1219,6 +1225,20 @@ type GlobalConfig struct {
 	// project workspaces. Nil or Backend=="" / "local" preserves the legacy
 	// node-local behavior. Populated from server.workspace_storage in settings.yaml.
 	WorkspaceStorage *V1WorkspaceStorageConfig `json:"-" yaml:"-" koanf:"-"`
+
+	// ProjectStorage is server.project_storage as written (file, then
+	// SCION_SERVER_PROJECT_STORAGE_* env). SharedDirStorage and HomeStorage
+	// are server.shared_dir_storage and server.home_storage from the file
+	// only. ResolveProjectStorage turns the four blocks into the one block
+	// the hub uses.
+	ProjectStorage   *V1ProjectStorageConfig   `json:"-" yaml:"-" koanf:"-"`
+	SharedDirStorage *V1SharedDirStorageConfig `json:"-" yaml:"-" koanf:"-"`
+	HomeStorage      *V1HomeStorageConfig      `json:"-" yaml:"-" koanf:"-"`
+	// EffectiveProjectStorage is the block ResolveGlobalProjectStorage
+	// returned at hub startup; nil means the local backend.
+	EffectiveProjectStorage *V1ProjectStorageConfig `json:"-" yaml:"-" koanf:"-"`
+	// EffectiveProjectStorageWarnings are that resolution's warnings.
+	EffectiveProjectStorageWarnings []string `json:"-" yaml:"-" koanf:"-"`
 
 	// NativeChat controls the built-in chat feature. Nil (absent) means
 	// enabled. Populated from server.native_chat in settings.yaml.
@@ -2339,6 +2359,7 @@ type globalConfigEnvOverlay struct {
 	DefaultGCPIdentityServiceAccountID *string `koanf:"default_gcp_identity_service_account_id"`
 	Server                             struct {
 		WorkspaceStorage *V1WorkspaceStorageConfig `koanf:"workspace_storage"`
+		ProjectStorage   *V1ProjectStorageConfig   `koanf:"project_storage"`
 		NativeChat       *V1NativeChatConfig       `koanf:"native_chat"`
 	} `koanf:"server"`
 }
@@ -2362,12 +2383,14 @@ func applyEnvToOutsideKoanfFields(gc *GlobalConfig) error {
 	var ov globalConfigEnvOverlay
 	ov.Telemetry = gc.TelemetryConfig
 	ov.Server.WorkspaceStorage = gc.WorkspaceStorage
+	ov.Server.ProjectStorage = gc.ProjectStorage
 	ov.Server.NativeChat = gc.NativeChat
 	if err := k.Unmarshal("", &ov); err != nil {
 		return fmt.Errorf("SCION_SERVER_* environment: %w", err)
 	}
 	gc.TelemetryConfig = ov.Telemetry
 	gc.WorkspaceStorage = ov.Server.WorkspaceStorage
+	gc.ProjectStorage = ov.Server.ProjectStorage
 	gc.NativeChat = ov.Server.NativeChat
 	if v := ov.ProjectDefaults.DefaultScratchpad; v != nil {
 		gc.DefaultScratchpad = v
@@ -2466,7 +2489,7 @@ func LoadServerMode() string {
 	}
 
 	var raw map[string]interface{}
-	if err := yamlv3.Unmarshal(data, &raw); err != nil {
+	if err := unmarshalSettingsYAML(data, &raw); err != nil {
 		return ""
 	}
 
@@ -2561,7 +2584,7 @@ func readSettingsFileRaw(dir string) (map[string]interface{}, bool) {
 		return nil, false
 	}
 	var raw map[string]interface{}
-	if err := yamlv3.Unmarshal(data, &raw); err != nil {
+	if err := unmarshalSettingsYAML(data, &raw); err != nil {
 		return nil, false
 	}
 	return raw, true
