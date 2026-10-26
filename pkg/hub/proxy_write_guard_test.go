@@ -109,6 +109,13 @@ func TestProxyWriteGuard_PortViewExemptOnlyForPageViewRequests(t *testing.T) {
 		"/api/v1/portview//api/ping",
 		"/api/v1/portview/CAP%2F/api/ping",
 		"/api/v1/portview/CA%25P/api/ping",
+		// Encoded separators and dots in either case, where the decoded
+		// path is clean, so only the escaped form decides.
+		"/api/v1/portview/CAP%2f/api/ping",
+		"/api/v1/portview/CAP/app%2ejs",
+		"/api/v1/portview/CAP/app%2Ejs",
+		"/api/v1/portview/CAP/a%5cb",
+		"/api/v1/portview/CAP/a%5Cb",
 	} {
 		code, reached := doGuardBody(proxyAuthMode, http.MethodPost, path, "hello", cross)
 		if reached || code != http.StatusForbidden {
