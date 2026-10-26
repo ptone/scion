@@ -85,10 +85,10 @@ func TestBootstrapHarnessConfigsFromDir_LinkedConfigYAMLNotLoaded(t *testing.T) 
 	}
 }
 
-// A1 on the import path: a harness-config directory admitted for import
-// (here directly, past discovery) whose config.yaml is a link, with a name
-// from which a harness can be inferred, is refused at the commit and not
-// stored, active or otherwise.
+// On the import path, a harness-config directory admitted for import (here
+// directly, past discovery) whose config.yaml is a link, with a name from
+// which a harness can be inferred, is refused at the commit and not stored,
+// active or otherwise.
 func TestHarnessConfigImport_LinkedConfigYAMLRefusedPastDiscovery(t *testing.T) {
 	srv, s, _ := testTemplateBootstrapServer(t)
 	parent := localLinkedConfigYAMLTree(t)

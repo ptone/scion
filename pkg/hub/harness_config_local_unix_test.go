@@ -21,7 +21,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
@@ -53,6 +56,55 @@ func localLinkedConfigYAMLTree(t *testing.T) string {
 		t.Fatalf("fixture: the link target does not load: %v", err)
 	}
 	return parent
+}
+
+// localInRootLinkDir returns a harness-config directory whose config.yaml
+// and agent-plugins.yaml are links to files INSIDE the directory: os.Root
+// would resolve them, so only the regular-file check refuses them. The
+// config.yaml target is valid and names the config inroot-cfg; the sidecar
+// target is invalid, so a reader that followed it records it.
+func localInRootLinkDir(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(writeCollectedTestTree(t, map[string]string{
+		"claude-inroot/home/real.yaml": "harness: claude\nname: inroot-cfg\n",
+		"claude-inroot/home/side.yaml": "{{ not yaml",
+	}), "claude-inroot")
+	if err := os.Symlink("home/real.yaml", filepath.Join(dir, "config.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("home/side.yaml", filepath.Join(dir, config.AgentPluginsSidecarFile)); err != nil {
+		t.Fatal(err)
+	}
+	// The unconfined loader follows both links.
+	if hc, err := config.LoadHarnessConfigDir(dir); err != nil || hc.Name != "inroot-cfg" || hc.Config.AgentPluginsSidecar == nil {
+		t.Fatalf("fixture: the unconfined loader did not follow the in-root links (%+v, %v)", hc, err)
+	}
+	return dir
+}
+
+// mkfifoOrSkip makes a FIFO at p, or skips the test where FIFOs are not
+// supported.
+func mkfifoOrSkip(t *testing.T, p string) {
+	t.Helper()
+	if err := syscall.Mkfifo(p, 0o600); err != nil {
+		t.Skipf("mkfifo: %v", err)
+	}
+}
+
+// returnsPromptly fails the test if fn does not return within 5 s (a read
+// that blocked on a FIFO).
+func returnsPromptly(t *testing.T, fn func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("call blocked on a FIFO")
+	}
 }
 
 func TestIsHarnessConfigDir_DoesNotFollowLinkedConfigYAML(t *testing.T) {
@@ -93,11 +145,63 @@ func TestLoadLocalHarnessConfigDir(t *testing.T) {
 		if !errors.Is(err, errNotRegularLocalFile) {
 			t.Errorf("error = %v, want the not-a-regular-file refusal", err)
 		}
-	})
-	t.Run("missing config.yaml fails", func(t *testing.T) {
-		if _, err := loadLocalHarnessConfigDir(filepath.Join(parent, "claude-other")); err == nil {
-			t.Fatal("loaded a directory whose config.yaml is a directory")
+		if msg := err.Error(); !strings.Contains(msg, "config.yaml is a link or not a regular file") || strings.Contains(msg, "does not exist") {
+			t.Errorf("error message %q: want it to say the file is a link or not a regular file, not that it does not exist", msg)
 		}
+	})
+	t.Run("config.yaml that is a directory fails", func(t *testing.T) {
+		_, err := loadLocalHarnessConfigDir(filepath.Join(parent, "claude-other"))
+		if !errors.Is(err, errNotRegularLocalFile) {
+			t.Fatalf("error = %v, want the not-a-regular-file refusal", err)
+		}
+	})
+	t.Run("in-root linked config.yaml fails", func(t *testing.T) {
+		hc, err := loadLocalHarnessConfigDir(localInRootLinkDir(t))
+		if !errors.Is(err, errNotRegularLocalFile) {
+			t.Fatalf("loaded %+v, err %v; want the not-a-regular-file refusal", hc, err)
+		}
+	})
+	t.Run("in-root linked sidecar reads as absent", func(t *testing.T) {
+		dir := localInRootLinkDir(t)
+		if err := os.Remove(filepath.Join(dir, "config.yaml")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("harness: claude\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got, err := loadLocalHarnessConfigDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Config.AgentPluginsSidecar != nil {
+			t.Errorf("the in-root linked sidecar was read: %+v", got.Config.AgentPluginsSidecar)
+		}
+	})
+	t.Run("FIFO config.yaml fails without blocking", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "claude-fifo")
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		mkfifoOrSkip(t, filepath.Join(dir, "config.yaml"))
+		returnsPromptly(t, func() {
+			if _, err := loadLocalHarnessConfigDir(dir); !errors.Is(err, errNotRegularLocalFile) {
+				t.Errorf("error = %v, want the not-a-regular-file refusal", err)
+			}
+		})
+	})
+	t.Run("FIFO sidecar reads as absent without blocking", func(t *testing.T) {
+		dir := filepath.Join(writeCollectedTestTree(t, map[string]string{"claude-fifo/config.yaml": "harness: claude\n"}), "claude-fifo")
+		mkfifoOrSkip(t, filepath.Join(dir, config.AgentPluginsSidecarFile))
+		returnsPromptly(t, func() {
+			got, err := loadLocalHarnessConfigDir(dir)
+			if err != nil {
+				t.Errorf("load: %v", err)
+				return
+			}
+			if got.Config.AgentPluginsSidecar != nil {
+				t.Errorf("the FIFO sidecar was read: %+v", got.Config.AgentPluginsSidecar)
+			}
+		})
 	})
 	t.Run("linked directory fails", func(t *testing.T) {
 		link := filepath.Join(t.TempDir(), "claude-dirlink")
@@ -181,6 +285,29 @@ func TestDiscoverResourceDirs_LinkedHarnessConfigYAMLNotFollowed(t *testing.T) {
 			t.Errorf("dirs = %+v, want claude-linked not named from the link target", dirs)
 		}
 	})
+	t.Run("child name is not bound from the link target", func(t *testing.T) {
+		// Admit every child but not the parent, so the children's name
+		// binding is tested (the parent stays a parent, not a leaf).
+		admitChildren := kind
+		admitChildren.isResourceDir = func(d string) bool { return d != parent }
+		dirs, _, err := discoverResourceDirs(parent, "", admitChildren)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, rd := range dirs {
+			if rd.path != filepath.Join(parent, "claude-linked") {
+				continue
+			}
+			found = true
+			if rd.name != "claude-linked" || rd.nameFromConfig {
+				t.Errorf("child %+v: want claude-linked, not named from the link target", rd)
+			}
+		}
+		if !found {
+			t.Errorf("dirs = %+v, want the claude-linked child admitted", dirs)
+		}
+	})
 }
 
 // The import's store selection and provisioner check do not read a linked
@@ -195,5 +322,18 @@ func TestHarnessConfigImportKind_LinkedConfigYAMLNotRead(t *testing.T) {
 	}
 	if err := kind.checkContent([]resourceDir{linked}); err != nil {
 		t.Errorf("checkContent read the linked config.yaml: %v", err)
+	}
+}
+
+// The reimport's store selection loads config.yaml confined to the
+// directory: a linked config.yaml is refused, a regular one is accepted.
+func TestReimportHarnessConfigNewStore_LinkedConfigYAMLRefused(t *testing.T) {
+	parent := localLinkedConfigYAMLTree(t)
+	newStore := (&Server{}).reimportHarnessConfigNewStore("hc-target")
+	if _, err := newStore(filepath.Join(parent, "claude-linked")); !errors.Is(err, errNotRegularLocalFile) {
+		t.Errorf("linked config.yaml: err = %v, want the not-a-regular-file refusal", err)
+	}
+	if rs, err := newStore(filepath.Join(parent, "claude-real")); err != nil || rs == nil {
+		t.Errorf("regular config.yaml: store %v, err %v; want a store", rs, err)
 	}
 }

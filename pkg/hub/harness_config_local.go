@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -22,85 +23,63 @@ import (
 	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
 // The harness-config bootstrap and import read a directory's config.yaml
 // before the directory is collected: to pick the harness for the store, to
 // bind the import name, and to check the provisioner. These reads follow the
 // collection's rules, so they never see content the collection would not
-// record: the directory must be a real directory (not a link), each file is
-// read only if it is a regular file (Lstat, so a link reads as absent), and
-// it is read through an os.Root opened at the directory, so nothing outside
-// the directory is opened.
+// record: the directory must be a real directory, not a link
+// (openRealDirRoot, shared with collectFiles), and each file is read only if
+// it is a regular file, through an os.Root opened at the directory
+// (transfer.OpenRegularFile, shared with transfer.OpenCollectedFile), so a
+// link reads as absent and nothing outside the directory is opened.
 
-// errNotRegularLocalFile reports a harness-config file that is a link or not
-// a regular file. It wraps fs.ErrNotExist: such a file reads as absent, as it
-// does in the collected set.
-var errNotRegularLocalFile = fmt.Errorf("a link or not a regular file: %w", fs.ErrNotExist)
+// errNotRegularLocalFile is the sentinel for a harness-config file that is a
+// link or not a regular file; errors.Is matches it on notRegularLocalFile.
+var errNotRegularLocalFile = errors.New("a link or not a regular file")
 
-// openLocalHarnessConfigDir opens an os.Root at dir after checking that dir
-// is a real directory (not a link) and that the root is that directory.
-func openLocalHarnessConfigDir(dir string) (*os.Root, error) {
-	before, err := os.Lstat(dir)
-	if err != nil {
-		return nil, fmt.Errorf("harness-config directory not found: %w", err)
-	}
-	if before.Mode()&fs.ModeSymlink != 0 {
-		return nil, fmt.Errorf("harness-config directory %s is a link", dir)
-	}
-	if !before.IsDir() {
-		return nil, fmt.Errorf("harness-config path is not a directory: %s", dir)
-	}
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		return nil, err
-	}
-	at, err := root.Stat(".")
-	if err != nil {
-		_ = root.Close()
-		return nil, err
-	}
-	if !os.SameFile(before, at) {
-		_ = root.Close()
-		return nil, fmt.Errorf("harness-config directory %s changed while it was opened", dir)
-	}
-	return root, nil
+// notRegularLocalFile reports a harness-config file that is a link or not a
+// regular file. Such a file reads as absent, as in the collected set, so
+// errors.Is matches fs.ErrNotExist as well as errNotRegularLocalFile; the
+// message says what the file is.
+type notRegularLocalFile struct{ name string }
+
+func (e *notRegularLocalFile) Error() string {
+	return e.name + " is a link or not a regular file"
 }
 
-// readLocalHarnessConfigRootFile reads the top-level file name through root.
-// A file that is a link or not a regular file reads as absent
-// (errNotRegularLocalFile), and so does one replaced after the Lstat.
+func (e *notRegularLocalFile) Is(target error) bool {
+	return target == errNotRegularLocalFile || target == fs.ErrNotExist
+}
+
+// readLocalHarnessConfigRootFile reads the top-level file name through root
+// with transfer.OpenRegularFile: Lstat, a non-blocking open (a FIFO swapped
+// in after the Lstat does not block), then fstat and SameFile on the opened
+// file. A link or another non-regular file reads as absent
+// (notRegularLocalFile). A file replaced between the Lstat and the open
+// fails the read.
 func readLocalHarnessConfigRootFile(root *os.Root, name string) ([]byte, error) {
-	fi, err := root.Lstat(name)
+	f, _, err := transfer.OpenRegularFile(root, name)
+	if errors.Is(err, transfer.ErrNotRegularFile) {
+		return nil, &notRegularLocalFile{name: name}
+	}
 	if err != nil {
 		return nil, err
 	}
-	if !fi.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s: %w", name, errNotRegularLocalFile)
-	}
-	f, err := root.Open(name)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	opened, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if !opened.Mode().IsRegular() || !os.SameFile(fi, opened) {
-		return nil, fmt.Errorf("%s: %w", name, errNotRegularLocalFile)
-	}
+	defer func() { _ = f.Close() }()
 	return io.ReadAll(f)
 }
 
 // readLocalHarnessConfigFile reads the top-level file name of the
 // harness-config directory dir, confined as described above.
 func readLocalHarnessConfigFile(dir, name string) ([]byte, error) {
-	root, err := openLocalHarnessConfigDir(dir)
+	root, _, err := openRealDirRoot(dir, nil)
 	if err != nil {
 		return nil, err
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	return readLocalHarnessConfigRootFile(root, name)
 }
 
@@ -113,11 +92,11 @@ func loadLocalHarnessConfigDir(dir string) (*config.HarnessConfigDir, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve path: %w", err)
 	}
-	root, err := openLocalHarnessConfigDir(absPath)
+	root, _, err := openRealDirRoot(absPath, nil)
 	if err != nil {
 		return nil, err
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	return config.LoadHarnessConfigFromFiles(filepath.Base(absPath), absPath, func(name string) ([]byte, error) {
 		return readLocalHarnessConfigRootFile(root, name)
 	})

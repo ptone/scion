@@ -223,35 +223,20 @@ func (rs *ResourceStore) requireConfigName() {
 // within's root has at rs.withinPath, reached without following a link.
 // The caller must close the root (cd.root).
 func (rs *ResourceStore) collectFiles(dir string) (*collectedDir, error) {
-	before, err := os.Lstat(dir)
+	var files []transfer.FileInfo
+	root, at, err := openRealDirRoot(dir, func() error {
+		var err error
+		files, err = transfer.CollectFiles(dir, rs.excludePatterns)
+		if err != nil {
+			return err
+		}
+		if hook := afterCollectHook.Load(); hook != nil {
+			(*hook)(dir)
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
-	}
-	if before.Mode()&os.ModeSymlink != 0 {
-		return nil, fmt.Errorf("%s is a link, not a directory", dir)
-	}
-	if !before.IsDir() {
-		return nil, fmt.Errorf("%s is not a directory", dir)
-	}
-	files, err := transfer.CollectFiles(dir, rs.excludePatterns)
-	if err != nil {
-		return nil, err
-	}
-	if hook := afterCollectHook.Load(); hook != nil {
-		(*hook)(dir)
-	}
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		return nil, fmt.Errorf("open collected dir: %w", err)
-	}
-	at, err := root.Stat(".")
-	if err != nil {
-		_ = root.Close()
-		return nil, fmt.Errorf("stat collected dir: %w", err)
-	}
-	if !os.SameFile(before, at) {
-		_ = root.Close()
-		return nil, fmt.Errorf("%s %w", dir, errCollectedDirChanged)
 	}
 	if rs.within != nil {
 		if err := rs.checkWithin(at, dir); err != nil {
@@ -260,6 +245,44 @@ func (rs *ResourceStore) collectFiles(dir string) (*collectedDir, error) {
 		}
 	}
 	return newCollectedDir(dir, root, files), nil
+}
+
+// openRealDirRoot opens an os.Root at dir, which must be a directory and
+// not a link (os.Lstat), after running between (for example the
+// collection). The root must be opened at the same directory the Lstat saw
+// (os.SameFile with root.Stat(".")); a directory replaced in between fails
+// with errCollectedDirChanged. It returns the root, which the caller must
+// close, and the directory's FileInfo as seen through the root.
+func openRealDirRoot(dir string, between func() error) (*os.Root, os.FileInfo, error) {
+	before, err := os.Lstat(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	if before.Mode()&os.ModeSymlink != 0 {
+		return nil, nil, fmt.Errorf("%s is a link, not a directory", dir)
+	}
+	if !before.IsDir() {
+		return nil, nil, fmt.Errorf("%s is not a directory", dir)
+	}
+	if between != nil {
+		if err := between(); err != nil {
+			return nil, nil, err
+		}
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open dir root %s: %w", dir, err)
+	}
+	at, err := root.Stat(".")
+	if err != nil {
+		_ = root.Close()
+		return nil, nil, fmt.Errorf("stat dir root %s: %w", dir, err)
+	}
+	if !os.SameFile(before, at) {
+		_ = root.Close()
+		return nil, nil, fmt.Errorf("%s %w", dir, errCollectedDirChanged)
+	}
+	return root, at, nil
 }
 
 // checkWithin requires got (the directory dir, as stat'ed) to be the
