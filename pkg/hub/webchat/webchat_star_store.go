@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hub
+package webchat
 
 import (
 	"context"
@@ -105,8 +105,8 @@ type StarredMessageRef struct {
 	ConversationID  string
 }
 
-// matches reports whether ref is in the history scope of sel.
-func (ref StarredMessageRef) matches(sel StarSelector) bool {
+// Matches reports whether ref is in the history scope of sel.
+func (ref StarredMessageRef) Matches(sel StarSelector) bool {
 	if ref.ConversationKey != sel.ConversationKey {
 		return false
 	}
@@ -120,7 +120,7 @@ func (ref StarredMessageRef) matches(sel StarSelector) bool {
 }
 
 // MessageStarStore persists starred messages. Both webchat store dialects
-// implement it; obtain it with messageStarStoreFrom. Every method takes
+// implement it; obtain it with MessageStarStoreFrom. Every method takes
 // the owner's user ID and matches it, so one user can never read or
 // change another user's association.
 type MessageStarStore interface {
@@ -145,9 +145,9 @@ type MessageStarStore interface {
 	ListStarredMessageIDs(ctx context.Context, userID string, messageIDs []string) ([]StarredMessageRef, error)
 }
 
-// messageStarStoreFrom returns the star store behind a webchat store, or
+// MessageStarStoreFrom returns the star store behind a webchat store, or
 // nil when it has none (test doubles that did not opt in).
-func messageStarStoreFrom(wcs WebChatStore) MessageStarStore {
+func MessageStarStoreFrom(wcs WebChatStore) MessageStarStore {
 	if mss, ok := wcs.(MessageStarStore); ok {
 		return mss
 	}
@@ -158,22 +158,22 @@ func messageStarStoreFrom(wcs WebChatStore) MessageStarStore {
 // the creation of webchat_message_star.
 const messageStarTableMigration = "message_star_table"
 
-// starTimePrecision is the stored precision of starred_at in both
+// StarTimePrecision is the stored precision of starred_at in both
 // dialects (PostgreSQL TIMESTAMPTZ keeps microseconds), so both return
 // identical values and cursors.
-const starTimePrecision = time.Microsecond
+const StarTimePrecision = time.Microsecond
 
 // starNow returns the current instant at the stored precision.
 func starNow() time.Time {
-	return time.Now().UTC().Truncate(starTimePrecision)
+	return time.Now().UTC().Truncate(StarTimePrecision)
 }
 
 // sqliteStarTimeLayout is the fixed-width TEXT form of starred_at, so a
 // lexical comparison is chronological even for whole seconds.
 const sqliteStarTimeLayout = "2006-01-02T15:04:05.000000000Z"
 
-func sqliteStarTime(t time.Time) string {
-	return t.UTC().Truncate(starTimePrecision).Format(sqliteStarTimeLayout)
+func SQLiteStarTime(t time.Time) string {
+	return t.UTC().Truncate(StarTimePrecision).Format(sqliteStarTimeLayout)
 }
 
 func parseSQLiteStarTime(s string) (time.Time, error) {
@@ -272,7 +272,7 @@ SELECT ?, m.id, ?, ?, ?
   FROM messages m
  WHERE ` + guard + `
 ON CONFLICT (user_id, message_id) DO NOTHING`
-	args := append([]any{userID, target.Selector.ConversationKey, nullableString(target.ProjectID), sqliteStarTime(starNow())}, guardArgs...)
+	args := append([]any{userID, target.Selector.ConversationKey, nullableString(target.ProjectID), SQLiteStarTime(starNow())}, guardArgs...)
 	res, err := tx.ExecContext(ctx, insert, args...)
 	if err != nil {
 		return StarRecord{}, false, fmt.Errorf("webchat store: add message star: %w", err)
@@ -355,7 +355,7 @@ func (s *sqliteWebChatStore) ListMessageStarCandidates(ctx context.Context, f St
 	args := []any{f.UserID, f.Selector.ConversationKey}
 	args = append(args, selArgs...)
 	if f.After != nil {
-		at := sqliteStarTime(f.After.StarredAt)
+		at := SQLiteStarTime(f.After.StarredAt)
 		conds = append(conds, "(st.starred_at < ? OR (st.starred_at = ? AND st.message_id < ?))")
 		args = append(args, at, at, f.After.MessageID)
 	}

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hub
+package webchat
 
 import (
 	"context"
@@ -171,7 +171,7 @@ func scanPGStar(row interface{ Scan(...any) error }) (*StarRecord, error) {
 	if err := row.Scan(&rec.UserID, &rec.MessageID, &rec.ConversationKey, &rec.ProjectID, &starredAt); err != nil {
 		return nil, err
 	}
-	rec.StarredAt = starredAt.UTC().Truncate(starTimePrecision)
+	rec.StarredAt = starredAt.UTC().Truncate(StarTimePrecision)
 	return &rec, nil
 }
 
@@ -222,7 +222,7 @@ func (s *pgWebChatStore) ListMessageStarCandidates(ctx context.Context, f StarFi
 		// two orders agree because message_id is always a canonical
 		// lowercase UUID (hex digits and hyphens; the handlers canonicalize
 		// every ID), and the shared store contract relies on that byte order.
-		at := a.add(f.After.StarredAt.UTC().Truncate(starTimePrecision))
+		at := a.add(f.After.StarredAt.UTC().Truncate(StarTimePrecision))
 		id := a.add(f.After.MessageID)
 		conds = append(conds, "(st.starred_at < "+at+"::timestamptz OR (st.starred_at = "+at+"::timestamptz AND st.message_id < "+id+"::text))")
 	}

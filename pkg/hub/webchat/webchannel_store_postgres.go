@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hub
+package webchat
 
 import (
 	"context"
@@ -1304,7 +1304,7 @@ SELECT id, project_id, COALESCE(thread_id, ''), sender, msg, created
 		if createdAt != nil {
 			r.Timestamp = *createdAt
 		}
-		r.Snippet = generateSnippet(r.Content, filter.Query, 80)
+		r.Snippet = GenerateSnippet(r.Content, filter.Query, 80)
 		results = append(results, r)
 	}
 	if err := rows.Err(); err != nil {

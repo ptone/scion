@@ -63,6 +63,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/webchat"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
@@ -5151,7 +5152,7 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	results, nextCursor, err := wcs.SearchChatMessages(ctx, filter)
-	if errors.Is(err, ErrInvalidSearchCursor) {
+	if errors.Is(err, webchat.ErrInvalidSearchCursor) {
 		writeInvalidCursor(w)
 		return
 	}

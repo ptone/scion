@@ -14,7 +14,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hub
+package webchat
 
 import (
 	"context"
@@ -86,7 +86,7 @@ func testMessageStarStoreContract(t *testing.T, env starStoreEnv) {
 	assert.Equal(t, m1, rec.MessageID)
 	assert.Equal(t, topic, rec.ConversationKey)
 	assert.Equal(t, "proj-1", rec.ProjectID)
-	assert.True(t, rec.StarredAt.Equal(rec.StarredAt.Truncate(starTimePrecision)), "stored precision")
+	assert.True(t, rec.StarredAt.Equal(rec.StarredAt.Truncate(StarTimePrecision)), "stored precision")
 	again, changed, err := add(userA, m1, threadSel(topic))
 	require.NoError(t, err)
 	assert.False(t, changed)
@@ -145,9 +145,9 @@ func testMessageStarStoreContract(t *testing.T, env starStoreEnv) {
 	require.Len(t, refs, 1, "deleted and unstarred are omitted")
 	assert.Equal(t, StarredMessageRef{MessageID: m1, ConversationKey: topic, ProjectID: "proj-1",
 		Channel: "web", ThreadID: topic, ConversationID: conv}, refs[0])
-	assert.True(t, refs[0].matches(threadSel(topic)))
-	assert.True(t, refs[0].matches(StarSelector{ConversationKey: topic, Channel: "web", ConversationID: conv}))
-	assert.False(t, refs[0].matches(threadSel(topic2)))
+	assert.True(t, refs[0].Matches(threadSel(topic)))
+	assert.True(t, refs[0].Matches(StarSelector{ConversationKey: topic, Channel: "web", ConversationID: conv}))
+	assert.False(t, refs[0].Matches(threadSel(topic2)))
 	refs, err = st.ListStarredMessageIDs(ctx, uuid.NewString(), []string{m1})
 	require.NoError(t, err)
 	assert.Empty(t, refs)
@@ -162,7 +162,7 @@ func testMessageStarStoreContract(t *testing.T, env starStoreEnv) {
 		require.NoError(t, err)
 		ids = append(ids, id)
 	}
-	tie := time.Now().UTC().Add(time.Hour).Truncate(starTimePrecision)
+	tie := time.Now().UTC().Add(time.Hour).Truncate(StarTimePrecision)
 	for _, id := range ids[:3] {
 		env.setStarredAt(t, user, id, tie)
 	}
@@ -257,7 +257,7 @@ func TestMessageStarStore_SQLite(t *testing.T) {
 	require.NoError(t, s.CreateProject(context.Background(), &store.Project{ID: projectID, Name: "Stars", Slug: "stars-" + projectID[:8]}))
 	env := starStoreEnv{
 		wcs:   wcs,
-		stars: messageStarStoreFrom(wcs),
+		stars: MessageStarStoreFrom(wcs),
 		addMsg: func(t *testing.T, id, channel, threadID, conversationID string, created time.Time) {
 			require.NoError(t, s.CreateMessage(context.Background(), &store.Message{
 				ID: id, ProjectID: projectID, Sender: "user:x@test.com", Recipient: "chat", Msg: "m " + id,
@@ -279,7 +279,7 @@ func TestMessageStarStore_SQLite(t *testing.T) {
 		},
 		setStarredAt: func(t *testing.T, userID, messageID string, at time.Time) {
 			_, err := db.Exec(`UPDATE webchat_message_star SET starred_at = ? WHERE user_id = ? AND message_id = ?`,
-				sqliteStarTime(at), userID, messageID)
+				SQLiteStarTime(at), userID, messageID)
 			require.NoError(t, err)
 		},
 		reinit: func(t *testing.T) { require.NoError(t, NewWebChatStore(db, "sqlite").Init()) },
@@ -299,11 +299,11 @@ func TestMessageStarStore_SQLite(t *testing.T) {
 func TestMessageStarStore_SQLite_FixedWidthTime(t *testing.T) {
 	whole := time.Date(2026, 10, 22, 10, 0, 0, 0, time.UTC)
 	frac := whole.Add(1500 * time.Microsecond)
-	assert.Equal(t, "2026-10-22T10:00:00.000000000Z", sqliteStarTime(whole))
-	assert.Equal(t, "2026-10-22T10:00:00.001500000Z", sqliteStarTime(frac))
-	assert.Less(t, sqliteStarTime(whole), sqliteStarTime(frac))
-	assert.Equal(t, sqliteStarTime(whole.Add(999)), sqliteStarTime(whole), "truncated to microseconds")
-	back, err := parseSQLiteStarTime(sqliteStarTime(frac))
+	assert.Equal(t, "2026-10-22T10:00:00.000000000Z", SQLiteStarTime(whole))
+	assert.Equal(t, "2026-10-22T10:00:00.001500000Z", SQLiteStarTime(frac))
+	assert.Less(t, SQLiteStarTime(whole), SQLiteStarTime(frac))
+	assert.Equal(t, SQLiteStarTime(whole.Add(999)), SQLiteStarTime(whole), "truncated to microseconds")
+	back, err := parseSQLiteStarTime(SQLiteStarTime(frac))
 	require.NoError(t, err)
 	assert.True(t, back.Equal(frac))
 }
@@ -331,7 +331,7 @@ func TestMessageStarStore_Postgres(t *testing.T) {
 	require.NoError(t, wcs.Init())
 	env := starStoreEnv{
 		wcs:   wcs,
-		stars: messageStarStoreFrom(wcs),
+		stars: MessageStarStoreFrom(wcs),
 		addMsg: func(t *testing.T, id, channel, threadID, conversationID string, created time.Time) {
 			var conv any
 			if conversationID != "" {

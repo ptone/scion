@@ -572,7 +572,7 @@ func (s *Server) handleStarState(w http.ResponseWriter, r *http.Request, call st
 			}
 			decisions[ref.ConversationKey] = d
 		}
-		if d.allowed && ref.matches(d.target.starSelector()) {
+		if d.allowed && ref.Matches(d.target.starSelector()) {
 			starred[ref.MessageID] = true
 		}
 	}
