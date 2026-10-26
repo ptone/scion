@@ -1238,3 +1238,61 @@ func TestPortView_StripsFrontProxyAssertionHeaders(t *testing.T) {
 		t.Fatal("the request did not reach the app")
 	}
 }
+
+// TestPortView_ProxyModeWriteGuardWithRouting runs the request checks of
+// proxy auth mode with the hub's full handler (middleware and router). A
+// cross-site state-changing request from a signed-in user, to a path that
+// only decodes to the page view prefix (a dot segment, or an encoded slash
+// or dot after it), is refused by the checks before any handler runs. A
+// page view request still reaches the page view route: a valid link serves
+// the app and an invalid one gets the route's own answer.
+func TestPortView_ProxyModeWriteGuardWithRouting(t *testing.T) {
+	f := newPortViewFixture(t, nil)
+	f.startAgent(t)
+	prevMode, prevAuth, prevProv, prevBase := f.srv.authConfig.AuthMode, f.srv.authConfig.ProxyAuthenticator, f.srv.authConfig.ProxyUserProvisioner, f.base
+	t.Cleanup(func() {
+		f.srv.authConfig.AuthMode, f.srv.authConfig.ProxyAuthenticator, f.srv.authConfig.ProxyUserProvisioner = prevMode, prevAuth, prevProv
+		f.base = prevBase
+	})
+	// The request checks and the auth middleware read their config when
+	// the handler is built.
+	f.srv.authConfig.AuthMode = proxyAuthMode
+	f.srv.authConfig.ProxyAuthenticator = portProxyStubAuthenticator{user: &ProxyUserInfo{Subject: "front-proxy-owner", Email: "owner@conduit.test"}}
+	f.srv.authConfig.ProxyUserProvisioner = func(context.Context, *ProxyUserInfo) (UserIdentity, error) { return f.owner, nil }
+	front := httptest.NewServer(f.srv.Handler())
+	t.Cleanup(front.Close)
+	f.base = front.URL
+
+	cross := func(contentType string) http.Header {
+		return http.Header{"Origin": {"null"}, "Sec-Fetch-Site": {"cross-site"}, "Sec-Fetch-Mode": {"cors"}, "Content-Type": {contentType}}
+	}
+	for _, p := range []string{
+		"/api/v1/portview/../projects",
+		"/api/v1/portview/CAP/../../projects",
+		"/api/v1/portview/%2e%2e/projects",
+		"/api/v1/portview/%2E%2E/projects",
+		"/api/v1/portview%2F..%2Fprojects",
+		"/api/v1/portview/CAP%2f..%2f..%2fprojects",
+	} {
+		t.Run(p, func(t *testing.T) {
+			res := f.send(t, http.MethodPost, f.base+p, cross("application/json"), strings.NewReader(`{"name":"port-view-guard-probe"}`))
+			require.Equal(t, http.StatusForbidden, res.status, res.body)
+			assert.Contains(t, res.body, "this request is not accepted on this endpoint", "answered by the request checks, before any handler")
+		})
+	}
+
+	for len(f.app.got) > 0 {
+		<-f.app.got
+	}
+	res := f.send(t, http.MethodPost, f.viewURL(f.ownerCap(), "api/items"), cross("text/plain"), strings.NewReader("item"))
+	require.Equal(t, http.StatusOK, res.status, res.body)
+	assert.Equal(t, "hello /api/items?", res.body)
+	select {
+	case r := <-f.app.got:
+		assert.Equal(t, http.MethodPost, r.Method)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the page view request did not reach the app")
+	}
+	bad := f.capFor(f.launched.OwnerID, f.app.port, time.Now().Add(-time.Second))
+	requirePortViewInvalid(t, f.send(t, http.MethodPost, f.viewURL(bad, "api/items"), cross("text/plain"), strings.NewReader("item")))
+}
