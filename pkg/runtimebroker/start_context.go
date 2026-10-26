@@ -1140,7 +1140,8 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// the host BEFORE the container starts, then dual-mount it. This avoids
 	// the full in-container clone. Falls through to clone-per-agent on error
 	// or if git is too old (< 2.48) — but only when this call has not yet
-	// created the agent's own worktree; see tryProvisionWorktree.
+	// created the agent's own worktree, and never for a refused clone URL;
+	// see tryProvisionWorktree.
 	worktreeProvisioned := false
 	var provisionedWorktreeRoot string
 	if !linkedCheckout && in.Config != nil && in.Config.GitClone != nil && in.WorkspaceMode == store.WorkspaceModeWorktreePerAgent {
@@ -1149,7 +1150,12 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		worktreeProvisioned, provisionedWorktreeRoot, err = s.tryProvisionWorktree(ctx, in, &opts, env, dispatchRuntimeType)
 		if err != nil {
 			span.SetStatus(codes.Error, err.Error())
-			return nil, &startContextError{Status: http.StatusInternalServerError, Message: err.Error()}
+			status := http.StatusInternalServerError
+			if errors.Is(err, provision.ErrHostCloneURLRefused) {
+				// The project's clone URL, not the broker, is the problem.
+				status = http.StatusUnprocessableEntity
+			}
+			return nil, &startContextError{Status: status, Message: err.Error()}
 		}
 	}
 
@@ -1766,9 +1772,10 @@ var provisionSharedWorktree = provision.ProvisionShared
 // ordinary fallback condition (git too old, no valid worktree-per-agent
 // input) it logs a warning and returns (false, "", nil) so the caller falls
 // through to clone-per-agent. On a condition that must not silently fall
-// back (missing agent identity on a start dispatch, or a pre-existing
-// worktree this call must not touch or replace), it returns a non-nil error
-// instead so the caller fails the dispatch.
+// back (missing agent identity on a start dispatch, a pre-existing
+// worktree this call must not touch or replace, or a clone URL that
+// provisioning refuses), it returns a non-nil error instead so the caller
+// fails the dispatch.
 //
 // The caller threads repoRoot onto ctx via
 // api.ContextWithProvisionedWorktreeRepoRoot; see that function's doc for why.
@@ -1898,6 +1905,15 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 	}
 
 	if err := provisionSharedWorktree(result.ProvisionInput); err != nil {
+		// A clone URL that provisioning refuses fails the dispatch, with
+		// the refusal as its error. It never falls back to the in-container
+		// clone: the agent would start in another workspace mode than the
+		// project's, from the same URL.
+		if errors.Is(err, provision.ErrHostCloneURLRefused) {
+			slog.Warn("worktree-per-agent: the project's clone URL is not accepted for a host-side clone; failing the dispatch",
+				"agent_id", in.AgentID)
+			return false, "", fmt.Errorf("worktree-per-agent: %w", provision.ErrHostCloneURLRefused)
+		}
 		cloneURL := ""
 		rawCloneURL := ""
 		if result.ProvisionInput.GitClone != nil {

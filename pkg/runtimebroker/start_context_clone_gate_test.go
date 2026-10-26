@@ -17,9 +17,11 @@ package runtimebroker
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -81,8 +83,9 @@ func tryProvisionWorktreeWithURL(t *testing.T, srv *Server, projectPath, cloneUR
 // The broker's host-side shared-base clone is hardened and its URL is
 // checked by provision.ProvisionShared: a local path, file://, http://, a
 // <transport>::<address> URL and a value starting with "-" are refused
-// before anything is cloned (the dispatch falls back to the in-container
-// clone), and every call is made with HostGitHardened set.
+// before anything is cloned, the dispatch fails with that refusal (no
+// fallback to the in-container clone), and every call is made with
+// HostGitHardened set.
 func TestTryProvisionWorktree_RefusesHostCloneURLs(t *testing.T) {
 	requireWorktreeEligible(t)
 	bare := unregisteredBareRepo(t)
@@ -104,8 +107,8 @@ func TestTryProvisionWorktree_RefusesHostCloneURLs(t *testing.T) {
 			}
 
 			ok, err := tryProvisionWorktreeWithURL(t, srv, projectPath, cloneURL)
-			if err != nil || ok {
-				t.Fatalf("tryProvisionWorktree: ok=%v err=%v, want the clone-per-agent fallback", ok, err)
+			if ok || !errors.Is(err, provision.ErrHostCloneURLRefused) {
+				t.Fatalf("tryProvisionWorktree: ok=%v err=%v, want the refusal (no clone-per-agent fallback)", ok, err)
 			}
 			if len(*inputs) != 1 {
 				t.Fatalf("provisioning ran %d times, want 1", len(*inputs))
@@ -158,5 +161,46 @@ func TestTryProvisionWorktree_HostCloneHardened(t *testing.T) {
 	}
 	if !(*inputs)[0].HostGitHardened {
 		t.Error("the broker's host-side clone must be hardened (HostGitHardened)")
+	}
+}
+
+// A refused clone URL fails the start context with 422 and the refusal's
+// fixed text, on create and on start, and no start context is built, so no
+// in-container clone (the clone-per-agent fallback) is set up.
+func TestBuildStartContext_RefusedCloneURLFailsWithoutFallback(t *testing.T) {
+	requireWorktreeEligible(t)
+	for _, op := range []startOperation{opCreate, opHTTPStart} {
+		t.Run(string(op), func(t *testing.T) {
+			cfg := DefaultServerConfig()
+			cfg.StateDir = t.TempDir()
+			srv := newTestServerForStartContext(t, cfg)
+			projectPath := filepath.Join(t.TempDir(), "proj")
+			if err := os.MkdirAll(projectPath, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+				Name: "agent-1", AgentID: "agent-1",
+				ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
+				WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+				Config:        &CreateAgentConfig{GitClone: &api.GitCloneConfig{URL: "http://git.example.com/org/repo.git", Branch: "main"}},
+				Operation:     op,
+			})
+			if sc != nil {
+				t.Fatalf("a start context was built (in-container clone env %q, GitClone %+v), want none", sc.Opts.Env["SCION_GIT_CLONE_URL"], sc.Opts.GitClone)
+			}
+			var sce *startContextError
+			if !errors.As(err, &sce) {
+				t.Fatalf("buildStartContext error = %v (%T), want a *startContextError", err, err)
+			}
+			if sce.Status != http.StatusUnprocessableEntity {
+				t.Errorf("status = %d, want %d", sce.Status, http.StatusUnprocessableEntity)
+			}
+			if !strings.Contains(sce.Message, provision.ErrHostCloneURLRefused.Error()) {
+				t.Errorf("message = %q, want the refusal text", sce.Message)
+			}
+			if strings.Contains(sce.Message, "git.example.com") {
+				t.Errorf("message %q names the refused URL", sce.Message)
+			}
+		})
 	}
 }

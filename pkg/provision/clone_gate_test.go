@@ -156,3 +156,36 @@ func TestAllowLocalCloneFixture_NotHonouredOutsideTestBinary(t *testing.T) {
 	assert.Equal(t, "testing=false init=false refused=true", lines[len(lines)-1])
 	assert.NoFileExists(t, filepath.Join(workspace, "README.md"))
 }
+
+// A hardened clone never follows an HTTP redirect: git, as run by
+// ProvisionShared for a hardened input, receives -c http.followRedirects=false
+// ahead of "clone", and no later setting of that key. (A behavioural redirect
+// test is not possible here: a hardened clone refuses plain http, and the
+// clone environment drops GIT_SSL_* settings, so a test TLS server cannot be
+// trusted.) Removing the setting from HostCloneGitArgs makes this fail.
+func TestProvisionShared_HardenedCloneNeverFollowsRedirects(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	record := fakeGit(t)
+	hostPath := t.TempDir()
+	in := sharedPlainInput(hostPath, "https://git.example.com/org/repo.git")
+	in.HostGitHardened = true
+
+	require.Error(t, ProvisionShared(in), "the fake git fails")
+	argv, allow := readArgv(t, record)
+	cloneAt := -1
+	for i, a := range argv {
+		if a == "clone" {
+			cloneAt = i
+			break
+		}
+	}
+	require.Positive(t, cloneAt, "git was run with clone: %q", argv)
+	last := ""
+	for i := 0; i+1 < cloneAt; i++ {
+		if argv[i] == "-c" && strings.HasPrefix(argv[i+1], "http.followRedirects=") {
+			last = argv[i+1]
+		}
+	}
+	assert.Equal(t, "http.followRedirects=false", last, "the last http.followRedirects setting ahead of clone")
+	assert.Equal(t, HostCloneProtocols, allow)
+}

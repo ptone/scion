@@ -203,6 +203,7 @@ func TestHostCloneGitArgs_PinsTransports(t *testing.T) {
 	for _, want := range []string{
 		"core.hooksPath=" + os.DevNull, "core.fsmonitor=false", "protocol.ext.allow=never",
 		"protocol.allow=never", "protocol.https.allow=always", "protocol.ssh.allow=always", "protocol.git.allow=always",
+		"http.followRedirects=false",
 	} {
 		assert.Contains(t, joined, want)
 	}
