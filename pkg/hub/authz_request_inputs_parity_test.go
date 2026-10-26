@@ -993,17 +993,15 @@ func TestParity_E6_CancellationBothVariants(t *testing.T) {
 						assertDecisionsEqual(t, refDecisions[i], candDecisions[i], "post-cancel tuple %d", i)
 					}
 
-					// The decision-equality assertion above cannot by itself
-					// catch a memo that silently served post-cancel
-					// decisions from a stale cache instead of bypassing to
-					// the store, because a mutant that drops the done-ctx
-					// bypass can still produce the same decisions in this
-					// fixture's shape. Assert directly that the candidate
-					// issues the SAME per-method store calls after
-					// cancellation as the reference: a working done-ctx
-					// bypass makes every post-cancel decision reach the
-					// store exactly like the reference does, so the
-					// post-cancel call-count DELTA must be equal per method.
+					// Assert that the candidate issues the SAME per-method
+					// store calls after cancellation as the reference. Since
+					// ptone/scion#6012 a decision on a done ctx refuses at
+					// principal resolution (or the user status gate) before
+					// any of these reads, in both runs, so every delta here
+					// is 0 == 0 and the decision-equality assertion above
+					// carries the guard; this check still catches a memo
+					// change that reads (or serves) inputs after the
+					// cancellation in one run only.
 					refCountsAfter := refSt.snapshotCounts()
 					candCountsAfter := candSt.snapshotCounts()
 					for _, method := range []string{"GetEffectiveGroups", "GetEffectiveGroupsForAgent", "ListRoleBindingsForPrincipals", "GetRoleDefinitionsByIDs", "ListAccessConstraints", "GetDelegationEdgesForDelegate"} {

@@ -26,6 +26,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -244,10 +245,12 @@ func TestAuthzRequestDone_PrincipalsNotResolvedAfterCancel(t *testing.T) {
 				if withMemo {
 					base = withAuthzInputMemo(base)
 				}
-				ctx, note := withAuthzStoppedNote(base)
-				require.NotNil(t, note)
-				ctx, cancel := context.WithCancel(ctx)
+				// The note is installed on the request context, as
+				// serveAfterAuth does, so it sees the request end.
+				reqCtx, cancel := context.WithCancel(base)
 				defer cancel()
+				ctx, note := withAuthzStoppedNote(reqCtx)
+				require.NotNil(t, note)
 
 				for _, tp := range tuples {
 					authz.CheckAccess(ctx, identity, tp.resource, tp.action)
@@ -279,49 +282,112 @@ func TestAuthzRequestDone_PrincipalsNotResolvedAfterCancel(t *testing.T) {
 	}
 }
 
-// A capability batch on an ended request runs no decision, reports no
-// action for any item, and logs no WARN.
+// requestDoneCancelEmitter records decisions and cancels the request
+// after the given number of them, so a loop is cut mid-way.
+type requestDoneCancelEmitter struct {
+	mu     sync.Mutex
+	n      int
+	after  int
+	cancel context.CancelFunc
+}
+
+func (e *requestDoneCancelEmitter) EmitDecisionAudit(context.Context, *store.DecisionAuditRecord) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.n++
+	if e.cancel != nil && e.after > 0 && e.n == e.after {
+		e.cancel()
+	}
+}
+
+func (e *requestDoneCancelEmitter) count() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.n
+}
+
+// Capability batches, for a plain user and a scoped user token, on both
+// ComputeCapabilitiesBatch and ComputeCapabilitiesForActions: on an ended
+// request no decision runs and every item gets no action; when the request
+// ends mid-loop, the items decided before keep their real result and the
+// rest get no action. No WARN either way.
 func TestAuthzRequestDone_CapabilityBatchesStopAndDeny(t *testing.T) {
 	_, s := authzTestSetup(t)
 	f := newP1Fixture(t, s, "reqdone-caps")
 	st := newMemoTestStore(s)
 	logs := &requestDoneLogCapture{}
 	authz := NewAuthzService(st, slog.New(logs))
-	emitter := &parityRecordingAuditEmitter{}
-	authz.SetDecisionAuditEmitter(emitter)
+	em := &requestDoneCancelEmitter{}
+	authz.SetDecisionAuditEmitter(em)
 	authz.DecisionAuditSampleRate = 1.0
 
-	const n = 20
+	const n = 12
 	resources := make([]Resource, n)
 	for i := range resources {
 		resources[i] = f.agentRes
 	}
+	actions := ResourceActions["agent"]
+	run := map[string]func(context.Context, Identity) []*Capabilities{
+		"batch": func(ctx context.Context, id Identity) []*Capabilities {
+			return authz.ComputeCapabilitiesBatch(ctx, id, resources, "agent")
+		},
+		"for-actions": func(ctx context.Context, id Identity) []*Capabilities {
+			return authz.ComputeCapabilitiesForActions(ctx, id, resources, actions)
+		},
+	}
+	identities := map[string]Identity{
+		"user":       f.user,
+		"scoped-uat": NewScopedUserIdentity(f.user, f.projectID, []string{"agent:read"}),
+	}
+	for idName, id := range identities {
+		for fnName, fn := range run {
+			t.Run(idName+"/"+fnName, func(t *testing.T) {
+				require.Equal(t, idName == "scoped-uat", IsScopedUserIdentity(id), "the branch under test")
+				em.mu.Lock()
+				em.n, em.after, em.cancel = 0, 0, nil
+				em.mu.Unlock()
 
-	live := authz.ComputeCapabilitiesBatch(context.Background(), f.user, resources, "agent")
-	require.NotEmpty(t, live[0].Actions, "the member has capabilities while the request is live")
-	emitter.mu.Lock()
-	liveDecisions := len(emitter.records)
-	emitter.mu.Unlock()
-	require.Positive(t, liveDecisions)
-	before := st.countOf("GetEffectiveGroups")
+				live := fn(context.Background(), id)
+				require.Len(t, live, n)
+				require.NotEmpty(t, live[0].Actions, "allowed something while the request is live")
+				require.Zero(t, em.count()%n, "every item costs the same decisions")
+				perItem := em.count() / n
+				require.Positive(t, perItem, "each item runs decisions")
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	for name, caps := range map[string][]*Capabilities{
-		"batch":       authz.ComputeCapabilitiesBatch(ctx, f.user, resources, "agent"),
-		"for-actions": authz.ComputeCapabilitiesForActions(ctx, f.user, resources, ResourceActions["agent"]),
-	} {
-		require.Len(t, caps, n, name)
-		for i, c := range caps {
-			require.NotNil(t, c, "%s item %d", name, i)
-			assert.Empty(t, c.Actions, "%s item %d is denied every action", name, i)
+				// Ended before the loop: no decision, no action.
+				em.mu.Lock()
+				em.n = 0
+				em.mu.Unlock()
+				before := st.countOf("GetEffectiveGroups")
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				for i, c := range fn(ctx, id) {
+					require.NotNil(t, c, "item %d", i)
+					assert.Empty(t, c.Actions, "item %d is denied every action", i)
+				}
+				assert.Zero(t, em.count(), "no decision runs on an ended request")
+				assert.Equal(t, before, st.countOf("GetEffectiveGroups"), "no principal lookup on an ended request")
+
+				// Ended mid-loop, after the decisions of the first k items.
+				const k = 3
+				ctx, cancel = context.WithCancel(context.Background())
+				defer cancel()
+				em.mu.Lock()
+				em.n, em.after, em.cancel = 0, k*perItem, cancel
+				em.mu.Unlock()
+				got := fn(ctx, id)
+				require.Len(t, got, n)
+				for i := 0; i < k; i++ {
+					assert.Equal(t, live[i].Actions, got[i].Actions, "item %d, decided before the end, keeps its result", i)
+				}
+				for i := k; i < n; i++ {
+					assert.Empty(t, got[i].Actions, "item %d, after the end, is denied every action", i)
+				}
+				assert.Equal(t, k*perItem, em.count(), "no decision runs after the request ends")
+				assert.Zero(t, logs.count(slog.LevelWarn))
+			})
 		}
 	}
-	emitter.mu.Lock()
-	assert.Equal(t, liveDecisions, len(emitter.records), "no decision runs on an ended request")
-	emitter.mu.Unlock()
-	assert.Equal(t, before, st.countOf("GetEffectiveGroups"), "no principal lookup on an ended request")
-	assert.Zero(t, logs.count(slog.LevelWarn))
 }
 
 // A standing lookup cut short by the request ending is remembered for the
@@ -332,10 +398,11 @@ func TestAuthzRequestDone_StandingRememberedAndDenies(t *testing.T) {
 	logs := captureRequestDoneDefaultLog(t)
 	rs := installRequestDoneStore(t, f.srv, f.s)
 
-	parent, note := withAuthzStoppedNote(withStandingMemo(context.Background()))
-	require.NotNil(t, note)
-	ctx, cancel := context.WithCancel(parent)
+	parent := withStandingMemo(context.Background())
+	reqCtx, cancel := context.WithCancel(parent)
 	defer cancel()
+	ctx, note := withAuthzStoppedNote(reqCtx)
+	require.NotNil(t, note)
 	// The request ends while the agent row is read, as when a client gives
 	// up during a slow read.
 	rs.onGetAgent = func(c context.Context) error {
@@ -407,11 +474,75 @@ func TestAuthzRequestDone_CountReachableAgentsStops(t *testing.T) {
 	require.Positive(t, rs.countOf("GetAgent"), "the live loop checks the sender's standing")
 
 	before := rs.total()
-	ctx, cancel := context.WithCancel(withStandingMemo(context.Background()))
+	reqCtx, cancel := context.WithCancel(withStandingMemo(context.Background()))
 	cancel()
+	ctx, note := withAuthzStoppedNote(reqCtx)
 	assert.Zero(t, f.srv.countReachableAgents(ctx, &sender, agents.Items))
 	assert.Equal(t, before, rs.total(), "no read on an ended request")
+	// The loop itself stopped: no per-target decision ran, so not even the
+	// sender's standing check was reached and counted.
+	assert.Zero(t, note.count, "no per-target decision runs on an ended request")
+	// Probe: one decision on the same ended request does reach the
+	// standing check and is counted, so the zero above is the loop's break.
+	other := agents.Items[0]
+	if other.ID == sender.ID {
+		other = agents.Items[1]
+	}
+	assert.False(t, f.srv.evaluateAgentMessageForSender(ctx, agentIdentityFromAgent(&sender), &sender, &other).Allowed)
+	assert.Equal(t, 1, note.count, "a decision on the ended request is counted")
 	assert.Zero(t, logs.count(slog.LevelWarn))
+}
+
+// A check that runs past its OWN caller-set bound while the request is
+// still live is an ordinary fault: it keeps its per-check WARN and is not
+// counted. Without a request note, a deadline keeps its WARN and only a
+// cancellation is quieted.
+func TestAuthzRequestDone_OwnDeadlineOnLiveRequestWarns(t *testing.T) {
+	f := newMSFixture(t, "reqdone-own")
+	logs := captureRequestDoneDefaultLog(t)
+
+	reqCtx, cancelReq := context.WithCancel(context.Background())
+	defer cancelReq()
+	ctx, note := withAuthzStoppedNote(reqCtx)
+	require.NotNil(t, note)
+	expired := func(parent context.Context) context.Context {
+		c, cancel := context.WithTimeout(parent, time.Nanosecond)
+		t.Cleanup(cancel)
+		<-c.Done()
+		return c
+	}
+
+	// Agent standing under its own expired bound.
+	err := f.srv.agentStanding(withStandingMemo(expired(ctx)), f.agentA.ID)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, context.DeadlineExceeded))
+	assert.Equal(t, 1, logs.count(slog.LevelWarn, "agent standing lookup failed"), "an own deadline keeps the WARN")
+
+	// A user decision under its own expired bound: the status gate WARN.
+	_, s := authzTestSetup(t)
+	p1 := newP1Fixture(t, s, "reqdone-own-u")
+	authzLogs := &requestDoneLogCapture{}
+	authz := NewAuthzService(newMemoTestStore(s), slog.New(authzLogs))
+	d := authz.CheckAccess(expired(ctx), p1.user, p1.agentRes, ActionRead)
+	assert.False(t, d.Allowed)
+	assert.Equal(t, 1, authzLogs.count(slog.LevelWarn, principalStatusWarnMsg), "an own deadline keeps the WARN")
+
+	// An agent decision under its own expired bound: the principals WARN.
+	a1 := newA1Fixture(t, s, "reqdone-own-a")
+	d = authz.CheckAccess(expired(ctx), a1.agent, a1.resource, ActionRead)
+	assert.False(t, d.Allowed)
+	assert.Equal(t, 1, authzLogs.count(slog.LevelWarn, "failed to resolve authorization principals"), "an own deadline keeps the WARN")
+
+	assert.Zero(t, note.count, "nothing is counted while the request is live")
+
+	// Without a note: a deadline WARNs, a cancellation does not.
+	before := logs.count(slog.LevelWarn, "agent standing lookup failed")
+	require.Error(t, f.srv.agentStanding(expired(context.Background()), f.agentA.ID))
+	assert.Equal(t, before+1, logs.count(slog.LevelWarn, "agent standing lookup failed"), "no note: a deadline keeps the WARN")
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.Error(t, f.srv.agentStanding(canceled, f.agentA.ID))
+	assert.Equal(t, before+1, logs.count(slog.LevelWarn, "agent standing lookup failed"), "no note: a cancellation is DEBUG")
 }
 
 // serveAfterAuth writes one INFO summary for a request with stopped

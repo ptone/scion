@@ -36,6 +36,11 @@ import (
 // were refused because the request context had ended. It is installed by
 // serveAfterAuth and read once when the handler returns.
 type authzStoppedNote struct {
+	// reqCtx is the request context the note was installed on. A check is
+	// counted as stopped by the request ending only when reqCtx itself has
+	// ended, not when only the check's own, shorter bound has.
+	reqCtx context.Context
+
 	mu        sync.Mutex
 	count     int
 	firstSite string
@@ -45,46 +50,75 @@ type authzStoppedNote struct {
 
 type authzStoppedNoteKey struct{}
 
-// withAuthzStoppedNote installs a fresh note unless one is present. It
-// returns the note only when it installed it, so only the outermost
-// installer emits; otherwise it returns ctx unchanged and a nil note.
+// withAuthzStoppedNote installs a fresh note for the request context ctx
+// unless one is present. It returns the note only when it installed it, so
+// only the outermost installer emits; otherwise it returns ctx unchanged
+// and a nil note.
 func withAuthzStoppedNote(ctx context.Context) (context.Context, *authzStoppedNote) {
 	if _, ok := ctx.Value(authzStoppedNoteKey{}).(*authzStoppedNote); ok {
 		return ctx, nil
 	}
-	n := &authzStoppedNote{}
+	n := &authzStoppedNote{reqCtx: ctx}
 	return context.WithValue(ctx, authzStoppedNoteKey{}, n), n
 }
 
-// requestDoneClass returns "canceled" or "deadline" when ctx has ended,
-// and "" while it is live.
-func requestDoneClass(ctx context.Context) string {
-	switch err := ctx.Err(); {
-	case err == nil:
-		return ""
-	case errors.Is(err, context.DeadlineExceeded):
-		return "deadline"
-	default:
-		return "canceled"
-	}
+func authzStoppedNoteFrom(ctx context.Context) *authzStoppedNote {
+	n, _ := ctx.Value(authzStoppedNoteKey{}).(*authzStoppedNote)
+	return n
 }
 
-// authzStoppedByRequestEnd reports whether err is the request context's
-// own end: ctx is done and err is a cancellation or deadline. A
-// cancellation or deadline from anywhere else, while ctx is live, is an
-// ordinary fault.
+// authzStoppedByRequestEnd reports whether a check on ctx that failed with
+// err was stopped by the request ending: ctx is done, err is its
+// cancellation or deadline, and the request context itself has ended
+// (read from the request's note). A check that only ran past its own
+// caller-set bound while the request is live is an ordinary fault and
+// keeps its WARN. Without a note, only a cancellation counts; a deadline
+// keeps its WARN.
 func authzStoppedByRequestEnd(ctx context.Context, err error) bool {
 	if err == nil || ctx.Err() == nil {
 		return false
 	}
-	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+	canceled := errors.Is(err, context.Canceled)
+	deadline := errors.Is(err, context.DeadlineExceeded)
+	if n := authzStoppedNoteFrom(ctx); n != nil {
+		return n.reqCtx.Err() != nil && (canceled || deadline)
+	}
+	return canceled
+}
+
+// requestDoneClass returns "deadline" or "canceled" for the end of the
+// request context of ctx (the note's, else ctx's own).
+func requestDoneClass(ctx context.Context) string {
+	end := ctx.Err()
+	if n := authzStoppedNoteFrom(ctx); n != nil && n.reqCtx.Err() != nil {
+		end = n.reqCtx.Err()
+	}
+	if errors.Is(end, context.DeadlineExceeded) {
+		return "deadline"
+	}
+	return "canceled"
+}
+
+// logAuthzCheckFault logs the failure err of the check at site: at DEBUG,
+// counted on the request's note, when the request ending stopped it
+// (authzStoppedByRequestEnd); otherwise as the WARN warnMsg with attrs and
+// the error. The caller denies either way.
+func logAuthzCheckFault(ctx context.Context, logger *slog.Logger, site, warnMsg string, err error, attrs ...any) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if authzStoppedByRequestEnd(ctx, err) {
+		noteAuthzStopped(ctx, logger, site, err, attrs...)
+		return
+	}
+	logger.Warn(warnMsg, append(attrs, "error", err)...)
 }
 
 // noteAuthzStopped records one check at site that stopped because the
 // request context ended, and logs it at DEBUG. The caller still denies.
 func noteAuthzStopped(ctx context.Context, logger *slog.Logger, site string, err error, attrs ...any) {
 	class := requestDoneClass(ctx)
-	if n, ok := ctx.Value(authzStoppedNoteKey{}).(*authzStoppedNote); ok {
+	if n := authzStoppedNoteFrom(ctx); n != nil {
 		n.mu.Lock()
 		if n.count == 0 {
 			n.firstSite = site

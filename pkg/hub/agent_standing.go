@@ -174,10 +174,8 @@ func (s *Server) agentStanding(ctx context.Context, agentID string) error {
 		switch {
 		case errors.Is(err, errAgentNotInStanding):
 			slog.Debug("agent standing refused", "agent_id", agentID, "reason", standingReason(err))
-		case stopped:
-			noteAuthzStopped(ctx, nil, "agent_standing", err, "agent_id", agentID)
 		default:
-			slog.Warn("agent standing lookup failed", "agent_id", agentID, "error", err)
+			logAuthzCheckFault(ctx, nil, "agent_standing", "agent standing lookup failed", err, "agent_id", agentID)
 		}
 	}
 	return err

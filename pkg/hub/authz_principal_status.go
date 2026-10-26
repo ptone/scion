@@ -59,6 +59,10 @@ const (
 	principalStatusLookupReason = "user status resolution error (fail-closed)"
 )
 
+// principalStatusWarnMsg is the WARN of a failed users-row lookup in
+// principalStatusGate.
+const principalStatusWarnMsg = "failed to resolve user status for authorization (fail-closed)"
+
 // principalStatusGate applies activeUserPredicate to the decision's own
 // principal. It returns ("", "") when the principal may proceed to the
 // grant stages, and otherwise the deny reason and cause. A lookup fault
@@ -71,10 +75,11 @@ func (a *AuthzService) principalStatusGate(ctx context.Context, principal Princi
 	if a.store == nil {
 		return principalStatusLookupReason, DenyCauseResolutionError
 	}
-	// Once the request context has ended, refuse without a lookup
-	// (ptone/scion#6012), as for a failed one.
+	// Once ctx has ended, refuse without a lookup (ptone/scion#6012), as
+	// for a failed one. logAuthzCheckFault keeps the WARN unless the
+	// request itself ended.
 	if err := ctx.Err(); err != nil {
-		noteAuthzStopped(ctx, a.logger, "principal_status", err, "principal_id", principal.ID)
+		logAuthzCheckFault(ctx, a.logger, "principal_status", principalStatusWarnMsg, err, "principal_id", principal.ID)
 		return principalStatusLookupReason, DenyCauseResolutionError
 	}
 	user, err := a.userForStatusGate(ctx, principal.ID)
@@ -83,12 +88,7 @@ func (a *AuthzService) principalStatusGate(ctx context.Context, principal Princi
 	}
 	if gateErr := activeUserPredicate(principal, user, err); gateErr != nil {
 		if isProjectAccessLookupFault(gateErr) {
-			if authzStoppedByRequestEnd(ctx, err) {
-				noteAuthzStopped(ctx, a.logger, "principal_status", err, "principal_id", principal.ID)
-			} else {
-				a.logger.Warn("failed to resolve user status for authorization (fail-closed)",
-					"principal_id", principal.ID, "error", err)
-			}
+			logAuthzCheckFault(ctx, a.logger, "principal_status", principalStatusWarnMsg, err, "principal_id", principal.ID)
 			return principalStatusLookupReason, DenyCauseResolutionError
 		}
 		return principalNotActiveReason, ""
