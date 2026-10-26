@@ -48,7 +48,7 @@ func TestParseViewCapabilityRefusesPortViewLinks(t *testing.T) {
 		"link layout, page sig":    agentID + ".8080." + e + "." + userID + "." + sign(portViewMsg),
 		"view layout, page domain": agentID + ".1." + e + "." + sign("port-view\n"+agentID+"\n1\n"+e),
 	} {
-		if _, err := parseViewCapability(testViewKey, c, now); err == nil {
+		if _, err := parseViewCapability(LegacyViewKeys(testViewKey), c, now); err == nil {
 			t.Errorf("%s: %q accepted as a view capability", name, c)
 		}
 	}

@@ -403,13 +403,16 @@ func TestPortView_UniformFailure(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, got.DeletedAt.IsZero(), "the agent is soft-deleted")
 
-	require.NotEqual(t, key, f.srv.artifactViewKey, "the page view key is not the artifact view key")
+	artifactKeys := f.srv.artifactViewKeys.candidates("")
+	require.Len(t, artifactKeys, 1, "the artifact view key is one fixed legacy key here")
+	artifactKey := artifactKeys[0].Bytes()
+	require.NotEqual(t, key, artifactKey, "the page view key is not the artifact view key")
 	otherKey := bytes.Repeat([]byte{7}, 32)
 	cases := []struct{ name, capability string }{
 		{"malformed", "not-a-link"},
 		{"wrong version", strings.Replace(f.ownerCap(), "v1.", "v2.", 1)},
 		{"bad signature", portview.Mint(otherKey, f.launched.ID, port, owner, now.Add(time.Hour))},
-		{"artifact view key", portViewSignWith(f.srv.artifactViewKey, f.launched.ID, port, owner, now.Add(time.Hour))},
+		{"artifact view key", portViewSignWith(artifactKey, f.launched.ID, port, owner, now.Add(time.Hour))},
 		{"tampered port", strings.Replace(f.ownerCap(), "."+strconv.Itoa(port)+".", "."+strconv.Itoa(port+1)+".", 1)},
 		{"expired", f.capFor(owner, port, now.Add(-time.Second))},
 		{"too far in the future", f.capFor(owner, port, now.Add(f.srv.portViewTTL()+portview.MaxSkew+time.Minute))},
