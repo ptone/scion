@@ -908,6 +908,7 @@ var tiaKeyMaterialSites = map[string]string{
 	"oidckeys.go:decodePEMPrivateKey:crypto/x509.ParsePKCS8PrivateKey":                              "oidc",
 	"download_signing.go:computeSkillFileHMAC:crypto/hmac.New":                                      "download_url",
 	"internal/portview/capability.go:mac:crypto/hmac.New":                                           "port_view_url",
+	"internal/portview/capability.go:macKeyed:crypto/hmac.New":                                      "port_view_url",
 	"download_signing.go:computeSkillFileHMACv2:crypto/hmac.New":                                    "download_url",
 	"attachment_delivery.go:deliveryMACv2:crypto/hmac.New":                                          "attachment_delivery",
 	"attachment_delivery.go:deliveryMAC:crypto/hmac.New":                                            "attachment_delivery",

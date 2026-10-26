@@ -17,7 +17,15 @@
 // the capability, the navigation predicate and the preflight header rules.
 // The hub's handler (pkg/hub/port_view.go) uses them. A capability names
 // one user's access to one exposed port of one agent until an expiry; Mint
-// creates one and Parse checks one.
+// and MintVersioned create one and Parse checks one.
+//
+// A capability has one of two forms:
+//
+//	v1.<agentID>.<port>.<userID>.<exp>.<sig>        (no key ID)
+//	v2.<kid>.<agentID>.<port>.<userID>.<exp>.<sig>  (key ID kid)
+//
+// The hub's signing keys pick the form: the versioned form names the key
+// generation that signed it, and only that generation checks it.
 package portview
 
 import (
@@ -26,6 +34,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -37,8 +46,11 @@ import (
 const Route = "/api/v1/portview/"
 
 const (
-	// version is the first field of every capability.
+	// version is the first field of a capability without a key ID.
 	version = "v1"
+
+	// versionKeyed is the first field of a capability with a key ID.
+	versionKeyed = "v2"
 
 	// sigDomain starts every signed message. The port view key is a key of
 	// its own (not the artifact view key or any other hub key), and the
@@ -46,13 +58,27 @@ const (
 	// be accepted by another route, nor another route's signature here.
 	sigDomain = "port-view"
 
+	// sigDomainKeyed starts every signed message of a capability with a
+	// key ID; the key ID follows it, so a signature names its generation.
+	sigDomainKeyed = "port-view-v2"
+
 	// MaxSkew bounds how far beyond the configured lifetime an expiry may
 	// lie. The hub never mints one; anything further out is refused.
 	MaxSkew = time.Minute
 
-	// fields is the number of dot-separated fields of a capability.
+	// fields is the number of dot-separated fields of a capability
+	// without a key ID; one with a key ID has one more.
 	fields = 6
 )
+
+// keyIDSyntax is the syntax of a key ID. A capability whose key ID does
+// not match it is refused before any key is looked up.
+var keyIDSyntax = regexp.MustCompile(`^[A-Za-z0-9_-]{1,32}$`)
+
+// Keys returns the keys that may have signed a capability carrying key ID
+// kid ("" for a capability without one). An unknown key ID has none:
+// Parse then refuses the capability and never tries another key.
+type Keys func(kid string) [][]byte
 
 // ErrInvalid is the only error Parse returns. Every way a capability can
 // fail (shape, encoding, signature, expiry) is reported the same way.
@@ -76,8 +102,18 @@ func mac(key []byte, agentID, port, userID, exp string) []byte {
 	return m.Sum(nil)
 }
 
-// Mint returns the capability for userID's access to port of agentID
-// until exp (whole seconds). The IDs must be canonical (see Parse).
+// macKeyed signs a capability with key ID kid: the message is
+// "port-view-v2\n" + kid + "\n" + agentID, port, userID and exp, newline
+// separated.
+func macKeyed(key []byte, kid, agentID, port, userID, exp string) []byte {
+	m := hmac.New(sha256.New, key)
+	m.Write([]byte(sigDomainKeyed + "\n" + kid + "\n" + agentID + "\n" + port + "\n" + userID + "\n" + exp))
+	return m.Sum(nil)
+}
+
+// Mint returns the capability without a key ID for userID's access to
+// port of agentID until exp (whole seconds). The IDs must be canonical
+// (see Parse).
 func Mint(key []byte, agentID string, port int, userID string, exp time.Time) string {
 	p := strconv.Itoa(port)
 	e := strconv.FormatInt(exp.Unix(), 10)
@@ -85,22 +121,49 @@ func Mint(key []byte, agentID string, port int, userID string, exp time.Time) st
 		sigEncoding.EncodeToString(mac(key, agentID, p, userID, e))
 }
 
-// Parse checks capability against key at now and returns what it names.
-// It refuses, with ErrInvalid: an empty key; anything but six fields
-// starting with "v1"; an agent or user ID that is not a canonical
+// MintVersioned is Mint for the key generation kid: the capability carries
+// kid and its signature covers it. kid must match the key ID syntax.
+func MintVersioned(key []byte, kid, agentID string, port int, userID string, exp time.Time) string {
+	p := strconv.Itoa(port)
+	e := strconv.FormatInt(exp.Unix(), 10)
+	return versionKeyed + "." + kid + "." + agentID + "." + p + "." + userID + "." + e + "." +
+		sigEncoding.EncodeToString(macKeyed(key, kid, agentID, p, userID, e))
+}
+
+// split returns the key ID ("" for none) and the five fields after it of
+// a capability of either form, or ok false for any other shape: six
+// fields starting with "v1", or seven starting with "v2" whose key ID
+// matches the key ID syntax.
+func split(capability string) (kid string, rest []string, ok bool) {
+	parts := strings.Split(capability, ".")
+	switch {
+	case len(parts) == fields && parts[0] == version:
+		return "", parts[1:], true
+	case len(parts) == fields+1 && parts[0] == versionKeyed && keyIDSyntax.MatchString(parts[1]):
+		return parts[1], parts[2:], true
+	}
+	return "", nil, false
+}
+
+// Parse checks capability against keys at now and returns what it names.
+// It refuses, with ErrInvalid: nil keys; any shape but the two forms (six
+// fields starting with "v1", or seven starting with "v2" with a key ID of
+// the key ID syntax); an agent or user ID that is not a canonical
 // (lower-case, hyphenated) UUID; a port or expiry that is not a decimal
 // without sign or leading zero, or a port outside 1..65535; a signature
-// that is not the canonical encoding or does not match; an expiry that is
-// not after now, or that lies more than ttl+MaxSkew after now.
-func Parse(key []byte, capability string, now time.Time, ttl time.Duration) (Grant, error) {
-	if len(key) == 0 {
+// that is not the canonical encoding or matches none of the keys that
+// keys returns for the capability's key ID (none for an unknown one); an
+// expiry that is not after now, or that lies more than ttl+MaxSkew after
+// now.
+func Parse(keys Keys, capability string, now time.Time, ttl time.Duration) (Grant, error) {
+	if keys == nil {
 		return Grant{}, ErrInvalid
 	}
-	parts := strings.Split(capability, ".")
-	if len(parts) != fields || parts[0] != version {
+	kid, parts, ok := split(capability)
+	if !ok {
 		return Grant{}, ErrInvalid
 	}
-	agentID, portStr, userID, expStr, sigStr := parts[1], parts[2], parts[3], parts[4], parts[5]
+	agentID, portStr, userID, expStr, sigStr := parts[0], parts[1], parts[2], parts[3], parts[4]
 	if !canonicalUUID(agentID) || !canonicalUUID(userID) {
 		return Grant{}, ErrInvalid
 	}
@@ -113,7 +176,26 @@ func Parse(key []byte, capability string, now time.Time, ttl time.Duration) (Gra
 		return Grant{}, ErrInvalid
 	}
 	sig, err := sigEncoding.DecodeString(sigStr)
-	if err != nil || !hmac.Equal(sig, mac(key, agentID, portStr, userID, expStr)) {
+	if err != nil {
+		return Grant{}, ErrInvalid
+	}
+	matched := false
+	for _, key := range keys(kid) {
+		if len(key) == 0 {
+			continue
+		}
+		var want []byte
+		if kid == "" {
+			want = mac(key, agentID, portStr, userID, expStr)
+		} else {
+			want = macKeyed(key, kid, agentID, portStr, userID, expStr)
+		}
+		if hmac.Equal(sig, want) {
+			matched = true
+			break
+		}
+	}
+	if !matched {
 		return Grant{}, ErrInvalid
 	}
 	t := time.Unix(exp, 0)
@@ -128,15 +210,15 @@ func Parse(key []byte, capability string, now time.Time, ttl time.Duration) (Gra
 // only used to send a page navigation back to the agent port's stable
 // link, which checks the caller itself.
 func Target(capability string) (agentID string, port int, ok bool) {
-	parts := strings.Split(capability, ".")
-	if len(parts) != fields || parts[0] != version || !canonicalUUID(parts[1]) {
+	_, parts, ok := split(capability)
+	if !ok || !canonicalUUID(parts[0]) {
 		return "", 0, false
 	}
-	p, ok := canonicalDecimal(parts[2])
+	p, ok := canonicalDecimal(parts[1])
 	if !ok || p < 1 || p > 65535 {
 		return "", 0, false
 	}
-	return parts[1], int(p), true
+	return parts[0], int(p), true
 }
 
 // CanonicalID reports whether s may be used as an agent or user ID in a

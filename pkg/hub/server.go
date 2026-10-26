@@ -1796,9 +1796,10 @@ type Server struct {
 	downloadKeys           capabilityKeys
 	artifactViewKeys       capabilityKeys
 	attachmentDeliveryKeys capabilityKeys
-	// portViewKey signs page view capabilities (port_view.go); separate
-	// from every other key.
-	portViewKey []byte
+	// portViewKeys sign page view capabilities (port_view.go): a
+	// signing-ring purpose of its own in keyring mode, one fixed key of its
+	// own otherwise; separate from every other key.
+	portViewKeys capabilityKeys
 	// portViewClock replaces time.Now on the page view route (tests only).
 	portViewClock func() time.Time
 

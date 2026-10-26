@@ -39,6 +39,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/portview"
+	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/gorilla/websocket"
@@ -64,13 +65,26 @@ func setPortViewExperiments(t *testing.T, srv *Server, conduitOn, portViewOn boo
 type portViewFixture struct {
 	*conduitProxyFixture
 	strangerToken string
+	// key is the one fixed page view key of the fixture's legacy-mode hub.
+	key []byte
+}
+
+// portViewLegacyKey returns the one fixed page view key of a legacy-mode
+// (no keyring) hub.
+func portViewLegacyKey(t *testing.T, s *Server) []byte {
+	t.Helper()
+	keys := s.portViewCapabilityKeys()
+	require.True(t, keys.configured(), "the port view key is initialised with the server")
+	legacy := keys.candidates("")
+	require.Len(t, legacy, 1, "a legacy-mode hub has one fixed page view key")
+	return legacy[0].Bytes()
 }
 
 func newPortViewFixture(t *testing.T, app http.Handler) *portViewFixture {
 	t.Helper()
 	f := &portViewFixture{conduitProxyFixture: newConduitProxyFixture(t, app)}
 	setPortViewExperiments(t, f.srv, true, true)
-	require.NotEmpty(t, f.srv.portViewSigningKey(), "the port view key is initialised with the server")
+	f.key = portViewLegacyKey(t, f.srv)
 	var err error
 	f.strangerToken, _, _, err = f.srv.userTokenService.GenerateTokenPair(
 		f.stranger.ID(), "stranger@conduit.test", "Stranger", store.UserRoleMember, ClientTypeWeb)
@@ -80,7 +94,7 @@ func newPortViewFixture(t *testing.T, app http.Handler) *portViewFixture {
 
 // capFor mints a capability for userID on port of the launched agent.
 func (f *portViewFixture) capFor(userID string, port int, exp time.Time) string {
-	return portview.Mint(f.srv.portViewSigningKey(), f.launched.ID, port, userID, exp)
+	return portview.Mint(f.key, f.launched.ID, port, userID, exp)
 }
 
 // ownerCap is a valid capability for the agent owner on the app port.
@@ -189,7 +203,7 @@ func TestPortView_PortLinkRedirectsAndServes(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "dir/index.html", sub)
 	assert.Equal(t, "a=1&b=two", view.RawQuery)
-	g, err := portview.Parse(f.srv.portViewSigningKey(), capability, time.Now(), f.srv.portViewTTL())
+	g, err := portview.Parse(f.srv.portViewKeyLookup(), capability, time.Now(), f.srv.portViewTTL())
 	require.NoError(t, err)
 	assert.Equal(t, portview.Grant{AgentID: f.launched.ID, Port: f.app.port, UserID: f.launched.OwnerID, Expires: g.Expires}, g)
 
@@ -214,7 +228,7 @@ func TestPortView_ViewTTL(t *testing.T) {
 		require.Equal(t, http.StatusFound, res.status, res.body)
 		view := resolveLocation(t, link, res)
 		capability, _, _ := strings.Cut(strings.TrimPrefix(view.Path, portview.Route), "/")
-		g, err := portview.Parse(f.srv.portViewSigningKey(), capability, now, tc.want)
+		g, err := portview.Parse(f.srv.portViewKeyLookup(), capability, now, tc.want)
 		require.NoError(t, err)
 		assert.Equal(t, now.Add(tc.want), g.Expires.UTC(), "ttl %s", tc.ttl)
 	}
@@ -385,7 +399,7 @@ func TestPortView_UniformFailure(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 	owner, port := f.launched.OwnerID, f.app.port
-	key := f.srv.portViewSigningKey()
+	key := f.key
 
 	// A soft-deleted agent of the same owner, exposing the same port.
 	deleted := &store.Agent{
@@ -593,7 +607,7 @@ func TestPortView_NavigationMatrix(t *testing.T) {
 	t.Run("valid link the user can no longer use, navigation", func(t *testing.T) {
 		foreign := f.capFor(f.stranger.ID(), f.app.port, time.Now().Add(time.Hour))
 		toPortLink(t, at(foreign), f.send(t, http.MethodGet, at(foreign), navHeader(), nil))
-		gone := portview.Mint(f.srv.portViewSigningKey(), tid("port-view-gone-agent"), f.app.port, f.launched.OwnerID, time.Now().Add(time.Hour))
+		gone := portview.Mint(f.key, tid("port-view-gone-agent"), f.app.port, f.launched.OwnerID, time.Now().Add(time.Hour))
 		res := f.send(t, http.MethodGet, f.viewURL(gone, "dir/page.html?q=1"), navHeader(), nil)
 		require.Equal(t, http.StatusFound, res.status, res.body)
 		got := resolveLocation(t, f.viewURL(gone, "dir/page.html?q=1"), res)
@@ -1020,4 +1034,174 @@ func (s *safeBuffer) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.b.String()
+}
+
+// ---------------------------------------------------------------------------
+// Signing ring
+// ---------------------------------------------------------------------------
+
+// portViewRingKeys returns the page view keys of ring k, with ring clock
+// clk (nil: wall clock).
+func portViewRingKeys(k *keyring.Keyring, clk *krClock) capabilityKeys {
+	c := capabilityKeys{ring: k.Signing(), purpose: sharedSecretPurpose(SecretKeyPortViewKey)}
+	if clk != nil {
+		c.now = clk.now
+	}
+	return c
+}
+
+// parsePortViewOn checks capability with srv's page view keys at now.
+func parsePortViewOn(srv *Server, capability string, now time.Time) error {
+	_, err := portview.Parse(srv.portViewKeyLookup(), capability, now, srv.portViewTTL())
+	return err
+}
+
+// TestPortView_SigningRingGoldenBytes pins both wire forms: a fixed legacy
+// key and a ring that emits legacy values sign the form without a key ID;
+// a ring that emits versioned values signs v2.<kid>... with the HMAC over
+// "port-view-v2", the key ID and the fields, under the generation's key
+// derived from the shared signing secret with the page view key name.
+func TestPortView_SigningRingGoldenBytes(t *testing.T) {
+	const agentID, userID = "0b6f2c1e-4a8d-4f5e-9c3b-2d1e0f9a8b7c", "7d3e9f10-2b4c-4d6e-8f01-a2b3c4d5e6f7"
+	exp := time.Unix(1893456000, 0)
+	fields := agentID + "\n8080\n" + userID + "\n1893456000"
+	layout := agentID + ".8080." + userID + ".1893456000."
+
+	fixed := []byte("test-only-golden-port-view-key-32")
+	got, err := (&Server{portViewKeys: fixedCapabilityKeys(fixed)}).mintPortView(agentID, 8080, userID, exp)
+	require.NoError(t, err)
+	assert.Equal(t, "v1."+layout+hmacB64(fixed, "port-view\n"+fields), got)
+
+	gen1 := deriveSharedSigningKey(krGen1Secret, SecretKeyPortViewKey)
+	legacyEmit := capKeyring(t, "gen1", "legacy", []string{"legacy", "gen1"},
+		krEntry{id: "legacy", secret: krLegacySecret}, krEntry{id: "gen1", secret: krGen1Secret})
+	got, err = (&Server{portViewKeys: portViewRingKeys(legacyEmit, nil)}).mintPortView(agentID, 8080, userID, exp)
+	require.NoError(t, err)
+	assert.Equal(t, "v1."+layout+hmacB64(gen1, "port-view\n"+fields), got)
+
+	versioned := capKeyring(t, "gen1", "versioned", []string{"legacy"},
+		krEntry{id: "legacy", secret: krLegacySecret}, krEntry{id: "gen1", secret: krGen1Secret})
+	got, err = (&Server{portViewKeys: portViewRingKeys(versioned, nil)}).mintPortView(agentID, 8080, userID, exp)
+	require.NoError(t, err)
+	assert.Equal(t, "v2.gen1."+layout+hmacB64(gen1, "port-view-v2\ngen1\n"+fields), got)
+}
+
+// TestPortView_SigningRingRotation: during a rollout a page link signed on
+// either replica opens on the other, in both forms; a link of the outgoing
+// generation stops opening once that generation's verify_until passes; a
+// key ID the ring does not know, or a signature by another generation's
+// key under a key ID, never opens; and a link without a key ID opens only
+// with the ring's legacy readers.
+func TestPortView_SigningRingRotation(t *testing.T) {
+	const agentID, userID = "0b6f2c1e-4a8d-4f5e-9c3b-2d1e0f9a8b7c", "7d3e9f10-2b4c-4d6e-8f01-a2b3c4d5e6f7"
+	for _, emit := range []string{"versioned", "legacy"} {
+		t.Run(emit, func(t *testing.T) {
+			clk := &krClock{t: krT0}
+			ka, kb := capRollout(t, emit)
+			a := &Server{portViewKeys: portViewRingKeys(ka, clk)}
+			b := &Server{portViewKeys: portViewRingKeys(kb, clk)}
+			exp := krT0.Add(time.Hour)
+
+			fromA, err := a.mintPortView(agentID, 8080, userID, exp)
+			require.NoError(t, err)
+			fromB, err := b.mintPortView(agentID, 8080, userID, exp)
+			require.NoError(t, err)
+			if emit == "versioned" {
+				assert.True(t, strings.HasPrefix(fromA, "v2.gen1."), fromA)
+				assert.True(t, strings.HasPrefix(fromB, "v2.gen2."), fromB)
+			} else {
+				assert.True(t, strings.HasPrefix(fromA, "v1."), fromA)
+				assert.True(t, strings.HasPrefix(fromB, "v1."), fromB)
+			}
+			for name, tc := range map[string]struct {
+				srv *Server
+				c   string
+			}{"A on A": {a, fromA}, "A on B": {b, fromA}, "B on A": {a, fromB}, "B on B": {b, fromB}} {
+				assert.NoError(t, parsePortViewOn(tc.srv, tc.c, krT0), name)
+			}
+
+			// Past gen1's verify_until on B (T0+48h), a gen1 link from A no
+			// longer opens on B; A still signs with gen1 (no deadline on A).
+			clk.t = krT0.Add(49 * time.Hour)
+			late, err := a.mintPortView(agentID, 8080, userID, clk.t.Add(time.Hour))
+			require.NoError(t, err)
+			require.NoError(t, parsePortViewOn(a, late, clk.t))
+			if emit == "versioned" {
+				assert.ErrorIs(t, parsePortViewOn(b, late, clk.t), portview.ErrInvalid, "retired generation")
+			}
+		})
+	}
+
+	k := capKeyring(t, "gen1", "versioned", []string{"legacy"},
+		krEntry{id: "legacy", secret: krLegacySecret}, krEntry{id: "gen1", secret: krGen1Secret})
+	srv := &Server{portViewKeys: portViewRingKeys(k, nil)}
+	now := time.Now()
+	exp := now.Add(time.Hour)
+	gen1 := deriveSharedSigningKey(krGen1Secret, SecretKeyPortViewKey)
+	legacy := deriveSharedSigningKey(krLegacySecret, SecretKeyPortViewKey)
+	for name, c := range map[string]string{
+		"unknown key ID":                        portview.MintVersioned(gen1, "gen9", agentID, 8080, userID, exp),
+		"another generation's key under gen1":   portview.MintVersioned(legacy, "gen1", agentID, 8080, userID, exp),
+		"no key ID, signed by a non-reader":     portview.Mint(gen1, agentID, 8080, userID, exp),
+		"no key ID, signed by an unrelated key": portview.Mint([]byte("test-only-unrelated-port-view-key"), agentID, 8080, userID, exp),
+	} {
+		assert.ErrorIs(t, parsePortViewOn(srv, c, now), portview.ErrInvalid, name)
+	}
+	assert.NoError(t, parsePortViewOn(srv, portview.Mint(legacy, agentID, 8080, userID, exp), now), "no key ID, signed by the legacy reader")
+	assert.NoError(t, parsePortViewOn(srv, portview.MintVersioned(legacy, "legacy", agentID, 8080, userID, exp), now), "key ID of the legacy generation")
+	assert.ErrorIs(t, parsePortViewOn(&Server{}, portview.Mint(legacy, agentID, 8080, userID, exp), now), portview.ErrInvalid, "no keys configured")
+}
+
+// TestPortView_SigningRingEndToEnd: with a ring that emits versioned
+// values, a page navigation to the port link is sent to a v2 page link,
+// which serves the page's sub-requests.
+func TestPortView_SigningRingEndToEnd(t *testing.T) {
+	f := newPortViewFixture(t, nil)
+	f.startAgent(t)
+	k := capKeyring(t, "gen1", "versioned", []string{"legacy"},
+		krEntry{id: "legacy", secret: krLegacySecret}, krEntry{id: "gen1", secret: krGen1Secret})
+	f.srv.mu.Lock()
+	f.srv.portViewKeys = portViewRingKeys(k, nil)
+	f.srv.mu.Unlock()
+
+	link := f.portLink("dir/index.html")
+	res := f.send(t, http.MethodGet, link, withBearer(navHeader(), f.userToken), nil)
+	require.Equal(t, http.StatusFound, res.status, res.body)
+	view := resolveLocation(t, link, res)
+	capability, _, ok := strings.Cut(strings.TrimPrefix(view.Path, portview.Route), "/")
+	require.True(t, ok)
+	require.True(t, strings.HasPrefix(capability, "v2.gen1."), capability)
+	served := f.send(t, http.MethodGet, view.String(), subHeader(), nil)
+	require.Equal(t, http.StatusOK, served.status, served.body)
+	assert.Equal(t, "hello /dir/index.html", served.body)
+}
+
+// TestPortView_IssuanceClosedServesPortLink: once the active generation
+// may no longer sign (past its sign_until), a page navigation to the port
+// link is served by the port link itself, with no redirect, and a page
+// link signed before then still opens until its own expiry.
+func TestPortView_IssuanceClosedServesPortLink(t *testing.T) {
+	f := newPortViewFixture(t, nil)
+	f.startAgent(t)
+	clk := &krClock{t: krT0}
+	keys := portViewRingKeys(capClosing(t), clk)
+	f.srv.mu.Lock()
+	f.srv.portViewKeys = keys
+	f.srv.mu.Unlock()
+
+	link := f.portLink("dir/index.html?a=1")
+	before := f.send(t, http.MethodGet, link, withBearer(navHeader(), f.userToken), nil)
+	require.Equal(t, http.StatusFound, before.status, before.body)
+	view := resolveLocation(t, link, before)
+
+	clk.t = krT0.Add(2 * time.Hour) // past gen1's sign_until (T0+1h), before its verify_until
+	_, err := f.srv.mintPortView(f.launched.ID, f.app.port, f.launched.OwnerID, time.Now().Add(time.Hour))
+	require.ErrorIs(t, err, errCapabilityIssuanceClosed)
+	res := f.send(t, http.MethodGet, link, withBearer(navHeader(), f.userToken), nil)
+	require.Equal(t, http.StatusOK, res.status, res.body)
+	assert.Empty(t, res.header.Get("Location"))
+	assert.Equal(t, "hello /dir/index.html?a=1", res.body)
+
+	served := f.send(t, http.MethodGet, view.String(), subHeader(), nil)
+	require.Equal(t, http.StatusOK, served.status, served.body)
 }

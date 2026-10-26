@@ -38,6 +38,31 @@ var (
 	testNow  = time.Unix(1_800_000_000, 0)
 )
 
+// legacyKeys returns Keys whose one key, for capabilities without a key
+// ID, is key; a key ID has none.
+func legacyKeys(key []byte) Keys {
+	return func(kid string) [][]byte {
+		if kid != "" {
+			return nil
+		}
+		return [][]byte{key}
+	}
+}
+
+// ringKeys returns Keys with the key of each key ID in m ("" for
+// capabilities without one), recording every key ID looked up in *asked.
+func ringKeys(m map[string][]byte, asked *[]string) Keys {
+	return func(kid string) [][]byte {
+		if asked != nil {
+			*asked = append(*asked, kid)
+		}
+		if k, ok := m[kid]; ok {
+			return [][]byte{k}
+		}
+		return nil
+	}
+}
+
 func mintAt(exp time.Time) string {
 	return Mint(testKey, testAgent, 8080, testUser, exp)
 }
@@ -58,7 +83,7 @@ func TestMintParseRoundTrip(t *testing.T) {
 	if !strings.HasPrefix(c, "v1."+testAgent+".8080."+testUser+"."+strconv.FormatInt(exp.Unix(), 10)+".") {
 		t.Fatalf("capability layout = %q", c)
 	}
-	g, err := Parse(testKey, c, testNow, testTTL)
+	g, err := Parse(legacyKeys(testKey), c, testNow, testTTL)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -122,7 +147,7 @@ func TestParseRefuses(t *testing.T) {
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
-			if g, err := Parse(testKey, c, testNow, testTTL); !errors.Is(err, ErrInvalid) || g != (Grant{}) {
+			if g, err := Parse(legacyKeys(testKey), c, testNow, testTTL); !errors.Is(err, ErrInvalid) || g != (Grant{}) {
 				t.Fatalf("Parse(%q) = %+v, %v; want ErrInvalid and a zero grant", c, g, err)
 			}
 		})
@@ -146,7 +171,7 @@ func TestParseExpiry(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := Parse(testKey, mintAt(tc.exp), testNow, testTTL)
+			_, err := Parse(legacyKeys(testKey), mintAt(tc.exp), testNow, testTTL)
 			if (err == nil) != tc.ok {
 				t.Fatalf("Parse err = %v, want ok=%v", err, tc.ok)
 			}
@@ -157,7 +182,103 @@ func TestParseExpiry(t *testing.T) {
 func TestParseEmptyKey(t *testing.T) {
 	c := Mint(nil, testAgent, 8080, testUser, testNow.Add(time.Hour))
 	if _, err := Parse(nil, c, testNow, testTTL); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("Parse with no key: %v, want ErrInvalid", err)
+		t.Fatalf("Parse with no keys: %v, want ErrInvalid", err)
+	}
+	if _, err := Parse(legacyKeys(nil), c, testNow, testTTL); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("Parse with an empty key: %v, want ErrInvalid", err)
+	}
+	v := MintVersioned(nil, "gen1", testAgent, 8080, testUser, testNow.Add(time.Hour))
+	if _, err := Parse(ringKeys(map[string][]byte{"gen1": nil}, nil), v, testNow, testTTL); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("Parse with an empty generation key: %v, want ErrInvalid", err)
+	}
+}
+
+// signKeyed builds a capability with a key ID from raw field strings,
+// signed with key over domain, kid and the fields.
+func signKeyed(key []byte, domain, ver, kid, agent, port, user, exp string) string {
+	m := hmac.New(sha256.New, key)
+	m.Write([]byte(domain + "\n" + kid + "\n" + agent + "\n" + port + "\n" + user + "\n" + exp))
+	return ver + "." + kid + "." + agent + "." + port + "." + user + "." + exp + "." +
+		base64.RawURLEncoding.EncodeToString(m.Sum(nil))
+}
+
+// TestMintVersionedParse: a capability with a key ID has the layout
+// v2.<kid>.<agent>.<port>.<user>.<exp>.<sig>, its signature is the HMAC
+// over "port-view-v2", the key ID and the fields, and it parses with the
+// key of that key ID, which is the only one looked up.
+func TestMintVersionedParse(t *testing.T) {
+	exp := testNow.Add(testTTL)
+	e := strconv.FormatInt(exp.Unix(), 10)
+	c := MintVersioned(testKey, "gen1", testAgent, 8080, testUser, exp)
+	if want := signKeyed(testKey, "port-view-v2", "v2", "gen1", testAgent, "8080", testUser, e); c != want {
+		t.Fatalf("MintVersioned = %q, want %q", c, want)
+	}
+	var asked []string
+	g, err := Parse(ringKeys(map[string][]byte{"gen1": testKey, "": otherKey}, &asked), c, testNow, testTTL)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	want := Grant{AgentID: testAgent, Port: 8080, UserID: testUser, Expires: time.Unix(exp.Unix(), 0)}
+	if g != want {
+		t.Fatalf("grant = %+v, want %+v", g, want)
+	}
+	if len(asked) != 1 || asked[0] != "gen1" {
+		t.Fatalf("key IDs looked up = %q, want only gen1", asked)
+	}
+	if a, p, ok := Target(c); !ok || a != testAgent || p != 8080 {
+		t.Fatalf("Target(versioned) = %q, %d, %v", a, p, ok)
+	}
+}
+
+// TestParseVersionedRefuses: a capability with a key ID is checked with
+// that key generation only. An unknown key ID, a key ID the signature does
+// not cover, a key of another generation or a key ID outside the key ID
+// syntax all fail the same way, and a bad key ID is never looked up.
+func TestParseVersionedRefuses(t *testing.T) {
+	exp := testNow.Add(time.Hour)
+	e := strconv.FormatInt(exp.Unix(), 10)
+	good := MintVersioned(testKey, "gen1", testAgent, 8080, testUser, exp)
+	ring := map[string][]byte{"gen1": testKey, "gen2": testKey, "": testKey}
+	cases := []struct {
+		name string
+		c    string
+		keys map[string][]byte
+	}{
+		{"unknown key ID", MintVersioned(testKey, "gen9", testAgent, 8080, testUser, exp), ring},
+		{"key ID moved to another generation", strings.Replace(good, "v2.gen1.", "v2.gen2.", 1), ring},
+		{"key ID not covered by the signature", signKeyed(testKey, "port-view", "v2", "gen1", testAgent, "8080", testUser, e), ring},
+		{"artifact view domain", signKeyed(testKey, "artifact-view-v2", "v2", "gen1", testAgent, "8080", testUser, e), ring},
+		{"signature without a key ID under a key ID", "v2.gen1." + strings.TrimPrefix(sign(testKey, "v1", testAgent, "8080", testUser, e), "v1."), ring},
+		{"another generation's key", good, map[string][]byte{"gen1": otherKey, "": testKey}},
+		{"only keys for links without a key ID", good, map[string][]byte{"": testKey}},
+		{"link without a key ID, no key for it", mintAt(exp), map[string][]byte{"gen1": testKey}},
+		{"keyed signature without a key ID", "v1." + strings.TrimPrefix(good, "v2.gen1."), ring},
+		{"v2 without a key ID", "v2." + strings.TrimPrefix(mintAt(exp), "v1."), ring},
+		{"v1 with a key ID", "v1." + strings.TrimPrefix(good, "v2."), ring},
+		{"empty key ID", strings.Replace(good, "v2.gen1.", "v2..", 1), ring},
+		{"key ID too long", strings.Replace(good, "v2.gen1.", "v2."+strings.Repeat("a", 33)+".", 1), ring},
+		{"key ID with a space", strings.Replace(good, "v2.gen1.", "v2.gen 1.", 1), ring},
+		{"key ID with a slash", strings.Replace(good, "v2.gen1.", "v2.gen/1.", 1), ring},
+		{"key ID with a dot", strings.Replace(good, "v2.gen1.", "v2.gen.1.", 1), ring},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var asked []string
+			if g, err := Parse(ringKeys(tc.keys, &asked), tc.c, testNow, testTTL); !errors.Is(err, ErrInvalid) || g != (Grant{}) {
+				t.Fatalf("Parse(%q) = %+v, %v; want ErrInvalid and a zero grant", tc.c, g, err)
+			}
+			for _, kid := range asked {
+				if !keyIDSyntax.MatchString(kid) && kid != "" {
+					t.Fatalf("key ID %q outside the syntax was looked up", kid)
+				}
+			}
+		})
+	}
+	// A key ID up to 32 characters of the syntax is accepted.
+	long := strings.Repeat("A-_9", 8)
+	c := MintVersioned(testKey, long, testAgent, 8080, testUser, exp)
+	if _, err := Parse(ringKeys(map[string][]byte{long: testKey}, nil), c, testNow, testTTL); err != nil {
+		t.Fatalf("32-character key ID: %v", err)
 	}
 }
 

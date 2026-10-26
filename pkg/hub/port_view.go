@@ -26,6 +26,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -70,7 +71,20 @@ const portViewPreflightMaxAge = "600"
 // same stable-key policy as the artifact view key: required on deployments
 // that need stable keys, otherwise an in-memory key, since losing it only
 // ends page links within their lifetime.
+//
+// In keyring mode the keys come from the signing ring instead (see
+// capability_keys.go) and nothing is read from the secret backend.
 func (s *Server) initPortViewKey(ctx context.Context) error {
+	if s.keyringManaged() {
+		keys, err := s.managedCapabilityKeys(SecretKeyPortViewKey)
+		if err != nil {
+			return err
+		}
+		s.mu.Lock()
+		s.portViewKeys = keys
+		s.mu.Unlock()
+		return nil
+	}
 	key, err := s.ensureSigningKey(ctx, SecretKeyPortViewKey, nil)
 	if err == nil && len(key) == 0 {
 		err = fmt.Errorf("port view key resolved to an empty value")
@@ -89,17 +103,61 @@ func (s *Server) initPortViewKey(ctx context.Context) error {
 		s.recordSigningKeySource(SecretKeyPortViewKey, signingKeySourceEphemeral)
 	}
 	s.mu.Lock()
-	s.portViewKey = key
+	s.portViewKeys = fixedCapabilityKeys(key)
 	s.mu.Unlock()
 	return nil
 }
 
-// portViewSigningKey returns the page view capability key (nil when it
-// was never initialised, which refuses every capability).
-func (s *Server) portViewSigningKey() []byte {
+// portViewCapabilityKeys returns the page view capability keys
+// (unconfigured when they were never initialised, which refuses every
+// capability and creates none).
+func (s *Server) portViewCapabilityKeys() capabilityKeys {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.portViewKey
+	return s.portViewKeys
+}
+
+// portViewKeyLookup returns the keys that may have signed a page link
+// with key ID kid: that generation only for a key ID (none when it is
+// unknown or retired), the legacy readers for a link without one.
+func (s *Server) portViewKeyLookup() portview.Keys {
+	keys := s.portViewCapabilityKeys()
+	if !keys.configured() {
+		return nil
+	}
+	return func(kid string) [][]byte {
+		var out [][]byte
+		for _, k := range keys.candidates(kid) {
+			out = append(out, k.Bytes())
+		}
+		return out
+	}
+}
+
+// portViewIssuanceClosedLogged makes the issuance-closed message of
+// mintPortView appear once per process.
+var portViewIssuanceClosedLogged atomic.Bool
+
+// mintPortView returns a page link capability for userID's access to port
+// of agentID until exp, signed by the active key generation, in the form
+// the signing ring selects (with or without a key ID). It fails when no
+// key is configured or none may sign now; the error names no key.
+func (s *Server) mintPortView(agentID string, port int, userID string, exp time.Time) (string, error) {
+	keys := s.portViewCapabilityKeys()
+	if !keys.configured() {
+		return "", errors.New("no port view key")
+	}
+	key, versioned, err := keys.issue()
+	if err != nil {
+		if errors.Is(err, errCapabilityIssuanceClosed) && portViewIssuanceClosedLogged.CompareAndSwap(false, true) {
+			slog.Warn("Port view: page links are not issued: the active signing generation may no longer sign (sign_until reached); port links are served directly")
+		}
+		return "", err
+	}
+	if versioned {
+		return portview.MintVersioned(key.Bytes(), key.ID, agentID, port, userID, exp), nil
+	}
+	return portview.Mint(key.Bytes(), agentID, port, userID, exp), nil
 }
 
 // portViewTTL is the configured lifetime of a page link
@@ -211,10 +269,10 @@ func (s *Server) handlePortView(w http.ResponseWriter, r *http.Request) {
 	rest := r.URL.Path[len(portview.Route):]
 	capability, sub, hasSlash := strings.Cut(rest, "/")
 	_, escSub, _ := strings.Cut(r.URL.EscapedPath()[len(portview.Route):], "/")
-	key, now, ttl := s.portViewSigningKey(), s.portViewNow(), s.portViewTTL()
+	keys, now, ttl := s.portViewKeyLookup(), s.portViewNow(), s.portViewTTL()
 
 	if r.Method == http.MethodOptions {
-		if _, err := portview.Parse(key, capability, now, ttl); err != nil {
+		if _, err := portview.Parse(keys, capability, now, ttl); err != nil {
 			writePortViewInvalid(w)
 			return
 		}
@@ -223,7 +281,7 @@ func (s *Server) handlePortView(w http.ResponseWriter, r *http.Request) {
 	}
 
 	navigation := (r.Method == http.MethodGet || r.Method == http.MethodHead) && portview.IsNavigation(r)
-	grant, err := portview.Parse(key, capability, now, ttl)
+	grant, err := portview.Parse(keys, capability, now, ttl)
 	if err != nil {
 		if agentID, port, ok := portview.Target(capability); ok && navigation {
 			redirectToPortLink(w, r, agentID, port, escSub)
@@ -337,8 +395,9 @@ func (s *Server) portViewIdentity(ctx context.Context, userID string, agent *sto
 // applies with the experiment on, to a GET or HEAD page navigation by a
 // signed-in user (not an agent or a token), for a loopback port of an
 // agent this node can reach over conduit, and only when the page view
-// route would serve that user (portViewIdentity). In every other case the
-// port link serves the request as before.
+// route would serve that user (portViewIdentity), and when a page link can
+// be signed now (mintPortView). In every other case the port link serves
+// the request as before.
 func (s *Server) redirectToPortView(w http.ResponseWriter, r *http.Request, agent *store.Agent, exposed *store.ExposedPort) bool {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		return false
@@ -365,8 +424,7 @@ func (s *Server) redirectToPortView(w http.ResponseWriter, r *http.Request, agen
 	if !ok {
 		return false
 	}
-	key := s.portViewSigningKey()
-	if len(key) == 0 {
+	if !s.portViewCapabilityKeys().configured() {
 		return false
 	}
 	if _, ok := s.portViewIdentity(r.Context(), userID, agent); !ok {
@@ -374,7 +432,11 @@ func (s *Server) redirectToPortView(w http.ResponseWriter, r *http.Request, agen
 		return false
 	}
 	exp := s.portViewNow().Add(s.portViewTTL()).Truncate(time.Second)
-	capability := portview.Mint(key, agent.ID, exposed.Port, userID, exp)
+	capability, err := s.mintPortView(agent.ID, exposed.Port, userID, exp)
+	if err != nil {
+		// No key may sign now: the port link serves the request.
+		return false
+	}
 	// A sub-path the page view route would not accept (isPortViewRequest)
 	// keeps the port link.
 	if u, err := url.Parse(portview.Route + capability + "/" + escSub); err != nil || !isPortViewRequest(&http.Request{URL: u}) {
