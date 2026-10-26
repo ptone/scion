@@ -29,16 +29,16 @@ import (
 // tests outside the web chat store files (handlers, attachments, UTC
 // timestamp and thread-group migration tests).
 //
-// The originals live in the web chat store test files, which move to
-// pkg/hub/webchat (ptone/scion#4269). These four build or read a web chat
+// The originals live in the web chat store test files in pkg/hub/webchat
+// (moved there by ptone/scion#4269). These four build or read a web chat
 // store, so they cannot live once in a shared support package: a non-test
-// package that imports pkg/hub (today) or pkg/hub/webchat (after the move)
-// cannot be imported by that package's own tests (import cycle), and
+// package that imports pkg/hub/webchat cannot be imported by that package's
+// own tests (import cycle), and
 // helpers in _test.go files cannot be imported by another package. The
 // generic database helpers they use live once in internal/hubtestutil.
 // Keep each copy in step with its original.
 
-// hubNewTestWebChatStoreV2 is newTestWebChatStoreV2 (webchannel_helpers_test.go):
+// hubNewTestWebChatStoreV2 is newTestWebChatStoreV2 (webchat/webchannel_helpers_test.go):
 // a WebChatStore backed by an in-memory SQLite DB.
 func hubNewTestWebChatStoreV2(t *testing.T) (WebChatStore, *sql.DB) {
 	t.Helper()
@@ -51,7 +51,7 @@ func hubNewTestWebChatStoreV2(t *testing.T) (WebChatStore, *sql.DB) {
 }
 
 // hubNewTestWebChatStoreWithConversations is
-// newTestWebChatStoreWithConversations (webchannel_helpers_test.go): a
+// newTestWebChatStoreWithConversations (webchat/webchannel_helpers_test.go): a
 // WebChatStore on an in-memory SQLite DB that also has the Ent-managed
 // conversations table, created before Init so the migrations see it.
 func hubNewTestWebChatStoreWithConversations(t *testing.T) (WebChatStore, *sql.DB) {
@@ -68,7 +68,7 @@ func hubNewTestWebChatStoreWithConversations(t *testing.T) (WebChatStore, *sql.D
 	return s, db
 }
 
-// hubNewEntWebChatStore is newEntWebChatStore (webchannel_sqlite_helpers_test.go):
+// hubNewEntWebChatStore is newEntWebChatStore (webchat/webchannel_sqlite_helpers_test.go):
 // a webchat store on the ent-migrated test store's database, as the hub does
 // in production. It returns the WebChatStore interface instead of the
 // concrete SQLite store, which pkg/hub cannot name once it moves.
@@ -84,7 +84,7 @@ func hubNewEntWebChatStore(t *testing.T) (WebChatStore, store.Store, *sql.DB) {
 	return wcs, s, db
 }
 
-// hubGetPrefs is getPrefs (webchannel_store_thread_groups_marker_test.go).
+// hubGetPrefs is getPrefs (webchat/webchannel_store_thread_groups_marker_test.go).
 func hubGetPrefs(t *testing.T, wcs WebChatStore, userID string) *WebChatUserPrefs {
 	t.Helper()
 	p, err := wcs.GetUserPrefs(context.Background(), userID)

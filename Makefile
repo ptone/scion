@@ -694,7 +694,9 @@ test-webchat-postgres:
 
 ## test-webchat-pkg-postgres: Run the pkg/hub/webchat store Postgres tests (WEBCHAT_POSTGRES_TESTS) against a real server
 # Requires SCION_TEST_POSTGRES_DSN; fails if it is unset, if any selected
-# test (or subtest) skips, or if any listed test reports no PASS line.
+# test (or subtest) skips, or if any listed test reports no PASS line. The
+# go test output is streamed with tee (its exit status is kept separately),
+# so a step killed mid-run still shows what ran (ptone/scion#4083).
 test-webchat-pkg-postgres:
 	@if [ -z "$$SCION_TEST_POSTGRES_DSN" ]; then \
 		echo "ERROR: SCION_TEST_POSTGRES_DSN is not set -- the Postgres tests would silently skip instead of running." >&2; \
@@ -702,10 +704,9 @@ test-webchat-pkg-postgres:
 	fi
 	@log=$$(mktemp) || exit 1; \
 	regex="^($$(echo $(WEBCHAT_POSTGRES_TESTS) | tr ' ' '|'))\$$"; \
-	go test -count=1 -timeout 20m -v -run "$$regex" ./pkg/hub/webchat > "$$log" 2>&1; \
-	status=$$?; \
-	cat "$$log"; \
-	if [ $$status -ne 0 ]; then rm -f "$$log"; exit $$status; fi; \
+	{ go test -count=1 -timeout 20m -v -run "$$regex" ./pkg/hub/webchat 2>&1; echo $$? > "$$log.rc"; } | tee "$$log"; \
+	status=$$(cat "$$log.rc"); rm -f "$$log.rc"; \
+	if [ "$$status" != 0 ]; then rm -f "$$log"; exit $$status; fi; \
 	if grep -qE '^[[:space:]]*--- SKIP' "$$log"; then \
 		echo "ERROR: one or more pkg/hub/webchat Postgres tests were skipped -- see '--- SKIP' lines above." >&2; rm -f "$$log"; exit 1; \
 	fi; \

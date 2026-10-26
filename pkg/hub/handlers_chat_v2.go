@@ -32,8 +32,8 @@
 //   - Real-time delivery uses SSE via the stateManager: project-scoped
 //     subjects for space threads, fan-out for DMs. Per-thread EventSource
 //     (wave-1) is replaced by a single multiplexed connection.
-//   - Storage uses the dual-dialect store (webchannel_store.go for SQLite,
-//     webchannel_store_postgres.go for Postgres) with new webchat_topic,
+//   - Storage uses the dual-dialect store (webchat/webchannel_store.go for SQLite,
+//     webchat/webchannel_store_postgres.go for Postgres) with new webchat_topic,
 //     webchat_read_state, webchat_user_prefs, and webchat_dm tables.
 //   - Wave-1 tables (webchat_thread, webchat_thread_prefs) remain in place.
 //     webchat_thread is still written by TouchThread (broker-inbound and

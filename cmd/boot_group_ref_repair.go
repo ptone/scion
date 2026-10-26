@@ -72,7 +72,8 @@ func runGroupRefRepair(ctx context.Context, s store.Store) {
 	slog.Info("Group ref repair: starting")
 
 	// We need raw SQL access for the webchat_topic table, which lives
-	// outside the ent schema (pkg/hub/webchat/webchannel_store_postgres.go (webchat_topic DDL)).
+	// outside the ent schema: see the webchat_topic DDL in
+	// pkg/hub/webchat/webchannel_store_postgres.go.
 	// Use the same interface-assertion pattern as server_foreground.go:596.
 	dbProvider, ok := s.(interface{ DB() *sql.DB })
 	if !ok {
