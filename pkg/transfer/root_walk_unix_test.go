@@ -283,7 +283,9 @@ func TestWalkRoot_SkipSemanticsMatchWalkDir(t *testing.T) {
 // entry with the chosen name is never followed or overwritten, and the walk
 // gives up after normalizeTempTries collisions.
 func TestNormalizeRoot_TemporaryNameCollisionRetried(t *testing.T) {
-	setSuffixes := func(t *testing.T, names ...string) {
+	// setSuffixes makes the suffix function return names in turn (the last
+	// one repeating) and returns a pointer to the number of calls.
+	setSuffixes := func(t *testing.T, names ...string) *int {
 		i := 0
 		orig := normalizeTempSuffix
 		normalizeTempSuffix = func() (string, error) {
@@ -295,6 +297,7 @@ func TestNormalizeRoot_TemporaryNameCollisionRetried(t *testing.T) {
 			return n, nil
 		}
 		t.Cleanup(func() { normalizeTempSuffix = orig })
+		return &i
 	}
 	t.Run("one collision", func(t *testing.T) {
 		dir := t.TempDir()
@@ -318,9 +321,12 @@ func TestNormalizeRoot_TemporaryNameCollisionRetried(t *testing.T) {
 		dir := t.TempDir()
 		writeReadTestFile(t, dir, "a.txt", "x\r\n")
 		writeReadTestFile(t, dir, ".scion-normalize.tmp-taken", "kept\n")
-		setSuffixes(t, "taken")
+		tries := setSuffixes(t, "taken")
 		if err := NormalizeRoot(openTestRoot(t, dir)); !errors.Is(err, fs.ErrExist) {
 			t.Errorf("err = %v, want the collision error after %d tries", err, normalizeTempTries)
+		}
+		if *tries != normalizeTempTries {
+			t.Errorf("tried %d temporary names, want exactly %d", *tries, normalizeTempTries)
 		}
 		if got, _ := os.ReadFile(filepath.Join(dir, "a.txt")); string(got) != "x\r\n" {
 			t.Errorf("a.txt = %q, want unchanged", got)
