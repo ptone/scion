@@ -20,12 +20,15 @@ package hub
 // for the agent's gh:// skills (agent.GitHubSkillResolver); they never
 // reach the container. The hub sends only the project-scope secrets those
 // skills can use, each authorized for delivery to the agent under the
-// delivery credential before its value is read.
+// delivery credential before its value is read. A secret named only by a
+// ?token= reference is sent only when its value is shaped like a GitHub
+// token (githubTokenShaped).
 
 import (
 	"context"
 	"errors"
 	"sort"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -35,7 +38,9 @@ import (
 )
 
 // ghCredentialKeysForSkills returns the secret names the broker's GitHub
-// skill resolver can look up for refs, sorted and without duplicates. It
+// skill resolver can look up for refs, sorted and without duplicates, and
+// the subset of those names that only a ?token= reference names (tokenOnly;
+// nil when there is none). It
 // follows the resolver's lookup (GitHubSkillResolver.lookupToken and
 // NewGitHubSkillResolverWithCredentials) for every ref the broker routes to
 // it (gh:// and github.com URLs, agent.ParseGitHubSkillURI):
@@ -47,30 +52,69 @@ import (
 //
 // Refs that are not GitHub skill refs add nothing, so an agent with no
 // gh:// refs gets no keys.
-func ghCredentialKeysForSkills(refs []api.SkillReference) []string {
-	set := make(map[string]struct{})
+//
+// A name that is also a convention key of a bare ref (GH_*, GITHUB_TOKEN)
+// is not in tokenOnly: the broker uses it for that ref whatever its value.
+func ghCredentialKeysForSkills(refs []api.SkillReference) (keys []string, tokenOnly map[string]bool) {
+	named := make(map[string]bool)
+	convention := make(map[string]bool)
 	for _, ref := range refs {
 		gh, err := agent.ParseGitHubSkillURI(ref.URI)
-		if err != nil || gh == nil {
+		if err != nil {
 			continue
 		}
 		if gh.TokenSecretName != "" {
-			set[gh.TokenSecretName] = struct{}{}
+			named[gh.TokenSecretName] = true
 			continue
 		}
-		set[ghauth.RepoKey(gh.Owner, gh.Repo)] = struct{}{}
-		set[ghauth.OwnerKey(gh.Owner)] = struct{}{}
-		set[ghauth.DefaultKey] = struct{}{}
+		convention[ghauth.RepoKey(gh.Owner, gh.Repo)] = true
+		convention[ghauth.OwnerKey(gh.Owner)] = true
+		convention[ghauth.DefaultKey] = true
 	}
-	if len(set) == 0 {
-		return nil
-	}
-	keys := make([]string, 0, len(set))
-	for k := range set {
+	for k := range convention {
 		keys = append(keys, k)
 	}
+	for k := range named {
+		if convention[k] {
+			continue
+		}
+		keys = append(keys, k)
+		if tokenOnly == nil {
+			tokenOnly = make(map[string]bool)
+		}
+		tokenOnly[k] = true
+	}
 	sort.Strings(keys)
-	return keys
+	return keys, tokenOnly
+}
+
+// githubTokenPrefixes are the documented prefixes of GitHub tokens:
+// personal access tokens (classic ghp_, fine-grained github_pat_), OAuth
+// (gho_), GitHub App user-to-server (ghu_), installation (ghs_) and refresh
+// (ghr_) tokens.
+var githubTokenPrefixes = []string{"ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"}
+
+// githubTokenShaped reports whether v looks like a GitHub token: a
+// documented prefix followed by one or more ASCII letters, digits or
+// underscores, and nothing else.
+func githubTokenShaped(v string) bool {
+	for _, p := range githubTokenPrefixes {
+		rest, ok := strings.CutPrefix(v, p)
+		if !ok {
+			continue
+		}
+		if rest == "" {
+			return false
+		}
+		for i := 0; i < len(rest); i++ {
+			c := rest[i]
+			if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '_' {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 // resolveProvisionCredentials returns the provision credentials for agent:
@@ -78,8 +122,11 @@ func ghCredentialKeysForSkills(refs []api.SkillReference) []string {
 // skill references (ghCredentialKeysForSkills), each one authorized as a
 // project-association delivery to the agent (Decide(secret.deliver) under
 // the delivery credential) before any value is read. Values are then
-// fetched by recorded metadata (FetchValues). User-scope secrets are never
-// sent. With no gh:// references, nothing is listed, authorized or sent.
+// fetched by recorded metadata (FetchValues). A secret named only by a
+// ?token= reference is then dropped unless its value is GitHub-token shaped
+// (githubTokenShaped), so such a reference cannot carry an arbitrary
+// project secret to the broker. User-scope secrets are never sent. With no
+// gh:// references, nothing is listed, authorized or sent.
 //
 // It is shared by the create, start and restart paths, so a gh:// skill
 // re-provisioned through any of them gets the same credentials. Failures
@@ -92,8 +139,9 @@ func (d *HTTPAgentDispatcher) resolveProvisionCredentials(ctx context.Context, a
 		return nil
 	}
 	var keys []string
+	var tokenOnly map[string]bool
 	if d.skillRefLister != nil {
-		keys = ghCredentialKeysForSkills(d.skillRefLister(ctx, agent))
+		keys, tokenOnly = ghCredentialKeysForSkills(d.skillRefLister(ctx, agent))
 	}
 	if len(keys) == 0 {
 		d.log.Info(callerName+": ProvisionCredentials resolved",
@@ -119,6 +167,7 @@ func (d *HTTPAgentDispatcher) resolveProvisionCredentials(ctx context.Context, a
 
 	sel := newDeliverySelector(d.authzService, agent, PurposeProvisionCredential)
 	var kept []secret.SecretMeta
+	var refused []string
 	for _, m := range projectSecrets {
 		if m.SecretType == store.SecretTypeInternal || !wanted[m.Name] {
 			continue
@@ -131,10 +180,16 @@ func (d *HTTPAgentDispatcher) resolveProvisionCredentials(ctx context.Context, a
 		}
 		if allowed {
 			kept = append(kept, m)
+		} else {
+			refused = append(refused, m.Name)
 		}
 	}
-	if d.debug && sel.denied > 0 {
-		d.log.Debug("material delivery: items not authorized", "agent_id", agent.ID, "purpose", string(sel.purpose), "count", sel.denied)
+	if len(refused) > 0 {
+		// Names only: a refused secret that is set would otherwise look,
+		// from the broker's skill error, as if it were missing.
+		sort.Strings(refused)
+		d.log.Warn(callerName+": ProvisionCredentials not authorized for delivery to the agent; not sent",
+			"agent_id", agent.ID, "project_id", agent.ProjectID, "secrets", refused)
 	}
 	if len(kept) == 0 {
 		d.log.Info(callerName+": ProvisionCredentials resolved",
@@ -153,17 +208,28 @@ func (d *HTTPAgentDispatcher) resolveProvisionCredentials(ctx context.Context, a
 	// interrupted counts secrets not fetched because ctx was cancelled or
 	// timed out. Those are reported once below rather than once per secret.
 	interrupted := 0
+	// interruptCause is the first per-item context error, reported when ctx
+	// itself has not ended.
+	var interruptCause error
 	for _, m := range kept {
 		r, ok := values[m.ID]
 		if !ok {
 			if ctx.Err() != nil {
 				interrupted++
+				continue
 			}
+			// FetchValues returns every requested ID; a backend that does
+			// not still gets the secret reported, by name only.
+			d.log.Warn(callerName+": failed to get project secret for ProvisionCredentials",
+				"agent_id", agent.ID, "project_id", agent.ProjectID, "secret", m.Name, "error", "no result returned")
 			continue
 		}
 		if r.Err != nil {
 			if ctx.Err() != nil || errors.Is(r.Err, context.Canceled) || errors.Is(r.Err, context.DeadlineExceeded) {
 				interrupted++
+				if interruptCause == nil {
+					interruptCause = r.Err
+				}
 				continue
 			}
 			// Secret name and project only; never the value.
@@ -171,14 +237,21 @@ func (d *HTTPAgentDispatcher) resolveProvisionCredentials(ctx context.Context, a
 				"agent_id", agent.ID, "project_id", agent.ProjectID, "secret", m.Name, "error", r.Err)
 			continue
 		}
-		if r.Value != "" {
-			creds[m.Name] = r.Value
+		if r.Value == "" {
+			continue
 		}
+		if tokenOnly[m.Name] && !githubTokenShaped(r.Value) {
+			// Secret name only; never the value or any part of it.
+			d.log.Warn(callerName+": ProvisionCredentials ?token= secret is not a GitHub token; not sent",
+				"agent_id", agent.ID, "project_id", agent.ProjectID, "secret", m.Name)
+			continue
+		}
+		creds[m.Name] = r.Value
 	}
 	if interrupted > 0 {
 		cause := ctx.Err()
 		if cause == nil {
-			cause = context.Canceled
+			cause = interruptCause
 		}
 		d.log.Warn(callerName+": ProvisionCredentials fetch stopped early; some project secrets were not fetched",
 			"agent_id", agent.ID, "project_id", agent.ProjectID, "not_fetched", interrupted, "error", cause)

@@ -87,37 +87,82 @@ func findProvisionCredsRecord(recs []map[string]any, level, msgSuffix string) ma
 
 // TestGHCredentialKeysForSkills pins the key set to the broker resolver's
 // lookup: ?token= names only its secret; any other GitHub ref names its
-// repo key, its owner key and GITHUB_TOKEN; other refs name nothing.
+// repo key, its owner key and GITHUB_TOKEN; other refs name nothing. A
+// ?token= name is token-only unless a bare ref also uses it as a
+// convention key.
 func TestGHCredentialKeysForSkills(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		uris []string
-		want []string
+		name          string
+		uris          []string
+		want          []string
+		wantTokenOnly map[string]bool
 	}{
-		{"none", nil, nil},
-		{"registry_and_gcp_only", []string{"skill://scion/global/test@1.0.0", "gcp-skill://reg/skill", ""}, nil},
-		{"unparseable_gh", []string{"gh://only-owner"}, nil},
+		{"none", nil, nil, nil},
+		{"registry_and_gcp_only", []string{"skill://scion/global/test@1.0.0", "gcp-skill://reg/skill", ""}, nil, nil},
+		{"unparseable_gh", []string{"gh://only-owner"}, nil, nil},
 		{"gh_shorthand", []string{"gh://Acme-Corp/tools/review@v1"},
-			[]string{"GH_ACME_CORP", "GH_ACME_CORP__TOOLS", "GITHUB_TOKEN"}},
+			[]string{"GH_ACME_CORP", "GH_ACME_CORP__TOOLS", "GITHUB_TOKEN"}, nil},
 		{"github_url", []string{"https://github.com/acme/tools/tree/main/skills/review"},
-			[]string{"GH_ACME", "GH_ACME__TOOLS", "GITHUB_TOKEN"}},
+			[]string{"GH_ACME", "GH_ACME__TOOLS", "GITHUB_TOKEN"}, nil},
 		{"token_param_only", []string{"gh://acme/tools/review?token=MY_SKILL_TOKEN"},
-			[]string{"MY_SKILL_TOKEN"}},
+			[]string{"MY_SKILL_TOKEN"}, map[string]bool{"MY_SKILL_TOKEN": true}},
 		{"merged_and_deduplicated", []string{
 			"gh://acme/tools/a",
 			"gh://acme/tools/b",
 			"gh://acme/other/c",
 			"gh://beta/repo/d?token=BETA_TOKEN",
 			"skill://scion/global/test",
-		}, []string{"BETA_TOKEN", "GH_ACME", "GH_ACME__OTHER", "GH_ACME__TOOLS", "GITHUB_TOKEN"}},
+		}, []string{"BETA_TOKEN", "GH_ACME", "GH_ACME__OTHER", "GH_ACME__TOOLS", "GITHUB_TOKEN"},
+			map[string]bool{"BETA_TOKEN": true}},
+		{"token_name_is_also_convention_key", []string{
+			"gh://acme/tools/a",
+			"gh://beta/repo/d?token=GH_ACME",
+			"gh://beta/repo/e?token=GITHUB_TOKEN",
+		}, []string{"GH_ACME", "GH_ACME__TOOLS", "GITHUB_TOKEN"}, nil},
+		{"convention_shaped_token_name_without_bare_ref", []string{"gh://beta/repo/d?token=GH_ACME"},
+			[]string{"GH_ACME"}, map[string]bool{"GH_ACME": true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var refs []api.SkillReference
 			for _, u := range tc.uris {
 				refs = append(refs, api.SkillReference{URI: u})
 			}
-			assert.Equal(t, tc.want, ghCredentialKeysForSkills(refs))
+			keys, tokenOnly := ghCredentialKeysForSkills(refs)
+			assert.Equal(t, tc.want, keys)
+			assert.Equal(t, tc.wantTokenOnly, tokenOnly)
 		})
+	}
+}
+
+// TestGitHubTokenShaped: a documented GitHub token prefix followed by one
+// or more letters, digits or underscores, and nothing else.
+func TestGitHubTokenShaped(t *testing.T) {
+	for _, v := range []string{
+		"ghp_Zq7mWx2Pk9aB3cD4eF5gH6iJ7kL8mN9oP0qR",
+		"gho_abc123",
+		"ghu_abc123",
+		"ghs_abc123",
+		"ghr_abc123",
+		"github_pat_11ABCDEFG0_abcdefghijklmnopqrstuvwxyz0123456789",
+	} {
+		assert.True(t, githubTokenShaped(v), v)
+	}
+	for _, v := range []string{
+		"",
+		"ghp_",
+		"github_pat_",
+		"GHP_abc123",
+		"ghx_abc123",
+		"sk-ant-api03-abcdef",
+		"AKIAIOSFODNN7EXAMPLE",
+		"0123456789abcdef0123456789abcdef01234567", // legacy 40-hex form
+		"ghp_abc 123",
+		"ghp_abc123\n",
+		"ghp_abc-123",
+		"Bearer ghp_abc123",
+		"-----BEGIN PRIVATE KEY-----",
+	} {
+		assert.False(t, githubTokenShaped(v), v)
 	}
 }
 
