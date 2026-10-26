@@ -921,8 +921,9 @@ func TestParity_E5b_DocumentedDivergenceOnLaterTransient(t *testing.T) {
 // TestParity_E6_CancellationBothVariants is row E6: P1 and A1 (raw
 // loop), the ctx is cancelled between tuple j and j+1, under both H4 store
 // variants. Every decision after cancellation must deep-equal the reference,
-// including Reason, because the memo bypasses entirely on a done ctx and
-// issues today's store call. AuthorizeReadBatch, called with an
+// including Reason, because on a done ctx the memo is bypassed entirely and
+// both runs stop at the same point (ptone/scion#6012: principal resolution
+// refuses without a store call). AuthorizeReadBatch, called with an
 // already-cancelled ctx, must return ctx.Err() in both runs.
 func TestParity_E6_CancellationBothVariants(t *testing.T) {
 	for _, honour := range []bool{true, false} {

@@ -71,14 +71,24 @@ func (a *AuthzService) principalStatusGate(ctx context.Context, principal Princi
 	if a.store == nil {
 		return principalStatusLookupReason, DenyCauseResolutionError
 	}
+	// Once the request context has ended, refuse without a lookup
+	// (ptone/scion#6012), as for a failed one.
+	if err := ctx.Err(); err != nil {
+		noteAuthzStopped(ctx, a.logger, "principal_status", err, "principal_id", principal.ID)
+		return principalStatusLookupReason, DenyCauseResolutionError
+	}
 	user, err := a.userForStatusGate(ctx, principal.ID)
 	if errors.Is(err, store.ErrNotFound) && offlineGrantorStatusExempt(ctx, principal, credential, permissionID) {
 		return "", ""
 	}
 	if gateErr := activeUserPredicate(principal, user, err); gateErr != nil {
 		if isProjectAccessLookupFault(gateErr) {
-			a.logger.Warn("failed to resolve user status for authorization (fail-closed)",
-				"principal_id", principal.ID, "error", err)
+			if authzStoppedByRequestEnd(ctx, err) {
+				noteAuthzStopped(ctx, a.logger, "principal_status", err, "principal_id", principal.ID)
+			} else {
+				a.logger.Warn("failed to resolve user status for authorization (fail-closed)",
+					"principal_id", principal.ID, "error", err)
+			}
 			return principalStatusLookupReason, DenyCauseResolutionError
 		}
 		return principalNotActiveReason, ""

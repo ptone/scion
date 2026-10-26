@@ -937,8 +937,12 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	authzIn := a.inputsFor(ctx, principal.Identity)
 	principals, err := authzIn.Principals()
 	if err != nil {
-		a.logger.Warn("failed to resolve authorization principals",
-			"principal_id", principal.ID, "error", err)
+		if authzStoppedByRequestEnd(ctx, err) {
+			noteAuthzStopped(ctx, a.logger, "principals", err, "principal_id", principal.ID)
+		} else {
+			a.logger.Warn("failed to resolve authorization principals",
+				"principal_id", principal.ID, "error", err)
+		}
 		errMsg := "principal resolution error: " + err.Error()
 		if request.Explain {
 			resolutionErrors = append(resolutionErrors, errMsg)
@@ -980,8 +984,12 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	// ── Step 3: Load active role bindings (batched) ───────────────────
 	bindings, err := authzIn.Bindings()
 	if err != nil {
-		a.logger.Warn("failed to load role bindings",
-			"principal_id", principal.ID, "error", err)
+		if authzStoppedByRequestEnd(ctx, err) {
+			noteAuthzStopped(ctx, a.logger, "role_bindings", err, "principal_id", principal.ID)
+		} else {
+			a.logger.Warn("failed to load role bindings",
+				"principal_id", principal.ID, "error", err)
+		}
 		errMsg := "binding resolution error: " + err.Error()
 		if request.Explain {
 			resolutionErrors = append(resolutionErrors, errMsg)
@@ -1004,8 +1012,12 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	// ── Step 4: Load role definitions ─────────────────────────────────
 	roleDefs, err := authzIn.RoleDefs()
 	if err != nil {
-		a.logger.Warn("failed to load role definitions",
-			"principal_id", principal.ID, "error", err)
+		if authzStoppedByRequestEnd(ctx, err) {
+			noteAuthzStopped(ctx, a.logger, "role_definitions", err, "principal_id", principal.ID)
+		} else {
+			a.logger.Warn("failed to load role definitions",
+				"principal_id", principal.ID, "error", err)
+		}
 		errMsg := "role resolution error: " + err.Error()
 		if request.Explain {
 			resolutionErrors = append(resolutionErrors, errMsg)
