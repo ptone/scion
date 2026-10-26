@@ -29,7 +29,9 @@ import (
 // nothing is fetched into it (the old content is left as it is), and the
 // error says why.
 func TestFetchRemoteTemplate_CacheCleanupFailureFailsTheFetch(t *testing.T) {
-	const uri = "https://example.invalid/scion/template.tar.gz"
+	// Neither a GitHub folder nor an archive: a fetch past the cleanup would
+	// fail at once as an unsupported type, with no network access.
+	const uri = "https://example.invalid/scion/template"
 
 	t.Run("planted RemoveAll error", func(t *testing.T) {
 		t.Setenv("HOME", t.TempDir())
