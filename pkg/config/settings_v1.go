@@ -1590,6 +1590,13 @@ type V1ServerHubConfig struct {
 	// HubServerConfig.TestIdentities). It is file/env only: the
 	// server-config API refuses it in every mode.
 	TestIdentities *V1TestIdentitiesConfig `json:"test_identities,omitempty" yaml:"test_identities,omitempty" koanf:"test_identities"`
+	// GCPProjectID is server.hub.gcp_project_id (see
+	// HubServerConfig.GCPProjectID): the hub's own GCP project, used for
+	// service-account minting, the Policy Troubleshooter quota project and
+	// the hub's metrics and trace export. Read once at startup. It is
+	// file/env only: the server-config API refuses it in every mode and GET
+	// leaves it out (HubGCPProjectIDKey).
+	GCPProjectID string `json:"gcp_project_id,omitempty" yaml:"gcp_project_id,omitempty" koanf:"gcp_project_id"`
 	// AgentEndpoint optionally overrides the Hub URL injected into agents as
 	// SCION_HUB_ENDPOINT, without changing PublicURL's other uses (invite
 	// links, chat-bridge links, the OIDC issuer default, the cloudrun_invoker
@@ -4118,6 +4125,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.HubClass != "" {
 			gc.Hub.HubClass = v1.Hub.HubClass
 		}
+		if v1.Hub.GCPProjectID != "" {
+			gc.Hub.GCPProjectID = v1.Hub.GCPProjectID
+		}
 		if v1.Hub.TestIdentities != nil {
 			ti := &TestIdentitiesConfig{AdminWebSessions: v1.Hub.TestIdentities.AdminWebSessions}
 			for _, e := range v1.Hub.TestIdentities.WorkloadIssuers {
@@ -4580,6 +4590,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		AgentEndpoint:          gc.Hub.AgentEndpoint,
 		MonitoringDashboardURL: gc.Hub.MonitoringDashboardURL,
 		HubClass:               gc.Hub.HubClass,
+		GCPProjectID:           gc.Hub.GCPProjectID,
 		ReadTimeout:            gc.Hub.ReadTimeout.String(),
 		WriteTimeout:           gc.Hub.WriteTimeout.String(),
 		AdminEmails:            gc.Hub.AdminEmails,
@@ -4848,22 +4859,32 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 
 	// Federation
 	if gc.Federation.Enabled || len(gc.Federation.TrustedIssuers) > 0 {
-		v1.Federation = &V1FederationConfig{
-			Enabled:    &gc.Federation.Enabled,
-			Algorithms: gc.Federation.Algorithms,
-		}
-		if gc.Federation.Cache.RefreshInterval > 0 {
-			v1.Federation.RefreshInterval = gc.Federation.Cache.RefreshInterval.String()
-		}
-		if gc.Federation.Cache.DebounceInterval > 0 {
-			v1.Federation.DebounceInterval = gc.Federation.Cache.DebounceInterval.String()
-		}
-		for _, ti := range gc.Federation.TrustedIssuers {
-			v1.Federation.TrustedIssuers = append(v1.Federation.TrustedIssuers, V1TrustedIssuerConfig(ti))
-		}
+		v1.Federation = ConvertFederationToV1(&gc.Federation)
 	}
 
 	return v1
+}
+
+// ConvertFederationToV1 converts a federation configuration to the admin
+// API wire format, whatever its content. ConvertGlobalToV1ServerConfig
+// emits federation only when it is enabled or has trusted issuers; a
+// caller that knows a federation section is stored (the database-mode
+// server-config GET) uses this to report it in full.
+func ConvertFederationToV1(fc *FederationConfig) *V1FederationConfig {
+	out := &V1FederationConfig{
+		Enabled:    &fc.Enabled,
+		Algorithms: fc.Algorithms,
+	}
+	if fc.Cache.RefreshInterval > 0 {
+		out.RefreshInterval = fc.Cache.RefreshInterval.String()
+	}
+	if fc.Cache.DebounceInterval > 0 {
+		out.DebounceInterval = fc.Cache.DebounceInterval.String()
+	}
+	for _, ti := range fc.TrustedIssuers {
+		out.TrustedIssuers = append(out.TrustedIssuers, V1TrustedIssuerConfig(ti))
+	}
+	return out
 }
 
 // AdaptLegacySettings converts a legacy Settings struct to VersionedSettings.
