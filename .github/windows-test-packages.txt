@@ -8,6 +8,8 @@
 # tests), as on Linux, and it runs anchored tests only.
 # A package left off for a Windows-environment reason gets a one-line reason
 # here; nothing is skipped.
+# ./pkg/util: anchored to its Windows tests (the full suite is POSIX-bound).
+./pkg/util -run=^(TestWindowsRemoveSymlinkSafe_FailsClosed|TestWindowsRemoveAllSafe_SymlinkFailsClosed|TestWindowsRemoveAllSafe_NoSymlinkRemoves)$
 ./pkg/util/privatefs
 ./pkg/util/pathcanon
 ./pkg/util/filelock
