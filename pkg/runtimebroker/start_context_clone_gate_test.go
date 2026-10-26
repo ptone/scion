@@ -46,6 +46,9 @@ func recordProvisionSharedWorktree(t *testing.T) (*[]provision.ProvisionInput, *
 	return &inputs, &errs
 }
 
+// requireWorktreeEligible fails, rather than skips, on a host whose git is
+// too old for worktree mode: these tests pin the broker's clone check and
+// hardening, which must not pass silently by skipping.
 func requireWorktreeEligible(t *testing.T) {
 	t.Helper()
 	if eligible, reason := runtime.WorktreeModeEligible(); !eligible {

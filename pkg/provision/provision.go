@@ -273,8 +273,8 @@ type ProvisionInput struct {
 	// GIT_ALLOW_PROTOCOL limited to HostCloneProtocols, so only the https,
 	// ssh and git transports can be used (no local path, file://, ext:: or
 	// other helper transport) and no hook, fsmonitor or pager runs. The hub,
-	// the broker and the Cloud Run runtime set it for their host-side
-	// clones. Independently of it, ProvisionShared refuses any GitClone.URL
+	// the broker, the Cloud Run runtime and the Kubernetes provisioning init
+	// container (sciontool provision) set it for their clones. Independently of it, ProvisionShared refuses any GitClone.URL
 	// that CheckHostCloneURL refuses.
 	HostGitHardened bool
 

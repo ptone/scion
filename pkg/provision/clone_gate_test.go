@@ -22,7 +22,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -142,7 +141,7 @@ func TestAllowLocalCloneFixture_NotHonouredOutsideTestBinary(t *testing.T) {
 	bare := newBareGitRepo(t)
 	dir := t.TempDir()
 	probe := filepath.Join(dir, "prodprobe")
-	build := exec.Command(filepath.Join(runtime.GOROOT(), "bin", "go"), "build", "-buildvcs=false", "-o", probe, "./testdata/prodprobe")
+	build := exec.Command("go", "build", "-buildvcs=false", "-o", probe, "./testdata/prodprobe")
 	out, err := build.CombinedOutput()
 	require.NoError(t, err, "build prodprobe: %s", out)
 

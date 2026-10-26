@@ -1753,6 +1753,11 @@ func worktreeBaseIsProvisioned(in provision.ProvisionInput) bool {
 	return true
 }
 
+// provisionSharedWorktree runs the broker's host-side shared-base
+// provisioning (provision.ProvisionShared). A variable so tests can observe
+// the input.
+var provisionSharedWorktree = provision.ProvisionShared
+
 // tryProvisionWorktree attempts to provision a per-agent worktree on the host
 // for worktree-per-agent mode. On success it sets opts.Workspace to the
 // worktree path and returns (true, repoRoot, nil), where repoRoot is the
@@ -1772,11 +1777,6 @@ func worktreeBaseIsProvisioned(in provision.ProvisionInput) bool {
 // dispatchRuntimeType), not the broker's default runtime: host-side
 // provisioning is skipped for an agent dispatched to kubernetes even when the
 // broker's default runtime is docker.
-// provisionSharedWorktree runs the broker's host-side shared-base
-// provisioning (provision.ProvisionShared). A variable so tests can observe
-// the input.
-var provisionSharedWorktree = provision.ProvisionShared
-
 func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs, opts *api.StartOptions, env map[string]string, runtimeName string) (bool, string, error) {
 	// A path recovered from the agent's container is a .scion directory,
 	// not the project root a worktree base is created under; provisioning
