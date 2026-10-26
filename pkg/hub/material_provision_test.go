@@ -39,10 +39,10 @@ var provisionTestRefs = []string{
 	"skill://scion/global/test@1.0.0",
 }
 
-// newProvisionFixture is a launch delivery fixture (newLDFixture) whose
+// newProvisionCredsFixture is a launch delivery fixture (newLDFixture) whose
 // dispatcher reads provisionTestRefs as the agent's merged skill
 // references and whose secret backend records what it is asked to fetch.
-func newProvisionFixture(t *testing.T, name string, opts ldOptions) (*ldFixture, *ldRecordingSecretBackend, *lockedBuffer) {
+func newProvisionCredsFixture(t *testing.T, name string, opts ldOptions) (*ldFixture, *ldRecordingSecretBackend, *lockedBuffer) {
 	t.Helper()
 	m := newLDFixture(t, name, opts)
 	rec := &ldRecordingSecretBackend{SecretBackend: m.backend}
@@ -70,7 +70,7 @@ func fetchedNames(rec *ldRecordingSecretBackend) []string {
 // owner key of a ?token= ref) are neither fetched nor sent. Each sent entry
 // is the secret's name and stored value, as before.
 func TestProvisionCredentials_LimitedToSkillFetchKeys(t *testing.T) {
-	m, rec, _ := newProvisionFixture(t, "pc-limited", ldOptions{})
+	m, rec, _ := newProvisionCredsFixture(t, "pc-limited", ldOptions{})
 	project := m.agent.ProjectID
 	m.secret(t, "GH_ACME__TOOLS", "repo-value", store.SecretTypeEnvironment, store.ScopeProject, project)
 	m.secret(t, "GH_ACME", "owner-value", store.SecretTypeFile, store.ScopeProject, project)
@@ -108,14 +108,14 @@ func TestProvisionCredentials_UserScopeTokenNotSent(t *testing.T) {
 		m.secret(t, "BETA_TOKEN", "broker-value", store.SecretTypeEnvironment, store.ScopeRuntimeBroker, m.broker.ID)
 	}
 	t.Run("no_project_secret", func(t *testing.T) {
-		m, rec, _ := newProvisionFixture(t, "pc-user-only", ldOptions{})
+		m, rec, _ := newProvisionCredsFixture(t, "pc-user-only", ldOptions{})
 		seedOtherScopes(t, m)
 
 		assert.Nil(t, m.d.resolveProvisionCredentials(context.Background(), m.agent, "test"))
 		assert.Empty(t, fetchedNames(rec), "nothing is fetched")
 	})
 	t.Run("beside_project_secret", func(t *testing.T) {
-		m, rec, _ := newProvisionFixture(t, "pc-user-beside", ldOptions{})
+		m, rec, _ := newProvisionCredsFixture(t, "pc-user-beside", ldOptions{})
 		seedOtherScopes(t, m)
 		m.secret(t, "GH_ACME", "project-value", store.SecretTypeEnvironment, store.ScopeProject, m.agent.ProjectID)
 
@@ -145,7 +145,7 @@ func TestProvisionCredentials_RefusedAssociationNotSentOrFetched(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			m, rec, _ := newProvisionFixture(t, "pc-refused-"+tc.name, tc.opts)
+			m, rec, _ := newProvisionCredsFixture(t, "pc-refused-"+tc.name, tc.opts)
 			m.secret(t, "GH_ACME", "project-value", store.SecretTypeEnvironment, store.ScopeProject, m.agent.ProjectID)
 			m.secret(t, "GITHUB_TOKEN", "default-value", store.SecretTypeEnvironment, store.ScopeProject, m.agent.ProjectID)
 			if tc.prep != nil {
@@ -162,7 +162,7 @@ func TestProvisionCredentials_RefusedAssociationNotSentOrFetched(t *testing.T) {
 // TestProvisionCredentials_AdmittedControl is the admitted control for the
 // refused rows above: the same fixture and secrets, unchanged, are sent.
 func TestProvisionCredentials_AdmittedControl(t *testing.T) {
-	m, rec, _ := newProvisionFixture(t, "pc-control", ldOptions{})
+	m, rec, _ := newProvisionCredsFixture(t, "pc-control", ldOptions{})
 	m.secret(t, "GH_ACME", "project-value", store.SecretTypeEnvironment, store.ScopeProject, m.agent.ProjectID)
 	m.secret(t, "GITHUB_TOKEN", "default-value", store.SecretTypeEnvironment, store.ScopeProject, m.agent.ProjectID)
 
@@ -175,7 +175,7 @@ func TestProvisionCredentials_AdmittedControl(t *testing.T) {
 // minted from the stored agent and every matching item admitted before
 // any value is fetched.
 func TestProvisionCredentials_MintBeforeFetch(t *testing.T) {
-	m, _, _ := newProvisionFixture(t, "pc-order", ldOptions{})
+	m, _, _ := newProvisionCredsFixture(t, "pc-order", ldOptions{})
 	var log []string
 	m.d.SetSecretBackend(&ldRecordingSecretBackend{SecretBackend: m.backend, log: &log})
 	m.secret(t, "GH_ACME", "a", store.SecretTypeEnvironment, store.ScopeProject, m.agent.ProjectID)
@@ -218,7 +218,7 @@ func TestProvisionCredentials_FetchFailures(t *testing.T) {
 		return failing, ok
 	}
 	t.Run("item_error", func(t *testing.T) {
-		m, _, buf := newProvisionFixture(t, "pc-item-err", ldOptions{})
+		m, _, buf := newProvisionCredsFixture(t, "pc-item-err", ldOptions{})
 		failing, _ := seed(t, m)
 		m.d.SetSecretBackend(&ldFaultSecretBackend{SecretBackend: m.backend, itemErrID: failing.ID})
 
@@ -234,7 +234,7 @@ func TestProvisionCredentials_FetchFailures(t *testing.T) {
 		assert.NotContains(t, buf.String(), "value-that-must-not-be-logged", "secret values must never be logged")
 	})
 	t.Run("whole_fetch_error", func(t *testing.T) {
-		m, _, buf := newProvisionFixture(t, "pc-fetch-err", ldOptions{})
+		m, _, buf := newProvisionCredsFixture(t, "pc-fetch-err", ldOptions{})
 		seed(t, m)
 		m.d.SetSecretBackend(&ldFaultSecretBackend{SecretBackend: m.backend, fetchErr: errors.New("backend unavailable")})
 
@@ -243,7 +243,7 @@ func TestProvisionCredentials_FetchFailures(t *testing.T) {
 		require.NotNil(t, warn, "log: %s", buf.String())
 	})
 	t.Run("request_ended", func(t *testing.T) {
-		m, _, buf := newProvisionFixture(t, "pc-cancel", ldOptions{})
+		m, _, buf := newProvisionCredsFixture(t, "pc-cancel", ldOptions{})
 		seed(t, m)
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -300,7 +300,7 @@ func TestProvisionCredentials_CallerParity(t *testing.T) {
 		m.secret(t, "GITHUB_TOKEN", "user-value", store.SecretTypeEnvironment, store.ScopeUser, m.agent.OwnerID)
 	}
 
-	m, _, _ := newProvisionFixture(t, "pc-parity", ldOptions{})
+	m, _, _ := newProvisionCredsFixture(t, "pc-parity", ldOptions{})
 	seed(t, m)
 	ctx := context.Background()
 
@@ -322,7 +322,7 @@ func TestProvisionCredentials_CallerParity(t *testing.T) {
 // as a provision credential and is not placed in the container env or
 // secrets of the restart.
 func TestProvisionCredentials_NotInContainerEnv(t *testing.T) {
-	m, _, _ := newProvisionFixture(t, "pc-not-env", ldOptions{})
+	m, _, _ := newProvisionCredsFixture(t, "pc-not-env", ldOptions{})
 	_, _, err := m.backend.Set(context.Background(), &secret.SetSecretInput{
 		Name: "GH_ACME", Value: "provision-only", SecretType: store.SecretTypeEnvironment, Target: "GH_ACME",
 		Scope: store.ScopeProject, ScopeID: m.agent.ProjectID, InjectionMode: store.InjectionModeAsNeeded, CreatedBy: m.projectOwnerID,
