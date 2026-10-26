@@ -121,6 +121,23 @@ var requestDoneWarnMsgs = []string{
 
 const requestDoneSummaryMsg = "authorization checks stopped after the request context ended"
 
+// requestDoneNoteCount reads the note's count under its lock.
+func requestDoneNoteCount(n *authzStoppedNote) int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.count
+}
+
+// requestDoneNoteField reads the note's first site or class under its lock.
+func requestDoneNoteField(n *authzStoppedNote, field string) string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if field == "site" {
+		return n.firstSite
+	}
+	return n.class
+}
+
 // requestDoneStore counts reads and can run a hook on GetAgent.
 type requestDoneStore struct {
 	store.Store
@@ -262,7 +279,7 @@ func TestAuthzRequestDone_PrincipalsNotResolvedAfterCancel(t *testing.T) {
 					liveTotal += live[m]
 				}
 				require.Positive(t, liveTotal, "the live decisions read the caller's inputs")
-				require.Zero(t, note.count, "nothing is counted while the request is live")
+				require.Zero(t, requestDoneNoteCount(note), "nothing is counted while the request is live")
 
 				cancel()
 				for i, tp := range tuples {
@@ -274,9 +291,9 @@ func TestAuthzRequestDone_PrincipalsNotResolvedAfterCancel(t *testing.T) {
 					assert.Equal(t, live[m], st.countOf(m), "no %s after the cancellation", m)
 				}
 				assert.Zero(t, logs.count(slog.LevelWarn), "no WARN for decisions after the cancellation")
-				assert.Equal(t, len(tuples), note.count, "each stopped decision is counted once")
-				assert.Equal(t, site, note.firstSite)
-				assert.Equal(t, "canceled", note.class)
+				assert.Equal(t, len(tuples), requestDoneNoteCount(note), "each stopped decision is counted once")
+				assert.Equal(t, site, requestDoneNoteField(note, "site"))
+				assert.Equal(t, "canceled", requestDoneNoteField(note, "class"))
 			})
 		}
 	}
@@ -419,8 +436,8 @@ func TestAuthzRequestDone_StandingRememberedAndDenies(t *testing.T) {
 	}
 	assert.Equal(t, 1, rs.countOf("GetAgent"), "only the first check reads; the rest are remembered")
 	assert.Zero(t, logs.count(slog.LevelWarn, requestDoneWarnMsgs...), "no WARN for a check cut short by the request ending")
-	assert.Equal(t, 1, note.count)
-	assert.Equal(t, "agent_standing", note.firstSite)
+	assert.Equal(t, 1, requestDoneNoteCount(note))
+	assert.Equal(t, "agent_standing", requestDoneNoteField(note, "site"))
 
 	// A different agent on the ended request refuses without a read.
 	err := f.srv.agentStanding(ctx, f.childC.ID)
@@ -481,7 +498,7 @@ func TestAuthzRequestDone_CountReachableAgentsStops(t *testing.T) {
 	assert.Equal(t, before, rs.total(), "no read on an ended request")
 	// The loop itself stopped: no per-target decision ran, so not even the
 	// sender's standing check was reached and counted.
-	assert.Zero(t, note.count, "no per-target decision runs on an ended request")
+	assert.Zero(t, requestDoneNoteCount(note), "no per-target decision runs on an ended request")
 	// Probe: one decision on the same ended request does reach the
 	// standing check and is counted, so the zero above is the loop's break.
 	other := agents.Items[0]
@@ -489,7 +506,7 @@ func TestAuthzRequestDone_CountReachableAgentsStops(t *testing.T) {
 		other = agents.Items[1]
 	}
 	assert.False(t, f.srv.evaluateAgentMessageForSender(ctx, agentIdentityFromAgent(&sender), &sender, &other).Allowed)
-	assert.Equal(t, 1, note.count, "a decision on the ended request is counted")
+	assert.Equal(t, 1, requestDoneNoteCount(note), "a decision on the ended request is counted")
 	assert.Zero(t, logs.count(slog.LevelWarn))
 }
 
@@ -533,7 +550,7 @@ func TestAuthzRequestDone_OwnDeadlineOnLiveRequestWarns(t *testing.T) {
 	assert.False(t, d.Allowed)
 	assert.Equal(t, 1, authzLogs.count(slog.LevelWarn, "failed to resolve authorization principals"), "an own deadline keeps the WARN")
 
-	assert.Zero(t, note.count, "nothing is counted while the request is live")
+	assert.Zero(t, requestDoneNoteCount(note), "nothing is counted while the request is live")
 
 	// Without a note: a deadline WARNs, a cancellation does not.
 	before := logs.count(slog.LevelWarn, "agent standing lookup failed")
@@ -595,4 +612,47 @@ func TestAuthzRequestDone_OneSummaryPerRequest(t *testing.T) {
 	sums = logs.find(requestDoneSummaryMsg)
 	require.Len(t, sums, 3, "one summary for nested installs")
 	assert.Equal(t, "3", sums[2].attrs["count"])
+}
+
+// A detached check (context.WithoutCancel of the request plus its own
+// timeout) that runs past its own bound after the request ended keeps its
+// WARN and is not counted; a check whose deadline is the request's own is
+// counted with class deadline; and a stopped check after the summary was
+// written is logged as a WARN, never counted silently.
+func TestAuthzRequestDone_DetachedAndAfterEmit(t *testing.T) {
+	f := newMSFixture(t, "reqdone-detached")
+	logs := captureRequestDoneDefaultLog(t)
+	const warn = "agent standing lookup failed"
+
+	// Detached check after the request ended.
+	reqCtx, cancelReq := context.WithCancel(context.Background())
+	ctx, note := withAuthzStoppedNote(reqCtx)
+	require.NotNil(t, note)
+	detached, cancelDetached := context.WithTimeout(context.WithoutCancel(ctx), time.Nanosecond)
+	defer cancelDetached()
+	<-detached.Done()
+	cancelReq()
+	err := f.srv.agentStanding(detached, f.agentA.ID)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, context.DeadlineExceeded))
+	assert.Equal(t, 1, logs.count(slog.LevelWarn, warn), "a detached check's own deadline keeps the WARN")
+	assert.Zero(t, requestDoneNoteCount(note), "and is not counted as the request ending")
+
+	// The request's own deadline: counted, class deadline.
+	dlCtx, cancelDl := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancelDl()
+	<-dlCtx.Done()
+	ctx2, note2 := withAuthzStoppedNote(dlCtx)
+	require.NotNil(t, note2)
+	require.Error(t, f.srv.agentStanding(ctx2, f.agentA.ID))
+	assert.Equal(t, 1, logs.count(slog.LevelWarn, warn), "the request's own deadline is not a WARN")
+	assert.Equal(t, 1, requestDoneNoteCount(note2))
+	assert.Equal(t, "deadline", requestDoneNoteField(note2, "class"))
+
+	// After the summary: a stopped check is a WARN, and the count is unchanged.
+	note2.emit(httptest.NewRequest(http.MethodGet, "/x", nil))
+	require.Len(t, logs.find(requestDoneSummaryMsg), 1)
+	require.Error(t, f.srv.agentStanding(ctx2, f.childC.ID))
+	assert.Equal(t, 2, logs.count(slog.LevelWarn, warn), "a stopped check after the summary is a WARN")
+	assert.Equal(t, 1, requestDoneNoteCount(note2), "never counted after the summary")
 }
