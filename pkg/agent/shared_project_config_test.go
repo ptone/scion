@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// These tests exercise unix-only, Windows-gated agent storage code.
+//go:build unix
+
 package agent
 
 import (
@@ -114,6 +117,30 @@ func testDeleteSharedProjectLegacyDir(t *testing.T, hubID string) {
 	}
 	if got := config.ResolveAgentDir(filepath.Join(root, config.DotScion), "old"); got == legacy {
 		t.Error("a new agent of the same name must not resolve to the removed legacy dir")
+	}
+}
+
+// removeCheckedAgentDir removes the agent's scion-agent.json before the
+// rest of the directory; when it is a symbolic link, the link goes and its
+// target is left unchanged.
+func TestRemoveCheckedAgentDir_AgentJSONLinkNotFollowed(t *testing.T) {
+	outside := filepath.Join(t.TempDir(), "target.json")
+	if err := os.WriteFile(outside, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	agentDir := filepath.Join(t.TempDir(), "agents", "old")
+	mustMkdirAll(t, filepath.Join(agentDir, "home"))
+	if err := os.Symlink(outside, filepath.Join(agentDir, "scion-agent.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	removeCheckedAgentDir(agentDir, "")
+
+	if _, err := os.Lstat(agentDir); !os.IsNotExist(err) {
+		t.Fatalf("agent dir should be removed (err %v)", err)
+	}
+	if data, err := os.ReadFile(outside); err != nil || string(data) != "keep" {
+		t.Fatalf("the link's target must be left unchanged: %q, %v", data, err)
 	}
 }
 

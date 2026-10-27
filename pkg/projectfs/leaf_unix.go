@@ -82,17 +82,6 @@ func (r Resolved) EnsureLeaf() (existed bool, err error) {
 	}
 }
 
-// ProvisionStateDir resolves a project's provisioning state directory on a
-// shared backend: <ProjectRoot>/provision, beside workspace/ and inside no
-// Mount.
-func (l Layout) ProvisionStateDir(projectID string) (Resolved, error) {
-	pr, err := l.ProjectRoot(projectID)
-	if err != nil {
-		return Resolved{}, err
-	}
-	return l.shared(filepath.Join(pr.RelPath, provisionDir), Mount{}), nil
-}
-
 // ProjectTreeIDs lists the project IDs that have a project root on l (one
 // listing of the subpath root, never following a symlink; entries that are
 // not project IDs are skipped). A subpath root that does not exist is an

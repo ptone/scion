@@ -30,7 +30,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"golang.org/x/sys/unix"
 )
 
 // nfsWorktreeSelection decides whether an agent on the NFS workspace backend
@@ -184,33 +183,6 @@ func nfsSharedCheckoutProvisioned(hostBase, rel string) (bool, error) {
 		return false, fmt.Errorf("workspace_storage nfs: check provisioning state of %q: %w", rel, err)
 	}
 	return false, nil
-}
-
-// nfsRemovalStateDir returns the provisioning state directory whose lock
-// RemoveNFSWorktree takes, the only lock the provisioning init containers
-// take. The path is derived the same way as the runtime's mount
-// (runtime.NFSProvisionStateSubPath) and the directory is created like
-// before a pod starts (ensureNFSLeaf, no symlink following).
-//
-// When the broker is not allowed to create, open or write in the directory
-// (a permission error, or no write and search access to an existing one),
-// or the path is a symlink, a regular file or otherwise unusable, it
-// returns an error and the worktree is left in place: no lock is taken in
-// the workspace root.
-func nfsRemovalStateDir(hostBase, rel, projectID string) (string, error) {
-	stateRel, err := runtime.NFSProvisionStateSubPath(rel, projectID)
-	if err != nil {
-		return "", fmt.Errorf("workspace_storage nfs: %w; left in place", err)
-	}
-	stateDir := filepath.Join(hostBase, stateRel)
-	_, err = ensureNFSLeaf(hostBase, stateRel)
-	if err == nil {
-		err = unix.Access(stateDir, unix.W_OK|unix.X_OK)
-	}
-	if err != nil {
-		return "", fmt.Errorf("workspace_storage nfs: prepare the provisioning state directory %q: %w; left in place", stateRel, err)
-	}
-	return stateDir, nil
 }
 
 // nfsWorktreeSubPath is the export-relative path of an agent's worktree:

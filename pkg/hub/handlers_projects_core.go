@@ -26,7 +26,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -1184,69 +1183,6 @@ func writeProjectSlugFile(root *os.Root, slug string) error {
 	return writeRootFile(root, projectkeys.ProjectSlugFile, slug+"\n")
 }
 
-// writeRootFile replaces name in root with content (mode 0644). name must
-// be a regular file or absent. os.Root follows a symbolic link that stays
-// inside root even with O_NOFOLLOW, so:
-//   - an absent name is created with O_EXCL, which never follows a link at
-//     the leaf (a link created meanwhile makes it fail with EEXIST, and the
-//     existing-file path below then refuses it);
-//   - an existing name is checked with Lstat, opened without O_TRUNC
-//     (O_NONBLOCK, so a FIFO never blocks), and truncated only once the
-//     opened file is the same regular file.
-//
-// A symbolic link, FIFO or other special file is refused and left unchanged.
-func writeRootFile(root *os.Root, name, content string) error {
-	before, err := root.Lstat(name)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o644)
-		if err == nil {
-			return writeOpenedRootFile(f, content, false)
-		}
-		if !errors.Is(err, fs.ErrExist) {
-			return err
-		}
-		if before, err = root.Lstat(name); err != nil {
-			return err
-		}
-	case err != nil:
-		return err
-	}
-	if !before.Mode().IsRegular() {
-		return fmt.Errorf("%s is not a regular file", name)
-	}
-	f, err := root.OpenFile(name, os.O_WRONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		return err
-	}
-	opened, err := f.Stat()
-	if err != nil {
-		_ = f.Close()
-		return err
-	}
-	if !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
-		_ = f.Close()
-		return fmt.Errorf("%s is not a regular file", name)
-	}
-	return writeOpenedRootFile(f, content, true)
-}
-
-// writeOpenedRootFile writes content to f (truncating it first when
-// truncate is set) and closes it.
-func writeOpenedRootFile(f *os.File, content string, truncate bool) error {
-	if truncate {
-		if err := f.Truncate(0); err != nil {
-			_ = f.Close()
-			return err
-		}
-	}
-	if _, err := f.WriteString(content); err != nil {
-		_ = f.Close()
-		return err
-	}
-	return f.Close()
-}
-
 // seedHubProjectSettings seeds the default settings.yaml in scionDir when
 // it has none and writes the hub connection settings into it.
 func (s *Server) seedHubProjectSettings(project *store.Project, scionDir string) error {
@@ -2213,7 +2149,11 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			// Update existing broker. The name and slug are set at
 			// creation or through the update API, so they are kept.
 			broker = existingBroker
-			broker.Version = req.Broker.Version
+			// An empty version (hubsync sends none) keeps the stored one;
+			// see brokerVersionToken.
+			if req.Broker.Version != "" {
+				broker.Version = brokerVersionToken(req.Broker.Version)
+			}
 			broker.Status = store.BrokerStatusOnline
 			broker.ConnectionState = "connected"
 			broker.Capabilities = req.Broker.Capabilities
@@ -2233,7 +2173,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 				ID:              brokerID,
 				Name:            req.Broker.Name,
 				Slug:            api.Slugify(req.Broker.Name),
-				Version:         req.Broker.Version,
+				Version:         brokerVersionToken(req.Broker.Version),
 				Status:          store.BrokerStatusOnline,
 				ConnectionState: "connected",
 				Capabilities:    req.Broker.Capabilities,
@@ -3992,11 +3932,31 @@ func (s *Server) cleanupBrokerProjectDirectoriesFromInputs(ctx context.Context, 
 			continue
 		}
 		if err := client.CleanupProject(ctx, provider.BrokerID, broker.Endpoint, project.Slug, project.ID); err != nil {
+			if isBrokerStatus(err, http.StatusConflict) {
+				// The broker kept its project directory: it still has
+				// agents of the project (a forced delete), or another
+				// Runtime Broker instance of its host does. That is the
+				// outcome, not a failure: the delete has committed and
+				// stands.
+				s.projectsLogger().Info("project directory kept on broker",
+					"project_id", project.ID, "slug", project.Slug, "broker", provider.BrokerID)
+				s.auditStorage(ctx, s.projectsLogger(), project.ID, "", []projectfs.Deletion{{
+					Tree: projectfs.TreeProjectDir, Path: "projects/" + project.Slug, Outcome: projectfs.OutcomeKept,
+					Reason: brokerProjectDirKeptReason(provider.BrokerID),
+				}})
+				continue
+			}
 			s.projectsLogger().Warn("failed to cleanup project on broker",
 				"project_id", project.ID, "slug", project.Slug,
 				"broker", provider.BrokerID, "endpoint", broker.Endpoint, "error", err)
 		}
 	}
+}
+
+// brokerProjectDirKeptReason is the audit reason of a broker project
+// directory the broker kept (it answered the cleanup with 409).
+func brokerProjectDirKeptReason(brokerID string) string {
+	return "kept on Runtime Broker " + brokerID + ": it still has agents of the project, or another instance of its host does"
 }
 
 // brokerUsesSlugProjectDir reports whether provider's broker keeps project

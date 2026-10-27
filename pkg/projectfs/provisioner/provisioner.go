@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build unix
-
 // Package provisioner is the layout authority's Provisioner
 // (ptone/scion#5834): the hub and the brokers create a project's
 // Scion-owned directories through it, so a leaf has the same mode and ACL
@@ -22,6 +20,11 @@
 // directory, its lock and sentinel, and the clone). It is a package of its
 // own so that pkg/projectfs, which configuration loaders and the relay
 // import, keeps no dependency on pkg/provision or pkg/store.
+//
+// It builds on every platform: on a non-unix one the leaf primitives it
+// calls (projectfs.EnsureSharedLeaf, Resolved.EnsureLeaf) and
+// provision.PrepareStateDir fail with errors.ErrUnsupported, so every
+// method fails with it too (the hub and the brokers are unix-only).
 package provisioner
 
 import (
