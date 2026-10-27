@@ -65,6 +65,11 @@ const contexts = new Map<string, BrowserContext>();
 /** Page requests any context sent with an Authorization header. */
 const bearerRequests: string[] = [];
 
+/** safePath is url's path with any page link redacted and no query. */
+function safePath(url: string): string {
+  return new URL(url).pathname.replace(/\/api\/v1\/portview\/[^/]*/, '/api/v1/portview/REDACTED');
+}
+
 /** How long beforeAll waits for the agent to serve its port again after the hub restart. */
 const READY_TIMEOUT_MS = 150_000;
 
@@ -111,7 +116,10 @@ async function newSignedInContext(
 ): Promise<void> {
   const c = await browser.newContext({ baseURL: hub.baseURL, storageState: who.storageFile });
   c.on('request', (req) => {
-    if (req.headers()['authorization'] !== undefined) bearerRequests.push(`${name}: ${req.url()}`);
+    // Record the context and the path only (page link redacted), so a
+    // failure never prints a credential.
+    if (req.headers()['authorization'] !== undefined)
+      bearerRequests.push(`${name}: ${safePath(req.url())}`);
   });
   await assertTestIdentity(c.request, { email: who.email, role: 'member' });
   contexts.set(name, c);
@@ -200,7 +208,7 @@ test('journey 3: a multi-file page opened from the hub loads its relative resour
   const { page, nav, subs } = await open('member', `${portLink()}/index.html?from=hub`);
   expect(nav?.status()).toBe(200);
   const parts = viewParts(page.url());
-  expect(parts, `landed on ${page.url()}`).not.toBeNull();
+  expect(parts, `landed on ${safePath(page.url())}`).not.toBeNull();
   expect(parts?.sub).toBe('index.html');
   expect(new URL(page.url()).search).toBe('?from=hub');
   // The first hop is the port link's redirect.
@@ -217,7 +225,8 @@ test('journey 3: a multi-file page opened from the hub loads its relative resour
     const res = subs.get(name);
     expect.soft(res?.status(), `${name} status`).toBe(200);
     const sent = await res?.request().allHeaders();
-    expect.soft(sent?.['cookie'], `${name} request cookie`).toBeUndefined();
+    // Compare presence only, so a failure never prints a cookie value.
+    expect.soft(sent?.['cookie'] !== undefined, `${name} request sent a cookie`).toBe(false);
   }
   memberIndex = page.url();
   await page.close();
@@ -257,8 +266,10 @@ test('journey 4: what the page can reach', async () => {
     }
   });
   const sent = await (await apiRequest).allHeaders();
-  expect(sent['cookie'], 'hub API request cookie').toBeUndefined();
-  expect(sent['authorization'], 'hub API request authorization').toBeUndefined();
+  expect(sent['cookie'] !== undefined, 'hub API request sent a cookie').toBe(false);
+  expect(sent['authorization'] !== undefined, 'hub API request sent an Authorization header').toBe(
+    false
+  );
   if (api.status !== undefined) expect(api.status).toBe(401);
   else expect(api.error).toBe('TypeError');
 
@@ -293,15 +304,17 @@ test('journey 4: a copied page link opened by another user', async () => {
   const peer = await open('peer', memberIndex);
   expect(peer.nav?.status()).toBe(200);
   const peerLink = viewParts(peer.page.url())?.link;
-  expect(peerLink, `peer landed on ${peer.page.url()}`).toBeTruthy();
-  expect(peerLink).not.toBe(memberLink);
+  expect(peerLink, `peer landed on ${safePath(peer.page.url())}`).toBeTruthy();
+  expect(peerLink !== memberLink, 'the peer got a page link of its own').toBe(true);
   await expect(peer.page.locator('#probe')).toHaveText('ok', { timeout: 20_000 });
   await peer.page.close();
 
   // A user who may not open it is sent to the port link and refused there.
   const outsider = await open('outsider', memberIndex);
   expect(outsider.nav?.status()).toBe(403);
-  expect(new URL(outsider.page.url()).pathname).toBe(new URL(`${portLink()}/index.html`).pathname);
+  expect(safePath(outsider.page.url()), 'the outsider is on the port link').toBe(
+    new URL(`${portLink()}/index.html`).pathname
+  );
   await outsider.page.close();
 });
 
@@ -320,7 +333,7 @@ test('journey 4: a page link that is not valid', async () => {
   expect(nav?.status()).toBe(200);
   const fresh = viewParts(page.url())?.link;
   expect(fresh).toBeTruthy();
-  expect(fresh).not.toBe(tamper(link));
+  expect(fresh !== tamper(link), 'the page got a new page link').toBe(true);
   await expect(page.locator('#probe')).toHaveText('ok', { timeout: 20_000 });
   await page.close();
 });
