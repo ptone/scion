@@ -132,3 +132,33 @@ func (s *Server) auditBrokerDeletion(ctx context.Context, projectID string, tree
 		Tree: tree, Path: path, Outcome: projectfs.OutcomeDeleted,
 	})
 }
+
+// agentsKeptReason is the audit reason of a project directory a project
+// delete leaves in place because this broker still has agents in it.
+const agentsKeptReason = "agents still exist on this broker"
+
+// projectHasAgentsHere reports whether this broker lists any agent of
+// projectID, in any phase (stopped, error and halted included): an entry
+// labelled with the project, or a legacy entry whose recorded project path
+// identifies as it (legacyEntryInProject). A project delete must not remove
+// the project directory of such an agent: on a forced delete its legacy
+// agent directory (~/.scion/projects/<slug>/.scion/agents/<name>, with a
+// clone-per-agent workspace that may hold unpushed work, also when the agent
+// is stopped) is still the agent's. A broker without a manager, or a
+// listing that fails, counts as having agents.
+func (s *Server) projectHasAgentsHere(ctx context.Context, projectID string) (bool, error) {
+	mgr := s.currentManager()
+	if mgr == nil {
+		return true, nil
+	}
+	agents, err := mgr.List(ctx, map[string]string{"scion.agent": "true"})
+	if err != nil {
+		return true, err
+	}
+	for _, a := range agents {
+		if agentInProjectStrict(a, projectID) || legacyEntryInProject(a, projectID) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
