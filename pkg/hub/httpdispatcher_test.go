@@ -4276,6 +4276,10 @@ func (m *mockGitHubAppMinter) MintGitHubAppTokenForProject(_ context.Context, _ 
 	return m.token, m.expiry, m.err
 }
 
+func (m *mockGitHubAppMinter) AuthorizeGitHubTokenSourceProject(context.Context, *store.Agent, *store.Project) error {
+	return nil
+}
+
 func TestBuildCreateRequest_UserGitHubTokenPrecedesApp(t *testing.T) {
 	ctx := context.Background()
 	memStore := createTestStore(t)
