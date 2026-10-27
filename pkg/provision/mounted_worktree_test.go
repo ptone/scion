@@ -351,7 +351,7 @@ func TestRemoveMountedWorktree_LeavesOtherEntries(t *testing.T) {
 // worktree in place.
 func TestRemoveMountedWorktree_WaitsForProvisioningLock(t *testing.T) {
 	workspace := provisionTwoMountedWorktrees(t)
-	held, err := acquireFileLock(t.Context(), workspace)
+	held, err := acquireFileLock(t.Context(), ProjectStateDir(workspace))
 	require.NoError(t, err)
 	defer func() { _ = held.release() }()
 
@@ -593,7 +593,7 @@ func TestProvisionShared_MountedWorktree_WaitsUpToLockWait(t *testing.T) {
 	workspace := filepath.Join(t.TempDir(), "workspace")
 	require.NoError(t, ProvisionShared(mountedWorktreeInput(workspace, origin, "agent-1", "agent-one")))
 
-	held, err := acquireFileLock(t.Context(), workspace)
+	held, err := acquireFileLock(t.Context(), ProjectStateDir(workspace))
 	require.NoError(t, err)
 	err = ProvisionShared(mountedWorktreeInput(workspace, origin, "agent-2", "agent-two"))
 	require.Error(t, err, "without LockWait the default budget runs out")

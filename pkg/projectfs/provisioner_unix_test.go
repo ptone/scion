@@ -201,7 +201,7 @@ func TestProvisioner_ProvisionSharedWorkspace_Errors(t *testing.T) {
 func TestLayout_ProjectTreeIDs(t *testing.T) {
 	base := t.TempDir()
 	l := delNFSLayout(base)
-	for _, d := range []string{testPID, testOtherPID, "not-a-project"} {
+	for _, d := range []string{testPID, testOtherPID, ".not-a-project", "-not-a-project"} {
 		require.NoError(t, os.MkdirAll(filepath.Join(base, "projects", d), 0o755))
 	}
 	ids, err := l.ProjectTreeIDs()

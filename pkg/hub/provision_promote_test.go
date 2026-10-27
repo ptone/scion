@@ -40,7 +40,7 @@ func TestPromoteLegacyProvisionMarkers_SharedLayout(t *testing.T) {
 	projects := filepath.Join(f.shareBase, "projects")
 	legacyWS := filepath.Join(projects, legacyID, "workspace")
 	cleanWS := filepath.Join(projects, cleanID, "workspace")
-	for _, d := range []string{legacyWS, cleanWS, filepath.Join(projects, noWorkspaceID), filepath.Join(projects, "not-a-project-id")} {
+	for _, d := range []string{legacyWS, cleanWS, filepath.Join(projects, noWorkspaceID), filepath.Join(projects, ".not-a-project-id")} {
 		require.NoError(t, os.MkdirAll(d, 0o755))
 	}
 	require.NoError(t, os.WriteFile(filepath.Join(legacyWS, provision.ProvisionSentinelFile), []byte("provisioned_at=x\n"), 0o644))
