@@ -152,6 +152,64 @@ type GitHubAppTokenMinter interface {
 	// Returns the token, expiry (ISO 8601 string), and any error.
 	// If the project has no installation or the app is not configured, returns ("", "", nil).
 	MintGitHubAppTokenForProject(ctx context.Context, project *store.Project) (token string, expiry string, err error)
+
+	// AuthorizeGitHubTokenSourceProject decides whether agent may receive a
+	// token minted with sourceProject's installation (the
+	// scion.dev/github-token-source-project label). It returns nil only when
+	// the agent's authoritative source user may create agents in
+	// sourceProject, i.e. could already get that token by starting an agent
+	// there directly. Any error refuses.
+	AuthorizeGitHubTokenSourceProject(ctx context.Context, agent *store.Agent, sourceProject *store.Project) error
+}
+
+// githubTokenSourceProjectLabel names another project whose GitHub App
+// installation an agent's token is minted from when its own project has
+// none (e.g. template-sync agents loading from an external repo).
+const githubTokenSourceProjectLabel = "scion.dev/github-token-source-project"
+
+// resolveGitHubMintProject returns the project whose GitHub App
+// installation mints agent's token: the agent's own project when it has an
+// installation; otherwise the project named by githubTokenSourceProjectLabel,
+// but only when minter authorizes that source for this agent. It returns nil
+// when there is nothing to mint with. The label is free-form agent input, so
+// an unauthorized source is ignored (fail closed) and logged. Whichever
+// project is returned, MintGitHubAppTokenForProject still re-verifies that
+// project's own installation association before minting.
+//
+// Every token delivery leg that starts from an agent resolves its source
+// here: agent create, the lifecycle injection at start and restart, and the
+// agent token-refresh endpoint. A refresh therefore names exactly the
+// project a create would, and never more.
+func resolveGitHubMintProject(ctx context.Context, st store.Store, minter GitHubAppTokenMinter, log *slog.Logger, agent *store.Agent, project *store.Project) *store.Project {
+	if agent == nil || project == nil || minter == nil {
+		return nil
+	}
+	if project.GitHubInstallationID != nil {
+		return project
+	}
+	sourceProjectID := agent.Labels[githubTokenSourceProjectLabel]
+	if sourceProjectID == "" {
+		return nil
+	}
+	source, err := st.GetProject(ctx, sourceProjectID)
+	if err != nil || source == nil || source.GitHubInstallationID == nil {
+		return nil
+	}
+	if err := minter.AuthorizeGitHubTokenSourceProject(ctx, agent, source); err != nil {
+		log.Warn("ignoring GitHub token source project label: agent's source user may not start agents in that project",
+			"agent_id", agent.ID, "project_id", agent.ProjectID, "source_project_id", sourceProjectID, "error", err)
+		return nil
+	}
+	log.Debug("using source project for GitHub App token",
+		"agent_id", agent.ID, "source_project_id", sourceProjectID,
+		"installation_id", *source.GitHubInstallationID)
+	return source
+}
+
+// githubMintProject is resolveGitHubMintProject with the dispatcher's store,
+// minter and logger.
+func (d *HTTPAgentDispatcher) githubMintProject(ctx context.Context, agent *store.Agent, project *store.Project) *store.Project {
+	return resolveGitHubMintProject(ctx, d.store, d.githubAppMinter, d.log, agent, project)
 }
 
 // HTTPAgentDispatcher dispatches agent operations to remote runtime brokers via HTTP.
@@ -1203,20 +1261,8 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 			// Prefer the agent's own project; fall back to a source project
 			// referenced by label (e.g. for template-sync agents loading
 			// from an external repo whose git project has the app installed).
-			mintProject := project
-			if project.GitHubInstallationID == nil {
-				if sourceProjectID := agent.Labels["scion.dev/github-token-source-project"]; sourceProjectID != "" {
-					if sg, sgErr := d.store.GetProject(ctx, sourceProjectID); sgErr == nil && sg.GitHubInstallationID != nil {
-						mintProject = sg
-						if d.debug {
-							d.log.Debug("buildCreateRequest: using source project for GitHub App token",
-								"sourceProjectID", sourceProjectID,
-								"installationID", *sg.GitHubInstallationID)
-						}
-					}
-				}
-			}
-			if mintProject.GitHubInstallationID != nil {
+			mintProject := d.githubMintProject(ctx, agent, project)
+			if mintProject != nil {
 				if req.ResolvedEnv != nil && req.ResolvedEnv["GITHUB_TOKEN"] != "" {
 					// User already has a GITHUB_TOKEN from secrets/env.
 					// Respect it: skip overwriting with the GitHub App token.
@@ -3131,15 +3177,8 @@ func (d *HTTPAgentDispatcher) injectLifecycleGitHubToken(
 	if err != nil {
 		return
 	}
-	mintProject := project
-	if project.GitHubInstallationID == nil {
-		if sourceProjectID := agent.Labels["scion.dev/github-token-source-project"]; sourceProjectID != "" {
-			if sourceProject, sourceErr := d.store.GetProject(ctx, sourceProjectID); sourceErr == nil && sourceProject.GitHubInstallationID != nil {
-				mintProject = sourceProject
-			}
-		}
-	}
-	if mintProject.GitHubInstallationID == nil {
+	mintProject := d.githubMintProject(ctx, agent, project)
+	if mintProject == nil {
 		return
 	}
 

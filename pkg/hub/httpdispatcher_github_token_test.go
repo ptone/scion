@@ -38,6 +38,12 @@ func (m *recordingGitHubAppMinter) MintGitHubAppTokenForProject(_ context.Contex
 	return "github-app-token", "2026-09-14T09:00:00Z", nil
 }
 
+// AuthorizeGitHubTokenSourceProject allows every source; the gate itself is
+// covered by TestGitHubTokenSourceLabel_RequiresAuthorization.
+func (m *recordingGitHubAppMinter) AuthorizeGitHubTokenSourceProject(context.Context, *store.Agent, *store.Project) error {
+	return nil
+}
+
 func TestInjectLifecycleGitHubToken(t *testing.T) {
 	ctx := t.Context()
 	st := createTestStore(t)
