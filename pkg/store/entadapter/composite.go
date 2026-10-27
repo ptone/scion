@@ -234,7 +234,7 @@ func (c *CompositeStore) WithTx(ctx context.Context, fn func(tx store.Store) err
 	if err != nil {
 		return markTransient(fmt.Errorf("begin transaction: %w", err))
 	}
-	txStore := newTxCompositeStore(tx)
+	txStore := c.newTxStore(tx)
 
 	defer func() {
 		// Safety net: if Commit was not called (i.e. fn panicked or returned
@@ -459,6 +459,16 @@ func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	obs := c.lifecycle.load()
+	var lifecycleBefore []*ent.Agent
+	if obs != nil && len(agentIDs) > 0 {
+		// The rows are already locked; read them whole for the deleted
+		// events' before snapshots (WP1 design 2.6, B1).
+		if lifecycleBefore, err = c.client.Agent.Query().
+			Where(agent.IDIn(agentIDs...)).Order(ent.Asc(agent.FieldID)).All(ctx); err != nil {
+			return err
+		}
+	}
 	if len(agentIDs) > 0 {
 		if _, err := c.client.Notification.Delete().
 			Where(notification.AgentIDIn(agentIDs...)).Exec(ctx); err != nil {
@@ -483,6 +493,19 @@ func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 		}
 		if _, err := c.client.Agent.Delete().
 			Where(agent.ProjectIDEQ(uid)).Exec(ctx); err != nil {
+			return err
+		}
+	}
+	if obs != nil {
+		now := time.Now()
+		for _, row := range lifecycleBefore {
+			if err := observeAgentWrite(ctx, obs, c.client, c.entTx, store.AgentWrite{
+				Op: store.AgentWriteProjectDelete, Before: entAgentToStore(row), Now: now,
+			}); err != nil {
+				return err
+			}
+		}
+		if err := deleteProjectLifecycleCursors(ctx, c.client, uid); err != nil {
 			return err
 		}
 	}
@@ -616,6 +639,7 @@ func (c *CompositeStore) ListSoftDeletedAgentsBefore(ctx context.Context, cutoff
 // candidates.
 func (c *CompositeStore) purgeDeletedAgents(ctx context.Context, cutoff time.Time, only []uuid.UUID, restrict bool) (int, error) {
 	useLock := c.AgentStore.usesRowLocks()
+	obs := c.lifecycle.load()
 	tx, err := c.client.Tx(ctx)
 	if err != nil {
 		return 0, err
@@ -639,7 +663,7 @@ func (c *CompositeStore) purgeDeletedAgents(ctx context.Context, cutoff time.Tim
 		return 0, err
 	}
 
-	txStore := newTxCompositeStore(tx)
+	txStore := c.newTxStore(tx)
 	// One deactivation record for every row this purge deactivates.
 	now := time.Now()
 	deactivation := store.Deactivation{
@@ -669,6 +693,16 @@ func (c *CompositeStore) purgeDeletedAgents(ctx context.Context, cutoff time.Tim
 		eligibleIDs, err := eligibleQuery.IDs(ctx)
 		if err != nil {
 			return 0, err
+		}
+		lifecycleBefore := map[uuid.UUID]*ent.Agent{}
+		if obs != nil && len(eligibleIDs) > 0 {
+			rows, err := tx.Agent.Query().Where(agent.IDIn(eligibleIDs...)).All(ctx)
+			if err != nil {
+				return 0, err
+			}
+			for _, r := range rows {
+				lifecycleBefore[r.ID] = r
+			}
 		}
 		if len(eligibleIDs) > 0 {
 			eligible := make([]string, 0, len(eligibleIDs))
@@ -717,6 +751,15 @@ func (c *CompositeStore) purgeDeletedAgents(ctx context.Context, cutoff time.Tim
 			}
 			if err := deactivatePurgedAgentAuthority(ctx, txStore, removed, deactivation); err != nil {
 				return 0, err
+			}
+			for _, id := range removedIDs {
+				if row := lifecycleBefore[id]; row != nil {
+					if err := observeAgentWrite(ctx, obs, tx.Client(), tx, store.AgentWrite{
+						Op: store.AgentWritePurge, Before: entAgentToStore(row), Now: now,
+					}); err != nil {
+						return 0, err
+					}
+				}
 			}
 		}
 	}
