@@ -37,6 +37,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs/provisioner"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
@@ -1294,7 +1295,7 @@ func (s *Server) writeHubConnectionSettings(project *store.Project, scionDir str
 
 // provisionSharedWorkspace provisions a shared-workspace git project's
 // workspace on a shared backend through the layout authority's Provisioner
-// (projectfs.Provisioner.ProvisionSharedWorkspace, the same path the
+// (provisioner.Provisioner.ProvisionSharedWorkspace, the same path the
 // brokers' shared-plain backstop takes): the uuid workspace leaf and the
 // provisioning state directory created with the leaf contract, then
 // provision.ProvisionShared with the sentinel and lock in
@@ -1323,8 +1324,8 @@ func writeSharedCloneSourceRefused(w http.ResponseWriter, err error) bool {
 
 // projectProvisioner returns the layout authority's Provisioner for layout, with
 // the hub's provisioning function (provisionSharedClone).
-func projectProvisioner(layout projectfs.Layout) projectfs.Provisioner {
-	return projectfs.Provisioner{Layout: layout, ProvisionShared: provisionSharedClone}
+func projectProvisioner(layout projectfs.Layout) provisioner.Provisioner {
+	return provisioner.Provisioner{Layout: layout, ProvisionShared: provisionSharedClone}
 }
 
 func (s *Server) provisionSharedWorkspace(ctx context.Context, project *store.Project) error {
@@ -1360,7 +1361,7 @@ func (s *Server) provisionSharedWorkspace(ctx context.Context, project *store.Pr
 	if cloneCfg != nil && project.GitRemote != "" {
 		cloneToken = s.resolveCloneToken(ctx, project)
 	}
-	createdRoot, err := projectProvisioner(layout).ProvisionSharedWorkspace(projectfs.SharedWorkspaceProvision{
+	createdRoot, err := projectProvisioner(layout).ProvisionSharedWorkspace(provisioner.SharedWorkspace{
 		Ctx:              ctx,
 		ProjectID:        project.ID,
 		GitClone:         cloneCfg,
@@ -1382,7 +1383,7 @@ func (s *Server) provisionSharedWorkspace(ctx context.Context, project *store.Pr
 				"project_id", project.ID, "error", derr)
 		}
 	}
-	if errors.Is(err, projectfs.ErrProvisionStorage) {
+	if errors.Is(err, provisioner.ErrStorage) {
 		s.projectsLogger().Warn("shared workspace provisioning: storage step failed",
 			"project_id", project.ID, "error", err)
 		return fmt.Errorf("shared workspace provisioning: %w", errWorkspaceStorageUnavailable)

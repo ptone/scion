@@ -37,6 +37,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs/provisioner"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -1265,11 +1266,11 @@ func (r *sharedDirResolution) onSharedBackend() bool {
 // authority (projectfs.Resolved.Open): on NFS, pkg/shareddirs' anchored
 // O_NOFOLLOW walk; on local disk, a root that refuses a symlinked
 // directory. With createIfMissing a missing leaf is first created by the
-// layout authority's Provisioner (projectfs.Provisioner.EnsureLeaf, the
+// layout authority's Provisioner (provisioner.Provisioner.EnsureLeaf, the
 // brokers' leaf contract). No caller joins paths and opens them itself.
 func (s *Server) openSharedDirRoot(resolution *sharedDirResolution, createIfMissing bool) (*os.Root, error) {
 	if createIfMissing {
-		if _, err := (projectfs.Provisioner{}).EnsureLeaf(resolution.Resolved); err != nil {
+		if _, err := (provisioner.Provisioner{}).EnsureLeaf(resolution.Resolved); err != nil {
 			return nil, err
 		}
 	}

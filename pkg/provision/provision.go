@@ -1451,7 +1451,7 @@ func garbageCollectLockLitter(dir string) {
 
 // GarbageCollectStateDir sweeps the aged lock litter of the provisioning
 // state directory dir (garbageCollectLockLitter): what an open of the state
-// directory runs, for callers outside this package (projectfs.Provisioner).
+// directory runs, for callers outside this package (provisioner.Provisioner).
 // Best effort; a live lock is never touched.
 func GarbageCollectStateDir(dir string) {
 	garbageCollectLockLitter(dir)

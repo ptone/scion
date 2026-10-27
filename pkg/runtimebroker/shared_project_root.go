@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs/provisioner"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 )
@@ -351,7 +352,7 @@ func localContainerRuntime(runtimeName string) bool {
 // for a git project on the broker's shared Layout dispatched to a local
 // container runtime (ptone/scion#5823): before the agent starts, the broker
 // provisions the project's workspace on the share through the layout
-// authority's Provisioner (projectfs.Provisioner.ProvisionSharedWorkspace,
+// authority's Provisioner (provisioner.Provisioner.ProvisionSharedWorkspace,
 // the path the hub takes at project create): the sentinel and lock in the
 // project state directory only, ownership from the Layout, a failed chown
 // not fatal. An already provisioned workspace (sentinel present, as after
@@ -370,8 +371,8 @@ func (s *Server) provisionSharedPlainWorkspace(ctx context.Context, in startCont
 	if err := provision.CheckHostCloneURL(gc.URL); err != nil {
 		return false, err
 	}
-	p := projectfs.Provisioner{Layout: layout, ProvisionShared: provisionSharedFn}
-	if _, err := p.ProvisionSharedWorkspace(projectfs.SharedWorkspaceProvision{
+	p := provisioner.Provisioner{Layout: layout, ProvisionShared: provisionSharedFn}
+	if _, err := p.ProvisionSharedWorkspace(provisioner.SharedWorkspace{
 		Ctx:              ctx,
 		ProjectID:        in.ProjectID,
 		AgentID:          in.AgentID,

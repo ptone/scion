@@ -23,6 +23,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs/provisioner"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -196,7 +197,7 @@ func (s *Server) handleProjectSharedDirs(w http.ResponseWriter, r *http.Request,
 
 // createSharedDirLeaf creates the backing directory of the shared dir sd
 // just declared on project, where the hub can resolve it
-// (resolveSharedDirPath), through projectfs.Provisioner.EnsureLeaf: on a
+// (resolveSharedDirPath), through provisioner.Provisioner.EnsureLeaf: on a
 // shared backend the confined leaf walk with mode 2775 and the default ACL,
 // on the local layout the directory created as the brokers create it. Best
 // effort: a shared dir the hub cannot resolve (a git project with no
@@ -208,7 +209,7 @@ func (s *Server) createSharedDirLeaf(ctx context.Context, project *store.Project
 			"project_id", project.ID, "shared_dir", sd.Name, "error", err)
 		return
 	}
-	if _, err := (projectfs.Provisioner{}).EnsureLeaf(resolution.Resolved); err != nil {
+	if _, err := (provisioner.Provisioner{}).EnsureLeaf(resolution.Resolved); err != nil {
 		s.projectsLogger().Warn("failed to create the shared dir leaf at declaration; it is created on first use",
 			"project_id", project.ID, "shared_dir", sd.Name, "error", err)
 	}

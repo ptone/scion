@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs/provisioner"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 )
 
@@ -126,7 +127,7 @@ func (s *Server) promoteLegacyProvisionMarkers(ctx context.Context) legacyPromot
 // workspace is absent or has nothing to promote; otherwise the state
 // directory is opened through the Provisioner (created with the leaf
 // contract if missing) and provision.PromoteLegacyMarker runs.
-func promoteProjectProvisionState(ctx context.Context, layout projectfs.Layout, p projectfs.Provisioner, projectID string) (provision.LegacyPromotion, error) {
+func promoteProjectProvisionState(ctx context.Context, layout projectfs.Layout, p provisioner.Provisioner, projectID string) (provision.LegacyPromotion, error) {
 	r, err := layout.Resolve(projectfs.Project{ID: projectID}, "", projectfs.WorkspaceMount(projectfs.ModeSharedPlain, ""))
 	if err != nil {
 		return provision.LegacyPromotion{}, err

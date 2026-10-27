@@ -31,7 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs/provisioner"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -351,7 +351,7 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 				// co-located broker given this path finds it. The hub
 				// used to create its own copy at project create.
 				if resolved.Backend.Shared() {
-					if _, leafErr := (projectfs.Provisioner{}).EnsureLeaf(resolved); leafErr != nil {
+					if _, leafErr := (provisioner.Provisioner{}).EnsureLeaf(resolved); leafErr != nil {
 						s.projectsLogger().Warn("failed to create the project workspace on shared storage",
 							"project_id", project.ID, "error", leafErr)
 						return fmt.Errorf("project workspace: %w", errWorkspaceStorageUnavailable)

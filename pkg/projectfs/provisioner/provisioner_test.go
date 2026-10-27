@@ -14,7 +14,7 @@
 
 //go:build unix
 
-package projectfs
+package provisioner
 
 import (
 	"context"
@@ -26,11 +26,18 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+const testPID = "550e8400-e29b-41d4-a716-446655440000"
+
+func nfsLayout(hostBase string) projectfs.Layout {
+	return projectfs.Layout{Backend: projectfs.BackendNFS, HostBase: hostBase, SubPathRoot: "projects"}
+}
 
 func permBits(t *testing.T, path string) uint32 {
 	t.Helper()
@@ -39,62 +46,12 @@ func permBits(t *testing.T, path string) uint32 {
 	return st.Mode & 0o7777
 }
 
-// On a shared backend EnsureLeaf is the brokers' leaf contract: a new leaf
-// (and its missing intermediates) mode 2775, an existing one reported as
-// existing, a symlinked component refused.
-func TestProvisioner_EnsureLeaf_Shared(t *testing.T) {
-	base := t.TempDir()
-	l := delNFSLayout(base)
-	r, err := l.Resolve(Project{ID: testPID}, "", SharedDirMount(api.SharedDir{Name: "results"}, ""))
-	require.NoError(t, err)
-
-	existed, err := Provisioner{Layout: l}.EnsureLeaf(r)
-	require.NoError(t, err)
-	assert.False(t, existed)
-	assert.Equal(t, uint32(0o2775), permBits(t, r.HostPath))
-
-	existed, err = Provisioner{Layout: l}.EnsureLeaf(r)
-	require.NoError(t, err)
-	assert.True(t, existed)
-
-	// A symlinked shared-dirs component is refused, its target untouched.
-	other, err := l.Resolve(Project{ID: testOtherPID}, "", SharedDirMount(api.SharedDir{Name: "results"}, ""))
-	require.NoError(t, err)
-	target := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(base, "projects", testOtherPID), 0o755))
-	require.NoError(t, os.Symlink(target, filepath.Join(base, "projects", testOtherPID, "shared-dirs")))
-	_, err = Provisioner{Layout: l}.EnsureLeaf(other)
-	require.Error(t, err)
-	assert.NoDirExists(t, filepath.Join(target, "results"))
-}
-
-// On the local backend EnsureLeaf creates the directory as before (0755
-// before the umask, parents included) and leaves an existing one alone.
-func TestProvisioner_EnsureLeaf_Local(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "project-configs", "p__1234", "shared-dirs", "results")
-	r := Resolved{Backend: BackendLocal, HostPath: dir}
-	existed, err := Provisioner{}.EnsureLeaf(r)
-	require.NoError(t, err)
-	assert.False(t, existed)
-	fi, err := os.Stat(dir)
-	require.NoError(t, err)
-	assert.True(t, fi.IsDir())
-	assert.Zero(t, fi.Mode()&os.ModeSetgid, "no setgid on the local backend")
-
-	existed, err = Provisioner{}.EnsureLeaf(r)
-	require.NoError(t, err)
-	assert.True(t, existed)
-
-	_, err = Provisioner{}.EnsureLeaf(Resolved{Backend: BackendLocal, HostPath: "relative"})
-	require.Error(t, err)
-}
-
 // OpenStateDir creates <ProjectRoot>/provision with the leaf contract and
 // sweeps its aged lock litter on every open (ptone/scion#5836), never the
 // live lock or fresh litter.
 func TestProvisioner_OpenStateDir_SweepsAgedLitter(t *testing.T) {
 	base := t.TempDir()
-	p := Provisioner{Layout: delNFSLayout(base)}
+	p := Provisioner{Layout: nfsLayout(base)}
 	dir, err := p.OpenStateDir(testPID)
 	require.NoError(t, err)
 	realBase, err := filepath.EvalSymlinks(base)
@@ -130,11 +87,11 @@ func TestProvisioner_ProvisionSharedWorkspace_Input(t *testing.T) {
 	base := t.TempDir()
 	var got []provision.ProvisionInput
 	p := Provisioner{
-		Layout:          delNFSLayout(base),
+		Layout:          nfsLayout(base),
 		ProvisionShared: func(in provision.ProvisionInput) error { got = append(got, in); return nil },
 	}
 	gc := &api.GitCloneConfig{URL: "https://github.example/org/repo.git"}
-	created, err := p.ProvisionSharedWorkspace(SharedWorkspaceProvision{
+	created, err := p.ProvisionSharedWorkspace(SharedWorkspace{
 		Ctx: context.Background(), ProjectID: testPID, AgentID: "agent-1",
 		GitClone: gc, CloneToken: "tok", CloneTokenRemote: gc.URL,
 	})
@@ -158,7 +115,7 @@ func TestProvisioner_ProvisionSharedWorkspace_Input(t *testing.T) {
 	assert.Equal(t, uint32(0o2775), permBits(t, filepath.Join(root, "workspace")))
 	assert.Equal(t, uint32(0o2775), permBits(t, filepath.Join(root, "provision")))
 
-	created, err = p.ProvisionSharedWorkspace(SharedWorkspaceProvision{Ctx: context.Background(), ProjectID: testPID})
+	created, err = p.ProvisionSharedWorkspace(SharedWorkspace{Ctx: context.Background(), ProjectID: testPID})
 	require.NoError(t, err)
 	assert.False(t, created, "the project root existed")
 }
@@ -167,9 +124,9 @@ func TestProvisioner_ProvisionSharedWorkspace_Input(t *testing.T) {
 // directory only, nothing in the workspace root (AC-L3).
 func TestProvisioner_ProvisionSharedWorkspace_RealNoClone(t *testing.T) {
 	base := t.TempDir()
-	l := delNFSLayout(base)
+	l := nfsLayout(base)
 	l.UID, l.GID = os.Getuid(), os.Getgid()
-	_, err := Provisioner{Layout: l}.ProvisionSharedWorkspace(SharedWorkspaceProvision{Ctx: context.Background(), ProjectID: testPID})
+	_, err := Provisioner{Layout: l}.ProvisionSharedWorkspace(SharedWorkspace{Ctx: context.Background(), ProjectID: testPID})
 	require.NoError(t, err)
 	root := filepath.Join(base, "projects", testPID)
 	assert.FileExists(t, filepath.Join(root, "provision", provision.ProvisionSentinelFile))
@@ -178,38 +135,20 @@ func TestProvisioner_ProvisionSharedWorkspace_RealNoClone(t *testing.T) {
 	assert.Empty(t, entries, "nothing of the provisioning in the workspace root")
 }
 
-// A storage step that fails wraps ErrProvisionStorage; a provisioning
+// A storage step that fails wraps ErrStorage; a provisioning
 // failure is returned as is.
 func TestProvisioner_ProvisionSharedWorkspace_Errors(t *testing.T) {
-	missing := Provisioner{Layout: delNFSLayout(filepath.Join(t.TempDir(), "not-mounted"))}
-	_, err := missing.ProvisionSharedWorkspace(SharedWorkspaceProvision{Ctx: context.Background(), ProjectID: testPID})
-	require.ErrorIs(t, err, ErrProvisionStorage)
+	missing := Provisioner{Layout: nfsLayout(filepath.Join(t.TempDir(), "not-mounted"))}
+	_, err := missing.ProvisionSharedWorkspace(SharedWorkspace{Ctx: context.Background(), ProjectID: testPID})
+	require.ErrorIs(t, err, ErrStorage)
 
 	boom := errors.New("clone failed")
-	failing := Provisioner{Layout: delNFSLayout(t.TempDir()), ProvisionShared: func(provision.ProvisionInput) error { return boom }}
-	created, err := failing.ProvisionSharedWorkspace(SharedWorkspaceProvision{Ctx: context.Background(), ProjectID: testPID})
+	failing := Provisioner{Layout: nfsLayout(t.TempDir()), ProvisionShared: func(provision.ProvisionInput) error { return boom }}
+	created, err := failing.ProvisionSharedWorkspace(SharedWorkspace{Ctx: context.Background(), ProjectID: testPID})
 	require.ErrorIs(t, err, boom)
-	assert.False(t, errors.Is(err, ErrProvisionStorage))
+	assert.False(t, errors.Is(err, ErrStorage))
 	assert.True(t, created)
 
-	_, err = Provisioner{Layout: Layout{Backend: BackendLocal, HostBase: t.TempDir()}}.ProvisionSharedWorkspace(SharedWorkspaceProvision{ProjectID: testPID})
-	require.Error(t, err)
-}
-
-// ProjectTreeIDs lists the project roots on the subpath root, skipping
-// other entries, and refuses a share that is not mounted.
-func TestLayout_ProjectTreeIDs(t *testing.T) {
-	base := t.TempDir()
-	l := delNFSLayout(base)
-	for _, d := range []string{testPID, testOtherPID, ".not-a-project", "-not-a-project"} {
-		require.NoError(t, os.MkdirAll(filepath.Join(base, "projects", d), 0o755))
-	}
-	ids, err := l.ProjectTreeIDs()
-	require.NoError(t, err)
-	assert.ElementsMatch(t, []string{testPID, testOtherPID}, ids)
-
-	_, err = delNFSLayout(t.TempDir()).ProjectTreeIDs()
-	require.ErrorIs(t, err, ErrNoProjectTree)
-	_, err = Layout{Backend: BackendLocal}.ProjectTreeIDs()
+	_, err = Provisioner{Layout: projectfs.Layout{Backend: projectfs.BackendLocal, HostBase: t.TempDir()}}.ProvisionSharedWorkspace(SharedWorkspace{ProjectID: testPID})
 	require.Error(t, err)
 }
