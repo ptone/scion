@@ -19,6 +19,7 @@ package provision
 import (
 	"errors"
 	"fmt"
+	"os"
 )
 
 // readSmallFileNoFollow always fails with errors.ErrUnsupported. The unix
@@ -28,4 +29,10 @@ import (
 // no path-based fallback.
 func readSmallFileNoFollow(path string, max int64) ([]byte, error) {
 	return nil, fmt.Errorf("read %s: %w on this platform", path, errors.ErrUnsupported)
+}
+
+// openDirNoFollow always fails with errors.ErrUnsupported (see
+// readSmallFileNoFollow).
+func openDirNoFollow(path string) (*os.File, error) {
+	return nil, fmt.Errorf("open directory %s: %w on this platform", path, errors.ErrUnsupported)
 }

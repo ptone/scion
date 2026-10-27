@@ -43,3 +43,15 @@ func readSmallFileNoFollow(path string, max int64) ([]byte, error) {
 	}
 	return readBoundedFile(f, max)
 }
+
+// openDirNoFollow opens the directory at path for reading its entries,
+// refusing a symlink at the last component (O_NOFOLLOW) and anything that is
+// not a directory (O_DIRECTORY). A missing directory is an fs.ErrNotExist
+// error.
+func openDirNoFollow(path string) (*os.File, error) {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open directory %s without following symlinks: %w", path, err)
+	}
+	return os.NewFile(uintptr(fd), path), nil
+}

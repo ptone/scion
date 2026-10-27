@@ -17,6 +17,8 @@
 package provision
 
 import (
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -218,4 +220,68 @@ func TestReadCloneManifest_OverCapRefused(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(scratch, cloneManifestFile), []byte(body+strings.Repeat("#", cloneManifestMaxBytes)), 0o644))
 	_, err := readCloneManifest(scratch)
 	assert.ErrorIs(t, err, errFileTooLarge)
+}
+
+// fillSharerRegistry creates n marker files (empty JSON objects, no sharers)
+// in base's registry directory and returns the directory.
+func fillSharerRegistry(t *testing.T, base string, n int) string {
+	t.Helper()
+	dir := filepath.Join(base, ".git", sharerDir)
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	for i := 0; i < n; i++ {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, fmt.Sprintf("m%05d.json", i)), []byte("{}"), 0o644))
+	}
+	return dir
+}
+
+// The registry listing is chunked and capped: above sharerMarkersMax markers
+// only that many names are kept and the scan reports truncation; a normal
+// registry is listed whole and sorted.
+func TestListSharerMarkers_Capped(t *testing.T) {
+	base := t.TempDir()
+	dir := fillSharerRegistry(t, base, 3)
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "sub.json"), 0o755)) // a directory is not a marker
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "notes.txt"), nil, 0o644))
+	names, truncated, err := listSharerMarkers(dir)
+	require.NoError(t, err)
+	assert.False(t, truncated)
+	assert.Equal(t, []string{"m00000.json", "m00001.json", "m00002.json"}, names)
+
+	big := fillSharerRegistry(t, t.TempDir(), sharerMarkersMax+5)
+	names, truncated, err = listSharerMarkers(big)
+	require.NoError(t, err)
+	assert.True(t, truncated)
+	assert.Len(t, names, sharerMarkersMax)
+
+	_, _, err = listSharerMarkers(filepath.Join(t.TempDir(), "absent"))
+	assert.ErrorIs(t, err, fs.ErrNotExist)
+}
+
+// Above the cap, "not registered" cannot be stated: FindBranchForAgent and
+// UnregisterSharerElsewhere return errSharerRegistryTooLarge (on the base
+// they listed everything and reported not found / nothing rewritten).
+func TestSharerRegistry_OverCapFailsClosed(t *testing.T) {
+	base := t.TempDir()
+	fillSharerRegistry(t, base, sharerMarkersMax+1)
+	_, _, found, err := FindBranchForAgent(base, "", "agent-1")
+	assert.False(t, found)
+	assert.ErrorIs(t, err, errSharerRegistryTooLarge)
+	_, err = UnregisterSharerElsewhere(base, "agent-1", "")
+	assert.ErrorIs(t, err, errSharerRegistryTooLarge)
+
+	small := t.TempDir()
+	fillSharerRegistry(t, small, 2)
+	_, _, found, err = FindBranchForAgent(small, "", "agent-1")
+	assert.NoError(t, err)
+	assert.False(t, found)
+}
+
+// A symlinked registry directory is not followed.
+func TestListSharerMarkers_SymlinkedDirRefused(t *testing.T) {
+	base := t.TempDir()
+	target := fillSharerRegistry(t, t.TempDir(), 1)
+	require.NoError(t, os.MkdirAll(filepath.Join(base, ".git"), 0o755))
+	require.NoError(t, os.Symlink(target, filepath.Join(base, ".git", sharerDir)))
+	_, _, err := listSharerMarkers(filepath.Join(base, ".git", sharerDir))
+	assert.Error(t, err)
 }
