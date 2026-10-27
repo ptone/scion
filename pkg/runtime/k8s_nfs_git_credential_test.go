@@ -357,7 +357,6 @@ func TestRun_NFSGitToken_RunScopedSecretName(t *testing.T) {
 		cancel()
 		return false, nil, nil
 	})
-	seedConfigClaims(t, clientset, "default", cfg)
 	_, _ = rt.Run(ctx, cfg)
 
 	mu.Lock()

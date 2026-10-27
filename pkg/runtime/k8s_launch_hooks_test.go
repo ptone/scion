@@ -748,7 +748,6 @@ func TestRun_NFSAgentDir_AsyncPath(t *testing.T) {
 	rec := &hookRecorder{}
 	rec.apply(&cfg)
 	failPodReadiness(r.Client.Clientset.(*k8sfake.Clientset))
-	seedConfigClaims(t, r.Client.Clientset.(*k8sfake.Clientset), "default", cfg)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if _, err := r.Run(ctx, cfg); err == nil {
