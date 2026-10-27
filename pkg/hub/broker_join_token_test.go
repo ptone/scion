@@ -41,7 +41,7 @@ import (
 // joinWithToken redeems a join token with no Authorization header.
 func joinWithToken(t *testing.T, srv *Server, brokerID, token string) *httptest.ResponseRecorder {
 	t.Helper()
-	return doRequestNoAuth(t, srv, http.MethodPost, "/api/v1/brokers/join", BrokerJoinRequest{
+	return doRequestNoAuthLoopback(t, srv, http.MethodPost, "/api/v1/brokers/join", BrokerJoinRequest{
 		BrokerID:  brokerID,
 		JoinToken: token,
 		Hostname:  "headless-host",

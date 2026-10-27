@@ -470,6 +470,7 @@ func TestBrokerRotateSecret_SelfAllowed(t *testing.T) {
 	// dispatched through srv.Handler().ServeHTTP, the same as a real broker's
 	// outbound call.
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/brokers/"+broker.ID+"/rotate-secret", nil)
+	req.RemoteAddr = tpLoopbackPeer // the transport policy admits a client on the hub host
 	require.NoError(t, srv.brokerAuthService.SignRequest(req, broker.ID, originalKey))
 	rec := httptest.NewRecorder()
 

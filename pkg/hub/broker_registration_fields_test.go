@@ -456,7 +456,7 @@ func TestJoin_LeavesUpdateManagedFields(t *testing.T) {
 		if flat {
 			join.RuntimeTarget = f.base.RuntimeTarget
 		}
-		rec := doRequestNoAuth(t, f.srv, http.MethodPost, "/api/v1/brokers/join", join)
+		rec := doRequestNoAuthLoopback(t, f.srv, http.MethodPost, "/api/v1/brokers/join", join)
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 		f.requireGCPHost(t, ownedEmailA, ownedProjectA)
@@ -500,7 +500,7 @@ func TestReregistration_NeverClearsGCPHostFields(t *testing.T) {
 		{"join", func(t *testing.T, f *ownedBrokerFixture) {
 			resp := f.reregister(t, nil)
 			join := BrokerJoinRequest{BrokerID: f.id, JoinToken: resp.JoinToken, Hostname: "never-clears", Version: "1.0.0", RuntimeTarget: f.base.RuntimeTarget}
-			rec := doRequestNoAuth(t, f.srv, http.MethodPost, "/api/v1/brokers/join", join)
+			rec := doRequestNoAuthLoopback(t, f.srv, http.MethodPost, "/api/v1/brokers/join", join)
 			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		}},
 		{"heartbeat copy", func(t *testing.T, f *ownedBrokerFixture) {

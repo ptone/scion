@@ -465,7 +465,7 @@ func TestBrokerHubToken_OwnerTokenCannotRotate(t *testing.T) {
 	originalKey := seedBrokerSecret(t, s, broker.ID)
 	key := mintHubBrokerUAT(t, srv, owner.ID, "broker:create")
 
-	rec := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/brokers/"+broker.ID+"/rotate-secret", map[string]interface{}{})
+	rec := doRequestWithTokenLoopback(t, srv, key, http.MethodPost, "/api/v1/brokers/"+broker.ID+"/rotate-secret", map[string]interface{}{})
 
 	assert.Equal(t, http.StatusForbidden, rec.Code,
 		"no user access token selector authorizes rotation; got: %s", rec.Body.String())
