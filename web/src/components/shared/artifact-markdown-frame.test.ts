@@ -125,4 +125,22 @@ describe('artifact markdown frame: CriticMarkup', () => {
     expect(off).not.toContain('critic-side');
     expect(off).not.toContain('notes-margin');
   });
+
+  it('shows the document in a frame that runs no script', async () => {
+    const el = document.createElement(
+      'scion-artifact-markdown-frame'
+    ) as ScionArtifactMarkdownFrame;
+    el.content = 'hello';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    const frame = el.shadowRoot!.querySelector('iframe')!;
+    const tokens = (frame.getAttribute('sandbox') ?? '').split(/\s+/);
+    expect(frame.hasAttribute('sandbox')).toBe(true);
+    expect(tokens).not.toContain('allow-scripts');
+    expect(tokens).not.toContain('allow-top-navigation');
+    expect(tokens.sort()).toEqual(
+      ['allow-popups', 'allow-popups-to-escape-sandbox', 'allow-same-origin'].sort()
+    );
+    el.remove();
+  });
 });

@@ -33,9 +33,8 @@ import { LitElement, html, css } from 'lit';
 import type { TemplateResult } from 'lit';
 import { customElement, property, query, state } from 'lit/decorators.js';
 
-import { getMarkdownRenderer } from '../../utils/markdown.js';
-import { PREVIEW_SANDBOX, previewDocument, rewriteImages } from '../../client/artifact-preview.js';
-import type { PreviewTheme } from '../../client/artifact-preview.js';
+import { PREVIEW_SANDBOX, previewFrameDocument } from '../../client/artifact-preview.js';
+import type { FrameDocument, PreviewTheme } from '../../client/artifact-preview.js';
 import type { ArtifactFile } from '../../client/artifacts.js';
 import { projectCritic } from '../../utils/critic.js';
 
@@ -60,7 +59,7 @@ export class ScionArtifactMarkdownFrame extends LitElement {
   /** Style the side note as an empty-state placeholder. */
   @property({ type: Boolean }) sideNoteEmpty = false;
 
-  @state() private srcdoc = '';
+  @state() private srcdoc: FrameDocument = '';
   @state() private error: string | null = null;
   @query('iframe') private frame?: HTMLIFrameElement;
 
@@ -124,25 +123,25 @@ export class ScionArtifactMarkdownFrame extends LitElement {
 
   private async build(): Promise<void> {
     try {
-      const renderer = await getMarkdownRenderer();
       const source =
         this.critic === 'clean' || this.critic === 'accept'
           ? projectCritic(this.content, this.critic)
           : this.content;
-      const clean = renderer.render(source, {
-        criticMarks: this.critic === 'marks',
-        criticAuthor: this.noteAuthor,
-      });
-      const body = rewriteImages(clean, {
-        id: this.artifactId,
-        seq: this.seq,
-        entryPath: this.entryPath,
-        files: this.files,
-      });
-      this.srcdoc = previewDocument(body, this.theme(), {
-        marginNotes: this.marginNotes && this.critic !== 'off',
-        sideNote: this.critic === 'off' ? '' : this.sideNote,
-        sideNoteEmpty: this.sideNoteEmpty,
+      this.srcdoc = await previewFrameDocument({
+        source,
+        render: { criticMarks: this.critic === 'marks', criticAuthor: this.noteAuthor },
+        files: {
+          id: this.artifactId,
+          seq: this.seq,
+          entryPath: this.entryPath,
+          files: this.files,
+        },
+        theme: this.theme(),
+        options: {
+          marginNotes: this.marginNotes && this.critic !== 'off',
+          sideNote: this.critic === 'off' ? '' : this.sideNote,
+          sideNoteEmpty: this.sideNoteEmpty,
+        },
       });
       this.error = null;
     } catch (err) {
