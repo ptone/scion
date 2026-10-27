@@ -236,7 +236,7 @@ func TestSigningKeySource_SharedAndPreconfiguredLabels(t *testing.T) {
 	cfg.SharedSigningSecret = "synthetic-test-secret"
 	srv, _, err := tiaNewServer(t, cfg)
 	require.NoError(t, err)
-	for _, k := range []string{SecretKeyUserSigningKey, SecretKeyAgentSigningKey, SecretKeyDownloadSigningKey, SecretKeyArtifactViewKey, SecretKeyAttachmentDeliveryKey, SecretKeyListCursorKey} {
+	for _, k := range []string{SecretKeyUserSigningKey, SecretKeyAgentSigningKey, SecretKeyDownloadSigningKey, SecretKeyArtifactViewKey, SecretKeyAttachmentDeliveryKey, SecretKeyListCursorKey, SecretKeyPortViewKey} {
 		assert.Equal(t, signingKeySourceSharedSecret, srv.signingKeySource(k), k)
 	}
 	assert.Equal(t, signingKeySourceUnresolved, srv.signingKeySource(SecretKeyOIDCSigningKey), "OIDC off: unresolved")
