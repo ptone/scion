@@ -1109,6 +1109,9 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 			// mirroring the cascade in resolveCloneToken. Users who store
 			// GITHUB_TOKEN at user/profile scope only (no project-scoped token)
 			// would otherwise still hit the NoAuth suppression bug (#1165).
+			// This by-name read of the owner's user-scope row does not go
+			// through the start-time user-scope checks in
+			// startSecretResolveOpts; it is tracked separately.
 			if (ghSecret == nil || ghSecret.Value == "") && agent.OwnerID != "" {
 				ghSecret, err = d.secretBackend.Get(ctx, "GITHUB_TOKEN", secret.ScopeUser, agent.OwnerID)
 				if err != nil {
@@ -2974,47 +2977,7 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 	// 2. Check secrets (all scopes via backend.Resolve).
 	// Only environment-type secrets can be mapped to env key=value pairs.
 	if d.secretBackend != nil {
-		var resolveOpts *secret.ResolveOpts
-		if len(agent.Ancestry) > 1 && d.authzService != nil {
-			agentID := agent.ID
-			ancestry := agent.Ancestry
-			// The synthetic identity must carry the agent's real scopes.
-			// Agent authority is derived from JWT scopes (buildAgentSyntheticBindings),
-			// and agentScopeRestriction denies everything when the scope list is
-			// empty, so an identity built without them can never be allowed.
-			role, additionalScopes := agentRoleAndScopes(agent)
-			scopes := append(ScopesForRole(role), additionalScopes...)
-			resolveOpts = &secret.ResolveOpts{
-				AgentAncestry: ancestry,
-				AuthzCheck: func(s secret.SecretMeta) bool {
-					ident := &agentIdentityWrapper{
-						AgentTokenClaims: &AgentTokenClaims{
-							Claims:    jwt.Claims{Subject: agentID},
-							ProjectID: agent.ProjectID,
-							Ancestry:  ancestry,
-							Scopes:    scopes,
-						},
-					}
-					// Name the permission explicitly. (resource="secret",
-					// action="read") has no registry entry - agent secret access is
-					// registered as project.secret_read on ResourceProject - so
-					// resolveResourcePermission cannot resolve the pair on its own.
-					decision := d.authzService.Decide(ctx, AuthzRequest{
-						Principal:  principalContextForIdentity(ident),
-						Credential: credentialContextForIdentity(ident),
-						Resource:   Resource{Type: "secret", ID: s.ID},
-						Action:     ActionRead,
-						Permission: permissionProjectSecretRead,
-					})
-					if !decision.Allowed && d.debug {
-						d.log.Debug("progeny secret denied by authz",
-							"agent_id", agentID, "secret", s.Name, "secret_id", s.ID,
-							"reason", decision.Reason, "scopes", len(scopes))
-					}
-					return decision.Allowed
-				},
-			}
-		}
+		resolveOpts := d.startSecretResolveOpts(ctx, agent)
 
 		resolved, err := d.secretBackend.Resolve(
 			ctx, agent.OwnerID, agent.ProjectID, agent.RuntimeBrokerID, resolveOpts)
@@ -3246,21 +3209,33 @@ type startEnvResult struct {
 // mintSiteRestart; it names the site in the mint audit record and gives the
 // verb of the secrets-resolution failure (the agent was not <verb>). Any
 // other site is an error before any work is done. It returns an error only
-// for such a site, when the stored env settings read fails or the secret
-// backend returns a resolution error (a *secretResolutionError; absence of
-// stored settings or secrets is not an error), when the
+// for such a site, when the stored env settings read fails, the secret
+// backend returns a resolution error, or the delivery credential an
+// associated item needs cannot be minted (a *secretResolutionError; absence
+// of stored settings or secrets is not an error, and an item the delivery
+// decision refuses is simply not delivered), when the
 // agent's project cannot be loaded (both checked before any token is
 // minted), or when the agent token is not issued.
 func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Agent, caller string, site mintSite) (startEnvResult, error) {
 	var startedVerb string
+	var purpose MaterialPurpose
 	switch site {
 	case mintSiteStart:
 		startedVerb = "started"
+		purpose = PurposeDispatch
 	case mintSiteRestart:
 		startedVerb = "restarted"
+		purpose = PurposeRestart
 	default:
 		return startEnvResult{}, fmt.Errorf("%s: unsupported mint site %q for a start", caller, site)
 	}
+	// Launch material is selected under the delivery credential: every
+	// project-, hub- and broker-scope env var and secret is authorized
+	// (Decide *.deliver) before it is used, and no secret value is read
+	// before the credential is minted and the item admitted
+	// (material_delivery.go). The selector is per start, so nothing is
+	// cached from an earlier start.
+	sel := newDeliverySelector(d.authzService, agent, purpose)
 	resolvedEnv := make(map[string]string)
 	var envClassifications map[string]api.EnvKind
 
@@ -3294,7 +3269,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	// A read error (not an absence) fails the start/restart here, like a
 	// secret resolution error below: before any token is minted and before
 	// anything reaches the broker. Only the fixed message leaves the hub.
-	envFromStorage, envFromStoragePlain, err := d.resolveEnvFromStorage(ctx, agent)
+	envFromStorage, envFromStoragePlain, err := d.selectDeliveryEnv(ctx, sel, agent)
 	if err != nil {
 		d.log.WarnContext(ctx, caller+": failed to read stored env settings; agent not "+startedVerb,
 			"agent_id", agent.ID, "error", err)
@@ -3321,7 +3296,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	// lookup and before any agent or transport token is minted below, so
 	// nothing reaches the broker and there is nothing to revoke. Absence is
 	// not an error: an agent with no secrets resolves to an empty list.
-	resolvedSecrets, _, err := d.resolveSecrets(ctx, agent)
+	resolvedSecrets, err := d.selectDeliverySecrets(ctx, sel, agent)
 	if err != nil {
 		d.log.WarnContext(ctx, caller+": failed to resolve secrets; agent not "+startedVerb,
 			"agent_id", agent.ID, "error", err)
@@ -4798,6 +4773,165 @@ func (d *HTTPAgentDispatcher) deferredLifecycleResult(
 	return none, nil
 }
 
+// startSecretResolveOpts builds the resolve options for a start-time
+// secret resolution. resolveSecrets, resolveAsNeededForKeys and the start
+// and restart launch selection (selectDeliverySecrets) all use it, so they
+// authorize a user-scope secret the same way. It returns nil when no
+// authorization service is configured; nothing is then resolved through
+// the progeny path and the owner path is unchecked.
+//
+// Two user-scope paths are checked, both for one synthetic identity built
+// from the agent's stored role, scopes and ancestry:
+//
+// The progeny path (an agent created by another agent: ancestry of more
+// than one entry). Each progeny candidate must pass both:
+//   - project.secret_read with ActionRead on the secret, the generic
+//     delegation walk this path has always applied (an unrecorded hop never
+//     allows it, so a chain without recorded provenance stays denied here);
+//   - for a user-scope candidate, secret.use with ActionUse on
+//     userSecretResource, the decision the runtime read (check 8) makes.
+//     Its step 10 applies the user-scope secret parent ceiling
+//     (EvaluateUserSecretParentCeiling), including the terminal user's
+//     secret.use access constraints (S4b) and the owner binding at the head
+//     of the ancestry (S7, S8); Decide also applies the agent's own access
+//     constraints for secret.use.
+//
+// The owner path (the user scope of agent.OwnerID, resolved directly; for an
+// agent created by a user, OwnerID is that user). It used to have no check.
+// Now a row shared with progeny (AllowProgeny) must pass the user-scope
+// secret parent ceiling (EvaluateUserSecretParentCeiling, the evaluator the
+// runtime read's step 10 runs) when the agent's chain has recorded
+// provenance: the chain and its terminal user (S1-S4c), the terminal
+// user's secret.use access constraints (S4b) and the owner binding at the
+// head of the ancestry (S7, S8). The full Decide is not used here: it would
+// also require the agent's own project:secret:read scope, which only the
+// full role carries, and owner-path delivery has never depended on the
+// agent's role. For the same reason the agent's own access constraints
+// (Decide steps 7b and 7c) are not applied here, while the runtime read
+// applies them. The boundary of this check:
+//   - a row not shared with progeny is unchanged. The runtime read never
+//     returns such a row (sharing_disabled), so there is no read to agree
+//     with, and injecting a user's own secrets into that user's agents is
+//     how they reach an agent;
+//   - a chain without recorded provenance is unchanged (the read applies the
+//     progeny rule to it, not the ceiling);
+//   - an agent with no stored ancestry is unchanged;
+//   - a chain lookup error rejects the row (fail closed).
+//
+// So an agent created by a user and re-delegated by another user still
+// receives the owner's rows not shared with progeny at start; that is
+// tracked separately from this check. So is the NoAuth GITHUB_TOKEN
+// fallback in buildCreateRequestFor: it reads the owner's row by name
+// (secretBackend.Get), outside Resolve, and this check does not cover it.
+//
+// A row that is rejected is skipped inside the resolver, so a lower-scope
+// row with the same key stays in effect. Neither check widens anything: a
+// row is delivered only when every decision applied to it allows.
+func (d *HTTPAgentDispatcher) startSecretResolveOpts(ctx context.Context, agent *store.Agent) *secret.ResolveOpts {
+	if agent == nil || d.authzService == nil {
+		return nil
+	}
+	agentID := agent.ID
+	ancestry := agent.Ancestry
+	// The synthetic identity must carry the agent's real scopes.
+	// Agent authority is derived from JWT scopes (buildAgentSyntheticBindings),
+	// and agentScopeRestriction denies everything when the scope list is
+	// empty, so an identity built without them can never be allowed.
+	role, additionalScopes := agentRoleAndScopes(agent)
+	scopes := append(ScopesForRole(role), additionalScopes...)
+	identity := func() *agentIdentityWrapper {
+		return &agentIdentityWrapper{
+			AgentTokenClaims: &AgentTokenClaims{
+				Claims:    jwt.Claims{Subject: agentID},
+				ProjectID: agent.ProjectID,
+				Ancestry:  ancestry,
+				Scopes:    scopes,
+			},
+		}
+	}
+	secretUse := func(ident *agentIdentityWrapper, s secret.SecretMeta) Decision {
+		return d.authzService.Decide(ctx, AuthzRequest{
+			Principal:  principalContextForIdentity(ident),
+			Credential: credentialContextForIdentity(ident),
+			Resource:   userSecretResource(s.ID, s.ScopeID),
+			Action:     ActionUse,
+			Permission: secretUsePermission,
+		})
+	}
+	deny := func(path string, s secret.SecretMeta, reason string) {
+		if d.debug {
+			d.log.Debug("start-time secret denied by authz", "path", path,
+				"agent_id", agentID, "secret", s.Name, "secret_id", s.ID,
+				"reason", reason, "scopes", len(scopes))
+		}
+	}
+
+	opts := &secret.ResolveOpts{}
+	if len(ancestry) > 1 {
+		if d.debug {
+			d.log.Debug("progeny resolution enabled",
+				"agent_id", agentID, "ancestry_len", len(ancestry),
+				"role", string(role), "scopes", len(scopes))
+		}
+		opts.AgentAncestry = ancestry
+		opts.AuthzCheck = func(s secret.SecretMeta) bool {
+			ident := identity()
+			// Name the permission explicitly. (resource="secret",
+			// action="read") has no registry entry - agent secret access is
+			// registered as project.secret_read on ResourceProject - so
+			// resolveResourcePermission cannot resolve the pair on its own.
+			decision := d.authzService.Decide(ctx, AuthzRequest{
+				Principal:  principalContextForIdentity(ident),
+				Credential: credentialContextForIdentity(ident),
+				Resource:   Resource{Type: "secret", ID: s.ID},
+				Action:     ActionRead,
+				Permission: permissionProjectSecretRead,
+			})
+			if decision.Allowed && s.Scope == store.ScopeUser {
+				decision = secretUse(ident, s)
+			}
+			if !decision.Allowed {
+				deny("progeny", s, decision.Reason)
+			}
+			return decision.Allowed
+		}
+	}
+	if agent.OwnerID != "" && len(ancestry) > 0 {
+		// The chain verdict is the same for every row, so it is computed
+		// once, on the first shared row.
+		var (
+			chainDone       bool
+			chainUnrecorded bool
+			chainErr        bool
+		)
+		opts.UserScopeCheck = func(s secret.SecretMeta) bool {
+			if !s.AllowProgeny {
+				return true
+			}
+			ident := identity()
+			if !chainDone {
+				chain := d.authzService.userSecretChainVerdict(ctx, ident, nil)
+				chainErr = chain.decision.DenyCause == DenyCauseCeilingError
+				chainUnrecorded = !chain.decision.Allowed && chain.unrecorded
+				chainDone = true
+			}
+			switch {
+			case chainErr:
+				deny("owner", s, "delegation chain could not be evaluated")
+				return false
+			case chainUnrecorded:
+				return true
+			}
+			ceiling := d.authzService.EvaluateUserSecretParentCeiling(ctx, ident, userSecretResource(s.ID, s.ScopeID))
+			if !ceiling.Allowed {
+				deny("owner", s, ceiling.Reason)
+			}
+			return ceiling.Allowed
+		}
+	}
+	return opts
+}
+
 // resolveSecrets queries secrets from all applicable scopes and merges them
 // into a flat list. Higher scopes override lower:
 //
@@ -4819,55 +4953,9 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 			"brokerID", agent.RuntimeBrokerID,
 		)
 	}
-	// Build resolve options: include agent ancestry for progeny secret resolution
-	// when the creating principal is an agent (ancestry has more than one entry,
-	// meaning the agent was created by another agent, not directly by the user).
-	var resolveOpts *secret.ResolveOpts
-	if len(agent.Ancestry) > 1 && d.authzService != nil {
-		agentID := agent.ID
-		ancestry := agent.Ancestry
-		// The synthetic identity must carry the agent's real scopes.
-		// Agent authority is derived from JWT scopes (buildAgentSyntheticBindings),
-		// and agentScopeRestriction denies everything when the scope list is
-		// empty, so an identity built without them can never be allowed.
-		role, additionalScopes := agentRoleAndScopes(agent)
-		scopes := append(ScopesForRole(role), additionalScopes...)
-		if d.debug {
-			d.log.Debug("resolveSecrets: progeny resolution enabled",
-				"agent_id", agentID, "ancestry_len", len(ancestry),
-				"role", string(role), "scopes", len(scopes))
-		}
-		resolveOpts = &secret.ResolveOpts{
-			AgentAncestry: ancestry,
-			AuthzCheck: func(s secret.SecretMeta) bool {
-				ident := &agentIdentityWrapper{
-					AgentTokenClaims: &AgentTokenClaims{
-						Claims:    jwt.Claims{Subject: agentID},
-						ProjectID: agent.ProjectID,
-						Ancestry:  ancestry,
-						Scopes:    scopes,
-					},
-				}
-				// Name the permission explicitly. (resource="secret",
-				// action="read") has no registry entry - agent secret access is
-				// registered as project.secret_read on ResourceProject - so
-				// resolveResourcePermission cannot resolve the pair on its own.
-				decision := d.authzService.Decide(ctx, AuthzRequest{
-					Principal:  principalContextForIdentity(ident),
-					Credential: credentialContextForIdentity(ident),
-					Resource:   Resource{Type: "secret", ID: s.ID},
-					Action:     ActionRead,
-					Permission: permissionProjectSecretRead,
-				})
-				if !decision.Allowed && d.debug {
-					d.log.Debug("progeny secret denied by authz",
-						"agent_id", agentID, "secret", s.Name, "secret_id", s.ID,
-						"reason", decision.Reason, "scopes", len(scopes))
-				}
-				return decision.Allowed
-			},
-		}
-	}
+	// The start-time checks on the progeny and owner user-scope paths
+	// (startSecretResolveOpts).
+	resolveOpts := d.startSecretResolveOpts(ctx, agent)
 
 	resolved, err := d.secretBackend.Resolve(ctx, agent.OwnerID, agent.ProjectID, agent.RuntimeBrokerID, resolveOpts)
 	if err != nil {
