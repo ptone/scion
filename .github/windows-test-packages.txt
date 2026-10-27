@@ -23,9 +23,10 @@
 # ./pkg/brokercredentials: the Windows-reachable read (the write path and
 # multistore are gated).
 ./pkg/brokercredentials -run=^(TestWindowsBrokerCredentials_RefusesUsersReadableFile|TestWindowsBrokerCredentials_RefusesSymlink|TestWindowsBrokerCredentials_MissingIsNotFound|TestStore_Load|TestStore_LoadNotFound|TestStore_LoadValidation)$
-# ./pkg/agent: the GitHub resolution cache, host state and the git base
-# config refusal only (the rest is gated agent provisioning).
-./pkg/agent -run=^(TestWindowsResolutionCache_NewDirAndFilePrivate|TestWindowsResolutionCache_RepairsOwnedTooOpenFile|TestWindowsResolutionCache_ForeignOwnedFileWarnedNotRepaired|TestWindowsResolutionCache_TooOpenDirWarnedNotRepaired|TestWindowsHostState_Unsupported|TestWindowsGitBaseConfig_Unsupported)$
+# ./pkg/agent: the GitHub resolution cache, host state, the git base config
+# refusal and the state directory removal (no podman unshare retry) only (the
+# rest is gated agent provisioning).
+./pkg/agent -run=^(TestWindowsResolutionCache_NewDirAndFilePrivate|TestWindowsResolutionCache_RepairsOwnedTooOpenFile|TestWindowsResolutionCache_ForeignOwnedFileWarnedNotRepaired|TestWindowsResolutionCache_TooOpenDirWarnedNotRepaired|TestWindowsHostState_Unsupported|TestWindowsGitBaseConfig_Unsupported|TestWindowsRetryRemovalInUserNamespace_ReturnsOriginal)$
 ./pkg/hubprofile
 # ./cmd: anchored to the Windows-relevant tests (the full suite is
 # POSIX-bound). Never the attachment-writing
