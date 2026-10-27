@@ -1452,14 +1452,16 @@ func TestGitHubAssociationReport_CancelledBuildCommitsNothing(t *testing.T) {
 	assert.True(t, byID[p.ID].Authorized)
 }
 
-// updateHookStore runs onUpdate before each UpdateProject it forwards.
+// updateHookStore runs onUpdate before each UpdateProject it forwards, while
+// its fault switch is armed.
 type updateHookStore struct {
 	store.Store
+	fault    *storeFaultSwitch
 	onUpdate func(p *store.Project)
 }
 
 func (s *updateHookStore) UpdateProject(ctx context.Context, p *store.Project) error {
-	if s.onUpdate != nil {
+	if s.fault.Active() && s.onUpdate != nil {
 		s.onUpdate(p)
 	}
 	return s.Store.UpdateProject(ctx, p)
@@ -1468,15 +1470,14 @@ func (s *updateHookStore) UpdateProject(ctx context.Context, p *store.Project) e
 // A report read that lands between the bind's first invalidation and its
 // store write re-evaluates the project from the pre-bind state; the second
 // invalidation, after the write, makes the next read pick up the binding.
-// The read is forced into that window by a store wrapper the server is
-// built on. Revert check:
+// The read is forced into that window by a store wrapper installed on the
+// server (installStoreFault). Revert check:
 // without the post-write invalidation the bound project stays missing from
 // the report.
 func TestGitHubAssociationReport_BindInvalidatesAfterWrite(t *testing.T) {
-	inner, err := newTestStore(t, ":memory:")
-	require.NoError(t, err)
-	hook := &updateHookStore{Store: inner}
-	srv, st := testServerOnMigratedStore(t, hook)
+	srv, st, hook, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *updateHookStore {
+		return &updateHookStore{Store: inner, fault: f}
+	})
 	createAssocInstallation(t, st, 5991, "acme", "acme/widgets")
 	p := createAssocProject(t, st, "assoc-postwrite-bind", "https://github.com/acme/widgets", "nobody", nil)
 
@@ -1495,6 +1496,7 @@ func TestGitHubAssociationReport_BindInvalidatesAfterWrite(t *testing.T) {
 		_, _, err := srv.githubAssociationReport(context.Background(), false)
 		require.NoError(t, err)
 	}
+	fault.Arm()
 
 	rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+p.ID+"/github-installation",
 		map[string]int64{"installation_id": 5991})
