@@ -149,6 +149,14 @@ type Resource struct {
 	// launcher status-read rule (authz_launcher_read.go) decides from it
 	// alone. It is unexported so no decoded request can carry it.
 	launchedTarget *store.Agent
+
+	// deliveryItem names the stored material record a deliver request is
+	// for, set only by materialDeliveryResource (material_resources.go).
+	// The association rules (authz_material_association.go) re-read the
+	// record it names from the store and decide from that record and the
+	// delivery credential's stored agent. It is unexported so no decoded
+	// request can carry it.
+	deliveryItem *materialDeliveryItem
 }
 
 // PrincipalKind describes the authenticated actor evaluated by an authorization request.
@@ -2036,8 +2044,22 @@ func (a *AuthzService) accessConstraintRestrictions(
 	if err != nil {
 		return nil, err
 	}
+	return restrictionsFromConstraints(constraints, closure, resource), nil
+}
+
+// restrictionsFromConstraints is accessConstraintRestrictions after its load:
+// it converts the loaded constraints, keeps those that apply to closure in
+// the scope resource.ProjectID selects (the system scope when it is empty),
+// and returns them as kernel restrictions. It does no I/O, so a caller that
+// evaluates many resources in one request can load the table once and call
+// this per resource.
+func restrictionsFromConstraints(
+	constraints []*store.AccessConstraint,
+	closure map[string]struct{},
+	resource ResourceContext,
+) []Restriction {
 	if len(constraints) == 0 {
-		return nil, nil
+		return nil
 	}
 
 	// Convert store constraints to hub AccessConstraint and filter.
@@ -2096,7 +2118,7 @@ func (a *AuthzService) accessConstraintRestrictions(
 		ri++
 	}
 
-	return restrictions, nil
+	return restrictions
 }
 
 // loadAllAccessConstraints loads all access constraints by paging through
