@@ -15,12 +15,15 @@
 package secret
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sort"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/secret/secretenvelope"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // ErrResolveDecrypt matches (errors.Is) a *ResolveDecryptError: secret
@@ -99,3 +102,83 @@ func (e *ResolveDecryptError) Error() string {
 
 // Is matches ErrResolveDecrypt.
 func (e *ResolveDecryptError) Is(target error) bool { return target == ErrResolveDecrypt }
+
+// ErrResolveAccess matches (errors.Is) a *ResolveAccessError: secret
+// resolution failed because a secret the agent references could not be read
+// from the secret backend (ptone/scion#5959). There is no partial mode: one
+// unreadable secret fails the whole resolution.
+var ErrResolveAccess = errors.New("secret resolution failed: a referenced secret could not be accessed")
+
+// Stable classifications of an access failure (ResolveAccessError.Kind).
+// They never carry backend text, resource paths or values.
+const (
+	FailureNotFound           = "not_found"
+	FailurePermissionDenied   = "permission_denied"
+	FailureUnavailable        = "unavailable"
+	FailureFailedPrecondition = "failed_precondition"
+	FailureDeadlineExceeded   = "deadline_exceeded"
+	FailureCanceled           = "canceled"
+	FailureEmptyPayload       = "empty_payload"
+	FailureAccess             = "access_failed"
+)
+
+// ErrEmptyPayload is returned when the secret backend reports success but
+// returns no payload (ptone/scion#6090). It is an access failure, never an
+// empty value.
+var ErrEmptyPayload = errors.New("secret backend returned no payload")
+
+// AccessFailureKind classifies a secret backend read error: a context error
+// or a gRPC status code.
+func AccessFailureKind(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return FailureCanceled
+	case errors.Is(err, context.DeadlineExceeded):
+		return FailureDeadlineExceeded
+	case errors.Is(err, ErrEmptyPayload):
+		return FailureEmptyPayload
+	}
+	switch status.Code(err) {
+	case codes.NotFound:
+		return FailureNotFound
+	case codes.PermissionDenied:
+		return FailurePermissionDenied
+	case codes.Unavailable:
+		return FailureUnavailable
+	case codes.FailedPrecondition:
+		return FailureFailedPrecondition
+	case codes.DeadlineExceeded:
+		return FailureDeadlineExceeded
+	case codes.Canceled:
+		return FailureCanceled
+	default:
+		return FailureAccess
+	}
+}
+
+// ResolveAccessError is the typed error of a resolution that could not read
+// a referenced secret from the backend. Error() names the secret's scope and
+// key and the failure classification only: never its value, the backend's
+// message or the backend resource path. The cause is kept in Err, reachable
+// through Unwrap, for errors.Is/As and status.Code.
+type ResolveAccessError struct {
+	Key   string
+	Scope string
+	Kind  string
+	Err   error
+}
+
+func newResolveAccessError(key, scope string, cause error) *ResolveAccessError {
+	return &ResolveAccessError{Key: key, Scope: scope, Kind: AccessFailureKind(cause), Err: cause}
+}
+
+// Error returns "<ErrResolveAccess>: scope/key (kind)".
+func (e *ResolveAccessError) Error() string {
+	return fmt.Sprintf("%s: %s/%s (%s)", ErrResolveAccess.Error(), e.Scope, e.Key, e.Kind)
+}
+
+// Is matches ErrResolveAccess.
+func (e *ResolveAccessError) Is(target error) bool { return target == ErrResolveAccess }
+
+// Unwrap returns the backend cause.
+func (e *ResolveAccessError) Unwrap() error { return e.Err }

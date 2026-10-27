@@ -1252,7 +1252,7 @@ func (s *Server) existingAgentFlatChecks(ctx context.Context, w http.ResponseWri
 	case existingBranchStart:
 		if a.RuntimeBrokerID != "" {
 			if err := s.lifecyclePlacementCheck(ctx, a, req.Profile, req.ExpectedRuntimeTargetID); err != nil {
-				if !writeRuntimeTargetRefusal(w, err) {
+				if !writeRuntimeTargetRefusal(w, err) && !writePreserveWorkspaceCapabilityError(w, err) {
 					writeErrorFromErr(w, err, "")
 				}
 				return existingAgentErrored, true
@@ -1525,6 +1525,8 @@ func (s *Server) handleExistingAgent(
 				// 503: the agent's secrets or stored env settings could not be read; nothing was sent.
 			case writeEmptyPerAgentCapabilityError(w, err):
 				// 412 already written (design #2703 D3).
+			case writePreserveWorkspaceCapabilityError(w, err):
+				// 412 already written: the broker cannot keep the workspace (ptone/scion#6096).
 			case relayDispatchRefusal(w, err):
 				// Required-skill resolution failure relayed with the broker's status.
 			case relayBrokerRefusal(w, err):
@@ -1683,6 +1685,8 @@ func (s *Server) handleExistingAgent(
 					// 503: the agent's secrets or stored env settings could not be read; nothing was sent.
 				case writeEmptyPerAgentCapabilityError(w, err):
 					// 412 already written (design #2703 D3).
+				case writePreserveWorkspaceCapabilityError(w, err):
+					// 412 already written: the broker cannot keep the workspace (ptone/scion#6096).
 				case relayDispatchRefusal(w, err):
 					// Required-skill resolution failure relayed with the broker's status.
 				case relayBrokerRefusal(w, err):
@@ -1935,6 +1939,8 @@ func (s *Server) handleExistingAgent(
 				// 503: the agent's secrets or stored env settings could not be read; nothing was sent.
 			case writeEmptyPerAgentCapabilityError(w, err):
 				// 412 already written (design #2703 D3).
+			case writePreserveWorkspaceCapabilityError(w, err):
+				// 412 already written: the broker cannot keep the workspace (ptone/scion#6096).
 			case relayDispatchRefusal(w, err):
 				// Required-skill resolution failure relayed with the broker's status.
 			case relayBrokerRefusal(w, err):

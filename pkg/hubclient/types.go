@@ -408,6 +408,10 @@ type BrokerCapabilities struct {
 	// AgentMoveRecreate indicates the broker can be the target of a forced
 	// move (store.BrokerCapabilities.AgentMoveRecreate is its counterpart).
 	AgentMoveRecreate bool `json:"agentMoveRecreate,omitempty"`
+	// PreserveWorkspaceCreate indicates the broker honours a create's
+	// preserveWorkspace (store.BrokerCapabilities.PreserveWorkspaceCreate is
+	// its counterpart; ptone/scion#6096).
+	PreserveWorkspaceCreate bool `json:"preserveWorkspaceCreate,omitempty"`
 	// AttachmentDelivery indicates the broker can receive attachment
 	// deliveries (ptone/scion#4596; store.BrokerCapabilities.AttachmentDelivery
 	// is its counterpart).

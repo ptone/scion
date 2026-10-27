@@ -156,6 +156,7 @@ type mockRuntimeBrokerClient struct {
 	lastInterrupt              bool
 	lastResolvedEnv            map[string]string
 	lastRestartResolvedEnv     map[string]string
+	lastStartResolvedSecrets   []ResolvedSecret
 	lastStartExtras            StartExtras
 	lastRestartExtras          StartExtras
 	lastInlineConfig           *api.ScionConfig
@@ -347,6 +348,7 @@ func (m *mockRuntimeBrokerClient) StartAgent(ctx context.Context, brokerID, brok
 	m.lastProjectPath = projectPath
 	m.lastProjectSlug = projectSlug
 	m.lastResolvedEnv = resolvedEnv
+	m.lastStartResolvedSecrets = resolvedSecrets
 	m.lastInlineConfig = inlineConfig
 	m.lastStartExtras = extras
 	m.startCallCount++
@@ -467,10 +469,12 @@ func (m *mockRuntimeBrokerClient) CreateAgentWithGather(ctx context.Context, bro
 	}
 	return &RemoteAgentResponse{
 		Agent: &RemoteAgentInfo{
-			ID:    req.ID,
-			Slug:  req.Slug,
-			Name:  req.Name,
-			Phase: string(state.PhaseRunning),
+			ID:              req.ID,
+			ContainerID:     "container-123",
+			Slug:            req.Slug,
+			Name:            req.Name,
+			Phase:           string(state.PhaseRunning),
+			ContainerStatus: "Up 5 seconds",
 		},
 		Created: true,
 		// Reprovisioned mirrors a real (non-stale) broker's echo: it only

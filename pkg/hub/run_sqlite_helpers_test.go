@@ -307,6 +307,13 @@ func (c *e2eBrokerClient) CreateAgent(_ context.Context, _, _ string, req *Remot
 	}, Created: true}, nil
 }
 
+// CreateAgentWithGather is the create DispatchAgentCreate sends
+// (ptone/scion#6096): it answers like CreateAgent, with no needs report.
+func (c *e2eBrokerClient) CreateAgentWithGather(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+	resp, err := c.CreateAgent(ctx, brokerID, brokerEndpoint, req)
+	return resp, nil, err
+}
+
 func (f *runIDFixture) storedRunID(t *testing.T) string {
 	t.Helper()
 	got, err := f.store.GetAgent(context.Background(), f.agent.ID)

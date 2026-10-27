@@ -100,6 +100,10 @@ func newEnvReadFixture(t *testing.T, wrap func(store.Store) store.Store) *envRea
 	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
 		ID: tid("broker-envread"), Name: "envread-broker", Slug: "envread-broker",
 		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
+		// A current broker: a start routed through create-with-gather
+		// needs PreserveWorkspaceCreate (ptone/scion#6096). The rest is
+		// what a nil set already implies.
+		Capabilities: &store.BrokerCapabilities{Attach: true, AsyncLaunch: true, AsyncStart: true, PreserveWorkspaceCreate: true},
 	}))
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
 		ProjectID: tid("project-envread"), BrokerID: tid("broker-envread"), BrokerName: "envread-broker",
@@ -313,17 +317,20 @@ func TestEnvReadError_HubLogNamesScopeOnly(t *testing.T) {
 
 // Absence is not an error: with no failing reads, create, start, restart
 // and an agent with ancestry but no progeny settings all reach the broker,
-// and the stored setting is sent.
+// and the stored setting is sent. The agent has no delivered config and an
+// ancestry, so its start goes through create-with-gather
+// (ptone/scion#6096).
 func TestEnvReadError_NoReadErrorStartsNormally(t *testing.T) {
 	f := newEnvReadFixture(t, nil)
 	f.agent.Ancestry = []string{f.agent.OwnerID, tid("parent-envread")}
 	ctx := context.Background()
 
 	require.NoError(t, f.d.DispatchAgentStart(ctx, f.agent, "", false))
-	assert.True(t, f.client.startCalled)
-	assert.Equal(t, "fake-stored-value", f.client.lastResolvedEnv["FAKE_STORED_KEY"])
+	require.True(t, f.client.createCalled, "the start went through create-with-gather")
+	assert.Equal(t, "fake-stored-value", f.client.lastCreateReq.ResolvedEnv["FAKE_STORED_KEY"])
 	require.NoError(t, f.d.DispatchAgentRestart(ctx, f.agent))
 	assert.True(t, f.client.restartCalled)
+	f.client.createCalled = false
 	_, err := f.d.DispatchAgentCreate(ctx, f.agent)
 	require.NoError(t, err)
 	assert.True(t, f.client.createCalled)

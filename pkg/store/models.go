@@ -405,6 +405,16 @@ type ExposedPort struct {
 
 // AgentAppliedConfig stores the effective configuration of an agent.
 type AgentAppliedConfig struct {
+	// ConfigDelivered records that a create or env finalize completed and
+	// started the agent with its config, including any as-needed values the
+	// broker asked for (ptone/scion#6096). Only a synchronous, needs-free
+	// create-with-gather or env finalize sets it; a provision, move
+	// provision or reprovision clears it, because it starts nothing and the
+	// as-needed values it resolves are not persisted anywhere a later start
+	// reads. A start of an agent with as-needed entries and without it is
+	// routed through create-with-gather.
+	ConfigDelivered bool `json:"configDelivered,omitempty"`
+
 	Image         string            `json:"image,omitempty"`
 	HarnessConfig string            `json:"harnessConfig,omitempty"`
 	HarnessAuth   string            `json:"harnessAuth,omitempty"` // Late-binding override for auth_selected_type
@@ -1402,6 +1412,12 @@ type BrokerCapabilities struct {
 	// with a fresh workspace after confirming it has no files for the agent.
 	// The hub refuses a forced move onto a broker without it (412).
 	AgentMoveRecreate bool `json:"agentMoveRecreate,omitempty"`
+	// PreserveWorkspaceCreate indicates the broker honours a create's
+	// preserveWorkspace flag: it keeps an existing workspace instead of
+	// clearing it for a fresh provision. The hub routes a start through
+	// create-with-gather only on a broker that reports it, and otherwise
+	// refuses the start (ptone/scion#6096).
+	PreserveWorkspaceCreate bool `json:"preserveWorkspaceCreate,omitempty"`
 	// AttachmentDelivery indicates the broker can receive attachment
 	// deliveries: it redeems the capabilities of a message request's
 	// attachments field and writes the files into the agent's home before

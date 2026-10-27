@@ -306,7 +306,10 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			// it has no files for the agent before provisioning it with a
 			// fresh workspace (ptone/scion#5441).
 			AgentMoveRecreate: true,
-			StartsInFlight:    s.startsInFlight != nil,
+			// This broker honours preserveWorkspace on a create
+			// (ptone/scion#6096).
+			PreserveWorkspaceCreate: true,
+			StartsInFlight:          s.startsInFlight != nil,
 			// This broker's reprovision reuses an empty-per-agent
 			// workspace in place (miller79/scion#167).
 			ReprovisionEmptyPerAgent: true,
@@ -808,6 +811,22 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	var req CreateAgentRequest
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+	// preserveWorkspace is a full create of an agent that may already have
+	// files here (a hub start routed through create-with-gather); it never
+	// combines with a provision-only or reprovision request
+	// (ptone/scion#6096).
+	if req.PreserveWorkspace && (req.ProvisionOnly || req.Reprovision) {
+		BadRequest(w, "preserveWorkspace cannot be combined with provisionOnly or reprovision")
+		return
+	}
+	// A preserveWorkspace create is always synchronous: an asynchronous
+	// create launch removes the agent's files when it fails
+	// (cleanupLaunchFiles), which must never happen to an existing
+	// workspace.
+	if req.PreserveWorkspace && req.AsyncLaunch {
+		BadRequest(w, "preserveWorkspace cannot be combined with asyncLaunch")
 		return
 	}
 
@@ -1526,6 +1545,13 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	if req.Reprovision {
 		opts.FreshProvision = false
 	}
+	// A create the hub marked preserveWorkspace (a routed start of an agent
+	// that may already have files here) must not clear an existing
+	// workspace: FreshProvision stays false. Nothing else changes; this is
+	// not a reprovision (ptone/scion#6096).
+	if req.PreserveWorkspace {
+		opts.FreshProvision = false
+	}
 	s.agentLifecycleLog.Info("Agent dispatch: buildStartContext complete",
 		"agent_id", req.ID, "name", req.Name, "elapsed", time.Since(buildCtxStart).String())
 
@@ -1925,7 +1951,14 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// newer run recorded in the host state file owns them otherwise,
 		// and an owner that cannot be determined keeps them
 		// (ptone/scion#4771).
-		if opts.ProjectPath != "" {
+		// A preserveWorkspace create (a hub start routed through
+		// create-with-gather, ptone/scion#6096) starts an agent that may
+		// already have a workspace and branch here, and the hub keeps the
+		// agent when the start fails: its files are never removed.
+		if req.PreserveWorkspace {
+			s.agentLifecycleLog.Info("Skipped agent file cleanup after start failure: the create keeps the agent's workspace",
+				"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name)
+		} else if opts.ProjectPath != "" {
 			// The ownership checks and the removal run under the
 			// process-wide workspace lock on the agent's files.
 			func() {
@@ -2176,6 +2209,17 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 		return opts, "", "", nil
 	}
 
+	// A preserveWorkspace create (a hub start routed through
+	// create-with-gather, ptone/scion#6096) never overwrites an agent's
+	// existing workspace with the upload: the agent may have changed it
+	// since. Only a workspace that is absent or empty is downloaded.
+	if req.PreserveWorkspace && workspaceHasEntries(workspaceDir) {
+		s.agentLifecycleLog.Info("Workspace bootstrap skipped: the create keeps the agent's existing workspace",
+			"agent_id", req.ID, "project_id", req.ProjectID)
+		opts.Workspace = workspaceDir
+		return opts, "", "", nil
+	}
+
 	if mkErr := os.MkdirAll(workspaceDir, 0755); mkErr != nil {
 		attemptMsg, httpMessage, err = s.workspaceBootstrapFailed(req, opCreateWorkspaceDir, mkErr)
 		return opts, attemptMsg, httpMessage, err
@@ -2215,6 +2259,19 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 		}
 	}
 	return opts, "", "", nil
+}
+
+// workspaceHasEntries reports whether dir exists with at least one entry.
+// A directory that cannot be read counts as having entries, so a
+// preserveWorkspace create keeps it rather than overwriting it.
+func workspaceHasEntries(dir string) bool {
+	f, err := os.Open(dir)
+	if err != nil {
+		return !errors.Is(err, os.ErrNotExist)
+	}
+	defer func() { _ = f.Close() }()
+	names, err := f.Readdirnames(1)
+	return len(names) > 0 || (err != nil && !errors.Is(err, io.EOF))
 }
 
 // bootstrapSkippedWarning is the create warning for a workspace bootstrap

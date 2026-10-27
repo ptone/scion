@@ -79,6 +79,13 @@ func (c *filesBrokerClient) CreateAgent(_ context.Context, _, _ string, req *Rem
 	return c.create(req)
 }
 
+// CreateAgentWithGather is the create DispatchAgentCreate sends
+// (ptone/scion#6096): it answers like CreateAgent, with no needs report.
+func (c *filesBrokerClient) CreateAgentWithGather(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+	resp, err := c.CreateAgent(ctx, brokerID, brokerEndpoint, req)
+	return resp, nil, err
+}
+
 func TestRunID_E2E_LateGhostDeleteSparesRecreatedAgentFiles(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
