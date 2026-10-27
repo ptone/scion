@@ -86,7 +86,7 @@ func TestBrokerEnvelope_T5_ProductionConstructor(t *testing.T) {
 	require.NotEmpty(t, successID)
 
 	member := newHubMemberUser(t, s, "t5-register-member")
-	regRec := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: "t5-register-broker"})
+	regRec := doRequestAsUserLoopback(t, srv, member, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: "t5-register-broker"})
 	require.Equal(t, http.StatusCreated, regRec.Code, regRec.Body.String())
 	regID := regRec.Header().Get("X-Request-ID")
 	require.NotEmpty(t, regID)
@@ -158,7 +158,7 @@ func TestBrokerEnvelope_T6_StatusUnchangedWithWriterBlockedAndFull(t *testing.T)
 		assert.Contains(t, rec.Body.String(), "missing X-Scion-Timestamp header", "body unchanged while full")
 	}
 	member := newHubMemberUser(t, s, "t6-register-member")
-	regRec := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: "t6-register-broker"})
+	regRec := doRequestAsUserLoopback(t, srv, member, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: "t6-register-broker"})
 	require.Equal(t, http.StatusCreated, regRec.Code, "registration is not blocked by a full audit writer: %s", regRec.Body.String())
 
 	after := srv.auditWriter.Snapshot()
