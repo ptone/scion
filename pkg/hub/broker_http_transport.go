@@ -112,7 +112,7 @@ func checkBrokerRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) > 0 && !strings.EqualFold(req.URL.Host, via[0].URL.Host) {
 		return fmt.Errorf("refusing a broker redirect to another host (%s)", req.URL.Host)
 	}
-	if err := config.CheckHubTransport(req.URL.String()); err != nil {
+	if err := config.CheckHubTransport((&url.URL{Scheme: req.URL.Scheme, Host: req.URL.Host}).String()); err != nil {
 		return fmt.Errorf("refusing a broker redirect: %w", err)
 	}
 	return nil

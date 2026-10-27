@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // Hub-broker transport policy, hub side.
@@ -169,7 +170,7 @@ func (s *Server) requireConfidentialArrival(w http.ResponseWriter, r *http.Reque
 		return true
 	}
 	slog.Warn("Refused a broker credential request that did not arrive over TLS or from this host",
-		"path", r.URL.Path, "remote_addr", r.RemoteAddr, "trusted_proxies_configured", len(s.transportTrustedNets) > 0)
+		"path", logging.RequestPath(r), "remote_addr", r.RemoteAddr, "trusted_proxies_configured", len(s.transportTrustedNets) > 0)
 	writeError(w, http.StatusForbidden, ErrCodeTransportNotConfidential, transportRefusalMessage, nil)
 	return false
 }
