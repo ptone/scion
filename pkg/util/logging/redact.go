@@ -91,12 +91,6 @@ const maxUnescapeRounds = 4
 // intended trade-off.
 func artifactPath(p string) bool { return pathMentions(p, "artifacts") }
 
-// portViewPath reports whether the URL path p (decoded or escaped) may
-// belong to the port view route (/api/v1/portview/<capability>/...),
-// whose path carries a page link. It applies the same any-spelling rule
-// as artifactPath to the word "portview".
-func portViewPath(p string) bool { return pathMentions(p, "portview") }
-
 // pathMentions reports whether p, lowercased and percent-decoded up to
 // maxUnescapeRounds times, contains word at any step. Input that still
 // holds a '%' when decoding stops (it does not decode, or is encoded more
@@ -174,11 +168,6 @@ func isArtifactURL(u *url.URL) bool {
 	return u != nil && (artifactPath(u.Path) || artifactPath(u.EscapedPath()))
 }
 
-// isPortViewURL applies portViewPath to both forms of u's path.
-func isPortViewURL(u *url.URL) bool {
-	return u != nil && (portViewPath(u.Path) || portViewPath(u.EscapedPath()))
-}
-
 // redactedPath returns the path u is logged with when it must not be
 // logged as is (RedactedArtifactPath, RedactedPortViewPath,
 // RedactedDeliveryPath, or RedactedPath when it is still encoded and names
@@ -208,9 +197,9 @@ func redactedPath(u *url.URL) string {
 
 // IsCredentialURL reports whether a request for u must not be recorded
 // with its path or query, for example in a trace: an artifact path
-// (artifactPath), a port view path (portViewPath), an attachment delivery
-// path (deliveryPath), or a query that names any of them
-// (credentialQuery). It shares its predicates with RequestPath,
+// (artifactPath), a port view path (pathMentions with "portview"), an
+// attachment delivery path (deliveryPath), or a query that names any of
+// them (credentialQuery). It shares its predicates with RequestPath,
 // RedactQuery and RedactURL.
 func IsCredentialURL(u *url.URL) bool {
 	return redactedPath(u) != "" || (u != nil && credentialQuery(u.RawQuery))
@@ -219,9 +208,9 @@ func IsCredentialURL(u *url.URL) bool {
 // RequestPath returns r's URL path for a log line: RedactedArtifactPath
 // for any request under the artifact routes, RedactedPortViewPath for any
 // request under the port view route, RedactedDeliveryPath for the
-// attachment delivery route (see artifactPath, portViewPath and
-// deliveryPath, which check the decoded and the escaped path), the decoded
-// path otherwise. Every log attribute that records a request path must use it.
+// attachment delivery route (see artifactPath, deliveryPath and
+// pathMentions with "portview", which check the decoded and the escaped
+// path), the decoded path otherwise. Every log attribute that records a request path must use it.
 func RequestPath(r *http.Request) string {
 	if r == nil || r.URL == nil {
 		return ""
