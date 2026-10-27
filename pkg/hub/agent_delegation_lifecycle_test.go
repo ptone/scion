@@ -476,12 +476,13 @@ func TestAgentDelegationLifecycle_AutoSuspendKeepsNewRunGrants(t *testing.T) {
 	// The new start runs on the unwrapped store, inside the release, before
 	// the auto-suspend takes its next step.
 	var newRun lifecycleGrant
+	var newClaim store.StartClaim
 	var takeoverErr error
 	takeover, _ := installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *claimTakeoverStore {
 		return &claimTakeoverStore{Store: inner}
 	})
 	takeover.onRelease = func() {
-		if _, takeoverErr = s.ClaimAgentStart(ctx, agent.ID, "hub-new-run", store.StartClaimUser, "", time.Minute); takeoverErr != nil {
+		if newClaim, takeoverErr = s.ClaimAgentStart(ctx, agent.ID, "hub-new-run", store.StartClaimUser, "", time.Minute); takeoverErr != nil {
 			return
 		}
 		newRun = seedLifecycleGrant(t, s, mustGetAgent(t, s, agent.ID), issuer.ID)
@@ -492,7 +493,10 @@ func TestAgentDelegationLifecycle_AutoSuspendKeepsNewRunGrants(t *testing.T) {
 	require.True(t, takeover.fired.Load(), "the suspended run's claim was released")
 	require.NoError(t, takeoverErr, "the new start took the released claim")
 	require.NotNil(t, newRun.grant)
-	require.Equal(t, string(state.PhaseSuspended), mustGetAgent(t, s, agent.ID).Phase)
+	after := mustGetAgent(t, s, agent.ID)
+	require.Equal(t, string(state.PhaseSuspended), after.Phase)
+	require.NotEmpty(t, newClaim.ID)
+	require.Equal(t, newClaim.ID, after.StartClaimID, "the new start's claim survives the auto-suspend")
 	assertGrantRevoked(t, s, suspendedRun, revokeReasonAgentSuspended)
 	assertGrantActive(t, s, newRun)
 }
