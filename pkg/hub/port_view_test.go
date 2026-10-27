@@ -314,10 +314,12 @@ func TestPortView_PortLinkUnchanged(t *testing.T) {
 		// read their own stores); the page view identity lookup reads
 		// s.store, which fails here, so no page link is created and the
 		// port link serves the page.
-		fs := &conduitFaultStore{Store: f.srv.store}
-		orig := f.srv.store
-		f.srv.store = fs
-		t.Cleanup(func() { f.srv.store = orig })
+		fs, _ := installStoreFault(t, f.srv, func(inner store.Store, _ *storeFaultSwitch) *conduitFaultStore {
+			return &conduitFaultStore{Store: inner}
+		})
+		// The wrapper stays installed for the later subtests and passes
+		// every call through once the fault is off.
+		t.Cleanup(func() { fs.failGetUser.Store(false) })
 		fs.failGetUser.Store(true)
 		res := f.send(t, http.MethodGet, link, withBearer(navHeader(), f.userToken), nil)
 		require.Equal(t, http.StatusOK, res.status, res.body)
@@ -809,6 +811,9 @@ func TestPortView_RequestStripping(t *testing.T) {
 // when that user is suspended.
 func TestPortView_WebSocketRunsAsRestrictedIdentity(t *testing.T) {
 	f := newPortViewFixture(t, echoApp())
+	// The fixture's relay starts with the no-op event publisher; the
+	// suspension below reaches the stream re-check through a real one.
+	f.srv.SetEventPublisher(NewChannelEventPublisher())
 	f.startAgent(t)
 	wsURL := "ws" + strings.TrimPrefix(f.viewURL(f.ownerCap(), "ws"), "http")
 	// No Origin header: the echo app's upgrader accepts only its own origin.
