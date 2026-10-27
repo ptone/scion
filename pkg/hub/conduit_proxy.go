@@ -262,7 +262,6 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 			}
 			if policy.portView {
 				portViewModifyResponse(resp.Header)
-				return nil
 			}
 			resp.Header.Set("Content-Security-Policy", untrustedContentSandboxCSP)
 			resp.Header.Set("X-Content-Type-Options", "nosniff")
