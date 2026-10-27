@@ -1985,7 +1985,7 @@ func TestBrokerRegistrationTwoPhaseFlow(t *testing.T) {
 		"capabilities": []string{"sync", "attach"},
 	}
 
-	rec2 := doRequestNoAuth(t, srv, http.MethodPost, "/api/v1/brokers/join", joinBody)
+	rec2 := doRequestNoAuthLoopback(t, srv, http.MethodPost, "/api/v1/brokers/join", joinBody)
 	if rec2.Code != http.StatusOK {
 		t.Errorf("Phase 2: expected status 200, got %d: %s", rec2.Code, rec2.Body.String())
 	}
@@ -2059,7 +2059,7 @@ func TestBrokerJoinWithInvalidToken(t *testing.T) {
 		"hostname":  "test-machine",
 	}
 
-	rec2 := doRequestNoAuth(t, srv, http.MethodPost, "/api/v1/brokers/join", joinBody)
+	rec2 := doRequestNoAuthLoopback(t, srv, http.MethodPost, "/api/v1/brokers/join", joinBody)
 	if rec2.Code != http.StatusUnauthorized {
 		t.Errorf("expected status 401 for invalid token, got %d: %s", rec2.Code, rec2.Body.String())
 	}
