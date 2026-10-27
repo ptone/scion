@@ -47,10 +47,11 @@ func provisionCloudRunNFSWithURL(t *testing.T, cloneURL string) error {
 	}}
 	_, err := r.provisionCloudRunNFS(context.Background(), RunConfig{
 		WorkspaceBackendName: "nfs",
+		Labels:               crTestLabels,
 		ProjectID:            "proj-123",
 		Workspace:            filepath.Join(t.TempDir(), "projects", "proj-123", "workspace"),
 		GitClone:             &api.GitCloneConfig{URL: cloneURL, Branch: "main"},
-	}, "agent-456", os.Getuid(), os.Getgid())
+	}, crTestAgentID, os.Getuid(), os.Getgid())
 	return err
 }
 
