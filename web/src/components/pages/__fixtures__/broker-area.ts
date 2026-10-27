@@ -16,7 +16,7 @@
 
 /** Shared fixtures for the Brokers area page tests (broker UI A1). */
 
-import type { BrokerWorkspaceStorage, RuntimeBroker } from '../../../shared/types.js';
+import type { RuntimeBroker } from '../../../shared/types.js';
 import { fullPresentation } from '../../../shared/__fixtures__/runtime-target-presentation.js';
 
 /** happy-dom has no EventSource; stateManager.setScope opens one. */
@@ -93,28 +93,6 @@ export const LEGACY = base({
   ],
 });
 
-/** An NFS storage layout as a broker reports it. */
-export function nfsStorage(over: Partial<BrokerWorkspaceStorage> = {}): BrokerWorkspaceStorage {
-  return {
-    backend: 'nfs',
-    nfs: {
-      server: 'filer.example.internal',
-      export: '/vol/scion',
-      subPathRoot: 'projects',
-      healthy: true,
-      exportId: 'export-marker-0001',
-    },
-    homes: 'nfs',
-    ...over,
-  };
-}
-
-/** Layout comparison lines as the hub reports them. */
-export const LAYOUT_MISMATCH = [
-  'nfs server: hub "filer.example.internal", broker "other.example.internal"',
-  'homes: hub "nfs", broker "local"',
-];
-
 /** An admin status that holds hub.health.read (or not). */
 export function adminStatus(canReadHealth: boolean) {
   return {
@@ -124,15 +102,11 @@ export function adminStatus(canReadHealth: boolean) {
   };
 }
 
-/** One broker of healthSummary(). */
-export interface HealthSummaryItem {
-  id: string;
-  checks?: Record<string, string>;
-  layout_mismatch?: string[];
-}
-
 /** A health summary listing the given brokers' health. */
-export function healthSummary(items: HealthSummaryItem[], truncated = false) {
+export function healthSummary(
+  items: { id: string; checks?: Record<string, string> }[],
+  truncated = false
+) {
   return {
     runtime_brokers: {
       items: items.map((i) => ({
@@ -142,9 +116,7 @@ export function healthSummary(items: HealthSummaryItem[], truncated = false) {
         status: 'online',
         last_heartbeat: '2026-10-20T00:00:00Z',
         runtime: null,
-        workspace_storage: i.layout_mismatch
-          ? { backend: 'nfs', nfs_healthy: true, layout_mismatch: i.layout_mismatch }
-          : { backend: 'local' },
+        workspace_storage: { backend: 'local' },
         health: { status: 'healthy', checks: i.checks ?? { runtime: 'available' } },
         agents: { running: 1, attention: 0 },
       })),

@@ -21,8 +21,7 @@
  * is on (client/broker-routes.ts); the existing detail page renders
  * otherwise. Tabs (?tab=):
  *
- * - overview: runtime target card, capacity, capabilities, legacy profiles,
- *   and the read-only project storage card;
+ * - overview: runtime target card, capacity, capabilities, legacy profiles;
  * - agents: the projects this broker provides for, with their agents;
  * - health: shown only to a user holding hub.health.read, exactly the set
  *   the health summary endpoint authorizes; also hidden on a 401/403;
@@ -53,7 +52,6 @@ import './broker-area-overview.js';
 import './broker-area-agents.js';
 import './broker-area-health.js';
 import './broker-area-configure.js';
-import '../shared/broker-storage-card.js';
 
 export type BrokerAreaTab = 'overview' | 'agents' | 'health' | 'configure';
 
@@ -188,16 +186,6 @@ export class ScionPageBrokerAreaDetail extends LitElement {
     } catch (err) {
       console.error('Failed to load broker health:', err);
     }
-  }
-
-  /**
-   * The hub's layout comparison for this broker: null when the health
-   * summary is not available to this user or has no row for this broker
-   * (for example a truncated summary), [] when it lists no difference.
-   */
-  private get storageMismatch(): string[] | null {
-    if (!this.healthAvailable || !this.healthRow) return null;
-    return this.healthRow.workspace_storage?.layout_mismatch ?? [];
   }
 
   private get configureVisible(): boolean {
@@ -356,10 +344,6 @@ export class ScionPageBrokerAreaDetail extends LitElement {
             .broker=${broker}
             .settings=${this.settings}
           ></scion-broker-area-overview>
-          <scion-broker-storage-card
-            .storage=${broker.workspaceStorage}
-            .mismatch=${this.storageMismatch}
-          ></scion-broker-storage-card>
         </sl-tab-panel>
         <sl-tab-panel name="agents">
           <scion-broker-area-agents

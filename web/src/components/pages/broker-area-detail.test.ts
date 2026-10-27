@@ -38,14 +38,11 @@ import { loadAdminStatus } from '../../client/admin-status.js';
 import {
   FakeEventSource,
   FLAT_K8S,
-  LAYOUT_MISMATCH,
   LEGACY,
   adminStatus,
   healthSummary,
   jsonResponse,
-  nfsStorage,
   settle,
-  type HealthSummaryItem,
 } from './__fixtures__/broker-area.js';
 
 type Page = HTMLElement & { updateComplete: Promise<boolean> };
@@ -67,8 +64,7 @@ const SETTINGS = {
 
 let broker: RuntimeBroker;
 let summaryStatus = 200;
-let summaryItems: HealthSummaryItem[] = [];
-let summaryTruncated = false;
+let summaryItems: { id: string }[] = [];
 let patchResponse: Partial<RuntimeBroker> = {};
 /** What GET returns after a PATCH (the stored record); null = unchanged. */
 let afterPatch: RuntimeBroker | null = null;
@@ -106,7 +102,6 @@ describe('scion-page-broker-area-detail', () => {
     vi.stubGlobal('EventSource', FakeEventSource);
     summaryStatus = 200;
     summaryItems = [];
-    summaryTruncated = false;
     patchResponse = {};
     afterPatch = null;
     providerProjects = [];
@@ -126,7 +121,7 @@ describe('scion-page-broker-area-detail', () => {
         if (summaryStatus !== 200) {
           return jsonResponse({ error: { code: 'forbidden', message: 'no' } }, summaryStatus);
         }
-        return jsonResponse(healthSummary(summaryItems, summaryTruncated));
+        return jsonResponse(healthSummary(summaryItems));
       }
       return jsonResponse({}, 404);
     });
@@ -169,71 +164,6 @@ describe('scion-page-broker-area-detail', () => {
     await health.updateComplete;
     expect(health.shadowRoot!.querySelector('.not-in-summary')).not.toBeNull();
     expect(health.shadowRoot!.textContent).not.toContain('healthy');
-  });
-
-  it('Project storage: the Overview tab shows the reported layout', async () => {
-    const el = await mount({ ...FLAT_K8S, workspaceStorage: nfsStorage() });
-    const card = el.shadowRoot!.querySelector(
-      'sl-tab-panel[name="overview"] scion-broker-storage-card'
-    ) as Page;
-    expect(card).not.toBeNull();
-    await card.updateComplete;
-    expect(card.shadowRoot!.querySelector('dl.storage-rows')?.textContent).toContain(
-      'filer.example.internal'
-    );
-    // Without hub.health.read the comparison is not known: no alert.
-    expect(card.shadowRoot!.querySelector('.storage-mismatch-alert')).toBeNull();
-    expect(card.shadowRoot!.querySelector('.storage-compare-note')).not.toBeNull();
-  });
-
-  it('Project storage: the hub-reported differences reach the card and the Health tab', async () => {
-    vi.mocked(loadAdminStatus).mockResolvedValue(adminStatus(true));
-    summaryItems = [{ id: FLAT_K8S.id, layout_mismatch: LAYOUT_MISMATCH }];
-    const el = await mount({ ...FLAT_K8S, workspaceStorage: nfsStorage() });
-    const card = el.shadowRoot!.querySelector('scion-broker-storage-card') as Page;
-    await card.updateComplete;
-    const cardLines = Array.from(card.shadowRoot!.querySelectorAll('.storage-mismatch-alert li'));
-    expect(cardLines.map((li) => li.textContent!.trim())).toEqual(LAYOUT_MISMATCH);
-    const health = el.shadowRoot!.querySelector('scion-broker-area-health') as Page;
-    await health.updateComplete;
-    const healthLines = Array.from(
-      health.shadowRoot!.querySelectorAll('.storage-layout-mismatch li')
-    );
-    expect(healthLines.map((li) => li.textContent!.trim())).toEqual(LAYOUT_MISMATCH);
-  });
-
-  it('Project storage: no differences listed when the summary reports none', async () => {
-    vi.mocked(loadAdminStatus).mockResolvedValue(adminStatus(true));
-    summaryItems = [{ id: FLAT_K8S.id }];
-    const el = await mount({ ...FLAT_K8S, workspaceStorage: nfsStorage() });
-    const card = el.shadowRoot!.querySelector('scion-broker-storage-card') as Page;
-    await card.updateComplete;
-    expect(card.shadowRoot!.querySelector('.storage-mismatch-alert')).toBeNull();
-    expect(card.shadowRoot!.querySelector('.storage-compare-note')).toBeNull();
-    const health = el.shadowRoot!.querySelector('scion-broker-area-health') as Page;
-    await health.updateComplete;
-    expect(health.shadowRoot!.querySelector('.storage-layout-mismatch')).toBeNull();
-  });
-
-  it('Project storage: comparison not available when a truncated summary has no row for the broker', async () => {
-    vi.mocked(loadAdminStatus).mockResolvedValue(adminStatus(true));
-    summaryItems = [{ id: 'other-broker', layout_mismatch: LAYOUT_MISMATCH }];
-    summaryTruncated = true;
-    const el = await mount({ ...FLAT_K8S, workspaceStorage: nfsStorage() });
-    const card = el.shadowRoot!.querySelector('scion-broker-storage-card') as Page;
-    await card.updateComplete;
-    expect(card.shadowRoot!.querySelector('.storage-mismatch-alert')).toBeNull();
-    expect(card.shadowRoot!.querySelector('.storage-compare-note')).not.toBeNull();
-  });
-
-  it('Project storage: comparison not available when the summary has no row for the broker', async () => {
-    vi.mocked(loadAdminStatus).mockResolvedValue(adminStatus(true));
-    summaryItems = [{ id: 'other-broker', layout_mismatch: LAYOUT_MISMATCH }];
-    const el = await mount({ ...FLAT_K8S, workspaceStorage: nfsStorage() });
-    const card = el.shadowRoot!.querySelector('scion-broker-storage-card') as Page;
-    await card.updateComplete;
-    expect(card.shadowRoot!.querySelector('.storage-mismatch-alert')).toBeNull();
-    expect(card.shadowRoot!.querySelector('.storage-compare-note')).not.toBeNull();
   });
 
   it('Default for project: taken from isDefault in the providers listing, with no project reads', async () => {
