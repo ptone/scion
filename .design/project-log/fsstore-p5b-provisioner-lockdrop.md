@@ -120,3 +120,43 @@ base: no clone and no recursive chown.
 ## Verification
 
 See the PR's acceptance criteria section for the test names.
+
+## Merge-forward onto phase 5a's final head (2026-10-27)
+
+P5b moved from its original base (phase 5a at eb51fb5a4) to phase 5a's
+merge-forward head 607bfcfd. That head is phase 5a plus phase 3b e3e8208c,
+plus main 807e67c5.
+
+Conflicts: main split code into `_unix`/`_other` files for the Windows build
+of `./cmd/scion`, and three P5b edits sat in moved code:
+`ensureNFSLeafClaim` (now in `nfs_leaf_unix.go`), `nfsRemovalStateDir` (now
+in `nfs_removal_state_unix.go`) and the migration's state-directory leaf (now
+in `project_storage_migrate_unix.go`). Each was resolved by taking
+upstream's split and re-applying the P5b change in the moved code.
+
+Windows build: the same pattern covers P5b's own new code.
+- `pkg/projectfs/leaf_other.go` makes `EnsureSharedLeaf`,
+  `Resolved.EnsureLeaf` and `Layout.ProjectTreeIDs` fail with
+  `errors.ErrUnsupported`.
+- `Layout.ProvisionStateDir` and `provisionDir` move to files built on every
+  platform.
+- `pkg/projectfs/provisioner` builds everywhere; its methods fail with
+  `ErrUnsupported` off unix.
+
+The no-compile checks are recorded with the merge: the Windows identifier
+and method scans, `GOOS=windows go list` over `./cmd/scion` and the Windows
+test package list, the duplicate-identifier scan, and gofmt.
+
+## Bounded reads of agent-writable files in the promotion step
+
+The workspace root is agent-writable, so the promotion must not trust what
+it finds there.
+- The workspace's `.git/info/exclude` is read only through `openGitExclude`
+  (each component opened with `O_NOFOLLOW`, `O_NONBLOCK`, and a regular-file
+  check on the opened descriptor). A file above 1 MiB is skipped with a
+  warning, and the read itself goes through a limited reader. A symlink, a
+  FIFO or a device is never followed or read.
+- The workspace root is listed in chunks, and only lock-litter names are
+  kept, at most 4096 per pass (`lockLitterEntries`, shared with the
+  recurring state-directory sweep). A root with very many entries is never
+  held in memory as a whole.

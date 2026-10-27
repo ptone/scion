@@ -1462,18 +1462,9 @@ func GarbageCollectStateDir(dir string) {
 // workspace root sweeps litter there while probing the clock in the state
 // directory, so it writes nothing into the workspace.
 func sweepLockLitter(dir, clockDir string) int {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
+	litter, err := lockLitterEntries(dir)
+	if err != nil && len(litter) == 0 {
 		return 0
-	}
-	prefix := provisionFileLockName + "."
-	var litter []os.DirEntry
-	for _, e := range entries {
-		name := e.Name()
-		if name == provisionFileLockName || !strings.HasPrefix(name, prefix) {
-			continue // the live lock name itself, or not one of ours
-		}
-		litter = append(litter, e)
 	}
 	if len(litter) == 0 {
 		return 0
@@ -1506,6 +1497,45 @@ func sweepLockLitter(dir, clockDir string) int {
 		}
 	}
 	return removed
+}
+
+// lockLitterMaxEntries bounds the lock litter entries one listing returns
+// (lockLitterEntries); a later sweep handles the rest.
+const lockLitterMaxEntries = 4096
+
+// lockLitterEntries lists the lock litter entries of dir: the names under
+// the lock's prefix, never the live lock name itself. The directory is read
+// in chunks and only matching entries are kept, at most
+// lockLitterMaxEntries, so a directory with very many entries (the
+// agent-writable workspace root the one-shot promotion sweeps) is never held
+// in memory as a whole.
+func lockLitterEntries(dir string) ([]os.DirEntry, error) {
+	f, err := os.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	prefix := provisionFileLockName + "."
+	var out []os.DirEntry
+	for {
+		chunk, err := f.ReadDir(256)
+		for _, e := range chunk {
+			name := e.Name()
+			if name == provisionFileLockName || !strings.HasPrefix(name, prefix) {
+				continue // the live lock name itself, or not one of ours
+			}
+			out = append(out, e)
+			if len(out) >= lockLitterMaxEntries {
+				return out, nil
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			return out, nil
+		}
+		if err != nil {
+			return out, err
+		}
+	}
 }
 
 // tryCreateFileLock atomically publishes a fully-formed, already-owned lock

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -145,7 +146,8 @@ func legacyMarkerPresent(workspacePath string) bool {
 // LegacyPromotionNeeded reports, without a lock and without writing
 // anything, whether the workspace at workspacePath has anything for
 // PromoteLegacyMarker to do: a marker entry, its exclude line, or lock
-// litter entries other than the live lock.
+// litter entries other than the live lock. The workspace is agent-writable,
+// so every read here is bounded (readLegacyExclude, lockLitterEntries).
 func LegacyPromotionNeeded(workspacePath string) bool {
 	if _, err := os.Lstat(filepath.Join(workspacePath, ProvisionSentinelFile)); err == nil {
 		return true
@@ -153,20 +155,22 @@ func LegacyPromotionNeeded(workspacePath string) bool {
 	if hasLegacyExcludeLine(workspacePath) {
 		return true
 	}
-	entries, err := os.ReadDir(workspacePath)
-	if err != nil {
-		return false
-	}
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), provisionFileLockName+".") {
-			return true
-		}
-	}
-	return false
+	litter, err := lockLitterEntries(workspacePath)
+	return err == nil && len(litter) > 0
 }
 
+// legacyExcludeMaxBytes caps the workspace's .git/info/exclude that the
+// promotion reads. The file is agent-writable; a larger one is skipped with
+// a warning (git's own exclude files are a few KiB).
+const legacyExcludeMaxBytes = 1 << 20
+
+// errLegacyExcludeTooLarge marks an exclude file above legacyExcludeMaxBytes.
+var errLegacyExcludeTooLarge = errors.New("git exclude file is larger than the promotion reads")
+
 // legacyExcludePath is the workspace's .git/info/exclude when .git and info
-// are plain directories and exclude is a regular file; "" otherwise.
+// are plain directories and exclude is a regular file; "" otherwise. It is
+// only a pre-check that keeps openGitExclude from creating the file in a
+// workspace that has none; the read itself goes through readLegacyExclude.
 func legacyExcludePath(workspacePath string) string {
 	gitDir := filepath.Join(workspacePath, ".git")
 	for _, d := range []string{gitDir, filepath.Join(gitDir, "info")} {
@@ -182,17 +186,57 @@ func legacyExcludePath(workspacePath string) string {
 	return p
 }
 
-// hasLegacyExcludeLine reports whether the workspace's git excludes hold
-// the legacy marker's line.
-func hasLegacyExcludeLine(workspacePath string) bool {
-	p := legacyExcludePath(workspacePath)
-	if p == "" {
-		return false
+// readLegacyExclude is the one reader of the workspace's .git/info/exclude
+// for the promotion: it opens the file through openGitExclude (each
+// component with O_NOFOLLOW, O_NONBLOCK, and a regular-file check on the
+// opened descriptor, so a symlink, a FIFO or a device is refused), refuses a
+// file whose size is above legacyExcludeMaxBytes, and reads at most that
+// many bytes through a limited reader (a file that grows past the cap after
+// the size check is refused too). It returns the open file (the caller
+// closes it) and its content, or nil, nil, nil when the workspace has no
+// exclude file.
+func readLegacyExclude(workspacePath string) (*os.File, []byte, error) {
+	if legacyExcludePath(workspacePath) == "" {
+		return nil, nil, nil
 	}
-	data, err := os.ReadFile(p)
+	f, err := openGitExclude(workspacePath)
 	if err != nil {
+		return nil, nil, err
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, nil, fmt.Errorf("stat %s: %w", f.Name(), err)
+	}
+	if fi.Size() > legacyExcludeMaxBytes {
+		_ = f.Close()
+		return nil, nil, fmt.Errorf("%s: %w (%d bytes, cap %d)", f.Name(), errLegacyExcludeTooLarge, fi.Size(), legacyExcludeMaxBytes)
+	}
+	data, err := io.ReadAll(io.LimitReader(io.NewSectionReader(f, 0, legacyExcludeMaxBytes+1), legacyExcludeMaxBytes+1))
+	if err != nil {
+		_ = f.Close()
+		return nil, nil, fmt.Errorf("read %s: %w", f.Name(), err)
+	}
+	if len(data) > legacyExcludeMaxBytes {
+		_ = f.Close()
+		return nil, nil, fmt.Errorf("%s: %w (cap %d)", f.Name(), errLegacyExcludeTooLarge, legacyExcludeMaxBytes)
+	}
+	return f, data, nil
+}
+
+// hasLegacyExcludeLine reports whether the workspace's git excludes hold
+// the legacy marker's line. An exclude file that cannot be read safely
+// (readLegacyExclude) is logged and treated as holding no such line.
+func hasLegacyExcludeLine(workspacePath string) bool {
+	f, data, err := readLegacyExclude(workspacePath)
+	if err != nil {
+		slog.Warn("provisioning state promotion: skipping the workspace's git exclude file", "path", workspacePath, "error", err)
 		return false
 	}
+	if f == nil {
+		return false
+	}
+	_ = f.Close()
 	for _, line := range strings.Split(string(data), "\n") {
 		if strings.TrimSpace(line) == legacyExcludeLine {
 			return true
@@ -202,22 +246,19 @@ func hasLegacyExcludeLine(workspacePath string) bool {
 }
 
 // removeLegacyExcludeLine removes every "/.scion-provisioned" line from the
-// workspace's .git/info/exclude, opened without following a symlink at
-// .git, info or exclude (openGitExclude), and keeps every other line as it
-// was. A workspace without that file is left alone.
+// workspace's .git/info/exclude (read through readLegacyExclude), and keeps
+// every other line as it was. A workspace without that file is left alone;
+// one that cannot be read safely is logged and left alone.
 func removeLegacyExcludeLine(workspacePath string) (bool, error) {
-	if legacyExcludePath(workspacePath) == "" {
+	f, data, err := readLegacyExclude(workspacePath)
+	if err != nil {
+		slog.Warn("provisioning state promotion: leaving the workspace's git exclude file as it is", "path", workspacePath, "error", err)
 		return false, nil
 	}
-	f, err := openGitExclude(workspacePath)
-	if err != nil {
-		return false, err
+	if f == nil {
+		return false, nil
 	}
 	defer func() { _ = f.Close() }()
-	data, err := io.ReadAll(io.NewSectionReader(f, 0, 1<<62))
-	if err != nil {
-		return false, fmt.Errorf("read %s: %w", f.Name(), err)
-	}
 	lines := strings.SplitAfter(string(data), "\n")
 	kept := make([]string, 0, len(lines))
 	removed := false
