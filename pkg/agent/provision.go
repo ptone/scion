@@ -553,9 +553,9 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 	//
 	// In podman rootless mode, files created as root inside the container are
 	// owned by a mapped subuid on the host, making them inaccessible to the
-	// normal user. When the removal fails with a permission error, the unix
-	// build retries it with `podman unshare rm -rf`, which enters the user
-	// namespace where the mapped UIDs are accessible
+	// normal user. When the removal fails with a permission error or
+	// ENOTEMPTY, the unix build retries it with `podman unshare rm -rf`,
+	// which enters the user namespace where the mapped UIDs are accessible
 	// (retryRemovalInUserNamespace). Any other failure, and any failure the
 	// retry cannot clear, is returned.
 	//

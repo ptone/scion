@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os/exec"
+	"syscall"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -40,12 +41,18 @@ var podmanUnshareRemove = func(ctx context.Context, path string) error {
 // an agent created as root are owned by that subuid and the host user cannot
 // remove them: the removal fails with EACCES or EPERM. `podman unshare` runs
 // the removal inside the user namespace, where those subuids map back to the
-// user and the files can be removed. The retry is taken only for a
-// permission error (fs.ErrPermission). Every other error, including one
-// wrapping errors.ErrUnsupported, is returned unchanged. When the retry
-// fails, the returned error wraps both removeErr and the retry's error.
+// user and the files can be removed.
+//
+// The retry is taken only for a permission error (fs.ErrPermission: EACCES,
+// EPERM) or ENOTEMPTY. ENOTEMPTY is the common rootless case: when a
+// subuid-owned directory is mode 700 and not empty, RemoveAllSafe's walk
+// cannot list it and skips the listing's EACCES, so the error that surfaces
+// is the later rmdir's ENOTEMPTY. Every other error, including one wrapping
+// errors.ErrUnsupported, is returned unchanged. When the retry fails, the
+// returned error wraps both removeErr and the retry's error.
 func retryRemovalInUserNamespace(path string, removeErr error) error {
-	if errors.Is(removeErr, errors.ErrUnsupported) || !errors.Is(removeErr, fs.ErrPermission) {
+	if errors.Is(removeErr, errors.ErrUnsupported) ||
+		!(errors.Is(removeErr, fs.ErrPermission) || errors.Is(removeErr, syscall.ENOTEMPTY)) {
 		return removeErr
 	}
 	util.Debugf("delete: removal of %s was refused (%v); retrying with podman unshare", path, removeErr)

@@ -41,10 +41,11 @@ func stubPodmanUnshare(t *testing.T, err error) *[]string {
 	return &calls
 }
 
-// TestRetryRemovalInUserNamespace_PermissionErrorsOnly checks that the podman
-// unshare retry is taken only for a permission error, and that every other
+// TestRetryRemovalInUserNamespace_PermissionAndNotEmptyOnly checks that the podman
+// unshare retry is taken only for a permission error or ENOTEMPTY (a
+// mode-700 subuid-owned directory that is not empty), and that every other
 // error is returned unchanged.
-func TestRetryRemovalInUserNamespace_PermissionErrorsOnly(t *testing.T) {
+func TestRetryRemovalInUserNamespace_PermissionAndNotEmptyOnly(t *testing.T) {
 	const path = "/state/agent"
 	tests := []struct {
 		name      string
@@ -57,7 +58,9 @@ func TestRetryRemovalInUserNamespace_PermissionErrorsOnly(t *testing.T) {
 		{"ErrUnsupported", fmt.Errorf("remove symlink: %w", errors.ErrUnsupported), false},
 		{"ErrUnsupported and permission", fmt.Errorf("%w: %w", errors.ErrUnsupported, fs.ErrPermission), false},
 		{"ENOTSUP", &fs.PathError{Op: "remove", Path: path, Err: syscall.ENOTSUP}, false},
-		{"ENOTEMPTY", &fs.PathError{Op: "remove", Path: path, Err: syscall.ENOTEMPTY}, false},
+		{"ENOTEMPTY", &fs.PathError{Op: "remove", Path: path, Err: syscall.ENOTEMPTY}, true},
+		{"ErrUnsupported and ENOTEMPTY", fmt.Errorf("%w: %w", errors.ErrUnsupported, syscall.ENOTEMPTY), false},
+		{"ENOENT", &fs.PathError{Op: "remove", Path: path, Err: syscall.ENOENT}, false},
 		{"EBUSY", &fs.PathError{Op: "remove", Path: path, Err: syscall.EBUSY}, false},
 		{"other", errors.New("some other failure"), false},
 	}
@@ -115,8 +118,9 @@ func failRemoveAllSafeWith(t *testing.T, name string, err error) {
 }
 
 // TestDeleteAgentFiles_ExternalStateDirPermissionRetried checks the external
-// state directory's permission-error path end to end: a successful podman
-// unshare retry lets the delete succeed; a failed one is returned.
+// state directory's retry path end to end: a successful podman unshare retry
+// (after a permission error or ENOTEMPTY) lets the delete succeed; a failed
+// one is returned.
 func TestDeleteAgentFiles_ExternalStateDirPermissionRetried(t *testing.T) {
 	permErr := &fs.PathError{Op: "remove", Path: "x", Err: syscall.EACCES}
 
@@ -131,6 +135,20 @@ func TestDeleteAgentFiles_ExternalStateDirPermissionRetried(t *testing.T) {
 		}
 		if len(*calls) != 1 || filepath.Base((*calls)[0]) != agentName {
 			t.Fatalf("podman unshare calls = %v; want one for %s", *calls, extAgentDir)
+		}
+	})
+
+	t.Run("not empty retried", func(t *testing.T) {
+		const agentName = "ext-notempty"
+		scionDir, _ := setupExternalStateDir(t, agentName)
+		failRemoveAllSafeWith(t, agentName, &fs.PathError{Op: "remove", Path: "x", Err: syscall.ENOTEMPTY})
+		calls := stubPodmanUnshare(t, nil)
+
+		if _, err := DeleteAgentFiles(agentName, scionDir, false); err != nil {
+			t.Fatalf("DeleteAgentFiles: %v", err)
+		}
+		if len(*calls) != 1 {
+			t.Fatalf("podman unshare calls = %v; want one", *calls)
 		}
 	})
 
