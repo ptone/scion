@@ -646,6 +646,14 @@ type cloudRunNFSProvisionPaths struct {
 	secretsHostPath     string
 }
 
+// cloudRunRequireNFS and cloudRunProvisionShared are requireNFSFilesystem
+// and ProvisionShared; variables so tests can reach and observe the
+// workspace provisioning step without an NFS mount.
+var (
+	cloudRunRequireNFS      = requireNFSFilesystem
+	cloudRunProvisionShared = ProvisionShared
+)
+
 // provisionCloudRunNFS prepares the agent's NFS directories. uid and gid
 // must already be defaulted by the caller (cloudRunOwnerIDs); they are
 // used as given.
@@ -676,7 +684,7 @@ func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfi
 	paths.homeHostPath = hostPaths.homeHostPath
 	paths.secretsHostPath = hostPaths.secretsHostPath
 
-	if err := requireNFSFilesystem(hostPaths.hostBase); err != nil {
+	if err := cloudRunRequireNFS(hostPaths.hostBase); err != nil {
 		return nil, err
 	}
 
@@ -687,15 +695,18 @@ func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfi
 		Backend:            "nfs",
 		SharedDirs:         map[string]ResolvedSharedDir{},
 	}
-	if err := ProvisionShared(ProvisionInput{
+	if err := cloudRunProvisionShared(ProvisionInput{
 		Ctx:       ctx,
 		Resolved:  resolved,
 		ProjectID: cfg.ProjectID,
 		AgentID:   agentID,
 		Mode:      store.SharingModeSharedPlain,
 		GitClone:  cfg.GitClone,
-		NFSUID:    uid,
-		NFSGID:    gid,
+		// The clone runs on the provisioning host from a project-supplied
+		// URL: https, ssh and git transports only.
+		HostGitHardened: true,
+		NFSUID:          uid,
+		NFSGID:          gid,
 	}); err != nil {
 		return nil, fmt.Errorf("cloudrun: provision NFS workspace %s via Hub-mounted path %s: %w; "+
 			"verify the Hub Cloud Run service mounts the Filestore export read/write or run an external provisioner",

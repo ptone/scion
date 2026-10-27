@@ -222,10 +222,13 @@ func runProvision(ctx context.Context) error {
 		// one is configured. Only the clone command gets the credential
 		// helper; its value names the variable, not the token.
 		CloneWithToken: gc != nil && os.Getenv(provision.GitTokenEnv) != "",
-		NFSUID:         provisionUID,
-		NFSGID:         provisionGID,
-		SentinelDir:    sentinelDir,
-		LegacyDir:      legacyDir,
+		// The clone URL is project-supplied: https, ssh and git transports
+		// only, as on the other provisioning paths.
+		HostGitHardened: true,
+		NFSUID:          provisionUID,
+		NFSGID:          provisionGID,
+		SentinelDir:     sentinelDir,
+		LegacyDir:       legacyDir,
 		// F-111: this command's entire purpose is the chown. A silent
 		// failure here would reproduce the "workspace stuck root:root" bug
 		// invisibly — the sentinel would still get written, and every future
