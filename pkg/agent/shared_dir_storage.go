@@ -273,7 +273,7 @@ func kubeletMayCreateSharedDirs(runtimeName string, sdLayout projectfs.Layout, s
 
 // ensureSharedDirLeaf is shareddirs.EnsureLeaf, replaceable in tests to
 // replace a path component after the walk and reach the backstop check.
-var ensureSharedDirLeaf = shareddirs.EnsureLeaf
+var ensureSharedDirLeaf = projectfs.EnsureSharedLeaf
 
 // fdGID is shareddirs.FdGID, replaceable in tests to simulate a failed stat.
 var fdGID = shareddirs.FdGID

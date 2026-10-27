@@ -1293,14 +1293,13 @@ func (s *Server) writeHubConnectionSettings(project *store.Project, scionDir str
 }
 
 // provisionSharedWorkspace provisions a shared-workspace git project's
-// workspace on a shared backend through provision.ProvisionShared with the
-// Kubernetes init container's layout: the uuid workspace leaf
-// (Resolve(workspace)), shared-plain, the sentinel and lock in
-// <ProjectRoot>/provision (provision.ProjectStateDir), the legacy lock in
-// the workspace itself (so an older pod's lock still excludes this one),
-// uid/gid from the Layout, chown best-effort. The workspace leaf and the
-// provisioning state directory are created first through the confined
-// EnsureLeaf walk. The project's git token reaches only the clone command
+// workspace on a shared backend through the layout authority's Provisioner
+// (projectfs.Provisioner.ProvisionSharedWorkspace, the same path the
+// brokers' shared-plain backstop takes): the uuid workspace leaf and the
+// provisioning state directory created with the leaf contract, then
+// provision.ProvisionShared with the sentinel and lock in
+// <ProjectRoot>/provision only, uid/gid from the Layout, chown best-effort.
+// The project's git token reaches only the clone command
 // (ProvisionInput.CloneToken). An existing sentinel means no clone.
 //
 // Errors returned to the caller carry no host path: a storage failure
@@ -1322,6 +1321,12 @@ func writeSharedCloneSourceRefused(w http.ResponseWriter, err error) bool {
 	return true
 }
 
+// projectProvisioner returns the layout authority's Provisioner for layout, with
+// the hub's provisioning function (provisionSharedClone).
+func projectProvisioner(layout projectfs.Layout) projectfs.Provisioner {
+	return projectfs.Provisioner{Layout: layout, ProvisionShared: provisionSharedClone}
+}
+
 func (s *Server) provisionSharedWorkspace(ctx context.Context, project *store.Project) error {
 	// The clone URL is project-supplied and the clone runs on the hub host:
 	// it is checked before any filesystem work, and refused (never
@@ -1336,56 +1341,15 @@ func (s *Server) provisionSharedWorkspace(ctx context.Context, project *store.Pr
 	if err != nil {
 		return err
 	}
-	res, err := s.projectWorkspaceResolved(project)
-	if err != nil {
+	// The project must have a hub-managed workspace Mount.
+	if _, err := s.projectWorkspaceResolved(project); err != nil {
 		return err
-	}
-	storageErr := func(step string, err error) error {
-		s.projectsLogger().Warn("shared workspace provisioning: storage step failed",
-			"project_id", project.ID, "step", step, "error", err)
-		return fmt.Errorf("shared workspace provisioning: %w", errWorkspaceStorageUnavailable)
 	}
 	pr, err := layout.ProjectRoot(project.ID)
 	if err != nil {
-		return storageErr("project root", err)
-	}
-	base, err := res.ResolvedHostBase()
-	if err != nil {
-		return storageErr("host base", err)
-	}
-	// A project root this create made is removed again, with everything
-	// under it, when provisioning fails, as the local backend removes its
-	// failed clone. A root that existed before this create is left as is.
-	_, statErr := os.Lstat(filepath.Join(base, pr.RelPath))
-	createdRoot := errors.Is(statErr, fs.ErrNotExist)
-	cleanup := func() {
-		if !createdRoot {
-			return
-		}
-		if err := shareddirs.DeleteProjectRoot(base, pr.SubPathRoot, project.ID); err != nil {
-			s.projectsLogger().Warn("shared workspace provisioning: could not remove the failed project tree",
-				"project_id", project.ID, "error", err)
-		}
-	}
-	root, err := res.Open(true)
-	if err != nil {
-		cleanup()
-		return storageErr("workspace leaf", err)
-	}
-	_ = root.Close()
-	fd, _, err := shareddirs.EnsureLeaf(base, filepath.Join(pr.RelPath, provision.ProvisionStateDirName))
-	if err != nil {
-		cleanup()
-		return storageErr("provisioning state directory", err)
-	}
-	if err := shareddirs.CloseFd(fd); err != nil {
-		cleanup()
-		return storageErr("provisioning state directory", err)
-	}
-	stateDir := filepath.Join(pr.HostPath, provision.ProvisionStateDirName)
-	if err := provision.PrepareStateDir(stateDir, provision.DefaultOwnerID(layout.UID), provision.DefaultOwnerID(layout.GID), false); err != nil {
-		cleanup()
-		return storageErr("provisioning state directory", err)
+		s.projectsLogger().Warn("shared workspace provisioning: storage step failed",
+			"project_id", project.ID, "step", "project root", "error", err)
+		return fmt.Errorf("shared workspace provisioning: %w", errWorkspaceStorageUnavailable)
 	}
 
 	// The project's token is bound to its own recorded remote
@@ -1396,27 +1360,36 @@ func (s *Server) provisionSharedWorkspace(ctx context.Context, project *store.Pr
 	if cloneCfg != nil && project.GitRemote != "" {
 		cloneToken = s.resolveCloneToken(ctx, project)
 	}
-	err = provisionSharedClone(provision.ProvisionInput{
+	createdRoot, err := projectProvisioner(layout).ProvisionSharedWorkspace(projectfs.SharedWorkspaceProvision{
 		Ctx:              ctx,
-		Resolved:         provision.ResolvedWorkspace{HostPath: res.HostPath},
 		ProjectID:        project.ID,
-		Mode:             store.SharingModeSharedPlain,
 		GitClone:         cloneCfg,
 		CloneToken:       cloneToken,
 		CloneTokenRemote: project.GitRemote,
-		HostGitHardened:  true,
-		NFSUID:           layout.UID,
-		NFSGID:           layout.GID,
-		SentinelDir:      stateDir,
-		LegacyDir:        res.HostPath,
 	})
-	if err != nil {
-		s.projectsLogger().Warn("shared workspace provisioning failed",
-			"project_id", project.ID, "error", err.Error())
-		cleanup()
-		return sharedWorkspaceCloneError(err)
+	if err == nil {
+		return nil
 	}
-	return nil
+	// A project root this create made is removed again, with everything
+	// under it, when provisioning fails, as the local backend removes its
+	// failed clone. A root that existed before this create is left as is.
+	if createdRoot {
+		if base, berr := pr.ResolvedHostBase(); berr != nil {
+			s.projectsLogger().Warn("shared workspace provisioning: could not remove the failed project tree",
+				"project_id", project.ID, "error", berr)
+		} else if derr := shareddirs.DeleteProjectRoot(base, pr.SubPathRoot, project.ID); derr != nil {
+			s.projectsLogger().Warn("shared workspace provisioning: could not remove the failed project tree",
+				"project_id", project.ID, "error", derr)
+		}
+	}
+	if errors.Is(err, projectfs.ErrProvisionStorage) {
+		s.projectsLogger().Warn("shared workspace provisioning: storage step failed",
+			"project_id", project.ID, "error", err)
+		return fmt.Errorf("shared workspace provisioning: %w", errWorkspaceStorageUnavailable)
+	}
+	s.projectsLogger().Warn("shared workspace provisioning failed",
+		"project_id", project.ID, "error", err.Error())
+	return sharedWorkspaceCloneError(err)
 }
 
 // sharedWorkspaceCloneError maps a provisioning failure to a *util.GitError

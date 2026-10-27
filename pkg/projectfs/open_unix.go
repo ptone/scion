@@ -51,7 +51,7 @@ func (r Resolved) Open(create bool) (*os.Root, error) {
 			return nil, err
 		}
 		if create {
-			leafFd, _, err := shareddirs.EnsureLeaf(base, r.RelPath)
+			leafFd, _, err := EnsureSharedLeaf(base, r.RelPath)
 			if err != nil {
 				return nil, fmt.Errorf("create %s %q: %w", r.Kind, r.Name, err)
 			}

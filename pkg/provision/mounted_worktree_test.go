@@ -43,8 +43,8 @@ func removedDirs(t *testing.T, workspace string) []string {
 }
 
 // mountedWorktreeInput is the input the Kubernetes init container builds
-// for worktree-per-agent mode: the workspace is both the shared checkout
-// and the sentinel/lock directory.
+// for worktree-per-agent mode: the workspace is the shared checkout, and the
+// sentinel and lock live in the provisioning state directory beside it.
 func mountedWorktreeInput(workspace, origin, agentID, branch string) ProvisionInput {
 	return ProvisionInput{
 		Resolved:            ResolvedWorkspace{HostPath: workspace},
@@ -55,7 +55,7 @@ func mountedWorktreeInput(workspace, origin, agentID, branch string) ProvisionIn
 		GitClone:            &api.GitCloneConfig{URL: origin},
 		NFSUID:              os.Getuid(),
 		NFSGID:              os.Getgid(),
-		SentinelDir:         workspace,
+		SentinelDir:         ProjectStateDir(workspace),
 		RequireChownSuccess: true,
 		MountedWorktree:     true,
 	}
@@ -171,7 +171,7 @@ func TestProvisionShared_MountedWorktree_OldGitLeavesEmptyDir(t *testing.T) {
 	entries, err := os.ReadDir(WorktreePath(workspace, "agent-1"))
 	require.NoError(t, err, "the agent's directory must exist for its mount")
 	assert.Empty(t, entries)
-	_, err = os.Stat(filepath.Join(workspace, ProvisionSentinelFile))
+	_, err = os.Stat(filepath.Join(ProjectStateDir(workspace), ProvisionSentinelFile))
 	assert.NoError(t, err, "the shared checkout is still provisioned")
 }
 

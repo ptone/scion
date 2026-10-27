@@ -26,7 +26,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // Hub-managed projects on a shared storage backend (ptone/scion#5823).
@@ -276,12 +275,13 @@ func (s *Server) sharedBootstrapWorkspace(req CreateAgentRequest) (ws, rel strin
 // sharedWorkspaceProvisioned reports whether the shared workspace at ws is
 // in use, so a workspace bootstrap (a sync that makes the target match the
 // upload) must never be applied to it: it carries the provisioning sentinel
-// (in the project state directory, or at the workspace root where an older
-// layout kept it), or it holds any entry other than provisioning
-// bookkeeping (provision.IsProvisioningArtifact; content a migration, the hub or an agent placed there without a
-// sentinel). An unreadable workspace counts as in use.
+// (in the project state directory, the only place it is kept), or it holds
+// any entry at all (content a migration, the hub or an agent placed there
+// without a sentinel; the workspace root holds no provisioning bookkeeping,
+// so a leftover workspace-root sentinel or lock from an older image counts
+// as content too). An unreadable workspace counts as in use.
 func sharedWorkspaceProvisioned(ws string) bool {
-	if provision.SentinelPresent(provision.ProjectStateDir(ws), ws) {
+	if provision.SentinelPresent(provision.ProjectStateDir(ws)) {
 		return true
 	}
 	entries, err := os.ReadDir(ws)
@@ -291,12 +291,7 @@ func sharedWorkspaceProvisioned(ws string) bool {
 	if err != nil {
 		return true
 	}
-	for _, e := range entries {
-		if !provision.IsProvisioningArtifact(e.Name()) {
-			return true
-		}
-	}
-	return false
+	return len(entries) > 0
 }
 
 // applySharedBootstrap applies a workspace bootstrap to the shared
@@ -307,7 +302,7 @@ func sharedWorkspaceProvisioned(ws string) bool {
 // (skipped); otherwise apply
 // places the upload and the sentinel is written, so later provisioners
 // reuse it. The workspace and its state directory are created first with
-// the broker's leaf contract (shareddirs.EnsureLeaf).
+// the broker's leaf contract (projectfs.EnsureSharedLeaf).
 func (s *Server) applySharedBootstrap(ctx context.Context, ws, rel string, apply func(ctx context.Context) error) (skipped bool, err error) {
 	base, err := filepath.EvalSymlinks(s.config.StorageLayout.HostBase)
 	if err != nil {
@@ -315,7 +310,7 @@ func (s *Server) applySharedBootstrap(ctx context.Context, ws, rel string, apply
 	}
 	stateRel := filepath.Join(filepath.Dir(rel), provision.ProvisionStateDirName)
 	for _, leaf := range []string{rel, stateRel} {
-		fd, _, err := shareddirs.EnsureLeaf(base, leaf)
+		fd, _, err := projectfs.EnsureSharedLeaf(base, leaf)
 		if err != nil {
 			return false, fmt.Errorf("create %s: %w", filepath.Base(leaf), err)
 		}
@@ -355,11 +350,11 @@ func localContainerRuntime(runtimeName string) bool {
 // provisionSharedPlainWorkspace is the shared-plain provisioning backstop
 // for a git project on the broker's shared Layout dispatched to a local
 // container runtime (ptone/scion#5823): before the agent starts, the broker
-// runs provision.ProvisionShared for the project's workspace on the share,
-// exactly as the Kubernetes provisioning init container lays it out (the
-// sentinel and lock in the project state directory, the workspace root as
-// the legacy sentinel location, ownership from the Layout, a failed chown
-// not fatal). An already provisioned workspace (sentinel present, as after
+// provisions the project's workspace on the share through the layout
+// authority's Provisioner (projectfs.Provisioner.ProvisionSharedWorkspace,
+// the path the hub takes at project create): the sentinel and lock in the
+// project state directory only, ownership from the Layout, a failed chown
+// not fatal. An already provisioned workspace (sentinel present, as after
 // the hub's provisioning at project create) takes the reuse path; a lost
 // sentinel or a project from before that provisioning gets the clone, under
 // the provisioning lock. The clone gets the agent's git token only for the
@@ -375,47 +370,15 @@ func (s *Server) provisionSharedPlainWorkspace(ctx context.Context, in startCont
 	if err := provision.CheckHostCloneURL(gc.URL); err != nil {
 		return false, err
 	}
-	r, err := layout.Resolve(projectfs.Project{ID: in.ProjectID}, "", projectfs.WorkspaceMount(projectfs.ModeSharedPlain, ""))
-	if err != nil {
-		return false, err
-	}
-	base, err := filepath.EvalSymlinks(layout.HostBase)
-	if err != nil {
-		return false, fmt.Errorf("resolve host base: %w", err)
-	}
-	stateRel := filepath.Join(filepath.Dir(r.RelPath), provision.ProvisionStateDirName)
-	for _, leaf := range []string{r.RelPath, stateRel} {
-		fd, _, err := shareddirs.EnsureLeaf(base, leaf)
-		if err != nil {
-			return false, fmt.Errorf("create %s: %w", filepath.Base(leaf), err)
-		}
-		if err := shareddirs.CloseFd(fd); err != nil {
-			return false, err
-		}
-	}
-	ws := filepath.Join(base, r.RelPath)
-	stateDir := provision.ProjectStateDir(ws)
-	uid, gid := provision.DefaultOwnerID(layout.UID), provision.DefaultOwnerID(layout.GID)
-	if err := provision.PrepareStateDir(stateDir, uid, gid, false); err != nil {
-		return false, err
-	}
-	err = provisionSharedFn(provision.ProvisionInput{
-		Ctx:                 ctx,
-		Resolved:            provision.ResolvedWorkspace{HostPath: ws, ServerRelativePath: r.RelPath, HostBase: base, Backend: string(layout.Backend)},
-		ProjectID:           in.ProjectID,
-		AgentID:             in.AgentID,
-		Mode:                store.SharingModeSharedPlain,
-		GitClone:            &gc,
-		CloneToken:          env[provision.GitTokenEnv],
-		CloneTokenRemote:    gc.URL,
-		HostGitHardened:     true,
-		NFSUID:              uid,
-		NFSGID:              gid,
-		SentinelDir:         stateDir,
-		LegacyDir:           ws,
-		RequireChownSuccess: false,
-	})
-	if err != nil {
+	p := projectfs.Provisioner{Layout: layout, ProvisionShared: provisionSharedFn}
+	if _, err := p.ProvisionSharedWorkspace(projectfs.SharedWorkspaceProvision{
+		Ctx:              ctx,
+		ProjectID:        in.ProjectID,
+		AgentID:          in.AgentID,
+		GitClone:         &gc,
+		CloneToken:       env[provision.GitTokenEnv],
+		CloneTokenRemote: gc.URL,
+	}); err != nil {
 		return false, err
 	}
 	return true, nil

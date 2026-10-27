@@ -1263,11 +1263,17 @@ func (r *sharedDirResolution) onSharedBackend() bool {
 
 // openSharedDirRoot opens the resolved shared dir through the layout
 // authority (projectfs.Resolved.Open): on NFS, pkg/shareddirs' anchored
-// O_NOFOLLOW walk (and, with createIfMissing, shareddirs.EnsureLeaf first);
-// on local disk, a root that refuses a symlinked directory. No caller joins
-// paths and opens them itself.
+// O_NOFOLLOW walk; on local disk, a root that refuses a symlinked
+// directory. With createIfMissing a missing leaf is first created by the
+// layout authority's Provisioner (projectfs.Provisioner.EnsureLeaf, the
+// brokers' leaf contract). No caller joins paths and opens them itself.
 func (s *Server) openSharedDirRoot(resolution *sharedDirResolution, createIfMissing bool) (*os.Root, error) {
-	return resolution.Resolved.Open(createIfMissing)
+	if createIfMissing {
+		if _, err := (projectfs.Provisioner{}).EnsureLeaf(resolution.Resolved); err != nil {
+			return nil, err
+		}
+	}
+	return resolution.Resolved.Open(false)
 }
 
 // sharedDirLayoutSource names where a shared-dir Layout came from.
