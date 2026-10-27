@@ -580,13 +580,26 @@ func TestApplySharedBootstrap(t *testing.T) {
 // token in its resolved env.
 func createSharedGitAgent(t *testing.T, f *sharedRootFixture) *httptest.ResponseRecorder {
 	t.Helper()
+	return createSharedGitAgentWithURL(t, f, "https://github.example/org/repo.git")
+}
+
+// createSharedGitAgentWithURL is createSharedGitAgent with the project's
+// clone URL given.
+func createSharedGitAgentWithURL(t *testing.T, f *sharedRootFixture, cloneURL string) *httptest.ResponseRecorder {
+	t.Helper()
+	cfg, err := json.Marshal(map[string]any{
+		"template": "claude", "sharedWorkspace": true,
+		"gitClone": map[string]string{"url": cloneURL, "branch": "main"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	body := fmt.Sprintf(`{
 		"name": "a1", "id": "agent-uuid-a1", "slug": "a1",
 		"projectId": %q, "projectSlug": "web",
 		"resolvedEnv": {"GITHUB_TOKEN": "tok-123"},
-		"config": {"template": "claude", "sharedWorkspace": true,
-			"gitClone": {"url": "https://github.example/org/repo.git", "branch": "main"}}
-	}`, sharedRootProjectID)
+		"config": %s
+	}`, sharedRootProjectID, cfg)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -624,6 +637,87 @@ func TestCreateAgent_SharedPlainBackstopInput(t *testing.T) {
 	}
 	if v, ok := f.mgr.lastOpts.Env["SCION_GIT_CLONE_URL"]; ok {
 		t.Errorf("the in-container clone must not be requested (SCION_GIT_CLONE_URL=%q)", v)
+	}
+}
+
+// sharedPlainRefusedCloneURLs are the clone URLs every host-side
+// provisioning path refuses.
+func sharedPlainRefusedCloneURLs(t *testing.T) map[string]string {
+	local := filepath.Join(t.TempDir(), "repo.git")
+	return map[string]string{
+		"local path":   local,
+		"file":         "file://" + local,
+		"http":         "http://git.example.invalid/org/repo.git",
+		"transport":    "ext::git-remote-probe",
+		"leading dash": "--upload-pack=git-remote-probe",
+	}
+}
+
+// The shared-plain backstop refuses a local path, file://, http://, a
+// <transport>::<address> URL and a value starting with "-": the create
+// fails with 422 and the refusal's fixed text (naming no URL), nothing is
+// provisioned, and the in-container clone is not requested either.
+func TestCreateAgent_SharedPlainBackstopRefusesHostCloneURLs(t *testing.T) {
+	for name, cloneURL := range sharedPlainRefusedCloneURLs(t) {
+		t.Run(name, func(t *testing.T) {
+			f := newSharedRootFixture(t, true)
+			var calls int
+			old := provisionSharedFn
+			provisionSharedFn = func(in provision.ProvisionInput) error { calls++; return provision.ProvisionShared(in) }
+			t.Cleanup(func() { provisionSharedFn = old })
+
+			w := createSharedGitAgentWithURL(t, f, cloneURL)
+			if w.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("create = %d, want %d: %s", w.Code, http.StatusUnprocessableEntity, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), provision.ErrHostCloneURLRefused.Error()) {
+				t.Errorf("body %q does not carry the refusal", w.Body.String())
+			}
+			if strings.Contains(w.Body.String(), cloneURL) {
+				t.Errorf("body %q names the refused URL", w.Body.String())
+			}
+			if calls != 0 {
+				t.Errorf("ProvisionShared calls = %d, want 0 for a refused URL", calls)
+			}
+			if _, err := os.Stat(filepath.Join(f.root, "workspace", ".git")); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("nothing may be cloned for a refused URL (stat .git: %v)", err)
+			}
+			if v, ok := f.mgr.lastOpts.Env["SCION_GIT_CLONE_URL"]; ok {
+				t.Errorf("the in-container clone must not be requested (SCION_GIT_CLONE_URL=%q)", v)
+			}
+		})
+	}
+}
+
+// The provisioning input the shared-plain backstop builds is refused by
+// the real ProvisionShared for each of those URLs, independently of the
+// backstop's own URL check ahead of it, and nothing is cloned.
+func TestSharedPlainBackstopInputRefusedByProvisionShared(t *testing.T) {
+	f := newSharedRootFixture(t, true)
+	var got []provision.ProvisionInput
+	old := provisionSharedFn
+	provisionSharedFn = func(in provision.ProvisionInput) error { got = append(got, in); return nil }
+	t.Cleanup(func() { provisionSharedFn = old })
+	if w := createSharedGitAgent(t, f); w.Code >= 300 {
+		t.Fatalf("create = %d: %s", w.Code, w.Body.String())
+	}
+	if len(got) != 1 {
+		t.Fatalf("ProvisionShared calls = %d, want 1", len(got))
+	}
+	for name, cloneURL := range sharedPlainRefusedCloneURLs(t) {
+		t.Run(name, func(t *testing.T) {
+			in := got[0]
+			gc := *in.GitClone
+			gc.URL = cloneURL
+			in.GitClone = &gc
+			in.CloneTokenRemote = cloneURL
+			if err := provision.ProvisionShared(in); !errors.Is(err, provision.ErrHostCloneURLRefused) {
+				t.Fatalf("ProvisionShared error = %v, want the clone URL refused", err)
+			}
+			if _, err := os.Stat(filepath.Join(in.Resolved.HostPath, ".git")); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("nothing may be cloned for a refused URL (stat .git: %v)", err)
+			}
+		})
 	}
 }
 

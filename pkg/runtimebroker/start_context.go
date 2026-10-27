@@ -1161,6 +1161,10 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 			s.agentLifecycleLog.Error("Shared workspace provisioning failed", "agent_id", in.AgentID, "project_id", in.ProjectID,
 				"error", sanitizeCloneErrorText(err.Error(), in.Config.GitClone.URL))
 			span.SetStatus(codes.Error, "shared workspace provisioning failed")
+			if errors.Is(err, provision.ErrHostCloneURLRefused) {
+				// The project's clone URL, not the broker, is the problem.
+				return nil, &startContextError{Status: http.StatusUnprocessableEntity, Message: provision.ErrHostCloneURLRefused.Error()}
+			}
 			return nil, &startContextError{Status: http.StatusInternalServerError, Message: "the project's shared workspace could not be provisioned"}
 		}
 		sharedPlainProvisioned = provisioned
