@@ -89,7 +89,15 @@ type Realized struct {
 // Realize places r in a container of runtime kind: a bind mount of
 // r.HostPath, or (on a shared backend) a pod mount of the share's claim at
 // r.SubPath. The target is r.Target and read-only follows r.
+//
+// A `volumes:` entry (KindVolume) is realized as the user declared it: a
+// bind mount of its source, or, on a pod, its target and read-only flag,
+// the runtime supplying the user's own volume source (the GCS FUSE CSI
+// driver). Like Resolve, Realize never refuses such an entry.
 func (l Layout) Realize(r Resolved, kind RuntimeKind) (Realized, error) {
+	if r.Kind == KindVolume {
+		return realizeUserVolume(r, kind)
+	}
 	if r.Target == "" {
 		return Realized{}, errors.New("projectfs: cannot realize a mount without a container target")
 	}
@@ -115,6 +123,20 @@ func (l Layout) Realize(r Resolved, kind RuntimeKind) (Realized, error) {
 			claim = l.Share.PVName
 		}
 		out.ClaimName, out.SubPath = claim, r.SubPath
+	default:
+		return Realized{}, fmt.Errorf("projectfs: unknown runtime kind %q", kind)
+	}
+	return out, nil
+}
+
+// realizeUserVolume realizes a resolved `volumes:` entry for runtime kind.
+func realizeUserVolume(r Resolved, kind RuntimeKind) (Realized, error) {
+	out := Realized{Target: r.Target, ReadOnly: r.ReadOnly}
+	switch kind {
+	case RuntimeBind:
+		out.Source = r.HostPath
+	case RuntimePod:
+		// No claim: the volume is the user's, not on the share.
 	default:
 		return Realized{}, fmt.Errorf("projectfs: unknown runtime kind %q", kind)
 	}

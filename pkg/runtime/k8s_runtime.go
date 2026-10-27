@@ -1990,6 +1990,15 @@ func (r *KubernetesRuntime) ensureProjectRWXClaim(
 	// Check if PVC already exists (project-scoped, may have been created by another agent)
 	existing, err := r.Client.Clientset.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
 	if err == nil {
+		// A claim of the same name labelled for another project (two
+		// projects with the same slug in one namespace) is never reused:
+		// it holds the other project's files, and deleting that project
+		// releases it.
+		if projectID != "" {
+			if other := existing.Labels[projectkeys.LabelProjectID]; other != "" && other != projectID {
+				return fmt.Errorf("shared dir %q: PVC %q in namespace %q belongs to another project (project ID %s); refusing to reuse it", dirName, pvcName, namespace, other)
+			}
+		}
 		runtimeLog().Info("Project RWX PVC already exists, reusing", "pvc", pvcName, "dir", dirName)
 		warnOnStorageClassMismatch(existing, storageClass)
 		return nil
@@ -2903,6 +2912,12 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	for i, v := range config.Volumes {
 		switch v.Type {
 		case "gcs":
+			// The entry is a user-owned Mount: Realize gives its target and
+			// read-only flag, the GCS FUSE CSI driver its volume.
+			realized, err := realizeUserVolume(v.Bucket, v.Target, v.ReadOnly, projectfs.RuntimePod)
+			if err != nil {
+				return nil, err
+			}
 			volName := fmt.Sprintf("gcs-vol-%d", i)
 			attrs := map[string]string{
 				"bucketName": v.Bucket,
@@ -2924,8 +2939,8 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			})
 			pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
 				Name:      volName,
-				MountPath: v.Target,
-				ReadOnly:  v.ReadOnly,
+				MountPath: realized.Target,
+				ReadOnly:  realized.ReadOnly,
 			})
 
 			pod.Annotations = ensureAnnotations(pod.Annotations)
