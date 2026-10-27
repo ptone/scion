@@ -46,16 +46,26 @@ Now:
   `SCION_PROVISION_STATE_DIR` ("this pod has no provisioning state
   directory; the runtime broker must be upgraded"), before anything is
   created.
-- `pkg/projectfs.Provisioner`:
+- `pkg/projectfs` (store-free leaf primitives):
   - `EnsureSharedLeaf` is the leaf primitive (the confined walk, mode 2775,
     default ACL);
-  - `EnsureLeaf(Resolved)` uses it on a shared backend, and on the local
+  - `Resolved.EnsureLeaf` uses it on a shared backend, and on the local
     backend creates the directory as before (0755);
+  - `Layout.ProvisionStateDir` resolves `<ProjectRoot>/provision`, and
+    `Layout.ProjectTreeIDs` lists the project trees.
+- `pkg/projectfs/provisioner.Provisioner`:
+  - `EnsureLeaf` (over `Resolved.EnsureLeaf`);
   - `OpenStateDir` creates and checks the state directory and sweeps it;
   - `ProvisionSharedWorkspace` is the shared-plain provisioning of both the
     hub (at project create) and the broker (the backstop before a local
-    container starts);
-  - `Layout.ProjectTreeIDs` lists the project trees.
+    container starts).
+- Why the Provisioner is a separate package: `pkg/config`, and through it
+  the conduit relay, imports `pkg/projectfs`, and the relay must never reach
+  `pkg/store` (`TestRelayCodeUsesOnlyRegistryStore`). `pkg/provision` imports
+  `pkg/store`, so what needs it lives in `pkg/projectfs/provisioner`, and
+  `pkg/projectfs` keeps depending only on `pkg/api` and `pkg/shareddirs`.
+  The first CI run caught a version that had the Provisioner in
+  `pkg/projectfs`.
 - Hub:
   - `provisionSharedWorkspace`, the workspace leaf in `populateAgentConfig`
     and the shared-dir write path go through the Provisioner;
