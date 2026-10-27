@@ -112,6 +112,7 @@ const (
 	ErrCodeUnavailable                      = apierr.ErrCodeUnavailable
 	ErrCodeUnprocessable                    = apierr.ErrCodeUnprocessable
 	ErrCodeUnsupportedCapability            = apierr.ErrCodeUnsupportedCapability
+	ErrCodeUserDeleteBlocked                = apierr.ErrCodeUserDeleteBlocked
 	ErrCodeUserNotFound                     = apierr.ErrCodeUserNotFound
 	ErrCodeValidationError                  = apierr.ErrCodeValidationError
 	ErrCodeVersionConflict                  = apierr.ErrCodeVersionConflict
