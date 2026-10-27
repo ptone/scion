@@ -19,6 +19,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -300,15 +301,15 @@ func TestNFSKeepSharedCheckout(t *testing.T) {
 	assert.NoDirExists(t, filepath.Join(resolved.HostBase, filepath.Dir(sub), "old"), "the check only reads")
 }
 
-// The export not mounted on the broker: the pod still uses the agent
-// directory, and the node creates it.
+// The export not mounted on the broker: the start is refused before any
+// pod or directory exists (ptone/scion#5823);
+// the node is never left to create project storage.
 func TestStartNFSAgentDir_ExportNotMounted(t *testing.T) {
 	mountRoot := filepath.Join(t.TempDir(), "nfs")
-	cfg, emptyAtRun, err := startNFSAgentDirAgent(t, "kubernetes", mountRoot, map[string]string{"SCION_WORKSPACE_MODE": "clone-per-agent"}, testGitClone)
-	require.NoError(t, err)
-	assert.False(t, emptyAtRun)
-	assert.Equal(t, "test-agent", cfg.NFSAgentDirName)
-	assert.False(t, cfg.NFSWorkspacePreCreated)
+	_, _, err := startNFSAgentDirAgent(t, "kubernetes", mountRoot, map[string]string{"SCION_WORKSPACE_MODE": "clone-per-agent"}, testGitClone)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrProjectShareNotMounted), "err = %v", err)
+	assert.Contains(t, err.Error(), "mount it or set nfs.auto_mount")
 	assert.NoDirExists(t, mountRoot)
 }
 
@@ -331,7 +332,7 @@ func TestStartNFSAgentDir_OtherModesUnchanged(t *testing.T) {
 			mountRoot := filepath.Join(t.TempDir(), "nfs")
 			ws := nfsTestWorkspaceDir(mountRoot)
 			require.NoError(t, os.MkdirAll(ws, 0o770))
-			require.NoError(t, os.WriteFile(filepath.Join(ws, provision.ProvisionSentinelFile), []byte("x"), 0o644))
+			writeStateSentinel(t, ws)
 			env := map[string]string{}
 			if tc.mode != "" {
 				env["SCION_WORKSPACE_MODE"] = tc.mode
@@ -538,7 +539,7 @@ func TestRemoveNFSAgentFiles_AfterSwitchToSharedPlain(t *testing.T) {
 		Mode:        store.SharingModeSharedPlain,
 		NFSUID:      os.Getuid(),
 		NFSGID:      os.Getgid(),
-		SentinelDir: ws,
+		SentinelDir: provision.ProjectStateDir(ws),
 	}))
 	require.NoError(t, os.WriteFile(filepath.Join(ws, "shared.txt"), []byte("x"), 0o644))
 	sharedBefore := treeSnapshot(t, ws, "")
@@ -569,7 +570,7 @@ func TestRemoveNFSAgentFiles_RefusedStickyAgent_LeavesSharedCheckout(t *testing.
 		Mode:        store.SharingModeSharedPlain,
 		NFSUID:      os.Getuid(),
 		NFSGID:      os.Getgid(),
-		SentinelDir: ws,
+		SentinelDir: provision.ProjectStateDir(ws),
 	}))
 	require.NoError(t, os.WriteFile(filepath.Join(ws, "unpushed.txt"), []byte("work"), 0o644))
 

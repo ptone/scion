@@ -168,7 +168,9 @@ func isProvisionAgentWorkspaceShape(projectDir, candidate string) bool {
 // ProvisionAgent-layout shape check (see its doc comment); pass "" for
 // callers with no such layout.
 func readMarker(base, projectDir, path string) (*sharerMarker, error) {
-	data, err := os.ReadFile(path)
+	// The marker is in the shared .git, which agents can write: it is read
+	// without following a symlink at its last component and bounded.
+	data, err := readSmallFileNoFollow(path, sharerMarkerMaxBytes)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
