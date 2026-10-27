@@ -18,7 +18,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -160,12 +159,13 @@ func LegacyPromotionNeeded(workspacePath string) bool {
 }
 
 // legacyExcludeMaxBytes caps the workspace's .git/info/exclude that the
-// promotion reads. The file is agent-writable; a larger one is skipped with
-// a warning (git's own exclude files are a few KiB).
-const legacyExcludeMaxBytes = 1 << 20
+// promotion reads (gitExcludeMaxBytes, shared with appendGitExclude). The
+// file is agent-writable; a larger one is skipped with a warning.
+const legacyExcludeMaxBytes = gitExcludeMaxBytes
 
-// errLegacyExcludeTooLarge marks an exclude file above legacyExcludeMaxBytes.
-var errLegacyExcludeTooLarge = errors.New("git exclude file is larger than the promotion reads")
+// errLegacyExcludeTooLarge marks an exclude file above legacyExcludeMaxBytes
+// (errFileTooLarge, the shared bounded read's refusal).
+var errLegacyExcludeTooLarge = errFileTooLarge
 
 // legacyExcludePath is the workspace's .git/info/exclude when .git and info
 // are plain directories and exclude is a regular file; "" otherwise. It is
@@ -203,23 +203,10 @@ func readLegacyExclude(workspacePath string) (*os.File, []byte, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	fi, err := f.Stat()
+	data, err := readBoundedFile(f, legacyExcludeMaxBytes)
 	if err != nil {
 		_ = f.Close()
-		return nil, nil, fmt.Errorf("stat %s: %w", f.Name(), err)
-	}
-	if fi.Size() > legacyExcludeMaxBytes {
-		_ = f.Close()
-		return nil, nil, fmt.Errorf("%s: %w (%d bytes, cap %d)", f.Name(), errLegacyExcludeTooLarge, fi.Size(), legacyExcludeMaxBytes)
-	}
-	data, err := io.ReadAll(io.LimitReader(io.NewSectionReader(f, 0, legacyExcludeMaxBytes+1), legacyExcludeMaxBytes+1))
-	if err != nil {
-		_ = f.Close()
-		return nil, nil, fmt.Errorf("read %s: %w", f.Name(), err)
-	}
-	if len(data) > legacyExcludeMaxBytes {
-		_ = f.Close()
-		return nil, nil, fmt.Errorf("%s: %w (cap %d)", f.Name(), errLegacyExcludeTooLarge, legacyExcludeMaxBytes)
+		return nil, nil, err
 	}
 	return f, data, nil
 }

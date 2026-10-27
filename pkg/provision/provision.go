@@ -3219,7 +3219,7 @@ func IsRealWorktreeDir(path, base string) bool {
 		return false
 	}
 
-	data, err := os.ReadFile(gitFile)
+	data, err := readSmallFileNoFollow(gitFile, gitPointerMaxBytes)
 	if err != nil {
 		return false
 	}
@@ -3681,7 +3681,10 @@ const (
 // is false unless that directory is a real directory directly inside
 // <base>/.git/worktrees.
 func worktreeAdminDir(path, base string) (dir string, ok bool) {
-	data, err := os.ReadFile(filepath.Join(path, ".git"))
+	// The .git file is read without following a symlink and bounded: a
+	// worktree's .git is a regular file git writes (IsRealWorktreeDir
+	// refuses a symlinked one too).
+	data, err := readSmallFileNoFollow(filepath.Join(path, ".git"), gitPointerMaxBytes)
 	if err != nil {
 		return "", false
 	}
@@ -3712,7 +3715,7 @@ func linkedWorktreeState(base, path string) linkedWorktreeKind {
 	if !ok {
 		return linkedWorktreeNoAdmin
 	}
-	data, err := os.ReadFile(filepath.Join(admin, "gitdir"))
+	data, err := readSmallFileNoFollow(filepath.Join(admin, "gitdir"), gitPointerMaxBytes)
 	if err != nil {
 		return linkedWorktreeMismatch
 	}
@@ -4161,9 +4164,32 @@ func appendGitExclude(hostPath, pattern string) error {
 		return err
 	}
 	defer func() { _ = f.Close() }()
-	data, err := io.ReadAll(io.NewSectionReader(f, 0, 1<<62))
+	data, err := readBoundedFile(f, gitExcludeMaxBytes)
+	if errors.Is(err, errFileTooLarge) {
+		// The file is agent-writable. An over-cap file is not read: the
+		// duplicate check is skipped and the pattern is appended anyway (a
+		// repeated exclude line is harmless), after a newline when the
+		// file's last byte is not one, so the exclude is never lost.
+		slog.Warn("git exclude file above the read cap; appending the pattern without the duplicate check",
+			"path", f.Name(), "pattern", pattern, "error", err)
+		fi, serr := f.Stat()
+		if serr != nil {
+			return fmt.Errorf("stat %s: %w", f.Name(), serr)
+		}
+		last := make([]byte, 1)
+		if _, rerr := f.ReadAt(last, fi.Size()-1); rerr != nil {
+			return fmt.Errorf("read %s: %w", f.Name(), rerr)
+		}
+		if last[0] != '\n' {
+			if _, werr := f.WriteString("\n"); werr != nil {
+				return werr
+			}
+		}
+		_, err = f.WriteString(pattern + "\n")
+		return err
+	}
 	if err != nil {
-		return fmt.Errorf("read %s: %w", f.Name(), err)
+		return err
 	}
 	// Exact line match — strings.Contains would false-positive on e.g.
 	// "my-worktrees/" or "worktrees/agent-1" and skip appending the pattern.

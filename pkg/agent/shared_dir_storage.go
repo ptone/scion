@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -425,6 +426,44 @@ const legacySharedDirStorageRecordFile = "shared-dir-storage.json"
 // backend record when it is moved aside.
 const retiredSharedDirRecordSuffix = ".retired"
 
+// retiredSharedDirRecordMaxBytes caps the read of a retired shared-dir
+// backend record (a small JSON object written by earlier versions).
+const retiredSharedDirRecordMaxBytes = 64 << 10
+
+// readRetiredSharedDirRecord reads the retired record at path: a regular
+// file (a symlink or anything else is refused, checked with Lstat and again
+// on the opened file), at most retiredSharedDirRecordMaxBytes. The record is
+// in the broker-local agent directory, which the agent container does not
+// mount (it mounts the home below it), so this is defence in depth; a
+// larger file is refused rather than read.
+func readRetiredSharedDirRecord(path string) ([]byte, error) {
+	if fi, err := os.Lstat(path); err != nil {
+		return nil, err
+	} else if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() || fi.Size() > retiredSharedDirRecordMaxBytes {
+		return nil, fmt.Errorf("%s: not a regular file of at most %d bytes", path, retiredSharedDirRecordMaxBytes)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, retiredSharedDirRecordMaxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > retiredSharedDirRecordMaxBytes {
+		return nil, fmt.Errorf("%s: larger than %d bytes", path, retiredSharedDirRecordMaxBytes)
+	}
+	return data, nil
+}
+
 // retireSharedDirRecord handles an agent's per-agent shared-dir backend
 // record from earlier versions, once: when it named another backend for any
 // of dirs than the one sdLayout now places them on, it returns a warning for
@@ -437,7 +476,7 @@ func retireSharedDirRecord(agentDir string, sdLayout projectfs.Layout, dirs []ap
 		return ""
 	}
 	path := filepath.Join(agentDir, legacySharedDirStorageRecordFile)
-	data, err := os.ReadFile(path)
+	data, err := readRetiredSharedDirRecord(path)
 	if err != nil {
 		return ""
 	}
