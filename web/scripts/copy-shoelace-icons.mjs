@@ -15,28 +15,38 @@
  */
 
 /**
- * Copies only the Shoelace icons used by the app into public/shoelace/assets/icons/.
+ * Builds the Shoelace icon sprite sheet: one SVG file holding a <symbol>
+ * for each icon the app uses (USED_ICONS) and for each of Shoelace's own
+ * system icons (SYSTEM_ICONS). main.ts imports the file with ?url, so Vite
+ * fingerprints it, and registers both icon libraries to draw from it. The
+ * browser loads the sheet once and every icon is drawn from it.
  *
- * This avoids bundling the full 2000+ icon set (8MB+) while ensuring icons
- * load correctly when served by the Go server (which doesn't serve node_modules).
- *
- * To add a new icon: add its Bootstrap Icons name to the USED_ICONS array below,
- * then run `npm run copy:shoelace-icons`.
+ * To add a new icon: add its Bootstrap Icons name to the USED_ICONS array
+ * below, then run `npm run copy:shoelace-icons`. The build fails when an
+ * icon in either list cannot be found.
  */
 
-import { cpSync, mkdirSync, existsSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { resolve, dirname } from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
 
 const SRC = resolve(ROOT, 'node_modules/@shoelace-style/shoelace/dist/assets/icons');
 const SRC_FALLBACK = resolve(ROOT, 'node_modules/bootstrap-icons/icons');
-const DEST = resolve(ROOT, 'public/shoelace/assets/icons');
+const SYSTEM_LIBRARY = resolve(
+  ROOT,
+  'node_modules/@shoelace-style/shoelace/dist/components/icon/library.system.js'
+);
+/** Where the sheet is written; main.ts imports it. Generated, not committed. */
+export const SPRITE_PATH = resolve(ROOT, 'src/generated/shoelace-icons.svg');
+
+/** Symbol id prefix of Shoelace's system icons (see main.ts). */
+export const SYSTEM_PREFIX = 'system-';
 
 /** Icons referenced via <sl-icon name="..."> across the app. */
-const USED_ICONS = [
+export const USED_ICONS = [
   'arrow-clockwise',
   'arrow-counterclockwise',
   'bell-slash',
@@ -210,25 +220,137 @@ const USED_ICONS = [
   'x-lg',
 ];
 
-mkdirSync(DEST, { recursive: true });
+/** Shoelace's own system icons, used inside its components. */
+export const SYSTEM_ICONS = [
+  'caret',
+  'check',
+  'chevron-down',
+  'chevron-left',
+  'chevron-right',
+  'copy',
+  'eye',
+  'eye-slash',
+  'eyedropper',
+  'grip-vertical',
+  'indeterminate',
+  'person-fill',
+  'play-fill',
+  'pause-fill',
+  'radio',
+  'star-fill',
+  'x-lg',
+  'x-circle-fill',
+];
 
-let copied = 0;
-let missing = 0;
+/** Root <svg> attributes that carry over to the symbol (drawing attributes). */
+const KEPT_ATTRIBUTES = new Set([
+  'viewBox',
+  'fill',
+  'fill-rule',
+  'clip-rule',
+  'stroke',
+  'stroke-width',
+  'stroke-linecap',
+  'stroke-linejoin',
+]);
 
-for (const name of USED_ICONS) {
-  const src = resolve(SRC, `${name}.svg`);
-  const srcFallback = resolve(SRC_FALLBACK, `${name}.svg`);
-  const dest = resolve(DEST, `${name}.svg`);
-  if (existsSync(src)) {
-    cpSync(src, dest);
-    copied++;
-  } else if (existsSync(srcFallback)) {
-    cpSync(srcFallback, dest);
-    copied++;
-  } else {
-    console.warn(`  warning: icon "${name}.svg" not found in Shoelace or Bootstrap Icons`);
-    missing++;
+/** Root <svg> attributes that are dropped (sizing, naming, namespace). */
+const DROPPED_ATTRIBUTES = new Set(['xmlns', 'width', 'height', 'class', 'part']);
+
+/** Elements and attributes an icon may not contain; the build fails on them. */
+const FORBIDDEN = [
+  [/<\s*(script|foreignObject|iframe|object|embed|use|image|a|style)\b/i, 'element'],
+  [/\son[a-z]+\s*=/i, 'event attribute'],
+  [/\b(xlink:)?href\s*=/i, 'link attribute'],
+  [/\bid\s*=/i, 'id attribute'],
+  [/url\(/i, 'url() reference'],
+];
+
+/**
+ * Turns one icon's SVG source into a <symbol> with the given id. Throws
+ * when the source is not a single <svg> element, has a root attribute the
+ * sheet does not know, or contains anything in FORBIDDEN.
+ */
+export function iconSymbol(id, svg) {
+  const match = /^\s*<svg\b([^>]*)>([\s\S]*)<\/svg>\s*$/.exec(svg);
+  if (!match) throw new Error(`icon "${id}" is not a single <svg> element`);
+  const [, rootAttributes, body] = match;
+  for (const [pattern, what] of FORBIDDEN) {
+    if (pattern.test(body) || (what !== 'element' && pattern.test(rootAttributes))) {
+      throw new Error(`icon "${id}" contains a disallowed ${what}`);
+    }
   }
+  const kept = [];
+  const rest = rootAttributes.replace(/\s([a-zA-Z:-]+)="([^"]*)"/g, (_m, name, value) => {
+    if (KEPT_ATTRIBUTES.has(name)) kept.push(`${name}="${value}"`);
+    else if (!DROPPED_ATTRIBUTES.has(name)) {
+      throw new Error(`icon "${id}" has an unexpected root attribute ${name}`);
+    }
+    return '';
+  });
+  if (rest.trim() !== '') throw new Error(`icon "${id}" has a malformed root element`);
+  if (!kept.some((a) => a.startsWith('viewBox='))) {
+    throw new Error(`icon "${id}" has no viewBox`);
+  }
+  const content = body
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join('');
+  return `<symbol id="${id}" ${kept.join(' ')}>${content}</symbol>`;
 }
 
-console.log(`Shoelace icons: ${copied} copied${missing ? `, ${missing} missing` : ''}`);
+/** The whole sheet from [id, svg source] pairs. */
+export function spriteSheet(icons) {
+  const ids = new Set();
+  const symbols = icons.map(([id, svg]) => {
+    if (ids.has(id)) throw new Error(`icon "${id}" is listed twice`);
+    ids.add(id);
+    return iconSymbol(id, svg);
+  });
+  return `<svg xmlns="http://www.w3.org/2000/svg">${symbols.join('')}</svg>\n`;
+}
+
+/** The SVG source of one app icon, from Shoelace or Bootstrap Icons. */
+function readAppIcon(name) {
+  for (const dir of [SRC, SRC_FALLBACK]) {
+    const path = resolve(dir, `${name}.svg`);
+    if (existsSync(path)) return readFileSync(path, 'utf8');
+  }
+  throw new Error(`icon "${name}.svg" not found in Shoelace or Bootstrap Icons`);
+}
+
+/** The SVG source of each system icon, from Shoelace's system library. */
+async function readSystemIcons() {
+  const { default: library } = await import(pathToFileURL(SYSTEM_LIBRARY).href);
+  return SYSTEM_ICONS.map((name) => {
+    const url = library.resolver(name);
+    const prefix = 'data:image/svg+xml,';
+    if (typeof url !== 'string' || !url.startsWith(prefix)) {
+      throw new Error(`Shoelace has no system icon "${name}"`);
+    }
+    return [`${SYSTEM_PREFIX}${name}`, decodeURIComponent(url.slice(prefix.length))];
+  });
+}
+
+/** Every icon of the sheet as [id, svg source] pairs. */
+export async function sheetIcons() {
+  return [...USED_ICONS.map((name) => [name, readAppIcon(name)]), ...(await readSystemIcons())];
+}
+
+async function main() {
+  const sheet = spriteSheet(await sheetIcons());
+  mkdirSync(dirname(SPRITE_PATH), { recursive: true });
+  writeFileSync(SPRITE_PATH, sheet);
+  console.log(
+    `Shoelace icons: ${USED_ICONS.length} app and ${SYSTEM_ICONS.length} system icons, ` +
+      `${sheet.length} bytes`
+  );
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((err) => {
+    console.error(`copy-shoelace-icons: ${err.message}`);
+    process.exit(1);
+  });
+}

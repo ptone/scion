@@ -26,6 +26,7 @@ web/dist/client/*
 !web/dist/client/.gitkeep
 web/public/assets/
 web/public/shoelace/
+web/src/generated/
 
 # docs site
 docs-site/node_modules/

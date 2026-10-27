@@ -95,11 +95,11 @@ const TZ_LOAD_BUDGET_MS = 1500;
   document.head.appendChild(style);
 }
 
-// Import Shoelace base path config (needed for icons).
-// Icons are copied to public/shoelace/ by scripts/copy-shoelace-icons.mjs
-// so they are available under both the Vite dev server and the Go server.
-import { setBasePath } from '@shoelace-style/shoelace/dist/utilities/base-path.js';
-setBasePath('/shoelace');
+// Shoelace icons are drawn from one sprite sheet, built from USED_ICONS
+// and Shoelace's own system icons by scripts/copy-shoelace-icons.mjs. Both
+// icon libraries are pointed at it before any icon renders.
+import { registerShoelaceIcons } from './shoelace-icons.js';
+registerShoelaceIcons();
 
 // Explicitly import all Shoelace components used in the app. This is the
 // only place Shoelace components are registered: the SPA shell loads no CDN
