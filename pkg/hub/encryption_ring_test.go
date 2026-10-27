@@ -30,7 +30,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -734,8 +733,11 @@ func TestAuditRecordIDs_Capped(t *testing.T) {
 // ensureSigningKey call site that is missing from either fails here.
 func TestEncryptionAudit_CoversEveryEnsureSigningKeyBackup(t *testing.T) {
 	fset := token.NewFileSet()
-	files, err := filepath.Glob("*.go")
+	// pkgmove:scan-covers guardScanSubdirs
+	// scanned through guardScanSubdirs: pkg/hub and every area moved out of it.
+	files, err := globGuardScanDirs(".", "*.go")
 	require.NoError(t, err)
+	require.NotEmpty(t, files)
 	used := map[string]string{} // key constant -> first call site
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") {
