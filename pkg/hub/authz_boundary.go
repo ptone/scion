@@ -1606,6 +1606,10 @@ const (
 	MintDenialBoundaryNotAllowed      MintDenialReason = "boundary_not_allowed"
 	MintDenialFlatRoleInsufficient    MintDenialReason = "flat_role_insufficient"
 	MintDenialNoRelationshipCandidacy MintDenialReason = "no_relationship_candidacy"
+	// MintDenialAuthorityRequired is the hub-boundary denial: the principal
+	// holds the permission through no system grant, no project binding and
+	// no relationship candidacy with relevant project admission.
+	MintDenialAuthorityRequired MintDenialReason = "authority_required"
 )
 
 // SelectorEligibility is one selector's result within a CanMintSelector call.
@@ -1671,9 +1675,10 @@ var ErrEmptySelectorList = errors.New("no selectors requested")
 // boundary even with no system role and no blanket project permission grant.
 //
 // Any failure sets MintDenialProjectAccessRequired for Project-boundary
-// admission, or the specific MintEligibilityRegistry-derived reason
-// otherwise — no oracle distinguishing "no membership" from "wrong
-// permission" for the admission gate itself.
+// admission, MintDenialAuthorityRequired for a Hub-boundary permission the
+// principal cannot select, or the specific MintEligibilityRegistry-derived
+// reason otherwise. The project admission gate gives the same reason for
+// "no membership" and "wrong permission".
 func (a *AuthzService) CanMintSelector(ctx context.Context, principal PrincipalContext, boundary TokenBoundary, selectors []string) ([]SelectorEligibility, error) {
 	if err := requireLocalUserPrincipal(principal); err != nil {
 		return nil, err
@@ -1776,6 +1781,7 @@ func (a *AuthzService) selectorAdmitted(ctx context.Context, principal Principal
 // selector's expansion via hubPermissionEligible, combining admission and
 // mint eligibility into one per-permission decision (the flat/system path
 // and the relationship path are genuine alternatives — see CanMintSelector).
+// A hub boundary names no project, so a denial is MintDenialAuthorityRequired.
 func (a *AuthzService) hubSelectorEligible(ctx context.Context, principal PrincipalContext, permIDs []string) (bool, MintDenialReason, error) {
 	for _, permID := range permIDs {
 		ok, err := a.hubPermissionEligible(ctx, principal, permID)
@@ -1783,7 +1789,7 @@ func (a *AuthzService) hubSelectorEligible(ctx context.Context, principal Princi
 			return false, MintDenialNone, err
 		}
 		if !ok {
-			return false, MintDenialProjectAccessRequired, nil
+			return false, MintDenialAuthorityRequired, nil
 		}
 	}
 	return true, MintDenialNone, nil
