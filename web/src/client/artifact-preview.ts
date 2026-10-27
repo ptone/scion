@@ -343,7 +343,7 @@ let framePolicy: MarkupPolicy | null | undefined;
 /**
  * Marks a frame document built by previewFrameDocument as markup the page
  * accepts. Its only caller is previewFrameDocument, whose document is fixed
- * text, theme values filtered by cssValue, a side note escaped by
+ * text, theme values filtered by cssValue, a side note passed through
  * escapeText, and the sanitized, rewritten markdown body.
  */
 function frameMarkup(doc: string): FrameDocument {

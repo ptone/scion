@@ -65,7 +65,7 @@ const KNOWN: Record<string, number> = {
   // The artifact preview frame's document: set from previewFrameDocument,
   // which builds it from sanitized markup and marks it as accepted markup.
   'components/shared/artifact-markdown-frame.ts: srcdoc binding or assignment': 1,
-  // Search result snippets: escaped text with <mark> highlights, rendered by Lit.
+  // Search result snippets: plain text with only <mark> highlights, rendered by Lit.
   'components/shared/chat/chat-search.ts: Lit unsafeHTML/unsafeSVG': 1,
 };
 

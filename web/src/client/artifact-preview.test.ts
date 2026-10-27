@@ -257,7 +257,7 @@ describe('previewDocument', () => {
     expect(PREVIEW_SANDBOX.split(' ')).not.toContain('allow-scripts');
     expect(PREVIEW_SANDBOX).toBe('allow-same-origin allow-popups allow-popups-to-escape-sandbox');
   });
-  it('escapes the side note and only adds a fixed class for margin notes', () => {
+  it('shows the side note as text and only adds a fixed class for margin notes', () => {
     const doc = previewDocument('', {}, { sideNote: '<b>&</b>', marginNotes: true });
     expect(doc).toContain('<aside class="critic-side">&lt;b&gt;&amp;&lt;/b&gt;</aside>');
     expect(doc).toContain('<body class="notes-margin">');
