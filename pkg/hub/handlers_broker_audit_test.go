@@ -153,7 +153,7 @@ func TestBrokerAudit_SelfRotationRecordsBrokerCredential(t *testing.T) {
 	audit := installBrokerAuditCapture(srv)
 	broker, key := newOnboardingSigningBroker(t, s, "audit-self-rotate")
 
-	rec := doBrokerSignedRequest(t, srv, broker.ID, key, "", http.MethodPost, "/api/v1/brokers/"+broker.ID+"/rotate-secret", nil)
+	rec := doBrokerSignedRequestLoopback(t, srv, broker.ID, key, "", http.MethodPost, "/api/v1/brokers/"+broker.ID+"/rotate-secret", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 	events := brokerAuditEventsOfType(audit, BrokerAuthEventRotate)
@@ -260,7 +260,7 @@ func TestBrokerAudit_ProjectRegisterLinkRecordsCredential(t *testing.T) {
 	f := brokerAssocSetup(t, "audit-link-on-register")
 	audit := installBrokerAuditCapture(f.srv)
 
-	rec := doRequestAsUser(t, f.srv, f.brokerOwner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+	rec := doRequestAsUserLoopback(t, f.srv, f.brokerOwner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
 		Name:     "Audit Register Link",
 		BrokerID: f.otherBroker.ID,
 	})
@@ -279,7 +279,7 @@ func TestBrokerAudit_ProjectRegisterDeniedLinkRecordsNoEvent(t *testing.T) {
 	f := brokerAssocSetup(t, "audit-link-on-register-denied")
 	audit := installBrokerAuditCapture(f.srv)
 
-	rec := doRequestAsUser(t, f.srv, f.projectOwner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+	rec := doRequestAsUserLoopback(t, f.srv, f.projectOwner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
 		Name:     "Audit Register Link Denied",
 		BrokerID: f.otherBroker.ID,
 	})
@@ -307,7 +307,7 @@ func TestBrokerAudit_EmbeddedRegisterRecordsCredential(t *testing.T) {
 				info = &RegisterProjectBrokerInfo{ID: broker.ID, Name: broker.Name, Version: "2.0.0"}
 			}
 
-			rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+			rec := doRequestAsUserLoopback(t, srv, owner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
 				Name:   "Audit Embedded Project",
 				Broker: info,
 			})

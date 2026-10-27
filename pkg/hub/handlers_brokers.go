@@ -18,6 +18,8 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -675,6 +677,22 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Transport policy: the response carries the broker's HMAC secret, so a
+	// join that did not arrive over TLS or from this host is refused before
+	// the token is consumed. Its token has crossed the network in the clear,
+	// so it is revoked when it is the broker's pending token (and only
+	// then: a wrong token revokes nothing).
+	if !confidentialArrival(r, s.transportTrustedNets) {
+		revoked, revokeErr := s.brokerAuthService.RevokeExposedJoinToken(r.Context(), req.BrokerID, req.JoinToken)
+		if revokeErr != nil {
+			slog.Error("Failed to revoke a join token sent without TLS", "brokerID", req.BrokerID, "error", revokeErr)
+		}
+		LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), false,
+			fmt.Sprintf("refused: not over TLS or from this host (join token revoked: %t)", revoked), auditevent.BrokerFailureRefused)
+		s.requireConfidentialArrival(w, r)
+		return
+	}
+
 	// Test admin tier: only the co-located broker may complete a join.
 	if s.refuseTestAdminBrokerRegistration(w, req.BrokerID) {
 		LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), false, ErrTestAdminRemoteBrokerRefused.Error(), auditevent.BrokerFailureRefused)
@@ -771,6 +789,11 @@ func (s *Server) handleBrokerRotateSecret(w http.ResponseWriter, r *http.Request
 	if s.brokerAuthService == nil {
 		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
 			"broker authentication service not configured", nil)
+		return
+	}
+
+	// Transport policy: the response carries the broker's new HMAC secret.
+	if !s.requireConfidentialArrival(w, r) {
 		return
 	}
 
