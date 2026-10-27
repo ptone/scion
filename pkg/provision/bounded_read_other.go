@@ -17,31 +17,15 @@
 package provision
 
 import (
+	"errors"
 	"fmt"
-	"os"
 )
 
-// readSmallFileNoFollow reads the regular file at path, at most max bytes.
-// This platform has no O_NOFOLLOW open: the path is checked with Lstat (a
-// symlink or any non-regular file is refused) and the opened file again
-// with Stat, and the read is bounded (readBoundedFile), as on unix.
+// readSmallFileNoFollow always fails with errors.ErrUnsupported. The unix
+// version opens the file with O_NOFOLLOW and O_NONBLOCK and checks the
+// opened descriptor; this platform offers neither, and its callers are
+// runtime broker provisioning paths, which are not supported here. There is
+// no path-based fallback.
 func readSmallFileNoFollow(path string, max int64) ([]byte, error) {
-	if fi, err := os.Lstat(path); err != nil {
-		return nil, err
-	} else if !fi.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s is not a regular file", path)
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-	fi, err := f.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("stat %s: %w", path, err)
-	}
-	if !fi.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s is not a regular file", path)
-	}
-	return readBoundedFile(f, max)
+	return nil, fmt.Errorf("read %s: %w on this platform", path, errors.ErrUnsupported)
 }

@@ -33,6 +33,13 @@ const gitExcludeMaxBytes = 1 << 20
 // file (one "gitdir: <path>" line).
 const gitPointerMaxBytes = 64 << 10
 
+// cloneManifestMaxBytes caps a clone scratch directory's manifest (a header
+// and the clone's top-level entry names).
+const cloneManifestMaxBytes = 1 << 20
+
+// sharerMarkerMaxBytes caps a sharer registry marker (a small JSON object).
+const sharerMarkerMaxBytes = 64 << 10
+
 // errFileTooLarge marks a file above the cap of a bounded read.
 var errFileTooLarge = errors.New("file is larger than the cap for this read")
 

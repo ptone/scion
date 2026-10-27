@@ -2619,7 +2619,9 @@ func manifestBranch(gc *api.GitCloneConfig) string {
 
 // readCloneManifest parses scratch's manifest.
 func readCloneManifest(scratch string) (cloneManifest, error) {
-	data, err := os.ReadFile(filepath.Join(scratch, cloneManifestFile))
+	// The scratch directory is in the agent-writable workspace: the manifest is
+	// read without following a symlink and bounded (cloneManifestMaxBytes).
+	data, err := readSmallFileNoFollow(filepath.Join(scratch, cloneManifestFile), cloneManifestMaxBytes)
 	if err != nil {
 		return cloneManifest{}, err
 	}
@@ -3784,11 +3786,10 @@ func startBranch(base, path string) string {
 	if !ok {
 		return ""
 	}
-	file := filepath.Join(admin, startBranchFile)
-	if fi, err := os.Lstat(file); err != nil || !fi.Mode().IsRegular() {
-		return ""
-	}
-	data, err := os.ReadFile(file)
+	// The record is read without following a symlink, as a regular file of
+	// at most gitPointerMaxBytes (the shared .git is agent-writable); a
+	// missing, symlinked, non-regular or over-cap record reads as none.
+	data, err := readSmallFileNoFollow(filepath.Join(admin, startBranchFile), gitPointerMaxBytes)
 	if err != nil {
 		return ""
 	}

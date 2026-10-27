@@ -150,3 +150,72 @@ func TestReadSmallFileNoFollow(t *testing.T) {
 	_, err = readSmallFileNoFollow(ok, gitPointerMaxBytes)
 	assert.ErrorIs(t, err, errFileTooLarge)
 }
+
+// The start-branch record is read bounded and without following a symlink:
+// an over-cap record (a valid branch padded with whitespace) reads as none,
+// and a missing record still reads as none.
+func TestStartBranch_BoundedRead(t *testing.T) {
+	base, wt := newLinkedWorktree(t, "agent-1")
+	assert.Empty(t, startBranch(base, wt), "a missing record reads as none")
+	record := filepath.Join(base, ".git", "worktrees", "agent-1", startBranchFile)
+	require.NoError(t, os.WriteFile(record, []byte("agent-one\n"), 0o644))
+	assert.Equal(t, "agent-one", startBranch(base, wt))
+	require.NoError(t, os.WriteFile(record, []byte("agent-one\n"+strings.Repeat(" ", gitPointerMaxBytes)), 0o644))
+	assert.Empty(t, startBranch(base, wt), "an over-cap record is not read")
+}
+
+// ValidateWorktreeForBase reads the candidate's .git and the admin back-link
+// bounded and without following a symlink.
+func TestValidateWorktreeForBase_BoundedReads(t *testing.T) {
+	base, wt := newLinkedWorktree(t, "agent-1")
+	require.NoError(t, ValidateWorktreeForBase(base, wt), "fixture")
+	admin := filepath.Join(base, ".git", "worktrees", "agent-1")
+
+	require.NoError(t, os.WriteFile(filepath.Join(wt, ".git"), paddedGitdir(admin), 0o644))
+	assert.Error(t, ValidateWorktreeForBase(base, wt), "an over-cap .git is not read")
+
+	base2, wt2 := newLinkedWorktree(t, "agent-2")
+	gitdir := filepath.Join(base2, ".git", "worktrees", "agent-2", "gitdir")
+	require.NoError(t, os.WriteFile(gitdir, paddedGitdir(filepath.Join(wt2, ".git"))[len("gitdir: "):], 0o644))
+	assert.Error(t, ValidateWorktreeForBase(base2, wt2), "an over-cap back-link is not read")
+}
+
+// readAgentBranch: an over-cap record (a valid branch padded with
+// whitespace) or a symlinked one reads as none.
+func TestReadAgentBranch_BoundedRead(t *testing.T) {
+	dir := t.TempDir()
+	rec := filepath.Join(dir, AgentBranchFile)
+	assert.Empty(t, readAgentBranch(rec))
+	require.NoError(t, os.WriteFile(rec, []byte("scion/agent-1\n"), 0o644))
+	assert.Equal(t, "scion/agent-1", readAgentBranch(rec))
+	require.NoError(t, os.WriteFile(rec, []byte("scion/agent-1\n"+strings.Repeat(" ", gitPointerMaxBytes)), 0o644))
+	assert.Empty(t, readAgentBranch(rec), "an over-cap record is not read")
+	target := filepath.Join(t.TempDir(), "branch")
+	require.NoError(t, os.WriteFile(target, []byte("scion/agent-1\n"), 0o644))
+	require.NoError(t, os.Remove(rec))
+	require.NoError(t, os.Symlink(target, rec))
+	assert.Empty(t, readAgentBranch(rec), "a symlinked record is not followed")
+}
+
+// A sharer marker above its cap is refused (an error, not a silently
+// dropped registration), even when its content is valid JSON.
+func TestReadMarker_OverCapRefused(t *testing.T) {
+	base := t.TempDir()
+	p := sharerPath(base, "agent-one")
+	require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
+	require.NoError(t, os.WriteFile(p, []byte("{}"+strings.Repeat(" ", sharerMarkerMaxBytes)), 0o644))
+	_, err := readMarker(base, "", p)
+	assert.ErrorIs(t, err, errFileTooLarge)
+	m, err := readMarker(base, "", filepath.Join(filepath.Dir(p), "absent.json"))
+	assert.NoError(t, err, "a missing marker is still no marker")
+	assert.Nil(t, m)
+}
+
+// The clone manifest in the workspace's scratch directory is read bounded.
+func TestReadCloneManifest_OverCapRefused(t *testing.T) {
+	scratch := t.TempDir()
+	body := cloneManifestHeader + "\nurl=x\nbranch=main\n\nREADME.md\n"
+	require.NoError(t, os.WriteFile(filepath.Join(scratch, cloneManifestFile), []byte(body+strings.Repeat("#", cloneManifestMaxBytes)), 0o644))
+	_, err := readCloneManifest(scratch)
+	assert.ErrorIs(t, err, errFileTooLarge)
+}
