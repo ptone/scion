@@ -28,6 +28,9 @@
 # rest is gated agent provisioning).
 ./pkg/agent -run=^(TestWindowsResolutionCache_NewDirAndFilePrivate|TestWindowsResolutionCache_RepairsOwnedTooOpenFile|TestWindowsResolutionCache_ForeignOwnedFileWarnedNotRepaired|TestWindowsResolutionCache_TooOpenDirWarnedNotRepaired|TestWindowsHostState_Unsupported|TestWindowsGitBaseConfig_Unsupported|TestWindowsRetryRemovalInUserNamespace_ReturnsOriginal)$
 ./pkg/hubprofile
+# ./pkg/runtime: anchored to the git-metadata bind refusal (the rest is
+# broker-side container runtime code).
+./pkg/runtime -run=^(TestWindowsGitBindSource_Unsupported|TestWindowsGitBindCallers_RegisterNoMount)$
 # ./cmd: anchored to the Windows-relevant tests (the full suite is
 # POSIX-bound). Never the attachment-writing
 # message tests.
@@ -127,7 +130,6 @@
 # ./pkg/projectfs/migrate: unix-only package (every file is unix-tagged; hub-side project storage migration).
 # ./pkg/k8s: the exec credential plugin test runs a #!/bin/sh script (POSIX-only); the Kubernetes runtime is broker-side.
 # ./pkg/preflight: TestProfilesCheck_BeforeViewWithoutRetention reports only dropped_unused_profile (active_profile_fallback missing) and TestProfilesCheck_RealBadSettingsFileNeverQuotesValue reports a warning instead of the undecodable-settings block (hub-side upgrade preflight; follow-up).
-# ./pkg/runtime: test package does not build for Windows (untagged unix-only test files define shared helpers); follow-up.
 # ./pkg/sciontool/autoexpose: TestReconciler_IPv6OnlyListenerRegisteredAsLoopback skips without /proc/net/tcp6 (in-container tool).
 # ./pkg/sciontool/conduit: the sciontool agent log cannot be opened on Windows (in-container tool), and the IPv6-only loopback fallback fails.
 # ./pkg/sciontool/log: the agent log cannot be opened on Windows by design (openLogFileNoFollow is ErrUnsupported; in-container tool).
