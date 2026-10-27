@@ -209,6 +209,12 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 	var repoRoot string
 	var externalAgentDir string
 	var hubAgentDir string // state dir resolved from hubProjectID, when distinct
+	// legacyAgentDir is the retired in-project state dir an agent of a
+	// shared project configuration had before the configuration moved to
+	// the project root (config.LegacySharedProjectAgentDir); removed with
+	// the agent (ptone/scion#5835). Its state in the broker-local external
+	// root is externalAgentDir (layout.externalAgentsRoot).
+	var legacyAgentDir string
 	var worktreeDir string // worktree-per-agent: agent's worktree path
 	// ownWorktreePaths lists the paths where this agent's own worktree may
 	// be registered. Only these entries are removed from git's worktree
@@ -231,7 +237,15 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 	var layout agentProjectLayout
 	if projectDir, err := config.GetResolvedProjectDir(projectPath); err == nil {
 		resolvedProjectDir = projectDir
-		agentsDirs = append(agentsDirs, filepath.Join(projectDir, "agents"))
+		// A shared project configuration's in-project agents root is on
+		// the share, in the hub-owned configuration: never a delete target.
+		if !config.IsSharedProjectConfigDir(projectDir) {
+			agentsDirs = append(agentsDirs, filepath.Join(projectDir, "agents"))
+		}
+		if legacy := config.LegacySharedProjectAgentDir(projectDir, agentName); legacy != "" {
+			legacyAgentDir = legacy
+			agentsDirs = append(agentsDirs, filepath.Dir(legacy))
+		}
 
 		// The global project's own per-agent workspace
 		// (~/.scion/workspace/<agentName>, see ProvisionAgent's Case 3) is
@@ -280,10 +294,10 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 	// A sharer key other than the name owns its worktree under the shared
 	// base too, so that path is one of the agent's own. hubAgentDir (when
 	// set) is one of the agent's own directories, the state dir
-	// ProvisionAgent's guard also trusts; it is verified like an extra root
-	// (anchored at its parent, not trusted when it resolves elsewhere). An
-	// empty extra root is ignored.
-	keyRoots := []string{hubAgentDir}
+	// ProvisionAgent's guard also trusts, and so is legacyAgentDir (when
+	// set); each is verified like an extra root (anchored at its parent, not
+	// trusted when it resolves elsewhere). An empty extra root is ignored.
+	keyRoots := []string{hubAgentDir, legacyAgentDir}
 	if sharerKey != agentName && layout.sharedBaseIsRepo {
 		keyRoots = append(keyRoots, filepath.Join(layout.sharedBase, "worktrees", sharerKey))
 	}
@@ -1298,6 +1312,16 @@ func reprovisionEmptyPerAgentPreflight(projectDir, agentName string, rt runtime.
 }
 
 func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	// A create over a legacy agent directory no agent owns is refused
+	// before anything runs. A project dir that does not resolve fails here
+	// too (fail closed), as GetAgent would.
+	projectDir, err := config.GetResolvedProjectDir(opts.ProjectPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := refuseRetiredLegacyAgent(projectDir, opts); err != nil {
+		return nil, err
+	}
 	// A forced move's provision never touches an agent directory it did not
 	// create: an existing one (even an empty leftover that GetAgent would
 	// clear as stale) refuses the provision before anything runs.
@@ -1687,6 +1711,12 @@ func agentStateDir(projectDir, agentName string, sharedWorkspace bool, hubProjec
 func effectiveSharedWorkspace(projectDir, agentName string, sharedWorkspace bool, hubProjectID string) bool {
 	if sharedWorkspace {
 		return true
+	}
+	// A shared project configuration keeps every agent's state in the
+	// external root (config.AgentsRootForProject), so its presence there
+	// says nothing about the workspace mode.
+	if config.IsSharedProjectConfigDir(projectDir) {
+		return false
 	}
 	ext, err := config.AgentDirForProject(projectDir, agentName, true, hubProjectID)
 	if err != nil {
@@ -4253,6 +4283,11 @@ func removeCheckedAgentDir(agentDir, agentWorkspace string) {
 		_ = os.Chmod(path, 0755)
 		return nil
 	})
+	// The agent's scion-agent.json goes first (a link is removed, never
+	// followed): a removal that then fails part-way leaves a directory the
+	// legacy agent look-up (config.LegacySharedProjectAgentDir) no longer
+	// recognises as the agent's.
+	_ = os.Remove(filepath.Join(agentDir, "scion-agent.json"))
 	_ = os.RemoveAll(agentDir)
 	removeWorkspaceWorktreeEntry(agentWorkspace)
 }
