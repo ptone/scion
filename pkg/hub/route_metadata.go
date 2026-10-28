@@ -282,6 +282,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/users/me/delegations", RouteID: "users.me.delegations",
 		Classification: RouteAuthenticated,
 	},
+	"/api/v1/users/me/delegations/revoke-all": {
+		Pattern: "/api/v1/users/me/delegations/revoke-all", RouteID: "users.me.delegations.revokeAll",
+		Classification: RouteAuthenticated,
+	},
 	"/api/v1/users/me/terminal-workspace": {
 		Pattern: "/api/v1/users/me/terminal-workspace", RouteID: "users.me.terminalWorkspace",
 		Classification: RouteAuthenticated,
@@ -711,6 +715,15 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RoutePolicy,
 		Permission:     "project.read", Resource: "project", Action: "read",
 	},
+	// chat.starredConversations is the Starred rail: the caller's own
+	// conversations with stars, each kept only while the caller can read
+	// it (project.read for a thread), checked per conversation by the
+	// handler.
+	"/api/v1/chat/starred-conversations": {
+		Pattern: "/api/v1/chat/starred-conversations", RouteID: "chat.starredConversations",
+		Classification: RoutePolicy,
+		Permission:     "project.read", Resource: "project", Action: "read",
+	},
 	// chat.attachments.list and chat.attachments.byId are wrapped by
 	// chatAttachmentRoute: an agent credential is admitted on the collection
 	// only, for POST (upload) and GET (the capability probe), and must pass
@@ -808,6 +821,11 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 	"/api/v1/admin/maintenance/restart": {
 		Pattern: "/api/v1/admin/maintenance/restart", RouteID: "admin.maintenance.restart",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.maintenance.execute", Resource: "hub", Action: "execute",
+	},
+	"/api/v1/admin/maintenance/update-status": {
+		Pattern: "/api/v1/admin/maintenance/update-status", RouteID: "admin.maintenance.updateStatus",
 		Classification: RouteHubAdmin,
 		Permission:     "hub.maintenance.execute", Resource: "hub", Action: "execute",
 	},
