@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"golang.org/x/sys/unix"
 )
@@ -43,7 +44,7 @@ func ensureNFSLeaf(hostBase, rel string) (prepared bool, err error) {
 // created the leaf directory (shareddirs.EnsureLeaf's own report, not a
 // separate check).
 func ensureNFSLeafClaim(hostBase, rel string) (prepared, created bool, err error) {
-	leafFd, existed, err := shareddirs.EnsureLeaf(hostBase, rel)
+	leafFd, existed, err := projectfs.EnsureSharedLeaf(hostBase, rel)
 	if err != nil {
 		return false, false, err
 	}
