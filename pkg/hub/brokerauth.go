@@ -951,7 +951,24 @@ var (
 	errBrokerAuthSecretExpired    = errors.New("broker secret has expired")
 	errBrokerAuthInvalidSignature = errors.New("invalid signature")
 	errBrokerAuthNoValidSecrets   = errors.New("no valid secrets found")
+	errBrokerAuthBrokerLookup     = errors.New("failed to get runtime broker")
 )
+
+// requireLiveBroker refuses a request whose signature verified against a
+// stored secret when the broker's runtime_brokers row does not exist: a
+// secret authenticates only the live broker row with its ID, never an ID
+// whose row was deleted. It runs after the signature check, so a caller
+// without the secret learns nothing from it. A lookup failure is refused
+// (fail closed).
+func (s *BrokerAuthService) requireLiveBroker(ctx context.Context, brokerID string) error {
+	if _, err := s.store.GetRuntimeBroker(ctx, brokerID); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("%w: %s", errBrokerAuthUnknownBroker, brokerID)
+		}
+		return fmt.Errorf("%w: %w", errBrokerAuthBrokerLookup, err)
+	}
+	return nil
+}
 
 // ValidateBrokerSignature validates an HMAC-signed request from a Runtime Broker.
 func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http.Request) (BrokerIdentity, error) {
@@ -1045,6 +1062,10 @@ func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http
 
 	if !hmac.Equal([]byte(signature), []byte(expectedSigB64)) {
 		return nil, errBrokerAuthInvalidSignature
+	}
+
+	if err := s.requireLiveBroker(ctx, brokerID); err != nil {
+		return nil, err
 	}
 
 	return NewBrokerIdentity(brokerID), nil
@@ -1151,6 +1172,9 @@ func (s *BrokerAuthService) ValidateBrokerSignatureWithRotation(ctx context.Cont
 
 		identity, err := s.validateWithSecret(ctx, r, brokerID, secret.SecretKey)
 		if err == nil {
+			if err := s.requireLiveBroker(ctx, brokerID); err != nil {
+				return nil, err
+			}
 			return identity, nil
 		}
 		lastErr = err

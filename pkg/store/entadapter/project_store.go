@@ -28,6 +28,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerjointoken"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersecret"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokertargetinventory"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
@@ -1305,6 +1307,11 @@ func (s *ProjectStore) RecordRuntimeBrokerHostObservation(ctx context.Context, i
 // (ptone/scion#2061 P2, AC-P2-4). Both deletes run in one transaction so a
 // failure partway through never orphans a settings row for an ID that no
 // longer has a broker (ptone/scion#2061 P2 review round 1, F10).
+//
+// The broker's HMAC secret and any unconsumed join token (broker_secrets and
+// broker_join_tokens, keyed by the broker ID with no FK) are deleted in the
+// same transaction: once the row is gone, no credential for its ID is left
+// that a later row with the same ID could inherit.
 func (s *ProjectStore) DeleteRuntimeBroker(ctx context.Context, id string) error {
 	uid, err := parseUUID(id)
 	if err != nil {
@@ -1331,6 +1338,12 @@ func (s *ProjectStore) DeleteRuntimeBroker(ctx context.Context, id string) error
 	// broker_target_inventory has no FK to runtime_brokers either.
 	if _, err := tx.BrokerTargetInventory.Delete().Where(brokertargetinventory.BrokerIDEQ(uid.String())).Exec(ctx); err != nil {
 		return fmt.Errorf("delete runtime broker: delete target inventory: %w", err)
+	}
+	if _, err := tx.BrokerSecret.Delete().Where(brokersecret.IDEQ(uid)).Exec(ctx); err != nil {
+		return fmt.Errorf("delete runtime broker: delete broker secret: %w", err)
+	}
+	if _, err := tx.BrokerJoinToken.Delete().Where(brokerjointoken.IDEQ(uid)).Exec(ctx); err != nil {
+		return fmt.Errorf("delete runtime broker: delete join token: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("delete runtime broker: commit: %w", err)
