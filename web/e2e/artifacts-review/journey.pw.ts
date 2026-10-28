@@ -27,7 +27,7 @@
  */
 
 import { expect, test } from '@playwright/test';
-import type { Locator, Page } from '@playwright/test';
+import type { Locator, Page, Request } from '@playwright/test';
 
 import {
   createProject,
@@ -102,7 +102,35 @@ test.afterAll(async () => {
   await setExperiments(null);
 });
 
+/**
+ * The page's API fetches in flight (the editor's and the page's own
+ * background polls, such as the chat unread count), so a reload can wait
+ * for them: a reload that cuts off a fetch makes some engines report a
+ * page error, which is the reload's doing, not the page's.
+ */
+const inFlight = new WeakMap<Page, Set<Request>>();
+
+function trackFetches(page: Page): void {
+  const open = new Set<Request>();
+  inFlight.set(page, open);
+  page.on('request', (r) => {
+    if (r.resourceType() === 'fetch' && new URL(r.url()).pathname.startsWith('/api/')) open.add(r);
+  });
+  page.on('requestfinished', (r) => open.delete(r));
+  page.on('requestfailed', (r) => open.delete(r));
+}
+
+/** Reloads the page once no API fetch is in flight. */
+async function reloadWhenSettled(page: Page): Promise<void> {
+  const open = inFlight.get(page);
+  if (open) {
+    await expect.poll(() => open.size, { message: 'API fetches settle before reload' }).toBe(0);
+  }
+  await page.reload();
+}
+
 test.beforeEach(({ page }) => {
+  trackFetches(page);
   // Uncaught errors anywhere fail the test; console errors and failed
   // requests do when they come from the editor's code or are the editor's
   // own diagnostics (the rest of the page has its own suites).
@@ -357,7 +385,7 @@ test('edits become suggestions, comments work by button and shortcut, and the re
   expect(await currentText(a.id, 'index.md')).toBe(final);
 
   // Reload: the review's marks show inline in the graphical view.
-  await page.reload();
+  await reloadWhenSettled(page);
   await page
     .locator('scion-page-artifact-detail .header-actions sl-button', { hasText: 'Review' })
     .click();
@@ -459,7 +487,7 @@ test('paragraph breaks, joins, a new list item and a multi-paragraph paste are s
   expect(await currentText(a.id, 'index.md')).toBe(final);
 
   // Reload: the breaks and the join show their pilcrows, and the text is as saved.
-  await page.reload();
+  await reloadWhenSettled(page);
   await page
     .locator('scion-page-artifact-detail .header-actions sl-button', { hasText: 'Review' })
     .click();
