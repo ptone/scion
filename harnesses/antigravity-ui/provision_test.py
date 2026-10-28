@@ -389,6 +389,74 @@ class SecurityPinsTest(unittest.TestCase):
         self.assertIn("chown -R root:root /opt/Antigravity", df)
         self.assertNotIn("install.sh", df.replace("install script", ""))
 
+    def test_dockerfile_creates_share_dir_traversable_before_copy(self):
+        # A COPY --chmod=0644 into a missing directory creates it 0644, and
+        # the agent user then cannot run the helper.
+        df = _read("Dockerfile")
+        mkdir = df.find("install -d -m 0755 /usr/local/share/antigravity-ui")
+        self.assertNotEqual(mkdir, -1)
+        first_copy = df.find("/usr/local/share/antigravity-ui/", mkdir + 1)
+        self.assertGreater(first_copy, mkdir)
+        self.assertLess(mkdir, df.index("\nCOPY "))
+
+
+class WrapperStartupTest(unittest.TestCase):
+    """Runs the wrapper with a fake app; no network listener is started."""
+
+    def setUp(self):
+        for tool in ("bash", "setsid", "curl"):
+            if not shutil.which(tool):
+                self.skipTest(f"{tool} not found")
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.bin = os.path.join(self.tmp, "bin")
+        os.makedirs(self.bin)
+        os.makedirs(os.path.join(self.tmp, "home"))
+        # A fake scion that always fails, so the test can never reach a hub.
+        self._script("scion", "#!/bin/sh\nexit 1\n")
+
+    def _script(self, name: str, body: str) -> str:
+        path = os.path.join(self.bin, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(body)
+        os.chmod(path, 0o755)
+        return path
+
+    def _run(self, app: str, timeout: str) -> subprocess.CompletedProcess:
+        env = {
+            "HOME": os.path.join(self.tmp, "home"),
+            "PATH": self.bin + os.pathsep + "/usr/local/bin:/usr/bin:/bin",
+            "AGUI_APP_BIN": app,
+            "AGUI_SHARE_DIR": HERE,
+            "AGUI_LS_TIMEOUT": timeout,
+            # A port nothing listens on: the fake app never serves.
+            "JETSKI_LS_PORT": "1",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+        return subprocess.run(
+            ["bash", os.path.join(HERE, "antigravity-ui-wrapper.sh")],
+            env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60,
+        )
+
+    def test_app_exit_during_start_up(self):
+        proc = self._run("/bin/false", "40")
+        out = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 1, out)
+        self.assertIn("the app exited during start-up", out)
+
+    def test_log_tail_masks_csrf_token(self):
+        app = self._script("fakeapp", (
+            "#!/bin/sh\n"
+            "echo 'starting --csrf_token=" + TOKEN + " now'\n"
+            "exec sleep 50\n"
+        ))
+        proc = self._run(app, "2")
+        out = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 1, out)
+        self.assertIn("did not answer", out)
+        self.assertNotIn(TOKEN, out)
+        self.assertIn("<redacted>", out)
+
     def test_wrapper_shell_syntax(self):
         bash = shutil.which("bash")
         if not bash:

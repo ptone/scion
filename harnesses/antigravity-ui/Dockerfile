@@ -54,8 +54,11 @@ RUN set -eu; \
     test -x /opt/Antigravity/antigravity; \
     chown -R root:root /opt/Antigravity; \
     chmod -R go-w /opt/Antigravity; \
-    rm -f /etc/nginx/sites-enabled/default
+    rm -f /etc/nginx/sites-enabled/default; \
+    install -d -m 0755 /usr/local/share/antigravity-ui
 
+# The directory exists before these COPYs: a COPY --chmod into a missing
+# directory would create it with the file mode (no traverse bit).
 COPY --chmod=0755 antigravity-ui-wrapper.sh /usr/local/bin/antigravity-ui-wrapper
 COPY --chmod=0644 nginx.conf.tmpl /usr/local/share/antigravity-ui/nginx.conf.tmpl
 COPY --chmod=0644 agui_helper.py /usr/local/share/antigravity-ui/agui_helper.py
