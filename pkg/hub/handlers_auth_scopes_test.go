@@ -903,9 +903,11 @@ func TestAuthScopes_HubEligibility_NeverCollapsesToForbidden(t *testing.T) {
 }
 
 // TestAuthScopes_HubListingAgreesWithMint pins that the hub listing and
-// hub mint agree for the same principal over every catalog selector: a
-// selector listed eligible mints, and one listed ineligible is refused
-// with 403 scope_violation naming that selector and the listed reason.
+// hub mint agree for the same principal over every catalog selector and
+// alias: a selector or alias listed eligible mints; a selector listed
+// ineligible is refused with 403 scope_violation naming that selector and
+// the listed reason; an alias listed ineligible is refused with 403
+// scope_violation naming one of its listed ineligible members.
 func TestAuthScopes_HubListingAgreesWithMint(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -954,6 +956,36 @@ func TestAuthScopes_HubListingAgreesWithMint(t *testing.T) {
 	}
 	assert.True(t, sawEligible, "precondition: some selector is eligible")
 	assert.True(t, sawAuthorityRequired, "precondition: some selector is refused with authority_required")
+
+	// Aliases: an alias listed eligible mints; one listed ineligible is
+	// refused with 403 scope_violation naming one of its listed ineligible
+	// members.
+	rec := doRequestAsUser(t, srv, member, http.MethodGet, "/api/v1/auth/scopes?boundary=hub", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var full AuthScopesResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &full))
+	require.NotEmpty(t, full.Aliases)
+	for _, alias := range full.Aliases {
+		require.NotNil(t, alias.Eligibility, "alias %s missing eligibility", alias.ID)
+		mint := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/auth/tokens", map[string]any{
+			"name": "hub-agree-alias", "boundary": map[string]string{"kind": "hub"}, "scopes": []string{alias.ID},
+		})
+		if alias.Eligibility.Eligible {
+			require.Equal(t, http.StatusCreated, mint.Code, "listing said alias %s eligible, mint should succeed: %s", alias.ID, mint.Body.String())
+			var created TokenCreateResponse
+			require.NoError(t, json.Unmarshal(mint.Body.Bytes(), &created))
+			require.NotNil(t, created.AccessToken)
+			require.NoError(t, s.DeleteUserAccessToken(ctx, created.AccessToken.ID))
+			continue
+		}
+		require.Equal(t, http.StatusForbidden, mint.Code, "listing said alias %s ineligible, mint should fail: %s", alias.ID, mint.Body.String())
+		var resp ErrorResponse
+		require.NoError(t, json.Unmarshal(mint.Body.Bytes(), &resp))
+		assert.Equal(t, "scope_violation", resp.Error.Code, "alias %s", alias.ID)
+		require.NotNil(t, resp.Error.Details, "alias %s", alias.ID)
+		assert.Contains(t, alias.Eligibility.IneligibleMembers, resp.Error.Details["selector"],
+			"alias %s: the refused selector is one of the listed ineligible members", alias.ID)
+	}
 }
 
 // TestTokenCreate_HubDenialNamesSelector pins the hub-boundary mint
@@ -993,8 +1025,9 @@ func TestTokenCreate_HubDenialNamesSelector(t *testing.T) {
 
 // TestAuthScopes_TokenCannotRequestBoundaryEligibility pins that a user
 // access token reads the selector catalog only: a project token and a hub
-// token naming a boundary or project are refused with the session-only
-// 403, and the same tokens read the catalog with 200.
+// token naming a boundary or project (also an empty or unknown boundary)
+// are refused with the session-only 403 before any parameter validation,
+// and the same tokens read the catalog with 200.
 func TestAuthScopes_TokenCannotRequestBoundaryEligibility(t *testing.T) {
 	srv, s := testServer(t)
 	projectID := tid("authscopes-token-elig-project")
@@ -1012,6 +1045,8 @@ func TestAuthScopes_TokenCannotRequestBoundaryEligibility(t *testing.T) {
 		"/api/v1/auth/scopes?boundary=hub",
 		"/api/v1/auth/scopes?boundary=hub&projectId=" + projectID,
 		"/api/v1/auth/scopes?projectId=",
+		"/api/v1/auth/scopes?boundary=",
+		"/api/v1/auth/scopes?boundary=bogus",
 	}
 	for name, key := range tokens {
 		t.Run(name, func(t *testing.T) {

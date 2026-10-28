@@ -2101,7 +2101,9 @@ type ScopeEligibility struct {
 	// admitted, since the caller already knows the project exists in that
 	// case. It appears ONLY as the request's uniform 403 -- never here --
 	// when EVERY evaluated selector was denied for project access; see
-	// handleAuthScopes.
+	// handleAuthScopes. For a hub boundary a denial is authority_required
+	// (or boundary_not_allowed / unknown_selector); the response never
+	// collapses.
 	Reason string `json:"reason,omitempty"`
 	Note   string `json:"note,omitempty"`
 	// IneligibleMembers is set only on an alias entry (AuthScopeAlias): the
@@ -2290,7 +2292,8 @@ func (s *Server) handleAuthScopes(w http.ResponseWriter, r *http.Request) {
 	// A user access token reads the selector catalog only. Mint
 	// eligibility is answered for an interactive session or dev
 	// credential, the credentials that may mint.
-	if token != nil && (r.URL.Query().Has("boundary") || r.URL.Query().Has("projectId")) {
+	query := r.URL.Query()
+	if token != nil && (query.Has("boundary") || query.Has("projectId")) {
 		logAuthzDenial(r, identity, Resource{Type: "user"}, ActionRead, "boundary eligibility requires a session credential")
 		writeSessionOnlyDenial(w, ErrCodeForbidden, "boundary eligibility requires an interactive session", authzop.ReasonCredentialManagement)
 		return

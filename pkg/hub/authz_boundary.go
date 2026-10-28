@@ -1612,6 +1612,16 @@ const (
 	MintDenialAuthorityRequired MintDenialReason = "authority_required"
 )
 
+// uniformMintRefusal reports whether a CanMintSelector denial is answered with
+// the uniform, detail-free 403: a project boundary whose project admission
+// failed (MintDenialProjectAccessRequired), so a non-member and a nonexistent
+// project get the same answer. A hub boundary names no project, so every hub
+// denial is answered per selector: a scope_violation naming the selector and
+// its reason. Token mint and agent delegation issuance both use it.
+func uniformMintRefusal(boundary TokenBoundary, reason MintDenialReason) bool {
+	return boundary.Kind == BoundaryKindProject && reason == MintDenialProjectAccessRequired
+}
+
 // SelectorEligibility is one selector's result within a CanMintSelector call.
 type SelectorEligibility struct {
 	Selector string

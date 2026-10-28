@@ -94,9 +94,10 @@ var (
 // its message, so the 403 body now includes the selector and reason text
 // (e.g. `requested scopes exceed issuer authority: selector "agent:delete"
 // denied (flat_role_insufficient)`), where it previously carried only the
-// sentinel text. This is reached only once project admission has already
-// succeeded, never on the uniform ErrUATProjectForbidden path (see
-// CreateToken below), so it does not weaken oracle resistance.
+// sentinel text. For a project boundary this is reached only once project
+// admission has succeeded, never on the uniform ErrUATProjectForbidden path
+// (see CreateToken below); for a hub boundary, which names no project, every
+// per-selector denial is reported this way.
 type UATScopeViolationError struct {
 	Selector string
 	Reason   MintDenialReason
@@ -417,8 +418,8 @@ func (s *UserAccessTokenService) CreateTokenWithParams(ctx context.Context, para
 		// specific selector didn't) surfaces the typed
 		// UATScopeViolationError. A hub boundary names no project, so every
 		// hub denial is the typed UATScopeViolationError naming the
-		// selector and its reason.
-		if boundary.Kind == BoundaryKindProject && result.Reason == MintDenialProjectAccessRequired {
+		// selector and its reason (uniformMintRefusal).
+		if uniformMintRefusal(boundary, result.Reason) {
 			return "", nil, ErrUATProjectForbidden
 		}
 		return "", nil, &UATScopeViolationError{Selector: result.Selector, Reason: result.Reason}
