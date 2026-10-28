@@ -32,6 +32,7 @@ import { onlyMarksChanged, projectCritic } from '../../../utils/critic.js';
 import { ReviewController } from './controller.js';
 import { docMarkRuns } from './guard.js';
 import type { HintKind } from './policy.js';
+import { ALLOWED_ATTRIBUTES, ALLOWED_TAGS } from './safe-render.js';
 import { BLOCK_ATTR, breakOf } from './schema.js';
 import { saveDoc } from './bridge.js';
 import { docStrings } from './preserve.js';
@@ -701,5 +702,46 @@ describe('own is never saved (boundaries)', () => {
     const bytesWith = saveDoc(doc, serialize, doc.type.schema, a1);
     expect(saveDoc(tr.doc, serialize, doc.type.schema, a2)).toBe(bytesWith);
     expect(bytesWith).toBe('ab {++\n\n++}cd{--\n\n--}ef\n\n- x{--\n- --}y\n');
+  });
+});
+
+describe('a break next to an earlier break of the same kind', () => {
+  it('is refused: the two would read back as one suggestion', async () => {
+    const md = 'a{++\n\n++}b\n';
+    const { c, hints } = await open(md);
+    select(c, startOf(c, 'b'));
+    press(c, 'Enter');
+    expect(hints).toEqual(['generic']);
+    expect(c.flush()).toBe(md);
+  });
+});
+
+describe('rendering of boundary suggestions', () => {
+  it('uses only the fixed classes, elements and attributes', async () => {
+    const md =
+      'a{++\n\n++}bc\n\n# h{--\n\n--}c\n\n- x{++\n- ++}y\n- [ ] t{--\n- [ ] --}u\n\n> q{++\n>\n> ++}r\n\n1) n{++\n2) ++}m\n';
+    const h = await open(md);
+    select(h.c, posOf(h.c, 'bc', 1));
+    press(h.c, 'Enter');
+    expect(h.hints).toEqual([]);
+    const classes = new Set<string>();
+    for (const el of Array.from(h.root.querySelectorAll('*'))) {
+      const tag = el.tagName.toLowerCase();
+      expect(ALLOWED_TAGS.has(tag), `tag ${tag}`).toBe(true);
+      for (const attr of Array.from(el.attributes)) {
+        expect(attr.name.startsWith('on'), `${tag}[${attr.name}]`).toBe(false);
+        expect(ALLOWED_ATTRIBUTES.has(attr.name), `${tag}[${attr.name}]`).toBe(true);
+      }
+      for (const cls of Array.from(el.classList)) {
+        if (cls.startsWith('critic-break')) classes.add(`${tag}.${cls}`);
+      }
+    }
+    expect([...classes].sort()).toEqual([
+      'li.critic-break-del',
+      'li.critic-break-ins',
+      'p.critic-break-del',
+      'p.critic-break-ins',
+    ]);
+    expect(h.root.querySelectorAll('.critic-break-ins, .critic-break-del').length).toBe(7);
   });
 });
