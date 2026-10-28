@@ -2843,6 +2843,12 @@ type BrokerSecretStore interface {
 	// CleanExpiredJoinTokens removes all expired join tokens and returns how
 	// many were removed.
 	CleanExpiredJoinTokens(ctx context.Context) (int, error)
+
+	// DeleteOrphanBrokerCredentials removes, in one transaction, every broker
+	// secret and join token whose broker ID has no runtime broker row, and
+	// returns how many of each were removed. A later row with the same ID
+	// then starts without a credential. Idempotent.
+	DeleteOrphanBrokerCredentials(ctx context.Context) (secrets, joinTokens int, err error)
 }
 
 // =============================================================================

@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -143,4 +144,99 @@ func TestDeleteRuntimeBroker_MissingRowDeletesNoCredential(t *testing.T) {
 	assert.ErrorIs(t, ps.DeleteRuntimeBroker(ctx, id), store.ErrNotFound)
 	_, err := bs.GetBrokerSecret(ctx, id)
 	assert.NoError(t, err, "a failed delete leaves the secret")
+}
+
+// seedOrphanCredentials stores a secret and a join token for a broker ID
+// that has no runtime broker row.
+func seedOrphanCredentials(t *testing.T, bs *BrokerSecretStore) string {
+	t.Helper()
+	ctx := context.Background()
+	id := uuid.NewString()
+	require.NoError(t, bs.CreateBrokerSecret(ctx, &store.BrokerSecret{
+		BrokerID:  id,
+		SecretKey: []byte("orphan-credential-secret-32-byte"),
+		Algorithm: store.BrokerSecretAlgorithmHMACSHA256,
+		Status:    store.BrokerSecretStatusActive,
+	}))
+	require.NoError(t, bs.CreateJoinToken(ctx, &store.BrokerJoinToken{
+		BrokerID:  id,
+		TokenHash: "hash-" + uuid.NewString(),
+		ExpiresAt: time.Now().Add(time.Hour),
+		CreatedBy: uuid.NewString(),
+	}))
+	return id
+}
+
+// The orphan sweep removes a secret and a join token whose broker row does
+// not exist, keeps a live broker's, and reports what it removed.
+func TestDeleteOrphanBrokerCredentials_RemovesOrphansKeepsLive(t *testing.T) {
+	client := enttest.NewClient(t)
+	ps, bs := NewProjectStore(client), NewBrokerSecretStore(client)
+	ctx := context.Background()
+	live := seedBrokerWithCredentials(t, ps, bs, "orphan-sweep-live")
+	orphan := seedOrphanCredentials(t, bs)
+	orphanSecretOnly := uuid.NewString()
+	require.NoError(t, bs.CreateBrokerSecret(ctx, &store.BrokerSecret{
+		BrokerID: orphanSecretOnly, SecretKey: []byte("orphan-credential-secret-32-byte"),
+		Algorithm: store.BrokerSecretAlgorithmHMACSHA256, Status: store.BrokerSecretStatusActive,
+	}))
+
+	secrets, tokens, err := bs.DeleteOrphanBrokerCredentials(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 2, secrets, "both orphan secrets are removed")
+	assert.Equal(t, 1, tokens, "the orphan join token is removed")
+
+	for _, id := range []string{orphan, orphanSecretOnly} {
+		_, err = bs.GetBrokerSecret(ctx, id)
+		assert.ErrorIs(t, err, store.ErrNotFound, "orphan secret removed")
+	}
+	_, err = bs.GetJoinTokenByBrokerID(ctx, orphan)
+	assert.ErrorIs(t, err, store.ErrNotFound, "orphan join token removed")
+	_, err = bs.GetBrokerSecret(ctx, live)
+	assert.NoError(t, err, "a live broker's secret is kept")
+	_, err = bs.GetJoinTokenByBrokerID(ctx, live)
+	assert.NoError(t, err, "a live broker's join token is kept")
+}
+
+// A second run removes nothing.
+func TestDeleteOrphanBrokerCredentials_SecondRunIsNoop(t *testing.T) {
+	client := enttest.NewClient(t)
+	ps, bs := NewProjectStore(client), NewBrokerSecretStore(client)
+	ctx := context.Background()
+	live := seedBrokerWithCredentials(t, ps, bs, "orphan-sweep-noop")
+	seedOrphanCredentials(t, bs)
+
+	_, _, err := bs.DeleteOrphanBrokerCredentials(ctx)
+	require.NoError(t, err)
+	secrets, tokens, err := bs.DeleteOrphanBrokerCredentials(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 0, secrets)
+	assert.Equal(t, 0, tokens)
+	_, err = bs.GetBrokerSecret(ctx, live)
+	assert.NoError(t, err)
+}
+
+// Inside store.WithTx the sweep runs on the caller's transaction: rolling
+// it back keeps the orphans.
+func TestDeleteOrphanBrokerCredentials_InsideWithTxUsesCallerTransaction(t *testing.T) {
+	composite := NewCompositeStore(enttest.NewClient(t))
+	ctx := context.Background()
+	orphan := seedOrphanCredentials(t, composite.BrokerSecretStore)
+
+	rollback := errors.New("roll back")
+	err := composite.WithTx(ctx, func(tx store.Store) error {
+		secrets, tokens, err := tx.DeleteOrphanBrokerCredentials(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, 1, secrets)
+		assert.Equal(t, 1, tokens)
+		return rollback
+	})
+	require.ErrorIs(t, err, rollback)
+	_, err = composite.GetBrokerSecret(ctx, orphan)
+	assert.NoError(t, err, "the rolled-back sweep removed nothing")
+
+	secrets, tokens, err := composite.DeleteOrphanBrokerCredentials(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, secrets)
+	assert.Equal(t, 1, tokens)
 }

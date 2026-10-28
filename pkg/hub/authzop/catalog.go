@@ -173,15 +173,16 @@ var SecurityMutationSymbols = map[string]string{
 	"UpdateEncryptionMigration": "update-resource",
 
 	// Broker secret operations
-	"CreateBrokerSecret":     "create-resource",
-	"UpdateBrokerSecret":     "update-resource",
-	"DeleteBrokerSecret":     "delete-resource",
-	"CreateJoinToken":        "mint-credential",
-	"UpsertJoinToken":        "mint-credential",
-	"DeleteJoinToken":        "delete-resource",
-	"ConsumeJoinToken":       "delete-resource",
-	"DeleteExpiredJoinToken": "delete-resource",
-	"CleanExpiredJoinTokens": "delete-resource",
+	"CreateBrokerSecret":            "create-resource",
+	"UpdateBrokerSecret":            "update-resource",
+	"DeleteBrokerSecret":            "delete-resource",
+	"CreateJoinToken":               "mint-credential",
+	"UpsertJoinToken":               "mint-credential",
+	"DeleteJoinToken":               "delete-resource",
+	"ConsumeJoinToken":              "delete-resource",
+	"DeleteExpiredJoinToken":        "delete-resource",
+	"CleanExpiredJoinTokens":        "delete-resource",
+	"DeleteOrphanBrokerCredentials": "delete-resource",
 
 	// Invite code operations
 	"CreateInviteCode": "mint-credential",
@@ -748,6 +749,7 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/brokerauth.go", Function: "CompleteBrokerJoin", Symbol: "CreateBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker join completion, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
 	{File: "pkg/hub/brokerauth.go", Function: "CompleteBrokerJoin", Symbol: "DeleteBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker join completion, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
 	{File: "pkg/hub/brokerauth.go", Function: "CompleteBrokerJoin", Symbol: "ConsumeJoinToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker join completion: single-use join token consumed in the join transaction, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
+	{File: "pkg/hub/broker_orphan_credentials.go", Function: "sweepOrphanBrokerCredentials", Symbol: "DeleteOrphanBrokerCredentials", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Startup removal of broker secrets and join tokens that have no broker row, no caller", Scope: "pkg/hub/broker_orphan_credentials.go"}},
 	{File: "pkg/hub/server.go", Function: "brokerJoinTokenCleanupHandler", Symbol: "CleanExpiredJoinTokens", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Scheduled removal of expired broker join tokens, no caller", Scope: "pkg/hub/server.go"}},
 	{File: "pkg/hub/brokerauth.go", Function: "classifyUnconsumedJoinToken", Symbol: "DeleteExpiredJoinToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker join completion, expired join token cleanup, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
 	{File: "pkg/hub/brokerauth.go", Function: "issueJoinToken", Symbol: "UpsertJoinToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker registration, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
