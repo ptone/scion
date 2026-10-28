@@ -298,12 +298,12 @@ describe('track changes (inline)', () => {
 });
 
 describe('refused edits in suggest mode', () => {
-  it('Enter (a paragraph break) changes nothing and gives the break hint', async () => {
+  it('a split from outside the keymap is recorded as a suggested paragraph break', async () => {
     const { c, hints } = await open('one two\n');
     select(c, posOf(c, 'two'));
     splitBlock(c.view.state, c.view.dispatch);
-    expect(text(c)).toBe('one two\n');
-    expect(hints).toEqual(['break']);
+    expect(text(c)).toBe('one {++\n\n++}two\n');
+    expect(hints).toEqual([]);
   });
 
   it('formatting changes nothing and gives the formatting hint', async () => {
@@ -1223,7 +1223,8 @@ describe('composition timing', () => {
 describe('preset plugins', () => {
   // Every plugin in the editor state. A Milkdown upgrade that adds a
   // plugin fails here, so it is audited before it can change a review's
-  // document on its own (create.ts DROPPED_PLUGIN).
+  // document on its own (create.ts PRESET_PARTS lists what is kept and
+  // what is left out).
   const KEPT_PLUGINS = [
     'criticPaste',
     'criticPolicy',
@@ -1438,18 +1439,25 @@ describe('lists and tables keep their source', () => {
     expect(text(c)).toBe(`${items.join('\n')}\n`);
   });
 
-  it('refuses structure edits in lists and tables with the list and table hint', async () => {
-    const md = '- one\n- two\n\n| a | b |\n|---|---|\n| c | d |\n';
+  it('refuses structure edits in tables with the list and table hint', async () => {
+    const md = '- one\n\n| a | b |\n|---|---|\n| c | d |\n';
     const { c, hints } = await open(md);
-    // A deletion across two items, and across two cells.
-    deleteRange(c, posOf(c, 'one', 1), posOf(c, 'two', 1));
+    // A deletion across two cells (a cell holds one paragraph, so it
+    // cannot be split at all).
     deleteRange(c, posOf(c, 'c'), posOf(c, 'd', 1));
-    // A split in an item (Enter).
-    select(c, posOf(c, 'one', 1));
-    splitBlock(c.view.state, c.view.dispatch);
-    expect(hints).toEqual(['list-table', 'list-table', 'list-table']);
+    expect(hints).toEqual(['list-table']);
     expect(c.dirty).toBe(false);
     expect(text(c)).toBe(md);
+  });
+
+  it('records a deletion across two list items and a split in an item', async () => {
+    const md = '- one\n- two\n';
+    const { c, hints } = await open(md);
+    deleteRange(c, posOf(c, 'one', 1), posOf(c, 'two', 1));
+    select(c, posOf(c, 'wo', 1));
+    splitBlock(c.view.state, c.view.dispatch);
+    expect(hints).toEqual([]);
+    expect(text(c)).toBe('- o{--ne\n- t--}w{++\n- ++}o\n');
   });
 
   it('keeps the numbers of an ordered list and of a nested one', async () => {
@@ -1564,12 +1572,12 @@ describe('review keymap', () => {
     expect(c.dirty).toBe(false);
   });
 
-  it('Shift-Enter is refused like a paragraph break', async () => {
+  it('Shift-Enter suggests a line break', async () => {
     const { c, hints } = await open('one two\n');
     select(c, posOf(c, 'two'));
     expect(press(c, 'Enter', { shiftKey: true })).toBe(true);
-    expect(hints).toEqual(['break']);
-    expect(c.dirty).toBe(false);
+    expect(hints).toEqual([]);
+    expect(text(c)).toBe('one {++\\\n++}two\n');
   });
 
   it('Tab and Shift-Tab move between table cells without changing the text', async () => {

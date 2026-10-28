@@ -238,6 +238,36 @@ export const reviewEditorStyles = css`
     border-bottom: 2px solid var(--sl-color-warning-500, #ca8a04);
     border-radius: 0.15rem;
   }
+  /* Suggested paragraph breaks and joins: a pilcrow at the boundary. */
+  .critic-break-ins::before,
+  .critic-break-del::before {
+    content: '¶';
+    content: '¶' / 'Suggested paragraph break';
+    display: inline-block;
+    margin-right: 0.2rem;
+    padding: 0 0.15rem;
+    border-radius: 0.15rem;
+    font-weight: 700;
+    color: var(--sl-color-success-800, #166534);
+    background: var(--sl-color-success-100, #dcfce7);
+  }
+  .critic-break-del::before {
+    content: '¶' / 'Suggested join';
+    color: var(--sl-color-danger-800, #991b1b);
+    background: var(--sl-color-danger-100, #fee2e2);
+    text-decoration: line-through;
+    text-decoration-color: var(--sl-color-danger-600, #dc2626);
+  }
+  li.critic-break-ins {
+    box-shadow: inset 3px 0 0 var(--sl-color-success-600, #16a34a);
+    padding-left: 0.35rem;
+  }
+  li.critic-break-ins::before,
+  li.critic-break-del::before,
+  blockquote.critic-break-ins::before,
+  blockquote.critic-break-del::before {
+    float: left;
+  }
   .critic-comment {
     counter-increment: critic-note;
     display: inline-flex;
@@ -278,6 +308,10 @@ export const reviewEditorStyles = css`
       text-decoration: line-through;
     }
     .critic-comment {
+      border: 1px solid CanvasText;
+    }
+    .critic-break-ins::before,
+    .critic-break-del::before {
       border: 1px solid CanvasText;
     }
   }
