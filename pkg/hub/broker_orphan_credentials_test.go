@@ -22,6 +22,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -29,6 +31,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -153,4 +157,101 @@ func TestSweepOrphanBrokerCredentials_FailureLoggedStartupContinues(t *testing.T
 	require.NoError(t, err, "a failed sweep does not stop startup")
 	require.NotNil(t, srv)
 	assertCredentials(t, s, orphan, true, "the failed sweep removed nothing")
+}
+
+// seedOrphanFor stores a secret (orphanSweepTestKey) and a join token for
+// id, which has no broker row, and returns the token hash.
+func seedOrphanFor(t *testing.T, s store.Store, id string) string {
+	t.Helper()
+	ctx := context.Background()
+	hash := "orphan-recreate-hash-" + id
+	require.NoError(t, s.CreateBrokerSecret(ctx, &store.BrokerSecret{
+		BrokerID: id, SecretKey: []byte(orphanSweepTestKey),
+		Algorithm: store.BrokerSecretAlgorithmHMACSHA256, Status: store.BrokerSecretStatusActive,
+	}))
+	require.NoError(t, s.CreateJoinToken(ctx, &store.BrokerJoinToken{
+		BrokerID: id, TokenHash: hash, ExpiresAt: time.Now().Add(time.Hour), CreatedBy: "dev",
+	}))
+	return hash
+}
+
+// assertOrphanCleared checks that id's seeded secret and join token are
+// gone: no secret, or one with another key; no token, or one with another
+// hash.
+func assertOrphanCleared(t *testing.T, s store.Store, id, seededHash string) {
+	t.Helper()
+	ctx := context.Background()
+	if sec, err := s.GetBrokerSecret(ctx, id); err == nil {
+		assert.NotEqual(t, []byte(orphanSweepTestKey), sec.SecretKey, "the re-created row does not inherit the old secret")
+	} else {
+		assert.ErrorIs(t, err, store.ErrNotFound)
+	}
+	if tok, err := s.GetJoinTokenByBrokerID(ctx, id); err == nil {
+		assert.NotEqual(t, seededHash, tok.TokenHash, "the re-created row does not inherit the old join token")
+	} else {
+		assert.ErrorIs(t, err, store.ErrNotFound)
+	}
+}
+
+// A plugin broker row re-created with its fixed (UUIDv5) ID after the
+// startup sweep failed does not inherit the credential left for that ID:
+// the create clears it, so the old key no longer authenticates.
+func TestPluginBrokerRecreate_ClearsOrphanWhenSweepFails(t *testing.T) {
+	s, err := newTestStore(t, ":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+	const name = "orphan-recreate-plugin"
+	id := uuid.NewSHA1(pluginBrokerNS, []byte("plugin-broker-"+name)).String()
+	hash := seedOrphanFor(t, s, id)
+
+	cfg := DefaultServerConfig()
+	cfg.DevAuthToken = testDevToken
+	cfg.BrokerAuthConfig = DefaultBrokerAuthConfig()
+	srv, err := newTestHubServer(t, cfg, &orphanSweepFaultStore{Store: s})
+	require.NoError(t, err)
+	_, err = s.GetBrokerSecret(context.Background(), id)
+	require.NoError(t, err, "the failed sweep left the orphan")
+
+	creds := srv.getPluginHubCreds(context.Background(), name)
+	require.Equal(t, id, creds["broker_id"])
+	assert.NotEqual(t, base64.StdEncoding.EncodeToString([]byte(orphanSweepTestKey)), creds["hmac_key"], "a new secret is minted, not the old one returned")
+	_, err = s.GetRuntimeBroker(context.Background(), id)
+	require.NoError(t, err, "the plugin row is re-created")
+	assertOrphanCleared(t, s, id, hash)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/runtime-brokers", nil)
+	require.NoError(t, (&apiclient.HMACAuth{BrokerID: id, SecretKey: []byte(orphanSweepTestKey)}).ApplyAuth(req))
+	_, err = srv.GetBrokerAuthService().ValidateBrokerSignature(context.Background(), req)
+	assert.ErrorIs(t, err, errBrokerAuthInvalidSignature, "the old key does not authenticate as the re-created row")
+}
+
+// A registration that supplies the ID of a deleted broker creates a row
+// that does not inherit a credential left for that ID.
+func TestBrokerRegistration_SuppliedIDClearsOrphanCredential(t *testing.T) {
+	srv, s := testServerWithBrokerAuth(t)
+	id := uuid.NewString()
+	hash := seedOrphanFor(t, s, id)
+
+	resp, err := srv.brokerAuthService.CreateBrokerRegistration(context.Background(), CreateBrokerRegistrationRequest{BrokerID: id, Name: "orphan-recreate-registered"}, "dev")
+	require.NoError(t, err)
+	require.Equal(t, id, resp.BrokerID)
+	assert.False(t, resp.Reregistered)
+	assertOrphanCleared(t, s, id, hash)
+	_, err = s.GetJoinTokenByBrokerID(context.Background(), id)
+	assert.NoError(t, err, "the registration's own new join token is stored")
+}
+
+// A flat registration that creates a row with the ID of a deleted broker
+// does not inherit a credential left for that ID.
+func TestFlatRegistration_ClearsOrphanCredential(t *testing.T) {
+	srv, s := testServer(t)
+	setFlatExperiment(t, srv, true)
+	id := uuid.NewString()
+	hash := seedOrphanFor(t, s, id)
+	target := api.RuntimeTargetDescriptor{ID: uuid.NewString(), Type: "docker", DisplayName: "Local Docker"}
+
+	_, created, err := srv.registerFlatRuntimeBroker(context.Background(), flatRegistration{BrokerID: id, Name: "orphan-recreate-flat", Target: target, CreatedBy: "test"})
+	require.NoError(t, err)
+	require.True(t, created)
+	assertOrphanCleared(t, s, id, hash)
 }

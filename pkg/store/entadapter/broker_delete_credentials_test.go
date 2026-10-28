@@ -240,3 +240,74 @@ func TestDeleteOrphanBrokerCredentials_InsideWithTxUsesCallerTransaction(t *test
 	assert.Equal(t, 1, secrets)
 	assert.Equal(t, 1, tokens)
 }
+
+// CreateRuntimeBrokerClearingCredentials creates the row and removes a
+// secret and join token left for its ID, in one transaction.
+func TestCreateRuntimeBrokerClearingCredentials_ClearsLeftCredentials(t *testing.T) {
+	client := enttest.NewClient(t)
+	ps, bs := NewProjectStore(client), NewBrokerSecretStore(client)
+	ctx := context.Background()
+	id := seedOrphanCredentials(t, bs)
+	other := seedOrphanCredentials(t, bs)
+
+	b := &store.RuntimeBroker{ID: id, Name: "clearing-create", Slug: "clearing-create", Status: store.BrokerStatusOnline}
+	require.NoError(t, ps.CreateRuntimeBrokerClearingCredentials(ctx, b))
+	assert.False(t, b.Created.IsZero(), "the created row's timestamps are returned")
+
+	_, err := ps.GetRuntimeBroker(ctx, id)
+	require.NoError(t, err)
+	_, err = bs.GetBrokerSecret(ctx, id)
+	assert.ErrorIs(t, err, store.ErrNotFound, "the left secret is cleared")
+	_, err = bs.GetJoinTokenByBrokerID(ctx, id)
+	assert.ErrorIs(t, err, store.ErrNotFound, "the left join token is cleared")
+	_, err = bs.GetBrokerSecret(ctx, other)
+	assert.NoError(t, err, "another ID's credential is untouched")
+}
+
+// When the create fails (the ID already has a row) nothing is cleared: the
+// existing row keeps its credentials.
+func TestCreateRuntimeBrokerClearingCredentials_FailedCreateClearsNothing(t *testing.T) {
+	client := enttest.NewClient(t)
+	ps, bs := NewProjectStore(client), NewBrokerSecretStore(client)
+	ctx := context.Background()
+	id := seedBrokerWithCredentials(t, ps, bs, "clearing-create-dup")
+
+	err := ps.CreateRuntimeBrokerClearingCredentials(ctx, &store.RuntimeBroker{ID: id, Name: "clearing-create-dup-2", Slug: "clearing-create-dup-2", Status: store.BrokerStatusOnline})
+	require.ErrorIs(t, err, store.ErrAlreadyExists)
+	_, err = bs.GetBrokerSecret(ctx, id)
+	assert.NoError(t, err, "the existing row's secret is kept")
+	_, err = bs.GetJoinTokenByBrokerID(ctx, id)
+	assert.NoError(t, err, "the existing row's join token is kept")
+}
+
+// Inside store.WithTx it runs on the caller's transaction: a rollback
+// undoes both the row and the clearing.
+func TestCreateRuntimeBrokerClearingCredentials_InsideWithTxUsesCallerTransaction(t *testing.T) {
+	composite := NewCompositeStore(enttest.NewClient(t))
+	ctx := context.Background()
+	id := seedOrphanCredentials(t, composite.BrokerSecretStore)
+
+	rollback := errors.New("roll back")
+	err := composite.WithTx(ctx, func(tx store.Store) error {
+		require.NoError(t, tx.CreateRuntimeBrokerClearingCredentials(ctx, &store.RuntimeBroker{ID: id, Name: "clearing-create-tx", Slug: "clearing-create-tx", Status: store.BrokerStatusOnline}))
+		return rollback
+	})
+	require.ErrorIs(t, err, rollback)
+	_, err = composite.GetRuntimeBroker(ctx, id)
+	assert.ErrorIs(t, err, store.ErrNotFound, "the row is rolled back")
+	_, err = composite.GetBrokerSecret(ctx, id)
+	assert.NoError(t, err, "the clearing is rolled back")
+}
+
+// Plain CreateRuntimeBroker does not clear credentials (callers that need
+// it use CreateRuntimeBrokerClearingCredentials).
+func TestCreateRuntimeBroker_DoesNotClearCredentials(t *testing.T) {
+	client := enttest.NewClient(t)
+	ps, bs := NewProjectStore(client), NewBrokerSecretStore(client)
+	ctx := context.Background()
+	id := seedOrphanCredentials(t, bs)
+
+	require.NoError(t, ps.CreateRuntimeBroker(ctx, &store.RuntimeBroker{ID: id, Name: "plain-create", Slug: "plain-create", Status: store.BrokerStatusOnline}))
+	_, err := bs.GetBrokerSecret(ctx, id)
+	assert.NoError(t, err)
+}

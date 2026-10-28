@@ -1565,7 +1565,7 @@ func (s *Server) ensurePluginBroker(ctx context.Context, name, brokerID string) 
 		Created:         now,
 		Updated:         now,
 	}
-	if err := s.store.CreateRuntimeBroker(ctx, b); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+	if err := s.store.CreateRuntimeBrokerClearingCredentials(ctx, b); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 		slog.Warn("Failed to register broker entity for plugin", "plugin", name, "brokerId", brokerID, "error", err)
 	}
 }

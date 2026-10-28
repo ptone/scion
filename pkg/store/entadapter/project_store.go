@@ -17,6 +17,7 @@ package entadapter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -847,13 +848,59 @@ func (s *ProjectStore) CreateRuntimeBroker(ctx context.Context, b *store.Runtime
 	if err != nil {
 		return err
 	}
+	return createRuntimeBroker(ctx, s.client, uid, b)
+}
+
+// CreateRuntimeBrokerClearingCredentials creates a new runtime broker record
+// and, in the same transaction (the caller's, when called inside
+// store.WithTx), deletes any broker secret and join token stored for its ID
+// (broker_secrets and broker_join_tokens have no FK to runtime_brokers). A
+// row created with an ID that an earlier row had then starts without that
+// row's credential.
+func (s *ProjectStore) CreateRuntimeBrokerClearingCredentials(ctx context.Context, b *store.RuntimeBroker) error {
+	uid, err := parseUUID(b.ID)
+	if err != nil {
+		return err
+	}
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		if !errors.Is(err, ent.ErrTxStarted) {
+			return fmt.Errorf("create runtime broker: begin tx: %w", err)
+		}
+		// Already inside store.WithTx: run on the caller's transaction.
+		return createRuntimeBrokerClearingCredentials(ctx, s.client, uid, b)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := createRuntimeBrokerClearingCredentials(ctx, tx.Client(), uid, b); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("create runtime broker: commit: %w", err)
+	}
+	return nil
+}
+
+func createRuntimeBrokerClearingCredentials(ctx context.Context, client *ent.Client, uid uuid.UUID, b *store.RuntimeBroker) error {
+	if err := createRuntimeBroker(ctx, client, uid, b); err != nil {
+		return err
+	}
+	if _, err := client.BrokerSecret.Delete().Where(brokersecret.IDEQ(uid)).Exec(ctx); err != nil {
+		return fmt.Errorf("create runtime broker: delete broker secret: %w", err)
+	}
+	if _, err := client.BrokerJoinToken.Delete().Where(brokerjointoken.IDEQ(uid)).Exec(ctx); err != nil {
+		return fmt.Errorf("create runtime broker: delete join token: %w", err)
+	}
+	return nil
+}
+
+func createRuntimeBroker(ctx context.Context, client *ent.Client, uid uuid.UUID, b *store.RuntimeBroker) error {
 
 	profiles, defaultProfile := b.Profiles, b.DefaultProfile
 	if b.IsFlat() {
 		// Profiles never persist on a flat Runtime Broker row.
 		profiles, defaultProfile = nil, ""
 	}
-	create := s.client.RuntimeBroker.Create().
+	create := client.RuntimeBroker.Create().
 		SetID(uid).
 		SetName(b.Name).
 		SetSlug(b.Slug).

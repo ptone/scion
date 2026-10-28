@@ -609,7 +609,7 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 		if err := hostSAClaimWriteAllowed(hostSAClaim{}, hostSAClaimOf(broker), hostSA); err != nil {
 			return nil, err
 		}
-		if err := s.store.CreateRuntimeBroker(ctx, broker); err != nil {
+		if err := s.store.CreateRuntimeBrokerClearingCredentials(ctx, broker); err != nil {
 			return nil, fmt.Errorf("failed to create runtime broker: %w", err)
 		}
 	}
