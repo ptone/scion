@@ -37,7 +37,7 @@ var ErrSharedDirStorageUnavailable = errors.New("nfs shared-dir storage is unava
 
 // ensureSharedDirLeaf is shareddirs.EnsureLeaf, replaceable in tests to
 // replace a path component after the walk and reach the backstop check.
-var ensureSharedDirLeaf = shareddirs.EnsureLeaf
+var ensureSharedDirLeaf = projectfs.EnsureSharedLeaf
 
 // SharedDirHostPath is the host-side directory backing one shared dir, as
 // resolved by ResolveSharedDirHostPath.
