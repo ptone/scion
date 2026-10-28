@@ -53,7 +53,7 @@ func controlPathFixture(t *testing.T) (home, global, outside string) {
 	return home, global, outside
 }
 
-func volumeRunConfig(vols ...api.VolumeMount) RunConfig {
+func controlPathRunConfig(vols ...api.VolumeMount) RunConfig {
 	return RunConfig{
 		Harness:      &harness.Generic{},
 		Name:         "a1",
@@ -82,7 +82,7 @@ func TestBuildCommonRunArgs_RefusesVolumesReachingControlPaths(t *testing.T) {
 	} {
 		for _, ro := range []bool{false, true} {
 			t.Run(name, func(t *testing.T) {
-				_, err := buildCommonRunArgs(volumeRunConfig(api.VolumeMount{Source: src, Target: "/mnt/x", ReadOnly: ro}))
+				_, err := buildCommonRunArgs(controlPathRunConfig(api.VolumeMount{Source: src, Target: "/mnt/x", ReadOnly: ro}))
 				if !errors.Is(err, brokercontrol.ErrControlPathMount) {
 					t.Fatalf("read-only=%v: err = %v, want ErrControlPathMount", ro, err)
 				}
@@ -94,7 +94,7 @@ func TestBuildCommonRunArgs_RefusesVolumesReachingControlPaths(t *testing.T) {
 func TestBuildCommonRunArgs_AllowsVolumesClearOfControlPaths(t *testing.T) {
 	_, global, outside := controlPathFixture(t)
 	ws := filepath.Join(global, "projects", "p", "workspace", "sub")
-	args, err := buildCommonRunArgs(volumeRunConfig(
+	args, err := buildCommonRunArgs(controlPathRunConfig(
 		api.VolumeMount{Source: outside, Target: "/mnt/data"},
 		api.VolumeMount{Source: ws, Target: "/mnt/ws", ReadOnly: true},
 		api.VolumeMount{Source: "cachevol", Target: "/mnt/cache"},
@@ -140,7 +140,7 @@ func TestBuildCommonRunArgs_BindUsesResolvedSource(t *testing.T) {
 	if err := os.Symlink(real, link); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	args, err := buildCommonRunArgs(volumeRunConfig(api.VolumeMount{Source: link, Target: "/mnt/x"}))
+	args, err := buildCommonRunArgs(controlPathRunConfig(api.VolumeMount{Source: link, Target: "/mnt/x"}))
 	if err != nil {
 		t.Fatalf("buildCommonRunArgs: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestBuildCommonRunArgs_BindUsesResolvedSource(t *testing.T) {
 func TestBuildCommonRunArgs_RefusesDevBinariesInGlobalDir(t *testing.T) {
 	_, global, _ := controlPathFixture(t)
 	t.Setenv("SCION_DEV_BINARIES", filepath.Join(global, "templates"))
-	_, err := buildCommonRunArgs(volumeRunConfig())
+	_, err := buildCommonRunArgs(controlPathRunConfig())
 	if !errors.Is(err, brokercontrol.ErrControlPathMount) {
 		t.Fatalf("err = %v, want ErrControlPathMount", err)
 	}
