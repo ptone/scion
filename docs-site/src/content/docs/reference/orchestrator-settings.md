@@ -266,6 +266,52 @@ profiles:
 
 The profile `timezone` field was removed. A request to `PUT /api/v1/admin/server-config` that still sends `profiles.<name>.timezone`, even as an empty string, is rejected with `422`. At startup a Postgres-backed Hub strips stored values from its profile settings. If exactly one zone was set and no Hub default existed, it is copied into `agent_defaults.default_timezone`, and `agent_defaults` then becomes admin-managed, so `settings.yaml` no longer seeds it on that Hub. A file-based Hub never rewrites `settings.yaml`; it logs each leftover key, and the `default_timezone: <zone>` line to add when one zone would have been copied.
 
+## Volume Source Restrictions
+
+A Runtime Broker refuses any agent mount whose host source reaches the broker host's own control files. This applies to every `volumes:` entry, whatever sets it (settings, profiles, harness configs, templates, flat Runtime Broker instance `agent_defaults`, or a create or start request from the Hub). It applies equally to read-only and read-write mounts. It also applies to shared directories, workspaces, agent homes and harness auth files.
+
+The protected paths are, in the Scion global directory (`~/.scion`):
+
+| Class | Paths |
+| :--- | :--- |
+| Credentials | `broker-credentials.json`, `hub-credentials/`, `dev-token`, `hub-profiles/` |
+| Local settings | `settings.yaml`, `settings.yml`, `settings.json`, `.settings.lock`, `server.yaml` |
+| Host identity and state | `runtime-brokers/`, `runtime-broker-state/`, `broker-workspaces/`, `hub-workspaces/`, `server.pid` |
+| Host plugins | `plugins/` |
+| Hub state | `hub.db` and its `-wal`, `-shm` and `-journal` files |
+
+The broker's configured state directory (`server.broker.state_dir`) and a co-located Hub's SQLite database file are protected wherever they are configured.
+
+A mount source is refused when:
+
+- it equals one of these paths, contains one, or lies inside a protected directory;
+- it is the Scion global directory itself, or contains it (for example `~` or `/`);
+- it lies inside the Scion global directory but outside the agent-data subtrees below. For `volumes:` and shared directories, only these are allowed:
+  - `~/.scion/workspace/...`
+  - `~/.scion/projects/<project>/workspace/...`
+  - `~/.scion/projects/<project>/worktrees/<name>/...`
+  - `~/.scion/projects/<project>/.scion/agents/<agent>/workspace/...`
+  - `~/.scion/project-configs/<dir>/.scion/agents/<agent>/workspace/...`
+  - `~/.scion/project-configs/<dir>/shared-dirs/<name>/...`
+
+  Harness auth files and `SCION_DEV_BINARIES` may not come from the Scion global directory at all.
+- it cannot be resolved: a relative path (other than a named volume), a dangling symbolic link, or a path the broker cannot read.
+
+Symbolic links are resolved on both sides before the comparison, and the resolved path is what gets mounted. The error a requester sees has the code `control_path_mount`. It names the source as configured and the class of path it reaches, never the resolved host path. The broker log adds the resolved paths.
+
+The check runs at each of these points:
+
+1. **Runtime Broker start.** The broker does not start when its worktree base or its NFS mount root (`nfs.mount_root` of the workspace storage settings) equals or contains a protected path. A flat Runtime Broker host does not start when an instance's `agent_defaults` or harness override volumes reach one.
+2. **Agent create and start.** A Hub request whose volumes reach a protected path is refused with `400`, before anything is saved. The agent's merged volumes are checked again before its configuration is written.
+3. **Container creation.** Every bind is checked just before the container is created. Right after creation, the binds the runtime reports are checked again. A refused bind stops the container and fails the start.
+4. **Running agents.** The broker re-checks the binds of running agents at startup and every 60 seconds, and sooner when the protected paths resolve somewhere else. An agent with a refused bind is stopped and marked `error`. An agent whose mounts cannot be inspected twice in a row is stopped too. This also covers agents that were created before this check existed.
+
+**Limitations.**
+
+- **Remote Docker daemon.** These checks protect a broker whose container runtime runs on the same host. With a remote Docker daemon (`DOCKER_HOST` pointing at another machine), bind sources name paths on the daemon's host, which the broker cannot verify. The operator must keep the broker's control files off that host and out of every bind source.
+- **Apple container runtime.** The re-checks after creation and for running agents read the binds the broker recorded on the container when it created it, not the runtime's own view of what it mounted.
+- **Hard links.** Directories are not walked. A hard link to a protected file, placed inside an allowed directory by a process on the host, is not detected. An agent cannot create such a link itself.
+
 ## Telemetry Configuration (`telemetry`)
 
 Controls agent telemetry collection, forwarding, privacy filtering, and debug output. Telemetry settings can be defined at global or project scope and are merged across the hierarchy (last write wins). A template's `telemetry` block is ignored; the Hub telemetry configuration and project telemetry policy also apply, and an agent's own config can only turn telemetry on or off. See the [telemetry ladder](/scion/reference/settings-precedence/#the-telemetry-ladder).

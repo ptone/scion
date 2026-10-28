@@ -109,7 +109,7 @@ func checkLayoutRoots(cfg ServerConfig) error {
 	type root struct{ name, path string }
 	roots := []root{{"the worktree base directory", cfg.WorktreeBase}}
 	if cfg.NFSConfig != nil {
-		roots = append(roots, root{"the NFS mount root (server.broker.nfs.mount_root)", cfg.NFSConfig.MountRoot})
+		roots = append(roots, root{"the NFS mount root (nfs.mount_root of the workspace storage settings)", cfg.NFSConfig.MountRoot})
 	}
 	for _, r := range roots {
 		if r.path == "" {
