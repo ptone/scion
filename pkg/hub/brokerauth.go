@@ -84,6 +84,18 @@ type BrokerAuthService struct {
 	// Server.testAdminBrokerAdmission, which refuses every broker other than
 	// the co-located one while the test admin tier is on.
 	brokerAdmission func(ctx context.Context, brokerID string) error
+	// deferNonce, when set and true for a request, makes
+	// ValidateBrokerSignature verify the request without recording its
+	// nonce. The hub sets it to Server.conduitIngressDefersBrokerNonce: a
+	// conduit dial the ingress forwards to a separate relay, whose Admit
+	// records the nonce instead (conduit_ingress_broker_nonce.go).
+	deferNonce func(r *http.Request) bool
+}
+
+// defersNonce reports whether ValidateBrokerSignature leaves r's nonce to
+// the hop that admits it (deferNonce).
+func (s *BrokerAuthService) defersNonce(r *http.Request) bool {
+	return s != nil && s.deferNonce != nil && s.deferNonce(r)
 }
 
 // admitBroker applies brokerAdmission, if any.
@@ -951,7 +963,22 @@ var (
 	errBrokerAuthSecretExpired    = errors.New("broker secret has expired")
 	errBrokerAuthInvalidSignature = errors.New("invalid signature")
 	errBrokerAuthNoValidSecrets   = errors.New("no valid secrets found")
+	// errBrokerAuthBodyTooLarge reports a body over
+	// apiclient.MaxSignedRequestBodyBytes. Callers answer it with 413
+	// (writeBrokerAuthFailure), not 401.
+	errBrokerAuthBodyTooLarge = errors.New(apiclient.SignedBodyTooLargeMessage)
 )
+
+// limitBrokerAuthBody bounds r's body before the verifier reads it to build
+// the canonical string. The verifiers have no response writer, so the cap is
+// installed with a nil writer; an over-cap declared length is refused
+// without reading a byte.
+func limitBrokerAuthBody(r *http.Request) error {
+	if err := apiclient.LimitSignedRequestBody(nil, r); err != nil {
+		return errBrokerAuthBodyTooLarge
+	}
+	return nil
+}
 
 // ValidateBrokerSignature validates an HMAC-signed request from a Runtime Broker.
 func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http.Request) (BrokerIdentity, error) {
@@ -979,6 +1006,12 @@ func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http
 		return nil, errBrokerAuthMissingNonce
 	}
 
+	// Bound the body before anything reads it (the canonical string hashes
+	// it before the signature is compared).
+	if err := limitBrokerAuthBody(r); err != nil {
+		return nil, err
+	}
+
 	// A signed body must declare its length (before the nonce is recorded).
 	if err := apiclient.CheckSignedBodyFraming(r); err != nil {
 		return nil, err
@@ -997,26 +1030,6 @@ func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http
 	}
 	if clockSkew > s.config.MaxClockSkew {
 		return nil, fmt.Errorf("%w (skew: %v)", errBrokerAuthClockSkew, clockSkew)
-	}
-
-	// Validate nonce if enabled — use DB-backed store for multi-instance
-	// replay protection when configured; otherwise use in-memory cache.
-	// DB errors are fail-closed (request is rejected, not silently passed).
-	// Defence-in-depth: guard against empty nonce reaching the DB store.
-	if s.config.EnableNonceCache && nonce != "" {
-		if s.nonceStore != nil {
-			isNew, err := s.nonceStore.CheckAndStore(ctx, nonce, s.config.NonceCacheTTL)
-			if err != nil {
-				return nil, fmt.Errorf("%w: %w", errBrokerAuthNonceCheck, err)
-			}
-			if !isNew {
-				return nil, errBrokerAuthReplay
-			}
-		} else if s.nonces != nil {
-			if !s.nonces.Add(nonce) {
-				return nil, errBrokerAuthReplay
-			}
-		}
 	}
 
 	// Get the broker's secret
@@ -1047,7 +1060,42 @@ func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http
 		return nil, errBrokerAuthInvalidSignature
 	}
 
+	// Record the nonce only for a request whose signature verified, so a
+	// request with a valid nonce and a bad signature leaves the nonce
+	// unused. A request deferNonce selects is verified here and has its
+	// nonce recorded by the hop that admits it.
+	if !s.defersNonce(r) {
+		if err := s.recordNonce(ctx, nonce); err != nil {
+			return nil, err
+		}
+	}
+
 	return NewBrokerIdentity(brokerID), nil
+}
+
+// recordNonce records nonce when the nonce cache is enabled, refusing a
+// nonce already recorded. It uses the DB-backed store for multi-instance
+// replay protection when configured, otherwise the in-memory cache. DB
+// errors are fail-closed (the request is rejected, not silently passed).
+// Defence-in-depth: an empty nonce never reaches the DB store.
+func (s *BrokerAuthService) recordNonce(ctx context.Context, nonce string) error {
+	if !s.config.EnableNonceCache || nonce == "" {
+		return nil
+	}
+	if s.nonceStore != nil {
+		isNew, err := s.nonceStore.CheckAndStore(ctx, nonce, s.config.NonceCacheTTL)
+		if err != nil {
+			return fmt.Errorf("%w: %w", errBrokerAuthNonceCheck, err)
+		}
+		if !isNew {
+			return errBrokerAuthReplay
+		}
+		return nil
+	}
+	if s.nonces != nil && !s.nonces.Add(nonce) {
+		return errBrokerAuthReplay
+	}
+	return nil
 }
 
 // buildCanonicalString builds the canonical string for HMAC signing.
@@ -1131,6 +1179,12 @@ func (s *BrokerAuthService) ValidateBrokerSignatureWithRotation(ctx context.Cont
 		return nil, err
 	}
 
+	// Bound the body before the secret lookup and before anything reads
+	// it; validateWithSecret repeats this (it is idempotent).
+	if err := limitBrokerAuthBody(r); err != nil {
+		return nil, err
+	}
+
 	// Get all active secrets for this broker
 	secrets, err := s.store.GetActiveSecrets(ctx, brokerID)
 	if err != nil {
@@ -1177,6 +1231,12 @@ func (s *BrokerAuthService) validateWithSecret(ctx context.Context, r *http.Requ
 	nonce := r.Header.Get(HeaderNonce)
 	if nonce == "" {
 		return nil, errBrokerAuthMissingNonce
+	}
+
+	// Bound the body before anything reads it (the canonical string hashes
+	// it before the signature is compared).
+	if err := limitBrokerAuthBody(r); err != nil {
+		return nil, err
 	}
 
 	// A signed body must declare its length (before the nonce is recorded).
@@ -1404,7 +1464,7 @@ func BrokerAuthMiddleware(svc *BrokerAuthService) func(http.Handler) http.Handle
 			// Validate HMAC signature
 			identity, err := svc.ValidateBrokerSignature(r.Context(), r)
 			if err != nil {
-				writeBrokerAuthError(w, err.Error())
+				writeBrokerAuthFailure(w, err)
 				return
 			}
 
@@ -1424,6 +1484,20 @@ func BrokerAuthMiddleware(svc *BrokerAuthService) func(http.Handler) http.Handle
 // writeBrokerAuthError writes a broker authentication error response.
 func writeBrokerAuthError(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusUnauthorized, ErrCodeBrokerAuthFailed, message, nil)
+}
+
+// writeBrokerAuthFailure answers a failed broker signature check: 413 for a
+// body over apiclient.MaxSignedRequestBodyBytes, otherwise the 401 of
+// writeBrokerAuthError.
+// The HTTP error code "payload_too_large" follows the hub's existing 413
+// responses; the audit failure code for the same refusal is "malformed"
+// (brokerAuthFailureCode). The two namespaces differ on purpose.
+func writeBrokerAuthFailure(w http.ResponseWriter, err error) {
+	if errors.Is(err, errBrokerAuthBodyTooLarge) {
+		writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large", err.Error(), nil)
+		return
+	}
+	writeBrokerAuthError(w, err.Error())
 }
 
 // registrationLabels returns a copy of a registration request's labels with

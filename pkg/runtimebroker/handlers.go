@@ -3617,13 +3617,6 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		}
 	}
 
-	// Parity with the create path: populate the dedicated AgentToken field from
-	// the hub-minted token in ResolvedEnv so buildStartContext treats it as an
-	// explicit token rather than relying on the resolvedEnv-kept fallback. The
-	// precedence in buildStartContext step 3 keeps this token regardless, but
-	// setting it here makes the start path behave like create.
-	startContextAgentToken := startReq.ResolvedEnv["SCION_AUTH_TOKEN"]
-
 	// The URL path segment (id) is the agent's slug, not the Hub UUID: the
 	// broker's own dispatch client sends agent.Slug there. It is also the
 	// stable on-disk identity: create keys the agent directory, container
@@ -3705,7 +3698,6 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		EnvClassifications:       startReq.EnvClassifications,
 		ResolvedSecrets:          startReq.ResolvedSecrets,
 		SharedDirs:               startReq.SharedDirs,
-		AgentToken:               startContextAgentToken,
 		WorkspaceMode:            startReq.WorkspaceMode,
 		RunID:                    startReq.RunID,
 		TemplateName:             startReq.TemplateName,
@@ -5043,6 +5035,18 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		return
 	}
 	opts.ResolvedPlacement, opts.PlacementResolved = rp, true
+
+	// A profile (or its runtime entry) that still carries a removed storage
+	// override is refused before this endpoint's stop, with the profile the
+	// start resolved above: the refusal leaves the agent running
+	// (ptone/scion#6371). Manager.Start repeats the check as a backstop.
+	if err := agent.CheckProfileStorageRefusal(ctx, opts.Profile); err != nil {
+		if se, ok := storageMigrationRequiredFrom(err); ok {
+			trace.SpanFromContext(ctx).SetStatus(codes.Error, ErrCodeStorageMigrationRequired)
+			s.writeStorageMigrationRequired(w, se, "restart agent", id, nil)
+			return
+		}
+	}
 
 	// Stop then start — tolerate stop errors since the container may already
 	// be exited and the subsequent start will handle cleanup.
