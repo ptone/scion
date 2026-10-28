@@ -570,6 +570,10 @@ type Server struct {
 	// once per process (startSharedDirsMigrationHook).
 	sharedDirsMigrateOnce sync.Once
 	nfsReconcileCancel    context.CancelFunc
+	// controlPathSweepOnce and controlPathSweepCancel run and stop the
+	// running-agent control-path sweep (startControlPathSweep).
+	controlPathSweepOnce   sync.Once
+	controlPathSweepCancel context.CancelFunc
 	// nfsReconcileInterval overrides DefaultNFSReconcileInterval (tests).
 	nfsReconcileInterval time.Duration
 
@@ -669,6 +673,10 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime, rec config.Run
 			srv.stateDir = dir
 		}
 	}
+	// The state directory, a configured credentials file and a co-located
+	// Hub's database are Runtime Broker control paths no agent may mount,
+	// wherever they are configured (brokercontrol).
+	registerControlPaths(cfg.BrokerID, srv.stateDir, cfg.BrokerCredentialsPath)
 	if fi := srv.flatInstance(); fi != nil {
 		srv.flatK8sIdentity = newFlatKubernetesIdentityPolicy(fi)
 		srv.flatPolicy = config.NewFlatInstancePolicy(fi.Instance)
@@ -1615,6 +1623,10 @@ func (s *Server) startServices(ctx context.Context, withListener bool) error {
 	// reconciled.
 	s.startNFSReconcileLoop(ctx)
 
+	// Re-check the binds of agents already running, now and periodically,
+	// against the Runtime Broker control paths (controlPathSweeper).
+	s.startControlPathSweep(ctx)
+
 	// Move shared dirs this broker kept node-local onto the shared tree
 	// its Layout now places them on (background, once per process).
 	s.startSharedDirsMigrationHook(ctx)
@@ -1732,6 +1744,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.RUnlock()
 	if nfsCancel != nil {
 		nfsCancel()
+	}
+	s.mu.RLock()
+	sweepCancel := s.controlPathSweepCancel
+	s.mu.RUnlock()
+	if sweepCancel != nil {
+		sweepCancel()
 	}
 
 	// Cancel every start still running on a start, restart or create
