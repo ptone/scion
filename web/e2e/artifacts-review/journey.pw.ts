@@ -497,7 +497,9 @@ test('paragraph breaks, joins, a new list item and a multi-paragraph paste are s
   await expect(editor(page).locator('li.critic-break-ins')).toHaveCount(1);
   expect(await editorText(page)).toBe(final);
   // A loaded break is an earlier suggestion: Backspace there is refused.
-  await editor(page).locator('li.critic-break-ins').click();
+  // The cursor goes into the item's text (a click on the item itself can
+  // land on its pilcrow, outside the text).
+  await endOf(page, 'another');
   await page.keyboard.press('Home');
   await page.keyboard.press('Backspace');
   await expect(hint(page)).toContainText('This suggestion is from an earlier review.');
