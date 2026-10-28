@@ -130,25 +130,23 @@ func expandHostSource(path string) string {
 // when the agent's container is created. It is for configuration time: a
 // caller about to persist or start an agent configuration refuses it here,
 // before anything is written or run. Volume types that name no broker-host
-// path (gcs, cloudrun-volume, gke-shared-volume) are skipped. A volume at
-// /workspace is the agent's workspace and is judged by
-// ValidateWorkspaceSource instead of the configured-volume allow list.
+// path (gcs, cloudrun-volume, gke-shared-volume) are skipped, and so is a
+// volume at /workspace: that is the agent's workspace, judged where the
+// workspace is decided.
 func CheckVolumeSources(vols []api.VolumeMount) error {
 	for i, v := range vols {
 		switch strings.ToLower(v.Type) {
 		case "gcs", "cloudrun-volume", "gke-shared-volume":
 			continue
 		}
-		src := expandHostSource(v.Source)
-		if v.Target == "/workspace" && !isNamedVolume(src) {
-			// The workspace mount is judged by the workspace guard, which
-			// includes the control-path check, as it is at mount time.
-			if _, err := ValidateWorkspaceSource(src, ""); err != nil {
-				return fmt.Errorf("volumes[%d] (target %s): %w", i, v.Target, err)
-			}
+		if v.Target == "/workspace" {
+			// The workspace mount is resolved, filtered and validated where
+			// the workspace is decided (ValidateWorkspaceSource, which
+			// includes the control-path check), and every bind is checked
+			// again when the container is created.
 			continue
 		}
-		if err := checkConfiguredVolumeSource(src); err != nil {
+		if err := checkConfiguredVolumeSource(expandHostSource(v.Source)); err != nil {
 			return fmt.Errorf("volumes[%d] (target %s): %w", i, v.Target, err)
 		}
 	}

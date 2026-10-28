@@ -281,7 +281,7 @@ func TestCheckVolumeSources(t *testing.T) {
 		{Source: "cachevol", Target: "/b"},
 		{Type: "gcs", Bucket: "b", Target: "/c"},
 		{Type: "gke-shared-volume", VolumeName: "v", Target: "/d"},
-		// A bare project directory is a valid workspace, not a valid volume.
+		// The workspace is judged where it is decided, not here.
 		{Source: filepath.Join(global, "projects", "p"), Target: "/workspace"},
 	}
 	if err := CheckVolumeSources(ok); err != nil {
@@ -289,7 +289,6 @@ func TestCheckVolumeSources(t *testing.T) {
 	}
 	for _, v := range []api.VolumeMount{
 		{Source: filepath.Join(global, "projects", "p"), Target: "/mnt/p"},
-		{Source: global, Target: "/workspace"},
 	} {
 		if err := CheckVolumeSources([]api.VolumeMount{v}); err == nil {
 			t.Errorf("volume %+v: want refusal", v)
