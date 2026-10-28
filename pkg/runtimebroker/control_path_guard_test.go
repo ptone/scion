@@ -65,18 +65,26 @@ func decodeErrorCode(t *testing.T, body io.Reader) string {
 }
 
 func TestCreateAgent_RefusesVolumesReachingControlPaths(t *testing.T) {
-	global, _ := controlPathTestHome(t)
-	for _, body := range []string{
-		`{"name": "a1", "config": {"volumes": [{"source": "~/.scion", "target": "/x", "read_only": true}]}}`,
-		`{"name": "a1", "inlineConfig": {"volumes": [{"source": "` + filepath.ToSlash(filepath.Join(global, "settings.yaml")) + `", "target": "/x"}]}}`,
+	controlPathTestHome(t)
+	for _, vols := range []string{
+		`"config": {"volumes": [{"source": "~/.scion", "target": "/x", "read_only": true}]}`,
+		`"inlineConfig": {"volumes": [{"source": "GLOBAL/settings.yaml", "target": "/x"}]}`,
 	} {
+		// newTestServer may point $HOME elsewhere: take the global
+		// directory from the home in effect once the server exists.
 		srv := newTestServer(t)
+		home, err := os.UserHomeDir()
+		if err != nil {
+			t.Fatal(err)
+		}
+		global := filepath.ToSlash(filepath.Join(home, ".scion"))
+		body := `{"name": "a1", ` + strings.ReplaceAll(vols, "GLOBAL", global) + `}`
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(w, req)
 		if w.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, want 400: %s", w.Code, w.Body.String())
+			t.Fatalf("%s: status = %d, want 400: %s", vols, w.Code, w.Body.String())
 		}
 		if code := decodeErrorCode(t, w.Body); code != brokercontrol.ErrorCode {
 			t.Fatalf("code = %q, want %q", code, brokercontrol.ErrorCode)
