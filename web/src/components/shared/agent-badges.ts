@@ -92,10 +92,19 @@ export class ScionAgentBadges extends LitElement {
     const { mark } = view;
     // role="img" with the full label: assistive tech reads it once and treats
     // the children (the mark's alt text, the chip text) as presentational.
+    // The mark is not draggable (ptone/scion#6542): the graph puts the
+    // badges inside its card link, and an image drag (which WebKit starts
+    // after a few pixels of movement) swallows the click that opens the
+    // agent page.
     return html`<span class="badges" role="img" aria-label=${view.title} title=${view.title}>
-      <img class="mark" src=${mark.src} width="16" height="16" alt=${mark.label} />${view.size
-        ? html`<span class="size">${view.size.chip}</span>`
-        : nothing}
+      <img
+        class="mark"
+        src=${mark.src}
+        width="16"
+        height="16"
+        alt=${mark.label}
+        draggable="false"
+      />${view.size ? html`<span class="size">${view.size.chip}</span>` : nothing}
     </span>`;
   }
 }
