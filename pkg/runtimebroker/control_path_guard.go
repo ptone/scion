@@ -15,6 +15,9 @@
 package runtimebroker
 
 import (
+	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -96,4 +99,29 @@ func absOrSelf(p string) string {
 		return abs
 	}
 	return p
+}
+
+// checkLayoutRoots refuses a broker layout root under which agent mounts are
+// made or shares are mounted (the worktree base, the NFS mount root) when it
+// equals or contains a Runtime Broker control path. The server then refuses
+// to start.
+func checkLayoutRoots(cfg ServerConfig) error {
+	type root struct{ name, path string }
+	roots := []root{{"the worktree base directory", cfg.WorktreeBase}}
+	if cfg.NFSConfig != nil {
+		roots = append(roots, root{"the NFS mount root (server.broker.nfs.mount_root)", cfg.NFSConfig.MountRoot})
+	}
+	for _, r := range roots {
+		if r.path == "" {
+			continue
+		}
+		if _, err := brokercontrol.CheckNamed(r.path); err != nil {
+			var re *brokercontrol.RefusalError
+			if errors.As(err, &re) {
+				slog.Error("Runtime Broker layout root reaches Runtime Broker control paths", "root", r.name, "detail", re.Detail())
+			}
+			return fmt.Errorf("%s: %w", r.name, err)
+		}
+	}
+	return nil
 }

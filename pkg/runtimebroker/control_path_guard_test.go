@@ -276,3 +276,19 @@ func TestControlPathSweep_RuntimeWithoutInspection(t *testing.T) {
 	cancel()
 	sw.run(ctx) // returns at once: nothing to sweep
 }
+
+func TestCheckLayoutRoots(t *testing.T) {
+	global, outside := controlPathTestHome(t)
+	home := filepath.Dir(global)
+	if err := checkLayoutRoots(ServerConfig{WorktreeBase: filepath.Join(outside, "wt"), NFSConfig: &config.V1NFSConfig{MountRoot: filepath.Join(outside, "nfs")}}); err != nil {
+		t.Fatalf("roots clear of control paths: %v", err)
+	}
+	for _, cfg := range []ServerConfig{
+		{WorktreeBase: home},
+		{NFSConfig: &config.V1NFSConfig{MountRoot: global}},
+	} {
+		if err := checkLayoutRoots(cfg); !errors.Is(err, brokercontrol.ErrControlPathMount) {
+			t.Errorf("checkLayoutRoots(%+v) = %v, want ErrControlPathMount", cfg, err)
+		}
+	}
+}

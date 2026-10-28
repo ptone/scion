@@ -452,6 +452,9 @@ type Server struct {
 	// stateDirSetupErr refuses to start a server whose broker ID cannot
 	// name its default state directory (DefaultStateDir; startServices).
 	stateDirSetupErr error
+	// controlPathSetupErr refuses to start a server whose layout roots
+	// reach Runtime Broker control paths (checkLayoutRoots).
+	controlPathSetupErr error
 
 	// auxiliaryRuntimes holds runtime+manager pairs for non-default runtimes
 	// created via profile resolution (e.g. kubernetes when default is docker).
@@ -677,6 +680,10 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime, rec config.Run
 	// Hub's database are Runtime Broker control paths no agent may mount,
 	// wherever they are configured (brokercontrol).
 	registerControlPaths(cfg.BrokerID, srv.stateDir, cfg.BrokerCredentialsPath)
+	if err := checkLayoutRoots(cfg); err != nil {
+		srv.controlPathSetupErr = fmt.Errorf("runtime broker layout: %w", err)
+		slog.Error("Runtime Broker will not start", "error", srv.controlPathSetupErr)
+	}
 	if fi := srv.flatInstance(); fi != nil {
 		srv.flatK8sIdentity = newFlatKubernetesIdentityPolicy(fi)
 		srv.flatPolicy = config.NewFlatInstancePolicy(fi.Instance)
@@ -1547,6 +1554,9 @@ func (s *Server) startServices(ctx context.Context, withListener bool) error {
 	}
 	if s.stateDirSetupErr != nil {
 		return s.stateDirSetupErr
+	}
+	if s.controlPathSetupErr != nil {
+		return s.controlPathSetupErr
 	}
 	if s.hostSetupErr != nil {
 		return s.hostSetupErr
