@@ -177,8 +177,9 @@ curl -H "Authorization: Bearer $SESSION_TOKEN" \
      "https://scion.example.com/api/v1/auth/scopes?projectId=<project-id>"
 ```
 
-For a hub boundary, send `?boundary=hub` with no `projectId`. A hub scope you cannot select is
-reported with the reason `authority_required`.
+For a hub boundary, send `?boundary=hub` with no `projectId`. A scope that a hub boundary allows
+but you cannot select is reported with the reason `authority_required`; a scope that a hub boundary
+does not allow reports `boundary_not_allowed`.
 
 Each scope in the response reports `eligibility.eligible` and, when it is not, a machine-readable
 `eligibility.reason` (for an alias such as `agent:manage`, `eligibility.ineligibleMembers` names the

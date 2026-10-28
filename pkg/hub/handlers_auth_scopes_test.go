@@ -965,6 +965,7 @@ func TestAuthScopes_HubListingAgreesWithMint(t *testing.T) {
 	var full AuthScopesResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &full))
 	require.NotEmpty(t, full.Aliases)
+	var sawIneligibleAlias bool
 	for _, alias := range full.Aliases {
 		require.NotNil(t, alias.Eligibility, "alias %s missing eligibility", alias.ID)
 		mint := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/auth/tokens", map[string]any{
@@ -978,6 +979,7 @@ func TestAuthScopes_HubListingAgreesWithMint(t *testing.T) {
 			require.NoError(t, s.DeleteUserAccessToken(ctx, created.AccessToken.ID))
 			continue
 		}
+		sawIneligibleAlias = true
 		require.Equal(t, http.StatusForbidden, mint.Code, "listing said alias %s ineligible, mint should fail: %s", alias.ID, mint.Body.String())
 		var resp ErrorResponse
 		require.NoError(t, json.Unmarshal(mint.Body.Bytes(), &resp))
@@ -985,7 +987,14 @@ func TestAuthScopes_HubListingAgreesWithMint(t *testing.T) {
 		require.NotNil(t, resp.Error.Details, "alias %s", alias.ID)
 		assert.Contains(t, alias.Eligibility.IneligibleMembers, resp.Error.Details["selector"],
 			"alias %s: the refused selector is one of the listed ineligible members", alias.ID)
+		sel, _ := resp.Error.Details["selector"].(string)
+		entry, ok := byID[sel]
+		require.True(t, ok, "alias %s: refused selector %q is in the listing", alias.ID, sel)
+		require.NotNil(t, entry.Eligibility, "alias %s: refused selector %q has eligibility", alias.ID, sel)
+		assert.Equal(t, entry.Eligibility.Reason, resp.Error.Details["reason"],
+			"alias %s: mint's reason for %s matches the listing's reason", alias.ID, sel)
 	}
+	assert.True(t, sawIneligibleAlias, "precondition: some alias is ineligible on a hub boundary")
 }
 
 // TestTokenCreate_HubDenialNamesSelector pins the hub-boundary mint
