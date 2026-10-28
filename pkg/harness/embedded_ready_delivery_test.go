@@ -27,6 +27,13 @@ import (
 
 // loadEmbeddedEntry reads harnesses/<name>/config.yaml from the embed FS and
 // returns its raw bytes and parsed entry.
+// bundleOwnReady lists the bundles added after the legacy name-keyed
+// readiness table, with the ready block they chose. Every other bundle
+// reproduces the legacy table.
+var bundleOwnReady = map[string]api.ReadySpec{
+	"antigravity-ui": {Strategy: "delay", Settle: 15 * time.Second},
+}
+
 func loadEmbeddedEntry(t *testing.T, name string) ([]byte, config.HarnessConfigEntry) {
 	t.Helper()
 	data, err := fs.ReadFile(harnessesEmbed.FS, name+"/config.yaml")
@@ -77,7 +84,8 @@ func TestEmbeddedHarnessConfigs_Validate(t *testing.T) {
 // sessionStart fires only on the first prompt), every other bundle uses
 // delay, and every bundle's delivery equals the historical hard-coded Enter
 // x3 at 300ms. The blocks must be written out explicitly, not left to
-// defaults, so authors can see the values.
+// defaults, so authors can see the values. Bundles added after the legacy
+// table are listed in ownValues with the values they chose.
 func TestEmbeddedHarnessConfigs_ValuesMatchLegacyTable(t *testing.T) {
 	legacyHook := map[string]bool{
 		"claude":     true,
@@ -87,6 +95,20 @@ func TestEmbeddedHarnessConfigs_ValuesMatchLegacyTable(t *testing.T) {
 	wantHook := api.ReadySpec{Strategy: "hook", Settle: 1500 * time.Millisecond, Timeout: 90 * time.Second}
 	wantDelay := api.ReadySpec{Strategy: "delay", Settle: 8 * time.Second}
 	wantDelivery := api.DeliverySpec{SubmitKeys: []string{"Enter"}, ExtraSubmits: 2, ExtraSubmitDelay: 300 * time.Millisecond}
+	ownValues := map[string]struct {
+		ready    api.ReadySpec
+		delivery api.DeliverySpec
+	}{
+		// A GUI app driven from its own UI: messages only reach a notice
+		// in the pane, so one Enter is enough.
+		"antigravity-ui": {
+			ready:    bundleOwnReady["antigravity-ui"],
+			delivery: api.DeliverySpec{SubmitKeys: []string{"Enter"}},
+		},
+	}
+	if len(ownValues) != len(bundleOwnReady) {
+		t.Errorf("ownValues and bundleOwnReady list different bundles")
+	}
 
 	seen := map[string]bool{}
 	for _, name := range AllHarnessNames() {
@@ -98,26 +120,35 @@ func TestEmbeddedHarnessConfigs_ValuesMatchLegacyTable(t *testing.T) {
 			if entry.Delivery == nil {
 				t.Errorf("missing explicit delivery block")
 			}
-			want := wantDelay
+			want, wantDel := wantDelay, wantDelivery
 			if legacyHook[name] {
 				want = wantHook
+				seen[name] = true
+			}
+			if own, ok := ownValues[name]; ok {
+				want, wantDel = own.ready, own.delivery
 				seen[name] = true
 			}
 			if got := entry.ResolvedReady(); got != want {
 				t.Errorf("ResolvedReady() = %+v, want %+v", got, want)
 			}
-			if got := entry.ResolvedDelivery(); !reflect.DeepEqual(got, wantDelivery) {
-				t.Errorf("ResolvedDelivery() = %+v, want %+v", got, wantDelivery)
+			if got := entry.ResolvedDelivery(); !reflect.DeepEqual(got, wantDel) {
+				t.Errorf("ResolvedDelivery() = %+v, want %+v", got, wantDel)
 			}
 			// Host delivery reads the spec through harness.New.
-			if got := New(name).DeliverySpec(); !reflect.DeepEqual(got, wantDelivery) {
-				t.Errorf("New(%q).DeliverySpec() = %+v, want %+v", name, got, wantDelivery)
+			if got := New(name).DeliverySpec(); !reflect.DeepEqual(got, wantDel) {
+				t.Errorf("New(%q).DeliverySpec() = %+v, want %+v", name, got, wantDel)
 			}
 		})
 	}
 	for name := range legacyHook {
 		if !seen[name] {
 			t.Errorf("legacy hook-mode harness %q has no embedded bundle", name)
+		}
+	}
+	for name := range ownValues {
+		if !seen[name] {
+			t.Errorf("harness %q with its own ready/delivery values has no embedded bundle", name)
 		}
 	}
 }
@@ -130,15 +161,16 @@ func TestEmbeddedHarnessConfigs_ValuesMatchLegacyTable(t *testing.T) {
 // wrapper and skip rule); the harnesses without native support say no.
 func TestEmbeddedHarnessConfigs_AgentPluginsCapability(t *testing.T) {
 	want := map[string]api.SupportLevel{
-		"codex":       api.SupportPartial,
-		"copilot":     api.SupportYes,
-		"claude":      api.SupportPartial,
-		"muse-code":   api.SupportPartial,
-		"gemini-cli":  api.SupportNo,
-		"grok-build":  api.SupportNo,
-		"antigravity": api.SupportNo,
-		"hermes":      api.SupportNo,
-		"opencode":    api.SupportNo,
+		"codex":          api.SupportPartial,
+		"copilot":        api.SupportYes,
+		"claude":         api.SupportPartial,
+		"muse-code":      api.SupportPartial,
+		"gemini-cli":     api.SupportNo,
+		"grok-build":     api.SupportNo,
+		"antigravity":    api.SupportNo,
+		"antigravity-ui": api.SupportNo,
+		"hermes":         api.SupportNo,
+		"opencode":       api.SupportNo,
 	}
 	for name, level := range want {
 		_, entry := loadEmbeddedEntry(t, name)

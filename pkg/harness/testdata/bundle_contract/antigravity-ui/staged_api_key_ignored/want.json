@@ -1,0 +1,12 @@
+{
+  "exit_code": 0,
+  "resolved_auth": {
+    "method": "none",
+    "harness": "antigravity-ui"
+  },
+  "env": {},
+  "env_absent": [
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY"
+  ]
+}

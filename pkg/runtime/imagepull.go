@@ -23,15 +23,16 @@ import (
 // with a Dockerfile) to its image name. Keep it in sync with harnesses/;
 // TestHarnessImageMap_MatchesBundledHarnesses fails on drift.
 var harnessImageMap = map[string]string{
-	"antigravity": "scion-antigravity:latest",
-	"claude":      "scion-claude:latest",
-	"codex":       "scion-codex:latest",
-	"copilot":     "scion-copilot:latest",
-	"gemini-cli":  "scion-gemini-cli:latest",
-	"grok-build":  "scion-grok-build:latest",
-	"hermes":      "scion-hermes:latest",
-	"muse-code":   "scion-muse-code:latest",
-	"opencode":    "scion-opencode:latest",
+	"antigravity":    "scion-antigravity:latest",
+	"antigravity-ui": "scion-antigravity-ui:latest",
+	"claude":         "scion-claude:latest",
+	"codex":          "scion-codex:latest",
+	"copilot":        "scion-copilot:latest",
+	"gemini-cli":     "scion-gemini-cli:latest",
+	"grok-build":     "scion-grok-build:latest",
+	"hermes":         "scion-hermes:latest",
+	"muse-code":      "scion-muse-code:latest",
+	"opencode":       "scion-opencode:latest",
 }
 
 // HarnessImages returns the fully qualified image names needed for the given harness keys.

@@ -156,8 +156,10 @@ func shippedHarnessesWithAuth(t *testing.T) map[string]config.HarnessConfigEntry
 	return out
 }
 
-// minProvisionTestFiles mirrors the floor in python_unit_test.go (a
-// different package, so it cannot be shared).
+// minProvisionTestFiles is a floor on discovered harnesses with auth
+// types. It is one below the floor in python_unit_test.go (a different
+// package, so it cannot be shared) because antigravity-ui declares no auth
+// types.
 const minProvisionTestFiles = 9
 
 func runPinDriver(t *testing.T, python, dir string, cases []pinCase) ([]pinMethod, []pinResult) {

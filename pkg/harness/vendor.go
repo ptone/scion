@@ -31,12 +31,13 @@ const (
 // run models from several vendors) maps to its own harness name, because
 // the harness alone does not say whose model runs.
 var harnessVendors = map[string]string{
-	"antigravity": VendorGoogle,
-	"claude":      VendorAnthropic,
-	"codex":       VendorOpenAI,
-	"gemini-cli":  VendorGoogle,
-	"grok-build":  VendorXAI,
-	"muse-code":   VendorMeta,
+	"antigravity":    VendorGoogle,
+	"antigravity-ui": VendorGoogle,
+	"claude":         VendorAnthropic,
+	"codex":          VendorOpenAI,
+	"gemini-cli":     VendorGoogle,
+	"grok-build":     VendorXAI,
+	"muse-code":      VendorMeta,
 
 	"copilot":  "copilot",
 	"hermes":   "hermes",

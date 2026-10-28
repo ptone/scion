@@ -19,6 +19,7 @@ section covers the `ready` and `delivery` blocks.
 | [opencode](opencode/README.md) | [OpenCode](https://opencode.ai) AI coding assistant | `scion harness-config install harnesses/opencode` |
 | [codex](codex/README.md) | [Codex](https://github.com/openai/codex) OpenAI coding agent CLI | `scion harness-config install harnesses/codex` |
 | [antigravity](antigravity/README.md) | [Antigravity](https://github.com/ptone/scion-antigravity) Gemini-based coding agent via OAuth | `scion harness-config install harnesses/antigravity` |
+| [antigravity-ui](antigravity-ui/README.md) | Experimental: the Antigravity desktop app, headless, used through its web UI (amd64, locally built image) | `scion harness-config install harnesses/antigravity-ui` |
 
 Or install directly from GitHub (no local checkout needed):
 

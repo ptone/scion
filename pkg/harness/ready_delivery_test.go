@@ -143,6 +143,9 @@ func TestResolve_BuiltInNameWithoutDirKeepsBundleReady(t *testing.T) {
 		if legacyHook[name] {
 			want = config.DefaultReadySpec(config.ReadyStrategyHook)
 		}
+		if own, ok := bundleOwnReady[name]; ok {
+			want = own
+		}
 		if got := resolved.Harness.ReadySpec(); got != want {
 			t.Errorf("%s: ReadySpec() = %+v, want %+v", name, got, want)
 		}
@@ -167,6 +170,9 @@ func TestEffectiveConfig_ReadyFromBundleMatchesLegacyTable(t *testing.T) {
 		want := config.DefaultReadySpec(config.ReadyStrategyDelay)
 		if legacyHook[name] {
 			want = config.DefaultReadySpec(config.ReadyStrategyHook)
+		}
+		if own, ok := bundleOwnReady[name]; ok {
+			want = own
 		}
 		if got := entry.ResolvedReady(); got != want {
 			t.Errorf("%s: ResolvedReady() = %+v, want %+v", name, got, want)

@@ -159,11 +159,24 @@ func TestAutoDetectAuthType_APIKeyOverVertexFileFiresOnlyForKnownHarnesses(t *te
 			continue
 		}
 		name := e.Name()
-		if _, err := fs.Stat(harnessesEmbed.FS, name+"/config.yaml"); err != nil {
+		data, err := fs.ReadFile(harnessesEmbed.FS, name+"/config.yaml")
+		if err != nil {
 			continue
 		}
 		seen++
-		authMeta := loadAuthMetaFromHarness(t, name)
+		entry, err := config.ParseHarnessConfigYAML(data)
+		if err != nil {
+			t.Fatalf("parse %s/config.yaml: %v", name, err)
+		}
+		if entry.Auth == nil {
+			// A harness that stages no Scion credentials (it has no auth
+			// block) has nothing to autodetect.
+			if expected[name] {
+				t.Errorf("expected harness %q declares no auth block", name)
+			}
+			continue
+		}
+		authMeta := entry.Auth
 
 		var firing []string
 		for fileKey := range authMeta.Autodetect.Files {

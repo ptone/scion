@@ -1,0 +1,10 @@
+{
+  "auth_candidates": {},
+  "harness_config": {},
+  "mcp_servers": {
+    "fs": {
+      "transport": "stdio",
+      "command": "echo"
+    }
+  }
+}

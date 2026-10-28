@@ -73,11 +73,11 @@ mod = importlib.util.module_from_spec(spec_obj)
 spec_obj.loader.exec_module(mod)
 
 auth_specs = [v for v in vars(mod).values() if type(v).__name__ == "AuthSpec"]
-if len(auth_specs) != 1:
-    raise SystemExit("expected exactly one AuthSpec in provision.py, found %d" % len(auth_specs))
+if len(auth_specs) > 1:
+    raise SystemExit("expected at most one AuthSpec in provision.py, found %d" % len(auth_specs))
 
 methods = []
-for m in auth_specs[0].methods:
+for m in (auth_specs[0].methods if auth_specs else []):
     groups = [[k] for k in m.all_of]
     if m.any_of:
         groups.append(list(m.any_of))
@@ -90,7 +90,7 @@ if "vertex-ai" not in names and hasattr(mod, "_VERTEX_PROJECT_VARS") and hasattr
                     "groups": [list(mod._VERTEX_PROJECT_VARS), list(mod._VERTEX_LOCATION_VARS)],
                     "path": "", "secret_key": ""})
 
-out = {"methods": methods}
+out = {"methods": methods, "has_auth_spec": bool(auth_specs)}
 if hasattr(mod, "VALID_AUTH_TYPES"):
     out["valid_auth_types"] = list(mod.VALID_AUTH_TYPES)
 print(json.dumps(out))
@@ -107,6 +107,7 @@ type specMethod struct {
 type specReport struct {
 	Methods        []specMethod `json:"methods"`
 	ValidAuthTypes []string     `json:"valid_auth_types"`
+	HasAuthSpec    bool         `json:"has_auth_spec"`
 }
 
 func runAuthSpecDriver(t *testing.T, python, dir string) specReport {
@@ -291,6 +292,14 @@ func TestAuthSpecMatchesHarnessConfig(t *testing.T) {
 		checked++
 		t.Run(dir, func(t *testing.T) {
 			rep := runAuthSpecDriver(t, python, dir)
+			if !rep.HasAuthSpec {
+				// A harness that stages no Scion credentials declares
+				// neither an AuthSpec nor config.yaml auth types.
+				if entry.Auth != nil && len(entry.Auth.Types) > 0 {
+					t.Fatal("config.yaml declares auth types but provision.py has no AuthSpec")
+				}
+				return
+			}
 			if len(rep.Methods) == 0 {
 				t.Fatal("provisioner AuthSpec declares no auth methods")
 			}
