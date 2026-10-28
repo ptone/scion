@@ -339,20 +339,22 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		return expanded
 	}
 
-	// Volume deduplication
-	volumeMap := make(map[string]string)
+	// Volume deduplication, by target. The source of each bind is checked
+	// once, when the binds are emitted below (checkBindSource).
+	type bindSpec struct {
+		src string
+		ro  bool
+	}
+	volumeMap := make(map[string]bindSpec)
 	var volumeOrder []string
 
 	registerMount := func(src, tgt string, ro bool, overwrite bool) {
-		val := fmt.Sprintf("%s:%s", src, tgt)
-		if ro {
-			val += ":ro"
-		}
+		spec := bindSpec{src: src, ro: ro}
 		if _, exists := volumeMap[tgt]; !exists {
 			volumeOrder = append(volumeOrder, tgt)
-			volumeMap[tgt] = val
+			volumeMap[tgt] = spec
 		} else if overwrite {
-			volumeMap[tgt] = val
+			volumeMap[tgt] = spec
 		}
 	}
 
@@ -397,8 +399,15 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		}
 		// Agents' own directories under ~/.scion/project-configs hold state
 		// the host relies on; no configured volume may mount them
-		// (checkVolumeSource).
+		// (checkVolumeSource). Nor may one reach a Runtime Broker control
+		// path, read-only or not (checkConfiguredVolumeSource).
 		if err := checkVolumeSource(src, v.ReadOnly); err != nil {
+			if volumeErr == nil {
+				volumeErr = err
+			}
+			return
+		}
+		if err := checkConfiguredVolumeSource(src); err != nil {
 			if volumeErr == nil {
 				volumeErr = err
 			}
@@ -841,7 +850,11 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	if devBinDir := os.Getenv("SCION_DEV_BINARIES"); devBinDir != "" {
 		if abs, err := filepath.Abs(devBinDir); err == nil {
 			if info, err := os.Stat(abs); err == nil && info.IsDir() {
-				registerMount(abs, "/opt/scion/bin", true, true)
+				resolved, err := checkHostFileSource(abs)
+				if err != nil {
+					return nil, err
+				}
+				registerMount(resolved, "/opt/scion/bin", true, true)
 			}
 		}
 	}
@@ -860,9 +873,32 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		}
 	}
 
-	// Add all registered volumes
+	// Add all registered volumes. Every bind source, whatever produced it
+	// (workspace, home, configured volume, shared dir, git, auth file), is
+	// checked here against the Runtime Broker control paths, and the
+	// resolved source is what is mounted.
+	var emittedBinds []BindMount
 	for _, tgt := range volumeOrder {
-		addArg("-v", volumeMap[tgt])
+		spec := volumeMap[tgt]
+		src, err := checkBindSource(spec.src)
+		if err != nil {
+			return nil, err
+		}
+		val := fmt.Sprintf("%s:%s", src, tgt)
+		if spec.ro {
+			val += ":ro"
+		}
+		addArg("-v", val)
+		if !isNamedVolume(src) {
+			emittedBinds = append(emittedBinds, BindMount{Source: src, Destination: tgt})
+		}
+	}
+	// Record the binds on the container, for runtimes that cannot report
+	// them (LabelBindSources).
+	if label, err := encodeBindSourcesLabel(emittedBinds); err == nil {
+		addArg("--label", LabelBindSources+"="+label)
+	} else {
+		return nil, fmt.Errorf("recording container binds: %w", err)
 	}
 
 	// (The whole repo root is never mounted read-write any more: the
@@ -2256,6 +2292,12 @@ func applyResolvedAuth(config RunConfig, addEnv func(string, string), addVolume 
 			// intentionally cleared by run.go. Skip the copy/mount.
 			continue
 		}
+		// No auth file may come from a Runtime Broker control path or from
+		// the Scion global directory, whether it is copied or bound.
+		sourcePath, err := checkHostFileSource(f.SourcePath)
+		if err != nil {
+			return err
+		}
 		containerPath := expandTildeTarget(f.ContainerPath, containerHome)
 
 		if config.HomeDir != "" {
@@ -2275,12 +2317,12 @@ func applyResolvedAuth(config RunConfig, addEnv func(string, string), addVolume 
 				}
 				home = h
 			}
-			if err := copyFileIntoHome(f.SourcePath, home, relPath); err != nil {
+			if err := copyFileIntoHome(sourcePath, home, relPath); err != nil {
 				return fmt.Errorf("failed to copy auth file %s → %s: %w", f.SourcePath, dst, err)
 			}
 		} else {
 			// Volume mount mode: register a read-only bind mount
-			registerMount(f.SourcePath, containerPath, true, false)
+			registerMount(sourcePath, containerPath, true, false)
 		}
 	}
 

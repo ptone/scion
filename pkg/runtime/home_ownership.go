@@ -156,6 +156,11 @@ func agentHomeRepairArgs(h agentHomeRepairHelper) ([]string, error) {
 	if strings.ContainsAny(req.HomeDir, ":,") {
 		return nil, fmt.Errorf("agent home ownership repair: agent home path %q contains ':' or ','", req.HomeDir)
 	}
+	// The helper bind-mounts the home read-write: it may not reach a
+	// Runtime Broker control path (checkBindSource).
+	if _, err := checkBindSource(req.HomeDir); err != nil {
+		return nil, fmt.Errorf("agent home ownership repair: %w", err)
+	}
 	if req.Image == "" || strings.HasPrefix(req.Image, "-") {
 		return nil, fmt.Errorf("agent home ownership repair: invalid image %q", req.Image)
 	}
