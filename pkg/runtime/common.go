@@ -385,17 +385,18 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			// own path); registerMount below would not add this one.
 			return
 		}
-		// Agents' own directories under ~/.scion/project-configs hold state
-		// the host relies on; no configured volume may mount them
-		// (checkVolumeSource). Nor may one reach a Runtime Broker control
-		// path, read-only or not (checkConfiguredVolumeSource).
-		if err := checkVolumeSource(src, v.ReadOnly); err != nil {
+		// No configured volume may reach a Runtime Broker control path,
+		// read-only or not (checkConfiguredVolumeSource). Agents' own
+		// directories under ~/.scion/project-configs hold state the host
+		// relies on; no configured volume may mount them either
+		// (checkVolumeSource).
+		if err := checkConfiguredVolumeSource(src); err != nil {
 			if volumeErr == nil {
 				volumeErr = err
 			}
 			return
 		}
-		if err := checkConfiguredVolumeSource(src); err != nil {
+		if err := checkVolumeSource(src, v.ReadOnly); err != nil {
 			if volumeErr == nil {
 				volumeErr = err
 			}
