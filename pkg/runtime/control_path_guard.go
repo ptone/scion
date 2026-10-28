@@ -16,10 +16,16 @@ package runtime
 
 import (
 	"errors"
+	"fmt"
+	"log/slog"
+	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercontrol"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 // namedVolumePattern matches a container runtime's named volume (Docker and
@@ -92,4 +98,59 @@ func checkHostFileSource(src string) (string, error) {
 		return "", err
 	}
 	return resolved, nil
+}
+
+// expandVolumeEnv expands environment variables in a volume path (e.g.
+// ${GOPATH}, $HOME). Mount paths are visible to the agent, so names refused
+// for agents expand to empty.
+func expandVolumeEnv(path string) string {
+	expanded, _, refused := util.ExpandEnvRefusing(path, util.IsAgentRefusedHostEnvName)
+	for _, name := range refused {
+		slog.Warn("volume path: host environment variable is reserved and is not expanded", "variable", name)
+	}
+	return expanded
+}
+
+// expandHostSource expands a configured volume source on the host side the
+// way buildCommonRunArgs does: environment variables, then a leading "~".
+func expandHostSource(path string) string {
+	expanded := expandVolumeEnv(path)
+	hostHome, _ := os.UserHomeDir()
+	if strings.HasPrefix(expanded, "~/") {
+		return filepath.Join(hostHome, expanded[2:])
+	}
+	if expanded == "~" {
+		return hostHome
+	}
+	return expanded
+}
+
+// CheckVolumeSources applies the configured-volume control-path check to
+// every host-path volume in vols, with each source expanded as it will be
+// when the agent's container is created. It is for configuration time: a
+// caller about to persist or start an agent configuration refuses it here,
+// before anything is written or run. Volume types that name no broker-host
+// path (gcs, cloudrun-volume, gke-shared-volume) are skipped. A volume at
+// /workspace is the agent's workspace and is judged by
+// ValidateWorkspaceSource instead of the configured-volume allow list.
+func CheckVolumeSources(vols []api.VolumeMount) error {
+	for i, v := range vols {
+		switch strings.ToLower(v.Type) {
+		case "gcs", "cloudrun-volume", "gke-shared-volume":
+			continue
+		}
+		src := expandHostSource(v.Source)
+		if v.Target == "/workspace" && !isNamedVolume(src) {
+			// The workspace mount is judged by the workspace guard, which
+			// includes the control-path check, as it is at mount time.
+			if _, err := ValidateWorkspaceSource(src, ""); err != nil {
+				return fmt.Errorf("volumes[%d] (target %s): %w", i, v.Target, err)
+			}
+			continue
+		}
+		if err := checkConfiguredVolumeSource(src); err != nil {
+			return fmt.Errorf("volumes[%d] (target %s): %w", i, v.Target, err)
+		}
+	}
+	return nil
 }

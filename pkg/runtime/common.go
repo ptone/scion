@@ -313,28 +313,16 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		}
 	}
 
-	hostHome, _ := os.UserHomeDir()
 	expandPath := func(path string, isTarget bool) string {
-		// Expand environment variables first (e.g., ${GOPATH}, $HOME).
-		// Mount paths are visible to the agent, so names refused for
-		// agents expand to empty.
-		expanded, _, refused := util.ExpandEnvRefusing(path, util.IsAgentRefusedHostEnvName)
-		for _, name := range refused {
-			slog.Warn("volume path: host environment variable is reserved and is not expanded", "variable", name)
+		if !isTarget {
+			return expandHostSource(path)
 		}
-
-		// Then handle tilde expansion
+		expanded := expandVolumeEnv(path)
 		if strings.HasPrefix(expanded, "~/") {
-			if isTarget {
-				return filepath.Join(util.GetHomeDir(config.UnixUsername), expanded[2:])
-			}
-			return filepath.Join(hostHome, expanded[2:])
+			return filepath.Join(util.GetHomeDir(config.UnixUsername), expanded[2:])
 		}
 		if expanded == "~" {
-			if isTarget {
-				return util.GetHomeDir(config.UnixUsername)
-			}
-			return hostHome
+			return util.GetHomeDir(config.UnixUsername)
 		}
 		return expanded
 	}

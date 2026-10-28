@@ -267,3 +267,32 @@ func TestDecodeBindSourcesLabel_MissingIsUnverifiable(t *testing.T) {
 		t.Fatalf("malformed label: err = %v", err)
 	}
 }
+
+func TestCheckVolumeSources(t *testing.T) {
+	_, global, outside := controlPathFixture(t)
+	for _, src := range []string{"~", "~/.scion", "${HOME}/.scion/settings.yaml", "$HOME"} {
+		err := CheckVolumeSources([]api.VolumeMount{{Source: src, Target: "/x"}})
+		if !errors.Is(err, brokercontrol.ErrControlPathMount) {
+			t.Errorf("source %q: err = %v, want ErrControlPathMount", src, err)
+		}
+	}
+	ok := []api.VolumeMount{
+		{Source: outside, Target: "/a"},
+		{Source: "cachevol", Target: "/b"},
+		{Type: "gcs", Bucket: "b", Target: "/c"},
+		{Type: "gke-shared-volume", VolumeName: "v", Target: "/d"},
+		// A bare project directory is a valid workspace, not a valid volume.
+		{Source: filepath.Join(global, "projects", "p"), Target: "/workspace"},
+	}
+	if err := CheckVolumeSources(ok); err != nil {
+		t.Fatalf("clean volumes: %v", err)
+	}
+	for _, v := range []api.VolumeMount{
+		{Source: filepath.Join(global, "projects", "p"), Target: "/mnt/p"},
+		{Source: global, Target: "/workspace"},
+	} {
+		if err := CheckVolumeSources([]api.VolumeMount{v}); err == nil {
+			t.Errorf("volume %+v: want refusal", v)
+		}
+	}
+}
