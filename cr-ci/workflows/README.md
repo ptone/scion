@@ -86,19 +86,21 @@ job no longer has those since #4061 (`hack/golangci-lint-split.sh`).
 **Only host-process jobs may be routed.** Cloud Run cannot run Docker, so
 jobs with `services:` (the Postgres jobs) or Docker steps must stay on
 `ubuntu-latest` ([architecture: constraints](../docs/architecture.md#constraints)).
-v1 routes `lint` only.
+`hack/check-runner-routing.sh` enforces this for every job whose `runs-on` reads
+the variable (`grep -n SCION_LARGE_RUNNER .github/workflows/*.yml` lists them).
 
 ### Things P6 must look at before P7
 
 - **golangci-lint binary.** `ci.yml`'s lint job runs golangci-lint v2.15.0
   built with the go-tools#1839 patch by `cr-ci/runner/golangci-lint/build.sh`:
   it restores the binary from its own Actions cache entry (key
-  `golangci-lint-patched-<os>-<arch>-go<version>-<hash of cr-ci/runner/golangci-lint/**>`,
+  `golangci-lint-patched-<runner.environment>-<os>-<arch>-go<version>-<hash of cr-ci/runner/golangci-lint/**>`,
   path `$RUNNER_TEMP/golangci-lint-patched`), or builds it, and puts it first on
   `PATH`; `golangci-lint-action` then only restores the analysis cache
   (`install-mode: none`). A routed `lint` job does the same on the cr-ci runner
-  (`RUNNER_TEMP` is `/home/runner/work/_temp` on both runner types, so the entry
-  is shared) and uses that binary, not the image's. The image ships the same
+  (`RUNNER_TEMP` is `/home/runner/work/_temp` on both runner types, but the key
+  carries `runner.environment`, so each runner type has its own entry; see "Cache
+  scope") and uses that binary, not the image's. The image ships the same
   build (`runner/Dockerfile`, `golangci-lint` stage) for the PoC template and
   anything else that calls `golangci-lint` directly. One set of pins
   (`cr-ci/runner/golangci-lint/VERSIONS`) serves all of them.
@@ -180,6 +182,21 @@ zstd are wrong.
 | :--- | :--- |
 | **Parity holds** (the check passes) | **Shared.** A routed job restores the entries ubuntu-latest saved, and the entries it saves on `main` restore unchanged on a fallback ubuntu-latest run. One set of entries; quota unchanged. |
 | Parity broken (the check fails) | **Separate.** Every restore misses or extracts beside the cache (a cold lint; ci.yml's comments cite 818-1063 s cold against 584-776 s warm, and the warm lint took 1310-1802 s on ubuntu-latest in October 2026, see "Tuning"). Routed `main` runs save a second set (about 4.2 GB of Go build cache plus module zips and the golangci-lint analysis cache) inside the repository's 10 GB Actions cache quota, which raises eviction pressure on every other workload. |
+
+**Cache scope (ptone/scion#5979).** Routed jobs on pushes to `main` save caches in
+`main`'s scope, and every later run on either runner type restores them. Decision:
+- **The patched golangci-lint binary is scoped by runner type.** Its key includes
+  `runner.environment` (`github-hosted` or `self-hosted`): a job executes the binary
+  it restores, so each runner type only runs binaries it built itself. The cost is
+  one cold build (about 50 s) per runner type and Go or pin change, and a second,
+  small entry.
+- **The Go build and module caches and golangci-lint's analysis cache stay
+  shared.** Sharing is the point of cache parity (one set of about 4.2 GB instead
+  of two in the 10 GB quota, and warm runs on both types), and only pushes to
+  `main`, which run trusted code on either runner type, save them; pull requests
+  restore but never save, and fork pull requests never run on cr-ci. Module zips
+  are verified against `go.sum`; build-cache entries are not, so this rests on
+  the writers being trusted, the same trust the hosted runner already has.
 
 **`GITHUB_WORKSPACE` stays `/home/runner/work/scion/scion`.** In actions/runner
 v2.338.0 the work directory is `Path.GetFullPath(Path.Combine(root,
