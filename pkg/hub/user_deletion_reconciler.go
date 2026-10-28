@@ -501,13 +501,6 @@ func (s *Server) completeUserDeletion(ctx context.Context, d *store.UserDeletion
 				// then the records, so it either commits before this lock
 				// (the re-read below sees the row gone or soft-deleted, and
 				// its stopped record stays) or waits for this transaction.
-				ids := make([]string, 0, len(cur.agents))
-				for i := range cur.agents {
-					ids = append(ids, cur.agents[i].ID)
-				}
-				if err := tx.LockAgentRows(ctx, ids); err != nil {
-					return fmt.Errorf("lock blocking agents: %w", err)
-				}
 				deact := store.Deactivation{Cause: store.EdgeDeactivationUserDeleteCascade, OpID: d.ID}
 				for i := range cur.agents {
 					a := &cur.agents[i]
