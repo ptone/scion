@@ -25,7 +25,9 @@
 //   - the owner path (an agent created by a user, whose OwnerID is that
 //     user): for a row shared with progeny, start delivery equals the
 //     user-scope secret parent ceiling verdict (the read's step 10); a row
-//     not shared with progeny is unchanged.
+//     not shared with progeny is held to the owner material chain rule
+//     (start_owner_material_chain_test.go), so it is withheld only where
+//     the agent's chain ends at another user.
 //
 // The two residual cases are a terminal user whose access constraint allows
 // project.secret_read but not secret.use (S4b), and a chain whose terminal
@@ -452,6 +454,9 @@ func TestStartDelivery_ParityWithRuntimeRead(t *testing.T) {
 			return built{c, tok}
 		}, false, true, false},
 	}
+	// The owner-path case whose chain ends at another user: the owner
+	// material chain rule withholds the unshared row too.
+	chainEndsElsewhere := map[string]bool{"owner/edge from another user (S8)": true}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newSDFixture(t, "sd-pm-"+string(rune('a'+i)))
@@ -461,7 +466,8 @@ func TestStartDelivery_ParityWithRuntimeRead(t *testing.T) {
 			assert.Equal(t, tc.wantStart, got.always, "resolveSecrets")
 			assert.Equal(t, tc.wantStart, got.asNeeded, "resolveAsNeededForKeys")
 			assert.Equal(t, got.always, got.asNeeded, "the two start sites agree")
-			assert.Equal(t, tc.owner, got.private, "the unshared row is delivered on the owner path only, unchanged")
+			assert.Equal(t, tc.owner && !chainEndsElsewhere[tc.name], got.private,
+				"the unshared row is delivered on the owner path only, where the chain ends at the owner")
 
 			readAlways := f.read(t, b.agentID, b.token, sdAlwaysKey)
 			readAsNeeded := f.read(t, b.agentID, b.token, sdAsNeededKey)
@@ -583,8 +589,8 @@ func TestStartDelivery_CrossUserReincarnation(t *testing.T) {
 		require.False(t, d.Allowed)
 		assert.Equal(t, DenyCauseCeilingSourceNotAllowed, d.DenyCause, "S8 denies; reason %q", d.Reason)
 		assert.False(t, r.readAllows(t, agent.ID, sdAlwaysKey, []AgentTokenScope{ScopeProjectSecretRead}), "the runtime read refuses")
-		assert.Equal(t, sdDelivery{always: false, asNeeded: false, private: true}, sdStartDelivery(t, r.disp, r.s, agent.ID),
-			"start refuses the shared secret at both sites; the unshared row is unchanged")
+		assert.Equal(t, sdDelivery{always: false, asNeeded: false, private: false}, sdStartDelivery(t, r.disp, r.s, agent.ID),
+			"start refuses the shared secret at both sites, and the owner material chain rule the unshared row")
 	})
 
 	t.Run("progeny path", func(t *testing.T) {
