@@ -17,11 +17,11 @@
  * a markdown entry in the preview frame and opening the review editor make
  * no plain-string markup call, and the page's icons are drawn.
  *
- * Until ptone/scion#6127 lands, the preview still parses its rendered
- * markdown once as a string to point images at the version's files
- * (IMAGE_REWRITE below), which would throw under the enforced rule and
- * leave the preview empty. So this test adds the rule as report-only and
- * accepts exactly that call. When ptone/scion#6127 is merged in, the
+ * The preview still reads its rendered markdown back into nodes once, from
+ * a string, to point images at the version's files (IMAGE_REWRITE below).
+ * That would throw under the enforced rule and leave the preview empty, so
+ * this test adds the rule as report-only and accepts exactly that call.
+ * When ptone/scion#6674 gives the preview nodes to rewrite instead, the
  * allowance goes and the test switches to the enforced rule.
  */
 
@@ -60,10 +60,10 @@ const DOC = [
   '',
 ].join('\n');
 
-/** The preview's image rewrite of its rendered markdown (ptone/scion#6127). */
+/** The preview's image rewrite of its rendered markdown (ptone/scion#6674). */
 const IMAGE_REWRITE: AllowedViolation[] = [
   {
-    reason: 'preview image rewrite (ptone/scion#6127)',
+    reason: 'preview image rewrite (ptone/scion#6674)',
     sample: /^Element innerHTML\|<h1>Trusted preview<\/h1>/,
   },
 ];
@@ -112,7 +112,7 @@ test('the artifact preview and review editor make no plain-string markup call', 
   await expectIconsDrawn(page, 1);
   const before = await expectNoTrustedTypesFindings(page, errors, IMAGE_REWRITE);
   // The allowance is still needed; remove it once this fails.
-  expect(before['preview image rewrite (ptone/scion#6127)']).toBeGreaterThan(0);
+  expect(before['preview image rewrite (ptone/scion#6674)']).toBeGreaterThan(0);
 
   await startGraphicalReview(page);
   await expectIconsDrawn(page, 1);

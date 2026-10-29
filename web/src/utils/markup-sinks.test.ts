@@ -54,7 +54,7 @@ const PATTERNS: Record<string, RegExp> = {
  * Each entry says why it is here.
  */
 const KNOWN: Record<string, number> = {
-  // The artifact preview's image rewrite; moves to nodes after ptone/scion#6127.
+  // The artifact preview's image rewrite; moves to nodes with ptone/scion#6674.
   'client/artifact-preview.ts: innerHTML/outerHTML assignment': 1,
   // The artifact preview frame's document: set from previewFrameDocument,
   // which builds it from sanitized markup and marks it as accepted markup.
