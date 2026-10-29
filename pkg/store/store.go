@@ -3605,17 +3605,24 @@ type HubSettingRevisionDeleter interface {
 
 // HubSettingWrite is one section write of a guarded batch
 // (HubSettingGuardedBatchWriter). ExpectedRevision has UpsertHubSetting's
-// meaning: -1 unconditional, 0 create-only, >0 the current revision.
+// meaning: -1 unconditional, 0 create-only, >0 the current revision. A
+// Delete write removes the row instead (Value unused): the row must exist,
+// at ExpectedRevision unless that is -1 (a missing row is then
+// ErrNotFound), and its returned HubSetting has only Section and
+// SettingsRevision set.
 type HubSettingWrite struct {
 	Section          string
 	Value            json.RawMessage
 	ExpectedRevision int64
+	Delete           bool
 }
 
 // HubSettingGuardedBatchWriter is an optional HubSettingStore method: write
 // several sections in one transaction, guarded by the revisions of other
-// sections the caller read to validate the write. Every written and read
-// row is locked (in section order on Postgres) and compared inside the
+// sections the caller read to validate the write. Guarded batches are
+// serialized against each other (on Postgres by a transaction-scoped
+// advisory lock, which also covers a read section with no row), every
+// existing written and read row is locked, and all are compared inside the
 // transaction: a read section must still be at its given revision (0: it
 // must not exist), and each write's ExpectedRevision must hold. Any
 // mismatch returns ErrRevisionConflict and writes nothing. The

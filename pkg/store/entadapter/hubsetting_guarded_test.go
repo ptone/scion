@@ -123,3 +123,47 @@ func TestUpsertHubSettingsGuardedBumpsRevisionOnce(t *testing.T) {
 	assert.Equal(t, int64(2), rows[0].Revision)
 	assert.Equal(t, before+2, settingsRevision(t, s))
 }
+
+// A guarded delete removes the row and bumps the settings revision once;
+// with a stale read guard or expected revision it deletes nothing, and a
+// missing row is a conflict at an expected revision and not found at -1.
+func TestUpsertHubSettingsGuardedDelete(t *testing.T) {
+	s := newTestHubSettingStore(t)
+	ctx := context.Background()
+	rt, err := s.UpsertHubSetting(ctx, "runtimes", json.RawMessage(`{"a":{"type":"kubernetes"}}`), "admin", 0, "managed")
+	require.NoError(t, err)
+	pr, err := s.UpsertHubSetting(ctx, "profiles", json.RawMessage(`{"p":{"runtime":"a"}}`), "admin", 0, "managed")
+	require.NoError(t, err)
+	before := settingsRevision(t, s)
+
+	for name, tc := range map[string]struct {
+		write store.HubSettingWrite
+		reads map[string]int64
+	}{
+		"stale read guard":        {store.HubSettingWrite{Section: "runtimes", ExpectedRevision: rt.Revision, Delete: true}, map[string]int64{"profiles": pr.Revision + 1}},
+		"stale expected revision": {store.HubSettingWrite{Section: "runtimes", ExpectedRevision: rt.Revision + 1, Delete: true}, nil},
+		"missing row":             {store.HubSettingWrite{Section: "harness_configs", ExpectedRevision: 3, Delete: true}, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := s.UpsertHubSettingsGuarded(ctx, []store.HubSettingWrite{tc.write}, tc.reads, "", "")
+			require.True(t, errors.Is(err, store.ErrRevisionConflict), "err = %v", err)
+			got, err := s.GetHubSetting(ctx, "runtimes")
+			require.NoError(t, err)
+			assert.Equal(t, rt.Revision, got.Revision)
+			assert.Equal(t, before, settingsRevision(t, s))
+		})
+	}
+	_, err = s.UpsertHubSettingsGuarded(ctx, []store.HubSettingWrite{{Section: "harness_configs", ExpectedRevision: -1, Delete: true}}, nil, "", "")
+	assert.ErrorIs(t, err, store.ErrNotFound)
+
+	rows, err := s.UpsertHubSettingsGuarded(ctx, []store.HubSettingWrite{
+		{Section: "runtimes", ExpectedRevision: rt.Revision, Delete: true},
+	}, map[string]int64{"profiles": pr.Revision}, "", "")
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "runtimes", rows[0].Section)
+	assert.Equal(t, before+1, rows[0].SettingsRevision)
+	assert.Equal(t, before+1, settingsRevision(t, s))
+	_, err = s.GetHubSetting(ctx, "runtimes")
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}
