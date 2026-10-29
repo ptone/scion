@@ -19,12 +19,6 @@
  * call, and every icon they show (app icons and Shoelace's own) is drawn.
  *
  * Tagged @static so it also runs on the WebKit iPhone project.
- *
- * Until ptone/scion#6127 lands, chat message rendering still assigns markup
- * strings, which would throw under the enforced rule and blank the thread,
- * so these tests add the rule as report-only and accept exactly those calls
- * (CHAT_RENDERING below). When ptone/scion#6127 is merged in, the allowance
- * goes and the tests switch to the enforced rule.
  */
 
 import { test, expect } from '@playwright/test';
@@ -36,47 +30,31 @@ import {
   expectNoTrustedTypesFindings,
   expectProbeSeesIconFileParse,
   expectProbeSeesViolation,
-  type AllowedViolation,
-  type TrustedTypesOptions,
 } from '../trusted-types.js';
-
-const MODE: TrustedTypesOptions = { mode: 'report' };
-
-/** Chat message rendering's markup assignments, replaced by ptone/scion#6127. */
-const CHAT_RENDERING: AllowedViolation[] = [
-  {
-    reason: 'chat message rendering (ptone/scion#6127)',
-    sample: /^Element innerHTML\|/,
-    sourceFile:
-      /\/src\/(utils\/markdown|components\/shared\/(chat\/chat-message|markdown-preview|chat\/chat-interagent-marker))\.ts|\/node_modules\/\.vite\/deps\/(lit[\w-]*|chunk-[\w-]+)\.js/,
-  },
-];
 
 test('@static chat thread and rail make no plain-string markup call and draw their icons', async ({
   page,
 }) => {
-  const errors = await enforceTrustedTypes(page, MODE);
+  const errors = await enforceTrustedTypes(page);
   await openChatRail(page);
   await openGeneralThread(page);
   await expect(page.locator('scion-chat-message').first()).toBeVisible({ timeout: 15_000 });
 
   await expectIconsDrawn(page, 3);
-  const allowed = await expectNoTrustedTypesFindings(page, errors, CHAT_RENDERING);
-  // The allowance is still needed; remove it once this fails.
-  expect(allowed['chat message rendering (ptone/scion#6127)']).toBeGreaterThan(0);
-  await expectProbeSeesViolation(page, MODE);
+  await expectNoTrustedTypesFindings(page, errors);
+  await expectProbeSeesViolation(page);
   await expectProbeSeesIconFileParse(page);
 });
 
 test('@static a direct message conversation makes no plain-string markup call', async ({
   page,
 }) => {
-  const errors = await enforceTrustedTypes(page, MODE);
+  const errors = await enforceTrustedTypes(page);
   await openChatRail(page);
   await page.goto(`/chat/dm/${HUMAN_MEMBER_ID}`, { waitUntil: 'domcontentloaded' });
   await expect(page.locator('scion-chat-thread')).toBeAttached({ timeout: 15_000 });
 
   await expectIconsDrawn(page, 1);
-  await expectNoTrustedTypesFindings(page, errors, CHAT_RENDERING);
-  await expectProbeSeesViolation(page, MODE);
+  await expectNoTrustedTypesFindings(page, errors);
+  await expectProbeSeesViolation(page);
 });
