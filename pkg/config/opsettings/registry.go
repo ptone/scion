@@ -132,6 +132,15 @@ func profileCloneDepthSchema(defs map[string]interface{}) map[string]interface{}
 	return cd
 }
 
+// defsProperty returns $defs.<def>.properties.<name> from the settings
+// schema, or nil when it is missing.
+func defsProperty(defs map[string]interface{}, def, name string) map[string]interface{} {
+	d, _ := defs[def].(map[string]interface{})
+	props, _ := d["properties"].(map[string]interface{})
+	p, _ := props[name].(map[string]interface{})
+	return p
+}
+
 // sharedDirStorageBackendsSchema mirrors shared_dir_storage_backends in
 // settings-v1.schema.json: shared dir name keys (lowercase letters, digits
 // and hyphens, as api.ValidateSharedDirs requires) mapped to local or nfs.
@@ -512,6 +521,25 @@ func compileSchemas() {
 		return
 	}
 
+	// Properties of the runtimes and profiles sections taken from the
+	// settings schema as they are: the Kubernetes placement fields (snake
+	// case, with the closed toleration object) and the closed per-type
+	// runtime blocks.
+	fromDefs := map[string]map[string]interface{}{}
+	for _, ref := range [][2]string{
+		{"runtimeConfig", "node_selector"}, {"runtimeConfig", "tolerations"}, {"runtimeConfig", "runtime_class_name"},
+		{"runtimeConfig", "cloudrun"}, {"runtimeConfig", "cloudrun_instances"}, {"runtimeConfig", "cloudrun_sandbox"},
+		{"runtimeConfig", "substrate"},
+		{"profileConfig", "node_selector"}, {"profileConfig", "tolerations"}, {"profileConfig", "runtime_class_name"},
+	} {
+		p := defsProperty(defs, ref[0], ref[1])
+		if p == nil {
+			schemaCompileErr = fmt.Errorf("opsettings: settings schema has no %s.%s", ref[0], ref[1])
+			return
+		}
+		fromDefs[ref[0]+"."+ref[1]] = p
+	}
+
 	sectionSchemaMap := map[string]map[string]interface{}{
 		"access": {
 			"type": "object",
@@ -698,7 +726,10 @@ func compileSchemas() {
 					"gke":                         map[string]interface{}{"type": "boolean"},
 					"list_all_namespaces":         map[string]interface{}{"type": "boolean"},
 					"priority_class_name":         map[string]interface{}{"type": "string", "maxLength": 253, "pattern": dns1123SubdomainOrEmptyPattern},
-					"cloudrun":                    map[string]interface{}{"type": "object"},
+					"cloudrun":                    fromDefs["runtimeConfig.cloudrun"],
+					"cloudrun_instances":          fromDefs["runtimeConfig.cloudrun_instances"],
+					"cloudrun_sandbox":            fromDefs["runtimeConfig.cloudrun_sandbox"],
+					"substrate":                   fromDefs["runtimeConfig.substrate"],
 					"shared_dir_storage_class":    map[string]interface{}{"type": "string"},
 					"shared_dir_size":             map[string]interface{}{"type": "string"},
 					"safe_to_evict":               map[string]interface{}{"type": "boolean"},
@@ -709,7 +740,19 @@ func compileSchemas() {
 
 					// GCP identity "assign" on Kubernetes.
 					"kubernetes_service_account_mappings": kubernetesServiceAccountMappingsSchema(),
+					// GCP identity "block" on Kubernetes.
+					"kubernetes_block_service_account": kubernetesBlockServiceAccountSchema(),
+
+					// Kubernetes placement defaults, snake case only.
+					"node_selector":      fromDefs["runtimeConfig.node_selector"],
+					"tolerations":        fromDefs["runtimeConfig.tolerations"],
+					"runtime_class_name": fromDefs["runtimeConfig.runtime_class_name"],
 				},
+				// Each property is a V1RuntimeConfig field (pinned by
+				// TestRuntimeSchemaTypedFieldParity). A key the struct has no
+				// field for would pass validation and then be dropped on
+				// decode.
+				"additionalProperties": false,
 			},
 		},
 		// profiles: map-of-objects — keys are profile names, values are
@@ -755,11 +798,11 @@ func compileSchemas() {
 					// GCP identity "block" on Kubernetes.
 					"kubernetes_block_service_account": kubernetesBlockServiceAccountSchema(),
 
-					// Kubernetes placement defaults (ptone/scion#5085); shapes
-					// only.
-					"node_selector":      map[string]interface{}{"type": "object", "additionalProperties": map[string]interface{}{"type": "string"}},
-					"tolerations":        map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "object"}},
-					"runtime_class_name": map[string]interface{}{"type": "string"},
+					// Kubernetes placement defaults (ptone/scion#5085), snake
+					// case only, with the closed toleration object.
+					"node_selector":      fromDefs["profileConfig.node_selector"],
+					"tolerations":        fromDefs["profileConfig.tolerations"],
+					"runtime_class_name": fromDefs["profileConfig.runtime_class_name"],
 				},
 				// Each property is a V1ProfileConfig field (pinned by
 				// TestProfilesSectionSchema_MatchesProfileConfig). A key the
