@@ -350,6 +350,13 @@ func (s *Server) authorizeRuntimeUserItem(ctx context.Context, ident AgentIdenti
 		}
 	}
 
+	// Source liveness. On this path it is defence in depth: a recorded chain
+	// admits only rows whose recorded author is their owner, the root user
+	// (the parent ceiling's source check), and that user's activity is
+	// already required by the precheck and the chain verdict; an
+	// agent-authored row is refused by Decide before this point, and an
+	// unrecorded chain is refused above. The agent secret list evaluates
+	// liveness before its source check.
 	live, kind, liveReason, liveErr := s.progenySourceLive(ctx, *meta)
 	if kind != "" {
 		cand.SharingSource = &SourceRef{Kind: kind, ID: meta.CreatedBy}

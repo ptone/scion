@@ -181,10 +181,13 @@ func TestAgentSecretRead_SharingSourceEmptyCreatedByDenies(t *testing.T) {
 	}
 }
 
-// TestAgentSecretRead_SharingSourceAgentDeletedDenied pins that a
-// soft-deleted source agent is not live, even though GetAgent returns
-// soft-deleted rows.
-func TestAgentSecretRead_SharingSourceAgentDeletedDenied(t *testing.T) {
+// TestAgentSecretRead_AgentAuthoredRowRefusedByChain_DeletedSource pins
+// that a shared row authored by a soft-deleted lineage agent is refused on a
+// recorded chain by the delegation checks (check 8's Decide), and that the
+// source itself is not live (GetAgent returns soft-deleted rows; the
+// liveness check rejects them). On a recorded chain an agent-authored row
+// never reaches check 8's liveness step, which is defence in depth there.
+func TestAgentSecretRead_AgentAuthoredRowRefusedByChain_DeletedSource(t *testing.T) {
 	f := newMaterialFixture(t, "source-agent-deleted")
 	ctx := context.Background()
 
@@ -226,9 +229,11 @@ func TestAgentSecretRead_SharingSourceAgentDeletedDenied(t *testing.T) {
 	assertSourceAgentRefusal(t, uf, grandchildID, "SOURCE_DELETED_KEY")
 }
 
-// TestAgentSecretRead_SharingSourceAgentRootSuspendedDenied pins that
-// resolving a source agent's own root and finding it suspended denies.
-func TestAgentSecretRead_SharingSourceAgentRootSuspendedDenied(t *testing.T) {
+// TestAgentSecretRead_AgentAuthoredRowRefusedByChain_SuspendedSourceRoot
+// pins that a shared row authored by a lineage agent whose own root is
+// suspended is refused on a recorded chain by the delegation checks, and
+// that the source itself is not live (its root is suspended).
+func TestAgentSecretRead_AgentAuthoredRowRefusedByChain_SuspendedSourceRoot(t *testing.T) {
 	f := newMaterialFixture(t, "source-agent-root-suspended")
 	ctx := context.Background()
 

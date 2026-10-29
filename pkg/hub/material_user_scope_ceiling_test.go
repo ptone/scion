@@ -765,16 +765,18 @@ func TestAgentSecretList_RecordedChainLoads(t *testing.T) {
 // verdict once per item and Decide's step 10 reuses it, on an allowed and a
 // denied recorded chain. Step 10's decision with the reused verdict equals
 // the decision it reaches computing the verdict itself, and a verdict
-// recorded for another agent is not used.
+// recorded for another agent, or for the same agent in another project, is
+// not used, and an explain trace computes its own verdict.
 func TestAgentSecretRead_ChainVerdictComputedOnce(t *testing.T) {
 	counts := map[string]int{}
 	var mu sync.Mutex
-	userSecretChainVerdictObserver = func(agentID string) {
+	observe := func(agentID string) {
 		mu.Lock()
 		counts[agentID]++
 		mu.Unlock()
 	}
-	t.Cleanup(func() { userSecretChainVerdictObserver = nil })
+	userSecretChainVerdictObserver.Store(&observe)
+	t.Cleanup(func() { userSecretChainVerdictObserver.Store(nil) })
 	count := func(id string) int {
 		mu.Lock()
 		defer mu.Unlock()
@@ -827,6 +829,27 @@ func TestAgentSecretRead_ChainVerdictComputedOnce(t *testing.T) {
 			got = f.Server.authzService.Decide(ctx, mismatched)
 			assert.Equal(t, 1, count(f.AgentID)-before, "a verdict for another agent is recomputed")
 			assert.Equal(t, fresh.Allowed, got.Allowed)
+
+			// The same agent ID in another project is not the principal.
+			otherProject := newFullAgentIdentity(f.AgentID, tid("usc-once-other-project-"+tc.name), []string{f.UserID}, []AgentTokenScope{ScopeProjectSecretRead})
+			projectMismatch := req
+			projectMismatch.userSecretChain = newPrecomputedUserSecretChain(otherProject, chain)
+			before = count(f.AgentID)
+			got = f.Server.authzService.Decide(ctx, projectMismatch)
+			assert.Equal(t, 1, count(f.AgentID)-before, "a verdict for another project is recomputed")
+			assert.Equal(t, fresh.Allowed, got.Allowed)
+			_, ok := newPrecomputedUserSecretChain(otherProject, chain).verdictFor(ident, nil)
+			assert.False(t, ok)
+
+			// An explain trace computes its own verdict, with its steps.
+			var explain []DecisionStep
+			before = count(f.AgentID)
+			d, _ := f.Server.authzService.evaluateUserSecretParentCeilingWithChain(ctx, ident, req.Resource, &explain, newPrecomputedUserSecretChain(ident, chain))
+			assert.Equal(t, 1, count(f.AgentID)-before, "an explain trace recomputes the verdict")
+			assert.Equal(t, tc.allowed, d.Allowed, "the explain path reaches the same outcome")
+			assert.NotEmpty(t, explain, "the trace carries the verdict's own steps")
+			_, ok = newPrecomputedUserSecretChain(ident, chain).verdictFor(ident, &explain)
+			assert.False(t, ok)
 		})
 	}
 }

@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/go-jose/go-jose/v4/jwt"
 
@@ -922,17 +923,18 @@ func (a *AuthzService) evaluateUserSecretParentCeilingWithChain(ctx context.Cont
 	return d, unrecordedHopNote{}
 }
 
-// userSecretChainVerdictObserver is a test seam: when set, it is called
-// with the agent ID each time userSecretChainVerdict runs. Only tests set
-// it; it is nil in production.
-var userSecretChainVerdictObserver func(agentID string)
+// userSecretChainVerdictObserver is a test seam: when it holds a function,
+// that function is called with the agent ID each time
+// userSecretChainVerdict runs. Only tests store one; it is empty in
+// production. It is atomic so a test may set it while others run.
+var userSecretChainVerdictObserver atomic.Pointer[func(agentID string)]
 
 // userSecretChainVerdict runs clauses S1-S4c for principal (see
 // EvaluateUserSecretParentCeiling). It masks the request's authorization
 // inputs itself, so it can be called on its own.
 func (a *AuthzService) userSecretChainVerdict(ctx context.Context, principal AgentIdentity, explain *[]DecisionStep) userSecretChain {
-	if userSecretChainVerdictObserver != nil && !isNilIdentity(principal) {
-		userSecretChainVerdictObserver(principal.ID())
+	if obs := userSecretChainVerdictObserver.Load(); obs != nil && !isNilIdentity(principal) {
+		(*obs)(principal.ID())
 	}
 	chain := userSecretChain{decision: ParentCeilingDecision{Proof: ParentProof{Kind: ParentProofKindOwnershipFact, Permission: secretUsePermission}}}
 	if a == nil || a.store == nil || isNilIdentity(principal) || principal.ID() == "" {

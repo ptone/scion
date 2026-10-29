@@ -27,6 +27,7 @@ import (
 	"context"
 	"errors"
 	"go/ast"
+	"go/token"
 	"log/slog"
 	"strings"
 	"sync"
@@ -1408,9 +1409,34 @@ func TestUserSecretWriters_Inventory(t *testing.T) {
 // TestUserSecretWriters_ScopedByKeyCallers keeps the inventory's reason for
 // handleScopedEnvVarByKey and handleScopedSecretByKey true: every production
 // call passes the project or the runtime broker scope constant, never the
-// user scope or a computed value.
+// user scope or a computed value, and no production code takes either
+// method as a value (which would escape the call check).
 func TestUserSecretWriters_ScopedByKeyCallers(t *testing.T) {
-	_, files := parseHubProduction(t)
+	fset, files := parseHubProduction(t)
+	targets := map[string]bool{"handleScopedEnvVarByKey": true, "handleScopedSecretByKey": true}
+	for _, file := range files {
+		called := map[ast.Node]bool{}
+		ast.Inspect(file, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				called[call.Fun] = true
+			}
+			return true
+		})
+		ast.Inspect(file, func(n ast.Node) bool {
+			if fn, ok := n.(*ast.FuncDecl); ok && targets[fn.Name.Name] {
+				// The declaration itself: inspect its body only.
+				if fn.Body != nil {
+					ast.Inspect(fn.Body, func(m ast.Node) bool {
+						checkScopedByKeyRef(t, fset, m, targets, called)
+						return true
+					})
+				}
+				return false
+			}
+			checkScopedByKeyRef(t, fset, n, targets, called)
+			return true
+		})
+	}
 	for _, name := range []string{"handleScopedEnvVarByKey", "handleScopedSecretByKey"} {
 		calls := callsIn(files, name)
 		n := 0
@@ -1430,6 +1456,16 @@ func TestUserSecretWriters_ScopedByKeyCallers(t *testing.T) {
 			}
 		}
 		assert.Positive(t, n, "the callers of %s are still found", name)
+	}
+}
+
+// checkScopedByKeyRef fails on a selector reference to one of targets (the
+// methods are only reachable through a selector) that is not the function
+// of a call: a method value or method expression.
+func checkScopedByKeyRef(t *testing.T, fset *token.FileSet, n ast.Node, targets map[string]bool, called map[ast.Node]bool) {
+	t.Helper()
+	if x, ok := n.(*ast.SelectorExpr); ok && targets[x.Sel.Name] && !called[x] {
+		assert.Fail(t, "method value", "%s: %s is referenced without being called", fset.Position(x.Pos()), x.Sel.Name)
 	}
 }
 
