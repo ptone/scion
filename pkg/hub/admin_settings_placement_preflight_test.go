@@ -39,7 +39,7 @@ func TestPlacementPreflightReportsCountsOnly(t *testing.T) {
 	}`))
 	fakeStore.seed("profiles", json.RawMessage(`{
 		"batch": {"runtime": "k8s", "node_selector": {"scion.dev/pool": "secret-pool"}},
-		"dangling": {"runtime": "secret-runtime"}
+		"dangling": {"runtime": "secret-runtime", "runtime_class_name": "secret-class"}
 	}`))
 	_, err := ops.Refresh(context.Background())
 	if err != nil {
