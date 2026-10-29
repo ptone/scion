@@ -4815,10 +4815,38 @@ func (d *HTTPAgentDispatcher) deferredLifecycleResult(
 // row with the same key stays in effect. Neither check widens anything: a
 // row is delivered only when every decision applied to it allows.
 func (d *HTTPAgentDispatcher) startSecretResolveOpts(ctx context.Context, agent *store.Agent) (*secret.ResolveOpts, *ownerMaterialGate) {
+	return d.startSecretResolveOptsFor(ctx, agent, true)
+}
+
+// startSecretResolveOptsFor is startSecretResolveOpts. testAdminMasks says
+// whether the caller applies the test-admin scope restriction to what the
+// check keeps (resolveSecrets, resolveAsNeededForKeys and the launch
+// selection do; the by-name clone-token read does not). When it does and
+// the restriction withholds the user scope for this agent, an unshared
+// owner row is kept for the restriction to drop: the restriction's
+// withheld row still masks a lower-scope row of the same name, exactly as
+// without the owner material chain rule, and nothing of the owner's is
+// delivered either way.
+func (d *HTTPAgentDispatcher) startSecretResolveOptsFor(ctx context.Context, agent *store.Agent, testAdminMasks bool) (*secret.ResolveOpts, *ownerMaterialGate) {
 	if agent == nil || d.authzService == nil {
 		return nil, nil
 	}
 	gate := d.newOwnerMaterialGate(agent)
+	var (
+		taDone     bool
+		taWithheld bool
+	)
+	testAdminWithholdsUser := func() bool {
+		if !testAdminMasks {
+			return false
+		}
+		if !taDone {
+			restricted, allowed, _ := d.testAdminRootScopes(ctx, agent)
+			taWithheld = restricted && !allowed[store.ScopeUser]
+			taDone = true
+		}
+		return taWithheld
+	}
 	agentID := agent.ID
 	ancestry := agent.Ancestry
 	// The synthetic identity must carry the agent's real scopes.
@@ -4924,6 +4952,11 @@ func (d *HTTPAgentDispatcher) startSecretResolveOpts(ctx context.Context, agent 
 			if !s.AllowProgeny {
 				// Start-time owner-path injection: an agent-subject access
 				// constraint that denies secret.use does not stop it.
+				if testAdminWithholdsUser() {
+					// The test-admin restriction drops the row and keeps its
+					// masking (see startSecretResolveOptsFor).
+					return true
+				}
 				return gate.allow(ctx, ownerMaterialKindSecret, s.ScopeID)
 			}
 			if len(ancestry) == 0 {

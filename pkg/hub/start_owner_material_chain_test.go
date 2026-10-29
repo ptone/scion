@@ -445,6 +445,10 @@ func TestOwnerMaterialChain_FailClosed(t *testing.T) {
 
 type omcEdgeFaultStore struct{ store.Store }
 
+func (omcEdgeFaultStore) GetDelegationEdgesForDelegate(context.Context, string, string) ([]*store.DelegationEdge, error) {
+	return nil, errors.New("omc: edge lookup fault")
+}
+
 // omcEdgesOverrideStore returns edges for agentID's delegate lookup (the
 // store's partial unique index forbids two active edges for one delegate
 // and scope); every other lookup is the store's.

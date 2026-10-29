@@ -528,7 +528,9 @@ func (a *AuthzService) recordOwnerMaterialChain(ctx context.Context, site, outco
 // closed. Without an authorization service the row is not checked, as
 // Resolve does not check it then.
 func (d *HTTPAgentDispatcher) ownerCloneTokenAllowed(ctx context.Context, agent *store.Agent) bool {
-	opts, gate := d.startSecretResolveOpts(ctx, agent)
+	// The by-name read applies no test-admin scope restriction afterwards,
+	// so the check runs without the test-admin keep.
+	opts, gate := d.startSecretResolveOptsFor(ctx, agent, false)
 	if opts == nil || opts.UserScopeCheck == nil {
 		return true
 	}
