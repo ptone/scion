@@ -94,6 +94,10 @@ type ServerConfigDBResponse struct {
 	// reports a node env, and each profile's value (ptone/scion#3916).
 	// Read-only.
 	ImageRegistryProvenance *ImageRegistryProvenance `json:"image_registry_provenance,omitempty"`
+
+	// PlacementPreflight is the read-only Kubernetes placement pre-upgrade
+	// report (counts only). Set by the GET handler only.
+	PlacementPreflight *PlacementPreflightView `json:"placement_preflight,omitempty"`
 }
 
 // SupersededKey represents a bootstrap-material key whose value in the
@@ -127,7 +131,9 @@ type ServerConfigUpdateDBRequest struct {
 	// A section merged on its current row (mergeSectionOnCurrent) that has
 	// no entry uses the revision the merge read as an implicit CAS; the
 	// map sections (runtimes, profiles, harness_configs) use
-	// last-writer-wins.
+	// last-writer-wins. runtimes and profiles are written together in one
+	// transaction that also compares the revision of the one the body
+	// leaves out (placementPairForSave).
 	ExpectedRevisions map[string]int64 `json:"expected_revisions,omitempty"`
 }
 
@@ -148,6 +154,7 @@ func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	resp.StorageOverrideErrors = s.removedStorageOverrideErrors()
+	resp.PlacementPreflight = s.placementPreflight(r.Context(), ops)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -1042,6 +1049,8 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// ignored, so the echo of a changed report is not refused
 	// (ptone/scion#3916).
 	rawBody = dropImageRegistryProvenance(rawBody)
+	// Likewise the read-only placement pre-upgrade report of a GET body.
+	rawBody = dropTopLevelMember(rawBody, placementPreflightKey)
 	if s.rejectGateProtectedSettingsKeys(w, rawBody) {
 		return
 	}
@@ -1065,6 +1074,11 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	rawBody = cl.body
+	// Kubernetes placement keys of runtimes and profiles are checked raw,
+	// before the typed decode below can drop a misspelt or malformed one.
+	if rejectMalformedPlacement(w, rawBody) {
+		return
+	}
 	var req ServerConfigUpdateDBRequest
 	if err := json.Unmarshal(rawBody, &req); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
@@ -1635,6 +1649,14 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		})
 		return
 	}
+	// Kubernetes placement of the proposed runtimes and profiles pair: the
+	// sent sections and the stored value of an omitted one. The write below
+	// saves both sections in one transaction and compares the revision of
+	// the omitted section read here.
+	placement, ok := s.placementPairForSave(r.Context(), w, ops, sectionDocs)
+	if !ok {
+		return
+	}
 
 	// Workstation: validate and prepare the settings.yaml part before any DB
 	// write, so a bad file-routed value or a file that cannot be edited
@@ -1719,7 +1741,80 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	}
 	sort.Strings(sortedSections)
 
+	// runtimes and profiles are saved first, together, in one guarded
+	// transaction (placementPairForSave): either both are written or
+	// neither is, and a conflict leaves every section of the save
+	// unwritten.
+	if placement.active {
+		var writes []guardedSectionWrite
+		reads := placement.reads
+		for _, secName := range placementSections {
+			doc, sent := sectionDocs[secName]
+			if !sent {
+				continue
+			}
+			expectedRev := int64(-1)
+			if rev, ok := req.ExpectedRevisions[secName]; ok {
+				expectedRev = rev
+			} else if rev, ok := mergedBaseRevs[secName]; ok {
+				expectedRev = rev
+			}
+			if rev, ok := noopRevs[secName]; ok && expectedRev == rev {
+				applied[secName] = rev
+				unchanged = append(unchanged, secName)
+				reads[secName] = rev
+				continue
+			}
+			if rev, same := unchangedManagedRow(r.Context(), ops, secName, doc, expectedRev); same {
+				applied[secName] = rev
+				unchanged = append(unchanged, secName)
+				reads[secName] = rev
+				continue
+			}
+			writes = append(writes, guardedSectionWrite{section: secName, doc: doc, expectedRevision: expectedRev})
+		}
+		if len(writes) > 0 {
+			revs, notApplied, err := ops.updateGuarded(r.Context(), writes, reads, updatedBy, "managed")
+			switch {
+			case errors.Is(err, store.ErrRevisionConflict):
+				for _, wr := range writes {
+					conflicted = append(conflicted, map[string]interface{}{
+						"section":           wr.section,
+						"expected_revision": wr.expectedRevision,
+						"current_revision":  s.getCurrentRevision(ops, wr.section),
+					})
+				}
+			case errors.Is(err, errGuardedBatchUnsupported):
+				slog.Error("PUT server-config: the settings store cannot save runtimes and profiles together", "error", err)
+				fileTxn.abort()
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"Failed to save runtimes and profiles: the settings store cannot save them in one transaction", nil)
+				return
+			case err != nil:
+				slog.Error("Failed to update runtimes and profiles", "error", err)
+				fileTxn.abort()
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to update runtimes and profiles", nil)
+				return
+			default:
+				for sec, rev := range revs {
+					applied[sec] = rev
+					if notApplied[sec] {
+						notInEffect[sec] = true
+					}
+				}
+			}
+		}
+	}
+
 	for _, secName := range sortedSections {
+		if len(conflicted) > 0 {
+			// A conflict on the runtimes and profiles save writes nothing
+			// else.
+			break
+		}
+		if placement.active && (secName == "runtimes" || secName == "profiles") {
+			continue
+		}
 		doc := sectionDocs[secName]
 		expectedRev := int64(-1) // last-writer-wins by default
 		if rev, ok := req.ExpectedRevisions[secName]; ok {
