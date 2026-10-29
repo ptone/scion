@@ -121,13 +121,16 @@ func TestMergeSectionOnCurrent_KeepsUnmodelledKeyWhenSchemaAllows(t *testing.T) 
 	_, fakeStore, ops := newTestDBServer(t)
 	// runtimes allows any top-level key (a map of runtime entries) and
 	// has no section-level key mapping, so nothing the body sends applies.
-	fakeStore.seedWithOrigin("runtimes", json.RawMessage(`{"local":{"type":"docker"},"future_runtime":{"type":"x","new_leaf":1}}`), "managed")
+	// Each entry's own schema is closed (the complete runtime field set),
+	// so the stored entry uses only known fields; an unmodelled nested key
+	// is the schema rule checked below.
+	fakeStore.seedWithOrigin("runtimes", json.RawMessage(`{"local":{"type":"docker"},"future_runtime":{"type":"x","gke":true}}`), "managed")
 	fp, err := parseFieldPresence([]byte(`{"local": null}`))
 	require.NoError(t, err)
 
 	doc, rev, err := mergeSectionOnCurrent(context.Background(), ops, "runtimes", json.RawMessage(`{}`), fp)
 	require.NoError(t, err)
-	assert.JSONEq(t, `{"local":{"type":"docker"},"future_runtime":{"type":"x","new_leaf":1}}`, string(doc))
+	assert.JSONEq(t, `{"local":{"type":"docker"},"future_runtime":{"type":"x","gke":true}}`, string(doc))
 	assert.Equal(t, int64(1), rev)
 
 	// The schema rule itself: extra keys survive unless the object schema
