@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -288,4 +289,68 @@ func TestGitReportsNotARepository(t *testing.T) {
 			t.Fatal("a git work tree must not be reported as not a git repository")
 		}
 	})
+}
+
+// shProbe returns a workspaceGitProbe stand-in that runs script under sh, a
+// real process, so its result is a genuine *exec.ExitError (or nil).
+func shProbe(t *testing.T, script string) func(context.Context, string) (string, error) {
+	t.Helper()
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not installed")
+	}
+	return func(ctx context.Context, _ string) (string, error) {
+		return runWorkspaceGitProbe(exec.CommandContext(ctx, "sh", "-c", script))
+	}
+}
+
+// Real processes for every branch of the decision: only a positive exit
+// code with a stderr line that starts with git's "fatal: not a git
+// repository" reads as "not git".
+func TestGitReportsNotARepository_RealProcesses(t *testing.T) {
+	dir := t.TempDir()
+	cases := []struct {
+		name   string
+		script string
+		want   bool
+	}{
+		{"positive control: exit 128 with git's message", `echo "fatal: not a git repository (or any of the parent directories): .git" >&2; exit 128`, true},
+		{"git's message on a later line", `printf 'hint: something\nfatal: not a git repository\n' >&2; exit 128`, true},
+		{"non-zero exit with other stderr", `echo "fatal: detected dubious ownership in repository" >&2; exit 128`, false},
+		{"the phrase not at the start of a line", `echo "warning: this is not a git repository, maybe" >&2; exit 128`, false},
+		{"signalled exit with the message", `echo "fatal: not a git repository" >&2; kill -9 $$`, false},
+		{"exit 0 with the message", `echo "fatal: not a git repository" >&2; exit 0`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stubWorkspaceGitProbe(t, shProbe(t, tc.script))
+			if got := gitReportsNotARepository(context.Background(), dir); got != tc.want {
+				t.Fatalf("gitReportsNotARepository = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	t.Run("clean exit 128 with the message after the bound expired", func(t *testing.T) {
+		prev := workspaceGitTimeout
+		workspaceGitTimeout = 20 * time.Millisecond
+		t.Cleanup(func() { workspaceGitTimeout = prev })
+		realProbe := shProbe(t, `echo "fatal: not a git repository" >&2; exit 128`)
+		stubWorkspaceGitProbe(t, func(ctx context.Context, d string) (string, error) {
+			<-ctx.Done()
+			// A genuine ExitError, obtained without the expired context.
+			return realProbe(context.Background(), d)
+		})
+		if gitReportsNotARepository(context.Background(), dir) {
+			t.Fatal("an answer that arrives after the bound expired must be unknown")
+		}
+	})
+}
+
+// The probe runs without system git configuration and with untranslated
+// messages.
+func TestWorkspaceGitProbeEnv(t *testing.T) {
+	env := workspaceGitProbeEnv()
+	for _, want := range []string{"GIT_CONFIG_NOSYSTEM=1", "LC_ALL=C"} {
+		if !slices.Contains(env, want) {
+			t.Errorf("probe env has no %s", want)
+		}
+	}
 }
