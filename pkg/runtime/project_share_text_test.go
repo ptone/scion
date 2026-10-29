@@ -32,9 +32,15 @@ func TestProjectShareUnavailableText(t *testing.T) {
 		"project storage share could not be mounted on this broker at /mnt/nfs/ws1: check that the NFS server and export (server.project_storage.nfs.shares[0]) are reachable from the broker; the broker log has the details"; got != want {
 		t.Errorf("mount failure:\n got %q\nwant %q", got, want)
 	}
+	if got, want := ProjectShareMountFlagsText("/mnt/nfs/ws1"),
+		"project storage share at /mnt/nfs/ws1: nosuid,nodev could not be confirmed (a mount there or below it lacks them, or the mount table could not be read): remount the share with nosuid,nodev; the broker log has the details"; got != want {
+		t.Errorf("mount flags:\n got %q\nwant %q", got, want)
+	}
 	// A platform-mounting broker is never told to set auto_mount: it has no effect there.
 	// Nor is a broker whose auto_mount is already on and failed.
-	for _, s := range []string{ProjectShareUnavailableText("/mnt/nfs/ws1", true), ProjectShareMountFailedText("/mnt/nfs/ws1")} {
+	// Nor is a broker refused over a share without nosuid,nodev: the fix is
+	// a remount with those options.
+	for _, s := range []string{ProjectShareUnavailableText("/mnt/nfs/ws1", true), ProjectShareMountFailedText("/mnt/nfs/ws1"), ProjectShareMountFlagsText("/mnt/nfs/ws1")} {
 		if strings.Contains(s, "auto_mount") {
 			t.Errorf("text must not advise auto_mount: %q", s)
 		}
@@ -42,8 +48,8 @@ func TestProjectShareUnavailableText(t *testing.T) {
 	// The client-safe forms carry the neutral mount point name, never a path,
 	// and are exactly the client texts.
 	texts := ProjectShareClientTexts()
-	if len(texts) != 3 {
-		t.Fatalf("ProjectShareClientTexts = %d texts, want 3", len(texts))
+	if len(texts) != 4 {
+		t.Fatalf("ProjectShareClientTexts = %d texts, want 4", len(texts))
 	}
 	for _, got := range texts {
 		if strings.Contains(got, "/mnt/") || !strings.Contains(got, ProjectShareMountPathField) {
