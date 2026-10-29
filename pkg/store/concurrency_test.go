@@ -208,6 +208,7 @@ func TestAdvisoryLockKeys_AllUnique(t *testing.T) {
 		{"LockTestIdentityIssuance", LockTestIdentityIssuance},
 		{"LockTestIdentityReaper", LockTestIdentityReaper},
 		{"LockAgentDelegatedCredentialPurge", LockAgentDelegatedCredentialPurge},
+		{"LockHubSettingsGuardedBatch", LockHubSettingsGuardedBatch},
 	}
 
 	// --- Check 1: value uniqueness ---
