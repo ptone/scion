@@ -279,7 +279,9 @@ func TestInboundAttachment_LegacyStagesAfterCheck(t *testing.T) {
 	assert.Empty(t, sends[0].AttachmentIDs)
 	assert.Empty(t, hub.requestsTo(iaSpecUploadPath), "no upload in legacy mode")
 	assert.Empty(t, iaSpecFilesUnder(t, env.downloads), "nothing under downloads_path")
-	assert.Equal(t, []string{filepath.Join(".attachments", "_telegram", entries[0], "notes.txt")}, iaSpecFilesHolding(t, env.home, env.tg.content))
+	assert.Equal(t, []string{filepath.Join(".attachments", "_telegram", entries[0], "notes.txt")}, iaSpecFilesHolding(t, env.scratchpad, env.tg.content),
+		"the bytes are in the per-message entry")
+	assert.Len(t, iaSpecFilesHolding(t, env.home, env.tg.content), 1, "and nowhere else under HOME")
 }
 
 // Matrix row T6b: when the hub takes no attachments, the text is delivered
