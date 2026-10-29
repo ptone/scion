@@ -42,6 +42,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/google/uuid"
 )
 
 type ListProjectsResponse struct {
@@ -348,6 +349,13 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Labels = labels
 
+	// A client-supplied project ID is a canonical UUID: it keys the store row
+	// and, on a shared backend, the project's directory tree.
+	if !validClientProjectID(req.ID) {
+		ValidationError(w, invalidClientProjectIDMessage, map[string]interface{}{"field": "id"})
+		return
+	}
+
 	// Idempotency: if we have a client-provided ID, check for existing project
 	if req.ID != "" {
 		existing, err := s.store.GetProject(ctx, req.ID)
@@ -618,7 +626,7 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		}
 	} else if project.GitRemote == "" {
 		// Hub-native project (no git remote): create workspace directory.
-		if err := s.initHubManagedProject(project); err != nil {
+		if err := s.initHubManagedProject(ctx, project); err != nil {
 			// Workspace storage did not respond: the workspace (and its
 			// seeded .scion/settings.yaml) cannot be created, so roll back
 			// like the clone failure above and answer 503. Other failures
@@ -633,6 +641,11 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 			s.projectsLogger().Warn("failed to initialize project workspace",
 				"project_id", project.ID, "slug", project.Slug, "error", err)
 		}
+	} else {
+		// Per-agent git project (clone-per-agent, worktree-per-agent): no
+		// workspace is prepared at create, but on a shared backend brokers
+		// still require <ProjectRoot>/.scion/{project-id,project-slug}.
+		s.ensureSharedProjectIdentityBestEffort(project)
 	}
 
 	// Auto-link brokers that have auto_provide enabled (mirrors registerProject behavior).
@@ -1106,14 +1119,20 @@ func writeWorkspaceStorageUnavailable(w http.ResponseWriter, err error) bool {
 // On the local workspace backend this is ~/.scion/projects/<slug>/.scion,
 // inside the workspace directory it also creates (unchanged). On a shared
 // backend it is <ProjectRoot(uuid)>/.scion beside workspace/, which no
-// agent mounts; the workspace itself is created by the
-// first agent or the first Files-tab write. Unlike linked projects,
+// agent mounts, and the hub first provisions the empty workspace leaf
+// (provisionHubNativeWorkspace: the leaf at mode 2775 with the default ACL,
+// chowned to the Layout uid:gid, and the provisioning sentinel), so the
+// first agent finds a provisioned workspace. Unlike linked projects,
 // hub-managed projects keep their settings directly in that directory (no
 // split storage or marker files).
 //
-// A shared workspace storage the hub cannot use returns an error wrapping
-// errWorkspaceStorageUnavailable; callers roll the create back.
-func (s *Server) initHubManagedProject(project *store.Project) error {
+// A shared workspace storage the hub cannot use, or a failed workspace
+// provisioning, returns an error wrapping errWorkspaceStorageUnavailable;
+// callers roll the create back.
+func (s *Server) initHubManagedProject(ctx context.Context, project *store.Project) error {
+	if err := s.provisionHubNativeWorkspace(ctx, project); err != nil {
+		return err
+	}
 	scionDir, err := s.ensureProjectConfigDir(project, true)
 	if err != nil {
 		return err
@@ -1135,10 +1154,79 @@ func (s *Server) seedSharedProjectIdentity(project *store.Project, scionDir stri
 	}
 	if _, err := s.ensureProjectConfigIdentity(project); err != nil {
 		s.projectsLogger().Warn("failed to write the project identity files on shared workspace storage",
-			"project_id", project.ID, "error", err)
+			"project_id", project.ID, "error", sanitizedStorageError(err))
 		return fmt.Errorf("project configuration: %w", errWorkspaceStorageUnavailable)
 	}
 	return nil
+}
+
+// ensureSharedProjectIdentityBestEffort writes the project-id and
+// project-slug files for a project whose create seeds no project
+// configuration otherwise: a git project that is not a shared workspace
+// (clone-per-agent or worktree-per-agent), and a project created by
+// handleProjectRegister. A no-op on the local backend.
+// Hub-native and shared-workspace projects are seeded by initHubManagedProject
+// and cloneSharedWorkspaceProject (seedSharedProjectIdentity) and do not call
+// this, so each project shape has exactly one seeding call site at create.
+// Best-effort: a failure is logged and the create goes on (the hub-start
+// pass ensureProjectConfigIdentities retries it); a project-id naming
+// another project is left unchanged and reported by
+// ensureProjectConfigIdentity, as for the other shapes.
+func (s *Server) ensureSharedProjectIdentityBestEffort(project *store.Project) {
+	if !s.workspaceBackendShared() {
+		return
+	}
+	if _, err := s.ensureProjectConfigIdentity(project); err != nil {
+		s.projectsLogger().Warn("failed to write the project identity files on shared workspace storage",
+			"project_id", project.ID, "error", sanitizedStorageError(err))
+	}
+}
+
+// invalidClientProjectIDMessage is the 400 text for a client-supplied
+// project ID that is not a canonical UUID.
+const invalidClientProjectIDMessage = "id must be a canonical lowercase UUID (for example 0b6f3e1a-2c4d-4e5f-8a9b-0c1d2e3f4a5b)"
+
+// validClientProjectID reports whether id, a client-supplied project ID, is
+// empty (the hub then generates one) or a canonical lowercase UUID, the form
+// the hub and the CLI generate. Other forms uuid.Parse accepts (braces, urn:,
+// upper case) are refused: the ID keys a directory tree on shared storage.
+func validClientProjectID(id string) bool {
+	if id == "" {
+		return true
+	}
+	u, err := uuid.Parse(id)
+	return err == nil && u.String() == id
+}
+
+// sanitizedStorageError renders err for an operator log line without any
+// path: the operation and the errno of the innermost path, link or syscall
+// error, behind the outermost code-authored prefix when that holds no path
+// separator. A deep OS error never carries a host path into the log.
+func sanitizedStorageError(err error) string {
+	if err == nil {
+		return ""
+	}
+	prefix := ""
+	if head, _, ok := strings.Cut(err.Error(), ":"); ok && !strings.ContainsAny(head, `/\`) {
+		prefix = head + ": "
+	}
+	var pe *fs.PathError
+	var le *os.LinkError
+	var se *os.SyscallError
+	switch {
+	case errors.As(err, &pe):
+		return prefix + pe.Op + ": " + pe.Err.Error()
+	case errors.As(err, &le):
+		return prefix + le.Op + ": " + le.Err.Error()
+	case errors.As(err, &se):
+		return prefix + se.Syscall + ": " + se.Err.Error()
+	case errors.Is(err, errWorkspaceStorageUnavailable):
+		return prefix + errWorkspaceStorageUnavailable.Error()
+	}
+	if prefix != "" {
+		return strings.TrimSuffix(prefix, ": ")
+	}
+	return "storage error (details withheld: may name a path)"
 }
 
 // ensureProjectConfigDir creates the hub-managed project's configuration
@@ -1229,7 +1317,8 @@ func (s *Server) writeHubConnectionSettings(project *store.Project, scionDir str
 }
 
 // provisionSharedWorkspace provisions a shared-workspace git project's
-// workspace on a shared backend through provision.ProvisionShared with the
+// workspace, or (with no clone and no workspace lock) a hub-native project's
+// empty workspace, on a shared backend through provision.ProvisionShared with the
 // Kubernetes init container's layout: the uuid workspace leaf
 // (Resolve(workspace)), shared-plain, the sentinel and lock in
 // <ProjectRoot>/provision (provision.ProjectStateDir), the legacy lock in
@@ -1332,6 +1421,14 @@ func (s *Server) provisionSharedWorkspace(ctx context.Context, project *store.Pr
 	if cloneCfg != nil && project.GitRemote != "" {
 		cloneToken = s.resolveCloneToken(ctx, project)
 	}
+	// The legacy lock in the workspace itself excludes an older pod that may
+	// already be provisioning a git workspace. A hub-native workspace is new
+	// (or absent) and is never cloned, so it takes only the state-directory
+	// lock and gets no lock file in its root.
+	legacyLockDir := res.HostPath
+	if project.GitRemote == "" {
+		legacyLockDir = ""
+	}
 	err = provisionSharedClone(provision.ProvisionInput{
 		Ctx:              ctx,
 		Resolved:         provision.ResolvedWorkspace{HostPath: res.HostPath},
@@ -1344,15 +1441,47 @@ func (s *Server) provisionSharedWorkspace(ctx context.Context, project *store.Pr
 		NFSUID:           layout.UID,
 		NFSGID:           layout.GID,
 		SentinelDir:      stateDir,
-		LegacyDir:        res.HostPath,
+		LegacyDir:        legacyLockDir,
 	})
 	if err != nil {
 		s.projectsLogger().Warn("shared workspace provisioning failed",
 			"project_id", project.ID, "error", err.Error())
 		cleanup()
+		if cloneCfg == nil {
+			// No clone ran (a hub-native workspace): a storage failure, not a git one.
+			return fmt.Errorf("shared workspace provisioning: %w", errWorkspaceStorageUnavailable)
+		}
 		return sharedWorkspaceCloneError(err)
 	}
 	return nil
+}
+
+// provisionHubNativeWorkspace provisions the empty workspace of a hub-native
+// project (no git remote) on a shared backend at create, through the same
+// provisionSharedWorkspace a shared-workspace git project uses, with no
+// clone: the workspace leaf and the provisioning state directory through the
+// confined EnsureLeaf walk (mode 2775, default ACL), PrepareStateDir, then
+// provision.ProvisionShared (shared-plain, SentinelDir =
+// <ProjectRoot>/provision, the Layout uid/gid), which chowns the leaf and
+// writes the sentinel. A no-op on the local backend, for any git project,
+// for an empty-per-agent project (no project workspace) and for the global
+// project. Errors wrap errWorkspaceStorageUnavailable (no host path); a
+// project root this call created is removed again on failure.
+func (s *Server) provisionHubNativeWorkspace(ctx context.Context, project *store.Project) error {
+	if !hubNativeWorkspaceProvisioned(s, project) {
+		return nil
+	}
+	return s.provisionSharedWorkspace(ctx, project)
+}
+
+// hubNativeWorkspaceProvisioned reports whether the hub provisions project's
+// workspace itself (provisionHubNativeWorkspace): a shared backend and a
+// hub-native project (no git remote, not empty-per-agent, not the global
+// project). Never true for a git project: a hub-created leaf must not change
+// a git project's provisioning decision.
+func hubNativeWorkspaceProvisioned(s *Server, project *store.Project) bool {
+	return s.workspaceBackendShared() && project != nil && project.GitRemote == "" &&
+		!project.IsEmptyPerAgent() && !isGlobalHubProject(project.Slug)
 }
 
 // sharedWorkspaceCloneError maps a provisioning failure to a *util.GitError
@@ -1643,6 +1772,10 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 
 	if req.Name == "" {
 		ValidationError(w, "name is required", nil)
+		return
+	}
+	if !validClientProjectID(req.ID) {
+		ValidationError(w, invalidClientProjectIDMessage, map[string]interface{}{"field": "id"})
 		return
 	}
 
@@ -2068,6 +2201,12 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 
 		// Ensure the #general chat topic exists for this project (best-effort).
 		s.ensureProjectGeneralTopic(ctx, project)
+
+		// A registered project is dispatched by slug to every provider without a
+		// registered local path (the auto-linked brokers below; brokerUsesSlugProjectDir),
+		// and on a shared backend such a broker requires the project identity
+		// files: write them now (best-effort), not at the next hub start.
+		s.ensureSharedProjectIdentityBestEffort(project)
 
 		// Auto-link brokers that have auto_provide enabled
 		s.autoLinkProviders(ctx, project)
