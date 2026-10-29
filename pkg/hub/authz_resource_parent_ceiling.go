@@ -848,6 +848,47 @@ func (a *AuthzService) EvaluateUserSecretParentCeiling(ctx context.Context, prin
 // evaluateUserSecretParentCeiling is EvaluateUserSecretParentCeiling with
 // explain steps and the unrecorded-hop note.
 func (a *AuthzService) evaluateUserSecretParentCeiling(ctx context.Context, principal AgentIdentity, resource Resource, explain *[]DecisionStep) (ParentCeilingDecision, unrecordedHopNote) {
+	return a.evaluateUserSecretParentCeilingWithChain(ctx, principal, resource, explain, nil)
+}
+
+// precomputedUserSecretChain is a chain verdict (userSecretChainVerdict) a
+// caller computed for an agent before calling Decide: the runtime read
+// computes it to choose its rule, and passes it on the request
+// (AuthzRequest.userSecretChain) so step 10 does not compute it again. It
+// grants nothing by itself: the verdict is the one step 10 would compute,
+// for the same agent, at the same point of the same request.
+type precomputedUserSecretChain struct {
+	agentID   string
+	projectID string
+	chain     userSecretChain
+}
+
+// newPrecomputedUserSecretChain records chain as principal's verdict. It
+// returns nil for an invalid principal, so step 10 computes the verdict.
+func newPrecomputedUserSecretChain(principal AgentIdentity, chain userSecretChain) *precomputedUserSecretChain {
+	if isNilIdentity(principal) || principal.ID() == "" {
+		return nil
+	}
+	return &precomputedUserSecretChain{agentID: principal.ID(), projectID: principal.ProjectID(), chain: chain}
+}
+
+// verdictFor returns the recorded verdict when it is principal's and no
+// explain trace is being collected (a trace needs the verdict's own steps).
+// Otherwise ok is false and the caller computes the verdict.
+func (p *precomputedUserSecretChain) verdictFor(principal AgentIdentity, explain *[]DecisionStep) (userSecretChain, bool) {
+	if p == nil || explain != nil || isNilIdentity(principal) {
+		return userSecretChain{}, false
+	}
+	if p.agentID == "" || p.agentID != principal.ID() || p.projectID != principal.ProjectID() {
+		return userSecretChain{}, false
+	}
+	return p.chain, true
+}
+
+// evaluateUserSecretParentCeilingWithChain is evaluateUserSecretParentCeiling
+// that uses pre, when it holds principal's verdict, instead of computing the
+// chain verdict again.
+func (a *AuthzService) evaluateUserSecretParentCeilingWithChain(ctx context.Context, principal AgentIdentity, resource Resource, explain *[]DecisionStep, pre *precomputedUserSecretChain) (ParentCeilingDecision, unrecordedHopNote) {
 	proof := ParentProof{Kind: ParentProofKindOwnershipFact, Permission: secretUsePermission, ResourceID: resource.ID}
 	if a == nil || a.store == nil || isNilIdentity(principal) || principal.ID() == "" {
 		secretParentStep(explain, "error", "invalid parent ceiling request")
@@ -858,7 +899,10 @@ func (a *AuthzService) evaluateUserSecretParentCeiling(ctx context.Context, prin
 		return parentCeilingDeny(DenyCauseCeilingResourceMissing, "invalid resource: no secret or parent user", proof), unrecordedHopNote{}
 	}
 	ctx = maskAuthzInputs(ctx)
-	chain := a.userSecretChainVerdict(ctx, principal, explain)
+	chain, ok := pre.verdictFor(principal, explain)
+	if !ok {
+		chain = a.userSecretChainVerdict(ctx, principal, explain)
+	}
 	if !chain.decision.Allowed {
 		d := chain.decision
 		d.Proof.ResourceID = resource.ID
@@ -878,10 +922,18 @@ func (a *AuthzService) evaluateUserSecretParentCeiling(ctx context.Context, prin
 	return d, unrecordedHopNote{}
 }
 
+// userSecretChainVerdictObserver is a test seam: when set, it is called
+// with the agent ID each time userSecretChainVerdict runs. Only tests set
+// it; it is nil in production.
+var userSecretChainVerdictObserver func(agentID string)
+
 // userSecretChainVerdict runs clauses S1-S4c for principal (see
 // EvaluateUserSecretParentCeiling). It masks the request's authorization
 // inputs itself, so it can be called on its own.
 func (a *AuthzService) userSecretChainVerdict(ctx context.Context, principal AgentIdentity, explain *[]DecisionStep) userSecretChain {
+	if userSecretChainVerdictObserver != nil && !isNilIdentity(principal) {
+		userSecretChainVerdictObserver(principal.ID())
+	}
 	chain := userSecretChain{decision: ParentCeilingDecision{Proof: ParentProof{Kind: ParentProofKindOwnershipFact, Permission: secretUsePermission}}}
 	if a == nil || a.store == nil || isNilIdentity(principal) || principal.ID() == "" {
 		secretParentStep(explain, "error", "invalid parent ceiling request")
