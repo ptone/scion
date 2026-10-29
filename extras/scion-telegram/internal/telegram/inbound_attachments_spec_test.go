@@ -93,6 +93,12 @@ type iaSpecHub struct {
 	authorized bool
 	agents     []string
 
+	// Optional behaviour, set before the first request.
+	maxBytes      int64          // delivery_max_bytes in artifact mode; 0 = iaSpecMaxBytes
+	checkStatus   int            // non-zero: the check answers this status
+	checkEnvelope bool           // with checkStatus: answer the JSON error envelope
+	inboundStatus map[string]int // inbound send status per message recipient
+
 	mu       sync.Mutex
 	seq      int
 	requests []iaSpecHubRequest
@@ -159,9 +165,22 @@ func (h *iaSpecHub) serve(w http.ResponseWriter, r *http.Request) {
 
 	case r.Method == http.MethodPost && r.URL.Path == iaSpecCheckPath:
 		rec.Body, _ = io.ReadAll(r.Body)
+		if h.checkStatus != 0 {
+			rec.Status = h.checkStatus
+			h.record(rec)
+			if h.checkEnvelope {
+				iaSpecWriteError(w, h.checkStatus, "spec_error")
+			} else {
+				http.Error(w, http.StatusText(h.checkStatus), h.checkStatus)
+			}
+			return
+		}
 		answer := map[string]any{"authorized": h.authorized, "uploads": h.mode}
 		if h.mode == "artifact" {
-			answer["delivery_max_bytes"] = iaSpecMaxBytes
+			answer["delivery_max_bytes"] = int64(iaSpecMaxBytes)
+			if h.maxBytes != 0 {
+				answer["delivery_max_bytes"] = h.maxBytes
+			}
 		}
 		rec.Status = http.StatusOK
 		h.record(rec)
@@ -172,6 +191,14 @@ func (h *iaSpecHub) serve(w http.ResponseWriter, r *http.Request) {
 
 	case r.Method == http.MethodPost && r.URL.Path == iaSpecInboundPath:
 		rec.Body, _ = io.ReadAll(r.Body)
+		var send iaSpecInboundSend
+		_ = json.Unmarshal(rec.Body, &send)
+		if status := h.inboundStatus[send.Message.Recipient]; status != 0 {
+			rec.Status = status
+			h.record(rec)
+			iaSpecWriteError(w, status, "spec_refused")
+			return
+		}
 		rec.Status = http.StatusOK
 		h.record(rec)
 		iaSpecWriteJSON(w, http.StatusOK, map[string]any{})
@@ -240,6 +267,9 @@ func (h *iaSpecHub) serveUpload(w http.ResponseWriter, r *http.Request, rec iaSp
 	case first("sender") == "" || first("project_id") == "" || first("surface") == "" || first("audience") == "":
 		fail(http.StatusBadRequest, "validation_error")
 		return
+	case !iaSpecFilePartsNamedFile(rec.Files):
+		fail(http.StatusBadRequest, "validation_error")
+		return
 	case !h.authorized:
 		fail(http.StatusForbidden, "forbidden")
 		return
@@ -266,13 +296,24 @@ func (h *iaSpecHub) serveUpload(w http.ResponseWriter, r *http.Request, rec iaSp
 	iaSpecWriteJSON(w, http.StatusCreated, map[string]any{"attachments": results, "failures": []any{}})
 }
 
+// iaSpecFilePartsNamedFile reports whether every file part is named "file".
+func iaSpecFilePartsNamedFile(files []iaSpecFormPart) bool {
+	for _, f := range files {
+		if f.Name != "file" {
+			return false
+		}
+	}
+	return true
+}
+
 // iaSpecTelegram fronts the fake Telegram server: it serves getFile and
 // the file download path itself, counting each request, and forwards
 // every other Bot API call to the fake server.
 type iaSpecTelegram struct {
-	inner   *fakeTGServerV2
-	srv     *httptest.Server
-	content []byte
+	inner    *fakeTGServerV2
+	srv      *httptest.Server
+	content  []byte
+	hideSize bool // getFile reports no file size
 
 	mu            sync.Mutex
 	getFileCalls  int
@@ -293,14 +334,19 @@ func newIASpecTelegram(t *testing.T) *iaSpecTelegram {
 		case r.URL.Path == "/bottest-token/getFile":
 			tg.mu.Lock()
 			tg.getFileCalls++
+			hideSize := tg.hideSize
 			tg.mu.Unlock()
 			fileID := r.URL.Query().Get("file_id")
+			size := int64(len(tg.content))
+			if hideSize {
+				size = 0
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(apiResponse{
 				OK: true,
 				Result: mustJSONRawV2(t, TGFile{
 					FileID:   fileID,
-					FileSize: int64(len(tg.content)),
+					FileSize: size,
 					FilePath: "documents/" + fileID,
 				}),
 			})
@@ -337,6 +383,13 @@ type iaSpecEnv struct {
 
 func newIASpecEnv(t *testing.T, hub *iaSpecHub, withDownloadsPath bool) *iaSpecEnv {
 	t.Helper()
+	return newIASpecEnvWith(t, hub, withDownloadsPath, nil)
+}
+
+// newIASpecEnvWith is newIASpecEnv with a hook that runs before the broker
+// is configured, given the scratchpad and downloads_path directories.
+func newIASpecEnvWith(t *testing.T, hub *iaSpecHub, withDownloadsPath bool, beforeStart func(scratchpad, downloads string)) *iaSpecEnv {
+	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	stubSharedDirSettings(t, &config.VersionedSettings{})
@@ -346,6 +399,12 @@ func newIASpecEnv(t *testing.T, hub *iaSpecHub, withDownloadsPath bool) *iaSpecE
 		tg:        newIASpecTelegram(t),
 		home:      home,
 		downloads: filepath.Join(t.TempDir(), "downloads"),
+	}
+	res, err := resolveSharedDir(home, iaSpecProjectSlug, sharedDirTestProjectID, projectfs.ScratchpadName)
+	require.NoError(t, err)
+	env.scratchpad = res.Path
+	if beforeStart != nil {
+		beforeStart(env.scratchpad, env.downloads)
 	}
 
 	cfg := map[string]string{
@@ -363,10 +422,6 @@ func newIASpecEnv(t *testing.T, hub *iaSpecHub, withDownloadsPath bool) *iaSpecE
 	env.b = NewV2(slog.Default())
 	t.Cleanup(func() { env.b.Close() })
 	require.NoError(t, env.b.Configure(cfg))
-
-	res, err := resolveSharedDir(home, iaSpecProjectSlug, sharedDirTestProjectID, projectfs.ScratchpadName)
-	require.NoError(t, err)
-	env.scratchpad = res.Path
 	return env
 }
 
@@ -507,7 +562,7 @@ func (env *iaSpecEnv) assertDeliveredThroughUpload(t *testing.T, sender string) 
 	assert.Equal(t, sender, check["sender"], "check sender")
 	assert.Equal(t, sharedDirTestProjectID, check["project_id"], "check project_id")
 	assert.Equal(t, "telegram", check["surface"], "check surface")
-	assert.Contains(t, fmt.Sprint(check["targets"]), "coder", "check targets name the resolved agent")
+	assert.Equal(t, []any{"coder"}, check["targets"], "check targets name the resolved agent")
 
 	require.Len(t, uploadReqs, 1, "exactly one attachment upload request")
 	up := uploadReqs[0]
@@ -517,7 +572,9 @@ func (env *iaSpecEnv) assertDeliveredThroughUpload(t *testing.T, sender string) 
 	assert.Equal(t, []string{sharedDirTestProjectID}, up.Meta["project_id"], "upload project_id")
 	assert.Equal(t, []string{"telegram"}, up.Meta["surface"], "upload surface")
 	assert.Equal(t, []string{"group"}, up.Meta["audience"], "upload audience attestation")
+	assert.Equal(t, []string{"coder"}, up.Meta["targets"], "upload targets, one field per slug")
 	require.Len(t, up.Files, 1, "one file part")
+	assert.Equal(t, "file", up.Files[0].Name, "file parts are named file")
 	assert.Equal(t, env.tg.content, up.Files[0].Data, "uploaded bytes are the Telegram file")
 	assert.Less(t, checks[0].Seq, up.Seq, "the check precedes the upload")
 
@@ -528,8 +585,8 @@ func (env *iaSpecEnv) assertDeliveredThroughUpload(t *testing.T, sender string) 
 	require.Len(t, sends, 1, "exactly one inbound send")
 	var send iaSpecInboundSend
 	require.NoError(t, json.Unmarshal(sends[0].Body, &send), "inbound body: %s", sends[0].Body)
-	ids := append(append([]string(nil), send.AttachmentIDs...), send.Message.AttachmentIDs...)
-	assert.Equal(t, []string{stored[0].ID}, ids, "the inbound send names the upload by id")
+	assert.Equal(t, []string{stored[0].ID}, send.AttachmentIDs, "the inbound send names the upload by id, at the top level")
+	assert.Empty(t, send.Message.AttachmentIDs, "the ids are not inside the message")
 	assert.Empty(t, send.Message.Attachments, "the inbound send carries no path attachment")
 	assert.Equal(t, "agent:coder", send.Message.Recipient, "inbound recipient")
 	assert.Less(t, up.Seq, sends[0].Seq, "the upload precedes the send")
