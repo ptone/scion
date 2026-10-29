@@ -346,9 +346,9 @@
 - [gcp.identity.verify](#gcpidentityverify) — Verify a GCP service account's IAM configuration
 - [env.read](#envread) — Read project or broker environment variables (scope=project or runtime_broker). User and hub scope are the session-only operations env.user.read, env.hub.read and env.hub.list
 - [env.hub.list](#envhublist) — List hub-level environment variables (scope=hub). Session only: an unscoped admin lists every entry, and a session holder of hub.env_vars.read lists them without secret entries; every user access token is refused
-- [env.user.read](#envuserread) — Read the caller's own user-level environment variables (scope=user, the default)
+- [env.user.read](#envuserread) — Read the caller's own user-level environment variables (scope=user, the default). A federated caller reads its own (retained prior behaviour)
 - [env.user.write](#envuserwrite) — Create, update or delete the caller's own user-level environment variables (scope=user, the default). A federated caller is refused (requireProfileWriter)
-- [secret.user.read](#secretuserread) — Read the caller's own user-level secrets (scope=user, the default)
+- [secret.user.read](#secretuserread) — Read the caller's own user-level secrets (scope=user, the default). A federated caller reads its own (retained prior behaviour)
 - [secret.user.write](#secretuserwrite) — Create, update or delete the caller's own user-level secrets (scope=user, the default). A federated caller is refused (requireProfileWriter)
 - [env.hub.read](#envhubread) — Read one hub-level environment variable (scope=hub). Agents may read; a user must be an unscoped admin
 - [env.hub.write](#envhubwrite) — Create, update or delete hub-level environment variables (scope=hub). A user must be an unscoped admin
@@ -12848,7 +12848,7 @@
 
 **Domain:** env
 
-**Description:** Read the caller's own user-level environment variables (scope=user, the default)
+**Description:** Read the caller's own user-level environment variables (scope=user, the default). A federated caller reads its own (retained prior behaviour)
 
 ### Entry Points
 
@@ -12859,7 +12859,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `federated_user`
 
 **Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
 
@@ -12875,6 +12875,7 @@
 - `pkg/hub:TestUserEnvSecret_ProjectBoundaryTokenRefused`
 - `pkg/hub:TestUserEnvSecretWrites_SessionAllowedTokenRefused`
 - `pkg/hub:TestUserEnvSecretWrites_FederatedUserRefused`
+- `pkg/hub:TestUserEnvSecretReads_FederatedOwnScopeAllowed`
 
 ### Exemptions
 
@@ -12931,7 +12932,7 @@
 
 **Domain:** secret
 
-**Description:** Read the caller's own user-level secrets (scope=user, the default)
+**Description:** Read the caller's own user-level secrets (scope=user, the default). A federated caller reads its own (retained prior behaviour)
 
 ### Entry Points
 
@@ -12942,7 +12943,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `federated_user`
 
 **Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
 
@@ -12964,6 +12965,7 @@
 - `pkg/hub:TestUserEnvSecret_ProjectBoundaryTokenRefused`
 - `pkg/hub:TestUserEnvSecretWrites_SessionAllowedTokenRefused`
 - `pkg/hub:TestUserEnvSecretWrites_FederatedUserRefused`
+- `pkg/hub:TestUserEnvSecretReads_FederatedOwnScopeAllowed`
 
 ### Exemptions
 
