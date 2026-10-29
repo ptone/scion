@@ -18,6 +18,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -53,15 +55,14 @@ import (
 // admission) are not applied to these rows, so a user's own agent at any
 // role keeps the user's own rows as before.
 //
-// Legacy data keeps today's delivery, with a rate-limited Warn naming the
-// cohort (ptone 2026-10-28, legacy cohort decision A):
-//
-//   - the agent's own edge is missing (legacy_no_edge), is the migration
-//     sentinel (legacy_sentinel_edge), carries no recorded provenance
-//     (legacy_unadopted_edge), is one of several active edges
-//     (legacy_ambiguous_edges), or records a principal that does not
-//     type-check (legacy_inconsistent_principal). The ancestry check
-//     above still applies.
+// Legacy agents keep their start-time delivery, with a rate-limited Warn
+// naming the cohort, when the agent's own edge is missing
+// (legacy_no_edge), is the migration sentinel (legacy_sentinel_edge),
+// carries no recorded provenance (legacy_unadopted_edge), is one of several
+// active edges (legacy_ambiguous_edges), or records a principal that does
+// not type-check (legacy_inconsistent_principal). The ancestry check above
+// still applies to them: a legacy agent whose ancestry starts at another
+// user is withheld.
 //
 // An adopted edge (source system_migration) and an edge recorded from a
 // user access token (source uat) are recorded edges: their delegator is
@@ -70,7 +71,17 @@ import (
 //
 // Fail closed: a store error while following the chain, a depth or cycle
 // violation, or a hop above the agent's own edge without recorded
-// provenance withholds every such row.
+// provenance (including several active edges there) withholds every such
+// row.
+//
+// One verdict per dispatch: each dispatch entry point installs a memo
+// (withOwnerChainMemo), so every site of one create, start or restart uses
+// the same verdict and the chain is followed once.
+//
+// The read-only reports (the env source labels, the required-key probe and
+// the env-gather response) apply the same row decision without counting or
+// logging (ownerChainCheck.allowsRow), so they never report a withheld row
+// as present.
 
 // Owner material chain outcomes.
 type ownerChainOutcome int
@@ -182,13 +193,91 @@ func ownerRowDecision(v ownerChainVerdict, ancestry []string, rowOwner string) (
 	}
 }
 
+// ownerChainMemoKey keys the per-dispatch verdict memo in a context.
+type ownerChainMemoKey struct{}
+
+// ownerChainMemo holds the verdicts computed during one dispatch, by agent.
+type ownerChainMemo struct {
+	mu       sync.Mutex
+	verdicts map[string]ownerChainVerdict
+}
+
+// withOwnerChainMemo returns ctx with a verdict memo for one dispatch, or
+// ctx itself when it already carries one (a nested dispatch call).
+func withOwnerChainMemo(ctx context.Context) context.Context {
+	if _, ok := ctx.Value(ownerChainMemoKey{}).(*ownerChainMemo); ok {
+		return ctx
+	}
+	return context.WithValue(ctx, ownerChainMemoKey{}, &ownerChainMemo{verdicts: make(map[string]ownerChainVerdict)})
+}
+
+// ownerChainVerdictFor is ownerChainVerdict, memoized for the dispatch ctx
+// carries (withOwnerChainMemo). Without a memo it computes the verdict.
+func (a *AuthzService) ownerChainVerdictFor(ctx context.Context, agent *store.Agent) ownerChainVerdict {
+	m, ok := ctx.Value(ownerChainMemoKey{}).(*ownerChainMemo)
+	if !ok || m == nil || agent == nil {
+		return a.ownerChainVerdict(ctx, agent)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if v, ok := m.verdicts[agent.ID]; ok {
+		return v
+	}
+	v := a.ownerChainVerdict(ctx, agent)
+	m.verdicts[agent.ID] = v
+	return v
+}
+
+// ownerChainCheck applies the rule to one agent's rows. The verdict is
+// computed on the first row. It counts and logs nothing. A nil check
+// allows every row: no authorization service is configured, the agent has
+// no owner, or it has no ID yet (the create-time availability probe, before
+// the agent is stored; nothing is delivered to it, and every later start
+// applies the rule).
+type ownerChainCheck struct {
+	a       *AuthzService
+	agent   *store.Agent
+	done    bool
+	verdict ownerChainVerdict
+}
+
+func newOwnerChainCheck(a *AuthzService, agent *store.Agent) *ownerChainCheck {
+	if a == nil || agent == nil || agent.OwnerID == "" || agent.ID == "" {
+		return nil
+	}
+	return &ownerChainCheck{a: a, agent: agent}
+}
+
+// decide applies the rule to a row of rowOwner not shared with progeny.
+func (c *ownerChainCheck) decide(ctx context.Context, rowOwner string) (deliver, legacy bool, reason string) {
+	if c == nil {
+		return true, false, ""
+	}
+	if !c.done {
+		c.verdict = c.a.ownerChainVerdictFor(ctx, c.agent)
+		c.done = true
+	}
+	return ownerRowDecision(c.verdict, c.agent.Ancestry, rowOwner)
+}
+
+// allowsRow reports, without counting or logging, whether a user-scope row
+// of rowOwner is delivered under the rule: a row shared with progeny is
+// not the rule's to decide.
+func (c *ownerChainCheck) allowsRow(ctx context.Context, allowProgeny bool, rowOwner string) bool {
+	if c == nil || allowProgeny {
+		return true
+	}
+	deliver, _, _ := c.decide(ctx, rowOwner)
+	return deliver
+}
+
 // Kinds counted by the owner material gate.
 const (
 	ownerMaterialKindSecret = "secret"
 	ownerMaterialKindEnvVar = "env_var"
 )
 
-// Sites the owner material gate reports.
+// Sites the owner material gate reports (the metric's site attribute).
 const (
 	ownerMaterialSiteResolveSecrets = "resolve_secrets"
 	ownerMaterialSiteAsNeeded       = "as_needed"
@@ -196,6 +285,7 @@ const (
 	ownerMaterialSiteLaunchEnv      = "launch_env"
 	ownerMaterialSiteEnvStorage     = "env_storage"
 	ownerMaterialSiteCloneToken     = "clone_token"
+	ownerMaterialSiteTZ             = "tz"
 )
 
 // ownerMaterialChainWarnInterval is the shortest gap between two Warn lines
@@ -213,25 +303,26 @@ func (c *ownerMaterialCounts) add(kind string) {
 }
 
 // ownerMaterialGate applies the owner material chain rule to the non-shared
-// user-scope rows of one start-time site, for one agent. The chain is
-// followed once, on the first row. Withheld and legacy rows are counted and
-// reported by flush. A nil gate allows every row (no authorization service
-// is configured).
+// user-scope rows of one start-time site, for one agent, and counts the
+// rows it withholds or lets through as legacy; flush reports them. A nil
+// gate allows every row (no authorization service is configured).
 type ownerMaterialGate struct {
-	d       *HTTPAgentDispatcher
-	agent   *store.Agent
-	done    bool
-	verdict ownerChainVerdict
+	d     *HTTPAgentDispatcher
+	check *ownerChainCheck
 
 	withheld map[string]*ownerMaterialCounts // by reason
 	legacy   map[string]*ownerMaterialCounts // by cohort
 }
 
 func (d *HTTPAgentDispatcher) newOwnerMaterialGate(agent *store.Agent) *ownerMaterialGate {
-	if d == nil || d.authzService == nil || agent == nil || agent.OwnerID == "" {
+	if d == nil {
 		return nil
 	}
-	return &ownerMaterialGate{d: d, agent: agent}
+	check := newOwnerChainCheck(d.authzService, agent)
+	if check == nil {
+		return nil
+	}
+	return &ownerMaterialGate{d: d, check: check}
 }
 
 // allow reports whether a non-shared user-scope row of rowOwner, of kind
@@ -240,11 +331,7 @@ func (g *ownerMaterialGate) allow(ctx context.Context, kind, rowOwner string) bo
 	if g == nil {
 		return true
 	}
-	if !g.done {
-		g.verdict = g.d.authzService.ownerChainVerdict(ctx, g.agent)
-		g.done = true
-	}
-	deliver, legacy, reason := ownerRowDecision(g.verdict, g.agent.Ancestry, rowOwner)
+	deliver, legacy, reason := g.check.decide(ctx, rowOwner)
 	switch {
 	case !deliver:
 		if g.withheld == nil {
@@ -273,11 +360,24 @@ func (g *ownerMaterialGate) allowEnvRow(ctx context.Context, filter store.EnvVar
 	if g == nil || filter.Scope != store.ScopeUser || v.AllowProgeny {
 		return true
 	}
-	owner := v.ScopeID
-	if owner == "" {
-		owner = filter.ScopeID
+	return g.allow(ctx, ownerMaterialKindEnvVar, envRowOwner(filter, v))
+}
+
+// ownerRowScope is a row's owner: its scope ID, or the scope it was looked
+// up in when the row does not carry one.
+func ownerRowScope(scopeID, lookedUp string) string {
+	if scopeID != "" {
+		return scopeID
 	}
-	return g.allow(ctx, ownerMaterialKindEnvVar, owner)
+	return lookedUp
+}
+
+// envRowOwner is the owner of a user-scope env var row listed under filter.
+func envRowOwner(filter store.EnvVarFilter, v store.EnvVar) string {
+	if v.ScopeID != "" {
+		return v.ScopeID
+	}
+	return filter.ScopeID
 }
 
 // flush reports the rows counted since the last flush, for site: one
@@ -288,23 +388,28 @@ func (g *ownerMaterialGate) flush(ctx context.Context, site string) {
 		return
 	}
 	a := g.d.authzService
+	agent := g.check.agent
+	log := g.d.log
+	if log == nil {
+		log = slog.Default()
+	}
 	for reason, c := range g.withheld {
-		a.recordOwnerMaterialChain(ctx, "withheld", reason, c)
-		if !g.d.admitOwnerChainWarn(g.agent.ID+"/"+site, "withheld/"+reason) {
+		a.recordOwnerMaterialChain(ctx, site, "withheld", reason, c)
+		if !g.d.admitOwnerChainWarn(agent.ID+"/"+site, "withheld/"+reason) {
 			continue
 		}
-		g.d.log.WarnContext(ctx, "start-time user material withheld: the agent's recorded delegation chain does not end at the material's owner",
-			"site", site, "agent_id", g.agent.ID, "owner_id", g.agent.OwnerID,
-			"terminal_user_id", g.verdict.terminalUserID, "reason", reason,
+		log.WarnContext(ctx, "start-time user material withheld: the agent's recorded delegation chain does not end at the material's owner",
+			"site", site, "agent_id", agent.ID, "owner_id", agent.OwnerID,
+			"terminal_user_id", g.check.verdict.terminalUserID, "reason", reason,
 			"secrets", c.secrets, "env_vars", c.envVars)
 	}
 	for cohort, c := range g.legacy {
-		a.recordOwnerMaterialChain(ctx, "legacy", cohort, c)
-		if !g.d.admitOwnerChainWarn(g.agent.ID+"/"+site, "legacy/"+cohort) {
+		a.recordOwnerMaterialChain(ctx, site, "legacy", cohort, c)
+		if !g.d.admitOwnerChainWarn(agent.ID+"/"+site, "legacy/"+cohort) {
 			continue
 		}
-		g.d.log.WarnContext(ctx, "start-time user material delivered through the legacy fallback: the agent's delegation chain is not recorded",
-			"site", site, "agent_id", g.agent.ID, "owner_id", g.agent.OwnerID,
+		log.WarnContext(ctx, "start-time user material delivered through the legacy fallback: the agent's delegation chain is not recorded",
+			"site", site, "agent_id", agent.ID, "owner_id", agent.OwnerID,
 			"cohort", cohort, "exception", "legacy",
 			"secrets", c.secrets, "env_vars", c.envVars)
 	}
@@ -325,14 +430,19 @@ func newOwnerMaterialChainLimiter() *hookRefusalLimiter {
 	return newHookRefusalLimiter(ownerMaterialChainWarnInterval, time.Now)
 }
 
-// ownerMaterialChainMetrics counts rows the owner material chain rule
-// withholds or delivers through the legacy fallback.
+// ownerMaterialChainMetrics counts the rule's row evaluations that withhold
+// a row or deliver it through the legacy fallback.
 type ownerMaterialChainMetrics interface {
-	RecordOwnerMaterialChain(ctx context.Context, outcome, reason, kind string, n int64)
+	RecordOwnerMaterialChain(ctx context.Context, site, outcome, reason, kind string, n int64)
 }
 
 // OTelOwnerMaterialChainMetrics counts them as
-// scion.hub.user_material.owner_chain (attributes outcome, reason, kind).
+// scion.hub.user_material.owner_chain, unit {evaluation}. One start
+// evaluates a row at each site that reads it, so the counter counts
+// evaluations per site, not distinct rows. Attributes, each with a fixed
+// set of values: site (resolve_secrets, as_needed, launch_secrets,
+// launch_env, env_storage, clone_token, tz), outcome (withheld, legacy),
+// reason (a withhold reason or legacy cohort) and kind (secret, env_var).
 type OTelOwnerMaterialChainMetrics struct {
 	total metric.Int64Counter
 }
@@ -343,7 +453,8 @@ func NewOTelOwnerMaterialChainMetrics(mp metric.MeterProvider) (*OTelOwnerMateri
 		return nil, errors.New("otel owner material chain metrics: nil MeterProvider")
 	}
 	c, err := mp.Meter(instrumentationScope).Int64Counter("scion.hub.user_material.owner_chain",
-		metric.WithUnit("{row}"))
+		metric.WithUnit("{evaluation}"),
+		metric.WithDescription("start-time evaluations of an owner's unshared user-scope row that withheld it or delivered it through the legacy fallback, per site"))
 	if err != nil {
 		return nil, fmt.Errorf("creating user_material.owner_chain counter: %w", err)
 	}
@@ -351,8 +462,9 @@ func NewOTelOwnerMaterialChainMetrics(mp metric.MeterProvider) (*OTelOwnerMateri
 }
 
 // RecordOwnerMaterialChain implements ownerMaterialChainMetrics.
-func (m *OTelOwnerMaterialChainMetrics) RecordOwnerMaterialChain(ctx context.Context, outcome, reason, kind string, n int64) {
+func (m *OTelOwnerMaterialChainMetrics) RecordOwnerMaterialChain(ctx context.Context, site, outcome, reason, kind string, n int64) {
 	m.total.Add(ctx, n, metric.WithAttributes(
+		attribute.String("site", site),
 		attribute.String("outcome", outcome),
 		attribute.String("reason", reason),
 		attribute.String("kind", kind),
@@ -367,8 +479,9 @@ func (s *Server) SetOwnerMaterialChainMetrics(m ownerMaterialChainMetrics) {
 	s.authzService.ownerChainMetrics = m
 }
 
-// OwnerMaterialChainWithheld returns the number of rows the owner material
-// chain rule withheld since the process started.
+// OwnerMaterialChainWithheld returns the number of row evaluations the
+// owner material chain rule withheld since the process started (counted
+// per site, as the metric is).
 func (a *AuthzService) OwnerMaterialChainWithheld() int64 {
 	if a == nil {
 		return 0
@@ -376,7 +489,7 @@ func (a *AuthzService) OwnerMaterialChainWithheld() int64 {
 	return a.ownerChainWithheld.Load()
 }
 
-func (a *AuthzService) recordOwnerMaterialChain(ctx context.Context, outcome, reason string, c *ownerMaterialCounts) {
+func (a *AuthzService) recordOwnerMaterialChain(ctx context.Context, site, outcome, reason string, c *ownerMaterialCounts) {
 	if a == nil || c == nil {
 		return
 	}
@@ -388,10 +501,10 @@ func (a *AuthzService) recordOwnerMaterialChain(ctx context.Context, outcome, re
 		return
 	}
 	if c.secrets > 0 {
-		m.RecordOwnerMaterialChain(ctx, outcome, reason, ownerMaterialKindSecret, int64(c.secrets))
+		m.RecordOwnerMaterialChain(ctx, site, outcome, reason, ownerMaterialKindSecret, int64(c.secrets))
 	}
 	if c.envVars > 0 {
-		m.RecordOwnerMaterialChain(ctx, outcome, reason, ownerMaterialKindEnvVar, int64(c.envVars))
+		m.RecordOwnerMaterialChain(ctx, site, outcome, reason, ownerMaterialKindEnvVar, int64(c.envVars))
 	}
 }
 

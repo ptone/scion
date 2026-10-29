@@ -167,13 +167,19 @@ func legacyEnvTZ(ac *store.AgentAppliedConfig) string {
 // one), then falls back to progeny vars. It differs in one way: an
 // empty-valued entry never wins, because the TZ chain takes the first
 // non-empty rung. as_needed entries are skipped: they are not a rung of the
-// TZ chain.
+// TZ chain. The owner's user-scope row not shared with progeny counts only
+// when the owner material chain rule delivers it.
 func (d *HTTPAgentDispatcher) resolveStorageTZ(ctx context.Context, agent *store.Agent) agentTZ {
 	var result agentTZ
 	if agent == nil || d.store == nil {
 		return result
 	}
 
+	// The owner's user-scope TZ row not shared with progeny is held to the
+	// owner material chain rule (start_owner_material_chain.go); when it is
+	// withheld, a lower scope or the hub default supplies TZ.
+	gate := d.newOwnerMaterialGate(agent)
+	defer gate.flush(ctx, ownerMaterialSiteTZ)
 	for _, filter := range d.envScopesInPrecedenceOrder(agent) {
 		filter.Key = agentTZEnvKey
 		vars, err := d.store.ListEnvVars(ctx, filter)
@@ -183,6 +189,9 @@ func (d *HTTPAgentDispatcher) resolveStorageTZ(ctx context.Context, agent *store
 		}
 		for _, v := range vars {
 			if v.Key != agentTZEnvKey || v.Value == "" || v.InjectionMode == store.InjectionModeAsNeeded {
+				continue
+			}
+			if !gate.allowEnvRow(ctx, filter, v) {
 				continue
 			}
 			result = agentTZ{TZ: v.Value, Source: envScopeSourceLabel(filter.Scope)}

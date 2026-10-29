@@ -35,6 +35,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -191,11 +192,12 @@ func omcAgentWith(t *testing.T, f *sdFixture, name string, ancestry []string, cr
 	return id
 }
 
-// TestOwnerMaterialChain_CompositionMatrix (condition iii): shared and
+// TestOwnerMaterialChain_CompositionMatrix: shared and
 // non-shared rows, secrets and env vars, on a clean chain and on a
 // re-delegated chain. The clean chain delivers everything (the owner's own
 // direct agent keeps all of the owner's rows). On the re-delegated chain the
-// shared secret is refused by the parent ceiling (S8), every non-shared row
+// shared secret is refused by the parent ceiling (its chain does not end at
+// the secret's owner), every non-shared row
 // by the chain rule, and the shared env var stays on today's rule.
 func TestOwnerMaterialChain_CompositionMatrix(t *testing.T) {
 	t.Run("clean chain", func(t *testing.T) {
@@ -219,7 +221,7 @@ func TestOwnerMaterialChain_CompositionMatrix(t *testing.T) {
 	})
 }
 
-// TestOwnerMaterialChain_ProvenanceRootNotOwner (condition ii): the chain
+// TestOwnerMaterialChain_ProvenanceRootNotOwner: the chain
 // ends at the owner, but the stored ancestry starts at another user. The
 // read is keyed on Ancestry[0], so the owner's rows not shared are withheld.
 func TestOwnerMaterialChain_ProvenanceRootNotOwner(t *testing.T) {
@@ -232,13 +234,13 @@ func TestOwnerMaterialChain_ProvenanceRootNotOwner(t *testing.T) {
 	got := omcStartDelivery(t, f.disp, f.Store, id)
 	assert.False(t, got.privateSecret || got.privateAsNeeded || got.privateEnv || got.privateSecretEnv || got.privateAsNeededEnv,
 		"every row not shared is withheld: %+v", got)
-	assert.False(t, got.sharedSecret, "the parent ceiling refuses the shared secret too (S8)")
+	assert.False(t, got.sharedSecret, "the parent ceiling refuses the shared secret too: the ancestry does not start at its owner")
 	assert.True(t, got.sharedEnv, "the shared env var stays on today's rule")
 }
 
 // TestOwnerMaterialChain_LegacyCohorts pins the behaviour for agents and
 // rows written by older versions. Legacy chains keep today's delivery of
-// the owner's rows not shared (ptone 10-28, decision A) and log the cohort;
+// the owner's rows not shared and log the cohort;
 // recorded shapes are judged by who the chain ends at.
 func TestOwnerMaterialChain_LegacyCohorts(t *testing.T) {
 	type tc struct {
@@ -308,6 +310,21 @@ func TestOwnerMaterialChain_LegacyCohorts(t *testing.T) {
 			})
 			return id
 		}, true, ""},
+		{"adopted readonly edge from the owner", func(t *testing.T, f *sdFixture) string {
+			id := omcAgentWith(t, f, "adopted-ro", []string{f.UserID}, f.UserID)
+			edge(f, t, id, func(e *store.DelegationEdge) {
+				e.SourceCredentialKind = store.SourceCredentialSystemMigration
+				e.Role = string(AgentRoleReadOnly)
+				e.EffectCeiling = store.EffectCeiling{Kind: store.EffectCeilingBounded, PermissionIDs: lafV1(t, AgentRoleReadOnly, false)}
+			})
+			return id
+		}, true, ""},
+		{"no edge, ancestry starts at another user", func(t *testing.T, f *sdFixture) string {
+			// Legacy delivery keeps the ancestry check: withheld.
+			other := tid("omc-legacy-root-other")
+			createDCUser(t, f.Store, other, "omc-legacy-root-other@test.com", f.ProjectID, store.ProjectRoleOwner)
+			return omcAgentWith(t, f, "legacy-root", []string{other}, f.UserID)
+		}, false, ""},
 		{"edge recorded from a user access token (uat_created_no_deliver_mapping)", func(t *testing.T, f *sdFixture) string {
 			id := omcAgentWith(t, f, "uat", []string{f.UserID}, f.UserID)
 			edge(f, t, id, func(e *store.DelegationEdge) {
@@ -427,45 +444,289 @@ func TestOwnerMaterialChain_FailClosed(t *testing.T) {
 
 type omcEdgeFaultStore struct{ store.Store }
 
-// omcEdgesOverrideStore returns edges for every delegate lookup (the store's
-// partial unique index forbids two active edges for one delegate and scope).
+// omcEdgesOverrideStore returns edges for agentID's delegate lookup (the
+// store's partial unique index forbids two active edges for one delegate
+// and scope); every other lookup is the store's.
 type omcEdgesOverrideStore struct {
 	store.Store
-	edges []*store.DelegationEdge
+	agentID string
+	edges   []*store.DelegationEdge
 }
 
-func (o omcEdgesOverrideStore) GetDelegationEdgesForDelegate(context.Context, string, string) ([]*store.DelegationEdge, error) {
-	return o.edges, nil
+func (o omcEdgesOverrideStore) GetDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string) ([]*store.DelegationEdge, error) {
+	if delegateID == o.agentID {
+		return o.edges, nil
+	}
+	return o.Store.GetDelegationEdgesForDelegate(ctx, delegateType, delegateID)
+}
+
+// omcTwoEdges is two active, recorded principal edges from the user
+// delegator to delegate in the fixture project.
+func omcTwoEdges(f *sdFixture, delegatorID, delegateID, name string) []*store.DelegationEdge {
+	edge := func(edgeID string) *store.DelegationEdge {
+		return &store.DelegationEdge{
+			ID: edgeID, DelegatorType: store.DelegationPrincipalUser, DelegatorID: delegatorID,
+			DelegateType: store.DelegationPrincipalAgent, DelegateID: delegateID,
+			ScopeType: store.RoleScopeProject, ScopeID: f.ProjectID, Role: string(AgentRoleFull), Active: true,
+			AuthorityProvenance: store.AuthorityProvenance{ProvenanceVersion: store.ProvenanceVersionV1, SourcePrincipalKind: store.DelegationPrincipalUser, SourcePrincipalID: delegatorID, SourceCredentialKind: store.SourceCredentialSession},
+			EffectCeiling:       store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+		}
+	}
+	return []*store.DelegationEdge{edge(tid(name + "-1")), edge(tid(name + "-2"))}
+}
+
+// omcCreateDelivery is what the create-path functions deliver of the
+// owner's unshared rows (resolveSecrets and resolveEnvFromStorage, which
+// build no delivery credential), and the dispatcher's log.
+func omcCreateDelivery(t *testing.T, f *sdFixture, agentID string) (privateSecret, privateEnv bool, log string) {
+	t.Helper()
+	ctx := context.Background()
+	var buf bytes.Buffer
+	f.disp.log = slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	agent, err := f.Store.GetAgent(ctx, agentID)
+	require.NoError(t, err)
+	resolved, _, err := f.disp.resolveSecrets(ctx, agent)
+	require.NoError(t, err)
+	for _, r := range resolved {
+		privateSecret = privateSecret || (r.Source == store.ScopeUser && r.Name == sdPrivateKey && r.Value == sdPrivateValue)
+	}
+	env, _, err := f.disp.resolveEnvFromStorage(ctx, agent)
+	require.NoError(t, err)
+	privateEnv = env[omcPrivateEnvKey] == omcPrivateEnvValue
+	return privateSecret, privateEnv, buf.String()
 }
 
 // TestOwnerMaterialChain_AmbiguousEdgesLegacy: more than one active edge on
-// the agent's own hop is a legacy shape: the verdict is legacy (delivery
-// kept, with the Warn), as the parent ceiling treats it as unrecorded.
+// the agent's own hop is a legacy shape: delivery is kept, with the legacy
+// Warn (cohort legacy_ambiguous_edges), as the parent ceiling treats it as
+// unrecorded. The verdict and the end-to-end delivery are pinned.
 func TestOwnerMaterialChain_AmbiguousEdgesLegacy(t *testing.T) {
 	f := newOMCFixture(t, "omc-ambig")
 	id, _ := f.direct(t, "ambig", false)
 	agent, err := f.Store.GetAgent(context.Background(), id)
 	require.NoError(t, err)
-	edge := func(edgeID string) *store.DelegationEdge {
-		return &store.DelegationEdge{
-			ID: edgeID, DelegatorType: store.DelegationPrincipalUser, DelegatorID: f.UserID,
-			DelegateType: store.DelegationPrincipalAgent, DelegateID: id,
-			ScopeType: store.RoleScopeProject, ScopeID: f.ProjectID, Active: true,
-			AuthorityProvenance: store.AuthorityProvenance{ProvenanceVersion: store.ProvenanceVersionV1, SourcePrincipalKind: store.DelegationPrincipalUser, SourcePrincipalID: f.UserID, SourceCredentialKind: store.SourceCredentialSession},
-			EffectCeiling:       store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
-		}
-	}
-	a := &AuthzService{store: omcEdgesOverrideStore{Store: f.Store, edges: []*store.DelegationEdge{edge(tid("omc-dup-1")), edge(tid("omc-dup-2"))}}}
-	v := a.ownerChainVerdict(context.Background(), agent)
+	f.Server.authzService.store = omcEdgesOverrideStore{Store: f.Server.authzService.store, agentID: id, edges: omcTwoEdges(f, f.UserID, id, "omc-dup")}
+
+	v := f.Server.authzService.ownerChainVerdict(context.Background(), agent)
 	assert.Equal(t, ownerChainVerdict{outcome: ownerChainLegacy, reason: ownerChainCohortAmbiguousEdges}, v)
-	deliver, legacy, reason := ownerRowDecision(v, agent.Ancestry, f.UserID)
-	assert.True(t, deliver)
-	assert.True(t, legacy)
-	assert.Equal(t, ownerChainCohortAmbiguousEdges, reason)
+
+	privateSecret, privateEnv, log := omcCreateDelivery(t, f, id)
+	assert.True(t, privateSecret, "legacy delivery is kept")
+	assert.True(t, privateEnv, "legacy delivery is kept")
+	recs := omcRecords(t, log, omcLegacyMsg)
+	require.NotEmpty(t, recs, "log: %s", log)
+	for _, r := range recs {
+		assert.Equal(t, ownerChainCohortAmbiguousEdges, r["cohort"])
+	}
 }
 
-func (omcEdgeFaultStore) GetDelegationEdgesForDelegate(context.Context, string, string) ([]*store.DelegationEdge, error) {
-	return nil, errors.New("omc: edge lookup fault")
+// TestOwnerMaterialChain_AmbiguousEdgesAboveAgent: more than one active edge
+// above the agent's own hop cannot be followed: the rows are withheld
+// (unrecorded_hop_above_agent), with the withheld Warn.
+func TestOwnerMaterialChain_AmbiguousEdgesAboveAgent(t *testing.T) {
+	f := newOMCFixture(t, "omc-ambig-above")
+	parent := omcAgentWith(t, f, "ambig-above-parent", []string{f.UserID}, f.UserID)
+	id, _ := f.direct(t, "ambig-above", false)
+	f.recordEdge(t, store.DelegationPrincipalAgent, parent, id, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, nil)
+	f.Server.authzService.store = omcEdgesOverrideStore{Store: f.Server.authzService.store, agentID: parent, edges: omcTwoEdges(f, f.UserID, parent, "omc-dup-above")}
+
+	agent, err := f.Store.GetAgent(context.Background(), id)
+	require.NoError(t, err)
+	v := f.Server.authzService.ownerChainVerdict(context.Background(), agent)
+	assert.Equal(t, ownerChainVerdict{outcome: ownerChainWithhold, reason: ownerChainReasonUnrecordedAbove}, v)
+
+	privateSecret, privateEnv, log := omcCreateDelivery(t, f, id)
+	assert.False(t, privateSecret)
+	assert.False(t, privateEnv)
+	recs := omcRecords(t, log, omcWithheldMsg)
+	require.NotEmpty(t, recs, "log: %s", log)
+	for _, r := range recs {
+		assert.Equal(t, ownerChainReasonUnrecordedAbove, r["reason"])
+	}
+}
+
+// TestOwnerMaterialChain_LookupFaultEndToEnd: a store fault while following
+// the chain withholds the rows at every site, with the withheld Warn.
+func TestOwnerMaterialChain_LookupFaultEndToEnd(t *testing.T) {
+	f := newOMCFixture(t, "omc-fault-e2e")
+	id, _ := f.direct(t, "fault-e2e", true)
+	f.Server.authzService.store = omcEdgeFaultStore{Store: f.Server.authzService.store}
+
+	privateSecret, privateEnv, log := omcCreateDelivery(t, f, id)
+	assert.False(t, privateSecret)
+	assert.False(t, privateEnv)
+	recs := omcRecords(t, log, omcWithheldMsg)
+	require.NotEmpty(t, recs, "log: %s", log)
+	for _, r := range recs {
+		assert.Equal(t, ownerChainReasonLookupError, r["reason"])
+	}
+}
+
+// TestOwnerMaterialChain_VerdictOncePerDispatch: inside one dispatch (the
+// memo withOwnerChainMemo installs) the chain is followed once, whatever the
+// number of sites; without a memo each call follows it.
+func TestOwnerMaterialChain_VerdictOncePerDispatch(t *testing.T) {
+	f := newOMCFixture(t, "omc-memo")
+	id, _ := f.direct(t, "memo", true)
+	agent, err := f.Store.GetAgent(context.Background(), id)
+	require.NoError(t, err)
+	counter := &omcEdgeCountingStore{Store: f.Store}
+	a := &AuthzService{store: counter}
+
+	ctx := withOwnerChainMemo(context.Background())
+	assert.Equal(t, ctx, withOwnerChainMemo(ctx), "a nested dispatch keeps the memo")
+	first := a.ownerChainVerdictFor(ctx, agent)
+	n := counter.calls
+	require.Positive(t, n)
+	for i := 0; i < 3; i++ {
+		assert.Equal(t, first, a.ownerChainVerdictFor(ctx, agent))
+	}
+	assert.Equal(t, n, counter.calls, "the verdict is reused within the dispatch")
+
+	a.ownerChainVerdictFor(context.Background(), agent)
+	assert.Greater(t, counter.calls, n, "without a memo the chain is followed again")
+}
+
+type omcEdgeCountingStore struct {
+	store.Store
+	calls int
+}
+
+func (c *omcEdgeCountingStore) GetDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string) ([]*store.DelegationEdge, error) {
+	c.calls++
+	return c.Store.GetDelegationEdgesForDelegate(ctx, delegateType, delegateID)
+}
+
+const (
+	omcUserTZ    = "Europe/Paris"
+	omcProjectTZ = "Asia/Tokyo"
+	omcHubTZ     = "America/Chicago"
+)
+
+// omcSeedTZ writes a TZ env row in scope.
+func omcSeedTZ(t *testing.T, f *sdFixture, scope, scopeID, tz string, shared bool) {
+	t.Helper()
+	_, err := f.Store.UpsertEnvVar(context.Background(), &store.EnvVar{
+		ID: api.NewUUID(), Key: agentTZEnvKey, Value: tz, Scope: scope, ScopeID: scopeID,
+		InjectionMode: store.InjectionModeAlways, AllowProgeny: shared, CreatedBy: scopeID,
+	})
+	require.NoError(t, err)
+}
+
+// TestOwnerMaterialChain_TZ: the owner's user-scope TZ row is a rung of the
+// agent TZ chain. Not shared, it is held to the chain rule: a re-delegated
+// agent takes TZ from a lower scope, or the hub default when none has one.
+// Shared, it stays on today's rule.
+func TestOwnerMaterialChain_TZ(t *testing.T) {
+	for _, c := range []struct {
+		name        string
+		shared      bool
+		redelegated bool
+		projectRow  bool
+		want        agentTZ
+	}{
+		{"clean chain, unshared", false, false, true, agentTZ{TZ: omcUserTZ, Source: TZSourceUser}},
+		{"re-delegated, unshared, project row below", false, true, true, agentTZ{TZ: omcProjectTZ, Source: TZSourceProject}},
+		{"re-delegated, unshared, no lower row", false, true, false, agentTZ{TZ: omcHubTZ, Source: TZSourceHubDefault}},
+		{"re-delegated, shared", true, true, true, agentTZ{TZ: omcUserTZ, Source: TZSourceUser}},
+		{"clean chain, shared", true, false, false, agentTZ{TZ: omcUserTZ, Source: TZSourceUser}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newOMCFixture(t, "omc-tz")
+			f.disp.SetHubAgentDefaultsProvider(func() opsettings.AgentDefaultsSettings {
+				return opsettings.AgentDefaultsSettings{DefaultTimezone: omcHubTZ}
+			})
+			omcSeedTZ(t, f, store.ScopeUser, f.UserID, omcUserTZ, c.shared)
+			if c.projectRow {
+				omcSeedTZ(t, f, store.ScopeProject, f.ProjectID, omcProjectTZ, false)
+			}
+			var id string
+			if c.redelegated {
+				id, _ = omcRedelegated(t, f, "tz")
+			} else {
+				id, _ = f.direct(t, "tz", true)
+			}
+			agent, err := f.Store.GetAgent(context.Background(), id)
+			require.NoError(t, err)
+			got := f.disp.resolveAgentTZ(context.Background(), agent, false)
+			assert.Equal(t, c.want.TZ, got.TZ)
+			assert.Equal(t, c.want.Source, got.Source)
+		})
+	}
+}
+
+// TestOwnerMaterialChain_ReportsSkipWithheldRows: the read-only reports
+// apply the rule without logging. For a re-delegated agent the owner's
+// withheld rows do not count as present (hasAnyKey), do not label a key
+// "user" (buildEnvSources, the env-gather hubHas labels), and do not raise
+// the "stored but not included" warning; a clean chain is unchanged.
+func TestOwnerMaterialChain_ReportsSkipWithheldRows(t *testing.T) {
+	const projectKey = "OMC_LABEL_KEY"
+	for _, redelegated := range []bool{false, true} {
+		name := "clean"
+		if redelegated {
+			name = "re-delegated"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newOMCFixture(t, "omc-reports")
+			ctx := context.Background()
+			// The owner's unshared row and a project row for the same key.
+			_, err := f.Store.UpsertEnvVar(ctx, &store.EnvVar{ID: api.NewUUID(), Key: projectKey, Value: "user-v", Scope: store.ScopeUser, ScopeID: f.UserID, InjectionMode: store.InjectionModeAlways, CreatedBy: f.UserID})
+			require.NoError(t, err)
+			_, err = f.Store.UpsertEnvVar(ctx, &store.EnvVar{ID: api.NewUUID(), Key: projectKey, Value: "project-v", Scope: store.ScopeProject, ScopeID: f.ProjectID, InjectionMode: store.InjectionModeAlways, CreatedBy: f.UserID})
+			require.NoError(t, err)
+			var id string
+			if redelegated {
+				id, _ = omcRedelegated(t, f, "reports")
+			} else {
+				id, _ = f.direct(t, "reports", true)
+			}
+			agent, err := f.Store.GetAgent(ctx, id)
+			require.NoError(t, err)
+			var buf bytes.Buffer
+			f.disp.log = slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+			// hasAnyKey: the owner-only keys.
+			for _, key := range []string{omcPrivateEnvKey, sdPrivateKey} {
+				found, err := f.Server.hasAnyKey(ctx, agent, []string{key})
+				require.NoError(t, err)
+				assert.Equal(t, !redelegated, found, "hasAnyKey(%s)", key)
+			}
+			shared, err := f.Server.hasAnyKey(ctx, agent, []string{omcSharedEnvKey})
+			require.NoError(t, err)
+			assert.True(t, shared, "a shared row stays on today's rule")
+
+			// buildEnvSources.
+			sources := f.disp.buildEnvSources(ctx, agent, map[string]string{projectKey: "x", omcPrivateEnvKey: "x"})
+			if redelegated {
+				assert.Equal(t, "project", sources[projectKey], "the withheld user row does not label the key")
+				assert.NotContains(t, sources, omcPrivateEnvKey)
+			} else {
+				assert.Equal(t, "user", sources[projectKey])
+				assert.Equal(t, "user", sources[omcPrivateEnvKey])
+			}
+
+			// buildEnvGatherResponse.
+			resp := f.Server.buildEnvGatherResponse(ctx, agent, &RemoteEnvRequirementsResponse{
+				HubHas: []string{projectKey}, Needs: []string{omcPrivateEnvKey, sdPrivateKey},
+			})
+			require.Len(t, resp.HubHas, 1)
+			userWarnings := 0
+			for _, w := range resp.HubWarnings {
+				if strings.Contains(w, "(user scope)") {
+					userWarnings++
+				}
+			}
+			if redelegated {
+				assert.Equal(t, "project", resp.HubHas[0].Scope)
+				assert.Zero(t, userWarnings, "no user-scope warning for withheld rows: %v", resp.HubWarnings)
+			} else {
+				assert.Equal(t, "user", resp.HubHas[0].Scope)
+				assert.Equal(t, 2, userWarnings, "%v", resp.HubWarnings)
+			}
+			assert.Empty(t, omcRecords(t, buf.String(), omcWithheldMsg), "the reports log nothing")
+		})
+	}
 }
 
 // TestOwnerRowDecision covers the per-row rule in isolation.
@@ -520,17 +781,17 @@ func omcRecords(t *testing.T, raw, msg string) []map[string]any {
 
 type omcMetrics struct {
 	mu   sync.Mutex
-	got  map[string]int64 // outcome/reason/kind
+	got  map[string]int64 // site/outcome/reason/kind
 	seen int
 }
 
-func (m *omcMetrics) RecordOwnerMaterialChain(_ context.Context, outcome, reason, kind string, n int64) {
+func (m *omcMetrics) RecordOwnerMaterialChain(_ context.Context, site, outcome, reason, kind string, n int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.got == nil {
 		m.got = map[string]int64{}
 	}
-	m.got[outcome+"/"+reason+"/"+kind] += n
+	m.got[site+"/"+outcome+"/"+reason+"/"+kind] += n
 	m.seen++
 }
 
@@ -579,8 +840,8 @@ func TestOwnerMaterialChain_WithheldObservable(t *testing.T) {
 		assert.NotContains(t, buf.String(), s, "a withheld row's key or value was logged")
 	}
 	assert.Equal(t, before+4, f.Server.authzService.OwnerMaterialChainWithheld())
-	assert.EqualValues(t, 2, m.got["withheld/"+ownerChainReasonTerminalNotOwner+"/"+ownerMaterialKindSecret])
-	assert.EqualValues(t, 2, m.got["withheld/"+ownerChainReasonTerminalNotOwner+"/"+ownerMaterialKindEnvVar])
+	assert.EqualValues(t, 2, m.got[ownerMaterialSiteLaunchSecrets+"/withheld/"+ownerChainReasonTerminalNotOwner+"/"+ownerMaterialKindSecret])
+	assert.EqualValues(t, 2, m.got[ownerMaterialSiteLaunchEnv+"/withheld/"+ownerChainReasonTerminalNotOwner+"/"+ownerMaterialKindEnvVar])
 
 	// A second start within the window: counted, not logged again.
 	buf.Reset()
@@ -594,6 +855,7 @@ func TestOwnerMaterialChain_WithheldObservable(t *testing.T) {
 // the owner's rows not shared, and of the shared secret.
 type omcDispatched struct {
 	sharedSecret, privateSecret, privateEnv, privateSecretEnv bool
+	tz                                                        string
 }
 
 // omcDispatch runs DispatchAgentCreate, DispatchAgentStart and
@@ -636,6 +898,7 @@ func omcDispatch(t *testing.T, f *sdFixture, agentID string, noAuth bool) (creat
 		}
 		o.privateEnv = env[omcPrivateEnvKey] == omcPrivateEnvValue
 		_, o.privateSecretEnv = env[omcPrivateSecretEnvKey]
+		o.tz = env[agentTZEnvKey]
 		return o
 	}
 	_, err = d.DispatchAgentCreate(ctx, agent)
@@ -655,9 +918,9 @@ func omcDispatch(t *testing.T, f *sdFixture, agentID string, noAuth bool) (creat
 }
 
 // TestOwnerMaterialChain_CreateStartRestartParity: create, start and
-// restart send the same owner rows, on a clean chain (all), a re-delegated
-// chain (none of the rows not shared, and not the shared secret) and a
-// legacy chain (all).
+// restart send the same owner rows, on a clean chain (all, and the owner's
+// TZ), a re-delegated chain (none of the rows not shared, not the shared
+// secret, and TZ from the project row below) and a legacy chain (all).
 func TestOwnerMaterialChain_CreateStartRestartParity(t *testing.T) {
 	for _, c := range []struct {
 		name  string
@@ -667,17 +930,20 @@ func TestOwnerMaterialChain_CreateStartRestartParity(t *testing.T) {
 		{"clean", func(t *testing.T, f *sdFixture) string {
 			id, _ := f.direct(t, "parity-clean", true)
 			return id
-		}, omcDispatched{true, true, true, true}},
+		}, omcDispatched{sharedSecret: true, privateSecret: true, privateEnv: true, privateSecretEnv: true, tz: omcUserTZ}},
 		{"re-delegated", func(t *testing.T, f *sdFixture) string {
 			id, _ := omcRedelegated(t, f, "parity-redeleg")
 			return id
-		}, omcDispatched{}},
+		}, omcDispatched{tz: omcProjectTZ}},
 		{"legacy, no edge", func(t *testing.T, f *sdFixture) string {
 			return omcAgentWith(t, f, "parity-legacy", []string{f.UserID}, f.UserID)
-		}, omcDispatched{true, true, true, true}},
+		}, omcDispatched{sharedSecret: true, privateSecret: true, privateEnv: true, privateSecretEnv: true, tz: omcUserTZ}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := newOMCFixture(t, "omc-parity")
+			// The owner's unshared TZ row, and a project TZ row below it.
+			omcSeedTZ(t, f, store.ScopeUser, f.UserID, omcUserTZ, false)
+			omcSeedTZ(t, f, store.ScopeProject, f.ProjectID, omcProjectTZ, false)
 			id := c.build(t, f)
 			create, start, restart, _ := omcDispatch(t, f, id, false)
 			assert.Equal(t, c.want, create, "create")

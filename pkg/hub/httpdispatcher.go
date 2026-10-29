@@ -1775,6 +1775,8 @@ func (d *HTTPAgentDispatcher) swapRunID(ctx context.Context, agent *store.Agent,
 
 // DispatchAgentCreate creates and starts an agent on the runtime broker.
 func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *store.Agent) (_ *CreateDispatchResult, err error) {
+	// One owner material chain verdict per dispatch (start_owner_material_chain.go).
+	ctx = withOwnerChainMemo(ctx)
 	ctx, span := tracer.Start(ctx, "hub.dispatch.create")
 	defer span.End()
 	span.SetAttributes(
@@ -1869,6 +1871,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 // agent is provisioned without injected secrets. The broker's provision does
 // not read them, and a later start resolves them again and fails there.
 func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent *store.Agent) error {
+	// One owner material chain verdict per dispatch (start_owner_material_chain.go).
+	ctx = withOwnerChainMemo(ctx)
 	return d.dispatchProvision(ctx, agent, "DispatchAgentProvision", false, "", "")
 }
 
@@ -1892,6 +1896,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent 
 // does that separately via DispatchAgentStart. Precondition: the agent's
 // container is already stopped.
 func (d *HTTPAgentDispatcher) DispatchAgentReprovision(ctx context.Context, agent *store.Agent) error {
+	// One owner material chain verdict per dispatch (start_owner_material_chain.go).
+	ctx = withOwnerChainMemo(ctx)
 	return d.dispatchProvision(ctx, agent, "DispatchAgentReprovision", true, "", "")
 }
 
@@ -2117,6 +2123,8 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 // If the broker returns 202 with env requirements, it returns the requirements
 // as the first value instead of an error.
 func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (_ *CreateDispatchResult, err error) {
+	// One owner material chain verdict per dispatch (start_owner_material_chain.go).
+	ctx = withOwnerChainMemo(ctx)
 	dispatchStart := time.Now()
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return nil, err
@@ -2283,6 +2291,8 @@ func (e *ErrEnvStillMissing) Error() string {
 // action. This makes the finalize HA-safe: the replay can land on any broker
 // replica because it carries the complete request state.
 func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) (*CreateDispatchResult, error) {
+	// One owner material chain verdict per dispatch (start_owner_material_chain.go).
+	ctx = withOwnerChainMemo(ctx)
 	// Flat placement backstop: the first pass pinned the agent, so this
 	// refuses only a pin corrupted between the two passes.
 	if err := d.placementBackstop(ctx, agent); err != nil {
@@ -3013,6 +3023,10 @@ func (d *HTTPAgentDispatcher) buildEnvSources(ctx context.Context, agent *store.
 		return sources
 	}
 
+	// An owner's user row the owner material chain rule withholds did not
+	// supply the value, so it never labels the key (decided without a
+	// report; the resolving site reports it).
+	check := newOwnerChainCheck(d.authzService, agent)
 	for _, filter := range d.envScopesForDispatch(ctx, agent) {
 		vars, err := d.store.ListEnvVars(ctx, filter)
 		if err != nil {
@@ -3024,6 +3038,9 @@ func (d *HTTPAgentDispatcher) buildEnvSources(ctx context.Context, agent *store.
 		label := envScopeSourceLabel(filter.Scope)
 		for _, v := range vars {
 			if v.InjectionMode == store.InjectionModeAsNeeded {
+				continue
+			}
+			if filter.Scope == store.ScopeUser && !check.allowsRow(ctx, v.AllowProgeny, envRowOwner(filter, v)) {
 				continue
 			}
 			if _, inResolved := resolvedEnv[v.Key]; inResolved {
@@ -3466,6 +3483,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 // and the launch's end settles the start. Otherwise the start is
 // synchronous and the result is nil.
 func (d *HTTPAgentDispatcher) DispatchAgentStartWithOptions(ctx context.Context, agent *store.Agent, task string, resume bool, opts StartDispatchOptions) (*StartDispatchResult, error) {
+	// One owner material chain verdict per dispatch (start_owner_material_chain.go).
+	ctx = withOwnerChainMemo(ctx)
 	return d.dispatchAgentStart(ctx, agent, task, resume, opts)
 }
 
@@ -3876,6 +3895,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentStop(ctx context.Context, agent *stor
 // It generates a fresh auth token so the restarted container has valid
 // Hub credentials, preventing auth loss across container restarts.
 func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *store.Agent) error {
+	// One owner material chain verdict per dispatch (start_owner_material_chain.go).
+	ctx = withOwnerChainMemo(ctx)
 	// Flat placement backstop (see DispatchAgentStart).
 	if _, err := checkAgentPinnedPlacement(ctx, d.store, agent); err != nil {
 		return err
