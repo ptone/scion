@@ -120,6 +120,10 @@ type ParentCeilingDecision struct {
 	DenyCause DenyCause
 	Reason    string
 	Proof     ParentProof
+	// legacyFallback is set on an allowed user secret decision that passed
+	// S3c through the legacy adopted-agent fallback; callers record the use
+	// (recordLegacyAdoptedFallback).
+	legacyFallback *legacyAdoptedFallback
 }
 
 func parentCeilingDeny(cause DenyCause, reason string, proof ParentProof) ParentCeilingDecision {
@@ -399,7 +403,7 @@ func (a *AuthzService) parentCeilingSourceIdentity(ctx context.Context, row stor
 // reviewed mappings have an evaluator; any other mapping denies with
 // ceiling_error, so adding a table row without an evaluator cannot allow.
 func (a *AuthzService) evaluateResourceParentCeiling(ctx context.Context, m ResourceParentCeiling, agentID string, resource Resource) ParentCeilingDecision {
-	proof := ParentProof{Permission: m.ParentPermission}
+	proof := ParentProof{Kind: ParentProofKindParentPermission, Permission: m.ParentPermission}
 	if resource.Type != m.ResourceType {
 		return parentCeilingDeny(DenyCauseCeilingError, "resource does not match the parent ceiling", proof)
 	}
@@ -426,10 +430,10 @@ func (a *AuthzService) evaluateResourceParentCeiling(ctx context.Context, m Reso
 func (a *AuthzService) applyResourceParentCeiling(ctx context.Context, m ResourceParentCeiling, agent AgentIdentity, resource Resource, decision Decision) Decision {
 	if agent == nil || isNilIdentity(agent) || agent.ID() == "" {
 		return parentCeilingDenyDecision(decision, DenyCauseCeilingError,
-			"parent ceiling: the principal is not an agent identity", ParentProof{Permission: m.ParentPermission})
+			"parent ceiling: the principal is not an agent identity", ParentProof{Kind: ParentProofKindParentPermission, Permission: m.ParentPermission})
 	}
 	if deny, cause, reason, adoptable := a.parentCeilingChainDeny(ctx, agent, m.DecisionPermission); deny {
-		decision = parentCeilingDenyDecision(decision, cause, reason, ParentProof{Permission: m.ParentPermission})
+		decision = parentCeilingDenyDecision(decision, cause, reason, ParentProof{Kind: ParentProofKindParentPermission, Permission: m.ParentPermission})
 		decision.adoptionRemediable = cause == DenyCauseCeilingUnrecorded && adoptable
 		return decision
 	}
@@ -627,6 +631,12 @@ func (a *AuthzService) decideStoredAgentServiceAccountUse(ctx context.Context, a
 	return decision
 }
 
+// reasonStoredAgentConstraintLoadError is the deny reason of
+// storedAgentAccessConstraintDeny when the access constraints cannot be
+// loaded. It names the failure, rather than the "no check function" text of
+// a restriction without a check.
+const reasonStoredAgentConstraintLoadError = "access constraint load error (fail-closed)"
+
 // storedAgentAccessConstraintDeny is Decide's step 7c for a stored agent
 // with no credential on the request: it loads the access constraints that
 // apply to the agent's principal closure (the agent and the groups it
@@ -657,7 +667,7 @@ func (a *AuthzService) storedAgentAccessConstraintDeny(ctx context.Context, iden
 	restrictions, err := a.accessConstraintRestrictions(ctx, closure, resourceCtx)
 	if err != nil {
 		a.logger.Warn("stored-agent use: failed to load access constraints (fail-closed)", "error", err)
-		return Decision{Allowed: false, Reason: "restriction removed permission: access_constraint_error - restriction has no check function (fail closed)", DenyCause: DenyCauseResolutionError}, true
+		return Decision{Allowed: false, Reason: reasonStoredAgentConstraintLoadError, DenyCause: DenyCauseResolutionError}, true
 	}
 	for _, r := range restrictions {
 		if r.Check == nil {
@@ -766,6 +776,9 @@ type userSecretChain struct {
 	// the callers (check 8 and the agent secret list) never deny on such a
 	// hop alone: they apply the progeny rule instead.
 	unrecorded bool
+	// legacyFallback is set when S3c passed through the legacy adopted-agent
+	// fallback (legacyAdoptedSecretUseFallback). Every other clause applied.
+	legacyFallback *legacyAdoptedFallback
 }
 
 func (c userSecretChain) deny(cause DenyCause, reason string) userSecretChain {
@@ -858,7 +871,11 @@ func (a *AuthzService) evaluateUserSecretParentCeiling(ctx context.Context, prin
 		d.Proof.ResourceID = resource.ID
 		return d, unrecordedHopNote{}
 	}
-	return userSecretSourceCheck(chain, in, resource, explain), unrecordedHopNote{}
+	d := userSecretSourceCheck(chain, in, resource, explain)
+	if d.Allowed && chain.legacyFallback != nil {
+		d.legacyFallback = chain.legacyFallback
+	}
+	return d, unrecordedHopNote{}
 }
 
 // userSecretChainVerdict runs clauses S1-S4c for principal (see
@@ -970,10 +987,20 @@ func (a *AuthzService) userSecretChainVerdict(ctx context.Context, principal Age
 				return chain.deny(DenyCauseCeilingSourceNotAllowed, "local development provenance with another delegator")
 			}
 		}
-		// S3c
+		// S3c, with the legacy adopted-agent fallback (see
+		// user_secret_legacy_adopted_fallback.go).
 		if edge.Kind == store.EffectCeilingBounded && !EffectCeilingAllows(edge.EffectCeiling, secretUsePermission, false) {
-			secretParentStep(explain, "effect_exceeded", fmt.Sprintf("edge %s: secret.use is outside the recorded effect ceiling", edge.ID))
-			return chain.deny(DenyCauseCeilingEffectExceeded, "secret.use is outside the recorded effect ceiling")
+			fb, err := a.legacyAdoptedSecretUseFallback(ctx, agent, edge, depth)
+			if err != nil {
+				secretParentStep(explain, "error", "adoption record lookup failed")
+				return chain.deny(DenyCauseCeilingError, "adoption record lookup failed")
+			}
+			if fb == nil {
+				secretParentStep(explain, "effect_exceeded", fmt.Sprintf("edge %s: secret.use is outside the recorded effect ceiling", edge.ID))
+				return chain.deny(DenyCauseCeilingEffectExceeded, "secret.use is outside the recorded effect ceiling")
+			}
+			secretParentStep(explain, "legacy_adopted_fallback", fmt.Sprintf("edge %s: adopted %s edge under compatibility policy V1; secret.use allowed for the owner's own secrets", edge.ID, fb.Role))
+			chain.legacyFallback = fb
 		}
 
 		switch edge.DelegatorType {

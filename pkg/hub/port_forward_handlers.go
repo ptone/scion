@@ -471,6 +471,9 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 	ctx, cancel := context.WithTimeout(legacy.context(r), portForwardTimeout)
 	defer cancel()
 	reqPath := "/" + strings.TrimPrefix(proxyPath, "/")
+	fwdHeader := cloneForwardHeaders(r.Header)
+	// The front proxy's identity headers are not passed to the agent's app.
+	s.stripFrontProxyIdentityHeaders(fwdHeader)
 	resp, err := s.portTunnels.Do(ctx, agent.ID, portforward.Request{
 		StreamID: uuid.NewString(),
 		Port:     exposed.Port,
@@ -478,7 +481,7 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 		Method:   r.Method,
 		Path:     reqPath,
 		Query:    r.URL.RawQuery,
-		Header:   cloneForwardHeaders(r.Header),
+		Header:   fwdHeader,
 		Body:     body,
 	})
 	if hook := s.legacyPortTunnelReturnedTestHook; hook != nil {
@@ -525,7 +528,7 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 	// Hub-controlled response headers: the proxied content cannot override
 	// these, so it is sandboxed to an opaque origin and cannot set cookies
 	// on the hub origin.
-	w.Header().Set("Content-Security-Policy", untrustedContentSandboxCSP)
+	setUntrustedContentHeaders(w.Header(), agentServedPageSandboxCSP)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if resp.Status == 0 {
 		resp.Status = http.StatusOK

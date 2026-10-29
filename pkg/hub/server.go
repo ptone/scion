@@ -624,6 +624,14 @@ type MaintenanceConfig struct {
 	// detected once at startup (DetectMaintenanceInstaller); nil means
 	// unsupported.
 	Installer maintenance.Installer
+	// ReleaseCatalog lists and classifies the releases of GitHubRepo. nil:
+	// the hub builds one maintenance.Catalog on first use, persisted in the
+	// hub_settings row system.release_catalog (see updateReleaseCatalog).
+	ReleaseCatalog maintenance.CatalogSource
+	// ReleaseSource looks a single release up by tag (and, when it also
+	// implements maintenance.ReleaseLister, backs the default catalog).
+	// nil: GitHub's API for GitHubRepo.
+	ReleaseSource maintenance.ReleaseSource
 }
 
 // GitHubAppServerConfig holds the GitHub App configuration for the Hub server.
@@ -1560,7 +1568,7 @@ type ResolvedSecret struct {
 	Target string `json:"target"`        // Projection target
 	Value  string `json:"value"`         // Decrypted secret value
 	Source string `json:"source"`        // Scope that provided this secret
-	Ref    string `json:"ref,omitempty"` // External secret reference (e.g., "gcpsm:projects/123/secrets/name")
+	Ref    string `json:"ref,omitempty"` // External secret reference: for GCP Secret Manager the resource path "projects/123/secrets/name" (no "gcpsm:" prefix), which brokers mount as <ref>/versions/latest
 }
 
 // RemoteAgentConfig contains agent configuration for remote creation.
@@ -2009,6 +2017,10 @@ type Server struct {
 	// users' user-scope data ends (startUserScopedDataSweep).
 	userScopedDataSweepDone <-chan struct{}
 
+	// userDeletionLocks holds one *sync.Mutex per forced user deletion
+	// this process is reconciling (userDeletionLock, ptone/scion#2143).
+	userDeletionLocks sync.Map
+
 	// auditWriter is the bounded asynchronous writer under the decision
 	// log; decisionAuditLogger is Decide's audit emitter (P1). Both are set
 	// in New and never replaced.
@@ -2245,6 +2257,11 @@ type Server struct {
 	// lifecycle hook (hookFireActAsAudit); created on first use.
 	hookFireLimiter     *hookRefusalLimiter
 	hookFireLimiterOnce sync.Once
+
+	// userSecretWithheldLimiter rate limits the runtime read's Warn of a
+	// user secret withheld by authorization; created on first use.
+	userSecretWithheldLimiter     *hookRefusalLimiter
+	userSecretWithheldLimiterOnce sync.Once
 
 	// GCP token rate limiter (nil = no rate limiting)
 	gcpTokenRateLimiter *GCPTokenRateLimiter
@@ -2530,6 +2547,14 @@ type Server struct {
 	// hubRestartReservedAt is the UnixNano time Restart Hub reserved the
 	// hub-binary exclusive group (0: none); see reserveHubRestart.
 	hubRestartReservedAt atomic.Int64
+
+	// updateCatalog is the hub's release catalog and updateDater the
+	// remembered running-release lookup, each built once on first use
+	// (updateReleaseCatalog, runningReleaseDater).
+	updateCatalogOnce sync.Once
+	updateCatalog     maintenance.CatalogSource
+	updateDaterOnce   sync.Once
+	updateDater       maintenance.ReleaseSource
 }
 
 // groupsLogger returns the groups subsystem logger, falling back to
@@ -2870,6 +2895,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// Initialize broker auth service if enabled
 	if cfg.BrokerAuthConfig.Enabled {
 		srv.brokerAuthService = NewBrokerAuthService(cfg.BrokerAuthConfig, s)
+		srv.brokerAuthService.deferNonce = srv.conduitIngressDefersBrokerNonce
 		srv.metrics = NewBrokerAuthMetrics()
 		slog.Info("Broker HMAC authentication enabled")
 	}
@@ -3444,6 +3470,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// external-bearer path, both of which resolve through this instance.
 	googleResolver.SetPlatformAuthSA(cfg.PlatformAuthSA)
 	googleResolver.SetDriverPrincipals(srv.proxyDrivers)
+	googleResolver.SetOrphanUserCleanup(srv.cleanupOrphanedProvisionedUser)
 	// Same policy as isUserAuthorized above, in its code-returning form,
 	// so a refusal's audit entry records the code the decision returned.
 	googleResolver.SetSignInDenial(srv.signInDenial)
@@ -5447,8 +5474,9 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 			return false
 		}
 	}
-	// The superseded start claim is released last on each path below,
-	// after the status write and the quota release (see suspendAgent).
+	// The superseded start claim is released last on each path below:
+	// after the status write and, once the suspension is recorded, after
+	// the grant revocation and the quota release (see suspendAgent).
 	releaseClaim := func() {
 		if agent.RuntimeBrokerID != "" {
 			s.releaseSupersededClaim(ctx, agent.ID, supersedes, intentAt)
@@ -5477,6 +5505,13 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 		return false
 	}
 
+	// As for suspendAgent: the agent's delegation grants end with the
+	// suspension, best effort (.design/agent-delegation.md §16.3). The
+	// revocation selects grants by agent, so it runs before the claim is
+	// released: released first, a new start could take the claim and then
+	// lose its own run's grants to it.
+	s.revokeAgentDelegationGrantsBestEffort(ctx, store.AgentDelegationGrantFilter{AgentID: agent.ID}, revokeReasonAgentSuspended)
+
 	agent.Phase = string(state.PhaseSuspended)
 	agent.ContainerStatus = "stopped"
 	agent.Activity = ""
@@ -5485,9 +5520,6 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 	// suspendAgent's HTTP-path behavior.
 	s.releaseBrokerQuota(ctx, agent)
 	releaseClaim()
-	// As for suspendAgent: the agent's delegation grants end with the
-	// suspension, best effort (.design/agent-delegation.md §16.3).
-	s.revokeAgentDelegationGrantsBestEffort(ctx, store.AgentDelegationGrantFilter{AgentID: agent.ID}, revokeReasonAgentSuspended)
 	s.events.PublishAgentStatus(ctx, agent)
 	return true
 }
@@ -6671,6 +6703,12 @@ func (s *Server) registerSchedulerHandlers() {
 	s.scheduler.RegisterRecurringSingleton("broker-quota-reconcile", 60, store.LockBrokerQuotaReconcile, s.ReconcileStaleBrokerQuotaReservations)
 	s.scheduler.RegisterRecurringSingleton("reincarnation-sweep", 5, store.LockReincarnationSweep, s.reincarnationSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("start-claim-reaper", 1, store.LockStartClaimReaper, s.startClaimReaperHandler())
+	// Forced user deletions (ptone/scion#2143): every minute, on every
+	// replica (the engine's per-agent lease and the completion's
+	// compare-and-set make concurrent runs safe). It runs whether or not
+	// hub.user_delete_force_cascade is on, so deletions accepted while it
+	// was on complete (see userDeletionReconcileHandler).
+	s.scheduler.RegisterRecurring("user-deletion-reconcile", 1, s.userDeletionReconcileHandler())
 	go func() {
 		// Bounded: a store that does not answer at startup must not leave
 		// this goroutine behind.
@@ -7447,6 +7485,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/maintenance/update-available", s.guarded("/api/v1/admin/maintenance/update-available", s.handleUpdateAvailable))
 	s.mux.HandleFunc("/api/v1/admin/maintenance/restart", s.guarded("/api/v1/admin/maintenance/restart", s.handleAdminRestart))
 	s.mux.HandleFunc("/api/v1/admin/maintenance/update-status", s.guarded("/api/v1/admin/maintenance/update-status", s.handleUpdateStatus))
+	s.mux.HandleFunc("/api/v1/admin/maintenance/releases", s.guarded("/api/v1/admin/maintenance/releases", s.handleMaintenanceReleases))
 	s.mux.HandleFunc("/api/v1/admin/scheduler", s.guarded("/api/v1/admin/scheduler", s.handleAdminScheduler))
 	s.mux.HandleFunc("/api/v1/admin/allow-list", s.guarded("/api/v1/admin/allow-list", s.handleAdminAllowList))
 	s.mux.HandleFunc("/api/v1/admin/allow-list/", s.guarded("/api/v1/admin/allow-list/", s.handleAdminAllowListByEmail))
@@ -7548,6 +7587,7 @@ func (s *Server) registerRoutes() {
 		// Starred messages (web.chat_starred_messages; 404 while off).
 		s.mux.HandleFunc("/api/v1/chat/stars", s.guarded("/api/v1/chat/stars", s.chatRoute(s.handleChatStars)))
 		s.mux.HandleFunc("/api/v1/chat/stars/", s.guarded("/api/v1/chat/stars/", s.chatRoute(s.handleChatStarRoutes)))
+		s.mux.HandleFunc("/api/v1/chat/starred-conversations", s.guarded("/api/v1/chat/starred-conversations", s.chatRoute(s.handleChatStarredConversations)))
 		s.mux.HandleFunc("/api/v1/chat/attachments", s.guarded("/api/v1/chat/attachments", s.chatAttachmentRoute(s.handleChatAttachments)))
 		s.mux.HandleFunc("/api/v1/chat/attachments/", s.guarded("/api/v1/chat/attachments/", s.chatAttachmentRoute(s.handleChatAttachmentByID)))
 	}
@@ -7718,6 +7758,11 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	// Apply unified auth middleware
 	// This handles all authentication types: agent tokens, user tokens, API keys, dev tokens
 	h = UnifiedAuthMiddleware(s.authConfig)(h)
+
+	// Behind an authenticating front proxy (AuthMode == "proxy"), check
+	// state-changing /api/v1 requests before authentication (see
+	// proxyModeWriteGuard). No-op in other auth modes.
+	h = s.proxyModeWriteGuard(h)
 
 	// The audit operation context (remaining-audit P4-1) sits directly
 	// inside the request logger, which mints the request ID it adopts, and
