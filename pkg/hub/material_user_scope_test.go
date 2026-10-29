@@ -81,6 +81,10 @@ func TestAgentSecretRead_UserSecretRequiresSharingEnabled(t *testing.T) {
 func TestAgentSecretRead_DirectChildRequiresSharingEnabled(t *testing.T) {
 	f := newMaterialFixture(t, "direct-child-sharing")
 	ctx := context.Background()
+	// A recorded chain: a chain without recorded provenance reads no
+	// user-scope secret at all (TestAgentSecretRead_UnrecordedChainRefused).
+	(&userScopeCeilingFixture{materialFixture: f}).recordEdge(t, store.DelegationPrincipalUser, f.UserID, f.AgentID,
+		store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, nil)
 
 	// f.AgentID is a direct child of f.UserID (Ancestry = [f.UserID]).
 	_, _, err := f.Server.secretBackend.Set(ctx, &secret.SetSecretInput{
@@ -263,8 +267,9 @@ func TestAgentSecretRead_SharingSourceLookupErrorDenies(t *testing.T) {
 // TestAgentSecretRead_UserScopeMakesNoProjectSecretDecision pins that a
 // user-scope read never calls Decide(project.secret_read). The fixture
 // agent has no delegation edge, so the read's only edge lookup is the
-// chain classification of check 8 (one hop, no edge); a project decision
-// would add the step-10 walk's own lookup.
+// chain classification of check 8 (one hop, no edge), which refuses the
+// read (chain_unrecorded) before any decision; a project decision would add
+// the step-10 walk's own lookup.
 func TestAgentSecretRead_UserScopeMakesNoProjectSecretDecision(t *testing.T) {
 	f := newMaterialFixture(t, "user-scope-no-project-decision")
 	ctx := context.Background()
@@ -279,8 +284,8 @@ func TestAgentSecretRead_UserScopeMakesNoProjectSecretDecision(t *testing.T) {
 	f.Server.authzService = NewAuthzService(counting, logging.Subsystem("hub.auth"))
 
 	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+f.AgentID+"/secrets/USER_ONLY_KEY?scope=user", nil, f.Token)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 (chain without recorded provenance), got %d: %s", rec.Code, rec.Body.String())
 	}
 	if counting.getDelegationEdgesForDelegateCalls != 1 {
 		t.Fatalf("expected only the chain classification's edge lookup for a user-scope read, got %d edge lookups", counting.getDelegationEdgesForDelegateCalls)

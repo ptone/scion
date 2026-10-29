@@ -224,6 +224,12 @@ type AuthzRequest struct {
 	// grants nothing, and callers of Decide leave it nil.
 	bearerRun *bearerGateRun
 
+	// userSecretChain carries a user-scope secret chain verdict the caller
+	// already computed for the principal (the runtime read), so step 10
+	// does not compute it again. It is set only by in-package callers and
+	// grants nothing; step 10 ignores it unless it names the principal.
+	userSecretChain *precomputedUserSecretChain
+
 	// AlwaysAudit forces Decide's single audit exit to emit a decision audit
 	// record for this request regardless of the allow-sampling rate
 	// (AuthzService.DecisionAuditSampleRate). Deny decisions are always
