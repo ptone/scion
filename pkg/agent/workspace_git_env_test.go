@@ -125,17 +125,21 @@ func TestStart_WorkspaceGitEnvIsTheCallers(t *testing.T) {
 				t.Fatal("runtime Run was not called")
 			}
 			var got []string
-			probes := 0
+			probes := map[string]bool{}
 			for _, kv := range captured.Env {
 				if strings.HasPrefix(kv, "SCION_WORKSPACE_GIT=") {
 					got = append(got, strings.TrimPrefix(kv, "SCION_WORKSPACE_GIT="))
 				}
-				if strings.HasPrefix(kv, "DTB_PROBE_") {
-					probes++
+				if k, _, _ := strings.Cut(kv, "="); strings.HasPrefix(k, "DTB_PROBE_") {
+					probes[k] = true
 				}
 			}
-			if probes == 0 {
-				t.Fatalf("no project env layer reached the container env (env %v): the test does not exercise a merge path", captured.Env)
+			// Both layers must reach the container env, or the test would
+			// not exercise that merge path.
+			for _, k := range []string{"DTB_PROBE_SETTINGS", "DTB_PROBE_HC"} {
+				if !probes[k] {
+					t.Fatalf("probe %s did not reach the container env (env %v): its env layer is not exercised", k, captured.Env)
+				}
 			}
 			switch {
 			case tc.want == "" && len(got) != 0:

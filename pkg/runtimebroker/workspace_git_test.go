@@ -16,11 +16,13 @@ package runtimebroker
 
 import (
 	"context"
+	"errors"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
@@ -119,6 +121,10 @@ func TestSharedWorkspaceKnownNotGit(t *testing.T) {
 		{name: "clone-per-agent mode", prepare: (*workspaceGitFixture).mkLeaf,
 			in: startContextInputs{WorkspaceMode: "clone-per-agent"}},
 		{name: "no project ID", prepare: (*workspaceGitFixture).mkLeaf, in: startContextInputs{ProjectID: "-"}},
+		// A restart from an older hub builds no Config and carries the flag
+		// only at the top level (restartAgentConfig).
+		{name: "top-level SharedWorkspace with no Config (git remote)", prepare: (*workspaceGitFixture).mkLeaf,
+			in: startContextInputs{SharedWorkspace: true}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -202,11 +208,84 @@ func TestBuildStartContext_WorkspaceGitOnSharedLayout(t *testing.T) {
 			}
 		})
 	}
+	t.Run("hub-native project, git cannot be run: absent", func(t *testing.T) {
+		stubWorkspaceGitProbe(t, func(context.Context, string) (string, error) {
+			return "", &exec.Error{Name: "git", Err: exec.ErrNotFound}
+		})
+		f := newWorkspaceGitFixture(t)
+		f.mkLeaf(t)
+		env := f.start(t, startContextInputs{})
+		if v, ok := env["SCION_WORKSPACE_GIT"]; ok {
+			t.Fatalf("SCION_WORKSPACE_GIT = %q, want absent when git cannot be run", v)
+		}
+	})
 	t.Run("hub-native project, workspace directory not there yet: absent", func(t *testing.T) {
 		f := newWorkspaceGitFixture(t)
 		env := f.start(t, startContextInputs{ResolvedEnv: map[string]string{"SCION_WORKSPACE_GIT": "false"}})
 		if v, ok := env["SCION_WORKSPACE_GIT"]; ok {
 			t.Fatalf("SCION_WORKSPACE_GIT = %q, want absent when the workspace cannot be checked", v)
+		}
+	})
+}
+
+// stubWorkspaceGitProbe replaces workspaceGitProbe for the rest of the test.
+func stubWorkspaceGitProbe(t *testing.T, probe func(context.Context, string) (string, error)) {
+	t.Helper()
+	prev := workspaceGitProbe
+	workspaceGitProbe = probe
+	t.Cleanup(func() { workspaceGitProbe = prev })
+}
+
+// Only a clean "not a git repository" failure of git reads as "not git";
+// every other outcome is unknown.
+func TestGitReportsNotARepository(t *testing.T) {
+	plain := t.TempDir()
+	t.Run("missing git binary: unknown", func(t *testing.T) {
+		stubWorkspaceGitProbe(t, func(context.Context, string) (string, error) {
+			return "", &exec.Error{Name: "git", Err: exec.ErrNotFound}
+		})
+		if gitReportsNotARepository(context.Background(), plain) {
+			t.Fatal("an exec error must be unknown, not \"not git\"")
+		}
+		if workspaceDirKnownNotGit(context.Background(), plain) {
+			t.Fatal("workspaceDirKnownNotGit must be false when git cannot be run")
+		}
+	})
+	t.Run("IO error with the message: unknown", func(t *testing.T) {
+		stubWorkspaceGitProbe(t, func(context.Context, string) (string, error) {
+			return "fatal: not a git repository (or any of the parent directories): .git", errors.New("read |0: input/output error")
+		})
+		if gitReportsNotARepository(context.Background(), plain) {
+			t.Fatal("an error that is not a clean git exit must be unknown")
+		}
+	})
+	t.Run("timeout: unknown", func(t *testing.T) {
+		prev := workspaceGitTimeout
+		workspaceGitTimeout = 20 * time.Millisecond
+		t.Cleanup(func() { workspaceGitTimeout = prev })
+		stubWorkspaceGitProbe(t, func(ctx context.Context, _ string) (string, error) {
+			<-ctx.Done()
+			return "fatal: not a git repository", ctx.Err()
+		})
+		start := time.Now()
+		if gitReportsNotARepository(context.Background(), plain) {
+			t.Fatal("a timed-out git call must be unknown")
+		}
+		if d := time.Since(start); d > 5*time.Second {
+			t.Fatalf("the git call was not bounded: took %s", d)
+		}
+	})
+	t.Run("real git", func(t *testing.T) {
+		if _, err := exec.LookPath("git"); err != nil {
+			t.Skip("git not installed")
+		}
+		if !gitReportsNotARepository(context.Background(), plain) {
+			t.Fatal("a plain directory must be reported as not a git repository")
+		}
+		repo := t.TempDir()
+		gitInitDir(t, repo)
+		if gitReportsNotARepository(context.Background(), repo) {
+			t.Fatal("a git work tree must not be reported as not a git repository")
 		}
 	})
 }

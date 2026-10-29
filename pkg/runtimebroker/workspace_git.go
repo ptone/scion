@@ -19,7 +19,9 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
@@ -39,15 +41,18 @@ import (
 //     field, where empty means shared-plain), never a clone, worktree or
 //     empty-per-agent mode;
 //   - the hub sent no git source for the workspace: no per-agent GitClone,
-//     no shared-workspace clone settings and no SharedWorkspace flag. The
+//     no shared-workspace clone settings and no SharedWorkspace flag (in the
+//     Config or at the top level of the start inputs). The
 //     hub sets the flag and the clone settings only for a project with a git
 //     remote (store.Project.IsSharedWorkspace, sharedWorkspaceCloneConfig)
 //     and re-sends them on every start;
 //   - no worktree was provisioned and no linked checkout is used;
 //   - at decision time, the project's workspace directory on the share is a
-//     visible directory (not a symlink) with no .git entry, and git does not
-//     see it as inside a work tree (util.CheckGitRepoDir, which reports an
-//     ownership refusal as an error rather than as "not git").
+//     visible directory (not a symlink) with no .git entry, and a bounded
+//     `git rev-parse --is-inside-work-tree` in it fails with "not a git
+//     repository" (workspaceGitProbe). Any other git outcome (a missing
+//     binary, an exec or IO error, a timeout, an ownership refusal) is
+//     unknown.
 //
 // Anything else, including a workspace directory that does not exist yet,
 // returns false: the variable stays absent and the Kubernetes guard refuses
@@ -59,6 +64,11 @@ func (s *Server) sharedWorkspaceKnownNotGit(ctx context.Context, in startContext
 		return false
 	}
 	if store.ResolveWorkspaceSharingMode(in.WorkspaceMode) != store.SharingModeSharedPlain {
+		return false
+	}
+	// The top-level flag is what a restart carries when it builds no Config
+	// (restartAgentConfig returns nil for an older hub's request).
+	if in.SharedWorkspace {
 		return false
 	}
 	if c := in.Config; c != nil && (c.SharedWorkspace || c.GitClone != nil || c.SharedWorkspaceClone != nil) {
@@ -75,8 +85,8 @@ func (s *Server) sharedWorkspaceKnownNotGit(ctx context.Context, in startContext
 }
 
 // workspaceDirKnownNotGit reports whether dir is, right now, a visible
-// directory (not a symlink) that holds no .git entry and that git does not
-// see as inside a work tree. Any error or doubt returns false.
+// directory (not a symlink) that holds no .git entry and that git positively
+// reports as not inside a work tree. Any error or doubt returns false.
 func workspaceDirKnownNotGit(ctx context.Context, dir string) bool {
 	if dir == "" || projectfs.ShareDirVisible(ctx, dir) != nil {
 		return false
@@ -88,6 +98,45 @@ func workspaceDirKnownNotGit(ctx context.Context, dir string) bool {
 	if _, err := os.Lstat(filepath.Join(dir, ".git")); !errors.Is(err, fs.ErrNotExist) {
 		return false // a .git entry, or it could not be checked
 	}
-	isGit, err := util.CheckGitRepoDir(dir)
-	return err == nil && !isGit
+	return gitReportsNotARepository(ctx, dir)
+}
+
+// workspaceGitTimeout bounds the git call of gitReportsNotARepository: the
+// directory is on the share, where a hung mount can block it.
+var workspaceGitTimeout = projectfs.ShareVisibleTimeout
+
+// workspaceGitProbe runs `git rev-parse --is-inside-work-tree` in dir with the
+// host git arguments and environment (util.HostGitArgs, util.HostGitEnv) and
+// LC_ALL=C, and returns git's stderr and the run error. A variable so tests
+// can simulate exec failures.
+var workspaceGitProbe = func(ctx context.Context, dir string) (stderr string, err error) {
+	cmd := exec.CommandContext(ctx, "git", append(util.HostGitArgs(), "rev-parse", "--is-inside-work-tree")...)
+	cmd.Dir = dir
+	// Untranslated messages, so the "not a git repository" match is locale-stable.
+	cmd.Env = append(util.HostGitEnv(os.Environ()), "LC_ALL=C")
+	var buf strings.Builder
+	cmd.Stderr = &buf
+	err = cmd.Run()
+	return buf.String(), err
+}
+
+// gitReportsNotARepository reports whether git, run in dir within
+// workspaceGitTimeout, cleanly failed with "not a git repository": the only
+// outcome read as "not git". Success (a work tree), a missing git binary, an
+// exec or IO error, a timeout, a signal, or any other failure (such as an
+// ownership refusal) returns false: unknown, so SCION_WORKSPACE_GIT stays
+// absent. It is a separate helper from util.CheckGitRepoDir, whose (false,
+// nil) for any non-ownership failure its other callers rely on.
+func gitReportsNotARepository(ctx context.Context, dir string) bool {
+	ctx, cancel := context.WithTimeout(ctx, workspaceGitTimeout)
+	defer cancel()
+	stderr, err := workspaceGitProbe(ctx, dir)
+	if err == nil || ctx.Err() != nil {
+		return false
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || !exitErr.Exited() || exitErr.ExitCode() <= 0 {
+		return false
+	}
+	return strings.Contains(stderr, "not a git repository")
 }
