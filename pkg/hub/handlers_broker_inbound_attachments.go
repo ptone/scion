@@ -172,14 +172,15 @@ type brokerAttachmentCheckResponse struct {
 }
 
 // authorizeBrokerAttachmentRequest resolves and authorizes the sender of
-// req. It returns the sender, or the refusal (403 or 500).
+// req. It returns the sender (nil when it could not be resolved) and the
+// refusal (403 or 500), nil when the sender is authorized.
 func (s *Server) authorizeBrokerAttachmentRequest(ctx context.Context, req *brokerAttachmentRequest) (*AuthenticatedUser, *apiError) {
 	sender, refusal := s.resolveBrokerInboundSender(ctx, req.Sender)
 	if refusal != nil {
 		return nil, refusal
 	}
 	if refusal := s.authorizeBrokerAttachmentSender(ctx, sender, req.ProjectID, req.Targets); refusal != nil {
-		return nil, refusal
+		return sender, refusal
 	}
 	return sender, nil
 }
@@ -260,12 +261,11 @@ func (s *Server) handleBrokerAttachmentsCheck(w http.ResponseWriter, r *http.Req
 //  5. each file is checked (checkBrokerAttachmentFile) and
 //  6. stored as an unsent upload of the sender user (storeBrokerAttachment).
 //
-// Steps 2-4 complete before the first file part's content is read, and a
-// refusal stores nothing. The broker HMAC middleware has already read and
-// hashed the whole body before this handler runs (bounded at
-// apiclient.MaxSignedRequestBodyBytes), so the ordering is a property of
-// this handler: no sender or target check depends on file content, and no
-// file is parsed or stored for a refused request.
+// The broker HMAC middleware buffers and hashes the whole body (bounded at
+// apiclient.MaxSignedRequestBodyBytes) before this handler runs. The
+// handler then runs the sender and target checks (steps 2-4) before parsing
+// any file part, and stores nothing on refusal. This is not end-to-end
+// streaming: the ordering is a property of this handler.
 func (s *Server) handleBrokerAttachmentsUpload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w, http.MethodPost)
@@ -300,8 +300,12 @@ func (s *Server) handleBrokerAttachmentsUpload(w http.ResponseWriter, r *http.Re
 		if refusal.status >= http.StatusInternalServerError {
 			log.Error("broker attachment upload failed", "project_id", req.ProjectID, "refusal", errBrokerSenderRefused(refusal))
 		} else {
+			senderID := ""
+			if sender != nil {
+				senderID = sender.ID()
+			}
 			log.Warn("broker attachment upload",
-				"sender_id", "", "project_id", req.ProjectID, "decision", "refused: "+refusal.code,
+				"sender_id", senderID, "project_id", req.ProjectID, "decision", "refused: "+refusal.code,
 				"audience", req.Audience, "count", 0, "total_bytes", 0)
 		}
 		refusal.write(w)
