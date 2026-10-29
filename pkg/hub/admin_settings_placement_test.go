@@ -226,3 +226,29 @@ func TestPutSettingsFlatPlacementNotWritable(t *testing.T) {
 		})
 	}
 }
+
+// A save that sends only profiles reads the stored runtimes as the
+// omitted section for the placement pair check, by its typed fields: a
+// stored runtimes row holding a key the closed runtimes schema does not
+// know (written by another version, kept on load with a warning) does not
+// refuse the save, is not rewritten, and keeps its raw content.
+func TestPutSettingsProfilesOnlyKeepsStoredRuntimesUnknownKey(t *testing.T) {
+	tempSettingsHome(t)
+	srv, fake, ops := newTestDBServer(t)
+	stored := `{"k8s":{"type":"kubernetes","namespace":"agents","node_selector":{"scion.dev/pool":"agents"},"future_field":{"x":1}}}`
+	fake.seedWithOrigin("runtimes", json.RawMessage(stored), "managed")
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
+
+	rr := putServerConfigDB(t, srv, ops, `{"profiles":{"fast":{"runtime":"k8s","runtime_class_name":"gvisor"}}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	requirePlacementRow(t, fake, "runtimes", 1, stored)
+	requirePlacementRow(t, fake, "profiles", 1, `{"fast":{"runtime":"k8s","runtime_class_name":"gvisor"}}`)
+
+	// The placement rules still apply to the stored runtimes: a profile
+	// that changes their pool is refused, naming the profile.
+	rr = putServerConfigDB(t, srv, ops, `{"profiles":{"batch":{"runtime":"k8s","node_selector":{"scion.dev/pool":"batch"}}}}`)
+	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
+	assert.Contains(t, rr.Body.String(), "profiles.batch.node_selector")
+	requirePlacementRow(t, fake, "runtimes", 1, stored)
+}
