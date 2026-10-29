@@ -640,6 +640,10 @@ func TestRootLevelStaticFile_ListMatchesPublicDir(t *testing.T) {
 	require.NoError(t, err)
 	want := map[string]bool{}
 	for _, e := range entries {
+		// Dot names (such as .gitkeep) are never served (hasDotSegment).
+		if strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
 		require.False(t, e.IsDir(), "web/public/%s: rootStaticFiles lists root-level files only", e.Name())
 		want["/"+e.Name()] = true
 	}
