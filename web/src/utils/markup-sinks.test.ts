@@ -54,12 +54,6 @@ const PATTERNS: Record<string, RegExp> = {
  * Each entry says why it is here.
  */
 const KNOWN: Record<string, number> = {
-  // Chat markdown rendering; replaced by ptone/scion#6127.
-  'utils/markdown.ts: innerHTML/outerHTML assignment': 1,
-  'components/shared/chat/chat-message.ts: innerHTML/outerHTML assignment': 1,
-  'components/shared/chat/chat-message.ts: innerHTML property binding': 1,
-  'components/shared/markdown-preview.ts: innerHTML property binding': 1,
-  'components/shared/chat/chat-interagent-marker.ts: innerHTML property binding': 1,
   // The artifact preview's image rewrite; moves to nodes after ptone/scion#6127.
   'client/artifact-preview.ts: innerHTML/outerHTML assignment': 1,
   // The artifact preview frame's document: set from previewFrameDocument,
