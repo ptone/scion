@@ -426,6 +426,9 @@ describe('Shift-Enter suggests a line break', () => {
     expect(press(c, 'Enter', { shiftKey: true })).toBe(true);
     expect(hints).toEqual([]);
     await check(md, saved(c, md), 'ab {++\\\n++}cd\n', 'ab \\\ncd\n');
+    const again = await open(saved(c, md));
+    expect(docMarkRuns(again.c.view.state.doc).map((r) => r.kind)).toEqual(['insertion']);
+    expect(again.c.readOnlyBlocks()).toEqual([]);
   });
 
   it('in a heading is refused', async () => {
@@ -824,7 +827,7 @@ describe('whole-text check for structural edits in hazardous documents (R2, desi
       'a break after a literal insertion opener',
       'Note: {++ stays literal.\n\n- one\n- two\n',
       'Note: stays literal.\n\n- one\n- two\n',
-      (h) => {
+      (h): void => {
         select(h.c, posOf(h.c, 'two', 1));
         press(h.c, 'Enter');
       },
@@ -833,7 +836,7 @@ describe('whole-text check for structural edits in hazardous documents (R2, desi
       'a join after a literal deletion opener',
       'Note: {-- stays literal.\n\none\n\ntwo\n',
       'Note: stays literal.\n\none\n\ntwo\n',
-      (h) => {
+      (h): void => {
         select(h.c, startOf(h.c, 'two'));
         press(h.c, 'Backspace');
       },
@@ -842,7 +845,7 @@ describe('whole-text check for structural edits in hazardous documents (R2, desi
       'a two-paragraph paste after a literal insertion opener',
       'Note: {++ stays literal.\n\nab\n',
       'Note: stays literal.\n\nab\n',
-      (h) => {
+      (h): void => {
         select(h.c, posOf(h.c, 'ab', 1));
         paste(h, 'P1\n\nP2');
       },
@@ -927,7 +930,7 @@ describe('the read-back takes the alternative reading only for boundary runs (O1
     // The same mark, written across a line with an ordered-list marker the
     // Markdown reading keeps as text.
     expect(marksReadBack(doc, 'x {++a\n2. b++} y\n', coreOf(c).plain)).not.toBeNull();
-    expect(marksReadBack(doc, 'x {++a\n> b++} y\n', coreOf(c).plain)).not.toBeNull();
+    expect(marksReadBack(doc, 'x {++a\n10) b++} y\n', coreOf(c).plain)).not.toBeNull();
     expect(marksReadBack(doc, 'x {++a b++} y\n', coreOf(c).plain)).toBeNull();
   });
 
@@ -961,6 +964,11 @@ describe('more of the addendum table (O3)', () => {
       expect(projectCritic(out, 'clean')).toBe(md);
       const again = await open(out);
       expect(again.c.flush()).toBe(out);
+      // It opens again as an insertion, not as literal tokens.
+      expect(
+        docMarkRuns(again.c.view.state.doc).map((r) => r.kind),
+        md
+      ).toEqual(['insertion']);
     }
   });
 
@@ -979,7 +987,7 @@ describe('more of the addendum table (O3)', () => {
       ['- [x] done it\n', '- [x] done {++\n- [ ] ++}it\n'],
     ]) {
       const { c, hints } = await open(md);
-      select(c, posOf(c, md.includes('one') ? 'one' : 'it'));
+      select(c, md.includes('task') ? posOf(c, 'one') : posOf(c, ' it', 1));
       press(c, 'Enter');
       expect(hints, md).toEqual([]);
       expect(saved(c, md)).toBe(want);

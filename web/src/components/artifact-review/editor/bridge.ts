@@ -193,6 +193,11 @@ export function applySentinels(
   const markable = (from: number, to: number): boolean => {
     let ok = false;
     tr.doc.nodesBetween(from, to, (n, pos, parent) => {
+      // A hard break is markable content (a suggested line break).
+      if (n.type.name === 'hardbreak' && parent?.type.allowsMarkType(insType)) {
+        ok = true;
+        return false;
+      }
       if (n.isText && parent?.type.allowsMarkType(insType)) {
         const t = (n.text ?? '').slice(Math.max(0, from - pos), to - pos);
         for (const c of t) {

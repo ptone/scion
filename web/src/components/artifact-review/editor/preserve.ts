@@ -364,7 +364,9 @@ function writeChildren(
       wasKids[0],
       slice,
       () =>
-        table ? serializeChild(was, wasKids[0], g.c0, serialize, schema, free) : items(wasKids, g.c0),
+        table
+          ? serializeChild(was, wasKids[0], g.c0, serialize, schema, free)
+          : items(wasKids, g.c0),
       g.c1
     );
     const after = table
