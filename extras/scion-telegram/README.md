@@ -193,6 +193,8 @@ The bot strips @-mentions from the message text before forwarding to the agent. 
 
 ### File Attachments
 
+Files sent in a linked group (photos, documents, audio and video) are delivered to each addressed agent. When attachment artifacts are enabled on the Hub (the default where the artifact service is ready), each agent receives the file in its inbox at `~/.scion/inbox/<message-id>/`. If the Hub can't take attachments, the message text is still delivered and the sender is told in the chat. The former `downloads_path` setting is retired; if it is still configured, the plugin logs a warning at startup and ignores it.
+
 Agents can send files to users via the Scion CLI:
 
 ```bash

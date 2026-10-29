@@ -32,6 +32,12 @@ configuration from the web UI, registration, and your first message.
 - **Body mentions:** Mentions inside the body of a message (e.g., `@agent-b`) are delivered as lightweight `TypeMention` (`mention`) notifications instead of full instructions, preventing accidental multi-agent execution loops. If a message contains only body mentions, the group's default agent is restored as the primary recipient.
 - Available bot commands: `/agents` (list agents), `/default` (set default), `/terminal <agent>` (get web terminal URL), `/settings` (configure group), `/notifications` (toggle notification types).
 
+### Attachments
+
+Photos, documents, audio and video sent in a linked group are delivered to each addressed agent (the agents the message is routed to, including mentioned agents). When attachment artifacts are enabled on the Hub (the default where the artifact service is ready), each agent receives the file in its inbox at `~/.scion/inbox/<message-id>/`. If the Hub can't take attachments, the message text is still delivered and the sender is told in the chat that the attachment was not.
+
+The plugin's former `downloads_path` setting is retired. If it is still configured, the plugin logs a warning at startup and ignores it.
+
 ### Group Settings
 
 Each linked group can be configured via `/settings`:
