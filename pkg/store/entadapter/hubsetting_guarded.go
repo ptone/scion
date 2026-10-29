@@ -19,18 +19,27 @@ import (
 	"fmt"
 	"sort"
 
+	"entgo.io/ent/dialect/sql"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubsetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // UpsertHubSettingsGuarded implements store.HubSettingGuardedBatchWriter:
-// one transaction locks every written and read row in section order (FOR
-// UPDATE on Postgres; SQLite serializes writers), compares the read
-// revisions and the writes' expected revisions, writes every section and
-// bumps the operational-settings revision once. Any mismatch, including a
-// lost concurrent create, returns store.ErrRevisionConflict and nothing is
-// written.
+// one transaction serializes against every other guarded batch, compares
+// the read revisions and the writes' expected revisions, writes or deletes
+// every section and bumps the operational-settings revision once. Any
+// mismatch, including a lost concurrent create, returns
+// store.ErrRevisionConflict and nothing is written.
+//
+// On Postgres the transaction first takes the store.LockHubSettingsGuardedBatch
+// advisory lock (held to commit or rollback), so a read guard on a section
+// with no row, which FOR UPDATE cannot lock, still holds; the rows are also
+// locked FOR UPDATE in section order against the single-section writers.
+// On SQLite the hub's pool has one connection (MaxOpenConns is forced to 1
+// for SQLite), so the transaction holds the only connection and no other
+// write can start before it ends.
 func (s *HubSettingStore) UpsertHubSettingsGuarded(
 	ctx context.Context,
 	writes []store.HubSettingWrite,
@@ -73,6 +82,14 @@ func (s *HubSettingStore) UpsertHubSettingsGuarded(
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if s.usesRowLocks() {
+		var res sql.Result
+		if err := tx.Client().Driver().Exec(ctx, "SELECT pg_advisory_xact_lock($1)",
+			[]any{int64(store.LockHubSettingsGuardedBatch)}, &res); err != nil {
+			return nil, fmt.Errorf("guarded hub settings batch: lock: %w", err)
+		}
+	}
+
 	rows := make(map[string]*ent.HubSetting, len(sections))
 	for _, section := range sections {
 		q := tx.HubSetting.Query().Where(hubsetting.SectionEQ(section))
@@ -102,6 +119,11 @@ func (s *HubSettingStore) UpsertHubSettingsGuarded(
 	}
 	for _, w := range writes {
 		switch {
+		case w.Delete && rows[w.Section] == nil:
+			if w.ExpectedRevision == -1 {
+				return nil, store.ErrNotFound
+			}
+			return nil, store.ErrRevisionConflict
 		case w.ExpectedRevision == -1:
 		case w.ExpectedRevision == 0:
 			if rows[w.Section] != nil {
@@ -116,7 +138,9 @@ func (s *HubSettingStore) UpsertHubSettingsGuarded(
 	out := make([]store.HubSetting, 0, len(writes))
 	for _, w := range writes {
 		var saved *ent.HubSetting
-		if existing := rows[w.Section]; existing == nil {
+		if w.Delete {
+			err = tx.HubSetting.DeleteOneID(rows[w.Section].ID).Exec(ctx)
+		} else if existing := rows[w.Section]; existing == nil {
 			create := tx.HubSetting.Create().SetSection(w.Section).SetValue(w.Value).SetRevision(1)
 			if updatedBy != "" {
 				create.SetUpdatedBy(updatedBy)
@@ -145,6 +169,10 @@ func (s *HubSettingStore) UpsertHubSettingsGuarded(
 		}
 		if isOperationalSection(w.Section) {
 			bump = true
+		}
+		if w.Delete {
+			out = append(out, store.HubSetting{Section: w.Section})
+			continue
 		}
 		out = append(out, *entHubSettingToStore(saved))
 	}
