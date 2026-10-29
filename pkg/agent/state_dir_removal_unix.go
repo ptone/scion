@@ -52,7 +52,7 @@ var podmanUnshareRemove = func(ctx context.Context, path string) error {
 // returned error wraps both removeErr and the retry's error.
 func retryRemovalInUserNamespace(path string, removeErr error) error {
 	if errors.Is(removeErr, errors.ErrUnsupported) ||
-		!(errors.Is(removeErr, fs.ErrPermission) || errors.Is(removeErr, syscall.ENOTEMPTY)) {
+		(!errors.Is(removeErr, fs.ErrPermission) && !errors.Is(removeErr, syscall.ENOTEMPTY)) {
 		return removeErr
 	}
 	util.Debugf("delete: removal of %s was refused (%v); retrying with podman unshare", path, removeErr)
