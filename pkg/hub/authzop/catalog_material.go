@@ -190,11 +190,7 @@ var materialOperations = []OperationSpec{
 			Atomic:        true,
 		},
 		DenialCodes: []DenialCode{DenialForbidden},
-		TestRefs: []TestRef{
-			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
-			{Package: "pkg/hub", Function: "TestUserEnvSecretWrites_FederatedUserRefused"},
-			{Package: "pkg/hub", Function: "TestUserEnvSecretWrites_SessionAndTokenUnchanged"},
-		},
+		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 
 	// =====================================================================
@@ -366,6 +362,7 @@ func envSecretSessionOnlyOp(id OperationID, domain, description string, eps []En
 		{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 		{Package: "pkg/hub", Function: "TestUserEnvSecret_ProjectBoundaryTokenRefused"},
 		{Package: "pkg/hub", Function: "TestUserEnvSecretWrites_SessionAllowedTokenRefused"},
+		{Package: "pkg/hub", Function: "TestUserEnvSecretWrites_FederatedUserRefused"},
 	}
 	if hub {
 		refs = []TestRef{
@@ -376,6 +373,21 @@ func envSecretSessionOnlyOp(id OperationID, domain, description string, eps []En
 			{Package: "pkg/hub", Function: "TestHubEnvSecret_NonAdminSessionRefused"},
 			{Package: "pkg/hub", Function: "TestHubEnvSecret_TestAdminSessionRefused"},
 		}
+	}
+	// Writes and secret reads carry an audit obligation, as the project
+	// operations secret.read and secret.write do.
+	var audit *AuditObligation
+	for _, eff := range effects {
+		if !eff.RequiresAudit() {
+			continue
+		}
+		audit = &AuditObligation{EventType: domain + ".write", ContextFields: []string{"actor_id"}, Atomic: true}
+		if eff == EffectReadSecret {
+			audit.EventType = domain + ".read"
+		} else {
+			audit.BeforeFields = []string{domain + "_key"}
+		}
+		break
 	}
 	principals := []PrincipalKind{PrincipalUser}
 	credentials := []CredentialKind{CredentialSessionJWT}
@@ -397,6 +409,7 @@ func envSecretSessionOnlyOp(id OperationID, domain, description string, eps []En
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs:         refs,
+		AuditObligation:  audit,
 		Exemptions:       []Exemption{exemption},
 		Bearer:           SessionOnly(ReasonCredentialManagement),
 	}
