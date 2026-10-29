@@ -60,7 +60,8 @@ type SetEnvVarResponse struct {
 // For user scope: extracts the authenticated user's ID as scopeID (ignoring
 // any client-supplied value). The caller must use an interactive session or
 // dev credential; a user access token is refused (session-only,
-// CREDENTIAL_MANAGEMENT).
+// CREDENTIAL_MANAGEMENT). A federated caller may read (never write) its own
+// user-level material, as before (federatedOwnUserRead).
 //
 // For hub scope: agents may read. A user must be an unscoped local platform
 // admin on an interactive session or dev credential; a user access token is
@@ -87,13 +88,21 @@ func (s *Server) resolveEnvSecretAccess(w http.ResponseWriter, r *http.Request, 
 			Unauthorized(w)
 			return "", false
 		}
-		// User-level variables and secrets need an interactive session or
-		// dev credential; every user access token is refused.
-		if !sessionCredentialAllowed(ctx) {
-			writeEnvSecretSessionRequired(w)
+		// A federated caller is never a profile writer: its writes are
+		// refused here, before the credential check, with the profile
+		// write refusal.
+		if isWrite && !requireProfileWriter(w, r) {
 			return "", false
 		}
-		if isWrite && !requireProfileWriter(w, r) {
+		// User-level variables and secrets need an interactive session or
+		// dev credential; every user access token is refused. The one
+		// exception is a federated caller's READ of its own user-level
+		// material, kept deliberately as it was before session-only: it is
+		// read-only (writes were refused above), limited to the caller's own
+		// ID (returned below, never a client-supplied one), and gives no hub
+		// scope (the hub branch requires an unscoped local admin).
+		if !sessionCredentialAllowed(ctx) && !federatedOwnUserRead(ctx, isWrite) {
+			writeEnvSecretSessionRequired(w)
 			return "", false
 		}
 		return userIdent.ID(), true
@@ -221,6 +230,16 @@ func (s *Server) resolveEnvSecretAccess(w http.ResponseWriter, r *http.Request, 
 // envSecretSessionRequiredMessage is the refusal message for a user access
 // token on user- or hub-level env and secret operations.
 const envSecretSessionRequiredMessage = "user- and hub-level environment variables and secrets require an interactive login (run 'scion hub auth login'); access tokens are not accepted"
+
+// federatedOwnUserRead reports whether the request is a federated caller's
+// read of its own user-level env or secret material: a read (not a write),
+// on a federation credential, by a federated identity. It admits nothing
+// else; in particular a user access token never matches.
+func federatedOwnUserRead(ctx context.Context, isWrite bool) bool {
+	return !isWrite &&
+		GetCredentialContextFromContext(ctx).Kind == CredentialKindFederation &&
+		isFederatedCaller(ctx)
+}
 
 // writeEnvSecretSessionRequired writes the session-only refusal for user-
 // and hub-level env and secret operations.

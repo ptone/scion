@@ -292,7 +292,7 @@ var materialOperations = []OperationSpec{
 	// share routes with the project and broker operations above and are
 	// told apart by the scope query parameter or body field.
 	// =====================================================================
-	envSecretSessionOnlyOp("env.user.read", "env", "Read the caller's own user-level environment variables (scope=user, the default)",
+	envSecretSessionOnlyOp("env.user.read", "env", "Read the caller's own user-level environment variables (scope=user, the default). A federated caller reads its own (retained prior behaviour)",
 		[]EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/env", Method: "GET", Variant: "scope=user", Response: ResponseCredential},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/env/{key}", Method: "GET", Variant: "scope=user", Response: ResponseCredential},
@@ -302,7 +302,7 @@ var materialOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/env/{key}", Method: "PUT", Variant: "scope=user", Response: ResponseCredential},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/env/{key}", Method: "DELETE", Variant: "scope=user"},
 		}, []SecurityEffect{EffectCreateResource, EffectUpdateResource, EffectDeleteResource}, false),
-	envSecretSessionOnlyOp("secret.user.read", "secret", "Read the caller's own user-level secrets (scope=user, the default)",
+	envSecretSessionOnlyOp("secret.user.read", "secret", "Read the caller's own user-level secrets (scope=user, the default). A federated caller reads its own (retained prior behaviour)",
 		[]EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/secrets", Method: "GET", Variant: "scope=user"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/secrets/{key}", Method: "GET", Variant: "scope=user"},
@@ -395,6 +395,12 @@ func envSecretSessionOnlyOp(id OperationID, domain, description string, eps []En
 		// Agents read hub-level material with their agent token.
 		principals = append(principals, PrincipalAgent)
 		credentials = append(credentials, CredentialAgentJWT)
+	}
+	if !hub && allGET(eps) {
+		// A federated caller reads its own user-level material (retained
+		// prior behaviour; writes are refused by requireProfileWriter).
+		credentials = append(credentials, CredentialFederatedUser)
+		refs = append(refs, TestRef{Package: "pkg/hub", Function: "TestUserEnvSecretReads_FederatedOwnScopeAllowed"})
 	}
 	return OperationSpec{
 		ID:               id,
