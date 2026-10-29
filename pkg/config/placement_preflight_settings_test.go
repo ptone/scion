@@ -36,7 +36,8 @@ func settingsScanFixture() (map[string]V1RuntimeConfig, map[string]V1ProfileConf
 	}
 	profiles := map[string]V1ProfileConfig{
 		"pool-other": {Runtime: "k8s-a", NodeSelector: map[string]string{PoolNodeSelectorKey: "batch"}},
-		"missing":    {Runtime: "nowhere"},
+		"missing":    {Runtime: "nowhere", NodeSelector: map[string]string{"disk": "ssd"}},
+		"no-place":   {Runtime: "nowhere"}, // no placement: not a placement finding
 		"on-docker":  {Runtime: "local", RuntimeClassName: "gvisor"},
 		"ok":         {Runtime: "k8s-a", NodeSelector: map[string]string{"disk": "ssd"}},
 	}
