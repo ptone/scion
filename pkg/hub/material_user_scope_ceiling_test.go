@@ -256,6 +256,17 @@ func (f *userScopeCeilingFixture) itemFacts(t *testing.T, agentID string) (Agent
 	}
 }
 
+// ceilingFor is the user-scope secret parent ceiling verdict for the agent
+// (stored ancestry) on the root user's row of key.
+func (f *userScopeCeilingFixture) ceilingFor(t *testing.T, agentID, key string) ParentCeilingDecision {
+	t.Helper()
+	ident, facts := f.itemFacts(t, agentID)
+	meta, err := f.Server.secretBackend.GetMeta(context.Background(), key, store.ScopeUser, facts.Root.ID)
+	require.NoError(t, err)
+	require.NotNil(t, meta)
+	return f.Server.authzService.EvaluateUserSecretParentCeiling(context.Background(), ident, userSecretResource(meta.ID, meta.ScopeID))
+}
+
 // userItem is check 8 (authorizeRuntimeUserItem) for the agent on key.
 func (f *userScopeCeilingFixture) userItem(t *testing.T, agentID, key string) ItemResult {
 	t.Helper()

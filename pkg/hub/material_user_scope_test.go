@@ -29,7 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -115,6 +115,9 @@ func TestAgentSecretRead_DirectChildRequiresSharingEnabled(t *testing.T) {
 func TestAgentSecretRead_UserScopeRowAuthoredOutsideLineageDenied(t *testing.T) {
 	f := newMaterialFixture(t, "outside-lineage")
 	ctx := context.Background()
+	// A recorded chain, so the refusal is the lineage check, not the
+	// unrecorded-chain refusal.
+	f.recordAgentEdge(t)
 
 	outsiderAgentID := tid("outsider-agent")
 	require.NoError(t, f.Store.CreateAgent(ctx, &store.Agent{
@@ -133,6 +136,12 @@ func TestAgentSecretRead_UserScopeRowAuthoredOutsideLineageDenied(t *testing.T) 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 (creator outside ancestry denies), got %d: %s", rec.Code, rec.Body.String())
 	}
+	uf := &userScopeCeilingFixture{materialFixture: f}
+	item := uf.userItem(t, f.AgentID, "OUTSIDE_LINEAGE_KEY")
+	require.Equal(t, ReasonDeniedByPolicy, item.Reason, "the lineage check denies, not chain_unrecorded")
+	d := uf.ceilingFor(t, f.AgentID, "OUTSIDE_LINEAGE_KEY")
+	require.False(t, d.Allowed)
+	require.Equal(t, DenyCauseCeilingResourceMissing, d.DenyCause, "the row is not a progeny secret of the lineage; reason %q", d.Reason)
 }
 
 // TestAgentSecretRead_SharingSourceMustBeActive unit-tests progenySourceLive
@@ -193,6 +202,11 @@ func TestAgentSecretRead_SharingSourceAgentDeletedDenied(t *testing.T) {
 	}))
 	grandchildToken, err := f.Server.agentTokenService.GenerateAgentToken(grandchildID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{f.UserID, creatorAgentID})
 	require.NoError(t, err)
+	// A recorded chain U -> source agent -> grandchild, so the refusal is
+	// the source's, not the unrecorded-chain refusal.
+	uf := &userScopeCeilingFixture{materialFixture: f}
+	uf.recordEdge(t, store.DelegationPrincipalUser, f.UserID, creatorAgentID, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, nil)
+	uf.recordEdge(t, store.DelegationPrincipalAgent, creatorAgentID, grandchildID, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, nil)
 
 	_, _, err = f.Server.secretBackend.Set(ctx, &secret.SetSecretInput{
 		Name: "SOURCE_DELETED_KEY", Value: "v", SecretType: store.SecretTypeEnvironment, Target: "SOURCE_DELETED_KEY",
@@ -209,6 +223,7 @@ func TestAgentSecretRead_SharingSourceAgentDeletedDenied(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 (soft-deleted source agent denies), got %d: %s", rec.Code, rec.Body.String())
 	}
+	assertSourceAgentRefusal(t, uf, grandchildID, "SOURCE_DELETED_KEY")
 }
 
 // TestAgentSecretRead_SharingSourceAgentRootSuspendedDenied pins that
@@ -235,6 +250,11 @@ func TestAgentSecretRead_SharingSourceAgentRootSuspendedDenied(t *testing.T) {
 	}))
 	grandchildToken, err := f.Server.agentTokenService.GenerateAgentToken(grandchildID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{f.UserID, creatorAgentID})
 	require.NoError(t, err)
+	// A recorded chain U -> source agent -> grandchild, so the refusal is
+	// the source's, not the unrecorded-chain refusal.
+	uf := &userScopeCeilingFixture{materialFixture: f}
+	uf.recordEdge(t, store.DelegationPrincipalUser, f.UserID, creatorAgentID, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, nil)
+	uf.recordEdge(t, store.DelegationPrincipalAgent, creatorAgentID, grandchildID, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, nil)
 
 	_, _, err = f.Server.secretBackend.Set(ctx, &secret.SetSecretInput{
 		Name: "SOURCE_ROOT_SUSPENDED_KEY", Value: "v", SecretType: store.SecretTypeEnvironment, Target: "SOURCE_ROOT_SUSPENDED_KEY",
@@ -246,6 +266,25 @@ func TestAgentSecretRead_SharingSourceAgentRootSuspendedDenied(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 (source agent's own root suspended denies), got %d: %s", rec.Code, rec.Body.String())
 	}
+	assertSourceAgentRefusal(t, uf, grandchildID, "SOURCE_ROOT_SUSPENDED_KEY")
+}
+
+// assertSourceAgentRefusal pins that a row authored by a source agent is
+// refused on a recorded chain by the delegation checks (check 8's Decide),
+// never by the unrecorded-chain refusal, and that the source-liveness check
+// itself still refuses the source. On a recorded chain an agent-authored
+// row cannot reach the liveness step: the parent ceiling admits only rows
+// whose recorded author is their owner (the root user), so the liveness of
+// an agent source is pinned at progenySourceLive directly.
+func assertSourceAgentRefusal(t *testing.T, uf *userScopeCeilingFixture, agentID, key string) {
+	t.Helper()
+	item := uf.userItem(t, agentID, key)
+	require.Equal(t, ReasonDeniedByPolicy, item.Reason, "refused by the delegation checks, not chain_unrecorded")
+	live, kind, reason, err := uf.Server.progenySourceLive(context.Background(), item.Meta)
+	require.NoError(t, err)
+	assert.False(t, live, "the source agent is not live")
+	assert.Equal(t, "agent", kind)
+	assert.Equal(t, ReasonSourceInactive, reason)
 }
 
 // TestAgentSecretRead_SharingSourceLookupErrorDenies unit-tests that a
@@ -265,14 +304,13 @@ func TestAgentSecretRead_SharingSourceLookupErrorDenies(t *testing.T) {
 }
 
 // TestAgentSecretRead_UserScopeMakesNoProjectSecretDecision pins that a
-// user-scope read never calls Decide(project.secret_read). The fixture
-// agent has no delegation edge, so the read's only edge lookup is the
-// chain classification of check 8 (one hop, no edge), which refuses the
-// read (chain_unrecorded) before any decision; a project decision would add
-// the step-10 walk's own lookup.
+// user-scope read never calls Decide(project.secret_read): on a recorded
+// chain the read is allowed through Decide(secret.use) alone, and the
+// decision audit holds no project.secret_read decision.
 func TestAgentSecretRead_UserScopeMakesNoProjectSecretDecision(t *testing.T) {
 	f := newMaterialFixture(t, "user-scope-no-project-decision")
 	ctx := context.Background()
+	f.recordAgentEdge(t)
 
 	_, _, err := f.Server.secretBackend.Set(ctx, &secret.SetSecretInput{
 		Name: "USER_ONLY_KEY", Value: "v", SecretType: store.SecretTypeEnvironment, Target: "USER_ONLY_KEY",
@@ -280,15 +318,25 @@ func TestAgentSecretRead_UserScopeMakesNoProjectSecretDecision(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	counting := &callCountingStore{Store: f.Store}
-	f.Server.authzService = NewAuthzService(counting, logging.Subsystem("hub.auth"))
+	emitter := &recordingDecisionAuditEmitter{}
+	f.Server.authzService.SetDecisionAuditEmitter(emitter)
+	f.Server.authzService.DecisionAuditSampleRate = 1.0
 
 	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+f.AgentID+"/secrets/USER_ONLY_KEY?scope=user", nil, f.Token)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("expected 404 (chain without recorded provenance), got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if counting.getDelegationEdgesForDelegateCalls != 1 {
-		t.Fatalf("expected only the chain classification's edge lookup for a user-scope read, got %d edge lookups", counting.getDelegationEdgesForDelegateCalls)
+	secretUse := 0
+	for _, r := range emitter.records {
+		if r.Permission == "project.secret_read" {
+			t.Fatalf("a user-scope read made a project.secret_read decision: %+v", r)
+		}
+		if r.Permission == secretUsePermission {
+			secretUse++
+		}
+	}
+	if secretUse == 0 {
+		t.Fatalf("expected the read's secret.use decision in the audit, got %d records", len(emitter.records))
 	}
 }
 
