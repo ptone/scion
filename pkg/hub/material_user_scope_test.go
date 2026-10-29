@@ -310,8 +310,11 @@ func TestAgentSecretRead_SharingSourceLookupErrorDenies(t *testing.T) {
 
 // TestAgentSecretRead_UserScopeMakesNoProjectSecretDecision pins that a
 // user-scope read never calls Decide(project.secret_read): on a recorded
-// chain the read is allowed (check 8, not check 7) and the decision audit
-// holds no project.secret_read decision.
+// chain the read is allowed through a secret.use decision, and the decision
+// audit holds no project.secret_read decision. The control, a project-scope
+// read on the same fixture, does record one, so the negative check can fire.
+// The audit record carries the action in Permission and the permission ID
+// in PermissionID.
 func TestAgentSecretRead_UserScopeMakesNoProjectSecretDecision(t *testing.T) {
 	f := newMaterialFixture(t, "user-scope-no-project-decision")
 	ctx := context.Background()
@@ -331,10 +334,31 @@ func TestAgentSecretRead_UserScopeMakesNoProjectSecretDecision(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
+	secretUse := 0
 	for _, r := range emitter.records {
-		if r.Permission == "project.secret_read" {
+		if r.PermissionID == permissionProjectSecretRead {
 			t.Fatalf("a user-scope read made a project.secret_read decision: %+v", r)
 		}
+		if r.PermissionID == secretUsePermission {
+			secretUse++
+		}
+	}
+	if secretUse == 0 {
+		t.Fatalf("expected the read's secret.use decision in the audit, got %d records", len(emitter.records))
+	}
+
+	// Control: a project-scope read records a project.secret_read decision.
+	seedSecret(t, f.Server.secretBackend, "PROJECT_CONTROL_KEY", "v", "", "", f.ProjectID)
+	emitter.records = nil
+	_ = doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+f.AgentID+"/secrets/PROJECT_CONTROL_KEY", nil, f.Token)
+	projectRead := 0
+	for _, r := range emitter.records {
+		if r.PermissionID == permissionProjectSecretRead {
+			projectRead++
+		}
+	}
+	if projectRead == 0 {
+		t.Fatalf("control: a project-scope read records a project.secret_read decision, got %d records", len(emitter.records))
 	}
 }
 

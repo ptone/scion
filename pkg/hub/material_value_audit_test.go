@@ -799,11 +799,12 @@ func TestAgentListSecrets_LivenessErrorRecordsAuditItem(t *testing.T) {
 
 	// Only the per-row liveness check's own GetUser call fails: the request
 	// precheck and the chain checks read the same user and must succeed.
-	f.Server.store = &materialFailingStore{
+	failing := &materialFailingStore{
 		Store:            f.Store,
 		getUserErr:       errors.New("injected liveness lookup failure"),
 		getUserErrCaller: "progenySourceLive",
 	}
+	f.Server.store = failing
 
 	auditor := newRecordingMaterialAuditor()
 	f.Server.SetAuditLogger(auditor)
@@ -816,6 +817,9 @@ func TestAgentListSecrets_LivenessErrorRecordsAuditItem(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	if len(resp.Secrets) != 0 {
 		t.Fatalf("expected the row to be skipped from the list, got %+v", resp.Secrets)
+	}
+	if failing.getUserErrCallerFired != 1 {
+		t.Fatalf("expected the liveness check's user read to fail exactly once, got %d", failing.getUserErrCallerFired)
 	}
 	if len(auditor.events) != 1 {
 		t.Fatalf("expected 1 material selection event, got %d", len(auditor.events))
