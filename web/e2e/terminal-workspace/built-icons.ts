@@ -40,7 +40,7 @@ export function builtSheetPath(): string {
 export function symbolContent(sheet: string, name: string): string | null {
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const m = new RegExp(`<symbol id="${escaped}"[^>]*>([\\s\\S]*?)</symbol>`).exec(sheet);
-  return m ? m[1]! : null;
+  return m ? (m[1] ?? null) : null;
 }
 
 /** The drawing content of a packaged Shoelace icon, as the sheet holds it. */
