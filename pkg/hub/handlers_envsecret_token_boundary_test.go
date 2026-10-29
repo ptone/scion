@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
@@ -93,16 +94,25 @@ func hubEnvSecretRequests() []struct {
 // hub-level variable and secret are still present with their seeded values.
 func requireHubMaterialUnchanged(t *testing.T, f *envSecretTokenFixture) {
 	t.Helper()
-	rec := doRequest(t, f.srv, http.MethodGet, "/api/v1/env/"+envSecretTokenVar+"?scope=hub", nil)
+	requireHubMaterialUnchangedVia(t, func(method, path string, body interface{}) *httptest.ResponseRecorder {
+		return doRequest(t, f.srv, method, path, body)
+	})
+}
+
+// requireHubMaterialUnchangedVia is requireHubMaterialUnchanged with the
+// checking requests sent by do, an admin session of the caller's choice.
+func requireHubMaterialUnchangedVia(t *testing.T, do func(method, path string, body interface{}) *httptest.ResponseRecorder) {
+	t.Helper()
+	rec := do(http.MethodGet, "/api/v1/env/"+envSecretTokenVar+"?scope=hub", nil)
 	require.Equal(t, http.StatusOK, rec.Code, "hub variable must survive refused requests: %s", rec.Body.String())
 	var ev store.EnvVar
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&ev))
 	require.Equal(t, "seed", ev.Value, "hub variable value must be unchanged")
 
-	rec = doRequest(t, f.srv, http.MethodGet, "/api/v1/env/EST_HUB_NEW?scope=hub", nil)
+	rec = do(http.MethodGet, "/api/v1/env/EST_HUB_NEW?scope=hub", nil)
 	require.Equal(t, http.StatusNotFound, rec.Code, "a refused request must not create a hub variable: %s", rec.Body.String())
 
-	rec = doRequest(t, f.srv, http.MethodGet, "/api/v1/secrets/"+envSecretTokenSecret+"?scope=hub", nil)
+	rec = do(http.MethodGet, "/api/v1/secrets/"+envSecretTokenSecret+"?scope=hub", nil)
 	require.Equal(t, http.StatusOK, rec.Code, "hub secret must survive refused requests: %s", rec.Body.String())
 }
 
@@ -154,6 +164,57 @@ func TestHubEnvSecret_SessionAdminAllowed(t *testing.T) {
 			require.Equal(t, want[tc.name], rec.Code, "%s %s: %s", tc.method, tc.path, rec.Body.String())
 		})
 	}
+}
+
+// TestHubEnvSecret_NonAdminSessionRefused: a session alone is not enough on
+// hub-level env and secret operations; a non-admin user's session is refused
+// and changes nothing.
+func TestHubEnvSecret_NonAdminSessionRefused(t *testing.T) {
+	f := newEnvSecretTokenFixture(t, "est-na")
+	memberID := hubConfigTokenUser(t, f.s, "est-na-member", store.SystemRoleHubMember)
+	member, err := f.s.GetUser(context.Background(), memberID)
+	require.NoError(t, err)
+	require.NotEqual(t, store.UserRoleAdmin, member.Role)
+
+	for _, tc := range hubEnvSecretRequests() {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doRequestAsUser(t, f.srv, member, tc.method, tc.path, tc.body)
+			require.Equal(t, http.StatusForbidden, rec.Code, "%s %s: %s", tc.method, tc.path, rec.Body.String())
+		})
+	}
+	requireHubMaterialUnchanged(t, f)
+}
+
+// TestHubEnvSecret_TestAdminSessionRefused: a test identity with an admin
+// role uses a session-class credential, and is still refused on every
+// hub-level env and secret operation (test-admin policy); a human
+// super-admin's session keeps access.
+func TestHubEnvSecret_TestAdminSessionRefused(t *testing.T) {
+	srv, s, _ := tsaServer(t)
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
+	issuer := taUser(t, s, "est-ta-iss", store.SystemRoleSuperAdmin)
+	issuer2 := taUser(t, s, "est-ta-iss2", store.SystemRoleSuperAdmin)
+	superKind := tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin)
+	hubKind := tsaIssue(t, srv, issuer2, testAdminRoleHubAdmin)
+	human := taTokenFor(t, srv, issuer)
+	asHuman := func(method, path string, body interface{}) *httptest.ResponseRecorder {
+		return doRequestWithToken(t, srv, human, method, path, body)
+	}
+
+	rec := asHuman(http.MethodPut, "/api/v1/env/"+envSecretTokenVar, SetEnvVarRequest{Value: "seed", Scope: "hub"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = asHuman(http.MethodPut, "/api/v1/secrets/"+envSecretTokenSecret, SetSecretRequest{Value: "c2VlZA==", Scope: "hub"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	for who, tok := range map[string]string{"test_super_admin": superKind.AccessToken, "test_hub_admin": hubKind.AccessToken} {
+		for _, tc := range hubEnvSecretRequests() {
+			t.Run(who+" "+tc.name, func(t *testing.T) {
+				rec := doRequestWithToken(t, srv, tok, tc.method, tc.path, tc.body)
+				require.Equal(t, http.StatusForbidden, rec.Code, "%s %s %s: %s", who, tc.method, tc.path, rec.Body.String())
+			})
+		}
+	}
+	requireHubMaterialUnchangedVia(t, asHuman)
 }
 
 // TestUserEnvSecret_ProjectBoundaryTokenRefused: a project-boundary token
