@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -115,17 +116,18 @@ type ownerChainVerdict struct {
 	reason         string // withhold reason, or legacy cohort
 }
 
-// ownerChainVerdictObserver is a test seam: when set, it is called with the
-// agent ID each time ownerChainVerdict follows a chain. Only tests set it;
-// it is nil in production.
-var ownerChainVerdictObserver func(agentID string)
+// ownerChainVerdictObserver is a test seam: when it holds a function, that
+// function is called with the agent ID each time ownerChainVerdict follows
+// a chain. Only tests store one; it is empty in production. It is atomic so
+// a test may set it while others run.
+var ownerChainVerdictObserver atomic.Pointer[func(agentID string)]
 
 // ownerChainVerdict follows agent's recorded delegation edges in its project
 // up to the first user delegator. It reads edges only; it allows nothing
 // by itself.
 func (a *AuthzService) ownerChainVerdict(ctx context.Context, agent *store.Agent) ownerChainVerdict {
-	if ownerChainVerdictObserver != nil && agent != nil {
-		ownerChainVerdictObserver(agent.ID)
+	if obs := ownerChainVerdictObserver.Load(); obs != nil && agent != nil {
+		(*obs)(agent.ID)
 	}
 	if a == nil || a.store == nil || agent == nil || agent.ID == "" {
 		return ownerChainVerdict{outcome: ownerChainWithhold, reason: ownerChainReasonLookupError}

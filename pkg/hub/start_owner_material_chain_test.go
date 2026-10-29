@@ -1050,14 +1050,15 @@ func TestOwnerMaterialChain_VerdictOncePerEntryPoint(t *testing.T) {
 
 	var mu sync.Mutex
 	counts := 0
-	ownerChainVerdictObserver = func(agentID string) {
+	observe := func(agentID string) {
 		if agentID == id {
 			mu.Lock()
 			counts++
 			mu.Unlock()
 		}
 	}
-	t.Cleanup(func() { ownerChainVerdictObserver = nil })
+	ownerChainVerdictObserver.Store(&observe)
+	t.Cleanup(func() { ownerChainVerdictObserver.Store(nil) })
 	take := func() int {
 		mu.Lock()
 		defer mu.Unlock()
