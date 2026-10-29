@@ -238,9 +238,27 @@ export const reviewEditorStyles = css`
     border-bottom: 2px solid var(--sl-color-warning-500, #ca8a04);
     border-radius: 0.15rem;
   }
-  /* Suggested paragraph breaks and joins: a pilcrow at the boundary. */
-  .critic-break-ins::before,
-  .critic-break-del::before {
+  /*
+   * Suggested paragraph breaks and joins: a pilcrow at the boundary. A list
+   * item or quote draws it inside its first paragraph, so a click on it
+   * puts the cursor at the start of that text.
+   */
+  p.critic-break-ins::before,
+  p.critic-break-del::before,
+  h1.critic-break-ins::before,
+  h1.critic-break-del::before,
+  h2.critic-break-ins::before,
+  h2.critic-break-del::before,
+  h3.critic-break-ins::before,
+  h3.critic-break-del::before,
+  h4.critic-break-ins::before,
+  h4.critic-break-del::before,
+  h5.critic-break-ins::before,
+  h5.critic-break-del::before,
+  h6.critic-break-ins::before,
+  h6.critic-break-del::before,
+  :is(li, blockquote).critic-break-ins > :first-child::before,
+  :is(li, blockquote).critic-break-del > :first-child::before {
     content: '¶';
     content: '¶' / 'Suggested paragraph break';
     display: inline-block;
@@ -251,7 +269,8 @@ export const reviewEditorStyles = css`
     color: var(--sl-color-success-800, #166534);
     background: var(--sl-color-success-100, #dcfce7);
   }
-  .critic-break-del::before {
+  :is(p, h1, h2, h3, h4, h5, h6).critic-break-del::before,
+  :is(li, blockquote).critic-break-del > :first-child::before {
     content: '¶' / 'Suggested join';
     color: var(--sl-color-danger-800, #991b1b);
     background: var(--sl-color-danger-100, #fee2e2);
@@ -261,12 +280,6 @@ export const reviewEditorStyles = css`
   li.critic-break-ins {
     box-shadow: inset 3px 0 0 var(--sl-color-success-600, #16a34a);
     padding-left: 0.35rem;
-  }
-  li.critic-break-ins::before,
-  li.critic-break-del::before,
-  blockquote.critic-break-ins::before,
-  blockquote.critic-break-del::before {
-    float: left;
   }
   .critic-comment {
     counter-increment: critic-note;
@@ -311,7 +324,9 @@ export const reviewEditorStyles = css`
       border: 1px solid CanvasText;
     }
     .critic-break-ins::before,
-    .critic-break-del::before {
+    .critic-break-del::before,
+    :is(li, blockquote).critic-break-ins > :first-child::before,
+    :is(li, blockquote).critic-break-del > :first-child::before {
       border: 1px solid CanvasText;
     }
   }

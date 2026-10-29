@@ -159,10 +159,11 @@ export function classify(tr: Transaction, before: EditorState): EditClass {
     return container ?? 'cross-block';
   }
   const frag = step.slice.size ? inlineContent(step.slice) : null;
-  if (step.slice.size && !frag) return container === 'table' ? 'table' : 'split';
   const inserted: Node[] = [];
   frag?.forEach((n) => inserted.push(n));
+  // Raw HTML in the range is never edited, whatever the edit's class.
   if (touchesHtml(doc, step.from, step.to, inserted)) return 'html';
+  if (step.slice.size && !frag) return container === 'table' ? 'table' : 'split';
   return 'inline';
 }
 
@@ -253,6 +254,10 @@ export function decide(
   if (meta) {
     const rule = POLICY[meta.cls];
     if (rule.action === 'refuse') return rule.hint;
+    if (touchesHtml(before.doc, meta.from, meta.to, [])) {
+      const html = POLICY.html;
+      return html.action === 'refuse' ? html.hint : 'generic';
+    }
     if (touchesEarlier(before.doc, meta.from, meta.to)) {
       return earlierHint(before.doc.resolve(meta.from).index(0));
     }

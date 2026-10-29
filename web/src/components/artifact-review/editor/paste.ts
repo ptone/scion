@@ -70,9 +70,13 @@ export function pastePieces(doc: Node): Piece[] | null {
   const out: Piece[] = [];
   let ok = true;
   const schema = doc.type.schema;
+  // A line of code or a table row becomes paragraph text, where a mark
+  // token it holds would be read as a mark: such a paste is refused.
   const plainLines = (text: string): void => {
     for (const line of text.split('\n')) {
-      if (line.trim()) out.push({ type: 'paragraph', content: Fragment.from(schema.text(line)) });
+      if (!line.trim()) continue;
+      if (parseCritic(line).some((x) => x.kind !== 'text')) ok = false;
+      out.push({ type: 'paragraph', content: Fragment.from(schema.text(line)) });
     }
   };
   const walk = (n: Node): void => {

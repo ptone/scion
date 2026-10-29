@@ -136,11 +136,19 @@ export interface MarkRun {
   /** Added in this editing session (document runs only). */
   mine?: boolean;
   /**
+   * Document runs only: the run holds a suggested break or join, or a hard
+   * break, which its text in the source writes as line-start syntax (a list
+   * or quote marker) or line-end syntax; only such a run is compared with
+   * its text's alternative reading (alt).
+   */
+  boundary?: boolean;
+  /**
    * Text runs only, for a mark whose text crosses a line: its text read
    * with the block syntax at the starts of its lines left out (alt, and
    * nextAlt for a replacement's new side). A mark around a suggested break
    * or join holds the source between two blocks (a list marker, a quote
-   * marker), which the editor shows as the boundary, not as text.
+   * marker), which the editor shows as the boundary, not as text. It is
+   * used only for a document run with a boundary (MarkRun.boundary).
    */
   alt?: string | undefined;
   nextAlt?: string | undefined;
@@ -248,7 +256,13 @@ export function docMarkRuns(doc: Node): MarkRun[] {
   let prev: string | null = null;
   let cur: MarkRun | null = null;
   let side: 'text' | 'next' = 'text';
-  const step = (k: MarkKey | null, run: string | null, mine: boolean, t: string): void => {
+  const step = (
+    k: MarkKey | null,
+    run: string | null,
+    mine: boolean,
+    t: string,
+    boundary = false
+  ): void => {
     if (k === null || run === null) {
       prev = null;
       cur = null;
@@ -269,6 +283,7 @@ export function docMarkRuns(doc: Node): MarkRun[] {
     if (cur) {
       if (side === 'next') cur.next = (cur.next ?? '') + t;
       else cur.text += t;
+      if (boundary) cur.boundary = true;
     }
     prev = run;
   };
@@ -281,7 +296,7 @@ export function docMarkRuns(doc: Node): MarkRun[] {
       });
       prev = null;
       cur = null;
-    } else if (s.kind === 'break') step(s.key, s.run, s.mine, '');
+    } else if (s.kind === 'break') step(s.key, s.run, s.mine, '', true);
     else if (s.kind === 'edge') {
       if (endsAt(s, prev)) {
         prev = null;
@@ -289,7 +304,8 @@ export function docMarkRuns(doc: Node): MarkRun[] {
       }
     } else {
       const n = s.node;
-      step(markKeyOf(n.marks), runKeyOf(n.marks), isMine(n.marks), n.isText ? (n.text ?? '') : '');
+      const t = n.isText ? (n.text ?? '') : '';
+      step(markKeyOf(n.marks), runKeyOf(n.marks), isMine(n.marks), t, n.type.name === 'hardbreak');
     }
   });
   return out;
@@ -415,8 +431,10 @@ export function sameRuns(d: MarkRun[], t: MarkRun[], texts: boolean): boolean {
       if (r.kind !== o.kind) return false;
       if (!texts) return true;
       if (r.kind === 'comment') return r.text === o.text;
+      // The alternative reading only for a run with a boundary in it.
       const same = (a: string, b: string, alt: string | undefined): boolean =>
-        squash(a) === squash(b) || (alt !== undefined && squash(a) === squash(alt));
+        squash(a) === squash(b) ||
+        (r.boundary === true && alt !== undefined && squash(a) === squash(alt));
       return same(r.text, o.text, o.alt) && same(r.next ?? '', o.next ?? '', o.nextAlt);
     })
   );

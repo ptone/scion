@@ -504,6 +504,14 @@ test('paragraph breaks, joins, a new list item and a multi-paragraph paste are s
   await page.keyboard.press('Backspace');
   await expect(hint(page)).toContainText('This suggestion is from an earlier review.');
   expect(await editorText(page)).toBe(final);
+  // A click on the item's pilcrow puts the cursor at the start of its text:
+  // typing there is refused (the text belongs to an earlier suggestion),
+  // never a stray edit.
+  await editor(page)
+    .locator('li.critic-break-ins > p')
+    .click({ position: { x: 3, y: 6 } });
+  await page.keyboard.type('Z');
+  await expect.poll(() => editorText(page)).toBe(final);
 });
 
 test('a stale review reloads the current version and keeps the discarded text', async ({

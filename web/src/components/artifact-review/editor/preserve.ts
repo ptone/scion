@@ -344,8 +344,12 @@ function writeChildren(
   }
   if (c + 1 !== subs.length) return null;
   const style = listStyle(src);
-  const items = (nodes: Node[]): string | null => {
-    const t = serializeBlocks([was.type.create(was.attrs, nodes)], serialize, schema, free);
+  // A group of an ordered list is numbered from its first item's own number
+  // in the source, so an item a break adds after it takes the next number.
+  const items = (nodes: Node[], first: number): string | null => {
+    const num = was.type.name === 'ordered_list' ? itemNumber(src.slice(subs[first].from)) : null;
+    const attrs = num === null ? was.attrs : { ...was.attrs, order: num };
+    const t = serializeBlocks([was.type.create(attrs, nodes)], serialize, schema, free);
     return t === null ? null : restyle(t, style);
   };
   let out = '';
@@ -360,12 +364,12 @@ function writeChildren(
       wasKids[0],
       slice,
       () =>
-        table ? serializeChild(was, wasKids[0], g.c0, serialize, schema, free) : items(wasKids),
+        table ? serializeChild(was, wasKids[0], g.c0, serialize, schema, free) : items(wasKids, g.c0),
       g.c1
     );
     const after = table
       ? serializeChild(was, g.nodes[0], g.c0, serialize, schema, free)
-      : items(g.nodes);
+      : items(g.nodes, g.c0);
     if (before === null || after === null) return null;
     // A row reads as a row only under its table's header and delimiter
     // lines (the header row: above the delimiter and first row).
@@ -559,6 +563,12 @@ function writeUnitAnew(
   const after = write(nowNodes);
   if (before === null || after === null) return null;
   return patch(src, before, after, parse);
+}
+
+/** The number an ordered list item's source starts with, or null. */
+export function itemNumber(src: string): number | null {
+  const m = /^[ \t]*(?:>[ \t]?)*[ \t]*(\d{1,9})[.)]/.exec(src);
+  return m ? Number(m[1]) : null;
 }
 
 /** Whether a node or any block inside it carries a boundary suggestion. */

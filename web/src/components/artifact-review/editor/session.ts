@@ -595,11 +595,12 @@ export function backtickRuns(text: string): string {
 }
 
 /**
- * The backtick runs of text (backtickRuns) per line run: a blank line, or
- * a line inside a mark the editor shows as a block boundary, separates
- * line runs ("|"), since the critic parser pairs backticks only within
- * one. A suggested break adds a blank line, so it changes the signature
- * when it falls between two backticks.
+ * The backtick runs of text (backtickRuns) per line run: a blank line (one
+ * with only spaces or tabs, as the critic parser reads it) separates line
+ * runs ("|"), since the critic parser pairs backticks only within one. A
+ * suggested paragraph break adds a blank line (inside its mark), so it
+ * changes the signature when it falls between two backticks; the quote
+ * and list separators hold no blank line.
  */
 export function codeSignature(text: string): string {
   return text

@@ -25,12 +25,13 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { undo } from '@milkdown/prose/history';
 import type { Node } from '@milkdown/prose/model';
+import { splitBlock } from '@milkdown/prose/commands';
 import { TextSelection } from '@milkdown/prose/state';
 import { Transform } from '@milkdown/prose/transform';
 
 import { onlyMarksChanged, projectCritic } from '../../../utils/critic.js';
 import { ReviewController } from './controller.js';
-import { docMarkRuns } from './guard.js';
+import { docMarkRuns, marksReadBack } from './guard.js';
 import type { HintKind } from './policy.js';
 import { ALLOWED_ATTRIBUTES, ALLOWED_TAGS } from './safe-render.js';
 import { BLOCK_ATTR, breakOf } from './schema.js';
@@ -217,11 +218,18 @@ describe('Enter suggests a paragraph break', () => {
       ['1. a b\n2. c\n', '1. a {++\n2. ++}b\n2. c\n'],
       ['1) a b\n2) c\n', '1) a {++\n2) ++}b\n2) c\n'],
       ['3. three x\n7. seven\n', '3. three {++\n4. ++}x\n7. seven\n'],
+      ['1. a\n2. b\n3. c d\n', '1. a\n2. b\n3. c {++\n4. ++}d\n'],
       ['1. a\n1. b c\n1. d\n', '1. a\n1. b {++\n2. ++}c\n1. d\n'],
     ];
     for (const [md, want] of cases) {
       const { c, hints } = await open(md);
-      const needle = md.includes('b c') ? 'b c' : md.includes('three') ? 'three x' : 'a b';
+      const needle = md.includes('b c')
+        ? 'b c'
+        : md.includes('three')
+          ? 'three x'
+          : md.includes('c d')
+            ? 'c d'
+            : 'a b';
       select(c, posOf(c, needle, needle.length - 1));
       press(c, 'Enter');
       expect(hints).toEqual([]);
@@ -651,7 +659,7 @@ describe('code runs and breaks', () => {
     const { c, hints } = await open(md);
     select(c, posOf(c, '` z'));
     press(c, 'Enter');
-    expect(hints.length).toBe(1);
+    expect(hints).toEqual(['generic']);
     expect(c.flush()).toBe(md);
     expect(projectCritic(md, 'clean')).toBe(md);
   });
@@ -743,5 +751,284 @@ describe('rendering of boundary suggestions', () => {
       'p.critic-break-ins',
     ]);
     expect(h.root.querySelectorAll('.critic-break-ins, .critic-break-del').length).toBe(7);
+  });
+});
+
+/** The editor core of a controller (tests only). */
+function coreOf(c: ReviewController): { plain(md: string): string } {
+  return (c as unknown as { core: { plain(md: string): string } }).core;
+}
+
+/** The structural edit kinds of the whole-text check tests. */
+type Act = (h: Harness) => void;
+
+describe('raw HTML is never edited by a structural edit (R1)', () => {
+  const md = 'ab <b>x</b> cd ef\n';
+
+  it('Enter over a selection holding inline HTML is refused; over plain text, taken', async () => {
+    const h = await open(md);
+    select(h.c, posOf(h.c, 'ab', 1), posOf(h.c, 'x', 1));
+    press(h.c, 'Enter');
+    expect(h.hints).toEqual(['generic']);
+    expect(h.c.flush()).toBe(md);
+    // Control: the same edit over plain text beside it.
+    select(h.c, posOf(h.c, 'ef'), posOf(h.c, 'ef', 1));
+    press(h.c, 'Enter');
+    expect(h.hints).toEqual(['generic']);
+    expect(saved(h.c, md)).toBe('ab <b>x</b> cd {--e--}{++\n\n++}f\n');
+  });
+
+  it('a two-paragraph paste over a selection holding inline HTML is refused; over plain text, taken', async () => {
+    const h = await open(md);
+    select(h.c, posOf(h.c, 'ab', 1), posOf(h.c, 'x', 1));
+    paste(h, 'P1\n\nP2');
+    expect(h.hints).toEqual(['generic']);
+    expect(h.c.flush()).toBe(md);
+    select(h.c, posOf(h.c, 'ef'), posOf(h.c, 'ef', 1));
+    paste(h, 'P1\n\nP2');
+    expect(h.hints).toEqual(['generic']);
+    expect(saved(h.c, md)).toBe('ab <b>x</b> cd {--e--}{++P1\n\nP2++}f\n');
+  });
+
+  it('a split from outside the keymap over inline HTML is refused as an HTML edit', async () => {
+    const h = await open(md);
+    select(h.c, posOf(h.c, 'ab', 1), posOf(h.c, 'x', 1));
+    splitBlock(h.c.view.state, h.c.view.dispatch);
+    expect(h.hints).toEqual(['generic']);
+    expect(h.c.flush()).toBe(md);
+    let marked = false;
+    h.c.view.state.doc.descendants((n) => {
+      if (n.type.name === 'html' && n.marks.length) marked = true;
+      return true;
+    });
+    expect(marked).toBe(false);
+  });
+});
+
+describe('whole-text check for structural edits in hazardous documents (R2, design E7)', () => {
+  /** Switches off the fast first-line checks, so only the whole-text check is left. */
+  function firstLineOff(c: ReviewController): void {
+    const session = (c as unknown as { session: Record<string, unknown> }).session;
+    session.addsCloser = (): boolean => false;
+    session.changesCode = (): boolean => false;
+  }
+  /** Forces the hazard flag off, so the per-edit whole-text check does not run. */
+  function hazardOff(c: ReviewController): void {
+    (c as unknown as { session: Record<string, unknown> }).session.hazardous = false;
+  }
+  // Each case: the hazardous document, its variant that is not hazardous
+  // (the literal opener taken out), and a structural edit whose closing
+  // token would pair with the literal opener in another unit.
+  const cases: [string, string, string, Act][] = [
+    [
+      'a break after a literal insertion opener',
+      'Note: {++ stays literal.\n\n- one\n- two\n',
+      'Note: stays literal.\n\n- one\n- two\n',
+      (h) => {
+        select(h.c, posOf(h.c, 'two', 1));
+        press(h.c, 'Enter');
+      },
+    ],
+    [
+      'a join after a literal deletion opener',
+      'Note: {-- stays literal.\n\none\n\ntwo\n',
+      'Note: stays literal.\n\none\n\ntwo\n',
+      (h) => {
+        select(h.c, startOf(h.c, 'two'));
+        press(h.c, 'Backspace');
+      },
+    ],
+    [
+      'a two-paragraph paste after a literal insertion opener',
+      'Note: {++ stays literal.\n\nab\n',
+      'Note: stays literal.\n\nab\n',
+      (h) => {
+        select(h.c, posOf(h.c, 'ab', 1));
+        paste(h, 'P1\n\nP2');
+      },
+    ],
+  ];
+  for (const [name, md, plainMd, act] of cases) {
+    it(`refuses ${name} with only the whole-text check left`, async () => {
+      const h = await open(md);
+      expect(h.c.isHazardous).toBe(true);
+      firstLineOff(h.c);
+      act(h);
+      expect(h.hints).toEqual(['generic']);
+      expect(h.c.flush()).toBe(md);
+    });
+
+    it(`takes ${name} with no check left, and the save then refuses it`, async () => {
+      // Control: without the whole-text check the edit is taken, so the
+      // refusal above is that check's; save's own whole-text check stops it.
+      const h = await open(md);
+      firstLineOff(h.c);
+      hazardOff(h.c);
+      act(h);
+      expect(h.hints).toEqual([]);
+      expect(h.c.flush()).toBeNull();
+    });
+
+    it(`takes ${name} in the same document without the literal opener`, async () => {
+      // Positive control: not hazardous, so the edit is taken and saves.
+      const h = await open(plainMd);
+      expect(h.c.isHazardous).toBe(false);
+      act(h);
+      expect(h.hints).toEqual([]);
+      expect(saved(h.c, plainMd)).not.toBe(plainMd);
+    });
+  }
+});
+
+describe('pasting one block inserts its text (R3)', () => {
+  const cases: [string, string][] = [
+    ['# H', 'a{++H++}b\n'],
+    ['- item', 'a{++item++}b\n'],
+    ['```\nline\n```', 'a{++line++}b\n'],
+    ['| x | y |\n|---|---|\n| 1 | 2 |', 'a{++x y++}{++\n\n1 2++}b\n'],
+  ];
+  for (const [text, want] of cases) {
+    it(`pastes ${JSON.stringify(text)} as text`, async () => {
+      const md = 'ab\n';
+      const h = await open(md);
+      select(h.c, posOf(h.c, 'ab', 1));
+      paste(h, text);
+      expect(h.hints).toEqual([]);
+      const out = saved(h.c, md);
+      if (!text.startsWith('|')) {
+        expect(out).toBe(want);
+        // Text only: one paragraph, no heading, list or code block.
+        const doc = h.c.view.state.doc;
+        expect(doc.childCount).toBe(1);
+        expect(doc.firstChild!.type.name).toBe('paragraph');
+      } else {
+        // A table is two rows: two paragraphs of plain text.
+        expect(projectCritic(out, 'accept')).toBe('ax y\n\n1 2b\n');
+      }
+    });
+  }
+
+  it('a code line holding CriticMarkup is not pasted as text (O4)', async () => {
+    const md = 'ab\n';
+    const h = await open(md);
+    select(h.c, posOf(h.c, 'ab', 1));
+    paste(h, 'P1\n\n```\nsee {++x++} here\n```');
+    expect(h.hints).toEqual(['generic']);
+    paste(h, '```\n{--y--}\n```');
+    expect(h.hints).toEqual(['generic', 'generic']);
+    expect(h.c.flush()).toBe(md);
+  });
+});
+
+describe('the read-back takes the alternative reading only for boundary runs (O1)', () => {
+  it('a mark without a boundary whose text gains line-start syntax still fails', async () => {
+    const { c } = await open('x {++a b++} y\n');
+    const doc = c.view.state.doc;
+    // The same mark, written across a line with an ordered-list marker the
+    // Markdown reading keeps as text.
+    expect(marksReadBack(doc, 'x {++a\n2. b++} y\n', coreOf(c).plain)).not.toBeNull();
+    expect(marksReadBack(doc, 'x {++a\n> b++} y\n', coreOf(c).plain)).not.toBeNull();
+    expect(marksReadBack(doc, 'x {++a b++} y\n', coreOf(c).plain)).toBeNull();
+  });
+
+  it('a mark around a suggested break reads back with its separator', async () => {
+    for (const md of ['1. a{++\n2. ++}b\n', '* a{++\n* ++}b\n', 'ab {++\\\n++}cd\n']) {
+      const { c } = await open(md);
+      expect(marksReadBack(c.view.state.doc, md, coreOf(c).plain), md).toBeNull();
+    }
+  });
+});
+
+describe('more of the addendum table (O3)', () => {
+  it('a join between two block quotes', async () => {
+    const md = '> a\n\n> b\n';
+    const { c, hints } = await open(md);
+    select(c, startOf(c, 'b'));
+    press(c, 'Backspace');
+    expect(hints).toEqual([]);
+    await check(md, saved(c, md), '> a{--\n\n> --}b\n', '> ab\n');
+    expect(await pilcrows(saved(c, md))).toEqual(['blockquote.del']);
+  });
+
+  it('Shift-Enter in a list item and in a quote', async () => {
+    for (const md of ['- ab cd\n', '> ab cd\n']) {
+      const { c, hints } = await open(md);
+      select(c, posOf(c, 'cd'));
+      press(c, 'Enter', { shiftKey: true });
+      expect(hints, md).toEqual([]);
+      const out = saved(c, md);
+      expect(out, md).toContain('{++\\\n');
+      expect(projectCritic(out, 'clean')).toBe(md);
+      const again = await open(out);
+      expect(again.c.flush()).toBe(out);
+    }
+  });
+
+  it('Enter at the end of a block, saved and reloaded without typing', async () => {
+    const md = 'ab\n\ncd\n';
+    const { c } = await open(md);
+    select(c, endOf(c, 'ab'));
+    press(c, 'Enter');
+    await check(md, saved(c, md), 'ab{++\n\n++}\n\ncd\n', 'ab\n\n\n\ncd\n');
+    expect(await pilcrows(saved(c, md))).toEqual(['p.ins']);
+  });
+
+  it('Enter in a task list item makes an unchecked item', async () => {
+    for (const [md, want] of [
+      ['- [ ] task one\n', '- [ ] task {++\n- [ ] ++}one\n'],
+      ['- [x] done it\n', '- [x] done {++\n- [ ] ++}it\n'],
+    ]) {
+      const { c, hints } = await open(md);
+      select(c, posOf(c, md.includes('one') ? 'one' : 'it'));
+      press(c, 'Enter');
+      expect(hints, md).toEqual([]);
+      expect(saved(c, md)).toBe(want);
+    }
+  });
+
+  it('Enter in the second paragraph of a list item makes a paragraph in the item', async () => {
+    const md = '- a\n\n  b c\n';
+    const { c, hints } = await open(md);
+    select(c, posOf(c, 'b c', 2));
+    press(c, 'Enter');
+    expect(hints).toEqual([]);
+    expect(breaks(c.view.state.doc)).toEqual(['ins/own']);
+    const out = saved(c, md);
+    expect(out).toBe('- a\n\n  b {++\n\n  ++}c\n');
+    const again = await open(out);
+    expect(again.c.flush()).toBe(out);
+  });
+
+  it('Enter right after a composition records the composed text, then the break', async () => {
+    const md = 'ab\n';
+    const { c, hints } = await open(md);
+    const at = endOf(c, 'ab');
+    select(c, at);
+    c.beginComposition();
+    const tr = c.view.state.tr.insertText('X', at);
+    tr.setMeta('composition', 7);
+    c.view.dispatch(tr);
+    c.endComposition();
+    // Enter before the settle step: it settles first.
+    press(c, 'Enter');
+    expect(hints).toEqual([]);
+    expect(saved(c, md)).toBe('ab{++X\n\n++}\n');
+  });
+
+  it('with the cursor outside a list item’s text, Backspace and typing change nothing', async () => {
+    const md = '- a\n- b\n';
+    const { c } = await open(md);
+    // The position inside the second item, before its paragraph.
+    const pos = startOf(c, 'b') - 1;
+    c.view.dispatch(c.view.state.tr.setSelection(new TextSelection(c.view.state.doc.resolve(pos))));
+    press(c, 'Backspace');
+    expect(c.flush()).toBe(md);
+    const v = c.view;
+    try {
+      v.dispatch(v.state.tr.insertText('Z', pos));
+    } catch {
+      // Not a place text can go.
+    }
+    expect(c.flush()).toBe(md);
   });
 });

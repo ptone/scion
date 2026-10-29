@@ -175,13 +175,28 @@ function cutsInline($p: ResolvedPos): HintKind | null {
   return null;
 }
 
+/** Whether doc holds a raw HTML node between from and to (never editable in suggest mode). */
+export function holdsHtml(doc: Node, from: number, to: number): boolean {
+  let found = false;
+  if (to > from) {
+    doc.nodesBetween(from, to, (n) => {
+      if (n.type.name === 'html') found = true;
+      return !found;
+    });
+  }
+  return found;
+}
+
 /**
  * Marks [from, to] (inside one textblock of tr.doc) as deleted, as typing
- * would (trackStep), and returns where to now is; null when it cannot.
+ * would (trackStep), and returns where to now is; null when it cannot. Raw
+ * HTML in the range is refused (the caller gives the generic hint), as for
+ * an inline edit.
  */
 function deleteInline(tr: Transform, from: number, to: number): number | null {
   if (from === to) return to;
   const doc = tr.doc;
+  if (holdsHtml(doc, from, to)) return null;
   const step = new ReplaceStep(from, to, Slice.empty);
   const applied = step.apply(doc);
   if (!applied.doc) return null;
