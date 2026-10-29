@@ -109,6 +109,21 @@ func chooseAgentTZ(ac *store.AgentAppliedConfig, storage agentTZ, hubDefault str
 // hubAgentDefaultsProvider, so an edit to either reaches every unpinned
 // agent at its next start.
 func (d *HTTPAgentDispatcher) resolveAgentTZ(ctx context.Context, agent *store.Agent, forGatherAnswer bool) agentTZ {
+	return d.resolveAgentTZFor(ctx, agent, forGatherAnswer, true)
+}
+
+// viewAgentTZ is resolveAgentTZ for a read-only view of the agent's TZ
+// (the agent view and edit responses, the env source and env-gather
+// labels): the owner material chain rule is applied to the owner's user
+// TZ row without counting or logging, since nothing is delivered.
+func (d *HTTPAgentDispatcher) viewAgentTZ(ctx context.Context, agent *store.Agent) agentTZ {
+	return d.resolveAgentTZFor(ctx, agent, false, false)
+}
+
+// resolveAgentTZFor is resolveAgentTZ; report says whether the owner
+// material chain rule reports the TZ row it withholds or delivers as legacy
+// (dispatch) or decides silently (views).
+func (d *HTTPAgentDispatcher) resolveAgentTZFor(ctx context.Context, agent *store.Agent, forGatherAnswer, report bool) agentTZ {
 	var ac *store.AgentAppliedConfig
 	if agent != nil {
 		ac = agent.AppliedConfig
@@ -124,7 +139,7 @@ func (d *HTTPAgentDispatcher) resolveAgentTZ(ctx context.Context, agent *store.A
 		d.warnTZ("unadopted legacy TZ in agent env; adoptLegacyTZ must run before resolveAgentTZ",
 			"agentID", agent.ID, "tz", legacy)
 	}
-	storage := d.resolveStorageTZ(ctx, agent)
+	storage := d.resolveStorageTZFor(ctx, agent, report)
 	hubDefault := ""
 	if storage.TZ == "" && d.hubAgentDefaultsProvider != nil {
 		hubDefault = d.hubAgentDefaultsProvider().DefaultTimezone
@@ -170,6 +185,13 @@ func legacyEnvTZ(ac *store.AgentAppliedConfig) string {
 // TZ chain. The owner's user-scope row not shared with progeny counts only
 // when the owner material chain rule delivers it.
 func (d *HTTPAgentDispatcher) resolveStorageTZ(ctx context.Context, agent *store.Agent) agentTZ {
+	return d.resolveStorageTZFor(ctx, agent, true)
+}
+
+// resolveStorageTZFor is resolveStorageTZ; report says whether the owner
+// material chain rule reports what it withholds (dispatch) or decides
+// silently (read-only views).
+func (d *HTTPAgentDispatcher) resolveStorageTZFor(ctx context.Context, agent *store.Agent, report bool) agentTZ {
 	var result agentTZ
 	if agent == nil || d.store == nil {
 		return result
@@ -178,8 +200,20 @@ func (d *HTTPAgentDispatcher) resolveStorageTZ(ctx context.Context, agent *store
 	// The owner's user-scope TZ row not shared with progeny is held to the
 	// owner material chain rule (start_owner_material_chain.go); when it is
 	// withheld, a lower scope or the hub default supplies TZ.
-	gate := d.newOwnerMaterialGate(agent)
-	defer gate.flush(ctx, ownerMaterialSiteTZ)
+	var gate *ownerMaterialGate
+	var check *ownerChainCheck
+	if report {
+		gate = d.newOwnerMaterialGate(agent)
+		defer gate.flush(ctx, ownerMaterialSiteTZ)
+	} else {
+		check = newOwnerChainCheck(d.authzService, agent)
+	}
+	allowRow := func(filter store.EnvVarFilter, v store.EnvVar) bool {
+		if report {
+			return gate.allowEnvRow(ctx, filter, v)
+		}
+		return filter.Scope != store.ScopeUser || check.allowsRow(ctx, v.AllowProgeny, envRowOwner(filter, v))
+	}
 	for _, filter := range d.envScopesInPrecedenceOrder(agent) {
 		filter.Key = agentTZEnvKey
 		vars, err := d.store.ListEnvVars(ctx, filter)
@@ -191,7 +225,7 @@ func (d *HTTPAgentDispatcher) resolveStorageTZ(ctx context.Context, agent *store
 			if v.Key != agentTZEnvKey || v.Value == "" || v.InjectionMode == store.InjectionModeAsNeeded {
 				continue
 			}
-			if !gate.allowEnvRow(ctx, filter, v) {
+			if !allowRow(filter, v) {
 				continue
 			}
 			result = agentTZ{TZ: v.Value, Source: envScopeSourceLabel(filter.Scope)}
@@ -347,13 +381,14 @@ func (d *HTTPAgentDispatcher) withoutCallerTZ(ctx context.Context, agent *store.
 // hub ID and live hub agent defaults.
 func (s *Server) agentTZ(ctx context.Context, agent *store.Agent) agentTZ {
 	if d, ok := s.GetDispatcher().(*HTTPAgentDispatcher); ok && d != nil {
-		return d.resolveAgentTZ(ctx, agent, false)
+		return d.viewAgentTZ(ctx, agent)
 	}
 	r := &HTTPAgentDispatcher{
 		store:                    s.store,
 		hubID:                    s.HubID(),
 		hubAgentDefaultsProvider: s.hubAgentDefaults,
 		log:                      slog.Default(),
+		authzService:             s.authzService,
 	}
-	return r.resolveAgentTZ(ctx, agent, false)
+	return r.viewAgentTZ(ctx, agent)
 }

@@ -78,10 +78,11 @@ import (
 // (withOwnerChainMemo), so every site of one create, start or restart uses
 // the same verdict and the chain is followed once.
 //
-// The read-only reports (the env source labels, the required-key probe and
-// the env-gather response) apply the same row decision without counting or
-// logging (ownerChainCheck.allowsRow), so they never report a withheld row
-// as present.
+// The read-only reports (the env source labels, the required-key probe,
+// the env-gather response, and the TZ shown by the agent view, the edit
+// response and the labels: viewAgentTZ) apply the same row decision
+// without counting or logging (ownerChainCheck.allowsRow), so they never
+// report a withheld row as present. Only delivery sites report.
 
 // Owner material chain outcomes.
 type ownerChainOutcome int
@@ -114,10 +115,18 @@ type ownerChainVerdict struct {
 	reason         string // withhold reason, or legacy cohort
 }
 
+// ownerChainVerdictObserver is a test seam: when set, it is called with the
+// agent ID each time ownerChainVerdict follows a chain. Only tests set it;
+// it is nil in production.
+var ownerChainVerdictObserver func(agentID string)
+
 // ownerChainVerdict follows agent's recorded delegation edges in its project
 // up to the first user delegator. It reads edges only; it allows nothing
 // by itself.
 func (a *AuthzService) ownerChainVerdict(ctx context.Context, agent *store.Agent) ownerChainVerdict {
+	if ownerChainVerdictObserver != nil && agent != nil {
+		ownerChainVerdictObserver(agent.ID)
+	}
 	if a == nil || a.store == nil || agent == nil || agent.ID == "" {
 		return ownerChainVerdict{outcome: ownerChainWithhold, reason: ownerChainReasonLookupError}
 	}

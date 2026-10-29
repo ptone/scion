@@ -3062,7 +3062,7 @@ func (d *HTTPAgentDispatcher) buildEnvSources(ctx context.Context, agent *store.
 	// whatever storage or config entries share the key.
 	delete(sources, agentTZEnvKey)
 	if _, inResolved := resolvedEnv[agentTZEnvKey]; inResolved {
-		sources[agentTZEnvKey] = d.resolveAgentTZ(ctx, agent, false).Source
+		sources[agentTZEnvKey] = d.viewAgentTZ(ctx, agent).Source
 	}
 
 	return sources
@@ -3472,6 +3472,8 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 // (always synchronous); both call dispatchAgentStart directly, so neither is
 // a guarded call site of the other.
 func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) error {
+	// One owner material chain verdict per dispatch (start_owner_material_chain.go).
+	ctx = withOwnerChainMemo(ctx)
 	_, err := d.dispatchAgentStart(ctx, agent, task, resume, StartDispatchOptions{})
 	return err
 }

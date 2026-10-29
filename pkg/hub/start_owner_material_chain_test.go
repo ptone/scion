@@ -27,6 +27,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -630,6 +631,7 @@ func TestOwnerMaterialChain_TZ(t *testing.T) {
 		{"re-delegated, unshared, no lower row", false, true, false, agentTZ{TZ: omcHubTZ, Source: TZSourceHubDefault}},
 		{"re-delegated, shared", true, true, true, agentTZ{TZ: omcUserTZ, Source: TZSourceUser}},
 		{"clean chain, shared", true, false, false, agentTZ{TZ: omcUserTZ, Source: TZSourceUser}},
+		{"legacy (no edge), unshared", false, false, true, agentTZ{TZ: omcUserTZ, Source: TZSourceUser}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := newOMCFixture(t, "omc-tz")
@@ -641,9 +643,12 @@ func TestOwnerMaterialChain_TZ(t *testing.T) {
 				omcSeedTZ(t, f, store.ScopeProject, f.ProjectID, omcProjectTZ, false)
 			}
 			var id string
-			if c.redelegated {
+			switch {
+			case c.redelegated:
 				id, _ = omcRedelegated(t, f, "tz")
-			} else {
+			case strings.HasPrefix(c.name, "legacy"):
+				id = omcAgentWith(t, f, "tz-legacy", []string{f.UserID}, f.UserID)
+			default:
 				id, _ = f.direct(t, "tz", true)
 			}
 			agent, err := f.Store.GetAgent(context.Background(), id)
@@ -997,4 +1002,98 @@ func TestOwnerMaterialChain_NoAuthCloneToken(t *testing.T) {
 			assert.Equal(t, c.want, client.lastCreateReq.ResolvedEnv["GITHUB_TOKEN"] == token)
 		})
 	}
+}
+
+// TestOwnerMaterialChain_TZViewsQuiet: the read-only TZ views of a
+// re-delegated agent (the agent view through Server.agentTZ, the env
+// source label) show the TZ the agent would get, decided without counting
+// or logging; only delivery reports.
+func TestOwnerMaterialChain_TZViewsQuiet(t *testing.T) {
+	f := newOMCFixture(t, "omc-tz-views")
+	omcSeedTZ(t, f, store.ScopeUser, f.UserID, omcUserTZ, false)
+	omcSeedTZ(t, f, store.ScopeProject, f.ProjectID, omcProjectTZ, false)
+	id, _ := omcRedelegated(t, f, "tz-views")
+	agent, err := f.Store.GetAgent(context.Background(), id)
+	require.NoError(t, err)
+
+	defaultLog := usaCaptureDefaultLog(t)
+	var buf bytes.Buffer
+	f.disp.log = slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	before := f.Server.authzService.OwnerMaterialChainWithheld()
+
+	view := f.Server.agentTZ(context.Background(), agent)
+	assert.Equal(t, omcProjectTZ, view.TZ, "the view shows the TZ the agent gets")
+	assert.Equal(t, TZSourceProject, view.Source)
+	sources := f.disp.buildEnvSources(context.Background(), agent, map[string]string{agentTZEnvKey: omcProjectTZ})
+	assert.Equal(t, TZSourceProject, sources[agentTZEnvKey])
+	// The agent view over HTTP (its TZ comes from Server.agentTZ).
+	_ = doRequest(t, f.Server, http.MethodGet, "/api/v1/agents/"+id, nil)
+
+	assert.Equal(t, before, f.Server.authzService.OwnerMaterialChainWithheld(), "views count nothing")
+	assert.Empty(t, omcRecords(t, buf.String(), omcWithheldMsg))
+	assert.NotContains(t, defaultLog.String(), "start-time user material withheld")
+
+	// Delivery still reports.
+	got := f.disp.resolveAgentTZ(context.Background(), agent, false)
+	assert.Equal(t, omcProjectTZ, got.TZ)
+	assert.Equal(t, before+1, f.Server.authzService.OwnerMaterialChainWithheld(), "the dispatch TZ rung counts its withhold")
+}
+
+// TestOwnerMaterialChain_VerdictOncePerEntryPoint: one create, one start
+// and one restart through the real dispatch entry points each follow the
+// agent's chain exactly once, whatever the number of sites they read owner
+// material at.
+func TestOwnerMaterialChain_VerdictOncePerEntryPoint(t *testing.T) {
+	f := newOMCFixture(t, "omc-entry")
+	omcSeedTZ(t, f, store.ScopeUser, f.UserID, omcUserTZ, false)
+	id, _ := f.direct(t, "entry", true)
+
+	var mu sync.Mutex
+	counts := 0
+	ownerChainVerdictObserver = func(agentID string) {
+		if agentID == id {
+			mu.Lock()
+			counts++
+			mu.Unlock()
+		}
+	}
+	t.Cleanup(func() { ownerChainVerdictObserver = nil })
+	take := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		n := counts
+		counts = 0
+		return n
+	}
+
+	ctx := context.Background()
+	brokerID := tid("omc-entry-broker")
+	require.NoError(t, f.Store.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID: brokerID, Name: "omc-entry-broker", Slug: "omc-entry-broker",
+		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
+	}))
+	require.NoError(t, f.Store.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: f.ProjectID, BrokerID: brokerID, BrokerName: "omc-entry-broker",
+		LocalPath: "/home/user/projects/omc/.scion", Status: store.BrokerStatusOnline,
+	}))
+	agent, err := f.Store.GetAgent(ctx, id)
+	require.NoError(t, err)
+	agent.RuntimeBrokerID = brokerID
+	agent.AppliedConfig.HarnessConfig = "claude"
+	svc, err := NewAgentTokenService(AgentTokenConfig{})
+	require.NoError(t, err)
+	client := &mockRuntimeBrokerClient{}
+	d := NewHTTPAgentDispatcherWithClient(f.Store, client, false, slog.Default())
+	d.SetTokenGenerator(runTokenGenerator{svc: svc})
+	d.SetSecretBackend(f.Server.secretBackend)
+	d.SetAuthzService(f.Server.authzService)
+
+	take()
+	_, err = d.DispatchAgentCreate(ctx, agent)
+	require.NoError(t, err)
+	assert.Equal(t, 1, take(), "create follows the chain once")
+	require.NoError(t, d.DispatchAgentStart(ctx, agent, "", false))
+	assert.Equal(t, 1, take(), "start follows the chain once")
+	require.NoError(t, d.DispatchAgentRestart(ctx, agent))
+	assert.Equal(t, 1, take(), "restart follows the chain once")
 }
