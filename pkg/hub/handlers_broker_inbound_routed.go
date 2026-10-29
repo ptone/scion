@@ -142,45 +142,14 @@ func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Reques
 	}
 
 	// --- Resolve sender identity ---
-	senderEmail := strings.TrimPrefix(req.Message.Sender, "user:")
-	// A hub test identity is reachable only through its own hub-issued
-	// token; this path resolves by email, so it refuses one outright.
-	if emailResolvedPrincipalRefused(senderEmail, nil) {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"sender identity not eligible", map[string]interface{}{"sender": req.Message.Sender})
+	senderIdentity, refusal := s.resolveBrokerInboundSender(r.Context(), req.Message.Sender)
+	if refusal != nil {
+		log.Warn("routed inbound sender refused",
+			"sender", req.Message.Sender, "refusal", errBrokerSenderRefused(refusal))
+		refusal.write(w)
 		return
 	}
-	senderUser, err := s.store.GetUserByEmail(r.Context(), senderEmail)
-	if err != nil {
-		log.Warn("Could not resolve sender identity",
-			"sender", req.Message.Sender, "error", err)
-		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"sender identity could not be resolved",
-				map[string]interface{}{"sender": req.Message.Sender})
-		} else {
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-				"internal error resolving sender identity", nil)
-		}
-		return
-	}
-	// C2a containment: require active status.
-	if senderUser.Status != store.UserStatusActive {
-		log.Warn("routed inbound sender is not active",
-			"sender", req.Message.Sender, "status", senderUser.Status)
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"sender identity is not active",
-			map[string]interface{}{"sender": req.Message.Sender, "status": senderUser.Status})
-		return
-	}
-	if emailResolvedPrincipalRefused(senderEmail, senderUser) {
-		log.Warn("routed inbound sender is a test identity", "sender", req.Message.Sender)
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"sender identity not eligible", map[string]interface{}{"sender": req.Message.Sender})
-		return
-	}
-	req.Message.SenderID = senderUser.ID
-	senderIdentity := NewAuthenticatedUser(senderUser.ID, senderUser.Email, senderUser.DisplayName, senderUser.Role, "integration")
+	req.Message.SenderID = senderIdentity.ID()
 
 	// --- Strip leading "!" interrupt prefix ---
 	if trimmed := strings.TrimSpace(req.Message.Msg); strings.HasPrefix(trimmed, "!") {
