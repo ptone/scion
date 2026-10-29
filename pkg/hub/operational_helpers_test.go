@@ -191,6 +191,10 @@ func (f *fakeHubSettingStore) UpsertHubSettingsGuarded(_ context.Context, writes
 	for _, w := range writes {
 		_, exists := f.settings[w.Section]
 		switch {
+		case w.Delete && !exists && w.ExpectedRevision == -1:
+			return nil, store.ErrNotFound
+		case w.Delete && !exists:
+			return nil, store.ErrRevisionConflict
 		case w.ExpectedRevision == -1:
 		case w.ExpectedRevision == 0:
 			if exists {
@@ -202,6 +206,11 @@ func (f *fakeHubSettingStore) UpsertHubSettingsGuarded(_ context.Context, writes
 	}
 	out := make([]store.HubSetting, 0, len(writes))
 	for _, w := range writes {
+		if w.Delete {
+			delete(f.settings, w.Section)
+			out = append(out, store.HubSetting{Section: w.Section})
+			continue
+		}
 		s := &store.HubSetting{ID: w.Section, Section: w.Section, Value: w.Value, Revision: current(w.Section) + 1,
 			UpdatedBy: updatedBy, Origin: origin}
 		f.settings[w.Section] = s

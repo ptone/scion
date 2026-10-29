@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -64,8 +65,13 @@ func TestPutSettingsRejectsInvalidPlacement(t *testing.T) {
 		{"case-folded selector", `{"profiles":{"p":{"runtime":"docker","Node_Selector":{"a":"b"}}}}`, http.StatusBadRequest, "profiles.p"},
 		{"toleration seconds", `{"runtimes":{"k":{"type":"kubernetes","tolerations":[{"key":"a","operator":"Exists","tolerationSeconds":5}]}}}`, http.StatusBadRequest, "runtimes.k"},
 		{"selector number", `{"runtimes":{"k":{"type":"kubernetes","node_selector":{"a":1}}}}`, http.StatusBadRequest, "runtimes.k"},
-		{"invalid selector key", `{"runtimes":{"k":{"type":"kubernetes","node_selector":{"secret key!":"v"}}}}`, http.StatusUnprocessableEntity, "runtimes.k.node_selector"},
-		{"invalid class", `{"profiles":{"p":{"runtime":"kubernetes","runtime_class_name":"Secret_Class"}}}`, http.StatusUnprocessableEntity, "profiles.p.runtime_class_name"},
+		{"zero toleration seconds", `{"runtimes":{"k":{"type":"kubernetes","tolerations":[{"key":"a","operator":"Exists","tolerationSeconds":0}]}}}`, http.StatusBadRequest, "runtimes.k"},
+		{"case-folded toleration key", `{"runtimes":{"k":{"type":"kubernetes","tolerations":[{"Key":"a","operator":"Exists"}]}}}`, http.StatusBadRequest, "runtimes.k"},
+		{"case-folded section", `{"Runtimes":{"k":{"type":"kubernetes","nodeSelector":{"a":"b"}}}}`, http.StatusBadRequest, "runtimes"},
+		{"case-folded profiles section", `{"PROFILES":{"p":{"runtime":"k8s"}}}`, http.StatusBadRequest, "profiles"},
+		{"section sent twice", `{"runtimes":{"k":{"type":"kubernetes","nodeSelector":{"a":"b"}}},"runtimes":{"d":{"type":"docker"}}}`, http.StatusBadRequest, "runtimes"},
+		{"invalid selector key", `{"runtimes":{"k":{"type":"kubernetes","node_selector":{"zz-private-value key!":"v"}}}}`, http.StatusUnprocessableEntity, "runtimes.k.node_selector"},
+		{"invalid class", `{"profiles":{"p":{"runtime":"kubernetes","runtime_class_name":"Zz_Private_Value"}}}`, http.StatusUnprocessableEntity, "profiles.p.runtime_class_name"},
 		{"placement on docker", `{"runtimes":{"d":{"type":"docker","runtime_class_name":"gvisor"}}}`, http.StatusUnprocessableEntity, "runtimes.d"},
 	}
 	for _, tc := range cases {
@@ -74,7 +80,8 @@ func TestPutSettingsRejectsInvalidPlacement(t *testing.T) {
 			rr := putServerConfigDB(t, srv, ops, tc.body)
 			require.Equal(t, tc.code, rr.Code, rr.Body.String())
 			assert.Contains(t, rr.Body.String(), tc.path)
-			assert.NotContains(t, rr.Body.String(), "secret", "the response echoes a submitted value")
+			assert.NotContains(t, strings.ToLower(rr.Body.String()), "zz-private-value", "the response echoes a submitted value")
+			assert.NotContains(t, strings.ToLower(rr.Body.String()), "zz_private_value", "the response echoes a submitted value")
 			requireNoPlacementRow(t, fake, "runtimes")
 			requireNoPlacementRow(t, fake, "profiles")
 		})
@@ -154,7 +161,18 @@ func TestPutSettingsPlacementDependencyRevisionConflict(t *testing.T) {
 
 			rr := putServerConfigDB(t, srv, ops, body)
 			require.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
-			assert.Contains(t, rr.Body.String(), `"runtimes"`)
+			var resp struct {
+				Conflicted []map[string]interface{} `json:"conflicted"`
+			}
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+			require.Len(t, resp.Conflicted, 2, rr.Body.String())
+			assert.Equal(t, "runtimes", resp.Conflicted[0]["section"])
+			assert.Nil(t, resp.Conflicted[0]["read"])
+			// The omitted section read for the validation, whose revision
+			// changed, is listed as read at the revision read.
+			assert.Equal(t, map[string]interface{}{
+				"section": "profiles", "expected_revision": float64(1), "current_revision": float64(2), "read": true,
+			}, resp.Conflicted[1])
 			requireNoPlacementRow(t, fake, "runtimes")
 		})
 	}
@@ -207,22 +225,27 @@ func TestPutSettingsGuardedBatchUnsupportedFailsClosed(t *testing.T) {
 
 // Flat instance placement is Layer 0: a save that sends it, at the top
 // level or nested in an accepted section, is refused and writes nothing.
+// Each body has one refusal: the instance list under server.broker is a
+// bootstrap key, and the other spellings are keys the save would drop.
 func TestPutSettingsFlatPlacementNotWritable(t *testing.T) {
 	tempSettingsHome(t)
-	for _, body := range []string{
-		`{"server":{"broker":{"instances":[{"key":"a","runtime_target":{"type":"kubernetes","node_selector":{"scion.dev/pool":"x"}}}]}}}`,
-		`{"server.broker.instances":[{"key":"a"}]}`,
-		`{"runtimes":{"k":{"type":"kubernetes","instances":[{"runtime_target":{"node_selector":{"scion.dev/pool":"x"}}}]}}}`,
-		`{"profiles":{"p":{"runtime":"kubernetes","runtime_target":{"node_selector":{"scion.dev/pool":"x"}}}}}`,
-	} {
-		t.Run(body, func(t *testing.T) {
+	cases := []struct {
+		body, marker string
+	}{
+		{`{"server":{"broker":{"instances":[{"key":"a","runtime_target":{"type":"kubernetes","node_selector":{"scion.dev/pool":"x"}}}]}}}`, `"layer0_rejected"`},
+		{`{"server.broker.instances":[{"key":"a"}]}`, `"unpersisted_keys_rejected"`},
+		{`{"runtimes":{"k":{"type":"kubernetes","instances":[{"runtime_target":{"node_selector":{"scion.dev/pool":"x"}}}]}}}`, `"unpersisted_keys_rejected"`},
+		{`{"profiles":{"p":{"runtime":"kubernetes","runtime_target":{"node_selector":{"scion.dev/pool":"x"}}}}}`, `"unpersisted_keys_rejected"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.body, func(t *testing.T) {
 			srv, fake, ops := newTestDBServer(t)
-			rr := putServerConfigDB(t, srv, ops, body)
-			require.True(t, rr.Code == http.StatusUnprocessableEntity || rr.Code == http.StatusBadRequest, "%d: %s", rr.Code, rr.Body.String())
+			rr := putServerConfigDB(t, srv, ops, tc.body)
+			require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
+			assert.Contains(t, rr.Body.String(), tc.marker)
 			fake.mu.Lock()
 			defer fake.mu.Unlock()
 			assert.Empty(t, fake.settings, "a section was written")
-			assert.False(t, strings.Contains(rr.Body.String(), `"applied"`) && rr.Code == http.StatusOK)
 		})
 	}
 }
@@ -251,4 +274,94 @@ func TestPutSettingsProfilesOnlyKeepsStoredRuntimesUnknownKey(t *testing.T) {
 	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
 	assert.Contains(t, rr.Body.String(), "profiles.batch.node_selector")
 	requirePlacementRow(t, fake, "runtimes", 1, stored)
+}
+
+// resetPlacementSectionDB sends DELETE .../sections/{section}.
+func resetPlacementSectionDB(srv *Server, section string) *httptest.ResponseRecorder {
+	rr := httptest.NewRecorder()
+	srv.handleAdminServerConfigSectionReset(rr, adminRequest(http.MethodDelete, "/api/v1/admin/server-config/sections/"+section, ""))
+	return rr
+}
+
+// Resetting runtimes or profiles validates the pair the reset leaves (the
+// bootstrap value of the reset section and the stored other section): a
+// reset that would leave a profile's placement without its runtime entry
+// is refused with 422 naming the section and the path, and the row stays;
+// a reset that leaves a valid pair removes the row.
+func TestResetPlacementSectionValidatesPair(t *testing.T) {
+	tempSettingsHome(t)
+	srv, fake, ops := newTestDBServer(t)
+	fake.seedWithOrigin("runtimes", json.RawMessage(`{"pool-rt":{"type":"kubernetes","namespace":"agents"}}`), "managed")
+	fake.seedWithOrigin("profiles", json.RawMessage(`{"fast":{"runtime":"pool-rt","runtime_class_name":"gvisor"}}`), "managed")
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
+
+	rr := resetPlacementSectionDB(srv, "runtimes")
+	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
+	var resp struct {
+		Error struct {
+			Code    string `json:"code"`
+			Details struct {
+				Section string `json:"section"`
+				Errors  []struct {
+					Path string `json:"path"`
+				} `json:"errors"`
+			} `json:"details"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), rr.Body.String())
+	assert.Equal(t, ErrCodeValidationError, resp.Error.Code)
+	assert.Equal(t, "runtimes", resp.Error.Details.Section)
+	require.Len(t, resp.Error.Details.Errors, 1, rr.Body.String())
+	assert.Equal(t, "profiles.fast.runtime", resp.Error.Details.Errors[0].Path)
+	requirePlacementRow(t, fake, "runtimes", 1, `{"pool-rt":{"type":"kubernetes","namespace":"agents"}}`)
+
+	// Without the profile's placement the same reset is valid.
+	fake.seedWithOrigin("profiles", json.RawMessage(`{"fast":{"runtime":"pool-rt"}}`), "managed")
+	rr = resetPlacementSectionDB(srv, "runtimes")
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	requireNoPlacementRow(t, fake, "runtimes")
+	requirePlacementRow(t, fake, "profiles", 1, `{"fast":{"runtime":"pool-rt"}}`)
+
+	// A section with no row is still a 404.
+	rr = resetPlacementSectionDB(srv, "runtimes")
+	require.Equal(t, http.StatusNotFound, rr.Code, rr.Body.String())
+}
+
+// A reset whose other section changes between the validation read and the
+// guarded delete is a 409 listing that section as read, and deletes
+// nothing.
+func TestResetPlacementSectionRevisionConflict(t *testing.T) {
+	tempSettingsHome(t)
+	srv, fake, ops := newTestDBServer(t)
+	fake.seedWithOrigin("runtimes", json.RawMessage(placementRuntimesDoc), "managed")
+	fake.seedWithOrigin("profiles", json.RawMessage(`{"plain":{"runtime":"k8s"}}`), "managed")
+	ops.store = &racingProfilesStore{fakeHubSettingStore: fake}
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
+
+	rr := resetPlacementSectionDB(srv, "runtimes")
+	require.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
+	var resp struct {
+		Conflicted []map[string]interface{} `json:"conflicted"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Len(t, resp.Conflicted, 2, rr.Body.String())
+	assert.Equal(t, "runtimes", resp.Conflicted[0]["section"])
+	assert.Equal(t, map[string]interface{}{
+		"section": "profiles", "expected_revision": float64(1), "current_revision": float64(2), "read": true,
+	}, resp.Conflicted[1])
+	requirePlacementRow(t, fake, "runtimes", 1, placementRuntimesDoc)
+}
+
+// A store without the guarded batch method fails a placement section reset
+// closed, deleting nothing.
+func TestResetPlacementSectionGuardedBatchUnsupported(t *testing.T) {
+	tempSettingsHome(t)
+	srv, fake, ops := newTestDBServer(t)
+	fake.seedWithOrigin("profiles", json.RawMessage(`{"plain":{"runtime":"k8s"}}`), "managed")
+	ops.store = unguardedHubSettingStore{HubSettingStore: fake}
+	rr := resetPlacementSectionDB(srv, "profiles")
+	require.Equal(t, http.StatusInternalServerError, rr.Code, rr.Body.String())
+	requirePlacementRow(t, fake, "profiles", 1, `{"plain":{"runtime":"k8s"}}`)
 }

@@ -1826,13 +1826,18 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			revs, notApplied, err := ops.updateGuarded(r.Context(), writes, reads, updatedBy, "managed")
 			switch {
 			case errors.Is(err, store.ErrRevisionConflict):
+				written := map[string]bool{}
 				for _, wr := range writes {
+					written[wr.section] = true
 					conflicted = append(conflicted, map[string]interface{}{
 						"section":           wr.section,
 						"expected_revision": wr.expectedRevision,
 						"current_revision":  s.getCurrentRevision(ops, wr.section),
 					})
 				}
+				// The sections read for the validation and not written,
+				// whose revision changed, are listed too.
+				conflicted = append(conflicted, placementReadConflicts(r.Context(), ops, reads, written)...)
 			case errors.Is(err, errGuardedBatchUnsupported):
 				slog.Error("PUT server-config: the settings store cannot save runtimes and profiles together", "error", err)
 				fileTxn.abort()

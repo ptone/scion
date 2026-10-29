@@ -965,7 +965,35 @@ func (o *OperationalSettings) DeleteSection(ctx context.Context, section string)
 	} else if err := o.store.DeleteHubSetting(ctx, section); err != nil {
 		return err
 	}
+	o.applyDelete(ctx, section, deleteRevision)
+	return nil
+}
 
+// deleteGuarded is DeleteSection in a guarded store transaction
+// (store.HubSettingGuardedBatchWriter): the row must still be at
+// expectedRevision and each section in reads at its revision, or
+// store.ErrRevisionConflict is returned and nothing is deleted.
+func (o *OperationalSettings) deleteGuarded(ctx context.Context, section string, expectedRevision int64, reads map[string]int64) error {
+	bw, ok := o.store.(store.HubSettingGuardedBatchWriter)
+	if !ok {
+		return errGuardedBatchUnsupported
+	}
+	if err := o.checkWriteGuard(ctx, section); err != nil {
+		return err
+	}
+	rows, err := bw.UpsertHubSettingsGuarded(ctx,
+		[]store.HubSettingWrite{{Section: section, ExpectedRevision: expectedRevision, Delete: true}}, reads, "", "")
+	if err != nil {
+		return err
+	}
+	o.applyDelete(ctx, section, rows[0].SettingsRevision)
+	return nil
+}
+
+// applyDelete evicts a deleted section from the cache, publishes the event
+// so peers refresh and self-applies. deleteRevision is the
+// operational-settings revision of the delete (0 when unknown).
+func (o *OperationalSettings) applyDelete(ctx context.Context, section string, deleteRevision int64) {
 	o.mu.Lock()
 	// As in Update: a delete at or above the revision the cache knows the
 	// section at is applied to the cache directly, with a tombstone so a
@@ -1004,8 +1032,6 @@ func (o *OperationalSettings) DeleteSection(ctx context.Context, section string)
 		ApplySnapshot(o.server, snap)
 		ApplyMaintenanceFromSnapshot(o.server, snap)
 	}
-
-	return nil
 }
 
 // refreshThroughAttempts bounds refreshThrough's reads.
