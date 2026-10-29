@@ -338,11 +338,12 @@ func (s *Server) handleBrokerAttachmentsUpload(w http.ResponseWriter, r *http.Re
 		result, err := s.storeBrokerAttachment(ownerCtx, batch, name, part)
 		_ = part.Close()
 		if err != nil {
-			if isBodyTooLarge(err) {
+			if isBodyTooLarge(err) || errors.Is(err, errBrokerAttachmentsOverTotal) {
 				log.Warn("broker attachment upload",
-					"sender_id", sender.ID(), "project_id", req.ProjectID, "decision", "refused: body over cap",
+					"sender_id", sender.ID(), "project_id", req.ProjectID, "decision", "refused: over size limit",
 					"audience", req.Audience, "count", len(results), "total_bytes", batch.total)
-				writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large", "request body too large", nil)
+				writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
+					fmt.Sprintf("attachments exceed the total of %d bytes for one message", batch.maxTotal), nil)
 				return
 			}
 			var rejection attachmentRejection
@@ -499,6 +500,11 @@ func newBrokerAttachmentBatch(maxFile, maxTotal int64) *brokerAttachmentBatch {
 	}
 }
 
+// errBrokerAttachmentsOverTotal reports an upload whose files exceed the
+// total for one message (brokerAttachmentDeliveryMaxBytes). The whole
+// request is refused with 413, like a body over the cap.
+var errBrokerAttachmentsOverTotal = errors.New("attachments exceed the total size for one message")
+
 // errBrokerAttachmentOverBudget is returned while reading a file that
 // would take the batch over its per-file limit or total budget.
 var errBrokerAttachmentOverBudget = errors.New("attachment over the size limit")
@@ -561,7 +567,7 @@ func (s *Server) storeBrokerAttachment(ctx context.Context, batch *brokerAttachm
 		return attachmentUploadResult{}, err
 	case errors.Is(err, errBrokerAttachmentOverBudget), errors.Is(err, artifacts.ErrAttachmentTooLarge):
 		if limit < batch.maxFile {
-			return attachmentUploadResult{}, rejectAttachment("attachments exceed the total of %d bytes for one message", batch.maxTotal)
+			return attachmentUploadResult{}, errBrokerAttachmentsOverTotal
 		}
 		return attachmentUploadResult{}, rejectAttachment("file exceeds the maximum size of %d bytes", batch.maxFile)
 	case errors.Is(err, artifacts.ErrAttachmentName):

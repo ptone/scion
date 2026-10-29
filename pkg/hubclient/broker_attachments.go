@@ -194,7 +194,7 @@ func (c *client) UploadBrokerAttachments(ctx context.Context, sender, projectID 
 	if err != nil {
 		return nil, err
 	}
-	return decodeAttachmentUploadResponse(resp)
+	return decodeAttachmentUploadResponse(resp, true)
 }
 
 func uploadBuildError(err error) error {
@@ -226,6 +226,11 @@ func (c *client) UploadAttachmentReaders(ctx context.Context, files []NamedReade
 	if len(files) == 0 {
 		return nil, errors.New("no attachments to upload")
 	}
+	for _, f := range files {
+		if f.Name == "" || f.Reader == nil {
+			return nil, errors.New("attachment needs a name and a reader")
+		}
+	}
 	pr, pw := io.Pipe()
 	writer := multipart.NewWriter(pw)
 	go func() {
@@ -253,7 +258,7 @@ func (c *client) UploadAttachmentReaders(ctx context.Context, files []NamedReade
 	if err != nil {
 		return nil, err
 	}
-	return decodeAttachmentUploadResponse(resp)
+	return decodeAttachmentUploadResponse(resp, false)
 }
 
 // appendReaderPart adds f to writer as a file part named field.
@@ -272,10 +277,10 @@ func appendReaderPart(writer *multipart.Writer, field string, f NamedReader) err
 }
 
 // decodeAttachmentUploadResponse reads the answer to an attachment upload:
-// the result on 201 or 200; on a refusal of every file, the per-file
-// failures when the hub reports them; otherwise the hub's error.
-func decodeAttachmentUploadResponse(resp *http.Response) (*AttachmentUploadResult, error) {
-	if resp.StatusCode == http.StatusCreated || resp.StatusCode == http.StatusOK {
+// the result on 201 (or 200 when okToo); on a refusal of every file, the
+// per-file failures when the hub reports them; otherwise the hub's error.
+func decodeAttachmentUploadResponse(resp *http.Response, okToo bool) (*AttachmentUploadResult, error) {
+	if resp.StatusCode == http.StatusCreated || (okToo && resp.StatusCode == http.StatusOK) {
 		return apiclient.DecodeRequired[AttachmentUploadResult](resp)
 	}
 	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
