@@ -190,16 +190,19 @@ func TestOwnerMaterialChain_RedelegatedSameRowsDeliverNothingOfOwner(t *testing.
 }
 
 // omcFlakyKindStore fails the first user read of userID after each arm
-// (the kind read of the test-admin check), then reads normally.
+// (the kind read of the test-admin check), then reads normally. faults
+// counts the failed reads.
 type omcFlakyKindStore struct {
 	store.Store
 	userID string
 	armed  *bool
+	faults *int
 }
 
 func (s omcFlakyKindStore) GetUser(ctx context.Context, id string) (*store.User, error) {
 	if id == s.userID && *s.armed {
 		*s.armed = false
+		*s.faults++
 		return nil, errors.New("omc: transient user read fault")
 	}
 	return s.Store.GetUser(ctx, id)
@@ -218,24 +221,49 @@ func TestOwnerMaterialChain_TestAdminDecisionOncePerSite(t *testing.T) {
 	agent, err := f.Store.GetAgent(ctx, id)
 	require.NoError(t, err)
 	omcTASeed(t, f.Server.secretBackend, f.ProjectID, f.UserID)
-	armed := false
-	f.Server.authzService.store = omcFlakyKindStore{Store: f.Server.authzService.store, userID: f.UserID, armed: &armed}
+	armed, faults := false, 0
+	f.Server.authzService.store = omcFlakyKindStore{Store: f.Server.authzService.store, userID: f.UserID, armed: &armed, faults: &faults}
+
+	// The armed fault lands on the test-admin decision: it reads the root
+	// user's kind first, and a failed read decides restricted with nothing
+	// allowed (the user scope withheld).
+	armed = true
+	direct := f.disp.testAdminScopesFor(ctx, agent)
+	require.False(t, armed, "the test-admin decision consumed the fault")
+	require.True(t, direct.restricted)
+	require.True(t, direct.withholdsUser(), "a failed read withholds the user scope")
+	// Unarmed, the same decision finds a human root: no restriction.
+	require.False(t, f.disp.testAdminScopesFor(ctx, agent).restricted)
+
+	// consumed asserts that a site's first read of the root user, the
+	// test-admin decision, took the fault.
+	consumed := func(site string, before int) {
+		t.Helper()
+		require.False(t, armed, "%s: the armed fault fired", site)
+		require.Equal(t, before+1, faults, "%s: exactly one faulted read", site)
+	}
 
 	armed = true
+	before := faults
 	resolved, _, err := f.disp.resolveSecrets(ctx, agent)
 	require.NoError(t, err)
+	consumed("resolveSecrets", before)
 	assertNothingOfOwner(t, "resolveSecrets", resolved)
 
 	armed = true
+	before = faults
 	asNeeded, err := f.disp.resolveAsNeededForKeys(ctx, agent, []string{omcTAAsNeeded, omcTAUserOnly}, nil)
 	require.NoError(t, err)
+	consumed("as_needed", before)
 	assert.NotEqual(t, "owner-as-needed", asNeeded[omcTAAsNeeded], "as_needed pass")
 	assert.NotContains(t, asNeeded, omcTAUserOnly, "as_needed pass")
 
 	for _, purpose := range []MaterialPurpose{PurposeDispatch, PurposeRestart} {
 		armed = true
+		before = faults
 		got, err := f.disp.selectDeliverySecrets(ctx, newDeliverySelector(f.disp.authzService, agent, purpose), agent)
 		require.NoError(t, err)
+		consumed("launch selection ("+string(purpose)+")", before)
 		assertNothingOfOwner(t, "launch selection ("+string(purpose)+")", got)
 	}
 }

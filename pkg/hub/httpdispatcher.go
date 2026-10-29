@@ -4942,7 +4942,7 @@ func (d *HTTPAgentDispatcher) startSecretResolveOpts(ctx context.Context, agent 
 				// constraint that denies secret.use does not stop it.
 				if ta.withholdsUser() {
 					// The test-admin restriction drops the row and keeps its
-					// masking (see startSecretResolveOptsFor).
+					// masking (see startSecretResolveOpts).
 					return true
 				}
 				return gate.allow(ctx, ownerMaterialKindSecret, s.ScopeID)
