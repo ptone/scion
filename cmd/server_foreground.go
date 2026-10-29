@@ -432,6 +432,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	var s store.Store
 	var entClient *ent.Client
 	if enableHub {
+		// Before the database is opened: the boot-failure guard must know
+		// that this update target may have migrated the schema.
+		markUpdateStateBooting(maintenanceInstallRoot())
 		s, entClient, err = initStore(ctx, cfg)
 		if err != nil {
 			return err
@@ -669,6 +672,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			startSettingsPropagation(ctx, hubSrv, eventPub)
 
 			log.Printf("Starting Hub API server on %s:%d", cfg.Hub.Host, cfg.Hub.Port)
+			// An update target counts as healthy (update-state verified)
+			// only once its listener is bound.
+			hubSrv.SetOnListening(hubSrv.MarkUpdateStateVerified)
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -715,6 +721,11 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			}
 		}
 		log.Printf("Starting Web Frontend on %s:%d", cfg.Hub.Host, webPort)
+		if enableHub && hubSrv != nil {
+			// Combined mode: the web listener serves the hub API, so the
+			// update target is verified once it is bound.
+			webSrv.SetOnListening(hubSrv.MarkUpdateStateVerified)
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
