@@ -338,12 +338,35 @@ class RenderNginxTest(unittest.TestCase):
         for sub in ("nx-body", "nx-proxy", "nx-fastcgi", "nx-uwsgi", "nx-scgi"):
             self.assertTrue(os.path.isdir(os.path.join(self.state, sub)), sub)
 
-    def test_html_path_rewrite(self):
-        rc, _, err = self._render("--path-rewrite", "html")
+    def test_shim_tier(self):
+        rc, _, err = self._render("--path-rewrite", "shim")
         self.assertEqual(rc, 0, err)
         conf = self._conf()
-        self.assertIn("sub_filter '=\"/' '=\"./';", conf)
-        self.assertIn("sub_filter_once off;", conf)
+        self.assertNotIn("${", conf)
+        self.assertIn("""sub_filter '<head>' '<head><script src="agui-shim.js"></script>';""", conf)
+        self.assertIn("""sub_filter '="/' '="';""", conf)
+        self.assertIn("location ~ /agui-shim\\.js$ {", conf)
+        self.assertIn("root %s;" % HERE, conf)
+        self.assertIn("try_files /agui_shim.js =404;", conf)
+        self.assertIn("location = /main.js {", conf)
+        for token, replacement in helper.SHIM_PATCHES:
+            self.assertIn("sub_filter '%s' '%s';" % (token, replacement), conf)
+        # Only loopback upstreams, also in the shim locations.
+        passes = set(re.findall(r"proxy_pass\s+([^;]+);", conf))
+        self.assertEqual(passes, {"https://127.0.0.1:8443"})
+        # nginx rejects config tokens over 4 KiB.
+        self.assertLess(max(len(line) for line in conf.splitlines()), 1024)
+
+    def test_shim_tier_needs_the_shim_file(self):
+        with self.assertRaisesRegex(helper.HelperError, "not found"):
+            helper.shim_rules("8443", self.tmp)
+
+    def test_shim_patches_are_nginx_safe_and_change_something(self):
+        for token, replacement in helper.SHIM_PATCHES:
+            for value in (token, replacement):
+                for c in ("'", "$", "\\"):
+                    self.assertNotIn(c, value)
+            self.assertNotEqual(token, replacement)
 
     def test_bad_inputs(self):
         cases = [
@@ -359,6 +382,20 @@ class RenderNginxTest(unittest.TestCase):
             with self.subTest(**override):
                 with self.assertRaises(helper.HelperError):
                     helper.build_values(**{**base, **override})
+
+    def test_shim_check_text(self):
+        page = "<html><head></head><body></body></html>"
+        js = " ".join(t for t, _ in helper.SHIM_PATCHES)
+        self.assertEqual(helper.shim_check_text(page, js), "shim")
+        self.assertTrue(helper.shim_check_text("<html></html>", js).startswith("none:"))
+        self.assertTrue(helper.shim_check_text(page, js.split(" ")[0]).startswith("none:"))
+        self.assertTrue(helper.shim_check_text(page, js + " " + js).startswith("none:"))
+
+    def test_shim_check_unreachable(self):
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = str(s.getsockname()[1])
+        self.assertTrue(helper.shim_check(port).startswith("none: could not read"))
 
     def test_unknown_placeholder_is_an_error(self):
         with self.assertRaisesRegex(helper.HelperError, "TYPO"):

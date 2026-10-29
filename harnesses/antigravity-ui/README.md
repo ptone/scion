@@ -22,9 +22,16 @@ agent container (scion-antigravity-ui)
 - The app's language server serves the UI over HTTPS on loopback with a
   self-signed certificate. The bundled nginx terminates that TLS and serves
   plain HTTP on `127.0.0.1:8090`, the only port the harness exposes.
-- The wrapper registers port 8090 with `scion expose`. It asks for the
-  experimental app mode first. If the Hub does not support app mode, it
-  registers the port normally, and you connect with `scion tunnel`.
+- The app's UI expects to own the root of its origin. For the Hub's port
+  link, which serves it under `/api/v1/agents/<id>/ports/<port>/proxy/`,
+  nginx adds a small path shim (`agui_shim.js`) to the app page and patches
+  two places in the app's `main.js`. At the root of the port (a tunnel) the
+  shim changes nothing. The patches are specific to the pinned app version:
+  at start the wrapper checks that they apply, and otherwise turns the shim
+  off and offers only the tunnel.
+- The wrapper registers port 8090 with `scion expose`. With the shim on it
+  asks for the experimental app mode first. If the Hub does not support app
+  mode, it registers the port normally, and you connect with `scion tunnel`.
 - Interrupts and pasted messages never reach the app. If the app or nginx
   exits, the wrapper stops the other and the agent ends.
 
@@ -97,10 +104,12 @@ is stored in the agent's home.
 | `agent-plugins.yaml` | Agent Plugins support (none) |
 | `Dockerfile` | pinned app package, nginx, wrapper |
 | `antigravity-ui-wrapper.sh` | process supervisor (installed into the image) |
-| `agui_helper.py` | renders the nginx config, turns updates off (installed into the image) |
+| `agui_helper.py` | renders the nginx config, checks the shim, picks free ports, turns updates off (installed into the image) |
+| `agui_shim.js` | path shim for the Hub port link (installed into the image) |
+| `agui_shim.test.mjs` | shim unit tests (`node --test`) |
 | `nginx.conf.tmpl` | forwarding proxy template |
 | `provision_test.py` | unit tests |
-| `PROBE.md` | runtime probe of the app in a throwaway container |
+| `PROBE.md` | runtime probe of the image and the path shim in a throwaway container |
 | `cloudbuild.yaml` | Cloud Build config (amd64) |
 
 ## Wrapper settings
@@ -111,7 +120,7 @@ Set in the agent's environment (for example a template's `env`):
 |---|---|---|
 | `JETSKI_LS_PORT` | `8443` | preferred language server HTTPS port (loopback) |
 | `AGUI_PROXY_PORT` | `8090` | preferred nginx port, the exposed port |
-| `AGUI_PATH_REWRITE` | `none` | `html`: rewrite root-relative URLs in HTML pages |
+| `AGUI_PATH_REWRITE` | `auto` | `none`: never use the path shim (tunnel only) |
 | `AGUI_SIGNIN_RELAY` | `0` | `1`: relay an interactive sign-in through the tmux pane |
 | `AGUI_LS_TIMEOUT` | `90` | seconds to wait for the language server |
 | `AGUI_PROXY_TIMEOUT` | `30` | seconds to wait for nginx |
@@ -148,3 +157,8 @@ window).
    sha512 for the same file.
 3. Change `AG_VERSION` and `AG_DEB_SHA256` in the `Dockerfile` together, in a
    reviewed change that records the feed sha512 check.
+4. Re-check the path shim: run `agui_helper.py shim-check` against the new
+   app (or check that `main.js` contains each `SHIM_PATCHES` token in
+   `agui_helper.py` exactly once), and update the tokens if the bundle
+   changed. Until then the wrapper turns the shim off and offers only the
+   tunnel.

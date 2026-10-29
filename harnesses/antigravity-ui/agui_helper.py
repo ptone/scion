@@ -19,6 +19,8 @@ Subcommands:
   seed-update-off   Merge {"autoCheckForUpdates": false} into the app's
                     app_storage.json, keeping every other key.
   render-nginx      Render nginx.conf.tmpl into a private nginx.conf.
+  shim-check        Print "shim" if the running app matches the path shim
+                    (see SHIM_PATCHES), else "none" and the reason.
   free-port         Print the preferred loopback port if it is free, else
                     a free ephemeral one.
 
@@ -32,8 +34,10 @@ import json
 import os
 import re
 import socket
+import ssl
 import sys
 import tempfile
+import urllib.request
 
 APP_STORAGE_REL = os.path.join(".config", "Antigravity", "app_storage.json")
 UPDATE_KEY = "autoCheckForUpdates"
@@ -44,19 +48,36 @@ PLACEHOLDERS = (
     "STATE",
     "AGUI_PROXY_PORT",
     "JETSKI_LS_PORT",
-    "PATH_REWRITE_RULES",
+    "SHIM_LOCATIONS",
+    "PAGE_RULES",
 )
 _PLACEHOLDER_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
-PATH_REWRITE_TIERS = {
-    "none": "",
-    # Root-relative attribute URLs in HTML become page-relative, so they
-    # resolve under the Hub proxy's path prefix.
-    "html": "\n".join([
-        "      sub_filter_once off;",
-        "      sub_filter '=\"/' '=\"./';",
-    ]),
-}
+PATH_REWRITE_TIERS = ("none", "shim")
+
+# The path shim (agui_shim.js) and the main.js patches it relies on, for the
+# pinned app version. Each token must occur exactly once in main.js;
+# shim-check verifies that against the running app before the shim is used.
+# Neither side may contain a single quote, a dollar sign or a backslash:
+# they are written into single-quoted nginx strings.
+#
+# The page loads the shim with a relative URL, so it resolves under the
+# proxy prefix at any route depth; nginx serves it for any path ending in
+# SHIM_URL_NAME. (Inlining it is not possible: nginx rejects config tokens
+# over 4 KiB.)
+SHIM_FILE = "agui_shim.js"
+SHIM_URL_NAME = "agui-shim.js"
+SHIM_PATCHES = (
+    # Router base path and asset base: the app's own helper returns the
+    # proxy prefix the shim found.
+    ("function Ri(){if(Qi()&&",
+     "function Ri(){if(window.__AGUI_PREFIX__)return window.__AGUI_PREFIX__;if(Qi()&&"),
+    # RPC client base URL.
+    ("baseUrl:window.location.origin,onWebSocketFallback",
+     "baseUrl:window.location.origin+(window.__AGUI_PREFIX__||\"\"),onWebSocketFallback"),
+)
+SHIM_PAGE_TOKEN = "<head>"
+_NGINX_UNSAFE = ("'", "$", "\\")
 
 
 class HelperError(Exception):
@@ -141,17 +162,64 @@ def build_values(
     proxy_port: str,
     ls_port: str,
     path_rewrite: str,
+    share_dir: str = "",
 ) -> dict[str, str]:
     if not os.path.isabs(state) or any(c in state for c in ' ;{}"\'$\\\n'):
         raise HelperError(f"state dir must be an absolute path without special characters, got {state!r}")
     if path_rewrite not in PATH_REWRITE_TIERS:
         raise HelperError(f"unknown path rewrite tier {path_rewrite!r}")
+    ls = _port(ls_port, "language server port")
+    shim_locations, page_rules = "", ""
+    if path_rewrite == "shim":
+        shim_locations, page_rules = shim_rules(ls, share_dir)
     return {
         "STATE": state,
         "AGUI_PROXY_PORT": _port(proxy_port, "proxy port"),
-        "JETSKI_LS_PORT": _port(ls_port, "language server port"),
-        "PATH_REWRITE_RULES": PATH_REWRITE_TIERS[path_rewrite],
+        "JETSKI_LS_PORT": ls,
+        "SHIM_LOCATIONS": shim_locations,
+        "PAGE_RULES": page_rules,
     }
+
+
+def _nginx_str(value: str, what: str) -> str:
+    for c in _NGINX_UNSAFE:
+        if c in value:
+            raise HelperError(f"{what} contains {c!r}, which cannot go into an nginx string")
+    return "'" + value + "'"
+
+
+def shim_rules(ls_port: str, share_dir: str) -> tuple[str, str]:
+    """nginx directives for the shim: (extra locations, page rules)."""
+    if not os.path.isabs(share_dir) or any(c in share_dir for c in ' ;{}"\'$\\\n'):
+        raise HelperError(f"shim directory must be an absolute path without special characters, got {share_dir!r}")
+    if not os.path.isfile(os.path.join(share_dir, SHIM_FILE)):
+        raise HelperError(f"shim file {SHIM_FILE} not found in {share_dir}")
+    inject = SHIM_PAGE_TOKEN + '<script src="' + SHIM_URL_NAME + '"></script>'
+    page = "\n".join([
+        "      sub_filter_once off;",
+        "      sub_filter " + _nginx_str(SHIM_PAGE_TOKEN, "page token") + " " + _nginx_str(inject, "inject") + ";",
+        # Root-relative attribute URLs become relative; the shim's <base>
+        # resolves them under the proxy prefix (or "/" without one).
+        "      sub_filter " + _nginx_str('="/', "rule") + " " + _nginx_str('="', "rule") + ";",
+    ])
+    lines = [
+        "    location ~ /" + SHIM_URL_NAME.replace(".", "\\.") + "$ {",
+        f"      root {share_dir};",
+        "      types { }",
+        "      default_type application/javascript;",
+        "      add_header Cache-Control no-cache;",
+        f"      try_files /{SHIM_FILE} =404;",
+        "    }",
+        "    location = /main.js {",
+        f"      proxy_pass https://127.0.0.1:{ls_port};",
+        "      sub_filter_types application/javascript text/javascript;",
+        "      sub_filter_once on;",
+    ]
+    for token, replacement in SHIM_PATCHES:
+        lines.append("      sub_filter " + _nginx_str(token, "patch token") + " "
+                     + _nginx_str(replacement, "patch") + ";")
+    lines.append("    }")
+    return "\n".join(lines), page
 
 
 def render_nginx(args: argparse.Namespace) -> str:
@@ -162,11 +230,47 @@ def render_nginx(args: argparse.Namespace) -> str:
         proxy_port=args.proxy_port,
         ls_port=args.ls_port,
         path_rewrite=args.path_rewrite,
+        share_dir=os.path.dirname(os.path.abspath(args.template)),
     )
     for sub in ("nx-body", "nx-proxy", "nx-fastcgi", "nx-uwsgi", "nx-scgi"):
         os.makedirs(os.path.join(args.state, sub), mode=0o700, exist_ok=True)
     _atomic_write(args.out, render_template(template, values), 0o600)
     return "path_rewrite=%s" % args.path_rewrite
+
+
+# ---------------------------------------------------------------------------
+# shim-check
+# ---------------------------------------------------------------------------
+
+
+def _fetch_loopback(port: str, path: str) -> str:
+    # Loopback only, to the language server's self-signed certificate.
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    url = f"https://127.0.0.1:{_port(port, 'language server port')}{path}"
+    with urllib.request.urlopen(url, context=ctx, timeout=15) as resp:  # noqa: S310 (loopback)
+        return resp.read().decode("utf-8", "replace")
+
+
+def shim_check_text(index_html: str, main_js: str) -> str:
+    """Return "shim" if the app matches the shim, else "none: <reason>"."""
+    if index_html.count(SHIM_PAGE_TOKEN) != 1:
+        return "none: the app page has no single <head> tag"
+    for token, _ in SHIM_PATCHES:
+        n = main_js.count(token)
+        if n != 1:
+            return f"none: main.js has {n} copies of a patch point (app version differs)"
+    return "shim"
+
+
+def shim_check(ls_port: str) -> str:
+    try:
+        index_html = _fetch_loopback(ls_port, "/")
+        main_js = _fetch_loopback(ls_port, "/main.js")
+    except OSError as exc:
+        return f"none: could not read the app page ({exc.__class__.__name__})"
+    return shim_check_text(index_html, main_js)
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +319,10 @@ def main(argv: list[str] | None = None) -> int:
     p_render.add_argument("--state", required=True)
     p_render.add_argument("--proxy-port", required=True)
     p_render.add_argument("--ls-port", required=True)
-    p_render.add_argument("--path-rewrite", choices=tuple(PATH_REWRITE_TIERS), default="none")
+    p_render.add_argument("--path-rewrite", choices=PATH_REWRITE_TIERS, default="none")
+
+    p_check = sub.add_parser("shim-check")
+    p_check.add_argument("--ls-port", required=True)
 
     p_free = sub.add_parser("free-port")
     p_free.add_argument("--preferred", required=True)
@@ -224,6 +331,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.cmd == "seed-update-off":
             print("antigravity-ui: app_storage.json " + seed_update_off(args.home))
+        elif args.cmd == "shim-check":
+            print(shim_check(args.ls_port))
         elif args.cmd == "free-port":
             print(free_port(args.preferred))
         else:

@@ -35,7 +35,9 @@
 #                        A preferred port that is taken (agents on host
 #                        networking share the loopback) is replaced by a
 #                        free one.
-#   AGUI_PATH_REWRITE    none|html: rewrite root-relative URLs in HTML (none)
+#   AGUI_PATH_REWRITE    auto|none: path shim that lets the UI run under the
+#                        Hub port proxy path (auto: on when the running app
+#                        matches the shim's patch points)
 #   AGUI_SIGNIN_RELAY    1: relay an interactive sign-in through this pane (off)
 #   AGUI_LS_TIMEOUT      seconds to wait for the language server, not
 #                        counting time spent waiting for a sign-in code (90)
@@ -45,7 +47,7 @@ set -euo pipefail
 
 : "${JETSKI_LS_PORT:=8443}"
 : "${AGUI_PROXY_PORT:=8090}"
-: "${AGUI_PATH_REWRITE:=none}"
+: "${AGUI_PATH_REWRITE:=auto}"
 : "${AGUI_SIGNIN_RELAY:=0}"
 : "${AGUI_LS_TIMEOUT:=90}"
 : "${AGUI_PROXY_TIMEOUT:=30}"
@@ -172,8 +174,13 @@ banner() {
       echo " Open the \"Antigravity\" port from this agent's page in Scion."
       ;;
     tunnel)
-      echo " The port link is sandboxed on this hub, so the UI does not work"
-      echo " through it. Connect with a tunnel instead:"
+      if [ "$SHIM" = shim ]; then
+        echo " The port link is sandboxed on this hub, so the UI does not work"
+        echo " through it. Connect with a tunnel instead:"
+      else
+        echo " The port link cannot show the UI (${SHIM_REASON})."
+        echo " Connect with a tunnel instead:"
+      fi
       echo "   scion tunnel ${agent} --port ${AGUI_PROXY_PORT} --local-port ${AGUI_PROXY_PORT}"
       echo " then open http://127.0.0.1:${AGUI_PROXY_PORT}/"
       ;;
@@ -246,13 +253,30 @@ until ls_up; do
 done
 log "language server is up on 127.0.0.1:${JETSKI_LS_PORT}"
 
+# Path shim: only for the app version whose patch points it knows.
+SHIM=none
+SHIM_REASON="path shim turned off"
+case "$AGUI_PATH_REWRITE" in
+  auto)
+    check="$(python3 -I "$HELPER" shim-check --ls-port "$JETSKI_LS_PORT")" || check="none: shim check failed"
+    if [ "$check" = shim ]; then
+      SHIM=shim
+    else
+      SHIM_REASON="${check#none: }"
+      log "path shim off: ${SHIM_REASON}"
+    fi
+    ;;
+  none) ;;
+  *) fail "AGUI_PATH_REWRITE must be auto or none, got ${AGUI_PATH_REWRITE}" ;;
+esac
+
 python3 -I "$HELPER" render-nginx \
   --template "${AGUI_SHARE_DIR}/nginx.conf.tmpl" \
   --out "${STATE}/nginx.conf" \
   --state "$STATE" \
   --proxy-port "$AGUI_PROXY_PORT" \
   --ls-port "$JETSKI_LS_PORT" \
-  --path-rewrite "$AGUI_PATH_REWRITE" \
+  --path-rewrite "$SHIM" \
   || fail "could not render the nginx config"
 
 setsid nginx -p "$STATE" -e "${STATE}/nginx.err" -c "${STATE}/nginx.conf" \
@@ -271,7 +295,8 @@ log "proxy is up on 127.0.0.1:${AGUI_PROXY_PORT}"
 
 MODE=none
 if command -v scion >/dev/null 2>&1; then
-  if scion expose "$AGUI_PROXY_PORT" --label "Antigravity" --app-mode >>"${STATE}/expose.log" 2>&1; then
+  if [ "$SHIM" = shim ] \
+    && scion expose "$AGUI_PROXY_PORT" --label "Antigravity" --app-mode >>"${STATE}/expose.log" 2>&1; then
     MODE=link
   elif scion expose "$AGUI_PROXY_PORT" --label "Antigravity (use scion tunnel)" >>"${STATE}/expose.log" 2>&1; then
     MODE=tunnel

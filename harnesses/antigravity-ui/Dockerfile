@@ -62,5 +62,6 @@ RUN set -eu; \
 COPY --chmod=0755 antigravity-ui-wrapper.sh /usr/local/bin/antigravity-ui-wrapper
 COPY --chmod=0644 nginx.conf.tmpl /usr/local/share/antigravity-ui/nginx.conf.tmpl
 COPY --chmod=0644 agui_helper.py /usr/local/share/antigravity-ui/agui_helper.py
+COPY --chmod=0644 agui_shim.js /usr/local/share/antigravity-ui/agui_shim.js
 
 USER scion
