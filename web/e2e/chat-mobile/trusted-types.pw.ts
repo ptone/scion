@@ -45,8 +45,10 @@ test('@static chat thread and rail make no plain-string markup call and draw the
   await expect(page.locator('scion-chat-message .md-content table').first()).toBeAttached({
     timeout: 15_000,
   });
+  // The fixture's code block names a language, so it mounts the read-only
+  // code editor; wait for the editor's own content (CodeMirror loads lazily).
   await expect(
-    page.locator('scion-chat-message .md-content :is(pre, scion-code-editor)').first()
+    page.locator('scion-chat-message .md-content scion-code-editor .cm-content').first()
   ).toBeAttached({ timeout: 15_000 });
 
   await expectIconsDrawn(page, 3);
