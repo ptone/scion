@@ -80,11 +80,13 @@ func DeleteAgentFilesForHubProject(agentName, projectPath, hubProjectID string, 
 }
 
 // Seams for tests that force a failure of the last sharer's worktree
-// teardown (deleteAgentFiles).
+// teardown and of the directory removals in deleteAgentFiles. Every
+// removal result is handled.
 var (
 	removeWorktree      = util.RemoveWorktree
 	removeWorktreeEntry = util.RemoveWorktreeEntryIn
 	deleteBranchByName  = util.DeleteBranchIn
+	removeAllSafe       = util.RemoveAllSafe
 )
 
 // DeleteHubAgentFiles is DeleteAgentFiles for a hub agent: sharerKey is the
@@ -172,14 +174,6 @@ func isOwnWorktreePath(wtPath string, own []string) bool {
 	}
 	return false
 }
-
-// removeAllSafe and removeWorktree are the removal primitives
-// deleteAgentFiles uses. Tests replace them to inject failures; every result
-// is handled.
-var (
-	removeAllSafe  = util.RemoveAllSafe
-	removeWorktree = util.RemoveWorktree
-)
 
 // deleteAgentFiles implements DeleteHubAgentFiles and, with startFailure,
 // DeleteStartFailureFiles (which passes removeBranch false).

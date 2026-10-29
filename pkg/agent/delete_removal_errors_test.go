@@ -37,15 +37,13 @@ var errInjectedRemoval = fmt.Errorf("injected removal failure: %w", errors.ErrUn
 func failRemoveAllSafeAt(t *testing.T, parent, name string) *[]string {
 	t.Helper()
 	var failed []string
-	orig := removeAllSafe
-	t.Cleanup(func() { removeAllSafe = orig })
-	removeAllSafe = func(path string) error {
+	setSeam(t, &removeAllSafe, func(path string) error {
 		if filepath.Base(path) == name && filepath.Base(filepath.Dir(path)) == parent {
 			failed = append(failed, path)
 			return errInjectedRemoval
 		}
 		return util.RemoveAllSafe(path)
-	}
+	})
 	return &failed
 }
 
@@ -53,11 +51,9 @@ func failRemoveAllSafeAt(t *testing.T, parent, name string) *[]string {
 // filesystem.
 func failRemoveWorktree(t *testing.T, err error) {
 	t.Helper()
-	orig := removeWorktree
-	t.Cleanup(func() { removeWorktree = orig })
-	removeWorktree = func(base, path, repoRoot, branch string) (bool, error) {
+	setSeam(t, &removeWorktree, func(base, path, repoRoot, branch string) (bool, error) {
 		return false, err
-	}
+	})
 }
 
 // setupDeleteRemovalProject creates a git project with an agents directory

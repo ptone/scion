@@ -32,12 +32,10 @@ import (
 func stubPodmanUnshare(t *testing.T, err error) *[]string {
 	t.Helper()
 	var calls []string
-	orig := podmanUnshareRemove
-	t.Cleanup(func() { podmanUnshareRemove = orig })
-	podmanUnshareRemove = func(_ context.Context, path string) error {
+	setSeam(t, &podmanUnshareRemove, func(_ context.Context, path string) error {
 		calls = append(calls, path)
 		return err
-	}
+	})
 	return &calls
 }
 
@@ -108,13 +106,12 @@ func TestRetryRemovalInUserNamespace_RetryFailureReturned(t *testing.T) {
 func failRemoveAllSafeWith(t *testing.T, name string, err error) {
 	t.Helper()
 	orig := removeAllSafe
-	t.Cleanup(func() { removeAllSafe = orig })
-	removeAllSafe = func(path string) error {
+	setSeam(t, &removeAllSafe, func(path string) error {
 		if filepath.Base(path) == name {
 			return err
 		}
 		return orig(path)
-	}
+	})
 }
 
 // TestDeleteAgentFiles_ExternalStateDirPermissionRetried checks the external
