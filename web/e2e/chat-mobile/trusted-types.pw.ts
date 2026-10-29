@@ -39,6 +39,15 @@ test('@static chat thread and rail make no plain-string markup call and draw the
   await openChatRail(page);
   await openGeneralThread(page);
   await expect(page.locator('scion-chat-message').first()).toBeVisible({ timeout: 15_000 });
+  // Markdown rendering has run (the renderer loads lazily, and a message
+  // shows plain text until it does): a table and a code block from the
+  // fixture's messages are drawn as markdown.
+  await expect(page.locator('scion-chat-message .md-content table').first()).toBeAttached({
+    timeout: 15_000,
+  });
+  await expect(
+    page.locator('scion-chat-message .md-content :is(pre, scion-code-editor)').first()
+  ).toBeAttached({ timeout: 15_000 });
 
   await expectIconsDrawn(page, 3);
   await expectNoTrustedTypesFindings(page, errors);
