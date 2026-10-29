@@ -178,3 +178,34 @@ func TestUpsertHubSettingsGuardedDeleteRace_Postgres(t *testing.T) {
 		}
 	}
 }
+
+// Two saves that merged onto the same runtimes row revision (the runtimes
+// compare-and-swap, ptone/scion#6580) and also write profiles never both
+// commit: the loser gets a conflict and writes neither section.
+func TestUpsertHubSettingsGuardedRuntimesCASRace_Postgres(t *testing.T) {
+	s := newPostgresGuardedStore(t)
+	ctx := context.Background()
+	for i := 0; i < guardedRaceRounds; i++ {
+		_ = s.DeleteHubSetting(ctx, "runtimes")
+		_ = s.DeleteHubSetting(ctx, "profiles")
+		rt, err := s.UpsertHubSetting(ctx, "runtimes", json.RawMessage(`{"a":{"type":"kubernetes"}}`), "admin", 0, "managed")
+		require.NoError(t, err)
+		save := func(ns string) func() error {
+			return func() error {
+				_, err := s.UpsertHubSettingsGuarded(ctx, []store.HubSettingWrite{
+					{Section: "runtimes", Value: json.RawMessage(`{"a":{"type":"kubernetes","namespace":"` + ns + `"}}`), ExpectedRevision: rt.Revision},
+					{Section: "profiles", Value: json.RawMessage(`{"p":{"runtime":"a"}}`), ExpectedRevision: -1},
+				}, nil, "admin", "managed")
+				return err
+			}
+		}
+		errA, errB := raceGuarded(save("one"), save("two"))
+		requireOneWinner(t, errA, errB)
+		got, err := s.GetHubSetting(ctx, "runtimes")
+		require.NoError(t, err)
+		assert.Equal(t, rt.Revision+1, got.Revision, "one write, one revision bump")
+		pr, err := s.GetHubSetting(ctx, "profiles")
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), pr.Revision, "the loser wrote no profiles")
+	}
+}

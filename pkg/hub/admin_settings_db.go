@@ -1395,6 +1395,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// kept (ptone/scion#6580; mergeRuntimeEntries). The row revision read
 	// is the CAS base.
 	var runtimeMergeWarnings []string
+	var runtimeKeptKeys map[string][]string
 	if _, ok := sectionDocs["runtimes"]; ok {
 		var rowValue []byte
 		rev := int64(0)
@@ -1408,7 +1409,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
 			return
 		}
-		merged, warnings, err := mergeRuntimesRow(rowValue, req.Runtimes, sentRuntimesObject(rawBody))
+		merged, warnings, kept, err := mergeRuntimesRow(rowValue, req.Runtimes, sentRuntimesObject(rawBody))
 		if err != nil {
 			slog.Error("PUT server-config: failed to build runtimes document", "error", err)
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
@@ -1417,6 +1418,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		sectionDocs["runtimes"] = merged
 		mergedBaseRevs["runtimes"] = rev
 		runtimeMergeWarnings = warnings
+		runtimeKeptKeys = kept
 	}
 
 	// The start-claim keys are checked on the merged lifecycle document,
@@ -1683,6 +1685,13 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	allValidationErrors := make(map[string][]config.ValidationError)
 	tlsTouched := telemetryTLSTouched(rawBody)
 	for secName, doc := range sectionDocs {
+		if secName == "runtimes" {
+			// The stored keys the merge kept that are not runtime
+			// settings never refuse a save (they carry a save warning).
+			if vdoc, err := runtimesDocForValidation(doc, runtimeKeptKeys); err == nil {
+				doc = vdoc
+			}
+		}
 		errs := opsettings.Validate(secName, doc)
 		if secName == "telemetry" {
 			errs = append(errs, telemetryTLSSaveErrors(doc, tlsTouched, slog.Default())...)
@@ -1820,7 +1829,13 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 				reads[secName] = rev
 				continue
 			}
-			writes = append(writes, guardedSectionWrite{section: secName, doc: doc, expectedRevision: expectedRev})
+			wr := guardedSectionWrite{section: secName, doc: doc, expectedRevision: expectedRev}
+			if secName == "runtimes" && len(runtimeKeptKeys) > 0 {
+				if vdoc, err := runtimesDocForValidation(doc, runtimeKeptKeys); err == nil {
+					wr.validationDoc = vdoc
+				}
+			}
+			writes = append(writes, wr)
 		}
 		if len(writes) > 0 {
 			revs, notApplied, err := ops.updateGuarded(r.Context(), writes, reads, updatedBy, "managed")

@@ -71,9 +71,11 @@ var removedRuntimeStorageKeys = map[string]bool{
 // object of the body, whose members decide which keys were sent. encode
 // turns a typed entry into the value form of stored (JSON values for a
 // database row, YAML values for settings.yaml). It returns the merged
-// entries and one warning per unmodeled key kept or removed-storage key
-// dropped, sorted.
-func mergeRuntimeEntries(stored map[string]map[string]any, sent map[string]config.V1RuntimeConfig, sentRaw map[string]json.RawMessage, encode func(config.V1RuntimeConfig) map[string]any) (map[string]map[string]any, []string) {
+// entries, one warning per unmodeled key kept or removed-storage key
+// dropped, sorted, and the stored keys kept that are not a runtime setting
+// as spelled (keys found by entry name), which the save's schema check
+// leaves out (runtimesDocForValidation).
+func mergeRuntimeEntries(stored map[string]map[string]any, sent map[string]config.V1RuntimeConfig, sentRaw map[string]json.RawMessage, encode func(config.V1RuntimeConfig) map[string]any) (map[string]map[string]any, []string, map[string][]string) {
 	if sentRaw == nil {
 		// No body (internal callers): every key the typed entries encode
 		// counts as sent.
@@ -84,6 +86,7 @@ func mergeRuntimeEntries(stored map[string]map[string]any, sent map[string]confi
 	rtType := reflect.TypeOf(config.V1RuntimeConfig{})
 	out := make(map[string]map[string]any, len(sent))
 	var warnings []string
+	kept := map[string][]string{}
 	for name, entry := range sent {
 		raw, ok := sentRaw[name]
 		if ok && isJSONNull(raw) {
@@ -117,6 +120,7 @@ func mergeRuntimeEntries(stored map[string]map[string]any, sent map[string]confi
 					// is ignored (a hand-edited file): kept as stored, since
 					// renaming it could change which value applies.
 					warnings = append(warnings, fmt.Sprintf("runtimes.%s.%s is not spelled as the runtime setting %s; it is kept as stored and may be ignored; rename it to %s", name, key, canonical, canonical))
+					kept[name] = append(kept[name], key)
 					continue
 				}
 				if removedRuntimeStorageKeys[key] && !sentFoldHas(sentKeys, key) {
@@ -126,11 +130,12 @@ func mergeRuntimeEntries(stored map[string]map[string]any, sent map[string]confi
 				continue
 			}
 			warnings = append(warnings, fmt.Sprintf("runtimes.%s.%s is not a runtime setting and has no effect; it is kept as stored", name, key))
+			kept[name] = append(kept[name], key)
 		}
 		out[name] = merged
 	}
 	sort.Strings(warnings)
-	return out, warnings
+	return out, warnings, kept
 }
 
 // sentFoldHas reports whether keys has key, matched as the typed request
@@ -160,13 +165,14 @@ func sentRuntimesObject(rawBody []byte) map[string]json.RawMessage {
 }
 
 // mergeRuntimesRow merges a save's runtimes onto the stored runtimes row
-// value (database mode) and returns the JSON document to write.
-func mergeRuntimesRow(row []byte, sent map[string]config.V1RuntimeConfig, sentRaw map[string]json.RawMessage) (json.RawMessage, []string, error) {
+// value (database mode) and returns the JSON document to write, the save
+// warnings and the stored keys kept that are not runtime settings.
+func mergeRuntimesRow(row []byte, sent map[string]config.V1RuntimeConfig, sentRaw map[string]json.RawMessage) (json.RawMessage, []string, map[string][]string, error) {
 	stored := map[string]map[string]any{}
 	if len(bytes.TrimSpace(row)) > 0 {
 		var entries map[string]json.RawMessage
 		if err := decodeJSONNumbers(row, &entries); err != nil {
-			return nil, nil, fmt.Errorf("decoding current runtimes row: %w", err)
+			return nil, nil, nil, fmt.Errorf("decoding current runtimes row: %w", err)
 		}
 		for name, e := range entries {
 			var obj map[string]any
@@ -175,7 +181,7 @@ func mergeRuntimesRow(row []byte, sent map[string]config.V1RuntimeConfig, sentRa
 			}
 		}
 	}
-	merged, warnings := mergeRuntimeEntries(stored, sent, sentRaw, func(rt config.V1RuntimeConfig) map[string]any {
+	merged, warnings, kept := mergeRuntimeEntries(stored, sent, sentRaw, func(rt config.V1RuntimeConfig) map[string]any {
 		var m map[string]any
 		b, err := json.Marshal(rt)
 		if err == nil {
@@ -185,9 +191,30 @@ func mergeRuntimesRow(row []byte, sent map[string]config.V1RuntimeConfig, sentRa
 	})
 	doc, err := json.Marshal(merged)
 	if err != nil {
-		return nil, nil, fmt.Errorf("encoding runtimes doc: %w", err)
+		return nil, nil, nil, fmt.Errorf("encoding runtimes doc: %w", err)
 	}
-	return doc, warnings, nil
+	return doc, warnings, kept, nil
+}
+
+// runtimesDocForValidation returns the merged runtimes document without
+// the stored keys the merge kept that are not runtime settings, for the
+// closed runtimes schema check: such a key never refuses a save (it keeps
+// its save warning). Every other key, including every key the body sent,
+// is checked.
+func runtimesDocForValidation(doc json.RawMessage, kept map[string][]string) (json.RawMessage, error) {
+	if len(kept) == 0 {
+		return doc, nil
+	}
+	var entries map[string]map[string]json.RawMessage
+	if err := json.Unmarshal(doc, &entries); err != nil {
+		return nil, err
+	}
+	for name, keys := range kept {
+		for _, k := range keys {
+			delete(entries[name], k)
+		}
+	}
+	return json.Marshal(entries)
 }
 
 // mergeRuntimesFile merges a save's runtimes onto the runtimes value of
@@ -202,7 +229,7 @@ func mergeRuntimesFile(current any, sent map[string]config.V1RuntimeConfig, sent
 			}
 		}
 	}
-	merged, warnings := mergeRuntimeEntries(stored, sent, sentRaw, func(rt config.V1RuntimeConfig) map[string]any {
+	merged, warnings, _ := mergeRuntimeEntries(stored, sent, sentRaw, func(rt config.V1RuntimeConfig) map[string]any {
 		m, _ := marshalToMap(rt).(map[string]any)
 		return m
 	})

@@ -365,3 +365,93 @@ func TestResetPlacementSectionGuardedBatchUnsupported(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, rr.Code, rr.Body.String())
 	requirePlacementRow(t, fake, "profiles", 1, `{"plain":{"runtime":"k8s"}}`)
 }
+
+// A runtimes save merges onto the stored row (ptone/scion#6580): a stored
+// key that is not a runtime setting is kept with a save warning and never
+// refuses the save under the closed runtimes schema; the same key sent by
+// the client is refused, and nothing is written.
+func TestPutSettingsRuntimesKeptUnknownKeyPasses(t *testing.T) {
+	tempSettingsHome(t)
+	srv, fake, ops := newTestDBServer(t)
+	fake.seedWithOrigin("runtimes", json.RawMessage(`{"k8s":{"type":"kubernetes","namespace":"agents","future_field":{"x":1}}}`), "managed")
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
+
+	rr := putServerConfigDB(t, srv, ops, `{"runtimes":{"k8s":{"type":"kubernetes","namespace":"agents","node_selector":{"scion.dev/pool":"agents"}}}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	assert.Contains(t, rr.Body.String(), "runtimes.k8s.future_field")
+	requirePlacementRow(t, fake, "runtimes", 2,
+		`{"k8s":{"type":"kubernetes","namespace":"agents","node_selector":{"scion.dev/pool":"agents"},"future_field":{"x":1}}}`)
+
+	rr = putServerConfigDB(t, srv, ops, `{"runtimes":{"k8s":{"type":"kubernetes","namespace":"agents","bogus_key":1}}}`)
+	require.GreaterOrEqual(t, rr.Code, 400, rr.Body.String())
+	require.Less(t, rr.Code, 500, rr.Body.String())
+	assert.Contains(t, rr.Body.String(), "bogus_key")
+	requirePlacementRow(t, fake, "runtimes", 2,
+		`{"k8s":{"type":"kubernetes","namespace":"agents","node_selector":{"scion.dev/pool":"agents"},"future_field":{"x":1}}}`)
+}
+
+// Placement is checked on the merged pair only for what the save changes:
+// a stored entry with invalid placement that the save leaves as it is does
+// not block a save of another entry or of an unrelated profile; changing
+// that entry, or adding a profile on it, still counts.
+func TestPutSettingsUntouchedStoredBadPlacementDoesNotBlock(t *testing.T) {
+	tempSettingsHome(t)
+	srv, fake, ops := newTestDBServer(t)
+	bad := `"bad":{"type":"docker","runtime_class_name":"gvisor"}`
+	fake.seedWithOrigin("runtimes", json.RawMessage(`{`+bad+`,"k8s":{"type":"kubernetes","namespace":"agents"}}`), "managed")
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
+
+	// The full map sent back with only k8s changed.
+	rr := putServerConfigDB(t, srv, ops, `{"runtimes":{`+bad+`,"k8s":{"type":"kubernetes","namespace":"agents","node_selector":{"scion.dev/pool":"agents"}}}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	// A profiles-only save of an unrelated profile.
+	rr = putServerConfigDB(t, srv, ops, `{"profiles":{"fast":{"runtime":"k8s","runtime_class_name":"gvisor"}}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	// A profile on the bad entry is refused, naming it.
+	rr = putServerConfigDB(t, srv, ops, `{"profiles":{"fast":{"runtime":"k8s","runtime_class_name":"gvisor"},"onbad":{"runtime":"bad","runtime_class_name":"gvisor"}}}`)
+	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
+	assert.Contains(t, rr.Body.String(), "profiles.onbad")
+	assert.NotContains(t, rr.Body.String(), `runtimes.bad"`)
+
+	// Changing the bad entry itself is refused.
+	rr = putServerConfigDB(t, srv, ops, `{"runtimes":{"bad":{"type":"docker","runtime_class_name":"kata"},"k8s":{"type":"kubernetes","namespace":"agents","node_selector":{"scion.dev/pool":"agents"}}}}`)
+	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
+	assert.Contains(t, rr.Body.String(), "runtimes.bad")
+}
+
+// racingRuntimesStore changes the runtimes row (another writer) just before
+// the guarded write, after the save merged onto the row it read.
+type racingRuntimesStore struct {
+	*fakeHubSettingStore
+}
+
+func (s *racingRuntimesStore) UpsertHubSettingsGuarded(ctx context.Context, writes []store.HubSettingWrite, reads map[string]int64, updatedBy, origin string) ([]store.HubSetting, error) {
+	if _, err := s.fakeHubSettingStore.UpsertHubSetting(ctx, "runtimes",
+		json.RawMessage(`{"k8s":{"type":"kubernetes","namespace":"other"}}`), "other@example.com", -1, "managed"); err != nil {
+		return nil, err
+	}
+	return s.fakeHubSettingStore.UpsertHubSettingsGuarded(ctx, writes, reads, updatedBy, origin)
+}
+
+// The runtimes write is the compare-and-swap on the row the merge read
+// (ptone/scion#6580), in the same guarded transaction as profiles: a
+// concurrent runtimes write makes the save a 409 that writes nothing.
+func TestPutSettingsRuntimesMergeCASConflict(t *testing.T) {
+	tempSettingsHome(t)
+	srv, fake, ops := newTestDBServer(t)
+	fake.seedWithOrigin("runtimes", json.RawMessage(`{"k8s":{"type":"kubernetes","namespace":"agents"}}`), "managed")
+	ops.store = &racingRuntimesStore{fakeHubSettingStore: fake}
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
+
+	rr := putServerConfigDB(t, srv, ops, `{"runtimes":{"k8s":{"type":"kubernetes","namespace":"agents","node_selector":{"scion.dev/pool":"agents"}}},
+		"profiles":{"fast":{"runtime":"k8s","runtime_class_name":"gvisor"}}}`)
+	require.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
+	assert.Contains(t, rr.Body.String(), `"runtimes"`)
+	requirePlacementRow(t, fake, "runtimes", 2, `{"k8s":{"type":"kubernetes","namespace":"other"}}`)
+	requireNoPlacementRow(t, fake, "profiles")
+}

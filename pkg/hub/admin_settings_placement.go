@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -134,11 +135,14 @@ type placementPair struct {
 }
 
 // placementPairForSave validates the proposed runtimes and profiles pair
-// of a save that sends either section: the sent documents, and for a
-// section the body leaves out, its stored row (or, without one, the value
-// in effect). A finding answers 422 validation_error with every path and
-// fixed reason, sorted, and nothing is written. ok is false when the
-// response has been written.
+// of a save that sends either section: the sent documents (runtimes as
+// merged onto the stored row, ptone/scion#6580), and for a section the
+// body leaves out, its stored row (or, without one, the value in effect).
+// Only findings on what the save touches count (placementTouched): a
+// stored entry the save leaves as it is never blocks it; the server config
+// view's placement report lists it, and a start refuses it. A finding
+// answers 422 validation_error with every path and fixed reason, sorted,
+// and nothing is written. ok is false when the response has been written.
 func (s *Server) placementPairForSave(ctx context.Context, w http.ResponseWriter, ops *OperationalSettings, sectionDocs map[string]json.RawMessage) (placementPair, bool) {
 	var pair placementPair
 	for _, section := range placementSections {
@@ -158,50 +162,117 @@ func (s *Server) placementPairForSave(ctx context.Context, w http.ResponseWriter
 		return pair, true
 	}
 	writePlacementFindings(w, findings,
-		fmt.Sprintf("Kubernetes placement in runtimes or profiles is not valid (%d findings); fix the named settings, including those of a section this save does not send", len(findings)), "")
+		fmt.Sprintf("Kubernetes placement in runtimes or profiles is not valid (%d findings); fix the named settings", len(findings)), "")
 	return pair, false
 }
 
 // readPlacementPair validates the runtimes and profiles pair made of the
 // documents in docs and, for a section docs leaves out, its stored row
-// (or, without one, the value in effect). reads holds the stored revision
-// of each section read (0: no row). ok is false when an error response has
-// been written.
+// (or, without one, the value in effect), and returns the findings on what
+// docs change against the stored pair (placementTouched). reads holds the
+// stored revision of each section docs leaves out (0: no row). ok is false
+// when an error response has been written.
 func readPlacementPair(ctx context.Context, w http.ResponseWriter, ops *OperationalSettings, docs map[string]json.RawMessage) (findings []config.PlacementSettingsError, reads map[string]int64, ok bool) {
 	reads = map[string]int64{}
 	snap := ops.Snapshot()
-	var runtimes opsettings.RuntimesSettings
-	var profiles opsettings.ProfilesSettings
-	load := func(section string, inEffect, out interface{}) error {
-		if doc, given := docs[section]; given {
-			return json.Unmarshal(doc, out)
-		}
+	inEffect := map[string]interface{}{"runtimes": snap.Runtimes, "profiles": snap.Profiles}
+	stored := map[string]json.RawMessage{}
+	for _, section := range placementSections {
 		row, err := ops.store.GetHubSetting(ctx, section)
 		switch {
 		case errors.Is(err, store.ErrNotFound):
-			reads[section] = 0
-			b, err := json.Marshal(inEffect)
+			b, err := json.Marshal(inEffect[section])
 			if err != nil {
-				return err
+				slog.Error("Failed to encode the value in effect for placement validation", "section", section, "error", err)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
+				return nil, nil, false
 			}
-			return json.Unmarshal(b, out)
+			stored[section] = b
 		case err != nil:
-			return err
+			slog.Error("Failed to read section for placement validation", "section", section, "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
+			return nil, nil, false
+		default:
+			stored[section] = row.Value
 		}
-		reads[section] = row.Revision
-		return json.Unmarshal(row.Value, out)
+		if _, given := docs[section]; !given {
+			reads[section] = 0
+			if err == nil {
+				reads[section] = row.Revision
+			}
+		}
 	}
-	if err := load("runtimes", snap.Runtimes, &runtimes); err != nil {
-		slog.Error("Failed to read runtimes for placement validation", "error", err)
+	proposed := func(section string) json.RawMessage {
+		if doc, given := docs[section]; given {
+			return doc
+		}
+		return stored[section]
+	}
+	var runtimes opsettings.RuntimesSettings
+	var profiles opsettings.ProfilesSettings
+	if err := json.Unmarshal(proposed("runtimes"), &runtimes); err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
 		return nil, nil, false
 	}
-	if err := load("profiles", snap.Profiles, &profiles); err != nil {
-		slog.Error("Failed to read profiles for placement validation", "error", err)
+	if err := json.Unmarshal(proposed("profiles"), &profiles); err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
 		return nil, nil, false
 	}
-	return config.ValidatePlacementSettings(runtimes, profiles), reads, true
+	touched := placementTouched(stored, map[string]json.RawMessage{"runtimes": proposed("runtimes"), "profiles": proposed("profiles")}, runtimes, profiles)
+	for _, f := range config.ValidatePlacementSettings(runtimes, profiles) {
+		section, rest, _ := strings.Cut(f.Path, ".")
+		name, _, _ := strings.Cut(rest, ".")
+		if touched[section+"."+name] {
+			findings = append(findings, f)
+		}
+	}
+	return findings, reads, true
+}
+
+// placementTouched returns, as "runtimes.NAME" and "profiles.NAME", the
+// entries the proposed pair adds, changes or removes against the stored
+// pair, widened by what such a change can break: every profile whose
+// runtime is a changed entry, and every runtime entry in the same context
+// and namespace group as a changed one (config.LiteralSiblingGroups),
+// since a sibling disagreement is created by the changed entry.
+func placementTouched(stored, proposed map[string]json.RawMessage, runtimes opsettings.RuntimesSettings, profiles opsettings.ProfilesSettings) map[string]bool {
+	changed := map[string]bool{}
+	for _, section := range placementSections {
+		var before, after map[string]interface{}
+		_ = json.Unmarshal(stored[section], &before)
+		_ = json.Unmarshal(proposed[section], &after)
+		for name, v := range after {
+			if !reflect.DeepEqual(before[name], v) {
+				changed[section+"."+name] = true
+			}
+		}
+		for name := range before {
+			if _, kept := after[name]; !kept {
+				changed[section+"."+name] = true
+			}
+		}
+	}
+	touched := map[string]bool{}
+	for k := range changed {
+		touched[k] = true
+	}
+	for name, p := range profiles {
+		if p.Runtime != "" && changed["runtimes."+p.Runtime] {
+			touched["profiles."+name] = true
+		}
+	}
+	for _, group := range config.LiteralSiblingGroups(runtimes) {
+		hit := false
+		for _, name := range group {
+			hit = hit || changed["runtimes."+name]
+		}
+		for _, name := range group {
+			if hit {
+				touched["runtimes."+name] = true
+			}
+		}
+	}
+	return touched
 }
 
 // writePlacementFindings answers 422 validation_error with every finding's
@@ -319,6 +390,9 @@ type guardedSectionWrite struct {
 	section          string
 	doc              json.RawMessage
 	expectedRevision int64
+	// validationDoc, when set, is what the section schema check sees
+	// instead of doc (runtimesDocForValidation).
+	validationDoc json.RawMessage
 }
 
 // updateGuarded is update for several sections in one store transaction
@@ -337,7 +411,11 @@ func (o *OperationalSettings) updateGuarded(ctx context.Context, writes []guarde
 		if err := o.checkWriteGuard(ctx, wr.section); err != nil {
 			return nil, nil, err
 		}
-		if errs := opsettings.Validate(wr.section, wr.doc); len(errs) > 0 {
+		vdoc := wr.doc
+		if wr.validationDoc != nil {
+			vdoc = wr.validationDoc
+		}
+		if errs := opsettings.Validate(wr.section, vdoc); len(errs) > 0 {
 			return nil, nil, fmt.Errorf("%w for section %q: %v", ErrSectionValidation, wr.section, errs)
 		}
 		batch = append(batch, store.HubSettingWrite{Section: wr.section, Value: wr.doc, ExpectedRevision: wr.expectedRevision})
