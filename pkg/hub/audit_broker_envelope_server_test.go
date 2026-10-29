@@ -118,7 +118,7 @@ func TestBrokerEnvelope_T5_ProductionConstructor(t *testing.T) {
 	assert.Equal(t, regID, reg[0]["correlation_id"])
 	assert.Equal(t, map[string]any{"kind": "user", "id": member.ID}, auditGroup(t, reg[0], "principal"))
 	assert.Equal(t, map[string]any{"kind": "runtime_broker", "id": resp.BrokerID}, auditGroup(t, reg[0], "resource"))
-	assert.Equal(t, map[string]any{"operation": "register", "source_ip": "192.0.2.1"}, auditGroup(t, reg[0], "payload"))
+	assert.Equal(t, map[string]any{"operation": "register", "source_ip": "127.0.0.1"}, auditGroup(t, reg[0], "payload"))
 	assertSessionCredential(t, reg[0])
 	require.NotEmpty(t, resp.JoinToken)
 	assert.NotContains(t, fmt.Sprint(capture.records()), resp.JoinToken, "the join token never reaches an audit record")
