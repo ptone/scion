@@ -12,6 +12,8 @@ The Hub persists two record types:
 - **Skill** — the logical skill: `name`, `slug`, `description`, `tags`, `scope` (`core`, `global`, `project`, `user`) and optional `scope_id`, ownership, and `status` (`active` or `archived`). Skills are unique per `(slug, scope, scope_id)`.
 - **SkillVersion** — an immutable release of a skill: `version` (semver), `status` (`draft`, `published`, `deprecated`, `archived`), a `sha256:` `content_hash`, the file manifest, publisher, download count, and — for deprecated versions — a deprecation message and optional replacement URI.
 
+Resolving a version constraint or content hash considers only `published` and `deprecated` versions. Reading a file by version number, the versions list and a single version's details apply the same rule, except that the skill's owner, its creator and callers who can update the skill also see its `draft` and `archived` versions. A version outside that set is reported as not found, exactly like a version that does not exist. Signed file URLs that the Hub issues at dispatch serve the version they were issued for until they expire.
+
 `scion skills delete` performs a **soft delete**: the skill's status becomes `archived` and its records are retained for audit and history.
 
 The registry is exposed over the Hub REST API under `/api/v1/skills` (list/create, versions, upload/finalize, deprecate, download, and resolve), and administered through the [web UI](#web-ui).

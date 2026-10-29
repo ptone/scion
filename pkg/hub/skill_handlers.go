@@ -898,7 +898,13 @@ func (s *Server) listSkillVersions(w http.ResponseWriter, r *http.Request, skill
 		return
 	}
 
-	result, err := s.store.ListSkillVersions(ctx, skillID, store.ListOptions{
+	// Version status filter (skill_version_status.go), applied in the store
+	// so the page and totalCount agree.
+	var filter store.SkillVersionFilter
+	if !s.skillVersionsAllStatuses(ctx, identity, skill) {
+		filter.Statuses = skillVersionListedStatuses
+	}
+	result, err := s.store.ListSkillVersions(ctx, skillID, filter, store.ListOptions{
 		Limit: 100,
 	})
 	if err != nil {
@@ -941,6 +947,12 @@ func (s *Server) getSkillVersion(w http.ResponseWriter, r *http.Request, skillID
 
 	if sv.SkillID != skillID {
 		NotFound(w, "SkillVersion")
+		return
+	}
+	// Version status filter (skill_version_status.go): a filtered-out
+	// version gets the same response as a missing version ID.
+	if !s.skillVersionVisible(ctx, identity, skill, sv) {
+		writeErrorFromErr(w, store.ErrNotFound, "")
 		return
 	}
 
