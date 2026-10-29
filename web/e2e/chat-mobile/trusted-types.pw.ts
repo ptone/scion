@@ -61,7 +61,9 @@ test('@static chat thread and rail make no plain-string markup call and draw the
   await expect(page.locator('scion-chat-message').first()).toBeVisible({ timeout: 15_000 });
 
   await expectIconsDrawn(page, 3);
-  await expectNoTrustedTypesFindings(page, errors, CHAT_RENDERING);
+  const allowed = await expectNoTrustedTypesFindings(page, errors, CHAT_RENDERING);
+  // The allowance is still needed; remove it once this fails.
+  expect(allowed['chat message rendering (ptone/scion#6127)']).toBeGreaterThan(0);
   await expectProbeSeesViolation(page, MODE);
   await expectProbeSeesIconFileParse(page);
 });

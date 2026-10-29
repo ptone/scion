@@ -1,5 +1,8 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { test, expect, type Page } from '@playwright/test';
 import { installEventSourceStub } from '../event-source-stub.js';
+import { builtSheetPath, distClient, shoelaceIconContent, symbolContent } from './built-icons.js';
 
 const agent = '11111111-1111-4111-8111-111111111111';
 const agentB = '22222222-2222-4222-8222-222222222222';
@@ -3188,50 +3191,28 @@ test.describe('production icon and title verification', () => {
     }).toPass({ timeout: 5000 });
   });
 
-  test('grid.svg exists in production build output and matches Shoelace source', async () => {
-    // The original #1677 defect was a production build issue — the grid.svg
-    // asset wasn't copied to the built output by copy-shoelace-icons.mjs.
-    // The dev server test above verifies rendering, but this test directly
-    // verifies the asset exists in dist/ after a production build.
-    const fs = await import('node:fs');
-    const path = await import('node:path');
-    const { fileURLToPath } = await import('node:url');
-    const thisDir = path.dirname(fileURLToPath(import.meta.url));
-    const distPath = path.resolve(thisDir, '../../dist/client');
-    // copy-shoelace-icons.mjs copies to public/shoelace/assets/icons/
-    // which Vite copies to dist/client/shoelace/assets/icons/ during build
-    const builtGridSvg = path.join(distPath, 'shoelace/assets/icons/grid.svg');
-    expect(fs.existsSync(builtGridSvg)).toBe(true);
-    // Verify it's a real SVG with content
-    const builtContent = fs.readFileSync(builtGridSvg, 'utf-8');
-    expect(builtContent).toContain('<svg');
-    expect(builtContent.length).toBeGreaterThan(100);
-
-    // Compare built asset against packaged Shoelace source — byte-equal copy
-    const sourceGridSvg = path.join(
-      thisDir,
-      '../../node_modules/@shoelace-style/shoelace/dist/assets/icons/grid.svg'
-    );
-    const sourceContent = fs.readFileSync(sourceGridSvg, 'utf-8');
-    expect(builtContent).toBe(sourceContent);
+  test('grid is in the production icon sheet and matches Shoelace source', () => {
+    // The original #1677 defect was a production build issue: the grid icon
+    // was missing from the built output. The dev server test above checks
+    // rendering; this one checks the production icon sheet itself.
+    const sheet = readFileSync(join(distClient, builtSheetPath()), 'utf-8');
+    const content = symbolContent(sheet, 'grid');
+    expect(content).not.toBeNull();
+    expect(content!.length).toBeGreaterThan(100);
+    // The symbol draws exactly what the packaged Shoelace icon draws.
+    expect(content).toBe(shoelaceIconContent('grid'));
   });
 
-  test('grid.svg is served from built output at correct URL', async () => {
-    // Serve the built output directory (dist/client/) with a simple static
-    // server and verify grid.svg is reachable at the expected path with
-    // content matching the Shoelace source.
-    const fs = await import('node:fs');
-    const path = await import('node:path');
+  test('the icon sheet with grid is served from built output at its URL', async () => {
+    // Serve dist/client with a simple static server and check that the
+    // sheet is reachable at its fingerprinted path and holds the grid icon.
     const http = await import('node:http');
-    const { fileURLToPath } = await import('node:url');
-    const thisDir = path.dirname(fileURLToPath(import.meta.url));
-    const distPath = path.resolve(thisDir, '../../dist/client');
+    const sheetPath = builtSheetPath();
 
     const server = http.createServer((req, res) => {
-      if (req.url === '/shoelace/assets/icons/grid.svg') {
-        const filePath = path.join(distPath, 'shoelace/assets/icons/grid.svg');
+      if (req.url === `/${sheetPath}`) {
         try {
-          const content = fs.readFileSync(filePath);
+          const content = readFileSync(join(distClient, sheetPath));
           res.writeHead(200, { 'Content-Type': 'image/svg+xml' });
           res.end(content);
         } catch {
@@ -3248,18 +3229,11 @@ test.describe('production icon and title verification', () => {
     const port = (server.address() as { port: number }).port;
 
     try {
-      const response = await fetch(`http://localhost:${port}/shoelace/assets/icons/grid.svg`);
+      const response = await fetch(`http://localhost:${port}/${sheetPath}`);
       expect(response.status).toBe(200);
       const text = await response.text();
-      expect(text).toContain('<svg');
-
-      // Verify served content matches Shoelace source (byte-equal)
-      const sourceGridSvg = path.join(
-        thisDir,
-        '../../node_modules/@shoelace-style/shoelace/dist/assets/icons/grid.svg'
-      );
-      const sourceContent = fs.readFileSync(sourceGridSvg, 'utf-8');
-      expect(text).toBe(sourceContent);
+      expect(text).toMatch(/^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg">/);
+      expect(symbolContent(text, 'grid')).toBe(shoelaceIconContent('grid'));
     } finally {
       server.close();
     }
