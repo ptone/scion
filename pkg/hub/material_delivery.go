@@ -219,7 +219,8 @@ func envVarDeliveryKind(v store.EnvVar) MaterialKind {
 // as_needed and reserved-target skips, the progeny pass and the error
 // contract are resolveEnvFromStorage's; TZ rows, which buildStartEnv
 // discards, are skipped. A credential that cannot be minted is an error,
-// like a store read error.
+// like a store read error. The owner's user-scope rows not shared with
+// progeny are held to the owner material chain rule, as there.
 func (d *HTTPAgentDispatcher) selectDeliveryEnv(ctx context.Context, sel *deliverySelector, agent *store.Agent) (map[string]string, map[string]bool, error) {
 	result := make(map[string]string)
 	plain := make(map[string]bool)
@@ -227,6 +228,10 @@ func (d *HTTPAgentDispatcher) selectDeliveryEnv(ctx context.Context, sel *delive
 		return result, plain, nil
 	}
 
+	// The owner material chain rule for the owner's rows not shared with
+	// progeny (start_owner_material_chain.go).
+	gate := d.newOwnerMaterialGate(agent)
+	defer gate.flush(ctx, ownerMaterialSiteLaunchEnv)
 	for _, filter := range d.envScopesForDispatch(ctx, agent) {
 		vars, err := d.store.ListEnvVars(ctx, filter)
 		if err != nil {
@@ -245,7 +250,11 @@ func (d *HTTPAgentDispatcher) selectDeliveryEnv(ctx context.Context, sel *delive
 			if v.Key == agentTZEnvKey {
 				continue
 			}
-			if filter.Scope != store.ScopeUser {
+			if filter.Scope == store.ScopeUser {
+				if !gate.allowEnvRow(ctx, filter, v) {
+					continue
+				}
+			} else {
 				allowed, err := sel.authorize(ctx, envVarDeliveryKind(v), materialRecordEnvVar, v.ID, v.Key, filter.Scope, filter.ScopeID)
 				if err != nil {
 					return nil, nil, err
@@ -337,7 +346,8 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 
 	// The start-time owner-path and progeny checks resolveSecrets applies
 	// through the backend's Resolve. Nil without an authorization service.
-	startOpts := d.startSecretResolveOpts(ctx, agent)
+	startOpts, gate := d.startSecretResolveOpts(ctx, agent)
+	defer gate.flush(ctx, ownerMaterialSiteLaunchSecrets)
 
 	var kept []secretDeliveryCandidate
 	for _, sc := range scopes {
