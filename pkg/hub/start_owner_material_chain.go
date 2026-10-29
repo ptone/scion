@@ -519,6 +519,29 @@ func (a *AuthzService) recordOwnerMaterialChain(ctx context.Context, site, outco
 	}
 }
 
+// testAdminScopes is one evaluation of testAdminRootScopes for an agent.
+// A start-time site computes it once and passes the same value to the
+// owner material chain rule's keep decision (startSecretResolveOpts) and to
+// the test-admin scope restriction it applies (applyTestAdminSecretScopes,
+// or the launch selection's withholding), so the two cannot diverge.
+type testAdminScopes struct {
+	restricted bool
+	allowed    map[string]bool
+	root       string
+}
+
+// testAdminScopesFor evaluates testAdminRootScopes once for agent.
+func (d *HTTPAgentDispatcher) testAdminScopesFor(ctx context.Context, agent *store.Agent) testAdminScopes {
+	restricted, allowed, root := d.testAdminRootScopes(ctx, agent)
+	return testAdminScopes{restricted: restricted, allowed: allowed, root: root}
+}
+
+// withholdsUser reports whether the restriction withholds the user scope.
+// A nil value (no restriction applied afterwards) withholds nothing.
+func (t *testAdminScopes) withholdsUser() bool {
+	return t != nil && t.restricted && !t.allowed[store.ScopeUser]
+}
+
 // ownerCloneTokenAllowed applies the start-time user-scope checks
 // (startSecretResolveOpts: the parent ceiling for a shared row, the owner
 // material chain rule for a row not shared) to the owner's GITHUB_TOKEN row
@@ -529,8 +552,8 @@ func (a *AuthzService) recordOwnerMaterialChain(ctx context.Context, site, outco
 // Resolve does not check it then.
 func (d *HTTPAgentDispatcher) ownerCloneTokenAllowed(ctx context.Context, agent *store.Agent) bool {
 	// The by-name read applies no test-admin scope restriction afterwards,
-	// so the check runs without the test-admin keep.
-	opts, gate := d.startSecretResolveOptsFor(ctx, agent, false)
+	// so the check runs without the test-admin keep (nil).
+	opts, gate := d.startSecretResolveOpts(ctx, agent, nil)
 	if opts == nil || opts.UserScopeCheck == nil {
 		return true
 	}

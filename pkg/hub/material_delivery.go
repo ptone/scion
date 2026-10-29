@@ -344,9 +344,13 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 		scopes = append(scopes, scopeEntry{store.ScopeUser, agent.OwnerID})
 	}
 
+	// The test-admin scope restriction, evaluated once: the start-time
+	// checks' keep decision and the withholding below use this one result.
+	ta := d.testAdminScopesFor(ctx, agent)
+
 	// The start-time owner-path and progeny checks resolveSecrets applies
 	// through the backend's Resolve. Nil without an authorization service.
-	startOpts, gate := d.startSecretResolveOpts(ctx, agent)
+	startOpts, gate := d.startSecretResolveOpts(ctx, agent, &ta)
 	defer gate.flush(ctx, ownerMaterialSiteLaunchSecrets)
 
 	var kept []secretDeliveryCandidate
@@ -411,7 +415,7 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 	// name or target, and the restriction then drops it. The one
 	// difference is fail-closed: a withheld item whose value could not
 	// have been read still outranks that lower-scope item.
-	restricted, allowedScopes, testAdminRoot := d.testAdminRootScopes(ctx, agent)
+	restricted, allowedScopes, testAdminRoot := ta.restricted, ta.allowed, ta.root
 	withheld := func(scope string) bool { return restricted && !allowedScopes[scope] }
 
 	metas := make([]secret.SecretMeta, 0, len(kept))

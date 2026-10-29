@@ -2892,7 +2892,10 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 
 	// The start-time user-scope checks: both passes below apply them to the
 	// owner's rows (startSecretResolveOpts).
-	resolveOpts, gate := d.startSecretResolveOpts(ctx, agent)
+	// One evaluation of the test-admin scope restriction, for both the
+	// start-time checks' keep decision and the restriction itself.
+	ta := d.testAdminScopesFor(ctx, agent)
+	resolveOpts, gate := d.startSecretResolveOpts(ctx, agent, &ta)
 	defer gate.flush(ctx, ownerMaterialSiteAsNeeded)
 
 	// 1. Check env_vars table (all scopes, in precedence order so last-wins).
@@ -2947,7 +2950,7 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 		resolved, err := d.secretBackend.Resolve(
 			ctx, agent.OwnerID, agent.ProjectID, agent.RuntimeBrokerID, resolveOpts)
 		if err == nil {
-			resolved = d.restrictTestAdminRootedSecrets(ctx, agent, resolved)
+			resolved = d.applyTestAdminSecretScopes(ctx, agent, resolved, ta.restricted, ta.allowed, ta.root)
 		}
 		if errors.Is(err, secret.ErrResolveDecrypt) {
 			// A stored secret could not be decrypted: never answer the
@@ -4814,39 +4817,24 @@ func (d *HTTPAgentDispatcher) deferredLifecycleResult(
 // A row that is rejected is skipped inside the resolver, so a lower-scope
 // row with the same key stays in effect. Neither check widens anything: a
 // row is delivered only when every decision applied to it allows.
-func (d *HTTPAgentDispatcher) startSecretResolveOpts(ctx context.Context, agent *store.Agent) (*secret.ResolveOpts, *ownerMaterialGate) {
-	return d.startSecretResolveOptsFor(ctx, agent, true)
-}
-
-// startSecretResolveOptsFor is startSecretResolveOpts. testAdminMasks says
-// whether the caller applies the test-admin scope restriction to what the
-// check keeps (resolveSecrets, resolveAsNeededForKeys and the launch
-// selection do; the by-name clone-token read does not). When it does and
-// the restriction withholds the user scope for this agent, an unshared
-// owner row is kept for the restriction to drop: the restriction's
-// withheld row still masks a lower-scope row of the same name, exactly as
-// without the owner material chain rule, and nothing of the owner's is
-// delivered either way.
-func (d *HTTPAgentDispatcher) startSecretResolveOptsFor(ctx context.Context, agent *store.Agent, testAdminMasks bool) (*secret.ResolveOpts, *ownerMaterialGate) {
+//
+// ta is the test-admin scope restriction the caller applies, afterwards,
+// to what this check keeps: the single evaluation (testAdminScopesFor) the
+// caller also passes to applyTestAdminSecretScopes or uses for its own
+// withholding (resolveSecrets, resolveAsNeededForKeys and the launch
+// selection). When that restriction withholds the user scope, an unshared
+// owner row is kept for the restriction to drop: its withheld row still
+// masks a lower-scope row of the same name, exactly as without the owner
+// material chain rule, and nothing of the owner's is delivered either way.
+// A row kept this way is not counted by the owner material chain Warn or
+// metric: the restriction drops it and reports the withheld scope itself.
+// A nil ta (the by-name clone-token read, which applies no restriction
+// afterwards) never keeps a row for it.
+func (d *HTTPAgentDispatcher) startSecretResolveOpts(ctx context.Context, agent *store.Agent, ta *testAdminScopes) (*secret.ResolveOpts, *ownerMaterialGate) {
 	if agent == nil || d.authzService == nil {
 		return nil, nil
 	}
 	gate := d.newOwnerMaterialGate(agent)
-	var (
-		taDone     bool
-		taWithheld bool
-	)
-	testAdminWithholdsUser := func() bool {
-		if !testAdminMasks {
-			return false
-		}
-		if !taDone {
-			restricted, allowed, _ := d.testAdminRootScopes(ctx, agent)
-			taWithheld = restricted && !allowed[store.ScopeUser]
-			taDone = true
-		}
-		return taWithheld
-	}
 	agentID := agent.ID
 	ancestry := agent.Ancestry
 	// The synthetic identity must carry the agent's real scopes.
@@ -4952,7 +4940,7 @@ func (d *HTTPAgentDispatcher) startSecretResolveOptsFor(ctx context.Context, age
 			if !s.AllowProgeny {
 				// Start-time owner-path injection: an agent-subject access
 				// constraint that denies secret.use does not stop it.
-				if testAdminWithholdsUser() {
+				if ta.withholdsUser() {
 					// The test-admin restriction drops the row and keeps its
 					// masking (see startSecretResolveOptsFor).
 					return true
@@ -5014,14 +5002,17 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 	}
 	// The start-time checks on the progeny and owner user-scope paths
 	// (startSecretResolveOpts).
-	resolveOpts, gate := d.startSecretResolveOpts(ctx, agent)
+	// One evaluation of the test-admin scope restriction, for both the
+	// start-time checks' keep decision and the restriction itself.
+	ta := d.testAdminScopesFor(ctx, agent)
+	resolveOpts, gate := d.startSecretResolveOpts(ctx, agent, &ta)
 
 	resolved, err := d.secretBackend.Resolve(ctx, agent.OwnerID, agent.ProjectID, agent.RuntimeBrokerID, resolveOpts)
 	gate.flush(ctx, ownerMaterialSiteResolveSecrets)
 	if err != nil {
 		return nil, nil, err
 	}
-	resolved = d.restrictTestAdminRootedSecrets(ctx, agent, resolved)
+	resolved = d.applyTestAdminSecretScopes(ctx, agent, resolved, ta.restricted, ta.allowed, ta.root)
 	result := make([]ResolvedSecret, 0, len(resolved))
 	var asNeededKeys []string
 	for _, sv := range resolved {
