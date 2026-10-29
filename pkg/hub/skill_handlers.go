@@ -945,13 +945,10 @@ func (s *Server) getSkillVersion(w http.ResponseWriter, r *http.Request, skillID
 		return
 	}
 
-	if sv.SkillID != skillID {
-		NotFound(w, "SkillVersion")
-		return
-	}
-	// Version status filter (skill_version_status.go): a filtered-out
-	// version gets the same response as a missing version ID.
-	if !s.skillVersionVisible(ctx, identity, skill, sv) {
+	// A version of another skill, and a version outside the status filter
+	// (skill_version_status.go), get the same response as a missing
+	// version ID.
+	if sv.SkillID != skillID || !s.skillVersionVisible(ctx, identity, skill, sv) {
 		writeErrorFromErr(w, store.ErrNotFound, "")
 		return
 	}

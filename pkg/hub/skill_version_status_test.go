@@ -189,12 +189,29 @@ func TestSkillFileRead_VersionStatusFilter(t *testing.T) {
 }
 
 // TestSkillVersionGet_StatusFilter: the single-version details endpoint
-// applies the same status filter, and a filtered-out version gets exactly
-// the response of a version ID that does not exist.
+// applies the same status filter, and a filtered-out version, like a
+// version of another skill, gets exactly the response of a version ID that
+// does not exist.
 func TestSkillVersionGet_StatusFilter(t *testing.T) {
 	f := setupSkillVersionStatusFixture(t)
 	missing := doRequestAsUser(t, f.srv, f.reader, http.MethodGet, f.detailsURL(api.NewUUID()), nil)
 	require.Equal(t, http.StatusNotFound, missing.Code, missing.Body.String())
+
+	t.Run("version of another skill", func(t *testing.T) {
+		other := createTestSkill(t, f.srv.store, "status-filter-other-"+api.NewUUID()[:8],
+			store.SkillScopeProject, f.skill.ScopeID, f.owner.ID)
+		otherVersion := &store.SkillVersion{
+			ID:      api.NewUUID(),
+			SkillID: other.ID,
+			Version: "1.0.0",
+			Status:  store.SkillVersionStatusPublished,
+		}
+		require.NoError(t, f.srv.store.CreateSkillVersion(context.Background(), otherVersion))
+		for _, user := range []*store.User{f.reader, f.admin} {
+			rec := doRequestAsUser(t, f.srv, user, http.MethodGet, f.detailsURL(otherVersion.ID), nil)
+			assertSameResponse(t, missing, rec)
+		}
+	})
 
 	for _, tc := range skillVersionStatusCases {
 		id := f.versionIDs[tc.version]
