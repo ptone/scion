@@ -130,8 +130,10 @@ func (r SettingsPlacementReport) Summary() string {
 	return b.String()
 }
 
-// ScanSettingsPlacement categorizes the typed runtime entries and profiles
-// by the findings of ValidatePlacementSettings, one count per finding.
+// ScanSettingsPlacement counts the placement findings of
+// ValidatePlacementSettings in the typed runtime entries and profiles, by
+// category: one count per finding, so an entry with two findings counts
+// twice.
 func ScanSettingsPlacement(runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig) SettingsPlacementReport {
 	var r SettingsPlacementReport
 	for _, e := range ValidatePlacementSettings(runtimes, profiles) {
