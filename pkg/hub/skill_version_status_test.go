@@ -137,15 +137,6 @@ func (f *skillVersionStatusFixture) listVersions(t *testing.T, user *store.User)
 	return result.Items
 }
 
-// assertSameResponse asserts got is byte-identical to want: status, headers
-// and body.
-func assertSameResponse(t *testing.T, want, got *httptest.ResponseRecorder) {
-	t.Helper()
-	assert.Equal(t, want.Code, got.Code)
-	assert.Equal(t, want.Header(), got.Header())
-	assert.Equal(t, want.Body.String(), got.Body.String())
-}
-
 func versionNumbers(items []store.SkillVersion) []string {
 	out := make([]string, 0, len(items))
 	for _, sv := range items {
@@ -173,7 +164,7 @@ func TestSkillFileRead_VersionStatusFilter(t *testing.T) {
 				assert.Equal(t, skillVersionStatusFileContent(tc.version), rec.Body.Bytes())
 				return
 			}
-			assertSameResponse(t, missing, rec)
+			assertSameResponse(t, missing, rec, tc.status)
 		})
 		for _, c := range []struct {
 			name string
@@ -209,7 +200,7 @@ func TestSkillVersionGet_StatusFilter(t *testing.T) {
 		require.NoError(t, f.srv.store.CreateSkillVersion(context.Background(), otherVersion))
 		for _, user := range []*store.User{f.reader, f.admin} {
 			rec := doRequestAsUser(t, f.srv, user, http.MethodGet, f.detailsURL(otherVersion.ID), nil)
-			assertSameResponse(t, missing, rec)
+			assertSameResponse(t, missing, rec, "version of another skill")
 		}
 	})
 
@@ -222,7 +213,7 @@ func TestSkillVersionGet_StatusFilter(t *testing.T) {
 				assert.Contains(t, rec.Body.String(), `"version":"`+tc.version+`"`)
 				return
 			}
-			assertSameResponse(t, missing, rec)
+			assertSameResponse(t, missing, rec, tc.status)
 		})
 		for _, c := range []struct {
 			name string
