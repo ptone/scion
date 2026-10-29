@@ -19,10 +19,8 @@ Subcommands:
   seed-update-off   Merge {"autoCheckForUpdates": false} into the app's
                     app_storage.json, keeping every other key.
   render-nginx      Render nginx.conf.tmpl into a private nginx.conf.
-
-The CSRF option of render-nginx reads the token from the language server's
-own command line (same user, same container) and writes it only into the
-rendered config (mode 0600). The token is never printed or logged.
+  free-port         Print the preferred loopback port if it is free, else
+                    a free ephemeral one.
 
 Stdlib only.
 """
@@ -33,6 +31,7 @@ import argparse
 import json
 import os
 import re
+import socket
 import sys
 import tempfile
 
@@ -45,26 +44,15 @@ PLACEHOLDERS = (
     "STATE",
     "AGUI_PROXY_PORT",
     "JETSKI_LS_PORT",
-    "ORIGIN_HEADER_LINE",
-    "CSRF_HEADER_LINE",
     "PATH_REWRITE_RULES",
 )
 _PLACEHOLDER_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
-CSRF_HEADER = "x-codeium-csrf-token"
-CSRF_FLAG = "--csrf_token"
-LS_NAME = "language_server"
-# Characters that cannot break out of a double-quoted nginx string or start
-# an nginx variable.
-_TOKEN_RE = re.compile(r"^[A-Za-z0-9._~+/=-]{8,512}$")
-
-ORIGIN_LINE = "      proxy_set_header Origin https://127.0.0.1;"
 PATH_REWRITE_TIERS = {
     "none": "",
     # Root-relative attribute URLs in HTML become page-relative, so they
     # resolve under the Hub proxy's path prefix.
     "html": "\n".join([
-        "      sub_filter_types text/html;",
         "      sub_filter_once off;",
         "      sub_filter '=\"/' '=\"./';",
     ]),
@@ -134,55 +122,6 @@ def seed_update_off(home: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _read_cmdline(pid_dir: str) -> list[str]:
-    with open(os.path.join(pid_dir, "cmdline"), "rb") as f:
-        raw = f.read()
-    return [a.decode("utf-8", "replace") for a in raw.split(b"\0") if a]
-
-
-def _token_from_argv(argv: list[str]) -> str | None:
-    for i, arg in enumerate(argv):
-        if arg == CSRF_FLAG and i + 1 < len(argv):
-            return argv[i + 1]
-        if arg.startswith(CSRF_FLAG + "="):
-            return arg[len(CSRF_FLAG) + 1:]
-    return None
-
-
-def find_csrf_token(proc_root: str = "/proc", uid: int | None = None) -> str:
-    """Return the CSRF token of this user's language server process."""
-    if uid is None:
-        uid = os.getuid()
-    tokens = set()
-    try:
-        entries = os.listdir(proc_root)
-    except OSError as exc:
-        raise HelperError(f"cannot list {proc_root}: {exc}") from exc
-    for name in entries:
-        if not name.isdigit():
-            continue
-        pid_dir = os.path.join(proc_root, name)
-        try:
-            if os.stat(pid_dir).st_uid != uid:
-                continue
-            argv = _read_cmdline(pid_dir)
-        except OSError:
-            continue
-        if not argv or LS_NAME not in os.path.basename(argv[0]):
-            continue
-        token = _token_from_argv(argv)
-        if token:
-            tokens.add(token)
-    if not tokens:
-        raise HelperError("no language server process with a CSRF token found")
-    if len(tokens) > 1:
-        raise HelperError("more than one language server CSRF token found")
-    token = tokens.pop()
-    if not _TOKEN_RE.match(token):
-        raise HelperError("language server CSRF token has unexpected characters")
-    return token
-
-
 def _port(value: str, what: str) -> str:
     if not value.isdigit() or not 1 <= int(value) <= 65535:
         raise HelperError(f"{what} must be a TCP port, got {value!r}")
@@ -201,25 +140,16 @@ def build_values(
     state: str,
     proxy_port: str,
     ls_port: str,
-    origin: bool,
-    csrf_token: str | None,
     path_rewrite: str,
 ) -> dict[str, str]:
     if not os.path.isabs(state) or any(c in state for c in ' ;{}"\'$\\\n'):
         raise HelperError(f"state dir must be an absolute path without special characters, got {state!r}")
     if path_rewrite not in PATH_REWRITE_TIERS:
         raise HelperError(f"unknown path rewrite tier {path_rewrite!r}")
-    csrf_line = ""
-    if csrf_token is not None:
-        if not _TOKEN_RE.match(csrf_token):
-            raise HelperError("CSRF token has unexpected characters")
-        csrf_line = f'      proxy_set_header {CSRF_HEADER} "{csrf_token}";'
     return {
         "STATE": state,
         "AGUI_PROXY_PORT": _port(proxy_port, "proxy port"),
         "JETSKI_LS_PORT": _port(ls_port, "language server port"),
-        "ORIGIN_HEADER_LINE": ORIGIN_LINE if origin else "",
-        "CSRF_HEADER_LINE": csrf_line,
         "PATH_REWRITE_RULES": PATH_REWRITE_TIERS[path_rewrite],
     }
 
@@ -227,20 +157,44 @@ def build_values(
 def render_nginx(args: argparse.Namespace) -> str:
     with open(args.template, encoding="utf-8") as f:
         template = f.read()
-    token = find_csrf_token(args.proc_root) if args.csrf == "inject" else None
     values = build_values(
         state=args.state,
         proxy_port=args.proxy_port,
         ls_port=args.ls_port,
-        origin=args.origin == "on",
-        csrf_token=token,
         path_rewrite=args.path_rewrite,
     )
     for sub in ("nx-body", "nx-proxy", "nx-fastcgi", "nx-uwsgi", "nx-scgi"):
         os.makedirs(os.path.join(args.state, sub), mode=0o700, exist_ok=True)
     _atomic_write(args.out, render_template(template, values), 0o600)
-    return "origin=%s csrf=%s path_rewrite=%s" % (
-        args.origin, "injected" if token else "off", args.path_rewrite)
+    return "path_rewrite=%s" % args.path_rewrite
+
+
+# ---------------------------------------------------------------------------
+# free-port
+# ---------------------------------------------------------------------------
+
+
+def _bindable(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+    return True
+
+
+def free_port(preferred: str) -> int:
+    """Return preferred if it can be bound on 127.0.0.1, else a free port.
+
+    Agents on host networking share the host's loopback, so a fixed port can
+    already be taken by another agent.
+    """
+    port = int(_port(preferred, "preferred port"))
+    if _bindable(port):
+        return port
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 # ---------------------------------------------------------------------------
@@ -261,15 +215,17 @@ def main(argv: list[str] | None = None) -> int:
     p_render.add_argument("--state", required=True)
     p_render.add_argument("--proxy-port", required=True)
     p_render.add_argument("--ls-port", required=True)
-    p_render.add_argument("--origin", choices=("on", "off"), default="on")
-    p_render.add_argument("--csrf", choices=("off", "inject"), default="off")
     p_render.add_argument("--path-rewrite", choices=tuple(PATH_REWRITE_TIERS), default="none")
-    p_render.add_argument("--proc-root", default="/proc")
+
+    p_free = sub.add_parser("free-port")
+    p_free.add_argument("--preferred", required=True)
 
     args = parser.parse_args(argv)
     try:
         if args.cmd == "seed-update-off":
             print("antigravity-ui: app_storage.json " + seed_update_off(args.home))
+        elif args.cmd == "free-port":
+            print(free_port(args.preferred))
         else:
             print("antigravity-ui: nginx config rendered (" + render_nginx(args) + ")")
     except (HelperError, OSError) as exc:

@@ -19,50 +19,69 @@
 #   - the Antigravity app (headless Electron) and nginx each run in their own
 #     session, so keys sent to this tmux pane never reach them;
 #   - this script ignores SIGINT, so a Scion interrupt stops nothing;
-#   - pasted messages are read by an input sink and answered with a notice;
-#     the app's stdin is /dev/null;
+#   - the app's stdin is a FIFO this script holds open, so the app never sees
+#     EOF. Lines typed or pasted into this pane get a "not delivered" notice;
+#   - without credentials the app waits for an interactive sign-in code (its
+#     log shows "Enter the authorization code"). By default the wrapper then
+#     exits 1 and says how to provide credentials. With AGUI_SIGNIN_RELAY=1
+#     it shows the sign-in URL in this pane instead, and forwards the next
+#     line to the app, only while a prompt is pending;
 #   - when the app or nginx exits, the other is stopped and the wrapper exits
 #     (with the app's exit code, or 1 if nginx died first).
 #
 # Tunables (environment):
-#   JETSKI_LS_PORT       language server HTTPS port, loopback only (8443)
-#   AGUI_PROXY_PORT      nginx port, the one exposed port (8090)
-#   AGUI_ORIGIN_HEADER   on|off: rewrite Origin for the upstream (on)
-#   AGUI_CSRF            off|inject: add the language server CSRF header (off)
+#   JETSKI_LS_PORT       preferred language server HTTPS port, loopback (8443)
+#   AGUI_PROXY_PORT      preferred nginx port, the one exposed port (8090)
+#                        A preferred port that is taken (agents on host
+#                        networking share the loopback) is replaced by a
+#                        free one.
 #   AGUI_PATH_REWRITE    none|html: rewrite root-relative URLs in HTML (none)
-#   AGUI_LS_TIMEOUT      seconds to wait for the language server (90)
+#   AGUI_SIGNIN_RELAY    1: relay an interactive sign-in through this pane (off)
+#   AGUI_LS_TIMEOUT      seconds to wait for the language server, not
+#                        counting time spent waiting for a sign-in code (90)
 #   AGUI_PROXY_TIMEOUT   seconds to wait for nginx (30)
 
 set -euo pipefail
 
 : "${JETSKI_LS_PORT:=8443}"
 : "${AGUI_PROXY_PORT:=8090}"
-: "${AGUI_ORIGIN_HEADER:=on}"
-: "${AGUI_CSRF:=off}"
 : "${AGUI_PATH_REWRITE:=none}"
+: "${AGUI_SIGNIN_RELAY:=0}"
 : "${AGUI_LS_TIMEOUT:=90}"
 : "${AGUI_PROXY_TIMEOUT:=30}"
 : "${AGUI_APP_BIN:=/opt/Antigravity/antigravity}"
 : "${AGUI_SHARE_DIR:=/usr/local/share/antigravity-ui}"
-export ELECTRON_OZONE_PLATFORM_HINT=headless JETSKI_LS_PORT
+export ELECTRON_OZONE_PLATFORM_HINT=headless
 
 STATE="${HOME}/.local/state/antigravity-ui"
 HELPER="${AGUI_SHARE_DIR}/agui_helper.py"
+APP_LOG="${STATE}/app.log"
+APP_IN="${STATE}/app.stdin"
+CODES_SENT="${STATE}/codes-forwarded"
+PROMPT_RE='Enter the authorization code'
+NO_AUTH_MSG="the app is not signed in and is waiting for an interactive sign-in code. Assign a dedicated GCP service account to the agent, or stage a gcloud-adc file (Application Default Credentials); see the bundle README."
 APP_PID=""
 NGX_PID=""
 SINK_PID=""
+WATCH_PID=""
 
 log() { printf 'antigravity-ui: %s\n' "$*"; }
 
 # Interrupts never stop anything (inherited by the input sink).
 trap '' INT
 
-# Print the tail of a log with anything that looks like a CSRF token masked.
+# Masks CSRF tokens and sign-in URLs in log lines shown in the pane.
+mask() {
+  sed -E -e 's/(csrf[_-]?token[=: "]+)[^ "&,]+/\1<redacted>/Ig' \
+    -e 's#https://accounts\.google\.com/[^[:space:]"]+#<sign-in URL hidden>#g'
+}
+
+# Print the tail of a log, masked.
 log_tail() {
   local file="$1"
   [ -f "$file" ] || return 0
   log "last lines of ${file}:"
-  tail -n 20 "$file" | sed -E 's/(csrf[_-]?token[=: "]+)[^ "&,]+/\1<redacted>/Ig'
+  tail -n 20 "$file" | mask
 }
 
 kill_group() {
@@ -74,7 +93,10 @@ kill_group() {
 cleanup() {
   kill_group "$NGX_PID"
   kill_group "$APP_PID"
-  if [ -n "$SINK_PID" ]; then kill "$SINK_PID" 2>/dev/null || true; fi
+  local p
+  for p in "$SINK_PID" "$WATCH_PID"; do
+    if [ -n "$p" ]; then kill "$p" 2>/dev/null || true; fi
+  done
 }
 
 trap 'cleanup; exit 143' TERM HUP
@@ -87,26 +109,56 @@ fail() {
   exit 1
 }
 
-# wait_until <timeout-seconds> <pid-that-must-stay-alive> <command...>
-# Returns 0 when the command succeeds, 1 on timeout, 2 if the pid exits.
-wait_until() {
-  local timeout="$1" pid="$2" i=0
-  shift 2
-  until "$@" >/dev/null 2>&1; do
-    kill -0 "$pid" 2>/dev/null || return 2
-    i=$((i + 1))
-    [ "$i" -lt "$timeout" ] || return 1
-    sleep 1
-  done
-}
+# Sign-in prompts the app has printed, and codes forwarded for them.
+prompts_seen() { grep -c -- "$PROMPT_RE" "$APP_LOG" 2>/dev/null || true; }
+codes_sent() { cat "$CODES_SENT" 2>/dev/null || echo 0; }
+code_pending() { [ "$(prompts_seen)" -gt "$(codes_sent)" ]; }
+relay_on() { [ "$AGUI_SIGNIN_RELAY" = "1" ]; }
 
 ls_up() { curl -sk -o /dev/null --max-time 2 "https://127.0.0.1:${JETSKI_LS_PORT}/"; }
 proxy_up() { curl -s -o /dev/null --max-time 2 "http://127.0.0.1:${AGUI_PROXY_PORT}/"; }
 
+# Reads lines from this pane. With the relay on, forwards one line per
+# pending sign-in prompt to the app; answers everything else with a notice.
 input_sink() {
   local line
   while IFS= read -r line || [ -n "$line" ]; do
-    log "message not delivered: this harness is driven from the Antigravity UI."
+    if relay_on && code_pending; then
+      printf '%s\n' "$line" >&4
+      echo $(( $(codes_sent) + 1 )) >"$CODES_SENT"
+      log "sign-in code forwarded to the app."
+    else
+      log "message not delivered: this harness is driven from the Antigravity UI."
+    fi
+  done
+}
+
+# Announces each new sign-in prompt. With the relay on, shows the URL the
+# app printed; otherwise only says that credentials are missing.
+prompt_watcher() {
+  local announced=0 n url
+  while :; do
+    n="$(prompts_seen)"
+    if [ "$n" -gt "$announced" ] && code_pending; then
+      announced="$n"
+      if ! relay_on; then
+        log "warning: ${NO_AUTH_MSG}"
+        sleep 1
+        continue
+      fi
+      url="$(grep -oE 'https://accounts\.google\.com/[^[:space:]"]+' "$APP_LOG" | tail -n 1 || true)"
+      echo
+      log "the app is waiting for Google sign-in."
+      if [ -n "$url" ]; then
+        log "open this URL in your browser and sign in:"
+        echo "  ${url}"
+      else
+        log "the sign-in URL is in ${APP_LOG}."
+      fi
+      log "then paste the authorization code here and press Enter."
+      echo
+    fi
+    sleep 1
   done
 }
 
@@ -143,18 +195,55 @@ chmod 700 "$STATE"
 
 python3 -I "$HELPER" seed-update-off || log "warning: could not disable the app's update check"
 
+for var in JETSKI_LS_PORT AGUI_PROXY_PORT; do
+  want="${!var}"
+  got="$(python3 -I "$HELPER" free-port --preferred "$want")" || fail "invalid ${var}: ${want}"
+  if [ "$got" != "$want" ]; then
+    log "port ${want} is in use; using ${got} for ${var}"
+  fi
+  printf -v "$var" '%s' "$got"
+done
+if [ "$JETSKI_LS_PORT" = "$AGUI_PROXY_PORT" ]; then
+  fail "JETSKI_LS_PORT and AGUI_PROXY_PORT must differ"
+fi
+export JETSKI_LS_PORT
+
+# The app's stdin: a FIFO held open read-write on fd 4, so the app never
+# sees EOF and the input sink can forward a sign-in code.
+rm -f "$APP_IN"
+mkfifo -m 600 "$APP_IN"
+exec 4<>"$APP_IN"
+echo 0 >"$CODES_SENT"
+: >"$APP_LOG"
+
 log "starting the Antigravity app (headless)"
 setsid "$AGUI_APP_BIN" --ozone-platform=headless --headless --disable-gpu --no-sandbox \
-  </dev/null >>"${STATE}/app.log" 2>&1 &
+  <"$APP_IN" >>"$APP_LOG" 2>&1 &
 APP_PID=$!
 
-rc=0
-wait_until "$AGUI_LS_TIMEOUT" "$APP_PID" ls_up || rc=$?
-case "$rc" in
-  0) ;;
-  1) fail "the language server did not answer on 127.0.0.1:${JETSKI_LS_PORT} within ${AGUI_LS_TIMEOUT}s" "${STATE}/app.log" ;;
-  *) fail "the app exited during start-up" "${STATE}/app.log" ;;
-esac
+exec 3<&0
+input_sink <&3 &
+SINK_PID=$!
+exec 3<&-
+prompt_watcher &
+WATCH_PID=$!
+
+# Wait for the language server. With the relay on, time spent waiting for a
+# sign-in code does not count toward the timeout. Without it, a pending
+# sign-in prompt ends the start (no log tail: the log holds the sign-in URL).
+waited=0
+until ls_up; do
+  kill -0 "$APP_PID" 2>/dev/null || fail "the app exited during start-up" "$APP_LOG"
+  if code_pending && ! relay_on; then
+    fail "$NO_AUTH_MSG"
+  fi
+  if ! code_pending; then
+    waited=$((waited + 1))
+    [ "$waited" -lt "$AGUI_LS_TIMEOUT" ] \
+      || fail "the language server did not answer on 127.0.0.1:${JETSKI_LS_PORT} within ${AGUI_LS_TIMEOUT}s" "$APP_LOG"
+  fi
+  sleep 1
+done
 log "language server is up on 127.0.0.1:${JETSKI_LS_PORT}"
 
 python3 -I "$HELPER" render-nginx \
@@ -163,8 +252,6 @@ python3 -I "$HELPER" render-nginx \
   --state "$STATE" \
   --proxy-port "$AGUI_PROXY_PORT" \
   --ls-port "$JETSKI_LS_PORT" \
-  --origin "$AGUI_ORIGIN_HEADER" \
-  --csrf "$AGUI_CSRF" \
   --path-rewrite "$AGUI_PATH_REWRITE" \
   || fail "could not render the nginx config"
 
@@ -172,13 +259,14 @@ setsid nginx -p "$STATE" -e "${STATE}/nginx.err" -c "${STATE}/nginx.conf" \
   </dev/null >>"${STATE}/nginx.log" 2>&1 &
 NGX_PID=$!
 
-rc=0
-wait_until "$AGUI_PROXY_TIMEOUT" "$NGX_PID" proxy_up || rc=$?
-case "$rc" in
-  0) ;;
-  1) fail "nginx did not answer on 127.0.0.1:${AGUI_PROXY_PORT} within ${AGUI_PROXY_TIMEOUT}s" "${STATE}/nginx.err" ;;
-  *) fail "nginx exited during start-up" "${STATE}/nginx.err" "${STATE}/nginx.log" ;;
-esac
+waited=0
+until proxy_up; do
+  kill -0 "$NGX_PID" 2>/dev/null || fail "nginx exited during start-up" "${STATE}/nginx.err" "${STATE}/nginx.log"
+  waited=$((waited + 1))
+  [ "$waited" -lt "$AGUI_PROXY_TIMEOUT" ] \
+    || fail "nginx did not answer on 127.0.0.1:${AGUI_PROXY_PORT} within ${AGUI_PROXY_TIMEOUT}s" "${STATE}/nginx.err"
+  sleep 1
+done
 log "proxy is up on 127.0.0.1:${AGUI_PROXY_PORT}"
 
 MODE=none
@@ -192,11 +280,6 @@ else
   log "warning: scion CLI not found; port not registered"
 fi
 banner "$MODE"
-
-exec 3<&0
-input_sink <&3 &
-SINK_PID=$!
-exec 3<&-
 
 rc=0
 who=""

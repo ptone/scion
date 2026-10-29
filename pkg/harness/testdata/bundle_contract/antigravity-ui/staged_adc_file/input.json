@@ -1,0 +1,12 @@
+{
+  "auth_candidates": {
+    "schema_version": 1,
+    "env_vars": [],
+    "env_secret_files": {},
+    "files": [],
+    "file_secret_files": {
+      "gcloud-adc": "$HOME/.scion/harness/secrets/gcloud-adc"
+    }
+  },
+  "harness_config": {}
+}

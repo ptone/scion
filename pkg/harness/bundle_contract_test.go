@@ -265,6 +265,10 @@ func runBundleContractCase(t *testing.T, python, hname, caseDir string) {
 		"GOOGLE_CLOUD_LOCATION":          true,
 		"CLOUD_ML_REGION":                true,
 		"GOOGLE_APPLICATION_CREDENTIALS": true,
+		// An assigned GCP identity (antigravity-ui resolves vertex-ai
+		// from it).
+		"SCION_METADATA_MODE":     true,
+		"SCION_METADATA_SA_EMAIL": true,
 	}
 	baseEnv := make([]string, 0, len(os.Environ()))
 	for _, e := range os.Environ() {

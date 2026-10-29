@@ -156,11 +156,9 @@ func shippedHarnessesWithAuth(t *testing.T) map[string]config.HarnessConfigEntry
 	return out
 }
 
-// minProvisionTestFiles is a floor on discovered harnesses with auth
-// types. It is one below the floor in python_unit_test.go (a different
-// package, so it cannot be shared) because antigravity-ui declares no auth
-// types.
-const minProvisionTestFiles = 9
+// minProvisionTestFiles mirrors the floor in python_unit_test.go (a
+// different package, so it cannot be shared).
+const minProvisionTestFiles = 10
 
 func runPinDriver(t *testing.T, python, dir string, cases []pinCase) ([]pinMethod, []pinResult) {
 	t.Helper()
@@ -384,9 +382,11 @@ func TestCheckStagedAuthPinnedToProvisioner(t *testing.T) {
 						c.label, results[i].Method, err)
 				}
 			}
-			// Non-vacuous: every harness has explicit types the check can
-			// reject when nothing is staged.
-			if goRejects == 0 {
+			// Non-vacuous: a harness with a type the check can reject (one
+			// without required_files) must see rejections when nothing is
+			// staged. A harness whose every type declares required_files is
+			// never rejected by the Go check, so there is nothing to pin.
+			if goRejects == 0 && hasRejectableType(entry) {
 				t.Errorf("Go check rejected none of %d cases; the pin is vacuous", len(cases))
 			}
 			t.Logf("%d cases, %d rejected by the Go check (all also rejected by the provisioner)", len(cases), goRejects)
@@ -455,4 +455,15 @@ func requirePythonPin(t *testing.T) string {
 		t.Skip("python3 not found in PATH; skipping auth pin tests")
 	}
 	return python
+}
+
+// hasRejectableType reports whether entry declares an auth type the Go
+// check can reject: one without required_files.
+func hasRejectableType(entry config.HarnessConfigEntry) bool {
+	for _, typ := range entry.Auth.Types {
+		if len(typ.RequiredFiles) == 0 {
+			return true
+		}
+	}
+	return false
 }

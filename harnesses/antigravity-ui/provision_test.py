@@ -24,10 +24,12 @@ import json
 import os
 import re
 import shutil
+import socket
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -67,13 +69,43 @@ def temporary_home(path: str):
             os.environ["HOME"] = old
 
 
-def _make_ctx(home: str, explicit_type: str = "") -> scion_harness.ProvisionContext:
+@contextlib.contextmanager
+def temporary_env(**values: str | None):
+    """Set (or, with None, unset) environment variables for a block."""
+    old = {k: os.environ.get(k) for k in values}
+    for k, v in values.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+    try:
+        yield
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+# Ambient identity variables cleared around every provisioner run, so the
+# host running the tests cannot change auth resolution.
+NO_IDENTITY = dict(GOOGLE_APPLICATION_CREDENTIALS=None, SCION_METADATA_MODE=None,
+                   SCION_METADATA_SA_EMAIL=None)
+
+
+def _make_ctx(home: str, explicit_type: str = "", adc_file: bool = False) -> scion_harness.ProvisionContext:
     bundle = os.path.join(home, ".scion", "harness")
     os.makedirs(os.path.join(bundle, "inputs"), exist_ok=True)
     os.makedirs(os.path.join(bundle, "outputs"), exist_ok=True)
     cand = {"schema_version": 1, "env_vars": [], "env_secret_files": {}, "files": []}
     if explicit_type:
         cand["explicit_type"] = explicit_type
+    if adc_file:
+        os.makedirs(os.path.join(bundle, "secrets"), exist_ok=True)
+        with open(os.path.join(bundle, "secrets", "gcloud-adc"), "w", encoding="utf-8") as f:
+            f.write("{}")
+        cand["file_secret_files"] = {"gcloud-adc": "$HOME/.scion/harness/secrets/gcloud-adc"}
     cand_path = os.path.join(bundle, "inputs", "auth-candidates.json")
     with open(cand_path, "w", encoding="utf-8") as f:
         json.dump(cand, f)
@@ -147,7 +179,7 @@ class _SeedCases:
 
 class ProvisionSeedTest(_SeedCases, unittest.TestCase):
     def seed(self, home: str) -> str:
-        with temporary_home(home), contextlib.redirect_stderr(io.StringIO()):
+        with temporary_home(home), temporary_env(**NO_IDENTITY), contextlib.redirect_stderr(io.StringIO()):
             return provision.seed_update_off(_make_ctx(home))
 
 
@@ -157,94 +189,107 @@ class HelperSeedTest(_SeedCases, unittest.TestCase):
 
 
 class ProvisionTest(unittest.TestCase):
-    def _run(self, home: str, explicit_type: str = ""):
-        with temporary_home(home), contextlib.redirect_stderr(io.StringIO()):
-            ctx = _make_ctx(home, explicit_type)
+    def _run(self, home: str, explicit_type: str = "", adc_file: bool = False, **env: str | None):
+        with temporary_home(home), temporary_env(**{**NO_IDENTITY, **env}), \
+                contextlib.redirect_stderr(io.StringIO()):
+            ctx = _make_ctx(home, explicit_type, adc_file)
             provision.provision(ctx)
-            return ctx
-
-    def test_writes_none_auth_and_empty_env(self):
-        with tempfile.TemporaryDirectory() as home:
-            ctx = self._run(home)
             auth_path, env_path = ctx.output_paths()
             with open(auth_path, encoding="utf-8") as f:
                 auth = json.load(f)
+            with open(env_path, encoding="utf-8") as f:
+                overlay = json.load(f)
+            return auth, overlay
+
+    def test_no_credentials_resolves_none(self):
+        with tempfile.TemporaryDirectory() as home:
+            auth, overlay = self._run(home)
             self.assertEqual(auth["method"], "none")
             self.assertEqual(auth["harness"], "antigravity-ui")
-            with open(env_path, encoding="utf-8") as f:
-                self.assertEqual(json.load(f), {})
+            self.assertEqual(overlay, {})
             self.assertTrue(os.path.exists(os.path.join(home, ".config", "Antigravity", "app_storage.json")))
 
-    def test_explicit_none_is_accepted(self):
+    def test_staged_adc_file(self):
         with tempfile.TemporaryDirectory() as home:
-            self._run(home, "none")
+            auth, overlay = self._run(home, adc_file=True)
+            self.assertEqual(auth["method"], "vertex-ai")
+            self.assertTrue(auth["vertex_ai"])
+            want = os.path.join(home, ".scion", "harness", "secrets", "gcloud-adc")
+            self.assertEqual(overlay, {"AGY_ADC_AUTH": "true", "GOOGLE_APPLICATION_CREDENTIALS": want})
 
-    def test_explicit_credential_type_is_rejected(self):
-        for typ in ("api-key", "vertex-ai", "oauth-token"):
+    def test_staged_file_wins_over_env_and_assignment(self):
+        with tempfile.TemporaryDirectory() as home:
+            _, overlay = self._run(home, adc_file=True, GOOGLE_APPLICATION_CREDENTIALS="/env/adc.json",
+                                   SCION_METADATA_MODE="assign", SCION_METADATA_SA_EMAIL="sa@p.iam.gserviceaccount.com")
+            self.assertTrue(overlay["GOOGLE_APPLICATION_CREDENTIALS"].endswith("/secrets/gcloud-adc"))
+
+    def test_env_credentials_file(self):
+        with tempfile.TemporaryDirectory() as home:
+            auth, overlay = self._run(home, GOOGLE_APPLICATION_CREDENTIALS="/env/adc.json")
+            self.assertEqual(auth["method"], "vertex-ai")
+            self.assertEqual(overlay, {"AGY_ADC_AUTH": "true", "GOOGLE_APPLICATION_CREDENTIALS": "/env/adc.json"})
+
+    def test_assigned_service_account(self):
+        with tempfile.TemporaryDirectory() as home:
+            auth, overlay = self._run(home, SCION_METADATA_MODE="assign",
+                                      SCION_METADATA_SA_EMAIL="sa@p.iam.gserviceaccount.com")
+            self.assertEqual(auth["method"], "vertex-ai")
+            self.assertEqual(overlay, {"AGY_ADC_AUTH": "true"})
+
+    def test_other_identity_modes_do_not_count(self):
+        cases = [
+            dict(SCION_METADATA_MODE="block", SCION_METADATA_SA_EMAIL=None),
+            dict(SCION_METADATA_MODE="passthrough", SCION_METADATA_SA_EMAIL="sa@p.iam.gserviceaccount.com"),
+            dict(SCION_METADATA_MODE="assign", SCION_METADATA_SA_EMAIL=""),
+        ]
+        for env in cases:
+            with self.subTest(**env), tempfile.TemporaryDirectory() as home:
+                auth, overlay = self._run(home, **env)
+                self.assertEqual(auth["method"], "none")
+                self.assertNotIn("AGY_ADC_AUTH", overlay)
+
+    def test_explicit_vertex_ai(self):
+        with tempfile.TemporaryDirectory() as home:
+            auth, _ = self._run(home, "vertex-ai", SCION_METADATA_MODE="assign",
+                                SCION_METADATA_SA_EMAIL="sa@p.iam.gserviceaccount.com")
+            self.assertEqual(auth["method"], "vertex-ai")
+        with tempfile.TemporaryDirectory() as home:
+            with self.assertRaisesRegex(scion_harness.ProvisionError, "no credentials found"):
+                self._run(home, "vertex-ai")
+
+    def test_unknown_explicit_type_is_rejected(self):
+        for typ in ("api-key", "oauth-token", "auth-file"):
             with self.subTest(typ=typ), tempfile.TemporaryDirectory() as home:
-                with self.assertRaises(scion_harness.ProvisionError) as cm:
+                with self.assertRaisesRegex(scion_harness.ProvisionError, "unknown auth type"):
                     self._run(home, typ)
-                self.assertIn("sign in inside the Antigravity UI", str(cm.exception))
 
-    def test_declares_no_auth_spec(self):
+    def test_declares_one_auth_spec_matching_config(self):
         specs = [v for v in vars(provision).values() if isinstance(v, scion_harness.AuthSpec)]
-        self.assertEqual(specs, [])
+        self.assertEqual(len(specs), 1)
+        self.assertEqual(specs[0].valid_types(), ("vertex-ai",))
+        self.assertIn("default_type: vertex-ai", _read("config.yaml"))
 
 
-class FindCsrfTokenTest(unittest.TestCase):
-    def setUp(self):
-        self.proc = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, self.proc)
+class FreePortTest(unittest.TestCase):
+    def test_preferred_port_when_free(self):
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        self.assertEqual(helper.free_port(str(port)), port)
 
-    def _proc(self, pid: int, *argv: str):
-        d = os.path.join(self.proc, str(pid))
-        os.makedirs(d)
-        with open(os.path.join(d, "cmdline"), "wb") as f:
-            f.write(b"\0".join(a.encode() for a in argv) + b"\0")
+    def test_other_port_when_taken(self):
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            s.listen(1)
+            port = s.getsockname()[1]
+            got = helper.free_port(str(port))
+            self.assertNotEqual(got, port)
+            self.assertTrue(1024 <= got <= 65535)
 
-    def test_space_separated_flag(self):
-        self._proc(10, "/opt/Antigravity/resources/bin/language_server", "--port", "8443", "--csrf_token", TOKEN)
-        self.assertEqual(helper.find_csrf_token(self.proc), TOKEN)
-
-    def test_equals_flag(self):
-        self._proc(11, "/x/language_server_linux_x64", "--csrf_token=" + TOKEN)
-        self.assertEqual(helper.find_csrf_token(self.proc), TOKEN)
-
-    def test_ignores_other_processes(self):
-        self._proc(12, "/usr/bin/bash", "--csrf_token", "not-this-one-123")
-        self._proc(13, "/opt/Antigravity/antigravity", "--csrf_token=" + "not-this-one-456")
-        self._proc(14, "/opt/Antigravity/resources/bin/language_server", "--csrf_token", TOKEN)
-        with open(os.path.join(self.proc, "self"), "w"):
-            pass
-        self.assertEqual(helper.find_csrf_token(self.proc), TOKEN)
-
-    def test_ignores_processes_of_other_users(self):
-        self._proc(15, "/bin/language_server", "--csrf_token", TOKEN)
-        with self.assertRaises(helper.HelperError):
-            helper.find_csrf_token(self.proc, uid=os.getuid() + 1)
-
-    def test_none_found(self):
-        self._proc(16, "/bin/language_server", "--port", "1")
-        with self.assertRaisesRegex(helper.HelperError, "no language server"):
-            helper.find_csrf_token(self.proc)
-
-    def test_ambiguous(self):
-        self._proc(17, "/bin/language_server", "--csrf_token", TOKEN)
-        self._proc(18, "/bin/language_server", "--csrf_token", TOKEN + "x")
-        with self.assertRaisesRegex(helper.HelperError, "more than one"):
-            helper.find_csrf_token(self.proc)
-
-    def test_rejects_unsafe_characters(self):
-        for bad in ('abc"def1234', "abc;def1234", "abc$def1234", "abc def1234", "short"):
-            with self.subTest(bad=bad):
-                p = tempfile.mkdtemp()
-                self.addCleanup(shutil.rmtree, p)
-                d = os.path.join(p, "20")
-                os.makedirs(d)
-                with open(os.path.join(d, "cmdline"), "wb") as f:
-                    f.write(b"/bin/language_server\0--csrf_token\0" + bad.encode() + b"\0")
-                with self.assertRaisesRegex(helper.HelperError, "unexpected characters"):
-                    helper.find_csrf_token(p)
+    def test_rejects_non_ports(self):
+        for bad in ("abc", "0", "70000"):
+            with self.subTest(bad=bad), self.assertRaises(helper.HelperError):
+                helper.free_port(bad)
 
 
 class RenderNginxTest(unittest.TestCase):
@@ -282,7 +327,7 @@ class RenderNginxTest(unittest.TestCase):
         self.assertIn("listen 127.0.0.1:8090;", conf)
         self.assertIn("proxy_pass https://127.0.0.1:8443;", conf)
         self.assertIn("proxy_set_header Host 127.0.0.1:8443;", conf)
-        self.assertIn("proxy_set_header Origin https://127.0.0.1;", conf)
+        self.assertNotIn("Origin", conf)
         self.assertIn("pid %s/nginx.pid;" % self.state, conf)
         self.assertNotIn("x-codeium-csrf-token", conf)
         self.assertNotRegex(conf, r"(?m)^\s*sub_filter")
@@ -293,38 +338,12 @@ class RenderNginxTest(unittest.TestCase):
         for sub in ("nx-body", "nx-proxy", "nx-fastcgi", "nx-uwsgi", "nx-scgi"):
             self.assertTrue(os.path.isdir(os.path.join(self.state, sub)), sub)
 
-    def test_origin_off(self):
-        rc, _, err = self._render("--origin", "off")
-        self.assertEqual(rc, 0, err)
-        self.assertNotIn("Origin", self._conf())
-
     def test_html_path_rewrite(self):
         rc, _, err = self._render("--path-rewrite", "html")
         self.assertEqual(rc, 0, err)
         conf = self._conf()
         self.assertIn("sub_filter '=\"/' '=\"./';", conf)
         self.assertIn("sub_filter_once off;", conf)
-
-    def test_csrf_inject_writes_token_only_to_the_config(self):
-        proc = os.path.join(self.tmp, "proc")
-        os.makedirs(os.path.join(proc, "42"))
-        with open(os.path.join(proc, "42", "cmdline"), "wb") as f:
-            f.write(b"/opt/Antigravity/resources/bin/language_server\0--csrf_token\0" + TOKEN.encode() + b"\0")
-        rc, out, err = self._render("--csrf", "inject", "--proc-root", proc)
-        self.assertEqual(rc, 0, err)
-        self.assertIn('proxy_set_header x-codeium-csrf-token "%s";' % TOKEN, self._conf())
-        self.assertNotIn(TOKEN, out)
-        self.assertNotIn(TOKEN, err)
-        self.assertIn("csrf=injected", out)
-        self.assertEqual(stat.S_IMODE(os.stat(self.out).st_mode), 0o600)
-
-    def test_csrf_inject_without_language_server_fails(self):
-        proc = os.path.join(self.tmp, "emptyproc")
-        os.makedirs(proc)
-        rc, _, err = self._render("--csrf", "inject", "--proc-root", proc)
-        self.assertEqual(rc, 1)
-        self.assertIn("no language server", err)
-        self.assertFalse(os.path.exists(self.out))
 
     def test_bad_inputs(self):
         cases = [
@@ -334,10 +353,8 @@ class RenderNginxTest(unittest.TestCase):
             dict(proxy_port="80a"),
             dict(ls_port="70000"),
             dict(path_rewrite="regex"),
-            dict(csrf_token="bad token value"),
         ]
-        base = dict(state="/tmp/ok", proxy_port="8090", ls_port="8443", origin=True,
-                    csrf_token=None, path_rewrite="none")
+        base = dict(state="/tmp/ok", proxy_port="8090", ls_port="8443", path_rewrite="none")
         for override in cases:
             with self.subTest(**override):
                 with self.assertRaises(helper.HelperError):
@@ -376,7 +393,8 @@ class SecurityPinsTest(unittest.TestCase):
     def test_wrapper_ignores_sigint_and_isolates_children(self):
         wrapper = _read("antigravity-ui-wrapper.sh")
         self.assertIn("trap '' INT", wrapper)
-        self.assertRegex(wrapper, r"setsid \"\$AGUI_APP_BIN\"[^\n]*\\\n\s*</dev/null")
+        self.assertRegex(wrapper, r"setsid \"\$AGUI_APP_BIN\"[^\n]*\\\n\s*<\"\$APP_IN\"")
+        self.assertIn('mkfifo -m 600 "$APP_IN"', wrapper)
         self.assertRegex(wrapper, r"setsid nginx [^\n]*\\\n\s*</dev/null")
 
     def test_dockerfile_pins_and_verifies_the_package(self):
@@ -422,21 +440,93 @@ class WrapperStartupTest(unittest.TestCase):
         os.chmod(path, 0o755)
         return path
 
-    def _run(self, app: str, timeout: str) -> subprocess.CompletedProcess:
+    @staticmethod
+    def _unused_port() -> str:
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            return str(s.getsockname()[1])
+
+    def _env(self, app: str, timeout: str, **extra: str) -> dict[str, str]:
         env = {
             "HOME": os.path.join(self.tmp, "home"),
             "PATH": self.bin + os.pathsep + "/usr/local/bin:/usr/bin:/bin",
             "AGUI_APP_BIN": app,
             "AGUI_SHARE_DIR": HERE,
             "AGUI_LS_TIMEOUT": timeout,
-            # A port nothing listens on: the fake app never serves.
-            "JETSKI_LS_PORT": "1",
+            # Nothing listens there: the fake app never serves.
+            "JETSKI_LS_PORT": self._unused_port(),
             "PYTHONDONTWRITEBYTECODE": "1",
         }
+        env.update(extra)
+        return env
+
+    def _run(self, app: str, timeout: str, **extra: str) -> subprocess.CompletedProcess:
         return subprocess.run(
             ["bash", os.path.join(HERE, "antigravity-ui-wrapper.sh")],
-            env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60,
+            env=self._env(app, timeout, **extra), stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=60,
         )
+
+    SIGNIN_APP = (
+        "#!/bin/sh\n"
+        "echo 'Go to https://accounts.google.com/o/oauth2/auth?client_id=x&state=y'\n"
+        "echo 'Enter the authorization code:'\n"
+        "IFS= read -r code\n"
+        "printf '%s' \"$code\" > \"$HOME/received-code\"\n"
+        "exit 7\n"
+    )
+
+    def test_sign_in_prompt_fails_by_default_without_the_url(self):
+        app = self._script("fakeapp", self.SIGNIN_APP)
+        proc = self._run(app, "40")
+        out = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 1, out)
+        self.assertIn("not signed in", out)
+        self.assertIn("assign a dedicated GCP service account".lower(), out.lower())
+        self.assertNotIn("accounts.google.com", out)
+        self.assertNotIn("did not answer", out)
+
+    def test_sign_in_relay_forwards_one_code(self):
+        app = self._script("fakeapp", self.SIGNIN_APP)
+        out_path = os.path.join(self.tmp, "out.txt")
+        with open(out_path, "w") as out_f:
+            proc = subprocess.Popen(
+                ["bash", os.path.join(HERE, "antigravity-ui-wrapper.sh")],
+                env=self._env(app, "40", AGUI_SIGNIN_RELAY="1"),
+                stdin=subprocess.PIPE, stdout=out_f, stderr=subprocess.STDOUT, text=True,
+            )
+            try:
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline:
+                    with open(out_path) as f:
+                        if "paste the authorization code" in f.read():
+                            break
+                    time.sleep(0.2)
+                proc.stdin.write("CODE-1234\n")
+                proc.stdin.flush()
+                rc = proc.wait(timeout=30)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+        with open(out_path) as f:
+            out = f.read()
+        with open(os.path.join(self.tmp, "home", "received-code")) as f:
+            self.assertEqual(f.read(), "CODE-1234")
+        self.assertIn("https://accounts.google.com/o/oauth2/auth?client_id=x&state=y", out)
+        self.assertIn("sign-in code forwarded", out)
+        # The fake app exits after reading the code, before serving.
+        self.assertEqual(rc, 1, out)
+        self.assertIn("the app exited during start-up", out)
+
+    def test_taken_port_falls_back_to_a_free_one(self):
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            s.listen(1)
+            taken = str(s.getsockname()[1])
+            proc = self._run("/bin/false", "5", JETSKI_LS_PORT=taken)
+        out = proc.stdout + proc.stderr
+        self.assertIn(f"port {taken} is in use", out)
+        self.assertIn("the app exited during start-up", out)
 
     def test_app_exit_during_start_up(self):
         proc = self._run("/bin/false", "40")
@@ -456,6 +546,18 @@ class WrapperStartupTest(unittest.TestCase):
         self.assertIn("did not answer", out)
         self.assertNotIn(TOKEN, out)
         self.assertIn("<redacted>", out)
+
+    def test_log_tail_hides_sign_in_url(self):
+        app = self._script("fakeapp", (
+            "#!/bin/sh\n"
+            "echo 'Go to https://accounts.google.com/o/oauth2/auth?state=secret-state'\n"
+            "exit 3\n"
+        ))
+        proc = self._run(app, "5")
+        out = proc.stdout + proc.stderr
+        self.assertIn("the app exited during start-up", out)
+        self.assertNotIn("secret-state", out)
+        self.assertIn("<sign-in URL hidden>", out)
 
     def test_wrapper_shell_syntax(self):
         bash = shutil.which("bash")

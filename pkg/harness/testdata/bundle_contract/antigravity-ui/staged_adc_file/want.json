@@ -1,0 +1,11 @@
+{
+  "exit_code": 0,
+  "resolved_auth": {
+    "method": "vertex-ai",
+    "harness": "antigravity-ui",
+    "vertex_ai": true
+  },
+  "env": {
+    "AGY_ADC_AUTH": "true"
+  }
+}

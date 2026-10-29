@@ -14,7 +14,8 @@
 
 # Experimental: the Antigravity desktop app, headless, driven through its web
 # UI (port 8090 via the exposed-port link or `scion tunnel`). Scion-driven
-# tasks, messages and credentials are not supported. See README.md.
+# tasks and messages are not supported. The app signs in with Google
+# Application Default Credentials (vertex-ai). See README.md.
 harness: antigravity-ui
 image: scion-antigravity-ui:latest
 user: scion
@@ -71,12 +72,30 @@ capabilities:
     system_prompt: { support: "no", reason: "Instructions are not projected into the app" }
     agent_instructions: { support: "no", reason: "Instructions are not projected into the app" }
   auth:
-    api_key: { support: "no", reason: "Sign in inside the app UI" }
+    api_key: { support: "no", reason: "The app does not accept an API key" }
     auth_file: { support: "no" }
-    oauth_token: { support: "no", reason: "Sign in inside the app UI" }
-    vertex_ai: { support: "no", reason: "Sign in inside the app UI" }
+    oauth_token: { support: "no", reason: "The app signs in with Application Default Credentials" }
+    vertex_ai: { support: "yes", reason: "Application Default Credentials: a gcloud-adc file or an assigned GCP service account" }
   mcp:
     stdio: { support: "no" }
     sse: { support: "no" }
     streamable_http: { support: "no" }
     project_scope: { support: "no" }
+
+auth:
+  default_type: vertex-ai
+  types:
+    vertex-ai:
+      required_files:
+        - name: gcloud-adc
+          type: file
+          description: "Google Cloud Application Default Credentials (ADC) file for the app's sign-in"
+          field: GoogleAppCredentials
+          alternative_env_keys: ["GOOGLE_APPLICATION_CREDENTIALS"]
+          skipped_when_gcp_service_account_assigned: true
+          required: true
+  autodetect:
+    env:
+      GOOGLE_APPLICATION_CREDENTIALS: vertex-ai
+    files:
+      gcloud-adc: vertex-ai

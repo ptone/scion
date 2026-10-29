@@ -96,7 +96,7 @@ Render and start the forwarding proxy with the harness's own helper:
 
 ```sh
 mkdir -p /tmp/agui
-render() {  # extra args: --origin off | --csrf inject | --path-rewrite html
+render() {  # extra args: --path-rewrite html
   python3 -I /usr/local/share/antigravity-ui/agui_helper.py render-nginx \
     --template /usr/local/share/antigravity-ui/nginx.conf.tmpl \
     --out /tmp/agui/nginx.conf --state /tmp/agui \
@@ -110,13 +110,8 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8090/
 1. Open `http://127.0.0.1:8090/` in the host browser. Does the UI load? Do
    its RPCs succeed (devtools, Network tab: count failed requests)? Are there
    `ws://` connections (P4)?
-2. P10: `render --origin off && $NGX -s reload`, reload the page. Does it
-   still work?
-3. P2: if RPCs failed with CSRF errors, `render --csrf inject && $NGX -s reload`
-   and reload. Does it work now? (The helper writes the token only into
-   `/tmp/agui/nginx.conf`; do not print that file.)
-
-Use the best working combination from 1 to 3 for the next step.
+The forwarding proxy sends no Origin or CSRF header: the first probe showed
+the UI works without either.
 
 ### Prefix simulation (P11)
 
@@ -182,7 +177,7 @@ If requests escaped, try the HTML rewrite tier and repeat with a fresh log:
 
 ```sh
 : > /tmp/agui-prefix/escaped.log
-render --path-rewrite html && $NGX -s reload    # plus any flags step 1-3 needed
+render --path-rewrite html && $NGX -s reload
 ```
 
 If escapes remain, record which kinds they are (asset files, RPC paths,
@@ -241,7 +236,7 @@ tokens.
 |---|---|---|
 | Build | clean build; wrong hash fails; arm64 fails | |
 | P1 | seconds to "listening"; number of listening TCP sockets; all on 127.0.0.1 (y/n); 8443 among them (y/n) | |
-| P2 | `grep -c csrf` count; RPCs work without `--csrf inject` (y/n); with it (y/n) | |
+| P2 | `grep -c csrf` count; RPCs work through the proxy (y/n) | |
 | P3 | status and content type of `https://127.0.0.1:8443/` | |
 | P4 | `ws://` connections seen (y/n, count) | |
 | P5 | what the UI shows without credentials; sign-in completes through 8090 (y/n); `GEMINI_API_KEY` skips sign-in (y/n/not tried) | |

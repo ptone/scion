@@ -4,5 +4,9 @@
     "method": "none",
     "harness": "antigravity-ui"
   },
-  "env": {}
+  "env": {},
+  "env_absent": [
+    "AGY_ADC_AUTH",
+    "GOOGLE_APPLICATION_CREDENTIALS"
+  ]
 }

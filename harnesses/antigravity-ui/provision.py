@@ -17,15 +17,25 @@
 Runs inside the agent container during the pre-start lifecycle hook, invoked
 by `sciontool harness provision --manifest ...`.
 
-The Antigravity desktop app is driven through its own web UI, and the user
-signs in there, so this provisioner stages no credentials, instructions or
-MCP servers. Its jobs:
+The Antigravity desktop app is driven through its own web UI. This
+provisioner stages no instructions or MCP servers. Its jobs:
 
-  1. Turn the app's self-update check off: merge
+  1. Auth. The app signs in with Google Application Default Credentials
+     when AGY_ADC_AUTH=true. vertex-ai is resolved, in this order, from:
+       a. a staged gcloud-adc file secret;
+       b. GOOGLE_APPLICATION_CREDENTIALS in the container environment;
+       c. a GCP service account the broker assigned to the agent
+          (SCION_METADATA_MODE=assign with SCION_METADATA_SA_EMAIL set; the
+          broker sets SCION_METADATA_MODE only for assign and block, never
+          for passthrough).
+     Each writes AGY_ADC_AUTH=true into the env overlay, plus
+     GOOGLE_APPLICATION_CREDENTIALS when a file is involved. With none of
+     them the method is "none" and AGY_ADC_AUTH is not set: the app then
+     waits for an interactive sign-in code, which the wrapper reports.
+  2. Turn the app's self-update check off: merge
      {"autoCheckForUpdates": false} into ~/.config/Antigravity/app_storage.json,
      keeping every other key. The wrapper does the same at start.
-  2. Write outputs/resolved-auth.json (method "none") and an empty
-     outputs/env.json.
+  3. Write outputs/resolved-auth.json and outputs/env.json.
 
 The script is stdlib-only.
 """
@@ -44,6 +54,22 @@ assert scion_harness.INTERFACE_VERSION >= 2, (
     f"scion_harness INTERFACE_VERSION {scion_harness.INTERFACE_VERSION} < 2"
 )
 
+AUTH = scion_harness.AuthSpec(
+    "antigravity-ui",
+    [
+        # The gcloud-adc file secret carries this credential (config.yaml
+        # declares it with GOOGLE_APPLICATION_CREDENTIALS as the alternative
+        # env key). resolve_auth below adds the assigned-SA path.
+        scion_harness.env_method(
+            "vertex-ai",
+            any_of=["GOOGLE_APPLICATION_CREDENTIALS"],
+            hint="stage a gcloud-adc file, set GOOGLE_APPLICATION_CREDENTIALS, "
+                 "or assign a dedicated GCP service account to the agent",
+        ),
+    ],
+)
+
+ADC_SECRET = "gcloud-adc"
 APP_STORAGE = "~/.config/Antigravity/app_storage.json"
 UPDATE_KEY = "autoCheckForUpdates"
 
@@ -80,16 +106,50 @@ def seed_update_off(ctx: scion_harness.ProvisionContext) -> str:
     return status
 
 
-def provision(ctx: scion_harness.ProvisionContext) -> None:
+def _assigned_service_account() -> bool:
+    return (os.environ.get("SCION_METADATA_MODE", "").strip() == "assign"
+            and bool(os.environ.get("SCION_METADATA_SA_EMAIL", "").strip()))
+
+
+def resolve_auth(ctx: scion_harness.ProvisionContext) -> tuple[scion_harness.ResolvedAuth, dict[str, str]]:
+    """Return the resolved auth and its env overlay (see the module doc)."""
     explicit = ctx.explicit_type
-    if explicit and explicit != "none":
+    if explicit and explicit not in AUTH.valid_types():
         raise scion_harness.ProvisionError(
-            f"auth type {explicit!r} is not supported: this harness takes no "
-            "Scion credentials; sign in inside the Antigravity UI"
+            f"antigravity-ui: unknown auth type {explicit!r}; valid types are: "
+            + ", ".join(AUTH.valid_types())
         )
+    method = AUTH.methods[0]
+
+    staged = ctx.file_secret_files.get(ADC_SECRET)
+    if staged:
+        path = scion_harness.expand_path(staged)
+        return (scion_harness.ResolvedAuth("vertex-ai", spec_entry=method, auth_file=path),
+                {"AGY_ADC_AUTH": "true", "GOOGLE_APPLICATION_CREDENTIALS": path})
+
+    gac = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+    if not gac and "GOOGLE_APPLICATION_CREDENTIALS" in ctx.env_keys:
+        gac = (ctx.read_secret("GOOGLE_APPLICATION_CREDENTIALS", env_fallback=True) or "").strip()
+    if gac:
+        return (scion_harness.ResolvedAuth("vertex-ai", "GOOGLE_APPLICATION_CREDENTIALS", method),
+                {"AGY_ADC_AUTH": "true", "GOOGLE_APPLICATION_CREDENTIALS": gac})
+
+    if _assigned_service_account():
+        return scion_harness.ResolvedAuth("vertex-ai", spec_entry=method), {"AGY_ADC_AUTH": "true"}
+
+    if explicit:
+        raise scion_harness.ProvisionError(
+            f"antigravity-ui: auth type {explicit!r} selected but no credentials found; {method.hint}"
+        )
+    return scion_harness.ResolvedAuth("none"), {}
+
+
+def provision(ctx: scion_harness.ProvisionContext) -> None:
+    resolved, env = resolve_auth(ctx)
     status = seed_update_off(ctx)
-    ctx.write_outputs(scion_harness.ResolvedAuth("none"), env={})
-    ctx.info(f"method=none app_storage={status}")
+    extra = {"vertex_ai": True} if resolved.method == "vertex-ai" else None
+    ctx.write_outputs(resolved, env=env, extra=extra)
+    ctx.info(f"method={resolved.method} app_storage={status}")
 
 
 if __name__ == "__main__":

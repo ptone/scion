@@ -44,8 +44,6 @@ http {
       proxy_buffering off;
       proxy_read_timeout 1h;
       proxy_send_timeout 1h;
-${ORIGIN_HEADER_LINE}
-${CSRF_HEADER_LINE}
 ${PATH_REWRITE_RULES}
     }
   }
