@@ -87,12 +87,10 @@ default. If the host VM's service account is minimal and you want to use
 it, set `AGY_ADC_AUTH=true` through settings or profile environment, or a
 harness-config `env` override. Template environment keys are not applied.
 
-Without credentials the app waits for an interactive sign-in code, and the
-agent stops with a message saying how to provide credentials. To sign in
-with a personal account instead, set `AGUI_SIGNIN_RELAY=1`: the wrapper
-then shows the sign-in URL in the agent's tmux pane (`scion attach`) and
-forwards the code you paste back to the app. The resulting Google session
-is stored in the agent's home.
+Without a `gcloud-adc` file or an assigned service account, Scion refuses to
+start the agent. If the app still asks for an interactive sign-in code (for
+example when the assigned service account stops working), the agent stops
+with a message saying how to provide credentials.
 
 ## Files
 
@@ -121,7 +119,6 @@ Set in the agent's environment (for example a template's `env`):
 | `JETSKI_LS_PORT` | `8443` | preferred language server HTTPS port (loopback) |
 | `AGUI_PROXY_PORT` | `8090` | preferred nginx port, the exposed port |
 | `AGUI_PATH_REWRITE` | `auto` | `none`: never use the path shim (tunnel only) |
-| `AGUI_SIGNIN_RELAY` | `0` | `1`: relay an interactive sign-in through the tmux pane |
 | `AGUI_LS_TIMEOUT` | `90` | seconds to wait for the language server |
 | `AGUI_PROXY_TIMEOUT` | `30` | seconds to wait for nginx |
 
@@ -144,9 +141,8 @@ window).
 - The app's UI has no login of its own. Anyone who can open the agent's port
   8090 controls the app, which can run commands in the container. Access is
   governed by the Hub's port access permission on the agent.
-- The app's Google identity (the ADC service account, or a personal account
-  signed in through the relay) is available to everyone with port access to
-  the agent.
+- The app's Google identity (the ADC service account) is available to
+  everyone with port access to the agent.
 - The app runs without the Chromium sandbox; the container is the boundary.
   Stage only credentials the app is meant to use.
 

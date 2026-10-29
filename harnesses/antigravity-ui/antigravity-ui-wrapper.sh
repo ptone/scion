@@ -21,11 +21,10 @@
 #   - this script ignores SIGINT, so a Scion interrupt stops nothing;
 #   - the app's stdin is a FIFO this script holds open, so the app never sees
 #     EOF. Lines typed or pasted into this pane get a "not delivered" notice;
-#   - without credentials the app waits for an interactive sign-in code (its
-#     log shows "Enter the authorization code"). By default the wrapper then
-#     exits 1 and says how to provide credentials. With AGUI_SIGNIN_RELAY=1
-#     it shows the sign-in URL in this pane instead, and forwards the next
-#     line to the app, only while a prompt is pending;
+#   - without working credentials the app waits for an interactive sign-in
+#     code (its log shows "Enter the authorization code"). The wrapper then
+#     stops the app and exits 1 with a message saying how to provide
+#     credentials, during start-up or later;
 #   - when the app or nginx exits, the other is stopped and the wrapper exits
 #     (with the app's exit code, or 1 if nginx died first).
 #
@@ -38,9 +37,7 @@
 #   AGUI_PATH_REWRITE    auto|none: path shim that lets the UI run under the
 #                        Hub port proxy path (auto: on when the running app
 #                        matches the shim's patch points)
-#   AGUI_SIGNIN_RELAY    1: relay an interactive sign-in through this pane (off)
-#   AGUI_LS_TIMEOUT      seconds to wait for the language server, not
-#                        counting time spent waiting for a sign-in code (90)
+#   AGUI_LS_TIMEOUT      seconds to wait for the language server (90)
 #   AGUI_PROXY_TIMEOUT   seconds to wait for nginx (30)
 
 set -euo pipefail
@@ -48,7 +45,6 @@ set -euo pipefail
 : "${JETSKI_LS_PORT:=8443}"
 : "${AGUI_PROXY_PORT:=8090}"
 : "${AGUI_PATH_REWRITE:=auto}"
-: "${AGUI_SIGNIN_RELAY:=0}"
 : "${AGUI_LS_TIMEOUT:=90}"
 : "${AGUI_PROXY_TIMEOUT:=30}"
 : "${AGUI_APP_BIN:=/opt/Antigravity/antigravity}"
@@ -59,7 +55,7 @@ STATE="${HOME}/.local/state/antigravity-ui"
 HELPER="${AGUI_SHARE_DIR}/agui_helper.py"
 APP_LOG="${STATE}/app.log"
 APP_IN="${STATE}/app.stdin"
-CODES_SENT="${STATE}/codes-forwarded"
+NO_AUTH_MARK="${STATE}/no-auth"
 PROMPT_RE='Enter the authorization code'
 NO_AUTH_MSG="the app is not signed in and is waiting for an interactive sign-in code. Assign a dedicated GCP service account to the agent, or stage a gcloud-adc file (Application Default Credentials); see the bundle README."
 APP_PID=""
@@ -111,56 +107,31 @@ fail() {
   exit 1
 }
 
-# Sign-in prompts the app has printed, and codes forwarded for them.
-prompts_seen() { grep -c -- "$PROMPT_RE" "$APP_LOG" 2>/dev/null || true; }
-codes_sent() { cat "$CODES_SENT" 2>/dev/null || echo 0; }
-code_pending() { [ "$(prompts_seen)" -gt "$(codes_sent)" ]; }
-relay_on() { [ "$AGUI_SIGNIN_RELAY" = "1" ]; }
+# Whether the app has asked for an interactive sign-in code.
+sign_in_prompted() { grep -q -- "$PROMPT_RE" "$APP_LOG" 2>/dev/null; }
 
 ls_up() { curl -sk -o /dev/null --max-time 2 "https://127.0.0.1:${JETSKI_LS_PORT}/"; }
 proxy_up() { curl -s -o /dev/null --max-time 2 "http://127.0.0.1:${AGUI_PROXY_PORT}/"; }
 
-# Reads lines from this pane. With the relay on, forwards one line per
-# pending sign-in prompt to the app; answers everything else with a notice.
+# Reads lines from this pane and answers each with a notice.
 input_sink() {
   local line
   while IFS= read -r line || [ -n "$line" ]; do
-    if relay_on && code_pending; then
-      printf '%s\n' "$line" >&4
-      echo $(( $(codes_sent) + 1 )) >"$CODES_SENT"
-      log "sign-in code forwarded to the app."
-    else
-      log "message not delivered: this harness is driven from the Antigravity UI."
-    fi
+    log "message not delivered: this harness is driven from the Antigravity UI."
   done
 }
 
-# Announces each new sign-in prompt. With the relay on, shows the URL the
-# app printed; otherwise only says that credentials are missing.
-prompt_watcher() {
-  local announced=0 n url
+# After start-up: if the app asks for a sign-in code (for example when an
+# assigned service account stops working), stop it; the main loop then
+# exits 1 with the no-auth message.
+sign_in_watcher() {
   while :; do
-    n="$(prompts_seen)"
-    if [ "$n" -gt "$announced" ] && code_pending; then
-      announced="$n"
-      if ! relay_on; then
-        log "warning: ${NO_AUTH_MSG}"
-        sleep 1
-        continue
-      fi
-      url="$(grep -oE 'https://accounts\.google\.com/[^[:space:]"]+' "$APP_LOG" | tail -n 1 || true)"
-      echo
-      log "the app is waiting for Google sign-in."
-      if [ -n "$url" ]; then
-        log "open this URL in your browser and sign in:"
-        echo "  ${url}"
-      else
-        log "the sign-in URL is in ${APP_LOG}."
-      fi
-      log "then paste the authorization code here and press Enter."
-      echo
+    if sign_in_prompted; then
+      : >"$NO_AUTH_MARK"
+      kill_group "$APP_PID"
+      return
     fi
-    sleep 1
+    sleep 2
   done
 }
 
@@ -216,11 +187,11 @@ fi
 export JETSKI_LS_PORT
 
 # The app's stdin: a FIFO held open read-write on fd 4, so the app never
-# sees EOF and the input sink can forward a sign-in code.
+# sees EOF on stdin, whatever it does with it.
 rm -f "$APP_IN"
 mkfifo -m 600 "$APP_IN"
 exec 4<>"$APP_IN"
-echo 0 >"$CODES_SENT"
+rm -f "$NO_AUTH_MARK"
 : >"$APP_LOG"
 
 log "starting the Antigravity app (headless)"
@@ -232,26 +203,20 @@ exec 3<&0
 input_sink <&3 &
 SINK_PID=$!
 exec 3<&-
-prompt_watcher &
-WATCH_PID=$!
-
-# Wait for the language server. With the relay on, time spent waiting for a
-# sign-in code does not count toward the timeout. Without it, a pending
-# sign-in prompt ends the start (no log tail: the log holds the sign-in URL).
+# Wait for the language server. A sign-in prompt ends the start (no log
+# tail: the log holds the sign-in URL).
 waited=0
 until ls_up; do
+  sign_in_prompted && fail "$NO_AUTH_MSG"
   kill -0 "$APP_PID" 2>/dev/null || fail "the app exited during start-up" "$APP_LOG"
-  if code_pending && ! relay_on; then
-    fail "$NO_AUTH_MSG"
-  fi
-  if ! code_pending; then
-    waited=$((waited + 1))
-    [ "$waited" -lt "$AGUI_LS_TIMEOUT" ] \
-      || fail "the language server did not answer on 127.0.0.1:${JETSKI_LS_PORT} within ${AGUI_LS_TIMEOUT}s" "$APP_LOG"
-  fi
+  waited=$((waited + 1))
+  [ "$waited" -lt "$AGUI_LS_TIMEOUT" ] \
+    || fail "the language server did not answer on 127.0.0.1:${JETSKI_LS_PORT} within ${AGUI_LS_TIMEOUT}s" "$APP_LOG"
   sleep 1
 done
 log "language server is up on 127.0.0.1:${JETSKI_LS_PORT}"
+sign_in_watcher &
+WATCH_PID=$!
 
 # Path shim: only for the app version whose patch points it knows.
 SHIM=none
@@ -310,6 +275,10 @@ rc=0
 who=""
 wait -n -p who "$APP_PID" "$NGX_PID" || rc=$?
 if [ "$who" = "$APP_PID" ]; then
+  if [ -f "$NO_AUTH_MARK" ]; then
+    APP_PID=""
+    fail "$NO_AUTH_MSG"
+  fi
   log "the app exited (code ${rc}); stopping nginx"
   APP_PID=""
   cleanup

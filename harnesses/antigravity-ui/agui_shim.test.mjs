@@ -36,7 +36,7 @@ function fakeStorage() {
   };
 }
 
-function load(pathname) {
+function load(pathname, before) {
   const calls = { fetch: [], xhr: [], ctor: [], history: [], writes: [] };
   class XMLHttpRequest {}
   XMLHttpRequest.prototype.open = function (method, url) { calls.xhr.push(url); };
@@ -82,17 +82,43 @@ function load(pathname) {
     sessionStorage: fakeStorage(),
   };
   const realLocal = window.localStorage;
+  if (before) {
+    for (const name of ["fetch", "WebSocket", "EventSource", "Worker", "localStorage", "sessionStorage"]) {
+      before[name] = window[name];
+    }
+    Object.defineProperty(before, "xhrOpen", { value: XMLHttpRequest.prototype.open });
+    Object.defineProperty(before, "setAttribute", { value: Element.prototype.setAttribute });
+    Object.defineProperty(before, "pushState", { value: window.history.pushState });
+    Object.defineProperty(before, "replaceState", { value: window.history.replaceState });
+    Object.defineProperty(before, "imgSrcSet", {
+      value: Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, "src").set,
+    });
+  }
   vm.runInNewContext(SHIM, { window, JSON, Object, Array, String });
   return { window, calls, realLocal };
 }
 
 test("without a proxy prefix it only writes a root base", () => {
-  const { window, calls, realLocal } = load("/conversations/1");
+  const before = {};
+  const { window, calls, realLocal } = load("/conversations/1", before);
+  // The root <base> together with nginx turning ="/ into =" reproduces the
+  // original root-relative asset URLs; nothing else changes.
   assert.deepEqual(calls.writes, ['<base href="/">']);
   assert.equal(window.__AGUI_PREFIX__, undefined);
+  for (const [name, value] of Object.entries(before)) {
+    assert.equal(window[name], value, `${name} was replaced at root`);
+  }
+  assert.equal(window.XMLHttpRequest.prototype.open, before.xhrOpen);
+  assert.equal(window.Element.prototype.setAttribute, before.setAttribute);
+  assert.equal(window.history.pushState, before.pushState);
+  assert.equal(window.history.replaceState, before.replaceState);
+  assert.deepEqual(
+    Object.getOwnPropertyDescriptor(window.HTMLImageElement.prototype, "src").set,
+    before.imgSrcSet,
+  );
+  assert.equal(window.localStorage, realLocal);
   window.fetch("/static/x");
   assert.deepEqual(calls.fetch, ["/static/x"]);
-  assert.equal(window.localStorage, realLocal);
 });
 
 test("finds the proxy prefix and writes its base", () => {

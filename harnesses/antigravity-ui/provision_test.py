@@ -348,6 +348,11 @@ class RenderNginxTest(unittest.TestCase):
         self.assertIn("location ~ /agui-shim\\.js$ {", conf)
         self.assertIn("root %s;" % HERE, conf)
         self.assertIn("try_files /agui_shim.js =404;", conf)
+        # The shim is served only by nginx, never proxied to the app, so an
+        # app path of the same name cannot replace it.
+        shim_block = conf[conf.index("location ~ /agui-shim"):]
+        shim_block = shim_block[:shim_block.index("}")]
+        self.assertNotIn("proxy_pass", shim_block)
         self.assertIn("location = /main.js {", conf)
         for token, replacement in helper.SHIM_PATCHES:
             self.assertIn("sub_filter '%s' '%s';" % (token, replacement), conf)
@@ -513,7 +518,7 @@ class WrapperStartupTest(unittest.TestCase):
         "exit 7\n"
     )
 
-    def test_sign_in_prompt_fails_by_default_without_the_url(self):
+    def test_sign_in_prompt_fails_without_showing_the_url(self):
         app = self._script("fakeapp", self.SIGNIN_APP)
         proc = self._run(app, "40")
         out = proc.stdout + proc.stderr
@@ -522,38 +527,6 @@ class WrapperStartupTest(unittest.TestCase):
         self.assertIn("assign a dedicated GCP service account".lower(), out.lower())
         self.assertNotIn("accounts.google.com", out)
         self.assertNotIn("did not answer", out)
-
-    def test_sign_in_relay_forwards_one_code(self):
-        app = self._script("fakeapp", self.SIGNIN_APP)
-        out_path = os.path.join(self.tmp, "out.txt")
-        with open(out_path, "w") as out_f:
-            proc = subprocess.Popen(
-                ["bash", os.path.join(HERE, "antigravity-ui-wrapper.sh")],
-                env=self._env(app, "40", AGUI_SIGNIN_RELAY="1"),
-                stdin=subprocess.PIPE, stdout=out_f, stderr=subprocess.STDOUT, text=True,
-            )
-            try:
-                deadline = time.monotonic() + 30
-                while time.monotonic() < deadline:
-                    with open(out_path) as f:
-                        if "paste the authorization code" in f.read():
-                            break
-                    time.sleep(0.2)
-                proc.stdin.write("CODE-1234\n")
-                proc.stdin.flush()
-                rc = proc.wait(timeout=30)
-            finally:
-                if proc.poll() is None:
-                    proc.kill()
-        with open(out_path) as f:
-            out = f.read()
-        with open(os.path.join(self.tmp, "home", "received-code")) as f:
-            self.assertEqual(f.read(), "CODE-1234")
-        self.assertIn("https://accounts.google.com/o/oauth2/auth?client_id=x&state=y", out)
-        self.assertIn("sign-in code forwarded", out)
-        # The fake app exits after reading the code, before serving.
-        self.assertEqual(rc, 1, out)
-        self.assertIn("the app exited during start-up", out)
 
     def test_taken_port_falls_back_to_a_free_one(self):
         with socket.socket() as s:
