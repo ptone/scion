@@ -72,9 +72,8 @@ var removedRuntimeStorageKeys = map[string]bool{
 // turns a typed entry into the value form of stored (JSON values for a
 // database row, YAML values for settings.yaml). It returns the merged
 // entries, one warning per unmodeled key kept or removed-storage key
-// dropped, sorted, and the stored keys kept that are not a runtime setting
-// as spelled (keys found by entry name), which the save's schema check
-// leaves out (runtimesDocForValidation).
+// dropped, sorted, and the kept stored keys that are not a runtime setting
+// as spelled, by entry name (runtimesDocForValidation).
 func mergeRuntimeEntries(stored map[string]map[string]any, sent map[string]config.V1RuntimeConfig, sentRaw map[string]json.RawMessage, encode func(config.V1RuntimeConfig) map[string]any) (map[string]map[string]any, []string, map[string][]string) {
 	if sentRaw == nil {
 		// No body (internal callers): every key the typed entries encode
@@ -166,7 +165,7 @@ func sentRuntimesObject(rawBody []byte) map[string]json.RawMessage {
 
 // mergeRuntimesRow merges a save's runtimes onto the stored runtimes row
 // value (database mode) and returns the JSON document to write, the save
-// warnings and the stored keys kept that are not runtime settings.
+// warnings and the kept stored keys.
 func mergeRuntimesRow(row []byte, sent map[string]config.V1RuntimeConfig, sentRaw map[string]json.RawMessage) (json.RawMessage, []string, map[string][]string, error) {
 	stored := map[string]map[string]any{}
 	if len(bytes.TrimSpace(row)) > 0 {
@@ -197,10 +196,8 @@ func mergeRuntimesRow(row []byte, sent map[string]config.V1RuntimeConfig, sentRa
 }
 
 // runtimesDocForValidation returns the merged runtimes document without
-// the stored keys the merge kept that are not runtime settings, for the
-// closed runtimes schema check: such a key never refuses a save (it keeps
-// its save warning). Every other key, including every key the body sent,
-// is checked.
+// the kept stored keys, for the closed runtimes schema check: such a key
+// never refuses a save (it keeps its save warning).
 func runtimesDocForValidation(doc json.RawMessage, kept map[string][]string) (json.RawMessage, error) {
 	if len(kept) == 0 {
 		return doc, nil

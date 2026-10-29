@@ -390,9 +390,7 @@ type guardedSectionWrite struct {
 	section          string
 	doc              json.RawMessage
 	expectedRevision int64
-	// validationDoc, when set, is what the section schema check sees
-	// instead of doc (runtimesDocForValidation).
-	validationDoc json.RawMessage
+	validationDoc    json.RawMessage // schema check input when set (runtimesDocForValidation)
 }
 
 // updateGuarded is update for several sections in one store transaction

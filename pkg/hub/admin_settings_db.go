@@ -1686,8 +1686,6 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	tlsTouched := telemetryTLSTouched(rawBody)
 	for secName, doc := range sectionDocs {
 		if secName == "runtimes" {
-			// The stored keys the merge kept that are not runtime
-			// settings never refuse a save (they carry a save warning).
 			if vdoc, err := runtimesDocForValidation(doc, runtimeKeptKeys); err == nil {
 				doc = vdoc
 			}
