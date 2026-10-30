@@ -22,8 +22,10 @@
  * 3. Starts the fake agent helper (hack/e2e/fakeagent): a standalone
  *    Runtime Broker joined to the hub that runs the real agent-side
  *    clients in process. It creates a project and one agent per transport,
- *    each registering the fixture port, and writes a ready file once each
- *    port answers through the hub.
+ *    each registering the fixture port, then stops and resumes each agent
+ *    through the hub (a hub/broker start regression fails here, retro
+ *    #6663 R8), and writes a ready file once each port answers through the
+ *    hub again.
  * 4. Issues the member test identity and makes it project-admin of the
  *    fixture project.
  * 5. Restarts the hub without development sign-in, as in production (the

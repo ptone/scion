@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
 func TestParseFlags(t *testing.T) {
@@ -211,4 +212,148 @@ func TestWaitConnected(t *testing.T) {
 	if err := wait(s, "port-proxy-missing", 300*time.Millisecond); err == nil {
 		t.Error("an agent the hub never started: want an error at the deadline")
 	}
+}
+
+// fakeLifecycle is the hub's stop and start for stopAndResume: stop ends
+// the agent here (as the broker's stop reaches the runtime), start runs
+// startFn (the broker's start handler calling the fake manager).
+type fakeLifecycle struct {
+	agents   *agentSet
+	name     string
+	noStop   bool
+	stopErr  error
+	startFn  func() error
+	stops    int
+	starts   int
+	sequence []string
+}
+
+func (f *fakeLifecycle) Stop(_ context.Context, _ string) (*hubclient.LifecycleResponse, error) {
+	f.stops++
+	f.sequence = append(f.sequence, "stop")
+	if f.stopErr != nil {
+		return nil, f.stopErr
+	}
+	if !f.noStop {
+		f.agents.stop(f.name)
+	}
+	return &hubclient.LifecycleResponse{}, nil
+}
+
+func (f *fakeLifecycle) Start(_ context.Context, _ string) (*hubclient.LifecycleResponse, error) {
+	f.starts++
+	f.sequence = append(f.sequence, "start")
+	if err := f.startFn(); err != nil {
+		return nil, err
+	}
+	return &hubclient.LifecycleResponse{}, nil
+}
+
+func TestStopAndResume(t *testing.T) {
+	const name = "port-proxy-legacy"
+	env := map[string]string{
+		// Nothing listens here: the agent keeps retrying the port
+		// registration until it is stopped.
+		"SCION_HUB_ENDPOINT": "http://127.0.0.1:1",
+		"SCION_AGENT_ID":     "agent-1",
+	}
+	startWith := func(s *agentSet, token, runID string) func() error {
+		return func() error {
+			_, err := s.start(api.StartOptions{Name: name, Env: env, HubIssuedToken: token, RunID: runID})
+			return err
+		}
+	}
+	running := func(t *testing.T) *agentSet {
+		t.Helper()
+		s := newAgentSet(8080)
+		t.Cleanup(s.stopAll)
+		if err := startWith(s, "token", "run-1")(); err != nil {
+			t.Fatalf("first start: %v", err)
+		}
+		return s
+	}
+	call := func(lc *fakeLifecycle) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		return stopAndResume(ctx, lc, lc.agents, name, "agent-1")
+	}
+
+	t.Run("resumes a new instance", func(t *testing.T) {
+		s := running(t)
+		old := s.current(name)
+		lc := &fakeLifecycle{agents: s, name: name}
+		lc.startFn = startWith(s, "token-2", "run-2")
+		if err := call(lc); err != nil {
+			t.Fatalf("stopAndResume: %v", err)
+		}
+		if strings.Join(lc.sequence, ",") != "stop,start" {
+			t.Errorf("hub calls = %v, want stop then start", lc.sequence)
+		}
+		cur := s.current(name)
+		if cur == nil || cur == old || cur.info.RunID != "run-2" {
+			t.Errorf("after resume the running instance is %+v, want a new one on run-2", cur)
+		}
+	})
+
+	t.Run("a resume without a hub-issued token fails", func(t *testing.T) {
+		// What #6663 did: the broker dropped the credential on start, so
+		// the agent manager refused the resume and the hub answered an
+		// error.
+		s := running(t)
+		lc := &fakeLifecycle{agents: s, name: name}
+		lc.startFn = func() error {
+			if err := startWith(s, "", "run-2")(); err != nil {
+				return &apiclient.APIError{StatusCode: 502, Message: err.Error()}
+			}
+			return nil
+		}
+		err := call(lc)
+		if err == nil || !strings.Contains(err.Error(), "resume agent "+name) {
+			t.Fatalf("err = %v, want the resume failure", err)
+		}
+		if s.current(name) != nil {
+			t.Error("a refused resume left an agent running")
+		}
+	})
+
+	t.Run("a hub start that starts nothing fails", func(t *testing.T) {
+		s := running(t)
+		lc := &fakeLifecycle{agents: s, name: name, startFn: func() error { return nil }}
+		if err := call(lc); err == nil || !strings.Contains(err.Error(), "started no new agent") {
+			t.Fatalf("err = %v, want the no-new-agent failure", err)
+		}
+	})
+
+	t.Run("a stop that does not end the agent fails before the start", func(t *testing.T) {
+		s := running(t)
+		lc := &fakeLifecycle{agents: s, name: name, noStop: true, startFn: func() error { return nil }}
+		if err := call(lc); err == nil || !strings.Contains(err.Error(), "did not end") {
+			t.Fatalf("err = %v, want the stop failure", err)
+		}
+		if lc.starts != 0 {
+			t.Errorf("start called %d times after a failed stop, want 0", lc.starts)
+		}
+	})
+
+	t.Run("a stop error is final", func(t *testing.T) {
+		s := running(t)
+		lc := &fakeLifecycle{agents: s, name: name, stopErr: errors.New("boom"), startFn: func() error { return nil }}
+		if err := call(lc); err == nil || !strings.Contains(err.Error(), "stop agent") {
+			t.Fatalf("err = %v, want the stop error", err)
+		}
+		if lc.starts != 0 {
+			t.Errorf("start called %d times after a stop error, want 0", lc.starts)
+		}
+	})
+
+	t.Run("an agent that is not running fails", func(t *testing.T) {
+		s := newAgentSet(8080)
+		lc := &fakeLifecycle{agents: s, name: name, startFn: func() error { return nil }}
+		if err := call(lc); err == nil || !strings.Contains(err.Error(), "not running") {
+			t.Fatalf("err = %v, want the not-running error", err)
+		}
+		if lc.stops != 0 {
+			t.Errorf("stop called %d times for an agent that is not running, want 0", lc.stops)
+		}
+	})
 }

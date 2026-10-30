@@ -65,8 +65,12 @@ No container runtime or credentials are needed.
   join token it requests as the dev-auth admin), creates a project and one
   agent per transport (`port-proxy-conduit`, `port-proxy-legacy`), and runs
   the real agent-side clients in process with the environment the broker
-  built for each agent. Each agent registers the fixture port; the helper
-  writes its ready file once the port answers through the hub.
+  built for each agent. Each agent registers the fixture port. Once the
+  port answers through the hub, the helper stops and resumes each agent
+  through the hub (the hub's start dispatch to the broker's start handler,
+  which must hand the agent its hub-issued credential; retro #6663 R8) and
+  writes its ready file once the port answers again. A failed resume fails
+  the setup.
 - **Restart**: after the agents are ready, global setup issues the member
   test identity and makes it project-admin of the fixture project, then
   restarts the hub without development sign-in

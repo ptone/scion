@@ -44,6 +44,18 @@
 # filters apply to the whole workflow, not one matrix entry, so a change to
 # those paths runs every suite here; the list is kept to those files.
 #
+# port-proxy also covers the hub/broker start boundary (retro #6663 R8):
+# the helper stops and resumes each agent through the hub before the
+# suite runs, so a start or resume regression fails the setup. The
+# boundary paths (the hub's start dispatch and transports, the control
+# channel, pkg/runtimebroker and pkg/agent/run.go) are in the path filter
+# for that reason.
+#
+# Red-on-main triage: a cross-component e2e turning red right after a
+# boundary change is a contract signal first, a harness bug second. Before
+# fixing the harness, ask what the change made the other side assume (the
+# #6663 defect first showed here as a "harness gap" on create).
+#
 # iap-driver (ptone/scion#4240, WS2) needs no hub and no web build: it
 # checks the e2e harness IAP driver hook against two local HTTP servers it
 # starts itself, in well under a minute.
@@ -102,6 +114,14 @@ on:
       - 'pkg/portforward/**'
       - 'pkg/sciontool/portforward/**'
       - 'pkg/sciontool/conduit/**'
+      # Hub/broker start boundary (retro #6663 R8): the suite's global
+      # setup creates, stops and resumes an agent through a real hub and a
+      # real broker, so a start/resume contract change runs it too.
+      - 'pkg/hub/httpdispatcher.go'
+      - 'pkg/hub/broker_http_transport.go'
+      - 'pkg/hub/controlchannel_*.go'
+      - 'pkg/runtimebroker/**'
+      - 'pkg/agent/run.go'
   push:
     branches: [ main ]
     paths:
@@ -126,6 +146,14 @@ on:
       - 'pkg/portforward/**'
       - 'pkg/sciontool/portforward/**'
       - 'pkg/sciontool/conduit/**'
+      # Hub/broker start boundary (retro #6663 R8): the suite's global
+      # setup creates, stops and resumes an agent through a real hub and a
+      # real broker, so a start/resume contract change runs it too.
+      - 'pkg/hub/httpdispatcher.go'
+      - 'pkg/hub/broker_http_transport.go'
+      - 'pkg/hub/controlchannel_*.go'
+      - 'pkg/runtimebroker/**'
+      - 'pkg/agent/run.go'
   # The odd minute avoids the top-of-hour spike in scheduled GitHub jobs.
   schedule:
     - cron: '41 5 * * *'
