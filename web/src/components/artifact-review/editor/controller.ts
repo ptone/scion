@@ -150,9 +150,17 @@ export class ReviewController {
           },
           Enter: (state, dispatch, view) => {
             const c = selectedComment(state);
-            if (!c) return keys.Enter(state, dispatch, view);
-            void this.editNote(c.pos);
-            return true;
+            if (c) {
+              void this.editNote(c.pos);
+              return true;
+            }
+            // Enter right after a composition: the composed text is
+            // recorded first, and the break is an edit of its own.
+            if (this.ended && view && !view.composing) {
+              this.settleComposition();
+              return keys.Enter(view.state, view.dispatch, view);
+            }
+            return keys.Enter(state, dispatch, view);
           },
         }),
       ],

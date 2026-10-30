@@ -20,11 +20,14 @@
  * comment by button and by shortcut, edit a comment, see the refusal
  * hints, toggle to the source view and back, save, reload and see the
  * marks, and the stale review path. In Chromium, an IME composition
- * (through the DevTools protocol) is recorded as an insertion.
+ * (through the DevTools protocol) is recorded as an insertion. Suggested
+ * paragraph breaks and joins (ptone/scion#5915): Enter, typing, a join, a
+ * new list item and a multi-paragraph paste, saved and reloaded with
+ * their pilcrows.
  */
 
 import { expect, test } from '@playwright/test';
-import type { Locator, Page } from '@playwright/test';
+import type { Locator, Page, Request } from '@playwright/test';
 
 import {
   createProject,
@@ -99,7 +102,35 @@ test.afterAll(async () => {
   await setExperiments(null);
 });
 
+/**
+ * The page's API fetches in flight (the editor's and the page's own
+ * background polls, such as the chat unread count), so a reload can wait
+ * for them: a reload that cuts off a fetch makes some engines report a
+ * page error, which is the reload's doing, not the page's.
+ */
+const inFlight = new WeakMap<Page, Set<Request>>();
+
+function trackFetches(page: Page): void {
+  const open = new Set<Request>();
+  inFlight.set(page, open);
+  page.on('request', (r) => {
+    if (r.resourceType() === 'fetch' && new URL(r.url()).pathname.startsWith('/api/')) open.add(r);
+  });
+  page.on('requestfinished', (r) => open.delete(r));
+  page.on('requestfailed', (r) => open.delete(r));
+}
+
+/** Reloads the page once no API fetch is in flight. */
+async function reloadWhenSettled(page: Page): Promise<void> {
+  const open = inFlight.get(page);
+  if (open) {
+    await expect.poll(() => open.size, { message: 'API fetches settle before reload' }).toBe(0);
+  }
+  await page.reload();
+}
+
 test.beforeEach(({ page }) => {
+  trackFetches(page);
   // Uncaught errors anywhere fail the test; console errors and failed
   // requests do when they come from the editor's code or are the editor's
   // own diagnostics (the rest of the page has its own suites).
@@ -252,20 +283,11 @@ test('edits become suggestions, comments work by button and shortcut, and the re
   afterDelete = await editorText(page);
   expect(afterDelete).toContain('{==written==}{>>Why?<<}');
 
-  // Refusals: a paragraph break, formatting, a new list item or table
-  // line, and code change nothing.
+  // Refusals: formatting, a new table line, and code change nothing.
   const before = await editorText(page);
-  await endOf(page, 'second paragraph');
-  await page.keyboard.press('Enter');
-  await expect(hint(page)).toContainText("Paragraph breaks can't be suggested here yet.");
   await selectWord(page, 'paragraph');
   await page.keyboard.press('Control+b');
   await expect(hint(page)).toContainText("Formatting can't be suggested here.");
-  await endOf(page, 'a list item');
-  await page.keyboard.press('Enter');
-  await expect(hint(page)).toContainText(
-    "List and table structure can't be changed in a suggestion."
-  );
   await editor(page).locator('td', { hasText: /^a$/ }).click();
   await page.keyboard.press('Enter');
   await expect(hint(page)).toContainText(
@@ -363,7 +385,7 @@ test('edits become suggestions, comments work by button and shortcut, and the re
   expect(await currentText(a.id, 'index.md')).toBe(final);
 
   // Reload: the review's marks show inline in the graphical view.
-  await page.reload();
+  await reloadWhenSettled(page);
   await page
     .locator('scion-page-artifact-detail .header-actions sl-button', { hasText: 'Review' })
     .click();
@@ -372,6 +394,124 @@ test('edits become suggestions, comments work by button and shortcut, and the re
   await expect(editor(page).locator('ins.critic-sub-new')).toHaveText('many');
   await expect(editor(page).locator('.critic-comment')).toHaveCount(2);
   expect(await editorText(page)).toBe(final);
+});
+
+/** Pastes plain text at the editor's selection (a real paste in Firefox, which hides script-made paste data). */
+async function pasteText(page: Page, browserName: string, text: string): Promise<void> {
+  if (browserName === 'firefox') {
+    await page.evaluate((t) => {
+      document.addEventListener(
+        'copy',
+        (e) => {
+          e.clipboardData!.setData('text/plain', t);
+          e.preventDefault();
+        },
+        { once: true }
+      );
+    }, text);
+    await page.keyboard.press('Control+c');
+    await page.keyboard.press('Control+v');
+    return;
+  }
+  await page.locator('scion-review-editor').evaluate((host, t) => {
+    const target = host.shadowRoot!.querySelector('.ProseMirror')!;
+    const dt = new DataTransfer();
+    dt.setData('text/plain', t);
+    let event: Event;
+    try {
+      event = new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true });
+    } catch {
+      event = new Event('paste', { bubbles: true, cancelable: true });
+    }
+    if (!(event as ClipboardEvent).clipboardData) {
+      Object.defineProperty(event, 'clipboardData', { value: dt });
+    }
+    target.dispatchEvent(event);
+  }, text);
+}
+
+test('paragraph breaks, joins, a new list item and a multi-paragraph paste are suggestions', async ({
+  page,
+  browserName,
+}) => {
+  const a = await publish({
+    project,
+    title: 'Breaks',
+    entry: 'index.md',
+    files: { 'index.md': Buffer.from(DOC) },
+  });
+  await openArtifact(page, project, a.id);
+  await startGraphicalReview(page);
+
+  // Enter at the end of a paragraph, then typing: one insertion across the break.
+  await endOf(page, 'second paragraph');
+  await page.keyboard.press('Enter');
+  await page.keyboard.type('A new one.');
+  await expect.poll(() => editorText(page)).toContain('stays as written.{++\n\nA new one.++}\n');
+  await expect(editor(page).locator('p.critic-break-ins')).toHaveCount(1);
+
+  // Backspace at the start of a paragraph suggests joining it to the one before.
+  await editor(page).locator('p', { hasText: 'second paragraph' }).click();
+  await page.keyboard.press('Home');
+  await page.keyboard.press('Backspace');
+  await expect.poll(() => editorText(page)).toContain('some words.{--\n\n--}The second paragraph');
+  await expect(editor(page).locator('p.critic-break-del')).toHaveCount(1);
+
+  // Enter at the end of a list item: a new item with the list's own bullet.
+  await endOf(page, 'a list item');
+  await page.keyboard.press('Enter');
+  await page.keyboard.type('another');
+  await expect.poll(() => editorText(page)).toContain('* a list item{++\n* another++}\n');
+
+  // A paste of two paragraphs at the end of the new paragraph.
+  await editor(page).locator('p', { hasText: 'A new one.' }).click();
+  await page.keyboard.press('End');
+  await pasteText(page, browserName, 'P1\n\nP2');
+  await expect.poll(() => editorText(page)).toContain('A new one.P1\n\nP2++}');
+  await expect(hint(page)).toHaveCount(0);
+
+  // Undo takes back the paste as one edit; paste it again.
+  await page.keyboard.press('Control+z');
+  await expect.poll(() => editorText(page)).not.toContain('P1');
+  await pasteText(page, browserName, 'P1\n\nP2');
+  await expect.poll(() => editorText(page)).toContain('A new one.P1\n\nP2++}');
+
+  const final = await editorText(page);
+  expect(final.replace(/\{\+\+[^]*?\+\+\}|\{--|--\}/g, '')).toBe(DOC);
+  await page
+    .locator('scion-page-artifact-detail .edit-footer sl-button', { hasText: 'Save review' })
+    .click();
+  await expect(
+    page.locator('scion-page-artifact-detail sl-badge', { hasText: 'Review pending' })
+  ).toBeVisible();
+  expect(await currentText(a.id, 'index.md')).toBe(final);
+
+  // Reload: the breaks and the join show their pilcrows, and the text is as saved.
+  await reloadWhenSettled(page);
+  await page
+    .locator('scion-page-artifact-detail .header-actions sl-button', { hasText: 'Review' })
+    .click();
+  await expect(editor(page)).toBeVisible();
+  await expect(editor(page).locator('p.critic-break-ins')).toHaveCount(2);
+  await expect(editor(page).locator('p.critic-break-del')).toHaveCount(1);
+  await expect(editor(page).locator('li.critic-break-ins')).toHaveCount(1);
+  expect(await editorText(page)).toBe(final);
+  // A loaded break is an earlier suggestion: Backspace there is refused.
+  // The cursor goes into the item's text (a click on the item itself can
+  // land on its pilcrow, outside the text).
+  await endOf(page, 'another');
+  await page.keyboard.press('Home');
+  await page.keyboard.press('Backspace');
+  await expect(hint(page)).toContainText('This suggestion is from an earlier review.');
+  expect(await editorText(page)).toBe(final);
+  // A click on the item's pilcrow puts the cursor at the start of its text:
+  // typing there is refused (the text belongs to an earlier suggestion),
+  // never a stray edit.
+  await editor(page)
+    .locator('li.critic-break-ins > p')
+    .click({ position: { x: 3, y: 6 } });
+  await page.keyboard.type('Z');
+  await expect.poll(() => editorText(page)).toBe(final);
 });
 
 test('a stale review reloads the current version and keeps the discarded text', async ({

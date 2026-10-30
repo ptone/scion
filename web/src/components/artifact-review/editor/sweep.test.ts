@@ -291,6 +291,116 @@ function report(label: string, t: Tally): void {
   writeFileSync(`${out}.${label}.json`, JSON.stringify(t.outputs));
 }
 
+type StructuralKind =
+  | 'enter'
+  | 'backspace-start'
+  | 'delete-end'
+  | 'cross-delete'
+  | 'cross-type'
+  | 'paste';
+const STRUCTURAL: StructuralKind[] = [
+  'enter',
+  'backspace-start',
+  'delete-end',
+  'cross-delete',
+  'cross-type',
+  'paste',
+];
+
+function pressKey(c: ReviewController, key: string): void {
+  c.view.dom.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+}
+
+/**
+ * Makes the structural edit kind at p as the reviewer would (keys and the
+ * paste event); false where it does not apply (no next block).
+ */
+function structuralEdit(c: ReviewController, kind: StructuralKind, p: number): boolean {
+  const v = c.view;
+  const $p = v.state.doc.resolve(p);
+  const sel = (from: number, to = from): void =>
+    v.dispatch(v.state.tr.setSelection(TextSelection.create(v.state.doc, from, to)));
+  if (kind === 'enter') {
+    sel(p);
+    pressKey(c, 'Enter');
+  } else if (kind === 'backspace-start') {
+    sel($p.start());
+    pressKey(c, 'Backspace');
+  } else if (kind === 'delete-end') {
+    sel($p.end());
+    pressKey(c, 'Delete');
+  } else if (kind === 'paste') {
+    sel(p);
+    const data = new DataTransfer();
+    data.setData('text/plain', 'P1\n\nP2');
+    const e = new Event('paste', { bubbles: true, cancelable: true }) as ClipboardEvent;
+    Object.defineProperty(e, 'clipboardData', { value: data });
+    v.dom.dispatchEvent(e);
+  } else {
+    // From p into the second character of the next textblock.
+    let next = -1;
+    v.state.doc.nodesBetween($p.after(), v.state.doc.content.size, (n, pos) => {
+      if (next >= 0) return false;
+      if (n.isTextblock) {
+        next = pos + 1 + Math.min(1, n.content.size);
+        return false;
+      }
+      return true;
+    });
+    if (next < 0) return false;
+    sel(p, next);
+    if (kind === 'cross-delete') pressKey(c, 'Backspace');
+    else v.dispatch(v.state.tr.insertText('Y', p, next));
+  }
+  return true;
+}
+
+/**
+ * Checks one structural edit made in c on the text md: a taken one by its
+ * saved text (the hub's check, and that it opens again), a refused one by
+ * the document and the hint. A key that does nothing at that place (the
+ * start of the document, a table cell) needs no hint.
+ */
+async function checkStructural(
+  t: Tally,
+  c: ReviewController,
+  reopen: ReviewController,
+  name: string,
+  md: string,
+  p: number,
+  kind: StructuralKind
+): Promise<void> {
+  const where = `${name} @${p} ${kind}`;
+  const before = c.view.state.doc;
+  const prior = c.flush();
+  const hintCount = hints.length;
+  if (!structuralEdit(c, kind, p)) return;
+  if (c.view.state.doc.eq(before)) {
+    const hint = hints[hintCount];
+    if (hint !== undefined) {
+      t.refused[hint] = (t.refused[hint] ?? 0) + 1;
+      if (process.env.SWEEP_REPORT) t.refusals.push(`${where}: ${hint}`);
+    } else {
+      t.noOps++;
+      if (process.env.SWEEP_REPORT) t.refusals.push(`${where}: (nothing to do)`);
+    }
+    if (c.flush() !== prior) t.failures.push(`${where}: refused, but the text changed`);
+    return;
+  }
+  t.applied++;
+  const out = c.flush();
+  if (out === null) {
+    t.failures.push(`${where}: taken but cannot be saved`);
+    return;
+  }
+  if (!onlyMarksChanged(out, projectCritic(md, 'clean'))) {
+    t.failures.push(`${where}: changes text outside marks: ${JSON.stringify(out)}`);
+  }
+  t.outputs.push({ name: where, base: md, review: out });
+  if (!reopen.load(out)) t.failures.push(`${where}: saved text does not open again`);
+  await Promise.resolve();
+}
+
 describe('edit sweep', () => {
   it(
     'every taken edit saves as text the hub accepts, local to its unit; every refused edit changes nothing',
@@ -360,6 +470,35 @@ describe('edit sweep', () => {
         }
       }
       report('sequence', t);
+      expect(t.failures).toEqual([]);
+      expect(t.applied).toBeGreaterThan(docs.length);
+    },
+    SWEEP_TIMEOUT_MS
+  );
+
+  it(
+    'structural edits: every taken one saves as text the hub accepts; every refused one changes nothing',
+    async () => {
+      const t = newTally();
+      const c = await controller();
+      const reopen = await controller();
+      for (const d of docs) {
+        hints = [];
+        if (!c.load(d.in)) {
+          t.notOpened.push(d.name);
+          continue;
+        }
+        t.opened++;
+        for (let k = 0; k < SPOTS; k++) {
+          for (const kind of STRUCTURAL) {
+            expect(c.load(d.in)).toBe(true);
+            const p = spot(c.view.state.doc, k);
+            if (p === null) continue;
+            await checkStructural(t, c, reopen, d.name, d.in, p, kind);
+          }
+        }
+      }
+      report('structural', t);
       expect(t.failures).toEqual([]);
       expect(t.applied).toBeGreaterThan(docs.length);
     },

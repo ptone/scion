@@ -24,7 +24,7 @@
 import { InitReady, marksCtx, schemaTimerCtx } from '@milkdown/core';
 import { createTimer } from '@milkdown/ctx';
 import type { MilkdownPlugin } from '@milkdown/ctx';
-import type { DOMOutputSpec, Mark, Node } from '@milkdown/prose/model';
+import type { DOMOutputSpec, Mark, Node, NodeSpec } from '@milkdown/prose/model';
 import { $markSchema, $nodeSchema } from '@milkdown/utils';
 
 export const MARKS = {
@@ -175,4 +175,88 @@ export function markKeyOf(marks: readonly Mark[]): MarkKey | null {
     for (const k of MARK_KEYS) if (MARKS[k] === m.type.name) return k;
   }
   return null;
+}
+
+/** The block attribute of structural suggestions (design 4.8 item 3). */
+export const BLOCK_ATTR = 'critic_block';
+
+/**
+ * A suggested paragraph break (ins) or join (del) at the boundary before
+ * the block that carries it. own: made in this editing session (never
+ * read from the text, never saved).
+ */
+export interface BlockBreak {
+  kind: 'break';
+  change: 'ins' | 'del';
+  own: boolean;
+}
+
+/** The node types that can carry a boundary suggestion. */
+export const CARRIER_TYPES: ReadonlySet<string> = new Set([
+  'paragraph',
+  'heading',
+  'list_item',
+  'blockquote',
+]);
+
+/** The boundary suggestion a node carries, or null. */
+export function breakOf(node: Node | null | undefined): BlockBreak | null {
+  const v = node?.attrs[BLOCK_ATTR] as BlockBreak | null | undefined;
+  return v && v.kind === 'break' && (v.change === 'ins' || v.change === 'del') ? v : null;
+}
+
+/** A boundary suggestion value. */
+export function blockBreak(change: 'ins' | 'del', own: boolean): BlockBreak {
+  return { kind: 'break', change, own };
+}
+
+/** Whether a critic_block value is null or a well-formed boundary suggestion. */
+function validBlockAttr(v: unknown): void {
+  if (v === null) return;
+  const b = v as Partial<BlockBreak>;
+  if (
+    typeof v !== 'object' ||
+    b.kind !== 'break' ||
+    (b.change !== 'ins' && b.change !== 'del') ||
+    typeof b.own !== 'boolean'
+  ) {
+    throw new RangeError('invalid critic_block');
+  }
+}
+
+/** The attribute spec added to each carrier type. */
+export const BLOCK_ATTR_SPEC = { default: null, validate: validBlockAttr };
+
+/**
+ * The fixed class a node carrying a boundary suggestion is rendered with
+ * (the styles draw a pilcrow with fixed alternative text), or null.
+ */
+export function breakClass(node: Node): string | null {
+  const b = breakOf(node);
+  if (!b) return null;
+  return b.change === 'ins' ? 'critic-break-ins' : 'critic-break-del';
+}
+
+/** spec with the boundary class of node added to its element's classes. */
+export function withBreakClass(spec: DOMOutputSpec, node: Node): DOMOutputSpec {
+  const cls = breakClass(node);
+  if (!cls || !Array.isArray(spec)) return spec;
+  const arr = spec as unknown as unknown[];
+  const first = arr[1];
+  if (first && typeof first === 'object' && !Array.isArray(first)) {
+    const attrs = { ...(first as Record<string, unknown>) };
+    attrs.class = typeof attrs.class === 'string' && attrs.class ? `${attrs.class} ${cls}` : cls;
+    return [arr[0], attrs, ...arr.slice(2)] as unknown as DOMOutputSpec;
+  }
+  return [arr[0], { class: cls }, ...arr.slice(1)] as unknown as DOMOutputSpec;
+}
+
+/** A node spec of a carrier type with the boundary attribute and its class added. */
+export function withBlockAttr<T extends NodeSpec>(spec: T): T {
+  const toDOM = spec.toDOM;
+  return {
+    ...spec,
+    attrs: { ...(spec.attrs ?? {}), [BLOCK_ATTR]: BLOCK_ATTR_SPEC },
+    toDOM: toDOM ? (node: Node): DOMOutputSpec => withBreakClass(toDOM(node), node) : undefined,
+  };
 }

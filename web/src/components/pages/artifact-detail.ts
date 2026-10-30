@@ -215,12 +215,12 @@ export const REVIEW_HINT_TEXT: Record<ReviewHint, { title: string; body: string 
     body: 'You can edit the text in them; use the Source view to add, remove or move items, rows or columns.',
   },
   break: {
-    title: "Paragraph breaks can't be suggested here yet.",
-    body: 'Use the Source view to split or join paragraphs.',
+    title: "That break or join can't be suggested here.",
+    body: 'Paragraphs, headings, list items and quotes can be split or joined, outside links, formatting and code; use the Source view for other block changes.',
   },
   'paste-multi': {
-    title: "Pasting several paragraphs isn't supported here yet.",
-    body: 'Paste one paragraph at a time, or use the Source view.',
+    title: "That text can't be pasted here as several paragraphs.",
+    body: 'Paste it into a paragraph, heading, list item or quote, or use the Source view.',
   },
   earlier: {
     title: 'This suggestion is from an earlier review.',

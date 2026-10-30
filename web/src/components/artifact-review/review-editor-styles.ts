@@ -271,6 +271,49 @@ export const reviewEditorStyles = css`
     border-bottom: 2px solid var(--scion-review-hl-line, #ca8a04);
     border-radius: 0.15rem;
   }
+  /*
+   * Suggested paragraph breaks and joins: a pilcrow at the boundary. A list
+   * item or quote draws it inside its first paragraph, so a click on it
+   * puts the cursor at the start of that text.
+   */
+  p.critic-break-ins::before,
+  p.critic-break-del::before,
+  h1.critic-break-ins::before,
+  h1.critic-break-del::before,
+  h2.critic-break-ins::before,
+  h2.critic-break-del::before,
+  h3.critic-break-ins::before,
+  h3.critic-break-del::before,
+  h4.critic-break-ins::before,
+  h4.critic-break-del::before,
+  h5.critic-break-ins::before,
+  h5.critic-break-del::before,
+  h6.critic-break-ins::before,
+  h6.critic-break-del::before,
+  :is(li, blockquote).critic-break-ins > :first-child::before,
+  :is(li, blockquote).critic-break-del > :first-child::before {
+    content: '¶';
+    content: '¶' / 'Suggested paragraph break';
+    display: inline-block;
+    margin-right: 0.2rem;
+    padding: 0 0.15rem;
+    border-radius: 0.15rem;
+    font-weight: 700;
+    color: var(--scion-review-ins-text, #166534);
+    background: var(--scion-review-ins-bg, #dcfce7);
+  }
+  :is(p, h1, h2, h3, h4, h5, h6).critic-break-del::before,
+  :is(li, blockquote).critic-break-del > :first-child::before {
+    content: '¶' / 'Suggested join';
+    color: var(--scion-review-del-text, #991b1b);
+    background: var(--scion-review-del-bg, #fee2e2);
+    text-decoration: line-through;
+    text-decoration-color: var(--scion-review-del-line, #dc2626);
+  }
+  li.critic-break-ins {
+    box-shadow: inset 3px 0 0 var(--scion-review-ins-line, #16a34a);
+    padding-left: 0.35rem;
+  }
   .critic-comment {
     counter-increment: critic-note;
     display: inline-flex;
@@ -311,6 +354,12 @@ export const reviewEditorStyles = css`
       text-decoration: line-through;
     }
     .critic-comment {
+      border: 1px solid CanvasText;
+    }
+    :is(p, h1, h2, h3, h4, h5, h6).critic-break-ins::before,
+    :is(p, h1, h2, h3, h4, h5, h6).critic-break-del::before,
+    :is(li, blockquote).critic-break-ins > :first-child::before,
+    :is(li, blockquote).critic-break-del > :first-child::before {
       border: 1px solid CanvasText;
     }
     .ProseMirror li[data-item-type='task']::before {

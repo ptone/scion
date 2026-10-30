@@ -38,8 +38,19 @@ import {
   tokenOf,
 } from '../../../utils/critic-sentinels.js';
 import type { SentinelAlphabet } from '../../../utils/critic-sentinels.js';
-import { COMMENT, CRITIC_MARK_NAMES, MARKS, markKeyOf, runKeyOf } from './schema.js';
+import { endsAt } from './guard.js';
+import {
+  BLOCK_ATTR,
+  COMMENT,
+  CRITIC_MARK_NAMES,
+  MARKS,
+  blockBreak,
+  breakOf,
+  markKeyOf,
+  runKeyOf,
+} from './schema.js';
 import type { MarkKey } from './schema.js';
+import { carrierBefore } from './structural.js';
 
 interface Edit {
   pos: number;
@@ -182,6 +193,11 @@ export function applySentinels(
   const markable = (from: number, to: number): boolean => {
     let ok = false;
     tr.doc.nodesBetween(from, to, (n, pos, parent) => {
+      // A hard break is markable content (a suggested line break).
+      if (n.type.name === 'hardbreak' && parent?.type.allowsMarkType(insType)) {
+        ok = true;
+        return false;
+      }
       if (n.isText && parent?.type.allowsMarkType(insType)) {
         const t = (n.text ?? '').slice(Math.max(0, from - pos), to - pos);
         for (const c of t) {
@@ -196,6 +212,25 @@ export function applySentinels(
     return ok;
   };
   const doc0 = tr.doc;
+  // Suggested breaks and joins found: the carrier's position in doc0.
+  const breaks: { at: number; change: 'ins' | 'del' }[] = [];
+  // The carriers of the textblock boundaries between from and to in doc0,
+  // or null when one of them cannot carry a suggestion.
+  const crossing = (from: number, to: number): number[] | null => {
+    const out: number[] = [];
+    let ok = true;
+    doc0.nodesBetween(from, to, (n, pos) => {
+      if (!ok) return false;
+      if (!n.isTextblock) return true;
+      if (pos > from) {
+        const b = carrierBefore(doc0, pos);
+        if (b) out.push(b.carrierPos);
+        else ok = false;
+      }
+      return false;
+    });
+    return ok ? out : null;
+  };
   // Every node in document order (as doc0.descendants), with the index of
   // the top-level block it is in.
   const visit = (
@@ -256,7 +291,14 @@ export function applySentinels(
         pending.push({ from: runStart, to: p, key: state });
         const closeEdit: Edit = { pos: p, entry };
         edits.push(closeEdit);
-        if (pending.some((r) => markable(r.from, r.to))) {
+        // An insertion or deletion around block boundaries that can carry
+        // a suggestion is a suggested break or join there, with or
+        // without text around it.
+        const crossed = state === 'ins' || state === 'del' ? crossing(openEdit!.pos, p) : null;
+        if (crossed && crossed.length > 0) {
+          for (const at of crossed) breaks.push({ at, change: state as 'ins' | 'del' });
+          ranges.push(...pending);
+        } else if (pending.some((r) => markable(r.from, r.to))) {
           ranges.push(...pending);
         } else {
           openEdit!.literal = tok(openOf[state]);
@@ -298,8 +340,10 @@ export function applySentinels(
       );
     }
   });
-  // Attribute changes keep every position, so they go first.
+  // Attribute changes keep every position, so they go first. A loaded
+  // suggestion is never the reviewer's own (design E6).
   for (const f of attrEdits) f();
+  for (const b of breaks) tr.setNodeAttribute(b.at, BLOCK_ATTR, blockBreak(b.change, false));
   const endState = state as MarkKey | null;
   if (endState !== null && openEdit) {
     (openEdit as Edit).literal = tok(openOf[endState]);
@@ -386,7 +430,7 @@ export function docToSentinels(
       return { close: '', open: '', sep: a.subSep };
     return { close: from ? closeS[from.key] : '', open: to ? openS[to.key] : '', sep: '' };
   };
-  const blocks: { end: number; items: Item[] }[] = [];
+  const blocks: { pos: number; end: number; items: Item[] }[] = [];
   doc.descendants((node, pos) => {
     if (!node.isTextblock) return true;
     const items: Item[] = [];
@@ -411,7 +455,7 @@ export function docToSentinels(
         });
       }
     });
-    blocks.push({ end: pos + 1 + node.content.size, items });
+    blocks.push({ pos, end: pos + 1 + node.content.size, items });
     return false;
   });
   // Tokens to insert at each position: closing ones go under the
@@ -459,6 +503,28 @@ export function docToSentinels(
   const runOf = (it: Item | undefined): RunState | null =>
     it?.key && it.run ? { key: it.key, run: it.run } : null;
   blocks.forEach((b, bi) => {
+    if (bi > 0) {
+      // The boundary before this block: a suggested break or join is a
+      // run of its own (with no text) that the runs on either side may
+      // continue; otherwise a run carries into this block only if it
+      // starts with it, and never an insertion or deletion across a
+      // boundary that could carry a suggestion (guard.ts endsAt).
+      const end = blocks[bi - 1].end;
+      const bd = carrierBefore(doc, b.pos);
+      const br = bd ? breakOf(bd.carrier) : null;
+      if (br) {
+        const next: RunState = { key: br.change, run: br.own ? `${br.change}:mine` : br.change };
+        add(end, transition(state, next));
+        state = next;
+      } else if (state !== null) {
+        const head = b.items[0];
+        const nextRun = head && head.note === undefined ? head.run : null;
+        if (endsAt({ eligible: bd !== null, next: nextRun }, state.run)) {
+          add(end, transition(state, null));
+          state = null;
+        }
+      }
+    }
     for (const it of b.items) {
       const next = runOf(it);
       add(it.from, transition(state, next));
@@ -468,13 +534,11 @@ export function docToSentinels(
         notes.push(it.note);
       }
     }
-    // A run carries into the next block only if that block starts with it.
-    const next = runOf(blocks[bi + 1]?.items[0]);
-    if (state !== null && next?.run !== state.run) {
-      add(b.end, transition(state, null));
-      state = null;
-    }
   });
+  if (state !== null && blocks.length > 0) {
+    add(blocks[blocks.length - 1].end, transition(state, null));
+    state = null;
+  }
   const tr = new Transform(doc);
   const ops = [
     ...[...ins].map(([pos, t]) => ({ pos, t, order: 1 })),

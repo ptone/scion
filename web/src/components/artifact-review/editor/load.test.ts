@@ -32,7 +32,7 @@ import { parseCritic } from '../../../utils/critic.js';
 import { loadDocument } from './bridge.js';
 import { definitionNodes } from './create.js';
 import type { Core, MdRead } from './create.js';
-import { TextMarks } from './guard.js';
+import { TextMarks, stripBlockSyntax } from './guard.js';
 import type { MarkRun } from './guard.js';
 import {
   consumedAsInSource,
@@ -93,6 +93,9 @@ function baselineOf(md: string): Baseline | null {
 }
 
 describe('marks of a range, from one reading of the whole text', () => {
+  /** The reading of a mark text across lines with its block syntax left out (MarkRun.alt). */
+  const alt = (t: string): string | undefined =>
+    /[\r\n]/.test(t) ? core.plain(stripBlockSyntax(t)) : undefined;
   /** The marks of [from, to): every segment of a fresh whole-text parse that starts there. */
   const fresh = (md: string, from: number, to: number, skip: Set<number>): MarkRun[] =>
     parseCritic(md)
@@ -102,8 +105,14 @@ describe('marks of a range, from one reading of the whole text', () => {
           s.kind === 'comment'
             ? { kind: 'comment', text: s.text }
             : s.kind === 'substitution'
-              ? { kind: 'substitution', text: core.plain(s.text), next: core.plain(s.next ?? '') }
-              : { kind: s.kind as MarkRun['kind'], text: core.plain(s.text) }
+              ? {
+                  kind: 'substitution',
+                  text: core.plain(s.text),
+                  next: core.plain(s.next ?? ''),
+                  alt: alt(s.text),
+                  nextAlt: alt(s.next ?? ''),
+                }
+              : { kind: s.kind as MarkRun['kind'], text: core.plain(s.text), alt: alt(s.text) }
       );
 
   it('gives every range the marks a fresh read of the whole text gives it', () => {

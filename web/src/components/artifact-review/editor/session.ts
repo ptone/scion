@@ -51,14 +51,18 @@ import {
 import {
   consumedAsInSource,
   docStrings,
+  hasBreak,
+  layout,
   makeBaseline,
   savePreserving,
   sentinelInDefinition,
+  spanOf,
   unitRange,
   unitSource,
   writeUnit,
 } from './preserve.js';
-import type { Baseline } from './preserve.js';
+import type { Baseline, UnitSpan } from './preserve.js';
+import { BLOCK_ATTR, COMMENT, breakOf, markKeyOf } from './schema.js';
 import type { HintKind } from './policy.js';
 
 export class ReviewSession {
@@ -286,26 +290,32 @@ export class ReviewSession {
     const { schema, serialize } = this.core;
     const clean = (t: string): string => normalizeCritic(projectCritic(t, 'clean'));
     const base = this.baseline;
-    if (!base || doc.childCount !== base.blocks.length) return 'generic';
-    const [i, j] = unitRange(base, first, last);
-    for (let k = i; k <= j; k++) if (this.readOnly.has(k)) return 'generic';
-    const src = unitSource(base, i, j);
+    if (!base) return 'generic';
+    const lay = layout(doc, base);
+    if (!lay) return 'generic';
+    const u = spanOf(lay, first, last);
+    if (!u) return 'generic';
+    for (let k = u.bi; k <= u.bj; k++) if (this.readOnly.has(k)) return 'generic';
+    const src = unitSource(base, u.bi, u.bj);
     const kids: Node[] = [];
-    for (let k = i; k <= j; k++) kids.push(doc.child(k));
+    for (let k = u.di; k <= u.dj; k++) kids.push(doc.child(k));
     const unit = schema.topNodeType.create(null, kids);
-    const md = writeUnit(doc, base, i, j, serialize, schema, this.parseInDocument);
+    const md = writeUnit(doc, base, u, serialize, schema, this.parseInDocument);
     if (md === null) return 'generic';
     if (clean(md) !== clean(src)) return 'generic';
-    if (this.addsCloser(i, j, md)) return 'generic';
-    if (this.changesCode(doc, i, j, md)) return 'code-run';
+    if (this.addsCloser(u.bi, u.bj, md)) return 'generic';
+    if (this.changesCode(doc, u, md)) return 'code-run';
     if (marksReadBack(unit, md, this.core.plain) !== null) return 'generic';
     // The written unit must open again as it is shown (for example, an
     // backslashed autolink-looking text must not become a link that takes in
-    // a mark's closing token).
-    if (!this.reopens(md)) return 'generic';
+    // a mark's closing token), with the same blocks where a suggested break
+    // or join is in it.
+    const again = this.reopened(md);
+    if (!again) return 'generic';
+    if (structural(unit, u) && shapeOf(again) !== shapeOf(unit)) return 'generic';
     const runs = docMarkRuns(unit);
-    if (!earlierKept(this.earlierOf(i, j), md, runs)) {
-      return earlierKept(this.earlierOf(i, j, false), md, runs, false) ? 'moved' : 'generic';
+    if (!earlierKept(this.earlierOf(u.bi, u.bj), md, runs)) {
+      return earlierKept(this.earlierOf(u.bi, u.bj, false), md, runs, false) ? 'moved' : 'generic';
     }
     if (this.hazardous && !this.wholeTextOk(doc)) return 'generic';
     return null;
@@ -343,9 +353,9 @@ export class ReviewSession {
     return this.hazardous;
   }
 
-  /** Whether md opens in the editor (the load checks, without showing it). */
-  private reopens(md: string): boolean {
-    return this.opening(md) !== null;
+  /** The document md opens as in the editor (the load checks, without showing it), or null. */
+  private reopened(md: string): Node | null {
+    return this.opening(md)?.loaded.doc ?? null;
   }
 
   /**
@@ -408,7 +418,9 @@ export class ReviewSession {
    * a read-only unit.
    */
   earlierHint(block: number): HintKind {
-    return this.readOnly.has(block) ? 'generic' : 'earlier';
+    const lay = this.baseline ? layout(this.core.view.state.doc, this.baseline) : null;
+    const k = lay ? lay.of[block] : block;
+    return this.readOnly.has(k) ? 'generic' : 'earlier';
   }
 
   /** Whether the document holds a mark or comment made in this editor since the last load. */
@@ -458,12 +470,12 @@ export class ReviewSession {
     for (const u of r.units) {
       if (!u.written) continue;
       const kids: Node[] = [];
-      if (u.i < 0) doc.forEach((n) => kids.push(n));
-      else for (let k = u.i; k <= u.j; k++) kids.push(doc.child(k));
+      for (let k = u.di; k <= u.dj; k++) kids.push(doc.child(k));
       const unit = schema.topNodeType.create(null, kids);
       if (marksReadBack(unit, u.md, this.core.plain) !== null) return null;
       if (u.i >= 0 && this.addsCloser(u.i, u.j, u.md)) return null;
-      if (u.i >= 0 && this.changesCode(doc, u.i, u.j, u.md)) return null;
+      const span = { bi: u.i, bj: u.j, di: u.di, dj: u.dj };
+      if (u.i >= 0 && this.changesCode(doc, span, u.md)) return null;
       const runs = docMarkRuns(unit);
       const before = u.i < 0 ? this.earlierOf() : this.earlierOf(u.i, u.j);
       if (!earlierKept(before, u.md, runs)) return null;
@@ -507,30 +519,39 @@ export class ReviewSession {
   }
 
   /**
-   * Whether the written text md of units i..j of doc could change how the
+   * Whether the written text md of unit u of doc could change how the
    * critic parser pairs backticks with text outside it (its code ranges
    * depend only on backtick runs, their backslashes, and blank and fence
-   * lines, and suggest mode adds no blank line): its fence-opener lines
-   * differ from its source's, or its backtick runs differ while another
+   * lines): its fence-opener lines differ from its source's, or its
+   * backtick runs per line run (codeSignature, read over the written text,
+   * so a blank line a suggested break adds counts) differ while another
    * block of its line run holds a backtick, or, for a list or table, while
    * an item or row it did not change holds one (the per-unit checks read
    * the unit alone, so they cannot see such a pairing).
    */
-  private changesCode(doc: Node, i: number, j: number, md: string): boolean {
+  private changesCode(doc: Node, u: UnitSpan, md: string): boolean {
     const base = this.baseline;
     if (!base) return false;
-    const src = unitSource(base, i, j);
+    const src = unitSource(base, u.bi, u.bj);
     if (fenceLines(md) !== fenceLines(src)) return true;
-    if (backtickRuns(md) === backtickRuns(src)) return false;
-    for (let k = i; k <= j; k++) {
+    if (codeSignature(md) === codeSignature(src)) return false;
+    const lay = layout(doc, base);
+    if (!lay) return true;
+    for (let k = u.bi; k <= u.bj; k++) {
       if (this.codeNeighbours[k]) return true;
       const subs = base.blocks[k].subs;
+      if (!subs) continue;
       const was = base.nodes[k];
-      const now = doc.child(k);
-      if (!subs || now.childCount !== was.childCount) continue;
+      const now = doc.child(lay.at[k]);
+      const ticks = (c: number): boolean =>
+        base.blocks[k].src.slice(subs[c].from, subs[c].to).includes('`');
+      if (now.childCount !== was.childCount) {
+        // Items added or joined: any item of the source with a backtick counts.
+        for (let c = 0; c < subs.length; c++) if (ticks(c)) return true;
+        continue;
+      }
       for (let c = 0; c < subs.length; c++) {
-        if (now.child(c) !== was.child(c)) continue;
-        if (base.blocks[k].src.slice(subs[c].from, subs[c].to).includes('`')) return true;
+        if (now.child(c) === was.child(c) && ticks(c)) return true;
       }
     }
     return false;
@@ -571,6 +592,22 @@ export function backtickRuns(text: string): string {
     out.push(`${m[0].length}${slashes % 2 ? 'e' : ''}`);
   }
   return out.join(',');
+}
+
+/**
+ * The backtick runs of text (backtickRuns) per line run: a blank line (one
+ * with only spaces or tabs, as the critic parser reads it) separates line
+ * runs ("|"), since the critic parser pairs backticks only within one. A
+ * suggested paragraph break adds a blank line (inside its mark), so it
+ * changes the signature when it falls between two backticks; the quote
+ * and list separators hold no blank line.
+ */
+export function codeSignature(text: string): string {
+  return text
+    .replace(/\r\n?/g, '\n')
+    .split(/\n[ \t]*(?=\n)/)
+    .map((part) => backtickRuns(part))
+    .join('|');
 }
 
 /** The lines of text that would open (or close) a fenced code block. */
@@ -705,4 +742,45 @@ function blockStarts(base: Baseline): number[] {
     at += b.src.length + b.after.length;
   }
   return out;
+}
+
+/** Whether a unit holds a suggested break or join, or blocks a break added. */
+function structural(unit: Node, u: UnitSpan): boolean {
+  if (u.dj - u.di !== u.bj - u.bi) return true;
+  let found = false;
+  unit.forEach((n) => {
+    if (!found && hasBreak(n)) found = true;
+  });
+  return found;
+}
+
+/**
+ * The block structure of a document with its text and suggestions: each
+ * block's type (a heading's level) and boundary suggestion, and each
+ * textblock's text with its critic marks and comments. Ownership and
+ * other attributes are left out.
+ */
+export function shapeOf(doc: Node): string {
+  const parts: string[] = [];
+  const walk = (n: Node): void => {
+    if (n.isText) {
+      parts.push(`${markKeyOf(n.marks) ?? ''}:${JSON.stringify(n.text ?? '')}`);
+      return;
+    }
+    if (n.type.name === COMMENT) {
+      parts.push(`note:${JSON.stringify(String(n.attrs.note))}`);
+      return;
+    }
+    if (n.isInline) {
+      parts.push(`${markKeyOf(n.marks) ?? ''}:${n.type.name}`);
+      return;
+    }
+    const br = BLOCK_ATTR in n.attrs ? breakOf(n) : null;
+    const level = n.type.name === 'heading' ? String(n.attrs.level) : '';
+    parts.push(`<${n.type.name}${level}${br ? `/${br.change}` : ''}>`);
+    n.forEach(walk);
+    parts.push('</>');
+  };
+  doc.forEach(walk);
+  return parts.join('');
 }
