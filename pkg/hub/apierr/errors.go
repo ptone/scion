@@ -51,6 +51,8 @@ const (
 	ErrCodeVersionConflict       = "version_conflict"
 	ErrCodeTemplateConflict      = "template_conflict"       // 409: a template commit lost its compare-and-swap (ptone/scion#4221)
 	ErrCodeHarnessConfigConflict = "harness_config_conflict" // 409: a harness-config commit lost its compare-and-swap (ptone/scion#4219)
+	ErrCodeTemplateUnavailable   = "template_unavailable"    // 409: a reincarnate cannot keep the agent's user-scoped template (ptone/scion#5770)
+	ErrCodeTemplatePinConflict   = "template_pin_conflict"   // 409: a start, restart, resume or DM wake lost the race to re-record the agent's user-scoped template; retry (ptone/scion#5770)
 	ErrCodeUnprocessable         = "unprocessable"
 	ErrCodeRateLimited           = "rate_limited"
 	ErrCodeInternalError         = "internal_error"

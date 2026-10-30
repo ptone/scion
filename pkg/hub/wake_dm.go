@@ -334,6 +334,16 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 					HTTPStatus: http.StatusInternalServerError,
 				}
 			}
+			if errors.Is(err, errTemplatePinConflict) {
+				// The re-pin of the agent's user-scoped template lost its
+				// compare-and-set (ptone/scion#5770): the agent changed
+				// since it was read, and nothing was dispatched.
+				return nil, &AgentDMError{
+					Code:       ErrCodeTemplatePinConflict,
+					Message:    "Failed to wake agent: " + errTemplatePinConflict.Error(),
+					HTTPStatus: http.StatusConflict,
+				}
+			}
 			var held *store.ClaimHeldError
 			if errors.As(err, &held) {
 				// Another start holds the agent's claim: it is already

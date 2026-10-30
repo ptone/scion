@@ -1063,6 +1063,11 @@ func classifyStartErrorCode(err error, templateSlug, op string) (code, message s
 		// or a content hash (ptone/scion#3113; see notFoundResourceText).
 		// The full error is logged by runLaunch.
 		return api.LaunchCodeTemplateNotFound, notFoundMessage(op, err, templateSlug)
+	case errors.Is(err, errDispatchTemplateUnreadable):
+		// The Hub refused the dispatched template (ptone/scion#5770); fixed
+		// text naming the template, as for a not-found template.
+		msg, _ := dispatchTemplateUnreadableText(err)
+		return api.LaunchCodeTemplateNotFound, failedOpText(op) + ": " + msg
 	case errors.Is(err, config.ErrAgentStateDirUnavailable):
 		return LaunchErrCodeAgentStateUnavailable, err.Error()
 	case errors.Is(err, config.ErrAgentStateConflict):

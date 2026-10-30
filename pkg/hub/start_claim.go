@@ -87,7 +87,7 @@ func startOutcomeOf(err error) startOutcome {
 		return startReleased
 	case errors.Is(err, ErrLaunchInFlight), errors.As(err, &incomplete), errors.As(err, &stillMissing),
 		errors.Is(err, ErrLaunchInvalidPhase),
-		errors.Is(err, errStartRunNotBegun), errors.Is(err, errPendingConfigFold),
+		errors.Is(err, errStartRunNotBegun), errors.Is(err, errPendingConfigFold), errors.Is(err, errStartRepinRefused),
 		errors.As(err, &tokenErr), errors.Is(err, errBrokerLacksEmptyPerAgent),
 		isBrokerRuntimeUnavailable(err), isBrokerDraining(err), errors.Is(err, errStartClaimLost), errors.Is(err, store.ErrDeleteInProgress):
 		return startReleased
@@ -540,6 +540,21 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 				return false, err
 			}
 			stillHeld = held
+		}
+		// A start, restart or resume follows the current version of the
+		// agent's user-scoped template, re-recorded before the dispatch,
+		// which the launch then stays pinned to (ptone/scion#5770). It runs
+		// here, under the start claim and after the held-edit fold, so a
+		// start the claim refuses never re-pins under another start's
+		// launch, and the re-pin compares and sets on the state version
+		// the fold refreshed (the fold never changes the template; the
+		// template has no edit surface). It runs for every claimed start:
+		// a start that keeps a running container still hydrates the
+		// template for its env fallback. Nothing was dispatched on a
+		// failure.
+		if err := s.repinUserTemplateForStart(ctx, agent); err != nil {
+			sd.rollback(ctx)
+			return false, fmt.Errorf("%w: %w", errStartRepinRefused, err)
 		}
 		dctx := ctx
 		if opts.KeepCallerDeadline && hasCallerDeadline {
@@ -1117,6 +1132,11 @@ func (s *Server) writeStartClaimError(ctx context.Context, w http.ResponseWriter
 		return true
 	}
 	switch {
+	case errors.Is(err, errTemplatePinConflict):
+		// The re-pin of the agent's user-scoped template lost its
+		// compare-and-set (ptone/scion#5770); nothing was dispatched.
+		writeError(w, http.StatusConflict, ErrCodeTemplatePinConflict, errTemplatePinConflict.Error(), nil)
+		return true
 	case errors.Is(err, errStartingWrite):
 		// The starting write before dispatch failed (409 when the stored
 		// phase moved on), as beginStartDispatchHTTP answers.

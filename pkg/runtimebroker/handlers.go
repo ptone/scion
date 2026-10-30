@@ -40,6 +40,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
@@ -352,6 +353,8 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			// Hub telemetry defaults and policy are separate tiers
 			// (ptone/scion#4218).
 			TemplateTiers: true,
+			// Template reads name the agent (ptone/scion#5770).
+			DispatchBoundCatalogRead: true,
 		},
 		Profiles:         s.buildInfoProfiles(runtimeType),
 		WorkspaceStorage: s.workspaceStorageDescriptor(),
@@ -1235,7 +1238,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		if req.Config != nil && (req.Config.TemplateID != "" || req.Config.TemplateHash != "") {
 			hubConn := s.resolveHubConnection(r)
 			if hubConn != nil {
-				tplPath, err := s.hydrateTemplate(ctx, req.Config, hubConn)
+				tplPath, err := s.hydrateTemplate(ctx, req.Config, hubConn, req.ID)
 				if err != nil {
 					sce := &startContextError{
 						Status:      http.StatusInternalServerError,
@@ -1439,7 +1442,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				s.writeStartContextError(w, sce, "create agent", "agent_id", req.ID, "profile", createRequestProfile(req))
 			}
 			if !tplHydrated && (req.Config.TemplateID != "" || req.Config.TemplateHash != "") {
-				tplPath, err := s.hydrateTemplate(ctx, req.Config, hubConn)
+				tplPath, err := s.hydrateTemplate(ctx, req.Config, hubConn, req.ID)
 				if err != nil {
 					failHydrate("template", err)
 					return
@@ -2467,7 +2470,25 @@ func (s *Server) resolveGCSWorkspaceDir(req CreateAgentRequest) (resolvedDir str
 // (co-located workstation mode) the broker reads the resource directly from the
 // backend's on-disk location; otherwise it hydrates from remote storage via
 // signed URLs and the content-addressed cache.
-func (s *Server) hydrateTemplate(ctx context.Context, cfg *CreateAgentConfig, conn *HubConnection) (string, error) {
+//
+// agentID is the Hub UUID of the agent the template is hydrated for. Every
+// Hub read names it (hubclient.WithDispatchAgent), so the Hub can let this
+// broker read the agent's user-scoped template (ptone/scion#5770). When the
+// Hub refuses a read for a dispatch that named a TemplateID, the error wraps
+// errDispatchTemplateUnreadable, which maps to a clear client message.
+func (s *Server) hydrateTemplate(ctx context.Context, cfg *CreateAgentConfig, conn *HubConnection, agentID string) (string, error) {
+	path, err := s.hydrateTemplateFor(ctx, cfg, conn, agentID)
+	if err != nil && cfg.TemplateID != "" && apiclient.IsNotFoundError(err) {
+		name := cfg.Template
+		if name == "" {
+			name = cfg.TemplateID
+		}
+		return "", &dispatchTemplateUnreadableError{template: name, cause: err}
+	}
+	return path, err
+}
+
+func (s *Server) hydrateTemplateFor(ctx context.Context, cfg *CreateAgentConfig, conn *HubConnection, agentID string) (string, error) {
 	// Check if we have template info from Hub
 	if cfg.TemplateID == "" && cfg.TemplateHash == "" {
 		// No Hub template info provided, use local template handling
@@ -2481,7 +2502,7 @@ func (s *Server) hydrateTemplate(ctx context.Context, cfg *CreateAgentConfig, co
 		if ref == "" {
 			ref = cfg.Template
 		}
-		path, err := s.resolveLocalResource(ctx, storage.ResourceKindTemplate, ref, conn)
+		path, err := s.resolveLocalResource(ctx, storage.ResourceKindTemplate, ref, conn, agentID)
 		if err != nil {
 			return "", err
 		}
@@ -2496,14 +2517,12 @@ func (s *Server) hydrateTemplate(ctx context.Context, cfg *CreateAgentConfig, co
 		return "", nil
 	}
 
-	// If we have a template hash, try to use it for cache lookup
-	if cfg.TemplateHash != "" && cfg.TemplateID != "" {
-		return hydrator.HydrateWithHash(ctx, cfg.TemplateID, cfg.TemplateHash)
-	}
-
-	// Just have template ID, do full hydration
+	// The dispatched hash is not used for the cache lookup: the Hub's
+	// current hash is authoritative (see Hydrator.HydrateWithHash), and the
+	// Hub refuses a user-scoped template whose current hash is not the one
+	// it recorded for the agent.
 	if cfg.TemplateID != "" {
-		return hydrator.Hydrate(ctx, cfg.TemplateID)
+		return hydrator.HydrateForAgent(ctx, cfg.TemplateID, agentID)
 	}
 
 	return "", nil
@@ -2581,7 +2600,7 @@ func (s *Server) hydrateHarnessConfig(ctx context.Context, cfg *CreateAgentConfi
 				// Hash check was skipped (no hub client or no dispatch
 				// hash); resolve via the standard path which fetches
 				// metadata itself.
-				path, err := s.resolveLocalResource(ctx, storage.ResourceKindHarnessConfig, ref, conn)
+				path, err := s.resolveLocalResource(ctx, storage.ResourceKindHarnessConfig, ref, conn, "")
 				if err != nil {
 					return "", err
 				}
@@ -2632,13 +2651,16 @@ type localObjectResolver interface {
 // then falls back to hydration). Metadata is fetched from the Hub to learn the
 // resource's scope/slug; over a co-located loopback connection this is a cheap
 // DB read.
-func (s *Server) resolveLocalResource(ctx context.Context, kind storage.ResourceKind, ref string, conn *HubConnection) (string, error) {
+//
+// agentID names the agent the read is for (see hydrateTemplate); only
+// template reads send it.
+func (s *Server) resolveLocalResource(ctx context.Context, kind storage.ResourceKind, ref string, conn *HubConnection, agentID string) (string, error) {
 	resolver, ok := conn.LocalStorage.(localObjectResolver)
 	if !ok || conn.HubClient == nil || ref == "" {
 		return "", nil
 	}
 
-	objectPath, err := s.resourceObjectPath(ctx, kind, ref, conn)
+	objectPath, err := s.resourceObjectPath(ctx, kind, ref, conn, agentID)
 	if err != nil {
 		return "", err
 	}
@@ -2658,7 +2680,7 @@ func (s *Server) resolveLocalResource(ctx context.Context, kind storage.Resource
 // resourceObjectPath fetches resource metadata over the hub connection and
 // returns its storage object path, falling back to the kind-keyed scope layout
 // when the record carries no explicit StoragePath.
-func (s *Server) resourceObjectPath(ctx context.Context, kind storage.ResourceKind, ref string, conn *HubConnection) (string, error) {
+func (s *Server) resourceObjectPath(ctx context.Context, kind storage.ResourceKind, ref string, conn *HubConnection, agentID string) (string, error) {
 	switch kind {
 	case storage.ResourceKindHarnessConfig:
 		hc, err := conn.HubClient.HarnessConfigs().Get(ctx, ref)
@@ -2670,7 +2692,7 @@ func (s *Server) resourceObjectPath(ctx context.Context, kind storage.ResourceKi
 		}
 		return storage.ResourceStoragePath("", kind, hc.Scope, hc.ScopeID, hc.Slug), nil
 	default:
-		tmpl, err := conn.HubClient.Templates().Get(ctx, ref)
+		tmpl, err := conn.HubClient.Templates().Get(ctx, ref, hubclient.WithDispatchAgent(agentID))
 		if err != nil {
 			return "", wrapResourceMetaErr(err, "template")
 		}

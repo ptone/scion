@@ -198,3 +198,61 @@ func TestTemplate_AgentConfigDecodes(t *testing.T) {
 		t.Errorf("AgentConfig = %+v, want model opus, message_mode lineage", tmpl.AgentConfig)
 	}
 }
+
+// WithDispatchAgent adds agentId to the template metadata and download-URL
+// reads (ptone/scion#5770); without it both requests carry no query, as
+// before.
+func TestTemplateReads_WithDispatchAgent(t *testing.T) {
+	var gotQueries []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQueries = append(gotQueries, r.URL.Path+"?"+r.URL.RawQuery)
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/templates/tmpl-1/download" {
+			_ = json.NewEncoder(w).Encode(DownloadResponse{})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(Template{ID: "tmpl-1"})
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.Background()
+	if _, err := client.Templates().Get(ctx, "tmpl-1", WithDispatchAgent("agent/1 x")); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if _, err := client.Templates().RequestDownloadURLs(ctx, "tmpl-1", WithDispatchAgent("agent/1 x")); err != nil {
+		t.Fatalf("RequestDownloadURLs: %v", err)
+	}
+	if _, err := client.Templates().Get(ctx, "tmpl-1"); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if _, err := client.Templates().RequestDownloadURLs(ctx, "tmpl-1", WithDispatchAgent("")); err != nil {
+		t.Fatalf("RequestDownloadURLs: %v", err)
+	}
+	want := []string{
+		"/api/v1/templates/tmpl-1?agentId=agent%2F1+x",
+		"/api/v1/templates/tmpl-1/download?agentId=agent%2F1+x",
+		"/api/v1/templates/tmpl-1?",
+		"/api/v1/templates/tmpl-1/download?",
+	}
+	if len(gotQueries) != len(want) {
+		t.Fatalf("requests = %q, want %q", gotQueries, want)
+	}
+	for i := range want {
+		if gotQueries[i] != want[i] {
+			t.Errorf("request %d = %q, want %q", i, gotQueries[i], want[i])
+		}
+	}
+}
+
+func TestDispatchAgentOf(t *testing.T) {
+	if got := DispatchAgentOf(); got != "" {
+		t.Errorf("no options: got %q", got)
+	}
+	if got := DispatchAgentOf(nil, WithDispatchAgent("a1")); got != "a1" {
+		t.Errorf("got %q, want a1", got)
+	}
+}

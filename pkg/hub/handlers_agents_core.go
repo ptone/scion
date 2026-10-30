@@ -1975,6 +1975,13 @@ func (s *Server) createAgentInProject(
 		}
 	}
 
+	// A user-scoped template on a broker known to lack dispatch-bound
+	// template reads would fail at hydration (ptone/scion#5770): 412 before
+	// anything is persisted.
+	if !s.requireDispatchBoundReadCapability(ctx, w, resolvedTemplate, runtimeBrokerID) {
+		return
+	}
+
 	agent := &store.Agent{
 		ID:              api.NewUUID(),
 		Slug:            slug,

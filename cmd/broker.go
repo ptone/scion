@@ -2348,7 +2348,10 @@ func brokerRegistrationCapabilities() []string {
 	// (runtimebroker.StaticCapabilities), so the Hub knows them from the
 	// join on, before the first heartbeat (ptone/scion#2918,
 	// ptone/scion#4669).
-	return []string{"sync", "attach", "reprovision", "asyncLaunch", "asyncStart", "emptyPerAgentWorkspace", "agentMove", "agentMoveRecreate", "reprovisionEmptyPerAgent"}
+	// dispatchBoundCatalogRead likewise (ptone/scion#5770): without it a
+	// newly registered row would be known to lack it until its first
+	// heartbeat, and a user-scoped template create would get a spurious 412.
+	return []string{"sync", "attach", "reprovision", "asyncLaunch", "asyncStart", "emptyPerAgentWorkspace", "agentMove", "agentMoveRecreate", "reprovisionEmptyPerAgent", "dispatchBoundCatalogRead"}
 }
 
 // buildBrokerProfiles builds BrokerProfile objects from settings.Profiles.
