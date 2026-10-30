@@ -3039,6 +3039,13 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		}
 	}
 
+	// Agent pods are created with automountServiceAccountToken false, in
+	// every GCP identity mode and whether or not config.Kubernetes is set.
+	// Nothing in Scion uses a Kubernetes API token from inside the pod,
+	// and GCP identity (Workload Identity) does not depend on it.
+	automount := false
+	pod.Spec.AutomountServiceAccountToken = &automount
+
 	if config.KubernetesBlockIdentity {
 		applyKubernetesBlockIdentity(pod)
 	}
