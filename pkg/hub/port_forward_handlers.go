@@ -438,9 +438,6 @@ type portProxyPolicy struct {
 	surface string
 	// caller is the identity string logged with each proxied request.
 	caller string
-	// conduitOnly: only the conduit transport serves; without it the
-	// answer is writeAgentOffline.
-	conduitOnly bool
 	// portView applies the page view headers (setPortViewResponseHeaders)
 	// and response rules (portViewModifyResponse).
 	portView bool
@@ -459,9 +456,8 @@ func writePortNotExposed(w http.ResponseWriter, r *http.Request) {
 
 // proxyToAgentPort proxies r to the agent's exposed port as identity, the
 // caller's access already decided: over the agent's conduit session when
-// this node can route it and the port is loopback, else (unless
-// policy.conduitOnly) over the port-forward tunnel, subject to the
-// refuseLegacyProxy rule.
+// this node can route it and the port is loopback, else over the
+// port-forward tunnel, subject to the refuseLegacyProxy rule.
 func (s *Server) proxyToAgentPort(w http.ResponseWriter, r *http.Request, identity Identity, agent *store.Agent, exposed *store.ExposedPort, proxyPath string, policy portProxyPolicy, start time.Time) {
 	port := exposed.Port
 	if policy.portView {
@@ -484,10 +480,6 @@ func (s *Server) proxyToAgentPort(w http.ResponseWriter, r *http.Request, identi
 			writeConduitProxyError(w, r, agent.ID, err)
 			return
 		}
-	}
-	if policy.conduitOnly {
-		writeAgentOffline(w, r)
-		return
 	}
 	// No path without a target-side deadline (design §3.5 Q14, v2.21.46):
 	// in external relay mode with enforce, a user request that only the
@@ -569,19 +561,28 @@ func (s *Server) proxyToAgentPort(w http.ResponseWriter, r *http.Request, identi
 		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, resp.Error, nil)
 		return
 	}
+	// The app's headers, minus hop-by-hop and the ones the hub controls,
+	// get the hub's response policy (applyPortProxyResponsePolicy), as on
+	// the conduit path. They are then added to w after the policy headers
+	// already set further up the handler chain are removed, which is the
+	// merge the conduit path's reverse proxy performs, so each policy
+	// header is sent once.
+	app := make(http.Header, len(resp.Header))
 	for k, vals := range resp.Header {
 		if hopByHopHeader(k) || stripFromProxyResponse(k) {
 			continue
 		}
+		app[http.CanonicalHeaderKey(k)] = append(app[http.CanonicalHeaderKey(k)], vals...)
+	}
+	applyPortProxyResponsePolicy(app, policy)
+	for _, k := range portProxyPolicyHeaders {
+		w.Header().Del(k)
+	}
+	for k, vals := range app {
 		for _, v := range vals {
 			w.Header().Add(k, v)
 		}
 	}
-	// Hub-controlled response headers: the proxied content cannot override
-	// these, so it is sandboxed to an opaque origin and cannot set cookies
-	// on the hub origin.
-	setUntrustedContentHeaders(w.Header(), agentServedPageSandboxCSP)
-	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if resp.Status == 0 {
 		resp.Status = http.StatusOK
 	}
@@ -799,6 +800,25 @@ func stripFromProxyResponse(k string) bool {
 	default:
 		return false
 	}
+}
+
+// portProxyPolicyHeaders are the response headers applyPortProxyResponsePolicy
+// always sets. A transport that merges the app's headers into a response
+// writer removes them from the writer first, so each is sent once.
+var portProxyPolicyHeaders = []string{"Content-Security-Policy", "Permissions-Policy", "X-Content-Type-Options"}
+
+// applyPortProxyResponsePolicy sets the hub's response policy on h, the
+// headers of a proxied app response after stripFromProxyResponse, for both
+// port proxy transports: the page view rules (portViewModifyResponse) when
+// policy.portView, then the sandbox policy with its Permissions-Policy, and
+// nosniff. The last two are set unconditionally and last: nothing sets them
+// on a proxied answer after this, so the app cannot replace them.
+func applyPortProxyResponsePolicy(h http.Header, policy portProxyPolicy) {
+	if policy.portView {
+		portViewModifyResponse(h)
+	}
+	setUntrustedContentHeaders(h, agentServedPageSandboxCSP)
+	h.Set("X-Content-Type-Options", "nosniff")
 }
 
 // sensitiveHeader reports whether a request header is removed before a

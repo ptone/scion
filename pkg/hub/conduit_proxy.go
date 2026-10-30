@@ -259,11 +259,7 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 					resp.Header.Del(k)
 				}
 			}
-			if policy.portView {
-				portViewModifyResponse(resp.Header)
-			}
-			setUntrustedContentHeaders(resp.Header, agentServedPageSandboxCSP)
-			resp.Header.Set("X-Content-Type-Options", "nosniff")
+			applyPortProxyResponsePolicy(resp.Header, policy)
 			return nil
 		},
 		// The ErrorHandler runs only before the response is committed (the
@@ -323,9 +319,9 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 	// header set further up the handler chain, so the sandbox headers set
 	// in ModifyResponse are the only ones and pages served from an agent's
 	// port keep working as on the tunnel path.
-	w.Header().Del("Content-Security-Policy")
-	w.Header().Del("Permissions-Policy")
-	w.Header().Del("X-Content-Type-Options")
+	for _, k := range portProxyPolicyHeaders {
+		w.Header().Del(k)
+	}
 	rp.ServeHTTP(w, r)
 }
 

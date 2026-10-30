@@ -345,10 +345,9 @@ func (s *Server) handlePortView(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.proxyToAgentPort(w, r, identity, agent, exposed, "/"+sub, portProxyPolicy{
-		surface:     portProxySurfaceView,
-		caller:      "user:" + grant.UserID,
-		conduitOnly: true,
-		portView:    true,
+		surface:  portProxySurfaceView,
+		caller:   "user:" + grant.UserID,
+		portView: true,
 	}, start)
 }
 
@@ -390,14 +389,29 @@ func (s *Server) portViewIdentity(ctx context.Context, userID string, agent *sto
 	return identity, true
 }
 
+// portViewTransportAvailable reports whether the page view route could
+// serve this agent's exposed port now for identity (the identity the page
+// view request runs as, portViewIdentity), so a page link is only created
+// when one of proxyToAgentPort's transports would carry it: the agent's
+// conduit session (this node routes conduit and the port is loopback), or
+// else the agent's port-forward tunnel when it is up and the legacy route
+// is not refused for identity (conduitLegacyRouteRefusedFor, the check
+// refuseLegacyProxy makes). It writes, logs and records nothing.
+func (s *Server) portViewTransportAvailable(agentID string, exposed *store.ExposedPort, identity Identity) bool {
+	if s.conduitRoutable() && isLoopbackHost(exposed.Host) {
+		return true
+	}
+	return s.portTunnels.has(agentID) && !s.conduitLegacyRouteRefusedFor(identity)
+}
+
 // redirectToPortView answers a page navigation to an exposed port's link
 // with a redirect to a new page link, and reports whether it did. It
 // applies with the experiment on, to a GET or HEAD page navigation by a
-// signed-in user (not an agent or a token), for a loopback port of an
-// agent this node can reach over conduit, and only when the page view
-// route would serve that user (portViewIdentity), and when a page link can
-// be signed now (mintPortView). In every other case the port link serves
-// the request as before.
+// signed-in user (not an agent or a token), only when the page view route
+// would serve that user (portViewIdentity), when a transport would carry
+// the page view request (portViewTransportAvailable), and when a page link
+// can be signed now (mintPortView). In every other case the port link
+// serves the request as before.
 func (s *Server) redirectToPortView(w http.ResponseWriter, r *http.Request, agent *store.Agent, exposed *store.ExposedPort) bool {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		return false
@@ -417,9 +431,6 @@ func (s *Server) redirectToPortView(w http.ResponseWriter, r *http.Request, agen
 	if !portview.CanonicalID(userID) || !portview.CanonicalID(agent.ID) {
 		return false
 	}
-	if !s.conduitRoutable() || !isLoopbackHost(exposed.Host) {
-		return false
-	}
 	escSub, ok := portLinkSubpath(r.URL.EscapedPath())
 	if !ok {
 		return false
@@ -427,8 +438,13 @@ func (s *Server) redirectToPortView(w http.ResponseWriter, r *http.Request, agen
 	if !s.portViewCapabilityKeys().configured() {
 		return false
 	}
-	if _, ok := s.portViewIdentity(r.Context(), userID, agent); !ok {
+	identity, ok := s.portViewIdentity(r.Context(), userID, agent)
+	if !ok {
 		slog.Debug("Port view: not opened for this user; serving the port link", "agent_id", agent.ID, "port", exposed.Port)
+		return false
+	}
+	// Never create a page link the page view route would then refuse.
+	if !s.portViewTransportAvailable(agent.ID, exposed, identity) {
 		return false
 	}
 	exp := s.portViewNow().Add(s.portViewTTL()).Truncate(time.Second)
