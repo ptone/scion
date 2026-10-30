@@ -3189,6 +3189,35 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 		Needs:     brokerReqs.Needs,
 	}
 
+	// An owner's user row the owner material chain rule withholds at start
+	// neither labels a key "user" nor counts as stored (decided without a
+	// report; start_owner_material_chain.go).
+	ownerRows := newOwnerChainCheck(s.authzService, agent)
+	userEnvStored := func(key string) bool {
+		vars, err := s.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: "user", ScopeID: agent.OwnerID, Key: key})
+		if err != nil {
+			return false
+		}
+		for _, v := range vars {
+			if ownerRows.allowsRow(ctx, v.AllowProgeny, ownerRowScope(v.ScopeID, agent.OwnerID)) {
+				return true
+			}
+		}
+		return false
+	}
+	userSecretStored := func(key string) bool {
+		metas, err := s.secretBackend.List(ctx, secret.Filter{Scope: "user", ScopeID: agent.OwnerID, Name: key})
+		if err != nil {
+			return false
+		}
+		for _, m := range metas {
+			if ownerRows.allowsRow(ctx, m.AllowProgeny, ownerRowScope(m.ScopeID, agent.OwnerID)) {
+				return true
+			}
+		}
+		return false
+	}
+
 	// Build hubHas with scope info
 	// Try to determine the scope for each key the Hub provided
 	for _, key := range brokerReqs.HubHas {
@@ -3200,11 +3229,8 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 		source := EnvSource{Key: key, Scope: "hub"}
 
 		// Check if we can determine a more specific scope
-		if agent.OwnerID != "" {
-			vars, err := s.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: "user", ScopeID: agent.OwnerID, Key: key})
-			if err == nil && len(vars) > 0 {
-				source.Scope = "user"
-			}
+		if agent.OwnerID != "" && userEnvStored(key) {
+			source.Scope = "user"
 		}
 		if source.Scope == "hub" && agent.ProjectID != "" {
 			vars, err := s.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: "project", ScopeID: agent.ProjectID, Key: key})
@@ -3221,13 +3247,8 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 			}
 		}
 		if source.Scope == "hub" && s.secretBackend != nil {
-			if agent.OwnerID != "" {
-				metas, err := s.secretBackend.List(ctx, secret.Filter{
-					Scope: "user", ScopeID: agent.OwnerID, Name: key,
-				})
-				if err == nil && len(metas) > 0 {
-					source.Scope = "secret"
-				}
+			if agent.OwnerID != "" && userSecretStored(key) {
+				source.Scope = "secret"
 			}
 			if source.Scope == "hub" && agent.ProjectID != "" {
 				metas, err := s.secretBackend.List(ctx, secret.Filter{
@@ -3260,8 +3281,7 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 	for _, key := range brokerReqs.Needs {
 		// Check env_vars table
 		if agent.OwnerID != "" {
-			vars, err := s.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: "user", ScopeID: agent.OwnerID, Key: key})
-			if err == nil && len(vars) > 0 {
+			if userEnvStored(key) {
 				resp.HubWarnings = append(resp.HubWarnings,
 					fmt.Sprintf("%s is stored in Hub env storage (user scope) but was not included in the dispatch — this may indicate a resolution issue", key))
 				continue
@@ -3287,8 +3307,7 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 		// Check secret backend
 		if s.secretBackend != nil {
 			if agent.OwnerID != "" {
-				metas, err := s.secretBackend.List(ctx, secret.Filter{Scope: "user", ScopeID: agent.OwnerID, Name: key})
-				if err == nil && len(metas) > 0 {
+				if userSecretStored(key) {
 					resp.HubWarnings = append(resp.HubWarnings,
 						fmt.Sprintf("%s is stored in Hub secrets (user scope) but was not included in the dispatch — this may indicate a resolution issue", key))
 					continue
