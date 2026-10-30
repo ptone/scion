@@ -251,7 +251,7 @@ export async function expectProbeSeesViolation(
   await expect
     .poll(() =>
       page.evaluate(
-        ({ from, want, rule }) =>
+        ({ from, want, policy }) =>
           (window.__trustedTypesViolations ?? [])
             .slice(from)
             .filter(
