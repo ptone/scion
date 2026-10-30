@@ -1726,6 +1726,9 @@ type V1ServerHubPortProxyConfig struct {
 	// headers, the WebSocket handshake included (e.g. "60s"; default
 	// "60s", between "5s" and "10m"). The body is not time-limited.
 	ResponseHeaderTimeout string `json:"response_header_timeout,omitempty" yaml:"response_header_timeout,omitempty" koanf:"response_header_timeout"`
+	// ViewTTL is how long a page view link stays valid (experiment
+	// hub.port_view; e.g. "2h"; default "2h", between "15m" and "24h").
+	ViewTTL string `json:"view_ttl,omitempty" yaml:"view_ttl,omitempty" koanf:"view_ttl"`
 }
 
 // V1ServerHubConduitConfig holds the conduit settings of the hub server
@@ -1953,6 +1956,19 @@ type V1RuntimeTargetConfig struct {
 	// and an explicit false or true is kept as written. The agent's own
 	// kubernetes.safeToEvict wins over it. Kubernetes only.
 	SafeToEvict *bool `json:"safe_to_evict,omitempty" yaml:"safe_to_evict,omitempty" koanf:"safe_to_evict"`
+	// NodeSelector, Tolerations and RuntimeClassName are this Kubernetes
+	// instance's pod placement: the flat counterpart of the runtime entry
+	// fields of the same names. Unlike the defaults above, the operator owns
+	// them: an agent may add node selector keys, but it cannot change a key
+	// set here or the runtime class, and its tolerations must be among
+	// these, so none are allowed when none are set here
+	// (config.ApplyOperatorPlacement).
+	// Read from the activated
+	// instance policy on every start; a change takes effect on restart.
+	// Kubernetes only.
+	NodeSelector     map[string]string   `json:"node_selector,omitempty" yaml:"node_selector,omitempty" koanf:"node_selector"`
+	Tolerations      []api.K8sToleration `json:"tolerations,omitempty" yaml:"tolerations,omitempty" koanf:"tolerations"`
+	RuntimeClassName string              `json:"runtime_class_name,omitempty" yaml:"runtime_class_name,omitempty" koanf:"runtime_class_name"`
 	// SharedDirStorageBackend, SharedDirStorageBackends, HomeStorageBackend
 	// and HomeStorageLeaf are removed per-instance storage overrides
 	// (design: no per-runtime storage overrides): server.project_storage places every agent's storage.
@@ -4304,7 +4320,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 			}
 		}
 		if p := v1.Hub.PortProxy; p != nil {
-			gc.Hub.PortProxy = HubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout}
+			gc.Hub.PortProxy = HubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout, ViewTTL: p.ViewTTL}
 		}
 		if o := v1.Hub.Observability; o != nil {
 			gc.Hub.Observability = HubObservabilityConfig{
@@ -4703,7 +4719,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		}
 	}
 	if p := gc.Hub.PortProxy; !p.IsZero() {
-		v1Hub.PortProxy = &V1ServerHubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout}
+		v1Hub.PortProxy = &V1ServerHubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout, ViewTTL: p.ViewTTL}
 	}
 	if o := gc.Hub.Observability; !o.IsZero() {
 		v1Hub.Observability = &V1ServerHubObservabilityConfig{
@@ -6576,6 +6592,13 @@ func writeVersionedSettingsFile(lock *SettingsLock, dir, targetPath string, vs *
 	return writeSettingsFileAtomic(lock, targetPath, data)
 }
 
+// storageFieldMigrationWarning is the migration warning for a project
+// storage field that breaks a rule: the file is still converted, but
+// `scion config validate` and a server start refuse it until it is fixed.
+func storageFieldMigrationWarning(ve ValidationError) string {
+	return fmt.Sprintf("%s; fix it before starting the server (scion config validate reports it, and a hub refuses to start)", ve.Error())
+}
+
 // MigrateSettingsFile migrates a single legacy settings file in dir to versioned format.
 // If a server.yaml exists in the same directory, it is also merged into the settings
 // under the "server" key and backed up.
@@ -6718,11 +6741,17 @@ func migrateSettingsFileLocked(lock *SettingsLock, dir string, dryRun bool) (*Mi
 	if err != nil {
 		return nil, fmt.Errorf("validation error: %w", err)
 	}
-	if len(validationErrors) > 0 {
-		var errMsgs []string
-		for _, ve := range validationErrors {
-			errMsgs = append(errMsgs, ve.Error())
+	var errMsgs []string
+	for _, ve := range validationErrors {
+		if ve.StorageField {
+			// The file is converted anyway, so the operator has the file
+			// to fix; validation and server start still refuse it.
+			result.Warnings = append(result.Warnings, storageFieldMigrationWarning(ve))
+			continue
 		}
+		errMsgs = append(errMsgs, ve.Error())
+	}
+	if len(errMsgs) > 0 {
 		return nil, fmt.Errorf("migrated settings failed validation: %s", strings.Join(errMsgs, "; "))
 	}
 
@@ -6748,6 +6777,10 @@ func migrateSettingsFileLocked(lock *SettingsLock, dir string, dryRun bool) (*Mi
 			return nil, fmt.Errorf("validation error: %w", err)
 		}
 		for _, ve := range carriedErrors {
+			if ve.StorageField {
+				result.Warnings = append(result.Warnings, storageFieldMigrationWarning(ve))
+				continue
+			}
 			result.Warnings = append(result.Warnings,
 				fmt.Sprintf("kept setting does not match the v1 schema: %s", ve.Error()))
 		}
