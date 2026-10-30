@@ -185,7 +185,7 @@ func TestInboundAttachment_ArtifactSendRefused(t *testing.T) {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
 			stages := countLegacyStages(t)
 			hub := newIASpecHub(t, "artifact", true, "coder")
-			hub.inboundStatus = map[string]int{"agent:coder": status}
+			hub.set(func() { hub.inboundStatus = map[string]int{"agent:coder": status} })
 			env := newIAEnv(t, hub)
 
 			env.iaSendCaption(t, "please review this file")
@@ -210,7 +210,7 @@ func TestInboundAttachment_LegacySendRefusedRemovesEntry(t *testing.T) {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
 			stages := countLegacyStages(t)
 			hub := newIASpecHub(t, "legacy", true, "coder")
-			hub.inboundStatus = map[string]int{"agent:coder": status}
+			hub.set(func() { hub.inboundStatus = map[string]int{"agent:coder": status} })
 			env := newIAEnv(t, hub)
 
 			env.iaSendCaption(t, "please review this file")
@@ -241,7 +241,7 @@ func TestInboundAttachment_LegacyMultipleRecipients(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			hub := newIASpecHub(t, "legacy", true, "coder", "reviewer")
-			hub.inboundStatus = tc.refuse
+			hub.set(func() { hub.inboundStatus = tc.refuse })
 			env := newIAEnv(t, hub)
 
 			env.iaSendCaption(t, "@coder @reviewer please review this file")
@@ -342,7 +342,7 @@ func TestInboundAttachment_OverDeliveryLimit(t *testing.T) {
 		t.Run(fmt.Sprintf("size_known=%t", sizeKnown), func(t *testing.T) {
 			stages := countLegacyStages(t)
 			hub := newIASpecHub(t, "artifact", true, "coder")
-			hub.maxBytes = limit
+			hub.set(func() { hub.maxBytes = limit })
 			env := newIAEnv(t, hub)
 			env.tg.content = bytes.Repeat([]byte("x"), int(limit)+1)
 			env.tg.hideSize = !sizeKnown
@@ -440,7 +440,7 @@ func iaSnapshot(t *testing.T, root string) map[string]string {
 // contents are untouched at start and after a refused legacy send.
 func TestInboundAttachment_PreExistingEntriesUntouched(t *testing.T) {
 	hub := newIASpecHub(t, "legacy", true, "coder")
-	hub.inboundStatus = map[string]int{"agent:coder": http.StatusConflict}
+	hub.set(func() { hub.inboundStatus = map[string]int{"agent:coder": http.StatusConflict} })
 	old := time.Now().Add(-48 * time.Hour).Truncate(time.Second)
 	var oldEntryRoot string
 	env := newIASpecEnvWith(t, hub, true, func(scratchpad, downloads string) {
@@ -591,13 +591,13 @@ func TestInboundAttachment_LegacyStageOnlyInLegacyModes(t *testing.T) {
 		{"refused", func(t *testing.T) *iaSpecHub { return newIASpecHub(t, "legacy", false, "coder") }, 0},
 		{"check error", func(t *testing.T) *iaSpecHub {
 			h := newIASpecHub(t, "legacy", true, "coder")
-			h.checkStatus = http.StatusInternalServerError
+			h.set(func() { h.checkStatus = http.StatusInternalServerError })
 			return h
 		}, 0},
 		{"legacy", func(t *testing.T) *iaSpecHub { return newIASpecHub(t, "legacy", true, "coder") }, 1},
 		{"older hub", func(t *testing.T) *iaSpecHub {
 			h := newIASpecHub(t, "legacy", true, "coder")
-			h.checkStatus = http.StatusNotFound
+			h.set(func() { h.checkStatus = http.StatusNotFound })
 			return h
 		}, 1},
 	}
@@ -617,7 +617,7 @@ func TestInboundAttachment_LegacyStageOnlyInLegacyModes(t *testing.T) {
 func TestInboundAttachment_OlderHub(t *testing.T) {
 	t.Run("authorized", func(t *testing.T) {
 		hub := newIASpecHub(t, "legacy", true, "coder")
-		hub.checkStatus = http.StatusNotFound
+		hub.set(func() { hub.checkStatus = http.StatusNotFound })
 		env := newIAEnv(t, hub)
 
 		env.iaSendCaption(t, "please review this file")
@@ -632,8 +632,8 @@ func TestInboundAttachment_OlderHub(t *testing.T) {
 	})
 	t.Run("send refused", func(t *testing.T) {
 		hub := newIASpecHub(t, "legacy", true, "coder")
-		hub.checkStatus = http.StatusNotFound
-		hub.inboundStatus = map[string]int{"agent:coder": http.StatusForbidden}
+		hub.set(func() { hub.checkStatus = http.StatusNotFound })
+		hub.set(func() { hub.inboundStatus = map[string]int{"agent:coder": http.StatusForbidden} })
 		env := newIAEnv(t, hub)
 
 		env.iaSendCaption(t, "please review this file")
@@ -643,7 +643,7 @@ func TestInboundAttachment_OlderHub(t *testing.T) {
 	})
 	t.Run("unresolved sender", func(t *testing.T) {
 		hub := newIASpecHub(t, "legacy", true, "coder")
-		hub.checkStatus = http.StatusNotFound
+		hub.set(func() { hub.checkStatus = http.StatusNotFound })
 		env := newIASpecEnv(t, hub, true)
 		env.linkGroup(t, -1001, "group")
 
@@ -675,8 +675,8 @@ func TestInboundAttachment_CheckErrorNeverStages(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			stages := countLegacyStages(t)
 			hub := newIASpecHub(t, "legacy", true, "coder")
-			hub.checkStatus = tc.status
-			hub.checkEnvelope = tc.envelope
+			hub.set(func() { hub.checkStatus = tc.status })
+			hub.set(func() { hub.checkEnvelope = tc.envelope })
 			env := newIAEnv(t, hub)
 
 			env.iaSendCaption(t, "please review this file")
@@ -715,7 +715,7 @@ func TestInboundAttachment_ArtifactUploadFailureSendsNothing(t *testing.T) {
 	// The check answers artifact, but the upload route refuses: the
 	// sender's access changed in between.
 	hub.mu.Lock()
-	hub.authorized = false
+	hub.set(func() { hub.authorized = false })
 	hub.mu.Unlock()
 	var answered atomic.Bool
 	env.b.mu.Lock()
@@ -830,7 +830,7 @@ func TestTelegramAttachmentOf_DotDotName(t *testing.T) {
 func TestInboundAttachment_DeliveryOffWithheld(t *testing.T) {
 	stages := countLegacyStages(t)
 	hub := newIASpecHub(t, "artifact", true, "coder")
-	hub.zeroMaxBytes = true
+	hub.set(func() { hub.zeroMaxBytes = true })
 	env := newIAEnv(t, hub)
 
 	env.iaSendCaption(t, "please review this file")
@@ -852,9 +852,9 @@ func TestInboundAttachment_DeliveryOffWithheld(t *testing.T) {
 func TestInboundAttachment_TooManyRecipientsNotice(t *testing.T) {
 	stages := countLegacyStages(t)
 	hub := newIASpecHub(t, "artifact", true, "coder")
-	hub.checkStatus = http.StatusBadRequest
-	hub.checkEnvelope = true
-	hub.checkCode = hubCodeTooManyTargets
+	hub.set(func() { hub.checkStatus = http.StatusBadRequest })
+	hub.set(func() { hub.checkEnvelope = true })
+	hub.set(func() { hub.checkCode = hubCodeTooManyTargets })
 	env := newIAEnv(t, hub)
 
 	env.iaSendCaption(t, "please review this file")
@@ -921,8 +921,8 @@ func TestInboundAttachment_LegacyNoAnswerKeepsEntry(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			hub := newIASpecHub(t, "legacy", true, tc.agents...)
-			hub.inboundDelay = map[string]time.Duration{"agent:coder": 2 * time.Second}
-			hub.inboundStatus = tc.refuse
+			hub.set(func() { hub.inboundDelay = map[string]time.Duration{"agent:coder": 2 * time.Second} })
+			hub.set(func() { hub.inboundStatus = tc.refuse })
 			env := newIAEnv(t, hub)
 			shortenHubTimeout(env.b, 300*time.Millisecond)
 
@@ -955,7 +955,7 @@ func TestInboundAttachment_PerFileUploadRefusalShown(t *testing.T) {
 	assert.Empty(t, hub.storedUploads(), "nothing stored")
 	assert.Empty(t, env.sends(t), "nothing sent to that agent")
 	assert.Zero(t, stages.Load())
-	assert.True(t, anyContains(env.chatTexts(), "HTML and SVG files are not accepted as attachments"), "the hub's reason is shown: %q", env.chatTexts())
+	assert.True(t, anyContains(env.chatTexts(), "files with a .html extension are not accepted"), "the hub's reason is shown: %q", env.chatTexts())
 	env.assertNoAttachmentWrites(t)
 }
 
@@ -964,7 +964,7 @@ func TestInboundAttachment_PerFileUploadRefusalShown(t *testing.T) {
 // own upload.
 func TestInboundAttachment_ArtifactRecipientUploadRefused(t *testing.T) {
 	hub := newIASpecHub(t, "artifact", true, "coder", "reviewer")
-	hub.uploadRefuse = map[string]int{"reviewer": http.StatusForbidden}
+	hub.set(func() { hub.uploadRefuse = map[string]int{"reviewer": http.StatusForbidden} })
 	env := newIAEnv(t, hub)
 
 	env.iaSendCaption(t, "@coder @reviewer please review this file")
@@ -1023,4 +1023,45 @@ func TestInboundAttachment_FailedLegacyStageLeavesNoEntry(t *testing.T) {
 	assert.Equal(t, 1, download, "the download started")
 	assert.Empty(t, env.telegramEntries(t), "the partly staged entry is removed")
 	env.assertNoAttachmentWrites(t)
+}
+
+// An entry name that already exists is not the plugin's: staging picks the
+// next name, never writes into the existing entry, and the refusal cleanup
+// never removes it.
+func TestInboundAttachment_ExistingEntryNeverTouched(t *testing.T) {
+	tick := time.Now()
+	origClock := legacyEntryClock
+	legacyEntryClock = func() time.Time { return tick }
+	legacyEntrySeq.Lock()
+	origLast := legacyEntrySeq.last
+	legacyEntrySeq.last = 0
+	legacyEntrySeq.Unlock()
+	t.Cleanup(func() {
+		legacyEntryClock = origClock
+		legacyEntrySeq.Lock()
+		if legacyEntrySeq.last < origLast {
+			legacyEntrySeq.last = origLast
+		}
+		legacyEntrySeq.Unlock()
+	})
+
+	hub := newIASpecHub(t, "legacy", true, "coder")
+	hub.set(func() { hub.inboundStatus = map[string]int{"agent:coder": http.StatusConflict} })
+	env := newIAEnv(t, hub)
+	taken := fmt.Sprintf("tg_%d", tick.UnixNano())
+	takenDir := filepath.Join(env.scratchpad, ".attachments", projectfs.AttachmentChannelTelegram, taken)
+	require.NoError(t, os.MkdirAll(takenDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(takenDir, "theirs.txt"), []byte("not the plugin's"), 0o644))
+
+	env.iaSendCaption(t, "please review this file")
+
+	sends := env.sends(t)
+	require.Len(t, sends, 1)
+	require.Len(t, sends[0].Message.Attachments, 1)
+	assert.NotContains(t, sends[0].Message.Attachments[0], "/"+taken+"/", "the staged path is not in the existing entry")
+	assert.Equal(t, []string{taken}, env.telegramEntries(t), "only the existing entry remains; the plugin's refused entry is removed")
+	got, err := os.ReadDir(takenDir)
+	require.NoError(t, err)
+	require.Len(t, got, 1, "nothing was written into the existing entry")
+	assert.Equal(t, "theirs.txt", got[0].Name())
 }

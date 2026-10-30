@@ -21,9 +21,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"mime/multipart"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -385,37 +387,88 @@ func downloadTelegramFile(ctx context.Context, api *TelegramAPIClient, att teleg
 // observe which delivery modes stage.
 var onLegacyStage = func() {}
 
+// legacyStaged is the outcome of legacyStage.
+type legacyStaged struct {
+	agentPath  string
+	scratchpad projectfs.Resolved
+	entry      string
+	// created reports that this call created the entry directory, so it
+	// may remove it; an entry it did not create is never removed.
+	created bool
+}
+
+// legacyEntryAttempts bounds how many entry names legacyStage tries when a
+// name is already taken.
+const legacyEntryAttempts = 5
+
 // legacyStage writes one inbound attachment into the project scratchpad,
-// in the per-message entry .attachments/_telegram/<entry>/<name>, and
-// returns the agent-visible path and the scratchpad it wrote to (also on a
-// failed write, once the scratchpad was resolved). It is the
+// in a per-message entry .attachments/_telegram/<entry>/<name> that it
+// creates itself (claimLegacyEntry), and returns the agent-visible path.
+// On a failed write it still returns the scratchpad and, when it created
+// one, the entry, so the caller can remove what the write left. It is the
 // plugin's only scratchpad writer; it runs only after the hub authorized
 // the sender (or, on an older hub, after the plugin's own sender checks).
-func legacyStage(projectSlug, projectID, entry, name string, body io.Reader) (string, projectfs.Resolved, error) {
+func legacyStage(projectSlug, projectID, name string, body io.Reader) (legacyStaged, error) {
 	onLegacyStage()
 	if projectID == "" {
-		return "", projectfs.Resolved{}, fmt.Errorf("no project for %q: attachments are stored in the project's scratchpad", name)
+		return legacyStaged{}, fmt.Errorf("no project for %q: attachments are stored in the project's scratchpad", name)
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", projectfs.Resolved{}, fmt.Errorf("resolve home directory: %w", err)
+		return legacyStaged{}, fmt.Errorf("resolve home directory: %w", err)
 	}
 	// The scratchpad resolves through the layout authority (local or nfs).
 	// Never fall back to a local directory for an nfs-backed scratchpad: no
 	// agent mounts it.
 	scratchpad, err := resolveSharedDir(home, projectSlug, projectID, projectfs.ScratchpadName)
 	if err != nil {
-		return "", projectfs.Resolved{}, fmt.Errorf("resolve scratchpad shared dir for %q: %w", name, err)
+		return legacyStaged{}, fmt.Errorf("resolve scratchpad shared dir for %q: %w", name, err)
 	}
+	out := legacyStaged{scratchpad: scratchpad.Resolved}
+	entry, err := claimLegacyEntry(scratchpad.Resolved)
+	if err != nil {
+		return out, err
+	}
+	out.entry, out.created = entry, true
 	agentPath, err := projectfs.WriteAttachment(scratchpad.Resolved, true,
 		projectfs.SharedDirMount(scionapi.SharedDir{Name: projectfs.ScratchpadName}, ""),
 		projectfs.AttachmentChannelTelegram, entry, name, body)
 	if err != nil {
-		// The resolved scratchpad is returned so the caller can remove
-		// what a failed write left.
-		return "", scratchpad.Resolved, fmt.Errorf("write file: %w", err)
+		return out, fmt.Errorf("write file: %w", err)
 	}
-	return agentPath, scratchpad.Resolved, nil
+	out.agentPath = agentPath
+	return out, nil
+}
+
+// claimLegacyEntry creates a new per-message entry directory under the
+// scratchpad's .attachments/_telegram and returns its name. The directory
+// is created exclusively: a name that already exists (another process, or
+// an entry left from before a restart) is not ours, and the next name is
+// tried, up to legacyEntryAttempts times.
+func claimLegacyEntry(scratchpad projectfs.Resolved) (string, error) {
+	root, err := scratchpad.Open(true)
+	if err != nil {
+		return "", fmt.Errorf("open scratchpad: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+	for range legacyEntryAttempts {
+		entry := nextLegacyEntry()
+		rel, err := projectfs.AttachmentRelDir(projectfs.AttachmentChannelTelegram, entry)
+		if err != nil {
+			return "", err
+		}
+		if err := root.MkdirAll(path.Dir(rel), 0o755); err != nil {
+			return "", fmt.Errorf("create attachment dir: %w", err)
+		}
+		err = root.Mkdir(rel, 0o755)
+		if err == nil {
+			return entry, nil
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return "", fmt.Errorf("create attachment entry: %w", err)
+		}
+	}
+	return "", fmt.Errorf("no free attachment entry after %d attempts", legacyEntryAttempts)
 }
 
 // inboundAttachment is an attachment being delivered with one Telegram
@@ -469,7 +522,7 @@ func (b *TelegramBrokerV2) prepareInboundAttachment(ctx context.Context, api *Te
 		// An older hub: stage after the plugin's own sender checks, which
 		// passed before this point.
 		b.log.Info("Hub has no attachment check; staging the attachment in the project scratchpad")
-		return b.stageInboundAttachment(ctx, api, link, att, reply)
+		return b.stageInboundAttachment(ctx, api, link, att, reply, hasText)
 	case errors.Is(err, errAttachmentTooManyTargets):
 		b.log.Info("Hub refused the attachment check: too many recipients", "recipients", len(recipients))
 		if hasText {
@@ -517,7 +570,7 @@ func (b *TelegramBrokerV2) prepareInboundAttachment(ctx context.Context, api *Te
 		}
 		return inboundAttachmentPlan{attachment: &inboundAttachment{att: att, data: data}}
 	case attachmentUploadsLegacy:
-		return b.stageInboundAttachment(ctx, api, link, att, reply)
+		return b.stageInboundAttachment(ctx, api, link, att, reply, hasText)
 	default:
 		return withheld()
 	}
@@ -535,8 +588,13 @@ func (b *TelegramBrokerV2) downloadAttachmentBytes(ctx context.Context, api *Tel
 
 // stageInboundAttachment downloads att and stages it in a per-message
 // scratchpad entry for every recipient send to name.
-func (b *TelegramBrokerV2) stageInboundAttachment(ctx context.Context, api *TelegramAPIClient, link *GroupLink, att telegramAttachment, reply func(string)) inboundAttachmentPlan {
+func (b *TelegramBrokerV2) stageInboundAttachment(ctx context.Context, api *TelegramAPIClient, link *GroupLink, att telegramAttachment, reply func(string), hasText bool) inboundAttachmentPlan {
 	fail := func(err error) inboundAttachmentPlan {
+		if errors.Is(err, errAttachmentTooLarge) {
+			b.log.Info("Inbound attachment over the size limit", "size", att.Size, "limit", maxTelegramFileSize)
+			reply(attachmentTooLargeText(att.Name, maxTelegramFileSize, hasText))
+			return inboundAttachmentPlan{}
+		}
 		b.log.Error("Failed to stage telegram file", "error", err)
 		// The error can name host paths; the sender only gets fixed text.
 		reply(attachmentFailureText(att.Name, err))
@@ -547,21 +605,21 @@ func (b *TelegramBrokerV2) stageInboundAttachment(ctx context.Context, api *Tele
 		return fail(err)
 	}
 	defer body.Close()
-	entry := nextLegacyEntry()
-	agentPath, scratchpad, err := legacyStage(link.ProjectSlug, link.ProjectID, entry, att.Name, body)
+	staged, err := legacyStage(link.ProjectSlug, link.ProjectID, att.Name, body)
 	if err != nil {
 		// A write that failed part way (the size bound, a write error) can
-		// leave the entry's directory: remove it, best effort.
-		if scratchpad.HostPath != "" {
-			if _, rmErr := projectfs.RemoveAttachmentEntry(scratchpad, projectfs.AttachmentChannelTelegram, entry); rmErr != nil {
+		// leave the entry this call created: remove it, best effort. An
+		// entry it did not create is never touched.
+		if staged.created {
+			if _, rmErr := projectfs.RemoveAttachmentEntry(staged.scratchpad, projectfs.AttachmentChannelTelegram, staged.entry); rmErr != nil {
 				b.log.Warn("Failed to remove a partly staged attachment entry", "entries", 1)
 			}
 		}
 		return fail(err)
 	}
-	b.log.Info("Staged telegram file", "type", att.Kind, "agent_path", agentPath)
+	b.log.Info("Staged telegram file", "type", att.Kind, "agent_path", staged.agentPath)
 	return inboundAttachmentPlan{attachment: &inboundAttachment{
-		att: att, legacy: true, agentPath: agentPath, scratchpad: scratchpad, entry: entry,
+		att: att, legacy: true, agentPath: staged.agentPath, scratchpad: staged.scratchpad, entry: staged.entry,
 	}}
 }
 

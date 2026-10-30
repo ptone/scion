@@ -3595,17 +3595,19 @@ func TestV2_LegacyStage_SharedDirPath(t *testing.T) {
 	t.Setenv("HOME", fakeHome)
 	stubSharedDirSettings(t, &config.VersionedSettings{})
 
-	agentPath, _, err := legacyStage("my-project", "abcd1234-ef56-7890-abcd-ef1234567890", "tg_42", "shared-report.pdf", strings.NewReader("report"))
+	staged, err := legacyStage("my-project", "abcd1234-ef56-7890-abcd-ef1234567890", "shared-report.pdf", strings.NewReader("report"))
 	require.NoError(t, err)
-	assert.Equal(t, "/scion-volumes/scratchpad/.attachments/_telegram/tg_42/shared-report.pdf", agentPath)
+	assert.True(t, staged.created)
+	assert.Regexp(t, `^tg_[0-9]+$`, staged.entry)
+	assert.Equal(t, "/scion-volumes/scratchpad/.attachments/_telegram/"+staged.entry+"/shared-report.pdf", staged.agentPath)
 
 	expectedHostBase := filepath.Join(fakeHome, ".scion", "project-configs", "my-project__abcd1234", "shared-dirs", "scratchpad", ".attachments", "_telegram")
 	entries, err := os.ReadDir(expectedHostBase)
 	require.NoError(t, err, "shared dir host path should exist")
 	require.Len(t, entries, 1)
 	require.True(t, entries[0].IsDir())
-	assert.Equal(t, "tg_42", entries[0].Name())
-	assert.FileExists(t, filepath.Join(expectedHostBase, "tg_42", "shared-report.pdf"))
+	assert.Equal(t, staged.entry, entries[0].Name())
+	assert.FileExists(t, filepath.Join(expectedHostBase, staged.entry, "shared-report.pdf"))
 }
 
 func TestV2_LegacyStage_EmptyProjectID_Refused(t *testing.T) {
@@ -3614,7 +3616,7 @@ func TestV2_LegacyStage_EmptyProjectID_Refused(t *testing.T) {
 	fakeHome := t.TempDir()
 	t.Setenv("HOME", fakeHome)
 
-	_, _, err := legacyStage("some-slug", "", "tg_1", "legacy.txt", strings.NewReader("x"))
+	_, err := legacyStage("some-slug", "", "legacy.txt", strings.NewReader("x"))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no project")
 	entries, err := os.ReadDir(fakeHome)

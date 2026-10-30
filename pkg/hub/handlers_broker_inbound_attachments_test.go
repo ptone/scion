@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -522,6 +523,7 @@ func TestBrokerAttachmentUpload_FileChecks(t *testing.T) {
 		{"page.html", "<p>hi</p>"},
 		{"icon.svg", "<svg></svg>"},
 		{"notes.txt", "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>"},
+		{"data.bin", "<html><body>sniffed by content</body></html>"},
 	} {
 		rec := brokerUpload(t, f.srv, sender, f.projA.ID, nil, file)
 		assert.Equal(t, http.StatusBadRequest, rec.Code, "%s: %s", file.name, rec.Body.String())
@@ -854,4 +856,95 @@ func TestBrokerAttachmentUpload_BodyCapWhileReading(t *testing.T) {
 
 	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, rec.Body.String())
 	requireNoUploadsAtAll(t, f.art)
+}
+
+// TestBrokerAttachmentUpload_MetadataBudget: upload metadata (field names
+// plus values) up to maxBrokerAttachmentMetadataBytes passes the framing
+// check; one byte more is refused with 400 metadata_too_large before any
+// sender check, and nothing is stored.
+func TestBrokerAttachmentUpload_MetadataBudget(t *testing.T) {
+	f := newSendFixture(t)
+	sender := "user:" + f.ua.Email
+	base := 0
+	for _, kv := range [][2]string{{"sender", sender}, {"project_id", f.projA.ID}, {"surface", "telegram"}, {"audience", "group"}} {
+		base += len(kv[0]) + len(kv[1])
+	}
+	// targets fills the rest of the budget with slugs of at most 4000 bytes,
+	// plus extra bytes.
+	targets := func(extra int) []string {
+		remaining := maxBrokerAttachmentMetadataBytes - base + extra
+		var out []string
+		for remaining > 0 {
+			n := min(4000, remaining-len("targets"))
+			if n < 1 {
+				n = 1
+			}
+			out = append(out, strings.Repeat("t", n))
+			remaining -= len("targets") + n
+		}
+		return out
+	}
+	atBudget := targets(0)
+	sum := base
+	for _, v := range atBudget {
+		sum += len("targets") + len(v)
+	}
+	require.Equal(t, maxBrokerAttachmentMetadataBytes, sum, "the test builds metadata exactly at the budget")
+
+	rec := brokerUpload(t, f.srv, sender, f.projA.ID, atBudget, brokerAttFile{"a.txt", "hello"})
+	assert.Equal(t, http.StatusForbidden, rec.Code, "at the budget the request reaches the target check: %s", rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), codeMetadataTooLarge)
+
+	rec = brokerUpload(t, f.srv, sender, f.projA.ID, targets(1), brokerAttFile{"a.txt", "hello"})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `"code":"`+codeMetadataTooLarge+`"`)
+	requireNoUploadsAtAll(t, f.art)
+}
+
+// TestBrokerInbound_AttachmentIDsRefusedAfterValidation: valid ids on a
+// broker inbound message refused after they were validated (the agent is
+// not running) leave no message row and no bind; the upload stays usable.
+func TestBrokerInbound_AttachmentIDsRefusedAfterValidation(t *testing.T) {
+	f := newSendFixture(t)
+	ctx := context.Background()
+	stopped := &store.Agent{ID: uuid.NewString(), ProjectID: f.projA.ID, Name: "stopped", Slug: "stopped", Phase: "stopped",
+		OwnerID: f.ua.ID, CreatedBy: f.ua.ID, RuntimeBrokerID: f.brokerID,
+		MessageMode: store.MessageModeProject, Ancestry: []string{f.ua.ID}}
+	require.NoError(t, f.st.CreateAgent(ctx, stopped))
+	sender := "user:" + f.ua.Email
+	ids := brokerUploadedIDs(t, brokerUpload(t, f.srv, sender, f.projA.ID, []string{stopped.Slug}, brokerAttFile{"notes.txt", "hello"}))
+
+	rec := brokerInbound(t, f.srv, sender, stopped, ids)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Empty(t, f.disp.getCalls())
+	msgs, err := f.st.ListMessages(ctx, store.MessageFilter{AgentID: stopped.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.Empty(t, msgs.Items, "no message row")
+	_, state, err := f.srv.attachmentService().UsableAttachment(ctx, ids[0], artifacts.PrincipalKindUser, f.ua.ID)
+	require.NoError(t, err)
+	assert.Equal(t, artifacts.AttachmentUsable, state, "the upload is not bound and stays usable")
+}
+
+// TestBrokerAttachments_AuditLinesCarryNoFileNames: the check and upload
+// audit lines name the decision, counts and bytes, never a file name.
+func TestBrokerAttachments_AuditLinesCarryNoFileNames(t *testing.T) {
+	f := newSendFixture(t)
+	var buf bytes.Buffer
+	f.srv.messageLog = slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	sender := "user:" + f.ua.Email
+	const marker = "zq-private-report-name"
+
+	brokerCheckAnswer(t, brokerCheck(t, f.srv, sender, f.projA.ID, []string{f.target.Slug}))
+	brokerUploadedIDs(t, brokerUpload(t, f.srv, sender, f.projA.ID, []string{f.target.Slug}, brokerAttFile{marker + ".txt", "hello"}))
+	rec := brokerUpload(t, f.srv, sender, f.projA.ID, nil, brokerAttFile{marker + ".html", "<p>x</p>"})
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	rec = brokerUpload(t, f.srv, "user:"+f.ub.Email, f.projA.ID, nil, brokerAttFile{marker + ".txt", "hello"})
+	require.Equal(t, http.StatusForbidden, rec.Code)
+
+	out := buf.String()
+	assert.Contains(t, out, `"msg":"broker attachment check"`)
+	assert.Contains(t, out, `"msg":"broker attachment upload"`)
+	assert.Contains(t, out, `"decision":"stored"`)
+	assert.Contains(t, out, `"decision":"refused: files"`)
+	assert.NotContains(t, out, marker, "no audit line names a file")
 }

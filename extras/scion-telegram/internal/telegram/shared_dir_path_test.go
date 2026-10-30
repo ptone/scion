@@ -74,8 +74,8 @@ func localSharedDir(home, name string) string {
 
 func stageTestFile(t *testing.T) (string, error) {
 	t.Helper()
-	agentPath, _, err := legacyStage("my-project", sharedDirTestProjectID, "tg_1", "note.txt", strings.NewReader("0123456789"))
-	return agentPath, err
+	staged, err := legacyStage("my-project", sharedDirTestProjectID, "note.txt", strings.NewReader("0123456789"))
+	return staged.agentPath, err
 }
 
 func TestLegacyStage_LocalBackend(t *testing.T) {
@@ -120,7 +120,9 @@ func TestLegacyStage_NFSUnavailable(t *testing.T) {
 	_, statErr := os.Stat(localSharedDir(home, "scratchpad"))
 	assert.True(t, os.IsNotExist(statErr), "must not fall back to the local shared dir")
 
-	text := sharedDirUnavailableText(telegramAttachmentName(&TGMessage{Document: &TGDocument{FileName: "note.txt"}}))
+	att, ok := telegramAttachmentOf(&TGMessage{Document: &TGDocument{FileID: "f1", FileName: "note.txt"}})
+	require.True(t, ok)
+	text := sharedDirUnavailableText(att.Name)
 	assert.Contains(t, text, "note.txt")
 	assert.NotContains(t, text, "not-mounted", "the sender message must not name host paths")
 }

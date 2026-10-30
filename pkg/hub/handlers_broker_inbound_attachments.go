@@ -85,6 +85,16 @@ const maxBrokerAttachmentTargets = 256
 // naming more than maxBrokerAttachmentTargets targets.
 const codeTooManyTargets = "too_many_targets"
 
+// maxBrokerAttachmentMetadataBytes bounds the metadata of one upload: the
+// sum of each field's name and value. It fits inside the framing
+// allowance (brokerAttachmentEnvelopeBytes), so metadata can never push a
+// file of delivery_max_bytes over the body cap.
+const maxBrokerAttachmentMetadataBytes = 32 << 10
+
+// codeMetadataTooLarge is the error code of the 400 for an upload whose
+// metadata exceeds maxBrokerAttachmentMetadataBytes.
+const codeMetadataTooLarge = "metadata_too_large"
+
 // maxBrokerAttachmentFieldBytes bounds one metadata field of an upload.
 const maxBrokerAttachmentFieldBytes = 4 << 10
 
@@ -248,9 +258,9 @@ func (s *Server) handleBrokerAttachmentsCheck(w http.ResponseWriter, r *http.Req
 	}
 	answer.Authorized = refusal == nil
 	if answer.Uploads == brokerUploadsArtifact {
-		// The plugin sends one file per message: the largest it can upload
-		// is the total for one message, or the per-file artifact limit when
-		// that is smaller.
+		// delivery_max_bytes is the largest single file the hub takes: the
+		// smaller of the total for one message and the per-file artifact
+		// limit. The upload enforces the total across all its files.
 		limit := min(s.brokerAttachmentDeliveryMaxBytes(), s.attachmentMaxBytes(ctx, true))
 		answer.DeliveryMaxBytes = &limit
 	}
@@ -303,6 +313,9 @@ func (s *Server) handleBrokerAttachmentsUpload(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large", "request body too large", nil)
 		return
 	}
+	// The reader is capped at the fixed signed-body cap, because the broker
+	// HMAC middleware already bounds the body there; the total for one
+	// message is enforced separately, per file, in readBrokerAttachmentFile.
 	r.Body = http.MaxBytesReader(w, r.Body, bodyCap)
 	mr, err := r.MultipartReader()
 	if err != nil {
@@ -350,23 +363,35 @@ func (s *Server) handleBrokerAttachmentsUpload(w http.ResponseWriter, r *http.Re
 	batch := newBrokerAttachmentBatch(s.attachmentMaxBytes(ctx, true), s.brokerAttachmentDeliveryMaxBytes())
 	var pending []brokerAttachmentPending
 	failures := make([]attachmentUploadFailure, 0)
-	tooLarge := func() {
+	// refuse writes a refusal of the whole request after authorization,
+	// with its audit line (count and bytes read so far; never file names).
+	refuse := func(reason string, write func()) {
 		log.Warn("broker attachment upload",
-			"sender_id", sender.ID(), "project_id", req.ProjectID, "decision", "refused: over size limit",
-			"audience", req.Audience, "count", 0, "total_bytes", batch.total)
-		writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
-			fmt.Sprintf("attachments exceed the total of %d bytes for one message", batch.maxTotal), nil)
+			"sender_id", sender.ID(), "project_id", req.ProjectID, "decision", "refused: "+reason,
+			"audience", req.Audience, "count", batch.count, "total_bytes", batch.total)
+		write()
+	}
+	tooLarge := func() {
+		refuse("over size limit", func() {
+			writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
+				fmt.Sprintf("attachments exceed the total of %d bytes for one message", batch.maxTotal), nil)
+		})
+	}
+	badBody := func() {
+		refuse("invalid multipart body", func() { BadRequest(w, "invalid multipart body") })
 	}
 	part := first
 	for part != nil {
 		if part.FormName() != "file" || part.FileName() == "" {
 			_ = part.Close()
-			BadRequest(w, "only file parts may follow the metadata fields")
+			refuse("part out of order", func() { BadRequest(w, "only file parts may follow the metadata fields") })
 			return
 		}
 		if batch.count == MaxAttachmentsPerMessage {
 			_ = part.Close()
-			ValidationError(w, fmt.Sprintf("too many files (max %d)", MaxAttachmentsPerMessage), nil)
+			refuse("too many files", func() {
+				ValidationError(w, fmt.Sprintf("too many files (max %d)", MaxAttachmentsPerMessage), nil)
+			})
 			return
 		}
 		batch.count++
@@ -381,7 +406,7 @@ func (s *Server) handleBrokerAttachmentsUpload(w http.ResponseWriter, r *http.Re
 			var rejection attachmentRejection
 			if !errors.As(err, &rejection) {
 				log.Error("Broker attachment upload failed", "sender_id", sender.ID(), "error", err)
-				BadRequest(w, "invalid multipart body")
+				badBody()
 				return
 			}
 			failures = append(failures, attachmentUploadFailure{Name: name, Error: uploadFailureMessage(err)})
@@ -397,17 +422,22 @@ func (s *Server) handleBrokerAttachmentsUpload(w http.ResponseWriter, r *http.Re
 				tooLarge()
 				return
 			}
-			BadRequest(w, "invalid multipart body")
+			badBody()
 			return
 		}
 	}
 	if batch.count == 0 {
-		ValidationError(w, "no files uploaded", nil)
+		refuse("no files", func() { ValidationError(w, "no files uploaded", nil) })
 		return
 	}
 
 	// Pass 2: the request is acceptable; store each checked file as an
-	// unsent upload of the sender.
+	// unsent upload of the sender. A store fault part way through leaves
+	// the files stored before it in place, on purpose: Phase 1 has no
+	// per-upload delete, the uploads are readable only by the sender and
+	// expire after the upload TTL unless a send binds them, and the user
+	// upload route behaves the same way. The answer lists them, so the
+	// sender can still use or ignore them.
 	ownerCtx := brokerSenderContext(ctx, sender)
 	results := make([]attachmentUploadResult, 0, len(pending))
 	internalError := false
@@ -460,6 +490,7 @@ func readBrokerAttachmentMetadata(mr *multipart.Reader) (*brokerAttachmentReques
 	ordered := []string{"sender", "project_id", "surface", "audience"}
 	req := &brokerAttachmentRequest{}
 	seen := 0
+	metaBytes := 0
 	for {
 		part, err := mr.NextPart()
 		if err == io.EOF {
@@ -494,6 +525,11 @@ func readBrokerAttachmentMetadata(mr *multipart.Reader) (*brokerAttachmentReques
 			return bad(err.Error())
 		}
 		name := part.FormName()
+		metaBytes += len(name) + len(value)
+		if metaBytes > maxBrokerAttachmentMetadataBytes {
+			return nil, nil, &apiError{status: http.StatusBadRequest, code: codeMetadataTooLarge,
+				message: fmt.Sprintf("upload metadata exceeds %d bytes", maxBrokerAttachmentMetadataBytes)}
+		}
 		switch {
 		case seen < len(ordered):
 			if name != ordered[seen] {

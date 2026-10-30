@@ -164,12 +164,44 @@ func iaSpecWriteError(w http.ResponseWriter, status int, code string) {
 	})
 }
 
+// iaSpecHubConfig is a snapshot of the fake hub's behaviour fields, taken
+// under h.mu at the start of each request. Tests change the fields only
+// through set, and replace maps rather than mutating them.
+type iaSpecHubConfig struct {
+	mode, checkCode                         string
+	authorized, zeroMaxBytes, checkEnvelope bool
+	agents                                  []string
+	maxBytes                                int64
+	checkStatus                             int
+	inboundStatus, uploadRefuse             map[string]int
+	inboundDelay                            map[string]time.Duration
+}
+
+func (h *iaSpecHub) snapshot() iaSpecHubConfig {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return iaSpecHubConfig{
+		mode: h.mode, checkCode: h.checkCode,
+		authorized: h.authorized, zeroMaxBytes: h.zeroMaxBytes, checkEnvelope: h.checkEnvelope,
+		agents: h.agents, maxBytes: h.maxBytes, checkStatus: h.checkStatus,
+		inboundStatus: h.inboundStatus, uploadRefuse: h.uploadRefuse, inboundDelay: h.inboundDelay,
+	}
+}
+
+// set changes the fake hub's behaviour fields under h.mu.
+func (h *iaSpecHub) set(change func()) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	change()
+}
+
 func (h *iaSpecHub) serve(w http.ResponseWriter, r *http.Request) {
+	c := h.snapshot()
 	rec := iaSpecHubRequest{Method: r.Method, Path: r.URL.Path, Header: r.Header.Clone()}
 	switch {
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/projects/") && strings.HasSuffix(r.URL.Path, "/agents"):
-		agents := make([]map[string]string, 0, len(h.agents))
-		for _, slug := range h.agents {
+		agents := make([]map[string]string, 0, len(c.agents))
+		for _, slug := range c.agents {
 			agents = append(agents, map[string]string{"id": "id-" + slug, "slug": slug, "phase": "running"})
 		}
 		rec.Status = http.StatusOK
@@ -178,27 +210,27 @@ func (h *iaSpecHub) serve(w http.ResponseWriter, r *http.Request) {
 
 	case r.Method == http.MethodPost && r.URL.Path == iaSpecCheckPath:
 		rec.Body, _ = io.ReadAll(r.Body)
-		if h.checkStatus != 0 {
-			rec.Status = h.checkStatus
+		if c.checkStatus != 0 {
+			rec.Status = c.checkStatus
 			h.record(rec)
-			if h.checkEnvelope {
-				code := h.checkCode
+			if c.checkEnvelope {
+				code := c.checkCode
 				if code == "" {
 					code = "spec_error"
 				}
-				iaSpecWriteError(w, h.checkStatus, code)
+				iaSpecWriteError(w, c.checkStatus, code)
 			} else {
-				http.Error(w, http.StatusText(h.checkStatus), h.checkStatus)
+				http.Error(w, http.StatusText(c.checkStatus), c.checkStatus)
 			}
 			return
 		}
-		answer := map[string]any{"authorized": h.authorized, "uploads": h.mode}
-		if h.mode == "artifact" {
+		answer := map[string]any{"authorized": c.authorized, "uploads": c.mode}
+		if c.mode == "artifact" {
 			answer["delivery_max_bytes"] = int64(iaSpecMaxBytes)
-			if h.maxBytes != 0 {
-				answer["delivery_max_bytes"] = h.maxBytes
+			if c.maxBytes != 0 {
+				answer["delivery_max_bytes"] = c.maxBytes
 			}
-			if h.zeroMaxBytes {
+			if c.zeroMaxBytes {
 				answer["delivery_max_bytes"] = int64(0)
 			}
 		}
@@ -207,19 +239,19 @@ func (h *iaSpecHub) serve(w http.ResponseWriter, r *http.Request) {
 		iaSpecWriteJSON(w, http.StatusOK, answer)
 
 	case r.Method == http.MethodPost && r.URL.Path == iaSpecUploadPath:
-		h.serveUpload(w, r, rec)
+		h.serveUpload(w, r, rec, c)
 
 	case r.Method == http.MethodPost && r.URL.Path == iaSpecInboundPath:
 		rec.Body, _ = io.ReadAll(r.Body)
 		var send iaSpecInboundSend
 		_ = json.Unmarshal(rec.Body, &send)
-		if d := h.inboundDelay[send.Message.Recipient]; d > 0 {
+		if d := c.inboundDelay[send.Message.Recipient]; d > 0 {
 			select {
 			case <-time.After(d):
 			case <-r.Context().Done():
 			}
 		}
-		if status := h.inboundStatus[send.Message.Recipient]; status != 0 {
+		if status := c.inboundStatus[send.Message.Recipient]; status != 0 {
 			rec.Status = status
 			h.record(rec)
 			iaSpecWriteError(w, status, "spec_refused")
@@ -240,7 +272,7 @@ func (h *iaSpecHub) serve(w http.ResponseWriter, r *http.Request) {
 
 // serveUpload stores the file parts of a multipart upload as uploads of the
 // sender named in the leading metadata fields.
-func (h *iaSpecHub) serveUpload(w http.ResponseWriter, r *http.Request, rec iaSpecHubRequest) {
+func (h *iaSpecHub) serveUpload(w http.ResponseWriter, r *http.Request, rec iaSpecHubRequest, c iaSpecHubConfig) {
 	rec.Meta = map[string][]string{}
 	fail := func(status int, code string) {
 		rec.Status = status
@@ -305,10 +337,10 @@ func (h *iaSpecHub) serveUpload(w http.ResponseWriter, r *http.Request, rec iaSp
 	case !iaSpecFilePartsNamedFile(rec.Files):
 		fail(http.StatusBadRequest, "validation_error")
 		return
-	case !h.authorized:
+	case !c.authorized:
 		fail(http.StatusForbidden, "forbidden")
 		return
-	case h.mode != "artifact":
+	case c.mode != "artifact":
 		fail(http.StatusConflict, "attachments_unavailable")
 		return
 	case len(rec.Files) == 0:
@@ -316,19 +348,20 @@ func (h *iaSpecHub) serveUpload(w http.ResponseWriter, r *http.Request, rec iaSp
 		return
 	}
 	for _, target := range rec.Meta["targets"] {
-		if status := h.uploadRefuse[target]; status != 0 {
+		if status := c.uploadRefuse[target]; status != 0 {
 			fail(status, "message_denied")
 			return
 		}
 	}
-	// As the hub does, HTML and SVG files are refused per file; a request
-	// in which no file is stored answers 400 with the failures.
+	// As the hub does, markup files are refused per file, with the hub's
+	// wording; a request in which no file is stored answers 400 with the
+	// failures.
 	var refused []map[string]any
 	var kept []iaSpecFormPart
 	for _, f := range rec.Files {
-		lower := strings.ToLower(f.FileName)
-		if strings.HasSuffix(lower, ".html") || strings.HasSuffix(lower, ".htm") || strings.HasSuffix(lower, ".svg") {
-			refused = append(refused, map[string]any{"name": f.FileName, "error": "HTML and SVG files are not accepted as attachments"})
+		switch ext := strings.ToLower(filepath.Ext(f.FileName)); ext {
+		case ".html", ".htm", ".svg":
+			refused = append(refused, map[string]any{"name": f.FileName, "error": fmt.Sprintf("files with a %s extension are not accepted", ext)})
 			continue
 		}
 		kept = append(kept, f)
