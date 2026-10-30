@@ -171,6 +171,13 @@ function isBulkActionDisabled(button: HTMLButtonElement): boolean {
   return button.getAttribute('aria-disabled') === 'true';
 }
 
+/** A Shoelace icon element showing the named icon. */
+function iconElement(name: string): HTMLElement {
+  const icon = document.createElement('sl-icon');
+  icon.setAttribute('name', name);
+  return icon;
+}
+
 // TERMINAL_DRAG_MIME imported from ./terminal-workspace-events.js
 
 /** Preset button definitions for the layout toolbar. */
@@ -1589,14 +1596,14 @@ export class TerminalWorkspaceRoot {
 
     this.bulkReconnect.type = 'button';
     this.bulkReconnect.className = 'terminal-bulk-action terminal-bulk-reconnect';
-    this.bulkReconnect.innerHTML = '<sl-icon name="arrow-repeat"></sl-icon>';
+    this.bulkReconnect.replaceChildren(iconElement('arrow-repeat'));
     this.bulkReconnect.addEventListener('click', () => {
       if (!isBulkActionDisabled(this.bulkReconnect)) this.reconnectAll();
     });
 
     this.bulkRemove.type = 'button';
     this.bulkRemove.className = 'terminal-bulk-action terminal-bulk-remove';
-    this.bulkRemove.innerHTML = '<sl-icon name="trash"></sl-icon>';
+    this.bulkRemove.replaceChildren(iconElement('trash'));
     this.bulkRemove.addEventListener('click', () => {
       if (!isBulkActionDisabled(this.bulkRemove)) void this.removeAllInactive();
     });
@@ -1836,7 +1843,7 @@ export class TerminalWorkspaceRoot {
     reconnect.setAttribute('aria-label', `Reconnect ${agentName}`);
     reconnect.dataset.railFocusId = `${entry.state.key}:reconnect`;
     reconnect.title = 'Reconnect';
-    reconnect.innerHTML = '<sl-icon name="arrow-clockwise"></sl-icon>';
+    reconnect.replaceChildren(iconElement('arrow-clockwise'));
     reconnect.disabled = !canReconnectEntry(entry);
     reconnect.addEventListener('click', (event) => {
       event.stopPropagation();
@@ -1848,7 +1855,7 @@ export class TerminalWorkspaceRoot {
     close.setAttribute('aria-label', `Close ${agentName}`);
     close.dataset.railFocusId = `${entry.state.key}:close`;
     close.title = 'Close';
-    close.innerHTML = '<sl-icon name="x-circle"></sl-icon>';
+    close.replaceChildren(iconElement('x-circle'));
     close.addEventListener('click', (event) => {
       event.stopPropagation();
       this.removeEntry(entry);
@@ -1877,7 +1884,7 @@ export class TerminalWorkspaceRoot {
     placeBtn.setAttribute('aria-label', `Place ${agentName} in pane`);
     placeBtn.dataset.railFocusId = `${entry.state.key}:place`;
     placeBtn.title = 'Place in pane…';
-    placeBtn.innerHTML = '<sl-icon name="grid"></sl-icon>';
+    placeBtn.replaceChildren(iconElement('grid'));
     placeBtn.addEventListener('click', (event) => {
       event.stopPropagation();
       this.openPlaceMenu(entry.state.key, agentName, placeBtn);

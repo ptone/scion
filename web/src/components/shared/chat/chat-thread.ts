@@ -7424,7 +7424,7 @@ export class ScionChatThread extends LitElement {
   /**
    * Open a print-friendly window with the conversation content.
    *
-   * Creates a new browser window with clean HTML formatted messages and
+   * Creates a new browser window, builds its page from the messages as text and
    * invokes the browser's print dialog (which allows saving as PDF).
    */
   public printConversation(): void {
@@ -7439,26 +7439,38 @@ export class ScionChatThread extends LitElement {
       return;
     }
 
-    const title = this.threadName ? this.escapeHtml(this.threadName) : 'Conversation';
+    const doc = printWindow.document;
+    const title = this.threadName || 'Conversation';
+    const el = (tag: string, style: string, text?: string): HTMLElement => {
+      const node = doc.createElement(tag);
+      node.setAttribute('style', style);
+      if (text !== undefined) node.textContent = text;
+      return node;
+    };
 
-    const messagesHtml = this.messages
-      .map(
-        (m) =>
-          `<div style="margin-bottom: 1rem; padding-bottom: 0.5rem; border-bottom: 1px solid #eee;">
-        <div style="font-weight: bold; font-size: 0.875rem;">${this.escapeHtml(m.sender)}
-          <span style="color: #666; font-weight: normal;">${this.escapeHtml(this.formatExportTimestamp(m.createdAt))}</span>
-        </div>
-        <div style="margin-top: 0.5rem; white-space: pre-wrap;">${this.escapeHtml(m.msg)}</div>
-      </div>`
-      )
-      .join('');
+    const titleEl = doc.createElement('title');
+    titleEl.textContent = title;
+    const style = doc.createElement('style');
+    style.textContent =
+      'body{font-family:system-ui,-apple-system,sans-serif;max-width:800px;margin:2rem auto;padding:0 1rem;color:#1a1a1a;}';
+    doc.head.replaceChildren(titleEl, style);
 
-    printWindow.document.write(
-      `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${title}</title>` +
-        `<style>body{font-family:system-ui,-apple-system,sans-serif;max-width:800px;margin:2rem auto;padding:0 1rem;color:#1a1a1a;}</style>` +
-        `</head><body><h1 style="font-size:1.25rem;margin-bottom:1.5rem;">${title}</h1>${messagesHtml}</body></html>`
+    const messages = this.messages.map((m) => {
+      const header = el('div', 'font-weight: bold; font-size: 0.875rem;', `${m.sender} `);
+      header.append(
+        el('span', 'color: #666; font-weight: normal;', this.formatExportTimestamp(m.createdAt))
+      );
+      const item = el(
+        'div',
+        'margin-bottom: 1rem; padding-bottom: 0.5rem; border-bottom: 1px solid #eee;'
+      );
+      item.append(header, el('div', 'margin-top: 0.5rem; white-space: pre-wrap;', m.msg));
+      return item;
+    });
+    doc.body.replaceChildren(
+      el('h1', 'font-size:1.25rem;margin-bottom:1.5rem;', title),
+      ...messages
     );
-    printWindow.document.close();
     printWindow.onafterprint = () => printWindow.close();
     printWindow.print();
     // Fallback for browsers that don't fire afterprint

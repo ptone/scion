@@ -171,6 +171,7 @@ export default defineConfig([
       'e2e/event-source-stub.ts',
       'e2e/palette-focus.ts',
       'e2e/palette-typography.ts',
+      'e2e/trusted-types.ts',
       'e2e/*.spec.ts',
       'e2e/groups/*.ts',
       'e2e/harness/*.ts',
