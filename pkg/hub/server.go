@@ -1815,9 +1815,14 @@ type Server struct {
 	// the last check (-1: not checked yet), read by the readiness gauge.
 	conduitEligibleRelays atomic.Int64
 	// brokerPresenceRegistryFallbacks counts broker presence reads whose
-	// conduit registry read failed and fell back to the legacy signals
-	// (broker_presence.go).
+	// conduit registry read failed and fell back to the legacy signals,
+	// exported as scion.hub.broker.presence_registry_fallbacks with
+	// cause=registry_read (broker_presence.go).
 	brokerPresenceRegistryFallbacks atomic.Int64
+	// brokerPresenceRecordReadFallbacks counts BrokerPresent broker record
+	// reads that failed (the startup repair then counts the broker as
+	// present), exported on the same counter with cause=broker_record_read.
+	brokerPresenceRecordReadFallbacks atomic.Int64
 	// conduitAdmissionAEADv is the admission token cipher
 	// (conduit_admission.go), derived once; conduitAdmissionKeyErr is why
 	// it could not be.
