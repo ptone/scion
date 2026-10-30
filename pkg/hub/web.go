@@ -1242,8 +1242,7 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 			// redirect to login instead of letting the Hub return a raw JSON 401.
 			if isBrowserRequest(r) && isProxyRoute(r.URL.Path) {
 				if !ws.keepsNoAnonymousSession(r) {
-					session.Values[sessKeyReturnTo] = localRedirectPath(r.URL.RequestURI())
-					_ = session.Save(r, w)
+					_ = ws.saveReturnTo(w, r, session, localRedirectPath(r.URL.RequestURI()))
 					http.Redirect(w, r, "/auth/login", http.StatusFound)
 					return
 				}
@@ -3681,8 +3680,7 @@ func (ws *WebServer) sessionAuthMiddleware(next http.Handler) http.Handler {
 				http.Redirect(w, r, ws.noSessionLoginLocation(r.URL.RequestURI()), http.StatusFound)
 				return
 			}
-			session.Values[sessKeyReturnTo] = localRedirectPath(r.URL.RequestURI())
-			_ = session.Save(r, w)
+			_ = ws.saveReturnTo(w, r, session, localRedirectPath(r.URL.RequestURI()))
 			http.Redirect(w, r, "/auth/login", http.StatusFound)
 			return
 		}
@@ -3694,6 +3692,31 @@ func (ws *WebServer) sessionAuthMiddleware(next http.Handler) http.Handler {
 			"error": "authentication required",
 		})
 	})
+}
+
+// saveReturnTo stores next, a path on this server, as the post-sign-in
+// return path and saves the session. When the session cannot be saved with
+// it (a long query can push the cookie past its size limit), it stores the
+// path without its query and fragment. When that cannot be saved either, it
+// drops the return path, so sign-in lands on /, and returns the error. The
+// logs carry the error and the path length, never the path or the cookie.
+func (ws *WebServer) saveReturnTo(w http.ResponseWriter, r *http.Request, session *sessions.Session, next string) error {
+	session.Values[sessKeyReturnTo] = next
+	err := session.Save(r, w)
+	if err == nil {
+		return nil
+	}
+	if i := strings.IndexAny(next, "?#"); i > 0 {
+		ws.logger().Warn("Failed to save the sign-in return path to the session; retrying without its query", "error", err, "path_len", len(next))
+		next = next[:i]
+		session.Values[sessKeyReturnTo] = next
+		if err = session.Save(r, w); err == nil {
+			return nil
+		}
+	}
+	delete(session.Values, sessKeyReturnTo)
+	ws.logger().Error("Failed to save the sign-in return path to the session; sign-in returns to /", "error", err, "path_len", len(next))
+	return err
 }
 
 // handleOAuthLogin initiates the OAuth flow for a given provider.
@@ -3711,8 +3734,7 @@ func (ws *WebServer) handleOAuthLogin(w http.ResponseWriter, r *http.Request) {
 			session, _ = ws.sessionStore.New(r, webSessionName)
 		}
 		if returnTo := r.URL.Query().Get("returnTo"); returnTo != "" {
-			session.Values[sessKeyReturnTo] = localRedirectPath(returnTo)
-			_ = session.Save(r, w)
+			_ = ws.saveReturnTo(w, r, session, localRedirectPath(returnTo))
 		}
 		http.Redirect(w, r, "/login", http.StatusFound)
 		return
@@ -3750,14 +3772,18 @@ func (ws *WebServer) handleOAuthLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	session.Values[sessKeyOAuthState] = state
 	// The sign-in page passes returnTo on when a provider is picked; only
-	// a path on this server is stored.
+	// a path on this server is stored. A return path the session cannot
+	// hold is dropped, so the sign-in proceeds and lands on /.
+	saved := false
 	if returnTo := r.URL.Query().Get("returnTo"); returnTo != "" {
-		session.Values[sessKeyReturnTo] = localRedirectPath(returnTo)
+		saved = ws.saveReturnTo(w, r, session, localRedirectPath(returnTo)) == nil
 	}
-	if err := session.Save(r, w); err != nil {
-		ws.logger().Error("Failed to save OAuth state to session", "error", err)
-		http.Error(w, "session error", http.StatusInternalServerError)
-		return
+	if !saved {
+		if err := session.Save(r, w); err != nil {
+			ws.logger().Error("Failed to save OAuth state to session", "error", err)
+			http.Error(w, "session error", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	// Build redirect URI
