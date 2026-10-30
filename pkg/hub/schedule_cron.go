@@ -29,8 +29,8 @@ import (
 )
 
 // cronZonePrefixMessage is the user-facing error for a cron expression that
-// carries a zone prefix. Schedules are evaluated in UTC only.
-const cronZonePrefixMessage = "cron expressions are evaluated in UTC; zone prefixes (CRON_TZ=, TZ=) are not supported — convert the time to UTC"
+// carries a zone prefix. The zone is a separate schedule field instead.
+const cronZonePrefixMessage = "zone prefixes (CRON_TZ=, TZ=) are not supported in cron expressions — remove the prefix and set the schedule's time zone instead"
 
 // errCronZonePrefix is returned by parseScheduleCron for an expression that
 // begins with a CRON_TZ= or TZ= zone prefix.
@@ -165,7 +165,7 @@ func (s *Server) pauseZonePrefixedSchedules(ctx context.Context) {
 				continue
 			}
 			paused++
-			log.Warn("schedule paused: cron zone prefixes are not supported; edit the expression to UTC and resume",
+			log.Warn("schedule paused: cron zone prefixes are not supported; remove the prefix, set the schedule's time zone, and resume",
 				"schedule_id", sched.ID, "project_id", sched.ProjectID,
 				"cron_expr", sched.CronExpr)
 		}

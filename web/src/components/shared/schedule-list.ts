@@ -55,10 +55,10 @@ interface Schedule {
 
 /**
  * Label shown on a schedule whose cron expression carries a zone prefix.
- * Schedules are evaluated in UTC only; the hub rejects such expressions and
- * pauses existing rows that use one.
+ * The hub rejects such expressions and pauses existing rows that use one;
+ * the zone belongs in the schedule's time zone field.
  */
-export const ZONE_PREFIX_BADGE_LABEL = 'Zone prefix not supported — edit to UTC';
+export const ZONE_PREFIX_BADGE_LABEL = 'Zone prefix not supported — use the time zone field';
 
 /**
  * Text shown for each system pause reason the hub stores in
@@ -66,7 +66,8 @@ export const ZONE_PREFIX_BADGE_LABEL = 'Zone prefix not supported — edit to UT
  */
 const STATUS_REASON_LABELS: Record<string, string> = {
   creator_deleted: 'Creator deleted: resume to run it under your authority',
-  cron_zone_unsupported: 'Zone prefix not supported: edit to UTC, then resume',
+  cron_zone_unsupported:
+    'Zone prefix not supported: remove it, set the time zone field, then resume',
 };
 
 /** Returns the text shown for a schedule's status reason, or '' when it has none. */
@@ -132,7 +133,7 @@ export function buildScheduleEdit(
   if (hasCronZonePrefix(cronExpr)) {
     return {
       error:
-        'Zone prefixes (CRON_TZ=, TZ=) are not supported. Remove the prefix and give the time in UTC.',
+        'Zone prefixes (CRON_TZ=, TZ=) are not supported. Remove the prefix and set the time zone field instead.',
     };
   }
   const patch: Record<string, unknown> = {};
@@ -525,7 +526,7 @@ export class ScionScheduleList extends LitElement {
 
   private renderZonePrefixBadge(sched: Schedule) {
     if (!hasCronZonePrefix(sched.cronExpr)) return nothing;
-    return html`<span class="badge zone-prefix" title="Cron expressions are evaluated in UTC"
+    return html`<span class="badge zone-prefix" title="Set the zone in the time zone field"
       >${ZONE_PREFIX_BADGE_LABEL}</span
     >`;
   }
@@ -899,7 +900,7 @@ export class ScionScheduleList extends LitElement {
             label="Cron Expression"
             class="edit-cron"
             help-text=${prefixed
-              ? 'Zone prefixes (CRON_TZ=, TZ=) are not supported: remove the prefix and give the time in UTC.'
+              ? 'Zone prefixes (CRON_TZ=, TZ=) are not supported: remove the prefix and set the time zone field.'
               : 'Standard 5-field cron: minute hour day month weekday, in the time zone below'}
             .value=${this.editCron}
             @sl-input=${(e: Event): void => {
