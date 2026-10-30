@@ -24,8 +24,9 @@
 // over either the conduit session or the legacy port-forward tunnel.
 //
 // It creates one project and one agent per transport, waits until each
-// agent's port answers through the hub, writes a ready file (JSON, see
-// readyState) and runs until SIGINT or SIGTERM.
+// agent's port answers through the hub, stops and resumes each agent
+// through the hub and waits for its port again (stopAndResume), writes a
+// ready file (JSON, see readyState) and runs until SIGINT or SIGTERM.
 package main
 
 import (
@@ -52,6 +53,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit"
@@ -273,6 +275,23 @@ func run(ctx context.Context, o options) error {
 		}
 		log.Printf("agent %s (%s) serves port %d", a.Name, a.Transport, o.port)
 	}
+	// Stop and resume each agent through the hub before the suite runs, so
+	// a regression in the hub's start dispatch or the broker's start
+	// handler (what a resume of a stopped agent takes: the credential, env
+	// and classification contract across the hub/broker boundary, retro
+	// #6663 R8) fails the setup instead of passing on creates alone.
+	for _, a := range state.Agents {
+		if err := stopAndResume(setupCtx, admin.Agents(), agents, a.Name, a.ID); err != nil {
+			return err
+		}
+		if err := agents.waitConnected(setupCtx, a.Name); err != nil {
+			return fmt.Errorf("agent %s after resume: %w", a.Name, err)
+		}
+		if err := waitProxy(setupCtx, o, devToken, a.ID); err != nil {
+			return fmt.Errorf("agent %s after resume: %w", a.Name, err)
+		}
+		log.Printf("agent %s (%s) serves port %d after stop and resume", a.Name, a.Transport, o.port)
+	}
 	if err := writeReady(o.readyFile, state); err != nil {
 		return err
 	}
@@ -313,6 +332,42 @@ func createAgent(ctx context.Context, c hubclient.Client, projectID, brokerID, n
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
+}
+
+// agentLifecycle is the part of the hub's agent API stopAndResume uses
+// (hubclient.AgentService).
+type agentLifecycle interface {
+	Stop(ctx context.Context, agentID string) (*hubclient.LifecycleResponse, error)
+	Start(ctx context.Context, agentID string) (*hubclient.LifecycleResponse, error)
+}
+
+// stopAndResume stops a running agent through the hub, waits until the
+// broker's stop ended its running instance here, then resumes it through
+// the hub (a resume of a stopped agent is the hub's start dispatch, as
+// `scion resume` of a stopped agent) and checks the broker started a new
+// instance. The new instance's transport and port are the caller's to
+// wait for. Any failure is final: a resume that does not come back is
+// what this step exists to catch.
+func stopAndResume(ctx context.Context, hub agentLifecycle, agents *agentSet, name, id string) error {
+	old := agents.current(name)
+	if old == nil {
+		return fmt.Errorf("stop and resume agent %s: it is not running", name)
+	}
+	if _, err := hub.Stop(ctx, id); err != nil {
+		return fmt.Errorf("stop agent %s: %w", name, err)
+	}
+	select {
+	case <-old.done:
+	case <-ctx.Done():
+		return fmt.Errorf("stop agent %s: the hub's stop did not end the running agent", name)
+	}
+	if _, err := hub.Start(ctx, id); err != nil {
+		return fmt.Errorf("resume agent %s (a resume failing after creates pass is a hub/broker start contract signal first): %w", name, err)
+	}
+	if cur := agents.current(name); cur == nil || cur == old {
+		return fmt.Errorf("resume agent %s: the hub answered but the broker started no new agent", name)
+	}
+	return nil
 }
 
 // retryable reports whether a create failure may pass on its own: no HTTP
@@ -449,19 +504,30 @@ func (s *agentSet) start(opts api.StartOptions) (*api.AgentInfo, error) {
 		return nil, fmt.Errorf("fakeagent: agent %s is already running", opts.Name)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	// The broker finds an agent's entry by name and project
+	// ({scion.name, scion.project_id}, as on a real container) to stop,
+	// restart or delete it; without the project label a hub stop finds
+	// nothing and answers its idempotent "not found" 202.
+	projectID := opts.HubProjectID
+	if projectID == "" {
+		projectID = env["SCION_PROJECT_ID"]
+	}
 	a := &fakeAgent{
 		info: api.AgentInfo{
 			ID:          agentID,
 			ContainerID: "fakeagent-" + opts.Name,
 			Name:        opts.Name,
+			ProjectID:   projectID,
 			Phase:       "running",
 			// The run the hub minted for this start, as a real container
 			// carries it (label and launch id).
 			RunID: opts.RunID,
 			Labels: map[string]string{
-				"scion.name":   opts.Name,
-				"agent_id":     agentID,
-				api.LabelRunID: opts.RunID,
+				"scion.agent":              "true",
+				"scion.name":               opts.Name,
+				projectkeys.LabelProjectID: projectID,
+				"agent_id":                 agentID,
+				api.LabelRunID:             opts.RunID,
 			},
 		},
 		cancel:    cancel,
@@ -548,6 +614,13 @@ func (s *agentSet) waitConnected(ctx context.Context, name string) error {
 		case <-time.After(200 * time.Millisecond):
 		}
 	}
+}
+
+// current returns the running instance of the named agent, or nil.
+func (s *agentSet) current(name string) *fakeAgent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.agents[name]
 }
 
 func (s *agentSet) stop(name string) {
