@@ -2764,6 +2764,8 @@ func (s *Server) projectHasVerifiedGCPSA(ctx context.Context, projectID string) 
 // read; deliverySelector.probe). Before that (the create-time probe)
 // there is no target to authorize against and the record counts by
 // existence, as the start still authorizes every item before delivery.
+// An owner's user-scope row not shared with progeny counts only when the
+// owner material chain rule would deliver it (start_owner_material_chain.go).
 func (s *Server) hasAnyKey(ctx context.Context, agent *store.Agent, keys []string) (bool, error) {
 	var sel *deliverySelector
 	selReady := false
@@ -2778,6 +2780,9 @@ func (s *Server) hasAnyKey(ctx context.Context, agent *store.Agent, keys []strin
 		}
 		return sel.probe(ctx, kind, record, id, key, scope, scopeID)
 	}
+	// An owner's user row the owner material chain rule withholds at start
+	// does not count as present (decided without a report).
+	ownerRows := newOwnerChainCheck(s.authzService, agent)
 	for _, key := range keys {
 		if agent.AppliedConfig != nil && agent.AppliedConfig.Env != nil {
 			if _, ok := agent.AppliedConfig.Env[key]; ok {
@@ -2789,14 +2794,14 @@ func (s *Server) hasAnyKey(ctx context.Context, agent *store.Agent, keys []strin
 			if err != nil && !errors.Is(err, store.ErrNotFound) {
 				return false, err
 			}
-			if ev != nil {
+			if ev != nil && ownerRows.allowsRow(ctx, ev.AllowProgeny, ownerRowScope(ev.ScopeID, agent.OwnerID)) {
 				return true, nil
 			}
 			sec, err := s.store.GetSecret(ctx, key, "user", agent.OwnerID)
 			if err != nil && !errors.Is(err, store.ErrNotFound) {
 				return false, err
 			}
-			if sec != nil {
+			if sec != nil && ownerRows.allowsRow(ctx, sec.AllowProgeny, ownerRowScope(sec.ScopeID, agent.OwnerID)) {
 				return true, nil
 			}
 		}

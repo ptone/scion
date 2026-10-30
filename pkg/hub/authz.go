@@ -560,6 +560,12 @@ type AuthzService struct {
 	legacyFallbackWarn     *hookRefusalLimiter
 	legacyFallbackWarnOnce sync.Once
 
+	// ownerChainWithheld counts start-time owner rows the owner material
+	// chain rule withheld (start_owner_material_chain.go);
+	// ownerChainMetrics, when set, exports the rule's outcomes.
+	ownerChainWithheld atomic.Int64
+	ownerChainMetrics  ownerMaterialChainMetrics
+
 	// relationshipResolver handles progeny relationship grants. Lazily
 	// initialized on first use.
 	relationshipResolver *RelationshipGrantResolver
