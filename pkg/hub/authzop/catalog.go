@@ -622,7 +622,6 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/web.go", Function: "handleOAuthCallback", Symbol: "UpdateUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "OAuth callback user record update", Scope: "pkg/hub/web.go"}},
 	{File: "pkg/hub/web.go", Function: "proxyAuthMiddleware", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "Proxy auth user provisioning", Scope: "pkg/hub/web.go"}},
 	{File: "pkg/hub/web.go", Function: "proxyAuthMiddleware", Symbol: "UpdateUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "Proxy auth user record update", Scope: "pkg/hub/web.go"}},
-	{File: "pkg/hub/web.go", Function: "sessionToBearerMiddleware", Symbol: "GenerateAccessToken", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "Session-to-bearer token conversion middleware", Scope: "pkg/hub/web.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/handlers_test_login.go — dev/test login
@@ -700,7 +699,6 @@ var MutationClassifications = []MutationClassification{
 	// -----------------------------------------------------------------------
 	{File: "pkg/hub/server.go", Function: "sweepOrphanedGroupMemberships", Symbol: "DeleteOrphanedGroupMemberships", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Server startup: delete group memberships whose user and agent are both NULL (principal deleted, ON DELETE SET NULL); such rows are always orphans and carry no principal; idempotent, every startup (ptone/scion#2769)", Scope: "pkg/hub/server.go"}},
 	{File: "pkg/hub/agent_token_mint.go", Function: "recordAgentCredential", Symbol: "CreateAgentCredential", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Agent credential record at agent token issue, server infrastructure", Scope: "pkg/hub/agent_token_mint.go"}},
-	{File: "pkg/hub/server.go", Function: "a2aBridgeSweepHandler", Symbol: "GenerateAccessToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Background job: A2A bridge sweep generates GCP tokens", Scope: "pkg/hub/server.go"}},
 	{File: "pkg/hub/encryption_audit.go", Function: "runEncryptionAudit", Symbol: "ScanSecretPayloads", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Startup encryption audit (ptone/scion#1530 §5): authenticates every stored payload in process memory before any key sync or backup write; reports identities and counts only", Scope: "pkg/hub/encryption_audit.go"}},
 	{File: "pkg/hub/server.go", Function: "backupSigningKeyToStore", Symbol: "UpdateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC signing key backup, server infrastructure", Scope: "pkg/hub/server.go"}},
 	{File: "pkg/hub/server.go", Function: "backupSigningKeyToStore", Symbol: "UpsertSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC signing key backup, server infrastructure", Scope: "pkg/hub/server.go"}},
