@@ -30,10 +30,12 @@
  */
 
 import type { Node } from '@milkdown/prose/model';
+import { Transform } from '@milkdown/prose/transform';
 
 import { parseCritic } from '../../../utils/critic.js';
-import { COMMENT, isMine, markKeyOf, runKeyOf } from './schema.js';
+import { BLOCK_ATTR, COMMENT, breakOf, isMine, markKeyOf, runKeyOf } from './schema.js';
 import type { MarkKey } from './schema.js';
+import { carrierBefore } from './structural.js';
 
 /** The clean reading of a node: what the text is with every mark rejected. */
 export function cleanReading(node: Node): string {
@@ -50,12 +52,63 @@ export function cleanReading(node: Node): string {
       if (k !== 'ins' && k !== 'subNew') parts.push(`￼${n.type.name}${JSON.stringify(n.attrs)}`);
       return;
     }
-    parts.push(`<${n.type.name}${JSON.stringify(n.attrs)}>`);
+    parts.push(`<${n.type.name}${JSON.stringify(blockAttrs(n))}>`);
     n.forEach(walk);
     parts.push(`</${n.type.name}>`);
   };
   walk(node);
   return parts.join('');
+}
+
+/** A node's attributes without the boundary suggestion (which the clean reading leaves out). */
+function blockAttrs(n: Node): Record<string, unknown> {
+  if (!(BLOCK_ATTR in n.attrs)) return n.attrs;
+  const { [BLOCK_ATTR]: _drop, ...rest } = n.attrs;
+  return rest;
+}
+
+/**
+ * The clean reading of the top-level blocks first..last of doc with every
+ * suggested break undone (the blocks it split joined again) and every
+ * suggested join kept as a break: what the blocks are with every
+ * suggestion rejected. A '\u0000' reading when a break cannot be undone.
+ */
+export function cleanBlocks(doc: Node, first: number, last: number): string {
+  const nodes: Node[] = [];
+  for (let i = Math.max(0, first); i <= last && i < doc.childCount; i++) nodes.push(doc.child(i));
+  const top = doc.type.schema.topNodeType.create(null, nodes);
+  const tr = new Transform(top);
+  const joins: { aEnd: number; bStart: number }[] = [];
+  top.descendants((n, pos) => {
+    if (!n.isTextblock) return true;
+    const b = carrierBefore(top, pos);
+    if (b && breakOf(b.carrier)?.change === 'ins') joins.push(b);
+    return false;
+  });
+  try {
+    for (const b of joins.reverse()) tr.delete(b.aEnd, b.bStart);
+  } catch {
+    return '\u0000';
+  }
+  const parts: string[] = [];
+  tr.doc.forEach((n) => parts.push(cleanReading(n)));
+  return parts.join('');
+}
+
+/**
+ * Whether the top-level blocks first..last of before read the same, every
+ * suggestion rejected, as blocks first..last + (the change in the number of
+ * blocks) of after: the cheap per-edit clean check of a structural edit.
+ */
+export function cleanBlocksUnchanged(
+  before: Node,
+  after: Node,
+  first: number,
+  last: number
+): boolean {
+  const delta = after.childCount - before.childCount;
+  if (last + delta < first - 1) return false;
+  return cleanBlocks(before, first, last) === cleanBlocks(after, first, last + delta);
 }
 
 /**
@@ -82,6 +135,42 @@ export interface MarkRun {
   next?: string;
   /** Added in this editing session (document runs only). */
   mine?: boolean;
+  /**
+   * Document runs only: the run holds a suggested break or join, or a hard
+   * break, which its text in the source writes as line-start syntax (a list
+   * or quote marker) or line-end syntax; only such a run is compared with
+   * its text's alternative reading (alt).
+   */
+  boundary?: boolean;
+  /**
+   * Text runs only, for a mark whose text crosses a line: its text read
+   * with the block syntax at the starts of its lines left out (alt, and
+   * nextAlt for a replacement's new side). A mark around a suggested break
+   * or join holds the source between two blocks (a list marker, a quote
+   * marker), which the editor shows as the boundary, not as text. It is
+   * used only for a document run with a boundary (MarkRun.boundary).
+   */
+  alt?: string | undefined;
+  nextAlt?: string | undefined;
+}
+
+/**
+ * md with the block syntax that starts each of its lines after the first
+ * left out (quote markers, a list marker, a heading marker), and the
+ * hard-break syntax before each line break.
+ */
+export function stripBlockSyntax(md: string): string {
+  return md
+    .replace(/(?:\\|[ \t]{2,})(\r?\n)/g, '$1')
+    .replace(
+      /(\r?\n)[ \t]*(?:>[ \t]?)*[ \t]*(?:(?:[-+*]|\d{1,9}[.)])(?:[ \t]+(?:\[[ xX]\][ \t]+)?|(?=\r?\n|$))|#{1,6}(?:[ \t]+|(?=\r?\n|$)))?/g,
+      '$1'
+    );
+}
+
+/** The alternative reading of a mark text that crosses a line (MarkRun.alt), or undefined. */
+function altReading(plain: (md: string) => string, md: string): string | undefined {
+  return /[\r\n]/.test(md) ? plain(stripBlockSyntax(md)) : undefined;
 }
 
 const KIND_OF: Record<MarkKey, MarkRun['kind']> = {
@@ -92,76 +181,161 @@ const KIND_OF: Record<MarkKey, MarkRun['kind']> = {
   hl: 'highlight',
 };
 
+/** One step of a document's mark walk (walkMarks). */
+type MarkStep =
+  | { kind: 'comment'; node: Node; pos: number }
+  | { kind: 'inline'; node: Node; pos: number }
+  /** A suggested break or join at a boundary between textblocks. */
+  | { kind: 'break'; key: 'ins' | 'del'; run: string; mine: boolean; from: number; to: number }
+  /**
+   * A boundary without a suggestion. A run continues across it only into
+   * the same run at the start of the next textblock (next), and never an
+   * insertion or deletion where the boundary could carry a suggestion
+   * (eligible): that would be read as a suggested break or join.
+   */
+  | { kind: 'edge'; eligible: boolean; next: string | null };
+
+/** The inline nodes, comments and textblock boundaries of doc in document order. */
+function walkMarks(doc: Node, visit: (s: MarkStep) => void): void {
+  let first = true;
+  doc.descendants((n, pos) => {
+    if (n.type.name === COMMENT) {
+      visit({ kind: 'comment', node: n, pos });
+      return false;
+    }
+    if (n.isBlock) {
+      if (!n.isTextblock) return true;
+      if (!first) {
+        const b = carrierBefore(doc, pos);
+        const br = b ? breakOf(b.carrier) : null;
+        if (b && br) {
+          visit({
+            kind: 'break',
+            key: br.change,
+            run: br.own ? `${br.change}:mine` : br.change,
+            mine: br.own,
+            from: b.aEnd,
+            to: b.bStart,
+          });
+        } else {
+          const head = n.firstChild;
+          const next = head && head.type.name !== COMMENT ? runKeyOf(head.marks) : null;
+          visit({ kind: 'edge', eligible: b !== null, next });
+        }
+      }
+      first = false;
+      return true;
+    }
+    visit({ kind: 'inline', node: n, pos });
+    return false;
+  });
+}
+
+/** Whether a run key is an insertion's or a deletion's (which a plain boundary ends). */
+const insOrDel = (run: string | null): boolean =>
+  run !== null && (run.startsWith('ins') || run.startsWith('del'));
+
+/** Whether the run prev ends at a boundary without a suggestion. */
+export function endsAt(
+  edge: { eligible: boolean; next: string | null },
+  prev: string | null
+): boolean {
+  if (prev === null) return false;
+  return edge.next !== prev || (edge.eligible && insOrDel(prev));
+}
+
 /**
  * The marks of a document in order, with their text (a replacement once,
- * with both sides). Runs follow runKeyOf, as the serializer writes them.
+ * with both sides). Runs follow runKeyOf, as the serializer writes them; a
+ * suggested break or join is part of the run around it (with no text),
+ * and an insertion or deletion ends at a boundary that could carry one
+ * but does not.
  */
 export function docMarkRuns(doc: Node): MarkRun[] {
   const out: MarkRun[] = [];
   let prev: string | null = null;
   let cur: MarkRun | null = null;
   let side: 'text' | 'next' = 'text';
-  doc.descendants((n) => {
-    if (n.type.name === COMMENT) {
-      out.push({ kind: 'comment', text: String(n.attrs.note), mine: n.attrs.mine === true });
-      prev = null;
-      cur = null;
-      return false;
-    }
-    if (n.isBlock) return true; // A run that continues into the next block stays one mark.
-    const k = markKeyOf(n.marks);
-    const run = runKeyOf(n.marks);
+  const step = (
+    k: MarkKey | null,
+    run: string | null,
+    mine: boolean,
+    t: string,
+    boundary = false
+  ): void => {
     if (k === null || run === null) {
       prev = null;
       cur = null;
-      return false;
+      return;
     }
     if (run !== prev) {
       if (prev === 'subOld' && k === 'subNew' && cur) {
         side = 'next';
         cur.next = '';
       } else {
-        cur = { kind: KIND_OF[k], text: '', mine: isMine(n.marks) };
+        cur = { kind: KIND_OF[k], text: '', mine };
         side = 'text';
         if (k === 'subOld' || k === 'subNew') cur.next = '';
         if (k === 'subNew') side = 'next';
         out.push(cur);
       }
     }
-    const t = n.isText ? (n.text ?? '') : '';
     if (cur) {
       if (side === 'next') cur.next = (cur.next ?? '') + t;
       else cur.text += t;
+      if (boundary) cur.boundary = true;
     }
     prev = run;
-    return false;
+  };
+  walkMarks(doc, (s) => {
+    if (s.kind === 'comment') {
+      out.push({
+        kind: 'comment',
+        text: String(s.node.attrs.note),
+        mine: s.node.attrs.mine === true,
+      });
+      prev = null;
+      cur = null;
+    } else if (s.kind === 'break') step(s.key, s.run, s.mine, '', true);
+    else if (s.kind === 'edge') {
+      if (endsAt(s, prev)) {
+        prev = null;
+        cur = null;
+      }
+    } else {
+      const n = s.node;
+      const t = n.isText ? (n.text ?? '') : '';
+      step(markKeyOf(n.marks), runKeyOf(n.marks), isMine(n.marks), t, n.type.name === 'hardbreak');
+    }
   });
   return out;
 }
 
 /**
  * The document ranges of each mark run, in the order of docMarkRuns (a
- * replacement's two sides are one run; a run may span blocks).
+ * replacement's two sides are one run; a run may span blocks; a suggested
+ * break or join covers the boundary between its two textblocks).
  */
 export function docMarkRanges(doc: Node): { from: number; to: number }[][] {
   const out: { from: number; to: number }[][] = [];
   let prev: string | null = null;
-  doc.descendants((n, pos) => {
-    if (n.type.name === COMMENT) {
-      out.push([{ from: pos, to: pos + 1 }]);
-      prev = null;
-      return false;
-    }
-    if (n.isBlock) return true;
-    const run = runKeyOf(n.marks);
+  const step = (run: string | null, from: number, to: number): void => {
     if (run === null) {
       prev = null;
-      return false;
+      return;
     }
     if (run !== prev && !(prev === 'subOld' && run === 'subNew')) out.push([]);
-    out[out.length - 1].push({ from: pos, to: pos + n.nodeSize });
+    out[out.length - 1].push({ from, to });
     prev = run;
-    return false;
+  };
+  walkMarks(doc, (s) => {
+    if (s.kind === 'comment') {
+      out.push([{ from: s.pos, to: s.pos + 1 }]);
+      prev = null;
+    } else if (s.kind === 'break') step(s.run, s.from, s.to);
+    else if (s.kind === 'edge') {
+      if (endsAt(s, prev)) prev = null;
+    } else step(runKeyOf(s.node.marks), s.pos, s.pos + s.node.nodeSize);
   });
   return out;
 }
@@ -219,8 +393,14 @@ export class TextMarks {
       if (s.kind === 'text' || s.start < from || s.start >= to || skip.has(s.start)) continue;
       if (s.kind === 'comment') out.push({ kind: 'comment', text: s.text });
       else if (s.kind === 'substitution') {
-        out.push({ kind: 'substitution', text: plain(s.text), next: plain(s.next ?? '') });
-      } else out.push({ kind: s.kind, text: plain(s.text) });
+        out.push({
+          kind: 'substitution',
+          text: plain(s.text),
+          next: plain(s.next ?? ''),
+          alt: altReading(plain, s.text),
+          nextAlt: altReading(plain, s.next ?? ''),
+        });
+      } else out.push({ kind: s.kind, text: plain(s.text), alt: altReading(plain, s.text) });
     }
     return out;
   }
@@ -251,7 +431,11 @@ export function sameRuns(d: MarkRun[], t: MarkRun[], texts: boolean): boolean {
       if (r.kind !== o.kind) return false;
       if (!texts) return true;
       if (r.kind === 'comment') return r.text === o.text;
-      return squash(r.text) === squash(o.text) && squash(r.next ?? '') === squash(o.next ?? '');
+      // The alternative reading only for a run with a boundary in it.
+      const same = (a: string, b: string, alt: string | undefined): boolean =>
+        squash(a) === squash(b) ||
+        (r.boundary === true && alt !== undefined && squash(a) === squash(alt));
+      return same(r.text, o.text, o.alt) && same(r.next ?? '', o.next ?? '', o.nextAlt);
     })
   );
 }

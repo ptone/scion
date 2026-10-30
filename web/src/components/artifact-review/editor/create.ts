@@ -36,6 +36,10 @@ import {
 } from '@milkdown/core';
 import {
   blockContainerTypes,
+  blockquoteSchema,
+  headingSchema,
+  listItemSchema,
+  paragraphSchema,
   hardbreakFilterNodes,
   hardbreakFilterPlugin,
   remarkAddOrderInListPlugin,
@@ -46,7 +50,12 @@ import {
   remarkPreserveEmptyLinePlugin,
   schema as commonmarkSchema,
 } from '@milkdown/preset-commonmark';
-import { autoInsertSpanPlugin, remarkGFMPlugin, schema as gfmSchema } from '@milkdown/preset-gfm';
+import {
+  autoInsertSpanPlugin,
+  extendListItemSchemaForTask,
+  remarkGFMPlugin,
+  schema as gfmSchema,
+} from '@milkdown/preset-gfm';
 import type { MilkdownPlugin } from '@milkdown/ctx';
 import { ParserState } from '@milkdown/transformer';
 import type { MarkdownNode } from '@milkdown/transformer';
@@ -57,7 +66,7 @@ import type { EditorView } from '@milkdown/prose/view';
 
 import { safeRender } from './safe-render.js';
 import type { RenderContext } from './safe-render.js';
-import { criticSchema } from './schema.js';
+import { criticSchema, withBlockAttr } from './schema.js';
 
 /** A position-carrying Markdown tree, as far as preserve.ts reads it. */
 export interface MdRoot {
@@ -168,6 +177,22 @@ export async function createCore(opts: CoreOptions): Promise<Core> {
       // so the text of a row depends on that row alone and an edit in one
       // row lands in that row's source (preserve.ts).
       ctx.set(remarkGFMPlugin.options.key, { tablePipeAlign: false });
+      // The blocks that can carry a suggested paragraph break or join
+      // (schema.ts BLOCK_ATTR). The task list item replaces the list item.
+      for (const key of [
+        paragraphSchema.key,
+        headingSchema.key,
+        blockquoteSchema.key,
+        listItemSchema.key,
+        extendListItemSchemaForTask.key,
+      ]) {
+        ctx.update(
+          key,
+          (prev) =>
+            (c): ReturnType<typeof prev> =>
+              withBlockAttr(prev(c))
+        );
+      }
       ctx.update(editorStateOptionsCtx, (prev) => (options): ReturnType<typeof prev> => {
         const o = prev(options);
         const ours = opts.plugins ? opts.plugins(o.schema ?? ctx.get(schemaCtx)) : [];
@@ -196,8 +221,12 @@ export async function createCore(opts: CoreOptions): Promise<Core> {
       parse: (md: string): Node => parser(md),
       serialize: (doc: Node): string => serializer(doc),
       // A leading word keeps line-start syntax (list markers, headings,
-      // quotes) inline, as it is inside a mark.
-      plain: (md: string): string => parser(`a ${md}`).textContent.slice(2),
+      // quotes) inline, as it is inside a mark. When md starts with a line
+      // break, the word's paragraph ends before it and loses its space.
+      plain: (md: string): string => {
+        const t = parser(`a ${md}`).textContent;
+        return t.slice(t.startsWith('a ') ? 2 : 1);
+      },
       parseMd: (md: string): MdRoot => remark.runSync(remark.parse(md), md) as unknown as MdRoot,
       parseMdRaw: (md: string): MdNode => remark.parse(md) as unknown as MdNode,
       read: (md: string): MdRead => {

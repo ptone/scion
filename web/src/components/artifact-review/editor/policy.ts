@@ -35,9 +35,11 @@ import {
   ReplaceStep,
 } from '@milkdown/prose/transform';
 
-import { cleanUnchanged } from './guard.js';
+import { cleanBlocksUnchanged, cleanUnchanged } from './guard.js';
 import { COMMENT, isMine, markKeyOf, runKeyOf } from './schema.js';
-import { inlineContent, isExempt, trackTransaction } from './track.js';
+import { STRUCT_META, inlineContent, isExempt, trackRefusal, trackTransaction } from './track.js';
+import type { StructuralMeta } from './track.js';
+import { holdsHtml } from './structural.js';
 
 /** The hint shown when an edit is refused. */
 export type HintKind =
@@ -75,9 +77,9 @@ export type PolicyAction = { action: 'track' } | { action: 'refuse'; hint: HintK
 /** What suggest mode does with each class of edit. */
 export const POLICY: Record<EditClass, PolicyAction> = {
   inline: { action: 'track' },
-  split: { action: 'refuse', hint: 'break' },
-  join: { action: 'refuse', hint: 'break' },
-  'cross-block': { action: 'refuse', hint: 'break' },
+  split: { action: 'track' },
+  join: { action: 'track' },
+  'cross-block': { action: 'track' },
   'format-inline': { action: 'refuse', hint: 'format' },
   'format-block': { action: 'refuse', hint: 'format' },
   list: { action: 'refuse', hint: 'list-table' },
@@ -108,14 +110,7 @@ export function containerClass($pos: ResolvedPos): EditClass | null {
 }
 
 function touchesHtml(doc: Node, from: number, to: number, inserted: Node[]): boolean {
-  let found = inserted.some((n) => n.type.name === 'html');
-  if (!found && to > from) {
-    doc.nodesBetween(from, to, (n) => {
-      if (n.type.name === 'html') found = true;
-      return !found;
-    });
-  }
-  return found;
+  return inserted.some((n) => n.type.name === 'html') || holdsHtml(doc, from, to);
 }
 
 /** Puts a document-changing transaction in a class. */
@@ -146,14 +141,23 @@ export function classify(tr: Transaction, before: EditorState): EditClass {
   // edits like any other; changing the structure of a list or table is not.
   const container = containerClass($from) ?? containerClass($to);
   if (!$from.sameParent($to) || !$from.parent.isTextblock) {
-    if (container) return container;
-    return $from.parent.isTextblock && $to.parent.isTextblock ? 'join' : 'cross-block';
+    // Between textblocks (of paragraphs, headings, list items or quotes):
+    // a join or a deletion across blocks, which structural.ts records or
+    // refuses with the hint for what is in the way.
+    if (container === 'table') return 'table';
+    if ($from.parent.isTextblock && $to.parent.isTextblock) {
+      return step.slice.size === 0 && $from.end() === step.from && $to.start() === step.to
+        ? 'join'
+        : 'cross-block';
+    }
+    return container ?? 'cross-block';
   }
   const frag = step.slice.size ? inlineContent(step.slice) : null;
-  if (step.slice.size && !frag) return container ?? 'split';
   const inserted: Node[] = [];
   frag?.forEach((n) => inserted.push(n));
+  // Raw HTML in the range is never edited, whatever the edit's class.
   if (touchesHtml(doc, step.from, step.to, inserted)) return 'html';
+  if (step.slice.size && !frag) return container === 'table' ? 'table' : 'split';
   return 'inline';
 }
 
@@ -191,7 +195,9 @@ export function touchesEarlier(doc: Node, from: number, to: number): boolean {
   const $b = doc.resolve(to);
   const before = $a.nodeBefore;
   const after = $b.nodeAfter;
-  if (!before || !after || !$a.parent.isTextblock) return false;
+  // Across blocks the two ends stay in their own blocks (structural.ts
+  // checks the boundaries between them).
+  if (!before || !after || !$a.parent.isTextblock || !$a.sameParent($b)) return false;
   // An earlier highlight and its comment are one unit.
   if (after.type.name === COMMENT && markKeyOf(before.marks) === 'hl' && !isMine(before.marks)) {
     return true;
@@ -209,6 +215,26 @@ export function touchesEarlier(doc: Node, from: number, to: number): boolean {
  */
 export type EarlierHint = (block: number) => HintKind;
 
+/**
+ * Checks the result of a structural edit: the blocks it changed (first..
+ * last in before, the same blocks and those it added or removed in after)
+ * read the same with every suggestion rejected, and save as text the hub
+ * accepts.
+ */
+function checkStructural(
+  before: Node,
+  after: Node,
+  from: number,
+  to: number,
+  unitCheck: UnitCheck
+): HintKind | null {
+  const first = before.resolve(from).index(0);
+  const last = before.resolve(to).index(0);
+  if (!cleanBlocksUnchanged(before, after, first, last)) return 'generic';
+  const delta = after.childCount - before.childCount;
+  return unitCheck(after, first, Math.max(first, last + delta));
+}
+
 /** Decides a transaction: allow it, or refuse it with a hint. */
 export function decide(
   tr: Transaction,
@@ -217,6 +243,20 @@ export function decide(
   earlierHint: EarlierHint = () => 'earlier'
 ): HintKind | null {
   if (isExempt(tr)) return null;
+  // A structural edit the editor built in its tracked form (keymap, paste).
+  const meta = tr.getMeta(STRUCT_META) as StructuralMeta | undefined;
+  if (meta) {
+    const rule = POLICY[meta.cls];
+    if (rule.action === 'refuse') return rule.hint;
+    if (touchesHtml(before.doc, meta.from, meta.to, [])) {
+      const html = POLICY.html;
+      return html.action === 'refuse' ? html.hint : 'generic';
+    }
+    if (touchesEarlier(before.doc, meta.from, meta.to)) {
+      return earlierHint(before.doc.resolve(meta.from).index(0));
+    }
+    return checkStructural(before.doc, tr.doc, meta.from, meta.to, unitCheck);
+  }
   const cls = classify(tr, before);
   const rule = POLICY[cls];
   if (rule.action === 'refuse') return rule.hint;
@@ -227,8 +267,9 @@ export function decide(
   }
   // The edit will be tracked: check that the tracked result keeps the clean reading.
   const tracked = trackTransaction(tr, before);
-  if (!tracked) return 'generic';
+  if (!tracked) return trackRefusal(tr) ?? 'generic';
   const after = tracked.transform.doc;
+  if (cls !== 'inline') return checkStructural(before.doc, after, step.from, step.to, unitCheck);
   if (!cleanUnchanged(before.doc, after, step.from, step.to)) return 'generic';
   const first = before.doc.resolve(step.from).index(0);
   const last = before.doc.resolve(step.to).index(0);

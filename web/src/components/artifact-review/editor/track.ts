@@ -46,12 +46,27 @@ import type { EditorState, Transaction } from '@milkdown/prose/state';
 import { ReplaceStep, Transform } from '@milkdown/prose/transform';
 import type { EditorView } from '@milkdown/prose/view';
 
+import type { HintKind } from './policy.js';
 import { COMMENT, CRITIC_MARK_NAMES, MARKS, isMine, markKeyOf } from './schema.js';
+import { buildFromStep, isRefusal } from './structural.js';
 
 /** Meta of transactions the tracker must not rewrite (its own, and commands'). */
 export const SKIP_TRACK = 'criticSkipTrack';
 /** Meta of the transaction that loads a document. */
 export const LOAD_META = 'criticLoad';
+/**
+ * Meta of a structural edit the editor built in its tracked form (a split,
+ * join, deletion across blocks or multi-block paste; structural.ts): the
+ * tracker leaves it alone, and the policy checks it (StructuralMeta).
+ */
+export const STRUCT_META = 'criticStructural';
+
+/** What a structural edit tells the policy: its class and the range it changed in the state before. */
+export interface StructuralMeta {
+  cls: 'split' | 'join' | 'cross-block';
+  from: number;
+  to: number;
+}
 
 export const trackKey = new PluginKey('criticTrack');
 
@@ -74,7 +89,8 @@ export function inlineContent(slice: {
   return ok ? frag : null;
 }
 
-function stripCritic(frag: Fragment, schema: Schema): Node[] {
+/** The nodes of frag without critic marks. */
+export function stripCritic(frag: Fragment, schema: Schema): Node[] {
   const out: Node[] = [];
   frag.forEach((n) => {
     let marks = n.marks;
@@ -270,6 +286,40 @@ export function isExempt(tr: Transaction): boolean {
  * tracker does not compute them again when it applies.
  */
 const decided = new WeakMap<Transaction, Tracked>();
+/** Why a transaction could not be tracked, when a builder said (structural.ts). */
+const refusals = new WeakMap<Transaction, HintKind>();
+
+/**
+ * The tracked form of a structural replace step (a split, or a deletion
+ * across textblocks; structural.ts), on top of the edited doc; null when
+ * the step is neither or cannot be recorded (the reason in refusal).
+ */
+export function trackStructuralStep(
+  step: ReplaceStep,
+  oldDoc: Node,
+  newDoc: Node,
+  refusal: (hint: HintKind) => void = () => {}
+): Tracked | null {
+  const s = step as ReplaceStep & { from: number; to: number };
+  const inline = s.slice.size ? inlineContent(s.slice) : null;
+  const built = new Transform(oldDoc);
+  const r = buildFromStep(built, s, inline);
+  if (r === null) return null;
+  if (isRefusal(r)) {
+    refusal(r.refuse);
+    return null;
+  }
+  if (!('head' in r)) {
+    // Nothing to record (a join already suggested): undo the step alone.
+    const out = new Transform(newDoc);
+    out.step(step.invert(oldDoc));
+    return { transform: out, head: Math.min(s.from, out.doc.content.size) };
+  }
+  const out = new Transform(newDoc);
+  out.step(step.invert(oldDoc));
+  for (const st of built.steps) out.step(st);
+  return { transform: out, head: Math.min(r.head, out.doc.content.size) };
+}
 
 /** Tracks a user transaction against the state it applies to, or null. */
 export function trackTransaction(tr: Transaction, before: EditorState): Tracked | null {
@@ -278,9 +328,16 @@ export function trackTransaction(tr: Transaction, before: EditorState): Tracked 
   const step = singleReplace(tr);
   if (!step) return null;
   const sel = before.selection;
-  const t = trackStep(step, before.doc, tr.doc, { empty: sel.empty, head: sel.head });
+  const t =
+    trackStep(step, before.doc, tr.doc, { empty: sel.empty, head: sel.head }) ??
+    trackStructuralStep(step, before.doc, tr.doc, (h) => refusals.set(tr, h));
   if (t) decided.set(tr, t);
   return t;
+}
+
+/** The reason trackTransaction gave null for tr, when a builder gave one. */
+export function trackRefusal(tr: Transaction): HintKind | undefined {
+  return refusals.get(tr);
 }
 
 /** The tracking plugin. */
@@ -290,7 +347,7 @@ export function trackPlugin(): Plugin {
     appendTransaction(trs, oldState, newState): Transaction | null {
       if (trs.length !== 1) return null;
       const tr = trs[0];
-      if (isExempt(tr)) return null;
+      if (isExempt(tr) || tr.getMeta(STRUCT_META)) return null;
       const t = trackTransaction(tr, oldState);
       return t ? applyTracked(newState.tr, t) : null;
     },
