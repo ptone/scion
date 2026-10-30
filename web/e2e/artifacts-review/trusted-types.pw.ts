@@ -129,6 +129,13 @@ test('the artifact preview and review editor make no plain-string markup call', 
   // Negative check: without the allowance, the image rewrite's report-only
   // violations are findings, and so is every console notice of them (some
   // browsers log one per report-only violation), since none can pair.
+  // WebKit logs a console notice per report-only violation: there the
+  // pairing must have run, and paired every notice with the allowance.
+  if (test.info().project.name === 'webkit') {
+    const paired = await trustedTypesFindings(page, errors, IMAGE_REWRITE);
+    expect(paired.notices.seen, 'WebKit report-only notices').toBeGreaterThan(0);
+    expect(paired.notices.matched, 'notices paired with the allowance').toBe(paired.notices.seen);
+  }
   const strict = await trustedTypesFindings(page, errors);
   expect(strict.violations.length, 'report-only violations without an allowance').toBeGreaterThan(
     0

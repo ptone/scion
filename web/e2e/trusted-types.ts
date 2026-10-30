@@ -251,7 +251,8 @@ export async function trustedTypesFindings(
   const unmatched: string[] = [];
   for (const text of notices) {
     const type = noticeType(text);
-    const at = allowedReports.findIndex((t) => type === null || t === type);
+    // A notice that names no Trusted Type cannot be paired, so it is an error.
+    const at = type === null ? -1 : allowedReports.indexOf(type);
     if (text.includes('require-trusted-types-for') && at >= 0) allowedReports.splice(at, 1);
     else unmatched.push(text);
   }
