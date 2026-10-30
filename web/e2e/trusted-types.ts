@@ -176,9 +176,12 @@ export async function expectNoTrustedTypesFindings(
  * Checks that the rule is in force and the probe sees it: a plain string
  * markup assignment adds a violation with the expected disposition (and
  * throws when enforced). A page served by the hub also carries the hub's
- * own report-only rule, so the same assignment is reported once per rule;
- * the check therefore counts new violations of the expected disposition
- * reported by the test's own rule (originalPolicy). Run it after the page's own assertions, so their empty lists
+ * own report-only rule. Under the enforced rule the check counts new
+ * enforced violations reported by the test's own rule (originalPolicy is
+ * exactly TRUSTED_TYPES_RULE; the hub sends no enforced rule). In report
+ * mode the browser delivers the report through the page's report-only rule
+ * when the hub already sends one, so the check counts a new report from any
+ * rule that requires Trusted Types for scripts. Run it after the page's own assertions, so their empty lists
  * are not vacuous.
  */
 export async function expectProbeSeesViolation(
@@ -208,7 +211,9 @@ export async function expectProbeSeesViolation(
             .filter(
               (v) =>
                 v.disposition === want &&
-                v.originalPolicy === rule &&
+                (want === 'enforce'
+                  ? v.originalPolicy === rule
+                  : v.originalPolicy.includes(rule)) &&
                 v.sample.startsWith('Element innerHTML')
             ).length,
         { from: before, want: disposition, rule: TRUSTED_TYPES_RULE }

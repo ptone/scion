@@ -180,7 +180,8 @@ describe('artifact markdown frame: CriticMarkup', () => {
       const frame = await builtFrame(el);
       expect(set).toHaveLength(1);
       expect(set[0]).not.toBe('');
-      expect(String(set[0])).toContain('<p>hello</p>');
+      // The built preview document, with the entry's text in its body.
+      expect(String(set[0])).toMatch(/^<!doctype html>[\s\S]*<body[^>]*>[\s\S]*hello/);
       expect(frame.srcdoc).toBe(set[0]);
     } finally {
       el.remove();
