@@ -79,6 +79,7 @@ import '../shared/git-remote-display.js';
 import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
 import { DeletionLeaseController } from '../shared/deletion-badge.js';
+import '../shared/authority-badge.js';
 import '../shared/deletion-banner.js';
 import { runAgentDelete, lifecycleActionErrorMessage } from '../../client/agent-delete.js';
 import type { AgentDeleteRequest } from '../../client/agent-delete.js';
@@ -1798,6 +1799,7 @@ export class ScionPageProjectDetail extends LitElement {
     params.set('limit', String(this.pagerPageSize));
     params.set('fit', String(projectAgentsFitFor(this.pagerPageSize)));
     params.set('stats', '1');
+    params.set('include', 'authority');
     if (label) params.set('label', label);
     if (this.phaseFilter) params.set('phase', this.phaseFilter);
 
@@ -1881,6 +1883,7 @@ export class ScionPageProjectDetail extends LitElement {
 
     const params = new URLSearchParams();
     if (label.includes('=')) params.append('label', label);
+    params.set('include', 'authority');
     const qs = params.toString();
     const url = qs
       ? `/api/v1/projects/${this.projectId}/agents?${qs}`
@@ -2022,6 +2025,7 @@ export class ScionPageProjectDetail extends LitElement {
     if (params.cursor) qs.set('cursor', params.cursor);
     if (params.ids?.length) qs.set('ids', params.ids.join(','));
     if (params.wantStats) qs.set('stats', '1');
+    qs.set('include', 'authority');
     if (label) qs.set('label', label);
     if (this.phaseFilter) qs.set('phase', this.phaseFilter);
 
@@ -3469,6 +3473,7 @@ export class ScionPageProjectDetail extends LitElement {
             .deletion=${this.deletingView(agent)}
             size="small"
           ></scion-deletion-badge>
+          <scion-authority-badge .authority=${agent.authority} size="small"></scion-authority-badge>
           ${this.renderDeletionBanner(agent, true)}
         </td>
         <td class="hide-mobile">
@@ -3646,6 +3651,7 @@ export class ScionPageProjectDetail extends LitElement {
             .deletion=${this.deletingView(agent)}
             size="small"
           ></scion-deletion-badge>
+          <scion-authority-badge .authority=${agent.authority} size="small"></scion-authority-badge>
         </div>
 
         ${this.renderDeletionBanner(agent, false)}
