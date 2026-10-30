@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	neturl "net/url"
@@ -26,7 +27,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -667,7 +670,7 @@ func TestAllowVar(t *testing.T) {
 		}
 	}
 	// user.signingKey is top-level user.*; the v() helper treats it as such.
-	deny := []string{"core.sshCommand", "core.editor", "credential.helper", "url.x.insteadOf", "http.proxy", "http.sslVerify", "gpg.program", "gpg.ssh.program", "gpg.ssh.allowedSignersFile", "alias.st", "remote.origin.uploadpack", "diff.external", "diff.x.textconv", "merge.x.driver", "lfs.url", "lfs.storage", "lfs.standalonetransferagent", "lfs.extension.foo.clean", "totally.unknown.key"}
+	deny := []string{"core.sshCommand", "core.editor", "credential.helper", "url.x.insteadOf", "http.proxy", "http.sslVerify", "gpg.program", "gpg.ssh.program", "gpg.ssh.allowedSignersFile", "alias.st", "remote.origin.uploadpack", "diff.external", "diff.x.textconv", "merge.x.driver", "lfs.url", "lfs.storage", "lfs.standalonetransferagent", "lfs.extension.foo.clean", "totally.unknown.key", "diff.orderfile", "remote.origin.promisor", "remote.origin.partialclonefilter"}
 	for _, mode := range []RepoConfigPolicy{RepoPolicyManaged, RepoPolicyLinked} {
 		for _, k := range deny {
 			if ok, _ := allowVar(mode, v(k, "x"), repoConfigAllowOptions{}); ok {
@@ -1551,6 +1554,7 @@ func TestLfsConfigNamesEndpoint(t *testing.T) {
 		"[remote \"origin\"]\n\tlfsurl = https://x":           true,
 		"[lfs \"https://x:443/lfs\"]\n\taccess = negotiate\n": true,
 		"[lfs]\n\tconcurrenttransfers = 4\n":                  false, // inert, not an endpoint
+		"[lfs\n\tbroken":                                      true,  // present but unparseable -> fail closed
 	}
 	for body, want := range cases {
 		repo := filepath.Join(t.TempDir(), "repo")
@@ -1562,7 +1566,7 @@ func TestLfsConfigNamesEndpoint(t *testing.T) {
 		} else {
 			hostRunGit(t, repo, "-c", "core.hooksPath="+os.DevNull, "commit", "-q", "--allow-empty", "-m", "empty")
 		}
-		if got := lfsConfigNamesEndpoint(repo); got != want {
+		if got := lfsConfigNamesEndpoint(repo, "HEAD"); got != want {
 			t.Errorf("lfsConfigNamesEndpoint(%q) = %v, want %v", body, got, want)
 		}
 	}
@@ -1656,4 +1660,761 @@ func addTestCredentialHelper(t *testing.T, serverURL string) {
 		t.Fatal(err)
 	}
 	_ = f.Close()
+}
+
+// lfsOptionForLinkedCheckout reads the .lfsconfig of the ref being checked
+// out, not the root's HEAD. A branch that adds an endpoint is skipped even when
+// HEAD has none; a branch with none (and an http origin) is pinned.
+func TestLfsOptionForLinkedCheckout_ReadsBranchRef(t *testing.T) {
+	hostGitTestEnv(t)
+	repo := filepath.Join(t.TempDir(), "repo")
+	hostRunGit(t, filepath.Dir(repo), "init", "-q", "-b", "main", repo)
+	hostRunGit(t, repo, "remote", "add", "origin", "https://host.example/o/r.git")
+	// main (HEAD): no .lfsconfig endpoint.
+	writeFile(t, filepath.Join(repo, "f.txt"), "x\n")
+	hostRunGit(t, repo, "add", ".")
+	hostRunGit(t, repo, "-c", "core.hooksPath="+os.DevNull, "commit", "-q", "-m", "main")
+	// feat: adds a .lfsconfig naming an endpoint.
+	hostRunGit(t, repo, "checkout", "-q", "-b", "feat")
+	writeFile(t, filepath.Join(repo, ".lfsconfig"), "[lfs]\n\turl = https://lfs.example/lfs\n")
+	hostRunGit(t, repo, "add", ".")
+	hostRunGit(t, repo, "-c", "core.hooksPath="+os.DevNull, "commit", "-q", "-m", "feat lfs")
+	hostRunGit(t, repo, "checkout", "-q", "main")
+
+	if opt := lfsOptionForLinkedCheckout(repo, "feat", ""); !opt.skipSmudge {
+		t.Errorf("branch feat names an endpoint: want skipSmudge, got %+v", opt)
+	}
+	if opt := lfsOptionForLinkedCheckout(repo, "main", ""); opt.skipSmudge || opt.url == "" {
+		t.Errorf("branch main has no endpoint (http origin): want pinned url, got %+v", opt)
+	}
+	// A new branch (does not exist yet) reads HEAD, which is main → pinned.
+	if opt := lfsOptionForLinkedCheckout(repo, "brand-new", ""); opt.skipSmudge || opt.url == "" {
+		t.Errorf("new branch reads HEAD (no endpoint): want pinned url, got %+v", opt)
+	}
+}
+
+// The git-lfs endpoint is pinned from the broker-recorded origin, not the
+// live remote.origin.url. When the live origin no longer matches the recorded
+// one (an agent repointed it), the smudge is skipped rather than pinned.
+func TestLfsOptionForLinkedCheckout_RecordedOrigin(t *testing.T) {
+	hostGitTestEnv(t)
+	repo := filepath.Join(t.TempDir(), "repo")
+	hostRunGit(t, filepath.Dir(repo), "init", "-q", "-b", "main", repo)
+	writeFile(t, filepath.Join(repo, "f.txt"), "x\n")
+	hostRunGit(t, repo, "add", ".")
+	hostRunGit(t, repo, "-c", "core.hooksPath="+os.DevNull, "commit", "-q", "-m", "main")
+
+	const recorded = "https://host.example/o/r.git"
+
+	// Live origin matches the recorded origin (http): pin the recorded endpoint.
+	hostRunGit(t, repo, "remote", "add", "origin", recorded)
+	opt := lfsOptionForLinkedCheckout(repo, "main", recorded)
+	if opt.skipSmudge || opt.url == "" {
+		t.Fatalf("live origin matches recorded (http): want pinned url, got %+v", opt)
+	}
+	if want, _ := DeriveLFSEndpoint(recorded); opt.url != want {
+		t.Errorf("pinned url = %q, want endpoint derived from the recorded origin %q", opt.url, want)
+	}
+
+	// The live origin is repointed elsewhere: it no longer matches the recorded
+	// one, so skip rather than pin (never contact that host).
+	hostRunGit(t, repo, "remote", "set-url", "origin", "https://other.example/x.git")
+	if opt := lfsOptionForLinkedCheckout(repo, "main", recorded); !opt.skipSmudge {
+		t.Errorf("live origin repointed away from recorded: want skipSmudge, got %+v", opt)
+	}
+
+	// An ssh recorded origin cannot derive an http(s) endpoint: skip.
+	hostRunGit(t, repo, "remote", "set-url", "origin", "git@host.example:o/r.git")
+	if opt := lfsOptionForLinkedCheckout(repo, "main", "git@host.example:o/r.git"); !opt.skipSmudge {
+		t.Errorf("ssh recorded origin: want skipSmudge, got %+v", opt)
+	}
+}
+
+// A committed .lfsconfig whose blob is unreadable (present in the tree but the
+// object is missing) must be treated as naming an endpoint — skip the smudge,
+// not pin — just like an unparseable one. `git show` reports the same error for
+// an absent and an unreadable path, so the code distinguishes them with ls-tree.
+func TestLfsOptionForLinkedCheckout_UnreadableLfsConfigSkips(t *testing.T) {
+	hostGitTestEnv(t)
+	repo := filepath.Join(t.TempDir(), "repo")
+	hostRunGit(t, filepath.Dir(repo), "init", "-q", "-b", "main", repo)
+	hostRunGit(t, repo, "remote", "add", "origin", "https://host.example/o/r.git")
+	writeFile(t, filepath.Join(repo, ".lfsconfig"), "[lfs]\n\turl = https://lfs.example/lfs\n")
+	hostRunGit(t, repo, "add", ".")
+	hostRunGit(t, repo, "-c", "core.hooksPath="+os.DevNull, "commit", "-q", "-m", "lfs")
+
+	// Control: with the blob readable, the endpoint is seen and the smudge skips.
+	if opt := lfsOptionForLinkedCheckout(repo, "main", ""); !opt.skipSmudge {
+		t.Fatalf("readable .lfsconfig names an endpoint: want skipSmudge, got %+v", opt)
+	}
+
+	// Remove the blob object so `git show main:.lfsconfig` fails while ls-tree
+	// still reports the entry.
+	sha := strings.TrimSpace(string(mustOutput(t, repo, "rev-parse", "main:.lfsconfig")))
+	if len(sha) < 3 {
+		t.Fatalf("unexpected blob sha %q", sha)
+	}
+	obj := filepath.Join(repo, ".git", "objects", sha[:2], sha[2:])
+	if err := os.Remove(obj); err != nil {
+		t.Fatalf("remove blob object: %v", err)
+	}
+	// Confirm the blob is now unreadable but the tree entry remains.
+	if _, err := mustOutputErr(repo, "show", "main:.lfsconfig"); err == nil {
+		t.Skip("git still served the removed blob (packed elsewhere); cannot exercise the unreadable path")
+	}
+	if opt := lfsOptionForLinkedCheckout(repo, "main", ""); !opt.skipSmudge {
+		t.Errorf("unreadable .lfsconfig must skip the smudge (fail closed), got %+v", opt)
+	}
+}
+
+func mustOutput(t *testing.T, dir string, args ...string) []byte {
+	t.Helper()
+	out, err := mustOutputErr(dir, args...)
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return out
+}
+
+func mustOutputErr(dir string, args ...string) ([]byte, error) {
+	c := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	return c.CombinedOutput()
+}
+
+// The host-side guard refuses a root-level .git/commondir or gitdir in a linked
+// checkout (a .git directory): such a file would redirect the repository's common
+// git dir — where host git reads config, hooks and refs — through an
+// agent-writable path. A .git gitfile (a linked worktree) is not the target.
+func TestRefuseRootCommonDirRedirect(t *testing.T) {
+	dir := t.TempDir()
+	gitDir := filepath.Join(dir, ".git")
+	if err := os.MkdirAll(gitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A normal .git directory (no root commondir/gitdir) passes.
+	if err := refuseRootCommonDirRedirect(dir, false, AudienceLocal); err != nil {
+		t.Fatalf("a .git with no root commondir/gitdir must pass, got: %v", err)
+	}
+	// A root-level commondir or gitdir is refused.
+	for _, name := range []string{"commondir", "gitdir"} {
+		p := filepath.Join(gitDir, name)
+		if err := os.WriteFile(p, []byte("../elsewhere\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		err := refuseRootCommonDirRedirect(dir, false, AudienceLocal)
+		var refused *RepoConfigRefusedError
+		if !errors.As(err, &refused) {
+			t.Errorf("a root .git/%s must be refused with RepoConfigRefusedError, got: %v", name, err)
+		} else if refused.Dir != dir || refused.Seeded {
+			// The host form keeps the directory and is not a seed refusal.
+			t.Errorf("host refusal = dir %q seeded %v; want %q, false", refused.Dir, refused.Seeded, dir)
+		}
+		if err := os.Remove(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A .git gitfile (a linked worktree, which legitimately resolves a commondir
+	// inside its admin dir) is not the target of this guard.
+	if err := os.RemoveAll(gitDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(gitDir, []byte("gitdir: /somewhere/worktrees/x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := refuseRootCommonDirRedirect(dir, false, AudienceLocal); err != nil {
+		t.Errorf("a .git gitfile (linked worktree) must not be refused, got: %v", err)
+	}
+}
+
+// Host-side git refuses, through HostGitCommand's policy check, to run in a
+// repository whose .git directory carries a root-level commondir or gitdir (a
+// redirect of the common git dir). The command is refused before any git runs.
+func TestHostGitCommand_RefusesRootCommonDirRedirect(t *testing.T) {
+	for _, name := range []string{"commondir", "gitdir"} {
+		t.Run(name, func(t *testing.T) {
+			repo, _ := newHostGitRepo(t)
+			if err := os.WriteFile(filepath.Join(repo, ".git", name), []byte("../elsewhere\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := HostGitCommand(context.Background(), repo, HostGitOptions{Policy: RepoPolicyLinked}, "status")
+			var refused *RepoConfigRefusedError
+			if !errors.As(err, &refused) {
+				t.Fatalf("error = %v, want *RepoConfigRefusedError for a root .git/%s", err, name)
+			}
+			if !strings.Contains(refused.Key, name) {
+				t.Errorf("refused key = %q, want it to name .git/%s", refused.Key, name)
+			}
+		})
+	}
+}
+
+// fakeGitOnPath puts a git wrapper first on PATH. For every call it appends a
+// record to the returned log: "ARGV\t<argv>", one "ENV\t<k=v>" line per GIT_*
+// variable it was given, and "END". It acts instead of git for a few marker
+// subcommands and runs the real git otherwise:
+//   - fake-stderr: writes fakeGitStderr to stderr and exits 3;
+//   - fake-mutate: appends a refused key to ./.git/config and exits 0;
+//   - fake-mkgit: creates ./.git and exits 0;
+//   - fake-block: creates ./.fake-started, then becomes sleep 30;
+//   - fake-hold: leaves a background sleep holding stdout and stderr open,
+//     writes its PID to ./.fake-hold-pid, and exits 0;
+//   - fake-arm: creates ./.fake-armed and exits 0; from then on a config
+//     listing in that directory becomes sleep 120 (so the after-run check
+//     blocks).
+func fakeGitOnPath(t *testing.T) (log string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the git wrapper is a shell script")
+	}
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not installed")
+	}
+	dir := t.TempDir()
+	log = filepath.Join(dir, "calls.log")
+	script := "#!/bin/sh\n" +
+		"{ printf 'ARGV\\t%s\\n' \"$*\"; env | grep '^GIT_' | sort | sed 's/^/ENV\\t/'; printf 'END\\n'; } >> '" + log + "'\n" +
+		"case \" $* \" in\n" +
+		"*' fake-stderr '*) printf '" + strings.ReplaceAll(fakeGitStderr, "\n", "\\n") + "' >&2; exit 3;;\n" +
+		"*' fake-mutate '*) printf '[core]\\n\\tsshCommand = fake-marker-m1\\n' >> .git/config; exit 0;;\n" +
+		"*' fake-mkgit '*) mkdir .git; exit 0;;\n" +
+		"*' fake-block '*) touch .fake-started; exec sleep 30;;\n" +
+		"*' fake-hold '*) sleep 30 & echo $! > .fake-hold-pid; exit 0;;\n" +
+		"*' fake-arm '*) touch .fake-armed; exit 0;;\n" +
+		"*' config --show-scope '*) if [ -e .fake-armed ]; then exec sleep 120; fi;;\n" +
+		"esac\n" +
+		"exec '" + realGit + "' \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return log
+}
+
+// fakeGitStderr is what the wrapper's fake-stderr writes: leading and
+// trailing blanks, a tab and two lines, so any trimming or rewriting shows.
+const fakeGitStderr = " raw: fake-marker-e1\n\tsecond line \n"
+
+// fakeGitCall is one recorded call of the wrapper.
+type fakeGitCall struct {
+	argv string
+	env  map[string]string // GIT_* variables only
+}
+
+// fakeGitCalls parses the wrapper's log.
+func fakeGitCalls(t *testing.T, log string) []fakeGitCall {
+	t.Helper()
+	data, err := os.ReadFile(log)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	var calls []fakeGitCall
+	var cur *fakeGitCall
+	for _, line := range strings.Split(string(data), "\n") {
+		switch {
+		case strings.HasPrefix(line, "ARGV\t"):
+			calls = append(calls, fakeGitCall{argv: strings.TrimPrefix(line, "ARGV\t"), env: map[string]string{}})
+			cur = &calls[len(calls)-1]
+		case strings.HasPrefix(line, "ENV\t") && cur != nil:
+			k, v, _ := strings.Cut(strings.TrimPrefix(line, "ENV\t"), "=")
+			cur.env[k] = v
+		}
+	}
+	return calls
+}
+
+// fakeGitRuns counts the recorded calls whose argv ends with suffix.
+func fakeGitRuns(t *testing.T, log, suffix string) int {
+	t.Helper()
+	n := 0
+	for _, c := range fakeGitCalls(t, log) {
+		if strings.HasSuffix(c.argv, suffix) {
+			n++
+		}
+	}
+	return n
+}
+
+// gitEnvMap returns the GIT_* entries of env, the last value winning.
+func gitEnvMap(env []string) map[string]string {
+	m := map[string]string{}
+	for _, kv := range env {
+		if k, v, _ := strings.Cut(kv, "="); strings.HasPrefix(k, "GIT_") {
+			m[k] = v
+		}
+	}
+	return m
+}
+
+// diffEnvKeys names the keys whose presence or value differs (no values).
+func diffEnvKeys(got, want map[string]string) []string {
+	var keys []string
+	for k, v := range want {
+		if g, ok := got[k]; !ok || g != v {
+			keys = append(keys, k)
+		}
+	}
+	for k := range got {
+		if _, ok := want[k]; !ok {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// plantInheritedGitEnv sets variables that would choose a repository or add
+// config if they reached a host-side git call.
+func plantInheritedGitEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("GIT_DIR", filepath.Join(t.TempDir(), "planted-git-dir"))
+	t.Setenv("GIT_CONFIG_PARAMETERS", "'core.pager=plantmarker'")
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "core.pager")
+	t.Setenv("GIT_CONFIG_VALUE_0", "plantmarker")
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(t.TempDir(), "planted-index"))
+	t.Setenv("GIT_WORK_TREE", filepath.Join(t.TempDir(), "planted-work-tree"))
+}
+
+var plantedGitEnvKeys = []string{"GIT_DIR", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_INDEX_FILE", "GIT_WORK_TREE"}
+
+func TestRunHostGit_ExitCode(t *testing.T) {
+	repo, _ := newHostGitRepo(t)
+	if res := RunHostGit(context.Background(), repo, HostGitOptions{}, "show-ref", "--verify", "--quiet", "refs/heads/main"); res.Err != nil || res.ExitCode != 0 {
+		t.Errorf("present ref: exit %d, err %v; want 0, nil", res.ExitCode, res.Err)
+	}
+	res := RunHostGit(context.Background(), repo, HostGitOptions{}, "show-ref", "--verify", "--quiet", "refs/heads/missing")
+	if res.Err != nil || res.ExitCode != 1 {
+		t.Errorf("missing ref: exit %d, err %v; want 1, nil (a normal exit is not an error)", res.ExitCode, res.Err)
+	}
+	if res := RunHostGit(context.Background(), repo, HostGitOptions{}, "rev-parse", "--show-toplevel"); res.ExitCode != 0 || strings.TrimSpace(string(res.Stdout)) == "" {
+		t.Errorf("rev-parse: exit %d, stdout %q", res.ExitCode, res.Stdout)
+	}
+}
+
+// Stderr comes back byte for byte, with the exit code, and git runs exactly
+// once (no retry) whether it succeeds or fails.
+func TestRunHostGit_RawStderrAndOneExec(t *testing.T) {
+	repo, _ := newHostGitRepo(t)
+	log := fakeGitOnPath(t)
+
+	res := RunHostGit(context.Background(), repo, HostGitOptions{}, "fake-stderr")
+	if res.Err != nil {
+		t.Fatalf("Err = %v; a normal exit 3 is not an error", res.Err)
+	}
+	if res.ExitCode != 3 {
+		t.Errorf("ExitCode = %d, want 3", res.ExitCode)
+	}
+	if string(res.Stderr) != fakeGitStderr {
+		t.Errorf("Stderr = %q, want exactly %q", res.Stderr, fakeGitStderr)
+	}
+	if n := fakeGitRuns(t, log, " fake-stderr"); n != 1 {
+		t.Errorf("a failing command ran %d times, want exactly 1", n)
+	}
+
+	res = RunHostGit(context.Background(), repo, HostGitOptions{}, "rev-parse", "--show-toplevel")
+	if res.Err != nil || res.ExitCode != 0 {
+		t.Fatalf("rev-parse: exit %d, err %v", res.ExitCode, res.Err)
+	}
+	if n := fakeGitRuns(t, log, " rev-parse --show-toplevel"); n != 1 {
+		t.Errorf("a succeeding command ran %d times, want exactly 1", n)
+	}
+}
+
+// A process killed through ctx reports ExitCode -1 and an error that is
+// ctx's, named once. Cancellation waits for git to signal that it started,
+// so no wall-clock deadline is involved.
+func TestRunHostGit_KilledByContext(t *testing.T) {
+	repo, _ := newHostGitRepo(t)
+	fakeGitOnPath(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	marker := filepath.Join(repo, ".fake-started")
+	go func() {
+		for {
+			if _, err := os.Stat(marker); err == nil {
+				cancel()
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+	}()
+	res := RunHostGit(ctx, repo, HostGitOptions{}, "fake-block")
+	if res.ExitCode != -1 {
+		t.Errorf("ExitCode = %d, want -1 for a killed process", res.ExitCode)
+	}
+	if !errors.Is(res.Err, context.Canceled) {
+		t.Fatalf("Err = %v, want it to wrap context.Canceled", res.Err)
+	}
+	if n := strings.Count(res.Err.Error(), context.Canceled.Error()); n != 1 {
+		t.Errorf("Err %q names %q %d times, want once", res.Err, context.Canceled.Error(), n)
+	}
+	// The process error is kept alongside ctx's.
+	var exitErr *exec.ExitError
+	if !errors.As(res.Err, &exitErr) {
+		t.Errorf("Err %v does not keep the *exec.ExitError", res.Err)
+	}
+}
+
+// A Ceiling value other than CeilingOn and CeilingOff is refused before
+// anything runs, with an error that names no path.
+func TestRunHostGit_UnknownCeilingRefuses(t *testing.T) {
+	repo, _ := newHostGitRepo(t)
+	log := fakeGitOnPath(t)
+	res := RunHostGit(context.Background(), repo, HostGitOptions{Ceiling: HostGitCeiling(2)}, "rev-parse", "--show-toplevel")
+	if !errors.Is(res.Err, errHostGitCeilingInvalid) {
+		t.Fatalf("Err = %v, want the unknown-setting refusal", res.Err)
+	}
+	if res.ExitCode != -1 {
+		t.Errorf("ExitCode = %d, want -1", res.ExitCode)
+	}
+	if strings.Contains(res.Err.Error(), repo) {
+		t.Errorf("refusal names the repository path: %q", res.Err)
+	}
+	if calls := fakeGitCalls(t, log); len(calls) != 0 {
+		t.Errorf("git ran %d times for a refused setting", len(calls))
+	}
+}
+
+// A descendant that keeps git's output pipes open does not keep RunHostGit
+// waiting past hostGitWaitDelay once git has exited.
+func TestRunHostGit_WaitDelayBoundsHeldPipes(t *testing.T) {
+	repo, _ := newHostGitRepo(t)
+	fakeGitOnPath(t)
+	// Kill the descendant the fake left behind once the test is done.
+	t.Cleanup(func() {
+		data, err := os.ReadFile(filepath.Join(repo, ".fake-hold-pid"))
+		if err != nil {
+			return
+		}
+		var pid int
+		if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &pid); err != nil || pid <= 0 {
+			return
+		}
+		if p, err := os.FindProcess(pid); err == nil {
+			_ = p.Kill() // it may have exited already
+		}
+	})
+	start := time.Now()
+	res := RunHostGit(context.Background(), repo, HostGitOptions{}, "fake-hold")
+	if elapsed := time.Since(start); elapsed > hostGitWaitDelay+10*time.Second {
+		t.Errorf("RunHostGit returned after %v, want within %v plus slack", elapsed, hostGitWaitDelay)
+	}
+	if !errors.Is(res.Err, exec.ErrWaitDelay) {
+		t.Errorf("Err = %v, want exec.ErrWaitDelay", res.Err)
+	}
+	if res.ExitCode != 0 {
+		t.Errorf("ExitCode = %d, want git's own 0", res.ExitCode)
+	}
+}
+
+// The after-run check runs with its own bounded context: a config listing
+// that blocks during the check is killed by hostGitVerifyTimeout and
+// reported as a config change, whatever the caller's context.
+func TestRunHostGit_VerifyIsBounded(t *testing.T) {
+	repo, _ := newHostGitRepo(t)
+	log := fakeGitOnPath(t)
+	start := time.Now()
+	res := RunHostGit(context.Background(), repo, HostGitOptions{}, "fake-arm")
+	elapsed := time.Since(start)
+	if elapsed > hostGitVerifyTimeout+15*time.Second {
+		t.Errorf("RunHostGit returned after %v, want within %v plus slack", elapsed, hostGitVerifyTimeout)
+	}
+	if !errors.Is(res.Err, ErrRepoConfigChanged) {
+		t.Errorf("Err = %v, want ErrRepoConfigChanged from the blocked check", res.Err)
+	}
+	if res.ExitCode != 0 {
+		t.Errorf("ExitCode = %d, want git's own 0", res.ExitCode)
+	}
+	// The check did start after the command, so the bound is what ended it.
+	var after bool
+	for _, c := range fakeGitCalls(t, log) {
+		if strings.HasSuffix(c.argv, " fake-arm") {
+			after = true
+			continue
+		}
+		if after && strings.HasSuffix(c.argv, " config --show-scope -z --list") {
+			return
+		}
+	}
+	t.Error("no config listing was recorded after the command")
+}
+
+// A refused repository config is Err, before git runs the command. For the
+// remote audience the refusal carries no directory in any field or sink.
+func TestRunHostGit_PolicyRefusalIsErr(t *testing.T) {
+	repo, _ := newHostGitRepo(t)
+	hostRunGit(t, repo, "config", "core.sshCommand", "ssh -v")
+	log := fakeGitOnPath(t)
+	for _, audience := range []Audience{AudienceLocal, AudienceRemote} {
+		res := RunHostGit(context.Background(), repo, HostGitOptions{Audience: audience}, "rev-parse", "--show-toplevel")
+		var refused *RepoConfigRefusedError
+		if !errors.As(res.Err, &refused) {
+			t.Fatalf("audience %v: Err = %v, want *RepoConfigRefusedError", audience, res.Err)
+		}
+		if res.ExitCode != -1 || len(res.Stdout) != 0 {
+			t.Errorf("audience %v: refused command reported exit %d, stdout %q", audience, res.ExitCode, res.Stdout)
+		}
+		if refused.Audience != audience {
+			t.Errorf("refusal audience = %v, want %v", refused.Audience, audience)
+		}
+		if audience == AudienceRemote {
+			if refused.Dir != "" {
+				t.Errorf("remote refusal carries Dir %q", refused.Dir)
+			}
+			for sink, got := range refusalSinks(t, res.Err) {
+				if strings.Contains(got, repo) {
+					t.Errorf("%s of a remote refusal prints the repository path: %q", sink, got)
+				}
+			}
+		} else if !strings.Contains(res.Err.Error(), repo) {
+			t.Errorf("local refusal %q does not name the repository", res.Err)
+		}
+	}
+	if n := fakeGitRuns(t, log, " rev-parse --show-toplevel"); n != 0 {
+		t.Errorf("the refused command ran %d times", n)
+	}
+}
+
+// A repository config change during the run is Err (ErrRepoConfigChanged),
+// whatever git's own exit.
+func TestRunHostGit_ConfigChangedDuringRunIsErr(t *testing.T) {
+	repo, _ := newHostGitRepo(t)
+	fakeGitOnPath(t)
+	res := RunHostGit(context.Background(), repo, HostGitOptions{}, "fake-mutate")
+	if !errors.Is(res.Err, ErrRepoConfigChanged) {
+		t.Fatalf("Err = %v, want ErrRepoConfigChanged", res.Err)
+	}
+	if res.ExitCode != 0 {
+		t.Errorf("ExitCode = %d, want git's own 0", res.ExitCode)
+	}
+}
+
+// ceilingFixture returns a repository "parent" with an empty work tree. With
+// poison, its config is unparseable, so any git that reads it fails with
+// "bad config".
+func ceilingFixture(t *testing.T, poison bool) (parent string) {
+	t.Helper()
+	hostGitTestEnv(t)
+	parent = filepath.Join(t.TempDir(), "parent")
+	hostRunGit(t, filepath.Dir(parent), "init", "-q", "-b", "main", parent)
+	if poison {
+		f, err := os.OpenFile(filepath.Join(parent, ".git", "config"), os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.WriteString("[core\n"); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return parent
+}
+
+// ceilingLeaf makes the directory rel (slash-separated) under parent.
+func ceilingLeaf(t *testing.T, parent, rel string) string {
+	t.Helper()
+	leaf := filepath.Join(parent, filepath.FromSlash(rel))
+	if err := os.MkdirAll(leaf, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return leaf
+}
+
+func ceilingEnv() []string {
+	return append(HostGitEnv(os.Environ()), "LC_ALL=C")
+}
+
+// Ceiling (a): by default git in a non-repository leaf inside a repository
+// finds no repository and never reads the enclosing repository's config: a
+// direct child of the work-tree root, a deeper leaf, and a leaf reached
+// through a symlink from elsewhere.
+func TestRunHostGit_CeilingDefaultStopsAtLeaf(t *testing.T) {
+	parent := ceilingFixture(t, true)
+	deep := ceilingLeaf(t, parent, "sub/leaf")
+	child := ceilingLeaf(t, parent, "child")
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(deep, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	for _, dir := range []string{child, deep, link} {
+		res := RunHostGit(context.Background(), dir, HostGitOptions{Env: ceilingEnv(), Audience: AudienceRemote}, "rev-parse", "--is-inside-work-tree")
+		if res.Err != nil {
+			t.Fatalf("%s: Err = %v", dir, res.Err)
+		}
+		if res.ExitCode != 128 || !strings.Contains(string(res.Stderr), "not a git repository") {
+			t.Errorf("%s: exit %d, stderr %q; want 128 and not a git repository", dir, res.ExitCode, res.Stderr)
+		}
+		if strings.Contains(string(res.Stderr), "bad config") {
+			t.Errorf("%s: git read the enclosing repository's config: %q", dir, res.Stderr)
+		}
+	}
+}
+
+// Ceiling (b): with CeilingOff git discovers the enclosing repository.
+func TestRunHostGit_CeilingOffDiscoversParent(t *testing.T) {
+	leaf := ceilingLeaf(t, ceilingFixture(t, false), "sub/leaf")
+	res := RunHostGit(context.Background(), leaf, HostGitOptions{Env: ceilingEnv(), Ceiling: CeilingOff, Audience: AudienceRemote}, "rev-parse", "--is-inside-work-tree")
+	if res.Err != nil || res.ExitCode != 0 || string(res.Stdout) != "true\n" {
+		t.Errorf("exit %d, err %v, stdout %q, stderr %q; want 0 and true", res.ExitCode, res.Err, res.Stdout, res.Stderr)
+	}
+}
+
+// A ceiling whose resolved path contains the path-list separator would be
+// split by git into unrelated ceilings: refused before git runs, with an
+// error that names no path, for both audiences.
+func TestRunHostGit_CeilingRefusesListSeparator(t *testing.T) {
+	parent := ceilingFixture(t, true)
+	leaf := ceilingLeaf(t, parent, "we"+string(filepath.ListSeparator)+"ird/leaf")
+	for _, audience := range []Audience{AudienceLocal, AudienceRemote} {
+		res := RunHostGit(context.Background(), leaf, HostGitOptions{Env: ceilingEnv(), Audience: audience}, "rev-parse", "--is-inside-work-tree")
+		if !errors.Is(res.Err, errHostGitCeilingSeparator) {
+			t.Fatalf("audience %v: Err = %v, want the separator refusal", audience, res.Err)
+		}
+		if res.ExitCode != -1 || len(res.Stderr) != 0 {
+			t.Errorf("audience %v: git ran (exit %d, stderr %q)", audience, res.ExitCode, res.Stderr)
+		}
+		if msg := res.Err.Error(); strings.Contains(msg, parent) || strings.Contains(msg, "ird") {
+			t.Errorf("audience %v: refusal names a path: %q", audience, msg)
+		}
+	}
+}
+
+// For the remote audience, the discovery-mode errors name no path and wrap
+// no *fs.PathError; for the local audience they keep the cause.
+func TestRunHostGit_DiscoveryErrorsRemoteHaveNoPath(t *testing.T) {
+	hostGitTestEnv(t)
+	base := filepath.Join(t.TempDir(), "pathmarker-r7")
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	headLeaf := filepath.Join(base, "headleaf")
+	if err := os.MkdirAll(headLeaf, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(headLeaf, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A path under a regular file: checking it for .git fails with an error
+	// other than "does not exist" on Unix, and cannot be resolved elsewhere.
+	file := filepath.Join(base, "file")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	underFile := filepath.Join(file, "sub")
+	for name, dir := range map[string]string{"HEAD leaf": headLeaf, "under a file": underFile} {
+		res := RunHostGit(context.Background(), dir, HostGitOptions{Env: ceilingEnv(), Audience: AudienceRemote}, "rev-parse", "--is-inside-work-tree")
+		if res.Err == nil {
+			t.Fatalf("%s: no error", name)
+		}
+		if strings.Contains(res.Err.Error(), "pathmarker-r7") {
+			t.Errorf("%s: remote error names a path: %q", name, res.Err)
+		}
+		var pe *fs.PathError
+		if errors.As(res.Err, &pe) {
+			t.Errorf("%s: remote error wraps a *fs.PathError", name)
+		}
+	}
+	if runtime.GOOS != "windows" {
+		res := RunHostGit(context.Background(), underFile, HostGitOptions{Env: ceilingEnv(), Audience: AudienceLocal}, "rev-parse", "--is-inside-work-tree")
+		var pe *fs.PathError
+		if !errors.As(res.Err, &pe) {
+			t.Errorf("local error %v does not keep its cause", res.Err)
+		}
+	}
+}
+
+// A leaf that holds a HEAD entry may be taken by git as a git directory,
+// whose config nothing checked: refused. A .git that appears in the leaf
+// while git runs is a config change.
+func TestRunHostGit_CeilingLeafBecomesRepository(t *testing.T) {
+	leaf := ceilingLeaf(t, ceilingFixture(t, false), "sub/leaf")
+	if err := os.WriteFile(filepath.Join(leaf, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := RunHostGit(context.Background(), leaf, HostGitOptions{Env: ceilingEnv()}, "rev-parse", "--is-inside-work-tree")
+	if res.Err == nil || res.ExitCode != -1 {
+		t.Errorf("leaf with HEAD: exit %d, err %v; want a refusal", res.ExitCode, res.Err)
+	}
+	if err := os.Remove(filepath.Join(leaf, "HEAD")); err != nil {
+		t.Fatal(err)
+	}
+	fakeGitOnPath(t)
+	res = RunHostGit(context.Background(), leaf, HostGitOptions{Env: ceilingEnv()}, "fake-mkgit")
+	if !errors.Is(res.Err, ErrRepoConfigChanged) {
+		t.Errorf("a .git created during the run: Err = %v, want ErrRepoConfigChanged", res.Err)
+	}
+}
+
+// The door's own listings (readFilterPins, and crossCheckAgainstGit through
+// the policy check) run with the door's environment and the HostGitArgs pins
+// first, and see no inherited variable that chooses a repository or adds
+// config. readFilterPins sees exactly the main command's environment,
+// GIT_CEILING_DIRECTORIES included when the door sets it. The global and
+// system config values are whatever HostGitEnv passes; an empty-config
+// assertion arrives with the change that sets those defaults in HostGitEnv.
+func TestHostGitCheckers_DoorListingsUseDoorEnv(t *testing.T) {
+	pins := strings.Join(HostGitArgs(), " ")
+	const pinMarker = "user.name=pinmarker"
+	for _, mode := range []string{"repository", "discovery"} {
+		t.Run(mode, func(t *testing.T) {
+			var dir string
+			if mode == "repository" {
+				dir, _ = newHostGitRepo(t)
+			} else {
+				dir = ceilingLeaf(t, ceilingFixture(t, false), "sub/leaf")
+			}
+			log := fakeGitOnPath(t)
+			plantInheritedGitEnv(t)
+			want := gitEnvMap(HostGitEnv(os.Environ()))
+			if mode == "discovery" {
+				resolved, err := filepath.EvalSymlinks(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want["GIT_CEILING_DIRECTORIES"] = filepath.Dir(resolved)
+			}
+			res := RunHostGit(context.Background(), dir, HostGitOptions{Config: []string{pinMarker}}, "rev-parse", "--is-inside-work-tree")
+			if res.Err != nil {
+				t.Fatalf("Err = %v", res.Err)
+			}
+			var main, filter, cross int
+			for _, c := range fakeGitCalls(t, log) {
+				if !strings.HasPrefix(c.argv, pins+" ") {
+					t.Errorf("call %q does not start with the HostGitArgs pins", c.argv)
+				}
+				for _, k := range plantedGitEnvKeys {
+					if _, ok := c.env[k]; ok {
+						t.Errorf("call %q received the inherited %s", c.argv, k)
+					}
+				}
+				if d := diffEnvKeys(c.env, want); len(d) > 0 {
+					t.Errorf("call %q: environment differs from the door's in %v", c.argv, d)
+				}
+				switch {
+				case strings.HasSuffix(c.argv, " rev-parse --is-inside-work-tree"):
+					main++
+				case strings.HasSuffix(c.argv, " config --show-scope -z --list") && strings.Contains(c.argv, pinMarker):
+					filter++
+				case strings.HasSuffix(c.argv, " config --show-scope -z --list"):
+					cross++
+				}
+			}
+			if main != 1 || filter != 1 {
+				t.Errorf("recorded %d main and %d filter-pin calls, want 1 and 1", main, filter)
+			}
+			if mode == "repository" && cross < 1 {
+				t.Error("no policy cross-check call was recorded")
+			}
+			if mode == "discovery" && cross != 0 {
+				t.Errorf("discovery mode ran %d policy cross-checks, want 0 (nothing to check)", cross)
+			}
+		})
+	}
 }

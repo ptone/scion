@@ -542,6 +542,9 @@ server:
 	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(settingsYAML), 0644))
 
 	srv, s := testServer(t)
+	// The hub resolves shared dirs from its in-memory server.project_storage
+	// (synthesized from the settings above at startup), never per request.
+	useNFSSharedDirStorage(srv, hostBase)
 	project := createTestGitProject(t, srv, "NFS Delete Test", "github.com/test/nfs-delete-repo")
 
 	// Pre-populate the project's shared-dir tree on the "export" exactly as
@@ -1852,6 +1855,8 @@ func TestCreateProject_SharedWorkspace_SetsLabelAndInitFilesystem(t *testing.T) 
 		require.NoError(t, cmd.Run(), "git %v", args)
 	}
 
+	allowLocalCloneFixture(t, sourceDir)
+
 	body := CreateProjectRequest{
 		Name:          "Shared WS Project",
 		GitRemote:     "github.com/test/shared-ws",
@@ -2102,6 +2107,8 @@ func TestCloneSharedWorkspaceProject_Success(t *testing.T) {
 		require.NoError(t, cmd.Run(), "git %v", args)
 	}
 
+	allowLocalCloneFixture(t, sourceDir)
+
 	project := &store.Project{
 		ID:        "project-clone-test",
 		Name:      "Clone Test",
@@ -2162,6 +2169,8 @@ func TestCloneSharedWorkspaceProject_IgnoreRuleFailure_CleansUpWithoutPath(t *te
 		cmd.Dir = sourceDir
 		require.NoError(t, cmd.Run(), "git %v", args)
 	}
+
+	allowLocalCloneFixture(t, sourceDir)
 
 	project := &store.Project{
 		ID:        "project-clone-unignored",
@@ -2335,6 +2344,8 @@ func TestCreateProject_AutoAssociatesGitHubInstallation(t *testing.T) {
 		cmd.Dir = sourceDir
 		require.NoError(t, cmd.Run(), "git %v", args)
 	}
+
+	allowLocalCloneFixture(t, sourceDir)
 
 	body := CreateProjectRequest{
 		Name:          "Auto Assoc Project",

@@ -35,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
+	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -1238,9 +1239,15 @@ func (s *Server) markCreateCleanupRefused(ctx context.Context, agentID string, r
 const createCleanupRefusedPrefix = "Create failed and its cleanup was refused: "
 
 // createCleanupRefusedMessage is the kept row's message after a refused
-// create-failure cleanup.
+// create-failure cleanup. It names force delete only when a force delete
+// would remove the run the broker holds (reportedRunDeletable,
+// ptone/scion#5016).
 func createCleanupRefusedMessage(refused *DeleteRunMismatchError) string {
-	return createCleanupRefusedPrefix + deleteRunMismatchMessage(refused) + ". Delete the agent to retry."
+	msg := createCleanupRefusedPrefix + deleteRunMismatchMessage(refused) + ". Delete the agent to retry"
+	if reportedRunDeletable(refused) {
+		msg += "; force delete removes run " + refused.CurrentRunID + " that the broker holds, then the agent"
+	}
+	return msg + "."
 }
 
 // isCreateCleanupRefusedRow reports whether a is a row markCreateCleanupRefused
@@ -2381,6 +2388,16 @@ func (s *Server) createAgentInProject(
 		if errors.Is(err, errAgentOwnerUserMissing) {
 			writeError(w, http.StatusConflict, ErrCodeConflict,
 				"cannot create the agent: the user or agent it belongs to no longer exists", nil)
+			return
+		}
+		if errors.Is(err, errAgentOwnerUserDeleting) {
+			writeError(w, http.StatusConflict, ErrCodeConflict,
+				"cannot create the agent: the user it belongs to is being deleted", nil)
+			return
+		}
+		if errors.Is(err, errAgentGuardUserLookup) {
+			slog.ErrorContext(ctx, "agent create: guard user lookup failed", "error", err)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "Could not verify the agent's owner; retry", nil)
 			return
 		}
 		if errors.Is(err, errAgentCreateWriteInvalid) {
@@ -3810,6 +3827,8 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 		s.handleAgentDelegationItem(w, r, id, route.Suffix.Param)
 	case AgentRouteDelegationCredential:
 		s.handleAgentDelegationCredential(w, r, id, route.Suffix.Param, route.Suffix.SecondParam)
+	case AgentRouteDelegationRevokeAll:
+		s.handleAgentDelegationsRevokeAll(w, r, id)
 
 	case AgentRouteActionStatus:
 		s.handleAgentAction(w, r, id, api.AgentActionStatus)
@@ -5603,6 +5622,16 @@ const workspaceStorageUnconfiguredErrorCode = api.BrokerErrCodeWorkspaceStorageU
 // harness-config whose provisioner cannot run (ptone/scion#3132).
 const harnessConfigUnusableErrorCode = api.BrokerErrCodeHarnessConfigUnusable
 
+// storageMigrationRequiredErrorCode is the runtime broker's error code for
+// an agent start refused because its storage would be placed differently
+// than configured before server.project_storage (ptone/scion#6371).
+const storageMigrationRequiredErrorCode = api.BrokerErrCodeStorageMigrationRequired
+
+// projectStorageUnavailableErrorCode is the runtime broker's error code for
+// an agent create, start or restart refused because the broker does not see
+// the project storage share (ptone/scion#5823).
+const projectStorageUnavailableErrorCode = api.BrokerErrCodeProjectStorageUnavailable
+
 // dispatchCreateErrorResponse classifies a failed create/provision dispatch to
 // the runtime broker and writes the matching HTTP response.
 //
@@ -5720,11 +5749,12 @@ func relayWorkspaceStorageUnconfigured(w http.ResponseWriter, err error) bool {
 	return true
 }
 
-// relayBrokerRefusal writes a broker 4xx refusal of a dispatch -- 422
-// harness_config_unusable, 403 forbidden, 400 validation_error or 409
-// conflict -- with the broker's status, code and message instead of the
-// generic 502, and reports whether it did. For any other error it writes
-// nothing and returns false.
+// relayBrokerRefusal writes a broker refusal of a dispatch -- 422
+// harness_config_unusable, 422 storage_migration_required, 403 forbidden,
+// 400 validation_error, 409 conflict or 503 project_storage_unavailable --
+// with the broker's status, code and message instead of the generic 502,
+// and reports whether it did. For any other error it writes nothing and
+// returns false.
 //
 // The 422 harness_config_unusable and 403 forbidden answers are the broker's
 // refusal of the harness-config a dispatch would run: its provisioner cannot
@@ -5753,6 +5783,14 @@ func relayBrokerRefusal(w http.ResponseWriter, err error) bool {
 	switch {
 	case se.StatusCode == http.StatusBadRequest && code == ErrCodeValidationError:
 	case se.StatusCode == http.StatusUnprocessableEntity && code == harnessConfigUnusableErrorCode:
+	case se.StatusCode == http.StatusUnprocessableEntity && code == storageMigrationRequiredErrorCode:
+	case se.StatusCode == http.StatusServiceUnavailable && code == projectStorageUnavailableErrorCode:
+		// The broker does not see the project storage share. Its message is
+		// relayed only when it is one of the known path-free texts; a broker
+		// built before those texts put the host mount path in the message,
+		// so anything else is replaced by a fixed text.
+		writeError(w, se.StatusCode, code, projectStorageRefusalMessage(se.brokerErrorMessage()), nil)
+		return true
 	case se.StatusCode == http.StatusConflict && code == ErrCodeConflict:
 	case se.StatusCode == http.StatusForbidden && code == ErrCodeForbidden:
 		// Harness-config policy is today the broker's only producer of a
@@ -5764,6 +5802,35 @@ func relayBrokerRefusal(w http.ResponseWriter, err error) bool {
 	}
 	writeError(w, se.StatusCode, code, se.brokerErrorMessage(), nil)
 	return true
+}
+
+// projectStorageRefusalFallback is the hub's text for a broker's 503
+// project_storage_unavailable whose message is not one of the known
+// path-free texts (scionrt.ProjectShareClientTexts).
+const projectStorageRefusalFallback = "project storage share is not available on the runtime broker; the broker log has the details"
+
+// projectStorageRefusalMessage returns msg when it is one of the runtime
+// broker's known path-free project storage refusal texts, and
+// projectStorageRefusalFallback otherwise.
+func projectStorageRefusalMessage(msg string) string {
+	if slices.Contains(scionrt.ProjectShareClientTexts(), msg) {
+		return msg
+	}
+	return projectStorageRefusalFallback
+}
+
+// brokerProjectStorageRefusal reports whether err carries a runtime broker's
+// 503 project_storage_unavailable, and returns its status, code and message
+// filtered by projectStorageRefusalMessage. Every hub path that reports
+// that refusal, as a response or as recorded text, uses it, so an older
+// broker's path-bearing message never reaches a client.
+func brokerProjectStorageRefusal(err error) (status int, code, message string, ok bool) {
+	var se *brokerStatusError
+	if !errors.As(err, &se) || se == nil || se.StatusCode != http.StatusServiceUnavailable ||
+		se.brokerErrorCode() != projectStorageUnavailableErrorCode {
+		return 0, "", "", false
+	}
+	return se.StatusCode, projectStorageUnavailableErrorCode, projectStorageRefusalMessage(se.brokerErrorMessage()), true
 }
 
 // skillResolutionClientDetails keeps the skill and cause entries of a

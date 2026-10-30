@@ -1851,6 +1851,16 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 				"cannot restore the agent: the user or agent it belongs to no longer exists", nil)
 			return
 		}
+		if errors.Is(err, errAgentOwnerUserDeleting) {
+			writeError(w, http.StatusConflict, ErrCodeConflict,
+				"cannot restore the agent: the user it belongs to is being deleted", nil)
+			return
+		}
+		if errors.Is(err, errAgentGuardUserLookup) {
+			slog.ErrorContext(ctx, "restore: guard user lookup failed", "agent_id", agent.ID, "error", err)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "Could not verify the agent's owner; retry the restore", nil)
+			return
+		}
 		if errors.Is(err, errRestoreEdgeConflict) {
 			Conflict(w, "The agent already has an active delegation that conflicts with the one being restored")
 			return
@@ -2526,6 +2536,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		if senderProjID, ok := senderAgentProject(ctx); ok {
 			storeMsg.SenderProjectID = &senderProjID
 		}
+		// A delegated send also names the issuer and the grant.
+		stampDelegatedMessageAttribution(ctx, storeMsg)
 
 		// Phase 5 dual-write: resolve-or-create conversation for user/agent → agent messages.
 		// If the CLI already resolved a conversation_id (S4 conversation references),
@@ -3887,6 +3899,13 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 		ValidationError(w, "structured_message is required", nil)
 		return
 	}
+	// A broadcast carries text: attachment ids are refused above, and the
+	// messages store accepts an empty body (attachment-only chat messages,
+	// ptone/scion#6146), so an empty one is refused here, before fan-out.
+	if req.StructuredMessage.Msg == "" {
+		ValidationError(w, "msg is required", nil)
+		return
+	}
 
 	// B5 SECURITY FIX: ALWAYS derive sender identity from the
 	// authenticated context, same as handleAgentMessage. Client-supplied
@@ -4274,6 +4293,19 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 
 	// Resolve mentions using the shared package.
 	results := messages.ResolveMentions(mentionSlugs, agentInfos, primaryAgent.Slug)
+
+	// A mention copy carries the text only, not the attachments, so a
+	// message without text (an attachment-only message, ptone/scion#6146)
+	// would reach the mentioned agents as an empty message. It is not
+	// copied; each resolved mention reports why.
+	if originalMsg.Msg == "" {
+		for i := range results {
+			if results[i].Status == "delivered" {
+				results[i].Status, results[i].Error = "error", errMentionCopyNeedsText
+			}
+		}
+		return results
+	}
 
 	// Phase 3 msg-authz: extract sender identity once for per-mention checks.
 	senderIdentity := GetIdentityFromContext(ctx)
