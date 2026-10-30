@@ -223,9 +223,8 @@ func isResponseHeaderTimeout(err error) bool {
 // arrive the exchange lasts as long as the request. Credentials are
 // stripped from the request and the response is sandboxed exactly as on
 // the tunnel path. policy is the surface's: the page view surface
-// (policy.portView) also removes the request headers in
-// portViewStrippedRequestHeader and applies portViewModifyResponse, and
-// each surface logs its own caller string. Every surface removes the front
+// (policy.portView) also applies portViewModifyResponse, and each surface
+// logs its own caller string. Every surface removes the front
 // proxy's identity headers (stripFrontProxyIdentityHeaders).
 func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent *store.Agent, port int, proxyPath string, conn net.Conn, policy portProxyPolicy) {
 	start := time.Now()
@@ -242,7 +241,7 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 			pr.Out.URL.RawQuery = r.URL.RawQuery
 			pr.Out.Host = target
 			for k := range pr.Out.Header {
-				if sensitiveHeader(k) || (policy.portView && portViewStrippedRequestHeader(k)) {
+				if sensitiveHeader(k) {
 					pr.Out.Header.Del(k)
 				}
 			}
@@ -260,11 +259,7 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 					resp.Header.Del(k)
 				}
 			}
-			if policy.portView {
-				portViewModifyResponse(resp.Header)
-			}
-			setUntrustedContentHeaders(resp.Header, agentServedPageSandboxCSP)
-			resp.Header.Set("X-Content-Type-Options", "nosniff")
+			applyPortProxyResponsePolicy(resp.Header, policy)
 			return nil
 		},
 		// The ErrorHandler runs only before the response is committed (the
@@ -324,9 +319,9 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 	// header set further up the handler chain, so the sandbox headers set
 	// in ModifyResponse are the only ones and pages served from an agent's
 	// port keep working as on the tunnel path.
-	w.Header().Del("Content-Security-Policy")
-	w.Header().Del("Permissions-Policy")
-	w.Header().Del("X-Content-Type-Options")
+	for _, k := range portProxyPolicyHeaders {
+		w.Header().Del(k)
+	}
 	rp.ServeHTTP(w, r)
 }
 
