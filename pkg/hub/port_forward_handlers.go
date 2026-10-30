@@ -471,6 +471,9 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 	ctx, cancel := context.WithTimeout(legacy.context(r), portForwardTimeout)
 	defer cancel()
 	reqPath := "/" + strings.TrimPrefix(proxyPath, "/")
+	fwdHeader := cloneForwardHeaders(r.Header)
+	// The front proxy's identity headers are not passed to the agent's app.
+	s.stripFrontProxyIdentityHeaders(fwdHeader)
 	resp, err := s.portTunnels.Do(ctx, agent.ID, portforward.Request{
 		StreamID: uuid.NewString(),
 		Port:     exposed.Port,
@@ -478,7 +481,7 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 		Method:   r.Method,
 		Path:     reqPath,
 		Query:    r.URL.RawQuery,
-		Header:   cloneForwardHeaders(r.Header),
+		Header:   fwdHeader,
 		Body:     body,
 	})
 	if hook := s.legacyPortTunnelReturnedTestHook; hook != nil {
@@ -525,7 +528,7 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 	// Hub-controlled response headers: the proxied content cannot override
 	// these, so it is sandboxed to an opaque origin and cannot set cookies
 	// on the hub origin.
-	w.Header().Set("Content-Security-Policy", untrustedContentSandboxCSP)
+	setUntrustedContentHeaders(w.Header(), agentServedPageSandboxCSP)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if resp.Status == 0 {
 		resp.Status = http.StatusOK
@@ -719,10 +722,16 @@ func hopByHopHeader(k string) bool {
 // hub itself (or intentionally omitted) so the response is sandboxed and
 // cannot set or clear cookies, storage, or cache on the hub origin. CORS
 // response headers are owned by the hub's corsMiddleware; relaying the
-// agent's copies would duplicate them, which browsers reject.
+// agent's copies would duplicate them, which browsers reject. The page
+// headers the web server sets on every response (X-Frame-Options,
+// X-XSS-Protection, Referrer-Policy, Permissions-Policy; see
+// securityHeadersMiddleware) are the hub's too, so the hub's own page
+// headers are not combined with the proxied app's.
 func stripFromProxyResponse(k string) bool {
 	switch strings.ToLower(k) {
 	case "set-cookie", "set-cookie2", "content-security-policy", "x-content-type-options", "clear-site-data":
+		return true
+	case "x-frame-options", "x-xss-protection", "referrer-policy", "permissions-policy":
 		return true
 	case "access-control-allow-origin", "access-control-allow-credentials", "access-control-allow-methods",
 		"access-control-allow-headers", "access-control-allow-private-network", "access-control-expose-headers",
