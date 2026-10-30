@@ -272,6 +272,25 @@ func TestOwnerMaterialChain_LegacyCohorts(t *testing.T) {
 			f.recordEdge(t, store.DelegationPrincipalUser, other, id, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, nil)
 			return id
 		}, false, ""},
+		{"empty ancestry, created by another user, edge recorded from the creator", func(t *testing.T, f *sdFixture) string {
+			// The owner is not the creator and the chain ends at the
+			// creator: the owner's unshared rows are withheld.
+			creator := tid("omc-noanc-creator")
+			createDCUser(t, f.Store, creator, "omc-noanc-creator@test.com", f.ProjectID, store.ProjectRoleOwner)
+			id := omcAgentWith(t, f, "noanc-creator", nil, creator)
+			f.recordEdge(t, store.DelegationPrincipalUser, creator, id, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, nil)
+			return id
+		}, false, ""},
+		{"empty ancestry, created by another user, edge adopted from the creator", func(t *testing.T, f *sdFixture) string {
+			creator := tid("omc-noanc-adopted-creator")
+			createDCUser(t, f.Store, creator, "omc-noanc-adopted-creator@test.com", f.ProjectID, store.ProjectRoleOwner)
+			id := omcAgentWith(t, f, "noanc-adopted-creator", nil, creator)
+			f.recordEdge(t, store.DelegationPrincipalUser, creator, id, store.EffectCeiling{Kind: store.EffectCeilingBounded, PermissionIDs: lafV1(t, AgentRoleBaseline, false)}, func(e *store.DelegationEdge) {
+				e.SourceCredentialKind = store.SourceCredentialSystemMigration
+				e.Role = string(AgentRoleBaseline)
+			})
+			return id
+		}, false, ""},
 		{"missing agent CreatedBy", func(t *testing.T, f *sdFixture) string {
 			id := omcAgentWith(t, f, "nocreator", []string{f.UserID}, "")
 			edge(f, t, id, nil)
