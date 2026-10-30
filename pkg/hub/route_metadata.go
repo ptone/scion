@@ -1011,8 +1011,8 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Permission:     "hub.health.read", Resource: "hub", Action: "read",
 	},
 	// Orphaned and revoked agents, an operator diagnostic under the
-	// permission of the health summary. Session only: it names the users
-	// at the root of agents' delegation chains.
+	// permission of the health summary. Session only (GOV_PENDING): its
+	// token admission waits for its governance batch.
 	"/api/v1/admin/orphaned-agents": {
 		Pattern: "/api/v1/admin/orphaned-agents", RouteID: "admin.orphanedAgents",
 		Classification: RouteHubAdmin,

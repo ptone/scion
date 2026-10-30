@@ -169,6 +169,27 @@ func TestAgentAuthorityState_LegacyUnrecorded(t *testing.T) {
 	assert.Equal(t, unrecorded, authorityState(t, f, child.ID), "the parent never had an edge")
 }
 
+// An agent whose only delegation was deactivated without a recorded cause
+// (an edge written inactive, as before causes were recorded) is unrecorded,
+// not revoked. Control: the same agent shape with a recorded cause is
+// revoked.
+func TestAgentAuthorityState_CauselessDeactivationUnrecorded(t *testing.T) {
+	f := newProvenanceFixture(t, "auth-causeless", false)
+	ag := f.agent(t, "auth-causeless", AgentRoleFull)
+	require.NoError(t, f.store.CreateDelegationEdge(context.Background(), &store.DelegationEdge{
+		DelegatorType: store.DelegationPrincipalUser, DelegatorID: f.userID,
+		DelegateType: store.DelegationPrincipalAgent, DelegateID: ag.ID,
+		ScopeType: store.RoleScopeProject, ScopeID: f.projectID, Role: string(AgentRoleFull), Active: false,
+		AuthorityProvenance: recordedProv(store.DelegationPrincipalUser, f.userID, store.SourceCredentialSession),
+		EffectCeiling:       ceilPrincip,
+	}))
+	assert.Equal(t, api.AgentAuthority{State: api.AgentAuthorityUnrecorded}, authorityState(t, f, ag.ID))
+
+	control := f.userChild(t, "auth-causeless-control", ceilPrincip)
+	revokeAgentEdges(t, f.store, control.ID, store.EdgeDeactivationDelegatorDeleted)
+	assert.Equal(t, api.AgentAuthorityRevoked, authorityState(t, f, control.ID).State)
+}
+
 // An agent whose recorded user delegator row was deleted directly (as
 // before deletes were refused) is orphaned with delegator_deleted.
 func TestAgentAuthorityState_UserRowDeleted(t *testing.T) {
@@ -331,6 +352,31 @@ func TestAgentAuthority_GetIncludesStateWithPrincipalVisibility(t *testing.T) {
 	// bob may not read the agent at all.
 	rec = doRequestAsUser(t, srv, f.bob, http.MethodGet, "/api/v1/agents/"+orphan.ID, nil)
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+}
+
+// An agent reads its own state with its agent token (the self-read on the
+// agent GET). The token is minted while the root user is active; once the
+// user is suspended the agent is orphaned, and the user's ID stays hidden
+// from the agent, which may not read users.
+func TestAgentAuthority_AgentReadsOwnState(t *testing.T) {
+	srv, s := testServer(t)
+	f := newAuthorityHTTPFixture(t, srv, s)
+	ag := f.agent(t, "self-read")
+	f.edge(t, store.DelegationPrincipalUser, f.alice.ID, ag.ID)
+	token, err := srv.issueAgentTokenForTest(context.Background(), ag)
+	require.NoError(t, err)
+
+	rec := doRequestWithAgentToken(t, srv, http.MethodGet, "/api/v1/agents/"+ag.ID, nil, token)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, &api.AgentAuthority{State: api.AgentAuthorityLive}, decodeAgentAuthority(t, rec.Body.Bytes()))
+
+	setUserStatus(t, s, f.alice.ID, "suspended")
+	rec = doRequestWithAgentToken(t, srv, http.MethodGet, "/api/v1/agents/"+ag.ID, nil, token)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, &api.AgentAuthority{
+		State: api.AgentAuthorityOrphaned, Cause: api.AgentAuthorityCauseDelegatorInactive,
+		Principal: &api.AgentAuthorityPrincipal{Kind: store.DelegationPrincipalUser},
+	}, decodeAgentAuthority(t, rec.Body.Bytes()), "the agent sees the cause but not the user's ID")
 }
 
 // listAuthorities decodes an agent list into agent ID → authority.

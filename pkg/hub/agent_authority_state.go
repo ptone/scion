@@ -42,7 +42,8 @@ import (
 //     deactivated one carries a recorded cause, which is the state's cause
 //     (for example user_delete_cascade or delegator_deleted);
 //   - unrecorded: the chain was never recorded, wholly or in part, and
-//     reaches no deleted principal.
+//     reaches no deleted principal; or the agent has no active project
+//     delegation and the one deactivated last carries no recorded cause.
 
 // AgentAuthorityState returns agent's authority state. The principal ID
 // is always set when a cause names one; callers that answer a reader

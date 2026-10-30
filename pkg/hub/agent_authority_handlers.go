@@ -31,8 +31,9 @@ import (
 //   - the agent list endpoints include it in the full view only when the
 //     request carries include=authority, so a list without it makes no
 //     extra reads;
-//   - GET /api/v1/admin/orphaned-agents lists the orphaned and revoked
-//     agents of the hub for operators.
+//   - GET /api/v1/admin/orphaned-agents pages over the hub's non-deleted
+//     agents and lists those whose computed state is orphaned or revoked,
+//     for operators.
 //
 // Who sees what: anyone who may read the agent sees the state and cause.
 // The principal's ID is shown only to a reader who may read that
@@ -162,8 +163,9 @@ type OrphanedAgentItem struct {
 }
 
 // OrphanedAgentsResponse is the body of GET /api/v1/admin/orphaned-agents.
-// Each page scans up to limit agents of the hub and lists the orphaned and
-// revoked ones among them, so a page can be empty while nextCursor is set:
+// Each page scans up to limit of the hub's non-deleted agents (whether or
+// not they have a delegation) and lists those whose computed state is
+// orphaned or revoked, so a page can be empty while nextCursor is set:
 // follow nextCursor until it is empty. scanned is the number of agents the
 // page examined.
 type OrphanedAgentsResponse struct {
@@ -172,10 +174,11 @@ type OrphanedAgentsResponse struct {
 	NextCursor string              `json:"nextCursor,omitempty"`
 }
 
-// handleAdminOrphanedAgents serves GET /api/v1/admin/orphaned-agents: the
-// hub's agents whose authority state is orphaned or revoked, for
-// operators. The route guard requires hub.health.read (the permission of
-// the admin health summary) on a session credential. Query parameters:
+// handleAdminOrphanedAgents serves GET /api/v1/admin/orphaned-agents: it
+// pages over the hub's non-deleted agents and lists those whose computed
+// authority state is orphaned or revoked, for operators. The route guard
+// requires hub.health.read (the permission of the admin health summary) on
+// a session credential (GOV_PENDING). Query parameters:
 // state (orphaned or revoked; both when absent), limit, cursor. Soft-deleted
 // agents are not listed. The cost is linear in the agents scanned.
 func (s *Server) handleAdminOrphanedAgents(w http.ResponseWriter, r *http.Request) {

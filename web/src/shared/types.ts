@@ -929,9 +929,6 @@ export interface AgentUpdateDisposition {
 /** A model size alias (pkg/config KnownModelAliases). */
 export type AgentModelSize = 'small' | 'medium' | 'large' | 'extra-large';
 
-/**
- * Agent information from the Hub API
- */
 /** The principal an {@link AgentAuthority} cause names. */
 export interface AgentAuthorityPrincipal {
   /** "user" or "agent". */
@@ -953,6 +950,9 @@ export interface AgentAuthority {
   since?: string;
 }
 
+/**
+ * Agent information from the Hub API
+ */
 export interface Agent {
   id: string;
   name: string;

@@ -415,7 +415,7 @@ var hubOperations = []OperationSpec{
 	{
 		ID:          "hub.orphanedagents.read",
 		Domain:      "hub",
-		Description: "List the hub's agents whose authority state is orphaned or revoked (an operator diagnostic under the permission of the health summary; session only, because items can name the users at the root of agents' delegation chains)",
+		Description: "List the hub's agents whose authority state is orphaned or revoked: the non-deleted agents, paged, filtered by computed state (an operator diagnostic under the permission of the health summary; session only until its token admission is governed)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/orphaned-agents", Method: "GET"},
 		},

@@ -29,8 +29,9 @@ const (
 	// last one was deactivated with a recorded cause.
 	AgentAuthorityRevoked = "revoked"
 	// AgentAuthorityUnrecorded: the agent's delegation was never recorded
-	// (an agent from before delegations were recorded). It is not reported
-	// as orphaned.
+	// (an agent from before delegations were recorded), or its last
+	// delegation was deactivated without a recorded cause. It is not
+	// reported as orphaned or revoked.
 	AgentAuthorityUnrecorded = "unrecorded"
 )
 
