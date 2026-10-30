@@ -55,7 +55,7 @@ func mergeRowForTest(t *testing.T, stored, body string) (map[string]map[string]a
 	if err := json.Unmarshal([]byte(body), &req); err != nil {
 		t.Fatal(err)
 	}
-	doc, warnings, err := mergeRuntimesRow([]byte(stored), req.Runtimes, sentRuntimesObject([]byte(body)))
+	doc, warnings, _, err := mergeRuntimesRow([]byte(stored), req.Runtimes, sentRuntimesObject([]byte(body)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +153,7 @@ func TestMergeRuntimesRow(t *testing.T) {
 		if err := json.Unmarshal([]byte(body), &req); err != nil {
 			t.Fatal(err)
 		}
-		doc, _, err := mergeRuntimesRow([]byte(`{"k":{"type":"docker","extra":{"n":12345678901234567890}}}`), req.Runtimes, sentRuntimesObject([]byte(body)))
+		doc, _, _, err := mergeRuntimesRow([]byte(`{"k":{"type":"docker","extra":{"n":12345678901234567890}}}`), req.Runtimes, sentRuntimesObject([]byte(body)))
 		if err != nil {
 			t.Fatal(err)
 		}

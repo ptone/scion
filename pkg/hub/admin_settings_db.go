@@ -95,6 +95,10 @@ type ServerConfigDBResponse struct {
 	// reports a node env, and each profile's value (ptone/scion#3916).
 	// Read-only.
 	ImageRegistryProvenance *ImageRegistryProvenance `json:"image_registry_provenance,omitempty"`
+
+	// PlacementPreflight is the read-only Kubernetes placement pre-upgrade
+	// report (counts only). Set by the GET handler only.
+	PlacementPreflight *PlacementPreflightView `json:"placement_preflight,omitempty"`
 }
 
 // SupersededKey represents a bootstrap-material key whose value in the
@@ -128,7 +132,9 @@ type ServerConfigUpdateDBRequest struct {
 	// A section merged on its current row (mergeSectionOnCurrent) that has
 	// no entry uses the revision the merge read as an implicit CAS; the
 	// map sections (runtimes, profiles, harness_configs) use
-	// last-writer-wins.
+	// last-writer-wins. runtimes and profiles are written together in one
+	// transaction that also compares the revision of the one the body
+	// leaves out (placementPairForSave).
 	ExpectedRevisions map[string]int64 `json:"expected_revisions,omitempty"`
 }
 
@@ -149,6 +155,7 @@ func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	resp.StorageOverrideErrors = s.removedStorageOverrideErrors()
+	resp.PlacementPreflight = s.placementPreflight(r.Context(), ops)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -1043,6 +1050,8 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// ignored, so the echo of a changed report is not refused
 	// (ptone/scion#3916).
 	rawBody = dropImageRegistryProvenance(rawBody)
+	// Likewise the read-only placement pre-upgrade report of a GET body.
+	rawBody = dropTopLevelMember(rawBody, placementPreflightKey)
 	if s.rejectGateProtectedSettingsKeys(w, rawBody) {
 		return
 	}
@@ -1066,6 +1075,11 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	rawBody = cl.body
+	// Kubernetes placement keys of runtimes and profiles are checked raw,
+	// before the typed decode below can drop a misspelt or malformed one.
+	if rejectMalformedPlacement(w, rawBody) {
+		return
+	}
 	var req ServerConfigUpdateDBRequest
 	if err := json.Unmarshal(rawBody, &req); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
@@ -1381,6 +1395,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// kept (ptone/scion#6580; mergeRuntimeEntries). The row revision read
 	// is the CAS base.
 	var runtimeMergeWarnings []string
+	var runtimeKeptKeys map[string][]string
 	if _, ok := sectionDocs["runtimes"]; ok {
 		var rowValue []byte
 		rev := int64(0)
@@ -1394,7 +1409,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
 			return
 		}
-		merged, warnings, err := mergeRuntimesRow(rowValue, req.Runtimes, sentRuntimesObject(rawBody))
+		merged, warnings, kept, err := mergeRuntimesRow(rowValue, req.Runtimes, sentRuntimesObject(rawBody))
 		if err != nil {
 			slog.Error("PUT server-config: failed to build runtimes document", "error", err)
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
@@ -1403,6 +1418,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		sectionDocs["runtimes"] = merged
 		mergedBaseRevs["runtimes"] = rev
 		runtimeMergeWarnings = warnings
+		runtimeKeptKeys = kept
 	}
 
 	// The start-claim keys are checked on the merged lifecycle document,
@@ -1669,6 +1685,11 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	allValidationErrors := make(map[string][]config.ValidationError)
 	tlsTouched := telemetryTLSTouched(rawBody)
 	for secName, doc := range sectionDocs {
+		if secName == "runtimes" {
+			if vdoc, err := runtimesDocForValidation(doc, runtimeKeptKeys); err == nil {
+				doc = vdoc
+			}
+		}
 		errs := opsettings.Validate(secName, doc)
 		if secName == "telemetry" {
 			errs = append(errs, telemetryTLSSaveErrors(doc, tlsTouched, slog.Default())...)
@@ -1682,6 +1703,14 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			"error":  "validation_failed",
 			"errors": allValidationErrors,
 		})
+		return
+	}
+	// Kubernetes placement of the proposed runtimes and profiles pair: the
+	// sent sections and the stored value of an omitted one. The write below
+	// saves both sections in one transaction and compares the revision of
+	// the omitted section read here.
+	placement, ok := s.placementPairForSave(r.Context(), w, ops, sectionDocs)
+	if !ok {
 		return
 	}
 
@@ -1768,7 +1797,91 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	}
 	sort.Strings(sortedSections)
 
+	// runtimes and profiles are saved first, together, in one guarded
+	// transaction (placementPairForSave): either both are written or
+	// neither is, and a conflict leaves every section of the save
+	// unwritten.
+	if placement.active {
+		var writes []guardedSectionWrite
+		reads := placement.reads
+		for _, secName := range placementSections {
+			doc, sent := sectionDocs[secName]
+			if !sent {
+				continue
+			}
+			expectedRev := int64(-1)
+			if rev, ok := req.ExpectedRevisions[secName]; ok {
+				expectedRev = rev
+			} else if rev, ok := mergedBaseRevs[secName]; ok {
+				expectedRev = rev
+			}
+			if rev, ok := noopRevs[secName]; ok && expectedRev == rev {
+				applied[secName] = rev
+				unchanged = append(unchanged, secName)
+				reads[secName] = rev
+				continue
+			}
+			if rev, same := unchangedManagedRow(r.Context(), ops, secName, doc, expectedRev); same {
+				applied[secName] = rev
+				unchanged = append(unchanged, secName)
+				reads[secName] = rev
+				continue
+			}
+			wr := guardedSectionWrite{section: secName, doc: doc, expectedRevision: expectedRev}
+			if secName == "runtimes" && len(runtimeKeptKeys) > 0 {
+				if vdoc, err := runtimesDocForValidation(doc, runtimeKeptKeys); err == nil {
+					wr.validationDoc = vdoc
+				}
+			}
+			writes = append(writes, wr)
+		}
+		if len(writes) > 0 {
+			revs, notApplied, err := ops.updateGuarded(r.Context(), writes, reads, updatedBy, "managed")
+			switch {
+			case errors.Is(err, store.ErrRevisionConflict):
+				written := map[string]bool{}
+				for _, wr := range writes {
+					written[wr.section] = true
+					conflicted = append(conflicted, map[string]interface{}{
+						"section":           wr.section,
+						"expected_revision": wr.expectedRevision,
+						"current_revision":  s.getCurrentRevision(ops, wr.section),
+					})
+				}
+				// The sections read for the validation and not written,
+				// whose revision changed, are listed too.
+				conflicted = append(conflicted, placementReadConflicts(r.Context(), ops, reads, written)...)
+			case errors.Is(err, errGuardedBatchUnsupported):
+				slog.Error("PUT server-config: the settings store cannot save runtimes and profiles together", "error", err)
+				fileTxn.abort()
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"Failed to save runtimes and profiles: the settings store cannot save them in one transaction", nil)
+				return
+			case err != nil:
+				slog.Error("Failed to update runtimes and profiles", "error", err)
+				fileTxn.abort()
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to update runtimes and profiles", nil)
+				return
+			default:
+				for sec, rev := range revs {
+					applied[sec] = rev
+					if notApplied[sec] {
+						notInEffect[sec] = true
+					}
+				}
+			}
+		}
+	}
+
 	for _, secName := range sortedSections {
+		if len(conflicted) > 0 {
+			// A conflict on the runtimes and profiles save writes nothing
+			// else.
+			break
+		}
+		if placement.active && (secName == "runtimes" || secName == "profiles") {
+			continue
+		}
 		doc := sectionDocs[secName]
 		expectedRev := int64(-1) // last-writer-wins by default
 		if rev, ok := req.ExpectedRevisions[secName]; ok {

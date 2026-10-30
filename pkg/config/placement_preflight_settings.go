@@ -44,8 +44,8 @@ const (
 	// SettingsPlacementOnNonKubernetes: a runtime entry that is not
 	// Kubernetes, or a profile whose runtime entry is not, sets placement.
 	SettingsPlacementOnNonKubernetes SettingsPlacementCategory = "settings_placement_on_non_kubernetes"
-	// SettingsProfileRuntimeMissing: a profile names a runtime entry that
-	// does not exist.
+	// SettingsProfileRuntimeMissing: a profile that sets placement names a
+	// runtime entry that does not exist.
 	SettingsProfileRuntimeMissing SettingsPlacementCategory = "settings_profile_runtime_missing"
 	// SettingsSiblingPlacementDisagreement: two runtime entries with the
 	// same context and namespace set different placement.
@@ -130,43 +130,15 @@ func (r SettingsPlacementReport) Summary() string {
 	return b.String()
 }
 
-// ScanSettingsPlacement categorizes the typed runtime entries and profiles.
-// Sibling runtime entries are grouped by literal context and namespace
-// (LiteralSiblingGroups): entries whose cluster identity only a Runtime
-// Broker can resolve are compared there, at start.
+// ScanSettingsPlacement counts the placement findings of
+// ValidatePlacementSettings in the typed runtime entries and profiles, by
+// category: one count per finding, so an entry with two findings counts
+// twice.
 func ScanSettingsPlacement(runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig) SettingsPlacementReport {
 	var r SettingsPlacementReport
-	for name, rt := range runtimes {
-		if len(ValidatePlacementFields("runtimes."+name, rt.NodeSelector, rt.Tolerations, rt.RuntimeClassName)) > 0 {
-			r.add(SettingsInvalidPlacementField, "runtimes")
-		}
-		if RuntimeEntryHasPlacement(rt) && !IsKubernetesRuntimeEntry(name, rt) {
-			r.add(SettingsPlacementOnNonKubernetes, "runtimes")
-		}
-	}
-	for name, p := range profiles {
-		if len(ValidatePlacementFields("profiles."+name, p.NodeSelector, p.Tolerations, p.RuntimeClassName)) > 0 {
-			r.add(SettingsInvalidPlacementField, "profiles")
-		}
-		if p.Runtime == "" {
-			continue
-		}
-		rt, ok := runtimes[p.Runtime]
-		if !ok {
-			r.add(SettingsProfileRuntimeMissing, "profiles")
-			continue
-		}
-		if ProfileHasPlacement(p) && !IsKubernetesRuntimeEntry(p.Runtime, rt) {
-			r.add(SettingsPlacementOnNonKubernetes, "profiles")
-		}
-		if ProfilePoolConflict(rt, p) {
-			r.add(SettingsPoolSelectorConflict, "profiles")
-		}
-	}
-	for _, e := range ValidatePlacement(runtimes, nil, LiteralSiblingGroups(runtimes)) {
-		if strings.HasPrefix(e.Message, "runtime entries ") {
-			r.add(SettingsSiblingPlacementDisagreement, "runtimes")
-		}
+	for _, e := range ValidatePlacementSettings(runtimes, profiles) {
+		section, _, _ := strings.Cut(e.Path, ".")
+		r.add(e.Category, section)
 	}
 	return r
 }
