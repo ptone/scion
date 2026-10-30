@@ -262,6 +262,11 @@ func (s *Server) handlePortView(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setPortViewResponseHeaders(w)
+	// Every answer below counts as invalid (scion.hub.port_view.request),
+	// except a preflight, the trailing-slash redirect and a proxied
+	// request, which proxyToAgentPort counts with its transport.
+	countedOutcome := portViewRequestInvalid
+	defer func() { s.recordPortViewRequest("", countedOutcome) }()
 	if !isPortViewRequest(r) {
 		writePortViewInvalid(w)
 		return
@@ -276,6 +281,7 @@ func (s *Server) handlePortView(w http.ResponseWriter, r *http.Request) {
 			writePortViewInvalid(w)
 			return
 		}
+		countedOutcome = ""
 		writePortViewPreflight(w, r)
 		return
 	}
@@ -339,16 +345,17 @@ func (s *Server) handlePortView(w http.ResponseWriter, r *http.Request) {
 		if r.URL.RawQuery != "" {
 			loc += "?" + encodeLocationQuery(r.URL.RawQuery)
 		}
+		countedOutcome = ""
 		w.Header().Set("Location", loc)
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusPermanentRedirect)
 		return
 	}
+	countedOutcome = ""
 	s.proxyToAgentPort(w, r, identity, agent, exposed, "/"+sub, portProxyPolicy{
-		surface:     portProxySurfaceView,
-		caller:      "user:" + grant.UserID,
-		conduitOnly: true,
-		portView:    true,
+		surface:  portProxySurfaceView,
+		caller:   "user:" + grant.UserID,
+		portView: true,
 	}, start)
 }
 
@@ -390,14 +397,30 @@ func (s *Server) portViewIdentity(ctx context.Context, userID string, agent *sto
 	return identity, true
 }
 
+// portViewTransportAvailable reports whether the page view route could
+// serve this agent's exposed port now for identity (the identity the page
+// view request runs as, portViewIdentity), so a page link is only created
+// when one of proxyToAgentPort's transports would carry it: the agent's
+// conduit session (this node routes conduit and the port is loopback), or
+// else the agent's port-forward tunnel when it is up and the legacy route
+// is not refused for identity (conduitLegacyRouteRefusedFor, the check
+// refuseLegacyProxy makes). It writes, logs and records nothing.
+func (s *Server) portViewTransportAvailable(agentID string, exposed *store.ExposedPort, identity Identity) bool {
+	if s.conduitRoutable() && isLoopbackHost(exposed.Host) {
+		return true
+	}
+	return s.portTunnels.has(agentID) && !s.conduitLegacyRouteRefusedFor(identity)
+}
+
 // redirectToPortView answers a page navigation to an exposed port's link
 // with a redirect to a new page link, and reports whether it did. It
 // applies with the experiment on, to a GET or HEAD page navigation by a
-// signed-in user (not an agent or a token), for a loopback port of an
-// agent this node can reach over conduit, and only when the page view
-// route would serve that user (portViewIdentity), and when a page link can
-// be signed now (mintPortView). In every other case the port link serves
-// the request as before.
+// signed-in user (not an agent or a token), only when the page view route
+// would serve that user (portViewIdentity), when a transport would carry
+// the page view request (portViewTransportAvailable), and when a page link
+// can be signed now (mintPortView). In every other case the port link
+// serves the request as before. Each such navigation is counted
+// (scion.hub.port_view.redirect).
 func (s *Server) redirectToPortView(w http.ResponseWriter, r *http.Request, agent *store.Agent, exposed *store.ExposedPort) bool {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		return false
@@ -405,6 +428,16 @@ func (s *Server) redirectToPortView(w http.ResponseWriter, r *http.Request, agen
 	if !s.experimentEnabled(experiments.PortView) || !portview.IsNavigation(r) {
 		return false
 	}
+	outcome := s.portViewRedirect(w, r, agent, exposed)
+	s.recordPortViewRedirect(outcome)
+	return outcome == portViewRedirectMinted
+}
+
+// portViewRedirect is redirectToPortView for a page navigation with the
+// experiment on. It answers with the redirect only when it returns
+// portViewRedirectMinted; otherwise it writes nothing and the outcome says
+// why the port link serves the request.
+func (s *Server) portViewRedirect(w http.ResponseWriter, r *http.Request, agent *store.Agent, exposed *store.ExposedPort) string {
 	var userID string
 	switch u := GetIdentityFromContext(r.Context()).(type) {
 	case *AuthenticatedUser:
@@ -412,35 +445,37 @@ func (s *Server) redirectToPortView(w http.ResponseWriter, r *http.Request, agen
 	case *DevUser:
 		userID = u.ID()
 	default:
-		return false
+		return portViewRedirectNotEligible
 	}
 	if !portview.CanonicalID(userID) || !portview.CanonicalID(agent.ID) {
-		return false
-	}
-	if !s.conduitRoutable() || !isLoopbackHost(exposed.Host) {
-		return false
+		return portViewRedirectNotEligible
 	}
 	escSub, ok := portLinkSubpath(r.URL.EscapedPath())
 	if !ok {
-		return false
+		return portViewRedirectNotEligible
 	}
 	if !s.portViewCapabilityKeys().configured() {
-		return false
+		return portViewRedirectIssuanceClosed
 	}
-	if _, ok := s.portViewIdentity(r.Context(), userID, agent); !ok {
+	identity, ok := s.portViewIdentity(r.Context(), userID, agent)
+	if !ok {
 		slog.Debug("Port view: not opened for this user; serving the port link", "agent_id", agent.ID, "port", exposed.Port)
-		return false
+		return portViewRedirectUserRefused
+	}
+	// Never create a page link the page view route would then refuse.
+	if !s.portViewTransportAvailable(agent.ID, exposed, identity) {
+		return portViewRedirectNoTransport
 	}
 	exp := s.portViewNow().Add(s.portViewTTL()).Truncate(time.Second)
 	capability, err := s.mintPortView(agent.ID, exposed.Port, userID, exp)
 	if err != nil {
 		// No key may sign now: the port link serves the request.
-		return false
+		return portViewRedirectIssuanceClosed
 	}
 	// A sub-path the page view route would not accept (isPortViewRequest)
 	// keeps the port link.
 	if u, err := url.Parse(portview.Route + capability + "/" + escSub); err != nil || !isPortViewRequest(&http.Request{URL: u}) {
-		return false
+		return portViewRedirectNotEligible
 	}
 	loc := relativeAPIRoot(r.URL.EscapedPath()) + "portview/" + capability + "/" + escSub
 	if r.URL.RawQuery != "" {
@@ -449,7 +484,7 @@ func (s *Server) redirectToPortView(w http.ResponseWriter, r *http.Request, agen
 	w.Header().Set("Location", loc)
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusFound)
-	return true
+	return portViewRedirectMinted
 }
 
 // redirectToPortLink sends a page navigation on the page view route to
@@ -487,25 +522,6 @@ func portLinkSubpath(escPath string) (string, bool) {
 		return "", false
 	}
 	return segs[8], true
-}
-
-// portViewStrippedRequestHeader reports whether a request header is
-// removed before a page view request reaches the app: the hub's own
-// credential headers (sensitiveHeader) and the identity headers a
-// federated caller or a forwarding hub may add. The front proxy's identity
-// headers are removed on every port proxy surface
-// (stripFrontProxyIdentityHeaders).
-func portViewStrippedRequestHeader(k string) bool {
-	if sensitiveHeader(k) {
-		return true
-	}
-	switch strings.ToLower(k) {
-	case strings.ToLower(FederationTokenHeader),
-		"x-forwarded-user-id", "x-forwarded-user-email", "x-forwarded-user-name", "x-forwarded-user-role":
-		return true
-	default:
-		return false
-	}
 }
 
 // portViewModifyResponse applies the page view rules to the headers of a
