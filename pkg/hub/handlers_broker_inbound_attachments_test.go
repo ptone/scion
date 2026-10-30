@@ -948,3 +948,37 @@ func TestBrokerAttachments_AuditLinesCarryNoFileNames(t *testing.T) {
 	assert.Contains(t, out, `"decision":"refused: files"`)
 	assert.NotContains(t, out, marker, "no audit line names a file")
 }
+
+// TestRequireNoUploadsAtAll_SeesAStoredUpload: the listing behind
+// requireNoUploadsAtAll reports a stored unsent upload, so the "nothing
+// stored" assertions cannot pass vacuously.
+func TestRequireNoUploadsAtAll_SeesAStoredUpload(t *testing.T) {
+	f := newSendFixture(t)
+	brokerUploadedIDs(t, brokerUpload(t, f.srv, "user:"+f.ua.Email, f.projA.ID, nil, brokerAttFile{"notes.txt", "hello"}))
+	refs, err := f.art.ListLiveScopeRefs(context.Background(), artifacts.ScopeKindUpload, "", 1000)
+	require.NoError(t, err)
+	assert.Contains(t, refs, artifacts.PrincipalRef(artifacts.PrincipalKindUser, f.ua.ID))
+}
+
+// TestBrokerInboundRouted_AttachmentIDsRefused: attachment_ids on the
+// routed route are refused with 400 and nothing is dispatched; a request
+// without them is handled as before.
+func TestBrokerInboundRouted_AttachmentIDsRefused(t *testing.T) {
+	f := newSendFixture(t)
+	sender := "user:" + f.ua.Email
+	ids := brokerUploadedIDs(t, brokerUpload(t, f.srv, sender, f.projA.ID, nil, brokerAttFile{"notes.txt", "hello"}))
+	raw, err := json.Marshal(routedInboundRequest{
+		ProjectID: f.projA.ID, DefaultAgent: f.target.Slug,
+		Message: &messages.StructuredMessage{Version: messages.Version, Channel: "telegram", Sender: sender,
+			Msg: "hello", Type: messages.TypeInstruction},
+		AttachmentIDs: ids,
+	})
+	require.NoError(t, err)
+	rec := brokerAttRequest(t, f.srv, "/api/v1/broker/inbound/routed", "application/json", bytes.NewReader(raw))
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `"code":"`+codeAttachmentsUnsupportedOnRoute+`"`)
+	assert.Empty(t, f.disp.getCalls(), "nothing is dispatched")
+
+	rec = brokerInboundRouted(t, f.srv, sender, f.target)
+	assert.NotEqual(t, http.StatusBadRequest, rec.Code, "without attachment_ids the route is unchanged: %s", rec.Body.String())
+}

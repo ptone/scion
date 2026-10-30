@@ -85,10 +85,12 @@ const maxBrokerAttachmentTargets = 256
 // naming more than maxBrokerAttachmentTargets targets.
 const codeTooManyTargets = "too_many_targets"
 
-// maxBrokerAttachmentMetadataBytes bounds the metadata of one upload: the
-// sum of each field's name and value. It fits inside the framing
-// allowance (brokerAttachmentEnvelopeBytes), so metadata can never push a
-// file of delivery_max_bytes over the body cap.
+// maxBrokerAttachmentMetadataBytes bounds the metadata values of one
+// upload: the sum of each field's name and value, not the multipart
+// framing or a file part's file name. The framing of up to
+// maxBrokerAttachmentTargets fields still fits the framing allowance
+// (brokerAttachmentEnvelopeBytes); a very long file name can still take
+// the body over the cap, and is then refused with 413, nothing stored.
 const maxBrokerAttachmentMetadataBytes = 32 << 10
 
 // codeMetadataTooLarge is the error code of the 400 for an upload whose
@@ -252,7 +254,7 @@ func (s *Server) handleBrokerAttachmentsCheck(w http.ResponseWriter, r *http.Req
 	answer := brokerAttachmentCheckResponse{Uploads: s.brokerAttachmentUploads()}
 	sender, refusal := s.authorizeBrokerAttachmentRequest(ctx, &req)
 	if refusal != nil && refusal.status >= http.StatusInternalServerError {
-		log.Error("broker attachment check failed", "project_id", req.ProjectID, "refusal", errBrokerSenderRefused(refusal))
+		log.Error("broker attachment check failed", "project_id", req.ProjectID, "refusal", brokerRefusalLogText(refusal))
 		refusal.write(w)
 		return
 	}
@@ -333,7 +335,7 @@ func (s *Server) handleBrokerAttachmentsUpload(w http.ResponseWriter, r *http.Re
 	sender, refusal := s.authorizeBrokerAttachmentRequest(ctx, req)
 	if refusal != nil {
 		if refusal.status >= http.StatusInternalServerError {
-			log.Error("broker attachment upload failed", "project_id", req.ProjectID, "refusal", errBrokerSenderRefused(refusal))
+			log.Error("broker attachment upload failed", "project_id", req.ProjectID, "refusal", brokerRefusalLogText(refusal))
 		} else {
 			senderID := ""
 			if sender != nil {

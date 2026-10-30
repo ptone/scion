@@ -126,9 +126,9 @@ func brokerSenderContext(ctx context.Context, sender *AuthenticatedUser) context
 	return contextWithIdentity(ctx, sender)
 }
 
-// errBrokerSenderRefused formats a refusal for a log line: code and message
+// brokerRefusalLogText formats a refusal for a log line: code and message
 // only, never request content.
-func errBrokerSenderRefused(e *apiError) string {
+func brokerRefusalLogText(e *apiError) string {
 	if e == nil {
 		return ""
 	}

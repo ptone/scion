@@ -162,7 +162,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		senderUser, refusal = s.resolveBrokerInboundSender(r.Context(), req.Message.Sender)
 		if refusal != nil {
 			log.Warn("broker inbound sender refused",
-				"sender", req.Message.Sender, "refusal", errBrokerSenderRefused(refusal))
+				"sender", req.Message.Sender, "refusal", brokerRefusalLogText(refusal))
 			refusal.write(w)
 			return
 		}

@@ -556,11 +556,14 @@ func (b *TelegramBrokerV2) prepareInboundAttachment(ctx context.Context, api *Te
 			b.log.Warn("Attachment check answered artifact without a size limit; delivering the message without its attachment")
 			return withheld()
 		}
-		limit = min(limit, maxTelegramFileSize)
+		source := limitSourceHub
+		if maxTelegramFileSize < limit {
+			limit, source = maxTelegramFileSize, limitSourceTelegram
+		}
 		data, err := b.downloadAttachmentBytes(ctx, api, att, limit)
 		if errors.Is(err, errAttachmentTooLarge) {
-			b.log.Info("Inbound attachment over the hub's size limit", "size", att.Size, "limit", limit)
-			reply(attachmentTooLargeText(att.Name, limit, hasText))
+			b.log.Info("Inbound attachment over the size limit", "size", att.Size, "limit", limit, "limit_source", source)
+			reply(attachmentTooLargeText(att.Name, limit, source, hasText))
 			return inboundAttachmentPlan{}
 		}
 		if err != nil {
@@ -591,8 +594,8 @@ func (b *TelegramBrokerV2) downloadAttachmentBytes(ctx context.Context, api *Tel
 func (b *TelegramBrokerV2) stageInboundAttachment(ctx context.Context, api *TelegramAPIClient, link *GroupLink, att telegramAttachment, reply func(string), hasText bool) inboundAttachmentPlan {
 	fail := func(err error) inboundAttachmentPlan {
 		if errors.Is(err, errAttachmentTooLarge) {
-			b.log.Info("Inbound attachment over the size limit", "size", att.Size, "limit", maxTelegramFileSize)
-			reply(attachmentTooLargeText(att.Name, maxTelegramFileSize, hasText))
+			b.log.Info("Inbound attachment over the size limit", "size", att.Size, "limit", maxTelegramFileSize, "limit_source", limitSourceTelegram)
+			reply(attachmentTooLargeText(att.Name, maxTelegramFileSize, limitSourceTelegram, hasText))
 			return inboundAttachmentPlan{}
 		}
 		b.log.Error("Failed to stage telegram file", "error", err)
@@ -654,13 +657,25 @@ func replyToSender(ctx context.Context, api *TelegramAPIClient, tgMsg *TGMessage
 	api.SendMessage(ctx, tgMsg.Chat.ID, text, "", SendOption{MessageThreadID: tgMsg.MessageThreadID}) //nolint:errcheck
 }
 
-// attachmentTooLargeText tells the sender an attachment was over the
-// hub's limit.
-func attachmentTooLargeText(name string, limit int64, hasText bool) string {
-	if hasText {
-		return fmt.Sprintf("Attachment %q is larger than agents on this hub accept (max %d bytes); your message was sent without it.", name, limit)
+// Where an attachment size limit comes from: the hub's answer, or
+// Telegram's download limit for bots (maxTelegramFileSize) when that is the
+// smaller one.
+const (
+	limitSourceHub      = "hub"
+	limitSourceTelegram = "telegram"
+)
+
+// attachmentTooLargeText tells the sender an attachment was over limit,
+// naming where the limit comes from (limitSourceHub or limitSourceTelegram).
+func attachmentTooLargeText(name string, limit int64, source string, hasText bool) string {
+	what := "agents on this hub accept"
+	if source == limitSourceTelegram {
+		what = "Telegram lets bots download"
 	}
-	return fmt.Sprintf("Attachment %q is larger than agents on this hub accept (max %d bytes), so nothing was sent.", name, limit)
+	if hasText {
+		return fmt.Sprintf("Attachment %q is larger than %s (max %d bytes); your message was sent without it.", name, what, limit)
+	}
+	return fmt.Sprintf("Attachment %q is larger than %s (max %d bytes), so nothing was sent.", name, what, limit)
 }
 
 // sendInbound delivers msg for one recipient agent, carrying the message's

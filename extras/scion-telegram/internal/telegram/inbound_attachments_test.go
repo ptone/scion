@@ -1022,6 +1022,7 @@ func TestInboundAttachment_FailedLegacyStageLeavesNoEntry(t *testing.T) {
 	_, download := env.tg.fileCalls()
 	assert.Equal(t, 1, download, "the download started")
 	assert.Empty(t, env.telegramEntries(t), "the partly staged entry is removed")
+	assert.True(t, anyContains(env.chatTexts(), "larger than Telegram lets bots download"), "the notice names Telegram's limit: %q", env.chatTexts())
 	env.assertNoAttachmentWrites(t)
 }
 
@@ -1064,4 +1065,16 @@ func TestInboundAttachment_ExistingEntryNeverTouched(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got, 1, "nothing was written into the existing entry")
 	assert.Equal(t, "theirs.txt", got[0].Name())
+}
+
+// The size notice names the hub when the hub's limit applied, and
+// Telegram's download limit for bots when that was the smaller one.
+func TestAttachmentTooLargeText_NamesTheLimit(t *testing.T) {
+	hub := attachmentTooLargeText("a.bin", 1000, limitSourceHub, true)
+	assert.Contains(t, hub, "larger than agents on this hub accept (max 1000 bytes)")
+	assert.Contains(t, hub, "sent without it")
+	tg := attachmentTooLargeText("a.bin", maxTelegramFileSize, limitSourceTelegram, false)
+	assert.Contains(t, tg, fmt.Sprintf("larger than Telegram lets bots download (max %d bytes)", maxTelegramFileSize))
+	assert.Contains(t, tg, "nothing was sent")
+	assert.NotContains(t, tg, "hub")
 }

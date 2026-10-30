@@ -38,7 +38,16 @@ type routedInboundRequest struct {
 	ExternalRef  string                      `json:"external_ref,omitempty"`
 	ParentRef    string                      `json:"parent_ref,omitempty"`
 	Message      *messages.StructuredMessage `json:"message"`
+
+	// AttachmentIDs is not supported on this route yet; a request naming
+	// any is refused (codeAttachmentsUnsupportedOnRoute) rather than
+	// delivered without them.
+	AttachmentIDs []string `json:"attachment_ids,omitempty"`
 }
+
+// codeAttachmentsUnsupportedOnRoute is the error code of the 400 for
+// attachment_ids on the routed broker inbound route.
+const codeAttachmentsUnsupportedOnRoute = "attachments_unsupported_on_route"
 
 // routedInboundResponse is returned from POST /api/v1/broker/inbound/routed.
 type routedInboundResponse struct {
@@ -105,6 +114,11 @@ func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Reques
 	}
 
 	// --- Input validation ---
+	if len(req.AttachmentIDs) > 0 {
+		writeError(w, http.StatusBadRequest, codeAttachmentsUnsupportedOnRoute,
+			"attachment_ids are not accepted on this route", nil)
+		return
+	}
 	if req.ProjectID == "" {
 		ValidationError(w, "project_id is required", map[string]interface{}{"field": "project_id"})
 		return
@@ -145,7 +159,7 @@ func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Reques
 	senderIdentity, refusal := s.resolveBrokerInboundSender(r.Context(), req.Message.Sender)
 	if refusal != nil {
 		log.Warn("routed inbound sender refused",
-			"sender", req.Message.Sender, "refusal", errBrokerSenderRefused(refusal))
+			"sender", req.Message.Sender, "refusal", brokerRefusalLogText(refusal))
 		refusal.write(w)
 		return
 	}
