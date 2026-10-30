@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	scionapi "github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -67,11 +68,22 @@ const (
 	attachmentsWithheldNotice      = "Attachments can't be delivered to agents on this hub right now; your message was sent without them."
 	attachmentsWithheldNothingSent = "Attachments can't be delivered to agents on this hub right now, so nothing was sent."
 	attachmentsRefusedText         = "You can't send attachments to the addressed agents in this project, so your message was not delivered."
+
+	attachmentsTooManyRecipientsNotice      = "This message is addressed to more agents than the hub accepts attachments for; it was sent without its attachment."
+	attachmentsTooManyRecipientsNothingSent = "This message is addressed to more agents than the hub accepts attachments for, so nothing was sent."
+
+	// hubCodeTooManyTargets is the hub's error code for a check or upload
+	// naming more targets than it accepts.
+	hubCodeTooManyTargets = "too_many_targets"
 )
 
 // errAttachmentCheckAbsent reports that the hub does not serve the
 // attachment check route (an older hub).
 var errAttachmentCheckAbsent = errors.New("hub does not serve the attachment check")
+
+// errAttachmentTooManyTargets reports a check the hub refused because it
+// names more recipients than the hub accepts.
+var errAttachmentTooManyTargets = errors.New("attachment check names too many recipients")
 
 // errAttachmentTooLarge reports a file over the applicable size limit.
 var errAttachmentTooLarge = errors.New("attachment too large")
@@ -201,6 +213,8 @@ func (b *TelegramBrokerV2) checkInboundAttachments(ctx context.Context, sender, 
 		return out, nil
 	case status == http.StatusNotFound && !isHubErrorEnvelope(answer):
 		return attachmentCheckAnswer{}, errAttachmentCheckAbsent
+	case status == http.StatusBadRequest && hubErrorCode(answer) == hubCodeTooManyTargets:
+		return attachmentCheckAnswer{}, errAttachmentTooManyTargets
 	default:
 		return attachmentCheckAnswer{}, fmt.Errorf("attachment check: HTTP %d %s", status, hubErrorCode(answer))
 	}
@@ -311,7 +325,7 @@ func telegramAttachmentOf(tgMsg *TGMessage) (telegramAttachment, bool) {
 	// single component. Backslashes become slashes first so both Windows
 	// and Unix separators are stripped whatever the host OS.
 	a.Name = filepath.Base(strings.ReplaceAll(a.Name, "\\", "/"))
-	if a.Name == "." || a.Name == "/" || a.Name == "" {
+	if a.Name == "." || a.Name == ".." || a.Name == "/" || a.Name == "" {
 		a.Name = fmt.Sprintf("file_%s", a.FileID)
 	}
 	return a, true
@@ -447,6 +461,14 @@ func (b *TelegramBrokerV2) prepareInboundAttachment(ctx context.Context, api *Te
 		// passed before this point.
 		b.log.Info("Hub has no attachment check; staging the attachment in the project scratchpad")
 		return b.stageInboundAttachment(ctx, api, link, att, reply)
+	case errors.Is(err, errAttachmentTooManyTargets):
+		b.log.Info("Hub refused the attachment check: too many recipients", "recipients", len(recipients))
+		if hasText {
+			reply(attachmentsTooManyRecipientsNotice)
+		} else {
+			reply(attachmentsTooManyRecipientsNothingSent)
+		}
+		return inboundAttachmentPlan{}
 	case err != nil:
 		b.log.Warn("Attachment check failed; delivering the message without its attachment", "error", err)
 		return withheld()
@@ -507,7 +529,7 @@ func (b *TelegramBrokerV2) stageInboundAttachment(ctx context.Context, api *Tele
 		return fail(err)
 	}
 	defer body.Close()
-	entry := fmt.Sprintf("tg_%d", time.Now().UnixNano())
+	entry := nextLegacyEntry()
 	agentPath, scratchpad, err := legacyStage(link.ProjectSlug, link.ProjectID, entry, att.Name, body)
 	if err != nil {
 		return fail(err)
@@ -516,6 +538,32 @@ func (b *TelegramBrokerV2) stageInboundAttachment(ctx context.Context, api *Tele
 	return inboundAttachmentPlan{attachment: &inboundAttachment{
 		att: att, legacy: true, agentPath: agentPath, scratchpad: scratchpad, entry: entry,
 	}}
+}
+
+// legacyEntryClock is the clock legacy entry names are taken from; tests
+// replace it.
+var legacyEntryClock = time.Now
+
+// legacyEntrySeq makes legacy entry names unique within the process.
+var legacyEntrySeq struct {
+	sync.Mutex
+	last int64
+}
+
+// nextLegacyEntry returns the name of a new per-message legacy entry,
+// tg_<n>: n is the current time in nanoseconds, or one more than the last
+// name's n when the clock has not moved past it, so two messages staged in
+// one clock tick never share an entry (the refusal cleanup of one would
+// otherwise remove the other's file).
+func nextLegacyEntry() string {
+	n := legacyEntryClock().UnixNano()
+	legacyEntrySeq.Lock()
+	if n <= legacyEntrySeq.last {
+		n = legacyEntrySeq.last + 1
+	}
+	legacyEntrySeq.last = n
+	legacyEntrySeq.Unlock()
+	return fmt.Sprintf("tg_%d", n)
 }
 
 // replyToSender sends text to the chat (and forum topic) of tgMsg.
@@ -551,6 +599,15 @@ func (b *TelegramBrokerV2) sendInbound(ctx context.Context, api *TelegramAPIClie
 		return status, errMsg, true
 	}
 
+	b.mu.RLock()
+	inProcess := b.InboundHandler != nil
+	b.mu.RUnlock()
+	if inProcess {
+		// An in-process InboundHandler receives the message only; it takes
+		// no upload ids, so nothing is uploaded for it.
+		status, errMsg = b.deliverInboundWithAttachments(ctx, topic, msg, nil)
+		return status, errMsg, true
+	}
 	ids, failure := b.uploadForSend(ctx, msg.Sender, projectID, agentSlug, a)
 	if failure != "" {
 		replyToSender(ctx, api, tgMsg, fmt.Sprintf("Attachment %q could not be uploaded for %s: %s. Your message was not sent to that agent.", a.att.Name, agentSlug, failure))

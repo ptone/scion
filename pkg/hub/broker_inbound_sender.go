@@ -56,8 +56,8 @@ func (s *Server) resolveBrokerInboundSender(ctx context.Context, sender string) 
 		return nil, &apiError{status: http.StatusInternalServerError, code: ErrCodeInternalError,
 			message: "internal error resolving sender identity"}
 	}
-	// C2a containment: require active status before constructing an
-	// AuthenticatedUser from broker-supplied sender data.
+	// Require active status before constructing an AuthenticatedUser from
+	// broker-supplied sender data.
 	if senderUser.Status != store.UserStatusActive {
 		return nil, &apiError{status: http.StatusForbidden, code: ErrCodeForbidden,
 			message: "sender identity is not active",

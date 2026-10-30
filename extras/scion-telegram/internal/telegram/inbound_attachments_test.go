@@ -23,6 +23,7 @@ import (
 	"go/token"
 	"io/fs"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -152,7 +153,7 @@ func anyContains(texts []string, sub string) bool {
 	return false
 }
 
-// Matrix row T4: a sender the hub refuses causes no download and no write.
+// A sender the hub refuses causes no download and no write.
 func TestInboundAttachment_RefusedSender(t *testing.T) {
 	for _, mode := range []string{"artifact", "legacy"} {
 		t.Run(mode, func(t *testing.T) {
@@ -176,7 +177,7 @@ func TestInboundAttachment_RefusedSender(t *testing.T) {
 	}
 }
 
-// Matrix row T5a: in artifact mode a send the hub refuses after the
+// In artifact mode a send the hub refuses after the
 // upload leaves only the upload; nothing is staged.
 func TestInboundAttachment_ArtifactSendRefused(t *testing.T) {
 	for _, status := range []int{http.StatusConflict, http.StatusNotFound, http.StatusServiceUnavailable} {
@@ -201,7 +202,7 @@ func TestInboundAttachment_ArtifactSendRefused(t *testing.T) {
 	}
 }
 
-// Matrix row T5b: in legacy mode a refused send removes the entry it
+// In legacy mode a refused send removes the entry it
 // staged.
 func TestInboundAttachment_LegacySendRefusedRemovesEntry(t *testing.T) {
 	for _, status := range []int{http.StatusConflict, http.StatusNotFound, http.StatusServiceUnavailable} {
@@ -225,7 +226,7 @@ func TestInboundAttachment_LegacySendRefusedRemovesEntry(t *testing.T) {
 	}
 }
 
-// Matrix row T5c: with several recipients, the staged entry is kept if one
+// With several recipients, the staged entry is kept if one
 // accepted and removed if none did.
 func TestInboundAttachment_LegacyMultipleRecipients(t *testing.T) {
 	cases := []struct {
@@ -256,7 +257,7 @@ func TestInboundAttachment_LegacyMultipleRecipients(t *testing.T) {
 	}
 }
 
-// Matrix row T6a: in legacy mode the file is staged only after the hub
+// In legacy mode the file is staged only after the hub
 // authorized the sender, in a per-message entry whose path is delivered,
 // and never under downloads_path.
 func TestInboundAttachment_LegacyStagesAfterCheck(t *testing.T) {
@@ -284,7 +285,7 @@ func TestInboundAttachment_LegacyStagesAfterCheck(t *testing.T) {
 	assert.Len(t, iaSpecFilesHolding(t, env.home, env.tg.content), 1, "and nowhere else under HOME")
 }
 
-// Matrix row T6b: when the hub takes no attachments, the text is delivered
+// When the hub takes no attachments, the text is delivered
 // with a notice and nothing is downloaded or written. Unknown answers are
 // treated the same way.
 func TestInboundAttachment_UnavailableDeliversTextWithNotice(t *testing.T) {
@@ -331,7 +332,7 @@ func (s iaSpecInboundSend) messageText(t *testing.T, hub *iaSpecHub) string {
 	return ""
 }
 
-// Matrix row T7: an attachment over the hub's delivery limit is refused
+// An attachment over the hub's delivery limit is refused
 // with a notice, before download when Telegram gives its size; nothing is
 // uploaded, staged or written, and the text is still delivered.
 func TestInboundAttachment_OverDeliveryLimit(t *testing.T) {
@@ -376,7 +377,7 @@ func TestInboundAttachment_OverDeliveryLimit(t *testing.T) {
 	}
 }
 
-// Matrix row T8: targets plus mentioned agents get one upload per
+// Targets plus mentioned agents get one upload per
 // recipient send, each send naming its own upload.
 func TestInboundAttachment_ArtifactUploadPerRecipient(t *testing.T) {
 	hub := newIASpecHub(t, "artifact", true, "coder", "reviewer", "tester")
@@ -434,7 +435,7 @@ func iaSnapshot(t *testing.T, root string) map[string]string {
 	return out
 }
 
-// Matrix row T12: pre-existing scratchpad entries and downloads_path
+// Pre-existing scratchpad entries and downloads_path
 // contents are untouched at start and after a refused legacy send.
 func TestInboundAttachment_PreExistingEntriesUntouched(t *testing.T) {
 	hub := newIASpecHub(t, "legacy", true, "coder")
@@ -471,7 +472,7 @@ func TestInboundAttachment_PreExistingEntriesUntouched(t *testing.T) {
 	assert.ElementsMatch(t, []string{"tg_1000", "tg_2000"}, env.telegramEntries(t), "only the refused message's entry was removed")
 }
 
-// Matrix row T17a (static half): projectfs.WriteAttachment is referenced
+// projectfs.WriteAttachment is referenced
 // only from legacyStage, whose only caller is stageInboundAttachment, which
 // runs only in the "legacy" and older-hub branches of
 // prepareInboundAttachment.
@@ -576,7 +577,7 @@ func TestInboundAttachment_ScratchpadWriterIsLegacyOnly(t *testing.T) {
 	assert.ElementsMatch(t, []string{"errors Is err errAttachmentCheckAbsent", "attachmentUploadsLegacy"}, clauses)
 }
 
-// Matrix row T17a (spy half): legacyStage runs in legacy mode and on an
+// legacyStage runs in legacy mode and on an
 // older hub only.
 func TestInboundAttachment_LegacyStageOnlyInLegacyModes(t *testing.T) {
 	cases := []struct {
@@ -609,7 +610,7 @@ func TestInboundAttachment_LegacyStageOnlyInLegacyModes(t *testing.T) {
 	}
 }
 
-// Matrix row T19: a hub without the check route (a plain 404) is an older
+// A hub without the check route (a plain 404) is an older
 // hub: an authorized sender's file is staged under the plugin's own checks
 // and removed if the send is refused; an unresolved sender causes no write.
 func TestInboundAttachment_OlderHub(t *testing.T) {
@@ -655,7 +656,7 @@ func TestInboundAttachment_OlderHub(t *testing.T) {
 	})
 }
 
-// Matrix row T21: a 404 carrying the hub's JSON error envelope, or any
+// A 404 carrying the hub's JSON error envelope, or any
 // other failed check, is an error: the text is delivered with a notice and
 // nothing is staged, downloaded or written.
 func TestInboundAttachment_CheckErrorNeverStages(t *testing.T) {
@@ -797,3 +798,101 @@ func TestBoundedReadCloser(t *testing.T) {
 type nopCloser struct{ *strings.Reader }
 
 func (nopCloser) Close() error { return nil }
+
+// Two messages staged in one clock tick get distinct numeric entries, so
+// the refusal cleanup of one never removes the other's file.
+func TestNextLegacyEntry_UniqueWithinOneTick(t *testing.T) {
+	orig := legacyEntryClock
+	tick := time.Unix(1_900_000_000, 0)
+	legacyEntryClock = func() time.Time { return tick }
+	t.Cleanup(func() { legacyEntryClock = orig })
+
+	a, b := nextLegacyEntry(), nextLegacyEntry()
+	assert.NotEqual(t, a, b)
+	for _, e := range []string{a, b} {
+		assert.Regexp(t, `^tg_[0-9]+$`, e)
+	}
+}
+
+// A document named ".." (after reducing the name to one component) is
+// delivered as file_<id>, like ".".
+func TestTelegramAttachmentOf_DotDotName(t *testing.T) {
+	for _, name := range []string{"..", "a/..", `a\..`, "."} {
+		att, ok := telegramAttachmentOf(&TGMessage{Document: &TGDocument{FileID: "doc-1", FileUniqueID: "u1", FileName: name}})
+		require.True(t, ok, name)
+		assert.Equal(t, "file_doc-1", att.Name, name)
+	}
+}
+
+// With delivery off (delivery_max_bytes 0) the text is delivered with the
+// withheld notice and nothing is downloaded, uploaded or written.
+func TestInboundAttachment_DeliveryOffWithheld(t *testing.T) {
+	stages := countLegacyStages(t)
+	hub := newIASpecHub(t, "artifact", true, "coder")
+	hub.zeroMaxBytes = true
+	env := newIAEnv(t, hub)
+
+	env.iaSendCaption(t, "please review this file")
+
+	getFile, download := env.tg.fileCalls()
+	assert.Zero(t, getFile)
+	assert.Zero(t, download)
+	sends := env.sends(t)
+	require.Len(t, sends, 1, "the text is delivered")
+	assert.Empty(t, sends[0].AttachmentIDs)
+	assert.Empty(t, hub.requestsTo(iaSpecUploadPath))
+	assert.Zero(t, stages.Load())
+	assert.Contains(t, env.chatTexts(), attachmentsWithheldNotice)
+	env.assertNoAttachmentWrites(t)
+}
+
+// A check the hub refuses because it names too many recipients tells the
+// sender so; the text is delivered without the file.
+func TestInboundAttachment_TooManyRecipientsNotice(t *testing.T) {
+	stages := countLegacyStages(t)
+	hub := newIASpecHub(t, "artifact", true, "coder")
+	hub.checkStatus = http.StatusBadRequest
+	hub.checkEnvelope = true
+	hub.checkCode = hubCodeTooManyTargets
+	env := newIAEnv(t, hub)
+
+	env.iaSendCaption(t, "please review this file")
+
+	_, download := env.tg.fileCalls()
+	assert.Zero(t, download)
+	sends := env.sends(t)
+	require.Len(t, sends, 1, "the text is delivered")
+	assert.Empty(t, sends[0].AttachmentIDs)
+	assert.Empty(t, hub.requestsTo(iaSpecUploadPath))
+	assert.Zero(t, stages.Load())
+	assert.Contains(t, env.chatTexts(), attachmentsTooManyRecipientsNotice)
+	assert.NotContains(t, env.chatTexts(), attachmentsWithheldNotice)
+	env.assertNoAttachmentWrites(t)
+}
+
+// The fake hub refuses metadata fields out of the required order, as the
+// hub does, so the plugin's own order is what the specs exercise.
+func TestIASpecHub_RefusesOutOfOrderFields(t *testing.T) {
+	hub := newIASpecHub(t, "artifact", true, "coder")
+	post := func(fields [][2]string) int {
+		var buf bytes.Buffer
+		mw := multipart.NewWriter(&buf)
+		for _, f := range fields {
+			require.NoError(t, mw.WriteField(f[0], f[1]))
+		}
+		fw, err := mw.CreateFormFile("file", "a.txt")
+		require.NoError(t, err)
+		_, _ = fw.Write([]byte("hello"))
+		require.NoError(t, mw.Close())
+		resp, err := http.Post(hub.srv.URL+iaSpecUploadPath, mw.FormDataContentType(), &buf)
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+	inOrder := [][2]string{{"sender", iaSpecSender}, {"project_id", "p"}, {"surface", "telegram"}, {"audience", "group"}, {"targets", "coder"}}
+	assert.Equal(t, http.StatusCreated, post(inOrder))
+	swapped := [][2]string{{"project_id", "p"}, {"sender", iaSpecSender}, {"surface", "telegram"}, {"audience", "group"}}
+	assert.Equal(t, http.StatusBadRequest, post(swapped))
+	targetsEarly := [][2]string{{"sender", iaSpecSender}, {"targets", "coder"}, {"project_id", "p"}, {"surface", "telegram"}, {"audience", "group"}}
+	assert.Equal(t, http.StatusBadRequest, post(targetsEarly))
+}

@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -304,7 +305,7 @@ func TestBrokerAttachmentCheck_NeverNotFound(t *testing.T) {
 	}
 }
 
-// TestBrokerAttachments_RefusedSenders (T4): an inactive user, a test
+// TestBrokerAttachments_RefusedSenders: an inactive user, a test
 // identity and a sender authorizeAgentMessage refuses for a named target
 // get authorized false from the check, 403 from the upload, and nothing is
 // stored; in legacy mode the check refuses them too.
@@ -333,7 +334,7 @@ func TestBrokerAttachments_RefusedSenders(t *testing.T) {
 	}
 }
 
-// TestBrokerAttachments_NoProjectReadRefused (T18): without targets, a
+// TestBrokerAttachments_NoProjectReadRefused: without targets, a
 // sender without read on the project is refused by the check and the
 // upload, in artifact and legacy mode, and stores nothing; a project member
 // is authorized.
@@ -494,7 +495,7 @@ func TestBrokerAttachmentUpload_RefusedSenderFileNeverRead(t *testing.T) {
 	requireNoUploadsAtAll(t, f.art)
 }
 
-// TestBrokerAttachmentUpload_FileChecks (T7, hub side): HTML and SVG files,
+// TestBrokerAttachmentUpload_FileChecks: HTML and SVG files,
 // files over the total budget, and two files under one name or one
 // delivered name are refused and not stored.
 func TestBrokerAttachmentUpload_FileChecks(t *testing.T) {
@@ -547,7 +548,7 @@ func TestBrokerAttachmentUpload_FileChecks(t *testing.T) {
 // TestBrokerInbound_AttachmentIDsDelivered: ids uploaded on the broker
 // route and named on the legacy inbound route are bound to the stored
 // message and planned for the recipient's inbox, with no scratchpad
-// projection (T15: a plugin conversation is not a project audience).
+// projection: a plugin conversation is not a project audience.
 func TestBrokerInbound_AttachmentIDsDelivered(t *testing.T) {
 	f := newSendFixture(t)
 	f.enableBrokerDelivery(t)
@@ -575,14 +576,14 @@ func TestBrokerInbound_AttachmentIDsDelivered(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, f.target.ID, stored.AgentID)
 
-	// T15 at the classifier: a plugin conversation key is never a project
+	// At the classifier: a plugin conversation key is never a project
 	// audience.
 	for _, key := range []string{"telegram:chat:-100123", stored.ConversationID, stored.ThreadID} {
 		assert.False(t, f.srv.projectionAudienceIsProject(context.Background(), key, f.projA.ID), "key %q", key)
 	}
 }
 
-// TestBrokerInbound_AttachmentIDsRefused (T14): another user's upload, an
+// TestBrokerInbound_AttachmentIDsRefused: another user's upload, an
 // upload already sent, unknown ids and ids from a non-user sender are
 // refused, and nothing is dispatched.
 func TestBrokerInbound_AttachmentIDsRefused(t *testing.T) {
@@ -631,7 +632,7 @@ func TestBrokerInbound_AttachmentDispatchFailureMarksMessage(t *testing.T) {
 	assert.Equal(t, store.MessageDispatchFailed, stored.DispatchState)
 }
 
-// TestBrokerInbound_AttachmentsNotReadableByOtherUsersAgent (T16, artifact
+// TestBrokerInbound_AttachmentsNotReadableByOtherUsersAgent (artifact
 // mode, multi-user): user B's agent in the same project cannot read user
 // A's upload by any path: not as an unsent upload, not by naming its id,
 // not once it is sent to A's agent, and it is not projected.
@@ -710,4 +711,115 @@ func TestBrokerInbound_SenderRefusalsUnchanged(t *testing.T) {
 		}
 	}
 	require.Empty(t, f.disp.getCalls())
+}
+
+// TestBrokerAttachmentUpload_WholeRequestRefusalsStoreNothing: a refusal of
+// the whole request stores none of its files, also those before the
+// refused part: a later file over the remaining total (413), more files
+// than one message takes (400), a non-file part after a file (400), and a
+// body over the cap without a declared length after a first file (413).
+func TestBrokerAttachmentUpload_WholeRequestRefusalsStoreNothing(t *testing.T) {
+	f := newSendFixture(t)
+	sender := "user:" + f.ua.Email
+
+	setDeliveryBudget(t, f.srv, 10)
+	rec := brokerUpload(t, f.srv, sender, f.projA.ID, nil, brokerAttFile{"a.txt", "123456"}, brokerAttFile{"b.txt", "789012"})
+	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, rec.Body.String())
+	requireNoUploadsAtAll(t, f.art)
+
+	f = newSendFixture(t)
+	var files []brokerAttFile
+	for i := 0; i <= MaxAttachmentsPerMessage; i++ {
+		files = append(files, brokerAttFile{fmt.Sprintf("f%02d.txt", i), "x"})
+	}
+	rec = brokerUpload(t, f.srv, sender, f.projA.ID, nil, files...)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	requireNoUploadsAtAll(t, f.art)
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	for _, kv := range [][2]string{{"sender", sender}, {"project_id", f.projA.ID}, {"surface", "telegram"}, {"audience", "group"}} {
+		require.NoError(t, mw.WriteField(kv[0], kv[1]))
+	}
+	part, err := mw.CreateFormFile("file", "a.txt")
+	require.NoError(t, err)
+	_, err = part.Write([]byte("hello"))
+	require.NoError(t, err)
+	require.NoError(t, mw.WriteField("targets", f.target.Slug))
+	require.NoError(t, mw.Close())
+	rec = brokerAttRequest(t, f.srv, brokerAttachmentsUploadPath, mw.FormDataContentType(), &body)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	requireNoUploadsAtAll(t, f.art)
+
+	big, ct := brokerUploadBody(t, sender, f.projA.ID, nil, []brokerAttFile{
+		{"first.txt", "small"}, {"big.txt", strings.Repeat("a", int(brokerAttachmentBodyCap()))},
+	})
+	req := httptest.NewRequest(http.MethodPost, brokerAttachmentsUploadPath, io.NopCloser(bytes.NewReader(big.Bytes())))
+	req.ContentLength = -1
+	req.Header.Set("Content-Type", ct)
+	req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity("test-broker")))
+	rec = httptest.NewRecorder()
+	f.srv.mux.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, rec.Body.String())
+	requireNoUploadsAtAll(t, f.art)
+}
+
+// TestBrokerAttachments_TargetBound: the check and the upload accept
+// maxBrokerAttachmentTargets targets and refuse one more with 400
+// too_many_targets, storing nothing.
+func TestBrokerAttachments_TargetBound(t *testing.T) {
+	f := newSendFixture(t)
+	sender := "user:" + f.ua.Email
+	targets := func(n int) []string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = fmt.Sprintf("agent-%03d", i)
+		}
+		return out
+	}
+	got := brokerCheckAnswer(t, brokerCheck(t, f.srv, sender, f.projA.ID, targets(maxBrokerAttachmentTargets)))
+	assert.False(t, got.Authorized, "unknown slugs are refused, not malformed")
+
+	for name, rec := range map[string]*httptest.ResponseRecorder{
+		"check":  brokerCheck(t, f.srv, sender, f.projA.ID, targets(maxBrokerAttachmentTargets+1)),
+		"upload": brokerUpload(t, f.srv, sender, f.projA.ID, targets(maxBrokerAttachmentTargets+1), brokerAttFile{"a.txt", "hello"}),
+	} {
+		require.Equal(t, http.StatusBadRequest, rec.Code, "%s: %s", name, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), `"code":"`+codeTooManyTargets+`"`, name)
+	}
+	requireNoUploadsAtAll(t, f.art)
+}
+
+// TestBrokerAttachmentCheck_DeliveryMaxBytesHonoursPerFileLimit: the
+// check's delivery_max_bytes is the per-file artifact limit when that is
+// below the total for one message.
+func TestBrokerAttachmentCheck_DeliveryMaxBytesHonoursPerFileLimit(t *testing.T) {
+	f := newSendFixture(t)
+	f.srv.SetOperationalSettings(artifactsOpsWith(t, `{"enabled":true,"max_file_bytes":1000}`, ""))
+	require.Equal(t, int64(1000), f.srv.attachmentMaxBytes(context.Background(), true))
+	got := brokerCheckAnswer(t, brokerCheck(t, f.srv, "user:"+f.ua.Email, f.projA.ID, nil))
+	require.Equal(t, brokerUploadsArtifact, got.Uploads)
+	require.NotNil(t, got.DeliveryMaxBytes)
+	assert.Equal(t, int64(1000), *got.DeliveryMaxBytes)
+}
+
+// TestBrokerInbound_AttachmentIDsOnBroadcastRefused: attachment ids on a
+// broadcast are refused with 400 and nothing is dispatched.
+func TestBrokerInbound_AttachmentIDsOnBroadcastRefused(t *testing.T) {
+	f := newSendFixture(t)
+	sender := "user:" + f.ua.Email
+	ids := brokerUploadedIDs(t, brokerUpload(t, f.srv, sender, f.projA.ID, nil, brokerAttFile{"notes.txt", "hello"}))
+	raw, err := json.Marshal(inboundMessageRequest{
+		Topic: "scion.project." + f.target.ProjectID + ".agent." + f.target.Slug + ".messages",
+		Message: &messages.StructuredMessage{
+			Version: messages.Version, Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Channel: "telegram", Sender: sender, Recipient: "agent:" + f.target.Slug,
+			Msg: "to everyone", Type: messages.TypeInstruction, Broadcasted: true,
+		},
+		AttachmentIDs: ids,
+	})
+	require.NoError(t, err)
+	rec := brokerAttRequest(t, f.srv, "/api/v1/broker/inbound", "application/json", bytes.NewReader(raw))
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Empty(t, f.disp.getCalls())
 }

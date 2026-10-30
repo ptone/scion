@@ -71,8 +71,19 @@ const codeAttachmentsUnavailable = "attachments_unavailable"
 // and the metadata fields of an upload, above its file bytes.
 const brokerAttachmentEnvelopeBytes int64 = 64 << 10
 
-// maxBrokerAttachmentTargets bounds the targets of one check or upload.
-const maxBrokerAttachmentTargets = 32
+// maxBrokerAttachmentTargets bounds the targets of one check or upload. A
+// plugin names every recipient of a message, an @all included, and each
+// target costs one agent lookup and one message authorization before
+// anything else happens, so the bound keeps that work small. The hub sets
+// no per-project agent limit by default to derive it from; 256 is above
+// the hub's own per-message recipient bounds (messages.MaxGroupRecipients,
+// messages.MaxMentionRecipients), so only an unusually wide message is
+// refused, with codeTooManyTargets, which the plugin reports to the sender.
+const maxBrokerAttachmentTargets = 256
+
+// codeTooManyTargets is the error code of the 400 for a check or upload
+// naming more than maxBrokerAttachmentTargets targets.
+const codeTooManyTargets = "too_many_targets"
 
 // maxBrokerAttachmentFieldBytes bounds one metadata field of an upload.
 const maxBrokerAttachmentFieldBytes = 4 << 10
@@ -141,6 +152,12 @@ type brokerAttachmentRequest struct {
 }
 
 // validate returns the validation message for a malformed request, or "".
+// tooManyTargets reports whether r names more targets than accepted.
+func (r *brokerAttachmentRequest) tooManyTargets() bool {
+	return len(r.Targets) > maxBrokerAttachmentTargets
+}
+
+// validate returns the validation message for a malformed request, or "".
 func (r *brokerAttachmentRequest) validate(upload bool) string {
 	switch {
 	case !strings.HasPrefix(r.Sender, "user:") || r.Sender == "user:":
@@ -151,8 +168,6 @@ func (r *brokerAttachmentRequest) validate(upload bool) string {
 		return "surface must be telegram or discord"
 	case upload && !brokerAttachmentAudiences[r.Audience]:
 		return "audience must be direct or group"
-	case len(r.Targets) > maxBrokerAttachmentTargets:
-		return fmt.Sprintf("too many targets (max %d)", maxBrokerAttachmentTargets)
 	}
 	for _, t := range r.Targets {
 		if t == "" {
@@ -166,8 +181,9 @@ func (r *brokerAttachmentRequest) validate(upload bool) string {
 type brokerAttachmentCheckResponse struct {
 	Authorized bool   `json:"authorized"`
 	Uploads    string `json:"uploads"`
-	// DeliveryMaxBytes, with "artifact", is the total file size of one
-	// upload (brokerAttachmentDeliveryMaxBytes).
+	// DeliveryMaxBytes, with "artifact", is the largest file one upload
+	// may carry: brokerAttachmentDeliveryMaxBytes, or the per-file
+	// artifact limit when that is smaller.
 	DeliveryMaxBytes *int64 `json:"delivery_max_bytes,omitempty"`
 }
 
@@ -214,6 +230,10 @@ func (s *Server) handleBrokerAttachmentsCheck(w http.ResponseWriter, r *http.Req
 		BadRequest(w, "invalid request body: "+err.Error())
 		return
 	}
+	if req.tooManyTargets() {
+		writeTooManyTargets(w)
+		return
+	}
 	if msg := req.validate(false); msg != "" {
 		ValidationError(w, msg, nil)
 		return
@@ -229,7 +249,10 @@ func (s *Server) handleBrokerAttachmentsCheck(w http.ResponseWriter, r *http.Req
 	}
 	answer.Authorized = refusal == nil
 	if answer.Uploads == brokerUploadsArtifact {
-		limit := s.brokerAttachmentDeliveryMaxBytes()
+		// The plugin sends one file per message: the largest it can upload
+		// is the total for one message, or the per-file artifact limit when
+		// that is smaller.
+		limit := min(s.brokerAttachmentDeliveryMaxBytes(), s.attachmentMaxBytes(ctx, true))
 		answer.DeliveryMaxBytes = &limit
 	}
 	decision := "authorized"
@@ -320,11 +343,21 @@ func (s *Server) handleBrokerAttachmentsUpload(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	ownerCtx := brokerSenderContext(ctx, sender)
+	// Pass 1: read and check every part before anything is stored. The
+	// body is bounded (brokerAttachmentBodyCap), so holding the files in
+	// memory is bounded too. A refusal of the whole request (a body over
+	// the cap, files over the total, too many files, a part out of order)
+	// leaves nothing stored.
 	batch := newBrokerAttachmentBatch(s.attachmentMaxBytes(ctx, true), s.brokerAttachmentDeliveryMaxBytes())
-	results := make([]attachmentUploadResult, 0, 1)
+	var pending []brokerAttachmentPending
 	failures := make([]attachmentUploadFailure, 0)
-	internalError := false
+	tooLarge := func() {
+		log.Warn("broker attachment upload",
+			"sender_id", sender.ID(), "project_id", req.ProjectID, "decision", "refused: over size limit",
+			"audience", req.Audience, "count", 0, "total_bytes", batch.total)
+		writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
+			fmt.Sprintf("attachments exceed the total of %d bytes for one message", batch.maxTotal), nil)
+	}
 	part := first
 	for part != nil {
 		if part.FormName() != "file" || part.FileName() == "" {
@@ -339,25 +372,22 @@ func (s *Server) handleBrokerAttachmentsUpload(w http.ResponseWriter, r *http.Re
 		}
 		batch.count++
 		name := part.FileName()
-		result, err := s.storeBrokerAttachment(ownerCtx, batch, name, part)
+		f, err := readBrokerAttachmentFile(batch, name, part)
 		_ = part.Close()
-		if err != nil {
-			if isBodyTooLarge(err) || errors.Is(err, errBrokerAttachmentsOverTotal) {
-				log.Warn("broker attachment upload",
-					"sender_id", sender.ID(), "project_id", req.ProjectID, "decision", "refused: over size limit",
-					"audience", req.Audience, "count", len(results), "total_bytes", batch.total)
-				writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
-					fmt.Sprintf("attachments exceed the total of %d bytes for one message", batch.maxTotal), nil)
-				return
-			}
+		switch {
+		case isBodyTooLarge(err) || errors.Is(err, errBrokerAttachmentsOverTotal):
+			tooLarge()
+			return
+		case err != nil:
 			var rejection attachmentRejection
 			if !errors.As(err, &rejection) {
-				internalError = true
 				log.Error("Broker attachment upload failed", "sender_id", sender.ID(), "error", err)
+				BadRequest(w, "invalid multipart body")
+				return
 			}
 			failures = append(failures, attachmentUploadFailure{Name: name, Error: uploadFailureMessage(err)})
-		} else {
-			results = append(results, result)
+		default:
+			pending = append(pending, f)
 		}
 		part, err = mr.NextPart()
 		if err == io.EOF {
@@ -365,7 +395,7 @@ func (s *Server) handleBrokerAttachmentsUpload(w http.ResponseWriter, r *http.Re
 		}
 		if err != nil {
 			if isBodyTooLarge(err) {
-				writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large", "request body too large", nil)
+				tooLarge()
 				return
 			}
 			BadRequest(w, "invalid multipart body")
@@ -375,6 +405,25 @@ func (s *Server) handleBrokerAttachmentsUpload(w http.ResponseWriter, r *http.Re
 	if batch.count == 0 {
 		ValidationError(w, "no files uploaded", nil)
 		return
+	}
+
+	// Pass 2: the request is acceptable; store each checked file as an
+	// unsent upload of the sender.
+	ownerCtx := brokerSenderContext(ctx, sender)
+	results := make([]attachmentUploadResult, 0, len(pending))
+	internalError := false
+	for _, f := range pending {
+		result, err := s.storeBrokerAttachment(ownerCtx, f)
+		if err != nil {
+			var rejection attachmentRejection
+			if !errors.As(err, &rejection) {
+				internalError = true
+				log.Error("Broker attachment upload failed", "sender_id", sender.ID(), "error", err)
+			}
+			failures = append(failures, attachmentUploadFailure{Name: f.name, Error: uploadFailureMessage(err)})
+			continue
+		}
+		results = append(results, result)
 	}
 	status := http.StatusCreated
 	if len(results) == 0 {
@@ -457,13 +506,25 @@ func readBrokerAttachmentMetadata(mr *multipart.Reader) (*brokerAttachmentReques
 			seen++
 		case name == "targets":
 			req.Targets = append(req.Targets, value)
-			if len(req.Targets) > maxBrokerAttachmentTargets {
-				return bad(fmt.Sprintf("too many targets (max %d)", maxBrokerAttachmentTargets))
+			if req.tooManyTargets() {
+				return nil, nil, tooManyTargetsError()
 			}
 		default:
 			return bad(fmt.Sprintf("unexpected field %q", name))
 		}
 	}
+}
+
+// tooManyTargetsError is the refusal of a request naming more than
+// maxBrokerAttachmentTargets targets.
+func tooManyTargetsError() *apiError {
+	return &apiError{status: http.StatusBadRequest, code: codeTooManyTargets,
+		message: fmt.Sprintf("too many targets (max %d)", maxBrokerAttachmentTargets)}
+}
+
+// writeTooManyTargets writes tooManyTargetsError.
+func writeTooManyTargets(w http.ResponseWriter) {
+	tooManyTargetsError().write(w)
 }
 
 // readBrokerAttachmentField reads one metadata value, at most
@@ -543,43 +604,63 @@ func checkBrokerAttachmentFile(batch *brokerAttachmentBatch, name string, head [
 	return safeName, mimeType, nil
 }
 
-// storeBrokerAttachment checks one file (checkBrokerAttachmentFile) and
-// stores it through the artifact service as an unsent upload of the caller
-// of ctx, which must be the sender user (brokerSenderContext): the same
-// store call a user's own upload makes. Its size counts against the
-// per-file limit and the batch total; a file over either is refused and
-// not stored.
-func (s *Server) storeBrokerAttachment(ctx context.Context, batch *brokerAttachmentBatch, name string, body io.Reader) (attachmentUploadResult, error) {
+// brokerAttachmentPending is one file of a broker upload that passed every
+// check and is held in memory until the whole request is accepted.
+type brokerAttachmentPending struct {
+	name, mimeType string
+	data           []byte
+}
+
+// readBrokerAttachmentFile reads one file of a broker upload into memory
+// and checks it (checkBrokerAttachmentFile, then its size against the
+// per-file limit and the batch total). A refusal of this file alone is an
+// attachmentRejection; errBrokerAttachmentsOverTotal and a body over the
+// cap refuse the whole request. Nothing is stored here.
+func readBrokerAttachmentFile(batch *brokerAttachmentBatch, name string, body io.Reader) (brokerAttachmentPending, error) {
 	head := make([]byte, contentSniffLen)
 	n, err := io.ReadFull(body, head)
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
-		return attachmentUploadResult{}, fmt.Errorf("read attachment: %w", err)
+		return brokerAttachmentPending{}, fmt.Errorf("read attachment: %w", err)
 	}
 	head = head[:n]
 	safeName, mimeType, err := checkBrokerAttachmentFile(batch, name, head)
 	if err != nil {
-		return attachmentUploadResult{}, err
+		return brokerAttachmentPending{}, err
 	}
 	limit := batch.maxFile
 	if remaining := batch.maxTotal - batch.total; remaining < limit {
 		limit = remaining
 	}
-	counted := &budgetReader{r: io.MultiReader(bytes.NewReader(head), body), limit: limit}
-	info, err := s.attachmentService().CreateAttachment(ctx, safeName, mimeType, counted)
+	data, err := io.ReadAll(&budgetReader{r: io.MultiReader(bytes.NewReader(head), body), limit: limit})
 	switch {
 	case isBodyTooLarge(err):
-		return attachmentUploadResult{}, err
-	case errors.Is(err, errBrokerAttachmentOverBudget), errors.Is(err, artifacts.ErrAttachmentTooLarge):
+		return brokerAttachmentPending{}, err
+	case errors.Is(err, errBrokerAttachmentOverBudget):
 		if limit < batch.maxFile {
-			return attachmentUploadResult{}, errBrokerAttachmentsOverTotal
+			return brokerAttachmentPending{}, errBrokerAttachmentsOverTotal
 		}
-		return attachmentUploadResult{}, rejectAttachment("file exceeds the maximum size of %d bytes", batch.maxFile)
+		return brokerAttachmentPending{}, rejectAttachment("file exceeds the maximum size of %d bytes", batch.maxFile)
+	case err != nil:
+		return brokerAttachmentPending{}, fmt.Errorf("read attachment: %w", err)
+	}
+	batch.total += int64(len(data))
+	return brokerAttachmentPending{name: safeName, mimeType: mimeType, data: data}, nil
+}
+
+// storeBrokerAttachment stores one checked file through the artifact
+// service as an unsent upload of the caller of ctx, which must be the
+// sender user (brokerSenderContext): the same store call a user's own
+// upload makes.
+func (s *Server) storeBrokerAttachment(ctx context.Context, f brokerAttachmentPending) (attachmentUploadResult, error) {
+	info, err := s.attachmentService().CreateAttachment(ctx, f.name, f.mimeType, bytes.NewReader(f.data))
+	switch {
+	case errors.Is(err, artifacts.ErrAttachmentTooLarge):
+		return attachmentUploadResult{}, rejectAttachment("file exceeds the maximum size")
 	case errors.Is(err, artifacts.ErrAttachmentName):
 		return attachmentUploadResult{}, rejectAttachment("invalid filename")
 	case err != nil:
 		return attachmentUploadResult{}, fmt.Errorf("save attachment: %w", err)
 	}
-	batch.total += info.Size
 	return attachmentUploadResult{
 		ID:       info.ID,
 		Name:     info.Name,

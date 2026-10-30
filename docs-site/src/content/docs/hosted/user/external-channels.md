@@ -34,7 +34,7 @@ configuration from the web UI, registration, and your first message.
 
 ### Attachments
 
-Photos, documents, audio and video sent in a linked group are delivered to each addressed agent (the agents the message is routed to, including mentioned agents). When attachment artifacts are enabled on the Hub (the default where the artifact service is ready), each agent receives the file in its inbox at `~/.scion/inbox/<message-id>/`. If the Hub can't take attachments, the message text is still delivered and the sender is told in the chat that the attachment was not.
+Photos, documents, audio and video sent in a linked group are delivered to each addressed agent (the agents the message is routed to, including mentioned agents). When attachment artifacts are enabled on the Hub (the default where the artifact service is ready), each agent receives the file in its inbox at `~/.scion/inbox/<message-id>/`. If the Hub can't take attachments, the message text is still delivered and the sender is told in the chat that the attachment was not. A message that carries only a file which can't be delivered is not sent at all, and the sender is told. If the Hub doesn't accept attachments from the sender for the addressed agents, the whole message is refused; with several recipients, none of them receives the text. A file over the Hub's current size limit is left out: the text is delivered and the sender gets a notice naming the limit, which the Hub sets.
 
 The plugin's former `downloads_path` setting is retired. If it is still configured, the plugin logs a warning at startup and ignores it.
 

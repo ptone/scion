@@ -426,18 +426,14 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// F5 fix (Phase 6): the inbound message is persisted and an SSE event
-	// published so that messages from external channels (Discord, Telegram)
-	// appear in the web chat — both live and after a refresh. This mirrors
-	// the persistence + SSE pattern used by handleAgentMessage. The row is
-	// built here; it is written after dispatch, or before it when the
-	// message carries attachments (below).
+	// The inbound message is persisted and an SSE event published so that
+	// messages from external channels (Discord, Telegram) appear in the web
+	// chat, both live and after a refresh, as handleAgentMessage does. The
+	// row is built here. It is written after dispatch, except for a message
+	// that carries attachment ids, which is written before dispatch (below).
 	//
-	// Migration gate (design agent-reincarnate §3.7, R3 p2a-r1 review): skip
-	// dispatch while the recipient is mid-`scion reincarnate`. This legacy
-	// endpoint dispatches before persisting (unlike every other path in this
-	// package), so the gate here only skips the dispatch call; the
-	// persisted row is stamped "deferred" via agentReincarnating.
+	// Dispatch is skipped while the recipient is mid-`scion reincarnate`;
+	// the persisted row is then stamped "deferred" via agentReincarnating.
 	agentReincarnating := reincarnationInFlight(agent)
 	storeMsg := &store.Message{
 		ID:            brokerInboundMsgID,
@@ -488,7 +484,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 				Match:      match,
 				Reason:     reason,
 			})
-			// DEF-3: Independent consistency check against prior messages.
+			// Independent consistency check against prior messages.
 			if consistent := messaging.CheckConversationConsistency(r.Context(), s.store, storeMsg.ID, convID, storeMsg.ThreadID, senderUserID, agent.ID, log); !consistent {
 				log.Warn("DEF-3: conversation consistency mismatch (inbound broker)",
 					"message_id", storeMsg.ID, "conversation_id", convID, "agent_id", agent.ID)

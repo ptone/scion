@@ -36,6 +36,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 )
@@ -50,8 +51,15 @@ const (
 	iaSpecCheckPath   = "/api/v1/broker/inbound/attachments/check"
 	iaSpecUploadPath  = "/api/v1/broker/inbound/attachments"
 	iaSpecInboundPath = "/api/v1/broker/inbound"
-	iaSpecMaxBytes    = 25 * 1024 * 1024
 )
+
+// iaSpecMaxBytes is the delivery_max_bytes the fake hub answers by default:
+// the hub's clamp, the signed-body limit less its 64 KiB framing allowance.
+const iaSpecMaxBytes = apiclient.MaxSignedRequestBodyBytes - 64<<10
+
+// iaSpecMetaOrder is the order of the leading metadata fields the hub
+// requires on an upload; any number of targets fields follow.
+var iaSpecMetaOrder = []string{"sender", "project_id", "surface", "audience"}
 
 // iaSpecFormPart is one multipart part received by the fake hub.
 type iaSpecFormPart struct {
@@ -73,6 +81,7 @@ type iaSpecHubRequest struct {
 	Meta           map[string][]string
 	Files          []iaSpecFormPart
 	FileBeforeMeta bool // a file part arrived before a metadata field
+	OutOfOrder     bool // a metadata field arrived out of the required order
 }
 
 // iaSpecUpload is an upload the fake hub stored.
@@ -95,8 +104,10 @@ type iaSpecHub struct {
 
 	// Optional behaviour, set before the first request.
 	maxBytes      int64          // delivery_max_bytes in artifact mode; 0 = iaSpecMaxBytes
+	zeroMaxBytes  bool           // answer delivery_max_bytes 0 (delivery off)
 	checkStatus   int            // non-zero: the check answers this status
 	checkEnvelope bool           // with checkStatus: answer the JSON error envelope
+	checkCode     string         // with checkEnvelope: its code; "" = "spec_error"
 	inboundStatus map[string]int // inbound send status per message recipient
 
 	mu       sync.Mutex
@@ -169,7 +180,11 @@ func (h *iaSpecHub) serve(w http.ResponseWriter, r *http.Request) {
 			rec.Status = h.checkStatus
 			h.record(rec)
 			if h.checkEnvelope {
-				iaSpecWriteError(w, h.checkStatus, "spec_error")
+				code := h.checkCode
+				if code == "" {
+					code = "spec_error"
+				}
+				iaSpecWriteError(w, h.checkStatus, code)
 			} else {
 				http.Error(w, http.StatusText(h.checkStatus), h.checkStatus)
 			}
@@ -180,6 +195,9 @@ func (h *iaSpecHub) serve(w http.ResponseWriter, r *http.Request) {
 			answer["delivery_max_bytes"] = int64(iaSpecMaxBytes)
 			if h.maxBytes != 0 {
 				answer["delivery_max_bytes"] = h.maxBytes
+			}
+			if h.zeroMaxBytes {
+				answer["delivery_max_bytes"] = int64(0)
 			}
 		}
 		rec.Status = http.StatusOK
@@ -227,6 +245,7 @@ func (h *iaSpecHub) serveUpload(w http.ResponseWriter, r *http.Request, rec iaSp
 		return
 	}
 	sawFile := false
+	metaFields := 0
 	for {
 		p, err := mr.NextPart()
 		if errors.Is(err, io.EOF) {
@@ -252,6 +271,14 @@ func (h *iaSpecHub) serveUpload(w http.ResponseWriter, r *http.Request, rec iaSp
 		if sawFile {
 			rec.FileBeforeMeta = true
 		}
+		if n := metaFields; n < len(iaSpecMetaOrder) {
+			if p.FormName() != iaSpecMetaOrder[n] {
+				rec.OutOfOrder = true
+			}
+		} else if p.FormName() != "targets" {
+			rec.OutOfOrder = true
+		}
+		metaFields++
 		rec.Meta[p.FormName()] = append(rec.Meta[p.FormName()], string(data))
 	}
 	first := func(name string) string {
@@ -261,7 +288,7 @@ func (h *iaSpecHub) serveUpload(w http.ResponseWriter, r *http.Request, rec iaSp
 		return ""
 	}
 	switch {
-	case rec.FileBeforeMeta:
+	case rec.FileBeforeMeta, rec.OutOfOrder:
 		fail(http.StatusBadRequest, "bad_request")
 		return
 	case first("sender") == "" || first("project_id") == "" || first("surface") == "" || first("audience") == "":
@@ -592,7 +619,8 @@ func (env *iaSpecEnv) assertDeliveredThroughUpload(t *testing.T, sender string) 
 	assert.Less(t, up.Seq, sends[0].Seq, "the upload precedes the send")
 }
 
-// Matrix row T1.
+// A sender in a one-member group gets the file into the agent's inbox
+// through an upload, and nothing is written to disk.
 func TestInboundAttachmentSpecNarrowGroup(t *testing.T) {
 	for _, withDownloadsPath := range []bool{true, false} {
 		t.Run(fmt.Sprintf("downloads_path=%t", withDownloadsPath), func(t *testing.T) {
@@ -612,7 +640,8 @@ func TestInboundAttachmentSpecNarrowGroup(t *testing.T) {
 	}
 }
 
-// Matrix row T2.
+// A group with several people is handled like a narrow group: inbox
+// delivery through an upload, nothing written to disk.
 func TestInboundAttachmentSpecSharedGroup(t *testing.T) {
 	for _, withDownloadsPath := range []bool{true, false} {
 		t.Run(fmt.Sprintf("downloads_path=%t", withDownloadsPath), func(t *testing.T) {
@@ -636,7 +665,8 @@ func TestInboundAttachmentSpecSharedGroup(t *testing.T) {
 	}
 }
 
-// Matrix row T3.
+// A sender who is not linked, or not resolved by the hub, causes no
+// download and no write, whatever the hub answers.
 func TestInboundAttachmentSpecUnresolvedSender(t *testing.T) {
 	senders := []struct {
 		name  string
