@@ -145,12 +145,12 @@ func TestNextDST(t *testing.T) {
 	}{
 		{
 			name: "daily local time keeps the wall clock across spring forward",
-			expr: "30 19 * * *", zone: "America/Los_Angeles", start: "2026-03-06T00:00:00Z",
+			expr: "30 19 * * *", zone: "America/Los_Angeles", start: "2026-03-06T12:00:00Z",
 			want: []string{"2026-03-07T03:30:00Z", "2026-03-08T03:30:00Z", "2026-03-09T02:30:00Z", "2026-03-10T02:30:00Z"},
 		},
 		{
 			name: "daily local time keeps the wall clock across fall back",
-			expr: "30 19 * * *", zone: "America/Los_Angeles", start: "2026-10-30T00:00:00Z",
+			expr: "30 19 * * *", zone: "America/Los_Angeles", start: "2026-10-30T12:00:00Z",
 			want: []string{"2026-10-31T02:30:00Z", "2026-11-01T02:30:00Z", "2026-11-02T03:30:00Z"},
 		},
 		{
