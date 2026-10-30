@@ -36,6 +36,8 @@ import { ReviewController } from './controller.js';
 import { docMarkRuns, marksReadBack } from './guard.js';
 import { classify, decide } from './policy.js';
 import { STRUCT_META } from './track.js';
+import { buildDelete, buildPaste, buildSplit } from './structural.js';
+import type { Piece } from './structural.js';
 import type { HintKind } from './policy.js';
 import { ALLOWED_ATTRIBUTES, ALLOWED_TAGS } from './safe-render.js';
 import { BLOCK_ATTR, breakOf } from './schema.js';
@@ -1124,5 +1126,42 @@ describe('pilcrow styles', () => {
         sel
       ).toBe(true);
     }
+  });
+});
+
+describe('the builders refuse raw HTML on their own', () => {
+  // The builders called directly, without the policy behind them, so their
+  // own check is tested by itself.
+  const md = 'ab <b>x</b> cd\n\nef\n';
+
+  it('a split over a selection holding inline HTML is refused; over plain text, built', async () => {
+    const { c } = await open(md);
+    const tr = new Transform(c.view.state.doc);
+    expect(buildSplit(tr, posOf(c, 'ab', 1), posOf(c, 'x', 1))).toEqual({ refuse: 'generic' });
+    expect(tr.steps).toHaveLength(0);
+    const ok = new Transform(c.view.state.doc);
+    expect('head' in buildSplit(ok, posOf(c, 'cd'), posOf(c, 'cd', 1))).toBe(true);
+  });
+
+  it('a multi-block paste over a selection holding inline HTML is refused', async () => {
+    const { c } = await open(md);
+    const p = c.view.state.schema;
+    const pieces: Piece[] = [
+      { type: 'paragraph', content: Fragment.from(p.text('P1')) },
+      { type: 'paragraph', content: Fragment.from(p.text('P2')) },
+    ];
+    const tr = new Transform(c.view.state.doc);
+    expect(buildPaste(tr, posOf(c, 'ab', 1), posOf(c, 'x', 1), pieces)).toEqual({ refuse: 'generic' });
+    const ok = new Transform(c.view.state.doc);
+    expect('head' in buildPaste(ok, posOf(c, 'cd'), posOf(c, 'cd', 1), pieces)).toBe(true);
+  });
+
+  it('a deletion across blocks that holds inline HTML is refused; without it, built', async () => {
+    const { c } = await open(md);
+    const tr = new Transform(c.view.state.doc);
+    expect('refuse' in buildDelete(tr, posOf(c, 'ab', 1), posOf(c, 'ef', 1), null)).toBe(true);
+    expect(tr.steps).toHaveLength(0);
+    const ok = new Transform(c.view.state.doc);
+    expect('head' in buildDelete(ok, posOf(c, 'cd', 1), posOf(c, 'ef', 1), null)).toBe(true);
   });
 });
