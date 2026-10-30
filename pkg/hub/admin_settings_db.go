@@ -1189,11 +1189,8 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		if len(owned) > 0 {
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]interface{}{
-				"error":   "hub_owned_keys_rejected",
-				"message": "The broker ID and token are written by the hub itself and cannot be changed through the server config API.",
-				"keys":    owned,
-			})
+			writeSettingsCodedKeysError(w, "hub_owned_keys_rejected",
+				"The broker ID and token are written by the hub itself and cannot be changed through the server config API.", owned)
 			return
 		}
 	}
@@ -1201,11 +1198,8 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// Reject if any Layer-0 keys are present — 422 before any write.
 	if len(layer0Keys) > 0 {
 		sort.Strings(layer0Keys)
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]interface{}{
-			"error":   "layer0_rejected",
-			"message": "Bootstrap settings are managed via settings.yaml / deployment tooling; restart required.",
-			"keys":    layer0Keys,
-		})
+		writeSettingsCodedKeysError(w, "layer0_rejected",
+			"Bootstrap settings are managed via settings.yaml / deployment tooling; restart required.", layer0Keys)
 		return
 	}
 
@@ -1221,11 +1215,8 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			"keys", unclassifiedKeys,
 			"user", updatedBy,
 		)
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]interface{}{
-			"error":   "unclassified_keys_rejected",
-			"message": "These settings cannot be persisted in database mode. They must be configured via settings.yaml / deployment tooling.",
-			"keys":    unclassifiedKeys,
-		})
+		writeSettingsCodedKeysError(w, "unclassified_keys_rejected",
+			"These settings cannot be persisted in database mode. They must be configured via settings.yaml / deployment tooling.", unclassifiedKeys)
 		return
 	}
 
@@ -1294,10 +1285,12 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// NestedDurations) must parse as a Go duration; "" or null clears.
 	// Checked on the documents built from the body, before any merge, so
 	// only the values sent are checked.
-	if fieldErr := validateDurationSettings(sectionDocs); fieldErr != nil {
-		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, fieldErr.Error(), map[string]interface{}{
-			"field": fieldErr.field,
-		})
+	if bad := validateDurationSettings(sectionDocs); len(bad) > 0 {
+		entries := make([]settingsFieldError, 0, len(bad))
+		for _, fe := range bad {
+			entries = append(entries, settingsFieldError{Field: fe.field, Message: fe.msg})
+		}
+		writeSettingsValidation(w, bad[0].msg, entries, nil)
 		return
 	}
 
@@ -1422,7 +1415,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		var lc opsettings.LifecycleSettings
 		if err := json.Unmarshal(doc, &lc); err == nil {
 			if err := validateStartClaimSettingStrings(s.config.StartClaim, lc); err != nil {
-				writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, err.Error(), nil)
+				writeSettingsFieldError(w, startClaimErrorField(err), err.Error())
 				return
 			}
 		}
@@ -1466,16 +1459,10 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			// read, so the write must be a CAS on that row's revision. A
 			// client revision that differs (-1 included) cannot carry it.
 			if pinned, ok := req.ExpectedRevisions["telemetry"]; ok && restored > 0 && pinned != rev {
-				writeJSON(w, http.StatusConflict, map[string]interface{}{
-					"error":   "revision_conflict",
-					"message": "telemetry.cloud.headers holds masked values, which are kept only on the current revision of the telemetry section; reload and save again.",
-					"applied": map[string]int64{},
-					"conflicted": []map[string]interface{}{{
-						"section":           "telemetry",
-						"expected_revision": pinned,
-						"current_revision":  rev,
-					}},
-				})
+				writeSettingsRevisionConflict(w,
+					"telemetry.cloud.headers holds masked values, which are kept only on the current revision of the telemetry section; reload and save again.",
+					[]map[string]interface{}{settingsConflictEntry("telemetry", pinned, rev)},
+					map[string]interface{}{"applied": map[string]int64{}})
 				return
 			}
 		}
@@ -1542,38 +1529,9 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	if doc, ok := sectionDocs["federation"]; ok {
 		var fedSettings opsettings.FederationSettings
 		if err := json.Unmarshal(doc, &fedSettings); err == nil {
-			// Validate duration strings before conversion (which silently
-			// falls back to zero for invalid values). Invalid durations like
-			// "1hour" would fail at time.ParseDuration during ApplySnapshot.
-			// A value sent in the body was checked by validateDurationSettings;
-			// this catches one carried over from the stored row by the merge.
-			if fedSettings.RefreshInterval != "" {
-				if _, err := time.ParseDuration(fedSettings.RefreshInterval); err != nil {
-					writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-						fmt.Sprintf("invalid refresh_interval %q: %v", fedSettings.RefreshInterval, err),
-						map[string]interface{}{"field": "server.federation.refresh_interval"})
-					return
-				}
-			}
-			if fedSettings.DebounceInterval != "" {
-				if _, err := time.ParseDuration(fedSettings.DebounceInterval); err != nil {
-					writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-						fmt.Sprintf("invalid debounce_interval %q: %v", fedSettings.DebounceInterval, err),
-						map[string]interface{}{"field": "server.federation.debounce_interval"})
-					return
-				}
-			}
-
-			fedCfg := convertFederationSettingsToConfig(fedSettings)
-			if errs := fedCfg.Validate(); len(errs) > 0 {
-				var errMsgs []string
-				for _, e := range errs {
-					errMsgs = append(errMsgs, e.Error())
-				}
-				writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-					"federation config validation failed", map[string]interface{}{
-						"errors": errMsgs,
-					})
+			// Every failure is reported in one response (ptone/scion#4450).
+			if entries := federationSaveErrors(fedSettings); len(entries) > 0 {
+				writeSettingsValidation(w, "federation config validation failed", entries, nil)
 				return
 			}
 		} else {
@@ -1599,14 +1557,14 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		}
 		sentProfiles := profiles
 		if errs := config.ValidateSharedDirSizes(runtimes, profiles); len(errs) > 0 {
-			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, errs[0].Error(), nil)
+			writeSettingsValidationErrors(w, errs)
 			return
 		}
 		// The per-runtime and per-profile storage overrides are removed
 		// (server.project_storage decides storage; volumes: replaces
 		// node-local overrides).
 		if errs := config.RemovedStorageOverrideErrors(runtimes, profiles, nil); len(errs) > 0 {
-			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, errs[0].Error(), nil)
+			writeSettingsValidationErrors(w, errs)
 			return
 		}
 		// safe_to_evict on a non-Kubernetes runtime is accepted and ignored,
@@ -1636,7 +1594,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		}
 		qErrs, qWarnings := config.ValidateResourceQuantities(defaultResources, sentProfiles)
 		if len(qErrs) > 0 {
-			writeResourceQuantityError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, qErrs)
+			writeSettingsValidationErrors(w, qErrs)
 			return
 		}
 		saveWarnings = append(saveWarnings, resourceQuantityWarnings(qWarnings)...)
@@ -1654,8 +1612,8 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			adSent := applySectionPatch("agent_defaults", map[string]json.RawMessage{}, nil, agentDefaultsPresence(topFP))
 			if adSent["default_timezone"] {
 				if err := validateDefaultTimezone(agentDefaults.DefaultTimezone); err != nil {
-					writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-						fmt.Sprintf("invalid default_timezone %q: %v", agentDefaults.DefaultTimezone, err), nil)
+					writeSettingsFieldError(w, "default_timezone",
+						fmt.Sprintf("invalid default_timezone %q: %v", agentDefaults.DefaultTimezone, err))
 					return
 				}
 			}
@@ -1685,10 +1643,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		}
 	}
 	if len(allValidationErrors) > 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"error":  "validation_failed",
-			"errors": allValidationErrors,
-		})
+		writeSettingsValidation(w, "", sortedSectionValidationEntries(allValidationErrors), nil)
 		return
 	}
 
@@ -1701,17 +1656,15 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		if err := validateServerConfigFileKeys(&req.ServerConfigUpdateRequest, fileKeys, ops); err != nil {
 			var fieldErr *serverConfigFileFieldError
 			if errors.As(err, &fieldErr) {
-				writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, fieldErr.Error(), map[string]interface{}{
-					"field": fieldErr.field,
-				})
+				writeSettingsFieldError(w, fieldErr.field, fieldErr.Error())
 				return
 			}
-			var details map[string]interface{}
 			var valErr *serverConfigFileValidationError
 			if errors.As(err, &valErr) {
-				details = valErr.details
+				writeSettingsValidation(w, valErr.Error(), valErr.entries, nil)
+				return
 			}
-			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), details)
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
 			return
 		}
 		fileTxn, err = prepareSettingsFileTxn(s.config.ConfigPath, func(gc *config.GlobalConfig, typed *config.VersionedSettings) []config.SettingsPathEdit {
@@ -1725,8 +1678,8 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 				return
 			}
 			if errors.Is(err, config.ErrSettingsPathEditUnsupported) {
-				writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-					"settings.yaml cannot be edited in place (it uses YAML anchors/aliases or is JSON); edit the file by hand", nil)
+				writeSettingsFieldError(w, "settings",
+					"settings.yaml cannot be edited in place (it uses YAML anchors/aliases or is JSON); edit the file by hand")
 				return
 			}
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to write settings file", nil)
@@ -1744,11 +1697,8 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		}
 		if len(bad) > 0 {
 			fileTxn.abort()
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]interface{}{
-				"error":   "unsaved_keys_rejected",
-				"message": "These settings would not take effect as sent; nothing was saved.",
-				"keys":    bad,
-			})
+			writeSettingsCodedKeysError(w, "unsaved_keys_rejected",
+				"These settings would not take effect as sent; nothing was saved.", bad)
 			return
 		}
 	}
@@ -1859,11 +1809,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			if errors.Is(err, store.ErrRevisionConflict) {
 				// Report the conflict with current revision.
 				currentRev := s.getCurrentRevision(ops, secName)
-				conflicted = append(conflicted, map[string]interface{}{
-					"section":           secName,
-					"expected_revision": expectedRev,
-					"current_revision":  currentRev,
-				})
+				conflicted = append(conflicted, settingsConflictEntry(secName, expectedRev, currentRev))
 				// Stop writing further sections on CAS conflict.
 				break
 			}
@@ -1938,16 +1884,14 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		for _, sec := range unchanged {
 			unchangedRevs[sec] = applied[sec]
 		}
-		writeJSON(w, http.StatusConflict, map[string]interface{}{
-			"error":               "revision_conflict",
-			"message":             "One or more sections have been modified since the expected revision.",
-			"applied":             written,
-			"unchanged_revisions": unchangedRevs,
-			"conflicted":          conflicted,
-			"applied_keys":        keyReport.Applied,
-			"pending_restart":     keyReport.PendingRestart,
-			"skipped":             keyReport.Skipped,
-		})
+		writeSettingsRevisionConflict(w, "One or more sections have been modified since the expected revision.",
+			conflicted, map[string]interface{}{
+				"applied":             written,
+				"unchanged_revisions": unchangedRevs,
+				"applied_keys":        keyReport.Applied,
+				"pending_restart":     keyReport.PendingRestart,
+				"skipped":             keyReport.Skipped,
+			})
 		return
 	}
 	slog.Info("Server config updated via admin API (DB-backed)",
@@ -2032,14 +1976,14 @@ func (s *Server) validateHubDefaultGCPIdentity(w http.ResponseWriter, ctx contex
 	switch d.DefaultGCPIdentityMode {
 	case "", store.GCPMetadataModeBlock, store.GCPMetadataModePassthrough, store.GCPMetadataModeAssign:
 	default:
-		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-			fmt.Sprintf("invalid default_gcp_identity_mode %q: must be one of block, passthrough, assign", d.DefaultGCPIdentityMode), nil)
+		writeSettingsFieldError(w, "default_gcp_identity_mode",
+			fmt.Sprintf("invalid default_gcp_identity_mode %q: must be one of block, passthrough, assign", d.DefaultGCPIdentityMode))
 		return false
 	}
 
 	if d.DefaultGCPIdentityMode == store.GCPMetadataModeAssign && d.DefaultGCPIdentityServiceAccountID == "" {
-		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-			"default GCP identity mode 'assign' requires a service account; set default_gcp_identity_service_account_id or choose another mode", nil)
+		writeSettingsFieldError(w, "default_gcp_identity_service_account_id",
+			"default GCP identity mode 'assign' requires a service account; set default_gcp_identity_service_account_id or choose another mode")
 		return false
 	}
 
@@ -2054,8 +1998,8 @@ func (s *Server) validateHubDefaultGCPIdentity(w http.ResponseWriter, ctx contex
 	}
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-				"default GCP service account not found", nil)
+			writeSettingsFieldError(w, "default_gcp_identity_service_account_id",
+				"default GCP service account not found")
 			return false
 		}
 		writeErrorFromErr(w, err, "")
@@ -2063,20 +2007,23 @@ func (s *Server) validateHubDefaultGCPIdentity(w http.ResponseWriter, ctx contex
 	}
 
 	if !gcpServiceAccountVerified(sa) {
-		writeError(w, http.StatusUnprocessableEntity, ErrCodeIdentityNotVerified,
-			"GCP service account is not verified; verify it before setting it as the hub default. "+
-				identityVerifyRemedy(sa.Scope), nil)
+		msg := "GCP service account is not verified; verify it before setting it as the hub default. " +
+			identityVerifyRemedy(sa.Scope)
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeIdentityNotVerified, msg, map[string]interface{}{
+			"field":  "default_gcp_identity_service_account_id",
+			"errors": []settingsFieldError{{Field: "default_gcp_identity_service_account_id", Message: msg}},
+		})
 		return false
 	}
 
 	if sa.Scope != store.ScopeHub {
-		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-			"hub default service account must be hub-scoped; a project-scoped account is unavailable in every other project", nil)
+		writeSettingsFieldError(w, "default_gcp_identity_service_account_id",
+			"hub default service account must be hub-scoped; a project-scoped account is unavailable in every other project")
 		return false
 	}
 
 	if saReferencePreconditions(sa) != nil {
-		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, saAssignTranslationRecordMsg, nil)
+		writeSettingsFieldError(w, "default_gcp_identity_service_account_id", saAssignTranslationRecordMsg)
 		return false
 	}
 
@@ -2084,9 +2031,9 @@ func (s *Server) validateHubDefaultGCPIdentity(w http.ResponseWriter, ctx contex
 	mode := s.saAssignCheckMode
 	s.mu.RUnlock()
 	if mode != SAAssignCheckEnforce {
-		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+		writeSettingsFieldError(w, "default_gcp_identity_service_account_id",
 			"hub-scoped service account assignment requires gcpIamCheckMode=enforce; "+
-				"agent creation would be denied for every user until it is enabled", nil)
+				"agent creation would be denied for every user until it is enabled")
 		return false
 	}
 
