@@ -53,6 +53,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit"
@@ -503,19 +504,30 @@ func (s *agentSet) start(opts api.StartOptions) (*api.AgentInfo, error) {
 		return nil, fmt.Errorf("fakeagent: agent %s is already running", opts.Name)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	// The broker finds an agent's entry by name and project
+	// ({scion.name, scion.project_id}, as on a real container) to stop,
+	// restart or delete it; without the project label a hub stop finds
+	// nothing and answers its idempotent "not found" 202.
+	projectID := opts.HubProjectID
+	if projectID == "" {
+		projectID = env["SCION_PROJECT_ID"]
+	}
 	a := &fakeAgent{
 		info: api.AgentInfo{
 			ID:          agentID,
 			ContainerID: "fakeagent-" + opts.Name,
 			Name:        opts.Name,
+			ProjectID:   projectID,
 			Phase:       "running",
 			// The run the hub minted for this start, as a real container
 			// carries it (label and launch id).
 			RunID: opts.RunID,
 			Labels: map[string]string{
-				"scion.name":   opts.Name,
-				"agent_id":     agentID,
-				api.LabelRunID: opts.RunID,
+				"scion.agent":              "true",
+				"scion.name":               opts.Name,
+				projectkeys.LabelProjectID: projectID,
+				"agent_id":                 agentID,
+				api.LabelRunID:             opts.RunID,
 			},
 		},
 		cancel:    cancel,

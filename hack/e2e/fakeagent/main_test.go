@@ -25,6 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
 func TestParseFlags(t *testing.T) {
@@ -356,4 +357,38 @@ func TestStopAndResume(t *testing.T) {
 			t.Errorf("stop called %d times for an agent that is not running, want 0", lc.stops)
 		}
 	})
+}
+
+// TestStartLabelsTheProject pins the labels the broker's stop, restart and
+// delete look an agent up by (runtimebroker scopedNameFilter: scion.name
+// and scion.project_id). Without them a hub stop finds no entry.
+func TestStartLabelsTheProject(t *testing.T) {
+	s := newAgentSet(8080)
+	defer s.stopAll()
+	env := map[string]string{
+		// Nothing listens here: the agent keeps retrying the port
+		// registration until stopAll.
+		"SCION_HUB_ENDPOINT": "http://127.0.0.1:1",
+		"SCION_AGENT_ID":     "agent-1",
+		"SCION_PROJECT_ID":   "project-env",
+	}
+	if _, err := s.start(api.StartOptions{Name: "port-proxy-legacy", HubProjectID: "project-1", HubIssuedToken: "token", Env: env}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	filter := map[string]string{"scion.name": "port-proxy-legacy", projectkeys.LabelProjectID: "project-1"}
+	if got := s.list(filter); len(got) != 1 || got[0].ProjectID != "project-1" {
+		t.Errorf("list(%v) = %v, want the agent in project-1", filter, got)
+	}
+	if got := s.list(map[string]string{"scion.name": "port-proxy-legacy", projectkeys.LabelProjectID: "other"}); len(got) != 0 {
+		t.Errorf("list in another project = %v, want none", got)
+	}
+	s.stop("port-proxy-legacy")
+
+	// Without HubProjectID the hub's SCION_PROJECT_ID is the project.
+	if _, err := s.start(api.StartOptions{Name: "port-proxy-legacy", HubIssuedToken: "token", Env: env}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if got := s.list(map[string]string{projectkeys.LabelProjectID: "project-env"}); len(got) != 1 {
+		t.Errorf("list by the env project = %v, want the agent", got)
+	}
 }
