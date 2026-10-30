@@ -1355,6 +1355,21 @@ jobs:
           fi
           grep -qE '^--- PASS: TestStartResumeRestartHubCredential( |$)' /tmp/rb.log
 
+      # The consumer end of the chain: pkg/agent refuses a hub-dispatched
+      # start without the hub-issued credential (ErrNoHubToken). The hub
+      # e2e stands a recording manager in for it, so the absent-field
+      # fail-closed claim needs this test too.
+      - name: Run pkg/agent start-contract test by name
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          go test -count=1 -v -run '^TestStartHubCredentialIsHubIssuedOnly$' ./pkg/agent | tee /tmp/agent.log
+          if grep -qE '^[[:space:]]*--- SKIP' /tmp/agent.log; then
+            echo "::error title=Start contract::TestStartHubCredentialIsHubIssuedOnly skipped"
+            exit 1
+          fi
+          grep -qE '^--- PASS: TestStartHubCredentialIsHubIssuedOnly( |$)' /tmp/agent.log
+
   # T1 Launch Store PostgreSQL Tests runs as several parallel jobs; the
   # job below with the old name only rolls them up. About 70% of the old
   # single job was pkg/store/entadapter on Postgres (~13 of ~20 min), so

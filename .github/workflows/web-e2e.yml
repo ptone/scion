@@ -48,8 +48,16 @@
 # the helper stops and resumes each agent through the hub before the
 # suite runs, so a start or resume regression fails the setup. The
 # boundary paths (the hub's start dispatch and transports, the control
-# channel, pkg/runtimebroker and pkg/agent/run.go) are in the path filter
-# for that reason.
+# channel and pkg/runtimebroker) are in the path filter for that reason.
+# pkg/runtimebroker is listed whole (**), not file by file: the setup
+# goes through the broker's create, stop and start handlers, its start
+# context, its hub connection and its control-channel and conduit
+# clients, and that set spans most of the package and moves as it is
+# refactored, so a narrower list would quietly miss a boundary file. The
+# cost is that any broker change runs every suite here. pkg/agent/run.go
+# is not listed: the helper replaces Manager.Start, so this suite cannot
+# catch a pkg/agent Start regression (ci.yml's start-contract job runs
+# pkg/agent's start credential test by name instead).
 #
 # Red-on-main triage: a cross-component e2e turning red right after a
 # boundary change is a contract signal first, a harness bug second. Before
@@ -121,7 +129,6 @@ on:
       - 'pkg/hub/broker_http_transport.go'
       - 'pkg/hub/controlchannel_*.go'
       - 'pkg/runtimebroker/**'
-      - 'pkg/agent/run.go'
   push:
     branches: [ main ]
     paths:
@@ -153,7 +160,6 @@ on:
       - 'pkg/hub/broker_http_transport.go'
       - 'pkg/hub/controlchannel_*.go'
       - 'pkg/runtimebroker/**'
-      - 'pkg/agent/run.go'
   # The odd minute avoids the top-of-hour spike in scheduled GitHub jobs.
   schedule:
     - cron: '41 5 * * *'
