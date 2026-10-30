@@ -19,13 +19,11 @@ package hub
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"testing"
 	"time"
 	_ "time/tzdata" // the zones below must not depend on the host's zoneinfo
 
-	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -35,20 +33,6 @@ import (
 // saving rules are tested in pkg/cronzone; these tests cover the hub
 // surfaces: validation, storage, the update semantics, re-attribution, and
 // that every next-run computation uses the stored zone.
-
-// setupZonedScheduleTest is setupScheduleTest with the
-// hub.schedule_time_zone experiment set on or off.
-func setupZonedScheduleTest(t *testing.T, experimentOn bool) (*Server, store.Store, string) {
-	t.Helper()
-	srv, s, projectID := setupScheduleTest(t)
-	fakeStore := newFakeHubSettingStore()
-	fakeStore.seed("experiments", json.RawMessage(fmt.Sprintf(`{"overrides":{%q:%t}}`, experiments.ScheduleTimeZone, experimentOn)))
-	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
-	_, err := ops.Refresh(context.Background())
-	require.NoError(t, err)
-	srv.SetOperationalSettings(ops)
-	return srv, s, projectID
-}
 
 // createZonedSchedule creates a message schedule through the API and
 // returns the decoded response.
@@ -78,7 +62,7 @@ func assertLocalRun(t *testing.T, next *time.Time, zone string, hh, mm int) {
 }
 
 func TestScheduleTimeZone_Create(t *testing.T) {
-	srv, s, projectID := setupZonedScheduleTest(t, true)
+	srv, s, projectID := setupScheduleTest(t)
 
 	created := createZonedSchedule(t, srv, projectID, "pacific", "17 9 * * *", "America/Los_Angeles")
 	assert.Equal(t, "America/Los_Angeles", created.TimeZone)
@@ -96,7 +80,7 @@ func TestScheduleTimeZone_Create(t *testing.T) {
 }
 
 func TestScheduleTimeZone_CreateRefusesInvalidZone(t *testing.T) {
-	srv, _, projectID := setupZonedScheduleTest(t, true)
+	srv, _, projectID := setupScheduleTest(t)
 
 	cases := map[string]string{
 		"Mars/Olympus_Mons": `unknown time zone "Mars/Olympus_Mons": use an IANA name such as America/Los_Angeles`,
@@ -133,7 +117,7 @@ func TestScheduleTimeZone_CreateRefusesInvalidZone(t *testing.T) {
 }
 
 func TestScheduleTimeZone_Update(t *testing.T) {
-	srv, s, projectID := setupZonedScheduleTest(t, true)
+	srv, s, projectID := setupScheduleTest(t)
 	ctx := context.Background()
 
 	created := createZonedSchedule(t, srv, projectID, "nightly", "30 19 * * *", "")
@@ -200,7 +184,7 @@ func TestScheduleTimeZone_Update(t *testing.T) {
 }
 
 func TestScheduleTimeZone_EnableAndResumeUseStoredZone(t *testing.T) {
-	srv, s, projectID := setupZonedScheduleTest(t, true)
+	srv, s, projectID := setupScheduleTest(t)
 	ctx := context.Background()
 
 	for _, path := range []string{"resume", "enable"} {
@@ -231,7 +215,7 @@ func TestScheduleTimeZone_EnableAndResumeUseStoredZone(t *testing.T) {
 }
 
 func TestScheduleTimeZone_Evaluator(t *testing.T) {
-	srv, s, projectID := setupZonedScheduleTest(t, true)
+	srv, s, projectID := setupScheduleTest(t)
 	ctx := context.Background()
 
 	// A due zoned schedule: the evaluator computes the next run in its zone.
@@ -264,61 +248,4 @@ func TestScheduleTimeZone_Evaluator(t *testing.T) {
 	events, err := s.ListScheduledEvents(ctx, store.ScheduledEventFilter{ProjectID: projectID, ScheduleID: bad.ID}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Empty(t, events.Items, "no event is materialized for an invalid zone")
-}
-
-func TestScheduleTimeZone_ExperimentOff(t *testing.T) {
-	srv, s, projectID := setupZonedScheduleTest(t, false)
-	ctx := context.Background()
-
-	// Setting a zone is refused while the experiment is off.
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules",
-		CreateScheduleRequest{
-			Name: "pacific", CronExpr: "0 9 * * *", TimeZone: "America/Los_Angeles", EventType: "message",
-			AgentName: "worker", Message: "hello",
-		})
-	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-	assert.Equal(t, scheduleTimeZoneExperimentMessage, errorMessage(t, rec.Body.Bytes()))
-
-	// An unknown zone still gets the zone error, not the experiment one.
-	rec = doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules",
-		CreateScheduleRequest{
-			Name: "bad", CronExpr: "0 9 * * *", TimeZone: "Nowhere/City", EventType: "message",
-			AgentName: "worker", Message: "hello",
-		})
-	require.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Contains(t, errorMessage(t, rec.Body.Bytes()), `unknown time zone "Nowhere/City"`)
-
-	// Empty and UTC are not gated.
-	created := createZonedSchedule(t, srv, projectID, "utc", "30 19 * * *", "UTC")
-	assert.Empty(t, created.TimeZone)
-	base := "/api/v1/projects/" + projectID + "/schedules/" + created.ID
-	rec = doRequest(t, srv, http.MethodPatch, base, UpdateScheduleRequest{TimeZone: strPtr("Europe/London")})
-	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-	assert.Equal(t, scheduleTimeZoneExperimentMessage, errorMessage(t, rec.Body.Bytes()))
-
-	// A schedule that already has a zone (set while the experiment was on)
-	// keeps running in it: resending the same zone and other edits work,
-	// next runs stay in the zone, and clearing it back to UTC is allowed.
-	row, err := s.GetSchedule(ctx, created.ID)
-	require.NoError(t, err)
-	row.TimeZone = "Europe/London"
-	require.NoError(t, s.UpdateSchedule(ctx, row, store.ScheduleFieldMask{TimeZone: true},
-		row.AuthorizationRevision, row.AuthorizationRevision != 0, nil))
-	rec = doRequest(t, srv, http.MethodPatch, base, UpdateScheduleRequest{CronExpr: "15 6 * * *", TimeZone: strPtr("Europe/London")})
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	got, err := s.GetSchedule(ctx, created.ID)
-	require.NoError(t, err)
-	assert.Equal(t, "Europe/London", got.TimeZone)
-	assertLocalRun(t, got.NextRunAt, "Europe/London", 6, 15)
-
-	srv.executeSchedule(ctx, *got, time.Now().UTC())
-	got, err = s.GetSchedule(ctx, created.ID)
-	require.NoError(t, err)
-	assertLocalRun(t, got.NextRunAt, "Europe/London", 6, 15)
-
-	rec = doRequest(t, srv, http.MethodPatch, base, UpdateScheduleRequest{TimeZone: strPtr("")})
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	got, err = s.GetSchedule(ctx, created.ID)
-	require.NoError(t, err)
-	assert.Empty(t, got.TimeZone)
 }

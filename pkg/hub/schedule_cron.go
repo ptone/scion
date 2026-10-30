@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/cronzone"
-	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/robfig/cron/v3"
 )
@@ -83,22 +82,6 @@ func normalizeScheduleTimeZone(name string) (string, error) {
 		return "", nil
 	}
 	return name, nil
-}
-
-// scheduleTimeZoneExperimentMessage is the 400 message for a request that
-// sets a time zone while the hub.schedule_time_zone experiment is off.
-const scheduleTimeZoneExperimentMessage = "schedule time zones are not enabled on this hub (experiment hub.schedule_time_zone); omit timeZone or use UTC"
-
-// allowScheduleTimeZone writes a 400 and returns false when a request sets
-// a non-UTC time zone (normalized; "" is UTC) while the
-// hub.schedule_time_zone experiment is off. Only writes are gated:
-// schedules that already carry a zone keep being evaluated in it.
-func (s *Server) allowScheduleTimeZone(w http.ResponseWriter, normalizedZone string) bool {
-	if normalizedZone == "" || s.experimentEnabled(experiments.ScheduleTimeZone) {
-		return true
-	}
-	ValidationError(w, scheduleTimeZoneExperimentMessage, map[string]interface{}{"field": "timeZone"})
-	return false
 }
 
 // scheduleNextRun returns the first run of a recurring schedule strictly
