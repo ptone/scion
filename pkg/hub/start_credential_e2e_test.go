@@ -279,6 +279,37 @@ var contractPaths = []contractPath{
 	},
 }
 
+// contractSecretBackend serves its secrets on both of the hub's secret
+// paths: Resolve (create) and List plus FetchValues (start and restart,
+// selectDeliverySecrets). mockSecretBackend implements only Resolve.
+type contractSecretBackend struct {
+	mockSecretBackend
+}
+
+func (b *contractSecretBackend) List(_ context.Context, filter secret.Filter) ([]secret.SecretMeta, error) {
+	var out []secret.SecretMeta
+	for _, s := range b.secrets {
+		if s.Scope == filter.Scope && s.ScopeID == filter.ScopeID &&
+			(filter.Type == "" || s.SecretType == filter.Type) && (filter.Name == "" || s.Name == filter.Name) {
+			out = append(out, s.SecretMeta)
+		}
+	}
+	return out, nil
+}
+
+func (b *contractSecretBackend) FetchValues(_ context.Context, metas []secret.SecretMeta) (map[string]secret.FetchResult, error) {
+	out := make(map[string]secret.FetchResult, len(metas))
+	for _, m := range metas {
+		out[m.ID] = secret.FetchResult{Err: store.ErrNotFound}
+		for _, s := range b.secrets {
+			if s.ID == m.ID {
+				out[m.ID] = secret.FetchResult{Value: s.Value}
+			}
+		}
+	}
+	return out, nil
+}
+
 // contractFixture is a hub store, dispatcher and token service wired to a
 // real broker over one transport.
 type contractFixture struct {
@@ -383,10 +414,10 @@ runtimes:
 	d.SetTokenGenerator(runTokenGenerator{svc: svc})
 	// One environment secret and one file secret, user scope (no
 	// project-scope authorization in this fixture).
-	d.SetSecretBackend(&mockSecretBackend{secrets: []secret.SecretWithValue{
-		{SecretMeta: secret.SecretMeta{Name: "e2e-contract-env", SecretType: "environment", Target: contractEnvSecret, Scope: "user", ScopeID: ownerID, InjectionMode: "always"}, Value: contractEnvValue},
-		{SecretMeta: secret.SecretMeta{Name: contractFileSecret, SecretType: "file", Target: contractFileTarget, Scope: "user", ScopeID: ownerID, InjectionMode: "always"}, Value: contractFileValue},
-	}})
+	d.SetSecretBackend(&contractSecretBackend{mockSecretBackend{secrets: []secret.SecretWithValue{
+		{SecretMeta: secret.SecretMeta{ID: "secret-e2e-env", Name: "e2e-contract-env", SecretType: "environment", Target: contractEnvSecret, Scope: "user", ScopeID: ownerID, InjectionMode: "always"}, Value: contractEnvValue},
+		{SecretMeta: secret.SecretMeta{ID: "secret-e2e-file", Name: contractFileSecret, SecretType: "file", Target: contractFileTarget, Scope: "user", ScopeID: ownerID, InjectionMode: "always"}, Value: contractFileValue},
+	}}})
 
 	return &contractFixture{store: s, d: d, svc: svc, mgr: mgr, wire: wire, agent: a}
 }
@@ -416,8 +447,12 @@ func TestStartCredential_E2E_HubDispatchReachesAgentStart(t *testing.T) {
 				assert.Equal(t, api.EnvKindPlain, cls[contractPlainKey], "agent config env is plain")
 				assert.Equal(t, contractEnvValue, wire.body.ResolvedEnv[contractEnvSecret], "environment secret in resolved env")
 				assert.Equal(t, api.EnvKindSecretFetchable, cls[contractEnvSecret], "environment secret classification")
-				assert.Equal(t, f.agent.ID, wire.body.ResolvedEnv["SCION_AGENT_ID"])
-				assert.Equal(t, f.agent.ProjectID, wire.body.ResolvedEnv["SCION_PROJECT_ID"])
+				if !p.create {
+					// Create sends the agent and project as request fields
+					// (id, projectId); start and restart send them in env.
+					assert.Equal(t, f.agent.ID, wire.body.ResolvedEnv["SCION_AGENT_ID"])
+					assert.Equal(t, f.agent.ProjectID, wire.body.ResolvedEnv["SCION_PROJECT_ID"])
+				}
 				assertContractSecrets(t, wire.body.ResolvedSecrets, "wire resolvedSecrets")
 				if p.create {
 					assert.NotEmpty(t, wire.body.AgentToken, "create carries the credential in agentToken")
