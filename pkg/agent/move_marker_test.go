@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// These tests exercise unix-only, Windows-gated agent storage code.
+//go:build unix
+
 package agent
 
 import (
@@ -370,7 +373,7 @@ func TestEnsureNFSAgentWorkspaceLeafClaim_ReportsCreatedOnLaterError(t *testing.
 	require.NoError(t, os.MkdirAll(filepath.Dir(blocker), 0o755))
 	require.NoError(t, os.WriteFile(blocker, []byte("not a directory"), 0o644))
 
-	_, created, err := ensureNFSAgentWorkspaceLeafClaim("kubernetes", testNFSWorkspaceProjectID, res, "ws-pv", []string{"scratchpad"}, "test-agent")
+	_, created, err := ensureNFSAgentWorkspaceLeafClaim("kubernetes", testNFSWorkspaceProjectID, res, runtime.NFSPodShare{ClaimName: "ws-pv"}, []string{"scratchpad"}, "test-agent")
 	require.Error(t, err)
 	assert.True(t, created, "the agent's directory was created before the later failure")
 	assert.DirExists(t, nfsTestAgentDir(mountRoot, "test-agent"))
