@@ -1290,6 +1290,31 @@ func (s *Server) existingAgentFlatChecks(ctx context.Context, w http.ResponseWri
 	return existingAgentNone, false
 }
 
+// persistRuntimeBrokerFill persists a Runtime Broker that a resume or
+// restart assigns to an existing agent with none, before the start is
+// dispatched (ptone/scion#5770): a broker reading the agent's user-scoped
+// template during that start is admitted only when the hub records the
+// agent on it. It compare-and-sets from empty and bumps state_version, and
+// agent is replaced by the returned row, so the post-start whole-row update
+// neither conflicts nor reverts the broker. A fill lost to a concurrent
+// placement on another broker answers 409 and nothing is dispatched; the
+// same broker already stored counts as success. The fill is kept if the
+// start then fails, as a flat first placement is. Returns false when it has
+// written the response.
+func (s *Server) persistRuntimeBrokerFill(ctx context.Context, w http.ResponseWriter, agent *store.Agent, brokerID string) bool {
+	updated, err := s.store.SetAgentRuntimeBrokerIfEmpty(ctx, agent.ID, brokerID)
+	if err != nil {
+		if errors.Is(err, store.ErrRuntimeBrokerChanged) {
+			Conflict(w, "agent placement changed concurrently; retry")
+		} else {
+			writeErrorFromErr(w, err, "")
+		}
+		return false
+	}
+	*agent = *updated
+	return true
+}
+
 // handleExistingAgent encapsulates the full decision tree for an agent that
 // already exists (same slug, same project) when a create request arrives. It
 // either writes the HTTP response itself or tells the caller what to do.
@@ -1425,7 +1450,10 @@ func (s *Server) handleExistingAgent(
 
 	// Branch 1: Suspended agents are restarted in-place (not deleted), preserving harness state.
 	if !req.ProvisionOnly && rest == string(state.PhaseSuspended) {
-		if existingAgent.RuntimeBrokerID == "" && runtimeBrokerID != "" {
+		// Captured before the in-memory assignment below, after which the
+		// row can no longer tell whether the broker still needs persisting.
+		needBrokerFill := existingAgent.RuntimeBrokerID == "" && runtimeBrokerID != ""
+		if needBrokerFill {
 			existingAgent.RuntimeBrokerID = runtimeBrokerID
 		}
 
@@ -1439,6 +1467,20 @@ func (s *Server) handleExistingAgent(
 		// Fail fast on a GCP identity the token-mint gate would refuse,
 		// before any quota reservation or run-intent write.
 		if s.gcpIdentityStartRefusal(ctx, w, existingAgent, "resume") {
+			return existingAgentErrored
+		}
+
+		// A user-scoped template on a broker known to lack dispatch-bound
+		// template reads (ptone/scion#5770): 412, before the fill below, so a
+		// refused request persists nothing. existingAgent already carries the
+		// broker in memory.
+		if !s.requireDispatchBoundReadCapabilityForAgent(ctx, w, existingAgent) {
+			return existingAgentErrored
+		}
+		// Persist the broker before dispatch, so the broker hydrating this
+		// start is the one the hub records as running the agent
+		// (ptone/scion#5770).
+		if needBrokerFill && !s.persistRuntimeBrokerFill(ctx, w, existingAgent, runtimeBrokerID) {
 			return existingAgentErrored
 		}
 
@@ -1576,7 +1618,10 @@ func (s *Server) handleExistingAgent(
 
 		resumeInPlace, forcedRecovery := resumeInPlaceDecision(rest, req.Resume, req.ForceResume)
 		if resumeInPlace {
-			if existingAgent.RuntimeBrokerID == "" && runtimeBrokerID != "" {
+			// Captured before the in-memory assignment below, after which the
+			// row can no longer tell whether the broker still needs persisting.
+			needBrokerFill := existingAgent.RuntimeBrokerID == "" && runtimeBrokerID != ""
+			if needBrokerFill {
 				existingAgent.RuntimeBrokerID = runtimeBrokerID
 			}
 
@@ -1590,6 +1635,20 @@ func (s *Server) handleExistingAgent(
 			// Fail fast on a GCP identity the token-mint gate would refuse,
 			// before any quota reservation or run-intent write.
 			if s.gcpIdentityStartRefusal(ctx, w, existingAgent, "resume") {
+				return existingAgentErrored
+			}
+
+			// A user-scoped template on a broker known to lack dispatch-bound
+			// template reads (ptone/scion#5770): 412, before the fill below, so a
+			// refused request persists nothing. existingAgent already carries the
+			// broker in memory.
+			if !s.requireDispatchBoundReadCapabilityForAgent(ctx, w, existingAgent) {
+				return existingAgentErrored
+			}
+			// Persist the broker before dispatch, so the broker hydrating this
+			// start is the one the hub records as running the agent
+			// (ptone/scion#5770).
+			if needBrokerFill && !s.persistRuntimeBrokerFill(ctx, w, existingAgent, runtimeBrokerID) {
 				return existingAgentErrored
 			}
 
@@ -1831,7 +1890,10 @@ func (s *Server) handleExistingAgent(
 			rest == string(state.PhaseProvisioning)) {
 
 		// Recover RuntimeBrokerID from the freshly-resolved value if the stored one is empty.
-		if existingAgent.RuntimeBrokerID == "" && runtimeBrokerID != "" {
+		// Captured before the in-memory assignment below, after which the
+		// row can no longer tell whether the broker still needs persisting.
+		needBrokerFill := existingAgent.RuntimeBrokerID == "" && runtimeBrokerID != ""
+		if needBrokerFill {
 			existingAgent.RuntimeBrokerID = runtimeBrokerID
 		}
 
@@ -1845,6 +1907,20 @@ func (s *Server) handleExistingAgent(
 		// Fail fast on a GCP identity the token-mint gate would refuse,
 		// before any quota reservation or run-intent write.
 		if s.gcpIdentityStartRefusal(ctx, w, existingAgent, "start") {
+			return existingAgentErrored
+		}
+
+		// A user-scoped template on a broker known to lack dispatch-bound
+		// template reads (ptone/scion#5770): 412, before the fill below, so a
+		// refused request persists nothing. existingAgent already carries the
+		// broker in memory.
+		if !s.requireDispatchBoundReadCapabilityForAgent(ctx, w, existingAgent) {
+			return existingAgentErrored
+		}
+		// Persist the broker before dispatch, so the broker hydrating this
+		// start is the one the hub records as running the agent
+		// (ptone/scion#5770).
+		if needBrokerFill && !s.persistRuntimeBrokerFill(ctx, w, existingAgent, runtimeBrokerID) {
 			return existingAgentErrored
 		}
 

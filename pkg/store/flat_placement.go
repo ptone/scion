@@ -38,6 +38,13 @@ var (
 	// ErrInvalidPinnedPlacement: SetAgentPinnedRuntimeTarget was asked to
 	// write an incomplete placement (it never unpins).
 	ErrInvalidPinnedPlacement = errors.New("invalid pinned placement")
+	// ErrRuntimeBrokerChanged: SetAgentRuntimeBrokerIfEmpty found another
+	// Runtime Broker already stored on the agent. The row is unchanged.
+	ErrRuntimeBrokerChanged = errors.New("runtime broker changed")
+	// ErrTemplatePinChanged: SetAgentTemplatePin found the row at another
+	// state_version, or another template or hash recorded on the agent.
+	// The row is unchanged.
+	ErrTemplatePinChanged = errors.New("template pin changed")
 	// ErrFlatRuntimeBrokerReassign: ReassignAgentsToBroker refused a flat
 	// destination; agents are never bulk-moved onto a flat Runtime Broker.
 	ErrFlatRuntimeBrokerReassign = errors.New("refusing to reassign agents to a flat runtime broker")

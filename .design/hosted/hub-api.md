@@ -1546,6 +1546,8 @@ All error responses follow a consistent format:
 | 404 | `not_found` | Resource not found |
 | 409 | `conflict` | Resource conflict (e.g., name collision) |
 | 409 | `version_conflict` | Optimistic locking failed |
+| 409 | `template_pin_conflict` | A start, restart, resume or DM wake lost the race to re-record the agent's user-scoped template; retry |
+| 409 | `template_unavailable` | A reincarnate or move (dry runs included) cannot keep the agent's user-scoped template |
 | 409 | `encryption_policy_mismatch` | The database encryption policy refused a secret payload write from this hub's encryption keyring (stale or non-ring-aware writer); nothing was stored and there is no unencrypted fallback |
 | 422 | `unprocessable` | Valid request but cannot be processed |
 | 429 | `rate_limited` | Too many requests |

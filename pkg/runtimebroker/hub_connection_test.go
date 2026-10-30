@@ -1825,9 +1825,12 @@ func TestHandleHubConnections_ConnectionStatus(t *testing.T) {
 type stubTemplateService struct {
 	hubclient.TemplateService
 	getFunc func(ctx context.Context, ref string) (*hubclient.Template, error)
+	// getAgents records the WithDispatchAgent value of each Get.
+	getAgents []string
 }
 
-func (s *stubTemplateService) Get(ctx context.Context, ref string) (*hubclient.Template, error) {
+func (s *stubTemplateService) Get(ctx context.Context, ref string, opts ...hubclient.TemplateReadOption) (*hubclient.Template, error) {
+	s.getAgents = append(s.getAgents, hubclient.DispatchAgentOf(opts...))
 	return s.getFunc(ctx, ref)
 }
 
@@ -1888,7 +1891,7 @@ func TestHydrateTemplate_LocalStorageDirectRead(t *testing.T) {
 		TemplateID: "some-uuid",
 	}
 
-	path, err := srv.hydrateTemplate(context.Background(), cfg, conn)
+	path, err := srv.hydrateTemplate(context.Background(), cfg, conn, "")
 	if err != nil {
 		t.Fatalf("hydrateTemplate failed: %v", err)
 	}
@@ -1920,7 +1923,7 @@ func TestHydrateTemplate_LocalStorageFallsBackWhenMissing(t *testing.T) {
 		TemplateID: "some-uuid",
 	}
 
-	path, err := srv.hydrateTemplate(context.Background(), cfg, conn)
+	path, err := srv.hydrateTemplate(context.Background(), cfg, conn, "")
 	if err != nil {
 		t.Fatalf("hydrateTemplate failed: %v", err)
 	}
@@ -1943,7 +1946,7 @@ func TestHydrateTemplate_RemoteWithoutHydratorReturnsEmpty(t *testing.T) {
 		TemplateID: "some-uuid",
 	}
 
-	path, err := srv.hydrateTemplate(context.Background(), cfg, conn)
+	path, err := srv.hydrateTemplate(context.Background(), cfg, conn, "")
 	if err != nil {
 		t.Fatalf("hydrateTemplate failed: %v", err)
 	}

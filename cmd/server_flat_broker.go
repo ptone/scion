@@ -180,6 +180,7 @@ func storeBrokerCapabilities(c *hubclient.BrokerCapabilities) *store.BrokerCapab
 		ClearedFields:            c.ClearedFields,
 		StartsInFlight:           c.StartsInFlight,
 		AttachmentDelivery:       c.AttachmentDelivery,
+		DispatchBoundCatalogRead: c.DispatchBoundCatalogRead,
 		NodeImageRegistry:        c.NodeImageRegistry,
 	}
 }

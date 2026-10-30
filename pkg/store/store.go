@@ -899,6 +899,29 @@ type AgentStore interface {
 	// returns ErrPinnedPlacementChanged; a missing agent ErrNotFound.
 	SetAgentPinnedRuntimeTarget(ctx context.Context, agentID string, expected, next PinnedPlacement) (*Agent, error)
 
+	// SetAgentRuntimeBrokerIfEmpty compare-and-sets an agent's
+	// runtime_broker_id from empty ("" or NULL) to brokerID, bumping
+	// state_version in the same conditional update so a stale UpdateAgent
+	// conflicts instead of reverting it, and returns the updated row. A row
+	// that already stores brokerID is returned unchanged (an idempotent
+	// retry). A row that stores another broker returns
+	// ErrRuntimeBrokerChanged and is not changed; a missing agent
+	// ErrNotFound. brokerID must be non-empty.
+	SetAgentRuntimeBrokerIfEmpty(ctx context.Context, agentID, brokerID string) (*Agent, error)
+
+	// SetAgentTemplatePin re-records the content hash of an agent's Hub
+	// template (AgentAppliedConfig.TemplateHash) and changes no other
+	// applied-config key or column. It applies only while the row is still
+	// at expectedVersion (the state_version the caller read) and its
+	// applied config still names templateID with expectedHash; otherwise
+	// it returns ErrTemplatePinChanged and writes nothing, so a caller
+	// holding a stale read never gets a version that would let it overwrite
+	// another writer's change. The write bumps state_version by exactly one
+	// (expectedVersion+1, returned), so any other writer holding a read from
+	// before it gets ErrVersionConflict from UpdateAgent. A missing or
+	// deleted agent returns ErrNotFound.
+	SetAgentTemplatePin(ctx context.Context, agentID string, expectedVersion int64, templateID, expectedHash, newHash string) (newVersion int64, err error)
+
 	// AggregateAgentHealth returns lightweight health-oriented counts and lists
 	// for the health-summary endpoint without fetching full agent records.
 	// This avoids the O(N) deserialization cost of ListAgents on large installations.
