@@ -151,7 +151,6 @@ type brokerAttachmentRequest struct {
 	Audience string `json:"-"`
 }
 
-// validate returns the validation message for a malformed request, or "".
 // tooManyTargets reports whether r names more targets than accepted.
 func (r *brokerAttachmentRequest) tooManyTargets() bool {
 	return len(r.Targets) > maxBrokerAttachmentTargets
@@ -426,15 +425,22 @@ func (s *Server) handleBrokerAttachmentsUpload(w http.ResponseWriter, r *http.Re
 		results = append(results, result)
 	}
 	status := http.StatusCreated
+	decision := "stored"
 	if len(results) == 0 {
 		status = http.StatusBadRequest
+		decision = "refused: files"
 		if internalError {
 			status = http.StatusInternalServerError
+			decision = "failed"
 		}
 	}
+	var storedBytes int64
+	for _, r := range results {
+		storedBytes += r.Size
+	}
 	log.Info("broker attachment upload",
-		"sender_id", sender.ID(), "project_id", req.ProjectID, "decision", "stored",
-		"audience", req.Audience, "count", len(results), "failed", len(failures), "total_bytes", batch.total)
+		"sender_id", sender.ID(), "project_id", req.ProjectID, "decision", decision,
+		"audience", req.Audience, "count", len(results), "failed", len(failures), "total_bytes", storedBytes)
 	writeJSON(w, status, map[string]interface{}{
 		"attachments": results,
 		"failures":    failures,

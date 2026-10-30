@@ -255,6 +255,11 @@ func (b *TelegramBrokerV2) uploadInboundAttachment(ctx context.Context, sender, 
 		return attachmentUploadResult{}, fmt.Errorf("attachment upload: %w", err)
 	}
 	if status != http.StatusOK && status != http.StatusCreated {
+		// A refusal of every file carries the per-file reasons.
+		var refused attachmentUploadResult
+		if json.Unmarshal(answer, &refused) == nil && len(refused.Failures) > 0 {
+			return refused, nil
+		}
 		return attachmentUploadResult{}, fmt.Errorf("attachment upload: HTTP %d %s", status, hubErrorCode(answer))
 	}
 	var out attachmentUploadResult
@@ -382,7 +387,8 @@ var onLegacyStage = func() {}
 
 // legacyStage writes one inbound attachment into the project scratchpad,
 // in the per-message entry .attachments/_telegram/<entry>/<name>, and
-// returns the agent-visible path and the scratchpad it wrote to. It is the
+// returns the agent-visible path and the scratchpad it wrote to (also on a
+// failed write, once the scratchpad was resolved). It is the
 // plugin's only scratchpad writer; it runs only after the hub authorized
 // the sender (or, on an older hub, after the plugin's own sender checks).
 func legacyStage(projectSlug, projectID, entry, name string, body io.Reader) (string, projectfs.Resolved, error) {
@@ -405,7 +411,9 @@ func legacyStage(projectSlug, projectID, entry, name string, body io.Reader) (st
 		projectfs.SharedDirMount(scionapi.SharedDir{Name: projectfs.ScratchpadName}, ""),
 		projectfs.AttachmentChannelTelegram, entry, name, body)
 	if err != nil {
-		return "", projectfs.Resolved{}, fmt.Errorf("write file: %w", err)
+		// The resolved scratchpad is returned so the caller can remove
+		// what a failed write left.
+		return "", scratchpad.Resolved, fmt.Errorf("write file: %w", err)
 	}
 	return agentPath, scratchpad.Resolved, nil
 }
@@ -424,6 +432,7 @@ type inboundAttachment struct {
 	scratchpad projectfs.Resolved
 	entry      string
 	accepted   bool // some recipient accepted a send naming agentPath
+	unknown    bool // some send naming agentPath got no hub answer
 }
 
 // inboundAttachmentPlan is the outcome of preparing a message's attachment.
@@ -480,6 +489,15 @@ func (b *TelegramBrokerV2) prepareInboundAttachment(ctx context.Context, api *Te
 
 	switch answer.Uploads {
 	case attachmentUploadsArtifact:
+		b.mu.RLock()
+		inProcess := b.InboundHandler != nil
+		b.mu.RUnlock()
+		if inProcess {
+			// An in-process InboundHandler takes no upload ids, so the file
+			// cannot reach it: withhold it before anything is downloaded.
+			b.log.Info("Inbound handler set; delivering the message without its attachment")
+			return withheld()
+		}
 		limit := answer.DeliveryMaxBytes
 		if limit <= 0 {
 			b.log.Warn("Attachment check answered artifact without a size limit; delivering the message without its attachment")
@@ -532,6 +550,13 @@ func (b *TelegramBrokerV2) stageInboundAttachment(ctx context.Context, api *Tele
 	entry := nextLegacyEntry()
 	agentPath, scratchpad, err := legacyStage(link.ProjectSlug, link.ProjectID, entry, att.Name, body)
 	if err != nil {
+		// A write that failed part way (the size bound, a write error) can
+		// leave the entry's directory: remove it, best effort.
+		if scratchpad.HostPath != "" {
+			if _, rmErr := projectfs.RemoveAttachmentEntry(scratchpad, projectfs.AttachmentChannelTelegram, entry); rmErr != nil {
+				b.log.Warn("Failed to remove a partly staged attachment entry", "entries", 1)
+			}
+		}
 		return fail(err)
 	}
 	b.log.Info("Staged telegram file", "type", att.Kind, "agent_path", agentPath)
@@ -592,22 +617,19 @@ func (b *TelegramBrokerV2) sendInbound(ctx context.Context, api *TelegramAPIClie
 	}
 	if a.legacy {
 		msg.Attachments = []string{a.agentPath}
-		status, errMsg = b.deliverInboundWithAttachments(ctx, topic, msg, nil)
-		if status >= 200 && status < 300 {
+		var answered bool
+		status, errMsg, answered = b.deliverInboundOutcome(ctx, topic, msg, nil)
+		switch {
+		case !answered:
+			// No hub answer: the hub may still deliver the path, so the
+			// entry is kept.
+			a.unknown = true
+		case status >= 200 && status < 300:
 			a.accepted = true
 		}
 		return status, errMsg, true
 	}
 
-	b.mu.RLock()
-	inProcess := b.InboundHandler != nil
-	b.mu.RUnlock()
-	if inProcess {
-		// An in-process InboundHandler receives the message only; it takes
-		// no upload ids, so nothing is uploaded for it.
-		status, errMsg = b.deliverInboundWithAttachments(ctx, topic, msg, nil)
-		return status, errMsg, true
-	}
 	ids, failure := b.uploadForSend(ctx, msg.Sender, projectID, agentSlug, a)
 	if failure != "" {
 		replyToSender(ctx, api, tgMsg, fmt.Sprintf("Attachment %q could not be uploaded for %s: %s. Your message was not sent to that agent.", a.att.Name, agentSlug, failure))
@@ -640,10 +662,17 @@ func (b *TelegramBrokerV2) uploadForSend(ctx context.Context, sender, projectID,
 	return ids, ""
 }
 
-// finishInboundAttachment removes a staged legacy entry that no recipient
-// accepted. A removal failure is logged with counts only.
+// finishInboundAttachment removes a staged legacy entry that every
+// recipient refused with a real hub answer. A send that got no answer (a
+// transport error, a timeout) is an unknown outcome: the hub may still
+// deliver the path, so the entry is kept, and the projection sweep ages it.
+// A removal failure is logged with counts only.
 func (b *TelegramBrokerV2) finishInboundAttachment(a *inboundAttachment) {
 	if a == nil || !a.legacy || a.accepted {
+		return
+	}
+	if a.unknown {
+		b.log.Info("Kept a staged attachment entry: a send got no hub answer", "entries", 1)
 		return
 	}
 	removed, err := projectfs.RemoveAttachmentEntry(a.scratchpad, projectfs.AttachmentChannelTelegram, a.entry)

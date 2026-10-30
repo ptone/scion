@@ -70,8 +70,9 @@ type BrokerAttachmentCheck struct {
 	// Uploads is AttachmentUploadsArtifact, AttachmentUploadsLegacy or
 	// AttachmentUploadsUnavailable.
 	Uploads string `json:"uploads"`
-	// DeliveryMaxBytes, with AttachmentUploadsArtifact, is the total file
-	// size one upload may carry.
+	// DeliveryMaxBytes, with AttachmentUploadsArtifact, is the largest file
+	// one upload may carry: the total for one message, or the hub's
+	// per-file limit when that is smaller.
 	DeliveryMaxBytes *int64 `json:"delivery_max_bytes,omitempty"`
 }
 

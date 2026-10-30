@@ -38,6 +38,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 )
 
@@ -336,14 +337,14 @@ func (s iaSpecInboundSend) messageText(t *testing.T, hub *iaSpecHub) string {
 // with a notice, before download when Telegram gives its size; nothing is
 // uploaded, staged or written, and the text is still delivered.
 func TestInboundAttachment_OverDeliveryLimit(t *testing.T) {
-	const limit = 2*1024*1024 - 64*1024 // the hub's current answer
+	const limit = iaSpecMaxBytes // the hub's current answer
 	for _, sizeKnown := range []bool{true, false} {
 		t.Run(fmt.Sprintf("size_known=%t", sizeKnown), func(t *testing.T) {
 			stages := countLegacyStages(t)
 			hub := newIASpecHub(t, "artifact", true, "coder")
 			hub.maxBytes = limit
 			env := newIAEnv(t, hub)
-			env.tg.content = bytes.Repeat([]byte("x"), limit+1)
+			env.tg.content = bytes.Repeat([]byte("x"), int(limit)+1)
 			env.tg.hideSize = !sizeKnown
 
 			msg := &TGMessage{
@@ -895,4 +896,131 @@ func TestIASpecHub_RefusesOutOfOrderFields(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, post(swapped))
 	targetsEarly := [][2]string{{"sender", iaSpecSender}, {"targets", "coder"}, {"project_id", "p"}, {"surface", "telegram"}, {"audience", "group"}}
 	assert.Equal(t, http.StatusBadRequest, post(targetsEarly))
+}
+
+// shortenHubTimeout makes b give up on a hub request after d.
+func shortenHubTimeout(b *TelegramBrokerV2, d time.Duration) {
+	b.mu.Lock()
+	b.httpClient = &http.Client{Timeout: d}
+	b.mu.Unlock()
+}
+
+// In legacy mode a send that gets no hub answer (the client times out) is
+// an unknown outcome: the hub may still deliver the path, so the entry is
+// kept, alone or next to a recipient that refused.
+func TestInboundAttachment_LegacyNoAnswerKeepsEntry(t *testing.T) {
+	cases := []struct {
+		name    string
+		caption string
+		agents  []string
+		refuse  map[string]int
+	}{
+		{"single recipient", "please review this file", []string{"coder"}, nil},
+		{"unknown plus refused", "@coder @reviewer please review this file", []string{"coder", "reviewer"}, map[string]int{"agent:reviewer": http.StatusConflict}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hub := newIASpecHub(t, "legacy", true, tc.agents...)
+			hub.inboundDelay = map[string]time.Duration{"agent:coder": 2 * time.Second}
+			hub.inboundStatus = tc.refuse
+			env := newIAEnv(t, hub)
+			shortenHubTimeout(env.b, 300*time.Millisecond)
+
+			env.iaSendCaption(t, tc.caption)
+
+			require.Len(t, env.telegramEntries(t), 1, "the entry is kept when a send got no answer")
+			assert.NotEmpty(t, iaSpecFilesHolding(t, env.scratchpad, env.tg.content))
+		})
+	}
+}
+
+// An upload the hub refuses per file (an HTML document) shows the hub's
+// reason in the chat; nothing is stored and nothing is sent to that agent.
+func TestInboundAttachment_PerFileUploadRefusalShown(t *testing.T) {
+	stages := countLegacyStages(t)
+	hub := newIASpecHub(t, "artifact", true, "coder")
+	env := newIAEnv(t, hub)
+	env.tg.content = []byte("<html><body>hi</body></html>")
+
+	env.b.handleIncomingMessageV2(env.b.gen, &TGMessage{
+		MessageID: 77,
+		From:      &TGUser{ID: 456, Username: "alice"},
+		Chat:      TGChat{ID: -1001, Type: "group"},
+		Date:      time.Now().Unix(),
+		Caption:   "please review this page",
+		Document:  &TGDocument{FileID: "page", FileUniqueID: "page-u", FileName: "page.html", FileSize: int64(len(env.tg.content))},
+	})
+
+	require.Len(t, hub.requestsTo(iaSpecUploadPath), 1, "the upload was tried")
+	assert.Empty(t, hub.storedUploads(), "nothing stored")
+	assert.Empty(t, env.sends(t), "nothing sent to that agent")
+	assert.Zero(t, stages.Load())
+	assert.True(t, anyContains(env.chatTexts(), "HTML and SVG files are not accepted as attachments"), "the hub's reason is shown: %q", env.chatTexts())
+	env.assertNoAttachmentWrites(t)
+}
+
+// With several recipients in artifact mode, a recipient whose upload the
+// hub refuses (403) does not get the message; the others get it with their
+// own upload.
+func TestInboundAttachment_ArtifactRecipientUploadRefused(t *testing.T) {
+	hub := newIASpecHub(t, "artifact", true, "coder", "reviewer")
+	hub.uploadRefuse = map[string]int{"reviewer": http.StatusForbidden}
+	env := newIAEnv(t, hub)
+
+	env.iaSendCaption(t, "@coder @reviewer please review this file")
+
+	sends := env.sends(t)
+	require.Len(t, sends, 1, "only the recipient whose upload was stored gets the message")
+	assert.Equal(t, "agent:coder", sends[0].Message.Recipient)
+	stored := hub.storedUploads()
+	require.Len(t, stored, 1)
+	assert.Equal(t, []string{stored[0].ID}, sends[0].AttachmentIDs)
+	assert.True(t, anyContains(env.chatTexts(), "reviewer"), "the sender is told which agent missed it: %q", env.chatTexts())
+	env.assertNoAttachmentWrites(t)
+}
+
+// With an in-process InboundHandler in artifact mode, the file is withheld
+// before it is downloaded: the sender gets the usual notice and the
+// delivered text names no attachment.
+func TestInboundAttachment_InProcessHandlerWithholdsBeforeDownload(t *testing.T) {
+	hub := newIASpecHub(t, "artifact", true, "coder")
+	env := newIAEnv(t, hub)
+	var got []string
+	env.b.mu.Lock()
+	env.b.InboundHandler = func(_ string, msg *messages.StructuredMessage) { got = append(got, msg.Msg) }
+	env.b.mu.Unlock()
+
+	env.iaSendCaption(t, "please review this file")
+
+	getFile, download := env.tg.fileCalls()
+	assert.Zero(t, getFile)
+	assert.Zero(t, download)
+	assert.Empty(t, hub.requestsTo(iaSpecUploadPath))
+	require.Len(t, got, 1)
+	assert.NotContains(t, got[0], "📎", "no placeholder for a withheld file")
+	assert.Contains(t, env.chatTexts(), attachmentsWithheldNotice)
+	env.assertNoAttachmentWrites(t)
+}
+
+// A legacy stage that fails part way (the download is over the size bound)
+// leaves no entry behind.
+func TestInboundAttachment_FailedLegacyStageLeavesNoEntry(t *testing.T) {
+	hub := newIASpecHub(t, "legacy", true, "coder")
+	env := newIAEnv(t, hub)
+	env.tg.content = bytes.Repeat([]byte("x"), maxTelegramFileSize+1)
+	env.tg.hideSize = true
+
+	env.b.handleIncomingMessageV2(env.b.gen, &TGMessage{
+		MessageID: 77,
+		From:      &TGUser{ID: 456, Username: "alice"},
+		Chat:      TGChat{ID: -1001, Type: "group"},
+		Date:      time.Now().Unix(),
+		Caption:   "please review this file",
+		Document:  &TGDocument{FileID: "big", FileUniqueID: "big-u", FileName: "big.bin"},
+	})
+
+	_, download := env.tg.fileCalls()
+	assert.Equal(t, 1, download, "the download started")
+	assert.Empty(t, env.telegramEntries(t), "the partly staged entry is removed")
+	env.assertNoAttachmentWrites(t)
 }

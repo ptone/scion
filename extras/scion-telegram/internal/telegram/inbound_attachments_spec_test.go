@@ -103,12 +103,14 @@ type iaSpecHub struct {
 	agents     []string
 
 	// Optional behaviour, set before the first request.
-	maxBytes      int64          // delivery_max_bytes in artifact mode; 0 = iaSpecMaxBytes
-	zeroMaxBytes  bool           // answer delivery_max_bytes 0 (delivery off)
-	checkStatus   int            // non-zero: the check answers this status
-	checkEnvelope bool           // with checkStatus: answer the JSON error envelope
-	checkCode     string         // with checkEnvelope: its code; "" = "spec_error"
-	inboundStatus map[string]int // inbound send status per message recipient
+	maxBytes      int64                    // delivery_max_bytes in artifact mode; 0 = iaSpecMaxBytes
+	zeroMaxBytes  bool                     // answer delivery_max_bytes 0 (delivery off)
+	checkStatus   int                      // non-zero: the check answers this status
+	checkEnvelope bool                     // with checkStatus: answer the JSON error envelope
+	checkCode     string                   // with checkEnvelope: its code; "" = "spec_error"
+	inboundStatus map[string]int           // inbound send status per message recipient
+	inboundDelay  map[string]time.Duration // inbound send delay per message recipient
+	uploadRefuse  map[string]int           // upload status per target slug
 
 	mu       sync.Mutex
 	seq      int
@@ -211,6 +213,12 @@ func (h *iaSpecHub) serve(w http.ResponseWriter, r *http.Request) {
 		rec.Body, _ = io.ReadAll(r.Body)
 		var send iaSpecInboundSend
 		_ = json.Unmarshal(rec.Body, &send)
+		if d := h.inboundDelay[send.Message.Recipient]; d > 0 {
+			select {
+			case <-time.After(d):
+			case <-r.Context().Done():
+			}
+		}
 		if status := h.inboundStatus[send.Message.Recipient]; status != 0 {
 			rec.Status = status
 			h.record(rec)
@@ -307,6 +315,31 @@ func (h *iaSpecHub) serveUpload(w http.ResponseWriter, r *http.Request, rec iaSp
 		fail(http.StatusBadRequest, "validation_error")
 		return
 	}
+	for _, target := range rec.Meta["targets"] {
+		if status := h.uploadRefuse[target]; status != 0 {
+			fail(status, "message_denied")
+			return
+		}
+	}
+	// As the hub does, HTML and SVG files are refused per file; a request
+	// in which no file is stored answers 400 with the failures.
+	var refused []map[string]any
+	var kept []iaSpecFormPart
+	for _, f := range rec.Files {
+		lower := strings.ToLower(f.FileName)
+		if strings.HasSuffix(lower, ".html") || strings.HasSuffix(lower, ".htm") || strings.HasSuffix(lower, ".svg") {
+			refused = append(refused, map[string]any{"name": f.FileName, "error": "HTML and SVG files are not accepted as attachments"})
+			continue
+		}
+		kept = append(kept, f)
+	}
+	if len(kept) == 0 {
+		rec.Status = http.StatusBadRequest
+		h.record(rec)
+		iaSpecWriteJSON(w, http.StatusBadRequest, map[string]any{"attachments": []any{}, "failures": refused})
+		return
+	}
+	rec.Files = kept
 
 	results := make([]map[string]any, 0, len(rec.Files))
 	h.mu.Lock()

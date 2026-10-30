@@ -243,8 +243,11 @@ func TestBrokerAttachmentDeliveryMaxBytes_ClampedToSignedBodyCap(t *testing.T) {
 }
 
 // TestBrokerAttachmentUpload_BodyOverCapRefused: a client that ignores
-// delivery_max_bytes and sends a body over the cap gets 413 and nothing is
-// stored, whether the length is declared or not.
+// delivery_max_bytes and sends a file over the limit gets 413 and nothing is
+// stored. With the length declared, the body cap refuses the request before
+// any read; without it, the file is refused while it is read, because it
+// passes the total for one message before the body reaches the cap
+// (TestBrokerAttachmentUpload_BodyCapWhileReading exercises the cap itself).
 func TestBrokerAttachmentUpload_BodyOverCapRefused(t *testing.T) {
 	f := newSendFixture(t)
 	big := strings.Repeat("a", int(brokerAttachmentBodyCap()))
@@ -716,8 +719,9 @@ func TestBrokerInbound_SenderRefusalsUnchanged(t *testing.T) {
 // TestBrokerAttachmentUpload_WholeRequestRefusalsStoreNothing: a refusal of
 // the whole request stores none of its files, also those before the
 // refused part: a later file over the remaining total (413), more files
-// than one message takes (400), a non-file part after a file (400), and a
-// body over the cap without a declared length after a first file (413).
+// than one message takes (400), a non-file part after a file (400), and,
+// without a declared length, a large file after a first one (413; it passes
+// the total for one message before the body reaches the cap).
 func TestBrokerAttachmentUpload_WholeRequestRefusalsStoreNothing(t *testing.T) {
 	f := newSendFixture(t)
 	sender := "user:" + f.ua.Email
@@ -822,4 +826,32 @@ func TestBrokerInbound_AttachmentIDsOnBroadcastRefused(t *testing.T) {
 	rec := brokerAttRequest(t, f.srv, "/api/v1/broker/inbound", "application/json", bytes.NewReader(raw))
 	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	assert.Empty(t, f.disp.getCalls())
+}
+
+// TestBrokerAttachmentUpload_BodyCapWhileReading: a body that reaches the
+// cap while a file is read, with that file under the total for one message,
+// is refused with 413 by the body cap itself, and nothing is stored (a first
+// small file included). The framing is pushed past the 64 KiB allowance
+// with a long file name in the part header: metadata fields cannot carry
+// it, because every target must be a real agent (a long unknown slug is
+// refused with 403 before any file is read) and the other fields are short.
+func TestBrokerAttachmentUpload_BodyCapWhileReading(t *testing.T) {
+	f := newSendFixture(t)
+	total := f.srv.brokerAttachmentDeliveryMaxBytes()
+	longName := strings.Repeat("n", int(brokerAttachmentEnvelopeBytes)+8<<10) + ".txt"
+	body, ct := brokerUploadBody(t, "user:"+f.ua.Email, f.projA.ID, nil, []brokerAttFile{
+		{"first.txt", "small"},
+		{longName, strings.Repeat("a", int(total)-64)},
+	})
+	require.Greater(t, int64(body.Len()), brokerAttachmentBodyCap(), "the body is over the cap")
+
+	req := httptest.NewRequest(http.MethodPost, brokerAttachmentsUploadPath, io.NopCloser(bytes.NewReader(body.Bytes())))
+	req.ContentLength = -1
+	req.Header.Set("Content-Type", ct)
+	req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity("test-broker")))
+	rec := httptest.NewRecorder()
+	f.srv.mux.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, rec.Body.String())
+	requireNoUploadsAtAll(t, f.art)
 }

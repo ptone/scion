@@ -3387,8 +3387,19 @@ func (b *TelegramBrokerV2) deliverInboundWithFeedback(ctx context.Context, topic
 }
 
 // deliverInboundWithAttachments is deliverInboundWithFeedback for a
-// message that names the sender's hub uploads by id.
+// message that names the sender's hub uploads by id. A hub that could not
+// be reached answers 502 here.
 func (b *TelegramBrokerV2) deliverInboundWithAttachments(ctx context.Context, topic string, msg *messages.StructuredMessage, attachmentIDs []string) (statusCode int, errMsg string) {
+	statusCode, errMsg, _ = b.deliverInboundOutcome(ctx, topic, msg, attachmentIDs)
+	return statusCode, errMsg
+}
+
+// deliverInboundOutcome is deliverInboundWithAttachments that also reports
+// whether the outcome is known: answered is false when the request may
+// have reached the hub but no answer came back (a transport error, a
+// timeout or a cancellation), so the hub may still deliver the message.
+// It is true for a real hub answer, and for a request that was never sent.
+func (b *TelegramBrokerV2) deliverInboundOutcome(ctx context.Context, topic string, msg *messages.StructuredMessage, attachmentIDs []string) (statusCode int, errMsg string, answered bool) {
 	b.mu.RLock()
 	handler := b.InboundHandler
 	hubURL := b.hubURL
@@ -3399,12 +3410,12 @@ func (b *TelegramBrokerV2) deliverInboundWithAttachments(ctx context.Context, to
 
 	if handler != nil {
 		handler(topic, msg)
-		return http.StatusOK, ""
+		return http.StatusOK, "", true
 	}
 
 	if hubURL == "" {
 		b.log.Debug("No hub URL configured, dropping inbound message", "topic", topic)
-		return http.StatusOK, ""
+		return http.StatusOK, "", true
 	}
 
 	payload := inboundPayload{
@@ -3415,14 +3426,14 @@ func (b *TelegramBrokerV2) deliverInboundWithAttachments(ctx context.Context, to
 	body, err := json.Marshal(payload)
 	if err != nil {
 		b.log.Error("Failed to marshal inbound message", "error", err)
-		return http.StatusInternalServerError, "internal error"
+		return http.StatusInternalServerError, "internal error", true
 	}
 
 	inboundURL := hubURL + "/api/v1/broker/inbound"
 	req, err := http.NewRequestWithContext(ctx, "POST", inboundURL, bytes.NewReader(body))
 	if err != nil {
 		b.log.Error("Failed to create inbound request", "error", err)
-		return http.StatusInternalServerError, "internal error"
+		return http.StatusInternalServerError, "internal error", true
 	}
 	req.ContentLength = int64(len(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -3431,14 +3442,14 @@ func (b *TelegramBrokerV2) deliverInboundWithAttachments(ctx context.Context, to
 	if brokerID != "" && hmacKey != "" {
 		if err := signInboundRequest(req, brokerID, hmacKey); err != nil {
 			b.log.Error("Failed to sign inbound request", "error", err)
-			return http.StatusInternalServerError, "internal error"
+			return http.StatusInternalServerError, "internal error", true
 		}
 	}
 
 	resp, err := b.httpClient.Do(req)
 	if err != nil {
 		b.log.Error("Failed to deliver inbound message", "error", err, "topic", topic)
-		return http.StatusBadGateway, "delivery failed"
+		return http.StatusBadGateway, "delivery failed", false
 	}
 	defer resp.Body.Close()
 
@@ -3458,13 +3469,13 @@ func (b *TelegramBrokerV2) deliverInboundWithAttachments(ctx context.Context, to
 			if rem, ok := hubErr.Error.Details["remediation"].(string); ok && rem != "" {
 				errDetail += " " + rem
 			}
-			return resp.StatusCode, errDetail
+			return resp.StatusCode, errDetail, true
 		}
-		return resp.StatusCode, fmt.Sprintf("delivery failed (HTTP %d)", resp.StatusCode)
+		return resp.StatusCode, fmt.Sprintf("delivery failed (HTTP %d)", resp.StatusCode), true
 	}
 
 	io.Copy(io.Discard, resp.Body)
-	return resp.StatusCode, ""
+	return resp.StatusCode, "", true
 }
 
 // signInboundRequest signs an HTTP request with HMAC auth.
