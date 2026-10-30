@@ -89,12 +89,19 @@ export async function enforceTrustedTypes(
         await route.fallback();
         return;
       }
-      // Redirects go back to the browser unchanged, so it follows them
-      // itself (a sign-in link redirects to the page it opens); the rule is
-      // added to the document the redirect chain ends at.
+      // Redirects are left to the browser, so it follows them itself and the
+      // rule is added to the document the redirect chain ends at. A route
+      // cannot hand a fetched redirect back to WebKit (Playwright refuses to
+      // fulfill a 3xx there), so the sign-in endpoints, which redirect and
+      // whose one-time codes must not be fetched twice, are not fetched at
+      // all, and any other redirect is re-requested by the browser.
+      if (new URL(route.request().url()).pathname.startsWith('/auth/')) {
+        await route.continue();
+        return;
+      }
       const response = await route.fetch({ maxRedirects: 0 });
       if (response.status() >= 300 && response.status() < 400) {
-        await route.fulfill({ response });
+        await route.continue();
         return;
       }
       const headers = response.headers();
