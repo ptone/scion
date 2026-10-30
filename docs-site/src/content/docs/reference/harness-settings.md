@@ -283,7 +283,8 @@ result is always user-managed and does not receive later bundled updates. Workst
 it updated.
 
 The Hub must be able to reach GitHub to fetch the URL. An air-gapped Hub needs another source it
-can reach, for example a mirror given as an rclone URI in `sourceUrl` (`:gcs:bucket/path`), or a
+can reach, for example a mirror in a publicly readable Cloud Storage bucket given in `sourceUrl`
+as `:gcs:bucket/path` (the Hub reads it without credentials), or a
 project workspace import (`POST /api/v1/projects/{id}/import-harness-configs` with
 `workspacePath`), which creates a project-scoped config. On a hosted Hub, both give a
 user-managed copy.

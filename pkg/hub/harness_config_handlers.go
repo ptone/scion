@@ -1422,6 +1422,10 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	if writeRemoteSourceNotAccepted(w, sourceURL) {
+		return
+	}
+
 	if s.GetStorage() == nil {
 		writeError(w, http.StatusServiceUnavailable, "storage_unavailable", "Storage is not configured", nil)
 		return

@@ -26,6 +26,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -83,6 +84,7 @@ func claudeTarGzServer(t *testing.T) *httptest.Server {
 		_, _ = w.Write(archive)
 	}))
 	t.Cleanup(srv.Close)
+	t.Cleanup(config.AllowArchiveServerForTest(srv.URL))
 	return srv
 }
 

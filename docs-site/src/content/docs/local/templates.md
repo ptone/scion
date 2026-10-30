@@ -248,6 +248,16 @@ When you reference a template by bare name, Scion searches in this order and use
 3. **Project** templates (`.scion/templates/`).
 4. **Global** templates (`~/.scion/templates/`).
 
+#### Remote template sources
+
+A remote URI is one of:
+
+- a GitHub folder URL: `https://github.com/<owner>/<repo>/tree/<ref>/<path>`;
+- an archive URL ending in `.tar.gz`, `.tgz` or `.zip`, over `https`, on a public host;
+- a Google Cloud Storage location: `:gcs:<bucket>/<path>`. This is the only rclone form accepted. It takes no inline options (`:gcs,key=value:` is refused), and no other rclone backend is accepted.
+
+The CLI reads a `:gcs:` source with your own Google credentials (Application Default Credentials). The Hub and Runtime Brokers read it without credentials, so a template that a Hub imports or a broker resolves must be in a publicly readable bucket.
+
 When connected to a Hub, templates resolve from the Hub across three scopes. If a name matches in several locations, the CLI prompts you to choose; the `--local`, `--hub`, and `--global` flags narrow the search.
 
 ### Hub Template Scopes

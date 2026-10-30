@@ -111,6 +111,18 @@ type projectImportOptions struct {
 	response                func([]string, []ImportFailure) any
 }
 
+// writeRemoteSourceNotAccepted checks sourceURL with
+// config.ValidateRemoteFetchSource and, if it is refused, writes a 400
+// validation error and returns true. Handlers call it before any response is committed (including
+// the streaming path), after their authorization checks.
+func writeRemoteSourceNotAccepted(w http.ResponseWriter, sourceURL string) bool {
+	if err := config.ValidateRemoteFetchSource(sourceURL); err != nil {
+		ValidationError(w, err.Error(), nil)
+		return true
+	}
+	return false
+}
+
 func (s *Server) handleProjectImportResources(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -150,6 +162,12 @@ func (s *Server) handleProjectImportResources(
 	if s.GetStorage() == nil {
 		writeError(w, http.StatusServiceUnavailable, "storage_unavailable", options.storageLabel+" storage is not configured", nil)
 		return
+	}
+
+	if req.WorkspacePath == "" {
+		if writeRemoteSourceNotAccepted(w, config.NormalizeTemplateSourceURL(req.SourceURL)) {
+			return
+		}
 	}
 
 	run := func(progress importProgressFunc) ([]string, error) {
@@ -345,6 +363,10 @@ func (s *Server) handleResourcesImport(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusBadRequest, "invalid_request",
 			"scope must be 'global', 'project', or 'user'", nil)
+		return
+	}
+
+	if writeRemoteSourceNotAccepted(w, sourceURL) {
 		return
 	}
 
@@ -619,6 +641,9 @@ func (s *Server) handleProjectDiscoverResources(
 		names, skipped, err = s.discoverFromWorkspace(ctx, project, req.WorkspacePath, kind)
 	} else {
 		req.SourceURL = config.NormalizeTemplateSourceURL(req.SourceURL)
+		if writeRemoteSourceNotAccepted(w, req.SourceURL) {
+			return
+		}
 		names, skipped, err = s.discoverFromRemote(ctx, store.TemplateScopeProject, projectID, req.SourceURL, kind)
 	}
 	if err != nil {
@@ -747,6 +772,10 @@ func (s *Server) handleResourcesDiscover(w http.ResponseWriter, r *http.Request)
 	default:
 		writeError(w, http.StatusBadRequest, "invalid_request",
 			"scope must be 'global', 'project', or 'user'", nil)
+		return
+	}
+
+	if writeRemoteSourceNotAccepted(w, sourceURL) {
 		return
 	}
 

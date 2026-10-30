@@ -178,7 +178,7 @@ func TestExtractTarGz_SkipsLinksAndStaysInside(t *testing.T) {
 	dest := filepath.Join(parent, "dest")
 	require.NoError(t, os.MkdirAll(dest, 0o755))
 
-	require.NoError(t, extractTarGz(archive, dest))
+	require.NoError(t, extractTarGz(archive, dest, templateBudget()))
 
 	assert.Equal(t, map[string]string{
 		"scion-agent.yaml": "schema_version: \"1\"\n",
@@ -213,7 +213,7 @@ func TestExtractTarGz_RefusesWriteThroughExistingLink(t *testing.T) {
 				entry,
 			}), "a.tar.gz")
 
-			require.Error(t, extractTarGz(archive, dest))
+			require.Error(t, extractTarGz(archive, dest, templateBudget()))
 			assertOutsideUntouched(t, outside)
 		})
 	}
@@ -232,7 +232,7 @@ func TestExtractTarGz_KeepsLexicalChecks(t *testing.T) {
 
 	// archive/tar may itself refuse insecure names (GODEBUG
 	// tarinsecurepath=0); either way nothing lands outside the destination.
-	err := extractTarGz(archive, dest)
+	err := extractTarGz(archive, dest, templateBudget())
 	assertOutsideUntouched(t, outside)
 	assertRegularOnly(t, dest)
 	if err == nil {
@@ -277,7 +277,7 @@ func TestExtractZip_SkipsLinksAndStaysInside(t *testing.T) {
 		{name: "root/rel-dir/data.txt", body: "data\n", mode: 0o644},
 	}), "a.zip")
 
-	require.NoError(t, extractZip(archive, dest))
+	require.NoError(t, extractZip(archive, dest, templateBudget()))
 	assert.Equal(t, map[string]string{
 		"scion-agent.yaml": "schema_version: \"1\"\n",
 		"abs-dir/data.txt": "data\n",
@@ -298,7 +298,7 @@ func TestExtractZip_RefusesWriteThroughExistingLink(t *testing.T) {
 		{name: "root/linked/data.txt", body: "data\n", mode: 0o644},
 	}), "a.zip")
 
-	require.Error(t, extractZip(archive, dest))
+	require.Error(t, extractZip(archive, dest, templateBudget()))
 	assertOutsideUntouched(t, outside)
 }
 
@@ -462,7 +462,7 @@ func TestFetchRemoteTemplate_RefusesNonRegularResult(t *testing.T) {
 		return os.Symlink(filepath.Join(outside, "secret.txt"), filepath.Join(destPath, "leak"))
 	}))
 
-	_, err := FetchRemoteTemplate(context.Background(), "https://github.com/acme/repo/tree/main/templates/foo")
+	_, err := FetchRemoteTemplate(context.Background(), "https://github.com/acme/repo/tree/main/templates/foo", RemoteFetchOptions{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "non-regular file: leak")
 	require.NotEmpty(t, cache)
@@ -474,7 +474,7 @@ func TestFetchRemoteTemplate_RefusesNonRegularResult(t *testing.T) {
 	t.Cleanup(SetGitSparseCheckoutForTest(func(_ context.Context, _ *GitHubURLParts, destPath, _ string) error {
 		return os.WriteFile(filepath.Join(destPath, "scion-agent.yaml"), []byte("x\n"), 0o644)
 	}))
-	got, err := FetchRemoteTemplate(context.Background(), "https://github.com/acme/repo/tree/main/templates/foo")
+	got, err := FetchRemoteTemplate(context.Background(), "https://github.com/acme/repo/tree/main/templates/foo", RemoteFetchOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"scion-agent.yaml": "x\n"}, readTree(t, got))
 }

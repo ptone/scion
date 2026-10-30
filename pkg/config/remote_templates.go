@@ -30,13 +30,18 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
+	"sync/atomic"
+	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/fs/sync"
+	"github.com/rclone/rclone/fs/accounting"
+	"github.com/rclone/rclone/fs/config/configmap"
+	"github.com/rclone/rclone/fs/operations"
+	"github.com/rclone/rclone/fs/rc"
+	"github.com/rclone/rclone/fs/walk"
 	// Import rclone backends for remote template support
 	// GCS and local are already imported in gcp/storage.go
 	// Additional backends can be added as needed
@@ -171,15 +176,41 @@ func isArchiveURL(uri string) bool {
 		strings.HasSuffix(lower, ".zip")
 }
 
+// RemoteFetchCredentials selects which credentials a remote template fetch
+// may use for storage backends that authenticate (currently gcs).
+type RemoteFetchCredentials int
+
+const (
+	// RemoteFetchAnonymous fetches without any process-held credential:
+	// only public sources are readable. It is the zero value, so a caller
+	// that does not choose gets it. The hub and runtime brokers always use
+	// it, because they fetch on behalf of other principals.
+	RemoteFetchAnonymous RemoteFetchCredentials = iota
+	// RemoteFetchCallerCredentials lets the backend use the default
+	// credentials of the running process (for gcs, Application Default
+	// Credentials). Only the CLI uses it, where those credentials belong
+	// to the user who runs the command.
+	RemoteFetchCallerCredentials
+)
+
+// RemoteFetchOptions configures FetchRemoteTemplate.
+type RemoteFetchOptions struct {
+	// GitHubToken is sent for GitHub folder sources only (e.g. a GitHub App
+	// installation token). Empty means unauthenticated.
+	GitHubToken string
+	// Credentials selects the credential mode for storage backends.
+	Credentials RemoteFetchCredentials
+}
+
 // FetchRemoteTemplate fetches a template from a remote URI and caches it locally.
 // Returns the local path to the cached template.
-// An optional authToken can be provided for authenticated GitHub access (e.g.
-// a GitHub App installation token). Pass "" when no auth is needed.
-func FetchRemoteTemplate(ctx context.Context, uri string, authToken ...string) (string, error) {
-	token := ""
-	if len(authToken) > 0 {
-		token = authToken[0]
+// The source is checked with ValidateRemoteFetchSource before the cache or
+// the network is touched.
+func FetchRemoteTemplate(ctx context.Context, uri string, opts RemoteFetchOptions) (string, error) {
+	if err := ValidateRemoteFetchSource(uri); err != nil {
+		return "", err
 	}
+	token := opts.GitHubToken
 	cacheDir, err := remoteCacheDir()
 	if err != nil {
 		return "", fmt.Errorf("failed to get cache directory: %w", err)
@@ -201,27 +232,33 @@ func FetchRemoteTemplate(ctx context.Context, uri string, authToken ...string) (
 		return "", fmt.Errorf("failed to create cache directory: %w", err)
 	}
 
-	remoteType := DetectRemoteType(uri)
-
-	switch remoteType {
+	var fetchErr error
+	switch DetectRemoteType(uri) {
 	case RemoteTypeGitHub:
 		if err := fetchGitHubFolder(ctx, uri, templateCachePath, token); err != nil {
-			return "", fmt.Errorf("failed to fetch GitHub folder: %w", err)
+			fetchErr = fmt.Errorf("failed to fetch GitHub folder: %w", err)
 		}
 	case RemoteTypeArchive:
-		if err := fetchArchive(ctx, uri, templateCachePath); err != nil {
-			return "", fmt.Errorf("failed to fetch archive: %w", err)
+		if err := fetchArchive(ctx, uri, templateCachePath, opts.Credentials); err != nil {
+			fetchErr = fmt.Errorf("failed to fetch archive: %w", err)
 		}
 	case RemoteTypeRclone:
-		if err := fetchRclone(ctx, uri, templateCachePath); err != nil {
-			return "", fmt.Errorf("failed to fetch via rclone: %w", err)
+		if err := fetchRclone(ctx, uri, templateCachePath, opts.Credentials); err != nil {
+			fetchErr = fmt.Errorf("failed to fetch via rclone: %w", err)
 		}
 	default:
-		return "", fmt.Errorf("unsupported remote template type: %s", uri)
+		fetchErr = errors.New("unsupported remote template type")
+	}
+	if fetchErr != nil {
+		// Never leave a partial result behind (for example after a limit
+		// was exceeded).
+		_ = os.RemoveAll(templateCachePath)
+		return "", fetchErr
 	}
 
 	// Whatever the fetch path, a fetched template holds regular files and
-	// directories only; refuse it (and drop the cache) otherwise.
+	// directories only, within the fetch limits; refuse it (and drop the
+	// cache) otherwise.
 	if err := checkRegularTree(templateCachePath); err != nil {
 		_ = os.RemoveAll(templateCachePath)
 		return "", err
@@ -233,12 +270,33 @@ func FetchRemoteTemplate(ctx context.Context, uri string, authToken ...string) (
 // checkRegularTree returns an error if the tree at dir contains anything
 // other than directories and regular files (for example a symbolic link).
 // It does not follow links.
+//
+// It also checks the tree against the template fetch limits, as a backstop
+// for every fetch path.
 func checkRegularTree(dir string) error {
+	budget := templateBudget()
 	return filepath.WalkDir(dir, func(path string, d iofs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() || d.Type().IsRegular() {
+		if path == dir {
+			return nil
+		}
+		if d.IsDir() {
+			return budget.entry()
+		}
+		if d.Type().IsRegular() {
+			if err := budget.entry(); err != nil {
+				return err
+			}
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			budget.bytes += info.Size()
+			if budget.bytes > budget.maxBytes {
+				return fmt.Errorf("%w: more than %d bytes", ErrRemoteTemplateTooLarge, budget.maxBytes)
+			}
 			return nil
 		}
 		rel, relErr := filepath.Rel(dir, path)
@@ -473,9 +531,12 @@ func fetchGitHubTarball(ctx context.Context, parts *GitHubURLParts, destPath str
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	// http.DefaultClient's transport is kept (tests replace it); redirects
+	// must stay on https GitHub hosts.
+	client := &http.Client{Transport: http.DefaultClient.Transport, CheckRedirect: githubCheckRedirect}
+	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to download tarball: %w", err)
+		return fmt.Errorf("failed to download tarball: %w", withoutRequestURL(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -491,7 +552,7 @@ func fetchGitHubTarball(ctx context.Context, parts *GitHubURLParts, destPath str
 	tmpPath := tmpFile.Name()
 	defer func() { _ = os.Remove(tmpPath) }()
 
-	if _, err := io.Copy(tmpFile, resp.Body); err != nil {
+	if err := copyDownload(tmpFile, resp.Body); err != nil {
 		_ = tmpFile.Close()
 		return fmt.Errorf("failed to save tarball: %w", err)
 	}
@@ -500,7 +561,7 @@ func fetchGitHubTarball(ctx context.Context, parts *GitHubURLParts, destPath str
 	// If no sub-path, extract directly to destPath
 	subPath := strings.TrimRight(parts.Path, "/")
 	if subPath == "" {
-		return extractTarGz(tmpPath, destPath)
+		return extractTarGz(tmpPath, destPath, templateBudget())
 	}
 
 	// Extract to a temp directory, then copy the desired sub-path
@@ -510,11 +571,13 @@ func fetchGitHubTarball(ctx context.Context, parts *GitHubURLParts, destPath str
 	}
 	defer func() { _ = os.RemoveAll(tmpExtract) }()
 
-	if err := extractTarGz(tmpPath, tmpExtract); err != nil {
+	// The whole repository is unpacked here, so it gets the larger scratch
+	// budget; what is copied into the cache gets the template budget.
+	if err := extractTarGz(tmpPath, tmpExtract, scratchBudget()); err != nil {
 		return err
 	}
 
-	return copyDirExcludingGit(tmpExtract, subPath, destPath)
+	return copyDirExcludingGit(tmpExtract, subPath, destPath, templateBudget())
 }
 
 // GitHubURLParts contains parsed parts of a GitHub URL.
@@ -719,7 +782,7 @@ func execSparseGitCheckout(ctx context.Context, parts *GitHubURLParts, destPath 
 	// checkout may contain symbolic links (git materialises them as links);
 	// copyDirExcludingGit never follows or copies them, so the template holds
 	// regular files and directories only.
-	return copyDirExcludingGit(tmpDir, parts.Path, destPath)
+	return copyDirExcludingGit(tmpDir, parts.Path, destPath, templateBudget())
 }
 
 // copyDirExcludingGit copies the directory subPath of baseDir into dst,
@@ -739,7 +802,9 @@ func execSparseGitCheckout(ctx context.Context, parts *GitHubURLParts, destPath 
 //
 // Writes go through an os.Root opened at dst. The result therefore contains
 // regular files and directories only.
-func copyDirExcludingGit(baseDir, subPath, dst string) error {
+//
+// Every directory and file written is charged to budget.
+func copyDirExcludingGit(baseDir, subPath, dst string, budget *fetchBudget) error {
 	sub, err := cleanRemoteSubPath(subPath)
 	if err != nil {
 		return err
@@ -784,9 +849,9 @@ func copyDirExcludingGit(baseDir, subPath, dst string) error {
 			if err != nil {
 				return err
 			}
-			return dstRoot.MkdirAll(rel, dirPerm(info.Mode()))
+			return budget.mkdirAll(dstRoot, rel, dirPerm(info.Mode()))
 		case d.Type().IsRegular():
-			return copyRegularFileNoFollow(srcRoot, srcName, dstRoot, rel)
+			return copyRegularFileNoFollow(srcRoot, srcName, dstRoot, rel, budget)
 		default:
 			// Symbolic links, devices, sockets and pipes are never copied.
 			slog.Warn("Skipping non-regular file in remote template", "path", filepath.ToSlash(rel), "type", d.Type().String())
@@ -825,7 +890,7 @@ func checkRealDirPath(root *os.Root, sub, display string) error {
 // copyRegularFileNoFollow copies the regular file srcName in srcRoot to
 // dstName in dstRoot. It refuses anything that is not a regular file at the
 // time of the Lstat, and anything that is not that same file once opened.
-func copyRegularFileNoFollow(srcRoot *os.Root, srcName string, dstRoot *os.Root, dstName string) error {
+func copyRegularFileNoFollow(srcRoot *os.Root, srcName string, dstRoot *os.Root, dstName string, budget *fetchBudget) error {
 	linfo, err := srcRoot.Lstat(srcName)
 	if err != nil {
 		return err
@@ -848,23 +913,25 @@ func copyRegularFileNoFollow(srcRoot *os.Root, srcName string, dstRoot *os.Root,
 		return fmt.Errorf("file %s changed while copying the remote template: %w", filepath.ToSlash(dstName), errRemoteContentRefused)
 	}
 
-	return writeFileInRoot(dstRoot, dstName, in, linfo.Mode())
+	return writeFileInRoot(dstRoot, dstName, in, linfo.Mode(), budget)
 }
 
 // writeFileInRoot creates (or truncates) the regular file name inside root,
 // creating missing parent directories, and fills it from r. All path
-// resolution goes through root, so the write cannot land outside it.
-func writeFileInRoot(root *os.Root, name string, r io.Reader, mode iofs.FileMode) error {
-	if dir := filepath.Dir(name); dir != "." {
-		if err := root.MkdirAll(dir, 0755); err != nil {
-			return err
-		}
+// resolution goes through root, so the write cannot land outside it. The
+// file and its bytes are charged to budget.
+func writeFileInRoot(root *os.Root, name string, r io.Reader, mode iofs.FileMode, budget *fetchBudget) error {
+	if err := budget.entry(); err != nil {
+		return err
+	}
+	if err := budget.mkdirAll(root, filepath.Dir(name), 0755); err != nil {
+		return err
 	}
 	out, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode.Perm())
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(out, r); err != nil {
+	if err := budget.copy(out, r); err != nil {
 		_ = out.Close()
 		return err
 	}
@@ -879,7 +946,7 @@ func dirPerm(mode iofs.FileMode) iofs.FileMode {
 }
 
 // fetchArchive downloads and extracts a compressed archive.
-func fetchArchive(ctx context.Context, uri string, destPath string) error {
+func fetchArchive(ctx context.Context, uri string, destPath string, creds RemoteFetchCredentials) error {
 	// Download the archive to a temp file
 	tmpFile, err := os.CreateTemp("", "scion-archive-*")
 	if err != nil {
@@ -895,9 +962,9 @@ func fetchArchive(ctx context.Context, uri string, destPath string) error {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := newArchiveHTTPClient(creds).Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to download archive: %w", err)
+		return fmt.Errorf("failed to download archive: %w", withoutRequestURL(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -905,7 +972,7 @@ func fetchArchive(ctx context.Context, uri string, destPath string) error {
 		return fmt.Errorf("failed to download archive: HTTP %d", resp.StatusCode)
 	}
 
-	if _, err := io.Copy(tmpFile, resp.Body); err != nil {
+	if err := copyDownload(tmpFile, resp.Body); err != nil {
 		return fmt.Errorf("failed to save archive: %w", err)
 	}
 	_ = tmpFile.Close()
@@ -913,12 +980,12 @@ func fetchArchive(ctx context.Context, uri string, destPath string) error {
 	// Extract based on file type
 	lower := strings.ToLower(uri)
 	if strings.HasSuffix(lower, ".zip") {
-		return extractZip(tmpPath, destPath)
+		return extractZip(tmpPath, destPath, templateBudget())
 	} else if strings.HasSuffix(lower, ".tgz") || strings.HasSuffix(lower, ".tar.gz") {
-		return extractTarGz(tmpPath, destPath)
+		return extractTarGz(tmpPath, destPath, templateBudget())
 	}
 
-	return fmt.Errorf("unsupported archive format: %s", uri)
+	return errors.New("unsupported archive format")
 }
 
 // extractZip extracts a zip archive to the destination path.
@@ -926,12 +993,30 @@ func fetchArchive(ctx context.Context, uri string, destPath string) error {
 // Only directories and regular files are extracted; other entry types are
 // skipped (logged). Entry names are checked by sanitizePath, and every write
 // goes through an os.Root opened at destPath, so all writes stay inside it.
-func extractZip(zipPath, destPath string) error {
+//
+// Every directory and file written is charged to budget.
+func extractZip(zipPath, destPath string, budget *fetchBudget) error {
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
 		return fmt.Errorf("failed to open zip: %w", err)
 	}
 	defer func() { _ = r.Close() }()
+
+	// Check the central directory against the limits before writing
+	// anything (one extra entry for a stripped common root directory). The
+	// declared sizes are checked by archive/zip when the entries are read,
+	// and the bytes written are limited again by budget.
+	if len(r.File) > budget.maxEntries+1 {
+		return fmt.Errorf("%w: more than %d files and directories", ErrRemoteTemplateTooLarge, budget.maxEntries)
+	}
+	var declared uint64
+	for _, f := range r.File {
+		// Compare before adding, so a huge declared size cannot wrap.
+		if f.UncompressedSize64 > uint64(budget.maxBytes)-declared {
+			return fmt.Errorf("%w: more than %d bytes", ErrRemoteTemplateTooLarge, budget.maxBytes)
+		}
+		declared += f.UncompressedSize64
+	}
 
 	root, err := os.OpenRoot(destPath)
 	if err != nil {
@@ -967,7 +1052,7 @@ func extractZip(zipPath, destPath string) error {
 
 		mode := f.Mode()
 		if mode.IsDir() {
-			if err := root.MkdirAll(name, dirPerm(mode)); err != nil {
+			if err := budget.mkdirAll(root, name, dirPerm(mode)); err != nil {
 				return err
 			}
 			continue
@@ -981,7 +1066,7 @@ func extractZip(zipPath, destPath string) error {
 		if err != nil {
 			return err
 		}
-		err = writeFileInRoot(root, name, rc, mode)
+		err = writeFileInRoot(root, name, rc, mode, budget)
 		_ = rc.Close()
 		if err != nil {
 			return err
@@ -997,7 +1082,13 @@ func extractZip(zipPath, destPath string) error {
 // entries are skipped (logged). Entry names are checked by sanitizePath, and
 // every write goes through an os.Root opened at destPath, so all writes stay
 // inside it.
-func extractTarGz(tarGzPath, destPath string) error {
+//
+// Limits: every directory and file written is charged to budget. The first
+// pass counts every header against the entry limit and sums the declared
+// entry sizes against the byte limit, before anything is written. Both
+// passes read the decompressed stream through budget.tarStreamLimit, so
+// skipped entry bodies and header records are bounded too.
+func extractTarGz(tarGzPath, destPath string, budget *fetchBudget) error {
 	f, err := os.Open(tarGzPath)
 	if err != nil {
 		return fmt.Errorf("failed to open archive: %w", err)
@@ -1015,8 +1106,10 @@ func extractTarGz(tarGzPath, destPath string) error {
 	// metadata entries must be skipped or they break common-root detection
 	// (GitHub tarballs start with a pax_global_header entry whose name
 	// does not share the repo-root prefix).
-	tarReader := tar.NewReader(gzr)
+	tarReader := tar.NewReader(&limitedStream{r: gzr, limit: budget.tarStreamLimit()})
 	var entries []string
+	headers := 0
+	var declared int64
 	for {
 		header, err := tarReader.Next()
 		if err == io.EOF {
@@ -1024,6 +1117,20 @@ func extractTarGz(tarGzPath, destPath string) error {
 		}
 		if err != nil {
 			return fmt.Errorf("failed to read tar header: %w", err)
+		}
+		// Every header counts, whatever its type. Two more than the entry
+		// limit are allowed: the common root directory (stripped, not
+		// written) and a pax global header.
+		headers++
+		if headers > budget.maxEntries+2 {
+			return fmt.Errorf("%w: more than %d files and directories", ErrRemoteTemplateTooLarge, budget.maxEntries)
+		}
+		if header.Size > 0 {
+			// Compare before adding, so a huge declared size cannot wrap.
+			if header.Size > budget.maxBytes-declared {
+				return fmt.Errorf("%w: more than %d bytes", ErrRemoteTemplateTooLarge, budget.maxBytes)
+			}
+			declared += header.Size
 		}
 		if header.Typeflag == tar.TypeDir || header.Typeflag == tar.TypeReg || header.Typeflag == tar.TypeSymlink {
 			entries = append(entries, header.Name)
@@ -1052,7 +1159,7 @@ func extractTarGz(tarGzPath, destPath string) error {
 	}
 	defer func() { _ = gzr.Close() }()
 
-	tarReader = tar.NewReader(gzr)
+	tarReader = tar.NewReader(&limitedStream{r: gzr, limit: budget.tarStreamLimit()})
 
 	root, err := os.OpenRoot(destPath)
 	if err != nil {
@@ -1087,11 +1194,11 @@ func extractTarGz(tarGzPath, destPath string) error {
 
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := root.MkdirAll(name, dirPerm(os.FileMode(header.Mode))); err != nil {
+			if err := budget.mkdirAll(root, name, dirPerm(os.FileMode(header.Mode))); err != nil {
 				return err
 			}
 		case tar.TypeReg:
-			if err := writeFileInRoot(root, name, tarReader, os.FileMode(header.Mode)); err != nil {
+			if err := writeFileInRoot(root, name, tarReader, os.FileMode(header.Mode), budget); err != nil {
 				return err
 			}
 		case tar.TypeSymlink, tar.TypeLink:
@@ -1151,25 +1258,185 @@ func sanitizePath(name string) string {
 	return name
 }
 
-// fetchRclone fetches a template using rclone from a remote storage location.
-func fetchRclone(ctx context.Context, uri string, destPath string) error {
-	// uri is expected to be in rclone format, e.g., :gcs:bucket/path or :s3:bucket/path
-	srcFs, err := fs.NewFs(ctx, uri)
-	if err != nil {
-		return fmt.Errorf("failed to create source fs for %s: %w", uri, err)
-	}
+// RcloneFetchFunc copies an accepted rclone source into destPath.
+type RcloneFetchFunc func(ctx context.Context, remote RcloneRemote, creds RemoteFetchCredentials, destPath string) error
 
+// rcloneFetch is the copy step behind fetchRclone; tests replace it with
+// SetRcloneFetchForTest.
+var rcloneFetch RcloneFetchFunc = execRcloneFetch
+
+// SetRcloneFetchForTest replaces the rclone copy step and returns a restore
+// func. It lets tests outside this package observe the source and the
+// credential mode that a fetch would use, without network access.
+//
+// TEST-ONLY: it panics outside a test binary. It mutates package-global
+// state and is not safe for use from parallel tests.
+func SetRcloneFetchForTest(fn RcloneFetchFunc) (restore func()) {
+	if !testing.Testing() {
+		panic("SetRcloneFetchForTest called outside a test binary")
+	}
+	prev := rcloneFetch
+	rcloneFetch = fn
+	return func() { rcloneFetch = prev }
+}
+
+// fetchRclone fetches a template from an allowlisted rclone source. The
+// source is parsed and checked before any rclone code sees it.
+func fetchRclone(ctx context.Context, uri string, destPath string, creds RemoteFetchCredentials) error {
+	remote, err := ParseRcloneRemote(uri)
+	if err != nil {
+		return err
+	}
+	return rcloneFetch(ctx, remote, creds, destPath)
+}
+
+// execRcloneFetch builds the source Fs from a configuration fixed in code
+// (never from the source string, the environment or an rclone config file)
+// and copies it into destPath within the template fetch limits.
+func execRcloneFetch(ctx context.Context, remote RcloneRemote, creds RemoteFetchCredentials, destPath string) error {
+	srcFs, err := newRcloneSourceFs(ctx, remote, creds)
+	if err != nil {
+		return err
+	}
+	return rcloneCopyLimited(ctx, srcFs, destPath)
+}
+
+// rcloneFetchSeq numbers the per-fetch rclone stats groups.
+var rcloneFetchSeq atomic.Uint64
+
+// rcloneCopyLimited copies srcFs into destPath within the template fetch
+// limits. The source is listed once and checked (entry count, sizes, and
+// object names that must be local relative paths); then exactly the listed
+// objects are copied, so nothing added to the source after the listing is
+// fetched. The copy runs with a hard transfer cutoff at the byte limit, so
+// an object that grows after the listing cannot exceed it either.
+func rcloneCopyLimited(ctx context.Context, srcFs fs.Fs, destPath string) error {
+	objs, err := listRcloneSource(ctx, srcFs)
+	if err != nil {
+		return err
+	}
+	return rcloneCopyObjects(ctx, objs, destPath)
+}
+
+// rcloneCopyObjects copies objs into destPath with a hard transfer cutoff at
+// the template byte limit, counted in a stats group of this call only
+// (rclone's default stats group is process-wide).
+func rcloneCopyObjects(ctx context.Context, objs []fs.Object, destPath string) error {
 	dstFs, err := fs.NewFs(ctx, destPath)
 	if err != nil {
-		return fmt.Errorf("failed to create destination fs for %s: %w", destPath, err)
+		return fmt.Errorf("failed to create destination fs: %w", err)
 	}
 
-	// Sync from remote to local
-	if err := sync.Sync(ctx, dstFs, srcFs, false); err != nil {
-		return fmt.Errorf("rclone sync failed: %w", err)
-	}
+	group := fmt.Sprintf("scion-remote-template-%d", rcloneFetchSeq.Add(1))
+	ctx = accounting.WithStatsGroup(ctx, group)
+	defer deleteRcloneStatsGroup(group)
+	ctx, ci := fs.AddConfig(ctx)
+	ci.MaxTransfer = fs.SizeSuffix(remoteFetchMaxBytes)
+	ci.CutoffMode = fs.CutoffModeHard
 
+	for _, o := range objs {
+		if _, err := operations.Copy(ctx, dstFs, nil, o.Remote(), o); err != nil {
+			if errors.Is(err, accounting.ErrorMaxTransferLimitReached) {
+				return fmt.Errorf("%w: more than %d bytes", ErrRemoteTemplateTooLarge, remoteFetchMaxBytes)
+			}
+			return fmt.Errorf("rclone copy failed: %w", err)
+		}
+	}
 	return nil
+}
+
+// listRcloneSource lists srcFs recursively and returns its objects. It
+// refuses the source once it passes the template entry or byte limit, or
+// when an object name is not a local relative path.
+func listRcloneSource(ctx context.Context, srcFs fs.Fs) ([]fs.Object, error) {
+	budget := templateBudget()
+	var objs []fs.Object
+	err := walk.ListR(ctx, srcFs, "", true, -1, walk.ListAll, func(entries fs.DirEntries) error {
+		for _, e := range entries {
+			if err := budget.entry(); err != nil {
+				return err
+			}
+			if err := checkRcloneEntryName(e.Remote()); err != nil {
+				return err
+			}
+			o, ok := e.(fs.Object)
+			if !ok {
+				continue
+			}
+			if o.Size() > 0 {
+				budget.bytes += o.Size()
+				if budget.bytes > budget.maxBytes {
+					return fmt.Errorf("%w: more than %d bytes", ErrRemoteTemplateTooLarge, budget.maxBytes)
+				}
+			}
+			objs = append(objs, o)
+		}
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, ErrRemoteTemplateTooLarge) || errors.Is(err, errRemoteContentRefused) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("failed to list source: %w", err)
+	}
+	return objs, nil
+}
+
+// checkRcloneEntryName refuses a listed entry name that is not a local
+// relative path (absolute, "..", or with a backslash), so a copy can only
+// write inside the destination.
+func checkRcloneEntryName(remote string) error {
+	if remote == "" || strings.Contains(remote, "\\") || !filepath.IsLocal(filepath.FromSlash(remote)) {
+		return fmt.Errorf("source entry name is not a relative path: %w", errRemoteContentRefused)
+	}
+	return nil
+}
+
+// deleteRcloneStatsGroup removes a per-fetch stats group (rclone exposes
+// the removal only through its rc call).
+func deleteRcloneStatsGroup(group string) {
+	if call := rc.Calls.Get("core/stats-delete"); call != nil {
+		_, _ = call.Fn(context.Background(), rc.Params{"group": group})
+	}
+}
+
+// newRcloneSourceFs creates the backend Fs for an accepted rclone source.
+func newRcloneSourceFs(ctx context.Context, remote RcloneRemote, creds RemoteFetchCredentials) (fs.Fs, error) {
+	rule, ok := allowedRcloneBackends[remote.Backend]
+	if !ok {
+		return nil, fmt.Errorf("rclone backend %q is not accepted for remote templates", remote.Backend)
+	}
+	info, err := fs.Find(remote.Backend)
+	if err != nil {
+		return nil, fmt.Errorf("rclone backend %q is not available: %w", remote.Backend, err)
+	}
+	srcFs, err := info.NewFs(ctx, ":"+remote.Backend, remote.Path, rcloneFetchConfig(info.Options, rule, creds))
+	if err != nil {
+		return nil, fmt.Errorf("failed to open %s source: %w", remote.Backend, err)
+	}
+	return srcFs, nil
+}
+
+// rcloneFetchConfig returns the complete backend configuration for a fetch:
+// the backend's option defaults, plus the rule's anonymous options in
+// RemoteFetchAnonymous mode. Nothing is read from the environment or from an
+// rclone config file.
+func rcloneFetchConfig(options fs.Options, rule rcloneBackendRule, creds RemoteFetchCredentials) configmap.Simple {
+	m := configmap.Simple{}
+	for i := range options {
+		if options[i].Default == nil {
+			continue
+		}
+		o := options[i].Copy()
+		o.Value = nil
+		m[o.Name] = o.String()
+	}
+	if creds != RemoteFetchCallerCredentials {
+		for k, v := range rule.anonymousOptions {
+			m[k] = v
+		}
+	}
+	return m
 }
 
 // CleanRemoteTemplateCache cleans up the remote template cache.
@@ -1191,33 +1458,9 @@ func CleanRemoteTemplateCache() error {
 // - Hub bucket/prefix configuration
 // - Fallback chain: local project -> hub project -> hub global -> error
 
-// ValidateRemoteURI performs basic validation on a remote template URI.
+// ValidateRemoteURI checks that uri is a remote template source that may be
+// fetched. It is the same check FetchRemoteTemplate applies; see
+// ValidateRemoteFetchSource.
 func ValidateRemoteURI(uri string) error {
-	if !IsRemoteURI(uri) {
-		return fmt.Errorf("not a remote URI: %s", uri)
-	}
-
-	remoteType := DetectRemoteType(uri)
-
-	switch remoteType {
-	case RemoteTypeGitHub:
-		// Validate GitHub URL format
-		_, err := parseGitHubURL(uri)
-		return err
-
-	case RemoteTypeArchive:
-		// Validate URL format
-		_, err := url.Parse(uri)
-		return err
-
-	case RemoteTypeRclone:
-		// Basic validation - should match :backend:path format
-		if !regexp.MustCompile(`^:\w+:.+`).MatchString(uri) {
-			return fmt.Errorf("invalid rclone URI format: %s (expected :backend:path)", uri)
-		}
-		return nil
-
-	default:
-		return fmt.Errorf("unsupported remote URI type: %s", uri)
-	}
+	return ValidateRemoteFetchSource(uri)
 }
