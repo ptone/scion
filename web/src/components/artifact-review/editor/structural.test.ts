@@ -894,6 +894,7 @@ describe('a hard break alone in a mark loads as that mark', () => {
     ['ab {--\\\n--}cd\n', ['deletion']],
     ['ab {==\\\n==}cd\n', ['highlight']],
     ['ab {==\\\n==}{>>a note<<}cd\n', ['highlight', 'comment']],
+    ['ab {~~\\\n~>x~~}cd\n', ['substitution']],
   ] as const) {
     it(`opens ${JSON.stringify(md)} with the mark, not literal tokens`, async () => {
       const { c } = await open(md);
@@ -1108,10 +1109,14 @@ describe('pilcrow styles', () => {
     // forced-colors included, may select it.
     const css = reviewEditorStyles.cssText.replace(/\/\*[\s\S]*?\*\//g, '');
     const selectors = [...css.matchAll(/([^{}]+)\{/g)]
-      .flatMap((m) => m[1].split(','))
+      // Split on top-level commas only, not those inside :is(...).
+      .flatMap((m) => m[1].split(/,(?![^()]*\))/))
       .map((sel) => sel.trim())
       .filter((sel) => /critic-break-(ins|del)/.test(sel) && sel.includes('::before'));
     expect(selectors.length).toBeGreaterThan(0);
+    // The parse keeps whole selectors: the forced-colors ones are among them.
+    expect(selectors).toContain(':is(p, h1, h2, h3, h4, h5, h6).critic-break-ins::before');
+    expect(selectors).toContain(':is(li, blockquote).critic-break-del > :first-child::before');
     for (const sel of selectors) {
       expect(
         /^(p|h[1-6]|:is\(p, h1, h2, h3, h4, h5, h6\))\.critic-break-(ins|del)::before$/.test(sel) ||
