@@ -262,6 +262,11 @@ func (s *Server) handlePortView(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setPortViewResponseHeaders(w)
+	// Every answer below counts as invalid (scion.hub.port_view.request),
+	// except a preflight, the trailing-slash redirect and a proxied
+	// request, which proxyToAgentPort counts with its transport.
+	countedOutcome := portViewRequestInvalid
+	defer func() { s.recordPortViewRequest("", countedOutcome) }()
 	if !isPortViewRequest(r) {
 		writePortViewInvalid(w)
 		return
@@ -276,6 +281,7 @@ func (s *Server) handlePortView(w http.ResponseWriter, r *http.Request) {
 			writePortViewInvalid(w)
 			return
 		}
+		countedOutcome = ""
 		writePortViewPreflight(w, r)
 		return
 	}
@@ -339,11 +345,13 @@ func (s *Server) handlePortView(w http.ResponseWriter, r *http.Request) {
 		if r.URL.RawQuery != "" {
 			loc += "?" + encodeLocationQuery(r.URL.RawQuery)
 		}
+		countedOutcome = ""
 		w.Header().Set("Location", loc)
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusPermanentRedirect)
 		return
 	}
+	countedOutcome = ""
 	s.proxyToAgentPort(w, r, identity, agent, exposed, "/"+sub, portProxyPolicy{
 		surface:  portProxySurfaceView,
 		caller:   "user:" + grant.UserID,
@@ -411,7 +419,8 @@ func (s *Server) portViewTransportAvailable(agentID string, exposed *store.Expos
 // would serve that user (portViewIdentity), when a transport would carry
 // the page view request (portViewTransportAvailable), and when a page link
 // can be signed now (mintPortView). In every other case the port link
-// serves the request as before.
+// serves the request as before. Each such navigation is counted
+// (scion.hub.port_view.redirect).
 func (s *Server) redirectToPortView(w http.ResponseWriter, r *http.Request, agent *store.Agent, exposed *store.ExposedPort) bool {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		return false
@@ -419,6 +428,16 @@ func (s *Server) redirectToPortView(w http.ResponseWriter, r *http.Request, agen
 	if !s.experimentEnabled(experiments.PortView) || !portview.IsNavigation(r) {
 		return false
 	}
+	outcome := s.portViewRedirect(w, r, agent, exposed)
+	s.recordPortViewRedirect(outcome)
+	return outcome == portViewRedirectMinted
+}
+
+// portViewRedirect is redirectToPortView for a page navigation with the
+// experiment on. It answers with the redirect only when it returns
+// portViewRedirectMinted; otherwise it writes nothing and the outcome says
+// why the port link serves the request.
+func (s *Server) portViewRedirect(w http.ResponseWriter, r *http.Request, agent *store.Agent, exposed *store.ExposedPort) string {
 	var userID string
 	switch u := GetIdentityFromContext(r.Context()).(type) {
 	case *AuthenticatedUser:
@@ -426,37 +445,37 @@ func (s *Server) redirectToPortView(w http.ResponseWriter, r *http.Request, agen
 	case *DevUser:
 		userID = u.ID()
 	default:
-		return false
+		return portViewRedirectNotEligible
 	}
 	if !portview.CanonicalID(userID) || !portview.CanonicalID(agent.ID) {
-		return false
+		return portViewRedirectNotEligible
 	}
 	escSub, ok := portLinkSubpath(r.URL.EscapedPath())
 	if !ok {
-		return false
+		return portViewRedirectNotEligible
 	}
 	if !s.portViewCapabilityKeys().configured() {
-		return false
+		return portViewRedirectIssuanceClosed
 	}
 	identity, ok := s.portViewIdentity(r.Context(), userID, agent)
 	if !ok {
 		slog.Debug("Port view: not opened for this user; serving the port link", "agent_id", agent.ID, "port", exposed.Port)
-		return false
+		return portViewRedirectUserRefused
 	}
 	// Never create a page link the page view route would then refuse.
 	if !s.portViewTransportAvailable(agent.ID, exposed, identity) {
-		return false
+		return portViewRedirectNoTransport
 	}
 	exp := s.portViewNow().Add(s.portViewTTL()).Truncate(time.Second)
 	capability, err := s.mintPortView(agent.ID, exposed.Port, userID, exp)
 	if err != nil {
 		// No key may sign now: the port link serves the request.
-		return false
+		return portViewRedirectIssuanceClosed
 	}
 	// A sub-path the page view route would not accept (isPortViewRequest)
 	// keeps the port link.
 	if u, err := url.Parse(portview.Route + capability + "/" + escSub); err != nil || !isPortViewRequest(&http.Request{URL: u}) {
-		return false
+		return portViewRedirectNotEligible
 	}
 	loc := relativeAPIRoot(r.URL.EscapedPath()) + "portview/" + capability + "/" + escSub
 	if r.URL.RawQuery != "" {
@@ -465,7 +484,7 @@ func (s *Server) redirectToPortView(w http.ResponseWriter, r *http.Request, agen
 	w.Header().Set("Location", loc)
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusFound)
-	return true
+	return portViewRedirectMinted
 }
 
 // redirectToPortLink sends a page navigation on the page view route to

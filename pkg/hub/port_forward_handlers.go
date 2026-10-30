@@ -460,8 +460,12 @@ func writePortNotExposed(w http.ResponseWriter, r *http.Request) {
 // port-forward tunnel, subject to the refuseLegacyProxy rule.
 func (s *Server) proxyToAgentPort(w http.ResponseWriter, r *http.Request, identity Identity, agent *store.Agent, exposed *store.ExposedPort, proxyPath string, policy portProxyPolicy, start time.Time) {
 	port := exposed.Port
+	// transport and outcome name the answer for the page view request
+	// counter (recordPortViewRequest); other surfaces are not counted.
+	var transport, outcome string
 	if policy.portView {
 		setPortViewResponseHeaders(w)
+		defer func() { s.recordPortViewRequest(transport, outcome) }()
 	}
 	// Conduit first (hub.conduit on and this node runs the relay): an agent
 	// with a conduit session is proxied over it. An agent without one may
@@ -474,13 +478,18 @@ func (s *Server) proxyToAgentPort(w http.ResponseWriter, r *http.Request, identi
 		conn, err := s.openConduitPort(r.Context(), identity, agent, exposed.Port)
 		switch {
 		case err == nil:
+			transport, outcome = portViewTransportConduit, portViewRequestServed
 			s.serveConduitProxy(w, r, agent, exposed.Port, proxyPath, conn, policy)
 			return
 		case !errors.Is(err, router.ErrNoSession):
+			transport, outcome = portViewTransportConduit, portViewRequestOffline
 			writeConduitProxyError(w, r, agent.ID, err)
 			return
 		}
 	}
+	// Every answer below is the tunnel's: refused unless it is served or
+	// the tunnel is unavailable.
+	transport, outcome = portViewTransportLegacy, portViewRequestRefused
 	// No path without a target-side deadline (design §3.5 Q14, v2.21.46):
 	// in external relay mode with enforce, a user request that only the
 	// port-forward tunnel below could serve is refused with the
@@ -490,6 +499,7 @@ func (s *Server) proxyToAgentPort(w http.ResponseWriter, r *http.Request, identi
 	}
 	if isWebSocketUpgrade(r) {
 		if conduitOn && !s.portTunnels.has(agent.ID) {
+			outcome = portViewRequestOffline
 			writeAgentOffline(w, r)
 			return
 		}
@@ -537,6 +547,7 @@ func (s *Server) proxyToAgentPort(w http.ResponseWriter, r *http.Request, identi
 		return
 	}
 	if err != nil {
+		outcome = portViewRequestOffline
 		if errors.Is(err, errNoPortTunnel) {
 			if conduitOn {
 				writeAgentOffline(w, r)
@@ -558,6 +569,7 @@ func (s *Server) proxyToAgentPort(w http.ResponseWriter, r *http.Request, identi
 		return
 	}
 	if resp.Error != "" {
+		outcome = portViewRequestOffline
 		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, resp.Error, nil)
 		return
 	}
@@ -586,6 +598,7 @@ func (s *Server) proxyToAgentPort(w http.ResponseWriter, r *http.Request, identi
 	if resp.Status == 0 {
 		resp.Status = http.StatusOK
 	}
+	outcome = portViewRequestServed
 	w.WriteHeader(resp.Status)
 	_, _ = w.Write(resp.Body)
 	slog.Debug("Proxy request",
