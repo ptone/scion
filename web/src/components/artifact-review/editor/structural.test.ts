@@ -24,14 +24,18 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 import { undo } from '@milkdown/prose/history';
+import { Fragment, Slice } from '@milkdown/prose/model';
 import type { Node } from '@milkdown/prose/model';
 import { splitBlock } from '@milkdown/prose/commands';
 import { TextSelection } from '@milkdown/prose/state';
-import { Transform } from '@milkdown/prose/transform';
+import type { Transaction } from '@milkdown/prose/state';
+import { ReplaceStep, Transform } from '@milkdown/prose/transform';
 
 import { onlyMarksChanged, projectCritic } from '../../../utils/critic.js';
 import { ReviewController } from './controller.js';
 import { docMarkRuns, marksReadBack } from './guard.js';
+import { classify, decide } from './policy.js';
+import { STRUCT_META } from './track.js';
 import type { HintKind } from './policy.js';
 import { ALLOWED_ATTRIBUTES, ALLOWED_TAGS } from './safe-render.js';
 import { BLOCK_ATTR, breakOf } from './schema.js';
@@ -39,6 +43,7 @@ import { saveDoc } from './bridge.js';
 import { docStrings } from './preserve.js';
 import { chooseAlphabet } from '../../../utils/critic-sentinels.js';
 import { renderContext } from './__fixtures__/core.js';
+import { reviewEditorStyles } from '../review-editor-styles.js';
 
 interface Harness {
   c: ReviewController;
@@ -765,7 +770,7 @@ function coreOf(c: ReviewController): { plain(md: string): string } {
 /** The structural edit kinds of the whole-text check tests. */
 type Act = (h: Harness) => void;
 
-describe('raw HTML is never edited by a structural edit (R1)', () => {
+describe('raw HTML is never edited by a structural edit', () => {
   const md = 'ab <b>x</b> cd ef\n';
 
   it('Enter over a selection holding inline HTML is refused; over plain text, taken', async () => {
@@ -808,7 +813,7 @@ describe('raw HTML is never edited by a structural edit (R1)', () => {
   });
 });
 
-describe('whole-text check for structural edits in hazardous documents (R2, design E7)', () => {
+describe('whole-text check for structural edits in hazardous documents (design E7)', () => {
   /** Switches off the fast first-line checks, so only the whole-text check is left. */
   function firstLineOff(c: ReviewController): void {
     const session = (c as unknown as { session: Record<string, unknown> }).session;
@@ -883,7 +888,23 @@ describe('whole-text check for structural edits in hazardous documents (R2, desi
   }
 });
 
-describe('pasting one block inserts its text (R3)', () => {
+describe('a hard break alone in a mark loads as that mark', () => {
+  for (const [md, kinds] of [
+    ['ab {--\\\ncd--} ef\n', ['deletion']],
+    ['ab {--\\\n--}cd\n', ['deletion']],
+    ['ab {==\\\n==}cd\n', ['highlight']],
+    ['ab {==\\\n==}{>>a note<<}cd\n', ['highlight', 'comment']],
+  ] as const) {
+    it(`opens ${JSON.stringify(md)} with the mark, not literal tokens`, async () => {
+      const { c } = await open(md);
+      expect(docMarkRuns(c.view.state.doc).map((r) => r.kind)).toEqual([...kinds]);
+      expect(c.readOnlyBlocks()).toEqual([]);
+      expect(c.flush()).toBe(md);
+    });
+  }
+});
+
+describe('pasting one block inserts its text', () => {
   const cases: [string, string][] = [
     ['# H', 'a{++H++}b\n'],
     ['- item', 'a{++item++}b\n'],
@@ -911,7 +932,7 @@ describe('pasting one block inserts its text (R3)', () => {
     });
   }
 
-  it('a code line holding CriticMarkup is not pasted as text (O4)', async () => {
+  it('a code line holding CriticMarkup is not pasted as text', async () => {
     const md = 'ab\n';
     const h = await open(md);
     select(h.c, posOf(h.c, 'ab', 1));
@@ -923,7 +944,7 @@ describe('pasting one block inserts its text (R3)', () => {
   });
 });
 
-describe('the read-back takes the alternative reading only for boundary runs (O1)', () => {
+describe('the read-back takes the alternative reading only for boundary runs', () => {
   it('a mark without a boundary whose text gains line-start syntax still fails', async () => {
     const { c } = await open('x {++a b++} y\n');
     const doc = c.view.state.doc;
@@ -942,7 +963,7 @@ describe('the read-back takes the alternative reading only for boundary runs (O1
   });
 });
 
-describe('more of the addendum table (O3)', () => {
+describe('more boundary cases: quotes, line breaks, task items, composition', () => {
   it('a join between two block quotes', async () => {
     const md = '> a\n\n> b\n';
     const { c, hints } = await open(md);
@@ -1025,18 +1046,78 @@ describe('more of the addendum table (O3)', () => {
 
   it('with the cursor outside a list item’s text, Backspace and typing change nothing', async () => {
     const md = '- a\n- b\n';
-    const { c } = await open(md);
+    const { c, hints } = await open(md);
     // The position inside the second item, before its paragraph.
     const pos = startOf(c, 'b') - 1;
     c.view.dispatch(c.view.state.tr.setSelection(new TextSelection(c.view.state.doc.resolve(pos))));
     press(c, 'Backspace');
     expect(c.flush()).toBe(md);
+    // Typing there: ProseMirror wraps the text in a new paragraph, which
+    // the policy refuses with a hint; the text stays as it was.
     const v = c.view;
-    try {
-      v.dispatch(v.state.tr.insertText('Z', pos));
-    } catch {
-      // Not a place text can go.
-    }
+    const before = hints.length;
+    v.dispatch(v.state.tr.insertText('Z', pos));
+    expect(hints.length).toBe(before + 1);
     expect(c.flush()).toBe(md);
+  });
+});
+
+describe('the policy refuses structural edits over raw HTML on its own', () => {
+  // These call the policy directly, without the builders' own refusal, so
+  // each of its two checks is tested by itself.
+  const md = 'ab <b>x</b> cd\n';
+
+  it('a raw split step over inline HTML is classed as an HTML edit', async () => {
+    const { c } = await open(md);
+    const state = c.view.state;
+    const from = posOf(c, 'ab', 1);
+    const to = posOf(c, 'x', 1);
+    const p = state.schema.nodes.paragraph;
+    const tr = state.tr.step(
+      new ReplaceStep(from, to, new Slice(Fragment.from([p.create(), p.create()]), 1, 1))
+    );
+    expect(classify(tr, state)).toBe('html');
+    // The same split over plain text is a split.
+    const plain = posOf(c, 'cd', 1);
+    const tr2 = state.tr.step(
+      new ReplaceStep(plain, plain, new Slice(Fragment.from([p.create(), p.create()]), 1, 1))
+    );
+    expect(classify(tr2, state)).toBe('split');
+  });
+
+  it('a built structural edit whose range holds inline HTML is refused', async () => {
+    const { c } = await open(md);
+    const state = c.view.state;
+    // A change that keeps the text (so the other checks pass), tagged as a
+    // built structural edit over a range.
+    const built = (from: number, to: number): Transaction => {
+      const tr = state.tr.setNodeAttribute(0, BLOCK_ATTR, null);
+      tr.setMeta(STRUCT_META, { cls: 'split', from, to });
+      return tr;
+    };
+    const pass = (): null => null;
+    expect(decide(built(posOf(c, 'ab', 1), posOf(c, 'x', 1)), state, pass)).toBe('generic');
+    // Control: the same edit over plain text is allowed.
+    expect(decide(built(posOf(c, 'cd'), posOf(c, 'cd', 1)), state, pass)).toBeNull();
+  });
+});
+
+describe('pilcrow styles', () => {
+  it('draw only on paragraphs, headings, and the first child of a list item or quote', () => {
+    // A list item's own ::before is the task-list checkbox: no pilcrow rule,
+    // forced-colors included, may select it.
+    const css = reviewEditorStyles.cssText.replace(/\/\*[\s\S]*?\*\//g, '');
+    const selectors = [...css.matchAll(/([^{}]+)\{/g)]
+      .flatMap((m) => m[1].split(','))
+      .map((sel) => sel.trim())
+      .filter((sel) => /critic-break-(ins|del)/.test(sel) && sel.includes('::before'));
+    expect(selectors.length).toBeGreaterThan(0);
+    for (const sel of selectors) {
+      expect(
+        /^(p|h[1-6]|:is\(p, h1, h2, h3, h4, h5, h6\))\.critic-break-(ins|del)::before$/.test(sel) ||
+          /^:is\(li, blockquote\)\.critic-break-(ins|del) > :first-child::before$/.test(sel),
+        sel
+      ).toBe(true);
+    }
   });
 });

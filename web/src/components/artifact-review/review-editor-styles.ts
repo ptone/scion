@@ -356,8 +356,8 @@ export const reviewEditorStyles = css`
     .critic-comment {
       border: 1px solid CanvasText;
     }
-    .critic-break-ins::before,
-    .critic-break-del::before,
+    :is(p, h1, h2, h3, h4, h5, h6).critic-break-ins::before,
+    :is(p, h1, h2, h3, h4, h5, h6).critic-break-del::before,
     :is(li, blockquote).critic-break-ins > :first-child::before,
     :is(li, blockquote).critic-break-del > :first-child::before {
       border: 1px solid CanvasText;

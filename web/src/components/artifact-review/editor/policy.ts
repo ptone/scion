@@ -39,6 +39,7 @@ import { cleanBlocksUnchanged, cleanUnchanged } from './guard.js';
 import { COMMENT, isMine, markKeyOf, runKeyOf } from './schema.js';
 import { STRUCT_META, inlineContent, isExempt, trackRefusal, trackTransaction } from './track.js';
 import type { StructuralMeta } from './track.js';
+import { holdsHtml } from './structural.js';
 
 /** The hint shown when an edit is refused. */
 export type HintKind =
@@ -109,14 +110,7 @@ export function containerClass($pos: ResolvedPos): EditClass | null {
 }
 
 function touchesHtml(doc: Node, from: number, to: number, inserted: Node[]): boolean {
-  let found = inserted.some((n) => n.type.name === 'html');
-  if (!found && to > from) {
-    doc.nodesBetween(from, to, (n) => {
-      if (n.type.name === 'html') found = true;
-      return !found;
-    });
-  }
-  return found;
+  return inserted.some((n) => n.type.name === 'html') || holdsHtml(doc, from, to);
 }
 
 /** Puts a document-changing transaction in a class. */
