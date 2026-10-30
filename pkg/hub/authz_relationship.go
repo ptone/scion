@@ -98,6 +98,11 @@ func NewRelationshipGrantResolver(s store.Store) *RelationshipGrantResolver {
 // It checks whether the given agent identity has progeny access to the specified
 // resource via a named relationship grant.
 //
+// It has no runtime-read caller: the user-scope runtime read and the agent
+// secret list refuse a chain without recorded provenance instead of falling
+// back to it. It is retained for the pending launch-selection follow-ups;
+// whether to delete it is tracked separately.
+//
 // This replaces the legacy DelegatedFrom policy pattern. Instead of creating a
 // Policy row per resource, the resolver derives the grant from:
 //   - The resource's AllowProgeny flag and CreatedBy field (queried via store)

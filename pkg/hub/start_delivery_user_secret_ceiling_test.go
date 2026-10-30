@@ -359,10 +359,9 @@ func TestStartDelivery_OwnerRowDeniedFallsBackToLowerScope(t *testing.T) {
 // start equals the read. On the owner path start equals the ceiling verdict
 // (the read's step 10) for a recorded chain; where the read is narrower
 // than the ceiling (the agent's own access constraint, which only Decide
-// applies) the case says so. A chain without recorded provenance keeps its
-// legacy behaviour on both paths (ptone-gated, not changed here): progeny
-// start refuses it (project.secret_read needs recorded provenance) while
-// the read applies the progeny rule; owner start delivers it.
+// applies) the case says so. A chain without recorded provenance: progeny
+// start refuses it (project.secret_read needs recorded provenance) and so
+// does the read (chain_unrecorded); owner start keeps its legacy delivery.
 func TestStartDelivery_ParityWithRuntimeRead(t *testing.T) {
 	type built struct{ agentID, token string }
 	cases := []struct {
@@ -412,7 +411,7 @@ func TestStartDelivery_ParityWithRuntimeRead(t *testing.T) {
 			createDCEdge(t, f.Store, store.DelegationPrincipalUser, f.UserID, store.DelegationPrincipalAgent, id,
 				store.RoleScopeProject, f.ProjectID, string(AgentRoleFull))
 			return built{id, tok}
-		}, true, true, false},
+		}, true, false, false},
 		// Progeny path.
 		{"progeny/clean", false, func(t *testing.T, f *sdFixture) built {
 			c, tok, _ := f.progeny(t, "pm-p-clean", true)
@@ -450,7 +449,7 @@ func TestStartDelivery_ParityWithRuntimeRead(t *testing.T) {
 			createDCEdge(t, f.Store, store.DelegationPrincipalAgent, p, store.DelegationPrincipalAgent, c,
 				store.RoleScopeProject, f.ProjectID, string(AgentRoleFull))
 			return built{c, tok}
-		}, false, true, false},
+		}, false, false, false},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
