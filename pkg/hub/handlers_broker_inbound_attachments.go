@@ -433,8 +433,8 @@ func (s *Server) handleBrokerAttachmentsUpload(w http.ResponseWriter, r *http.Re
 
 	// Pass 2: the request is acceptable; store each checked file as an
 	// unsent upload of the sender. A store fault part way through leaves
-	// the files stored before it in place, on purpose: Phase 1 has no
-	// per-upload delete, the uploads are readable only by the sender and
+	// the files stored before it in place, on purpose: the artifact service
+	// has no per-upload delete, the uploads are readable only by the sender and
 	// expire after the upload TTL unless a send binds them, and the user
 	// upload route behaves the same way. The answer lists them, so the
 	// sender can still use or ignore them.
