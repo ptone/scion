@@ -98,7 +98,7 @@ test('the artifact preview and review editor make no plain-string markup call', 
   // through the sign-in redirect is not routed, so it would get no rule.
   const h = hub();
   await page.goto(await devSignInURL(h.baseURL, h.devToken), { waitUntil: 'domcontentloaded' });
-  await page.goto(artifactPage(project, a.id), { waitUntil: 'domcontentloaded' });
+  await page.goto(`${h.baseURL}${artifactPage(project, a.id)}`, { waitUntil: 'domcontentloaded' });
   await expect(page.locator('scion-page-artifact-detail')).toBeAttached({ timeout: 30_000 });
   await expect(page.locator('scion-page-artifact-detail scion-detail-header').first()).toBeVisible({
     timeout: 30_000,
