@@ -175,45 +175,100 @@ export async function enforceTrustedTypes(
     if (namesTrustedType(String(err))) errors.push(String(err));
   });
   // A report-only violation is also logged to the console by some browsers
-  // (WebKit: "[Report Only] This requires a TrustedHTML value ..."). It is
-  // the same event the probe records as a violation, where allowances
-  // apply, so it is not counted again as an error.
-  const isReportOnlyNotice = (text: string): boolean =>
-    /^\[Report Only\]|\(Report-Only policy\)/i.test(text);
+  // (WebKit: "[Report Only] This requires a TrustedHTML value ..."). Such a
+  // line is kept apart: trustedTypesFindings pairs it with a report-only
+  // violation the probe recorded and the test allows, and reports it as an
+  // error only when it has no such pair.
+  const notices: string[] = [];
+  noticesByPage.set(page, notices);
   page.on('console', (msg) => {
-    if (msg.type() === 'error' && namesTrustedType(msg.text()) && !isReportOnlyNotice(msg.text())) {
-      errors.push(msg.text());
-    }
+    if (msg.type() !== 'error' || !namesTrustedType(msg.text())) return;
+    if (isReportOnlyNotice(msg.text())) notices.push(msg.text());
+    else errors.push(msg.text());
   });
   return errors;
 }
 
+const noticesByPage = new WeakMap<Page, string[]>();
+
+/** A console line some browsers log for a report-only violation. */
+function isReportOnlyNotice(text: string): boolean {
+  return /^\[Report Only\]|\(Report-Only policy\)/i.test(text);
+}
+
+/** The Trusted Type a console notice says is required, or null. */
+function noticeType(text: string): string | null {
+  return /Trusted ?(ScriptURL|Script|HTML)/i.exec(text)?.[1]?.toLowerCase() ?? null;
+}
+
+/** The Trusted Type a violation's sink requires, from its sample. */
+function sinkType(sample: string): string {
+  const sink = sample.split('|')[0] ?? '';
+  if (/\bsrc\b|ScriptURL|importScripts|Worker/i.test(sink)) return 'scripturl';
+  if (/eval|Function|setTimeout|setInterval|HTMLScriptElement|text$|textContent/i.test(sink)) {
+    return 'script';
+  }
+  return 'html';
+}
+
 /**
  * The findings so far: page-side violations not matched by `allowed`, and
- * the collected errors. Also returns how many violations each allowance
- * matched, so a test can check an allowance is still needed.
+ * the collected errors, plus each report-only console notice that does not
+ * pair with an allowed report-only violation of the Trusted Type it names.
+ * Also returns how many violations each allowance matched, so a test can
+ * check an allowance is still needed, and how many notices were seen and
+ * paired.
  */
 export async function trustedTypesFindings(
   page: Page,
   errors: string[],
   allowed: AllowedViolation[] = []
-): Promise<TrustedTypesFindings & { allowedCounts: Record<string, number> }> {
+): Promise<
+  TrustedTypesFindings & {
+    allowedCounts: Record<string, number>;
+    /** Report-only console notices: seen, and paired with an allowed violation. */
+    notices: { seen: number; matched: number };
+  }
+> {
   const all = await page.evaluate(() => [...(window.__trustedTypesViolations ?? [])]);
   const allowedCounts: Record<string, number> = Object.fromEntries(
     allowed.map((a) => [a.reason, 0])
   );
   const violations: string[] = [];
+  // Allowed report-only violations, by the Trusted Type their sink requires,
+  // each available to pair with one console notice.
+  const allowedReports: string[] = [];
   for (const v of all) {
     const match = allowed.find(
       (a) => a.sample.test(v.sample) && (!a.sourceFile || a.sourceFile.test(v.sourceFile))
     );
-    if (match) allowedCounts[match.reason] = (allowedCounts[match.reason] ?? 0) + 1;
-    else violations.push(`${v.disposition} ${v.sample} ${v.sourceFile}:${v.lineNumber}`);
+    if (match) {
+      allowedCounts[match.reason] = (allowedCounts[match.reason] ?? 0) + 1;
+      if (v.disposition === 'report') allowedReports.push(sinkType(v.sample));
+    } else violations.push(`${v.disposition} ${v.sample} ${v.sourceFile}:${v.lineNumber}`);
   }
-  return { violations, errors: [...errors], allowedCounts };
+  const notices = noticesByPage.get(page) ?? [];
+  const unmatched: string[] = [];
+  for (const text of notices) {
+    const type = noticeType(text);
+    const at = allowedReports.findIndex((t) => type === null || t === type);
+    if (text.includes('require-trusted-types-for') && at >= 0) allowedReports.splice(at, 1);
+    else unmatched.push(text);
+  }
+  return {
+    violations,
+    errors: [...errors, ...unmatched],
+    allowedCounts,
+    notices: { seen: notices.length, matched: notices.length - unmatched.length },
+  };
 }
 
-/** Expects no findings beyond the allowed ones. */
+/**
+ * Asserts there are no findings: no violation outside `allowed` and no
+ * error, a report-only console notice counting as an error unless it pairs
+ * with an allowed report-only violation. Returns how many violations each
+ * allowance matched.
+ */
 export async function expectNoTrustedTypesFindings(
   page: Page,
   errors: string[],

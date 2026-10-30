@@ -43,6 +43,7 @@ import {
   expectProbeSeesIconFileParse,
   expectProbeSeesViolation,
   expectRuleOnLoadedDocument,
+  trustedTypesFindings,
   type AllowedViolation,
   type TrustedTypesOptions,
 } from '../trusted-types.js';
@@ -125,6 +126,17 @@ test('the artifact preview and review editor make no plain-string markup call', 
   const before = await expectNoTrustedTypesFindings(page, errors, IMAGE_REWRITE);
   // The allowance is still needed; remove it once this fails.
   expect(before['preview image rewrite (ptone/scion#6674)']).toBeGreaterThan(0);
+  // Negative check: without the allowance, the image rewrite's report-only
+  // violations are findings, and so is every console notice of them (some
+  // browsers log one per report-only violation), since none can pair.
+  const strict = await trustedTypesFindings(page, errors);
+  expect(strict.violations.length, 'report-only violations without an allowance').toBeGreaterThan(
+    0
+  );
+  expect(strict.notices.matched, 'notices paired without an allowance').toBe(0);
+  expect(strict.errors.length, 'unpaired notices count as errors').toBe(
+    errors.length + strict.notices.seen
+  );
 
   await startGraphicalReview(page);
   await expectIconsDrawn(page, 1);
