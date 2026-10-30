@@ -442,8 +442,7 @@ type portProxyPolicy struct {
 	// answer is writeAgentOffline.
 	conduitOnly bool
 	// portView applies the page view headers (setPortViewResponseHeaders)
-	// and request and response rules (portViewStrippedRequestHeader,
-	// portViewModifyResponse).
+	// and response rules (portViewModifyResponse).
 	portView bool
 }
 
@@ -802,9 +801,18 @@ func stripFromProxyResponse(k string) bool {
 	}
 }
 
+// sensitiveHeader reports whether a request header is removed before a
+// request proxied to an agent's port reaches the app, on both port proxy
+// transports: the hub's credential headers, the federation token
+// (FederationTokenHeader) and the trusted-proxy identity headers
+// (extractProxyUser). The hub reads them for its own authentication; the
+// agent's app never receives them.
 func sensitiveHeader(k string) bool {
 	switch strings.ToLower(k) {
 	case "authorization", "cookie", "x-scion-agent-token", "x-scion-broker-id", "x-scion-broker-hmac":
+		return true
+	case strings.ToLower(FederationTokenHeader),
+		"x-forwarded-user-id", "x-forwarded-user-email", "x-forwarded-user-name", "x-forwarded-user-role":
 		return true
 	default:
 		return false
