@@ -221,8 +221,7 @@ function entryFromUnknown(
   // ("a[0].b" is "a.0.b").
   const field = str(raw.field);
   if (field) {
-    const key =
-      resolveFieldKey(entrySection, field, ctx) ?? fallbackFieldKey(null, field) ?? field;
+    const key = resolveFieldKey(entrySection, field, ctx) ?? fallbackFieldKey(null, field) ?? field;
     return { section: entrySection, key, path: str(raw.path) ?? field, message };
   }
   const path = str(raw.Path) ?? str(raw.path) ?? str(raw.key) ?? '';
