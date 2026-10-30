@@ -3082,15 +3082,16 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		// What the caller may do in the thread (ptone/scion#5519):
 		// authorizeChatThreadRead above decides read and the not-found
 		// answer; chatThreadAccess adds the actions behind _capabilities and
-		// canPost. Its read step is the same project read check, so if the
-		// two ever disagreed the thread is still answered as not found.
-		access, err := s.chatThreadAccess(ctx, user, chatThreadRef{Key: key, Project: project})
+		// canPost, reusing that read decision (readAllowed) instead of
+		// checking project read again.
+		access, err := s.chatThreadAccess(ctx, user, chatThreadRef{Key: key, Project: project, readAllowed: true})
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
 		if !access.Can(ChatActionRead) {
-			logAuthzDenial(r, user, projectResource(project), ActionRead, access.readDenial.Reason)
+			// Fail closed: without a read action (no authz service) the
+			// thread is answered as missing, like any refused read.
 			NotFound(w, "Thread")
 			return
 		}

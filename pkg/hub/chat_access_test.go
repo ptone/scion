@@ -21,6 +21,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -124,6 +125,59 @@ func TestChatThreadAccess_MemberAndOwnerPost(t *testing.T) {
 	caps := decodeChatCaps(t, rec.Body.Bytes())
 	assert.Nil(t, caps.Capabilities)
 	assert.Nil(t, caps.CanPost)
+}
+
+// countingDecisionEmitter records every decision audit record; with the
+// sample rate at 1 the authz service emits exactly one per CheckAccess.
+type countingDecisionEmitter struct {
+	mu      sync.Mutex
+	records []*store.DecisionAuditRecord
+}
+
+func (e *countingDecisionEmitter) EmitDecisionAudit(_ context.Context, record *store.DecisionAuditRecord) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.records = append(e.records, record)
+}
+
+func (e *countingDecisionEmitter) reset() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.records = nil
+}
+
+// onProject counts the recorded decisions on projectID by action.
+func (e *countingDecisionEmitter) onProject(projectID string) map[string]int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	counts := map[string]int{}
+	for _, r := range e.records {
+		if r.ResourceType == "project" && r.ResourceID == projectID {
+			counts[r.Permission]++
+		}
+	}
+	return counts
+}
+
+// TestChatHistory_ProjectDecisionCount pins the authorization cost of a
+// topic history page (ptone/scion#5519 rebase review N1): project read once
+// (authorizeChatThreadRead) and project.chat_post once (chatThreadAccess,
+// which reuses that read decision instead of checking it again), for a
+// member and for a read-only viewer.
+func TestChatHistory_ProjectDecisionCount(t *testing.T) {
+	f := newChatFixture(t)
+	viewer := f.chatViewer(t, f.projA)
+	emitter := &countingDecisionEmitter{}
+	f.srv.authzService.DecisionAuditSampleRate = 1.0
+	f.srv.authzService.SetDecisionAuditEmitter(emitter)
+	for _, user := range []string{f.member, viewer} {
+		emitter.reset()
+		rec := f.session(t, user, http.MethodGet, chatConversationPath(f.topicA, "messages"), nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		require.NotNil(t, decodeChatCaps(t, rec.Body.Bytes()).Capabilities)
+		assert.Equal(t, map[string]int{string(ActionRead): 1, string(ActionChatPost): 1}, emitter.onProject(f.projA),
+			"decisions on the topic's project for user %s", user)
+	}
 }
 
 // TestChatThreadAccess_ProjectAdminAndHubAdminPost: a project-admin and a

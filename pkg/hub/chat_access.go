@@ -135,6 +135,12 @@ type chatThreadRef struct {
 	// in Phase 1 (design section 8.3 item 4); Phase 2 decides whether to
 	// unify it with chat sends.
 	skipTokenScope bool
+	// readAllowed records that this request already holds an allowed
+	// project-read decision for Project and this caller, made by
+	// authorizeChatThreadRead with the same check (project.read on the
+	// caller), so the user branch does not repeat it. Only the topic
+	// history handler sets it, right after that check succeeded.
+	readAllowed bool
 }
 
 // chatThreadAccess is the single decision point for what caller may do in
@@ -174,7 +180,7 @@ func (s *Server) chatThreadAccess(ctx context.Context, caller Identity, thread c
 	}
 	return s.chatUserAccess(ctx, user, thread.Project,
 		[]string{ChatActionRead, ChatActionDeleteOwn}, chatThreadWriteActions,
-		[]string{ChatActionDeleteOwn}, !thread.skipTokenScope), nil
+		[]string{ChatActionDeleteOwn}, !thread.skipTokenScope, thread.readAllowed), nil
 }
 
 // chatSpaceAccess is the single decision point for what caller may do in
@@ -187,7 +193,7 @@ func (s *Server) chatSpaceAccess(ctx context.Context, caller Identity, project *
 	if !ok || isNilIdentity(caller) || project == nil {
 		return ChatAccess{}
 	}
-	access := s.chatUserAccess(ctx, user, project, []string{ChatActionRead}, chatSpaceWriteActions, nil, true)
+	access := s.chatUserAccess(ctx, user, project, []string{ChatActionRead}, chatSpaceWriteActions, nil, true, false)
 	if !access.Can(ChatActionRead) {
 		return access
 	}
@@ -201,17 +207,20 @@ func (s *Server) chatSpaceAccess(ctx context.Context, caller Identity, project *
 // chatUserAccess is the user branch shared by the two resolvers. base is
 // granted with project.read, writes in addition with project.chat_post,
 // and tokenDropped lists the base actions a token without chat write scope
-// loses. tokenScope selects the token-scope step.
-func (s *Server) chatUserAccess(ctx context.Context, user UserIdentity, project *store.Project, base, writes, tokenDropped []string, tokenScope bool) ChatAccess {
+// loses. tokenScope selects the token-scope step. readAllowed skips the
+// read check when the caller already made it (chatThreadRef.readAllowed).
+func (s *Server) chatUserAccess(ctx context.Context, user UserIdentity, project *store.Project, base, writes, tokenDropped []string, tokenScope, readAllowed bool) ChatAccess {
 	if s.authzService == nil {
 		return ChatAccess{}
 	}
 	resource := projectResource(project)
 	// The read ceiling. It is checked on the caller itself, so a token's
 	// own ceiling applies.
-	read := s.authzService.CheckAccess(ctx, user, resource, ActionRead)
-	if !read.Allowed {
-		return ChatAccess{readDenial: read}
+	if !readAllowed {
+		read := s.authzService.CheckAccess(ctx, user, resource, ActionRead)
+		if !read.Allowed {
+			return ChatAccess{readDenial: read}
+		}
 	}
 	access := ChatAccess{Actions: slices.Clone(base)}
 	post := s.authzService.CheckAccess(ctx, chatPostIdentity(user), resource, ActionChatPost)
