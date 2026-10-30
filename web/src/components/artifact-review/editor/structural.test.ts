@@ -544,6 +544,8 @@ describe('boundary marks in the text', () => {
       select(c, at);
       typeText(c, 'Z');
       const out = saved(c, md);
+      // The edit is taken (not refused), and only it changes the text.
+      expect(out, md).toContain('{++Z++}');
       expect(out.replace('{++Z++}', ''), md).toBe(md);
     }
   });
@@ -1151,7 +1153,9 @@ describe('the builders refuse raw HTML on their own', () => {
       { type: 'paragraph', content: Fragment.from(p.text('P2')) },
     ];
     const tr = new Transform(c.view.state.doc);
-    expect(buildPaste(tr, posOf(c, 'ab', 1), posOf(c, 'x', 1), pieces)).toEqual({ refuse: 'generic' });
+    expect(buildPaste(tr, posOf(c, 'ab', 1), posOf(c, 'x', 1), pieces)).toEqual({
+      refuse: 'generic',
+    });
     const ok = new Transform(c.view.state.doc);
     expect('head' in buildPaste(ok, posOf(c, 'cd'), posOf(c, 'cd', 1), pieces)).toBe(true);
   });
@@ -1163,5 +1167,26 @@ describe('the builders refuse raw HTML on their own', () => {
     expect(tr.steps).toHaveLength(0);
     const ok = new Transform(c.view.state.doc);
     expect('head' in buildDelete(ok, posOf(c, 'cd', 1), posOf(c, 'ef', 1), null)).toBe(true);
+  });
+});
+
+describe('a written unit must open again with the blocks it shows', () => {
+  it('a new item in a nested list with its own bullet is refused, so it never reopens as another list', async () => {
+    // The outer list uses "-" and the nested one "*": the item a break adds
+    // is written with the outer list's bullet, which would start a new
+    // nested list on reopening. The reopen check refuses it; the same break
+    // in a nested list with the outer bullet is taken.
+    const md = '- a\n  * b\n';
+    const { c, hints } = await open(md);
+    select(c, endOf(c, 'b'));
+    press(c, 'Enter');
+    expect(hints).toEqual(['generic']);
+    expect(c.flush()).toBe(md);
+    const same = '- a\n  - b\n';
+    const h2 = await open(same);
+    select(h2.c, endOf(h2.c, 'b'));
+    press(h2.c, 'Enter');
+    expect(h2.hints).toEqual([]);
+    expect(saved(h2.c, same)).toBe('- a\n  - b{++\n  - ++}\n');
   });
 });
