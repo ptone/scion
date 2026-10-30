@@ -8066,6 +8066,50 @@ describe('export timestamps in the display zone (tz-refactor task 21)', () => {
   });
 });
 
+describe('print conversation', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('shows the thread name and every message as text, without writing markup', () => {
+    vi.useFakeTimers();
+    const doc = document.implementation.createHTMLDocument('');
+    const write = vi.spyOn(doc, 'write');
+    const printWindow = { document: doc, print: vi.fn(), close: vi.fn(), closed: false };
+    vi.spyOn(window, 'open').mockReturnValue(printWindow as unknown as Window);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const el = document.createElement('scion-chat-thread') as any;
+    el.threadName = 'Plans <b>& notes</b>';
+    el.messages = [
+      {
+        id: 'm1',
+        sender: 'ana@example.com',
+        msg: 'line one\n<img src=x onerror=alert(1)> & more',
+        createdAt: '2026-01-01T00:00:00Z',
+      },
+      { id: 'm2', sender: '<i>bot</i>', msg: 'second', createdAt: '2026-01-01T00:01:00Z' },
+    ];
+    el.printConversation();
+
+    expect(write).not.toHaveBeenCalled();
+    expect(doc.title).toBe('Plans <b>& notes</b>');
+    expect(doc.querySelector('h1')?.textContent).toBe('Plans <b>& notes</b>');
+    expect(doc.head.querySelector('style')?.textContent).toContain('font-family');
+    // The message text stays text: no element is created from it.
+    expect(doc.body.querySelector('b, i, img')).toBeNull();
+    const items = [...doc.body.children].slice(1);
+    expect(items).toHaveLength(2);
+    expect(items[0]!.textContent).toContain('ana@example.com');
+    expect(items[0]!.lastElementChild?.textContent).toBe(
+      'line one\n<img src=x onerror=alert(1)> & more'
+    );
+    expect(items[1]!.firstElementChild?.firstChild?.textContent).toBe('<i>bot</i> ');
+    expect(printWindow.print).toHaveBeenCalledTimes(1);
+  });
+});
+
 /**
  * Switching chat to the dashboard and back builds a fresh thread; the page
  * hands it the previous instance's scroll anchor (`restoreScrollAnchor`) and
