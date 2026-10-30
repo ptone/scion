@@ -17,7 +17,6 @@ package provision
 import (
 	"errors"
 	"net/url"
-	"os"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -29,61 +28,41 @@ import (
 const HostCloneProtocols = "https:ssh:git"
 
 // HostCloneGitArgs returns the -c settings a hardened host-side clone
-// carries ahead of the subcommand: hostGitArgs, then a transport allow-list
-// that denies every protocol except https, ssh and git. The later
-// protocol.file.allow=never overrides hostGitArgs' protocol.file.allow=user,
-// so a local path or file:// URL is refused even on the command line.
-// http.followRedirects=false: the clone never follows an HTTP redirect to
-// another URL.
+// carries ahead of the subcommand: hostGitArgs, then HostCloneGitConfig.
 func HostCloneGitArgs() []string {
-	return append(hostGitArgs(),
-		"-c", "http.followRedirects=false",
-		"-c", "protocol.allow=never",
-		"-c", "protocol.file.allow=never",
-		"-c", "protocol.https.allow=always",
-		"-c", "protocol.ssh.allow=always",
-		"-c", "protocol.git.allow=always",
-	)
+	args := hostGitArgs()
+	for _, kv := range HostCloneGitConfig() {
+		args = append(args, "-c", kv)
+	}
+	return args
 }
 
-// hostGitArgs returns the -c settings every host-side git invocation in a
-// repository that agents can write carries, ahead of the subcommand:
-//
-//   - core.hooksPath=/dev/null: no hook runs (post-checkout,
-//     reference-transaction, post-merge, ...). Hooks are repository content
-//     here, not host configuration.
-//   - core.fsmonitor=false: no file-system monitor command runs when git
-//     reads the index.
-//   - core.pager=cat: never starts a configured pager.
-//   - protocol.ext.allow=never: the ext:: transport, which runs a command,
-//     is never used, whatever a config file allows.
-//   - submodule.recurse=false, fetch.recurseSubmodules=false: git never
-//     works inside submodules, whose own config (.git/modules/<name>) is not
-//     part of the checks here, and never fetches from submodule URLs.
-//   - merge.verifySignatures=false, commit.gpgsign=false, tag.gpgsign=false:
-//     no git invocation runs gpg.program to verify or make a signature.
-//   - protocol.file.allow=user: the file:// and local-path transports are
-//     allowed for a top-level operation the user drives directly (git treats
-//     those as GIT_PROTOCOL_FROM_USER=1), which includes a hub clone URL that is
-//     a local path, but are blocked for git's own indirect uses such as
-//     submodule fetches. It is not restricted to command-line URLs: a top-level
-//     fetch of a configured file:// remote is still allowed.
-//
-// TODO(ptone/scion#5865): replace with util.HostGitArgs() and delete this
-// copy once it is available.
-func hostGitArgs() []string {
+// HostCloneGitConfig returns the key=value settings a hardened host-side
+// clone or fetch adds after the base host pins (util.HostGitArgs): a
+// transport allow-list that denies every protocol except https, ssh and
+// git. protocol.file.allow=never overrides the base
+// protocol.file.allow=user, so a local path or file:// URL is refused even
+// on the command line. http.followRedirects=false: git never follows an
+// HTTP redirect to another URL.
+func HostCloneGitConfig() []string {
 	return []string{
-		"-c", "core.hooksPath=" + os.DevNull,
-		"-c", "core.fsmonitor=false",
-		"-c", "core.pager=cat",
-		"-c", "protocol.ext.allow=never",
-		"-c", "protocol.file.allow=user",
-		"-c", "submodule.recurse=false",
-		"-c", "fetch.recurseSubmodules=false",
-		"-c", "merge.verifySignatures=false",
-		"-c", "commit.gpgsign=false",
-		"-c", "tag.gpgsign=false",
+		"http.followRedirects=false",
+		"protocol.allow=never",
+		"protocol.file.allow=never",
+		"protocol.https.allow=always",
+		"protocol.ssh.allow=always",
+		"protocol.git.allow=always",
 	}
+}
+
+// hostGitArgs returns the base -c settings every host-side git invocation in a
+// repository that agents can write carries, ahead of the subcommand. It
+// delegates to util.HostGitArgs so there is a single source of truth for the
+// base pins (no hooks, no fsmonitor, no pager, restricted ext/file transports,
+// no submodule recursion, no signature verification or signing); see
+// util.HostGitArgs for the per-setting rationale.
+func hostGitArgs() []string {
+	return util.HostGitArgs()
 }
 
 // ErrHostCloneURLRefused is returned by CheckHostCloneURL. Its text names no
@@ -155,6 +134,15 @@ func remoteHelperForm(raw string) bool {
 		i++
 	}
 	return i > 0 && strings.HasPrefix(raw[i:], "::")
+}
+
+// CloneTokenBound reports whether a project's git token may be offered to
+// a host-side clone or fetch of cloneURL: cloneURL is https without user
+// info and resolves to the host and owner/repo of the project's recorded
+// git remote (cloneTokenHost). Any other URL gets no token.
+func CloneTokenBound(projectRemote, cloneURL string) bool {
+	_, ok := cloneTokenHost(projectRemote, cloneURL)
+	return ok
 }
 
 // cloneTokenHost returns the host a project's git token may be offered to

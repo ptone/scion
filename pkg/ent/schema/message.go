@@ -50,8 +50,9 @@ func (Message) Fields() []ent.Field {
 			NotEmpty(),
 		field.String("recipient_id").
 			Optional(),
-		field.String("msg").
-			NotEmpty(),
+		// msg may be empty: an attachment-only chat message has no text.
+		// Send handlers enforce their own body rules.
+		field.String("msg"),
 		field.String("type").
 			Default("instruction"),
 		field.Bool("urgent").
@@ -109,6 +110,20 @@ func (Message) Fields() []ent.Field {
 			Optional().
 			Nillable().
 			Immutable(),
+		// authorizing_user_id / delegation_grant_id attribute a message
+		// sent with an agent delegated credential
+		// (.design/agent-delegation.md §14.5): the grant issuer and the
+		// grant. The sender columns name the actor agent. Nullable: every
+		// other message has neither. Stamped at admission and never
+		// updated afterwards.
+		field.String("authorizing_user_id").
+			Optional().
+			Nillable().
+			Immutable(),
+		field.String("delegation_grant_id").
+			Optional().
+			Nillable().
+			Immutable(),
 		field.Time("created").
 			Default(time.Now).
 			Immutable(),
@@ -131,6 +146,18 @@ func (Message) Indexes() []ent.Index {
 		// (created, id) keyset cursor. Without this index every page reads
 		// and sorts all of the project's messages.
 		index.Fields("project_id", "created", "id"),
+		// Participant reads (the agent DM inter-agent view, a user's message
+		// listing) filter on recipient_id = X OR sender_id = X across all
+		// projects. ListMessages reads each branch as its own query, and the
+		// trailing created, id serves its ORDER BY ... LIMIT in index order,
+		// so a page reads at most limit+1 rows per branch however busy the
+		// participant is. The COUNT of the OR uses both indexes (a
+		// multi-index OR on SQLite) instead of scanning the whole table.
+		index.Fields("sender_id", "created", "id"),
+		index.Fields("recipient_id", "created", "id"),
+		// The inter-agent view's legacy lookup filters on project_id and
+		// the sender text ("agent:<slug>") and orders by created, id.
+		index.Fields("project_id", "sender", "created", "id"),
 	}
 }
 
