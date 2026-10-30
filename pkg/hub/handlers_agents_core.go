@@ -392,7 +392,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		s.writeAgentList(ctx, w, p.view, sortedShortCircuitResponse(p))
+		s.writeAgentList(ctx, w, p.view, false, sortedShortCircuitResponse(p))
 	}
 
 	// RS2: Unauthenticated callers get an empty list immediately.
@@ -556,7 +556,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 
 	agents, scopeCap := s.buildGlobalAgentPage(ctx, identity, result.Items)
 
-	s.writeAgentList(ctx, w, legacyAgentListView(query), ListAgentsResponse{
+	s.writeAgentList(ctx, w, legacyAgentListView(query), agentListIncludesAuthority(query), ListAgentsResponse{
 		Agents:                agents,
 		NextCursor:            result.NextCursor,
 		TotalCount:            result.TotalCount,
@@ -4035,6 +4035,10 @@ func (s *Server) writeAgentGetResponse(w http.ResponseWriter, r *http.Request, a
 		resp.ResolvedTimezone = &tz.TZ
 		resp.TimezoneSource = &tz.Source
 	}
+
+	// The authority state is always included on the single-agent GET,
+	// for the agent itself too (agent_authority_handlers.go).
+	resp.Authority = s.newAgentAuthorityReader(GetIdentityFromContext(ctx)).authority(ctx, agent)
 
 	resp.AppliedConfig, resp.PendingConfig = redactAgentConfigsForResponse(resp.AppliedConfig, resp.PendingConfig, s.envViewAllowed(ctx, GetIdentityFromContext(ctx), agent, resp.Cap))
 	if r.URL.Query().Get("view") == agentViewEdit {

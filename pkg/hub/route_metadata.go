@@ -1010,6 +1010,15 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RouteHubAdmin,
 		Permission:     "hub.health.read", Resource: "hub", Action: "read",
 	},
+	// Orphaned and revoked agents, an operator diagnostic under the
+	// permission of the health summary. Session only: it names the users
+	// at the root of agents' delegation chains.
+	"/api/v1/admin/orphaned-agents": {
+		Pattern: "/api/v1/admin/orphaned-agents", RouteID: "admin.orphanedAgents",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.health.read", Resource: "hub", Action: "read",
+		SessionOnly: authzop.ReasonGovernancePending,
+	},
 	"/api/v1/admin/messaging/divergence": {
 		Pattern: "/api/v1/admin/messaging/divergence", RouteID: "admin.messaging.divergence",
 		Classification: RouteHubAdmin,
