@@ -54,13 +54,17 @@ for (const path of ['/', '/terminals', '/chat']) {
       waitUntil: 'domcontentloaded',
     });
     await page.goto(path, { waitUntil: 'domcontentloaded' });
-    await expect(page.locator('[data-scion-page]').first()).toBeAttached({ timeout: 30_000 });
+    // A routed page, or the terminal workspace host on /terminals.
+    await expect(page.locator('[data-scion-page], #terminal-workspace').first()).toBeAttached({
+      timeout: 30_000,
+    });
 
     await expectIconsDrawn(page, 1);
     await expectNoTrustedTypesFindings(page, errors);
     // Icons come from the one fingerprinted sheet, not from per-icon files.
-    expect(new Set(sheets).size).toBe(1);
-    expect([...sheets][0]).toMatch(/^\/assets\/shoelace-icons-[\w-]+\.svg$/);
+    expect([...new Set(sheets)], 'icon sheet requests').toEqual([
+      expect.stringMatching(/^\/assets\/shoelace-icons-[\w-]+\.svg$/),
+    ]);
 
     await expectProbeSeesViolation(page);
     await expectProbeSeesIconFileParse(page);

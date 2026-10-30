@@ -87,7 +87,14 @@ export async function enforceTrustedTypes(
         await route.fallback();
         return;
       }
-      const response = await route.fetch();
+      // Redirects go back to the browser unchanged, so it follows them
+      // itself (a sign-in link redirects to the page it opens); the rule is
+      // added to the document the redirect chain ends at.
+      const response = await route.fetch({ maxRedirects: 0 });
+      if (response.status() >= 300 && response.status() < 400) {
+        await route.fulfill({ response });
+        return;
+      }
       const headers = response.headers();
       const existing = headers[header];
       headers[header] = existing ? `${existing}, ${TRUSTED_TYPES_RULE}` : TRUSTED_TYPES_RULE;
@@ -164,8 +171,12 @@ export async function expectNoTrustedTypesFindings(
 
 /**
  * Checks that the rule is in force and the probe sees it: a plain string
- * markup assignment adds exactly one violation (and throws when enforced). Run it
- * after the page's own assertions, so their empty lists are not vacuous.
+ * markup assignment adds a violation with the expected disposition (and
+ * throws when enforced). A page served by the hub also carries the hub's
+ * own report-only rule, so the same assignment is reported once per rule;
+ * the check therefore counts the new violations of the expected
+ * disposition. Run it after the page's own assertions, so their empty lists
+ * are not vacuous.
  */
 export async function expectProbeSeesViolation(
   page: Page,
@@ -184,9 +195,19 @@ export async function expectProbeSeesViolation(
   expect(threw, 'a plain string markup assignment throws only under the enforced rule').toBe(
     options.mode !== 'report'
   );
+  const disposition = options.mode === 'report' ? 'report' : 'enforce';
   await expect
-    .poll(() => page.evaluate(() => window.__trustedTypesViolations?.length ?? -1))
-    .toBe(before + 1);
+    .poll(() =>
+      page.evaluate(
+        ({ from, want }) =>
+          (window.__trustedTypesViolations ?? [])
+            .slice(from)
+            .filter((v) => v.disposition === want && v.sample.startsWith('Element innerHTML'))
+            .length,
+        { from: before, want: disposition }
+      )
+    )
+    .toBeGreaterThanOrEqual(1);
 }
 
 /**
