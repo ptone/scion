@@ -138,8 +138,13 @@ type chatThreadRef struct {
 	// readAllowed records that this request already holds an allowed
 	// project-read decision for Project and this caller, made by
 	// authorizeChatThreadRead with the same check (project.read on the
-	// caller), so the user branch does not repeat it. Only the topic
-	// history handler sets it, right after that check succeeded.
+	// caller), so the user branch does not repeat it.
+	//
+	// Invariant: it may be set true ONLY immediately after
+	// authorizeChatThreadRead allowed the read for the same principal,
+	// project and thread in the same request, and never from request input.
+	// The sole setter today is handleConversationHistory
+	// (handlers_chat_v2.go).
 	readAllowed bool
 }
 

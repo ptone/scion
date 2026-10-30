@@ -3090,8 +3090,10 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		if !access.Can(ChatActionRead) {
-			// Fail closed: without a read action (no authz service) the
-			// thread is answered as missing, like any refused read.
+			// Unreachable today: authorizeChatThreadRead above already
+			// answers a missing authz service as not found. Kept as defence
+			// in depth, so a resolver without a read action still answers
+			// the thread as missing, like any refused read.
 			NotFound(w, "Thread")
 			return
 		}
