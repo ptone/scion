@@ -30,6 +30,7 @@ import {
   expectNoTrustedTypesFindings,
   expectProbeSeesIconFileParse,
   expectProbeSeesViolation,
+  expectRuleOnLoadedDocument,
 } from '../trusted-types.js';
 
 function hubState(): HubState {
@@ -58,6 +59,8 @@ for (const path of ['/', '/terminals', '/chat']) {
     // attached hidden until the workspace is shown, so wait until visible.
     const ready = path === '/terminals' ? '#terminal-workspace' : '[data-scion-page]';
     await expect(page.locator(ready).first()).toBeVisible({ timeout: 30_000 });
+    // The page was opened directly after signing in, so it was routed.
+    await expectRuleOnLoadedDocument(page);
 
     await expectIconsDrawn(page, 1);
     await expectNoTrustedTypesFindings(page, errors);

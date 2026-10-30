@@ -23,10 +23,11 @@ import { test, expect, type Page } from '@playwright/test';
 import { installEventSourceStub } from '../event-source-stub.js';
 import {
   enforceTrustedTypes,
-  expectNoTrustedTypesFindings,
   expectIconsDrawn,
+  expectNoTrustedTypesFindings,
   expectProbeSeesIconFileParse,
   expectProbeSeesViolation,
+  expectRuleOnLoadedDocument,
 } from '../trusted-types.js';
 
 const agentA = '11111111-1111-4111-8111-111111111111';
@@ -86,6 +87,7 @@ test('terminal workspace makes no plain-string markup call and draws its icons',
 
   await page.goto(`/terminals/${agentA}`);
   await expect(page.locator('#terminal-workspace')).toHaveCount(1);
+  await expectRuleOnLoadedDocument(page);
   await expect.poll(() => sockets.attaches).toBe(1);
   await page.evaluate(
     (path) =>

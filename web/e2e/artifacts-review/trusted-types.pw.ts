@@ -27,9 +27,11 @@
 
 import { expect, test } from '@playwright/test';
 
+import { devSignInURL } from '../harness/auth.js';
 import {
+  artifactPage,
   createProject,
-  openArtifact,
+  hub,
   publish,
   setExperiments,
   startGraphicalReview,
@@ -40,6 +42,7 @@ import {
   expectNoTrustedTypesFindings,
   expectProbeSeesIconFileParse,
   expectProbeSeesViolation,
+  expectRuleOnLoadedDocument,
   type AllowedViolation,
   type TrustedTypesOptions,
 } from '../trusted-types.js';
@@ -91,7 +94,16 @@ test('the artifact preview and review editor make no plain-string markup call', 
     entry: 'index.md',
     files: { 'index.md': Buffer.from(DOC) },
   });
-  await openArtifact(page, project, a.id);
+  // Sign in first, then open the artifact page directly: a page reached
+  // through the sign-in redirect is not routed, so it would get no rule.
+  const h = hub();
+  await page.goto(await devSignInURL(h.baseURL, h.devToken), { waitUntil: 'domcontentloaded' });
+  await page.goto(artifactPage(project, a.id), { waitUntil: 'domcontentloaded' });
+  await expect(page.locator('scion-page-artifact-detail')).toBeAttached({ timeout: 30_000 });
+  await expect(page.locator('scion-page-artifact-detail scion-detail-header').first()).toBeVisible({
+    timeout: 30_000,
+  });
+  await expectRuleOnLoadedDocument(page);
 
   // The preview frame shows the document, with its own script-free policy.
   const frameHost = page.locator('scion-page-artifact-detail scion-artifact-markdown-frame');

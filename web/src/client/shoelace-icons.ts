@@ -57,11 +57,17 @@ const iconDrawingStyle = css`
 `;
 
 /**
- * Registers both icon libraries and the icon drawing style. Call before the
- * first icon renders: each icon takes the component's styles when it is
- * created.
+ * Registers both icon libraries and the icon drawing style. Call after
+ * sl-icon is defined (importing components/icon/icon.js defines it) and
+ * before the first icon renders: each icon takes the component's styles
+ * when it is created.
  */
 export function registerShoelaceIcons(sheetUrl: string = shoelaceIconsUrl): void {
+  // The component's styles are collected when sl-icon is defined; a style
+  // added before that would be dropped, or added to the base class.
+  if (!Object.hasOwn(SlIcon, 'elementStyles')) {
+    throw new Error('registerShoelaceIcons: define sl-icon (components/icon/icon.js) first');
+  }
   for (const { name, ...options } of spriteLibraries(sheetUrl)) {
     registerIconLibrary(name, options);
   }

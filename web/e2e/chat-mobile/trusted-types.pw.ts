@@ -30,6 +30,7 @@ import {
   expectNoTrustedTypesFindings,
   expectProbeSeesIconFileParse,
   expectProbeSeesViolation,
+  expectRuleOnLoadedDocument,
 } from '../trusted-types.js';
 
 test('@static chat thread and rail make no plain-string markup call and draw their icons', async ({
@@ -51,6 +52,7 @@ test('@static chat thread and rail make no plain-string markup call and draw the
     page.locator('scion-chat-message .md-content scion-code-editor .cm-content').first()
   ).toBeAttached({ timeout: 15_000 });
 
+  await expectRuleOnLoadedDocument(page);
   await expectIconsDrawn(page, 3);
   await expectNoTrustedTypesFindings(page, errors);
   await expectProbeSeesViolation(page);
@@ -65,6 +67,7 @@ test('@static a direct message conversation makes no plain-string markup call', 
   await page.goto(`/chat/dm/${HUMAN_MEMBER_ID}`, { waitUntil: 'domcontentloaded' });
   await expect(page.locator('scion-chat-thread')).toBeAttached({ timeout: 15_000 });
 
+  await expectRuleOnLoadedDocument(page);
   await expectIconsDrawn(page, 1);
   await expectNoTrustedTypesFindings(page, errors);
   await expectProbeSeesViolation(page);

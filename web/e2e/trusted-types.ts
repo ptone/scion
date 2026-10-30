@@ -20,7 +20,7 @@
  * the same rule as an enforced page policy on every document response, so
  * a markup call made with a plain string throws and is recorded, the way
  * it would be once the rule is enforced (or, in 'report' mode, as a second
- * report-only policy). The probe records each violation
+ * report-only policy, TEST_REPORT_POLICY). The probe records each violation
  * of that rule (enforced or report-only) and each page error or console
  * error that names a Trusted Type, from before any page script runs.
  */
@@ -29,6 +29,17 @@ import { expect, type Page } from '@playwright/test';
 
 /** The Trusted Types rule the helpers add to each document. */
 export const TRUSTED_TYPES_RULE = "require-trusted-types-for 'script'";
+
+/** Where the browser sends the reports of the test's report-only rule. */
+const TEST_REPORT_PATH = '/__e2e-trusted-types-report';
+
+/**
+ * The test's report-only policy: the rule plus a report endpoint only the
+ * test uses. The hub sends the same rule report-only; giving the test's
+ * policy its own text keeps its violations apart from the hub's, so the
+ * report-mode check can require a violation of the test's own policy.
+ */
+export const TEST_REPORT_POLICY = `${TRUSTED_TYPES_RULE}; report-uri ${TEST_REPORT_PATH}`;
 
 /** One recorded violation of the rule. */
 export interface TrustedTypesViolation {
@@ -71,6 +82,16 @@ declare global {
   }
 }
 
+/** The document requests a page's route handled, by outcome. */
+interface RoutedDocuments {
+  /** Documents fulfilled with the rule added. */
+  fulfilled: string[];
+  /** Sign-in requests and redirects passed to the browser without the rule. */
+  passedThrough: string[];
+}
+
+const routedByPage = new WeakMap<Page, RoutedDocuments>();
+
 /**
  * Adds the rule to every document response of the page (keeping the
  * response's own policies) and installs the probe. Call before the first
@@ -82,31 +103,45 @@ export async function enforceTrustedTypes(
 ): Promise<string[]> {
   const header =
     options.mode === 'report' ? 'content-security-policy-report-only' : 'content-security-policy';
+  const routed: RoutedDocuments = { fulfilled: [], passedThrough: [] };
+  routedByPage.set(page, routed);
   await page.route(
     (url) => !url.pathname.startsWith('/api/'),
     async (route) => {
+      if (new URL(route.request().url()).pathname === TEST_REPORT_PATH) {
+        await route.fulfill({ status: 204 });
+        return;
+      }
       if (route.request().resourceType() !== 'document') {
         await route.fallback();
         return;
       }
-      // Redirects are left to the browser, so it follows them itself and the
-      // rule is added to the document the redirect chain ends at. A route
-      // cannot hand a fetched redirect back to WebKit (Playwright refuses to
-      // fulfill a 3xx there), so the sign-in endpoints, which redirect and
-      // whose one-time codes must not be fetched twice, are not fetched at
-      // all, and any other redirect is re-requested by the browser.
-      if (new URL(route.request().url()).pathname.startsWith('/auth/')) {
+      const url = route.request().url();
+      // A route cannot hand a fetched redirect back to WebKit (Playwright
+      // refuses to fulfill a 3xx there), and when the browser follows a
+      // redirect itself, this handler sees only the first URL of the chain:
+      // the document the chain ends at is not routed and gets no rule. So a
+      // test signs in first and then opens its page directly (see
+      // expectRuleOnLoadedDocument). The sign-in endpoints are passed to the
+      // browser unfetched, so their one-time codes are used once.
+      if (new URL(url).pathname.startsWith('/auth/')) {
+        routed.passedThrough.push(url);
         await route.continue();
         return;
       }
       const response = await route.fetch({ maxRedirects: 0 });
       if (response.status() >= 300 && response.status() < 400) {
+        // An unexpected redirect: the browser requests it again and follows
+        // it; expectRuleOnLoadedDocument then reports the unrouted page.
+        routed.passedThrough.push(url);
         await route.continue();
         return;
       }
       const headers = response.headers();
       const existing = headers[header];
-      headers[header] = existing ? `${existing}, ${TRUSTED_TYPES_RULE}` : TRUSTED_TYPES_RULE;
+      const policy = options.mode === 'report' ? TEST_REPORT_POLICY : TRUSTED_TYPES_RULE;
+      headers[header] = existing ? `${existing}, ${policy}` : policy;
+      routed.fulfilled.push(url);
       await route.fulfill({ response, headers });
     }
   );
@@ -182,14 +217,12 @@ export async function expectNoTrustedTypesFindings(
 /**
  * Checks that the rule is in force and the probe sees it: a plain string
  * markup assignment adds a violation with the expected disposition (and
- * throws when enforced). A page served by the hub also carries the hub's
- * own report-only rule. Under the enforced rule the check counts new
- * enforced violations reported by the test's own rule (originalPolicy is
- * exactly TRUSTED_TYPES_RULE; the hub sends no enforced rule). In report
- * mode the browser delivers the report through the page's report-only rule
- * when the hub already sends one, so the check counts a new report from any
- * rule that requires Trusted Types for scripts. Run it after the page's own assertions, so their empty lists
- * are not vacuous.
+ * throws when enforced), reported by the test's own policy. A page served
+ * by the hub also carries the hub's own report-only rule, so the check
+ * matches originalPolicy exactly: TRUSTED_TYPES_RULE when enforced (the hub
+ * sends no enforced rule), TEST_REPORT_POLICY in report mode (its own text,
+ * unlike the hub's). Run it after the page's own assertions, so their empty
+ * lists are not vacuous.
  */
 export async function expectProbeSeesViolation(
   page: Page,
@@ -218,12 +251,14 @@ export async function expectProbeSeesViolation(
             .filter(
               (v) =>
                 v.disposition === want &&
-                (want === 'enforce'
-                  ? v.originalPolicy === rule
-                  : v.originalPolicy.includes(rule)) &&
+                v.originalPolicy === policy &&
                 v.sample.startsWith('Element innerHTML')
             ).length,
-        { from: before, want: disposition, rule: TRUSTED_TYPES_RULE }
+        {
+          from: before,
+          want: disposition,
+          policy: options.mode === 'report' ? TEST_REPORT_POLICY : TRUSTED_TYPES_RULE,
+        }
       )
     )
     .toBeGreaterThanOrEqual(1);
@@ -292,4 +327,22 @@ export async function expectIconsDrawn(page: Page, atLeast: number): Promise<num
     })
     .toBe('ok');
   return count;
+}
+
+/**
+ * Asserts that the document the page has loaded was routed and given the
+ * rule. It fails when the page was reached through a redirect the browser
+ * followed (the end of a redirect chain is not routed), so a passing check
+ * cannot come from the hub's own report-only rule alone.
+ */
+export async function expectRuleOnLoadedDocument(page: Page): Promise<void> {
+  const routed = routedByPage.get(page);
+  if (!routed) throw new Error('expectRuleOnLoadedDocument: call enforceTrustedTypes first');
+  const loaded = await page.evaluate(
+    () => (performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming).name
+  );
+  expect(
+    routed.fulfilled,
+    `the loaded document ${loaded} was not routed; passed through: ${routed.passedThrough.join(', ')}`
+  ).toContain(loaded);
 }

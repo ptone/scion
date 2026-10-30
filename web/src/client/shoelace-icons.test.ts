@@ -19,6 +19,8 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { getIconLibrary } from '@shoelace-style/shoelace/dist/components/icon/library.js';
 import SlIcon from '@shoelace-style/shoelace/dist/components/icon/icon.component.js';
+// Defines sl-icon, as main.ts does before it registers the icon libraries.
+import '@shoelace-style/shoelace/dist/components/icon/icon.js';
 
 import { registerShoelaceIcons, spriteLibraries } from './shoelace-icons.js';
 
@@ -43,16 +45,45 @@ describe('Shoelace icon libraries', () => {
     }
   });
 
-  it('keep the icon drawing out of hit testing, so a click lands on the icon element', () => {
+  it('keep the icon drawing out of hit testing, so a click lands on the icon element', async () => {
     // WebKit hit-tests a sprite <use> as its own target, outside the
     // clickable that holds the icon; with the drawing out of hit testing a
     // click lands on the sl-icon element, inside that clickable.
+    const noHit = /svg\s*\{[^}]*pointer-events:\s*none/;
+    // sl-icon is defined, so its styles are its own, collected at definition.
+    expect(Object.hasOwn(SlIcon, 'elementStyles')).toBe(true);
     registerShoelaceIcons('/sheet.svg');
     registerShoelaceIcons('/sheet.svg');
     const rules = SlIcon.elementStyles
       .map((s) => ('cssText' in s ? s.cssText : ''))
-      .filter((text) => /svg\s*\{[^}]*pointer-events:\s*none/.test(text));
+      .filter((text) => noHit.test(text));
     expect(rules).toHaveLength(1);
+
+    // An icon created now carries the style in its own shadow root, once.
+    const icon = document.createElement('sl-icon') as SlIcon;
+    icon.name = 'gear';
+    document.body.append(icon);
+    try {
+      await icon.updateComplete;
+      const root = icon.shadowRoot!;
+      const texts = [
+        ...root.adoptedStyleSheets.flatMap((sheet) => [...sheet.cssRules].map((r) => r.cssText)),
+        ...[...root.querySelectorAll('style')].map((el) => el.textContent ?? ''),
+      ];
+      expect(texts.filter((text) => noHit.test(text))).toHaveLength(1);
+    } finally {
+      icon.remove();
+    }
+  });
+
+  it('refuses to register before sl-icon is defined, when its styles would be dropped', () => {
+    const own = Object.getOwnPropertyDescriptor(SlIcon, 'elementStyles')!;
+    delete (SlIcon as { elementStyles?: unknown }).elementStyles;
+    try {
+      expect(() => registerShoelaceIcons('/sheet.svg')).toThrow(/define sl-icon/);
+    } finally {
+      Object.defineProperty(SlIcon, 'elementStyles', own);
+    }
   });
 
   it('use the symbol id prefix the sheet builder writes', () => {
