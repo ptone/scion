@@ -17,12 +17,13 @@
  * a plain string to an API that parses markup (ptone/scion#6367).
  *
  * The hub sends the Trusted Types rule as report-only. These helpers add
- * the same rule as an enforced page policy on every document response, so
- * a markup call made with a plain string throws and is recorded, the way
- * it would be once the rule is enforced (or, in 'report' mode, as a second
- * report-only policy, TEST_REPORT_POLICY). The probe records each violation
- * of that rule (enforced or report-only) and each page error or console
- * error that names a Trusted Type, from before any page script runs.
+ * the same rule as an enforced page policy on each document the route
+ * fulfills, so a markup call made with a plain string throws and is
+ * recorded, the way it would be once the rule is enforced (or, in 'report'
+ * mode, as a second report-only policy, TEST_REPORT_POLICY). The probe
+ * records each violation of that rule (enforced or report-only) and each
+ * page error or console error that names a Trusted Type, from before any
+ * page script runs.
  */
 
 import { expect, type Page } from '@playwright/test';
@@ -82,19 +83,20 @@ declare global {
   }
 }
 
-/** The document requests a page's route handled, by outcome. */
-interface RoutedDocuments {
-  /** Documents fulfilled with the rule added. */
-  fulfilled: string[];
-  /** Sign-in requests and redirects passed to the browser without the rule. */
-  passedThrough: string[];
+/** One main-frame document request the page's route handled, in order. */
+interface RoutedDocument {
+  url: string;
+  /** True when fulfilled with the rule added; false when passed to the
+   * browser without it (a sign-in request or a redirect). */
+  withRule: boolean;
 }
 
-const routedByPage = new WeakMap<Page, RoutedDocuments>();
+const routedByPage = new WeakMap<Page, RoutedDocument[]>();
 
 /**
- * Adds the rule to every document response of the page (keeping the
- * response's own policies) and installs the probe. Call before the first
+ * Adds the rule to each document response the page's route fulfills
+ * (keeping the response's own policies; sign-in requests and redirects are
+ * passed to the browser without it) and installs the probe. Call before the first
  * navigation. Returns the page-side errors list, filled as they come.
  */
 export async function enforceTrustedTypes(
@@ -103,7 +105,7 @@ export async function enforceTrustedTypes(
 ): Promise<string[]> {
   const header =
     options.mode === 'report' ? 'content-security-policy-report-only' : 'content-security-policy';
-  const routed: RoutedDocuments = { fulfilled: [], passedThrough: [] };
+  const routed: RoutedDocument[] = [];
   routedByPage.set(page, routed);
   await page.route(
     (url) => !url.pathname.startsWith('/api/'),
@@ -117,6 +119,10 @@ export async function enforceTrustedTypes(
         return;
       }
       const url = route.request().url();
+      // The guard follows the page's own documents, not those of frames.
+      const record = (withRule: boolean): void => {
+        if (route.request().frame() === page.mainFrame()) routed.push({ url, withRule });
+      };
       // A route cannot hand a fetched redirect back to WebKit (Playwright
       // refuses to fulfill a 3xx there), and when the browser follows a
       // redirect itself, this handler sees only the first URL of the chain:
@@ -125,7 +131,7 @@ export async function enforceTrustedTypes(
       // expectRuleOnLoadedDocument). The sign-in endpoints are passed to the
       // browser unfetched, so their one-time codes are used once.
       if (new URL(url).pathname.startsWith('/auth/')) {
-        routed.passedThrough.push(url);
+        record(false);
         await route.continue();
         return;
       }
@@ -133,7 +139,7 @@ export async function enforceTrustedTypes(
       if (response.status() >= 300 && response.status() < 400) {
         // An unexpected redirect: the browser requests it again and follows
         // it; expectRuleOnLoadedDocument then reports the unrouted page.
-        routed.passedThrough.push(url);
+        record(false);
         await route.continue();
         return;
       }
@@ -141,7 +147,7 @@ export async function enforceTrustedTypes(
       const existing = headers[header];
       const policy = options.mode === 'report' ? TEST_REPORT_POLICY : TRUSTED_TYPES_RULE;
       headers[header] = existing ? `${existing}, ${policy}` : policy;
-      routed.fulfilled.push(url);
+      record(true);
       await route.fulfill({ response, headers });
     }
   );
@@ -341,8 +347,14 @@ export async function expectRuleOnLoadedDocument(page: Page): Promise<void> {
   const loaded = await page.evaluate(
     () => (performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming).name
   );
+  // The page's latest document request decides. After a redirect the
+  // browser followed, the latest request is the redirect (its end is not
+  // routed), so an earlier routed load of the same URL cannot match.
+  const latest = routed.at(-1);
   expect(
-    routed.fulfilled,
-    `the loaded document ${loaded} was not routed; passed through: ${routed.passedThrough.join(', ')}`
-  ).toContain(loaded);
+    latest,
+    `the loaded document ${loaded} is not the page's latest routed request; requests: ${routed
+      .map((d) => `${d.url} (${d.withRule ? 'with rule' : 'passed through'})`)
+      .join(', ')}`
+  ).toEqual({ url: loaded, withRule: true });
 }
