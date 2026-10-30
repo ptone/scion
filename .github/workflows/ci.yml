@@ -1301,6 +1301,75 @@ jobs:
             exit 1
           fi
 
+  # Hub/broker start-boundary contract (retro #6663 R1; the R292 boundary
+  # test set). It always runs: no needs: changes and no path filter, so
+  # no path list can skip it on a change to the boundary
+  # (pkg/hub/httpdispatcher.go, pkg/hub/server.go StartExtras and
+  # applyStartExtras, pkg/hub/broker_http_transport.go,
+  # pkg/hub/controlchannel_*.go, pkg/runtimebroker/start_context.go and
+  # handlers.go, pkg/agent/run.go Start). The pkg/hub shards run these tests
+  # too, but print no test names; this job runs them by name with -test.v,
+  # so its log is the by-name record for the set.
+  #
+  # shard.sh's "postgres" command is its generic by-name runner: it compiles
+  # only the shard holding each named test, needs no database for tests
+  # that do not use one, and fails if a name is in no test file, if a
+  # selected test skips, or if a named test prints no PASS line.
+  start-contract:
+    name: Start contract (hub/broker boundary)
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      # Restores the pkg/hub shards' shared cache; only the first shard job
+      # saves it (see hub-shard), so this job has no Save step.
+      - name: Setup Go
+        uses: ./.github/actions/setup-go-cache
+        with:
+          workload: hub-shards
+
+      - name: Run pkg/hub start-contract tests by name
+        run: |
+          ./hack/hubshard/shard.sh postgres all "" \
+            TestStartCredential_E2E_HubDispatchReachesAgentStart \
+            TestStartContract_E2E_AbsentFieldFailsClosed \
+            TestApplyStartExtras_EnvClassifications \
+            TestBrokerHTTPTransport_StartAndRestartSendEnvClassifications \
+            TestControlChannelBrokerClient_StartAndRestartSendEnvClassifications \
+            TestDispatchStartAndRestartClassifyIssuedCredential \
+            TestSetStartEnvToken_NilClassifications
+
+      - name: Run pkg/runtimebroker start-contract tests by name
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          go test -count=1 -v -run '^TestStartResumeRestartHubCredential$' ./pkg/runtimebroker | tee /tmp/rb.log
+          if grep -qE '^[[:space:]]*--- SKIP' /tmp/rb.log; then
+            echo "::error title=Start contract::TestStartResumeRestartHubCredential skipped"
+            exit 1
+          fi
+          grep -qE '^--- PASS: TestStartResumeRestartHubCredential( |$)' /tmp/rb.log
+
+      # The consumer end of the chain: pkg/agent refuses a hub-dispatched
+      # start without the hub-issued credential (ErrNoHubToken). The hub
+      # e2e stands a recording manager in for it, so the absent-field
+      # fail-closed claim needs this test too.
+      - name: Run pkg/agent start-contract test by name
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          go test -count=1 -v -run '^TestStartHubCredentialIsHubIssuedOnly$' ./pkg/agent | tee /tmp/agent.log
+          if grep -qE '^[[:space:]]*--- SKIP' /tmp/agent.log; then
+            echo "::error title=Start contract::TestStartHubCredentialIsHubIssuedOnly skipped"
+            exit 1
+          fi
+          grep -qE '^--- PASS: TestStartHubCredentialIsHubIssuedOnly( |$)' /tmp/agent.log
+
   # T1 Launch Store PostgreSQL Tests runs as several parallel jobs; the
   # job below with the old name only rolls them up. About 70% of the old
   # single job was pkg/store/entadapter on Postgres (~13 of ~20 min), so
