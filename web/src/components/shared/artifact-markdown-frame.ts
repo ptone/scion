@@ -29,7 +29,7 @@
  * accepted), the projections the hub serves with ?resolve=.
  */
 
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, nothing } from 'lit';
 import type { TemplateResult } from 'lit';
 import { customElement, property, query, state } from 'lit/decorators.js';
 
@@ -59,7 +59,8 @@ export class ScionArtifactMarkdownFrame extends LitElement {
   /** Style the side note as an empty-state placeholder. */
   @property({ type: Boolean }) sideNoteEmpty = false;
 
-  @state() private srcdoc: FrameDocument = '';
+  /** The frame's document; null until the first build has made one. */
+  @state() private srcdoc: FrameDocument | null = null;
   @state() private error: string | null = null;
   @query('iframe') private frame?: HTMLIFrameElement;
 
@@ -165,10 +166,13 @@ export class ScionArtifactMarkdownFrame extends LitElement {
     }
   };
 
-  override render(): TemplateResult {
+  override render(): TemplateResult | typeof nothing {
     if (this.error) {
       return html`<div class="error-state">${this.error}</div>`;
     }
+    // The frame exists only once its document does, so its srcdoc is only
+    // ever set to the document previewFrameDocument returns.
+    if (this.srcdoc === null) return nothing;
     return html`<iframe
       title="Markdown preview"
       sandbox=${PREVIEW_SANDBOX}

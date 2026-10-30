@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 
 import type { ScionArtifactMarkdownFrame } from './artifact-markdown-frame.js';
 
@@ -43,6 +43,17 @@ async function frameDoc(
   const doc = el.shadowRoot!.querySelector('iframe')!.srcdoc;
   el.remove();
   return doc;
+}
+
+/** Waits for the frame's first build and returns its iframe. */
+async function builtFrame(el: ScionArtifactMarkdownFrame): Promise<HTMLIFrameElement> {
+  for (let i = 0; i < 20; i++) {
+    await new Promise((r) => setTimeout(r, 0));
+    await el.updateComplete;
+    const frame = el.shadowRoot!.querySelector('iframe');
+    if (frame) return frame;
+  }
+  throw new Error('the frame was not built');
 }
 
 describe('artifact markdown frame: CriticMarkup', () => {
@@ -132,8 +143,9 @@ describe('artifact markdown frame: CriticMarkup', () => {
     ) as ScionArtifactMarkdownFrame;
     el.content = 'hello';
     document.body.appendChild(el);
-    await el.updateComplete;
-    const frame = el.shadowRoot!.querySelector('iframe')!;
+    const frame = await builtFrame(el);
+    expect(frame.getAttribute('title')).toBe('Markdown preview');
+    expect(frame.getAttribute('referrerpolicy')).toBe('no-referrer');
     const tokens = (frame.getAttribute('sandbox') ?? '').split(/\s+/);
     expect(frame.hasAttribute('sandbox')).toBe(true);
     expect(tokens).not.toContain('allow-scripts');
@@ -142,5 +154,34 @@ describe('artifact markdown frame: CriticMarkup', () => {
       ['allow-popups', 'allow-popups-to-escape-sandbox', 'allow-same-origin'].sort()
     );
     el.remove();
+  });
+
+  it('sets the frame document only once it is built, never a plain empty one', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'srcdoc')!;
+    const set: unknown[] = [];
+    vi.spyOn(HTMLIFrameElement.prototype, 'srcdoc', 'set').mockImplementation(function (
+      this: HTMLIFrameElement,
+      value: string
+    ) {
+      set.push(value);
+      descriptor.set!.call(this, value);
+    });
+    const el = document.createElement(
+      'scion-artifact-markdown-frame'
+    ) as ScionArtifactMarkdownFrame;
+    el.content = 'hello';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    // The first render has no document yet, so it draws no frame.
+    expect(el.shadowRoot!.querySelector('iframe')).toBeNull();
+    expect(set).toEqual([]);
+
+    const frame = await builtFrame(el);
+    expect(set).toHaveLength(1);
+    expect(set[0]).not.toBe('');
+    expect(String(set[0])).toContain('<p>hello</p>');
+    expect(frame.srcdoc).toBe(set[0]);
+    el.remove();
+    vi.restoreAllMocks();
   });
 });
