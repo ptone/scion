@@ -260,6 +260,9 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 		writeScheduleTimingError(w, err)
 		return
 	}
+	if !s.allowScheduleTimeZone(w, timeZone) {
+		return
+	}
 
 	// Build payload
 	payload := req.Payload
@@ -534,6 +537,9 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 		}
 		newTimeZone = tz
 		zoneChanged = tz != originalTimeZone
+		if zoneChanged && !s.allowScheduleTimeZone(w, tz) {
+			return
+		}
 	}
 	if cronChanged || zoneChanged {
 		newCronExpr := originalCronExpr

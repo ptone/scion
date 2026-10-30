@@ -152,6 +152,13 @@ const AttachmentArtifacts = "hub.attachment_artifacts"
 // the delivery sweeper, which holds pending messages while it is off.
 const ChatScheduledSend = "web.chat_scheduled_send"
 
+// ScheduleTimeZone gates per-schedule time zones on recurring schedules
+// (ptone/scion#6771): while it is off, the hub refuses a create or update
+// that sets a time zone other than UTC, and the web UI hides the time zone
+// field. Schedules that already carry a zone keep being evaluated in it, so
+// turning it off never moves a live schedule's run time.
+const ScheduleTimeZone = "hub.schedule_time_zone"
+
 // ChatStarredMessages gates starred messages in native web chat: the
 // message Star/Unstar action, the private starred indicator, the
 // conversation header's starred-message list, the starred-only center and
@@ -411,6 +418,17 @@ var compiled = []Experiment{
 		Issue:    "ptone/scion#2926",
 		Owner:    "runtime-broker",
 		ReviewBy: "2027-03-31",
+	},
+	{
+		Name:        ScheduleTimeZone,
+		Title:       "Schedule time zones",
+		Description: "Recurring schedules can carry an IANA time zone (for example America/Los_Angeles): the cron expression is evaluated in local time there, so a schedule keeps its local run time across daylight saving changes. A skipped local time runs once when the clocks change; a repeated local time runs once, at its first occurrence. While it is off, the hub refuses a create or update that sets a zone other than UTC (LayerServer) and the schedule form hides the field (LayerWeb). Schedules that already have a zone keep running in it.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb, LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#6771",
+		Owner:       "hub",
+		ReviewBy:    "2027-01-31",
 	},
 	{
 		Name:        PortView,
