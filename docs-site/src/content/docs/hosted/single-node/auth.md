@@ -131,14 +131,14 @@ An agent acts under authority delegated to it: by the user who created it, or by
 | `live` | The chain reaches an active user. |
 | `orphaned` | The agent has an active delegation, but the chain reaches a principal that cannot authorize it. The cause says why: `delegator_deleted` (a user or agent on the chain was deleted, for example a parent agent that was deleted while its children kept running, or a user deleted before deletes were refused), `delegator_inactive` (the user at the root is suspended or being deleted), `delegator_revoked` (a parent agent's own delegation was revoked) or `chain_invalid` (the recorded chain cannot be resolved). |
 | `revoked` | The agent's delegation was deactivated. The cause is the one recorded with it: `user_delete_cascade` for the agents of a [force-deleted](#force-deleting-a-user-who-has-agents) user, `delegator_deleted` for an agent whose delegating user was deleted. |
-| `unrecorded` | The agent's delegation was never recorded (an agent from before delegations were recorded). It is not reported as orphaned. |
+| `unrecorded` | The agent's delegation was never recorded (an agent from before delegations were recorded), or its last delegation was deactivated without a recorded cause. It is not reported as orphaned or revoked. |
 
 An orphaned or revoked agent keeps running until it is stopped, but every request that needs its delegation is denied. Where the state shows:
 
 - **Web:** an **Orphaned** or **Revoked** badge on the agent's page and in the project's agent list; its tooltip names the cause and the remediation.
 - **CLI:** `scion list` marks the agent in the PHASE column, for example `running (ORPHANED)`, and `scion look` prints the cause on stderr. Both do so in human CLI mode only.
 - **API:** `authority` on `GET /api/v1/agents/{id}`, and on agent lists with `include=authority`. The ID of the principal the cause names is shown only to readers who may read that principal; for a user, that is hub admins.
-- **Operators:** `GET /api/v1/admin/orphaned-agents` lists every orphaned and revoked agent in the hub, a page of agents at a time (follow `nextCursor`). It is an operator diagnostic under `hub.health.read`, the same permission as the admin health summary, and needs a sign-in session; access tokens are refused.
+- **Operators:** `GET /api/v1/admin/orphaned-agents` pages over the hub's non-deleted agents and lists those whose computed state is orphaned or revoked (follow `nextCursor`; a page can be empty). It is an operator diagnostic under `hub.health.read`, the same permission as the admin health summary, and needs a sign-in session; access tokens are refused.
 
 To remediate:
 
