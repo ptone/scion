@@ -246,7 +246,7 @@ func (r *agentAuthorityResolver) resolve(ctx context.Context, agent *store.Agent
 
 	var trace provenanceChainTrace
 	// The legacy flag lets the walk continue through unrecorded hops, so a
-	// chain that is unrecorded in part still reports a deleted delegator.
+	// chain that is unrecorded in part reports a deleted delegator too.
 	// The result is descriptive only.
 	root, err := r.a.walkProvenanceChain(ctx, agent, true, r, &trace)
 	switch {

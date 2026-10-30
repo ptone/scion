@@ -124,7 +124,7 @@ func TestAgentAuthorityState_ForceCascadeRevoked(t *testing.T) {
 	assert.Equal(t, api.AgentAuthorityRevoked, got.State)
 	assert.Equal(t, string(store.EdgeDeactivationUserDeleteCascade), got.Cause)
 	assert.Equal(t, &api.AgentAuthorityPrincipal{Kind: store.DelegationPrincipalUser, ID: f.userID, Deleted: true}, got.Principal,
-		"the tombstone marks the user deleted while its row is still present")
+		"the tombstone marks the user deleted while its row is present")
 	require.NotNil(t, got.Since)
 
 	got = authorityState(t, f, c.ID)
