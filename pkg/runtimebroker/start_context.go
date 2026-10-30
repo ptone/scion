@@ -979,7 +979,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 			opts.Template = in.Prehydrated.TemplatePath
 		}
 	} else if hubConn != nil && in.Config != nil {
-		templatePath, err := s.hydrateTemplate(ctx, in.Config, hubConn)
+		templatePath, err := s.hydrateTemplate(ctx, in.Config, hubConn, in.AgentID)
 		if err != nil {
 			span.SetStatus(codes.Error, err.Error())
 			return nil, &startContextError{
@@ -2794,7 +2794,7 @@ func (s *Server) applyStartTemplateEnvSource(ctx context.Context, in startContex
 		Template:     templateSlug,
 		TemplateID:   in.TemplateID,
 		TemplateHash: in.TemplateHash,
-	}, hubConn)
+	}, hubConn, in.AgentID)
 	if err != nil {
 		s.agentLifecycleLog.Warn("Start: could not resolve the agent's Hub template; its env fallback is not applied",
 			"agent_id", in.AgentID, "template", templateSlug, "error", err)
@@ -2838,7 +2838,7 @@ func (s *Server) applyStartTemplateIdentity(ctx context.Context, in startContext
 		Template:     templateSlug,
 		TemplateID:   in.TemplateID,
 		TemplateHash: in.TemplateHash,
-	}, hubConn)
+	}, hubConn, in.AgentID)
 	if err != nil {
 		return &startContextError{
 			Status:      http.StatusInternalServerError,

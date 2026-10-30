@@ -395,6 +395,39 @@ func NewOpaqueError(msg string, err error) *OpaqueError {
 func (e *OpaqueError) Error() string { return e.msg }
 func (e *OpaqueError) Unwrap() error { return e.err }
 
+// errDispatchTemplateUnreadable is matched by a hydration error for a
+// dispatch that named a Hub TemplateID the Hub would not let this broker
+// read (ptone/scion#5770): the template was deleted, its creator lost
+// access to it, the agent is no longer recorded on this broker, or (for a
+// user-scoped template) it changed while the launch was in progress.
+var errDispatchTemplateUnreadable = errors.New("dispatched template is not readable")
+
+// dispatchTemplateUnreadableError is errDispatchTemplateUnreadable with the
+// template's name and the Hub error.
+type dispatchTemplateUnreadableError struct {
+	template string
+	cause    error
+}
+
+func (e *dispatchTemplateUnreadableError) Error() string {
+	return "template " + e.template + " is not readable for this agent: " + e.cause.Error()
+}
+func (e *dispatchTemplateUnreadableError) Unwrap() error { return e.cause }
+func (e *dispatchTemplateUnreadableError) Is(target error) bool {
+	return target == errDispatchTemplateUnreadable
+}
+
+// dispatchTemplateUnreadableText returns the client text for
+// errDispatchTemplateUnreadable. It names the template, never the Hub
+// error, which the log carries.
+func dispatchTemplateUnreadableText(err error) (string, bool) {
+	var e *dispatchTemplateUnreadableError
+	if !errors.As(err, &e) {
+		return "", false
+	}
+	return "template " + e.template + " is no longer readable for this agent (it was removed, its access changed, or it was edited while this launch was in progress); retry, or re-create the agent or choose another template", true
+}
+
 // runtimeOpError builds the OpaqueError a broker runtime-op handler
 // (start, stop, restart, delete, exec, message, logs, list) writes to its
 // client on failure: op names the operation in the fixed message (e.g.
@@ -811,6 +844,11 @@ func (s *Server) writeStartContextError(w http.ResponseWriter, err error, op str
 		if templatecache.IsHubConnectivityError(sce.OriginalErr) {
 			HubUnreachableError(w, sce.OriginalErr.Error())
 			return http.StatusServiceUnavailable
+		}
+		if msg, ok := dispatchTemplateUnreadableText(sce.OriginalErr); ok {
+			s.logStartContextFailure("buildStartContext failed: dispatched template not readable", op, startContextDiagnostic(sce), extra)
+			TemplateError(w, failedOpText(op)+": "+msg)
+			return http.StatusInternalServerError
 		}
 		s.logStartContextFailure("buildStartContext failed", op, startContextDiagnostic(sce), extra)
 		TemplateError(w, runtimeOpError(op, err).Error())

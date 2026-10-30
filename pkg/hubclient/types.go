@@ -445,6 +445,10 @@ type BrokerCapabilities struct {
 	// create/start/restart as policy above everything. A hub may stop writing those values into
 	// InlineConfig only for a broker that reports this (ptone/scion#4222).
 	TemplateTiers bool `json:"templateTiers,omitempty"`
+	// DispatchBoundCatalogRead indicates the broker names the agent on its
+	// template reads (ptone/scion#5770). Mirrors
+	// store.BrokerCapabilities.DispatchBoundCatalogRead.
+	DispatchBoundCatalogRead bool `json:"dispatchBoundCatalogRead,omitempty"`
 	// NodeImageRegistry is the broker's SCION_IMAGE_REGISTRY, the node env
 	// layer of image_registry that beats every settings value for agents
 	// this broker runs (ptone/scion#3916). It is a node configuration value

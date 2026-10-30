@@ -30,7 +30,13 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
+
+// dispatchAgentQueryParam names the agent a broker's template read is for
+// (ptone/scion#5770). See brokerMayReadForDispatch: it authenticates the
+// request's purpose but is not itself authority.
+const dispatchAgentQueryParam = "agentId"
 
 // SignedURLExpiry is the duration signed URLs are valid for.
 const SignedURLExpiry = 15 * time.Minute
@@ -959,7 +965,13 @@ func (s *Server) handleTemplateDownload(w http.ResponseWriter, r *http.Request, 
 	// For local storage, rewrite file:// URLs to HTTP proxy URLs
 	if stor.Provider() == storage.ProviderLocal {
 		hubURL := requestBaseURL(r)
-		downloadURLs = rewriteLocalTemplateDownloadURLs(downloadURLs, hubURL, id, isBlobLayout(template))
+		// A broker's dispatch-bound read names its agent; the proxy URLs
+		// pass through the same read gate, so they carry it too.
+		agentID := ""
+		if GetBrokerIdentityFromContext(ctx) != nil {
+			agentID = r.URL.Query().Get(dispatchAgentQueryParam)
+		}
+		downloadURLs = rewriteLocalTemplateDownloadURLs(downloadURLs, hubURL, id, isBlobLayout(template), agentID)
 	}
 
 	response := DownloadResponse{
@@ -1282,7 +1294,28 @@ func templateUserScopeResource(userIdent UserIdentity) Resource {
 func (s *Server) authorizeTemplateReadRoute(w http.ResponseWriter, r *http.Request, template *store.Template) bool {
 	ctx := r.Context()
 	if broker := GetBrokerIdentityFromContext(ctx); broker != nil {
-		if s.brokerMayReadCatalogResource(ctx, broker, template.Scope, template.ScopeID) {
+		agentID := r.URL.Query().Get(dispatchAgentQueryParam)
+		allowed, reason := s.brokerMayReadForDispatch(ctx, broker, dispatchCatalogResource{
+			Kind:        catalogKindTemplate,
+			ID:          template.ID,
+			Scope:       template.Scope,
+			ScopeID:     template.ScopeID,
+			ContentHash: template.ContentHash,
+			Authz:       templateResource(template),
+		}, agentID)
+		switch {
+		case allowed && reason == dispatchReadBound:
+			slog.Info("dispatch-bound catalog read allowed",
+				"broker_id", broker.BrokerID(), "agent_id", agentID,
+				"kind", string(catalogKindTemplate), "resource_id", template.ID,
+				"request_id", logging.RequestIDFromContext(ctx))
+		case !allowed && agentID != "":
+			slog.Warn("dispatch-bound catalog read denied",
+				"broker_id", broker.BrokerID(), "agent_id", agentID,
+				"kind", string(catalogKindTemplate), "resource_id", template.ID,
+				"reason", reason, "request_id", logging.RequestIDFromContext(ctx))
+		}
+		if allowed {
 			return true
 		}
 		NotFound(w, "Template")

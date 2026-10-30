@@ -430,6 +430,9 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		if writeWorkspaceStorageUnavailable(w, err) {
 			return
 		}
+		if writeTemplateNotCarriable(w, err) {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"failed to resolve new configuration: "+err.Error(), nil)
 		return
@@ -709,6 +712,9 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req
 	fresh, warnings, err := s.buildPatchedAppliedConfig(ctx, agent, project, resolveRegistry, patch)
 	if err != nil {
 		if writeWorkspaceStorageUnavailable(w, err) {
+			return
+		}
+		if writeTemplateNotCarriable(w, err) {
 			return
 		}
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
@@ -1224,4 +1230,20 @@ func (s *Server) reincarnateWorkspaceGate(ctx context.Context, agent *store.Agen
 		cloneMode:               hasGitClone || emptyPerAgentMove,
 		sameBrokerEmptyPerAgent: sameBrokerEmptyPerAgent,
 	}
+}
+
+// writeTemplateNotCarriable writes the 409 template_unavailable answer for a
+// reincarnate whose rebuild cannot keep the agent's user-scoped template
+// (errTemplateNotCarriable, ptone/scion#5770) and reports whether it did.
+func writeTemplateNotCarriable(w http.ResponseWriter, err error) bool {
+	if !errors.Is(err, errTemplateNotCarriable) {
+		return false
+	}
+	var tnc *templateNotCarriableError
+	msg := err.Error()
+	if errors.As(err, &tnc) {
+		msg = tnc.msg
+	}
+	writeError(w, http.StatusConflict, ErrCodeTemplateUnavailable, msg, nil)
+	return true
 }

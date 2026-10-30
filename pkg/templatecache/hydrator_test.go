@@ -33,13 +33,18 @@ type mockTemplateService struct {
 	getFunc             func(ctx context.Context, templateID string) (*hubclient.Template, error)
 	requestDownloadURLs func(ctx context.Context, templateID string) (*hubclient.DownloadResponse, error)
 	downloadFileFunc    func(ctx context.Context, url string) ([]byte, error)
+	// getAgents and downloadAgents record the WithDispatchAgent value of
+	// each Get and RequestDownloadURLs call.
+	getAgents      []string
+	downloadAgents []string
 }
 
 func (m *mockTemplateService) List(ctx context.Context, opts *hubclient.ListTemplatesOptions) (*hubclient.ListTemplatesResponse, error) {
 	return nil, nil
 }
 
-func (m *mockTemplateService) Get(ctx context.Context, templateID string) (*hubclient.Template, error) {
+func (m *mockTemplateService) Get(ctx context.Context, templateID string, opts ...hubclient.TemplateReadOption) (*hubclient.Template, error) {
+	m.getAgents = append(m.getAgents, hubclient.DispatchAgentOf(opts...))
 	if m.getFunc != nil {
 		return m.getFunc(ctx, templateID)
 	}
@@ -70,7 +75,8 @@ func (m *mockTemplateService) Finalize(ctx context.Context, templateID string, m
 	return nil, nil
 }
 
-func (m *mockTemplateService) RequestDownloadURLs(ctx context.Context, templateID string) (*hubclient.DownloadResponse, error) {
+func (m *mockTemplateService) RequestDownloadURLs(ctx context.Context, templateID string, opts ...hubclient.TemplateReadOption) (*hubclient.DownloadResponse, error) {
+	m.downloadAgents = append(m.downloadAgents, hubclient.DispatchAgentOf(opts...))
 	if m.requestDownloadURLs != nil {
 		return m.requestDownloadURLs(ctx, templateID)
 	}
@@ -547,5 +553,60 @@ func TestHydrate_IgnoresMalformedDownloadContentHash(t *testing.T) {
 	}
 	if _, ok := cache.Get(h1); !ok {
 		t.Errorf("files not cached under the key of the downloaded files %s", h1)
+	}
+}
+
+// dispatchAgentTemplateService is a one-file template service for the
+// HydrateForAgent tests (ptone/scion#5770).
+func dispatchAgentTemplateService() *mockTemplateService {
+	content := []byte("harness: claude\n")
+	return &mockTemplateService{
+		getFunc: func(ctx context.Context, templateID string) (*hubclient.Template, error) {
+			return &hubclient.Template{ID: "tmpl-user", Name: "user-template", ContentHash: "hash-user"}, nil
+		},
+		requestDownloadURLs: func(ctx context.Context, templateID string) (*hubclient.DownloadResponse, error) {
+			return &hubclient.DownloadResponse{
+				Files: []hubclient.DownloadURLInfo{{Path: "scion-agent.yaml", URL: "file:///tmp/user", Hash: transfer.HashBytes(content)}},
+			}, nil
+		},
+		downloadFileFunc: func(ctx context.Context, url string) ([]byte, error) { return content, nil },
+	}
+}
+
+// HydrateForAgent names the agent on both Hub reads (metadata and download
+// URLs), so the Hub can admit the broker running that agent.
+func TestHydrateForAgent_NamesAgentOnEveryHubRead(t *testing.T) {
+	cache, err := New(t.TempDir(), DefaultMaxSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := dispatchAgentTemplateService()
+	path, err := NewHydrator(cache, &mockHubClient{templates: svc}).HydrateForAgent(context.Background(), "tmpl-user", "agent-uuid-1")
+	if err != nil {
+		t.Fatalf("HydrateForAgent: %v", err)
+	}
+	if path == "" {
+		t.Fatal("HydrateForAgent returned no path")
+	}
+	if len(svc.getAgents) != 1 || svc.getAgents[0] != "agent-uuid-1" {
+		t.Errorf("metadata read must name the agent, got %q", svc.getAgents)
+	}
+	if len(svc.downloadAgents) != 1 || svc.downloadAgents[0] != "agent-uuid-1" {
+		t.Errorf("download-URL read must name the agent, got %q", svc.downloadAgents)
+	}
+}
+
+// Hydrate (no agent) sends no agent on either read, exactly as before.
+func TestHydrate_NamesNoAgent(t *testing.T) {
+	cache, err := New(t.TempDir(), DefaultMaxSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := dispatchAgentTemplateService()
+	if _, err := NewHydrator(cache, &mockHubClient{templates: svc}).Hydrate(context.Background(), "tmpl-user"); err != nil {
+		t.Fatalf("Hydrate: %v", err)
+	}
+	if len(svc.getAgents) != 1 || svc.getAgents[0] != "" || len(svc.downloadAgents) != 1 || svc.downloadAgents[0] != "" {
+		t.Errorf("Hydrate must name no agent, got get=%q download=%q", svc.getAgents, svc.downloadAgents)
 	}
 }

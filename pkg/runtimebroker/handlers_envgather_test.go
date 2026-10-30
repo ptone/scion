@@ -3569,7 +3569,7 @@ profiles:
 	// calling extractRequiredEnvKeys (handlers.go, next to the
 	// harness-config hydration): hydrate the template and pass the
 	// resulting path through in place of the slug.
-	hydratedPath, err := srv.hydrateTemplate(context.Background(), cfg, conn)
+	hydratedPath, err := srv.hydrateTemplate(context.Background(), cfg, conn, "")
 	if err != nil {
 		t.Fatalf("hydrateTemplate failed: %v", err)
 	}

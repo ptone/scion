@@ -761,3 +761,141 @@ func TestGetLegacyRuntimeBrokerByName_OldestByCreatedWins(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, older.String(), got.ID)
 }
+
+// SetAgentRuntimeBrokerIfEmpty (ptone/scion#5770) fills an empty broker,
+// bumps state_version and returns the row; the same broker again is an
+// idempotent success; another broker is refused and nothing changes.
+func TestSetAgentRuntimeBrokerIfEmpty_CompareAndSet(t *testing.T) {
+	ctx := context.Background()
+	fs := newFlatStores(t)
+	b := fs.createBroker(t, flatBroker("legacy", store.BrokerStatusOnline, nil))
+	other := fs.createBroker(t, flatBroker("legacy-2", store.BrokerStatusOnline, nil))
+
+	// Empty runtime_broker_id ('').
+	a := makeAgent(fs.projectID, "empty-broker")
+	require.NoError(t, fs.agents.CreateAgent(ctx, a))
+	before, err := fs.agents.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	got, err := fs.agents.SetAgentRuntimeBrokerIfEmpty(ctx, a.ID, b.ID)
+	require.NoError(t, err)
+	assert.Equal(t, b.ID, got.RuntimeBrokerID)
+	assert.Equal(t, before.StateVersion+1, got.StateVersion, "the fill bumps state_version")
+
+	// The same broker again: success, row unchanged.
+	again, err := fs.agents.SetAgentRuntimeBrokerIfEmpty(ctx, a.ID, b.ID)
+	require.NoError(t, err)
+	assert.Equal(t, b.ID, again.RuntimeBrokerID)
+	assert.Equal(t, got.StateVersion, again.StateVersion, "an idempotent retry writes nothing")
+
+	// Another broker: refused, never overwritten.
+	_, err = fs.agents.SetAgentRuntimeBrokerIfEmpty(ctx, a.ID, other.ID)
+	require.ErrorIs(t, err, store.ErrRuntimeBrokerChanged)
+	after, err := fs.agents.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, b.ID, after.RuntimeBrokerID, "a stored broker is never overwritten")
+	assert.Equal(t, got.StateVersion, after.StateVersion)
+
+	// NULL runtime_broker_id also counts as empty.
+	n := makeAgent(fs.projectID, "null-broker")
+	require.NoError(t, fs.agents.CreateAgent(ctx, n))
+	uid, err := parseUUID(n.ID)
+	require.NoError(t, err)
+	_, err = fs.client.Agent.UpdateOneID(uid).ClearRuntimeBrokerID().Save(ctx)
+	require.NoError(t, err)
+	got, err = fs.agents.SetAgentRuntimeBrokerIfEmpty(ctx, n.ID, other.ID)
+	require.NoError(t, err)
+	assert.Equal(t, other.ID, got.RuntimeBrokerID)
+
+	// Missing agent; empty broker ID.
+	_, err = fs.agents.SetAgentRuntimeBrokerIfEmpty(ctx, uuid.NewString(), b.ID)
+	require.ErrorIs(t, err, store.ErrNotFound)
+	_, err = fs.agents.SetAgentRuntimeBrokerIfEmpty(ctx, a.ID, "")
+	require.Error(t, err)
+}
+
+// A whole-row UpdateAgent from a model read before the fill conflicts
+// instead of reverting the broker.
+func TestSetAgentRuntimeBrokerIfEmpty_StaleUpdateAgentConflicts(t *testing.T) {
+	ctx := context.Background()
+	fs := newFlatStores(t)
+	b := fs.createBroker(t, flatBroker("legacy", store.BrokerStatusOnline, nil))
+	a := makeAgent(fs.projectID, "stale")
+	require.NoError(t, fs.agents.CreateAgent(ctx, a))
+	stale, err := fs.agents.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+
+	filled, err := fs.agents.SetAgentRuntimeBrokerIfEmpty(ctx, a.ID, b.ID)
+	require.NoError(t, err)
+	require.ErrorIs(t, fs.agents.UpdateAgent(ctx, stale), store.ErrVersionConflict, "a stale whole-row update must conflict")
+
+	// The refreshed row updates cleanly and keeps the broker.
+	filled.Message = "after start"
+	require.NoError(t, fs.agents.UpdateAgent(ctx, filled))
+	got, err := fs.agents.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, b.ID, got.RuntimeBrokerID)
+}
+
+// SetAgentTemplatePin (ptone/scion#5770) re-records only the template hash,
+// only while the row is still at the caller's state_version with the
+// recorded template and hash, and bumps state_version so a stale whole-row
+// write conflicts.
+func TestSetAgentTemplatePin(t *testing.T) {
+	ctx := context.Background()
+	fs := newFlatStores(t)
+	a := makeAgent(fs.projectID, "pinned-template")
+	a.AppliedConfig = &store.AgentAppliedConfig{TemplateID: "tpl-1", TemplateHash: "sha256:old", Image: "img:1"}
+	require.NoError(t, fs.agents.CreateAgent(ctx, a))
+	stale, err := fs.agents.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+
+	v, err := fs.agents.SetAgentTemplatePin(ctx, a.ID, stale.StateVersion, "tpl-1", "sha256:old", "sha256:new")
+	require.NoError(t, err)
+	got, err := fs.agents.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, stale.StateVersion+1, v)
+	assert.Equal(t, v, got.StateVersion)
+	assert.Equal(t, "sha256:new", got.AppliedConfig.TemplateHash)
+	assert.Equal(t, "tpl-1", got.AppliedConfig.TemplateID)
+	assert.Equal(t, "img:1", got.AppliedConfig.Image, "other applied-config keys are kept")
+	require.ErrorIs(t, fs.agents.UpdateAgent(ctx, stale), store.ErrVersionConflict, "a stale whole-row write conflicts")
+
+	// A mismatched template or hash writes nothing.
+	_, err = fs.agents.SetAgentTemplatePin(ctx, a.ID, got.StateVersion, "tpl-1", "sha256:old", "sha256:other")
+	require.ErrorIs(t, err, store.ErrTemplatePinChanged)
+	_, err = fs.agents.SetAgentTemplatePin(ctx, a.ID, got.StateVersion, "tpl-2", "sha256:new", "sha256:other")
+	require.ErrorIs(t, err, store.ErrTemplatePinChanged)
+	again, err := fs.agents.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, got.StateVersion, again.StateVersion)
+	assert.Equal(t, "sha256:new", again.AppliedConfig.TemplateHash)
+
+	_, err = fs.agents.SetAgentTemplatePin(ctx, uuid.NewString(), 1, "tpl-1", "", "x")
+	require.ErrorIs(t, err, store.ErrNotFound)
+}
+
+// A caller whose read is older than the row (another writer committed in
+// between) is refused and nothing is written, so it never gets a version
+// that would let its stale copy overwrite that write.
+func TestSetAgentTemplatePin_StaleExpectedVersionRefused(t *testing.T) {
+	ctx := context.Background()
+	fs := newFlatStores(t)
+	a := makeAgent(fs.projectID, "pin-stale")
+	a.AppliedConfig = &store.AgentAppliedConfig{TemplateID: "tpl-1", TemplateHash: "sha256:old"}
+	require.NoError(t, fs.agents.CreateAgent(ctx, a))
+	read, err := fs.agents.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+
+	other, err := fs.agents.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	other.Message = "other writer"
+	require.NoError(t, fs.agents.UpdateAgent(ctx, other))
+
+	_, err = fs.agents.SetAgentTemplatePin(ctx, a.ID, read.StateVersion, "tpl-1", "sha256:old", "sha256:new")
+	require.ErrorIs(t, err, store.ErrTemplatePinChanged)
+	got, err := fs.agents.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, other.StateVersion, got.StateVersion, "nothing is written")
+	assert.Equal(t, "sha256:old", got.AppliedConfig.TemplateHash)
+	assert.Equal(t, "other writer", got.Message)
+}
