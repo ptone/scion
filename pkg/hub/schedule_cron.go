@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/cronzone"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/robfig/cron/v3"
 )
@@ -67,6 +68,38 @@ func parseScheduleCron(expr string) (cron.Schedule, error) {
 		spec.Location = time.UTC
 	}
 	return sched, nil
+}
+
+// normalizeScheduleTimeZone validates a schedule time zone name and returns
+// the value to store: "" for UTC (an empty name or "UTC"), otherwise the
+// name as given. Every error matches cronzone.ErrInvalidZone.
+func normalizeScheduleTimeZone(name string) (string, error) {
+	loc, err := cronzone.ValidateZone(name)
+	if err != nil {
+		return "", err
+	}
+	if loc == time.UTC {
+		return "", nil
+	}
+	return name, nil
+}
+
+// scheduleNextRun returns the first run of a recurring schedule strictly
+// after `after`, as a UTC instant. The expression goes through
+// parseScheduleCron (so zone prefixes stay refused) and is evaluated in the
+// schedule's time zone; an empty zone is UTC and gives exactly the UTC-only
+// result. The error is a parseScheduleCron error or a zone error matching
+// cronzone.ErrInvalidZone; writeScheduleTimingError writes either.
+func scheduleNextRun(expr, zone string, after time.Time) (time.Time, error) {
+	sched, err := parseScheduleCron(expr)
+	if err != nil {
+		return time.Time{}, err
+	}
+	loc, err := cronzone.ValidateZone(zone)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return cronzone.Next(sched, loc, after), nil
 }
 
 // zonePrefixPassBatchSize is the number of rows pauseZonePrefixedSchedules
@@ -160,6 +193,16 @@ func (s *Server) pauseZonePrefixedSchedules(ctx context.Context) {
 func (s *Server) startScheduler(ctx context.Context) {
 	s.pauseZonePrefixedSchedules(ctx)
 	s.scheduler.Start(ctx)
+}
+
+// writeScheduleTimingError writes the 400 response for an error from
+// scheduleNextRun or normalizeScheduleTimeZone.
+func writeScheduleTimingError(w http.ResponseWriter, err error) {
+	if errors.Is(err, cronzone.ErrInvalidZone) {
+		ValidationError(w, err.Error(), map[string]interface{}{"field": "timeZone"})
+		return
+	}
+	writeCronParseError(w, err)
 }
 
 // writeCronParseError writes the 400 response for a cron expression that
