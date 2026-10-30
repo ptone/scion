@@ -174,8 +174,16 @@ export async function enforceTrustedTypes(
   page.on('pageerror', (err) => {
     if (namesTrustedType(String(err))) errors.push(String(err));
   });
+  // A report-only violation is also logged to the console by some browsers
+  // (WebKit: "[Report Only] This requires a TrustedHTML value ..."). It is
+  // the same event the probe records as a violation, where allowances
+  // apply, so it is not counted again as an error.
+  const isReportOnlyNotice = (text: string): boolean =>
+    /^\[Report Only\]|\(Report-Only policy\)/i.test(text);
   page.on('console', (msg) => {
-    if (msg.type() === 'error' && namesTrustedType(msg.text())) errors.push(msg.text());
+    if (msg.type() === 'error' && namesTrustedType(msg.text()) && !isReportOnlyNotice(msg.text())) {
+      errors.push(msg.text());
+    }
   });
   return errors;
 }
