@@ -25,6 +25,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -176,6 +177,7 @@ func TestRunHarnessConfigInstall_RecordsSourceURL(t *testing.T) {
 		_, _ = w.Write(archive)
 	}))
 	defer src.Close()
+	t.Cleanup(config.AllowArchiveServerForTest(src.URL))
 	sourceURL := src.URL + "/configs/codex.tar.gz"
 
 	for _, tc := range []struct {

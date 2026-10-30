@@ -29,16 +29,19 @@ import (
 // nothing is fetched into it (the old content is left as it is), and the
 // error says why.
 func TestFetchRemoteTemplate_CacheCleanupFailureFailsTheFetch(t *testing.T) {
-	// Neither a GitHub folder nor an archive: a fetch past the cleanup would
-	// fail at once as an unsupported type, with no network access.
-	const uri = "https://example.invalid/scion/template"
+	// An archive URL on a reserved .invalid host: FetchRemoteTemplate accepts
+	// the source (it validates the source before touching the cache, and an
+	// unsupported type would be refused before the cleanup), then fails at the
+	// cleanup, so nothing is fetched. A fetch past the cleanup would fail at
+	// once on the unresolvable host.
+	const uri = "https://example.invalid/scion/template.tar.gz"
 
 	t.Run("planted RemoveAll error", func(t *testing.T) {
 		t.Setenv("HOME", t.TempDir())
 		orig := removeAllCache
 		removeAllCache = func(string) error { return errors.New("planted removal failure") }
 		t.Cleanup(func() { removeAllCache = orig })
-		_, err := FetchRemoteTemplate(context.Background(), uri)
+		_, err := FetchRemoteTemplate(context.Background(), uri, RemoteFetchOptions{})
 		if err == nil || !strings.Contains(err.Error(), "failed to remove the old cache directory") || !strings.Contains(err.Error(), "planted removal failure") {
 			t.Fatalf("err = %v, want the cache cleanup failure", err)
 		}
@@ -66,7 +69,7 @@ func TestFetchRemoteTemplate_CacheCleanupFailureFailsTheFetch(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
-		_, err = FetchRemoteTemplate(context.Background(), uri)
+		_, err = FetchRemoteTemplate(context.Background(), uri, RemoteFetchOptions{})
 		if err == nil || !strings.Contains(err.Error(), "failed to remove the old cache directory") {
 			t.Fatalf("err = %v, want the cache cleanup failure", err)
 		}

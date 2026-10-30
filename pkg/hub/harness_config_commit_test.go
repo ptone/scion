@@ -32,6 +32,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -410,6 +411,7 @@ func TestHarnessConfigReimport_UpdatesRowByIDAfterSlugRename(t *testing.T) {
 		_, _ = io.Copy(w, resp.Body)
 	}))
 	t.Cleanup(src.Close)
+	t.Cleanup(config.AllowArchiveServerForTest(src.URL))
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/harness-configs/"+hc.ID+"/reimport",
 		map[string]interface{}{"sourceUrl": src.URL + "/configs/derive.tar.gz"})

@@ -125,7 +125,11 @@ func resolveInstallSource(source string) (localPath string, cleanup func(), err 
 		}
 
 		fmt.Printf("Fetching remote source: %s\n", source)
-		cachePath, fetchErr := config.FetchRemoteTemplate(context.Background(), normalized, remoteFetchCredential(normalized))
+		cachePath, fetchErr := config.FetchRemoteTemplate(context.Background(), normalized, config.RemoteFetchOptions{
+			GitHubToken: remoteFetchCredential(normalized),
+			// The CLI runs as the user: their own storage credentials apply.
+			Credentials: config.RemoteFetchCallerCredentials,
+		})
 		if fetchErr != nil {
 			return "", nil, fmt.Errorf("failed to fetch remote source: %w", fetchErr)
 		}
