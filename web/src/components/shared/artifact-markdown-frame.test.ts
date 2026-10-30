@@ -159,7 +159,7 @@ describe('artifact markdown frame: CriticMarkup', () => {
   it('sets the frame document only once it is built, never a plain empty one', async () => {
     const descriptor = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'srcdoc')!;
     const set: unknown[] = [];
-    vi.spyOn(HTMLIFrameElement.prototype, 'srcdoc', 'set').mockImplementation(function (
+    const spy = vi.spyOn(HTMLIFrameElement.prototype, 'srcdoc', 'set').mockImplementation(function (
       this: HTMLIFrameElement,
       value: string
     ) {
@@ -169,19 +169,22 @@ describe('artifact markdown frame: CriticMarkup', () => {
     const el = document.createElement(
       'scion-artifact-markdown-frame'
     ) as ScionArtifactMarkdownFrame;
-    el.content = 'hello';
-    document.body.appendChild(el);
-    await el.updateComplete;
-    // The first render has no document yet, so it draws no frame.
-    expect(el.shadowRoot!.querySelector('iframe')).toBeNull();
-    expect(set).toEqual([]);
+    try {
+      el.content = 'hello';
+      document.body.appendChild(el);
+      await el.updateComplete;
+      // The first render has no document yet, so it draws no frame.
+      expect(el.shadowRoot!.querySelector('iframe')).toBeNull();
+      expect(set).toEqual([]);
 
-    const frame = await builtFrame(el);
-    expect(set).toHaveLength(1);
-    expect(set[0]).not.toBe('');
-    expect(String(set[0])).toContain('<p>hello</p>');
-    expect(frame.srcdoc).toBe(set[0]);
-    el.remove();
-    vi.restoreAllMocks();
+      const frame = await builtFrame(el);
+      expect(set).toHaveLength(1);
+      expect(set[0]).not.toBe('');
+      expect(String(set[0])).toContain('<p>hello</p>');
+      expect(frame.srcdoc).toBe(set[0]);
+    } finally {
+      el.remove();
+      spy.mockRestore();
+    }
   });
 });

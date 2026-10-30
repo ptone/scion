@@ -54,10 +54,10 @@ for (const path of ['/', '/terminals', '/chat']) {
       waitUntil: 'domcontentloaded',
     });
     await page.goto(path, { waitUntil: 'domcontentloaded' });
-    // A routed page, or the terminal workspace host on /terminals.
-    await expect(page.locator('[data-scion-page], #terminal-workspace').first()).toBeAttached({
-      timeout: 30_000,
-    });
+    // A routed page, or on /terminals the terminal workspace host, which is
+    // attached hidden until the workspace is shown, so wait until visible.
+    const ready = path === '/terminals' ? '#terminal-workspace' : '[data-scion-page]';
+    await expect(page.locator(ready).first()).toBeVisible({ timeout: 30_000 });
 
     await expectIconsDrawn(page, 1);
     await expectNoTrustedTypesFindings(page, errors);

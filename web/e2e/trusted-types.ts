@@ -37,6 +37,8 @@ export interface TrustedTypesViolation {
   sample: string;
   sourceFile: string;
   lineNumber: number;
+  /** The policy that reported it, so the test's own rule can be told apart. */
+  originalPolicy: string;
 }
 
 /** A violation a test accepts for now, with the reason it is accepted. */
@@ -113,6 +115,7 @@ export async function enforceTrustedTypes(
           sample: e.sample,
           sourceFile: e.sourceFile,
           lineNumber: e.lineNumber,
+          originalPolicy: e.originalPolicy,
         });
       },
       true
@@ -174,8 +177,8 @@ export async function expectNoTrustedTypesFindings(
  * markup assignment adds a violation with the expected disposition (and
  * throws when enforced). A page served by the hub also carries the hub's
  * own report-only rule, so the same assignment is reported once per rule;
- * the check therefore counts the new violations of the expected
- * disposition. Run it after the page's own assertions, so their empty lists
+ * the check therefore counts new violations of the expected disposition
+ * reported by the test's own rule (originalPolicy). Run it after the page's own assertions, so their empty lists
  * are not vacuous.
  */
 export async function expectProbeSeesViolation(
@@ -199,12 +202,16 @@ export async function expectProbeSeesViolation(
   await expect
     .poll(() =>
       page.evaluate(
-        ({ from, want }) =>
+        ({ from, want, rule }) =>
           (window.__trustedTypesViolations ?? [])
             .slice(from)
-            .filter((v) => v.disposition === want && v.sample.startsWith('Element innerHTML'))
-            .length,
-        { from: before, want: disposition }
+            .filter(
+              (v) =>
+                v.disposition === want &&
+                v.originalPolicy === rule &&
+                v.sample.startsWith('Element innerHTML')
+            ).length,
+        { from: before, want: disposition, rule: TRUSTED_TYPES_RULE }
       )
     )
     .toBeGreaterThanOrEqual(1);
