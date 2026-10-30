@@ -18,6 +18,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { getIconLibrary } from '@shoelace-style/shoelace/dist/components/icon/library.js';
+import SlIcon from '@shoelace-style/shoelace/dist/components/icon/icon.component.js';
 
 import { registerShoelaceIcons, spriteLibraries } from './shoelace-icons.js';
 
@@ -40,6 +41,18 @@ describe('Shoelace icon libraries', () => {
       expect(library?.spriteSheet, name).toBe(true);
       expect(library?.resolver(icon)).toBe(url);
     }
+  });
+
+  it('keep the icon drawing out of hit testing, so a click lands on the icon element', () => {
+    // WebKit hit-tests a sprite <use> as its own target, outside the
+    // clickable that holds the icon; with the drawing out of hit testing a
+    // click lands on the sl-icon element, inside that clickable.
+    registerShoelaceIcons('/sheet.svg');
+    registerShoelaceIcons('/sheet.svg');
+    const rules = SlIcon.elementStyles
+      .map((s) => ('cssText' in s ? s.cssText : ''))
+      .filter((text) => /svg\s*\{[^}]*pointer-events:\s*none/.test(text));
+    expect(rules).toHaveLength(1);
   });
 
   it('use the symbol id prefix the sheet builder writes', () => {

@@ -23,6 +23,8 @@
  * on a page is drawn from that one file.
  */
 
+import { css } from 'lit';
+import SlIcon from '@shoelace-style/shoelace/dist/components/icon/icon.component.js';
 import { registerIconLibrary } from '@shoelace-style/shoelace/dist/utilities/icon-library.js';
 // Always a file URL, never an inlined data: URL, which <use> cannot load.
 import shoelaceIconsUrl from '../generated/shoelace-icons.svg?no-inline';
@@ -42,9 +44,28 @@ export function spriteLibraries(sheetUrl: string): SpriteLibrary[] {
   ];
 }
 
-/** Registers both icon libraries. Call before the first icon renders. */
+/**
+ * Keeps an icon's drawing out of hit testing. WebKit treats a sprite <use>
+ * as its own click target, outside the button or badge that holds the
+ * icon; without hit testing on the drawing, a click lands on the sl-icon
+ * element itself, inside that clickable (as it does for inline icons).
+ */
+const iconDrawingStyle = css`
+  svg {
+    pointer-events: none;
+  }
+`;
+
+/**
+ * Registers both icon libraries and the icon drawing style. Call before the
+ * first icon renders: each icon takes the component's styles when it is
+ * created.
+ */
 export function registerShoelaceIcons(sheetUrl: string = shoelaceIconsUrl): void {
   for (const { name, ...options } of spriteLibraries(sheetUrl)) {
     registerIconLibrary(name, options);
+  }
+  if (!SlIcon.elementStyles.includes(iconDrawingStyle)) {
+    SlIcon.elementStyles.push(iconDrawingStyle);
   }
 }
