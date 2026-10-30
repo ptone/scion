@@ -37,10 +37,12 @@ import (
 type resourceFetcher interface {
 	// Get returns the resource's ID, content hash and recorded file
 	// manifest (whose Mode fields name executable files), or id=="" if not
-	// found.
-	Get(ctx context.Context, ref string) (id, contentHash string, files []hubclient.TemplateFile, err error)
+	// found. agentID, when set, names the agent the read is for
+	// (hubclient.WithDispatchAgent); kinds that do not support it ignore it.
+	Get(ctx context.Context, ref, agentID string) (id, contentHash string, files []hubclient.TemplateFile, err error)
 	// RequestDownloadURLs returns signed GET URLs (with per-file hashes).
-	RequestDownloadURLs(ctx context.Context, id string) (*hubclient.DownloadResponse, error)
+	// agentID is as for Get.
+	RequestDownloadURLs(ctx context.Context, id, agentID string) (*hubclient.DownloadResponse, error)
 	// DownloadFile downloads a single file from a signed URL.
 	DownloadFile(ctx context.Context, url string) ([]byte, error)
 }
@@ -65,13 +67,25 @@ func NewResolver(cache *Cache, fetcher resourceFetcher, label string) *Resolver 
 // every file's hash is verified, and it is stored under the EntryKey of the
 // downloaded files.
 func (r *Resolver) Resolve(ctx context.Context, ref string) (string, error) {
+	return r.resolve(ctx, ref, "")
+}
+
+// ResolveForAgent is Resolve for a read made on behalf of a dispatched
+// agent: the Hub reads name agentID (ptone/scion#5770), so the broker
+// running that agent can read the agent's user-scoped resource. An empty
+// agentID is exactly Resolve.
+func (r *Resolver) ResolveForAgent(ctx context.Context, ref, agentID string) (string, error) {
+	return r.resolve(ctx, ref, agentID)
+}
+
+func (r *Resolver) resolve(ctx context.Context, ref, agentID string) (string, error) {
 	if r.fetcher == nil {
 		return "", fmt.Errorf("hub client not configured")
 	}
 
 	// Step 1: metadata. The hub's content hash is not used: the cache key
 	// is computed from the manifest (ptone/scion#5658).
-	id, _, metaFiles, err := r.fetcher.Get(ctx, ref)
+	id, _, metaFiles, err := r.fetcher.Get(ctx, ref, agentID)
 	if err != nil {
 		if IsHubConnectivityError(err) {
 			return "", &HubConnectivityError{Cause: err}
@@ -94,7 +108,7 @@ func (r *Resolver) Resolve(ctx context.Context, ref string) (string, error) {
 	}
 
 	// Step 3: request download URLs (includes per-file hashes).
-	downloadResp, err := r.fetcher.RequestDownloadURLs(ctx, id)
+	downloadResp, err := r.fetcher.RequestDownloadURLs(ctx, id, agentID)
 	if err != nil {
 		if IsHubConnectivityError(err) {
 			return "", &HubConnectivityError{Cause: err}
@@ -232,8 +246,8 @@ func downloadModes(dl []hubclient.DownloadURLInfo, meta []hubclient.TemplateFile
 // templateFetcher adapts hubclient.Templates() to resourceFetcher.
 type templateFetcher struct{ client hubclient.Client }
 
-func (f *templateFetcher) Get(ctx context.Context, ref string) (string, string, []hubclient.TemplateFile, error) {
-	t, err := f.client.Templates().Get(ctx, ref)
+func (f *templateFetcher) Get(ctx context.Context, ref, agentID string) (string, string, []hubclient.TemplateFile, error) {
+	t, err := f.client.Templates().Get(ctx, ref, hubclient.WithDispatchAgent(agentID))
 	if err != nil {
 		return "", "", nil, err
 	}
@@ -243,8 +257,8 @@ func (f *templateFetcher) Get(ctx context.Context, ref string) (string, string, 
 	return t.ID, t.ContentHash, t.Files, nil
 }
 
-func (f *templateFetcher) RequestDownloadURLs(ctx context.Context, id string) (*hubclient.DownloadResponse, error) {
-	return f.client.Templates().RequestDownloadURLs(ctx, id)
+func (f *templateFetcher) RequestDownloadURLs(ctx context.Context, id, agentID string) (*hubclient.DownloadResponse, error) {
+	return f.client.Templates().RequestDownloadURLs(ctx, id, hubclient.WithDispatchAgent(agentID))
 }
 
 func (f *templateFetcher) DownloadFile(ctx context.Context, url string) ([]byte, error) {
@@ -254,7 +268,8 @@ func (f *templateFetcher) DownloadFile(ctx context.Context, url string) ([]byte,
 // harnessConfigFetcher adapts hubclient.HarnessConfigs() to resourceFetcher.
 type harnessConfigFetcher struct{ client hubclient.Client }
 
-func (f *harnessConfigFetcher) Get(ctx context.Context, ref string) (string, string, []hubclient.TemplateFile, error) {
+// Get ignores agentID: dispatch-bound reads are wired for templates only.
+func (f *harnessConfigFetcher) Get(ctx context.Context, ref, _ string) (string, string, []hubclient.TemplateFile, error) {
 	hc, err := f.client.HarnessConfigs().Get(ctx, ref)
 	if err != nil {
 		return "", "", nil, err
@@ -265,7 +280,8 @@ func (f *harnessConfigFetcher) Get(ctx context.Context, ref string) (string, str
 	return hc.ID, hc.ContentHash, hc.Files, nil
 }
 
-func (f *harnessConfigFetcher) RequestDownloadURLs(ctx context.Context, id string) (*hubclient.DownloadResponse, error) {
+// RequestDownloadURLs ignores agentID, as Get does.
+func (f *harnessConfigFetcher) RequestDownloadURLs(ctx context.Context, id, _ string) (*hubclient.DownloadResponse, error) {
 	return f.client.HarnessConfigs().RequestDownloadURLs(ctx, id)
 }
 

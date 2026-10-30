@@ -355,6 +355,8 @@ func capabilitiesFromStrings(names []string) *store.BrokerCapabilities {
 			caps.StartsInFlight = true
 		case "templatetiers", "template_tiers":
 			caps.TemplateTiers = true
+		case "dispatchboundcatalogread", "dispatch_bound_catalog_read":
+			caps.DispatchBoundCatalogRead = true
 		}
 	}
 	return caps

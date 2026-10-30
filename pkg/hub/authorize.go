@@ -288,6 +288,133 @@ func (s *Server) brokerMayReadCatalogResource(ctx context.Context, broker Broker
 	}
 }
 
+// Version pinning of dispatch-bound user-scoped template reads
+// (ptone/scion#5770). The read gate requires the template's current content
+// hash to equal the hash the hub recorded for the agent
+// (AppliedConfig.TemplateHash). Where the hub records it decides which
+// version each operation sees:
+//   - create records the hash of the template it resolved;
+//   - start, restart and resume re-record the current hash of the SAME
+//     TemplateID, after re-checking that the agent's creator can read it,
+//     before dispatching (repinUserTemplateForStart);
+//   - within a launch nothing re-records it, so a commit that races the
+//     launch fails it rather than hydrating content the hub did not record
+//     for it;
+//   - a reincarnate or move never re-records it: a user-scoped template
+//     whose hash changed since dispatch is refused with 409
+//     template_unavailable (carryUserScopedTemplate).
+
+// catalogResourceKind names the kind of catalog resource a dispatch-bound
+// read is for. Only templates are wired today; the gate is generic so that
+// harness-configs can be wired the same way.
+type catalogResourceKind string
+
+const catalogKindTemplate catalogResourceKind = "template"
+
+// dispatchCatalogResource is the catalog record a broker asks to read, in
+// the kind-generic form brokerMayReadForDispatch takes.
+type dispatchCatalogResource struct {
+	Kind        catalogResourceKind
+	ID          string
+	Scope       string
+	ScopeID     string
+	ContentHash string
+	// Authz is the authorization Resource for the record, checked for the
+	// agent's creator.
+	Authz Resource
+}
+
+// Reasons brokerMayReadForDispatch reports. They are logged, never sent to
+// the caller (every denial reads as 404).
+const (
+	dispatchReadCatalog         = "catalog"
+	dispatchReadBound           = "dispatch_bound"
+	dispatchDenyNoBroker        = "no_broker"
+	dispatchDenyNotUserScope    = "not_user_scope"
+	dispatchDenyNoAgent         = "no_agent_id"
+	dispatchDenyAgentLookup     = "agent_lookup_failed"
+	dispatchDenyAgentDeleted    = "agent_deleted"
+	dispatchDenyOtherBroker     = "agent_on_other_broker"
+	dispatchDenyNotBound        = "resource_not_bound_to_agent"
+	dispatchDenyVersionMismatch = "version_not_dispatched"
+	dispatchDenyCreatorLost     = "creator_lost_access"
+	dispatchDenyNoStore         = "no_store"
+)
+
+// boundCatalogIdentity returns the ID and content hash of the resource of
+// the given kind that the hub bound to agent at dispatch. Only the
+// hub-written AppliedConfig fields count; never agent.Template, which holds
+// the slug.
+func boundCatalogIdentity(agent *store.Agent, kind catalogResourceKind) (id, hash string) {
+	if agent == nil || agent.AppliedConfig == nil {
+		return "", ""
+	}
+	switch kind {
+	case catalogKindTemplate:
+		return agent.AppliedConfig.TemplateID, agent.AppliedConfig.TemplateHash
+	default:
+		return "", ""
+	}
+}
+
+// brokerMayReadForDispatch reports whether an authenticated runtime broker
+// may read a catalog record, and why (ptone/scion#5770). It allows what
+// brokerMayReadCatalogResource allows, plus one narrow case: a user-scoped
+// record that the hub bound to an agent the broker is running. All of
+// these must hold for that case:
+//   - agentID is set and names an agent that exists and is not deleted;
+//   - the hub records that agent as assigned to this broker
+//     (RuntimeBrokerID);
+//   - the agent's hub-written AppliedConfig names this record;
+//   - the record's current content hash is the one the hub recorded for
+//     the agent (see "Version pinning" above);
+//   - the agent's creator (creatorIdentityForAgent) can still read the
+//     record.
+//
+// agentID comes from the broker's signed request. The signature
+// authenticates it and prevents replay, but grants nothing: all authority
+// comes from the hub's own records, which no broker can write. This keeps
+// the restriction from ptone/scion#1916 for every other broker.
+func (s *Server) brokerMayReadForDispatch(ctx context.Context, broker BrokerIdentity, res dispatchCatalogResource, agentID string) (bool, string) {
+	if s.brokerMayReadCatalogResource(ctx, broker, res.Scope, res.ScopeID) {
+		return true, dispatchReadCatalog
+	}
+	if isNilIdentity(broker) {
+		return false, dispatchDenyNoBroker
+	}
+	if res.Scope != store.TemplateScopeUser { // == store.HarnessConfigScopeUser
+		return false, dispatchDenyNotUserScope
+	}
+	if agentID == "" {
+		return false, dispatchDenyNoAgent
+	}
+	if s.store == nil || s.authzService == nil {
+		return false, dispatchDenyNoStore
+	}
+	agent, err := s.store.GetAgent(ctx, agentID)
+	if err != nil || agent == nil {
+		return false, dispatchDenyAgentLookup
+	}
+	if !agent.DeletedAt.IsZero() {
+		return false, dispatchDenyAgentDeleted
+	}
+	if agent.RuntimeBrokerID == "" || agent.RuntimeBrokerID != broker.BrokerID() {
+		return false, dispatchDenyOtherBroker
+	}
+	boundID, boundHash := boundCatalogIdentity(agent, res.Kind)
+	if boundID == "" || boundID != res.ID {
+		return false, dispatchDenyNotBound
+	}
+	if boundHash != res.ContentHash {
+		return false, dispatchDenyVersionMismatch
+	}
+	creator := s.creatorIdentityForAgent(ctx, agent)
+	if creator == nil || !s.authzService.CheckAccess(ctx, creator, res.Authz, ActionRead).Allowed {
+		return false, dispatchDenyCreatorLost
+	}
+	return true, dispatchReadBound
+}
+
 // agentCreateDenyMessage is the client message for a denied agent creation.
 const agentCreateDenyMessage = "You don't have permission to create agents in this project"
 

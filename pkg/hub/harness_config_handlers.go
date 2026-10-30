@@ -1111,7 +1111,7 @@ func (s *Server) handleHarnessConfigDownload(w http.ResponseWriter, r *http.Requ
 	// A blob row's local URLs carry the file's hash, so the raw read serves
 	// that blob even after a later commit replaced the file.
 	if stor.Provider() == storage.ProviderLocal {
-		downloadURLs = rewriteLocalBlobDownloadURLs(downloadURLs, requestBaseURL(r), "harness-configs", hc.ID, isHarnessConfigBlobLayout(hc))
+		downloadURLs = rewriteLocalBlobDownloadURLs(downloadURLs, requestBaseURL(r), "harness-configs", hc.ID, isHarnessConfigBlobLayout(hc), "")
 	}
 
 	// ContentHash names the version the URLs were signed for, so a broker

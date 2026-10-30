@@ -56,7 +56,7 @@ func TestHydrateTemplate_BlobLayoutMissesDirectRead(t *testing.T) {
 	}
 
 	blobRow := &hubclient.Template{ID: "tmpl-blob", Slug: "shared-slug", Scope: "global", StoragePath: blobPath}
-	path, err := srv.hydrateTemplate(context.Background(), &CreateAgentConfig{Template: "shared-slug", TemplateID: "tmpl-blob"}, connFor(blobRow))
+	path, err := srv.hydrateTemplate(context.Background(), &CreateAgentConfig{Template: "shared-slug", TemplateID: "tmpl-blob"}, connFor(blobRow), "")
 	if err != nil {
 		t.Fatalf("hydrateTemplate (blob row) failed: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestHydrateTemplate_BlobLayoutMissesDirectRead(t *testing.T) {
 	}
 
 	legacyRow := &hubclient.Template{ID: "tmpl-legacy", Slug: "shared-slug", Scope: "global"}
-	path, err = srv.hydrateTemplate(context.Background(), &CreateAgentConfig{Template: "shared-slug", TemplateID: "tmpl-legacy"}, connFor(legacyRow))
+	path, err = srv.hydrateTemplate(context.Background(), &CreateAgentConfig{Template: "shared-slug", TemplateID: "tmpl-legacy"}, connFor(legacyRow), "")
 	if err != nil {
 		t.Fatalf("hydrateTemplate (legacy row) failed: %v", err)
 	}

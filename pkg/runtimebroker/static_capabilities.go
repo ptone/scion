@@ -60,6 +60,9 @@ func StaticCapabilities(rt scionrt.Runtime, nodeImageRegistry string) *hubclient
 		// This broker redeems attachment delivery capabilities and writes
 		// the files into the agent's home (ptone/scion#4596).
 		AttachmentDelivery: true,
+		// This broker names the agent on its Hub template reads, so it
+		// can hydrate the agent's user-scoped template (ptone/scion#5770).
+		DispatchBoundCatalogRead: true,
 	}
 }
 
@@ -124,5 +127,6 @@ func StaticCapabilityNames(rt scionrt.Runtime) []string {
 	add(c.ChangedFields, "changedFields")
 	add(c.ClearedFields, "clearedFields")
 	add(c.AttachmentDelivery, "attachmentDelivery")
+	add(c.DispatchBoundCatalogRead, "dispatchBoundCatalogRead")
 	return names
 }

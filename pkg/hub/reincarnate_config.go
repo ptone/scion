@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"sort"
@@ -68,6 +69,73 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 	return s.buildPatchedAppliedConfig(ctx, agent, project, fixedImageRegistry(imageRegistry), nil)
 }
 
+// errTemplateNotCarriable is the sentinel a reincarnate rebuild returns when
+// the agent's recorded template is a user-scoped template that still exists
+// but cannot be kept (ptone/scion#5770). Both reincarnate handlers map it to
+// 409 template_unavailable, dry runs included.
+var errTemplateNotCarriable = errors.New("template not carriable")
+
+// templateNotCarriableError is errTemplateNotCarriable with its client
+// message.
+type templateNotCarriableError struct{ msg string }
+
+func (e *templateNotCarriableError) Error() string { return e.msg }
+func (e *templateNotCarriableError) Is(target error) bool {
+	return target == errTemplateNotCarriable
+}
+
+// carryUserScopedTemplate decides whether a reincarnate rebuild keeps the
+// agent's recorded template by ID (ptone/scion#5770). Main's slug path
+// re-resolves agent.Template project-first, then global, which would lose a
+// user-scoped template or silently swap it for a same-named project or
+// global one. This applies only to a recorded TemplateID that resolves to a
+// user-scoped template:
+//   - its creator (creatorIdentityForAgent, so self-reincarnation and moves
+//     are authorized as the creator, not the caller) must still be able to
+//     read it, and its content hash must still be the one recorded for the
+//     agent at dispatch (a reincarnate never re-pins; see "Version pinning" in
+//     authorize.go).
+//     Then it is returned with carried=true.
+//   - otherwise the rebuild fails with errTemplateNotCarriable.
+//
+// Every other case returns carried=false and main's slug path runs
+// unchanged: no TemplateID, a global- or project-scope template, or an ID
+// that no longer resolves (store.ErrNotFound; this includes a user template
+// its owner deleted, since the record keeps no scope). So a user-scoped
+// template that still exists is never silently swapped. Any other store
+// error fails the rebuild: a transient error must not swap a live
+// user-template agent onto a same-named twin.
+func (s *Server) carryUserScopedTemplate(ctx context.Context, agent *store.Agent) (*store.Template, bool, error) {
+	if agent.AppliedConfig == nil || agent.AppliedConfig.TemplateID == "" {
+		return nil, false, nil
+	}
+	tmpl, err := s.store.GetTemplate(ctx, agent.AppliedConfig.TemplateID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("look up the agent's template %s: %w", agent.AppliedConfig.TemplateID, err)
+	}
+	if tmpl == nil || tmpl.Scope != store.TemplateScopeUser {
+		return nil, false, nil
+	}
+	name := tmpl.Slug
+	if name == "" {
+		name = tmpl.Name
+	}
+	creator := s.creatorIdentityForAgent(ctx, agent)
+	if creator == nil || s.authzService == nil ||
+		!s.authzService.CheckAccess(ctx, creator, templateResource(tmpl), ActionRead).Allowed {
+		return nil, false, &templateNotCarriableError{msg: fmt.Sprintf(
+			"template %s recorded for this agent is a user-scoped template its creator can no longer read; reincarnate cannot keep it: re-create the agent or choose another template", name)}
+	}
+	if tmpl.ContentHash != agent.AppliedConfig.TemplateHash {
+		return nil, false, &templateNotCarriableError{msg: fmt.Sprintf(
+			"template %s recorded for this agent is a user-scoped template that changed since the agent was dispatched; reincarnate cannot keep it: re-create the agent, or restore the template to the version the agent was dispatched with and reincarnate again", name)}
+	}
+	return tmpl, true, nil
+}
+
 // imageRegistryResolver returns the registry the hub rewrites an agent's
 // explicit image to for the new generation's profile ("" = no rewrite). It
 // is bound to the broker the new generation runs on (ptone/scion#3916).
@@ -96,8 +164,11 @@ func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Age
 
 	// Resolve the template (no template row field feeds the legacy-fallback
 	// env reconstruction below; ptone/scion#4224).
-	var resolvedTemplate *store.Template
-	if agent.Template != "" {
+	resolvedTemplate, carried, err := s.carryUserScopedTemplate(ctx, agent)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !carried && agent.Template != "" {
 		tmpl, err := s.resolveTemplate(ctx, agent.Template, agent.ProjectID)
 		if err != nil {
 			s.agentLifecycleLog.Warn("reincarnate: failed to re-resolve template; continuing without one",
