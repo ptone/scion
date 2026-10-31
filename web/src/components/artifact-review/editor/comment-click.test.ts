@@ -42,7 +42,7 @@ interface Harness {
   hints: HintKind[];
   asked: NoteRequest[];
   /** The answer the note dialog gives next; a pending gate holds it open. */
-  answer: { note: string | null; gate?: Promise<void> };
+  answer: { note: string | null; gate?: Promise<void> | undefined };
 }
 
 async function open(md: string): Promise<Harness> {
