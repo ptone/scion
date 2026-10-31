@@ -340,7 +340,7 @@ func TestAgentDelegationIssuance_Refusals(t *testing.T) {
 	})
 	t.Run("mintable but not delegable", func(t *testing.T) {
 		body := hubRead()
-		body["permissions"] = []string{"agent:list"}
+		body["permissions"] = []string{"harness_config:list"}
 		rec := f.issue(t, alice, f.agentA.ID, body)
 		adtAssertAPIError(t, rec, http.StatusForbidden, errCodePermissionNotDelegable)
 	})

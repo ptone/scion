@@ -349,6 +349,9 @@ func TestAgentDelegablePermissions_EachExercisedThroughItsRoute(t *testing.T) {
 		"agent.attach": {"agent:attach", func(token string) *httptest.ResponseRecorder {
 			return f.do(t, http.MethodGet, adtPTYPath(attachTarget.ID), nil, adtBearer(token))
 		}},
+		"agent.list": {"agent:list", func(token string) *httptest.ResponseRecorder {
+			return f.do(t, http.MethodGet, "/api/v1/agents", nil, adtBearer(token))
+		}},
 	}
 	for perm := range permissions.AgentDelegableRegistry {
 		tc, ok := cases[perm]
