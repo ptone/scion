@@ -230,6 +230,11 @@ export async function trustedTypesFindings(
     notices: { seen: number; matched: number };
   }
 > {
+  // Copied before the first await, so the result matches the lists as they
+  // were when the caller asked: an error or notice logged while the page is
+  // read does not appear in this result.
+  const collected = [...errors];
+  const notices = [...(noticesByPage.get(page) ?? [])];
   const all = await page.evaluate(() => [...(window.__trustedTypesViolations ?? [])]);
   const allowedCounts: Record<string, number> = Object.fromEntries(
     allowed.map((a) => [a.reason, 0])
@@ -247,7 +252,6 @@ export async function trustedTypesFindings(
       if (v.disposition === 'report') allowedReports.push(sinkType(v.sample));
     } else violations.push(`${v.disposition} ${v.sample} ${v.sourceFile}:${v.lineNumber}`);
   }
-  const notices = noticesByPage.get(page) ?? [];
   const unmatched: string[] = [];
   for (const text of notices) {
     const type = noticeType(text);
@@ -258,7 +262,7 @@ export async function trustedTypesFindings(
   }
   return {
     violations,
-    errors: [...errors, ...unmatched],
+    errors: [...collected, ...unmatched],
     allowedCounts,
     notices: { seen: notices.length, matched: notices.length - unmatched.length },
   };
