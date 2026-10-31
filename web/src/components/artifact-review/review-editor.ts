@@ -303,9 +303,7 @@ export class ScionReviewEditor extends LitElement {
       >
       <div
         class="editor-root"
-        style=${styleMap(
-          this.insetTop > 0 ? { '--review-scroll-inset': `${this.insetTop}px` } : {}
-        )}
+        style=${styleMap({ '--review-scroll-inset': `${this.insetTop}px` })}
       ></div>
       ${this.card
         ? html`<sl-popup

@@ -118,10 +118,12 @@ describe('scion-review-editor scrollInset', () => {
     expect(css).toMatch(
       /\.editor-root \[tabindex\],\s*\.editor-root a\[href\]\s*\{\s*scroll-margin-top: var\(--review-scroll-inset, 0px\);/
     );
-    // 0, nothing pinned: today's behaviour, ProseMirror's defaults and no margin.
+    // 0, nothing pinned: today's behaviour, ProseMirror's defaults and a 0
+    // scroll-margin (the CSS default).
     el.scrollInset = 0;
     await el.updateComplete;
-    expect(root.style.getPropertyValue('--review-scroll-inset')).toBe('');
+    // Always set here, so an inherited value cannot act as a second input.
+    expect(root.style.getPropertyValue('--review-scroll-inset')).toBe('0px');
     expect(props(el).margin).toEqual({ top: 5, right: 5, bottom: 5, left: 5 });
     expect(props(el).threshold).toEqual({ top: 0, right: 0, bottom: 0, left: 0 });
   });
@@ -134,7 +136,7 @@ describe('scion-review-editor scrollInset', () => {
       await el.updateComplete;
       el.scrollInset = bad;
       await el.updateComplete;
-      expect(root.style.getPropertyValue('--review-scroll-inset'), String(bad)).toBe('');
+      expect(root.style.getPropertyValue('--review-scroll-inset'), String(bad)).toBe('0px');
       expect(props(el).margin.top, String(bad)).toBe(5);
       expect(props(el).threshold.top, String(bad)).toBe(0);
     }
