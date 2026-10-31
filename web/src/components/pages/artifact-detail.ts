@@ -874,25 +874,17 @@ export class ScionPageArtifactDetail extends LitElement {
     return this.seq > 0 ? `${id}/versions/${this.seq}` : id;
   }
 
-  /**
-   * Loads the artifact, the version shown and its versions. A quiet load
-   * (Refresh, ptone/scion#6851) keeps the page on screen while it runs and
-   * reports a failure in a toast instead of the error state.
-   */
-  private async load(opts: { quiet?: boolean } = {}): Promise<void> {
-    const quiet = !!opts.quiet;
+  private async load(): Promise<void> {
     const gen = ++this.loadGen;
     this.viewGen++;
-    if (!quiet) {
-      this.loading = true;
-      this.text = null;
-      this.view = null;
-      this.viewError = null;
-      this.viewExpired = false;
-      this.crossProjectSharing = false;
-    }
+    this.loading = true;
     this.error = null;
     this.notFound = false;
+    this.text = null;
+    this.view = null;
+    this.viewError = null;
+    this.viewExpired = false;
+    this.crossProjectSharing = false;
     if (this.viewTimer) clearTimeout(this.viewTimer);
     this.viewTimer = null;
     try {
@@ -916,15 +908,6 @@ export class ScionPageArtifactDetail extends LitElement {
       void this.loadVersions(0, gen);
       if (data.canManage) void this.loadCrossProjectSharing(gen);
       const kind = this.entry ? rendererFor(this.entry.mediaType) : 'download';
-      if (quiet) {
-        // What the new entry does not show is cleared; the rest is replaced below.
-        if (kind !== 'markdown' && kind !== 'text') this.text = null;
-        if (kind !== 'html') {
-          this.view = null;
-          this.viewError = null;
-          this.viewExpired = false;
-        }
-      }
       if ((kind === 'markdown' || kind === 'text') && this.entry) {
         if (this.entry.size <= MAX_INLINE_TEXT_BYTES) {
           await this.loadText(this.entry, gen);
@@ -940,9 +923,7 @@ export class ScionPageArtifactDetail extends LitElement {
     } catch (err) {
       if (gen !== this.loadGen) return;
       console.error('Failed to load artifact:', err);
-      const message = err instanceof Error ? err.message : 'Failed to load artifact';
-      if (quiet && this.data) showToast(`Could not refresh: ${message}`, 'danger');
-      else this.error = message;
+      this.error = err instanceof Error ? err.message : 'Failed to load artifact';
     } finally {
       if (gen === this.loadGen) this.loading = false;
     }
@@ -950,13 +931,75 @@ export class ScionPageArtifactDetail extends LitElement {
 
   /** Reloads the artifact and its versions in place (ptone/scion#6851). */
   private refresh = (): void => {
-    if (this.refreshing) return;
+    if (this.refreshing || this.editing || this.reviewing || this.publishOpen) return;
     this.refreshing = true;
     this.versionsCheckedAt = Date.now();
-    void this.load({ quiet: true }).finally(() => {
+    void this.refreshInPlace().finally(() => {
       this.refreshing = false;
     });
   };
+
+  /**
+   * Refresh's reload (ptone/scion#6851): the page stays on screen. The
+   * artifact and, for a text entry, its text are read first and applied
+   * together, so the version shown and its text never come from different
+   * loads. The result is dropped when an edit, a review or an upload started
+   * while it ran (their buttons are disabled meanwhile), or a newer load
+   * began. A
+   * failure is reported in a toast; the page keeps what it showed.
+   */
+  private async refreshInPlace(): Promise<void> {
+    const gen = ++this.loadGen;
+    // Dropped once anything that publishes from the shown version started.
+    const stale = (): boolean =>
+      gen !== this.loadGen || this.editing || this.reviewing || this.publishOpen;
+    try {
+      const res = await apiFetch(this.versionPath);
+      if (stale()) return;
+      if (res.status === 404) {
+        this.notFound = true;
+        return;
+      }
+      if (!res.ok) throw new Error(await extractApiError(res, `HTTP ${res.status}`));
+      const data = (await res.json()) as ArtifactResponse;
+      if (stale()) return;
+      const version = data.version;
+      const entry = version?.files.find((f) => f.path === version.entryPath) ?? null;
+      const kind = entry ? rendererFor(entry.mediaType) : 'download';
+      let text: string | null = null;
+      const inline = entry !== null && entry.size <= MAX_INLINE_TEXT_BYTES;
+      if ((kind === 'markdown' || kind === 'text') && inline) {
+        const r = await apiFetch(artifactFileUrl(this.artifactId, version!.seq, entry.path, true));
+        if (!r.ok) throw new Error(await extractApiError(r, `HTTP ${r.status}`));
+        text = await r.text();
+        if (stale()) return;
+      }
+      // Apply the version, its entry and its text together.
+      this.data = data;
+      this.noteSeq(data.artifact.currentSeq);
+      dispatchPageTitle(this, data.artifact.title, 'Artifacts');
+      this.entry = entry;
+      this.text = text;
+      this.resolveNames();
+      void this.loadVersions(0, gen);
+      if (data.canManage) void this.loadCrossProjectSharing(gen);
+      if (kind === 'html' && version) {
+        void this.loadView(version.seq);
+      } else {
+        this.viewGen++;
+        if (this.viewTimer) clearTimeout(this.viewTimer);
+        this.viewTimer = null;
+        this.view = null;
+        this.viewError = null;
+        this.viewExpired = false;
+      }
+    } catch (err) {
+      if (gen !== this.loadGen) return;
+      console.error('Failed to refresh artifact:', err);
+      const message = err instanceof Error ? err.message : 'Failed to refresh';
+      showToast(`Could not refresh: ${message}`, 'danger');
+    }
+  }
 
   /** When the version list was last read by a Refresh or a return to the tab. */
   private versionsCheckedAt = 0;
@@ -1953,13 +1996,21 @@ export class ScionPageArtifactDetail extends LitElement {
                 </sl-tooltip>
                 ${v ? this.renderVersionMenu() : nothing}
                 ${this.canEdit
-                  ? html`<sl-button size="small" @click=${this.startEdit}>
+                  ? html`<sl-button
+                      size="small"
+                      ?disabled=${this.refreshing}
+                      @click=${this.startEdit}
+                    >
                       <sl-icon slot="prefix" name="pencil"></sl-icon>
                       Edit
                     </sl-button>`
                   : nothing}
                 ${this.canReview
-                  ? html`<sl-button size="small" @click=${this.startReview}>
+                  ? html`<sl-button
+                      size="small"
+                      ?disabled=${this.refreshing}
+                      @click=${this.startReview}
+                    >
                       <sl-icon slot="prefix" name="chat-text"></sl-icon>
                       Review
                     </sl-button>`
@@ -2422,6 +2473,7 @@ export class ScionPageArtifactDetail extends LitElement {
                   <sl-button
                     size="small"
                     variant="primary"
+                    ?disabled=${this.refreshing}
                     @click=${(): void => {
                       this.publishOpen = true;
                     }}
@@ -2430,7 +2482,11 @@ export class ScionPageArtifactDetail extends LitElement {
                     Upload new version
                   </sl-button>
                   ${this.canEdit
-                    ? html`<sl-button size="small" @click=${this.startEdit}>
+                    ? html`<sl-button
+                        size="small"
+                        ?disabled=${this.refreshing}
+                        @click=${this.startEdit}
+                      >
                         <sl-icon slot="prefix" name="pencil"></sl-icon>
                         Edit
                       </sl-button>`
@@ -2442,6 +2498,7 @@ export class ScionPageArtifactDetail extends LitElement {
           ? html`<div class="more">
               <sl-button
                 size="small"
+                ?disabled=${this.refreshing}
                 @click=${(): void => {
                   this.publishOpen = true;
                 }}

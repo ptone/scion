@@ -76,6 +76,14 @@ export function headingSlug(text: string): string {
     .replace(/\s/g, '-');
 }
 
+/** The link element of the editor an event's target is in (a text node's parent counts). */
+function linkElementAt(view: EditorView, target: EventTarget | null): Element | null {
+  const node = target as Node | null;
+  const el = node?.nodeType === 3 ? node.parentElement : (node as Element | null);
+  const a = el?.closest?.('a') ?? null;
+  return a && view.dom.contains(a) ? a : null;
+}
+
 /** The parts of a mouse event the link gestures read. */
 type Gesture = Pick<MouseEvent, 'type' | 'button' | 'metaKey' | 'ctrlKey'>;
 
@@ -88,9 +96,18 @@ export function followsLink(e: Gesture, mac: boolean): boolean {
   return (e.type === 'click' && e.button === 0 && mod) || (e.type === 'auxclick' && e.button === 1);
 }
 
-/** Whether a press is a Mod press of the main button, held back on a link. */
+/** Whether a press is a Mod press of the main button. */
 export function isModPress(e: Gesture, mac: boolean): boolean {
   return e.button === 0 && (mac ? e.metaKey : e.ctrlKey);
+}
+
+/**
+ * Whether a press on a link is held back: a Mod press of the main button
+ * (no caret move, no added selection range) or a middle press (no paste of
+ * the PRIMARY selection where the middle button pastes, as on Linux).
+ */
+export function holdsLinkPress(e: Gesture, mac: boolean): boolean {
+  return e.button === 1 || isModPress(e, mac);
 }
 
 /**
@@ -210,8 +227,8 @@ export class ReviewController {
    * new tab, a fragment scrolls to its heading, anything else does nothing.
    */
   private onLinkClick(view: EditorView, event: MouseEvent): boolean {
-    const a = (event.target as Element | null)?.closest?.('a');
-    if (!a || !view.dom.contains(a)) return false;
+    const a = linkElementAt(view, event.target);
+    if (!a) return false;
     event.preventDefault();
     if (!followsLink(event, isMacPlatform())) return false;
     const target = linkMarkTarget(view, a, this.opts.render());
@@ -273,11 +290,11 @@ export class ReviewController {
           click: (view, event): boolean => this.onLinkClick(view, event),
           auxclick: (view, event): boolean => this.onLinkClick(view, event),
           // A Mod press on a link neither moves the caret nor (Firefox, Ctrl)
-          // adds a selection range: the click that follows opens the link.
+          // adds a selection range, and a middle press pastes nothing: the
+          // click or auxclick that follows opens the link.
           mousedown: (view, event): boolean => {
-            if (!isModPress(event, isMacPlatform())) return false;
-            const link = (event.target as Element | null)?.closest?.('a');
-            if (!link || !view.dom.contains(link)) return false;
+            if (!holdsLinkPress(event, isMacPlatform())) return false;
+            if (!linkElementAt(view, event.target)) return false;
             event.preventDefault();
             return true;
           },

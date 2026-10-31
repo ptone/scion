@@ -28,7 +28,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const platform = vi.hoisted(() => ({ mac: false }));
 vi.mock('../../../utils/platform.js', () => ({ isMacPlatform: () => platform.mac }));
 
-import { ReviewController, followsLink, isModPress } from './controller.js';
+import { ReviewController, followsLink, holdsLinkPress, isModPress } from './controller.js';
 import { linkOpenHint } from './safe-render.js';
 import { renderContext } from './__fixtures__/core.js';
 
@@ -83,10 +83,11 @@ function mouse(type: 'click' | 'auxclick' | 'mousedown', init: MouseEventInit = 
   return new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, ...init });
 }
 
-/** The text node inside a link, where a click lands. */
-function textIn(a: HTMLAnchorElement): Element {
-  // A click's target is the element the pointer is over.
-  return a;
+/** The text node inside a link: events dispatched there bubble to the link. */
+function textIn(a: HTMLAnchorElement): Node {
+  const t = a.firstChild;
+  if (!t || t.nodeType !== 3) throw new Error('link has no text node');
+  return t;
 }
 
 function markdown(c: ReviewController): string {
@@ -175,6 +176,29 @@ describe('links in the review editor (ptone/scion#6848)', () => {
     expect(c.view.state.selection.toJSON()).toEqual(sel);
   });
 
+  it('a middle press on a link is held back, so it pastes nothing (PRIMARY on Linux)', async () => {
+    const c = await open(DOC);
+    const before = markdown(c);
+    const down = mouse('mousedown', { button: 1 });
+    textIn(link(c, 'the site')).dispatchEvent(down);
+    expect(down.defaultPrevented).toBe(true);
+    expect(markdown(c)).toBe(before);
+    // The middle click that follows opens the link once.
+    textIn(link(c, 'the site')).dispatchEvent(mouse('auxclick', { button: 1 }));
+    expect(opened).toEqual([['https://example.com/page', '_blank', 'noopener,noreferrer']]);
+  });
+
+  it('a Mod-click on a #fragment link moves to its heading and opens nothing', async () => {
+    const c = await open('[go](#second-part)\n\n# First\n\n## Second part\n');
+    const go = link(c, 'go');
+    expect(go.hasAttribute('href')).toBe(false);
+    const e = mouse('click', { ctrlKey: true });
+    textIn(go).dispatchEvent(e);
+    expect(e.defaultPrevented).toBe(true);
+    expect(opened).toEqual([]);
+    expect(c.view.state.selection.$from.parent.textContent).toBe('Second part');
+  });
+
   it('decides the gestures by platform: Mod is Cmd on macOS and Ctrl elsewhere', () => {
     const e = (type: string, init: Partial<MouseEvent>): MouseEvent =>
       ({ type, button: 0, metaKey: false, ctrlKey: false, ...init }) as MouseEvent;
@@ -193,6 +217,12 @@ describe('links in the review editor (ptone/scion#6848)', () => {
     expect(isModPress(e('mousedown', {}), false)).toBe(false);
     expect(isModPress(e('mousedown', { ctrlKey: true, button: 2 }), false)).toBe(false);
     expect(isModPress(e('mousedown', { ctrlKey: true }), true)).toBe(false);
+    // Held back on a link: a Mod press or a middle press; a plain or right press is not.
+    expect(holdsLinkPress(e('mousedown', { button: 1 }), false)).toBe(true);
+    expect(holdsLinkPress(e('mousedown', { button: 1 }), true)).toBe(true);
+    expect(holdsLinkPress(e('mousedown', { ctrlKey: true }), false)).toBe(true);
+    expect(holdsLinkPress(e('mousedown', {}), false)).toBe(false);
+    expect(holdsLinkPress(e('mousedown', { button: 2 }), false)).toBe(false);
   });
 
   it('the open hint is a fixed text per platform', () => {

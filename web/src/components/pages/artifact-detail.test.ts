@@ -90,6 +90,10 @@ interface MockOptions {
   write?: (method: string, url: string) => Response;
   /** File body at the time of the read (overrides body). */
   bodyFn?: () => string;
+  /** Holds a metadata GET until the promise it returns resolves (none: answer at once). */
+  metaGate?: () => Promise<void> | undefined;
+  /** Status of a metadata GET at the time of the request (default 200). */
+  metaStatus?: () => number;
 }
 
 const VIEW_URL = `/api/v1/artifacts/view/${ID}.1.9999999999.c2lnbmF0dXJl/`;
@@ -161,11 +165,16 @@ function mockFetch(
           new Response('{"error":{"code":"not_found","message":"not found"}}', { status: 404 })
         );
       }
-      return Promise.resolve(
-        new Response(JSON.stringify(meta), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        })
+      const status = opts.metaStatus?.() ?? 200;
+      const gate = opts.metaGate?.() ?? Promise.resolve();
+      // The body is built when the gate opens, so a test can change meta meanwhile.
+      return gate.then(() =>
+        status !== 200
+          ? new Response('{"error":{"code":"internal","message":"boom"}}', { status })
+          : new Response(JSON.stringify(meta), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            })
       );
     })
   );
@@ -2312,5 +2321,153 @@ describe('artifact page: refresh, origin and version labels', () => {
     } finally {
       nav.stop();
     }
+  });
+  /** Private state the race tests read and the actions they start. */
+  type Internals = {
+    data: ArtifactResponse;
+    text: string | null;
+    reviewText: string;
+    editing: boolean;
+    reviewing: boolean;
+    startReview: () => void;
+    startEdit: () => void;
+  };
+  const internals = (el: ScionPageArtifactDetail): Internals => el as unknown as Internals;
+
+  /** A Refresh whose artifact read is held until release() (round 1, R-1). */
+  function heldRefresh(): {
+    meta: ArtifactResponse;
+    body: { text: string };
+    hold: () => void;
+    release: () => void;
+    opts: { metaGate: () => Promise<void> | undefined; bodyFn: () => string };
+  } {
+    const meta = artifact('design.md', 'text/markdown');
+    const body = { text: '# One' };
+    let held = false;
+    let open: (() => void) | null = null;
+    return {
+      meta,
+      body,
+      hold: (): void => {
+        held = true;
+      },
+      release: (): void => {
+        held = false;
+        open?.();
+      },
+      opts: {
+        metaGate: () => (held ? new Promise<void>((r) => (open = () => r())) : undefined),
+        bodyFn: () => body.text,
+      },
+    };
+  }
+
+  /** Meanwhile v2 is published, with new text. */
+  function publishV2(h: ReturnType<typeof heldRefresh>): void {
+    h.meta.artifact.currentSeq = 2;
+    h.meta.version = version(2, 'publish', ['user', 'u-1']);
+    h.body.text = '# Two';
+  }
+
+  it('R-1: a review started while a Refresh is in flight keeps the version it was started on', async () => {
+    const h = heldRefresh();
+    mockFetch(h.meta, '# One', h.opts);
+    const el = await mountAs();
+    const review = (): HTMLElement => headerButton(el, 'Review');
+    expect(review().hasAttribute('disabled')).toBe(false);
+
+    h.hold();
+    headerButton(el, 'Refresh').click();
+    await el.updateComplete;
+    // Review (and Edit) cannot be clicked while the Refresh runs.
+    expect(review().hasAttribute('disabled')).toBe(true);
+    expect(headerButton(el, 'Edit').hasAttribute('disabled')).toBe(true);
+
+    // A review starts anyway (another path), then the Refresh's read lands with v2.
+    internals(el).startReview();
+    publishV2(h);
+    h.release();
+    await settle(el);
+    // The Refresh result was dropped: the review's text and its base are both v1.
+    expect(internals(el).data.version!.seq).toBe(1);
+    expect(internals(el).text).toBe('# One');
+    expect(internals(el).reviewText).toBe('# One');
+  });
+
+  it('R-1 control: a Refresh with no review overlapping shows the new version, and a review then starts from it', async () => {
+    const h = heldRefresh();
+    mockFetch(h.meta, '# One', h.opts);
+    const el = await mountAs();
+    h.hold();
+    headerButton(el, 'Refresh').click();
+    await el.updateComplete;
+    publishV2(h);
+    h.release();
+    await settle(el);
+    expect(internals(el).data.version!.seq).toBe(2);
+    expect(internals(el).text).toBe('# Two');
+    expect(headerButton(el, 'Review').hasAttribute('disabled')).toBe(false);
+    internals(el).startReview();
+    expect(internals(el).reviewText).toBe('# Two');
+  });
+
+  for (const mode of ['editing', 'reviewing'] as const) {
+    it(`R-2: back on the tab while ${mode}, the version list is not re-read`, async () => {
+      const meta = artifact('design.md', 'text/markdown');
+      const urls = mockFetch(meta, '# Doc');
+      const el = await mountAs();
+      if (mode === 'editing') internals(el).startEdit();
+      else internals(el).startReview();
+      await el.updateComplete;
+      expect(internals(el)[mode]).toBe(true);
+      const listed = (): number => urls.filter((u) => /\/versions(\?|$)/.test(u)).length;
+      const n = listed();
+      const now = Date.now();
+      vi.spyOn(Date, 'now').mockReturnValue(now + 31_000);
+      const visible = (): void => {
+        Object.defineProperty(document, 'visibilityState', {
+          value: 'visible',
+          configurable: true,
+        });
+        document.dispatchEvent(new Event('visibilitychange'));
+      };
+      visible();
+      await settle(el);
+      expect(listed()).toBe(n);
+      // Positive control: once the edit or review is closed, the same return re-reads it.
+      internals(el)[mode] = false;
+      visible();
+      await settle(el);
+      expect(listed()).toBe(n + 1);
+    });
+  }
+
+  it('R-2: a failed Refresh keeps the page and says so in a toast', async () => {
+    const meta = artifact('design.md', 'text/markdown');
+    let status = 200;
+    mockFetch(meta, '# Doc', { metaStatus: () => status });
+    const el = await mountAs();
+    expect(el.shadowRoot!.querySelector('scion-artifact-markdown-frame')).not.toBeNull();
+    status = 500;
+    headerButton(el, 'Refresh').click();
+    await settle(el);
+    expect(el.shadowRoot!.querySelector('.loading-state')).toBeNull();
+    expect(el.shadowRoot!.querySelector('.error-state')).toBeNull();
+    expect(el.shadowRoot!.querySelector('scion-artifact-markdown-frame')).not.toBeNull();
+    const toasts = Array.from(document.querySelectorAll('sl-alert')).map(text);
+    expect(toasts.some((t) => t.startsWith('Could not refresh:'))).toBe(true);
+  });
+
+  it('R-2: a version with no author shows the bare kind in the menu and the header', async () => {
+    const meta = artifact('design.md', 'text/markdown');
+    mockFetch(meta, '# Doc');
+    const el = await mountAs();
+    const v = meta.version!;
+    expect(v.createdByKind).toBeUndefined();
+    expect(menuItems(el)).toEqual([`v1 (current) · Publish · ${formatInstant(v.createdAt)}`]);
+    expect(text(el.shadowRoot!.querySelector('.meta .version-info'))).toBe(
+      `Version: v1 · current · Publish · ${formatInstant(v.createdAt)}`
+    );
   });
 });
