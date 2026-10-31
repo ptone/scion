@@ -52,7 +52,7 @@ function walk(dir: string): string[] {
   return out;
 }
 
-const isSource = (path: string) => /\.ts$/.test(path) && !/\.test\.ts$/.test(path);
+const isSource = (path: string): boolean => /\.ts$/.test(path) && !/\.test\.ts$/.test(path);
 
 /** Every components/**\/chat/*.ts file and the chat page components. */
 function chatFiles(): string[] {
@@ -73,9 +73,7 @@ function declaredNames(text: string): Set<string> {
 
 /** Names set at runtime, written as quoted literals (`'--scion-x'`). */
 function literalNames(text: string): Set<string> {
-  return new Set(
-    [...stripComments(text).matchAll(/['"`](--scion-[\w-]+)['"`]/g)].map((m) => m[1])
-  );
+  return new Set([...stripComments(text).matchAll(/['"`](--scion-[\w-]+)['"`]/g)].map((m) => m[1]));
 }
 
 /** Names a text reads through var(--scion-x ...). */
@@ -169,7 +167,8 @@ function token(value: string | undefined): string {
 }
 
 describe('chat banner and reply contrast', () => {
-  const read = (file: string) => readFileSync(join(srcDir, 'components/shared/chat', file), 'utf8');
+  const read = (file: string): string =>
+    readFileSync(join(srcDir, 'components/shared/chat', file), 'utf8');
   const thread = read('chat-thread.ts');
   const message = read('chat-message.ts');
   const composer = read('chat-composer.ts');

@@ -17,15 +17,15 @@ applied. Six other chat rules had the same defect: each read a token that
 All seven now read declared theme tokens. The light theme looks the same as
 before, except for the artifact picker's row lines.
 
-| Rule | Was | Now |
-|---|---|---|
-| `chat-thread.ts` `.star-filter-banner` background | `--scion-surface-2` | `--scion-bg` |
-| `chat-message.ts` `.reply-preview` background | `--scion-surface-50` | `--scion-bg` |
-| `chat-message.ts` `.reply-preview:hover` background | `--scion-surface-100` | `--scion-bg-subtle` |
-| `chat-composer.ts` `.reply-bar` background | `--scion-surface-50` | `--scion-bg` |
-| `chat-search.ts` `.result-item` row line | `--scion-border-subtle` | `--scion-bg-subtle` |
-| `artifact-picker.ts` `td` row line | `--scion-border-subtle` | `--scion-border` |
-| `chat-members.ts` hover background | `--scion-surface-hover` | `--scion-bg-subtle` |
+| Rule                                                | Was                     | Now                 |
+| --------------------------------------------------- | ----------------------- | ------------------- |
+| `chat-thread.ts` `.star-filter-banner` background   | `--scion-surface-2`     | `--scion-bg`        |
+| `chat-message.ts` `.reply-preview` background       | `--scion-surface-50`    | `--scion-bg`        |
+| `chat-message.ts` `.reply-preview:hover` background | `--scion-surface-100`   | `--scion-bg-subtle` |
+| `chat-composer.ts` `.reply-bar` background          | `--scion-surface-50`    | `--scion-bg`        |
+| `chat-search.ts` `.result-item` row line            | `--scion-border-subtle` | `--scion-bg-subtle` |
+| `artifact-picker.ts` `td` row line                  | `--scion-border-subtle` | `--scion-border`    |
+| `chat-members.ts` hover background                  | `--scion-surface-hover` | `--scion-bg-subtle` |
 
 - `--scion-bg` is neutral-50 in the light theme (the old fallback colour) and
   neutral-900 in the dark one, so the banner, the reply preview and the reply
