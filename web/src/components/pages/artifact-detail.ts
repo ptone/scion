@@ -711,9 +711,13 @@ export class ScionPageArtifactDetail extends LitElement {
          document scrolls under them, at every width. The z-index lifts them
          over the document only: Shoelace's dialogs, drawers, popups and
          tooltips stack far above. */
+      /* Sticky offsets count from inside the scroll container's padding
+         (the app shell's content area: 1.5rem, 1rem at 640px and below), so
+         the block rises by that padding to meet the top edge and the text
+         does not show above it. */
       .g-sticky {
         position: sticky;
-        top: 0;
+        top: -1.5rem;
         z-index: 2;
         background: var(--scion-bg, #f8fafc);
       }
@@ -825,6 +829,9 @@ export class ScionPageArtifactDetail extends LitElement {
         padding: 0 0.3rem;
       }
       @media (max-width: 640px) {
+        .g-sticky {
+          top: -1rem;
+        }
         .g-toolbar {
           gap: 0.3rem;
           padding: 0.4rem;
@@ -840,6 +847,13 @@ export class ScionPageArtifactDetail extends LitElement {
         }
         .g-toolbar .narrow {
           display: inline;
+        }
+      }
+      /* Comment is the only way to comment by touch: a tap target of at
+         least 44px on phones and touch screens. */
+      @media (max-width: 640px), (pointer: coarse) {
+        .g-toolbar sl-button.comment {
+          --sl-input-height-small: 2.75rem;
         }
       }
       .download-state,
