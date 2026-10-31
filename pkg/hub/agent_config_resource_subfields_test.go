@@ -233,6 +233,35 @@ func TestAgentConfigPatch_ResourcesSubFieldDropResumes(t *testing.T) {
 	assert.Empty(t, starts[0].inline.Resources.Requests.Memory)
 }
 
+// TestAgentConfigPatch_ResourcesSubFieldDropRestarts: a sub-field clear
+// held for a running agent reaches the dispatched inline config of a
+// user restart's start leg, as it reaches a start's and a resume's.
+func TestAgentConfigPatch_ResourcesSubFieldDropRestarts(t *testing.T) {
+	disp := &inlineCaptureDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher()}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	setHeldEditsExperiment(t, srv, true)
+	setBrokerCapabilities(t, s, broker.ID, &store.BrokerCapabilities{Reprovision: true, ClearedFields: true, ClearedResourceSubfields: true})
+	agent := newSubfieldTestAgent(t, s, project, broker, state.PhaseRunning)
+
+	resp := patchPending(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{
+		"resources": map[string]interface{}{
+			"requests": map[string]string{"cpu": "1", "memory": "1Gi"},
+			"limits":   map[string]string{"cpu": "2"},
+		},
+	}})
+	assert.Equal(t, []string{"config.resources"}, resp.Disposition.Held)
+
+	pendingLifecycleWarnings(t, srv, agent.ID, "restart")
+	starts := disp.snapshot()
+	require.Len(t, starts, 1)
+	assert.False(t, starts[0].resume, "a restart's start leg is a fresh start")
+	assert.Equal(t, []string{"resources.limits.memory"}, starts[0].inline.ClearedFields)
+	require.NotNil(t, starts[0].inline.Resources)
+	assert.Equal(t, "2", starts[0].inline.Resources.Limits.CPU)
+	assert.Empty(t, starts[0].inline.Resources.Limits.Memory)
+	assert.Nil(t, pendingReloadAgent(t, s, agent.ID).PendingConfig)
+}
+
 // TestDispatchAgentStart_SendsResourceSubfieldClears drives the real start
 // dispatch, for a start and a resume: the inline config handed to the
 // broker client lists the agent's resources sub-field clears and omits the
