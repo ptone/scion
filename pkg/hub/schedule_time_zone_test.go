@@ -49,6 +49,18 @@ func createZonedSchedule(t *testing.T, srv *Server, projectID, name, cronExpr, z
 	return created
 }
 
+// errorDetailField returns details.field of an error response.
+func errorDetailField(t *testing.T, body []byte) any {
+	t.Helper()
+	var resp struct {
+		Error struct {
+			Details map[string]any `json:"details"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(body, &resp), string(body))
+	return resp.Error.Details["field"]
+}
+
 // assertLocalRun checks that next is a UTC instant at hh:mm local time in zone.
 func assertLocalRun(t *testing.T, next *time.Time, zone string, hh, mm int) {
 	t.Helper()
@@ -95,6 +107,7 @@ func TestScheduleTimeZone_CreateRefusesInvalidZone(t *testing.T) {
 			})
 		require.Equal(t, http.StatusBadRequest, rec.Code, zone)
 		assert.Equal(t, want, errorMessage(t, rec.Body.Bytes()), zone)
+		assert.Equal(t, "timeZone", errorDetailField(t, rec.Body.Bytes()), zone)
 	}
 
 	// The zone prefix refusal is unchanged, and takes precedence, even when
@@ -169,6 +182,7 @@ func TestScheduleTimeZone_Update(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodPatch, base, UpdateScheduleRequest{CronExpr: "0 1 * * *", TimeZone: strPtr("Nowhere/City")})
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, errorMessage(t, rec.Body.Bytes()), `unknown time zone "Nowhere/City"`)
+	assert.Equal(t, "timeZone", errorDetailField(t, rec.Body.Bytes()))
 	got = get()
 	assert.Equal(t, "45 22 * * *", got.CronExpr)
 	assert.Equal(t, "Asia/Kolkata", got.TimeZone)

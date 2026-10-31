@@ -194,6 +194,26 @@ func TestNextDST(t *testing.T) {
 			want: []string{"2026-10-03T15:30:00Z", "2026-10-04T15:15:00Z"},
 		},
 		{
+			name: "sub-hourly schedule computed during the second pass uses the second occurrence once",
+			expr: "*/30 * * * *", zone: "America/Los_Angeles", start: "2026-11-01T09:10:00Z",
+			// 01:10 PST: 01:30 PDT has gone by, 01:30 PST is still ahead;
+			// then 02:00 PST.
+			want: []string{"2026-11-01T09:30:00Z", "2026-11-01T10:00:00Z"},
+		},
+		{
+			name: "day of week is matched on the local date, not the UTC date",
+			expr: "0 20 * * 5", zone: "America/Los_Angeles", start: "2026-03-04T00:00:00Z",
+			// Friday 20:00 local is Saturday in UTC, on both sides of the
+			// spring change (2026-03-08).
+			want: []string{"2026-03-07T04:00:00Z", "2026-03-14T03:00:00Z"},
+		},
+		{
+			name: "day of month is matched on the local date, not the UTC date",
+			expr: "0 0 1 * *", zone: "Asia/Tokyo", start: "2026-03-15T00:00:00Z",
+			// 00:00 on the 1st in Tokyo is 15:00 on the previous day in UTC.
+			want: []string{"2026-03-31T15:00:00Z", "2026-04-30T15:00:00Z"},
+		},
+		{
 			name: "zone without daylight saving is a fixed shift",
 			expr: "0 9 * * 1", zone: "Asia/Kolkata", start: "2026-03-01T00:00:00Z",
 			want: []string{"2026-03-02T03:30:00Z", "2026-03-09T03:30:00Z"},
@@ -206,6 +226,25 @@ func TestNextDST(t *testing.T) {
 				t.Errorf("runs of %q in %s after %s:\n got  %v\n want %v", tc.expr, tc.zone, tc.start, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestNextLocalDateFields checks the local weekday and day of month of the
+// runs whose UTC date differs from the local one.
+func TestNextLocalDateFields(t *testing.T) {
+	la := mustZone(t, "America/Los_Angeles")
+	for _, s := range runs(t, "0 20 * * 5", "America/Los_Angeles", "2026-03-04T00:00:00Z", 2) {
+		local := mustUTC(t, s).In(la)
+		if local.Weekday() != time.Friday || local.Hour() != 20 {
+			t.Errorf("run %s is %v local, want Friday 20:00", s, local)
+		}
+	}
+	tokyo := mustZone(t, "Asia/Tokyo")
+	for _, s := range runs(t, "0 0 1 * *", "Asia/Tokyo", "2026-03-15T00:00:00Z", 2) {
+		local := mustUTC(t, s).In(tokyo)
+		if local.Day() != 1 || local.Hour() != 0 {
+			t.Errorf("run %s is %v local, want the 1st at 00:00", s, local)
+		}
 	}
 }
 

@@ -51,11 +51,13 @@ func hasCronZonePrefix(expr string) bool {
 // only parser for schedule expressions in the hub: every create, update,
 // enable, resume and evaluation goes through it.
 //
-// Schedules are UTC-only. A zone prefix is rejected with errCronZonePrefix,
-// and the returned schedule is pinned to UTC explicitly: robfig/cron captures
-// time.Local when no prefix is given, and a time.Local schedule evaluates in
-// the zone of the time passed to Next, so pinning makes the result
-// independent of both the process zone and the caller's time value.
+// A zone prefix is rejected with errCronZonePrefix; the zone is the
+// schedule's separate time zone field. The returned schedule is pinned to
+// UTC: cronzone.Next uses it as a naive wall clock and maps the result into
+// the schedule's zone (scheduleNextRun). Pinning also keeps the result
+// independent of the process zone: robfig/cron captures time.Local when no
+// prefix is given, and a time.Local schedule evaluates in the zone of the
+// time passed to Next.
 func parseScheduleCron(expr string) (cron.Schedule, error) {
 	if hasCronZonePrefix(expr) {
 		return nil, errCronZonePrefix
