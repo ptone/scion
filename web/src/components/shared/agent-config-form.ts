@@ -623,6 +623,15 @@ const AUTO_EXPOSE_ENV_KEYS: ReadonlySet<string> = new Set([
  */
 const TZ_ENV_KEY = 'TZ';
 
+/**
+ * Why Unlimited is disabled on a count limit whose editability sets
+ * unlimitedUnsupported (a bare flag): the hub's refusal reasons for such a
+ * change, unlimited_not_supported_by_broker and broker_unknown
+ * (pkg/hub/agent_config_unlimited.go), in one text.
+ */
+export const UNLIMITED_UNSUPPORTED_REASON =
+  'Unlimited is not available for this agent: its runtime broker cannot apply Unlimited over an inherited limit, or it has no runtime broker.';
+
 /** Why the env fields are locked for a caller the hub does not show the env to. */
 export const ENV_HIDDEN_REASON =
   "You cannot see this agent's environment, so it cannot be edited here.";
@@ -1177,12 +1186,26 @@ export class ScionAgentConfigForm extends LitElement {
   }
 
   /**
-   * Whether the stored value of a limit is Unlimited. Only a duration can
-   * show it: "0" is stored, while a count limit of 0 is indistinguishable
-   * from unset once saved.
+   * Whether the stored value of a limit is Unlimited: "0" for a duration, 0
+   * for a count limit (absent or null is inherit).
    */
   private storedUnlimited(f: AgentConfigFieldDef): boolean {
-    return f.control === 'limit-duration' && this.values?.[f.configKey] === '0';
+    if (f.control === 'limit-duration') return this.values?.[f.configKey] === '0';
+    if (f.control === 'limit-count') return this.values?.[f.configKey] === 0;
+    return false;
+  }
+
+  /**
+   * The hub reports that the agent's broker cannot apply Unlimited on this
+   * count limit (editability unlimitedUnsupported): the Unlimited control is
+   * disabled, while a stored Unlimited still shows as such.
+   */
+  private unlimitedUnsupported(f: AgentConfigFieldDef): boolean {
+    return (
+      this.mode === 'edit' &&
+      f.control === 'limit-count' &&
+      !!this.fieldState(f).unlimitedUnsupported
+    );
   }
 
   private editField(key: string, patch: Partial<FieldDraft>, f: AgentConfigFieldDef): void {
@@ -1310,20 +1333,25 @@ export class ScionAgentConfigForm extends LitElement {
         </div>`;
       default: {
         const session = st.note === 'session' ? ' (the conversation continues)' : '';
-        // A start keeps the previous value for a clear, and for a count
-        // limit of 0 (the broker applies limits only when greater than 0).
-        // Unlimited on a duration ("0") is applied at the next start.
-        const keptByStart = !!d && (d.cleared || (d.unlimited && f.control === 'limit-count'));
+        // A start keeps the previous value for a clear. Unlimited is a value
+        // (0, or "0" for a duration) that the next start applies; a broker
+        // that cannot apply it on a count limit is reported by
+        // unlimitedUnsupported, which disables the control instead.
         const clearNote =
-          st.clearNeedsReincarnate && d && keptByStart
+          st.clearNeedsReincarnate && d?.cleared
             ? html`<span class="clear-note" data-testid="clear-note">
-                ${d.cleared ? 'Clearing' : 'Unlimited'} takes effect at the next reincarnation; a
-                plain start keeps the previous value.</span
+                Clearing takes effect at the next reincarnation; a plain start keeps the previous
+                value.</span
               >`
             : nothing;
+        const unlimitedNote = this.unlimitedUnsupported(f)
+          ? html`<span class="unlimited-note" data-testid="unlimited-unsupported">
+              ${UNLIMITED_UNSUPPORTED_REASON}</span
+            >`
+          : nothing;
         const help = f.help ? `${f.help} ` : '';
         return html`<div class="status help">
-          <span>${help}${this.applyText(st)}${session}.</span>${clearNote}
+          <span>${help}${this.applyText(st)}${session}.</span>${clearNote}${unlimitedNote}
         </div>`;
       }
     }
@@ -1567,7 +1595,7 @@ export class ScionAgentConfigForm extends LitElement {
             size="small"
             class="unlimited"
             ?checked=${unlimited}
-            ?disabled=${off}
+            ?disabled=${off || this.unlimitedUnsupported(f)}
             @sl-change=${(e: Event) => {
               const checked = (e.target as HTMLInputElement).checked;
               // Unchecking a stored Unlimited, with nothing typed, removes
@@ -1747,20 +1775,23 @@ export class ScionAgentConfigForm extends LitElement {
       ${this.resourcesRemoveStored()
         ? html`<div class="status">
             <span class="clear-note" data-testid="clear-note"
-              >Removing a value takes effect at the next reincarnation; a plain start keeps the
-              previous value.</span
+              >Clearing a resource limit takes effect at the next reincarnation; a plain start keeps
+              the previous value.</span
             >
           </div>`
         : nothing}`;
   }
 
   /**
-   * Edit mode: the user emptied a resource value the agent stores. A start
-   * merges resources value by value and keeps one the request leaves out, so
-   * the removal reaches the agent only at its next reincarnation.
+   * Edit mode: the user emptied a resource value the agent stores, and the
+   * hub reports (subfieldClearUnsupported on config.resources) that the
+   * agent's broker keeps a value the request leaves out at a start, so the
+   * removal reaches the agent only at its next reincarnation. Without the
+   * flag the broker applies the removal at the next start.
    */
   private resourcesRemoveStored(): boolean {
     if (this.mode !== 'edit') return false;
+    if (!this.editability?.fields['config.resources']?.subfieldClearUnsupported) return false;
     return RESOURCE_FIELDS.some((r) => {
       const draft = this.resourceDrafts[r.sub];
       return draft !== undefined && draft.trim() === '' && !!r.get(this.values?.resources);
@@ -2210,6 +2241,7 @@ export class ScionAgentConfigForm extends LitElement {
       gap: 0.375rem;
     }
     .clear-note,
+    .unlimited-note,
     .override-note,
     .not-saveable {
       color: var(--sl-color-warning-700, #b45309);
