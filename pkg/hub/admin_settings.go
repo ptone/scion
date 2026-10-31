@@ -618,6 +618,14 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A save that sends authorized_domains or admin_emails may not leave
+	// access settings that refuse sign-in for the saving account
+	// (ptone/scion#6000). A domain list SCION_SERVER_* sets does not
+	// change by saving, so sending it alone is not checked.
+	if s.rejectFileAccessLockout(w, r, rawBody, &req) {
+		return
+	}
+
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to resolve settings directory", nil)
