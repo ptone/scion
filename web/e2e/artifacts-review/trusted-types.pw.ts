@@ -43,6 +43,10 @@ import {
   expectProbeSeesIconFileParse,
   expectProbeSeesViolation,
   expectRuleOnLoadedDocument,
+  matchesTestReportPolicy,
+  TEST_REPORT_PATH,
+  TEST_REPORT_POLICY,
+  TRUSTED_TYPES_RULE,
   trustedTypesFindings,
   type AllowedViolation,
   type TrustedTypesOptions,
@@ -126,6 +130,20 @@ test('the artifact preview and review editor make no plain-string markup call', 
   const before = await expectNoTrustedTypesFindings(page, errors, IMAGE_REWRITE);
   // The allowance is still needed; remove it once this fails.
   expect(before['preview image rewrite (ptone/scion#6674)']).toBeGreaterThan(0);
+  // The report-policy matcher tells the test's own policy (as written, and
+  // as Firefox reports it, with the endpoint as a full URL) apart from the
+  // hub's own report-only rule (pkg/hub/web_csp.go).
+  expect(matchesTestReportPolicy(TEST_REPORT_POLICY)).toBe(true);
+  expect(
+    matchesTestReportPolicy(
+      `${TRUSTED_TYPES_RULE}; report-uri http://127.0.0.1:1${TEST_REPORT_PATH}`
+    )
+  ).toBe(true);
+  expect(matchesTestReportPolicy(`${TRUSTED_TYPES_RULE}; report-to csp`)).toBe(false);
+  // The endpoint path must be the report-uri's path, not just appear.
+  expect(matchesTestReportPolicy(`${TRUSTED_TYPES_RULE}; report-to ${TEST_REPORT_PATH}`)).toBe(
+    false
+  );
   // Report-only console notices: only WebKit logs one per report-only
   // violation, so only there must notices be seen. In any engine, every
   // notice must pair with the allowance, or it is a finding.

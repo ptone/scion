@@ -32,7 +32,7 @@ import { expect, type Page } from '@playwright/test';
 export const TRUSTED_TYPES_RULE = "require-trusted-types-for 'script'";
 
 /** Where the browser sends the reports of the test's report-only rule. */
-const TEST_REPORT_PATH = '/__e2e-trusted-types-report';
+export const TEST_REPORT_PATH = '/__e2e-trusted-types-report';
 
 /**
  * The test's report-only policy: the rule plus a report endpoint only the
@@ -316,26 +316,57 @@ export async function expectProbeSeesViolation(
     options.mode !== 'report'
   );
   const disposition = options.mode === 'report' ? 'report' : 'enforce';
+  const ownPolicy = (policy: string): boolean =>
+    options.mode === 'report' ? matchesTestReportPolicy(policy) : policy === TRUSTED_TYPES_RULE;
+  const fresh = (): Promise<
+    Pick<TrustedTypesViolation, 'disposition' | 'originalPolicy' | 'sample'>[]
+  > =>
+    page.evaluate(
+      (from) =>
+        (window.__trustedTypesViolations ?? [])
+          .slice(from)
+          .map(({ disposition, originalPolicy, sample }) => ({
+            disposition,
+            originalPolicy,
+            sample,
+          })),
+      before
+    );
+  const mine = async (): Promise<number> =>
+    (await fresh()).filter(
+      (v) =>
+        v.disposition === disposition &&
+        ownPolicy(v.originalPolicy) &&
+        v.sample.startsWith('Element innerHTML')
+    ).length;
   await expect
-    .poll(() =>
-      page.evaluate(
-        ({ from, want, policy }) =>
-          (window.__trustedTypesViolations ?? [])
-            .slice(from)
-            .filter(
-              (v) =>
-                v.disposition === want &&
-                v.originalPolicy === policy &&
-                v.sample.startsWith('Element innerHTML')
-            ).length,
-        {
-          from: before,
-          want: disposition,
-          policy: options.mode === 'report' ? TEST_REPORT_POLICY : TRUSTED_TYPES_RULE,
-        }
-      )
-    )
-    .toBeGreaterThanOrEqual(1);
+    .poll(mine)
+    .toBeGreaterThanOrEqual(1)
+    .catch(async (e) => {
+      const policies = [
+        ...new Set((await fresh()).map((v) => `${v.disposition}: ${v.originalPolicy}`)),
+      ];
+      throw new Error(`${String(e)}\npolicies of the new violations: ${policies.join(' | ')}`);
+    });
+}
+
+/**
+ * Whether a reported policy is the test's report-only policy. Some browsers
+ * (Firefox) report the policy text normalized, with the report endpoint as a
+ * full URL ("...; report-uri http://host:port/__e2e-trusted-types-report"),
+ * so it is matched by the rule (as its own directive) and a report-uri whose
+ * path is the test's endpoint, which only the test's policy carries; the
+ * hub's own report-only rule does not match.
+ */
+export function matchesTestReportPolicy(policy: string): boolean {
+  const directives = policy.split(';').map((d) => d.trim().split(/\s+/));
+  const hasRule = directives.some((d) => d.join(' ') === TRUSTED_TYPES_RULE);
+  const reportsToTest = directives.some(
+    ([name, ...values]) =>
+      name === 'report-uri' &&
+      values.some((value) => new URL(value, 'http://x').pathname === TEST_REPORT_PATH)
+  );
+  return hasRule && reportsToTest;
 }
 
 /**
