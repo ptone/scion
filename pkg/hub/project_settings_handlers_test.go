@@ -668,9 +668,10 @@ func TestProjectSettings_ClearDefaultGCPIdentity(t *testing.T) {
 	srv, s := testServer(t)
 	project := createTestProjectForSettings(t, s)
 
-	// Set values first
+	// Set values first. (Saving a passthrough default needs an embedded
+	// broker and the setter's passthrough authority; block needs neither.)
 	putBody := hubclient.ProjectSettings{
-		DefaultGCPIdentityMode:             "passthrough",
+		DefaultGCPIdentityMode:             "block",
 		DefaultGCPIdentityServiceAccountID: "",
 	}
 	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings", putBody)
