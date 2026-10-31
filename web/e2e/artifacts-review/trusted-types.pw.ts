@@ -126,23 +126,26 @@ test('the artifact preview and review editor make no plain-string markup call', 
   const before = await expectNoTrustedTypesFindings(page, errors, IMAGE_REWRITE);
   // The allowance is still needed; remove it once this fails.
   expect(before['preview image rewrite (ptone/scion#6674)']).toBeGreaterThan(0);
-  // Negative check: without the allowance, the image rewrite's report-only
-  // violations are findings, and so is every console notice of them (some
-  // browsers log one per report-only violation), since none can pair.
-  // WebKit logs a console notice per report-only violation: there the
-  // pairing must have run, and paired every notice with the allowance.
+  // Report-only console notices: only WebKit logs one per report-only
+  // violation, so only there must notices be seen. In any engine, every
+  // notice must pair with the allowance, or it is a finding.
+  const paired = await trustedTypesFindings(page, errors, IMAGE_REWRITE);
   if (test.info().project.name === 'webkit') {
-    const paired = await trustedTypesFindings(page, errors, IMAGE_REWRITE);
     expect(paired.notices.seen, 'WebKit report-only notices').toBeGreaterThan(0);
-    expect(paired.notices.matched, 'notices paired with the allowance').toBe(paired.notices.seen);
   }
+  expect(paired.notices.matched, 'notices paired with the allowance').toBe(paired.notices.seen);
+  // Negative check: without the allowance, the image rewrite's report-only
+  // violations are findings, and so is every console notice of them, since
+  // none can pair. The error count is taken first, so an error logged while
+  // the findings are read cannot make the comparison fail.
+  const errorsBefore = errors.length;
   const strict = await trustedTypesFindings(page, errors);
   expect(strict.violations.length, 'report-only violations without an allowance').toBeGreaterThan(
     0
   );
   expect(strict.notices.matched, 'notices paired without an allowance').toBe(0);
   expect(strict.errors.length, 'unpaired notices count as errors').toBe(
-    errors.length + strict.notices.seen
+    errorsBefore + strict.notices.seen
   );
 
   await startGraphicalReview(page);
