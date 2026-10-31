@@ -146,10 +146,24 @@ export function countLimitOrNull(v: number | null | undefined): number | null {
   return typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : null;
 }
 
-/** The number input's text as a count limit: a positive integer, else null (inherit). */
-export function parseCountLimitInput(text: string): number | null {
+/** Whether a settings PUT warning is about the default count limits. */
+export function isCountLimitWarning(w: string): boolean {
+  return /^(defaultMaxTurns|defaultMaxModelCalls)\b/.test(w);
+}
+
+/**
+ * The number input's text as a count limit. Empty is Inherit (null); a
+ * positive integer is a limit; anything else is an error and changes
+ * nothing, so a typo never clears a stored limit.
+ */
+export function parseCountLimitInput(text: string): { value: number | null; error?: string } {
   const t = text.trim();
-  return /^[1-9]\d*$/.test(t) ? parseInt(t, 10) : null;
+  if (t === '') return { value: null };
+  if (/^[1-9]\d*$/.test(t)) return { value: parseInt(t, 10) };
+  if (/^0+$/.test(t)) {
+    return { value: null, error: 'For no limit, tick Unlimited; a limit must be greater than 0.' };
+  }
+  return { value: null, error: 'Must be a whole number greater than 0, or Unlimited.' };
 }
 
 @customElement('scion-page-project-settings')
@@ -253,6 +267,14 @@ export class ScionPageProjectSettings extends LitElement {
 
   private loadedDefaultMaxTurns: number | null = null;
   private loadedDefaultMaxModelCalls: number | null = null;
+
+  /** Per count-limit input error (by annotation key); a save is refused while any is set. */
+  @state()
+  private countLimitErrors: Record<string, string> = {};
+
+  /** The last save's warnings about the count limits (Unlimited on an older broker). */
+  @state()
+  private countLimitWarnings: string[] = [];
 
   @state()
   private configDefaultMaxDuration = '';
@@ -1510,11 +1532,6 @@ export class ScionPageProjectSettings extends LitElement {
   }
 
   /**
-   * Renders a small hub-default indicator icon with a tooltip showing the
-   * inherited hub value. Returns `nothing` when the setting is overridden at
-   * the project level or when no hub default exists.
-   */
-  /**
    * A project default count limit: a number input plus an Unlimited box,
    * as on the agent Edit page. Empty with the box clear is Inherit (null);
    * the box sends 0 (Unlimited); a positive integer is a limit
@@ -1537,20 +1554,45 @@ export class ScionPageProjectSettings extends LitElement {
         placeholder=${unlimited ? 'Unlimited' : this.hubHint(annotationKey) || 'Inherit'}
         .value=${value && value > 0 ? String(value) : ''}
         ?disabled=${!canEdit || unlimited}
-        @sl-input=${(e: Event) => set(parseCountLimitInput((e.target as HTMLInputElement).value))}
+        @sl-input=${(e: Event) => {
+          const parsed = parseCountLimitInput((e.target as HTMLInputElement).value);
+          const errors = { ...this.countLimitErrors };
+          if (parsed.error) {
+            // Keep the current value: an invalid entry never clears a stored limit.
+            errors[annotationKey] = parsed.error;
+          } else {
+            delete errors[annotationKey];
+            set(parsed.value);
+          }
+          this.countLimitErrors = errors;
+        }}
       ></sl-input>
       <sl-checkbox
         size="small"
         class="unlimited"
         ?checked=${unlimited}
         ?disabled=${!canEdit}
-        @sl-change=${(e: Event) => set((e.target as HTMLInputElement).checked ? 0 : null)}
+        @sl-change=${(e: Event) => {
+          const errors = { ...this.countLimitErrors };
+          delete errors[annotationKey];
+          this.countLimitErrors = errors;
+          set((e.target as HTMLInputElement).checked ? 0 : null);
+        }}
         >Unlimited</sl-checkbox
       >
-      <span class="field-help">${help}</span>
+      ${this.countLimitErrors[annotationKey]
+        ? html`<span class="field-help count-limit-error" style="color: var(--sl-color-danger-600);"
+            >${this.countLimitErrors[annotationKey]}</span
+          >`
+        : html`<span class="field-help">${help}</span>`}
     </div>`;
   }
 
+  /**
+   * Renders a small hub-default indicator icon with a tooltip showing the
+   * inherited hub value. Returns `nothing` when the setting is overridden at
+   * the project level or when no hub default exists.
+   */
   private renderHubIndicator(annotationKey: string) {
     const entry = this.resolvedSettings[annotationKey];
     if (!entry || entry.projectSet || entry.hubDefault !== 'present') {
@@ -2065,6 +2107,12 @@ export class ScionPageProjectSettings extends LitElement {
     this.profileDefaultErrors = { byProfile: {}, general: [] };
     this.profileDefaultWarnings = { byProfile: {}, general: [] };
 
+    this.countLimitWarnings = [];
+    if (Object.keys(this.countLimitErrors).length > 0) {
+      this.settingsError = 'Fix the default count limits: each must be a whole number greater than 0, Unlimited, or empty.';
+      return;
+    }
+
     const profileDefaultsDirty = this.profileDefaultsDirty;
     if (
       profileDefaultsDirty &&
@@ -2167,10 +2215,23 @@ export class ScionPageProjectSettings extends LitElement {
       const { warnings, ...savedSettings } = saved;
       this.settings = savedSettings;
       this.loadProfileDefaultRows(savedSettings.defaultGCPIdentityServiceAccountIDByProfile);
-      this.profileDefaultWarnings = splitProfileWarnings(warnings);
+      // The saved values are the new baseline, so the next save compares
+      // against them and sends only what changes after this one.
+      this.configDefaultMaxTurns = countLimitOrNull(savedSettings.defaultMaxTurns);
+      this.configDefaultMaxModelCalls = countLimitOrNull(savedSettings.defaultMaxModelCalls);
+      this.loadedDefaultMaxTurns = this.configDefaultMaxTurns;
+      this.loadedDefaultMaxModelCalls = this.configDefaultMaxModelCalls;
+      const countWarnings = Array.isArray(warnings)
+        ? warnings.filter((w): w is string => typeof w === 'string' && isCountLimitWarning(w))
+        : [];
+      this.countLimitWarnings = countWarnings;
+      this.profileDefaultWarnings = splitProfileWarnings(
+        Array.isArray(warnings) ? warnings.filter((w) => !countWarnings.includes(w)) : warnings
+      );
       const warningCount =
         Object.values(this.profileDefaultWarnings.byProfile).flat().length +
-        this.profileDefaultWarnings.general.length;
+        this.profileDefaultWarnings.general.length +
+        this.countLimitWarnings.length;
       this.settingsSuccess =
         warningCount > 0
           ? 'Configuration saved, with warnings (see above).'
@@ -3147,6 +3208,12 @@ export class ScionPageProjectSettings extends LitElement {
                 (v) => (this.configDefaultMaxModelCalls = v),
                 'Maximum LLM API calls per agent.',
                 canEdit
+              )}
+              ${this.countLimitWarnings.map(
+                (w) =>
+                  html`<div class="field-help count-limit-warning" style="color: var(--sl-color-warning-700);">
+                    ${w}
+                  </div>`
               )}
 
               <div

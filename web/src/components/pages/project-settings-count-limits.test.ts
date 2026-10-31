@@ -22,7 +22,7 @@
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { requestUrl } from '../../client/__fixtures__/request-url.js';
-import { countLimitOrNull, parseCountLimitInput } from './project-settings.js';
+import { countLimitOrNull, isCountLimitWarning, parseCountLimitInput } from './project-settings.js';
 
 interface Internals {
   projectId: string;
@@ -30,7 +30,12 @@ interface Internals {
   handleSaveConfig: () => Promise<void>;
   configDefaultMaxTurns: number | null;
   configDefaultMaxModelCalls: number | null;
+  countLimitErrors: Record<string, string>;
+  countLimitWarnings: string[];
+  settingsError: string | null;
 }
+
+let putWarnings: string[] = [];
 
 let stored: Record<string, unknown> = {};
 let puts: Array<Record<string, unknown>> = [];
@@ -50,7 +55,9 @@ function stubFetch(): void {
       if (init?.method === 'PUT' && path.endsWith('/settings') && typeof init.body === 'string') {
         const body = JSON.parse(init.body) as Record<string, unknown>;
         puts.push(body);
-        return json(body);
+        stored = { ...stored, ...body };
+        for (const k of Object.keys(stored)) if (stored[k] === null) delete stored[k];
+        return json(putWarnings.length > 0 ? { ...stored, warnings: putWarnings } : stored);
       }
       if (path.endsWith('/settings/resolved')) {
         return json({ projectId: 'proj-1', project: stored, settings: {} });
@@ -86,6 +93,7 @@ afterEach(() => {
 async function mount(settings: Record<string, unknown>): Promise<HTMLElement & Internals> {
   stored = settings;
   puts = [];
+  putWarnings = [];
   stubFetch();
   vi.spyOn(console, 'error').mockImplementation(() => {});
   const el = document.createElement('scion-page-project-settings') as HTMLElement & Internals;
@@ -106,13 +114,22 @@ describe('count-limit helpers', () => {
     expect(countLimitOrNull(-1)).toBeNull();
   });
 
-  it('parses only positive integers from the input; anything else is Inherit', () => {
-    expect(parseCountLimitInput('7')).toBe(7);
-    expect(parseCountLimitInput(' 40 ')).toBe(40);
-    expect(parseCountLimitInput('')).toBeNull();
-    expect(parseCountLimitInput('0')).toBeNull();
-    expect(parseCountLimitInput('-3')).toBeNull();
-    expect(parseCountLimitInput('1.5')).toBeNull();
+  it('parses a positive integer, empty as Inherit, and anything else as an error', () => {
+    expect(parseCountLimitInput('7')).toEqual({ value: 7 });
+    expect(parseCountLimitInput(' 40 ')).toEqual({ value: 40 });
+    expect(parseCountLimitInput('')).toEqual({ value: null });
+    expect(parseCountLimitInput('0').error).toContain('Unlimited');
+    for (const bad of ['-3', '1.5', '1e3', 'abc']) {
+      expect(parseCountLimitInput(bad).error).toBe(
+        'Must be a whole number greater than 0, or Unlimited.'
+      );
+    }
+  });
+
+  it('recognises count-limit warnings', () => {
+    expect(isCountLimitWarning('defaultMaxTurns: Unlimited (0) applies only ...')).toBe(true);
+    expect(isCountLimitWarning('defaultMaxModelCalls: ...')).toBe(true);
+    expect(isCountLimitWarning('defaultGCPIdentityServiceAccountIDByProfile[a]: ...')).toBe(false);
   });
 });
 
@@ -156,5 +173,64 @@ describe('project settings count limits', () => {
     await el2.handleSaveConfig();
     expect(puts[0]!.defaultMaxTurns).toBe(15);
     expect('defaultMaxModelCalls' in puts[0]!).toBe(false);
+  });
+
+  it('uses the saved values as the next baseline (two saves in one session)', async () => {
+    const el = await mount({});
+    el.configDefaultMaxTurns = 5;
+    await el.handleSaveConfig();
+    expect(puts[0]!.defaultMaxTurns).toBe(5);
+    el.configDefaultMaxTurns = null;
+    await el.handleSaveConfig();
+    expect(puts).toHaveLength(2);
+    expect(puts[1]!.defaultMaxTurns).toBeNull();
+
+    el.configDefaultMaxModelCalls = 5;
+    await el.handleSaveConfig();
+    el.configDefaultMaxModelCalls = 0;
+    await el.handleSaveConfig();
+    el.configDefaultMaxModelCalls = 5;
+    await el.handleSaveConfig();
+    expect(puts).toHaveLength(5);
+    expect(puts[3]!.defaultMaxModelCalls).toBe(0);
+    expect(puts[4]!.defaultMaxModelCalls).toBe(5);
+  });
+
+  it('refuses to save while a count limit input is invalid, keeping the stored value', async () => {
+    const el = await mount({ defaultMaxTurns: 20 });
+    const input = el.shadowRoot!.querySelector('sl-input[inputmode="numeric"]') as HTMLElement & {
+      value: string;
+    };
+    expect(input).toBeTruthy();
+    input.value = '1.5';
+    input.dispatchEvent(new Event('sl-input'));
+    await el.updateComplete;
+    expect(el.configDefaultMaxTurns).toBe(20);
+    expect(Object.values(el.countLimitErrors)).toEqual([
+      'Must be a whole number greater than 0, or Unlimited.',
+    ]);
+    expect(el.shadowRoot!.querySelector('.count-limit-error')?.textContent).toContain('whole number');
+    await el.handleSaveConfig();
+    expect(puts).toHaveLength(0);
+    expect(el.settingsError).toContain('default count limits');
+
+    input.value = '30';
+    input.dispatchEvent(new Event('sl-input'));
+    await el.updateComplete;
+    expect(el.countLimitErrors).toEqual({});
+    await el.handleSaveConfig();
+    expect(puts[0]!.defaultMaxTurns).toBe(30);
+  });
+
+  it('shows count-limit warnings with the count limits, not in the profile section', async () => {
+    const el = await mount({});
+    putWarnings = ['defaultMaxTurns: Unlimited (0) applies only on Runtime Brokers that support it'];
+    el.configDefaultMaxTurns = 0;
+    await el.handleSaveConfig();
+    await el.updateComplete;
+    expect(el.countLimitWarnings).toEqual(putWarnings);
+    expect(el.shadowRoot!.querySelector('.count-limit-warning')?.textContent).toContain(
+      'Unlimited (0) applies only'
+    );
   });
 });
