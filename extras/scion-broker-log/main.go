@@ -552,3 +552,5 @@ func includeField(fields map[string]bool, name string) bool {
 	}
 	return fields[name]
 }
+
+// cr-ci verify: no-op comment to run extras-ci on the runner layout switch.

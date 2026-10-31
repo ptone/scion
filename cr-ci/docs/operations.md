@@ -248,6 +248,7 @@ job's volume mount must match:
 - After the switch, the first start logs `volume root /home/runner: owner uid N,
   mode M`. Record it: if the runner's uid (1001) owns the root, the entrypoint
   has set it to 0755; otherwise HOME stays world-writable (a documented residual).
+- Live verification of the 2026-10-31 switch: the "cr-ci verify" fork draft PR (do not merge).
 
 ## Capacity and quotas
 
