@@ -56,6 +56,7 @@ import {
   ARTIFACTS_FLAG,
   MAX_INLINE_TEXT_BYTES,
   artifactFileUrl,
+  artifactOriginOf,
   artifactPagePath,
   baseName,
   discardReasonText,
@@ -74,6 +75,7 @@ import {
 import type {
   Artifact,
   ArtifactFile,
+  ArtifactOrigin,
   ArtifactResponse,
   ArtifactRenderer,
   ArtifactVersion,
@@ -113,6 +115,17 @@ import { countTopLevelBlocks } from '../../utils/markdown-blocks.js';
 import type { ReviewEditorElement } from '../artifact-review/review-editor-loader.js';
 
 type Tab = 'preview' | 'files' | 'history';
+
+/** How often a return to the tab may re-read the version list (ptone/scion#6851). */
+const VERSIONS_RECHECK_MS = 30_000;
+
+/** A version kind as the page shows it (ptone/scion#6852). */
+export function versionKindLabel(kind: string): string {
+  if (kind === 'publish') return 'Publish';
+  if (kind === 'review') return 'Review';
+  if (kind === 'attachment') return 'Attachment';
+  return kind;
+}
 
 /**
  * text with CRLF and lone CR line endings as LF: the form the editor works
@@ -332,6 +345,10 @@ export class ScionPageArtifactDetail extends LitElement {
   @state() private artifactId = '';
   /** Version in the URL; 0 shows the current version. */
   @state() private seq = 0;
+  /** Where the page was opened from (ptone/scion#6847); see artifactOriginOf. */
+  private origin: ArtifactOrigin = 'project';
+  /** A Refresh is reloading the page in place (ptone/scion#6851). */
+  @state() private refreshing = false;
   @state() private loading = true;
   @state() private notFound = false;
   @state() private error: string | null = null;
@@ -475,6 +492,9 @@ export class ScionPageArtifactDetail extends LitElement {
         display: inline-flex;
         align-items: center;
         gap: 0.25rem;
+      }
+      .version-info .v-state.current {
+        color: var(--sl-color-success-700);
       }
       .menu-note {
         display: block;
@@ -824,7 +844,9 @@ export class ScionPageArtifactDetail extends LitElement {
       this.wideReviewViewport = this.wideReviewQuery.matches;
       this.wideReviewQuery.addEventListener?.('change', this.onWideReviewChange);
     }
-    const parsed = parseArtifactPagePath(this.pageData?.path || window.location.pathname);
+    const pagePath = this.pageData?.path || window.location.pathname + window.location.search;
+    this.origin = artifactOriginOf(pagePath);
+    const parsed = parseArtifactPagePath(pagePath);
     if (parsed) {
       this.projectId = parsed.projectId;
       this.artifactId = parsed.id;
@@ -835,6 +857,8 @@ export class ScionPageArtifactDetail extends LitElement {
       this.notFound = true;
       return;
     }
+    document.addEventListener('visibilitychange', this.onVisibility);
+    this.versionsCheckedAt = Date.now();
     void this.load();
   }
 
@@ -843,17 +867,25 @@ export class ScionPageArtifactDetail extends LitElement {
     return this.seq > 0 ? `${id}/versions/${this.seq}` : id;
   }
 
-  private async load(): Promise<void> {
+  /**
+   * Loads the artifact, the version shown and its versions. A quiet load
+   * (Refresh, ptone/scion#6851) keeps the page on screen while it runs and
+   * reports a failure in a toast instead of the error state.
+   */
+  private async load(opts: { quiet?: boolean } = {}): Promise<void> {
+    const quiet = !!opts.quiet;
     const gen = ++this.loadGen;
     this.viewGen++;
-    this.loading = true;
+    if (!quiet) {
+      this.loading = true;
+      this.text = null;
+      this.view = null;
+      this.viewError = null;
+      this.viewExpired = false;
+      this.crossProjectSharing = false;
+    }
     this.error = null;
     this.notFound = false;
-    this.text = null;
-    this.view = null;
-    this.viewError = null;
-    this.viewExpired = false;
-    this.crossProjectSharing = false;
     if (this.viewTimer) clearTimeout(this.viewTimer);
     this.viewTimer = null;
     try {
@@ -876,6 +908,15 @@ export class ScionPageArtifactDetail extends LitElement {
       void this.loadVersions(0, gen);
       if (data.canManage) void this.loadCrossProjectSharing(gen);
       const kind = this.entry ? rendererFor(this.entry.mediaType) : 'download';
+      if (quiet) {
+        // What the new entry does not show is cleared; the rest is replaced below.
+        if (kind !== 'markdown' && kind !== 'text') this.text = null;
+        if (kind !== 'html') {
+          this.view = null;
+          this.viewError = null;
+          this.viewExpired = false;
+        }
+      }
       if ((kind === 'markdown' || kind === 'text') && this.entry) {
         if (this.entry.size <= MAX_INLINE_TEXT_BYTES) {
           await this.loadText(this.entry, gen);
@@ -891,11 +932,40 @@ export class ScionPageArtifactDetail extends LitElement {
     } catch (err) {
       if (gen !== this.loadGen) return;
       console.error('Failed to load artifact:', err);
-      this.error = err instanceof Error ? err.message : 'Failed to load artifact';
+      const message = err instanceof Error ? err.message : 'Failed to load artifact';
+      if (quiet && this.data) showToast(`Could not refresh: ${message}`, 'danger');
+      else this.error = message;
     } finally {
       if (gen === this.loadGen) this.loading = false;
     }
   }
+
+  /** Reloads the artifact and its versions in place (ptone/scion#6851). */
+  private refresh = (): void => {
+    if (this.refreshing) return;
+    this.refreshing = true;
+    this.versionsCheckedAt = Date.now();
+    void this.load({ quiet: true }).finally(() => {
+      this.refreshing = false;
+    });
+  };
+
+  /** When the version list was last read by a Refresh or a return to the tab. */
+  private versionsCheckedAt = 0;
+
+  /**
+   * A return to the tab re-reads the version list (at most every 30 s), so
+   * a version published meanwhile shows in the list and the Review pending
+   * badge (ptone/scion#6851) without reloading the page. Nothing is re-read
+   * while editing or reviewing.
+   */
+  private onVisibility = (): void => {
+    if (document.visibilityState !== 'visible' || !this.data || this.loading) return;
+    if (this.editing || this.reviewing || this.refreshing) return;
+    if (Date.now() - this.versionsCheckedAt < VERSIONS_RECHECK_MS) return;
+    this.versionsCheckedAt = Date.now();
+    void this.loadVersions(0, this.loadGen);
+  };
 
   private async loadText(file: ArtifactFile, gen: number): Promise<void> {
     const seq = this.data?.version?.seq ?? 0;
@@ -937,6 +1007,7 @@ export class ScionPageArtifactDetail extends LitElement {
   }
 
   override disconnectedCallback(): void {
+    document.removeEventListener('visibilitychange', this.onVisibility);
     super.disconnectedCallback();
     if (this.viewTimer) clearTimeout(this.viewTimer);
     this.viewTimer = null;
@@ -1038,7 +1109,8 @@ export class ScionPageArtifactDetail extends LitElement {
     navigateTo(
       artifactPagePath(
         { id: this.artifactId, scopeRef: this.homeProject },
-        seq === current ? 0 : seq
+        seq === current ? 0 : seq,
+        this.origin
       )
     );
   }
@@ -1104,9 +1176,13 @@ export class ScionPageArtifactDetail extends LitElement {
     return !!this.data?.canShare && !this.data?.canManage;
   }
 
-  /** Where the back link goes: the home project, or the artifacts list when it was deleted. */
+  /**
+   * Where the back link goes, and where a delete returns to: the Artifacts
+   * list when the page was opened from it (ptone/scion#6847) or the home
+   * project was deleted, the home project otherwise.
+   */
   private get backTarget(): { href: string; label: string } {
-    return this.data?.scopeDeleted
+    return this.data?.scopeDeleted || this.origin === 'artifacts'
       ? { href: '/artifacts', label: 'Artifacts' }
       : { href: `/projects/${encodeURIComponent(this.homeProject)}`, label: 'Project' };
   }
@@ -1142,13 +1218,24 @@ export class ScionPageArtifactDetail extends LitElement {
     );
   }
 
-  /** The artifact's current version is a review (whichever version is shown). */
+  /**
+   * The newest version the page has seen: the artifact's current one, or a
+   * newer ready one the version list holds after a re-read
+   * (ptone/scion#6851).
+   */
+  private get latestSeq(): number {
+    let seq = this.data?.artifact.currentSeq ?? 0;
+    for (const x of this.versions) if (x.state === 'ready' && x.seq > seq) seq = x.seq;
+    return seq;
+  }
+
+  /** The artifact's newest version seen is a review (whichever version is shown). */
   private get currentIsReview(): boolean {
-    const a = this.data?.artifact;
     const v = this.data?.version;
-    if (!a || !v) return false;
-    if (v.seq === a.currentSeq) return v.kind === 'review';
-    return this.versions.find((x) => x.seq === a.currentSeq)?.kind === 'review';
+    if (!this.data || !v) return false;
+    const seq = this.latestSeq;
+    if (v.seq === seq) return v.kind === 'review';
+    return this.versions.find((x) => x.seq === seq)?.kind === 'review';
   }
 
   /** The version shown is a review. */
@@ -1158,7 +1245,7 @@ export class ScionPageArtifactDetail extends LitElement {
 
   /** The current version is a review the owner has not answered yet. */
   private get reviewPendingNow(): boolean {
-    return this.isReview && this.showsCurrent;
+    return this.isReview && this.showsCurrent && this.data!.version!.seq === this.latestSeq;
   }
 
   /**
@@ -1604,10 +1691,14 @@ export class ScionPageArtifactDetail extends LitElement {
    * page reloads itself.
    */
   private showCurrentVersion(): void {
-    const target = artifactPagePath({ id: this.artifactId, scopeRef: this.homeProject });
+    const target = artifactPagePath(
+      { id: this.artifactId, scopeRef: this.homeProject },
+      0,
+      this.origin
+    );
     this.editing = false;
     this.reviewing = false;
-    if (stripBasePath(window.location.pathname) !== target) {
+    if (stripBasePath(window.location.pathname) + window.location.search !== target) {
       navigateTo(target);
       return;
     }
@@ -1724,12 +1815,33 @@ export class ScionPageArtifactDetail extends LitElement {
   /** After a move the artifact lives under its new home project: open it there. */
   private onMoved(moved: Artifact): void {
     this.moveOpen = false;
-    navigateTo(artifactPagePath(moved));
+    navigateTo(artifactPagePath(moved, 0, this.origin));
   }
 
   private versionLabel(v: ArtifactVersion | undefined): string {
     if (!v) return 'none';
-    return v.seq === this.data!.artifact.currentSeq ? `v${v.seq} (current)` : `v${v.seq}`;
+    return v.seq === this.latestSeq ? `v${v.seq} (current)` : `v${v.seq}`;
+  }
+
+  /** "Review by Alice", or the kind alone when the author is not known (ptone/scion#6852). */
+  private kindAndAuthor(v: ArtifactVersion): string {
+    const by = this.createdBy(v);
+    return by ? `${versionKindLabel(v.kind)} by ${by}` : versionKindLabel(v.kind);
+  }
+
+  /**
+   * The shown version's facts in the header (ptone/scion#6852): its number,
+   * whether it is the current version, its kind and author, and its date.
+   */
+  private renderVersionInfo(v: ArtifactVersion): TemplateResult {
+    const latest = this.latestSeq;
+    const state = v.seq === latest ? 'current' : `older, current is v${latest}`;
+    return html`<span class="version-info">
+      Version: <strong class="v-seq">v${v.seq}</strong> ·
+      <span class=${v.seq === latest ? 'v-state current' : 'v-state older'}>${state}</span> ·
+      <span class="v-kind">${this.kindAndAuthor(v)}</span> ·
+      <span class="v-date">${formatInstant(v.createdAt)}</span>
+    </span>`;
   }
 
   private renderVersionMenu(): TemplateResult {
@@ -1746,7 +1858,7 @@ export class ScionPageArtifactDetail extends LitElement {
             : this.versions.map(
                 (x) => html`
                   <sl-menu-item value=${String(x.seq)} ?checked=${x.seq === v?.seq} type="checkbox">
-                    ${this.versionLabel(x)} · ${formatInstant(x.createdAt)}
+                    ${this.versionLabel(x)} · ${this.kindAndAuthor(x)} · ${formatInstant(x.createdAt)}
                     ${x.note ? html`<span class="menu-note">${x.note}</span>` : nothing}
                   </sl-menu-item>
                 `
@@ -1794,6 +1906,7 @@ export class ScionPageArtifactDetail extends LitElement {
           : nothing}
         <div slot="meta" class="meta">
           <span>Owner: ${a.ownerDeleted ? this.goneOwner(a.ownerKind, a.ownerRef) : owner}</span>
+          ${v ? this.renderVersionInfo(v) : nothing}
           ${a.key ? html`<span>Key: <code>${a.key}</code></span>` : nothing}
           <span>Updated: ${formatInstant(a.updatedAt)}</span>
           <span class="expires"
@@ -1814,6 +1927,17 @@ export class ScionPageArtifactDetail extends LitElement {
         ${hasActions
           ? html`
               <div slot="actions" class="header-actions">
+                <sl-tooltip content="Reload the artifact and its versions">
+                  <sl-button
+                    size="small"
+                    class="refresh"
+                    ?loading=${this.refreshing}
+                    @click=${this.refresh}
+                  >
+                    <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+                    Refresh
+                  </sl-button>
+                </sl-tooltip>
                 ${v ? this.renderVersionMenu() : nothing}
                 ${this.canEdit
                   ? html`<sl-button size="small" @click=${this.startEdit}>
@@ -2203,7 +2327,7 @@ export class ScionPageArtifactDetail extends LitElement {
       <tr>
         <td>
           <strong>v${x.seq}</strong>
-          ${x.seq === this.data!.artifact.currentSeq
+          ${x.seq === this.latestSeq
             ? html`<sl-badge pill variant="success">current</sl-badge>`
             : nothing}
         </td>
