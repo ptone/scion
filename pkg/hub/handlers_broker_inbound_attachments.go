@@ -263,7 +263,12 @@ func (s *Server) handleBrokerAttachmentsCheck(w http.ResponseWriter, r *http.Req
 		// delivery_max_bytes is the largest single file the hub takes: the
 		// smaller of the total for one message and the per-file artifact
 		// limit. The upload enforces the total across all its files.
-		limit := min(s.brokerAttachmentDeliveryMaxBytes(), s.attachmentMaxBytes(ctx, true))
+		// (No builtin min here: the package's tests declare their own
+		// min(int, int).)
+		limit := s.brokerAttachmentDeliveryMaxBytes()
+		if perFile := s.attachmentMaxBytes(ctx, true); perFile < limit {
+			limit = perFile
+		}
 		answer.DeliveryMaxBytes = &limit
 	}
 	decision := "authorized"
