@@ -140,6 +140,12 @@ test('the artifact preview and review editor make no plain-string markup call', 
     )
   ).toBe(true);
   expect(matchesTestReportPolicy(`${TRUSTED_TYPES_RULE}; report-to csp`)).toBe(false);
+  // Directive names are case-insensitive.
+  expect(matchesTestReportPolicy(`${TRUSTED_TYPES_RULE}; REPORT-URI ${TEST_REPORT_PATH}`)).toBe(
+    true
+  );
+  // Both halves are needed: the endpoint without the rule does not match.
+  expect(matchesTestReportPolicy(`report-uri ${TEST_REPORT_PATH}`)).toBe(false);
   // The endpoint path must be the report-uri's path, not just appear.
   expect(matchesTestReportPolicy(`${TRUSTED_TYPES_RULE}; report-to ${TEST_REPORT_PATH}`)).toBe(
     false

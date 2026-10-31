@@ -293,10 +293,11 @@ export async function expectNoTrustedTypesFindings(
  * markup assignment adds a violation with the expected disposition (and
  * throws when enforced), reported by the test's own policy. A page served
  * by the hub also carries the hub's own report-only rule, so the check
- * matches originalPolicy exactly: TRUSTED_TYPES_RULE when enforced (the hub
- * sends no enforced rule), TEST_REPORT_POLICY in report mode (its own text,
- * unlike the hub's). Run it after the page's own assertions, so their empty
- * lists are not vacuous.
+ * matches the test's policy only: originalPolicy exactly TRUSTED_TYPES_RULE
+ * when enforced (the hub sends no enforced rule), and in report mode a
+ * policy matchesTestReportPolicy accepts (the rule plus a report-uri to the
+ * test's endpoint, which the hub's policy has not). Run it after the page's
+ * own assertions, so their empty lists are not vacuous.
  */
 export async function expectProbeSeesViolation(
   page: Page,
@@ -359,11 +360,12 @@ export async function expectProbeSeesViolation(
  * hub's own report-only rule does not match.
  */
 export function matchesTestReportPolicy(policy: string): boolean {
+  // Directive names and keywords are case-insensitive; the endpoint path is not.
   const directives = policy.split(';').map((d) => d.trim().split(/\s+/));
-  const hasRule = directives.some((d) => d.join(' ') === TRUSTED_TYPES_RULE);
+  const hasRule = directives.some((d) => d.join(' ').toLowerCase() === TRUSTED_TYPES_RULE);
   const reportsToTest = directives.some(
     ([name, ...values]) =>
-      name === 'report-uri' &&
+      name?.toLowerCase() === 'report-uri' &&
       values.some((value) => new URL(value, 'http://x').pathname === TEST_REPORT_PATH)
   );
   return hasRule && reportsToTest;
