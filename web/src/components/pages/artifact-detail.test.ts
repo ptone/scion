@@ -2130,7 +2130,13 @@ describe('artifact page: refresh, origin and version labels', () => {
     const v2 = version(2, 'review', ['agent', AGENT]);
     meta.artifact.currentSeq = 2;
     meta.version = v2;
-    return { meta, versions: [{ ...v2, files: [] }, { ...v1, files: [] }] };
+    return {
+      meta,
+      versions: [
+        { ...v2, files: [] },
+        { ...v1, files: [] },
+      ],
+    };
   }
 
   const text = (e: Element | null | undefined): string =>
@@ -2253,7 +2259,9 @@ describe('artifact page: refresh, origin and version labels', () => {
       write: () => new Response(null, { status: 204 }),
     });
     const el = await mountAs(`/projects/p-1/artifacts/${ID}?from=artifacts`);
-    const back = el.shadowRoot!.querySelector('scion-detail-header > scion-back-link[slot="back"]')!;
+    const back = el.shadowRoot!.querySelector(
+      'scion-detail-header > scion-back-link[slot="back"]'
+    )!;
     expect(text(back)).toBe('Artifacts');
     expect(back.getAttribute('href')).toBe('/artifacts');
 
@@ -2285,7 +2293,9 @@ describe('artifact page: refresh, origin and version labels', () => {
       write: () => new Response(null, { status: 204 }),
     });
     const el = await mountAs();
-    const back = el.shadowRoot!.querySelector('scion-detail-header > scion-back-link[slot="back"]')!;
+    const back = el.shadowRoot!.querySelector(
+      'scion-detail-header > scion-back-link[slot="back"]'
+    )!;
     expect(text(back)).toBe('Project');
     expect(back.getAttribute('href')).toBe('/projects/p-1');
     const nav = onNav();

@@ -79,10 +79,7 @@ function link(c: ReviewController, text: string): HTMLAnchorElement {
   return a;
 }
 
-function mouse(
-  type: 'click' | 'auxclick' | 'mousedown',
-  init: MouseEventInit = {}
-): MouseEvent {
+function mouse(type: 'click' | 'auxclick' | 'mousedown', init: MouseEventInit = {}): MouseEvent {
   return new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, ...init });
 }
 
@@ -104,7 +101,9 @@ describe('links in the review editor (ptone/scion#6848)', () => {
     expect(site.getAttribute('target')).toBe('_blank');
     expect(site.getAttribute('rel')).toBe('noopener noreferrer');
     expect(site.getAttribute('title')).toBe(linkOpenHint(false));
-    expect(link(c, 'notes').getAttribute('href')).toBe('/api/v1/artifacts/art1/versions/3/files/docs/notes.md');
+    expect(link(c, 'notes').getAttribute('href')).toBe(
+      '/api/v1/artifacts/art1/versions/3/files/docs/notes.md'
+    );
     const bad = link(c, 'bad');
     expect(bad.hasAttribute('href')).toBe(false);
     expect(bad.classList.contains('inert-link')).toBe(true);

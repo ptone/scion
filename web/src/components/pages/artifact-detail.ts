@@ -1870,7 +1870,8 @@ export class ScionPageArtifactDetail extends LitElement {
             : this.versions.map(
                 (x) => html`
                   <sl-menu-item value=${String(x.seq)} ?checked=${x.seq === v?.seq} type="checkbox">
-                    ${this.versionLabel(x)} · ${this.kindAndAuthor(x)} · ${formatInstant(x.createdAt)}
+                    ${this.versionLabel(x)} · ${this.kindAndAuthor(x)} ·
+                    ${formatInstant(x.createdAt)}
                     ${x.note ? html`<span class="menu-note">${x.note}</span>` : nothing}
                   </sl-menu-item>
                 `
