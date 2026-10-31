@@ -42,6 +42,16 @@ before, except for the artifact picker's row lines.
   - both sender names use `--scion-primary-hover` in place of the fixed
     `--scion-primary-600` (3.45:1 on neutral-900). That token is primary-600
     in the light theme and primary-300 in the dark one.
+- The banner's Show all messages button sets its fill, border and label
+  from theme tokens (`--scion-surface`, `--scion-border-hover`,
+  `--scion-text`; hover label `--scion-primary-hover`). `theme.css` maps
+  Shoelace's neutral scale to the same slate values in both themes, so
+  whether a default button's label is readable in the dark theme depends on
+  whether that mapping or Shoelace's dark theme comes last in the cascade.
+  With the mapping last (the Vite dev server), the label is slate-700 on a
+  neutral-800 fill. The tokens make the button independent of that order.
+  In the light theme its label is one step darker (neutral-800, was
+  neutral-700).
 - No new tokens were added to `theme.css`.
 
 ## Tests
@@ -55,7 +65,8 @@ before, except for the artifact picker's row lines.
   sets at runtime (`--scion-app-height`, `--scion-kb-*`) count as defined.
   The test also checks how many files it scans, that a planted undefined
   token is flagged, and that a token named only in a comment is ignored.
-- Contrast checks resolve the colours the banner title and its muted line,
+- Contrast checks resolve the colours the banner title, its muted line and
+  its Show all messages button,
   the reply preview (text, sender and hover) and the reply bar (text and
   sender) actually use, in the light and dark token maps, and need at least
   4.5:1 (4:1 for the hover state, whose light pair has always been 4.34:1).

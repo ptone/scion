@@ -189,6 +189,12 @@ describe('chat banner and reply contrast', () => {
       4.5,
     ],
     [
+      'Show all messages label',
+      token(rule(thread, '.star-filter-show-all::part(base)').get('color')),
+      token(rule(thread, '.star-filter-show-all::part(base)').get('background')),
+      4.5,
+    ],
+    [
       'reply preview text',
       token(rule(message, '.reply-preview').get('color')),
       token(rule(message, '.reply-preview').get('background')),
