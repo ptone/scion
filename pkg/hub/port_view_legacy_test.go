@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -63,30 +64,89 @@ func (f *portViewFixture) drainApp() {
 	}
 }
 
-// TestPortViewTransportAvailable: a page link is created only when a
-// transport would carry the page view request: the port-forward tunnel
-// counts unless the legacy route is refused for the request's identity.
-// The check writes, logs and records nothing.
-func TestPortViewTransportAvailable(t *testing.T) {
+// TestPortViewTransportAvailable_TunnelTerm: with no conduit routing on
+// this node, only the tunnel term decides: a page link is created only when
+// the port-forward tunnel is up and the legacy route is not refused for the
+// request's identity. The check writes, logs and records nothing. (The
+// conduit term is TestPortView_EligibilityExternalRelayEnforce.)
+func TestPortViewTransportAvailable_TunnelTerm(t *testing.T) {
 	srv, _ := testServer(t)
 	rec := recordOpenRefusals(srv)
-	const agentID = "agent-1"
+	ctx := context.Background()
+	agent := &store.Agent{ID: "agent-1", ProjectID: "project-1"}
 	exposed := &store.ExposedPort{Port: 3000, Host: "127.0.0.1"}
 	user := NewScopedUserIdentity(NewAuthenticatedUser("user-1", "u@example.com", "U", store.UserRoleMember, string(ClientTypeWeb)),
 		"project-1", []string{portViewScope})
+	require.False(t, srv.conduitRoutable(), "the conduit term is off")
 
-	assert.False(t, srv.portViewTransportAvailable(agentID, exposed, user), "no conduit routing and no tunnel")
+	assert.False(t, srv.portViewTransportAvailable(ctx, agent, exposed, user), "tunnel term: no tunnel")
 
 	srv.portTunnels.mu.Lock()
-	srv.portTunnels.sessions[agentID] = &PortTunnelSession{}
+	srv.portTunnels.sessions[agent.ID] = &PortTunnelSession{}
 	srv.portTunnels.mu.Unlock()
-	assert.True(t, srv.portViewTransportAvailable(agentID, exposed, user), "the tunnel carries it")
+	assert.True(t, srv.portViewTransportAvailable(ctx, agent, exposed, user), "tunnel term: tunnel up, legacy route allowed")
 
 	srv.conduitExternal.Store(&conduitExternalRuntime{})
 	enforceTargetDeadlines(srv)
 	require.True(t, srv.conduitUpgradeGateOn())
-	assert.False(t, srv.portViewTransportAvailable(agentID, exposed, user), "the legacy route is refused for a user")
+	assert.False(t, srv.portViewTransportAvailable(ctx, agent, exposed, user), "tunnel term: tunnel up, legacy route refused for a user")
 	assert.Empty(t, rec.list(), "the check records no refusal")
+}
+
+// portLinkNavigation sends a page navigation by the agent's owner to the
+// port link of w's agent, without following redirects.
+func portLinkNavigation(t *testing.T, w *separateRelayWorld) pvResult {
+	t.Helper()
+	tok, _, _, err := w.srv.userTokenService.GenerateTokenPair(
+		w.launched.OwnerID, "owner@conduit.test", "Owner", store.UserRoleMember, ClientTypeWeb)
+	require.NoError(t, err)
+	f := &portViewFixture{conduitProxyFixture: w.conduitProxyFixture}
+	return f.send(t, http.MethodGet, f.portLink("index.html"), withBearer(navHeader(), tok), nil)
+}
+
+// TestPortView_EligibilityExternalRelayEnforce: in external relay mode with
+// enforced target deadlines, conduit is routable but a user request to an
+// agent without a conduit session is refused rather than served on the
+// tunnel. A port link navigation then creates no page link (no_transport),
+// though the agent's tunnel is up; with a conduit session it does.
+func TestPortView_EligibilityExternalRelayEnforce(t *testing.T) {
+	t.Run("conduit term: no session, tunnel refused", func(t *testing.T) {
+		w := newSeparateRelayWorldWith(t, separateRelayOptions{enforce: true, noConduitAgent: true})
+		setPortViewExperiments(t, w.srv, true, true)
+		points := portViewCounters(t, w.srv)
+		rec := recordOpenRefusals(w.srv)
+		startLegacyTunnel(t, w.conduitProxyFixture, w.srv)
+		require.True(t, w.srv.conduitRoutable())
+		require.True(t, w.srv.conduitUpgradeGateOn())
+		require.Empty(t, w.agentSessions(t), "the agent has no conduit session")
+
+		res := portLinkNavigation(t, w)
+		assert.NotEqual(t, http.StatusFound, res.status, "no page link: %s", res.header.Get("Location"))
+		assert.NotContains(t, res.header.Get("Location"), "portview/")
+		got := points()
+		assert.Equal(t, int64(1), portViewCount(got, "scion.hub.port_view.redirect",
+			map[string]string{"outcome": portViewRedirectNoTransport}), "%+v", got)
+		assert.Zero(t, portViewCount(got, "scion.hub.port_view.redirect",
+			map[string]string{"outcome": portViewRedirectMinted}), "%+v", got)
+		// The port link's own request is refused by the route (the
+		// existing rule), and that refusal is the only one recorded: the
+		// eligibility check records none.
+		assert.Equal(t, []string{noSessionRefusal(conduitRouteProxy, ErrCodeUnavailable)}, rec.list())
+	})
+	t.Run("conduit term: session present", func(t *testing.T) {
+		w := newSeparateRelayWorldWith(t, separateRelayOptions{enforce: true})
+		setPortViewExperiments(t, w.srv, true, true)
+		points := portViewCounters(t, w.srv)
+		require.True(t, w.srv.conduitUpgradeGateOn())
+		require.NotEmpty(t, w.agentSessions(t), "the agent has a conduit session")
+
+		res := portLinkNavigation(t, w)
+		require.Equal(t, http.StatusFound, res.status, res.body)
+		assert.Contains(t, res.header.Get("Location"), "portview/")
+		got := points()
+		assert.Equal(t, int64(1), portViewCount(got, "scion.hub.port_view.redirect",
+			map[string]string{"outcome": portViewRedirectMinted}), "%+v", got)
+	})
 }
 
 // TestPortView_TunnelRedirectsAndServes: with the conduit route off, a
@@ -281,7 +341,9 @@ func TestPortView_TunnelWebSocketNotSupported(t *testing.T) {
 // user counts as a signed-in user; an agent identity counts as no session;
 // a page link whose user cannot use the agent now sends a navigation to
 // the port link, which does not create a new page link for that user, so
-// the two links never redirect to each other in a loop.
+// the two links never redirect to each other in a loop; that holds when
+// the user's port access is removed or the account is suspended
+// mid-session.
 func TestPortView_NavigationEdgeCases(t *testing.T) {
 	f := newPortViewFixture(t, nil)
 	f.startAgent(t)
@@ -327,6 +389,38 @@ func TestPortView_NavigationEdgeCases(t *testing.T) {
 		assert.NotEqual(t, http.StatusFound, next.status, "the port link created a page link: %s", next.header.Get("Location"))
 		assert.NotContains(t, next.header.Get("Location"), "portview/")
 	})
+	t.Run("same user's port access removed mid-session", func(t *testing.T) {
+		// A project admin may open the owner's agent's ports; the account
+		// stays active while the role is removed.
+		ctx := context.Background()
+		adminID := tid("port-view-project-admin")
+		createTestUserWithProjectRole(t, f.store, adminID, "admin@conduit.test", f.launched.ProjectID, store.ProjectRoleAdmin)
+		ensureHubMembership(ctx, f.store, adminID)
+		adminToken, _, _, err := f.srv.userTokenService.GenerateTokenPair(
+			adminID, "admin@conduit.test", "Admin", store.UserRoleMember, ClientTypeWeb)
+		require.NoError(t, err)
+		capability := f.capFor(adminID, f.app.port, time.Now().Add(time.Hour))
+		require.Equal(t, http.StatusOK, f.send(t, http.MethodGet, f.viewURL(capability, sub), subHeader(), nil).status,
+			"served while the admin has port access")
+
+		bindings, err := f.store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, adminID)
+		require.NoError(t, err)
+		require.NotEmpty(t, bindings)
+		for _, b := range bindings {
+			if b.ScopeType == store.RoleScopeProject && b.ScopeID == f.launched.ProjectID {
+				require.NoError(t, f.store.DeleteRoleBinding(ctx, b.ID))
+			}
+		}
+		user, err := f.store.GetUser(ctx, adminID)
+		require.NoError(t, err)
+		require.Equal(t, "active", user.Status, "the account stays active")
+
+		toPortLink(t, capability, f.send(t, http.MethodGet, f.viewURL(capability, sub), withBearer(navHeader(), adminToken), nil))
+		requirePortViewInvalid(t, f.send(t, http.MethodGet, f.viewURL(capability, sub), subHeader(), nil))
+		next := f.send(t, http.MethodGet, f.portLink(sub), withBearer(navHeader(), adminToken), nil)
+		assert.NotEqual(t, http.StatusFound, next.status, "the port link created a page link: %s", next.header.Get("Location"))
+		assert.NotContains(t, next.header.Get("Location"), "portview/")
+	})
 	t.Run("same user suspended mid-session", func(t *testing.T) {
 		capability := f.ownerCap()
 		require.Equal(t, http.StatusOK, f.send(t, http.MethodGet, f.viewURL(capability, sub), subHeader(), nil).status)
@@ -335,4 +429,34 @@ func TestPortView_NavigationEdgeCases(t *testing.T) {
 		toPortLink(t, capability, f.send(t, http.MethodGet, f.viewURL(capability, sub), navHeader(), nil))
 		requirePortViewInvalid(t, f.send(t, http.MethodGet, f.viewURL(capability, sub), subHeader(), nil))
 	})
+}
+
+// TestPortProxyPolicyHeadersMatchPolicy: the headers both transports clear
+// on the response writer before merging the app's (portProxyPolicyHeaders)
+// are exactly the ones applyPortProxyResponsePolicy always sets, so a
+// header added to the policy is also cleared and sent once.
+func TestPortProxyPolicyHeadersMatchPolicy(t *testing.T) {
+	want := make([]string, 0, len(portProxyPolicyHeaders))
+	for _, k := range portProxyPolicyHeaders {
+		want = append(want, http.CanonicalHeaderKey(k))
+	}
+	sort.Strings(want)
+	h := http.Header{}
+	applyPortProxyResponsePolicy(h, portProxyPolicy{})
+	got := make([]string, 0, len(h))
+	for k := range h {
+		got = append(got, k)
+	}
+	sort.Strings(got)
+	assert.Equal(t, want, got)
+
+	// The page view rules add only Cache-Control (a default the app may
+	// set itself), which the writer never carries.
+	pv := http.Header{}
+	applyPortProxyResponsePolicy(pv, portProxyPolicy{portView: true})
+	for _, k := range want {
+		assert.Len(t, pv.Values(k), 1, k)
+	}
+	assert.Equal(t, []string{"private"}, pv.Values("Cache-Control"))
+	assert.Len(t, pv, len(want)+1)
 }

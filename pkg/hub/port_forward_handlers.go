@@ -478,17 +478,23 @@ func (s *Server) proxyToAgentPort(w http.ResponseWriter, r *http.Request, identi
 		conn, err := s.openConduitPort(r.Context(), identity, agent, exposed.Port)
 		switch {
 		case err == nil:
+			// served, unless the round trip fails (offline); a response
+			// cut while its body streams was answered by the app.
 			transport, outcome = portViewTransportConduit, portViewRequestServed
-			s.serveConduitProxy(w, r, agent, exposed.Port, proxyPath, conn, policy)
+			if !s.serveConduitProxy(w, r, agent, exposed.Port, proxyPath, conn, policy) {
+				outcome = portViewRequestOffline
+			}
 			return
 		case !errors.Is(err, router.ErrNoSession):
-			transport, outcome = portViewTransportConduit, portViewRequestOffline
+			transport, outcome = portViewTransportConduit, portViewConduitOpenOutcome(err)
 			writeConduitProxyError(w, r, agent.ID, err)
 			return
 		}
 	}
-	// Every answer below is the tunnel's: refused unless it is served or
-	// the tunnel is unavailable.
+	// Every answer below is the tunnel's: refused (the route refused for
+	// user requests, the evaluation or a re-check denied it, a WebSocket,
+	// a body over the limit; portViewRequestRefused), unless the app
+	// answered (served) or the tunnel could not reach it (offline).
 	transport, outcome = portViewTransportLegacy, portViewRequestRefused
 	// No path without a target-side deadline (design §3.5 Q14, v2.21.46):
 	// in external relay mode with enforce, a user request that only the
@@ -818,7 +824,9 @@ func stripFromProxyResponse(k string) bool {
 // portProxyPolicyHeaders are the response headers applyPortProxyResponsePolicy
 // always sets. A transport that merges the app's headers into a response
 // writer removes them from the writer first, so each is sent once.
-var portProxyPolicyHeaders = []string{"Content-Security-Policy", "Permissions-Policy", "X-Content-Type-Options"}
+// TestPortProxyPolicyHeadersMatchPolicy keeps the list equal to what the
+// policy sets.
+var portProxyPolicyHeaders = [...]string{"Content-Security-Policy", "Permissions-Policy", "X-Content-Type-Options"}
 
 // applyPortProxyResponsePolicy sets the hub's response policy on h, the
 // headers of a proxied app response after stripFromProxyResponse, for both

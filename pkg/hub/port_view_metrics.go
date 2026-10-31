@@ -47,16 +47,43 @@ const (
 	portViewTransportConduit = "conduit"
 	portViewTransportLegacy  = "legacy"
 
-	// portViewRequestServed: the agent's app answered.
+	// portViewRequestServed: the agent's app answered, with any status.
 	portViewRequestServed = "served"
-	// portViewRequestInvalid: the page link failed or cannot be
-	// used, or names a port that is not exposed.
+	// portViewRequestInvalid: answered before any transport is chosen: the
+	// page link failed or cannot be used, or names a port that is not
+	// exposed.
 	portViewRequestInvalid = "invalid"
-	// portViewRequestOffline: the transport could not reach the agent.
+	// portViewRequestOffline: the chosen transport could not get an answer
+	// from the agent's app: no conduit session or tunnel, routing
+	// unavailable, a busy tunnel, an internal error, or a round trip that
+	// failed or timed out (502, 504).
 	portViewRequestOffline = "offline"
-	// portViewRequestRefused: the transport refused the request.
+	// portViewRequestRefused: the hub did not carry the request on the
+	// chosen transport: an access or policy refusal (the open refused for
+	// access, placement, an agent that must upgrade or a stream that
+	// cannot stay authorized; the tunnel route refused for user requests;
+	// a re-check that denied it), or a request the transport does not
+	// carry (a WebSocket on the tunnel, 501; a body over the tunnel's
+	// limit, 413; a request the conduit open rejects as invalid, 400).
 	portViewRequestRefused = "refused"
 )
+
+// portViewConduitOpenOutcome is the request outcome of a conduit open
+// that failed with err, other than for a missing session (which goes on
+// to the tunnel), as writeConduitProxyError answers it.
+func portViewConduitOpenOutcome(err error) string {
+	var placement *PlacementConflictError
+	switch {
+	case errors.As(err, &placement),
+		errors.Is(err, errConduitForbidden),
+		errors.Is(err, errConduitStreamRenewalUnavailable),
+		errors.Is(err, errConduitAgentUpgradeRequired),
+		errors.Is(err, errConduitInvalid):
+		return portViewRequestRefused
+	default:
+		return portViewRequestOffline
+	}
+}
 
 // OTelPortViewMetrics counts page view outcomes as
 // scion.hub.port_view.redirect (attribute outcome) and

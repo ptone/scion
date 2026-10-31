@@ -29,6 +29,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/portview"
@@ -400,16 +401,69 @@ func (s *Server) portViewIdentity(ctx context.Context, userID string, agent *sto
 // portViewTransportAvailable reports whether the page view route could
 // serve this agent's exposed port now for identity (the identity the page
 // view request runs as, portViewIdentity), so a page link is only created
-// when one of proxyToAgentPort's transports would carry it: the agent's
-// conduit session (this node routes conduit and the port is loopback), or
-// else the agent's port-forward tunnel when it is up and the legacy route
-// is not refused for identity (conduitLegacyRouteRefusedFor, the check
-// refuseLegacyProxy makes). It writes, logs and records nothing.
-func (s *Server) portViewTransportAvailable(agentID string, exposed *store.ExposedPort, identity Identity) bool {
+// when proxyToAgentPort would carry the request. It follows the same order:
+// over conduit when this node routes it and the port is loopback, as
+// portViewConduitRoute decides; if the agent has no conduit session there,
+// over the port-forward tunnel when it is up and the legacy route is not
+// refused for identity (conduitLegacyRouteRefusedFor, the check
+// refuseLegacyProxy makes). It opens no stream and writes, logs and records
+// nothing. A session or tunnel that goes away between this check and the
+// request is an accepted race: the request then gets the route's answer.
+func (s *Server) portViewTransportAvailable(ctx context.Context, agent *store.Agent, exposed *store.ExposedPort, identity Identity) bool {
 	if s.conduitRoutable() && isLoopbackHost(exposed.Host) {
-		return true
+		switch s.portViewConduitRoute(ctx, agent, identity) {
+		case portViewConduitServes:
+			return true
+		case portViewConduitRefuses:
+			return false
+		}
+		// No conduit session: the route goes on to the tunnel.
 	}
-	return s.portTunnels.has(agentID) && !s.conduitLegacyRouteRefusedFor(identity)
+	return s.portTunnels.has(agent.ID) && !s.conduitLegacyRouteRefusedFor(identity)
+}
+
+// What the conduit route of proxyToAgentPort would do with a page view
+// request (portViewConduitRoute).
+const (
+	// portViewConduitServes: a session is resolved and the stream would be
+	// opened on it.
+	portViewConduitServes = iota
+	// portViewConduitRefuses: the route would answer the request itself
+	// (writeConduitProxyError), without trying the tunnel.
+	portViewConduitRefuses
+	// portViewConduitNoSession: the agent has no eligible conduit session,
+	// so the route goes on to the tunnel.
+	portViewConduitNoSession
+)
+
+// portViewConduitRoute decides, without opening a stream, what
+// openConduitPort would do for a page view request by identity: resolve
+// the agent's session (router Resolve, a registry read), then apply the
+// open's refusals in their non-writing forms (conduitTargetUpgradeRequiredFor,
+// conduitRenewalPathRefusal). It writes, logs and records nothing.
+func (s *Server) portViewConduitRoute(ctx context.Context, agent *store.Agent, identity Identity) int {
+	rtr := s.conduitRouter()
+	if rtr == nil {
+		return portViewConduitRefuses
+	}
+	if _, isUser := identity.(UserIdentity); isUser && s.conduitAuthz.Load() == nil {
+		return portViewConduitRefuses
+	}
+	res, err := rtr.Resolve(ctx, conduitPortRequest(agent), nil)
+	switch {
+	case errors.Is(err, router.ErrNoSession):
+		return portViewConduitNoSession
+	case err != nil:
+		return portViewConduitRefuses
+	}
+	renews := conduitTargetRenews(res)
+	if s.conduitTargetUpgradeRequiredFor(identity, renews) {
+		return portViewConduitRefuses
+	}
+	if _, refused := s.conduitRenewalPathRefusal(identity, renews, s.conduitRouteCanRenew(res)); refused {
+		return portViewConduitRefuses
+	}
+	return portViewConduitServes
 }
 
 // redirectToPortView answers a page navigation to an exposed port's link
@@ -463,7 +517,7 @@ func (s *Server) portViewRedirect(w http.ResponseWriter, r *http.Request, agent 
 		return portViewRedirectUserRefused
 	}
 	// Never create a page link the page view route would then refuse.
-	if !s.portViewTransportAvailable(agent.ID, exposed, identity) {
+	if !s.portViewTransportAvailable(r.Context(), agent, exposed, identity) {
 		return portViewRedirectNoTransport
 	}
 	exp := s.portViewNow().Add(s.portViewTTL()).Truncate(time.Second)

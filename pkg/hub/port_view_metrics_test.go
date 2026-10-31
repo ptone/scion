@@ -17,6 +17,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"sort"
@@ -145,6 +146,14 @@ func TestPortViewMetrics_Outcomes(t *testing.T) {
 				}
 			}
 
+			// The app stops answering: the chosen transport counts offline.
+			f.app.srv.Close()
+			gone := f.send(t, http.MethodGet, f.viewURL(f.ownerCap(), "gone.js"), subHeader(), nil)
+			require.NotEqual(t, http.StatusOK, gone.status, gone.body)
+			got = points()
+			assert.Equal(t, int64(1), portViewCount(got, "scion.hub.port_view.request",
+				map[string]string{"transport": wantTransport, "outcome": portViewRequestOffline}), "%+v", got)
+
 			// Values that must never reach a label.
 			private := []string{view.Path, view.RawQuery, expired, f.launched.ID, f.launched.OwnerID, "dir/index.html", "a.js"}
 			for _, p := range got {
@@ -189,4 +198,25 @@ func TestPortViewMetrics_ExperimentOff(t *testing.T) {
 	require.Equal(t, http.StatusOK, res.status, res.body)
 	f.send(t, http.MethodGet, f.viewURL(f.ownerCap(), "a.js"), subHeader(), nil)
 	assert.Empty(t, points())
+}
+
+// TestPortViewMetrics_TunnelRefusals: on the tunnel, a WebSocket (501) and
+// a body over the tunnel's limit (413) are requests the transport does not
+// carry, counted refused with transport legacy (portViewRequestRefused).
+func TestPortViewMetrics_TunnelRefusals(t *testing.T) {
+	f := newPortViewFixture(t, nil)
+	points := portViewCounters(t, f.srv)
+	startLegacyTunnel(t, f.conduitProxyFixture, f.srv)
+
+	ws := f.send(t, http.MethodGet, f.viewURL(f.ownerCap(), "ws"), http.Header{"Connection": {"Upgrade"}, "Upgrade": {"websocket"},
+		"Sec-Websocket-Version": {"13"}, "Sec-Websocket-Key": {"dGhlIHNhbXBsZSBub25jZQ=="}}, nil)
+	require.Equal(t, http.StatusNotImplemented, ws.status, ws.body)
+	big := f.send(t, http.MethodPost, f.viewURL(f.ownerCap(), "upload"), http.Header{"Content-Type": {"text/plain"}},
+		bytes.NewReader(bytes.Repeat([]byte("a"), maxProxyRequestBody+1)))
+	require.Equal(t, http.StatusRequestEntityTooLarge, big.status, big.body)
+	assert.Zero(t, len(f.app.got), "neither request reached the app")
+
+	got := points()
+	assert.Equal(t, int64(2), portViewCount(got, "scion.hub.port_view.request",
+		map[string]string{"transport": portViewTransportLegacy, "outcome": portViewRequestRefused}), "%+v", got)
 }
