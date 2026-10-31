@@ -1741,6 +1741,12 @@ func validateServerPreflight(cfg *config.GlobalConfig) error {
 	if _, err := hub.ParseAgentRunScope(cfg.Auth.AgentRunScope, cfg.Auth.AgentRunScopeLegacyUntil); err != nil {
 		return err
 	}
+	// server.trusted_proxies decides whose X-Forwarded-Proto the hub-broker
+	// transport policy trusts; an invalid or catch-all entry refuses
+	// startup instead of being dropped.
+	if _, err := config.ParseTrustedProxies(cfg.TrustedProxies); err != nil {
+		return fmt.Errorf("refusing to start the hub: %w", err)
+	}
 	return nil
 }
 
@@ -2804,6 +2810,7 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		LaunchTimeout:                cfg.Hub.LaunchTimeout,
 		LaunchKeepaliveSeconds:       cfg.Hub.LaunchKeepaliveSeconds,
 		ConduitTCPAllowedPorts:       append([]int(nil), cfg.Hub.Conduit.TCPAllowedPorts...),
+		TransportTrustedProxies:      append([]string(nil), cfg.TrustedProxies...),
 		ConduitGrantKeyActivation:    conduitGrantKeyActivationSetting(cfg),
 		ConduitAuthzRecheckInterval:  conduitAuthzRecheckIntervalSetting(cfg),
 		ConduitUserStreamAuthzMax:    conduitUserStreamAuthzMaxSetting(cfg),
@@ -4244,6 +4251,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		if cfg.RuntimeBroker.Host == "0.0.0.0" {
 			rhEndpoint = fmt.Sprintf("http://localhost:%d", cfg.RuntimeBroker.Port)
 		}
+		warnColocatedBrokerEndpointTransport(rhEndpoint)
 
 		effectiveID, regErr := registerGlobalProjectAndBrokerPresence(ctx, s, hubSrv.BrokerPresent, brokerID, brokerName, rhEndpoint, rt, serverAutoProvide, brokerSettings, loadBrokerRegistrationWorkspaceStorage(), loadBrokerProfileTypeSettings())
 		if regErr != nil {
@@ -5082,5 +5090,19 @@ func (h *hubExitSequence) run() {
 			log.Printf("WARNING: hub OTel flush on exit: %v", err)
 		}
 		cancel()
+	}
+}
+
+// warnColocatedBrokerEndpointTransport logs, once at startup, that the hub
+// will not use the co-located broker's direct HTTP endpoint when it is plain
+// http on a non-loopback address (server.broker.host set to one): the
+// hub-broker transport policy refuses it at dispatch (config.CheckHubTransport
+// in the hub's broker HTTP transport), so only the control channel delivers
+// to this broker.
+func warnColocatedBrokerEndpointTransport(endpoint string) {
+	if err := config.CheckHubTransport(endpoint); err != nil {
+		slog.Warn("The co-located Runtime Broker's HTTP endpoint is not a loopback address; the hub will not send requests to it "+
+			"and delivers to this broker only over its control channel. Leave server.broker.host unset (or 0.0.0.0) to keep the HTTP fallback",
+			"endpoint", endpoint, "reason", err)
 	}
 }
