@@ -181,6 +181,10 @@ async function focusBadgeUnderToolbar(
     (a as HTMLElement | null)?.blur();
   });
   await expect(badge).not.toBeFocused();
+  // Blurring closes the comment card: let that render finish first.
+  await page
+    .locator('scion-review-editor')
+    .evaluate((e) => (e as HTMLElement & { updateComplete: Promise<boolean> }).updateComplete);
   await scrollUnderToolbar(page, n);
   expect(await badge.evaluate((e) => e.getBoundingClientRect().top)).toBeLessThan(
     await stickyBottom(page)
@@ -255,28 +259,33 @@ async function pinnedJourney(page: Page, title: string, touch: boolean): Promise
   const typed = await textBox(page, 'ZQ');
   expect(typed.top).toBeGreaterThanOrEqual(await stickyBottom(page));
 
+  // Keyboard focus scrolled into view is not hidden by the toolbar (WCAG
+  // 2.4.11): a comment badge under the toolbar is scrolled clear of it
+  // when it takes focus.
+  const cleared = await focusBadgeUnderToolbar(page, target);
+  expect(cleared.badge).toBeGreaterThanOrEqual(cleared.bar);
+  // Control: with the editor's inset at 0 (its one input), the same focus
+  // stays under the toolbar. The page sets it back when the toolbar next
+  // changes size (the hint below).
+  await page.locator('scion-review-editor').evaluate(async (e) => {
+    const el = e as HTMLElement & { scrollInset: number; updateComplete: Promise<boolean> };
+    el.scrollInset = 0;
+    await el.updateComplete;
+  });
+  const hidden = await focusBadgeUnderToolbar(page, target);
+  expect(hidden.badge).toBeLessThan(hidden.bar);
+  // Back into the text for the hint check (after the commented paragraph,
+  // whose text the highlight splits).
+  const again = await textBox(page, `Paragraph ${await firstClear(page, target + 1)} line.`);
+  await tap(again.x, again.y);
+  await expect(editor(page)).toBeFocused();
+
   // A refusal hint shows in the pinned block, in view.
   await page.keyboard.press('End');
   await page.keyboard.press('Enter');
   await expect(hint(page)).toContainText("Paragraph breaks can't be suggested here yet.");
   await expect(hint(page)).toBeInViewport();
   await expect(toolbar(page)).toBeInViewport();
-
-  // Keyboard focus scrolled into view is not hidden by the toolbar (WCAG
-  // 2.4.11): a comment badge under the toolbar is scrolled clear of it
-  // when it takes focus.
-  const cleared = await focusBadgeUnderToolbar(page, target);
-  expect(cleared.badge).toBeGreaterThanOrEqual(cleared.bar);
-  // Control: without the inset, the same focus stays under the toolbar.
-  await page
-    .locator('scion-review-editor')
-    .evaluate((e) =>
-      e
-        .shadowRoot!.querySelector<HTMLElement>('.editor-root')!
-        .style.setProperty('--review-scroll-inset', '0px')
-    );
-  const hidden = await focusBadgeUnderToolbar(page, target);
-  expect(hidden.badge).toBeLessThan(hidden.bar);
 }
 
 for (const device of ['Pixel 7', 'iPhone 13']) {
