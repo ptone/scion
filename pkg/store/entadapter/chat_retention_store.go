@@ -185,8 +185,10 @@ func (s *ChatRetentionStore) PurgeChatMessages(ctx context.Context, ids []string
 			return store.ChatRetentionPurgeResult{ByProject: map[string]store.ChatRetentionCounts{}}, err
 		}
 	}
-	if err := s.upsertCursor(ctx, tx, cursor); err != nil {
-		return store.ChatRetentionPurgeResult{ByProject: map[string]store.ChatRetentionCounts{}}, err
+	if cursor.Phase != "" {
+		if err := s.upsertCursor(ctx, tx, cursor); err != nil {
+			return store.ChatRetentionPurgeResult{ByProject: map[string]store.ChatRetentionCounts{}}, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return store.ChatRetentionPurgeResult{ByProject: map[string]store.ChatRetentionCounts{}}, fmt.Errorf("chat retention: commit purge: %w", err)
@@ -222,8 +224,8 @@ func (s *ChatRetentionStore) purgeTx(ctx context.Context, tx *sql.Tx, ids []stri
 	}
 
 	// Attachment links: capture the attachment IDs so the ones left with
-	// no link can be reported (their metadata and bytes stay for the
-	// attachment GC in this phase).
+	// no link can be reported. Their metadata rows stay: the caller
+	// deletes the bytes after the commit, then the row.
 	var attachmentIDs []string
 	seenAttachment := map[string]bool{}
 	if err := s.deleteReturning(ctx, tx, "DELETE FROM webchat_message_attachment WHERE message_id IN ("+in+") RETURNING message_id, attachment_id", args, func(rows *sql.Rows) error {
@@ -268,7 +270,7 @@ func (s *ChatRetentionStore) purgeTx(ctx context.Context, tx *sql.Tx, ids []stri
 		for i, id := range attachmentIDs {
 			aargs[i] = id
 		}
-		q := "SELECT a.id, a.project_id FROM webchat_attachment a WHERE a.id IN (" + s.placeholders(1, len(attachmentIDs)) +
+		q := "SELECT a.id, a.project_id, a.size FROM webchat_attachment a WHERE a.id IN (" + s.placeholders(1, len(attachmentIDs)) +
 			") AND NOT EXISTS (SELECT 1 FROM webchat_message_attachment l WHERE l.attachment_id = a.id)"
 		rows, err := tx.QueryContext(ctx, q, aargs...)
 		if err != nil {
@@ -276,11 +278,12 @@ func (s *ChatRetentionStore) purgeTx(ctx context.Context, tx *sql.Tx, ids []stri
 		}
 		for rows.Next() {
 			var aid, project string
-			if err := rows.Scan(&aid, &project); err != nil {
+			var size int64
+			if err := rows.Scan(&aid, &project, &size); err != nil {
 				_ = rows.Close()
 				return fmt.Errorf("chat retention: scan unlinked attachment: %w", err)
 			}
-			res.UnlinkedAttachmentIDs = append(res.UnlinkedAttachmentIDs, aid)
+			res.UnlinkedAttachments = append(res.UnlinkedAttachments, store.ChatRetentionAttachment{ID: aid, ProjectID: project, Size: size})
 			c := res.ByProject[project]
 			c.UnlinkedAttachments++
 			res.ByProject[project] = c
@@ -313,6 +316,177 @@ func (s *ChatRetentionStore) deleteReturning(ctx context.Context, tx *sql.Tx, qu
 		return err
 	}
 	return rows.Err()
+}
+
+// webchatTimeArg is the bind value of a timestamp compared with a web chat
+// table's time column: on SQLite those columns are RFC 3339 text written
+// by the web chat store (compared as strings; a sub-second difference may
+// order wrongly, which a grace measured in days does not notice), on
+// Postgres TIMESTAMPTZ.
+func (s *ChatRetentionStore) webchatTimeArg(t time.Time) any {
+	if s.pg {
+		return t.UTC()
+	}
+	return t.UTC().Format(time.RFC3339Nano)
+}
+
+// ListChatRetentionDeletedConversations implements store.ChatRetentionStore.
+func (s *ChatRetentionStore) ListChatRetentionDeletedConversations(ctx context.Context, cutoff time.Time, after string, limit int) ([]string, error) {
+	if err := s.requireDB(); err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		return nil, nil
+	}
+	query := `SELECT id FROM conversations WHERE deleted_at IS NOT NULL AND deleted_at < ?`
+	args := []any{cutoff.UTC()}
+	if after != "" {
+		query += ` AND id > ?`
+		args = append(args, after)
+	}
+	query += ` ORDER BY id LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, s.rebind(query), args...)
+	if err != nil {
+		return nil, fmt.Errorf("chat retention: list deleted conversations: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("chat retention: scan deleted conversation: %w", err)
+		}
+		out = append(out, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("chat retention: list deleted conversations: %w", err)
+	}
+	return out, nil
+}
+
+// ListChatRetentionDeletedTopics implements store.ChatRetentionStore.
+func (s *ChatRetentionStore) ListChatRetentionDeletedTopics(ctx context.Context, cutoff time.Time, after string, limit int) ([]store.ChatRetentionDeletedTopic, error) {
+	if err := s.requireDB(); err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		return nil, nil
+	}
+	query := `SELECT id, conversation_id FROM webchat_topic WHERE deleted_at IS NOT NULL AND deleted_at < ?`
+	args := []any{s.webchatTimeArg(cutoff)}
+	if after != "" {
+		query += ` AND id > ?`
+		args = append(args, after)
+	}
+	query += ` ORDER BY id LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, s.rebind(query), args...)
+	if err != nil {
+		return nil, fmt.Errorf("chat retention: list deleted topics: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []store.ChatRetentionDeletedTopic
+	for rows.Next() {
+		var t store.ChatRetentionDeletedTopic
+		var conv sql.NullString
+		if err := rows.Scan(&t.ID, &conv); err != nil {
+			return nil, fmt.Errorf("chat retention: scan deleted topic: %w", err)
+		}
+		t.ConversationID = conv.String
+		out = append(out, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("chat retention: list deleted topics: %w", err)
+	}
+	return out, nil
+}
+
+// SelectChatRetentionConversationMessages implements
+// store.ChatRetentionStore.
+func (s *ChatRetentionStore) SelectChatRetentionConversationMessages(ctx context.Context, conversationID, threadID string, limit int) ([]store.ChatRetentionCandidate, error) {
+	if err := s.requireDB(); err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		return nil, nil
+	}
+	out := make([]store.ChatRetentionCandidate, 0, limit)
+	if conversationID != "" {
+		got, err := s.selectMessagesWhere(ctx, `conversation_id = ?`, conversationID, limit)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, got...)
+	}
+	if threadID != "" && len(out) < limit {
+		got, err := s.selectMessagesWhere(ctx, `thread_id = ? AND conversation_id IS NULL`, threadID, limit-len(out))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, got...)
+	}
+	return out, nil
+}
+
+// selectMessagesWhere returns up to limit messages matching where (one
+// bind argument, arg) that are not pending or deferred.
+func (s *ChatRetentionStore) selectMessagesWhere(ctx context.Context, where string, arg any, limit int) ([]store.ChatRetentionCandidate, error) {
+	query := `SELECT id, created, project_id, conversation_id FROM messages WHERE ` + where +
+		` AND dispatch_state NOT IN ('pending', 'deferred') LIMIT ?`
+	rows, err := s.db.QueryContext(ctx, s.rebind(query), arg, limit)
+	if err != nil {
+		return nil, fmt.Errorf("chat retention: select conversation messages: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []store.ChatRetentionCandidate
+	for rows.Next() {
+		var c store.ChatRetentionCandidate
+		var conv sql.NullString
+		if err := rows.Scan(&c.ID, &c.Created, &c.ProjectID, &conv); err != nil {
+			return nil, fmt.Errorf("chat retention: scan conversation message: %w", err)
+		}
+		c.Created = c.Created.UTC()
+		c.ConversationID = conv.String
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("chat retention: select conversation messages: %w", err)
+	}
+	return out, nil
+}
+
+// ChatAttachmentLinked implements store.ChatRetentionStore.
+func (s *ChatRetentionStore) ChatAttachmentLinked(ctx context.Context, id string) (bool, error) {
+	if err := s.requireDB(); err != nil {
+		return false, err
+	}
+	var one int
+	err := s.db.QueryRowContext(ctx, s.rebind(`SELECT 1 FROM webchat_message_attachment WHERE attachment_id = ? LIMIT 1`), id).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("chat retention: attachment link: %w", err)
+	}
+	return true, nil
+}
+
+// DeleteUnlinkedChatAttachment implements store.ChatRetentionStore.
+func (s *ChatRetentionStore) DeleteUnlinkedChatAttachment(ctx context.Context, id string) (bool, error) {
+	if err := s.requireDB(); err != nil {
+		return false, err
+	}
+	res, err := s.db.ExecContext(ctx, s.rebind(`DELETE FROM webchat_attachment WHERE id = ?
+  AND NOT EXISTS (SELECT 1 FROM webchat_message_attachment l WHERE l.attachment_id = ?)`), id, id)
+	if err != nil {
+		return false, fmt.Errorf("chat retention: delete attachment row: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("chat retention: delete attachment row: %w", err)
+	}
+	return n > 0, nil
 }
 
 // chatRetentionExecer is a *sql.DB or *sql.Tx.
