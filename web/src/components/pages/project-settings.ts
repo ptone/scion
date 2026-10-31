@@ -102,8 +102,9 @@ interface ProjectSettings {
   telemetryEnabled?: boolean | null | undefined;
   autoExposePortsEnabled?: boolean | null | undefined;
   activeProfile?: string | undefined;
-  defaultMaxTurns?: number | undefined;
-  defaultMaxModelCalls?: number | undefined;
+  /** null clears (inherit), 0 is Unlimited, n >= 1 a limit. */
+  defaultMaxTurns?: number | null | undefined;
+  defaultMaxModelCalls?: number | null | undefined;
   defaultMaxDuration?: string | undefined;
   defaultResources?: ProjectResourceSpec | undefined;
   defaultGCPIdentityMode?: string | undefined;
@@ -138,6 +139,17 @@ interface HarnessConfigEntry {
 
 interface RuntimeBrokerWithProvider extends RuntimeBroker {
   localPath?: string;
+}
+
+/** A stored project count limit as page state: null (inherit), 0 or n. */
+export function countLimitOrNull(v: number | null | undefined): number | null {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : null;
+}
+
+/** The number input's text as a count limit: a positive integer, else null (inherit). */
+export function parseCountLimitInput(text: string): number | null {
+  const t = text.trim();
+  return /^[1-9]\d*$/.test(t) ? parseInt(t, 10) : null;
 }
 
 @customElement('scion-page-project-settings')
@@ -229,12 +241,18 @@ export class ScionPageProjectSettings extends LitElement {
   @state()
   private resolvedSettings: Record<string, ResolvedHubSetting> = {};
 
-  // Default agent limits
+  // Default agent limits. A count limit is null (inherit: no project
+  // value), 0 (Unlimited) or a limit n >= 1. The loaded values decide
+  // whether a save sends the field: an untouched count limit is left out,
+  // so a save never changes it.
   @state()
-  private configDefaultMaxTurns = 0;
+  private configDefaultMaxTurns: number | null = null;
 
   @state()
-  private configDefaultMaxModelCalls = 0;
+  private configDefaultMaxModelCalls: number | null = null;
+
+  private loadedDefaultMaxTurns: number | null = null;
+  private loadedDefaultMaxModelCalls: number | null = null;
 
   @state()
   private configDefaultMaxDuration = '';
@@ -1409,8 +1427,10 @@ export class ScionPageProjectSettings extends LitElement {
       this.configDefaultHarnessAuth = this.settings.defaultHarnessAuth || '';
       this.configTelemetryEnabled = this.settings.telemetryEnabled ?? null;
       this.configAutoExposePortsEnabled = this.settings.autoExposePortsEnabled ?? null;
-      this.configDefaultMaxTurns = this.settings.defaultMaxTurns || 0;
-      this.configDefaultMaxModelCalls = this.settings.defaultMaxModelCalls || 0;
+      this.configDefaultMaxTurns = countLimitOrNull(this.settings.defaultMaxTurns);
+      this.configDefaultMaxModelCalls = countLimitOrNull(this.settings.defaultMaxModelCalls);
+      this.loadedDefaultMaxTurns = this.configDefaultMaxTurns;
+      this.loadedDefaultMaxModelCalls = this.configDefaultMaxModelCalls;
       this.configDefaultMaxDuration = this.settings.defaultMaxDuration || '';
       const res = this.settings.defaultResources;
       this.configDefaultResCpuReq = res?.requests?.cpu || '';
@@ -1494,6 +1514,43 @@ export class ScionPageProjectSettings extends LitElement {
    * inherited hub value. Returns `nothing` when the setting is overridden at
    * the project level or when no hub default exists.
    */
+  /**
+   * A project default count limit: a number input plus an Unlimited box,
+   * as on the agent Edit page. Empty with the box clear is Inherit (null);
+   * the box sends 0 (Unlimited); a positive integer is a limit
+   * (ptone/scion#3925).
+   */
+  private renderCountLimitField(
+    label: string,
+    annotationKey: string,
+    value: number | null,
+    set: (v: number | null) => void,
+    help: string,
+    canEdit: boolean
+  ) {
+    const unlimited = value === 0;
+    return html`<div class="config-field ${this.isHubDefault(annotationKey) ? 'hub-inherited' : ''}">
+      <label>${label} ${this.renderHubIndicator(annotationKey)}</label>
+      <sl-input
+        type="number"
+        inputmode="numeric"
+        placeholder=${unlimited ? 'Unlimited' : this.hubHint(annotationKey) || 'Inherit'}
+        .value=${value && value > 0 ? String(value) : ''}
+        ?disabled=${!canEdit || unlimited}
+        @sl-input=${(e: Event) => set(parseCountLimitInput((e.target as HTMLInputElement).value))}
+      ></sl-input>
+      <sl-checkbox
+        size="small"
+        class="unlimited"
+        ?checked=${unlimited}
+        ?disabled=${!canEdit}
+        @sl-change=${(e: Event) => set((e.target as HTMLInputElement).checked ? 0 : null)}
+        >Unlimited</sl-checkbox
+      >
+      <span class="field-help">${help}</span>
+    </div>`;
+  }
+
   private renderHubIndicator(annotationKey: string) {
     const entry = this.resolvedSettings[annotationKey];
     if (!entry || entry.projectSet || entry.hubDefault !== 'present') {
@@ -2053,8 +2110,10 @@ export class ScionPageProjectSettings extends LitElement {
           : this.defaultModelSelection;
 
       // The PUT keeps any field the body leaves out, so every field this
-      // page manages is sent: "" / 0 / {} clears it, and null resets a
+      // page manages is sent: "" / {} clears it, and null resets a
       // tri-state field (telemetry, auto-expose, thinking level) to inherit.
+      // The count limits are sent only when changed: null for inherit, 0
+      // for Unlimited, n for a limit (ptone/scion#3925).
       // activeProfile, which this page does not manage, is left out so a
       // save keeps it. The per-profile service account map is replaced as a
       // whole when present, so it is sent only when its rows changed ({}
@@ -2066,8 +2125,6 @@ export class ScionPageProjectSettings extends LitElement {
         defaultModel: defaultModel || '',
         telemetryEnabled: this.configTelemetryEnabled,
         autoExposePortsEnabled: this.configAutoExposePortsEnabled,
-        defaultMaxTurns: this.configDefaultMaxTurns || 0,
-        defaultMaxModelCalls: this.configDefaultMaxModelCalls || 0,
         defaultMaxDuration: this.configDefaultMaxDuration || '',
         defaultResources: defaultResources ?? {},
         defaultThinkingLevel: this.defaultThinkingLevel,
@@ -2079,6 +2136,12 @@ export class ScionPageProjectSettings extends LitElement {
         maxAgentRole: this.configMaxAgentRole || '',
         defaultAgentRole: this.configDefaultAgentRole || '',
       };
+      if (this.configDefaultMaxTurns !== this.loadedDefaultMaxTurns) {
+        body.defaultMaxTurns = this.configDefaultMaxTurns;
+      }
+      if (this.configDefaultMaxModelCalls !== this.loadedDefaultMaxModelCalls) {
+        body.defaultMaxModelCalls = this.configDefaultMaxModelCalls;
+      }
       if (profileDefaultsDirty) {
         body.defaultGCPIdentityServiceAccountIDByProfile = mapFromRows(this.profileDefaultRows);
       }
@@ -3069,50 +3132,22 @@ export class ScionPageProjectSettings extends LitElement {
                 >Applied to new agents unless overridden by template or agent config.</span
               >
 
-              <div
-                class="config-field ${this.isHubDefault('scion.io/default-max-turns')
-                  ? 'hub-inherited'
-                  : ''}"
-              >
-                <label
-                  >Default Max Turns ${this.renderHubIndicator('scion.io/default-max-turns')}</label
-                >
-                <sl-input
-                  type="number"
-                  placeholder=${this.hubHint('scion.io/default-max-turns') || 'No limit'}
-                  .value=${this.configDefaultMaxTurns ? String(this.configDefaultMaxTurns) : ''}
-                  ?disabled=${!canEdit}
-                  @sl-input=${(e: Event) => {
-                    this.configDefaultMaxTurns =
-                      parseInt((e.target as HTMLInputElement).value) || 0;
-                  }}
-                ></sl-input>
-                <span class="field-help">Maximum conversation turns per agent.</span>
-              </div>
-
-              <div
-                class="config-field ${this.isHubDefault('scion.io/default-max-model-calls')
-                  ? 'hub-inherited'
-                  : ''}"
-              >
-                <label
-                  >Default Max Model Calls
-                  ${this.renderHubIndicator('scion.io/default-max-model-calls')}</label
-                >
-                <sl-input
-                  type="number"
-                  placeholder=${this.hubHint('scion.io/default-max-model-calls') || 'No limit'}
-                  .value=${this.configDefaultMaxModelCalls
-                    ? String(this.configDefaultMaxModelCalls)
-                    : ''}
-                  ?disabled=${!canEdit}
-                  @sl-input=${(e: Event) => {
-                    this.configDefaultMaxModelCalls =
-                      parseInt((e.target as HTMLInputElement).value) || 0;
-                  }}
-                ></sl-input>
-                <span class="field-help">Maximum LLM API calls per agent.</span>
-              </div>
+              ${this.renderCountLimitField(
+                'Default Max Turns',
+                'scion.io/default-max-turns',
+                this.configDefaultMaxTurns,
+                (v) => (this.configDefaultMaxTurns = v),
+                'Maximum conversation turns per agent.',
+                canEdit
+              )}
+              ${this.renderCountLimitField(
+                'Default Max Model Calls',
+                'scion.io/default-max-model-calls',
+                this.configDefaultMaxModelCalls,
+                (v) => (this.configDefaultMaxModelCalls = v),
+                'Maximum LLM API calls per agent.',
+                canEdit
+              )}
 
               <div
                 class="config-field ${this.isHubDefault('scion.io/default-max-duration')
