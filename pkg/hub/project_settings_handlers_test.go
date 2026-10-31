@@ -1212,7 +1212,10 @@ func TestProjectSettings_PartialPutDoesNotRevalidateStoredIdentity(t *testing.T)
 // stored service account that has gone unverified since it was saved: the
 // account no longer applies once the mode is not assign.
 func TestProjectSettings_ModeOnlyPutSkipsStaleStoredSA(t *testing.T) {
-	for _, mode := range []string{"passthrough", ""} {
+	// block, not passthrough: saving a passthrough default needs an
+	// embedded broker and the setter's passthrough authority, which this
+	// server does not have.
+	for _, mode := range []string{"block", ""} {
 		t.Run("mode="+mode, func(t *testing.T) {
 			srv, s := testServer(t)
 			project := createTestProjectForSettings(t, s)

@@ -6091,9 +6091,9 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 				agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
 					MetadataMode: store.GCPMetadataModePassthrough,
 					// RequireLocalRuntime: see the create path's twin in
-					// handlers_agents_core.go. Only ever set here, since this
-					// whole block only runs when hubDefaultPassthroughAllowed
-					// granted it.
+					// handlers_agents_core.go. Set only on a grant from this
+					// rung or the project-default rung above, both confined
+					// by hubDefaultPassthroughAllowed.
 					RequireLocalRuntime: true,
 				}
 				// The mode follows the pinned profile's type, as on every passthrough surface.
