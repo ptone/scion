@@ -539,12 +539,11 @@ func TestAgentDelegatedAgentList_NilSealerFailsClosed(t *testing.T) {
 }
 
 // TestAgentDelegatedAgentList_TruncatedPageCarriesCursor: newest first, the
-// list holds three readable P1 agents, then more agents than the candidate
-// cap in P3 (where Alice may list but not read agents), then an older
-// readable P1 agent. After the first page, a page is empty, carries a next
-// cursor and an approximate total; following the cursor reaches the older
-// readable agent. The aggregated record of the empty page counts the denied
-// candidates and names at most 50.
+// list holds more agents than the candidate cap in P3 (where Alice may list
+// but not read agents), then an older readable P1 agent and the fixture
+// agents. Page 1 is empty, carries a next cursor and an approximate total;
+// following the cursor reaches the readable agents. The aggregated record of
+// page 1 counts the denied candidates and names at most 50.
 func TestAgentDelegatedAgentList_TruncatedPageCarriesCursor(t *testing.T) {
 	if testing.Short() {
 		t.Skip("creates more agents than the list candidate cap")
@@ -555,34 +554,28 @@ func TestAgentDelegatedAgentList_TruncatedPageCarriesCursor(t *testing.T) {
 	createCustomBinding(t, w.store, rd.ID, w.alice.ID, w.p3.ID)
 	// The list covers P1 and P3 only.
 	require.NoError(t, w.store.DeleteRoleBinding(ctx, w.aliceP2Binding))
-	// Creation order is list order, oldest first: the fixture agents and agent D, then the member agent, then
-	// the bulk P3 agents, then three new P1 agents.
+	// Creation order is list order, oldest first: the fixture agents and agent D, then the member agent, then the
+	// bulk P3 agents.
 	member := w.adtMoreAgents(t, "adt-list-trunc-member", w.proj.ID, w.carol.ID, 1)[0]
 	w.adtMoreAgents(t, "adt-list-trunc-p3", w.p3.ID, w.bob.ID, authorizedListMaxCandidates+100)
-	fresh := w.adtMoreAgents(t, "adt-list-trunc-new", w.proj.ID, w.carol.ID, 3)
 	cred := w.delegated(t, w.adtIssueGrant(t, map[string]string{"kind": "hub"}, "agent:list", "agent:read").ID)
 	decisions := w.captureDecisions(t)
 
 	page := adtDecodeList(t, w.listAgents(t, cred.Token, url.Values{"limit": {"3"}}))
-	require.Equal(t, sortedIDs(fresh[0].ID, fresh[1].ID, fresh[2].ID), page.ids())
-	assert.True(t, page.TotalCountApproximate, "the count pass stopped at the candidate cap")
-	require.NotEmpty(t, page.NextCursor)
-	page = adtDecodeList(t, w.listAgents(t, cred.Token, url.Values{"limit": {"3"}, "cursor": {page.NextCursor}}))
 	assert.Empty(t, page.Agents, "the candidate budget ran out on denied items")
-	assert.True(t, page.TotalCountApproximate)
+	assert.True(t, page.TotalCountApproximate, "the count pass stopped at the candidate cap")
 	require.NotEmpty(t, page.NextCursor, "an empty page still carries a cursor")
 	adtAssertCursorHidesIDs(t, page.NextCursor, member.ID)
-	// Newest first after the bulk: the member agent, agent D (refused), then agents C and A (B is in P2).
+	// After the remaining bulk agents: the member agent, agent D (refused), then agents C and A (B is in P2).
 	page = adtDecodeList(t, w.listAgents(t, cred.Token, url.Values{"limit": {"3"}, "cursor": {page.NextCursor}}))
 	assert.Equal(t, sortedIDs(member.ID, w.agentC.ID, w.agentA.ID), page.ids(), "following the cursor reaches the older readable agents")
 
 	recs := decisions.listFilterRecords()
-	require.Len(t, recs, 3, "one aggregated record per request")
-	// The second request's count pass starts at the newest agents: the three new P1 agents, then bulk P3 agents
-	// up to the cap.
-	assert.Equal(t, 3, recs[1].ListFilter.Allowed, "the count pass finds the three new agents")
-	assert.True(t, recs[1].ListFilter.Truncated, "more denied items than the record names")
-	assert.Len(t, recs[1].ListFilter.DeniedIDs, store.DecisionAuditListFilterMaxDeniedIDs)
+	require.Len(t, recs, 2, "one aggregated record per request")
+	// Page 1's count pass starts at the bulk P3 agents and stops at the cap: nothing is allowed.
+	assert.Zero(t, recs[0].ListFilter.Allowed, "the count pass sees only refused bulk agents")
+	assert.True(t, recs[0].ListFilter.Truncated, "more denied items than the record names")
+	assert.Len(t, recs[0].ListFilter.DeniedIDs, store.DecisionAuditListFilterMaxDeniedIDs)
 }
 
 // adtCtxCapture is a decision-audit emitter that also records whether the

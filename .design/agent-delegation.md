@@ -766,9 +766,10 @@ table, a delegated request on it is refused at the route gate.
   intersected with the grant boundary and returned as a tagged scope: none, an explicit project
   set, or all projects (a hub boundary and an unrestricted issuer), less the projects an access
   constraint excludes. The agent's own principals contribute nothing. `ResolveListScopes` returns
-  `errDelegatedListScope`, never a scope, for a delegated identity. Any refusal by the arm, and a
-  server error while deciding the scope (logged at warn level, with no item IDs), answers 200 with an
-  empty list plus the arm's deny record ("any error denies"), never a 403 that names the failed check.
+  `errDelegatedListScope`, never a scope, for a delegated identity. Any refusal by the arm answers 200
+  with an empty list plus the arm's deny record ("any error denies"), never a 403 that names the failed
+  check. A store error during the arm's checks is recorded as a `lookup_error` deny; an internal error in
+  the list arm itself is also logged at warn level, with no item IDs.
 - **Item filter.** Each admitted list route names exactly one per-item permission in its admission
   entry (`agentDelegationAdmission.ItemFilter`; `agent.list → agent.read`). Only the item filter
   (`delegatedListItemRead`) accepts that permission; a request that asks `Decide` for it on the

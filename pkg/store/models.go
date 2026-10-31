@@ -5018,8 +5018,8 @@ type DecisionAuditListFilter struct {
 	DeniedIDs []string
 	Truncated bool
 	// Incomplete reports that the request did not finish its list, for any
-	// reason, after the list scope was decided: a panic, a cancelled
-	// request, an invalid cursor or filter, or a server error.
+	// reason, after the list arm started: a panic, a cancelled request, an
+	// invalid cursor or filter, or a server error.
 	Incomplete bool
 }
 
