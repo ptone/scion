@@ -217,6 +217,8 @@ func TestPortView_PortLinkRedirectsAndServes(t *testing.T) {
 // view_ttl after the time it is created (2h by default).
 func TestPortView_ViewTTL(t *testing.T) {
 	f := newPortViewFixture(t, nil)
+	// A page link is created only for an agent a transport reaches.
+	f.startAgent(t)
 	now := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
 	f.srv.portViewClock = func() time.Time { return now }
 	for _, tc := range []struct {
