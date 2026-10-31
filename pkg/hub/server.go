@@ -6005,10 +6005,24 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 	projectSettings := projectSettingsFromAnnotations(project)
 	switch projectSettings.DefaultGCPIdentityMode {
 	case store.GCPMetadataModePassthrough:
-		agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
-			MetadataMode: store.GCPMetadataModePassthrough,
-		}
-		if agent.RuntimeBrokerID != "" {
+		// Project-default passthrough gets the hub default's confinement
+		// plus the passthrough authority of the schedule's principal, which
+		// the caller placed on ctx (see projectDefaultPassthroughAllowed).
+		// Effective profile, pin-back and RequireLocalRuntime mirror the
+		// hub-default arm below; on denial GCPIdentity is left unset, as
+		// there.
+		effectiveProfile := effectiveRuntimeProfileName(agent.AppliedConfig.Profile, project)
+		if allowed, resolvedProfile := s.projectDefaultPassthroughAllowed(ctx, nil, agent.RuntimeBrokerID, agent.ProjectID, agent.Name, effectiveProfile); allowed {
+			if agent.AppliedConfig.Profile == "" {
+				agent.AppliedConfig.Profile = resolvedProfile
+			}
+			if agent.AppliedConfig.CreateInputs != nil && agent.AppliedConfig.CreateInputs.Profile == "" {
+				agent.AppliedConfig.CreateInputs.Profile = resolvedProfile
+			}
+			agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
+				MetadataMode:        store.GCPMetadataModePassthrough,
+				RequireLocalRuntime: true,
+			}
 			if err := s.translatePassthroughForSandbox(ctx, nil, agent, agent.RuntimeBrokerID, project); err != nil {
 				return "", fmt.Errorf("failed to configure GCP identity for sandbox runtime: %w", err)
 			}
