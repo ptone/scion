@@ -188,6 +188,20 @@ describe('links in the review editor (ptone/scion#6848)', () => {
     expect(opened).toEqual([['https://example.com/page', '_blank', 'noopener,noreferrer']]);
   });
 
+  it('a middle press outside a link is not held back, so plain text keeps its native paste', async () => {
+    const c = await open(DOC);
+    const plain = Array.from(c.view.dom.querySelectorAll('p'))[0].firstChild!;
+    expect(plain.nodeType).toBe(3);
+    expect(plain.parentElement!.closest('a')).toBeNull();
+    const down = mouse('mousedown', { button: 1 });
+    plain.dispatchEvent(down);
+    expect(down.defaultPrevented).toBe(false);
+    // Control: the same press on a link is held back.
+    const onLink = mouse('mousedown', { button: 1 });
+    textIn(link(c, 'the site')).dispatchEvent(onLink);
+    expect(onLink.defaultPrevented).toBe(true);
+  });
+
   it('a Mod-click on a #fragment link moves to its heading and opens nothing', async () => {
     const c = await open('[go](#second-part)\n\n# First\n\n## Second part\n');
     const go = link(c, 'go');

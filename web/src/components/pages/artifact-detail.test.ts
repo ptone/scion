@@ -2327,6 +2327,8 @@ describe('artifact page: refresh, origin and version labels', () => {
     data: ArtifactResponse;
     text: string | null;
     reviewText: string;
+    editText: string;
+    publishOpen: boolean;
     editing: boolean;
     reviewing: boolean;
     startReview: () => void;
@@ -2394,6 +2396,37 @@ describe('artifact page: refresh, origin and version labels', () => {
     expect(internals(el).text).toBe('# One');
     expect(internals(el).reviewText).toBe('# One');
   });
+
+  for (const action of ['edit', 'upload'] as const) {
+    it(`R-1: an ${action} started while a Refresh is in flight keeps the version it was started on`, async () => {
+      const h = heldRefresh();
+      mockFetch(h.meta, '# One', h.opts);
+      const el = await mountAs();
+      const uploads = (): HTMLElement[] =>
+        Array.from(el.shadowRoot!.querySelectorAll<HTMLElement>('sl-button')).filter((b) =>
+          text(b).includes('Upload new version')
+        );
+      expect(uploads().length).toBeGreaterThan(0);
+
+      h.hold();
+      headerButton(el, 'Refresh').click();
+      await el.updateComplete;
+      // Edit and every Upload button cannot be clicked while the Refresh runs.
+      expect(headerButton(el, 'Edit').hasAttribute('disabled')).toBe(true);
+      for (const u of uploads()) expect(u.hasAttribute('disabled')).toBe(true);
+
+      // The action starts anyway (another path), then the Refresh's read lands with v2.
+      if (action === 'edit') internals(el).startEdit();
+      else internals(el).publishOpen = true;
+      publishV2(h);
+      h.release();
+      await settle(el);
+      // The Refresh result was dropped: the page still shows v1.
+      expect(internals(el).data.version!.seq).toBe(1);
+      expect(internals(el).text).toBe('# One');
+      if (action === 'edit') expect(internals(el).editText).toBe('# One');
+    });
+  }
 
   it('R-1 control: a Refresh with no review overlapping shows the new version, and a review then starts from it', async () => {
     const h = heldRefresh();
