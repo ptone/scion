@@ -21,7 +21,7 @@
 
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   artifactLinkTarget,
@@ -29,6 +29,7 @@ import {
   PREVIEW_SANDBOX,
   imageSource,
   previewDocument,
+  previewFrameDocument,
   resolveBundlePath,
   rewriteImages,
 } from './artifact-preview.js';
@@ -251,7 +252,106 @@ describe('previewDocument', () => {
   });
   it('allows images from the hub only and never scripts', () => {
     expect(PREVIEW_CSP).toBe("default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'");
+    expect(PREVIEW_CSP.split(';').map((d) => d.trim())).toContain("default-src 'none'");
+    expect(PREVIEW_CSP).not.toMatch(/script-src|'unsafe-eval'/);
     expect(PREVIEW_SANDBOX.split(' ')).not.toContain('allow-scripts');
+    expect(PREVIEW_SANDBOX).toBe('allow-same-origin allow-popups allow-popups-to-escape-sandbox');
+  });
+  it('shows the side note as text and only adds a fixed class for margin notes', () => {
+    const doc = previewDocument('', {}, { sideNote: '<b>&</b>', marginNotes: true });
+    expect(doc).toContain('<aside class="critic-side">&lt;b&gt;&amp;&lt;/b&gt;</aside>');
+    expect(doc).toContain('<body class="notes-margin">');
+  });
+});
+
+/** The body elements of a frame document, parsed for inspection. */
+function frameBody(doc: unknown): HTMLElement {
+  expect(typeof doc).toBe('string');
+  return new DOMParser().parseFromString(doc as string, 'text/html').body;
+}
+
+const frameFiles = { id: ID, seq: 1, entryPath: 'plan.md', files: [] };
+
+describe('previewFrameDocument', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  });
+
+  it('keeps no link that runs script or loads a data document', async () => {
+    const source = [
+      '[a](javascript:alert(1)) [b](JaVaScRiPt:alert(1)) [c](vbscript:msgbox(1))',
+      '[d](data:text/html,<script>alert(1)</script>) [e](data:text/html;base64,PHNjcmlwdD4=)',
+      '<a href="javascript:alert(1)">f</a> <a href=" javascript:alert(1)">g</a>',
+      '<a href="data:text/javascript,alert(1)">h</a> <a href="jav&#x09;ascript:alert(1)">i</a>',
+      '[ok](https://example.com/x) [mail](mailto:a@example.com)',
+    ].join('\n\n');
+    const doc = await previewFrameDocument({ source, render: {}, files: frameFiles });
+    const hrefs = [...frameBody(doc).querySelectorAll('a[href]')].map((a) =>
+      a.getAttribute('href')
+    );
+    expect(hrefs).toEqual(['https://example.com/x', 'mailto:a@example.com']);
+  });
+
+  it('drops scripts, frames, embedded objects, foreign content and handlers', async () => {
+    const source = [
+      '<script>alert(1)</script><iframe src="https://example.com"></iframe>',
+      '<object data="x"></object><embed src="x">',
+      '<svg><foreignObject><p>x</p></foreignObject></svg>',
+      '<img src="a.png" onerror="alert(1)"><p onclick="alert(1)">text</p>',
+      '<form action="https://example.com"><input></form><base href="https://example.com">',
+      '<meta http-equiv="refresh" content="0;url=https://example.com">',
+    ].join('\n\n');
+    const doc = await previewFrameDocument({ source, render: {}, files: frameFiles });
+    const body = frameBody(doc);
+    expect(
+      body.querySelector('script, iframe, object, embed, foreignObject, base, meta, form')
+    ).toBeNull();
+    for (const el of body.querySelectorAll('*')) {
+      expect([...el.attributes].filter((a) => /^on/i.test(a.name))).toEqual([]);
+    }
+    expect(body.textContent).toContain('text');
+  });
+
+  it('marks the document through one named policy, created once', async () => {
+    interface Marked {
+      marked: string;
+      name: string;
+    }
+    const createPolicy = vi.fn(
+      (
+        name: string,
+        rules: { createHTML(markup: string): string }
+      ): { createHTML(markup: string): Marked } => ({
+        createHTML: (markup: string): Marked => ({ marked: rules.createHTML(markup), name }),
+      })
+    );
+    // The plain document, from the module already loaded without the API.
+    const expected = await previewFrameDocument({ source: 'hello', render: {}, files: frameFiles });
+    vi.stubGlobal('trustedTypes', { createPolicy });
+    const before = new Set(Object.keys(globalThis));
+    vi.resetModules();
+    const mod = await import('./artifact-preview.js');
+    const first = (await mod.previewFrameDocument({
+      source: 'hello',
+      render: {},
+      files: frameFiles,
+    })) as unknown as Marked;
+    await mod.previewFrameDocument({ source: 'again', render: {}, files: frameFiles });
+
+    expect(createPolicy.mock.calls.map((c) => c[0])).toEqual(['scion-preview-frame']);
+    expect(first.name).toBe('scion-preview-frame');
+    expect(typeof expected).toBe('string');
+    expect(first.marked).toBe(expected);
+    // The policy stays inside the module.
+    expect(Object.keys(mod).filter((k) => /policy|markup/i.test(k))).toEqual([]);
+    expect([...Object.keys(globalThis)].filter((k) => !before.has(k))).toEqual([]);
+  });
+
+  it('falls back to the plain document where the browser has no policy API', async () => {
+    const doc = await previewFrameDocument({ source: 'plain', render: {}, files: frameFiles });
+    const body = rewriteImages((await getMarkdownRenderer()).render('plain'), frameFiles);
+    expect(doc).toBe(previewDocument(body, {}, {}));
   });
 });
 

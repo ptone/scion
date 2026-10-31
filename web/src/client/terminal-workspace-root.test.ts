@@ -1678,6 +1678,48 @@ describe('idle entries', () => {
   // entry. The real restore path always wraps entry creation in
   // withAutoSelectSuspended for exactly this reason, so these tests do the
   // same to observe a deliberately-idle, unselected entry.
+  it('builds its icon buttons without assigning markup strings', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML')!;
+    const assigned: string[] = [];
+    vi.spyOn(Element.prototype, 'innerHTML', 'set').mockImplementation(function (
+      this: Element,
+      value: string
+    ) {
+      // Lit builds its templates in <template> elements, through its own
+      // policy in the browser; every other assignment is recorded.
+      if (!(this instanceof HTMLTemplateElement)) assigned.push(String(value));
+      descriptor.set!.call(this, value);
+    });
+    const fresh = new WorkspaceRoot();
+    document.body.append(fresh.element);
+    try {
+      const registry = new TerminalSessionRegistry({
+        hubUrl: window.location.origin,
+        accountId: 'i-icons',
+      });
+      fresh.withAutoSelectSuspended(() => fresh.create(registry, agentId, { deferConnect: true }));
+      await flush();
+
+      const iconName = (selector: string): string[] =>
+        [...fresh.element.querySelectorAll(selector)].map((button) =>
+          [...button.children]
+            .map((child) => `${child.localName}:${child.getAttribute('name')}`)
+            .join()
+        );
+      expect(iconName('.terminal-bulk-reconnect')).toEqual(['sl-icon:arrow-repeat']);
+      expect(iconName('.terminal-bulk-remove')).toEqual(['sl-icon:trash']);
+      expect(iconName('.terminal-rail-item .terminal-place-btn')).toEqual(['sl-icon:grid']);
+      expect(iconName('.terminal-rail-item [aria-label^="Reconnect"]')).toEqual([
+        'sl-icon:arrow-clockwise',
+      ]);
+      expect(iconName('.terminal-rail-item [aria-label^="Close"]')).toEqual(['sl-icon:x-circle']);
+      expect(assigned).toEqual([]);
+    } finally {
+      fresh.dispose();
+      fresh.element.remove();
+    }
+  });
+
   it('deferConnect leaves layoutManager state unchanged and creates no socket', async () => {
     const registry = new TerminalSessionRegistry({
       hubUrl: window.location.origin,
