@@ -156,12 +156,33 @@ test.afterEach(() => {
 });
 
 /**
- * Lets the editor take in the selection a tap or key just made (it reads
- * the DOM selection asynchronously), so the next key extends that one.
+ * Waits out the editor's settling after it takes focus. On focus,
+ * prosemirror-view (handlers.focus) schedules a 20ms timer that writes its
+ * own selection back to the DOM (selectionToDOM) if the two differ, and it
+ * reads selectionchange asynchronously; a key pressed sooner (a test's
+ * speed, not a person's) can be undone by that write. Waits until the
+ * selection has been quiet, with no selectionchange, for longer than that
+ * timer: a write-back fires selectionchange and restarts the wait.
  */
-async function settleSelection(page: Page): Promise<void> {
+async function settleAfterFocus(page: Page): Promise<void> {
   await page.evaluate(
-    () => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())))
+    () =>
+      new Promise<void>((resolve) => {
+        const QUIET_MS = 30; // longer than prosemirror-view's 20ms focus timer
+        let timer = setTimeout(done, QUIET_MS);
+        const giveUp = setTimeout(done, 2000);
+        function onChange(): void {
+          clearTimeout(timer);
+          timer = setTimeout(done, QUIET_MS);
+        }
+        function done(): void {
+          clearTimeout(timer);
+          clearTimeout(giveUp);
+          document.removeEventListener('selectionchange', onChange);
+          resolve();
+        }
+        document.addEventListener('selectionchange', onChange);
+      })
   );
 }
 
@@ -225,8 +246,12 @@ async function pinnedJourney(page: Page, title: string, touch: boolean): Promise
   // One toolbar, never a second, pinned copy.
   await expect(page.locator('scion-page-artifact-detail [role="toolbar"]')).toHaveCount(1);
   const comment = toolbar(page).locator('sl-button.comment');
-  const tap = async (x: number, y: number): Promise<void> =>
-    touch ? page.touchscreen.tap(x, y) : page.mouse.click(x, y);
+  /** Taps (or clicks) into the editor and waits until keys apply there. */
+  const tapIntoEditor = async (x: number, y: number): Promise<void> => {
+    await (touch ? page.touchscreen.tap(x, y) : page.mouse.click(x, y));
+    await expect(editor(page)).toBeFocused();
+    await settleAfterFocus(page);
+  };
 
   // Scrolled well down, the toolbar sits flush at the top of the content area.
   const scrollerTop = await scrollUnderToolbar(page, 30);
@@ -242,10 +267,8 @@ async function pinnedJourney(page: Page, title: string, touch: boolean): Promise
   // Select by tap and keyboard, then use the pinned Comment.
   const target = await firstClear(page, 31);
   const word = await textBox(page, `Paragraph ${target} line.`);
-  await tap(word.x, word.y);
-  await expect(editor(page)).toBeFocused();
+  await tapIntoEditor(word.x, word.y);
   await page.keyboard.press('Home');
-  await settleSelection(page);
   for (let i = 0; i < 'Paragraph'.length; i++) await page.keyboard.press('Shift+ArrowRight');
   await (touch ? comment.tap() : comment.click());
   const dialog = page.locator('scion-review-note-dialog sl-dialog');
@@ -260,8 +283,7 @@ async function pinnedJourney(page: Page, title: string, touch: boolean): Promise
   await scrollUnderToolbar(page, 40);
   const n = await firstClear(page, 40);
   const start = await textBox(page, `Paragraph ${n} line.`);
-  await tap(start.x, start.y);
-  await expect(editor(page)).toBeFocused();
+  await tapIntoEditor(start.x, start.y);
   await page.keyboard.press('Home');
   await page.keyboard.press('ArrowUp');
   await page.keyboard.press('ArrowUp');
@@ -288,8 +310,7 @@ async function pinnedJourney(page: Page, title: string, touch: boolean): Promise
   // Back into the text for the hint check (after the commented paragraph,
   // whose text the highlight splits).
   const again = await textBox(page, `Paragraph ${await firstClear(page, target + 1)} line.`);
-  await tap(again.x, again.y);
-  await expect(editor(page)).toBeFocused();
+  await tapIntoEditor(again.x, again.y);
 
   // A refusal hint shows in the pinned block, in view.
   await page.keyboard.press('End');
