@@ -712,7 +712,7 @@ export class ScionPageArtifactDetail extends LitElement {
          over the document only: Shoelace's dialogs, drawers, popups and
          tooltips stack far above. */
       /* Sticky offsets count from inside the scroll container's padding
-         (the app shell's content area: 1.5rem, 1rem at 640px and below), so
+         (the app shell's .content: 1.5rem, 1rem at 640px and below), so
          the block rises by that padding to meet the top edge and the text
          does not show above it. */
       .g-sticky {
