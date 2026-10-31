@@ -575,11 +575,11 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 	// An enable transition (any prior status, e.g. paused, back to active)
 	// re-arms future dispatch the same way resumeSchedule does. If this
 	// request didn't already recompute NextRunAt via a real CronExpr or
-	// TimeZone change,
-	// it must be recomputed here from the stored cron: otherwise a schedule
-	// that went stale while paused (or was paused with a next_run_at already
-	// in the past) would reactivate carrying that stale time, and the
-	// scheduler would treat it as immediately due.
+	// TimeZone change, it must be recomputed here from the stored cron
+	// expression and time zone: otherwise a schedule that went stale while
+	// paused (or was paused with a next_run_at already in the past) would
+	// reactivate carrying that stale time, and the scheduler would treat it
+	// as immediately due.
 	enabling := req.Status == store.ScheduleStatusActive && originalStatus != store.ScheduleStatusActive
 	if enabling && !fields.NextRunAt {
 		// A stored expression that no longer parses (for example one with a
@@ -596,9 +596,8 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 
 	// Ruling Q2: a fully reauthorized mutation that changes future dispatch
 	// (payload/target/type/timing including the time zone, or an enable
-	// transition) replaces the
-	// attribution and bumps authorization_revision atomically in the same
-	// write. A metadata-only edit (name, an unchanged cron/type/payload
+	// transition) replaces the attribution and bumps authorization_revision
+	// atomically in the same write. A metadata-only edit (name, an unchanged cron/type/payload
 	// resent as-is, or a status change other than an enable, e.g. pause)
 	// does not re-attribute, and attribution is passed to the store only
 	// when it changed. Deriving this from the field mask itself (rather
