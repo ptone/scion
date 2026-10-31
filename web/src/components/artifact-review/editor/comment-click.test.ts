@@ -189,10 +189,16 @@ describe('editing a comment from its badge (ptone/scion#6850)', () => {
     const { c, asked, pos } = await withOwnComment();
     const node = c.view.state.doc.nodeAt(pos)!;
     expect(clickOn(c, pos, node, click(0, { ctrlKey: true }))).toBe(false);
+    expect(clickOn(c, pos, node, click(0, { metaKey: true }))).toBe(false);
     expect(clickOn(c, pos, node, click(0, { shiftKey: true }))).toBe(false);
+    expect(clickOn(c, pos, node, click(0, { altKey: true }))).toBe(false);
     expect(clickOn(c, pos, node, click(1))).toBe(false);
     await settle();
     expect(asked).toHaveLength(1);
+    // Control: a plain main-button click on the same badge opens the dialog.
+    expect(clickOn(c, pos, node)).toBe(true);
+    await settle();
+    expect(asked).toHaveLength(2);
   });
 
   it('a double-click opens one dialog, not two', async () => {

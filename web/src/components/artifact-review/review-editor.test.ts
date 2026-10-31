@@ -126,3 +126,71 @@ describe('scion-review-editor comment card hint', () => {
     expect(own?.querySelector('button, sl-button, a, input')).toBeNull();
   });
 });
+
+/**
+ * An edit made from a comment badge (ptone/scion#6850) is a document change
+ * like any other: the element sends review-change with the new text.
+ */
+describe('scion-review-editor review-change after an edit from a badge', () => {
+  /** Mounts "one two three" with the reviewer's own comment "old" on "two". */
+  async function withOwnComment(): Promise<{
+    el: ScionReviewEditor;
+    changes: string[];
+    answer: { note: string };
+  }> {
+    const { el, changes } = await mount('one two three\n');
+    const answer = { note: 'old' };
+    const dialog = el.shadowRoot!.querySelector('scion-review-note-dialog') as unknown as {
+      ask: () => Promise<string>;
+    };
+    dialog.ask = () => Promise.resolve(answer.note);
+    const c = controllerOf(el);
+    let p = -1;
+    c.view.state.doc.descendants((n, pos) => {
+      if (p < 0 && n.isText && n.text!.includes('two')) p = pos + n.text!.indexOf('two');
+    });
+    // The editor's own selection class (no ProseMirror import outside the editor).
+    type Sel = Parameters<typeof c.view.state.tr.setSelection>[0];
+    const TextSel = c.view.state.selection.constructor as unknown as {
+      create(doc: unknown, from: number, to: number): Sel;
+    };
+    c.view.dispatch(c.view.state.tr.setSelection(TextSel.create(c.view.state.doc, p, p + 3)));
+    await el.comment();
+    await pause();
+    expect(changes.at(-1)).toBe('one {==two==}{>>old<<} three\n');
+    return { el, changes, answer };
+  }
+
+  /** Clicks the comment badge as ProseMirror does: handleClickOn on the atom. */
+  function clickBadge(el: ScionReviewEditor): boolean {
+    const view = controllerOf(el).view;
+    let at = -1;
+    view.state.doc.descendants((n, pos) => {
+      if (at < 0 && n.type.name === 'critic_comment') at = pos;
+    });
+    expect(at).toBeGreaterThanOrEqual(0);
+    const node = view.state.doc.nodeAt(at)!;
+    const e = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 });
+    return !!view.someProp('handleClickOn', (f) => f(view, at, node, at, e, true));
+  }
+
+  it('is sent with the changed note', async () => {
+    const { el, changes, answer } = await withOwnComment();
+    const before = changes.length;
+    answer.note = 'new';
+    expect(clickBadge(el)).toBe(true);
+    await pause();
+    expect(changes.length).toBeGreaterThan(before);
+    expect(changes.at(-1)).toBe('one {==two==}{>>new<<} three\n');
+  });
+
+  it('is sent without the comment and its highlight after an empty save', async () => {
+    const { el, changes, answer } = await withOwnComment();
+    const before = changes.length;
+    answer.note = '';
+    expect(clickBadge(el)).toBe(true);
+    await pause();
+    expect(changes.length).toBeGreaterThan(before);
+    expect(changes.at(-1)).toBe('one two three\n');
+  });
+});
