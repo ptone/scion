@@ -349,6 +349,13 @@ export class ScionPageArtifactDetail extends LitElement {
   private origin: ArtifactOrigin = 'project';
   /** A Refresh is reloading the page in place (ptone/scion#6851). */
   @state() private refreshing = false;
+  /**
+   * The newest version seq the page has seen (ptone/scion#6851): the one
+   * page property every source feeds through noteSeq (an artifact load, a
+   * version list; the review heartbeat of ptone/scion#6849 later), so the
+   * page shows one answer to "is there a newer version".
+   */
+  @state() private newestSeqSeen = 0;
   @state() private loading = true;
   @state() private notFound = false;
   @state() private error: string | null = null;
@@ -901,6 +908,7 @@ export class ScionPageArtifactDetail extends LitElement {
       const data = (await res.json()) as ArtifactResponse;
       if (gen !== this.loadGen) return;
       this.data = data;
+      this.noteSeq(data.artifact.currentSeq);
       dispatchPageTitle(this, data.artifact.title, 'Artifacts');
       const version = data.version;
       this.entry = version?.files.find((f) => f.path === version.entryPath) ?? null;
@@ -1036,6 +1044,7 @@ export class ScionPageArtifactDetail extends LitElement {
         const page = await listVersions(this.artifactId, next);
         if (gen !== this.loadGen) return;
         this.versions = next > 0 ? [...this.versions, ...page.versions] : page.versions;
+        for (const x of page.versions) if (x.state === 'ready') this.noteSeq(x.seq);
         const discarded = page.discarded ?? [];
         this.discarded = next > 0 ? [...this.discarded, ...discarded] : discarded;
         this.versionsNext = page.nextBefore ?? 0;
@@ -1219,14 +1228,17 @@ export class ScionPageArtifactDetail extends LitElement {
   }
 
   /**
-   * The newest version the page has seen: the artifact's current one, or a
-   * newer ready one the version list holds after a re-read
+   * The newest version the page has seen (newestSeqSeen): the artifact's
+   * current one, or a newer one a version list or another source reported
    * (ptone/scion#6851).
    */
   private get latestSeq(): number {
-    let seq = this.data?.artifact.currentSeq ?? 0;
-    for (const x of this.versions) if (x.state === 'ready' && x.seq > seq) seq = x.seq;
-    return seq;
+    return Math.max(this.newestSeqSeen, this.data?.artifact.currentSeq ?? 0);
+  }
+
+  /** Notes a version seq the page has seen to exist (see newestSeqSeen). */
+  noteSeq(seq: number): void {
+    if (seq > this.newestSeqSeen) this.newestSeqSeen = seq;
   }
 
   /** The artifact's newest version seen is a review (whichever version is shown). */
