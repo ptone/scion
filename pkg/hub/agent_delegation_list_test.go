@@ -792,7 +792,7 @@ func TestAgentsCollectionRoute_ResolvesOnlyTheExactPath(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, agentsCollectionRouteID, route.RouteID)
 	assert.Equal(t, opAgentList, route.OperationID)
-	assert.Equal(t, delegatedRouteTarget{Type: agentCollectionTargetType, ID: "hub"}, route.Target)
+	assert.Equal(t, hubAgentCollectionTarget, route.Target)
 
 	route, ok = resolveAgentsCollectionRoute(http.MethodPost, "/api/v1/agents")
 	require.True(t, ok)

@@ -35,8 +35,8 @@ import (
 )
 
 // TestAgentDelegationHandlerBranches_MatchCatalog pins the handlers'
-// explicit delegated branches (admitDelegatedHandler and
-// admitDelegatedAgentHandler calls) against the
+// explicit delegated branches (admitDelegatedHandler,
+// admitDelegatedAgentHandler and admitDelegatedListHandler calls) against the
 // catalog and the admission table: the set of operations named in those
 // calls equals the set of catalog operations that admit the delegated
 // principal and credential, which equals the set of admission table
@@ -80,7 +80,7 @@ func TestAgentDelegationHandlerBranches_MatchCatalog(t *testing.T) {
 					}
 				}
 			case *ast.CallExpr:
-				if fn, ok := node.Fun.(*ast.Ident); ok && (fn.Name == "admitDelegatedHandler" || fn.Name == "admitDelegatedAgentHandler") {
+				if fn, ok := node.Fun.(*ast.Ident); ok && (fn.Name == "admitDelegatedHandler" || fn.Name == "admitDelegatedAgentHandler" || fn.Name == "admitDelegatedListHandler") {
 					require.Len(t, node.Args, 4, "%s: %s takes four arguments", fset.Position(node.Pos()), fn.Name)
 					branches = append(branches, branch{where: fset.Position(node.Pos()).String(), arg: node.Args[2]})
 				}

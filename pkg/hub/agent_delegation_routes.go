@@ -47,13 +47,13 @@ const agentsCollectionRouteID delegatedRouteID = "agents.list.collection"
 const opAgentList authzop.OperationID = "agent.list"
 
 // agentCollectionTargetType is the route target type of a list route: the
-// collection the list reads, never one of its items. Capabilities computed
-// for a list item never match it.
+// collection the list reads, never one of its items and never a resource
+// type. Capabilities computed for a list item never match it.
 const agentCollectionTargetType = "agent_collection"
 
-// hubAgentCollectionResource is the route target of the hub agent list:
-// the hub's agent collection.
-var hubAgentCollectionResource = Resource{Type: agentCollectionTargetType, ID: "hub"}
+// hubAgentCollectionTarget is the route target of the hub agent list: the
+// hub's agent collection.
+var hubAgentCollectionTarget = delegatedRouteTarget{Type: agentCollectionTargetType, ID: "hub"}
 
 // delegatedRouteTarget is the resource a delegated request's route resolves
 // to: the agent or project named in the path.
@@ -179,7 +179,7 @@ func resolveAgentsCollectionRoute(method, escapedPath string) (delegatedRoute, b
 	}
 	route := delegatedRoute{
 		RouteID: agentsCollectionRouteID,
-		Target:  delegatedRouteTarget{Type: hubAgentCollectionResource.Type, ID: hubAgentCollectionResource.ID},
+		Target:  hubAgentCollectionTarget,
 	}
 	if method == http.MethodGet {
 		route.OperationID = opAgentList
@@ -289,6 +289,26 @@ func admitDelegatedHandler(w http.ResponseWriter, r *http.Request, op authzop.Op
 	target, hasTarget := delegatedTargetFromContext(ctx)
 	if !admitted || entry.Operation != op || !hasTarget || target.ProjectID != "" ||
 		target.Type != resource.Type || target.ID == "" || target.ID != resource.ID {
+		writeDelegatedNotAdmitted(w)
+		return false
+	}
+	return true
+}
+
+// admitDelegatedListHandler is admitDelegatedHandler for a list handler,
+// whose target is a collection rather than a resource. For a delegated
+// caller it returns true only when routeGuard admitted this request for
+// exactly op, on a list route (an entry with an item filter) whose target
+// is collection; otherwise it answers 403 credential_not_admitted. The
+// handler-branch drift test counts its calls with admitDelegatedHandler's.
+func admitDelegatedListHandler(w http.ResponseWriter, r *http.Request, op authzop.OperationID, collection delegatedRouteTarget) bool {
+	ctx := r.Context()
+	if !isDelegatedAgentIdentity(GetIdentityFromContext(ctx)) {
+		return true
+	}
+	entry, admitted := delegatedAdmissionFromContext(ctx)
+	target, hasTarget := delegatedTargetFromContext(ctx)
+	if !admitted || entry.Operation != op || entry.ItemFilter == "" || !hasTarget || target != collection {
 		writeDelegatedNotAdmitted(w)
 		return false
 	}

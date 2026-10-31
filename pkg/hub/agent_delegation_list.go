@@ -485,7 +485,7 @@ func listDelegated[T any](
 // returned agents. Each returned agent carries only the read capability,
 // its environment is redacted, and the response has no scope capabilities.
 func (s *Server) listAgentsDelegated(w http.ResponseWriter, r *http.Request, d *DelegatedAgentIdentity) {
-	if !admitDelegatedHandler(w, r, opAgentList, hubAgentCollectionResource) {
+	if !admitDelegatedListHandler(w, r, opAgentList, hubAgentCollectionTarget) {
 		return
 	}
 	ctx, query := r.Context(), r.URL.Query()
