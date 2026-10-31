@@ -55,6 +55,9 @@ interface CardState {
   note: string;
 }
 
+/** Space kept between the pinned toolbar and a caret scrolled into view. */
+const SCROLL_GAP_PX = 8;
+
 @customElement('scion-review-editor')
 export class ScionReviewEditor extends LitElement {
   /** The review text to open (Markdown with CriticMarkup, LF line ends). */
@@ -66,6 +69,12 @@ export class ScionReviewEditor extends LitElement {
   @property({ attribute: false }) files: ArtifactFile[] = [];
   /** Shown as the author of comments already in the text. */
   @property({ type: String }) noteAuthor = '';
+  /**
+   * Height in px of what is pinned over the top of the scrolled page (the
+   * sticky review toolbar). The editor keeps the caret and selection
+   * below it when it scrolls them into view.
+   */
+  @property({ type: Number }) scrollInset = 0;
 
   @state() private card: CardState | null = null;
 
@@ -103,6 +112,21 @@ export class ScionReviewEditor extends LitElement {
     if (changed.has('content') && this.controller && this.content !== this.known) {
       this.open(this.content);
     }
+    if (changed.has('scrollInset')) this.applyScrollInset();
+  }
+
+  /**
+   * ProseMirror scrolls the selection into view itself and ignores CSS
+   * scroll-padding, so the pinned toolbar's height goes into its scroll
+   * margin and threshold: a caret under the toolbar counts as out of view.
+   */
+  private applyScrollInset(): void {
+    if (!this.controller) return;
+    const top = Math.max(0, Math.ceil(this.scrollInset)) + SCROLL_GAP_PX;
+    this.controller.view.setProps({
+      scrollMargin: { top, right: 5, bottom: 5, left: 5 },
+      scrollThreshold: { top, right: 0, bottom: 0, left: 0 },
+    });
   }
 
   private async start(): Promise<void> {
@@ -141,6 +165,7 @@ export class ScionReviewEditor extends LitElement {
     view.dom.addEventListener('focusin', this.onPointer);
     view.dom.addEventListener('mouseleave', this.hideCard);
     view.dom.addEventListener('focusout', this.hideCard);
+    this.applyScrollInset();
     this.open(this.content);
   }
 

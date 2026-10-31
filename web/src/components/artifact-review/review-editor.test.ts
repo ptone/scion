@@ -78,3 +78,38 @@ describe('scion-review-editor review-change', () => {
     expect(changes).toEqual(['a {++big ++}dog\n']);
   });
 });
+
+describe('scion-review-editor scrollInset', () => {
+  type Sides = { top: number; right: number; bottom: number; left: number };
+  const props = (el: ScionReviewEditor): { margin: Sides; threshold: Sides } => {
+    const view = controllerOf(el).view;
+    return {
+      margin: view.someProp('scrollMargin') as Sides,
+      threshold: view.someProp('scrollThreshold') as Sides,
+    };
+  };
+
+  it('keeps a caret scrolled into view clear of the pinned toolbar', async () => {
+    const { el } = await mount('a dog\n');
+    el.scrollInset = 100;
+    await el.updateComplete;
+    // A caret under the toolbar counts as out of view, and lands below it.
+    expect(props(el).margin.top).toBe(108);
+    expect(props(el).threshold.top).toBe(108);
+    el.scrollInset = 40.4;
+    await el.updateComplete;
+    expect(props(el).margin.top).toBe(49);
+    expect(props(el).margin.bottom).toBe(5);
+  });
+
+  it('applies an inset set before the editor started', async () => {
+    const el = document.createElement('scion-review-editor') as ScionReviewEditor;
+    el.content = 'a dog\n';
+    el.entryPath = 'doc.md';
+    el.scrollInset = 60;
+    document.body.append(el);
+    await el.updateComplete;
+    await el.ready;
+    expect(props(el).margin.top).toBe(68);
+  });
+});
