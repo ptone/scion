@@ -100,9 +100,7 @@ function click(button = 0, init: MouseEventInit = {}): MouseEvent {
 
 /** Runs the editor's handleClickOn as ProseMirror does for a click on node at nodePos. */
 function clickOn(c: ReviewController, nodePos: number, node: Node, e = click()): boolean {
-  return !!c.view.someProp('handleClickOn', (f) =>
-    f(c.view, nodePos, node, nodePos, e, true)
-  );
+  return !!c.view.someProp('handleClickOn', (f) => f(c.view, nodePos, node, nodePos, e, true));
 }
 
 function doubleClickOn(c: ReviewController, nodePos: number, node: Node): boolean {

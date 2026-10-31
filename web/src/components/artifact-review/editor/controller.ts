@@ -214,8 +214,8 @@ export class ReviewController {
         // highlighted text places the caret as on any text.
         handleClickOn: (_view, _pos, node, nodePos, event, direct): boolean => {
           if (!direct || node.type.name !== COMMENT) return false;
-          if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
-            return false;
+          const modified = event.metaKey || event.ctrlKey || event.shiftKey || event.altKey;
+          if (event.button !== 0 || modified) return false;
           void this.editNote(nodePos);
           return true;
         },

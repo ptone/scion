@@ -110,8 +110,9 @@ describe('scion-review-editor comment card hint', () => {
       if (p < 0 && n.isText && n.text!.includes('two')) p = pos + n.text!.indexOf('two');
     });
     // The editor's own selection class (no ProseMirror import outside the editor).
+    type Sel = Parameters<typeof c.view.state.tr.setSelection>[0];
     const TextSel = c.view.state.selection.constructor as unknown as {
-      create(doc: unknown, from: number, to: number): Parameters<typeof c.view.state.tr.setSelection>[0];
+      create(doc: unknown, from: number, to: number): Sel;
     };
     c.view.dispatch(c.view.state.tr.setSelection(TextSel.create(c.view.state.doc, p, p + 3)));
     await el.comment();
