@@ -1453,6 +1453,10 @@ export class ScionPageProjectSettings extends LitElement {
       this.configDefaultMaxModelCalls = countLimitOrNull(this.settings.defaultMaxModelCalls);
       this.loadedDefaultMaxTurns = this.configDefaultMaxTurns;
       this.loadedDefaultMaxModelCalls = this.configDefaultMaxModelCalls;
+      // Reloaded values replace any edit, so its input errors and the last
+      // save's warnings no longer apply.
+      this.countLimitErrors = {};
+      this.countLimitWarnings = [];
       this.configDefaultMaxDuration = this.settings.defaultMaxDuration || '';
       const res = this.settings.defaultResources;
       this.configDefaultResCpuReq = res?.requests?.cpu || '';

@@ -33,6 +33,7 @@ interface Internals {
   countLimitErrors: Record<string, string>;
   countLimitWarnings: string[];
   settingsError: string | null;
+  loadResolvedSettings: () => Promise<void>;
 }
 
 let putWarnings: string[] = [];
@@ -232,5 +233,18 @@ describe('project settings count limits', () => {
     expect(el.shadowRoot!.querySelector('.count-limit-warning')?.textContent).toContain(
       'Unlimited (0) applies only'
     );
+  });
+
+  it('clears count-limit input errors and warnings when settings reload', async () => {
+    const el = await mount({ defaultMaxTurns: 20 });
+    el.countLimitErrors = { 'scion.io/default-max-turns': 'Must be a whole number greater than 0, or Unlimited.' };
+    el.countLimitWarnings = ['defaultMaxTurns: stale'];
+    await el.loadResolvedSettings();
+    await el.updateComplete;
+    expect(el.countLimitErrors).toEqual({});
+    expect(el.countLimitWarnings).toEqual([]);
+    await el.handleSaveConfig();
+    expect(puts).toHaveLength(1);
+    expect(el.settingsError).toBeNull();
   });
 });
