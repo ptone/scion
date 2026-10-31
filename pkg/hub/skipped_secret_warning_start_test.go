@@ -606,6 +606,32 @@ func TestSkippedSecretWarning_Classes(t *testing.T) {
 	})
 }
 
+// A send that fails (not deferred) still logs the skip, but the failed
+// start's response never says the agent was started without them.
+func TestSkippedSecretWarning_FailedSendLogsButDoesNotWarn(t *testing.T) {
+	for _, action := range []string{"start", "restart"} {
+		t.Run(action, func(t *testing.T) {
+			f := newSWFixture(t, "sw-failsend-"+action, swOptions{})
+			f.client.returnErr = errors.New("broker refused the request")
+			ctx, warns := withDispatchWarnings(context.Background())
+			var err error
+			purpose := PurposeDispatch
+			if action == "start" {
+				err = f.d.DispatchAgentStart(ctx, f.agent, "task", false)
+			} else {
+				purpose = PurposeRestart
+				err = f.d.DispatchAgentRestart(ctx, f.agent)
+			}
+			require.Error(t, err, "precondition: the send failed")
+			requireFetched(t, f.fb, swItemA, swItemB)
+			for _, w := range warns.Warnings() {
+				assert.NotContains(t, w, skippedWarnPrefix, "a failed send adds no skipped-secret warning")
+			}
+			assertOneSkipLine(t, f.logs, f.agent.ID, purpose, []skippedSecretLogItem{{swItemA, "project", skipClassAccess}})
+		})
+	}
+}
+
 // Test 6 (policy is not a read failure): an item the delivery decision
 // refuses gives no warning and no skipped-secret WARN line.
 func TestSkippedSecretWarning_AuthzRefusedNotWarned(t *testing.T) {

@@ -3492,19 +3492,29 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 }
 
 // reportSkippedSecrets reports the secrets a start or restart went without
-// (startEnv.skippedSecrets): the warning to this request's dispatch-warnings
-// collector and one WARN line to the server log. sendErr is the error of
-// the start or restart send. A send the client deferred to another hub node
-// reports nothing here: the owner node selects and sends again, reports its
-// own skips, and its warning reaches this request through the dispatch row
-// (LifecycleDispatchResult.Warnings), so a dispatch logs one WARN line on
-// the node that sent it and its response carries the owner's warning only.
+// (startEnv.skippedSecrets). sendErr is the error of the start or restart
+// send (nil for an accepted asynchronous launch, including one whose
+// outcome is unknown).
+//
+//   - The server log gets one WARN line whenever this node sent the
+//     request, failed or not: the skip happened either way.
+//   - The request's dispatch-warnings collector gets the warning only when
+//     the send succeeded, so a failed start never says the agent was
+//     started without them.
+//   - A send the client deferred to another hub node reports nothing here:
+//     the owner node selects and sends again, reports its own skips, and its
+//     warning reaches this request through the dispatch row
+//     (LifecycleDispatchResult.Warnings). A dispatch so logs one WARN line,
+//     on the node that sent it, and its response carries the owner's
+//     warning only.
 func (d *HTTPAgentDispatcher) reportSkippedSecrets(ctx context.Context, agent *store.Agent, startEnv startEnvResult, sendErr error) {
 	if len(startEnv.skippedSecrets) == 0 || errors.Is(sendErr, ErrLifecycleDeferred) {
 		return
 	}
-	addDispatchWarnings(ctx, startEnv.skippedSecretWarning)
 	logSkippedSecrets(ctx, d.log, agent.ID, startEnv.purpose, startEnv.skippedSecrets)
+	if sendErr == nil {
+		addDispatchWarnings(ctx, startEnv.skippedSecretWarning)
+	}
 }
 
 // DispatchAgentStart starts an agent on the runtime broker. When resume is

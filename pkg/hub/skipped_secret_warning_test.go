@@ -67,7 +67,7 @@ func TestFormatSkippedSecretWarning(t *testing.T) {
 			skippedWarnPrefix + "1 hub-scope secret, 1 broker-scope secret; the agent was started without them"},
 		{"only counts", []skippedSecret{user("U1")}, "started", false,
 			skippedWarnPrefix + "1 user-scope secret; the agent was started without them"},
-		{"unknown scope is not rendered", []skippedSecret{{Name: "X", Scope: "elsewhere", Class: skipClassAccess}}, "started", true, ""},
+		{"unknown scope is not rendered in the response", []skippedSecret{{Name: "X", Scope: "elsewhere", Class: skipClassAccess}}, "started", true, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -82,12 +82,14 @@ func TestSkippedSecretLogItems_AllNamesSorted(t *testing.T) {
 		{Name: "A", Scope: store.ScopeRuntimeBroker, Class: skipClassMissing},
 		{Name: "A", Scope: store.ScopeHub, Class: skipClassNotFound},
 		{Name: "B", Scope: store.ScopeUser, Class: skipClassAccess},
+		{Name: "C", Scope: "elsewhere", Class: skipClassAccess},
 	})
 	assert.Equal(t, []skippedSecretLogItem{
 		{Name: "A", Scope: "broker", Class: skipClassMissing},
 		{Name: "A", Scope: "hub", Class: skipClassNotFound},
 		{Name: "B", Scope: "user", Class: skipClassAccess},
-	}, got)
+		{Name: "C", Scope: "unknown", Class: skipClassAccess},
+	}, got, "an item of an unknown scope is logged as scope unknown, never dropped")
 }
 
 func TestDeliverySkipClass(t *testing.T) {

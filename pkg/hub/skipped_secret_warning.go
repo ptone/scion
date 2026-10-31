@@ -72,7 +72,8 @@ func skippedSecretScopeKind(scope string) (kind string, ok bool) {
 var skippedSecretCountOrder = []string{"hub", "broker", "user"}
 
 // formatSkippedSecretWarning is the only producer of the skipped-secret
-// warning text. It returns "" when nothing was skipped. verb is "started",
+// warning text. It returns "" when nothing was skipped. An item whose scope
+// is none of the four kinds is left out (the WARN log still lists it). verb is "started",
 // "restarted" or "created".
 //
 // Audience: a project-scope item is listed by name for every requester; a
@@ -134,6 +135,11 @@ type skippedSecretLogItem struct {
 	Class string `json:"class"`
 }
 
+// skippedSecretLogScopeUnknown is the log's scope kind for an item whose
+// store scope is none of the four kinds. Such an item is never named in
+// the response; the log keeps it so an operator can see it.
+const skippedSecretLogScopeUnknown = "unknown"
+
 // skippedSecretLogItems returns the log entries for skipped: every name,
 // whatever the audience, de-duplicated and sorted by name then scope kind.
 func skippedSecretLogItems(skipped []skippedSecret) []skippedSecretLogItem {
@@ -142,7 +148,7 @@ func skippedSecretLogItems(skipped []skippedSecret) []skippedSecretLogItem {
 	for _, s := range skipped {
 		kind, ok := skippedSecretScopeKind(s.Scope)
 		if !ok {
-			continue
+			kind = skippedSecretLogScopeUnknown
 		}
 		it := skippedSecretLogItem{Name: s.Name, Scope: kind, Class: s.Class}
 		if seen[it] {
