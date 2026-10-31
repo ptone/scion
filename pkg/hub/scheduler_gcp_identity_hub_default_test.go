@@ -158,7 +158,7 @@ func setProjectDefaultGCPMode(t *testing.T, f *bypassAgentsFixture, mode string)
 }
 
 // TestScheduledDispatch_ProjectDefaultWinsOverHubDefault mirrors
-// TestHubDefaultGCPIdentity_ProjectDefaultTakesPrecedenceOverHubDefault: a
+// TestHubDefaultGCPIdentity_RefusedProjectPassthroughDoesNotFallThroughToHubDefault: a
 // project default answers the question before the hub default is ever
 // consulted on the scheduled path too, regardless of what the hub default
 // would have produced (here, an unusable SA ID that would fail dispatch if it

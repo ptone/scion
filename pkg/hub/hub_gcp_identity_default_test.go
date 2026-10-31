@@ -618,11 +618,11 @@ func TestHubDefaultGCPIdentity_ProjectExplicitBlockWinsOverHubPassthrough(t *tes
 		"an explicit project-level \"block\" must not fall through to the hub default")
 }
 
-// TestHubDefaultGCPIdentity_ProjectDefaultTakesPrecedenceOverHubDefault
+// TestHubDefaultGCPIdentity_RefusedProjectPassthroughDoesNotFallThroughToHubDefault
 // confirms the ladder order: a project default answers the question before
 // the hub default is ever consulted, regardless of what the hub default
 // would have produced.
-func TestHubDefaultGCPIdentity_ProjectDefaultTakesPrecedenceOverHubDefault(t *testing.T) {
+func TestHubDefaultGCPIdentity_RefusedProjectPassthroughDoesNotFallThroughToHubDefault(t *testing.T) {
 	f := bypassAgentsSetup(t)
 	// A hub default that would produce a completely different, and
 	// unreachable-from-nowhere, outcome if it were ever consulted.
