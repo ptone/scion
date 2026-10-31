@@ -572,6 +572,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.SSEHiddenTabClose:            testAdminPolicyDeny,
 	experiments.SecretRotation:               testAdminPolicyDeny,
 	experiments.ContentHashV2:                testAdminPolicyDeny,
+	experiments.LifecycleEvents:              testAdminPolicyDeny,
 	experiments.ArtifactReviewEditor:         testAdminPolicyDeny,
 	experiments.SkillContentHashV2:           testAdminPolicyDeny,
 	experiments.UserDeleteForceCascade:       testAdminPolicyDeny,
