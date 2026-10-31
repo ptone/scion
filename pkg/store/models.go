@@ -3538,6 +3538,7 @@ const (
 type ScheduleFieldMask struct {
 	Name      bool
 	CronExpr  bool
+	TimeZone  bool
 	EventType bool
 	Payload   bool
 	Status    bool
@@ -3610,7 +3611,8 @@ type Schedule struct {
 	ID            string     `json:"id"`
 	ProjectID     string     `json:"projectId"`
 	Name          string     `json:"name"`
-	CronExpr      string     `json:"cronExpr"`               // Standard 5-field cron expression (UTC)
+	CronExpr      string     `json:"cronExpr"`               // Standard 5-field cron expression, evaluated in TimeZone
+	TimeZone      string     `json:"timeZone,omitempty"`     // IANA time zone for CronExpr; empty means UTC
 	EventType     string     `json:"eventType"`              // "message" (future: "dispatch_agent")
 	Payload       string     `json:"payload"`                // JSON: handler-specific configuration
 	Status        string     `json:"status"`                 // active, paused, deleted
