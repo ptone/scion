@@ -17,6 +17,7 @@
 package hub
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
