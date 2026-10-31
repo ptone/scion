@@ -155,6 +155,16 @@ test.afterEach(() => {
   expect(found, 'no page errors or console errors').toEqual([]);
 });
 
+/**
+ * Lets the editor take in the selection a tap or key just made (it reads
+ * the DOM selection asynchronously), so the next key extends that one.
+ */
+async function settleSelection(page: Page): Promise<void> {
+  await page.evaluate(
+    () => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())))
+  );
+}
+
 /** The first paragraph from n on whose text is fully below the pinned block. */
 async function firstClear(page: Page, n: number): Promise<number> {
   const below = await stickyBottom(page);
@@ -235,6 +245,7 @@ async function pinnedJourney(page: Page, title: string, touch: boolean): Promise
   await tap(word.x, word.y);
   await expect(editor(page)).toBeFocused();
   await page.keyboard.press('Home');
+  await settleSelection(page);
   for (let i = 0; i < 'Paragraph'.length; i++) await page.keyboard.press('Shift+ArrowRight');
   await (touch ? comment.tap() : comment.click());
   const dialog = page.locator('scion-review-note-dialog sl-dialog');
