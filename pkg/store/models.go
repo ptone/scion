@@ -5017,8 +5017,9 @@ type DecisionAuditListFilter struct {
 	// denied or dropped items; Truncated reports that there were more.
 	DeniedIDs []string
 	Truncated bool
-	// Incomplete reports that the request ended before its list finished
-	// (a panic, a cancelled request, or an error after filtering began).
+	// Incomplete reports that the request did not finish its list, for any
+	// reason, after the list scope was decided: a panic, a cancelled
+	// request, an invalid cursor or filter, or a server error.
 	Incomplete bool
 }
 

@@ -652,7 +652,8 @@ func TestAgentDelegation_RouteGateDeniesEverythingElse(t *testing.T) {
 	cases := []struct{ method, path string }{
 		{http.MethodPatch, "/api/v1/agents/" + f.agentB.ID},
 		{http.MethodDelete, "/api/v1/agents/" + f.agentB.ID},
-		{http.MethodGet, "/api/v1/agents"},
+		// GET /api/v1/agents is admitted (agent.list); other methods on it are not.
+		{http.MethodHead, "/api/v1/agents"},
 		{http.MethodPost, "/api/v1/agents/" + f.agentB.ID + "/pty"},
 		{http.MethodGet, "/api/v1/agents/" + f.agentB.ID + "/pty/"},
 		{http.MethodPost, "/api/v1/agents/" + f.agentB.ID + "/env"},
@@ -696,6 +697,16 @@ func TestAgentDelegation_RouteGateDeniesEverythingElse(t *testing.T) {
 		})
 	}
 	assert.Len(t, adtAudits(t, f.store, mutationAgentDelegationCredentialIssue), rowsBefore, "no denied request issued a credential")
+	// The hub agent list is admitted: a grant without agent:list gets an empty list, not a refusal.
+	rec := f.do(t, http.MethodGet, "/api/v1/agents", nil, adtBearer(cred.Token))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var list struct {
+		Agents     []json.RawMessage `json:"agents"`
+		TotalCount int               `json:"totalCount"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &list))
+	assert.Empty(t, list.Agents)
+	assert.Zero(t, list.TotalCount)
 	g, err := f.store.GetAgentDelegationGrant(context.Background(), grant.ID)
 	require.NoError(t, err)
 	assert.Nil(t, g.RevokedAt, "no denied request revoked the grant")

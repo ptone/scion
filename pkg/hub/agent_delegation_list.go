@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"slices"
 	"sync"
@@ -347,6 +348,10 @@ func (s *Server) delegatedListItemRead(ctx context.Context, identity Identity, r
 	}
 	a := s.authzService
 
+	// c.mu is held across the store reads below (the route checks and each
+	// EvaluateBearerCeiling). That is safe: the collector belongs to this one
+	// request, and nothing called under the lock re-enters the collector. Do
+	// not call anything that reads it (allowedItem, capabilities) from here.
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.itemChecked {
@@ -412,8 +417,10 @@ func projectOfListItem(r Resource) (string, bool) {
 // flushListFilter writes the request's aggregated item-filter record, once,
 // through the shared record builder. routeGuard defers it for every
 // admitted list route, so it also runs when the handler panics or the
-// request is cancelled; the record then says incomplete. A request that
-// never reached the list arm writes no record.
+// request is cancelled. The record says incomplete exactly when the handler
+// did not mark its list complete; a client that goes away after a complete
+// response does not change that. It is emitted on a context that is not
+// cancelled. A request that never reached the list arm writes no record.
 func (s *Server) flushListFilter(ctx context.Context, c *listFilterCollector) {
 	summary, resourceType, due := c.summary()
 	if !due {
@@ -426,9 +433,6 @@ func (s *Server) flushListFilter(ctx context.Context, c *listFilterCollector) {
 	d, _ := GetIdentityFromContext(ctx).(*DelegatedAgentIdentity)
 	if d == nil {
 		return
-	}
-	if ctx.Err() != nil {
-		summary.Incomplete = true
 	}
 	ctx = context.WithoutCancel(ctx)
 	request := AuthzRequest{
@@ -509,7 +513,14 @@ func (s *Server) listAgentsDelegated(w http.ResponseWriter, r *http.Request, d *
 		})
 	}
 
+	// Any refusal by the list arm, and a server error, answers 200 with an
+	// empty list plus the arm's deny record (.design/agent-delegation.md
+	// §11.8: any error denies, an empty list plus a decision audit), never a
+	// 403 that would tell the caller which check failed.
 	scope, err := s.delegatedListScope(ctx, d, "agent", "agent.list")
+	if err != nil {
+		slog.WarnContext(ctx, "listAgentsDelegated: list scope failed; answering an empty list", "error", err)
+	}
 	if err != nil || scope.Mode == delegatedListNone {
 		writeEmpty()
 		return

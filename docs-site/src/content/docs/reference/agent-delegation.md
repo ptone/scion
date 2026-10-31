@@ -127,6 +127,10 @@ delegated credential yet: they answer `403 credential_not_admitted`.
 
 - **Scope:** the issuer's own `agent:list` access right now, within the grant's boundary. A
   project-bounded grant lists only that project's agents. The agent's own access adds nothing.
+- **A refused list is empty, not an error:** when the list itself is refused (the grant lacks
+  `agent:list`, the issuer has no list access, any revocation-chain check fails, or the Hub hits
+  an error deciding the scope), the answer is `200` with an empty list and `totalCount: 0`. The
+  reason is in the decision record, never in the response.
 - **Each agent is checked too:** an agent is listed only if the issuer may also read it, so the
   grant needs `agent:read` as well. A grant with `agent:list` but not `agent:read` lists nothing.
   Each listed agent carries only the `read` capability, its environment is redacted, and the list

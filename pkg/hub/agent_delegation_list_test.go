@@ -262,10 +262,35 @@ func TestAgentDelegatedAgentList_MixedItemsAndCounts(t *testing.T) {
 	walked, _ := w.walkAgents(t, cred.Token, 2)
 	assert.Equal(t, allowed, sortedIDs(walked...), "no duplicates or gaps, and no denied item")
 
-	// The issuer loses read on P2: P2's agents drop out of the next list.
-	require.NoError(t, w.store.DeleteRoleBinding(context.Background(), w.aliceP2Binding))
+	// The issuer keeps agent.list on P2 but loses agent.read there (an access constraint that allows only
+	// agent.list): P2 stays in the list scope, and the item filter drops each P2 agent.
+	pType := "user"
+	_, err := w.store.CreateAccessConstraint(context.Background(), &store.AccessConstraint{
+		Name:                 "adt-list-mixed-no-read-p2",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
+		SubjectPrincipalType: &pType,
+		SubjectPrincipalID:   strPtr(w.alice.ID),
+		ScopeType:            "project",
+		ScopeID:              w.other.ID,
+		MaximumPermissions:   []string{"agent.list"},
+		Purpose:              "the issuer may list but not read agents in P2",
+		CreatedBy:            w.alice.ID,
+	})
+	require.NoError(t, err)
+	decisions.reset()
 	list = adtDecodeList(t, w.listAgents(t, cred.Token, nil))
-	assert.Equal(t, w.p1Agents(), list.ids())
+	assert.Equal(t, w.p1Agents(), list.ids(), "P2's agents drop out")
+	assert.Equal(t, len(w.p1Agents()), list.TotalCount)
+	recs = decisions.listFilterRecords()
+	require.Len(t, recs, 1)
+	assert.Equal(t, len(w.p1Agents()), recs[0].ListFilter.Allowed)
+	assert.Equal(t, 1+len(w.p2Agents()), recs[0].ListFilter.Denied+recs[0].ListFilter.DroppedByAdmission,
+		"agent D and every P2 agent are decided and refused by the item filter")
+	for _, id := range w.p2Agents() {
+		assert.Contains(t, recs[0].ListFilter.DeniedIDs, id)
+	}
+	walked, _ = w.walkAgents(t, cred.Token, 2)
+	assert.Equal(t, w.p1Agents(), sortedIDs(walked...), "the walk has no gap and no refused agent")
 }
 
 // walkAgents follows the delegated hub agent list's cursors with page size
@@ -423,16 +448,16 @@ func TestAgentDelegatedAgentList_MineAndSharedListNothing(t *testing.T) {
 	}
 }
 
-// adtMoreAgents creates n more agents in projectID owned by ownerID, one
-// second apart and older than every existing fixture agent.
-func (f *adtFixture) adtMoreAgents(t *testing.T, name, projectID, ownerID string, n int, base time.Time) []*store.Agent {
+// adtMoreAgents creates n more agents in projectID owned by ownerID. The
+// store stamps Created itself, so they are newer than every agent created
+// before the call, in creation order.
+func (f *adtFixture) adtMoreAgents(t *testing.T, name, projectID, ownerID string, n int) []*store.Agent {
 	t.Helper()
 	out := make([]*store.Agent, 0, n)
 	for i := 0; i < n; i++ {
 		a := &store.Agent{
 			ID: tid(fmt.Sprintf("%s-%d", name, i)), Name: fmt.Sprintf("%s-%d", name, i), Slug: fmt.Sprintf("%s-%d", name, i),
 			ProjectID: projectID, OwnerID: ownerID, Ancestry: []string{ownerID},
-			Created: base.Add(time.Duration(i) * time.Second), Updated: base,
 		}
 		require.NoError(t, f.store.CreateAgent(context.Background(), a))
 		out = append(out, a)
@@ -448,7 +473,7 @@ func (f *adtFixture) adtMoreAgents(t *testing.T, name, projectID, ownerID string
 func TestAgentDelegatedAgentList_SealedCursorPagingAndReplay(t *testing.T) {
 	w := newADTListWorld(t, "adt-list-page")
 	ctx := context.Background()
-	w.adtMoreAgents(t, "adt-list-page-more", w.proj.ID, w.carol.ID, 4, time.Now().Add(-time.Hour))
+	w.adtMoreAgents(t, "adt-list-page-more", w.proj.ID, w.carol.ID, 4)
 	grant := w.adtIssueGrant(t, map[string]string{"kind": "hub"}, "agent:list", "agent:read")
 	cred := w.delegated(t, grant.ID)
 
@@ -513,12 +538,13 @@ func TestAgentDelegatedAgentList_NilSealerFailsClosed(t *testing.T) {
 	adtAssertAPIError(t, w.listAgents(t, cred.Token, url.Values{"limit": {"1"}, "cursor": {first.NextCursor}}), http.StatusBadRequest, ErrCodeInvalidCursor)
 }
 
-// TestAgentDelegatedAgentList_TruncatedPageCarriesCursor: a readable agent
-// older than more agents than the candidate cap, all in a project where
-// Alice may list but not read agents. After the newest readable agents, a
-// page is empty, carries a next cursor and an approximate total; following
-// the cursor reaches the older readable agent. The aggregated record of the
-// empty page counts the denied candidates and names at most 50.
+// TestAgentDelegatedAgentList_TruncatedPageCarriesCursor: newest first, the
+// list holds three readable P1 agents, then more agents than the candidate
+// cap in P3 (where Alice may list but not read agents), then an older
+// readable P1 agent. After the first page, a page is empty, carries a next
+// cursor and an approximate total; following the cursor reaches the older
+// readable agent. The aggregated record of the empty page counts the denied
+// candidates and names at most 50.
 func TestAgentDelegatedAgentList_TruncatedPageCarriesCursor(t *testing.T) {
 	if testing.Short() {
 		t.Skip("creates more agents than the list candidate cap")
@@ -529,64 +555,118 @@ func TestAgentDelegatedAgentList_TruncatedPageCarriesCursor(t *testing.T) {
 	createCustomBinding(t, w.store, rd.ID, w.alice.ID, w.p3.ID)
 	// The list covers P1 and P3 only.
 	require.NoError(t, w.store.DeleteRoleBinding(ctx, w.aliceP2Binding))
-	base := time.Now().Add(-48 * time.Hour)
-	member := &store.Agent{
-		ID: tid("adt-list-trunc-member"), Name: "adt-list-trunc-member", Slug: "adt-list-trunc-member",
-		ProjectID: w.proj.ID, OwnerID: w.carol.ID, Ancestry: []string{w.carol.ID},
-		Created: base.Add(-time.Hour), Updated: base,
-	}
-	require.NoError(t, w.store.CreateAgent(ctx, member))
-	w.adtMoreAgents(t, "adt-list-trunc-p3", w.p3.ID, w.bob.ID, authorizedListMaxCandidates+100, base)
+	// Creation order is list order, oldest first: the fixture agents and agent D, then the member agent, then
+	// the bulk P3 agents, then three new P1 agents.
+	member := w.adtMoreAgents(t, "adt-list-trunc-member", w.proj.ID, w.carol.ID, 1)[0]
+	w.adtMoreAgents(t, "adt-list-trunc-p3", w.p3.ID, w.bob.ID, authorizedListMaxCandidates+100)
+	fresh := w.adtMoreAgents(t, "adt-list-trunc-new", w.proj.ID, w.carol.ID, 3)
 	cred := w.delegated(t, w.adtIssueGrant(t, map[string]string{"kind": "hub"}, "agent:list", "agent:read").ID)
 	decisions := w.captureDecisions(t)
 
-	// Newest first: agent D (P3, denied) and the P1 agents, then the bulk
-	// P3 agents, then the member agent.
-	limit := fmt.Sprint(len(w.p1Agents()))
-	page := adtDecodeList(t, w.listAgents(t, cred.Token, url.Values{"limit": {limit}}))
-	require.Equal(t, w.p1Agents(), page.ids())
+	page := adtDecodeList(t, w.listAgents(t, cred.Token, url.Values{"limit": {"3"}}))
+	require.Equal(t, sortedIDs(fresh[0].ID, fresh[1].ID, fresh[2].ID), page.ids())
 	assert.True(t, page.TotalCountApproximate, "the count pass stopped at the candidate cap")
 	require.NotEmpty(t, page.NextCursor)
-	page = adtDecodeList(t, w.listAgents(t, cred.Token, url.Values{"limit": {limit}, "cursor": {page.NextCursor}}))
+	page = adtDecodeList(t, w.listAgents(t, cred.Token, url.Values{"limit": {"3"}, "cursor": {page.NextCursor}}))
 	assert.Empty(t, page.Agents, "the candidate budget ran out on denied items")
 	assert.True(t, page.TotalCountApproximate)
 	require.NotEmpty(t, page.NextCursor, "an empty page still carries a cursor")
 	adtAssertCursorHidesIDs(t, page.NextCursor, member.ID)
-	page = adtDecodeList(t, w.listAgents(t, cred.Token, url.Values{"limit": {limit}, "cursor": {page.NextCursor}}))
-	assert.Equal(t, []string{member.ID}, page.ids(), "following the cursor reaches the readable agent")
-	assert.Empty(t, page.NextCursor)
+	// Newest first after the bulk: the member agent, agent D (refused), then agents C and A (B is in P2).
+	page = adtDecodeList(t, w.listAgents(t, cred.Token, url.Values{"limit": {"3"}, "cursor": {page.NextCursor}}))
+	assert.Equal(t, sortedIDs(member.ID, w.agentC.ID, w.agentA.ID), page.ids(), "following the cursor reaches the older readable agents")
 
 	recs := decisions.listFilterRecords()
 	require.Len(t, recs, 3, "one aggregated record per request")
-	assert.Equal(t, len(w.p1Agents()), recs[1].ListFilter.Allowed, "the count pass still finds the P1 agents")
+	// The second request's count pass starts at the newest agents: the three new P1 agents, then bulk P3 agents
+	// up to the cap.
+	assert.Equal(t, 3, recs[1].ListFilter.Allowed, "the count pass finds the three new agents")
 	assert.True(t, recs[1].ListFilter.Truncated, "more denied items than the record names")
 	assert.Len(t, recs[1].ListFilter.DeniedIDs, store.DecisionAuditListFilterMaxDeniedIDs)
 }
 
-// TestAgentDelegatedAgentList_CancelledRequestRecordsIncomplete: a request
-// cancelled while listing still writes its one aggregated record, marked
-// incomplete.
-func TestAgentDelegatedAgentList_CancelledRequestRecordsIncomplete(t *testing.T) {
-	w := newADTListWorld(t, "adt-list-cancel")
-	decisions := w.captureDecisions(t)
-	cred := w.delegated(t, w.adtIssueGrant(t, map[string]string{"kind": "hub"}, "agent:list", "agent:read").ID)
+// adtCtxCapture is a decision-audit emitter that also records whether the
+// context it was given was already cancelled.
+type adtCtxCapture struct {
+	adtDecisionCapture
+	ctxErrs []error
+}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil).WithContext(ctx)
-	req.Header.Set("Authorization", "Bearer "+cred.Token)
-	decisions.reset()
-	w.srv.Handler().ServeHTTP(httptest.NewRecorder(), req)
+func (c *adtCtxCapture) EmitDecisionAudit(ctx context.Context, r *store.DecisionAuditRecord) {
+	c.mu.Lock()
+	c.ctxErrs = append(c.ctxErrs, ctx.Err())
+	c.mu.Unlock()
+	c.adtDecisionCapture.EmitDecisionAudit(ctx, r)
+}
 
-	recs := decisions.listFilterRecords()
-	if len(recs) == 0 {
-		// The middleware may refuse a cancelled request before the list
-		// arm runs; then no list ran and no aggregated record is due.
-		assert.Empty(t, decisions.primaryDelegated())
-		return
+// TestListFilterFlush_CancelledRequest: a request cancelled before its list
+// finished writes its one aggregated record, marked incomplete; a request
+// cancelled after its list finished (the client went away after the
+// response) is not marked incomplete. Either way the record is emitted on a
+// context that is not cancelled.
+func TestListFilterFlush_CancelledRequest(t *testing.T) {
+	for _, complete := range []bool{false, true} {
+		capture := &adtCtxCapture{}
+		a := &AuthzService{DecisionAuditSampleRate: 1.0}
+		a.SetDecisionAuditEmitter(capture)
+		s := &Server{authzService: a}
+		c := newListFilterCollector("agent.read")
+		require.NoError(t, c.setDelegatedListAdmission("agent", delegatedListScope{Mode: delegatedListExplicit, ProjectIDs: []string{"p1"}}))
+		c.start()
+		if complete {
+			c.markComplete()
+		}
+		ctx, cancel := context.WithCancel(contextWithListFilterCollector(contextWithIdentity(context.Background(), adtTestIdentity("agent-x", "project-x")), c))
+		cancel()
+		s.flushListFilter(ctx, c)
+		recs := capture.records()
+		require.Len(t, recs, 1, "complete=%v", complete)
+		assert.Equal(t, !complete, recs[0].ListFilter.Incomplete, "complete=%v", complete)
+		require.Len(t, capture.ctxErrs, 1)
+		assert.NoError(t, capture.ctxErrs[0], "the record is emitted on a context that is not cancelled")
 	}
-	require.Len(t, recs, 1)
-	assert.True(t, recs[0].ListFilter.Incomplete)
+}
+
+// TestAgentDelegationDecide_ItemPermissionOnTheListRouteDenies: Decide itself
+// refuses the list route's item-filter permission. A request admitted for
+// the hub agent list that asks Decide for agent.read on an agent is denied
+// credential_not_admitted, while the same state admitted for the agent read
+// route is allowed.
+func TestAgentDelegationDecide_ItemPermissionOnTheListRouteDenies(t *testing.T) {
+	w := newADTListWorld(t, "adt-list-decide")
+	ctx := context.Background()
+	cred := w.delegated(t, w.adtIssueGrant(t, map[string]string{"kind": "hub"}, "agent:list", "agent:read").ID)
+	row, err := w.store.GetAgentDelegatedCredentialByKeyHash(ctx, hashDelegatedCredential(cred.Token))
+	require.NoError(t, err)
+	grant, err := w.store.GetAgentDelegationGrant(ctx, row.GrantID)
+	require.NoError(t, err)
+	issuer, err := w.store.GetUser(ctx, grant.IssuerUserID)
+	require.NoError(t, err)
+	agent, err := w.store.GetAgent(ctx, grant.AgentID)
+	require.NoError(t, err)
+	ac, err := w.store.GetAgentCredentialByID(ctx, row.ExchangeAgentCredentialID)
+	require.NoError(t, err)
+	st := &delegatedRequestState{
+		identity: newDelegatedAgentIdentity(row, grant), credential: row, grant: grant,
+		issuer: issuer, agent: agent, exchangeCred: ac, issuerPC: issuerPrincipal(issuer), memo: &ProjectAdmissionCache{},
+	}
+	listEntry, ok := agentDelegationAdmissionFor(http.MethodGet, agentsCollectionRouteID)
+	require.True(t, ok)
+	readEntry, ok := agentDelegationAdmissionFor(http.MethodGet, delegatedRouteID(AgentRouteRoot))
+	require.True(t, ok)
+	req := AuthzRequest{Principal: PrincipalContext{Identity: st.identity}, Resource: agentResource(w.agentB), Action: ActionRead, Permission: "agent.read"}
+
+	listCtx := withStandingMemo(contextWithDelegatedAdmission(contextWithDelegatedState(ctx, st), listEntry))
+	d := w.srv.authzService.Decide(listCtx, req)
+	assert.False(t, d.Allowed)
+	require.NotNil(t, d.AgentDelegation)
+	assert.Equal(t, agentDelegationCodeCredentialNotAdmitted, d.AgentDelegation.AgentDelegationCode)
+	assert.Equal(t, DeniedByAgentDelegation, d.DeniedBy)
+
+	// Control: the same state and request admitted for the agent read route is allowed.
+	readCtx := withStandingMemo(contextWithDelegatedAdmission(contextWithDelegatedState(ctx, st), readEntry))
+	d = w.srv.authzService.Decide(readCtx, req)
+	assert.True(t, d.Allowed, d.Reason)
 }
 
 // TestListFilterFlush_PanicRecordsIncompleteOnce: the deferred flush routeGuard
