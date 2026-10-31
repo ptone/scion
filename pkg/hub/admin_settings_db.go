@@ -1394,7 +1394,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 				return
 			}
 			domains, admins := s.accessListsAfterDBSave(merged, pinned)
-			if rejectAuthorizedDomainsLockout(w, updatedBy, domains, admins) {
+			if s.rejectAuthorizedDomainsLockout(r.Context(), w, updatedBy, domains, admins) {
 				return
 			}
 		}

@@ -298,6 +298,41 @@ func TestAuthorizedDomainsLockout(t *testing.T) {
 	}
 }
 
+// Test identity clamp: for an admin-kind test identity admin_emails grants
+// no bypass in the lockout rule, so a test admin never counts as a real
+// admin. With the test admin tier on and no store, the kind lookup fails
+// and the caller is treated as admin-kind (fail closed).
+func TestRejectAuthorizedDomainsLockout_TestIdentityClamp(t *testing.T) {
+	const email = "admin@example.com"
+	ctx := contextWithIdentity(context.Background(), NewAuthenticatedUser("u-ta", email, "Test Admin", "admin", "api"))
+	for _, tc := range []struct {
+		name    string
+		tierOn  bool
+		domains []string
+		refused bool
+	}{
+		{"tier off: admin_emails allows", false, []string{"other.example"}, false},
+		{"tier on, test identity: admin_emails does not allow", true, []string{"other.example"}, true},
+		{"tier on, test identity: a matching domain still allows", true, []string{"example.com"}, false},
+		{"tier on, test identity: an empty list still allows", true, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := &Server{}
+			if tc.tierOn {
+				srv.testAdminGate = testAdminGate{hubAdmin: true}
+			}
+			rr := httptest.NewRecorder()
+			got := srv.rejectAuthorizedDomainsLockout(ctx, rr, email, tc.domains, []string{email})
+			if got != tc.refused {
+				t.Fatalf("refused = %v, want %v (%d %s)", got, tc.refused, rr.Code, rr.Body.String())
+			}
+			if tc.refused {
+				assertLockoutRefusal(t, rr, tc.domains...)
+			}
+		})
+	}
+}
+
 // assertLockoutRefusal checks a 422 in the settings error envelope, naming
 // the field and no domain or email.
 func assertLockoutRefusal(t *testing.T, rr *httptest.ResponseRecorder, hidden ...string) {

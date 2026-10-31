@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"slices"
@@ -185,7 +186,16 @@ func (s *Server) accessListsAfterFileSave(domainsSent bool, sentDomains []string
 // save leaves in effect refuse sign-in for the saving account
 // (authorizedDomainsLockout, ptone/scion#6000). Nothing has been written
 // when it refuses.
-func rejectAuthorizedDomainsLockout(w http.ResponseWriter, email string, domains, admins []string) bool {
+//
+// Test identity clamp: for an admin-kind test identity (or when its kind
+// cannot be read) admin_emails grants no bypass here, so a test admin never
+// counts as a real admin for this rule. Such callers are refused earlier
+// anyway (rejectTestAdminSettingsWrite denies the access keys), and the
+// check can only refuse a save, never allow one.
+func (s *Server) rejectAuthorizedDomainsLockout(ctx context.Context, w http.ResponseWriter, email string, domains, admins []string) bool {
+	if _, testAdmin := s.testAdminCallerIsAdminKind(ctx); testAdmin {
+		admins = nil
+	}
 	if !authorizedDomainsLockout(email, domains, admins) {
 		return false
 	}
@@ -221,5 +231,5 @@ func (s *Server) rejectFileAccessLockout(w http.ResponseWriter, r *http.Request,
 		email = caller.Email()
 	}
 	domains, admins := s.accessListsAfterFileSave(domainsSent, sentDomains, adminsSent, sentAdmins, pinned)
-	return rejectAuthorizedDomainsLockout(w, email, domains, admins)
+	return s.rejectAuthorizedDomainsLockout(r.Context(), w, email, domains, admins)
 }
