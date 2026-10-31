@@ -26,7 +26,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const platform = vi.hoisted(() => ({ mac: false }));
-vi.mock('../../../utils/platform.js', () => ({ isMacPlatform: () => platform.mac }));
+vi.mock('../../../utils/platform.js', () => ({ isMacPlatform: (): boolean => platform.mac }));
 
 import { ReviewController, followsLink, holdsLinkPress, isModPress } from './controller.js';
 import { linkOpenHint } from './safe-render.js';

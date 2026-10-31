@@ -78,9 +78,9 @@ export function headingSlug(text: string): string {
 
 /** The link element of the editor an event's target is in (a text node's parent counts). */
 function linkElementAt(view: EditorView, target: EventTarget | null): Element | null {
-  const node = target as Node | null;
-  const el = node?.nodeType === 3 ? node.parentElement : (node as Element | null);
-  const a = el?.closest?.('a') ?? null;
+  const el =
+    target instanceof Element ? target : target instanceof Text ? target.parentElement : null;
+  const a = el?.closest('a') ?? null;
   return a && view.dom.contains(a) ? a : null;
 }
 

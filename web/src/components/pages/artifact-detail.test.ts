@@ -31,6 +31,10 @@ import type { ScionPageArtifactDetail } from './artifact-detail.js';
 import { resetPrincipalNames, shortId } from '../../client/principal-names.js';
 import { formatInstant } from '../../utils/time.js';
 import { requestBodyText, requestUrl } from '../../client/__fixtures__/request-url.js';
+import { showToast } from '../../utils/toast.js';
+
+// Toasts need Shoelace's toast stack, which the test DOM does not register.
+vi.mock('../../utils/toast.js', () => ({ showToast: vi.fn() }));
 
 const ID = '5f1c2d3e-0000-4000-8000-000000000001';
 
@@ -2359,7 +2363,8 @@ describe('artifact page: refresh, origin and version labels', () => {
         open?.();
       },
       opts: {
-        metaGate: () => (held ? new Promise<void>((r) => (open = () => r())) : undefined),
+        metaGate: (): Promise<void> | undefined =>
+          held ? new Promise<void>((r) => (open = (): void => r())) : undefined,
         bodyFn: () => body.text,
       },
     };
@@ -2483,13 +2488,13 @@ describe('artifact page: refresh, origin and version labels', () => {
     const el = await mountAs();
     expect(el.shadowRoot!.querySelector('scion-artifact-markdown-frame')).not.toBeNull();
     status = 500;
+    vi.mocked(showToast).mockClear();
     headerButton(el, 'Refresh').click();
     await settle(el);
     expect(el.shadowRoot!.querySelector('.loading-state')).toBeNull();
     expect(el.shadowRoot!.querySelector('.error-state')).toBeNull();
     expect(el.shadowRoot!.querySelector('scion-artifact-markdown-frame')).not.toBeNull();
-    const toasts = Array.from(document.querySelectorAll('sl-alert')).map(text);
-    expect(toasts.some((t) => t.startsWith('Could not refresh:'))).toBe(true);
+    expect(showToast).toHaveBeenCalledWith(expect.stringMatching(/^Could not refresh: /), 'danger');
   });
 
   it('R-2: a version with no author shows the bare kind in the menu and the header', async () => {
