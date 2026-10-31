@@ -912,7 +912,6 @@ export class ScionScheduleList extends LitElement {
           ${this.renderTimeZoneInput('edit-time-zone', this.editTimeZone, (v) => {
             this.editTimeZone = v;
           })}
-
           ${sched.status === 'paused'
             ? html`
                 <label class="checkbox-label">
