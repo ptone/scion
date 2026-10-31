@@ -38,10 +38,11 @@ func (c *fakeChatRetentionClock) now() time.Time { return c.t }
 
 // fakeChatRetentionMsg is one message of fakeChatRetentionStore.
 type fakeChatRetentionMsg struct {
-	id      string
-	created time.Time
-	project string
-	state   string
+	id        string
+	created   time.Time
+	project   string
+	state     string
+	recipient string // "" = an agent
 }
 
 // fakeChatRetentionStore is an in-memory store.ChatRetentionStore. It
@@ -59,12 +60,16 @@ type fakeChatRetentionStore struct {
 	purgeErr  error
 	// afterPurge, when set, runs after each successful purge (a test
 	// cancels the tick's context from it).
-	afterPurge  func(call int)
-	purgeCalls  int
-	selectCalls int
-	scanned     int
-	lastSelect  store.ChatRetentionPosition
-	deadlines   []bool
+	afterPurge func(call int)
+	purgeCalls int
+	// failedPurgeCalls counts PurgeFailedMessages calls; they share
+	// purgeCost, purgeErr and afterPurge (by call number) with the main
+	// purge.
+	failedPurgeCalls int
+	selectCalls      int
+	scanned          int
+	lastSelect       store.ChatRetentionPosition
+	deadlines        []bool
 }
 
 func (f *fakeChatRetentionStore) add(id string, created time.Time, project, state string) {
@@ -102,10 +107,58 @@ func (f *fakeChatRetentionStore) SelectChatRetentionCandidates(ctx context.Conte
 
 func (f *fakeChatRetentionStore) PurgeChatMessages(ctx context.Context, ids []string, projectOf map[string]string, cursor store.ChatRetentionCursor) (store.ChatRetentionPurgeResult, error) {
 	f.purgeCalls++
+	res, err := f.purge(ctx, ids, f.purgeCalls, func(c *store.ChatRetentionCounts) { c.Main++ })
+	if err != nil {
+		return res, err
+	}
+	f.cursor, f.hasCursor = cursor, true
+	if f.afterPurge != nil {
+		f.afterPurge(f.purgeCalls)
+	}
+	return res, nil
+}
+
+func (f *fakeChatRetentionStore) SelectFailedMessages(ctx context.Context, cutoff time.Time, after store.ChatRetentionPosition, limit int) ([]store.ChatRetentionCandidate, error) {
+	f.selectCalls++
+	f.lastSelect = after
+	var out []store.ChatRetentionCandidate
+	for _, m := range f.msgs {
+		if !m.created.Before(cutoff) {
+			break
+		}
+		if !after.IsStart() && (m.created.Before(after.Created) || (m.created.Equal(after.Created) && m.id <= after.ID)) {
+			continue
+		}
+		f.scanned++
+		if m.state != store.MessageDispatchFailed || (m.recipient != "" && !strings.HasPrefix(m.recipient, "agent:")) {
+			continue
+		}
+		out = append(out, store.ChatRetentionCandidate{ID: m.id, Created: m.created, ProjectID: m.project})
+		if len(out) == limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeChatRetentionStore) PurgeFailedMessages(ctx context.Context, ids []string, projectOf map[string]string) (store.ChatRetentionPurgeResult, error) {
+	f.failedPurgeCalls++
+	res, err := f.purge(ctx, ids, f.failedPurgeCalls, func(c *store.ChatRetentionCounts) { c.Failed++ })
+	if err != nil {
+		return res, err
+	}
+	if f.afterPurge != nil {
+		f.afterPurge(f.failedPurgeCalls)
+	}
+	return res, nil
+}
+
+// purge drops ids, counting each under countMessage and one mention.
+func (f *fakeChatRetentionStore) purge(ctx context.Context, ids []string, call int, countMessage func(*store.ChatRetentionCounts)) (store.ChatRetentionPurgeResult, error) {
 	_, hasDeadline := ctx.Deadline()
 	f.deadlines = append(f.deadlines, hasDeadline)
 	if f.purgeCost != nil {
-		f.clock.t = f.clock.t.Add(f.purgeCost(f.purgeCalls))
+		f.clock.t = f.clock.t.Add(f.purgeCost(call))
 	}
 	res := store.ChatRetentionPurgeResult{ByProject: map[string]store.ChatRetentionCounts{}}
 	if f.purgeErr != nil {
@@ -119,7 +172,7 @@ func (f *fakeChatRetentionStore) PurgeChatMessages(ctx context.Context, ids []st
 	for _, m := range f.msgs {
 		if drop[m.id] {
 			c := res.ByProject[m.project]
-			c.Main++
+			countMessage(&c)
 			c.Mentions++
 			res.ByProject[m.project] = c
 			continue
@@ -127,10 +180,6 @@ func (f *fakeChatRetentionStore) PurgeChatMessages(ctx context.Context, ids []st
 		kept = append(kept, m)
 	}
 	f.msgs = kept
-	f.cursor, f.hasCursor = cursor, true
-	if f.afterPurge != nil {
-		f.afterPurge(f.purgeCalls)
-	}
 	return res, nil
 }
 

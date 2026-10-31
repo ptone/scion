@@ -1,0 +1,153 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !no_sqlite
+
+package hub
+
+import (
+	"net/http"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+)
+
+// TestFailedMessageRetention_SameRowsNoOrphansSQLite: with chat retention
+// off and the default 7-day window, the handler purges exactly the rows the
+// former unbounded DELETE removed (failed, agent recipient, older than the
+// window), never pending, deferred, delivered or "user:" recipient rows,
+// over several chunks, and leaves no dependent row behind. It opens no
+// chat retention run.
+func TestFailedMessageRetention_SameRowsNoOrphansSQLite(t *testing.T) {
+	f := newChatRetentionHubFixture(t)
+	// Chat retention off (experiment and enabled); the smallest chunk and
+	// no pause, so the 30 rows take two chunks.
+	setChatRetentionSettings(t, f.srv, false, `{"sweep":{"chunk_size":25,"pause_ms":0}}`)
+	now := time.Now().UTC()
+	old := now.Add(-8 * 24 * time.Hour)
+
+	var purge []string
+	for i := 0; i < 30; i++ {
+		purge = append(purge, f.message(chatRetentionSeed{created: old.Add(time.Duration(i) * time.Second), state: store.MessageDispatchFailed, channel: "web"}))
+	}
+	keep := []string{
+		f.message(chatRetentionSeed{created: old, state: store.MessageDispatchFailed, recipient: "user:alice@test.com"}),
+		f.message(chatRetentionSeed{created: old, state: store.MessageDispatchPending}),
+		f.message(chatRetentionSeed{created: old, state: store.MessageDispatchDeferred}),
+		f.message(chatRetentionSeed{created: old, state: store.MessageDispatchDispatched}),
+		f.message(chatRetentionSeed{created: now.Add(-6 * 24 * time.Hour), state: store.MessageDispatchFailed}),
+	}
+
+	f.srv.failedMessageRetentionHandler()(f.ctx)
+
+	for _, id := range purge {
+		assert.False(t, f.exists(id), "purged %s", id)
+	}
+	for _, id := range keep {
+		assert.True(t, f.exists(id), "kept %s", id)
+	}
+	assert.Equal(t, chatRetentionNoOrphans(), chatRetentionOrphans(t, f.db))
+	for _, table := range []string{"message_addressees", "webchat_message_ext", "webchat_mention", "webchat_message_attachment", "webchat_message_star"} {
+		assert.Equal(t, len(keep), f.count(`SELECT COUNT(*) FROM `+table), table)
+	}
+	assert.Equal(t, 0, f.count(`SELECT COUNT(*) FROM chat_retention_runs`), "chat retention off: no run is opened")
+	assert.Equal(t, 0, f.count(`SELECT COUNT(*) FROM chat_retention_cursors`), "the failed purge writes no cursor")
+}
+
+// TestFailedMessageRetention_WindowChangeWithoutRestartSQLite: a PUT of
+// messaging.failed_message_retention_days applies on the next run of the
+// same handler, with no restart.
+func TestFailedMessageRetention_WindowChangeWithoutRestartSQLite(t *testing.T) {
+	f := newChatRetentionHubFixture(t)
+	setChatRetentionSettings(t, f.srv, false, "")
+	id := f.message(chatRetentionSeed{created: time.Now().UTC().Add(-2 * 24 * time.Hour), state: store.MessageDispatchFailed})
+
+	handler := f.srv.failedMessageRetentionHandler()
+	handler(f.ctx)
+	require.True(t, f.exists(id), "within the default 7-day window")
+
+	rr := putMessaging(t, f.srv, `{"failed_message_retention_days": 1}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	handler(f.ctx)
+	assert.False(t, f.exists(id), "the 1-day window applies on the next run")
+	assert.Equal(t, chatRetentionNoOrphans(), chatRetentionOrphans(t, f.db))
+}
+
+// TestFailedMessageRetention_AddsToOpenSweepRunSQLite: with chat retention
+// on and a sweep run open, the failed purge adds its counts under failed
+// in that run; with chat retention on and no run open, it opens none.
+func TestFailedMessageRetention_AddsToOpenSweepRunSQLite(t *testing.T) {
+	f := newChatRetentionHubFixture(t)
+	setChatRetentionSettings(t, f.srv, true, `{"enabled":true,"messages_retention_days":30,"sweep":{"pause_ms":0}}`)
+	now := time.Now().UTC()
+
+	// No run open yet: the counts are only logged.
+	first := f.message(chatRetentionSeed{created: now.Add(-8 * 24 * time.Hour), state: store.MessageDispatchFailed})
+	f.srv.failedMessageRetentionHandler()(f.ctx)
+	require.False(t, f.exists(first))
+	require.Equal(t, 0, f.count(`SELECT COUNT(*) FROM chat_retention_runs`), "no run is opened by the failed purge")
+
+	// A chat retention tick opens the day's run.
+	_ = f.message(chatRetentionSeed{created: now.Add(-40 * 24 * time.Hour)})
+	f.srv.chatRetentionHandler()(f.ctx)
+	run, err := f.crs.LatestChatRetentionRun(f.ctx, store.ChatRetentionTriggerSweep, now.Add(-time.Hour))
+	require.NoError(t, err)
+	require.NotNil(t, run)
+	require.Equal(t, int64(1), run.Counts[f.project.ID].Main)
+
+	// Within the 30-day window, so only the failed purge deletes it.
+	_ = f.message(chatRetentionSeed{created: now.Add(-8 * 24 * time.Hour), state: store.MessageDispatchFailed})
+	f.srv.failedMessageRetentionHandler()(f.ctx)
+
+	after, err := f.crs.LatestChatRetentionRun(f.ctx, store.ChatRetentionTriggerSweep, now.Add(-time.Hour))
+	require.NoError(t, err)
+	require.NotNil(t, after)
+	assert.Equal(t, run.ID, after.ID, "the open run is updated, not a new one")
+	assert.Equal(t, store.ChatRetentionCounts{
+		Main: 1, Failed: 1, Addressees: 2, Mentions: 2, Stars: 2, Ext: 2, Attachments: 2, UnlinkedAttachments: 2,
+	}, after.Counts[f.project.ID])
+	assert.Equal(t, run.Status, after.Status)
+	assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM chat_retention_runs`))
+	assert.Equal(t, chatRetentionNoOrphans(), chatRetentionOrphans(t, f.db))
+}
+
+// TestFailedMessageRetention_NoStoreSkipsSQLite: without the chat retention
+// store (web chat tables not initialized) the handler deletes nothing.
+func TestFailedMessageRetention_NoStoreSkipsSQLite(t *testing.T) {
+	f := newChatRetentionHubFixture(t)
+	id := f.message(chatRetentionSeed{created: time.Now().UTC().Add(-30 * 24 * time.Hour), state: store.MessageDispatchFailed})
+	f.srv.SetChatRetentionStore(nil)
+	f.srv.failedMessageRetentionHandler()(f.ctx)
+	assert.True(t, f.exists(id))
+}
+
+// TestAdminMessaging_FailedMessageRetentionDaysAuthz: a hub member cannot
+// change failed_message_retention_days; a hub admin can.
+func TestAdminMessaging_FailedMessageRetentionDaysAuthz(t *testing.T) {
+	srv, _, admin, member := chatRetentionAdminServer(t, false)
+	const path = "/api/v1/admin/messaging"
+	body := map[string]any{"failed_message_retention_days": 2}
+
+	rec := doRequestAsUser(t, srv, member, http.MethodPut, path, body)
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Equal(t, DefaultFailedMessageRetentionDays, srv.GetOperationalSettings().FailedMessageRetentionDays())
+
+	rec = doRequestAsUser(t, srv, admin, http.MethodPut, path, body)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, 2, srv.GetOperationalSettings().FailedMessageRetentionDays())
+}

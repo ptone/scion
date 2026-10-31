@@ -70,6 +70,9 @@ type ChatRetentionCursor struct {
 type ChatRetentionCounts struct {
 	// Main counts messages deleted by the main window.
 	Main int64 `json:"main,omitempty"`
+	// Failed counts failed agent messages deleted by the failed-message
+	// purge (messaging.failed_message_retention_days).
+	Failed int64 `json:"failed,omitempty"`
 	// Addressees, Mentions, Stars, Ext and Attachments count the
 	// dependent rows deleted with those messages: message_addressees,
 	// webchat_mention, webchat_message_star, webchat_message_ext and
@@ -88,6 +91,7 @@ type ChatRetentionCounts struct {
 // Add adds o to c.
 func (c *ChatRetentionCounts) Add(o ChatRetentionCounts) {
 	c.Main += o.Main
+	c.Failed += o.Failed
 	c.Addressees += o.Addressees
 	c.Mentions += o.Mentions
 	c.Stars += o.Stars
@@ -155,6 +159,19 @@ type ChatRetentionStore interface {
 	// project for the counts. Deletes are idempotent: an ID that is
 	// already gone counts nothing.
 	PurgeChatMessages(ctx context.Context, ids []string, projectOf map[string]string, cursor ChatRetentionCursor) (ChatRetentionPurgeResult, error)
+
+	// SelectFailedMessages returns up to limit messages in
+	// dispatch_state "failed" with an agent recipient ("agent:" prefix),
+	// created before cutoff and after the position after, oldest first in
+	// (created, id) order. It is served by the created index. A "user:"
+	// recipient row is never returned: it reaches "failed" only by the
+	// stuck-pending expiry, and is real chat history.
+	SelectFailedMessages(ctx context.Context, cutoff time.Time, after ChatRetentionPosition, limit int) ([]ChatRetentionCandidate, error)
+
+	// PurgeFailedMessages deletes the given messages with the same
+	// dependent rows as PurgeChatMessages, in one transaction, and counts
+	// the messages under Failed instead of Main. It writes no cursor.
+	PurgeFailedMessages(ctx context.Context, ids []string, projectOf map[string]string) (ChatRetentionPurgeResult, error)
 
 	// GetChatRetentionCursor returns the cursor of phase, or a zero cursor
 	// for phase (Position at the start) when none is stored.
