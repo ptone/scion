@@ -210,7 +210,9 @@ describe('project settings count limits', () => {
     expect(Object.values(el.countLimitErrors)).toEqual([
       'Must be a whole number greater than 0, or Unlimited.',
     ]);
-    expect(el.shadowRoot!.querySelector('.count-limit-error')?.textContent).toContain('whole number');
+    expect(el.shadowRoot!.querySelector('.count-limit-error')?.textContent).toContain(
+      'whole number'
+    );
     await el.handleSaveConfig();
     expect(puts).toHaveLength(0);
     expect(el.settingsError).toContain('default count limits');
@@ -225,7 +227,9 @@ describe('project settings count limits', () => {
 
   it('shows count-limit warnings with the count limits, not in the profile section', async () => {
     const el = await mount({});
-    putWarnings = ['defaultMaxTurns: Unlimited (0) applies only on Runtime Brokers that support it'];
+    putWarnings = [
+      'defaultMaxTurns: Unlimited (0) applies only on Runtime Brokers that support it',
+    ];
     el.configDefaultMaxTurns = 0;
     await el.handleSaveConfig();
     await el.updateComplete;
@@ -237,7 +241,9 @@ describe('project settings count limits', () => {
 
   it('clears count-limit input errors and warnings when settings reload', async () => {
     const el = await mount({ defaultMaxTurns: 20 });
-    el.countLimitErrors = { 'scion.io/default-max-turns': 'Must be a whole number greater than 0, or Unlimited.' };
+    el.countLimitErrors = {
+      'scion.io/default-max-turns': 'Must be a whole number greater than 0, or Unlimited.',
+    };
     el.countLimitWarnings = ['defaultMaxTurns: stale'];
     await el.loadResolvedSettings();
     await el.updateComplete;

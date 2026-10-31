@@ -151,6 +151,11 @@ export function isCountLimitWarning(w: string): boolean {
   return /^(defaultMaxTurns|defaultMaxModelCalls)\b/.test(w);
 }
 
+/** isCountLimitWarning for a warning of unknown type: only a string can be one. */
+function isCountLimitWarningValue(w: unknown): w is string {
+  return typeof w === 'string' && isCountLimitWarning(w);
+}
+
 /**
  * The number input's text as a count limit. Empty is Inherit (null); a
  * positive integer is a limit; anything else is an error and changes
@@ -1550,7 +1555,9 @@ export class ScionPageProjectSettings extends LitElement {
     canEdit: boolean
   ) {
     const unlimited = value === 0;
-    return html`<div class="config-field ${this.isHubDefault(annotationKey) ? 'hub-inherited' : ''}">
+    return html`<div
+      class="config-field ${this.isHubDefault(annotationKey) ? 'hub-inherited' : ''}"
+    >
       <label>${label} ${this.renderHubIndicator(annotationKey)}</label>
       <sl-input
         type="number"
@@ -2113,7 +2120,8 @@ export class ScionPageProjectSettings extends LitElement {
 
     this.countLimitWarnings = [];
     if (Object.keys(this.countLimitErrors).length > 0) {
-      this.settingsError = 'Fix the default count limits: each must be a whole number greater than 0, Unlimited, or empty.';
+      this.settingsError =
+        'Fix the default count limits: each must be a whole number greater than 0, Unlimited, or empty.';
       return;
     }
 
@@ -2225,13 +2233,10 @@ export class ScionPageProjectSettings extends LitElement {
       this.configDefaultMaxModelCalls = countLimitOrNull(savedSettings.defaultMaxModelCalls);
       this.loadedDefaultMaxTurns = this.configDefaultMaxTurns;
       this.loadedDefaultMaxModelCalls = this.configDefaultMaxModelCalls;
-      const countWarnings = Array.isArray(warnings)
-        ? warnings.filter((w): w is string => typeof w === 'string' && isCountLimitWarning(w))
-        : [];
-      this.countLimitWarnings = countWarnings;
-      this.profileDefaultWarnings = splitProfileWarnings(
-        Array.isArray(warnings) ? warnings.filter((w) => !countWarnings.includes(w)) : warnings
-      );
+      const allWarnings: unknown[] = Array.isArray(warnings) ? warnings : [];
+      this.countLimitWarnings = allWarnings.filter(isCountLimitWarningValue);
+      const otherWarnings = allWarnings.filter((w) => !isCountLimitWarningValue(w));
+      this.profileDefaultWarnings = splitProfileWarnings(otherWarnings);
       const warningCount =
         Object.values(this.profileDefaultWarnings.byProfile).flat().length +
         this.profileDefaultWarnings.general.length +
@@ -3215,7 +3220,10 @@ export class ScionPageProjectSettings extends LitElement {
               )}
               ${this.countLimitWarnings.map(
                 (w) =>
-                  html`<div class="field-help count-limit-warning" style="color: var(--sl-color-warning-700);">
+                  html`<div
+                    class="field-help count-limit-warning"
+                    style="color: var(--sl-color-warning-700);"
+                  >
                     ${w}
                   </div>`
               )}
