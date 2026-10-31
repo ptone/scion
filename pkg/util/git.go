@@ -88,8 +88,8 @@ func CheckGitRepoDir(dir string) (bool, error) {
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	// Force untranslated git messages so the stderr match is locale-stable.
-	cmd.Env = append(HostGitEnv(os.Environ()), "LC_ALL=C")
+	// hostGit's environment (HostGitEnv) sets LC_ALL=C, so the stderr match is
+	// locale-stable.
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err == nil {
@@ -329,10 +329,11 @@ func CreateWorktreeWithOrigin(path, branch, recordedOrigin string) error {
 
 	// git worktree add --relative-paths -b <branch> <path>
 	// We run from root to ensure --relative-paths are calculated from root.
-	// LC_ALL=C keeps git's messages in English, so the matches below hold.
-	// The checkout runs without repository hooks or repository-defined
-	// filter commands (HostGitCommand): agents can write this repository.
-	gitEnv := append(HostGitEnv(os.Environ()), "LC_ALL=C")
+	// HostGitEnv sets LC_ALL=C, which keeps git's messages in English, so the
+	// matches below hold. The checkout runs without repository hooks or
+	// repository-defined filter commands (HostGitCommand): agents can write
+	// this repository.
+	gitEnv := HostGitEnv(os.Environ())
 	ctx := context.Background()
 	// git-lfs on a host-side checkout would otherwise take its endpoint from
 	// a tracked .lfsconfig; pin the endpoint from the trusted (broker-recorded)
@@ -846,10 +847,12 @@ func baseRepoGitDir(repoRoot string) (string, error) {
 // from the process are dropped except the set HostGitEnv keeps (the host
 // user's own config and transport/auth — GIT_CONFIG_GLOBAL/SYSTEM/NOSYSTEM,
 // GIT_SSH*, GIT_ASKPASS, GIT_SSL_CA*, GIT_ALLOW_PROTOCOL,
-// GIT_CEILING_DIRECTORIES, ...) and LC_ALL=C is set; core.hooksPath points at an empty
+// GIT_CEILING_DIRECTORIES, ...) and LC_ALL=C is set (HostGitEnv); core.hooksPath points at an empty
 // location (os.DevNull), so hook files in the repository are not run; and
 // the file-system monitor is off. It returns an error, and no command, when
-// repoRoot is not a main repository (baseRepoGitDir).
+// repoRoot is not a main repository (baseRepoGitDir), and, as HostGitCommand
+// does, when args is empty or its first argument is empty or an option
+// (errHostGitArgsOption).
 //
 // git still reads the repository's own configuration. core.hooksPath does
 // not cover hooks defined in configuration (hook.<name>.command with
@@ -858,6 +861,9 @@ func baseRepoGitDir(repoRoot string) (string, error) {
 // (for example reference-transaction on branch -D). Making the repository
 // configuration read-only from agent containers is a follow-up.
 func BaseRepoGitCommand(ctx context.Context, repoRoot string, args ...string) (*exec.Cmd, error) {
+	if len(args) == 0 || args[0] == "" || strings.HasPrefix(args[0], "-") {
+		return nil, errHostGitArgsOption
+	}
 	gitDir, err := baseRepoGitDir(repoRoot)
 	if err != nil {
 		return nil, err
@@ -866,11 +872,12 @@ func BaseRepoGitCommand(ctx context.Context, repoRoot string, args ...string) (*
 	// scrubbed environment every host git call uses (HostGitArgs/HostGitEnv): no
 	// hooks, no fsmonitor, and credential helpers supplied through the environment
 	// are dropped, with the repository pinned by GIT_DIR/GIT_COMMON_DIR rather than
-	// by anything the worktree can rewrite. LC_ALL=C keeps porcelain output parseable.
+	// by anything the worktree can rewrite. HostGitEnv's LC_ALL=C keeps porcelain
+	// output parseable.
 	full := append(append(HostGitArgs(), "-C", repoRoot), args...)
 	cmd := exec.CommandContext(ctx, "git", full...)
 	cmd.WaitDelay = 5 * time.Second
-	cmd.Env = append(HostGitEnv(os.Environ()), "GIT_DIR="+gitDir, "GIT_COMMON_DIR="+gitDir, "LC_ALL=C")
+	cmd.Env = append(HostGitEnv(os.Environ()), "GIT_DIR="+gitDir, "GIT_COMMON_DIR="+gitDir)
 	return cmd, nil
 }
 
@@ -917,7 +924,8 @@ func RemoveWorktreeEntryIn(repoRoot, path string) error {
 // example with extra -c settings or environment for a shared checkout).
 // newCmd builds the git command for the given arguments, already pointed
 // at the repository; RemoveWorktreeEntry never adds -C itself. It appends
-// LC_ALL=C to the command's environment so git's messages can be matched.
+// LC_ALL=C to the command's environment so git's messages can be matched,
+// whatever environment newCmd built (one from HostGitEnv already has it).
 //
 // It acts only when path is absent (Lstat reports it does not exist), runs
 // "git worktree remove <path>" without --force, first with the cleaned path
@@ -976,6 +984,8 @@ func removeWorktreeEntryAt(ctx context.Context, newCmd func(ctx context.Context,
 	if cmd.Env == nil {
 		cmd.Env = os.Environ()
 	}
+	// newCmd may build any environment, so LC_ALL=C is appended here as well
+	// (os/exec keeps the last of duplicate entries).
 	cmd.Env = append(cmd.Env, "LC_ALL=C")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -1664,9 +1674,47 @@ func ExtractOrgRepo(gitURL string) (org, repo string) {
 // If the requested branch does not exist on the remote, the clone falls back to
 // the remote's default branch and creates the requested branch locally.
 func CloneSharedWorkspace(workspacePath, cloneURL, branch, token string) error {
+	return cloneSharedWorkspace(workspacePath, cloneURL, branch, token, HostGitHardening{})
+}
+
+// HostGitHardening is what a host-side clone or fetch of a URL the host
+// does not choose itself adds to the base host pins.
+type HostGitHardening struct {
+	// Config holds key=value settings passed as -c after HostGitArgs (and,
+	// on a fetch, after the network transport allow-list), so a setting
+	// here overrides a base pin of the same key.
+	Config []string
+	// Env is appended to the command environment.
+	Env []string
+	// NoCredentialHelpers runs git with no credential helper, no configured
+	// extra HTTP header and no askpass (NoCredentialHelperEnv); the token is
+	// not used.
+	NoCredentialHelpers bool
+}
+
+// configArgs returns h.Config as -c arguments.
+func (h HostGitHardening) configArgs() []string {
+	var args []string
+	for _, kv := range h.Config {
+		args = append(args, "-c", kv)
+	}
+	return args
+}
+
+// CloneSharedWorkspaceHardened is CloneSharedWorkspace for a clone URL the
+// host does not choose itself, with h applied to every clone subcommand.
+func CloneSharedWorkspaceHardened(workspacePath, cloneURL, branch, token string, h HostGitHardening) error {
+	return cloneSharedWorkspace(workspacePath, cloneURL, branch, token, h)
+}
+
+func cloneSharedWorkspace(workspacePath, cloneURL, branch, token string, h HostGitHardening) error {
+	gitArgs := h.configArgs()
 	baseEnv := append(HostGitEnv(os.Environ()), "GIT_TERMINAL_PROMPT=0", "GIT_LFS_SKIP_SMUDGE=1")
+	baseEnv = append(baseEnv, h.Env...)
 	env := baseEnv
-	if token != "" {
+	if h.NoCredentialHelpers {
+		env = NoCredentialHelperEnv(baseEnv, cloneURL)
+	} else if token != "" {
 		if scoped, ok := ScopedCredentialHelperEnv(baseEnv, cloneURL, token); ok {
 			env = scoped
 		}
@@ -1680,18 +1728,20 @@ func CloneSharedWorkspace(workspacePath, cloneURL, branch, token string) error {
 		return cmd.CombinedOutput()
 	}
 
-	args := []string{"clone"}
+	// "--" ends the options: a URL or path starting with "-" is never read
+	// as one.
+	args := append(append([]string{}, gitArgs...), "clone")
 	if branch != "" {
 		args = append(args, "--branch", branch)
 	}
-	args = append(args, cloneURL, workspacePath)
+	args = append(args, "--", cloneURL, workspacePath)
 	output, err := runClone(args...)
 
 	if err != nil && branch != "" && isRemoteBranchNotFound(string(output)) {
 		// The branch doesn't exist on the remote yet. Clone the default branch
 		// instead and create the requested branch locally.
 		_ = os.RemoveAll(workspacePath)
-		output, err = runClone("clone", cloneURL, workspacePath)
+		output, err = runClone(append(append([]string{}, gitArgs...), "clone", "--", cloneURL, workspacePath)...)
 		if err != nil {
 			sanitized := strings.TrimSpace(sanitizeGitOutput(string(output), token))
 			gitErr := ClassifyGitError(sanitized)
@@ -1767,6 +1817,16 @@ type PullResult struct {
 // current branch's configured upstream branch, or the current branch's own
 // name; it is fetched into refs/remotes/origin/<branch>.
 func PullSharedWorkspace(workspacePath, cloneURL, token string) (*PullResult, error) {
+	return pullSharedWorkspace(workspacePath, cloneURL, token, HostGitHardening{})
+}
+
+// PullSharedWorkspaceHardened is PullSharedWorkspace for a clone URL the
+// host does not choose itself, with h applied to the fetch.
+func PullSharedWorkspaceHardened(workspacePath, cloneURL, token string, h HostGitHardening) (*PullResult, error) {
+	return pullSharedWorkspace(workspacePath, cloneURL, token, h)
+}
+
+func pullSharedWorkspace(workspacePath, cloneURL, token string, h HostGitHardening) (*PullResult, error) {
 	pullErr := func(msg string) error {
 		msg = sanitizeGitOutput(msg, token)
 		gitErr := ClassifyGitError(msg)
@@ -1787,12 +1847,14 @@ func PullSharedWorkspace(workspacePath, cloneURL, token string) (*PullResult, er
 	// .lfsconfig might name. The merge/checkout step below gets no credential
 	// config at all and skips the LFS smudge, so no host-side checkout can
 	// leak the token to an agent-chosen endpoint.
-	fetchEnv := baseEnv
-	if token != "" {
+	fetchEnv := append(append([]string{}, baseEnv...), h.Env...)
+	if h.NoCredentialHelpers {
+		fetchEnv = NoCredentialHelperEnv(fetchEnv, cloneURL)
+	} else if token != "" {
 		// Only an http(s) clone URL can carry a host-scoped credential helper.
 		// For an ssh/scp or local-path URL the token is ignored (git uses its
 		// own transport auth), rather than failing the pull.
-		if scoped, ok := ScopedCredentialHelperEnv(baseEnv, cloneURL, token); ok {
+		if scoped, ok := ScopedCredentialHelperEnv(fetchEnv, cloneURL, token); ok {
 			fetchEnv = scoped
 		}
 	}
@@ -1818,7 +1880,7 @@ func PullSharedWorkspace(workspacePath, cloneURL, token string) (*PullResult, er
 	oldHeadStr := strings.TrimSpace(string(oldHead))
 
 	ctx := context.Background()
-	fetch, err := HostGitCommand(ctx, workspacePath, HostGitOptions{Env: fetchEnv, Network: true},
+	fetch, err := HostGitCommand(ctx, workspacePath, HostGitOptions{Env: fetchEnv, Network: true, Config: h.Config},
 		"fetch", "--no-tags", "--", cloneURL, "+refs/heads/"+remoteBranch+":"+trackingRef)
 	if err != nil {
 		return nil, pullErr(err.Error())
