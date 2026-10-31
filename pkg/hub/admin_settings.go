@@ -786,7 +786,7 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 			// already stored that the save does not touch is a warning.
 			pErrs, pWarnings := config.RuntimeSaveChecks(stored.Runtimes, merged.Runtimes, stored.Profiles, merged.Profiles)
 			if len(pErrs) > 0 {
-				writeResourceQuantityError(w, http.StatusBadRequest, ErrCodeInvalidRequest, pErrs)
+				writeSettingsValidationErrors(w, pErrs)
 				return
 			}
 			saveWarnings = append(saveWarnings, resourceQuantityWarnings(pWarnings)...)

@@ -1598,7 +1598,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			}
 			pErrs, pWarnings := config.RuntimeSaveChecks(runtimesBefore, runtimes, profilesBefore, profiles)
 			if len(pErrs) > 0 {
-				writeResourceQuantityError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, pErrs)
+				writeSettingsValidationErrors(w, pErrs)
 				return
 			}
 			saveWarnings = append(saveWarnings, resourceQuantityWarnings(pWarnings)...)
