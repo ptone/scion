@@ -102,6 +102,44 @@ describe('scion-review-editor scrollInset', () => {
     expect(props(el).margin.bottom).toBe(5);
   });
 
+  it('keeps focused comment badges and links clear of the pinned toolbar', async () => {
+    const { el } = await mount('a {==dog==}{>>Why?<<} and [a link](https://example.com)\n');
+    el.scrollInset = 100;
+    await el.updateComplete;
+    // Focus scrolling reads scroll-margin, which reads this height.
+    const root = el.shadowRoot!.querySelector<HTMLElement>('.editor-root')!;
+    expect(root.style.getPropertyValue('--review-scroll-inset')).toBe('108px');
+    const badge = root.querySelector<HTMLElement>('.critic-comment')!;
+    expect(badge.getAttribute('tabindex')).toBe('0');
+    const css = Array.from(el.shadowRoot!.adoptedStyleSheets ?? [])
+      .flatMap((sheet) => Array.from(sheet.cssRules))
+      .map((r) => r.cssText)
+      .join('\n');
+    expect(css).toMatch(
+      /\.editor-root \[tabindex\],\s*\.editor-root a\[href\]\s*\{\s*scroll-margin-top: var\(--review-scroll-inset, 0px\);/
+    );
+    // 0, nothing pinned: today's behaviour, ProseMirror's defaults and no margin.
+    el.scrollInset = 0;
+    await el.updateComplete;
+    expect(root.style.getPropertyValue('--review-scroll-inset')).toBe('');
+    expect(props(el).margin).toEqual({ top: 5, right: 5, bottom: 5, left: 5 });
+    expect(props(el).threshold).toEqual({ top: 0, right: 0, bottom: 0, left: 0 });
+  });
+
+  it('treats a negative, NaN or infinite inset as nothing pinned', async () => {
+    const { el } = await mount('a dog\n');
+    const root = el.shadowRoot!.querySelector<HTMLElement>('.editor-root')!;
+    for (const bad of [-40, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      el.scrollInset = 100;
+      await el.updateComplete;
+      el.scrollInset = bad;
+      await el.updateComplete;
+      expect(root.style.getPropertyValue('--review-scroll-inset'), String(bad)).toBe('');
+      expect(props(el).margin.top, String(bad)).toBe(5);
+      expect(props(el).threshold.top, String(bad)).toBe(0);
+    }
+  });
+
   it('applies an inset set before the editor started', async () => {
     const el = document.createElement('scion-review-editor') as ScionReviewEditor;
     el.content = 'a dog\n';
