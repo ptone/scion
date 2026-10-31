@@ -28,7 +28,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { paginateAll, PaginationError } from '../../client/paginate-all.js';
 import { resourceStyles } from './resource-styles.js';
-import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
+import { browserTimeZone, formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 interface Schedule {
@@ -96,15 +96,6 @@ export function scheduleZoneLabel(timeZone: string | undefined): string {
 export function normalizeTimeZoneInput(value: string): string {
   const zone = value.trim();
   return zone === 'UTC' ? '' : zone;
-}
-
-/** The browser's IANA zone, offered as a hint on the time zone field; '' if unknown. */
-export function browserTimeZone(): string {
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone ?? '';
-  } catch {
-    return '';
-  }
 }
 
 /** The edit dialog's fields. */
