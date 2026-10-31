@@ -714,9 +714,7 @@ func TestInboundAttachment_ArtifactUploadFailureSendsNothing(t *testing.T) {
 	env := newIAEnv(t, hub)
 	// The check answers artifact, but the upload route refuses: the
 	// sender's access changed in between.
-	hub.mu.Lock()
 	hub.set(func() { hub.authorized = false })
-	hub.mu.Unlock()
 	var answered atomic.Bool
 	env.b.mu.Lock()
 	hubURL := env.b.hubURL
