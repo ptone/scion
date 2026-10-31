@@ -128,7 +128,7 @@ Shoelace components, themes and icons ship in the client bundle; the SPA shell l
 
 All icons use the Shoelace `<sl-icon>` component, which provides [Bootstrap Icons](https://icons.getbootstrap.com/). Use these consistently when building new UI features.
 
-**Important:** Only icons listed in the `USED_ICONS` array in `scripts/copy-shoelace-icons.mjs` are included in production builds. When you add a new `<sl-icon name="...">` reference, you **must** also add the icon name to that array, then run `npm run copy:shoelace-icons`. Icons will render in dev mode but appear blank in production if this step is missed.
+**Important:** Icons are drawn from one sprite sheet that `scripts/copy-shoelace-icons.mjs` builds from its `USED_ICONS` array (plus Shoelace's own system icons). When you add a new `<sl-icon name="...">` reference, you **must** also add the icon name to that array, then run `npm run copy:shoelace-icons`. An icon missing from the array appears blank, in dev mode and production alike; `src/utils/icon-registration.test.ts` catches it. Do not give `sl-icon` a `src` attribute: `src/utils/markup-sinks.test.ts` rejects it.
 
 ### Resource Type Icons
 

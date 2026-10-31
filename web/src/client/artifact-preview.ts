@@ -32,6 +32,8 @@
 
 import { artifactFileUrl, isRemoteFile } from './artifacts.js';
 import type { ArtifactFile } from './artifacts.js';
+import { getMarkdownRenderer } from '../utils/markdown.js';
+import type { MarkdownRenderOptions } from '../utils/markdown.js';
 
 /** Content-Security-Policy of the preview document. */
 export const PREVIEW_CSP = "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'";
@@ -316,4 +318,65 @@ ${CRITIC_CSS}
       ? `<aside class="critic-side${options.sideNoteEmpty ? ' empty' : ''}">${escapeText(options.sideNote)}</aside>`
       : ''
   }${bodyHtml}</body></html>`;
+}
+
+/** What the preview frame's srcdoc is set to: the frame document. */
+export type FrameDocument = string | FrameMarkup;
+
+/** A frame document the browser accepts as markup (opaque). */
+export interface FrameMarkup {
+  readonly __brand: 'FrameMarkup';
+}
+
+/** The part of the browser's markup policy API the frame uses. */
+interface MarkupPolicy {
+  createHTML(markup: string): FrameMarkup;
+}
+
+interface MarkupPolicyFactory {
+  createPolicy(name: string, rules: { createHTML(markup: string): string }): MarkupPolicy;
+}
+
+/** The frame document policy, created on first use; null when unavailable. */
+let framePolicy: MarkupPolicy | null | undefined;
+
+/**
+ * Marks a frame document built by previewFrameDocument as markup the page
+ * accepts. Its only caller is previewFrameDocument, whose document is fixed
+ * text, theme values filtered by cssValue, a side note passed through
+ * escapeText, and the sanitized, rewritten markdown body.
+ */
+function frameMarkup(doc: string): FrameDocument {
+  if (framePolicy === undefined) {
+    const factory = (globalThis as { trustedTypes?: MarkupPolicyFactory }).trustedTypes;
+    try {
+      framePolicy =
+        factory?.createPolicy('scion-preview-frame', { createHTML: (markup) => markup }) ?? null;
+    } catch {
+      framePolicy = null;
+    }
+  }
+  return framePolicy ? framePolicy.createHTML(doc) : doc;
+}
+
+/** What the preview frame shows. */
+export interface PreviewFrameInput {
+  /** Markdown source of the entry (CriticMarkup already projected). */
+  source: string;
+  render: Pick<MarkdownRenderOptions, 'criticMarks' | 'criticAuthor'>;
+  files: { id: string; seq: number; entryPath: string; files: ArtifactFile[] };
+  theme?: Partial<PreviewTheme>;
+  options?: PreviewOptions;
+}
+
+/**
+ * The preview frame's document for a markdown entry: the markdown is
+ * rendered and sanitized, its images and links are pointed at the version's
+ * files, and the result is placed in previewDocument's frame document.
+ */
+export async function previewFrameDocument(input: PreviewFrameInput): Promise<FrameDocument> {
+  const renderer = await getMarkdownRenderer();
+  const clean = renderer.render(input.source, input.render);
+  const body = rewriteImages(clean, input.files);
+  return frameMarkup(previewDocument(body, input.theme, input.options));
 }

@@ -23,6 +23,7 @@ export default defineConfig({
         'url-nav-guard.pw.ts',
         'persistence.pw.ts',
         'jump-to-agent.pw.ts',
+        'trusted-types.pw.ts',
       ],
     },
     {

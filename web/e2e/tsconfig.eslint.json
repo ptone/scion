@@ -35,6 +35,7 @@
     "./event-source-stub.ts",
     "./palette-focus.ts",
     "./palette-typography.ts",
+    "./trusted-types.ts",
     "./*.spec.ts",
     "./groups/*.ts",
     "./harness/*.ts",

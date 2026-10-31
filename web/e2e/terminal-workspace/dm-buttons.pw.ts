@@ -1,5 +1,8 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { test, expect, type Page } from '@playwright/test';
 import { installEventSourceStub } from '../event-source-stub.js';
+import { builtSheetPath, distClient, shoelaceIconContent, symbolContent } from './built-icons.js';
 
 // ---------------------------------------------------------------------------
 // #1702 — DM header Terminal/Graph buttons & member list Graph icon
@@ -507,28 +510,12 @@ test.describe('diagram-3 icon registration (#1702)', () => {
     expect(scriptContent).toContain("'diagram-3'");
   });
 
-  test('diagram-3.svg exists in production build output and matches Shoelace source', async () => {
-    const fs = await import('node:fs');
-    const path = await import('node:path');
-    const { fileURLToPath } = await import('node:url');
-    const thisDir = path.dirname(fileURLToPath(import.meta.url));
-    const distPath = path.resolve(thisDir, '../../dist/client');
-
-    // Verify the built SVG file exists
-    const builtSvg = path.join(distPath, 'shoelace/assets/icons/diagram-3.svg');
-    expect(fs.existsSync(builtSvg)).toBe(true);
-
-    // Verify it's a real SVG with content
-    const builtContent = fs.readFileSync(builtSvg, 'utf-8');
-    expect(builtContent).toContain('<svg');
-    expect(builtContent.length).toBeGreaterThan(100);
-
-    // Compare against packaged Shoelace source — byte-equal copy
-    const sourceSvg = path.join(
-      thisDir,
-      '../../node_modules/@shoelace-style/shoelace/dist/assets/icons/diagram-3.svg'
-    );
-    const sourceContent = fs.readFileSync(sourceSvg, 'utf-8');
-    expect(builtContent).toBe(sourceContent);
+  test('diagram-3 is in the production icon sheet and matches Shoelace source', () => {
+    const sheet = readFileSync(join(distClient, builtSheetPath()), 'utf-8');
+    const content = symbolContent(sheet, 'diagram-3');
+    expect(content).not.toBeNull();
+    expect(content!.length).toBeGreaterThan(100);
+    // The symbol draws exactly what the packaged Shoelace icon draws.
+    expect(content).toBe(shoelaceIconContent('diagram-3'));
   });
 });
