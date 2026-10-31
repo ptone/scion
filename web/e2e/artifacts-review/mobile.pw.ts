@@ -21,7 +21,9 @@
  * clear of it, and a refusal hint stays in view with the toolbar.
  *
  * Phone viewports and touch are emulated (Pixel and iPhone), in whichever
- * engine runs the suite. Firefox has no mobile emulation, so it skips.
+ * engine runs the suite. Firefox cannot emulate a mobile browser (isMobile),
+ * so there it runs with the phone's viewport and touch only. A desktop-width
+ * case checks the same pinning, caret and focus clearance with a mouse.
  * Emulation shows no soft keyboard: how a pinned toolbar behaves with the
  * iOS keyboard open is a device check.
  */
@@ -38,7 +40,10 @@ import {
   startGraphicalReview,
 } from './fixtures.js';
 
-/** A device's viewport, touch and user agent, without its default engine. */
+/**
+ * A device's viewport, touch and user agent, without its default engine
+ * (the suite's project picks the engine).
+ */
 function phone(name: string): Omit<(typeof devices)[string], 'defaultBrowserType'> {
   const { defaultBrowserType: _engine, ...rest } = devices[name];
   return rest;
@@ -111,6 +116,11 @@ async function textBox(page: Page, text: string): Promise<{ x: number; y: number
   return box;
 }
 
+/** The top edge of the review toolbar, in viewport pixels, rounded. */
+async function toolbarTop(page: Page): Promise<number> {
+  return toolbar(page).evaluate((e) => Math.round(e.getBoundingClientRect().top));
+}
+
 /** The bottom edge of the pinned block, in viewport pixels. */
 async function stickyBottom(page: Page): Promise<number> {
   return sticky(page).evaluate((e) => e.getBoundingClientRect().bottom);
@@ -130,8 +140,7 @@ test.afterAll(async () => {
   await setExperiments(null);
 });
 
-test.beforeEach(({ page, browserName }) => {
-  test.skip(browserName === 'firefox', 'Firefox has no mobile emulation');
+test.beforeEach(({ page }) => {
   page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
   page.on('console', (m) => {
     if (m.type() !== 'error') return;
@@ -146,72 +155,151 @@ test.afterEach(() => {
   expect(found, 'no page errors or console errors').toEqual([]);
 });
 
+/** The first paragraph from n on whose text is fully below the pinned block. */
+async function firstClear(page: Page, n: number): Promise<number> {
+  const below = await stickyBottom(page);
+  while ((await textBox(page, `Paragraph ${n} line.`)).top < below + 2) n++;
+  return n;
+}
+
+/**
+ * Scrolls paragraph n, which holds the comment badge, under the pinned
+ * toolbar and moves keyboard focus to the badge from elsewhere (as Tab or
+ * Shift+Tab does; sequential focus through the nested shadow roots is not
+ * reliable under emulation). The badge is inside the scrolled view but
+ * under the toolbar, so only its scroll-margin tells the browser to scroll
+ * it clear. Returns the badge's top and the pinned block's bottom edge.
+ */
+async function focusBadgeUnderToolbar(
+  page: Page,
+  n: number
+): Promise<{ badge: number; bar: number }> {
+  const badge = editor(page).locator('.critic-comment').first();
+  await page.evaluate(() => {
+    let a: Element | null = document.activeElement;
+    while (a?.shadowRoot?.activeElement) a = a.shadowRoot.activeElement;
+    (a as HTMLElement | null)?.blur();
+  });
+  await expect(badge).not.toBeFocused();
+  await scrollUnderToolbar(page, n);
+  expect(await badge.evaluate((e) => e.getBoundingClientRect().top)).toBeLessThan(
+    await stickyBottom(page)
+  );
+  await badge.focus();
+  await expect(badge).toBeFocused();
+  return {
+    badge: await badge.evaluate((e) => e.getBoundingClientRect().top),
+    bar: await stickyBottom(page),
+  };
+}
+
+/**
+ * The journey: the toolbar pins flush at the top while the document scrolls
+ * under it, Comment there opens the note dialog, a caret moved up under the
+ * toolbar is scrolled clear of it, a refusal hint shows with the toolbar,
+ * and a comment badge given keyboard focus lands below the toolbar.
+ */
+async function pinnedJourney(page: Page, title: string, touch: boolean): Promise<void> {
+  const a = await publish({
+    project,
+    title,
+    entry: 'index.md',
+    files: { 'index.md': Buffer.from(DOC) },
+  });
+  await openArtifact(page, project, a.id);
+  await startGraphicalReview(page);
+  // One toolbar, never a second, pinned copy.
+  await expect(page.locator('scion-page-artifact-detail [role="toolbar"]')).toHaveCount(1);
+  const comment = toolbar(page).locator('sl-button.comment');
+  const tap = async (x: number, y: number): Promise<void> =>
+    touch ? page.touchscreen.tap(x, y) : page.mouse.click(x, y);
+
+  // Scrolled well down, the toolbar sits flush at the top of the content area.
+  const scrollerTop = await scrollUnderToolbar(page, 30);
+  await expect.poll(() => toolbarTop(page)).toBe(Math.round(scrollerTop));
+  await expect(editor(page).locator('h1')).not.toBeInViewport();
+  await expect(comment).toBeInViewport();
+  if (touch) {
+    // A tap target of at least 44px.
+    const height = await comment.evaluate((e) => e.getBoundingClientRect().height);
+    expect(height).toBeGreaterThanOrEqual(44);
+  }
+
+  // Select by tap and keyboard, then use the pinned Comment.
+  const target = await firstClear(page, 31);
+  const word = await textBox(page, `Paragraph ${target} line.`);
+  await tap(word.x, word.y);
+  await expect(editor(page)).toBeFocused();
+  await page.keyboard.press('Home');
+  for (let i = 0; i < 'Paragraph'.length; i++) await page.keyboard.press('Shift+ArrowRight');
+  await (touch ? comment.tap() : comment.click());
+  const dialog = page.locator('scion-review-note-dialog sl-dialog');
+  await expect(dialog).toHaveAttribute('open', '');
+  await expect(page.locator('scion-review-note-dialog .quote')).toHaveText('Paragraph');
+  await page.locator('scion-review-note-dialog textarea').fill('Pinned');
+  await page.keyboard.press('Enter');
+  await expect(dialog.locator('div.dialog[part="base"]')).toBeHidden();
+  expect(await editorText(page)).toContain(`{==Paragraph==}{>>Pinned<<} ${target} line.`);
+
+  // A caret moved up under the toolbar is scrolled clear of it.
+  await scrollUnderToolbar(page, 40);
+  const n = await firstClear(page, 40);
+  const start = await textBox(page, `Paragraph ${n} line.`);
+  await tap(start.x, start.y);
+  await expect(editor(page)).toBeFocused();
+  await page.keyboard.press('Home');
+  await page.keyboard.press('ArrowUp');
+  await page.keyboard.press('ArrowUp');
+  await page.keyboard.type('ZQ');
+  await expect.poll(() => editorText(page)).toContain(`{++ZQ++}Paragraph ${n - 2} line.`);
+  const typed = await textBox(page, 'ZQ');
+  expect(typed.top).toBeGreaterThanOrEqual(await stickyBottom(page));
+
+  // A refusal hint shows in the pinned block, in view.
+  await page.keyboard.press('End');
+  await page.keyboard.press('Enter');
+  await expect(hint(page)).toContainText("Paragraph breaks can't be suggested here yet.");
+  await expect(hint(page)).toBeInViewport();
+  await expect(toolbar(page)).toBeInViewport();
+
+  // Keyboard focus scrolled into view is not hidden by the toolbar (WCAG
+  // 2.4.11): a comment badge under the toolbar is scrolled clear of it
+  // when it takes focus.
+  const cleared = await focusBadgeUnderToolbar(page, target);
+  expect(cleared.badge).toBeGreaterThanOrEqual(cleared.bar);
+  // Control: without the inset, the same focus stays under the toolbar.
+  await page
+    .locator('scion-review-editor')
+    .evaluate((e) =>
+      e
+        .shadowRoot!.querySelector<HTMLElement>('.editor-root')!
+        .style.setProperty('--review-scroll-inset', '0px')
+    );
+  const hidden = await focusBadgeUnderToolbar(page, target);
+  expect(hidden.badge).toBeLessThan(hidden.bar);
+}
+
 for (const device of ['Pixel 7', 'iPhone 13']) {
   test.describe(device, () => {
-    test.use(phone(device));
+    const emulated = phone(device);
+    test.use({
+      ...emulated,
+      // Firefox has no isMobile: it runs with the phone's viewport and touch.
+      isMobile: async ({ browserName }, use) => {
+        await use(browserName !== 'firefox' && emulated.isMobile);
+      },
+    });
 
     test('the review toolbar stays pinned while the document scrolls under it', async ({
       page,
     }) => {
-      const a = await publish({
-        project,
-        title: `Mobile ${device}`,
-        entry: 'index.md',
-        files: { 'index.md': Buffer.from(DOC) },
-      });
-      await openArtifact(page, project, a.id);
-      await startGraphicalReview(page);
-      // One toolbar, never a second, pinned copy.
-      await expect(page.locator('scion-page-artifact-detail [role="toolbar"]')).toHaveCount(1);
-      const comment = toolbar(page).locator('sl-button.comment');
-      const startTop = await toolbar(page).evaluate((e) => e.getBoundingClientRect().top);
-
-      // Scrolled well down, the toolbar sits at the top of the content area.
-      const scrollerTop = await scrollUnderToolbar(page, 30);
-      await expect
-        .poll(() => toolbar(page).evaluate((e) => Math.round(e.getBoundingClientRect().top)))
-        .toBe(Math.round(scrollerTop));
-      expect(startTop).toBeGreaterThan(scrollerTop);
-      await expect(editor(page).locator('h1')).not.toBeInViewport();
-      await expect(comment).toBeInViewport();
-      // A tap target of at least 44px.
-      const height = await comment.evaluate((e) => e.getBoundingClientRect().height);
-      expect(height).toBeGreaterThanOrEqual(44);
-
-      // Select by touch and keyboard, then tap the pinned Comment.
-      const word = await textBox(page, 'Paragraph 34 line.');
-      await page.touchscreen.tap(word.x, word.y);
-      for (let i = 0; i < 'Paragraph'.length; i++) await page.keyboard.press('Shift+ArrowRight');
-      await comment.tap();
-      const dialog = page.locator('scion-review-note-dialog sl-dialog');
-      await expect(dialog).toHaveAttribute('open', '');
-      await expect(page.locator('scion-review-note-dialog .quote')).toHaveText('Paragraph');
-      await page.locator('scion-review-note-dialog textarea').fill('Pinned');
-      await page.keyboard.press('Enter');
-      await expect(dialog.locator('div.dialog[part="base"]')).toBeHidden();
-      expect(await editorText(page)).toContain('{==Paragraph==}{>>Pinned<<} 34 line.');
-
-      // A caret moved up under the toolbar is scrolled clear of it.
-      await scrollUnderToolbar(page, 40);
-      const below = await stickyBottom(page);
-      let n = 40;
-      while ((await textBox(page, `Paragraph ${n} line.`)).top < below + 2) n++;
-      const start = await textBox(page, `Paragraph ${n} line.`);
-      await page.touchscreen.tap(start.x, start.y);
-      await page.keyboard.press('Home');
-      await page.keyboard.press('ArrowUp');
-      await page.keyboard.press('ArrowUp');
-      await page.keyboard.type('ZQ');
-      await expect.poll(() => editorText(page)).toContain(`{++ZQ++}Paragraph ${n - 2} line.`);
-      const typed = await textBox(page, 'ZQ');
-      expect(typed.top).toBeGreaterThanOrEqual(await stickyBottom(page));
-
-      // A refusal hint shows in the pinned block, in view.
-      await page.keyboard.press('End');
-      await page.keyboard.press('Enter');
-      await expect(hint(page)).toContainText("Paragraph breaks can't be suggested here yet.");
-      await expect(hint(page)).toBeInViewport();
-      await expect(toolbar(page)).toBeInViewport();
+      await pinnedJourney(page, `Mobile ${device}`, true);
     });
   });
 }
+
+test.describe('desktop width', () => {
+  test('the review toolbar stays pinned flush with the top', async ({ page }) => {
+    await pinnedJourney(page, 'Desktop', false);
+  });
+});
