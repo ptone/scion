@@ -108,6 +108,8 @@ export class ReviewController {
   private dirtyAt = new WeakMap<CompositionSnapshot, boolean>();
   private endedTimer: ReturnType<typeof setTimeout> | null = null;
   private unguard: () => void = () => {};
+  /** A note dialog of editNote is open. */
+  private noteOpen = false;
 
   private constructor(private readonly opts: ControllerOptions) {}
 
@@ -204,6 +206,17 @@ export class ReviewController {
         handleDoubleClickOn: (_view, pos, node): boolean => {
           if (node.type.name !== COMMENT) return false;
           void this.editNote(pos);
+          return true;
+        },
+        // A single click on a comment badge edits it (ptone/scion#6850,
+        // design 4.5): the reviewer's own comment opens the note dialog, an
+        // earlier one stays read-only and says why (editNote). A click in
+        // highlighted text places the caret as on any text.
+        handleClickOn: (_view, _pos, node, nodePos, event, direct): boolean => {
+          if (!direct || node.type.name !== COMMENT) return false;
+          if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
+            return false;
+          void this.editNote(nodePos);
           return true;
         },
         handleClick: (view, pos, event): boolean => {
@@ -492,8 +505,10 @@ export class ReviewController {
   }
 
   /**
-   * Edit the note of this session's comment at pos (Enter, double-click).
-   * Comments already in the text are not edited here.
+   * Edit the note of this session's comment at pos (a click on its badge,
+   * Enter, double-click; ptone/scion#6850). Comments already in the text
+   * are not edited here. An empty note removes the comment and this
+   * session's highlight with it (editComment), as for a new comment.
    */
   async editNote(pos: number): Promise<void> {
     const view = this.core.view;
@@ -504,14 +519,23 @@ export class ReviewController {
       this.opts.onHint(this.session.earlierHint(view.state.doc.resolve(pos).index(0)));
       return;
     }
+    // One note dialog at a time: the second click of a double-click, or
+    // Enter while the dialog is open, opens no other (ptone/scion#6850).
+    if (this.noteOpen) return;
     const docBefore = view.state.doc;
     const number = commentNumber(view.state, pos);
-    const note = await this.opts.askNote({
-      note: String(node.attrs.note),
-      number,
-      quote: '',
-      context: this.commentContext(pos),
-    });
+    let note: string | null;
+    this.noteOpen = true;
+    try {
+      note = await this.opts.askNote({
+        note: String(node.attrs.note),
+        number,
+        quote: '',
+        context: this.commentContext(pos),
+      });
+    } finally {
+      this.noteOpen = false;
+    }
     view.focus();
     if (note === null) return;
     // The document may have changed while the dialog was open: the comment

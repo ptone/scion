@@ -17,7 +17,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import './review-editor.js';
-import { REVIEW_CHANGE_DELAY_MS } from './review-editor.js';
+import { EARLIER_COMMENT_HINT, OWN_COMMENT_HINT, REVIEW_CHANGE_DELAY_MS } from './review-editor.js';
 import type { ScionReviewEditor } from './review-editor.js';
 import type { ReviewController } from './editor/controller.js';
 
@@ -76,5 +76,52 @@ describe('scion-review-editor review-change', () => {
     view.dispatch(view.state.tr.insertText('big ', 3));
     await pause();
     expect(changes).toEqual(['a {++big ++}dog\n']);
+  });
+});
+
+/**
+ * The comment card (ptone/scion#6850): a read-only tooltip whose last line
+ * says how the reviewer's own comment is edited, or that an earlier one is
+ * read-only.
+ */
+describe('scion-review-editor comment card hint', () => {
+  async function cardFor(el: ScionReviewEditor, index: number): Promise<Element | null> {
+    const badge = controllerOf(el).view.dom.querySelectorAll('.critic-comment')[index];
+    expect(badge).toBeDefined();
+    badge.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+    await el.updateComplete;
+    return el.shadowRoot!.querySelector('sl-popup .card');
+  }
+
+  it('says an earlier comment is read-only, and the own one is edited by click or Enter', async () => {
+    const { el } = await mount('one two {>>earlier<<}\n');
+    const earlier = await cardFor(el, 0);
+    expect(earlier?.querySelector('.card-note')?.textContent).toBe('earlier');
+    expect(earlier?.querySelector('.card-hint')?.textContent).toBe(EARLIER_COMMENT_HINT);
+
+    // Add the reviewer's own comment on "two" through the note dialog.
+    const dialog = el.shadowRoot!.querySelector('scion-review-note-dialog') as unknown as {
+      ask: () => Promise<string>;
+    };
+    dialog.ask = () => Promise.resolve('mine');
+    const c = controllerOf(el);
+    let p = -1;
+    c.view.state.doc.descendants((n, pos) => {
+      if (p < 0 && n.isText && n.text!.includes('two')) p = pos + n.text!.indexOf('two');
+    });
+    // The editor's own selection class (no ProseMirror import outside the editor).
+    const TextSel = c.view.state.selection.constructor as unknown as {
+      create(doc: unknown, from: number, to: number): Parameters<typeof c.view.state.tr.setSelection>[0];
+    };
+    c.view.dispatch(c.view.state.tr.setSelection(TextSel.create(c.view.state.doc, p, p + 3)));
+    await el.comment();
+    await el.updateComplete;
+    expect(el.flush()).toBe('one {==two==}{>>mine<<} {>>earlier<<}\n');
+    const own = await cardFor(el, 0);
+    expect(own?.querySelector('.card-note')?.textContent).toBe('mine');
+    expect(own?.querySelector('.card-hint')?.textContent).toBe(OWN_COMMENT_HINT);
+    // The card stays a read-only tooltip: no control in it.
+    expect(el.shadowRoot!.querySelector('sl-popup')?.getAttribute('role')).toBe('tooltip');
+    expect(own?.querySelector('button, sl-button, a, input')).toBeNull();
   });
 });
