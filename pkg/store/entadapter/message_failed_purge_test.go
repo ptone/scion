@@ -139,14 +139,26 @@ func TestPurgeFailedMessagesChunk_TimeBoundStopsChunkEarly(t *testing.T) {
 	t.Cleanup(func() { failedPurgeDeleteBatch = prevBatch })
 
 	s := newTestMessageStore(t)
+	// The clock stands still until the chunk runs a DELETE, which advances
+	// it by 100ms: the elapsed time the bound sees depends only on the
+	// batches the chunk ran, not on how often it reads the clock.
 	var mu sync.Mutex
 	clock := time.Unix(1_700_000_000, 0)
 	s.now = func() time.Time {
 		mu.Lock()
 		defer mu.Unlock()
-		clock = clock.Add(100 * time.Millisecond)
 		return clock
 	}
+	s.client.Message.Use(func(next ent.Mutator) ent.Mutator {
+		return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+			if m.Op().Is(ent.OpDelete) {
+				mu.Lock()
+				clock = clock.Add(100 * time.Millisecond)
+				mu.Unlock()
+			}
+			return next.Mutate(ctx, m)
+		})
+	})
 
 	ctx := context.Background()
 	projectID := uuid.NewString()
@@ -157,9 +169,8 @@ func TestPurgeFailedMessagesChunk_TimeBoundStopsChunkEarly(t *testing.T) {
 	}
 	cutoff := time.Now().UTC().Add(-7 * 24 * time.Hour)
 
-	// Each clock read advances 100ms: the chunk has run 100ms before the
-	// second batch (under the 150ms bound) and 200ms before the third (over
-	// it).
+	// The chunk has run 100ms (one DELETE) before the second batch, under
+	// the 150ms bound, and 200ms before the third, over it.
 	res, err := s.PurgeFailedMessagesChunk(ctx, cutoff, store.MessagePosition{}, 6, 150*time.Millisecond)
 	require.NoError(t, err)
 	assert.Equal(t, 4, res.Examined, "the chunk stops after the batch in flight when the bound is reached")
