@@ -230,16 +230,18 @@ func TestPurgeFailedMessages_RunsSeveralChunksInOneTick(t *testing.T) {
 	}
 }
 
-// cancelAfterChunkStore cancels a context after each successful purge
-// chunk, so the purge loop sees the cancellation in the pause that follows.
+// cancelAfterChunkStore, once its switch is armed, cancels a context after
+// each successful purge chunk, so the purge loop sees the cancellation in
+// the pause that follows.
 type cancelAfterChunkStore struct {
 	store.Store
+	fault  *storeFaultSwitch
 	cancel context.CancelFunc
 }
 
 func (s *cancelAfterChunkStore) PurgeFailedMessagesChunk(ctx context.Context, cutoff time.Time, after store.MessagePosition, limit int, maxDuration time.Duration) (store.FailedMessagePurgeChunk, error) {
 	res, err := s.Store.PurgeFailedMessagesChunk(ctx, cutoff, after, limit, maxDuration)
-	if err == nil {
+	if err == nil && s.fault.Active() {
 		s.cancel()
 	}
 	return res, err
@@ -253,10 +255,13 @@ func TestPurgeFailedMessages_CancelDuringPauseKeepsCommittedCursor(t *testing.T)
 	// short one could race its timer against the cancellation.
 	setFailedPurgeKnobs(t, 2, time.Minute, 10*time.Minute)
 	srv, cs := newSweepTestServer(t)
-	ids := createOldFailedAgentMessages(t, cs, 5)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	srv.store = &cancelAfterChunkStore{Store: cs, cancel: cancel}
+	_, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *cancelAfterChunkStore {
+		return &cancelAfterChunkStore{Store: inner, fault: f, cancel: cancel}
+	})
+	ids := createOldFailedAgentMessages(t, cs, 5)
+	fault.Arm()
 
 	cutoff := time.Now().UTC().AddDate(0, 0, -defaultFailedMessageRetentionDays)
 	purged, chunks, done, err := srv.purgeFailedMessages(ctx, cutoff)
@@ -266,9 +271,9 @@ func TestPurgeFailedMessages_CancelDuringPauseKeepsCommittedCursor(t *testing.T)
 	assert.False(t, done)
 	assert.Equal(t, ids[1], srv.failedPurge.cursor.ID, "the cursor is the last row of the committed chunk")
 
-	// The next tick resumes from that cursor.
+	// The next tick resumes from that cursor. It runs on a fresh context,
+	// which the armed wrapper's cancel does not reach.
 	failedPurgeChunkPause = 0
-	srv.store = cs
 	purged, _, done, err = srv.purgeFailedMessages(context.Background(), cutoff)
 	require.NoError(t, err)
 	assert.Equal(t, 3, purged)
