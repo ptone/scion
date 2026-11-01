@@ -315,7 +315,9 @@ func (m *LifecycleManager) executeScript(path, eventName string) error {
 	cmd := exec.Command(path)
 	cmd.Stdout = os.Stderr // Redirect hook output to stderr
 	cmd.Stderr = os.Stderr
-	cmd.Env = m.hookEnv()
+	cmd.Env = setEnvVar(m.hookEnv(), "PYTHONNOUSERSITE", "1")
+	// Run from / like the enforced root path (see buildEnforcedCmd).
+	cmd.Dir = "/"
 
 	// Hook scripts run inside sciontool init's PID-1 process while its
 	// zombie reaper is active; RunManaged registers this child's PID so the

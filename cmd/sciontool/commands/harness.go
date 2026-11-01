@@ -384,6 +384,7 @@ func minimalEnv(home string, m *containerProvisionManifest) []string {
 		"SCION_HARNESS_BUNDLE=" + m.HarnessBundleDir,
 		"SCION_HARNESS=" + m.HarnessConfig.Harness,
 		"PYTHONDONTWRITEBYTECODE=1",
+		"PYTHONNOUSERSITE=1",
 	}
 	for _, e := range os.Environ() {
 		if strings.HasPrefix(e, "SCION_") {
