@@ -50,6 +50,22 @@ func settingsErrorFields(t *testing.T, body []byte) map[string]interface{} {
 	return out
 }
 
+// settingsErrorDetailsJSON returns the raw "details" member of a settings
+// error body in the writeError envelope, failing the test on a flat body.
+func settingsErrorDetailsJSON(t *testing.T, body []byte) []byte {
+	t.Helper()
+	var env struct {
+		Error struct {
+			Code    string          `json:"code"`
+			Details json.RawMessage `json:"details"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil || env.Error.Code == "" || len(env.Error.Details) == 0 {
+		t.Fatalf("error body is not the writeError envelope with details: %s", body)
+	}
+	return env.Error.Details
+}
+
 // settingsErrorEntries returns the details.errors entries of a settings
 // validation error body, failing the test unless every entry names a field
 // and a message.
