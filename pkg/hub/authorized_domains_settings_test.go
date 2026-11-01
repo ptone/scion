@@ -605,3 +605,80 @@ func TestPutServerConfigFile_AuthorizedDomains(t *testing.T) {
 		}
 	})
 }
+
+func resetAccessSection(srv *Server) *httptest.ResponseRecorder {
+	rr := httptest.NewRecorder()
+	srv.handleAdminServerConfigSectionReset(rr, adminRequest(http.MethodDelete, "/api/v1/admin/server-config/sections/access", ""))
+	return rr
+}
+
+// A reset of the access section returns it to the bootstrap values; like a
+// save, it may not leave access settings that refuse sign-in for the
+// account making it (scr3 F-1). The saving admin is admin@example.com.
+func TestResetAccessSection_AuthorizedDomainsLockout(t *testing.T) {
+	t.Run("refused when the startup list excludes the admin; row kept", func(t *testing.T) {
+		srv, fakeStore, ops := newDomainsDBServer(t, []string{"startup.example"}, nil, nil)
+		saveAccess(t, ops, `{"authorized_domains":["example.com"]}`)
+		applyOps(srv, ops)
+		rr := resetAccessSection(srv)
+		assertLockoutRefusal(t, rr, "startup.example", "example.com")
+		if accessRowAbsent(t, fakeStore) {
+			t.Fatal("access row deleted on refusal")
+		}
+		if got := srv.AuthorizedDomains(); !slices.Equal(got, []string{"example.com"}) {
+			t.Errorf("running = %v, want the saved [example.com]", got)
+		}
+	})
+	for _, tc := range []struct {
+		name string
+		boot map[string]any
+	}{
+		{"bootstrap list includes the admin's domain", map[string]any{authorizedDomainsKey: []any{"example.com"}}},
+		{"admin in bootstrap admin_emails", map[string]any{"server.hub.admin_emails": []any{"admin@example.com"}}},
+	} {
+		t.Run("allowed: "+tc.name, func(t *testing.T) {
+			srv, fakeStore, ops := newDomainsDBServer(t, []string{"startup.example"}, newFileKoanf(t, tc.boot), nil)
+			saveAccess(t, ops, `{"authorized_domains":["example.com"]}`)
+			applyOps(srv, ops)
+			rr := resetAccessSection(srv)
+			if rr.Code != http.StatusOK && rr.Code != http.StatusNoContent {
+				t.Fatalf("status = %d, want success: %s", rr.Code, rr.Body.String())
+			}
+			if !accessRowAbsent(t, fakeStore) {
+				t.Error("access row not deleted")
+			}
+		})
+	}
+	t.Run("allowed: no domain list anywhere", func(t *testing.T) {
+		srv, fakeStore, ops := newDomainsDBServer(t, nil, nil, nil)
+		saveAccess(t, ops, `{"authorized_domains":["example.com"]}`)
+		applyOps(srv, ops)
+		if rr := resetAccessSection(srv); rr.Code != http.StatusOK && rr.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, want success: %s", rr.Code, rr.Body.String())
+		}
+		if !accessRowAbsent(t, fakeStore) {
+			t.Error("access row not deleted")
+		}
+	})
+	t.Run("pinned node: refused when the pinned list excludes the admin", func(t *testing.T) {
+		bootK, envK := pinnedDomainsKoanfs(t, "env.example")
+		srv, fakeStore, ops := newDomainsDBServer(t, []string{"env.example"}, bootK, envK)
+		saveAccess(t, ops, `{"admin_emails":["admin@example.com"]}`)
+		applyOps(srv, ops)
+		// Running admin_emails holds the admin, but the reset's lists come
+		// from the bootstrap section; with no bootstrap admin_emails the
+		// running list is kept, so the admin stays allowed: a control.
+		if rr := resetAccessSection(srv); rr.Code != http.StatusOK && rr.Code != http.StatusNoContent {
+			t.Fatalf("control: status = %d, want success: %s", rr.Code, rr.Body.String())
+		}
+
+		srv, fakeStore, ops = newDomainsDBServer(t, []string{"env.example"}, bootK, envK)
+		saveAccess(t, ops, `{"authorized_domains":["example.com"]}`)
+		applyOps(srv, ops)
+		rr := resetAccessSection(srv)
+		assertLockoutRefusal(t, rr, "env.example", "example.com")
+		if accessRowAbsent(t, fakeStore) {
+			t.Error("access row deleted on refusal")
+		}
+	})
+}

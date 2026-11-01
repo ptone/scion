@@ -325,6 +325,13 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 		return
 	}
 
+	// Resetting access returns it to the bootstrap values; like a save, it
+	// may not leave access settings that refuse sign-in for the account
+	// making it (ptone/scion#6000).
+	if sectionName == "access" && s.rejectAccessResetLockout(r.Context(), w, ops) {
+		return
+	}
+
 	// Resetting the GCP permission-check section returns both keys to their
 	// deploy-time values: the same transition rule and audit record as a
 	// PUT apply.

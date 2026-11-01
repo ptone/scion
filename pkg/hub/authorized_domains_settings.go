@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"slices"
@@ -232,4 +233,42 @@ func (s *Server) rejectFileAccessLockout(w http.ResponseWriter, r *http.Request,
 	}
 	domains, admins := s.accessListsAfterFileSave(domainsSent, sentDomains, adminsSent, sentAdmins, pinned)
 	return s.rejectAuthorizedDomainsLockout(r.Context(), w, email, domains, admins)
+}
+
+// rejectAccessResetLockout runs the lockout check for a reset of the access
+// section (DELETE /api/v1/admin/server-config/sections/access) and writes
+// the 422 when it refuses (ptone/scion#6000). Without a row the snapshot
+// uses the bootstrap access section, so the lists after the reset are
+// worked out from it as for a save (accessListsAfterDBSave): domains from
+// the bootstrap list, else the startup list (and, on a node that pins the
+// list, the pinned list as well); admin_emails from the bootstrap list,
+// else the running one. The test identity clamp applies. A bootstrap
+// section that cannot be read refuses the reset. Nothing is deleted when it
+// refuses.
+func (s *Server) rejectAccessResetLockout(ctx context.Context, w http.ResponseWriter, ops *OperationalSettings) bool {
+	var boot opsettings.AccessSettings
+	if ops.bootstrapKoanf != nil {
+		doc, err := opsettings.ExtractSectionFromKoanf(ops.bootstrapKoanf, "access")
+		if err == nil && len(doc) > 0 {
+			err = json.Unmarshal(doc, &boot)
+		}
+		if err != nil {
+			slog.Error("Access reset: cannot read the bootstrap access section", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to reset section", nil)
+			return true
+		}
+	}
+	email := ""
+	if caller := GetUserIdentityFromContext(ctx); caller != nil {
+		email = caller.Email()
+	}
+	domains, admins := s.accessListsAfterDBSave(boot, false)
+	if s.rejectAuthorizedDomainsLockout(ctx, w, email, domains, admins) {
+		return true
+	}
+	if slices.Contains(ops.EnvOverriddenKeys(), authorizedDomainsKey) {
+		domains, admins = s.accessListsAfterDBSave(boot, true)
+		return s.rejectAuthorizedDomainsLockout(ctx, w, email, domains, admins)
+	}
+	return false
 }
