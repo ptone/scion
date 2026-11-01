@@ -1453,13 +1453,14 @@ var hubDefaultPassthroughRuntimeTypes = map[string]bool{
 // can disagree with what this broker resolves for the same dispatch against
 // its own, current project-effective settings (in-repo overrides, a DB
 // settings overlay, or just registration drift). requireLocalRuntime is the
-// signal that a passthrough grant came from that rung specifically —
+// signal that a passthrough grant came from that rung (or the hub's
+// project-default rung, which is confined the same way) —
 // store.GCPIdentityConfig.RequireLocalRuntime on the create path, or the
 // SCION_METADATA_REQUIRE_LOCAL_RUNTIME env var buildStartContext re-stamps
 // for the start/restart paths, which never receive that struct at all (see
 // its call sites for why each path needs its own call to this function).
-// Explicit and project-level passthrough are never flagged, so this is a
-// no-op for them by construction — this is strictly a second line of
+// Explicit passthrough is never flagged, so this is a no-op for it by
+// construction — this is strictly a second line of
 // defense behind the hub-side gate (hubDefaultRuntimeAllowed,
 // pkg/hub/default_gcp_identity.go), not a replacement for it.
 //
