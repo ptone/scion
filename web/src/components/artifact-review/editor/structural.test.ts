@@ -1190,3 +1190,27 @@ describe('a written unit must open again with the blocks it shows', () => {
     expect(saved(h2.c, same)).toBe('- a\n  - b{++\n  - ++}\n');
   });
 });
+
+describe('a break inside an earlier suggestion', () => {
+  it('is refused and leaves the document as it was; inside an own insertion it is taken', async () => {
+    // An earlier review's insertion cannot be split: the break would change
+    // that mark.
+    const md = 'a {++abc++} d\n';
+    const { c, hints } = await open(md);
+    select(c, posOf(c, 'abc', 1));
+    press(c, 'Enter');
+    expect(hints).toEqual(['earlier']);
+    expect(breaks(c.view.state.doc)).toEqual([]);
+    expect(c.flush()).toBe(md);
+    // Control: the same break inside the reviewer's own insertion is taken.
+    const plain = 'ab\n';
+    const h2 = await open(plain);
+    select(h2.c, endOf(h2.c, 'ab'));
+    typeText(h2.c, 'xyz');
+    select(h2.c, posOf(h2.c, 'xyz', 1));
+    press(h2.c, 'Enter');
+    expect(h2.hints).toEqual([]);
+    expect(breaks(h2.c.view.state.doc)).toEqual(['ins/own']);
+    expect(saved(h2.c, plain)).toBe('ab{++x\n\nyz++}\n');
+  });
+});
