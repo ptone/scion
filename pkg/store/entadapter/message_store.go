@@ -661,7 +661,7 @@ var failedPurgeDeleteBatch = 100
 // The candidate range is dispatch_state = 'failed' (a literal, see
 // messageDispatchFailedLiteral) and created < cutoff, served in order by the
 // partial (created, id) WHERE dispatch_state = 'failed' index. The recipient
-// check is applied per candidate rather than in the range, so the keyset
+// check is applied in the DELETE rather than in the range, so the keyset
 // cursor moves past the failed user: rows the purge keeps instead of
 // rescanning them on every chunk (ptone/scion#6954).
 func (s *MessageStore) PurgeFailedMessagesChunk(ctx context.Context, cutoff time.Time, after store.MessagePosition, limit int, maxDuration time.Duration) (store.FailedMessagePurgeChunk, error) {
@@ -691,19 +691,22 @@ func (s *MessageStore) PurgeFailedMessagesChunk(ctx context.Context, cutoff time
 		batch := candidates[i:min(i+failedPurgeDeleteBatch, len(candidates))]
 		ids := make([]uuid.UUID, 0, len(batch))
 		for _, m := range batch {
-			if strings.HasPrefix(m.Recipient, "agent:") {
-				ids = append(ids, m.ID)
-			}
+			ids = append(ids, m.ID)
 		}
-		if len(ids) > 0 {
-			n, err := tx.Message.Delete().
-				Where(message.IDIn(ids...), messageDispatchFailedLiteral()).
-				Exec(ctx)
-			if err != nil {
-				return store.FailedMessagePurgeChunk{Next: after}, mapError(err)
-			}
-			res.Deleted += n
+		// The recipient check is the same ent predicate the one-shot purge
+		// used (LIKE 'agent:%', with each dialect's case rules), applied in
+		// the DELETE so the rows deleted are exactly the rows it deleted.
+		n, err := tx.Message.Delete().
+			Where(
+				message.IDIn(ids...),
+				messageDispatchFailedLiteral(),
+				message.RecipientHasPrefix("agent:"),
+			).
+			Exec(ctx)
+		if err != nil {
+			return store.FailedMessagePurgeChunk{Next: after}, mapError(err)
 		}
+		res.Deleted += n
 		res.Examined += len(batch)
 		last := batch[len(batch)-1]
 		res.Next = store.MessagePosition{Created: last.Created.UTC(), ID: last.ID.String()}
@@ -741,7 +744,7 @@ func failedPurgeCandidates(ctx context.Context, c *ent.Client, cutoff time.Time,
 		Where(preds...).
 		Order(ent.Asc(message.FieldCreated), ent.Asc(message.FieldID)).
 		Limit(limit).
-		Select(message.FieldID, message.FieldCreated, message.FieldRecipient).
+		Select(message.FieldID, message.FieldCreated).
 		All(ctx)
 	if err != nil {
 		return nil, mapError(err)
