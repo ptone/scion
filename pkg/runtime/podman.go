@@ -139,9 +139,15 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 
 	// Rootless Podman runs PID 1 as the keep-id user (SCION_KEEPID_UID below),
 	// which drops privileges before the metadata server starts, so the
-	// in-container interception cannot be installed. Do not grant NET_ADMIN
-	// or mark the interception required there; the metadata env vars remain
-	// the mechanism.
+	// in-container interception cannot be installed. A start that requests
+	// it is refused unless the operator opted out
+	// (checkUninterceptedMetadata). When allowed, do not grant NET_ADMIN or
+	// mark the interception required.
+	if r.Rootless && config.MetadataInterception {
+		if err := checkUninterceptedMetadata(podmanRuntimeName(r.Rootless), config); err != nil {
+			return "", err
+		}
+	}
 	if r.Rootless {
 		config.MetadataInterception = false
 	}

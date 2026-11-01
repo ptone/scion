@@ -128,7 +128,8 @@ func TestPodmanRuntime_ExecUserMethod(t *testing.T) {
 // TestPodmanRuntime_Run_MetadataInterception checks that rootless Podman,
 // whose init drops to the keep-id user before the metadata server starts,
 // never gets NET_ADMIN or a required interception marker, while rootful
-// Podman keeps both.
+// Podman keeps both. The rootless start carries the operator opt-out, without
+// which it is refused (see unintercepted_metadata_test.go).
 func TestPodmanRuntime_Run_MetadataInterception(t *testing.T) {
 	mockPodman := filepath.Join(t.TempDir(), "mock-podman")
 	if err := os.WriteFile(mockPodman, []byte("#!/bin/sh\necho \"$@\"\n"), 0755); err != nil {
@@ -153,6 +154,9 @@ func TestPodmanRuntime_Run_MetadataInterception(t *testing.T) {
 				Task:                 "hello",
 				Env:                  []string{"SCION_METADATA_MODE=block"},
 				MetadataInterception: true,
+
+				AllowUninterceptedMetadata:    tc.rootless,
+				UninterceptedMetadataCloudAck: tc.rootless,
 			})
 			if err != nil {
 				t.Fatalf("runtime.Run failed: %v", err)

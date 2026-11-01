@@ -77,6 +77,13 @@ type Config struct {
 	// block mode the filter rule, cannot be installed, instead of continuing
 	// with only the GCE_METADATA_HOST variables.
 	InterceptionRequired bool
+	// InterceptionOff is set when the runtime explicitly marked the
+	// interception as not granted (InterceptionEnvVar is InterceptionOff),
+	// as rootless Podman does when the operator allowed the start without
+	// it. A start that then cannot install the interception logs a warning
+	// rather than a debug line. Unset (for example on Kubernetes) keeps the
+	// debug line.
+	InterceptionOff bool
 
 	// FetchGCPToken, if set, is called to obtain a GCP access token from the
 	// Hub instead of making a direct HTTP call. This allows the metadata
@@ -89,13 +96,14 @@ type Config struct {
 	FetchGCPIdentityToken func(ctx context.Context, audience string) (string, error)
 }
 
-// InterceptionEnvVar and its required value mirror
-// runtime.MetadataInterceptionEnvVar and runtime.MetadataInterceptionRequired
+// InterceptionEnvVar and its values mirror runtime.MetadataInterceptionEnvVar,
+// runtime.MetadataInterceptionRequired and runtime.MetadataInterceptionOff
 // (pkg/runtime/common.go), which the Docker/Podman runtime sets from the same
 // decision that grants NET_ADMIN.
 const (
 	InterceptionEnvVar   = "SCION_METADATA_INTERCEPTION"
 	InterceptionRequired = "required"
+	InterceptionOff      = "off"
 )
 
 // ErrInterceptionUnavailable is returned by Start when InterceptionRequired is
@@ -186,6 +194,7 @@ func ConfigFromEnv() *Config {
 		NetworkMode: os.Getenv("SCION_NETWORK_MODE"),
 
 		InterceptionRequired: os.Getenv(InterceptionEnvVar) == InterceptionRequired,
+		InterceptionOff:      os.Getenv(InterceptionEnvVar) == InterceptionOff,
 	}
 }
 
@@ -572,9 +581,12 @@ func (s *Server) configureMetadataInterception(uid int) error {
 		if s.config.InterceptionRequired {
 			return fmt.Errorf("%w: process is not root or shares the host network namespace", ErrInterceptionUnavailable)
 		}
-		if s.config.NetworkMode == "host" {
+		switch {
+		case s.config.NetworkMode == "host":
 			log.Warn("Metadata IP interception is not installed under host networking; mode %q applies only to clients that use GCE_METADATA_HOST", s.config.Mode)
-		} else {
+		case s.config.InterceptionOff:
+			log.Warn("Metadata IP interception is not installed: process is not running as root; mode %q applies only to clients that use GCE_METADATA_HOST", s.config.Mode)
+		default:
 			log.Debug("Skipping metadata IP interception: process is not running as root")
 		}
 		return nil
