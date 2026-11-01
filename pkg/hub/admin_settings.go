@@ -301,6 +301,15 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 			"use DELETE /api/v1/admin/experiments", nil)
 		return
 	}
+	// The "chat_retention" section is written only through PUT
+	// /api/v1/admin/chat-retention, which is gated on hub.chat_retention,
+	// compare-and-sets the revision and writes the mutation audit record.
+	// This route does none of that, so it must not be a second write path.
+	if sectionName == opsettings.ChatRetentionSectionName {
+		writeError(w, http.StatusBadRequest, "validation_failed",
+			"use PUT /api/v1/admin/chat-retention with explicit nulls to reset its fields", nil)
+		return
+	}
 	// While the test admin tier is on, federation settings are refused on
 	// every write path, resets included (G8).
 	if sectionName == "federation" && s.testAdminTierOn() {
@@ -358,7 +367,16 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 		}
 	}
 
-	err := ops.DeleteSection(r.Context(), sectionName)
+	var err error
+	if sectionName == "runtimes" || sectionName == "profiles" {
+		// The pair the reset leaves is validated and the delete guarded
+		// (resetPlacementSection); it writes its own error responses.
+		if !s.resetPlacementSection(r.Context(), w, ops, sectionName) {
+			return
+		}
+	} else {
+		err = ops.DeleteSection(r.Context(), sectionName)
+	}
 	if publicURLBefore != "" && err != nil {
 		s.auditPublicURLNotApplied(r.Context(), gcpIAMSurfaceReset, publicURLBefore, "", err)
 	}
