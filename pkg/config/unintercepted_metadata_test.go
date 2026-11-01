@@ -15,6 +15,7 @@
 package config
 
 import (
+	"reflect"
 	"testing"
 )
 
@@ -71,5 +72,51 @@ runtime:
 	}
 	if enabled, ack := UninterceptedMetadataOptOut(vs); !enabled || !ack {
 		t.Errorf("opt-out = (%v, %v), want (true, true)", enabled, ack)
+	}
+}
+
+// TestSettingsOverlayCannotCarryUninterceptedMetadataOptOut pins that the
+// hub's settings overlay (applied by LoadGlobalSettingsWithOverlay) has no
+// path to runtime.allow_unintercepted_metadata: no type reachable from
+// SettingsOverlay is the runtime defaults block, the opt-out, or a whole
+// VersionedSettings that would carry them. The opt-out is read with
+// LoadGlobalSettings, which applies no overlay; this keeps the overlay from
+// becoming a hub-writable path to it if a loader is ever switched. The walk
+// is over static types, so it cannot see through an interface (any) field;
+// it assumes the overlay holds only concrete settings types, as it does.
+func TestSettingsOverlayCannotCarryUninterceptedMetadataOptOut(t *testing.T) {
+	forbidden := map[reflect.Type]bool{
+		reflect.TypeOf(V1RuntimeDefaultsConfig{}):       true,
+		reflect.TypeOf(V1UninterceptedMetadataOptOut{}): true,
+		reflect.TypeOf(VersionedSettings{}):             true,
+	}
+	seen := map[reflect.Type]bool{}
+	var walk func(typ reflect.Type, path string)
+	walk = func(typ reflect.Type, path string) {
+		if seen[typ] {
+			return
+		}
+		seen[typ] = true
+		if forbidden[typ] {
+			t.Errorf("SettingsOverlay reaches %s at %s; the hub overlay must not be able to carry %s",
+				typ, path, "runtime.allow_unintercepted_metadata")
+			return
+		}
+		switch typ.Kind() {
+		case reflect.Pointer, reflect.Slice, reflect.Array:
+			walk(typ.Elem(), path+"[]")
+		case reflect.Map:
+			walk(typ.Key(), path+"{key}")
+			walk(typ.Elem(), path+"{}")
+		case reflect.Struct:
+			for i := 0; i < typ.NumField(); i++ {
+				f := typ.Field(i)
+				walk(f.Type, path+"."+f.Name)
+			}
+		}
+	}
+	walk(reflect.TypeOf(SettingsOverlay{}), "SettingsOverlay")
+	if len(seen) < 5 {
+		t.Fatalf("walked only %d types; the guard would pass vacuously", len(seen))
 	}
 }
