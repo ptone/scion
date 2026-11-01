@@ -1378,24 +1378,32 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// A save that sends authorized_domains or admin_emails may not leave
 	// access settings that refuse sign-in for the saving account
 	// (ptone/scion#6000). The check reads the merged access document, so a
-	// value kept from the row counts. A domain list the node pins through
-	// SCION_SERVER_* does not change by saving, so sending it alone is not
-	// checked.
+	// value kept from the row counts. It always checks the lists as saved:
+	// they apply on every replica that does not pin the domain list, and
+	// on this node once its pin is removed. When this node pins the list
+	// through SCION_SERVER_*, a save that sends admin_emails is also
+	// checked against the pinned list, which applies here. Either refuses.
 	if doc, ok := sectionDocs["access"]; ok {
 		fp := sectionBodyPresence("access", rawBody)
 		domainsSent := fp.has("authorized_domains") && !echoedRunning[authorizedDomainsKey]
 		adminsSent := fp.has("admin_emails")
 		pinned := slices.Contains(ops.EnvOverriddenKeys(), authorizedDomainsKey)
-		if adminsSent || (domainsSent && !pinned) {
+		if adminsSent || domainsSent {
 			var merged opsettings.AccessSettings
 			if err := json.Unmarshal(doc, &merged); err != nil {
 				slog.Error("PUT server-config: failed to decode access document", "error", err)
 				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
 				return
 			}
-			domains, admins := s.accessListsAfterDBSave(merged, pinned)
+			domains, admins := s.accessListsAfterDBSave(merged, false)
 			if s.rejectAuthorizedDomainsLockout(r.Context(), w, updatedBy, domains, admins) {
 				return
+			}
+			if pinned && adminsSent {
+				domains, admins = s.accessListsAfterDBSave(merged, true)
+				if s.rejectAuthorizedDomainsLockout(r.Context(), w, updatedBy, domains, admins) {
+					return
+				}
 			}
 		}
 	}

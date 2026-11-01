@@ -426,10 +426,22 @@ func TestPutServerConfigDB_AuthorizedDomainsLockout(t *testing.T) {
 		rr := putServerConfigDB(t, srv, ops, `{"server":{"auth":{"authorized_domains":[]}}}`)
 		assertLockoutRefusal(t, rr, "startup.example")
 	})
-	t.Run("pinned list is not checked and is reported skipped", func(t *testing.T) {
+	// On a pinning node the saved list is still checked: it is stored in
+	// the shared database, applies on unpinned replicas, and applies here
+	// once the pin is removed (scr3 R-1).
+	t.Run("pinned node still checks the saved list", func(t *testing.T) {
 		bootK, envK := pinnedDomainsKoanfs(t, "env.example")
-		srv, _, ops := newDomainsDBServer(t, []string{"env.example"}, bootK, envK)
+		srv, fakeStore, ops := newDomainsDBServer(t, []string{"env.example"}, bootK, envK)
 		rr := putServerConfigDB(t, srv, ops, `{"server":{"auth":{"authorized_domains":["other.example"]}}}`)
+		assertLockoutRefusal(t, rr, "other.example", "env.example")
+		if !accessRowAbsent(t, fakeStore) {
+			t.Error("access row written on refusal")
+		}
+	})
+	t.Run("pinned node: an allowed saved list is stored and reported skipped", func(t *testing.T) {
+		bootK, envK := pinnedDomainsKoanfs(t, "env.example")
+		srv, fakeStore, ops := newDomainsDBServer(t, []string{"env.example"}, bootK, envK)
+		rr := putServerConfigDB(t, srv, ops, `{"server":{"auth":{"authorized_domains":["example.com"]}}}`)
 		if rr.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
 		}
@@ -438,6 +450,10 @@ func TestPutServerConfigDB_AuthorizedDomainsLockout(t *testing.T) {
 		}
 		if got := srv.AuthorizedDomains(); !slices.Equal(got, []string{"env.example"}) {
 			t.Errorf("running = %v, want the pinned [env.example]", got)
+		}
+		access, _ := readAccessRow(t, fakeStore)
+		if !slices.Equal(access.AuthorizedDomains, []string{"example.com"}) {
+			t.Errorf("stored authorized_domains = %v, want [example.com]", access.AuthorizedDomains)
 		}
 	})
 	t.Run("pinned list still checks admin_emails", func(t *testing.T) {
