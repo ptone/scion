@@ -44,7 +44,8 @@ const (
 
 // crProfile is a Cloud Run profile whose broker reported, recently and at
 // the current version, native identity support, an allow-list holding
-// only crListedGSA and a block account.
+// only crListedGSA and a block account (the block account no longer lets
+// any mode pass with the experiment on; it is kept to show that).
 func crProfile(now time.Time) store.BrokerProfile {
 	at := now.Add(-time.Minute)
 	return store.BrokerProfile{
@@ -97,7 +98,6 @@ func setCloudRunNativeIdentity(t *testing.T, srv *Server, on bool) {
 
 func TestCloudRunIdentityRefusal(t *testing.T) {
 	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
-	noBlock := func(p *store.BrokerProfile) { p.CloudRunBlockAccount = false }
 	v2 := func(p *store.BrokerProfile) { p.MappingsReportVersion = cloudRunSAReportMinVersion - 1 }
 	tests := []struct {
 		name    string
@@ -112,14 +112,13 @@ func TestCloudRunIdentityRefusal(t *testing.T) {
 		{name: "assign with an empty list is refused", gcpID: crAssign(crListedGSA),
 			profile: func(p *store.BrokerProfile) { p.ServiceAccountMappings = nil }, want: cloudRunRefusalNotAttachable},
 		{name: "assign without an account is left to the broker", gcpID: crAssign("")},
-		{name: "block with a block account passes", gcpID: crMode(store.GCPMetadataModeBlock)},
-		{name: "block without a block account is refused", gcpID: crMode(store.GCPMetadataModeBlock), profile: noBlock, want: cloudRunRefusalNoBlockAccount},
-		{name: "unset with a block account passes", gcpID: nil},
-		{name: "unset without a block account is refused", gcpID: nil, profile: noBlock, want: cloudRunRefusalNoBlockAccount},
-		{name: "hub-default passthrough runs as block and is refused without a block account",
-			gcpID: &store.GCPIdentityConfig{MetadataMode: store.GCPMetadataModePassthrough, RequireLocalRuntime: true}, profile: noBlock, want: cloudRunRefusalNoBlockAccount},
-		{name: "hub-default passthrough with a block account passes",
-			gcpID: &store.GCPIdentityConfig{MetadataMode: store.GCPMetadataModePassthrough, RequireLocalRuntime: true}},
+		{name: "block is refused although a block account is reported", gcpID: crMode(store.GCPMetadataModeBlock), want: cloudRunRefusalBlockUnsupported},
+		{name: "block is refused without a block account", gcpID: crMode(store.GCPMetadataModeBlock),
+			profile: func(p *store.BrokerProfile) { p.CloudRunBlockAccount = false }, want: cloudRunRefusalBlockUnsupported},
+		{name: "unset (block on Cloud Run) is refused", gcpID: nil, want: cloudRunRefusalBlockUnsupported},
+		{name: "empty mode (block on Cloud Run) is refused", gcpID: crMode(""), want: cloudRunRefusalBlockUnsupported},
+		{name: "hub-default passthrough runs as block and is refused",
+			gcpID: &store.GCPIdentityConfig{MetadataMode: store.GCPMetadataModePassthrough, RequireLocalRuntime: true}, want: cloudRunRefusalBlockUnsupported},
 		{name: "passthrough is refused", gcpID: crMode(store.GCPMetadataModePassthrough), want: cloudRunRefusalPassthrough},
 		{name: "cloudrun-instances profile refuses assign", gcpID: crAssign(crListedGSA),
 			profile: func(p *store.BrokerProfile) {
@@ -205,13 +204,13 @@ func TestCloudRunIdentityRefusal(t *testing.T) {
 // the broker, and never names a service account.
 func TestCloudRunIdentityRefusal_RelayNamesNoAccount(t *testing.T) {
 	cases := map[string]string{
-		cloudRunRefusalNotAttachable:  "cloudrun.assignable_service_accounts",
-		cloudRunRefusalNoBlockAccount: "cloudrun.block_service_account",
-		cloudRunRefusalPassthrough:    "passthrough is not available on Cloud Run Instances; assign an account or use block",
-		cloudRunRefusalUnsupported:    "turn the experiment off",
-		cloudRunRefusalBrokerUpgrade:  "upgrade the broker or turn the experiment off",
-		cloudRunRefusalProfileUnknown: "is not known to the hub",
-		cloudRunRefusalReportStale:    "broker report stale or broker downgraded",
+		cloudRunRefusalNotAttachable:    "cloudrun.assignable_service_accounts",
+		cloudRunRefusalBlockUnsupported: "is not supported on Cloud Run Instances while the hub.cloudrun_native_identity experiment is on; assign the agent a service account, or turn the experiment off",
+		cloudRunRefusalPassthrough:      "passthrough is not available on Cloud Run Instances; assign an account",
+		cloudRunRefusalUnsupported:      "turn the experiment off",
+		cloudRunRefusalBrokerUpgrade:    "upgrade the broker or turn the experiment off",
+		cloudRunRefusalProfileUnknown:   "is not known to the hub",
+		cloudRunRefusalReportStale:      "broker report stale or broker downgraded",
 	}
 	for reason, want := range cases {
 		t.Run(reason, func(t *testing.T) {
@@ -241,8 +240,11 @@ func TestCloudRunIdentityRefusal_RelayNamesNoAccount(t *testing.T) {
 		})
 	}
 	// An unset mode names itself rather than an explicit block.
-	pre := &identityNotMappedPrecheck{Profile: "cr", Broker: "broker-cr", CloudRun: cloudRunRefusalNoBlockAccount, Agent: "agent-x"}
-	assert.Contains(t, pre.translate().Message, "an unset GCP identity")
+	pre := &identityNotMappedPrecheck{Profile: "cr", Broker: "broker-cr", CloudRun: cloudRunRefusalBlockUnsupported, Agent: "agent-x"}
+	msg := pre.translate().Message
+	assert.Contains(t, msg, "an unset GCP identity")
+	assert.Contains(t, msg, experiments.CloudRunNativeIdentity)
+	assert.Contains(t, msg, "assign the agent a service account, or turn the experiment off")
 }
 
 // A Cloud Run refusal raised on the executing node is carried on the
@@ -301,9 +303,27 @@ func crDispatcher(t *testing.T, profiles []store.BrokerProfile, profileName stri
 	return d, mockClient, agent
 }
 
+// crBlockCases are the GCP identities that run as block on Cloud Run: an
+// explicit block, an unset mode and a hub-default passthrough.
+func crBlockCases() []struct {
+	name  string
+	gcpID *store.GCPIdentityConfig
+} {
+	return []struct {
+		name  string
+		gcpID *store.GCPIdentityConfig
+	}{
+		{"block", crMode(store.GCPMetadataModeBlock)},
+		{"an unset mode", nil},
+		{"a hub-default passthrough", &store.GCPIdentityConfig{MetadataMode: store.GCPMetadataModePassthrough, RequireLocalRuntime: true}},
+	}
+}
+
 // Every dispatch path runs the Cloud Run check before any token, run or
 // broker call while the experiment is on; with it off, or on a Kubernetes
-// or docker profile, nothing new is refused.
+// or docker profile, nothing new is refused. Every identity that runs as
+// block on Cloud Run is refused with the experiment on, on create, start
+// and restart alike, and dispatched as before with it off.
 func TestDispatch_CloudRunIdentityPrecheck(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
@@ -330,6 +350,34 @@ func TestDispatch_CloudRunIdentityPrecheck(t *testing.T) {
 			assert.Equal(t, cloudRunRefusalPassthrough, pre.CloudRun)
 			assert.False(t, op.called(m))
 		})
+		for _, bc := range crBlockCases() {
+			t.Run(op.name+" refuses "+bc.name, func(t *testing.T) {
+				d, m, a := crDispatcher(t, []store.BrokerProfile{crProfile(now)}, "cr", bc.gcpID, true)
+				crPersist(t, d, a)
+				tokens := &precheckTokenCounter{}
+				d.SetTokenGenerator(tokens)
+				err := op.run(d, a)
+				var pre *identityNotMappedPrecheck
+				require.ErrorAs(t, err, &pre)
+				assert.Equal(t, cloudRunRefusalBlockUnsupported, pre.CloudRun)
+				ime, ok := identityMappingDispatchError(err)
+				require.True(t, ok)
+				assert.Contains(t, ime.Message, experiments.CloudRunNativeIdentity)
+				assert.Contains(t, ime.Message, "assign the agent a service account, or turn the experiment off")
+				assert.True(t, isConfirmedStartNotActedOnError(err), "classified as not acted on")
+				assert.False(t, op.called(m), "no broker call")
+				assert.Zero(t, tokens.authorize, "no token authorized")
+				assert.Zero(t, tokens.sign, "no token signed")
+				assert.False(t, crRecorded(t, d.store, a.ID), "no native decision recorded")
+			})
+			t.Run(op.name+" gate off dispatches "+bc.name, func(t *testing.T) {
+				d, m, a := crDispatcher(t, []store.BrokerProfile{crProfile(now)}, "cr", bc.gcpID, false)
+				err := op.run(d, a)
+				_, isIdentity := identityMappingDispatchError(err)
+				assert.False(t, isIdentity, "no identity refusal: %v", err)
+				assert.True(t, op.called(m), "broker called")
+			})
+		}
 		t.Run(op.name+" refuses a version-2 broker", func(t *testing.T) {
 			d, m, a := crDispatcher(t, []store.BrokerProfile{v2Broker}, "cr", crAssign(crListedGSA), true)
 			err := op.run(d, a)

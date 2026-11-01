@@ -41,21 +41,33 @@ type cloudRunIdentity struct {
 	// Identity is threaded onto StartOptions.CloudRunIdentity.
 	Identity *api.CloudRunIdentity
 	// SAEmail and ProjectID are set as informational env on an "assign"
-	// dispatch, whose metadata mode is rewritten to passthrough. They are
-	// empty for "block".
+	// dispatch, whose metadata mode is rewritten to passthrough.
 	SAEmail   string
 	ProjectID string
-	// Selection is the profile and runtime entry the allow-list or the
-	// block account was read from. The start and restart handlers compare
-	// it with their own later resolution
-	// (rejectCloudRunIdentityRuntimeChange).
+	// Selection is the profile and runtime entry the allow-list was read
+	// from. The start and restart handlers compare it with their own later
+	// resolution (rejectCloudRunIdentityRuntimeChange).
 	Selection dispatchProfileSelection
+}
+
+// cloudRunBlockRefusal is the refusal of a dispatch that resolves to GCP
+// identity mode "block" on Cloud Run Instances while the experiment is on:
+// an explicit block, an unset mode (block is the default off Kubernetes)
+// or a hub-default passthrough. Such an instance runs only as an assigned
+// account. The hub refuses the same before dispatch
+// (cloudRunRefusalBlockUnsupported).
+func cloudRunBlockRefusal(agentName string) *startContextError {
+	return &startContextError{
+		Status: http.StatusBadRequest,
+		Message: fmt.Sprintf("agent %q: GCP identity mode %q is not supported on Cloud Run Instances while the %s experiment is on; assign the agent a service account, or turn the experiment off",
+			agentName, store.GCPMetadataModeBlock, experiments.CloudRunNativeIdentity),
+	}
 }
 
 // cloudRunPassthroughRefusal is the refusal of GCP identity mode
 // "passthrough" (explicit or a project default) on Cloud Run Instances
 // while the experiment is on.
-const cloudRunPassthroughRefusal = "passthrough is not available on Cloud Run Instances; assign an account or use block"
+const cloudRunPassthroughRefusal = "passthrough is not available on Cloud Run Instances; assign an account"
 
 // cloudRunInitFirewallEnv is the setting that turns on sciontool init's
 // opt-in firewall (scionrt.CloudRunInitFirewallEnv).
@@ -150,18 +162,17 @@ func hubDefaultPassthrough(in startContextInputs) bool {
 //     native and deleting it otherwise.
 //
 // GCP identity mode "block", an unset mode (block is the default on Cloud
-// Run) and a hub-default passthrough run the instance as
-// cloudrun.block_service_account of the selected runtime entry in the
-// broker's global settings. Without one the dispatch is refused; the
-// runtime's own service account is never used in its place.
+// Run) and a hub-default passthrough are refused (cloudRunBlockRefusal):
+// with the experiment on, Cloud Run Instances runs only an assigned
+// account, and the runtime's own service account is never used.
 //
 // Explicit and project-default passthrough are refused
 // (cloudRunPassthroughRefusal).
 //
-// A project's own settings.yaml value for either setting is ignored with a
+// A project's own settings.yaml value for the allow-list is ignored with a
 // warning. A flat Runtime Broker instance and a runtime entry whose
-// effective type in the global settings is cloudrun-instances have neither
-// setting, so assign and block are refused there with their own message.
+// effective type in the global settings is cloudrun-instances have no
+// allow-list, so assign is refused there with its own message.
 // Every refusal names the agent and never an account or the list.
 //
 // On a create the mode, the account and the marker come from the create
@@ -186,7 +197,10 @@ func (s *Server) resolveCloudRunIdentity(ctx context.Context, in startContextInp
 	if mode == store.GCPMetadataModePassthrough && hubDefault {
 		mode = store.GCPMetadataModeBlock
 	}
-	if s.isFlat() && (mode == store.GCPMetadataModeAssign || mode == store.GCPMetadataModeBlock) {
+	if mode == store.GCPMetadataModeBlock {
+		return cloudRunIdentity{}, cloudRunBlockRefusal(in.Name)
+	}
+	if s.isFlat() && mode == store.GCPMetadataModeAssign {
 		return cloudRunIdentity{}, cloudRunFlatRefusal(in.Name, mode)
 	}
 
@@ -220,7 +234,6 @@ func (s *Server) resolveCloudRunIdentity(ctx context.Context, in startContextInp
 				Message: fmt.Sprintf("agent %q: GCP identity mode %q requires a service account email, and none was provided", in.Name, store.GCPMetadataModeAssign),
 			}
 		}
-	case store.GCPMetadataModeBlock:
 	default:
 		return cloudRunIdentity{}, &startContextError{
 			Status:  http.StatusBadRequest,
@@ -243,11 +256,6 @@ func (s *Server) resolveCloudRunIdentity(ctx context.Context, in startContextInp
 			"cloudrun.assignable_service_accounts is set in a project's own settings.yaml; it is never consulted there, only the broker's global settings are used for this list",
 			"agent", in.Name, "runtime_entry", sel.RuntimeEntryName)
 	}
-	if mode == store.GCPMetadataModeBlock && config.ProjectSettingsHasCloudRunBlockServiceAccount(in.ProjectPath, sel.RuntimeEntryName) {
-		s.agentLifecycleLog.Warn(
-			"cloudrun.block_service_account is set in a project's own settings.yaml; it is never consulted there, only the broker's global settings are used for this account",
-			"agent", in.Name, "runtime_entry", sel.RuntimeEntryName)
-	}
 	notAttachable := func() *startContextError {
 		s.agentLifecycleLog.Warn("GCP identity mode assign on Cloud Run Instances: the assigned account is not in cloudrun.assignable_service_accounts",
 			"agent", in.Name, "runtime_entry", sel.RuntimeEntryName)
@@ -264,9 +272,6 @@ func (s *Server) resolveCloudRunIdentity(ctx context.Context, in startContextInp
 	// selection that could not be resolved) has no settings to read: refused
 	// without loading the global settings.
 	if sel.RuntimeEntryName == "" {
-		if mode == store.GCPMetadataModeBlock {
-			return cloudRunIdentity{}, cloudRunBlockUnsetRefusal(in.Name, "")
-		}
 		return cloudRunIdentity{}, notAttachable()
 	}
 	// Global file plus the DB-backed overlay only: no project layer and no
@@ -277,26 +282,6 @@ func (s *Server) resolveCloudRunIdentity(ctx context.Context, in startContextInp
 	}
 	if cloudRunInstancesEntry(vs, sel.RuntimeEntryName) {
 		return cloudRunIdentity{}, cloudRunInstancesRefusal(in.Name, sel.RuntimeEntryName, mode)
-	}
-
-	if mode == store.GCPMetadataModeBlock {
-		// settings.yaml can be hand-edited without any write-time validator,
-		// so a malformed value is reported where it is read, by setting name
-		// only.
-		for _, w := range config.CloudRunBlockServiceAccountWarnings(vs, sel.RuntimeEntryName) {
-			s.agentLifecycleLog.Warn(w, "agent", in.Name, "runtime_entry", sel.RuntimeEntryName)
-		}
-		blockSA := ""
-		if entry, ok := vs.Runtimes[sel.RuntimeEntryName]; ok && entry.CloudRun != nil {
-			blockSA = strings.ToLower(strings.TrimSpace(entry.CloudRun.BlockServiceAccount))
-		}
-		if blockSA == "" {
-			return cloudRunIdentity{}, cloudRunBlockUnsetRefusal(in.Name, sel.RuntimeEntryName)
-		}
-		return cloudRunIdentity{
-			Identity:  &api.CloudRunIdentity{ServiceAccount: blockSA, Mode: store.GCPMetadataModeBlock},
-			Selection: sel,
-		}, nil
 	}
 
 	// settings.yaml can be hand-edited without any write-time validator, so
@@ -323,7 +308,7 @@ func (s *Server) resolveCloudRunIdentity(ctx context.Context, in startContextInp
 // does). env is the merged env after every layer the broker applies (the
 // hub's resolved env, then the config env). The settings, harness-config
 // and harness env sources are refused by the Cloud Run runtime check
-// (checkCloudRunInitFirewall). "block" and an off value are not refused.
+// (checkCloudRunInitFirewall). An off value is not refused.
 // The refusal names the agent and the setting, never its value or an
 // account.
 func refuseCloudRunInitFirewall(agentName string, identity *api.CloudRunIdentity, env map[string]string) *startContextError {
@@ -344,8 +329,8 @@ func refuseCloudRunInitFirewall(agentName string, identity *api.CloudRunIdentity
 	}
 }
 
-// cloudRunFlatRefusal refuses assign or block (mode) on a flat Runtime
-// Broker instance, which has no allow-list or block account setting.
+// cloudRunFlatRefusal refuses assign (mode) on a flat Runtime Broker
+// instance, which has no allow-list setting.
 func cloudRunFlatRefusal(agentName, mode string) *startContextError {
 	return &startContextError{
 		Status: http.StatusBadRequest,
@@ -376,28 +361,13 @@ func (s *Server) cloudRunSettingsUnreadable(agentName, key string) *startContext
 	}
 }
 
-// cloudRunInstancesRefusal refuses assign or block (mode) on a runtime entry
-// of type cloudrun-instances, which has no allow-list or block account
-// setting.
+// cloudRunInstancesRefusal refuses assign (mode) on a runtime entry of type
+// cloudrun-instances, which has no allow-list setting.
 func cloudRunInstancesRefusal(agentName, entryName, mode string) *startContextError {
 	return &startContextError{
 		Status: http.StatusBadRequest,
 		Message: fmt.Sprintf("agent %q: runtime entry %q of type %s does not support assigned identities (GCP identity mode %q with the %s experiment on)",
 			agentName, entryName, cloudRunInstancesRuntimeType, mode, experiments.CloudRunNativeIdentity),
-	}
-}
-
-// cloudRunBlockUnsetRefusal refuses block on Cloud Run Instances when the
-// selected runtime entry (entryName, or "" when none was selected) sets no
-// block account. It names the setting to configure and no account.
-func cloudRunBlockUnsetRefusal(agentName, entryName string) *startContextError {
-	if entryName == "" {
-		entryName = "<entry>"
-	}
-	return &startContextError{
-		Status: http.StatusBadRequest,
-		Message: fmt.Sprintf("agent %q: GCP identity mode %q on Cloud Run Instances needs a block service account; set runtimes.%s.cloudrun.block_service_account on the broker",
-			agentName, store.GCPMetadataModeBlock, entryName),
 	}
 }
 
@@ -447,7 +417,7 @@ func cloudRunAccountAssignable(vs *config.VersionedSettings, sel dispatchProfile
 // later, authoritative resolution (resolvedRuntimeType, lateSelection for
 // the profile and runtime entry, and pinnedEntry) does not match what
 // buildStartContext resolved the Cloud Run identity for (early is the
-// selection the allow-list or block account was read from):
+// selection the allow-list was read from):
 //
 //   - an identity was resolved for Cloud Run (and an "assign" metadata env
 //     rewritten to passthrough), but the later runtime is not Cloud Run,

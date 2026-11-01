@@ -113,13 +113,13 @@ func (e *identityNotMappedPrecheck) translate() identityMappingError {
 // Reasons of a Cloud Run refusal (identityNotMappedPrecheck.CloudRun), also
 // sent as its "reason" detail.
 const (
-	cloudRunRefusalNotAttachable  = "cloudrun_account_not_attachable"
-	cloudRunRefusalNoBlockAccount = "cloudrun_block_account_missing"
-	cloudRunRefusalPassthrough    = "cloudrun_passthrough_unavailable"
-	cloudRunRefusalUnsupported    = "cloudrun_native_identity_unsupported"
-	cloudRunRefusalBrokerUpgrade  = "cloudrun_broker_upgrade_required"
-	cloudRunRefusalProfileUnknown = "cloudrun_profile_unknown"
-	cloudRunRefusalReportStale    = "cloudrun_report_not_current"
+	cloudRunRefusalNotAttachable    = "cloudrun_account_not_attachable"
+	cloudRunRefusalBlockUnsupported = "cloudrun_block_unsupported"
+	cloudRunRefusalPassthrough      = "cloudrun_passthrough_unavailable"
+	cloudRunRefusalUnsupported      = "cloudrun_native_identity_unsupported"
+	cloudRunRefusalBrokerUpgrade    = "cloudrun_broker_upgrade_required"
+	cloudRunRefusalProfileUnknown   = "cloudrun_profile_unknown"
+	cloudRunRefusalReportStale      = "cloudrun_report_not_current"
 )
 
 // translateCloudRun builds the client-facing form of a Cloud Run refusal.
@@ -142,17 +142,17 @@ func (e *identityNotMappedPrecheck) translateCloudRun() identityMappingError {
 			"the broker's latest report does not list it in cloudrun.assignable_service_accounts. "+
 			"A broker operator adds it to that list in the broker's global settings, or assign the agent an account the broker can attach",
 			e.Agent, store.GCPMetadataModeAssign, scope)
-	case cloudRunRefusalNoBlockAccount:
-		msg = fmt.Sprintf("agent %q: GCP identity mode %q on Cloud Run Instances needs a block service account, and %s reports none. "+
-			"A broker operator sets cloudrun.block_service_account in the broker's global settings",
-			e.Agent, store.GCPMetadataModeBlock, scope)
-		if e.Mode != store.GCPMetadataModeBlock {
-			msg = fmt.Sprintf("agent %q: an unset GCP identity runs as mode %q on Cloud Run Instances, which needs a block service account, and %s reports none. "+
-				"A broker operator sets cloudrun.block_service_account in the broker's global settings, or assign the agent an account",
-				e.Agent, store.GCPMetadataModeBlock, scope)
+	case cloudRunRefusalBlockUnsupported:
+		msg = fmt.Sprintf("agent %q on %s: GCP identity mode %q is not supported on Cloud Run Instances while the %s experiment is on; "+
+			"assign the agent a service account, or turn the experiment off",
+			e.Agent, scope, store.GCPMetadataModeBlock, experiments.CloudRunNativeIdentity)
+		if e.Mode == "" {
+			msg = fmt.Sprintf("agent %q on %s: an unset GCP identity runs as mode %q on Cloud Run Instances, which is not supported while the %s experiment is on; "+
+				"assign the agent a service account, or turn the experiment off",
+				e.Agent, scope, store.GCPMetadataModeBlock, experiments.CloudRunNativeIdentity)
 		}
 	case cloudRunRefusalPassthrough:
-		msg = fmt.Sprintf("agent %q on %s: passthrough is not available on Cloud Run Instances; assign an account or use block",
+		msg = fmt.Sprintf("agent %q on %s: passthrough is not available on Cloud Run Instances; assign an account",
 			e.Agent, scope)
 	case cloudRunRefusalProfileUnknown:
 		where := fmt.Sprintf("the agent's profile on broker %q", e.Broker)
@@ -442,12 +442,14 @@ func isCloudRunProfileType(t string) bool {
 //     (cloudRunRefusalReportStale), since a downgraded broker can leave a
 //     version-3 report behind that no heartbeat renews;
 //   - otherwise passthrough is refused; a profile without native identity
-//     support refuses assign and block; assign is refused for an account
-//     the report does not list; block, and an unset mode (block on Cloud
-//     Run), are refused when no block account is reported.
+//     support refuses every mode; assign is refused for an account the
+//     report does not list; every other mode, including block and an unset
+//     mode (block on Cloud Run), is refused
+//     (cloudRunRefusalBlockUnsupported): with the experiment on, Cloud Run
+//     Instances runs only an assigned account.
 //
-// A passthrough granted by the hub default (RequireLocalRuntime) is run as
-// block on Cloud Run by the broker, so it is decided as block. An assign
+// A passthrough granted by the hub default (RequireLocalRuntime) would run
+// as block on Cloud Run, so it is decided, and refused, as block. An assign
 // with no account is left to the broker and the start gate.
 func cloudRunIdentityRefusal(broker *store.RuntimeBroker, profileName, agentName string, gcpID *store.GCPIdentityConfig, now time.Time) *identityNotMappedPrecheck {
 	if broker == nil {
@@ -507,10 +509,7 @@ func cloudRunIdentityRefusal(broker *store.RuntimeBroker, profileName, agentName
 		}
 		return refuse(cloudRunRefusalNotAttachable)
 	}
-	if !profile.CloudRunBlockAccount {
-		return refuse(cloudRunRefusalNoBlockAccount)
-	}
-	return nil
+	return refuse(cloudRunRefusalBlockUnsupported)
 }
 
 // cloudRunIdentityPrecheck returns the hub's refusal of agent's next

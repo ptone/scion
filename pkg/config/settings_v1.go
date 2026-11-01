@@ -2887,15 +2887,15 @@ type CloudRunConfig struct {
 	// means no account is attachable, so "assign" is refused.
 	AssignableServiceAccounts []string `json:"assignable_service_accounts,omitempty" yaml:"assignable_service_accounts,omitempty" koanf:"assignable_service_accounts"`
 
-	// BlockServiceAccount is the service account, holding no roles, that
-	// this Runtime Broker runs a Cloud Run instance as for GCP identity mode
-	// "block" (and for an unset mode, which is block on Cloud Run) while the
-	// hub.cloudrun_native_identity experiment is on. It is read from the
-	// broker's global settings only: the same key in a project's own
-	// settings.yaml is ignored (see
-	// ProjectSettingsHasCloudRunBlockServiceAccount). Empty or unset means
-	// such a dispatch is refused; the runtime's own service_account is never
-	// used in its place.
+	// BlockServiceAccount is a service account, holding no roles, for GCP
+	// identity mode "block" on Cloud Run Instances. It is read from the
+	// broker's global settings only and reported to the hub
+	// (CloudRunBlockAccount); the same key in a project's own settings.yaml
+	// is ignored (see ProjectSettingsHasCloudRunBlockServiceAccount). No
+	// instance runs as it: while the hub.cloudrun_native_identity
+	// experiment is on, block (and an unset mode, which is block on Cloud
+	// Run) is refused, and the runtime's own service_account is never used
+	// in its place.
 	BlockServiceAccount string `json:"block_service_account,omitempty" yaml:"block_service_account,omitempty" koanf:"block_service_account"`
 }
 

@@ -45,9 +45,10 @@ const (
 	crProjectID  = "example-project"
 )
 
-// crBlockUnset is the fixed part of the refusal of block on Cloud Run when
-// the "cloudrun" runtime entry sets no block account.
-const crBlockUnset = "set runtimes.cloudrun.cloudrun.block_service_account on the broker"
+// crBlockRefused is the fixed part of the refusal of every dispatch that
+// resolves to block on Cloud Run with the experiment on (cloudRunBlockRefusal),
+// without the quoted mode, so it also matches a JSON-encoded body.
+const crBlockRefused = "is not supported on Cloud Run Instances while the hub.cloudrun_native_identity experiment is on; assign the agent a service account, or turn the experiment off"
 
 // testCloudRunBlockGlobalSettingsYAML is testCloudRunAllowListGlobalSettingsYAML
 // plus a block account, in mixed case with surrounding spaces to check that
@@ -444,23 +445,15 @@ func TestBuildStartContext_CloudRunIdentityRefusals(t *testing.T) {
 		{name: "assign with an empty account", global: testCloudRunAllowListGlobalSettingsYAML,
 			gcp:        &GCPIdentityConfig{MetadataMode: "assign", NativeCloudRun: true},
 			wantStatus: http.StatusBadRequest, wantText: []string{"requires a service account email"}},
-		{name: "assign on start without SOURCE=hub is block, no block account", global: testCloudRunAllowListGlobalSettingsYAML,
+		{name: "assign on start without SOURCE=hub is block", global: testCloudRunBlockGlobalSettingsYAML,
 			resolvedEnv: assignStartEnv(""),
-			wantStatus:  http.StatusBadRequest, wantText: []string{`"block"`, crBlockUnset}},
-		{name: "assign on start with another SOURCE is block, no block account", global: testCloudRunAllowListGlobalSettingsYAML,
+			wantStatus:  http.StatusBadRequest, wantText: []string{"agent-cr-refusal", crBlockRefused}},
+		{name: "assign on start with another SOURCE is block", global: testCloudRunBlockGlobalSettingsYAML,
 			resolvedEnv: assignStartEnv("agent"),
-			wantStatus:  http.StatusBadRequest, wantText: []string{`"block"`, crBlockUnset}},
-		{name: "block, no block account", global: testCloudRunAllowListGlobalSettingsYAML,
-			gcp:        &GCPIdentityConfig{MetadataMode: "block"},
-			wantStatus: http.StatusBadRequest, wantText: []string{"agent-cr-refusal", `"block"`, crBlockUnset}},
+			wantStatus:  http.StatusBadRequest, wantText: []string{"agent-cr-refusal", crBlockRefused}},
 		{name: "block, no global settings at all",
 			gcp:        &GCPIdentityConfig{MetadataMode: "block"},
-			wantStatus: http.StatusBadRequest, wantText: []string{"agent-cr-refusal", crBlockUnset}},
-		{name: "unset is block, no block account", global: testCloudRunAllowListGlobalSettingsYAML,
-			wantStatus: http.StatusBadRequest, wantText: []string{`"block"`, crBlockUnset}},
-		{name: "hub-default passthrough is block, no block account", global: testCloudRunAllowListGlobalSettingsYAML,
-			gcp:        &GCPIdentityConfig{MetadataMode: "passthrough", RequireLocalRuntime: true},
-			wantStatus: http.StatusBadRequest, wantText: []string{`"block"`, crBlockUnset}},
+			wantStatus: http.StatusBadRequest, wantText: []string{"agent-cr-refusal", crBlockRefused}},
 		{name: "explicit passthrough", global: testCloudRunBlockGlobalSettingsYAML,
 			gcp:        &GCPIdentityConfig{MetadataMode: "passthrough"},
 			wantStatus: http.StatusBadRequest, wantText: []string{"agent-cr-refusal", cloudRunPassthroughRefusal}},
@@ -710,7 +703,7 @@ func TestStartRestart_CloudRunIdentityLateRuntimeChange(t *testing.T) {
 }
 
 // crLateCheckBlockGlobalSettingsYAML is crLateCheckGlobalSettingsYAML plus
-// a block account.
+// a block account, which no longer lets block run with the experiment on.
 const crLateCheckBlockGlobalSettingsYAML = `schema_version: "1"
 runtimes:
     cloudrun:
@@ -720,43 +713,48 @@ runtimes:
             block_service_account: block-sa@example-project.iam.gserviceaccount.com
 `
 
-// Restart after revoke: an identity change must recreate the instance,
-// never start the existing one. An assign agent whose assignment the hub
-// revoked is restarted with "block": the restart runs, and the runtime is
-// asked to run the agent as the block account with the emulator in block
-// mode. That Run deletes the agent's existing instance and creates a new
-// one without calling StartInstance
-// (TestCloudRunRun_IdentityReplacesSameRunInstance, "revoked assignment,
-// restart as block").
-func TestRestart_CloudRunRevokedAssignmentArrivesAsBlock(t *testing.T) {
-	srv, _, remapRuntime := newTestServerForLateCheckOrdering(t, "actual-agent-name", "url-id", cloudRunRuntimeType)
-	var got *runtime.RunConfig
-	remapRuntime.RunFunc = func(ctx context.Context, config runtime.RunConfig) (string, error) {
-		got = &config
-		return "instance-id", nil
+// The start and restart handlers refuse every dispatch that resolves to
+// block on Cloud Run with the experiment on, before the agent is stopped
+// or the runtime is called, although the broker sets a block account: an
+// explicit block (as an assign agent whose assignment the hub revoked
+// arrives), an unset mode, and a hub-default passthrough.
+func TestStartRestart_CloudRunBlockRefused(t *testing.T) {
+	modes := []struct {
+		name  string
+		mode  string
+		extra map[string]string
+	}{
+		{name: "block", mode: "block"},
+		{name: "unset", mode: ""},
+		{name: "hub-default passthrough", mode: "passthrough", extra: map[string]string{"SCION_METADATA_REQUIRE_LOCAL_RUNTIME": "true"}},
 	}
-	newTestGlobalSettings(t, crLateCheckBlockGlobalSettingsYAML)
+	for _, verb := range []string{"start", "restart"} {
+		for _, m := range modes {
+			t.Run(verb+", "+m.name, func(t *testing.T) {
+				srv, mgr, remapRuntime := newTestServerForLateCheckOrdering(t, "actual-agent-name", "url-id", cloudRunRuntimeType)
+				remapRuntime.RunFunc = func(ctx context.Context, config runtime.RunConfig) (string, error) {
+					t.Error("the runtime must not be called for a refused dispatch")
+					return "", nil
+				}
+				newTestGlobalSettings(t, crLateCheckBlockGlobalSettingsYAML)
 
-	w := postCloudRunLifecycle(t, srv, "restart", "block")
+				w := postCloudRunLifecycleEnv(t, srv, verb, m.mode, m.extra)
 
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusAccepted, w.Body.String())
-	}
-	if got == nil {
-		t.Fatal("expected the Cloud Run runtime to run the agent")
-	}
-	if got.CloudRunIdentity == nil || got.CloudRunIdentity.ServiceAccount != crBlockSA || got.CloudRunIdentity.Mode != "block" {
-		t.Errorf("RunConfig.CloudRunIdentity = %+v, want {%s block}", got.CloudRunIdentity, crBlockSA)
-	}
-	env := map[string]string{}
-	for _, e := range got.Env {
-		if k, v, ok := strings.Cut(e, "="); ok {
-			env[k] = v
+				if w.Code != http.StatusBadRequest {
+					t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusBadRequest, w.Body.String())
+				}
+				body := w.Body.String()
+				if !strings.Contains(body, crBlockRefused) {
+					t.Errorf("expected the block refusal, got %s", body)
+				}
+				if strings.Contains(body, crBlockSA) || strings.Contains(body, crAssignedSA) {
+					t.Errorf("the refusal names an account: %s", body)
+				}
+				if mgr.stopCalls != 0 {
+					t.Errorf("expected the agent not to be stopped, got %d stop calls", mgr.stopCalls)
+				}
+			})
 		}
-	}
-	if env["SCION_METADATA_MODE"] != "block" || env["GCE_METADATA_HOST"] != "localhost:18380" {
-		t.Errorf("expected the emulator in block mode, got SCION_METADATA_MODE=%q GCE_METADATA_HOST=%q",
-			env["SCION_METADATA_MODE"], env["GCE_METADATA_HOST"])
 	}
 }
 
@@ -857,20 +855,23 @@ func newFlatCloudRunStartServer(t *testing.T) *Server {
 	return srv
 }
 
-// A flat Cloud Run instance has no allow-list or block account setting, so
-// with the gate on assign and block are refused there, even though the
-// broker's global settings list the account under a runtime entry. No
-// start context is built, and the refusal returns before the agent token
-// step (the token probe). The assertions stay off the full message text,
-// which a later change adding flat support will reword.
+// A flat Cloud Run instance has no allow-list setting, so with the gate on
+// assign is refused there (and block, as on every Cloud Run instance), even
+// though the broker's global settings list the account under a runtime
+// entry. No start context is built, and the refusal returns before the
+// agent token step (the token probe). The assertions stay off the full flat
+// message text, which a later change adding flat support will reword.
 func TestBuildStartContext_CloudRunFlatInstanceRefused(t *testing.T) {
 	tests := []struct {
 		name string
 		gcp  *GCPIdentityConfig
+		want string
 	}{
-		{name: "assign", gcp: &GCPIdentityConfig{MetadataMode: "assign", NativeCloudRun: true, SAEmail: crAssignedSA, ProjectID: crProjectID}},
-		{name: "block", gcp: &GCPIdentityConfig{MetadataMode: "block"}},
-		{name: "unset is block"},
+		{name: "assign", gcp: &GCPIdentityConfig{MetadataMode: "assign", NativeCloudRun: true, SAEmail: crAssignedSA, ProjectID: crProjectID}, want: "flat Cloud Run"},
+		// Block, however it is reached, is refused as on any Cloud Run
+		// instance, before the flat check.
+		{name: "block", gcp: &GCPIdentityConfig{MetadataMode: "block"}, want: crBlockRefused},
+		{name: "unset is block", want: crBlockRefused},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -895,10 +896,10 @@ func TestBuildStartContext_CloudRunFlatInstanceRefused(t *testing.T) {
 			if sce.Status < 400 || sce.Status > 499 {
 				t.Errorf("status = %d, want a 4xx", sce.Status)
 			}
-			if !strings.Contains(sce.Message, "agent-cr-f1") || !strings.Contains(sce.Message, "flat Cloud Run") {
-				t.Errorf("message %q must name the agent and the flat cause", sce.Message)
+			if !strings.Contains(sce.Message, "agent-cr-f1") || !strings.Contains(sce.Message, tc.want) {
+				t.Errorf("message %q must name the agent and contain %q", sce.Message, tc.want)
 			}
-			for _, other := range []string{crBlockUnset, cloudRunPassthroughRefusal, "not attachable"} {
+			for _, other := range []string{"block_service_account", cloudRunPassthroughRefusal, "not attachable"} {
 				if strings.Contains(sce.Message, other) {
 					t.Errorf("message %q is another refusal (%q), not the flat one", sce.Message, other)
 				}
@@ -956,153 +957,119 @@ runtimes:
 	}
 }
 
-// Block on Cloud Run with the gate on: block, an unset mode, a hub-default
-// passthrough (create and start shapes) and an assign without the hub's
-// marker all run the instance as the block account, lower-cased and
-// trimmed, with the emulator kept in block mode and no informational
-// account env.
-func TestBuildStartContext_CloudRunBlock(t *testing.T) {
-	tests := []struct {
+// crBlockDispatchCases are the dispatches that resolve to block on Cloud
+// Run, on create, start and restart: block, an unset mode, a hub-default
+// passthrough, and an assign on start or restart without the hub's mode
+// source.
+func crBlockDispatchCases() []struct {
+	name        string
+	op          startOperation
+	gcp         *GCPIdentityConfig
+	resolvedEnv map[string]string
+} {
+	type c = struct {
 		name        string
+		op          startOperation
 		gcp         *GCPIdentityConfig
 		resolvedEnv map[string]string
-	}{
-		{name: "block", gcp: &GCPIdentityConfig{MetadataMode: "block"}},
-		{name: "unset"},
-		{name: "hub-default passthrough on create", gcp: &GCPIdentityConfig{MetadataMode: "passthrough", RequireLocalRuntime: true}},
-		{name: "hub-default passthrough on start", resolvedEnv: map[string]string{
-			"SCION_METADATA_MODE":                  "passthrough",
-			"SCION_METADATA_MODE_SOURCE":           "hub",
-			"SCION_METADATA_REQUIRE_LOCAL_RUNTIME": "true",
-		}},
-		{name: "block on start", resolvedEnv: map[string]string{"SCION_METADATA_MODE": "block", "SCION_METADATA_MODE_SOURCE": "hub"}},
-		{name: "assign on start without SOURCE=hub", resolvedEnv: map[string]string{
-			"SCION_METADATA_MODE":     "assign",
-			"SCION_METADATA_SA_EMAIL": crAssignedSA,
-		}},
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
+	cases := []c{
+		{name: "create, block", op: opCreate, gcp: &GCPIdentityConfig{MetadataMode: "block"}},
+		{name: "create, unset", op: opCreate},
+		{name: "create, hub-default passthrough", op: opCreate, gcp: &GCPIdentityConfig{MetadataMode: "passthrough", RequireLocalRuntime: true}},
+	}
+	for _, op := range []startOperation{opHTTPStart, opHTTPRestart} {
+		cases = append(cases,
+			c{name: string(op) + ", block", op: op, resolvedEnv: map[string]string{"SCION_METADATA_MODE": "block", "SCION_METADATA_MODE_SOURCE": "hub"}},
+			c{name: string(op) + ", unset", op: op, resolvedEnv: map[string]string{}},
+			c{name: string(op) + ", hub-default passthrough", op: op, resolvedEnv: map[string]string{
+				"SCION_METADATA_MODE":                  "passthrough",
+				"SCION_METADATA_MODE_SOURCE":           "hub",
+				"SCION_METADATA_REQUIRE_LOCAL_RUNTIME": "true",
+			}},
+			c{name: string(op) + ", assign without SOURCE=hub", op: op, resolvedEnv: map[string]string{
+				"SCION_METADATA_MODE":     "assign",
+				"SCION_METADATA_SA_EMAIL": crAssignedSA,
+			}},
+		)
+	}
+	return cases
+}
+
+// crBlockDispatchInputs builds the start context inputs of a
+// crBlockDispatchCases row.
+func crBlockDispatchInputs(projectDir string, op startOperation, gcp *GCPIdentityConfig, resolvedEnv map[string]string) startContextInputs {
+	in := startContextInputs{
+		Name:        "agent-cr-block",
+		ProjectPath: projectDir,
+		HTTPRequest: httptest.NewRequest("POST", "/api/v1/agents", nil),
+		Operation:   op,
+		ResolvedEnv: resolvedEnv,
+	}
+	if op == opCreate {
+		in.Config = &CreateAgentConfig{GCPIdentity: gcp}
+	}
+	return in
+}
+
+// With the gate on, every dispatch that resolves to block on Cloud Run is
+// refused, on create, start and restart, whether or not the broker sets a
+// block account: no start context is built, and the refusal names the
+// agent, the mode and the experiment, gives the two ways out, and names no
+// account. With the gate off the same dispatches build today's block env
+// with no instance identity.
+func TestBuildStartContext_CloudRunBlockRefused(t *testing.T) {
+	settings := map[string]string{
+		"block account":    testCloudRunBlockGlobalSettingsYAML,
+		"no block account": testCloudRunAllowListGlobalSettingsYAML,
+	}
+	for _, tc := range crBlockDispatchCases() {
+		for settingsLabel, global := range settings {
+			t.Run(tc.name+", "+settingsLabel, func(t *testing.T) {
+				srv, projectDir := newCloudRunStartContextServer(t, global)
+				sc, err := srv.buildStartContext(crGateCtx(), crBlockDispatchInputs(projectDir, tc.op, tc.gcp, tc.resolvedEnv))
+				if sc != nil {
+					t.Fatalf("expected a refusal, got CloudRunIdentity %+v", sc.Opts.CloudRunIdentity)
+				}
+				sce := requireStartContextError(t, err)
+				if sce.Status != http.StatusBadRequest {
+					t.Errorf("status = %d, want %d", sce.Status, http.StatusBadRequest)
+				}
+				for _, want := range []string{"agent-cr-block", `"block"`, crBlockRefused} {
+					if !strings.Contains(sce.Message, want) {
+						t.Errorf("message %q does not contain %q", sce.Message, want)
+					}
+				}
+				for _, other := range []string{"block_service_account", cloudRunPassthroughRefusal, "did not mark this dispatch", "Block-SA", "block-sa", crAssignedSA} {
+					if strings.Contains(sce.Message, other) {
+						t.Errorf("message %q is not the block refusal or names an account (has %q)", sce.Message, other)
+					}
+				}
+			})
+		}
+		t.Run(tc.name+", gate off", func(t *testing.T) {
 			srv, projectDir := newCloudRunStartContextServer(t, testCloudRunBlockGlobalSettingsYAML)
-			in := startContextInputs{
-				Name:        "agent-cr-block",
-				ProjectPath: projectDir,
-				HTTPRequest: httptest.NewRequest("POST", "/api/v1/agents", nil),
-				Operation:   opCreate,
-			}
-			if tc.resolvedEnv != nil {
-				in.ResolvedEnv = tc.resolvedEnv
-				in.Operation = opHTTPStart
-			} else if tc.gcp != nil {
-				in.Config = &CreateAgentConfig{GCPIdentity: tc.gcp}
-			}
-			sc, err := srv.buildStartContext(crGateCtx(), in)
+			sc, err := srv.buildStartContext(context.Background(), crBlockDispatchInputs(projectDir, tc.op, tc.gcp, tc.resolvedEnv))
 			if err != nil {
 				t.Fatalf("buildStartContext: %v", err)
 			}
-			id := sc.Opts.CloudRunIdentity
-			if id == nil || id.ServiceAccount != crBlockSA || id.Mode != "block" {
-				t.Fatalf("CloudRunIdentity = %+v, want {%s block}", id, crBlockSA)
+			if sc.Opts.CloudRunIdentity != nil {
+				t.Errorf("CloudRunIdentity = %+v, want nil", sc.Opts.CloudRunIdentity)
 			}
-			if sc.CloudRunSelection == nil || sc.CloudRunSelection.RuntimeEntryName != cloudRunRuntimeType {
-				t.Errorf("CloudRunSelection = %+v, want runtime entry %q", sc.CloudRunSelection, cloudRunRuntimeType)
+			if got := sc.Opts.Env["SCION_METADATA_MODE"]; got != "block" {
+				t.Errorf("SCION_METADATA_MODE = %q, want block", got)
 			}
-			env := sc.Opts.Env
-			if env["SCION_METADATA_MODE"] != "block" || env["GCE_METADATA_HOST"] != "localhost:18380" ||
-				env["GCE_METADATA_ROOT"] != "localhost:18380" || env["SCION_METADATA_PORT"] != "18380" {
-				t.Errorf("expected the emulator in block mode, got %v", metadataEnv(env))
-			}
-			if v := env["SCION_METADATA_SA_EMAIL"]; v != "" && v != crAssignedSA {
-				t.Errorf("SCION_METADATA_SA_EMAIL = %q, want no block account in the env", v)
-			}
-			for k, v := range env {
-				if strings.Contains(strings.ToLower(v), "block-sa") {
-					t.Errorf("env %s carries the block account", k)
-				}
+			if got := sc.Opts.Env["GCE_METADATA_HOST"]; got != "localhost:18380" {
+				t.Errorf("GCE_METADATA_HOST = %q, want localhost:18380", got)
 			}
 		})
 	}
 }
 
-// A project's own settings.yaml cannot supply the block account: it is
-// ignored, with a warning, and block is refused with the remedy.
-func TestBuildStartContext_CloudRunProjectBlockAccountIgnored(t *testing.T) {
-	cfg := DefaultServerConfig()
-	cfg.StateDir = t.TempDir()
-	srv := newTestServerForStartContextRuntime(t, cfg, cloudRunRuntimeType)
-	var buf bytes.Buffer
-	srv.agentLifecycleLog = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	projectDir := newTestProjectSettings(t, testCloudRunProjectSettingsYAML+`        cloudrun:
-            block_service_account: project-block-sa@example-project.iam.gserviceaccount.com
-`)
-	newTestGlobalSettings(t, testCloudRunAllowListGlobalSettingsYAML)
-
-	sc, err := srv.buildStartContext(crGateCtx(), startContextInputs{
-		Name:        "agent-cr-project-block",
-		ProjectPath: projectDir,
-		Config:      &CreateAgentConfig{GCPIdentity: &GCPIdentityConfig{MetadataMode: "block"}},
-		HTTPRequest: httptest.NewRequest("POST", "/api/v1/agents", nil),
-		Operation:   opCreate,
-	})
-	if sc != nil {
-		t.Fatalf("expected a refusal, got CloudRunIdentity %+v", sc.Opts.CloudRunIdentity)
-	}
-	sce := requireStartContextError(t, err)
-	if !strings.Contains(sce.Message, crBlockUnset) || strings.Contains(sce.Message, "project-block-sa") {
-		t.Errorf("message = %q, want the block remedy and no account", sce.Message)
-	}
-	logged := buf.String()
-	if !strings.Contains(logged, "block_service_account") || !strings.Contains(logged, "never consulted") {
-		t.Errorf("expected a warning that the project-level block account is never consulted, got log: %s", logged)
-	}
-	if strings.Contains(logged, "project-block-sa") {
-		t.Errorf("the log names the account: %s", logged)
-	}
-}
-
-// A block account that is not a service account email is still used (the
-// instance create then fails), and a warning names the setting only.
-func TestBuildStartContext_CloudRunBlockAccountMalformedWarned(t *testing.T) {
-	srv, projectDir := newCloudRunStartContextServer(t, `schema_version: "1"
-active_profile: local
-profiles:
-    local:
-        runtime: cloudrun
-runtimes:
-    cloudrun:
-        type: cloudrun
-        cloudrun:
-            block_service_account: not-a-block-value
-`)
-	var buf bytes.Buffer
-	srv.agentLifecycleLog = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-
-	sc, err := srv.buildStartContext(crGateCtx(), startContextInputs{
-		Name:        "agent-cr-block-malformed",
-		ProjectPath: projectDir,
-		Config:      &CreateAgentConfig{GCPIdentity: &GCPIdentityConfig{MetadataMode: "block"}},
-		HTTPRequest: httptest.NewRequest("POST", "/api/v1/agents", nil),
-		Operation:   opCreate,
-	})
-	if err != nil {
-		t.Fatalf("buildStartContext: %v", err)
-	}
-	if id := sc.Opts.CloudRunIdentity; id == nil || id.ServiceAccount != "not-a-block-value" {
-		t.Errorf("CloudRunIdentity = %+v", id)
-	}
-	logged := buf.String()
-	if !strings.Contains(logged, "runtimes.cloudrun.cloudrun.block_service_account is not a service account email") {
-		t.Errorf("expected a warning naming the setting, got log: %s", logged)
-	}
-	if strings.Contains(logged, "not-a-block-value") {
-		t.Errorf("the log names the value: %s", logged)
-	}
-}
-
-// A runtime entry of type cloudrun-instances has no allow-list or block
-// account setting: with the gate on, assign and block there are refused
-// with their own message, which names the agent and the entry type and no
-// account.
+// A runtime entry of type cloudrun-instances has no allow-list setting:
+// with the gate on, assign there is refused with its own message, which
+// names the agent and the entry type and no account. Block is refused
+// with the block refusal, as on every Cloud Run entry.
 func TestBuildStartContext_CloudRunInstancesEntryRefused(t *testing.T) {
 	const instancesGlobalSettingsYAML = `schema_version: "1"
 active_profile: local
@@ -1119,10 +1086,13 @@ runtimes:
 	tests := []struct {
 		name string
 		gcp  *GCPIdentityConfig
+		want string
 	}{
-		{name: "assign", gcp: &GCPIdentityConfig{MetadataMode: "assign", NativeCloudRun: true, SAEmail: crAssignedSA, ProjectID: crProjectID}},
-		{name: "block", gcp: &GCPIdentityConfig{MetadataMode: "block"}},
-		{name: "unset is block"},
+		{name: "assign", gcp: &GCPIdentityConfig{MetadataMode: "assign", NativeCloudRun: true, SAEmail: crAssignedSA, ProjectID: crProjectID},
+			want: "of type cloudrun-instances does not support assigned identities"},
+		// Block is refused before the runtime entry is read.
+		{name: "block", gcp: &GCPIdentityConfig{MetadataMode: "block"}, want: crBlockRefused},
+		{name: "unset is block", want: crBlockRefused},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1144,8 +1114,8 @@ runtimes:
 			if sce.Status < 400 || sce.Status > 499 {
 				t.Errorf("status = %d, want a 4xx", sce.Status)
 			}
-			if !strings.Contains(sce.Message, "agent-cr-i1") || !strings.Contains(sce.Message, "of type cloudrun-instances does not support assigned identities") {
-				t.Errorf("message %q must name the agent and the entry type", sce.Message)
+			if !strings.Contains(sce.Message, "agent-cr-i1") || !strings.Contains(sce.Message, tc.want) {
+				t.Errorf("message %q must name the agent and contain %q", sce.Message, tc.want)
 			}
 			if strings.Contains(sce.Message, crAssignedSA) {
 				t.Errorf("message %q names an account", sce.Message)
@@ -1250,9 +1220,9 @@ func TestPinnedCloudRunEntry(t *testing.T) {
 
 // A runtime entry with no type field takes its name as its type, so an
 // entry named "cloudrun-instances" without a type is a cloudrun-instances
-// entry, with or without a cloudrun block: with the gate on, assign and
-// block through a profile that selects it are refused with the
-// cloudrun-instances message.
+// entry, with or without a cloudrun block: with the gate on, assign
+// through a profile that selects it is refused with the cloudrun-instances
+// message (block is refused before any entry is read).
 func TestBuildStartContext_CloudRunUntypedInstancesEntryRefused(t *testing.T) {
 	entries := map[string]string{
 		"with a cloudrun block": `    cloudrun-instances:
@@ -1266,7 +1236,6 @@ func TestBuildStartContext_CloudRunUntypedInstancesEntryRefused(t *testing.T) {
 	}
 	modes := map[string]*GCPIdentityConfig{
 		"assign": {MetadataMode: "assign", NativeCloudRun: true, SAEmail: crAssignedSA, ProjectID: crProjectID},
-		"block":  {MetadataMode: "block"},
 	}
 	for entryLabel, entryYAML := range entries {
 		for modeLabel, gcp := range modes {
@@ -1396,9 +1365,9 @@ func TestBuildStartContext_CloudRunAssignRequiresNativeMarker(t *testing.T) {
 // On a start, the mode comes only from a resolved env carrying
 // SCION_METADATA_MODE_SOURCE=hub. Without one, the start is block, never
 // assign or passthrough, whatever the request's GCPIdentity, the
-// hub-default passthrough flag, or an unsourced resolved env says. Each row
-// runs without a block account (refused for it) and with one (the instance
-// runs as the block account, with the emulator in block mode).
+// hub-default passthrough flag, or an unsourced resolved env says. With the
+// gate on, block is refused, so each row is refused with the block refusal,
+// without a block account and with one.
 func TestBuildStartContext_CloudRunStartWithoutHubModeIsBlock(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -1457,43 +1426,30 @@ func TestBuildStartContext_CloudRunStartWithoutHubModeIsBlock(t *testing.T) {
 				Operation:   opHTTPStart,
 			}
 		}
-		t.Run(tc.name+", no block account", func(t *testing.T) {
-			srv, projectDir := newCloudRunStartContextServer(t, testCloudRunAllowListGlobalSettingsYAML)
-			sc, err := srv.buildStartContext(crGateCtx(), in(projectDir))
-			if sc != nil {
-				t.Fatalf("expected a refusal, got CloudRunIdentity %+v", sc.Opts.CloudRunIdentity)
-			}
-			sce := requireStartContextError(t, err)
-			if sce.Status != http.StatusBadRequest {
-				t.Errorf("status = %d, want %d", sce.Status, http.StatusBadRequest)
-			}
-			if !strings.Contains(sce.Message, "agent-cr-start-block") || !strings.Contains(sce.Message, crBlockUnset) {
-				t.Errorf("message %q must name the agent and the missing block account", sce.Message)
-			}
-			for _, other := range []string{cloudRunPassthroughRefusal, "did not mark this dispatch", crAssignedSA} {
-				if strings.Contains(sce.Message, other) {
-					t.Errorf("message %q is not the block refusal (has %q)", sce.Message, other)
+		for settingsLabel, global := range map[string]string{
+			"no block account": testCloudRunAllowListGlobalSettingsYAML,
+			"block account":    testCloudRunBlockGlobalSettingsYAML,
+		} {
+			t.Run(tc.name+", "+settingsLabel, func(t *testing.T) {
+				srv, projectDir := newCloudRunStartContextServer(t, global)
+				sc, err := srv.buildStartContext(crGateCtx(), in(projectDir))
+				if sc != nil {
+					t.Fatalf("expected a refusal, got CloudRunIdentity %+v", sc.Opts.CloudRunIdentity)
 				}
-			}
-		})
-		t.Run(tc.name+", block account", func(t *testing.T) {
-			srv, projectDir := newCloudRunStartContextServer(t, testCloudRunBlockGlobalSettingsYAML)
-			sc, err := srv.buildStartContext(crGateCtx(), in(projectDir))
-			if err != nil {
-				t.Fatalf("buildStartContext: %v", err)
-			}
-			id := sc.Opts.CloudRunIdentity
-			if id == nil || id.ServiceAccount != crBlockSA || id.Mode != "block" {
-				t.Fatalf("CloudRunIdentity = %+v, want {%s block}", id, crBlockSA)
-			}
-			env := sc.Opts.Env
-			if env["SCION_METADATA_MODE"] != "block" || env["GCE_METADATA_HOST"] != "localhost:18380" {
-				t.Errorf("expected the emulator in block mode, got %v", metadataEnv(env))
-			}
-			if v := env["SCION_METADATA_SA_EMAIL"]; v == crAssignedSA {
-				t.Errorf("SCION_METADATA_SA_EMAIL = %q, want no assigned account", v)
-			}
-		})
+				sce := requireStartContextError(t, err)
+				if sce.Status != http.StatusBadRequest {
+					t.Errorf("status = %d, want %d", sce.Status, http.StatusBadRequest)
+				}
+				if !strings.Contains(sce.Message, "agent-cr-start-block") || !strings.Contains(sce.Message, crBlockRefused) {
+					t.Errorf("message %q must name the agent and be the block refusal", sce.Message)
+				}
+				for _, other := range []string{cloudRunPassthroughRefusal, "did not mark this dispatch", crAssignedSA} {
+					if strings.Contains(sce.Message, other) {
+						t.Errorf("message %q is not the block refusal (has %q)", sce.Message, other)
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -1588,8 +1544,8 @@ func TestBuildStartContext_CloudRunStartIgnoresGCPIdentity(t *testing.T) {
 		assertCloudRunAssignEnv(t, sc, crAssignedSA, crProjectID)
 	})
 	t.Run("mode from the resolved env", func(t *testing.T) {
-		// The GCPIdentity says block, which would be refused here (no block
-		// account); the resolved env says assign.
+		// The GCPIdentity says block, which would be refused; the resolved
+		// env says assign.
 		srv, projectDir := newCloudRunStartContextServer(t, testCloudRunAllowListGlobalSettingsYAML)
 		sc, err := srv.buildStartContext(crGateCtx(), startContextInputs{
 			Name:        "agent-cr-start-carrier",
@@ -1677,10 +1633,11 @@ func TestResolveCloudRunIdentity_SettingsReadErrorNotEchoed(t *testing.T) {
 			in := startContextInputs{
 				Name:        "agent-cr-noecho",
 				ProjectPath: projectDir,
-				Config:      &CreateAgentConfig{GCPIdentity: &GCPIdentityConfig{MetadataMode: "block"}},
-				Operation:   opCreate,
+				Config: &CreateAgentConfig{GCPIdentity: &GCPIdentityConfig{
+					MetadataMode: "assign", NativeCloudRun: true, SAEmail: crAssignedSA, ProjectID: crProjectID}},
+				Operation: opCreate,
 			}
-			id, sce := srv.resolveCloudRunIdentity(crGateCtx(), in, cloudRunRuntimeType, "block", "local", false)
+			id, sce := srv.resolveCloudRunIdentity(crGateCtx(), in, cloudRunRuntimeType, "assign", "local", false)
 			if sce == nil {
 				t.Fatalf("expected a refusal, got %+v", id)
 			}
@@ -1891,8 +1848,7 @@ func TestBuildStartContext_CloudRunAssignInitFirewallSources(t *testing.T) {
 // init firewall before the agent is stopped or the runtime is called; the
 // create handler's only start context is buildStartContext with opCreate
 // (TestBuildStartContext_CloudRunAssignInitFirewallParse and ...Sources).
-// An off value, and "block" with the firewall on, reach the runtime with
-// the setting unchanged.
+// An off value reaches the runtime with the setting unchanged.
 func TestStartRestart_CloudRunAssignInitFirewallRefused(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -1908,7 +1864,6 @@ func TestStartRestart_CloudRunAssignInitFirewallRefused(t *testing.T) {
 		{name: "restart, assign, invalid", verb: "restart", mode: "assign", value: "garbage", global: crLateCheckGlobalSettingsYAML, wantStatus: http.StatusBadRequest},
 		{name: "start, assign, off", verb: "start", mode: "assign", value: "false", global: crLateCheckGlobalSettingsYAML, wantStatus: http.StatusAccepted},
 		{name: "restart, assign, off", verb: "restart", mode: "assign", value: "0", global: crLateCheckGlobalSettingsYAML, wantStatus: http.StatusAccepted},
-		{name: "restart, block, on", verb: "restart", mode: "block", value: "true", global: crLateCheckBlockGlobalSettingsYAML, wantStatus: http.StatusAccepted},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2012,62 +1967,6 @@ func TestBuildStartContext_CloudRunInitFirewallNativeIdentityOff(t *testing.T) {
 			delete(rest, cloudRunInitFirewallEnv)
 			if !maps.Equal(rest, without.Opts.Env) {
 				t.Errorf("the env with the init firewall differs beyond that key:\n with:    %v\n without: %v", rest, without.Opts.Env)
-			}
-		})
-	}
-}
-
-// Native "block" with the init firewall is not refused: the refusal applies
-// to "assign" only. The setting reaches the env unchanged, on create and
-// start.
-func TestBuildStartContext_CloudRunBlockInitFirewallKept(t *testing.T) {
-	tests := []struct {
-		name string
-		in   func(projectDir string) startContextInputs
-	}{
-		{name: "create", in: func(dir string) startContextInputs {
-			return startContextInputs{
-				Name:        crInitFirewallAgent,
-				ProjectPath: dir,
-				Config: &CreateAgentConfig{
-					GCPIdentity: &GCPIdentityConfig{MetadataMode: "block"},
-					Env:         []string{cloudRunInitFirewallEnv + "=true"},
-				},
-				HTTPRequest: httptest.NewRequest("POST", "/api/v1/agents", nil),
-				Operation:   opCreate,
-			}
-		}},
-		{name: "start", in: func(dir string) startContextInputs {
-			return startContextInputs{
-				Name:        crInitFirewallAgent,
-				ProjectPath: dir,
-				ResolvedEnv: map[string]string{
-					"SCION_METADATA_MODE":        "block",
-					"SCION_METADATA_MODE_SOURCE": "hub",
-					cloudRunInitFirewallEnv:      "true",
-				},
-				HTTPRequest: httptest.NewRequest("POST", "/api/v1/agents/x/start", nil),
-				Operation:   opHTTPStart,
-			}
-		}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			srv, projectDir := newCloudRunStartContextServer(t, testCloudRunBlockGlobalSettingsYAML)
-			sc, err := srv.buildStartContext(crGateCtx(), tc.in(projectDir))
-			if err != nil {
-				t.Fatalf("buildStartContext: %v", err)
-			}
-			id := sc.Opts.CloudRunIdentity
-			if id == nil || id.ServiceAccount != crBlockSA || id.Mode != "block" {
-				t.Fatalf("CloudRunIdentity = %+v, want {%s block}", id, crBlockSA)
-			}
-			env := sc.Opts.Env
-			if env["SCION_METADATA_MODE"] != "block" || env["GCE_METADATA_HOST"] != "localhost:18380" {
-				t.Errorf("expected metadata mode block, got %v", metadataEnv(env))
-			}
-			if got := env[cloudRunInitFirewallEnv]; got != "true" {
-				t.Errorf("%s = %q, want true unchanged", cloudRunInitFirewallEnv, got)
 			}
 		})
 	}

@@ -592,11 +592,10 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// uses the instance's own metadata server instead of the sciontool
 	// metadata emulator, so, as for Kubernetes Workload Identity above, the
 	// mode is rewritten to "passthrough" and the account and project are
-	// set as informational env in the passthrough arm below. "block" keeps
-	// the emulator in block mode as a second layer: the mode is set to
-	// "block", which also covers a hub-default passthrough the resolver
-	// mapped to block. The emulator and its env plumbing stay in place for
-	// every other dispatch.
+	// set as informational env in the passthrough arm below. A dispatch that
+	// resolves to "block" (explicit, unset, or a hub-default passthrough) is
+	// refused by the resolver. The emulator and its env plumbing stay in
+	// place for every other dispatch.
 	// requireLocalRuntime marks a passthrough granted by the hub's default
 	// rung. hubDefaultPassthrough is its only reading (the create request's
 	// GCPIdentity, else the resolved env overlaid by the config env); the
@@ -606,13 +605,8 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	if sce != nil {
 		return nil, sce
 	}
-	if crIdentity.Identity != nil {
-		switch crIdentity.Identity.Mode {
-		case store.GCPMetadataModeAssign:
-			gcpMetadataMode = store.GCPMetadataModePassthrough
-		case store.GCPMetadataModeBlock:
-			gcpMetadataMode = store.GCPMetadataModeBlock
-		}
+	if crIdentity.Identity != nil && crIdentity.Identity.Mode == store.GCPMetadataModeAssign {
+		gcpMetadataMode = store.GCPMetadataModePassthrough
 	}
 
 	// --- Build merged environment ---
