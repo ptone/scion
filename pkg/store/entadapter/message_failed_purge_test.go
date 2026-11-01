@@ -157,9 +157,10 @@ func TestPurgeFailedMessagesChunk_TimeBoundStopsChunkEarly(t *testing.T) {
 	}
 	cutoff := time.Now().UTC().Add(-7 * 24 * time.Hour)
 
-	// The clock reads t0+100ms at the start, t0+200ms before the second
-	// batch (under the 250ms bound) and t0+300ms before the third (over it).
-	res, err := s.PurgeFailedMessagesChunk(ctx, cutoff, store.MessagePosition{}, 6, 250*time.Millisecond)
+	// Each clock read advances 100ms: the chunk has run 100ms before the
+	// second batch (under the 150ms bound) and 200ms before the third (over
+	// it).
+	res, err := s.PurgeFailedMessagesChunk(ctx, cutoff, store.MessagePosition{}, 6, 150*time.Millisecond)
 	require.NoError(t, err)
 	assert.Equal(t, 4, res.Examined, "the chunk stops after the batch in flight when the bound is reached")
 	assert.Equal(t, 4, res.Deleted)
@@ -168,7 +169,7 @@ func TestPurgeFailedMessagesChunk_TimeBoundStopsChunkEarly(t *testing.T) {
 	_, err = s.GetMessage(ctx, ids[4])
 	require.NoError(t, err, "rows past the early stop are left for the next chunk")
 
-	res, err = s.PurgeFailedMessagesChunk(ctx, cutoff, res.Next, 6, 250*time.Millisecond)
+	res, err = s.PurgeFailedMessagesChunk(ctx, cutoff, res.Next, 6, 150*time.Millisecond)
 	require.NoError(t, err)
 	assert.Equal(t, 2, res.Deleted)
 	assert.True(t, res.Done)
