@@ -982,3 +982,20 @@ func TestBrokerInboundRouted_AttachmentIDsRefused(t *testing.T) {
 	rec = brokerInboundRouted(t, f.srv, sender, f.target)
 	assert.NotEqual(t, http.StatusBadRequest, rec.Code, "without attachment_ids the route is unchanged: %s", rec.Body.String())
 }
+
+// TestResolveBrokerInboundSender_IdentityFields: the resolved broker
+// inbound sender is the stored user as an AuthenticatedUser with client
+// type "integration", exactly as the broker inbound routes have always
+// built it, so checks that read the identity behave the same.
+func TestResolveBrokerInboundSender_IdentityFields(t *testing.T) {
+	f := newSendFixture(t)
+	got, refusal := f.srv.resolveBrokerInboundSender(context.Background(), "user:"+f.ua.Email)
+	require.Nil(t, refusal)
+	require.NotNil(t, got)
+	assert.Equal(t, f.ua.ID, got.ID())
+	assert.Equal(t, f.ua.Email, got.Email())
+	assert.Equal(t, f.ua.DisplayName, got.DisplayName())
+	assert.Equal(t, f.ua.Role, got.Role())
+	assert.Equal(t, "user", got.Type())
+	assert.Equal(t, "integration", got.ClientType())
+}
