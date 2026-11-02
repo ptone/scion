@@ -216,6 +216,32 @@ func TestDelegatedProjectAgentList_ScopeAndBinding(t *testing.T) {
 	_, err = w.srv.listCursorSealer.Open(page.NextCursor, scopedCursorBinding("project_agents:"+w.proj.ID, filter, identity))
 	assert.Error(t, err, "and under no other key")
 
+	// The refusal's record names its cause: the issuer's authority for P3, the grant boundary for P2 under a
+	// P1-bounded grant.
+	decisions := w.captureDecisions(t)
+	for _, tc := range []struct {
+		token, projectID, code string
+	}{
+		{cred.Token, w.p3.ID, agentDelegationCodeIssuerAuthority},
+		{bounded.Token, w.other.ID, agentDelegationCodeOutsideBoundary},
+	} {
+		decisions.reset()
+		assert.Empty(t, adtDecodeItems(t, w.listAt(t, tc.token, path(tc.projectID), nil), "agents").ids)
+		primary := decisions.primaryDelegated()
+		require.Len(t, primary, 1)
+		assert.Equal(t, "deny", primary[0].Result)
+		assert.Equal(t, "agent delegation: "+tc.code, primary[0].Reason)
+	}
+	// An unknown project answers the existing 404, before the list arm, as for every caller.
+	rec := w.listAt(t, cred.Token, path(tid("adt-plist-no-such-project")), nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+
+	// An unrestricted issuer: All ∩ {P} = {P}, so the admin lists P3's agents through the project form.
+	admin := hubAdminUser(t, w.bypassAgentsFixture)
+	adminAgent, _ := w.createdAgent(t, w.create(t, authUser(admin), CreateAgentRequest{Name: "adt-plist-admin-x"}), "adt-plist-admin-x")
+	_, adminCred := w.adtDelegatedFor(t, admin, adminAgent, map[string]string{"kind": "hub"}, "agent:list", "agent:read")
+	assert.Equal(t, []string{w.agentD.ID}, adtDecodeItems(t, w.listAt(t, adminCred.Token, path(w.p3.ID), nil), "agents").ids)
+
 	adtAssertAPIError(t, w.listAt(t, cred.Token, path(w.proj.ID), url.Values{"sort": {"name"}}), http.StatusBadRequest, errCodeDelegatedListSortUnsupported)
 	adtAssertAPIError(t, w.listAt(t, cred.Token, path(w.proj.ID), url.Values{"ids": {w.agentA.ID}}), http.StatusBadRequest, errCodeDelegatedListSortUnsupported)
 	adtAssertAPIError(t, w.do(t, http.MethodGet, path(w.proj.ID)+"/", nil, adtBearer(cred.Token)), http.StatusForbidden, errCodeCredentialNotAdmitted)
@@ -267,6 +293,13 @@ func TestDelegatedSkillList_ScopeAndItemFilter(t *testing.T) {
 	require.Len(t, primary, 1)
 	assert.Equal(t, "deny", primary[0].Result, "without skill:list the list arm refuses")
 	assert.Equal(t, "skill.list", primary[0].PermissionID)
+
+	// No project.list scope is resolved or recorded for a delegated skill list (R6-4).
+	decisions.reset()
+	adtDecodeItems(t, w.listAt(t, cred.Token, "/api/v1/skills", nil), "skills")
+	for _, r := range decisions.records() {
+		assert.NotEqual(t, "project.list", r.PermissionID, "a delegated skill list writes no project.list record")
+	}
 }
 
 // TestDelegatedTemplateList_ScopeAndItemFilter: a hub grant with
@@ -308,6 +341,15 @@ func TestDelegatedTemplateList_ScopeAndItemFilter(t *testing.T) {
 
 	bounded := w.delegated(t, w.adtIssueGrant(t, map[string]string{"kind": "project", "projectId": w.other.ID}, "template:list", "template:read").ID)
 	assert.Equal(t, []string{w.tmplP2}, adtDecodeItems(t, w.listAt(t, bounded.Token, "/api/v1/templates", nil), "templates").ids)
+
+	// R8-1: under a P1-bounded grant the legacy row (project ID P1, scope ID P3) is fetched through the project ID
+	// term and dropped by admission, and the aggregated record counts it.
+	boundedP1 := w.delegated(t, w.adtIssueGrant(t, map[string]string{"kind": "project", "projectId": w.proj.ID}, "template:list", "template:read").ID)
+	decisions.reset()
+	assert.Equal(t, []string{w.tmplP1}, adtDecodeItems(t, w.listAt(t, boundedP1.Token, "/api/v1/templates", nil), "templates").ids)
+	agg := decisions.listFilterRecords()
+	require.Len(t, agg, 1)
+	assert.GreaterOrEqual(t, agg[0].ListFilter.DroppedByAdmission, 1, "the legacy row is dropped by admission and counted")
 
 	readOnly := w.delegated(t, w.adtIssueGrant(t, map[string]string{"kind": "hub"}, "template:read").ID)
 	decisions.reset()
@@ -354,6 +396,53 @@ func TestDelegatedCatalogLists_HubCatalogNeverListed(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, []bool{false, false}, allowed, "the catalog batch denies every row for a delegated identity")
+}
+
+// TestDelegatedCatalogLists_IssuerScopeNoneAndExcludedProject: a P2-bounded grant whose issuer then loses P2 lists
+// nothing on the skill and template lists, with one deny record (issuer_authority). For an unrestricted issuer, an
+// access constraint that excludes P2 removes P2's skill and template (AllProjects mode, R7-1).
+func TestDelegatedCatalogLists_IssuerScopeNoneAndExcludedProject(t *testing.T) {
+	w := newADTCatalogWorld(t, "adt-catnone")
+	ctx := context.Background()
+	decisions := w.captureDecisions(t)
+	cred := w.delegated(t, w.adtIssueGrant(t, map[string]string{"kind": "project", "projectId": w.other.ID},
+		"skill:list", "skill:read", "template:list", "template:read").ID)
+	require.NoError(t, w.store.DeleteRoleBinding(ctx, w.aliceP2Binding))
+	for path, key := range map[string]string{"/api/v1/skills": "skills", "/api/v1/templates": "templates"} {
+		decisions.reset()
+		l := adtDecodeItems(t, w.listAt(t, cred.Token, path, nil), key)
+		assert.Empty(t, l.ids, path)
+		assert.Zero(t, l.TotalCount, path)
+		primary := decisions.primaryDelegated()
+		require.Len(t, primary, 1, path)
+		assert.Equal(t, "deny", primary[0].Result, path)
+		assert.Equal(t, "agent delegation: "+agentDelegationCodeIssuerAuthority, primary[0].Reason, path)
+	}
+
+	admin := hubAdminUser(t, w.bypassAgentsFixture)
+	adminAgent, _ := w.createdAgent(t, w.create(t, authUser(admin), CreateAgentRequest{Name: "adt-catnone-x"}), "adt-catnone-x")
+	_, adminCred := w.adtDelegatedFor(t, admin, adminAgent, map[string]string{"kind": "hub"}, "skill:list", "skill:read", "template:list", "template:read")
+	pType := "user"
+	_, err := w.store.CreateAccessConstraint(ctx, &store.AccessConstraint{
+		Name:                 "adt-catnone-block-p2",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
+		SubjectPrincipalType: &pType,
+		SubjectPrincipalID:   strPtr(admin.ID),
+		ScopeType:            "project",
+		ScopeID:              w.other.ID,
+		MaximumPermissions:   []string{"agent.read"},
+		Purpose:              "test constraint exclusion",
+		CreatedBy:            admin.ID,
+	})
+	require.NoError(t, err)
+	skills := adtDecodeItems(t, w.listAt(t, adminCred.Token, "/api/v1/skills", nil), "skills")
+	assert.Contains(t, skills.ids, w.skillP1)
+	assert.NotContains(t, skills.ids, w.skillP2, "a project the constraint excludes does not appear")
+	assert.Equal(t, len(skills.ids), skills.TotalCount)
+	tmpls := adtDecodeItems(t, w.listAt(t, adminCred.Token, "/api/v1/templates", nil), "templates")
+	assert.Contains(t, tmpls.ids, w.tmplP1)
+	assert.NotContains(t, tmpls.ids, w.tmplP2, "a project the constraint excludes does not appear")
+	assert.Equal(t, len(tmpls.ids), tmpls.TotalCount)
 }
 
 // TestDelegatedListRoutes_CursorBoundToCredentialGrantAgentAndBoundary:
@@ -403,6 +492,9 @@ func TestDelegatedListRoutes_CursorBoundToCredentialGrantAgentAndBoundary(t *tes
 
 			first := adtDecodeItems(t, w.listAt(t, cred.Token, rt.path, url.Values{"limit": {"2"}}), rt.key)
 			require.NotEmpty(t, first.NextCursor)
+			// A hand-built plaintext cursor is refused.
+			plain := authorizedListCursor(time.Now(), "adt-rcursor-plain", "binding")
+			adtAssertAPIError(t, w.listAt(t, cred.Token, rt.path, url.Values{"cursor": {plain}}), http.StatusBadRequest, ErrCodeInvalidCursor)
 			for name, other := range map[string]string{"another grant": otherGrant.Token, "another agent": otherAgent.Token, "a project-bounded grant": bounded.Token, "a re-exchanged credential": again.Token} {
 				t.Run(name, func(t *testing.T) {
 					adtAssertAPIError(t, w.listAt(t, other, rt.path, url.Values{"limit": {"2"}, "cursor": {first.NextCursor}}), http.StatusBadRequest, ErrCodeInvalidCursor)
@@ -480,14 +572,17 @@ func TestDelegatedItemFilterKeys_RefusedOnSingleReads(t *testing.T) {
 		"/api/v1/templates/" + w.tmplP1,
 		"/api/v1/templates/" + w.tmplP1 + "/download",
 		"/api/v1/templates/" + w.tmplP1 + "/files",
+		"/api/v1/templates/" + w.tmplP1 + "/validate",
+		"/api/v1/skills/" + w.skillP1 + "/resolve",
+		"/api/v1/skills/" + w.skillP1 + "/files/x",
+		"/api/v1/users/me/templates",
 	} {
 		adtAssertAPIError(t, w.do(t, http.MethodGet, path, nil, adtBearer(cred.Token)), http.StatusForbidden, errCodeCredentialNotAdmitted)
 	}
 	adtAssertAPIError(t, w.do(t, http.MethodPost, "/api/v1/skills/resolve", map[string]interface{}{"ref": "x"}, adtBearer(cred.Token)), http.StatusForbidden, errCodeCredentialNotAdmitted)
 	// The list routes themselves accept only their exact path.
 	for _, path := range []string{"/api/v1/skills/", "/api/v1/templates/"} {
-		rec := w.do(t, http.MethodGet, path, nil, adtBearer(cred.Token))
-		assert.NotEqual(t, http.StatusOK, rec.Code, "%s is not the exact list path", path)
+		adtAssertAPIError(t, w.do(t, http.MethodGet, path, nil, adtBearer(cred.Token)), http.StatusForbidden, errCodeCredentialNotAdmitted)
 	}
 }
 

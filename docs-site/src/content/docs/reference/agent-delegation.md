@@ -138,7 +138,9 @@ those routes answer `403 credential_not_admitted`.
 - **Scope:** the issuer's own list access right now, within the grant's boundary. A
   project-bounded grant lists only that project. The project agent list lists only its one
   project, and lists nothing for a project outside the issuer's access or the grant's boundary.
-  The agent's own access adds nothing.
+  A project that does not exist answers `404`, as it does for every caller; name the project by
+  its ID, because a slug in the path answers `403 credential_not_admitted`. The agent's own access
+  adds nothing.
 - **Project items only on the skill and template lists:** only project-scoped skills and templates
   are listed. Hub catalog (global and core) and user-scoped skills and templates are never listed
   to a delegated credential. `scope=global`, `scope=core` and `scope=user` list nothing, and so

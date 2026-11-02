@@ -802,7 +802,12 @@ list route that is not in the admission table refuses a delegated request at the
     Explicit {P} or None; a project outside the issuer's scope or the grant boundary lists nothing.
     The binding key is the landed `project-agents:<projectID>` (through `sortSuffix`). The route
     target is the project segment as the path names it, so a slug path, whose segment differs from
-    the loaded project's ID, is refused with 403 `credential_not_admitted`.
+    the loaded project's ID, is refused with 403 `credential_not_admitted`. An unknown project answers
+    the existing 404 from `handleProjectAgents`, which runs before the list arm for every caller, so
+    no decision record is written for it: unlike the empty 200 for a project outside the scope, the
+    404 tells the caller the project does not exist, as it does any other caller.
+    When the issuer's scope holds the project but the grant boundary removes it, the arm's deny code
+    is `outside_boundary`; otherwise `issuer_authority`.
   - **Skill list** (`skills.list.collection`). No `project.list` scope is resolved for the caller.
     The query lists project-scoped skills only: the scope's projects in Explicit mode, or every
     project (`SkillAccessScope.AllProjects`) in AllProjects mode, with project admission per item.

@@ -293,7 +293,15 @@ func (s *Server) delegatedListScope(ctx context.Context, d *DelegatedAgentIdenti
 		return none, nil
 	}
 	if narrowProject != "" {
+		// When the issuer's own scope holds the project but the grant boundary
+		// removes it, the boundary is the reason, not the issuer's authority.
+		issuerHolds := !issuerScope.Scopes.Intersection(ScopeSetExplicit(narrowProject)).IsNone() &&
+			!slices.Contains(issuerScope.ExcludedProjectIDs, narrowProject)
 		scopes = scopes.Intersection(ScopeSetExplicit(narrowProject))
+		if scopes.IsNone() && issuerHolds {
+			deny(agentDelegationCodeOutsideBoundary)
+			return none, nil
+		}
 	}
 
 	scope := delegatedListScope{Mode: delegatedListExplicit}
