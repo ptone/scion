@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -3070,6 +3071,12 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 	if !checkAgentReadScope(w, r) {
 		return
 	}
+	// An agent delegated credential takes its scope only from the delegated
+	// list arm, narrowed to this project (.design/agent-delegation.md §11.8).
+	if d, ok := GetIdentityFromContext(r.Context()).(*DelegatedAgentIdentity); ok && d != nil {
+		s.listProjectAgentsDelegated(w, r, d, projectID)
+		return
+	}
 	// The listing performs no authorization-state writes, so one input memo
 	// serves every authorization decision this request makes.
 	r = r.WithContext(withAuthzInputMemo(r.Context()))
@@ -3114,24 +3121,9 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 		}
 	}
 
-	filter := store.AgentFilter{
-		ProjectID:       projectID,
-		RuntimeBrokerID: query.Get("runtimeBrokerId"),
-		Phase:           query.Get("phase"),
-		IncludeDeleted:  query.Get("includeDeleted") == "true",
-	}
-	if err := applyAgentAttributeAndRelationshipFilters(&filter, query); err != nil {
-		BadRequest(w, err.Error())
+	filter, ok := projectAgentListFilter(w, query, projectID)
+	if !ok {
 		return
-	}
-
-	if labelParams := query["label"]; len(labelParams) > 0 {
-		parsed, err := parseLabelFilters(labelParams)
-		if err != nil {
-			BadRequest(w, err.Error())
-			return
-		}
-		filter.Labels = parsed
 	}
 
 	limit := 500
@@ -3218,6 +3210,32 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 		ServerTime:            time.Now().UTC(),
 		Capabilities:          scopeCap,
 	})
+}
+
+// projectAgentListFilter builds the store filter of a project agent list
+// from the caller's query: the project, broker, phase, deleted, attribute,
+// relationship and label filters. It writes 400 and returns false for a
+// malformed filter. listProjectAgents and its delegated branch share it.
+func projectAgentListFilter(w http.ResponseWriter, query url.Values, projectID string) (store.AgentFilter, bool) {
+	filter := store.AgentFilter{
+		ProjectID:       projectID,
+		RuntimeBrokerID: query.Get("runtimeBrokerId"),
+		Phase:           query.Get("phase"),
+		IncludeDeleted:  query.Get("includeDeleted") == "true",
+	}
+	if err := applyAgentAttributeAndRelationshipFilters(&filter, query); err != nil {
+		BadRequest(w, err.Error())
+		return store.AgentFilter{}, false
+	}
+	if labelParams := query["label"]; len(labelParams) > 0 {
+		parsed, err := parseLabelFilters(labelParams)
+		if err != nil {
+			BadRequest(w, err.Error())
+			return store.AgentFilter{}, false
+		}
+		filter.Labels = parsed
+	}
+	return filter, true
 }
 
 // createProjectAgent creates an agent within a specific project
