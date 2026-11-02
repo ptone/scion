@@ -64,6 +64,20 @@ func (_c *AgentDelegationGrantCreate) SetNillableAgentStateVersion(v *int64) *Ag
 	return _c
 }
 
+// SetAgentRunID sets the "agent_run_id" field.
+func (_c *AgentDelegationGrantCreate) SetAgentRunID(v string) *AgentDelegationGrantCreate {
+	_c.mutation.SetAgentRunID(v)
+	return _c
+}
+
+// SetNillableAgentRunID sets the "agent_run_id" field if the given value is not nil.
+func (_c *AgentDelegationGrantCreate) SetNillableAgentRunID(v *string) *AgentDelegationGrantCreate {
+	if v != nil {
+		_c.SetAgentRunID(*v)
+	}
+	return _c
+}
+
 // SetIssuerUserID sets the "issuer_user_id" field.
 func (_c *AgentDelegationGrantCreate) SetIssuerUserID(v string) *AgentDelegationGrantCreate {
 	_c.mutation.SetIssuerUserID(v)
@@ -337,6 +351,10 @@ func (_c *AgentDelegationGrantCreate) defaults() {
 		v := agentdelegationgrant.DefaultAgentStateVersion
 		_c.mutation.SetAgentStateVersion(v)
 	}
+	if _, ok := _c.mutation.AgentRunID(); !ok {
+		v := agentdelegationgrant.DefaultAgentRunID
+		_c.mutation.SetAgentRunID(v)
+	}
 	if _, ok := _c.mutation.AllowSubdelegation(); !ok {
 		v := agentdelegationgrant.DefaultAllowSubdelegation
 		_c.mutation.SetAllowSubdelegation(v)
@@ -378,6 +396,9 @@ func (_c *AgentDelegationGrantCreate) check() error {
 	}
 	if _, ok := _c.mutation.AgentStateVersion(); !ok {
 		return &ValidationError{Name: "agent_state_version", err: errors.New(`ent: missing required field "AgentDelegationGrant.agent_state_version"`)}
+	}
+	if _, ok := _c.mutation.AgentRunID(); !ok {
+		return &ValidationError{Name: "agent_run_id", err: errors.New(`ent: missing required field "AgentDelegationGrant.agent_run_id"`)}
 	}
 	if _, ok := _c.mutation.IssuerUserID(); !ok {
 		return &ValidationError{Name: "issuer_user_id", err: errors.New(`ent: missing required field "AgentDelegationGrant.issuer_user_id"`)}
@@ -493,6 +514,10 @@ func (_c *AgentDelegationGrantCreate) createSpec() (*AgentDelegationGrant, *sqlg
 	if value, ok := _c.mutation.AgentStateVersion(); ok {
 		_spec.SetField(agentdelegationgrant.FieldAgentStateVersion, field.TypeInt64, value)
 		_node.AgentStateVersion = value
+	}
+	if value, ok := _c.mutation.AgentRunID(); ok {
+		_spec.SetField(agentdelegationgrant.FieldAgentRunID, field.TypeString, value)
+		_node.AgentRunID = value
 	}
 	if value, ok := _c.mutation.IssuerUserID(); ok {
 		_spec.SetField(agentdelegationgrant.FieldIssuerUserID, field.TypeString, value)
@@ -744,6 +769,9 @@ func (u *AgentDelegationGrantUpsertOne) UpdateNewValues() *AgentDelegationGrantU
 		}
 		if _, exists := u.create.mutation.AgentStateVersion(); exists {
 			s.SetIgnore(agentdelegationgrant.FieldAgentStateVersion)
+		}
+		if _, exists := u.create.mutation.AgentRunID(); exists {
+			s.SetIgnore(agentdelegationgrant.FieldAgentRunID)
 		}
 		if _, exists := u.create.mutation.IssuerUserID(); exists {
 			s.SetIgnore(agentdelegationgrant.FieldIssuerUserID)
@@ -1120,6 +1148,9 @@ func (u *AgentDelegationGrantUpsertBulk) UpdateNewValues() *AgentDelegationGrant
 			}
 			if _, exists := b.mutation.AgentStateVersion(); exists {
 				s.SetIgnore(agentdelegationgrant.FieldAgentStateVersion)
+			}
+			if _, exists := b.mutation.AgentRunID(); exists {
+				s.SetIgnore(agentdelegationgrant.FieldAgentRunID)
 			}
 			if _, exists := b.mutation.IssuerUserID(); exists {
 				s.SetIgnore(agentdelegationgrant.FieldIssuerUserID)
