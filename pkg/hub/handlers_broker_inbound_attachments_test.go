@@ -22,11 +22,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -998,4 +1002,72 @@ func TestResolveBrokerInboundSender_IdentityFields(t *testing.T) {
 	assert.Equal(t, f.ua.Role, got.Role())
 	assert.Equal(t, "user", got.Type())
 	assert.Equal(t, "integration", got.ClientType())
+}
+
+// brokerSenderContextRefs counts, per enclosing top-level function, the
+// identifiers named name (either first-letter case) in files.
+func brokerSenderContextRefs(files map[string]*ast.File, name string) map[string]int {
+	out := map[string]int{}
+	lower := strings.ToLower(name[:1]) + name[1:]
+	upper := strings.ToUpper(name[:1]) + name[1:]
+	for path, f := range files {
+		for _, d := range f.Decls {
+			key := path + ":<package scope>"
+			var node ast.Node = d
+			if fn, ok := d.(*ast.FuncDecl); ok {
+				if fn.Body == nil {
+					continue
+				}
+				key = path + ":" + fn.Name.Name
+				node = fn.Body
+			}
+			ast.Inspect(node, func(n ast.Node) bool {
+				if id, ok := n.(*ast.Ident); ok && (id.Name == lower || id.Name == upper) {
+					out[key]++
+				}
+				return true
+			})
+		}
+	}
+	return out
+}
+
+// TestBrokerSenderContext_SingleIdentitySetter pins the condition behind
+// the allow-list entry for broker_inbound_sender.go in
+// principalContextSetterFiles: that file names contextWithIdentity exactly
+// once, inside brokerSenderContext, and brokerSenderContext is called only
+// by the two broker routes, after the sender was resolved and authorized.
+func TestBrokerSenderContext_SingleIdentitySetter(t *testing.T) {
+	paths, err := filepath.Glob("*.go")
+	require.NoError(t, err)
+	fset := token.NewFileSet()
+	files := map[string]*ast.File{}
+	for _, p := range paths {
+		if strings.HasSuffix(p, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, p, nil, 0)
+		require.NoError(t, err, p)
+		files[p] = f
+	}
+	require.Contains(t, files, "broker_inbound_sender.go")
+
+	setters := brokerSenderContextRefs(map[string]*ast.File{"broker_inbound_sender.go": files["broker_inbound_sender.go"]}, "contextWithIdentity")
+	assert.Equal(t, map[string]int{"broker_inbound_sender.go:brokerSenderContext": 1}, setters,
+		"broker_inbound_sender.go must name contextWithIdentity once, in brokerSenderContext")
+
+	callers := brokerSenderContextRefs(files, "brokerSenderContext")
+	assert.Equal(t, map[string]int{
+		"handlers_broker_inbound_attachments.go:handleBrokerAttachmentsUpload": 1,
+		"handlers_broker_inbound.go:handleBrokerInbound":                       1,
+	}, callers, "brokerSenderContext must be called only by the two broker routes")
+
+	// Control: a planted second setter and a planted caller are counted.
+	planted, err := parser.ParseFile(token.NewFileSet(), "broker_inbound_sender.go",
+		"package hub\nfunc plantedSetter(ctx context.Context, u *AuthenticatedUser) { _ = contextWithIdentity(ctx, u); _ = brokerSenderContext(ctx, u) }\n", 0)
+	require.NoError(t, err)
+	got := brokerSenderContextRefs(map[string]*ast.File{"broker_inbound_sender.go": planted}, "contextWithIdentity")
+	assert.Equal(t, map[string]int{"broker_inbound_sender.go:plantedSetter": 1}, got)
+	got = brokerSenderContextRefs(map[string]*ast.File{"zz_planted.go": planted}, "brokerSenderContext")
+	assert.Equal(t, map[string]int{"zz_planted.go:plantedSetter": 1}, got)
 }
