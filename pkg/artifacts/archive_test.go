@@ -991,7 +991,9 @@ func TestArchiveClientGoneClassifier(t *testing.T) {
 		{"blob read failing, client still there", live, archiveFailBlobRead, errors.New("storage unavailable"), false},
 		{"blob read failing while the client is gone", gone, archiveFailBlobRead, errors.New("storage unavailable"), false},
 		{"size mismatch while the client is gone", gone, archiveFailSizeMatch, errBlobSize, false},
-		{"blob open while the client is gone", gone, archiveFailBlobOpen, context.Canceled, false},
+		{"blob open cancelled by the client", gone, archiveFailBlobOpen, fmt.Errorf("open: %w", context.Canceled), true},
+		{"blob open failing while the client is gone", gone, archiveFailBlobOpen, errors.New("storage unavailable"), false},
+		{"blob open cancelled, client still there", live, archiveFailBlobOpen, context.Canceled, false},
 		{"entry header while the client is gone", gone, archiveFailEntryHeader, errors.New("bad header"), false},
 		{"time limit", live, archiveFailTimeLimit, errArchiveTimeLimit, false},
 	} {

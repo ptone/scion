@@ -24,7 +24,7 @@ import (
 	"testing"
 )
 
-func TestConnGoneWindows(t *testing.T) {
+func TestWindowsConnGone(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		err  error

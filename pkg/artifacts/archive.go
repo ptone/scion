@@ -554,15 +554,16 @@ func archiveLogFailure(ctx context.Context, a *Artifact, v *Version, class strin
 //   - a write failure while the request context has ended (the client
 //     disconnected; the archive's own time limit uses a separate context),
 //     or on a closed, broken or reset connection (connGone, per OS);
-//   - a blob read cancelled because the request context ended.
+//   - a blob open or read cancelled because the request context ended.
 //
-// Size mismatches, blob opens, entry headers and the time limit are never
-// relabelled: they stay at Warn whether or not the client is still there.
+// Size mismatches, entry headers, the time limit, and blob opens and reads
+// that fail for any other reason are never relabelled: they stay at Warn
+// whether or not the client is still there.
 func archiveClientGone(reqCtx context.Context, class string, err error) bool {
 	switch class {
 	case archiveFailWrite:
 		return reqCtx.Err() != nil || connGone(err) || errors.Is(err, net.ErrClosed)
-	case archiveFailBlobRead:
+	case archiveFailBlobOpen, archiveFailBlobRead:
 		return reqCtx.Err() != nil && errors.Is(err, context.Canceled)
 	}
 	return false
