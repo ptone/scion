@@ -21,15 +21,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand"
 	"mime"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sort"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -58,6 +62,13 @@ func newArchiveFixture(t *testing.T) *fixture {
 func (f *fixture) archive(p *principal, method, target string, hdr map[string]string) (rec *httptest.ResponseRecorder, aborted bool) {
 	f.t.Helper()
 	rec = httptest.NewRecorder()
+	return rec, f.serveArchive(rec, p, method, target, hdr)
+}
+
+// serveArchive serves an archive request into w and reports whether the
+// handler aborted the response.
+func (f *fixture) serveArchive(w http.ResponseWriter, p *principal, method, target string, hdr map[string]string) (aborted bool) {
+	f.t.Helper()
 	r := httptest.NewRequest(method, target, nil)
 	for k, v := range hdr {
 		r.Header.Set(k, v)
@@ -73,8 +84,8 @@ func (f *fixture) archive(p *principal, method, target string, hdr map[string]st
 			aborted = true
 		}
 	}()
-	f.svc.ServeHTTP(rec, r)
-	return rec, false
+	f.svc.ServeHTTP(w, r)
+	return false
 }
 
 // mustArchive serves a GET that must stream a whole archive.
@@ -464,8 +475,9 @@ func TestArchiveTooLarge(t *testing.T) {
 			if method == http.MethodGet && errCode(t, rec) != CodeArchiveTooLarge {
 				t.Errorf("%s: code %s", name, errCode(t, rec))
 			}
-			if rec.Header().Get("Content-Disposition") != "" || rec.Header().Get("Content-Type") == "application/zip" {
-				t.Errorf("%s %s: zip headers on a refusal", name, method)
+			if rec.Header().Get("Content-Disposition") != "" || rec.Header().Get("Content-Type") == "application/zip" ||
+				rec.Header().Get("ETag") != "" || rec.Header().Get("Content-Security-Policy") != "" {
+				t.Errorf("%s %s: archive headers on a refusal", name, method)
 			}
 		}
 		resp, _ := f.getVersion(agentA, id, 1)
@@ -498,8 +510,10 @@ func TestArchiveBusy(t *testing.T) {
 			if method == http.MethodGet && errCode(t, rec) != CodeArchiveBusy {
 				t.Errorf("code %s", errCode(t, rec))
 			}
-			if rec.Header().Get("Content-Disposition") != "" || rec.Header().Get("ETag") != "" {
-				t.Errorf("%s: archive headers on a busy answer", method)
+			for _, k := range []string{"Content-Disposition", "ETag", "Content-Security-Policy", "Referrer-Policy"} {
+				if rec.Header().Get(k) != "" {
+					t.Errorf("%s: archive header %s on a busy answer", method, k)
+				}
 			}
 		}
 	}
@@ -627,7 +641,8 @@ func TestArchiveFirstBlobMissing(t *testing.T) {
 	if aborted || rec.Code != http.StatusInternalServerError || errCode(t, rec) != "internal" {
 		t.Fatalf("aborted=%v %d %s", aborted, rec.Code, rec.Body.String())
 	}
-	if rec.Header().Get("Content-Disposition") != "" || rec.Header().Get("Content-Type") != "application/json" {
+	if rec.Header().Get("Content-Disposition") != "" || rec.Header().Get("Content-Type") != "application/json" ||
+		rec.Header().Get("ETag") != "" || rec.Header().Get("Content-Security-Policy") != "" {
 		t.Errorf("headers %v", rec.Header())
 	}
 	if f.svc.archiveSlotsFor().total != 0 {
@@ -845,6 +860,132 @@ func TestArchiveStored(t *testing.T) {
 	} {
 		if got := archiveStored(mt); got != want {
 			t.Errorf("archiveStored(%q) = %v, want %v", mt, got, want)
+		}
+	}
+}
+
+// --- write deadline and client loss ---
+
+// deadlineRecorder records every SetWriteDeadline call
+// (http.ResponseController) with the number of body bytes written by then.
+type deadlineRecorder struct {
+	*httptest.ResponseRecorder
+	calls []deadlineCall
+}
+
+type deadlineCall struct {
+	deadline time.Time
+	written  int
+}
+
+func (d *deadlineRecorder) SetWriteDeadline(t time.Time) error {
+	d.calls = append(d.calls, deadlineCall{deadline: t, written: d.Body.Len()})
+	return nil
+}
+
+// TestArchiveRollingWriteDeadline: the write deadline is set
+// archiveIdleWindow ahead once before the first byte of the archive, then
+// again after every archiveDeadlineStep bytes written, so a client that
+// reads less than that much in the window is cut off.
+func TestArchiveRollingWriteDeadline(t *testing.T) {
+	f := newArchiveFixture(t)
+	body := append([]byte("\x89PNG\r\n\x1a\n"), make([]byte, 7<<19)...) // a 3.5 MiB stored entry
+	rnd := rand.New(rand.NewSource(7106))
+	_, _ = rnd.Read(body[8:])
+	id := f.publish(agentA, "big.png", body, "").Artifact.ID
+	t0 := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	f.svc.archiveNow = func() time.Time { return t0 }
+
+	rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	if aborted := f.serveArchive(rec, &agentA, http.MethodGet, archivePath(id, 1), nil); aborted || rec.Code != http.StatusOK {
+		t.Fatalf("aborted=%v status %d", aborted, rec.Code)
+	}
+	entries := readArchive(t, rec.Body.Bytes())
+	if len(entries) != 1 || !bytes.Equal(entries[0].body, body) {
+		t.Fatal("archive content differs")
+	}
+	total := rec.Body.Len()
+	if len(rec.calls) == 0 || rec.calls[0].written != 0 {
+		t.Fatalf("first deadline not set before the first byte: %+v", rec.calls)
+	}
+	for i, c := range rec.calls {
+		if !c.deadline.Equal(t0.Add(archiveIdleWindow)) {
+			t.Errorf("call %d: deadline %v, want now+%v", i, c.deadline, archiveIdleWindow)
+		}
+		if i > 0 && c.written-rec.calls[i-1].written < archiveDeadlineStep {
+			t.Errorf("call %d after %d bytes, less than one step since the last", i, c.written-rec.calls[i-1].written)
+		}
+	}
+	// One extension per full step; writes are at most 32 KiB, so a step
+	// is crossed by at most that much.
+	ext := len(rec.calls) - 1
+	if lo, hi := total/(archiveDeadlineStep+32<<10), total/archiveDeadlineStep; ext < lo || ext > hi || ext < 3 {
+		t.Errorf("%d extensions for %d bytes, want %d..%d (and at least 3)", ext, total, lo, hi)
+	}
+}
+
+// brokenPipeWriter fails every write after the first n bytes with EPIPE,
+// as a connection the client closed does.
+type brokenPipeWriter struct {
+	*httptest.ResponseRecorder
+	n int
+}
+
+func (b *brokenPipeWriter) Write(p []byte) (int, error) {
+	if b.n <= 0 {
+		return 0, syscall.EPIPE
+	}
+	if len(p) > b.n {
+		// A connection that breaks mid-write reports the bytes it took
+		// and the error together.
+		n, _ := b.ResponseRecorder.Write(p[:b.n])
+		b.n = 0
+		return n, syscall.EPIPE
+	}
+	b.n -= len(p)
+	return b.ResponseRecorder.Write(p)
+}
+
+// TestArchiveClientGone: a download the client abandons (the connection
+// breaks) aborts like any failure, but is logged at INFO with class
+// client_gone, not as a WARN.
+func TestArchiveClientGone(t *testing.T) {
+	f := newArchiveFixture(t)
+	id := f.publishNested("Gone").Artifact.ID
+	logs := captureLogs(t, slog.LevelInfo)
+	w := &brokenPipeWriter{ResponseRecorder: httptest.NewRecorder(), n: 100}
+	if !f.serveArchive(w, &agentA, http.MethodGet, archivePath(id, 1), nil) {
+		t.Fatal("not aborted")
+	}
+	out := logs.String()
+	if !strings.Contains(out, "level=INFO") || !strings.Contains(out, "class="+archiveFailClientGone) || strings.Contains(out, "level=WARN") {
+		t.Errorf("log:\n%s", out)
+	}
+	if f.svc.archiveSlotsFor().total != 0 {
+		t.Error("slot not released")
+	}
+}
+
+func TestArchiveClientGoneClassifier(t *testing.T) {
+	live := context.Background()
+	gone, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, c := range []struct {
+		name string
+		ctx  context.Context
+		err  error
+		want bool
+	}{
+		{"request context ended", gone, errBlobSize, true},
+		{"broken pipe", live, fmt.Errorf("write: %w", syscall.EPIPE), true},
+		{"connection reset", live, fmt.Errorf("write: %w", syscall.ECONNRESET), true},
+		{"closed connection", live, net.ErrClosed, true},
+		{"size mismatch", live, errBlobSize, false},
+		{"time limit", live, errArchiveTimeLimit, false},
+		{"storage error", live, errors.New("storage unavailable"), false},
+	} {
+		if got := archiveClientGone(c.ctx, c.err); got != c.want {
+			t.Errorf("%s: %v, want %v", c.name, got, c.want)
 		}
 	}
 }

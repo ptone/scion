@@ -22,11 +22,13 @@ import (
 	"io"
 	"log/slog"
 	"mime"
+	"net"
 	"net/http"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -99,6 +101,7 @@ const (
 	archiveFailSizeMatch   = "size_mismatch"
 	archiveFailWrite       = "write"
 	archiveFailTimeLimit   = "time_limit"
+	archiveFailClientGone  = "client_gone"
 	archiveFailEntryHeader = "entry_header"
 )
 
@@ -349,6 +352,15 @@ func (s *Service) handleGetArchive(w http.ResponseWriter, r *http.Request, id st
 	if !ok {
 		return
 	}
+	// readableArtifact admits only a caller with a principal, so this
+	// holds; it is checked so the concurrency cap is never keyed on an
+	// empty principal.
+	kind, ref, _, ok := s.host.Principal(ctx)
+	if !ok {
+		writeNotFound(w)
+		return
+	}
+	principal := PrincipalRef(kind, ref)
 	v, ok := readyVersion(w, r, b, a, seq)
 	if !ok {
 		return
@@ -377,28 +389,26 @@ func (s *Service) handleGetArchive(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
-	h := w.Header()
-	h.Set("X-Content-Type-Options", "nosniff")
-	h.Set("Referrer-Policy", "no-referrer")
-	h.Set("Cache-Control", "private, no-cache")
-	h.Set("Content-Security-Policy", fileCSP)
+	// The file headers go on the answers that describe the archive: 304,
+	// 200 and HEAD. Refusals (413, 422, 429, and the 404s above) are plain
+	// JSON errors, like every other refusal of the service.
 	etag := `"` + archiveETagVersion + `:` + v.ID + `"`
-	h.Set("ETag", etag)
+	h := w.Header()
 	if match := r.Header.Get("If-None-Match"); match != "" && match == etag {
+		setArchiveFileHeaders(h, etag)
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
 
-	kind, ref, _, _ := s.host.Principal(ctx)
-	release, ok := s.archiveSlotsFor().acquire(PrincipalRef(kind, ref))
+	release, ok := s.archiveSlotsFor().acquire(principal)
 	if !ok {
-		h.Del("ETag")
 		h.Set("Retry-After", strconv.Itoa(archiveRetryAfter))
 		writeError(w, http.StatusTooManyRequests, CodeArchiveBusy, "too many archive downloads; try again shortly")
 		return
 	}
 	defer release()
 
+	setArchiveFileHeaders(h, etag)
 	disposition := mime.FormatMediaType("attachment", map[string]string{"filename": archiveName(a, v.Seq)})
 	h.Set("Content-Type", "application/zip")
 	h.Set("Content-Disposition", disposition)
@@ -408,6 +418,9 @@ func (s *Service) handleGetArchive(w http.ResponseWriter, r *http.Request, id st
 	}
 
 	limit := archiveTimeLimit(total)
+	// reqCtx ends only when the client goes away (or the hub stops); ctx
+	// also ends at the archive's time limit.
+	reqCtx := ctx
 	ctx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
 
@@ -418,8 +431,9 @@ func (s *Service) handleGetArchive(w http.ResponseWriter, r *http.Request, id st
 		first, _, err = b.blobs.Download(ctx, BlobPath(b.hubID, files[0].SHA256))
 		if err != nil {
 			archiveLogFailure(ctx, a, v, archiveFailBlobOpen, err)
-			h.Del("Content-Disposition")
-			h.Del("ETag")
+			for _, k := range []string{"Content-Disposition", "ETag", "Content-Security-Policy", "Referrer-Policy"} {
+				h.Del(k)
+			}
 			writeError(w, http.StatusInternalServerError, "internal", "could not read the files")
 			return
 		}
@@ -446,7 +460,7 @@ func (s *Service) handleGetArchive(w http.ResponseWriter, r *http.Request, id st
 		if i > 0 {
 			rc, _, err = b.blobs.Download(ctx, BlobPath(b.hubID, f.SHA256))
 			if err != nil {
-				abortArchive(ctx, a, v, f, archiveFailBlobOpen, err)
+				abortArchive(reqCtx, a, v, f, archiveFailBlobOpen, err)
 			}
 		}
 		class, werr := writeArchiveEntry(zw, rc, f, v.CreatedAt, buf)
@@ -455,12 +469,22 @@ func (s *Service) handleGetArchive(w http.ResponseWriter, r *http.Request, id st
 			if aw.err != nil {
 				class, werr = archiveWriteClass(aw.err), aw.err
 			}
-			abortArchive(ctx, a, v, f, class, werr)
+			abortArchive(reqCtx, a, v, f, class, werr)
 		}
 	}
 	if cerr := zw.Close(); cerr != nil {
-		abortArchive(ctx, a, v, File{}, archiveWriteClass(cerr), cerr)
+		abortArchive(reqCtx, a, v, File{}, archiveWriteClass(cerr), cerr)
 	}
+}
+
+// setArchiveFileHeaders sets the headers of a response that describes the
+// archive itself (200, HEAD and 304).
+func setArchiveFileHeaders(h http.Header, etag string) {
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Referrer-Policy", "no-referrer")
+	h.Set("Cache-Control", "private, no-cache")
+	h.Set("Content-Security-Policy", fileCSP)
+	h.Set("ETag", etag)
 }
 
 // writeArchiveEntry writes file f, read from rc, as one entry of zw. It
@@ -498,6 +522,9 @@ func archiveWriteClass(err error) string {
 // aborts the response, so the client sees a failed download rather than a
 // short archive. The deferred releases of the handler still run.
 func abortArchive(ctx context.Context, a *Artifact, v *Version, f File, class string, err error) {
+	if archiveClientGone(ctx, err) {
+		class = archiveFailClientGone
+	}
 	archiveLogFailure(ctx, a, v, class, err)
 	if f.Path != "" {
 		slog.DebugContext(ctx, "artifacts: archive aborted at file", "artifact", a.ID, "version", v.ID, "path", f.Path)
@@ -512,5 +539,22 @@ func archiveLogFailure(ctx context.Context, a *Artifact, v *Version, class strin
 	if err != nil {
 		attrs = append(attrs, "error", err)
 	}
-	slog.WarnContext(ctx, "artifacts: archive failed", attrs...)
+	level := slog.LevelWarn
+	if class == archiveFailClientGone {
+		// The client cancelled the download or its connection broke: an
+		// ordinary event, not a fault of the hub.
+		level = slog.LevelInfo
+	}
+	slog.Log(ctx, level, "artifacts: archive failed", attrs...)
+}
+
+// archiveClientGone reports whether a failure after the archive started
+// came from the client going away: the request context ended (the client
+// disconnected; the archive's own time limit uses a separate context), or
+// the write failed on a closed, broken or reset connection.
+func archiveClientGone(reqCtx context.Context, err error) bool {
+	if reqCtx.Err() != nil {
+		return true
+	}
+	return errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, net.ErrClosed)
 }
