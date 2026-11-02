@@ -244,6 +244,11 @@ func TestDelegatedProjectAgentList_ScopeAndBinding(t *testing.T) {
 
 	adtAssertAPIError(t, w.listAt(t, cred.Token, path(w.proj.ID), url.Values{"sort": {"name"}}), http.StatusBadRequest, errCodeDelegatedListSortUnsupported)
 	adtAssertAPIError(t, w.listAt(t, cred.Token, path(w.proj.ID), url.Values{"ids": {w.agentA.ID}}), http.StatusBadRequest, errCodeDelegatedListSortUnsupported)
+	adtAssertAPIError(t, w.listAt(t, cred.Token, path(w.proj.ID), url.Values{"ids": {w.agentA.ID}, "sort": {"name"}}), http.StatusBadRequest, errCodeDelegatedListSortUnsupported)
+	// The delegated refusal runs before the ids= format check; a user caller still gets that check unchanged.
+	userRec := w.listAt(t, w.session(t, w.alice), path(w.proj.ID), url.Values{"ids": {w.agentA.ID}})
+	assert.Equal(t, http.StatusBadRequest, userRec.Code, userRec.Body.String())
+	assert.Contains(t, userRec.Body.String(), "ids requires sort")
 	adtAssertAPIError(t, w.do(t, http.MethodGet, path(w.proj.ID)+"/", nil, adtBearer(cred.Token)), http.StatusForbidden, errCodeCredentialNotAdmitted)
 }
 

@@ -3063,18 +3063,20 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 		s.listProjectAgentsForVisitor(w, r, projectID)
 		return
 	}
+	// An agent delegated credential takes its scope only from the delegated
+	// list arm, narrowed to this project (.design/agent-delegation.md §11.8).
+	// Its branch refuses sort= and ids= itself (delegated_list_sort_unsupported),
+	// so it runs before the ids= format check below, as on the hub agent list.
+	if d, ok := GetIdentityFromContext(r.Context()).(*DelegatedAgentIdentity); ok && d != nil {
+		s.listProjectAgentsDelegated(w, r, d, projectID)
+		return
+	}
 	// The ids= format check runs before any authorization or store call
 	// this handler makes (see parseAgentListIDs).
 	if q := r.URL.Query(); !validateAgentListIDs(w, q, agentListLimit(q), isSortedModeRequest(q)) {
 		return
 	}
 	if !checkAgentReadScope(w, r) {
-		return
-	}
-	// An agent delegated credential takes its scope only from the delegated
-	// list arm, narrowed to this project (.design/agent-delegation.md §11.8).
-	if d, ok := GetIdentityFromContext(r.Context()).(*DelegatedAgentIdentity); ok && d != nil {
-		s.listProjectAgentsDelegated(w, r, d, projectID)
 		return
 	}
 	// The listing performs no authorization-state writes, so one input memo

@@ -372,6 +372,16 @@ func TestAgentDelegablePermissions_EachExercisedThroughItsRoute(t *testing.T) {
 	}
 	// The list permission an item-filter-only key is exercised with.
 	itemFilterList := map[string]string{"skill.read": "skill:list", "template.read": "template:list"}
+	// Each grant is revoked when its case ends, so the cases stay under the per-agent active-grant limit.
+	issue := func(t *testing.T, selectors ...string) ExchangeAgentDelegationResponse {
+		t.Helper()
+		grant := f.adtIssueGrant(t, map[string]string{"kind": "hub"}, selectors...)
+		t.Cleanup(func() {
+			rec := f.revokeGrant(t, f.session(t, f.alice), f.agentA.ID, grant.ID)
+			assert.Less(t, rec.Code, 300, "revoking the case's grant: %s", rec.Body.String())
+		})
+		return f.delegated(t, grant.ID)
+	}
 	now := time.Now()
 	require.NoError(t, f.store.CreateSkill(context.Background(), &store.Skill{ID: tid("adt-keys-skill"), Name: "adt-keys-skill", Slug: "adt-keys-skill",
 		Scope: store.SkillScopeProject, ScopeID: f.proj.ID, Status: "active", OwnerID: f.alice.ID, Created: now, Updated: now}))
@@ -385,7 +395,7 @@ func TestAgentDelegablePermissions_EachExercisedThroughItsRoute(t *testing.T) {
 		t.Run(perm, func(t *testing.T) {
 			if list, ok := itemFilterList[perm]; ok {
 				// With the list permission too, the key allows items.
-				cred := f.delegated(t, f.adtIssueGrant(t, map[string]string{"kind": "hub"}, list, tc.selector).ID)
+				cred := issue(t, list, tc.selector)
 				decisions.reset()
 				rec := tc.request(cred.Token)
 				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -393,7 +403,7 @@ func TestAgentDelegablePermissions_EachExercisedThroughItsRoute(t *testing.T) {
 				require.Len(t, agg, 1)
 				assert.Positive(t, agg[0].ListFilter.Allowed, "%s allows items on its list route", perm)
 				// Alone, the list arm refuses.
-				alone := f.delegated(t, f.adtIssueGrant(t, map[string]string{"kind": "hub"}, tc.selector).ID)
+				alone := issue(t, tc.selector)
 				decisions.reset()
 				rec = tc.request(alone.Token)
 				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -402,7 +412,7 @@ func TestAgentDelegablePermissions_EachExercisedThroughItsRoute(t *testing.T) {
 				assert.Equal(t, "deny", primary[0].Result, "%s alone admits no list", perm)
 				return
 			}
-			cred := f.delegated(t, f.adtIssueGrant(t, map[string]string{"kind": "hub"}, tc.selector).ID)
+			cred := issue(t, tc.selector)
 			decisions.reset()
 			rec := tc.request(cred.Token)
 			assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
