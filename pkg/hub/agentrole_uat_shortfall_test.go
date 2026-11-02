@@ -55,6 +55,8 @@ func TestAgentRoleUATShortfall_SelectorsMakeRoleFit(t *testing.T) {
 	for _, role := range []AgentRole{AgentRoleReadOnly, AgentRoleBaseline} {
 		s, ok := AgentRoleUATShortfall(append([]string{"agent:create"}, AgentRoleUATSelectors(role).Selectors...), role)
 		require.True(t, ok)
+		// A fitting role's shortfall is the zero value: both fields nil.
+		assert.Equal(t, RoleShortfall{}, s, "role %s", role)
 		assert.True(t, s.Empty(), "role %s: %+v", role, s)
 	}
 

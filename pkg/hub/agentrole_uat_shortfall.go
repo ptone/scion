@@ -26,7 +26,8 @@ import (
 // (roleFitsCeiling). Selectors are the user access token scopes that grant
 // the missing permissions; Ungrantable are the missing permission IDs that
 // no token scope grants, and any role scope that maps to no permission at
-// all. Both are sorted, and both are empty exactly when the role fits.
+// all. Both are sorted, and both are nil exactly when the role fits, so a
+// fitting role's shortfall is the zero value. It is never serialized.
 type RoleShortfall struct {
 	Selectors   []string
 	Ungrantable []string
@@ -82,9 +83,18 @@ func roleCeilingShortfall(c store.EffectCeiling, role AgentRole) RoleShortfall {
 			out.Ungrantable = append(out.Ungrantable, perm)
 		}
 	}
-	out.Selectors = sortedUniqueIDs(out.Selectors)
-	out.Ungrantable = sortedUniqueIDs(append(out.Ungrantable, unmapped...))
+	out.Selectors = nilIfEmpty(sortedUniqueIDs(out.Selectors))
+	out.Ungrantable = nilIfEmpty(sortedUniqueIDs(append(out.Ungrantable, unmapped...)))
 	return out
+}
+
+// nilIfEmpty returns nil for an empty slice, so an empty RoleShortfall field
+// has one shape (nil).
+func nilIfEmpty(s []string) []string {
+	if len(s) == 0 {
+		return nil
+	}
+	return s
 }
 
 // uatSelectorForPermission maps each permission ID to the user access token
