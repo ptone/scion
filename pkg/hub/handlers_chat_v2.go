@@ -3220,6 +3220,9 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 	}
 
 	page := s.chatHistoryPage(ctx, wcs, key, historyConvID, result, canPost)
+	// What the caller may do in a topic (chatThreadAccess, above); nil for a
+	// DM. The starred-only variant has no composer and carries none.
+	page.Capabilities = capabilities
 	page.Retention = s.chatHistoryRetentionMarker(ctx, result, historyConvID, topic)
 	writeJSON(w, http.StatusOK, page)
 }
@@ -3382,7 +3385,6 @@ func (s *Server) chatHistoryPage(ctx context.Context, wcs WebChatStore, key, his
 		NextCursor:                  result.NextCursor,
 		TotalCount:                  result.TotalCount,
 		CanPost:                     canPost,
-		Capabilities:                capabilities,
 		MessageAttachments:          messageAttachments,
 		MessageArtifacts:            messageArtifacts,
 		MessageArtifactsUnavailable: messageArtifactsUnavailable,
