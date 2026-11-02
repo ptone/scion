@@ -23,6 +23,7 @@ scion hub token create \
   --project my-project \
   --name "coding-agent" \
   --scopes project:read,agent:list,agent:read,agent:create,agent:message \
+  --scopes skill:read,skill:list,template:read,template:list,harness_config:read,harness_config:list \
   --expires 30d
 ```
 
@@ -34,11 +35,18 @@ Most CLI commands that run in a project look the project up on the Hub first, wh
 | Any command run in a project | `project:read` |
 | `scion list` | `project:read`, `agent:list` |
 | `scion look`, `scion logs` | `project:read`, `agent:read` |
-| `scion start` / `scion create` | `project:read`, `agent:create`, `agent:read` |
+| `scion start` / `scion create` | `project:read`, `agent:create`, `agent:read`, `skill:read`, `skill:list`, `template:read`, `template:list`, `harness_config:read`, `harness_config:list` (see below) |
 | `scion message` | `project:read`, `agent:message` |
 | `scion attach` | `project:read`, `agent:attach` |
 | `scion stop`, `scion suspend`, `scion resume`, `scion restore` | `project:read`, `agent:lifecycle` |
 | `scion delete` | `project:read`, `agent:delete` |
+
+An agent created with a token gets an agent role only when the token covers that role's
+permissions. The `readonly` role, the lowest one above `none`, needs the skill, template and
+harness_config read and list scopes listed for `scion start`. Without them the Hub refuses the
+create with "the token's scopes fit no usable agent role" and names the missing scopes, unless the
+request asks for agent role `none`. `scion hub token create` warns when a token with `agent:create`
+lacks them.
 
 Run `scion hub token scopes --project my-project` to see which scopes you can select.
 

@@ -91,12 +91,17 @@ func TestAgentCreate_Characterization(t *testing.T) {
 	})
 	t.Run("UAT with agent:create", func(t *testing.T) {
 		// The UAT's scopes fit no agent role above none, so a defaulted
-		// role is denied at the delegation ceiling and nothing is written.
+		// role is denied at the delegation ceiling, the message names the
+		// scopes the readonly role needs, and nothing is written.
 		uat := NewScopedUserIdentity(authUser(creator), f.proj.ID, []string{"agent:create"})
 		rec := requestAsIdentity(t, f.srv, uat, http.MethodPost, path, CreateAgentRequest{Name: "char-uat"})
 		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 		apiErr := decodeTargetAPIError(t, rec)
-		assert.Equal(t, reasonNoUsableRole, apiErr.Message)
+		assert.Equal(t,
+			"the token's scopes fit no usable agent role; the readonly role also needs the scopes "+
+				"harness_config:list, harness_config:read, project:read, skill:list, skill:read, template:list, template:read; "+
+				"add them, request role=none explicitly, or create from a session",
+			apiErr.Message)
 		assert.Equal(t, string(DeniedByDelegationCeiling), apiErr.Details["denied_by"])
 		_, err := f.store.GetAgentBySlug(context.Background(), f.proj.ID, "char-uat")
 		assert.ErrorIs(t, err, store.ErrNotFound)

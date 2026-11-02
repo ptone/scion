@@ -30,12 +30,17 @@ import (
 )
 
 // A UAT holding agent:create and project:read, no role requested: the
-// defaulted role fits nothing above none, so the create is denied and
-// nothing is written.
+// defaulted role fits nothing above none, so the create is denied, the
+// message names the scopes the readonly role still needs, and nothing is
+// written.
 func TestUATDefaultedRoleWithNoFittingRoleDenied(t *testing.T) {
 	f := newUATCreateFixture(t, "uat-none-deny")
 	rec := f.create(t, f.uat(t, "agent:create", "project:read"), CreateAgentRequest{Name: "uat-none-deny"})
-	assert.Equal(t, reasonNoUsableRole, assertCeilingDenial(t, rec))
+	assert.Equal(t,
+		"the token's scopes fit no usable agent role; the readonly role also needs the scopes "+
+			"harness_config:list, harness_config:read, skill:list, skill:read, template:list, template:read; "+
+			"add them, request role=none explicitly, or create from a session",
+		assertCeilingDenial(t, rec))
 	assertCreateWroteNothing(t, f.store, f.proj.ID, "uat-none-deny", f.creator.ID)
 }
 
@@ -169,12 +174,17 @@ func TestRoleCapRunsBeforeNoAuthMapping(t *testing.T) {
 	assert.False(t, client.lastCreateReq.NoAuth)
 }
 
-// An explicit role over the UAT ceiling: 403 at the delegation ceiling, no
-// agent row, no edge.
+// An explicit role over the UAT ceiling: 403 at the delegation ceiling
+// naming what the role still needs, no agent row, no edge.
 func TestUATExplicitRoleOverCeilingForbidden(t *testing.T) {
 	f := newUATCreateFixture(t, "uat-over")
 	rec := f.create(t, f.uat(t, minimalSelectors(t)...), CreateAgentRequest{Name: "uat-over", AgentRole: string(AgentRoleFull)})
-	assert.Contains(t, assertCeilingDenial(t, rec), `agent role "full"`)
+	assert.Equal(t,
+		`the credential's scopes do not cover agent role "full"; it also needs the scopes `+
+			"agent:attach, agent:delete, agent:lifecycle, agent:set_message_mode, gcp_service_account:assign, "+
+			"template:create, template:update; no token scope grants project.secret_read; "+
+			"request a role the token covers, request role=none explicitly, or create from a session",
+		assertCeilingDenial(t, rec))
 	assertCreateWroteNothing(t, f.store, f.proj.ID, "uat-over", f.creator.ID)
 }
 

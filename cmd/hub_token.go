@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -54,11 +55,21 @@ Scopes common CLI flows need:
   Any command run in a project   project:read
   scion list                     project:read, agent:list
   scion look, scion logs         project:read, agent:read
-  scion start / create           project:read, agent:create, agent:read
+  scion start / create           project:read, agent:create, agent:read,
+                                 skill:read, skill:list, template:read,
+                                 template:list, harness_config:read,
+                                 harness_config:list
   scion message                  project:read, agent:message
   scion attach                   project:read, agent:attach
   scion stop, suspend, resume    project:read, agent:lifecycle
   scion delete                   project:read, agent:delete
+
+An agent created with a token gets an agent role only when the token
+covers the role's permissions. The readonly role, the lowest one above
+none, needs the skill, template and harness_config read and list scopes
+listed for scion start; without them the Hub refuses the create unless
+it asks for agent role none. "scion hub token create" warns when a token
+with agent:create lacks them.
 
 Token scopes limit what the CLI can do on the Hub. Local actions, such
 as scion clean, act on the local machine with the user's file
@@ -75,6 +86,7 @@ Examples:
     --project my-project \
     --name "github-actions" \
     --scopes project:read,agent:create,agent:read,agent:list \
+    --scopes skill:read,skill:list,template:read,template:list,harness_config:read,harness_config:list \
     --expires 90d
 
   # Create a hub-boundary token for "scion doctor" Platform Health
@@ -137,8 +149,11 @@ project:read. See "scion hub token --help" for the scopes common CLI flows
 need.
 
 Examples:
-  scion hub token create --project my-project --name ci-token --scopes project:read,agent:create,agent:read
-  scion hub token create --project my-project --name deploy --scopes project:read,agent:manage --expires 30d
+  scion hub token create --project my-project --name ci-token \
+    --scopes project:read,agent:create,agent:read \
+    --scopes skill:read,skill:list,template:read,template:list,harness_config:read,harness_config:list
+  scion hub token create --project my-project --name deploy --expires 30d \
+    --scopes project:read,agent:manage,skill:manage,template:manage,harness_config:manage
   scion hub token create --boundary hub --name health-check --scopes hub_health:read,broker:read,agent:list`, permissions.UATScopeHelp(), expiryAcceptedForms, expiryUnitNote),
 	Args: cobra.NoArgs,
 	RunE: runTokenCreate,
@@ -295,6 +310,9 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 	scopes := splitCommaList(tokenCreateScopes)
 	if len(scopes) == 0 {
 		return newUsageError("--scopes must specify at least one scope")
+	}
+	if warning := agentCreateRoleWarning(scopes); warning != "" {
+		fmt.Fprintln(os.Stderr, warning)
 	}
 
 	var expiresAt *time.Time
@@ -660,4 +678,22 @@ func parseExpiryAt(s string, now time.Time) (time.Time, error) {
 			int64(store.UATMaxExpiry/time.Minute))
 	}
 	return now.Add(time.Duration(n) * step), nil
+}
+
+// agentCreateRoleWarning returns a warning when scopes let the token create
+// agents (agent.create) but lack scopes the readonly agent role needs: the
+// Hub then refuses an agent create from the token unless it asks for agent
+// role none. It returns "" otherwise, including when a scope does not
+// resolve (the Hub reports that).
+func agentCreateRoleWarning(scopes []string) string {
+	ceiling, ok := permissions.BuildCeilingFromSelectors(scopes)
+	if !ok || !ceiling.Allows("agent.create") {
+		return ""
+	}
+	shortfall, ok := hub.AgentRoleUATShortfall(scopes, hub.AgentRoleReadOnly)
+	if !ok || len(shortfall.Selectors) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("Warning: agents this token creates get no agent role above none: the readonly role also needs %s. "+
+		"Add them to --scopes, or create agents with agent role none.", strings.Join(shortfall.Selectors, ", "))
 }
