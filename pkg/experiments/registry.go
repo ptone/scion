@@ -323,6 +323,14 @@ const SkillContentHashV2 = "hub.skill_content_hash_v2"
 // whether or not it is on.
 const ArtifactReviewEditor = "web.artifact_review_editor"
 
+// ArtifactArchive gates the zip download of an artifact version's files
+// (ptone/scion#7106): GET|HEAD /api/v1/artifacts/{id}/versions/{seq}/archive
+// and the archive field of a version response, which the Files tab's
+// Download all button follows. The hub checks it in the artifact service
+// (SetArchiveEnabled); while it is off the route answers 404 and the field
+// is left out. It needs hub.artifacts.
+const ArtifactArchive = "hub.artifact_archive"
+
 // UserDeleteForceCascade gates the forced user delete (ptone/scion#2143):
 // DELETE /api/v1/users/{id}?force=true, which revokes the user's authority,
 // records a deletion tombstone and stops the user's agents, the GET
@@ -558,6 +566,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#5913",
 		Owner:       "artifacts",
 		ReviewBy:    "2027-01-21",
+	},
+	{
+		Name:        ArtifactArchive,
+		Title:       "Artifact zip download",
+		Description: "Adds a Download all (.zip) button to an artifact's Files tab and the hub route behind it. Needs hub.artifacts.",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#7106",
+		Owner:       "artifacts",
+		ReviewBy:    "2027-02-01",
 	},
 	{
 		Name:        UserDeleteForceCascade,
