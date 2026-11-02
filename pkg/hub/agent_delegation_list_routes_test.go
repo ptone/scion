@@ -299,7 +299,7 @@ func TestDelegatedSkillList_ScopeAndItemFilter(t *testing.T) {
 	assert.Equal(t, "deny", primary[0].Result, "without skill:list the list arm refuses")
 	assert.Equal(t, "skill.list", primary[0].PermissionID)
 
-	// No project.list scope is resolved or recorded for a delegated skill list (R6-4).
+	// No project.list scope is resolved or recorded for a delegated skill list.
 	decisions.reset()
 	adtDecodeItems(t, w.listAt(t, cred.Token, "/api/v1/skills", nil), "skills")
 	for _, r := range decisions.records() {
@@ -347,7 +347,7 @@ func TestDelegatedTemplateList_ScopeAndItemFilter(t *testing.T) {
 	bounded := w.delegated(t, w.adtIssueGrant(t, map[string]string{"kind": "project", "projectId": w.other.ID}, "template:list", "template:read").ID)
 	assert.Equal(t, []string{w.tmplP2}, adtDecodeItems(t, w.listAt(t, bounded.Token, "/api/v1/templates", nil), "templates").ids)
 
-	// R8-1: under a P1-bounded grant the legacy row (project ID P1, scope ID P3) is fetched through the project ID
+	// Under a P1-bounded grant the legacy row (project ID P1, scope ID P3) is fetched through the project ID
 	// term and dropped by admission, and the aggregated record counts it.
 	boundedP1 := w.delegated(t, w.adtIssueGrant(t, map[string]string{"kind": "project", "projectId": w.proj.ID}, "template:list", "template:read").ID)
 	decisions.reset()
@@ -407,9 +407,10 @@ func TestDelegatedCatalogLists_HubCatalogNeverListed(t *testing.T) {
 // and template lists for a hub-member issuer. The system-scoped hub-member role carries skill.list and template.list
 // (seed.go hubMemberPermissionIDs, bound to the hub-members group), and list scopes come from role bindings alone, so
 // the issuer's scope for them is every project. A P2-bounded grant whose issuer then loses P2 is therefore allowed by
-// the list arm (scope {P2}), and P2's items are refused per item, because the issuer may no longer read them there: an
-// empty 200 with one allow record, and an aggregated record that allows nothing and refuses at least one item. For an
-// unrestricted issuer, an access constraint that excludes P2 removes P2's skill and template (AllProjects mode, R7-1).
+// the list arm (scope {P2}). The issuer still holds skill.read and template.read everywhere through the same role;
+// what refuses P2's items is project admission, because the issuer no longer holds P2. The result is an empty 200
+// with one allow record, and an aggregated record that allows nothing and refuses at least one item. For an
+// unrestricted issuer, an access constraint that excludes P2 removes P2's skill and template (AllProjects mode).
 func TestDelegatedCatalogLists_HubMemberIssuerAndExcludedProject(t *testing.T) {
 	w := newADTCatalogWorld(t, "adt-catnone")
 	ctx := context.Background()
