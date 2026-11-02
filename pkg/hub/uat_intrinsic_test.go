@@ -241,6 +241,7 @@ func TestUATIntrinsic_CeilingReadersUseHopCeiling(t *testing.T) {
 		"childEffectCeiling":      true, // source: agentRowEffectCeiling passes uatHopEffectCeiling
 		"foldWithChain":           true, // chain.Ceiling is a fold; the edge is wrapped
 		"intersectEffectCeilings": true, // scheduler revision and agent-row ceilings: not token hops
+		"roleCeilingShortfall":    true, // c: callers pass uatHopEffectCeiling (create) or a token ceiling built through it (AgentRoleUATShortfall)
 	}
 	_, files := parseHubProduction(t)
 	seen := map[string]int{}

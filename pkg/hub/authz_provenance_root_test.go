@@ -1021,8 +1021,10 @@ func TestScopeFilterSingleSource(t *testing.T) {
 	}
 	// ceilingAllowsScope, the per-scope rule, is applied only inside
 	// filterScopes and the role-fit check that selects a child role.
+	// roleCeilingShortfall also calls it, but only describes a refusal in a
+	// denial message and never decides one.
 	for fn := range callsIn(files, "ceilingAllowsScope") {
-		assert.Contains(t, []string{"filterScopes", "roleFitsCeiling", "childRoleWithinCeiling"}, fn, "unexpected ceilingAllowsScope caller %s", fn)
+		assert.Contains(t, []string{"filterScopes", "roleFitsCeiling", "childRoleWithinCeiling", "roleCeilingShortfall"}, fn, "unexpected ceilingAllowsScope caller %s", fn)
 	}
 }
 

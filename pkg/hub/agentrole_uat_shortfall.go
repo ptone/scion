@@ -24,8 +24,9 @@ import (
 
 // RoleShortfall is what a bounded ceiling lacks for an agent role to fit it
 // (roleFitsCeiling). Selectors are the user access token scopes that grant
-// the missing permissions; Ungrantable are missing permission IDs that no
-// token scope grants. Both are sorted and empty when the role fits.
+// the missing permissions; Ungrantable are the missing permission IDs that
+// no token scope grants, and any role scope that maps to no permission at
+// all. Both are sorted, and both are empty exactly when the role fits.
 type RoleShortfall struct {
 	Selectors   []string
 	Ungrantable []string
@@ -41,22 +42,29 @@ func (s RoleShortfall) Empty() bool {
 // ceilingOptionalRoleScopes that ceilingAllowsScope refuses, every covered
 // permission c does not allow and that is not a self operation (or, for a
 // scope with zero registry coverage, its zeroCoverageScopeMapping
-// permission). A ceiling that is not bounded yields an empty shortfall:
+// permission). A role scope with zero registry coverage and no such mapping
+// can never fit a bounded ceiling; it is reported in Ungrantable by its
+// scope name. A ceiling that is not bounded yields an empty shortfall:
 // nothing a token could add would change the outcome.
+//
+// It only describes a refusal for a denial message; childRoleWithinCeiling
+// decides it.
 func roleCeilingShortfall(c store.EffectCeiling, role AgentRole) RoleShortfall {
 	frozen, ok := c.Frozen()
 	if !ok {
 		return RoleShortfall{}
 	}
-	var missing []string
+	var missing, unmapped []string
 	for _, scope := range ScopesForRole(role) {
 		if ceilingOptionalRoleScopes[scope] || ceilingAllowsScope(c, scope) {
 			continue
 		}
 		coverage := agentScopeCoverage([]AgentTokenScope{scope})
 		if len(coverage) == 0 {
-			if perm, mapped := zeroCoverageMappedPermission(scope); mapped && !frozen.Allows(perm) {
+			if perm, mapped := zeroCoverageMappedPermission(scope); mapped {
 				missing = append(missing, perm)
+			} else {
+				unmapped = append(unmapped, string(scope))
 			}
 			continue
 		}
@@ -75,6 +83,7 @@ func roleCeilingShortfall(c store.EffectCeiling, role AgentRole) RoleShortfall {
 		}
 	}
 	out.Selectors = sortedUniqueIDs(out.Selectors)
+	out.Ungrantable = sortedUniqueIDs(append(out.Ungrantable, unmapped...))
 	return out
 }
 
@@ -95,9 +104,21 @@ var uatSelectorForPermission = func() map[string]string {
 // the way agent create does (a bounded ceiling plus the intrinsic
 // permissions of a token hop). ok is false when a selector does not resolve.
 func AgentRoleUATShortfall(selectors []string, role AgentRole) (RoleShortfall, bool) {
-	frozen, ok := permissions.BuildCeilingFromSelectors(selectors)
+	c, ok := uatSelectorHopCeiling(selectors)
 	if !ok {
 		return RoleShortfall{}, false
+	}
+	return roleCeilingShortfall(c, role), true
+}
+
+// uatSelectorHopCeiling is the ceiling agent create reads for a user access
+// token minted with selectors: the token's bounded ceiling with the
+// intrinsic permissions of a token hop (uatHopEffectCeiling). ok is false
+// when a selector does not resolve.
+func uatSelectorHopCeiling(selectors []string) (store.EffectCeiling, bool) {
+	frozen, ok := permissions.BuildCeilingFromSelectors(selectors)
+	if !ok {
+		return store.EffectCeiling{}, false
 	}
 	const holder = "token-holder"
 	prov := store.AuthorityProvenance{
@@ -111,7 +132,7 @@ func AgentRoleUATShortfall(selectors []string, role AgentRole) (RoleShortfall, b
 		Version:       frozen.Version,
 		PermissionIDs: frozen.PermissionIDs,
 	}
-	return roleCeilingShortfall(uatHopEffectCeiling(store.DelegationPrincipalUser, holder, prov, c), role), true
+	return uatHopEffectCeiling(store.DelegationPrincipalUser, holder, prov, c), true
 }
 
 // AgentRoleUATSelectors returns the user access token scopes a token needs
@@ -138,7 +159,9 @@ func describeShortfall(s RoleShortfall) string {
 
 // noUsableRoleMessage is the denial message for a defaulted role that fits
 // no role above none. For a user access token it names the scopes the
-// readonly role still needs.
+// readonly role still needs. It reads only Selectors: readonly has no
+// permission without a token scope today, and if one is added (or no
+// selector is missing) the message falls back to reasonNoUsableRole.
 func noUsableRoleMessage(c store.EffectCeiling, prov store.AuthorityProvenance) string {
 	if prov.SourceCredentialKind != store.SourceCredentialUAT {
 		return reasonNoUsableRole

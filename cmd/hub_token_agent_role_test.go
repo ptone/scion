@@ -150,3 +150,38 @@ func TestRunTokenCreate_AgentCreateRoleWarning(t *testing.T) {
 	assert.Contains(t, errOut, "Warning: agents this token creates get no agent role above none")
 	assert.Contains(t, errOut, "skill:read")
 }
+
+// An input error stops runTokenCreate before the warning: the user sees
+// only the error.
+func TestRunTokenCreate_AgentCreateRoleWarningAfterValidation(t *testing.T) {
+	state := saveHubTokenTestState()
+	t.Cleanup(state.restore)
+
+	projectID := "55555555-5555-5555-5555-555555555555"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/"+projectID:
+			_ = json.NewEncoder(w).Encode(hubclient.Project{ID: projectID, Name: "my-project"})
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	setupHubTokenProject(t, server.URL)
+
+	tokenCreateName = "ci-token"
+	tokenCreateProject = projectID
+	tokenCreateBoundary = tokenBoundaryProject
+	tokenCreateScopes = []string{"project:read,agent:create"}
+	tokenCreateExpires = "not-a-duration"
+	tokenOutputJSON = false
+
+	var runErr error
+	_, errOut := captureStdoutStderr(t, func() {
+		runErr = runTokenCreate(nil, nil)
+	})
+	require.Error(t, runErr)
+	assert.NotContains(t, errOut, "Warning:")
+}

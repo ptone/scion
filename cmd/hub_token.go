@@ -153,7 +153,8 @@ Examples:
     --scopes project:read,agent:create,agent:read \
     --scopes skill:read,skill:list,template:read,template:list,harness_config:read,harness_config:list
   scion hub token create --project my-project --name deploy --expires 30d \
-    --scopes project:read,agent:manage,skill:manage,template:manage,harness_config:manage
+    --scopes project:read,agent:manage \
+    --scopes skill:read,skill:list,template:read,template:list,harness_config:read,harness_config:list
   scion hub token create --boundary hub --name health-check --scopes hub_health:read,broker:read,agent:list`, permissions.UATScopeHelp(), expiryAcceptedForms, expiryUnitNote),
 	Args: cobra.NoArgs,
 	RunE: runTokenCreate,
@@ -311,9 +312,6 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 	if len(scopes) == 0 {
 		return newUsageError("--scopes must specify at least one scope")
 	}
-	if warning := agentCreateRoleWarning(scopes); warning != "" {
-		fmt.Fprintln(os.Stderr, warning)
-	}
 
 	var expiresAt *time.Time
 	if tokenCreateExpires != "" {
@@ -342,6 +340,9 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 		req.ProjectID = project.ID
 	}
 
+	if warning := agentCreateRoleWarning(scopes); warning != "" {
+		fmt.Fprintln(os.Stderr, warning)
+	}
 	resp, err := client.Tokens().Create(ctx, req)
 	if err != nil {
 		if selector, reason, ok := hubclient.AsScopeViolation(err); ok {

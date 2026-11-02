@@ -1511,9 +1511,9 @@ func (s *Server) applyCreateEffectCeiling(
 
 	// The role cap reads the hop's ceiling as every walk does
 	// (uatHopEffectCeiling); the stored ceiling stays the token's verbatim.
-	hopCeiling := uatHopEffectCeiling(prov.SourcePrincipalKind, prov.SourcePrincipalID, prov, ceiling)
-	capped, cause, allowed := childRoleWithinCeiling(hopCeiling, role, roleExplicit)
+	capped, cause, allowed := childRoleWithinCeiling(uatHopEffectCeiling(prov.SourcePrincipalKind, prov.SourcePrincipalID, prov, ceiling), role, roleExplicit)
 	if !allowed {
+		hopCeiling := uatHopEffectCeiling(prov.SourcePrincipalKind, prov.SourcePrincipalID, prov, ceiling)
 		msg := noUsableRoleMessage(hopCeiling, prov)
 		if roleExplicit {
 			msg = roleNotCoveredMessage(hopCeiling, prov, role)

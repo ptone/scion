@@ -49,7 +49,8 @@ func TestAgentRoleUATSelectors(t *testing.T) {
 }
 
 // The selectors AgentRoleUATSelectors names are exactly what makes the role
-// fit: adding them leaves no shortfall and roleFitsCeiling agrees.
+// fit: adding them leaves no shortfall (roleFitsCeiling agreeing is
+// TestRoleCeilingShortfall_MatchesRoleFitsCeiling).
 func TestAgentRoleUATShortfall_SelectorsMakeRoleFit(t *testing.T) {
 	for _, role := range []AgentRole{AgentRoleReadOnly, AgentRoleBaseline} {
 		s, ok := AgentRoleUATShortfall(append([]string{"agent:create"}, AgentRoleUATSelectors(role).Selectors...), role)
@@ -126,4 +127,54 @@ func TestShortfallDenialMessages(t *testing.T) {
 	assert.Equal(t,
 		`the credential's scopes do not cover agent role "readonly"; request a role the token covers, request role=none explicitly, or create from a session`,
 		roleNotCoveredMessage(ceiling, agentProv, AgentRoleReadOnly))
+}
+
+// The shortfall describes the decision it explains: for every role and a
+// spread of token scope sets, it is empty exactly when roleFitsCeiling
+// accepts the ceiling agent create reads, and naming its selectors makes
+// the role fit.
+func TestRoleCeilingShortfall_MatchesRoleFitsCeiling(t *testing.T) {
+	sets := map[string][]string{
+		"none":         {"agent:create"},
+		"project read": {"agent:create", "project:read"},
+		"readonly":     append([]string{"agent:create"}, readonlyUATSelectors...),
+		"issue repro": {
+			"project:read", "project:update", "agent:create", "agent:read", "agent:list",
+			"agent:lifecycle", "agent:delete", "agent:message", "agent:attach",
+		},
+		"manage aliases": {
+			"project:read", "agent:manage", permissions.UATScopeSkillManage,
+			permissions.UATScopeTemplateManage, permissions.UATScopeHarnessConfigManage,
+		},
+		"full selectors": append([]string{}, AgentRoleUATSelectors(AgentRoleFull).Selectors...),
+	}
+	for i, drop := range readonlyUATSelectors {
+		sel := append(append([]string{"agent:create"}, readonlyUATSelectors[:i]...), readonlyUATSelectors[i+1:]...)
+		sets["readonly without "+drop] = sel
+	}
+	checked := 0
+	for name, selectors := range sets {
+		c, ok := uatSelectorHopCeiling(selectors)
+		require.True(t, ok, name)
+		for _, role := range []AgentRole{AgentRoleReadOnly, AgentRoleBaseline, AgentRoleFull} {
+			s := roleCeilingShortfall(c, role)
+			assert.Equal(t, roleFitsCeiling(c, role), s.Empty(), "%s, role %s: %+v", name, role, s)
+			checked++
+			if s.Empty() || len(s.Ungrantable) > 0 {
+				continue
+			}
+			fixed, ok := uatSelectorHopCeiling(append(append([]string{}, selectors...), s.Selectors...))
+			require.True(t, ok)
+			assert.True(t, roleFitsCeiling(fixed, role), "%s, role %s: adding %v makes it fit", name, role, s.Selectors)
+		}
+	}
+	require.Greater(t, checked, 30, "the table covers the roles")
+
+	// Ceilings that are not bounded have no shortfall, and fit every role.
+	for _, kind := range []store.EffectCeilingKind{store.EffectCeilingPrincipal, store.EffectCeilingUnrecorded} {
+		for _, role := range []AgentRole{AgentRoleReadOnly, AgentRoleBaseline, AgentRoleFull} {
+			c := store.EffectCeiling{Kind: kind}
+			assert.Equal(t, roleFitsCeiling(c, role), roleCeilingShortfall(c, role).Empty(), "%s, role %s", kind, role)
+		}
+	}
 }
