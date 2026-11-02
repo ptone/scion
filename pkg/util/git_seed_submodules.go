@@ -92,7 +92,7 @@ func checkSeedSubmodules(ctx context.Context, commonDir, workspace, adminName st
 	discover := func(base, root, layer, labelPrefix string) error {
 		found, unsafe, err := SubmoduleAdminDirs(base)
 		if err != nil || len(unsafe) > 0 {
-			return newRepoConfigRefusedError("", layer, "<modules>", "", "submodule admin directory is not a plain directory tree", true)
+			return newRepoConfigRefusedError("", layer, "<modules>", "", "submodule admin directory is not a plain directory tree", true, AudienceRemote)
 		}
 		for _, rel := range found {
 			abs := filepath.Join(base, filepath.FromSlash(rel))
@@ -185,7 +185,8 @@ func seedGitlinks(ctx context.Context, gitDir, commonDir string) ([]string, erro
 // "", "". The target must be one of dirs and must not hold a commondir entry.
 func resolveSeedGitlink(workspace, p string, dirs []seedAdminDir) (target, wt string, err error) {
 	if p == "" || strings.HasPrefix(p, "/") || filepath.IsAbs(filepath.FromSlash(p)) {
-		return "", "", refuseGitlink(p, "a submodule git link with an absolute or empty path")
+		// p is not printed: a fixed label stands in for an absolute or empty path.
+		return "", "", newRepoConfigRefusedError("", "submodule <absolute or empty path>", "<gitlink>", "", "a submodule git link with an absolute or empty path", true, AudienceRemote)
 	}
 	comps := strings.Split(p, "/")
 	cur := workspace
@@ -320,7 +321,7 @@ func checkSeedAdminDir(ctx context.Context, d seedAdminDir, ref string, referenc
 	}
 	// The merged set cannot attribute a key to one file, so the layer names the
 	// module only.
-	return crossCheckAgainstGit(ctx, d.abs, seedGitEnv(d.abs, d.abs), all, d.label, true)
+	return crossCheckAgainstGit(ctx, d.abs, seedGitEnv(d.abs, d.abs), all, d.label, true, AudienceRemote)
 }
 
 // checkSeedModuleWorktree reports whether a submodule admin dir's core.worktree
@@ -435,5 +436,5 @@ func canonicalExisting(p string) (string, error) {
 // refuseGitlink is the refusal for a gitlink that fails a structural rule. The
 // layer names the gitlink path through the safe label only.
 func refuseGitlink(p, reason string) error {
-	return newRepoConfigRefusedError("", "submodule "+safeSubsectionLabel("submodule", p), "<gitlink>", "", reason, true)
+	return newRepoConfigRefusedError("", "submodule "+safeSubsectionLabel("submodule", p), "<gitlink>", "", reason, true, AudienceRemote)
 }

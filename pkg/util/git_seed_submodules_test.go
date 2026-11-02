@@ -169,6 +169,21 @@ func mustRefuse(t *testing.T, err error, key, layerPart, marker string) *RepoCon
 	return r
 }
 
+// assertStructuralRemedy checks that a structural refusal (a <placeholder>
+// key) gives the submodule remedy and points at no config file or setting.
+func assertStructuralRemedy(t *testing.T, r *RepoConfigRefusedError) {
+	t.Helper()
+	msg := r.Error()
+	if !strings.Contains(msg, "remove or repair the submodule directory or git link it names") {
+		t.Errorf("structural refusal lacks the submodule remedy: %s", msg)
+	}
+	for _, bad := range []string{"config file", ".git/config", "global"} {
+		if strings.Contains(msg, bad) {
+			t.Errorf("structural refusal mentions %q: %s", bad, msg)
+		}
+	}
+}
+
 func TestCheckSeedSubmodules_CleanMainPasses(t *testing.T) {
 	f := newSubFixture(t)
 	if err := f.checkMain(); err != nil {
@@ -212,7 +227,23 @@ func TestCheckSeedSubmodules_GitfileOutsideModulesRefuses(t *testing.T) {
 	fake := filepath.Join(f.root, "fake-admin")
 	f.adminDir(fake)
 	f.write(filepath.Join(f.super, "libs", "a", ".git"), "gitdir: "+fake+"\n")
-	_ = mustRefuse(t, f.checkMain(), "<gitlink>", "submodule libs/a", "")
+	assertStructuralRemedy(t, mustRefuse(t, f.checkMain(), "<gitlink>", "submodule libs/a", ""))
+}
+
+// An absolute or empty gitlink path (only a hand-crafted index carries one)
+// is refused under a fixed label; the path itself is never printed.
+func TestResolveSeedGitlink_AbsoluteOrEmptyPathNotPrinted(t *testing.T) {
+	for _, p := range []string{"/x/y", ""} {
+		_, _, err := resolveSeedGitlink(t.TempDir(), p, nil)
+		r := mustRefuse(t, err, "<gitlink>", "", "")
+		if r.Layer != "submodule <absolute or empty path>" {
+			t.Errorf("path %q: layer = %q, want the fixed label", p, r.Layer)
+		}
+		if p != "" && strings.Contains(r.Error(), p) {
+			t.Errorf("refusal prints the path %q: %s", p, r.Error())
+		}
+		assertStructuralRemedy(t, r)
+	}
 }
 
 func TestCheckSeedSubmodules_EmbeddedGitDirRefuses(t *testing.T) {
@@ -241,6 +272,7 @@ func TestCheckSeedSubmodules_SymlinkedModuleDirRefuses(t *testing.T) {
 	if r.Layer != "modules" {
 		t.Errorf("layer = %q, want modules", r.Layer)
 	}
+	assertStructuralRemedy(t, r)
 }
 
 func TestCheckSeedSubmodules_WorktreeDotGitComponentRefuses(t *testing.T) {
@@ -274,7 +306,16 @@ func TestCheckSeedSubmodules_NestedAndLayerKeysRefuse(t *testing.T) {
 		c := filepath.Join(f.commonDir, "modules", "c")
 		f.adminDir(c)
 		f.write(filepath.Join(c, "config.worktree"), "[core]\n\tsshCommand = ssh -i /tmp/submarker-v1\n")
-		_ = mustRefuse(t, f.checkMain(), "core.sshcommand", "modules/c/config.worktree", "submarker-v1")
+		r := mustRefuse(t, f.checkMain(), "core.sshcommand", "modules/c/config.worktree", "submarker-v1")
+		// A submodule-layer key gets the layer remedy and names its layer by
+		// label, never by a host path.
+		msg := r.Error()
+		if !strings.Contains(msg, "remove it from the git config file that sets it (in modules/c/config.worktree)") {
+			t.Errorf("submodule-layer refusal lacks the layer remedy: %s", msg)
+		}
+		if strings.Contains(msg, f.root) {
+			t.Errorf("submodule-layer refusal prints the host path %q: %s", f.root, msg)
+		}
 	})
 	t.Run("include in module config", func(t *testing.T) {
 		f := newSubFixture(t)
@@ -675,5 +716,75 @@ func TestCheckSeedModuleWorktree_AbsoluteR2(t *testing.T) {
 		if got := checkSeedModuleWorktree(d, tc.value, "", false, commonDir); got != tc.want {
 			t.Errorf("%s: allowed = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// The agent-start check's listings (seedGitlinks, and crossCheckAgainstGit
+// through CheckSeedRepoConfigLayers and CheckSeedSubmodules) run with the
+// HostGitArgs pins first, an explicit GIT_DIR and GIT_COMMON_DIR (no
+// discovery), the global and system config off as seedGitEnv sets them, and
+// no inherited variable that adds config.
+func TestHostGitCheckers_SeedListingsPinGitDir(t *testing.T) {
+	f := newSubFixture(t)
+	setGermanLocale(t)
+	// The fixture adds the submodule from a local path, a URL the seed policy
+	// refuses in the base config; give the base an https URL so the layer
+	// check runs through to its cross-check. CheckSeedSubmodules does not read
+	// this key.
+	f.git(f.super, "config", "submodule.libs/a.url", "https://example.invalid/sub.git")
+	log := fakeGitOnPath(t)
+	plantInheritedGitEnv(t)
+	if err := CheckSeedRepoConfigLayers(context.Background(), f.commonDir, ""); err != nil {
+		t.Fatalf("CheckSeedRepoConfigLayers: %v", err)
+	}
+	if err := CheckSeedSubmodules(context.Background(), f.commonDir, f.super, ""); err != nil {
+		t.Fatalf("CheckSeedSubmodules: %v", err)
+	}
+	pins := strings.Join(HostGitArgs(), " ")
+	var lsFiles, layers, module int
+	for _, c := range fakeGitCalls(t, log) {
+		if !strings.HasPrefix(c.argv, pins+" ") {
+			t.Errorf("call %q does not start with the HostGitArgs pins", c.argv)
+		}
+		if c.env["GIT_DIR"] == "" || c.env["GIT_COMMON_DIR"] == "" {
+			t.Errorf("call %q runs without an explicit GIT_DIR and GIT_COMMON_DIR", c.argv)
+		}
+		if c.env["GIT_CONFIG_GLOBAL"] != os.DevNull || c.env["GIT_CONFIG_NOSYSTEM"] != "1" {
+			t.Errorf("call %q reads global or system config", c.argv)
+		}
+		// seedGitEnv starts from HostGitEnv, so the inherited German locale
+		// does not reach git. Mutant: deleting HostGitEnv's LC_ALL=C append.
+		if c.locale["LC_ALL"] != "C" {
+			t.Errorf("call %q ran with LC_ALL=%q, want C", c.argv, c.locale["LC_ALL"])
+		}
+		// The whole GIT_* environment is exactly seedGitEnv's for the call's
+		// directories, so no inherited variable (GIT_INDEX_FILE, GIT_WORK_TREE,
+		// GIT_CONFIG_*) gets through.
+		want := gitEnvMap(seedGitEnv(c.env["GIT_DIR"], c.env["GIT_COMMON_DIR"]))
+		if d := diffEnvKeys(c.env, want); len(d) > 0 {
+			t.Errorf("call %q: environment differs from seedGitEnv in %v", c.argv, d)
+		}
+		for _, k := range plantedGitEnvKeys {
+			if k == "GIT_DIR" {
+				continue // set by seedGitEnv, checked above
+			}
+			if _, ok := c.env[k]; ok {
+				t.Errorf("call %q received the inherited %s", c.argv, k)
+			}
+		}
+		switch {
+		case strings.HasSuffix(c.argv, " ls-files --stage -z"):
+			lsFiles++
+			if c.env["GIT_DIR"] != f.commonDir {
+				t.Errorf("gitlink listing GIT_DIR is not the common dir")
+			}
+		case strings.HasSuffix(c.argv, " config --show-scope -z --list") && c.env["GIT_DIR"] == f.commonDir:
+			layers++
+		case strings.HasSuffix(c.argv, " config --show-scope -z --list") && c.env["GIT_DIR"] == f.mainModule():
+			module++
+		}
+	}
+	if lsFiles < 1 || layers < 1 || module < 1 {
+		t.Errorf("recorded %d gitlink listings, %d layer cross-checks and %d module cross-checks; want at least one each", lsFiles, layers, module)
 	}
 }

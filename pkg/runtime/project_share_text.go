@@ -38,11 +38,28 @@ func ProjectShareUnavailableText(mountPath string, platformMounts bool) string {
 	return fmt.Sprintf("project storage share is not mounted on this broker at %s: mount it there, or set server.project_storage.nfs.auto_mount: true", mountPath)
 }
 
+// ProjectShareInlineUnavailableText is ProjectShareUnavailableText for a
+// Kubernetes broker whose NFS share has no pv_name: pods then mount each
+// directory inline by its server path, which the node does not create, so
+// the broker has to see the share, writable, to create the directories
+// before the pod starts.
+func ProjectShareInlineUnavailableText(mountPath string) string {
+	return fmt.Sprintf("project storage share is not visible on this broker at %s: make the share (the same storage the hub uses) available in this broker's container at that path, writable by the broker; without nfs.shares[0].pv_name, pods mount each directory by its server path, so the broker creates the directories before the pod starts", mountPath)
+}
+
 // ProjectShareMountFailedText is the refusal for a start on a broker that
 // mounts the share itself (nfs.auto_mount is on) and could not mount it at
 // mountPath.
 func ProjectShareMountFailedText(mountPath string) string {
 	return fmt.Sprintf("project storage share could not be mounted on this broker at %s: check that the NFS server and export (server.project_storage.nfs.shares[0]) are reachable from the broker; the broker log has the details", mountPath)
+}
+
+// ProjectShareMountFlagsText is the refusal for a create, start or restart
+// on a local-container runtime whose project storage share at mountPath
+// could not be confirmed to carry nosuid and nodev: a mount there or below
+// it lacks them, or the mount table could not be read.
+func ProjectShareMountFlagsText(mountPath string) string {
+	return fmt.Sprintf("project storage share at %s: nosuid,nodev could not be confirmed (a mount there or below it lacks them, or the mount table could not be read): remount the share with nosuid,nodev; the broker log has the details", mountPath)
 }
 
 // ProjectShareClientTexts are the project storage refusal texts a runtime
@@ -53,6 +70,8 @@ func ProjectShareClientTexts() []string {
 	return []string{
 		ProjectShareUnavailableText(ProjectShareMountPathField, true),
 		ProjectShareUnavailableText(ProjectShareMountPathField, false),
+		ProjectShareInlineUnavailableText(ProjectShareMountPathField),
 		ProjectShareMountFailedText(ProjectShareMountPathField),
+		ProjectShareMountFlagsText(ProjectShareMountPathField),
 	}
 }

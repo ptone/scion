@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
@@ -122,11 +123,12 @@ func (s *Server) shareMountCheckText() string {
 }
 
 // projectShareNotMountedText is the client text for a start refused with
-// agent.ErrProjectShareNotMounted. That refusal comes only from the
+// agent.ErrProjectShareNotMounted (err). That refusal comes only from the
 // Kubernetes workspace leaves, a runtime that never mounts the share on
-// the broker, so the remedy is the broker's own container.
-func projectShareNotMountedText() string {
-	return scionrt.ProjectShareUnavailableText(scionrt.ProjectShareMountPathField, true)
+// the broker, so the remedy is the broker's own container; a share without
+// a claim gets the inline variant (agent.ProjectShareClientText).
+func projectShareNotMountedText(err error) string {
+	return agent.ProjectShareClientText(err)
 }
 
 // shareAdvisoryDetail is the reconciler's last status message for the
@@ -455,14 +457,16 @@ func localContainerRuntime(runtimeName string) bool {
 // not fatal). An already provisioned workspace (sentinel present, as after
 // the hub's provisioning at project create) takes the reuse path; a lost
 // sentinel or a project from before that provisioning gets the clone, under
-// the provisioning lock. The clone gets no git token: the agent's token is
-// not passed to it and no token remote is set, so a private repository is
-// not cloned here and the start fails with the provisioner's "needs
-// credentials" error. It reports whether it
+// the provisioning lock. The clone gets the agent's git token only when the
+// clone URL names the project's recorded remote (gc.TokenRemote, which the
+// hub sets from the project record): https, the same host and owner/repo
+// (provision.CloneTokenAllowed). A clone URL naming any other host or
+// repository, no recorded remote, or no agent token, gets no token and no
+// host git credential, and a private repository then fails with the
+// provisioner's "needs credentials" error. It reports whether it
 // provisioned (the caller then suppresses the in-container clone); false
-// with no error when the request is not such a dispatch. The agent's
-// resolved environment (the third argument) is deliberately not read.
-func (s *Server) provisionSharedPlainWorkspace(ctx context.Context, in startContextInputs, _ map[string]string) (bool, error) {
+// with no error when the request is not such a dispatch.
+func (s *Server) provisionSharedPlainWorkspace(ctx context.Context, in startContextInputs, env map[string]string) (bool, error) {
 	layout := s.config.StorageLayout
 	if !layout.Backend.Shared() || !isSharedHubProjectRoot(in.ProjectPath) || in.Config == nil || in.Config.GitClone == nil {
 		return false, nil
@@ -490,6 +494,16 @@ func (s *Server) provisionSharedPlainWorkspace(ctx context.Context, in startCont
 	if err := provision.PrepareStateDir(stateDir, uid, gid, false); err != nil {
 		return false, err
 	}
+	// The token is bound to the recorded remote, never to the clone URL:
+	// without a match the token itself is withheld. The recorded remote is
+	// passed on only together with an offered token. runGitClone offers no
+	// host credential of any form on any clone (util.HostGitRemoteEnv), so a
+	// clone with no token offered (no match, or no agent token) runs
+	// anonymously.
+	var cloneToken, cloneTokenRemote string
+	if provision.CloneTokenAllowed(gc.TokenRemote, gc.URL) && env[provision.GitTokenEnv] != "" {
+		cloneToken, cloneTokenRemote = env[provision.GitTokenEnv], gc.TokenRemote
+	}
 	err = provisionSharedFn(provision.ProvisionInput{
 		Ctx:                 ctx,
 		Resolved:            provision.ResolvedWorkspace{HostPath: ws, ServerRelativePath: r.RelPath, HostBase: base, Backend: string(layout.Backend)},
@@ -497,6 +511,8 @@ func (s *Server) provisionSharedPlainWorkspace(ctx context.Context, in startCont
 		AgentID:             in.AgentID,
 		Mode:                store.SharingModeSharedPlain,
 		GitClone:            &gc,
+		CloneToken:          cloneToken,
+		CloneTokenRemote:    cloneTokenRemote,
 		HostGitHardened:     true,
 		NFSUID:              uid,
 		NFSGID:              gid,
