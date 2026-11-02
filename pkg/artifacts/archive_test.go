@@ -641,9 +641,14 @@ func TestArchiveFirstBlobMissing(t *testing.T) {
 	if aborted || rec.Code != http.StatusInternalServerError || errCode(t, rec) != "internal" {
 		t.Fatalf("aborted=%v %d %s", aborted, rec.Code, rec.Body.String())
 	}
-	if rec.Header().Get("Content-Disposition") != "" || rec.Header().Get("Content-Type") != "application/json" ||
-		rec.Header().Get("ETag") != "" || rec.Header().Get("Content-Security-Policy") != "" {
-		t.Errorf("headers %v", rec.Header())
+	// A plain JSON error: none of the archive's file headers.
+	for _, k := range []string{"Content-Disposition", "ETag", "Content-Security-Policy", "Referrer-Policy"} {
+		if rec.Header().Get(k) != "" {
+			t.Errorf("archive header %s on the 500: %v", k, rec.Header())
+		}
+	}
+	if rec.Header().Get("Content-Type") != "application/json" || rec.Header().Get("Cache-Control") != "private, no-store" {
+		t.Errorf("not the service's JSON error headers: %v", rec.Header())
 	}
 	if f.svc.archiveSlotsFor().total != 0 {
 		t.Error("slot not released")
@@ -971,20 +976,26 @@ func TestArchiveClientGoneClassifier(t *testing.T) {
 	gone, cancel := context.WithCancel(context.Background())
 	cancel()
 	for _, c := range []struct {
-		name string
-		ctx  context.Context
-		err  error
-		want bool
+		name  string
+		ctx   context.Context
+		class string
+		err   error
+		want  bool
 	}{
-		{"request context ended", gone, errBlobSize, true},
-		{"broken pipe", live, fmt.Errorf("write: %w", syscall.EPIPE), true},
-		{"connection reset", live, fmt.Errorf("write: %w", syscall.ECONNRESET), true},
-		{"closed connection", live, net.ErrClosed, true},
-		{"size mismatch", live, errBlobSize, false},
-		{"time limit", live, errArchiveTimeLimit, false},
-		{"storage error", live, errors.New("storage unavailable"), false},
+		{"write, request context ended", gone, archiveFailWrite, errors.New("short write"), true},
+		{"write, broken pipe", live, archiveFailWrite, fmt.Errorf("write: %w", syscall.EPIPE), true},
+		{"write, connection reset", live, archiveFailWrite, fmt.Errorf("write: %w", syscall.ECONNRESET), true},
+		{"write, closed connection", live, archiveFailWrite, net.ErrClosed, true},
+		{"write, other error", live, archiveFailWrite, errors.New("disk full"), false},
+		{"blob read cancelled by the client", gone, archiveFailBlobRead, fmt.Errorf("read: %w", context.Canceled), true},
+		{"blob read failing, client still there", live, archiveFailBlobRead, errors.New("storage unavailable"), false},
+		{"blob read failing while the client is gone", gone, archiveFailBlobRead, errors.New("storage unavailable"), false},
+		{"size mismatch while the client is gone", gone, archiveFailSizeMatch, errBlobSize, false},
+		{"blob open while the client is gone", gone, archiveFailBlobOpen, context.Canceled, false},
+		{"entry header while the client is gone", gone, archiveFailEntryHeader, errors.New("bad header"), false},
+		{"time limit", live, archiveFailTimeLimit, errArchiveTimeLimit, false},
 	} {
-		if got := archiveClientGone(c.ctx, c.err); got != c.want {
+		if got := archiveClientGone(c.ctx, c.class, c.err); got != c.want {
 			t.Errorf("%s: %v, want %v", c.name, got, c.want)
 		}
 	}

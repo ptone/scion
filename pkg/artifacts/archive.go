@@ -28,7 +28,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -408,11 +407,13 @@ func (s *Service) handleGetArchive(w http.ResponseWriter, r *http.Request, id st
 	}
 	defer release()
 
-	setArchiveFileHeaders(h, etag)
-	disposition := mime.FormatMediaType("attachment", map[string]string{"filename": archiveName(a, v.Seq)})
-	h.Set("Content-Type", "application/zip")
-	h.Set("Content-Disposition", disposition)
+	setZipHeaders := func() {
+		setArchiveFileHeaders(h, etag)
+		h.Set("Content-Type", "application/zip")
+		h.Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": archiveName(a, v.Seq)}))
+	}
 	if r.Method == http.MethodHead {
+		setZipHeaders()
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -431,9 +432,6 @@ func (s *Service) handleGetArchive(w http.ResponseWriter, r *http.Request, id st
 		first, _, err = b.blobs.Download(ctx, BlobPath(b.hubID, files[0].SHA256))
 		if err != nil {
 			archiveLogFailure(ctx, a, v, archiveFailBlobOpen, err)
-			for _, k := range []string{"Content-Disposition", "ETag", "Content-Security-Policy", "Referrer-Policy"} {
-				h.Del(k)
-			}
 			writeError(w, http.StatusInternalServerError, "internal", "could not read the files")
 			return
 		}
@@ -444,6 +442,9 @@ func (s *Service) handleGetArchive(w http.ResponseWriter, r *http.Request, id st
 		}
 	}()
 
+	// The archive headers are set only now, so every answer before this
+	// point is a plain JSON error.
+	setZipHeaders()
 	aw := &archiveWriter{w: w, rc: http.NewResponseController(w), now: s.archiveClock}
 	aw.limit = aw.now().Add(limit)
 	aw.extend()
@@ -522,7 +523,7 @@ func archiveWriteClass(err error) string {
 // aborts the response, so the client sees a failed download rather than a
 // short archive. The deferred releases of the handler still run.
 func abortArchive(ctx context.Context, a *Artifact, v *Version, f File, class string, err error) {
-	if archiveClientGone(ctx, err) {
+	if archiveClientGone(ctx, class, err) {
 		class = archiveFailClientGone
 	}
 	archiveLogFailure(ctx, a, v, class, err)
@@ -548,13 +549,21 @@ func archiveLogFailure(ctx context.Context, a *Artifact, v *Version, class strin
 	slog.Log(ctx, level, "artifacts: archive failed", attrs...)
 }
 
-// archiveClientGone reports whether a failure after the archive started
-// came from the client going away: the request context ended (the client
-// disconnected; the archive's own time limit uses a separate context), or
-// the write failed on a closed, broken or reset connection.
-func archiveClientGone(reqCtx context.Context, err error) bool {
-	if reqCtx.Err() != nil {
-		return true
+// archiveClientGone reports whether a failure of class after the archive
+// started came from the client going away. Only the write path qualifies:
+//   - a write failure while the request context has ended (the client
+//     disconnected; the archive's own time limit uses a separate context),
+//     or on a closed, broken or reset connection (connGone, per OS);
+//   - a blob read cancelled because the request context ended.
+//
+// Size mismatches, blob opens, entry headers and the time limit are never
+// relabelled: they stay at Warn whether or not the client is still there.
+func archiveClientGone(reqCtx context.Context, class string, err error) bool {
+	switch class {
+	case archiveFailWrite:
+		return reqCtx.Err() != nil || connGone(err) || errors.Is(err, net.ErrClosed)
+	case archiveFailBlobRead:
+		return reqCtx.Err() != nil && errors.Is(err, context.Canceled)
 	}
-	return errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, net.ErrClosed)
+	return false
 }
