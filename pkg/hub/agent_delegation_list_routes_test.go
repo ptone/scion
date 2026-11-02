@@ -403,10 +403,14 @@ func TestDelegatedCatalogLists_HubCatalogNeverListed(t *testing.T) {
 	assert.Equal(t, []bool{false, false}, allowed, "the catalog batch denies every row for a delegated identity")
 }
 
-// TestDelegatedCatalogLists_IssuerScopeNoneAndExcludedProject: a P2-bounded grant whose issuer then loses P2 lists
-// nothing on the skill and template lists, with one deny record (issuer_authority). For an unrestricted issuer, an
-// access constraint that excludes P2 removes P2's skill and template (AllProjects mode, R7-1).
-func TestDelegatedCatalogLists_IssuerScopeNoneAndExcludedProject(t *testing.T) {
+// TestDelegatedCatalogLists_HubMemberIssuerAndExcludedProject: an issuer scope of None cannot be reached on the skill
+// and template lists for a hub-member issuer. The system-scoped hub-member role carries skill.list and template.list
+// (seed.go hubMemberPermissionIDs, bound to the hub-members group), and list scopes come from role bindings alone, so
+// the issuer's scope for them is every project. A P2-bounded grant whose issuer then loses P2 is therefore allowed by
+// the list arm (scope {P2}), and P2's items are refused per item, because the issuer may no longer read them there: an
+// empty 200 with one allow record, and an aggregated record that allows nothing and refuses at least one item. For an
+// unrestricted issuer, an access constraint that excludes P2 removes P2's skill and template (AllProjects mode, R7-1).
+func TestDelegatedCatalogLists_HubMemberIssuerAndExcludedProject(t *testing.T) {
 	w := newADTCatalogWorld(t, "adt-catnone")
 	ctx := context.Background()
 	decisions := w.captureDecisions(t)
@@ -420,8 +424,11 @@ func TestDelegatedCatalogLists_IssuerScopeNoneAndExcludedProject(t *testing.T) {
 		assert.Zero(t, l.TotalCount, path)
 		primary := decisions.primaryDelegated()
 		require.Len(t, primary, 1, path)
-		assert.Equal(t, "deny", primary[0].Result, path)
-		assert.Equal(t, "agent delegation: "+agentDelegationCodeIssuerAuthority, primary[0].Reason, path)
+		assert.Equal(t, "allow", primary[0].Result, "%s: the hub-member role keeps the issuer's list scope on P2", path)
+		agg := decisions.listFilterRecords()
+		require.Len(t, agg, 1, path)
+		assert.Zero(t, agg[0].ListFilter.Allowed, path)
+		assert.Positive(t, agg[0].ListFilter.Denied+agg[0].ListFilter.DroppedByAdmission, "%s: P2's items are refused per item", path)
 	}
 
 	admin := hubAdminUser(t, w.bypassAgentsFixture)
