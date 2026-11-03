@@ -2232,9 +2232,11 @@ authDone:
 			// dirs are created by resolveSharedDirs above, on the shared-dir
 			// Layout, never here, so no shared-dir names are passed to the
 			// workspace leaf helpers.
-			// Kubernetes only: a local container runtime never mounted a
-			// clone-per-agent agent's shared checkout before its agent
-			// directory moved to the share (the start was refused).
+			// Kubernetes only: this keeps the pre-#3998 Kubernetes layout.
+			// A local container runtime's agent whose workspace is not its
+			// directory on the share is refused below instead
+			// (checkLocalRuntimeAgentWorkspace), whichever tree its work is
+			// in.
 			if isKubernetesRuntime(m.Runtime.Name()) && agentDirName != "" && podShare.Mountable() {
 				if keep, reason := nfsKeepSharedCheckout(opts.FreshProvision, agentDir, resolvedWorkspace, agentDirName); keep {
 					// The agent keeps the layout and mode it had before

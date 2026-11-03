@@ -20,6 +20,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,6 +80,9 @@ type sharedLayoutStarter struct {
 	root      string // the project root on the share
 	ext       string // the agent's broker-local external agent dir
 	scionDir  string
+	// run, when set, is the mock runtime's Run (it records the RunConfig
+	// in any case).
+	run func(ctx context.Context, rc runtime.RunConfig) (string, error)
 }
 
 // newSharedLayoutStarter seeds the fixture sharedLayoutStart uses.
@@ -106,6 +110,9 @@ func (sl *sharedLayoutStarter) start(mutate func(*api.StartOptions)) (runtime.Ru
 		NameFunc: func() string { return sl.rtName },
 		RunFunc: func(ctx context.Context, rc runtime.RunConfig) (string, error) {
 			cfg = rc
+			if sl.run != nil {
+				return sl.run(ctx, rc)
+			}
 			return "mock-id", nil
 		},
 	}
@@ -583,6 +590,137 @@ func TestStart_SharedLayoutLocalRuntimeAgentWorkspaceOnShare(t *testing.T) {
 	}
 }
 
+// fakeContainerCommand writes an executable that stands in for the docker
+// or podman CLI: it records its arguments, one per line, and prints a
+// container ID. It returns the command and the file its arguments go to.
+func fakeContainerCommand(t *testing.T) (command, argsFile string) {
+	t.Helper()
+	dir := t.TempDir()
+	command = filepath.Join(dir, "fake-container-cli")
+	argsFile = filepath.Join(dir, "args")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > '" + argsFile + "'\necho 0123456789abcdef\n"
+	require.NoError(t, os.WriteFile(command, []byte(script), 0o755))
+	return command, argsFile
+}
+
+// The RunConfig Start builds for a local container runtime on a shared
+// layout goes through the real Docker and Podman Run, and so through
+// buildCommonRunArgs and its NFS bind-scope check, not only a mock: the
+// agent's own workspace on the share is bound at the container workspace.
+// The same RunConfig without NFSAgentDirName is refused by that check,
+// so the test sees the real layer.
+func TestStart_SharedLayoutLocalRuntimeRealRunArgs(t *testing.T) {
+	runtimes := map[string]func(command string) runtime.Runtime{
+		"docker": func(c string) runtime.Runtime { return &runtime.DockerRuntime{Command: c} },
+		"podman": func(c string) runtime.Runtime { return &runtime.PodmanRuntime{Command: c} },
+	}
+	for rtName, newRT := range runtimes {
+		for _, mode := range localRuntimeModes {
+			t.Run(rtName+"/"+mode.name, func(t *testing.T) {
+				command, argsFile := fakeContainerCommand(t)
+				sl := newSharedLayoutStarter(t, rtName)
+				sl.run = func(ctx context.Context, rc runtime.RunConfig) (string, error) {
+					return newRT(command).Run(ctx, rc)
+				}
+				cfg, _, err := sl.start(mode.mutate)
+				require.NoError(t, err, "the real %s Run accepts the agent's workspace on the share", rtName)
+				realWS, err := filepath.EvalSymlinks(filepath.Join(sl.root, "agents", "test-agent", "workspace"))
+				require.NoError(t, err)
+				args, err := os.ReadFile(argsFile)
+				require.NoError(t, err, "the container CLI was run")
+				assert.Contains(t, string(args), realWS+":/workspace", "the agent's own workspace is bound at /workspace")
+				realRoot, err := filepath.EvalSymlinks(sl.root)
+				require.NoError(t, err)
+				assert.NotContains(t, string(args), filepath.Join(realRoot, "workspace")+":", "the project's shared checkout is not bound")
+
+				// The same RunConfig without the agent's name is refused by
+				// the runtime's bind-scope check.
+				rc := cfg
+				rc.NFSAgentDirName = ""
+				_, err = newRT(command).Run(context.Background(), rc)
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "mount outside the agent's directories on NFS project storage")
+			})
+		}
+	}
+}
+
+// NFSAgentDirName comes only from the agent's own validated slug: Start
+// sets it to api.ValidateAgentName of the agent's name, and a request that
+// names a workspace in another agent's directory on the share neither
+// changes it nor reaches the runtime.
+func TestStart_SharedLayoutLocalRuntimeAgentDirNameFromAgentOnly(t *testing.T) {
+	for _, mode := range localRuntimeModes {
+		t.Run(mode.name+"/slug", func(t *testing.T) {
+			cfg, _, _, opts, err := sharedLayoutStart(t, "docker", mode.mutate)
+			require.NoError(t, err)
+			slug, err := api.ValidateAgentName(opts.Name)
+			require.NoError(t, err)
+			assert.Equal(t, slug, cfg.NFSAgentDirName)
+		})
+	}
+	t.Run("clone-per-agent/request names another agent's workspace", func(t *testing.T) {
+		sl := newSharedLayoutStarter(t, "docker")
+		other := filepath.Join(sl.root, "agents", "other", "workspace")
+		mustMkdirAll(t, other)
+		require.NoError(t, os.WriteFile(filepath.Join(other, "theirs.txt"), []byte("x"), 0o644))
+		cfg, _, err := sl.start(func(o *api.StartOptions) {
+			localRuntimeModes[0].mutate(o)
+			o.Workspace = other
+		})
+		require.Error(t, err, "a workspace in another agent's directory is refused")
+		assert.Empty(t, cfg.Name, "the runtime is never reached")
+		assert.NoDirExists(t, filepath.Join(sl.root, "agents", "test-agent"), "nothing is created for the agent")
+		assert.FileExists(t, filepath.Join(other, "theirs.txt"), "the other agent's workspace is left as it is")
+	})
+}
+
+// Reincarnating (Reprovision) an agent-scoped agent of a local container
+// runtime on a shared layout checks its workspace on the share, where Start
+// placed it: an empty-per-agent agent's workspace is reused in place with
+// its content, a missing one is refused naming the share path, and a
+// clone-per-agent agent needs its clone there.
+func TestReprovision_SharedLayoutDockerChecksShare(t *testing.T) {
+	t.Run("empty-per-agent", func(t *testing.T) {
+		_, root, _, opts, err := sharedLayoutStart(t, "docker", localRuntimeModes[1].mutate)
+		require.NoError(t, err)
+		shareWS := filepath.Join(root, "agents", "test-agent", "workspace")
+		note := filepath.Join(shareWS, "notes.md")
+		require.NoError(t, os.WriteFile(note, []byte("keep"), 0o644))
+		m := NewManager(&runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+
+		_, err = m.Reprovision(context.Background(), opts)
+		if err != nil {
+			assert.NotContains(t, err.Error(), "workspace missing or not a real directory", "the workspace on the share must be found")
+		}
+		data, err := os.ReadFile(note)
+		require.NoError(t, err)
+		assert.Equal(t, "keep", string(data))
+
+		require.NoError(t, os.RemoveAll(shareWS))
+		_, err = m.Reprovision(context.Background(), opts)
+		require.ErrorIs(t, err, ErrReprovisionRefused)
+		assert.Contains(t, err.Error(), shareWS, "the refusal names the workspace on the share")
+		assert.NoDirExists(t, shareWS, "reincarnate never recreates it")
+	})
+	t.Run("clone-per-agent", func(t *testing.T) {
+		_, root, _, opts, err := sharedLayoutStart(t, "docker", localRuntimeModes[0].mutate)
+		require.NoError(t, err)
+		shareWS := filepath.Join(root, "agents", "test-agent", "workspace")
+		m := NewManager(&runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+
+		_, err = m.Reprovision(context.Background(), opts)
+		require.ErrorIs(t, err, ErrReprovisionRefused, "no clone on the share yet")
+		assert.Contains(t, err.Error(), "has no existing git clone at "+shareWS)
+
+		mustMkdirAll(t, filepath.Join(shareWS, ".git"))
+		_, err = m.Reprovision(context.Background(), opts)
+		if err != nil {
+			assert.NotContains(t, err.Error(), "has no existing git clone", "the clone on the share must be found")
+		}
+	})
+}
+
 // Docker and Kubernetes place the same agent's workspace at the same path
 // on the share: the Kubernetes leaf helper and the Docker bind mount both
 // address <root>/agents/<slug>/workspace.
@@ -693,6 +831,50 @@ func TestCheckLocalRuntimeAgentWorkspace(t *testing.T) {
 		assert.NotContains(t, err.Error(), agentDir, "the message names no path")
 		assert.FileExists(t, work, "the broker-local workspace is left as it is")
 		assert.NoDirExists(t, shareWS, "nothing is created on the share")
+	})
+	t.Run("only provisioning entries in the broker-local workspace", func(t *testing.T) {
+		resolved, shareWS, agentDir := setup(t)
+		mustMkdirAll(t, filepath.Join(localWS(agentDir), ".scion"))
+		mustMkdirAll(t, filepath.Join(localWS(agentDir), ".scion-volumes"))
+		require.NoError(t, checkLocalRuntimeAgentWorkspace("a1", shareWS, agentDir, resolved, "a1"))
+	})
+	t.Run("unreadable broker-local workspace", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root reads a mode-000 directory")
+		}
+		resolved, shareWS, agentDir := setup(t)
+		mustMkdirAll(t, localWS(agentDir))
+		require.NoError(t, os.WriteFile(filepath.Join(localWS(agentDir), "unpushed.txt"), []byte("work"), 0o644))
+		require.NoError(t, os.Chmod(localWS(agentDir), 0))
+		t.Cleanup(func() { _ = os.Chmod(localWS(agentDir), 0o755) })
+		require.ErrorIs(t, checkLocalRuntimeAgentWorkspace("a1", shareWS, agentDir, resolved, "a1"), ErrAgentWorkspaceOffShare,
+			"a workspace that cannot be read is never taken for empty")
+		assert.NoDirExists(t, shareWS)
+	})
+	t.Run("broker-local workspace is a file", func(t *testing.T) {
+		resolved, shareWS, agentDir := setup(t)
+		mustMkdirAll(t, agentDir)
+		require.NoError(t, os.WriteFile(localWS(agentDir), []byte("x"), 0o644))
+		require.ErrorIs(t, checkLocalRuntimeAgentWorkspace("a1", shareWS, agentDir, resolved, "a1"), ErrAgentWorkspaceOffShare)
+	})
+	t.Run("share workspace cannot be checked", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root searches a mode-000 directory")
+		}
+		resolved, shareWS, agentDir := setup(t)
+		agents := filepath.Dir(filepath.Dir(shareWS))
+		mustMkdirAll(t, agents)
+		require.NoError(t, os.Chmod(agents, 0))
+		t.Cleanup(func() { _ = os.Chmod(agents, 0o755) })
+		err := checkLocalRuntimeAgentWorkspace("a1", shareWS, agentDir, resolved, "a1")
+		require.Error(t, err, "an error other than absence fails closed")
+		assert.NotErrorIs(t, err, fs.ErrNotExist)
+	})
+	t.Run("share workspace is not a directory", func(t *testing.T) {
+		resolved, shareWS, agentDir := setup(t)
+		mustMkdirAll(t, filepath.Dir(shareWS))
+		require.NoError(t, os.WriteFile(shareWS, []byte("x"), 0o644))
+		require.ErrorIs(t, checkLocalRuntimeAgentWorkspace("a1", shareWS, agentDir, resolved, "a1"), ErrAgentWorkspaceOffShare)
 	})
 	t.Run("validated workspace is not the share's", func(t *testing.T) {
 		resolved, shareWS, agentDir := setup(t)
