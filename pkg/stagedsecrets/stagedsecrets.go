@@ -42,7 +42,23 @@ type FileSecret struct {
 type Staged struct {
 	FileSecrets     []FileSecret      `json:"file_secrets,omitempty"`
 	VariableSecrets map[string]string `json:"variable_secrets,omitempty"`
+	// HubToken is the agent's hub-issued credential, set only by runtimes
+	// whose instance cannot see the broker-written token file (Cloud Run).
+	// It is a dedicated field rather than a FileSecret so the payload
+	// cannot choose where it is written: sciontool init writes it to the
+	// canonical token file. Write ignores it.
+	HubToken string `json:"hub_token,omitempty"`
 }
+
+// String withholds every value, so formatting a Staged never prints a
+// secret or the hub credential.
+func (s Staged) String() string {
+	return fmt.Sprintf("stagedsecrets.Staged{files:%d variables:%d hub_token:%t}",
+		len(s.FileSecrets), len(s.VariableSecrets), s.HubToken != "")
+}
+
+// GoString is String, for %#v.
+func (s Staged) GoString() string { return s.String() }
 
 // Decode decodes the SCION_STAGED_SECRETS env var value
 // (base64 → JSON) and returns the structured secrets. This is called

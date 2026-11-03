@@ -289,11 +289,23 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	if err != nil {
 		return "", err
 	}
+	// The instance mounts its own home leaf from the NFS share in every
+	// homes mode, never cfg.HomeDir, so the hub-issued credential pkg/agent
+	// wrote there is carried in the staged blob (Staged.HubToken, never an
+	// env var of its own) and sciontool init writes it to the instance's
+	// token file. A refused read stages nothing and is reported by
+	// condition only; the instance then logs that its hub client is not
+	// configured.
+	hubToken, hubTokenCond := readCloudRunHubToken(cfg.HomeDir)
+	if hubTokenCond != "" {
+		runtimeLog().Warn("Cloud Run start: the agent's hub credential is not staged",
+			"agent_id", cfg.Labels["agent_id"], "condition", hubTokenCond)
+	}
 	// Deliver resolved secrets through the instance env: env-type secrets as
-	// plain variables, file/variable secrets as the staged blob that
-	// sciontool init writes out. Done before any provisioning so an
-	// oversized secret fails fast.
-	if _, err := applyResolvedSecretsToEnv(&cfg, cloudRunEnvLimit, cloudRunRuntimeEnvKeys...); err != nil {
+	// plain variables, file/variable secrets (and the hub credential) as the
+	// staged blob that sciontool init writes out. Done before any
+	// provisioning so an oversized secret fails fast.
+	if _, err := applyStagedSecretsToEnv(&cfg, cloudRunEnvLimit, hubToken, cloudRunRuntimeEnvKeys...); err != nil {
 		return "", fmt.Errorf("cloudrun: %w", err)
 	}
 	if err := r.resolveConfig(ctx); err != nil {

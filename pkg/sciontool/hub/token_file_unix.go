@@ -99,7 +99,7 @@ func readTokenAtStat(dirFd int, leaf, path string) (string, dirfd.Stat, error) {
 		return "", st, fmt.Errorf("%s: %w", path, err)
 	}
 	if enforceTokenFileOwnerChecks.Load() && st.Uid != 0 && st.Uid != dirSt.Uid {
-		return "", st, fmt.Errorf("refusing to read %s: unexpected owner", path)
+		return "", st, fmt.Errorf("refusing to read %s: %w", path, errTokenFileOwner)
 	}
 	return string(data), st, nil
 }

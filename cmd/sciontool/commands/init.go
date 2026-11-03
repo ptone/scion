@@ -456,16 +456,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 	log.Info("Child command: %v", childArgs)
 	log.Info("Grace period: %s", gracePeriod)
 
-	// Log operating mode for diagnostics
-	mode := hub.OperatingMode()
-	switch mode {
-	case hub.ModeLocal:
-		log.Info("Operating mode: local (no hub configured)")
-	case hub.ModeHubConnected:
-		log.Info("Operating mode: hub-connected (endpoint: %s)", os.Getenv(hub.EnvHubEndpoint))
-	case hub.ModeHosted:
-		log.Info("Operating mode: hosted (endpoint: %s)", os.Getenv(hub.EnvHubEndpoint))
-	}
+	// The operating mode is logged once the hub client is built (see
+	// logHubOperatingMode), so a hub endpoint without a usable client is
+	// reported as such rather than as hub-connected.
 
 	// nfs shared-dir writers: clear the umask's group bits (022 -> 002) when
 	// the runtime granted shared-dir groups (SCION_SUPPLEMENTAL_GIDS checked
@@ -544,6 +537,28 @@ func RunInit(args []string, opts InitRunOptions) int {
 			reportInitFailure(agentHome, fmt.Errorf("failed to write staged secrets: %w", err))
 			return 1
 		}
+		// A runtime whose instance cannot see the broker-written token file
+		// (Cloud Run) stages the hub-issued credential instead. It is
+		// written to the canonical token file, and a marker (not the
+		// credential) survives the re-exec below so this init removes the
+		// file again at exit. The errors name the step and path only.
+		if staged.HubToken != "" {
+			kept, err := stageHubToken(staged.HubToken, targetUID, targetGID)
+			staged.HubToken = ""
+			if err != nil {
+				log.Error("Failed to write the staged hub credential: %v", err)
+				reportInitFailure(agentHome, fmt.Errorf("failed to write the staged hub credential: %w", err))
+				return 1
+			}
+			if kept {
+				log.Info("Kept the existing hub credential file: it was issued after the staged one")
+			} else {
+				log.Info("Wrote the staged hub credential to the agent token file")
+			}
+			if err := os.Setenv(envHubTokenStaged, "1"); err != nil {
+				log.Warn("Could not mark the hub credential file as staged; it will not be removed at exit: %v", err)
+			}
+		}
 		_ = os.Unsetenv(stagedsecrets.EnvVar)
 		log.Info("Staged %d file secret(s) and %d variable secret(s)",
 			len(staged.FileSecrets), len(staged.VariableSecrets))
@@ -589,6 +604,15 @@ func RunInit(args []string, opts InitRunOptions) int {
 		} else {
 			log.Info("RunInit embedded: skipping environ-purge re-exec")
 		}
+	}
+
+	// The token file this init staged from the runtime's payload is removed
+	// when init returns, after the final hub reports (deferred calls run
+	// after every return path below). A file the broker bind-mounted or
+	// copied in (docker, Kubernetes) is never staged and stays as before.
+	if os.Getenv(envHubTokenStaged) == "1" {
+		_ = os.Unsetenv(envHubTokenStaged)
+		defer removeStagedHubToken()
 	}
 
 	// Open the startup listener when the runtime asked for one (only the
@@ -905,6 +929,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// Initialize hubClient early so the metadata server's fetch callbacks
 	// can use it without data races or startup race conditions.
 	hubClient := hub.NewClient()
+	logHubOperatingMode(hubClient)
 
 	// Publish what this process knows about its own agent credential for
 	// sciontool doctor. The first write happens here, before the child
