@@ -674,12 +674,55 @@ func TestStart_SharedLayoutLocalRuntimeAgentDirNameFromAgentOnly(t *testing.T) {
 		return cfg, sl, other, err
 	}
 	t.Run("clone-per-agent/request names another agent's workspace", func(t *testing.T) {
-		cfg, sl, other, err := requestOther(t, 0)
-		require.NoError(t, err)
+		// Through the real Docker Run: the binds it emits are scanned, not
+		// only the RunConfig.
+		command, argsFile := fakeContainerCommand(t)
+		sl := newSharedLayoutStarter(t, "docker")
+		sl.run = func(ctx context.Context, rc runtime.RunConfig) (string, error) {
+			return (&runtime.DockerRuntime{Command: command}).Run(ctx, rc)
+		}
+		other := filepath.Join(sl.root, "agents", "other", "workspace")
+		mustMkdirAll(t, other)
+		require.NoError(t, os.WriteFile(filepath.Join(other, "theirs.txt"), []byte("x"), 0o644))
+		cfg, _, err := sl.start(func(o *api.StartOptions) {
+			localRuntimeModes[0].mutate(o)
+			o.Workspace = other
+		})
+		require.NoError(t, err, "the requested workspace is ignored, not refused")
 		realOwn, err := filepath.EvalSymlinks(filepath.Join(sl.root, "agents", "test-agent", "workspace"))
+		require.NoError(t, err)
+		realOther, err := filepath.EvalSymlinks(other)
 		require.NoError(t, err)
 		assert.Equal(t, realOwn, cfg.Workspace, "the agent's own workspace, not the requested one")
 		assert.Equal(t, "test-agent", cfg.NFSAgentDirName)
+
+		data, err := os.ReadFile(argsFile)
+		require.NoError(t, err, "the container CLI was run")
+		args := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+		var sources []string
+		for i := 0; i+1 < len(args); i++ {
+			switch args[i] {
+			case "-v", "--volume":
+				src, _, _ := strings.Cut(args[i+1], ":")
+				sources = append(sources, src)
+			case "--mount":
+				for _, kv := range strings.Split(args[i+1], ",") {
+					if v, ok := strings.CutPrefix(kv, "source="); ok {
+						sources = append(sources, v)
+					} else if v, ok := strings.CutPrefix(kv, "src="); ok {
+						sources = append(sources, v)
+					}
+				}
+			}
+		}
+		require.NotEmpty(t, sources, "the run args carry binds")
+		assert.Contains(t, args, realOwn+":/workspace", "the mount source of /workspace is the agent's own leaf")
+		for _, src := range sources {
+			assert.False(t, src == realOther || strings.HasPrefix(src, realOther+string(filepath.Separator)) ||
+				src == other || strings.HasPrefix(src, other+string(filepath.Separator)),
+				"bind source %q is the other agent's workspace", src)
+		}
+		assert.NotContains(t, string(data), realOther, "the other agent's leaf appears in no run argument")
 		entries, err := os.ReadDir(other)
 		require.NoError(t, err)
 		require.Len(t, entries, 1, "the other agent's workspace is left as it is")
