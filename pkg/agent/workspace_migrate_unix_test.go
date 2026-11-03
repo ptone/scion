@@ -553,6 +553,35 @@ func TestMigrateAgentWorkspaces_EmptyLocalSkipped(t *testing.T) {
 	assert.NoDirExists(t, filepath.Join(f.sl.root, "agents"))
 }
 
+// A broker-local workspace that cannot be read refuses the agent; it is
+// never taken for empty, and is left as it is.
+func TestMigrateAgentWorkspaces_UnreadableLocalRefused(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a mode-0 directory")
+	}
+	f := newMigrateFixture(t)
+	f.seedPlain(t)
+	require.NoError(t, os.Chmod(f.local, 0))
+	t.Cleanup(func() { _ = os.Chmod(f.local, 0o755) })
+	r := f.migrate(t, false, notRunning)
+	assert.Equal(t, MigrationRefusedUnsupported, r.Status)
+	assert.Equal(t, causeSourceUnreadable, r.Cause)
+	assert.NoDirExists(t, filepath.Join(f.sl.root, "agents"))
+	require.NoError(t, os.Chmod(f.local, 0o755))
+	assert.FileExists(t, filepath.Join(f.local, "work.txt"))
+}
+
+// A workspace holding only provisioning artifacts is empty, as Start
+// judges it, and is skipped.
+func TestMigrateAgentWorkspaces_ProvisioningOnlyLocalSkipped(t *testing.T) {
+	f := newMigrateFixture(t)
+	mustMkdirAll(t, filepath.Join(f.local, ".scion"))
+	r := f.migrate(t, false, notRunning)
+	assert.Equal(t, MigrationSkipped, r.Status)
+	assert.Equal(t, causeLocalWorkspaceEmpty, r.Cause)
+	assert.DirExists(t, filepath.Join(f.local, ".scion"))
+}
+
 func TestAgentContainerLive(t *testing.T) {
 	list := func(phase string) func(context.Context, map[string]string) ([]api.AgentInfo, error) {
 		return func(_ context.Context, filter map[string]string) ([]api.AgentInfo, error) {
