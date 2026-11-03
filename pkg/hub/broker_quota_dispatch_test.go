@@ -1334,3 +1334,62 @@ func TestRestart_FinalReassertSkippedWhenDeleteOwnsRow(t *testing.T) {
 		})
 	}
 }
+
+// TestRestart_WithRunFailedStartEndsStoppedDyingReportDropped: on a row
+// with a run, the dying container's own stopped report during the restart's
+// stop leg is dropped (the restart has not recorded its new run:
+// store.RestartPreMint), so the agent does not flicker to stopped; when the
+// start leg then fails before it is sent, the restart records stopped
+// itself (recordRestartStopped writes only for a row with a run), and the
+// slot is released once.
+func TestRestart_WithRunFailedStartEndsStoppedDyingReportDropped(t *testing.T) {
+	srv, s := testServer(t)
+	disp := &hookedStartDispatcher{failStart: true, startErr: fmt.Errorf("start: %w", errStartRequestNotSent)}
+	srv.SetDispatcher(disp)
+	setBrokerAgentCeiling(t, s, 2)
+	ctx := context.Background()
+	broker, project := newQuotaTestBrokerAndProject(t, s, "rs-withrun")
+	a := newQuotaTestAgent(t, s, broker, project, "rs-withrun", state.PhaseRunning)
+	_, err := s.SetAgentRunID(ctx, a.ID, "run-rs-withrun", nil)
+	require.NoError(t, err)
+	a, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	reserveBrokerSlot(t, s, broker, a.ID)
+	var phaseAfterDyingReport string
+	disp.onStop = func(*store.Agent) {
+		postDyingStoppedReport(t, srv, a)
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		phaseAfterDyingReport = got.Phase
+	}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/restart", nil)
+	require.GreaterOrEqual(t, rec.Code, 500, rec.Body.String())
+	assert.Equal(t, string(state.PhaseRunning), phaseAfterDyingReport, "the dying report does not flicker the agent to stopped")
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseStopped), got.Phase, "the failed restart records stopped itself")
+	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID))
+	assert.Zero(t, brokerReservationCount(t, s, broker.ID))
+}
+
+// TestRestartWindow_RunlessSelfReportMovesNoReservation: a run-less agent
+// token's stopped report on a row with a minted run has its phase dropped
+// (store.RunlessAgentTokenReport). The hub drops it before its reservation
+// reconcile too, so the running agent keeps its slot. No restart claim is
+// held here, so nothing else protects the slot.
+func TestRestartWindow_RunlessSelfReportMovesNoReservation(t *testing.T) {
+	srv, s := testServer(t)
+	setBrokerAgentCeiling(t, s, 2)
+	ctx := context.Background()
+	broker, project := newQuotaTestBrokerAndProject(t, s, "rw-quota")
+	a := newQuotaTestAgent(t, s, broker, project, "rw-quota", state.PhaseRunning)
+	_, err := s.SetAgentRunID(ctx, a.ID, "run-rw-quota", nil)
+	require.NoError(t, err)
+	reserveBrokerSlot(t, s, broker, a.ID)
+	postDyingStoppedReport(t, srv, a) // run-less agent identity
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseRunning), got.Phase)
+	assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID), "the dropped phase moves no reservation")
+	assert.EqualValues(t, 1, brokerReservationCount(t, s, broker.ID))
+}

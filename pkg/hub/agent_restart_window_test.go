@@ -28,9 +28,12 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // restartMinted records run "run-2" on the fixture's agent, the write a
@@ -40,6 +43,19 @@ func (f haltFixture) restartMinted(t *testing.T) {
 	prior, err := f.s.SetAgentRunID(context.Background(), f.agent.ID, "run-2", nil)
 	require.NoError(t, err)
 	require.Equal(t, "run-1", prior)
+}
+
+// restartClaimed takes a restart's start claim on the fixture's agent, as a
+// restart does before its stop leg, and checks that the claim is later than
+// the recorded run "run-1" (the restart has not recorded its new run).
+func (f haltFixture) restartClaimed(t *testing.T) {
+	t.Helper()
+	_, err := f.s.ClaimAgentStart(context.Background(), f.agent.ID, "test-owner", store.StartClaimRestart, "", time.Minute)
+	require.NoError(t, err)
+	a := f.get(t)
+	require.NotNil(t, a.StartClaimAt)
+	require.NotNil(t, a.RunIDUpdatedAt)
+	require.True(t, a.RunIDUpdatedAt.Before(*a.StartClaimAt), "the run was recorded before the restart claim")
 }
 
 func TestRestartWindow_HeartbeatOldRunIgnoredAfterRestart(t *testing.T) {
@@ -89,8 +105,11 @@ func TestRestartWindow_SelfReportNewRunApplied(t *testing.T) {
 // behaviour; it is not an endorsement. The store's run check skips a report
 // that names no run, so after a restart has recorded the new run, a
 // heartbeat entry without a run ID (a pod without the scion.run_id label,
-// or an older broker) still changes the agent. See gap (1) in
-// notes/kr-restart-window-gaps.md for the analysis and the proposed fix.
+// or an older broker) still changes the agent once the restart has recorded
+// its new run. Run-less self-reports from an agent token are dropped
+// (TestRestartWindow_RunlessSelfReportIgnoredAfterRestart); run-less
+// heartbeats after a restart are a deferred follow-up that needs a broker
+// capability (gap (1) in notes/kr-restart-window-gaps.md).
 func TestRestartWindow_CharacterizesRunlessHeartbeatAccepted(t *testing.T) {
 	f := newHaltFixture(t)
 	f.restartMinted(t)
@@ -101,31 +120,82 @@ func TestRestartWindow_CharacterizesRunlessHeartbeatAccepted(t *testing.T) {
 	assert.Equal(t, "run-less report", got.Message, "current behaviour: a run-less heartbeat applies")
 }
 
-// TestRestartWindow_CharacterizesRunlessSelfReportAccepted documents CURRENT
-// behaviour; it is not an endorsement. An agent token without a run claim
-// presents no run (presentedAgentTokenRunID ""), so after a restart has
-// recorded the new run its report still changes the agent. With no start
-// launch active, Guard 0f does not apply. See gap (1) in
-// notes/kr-restart-window-gaps.md.
-func TestRestartWindow_CharacterizesRunlessSelfReportAccepted(t *testing.T) {
+// TestRestartWindow_RunlessSelfReportIgnoredAfterRestart: an agent token
+// without a run claim (presentedAgentTokenRunID "") belongs to no run of a
+// row whose run was recorded by a dispatch, so after a restart its report
+// no longer changes the agent's status fields (gap (1), the self-report
+// variant; store.RunlessAgentTokenReport).
+func TestRestartWindow_RunlessSelfReportIgnoredAfterRestart(t *testing.T) {
 	f := newHaltFixture(t)
 	f.restartMinted(t)
-	require.Equal(t, http.StatusOK, f.selfReport(t, "", map[string]any{"phase": "running", "activity": "idle"}))
-	assert.Equal(t, "idle", f.get(t).Activity, "current behaviour: a run-less self-report applies")
+	before := f.get(t)
+	require.Equal(t, http.StatusOK, f.selfReport(t, "", map[string]any{"phase": "stopped", "exitReason": "oom_killed", "activity": "idle"}))
+	got := f.get(t)
+	assert.Equal(t, before.Phase, got.Phase)
+	assert.Equal(t, before.Activity, got.Activity)
+	assert.Empty(t, got.ExitReason)
 }
 
-// TestRestartWindow_CharacterizesOldRunReportAcceptedBeforeMint documents
-// CURRENT behaviour; it is not an endorsement. A restart mints the new run
-// only in its start leg, after the stop leg, so between accepting the
-// restart and that mint the row still holds the old run, and the old pod's
-// reports pass the run check. Here the restart is accepted but not yet
-// minted (the row is still "run-1"). See gap (2) in
-// notes/kr-restart-window-gaps.md.
-func TestRestartWindow_CharacterizesOldRunReportAcceptedBeforeMint(t *testing.T) {
+// TestRestartWindow_OldRunReportAppliesWithoutRestartClaim: with no
+// restart in flight the row's run is the live one, so its reports apply.
+// The restart-window rule needs a restart claim
+// (TestRestartWindow_OldPodStoppedDuringRestartIgnored).
+func TestRestartWindow_OldRunReportAppliesWithoutRestartClaim(t *testing.T) {
 	f := newHaltFixture(t)
 	f.heartbeat(t, brokerAgentHeartbeat{Phase: "running", ContainerStatus: "exited (143)", Message: "old pod", RunID: "run-1"})
 	got := f.get(t)
 	assert.Equal(t, "run-1", got.RunID)
-	assert.Equal(t, "exited (143)", got.ContainerStatus, "current behaviour: the old run's report applies before the mint")
-	assert.Equal(t, "old pod", got.Message, "current behaviour: the old run's report applies before the mint")
+	assert.Equal(t, "exited (143)", got.ContainerStatus, "no restart in flight: the run's report applies")
+	assert.Equal(t, "old pod", got.Message, "no restart in flight: the run's report applies")
+}
+
+// TestRestartWindow_OldPodStoppedDuringRestartIgnored: while a restart has
+// not recorded its new run, the old pod's terminal heartbeat (of the
+// current run, or with no run) no longer flickers onto the agent: phase,
+// activity, exit and message are kept, the container status still applies.
+// Once the new run is recorded, its reports apply although the restart
+// claim is still held (gap (2); store.RestartPreMint).
+func TestRestartWindow_OldPodStoppedDuringRestartIgnored(t *testing.T) {
+	f := newHaltFixture(t)
+	f.restartClaimed(t)
+	before := f.get(t)
+	code := 143
+	f.heartbeat(t, brokerAgentHeartbeat{Phase: "stopped", ExitReason: "preempted", ExitCode: &code,
+		ContainerStatus: "exited (143)", Message: "old pod stopped", RunID: "run-1"})
+	f.heartbeat(t, brokerAgentHeartbeat{Phase: "stopped", ContainerStatus: "exited (0)", Message: "run-less stop"})
+	got := f.get(t)
+	assert.Equal(t, before.Phase, got.Phase, "no stopped flicker during the restart")
+	assert.Equal(t, before.Activity, got.Activity)
+	assert.Equal(t, before.Message, got.Message)
+	assert.Empty(t, got.ExitReason)
+	assert.Equal(t, "exited (0)", got.ContainerStatus, "the container status still applies")
+
+	f.restartMinted(t)
+	f.heartbeat(t, brokerAgentHeartbeat{Phase: "running", ContainerStatus: "running (new)", Message: "new run", RunID: "run-2"})
+	got = f.get(t)
+	assert.Equal(t, "new run", got.Message, "the new run's report applies while the claim is held")
+	assert.Equal(t, "running (new)", got.ContainerStatus)
+}
+
+func TestRestartWindow_OldPodSelfReportDuringRestartIgnored(t *testing.T) {
+	f := newHaltFixture(t)
+	f.restartClaimed(t)
+	before := f.get(t)
+	require.Equal(t, http.StatusOK, f.selfReport(t, "run-1", map[string]any{"phase": "stopped", "exitReason": "oom_killed"}))
+	require.Equal(t, http.StatusOK, f.selfReport(t, "", map[string]any{"phase": "stopped", "activity": "idle"}))
+	got := f.get(t)
+	assert.Equal(t, before.Phase, got.Phase)
+	assert.Equal(t, before.Activity, got.Activity)
+	assert.Empty(t, got.ExitReason)
+}
+
+// TestRestartWindow_UserStatusUpdateUnaffected: a user or service with
+// update access sends no run either, but it is not an agent token, so the
+// run-less rule leaves its update alone on a row with a minted run.
+func TestRestartWindow_UserStatusUpdateUnaffected(t *testing.T) {
+	f := newHaltFixture(t)
+	f.restartMinted(t)
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agent.ID+"/status", map[string]any{"phase": "running", "activity": "idle"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, "idle", f.get(t).Activity)
 }

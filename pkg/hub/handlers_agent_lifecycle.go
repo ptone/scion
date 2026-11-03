@@ -149,6 +149,12 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 		startLaunchGuarded := false
 		if _, isAgent := identity.(AgentIdentity); isAgent {
 			startLaunchGuarded = guardStartLaunchSelfReport(agent, &status, presentedAgentTokenRunID(ctx))
+			// Restart window: the store drops these fields on the locked
+			// row (store.RestartPreMint, store.RunlessAgentTokenReport);
+			// dropped here too, so the reservation reconcile below never
+			// acts on a phase the store will not write.
+			guardRestartWindowReport(agent, &status, store.AgentStatusUpdate{
+				ReportSource: store.StatusReportSourceAgent, ReportAgentToken: true, ReportRunID: presentedAgentTokenRunID(ctx)})
 		}
 		// Guarded no-op: when a guard that owns the agent's status (Guard 0c,
 		// a delete in progress or a soft-deleted row; Guard 0b, an in-flight
@@ -207,6 +213,9 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 	// The run of the token that sent this report: the store drops a report
 	// of another run (ptone/scion#4853).
 	status.ReportRunID = presentedAgentTokenRunID(ctx)
+	// Only the agent's own token marks a run-less report as an agent's: a
+	// user or service with update access sends no run either.
+	_, status.ReportAgentToken = identity.(AgentIdentity)
 	if err := s.store.UpdateAgentStatus(ctx, id, status); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -459,6 +468,23 @@ func guardAgentPhaseTransition(agent *store.Agent, status *store.AgentStatusUpda
 // it no longer applies. It reports whether it applied (blanked the
 // report's guarded fields), so a report with nothing else is answered as
 // not applied.
+// guardRestartWindowReport drops status's Phase, Activity, ExitCode,
+// ExitReason and Message when the report (described by report: its source,
+// agent-token flag and run) falls in the restart window on agent's
+// snapshot: a report of the current run, or of none, while a restart has
+// not yet recorded its new run (store.RestartPreMint), or a run-less agent
+// token against a row with a minted run (store.RunlessAgentTokenReport).
+// It mirrors the store's check on the locked row, which stays
+// authoritative, and reports whether it dropped the fields.
+func guardRestartWindowReport(agent *store.Agent, status *store.AgentStatusUpdate, report store.AgentStatusUpdate) bool {
+	preMint := store.RestartPreMint(agent.StartClaimID != "", agent.StartClaimKind, agent.RunID, agent.RunIDUpdatedAt, agent.StartClaimAt)
+	if (preMint && store.RestartPreMintReport(report, agent.RunID)) || store.RunlessAgentTokenReport(report, agent.RunIDUpdatedAt) {
+		store.DropReportedStatus(status)
+		return true
+	}
+	return false
+}
+
 func guardStartLaunchSelfReport(agent *store.Agent, status *store.AgentStatusUpdate, tokenRunID string) bool {
 	if agent.LaunchState != store.LaunchStateActive ||
 		(agent.LaunchKind != store.LaunchKindStart && agent.LaunchKind != store.LaunchKindRestart) {
