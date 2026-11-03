@@ -61,6 +61,10 @@ var brokerMachineLevelCommands = map[string]bool{
 	"hubs":       true,
 	"join":       true,
 	"convert":    true,
+	// migrate-workspaces moves this broker's own broker-local agent
+	// workspaces; it takes its projects from --project or the shared
+	// layout, never from the current directory.
+	"migrate-workspaces": true,
 }
 
 // commandRequiresProject reports whether cmd needs an active scion project

@@ -42,6 +42,9 @@ func TestBrokerMigrateWorkspaces_HumanOnlyAndUnixOnly(t *testing.T) {
 	assert.False(t, agentAllowed["runtime-broker"], "its parent is not in agentAllowed")
 	assert.False(t, windowsAllowed[path], "not in windowsAllowed")
 
+	assert.False(t, commandRequiresProject(resolveCommandPath(rootCmd, path)),
+		"its projects come from --project or the shared layout, never the current directory")
+
 	t.Run("agent mode", func(t *testing.T) {
 		root := &cobra.Command{Use: "scion"}
 		root.AddCommand(cloneCommandShape(resolveCommandPath(rootCmd, "runtime-broker")))
