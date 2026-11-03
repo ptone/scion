@@ -731,6 +731,7 @@ func TestStart_SharedLayoutLocalRuntimeAgentDirNameFromAgentOnly(t *testing.T) {
 	t.Run("empty-per-agent/request names another agent's workspace", func(t *testing.T) {
 		cfg, sl, other, err := requestOther(t, 1)
 		require.Error(t, err, "an empty-per-agent request with a workspace is refused")
+		assert.Contains(t, err.Error(), "does not take a workspace path", "refused by ProvisionAgent for that cause")
 		assert.Empty(t, cfg.Name, "the runtime is never reached")
 		assert.NoDirExists(t, filepath.Join(sl.root, "agents", "test-agent"), "nothing is created for the agent")
 		assert.FileExists(t, filepath.Join(other, "theirs.txt"))
@@ -873,7 +874,32 @@ func TestCheckLocalRuntimeAgentWorkspace(t *testing.T) {
 		mustMkdirAll(t, shareWS)
 		mustMkdirAll(t, localWS(agentDir))
 		require.NoError(t, os.WriteFile(filepath.Join(localWS(agentDir), "stray.txt"), []byte("x"), 0o644))
+		logs := captureSlogText(t)
 		require.NoError(t, checkLocalRuntimeAgentWorkspace("a1", shareWS, agentDir, resolved, "a1"))
+		assert.Contains(t, logs.String(), "still holds files while it runs on its directory on the shared project storage",
+			"broker-local work left off the mount is logged")
+		assert.FileExists(t, filepath.Join(localWS(agentDir), "stray.txt"), "it is left as it is")
+	})
+	t.Run("restart with the workspace on the share, nothing left locally", func(t *testing.T) {
+		resolved, shareWS, agentDir := setup(t)
+		mustMkdirAll(t, shareWS)
+		mustMkdirAll(t, filepath.Join(localWS(agentDir), ".scion"))
+		logs := captureSlogText(t)
+		require.NoError(t, checkLocalRuntimeAgentWorkspace("a1", shareWS, agentDir, resolved, "a1"))
+		assert.NotContains(t, logs.String(), "broker-local workspace", "provisioning entries only: nothing to report")
+	})
+	t.Run("restart with the workspace on the share, local workspace unreadable", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root reads a mode-000 directory")
+		}
+		resolved, shareWS, agentDir := setup(t)
+		mustMkdirAll(t, shareWS)
+		mustMkdirAll(t, localWS(agentDir))
+		require.NoError(t, os.Chmod(localWS(agentDir), 0))
+		t.Cleanup(func() { _ = os.Chmod(localWS(agentDir), 0o755) })
+		logs := captureSlogText(t)
+		require.NoError(t, checkLocalRuntimeAgentWorkspace("a1", shareWS, agentDir, resolved, "a1"), "a failed check never blocks the start")
+		assert.Contains(t, logs.String(), "could not read the agent's broker-local workspace")
 	})
 	t.Run("empty broker-local workspace", func(t *testing.T) {
 		resolved, shareWS, agentDir := setup(t)

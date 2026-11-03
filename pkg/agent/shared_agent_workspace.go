@@ -307,6 +307,7 @@ func checkLocalRuntimeAgentWorkspace(agentName, workspace, agentDir string, reso
 	shareInfo, err := os.Lstat(shareWS)
 	switch {
 	case err == nil && shareInfo.IsDir():
+		warnLocalWorkOffShare(agentName, agentDir, shareWS)
 		return nil
 	case err == nil:
 		return refuse(shareWS, "the agent's workspace on the share is not a directory")
@@ -335,6 +336,46 @@ func checkLocalRuntimeAgentWorkspace(agentName, workspace, agentDir string, reso
 		return refuse(local, "the broker-local workspace holds work")
 	}
 	return nil
+}
+
+// warnLocalWorkOffShare logs, for an agent admitted on its existing
+// workspace on the share (checkLocalRuntimeAgentWorkspace), when its
+// broker-local <agentDir>/workspace still holds more than provisioning
+// entries: that work is not mounted, and deleting the agent removes it. A
+// pre-switch agent whose share leaf already existed for another reason (an
+// operator's mkdir, an earlier agent of the same name) is then not
+// unnoticed. It never blocks the start: a check that fails is logged too.
+// The paths go to the broker log only.
+func warnLocalWorkOffShare(agentName, agentDir, shareWS string) {
+	if agentDir == "" {
+		return
+	}
+	local := filepath.Join(agentDir, provision.AgentWorkspaceDir)
+	if samePath(local, shareWS) {
+		return
+	}
+	info, err := os.Lstat(local)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return
+	case err != nil:
+		slog.Warn("could not check the agent's broker-local workspace; the agent starts on its directory on the shared project storage",
+			"agent", agentName, "workspace", local, "error", err)
+		return
+	case !info.IsDir():
+		slog.Warn("the agent's broker-local workspace is not a directory; the agent starts on its directory on the shared project storage",
+			"agent", agentName, "workspace", local)
+		return
+	}
+	only, err := workspaceHoldsOnlyProvisioningEntries(local)
+	switch {
+	case err != nil:
+		slog.Warn("could not read the agent's broker-local workspace; the agent starts on its directory on the shared project storage",
+			"agent", agentName, "workspace", local, "error", err)
+	case !only:
+		slog.Warn("the agent's broker-local workspace still holds files while it runs on its directory on the shared project storage; they are not mounted, and deleting the agent removes them",
+			"agent", agentName, "workspace", local, "share_workspace", shareWS)
+	}
 }
 
 // startWorkspaceSharingMode is the sharing mode Start selects the workspace

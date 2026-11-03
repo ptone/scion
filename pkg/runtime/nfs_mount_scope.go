@@ -119,7 +119,8 @@ type nfsBindScope struct {
 //     always one path segment. Another agent's leaf, agents/ itself and any
 //     nested path are refused.
 //
-// The workspace must be absolute with no ".." component, and must resolve
+// The workspace must be absolute, clean (filepath.Clean leaves it as it is)
+// and without a ".." component, and must resolve
 // (pathcanon.Resolve) to exactly the leaf below the resolved host base: no
 // component from the host base down may be a symlink. A link above the host
 // base (the share's own mount path) is allowed; both sides are resolved. The
@@ -152,6 +153,12 @@ func newNFSBindScope(cfg RunConfig) (*nfsBindScope, error) {
 	}
 	if !filepath.IsAbs(cfg.Workspace) || slices.Contains(strings.Split(filepath.ToSlash(cfg.Workspace), "/"), "..") {
 		return nil, refuse("is not an absolute path without \"..\"")
+	}
+	// Clean already: no doubled separator, "." component or trailing
+	// separator (both sides slash-normalised, so a native Windows path
+	// compares as itself).
+	if filepath.ToSlash(filepath.Clean(cfg.Workspace)) != filepath.ToSlash(cfg.Workspace) {
+		return nil, refuse("is not a clean path")
 	}
 	suffix := "/" + leaf
 	ws := filepath.ToSlash(filepath.Clean(cfg.Workspace))
