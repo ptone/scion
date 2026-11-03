@@ -199,3 +199,33 @@ func TestRestartWindow_UserStatusUpdateUnaffected(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Equal(t, "idle", f.get(t).Activity)
 }
+
+// TestRestartWindow_SelfReportMarksAgentTokenForStore pins the mark the
+// store's check reads: updateAgentStatus passes ReportAgentToken=true to the
+// store for the agent's own token and false for a user with update access.
+// The handler's restart-window check runs first on the same snapshot, so
+// the other tests here pass even without this mark; the store's check on
+// the locked row (authoritative when the row changed after the handler's
+// read) depends on it. The recorder is installed with installStoreFault; it
+// ignores the switch, so it records from the start without Arm().
+func TestRestartWindow_SelfReportMarksAgentTokenForStore(t *testing.T) {
+	f := newHaltFixture(t)
+	rec, _ := installStoreFault(t, f.srv, func(inner store.Store, _ *storeFaultSwitch) *recordingStatusStore {
+		return &recordingStatusStore{Store: inner}
+	})
+	recorded := func() int {
+		rec.mu.Lock()
+		defer rec.mu.Unlock()
+		return len(rec.heartbeats)
+	}
+
+	require.Equal(t, http.StatusOK, f.selfReport(t, "run-1", map[string]any{"heartbeat": true}))
+	afterAgent := recorded()
+	require.GreaterOrEqual(t, afterAgent, 1, "the agent's report reached the store through the recorder")
+	assert.True(t, rec.lastHeartbeat(t).ReportAgentToken, "the agent's own token marks the report")
+
+	userRec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agent.ID+"/status", map[string]any{"heartbeat": true})
+	require.Equal(t, http.StatusOK, userRec.Code, userRec.Body.String())
+	require.Greater(t, recorded(), afterAgent, "the user's update reached the store through the recorder")
+	assert.False(t, rec.lastHeartbeat(t).ReportAgentToken, "a user with update access is not an agent token")
+}
