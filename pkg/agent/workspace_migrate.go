@@ -83,6 +83,7 @@ const (
 	causeTargetNotDir         = "share entry for the agent is not a directory"
 	causeTargetParentUnsafe   = "share agents directory is not owned by the migrator or is group/other writable"
 	causeSourceNotDir         = "broker-local workspace is not a directory"
+	causeSourceUnreadable     = "broker-local workspace cannot be read"
 	causeLinkedWorktree       = "broker-local workspace is a linked git worktree"
 	causeSpecialFile          = "workspace holds special files (fifo, socket or device)"
 	causeUnreadableForeign    = "workspace holds entries owned by another user that the agent cannot read"
