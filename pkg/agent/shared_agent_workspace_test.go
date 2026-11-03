@@ -647,8 +647,10 @@ func TestStart_SharedLayoutLocalRuntimeRealRunArgs(t *testing.T) {
 
 // NFSAgentDirName comes only from the agent's own validated slug: Start
 // sets it to api.ValidateAgentName of the agent's name, and a request that
-// names a workspace in another agent's directory on the share neither
-// changes it nor reaches the runtime.
+// names a workspace in another agent's directory on the share changes
+// neither it nor the workspace. For clone-per-agent the clone takes
+// priority and the requested workspace is ignored (ProvisionAgent); for
+// empty-per-agent a requested workspace is refused before the runtime.
 func TestStart_SharedLayoutLocalRuntimeAgentDirNameFromAgentOnly(t *testing.T) {
 	for _, mode := range localRuntimeModes {
 		t.Run(mode.name+"/slug", func(t *testing.T) {
@@ -659,19 +661,36 @@ func TestStart_SharedLayoutLocalRuntimeAgentDirNameFromAgentOnly(t *testing.T) {
 			assert.Equal(t, slug, cfg.NFSAgentDirName)
 		})
 	}
-	t.Run("clone-per-agent/request names another agent's workspace", func(t *testing.T) {
+	requestOther := func(t *testing.T, mode int) (runtime.RunConfig, *sharedLayoutStarter, string, error) {
+		t.Helper()
 		sl := newSharedLayoutStarter(t, "docker")
 		other := filepath.Join(sl.root, "agents", "other", "workspace")
 		mustMkdirAll(t, other)
 		require.NoError(t, os.WriteFile(filepath.Join(other, "theirs.txt"), []byte("x"), 0o644))
 		cfg, _, err := sl.start(func(o *api.StartOptions) {
-			localRuntimeModes[0].mutate(o)
+			localRuntimeModes[mode].mutate(o)
 			o.Workspace = other
 		})
-		require.Error(t, err, "a workspace in another agent's directory is refused")
+		return cfg, sl, other, err
+	}
+	t.Run("clone-per-agent/request names another agent's workspace", func(t *testing.T) {
+		cfg, sl, other, err := requestOther(t, 0)
+		require.NoError(t, err)
+		realOwn, err := filepath.EvalSymlinks(filepath.Join(sl.root, "agents", "test-agent", "workspace"))
+		require.NoError(t, err)
+		assert.Equal(t, realOwn, cfg.Workspace, "the agent's own workspace, not the requested one")
+		assert.Equal(t, "test-agent", cfg.NFSAgentDirName)
+		entries, err := os.ReadDir(other)
+		require.NoError(t, err)
+		require.Len(t, entries, 1, "the other agent's workspace is left as it is")
+		assert.Equal(t, "theirs.txt", entries[0].Name())
+	})
+	t.Run("empty-per-agent/request names another agent's workspace", func(t *testing.T) {
+		cfg, sl, other, err := requestOther(t, 1)
+		require.Error(t, err, "an empty-per-agent request with a workspace is refused")
 		assert.Empty(t, cfg.Name, "the runtime is never reached")
 		assert.NoDirExists(t, filepath.Join(sl.root, "agents", "test-agent"), "nothing is created for the agent")
-		assert.FileExists(t, filepath.Join(other, "theirs.txt"), "the other agent's workspace is left as it is")
+		assert.FileExists(t, filepath.Join(other, "theirs.txt"))
 	})
 }
 
