@@ -1735,6 +1735,21 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		return tx.Commit()
 	}
 
+	// Restart window (epic ptone/scion#1956 item 5b), on the locked row:
+	// while a restart has not yet recorded its new run, a report of the
+	// current run (or of none) comes from the run being replaced, and a
+	// run-less agent token belongs to no run of a row that has one. Either
+	// way the status fields are dropped; the rest of the report applies.
+	// The hub applies the same predicates first (store.RestartPreMint,
+	// store.RunlessAgentTokenReport); this check is the authoritative one.
+	if isAgentReport(su) {
+		preMint := store.RestartPreMint(current.StartClaimID != nil && *current.StartClaimID != "",
+			store.StartClaimKind(current.StartClaimKind), current.RunID, current.RunIDUpdatedAt, current.StartClaimAt)
+		if (preMint && store.RestartPreMintReport(su, current.RunID)) || store.RunlessAgentTokenReport(su, current.RunIDUpdatedAt) {
+			store.DropReportedStatus(&su)
+		}
+	}
+
 	// The halted phase: sticky against reports, and the halt rule itself.
 	// See haltedStickyDrop and evaluateHalt. Only a broker heartbeat is
 	// evidence of how a run ended: the agent's own reports never halt it and
