@@ -234,6 +234,33 @@ func TestStageHubToken_UnreadableHardLinkedIsRefused(t *testing.T) {
 	}
 }
 
+// An UNREADABLE non-regular entry (a mode-000 FIFO, which the guarded read
+// classes as unreadable rather than non-regular) reaches the unlink path
+// and is refused there by the regular-file check: nothing is removed and
+// the start fails closed.
+func TestStageHubToken_UnreadableFIFOIsRefused(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root opens a mode-000 FIFO")
+	}
+	_, tokenPath := isolatedTokenHome(t)
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(tokenPath, 0); err != nil {
+		t.Fatal(err)
+	}
+	if got := hub.CheckTokenFile(); got != hub.TokenFileUnreadable {
+		t.Fatalf("precondition: CheckTokenFile() = %q, want %q", got, hub.TokenFileUnreadable)
+	}
+	if _, err := stageHubToken(initHubTokenCanary, os.Getuid(), os.Getgid()); err == nil {
+		t.Error("stageHubToken succeeded over an unreadable FIFO")
+	}
+	fi, err := os.Lstat(tokenPath)
+	if err != nil || fi.Mode()&os.ModeNamedPipe == 0 {
+		t.Errorf("the unreadable FIFO was removed or replaced (err %v)", err)
+	}
+}
+
 // A non-regular entry (a FIFO) at the token path is never removed or
 // written through, and the start fails closed.
 func TestStageHubToken_FIFOIsRefused(t *testing.T) {

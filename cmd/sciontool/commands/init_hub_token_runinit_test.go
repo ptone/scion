@@ -58,6 +58,7 @@ func stagedBlob(t *testing.T, token string) string {
 type runInitStagedFixture struct {
 	agentHome, tokenPath string
 	sawAtStopping        *bool
+	stoppingRan          *bool
 	readLog              func() string
 }
 
@@ -81,10 +82,11 @@ func newRunInitStagedFixture(t *testing.T) runInitStagedFixture {
 	limitsTriggerPath = filepath.Join(t.TempDir(), "limits-exceeded")
 	t.Cleanup(func() { limitsTriggerPath = origTrigger })
 
-	saw := false
-	f.sawAtStopping = &saw
+	saw, ran := false, false
+	f.sawAtStopping, f.stoppingRan = &saw, &ran
 	origStopping := runReportStoppingToHub
 	runReportStoppingToHub = func() {
+		ran = true
 		_, err := os.Lstat(f.tokenPath)
 		saw = err == nil
 	}
@@ -98,6 +100,11 @@ func (f runInitStagedFixture) run(t *testing.T, script string) int {
 		InitRunOptions{DisableTermSignalForwarding: true, DisableReExec: true})
 }
 
+// Children in these tests sleep 0.5s so they outlive RunInit's 100ms
+// immediate-exit check and RunInit takes the normal shutdown path (as in
+// init_session_backstop_test.go); the immediate-exit path is pinned
+// separately below.
+
 // A staged credential is written before the harness runs, is still there
 // at the final reports, and is removed after them on a clean exit. The
 // credential never reaches the log.
@@ -106,14 +113,14 @@ func TestRunInit_StagedHubToken_RemovedAfterFinalReportsOnCleanExit(t *testing.T
 	t.Setenv(stagedsecrets.EnvVar, stagedBlob(t, initHubTokenCanary))
 	seen := filepath.Join(t.TempDir(), "seen")
 
-	if got := f.run(t, `[ -f "$1" ] && touch '`+seen+`'`); got != 0 {
+	if got := f.run(t, `[ -f "$1" ] && touch '`+seen+`'; sleep 0.5`); got != 0 {
 		t.Fatalf("RunInit() = %d, want 0", got)
 	}
 	if _, err := os.Stat(seen); err != nil {
 		t.Error("the harness did not see the staged token file")
 	}
-	if !*f.sawAtStopping {
-		t.Error("the token file was gone before the stopping report")
+	if !*f.stoppingRan || !*f.sawAtStopping {
+		t.Errorf("the stopping report did not run with the token file present (ran=%v, file present=%v)", *f.stoppingRan, *f.sawAtStopping)
 	}
 	if _, err := os.Lstat(f.tokenPath); !os.IsNotExist(err) {
 		t.Errorf("staged token file not removed after a clean exit (err %v)", err)
@@ -141,7 +148,7 @@ func TestRunInit_StagedHubToken_CrashKeepsRefreshedTokenForRestart(t *testing.T)
 
 	// The harness stands in for the refresh loop, writing a newer
 	// credential, then crashes.
-	script := `printf '%s' '` + refreshed + `' > "$1.tmp" && mv "$1.tmp" "$1"; exit 3`
+	script := `printf '%s' '` + refreshed + `' > "$1.tmp" && mv "$1.tmp" "$1"; sleep 0.5; exit 3`
 	if got := f.run(t, script); got == 0 {
 		t.Fatalf("RunInit() = 0, want a crash exit")
 	}
@@ -154,11 +161,42 @@ func TestRunInit_StagedHubToken_CrashKeepsRefreshedTokenForRestart(t *testing.T)
 
 	// The container restarts with the same payload.
 	t.Setenv(stagedsecrets.EnvVar, stagedBlob(t, createTime))
-	if got := f.run(t, `test "$(cat "$1")" = '`+refreshed+`'`); got != 0 {
+	if got := f.run(t, `test "$(cat "$1")" = '`+refreshed+`' || exit 7; sleep 0.5`); got != 0 {
 		t.Fatalf("restart RunInit() = %d, want 0 (the harness must see the refreshed credential)", got)
 	}
 	if _, err := os.Lstat(f.tokenPath); !os.IsNotExist(err) {
 		t.Errorf("token file not removed after the restart's clean exit (err %v)", err)
+	}
+}
+
+// A child that exits within the immediate-exit check gets the same outcome
+// as one that runs longer: removed after exit 0, kept after a non-zero
+// exit. (Whichever path RunInit takes, the result is the same by design,
+// so the test does not depend on timing.)
+func TestRunInit_StagedHubToken_ImmediateExitSameOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		script   string
+		wantKept bool
+	}{
+		{"exit 0 removes", "exit 0", false},
+		{"exit 4 keeps", "exit 4", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRunInitStagedFixture(t)
+			t.Setenv(stagedsecrets.EnvVar, stagedBlob(t, initHubTokenCanary))
+			got := f.run(t, tc.script)
+			if (got == 0) == tc.wantKept {
+				t.Fatalf("RunInit() = %d for %q", got, tc.script)
+			}
+			_, err := os.Lstat(f.tokenPath)
+			if kept := err == nil; kept != tc.wantKept {
+				t.Errorf("token file kept = %v, want %v", kept, tc.wantKept)
+			}
+			if strings.Contains(f.readLog(), initHubTokenCanary) {
+				t.Error("log carries the credential")
+			}
+		})
 	}
 }
 

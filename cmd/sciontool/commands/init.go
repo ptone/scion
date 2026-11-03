@@ -612,7 +612,8 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// The token file this init staged from the runtime's payload is removed
 	// as init returns, after the final hub reports (deferred calls run after
 	// every return path below), but only when the agent's final outcome is
-	// clean (stagedTokenCleanExit, set once the exit is classified). After a
+	// clean (stagedTokenCleanExit, set once the exit is classified, or when
+	// the child exits 0 within the immediate-exit check). After a
 	// crash, a limits stop or an init failure the platform restarts the
 	// container with the same payload, so the file, which the refresh loop
 	// keeps current, is kept for stageHubToken's iat rule. A file the broker
@@ -1151,6 +1152,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 			return 1
 		}
 		log.Info("Child exited immediately with code %d (uid=%d, gid=%d)", result.code, os.Geteuid(), os.Getegid())
+		// An immediate exit 0 is as clean as one after the wait loop, so a
+		// token file this init staged is removed on both paths alike.
+		stagedTokenCleanExit = result.code == 0
 		return result.code
 	case <-time.After(100 * time.Millisecond):
 		// Process appears to be running, execute post-start hooks
