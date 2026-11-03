@@ -229,7 +229,7 @@ func withWorkspaceProvisionLocks(ctx context.Context, ws migrate.Tree, section f
 	if err != nil || !filepath.IsLocal(stateRel) {
 		return fmt.Errorf("provisioning state dir is not below the host base")
 	}
-	fd, _, err := shareddirs.EnsureLeaf(base, stateRel)
+	fd, _, err := projectfs.EnsureSharedLeaf(base, stateRel)
 	if err != nil {
 		return fmt.Errorf("create provisioning state dir: %w", err)
 	}
