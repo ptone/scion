@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 )
@@ -167,16 +168,10 @@ func MigrateAgentWorkspaces(ctx context.Context, opts WorkspaceMigrationOptions)
 	if opts.Running == nil {
 		return nil, errors.New("workspace migration: a running check is required")
 	}
-	if !config.IsSharedProjectConfigDir(opts.ProjectDir) {
-		return nil, fmt.Errorf("workspace migration: %s is not a shared project configuration directory", opts.ProjectDir)
-	}
-	abs, err := filepath.Abs(opts.ProjectDir)
+	projectID, err := WorkspaceMigrationProjectID(opts.ProjectDir)
 	if err != nil {
-		return nil, fmt.Errorf("workspace migration: %w", err)
+		return nil, err
 	}
-	// IsSharedProjectConfigDir checked that the parent's name is the
-	// project ID recorded in the configuration.
-	projectID := filepath.Base(filepath.Dir(abs))
 	agentsRoot, err := config.AgentsRootForProject(opts.ProjectDir, true, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("workspace migration: %w", err)
@@ -200,6 +195,70 @@ func MigrateAgentWorkspaces(ctx context.Context, opts WorkspaceMigrationOptions)
 		results = append(results, migrateOneAgentWorkspace(ctx, opts, projectID, agentsRoot, name))
 	}
 	return results, nil
+}
+
+// SharedLayoutProjectConfigDirs lists the shared project configuration
+// directories (config.IsSharedProjectConfigDir) on this host's project
+// storage Layout, from the global settings: <HostBase>/<subpath_root>/
+// <project id>/.scion, sorted. A Layout that is not shared is an error: there
+// is nothing to migrate onto.
+func SharedLayoutProjectConfigDirs(ctx context.Context) ([]string, error) {
+	settings, _, err := config.LoadGlobalSettingsWithOverlayFor(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("workspace migration: load settings: %w", err)
+	}
+	var srv *config.V1ServerConfig
+	if settings != nil {
+		srv = settings.Server
+	}
+	ps, _, err := config.ResolveProjectStorage(srv)
+	if err != nil {
+		return nil, fmt.Errorf("workspace migration: %w", err)
+	}
+	layout, err := config.ProjectStorageLayout(ps, config.DefaultVolumeMountBase)
+	if err != nil {
+		return nil, fmt.Errorf("workspace migration: %w", err)
+	}
+	if !layout.Backend.Shared() {
+		return nil, errors.New("workspace migration: the project storage layout is not shared")
+	}
+	sub := layout.SubPathRoot
+	if sub == "" {
+		sub = projectfs.DefaultSubPathRoot
+	}
+	root := filepath.Join(layout.HostBase, sub)
+	entries, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("workspace migration: %w", err)
+	}
+	var dirs []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(root, e.Name(), config.DotScion)
+		if config.IsSharedProjectConfigDir(dir) {
+			dirs = append(dirs, dir)
+		}
+	}
+	return dirs, nil
+}
+
+// WorkspaceMigrationProjectID is the project ID of the shared project
+// configuration directory projectDir: the name of the directory holding it,
+// which config.IsSharedProjectConfigDir checks against the recorded ID.
+func WorkspaceMigrationProjectID(projectDir string) (string, error) {
+	if !config.IsSharedProjectConfigDir(projectDir) {
+		return "", fmt.Errorf("workspace migration: %s is not a shared project configuration directory", projectDir)
+	}
+	abs, err := filepath.Abs(projectDir)
+	if err != nil {
+		return "", fmt.Errorf("workspace migration: %w", err)
+	}
+	return filepath.Base(filepath.Dir(abs)), nil
 }
 
 // listMigrationAgents lists the agent directories in the broker-local
