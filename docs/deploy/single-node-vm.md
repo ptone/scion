@@ -254,6 +254,11 @@ call:
   `.scion-update-*/old/` directory inside the plugin directory, and the
   error says so. The next update removes such directories, with a warning
   in the run log.
+- After a successful update, the downloads in the temporary directory are
+  removed before the restart. The previous plugin builds stay in a
+  `.scion-update-*/old/` directory, marked as applied, until the restart,
+  so the update can still be rolled back if the restart cannot be
+  requested. The restarted Hub removes that directory at startup.
 - Each release keeps a copy of the plugins installed with it in
   `/opt/scion/releases/<tag>/plugins/`. After the boot-failure guard rolls
   back, the restored Hub copies its own plugins back at startup, before

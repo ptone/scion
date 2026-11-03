@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -51,6 +52,17 @@ const PluginBinaryPrefix = "scion-plugin-"
 // in the plugin directory: on the same filesystem, so each plugin is
 // replaced with one rename. Plugin discovery skips directories.
 const pluginStagingPrefix = ".scion-update-"
+
+// pluginStagingAppliedMarker is the file a plugin swap writes into its
+// staging directory once the new builds are installed. The directory then
+// holds only old/, the previous builds, which an in-process rollback needs
+// until the restart; after the restart nothing uses it (a boot-failure
+// rollback restores plugins from releases/<tag>/plugins). A marked staging
+// directory is removed at the next start (RemoveAppliedPluginStaging), and
+// quietly by the next update. A restore removes the marker first, so a
+// directory kept by a failed restore (the only copies of old builds) is
+// never taken for a finished update (ptone/scion#7177).
+const pluginStagingAppliedMarker = "applied"
 
 // pluginsSubdir is where a retained release keeps the plugin binaries that
 // were installed with it: <install_root>/releases/<tag>/plugins/.
@@ -437,6 +449,7 @@ func (sw *pluginSwap) apply(logger io.Writer) error {
 // put back stay swapped, and the staging directory (their old binaries) is
 // kept.
 func (sw *pluginSwap) restore() error {
+	_ = os.Remove(filepath.Join(sw.staging, pluginStagingAppliedMarker))
 	var errs []error
 	var failed []pluginUpdate
 	for i := len(sw.swapped) - 1; i >= 0; i-- {
@@ -465,8 +478,29 @@ func (sw *pluginSwap) cleanup() {
 	_ = os.RemoveAll(sw.staging)
 }
 
-// removeStalePluginStaging removes staging directories of earlier runs,
-// each with a warning naming it.
+// markApplied records that the new builds are installed: it removes the
+// now-empty new/ and writes pluginStagingAppliedMarker, keeping old/ for a
+// rollback until the restart. Best-effort: a failure only leaves the
+// directory unmarked, to be removed with a warning by the next update.
+func (sw *pluginSwap) markApplied(logger io.Writer) {
+	_ = os.Remove(filepath.Join(sw.staging, "new"))
+	marker := filepath.Join(sw.staging, pluginStagingAppliedMarker)
+	body := []byte("The new broker plugin builds are installed; old/ holds the previous builds until the hub restarts.\n")
+	if err := os.WriteFile(marker, body, 0o644); err != nil {
+		pluginWarn(logger, fmt.Sprintf("could not mark %s as applied (%v); the next update removes it", sw.staging, err))
+	}
+}
+
+// isAppliedPluginStaging reports whether p is a staging directory marked by
+// markApplied.
+func isAppliedPluginStaging(p string) bool {
+	fi, err := os.Lstat(filepath.Join(p, pluginStagingAppliedMarker))
+	return err == nil && fi.Mode().IsRegular()
+}
+
+// removeStalePluginStaging removes staging directories of earlier runs.
+// One left by a successful update (marked applied) is removed with a plain
+// note; any other with a warning naming it.
 func removeStalePluginStaging(logger io.Writer, dir string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -475,10 +509,47 @@ func removeStalePluginStaging(logger io.Writer, dir string) {
 	for _, e := range entries {
 		if e.IsDir() && strings.HasPrefix(e.Name(), pluginStagingPrefix) {
 			p := filepath.Join(dir, e.Name())
-			pluginWarn(logger, fmt.Sprintf("removing %s, left by an interrupted or failed plugin update (it may hold old plugin binaries under old/)", p))
+			if isAppliedPluginStaging(p) {
+				_, _ = fmt.Fprintf(logger, "Removing %s, the previous plugin builds kept by an earlier successful update.\n", p)
+			} else {
+				pluginWarn(logger, fmt.Sprintf("removing %s, left by an interrupted or failed plugin update (it may hold old plugin binaries under old/)", p))
+			}
 			_ = os.RemoveAll(p)
 		}
 	}
+}
+
+// RemoveAppliedPluginStaging removes the staging directories in pluginDir
+// that a successful update left behind (marked applied), and returns their
+// paths. The hub calls it at startup, after the restart that made their
+// old/ backups unnecessary. Unmarked staging directories are left for the
+// next update, which removes them with a warning. A missing pluginDir is
+// not an error.
+func RemoveAppliedPluginStaging(pluginDir string) ([]string, error) {
+	entries, err := os.ReadDir(pluginDir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var removed []string
+	var errs []error
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), pluginStagingPrefix) {
+			continue
+		}
+		p := filepath.Join(pluginDir, e.Name())
+		if !isAppliedPluginStaging(p) {
+			continue
+		}
+		if err := os.RemoveAll(p); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		removed = append(removed, p)
+	}
+	return removed, errors.Join(errs...)
 }
 
 // linkOrCopy hard-links src to dst, or copies it where hard links are not
