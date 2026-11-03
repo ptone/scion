@@ -993,6 +993,14 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A request's template is a template slug or ID, never a host directory
+	// or a remote source: the broker resolves an absolute template directory
+	// only for the templates it hydrated itself (requestTemplateAllowed).
+	if req.Config != nil && !requestTemplateAllowed(req.Config.Template) {
+		ValidationError(w, requestTemplateRefusal, nil)
+		return
+	}
+
 	// ProjectSlug is joined onto the global projects directory below (to
 	// resolve req.ProjectPath) and again later to compute the GCS-bootstrap
 	// workspace directory, in both cases as a single path segment: a value
@@ -3909,6 +3917,13 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 
 	s.agentLifecycleLog.Debug("startAgent called", "agent_id", id, "task", startReq.Task, "projectPath", startReq.ProjectPath, "projectSlug", startReq.ProjectSlug, "harnessConfig", startReq.HarnessConfig, "resolvedEnvCount", len(startReq.ResolvedEnv))
 
+	// The start's template name is used for naming (and recorded with the
+	// agent); like create's template it must be a template slug or ID.
+	if !requestTemplateAllowed(startReq.TemplateName) {
+		ValidationError(w, requestTemplateRefusal, nil)
+		return
+	}
+
 	// Build config for buildStartContext (startAgent uses a subset of CreateAgentConfig)
 	var cfg *CreateAgentConfig
 	if startReq.Task != "" || startReq.HarnessConfig != "" || startReq.HarnessConfigID != "" || startReq.HarnessConfigHash != "" || len(startReq.SharedDirs) > 0 || startReq.SharedWorkspace || startReq.SharedWorkspaceClone != nil || startReq.GitClone != nil || startReq.Branch != "" || startReq.Image != "" {
@@ -4336,7 +4351,9 @@ func readAgentScionConfig(agentName, projectPath string, sharedWorkspace bool) (
 		return loadedAgentConfig{stage: "resolve"}, err
 	}
 	cfgPath := filepath.Join(config.GetAgentDir(projectDir, agentName, sharedWorkspace), "scion-agent.json")
-	data, err := os.ReadFile(cfgPath)
+	// Read without following a symbolic link (a plain single-link regular
+	// file only); the write back goes through agent.WriteAgentConfigFile.
+	data, err := agent.ReadAgentConfigFile(filepath.Dir(cfgPath))
 	if err != nil {
 		return loadedAgentConfig{projectDir: projectDir, path: cfgPath, stage: "read"}, err
 	}
@@ -4408,7 +4425,7 @@ func (s *Server) applyInlineConfigUpdate(ctx context.Context, agentName, project
 		s.agentLifecycleLog.Warn("applyInlineConfigUpdate: failed to marshal updated config", "agent", agentName, "error", err)
 		return
 	}
-	if err := os.WriteFile(cfgPath, updated, 0644); err != nil {
+	if err := agent.WriteAgentConfigFile(filepath.Dir(cfgPath), updated); err != nil {
 		s.agentLifecycleLog.Warn("applyInlineConfigUpdate: failed to write scion-agent.json", "agent", agentName, "error", err)
 		return
 	}
@@ -5142,6 +5159,11 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 			}
 			s.agentLifecycleLog.Debug("No resolvedEnv in restart request body (ignoring decode error)", "agent_id", id, "error", err)
 		}
+	}
+	// As on start: the template name must be a template slug or ID.
+	if !requestTemplateAllowed(restartReq.TemplateName) {
+		ValidationError(w, requestTemplateRefusal, nil)
+		return
 	}
 	// Checked before the stop leg and any runtime call, as on start.
 	if refusal := s.expectedTargetRefusal(restartReq.ExpectedRuntimeTargetID, false); refusal != nil {

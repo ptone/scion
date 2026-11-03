@@ -984,7 +984,16 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 					if provenance.Template != "" {
 						tplName = provenance.Template
 					}
-				case finalScionCfg != nil && finalScionCfg.Info != nil && finalScionCfg.Info.Template != "":
+				case finalScionCfg != nil && finalScionCfg.Info != nil && config.IsTemplateSlug(finalScionCfg.Info.Template):
+					// agent-info.json's template (agent-writable) is used
+					// only when it is a template slug: a live, fail-closed
+					// check for the harness-config choice. GetAgent
+					// (provision.go) is the primary control for the
+					// template chain and already replaces a non-slug
+					// agent-info template before finalScionCfg reaches
+					// here; this check keeps a Start path that builds its
+					// config without GetAgent from choosing an
+					// agent-written path.
 					tplName = finalScionCfg.Info.Template
 				}
 			}
@@ -1698,7 +1707,7 @@ authDone:
 			return nil, fmt.Errorf("failed to marshal agent config: %w", marshalErr)
 		}
 		configPath := filepath.Join(agentDir, "scion-agent.json")
-		if writeErr := os.WriteFile(configPath, cfgData, 0644); writeErr != nil {
+		if writeErr := WriteAgentConfigFile(agentDir, cfgData); writeErr != nil {
 			return nil, fmt.Errorf("failed to write agent config %s: %w", configPath, writeErr)
 		}
 	} else if finalScionCfg != nil && harness.IsHarnessImplementationName(finalScionCfg.AuthSelectedType) {
@@ -1709,7 +1718,7 @@ authDone:
 			return nil, fmt.Errorf("failed to marshal repaired agent config: %w", marshalErr)
 		}
 		configPath := filepath.Join(agentDir, "scion-agent.json")
-		if writeErr := os.WriteFile(configPath, cfgData, 0644); writeErr != nil {
+		if writeErr := WriteAgentConfigFile(agentDir, cfgData); writeErr != nil {
 			return nil, fmt.Errorf("failed to write agent config %s: %w", configPath, writeErr)
 		}
 	}
