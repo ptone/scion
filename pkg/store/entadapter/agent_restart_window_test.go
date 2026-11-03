@@ -23,7 +23,9 @@
 package entadapter
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -102,7 +104,7 @@ func TestAgentRestartWindow_NewRunApplied(t *testing.T) {
 // or an older broker) still changes the row. Run-less self-reports from an
 // agent token are dropped (TestAgentRestartWindow_RunlessAgentTokenDropped
 // WhenMinted); run-less heartbeats after a restart are a deferred follow-up
-// (gap (1) in notes/kr-restart-window-gaps.md).
+// (ptone/scion#1956 item 5b).
 func TestAgentRestartWindow_CharacterizesRunlessReportAccepted(t *testing.T) {
 	ctx := context.Background()
 	s, id := restartWindowAgent(t, ctx, "rw-runless")
@@ -295,4 +297,78 @@ func TestAgentRestartWindow_RunlessAgentTokenAppliesWhenNotMinted(t *testing.T) 
 	got, err := s.GetAgent(ctx, id)
 	require.NoError(t, err)
 	assert.Equal(t, "idle", got.Activity, "a row with no minted run keeps today's behaviour")
+}
+
+// clockAheadRestart is a running agent of run "run-1" whose restart claim
+// is stamped ahead of the hub clock by ahead, as a Postgres start claim is
+// when the database clock runs ahead of the hub's.
+func clockAheadRestart(t *testing.T, ctx context.Context, slug string, ahead time.Duration) (*AgentStore, string) {
+	t.Helper()
+	s, projectID := newTestAgentStore(t)
+	id := newHaltAgent(t, ctx, s, projectID, slug, defaultHaltRow())
+	setStartClaim(t, ctx, s, id, store.StartClaimRestart, time.Now().Add(ahead))
+	return s, id
+}
+
+// TestAgentRestartWindow_MintWithClaimClockAheadClosesWindow: the restart
+// claim's time can come from the database clock and run_id_updated_at from
+// the hub clock. With the database ahead, recording the new run must still
+// end the window, so the new run's report applies (store.RunIDStamp).
+func TestAgentRestartWindow_MintWithClaimClockAheadClosesWindow(t *testing.T) {
+	ctx := context.Background()
+	s, id := clockAheadRestart(t, ctx, "rw-skew-mint", 2*time.Second)
+	_, err := s.SetAgentRunID(ctx, id, "run-2", nil)
+	require.NoError(t, err)
+	newRun := restartWindowHeartbeat("run-2", "running (new)", "new run")
+	newRun.Activity = "idle"
+	apply(t, ctx, s, id, newRun)
+	got, err := s.GetAgent(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, "idle", got.Activity, "the new run's report applies although the claim time is ahead")
+	assert.Equal(t, "new run", got.Message)
+}
+
+// TestAgentRestartWindow_RevertWithClaimClockAheadClosesWindow: a start leg
+// that reverts to the old run makes the old run current again, so the
+// window ends for it too, whatever the clocks (the swap path of
+// store.RunIDStamp).
+func TestAgentRestartWindow_RevertWithClaimClockAheadClosesWindow(t *testing.T) {
+	ctx := context.Background()
+	s, id := clockAheadRestart(t, ctx, "rw-skew-revert", 2*time.Second)
+	_, err := s.SetAgentRunID(ctx, id, "run-2", nil)
+	require.NoError(t, err)
+	reverted, err := s.RevertAgentRunID(ctx, id, "run-2", "run-1")
+	require.NoError(t, err)
+	require.True(t, reverted)
+	oldRun := restartWindowHeartbeat("run-1", "running", "old run current again")
+	oldRun.Activity = "idle"
+	apply(t, ctx, s, id, oldRun)
+	got, err := s.GetAgent(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, "idle", got.Activity, "the reverted run's report applies")
+	assert.Equal(t, "old run current again", got.Message)
+}
+
+// TestAgentRestartWindow_MintClaimClockBeyondCapUsesHubClock: a claim time
+// further ahead than store.RestartClaimSkewCap is not honoured; the hub
+// clock is used and the skew is logged, with no ids.
+func TestAgentRestartWindow_MintClaimClockBeyondCapUsesHubClock(t *testing.T) {
+	var logs bytes.Buffer
+	prevLog := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prevLog) })
+
+	ctx := context.Background()
+	s, id := clockAheadRestart(t, ctx, "rw-skew-cap", 10*time.Minute)
+	before := time.Now()
+	_, err := s.SetAgentRunID(ctx, id, "run-2", nil)
+	require.NoError(t, err)
+	got, err := s.GetAgent(ctx, id)
+	require.NoError(t, err)
+	require.NotNil(t, got.RunIDUpdatedAt)
+	require.NotNil(t, got.StartClaimAt)
+	assert.WithinDuration(t, before, *got.RunIDUpdatedAt, time.Minute, "the hub clock is used")
+	assert.True(t, got.RunIDUpdatedAt.Before(*got.StartClaimAt), "the claim time beyond the cap is not honoured")
+	assert.Contains(t, logs.String(), "start claim time is ahead of the hub clock beyond the cap")
+	assert.NotContains(t, logs.String(), id, "the warning names no ids")
 }

@@ -97,3 +97,31 @@ func TestDropReportedStatus(t *testing.T) {
 	assert.Equal(t, "exited (1)", su.ContainerStatus)
 	assert.True(t, su.Heartbeat)
 }
+
+func TestRunIDStamp(t *testing.T) {
+	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	past := now.Add(-time.Minute)
+	within := now.Add(2 * time.Second)
+	beyond := now.Add(RestartClaimSkewCap + time.Second)
+	for _, tc := range []struct {
+		name       string
+		held       bool
+		kind       StartClaimKind
+		claimAt    *time.Time
+		wantStamp  time.Time
+		wantBeyond bool
+	}{
+		{"no claim", false, StartClaimRestart, &within, now, false},
+		{"user claim", true, StartClaimUser, &within, now, false},
+		{"restart claim with no time", true, StartClaimRestart, nil, now, false},
+		{"restart claim in the past", true, StartClaimRestart, &past, now, false},
+		{"restart claim ahead within the cap", true, StartClaimRestart, &within, within, false},
+		{"restart claim ahead beyond the cap", true, StartClaimRestart, &beyond, now, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stamp, over := RunIDStamp(now, tc.held, tc.kind, tc.claimAt)
+			assert.Equal(t, tc.wantStamp, stamp)
+			assert.Equal(t, tc.wantBeyond, over > 0)
+		})
+	}
+}

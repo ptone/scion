@@ -75,3 +75,27 @@ func DropReportedStatus(su *AgentStatusUpdate) {
 	su.ExitReason = ""
 	su.Message = ""
 }
+
+// RestartClaimSkewCap bounds how far a restart claim's time may be ahead of
+// the hub clock and still be honoured by RunIDStamp. Past it, the hub clock
+// is used and the caller logs the skew.
+const RestartClaimSkewCap = 2 * time.Minute
+
+// RunIDStamp returns the run_id_updated_at to write for a run_id change at
+// hub time now. start_claim_at may come from the database clock (storeNow
+// on Postgres) while run_id_updated_at comes from the hub clock, so a hub
+// clock behind the database's could leave a newly recorded run looking
+// older than the restart claim, and RestartPreMint would keep dropping the
+// new run's reports. While a restart claim is held, the stamp is therefore
+// max(now, claimAt), so a run_id change always ends the restart window.
+// The honoured skew is capped by RestartClaimSkewCap: beyond it, now is
+// returned with the skew as beyondCap (> 0) for the caller to log.
+func RunIDStamp(now time.Time, claimHeld bool, claimKind StartClaimKind, claimAt *time.Time) (stamp time.Time, beyondCap time.Duration) {
+	if !claimHeld || claimKind != StartClaimRestart || claimAt == nil || !claimAt.After(now) {
+		return now, 0
+	}
+	if skew := claimAt.Sub(now); skew > RestartClaimSkewCap {
+		return now, skew
+	}
+	return *claimAt, 0
+}

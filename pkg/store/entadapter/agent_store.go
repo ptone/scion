@@ -3180,6 +3180,19 @@ func (s *AgentStore) SetAgentRunID(ctx context.Context, agentID, runID string, c
 	return "", fmt.Errorf("agent store: run_id for agent %s kept changing; giving up after %d attempts", agentID, setAgentRunIDAttempts)
 }
 
+// runIDStamp is store.RunIDStamp for row (which must have the start claim
+// fields selected) at hub time now. A restart claim time beyond the cap is
+// logged with the skew only.
+func runIDStamp(row *ent.Agent, now time.Time) time.Time {
+	held := row.StartClaimID != nil && *row.StartClaimID != ""
+	stamp, beyond := store.RunIDStamp(now, held, store.StartClaimKind(row.StartClaimKind), row.StartClaimAt)
+	if beyond > 0 {
+		slog.Warn("restart window: start claim time is ahead of the hub clock beyond the cap; using the hub clock",
+			"skew_seconds", int64(beyond/time.Second))
+	}
+	return stamp
+}
+
 // setAgentRunIDOnce is one read-then-swap attempt of SetAgentRunID.
 // written is false, with nothing recorded, when run_id changed between the
 // read and the swap. The read is outside any transaction (the swap is a
@@ -3188,7 +3201,8 @@ func (s *AgentStore) SetAgentRunID(ctx context.Context, agentID, runID string, c
 func (s *AgentStore) setAgentRunIDOnce(ctx context.Context, uid uuid.UUID, agentID, runID string, cred *store.AgentCredential) (previous string, written bool, err error) {
 	row, err := s.client.Agent.Query().
 		Where(agent.IDEQ(uid)).
-		Select(agent.FieldRunID, agent.FieldPreviousRunIds, agent.FieldDeletedAt, agent.FieldDeletionState, agent.FieldDeletionLeaseAt).
+		Select(agent.FieldRunID, agent.FieldPreviousRunIds, agent.FieldDeletedAt, agent.FieldDeletionState, agent.FieldDeletionLeaseAt,
+			agent.FieldStartClaimID, agent.FieldStartClaimKind, agent.FieldStartClaimAt).
 		Only(ctx)
 	if err != nil {
 		return "", false, mapError(err)
@@ -3206,7 +3220,7 @@ func (s *AgentStore) setAgentRunIDOnce(ctx context.Context, uid uuid.UUID, agent
 			Where(agent.IDEQ(uid), agent.RunIDEQ(row.RunID), runIDWritable(now)).
 			SetRunID(runID)
 		if runID != row.RunID {
-			upd = upd.SetRunIDUpdatedAt(now.UTC())
+			upd = upd.SetRunIDUpdatedAt(runIDStamp(row, now).UTC())
 		}
 		if len(prevList) > 0 {
 			upd = upd.SetPreviousRunIds(prevList)
@@ -3412,12 +3426,26 @@ func (s *AgentStore) swapAgentRunID(ctx context.Context, agentID, expectedRunID,
 	if err != nil {
 		return false, err
 	}
+	stamp := time.Now()
+	if newRunID != expectedRunID {
+		// The restart claim, for the stamp (store.RunIDStamp). Read outside
+		// the swap: a claim taken after this read is later than the stamp,
+		// which leaves that new restart's window open, as it should be.
+		claim, err := s.client.Agent.Query().Where(agent.IDEQ(uid)).
+			Select(agent.FieldStartClaimID, agent.FieldStartClaimKind, agent.FieldStartClaimAt).Only(ctx)
+		if err != nil && !ent.IsNotFound(err) {
+			return false, mapError(err)
+		}
+		if claim != nil {
+			stamp = runIDStamp(claim, stamp)
+		}
+	}
 	write := func(ac *ent.AgentClient) (int, error) {
 		upd := ac.Update().
 			Where(append([]predicate.Agent{agent.IDEQ(uid), agent.RunIDEQ(expectedRunID)}, extra...)...).
 			SetRunID(newRunID)
 		if newRunID != expectedRunID {
-			upd = upd.SetRunIDUpdatedAt(time.Now().UTC())
+			upd = upd.SetRunIDUpdatedAt(stamp.UTC())
 		}
 		if clearPrevious {
 			upd = upd.ClearPreviousRunIds()
