@@ -246,7 +246,7 @@ func TestRestartAmbiguousStartLeg_SuspendedThenReportsRunning(t *testing.T) {
 	// restart's start leg records the new run (beginRun) before it sends,
 	// which this test's dispatcher does not do, so the run is recorded here.
 	// A report of the pre-restart run, or a run-less agent token, is dropped
-	// while the restart claim is held (notes/kr-restart-window-gaps.md).
+	// while the restart claim is held (ptone/scion#1956 item 5b).
 	_, err := f.s.SetAgentRunID(context.Background(), a.ID, "run-after-restart", nil)
 	require.NoError(t, err)
 	runTok, _, err := f.srv.GetAgentTokenService().SignAgentToken(AgentTokenGrant{AgentID: a.ID, ProjectID: a.ProjectID,

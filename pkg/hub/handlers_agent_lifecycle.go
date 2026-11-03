@@ -104,6 +104,18 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 	// exit-only POST is subject to the same reincarnation-sticky Guard 0b as
 	// a phase report (ptone/scion#2267). Fields the guards never touch
 	// (heartbeat, tool name, task summary, limits, ...) skip the extra read.
+	//
+	// The report descriptor is set first, from the caller's identity (never
+	// from the body), so the restart-window guard below and the store read
+	// the same values. The report is the agent's own: it is subject to the
+	// run check and halted's stickiness, and never halts. ReportRunID is the
+	// run of the token that sent it (the store drops a report of another
+	// run, ptone/scion#4853). Only the agent's own token marks a run-less
+	// report as an agent's: a user or service with update access sends no
+	// run either. statusUpdateIsEmpty ignores all three.
+	status.ReportSource = store.StatusReportSourceAgent
+	status.ReportRunID = presentedAgentTokenRunID(ctx)
+	_, status.ReportAgentToken = identity.(AgentIdentity)
 	if statusUpdateTouchesGuardedFields(status) {
 		agent, err := s.store.GetAgent(ctx, id)
 		if err != nil {
@@ -147,14 +159,14 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 		// Guard 0f applies to the agent's own reports only; a user or
 		// service with update access is not a container of some run.
 		startLaunchGuarded := false
-		if _, isAgent := identity.(AgentIdentity); isAgent {
-			startLaunchGuarded = guardStartLaunchSelfReport(agent, &status, presentedAgentTokenRunID(ctx))
+		restartWindowGuarded := false
+		if status.ReportAgentToken {
+			startLaunchGuarded = guardStartLaunchSelfReport(agent, &status, status.ReportRunID)
 			// Restart window: the store drops these fields on the locked
 			// row (store.RestartPreMint, store.RunlessAgentTokenReport);
 			// dropped here too, so the reservation reconcile below never
 			// acts on a phase the store will not write.
-			guardRestartWindowReport(agent, &status, store.AgentStatusUpdate{
-				ReportSource: store.StatusReportSourceAgent, ReportAgentToken: true, ReportRunID: presentedAgentTokenRunID(ctx)})
+			restartWindowGuarded = guardRestartWindowReport(agent, &status, status)
 		}
 		// Guarded no-op: when a guard that owns the agent's status (Guard 0c,
 		// a delete in progress or a soft-deleted row; Guard 0b, an in-flight
@@ -186,6 +198,12 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 			writeJSON(w, http.StatusOK, statusUpdateResult{Applied: false, Reason: statusUpdateReasonStartLaunchOtherRun})
 			return
 		}
+		// The same for the restart window: a report the window dropped,
+		// with nothing else to persist, is answered as not applied.
+		if restartWindowGuarded && statusUpdateIsEmpty(status) {
+			writeJSON(w, http.StatusOK, statusUpdateResult{Applied: false, Reason: statusUpdateReasonRestartWindow})
+			return
+		}
 		// Reconcile the max_agents_per_broker reservation against the phase
 		// this self-reported status update will actually persist (post-guard,
 		// since the guard may clear status.Phase on a regression or while
@@ -198,7 +216,7 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 		// as it does for the deletion guard's equivalent window. A report of
 		// another run changes nothing (the store's run check), so it is
 		// skipped here too.
-		if !reportOfOtherRun(presentedAgentTokenRunID(ctx), agent.RunID) {
+		if !reportOfOtherRun(status.ReportRunID, agent.RunID) {
 			s.reconcileBrokerQuotaOnPhaseChange(ctx, agent, oldPhase, status.Phase)
 			s.reconcileProjectQuotaOnPhaseChange(ctx, agent, oldPhase, status.Phase)
 		}
@@ -207,15 +225,6 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 	// A reincarnation that starts after the read above must still win: the
 	// store re-checks Guard 0b on the row it locks (ptone/scion#2887).
 	status.GuardReincarnation = true
-	// The report is the agent's own (set here, never from the body): it is
-	// subject to the run check and halted's stickiness, and never halts.
-	status.ReportSource = store.StatusReportSourceAgent
-	// The run of the token that sent this report: the store drops a report
-	// of another run (ptone/scion#4853).
-	status.ReportRunID = presentedAgentTokenRunID(ctx)
-	// Only the agent's own token marks a run-less report as an agent's: a
-	// user or service with update access sends no run either.
-	_, status.ReportAgentToken = identity.(AgentIdentity)
 	if err := s.store.UpdateAgentStatus(ctx, id, status); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -254,6 +263,11 @@ const (
 	// restart launch is active and the report's agent token names no run,
 	// or another run than the one being launched (Guard 0f).
 	statusUpdateReasonStartLaunchOtherRun = "start_launch_other_run"
+	// statusUpdateReasonRestartWindow: the report falls in the restart
+	// window (store.RestartPreMint, store.RunlessAgentTokenReport): it is of
+	// the run being replaced, or an agent token naming no run on a row with
+	// a recorded run.
+	statusUpdateReasonRestartWindow = "restart_window"
 )
 
 // statusGuardNoopReason returns the statusUpdateResult.Reason for the guard
@@ -297,10 +311,10 @@ func statusUpdateTouchesGuardedFields(su store.AgentStatusUpdate) bool {
 // POST never sets (ClearExit, ClearMessageIf, ClearTerminalRemnants):
 // erring towards "not empty" only means the store write runs.
 // The exceptions are the preconditions IfPhase, IfRunID, StartWrite,
-// GuardReincarnation, ReportSource, ReportRunID and Restore, and the output
+// GuardReincarnation, ReportSource, ReportRunID, ReportAgentToken and Restore, and the output
 // Result: they only condition the write (StartWrite selects the delete
 // guard; GuardReincarnation turns on the store's reincarnation guard;
-// ReportSource and ReportRunID select the report rules; Restore only
+// ReportSource, ReportRunID and ReportAgentToken select the report rules; Restore only
 // qualifies a Phase) or report on it,
 // and persist nothing themselves, so they deliberately do not count.
 // TestStatusUpdateIsEmpty_EveryFieldCounts catches a field missing here.
@@ -452,22 +466,6 @@ func guardAgentPhaseTransition(agent *store.Agent, status *store.AgentStatusUpda
 	}
 }
 
-// guardStartLaunchSelfReport is Guard 0f (design wave 3 D-e, there named
-// "Guard 0d"; renamed because 0d and 0e were taken), applied to the
-// agent's own status report after guardAgentPhaseTransition: while an
-// asynchronous start or restart launch is active on the row, a report whose
-// agent token names no run, or a run other than the row's (the run the hub
-// recorded for the new start before sending it), comes from the previous
-// container, not the one being launched. Its Phase, Activity, ExitCode,
-// ExitReason and Message are dropped, as Guards 0b and 0c drop them, so an
-// old container's "stopped" cannot end the launch as stopped during
-// launch. Other fields apply. A report from the new run's container passes.
-// The store already drops any report of another run (the run check in
-// UpdateAgentStatus); this guard adds the run-less token, and keeps the
-// quota reconcile from acting on such a report. Once the launch has ended
-// it no longer applies. It reports whether it applied (blanked the
-// report's guarded fields), so a report with nothing else is answered as
-// not applied.
 // guardRestartWindowReport drops status's Phase, Activity, ExitCode,
 // ExitReason and Message when the report (described by report: its source,
 // agent-token flag and run) falls in the restart window on agent's
@@ -485,6 +483,22 @@ func guardRestartWindowReport(agent *store.Agent, status *store.AgentStatusUpdat
 	return false
 }
 
+// guardStartLaunchSelfReport is Guard 0f (design wave 3 D-e, there named
+// "Guard 0d"; renamed because 0d and 0e were taken), applied to the
+// agent's own status report after guardAgentPhaseTransition: while an
+// asynchronous start or restart launch is active on the row, a report whose
+// agent token names no run, or a run other than the row's (the run the hub
+// recorded for the new start before sending it), comes from the previous
+// container, not the one being launched. Its Phase, Activity, ExitCode,
+// ExitReason and Message are dropped, as Guards 0b and 0c drop them, so an
+// old container's "stopped" cannot end the launch as stopped during
+// launch. Other fields apply. A report from the new run's container passes.
+// The store already drops any report of another run (the run check in
+// UpdateAgentStatus); this guard adds the run-less token, and keeps the
+// quota reconcile from acting on such a report. Once the launch has ended
+// it no longer applies. It reports whether it applied (blanked the
+// report's guarded fields), so a report with nothing else is answered as
+// not applied.
 func guardStartLaunchSelfReport(agent *store.Agent, status *store.AgentStatusUpdate, tokenRunID string) bool {
 	if agent.LaunchState != store.LaunchStateActive ||
 		(agent.LaunchKind != store.LaunchKindStart && agent.LaunchKind != store.LaunchKindRestart) {

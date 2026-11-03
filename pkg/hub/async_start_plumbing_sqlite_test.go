@@ -247,7 +247,7 @@ func TestAsyncStartGuard0f_RunlessSelfReportDuringStartLaunch(t *testing.T) {
 
 	// A run-less agent token (no run claim) against a row with a minted run
 	// belongs to no run of the row: its status fields are dropped (the
-	// restart-window rule, gap (1) in notes/kr-restart-window-gaps.md).
+	// restart-window rule, ptone/scion#1956 item 5b).
 	runless := mk("g0f-runless", string(state.PhaseStarting))
 	rec = postAgentStatusAsAgent(t, srv, runless, report)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())

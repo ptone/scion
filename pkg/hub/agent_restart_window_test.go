@@ -25,8 +25,11 @@ package hub
 // of run "run-1".
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -109,7 +112,7 @@ func TestRestartWindow_SelfReportNewRunApplied(t *testing.T) {
 // its new run. Run-less self-reports from an agent token are dropped
 // (TestRestartWindow_RunlessSelfReportIgnoredAfterRestart); run-less
 // heartbeats after a restart are a deferred follow-up that needs a broker
-// capability (gap (1) in notes/kr-restart-window-gaps.md).
+// capability (ptone/scion#1956 item 5b).
 func TestRestartWindow_CharacterizesRunlessHeartbeatAccepted(t *testing.T) {
 	f := newHaltFixture(t)
 	f.restartMinted(t)
@@ -228,4 +231,46 @@ func TestRestartWindow_SelfReportMarksAgentTokenForStore(t *testing.T) {
 	require.Equal(t, http.StatusOK, userRec.Code, userRec.Body.String())
 	require.Greater(t, recorded(), afterAgent, "the user's update reached the store through the recorder")
 	assert.False(t, rec.lastHeartbeat(t).ReportAgentToken, "a user with update access is not an agent token")
+}
+
+// TestRestartWindow_OldRunHeartbeatTakesNoSlotDuringRestart: the heartbeat
+// handler drops a restart-window report's phase before its reservation
+// reconcile. On a row whose stored phase is uncounted (stopped) during a
+// restart's stop leg, the old run's "running" heartbeat therefore does not
+// re-reserve a broker slot; the store also keeps the phase stopped.
+func TestRestartWindow_OldRunHeartbeatTakesNoSlotDuringRestart(t *testing.T) {
+	f := newHaltFixture(t)
+	setBrokerAgentCeiling(t, f.s, 2)
+	require.NoError(t, f.s.UpdateAgentStatus(context.Background(), f.agent.ID, store.AgentStatusUpdate{Phase: "stopped", ContainerStatus: "stopped"}))
+	f.restartClaimed(t)
+	f.heartbeat(t, brokerAgentHeartbeat{Phase: "running", ContainerStatus: "running", RunID: "run-1"})
+	assert.Equal(t, "stopped", f.get(t).Phase, "the store drops the old run's phase")
+	assert.False(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, f.agent.ID), "the dropped phase takes no broker slot")
+	assert.Zero(t, brokerReservationCount(t, f.s, f.broker.ID))
+}
+
+// TestRestartWindow_DroppedSelfReportAnsweredNotApplied: a self-report the
+// restart window drops entirely is answered applied=false with its reason,
+// as Guards 0b, 0c and 0f answer; one that still carries other fields is
+// applied in part.
+func TestRestartWindow_DroppedSelfReportAnsweredNotApplied(t *testing.T) {
+	f := newHaltFixture(t)
+	f.restartMinted(t)
+	post := func(body map[string]any) statusUpdateResult {
+		t.Helper()
+		raw, err := json.Marshal(body)
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+f.agent.ID+"/status", bytes.NewReader(raw))
+		req = req.WithContext(agentClaimsCtx(req.Context(), f.agent, "", ScopeAgentStatusUpdate))
+		rec := httptest.NewRecorder()
+		f.srv.updateAgentStatus(rec, req, f.agent.ID)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var res statusUpdateResult
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &res))
+		return res
+	}
+	assert.Equal(t, statusUpdateResult{Applied: false, Reason: statusUpdateReasonRestartWindow},
+		post(map[string]any{"phase": "stopped", "activity": "idle"}), "nothing left to persist")
+	assert.Equal(t, statusUpdateResult{Applied: true}, post(map[string]any{"phase": "stopped", "heartbeat": true}),
+		"the heartbeat still applies")
 }

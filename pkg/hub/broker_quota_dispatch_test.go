@@ -1393,3 +1393,32 @@ func TestRestartWindow_RunlessSelfReportMovesNoReservation(t *testing.T) {
 	assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID), "the dropped phase moves no reservation")
 	assert.EqualValues(t, 1, brokerReservationCount(t, s, broker.ID))
 }
+
+// TestRestartWindow_KeptSelfReportOnMintedRowReleasesReservation: the
+// restart-window rules drop only reports of the run being replaced and
+// run-less agent tokens. A stopped report sent with a token for the row's
+// own run is kept, so it still releases the agent's broker slot.
+func TestRestartWindow_KeptSelfReportOnMintedRowReleasesReservation(t *testing.T) {
+	srv, s := testServer(t)
+	setBrokerAgentCeiling(t, s, 2)
+	ctx := context.Background()
+	broker, project := newQuotaTestBrokerAndProject(t, s, "rw-quota-kept")
+	a := newQuotaTestAgent(t, s, broker, project, "rw-quota-kept", state.PhaseRunning)
+	_, err := s.SetAgentRunID(ctx, a.ID, "run-rw-quota-kept", nil)
+	require.NoError(t, err)
+	a, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	reserveBrokerSlot(t, s, broker, a.ID)
+	body, err := json.Marshal(store.AgentStatusUpdate{Phase: string(state.PhaseStopped), Message: "Agent stopped"})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+a.ID+"/status", bytes.NewReader(body))
+	req = req.WithContext(agentClaimsCtx(req.Context(), a, "run-rw-quota-kept", ScopeAgentStatusUpdate))
+	rec := httptest.NewRecorder()
+	srv.updateAgentStatus(rec, req, a.ID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseStopped), got.Phase, "a report of the row's own run applies")
+	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID), "the kept report releases the slot")
+	assert.Zero(t, brokerReservationCount(t, s, broker.ID))
+}
