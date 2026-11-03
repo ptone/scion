@@ -694,6 +694,17 @@ func (m *AgentManager) checkDeliveryTarget(ctx context.Context, agentID, project
 			"agent", agentID, "project_id", projectID, "error", err)
 		return nil
 	}
+	if liveAgentEntry(agents, agentID, projectID) {
+		return nil
+	}
+	// No matching container, or every matching container is stopped/errored.
+	return errNoRunningContainer(agentID)
+}
+
+// liveAgentEntry reports whether agents, a runtime list, holds an entry of
+// agentID (in projectID, when set) that is not stopped, errored or halted.
+// An entry whose state the runtime does not report counts as live.
+func liveAgentEntry(agents []api.AgentInfo, agentID, projectID string) bool {
 	for _, a := range agents {
 		if !matchesAgentID(a, agentID) || (projectID != "" && !EntryInProject(a, projectID)) {
 			continue
@@ -702,11 +713,10 @@ func (m *AgentManager) checkDeliveryTarget(ctx context.Context, agentID, project
 		case state.PhaseStopped, state.PhaseError, state.PhaseHalted:
 			// Keep looking: another matching container may be running.
 		default:
-			return nil
+			return true
 		}
 	}
-	// No matching container, or every matching container is stopped/errored.
-	return errNoRunningContainer(agentID)
+	return false
 }
 
 // RuntimeName returns the name of the runtime this manager lists, or "" when
