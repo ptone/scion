@@ -116,8 +116,27 @@ func entTemplateRowToStore(e *ent.Template) *store.Template {
 	return t
 }
 
+// errResourceNameNotComponent is returned by the template and harness-config
+// metadata writes for a Name that is not exactly one path component
+// (api.IsSingleNameComponent): such a name could later be joined into a
+// directory path. It wraps store.ErrInvalidInput and never contains the
+// name.
+var errResourceNameNotComponent = fmt.Errorf("%w: name must be a single path component", store.ErrInvalidInput)
+
+// checkResourceName is the store backstop for template and harness-config
+// names, applied by every write that sets Name.
+func checkResourceName(name string) error {
+	if !api.IsSingleNameComponent(name) {
+		return errResourceNameNotComponent
+	}
+	return nil
+}
+
 // CreateTemplate creates a new template record.
 func (s *TemplateStore) CreateTemplate(ctx context.Context, template *store.Template) error {
+	if err := checkResourceName(template.Name); err != nil {
+		return err
+	}
 	uid, err := parseUUID(template.ID)
 	if err != nil {
 		return err
@@ -208,6 +227,9 @@ func (s *TemplateStore) GetTemplateBySlug(ctx context.Context, slug, scope, scop
 // agent_config) and the storage columns (layout, storage_path,
 // storage_bucket, storage_uri) alone; see store.TemplateStore.UpdateTemplate.
 func (s *TemplateStore) UpdateTemplate(ctx context.Context, template *store.Template) error {
+	if err := checkResourceName(template.Name); err != nil {
+		return err
+	}
 	uid, err := parseUUID(template.ID)
 	if err != nil {
 		return err
@@ -548,6 +570,9 @@ func entHarnessConfigToStore(e *ent.HarnessConfig) *store.HarnessConfig {
 
 // CreateHarnessConfig creates a new harness config record.
 func (s *TemplateStore) CreateHarnessConfig(ctx context.Context, hc *store.HarnessConfig) error {
+	if err := checkResourceName(hc.Name); err != nil {
+		return err
+	}
 	uid, err := parseUUID(hc.ID)
 	if err != nil {
 		return err
@@ -632,6 +657,9 @@ func (s *TemplateStore) GetHarnessConfigBySlug(ctx context.Context, slug, scope,
 // and the storage columns (layout, storage_path, storage_bucket, storage_uri) alone,
 // and never writes built_image; see store.HarnessConfigStore.UpdateHarnessConfig.
 func (s *TemplateStore) UpdateHarnessConfig(ctx context.Context, hc *store.HarnessConfig) error {
+	if err := checkResourceName(hc.Name); err != nil {
+		return err
+	}
 	uid, err := parseUUID(hc.ID)
 	if err != nil {
 		return err
