@@ -4917,18 +4917,14 @@ func isWorkspaceEmptyDir(path string) bool {
 		return true
 	}
 	for _, e := range entries {
-		if !isProvisioningOnlyEntry(e.Name()) {
+		switch e.Name() {
+		case ".scion", ".scion-volumes":
+			continue
+		default:
 			return false
 		}
 	}
 	return true
-}
-
-// isProvisioningOnlyEntry reports whether a workspace entry named name is a
-// provisioning artifact that does not make the workspace non-empty
-// (isWorkspaceEmptyDir).
-func isProvisioningOnlyEntry(name string) bool {
-	return name == ".scion" || name == ".scion-volumes"
 }
 
 // infoTemplateFields returns the template name and content hash to record in

@@ -26,6 +26,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -105,7 +106,7 @@ func migrateFail(status WorkspaceMigrationStatus, cause string) *migrateOutcome 
 //  1. Source. The broker-local agent directory and its workspace are opened
 //     without following links. An exclusive lock on <agentDir>/.migrate.lock
 //     (broker-local) is held for the rest of the run (not in a dry run). A
-//     missing workspace, or one Start treats as empty (isProvisioningOnlyEntry),
+//     missing workspace, or one Start treats as empty (provisioningOnlyEntries),
 //     is skipped and left as it is, as Start leaves it.
 //  2. Running check, through the runtime (opts.Running).
 //  3. Scan. The source manifest is built; a special file, an entry owned by
@@ -227,16 +228,16 @@ func (m *workspaceMigration) run() error {
 			return migrateFail(MigrationRefusedUnsupported, causeSourceUnreadable)
 		}
 	}
-	// Empty as Start judges it (isProvisioningOnlyEntry, as
-	// isWorkspaceEmptyDir), read through the descriptor; a read error
-	// refuses the agent rather than counting as empty.
+	// Empty as Start judges it (provisioningOnlyEntries, as
+	// workspaceHoldsOnlyProvisioningEntries), read through the descriptor; a
+	// read error refuses the agent rather than counting as empty.
 	names, err := readDirNamesFd(m.srcFd)
 	if err != nil {
 		return migrateFail(MigrationRefusedUnsupported, causeSourceUnreadable)
 	}
 	empty := true
 	for _, name := range names {
-		if !isProvisioningOnlyEntry(name) {
+		if !slices.Contains(provisioningOnlyEntries, name) {
 			empty = false
 			break
 		}
