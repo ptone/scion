@@ -841,7 +841,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		if s.Type != "environment" && s.Type != "" {
 			continue
 		}
-		if _, collides := envKeys[s.Target]; collides || s.Target == SupplementalGIDsEnvVar || s.Target == MetadataInterceptionEnvVar {
+		if _, collides := envKeys[s.Target]; collides || s.Target == SupplementalGIDsEnvVar || s.Target == MetadataInterceptionEnvVar || reservedSecretEnvTarget(s.Target) {
 			continue
 		}
 		addArg("-e", fmt.Sprintf("%s=%s", s.Target, s.Value))
@@ -2289,6 +2289,14 @@ func copyFileIntoHome(src string, home *agenthome.Home, rel string) error {
 // the combined environment at ~128KB.
 const stagedSecretWarnThreshold = 100 * 1024
 
+// reservedSecretEnvTarget reports whether an environment-type secret may
+// not set name on any runtime: sciontool init reads it as its own marker
+// (stagedsecrets.HubTokenStagedEnvVar), so a secret supplying it would make
+// init treat a broker-provided token file as one it staged.
+func reservedSecretEnvTarget(name string) bool {
+	return name == stagedsecrets.HubTokenStagedEnvVar
+}
+
 // prepareContainerSecretEnv adds the shared secret-related environment needed
 // by local container runtimes.
 func prepareContainerSecretEnv(config *RunConfig) error {
@@ -2389,8 +2397,12 @@ func applyStagedSecretsToEnv(config *RunConfig, limit envSizeLimit, hubToken str
 	for _, e := range staged.Env {
 		key, val, _ := strings.Cut(e, "=")
 		if key == stagedsecrets.EnvVar && limit.exceeds(key, val) {
-			return nil, fmt.Errorf("file/variable secrets do not fit: %s is %d bytes, over the %d-byte limit for one %s on this runtime (largest secret: %q)",
-				stagedsecrets.EnvVar, limit.size(key, val), limit.maxBytes, limit.unit(), largestStagedSecretName(config.ResolvedSecrets))
+			carries := ""
+			if hubToken != "" {
+				carries = "; it also carries the agent's hub credential"
+			}
+			return nil, fmt.Errorf("file/variable secrets do not fit: %s is %d bytes, over the %d-byte limit for one %s on this runtime (largest secret: %q%s)",
+				stagedsecrets.EnvVar, limit.size(key, val), limit.maxBytes, limit.unit(), largestStagedSecretName(config.ResolvedSecrets), carries)
 		}
 	}
 
@@ -2402,6 +2414,7 @@ func applyStagedSecretsToEnv(config *RunConfig, limit envSizeLimit, hubToken str
 	// The staged keys are reserved even when this call does not set them:
 	// sciontool init reads them, so a secret must not supply them.
 	envKeys[stagedsecrets.EnvVar] = struct{}{}
+	envKeys[stagedsecrets.HubTokenStagedEnvVar] = struct{}{}
 	envKeys[telemetryGCPCredentialsEnvVar] = struct{}{}
 	for _, key := range reservedKeys {
 		envKeys[key] = struct{}{}

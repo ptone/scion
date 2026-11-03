@@ -18,6 +18,8 @@ package runtime
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,6 +28,7 @@ import (
 	"cloud.google.com/go/run/apiv2/runpb"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
 )
 
@@ -276,47 +279,147 @@ func TestReadCloudRunHubToken_TooLarge(t *testing.T) {
 	}
 }
 
-// The other runtimes' staged payloads are unchanged: the shared helpers
-// called without a token produce exactly what serializeSecrets produced
-// before, and a nil token leaves the docker path's env untouched.
+// The other runtimes' staged payloads are unchanged. The decoded blob the
+// shared helpers build without a token is exactly the JSON the format had
+// before HubToken existed (written out here, not derived from the code
+// under test), and it has no hub_token key at all.
 func TestStagedPayloadUnchangedWithoutHubToken(t *testing.T) {
-	secrets := crTestResolvedSecrets()
-	before, err := serializeSecrets("/home/scion", secrets)
-	if err != nil {
-		t.Fatal(err)
-	}
-	after, err := serializeStaged("/home/scion", secrets, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if before != after {
-		t.Error("serializeStaged without a token differs from serializeSecrets")
-	}
-	staged, err := stagedsecrets.Decode(before)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if staged.HubToken != "" {
-		t.Error("a payload built without a token carries a HubToken")
-	}
-	if strings.Contains(before, "hub_token") {
-		t.Error("hub_token key emitted without a token")
+	want := `{"file_secrets":[{"name":"creds","target":"` + crTestFileTarget + `","value":"` +
+		base64.StdEncoding.EncodeToString([]byte(crTestFileSecretValue)) +
+		`"}],"variable_secrets":{"EXAMPLE_REGION":"` + crTestVarSecretValue + `"}}`
+
+	decodeJSON := func(t *testing.T, blob string) []byte {
+		t.Helper()
+		raw, err := base64.StdEncoding.DecodeString(blob)
+		if err != nil {
+			t.Fatalf("decode blob: %v", err)
+		}
+		var keys map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &keys); err != nil {
+			t.Fatalf("blob JSON: %v", err)
+		}
+		if _, ok := keys["hub_token"]; ok {
+			t.Error("hub_token key present in a payload built without a token")
+		}
+		return raw
 	}
 
+	// docker, podman, apple: prepareContainerSecretEnv.
+	dockerCfg := RunConfig{UnixUsername: "scion", ResolvedSecrets: crTestResolvedSecrets()}
+	if err := prepareContainerSecretEnv(&dockerCfg); err != nil {
+		t.Fatal(err)
+	}
+	// cloudrun-sandbox (and cloudrun before this change): applyResolvedSecretsToEnv.
+	flatCfg := RunConfig{UnixUsername: "scion", ResolvedSecrets: crTestResolvedSecrets()}
+	if _, err := applyResolvedSecretsToEnv(&flatCfg, cloudRunEnvLimit); err != nil {
+		t.Fatal(err)
+	}
+	for name, env := range map[string][]string{"prepareContainerSecretEnv": dockerCfg.Env, "applyResolvedSecretsToEnv": flatCfg.Env} {
+		found := false
+		for _, e := range env {
+			if k, v, _ := strings.Cut(e, "="); k == stagedsecrets.EnvVar {
+				found = true
+				if got := string(decodeJSON(t, v)); got != want {
+					t.Errorf("%s: staged JSON changed:\n got %s\nwant %s", name, got, want)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("%s: no %s entry", name, stagedsecrets.EnvVar)
+		}
+	}
+
+	// No secrets and no token: nothing is added.
 	empty := RunConfig{UnixUsername: "scion"}
 	if err := prepareContainerSecretEnv(&empty); err != nil || len(empty.Env) != 0 {
 		t.Errorf("prepareContainerSecretEnv with no secrets changed env (%d entries, err %v)", len(empty.Env), err)
 	}
-	cfg := RunConfig{UnixUsername: "scion", ResolvedSecrets: []api.ResolvedSecret{{Name: "creds", Type: "file", Target: crTestFileTarget, Value: crTestFileSecretValue}}}
-	if _, err := applyResolvedSecretsToEnv(&cfg, cloudRunEnvLimit); err != nil {
+}
+
+// An environment-type secret can never supply the staged-token marker that
+// sciontool init reads, on any runtime path.
+func TestReservedSecretEnvTarget_HubTokenStagedMarker(t *testing.T) {
+	secret := api.ResolvedSecret{Name: "m", Type: "environment", Target: stagedsecrets.HubTokenStagedEnvVar, Value: "1"}
+
+	flatCfg := RunConfig{UnixUsername: "scion", ResolvedSecrets: []api.ResolvedSecret{secret}}
+	if _, err := applyResolvedSecretsToEnv(&flatCfg, cloudRunEnvLimit); err != nil {
 		t.Fatal(err)
 	}
-	for _, e := range cfg.Env {
-		if k, v, _ := strings.Cut(e, "="); k == stagedsecrets.EnvVar {
-			s, err := stagedsecrets.Decode(v)
-			if err != nil || s.HubToken != "" {
-				t.Errorf("applyResolvedSecretsToEnv staged a hub token (err %v)", err)
-			}
+	for _, e := range flatCfg.Env {
+		if strings.HasPrefix(e, stagedsecrets.HubTokenStagedEnvVar+"=") {
+			t.Error("applyResolvedSecretsToEnv let a secret set the staged-token marker")
 		}
+	}
+
+	ordinary := api.ResolvedSecret{Name: "k", Type: "environment", Target: "EXAMPLE_API_KEY", Value: "placeholder"}
+	dockerCfg := RunConfig{
+		Harness:         &harness.Generic{},
+		Name:            "test-agent",
+		UnixUsername:    "scion",
+		Image:           "scion-agent:latest",
+		ResolvedSecrets: []api.ResolvedSecret{secret, ordinary},
+	}
+	args, err := buildCommonRunArgs(dockerCfg)
+	if err != nil {
+		t.Fatalf("buildCommonRunArgs: %v", err)
+	}
+	sawOrdinary := false
+	for _, a := range args {
+		if strings.HasPrefix(a, stagedsecrets.HubTokenStagedEnvVar+"=") {
+			t.Error("buildCommonRunArgs let a secret set the staged-token marker")
+		}
+		if a == "EXAMPLE_API_KEY=placeholder" {
+			sawOrdinary = true
+		}
+	}
+	if !sawOrdinary {
+		t.Error("control: an ordinary environment secret was not emitted")
+	}
+	if !reservedSecretEnvTarget(stagedsecrets.HubTokenStagedEnvVar) || reservedSecretEnvTarget("EXAMPLE_API_KEY") {
+		t.Error("reservedSecretEnvTarget does not single out the marker")
+	}
+}
+
+// The existing-instance path (no update API) keeps the instance's
+// creation-time payload; it says so instead of dropping the credential
+// silently, and the credential never reaches the log or the error.
+func TestCloudRunRun_ExistingInstanceWarnsCredentialNotRedelivered(t *testing.T) {
+	wantName := "projects/test-project/locations/us-central1/instances/" + cloudRunInstanceID("agent-1")
+	fake := &fakeInstancesClient{getInstance: &runpb.Instance{Name: wantName}}
+	rt := newFakeCloudRunRuntime(t, fake)
+	logs := captureRuntimeLog(t)
+
+	cfg := runConfigForTest()
+	cfg.HomeDir = writeCRHubToken(t, crHubTokenCanary)
+	if _, err := rt.Run(context.Background(), cfg); err != nil {
+		if strings.Contains(err.Error(), crHubTokenCanary) {
+			t.Error("error carries the credential")
+		}
+		t.Fatalf("Run on an existing instance failed (error length %d)", len(err.Error()))
+	}
+	if len(fake.startReqs) != 1 || len(fake.createReqs) != 0 {
+		t.Fatalf("start/create calls = %d/%d, want 1/0", len(fake.startReqs), len(fake.createReqs))
+	}
+	out := logs.String()
+	if !strings.Contains(out, "keeps its creation-time staged secrets, including the hub credential") {
+		t.Errorf("no warning on the reuse path (log length %d)", len(out))
+	}
+	if strings.Contains(out, crHubTokenCanary) {
+		t.Error("log carries the credential")
+	}
+}
+
+// When the blob is over the limit and carries the hub credential, the
+// error says so (without the value).
+func TestCloudRunRun_OversizedBlobMentionsHubCredential(t *testing.T) {
+	cfg := RunConfig{UnixUsername: "scion", ResolvedSecrets: []api.ResolvedSecret{
+		{Name: "big", Type: "variable", Target: "BIG", Value: strings.Repeat("v", cloudRunMaxEnvValueBytes)},
+	}}
+	_, err := applyStagedSecretsToEnv(&cfg, cloudRunEnvLimit, crHubTokenCanary)
+	if err == nil {
+		t.Fatal("no error for an oversized blob")
+	}
+	if !strings.Contains(err.Error(), "also carries the agent's hub credential") || strings.Contains(err.Error(), crHubTokenCanary) {
+		t.Errorf("error does not mention the credential, or carries it (length %d)", len(err.Error()))
 	}
 }

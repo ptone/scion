@@ -20,12 +20,13 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
+	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
 )
 
 // envHubTokenStaged marks, across init's environ-purge re-exec, that this
 // init wrote the agent token file from the staged payload (so it removes
-// it at exit). It carries no credential.
-const envHubTokenStaged = "SCION_HUB_TOKEN_STAGED"
+// it at a clean exit). It carries no credential; the runtimes reserve it.
+const envHubTokenStaged = stagedsecrets.HubTokenStagedEnvVar
 
 // stageHubToken writes the staged hub credential to the canonical token
 // file through hub.WriteTokenFile: the parent directory is opened without
@@ -46,6 +47,17 @@ func stageHubToken(staged string, uid, gid int) (kept bool, err error) {
 			return true, nil
 		}
 	}
+	// An existing file that cannot be read loses. The write below refuses
+	// to replace a leaf it cannot open, so a regular single-link file the
+	// guarded reader classed as unreadable is unlinked first (fstatat and
+	// unlinkat on the parent, never following the leaf). A link or a
+	// non-regular entry is not removed: the write refuses it and the start
+	// fails closed.
+	if hub.CheckTokenFile() == hub.TokenFileUnreadable {
+		if err := hub.RemoveUnreadableRegularTokenFile(); err != nil {
+			return false, fmt.Errorf("remove the unreadable token file: %w", err)
+		}
+	}
 	if err := runWriteTokenFile(staged, uid, gid); err != nil {
 		return false, err
 	}
@@ -55,9 +67,18 @@ func stageHubToken(staged string, uid, gid int) (kept bool, err error) {
 // runWriteTokenFile is hub.WriteTokenFile; a test may replace it.
 var runWriteTokenFile = hub.WriteTokenFile
 
-// removeStagedHubToken removes the token file this init staged. It runs as
-// init returns, after the final status report.
-func removeStagedHubToken() {
+// finishStagedHubToken runs as init returns, after the final status
+// report, for a token file this init staged. After a clean final outcome (a
+// clean exit or a requested stop, which the platform does not restart) it
+// removes the file. Otherwise it keeps it: a container restart re-stages
+// the creation-time credential, and stageHubToken then keeps this file
+// when the refresh loop made it newer. A kept file stays on the agent's
+// own home until the next start replaces it or the agent is deleted.
+func finishStagedHubToken(cleanExit bool) {
+	if !cleanExit {
+		log.Info("Kept the staged hub credential file for a restart (the agent did not exit cleanly)")
+		return
+	}
 	if err := hub.RemoveTokenFile(); err != nil {
 		log.Error("Failed to remove the staged hub credential file: %v", err)
 		return

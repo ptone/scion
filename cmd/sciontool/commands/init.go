@@ -524,6 +524,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// because the GCP credentials file (pointed to by SCION_OTEL_GCP_CREDENTIALS)
 	// must exist on disk when the telemetry pipeline starts.
 	if encoded := os.Getenv(stagedsecrets.EnvVar); encoded != "" {
+		// Only this pass may set the staged-token marker; one inherited
+		// from the environment is dropped before anything is staged.
+		_ = os.Unsetenv(envHubTokenStaged)
 		staged, err := stagedsecrets.Decode(encoded)
 		if err != nil {
 			log.Error("Failed to decode staged secrets: %v", err)
@@ -607,12 +610,18 @@ func RunInit(args []string, opts InitRunOptions) int {
 	}
 
 	// The token file this init staged from the runtime's payload is removed
-	// when init returns, after the final hub reports (deferred calls run
-	// after every return path below). A file the broker bind-mounted or
-	// copied in (docker, Kubernetes) is never staged and stays as before.
+	// as init returns, after the final hub reports (deferred calls run after
+	// every return path below), but only when the agent's final outcome is
+	// clean (stagedTokenCleanExit, set once the exit is classified). After a
+	// crash, a limits stop or an init failure the platform restarts the
+	// container with the same payload, so the file, which the refresh loop
+	// keeps current, is kept for stageHubToken's iat rule. A file the broker
+	// bind-mounted or copied in (docker, Kubernetes) is never staged and
+	// stays as before.
+	stagedTokenCleanExit := false
 	if os.Getenv(envHubTokenStaged) == "1" {
 		_ = os.Unsetenv(envHubTokenStaged)
-		defer removeStagedHubToken()
+		defer func() { finishStagedHubToken(stagedTokenCleanExit) }()
 	}
 
 	// Open the startup listener when the runtime asked for one (only the
@@ -1577,6 +1586,7 @@ waitLoop:
 
 	outcome := classifyExit(result.code, result.err, harnessCode, limitsExceeded, requestedShutdown.Load())
 	finalCode := outcome.exitCode
+	stagedTokenCleanExit = finalCode == 0 && !outcome.isCrash && !outcome.limitsExceeded && result.err == nil
 	limitsExceeded = outcome.limitsExceeded
 
 	// Report a session whose session-end hook has not run (the agent is

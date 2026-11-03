@@ -386,6 +386,15 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 		if want != "" && run == want {
 			hooks.created(api.ResourceHandle{Kind: api.ResourceKindCloudRunInstance, Namespace: parent, Name: instanceID, UID: cfg.Labels[api.LabelRunID]})
 		}
+		// The Instances API has no update, so a started existing instance
+		// keeps the staged secrets it was created with, including the hub
+		// credential; the one this start read is not delivered. sciontool
+		// init then keeps a newer token file in the instance's home (its
+		// iat rule) over the creation-time one.
+		if hubToken != "" {
+			runtimeLog().Warn("Cloud Run start: reusing the existing instance; it keeps its creation-time staged secrets, including the hub credential",
+				"instance", instanceID, "agent_id", agentID)
+		}
 		startReq := &runpb.StartInstanceRequest{
 			Name: getReq.Name,
 			Etag: existing.GetEtag(),

@@ -31,6 +31,12 @@ import (
 // a base64-encoded JSON blob decoded by sciontool init.
 const EnvVar = "SCION_STAGED_SECRETS"
 
+// HubTokenStagedEnvVar is set by sciontool init, across its environ-purge
+// re-exec, when it wrote the agent token file from Staged.HubToken, so it
+// removes the file again at a clean exit. It carries no credential. The
+// runtimes reserve the name: an environment-type secret never supplies it.
+const HubTokenStagedEnvVar = "SCION_HUB_TOKEN_STAGED"
+
 // FileSecret describes a single file-type secret in the staged blob.
 type FileSecret struct {
 	Name   string `json:"name"`

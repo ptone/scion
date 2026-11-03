@@ -191,14 +191,65 @@ func TestStageHubToken_UnreadableExistingIsReplaced(t *testing.T) {
 	}
 }
 
-func TestRemoveStagedHubToken(t *testing.T) {
+func TestFinishStagedHubToken_RemovesOnlyOnCleanExit(t *testing.T) {
 	_, tokenPath := isolatedTokenHome(t)
 	if _, err := stageHubToken(initHubTokenCanary, os.Getuid(), os.Getgid()); err != nil {
 		t.Fatal(err)
 	}
-	removeStagedHubToken()
+	finishStagedHubToken(false)
+	if _, err := os.Lstat(tokenPath); err != nil {
+		t.Fatalf("staged token file removed after an exit that is not clean (err %v)", err)
+	}
+	finishStagedHubToken(true)
 	if _, err := os.Lstat(tokenPath); !os.IsNotExist(err) {
-		t.Errorf("staged token file not removed (err %v)", err)
+		t.Errorf("staged token file not removed after a clean exit (err %v)", err)
+	}
+}
+
+// An unreadable existing file is unlinked before the write only when it is
+// a regular file with one link: a hard-linked unreadable file is refused,
+// nothing is removed, and the start fails closed.
+func TestStageHubToken_UnreadableHardLinkedIsRefused(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a mode-000 file")
+	}
+	_, tokenPath := isolatedTokenHome(t)
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tokenPath, []byte(iatToken(5)), 0); err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(filepath.Dir(tokenPath), "other-link")
+	if err := os.Link(tokenPath, other); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stageHubToken(iatToken(9), os.Getuid(), os.Getgid()); err == nil {
+		t.Error("stageHubToken replaced a hard-linked unreadable token file")
+	}
+	for _, p := range []string{tokenPath, other} {
+		if _, err := os.Lstat(p); err != nil {
+			t.Errorf("%s removed (err %v)", filepath.Base(p), err)
+		}
+	}
+}
+
+// A non-regular entry (a FIFO) at the token path is never removed or
+// written through, and the start fails closed.
+func TestStageHubToken_FIFOIsRefused(t *testing.T) {
+	_, tokenPath := isolatedTokenHome(t)
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(tokenPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stageHubToken(initHubTokenCanary, os.Getuid(), os.Getgid()); err == nil {
+		t.Error("stageHubToken succeeded over a FIFO")
+	}
+	fi, err := os.Lstat(tokenPath)
+	if err != nil || fi.Mode()&os.ModeNamedPipe == 0 {
+		t.Errorf("the FIFO was removed or replaced (err %v)", err)
 	}
 }
 
