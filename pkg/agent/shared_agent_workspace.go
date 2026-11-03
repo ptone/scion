@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -168,10 +169,27 @@ func sharedLayoutAgentWorkspace(ctx context.Context, settings *config.VersionedS
 	if legacy := config.LegacySharedProjectAgentDir(projectDir, agentName); legacy != "" && samePath(legacy, agentDir) {
 		return "", nil
 	}
+	_, agentRoot, ok, err := sharedLayoutAgentRoot(ctx, settings, projectDir, agentName)
+	if err != nil || !ok {
+		return "", err
+	}
+	return filepath.Join(agentRoot.HostPath, provision.AgentWorkspaceDir), nil
+}
+
+// sharedLayoutAgentRoot resolves the shared Layout of the project whose
+// configuration is in projectDir and agentName's directory on it
+// (projectfs.Layout.AgentRoot): the part of sharedLayoutAgentWorkspace after
+// its runtime and legacy checks, shared with the workspace migration
+// (MigrateAgentWorkspaces) so both address the same directory. ok is false,
+// with no error, when the Layout is not a shared one. The Layout is built
+// from settings, or loaded for projectDir when settings is nil; a Layout
+// that cannot be built, or whose project root is not the directory holding
+// projectDir, is an error.
+func sharedLayoutAgentRoot(ctx context.Context, settings *config.VersionedSettings, projectDir, agentName string) (projectfs.Layout, projectfs.Resolved, bool, error) {
 	if settings == nil {
 		vs, _, err := config.LoadEffectiveSettingsFor(ctx, projectDir)
 		if err != nil {
-			return "", fmt.Errorf("agent workspace on the shared project tree: load settings: %w", err)
+			return projectfs.Layout{}, projectfs.Resolved{}, false, fmt.Errorf("agent workspace on the shared project tree: load settings: %w", err)
 		}
 		settings = vs
 	}
@@ -181,34 +199,34 @@ func sharedLayoutAgentWorkspace(ctx context.Context, settings *config.VersionedS
 	}
 	ps, _, err := config.ResolveProjectStorage(srv)
 	if err != nil {
-		return "", fmt.Errorf("agent workspace on the shared project tree: %w", err)
+		return projectfs.Layout{}, projectfs.Resolved{}, false, fmt.Errorf("agent workspace on the shared project tree: %w", err)
 	}
 	layout, err := config.ProjectStorageLayout(ps, config.DefaultVolumeMountBase)
 	if err != nil {
-		return "", fmt.Errorf("agent workspace on the shared project tree: %w", err)
+		return projectfs.Layout{}, projectfs.Resolved{}, false, fmt.Errorf("agent workspace on the shared project tree: %w", err)
 	}
 	if !layout.Backend.Shared() {
-		return "", nil
+		return projectfs.Layout{}, projectfs.Resolved{}, false, nil
 	}
 	abs, err := filepath.Abs(projectDir)
 	if err != nil {
-		return "", fmt.Errorf("agent workspace on the shared project tree: %w", err)
+		return projectfs.Layout{}, projectfs.Resolved{}, false, fmt.Errorf("agent workspace on the shared project tree: %w", err)
 	}
 	// IsSharedProjectConfigDir checked that the parent's name is the
 	// project ID recorded in the configuration.
 	projectID := filepath.Base(filepath.Dir(abs))
 	projectRoot, err := layout.ProjectRoot(projectID)
 	if err != nil {
-		return "", fmt.Errorf("agent workspace on the shared project tree: %w", err)
+		return projectfs.Layout{}, projectfs.Resolved{}, false, fmt.Errorf("agent workspace on the shared project tree: %w", err)
 	}
 	if !samePath(projectRoot.HostPath, filepath.Dir(abs)) {
-		return "", fmt.Errorf("agent workspace on the shared project tree: the project storage layout places project %s at %s, not at %s; refusing to start", projectID, projectRoot.HostPath, filepath.Dir(abs))
+		return projectfs.Layout{}, projectfs.Resolved{}, false, fmt.Errorf("agent workspace on the shared project tree: the project storage layout places project %s at %s, not at %s; refusing to start", projectID, projectRoot.HostPath, filepath.Dir(abs))
 	}
 	agentRoot, err := layout.AgentRoot(projectID, agentName)
 	if err != nil {
-		return "", fmt.Errorf("agent workspace on the shared project tree: %w", err)
+		return projectfs.Layout{}, projectfs.Resolved{}, false, fmt.Errorf("agent workspace on the shared project tree: %w", err)
 	}
-	return filepath.Join(agentRoot.HostPath, "workspace"), nil
+	return layout, agentRoot, true, nil
 }
 
 // ErrAgentWorkspaceOffShare refuses a local container runtime start of an
