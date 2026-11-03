@@ -80,7 +80,7 @@ Runtime Broker, or the server run outside a project without `--global` or `--pro
 `scion use`, `scion hub status`, `scion hub add`, `scion hub list`, `scion hub rename`,
 `scion hub remove`, the `scion hub auth` commands,
 `scion runtime-broker register`, `deregister`, `start`, `stop`, `restart`, `status`, `hubs`,
-`join` and `convert`, and the `server`, `admin` and `project` commands. Outside a project, the `scion hub`
+`join`, `convert` and `migrate-workspaces`, and the `server`, `admin` and `project` commands. Outside a project, the `scion hub`
 connection commands read and write the global settings, as with `--global`. The hub list
 commands (`add`, `list`, `rename`, `remove`) act on `~/.scion/context.yaml`.
 `scion runtime-broker provide` and `withdraw` act on a project and still need one.
@@ -1537,6 +1537,11 @@ Manages the local host as a Runtime Broker. The old name `scion broker` still wo
     - `--json`: Output in JSON format.
     - `--broker <id>`: Show the status of another Runtime Broker as the Hub sees it, instead of the local one.
     - `--port <port>`: Port of the local Runtime Broker.
+- `scion runtime-broker migrate-workspaces`: Move the workspaces of agents created before their project moved to shared project storage from this broker onto the share (see [Moving pre-switch agent workspaces onto shared storage](/scion/hosted/single-node/hub-server/#moving-pre-switch-agent-workspaces-onto-shared-storage)). Run it on the broker host with the agents stopped. It exits non-zero if any agent was refused or failed. Not available inside agents or on Windows.
+    - `--project <dir>`: The project root on the share, or its `.scion` directory. Default: every project on the shared layout.
+    - `--agent <name>`: Only this agent (repeatable; needs `--project`).
+    - `--dry-run`: List each agent's source, target, size and planned action without changing anything.
+    - `--json`: Print the results as JSON, with a status per agent.
 - `scion runtime-broker start`: Start the broker server as a background daemon.
     - `--foreground`: Run in the current process instead of daemonizing. Use this as the `ExecStart` of a systemd `Type=simple` unit.
     - `--port <port>`: Listen on a custom port (default: `server.broker.port` from settings, else 9800).
