@@ -26,6 +26,7 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -369,6 +370,31 @@ func TestAgentRestartWindow_MintClaimClockBeyondCapUsesHubClock(t *testing.T) {
 	require.NotNil(t, got.StartClaimAt)
 	assert.WithinDuration(t, before, *got.RunIDUpdatedAt, time.Minute, "the hub clock is used")
 	assert.True(t, got.RunIDUpdatedAt.Before(*got.StartClaimAt), "the claim time beyond the cap is not honoured")
-	assert.Contains(t, logs.String(), "start claim time is ahead of the hub clock beyond the cap")
+	assert.Equal(t, 1, strings.Count(logs.String(), "start claim time is ahead of the hub clock beyond the cap"), "one warning")
 	assert.NotContains(t, logs.String(), id, "the warning names no ids")
+}
+
+// TestAgentRestartWindow_RevertClaimClockBeyondCapUsesHubClock: the swap
+// path (RevertAgentRunID) applies the same cap as SetAgentRunID.
+func TestAgentRestartWindow_RevertClaimClockBeyondCapUsesHubClock(t *testing.T) {
+	var logs bytes.Buffer
+	prevLog := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prevLog) })
+
+	ctx := context.Background()
+	s, id := clockAheadRestart(t, ctx, "rw-skew-cap-revert", 10*time.Minute)
+	_, err := s.SetAgentRunID(ctx, id, "run-2", nil)
+	require.NoError(t, err)
+	before := time.Now()
+	reverted, err := s.RevertAgentRunID(ctx, id, "run-2", "run-1")
+	require.NoError(t, err)
+	require.True(t, reverted)
+	got, err := s.GetAgent(ctx, id)
+	require.NoError(t, err)
+	require.NotNil(t, got.RunIDUpdatedAt)
+	require.NotNil(t, got.StartClaimAt)
+	assert.WithinDuration(t, before, *got.RunIDUpdatedAt, time.Minute, "the hub clock is used")
+	assert.True(t, got.RunIDUpdatedAt.Before(*got.StartClaimAt), "the claim time beyond the cap is not honoured")
+	assert.Equal(t, 2, strings.Count(logs.String(), "start claim time is ahead of the hub clock beyond the cap"), "one warning per run change")
 }

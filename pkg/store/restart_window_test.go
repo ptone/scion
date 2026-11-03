@@ -103,6 +103,8 @@ func TestRunIDStamp(t *testing.T) {
 	past := now.Add(-time.Minute)
 	within := now.Add(2 * time.Second)
 	beyond := now.Add(RestartClaimSkewCap + time.Second)
+	atCap := now.Add(RestartClaimSkewCap)
+	justBeyond := atCap.Add(time.Nanosecond)
 	for _, tc := range []struct {
 		name       string
 		held       bool
@@ -117,6 +119,8 @@ func TestRunIDStamp(t *testing.T) {
 		{"restart claim in the past", true, StartClaimRestart, &past, now, false},
 		{"restart claim ahead within the cap", true, StartClaimRestart, &within, within, false},
 		{"restart claim ahead beyond the cap", true, StartClaimRestart, &beyond, now, true},
+		{"restart claim ahead exactly the cap", true, StartClaimRestart, &atCap, atCap, false},
+		{"restart claim ahead the cap plus 1ns", true, StartClaimRestart, &justBeyond, now, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stamp, over := RunIDStamp(now, tc.held, tc.kind, tc.claimAt)

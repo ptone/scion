@@ -3184,7 +3184,7 @@ func (s *AgentStore) SetAgentRunID(ctx context.Context, agentID, runID string, c
 // fields selected) at hub time now. A restart claim time beyond the cap is
 // logged with the skew only.
 func runIDStamp(row *ent.Agent, now time.Time) time.Time {
-	held := row.StartClaimID != nil && *row.StartClaimID != ""
+	held := startClaimHeld(row)
 	stamp, beyond := store.RunIDStamp(now, held, store.StartClaimKind(row.StartClaimKind), row.StartClaimAt)
 	if beyond > 0 {
 		slog.Warn("restart window: start claim time is ahead of the hub clock beyond the cap; using the hub clock",
@@ -3215,12 +3215,18 @@ func (s *AgentStore) setAgentRunIDOnce(ctx context.Context, uid uuid.UUID, agent
 		s.afterRunIDRead(agentID)
 	}
 	prevList, dropped := store.AppendPreviousRunID(row.PreviousRunIds, row.RunID, runID)
+	// The stamp, computed once per attempt and outside the swap, so a
+	// beyond-the-cap warning is logged at most once per attempt.
+	var stamp time.Time
+	if runID != row.RunID {
+		stamp = runIDStamp(row, now)
+	}
 	swap := func(c *ent.AgentClient) (int, error) {
 		upd := c.Update().
 			Where(agent.IDEQ(uid), agent.RunIDEQ(row.RunID), runIDWritable(now)).
 			SetRunID(runID)
 		if runID != row.RunID {
-			upd = upd.SetRunIDUpdatedAt(runIDStamp(row, now).UTC())
+			upd = upd.SetRunIDUpdatedAt(stamp.UTC())
 		}
 		if len(prevList) > 0 {
 			upd = upd.SetPreviousRunIds(prevList)
@@ -3429,8 +3435,9 @@ func (s *AgentStore) swapAgentRunID(ctx context.Context, agentID, expectedRunID,
 	stamp := time.Now()
 	if newRunID != expectedRunID {
 		// The restart claim, for the stamp (store.RunIDStamp). Read outside
-		// the swap: a claim taken after this read is later than the stamp,
-		// which leaves that new restart's window open, as it should be.
+		// the swap: a claim taken after this read is normally later than the
+		// stamp (unless the hub clock is ahead of the store clock), which
+		// leaves that new restart's window open, as it should be.
 		claim, err := s.client.Agent.Query().Where(agent.IDEQ(uid)).
 			Select(agent.FieldStartClaimID, agent.FieldStartClaimKind, agent.FieldStartClaimAt).Only(ctx)
 		if err != nil && !ent.IsNotFound(err) {

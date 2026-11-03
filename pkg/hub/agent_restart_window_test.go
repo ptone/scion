@@ -274,3 +274,50 @@ func TestRestartWindow_DroppedSelfReportAnsweredNotApplied(t *testing.T) {
 	assert.Equal(t, statusUpdateResult{Applied: true}, post(map[string]any{"phase": "stopped", "heartbeat": true}),
 		"the heartbeat still applies")
 }
+
+// postSelfReportResult posts body to the fixture agent's status endpoint
+// with an agent token for runID and returns the decoded answer.
+func (f haltFixture) postSelfReportResult(t *testing.T, runID string, body map[string]any) statusUpdateResult {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+f.agent.ID+"/status", bytes.NewReader(raw))
+	req = req.WithContext(agentClaimsCtx(req.Context(), f.agent, runID, ScopeAgentStatusUpdate))
+	rec := httptest.NewRecorder()
+	f.srv.updateAgentStatus(rec, req, f.agent.ID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var res statusUpdateResult
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &res))
+	return res
+}
+
+// TestRestartWindow_NotAppliedAnswerPaths: the restart_window answer also
+// comes from the pre-mint rule (a token for the current run while a
+// restart has not recorded its new run), and the guards that own the
+// agent's status keep their own reasons when they also apply: Guard 0f
+// (an active start launch) and Guard 0b (a reincarnation in flight) are
+// checked first.
+func TestRestartWindow_NotAppliedAnswerPaths(t *testing.T) {
+	t.Run("pre-mint", func(t *testing.T) {
+		f := newHaltFixture(t)
+		f.restartClaimed(t)
+		assert.Equal(t, statusUpdateResult{Applied: false, Reason: statusUpdateReasonRestartWindow},
+			f.postSelfReportResult(t, "run-1", map[string]any{"phase": "stopped"}))
+		assert.Equal(t, "running", f.get(t).Phase)
+	})
+	t.Run("start launch first", func(t *testing.T) {
+		f := newHaltFixture(t)
+		beginTestStartLaunch(t, f.s, f.get(t), store.LaunchKindStart, "stopped", false)
+		assert.Equal(t, statusUpdateResult{Applied: false, Reason: statusUpdateReasonStartLaunchOtherRun},
+			f.postSelfReportResult(t, "", map[string]any{"phase": "stopped"}), "Guard 0f answers before the restart window")
+	})
+	t.Run("reincarnation first", func(t *testing.T) {
+		f := newHaltFixture(t)
+		f.restartClaimed(t)
+		a := f.get(t)
+		a.ReincarnationState = store.ReincarnationStateStopping
+		require.NoError(t, f.s.UpdateAgent(context.Background(), a))
+		assert.Equal(t, statusUpdateResult{Applied: false, Reason: statusUpdateReasonReincarnationInFlight},
+			f.postSelfReportResult(t, "run-1", map[string]any{"phase": "stopped"}), "Guard 0b answers before the restart window")
+	})
+}
