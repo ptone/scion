@@ -182,24 +182,58 @@ func blockRestore(t *testing.T, dir string) {
 	}
 }
 
-// TestPluginSwap_RestoreMarkerStuckIsReported (#7177 review O1): when the
-// restore fails and the applied marker cannot be removed, the staging is
-// kept and the error says it is still marked, so the operator moves old/
-// aside before the next start would remove it.
-func TestPluginSwap_RestoreMarkerStuckIsReported(t *testing.T) {
+// TestPluginSwap_RestoreMarkerStuckMovesAside (#7177 review r2): when the
+// restore fails and the applied marker cannot be removed even on retry, the
+// staging (the only old builds) is moved off the staging prefix, so neither
+// the startup cleanup nor the next update removes it, and the error says
+// where it is.
+func TestPluginSwap_RestoreMarkerStuckMovesAside(t *testing.T) {
 	sw, dir := restoreMarkerSetup(t, 2)
+	orig := sw.staging
 	blockRestore(t, dir)
 	err := sw.restore()
-	if err == nil || !strings.Contains(err.Error(), "still marked applied") || !strings.Contains(err.Error(), "move "+filepath.Join(sw.staging, "old")+" aside") {
-		t.Fatalf("restore = %v, want the still-marked warning", err)
+	if err == nil || !strings.Contains(err.Error(), "so the backups were moved to "+sw.staging) {
+		t.Fatalf("restore = %v, want the moved-aside note", err)
+	}
+	if !strings.HasPrefix(filepath.Base(sw.staging), pluginKeptPrefix) || sw.staging == orig {
+		t.Fatalf("staging = %s, want it moved under %s", sw.staging, pluginKeptPrefix)
+	}
+	if _, err := os.Stat(orig); !os.IsNotExist(err) {
+		t.Fatalf("original staging still there: %v", err)
 	}
 	if !sw.keep {
 		t.Fatal("staging not kept")
 	}
 	sw.cleanup()
-	if _, err := os.Stat(filepath.Join(sw.staging, "old", "scion-plugin-a")); err != nil {
-		t.Fatalf("old build lost: %v", err)
+	wantFile(t, filepath.Join(sw.staging, "old", "scion-plugin-a"), "a old")
+	removeStalePluginStaging(io.Discard, dir)
+	if removed, err := RemoveAppliedPluginStaging(dir); err != nil || len(removed) != 0 {
+		t.Fatalf("RemoveAppliedPluginStaging removed %v (%v)", removed, err)
 	}
+	wantFile(t, filepath.Join(sw.staging, "old", "scion-plugin-a"), "a old")
+}
+
+// TestPluginSwap_RestoreMarkerStuckNotMovable: if the move aside fails too
+// (the plugin dir is read-only), the staging stays and the error tells the
+// operator to move old/ aside before the next start.
+func TestPluginSwap_RestoreMarkerStuckNotMovable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can write a 0555 directory")
+	}
+	sw, dir := restoreMarkerSetup(t, 2)
+	blockRestore(t, dir)
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	err := sw.restore()
+	if err == nil || !strings.Contains(err.Error(), "could not be moved aside") || !strings.Contains(err.Error(), "move "+filepath.Join(sw.staging, "old")+" aside") {
+		t.Fatalf("restore = %v, want the move-it-by-hand warning", err)
+	}
+	if !sw.keep || !strings.HasPrefix(filepath.Base(sw.staging), pluginStagingPrefix) {
+		t.Fatalf("keep %v, staging %s", sw.keep, sw.staging)
+	}
+	wantFile(t, filepath.Join(sw.staging, "old", "scion-plugin-a"), "a old")
 }
 
 // TestPluginSwap_RestoreMarkerRetried: a marker removal that fails once is

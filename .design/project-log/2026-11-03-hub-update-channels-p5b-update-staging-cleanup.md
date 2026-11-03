@@ -23,8 +23,9 @@ failed" warning, and the downloads piled up.
     restart nothing uses it, because a boot-failure rollback restores plugins from `releases/<tag>/plugins`.
   - `restore` removes the marker first. A directory kept by a failed restore holds the only copies of old builds,
     so it is never treated as finished. If that removal fails (not ENOENT) and a rename fails too, it is
-    retried; if it still fails, the directory is kept and the error says it is still marked and that `old/`
-    must be moved aside before the next start (review r1 O1).
+    retried (review r1 O1). If the retry fails too (review r2), the directory, which holds the only old builds, is
+    renamed off the staging prefix to `.scion-plugins-kept-<UTC ts>`, which no cleanup matches, and the error says
+    where it is. If even that rename fails, the error tells the operator to move `old/` aside before the next start.
   - `removeStalePluginStaging` (next update) removes a marked directory with a plain note. Unmarked ones still get
     the "interrupted or failed" warning.
   - New `RemoveAppliedPluginStaging(pluginDir)` removes only marked directories. The marker must be a regular file.
@@ -48,8 +49,11 @@ which use no unix-only call. `pkg/hub/maintenance` is not in `.github/windows-te
 for Windows but do not run on the Windows job until the package is listed (a CI change outside this task).
 
 `plugin_staging_test.go` (unix, because the swap itself uses unix-only `copyExecutable`):
-- the marker-removal failure cases: still marked after a retry → kept and reported; retried successfully →
-  unmarked and left by the startup cleanup; restore succeeds → no error despite the marker;
+- the marker-removal failure cases:
+  - still marked after a retry → moved to `.scion-plugins-kept-*`, ignored by both cleanups, old build intact;
+  - the move fails too (read-only dir) → kept in place, and the error says to move `old/` aside;
+  - retried successfully → unmarked and left by the startup cleanup;
+  - restore succeeds → no error despite the marker;
 - at the restart hook, no download temp is left; exactly one staging directory, marked, without `new/`, with the
   old build in `old/`;
 - a hook failure after the mark still restores the old build and removes the staging;

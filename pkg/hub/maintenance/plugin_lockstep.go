@@ -28,6 +28,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
@@ -63,6 +64,12 @@ const pluginStagingPrefix = ".scion-update-"
 // directory kept by a failed restore (the only copies of old builds) is
 // never taken for a finished update (ptone/scion#7177).
 const pluginStagingAppliedMarker = "applied"
+
+// pluginKeptPrefix names a staging directory moved aside because it holds
+// the only copies of old plugin builds and its applied marker could not be
+// removed. It is outside pluginStagingPrefix, so neither the startup cleanup
+// nor the next update removes it; the operator does.
+const pluginKeptPrefix = ".scion-plugins-kept-"
 
 // pluginsSubdir is where a retained release keeps the plugin binaries that
 // were installed with it: <install_root>/releases/<tag>/plugins/.
@@ -468,8 +475,7 @@ func (sw *pluginSwap) restore() error {
 		// marker removal that failed, and say so if it still fails.
 		if markerErr != nil {
 			if markerErr = removePluginStagingMarker(marker); markerErr != nil {
-				errs = append(errs, fmt.Errorf("%s is still marked applied (%v), so the next hub start would remove these backups: move %s aside before restarting the hub",
-					sw.staging, markerErr, filepath.Join(sw.staging, "old")))
+				errs = append(errs, sw.moveKeptStaging(markerErr))
 			}
 		}
 		return fmt.Errorf("%w (the old binaries are kept in %s)", errors.Join(errs...), filepath.Join(sw.staging, "old"))
@@ -499,6 +505,21 @@ func (sw *pluginSwap) markApplied(logger io.Writer) {
 	if err := os.WriteFile(marker, body, 0o644); err != nil {
 		pluginWarn(logger, fmt.Sprintf("could not mark %s as applied (%v); the next update removes it", sw.staging, err))
 	}
+}
+
+// moveKeptStaging is the last resort when a staging directory holding the
+// only old builds stays marked applied: it renames the directory off
+// pluginStagingPrefix (to pluginKeptPrefix + a UTC timestamp) so no cleanup
+// removes it, and returns an error that says where the backups are, or, if
+// the rename fails too, that they must be moved aside by hand.
+func (sw *pluginSwap) moveKeptStaging(markerErr error) error {
+	kept := filepath.Join(sw.dir, pluginKeptPrefix+time.Now().UTC().Format("20060102T150405.000000000Z"))
+	if err := os.Rename(sw.staging, kept); err != nil {
+		return fmt.Errorf("%s is still marked applied (%v) and could not be moved aside (%v), so the next hub start would remove these backups: move %s aside before restarting the hub",
+			sw.staging, markerErr, err, filepath.Join(sw.staging, "old"))
+	}
+	sw.staging = kept
+	return fmt.Errorf("its applied marker could not be removed (%v), so the backups were moved to %s, which no cleanup removes", markerErr, kept)
 }
 
 // removePluginStagingMarker removes an applied marker; a marker that is
