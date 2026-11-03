@@ -1590,7 +1590,13 @@ waitLoop:
 
 	outcome := classifyExit(result.code, result.err, harnessCode, limitsExceeded, requestedShutdown.Load())
 	finalCode := outcome.exitCode
-	stagedTokenCleanExit = finalCode == 0 && !outcome.isCrash && !outcome.limitsExceeded && result.err == nil
+	// Clean for the staged token file also requires that this process exits
+	// 0 (the supervised child's own code, which RunInit returns below) or
+	// that a stop was requested: when the harness exit-code file says 0 but
+	// the child exits non-zero, the container exits non-zero and is
+	// restarted with the same payload, so the file is kept.
+	stagedTokenCleanExit = finalCode == 0 && !outcome.isCrash && !outcome.limitsExceeded && result.err == nil &&
+		(result.code == 0 || outcome.signaled)
 	limitsExceeded = outcome.limitsExceeded
 
 	// Report a session whose session-end hook has not run (the agent is

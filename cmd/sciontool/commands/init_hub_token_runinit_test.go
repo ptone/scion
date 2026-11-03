@@ -57,6 +57,7 @@ func stagedBlob(t *testing.T, token string) string {
 // records whether the token file existed when the stopping report ran.
 type runInitStagedFixture struct {
 	agentHome, tokenPath string
+	harnessExitCodeFile  string
 	sawAtStopping        *bool
 	stoppingRan          *bool
 	readLog              func() string
@@ -77,6 +78,7 @@ func newRunInitStagedFixture(t *testing.T) runInitStagedFixture {
 
 	origExitCodePath := harnessExitCodePath
 	harnessExitCodePath = filepath.Join(t.TempDir(), "no-harness-exit-code")
+	f.harnessExitCodeFile = harnessExitCodePath
 	t.Cleanup(func() { harnessExitCodePath = origExitCodePath })
 	origTrigger := limitsTriggerPath
 	limitsTriggerPath = filepath.Join(t.TempDir(), "limits-exceeded")
@@ -197,6 +199,24 @@ func TestRunInit_StagedHubToken_ImmediateExitSameOutcome(t *testing.T) {
 				t.Error("log carries the credential")
 			}
 		})
+	}
+}
+
+// The harness exit-code file says 0 but the supervised child exits 1 (no
+// stop requested): the container exits non-zero and is restarted with the
+// same payload, so the staged file is kept.
+func TestRunInit_StagedHubToken_HarnessCleanChildNonZeroKeeps(t *testing.T) {
+	f := newRunInitStagedFixture(t)
+	t.Setenv(stagedsecrets.EnvVar, stagedBlob(t, initHubTokenCanary))
+	got := f.run(t, `printf '0' > '`+f.harnessExitCodeFile+`'; sleep 0.5; exit 1`)
+	if got == 0 {
+		t.Fatal("RunInit() = 0, want the child's non-zero code")
+	}
+	if !strings.Contains(f.readLog(), "Recovered harness exit code 0") {
+		t.Fatalf("precondition: the harness exit code 0 was not recovered (log length %d)", len(f.readLog()))
+	}
+	if _, err := os.Lstat(f.tokenPath); err != nil {
+		t.Errorf("staged token file removed although init exits non-zero (err %v)", err)
 	}
 }
 

@@ -270,6 +270,29 @@ func TestCloudRunRun_LinkedHubTokenRefused(t *testing.T) {
 	}
 }
 
+// A home path that ValidateAgentHomeSource refuses (here a relative path)
+// stages nothing, and Run warns with the home condition only.
+func TestCloudRunRun_RefusedHomePathStagesNothing(t *testing.T) {
+	if tok, cond := readCloudRunHubToken("relative/agent-home"); tok != "" || cond != hubTokenCondHome {
+		t.Errorf("readCloudRunHubToken(relative) = token present %v, condition %q; want none and %q", tok != "", cond, hubTokenCondHome)
+	}
+	fake := &fakeInstancesClient{getErr: notFoundErr()}
+	rt := newFakeCloudRunRuntime(t, fake)
+	logs := captureRuntimeLog(t)
+	cfg := runConfigForTest()
+	cfg.HomeDir = "relative/agent-home"
+	if _, err := rt.Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if _, ok := crInstanceEnv(t, fake)[stagedsecrets.EnvVar]; ok {
+		t.Errorf("%s set although the home path was refused", stagedsecrets.EnvVar)
+	}
+	out := logs.String()
+	if !strings.Contains(out, "hub credential is not staged") || !strings.Contains(out, hubTokenCondHome) {
+		t.Errorf("no warning naming the home condition (log length %d)", len(out))
+	}
+}
+
 // An oversized token file is refused by condition.
 func TestReadCloudRunHubToken_TooLarge(t *testing.T) {
 	home := writeCRHubToken(t, strings.Repeat("x", cloudRunHubTokenMaxBytes+1))
