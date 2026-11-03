@@ -995,7 +995,9 @@ func (m *AgentManager) finishProvision(opts api.StartOptions, agentDir, agentHom
 		}
 		cfgData, marshalErr := json.MarshalIndent(persisted, "", "  ")
 		if marshalErr == nil {
-			_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), cfgData, 0644)
+			if err := WriteAgentConfigFile(agentDir, cfgData); err != nil {
+				slog.Warn("agent config not updated with the harness auth override", "agent_dir", agentDir, "error", err)
+			}
 		}
 	}
 	return nil
@@ -1497,7 +1499,7 @@ type resolvedTemplate struct {
 // dir for provisioning, launch (Start's harness.Resolve) and the runtime
 // broker's policy gate.
 func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessConfig, projectPath, projectDir, profileName string, settings *config.VersionedSettings, inlineCfg *api.ScionConfig) (*resolvedTemplate, error) {
-	chain, err := config.GetTemplateChainInProject(templateName, projectPath)
+	chain, err := templateChainFor(templateName, projectPath, settings)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load template: %w", err)
 	}
@@ -1610,6 +1612,19 @@ func PreflightResolve(ctx context.Context, opts api.StartOptions) error {
 	// template environment keys; stay quiet here so each is reported once.
 	_, err = resolveTemplateAndHarnessConfig(withQuietTemplateEnvWarnings(ctx), templateName, opts.HarnessConfig, opts.ProjectPath, projectDir, profileName, settings, inlineCfg)
 	return err
+}
+
+// templateChainFor resolves the template chain for name. A name equal to the
+// operator's settings default_template is an operator value and may be a
+// remote source (config.GetOperatorTemplateChainInProject); any other name
+// (from a request or an agent's records) resolves through
+// config.GetTemplateChainInProject, which never fetches a remote source and
+// accepts an absolute directory only from the broker's own template cache.
+func templateChainFor(name, projectPath string, settings *config.VersionedSettings) ([]*config.Template, error) {
+	if settings != nil && settings.DefaultTemplate != "" && name == settings.DefaultTemplate {
+		return config.GetOperatorTemplateChainInProject(name, projectPath)
+	}
+	return config.GetTemplateChainInProject(name, projectPath)
 }
 
 // plainProjectWorkspaceSource is the directory a plain non-git project's
@@ -1836,14 +1851,17 @@ func provisionAgentStateDir(ctx context.Context, opts api.StartOptions) (string,
 }
 
 // agentStateProvisioned reports whether agentDir holds a provisioned agent:
-// the directory exists and has a scion-agent.json. A directory that cannot be
+// the directory exists and has a scion-agent config entry. A directory that cannot be
 // read counts as provisioned, so a caller does not treat an unreadable agent
 // as one to provision again.
 func agentStateProvisioned(agentDir string) bool {
 	if _, err := os.Stat(agentDir); err != nil {
 		return !os.IsNotExist(err)
 	}
-	return config.GetScionAgentConfigPath(agentDir) != ""
+	// A config entry that is refused (a link, a hard link, not a regular
+	// file) counts as provisioned, so it is never provisioned over; the start
+	// then fails on the refused read.
+	return config.AgentConfigEntryExists(agentDir)
 }
 
 // CheckAgentDirContained is the exported form of checkAgentDirContained, for
@@ -2867,7 +2885,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if err != nil {
 		return "", "", nil, fmt.Errorf("failed to marshal agent config: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), agentCfgData, 0644); err != nil {
+	if err := WriteAgentConfigFile(agentDir, agentCfgData); err != nil {
 		return "", "", nil, fmt.Errorf("failed to write agent config: %w", err)
 	}
 	// Record each image input at its own tier (ptone/scion#1799), so Start
@@ -3740,8 +3758,14 @@ func handleAgentDirWithoutConfigGuarded(g *agentFilesGuard, agentName, agentDir,
 	if _, err := os.Stat(agentDir); err != nil {
 		return nil
 	}
-	if config.GetScionAgentConfigPath(agentDir) != "" {
+	switch config.AgentConfigEntryState(agentDir) {
+	case config.AgentConfigRegular:
 		return nil
+	case config.AgentConfigRefused:
+		// A config entry that is a symbolic link (dangling or not), a hard
+		// link or not a regular file is present, not absent: nothing is
+		// written, removed or re-provisioned because of it.
+		return fmt.Errorf("%w: agent %q state directory kept: its scion-agent config file is not a plain regular file; replace it with a regular file, or delete and re-create the agent", config.ErrAgentStateConflict, agentName)
 	}
 
 	homes := []string{agentHome}
@@ -3775,7 +3799,7 @@ func handleAgentDirWithoutConfigGuarded(g *agentFilesGuard, agentName, agentDir,
 		if err != nil {
 			return fmt.Errorf("failed to marshal agent config: %w", err)
 		}
-		if err := os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), data, 0644); err != nil {
+		if err := WriteAgentConfigFile(agentDir, data); err != nil {
 			return fmt.Errorf("failed to write agent config: %w", err)
 		}
 		// The dir is live again: a marker from an earlier keep no longer
@@ -4766,6 +4790,14 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 		templateRecord = &api.AgentInfo{Template: provenance.Template, TemplateHash: provenance.TemplateHash}
 	case provErr == nil:
 		templateRecord = agentInfo
+		// agent-info.json is in the agent home, which the agent can write:
+		// its template is used only when it is a template slug, never as a
+		// host directory or a remote source.
+		if agentInfo != nil && agentInfo.Template != "" && !transfer.IsContentHash(agentInfo.Template) && !config.IsTemplateSlug(agentInfo.Template) {
+			// The value is not logged: the agent wrote it.
+			slog.Warn("Ignoring the template recorded in agent-info.json: not a template name", "agent", agentName)
+			templateRecord = &api.AgentInfo{TemplateHash: agentInfo.TemplateHash}
+		}
 	}
 
 	// A template recorded as loaded from a content-addressed cache (a
@@ -4800,7 +4832,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	if hydratedTemplate {
 		err = config.NewTemplateNotFoundError(effectiveTemplate, fmt.Sprintf("template %q was loaded from a content-addressed cache (%s)", effectiveTemplate, templateRecord.TemplateHash))
 	} else {
-		chain, err = config.GetTemplateChainInProject(effectiveTemplate, projectPath)
+		chain, err = templateChainFor(effectiveTemplate, projectPath, vs)
 	}
 	if err != nil {
 		util.Debugf("GetAgent: template chain for %q not found: %v, returning agentCfg only (harness=%q image=%q)",
