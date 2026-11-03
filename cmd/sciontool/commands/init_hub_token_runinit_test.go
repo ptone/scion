@@ -96,6 +96,15 @@ func newRunInitStagedFixture(t *testing.T) runInitStagedFixture {
 	return f
 }
 
+// runWithStopForwarding is run with init's own SIGTERM handling enabled,
+// so a SIGTERM to this process is a requested stop (pre-stop hooks, then
+// the child is stopped) rather than the test process's default action.
+func (f runInitStagedFixture) runWithStopForwarding(t *testing.T, script string) int {
+	t.Helper()
+	return RunInit([]string{"sh", "-c", script, "sh", f.tokenPath},
+		InitRunOptions{DisableReExec: true})
+}
+
 func (f runInitStagedFixture) run(t *testing.T, script string) int {
 	t.Helper()
 	return RunInit([]string{"sh", "-c", script, "sh", f.tokenPath},
@@ -217,6 +226,33 @@ func TestRunInit_StagedHubToken_HarnessCleanChildNonZeroKeeps(t *testing.T) {
 	}
 	if _, err := os.Lstat(f.tokenPath); err != nil {
 		t.Errorf("staged token file removed although init exits non-zero (err %v)", err)
+	}
+}
+
+// A requested stop (SIGTERM to init) is a clean outcome for the staged
+// file even though the stopped child exits by signal: the file is removed
+// after the final reports. The child sends the SIGTERM to its parent (this
+// process, where init's handler is installed before the child starts),
+// then execs a long sleep that init's shutdown stops.
+func TestRunInit_StagedHubToken_RequestedStopRemoves(t *testing.T) {
+	f := newRunInitStagedFixture(t)
+	t.Setenv(stagedsecrets.EnvVar, stagedBlob(t, initHubTokenCanary))
+	f.runWithStopForwarding(t, `[ -f "$1" ] || exit 9; sleep 0.3; kill -TERM "$PPID"; exec sleep 5`)
+	out := f.readLog()
+	if !strings.Contains(out, "Running pre-stop hooks...") {
+		t.Fatalf("precondition: no requested stop was seen (no pre-stop line; log length %d)", len(out))
+	}
+	if !*f.stoppingRan || !*f.sawAtStopping {
+		t.Errorf("the stopping report did not run with the token file present (ran=%v, file present=%v)", *f.stoppingRan, *f.sawAtStopping)
+	}
+	if _, err := os.Lstat(f.tokenPath); !os.IsNotExist(err) {
+		t.Errorf("staged token file not removed after a requested stop (err %v)", err)
+	}
+	if !strings.Contains(out, "Removed the staged hub credential file") {
+		t.Errorf("log lacks the removal line (log length %d)", len(out))
+	}
+	if strings.Contains(out, initHubTokenCanary) {
+		t.Error("log carries the credential")
 	}
 }
 
