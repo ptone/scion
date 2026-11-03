@@ -449,7 +449,8 @@ func (sw *pluginSwap) apply(logger io.Writer) error {
 // put back stay swapped, and the staging directory (their old binaries) is
 // kept.
 func (sw *pluginSwap) restore() error {
-	_ = os.Remove(filepath.Join(sw.staging, pluginStagingAppliedMarker))
+	marker := filepath.Join(sw.staging, pluginStagingAppliedMarker)
+	markerErr := removePluginStagingMarker(marker)
 	var errs []error
 	var failed []pluginUpdate
 	for i := len(sw.swapped) - 1; i >= 0; i-- {
@@ -462,6 +463,15 @@ func (sw *pluginSwap) restore() error {
 	sw.swapped = failed
 	if len(errs) > 0 {
 		sw.keep = true
+		// The kept directory holds the only copies of old builds, so it must
+		// not stay marked applied: the next start would remove it. Retry a
+		// marker removal that failed, and say so if it still fails.
+		if markerErr != nil {
+			if markerErr = removePluginStagingMarker(marker); markerErr != nil {
+				errs = append(errs, fmt.Errorf("%s is still marked applied (%v), so the next hub start would remove these backups: move %s aside before restarting the hub",
+					sw.staging, markerErr, filepath.Join(sw.staging, "old")))
+			}
+		}
 		return fmt.Errorf("%w (the old binaries are kept in %s)", errors.Join(errs...), filepath.Join(sw.staging, "old"))
 	}
 	sw.keep = false
@@ -489,6 +499,15 @@ func (sw *pluginSwap) markApplied(logger io.Writer) {
 	if err := os.WriteFile(marker, body, 0o644); err != nil {
 		pluginWarn(logger, fmt.Sprintf("could not mark %s as applied (%v); the next update removes it", sw.staging, err))
 	}
+}
+
+// removePluginStagingMarker removes an applied marker; a marker that is
+// already gone is not an error. A variable so tests can make it fail.
+var removePluginStagingMarker = func(marker string) error {
+	if err := os.Remove(marker); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // isAppliedPluginStaging reports whether p is a staging directory marked by

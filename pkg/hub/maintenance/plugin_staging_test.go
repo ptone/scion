@@ -19,6 +19,8 @@ package maintenance
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -133,69 +135,98 @@ func TestBinaryUpdate_HookFailureStillRestoresAfterMark(t *testing.T) {
 	noStaging(t, dir)
 }
 
-// TestRemoveStalePluginStaging_AppliedIsQuiet: the next update removes a
-// staging directory a successful update left without the "interrupted or
-// failed" warning; an unmarked one still gets it.
-func TestRemoveStalePluginStaging_AppliedIsQuiet(t *testing.T) {
-	dir := t.TempDir()
-	applied := filepath.Join(dir, pluginStagingPrefix+"done")
-	interrupted := filepath.Join(dir, pluginStagingPrefix+"cut")
-	for _, d := range []string{filepath.Join(applied, "old"), filepath.Join(interrupted, "new")} {
-		if err := os.MkdirAll(d, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(applied, pluginStagingAppliedMarker), []byte("x"), 0o644); err != nil {
+// restoreMarkerSetup stages, applies and marks a one-plugin swap in a fresh
+// plugin dir, and makes the marker removal fail failures times.
+func restoreMarkerSetup(t *testing.T, failures int) (*pluginSwap, string) {
+	t.Helper()
+	dir := pluginDirWith(t, map[string]string{"a": "a old"})
+	bin := filepath.Join(t.TempDir(), "bin")
+	if err := os.WriteFile(bin, []byte("a new"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	var log bytes.Buffer
-	removeStalePluginStaging(&log, dir)
-	out := log.String()
-	if !strings.Contains(out, "Removing "+applied+", the previous plugin builds kept by an earlier successful update.") {
-		t.Errorf("no plain note for the applied staging:\n%s", out)
+	sw, err := stagePluginSwap(io.Discard, &pluginPlan{dir: dir, plugins: []pluginUpdate{
+		{installedPlugin: installedPlugin{file: "scion-plugin-a", name: "a", path: filepath.Join(dir, "scion-plugin-a")}, bin: bin},
+	}})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if strings.Contains(out, "WARNING: removing "+applied) {
-		t.Errorf("applied staging got the interrupted-or-failed warning:\n%s", out)
+	if err := sw.apply(io.Discard); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(out, "WARNING: removing "+interrupted+", left by an interrupted or failed plugin update") {
-		t.Errorf("unmarked staging lost its warning:\n%s", out)
+	sw.markApplied(io.Discard)
+	if !isAppliedPluginStaging(sw.staging) {
+		t.Fatal("not marked")
 	}
-	noStaging(t, dir)
+	orig := removePluginStagingMarker
+	t.Cleanup(func() { removePluginStagingMarker = orig })
+	removePluginStagingMarker = func(marker string) error {
+		if failures > 0 {
+			failures--
+			return errors.New("injected marker removal failure")
+		}
+		return orig(marker)
+	}
+	return sw, dir
 }
 
-// TestRemoveAppliedPluginStaging: the startup cleanup removes only marked
-// staging directories; an unmarked one (an interrupted run, or a failed
-// restore holding the only old builds) and a marker that is not a regular
-// file are left; a missing directory is not an error.
-func TestRemoveAppliedPluginStaging(t *testing.T) {
-	dir := t.TempDir()
-	applied := filepath.Join(dir, pluginStagingPrefix+"done")
-	unmarked := filepath.Join(dir, pluginStagingPrefix+"kept")
-	fakeMarker := filepath.Join(dir, pluginStagingPrefix+"odd")
-	for _, d := range []string{filepath.Join(applied, "old"), filepath.Join(unmarked, "old"), filepath.Join(fakeMarker, pluginStagingAppliedMarker)} {
-		if err := os.MkdirAll(d, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(applied, pluginStagingAppliedMarker), []byte("x"), 0o644); err != nil {
+// blockRestore makes the plugin path something a file cannot be renamed
+// over, so restoring it fails.
+func blockRestore(t *testing.T, dir string) {
+	t.Helper()
+	p := filepath.Join(dir, "scion-plugin-a")
+	if err := os.Remove(p); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "scion-plugin-a"), []byte("a"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(p, "x"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	removed, err := RemoveAppliedPluginStaging(dir)
-	if err != nil || len(removed) != 1 || removed[0] != applied {
-		t.Fatalf("RemoveAppliedPluginStaging = %v, %v; want [%s]", removed, err, applied)
+}
+
+// TestPluginSwap_RestoreMarkerStuckIsReported (#7177 review O1): when the
+// restore fails and the applied marker cannot be removed, the staging is
+// kept and the error says it is still marked, so the operator moves old/
+// aside before the next start would remove it.
+func TestPluginSwap_RestoreMarkerStuckIsReported(t *testing.T) {
+	sw, dir := restoreMarkerSetup(t, 2)
+	blockRestore(t, dir)
+	err := sw.restore()
+	if err == nil || !strings.Contains(err.Error(), "still marked applied") || !strings.Contains(err.Error(), "move "+filepath.Join(sw.staging, "old")+" aside") {
+		t.Fatalf("restore = %v, want the still-marked warning", err)
 	}
-	for _, keep := range []string{unmarked, fakeMarker, filepath.Join(dir, "scion-plugin-a")} {
-		if _, err := os.Stat(keep); err != nil {
-			t.Errorf("%s removed: %v", keep, err)
-		}
+	if !sw.keep {
+		t.Fatal("staging not kept")
 	}
-	if _, err := os.Stat(applied); !os.IsNotExist(err) {
-		t.Errorf("applied staging kept: %v", err)
+	sw.cleanup()
+	if _, err := os.Stat(filepath.Join(sw.staging, "old", "scion-plugin-a")); err != nil {
+		t.Fatalf("old build lost: %v", err)
 	}
-	if removed, err := RemoveAppliedPluginStaging(filepath.Join(dir, "missing")); err != nil || removed != nil {
-		t.Fatalf("missing dir: %v, %v", removed, err)
+}
+
+// TestPluginSwap_RestoreMarkerRetried: a marker removal that fails once is
+// retried when the restore fails, so the kept staging is unmarked and the
+// startup cleanup leaves it.
+func TestPluginSwap_RestoreMarkerRetried(t *testing.T) {
+	sw, dir := restoreMarkerSetup(t, 1)
+	blockRestore(t, dir)
+	err := sw.restore()
+	if err == nil || strings.Contains(err.Error(), "still marked applied") {
+		t.Fatalf("restore = %v, want a plain restore failure", err)
 	}
+	if isAppliedPluginStaging(sw.staging) {
+		t.Fatal("kept staging still marked")
+	}
+	if removed, err := RemoveAppliedPluginStaging(dir); err != nil || len(removed) != 0 {
+		t.Fatalf("RemoveAppliedPluginStaging removed %v (%v)", removed, err)
+	}
+}
+
+// TestPluginSwap_RestoreSucceedsDespiteMarkerFailure: when every plugin is
+// put back the backups are no longer needed, so a marker that cannot be
+// removed does not fail the restore.
+func TestPluginSwap_RestoreSucceedsDespiteMarkerFailure(t *testing.T) {
+	sw, dir := restoreMarkerSetup(t, 5)
+	if err := sw.restore(); err != nil {
+		t.Fatalf("restore = %v", err)
+	}
+	wantFile(t, filepath.Join(dir, "scion-plugin-a"), "a old")
 }
