@@ -243,8 +243,9 @@ type agentWorkspaceOffShareError struct{}
 
 func (agentWorkspaceOffShareError) Error() string {
 	return "this agent's workspace is not in its directory on the shared project storage, so the agent was not started and the workspace was left as it is. " +
-		"The Runtime Broker log names the workspace; an operator can move its work out. Deleting the agent removes that workspace; " +
-		"recreate the agent to start it on the shared project storage"
+		"To move it there, an operator runs 'scion runtime-broker migrate-workspaces' on the Runtime Broker host with the agent stopped " +
+		"(it reports any agent it cannot move; the Runtime Broker log names the workspace). " +
+		"Or push its work and recreate the agent: deleting the agent removes that workspace"
 }
 
 func (agentWorkspaceOffShareError) Unwrap() error { return config.ErrAgentStateConflict }

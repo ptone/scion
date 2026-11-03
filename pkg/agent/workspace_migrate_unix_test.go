@@ -582,6 +582,16 @@ func TestMigrateAgentWorkspaces_ProvisioningOnlyLocalSkipped(t *testing.T) {
 	assert.DirExists(t, filepath.Join(f.local, ".scion"))
 }
 
+// The start refusal of a pre-switch agent names the migration as the remedy,
+// keeps the recreate path, and names no path (the broker log has those).
+func TestAgentWorkspaceOffShareNamesMigration(t *testing.T) {
+	msg := ErrAgentWorkspaceOffShare.Error()
+	assert.Contains(t, msg, "scion runtime-broker migrate-workspaces")
+	assert.Contains(t, msg, "on the Runtime Broker host")
+	assert.Contains(t, msg, "recreate the agent")
+	assert.NotContains(t, msg, "/", "no path in the client text")
+}
+
 func TestAgentContainerLive(t *testing.T) {
 	list := func(phase string) func(context.Context, map[string]string) ([]api.AgentInfo, error) {
 		return func(_ context.Context, filter map[string]string) ([]api.AgentInfo, error) {
