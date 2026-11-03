@@ -247,8 +247,13 @@ After project storage moves to a shared layout, Docker and Podman agents that us
 
 1. Stop the affected agents. A running agent is refused.
 2. Preview: `scion runtime-broker migrate-workspaces --dry-run`. It lists each agent with its broker-local workspace, its target on the share, its size and what would happen, and changes nothing. Without `--project` every project on the shared layout is listed; `--project <project root on the share>` and `--agent <name>` (repeatable) narrow it.
-3. Run it without `--dry-run`. Add `--json` for machine-readable results.
-4. Start the agents again.
+3. Resolve every `refused_conflict` before you start or delete that agent (see below).
+4. Run it without `--dry-run`. Add `--json` for machine-readable results.
+5. Start the agents again.
+
+:::caution[Conflicts: the share already holds a workspace for the agent]
+If the agent's directory on the share already has a workspace and the broker-local workspace holds different work, the command reports `refused_conflict` and touches neither. Such an agent still **starts on the workspace on the share**: its broker-local work is not mounted (the Runtime Broker logs a warning), and **deleting the agent deletes that broker-local work**. Before you start or delete it, compare the two workspaces (both paths are in the dry-run output and the Runtime Broker log), move what you need into the workspace on the share or push it, and keep the broker-local workspace until you have done so.
+:::
 
 For each agent the command copies the broker-local workspace into a staging directory beside the target (`.migrating-<agent>`), checks that the copy matches the original byte for byte (including `.git`, untracked and ignored files), renames it into place, and only then deletes the broker-local copy. Links are copied as links and never followed. Setuid and setgid bits are dropped from files. When the command runs as root, copied files get the storage configuration's uid and gid (or the owner of the broker-local workspace when none is set). Each agent's result has a status:
 
