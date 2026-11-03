@@ -257,8 +257,8 @@ func checkLocalRuntimeAgentWorkspace(agentName, workspace, agentDir string, reso
 	// path once its mount point is resolved (nothing below it may be a
 	// symlink: the leaf helpers refuse one).
 	hostBase := resolved.HostBase
-	if real, err := filepath.EvalSymlinks(hostBase); err == nil {
-		hostBase = real
+	if resolvedBase, err := filepath.EvalSymlinks(hostBase); err == nil {
+		hostBase = resolvedBase
 	}
 	shareWS := filepath.Join(hostBase, agentRel, provision.AgentWorkspaceDir)
 	refuse := func(old string) error {
