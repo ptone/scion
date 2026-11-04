@@ -19,10 +19,27 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"testing"
 	"time"
 )
+
+// forEachSessionBackend is forEachBackend for the review-session store
+// tests, whose Postgres path carries the serialized cap (C3): without
+// SCION_TEST_POSTGRES_DSN its postgres subtest SKIPS visibly instead of
+// being left out, so a run without Postgres can never read as covering it.
+// CI runs it with the DSN set in the launch-store-postgres-others job
+// (make test-artifacts-postgres, which fails on any skip).
+func forEachSessionBackend(t *testing.T, fn func(t *testing.T, db *sql.DB, st Store, reopen func() *sql.DB)) {
+	t.Helper()
+	forEachBackend(t, fn)
+	if os.Getenv("SCION_TEST_POSTGRES_DSN") == "" {
+		t.Run("postgres", func(t *testing.T) {
+			t.Skip("SCION_TEST_POSTGRES_DSN is not set: the Postgres path of this test did not run")
+		})
+	}
+}
 
 // session is a review session of artifact a by user ref with sid.
 func session(a *Artifact, ref, sid string, base int, dirty bool) ReviewSession {
@@ -42,7 +59,7 @@ func listAll(t *testing.T, st Store, artifactID string) []ReviewSession {
 }
 
 func TestReviewSessionStoreUpsert(t *testing.T) {
-	forEachBackend(t, func(t *testing.T, _ *sql.DB, st Store, _ func() *sql.DB) {
+	forEachSessionBackend(t, func(t *testing.T, _ *sql.DB, st Store, _ func() *sql.DB) {
 		ctx := context.Background()
 		a, _, _, _ := seedArtifact(t, st, "")
 		t0 := time.Date(2026, 11, 4, 10, 0, 0, 0, time.UTC)
@@ -79,7 +96,7 @@ func TestReviewSessionStoreUpsert(t *testing.T) {
 }
 
 func TestReviewSessionStorePrincipalScopedKey(t *testing.T) {
-	forEachBackend(t, func(t *testing.T, _ *sql.DB, st Store, _ func() *sql.DB) {
+	forEachSessionBackend(t, func(t *testing.T, _ *sql.DB, st Store, _ func() *sql.DB) {
 		ctx := context.Background()
 		a, _, _, _ := seedArtifact(t, st, "")
 		now := time.Now().UTC()
@@ -118,7 +135,7 @@ func TestReviewSessionStorePrincipalScopedKey(t *testing.T) {
 }
 
 func TestReviewSessionStoreCap(t *testing.T) {
-	forEachBackend(t, func(t *testing.T, _ *sql.DB, st Store, _ func() *sql.DB) {
+	forEachSessionBackend(t, func(t *testing.T, _ *sql.DB, st Store, _ func() *sql.DB) {
 		ctx := context.Background()
 		a, _, _, _ := seedArtifact(t, st, "")
 		now := time.Now().UTC()
@@ -159,7 +176,7 @@ func TestReviewSessionStoreCap(t *testing.T) {
 // upsert and before its count, while the second starts.
 func TestReviewSessionStoreCapConcurrent(t *testing.T) {
 	type heldKey struct{}
-	forEachBackend(t, func(t *testing.T, _ *sql.DB, st Store, _ func() *sql.DB) {
+	forEachSessionBackend(t, func(t *testing.T, _ *sql.DB, st Store, _ func() *sql.DB) {
 		ctx := context.Background()
 		a, _, _, _ := seedArtifact(t, st, "")
 		const limit = 4
@@ -215,7 +232,7 @@ func TestReviewSessionStoreCapConcurrent(t *testing.T) {
 }
 
 func TestReviewSessionStoreReap(t *testing.T) {
-	forEachBackend(t, func(t *testing.T, _ *sql.DB, st Store, _ func() *sql.DB) {
+	forEachSessionBackend(t, func(t *testing.T, _ *sql.DB, st Store, _ func() *sql.DB) {
 		ctx := context.Background()
 		a, _, _, _ := seedArtifact(t, st, "")
 		now := time.Now().UTC()
@@ -242,7 +259,7 @@ func TestReviewSessionStoreReap(t *testing.T) {
 }
 
 func TestReviewSessionStoreDeletedWithArtifact(t *testing.T) {
-	forEachBackend(t, func(t *testing.T, _ *sql.DB, st Store, _ func() *sql.DB) {
+	forEachSessionBackend(t, func(t *testing.T, _ *sql.DB, st Store, _ func() *sql.DB) {
 		ctx := context.Background()
 		a, _, _, _ := seedArtifact(t, st, "")
 		other, _, _, _ := seedArtifact(t, st, "")
@@ -294,6 +311,11 @@ func TestMigration0013_ReviewSessions(t *testing.T) {
 			if err := st.Init(ctx); err != nil {
 				t.Errorf("Init again: %v", err)
 			}
+		})
+	}
+	if os.Getenv("SCION_TEST_POSTGRES_DSN") == "" {
+		t.Run("postgres", func(t *testing.T) {
+			t.Skip("SCION_TEST_POSTGRES_DSN is not set: the Postgres migration did not run")
 		})
 	}
 }
