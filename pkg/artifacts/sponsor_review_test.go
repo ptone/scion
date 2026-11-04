@@ -682,9 +682,11 @@ func TestStoreSponsorReviewGrantCommitsWithArtifact(t *testing.T) {
 }
 
 // TestSponsorReviewSkipLogLeaksNothing: a policy lookup failure whose error
-// text names the delegating user and a store error is logged, in the
-// general log and the decision log, with the fixed reason
-// principal_check_failed and the artifact id only.
+// text names the delegating user and a store error is logged in the general
+// log with the fixed reason principal_check_failed and the artifact id, and
+// in the decision log with that reason and its usual fields (route, the
+// calling agent, the home project, owner_kind); neither carries the user id
+// or the error text.
 func TestSponsorReviewSkipLogLeaksNothing(t *testing.T) {
 	f, h := newSponsorReviewFixture(t)
 	h.err = errors.New("lookup of " + srSponsor.ref + " failed: pq: connection refused at db-host-7")
