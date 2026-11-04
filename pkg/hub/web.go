@@ -284,6 +284,10 @@ type WebServer struct {
 	startTime      time.Time
 	log            *slog.Logger // subsystem logger for hub.web
 
+	// linkOriginGuard is the mounted hub's secondary link origin guard,
+	// applied outermost by buildHandler (SetLinkOriginGuard), or nil.
+	linkOriginGuard func(http.Handler) http.Handler
+
 	// sessionCodecs are sessionStore's codecs, active generation first.
 	sessionCodecs []securecookie.Codec
 	// signingRing is the ring sessionCodecs came from.
@@ -4399,14 +4403,54 @@ func (ws *WebServer) buildHandler() http.Handler {
 	// Security headers
 	handler = ws.securityHeadersMiddleware(handler)
 
-	// Request logging (outermost)
+	// Request logging
 	if ws.requestLogger != nil {
 		handler = logging.RequestLogMiddleware(ws.requestLogger, "web", nil, ws.config.SlowRequestThreshold)(handler)
 	} else {
 		handler = ws.loggingMiddleware(handler)
 	}
 
+	// Outermost: the mounted hub's secondary link origin guard, so a
+	// request on artifacts.link_origin reaches neither the web app nor the
+	// session bridge unless it is a share or view read, and never with a
+	// credential. It comes from SetLinkOriginGuard, or else from the access
+	// settings provider when that is the hub (linkOriginGuardSource), so a
+	// combined server that wires the hub as its provider cannot leave it out.
+	if guard := ws.linkOriginGuardFor(); guard != nil {
+		handler = guard(handler)
+	}
+
 	return handler
+}
+
+// errLinkOriginGuardMissing refuses to start a web server that mounts the
+// hub API without the hub's secondary link origin guard.
+var errLinkOriginGuardMissing = errors.New("web server: the hub API is mounted but no secondary link origin guard is set (set the hub as the access settings provider, or SetLinkOriginGuard)")
+
+// linkOriginGuardSource is implemented by the hub Server: its secondary link
+// origin guard.
+type linkOriginGuardSource interface {
+	LinkOriginGuard(http.Handler) http.Handler
+}
+
+// linkOriginGuardFor returns the guard buildHandler applies outermost: the
+// one SetLinkOriginGuard set, else the access settings provider's when it
+// is a linkOriginGuardSource (the hub), else nil.
+func (ws *WebServer) linkOriginGuardFor() func(http.Handler) http.Handler {
+	if ws.linkOriginGuard != nil {
+		return ws.linkOriginGuard
+	}
+	if src, ok := ws.accessSettings.(linkOriginGuardSource); ok {
+		return src.LinkOriginGuard
+	}
+	return nil
+}
+
+// SetLinkOriginGuard sets the middleware buildHandler applies outermost,
+// overriding the access settings provider's (linkOriginGuardFor). Call it
+// before Start.
+func (ws *WebServer) SetLinkOriginGuard(guard func(http.Handler) http.Handler) {
+	ws.linkOriginGuard = guard
 }
 
 // Start starts the web frontend HTTP server.
@@ -4416,6 +4460,12 @@ func (ws *WebServer) buildHandler() http.Handler {
 // long-lived SSE streams. When deployed behind a TLS-terminating reverse
 // proxy (e.g. Caddy), the proxy negotiates HTTP/2 with the browser natively.
 func (ws *WebServer) Start(ctx context.Context) error {
+	// A mounted hub API is served only behind the hub's secondary link
+	// origin guard (linkOriginGuardFor): fail closed rather than serve the
+	// web app and the session bridge unguarded.
+	if ws.hubHandler != nil && ws.linkOriginGuardFor() == nil {
+		return errLinkOriginGuardMissing
+	}
 	handler := ws.buildHandler()
 
 	// Wrap the handler with h2c to support HTTP/2 cleartext upgrades.

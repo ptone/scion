@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
@@ -71,7 +72,90 @@ func (s *Server) artifactLimits(context.Context) artifacts.Limits {
 			FetchTimeout: time.Duration(c.RemoteImageFetchTimeoutS) * time.Second,
 			TotalBudget:  time.Duration(c.RemoteImageTotalBudgetS) * time.Second,
 		},
+		LinkOrigin:   s.linkOriginFrom(c),
+		PublicOrigin: s.HubEndpoints().Public,
 	}
+}
+
+// artifactLinkOrigin returns the secondary link origin in effect
+// (artifacts.link_origin, normalized), or "" for none. The secondary
+// origin's guard and the share response's shareUrl both read it, so they
+// always agree on whether one is configured.
+func (s *Server) artifactLinkOrigin() string {
+	return s.linkOriginFrom(s.artifactsConfig())
+}
+
+// linkOriginFrom returns the link origin of c that may be used. A value on
+// the hub's own host name, at any scheme or port, is ignored (saves refuse
+// it; a stored one, or a hub whose public URL changed after the save, must
+// not confine the hub's own host), and one under the hub's registrable
+// domain is used with a warning, since it isolates little. Each value is
+// warned about once.
+func (s *Server) linkOriginFrom(c opsettings.ArtifactsConfig) string {
+	lo := c.LinkOrigin
+	if lo == "" {
+		return ""
+	}
+	public := s.HubEndpoints().Public
+	sameHost, sameSite := opsettings.LinkOriginHubConflict(lo, public)
+	if (sameHost || sameSite) && s.artifactLinkOriginWarned.Swap(lo) != lo {
+		if sameHost {
+			slog.Warn("artifacts settings: link_origin is ignored because it is on the hub's own host name; share links stay on the hub origin",
+				"link_origin", lo)
+		} else {
+			slog.Warn("artifacts settings: link_origin shares the hub's registrable domain, which gives little isolation; use a separate registrable domain",
+				"link_origin", lo, "hub_public_url", public)
+		}
+	}
+	if sameHost {
+		return ""
+	}
+	return lo
+}
+
+// stripLinkOriginCredentials removes the hub's credential headers from a
+// request on the secondary link origin, after artifacts.LinkOriginGuard has
+// removed Cookie and Authorization: every X-Scion-* header (the agent,
+// federation, broker and issuer delegation credentials among them), the
+// X-Forwarded-User-* identity headers, and the front proxy's identity
+// assertions (stripFrontProxyIdentityHeaders).
+func (s *Server) stripLinkOriginCredentials(h http.Header) {
+	for name := range h {
+		if strings.HasPrefix(name, "X-Scion-") || strings.HasPrefix(name, "X-Forwarded-User-") {
+			h.Del(name)
+		}
+	}
+	s.stripFrontProxyIdentityHeaders(h)
+}
+
+// LinkOriginGuard wraps h in the secondary link origin's guard
+// (artifacts.LinkOriginGuard): on a request whose Host is the configured
+// artifacts.link_origin, only the share and view reads the authentication
+// lets through without a credential are served (servesOnLinkOrigin), and
+// every credential header is removed. applyMiddleware puts it outermost,
+// and the web server puts it outermost too when it mounts the hub API, so
+// it runs before the web app, the session bridge and authentication.
+//
+// A request on the hub's own host name skips the guard without reading the
+// settings: a link origin on that host name is never used (linkOriginFrom),
+// so such a request is never a secondary-origin request.
+func (s *Server) LinkOriginGuard(h http.Handler) http.Handler {
+	guarded := artifacts.LinkOriginGuard(s.artifactLinkOrigin, servesOnLinkOrigin, s.stripLinkOriginCredentials)(h)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if opsettings.RequestOnHubHost(r.Host, s.HubEndpoints().Public) {
+			h.ServeHTTP(w, r)
+			return
+		}
+		guarded.ServeHTTP(w, r)
+	})
+}
+
+// servesOnLinkOrigin reports whether the secondary link origin serves r: a
+// read of the view or the share-link route, by the same checks that pass
+// those reads through authentication (isArtifactViewRequest,
+// isArtifactSharedRequest).
+func servesOnLinkOrigin(r *http.Request) bool {
+	return isArtifactViewRequest(r) || isArtifactSharedRequest(r)
 }
 
 // artifactsHandler returns the artifact service's handler, built over this
