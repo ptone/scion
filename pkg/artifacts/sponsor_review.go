@@ -94,8 +94,8 @@ func (s *Service) SponsorReviewSkips() int64 {
 // an agent, homed in a project scope, records a delegating user, and the
 // host's SponsorReviewPolicy answers nil for a's home scope and that user.
 // The subject is always a.SponsorRef, never anything from the request. A
-// refusal other than "off" is counted and logged with the scope and the
-// missing permission only.
+// refusal other than "off" is counted and logged with a fixed reason code
+// and the artifact id only.
 func (s *Service) sponsorReviewGrant(r *http.Request, a *Artifact, now time.Time) (Grant, bool) {
 	if a.OwnerKind != PrincipalKindAgent || a.ScopeKind != ScopeKindProject || a.ScopeRef == "" || a.SponsorRef == "" {
 		return Grant{}, false
@@ -111,12 +111,14 @@ func (s *Service) sponsorReviewGrant(r *http.Request, a *Artifact, now time.Time
 			return Grant{}, false
 		}
 		s.sponsorReviewSkips.Add(1)
+		// Logged with a fixed reason code and the artifact id only: never
+		// the error text, which may name the user or carry a store error.
 		reason := logReasonCheckerError
 		var roleErr *SponsorReviewRoleError
 		if errors.As(err, &roleErr) {
 			reason = logReasonSponsorNoRole
 		}
-		slog.InfoContext(ctx, "artifacts: automatic review grant skipped", "artifact_id", a.ID, "error", err)
+		slog.InfoContext(ctx, "artifacts: automatic review grant skipped", "artifact_id", a.ID, "reason", reason)
 		s.logDecision(r, slog.LevelInfo, logEntry{action: logActionGrantCreated, outcome: logOutcomeRefused,
 			reason: reason, artifact: a, authority: AuthoritySponsorReview})
 		return Grant{}, false

@@ -17,6 +17,7 @@
 package artifacts
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -189,7 +190,7 @@ func TestSponsorReviewGrantOnCreate(t *testing.T) {
 
 // TestSponsorReviewGrantSkipped: no automatic grant when the delegating
 // user holds no role that reads in the home project, is inactive, or the
-// policy's lookup fails (C2; each counted as a skip), when the policy is
+// policy's lookup fails (each counted as a skip), when the policy is
 // off (not counted), and for no sponsor, a user owner, an attachment or a
 // host without the policy. The artifact is created regardless.
 func TestSponsorReviewGrantSkipped(t *testing.T) {
@@ -417,7 +418,7 @@ func TestSponsorReviewGrantUse(t *testing.T) {
 	}
 }
 
-// TestSponsorReviewAutomaticForm (C1): while the grant is in its automatic
+// TestSponsorReviewAutomaticForm: while the grant is in its automatic
 // form it counts only while the delegating user reads the home project
 // through a role. The user also reads the artifact through a grant to
 // project-2, so only the automatic-form rule decides: without a role in
@@ -483,7 +484,7 @@ func TestSponsorReviewAutomaticForm(t *testing.T) {
 	}
 }
 
-// TestGrantAllowsAutomaticForm pins the C1 rule in the one place grants
+// TestGrantAllowsAutomaticForm pins the automatic-form rule in the one place grants
 // are matched: an automatic-form grant counts only when the host
 // authorizes the caller to read in the home scope (a failed lookup answers
 // no), and a grant created by a person counts regardless.
@@ -517,7 +518,7 @@ func TestGrantAllowsAutomaticForm(t *testing.T) {
 	}
 }
 
-// TestSponsorReviewCreatorReserved (C3): the automatic form is reachable
+// TestSponsorReviewCreatorReserved: the automatic form is reachable
 // only from creation. A grant request carrying a creator is refused (400),
 // and the store refuses a put that carries the creator or the authority.
 func TestSponsorReviewCreatorReserved(t *testing.T) {
@@ -678,4 +679,45 @@ func TestStoreSponsorReviewGrantCommitsWithArtifact(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestSponsorReviewSkipLogLeaksNothing: a policy lookup failure whose error
+// text names the delegating user and a store error is logged, in the
+// general log and the decision log, with the fixed reason
+// principal_check_failed and the artifact id only.
+func TestSponsorReviewSkipLogLeaksNothing(t *testing.T) {
+	f, h := newSponsorReviewFixture(t)
+	h.err = errors.New("lookup of " + srSponsor.ref + " failed: pq: connection refused at db-host-7")
+	c := captureLog(f, slog.LevelDebug)
+	var general bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&general, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	id := f.publish(agentA, "a.md", []byte("# a"), "scope=project-1").Artifact.ID
+	checkNoSponsorGrant(t, f, id)
+	entries, raw := c.take(t)
+	for name, text := range map[string]string{"general log": general.String(), "decision log": raw} {
+		for _, leak := range []string{srSponsor.ref, "connection refused", "db-host-7", "pq:"} {
+			if strings.Contains(text, leak) {
+				t.Errorf("%s carries %q: %s", name, leak, text)
+			}
+		}
+	}
+	if !strings.Contains(general.String(), `"reason":"`+logReasonCheckerError+`"`) || !strings.Contains(general.String(), id) {
+		t.Errorf("general log line lacks the reason code or the artifact id: %s", general.String())
+	}
+	var skips int
+	for _, e := range entries {
+		if e[logKeyOutcome] == logOutcomeRefused {
+			skips++
+			checkEntry(t, "skip", e, "INFO", map[string]any{
+				logKeyAction: logActionGrantCreated, logKeyReason: logReasonCheckerError,
+				logKeyArtifactID: id, logKeySubjectRef: nil,
+			})
+		}
+	}
+	if skips != 1 {
+		t.Errorf("%d skip entries, want 1: %v", skips, entries)
+	}
 }
