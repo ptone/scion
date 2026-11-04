@@ -204,46 +204,59 @@ func strs(ss []string) string { return strings.Join(ss, " | ") }
 // TestGrantNotifyOrder (condition B2, spec amendment A1 C4): the send
 // check runs before the store write and the limiter, and NotifyGrant only
 // after a committed write recorded notified. On every refusal and fault
-// path the store is asked with notify=false, nothing is sent, the event
-// carries no notified and the limiter is not charged (the one-token
-// limiter still lets the final request through). A failed put never
-// notifies (K12).
+// path (not permitted, check fault, review read fault, review subject
+// cannot read, not raised, grants unreadable, rate limited) the grant is
+// made, the store is asked with notify=false, nothing is sent, and the
+// event carries no notified; the refusals before the limiter do not charge
+// it (the one-token limiter still lets the passing request through). A
+// failed put never notifies (K12). No notifier: TestGrantNotifyWithoutNotifier.
 func TestGrantNotifyOrder(t *testing.T) {
 	f := newNotifyFixture(t)
 	logs := captureLog(f.fixture, slog.LevelInfo)
 	f.host.allow(notifySubject, "project-1", PermissionRead)
 
+	// existing gives subject a grant of perm first, without notify.
+	existing := func(t *testing.T, subject, perm string) {
+		t.Helper()
+		if rec, _ := f.putGrant(userU, f.id, SubjectPrincipal, subject, perm); rec.Code != http.StatusCreated {
+			t.Fatalf("setup grant: %d %s", rec.Code, rec.Body.String())
+		}
+	}
+	base := notifyLogStore{Store: f.store, log: f.calls, mu: &f.n.mu}
 	refusals := []struct {
 		name     string
-		set      func()
+		subject  string // "" = user:order-<name>
+		set      func(t *testing.T, subject string)
 		perm     string
 		skipped  string
-		reason   string
-		wantMay  bool
+		reason   string // "" = no decision-log reason expected (not_raised)
 		wantCode int
 	}{
-		{"not permitted", func() { f.n.deny = true }, GrantRead, NotifySkippedNotPermitted, logReasonNotifyNotPermitted, true, http.StatusCreated},
-		{"check fault", func() { f.n.mayErr = errors.New("store down") }, GrantWrite, NotifySkippedUnavailable, logReasonNotifyUnavailable, true, http.StatusOK},
-		{"review subject read fault", func() { f.host.subjectErr = errors.New("lookup failed") }, GrantReview, NotifySkippedUnavailable, logReasonNotifyUnavailable, true, http.StatusOK},
+		{"not permitted", "", func(*testing.T, string) { f.n.deny = true },
+			GrantRead, NotifySkippedNotPermitted, logReasonNotifyNotPermitted, http.StatusCreated},
+		{"check fault", "", func(t *testing.T, sub string) { existing(t, sub, GrantRead); f.n.mayErr = errors.New("store down") },
+			GrantWrite, NotifySkippedUnavailable, logReasonNotifyUnavailable, http.StatusOK},
+		{"review subject read fault", notifySubjectID, func(*testing.T, string) { f.host.subjectErr = errors.New("lookup failed") },
+			GrantReview, NotifySkippedUnavailable, logReasonNotifyUnavailable, http.StatusCreated},
+		// The subject reads nothing in the home project (Q1).
+		{"review subject cannot read", "user:order-unreadable", func(*testing.T, string) {},
+			GrantReview, NotifySkippedNotPermitted, logReasonNotifyNotPermitted, http.StatusCreated},
+		{"not raised", "", func(t *testing.T, sub string) { existing(t, sub, GrantWrite) },
+			GrantRead, NotifySkippedNotRaised, "", http.StatusOK},
+		// The raise pre-check cannot read the grants: the grant is still
+		// made (condition H), with notify=false.
+		{"grants unreadable", "", func(*testing.T, string) { f.svc.SetStore(listFailStore{notifyLogStore: base}) },
+			GrantRead, NotifySkippedUnavailable, logReasonNotifyUnavailable, http.StatusCreated},
 	}
 	for _, tc := range refusals {
 		t.Run(tc.name, func(t *testing.T) {
 			f.n.deny, f.n.mayErr, f.host.subjectErr = false, nil, nil
-			tc.set()
-			subject := "user:order-" + strings.ReplaceAll(tc.name, " ", "-")
-			if tc.perm == GrantReview {
-				subject = notifySubjectID
+			defer f.svc.SetStore(base)
+			subject := tc.subject
+			if subject == "" {
+				subject = "user:order-" + strings.ReplaceAll(tc.name, " ", "-")
 			}
-			if tc.wantCode == http.StatusOK && tc.perm != GrantReview {
-				// Change an existing grant: give it first, without notify.
-				if rec, _ := f.putGrant(userU, f.id, SubjectPrincipal, subject, GrantRead); rec.Code != http.StatusCreated {
-					t.Fatalf("setup grant: %d", rec.Code)
-				}
-			}
-			if tc.perm == GrantReview {
-				// The subject holds no principal grant; review is a create.
-				tc.wantCode = http.StatusCreated
-			}
+			tc.set(t, subject)
 			f.take()
 			logs.take(t)
 			rec, resp := f.notifyGrant(userU, f.id, SubjectPrincipal, subject, tc.perm)
@@ -252,6 +265,9 @@ func TestGrantNotifyOrder(t *testing.T) {
 			}
 			if resp.Notified || resp.NotifySkipped != tc.skipped {
 				t.Errorf("response notified=%v skipped=%q, want false %q", resp.Notified, resp.NotifySkipped, tc.skipped)
+			}
+			if g := f.grantOf(f.id, subject); g == nil || (tc.skipped != NotifySkippedNotRaised && g.Permission != tc.perm) {
+				t.Errorf("grant not made as asked: %+v", g)
 			}
 			calls := f.take()
 			want := []string{"may " + strings.TrimPrefix(subject, "user:"), "put notify=false"}
@@ -262,7 +278,7 @@ func TestGrantNotifyOrder(t *testing.T) {
 				t.Errorf("event notified = %v, want absent", v)
 			}
 			entries, _ := logs.take(t)
-			found := false
+			found := tc.reason == ""
 			for _, e := range entries {
 				if e[logKeyReason] == tc.reason {
 					found = true
@@ -312,6 +328,39 @@ func TestGrantNotifyOrder(t *testing.T) {
 			t.Errorf("calls %q, want %q (no NotifyGrant after a failed put)", calls, want)
 		}
 	})
+
+	// The failed put spent the refilled token, so the next raise is rate
+	// limited: the grant is still made, with notify=false.
+	t.Run("rate limited", func(t *testing.T) {
+		f.take()
+		logs.take(t)
+		rec, resp := f.notifyGrant(userU, f.id, SubjectPrincipal, "user:order-limited", GrantRead)
+		if rec.Code != http.StatusCreated || resp.Notified || resp.NotifySkipped != NotifySkippedRateLimited {
+			t.Fatalf("status %d notified=%v skipped=%q, want 201 false rate_limited", rec.Code, resp.Notified, resp.NotifySkipped)
+		}
+		want := []string{"may order-limited", "put notify=false"}
+		if calls := f.take(); strs(calls) != strs(want) {
+			t.Errorf("calls %q, want %q", calls, want)
+		}
+		if v, ok := lastNotified(t, f.store, f.id, "user:order-limited"); ok {
+			t.Errorf("event notified = %v, want absent", v)
+		}
+		entries, _ := logs.take(t)
+		found := false
+		for _, e := range entries {
+			found = found || e[logKeyReason] == logReasonNotifyRateLimited
+		}
+		if !found {
+			t.Errorf("no decision log entry with reason %s", logReasonNotifyRateLimited)
+		}
+	})
+}
+
+// listFailStore fails every ListGrants call (the raise pre-check's read).
+type listFailStore struct{ notifyLogStore }
+
+func (listFailStore) ListGrants(context.Context, string) ([]Grant, error) {
+	return nil, errors.New("grants unreadable")
 }
 
 // failingPutStore fails every grant write after recording it.

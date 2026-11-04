@@ -369,10 +369,7 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 	}
 	notify, skipped := false, ""
 	if req.Notify {
-		var ok bool
-		if notify, skipped, ok = s.grantNotifyDecision(w, r, b, a, &req); !ok {
-			return
-		}
+		notify, skipped = s.grantNotifyDecision(r, b, a, &req)
 	}
 	// The store decides the home and cross-project rules again under the
 	// artifact's lock, against the home scope as it is then (a concurrent
@@ -458,29 +455,30 @@ func isUserPrincipal(kind, ref string) bool {
 //   - the grant must raise the user's current level: "not_raised";
 //   - the notify limiter, per requester and in all: "rate_limited".
 //
-// A refusal never charges the limiter (B2). ok is false when it wrote an
-// error response (the grants could not be read).
-func (s *Service) grantNotifyDecision(w http.ResponseWriter, r *http.Request, b backend, a *Artifact, req *GrantRequest) (notify bool, skipped string, ok bool) {
+// A refusal never charges the limiter (B2), and no fault here blocks the
+// grant (condition H): a lookup fault answers "unavailable" and the grant
+// is written without notify.
+func (s *Service) grantNotifyDecision(r *http.Request, b backend, a *Artifact, req *GrantRequest) (notify bool, skipped string) {
 	ctx := r.Context()
 	kind, ref, _, _ := s.host.Principal(ctx)
 	if req.SubjectRef == PrincipalRef(kind, ref) {
-		return false, NotifySkippedSelf, true
+		return false, NotifySkippedSelf
 	}
 	subjectID := strings.TrimPrefix(req.SubjectRef, PrincipalKindUser+":")
 	notifier, has := s.host.(GrantNotifier)
 	if !has {
 		s.logNotifySkipped(r, a, logReasonNotifyUnavailable, req.SubjectRef, req.Permission)
-		return false, NotifySkippedUnavailable, true
+		return false, NotifySkippedUnavailable
 	}
 	allowed, err := notifier.MayNotifyGrant(ctx, subjectID)
 	if err != nil {
 		slog.WarnContext(ctx, "artifacts: grant notify check failed", "error", err)
 		s.logNotifySkipped(r, a, logReasonNotifyUnavailable, req.SubjectRef, req.Permission)
-		return false, NotifySkippedUnavailable, true
+		return false, NotifySkippedUnavailable
 	}
 	if !allowed {
 		s.logNotifySkipped(r, a, logReasonNotifyNotPermitted, req.SubjectRef, req.Permission)
-		return false, NotifySkippedNotPermitted, true
+		return false, NotifySkippedNotPermitted
 	}
 	if req.Permission == GrantReview {
 		// Phase 2 only: a review grant does not read, so the review notice
@@ -489,29 +487,29 @@ func (s *Service) grantNotifyDecision(w http.ResponseWriter, r *http.Request, b 
 		if err != nil {
 			slog.WarnContext(ctx, "artifacts: grant notify: subject read check failed", "error", err)
 			s.logNotifySkipped(r, a, logReasonNotifyUnavailable, req.SubjectRef, req.Permission)
-			return false, NotifySkippedUnavailable, true
+			return false, NotifySkippedUnavailable
 		}
 		if !readable {
 			s.logNotifySkipped(r, a, logReasonNotifyNotPermitted, req.SubjectRef, req.Permission)
-			return false, NotifySkippedNotPermitted, true
+			return false, NotifySkippedNotPermitted
 		}
 	}
 	grants, err := b.store.ListGrants(ctx, a.ID)
 	if err != nil {
-		slog.ErrorContext(ctx, "artifacts: list grants failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "internal", "could not read the artifact's grants")
-		return false, "", false
+		slog.WarnContext(ctx, "artifacts: grant notify: list grants failed", "error", err)
+		s.logNotifySkipped(r, a, logReasonNotifyUnavailable, req.SubjectRef, req.Permission)
+		return false, NotifySkippedUnavailable
 	}
 	for _, g := range grants {
 		if g.SubjectKind == SubjectPrincipal && g.SubjectRef == req.SubjectRef && grantRank(req.Permission) <= grantRank(g.Permission) {
-			return false, NotifySkippedNotRaised, true
+			return false, NotifySkippedNotRaised
 		}
 	}
 	if _, allowed := s.notifyLimiterFor().allow(PrincipalRef(kind, ref)); !allowed {
 		s.logNotifySkipped(r, a, logReasonNotifyRateLimited, req.SubjectRef, req.Permission)
-		return false, NotifySkippedRateLimited, true
+		return false, NotifySkippedRateLimited
 	}
-	return true, "", true
+	return true, ""
 }
 
 // sendGrantNotice tells the user subject of grant g, which the store
