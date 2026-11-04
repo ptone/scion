@@ -1344,6 +1344,28 @@ var projectOperations = []OperationSpec{
 		Bearer: artifactVersionBearer,
 	},
 	{
+		ID:          "artifact.review_session.write",
+		Domain:      "artifact",
+		Description: "Record or end the caller's own open review session of an artifact (the heartbeat of a review tab, ptone/scion#6849); 404 while the hub.artifacts_open_review_check experiment is off; any caller who may start a review version passes (the write check of artifact.version.create); rate limited per principal after authorization; the row is always the caller's own",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/review-sessions/{sid}", Method: "PUT"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/review-sessions/{sid}", Method: "DELETE"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "artifact-home-project",
+		BasePermission:   "artifact.create",
+		Effects:          []SecurityEffect{EffectCreateResource, EffectDeleteResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialResourceNotFound, DenialForbidden, "rate_limited", "too_many_review_sessions"},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestArtifactsOpenReviewOnRoutes"},
+			{Package: "pkg/artifacts", Function: "TestReviewSessionAuthorization"},
+		},
+		Bearer: artifactVersionBearer,
+	},
+	{
 		ID:          "artifact.version.upload",
 		Domain:      "artifact",
 		Description: "Upload one manifest file of a pending version; only the principal that started the version may upload to it",

@@ -358,6 +358,14 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:create, not artifact:read, so the read check answers it 404 too; with artifact:read added, the super-admin is neither the fixture artifact's owner nor a write, admin or review grantee, so the write check would answer 403",
 		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
 	},
+	{OperationID: "artifact.review_session.write", Method: "PUT", Pattern: "/api/v1/artifacts/{id}/review-sessions/{sid}"}: {
+		Reason: "the review-session routes answer 404 to every caller while the hub.artifacts_open_review_check experiment is off, which is the case in this test server; with it on, the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, and a reader that may not start a review version with 403",
+		Pin:    "TestArtifactsOpenReviewOnRoutes",
+	},
+	{OperationID: "artifact.review_session.write", Method: "DELETE", Pattern: "/api/v1/artifacts/{id}/review-sessions/{sid}"}: {
+		Reason: "same as the PUT entry above: 404 while hub.artifacts_open_review_check is off; with it on, 404 for a caller that cannot read the artifact and 403 for a reader that may not start a review version",
+		Pin:    "TestArtifactsOpenReviewOnRoutes",
+	},
 	{OperationID: "artifact.version.upload", Method: "PUT", Pattern: "/api/v1/artifacts/{id}/versions/{seq}/files/{path}"}: {
 		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:create, not artifact:read, so the read check answers it 404 too; with artifact:read added, the super-admin is neither the fixture artifact's owner nor a write, admin or review grantee, so the write check would answer 403",
 		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",

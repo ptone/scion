@@ -216,6 +216,13 @@ func (s *Server) reapArtifactVersions(ctx context.Context) {
 	if n > 0 {
 		slog.InfoContext(ctx, "artifacts: reaped abandoned pending versions", "count", n)
 	}
+	// Review sessions are reaped whether or not the open-review check is
+	// on, so turning it off never leaves rows behind.
+	if n, err := st.ReapReviewSessions(ctx, now.Add(-artifacts.ReviewSessionRetention), artifactReapBatch); err != nil {
+		slog.WarnContext(ctx, "artifacts: reaping review sessions failed", "error", err)
+	} else if n > 0 {
+		slog.InfoContext(ctx, "artifacts: reaped closed review sessions", "count", n)
+	}
 	s.backfillArtifactSponsors(ctx, st)
 	s.reconcileArtifactOwners(ctx, st, now)
 	s.retireArtifactAttachments(ctx, st, now)

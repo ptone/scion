@@ -78,6 +78,7 @@ const (
 	logActionVersionCreated   = "version_created"   // pending version appended
 	logActionVersionFinalized = "version_finalized" // version made ready
 	logActionVersionFailed    = "version_failed"    // version could not be recorded or finalized, or was discarded
+	logActionVersionForced    = "version_forced"    // publish version started over open reviews (count only)
 	logActionGrantCreated     = "grant_created"
 	logActionGrantChanged     = "grant_changed"
 	logActionGrantRemoved     = EventGrantRemoved
@@ -296,6 +297,8 @@ func routeTemplate(r *http.Request) string {
 		return base + "/links"
 	case sub[0] == "links" && len(sub) == 2:
 		return base + "/links/{linkId}"
+	case sub[0] == reviewSessionsSegment && len(sub) == 2:
+		return base + "/" + reviewSessionsSegment + "/{sid}"
 	case sub[0] == "versions" && len(sub) == 1:
 		return base + "/versions"
 	case sub[0] == "versions" && len(sub) == 2:

@@ -129,6 +129,10 @@ type CreateVersionRequest struct {
 	Note  string `json:"note,omitempty"`
 	// Files is the version's manifest.
 	Files []ManifestFile `json:"files"`
+	// Force publishes even when reviews of the current version are open
+	// (ptone/scion#6849). Without it such a publish is refused with 409
+	// review_open. It has no effect on a review, or when nothing is open.
+	Force bool `json:"force,omitempty"`
 }
 
 // FinalizeRequest is the optional JSON body of a finalize request.
@@ -154,6 +158,9 @@ type PendingVersionResponse struct {
 	Artifact ArtifactInfo `json:"artifact"`
 	Version  *VersionInfo `json:"version"`
 	Upload   UploadInfo   `json:"upload"`
+	// Warnings are notes about the create that did not fail it, such as a
+	// publish forced over open reviews.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // UploadInfo tells the publisher what to upload before finalizing.
