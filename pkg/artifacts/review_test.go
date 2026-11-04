@@ -197,6 +197,43 @@ func TestReviewAccepted(t *testing.T) {
 		n.ReviewerKind != userU.kind || n.ReviewerRef != userU.ref || n.Ref() != FormatRef(f.id, 2) {
 		t.Fatalf("notice %+v", n)
 	}
+	// userU reviews under a write grant, not a review grant, and left no
+	// note.
+	if n.ViaReviewGrant || n.Note != "" || n.ScopeKind != ScopeKindProject || n.ScopeRef != "project-1" {
+		t.Fatalf("notice %+v", n)
+	}
+}
+
+// TestReviewNoticeCarriesNoteAndReviewGrant: a review finalized by a
+// caller whose only write access is a review grant is announced with
+// ViaReviewGrant set and the review's summary note as written
+// (ptone/scion#6853).
+func TestReviewNoticeCarriesNoteAndReviewGrant(t *testing.T) {
+	f := newReviewFixture(t)
+	f.host.allow(reviewer, "project-1", PermissionRead)
+	f.grant(reviewer, GrantReview)
+	const note = "Ship it.\nOne question on the chart."
+	files := with(f.v1, "plan.md", reviewMarked)
+	req := files.manifest("plan.md")
+	req.Kind = VersionKindReview
+	req.Note = note
+	base := f.current()
+	pend := f.createPending(reviewer, "/api/v1/artifacts/"+f.id+"/versions", req)
+	for _, path := range pend.Upload.Required {
+		if rec := f.put(reviewer, f.id, pend.Version.Seq, path, files[path]); rec.Code != http.StatusNoContent {
+			t.Fatalf("PUT %s: %d %s", path, rec.Code, rec.Body.String())
+		}
+	}
+	if r := f.result(f.finalizeReview(reviewer, pend.Version.Seq, base)); r.code != http.StatusOK {
+		t.Fatalf("finalize: %d %s", r.code, r.body)
+	}
+	if len(f.notices) != 1 {
+		t.Fatalf("notices %+v", f.notices)
+	}
+	n := f.notices[0]
+	if !n.ViaReviewGrant || n.Note != note || n.ReviewerRef != reviewer.ref || n.OwnerRef != agentA.ref {
+		t.Fatalf("notice %+v", n)
+	}
 }
 
 func TestReviewNormalisesLineEndingsAndNFC(t *testing.T) {
