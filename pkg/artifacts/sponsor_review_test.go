@@ -681,13 +681,13 @@ func TestStoreSponsorReviewGrantCommitsWithArtifact(t *testing.T) {
 	})
 }
 
-// TestSponsorReviewSkipLogLeaksNothing: a policy lookup failure whose error
+// TestSponsorReviewSkipLogCarriesNoIdentifiers: a policy lookup failure whose error
 // text names the delegating user and a store error is logged in the general
 // log with the fixed reason principal_check_failed and the artifact id, and
 // in the decision log with that reason and its usual fields (route, the
 // calling agent, the home project, owner_kind); neither carries the user id
 // or the error text.
-func TestSponsorReviewSkipLogLeaksNothing(t *testing.T) {
+func TestSponsorReviewSkipLogCarriesNoIdentifiers(t *testing.T) {
 	f, h := newSponsorReviewFixture(t)
 	h.err = errors.New("lookup of " + srSponsor.ref + " failed: pq: connection refused at db-host-7")
 	c := captureLog(f, slog.LevelDebug)
@@ -700,9 +700,9 @@ func TestSponsorReviewSkipLogLeaksNothing(t *testing.T) {
 	checkNoSponsorGrant(t, f, id)
 	entries, raw := c.take(t)
 	for name, text := range map[string]string{"general log": general.String(), "decision log": raw} {
-		for _, leak := range []string{srSponsor.ref, "connection refused", "db-host-7", "pq:"} {
-			if strings.Contains(text, leak) {
-				t.Errorf("%s carries %q: %s", name, leak, text)
+		for _, banned := range []string{srSponsor.ref, "connection refused", "db-host-7", "pq:"} {
+			if strings.Contains(text, banned) {
+				t.Errorf("%s carries %q: %s", name, banned, text)
 			}
 		}
 	}
