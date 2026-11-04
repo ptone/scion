@@ -346,6 +346,27 @@ Jumping to a message that was purged (`GET /api/v1/chat/conversations/:key/messa
 
 SQLite does not shrink its database file after deletes: the freed pages are reused by new data, but the file keeps its size. Reclaiming the space needs an offline `VACUUM` of the database while the Hub is stopped (with free disk space of about the database's size), after a backup.
 
+## Artifacts
+
+The `artifacts` section configures the [artifact service](/scion/reference/artifacts/) (`pkg/config/opsettings/sections.go`, `ArtifactsSettings`). Like `profiling`, it is stored only in the Hub database: it has no `settings.yaml` key and no environment variable, and it is not seeded. An absent row resolves to the compiled defaults. A stored document whose service values are invalid disables the service; an invalid remote image value only turns remote images off, and an invalid `link_origin` is ignored (links stay on the Hub origin). Each case is logged.
+
+| Key | Type | Default | Effect |
+|-----|------|---------|--------|
+| `enabled` | boolean | `true` | The Hub's switch for the service, on top of the `hub.artifacts` experiment. |
+| `max_file_bytes` | integer | 32 MiB | Largest file in a version. |
+| `max_bundle_bytes` | integer | 256 MiB | Largest total size of a version's files. |
+| `max_files` | integer | `200` | Most files in a version. |
+| `default_retention_days` | integer | `0` (forever) | How long an artifact with no expiry of its own is kept. |
+| `link_default_ttl_hours` | integer | `168` | Lifetime of a share link created without one. |
+| `link_max_ttl_hours` | integer | `720` | Longest lifetime a share link may be given. |
+| `gc_grace_hours` | integer | `168` (at least `24`) | How long an unreferenced blob is kept before the blob sweep deletes it. |
+| `remote_images_enabled`, `remote_image_max_count`, `remote_image_max_bytes`, `remote_image_fetch_timeout_s`, `remote_image_total_budget_s` | | see [Images in Markdown artifacts](/scion/reference/artifacts/#images-in-markdown-artifacts) | Fetching the remote images a Markdown artifact references. |
+| `link_origin` | string | empty | The operator's secondary origin for share links, `https://host[:port]`. Empty keeps every link on the Hub origin. When set, new links are also offered on it (`shareUrl`), and the Hub serves only the share and view routes there. See [Serving untrusted content](/scion/reference/security/#6-serving-untrusted-content-secondary-origin-recommended). |
+
+- **Changing it:** a Hub administrator on an interactive session can set any of these keys, the existing ones included, with `PUT /api/v1/admin/server-config` and an `artifacts` object, for example `{"artifacts": {"link_origin": "https://example-links.net", "link_max_ttl_hours": 168}}`. Keys the object leaves out keep their value; `null` (or `""` for `link_origin`) returns a key to its default. User access tokens are refused for the whole section: a token body that carries `artifacts` is refused as a whole and nothing in it is saved, and a token cannot reset the section. `DELETE /api/v1/admin/server-config/sections/artifacts` returns every key to its default. A Hub without a settings database refuses `artifacts` with `422` and code `db_only_section_rejected`. There is no admin UI card yet.
+- **Validation:** the values are range-checked as listed, and `link_default_ttl_hours` may not exceed `link_max_ttl_hours`. `link_origin` must be `https` (`http` only for a loopback host), with a host and optional port only: no path, query, fragment or user info, and not on the Hub's own host name at any scheme or port (for local testing, use another loopback name, such as `127.0.0.1` for a Hub on `localhost`). It is stored normalized (lower-case, default port dropped). A value under the Hub's registrable domain is saved with a warning in the save response and the log, since it gives little isolation.
+- **Audit:** every key a save or a reset changes is recorded before the write as a `hub_setting_update` mutation audit record on `artifacts.<key>` with the old and new value and the administrator. If a record cannot be written, nothing is changed. A save that changes nothing records nothing.
+
 ## HA Bootstrap Guidance
 
 For high-availability deployments with multiple hub replicas:

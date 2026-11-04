@@ -298,3 +298,36 @@ To facilitate local development, Scion provides a **Development Authentication**
 - **Agent Containers and Dispatched Agents**: Hub-dispatched agents authenticate only with the token the Hub issues for their run (`~/.scion/scion-token` and `SCION_AUTH_TOKEN` / `SCION_HUB_TOKEN`). The Runtime Broker never passes its own `SCION_DEV_TOKEN` or `SCION_AUTH_TOKEN` values into an agent's environment (even when co-located with a loopback Hub under dev auth), strips any `SCION_AUTH_TOKEN` set in agent or harness-config environment settings with a warning, and fails any Hub-dispatched start or restart that lacks a Hub-issued token (`the hub issued no agent token for this start; check the hub's agent token service`).
 - **Constraints & Safeguards**: Dev mode is disabled by default. Startup validation strictly prohibits binding the `devAuthMiddleware` to non-loopback interfaces (e.g., `0.0.0.0`). Because this middleware automatically logs in every cookieless request as an admin, refusing it on public interfaces prevents the accidental exposure of an unauthenticated admin UI.
 - **Warning**: The server logs clear warnings when operating in Dev Mode.
+
+## 6. Serving Untrusted Content: Secondary Origin (Recommended)
+
+Artifacts can hold HTML that an agent wrote, and share links let anyone who holds one open it. By default the Hub serves that content on its own origin with best-effort sandboxing: every view response carries a `Content-Security-Policy` whose `sandbox` directive runs the page in an opaque origin, with no network access from script, no forms and no popups (see [HTML artifacts](/scion/reference/artifacts/#html-artifacts)). Nothing else is required, and every feature works this way.
+
+A Hub administrator can go further and serve share links from a **secondary origin**: a separate host name that routes back to the same Hub, set as the [`artifacts.link_origin`](/scion/reference/admin-settings/#artifacts) setting. New share links are then offered on that origin. It is an operator best practice; it blocks no feature.
+
+**Setting up the origin:**
+
+- **Use a separate registrable domain.** For a Hub at `hub.example.com`, use a domain such as `example-links.net`, not `links.example.com`. A secondary origin under the same site as the Hub gives little isolation: the browser treats requests between the two as same-site, and any cookie scoped to the shared parent domain reaches both. The Hub accepts a same-site value but logs a warning when it first uses the value and on save. A value on the Hub's own host name is refused, whatever its scheme or port: a second port on the same host gives no cookie isolation, since cookies are not separated by port.
+- **Keep the Hub's cookies host-only.** The Hub's cookies must carry no `Domain` attribute, so they are never sent to another host. The Hub sets none; do not add one in a proxy in front of it.
+- **Route only the artifact routes.** Send only `/api/v1/artifacts/shared/` and `/api/v1/artifacts/view/` from the secondary origin to the Hub.
+- **Terminate TLS for it.** `link_origin` must be `https` (plain `http` is accepted only for a loopback host, for local testing).
+- **Preserve `Host`.** The proxy must pass the request's `Host` header for the secondary origin through to the Hub unchanged. The Hub recognizes a secondary-origin request only by the `Host` it receives; it never reads `X-Forwarded-Host` or `Forwarded`, which a requester can set. If the proxy rewrites `Host` to the Hub's own, the Hub cannot tell the origins apart, and the confinement and credential removal below silently stop applying.
+
+**Required check after setup.** Before you hand out links on the secondary origin, verify from outside that the Hub recognizes it:
+
+```bash
+curl -sI https://<link-origin>/ | head -1
+curl -sI https://<link-origin>/api/v1/agents | head -1
+```
+
+Both must answer `404`. Any other answer (the web app, a login redirect, a `401`) means the Hub does not see the secondary origin's `Host`: the proxy rewrites it, or the origin is routed somewhere else. Then the whole web app and API are served on that origin. Fix the proxy and check again. Repeat the check after any change to the proxy.
+
+**What the Hub enforces on the secondary origin.** A request is a secondary-origin request when its `Host` names the `link_origin` host (case-insensitively) and port (exactly; the scheme's default port is implied). On such a request the Hub, before any other handling:
+
+- serves only reads of `/api/v1/artifacts/shared/` and `/api/v1/artifacts/view/`, and answers `404` to everything else, the web app and every other API route included, so it does not rely on the proxy's routing alone;
+- removes every ambient credential before authentication: the `Cookie` and `Authorization` headers, every `X-Scion-*` header (agent, federation and Runtime Broker credentials among them), the `X-Forwarded-User-*` headers and the front proxy's identity assertions. The capability in the link is the only credential, so a mis-scoped cookie can never authenticate there;
+- builds the view `Content-Security-Policy` from configuration: its sources name the `link_origin` host. Every other view response names the Hub's configured public URL. A request's `Host` is never copied into a header.
+
+The Hub does not refuse share links on its own origin when `link_origin` is set: links created earlier keep working.
+
+**Who can set it.** `link_origin` decides where users send live link tokens, so only a Hub administrator on an interactive session can set it, through the [server-config API](/scion/reference/admin-settings/#artifacts); user access tokens cannot write or reset the `artifacts` section. Every change is recorded in the mutation audit with its old and new value. A value on the Hub's own host name (at any scheme or port), or one with a path, query, fragment or user info, is refused; a stored value that is invalid, or on the Hub's own host name, is ignored the same way, with a logged warning, and links stay on the Hub origin.
