@@ -346,8 +346,6 @@ func def49Setup(t *testing.T) (srv *Server, s store.Store, projectID string, tar
 	return srv, s, projectID, targetAgent, userID
 }
 
-func strPtr(s string) *string { return &s }
-
 // alwaysDropUserBus is an eventbus.EventBus whose Publish always reports a
 // subscriber-buffer-full drop, simulating InProcessEventBus.Publish when a
 // project's user-message subscriber is saturated (ptone/scion#2311).
@@ -1634,6 +1632,14 @@ type routedTestEnv struct {
 func setupRoutedTestEnv(t *testing.T) routedTestEnv {
 	t.Helper()
 	srv, s := testServer(t)
+	return setupRoutedTestEnvOn(t, srv, s)
+}
+
+// setupRoutedTestEnvOn builds the routed test fixtures on an existing server
+// and its raw store, for a test that installs a store fault wrapper
+// (testServerWithStoreFault) before any setup.
+func setupRoutedTestEnvOn(t *testing.T, srv *Server, s store.Store) routedTestEnv {
+	t.Helper()
 	ctx := context.Background()
 
 	// Wire a recording dispatcher so dispatch tests exercise the full path.

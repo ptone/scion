@@ -995,7 +995,9 @@ func (m *AgentManager) finishProvision(opts api.StartOptions, agentDir, agentHom
 		}
 		cfgData, marshalErr := json.MarshalIndent(persisted, "", "  ")
 		if marshalErr == nil {
-			_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), cfgData, 0644)
+			if err := WriteAgentConfigFile(agentDir, cfgData); err != nil {
+				slog.Warn("agent config not updated with the harness auth override", "agent_dir", agentDir, "error", err)
+			}
 		}
 	}
 	return nil
@@ -1174,7 +1176,7 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 			return nil, fmt.Errorf("%w: agent %q has no existing git clone at %s; reincarnate does not create or recreate the workspace", ErrReprovisionRefused, opts.Name, agentWorkspace)
 		}
 	} else if opts.EmptyPerAgentWorkspace {
-		dir, err := reprovisionEmptyPerAgentPreflight(projectDir, opts.Name, m.Runtime)
+		dir, err := reprovisionEmptyPerAgentPreflight(ctx, projectDir, opts.Name, m.Runtime)
 		if err != nil {
 			return nil, err
 		}
@@ -1307,11 +1309,14 @@ func writeReprovisionPrompt(agentDir, task string) error {
 
 // reprovisionEmptyPerAgentPreflight runs Reprovision's empty-per-agent
 // preconditions (miller79/scion#167) and returns the agent's directory. The
-// agent's private <agentDir>/workspace is reused in place, so it must
-// already exist as a real directory: every check here runs before
-// ProvisionAgent, whose MkdirAll would otherwise create a missing workspace.
-// All refusals wrap ErrReprovisionRefused (409 at the broker).
-func reprovisionEmptyPerAgentPreflight(projectDir, agentName string, rt runtime.Runtime) (string, error) {
+// agent's private workspace is reused in place, so it must already exist as
+// a real directory: every check here runs before ProvisionAgent, whose
+// MkdirAll would otherwise create a missing workspace. The workspace is
+// <agentDir>/workspace, or on a shared Layout the agent's directory on the
+// share (sharedLayoutAgentWorkspace, with ctx's runtime), where Start placed
+// it and ProvisionAgent checks it. All refusals wrap ErrReprovisionRefused
+// (409 at the broker).
+func reprovisionEmptyPerAgentPreflight(ctx context.Context, projectDir, agentName string, rt runtime.Runtime) (string, error) {
 	agentDir, err := CheckAgentDirContained(projectDir, agentName, false)
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", ErrReprovisionRefused, err)
@@ -1320,6 +1325,13 @@ func reprovisionEmptyPerAgentPreflight(projectDir, agentName string, rt runtime.
 		return "", fmt.Errorf("%w: agent %q was not created empty-per-agent", ErrReprovisionRefused, agentName)
 	}
 	agentWorkspace := filepath.Join(agentDir, "workspace")
+	sharedWS, err := sharedLayoutAgentWorkspace(ctx, nil, projectDir, agentName, agentDir)
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", ErrReprovisionRefused, err)
+	}
+	if sharedWS != "" {
+		agentWorkspace = sharedWS
+	}
 	info, statErr := os.Lstat(agentWorkspace)
 	if statErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return "", fmt.Errorf("%w: agent %q workspace missing or not a real directory at %s; reincarnate never recreates it", ErrReprovisionRefused, agentName, agentWorkspace)
@@ -1497,7 +1509,7 @@ type resolvedTemplate struct {
 // dir for provisioning, launch (Start's harness.Resolve) and the runtime
 // broker's policy gate.
 func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessConfig, projectPath, projectDir, profileName string, settings *config.VersionedSettings, inlineCfg *api.ScionConfig) (*resolvedTemplate, error) {
-	chain, err := config.GetTemplateChainInProject(templateName, projectPath)
+	chain, err := templateChainFor(templateName, projectPath, settings)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load template: %w", err)
 	}
@@ -1610,6 +1622,19 @@ func PreflightResolve(ctx context.Context, opts api.StartOptions) error {
 	// template environment keys; stay quiet here so each is reported once.
 	_, err = resolveTemplateAndHarnessConfig(withQuietTemplateEnvWarnings(ctx), templateName, opts.HarnessConfig, opts.ProjectPath, projectDir, profileName, settings, inlineCfg)
 	return err
+}
+
+// templateChainFor resolves the template chain for name. A name equal to the
+// operator's settings default_template is an operator value and may be a
+// remote source (config.GetOperatorTemplateChainInProject); any other name
+// (from a request or an agent's records) resolves through
+// config.GetTemplateChainInProject, which never fetches a remote source and
+// accepts an absolute directory only from the broker's own template cache.
+func templateChainFor(name, projectPath string, settings *config.VersionedSettings) ([]*config.Template, error) {
+	if settings != nil && settings.DefaultTemplate != "" && name == settings.DefaultTemplate {
+		return config.GetOperatorTemplateChainInProject(name, projectPath)
+	}
+	return config.GetTemplateChainInProject(name, projectPath)
 }
 
 // plainProjectWorkspaceSource is the directory a plain non-git project's
@@ -1836,14 +1861,17 @@ func provisionAgentStateDir(ctx context.Context, opts api.StartOptions) (string,
 }
 
 // agentStateProvisioned reports whether agentDir holds a provisioned agent:
-// the directory exists and has a scion-agent.json. A directory that cannot be
+// the directory exists and has a scion-agent config entry. A directory that cannot be
 // read counts as provisioned, so a caller does not treat an unreadable agent
 // as one to provision again.
 func agentStateProvisioned(agentDir string) bool {
 	if _, err := os.Stat(agentDir); err != nil {
 		return !os.IsNotExist(err)
 	}
-	return config.GetScionAgentConfigPath(agentDir) != ""
+	// A config entry that is refused (a link, a hard link, not a regular
+	// file) counts as provisioned, so it is never provisioned over; the start
+	// then fails on the refused read.
+	return config.AgentConfigEntryExists(agentDir)
 }
 
 // CheckAgentDirContained is the exported form of checkAgentDirContained, for
@@ -2867,7 +2895,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if err != nil {
 		return "", "", nil, fmt.Errorf("failed to marshal agent config: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), agentCfgData, 0644); err != nil {
+	if err := WriteAgentConfigFile(agentDir, agentCfgData); err != nil {
 		return "", "", nil, fmt.Errorf("failed to write agent config: %w", err)
 	}
 	// Record each image input at its own tier (ptone/scion#1799), so Start
@@ -3740,8 +3768,14 @@ func handleAgentDirWithoutConfigGuarded(g *agentFilesGuard, agentName, agentDir,
 	if _, err := os.Stat(agentDir); err != nil {
 		return nil
 	}
-	if config.GetScionAgentConfigPath(agentDir) != "" {
+	switch config.AgentConfigEntryState(agentDir) {
+	case config.AgentConfigRegular:
 		return nil
+	case config.AgentConfigRefused:
+		// A config entry that is a symbolic link (dangling or not), a hard
+		// link or not a regular file is present, not absent: nothing is
+		// written, removed or re-provisioned because of it.
+		return fmt.Errorf("%w: agent %q state directory kept: its scion-agent config file is not a plain regular file; replace it with a regular file, or delete and re-create the agent", config.ErrAgentStateConflict, agentName)
 	}
 
 	homes := []string{agentHome}
@@ -3775,7 +3809,7 @@ func handleAgentDirWithoutConfigGuarded(g *agentFilesGuard, agentName, agentDir,
 		if err != nil {
 			return fmt.Errorf("failed to marshal agent config: %w", err)
 		}
-		if err := os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), data, 0644); err != nil {
+		if err := WriteAgentConfigFile(agentDir, data); err != nil {
 			return fmt.Errorf("failed to write agent config: %w", err)
 		}
 		// The dir is live again: a marker from an earlier keep no longer
@@ -4766,6 +4800,14 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 		templateRecord = &api.AgentInfo{Template: provenance.Template, TemplateHash: provenance.TemplateHash}
 	case provErr == nil:
 		templateRecord = agentInfo
+		// agent-info.json is in the agent home, which the agent can write:
+		// its template is used only when it is a template slug, never as a
+		// host directory or a remote source.
+		if agentInfo != nil && agentInfo.Template != "" && !transfer.IsContentHash(agentInfo.Template) && !config.IsTemplateSlug(agentInfo.Template) {
+			// The value is not logged: the agent wrote it.
+			slog.Warn("Ignoring the template recorded in agent-info.json: not a template name", "agent", agentName)
+			templateRecord = &api.AgentInfo{TemplateHash: agentInfo.TemplateHash}
+		}
 	}
 
 	// A template recorded as loaded from a content-addressed cache (a
@@ -4800,7 +4842,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	if hydratedTemplate {
 		err = config.NewTemplateNotFoundError(effectiveTemplate, fmt.Sprintf("template %q was loaded from a content-addressed cache (%s)", effectiveTemplate, templateRecord.TemplateHash))
 	} else {
-		chain, err = config.GetTemplateChainInProject(effectiveTemplate, projectPath)
+		chain, err = templateChainFor(effectiveTemplate, projectPath, vs)
 	}
 	if err != nil {
 		util.Debugf("GetAgent: template chain for %q not found: %v, returning agentCfg only (harness=%q image=%q)",
@@ -5117,6 +5159,13 @@ func injectPromptFiles(h api.Harness, agentHome string, chain []*config.Template
 				content, err = config.ResolveContentInChain(chain, finalScionCfg.SystemPrompt)
 				if err != nil {
 					return false, fmt.Errorf("failed to resolve system_prompt: %w", err)
+				}
+				// The default template, first in every chain, ships a
+				// placeholder; it is no system prompt. Inline content is
+				// staged as given.
+				if config.IsPlaceholderSystemPrompt(content) {
+					util.Debugf("ProvisionAgent: system_prompt resolved to placeholder content, not injecting")
+					content = nil
 				}
 			}
 			if content != nil {

@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 375
+**Operations:** 376
 
 ## Table of Contents
 
@@ -111,6 +111,7 @@
 - [project.workspace.read](#projectworkspaceread) — Read a project's workspace: archive and file reads
 - [project.workspace.write](#projectworkspacewrite) — Change a project's workspace: file upload, write and delete, and git pull
 - [project.github.read](#projectgithubread) — Read a project's GitHub status, GitHub permissions and git identity
+- [project.github.installation.bind](#projectgithubinstallationbind) — Bind a GitHub App installation to a project (admin only: also requires hub.github_app.update)
 - [project.github.write](#projectgithubwrite) — Change a project's GitHub installation, status check, GitHub permissions and git identity
 - [project.members.assignableroles](#projectmembersassignableroles) — List the roles the caller may assign in a project
 - [agent.message.send](#agentmessagesend) — Send a message to an agent
@@ -243,7 +244,7 @@
 - [hub.audit.explain](#hubauditexplain) — Explain another principal's authorization, or compare two principals' effective permissions. A token needs hub_audit:read on a hub boundary; grant details of the other principal are redacted
 - [user.self.explain](#userselfexplain) — Explain the caller's own authorization. A token's decisions apply its ceiling and boundary, and its effective permission list holds only the permissions it may use; a project-boundary token explains only targets in its boundary project, while its holder is a current member of that project
 - [user.self.profile](#userselfprofile) — Read the caller's own profile and preferences. Any token reads its holder's own profile. A visitor reads its own federated account; an unlinked federated user is refused
-- [user.self.scopes](#userselfscopes) — List the token selectors and, for a requested boundary, the caller's own mint eligibility for each. Any token reads it
+- [user.self.scopes](#userselfscopes) — List the token selectors and, for a requested boundary, the caller's own mint eligibility for each. Any token reads the selector list. Eligibility needs an interactive session: a token request naming a boundary or project is refused
 - [user.self.adminstatus](#userselfadminstatus) — Read the caller's own admin status and system-scope permissions. For a token the permission list holds only the permissions its ceiling allows that are eligible for its boundary kind
 - [user.self.groups](#userselfgroups) — List the caller's own effective groups. A project-boundary token lists groups that belong to no project and the groups of its boundary project, the latter only while its holder is a current member of that project
 - [user.invite.redeem](#userinviteredeem) — Redeem an invitation code for the caller's identity. Session-only: a token does not bind an invitation to its holder
@@ -4512,6 +4513,47 @@
 
 ---
 
+## project.github.installation.bind
+
+**Domain:** project
+
+**Description:** Bind a GitHub App installation to a project (admin only: also requires hub.github_app.update)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/projects/{id}/github-installation` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `hub`)
+
+**Base Permission:** `project.update`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `update-resource`
+
+### Audit
+
+- **Event Type:** `project.github.installation.bind`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** setting
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+- `pkg/hub:TestGitHubInstallationBind_RequiresHubGitHubAppUpdate`
+- `pkg/hub:TestGitHubInstallationBind_HubBearerBoundaryOnly`
+
+---
+
 ## project.github.write
 
 **Domain:** project
@@ -4522,7 +4564,6 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | PUT | `/api/v1/projects/{id}/github-installation` |
 | http_route | DELETE | `/api/v1/projects/{id}/github-installation` |
 | http_route | POST | `/api/v1/projects/{id}/github-status` |
 | http_route | PUT | `/api/v1/projects/{id}/github-permissions` |
@@ -9239,7 +9280,7 @@
 
 **Domain:** user
 
-**Description:** List the token selectors and, for a requested boundary, the caller's own mint eligibility for each. Any token reads it
+**Description:** List the token selectors and, for a requested boundary, the caller's own mint eligibility for each. Any token reads the selector list. Eligibility needs an interactive session: a token request naming a boundary or project is refused
 
 ### Entry Points
 
@@ -9262,6 +9303,7 @@
 ### Tests
 
 - `pkg/hub:TestSelfIdentityReadsToken_AnyTokenReads`
+- `pkg/hub:TestAuthScopes_TokenCannotRequestBoundaryEligibility`
 
 ### Exemptions
 
@@ -12345,6 +12387,7 @@
 | http_route | GET | `/api/v1/runtime-brokers/{id}` |
 | http_route | GET | `/api/v1/runtime-brokers/{id}/settings` |
 | http_route | GET | `/api/v1/runtime-brokers/{id}/projects` |
+| http_route | GET | `/api/v1/runtime-brokers/{id}/conversion-plan` |
 
 **Principals:** `user`
 
