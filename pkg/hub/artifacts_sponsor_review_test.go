@@ -22,14 +22,18 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/token"
 	"net/http"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -137,9 +141,14 @@ func TestArtifactHostSponsorReadsHomeChecks(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, ok, "a test identity past its window")
 
-	if _, err := f.s.GetUser(ctx, DevUserID); errors.Is(err, store.ErrNotFound) {
-		createDCUser(t, f.s, DevUserID, "dev-sr@test.com", f.home, store.ProjectRoleMember)
-	}
+	// The dev user, which the test server seeds with a system role, with
+	// local-development authority on (positive control) and off.
+	_, err = f.s.GetUser(ctx, DevUserID)
+	require.NoError(t, err, "the test server seeds the dev user")
+	f.srv.authzService.setDevLocalAuthorityEnabled(true)
+	ok, err = host.sponsorReadsHomeThroughRole(ctx, DevUserID, f.home)
+	require.NoError(t, err)
+	require.True(t, ok, "control: the dev user with local-development authority on reads home")
 	f.srv.authzService.setDevLocalAuthorityEnabled(false)
 	ok, err = host.sponsorReadsHomeThroughRole(ctx, DevUserID, f.home)
 	require.NoError(t, err)
@@ -148,15 +157,17 @@ func TestArtifactHostSponsorReadsHomeChecks(t *testing.T) {
 	for name, fault := range map[string]*sponsorFaultStore{
 		"user lookup":    {Store: f.s, failUser: f.delegator},
 		"project lookup": {Store: f.s, failProject: f.home},
-		"role bindings":  {Store: f.s, failBindings: true},
 	} {
 		faulty := hostOverStore(fault, false)
 		ok, err := faulty.sponsorReadsHomeThroughRole(ctx, f.delegator, f.home)
 		assert.False(t, ok, name)
-		if name != "role bindings" {
-			assert.ErrorIs(t, err, errSponsorStoreFault, name)
-		}
+		assert.ErrorIs(t, err, errSponsorStoreFault, name)
 	}
+	// A role-binding fault makes CheckAccess's decision indeterminate: it is
+	// a lookup failure, not "no role".
+	ok, err = hostOverStore(&sponsorFaultStore{Store: f.s, failBindings: true}, false).sponsorReadsHomeThroughRole(ctx, f.delegator, f.home)
+	assert.False(t, ok, "role bindings")
+	assert.Error(t, err, "role bindings: reported as a lookup failure")
 	ok, err = hostOverStore(f.s, false).sponsorReadsHomeThroughRole(ctx, f.delegator, f.home)
 	require.NoError(t, err)
 	assert.True(t, ok, "control: the same host without faults")
@@ -295,7 +306,170 @@ func TestArtifactSponsorReviewGrantOnHub(t *testing.T) {
 	owner := f.user(f.owner)
 	rec = identityArtifactRequest(t, f.srv, owner, http.MethodDelete, "/api/v1/artifacts/"+id+"/grants/"+g.ID, nil)
 	require.Equal(t, http.StatusNoContent, rec.Code, "steward removes the grant: %s", rec.Body.String())
+	rec = identityArtifactRequest(t, f.srv, delegator, http.MethodPost, path, sponsorReviewManifest(t, artifacts.VersionKindReview, []byte("# report {>>again?<<}\n")))
+	assert.Equal(t, http.StatusForbidden, rec.Code, "review after the grant was removed: %s", rec.Body.String())
 	rec = identityArtifactRequest(t, f.srv, agent, http.MethodPost, "/api/v1/artifacts/"+id+"/versions", sponsorReviewManifest(t, "", []byte("# v3\n")))
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	assert.Nil(t, sponsorGrant(id), "a removed grant is never re-created")
+}
+
+// TestArtifactHostSponsorHomeMustExist: a sponsor whose system role would
+// pass CheckAccess for any project id (the dev user, seeded with a system
+// role, with local-development authority on) gets no grant for a home
+// project id that does not exist, and gets one for an existing home. Only
+// the helper's project-exists check refuses the missing id.
+func TestArtifactHostSponsorHomeMustExist(t *testing.T) {
+	f := newReviewGrantFixture(t)
+	host := newArtifactHost(f.srv)
+	ctx := context.Background()
+	_, err := f.s.GetUser(ctx, DevUserID)
+	require.NoError(t, err, "the test server seeds the dev user")
+	f.srv.authzService.setDevLocalAuthorityEnabled(true)
+	missing := tid("sr-never-created")
+
+	// The system role alone admits the missing id: CheckAccess allows it.
+	dev, err := f.s.GetUser(ctx, DevUserID)
+	require.NoError(t, err)
+	readPerm, ok := artifactPermission(artifacts.PermissionRead)
+	require.True(t, ok)
+	decision := f.srv.authzService.CheckAccess(maskAllAuthzMemo(ctx),
+		NewAuthenticatedUser(dev.ID, dev.Email, dev.DisplayName, dev.Role, ""),
+		Resource{Type: permissions.ResourceArtifact, ParentType: permissions.ResourceProject, ParentID: missing},
+		Action(readPerm.Action))
+	require.True(t, decision.Allowed, "precondition: a system role passes CheckAccess for a missing project id")
+
+	ok, err = host.sponsorReadsHomeThroughRole(ctx, DevUserID, f.home)
+	require.NoError(t, err)
+	require.True(t, ok, "control: existing home")
+	ok, err = host.sponsorReadsHomeThroughRole(ctx, DevUserID, missing)
+	require.NoError(t, err)
+	assert.False(t, ok, "missing home project")
+
+	enableSponsorReviewForTest(t, f.srv)
+	requireRoleError(t, host.SponsorReviewGrant(ctx, missing, DevUserID), missing)
+	assert.NoError(t, host.SponsorReviewGrant(ctx, f.home, DevUserID))
+}
+
+// userReadCountStore counts GetUser calls per user id.
+type userReadCountStore struct {
+	store.Store
+	mu    sync.Mutex
+	reads map[string]int
+}
+
+func (s *userReadCountStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	s.mu.Lock()
+	s.reads[id]++
+	s.mu.Unlock()
+	return s.Store.GetUser(ctx, id)
+}
+
+func (s *userReadCountStore) count(id string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reads[id]
+}
+
+// TestArtifactHostSponsorInactiveRefusedByHelper: the helper itself refuses
+// an inactive sponsor before any policy decision. CheckAccess reads the
+// user again for its own account-status gate, so an active sponsor costs
+// more than one user read; a suspended sponsor holding a home binding costs
+// exactly the helper's one read and gets no grant.
+func TestArtifactHostSponsorInactiveRefusedByHelper(t *testing.T) {
+	f := newReviewGrantFixture(t)
+	ctx := context.Background()
+	suspended := tid("sr-suspended")
+	createDCUser(t, f.s, suspended, "sr-suspended@test.com", f.home, store.ProjectRoleMember)
+	u, err := f.s.GetUser(ctx, suspended)
+	require.NoError(t, err)
+	u.Status = store.UserStatusSuspended
+	require.NoError(t, f.s.UpdateUser(ctx, u))
+
+	counting := &userReadCountStore{Store: f.s, reads: map[string]int{}}
+	host := hostOverStore(counting, false)
+
+	ok, err := host.sponsorReadsHomeThroughRole(ctx, f.delegator, f.home)
+	require.NoError(t, err)
+	require.True(t, ok, "control: active member")
+	require.Greater(t, counting.count(f.delegator), 1, "control: CheckAccess reads the user too")
+
+	ok, err = host.sponsorReadsHomeThroughRole(ctx, suspended, f.home)
+	require.NoError(t, err)
+	assert.False(t, ok, "suspended member")
+	assert.Equal(t, 1, counting.count(suspended), "the helper refuses before CheckAccess")
+}
+
+// homeBindingFaultStore fails role-binding reads that ask about home.
+type homeBindingFaultStore struct {
+	store.Store
+	home string
+}
+
+func (s *homeBindingFaultStore) ListRoleBindingsForPrincipals(ctx context.Context, principals []store.PrincipalRef, scopeTypes, scopeIDs []string) ([]*store.RoleBinding, error) {
+	if slices.Contains(scopeIDs, s.home) {
+		return nil, errSponsorStoreFault
+	}
+	return s.Store.ListRoleBindingsForPrincipals(ctx, principals, scopeTypes, scopeIDs)
+}
+
+// TestArtifactSponsorReviewAutomaticFormOnHub: through the hub's own
+// Authorize, an automatic grant counts only while its holder reads the home
+// project through a role. The delegating user also reads the artifact
+// through a grant to another project they belong to, so only the
+// automatic-form rule decides: leaving the home project refuses the review,
+// re-joining restores it, and a role-lookup fault on the home project
+// refuses it.
+func TestArtifactSponsorReviewAutomaticFormOnHub(t *testing.T) {
+	f := newReviewGrantFixture(t)
+	st, _ := enableArtifactsForTest(t, f.srv)
+	enableSponsorReviewForTest(t, f.srv)
+	ctx := context.Background()
+	agent := artifactTestAgent(f.agent.ID, f.home, ScopeProjectArtifactRead, ScopeProjectArtifactWrite)
+	rec := identityArtifactRequest(t, f.srv, agent, http.MethodPost, "/api/v1/artifacts?name=auto.md&scope="+f.home, []byte("# report\n"))
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var pub artifacts.ArtifactResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &pub))
+	id := pub.Artifact.ID
+
+	createDCUser(t, f.s, f.delegator, "rg-delegator@test.com", f.other, store.ProjectRoleMember)
+	_, err := st.PutGrant(ctx, &artifacts.Grant{ID: tid("sr-other-read"), ArtifactID: id, SubjectKind: artifacts.SubjectScope,
+		SubjectRef: f.other, Permission: artifacts.GrantRead, CreatedAt: time.Now()},
+		artifacts.MaxGrantsPerArtifact, true, &artifacts.Actor{Kind: artifacts.PrincipalKindUser, Ref: "test-setup", Authority: artifacts.AuthorityOwner})
+	require.NoError(t, err)
+
+	delegator := f.user(f.delegator)
+	path := "/api/v1/artifacts/" + id
+	n := 0
+	review := func() int {
+		t.Helper()
+		n++
+		body := sponsorReviewManifest(t, artifacts.VersionKindReview, []byte(fmt.Sprintf("# report {>>ok %d?<<}\n", n)))
+		return identityArtifactRequest(t, f.srv, delegator, http.MethodPost, path+"/versions", body).Code
+	}
+	read := func() int {
+		t.Helper()
+		return identityArtifactRequest(t, f.srv, delegator, http.MethodGet, path, nil).Code
+	}
+	require.Equal(t, http.StatusCreated, review(), "control: review with a home role")
+
+	bindings, err := f.s.ListRoleBindingsForPrincipals(ctx, []store.PrincipalRef{{Type: store.RoleBindingPrincipalUser, ID: f.delegator}},
+		[]string{store.RoleScopeProject}, []string{f.home})
+	require.NoError(t, err)
+	require.NotEmpty(t, bindings)
+	for _, b := range bindings {
+		require.NoError(t, f.s.DeleteRoleBinding(ctx, b.ID))
+	}
+	require.Equal(t, http.StatusOK, read(), "still reads through the other project's grant")
+	assert.Equal(t, http.StatusForbidden, review(), "left the home project: the automatic grant gives nothing")
+
+	createDCUser(t, f.s, f.delegator, "rg-delegator@test.com", f.home, store.ProjectRoleMember)
+	assert.Equal(t, http.StatusCreated, review(), "re-joined the home project")
+
+	orig := f.srv.authzService.store
+	f.srv.authzService.store = &homeBindingFaultStore{Store: orig, home: f.home}
+	t.Cleanup(func() { f.srv.authzService.store = orig })
+	require.Equal(t, http.StatusOK, read(), "fault on home only: still reads through the other project's grant")
+	assert.Equal(t, http.StatusForbidden, review(), "role lookup fault on the home project: refused")
+	f.srv.authzService.store = orig
+	assert.Equal(t, http.StatusCreated, review(), "control: fault cleared")
 }

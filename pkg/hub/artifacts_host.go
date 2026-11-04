@@ -435,7 +435,15 @@ func (h *artifactHost) SponsorReviewGrant(ctx context.Context, scopeRef, sponsor
 // is visible. It is CHECK-ONLY: the identity built from the user's record is
 // the subject of that one CheckAccess and never enters a context
 // (TestSponsorReviewIdentityOnlyASubject). It answers (false, nil) for a
-// refusal and an error for a failed lookup.
+// refusal and an error for a failed lookup, including a decision CheckAccess
+// marks indeterminate (a role-binding or principal resolution fault).
+//
+// The subject carries the user's global role, and CheckAccess counts
+// system-scope bindings too, so a user whose system role carries
+// artifact.read (a super-admin) passes for any existing home project. That
+// is intended: it is the same home-project read decision as the steward
+// clause's role read and the automatic form's read-time check
+// (grantAllows), and such a user already reads the artifact.
 func (h *artifactHost) sponsorReadsHomeThroughRole(ctx context.Context, userID, homeScope string) (bool, error) {
 	if h.server == nil || h.server.authzService == nil || h.server.authzService.store == nil || userID == "" || homeScope == "" {
 		return false, errors.New("artifacts: automatic review grant: authorization not available")
@@ -475,6 +483,11 @@ func (h *artifactHost) sponsorReadsHomeThroughRole(ctx context.Context, userID, 
 		ParentType: permissions.ResourceProject,
 		ParentID:   homeScope,
 	}, Action(perm.Action))
+	if decision.IsIndeterminate() {
+		// A store or resolution fault, not a policy answer: reported as a
+		// lookup failure (still no grant).
+		return false, errors.New("artifacts: automatic review grant: role lookup failed")
+	}
 	return decision.Allowed, nil
 }
 
