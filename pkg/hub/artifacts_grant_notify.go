@@ -139,9 +139,10 @@ func grantNoticeMessage(label, permission, artifactID string) string {
 // its email in parentheses only when policy lets the subject read the
 // granter's user record (CheckAccess with the subject's check-only
 // identity, under maskAllAuthzMemo). Any lookup failure or denial leaves the
-// email out, and so does a name and email longer together than the cap;
-// with no usable name the label is the email when it may be shown, else
-// "a user". It never refuses the notice.
+// email out, and so does an email or a name and email longer than the cap:
+// an email is shown whole or not at all. With no usable name the label is
+// the email when it may be shown and fits, else "a user". It never refuses
+// the notice.
 func (s *Server) grantNoticeLabel(ctx context.Context, subjectUserID, granterUserID string) string {
 	if s.store == nil || granterUserID == "" {
 		return noticeLabelFallback
@@ -151,9 +152,11 @@ func (s *Server) grantNoticeLabel(ctx context.Context, subjectUserID, granterUse
 		return noticeLabelFallback
 	}
 	name := sanitizeNoticeLabel(granter.DisplayName)
-	email := sanitizeNoticeLabel(granter.Email)
+	// The email is cleaned but never capped, so its length decides whether
+	// it can be shown whole.
+	email := cleanNoticeText(granter.Email, -1)
 	showEmail := false
-	if email != "" && s.authzService != nil {
+	if email != "" && utf8.RuneCountInString(email) <= noticeLabelMaxRunes && s.authzService != nil {
 		if _, subject, err := s.namedUserSubject(ctx, subjectUserID); err == nil && subject != nil {
 			showEmail = s.authzService.CheckAccess(maskAllAuthzMemo(ctx), subject, userResource(granter), ActionRead).Allowed
 		}
@@ -177,6 +180,12 @@ func (s *Server) grantNoticeLabel(ctx context.Context, subjectUserID, granterUse
 // space, trims, and caps the result at noticeLabelMaxRunes runes. Invalid
 // UTF-8 is dropped. ptone/scion#7135 reuses it for its own labels.
 func sanitizeNoticeLabel(s string) string {
+	return cleanNoticeText(s, noticeLabelMaxRunes)
+}
+
+// cleanNoticeText is sanitizeNoticeLabel with a cap of limit runes, or no
+// cap when limit is negative.
+func cleanNoticeText(s string, limit int) string {
 	var b strings.Builder
 	n := 0         // runes written
 	space := false // a white space run is pending
@@ -193,7 +202,7 @@ func sanitizeNoticeLabel(s string) string {
 		if space {
 			need = 2
 		}
-		if n+need > noticeLabelMaxRunes {
+		if limit >= 0 && n+need > limit {
 			break
 		}
 		if space {

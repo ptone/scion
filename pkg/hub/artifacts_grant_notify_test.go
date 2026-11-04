@@ -451,6 +451,22 @@ func TestGrantNoticeLabelEmail(t *testing.T) {
 	require.NoError(t, f.s.UpdateUser(ctx, g))
 	assert.Equal(t, "gn-granter@test.com", f.srv.grantNoticeLabel(ctx, f.reader, f.granter), "no name, readable: email only")
 	assert.Equal(t, "a user", f.srv.grantNoticeLabel(ctx, f.nonMember, f.granter), "no name, not readable")
+
+	// An email is shown whole or not at all: 81 runes -> "a user", 79 runes
+	// -> the email; with a name, a combination over the cap -> the name.
+	long := strings.Repeat("a", 81-len("@test.com")) + "@test.com"
+	fits := strings.Repeat("b", 79-len("@test.com")) + "@test.com"
+	require.Equal(t, 81, utf8.RuneCountInString(long))
+	require.Equal(t, 79, utf8.RuneCountInString(fits))
+	g.Email = long
+	require.NoError(t, f.s.UpdateUser(ctx, g))
+	assert.Equal(t, "a user", f.srv.grantNoticeLabel(ctx, f.reader, f.granter), "no name, 81-rune email")
+	g.DisplayName = "Grace"
+	require.NoError(t, f.s.UpdateUser(ctx, g))
+	assert.Equal(t, "Grace", f.srv.grantNoticeLabel(ctx, f.reader, f.granter), "name, 81-rune email")
+	g.DisplayName, g.Email = "", fits
+	require.NoError(t, f.s.UpdateUser(ctx, g))
+	assert.Equal(t, fits, f.srv.grantNoticeLabel(ctx, f.reader, f.granter), "no name, 79-rune email")
 }
 
 // TestNamedUserSubjectNeverEntersAContext (carry-forward C1, K29n): the
