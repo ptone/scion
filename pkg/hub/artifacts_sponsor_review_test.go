@@ -445,7 +445,10 @@ func (s *principalBindingFaultStore) firedCount() int {
 // is shown to fire and to make the hub's decision deny (CheckAccess with a
 // resolution error, Authorize false), and the review is refused under it:
 // every read path of a user loads the same bindings, so the artifact
-// answers 404.
+// answers 404. Finally the automatic-form clause itself is driven under a
+// fault confined to the home project (homeScopeHost): the artifact still
+// reads through the other project's grant, and the review is refused with
+// 403; the same service with an unfaulted home host accepts it.
 func TestArtifactSponsorReviewAutomaticFormOnHub(t *testing.T) {
 	f := newReviewGrantFixture(t)
 	st, blobs := enableArtifactsForTest(t, f.srv)
@@ -550,7 +553,7 @@ func TestArtifactSponsorReviewAutomaticFormOnHub(t *testing.T) {
 	require.Positive(t, homeFault.firedCount(), "the home-project fault fired")
 	require.Equal(t, http.StatusOK, readCode, "under the home fault: still reads through the other project's grant")
 	assert.Equal(t, http.StatusForbidden, reviewCode, "under the home fault: the automatic grant is refused (403)")
-	_, reviewCode = reviewVia(host)
+	_, reviewCode = reviewVia(hostOverStore(orig, false))
 	assert.Equal(t, http.StatusCreated, reviewCode, "control: the same service without the fault")
 }
 
