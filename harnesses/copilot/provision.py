@@ -419,6 +419,7 @@ _COPILOT_HOOK_EVENTS = [
     "userPromptSubmitted",
     "preToolUse",
     "postToolUse",
+    "postToolUseFailure",
     "errorOccurred",
     "agentStop",
     "subagentStop",
