@@ -94,8 +94,11 @@ func (s *Service) SponsorReviewSkips() int64 {
 // an agent, homed in a project scope, records a delegating user, and the
 // host's SponsorReviewPolicy answers nil for a's home scope and that user.
 // The subject is always a.SponsorRef, never anything from the request. A
-// refusal other than "off" is counted and logged with a fixed reason code
-// and the artifact id only.
+// refusal other than "off" is counted and logged with a fixed reason code:
+// the general log line carries the reason and the artifact id; the
+// decision log entry carries the reason with the usual request and artifact
+// fields (route, the calling agent, the home project, the owner). Neither
+// ever carries the delegating user's id or the policy's error text.
 func (s *Service) sponsorReviewGrant(r *http.Request, a *Artifact, now time.Time) (Grant, bool) {
 	if a.OwnerKind != PrincipalKindAgent || a.ScopeKind != ScopeKindProject || a.ScopeRef == "" || a.SponsorRef == "" {
 		return Grant{}, false
@@ -111,8 +114,8 @@ func (s *Service) sponsorReviewGrant(r *http.Request, a *Artifact, now time.Time
 			return Grant{}, false
 		}
 		s.sponsorReviewSkips.Add(1)
-		// Logged with a fixed reason code and the artifact id only: never
-		// the error text, which may name the user or carry a store error.
+		// Logged with a fixed reason code, never the error text, which may
+		// name the user or carry a store error.
 		reason := logReasonCheckerError
 		var roleErr *SponsorReviewRoleError
 		if errors.As(err, &roleErr) {

@@ -473,3 +473,31 @@ func TestArtifactSponsorReviewAutomaticFormOnHub(t *testing.T) {
 	f.srv.authzService.store = orig
 	assert.Equal(t, http.StatusCreated, review(), "control: fault cleared")
 }
+
+// TestArtifactHostSponsorHomeDeletedBindingRemains: a home project deleted
+// while the sponsor's member binding on its id remains gives no grant; the
+// same user is granted on the live home.
+func TestArtifactHostSponsorHomeDeletedBindingRemains(t *testing.T) {
+	f := newReviewGrantFixture(t)
+	host := newArtifactHost(f.srv)
+	ctx := context.Background()
+	gone := tid("sr-deleted-home")
+	createDCProject(t, f.s, gone, "sr-deleted-home")
+	createDCUser(t, f.s, f.delegator, "rg-delegator@test.com", gone, store.ProjectRoleMember)
+	ok, err := host.sponsorReadsHomeThroughRole(ctx, f.delegator, gone)
+	require.NoError(t, err)
+	require.True(t, ok, "control: the member reads the project before it is deleted")
+
+	require.NoError(t, f.s.DeleteProject(ctx, gone))
+	bindings, err := f.s.ListRoleBindingsForPrincipals(ctx, []store.PrincipalRef{{Type: store.RoleBindingPrincipalUser, ID: f.delegator}},
+		[]string{store.RoleScopeProject}, []string{gone})
+	require.NoError(t, err)
+	require.NotEmpty(t, bindings, "shape under test: the member binding remains on the deleted project's id")
+
+	ok, err = host.sponsorReadsHomeThroughRole(ctx, f.delegator, gone)
+	require.NoError(t, err)
+	assert.False(t, ok, "deleted home project")
+	enableSponsorReviewForTest(t, f.srv)
+	requireRoleError(t, host.SponsorReviewGrant(ctx, gone, f.delegator), gone)
+	assert.NoError(t, host.SponsorReviewGrant(ctx, f.home, f.delegator), "control: live home")
+}
