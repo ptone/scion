@@ -143,6 +143,14 @@ type Limits struct {
 	// that sets a limits getter must fill them in: incomplete or invalid
 	// values turn remote images off.
 	RemoteImages RemoteImageLimits
+	// LinkOrigin is the operator's secondary origin for share links
+	// (artifacts.link_origin, normalized scheme://host[:port]), or "" for
+	// none. When set, a created link also carries ShareURL on it.
+	LinkOrigin string
+	// PublicOrigin is the hub's configured public URL. The view CSP names
+	// its host on every request that is not on LinkOrigin; the request's
+	// own Host is never used.
+	PublicOrigin string
 }
 
 // Default limits, used when no limits getter is set or it yields a
