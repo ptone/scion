@@ -17,6 +17,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -26,6 +27,7 @@ import (
 	"go/ast"
 	"go/token"
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -170,7 +172,7 @@ func TestArtifactHostSponsorReadsHomeChecks(t *testing.T) {
 	// Fired control: with the project and user lookups unfaulted, the helper
 	// returns an error only for an indeterminate CheckAccess decision, which
 	// only the injected binding fault produces here.
-	assert.Error(t, err, "role bindings: reported as a lookup failure")
+	assert.ErrorContains(t, err, "role lookup failed", "role bindings: reported as a lookup failure")
 	ok, err = hostOverStore(f.s, false).sponsorReadsHomeThroughRole(ctx, f.delegator, f.home)
 	require.NoError(t, err)
 	assert.True(t, ok, "control: the same host without faults")
@@ -446,7 +448,7 @@ func (s *principalBindingFaultStore) firedCount() int {
 // answers 404.
 func TestArtifactSponsorReviewAutomaticFormOnHub(t *testing.T) {
 	f := newReviewGrantFixture(t)
-	st, _ := enableArtifactsForTest(t, f.srv)
+	st, blobs := enableArtifactsForTest(t, f.srv)
 	enableSponsorReviewForTest(t, f.srv)
 	ctx := context.Background()
 	agent := artifactTestAgent(f.agent.ID, f.home, ScopeProjectArtifactRead, ScopeProjectArtifactWrite)
@@ -520,6 +522,51 @@ func TestArtifactSponsorReviewAutomaticFormOnHub(t *testing.T) {
 	f.srv.authzService.store = orig
 	assert.True(t, host.Authorize(asDelegator, f.home, artifacts.PermissionRead), "control: fault cleared, Authorize allows")
 	assert.Equal(t, http.StatusCreated, review(), "control: fault cleared")
+
+	// The automatic-form refusal itself under a real fault: a service whose
+	// host is the hub's own artifactHost, except that Authorize for the home
+	// project goes through an artifactHost whose store faults the delegating
+	// user's role bindings. The other project's grant still reads (clean
+	// Authorize), so the review reaches the automatic-form clause in
+	// grantAllows, which must refuse it (403).
+	homeFault := &principalBindingFaultStore{Store: orig, userID: f.delegator}
+	reviewVia := func(homeHost *artifactHost) (int, int) {
+		t.Helper()
+		svc := artifacts.NewService(homeScopeHost{artifactHost: host, home: f.home, homeHost: homeHost})
+		svc.SetStore(st)
+		svc.SetBlobStorage(blobs, "hub-sponsor-review-test")
+		serve := func(method, target string, body []byte) int {
+			req := httptest.NewRequest(method, target, bytes.NewReader(body))
+			req = req.WithContext(contextWithIdentity(req.Context(), delegator))
+			rec := httptest.NewRecorder()
+			svc.ServeHTTP(rec, req)
+			return rec.Code
+		}
+		n++
+		body := sponsorReviewManifest(t, artifacts.VersionKindReview, []byte(fmt.Sprintf("# report {>>ok %d?<<}\n", n)))
+		return serve(http.MethodGet, path, nil), serve(http.MethodPost, path+"/versions", body)
+	}
+	readCode, reviewCode := reviewVia(hostOverStore(homeFault, false))
+	require.Positive(t, homeFault.firedCount(), "the home-project fault fired")
+	require.Equal(t, http.StatusOK, readCode, "under the home fault: still reads through the other project's grant")
+	assert.Equal(t, http.StatusForbidden, reviewCode, "under the home fault: the automatic grant is refused (403)")
+	_, reviewCode = reviewVia(host)
+	assert.Equal(t, http.StatusCreated, reviewCode, "control: the same service without the fault")
+}
+
+// homeScopeHost is the hub's artifactHost with Authorize for one project
+// answered by another artifactHost (one whose store injects a fault).
+type homeScopeHost struct {
+	*artifactHost
+	home     string
+	homeHost *artifactHost
+}
+
+func (h homeScopeHost) Authorize(ctx context.Context, scopeRef, permission string) bool {
+	if scopeRef == h.home {
+		return h.homeHost.Authorize(ctx, scopeRef, permission)
+	}
+	return h.artifactHost.Authorize(ctx, scopeRef, permission)
 }
 
 // TestArtifactHostSponsorHomeDeletedBindingRemains: a home project deleted
