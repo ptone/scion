@@ -380,6 +380,33 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 		}
 	}
 
+	// Resetting the artifacts section clears every stored key: each one is
+	// recorded before the reset, and the reset is not made if a record
+	// cannot be written (ptone/scion#7107 phase 2b).
+	var artifactsChanges []artifactsKeyChange
+	if sectionName == artifactsSection {
+		// The keys to record come from the stored row: a read that fails
+		// for any reason but a missing row refuses the reset, so it is
+		// never made without its records.
+		row, rerr := ops.store.GetHubSetting(r.Context(), artifactsSection)
+		switch {
+		case rerr == nil:
+			artifactsChanges = artifactsKeyChanges(row.Value, nil)
+		case errors.Is(rerr, store.ErrNotFound):
+		default:
+			slog.Error("Failed to read artifacts settings for the reset audit", "error", rerr)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"Failed to reset section", nil)
+			return
+		}
+		if err := s.auditArtifactsSettingsChanges(r.Context(), gcpIAMSurfaceReset, artifactsChanges); err != nil {
+			slog.Error("Failed to record artifacts settings change", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"Failed to reset section", nil)
+			return
+		}
+	}
+
 	var err error
 	if sectionName == "runtimes" || sectionName == "profiles" {
 		// The pair the reset leaves is validated and the delete guarded
@@ -392,6 +419,9 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 	}
 	if publicURLBefore != "" && err != nil {
 		s.auditPublicURLNotApplied(r.Context(), gcpIAMSurfaceReset, publicURLBefore, "", err)
+	}
+	if err != nil {
+		s.auditArtifactsSettingsNotApplied(r.Context(), gcpIAMSurfaceReset, artifactsChanges, err)
 	}
 	if gcpIAMChange {
 		// The approval covers only this reset's own self-apply.
@@ -536,6 +566,11 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// An empty relay-peer secret is ignored; any other value is refused.
 	rawBody = dropEmptySecretSettings(rawBody)
 	if s.rejectGateProtectedSettingsKeys(w, rawBody) {
+		return
+	}
+	// The artifacts section lives only in the settings database: refused
+	// here for every caller.
+	if rejectArtifactsInFileMode(w, rawBody) {
 		return
 	}
 	// Test identities with admin roles write no settings (test-admin
