@@ -76,6 +76,12 @@ type ProjectService interface {
 	// annotations and hub defaults (GET /settings/resolved).
 	GetResolvedSettings(ctx context.Context, projectID string) (*ResolvedProjectSettings, error)
 
+	// UpdateSettingsFields sends a settings PUT whose body is exactly
+	// fields: only those keys change (the Hub merges per key), and an
+	// explicit null or "" is sent as given, so it can clear a field.
+	// Refusals are returned as *SettingsError.
+	UpdateSettingsFields(ctx context.Context, projectID string, fields map[string]interface{}) (*ProjectSettingsSaveResult, error)
+
 	// UpdateGCPIdentityDefaults writes only the default GCP identity fields
 	// of the project settings; every other setting keeps its stored value.
 	UpdateGCPIdentityDefaults(ctx context.Context, projectID string, update *ProjectGCPIdentityDefaultsUpdate) (*ProjectSettings, error)
@@ -424,6 +430,25 @@ func (s *projectService) GetResolvedSettings(ctx context.Context, projectID stri
 		return nil, err
 	}
 	return apiclient.DecodeRequired[ResolvedProjectSettings](resp)
+}
+
+// ProjectSettingsSaveResult is the Hub's answer to a project settings save:
+// the settings as stored, and advisory warnings about the saved values.
+type ProjectSettingsSaveResult struct {
+	ProjectSettings
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+// UpdateSettingsFields sends a settings PUT whose body is exactly fields.
+func (s *projectService) UpdateSettingsFields(ctx context.Context, projectID string, fields map[string]interface{}) (*ProjectSettingsSaveResult, error) {
+	if len(fields) == 0 {
+		return nil, fmt.Errorf("no project settings to change")
+	}
+	resp, err := s.c.put(ctx, "/api/v1/projects/"+url.PathEscape(projectID)+"/settings", fields, nil)
+	if err != nil {
+		return nil, err
+	}
+	return decodeSettingsResponse[ProjectSettingsSaveResult](resp)
 }
 
 // UpdateGCPIdentityDefaults sends a settings PUT whose body carries only the
