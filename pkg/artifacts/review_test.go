@@ -255,6 +255,40 @@ func TestReviewNoticeSubmitAuthorized(t *testing.T) {
 	}
 }
 
+// TestNotifyReview_SubmitAuthorizedPerAccess pins the service half of the
+// rule directly: SubmitAuthorized is set for a review, write or admin
+// grantee's access and never for the owner's access or none, and a review
+// the owner wrote is not announced at all.
+func TestNotifyReview_SubmitAuthorizedPerAccess(t *testing.T) {
+	var got []ReviewNotice
+	svc := NewService(newFakeHost())
+	svc.SetReviewNotifier(func(_ context.Context, n ReviewNotice) { got = append(got, n) })
+	a := &Artifact{ID: "art-1", ScopeKind: ScopeKindProject, ScopeRef: "project-1", OwnerKind: agentA.kind, OwnerRef: agentA.ref}
+	byReviewer := &Version{Seq: 2, Kind: VersionKindReview, CreatedByKind: reviewer.kind, CreatedByRef: reviewer.ref}
+	for _, c := range []struct {
+		name   string
+		access writeAccess
+		want   bool
+	}{
+		{"review grant", accessReviewGrant, true},
+		{"write or admin grant", accessWriteGrant, true},
+		{"owner access", accessOwner, false},
+		{"no access", accessNone, false},
+	} {
+		got = nil
+		svc.notifyReview(context.Background(), a, byReviewer, c.access)
+		if len(got) != 1 || got[0].SubmitAuthorized != c.want {
+			t.Errorf("%s: notices %+v, want one with SubmitAuthorized %v", c.name, got, c.want)
+		}
+	}
+	got = nil
+	byOwner := &Version{Seq: 3, Kind: VersionKindReview, CreatedByKind: agentA.kind, CreatedByRef: agentA.ref}
+	svc.notifyReview(context.Background(), a, byOwner, accessOwner)
+	if len(got) != 0 {
+		t.Errorf("owner's own review announced: %+v", got)
+	}
+}
+
 // TestReviewNoticeUnauthorizedRefused: authorization is decided by the
 // finalize request itself. A reviewer whose review grant is removed after
 // starting the review is refused at finalize and nothing is announced; a

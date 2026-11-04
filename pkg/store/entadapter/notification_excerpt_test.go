@@ -65,31 +65,47 @@ func TestNotificationStore_ExcerptRoundTrip(t *testing.T) {
 // TestNotificationStore_ReviewSummaryNotSwept pins that a review summary
 // row is never handed to the dispatch sweep (the path that retries
 // delivery to agents and plugins) and never expired by it: the sweep reads
-// agent-subscriber rows only, and this kind is always a user row.
+// agent-subscriber rows only, and this kind is always a user row. The row
+// even names a subscriber that is a live agent's slug in the same project.
+// Controls: an eligible agent row IS returned by both sweep modes, and an
+// old agent row IS expired, so a sweep or expiry that returned nothing
+// could not pass.
 func TestNotificationStore_ReviewSummaryNotSwept(t *testing.T) {
 	ctx := context.Background()
-	s := newTestNotificationStore(t)
+	e := newRetryTestEnv(t)
+	const broker = "broker-1"
+	e.addAgent(t, "sub", broker, "running")
+	eligible := e.addNotif(t, store.SubscriberTypeAgent, "sub", 2*time.Minute, false)
+	stale := e.addNotif(t, store.SubscriberTypeAgent, "sub", 3*time.Hour, true)
 
-	n := newResourceNotification("user-1")
+	n := newResourceNotification("sub")
+	n.ProjectID = e.projectID.String()
 	n.Kind = store.NotificationKindArtifactReviewSummary
 	n.Status = store.NotificationStatusArtifactReviewSubmitted
 	n.Excerpt = "Looks good."
 	n.CreatedAt = time.Now().Add(-48 * time.Hour)
-	require.NoError(t, s.CreateNotification(ctx, n))
+	require.NoError(t, e.s.CreateNotification(ctx, n))
 
-	for _, broker := range []string{"", "broker-1"} {
-		undispatched, err := s.GetUndispatchedAgentNotifications(ctx, broker)
+	for _, mode := range []string{"", broker} {
+		got, err := e.s.GetUndispatchedAgentNotifications(ctx, mode)
 		require.NoError(t, err)
-		for _, u := range undispatched {
-			assert.NotEqual(t, n.ID, u.ID, "the sweep must not see a review summary row")
-		}
+		assert.Equal(t, []string{eligible}, notifIDs(got),
+			"mode %q: the eligible agent row only, never the review summary row", mode)
 	}
-	expired, err := s.ExpireStaleAgentNotifications(ctx, time.Now())
+
+	// The stale agent row is claimed (dispatched) and old; release it so
+	// expiry may decide it, as the control.
+	reverted, err := e.s.UnmarkNotificationDispatched(ctx, stale, time.Now().Add(-time.Second))
 	require.NoError(t, err)
-	assert.Zero(t, expired)
-	got, err := s.GetNotification(ctx, n.ID)
+	require.True(t, reverted)
+	expired, err := e.s.ExpireStaleAgentNotifications(ctx, time.Now().Add(-time.Hour))
 	require.NoError(t, err)
+	assert.Equal(t, 1, expired, "the old agent row is expired")
+	assert.Equal(t, store.NotificationOutcomeFailed, e.get(t, stale).DispatchOutcome)
+
+	got := e.get(t, n.ID)
 	assert.False(t, got.Dispatched)
 	assert.Empty(t, got.DispatchOutcome)
+	assert.Empty(t, got.DispatchReason)
 	assert.Equal(t, "Looks good.", got.Excerpt)
 }

@@ -216,6 +216,19 @@ func (f *summaryFixture) notifications(t *testing.T, u *store.User) []store.Noti
 	return list
 }
 
+// awaitNotificationEvents waits up to 5 seconds for n notification events
+// and returns them.
+func (f *summaryFixture) awaitNotificationEvents(t *testing.T, n int) []Event {
+	t.Helper()
+	var out []Event
+	require.Eventually(t, func() bool {
+		out = append(out, f.published()...)
+		return len(out) >= n
+	}, 5*time.Second, 5*time.Millisecond)
+	require.Len(t, out, n)
+	return out
+}
+
 // published drains every event published so far and returns the
 // notification events among them: the broadcast notification.* subjects
 // and every *.notification subject (user and project).
@@ -254,16 +267,15 @@ func TestNotifyArtifactReviewSummary_OwnerOnly(t *testing.T) {
 	assert.Empty(t, f.notifications(t, f.reviewer), "the reviewer gets nothing")
 	assert.Empty(t, f.notifications(t, f.other), "no other user gets anything")
 
-	evts := f.published()
-	require.Len(t, evts, 1, "one notification event")
+	evts := f.awaitNotificationEvents(t, 1)
 	assert.Equal(t, "user."+f.owner.ID+".notification", evts[0].Subject)
+	assert.Empty(t, f.published(), "one notification event only")
 	var evt UserNotificationEvent
 	require.NoError(t, json.Unmarshal(evts[0].Data, &evt))
 	assert.Equal(t, n.Excerpt, evt.Excerpt)
 	assert.Equal(t, n.ResourceID, evt.ResourceID)
 	assert.Equal(t, f.owner.ID, evt.SubscriberID)
 
-	time.Sleep(50 * time.Millisecond)
 	assert.Empty(t, f.dispatcher.getCalls(), "nothing is dispatched to an agent, broker or plugin")
 
 	// The per-recipient read path: the owner lists it with its excerpt;
@@ -317,15 +329,17 @@ func TestNotifyArtifactReviewSummary_NoExternalDelivery(t *testing.T) {
 	reg := &ChannelRegistry{entries: []channelEntry{{channel: ch, config: ChannelConfig{Type: "recording"}}}, log: slog.Default()}
 	f.srv.SetChannelRegistry(reg)
 
+	// The user-owner path is synchronous: notifyArtifactReview returns
+	// after the row is stored and the owner's event published. The event is
+	// awaited anyway before the negative checks.
 	f.srv.notifyArtifactReview(context.Background(), f.notice(hostileReviewNote))
+	evts := f.awaitNotificationEvents(t, 1)
+	assert.Equal(t, "user."+f.owner.ID+".notification", evts[0].Subject)
 	require.Len(t, f.notifications(t, f.owner), 1, "the in-app row is written")
-	time.Sleep(50 * time.Millisecond)
 	assert.Empty(t, bus.getEvents(), "nothing is published on the message broker bus")
 	assert.Zero(t, ch.count(), "nothing is handed to a notification channel")
 	assert.Empty(t, f.dispatcher.getCalls(), "nothing is dispatched to an agent")
-	for _, e := range f.published() {
-		assert.Equal(t, "user."+f.owner.ID+".notification", e.Subject)
-	}
+	assert.Empty(t, f.published(), "no further notification event")
 
 	// Control: the spies receive what is sent to them directly.
 	probe := messages.NewSystemMessage("system", "user:"+f.owner.ID, "probe", "")

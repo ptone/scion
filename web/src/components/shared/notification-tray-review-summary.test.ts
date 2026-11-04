@@ -218,6 +218,11 @@ describe('notification tray: review summary', () => {
     }
   });
 
+  it('collapses the spaces around a replaced break in a raw excerpt', () => {
+    expect(reviewSummaryExcerpt(summary({ excerpt: 'a \n b' }))).toBe('a b');
+    expect(reviewSummaryExcerpt(summary({ excerpt: ' a\r\n\u2028 \u200b b \n' }))).toBe('a b');
+  });
+
   it('keeps the kind, resource fields and excerpt of a user event', () => {
     const payload = {
       id: 'notif-review',

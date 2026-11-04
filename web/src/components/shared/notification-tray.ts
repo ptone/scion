@@ -81,13 +81,18 @@ const EXCERPT_UNSAFE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
 
 /**
  * The excerpt of a review summary row, or '' for any other row: no other
- * kind shows one. The hub already cleans it; line breaks and control or
- * format characters are removed here again so a row from anywhere else
- * still shows as one line of plain text.
+ * kind shows one. The hub already cleans it; line breaks become spaces,
+ * control and format characters are removed and runs of spaces collapse
+ * here again, so a row from anywhere else still shows as one line of plain
+ * text.
  */
 export function reviewSummaryExcerpt(n: Notification): string {
   if (n.kind !== ARTIFACT_REVIEW_SUMMARY_KIND || typeof n.excerpt !== 'string') return '';
-  return n.excerpt.replace(EXCERPT_BREAKS, ' ').replace(EXCERPT_UNSAFE, '');
+  return n.excerpt
+    .replace(EXCERPT_BREAKS, ' ')
+    .replace(EXCERPT_UNSAFE, '')
+    .replace(/ {2,}/g, ' ')
+    .trim();
 }
 
 /**
