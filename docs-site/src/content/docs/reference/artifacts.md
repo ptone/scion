@@ -160,7 +160,7 @@ The message comes from the hub and carries the reference in its text only; wheth
 - `message` names the reviewer (a user's display name, or an agent's name followed by `(agent)`) and the version: `Review summary from Alice (v3 of your artifact):`, or `Review (v3) of your artifact submitted by Alice.` when the review has no note.
 - `excerpt` holds the start of the review's note, in the reviewer's words: line breaks and runs of spaces become single spaces, control and formatting characters are removed, and text longer than 240 characters is cut and ends with `…`. It is omitted when the review has no note.
 
-The tray shows the excerpt in quotes under the message, as plain text: Markdown, HTML and links in it are not rendered. **View artifact** opens the artifact page, built from the notification's project and `resourceId`. The browser notification and `scion notifications` show the excerpt the same way, on a line of its own. The full note stays on the artifact page.
+The tray shows the excerpt in quotes under the message, as plain text: Markdown, HTML and links in it are not rendered. **View artifact** opens the artifact page, built from the notification's project and `resourceId`. An artifact that is not homed in a project gets no **View artifact** link, by design; `scion notifications` still prints its `scion://artifact/` reference. The browser notification and `scion notifications` show the excerpt the same way, on a line of its own. The full note stays on the artifact page.
 
 **Reading a review.** `scion artifact get <ref> --clean` returns the base text, `--accept` the text with every suggestion applied, and `--kind publish` the newest published version. Over the API, add `?resolve=clean` or `?resolve=accept` to a file route.
 

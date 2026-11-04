@@ -72,7 +72,7 @@ func TestClean(t *testing.T) {
 // A Clean that dropped the strip, the break case or any one category, or
 // kept a rune from any of them, fails here.
 func TestClean_StripsEveryUnsafeRune(t *testing.T) {
-	checked, breaks := 0, 0
+	checked, breaks, cc, cf := 0, 0, 0, 0
 	for r := rune(0); r <= unicode.MaxRune; r++ {
 		if r >= 0xD800 && r <= 0xDFFF {
 			continue // surrogates are not encodable
@@ -82,6 +82,12 @@ func TestClean_StripsEveryUnsafeRune(t *testing.T) {
 			continue
 		}
 		checked++
+		if unicode.Is(unicode.Cc, r) {
+			cc++
+		}
+		if unicode.Is(unicode.Cf, r) {
+			cf++
+		}
 		want := "ab"
 		if isBreak {
 			breaks++
@@ -91,9 +97,11 @@ func TestClean_StripsEveryUnsafeRune(t *testing.T) {
 			t.Errorf("%U: got %q, want %q", r, got, want)
 		}
 	}
-	// Cc has 65 code points, Cf more than 150, White_Space 25.
-	if checked < 250 || breaks < 25 {
-		t.Fatalf("checked %d code points (%d breaks); the oracles matched too little", checked, breaks)
+	// Per category, so an oracle that matched too little cannot hide behind
+	// the others: Cc is exactly 65 code points, Cf more than 150 in every
+	// Unicode version Go has shipped, White_Space 25 (Zl and Zp included).
+	if cc != 65 || cf < 150 || breaks < 25 || checked < cc+cf {
+		t.Fatalf("checked %d code points (Cc %d, Cf %d, breaks %d); an oracle matched too little", checked, cc, cf, breaks)
 	}
 }
 
