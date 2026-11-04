@@ -1188,6 +1188,7 @@ var projectOperations = []OperationSpec{
 			{Package: "pkg/hub", Function: "TestArtifactsGrantNotifyOnRoutes"},
 			{Package: "pkg/hub", Function: "TestGrantNotifyGate"},
 			{Package: "pkg/hub", Function: "TestArtifactGrantNotifyCatalogEntry"},
+			{Package: "pkg/hub", Function: "TestGrantNotifyTokenOnRoute"},
 			{Package: "pkg/artifacts", Function: "TestGrantNotifyOrder"},
 		},
 		Bearer: SessionOnly(ReasonInteractiveState),

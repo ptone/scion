@@ -3290,6 +3290,7 @@
 - `pkg/hub:TestArtifactsGrantNotifyOnRoutes`
 - `pkg/hub:TestGrantNotifyGate`
 - `pkg/hub:TestArtifactGrantNotifyCatalogEntry`
+- `pkg/hub:TestGrantNotifyTokenOnRoute`
 - `pkg/artifacts:TestGrantNotifyOrder`
 
 ---

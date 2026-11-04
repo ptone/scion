@@ -50,26 +50,34 @@ import (
 // tested in pkg/artifacts (grant_notify_test.go).
 
 // grantNoticeStore wraps the hub store to force lookup and write faults and
-// to report a user with another status (O4) without a store write.
+// to report a user with another status (O4) or a stored email the store's
+// own writes would normalise, without a store write.
 type grantNoticeStore struct {
 	store.Store
 	mu         sync.Mutex
 	getUserErr map[string]error
 	status     map[string]string
+	email      map[string]string
 	createErr  error
 }
 
 func (s *grantNoticeStore) GetUser(ctx context.Context, id string) (*store.User, error) {
 	s.mu.Lock()
 	err, status := s.getUserErr[id], s.status[id]
+	email, hasEmail := s.email[id]
 	s.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
 	u, gerr := s.Store.GetUser(ctx, id)
-	if gerr == nil && status != "" {
+	if gerr == nil && (status != "" || hasEmail) {
 		c := *u
-		c.Status = status
+		if status != "" {
+			c.Status = status
+		}
+		if hasEmail {
+			c.Email = email
+		}
 		return &c, nil
 	}
 	return u, gerr
@@ -139,7 +147,7 @@ func newGrantNotifyFixture(t *testing.T) *grantNotifyFixture {
 	createTestUserWithProjectRole(t, s, f.nonMember, "gn-non-member@test.com", f.home, store.ProjectRoleMember)
 	ensureHubMembership(ctx, s, f.granter)
 	ensureHubMembership(ctx, s, f.reader)
-	f.st = &grantNoticeStore{Store: s, getUserErr: map[string]error{}, status: map[string]string{}}
+	f.st = &grantNoticeStore{Store: s, getUserErr: map[string]error{}, status: map[string]string{}, email: map[string]string{}}
 	srv.store = f.st
 	f.events = &grantNoticeEventSpy{}
 	srv.SetEventPublisher(f.events)
@@ -238,6 +246,36 @@ func TestGrantNotifyGate(t *testing.T) {
 		assert.True(t, resp.Notified, "notifySkipped=%q", resp.NotifySkipped)
 		assert.Len(t, f.notices(t, f.reader), 1)
 	})
+}
+
+// TestGrantNotifyTokenOnRoute (D9, the bearer-matrix exclusion's reason):
+// through the hub's mux, an artifact:read+manage access token of the owner
+// posting a grant with notify gets the grant made, notifySkipped
+// not_permitted, and no notice row: a token's notify is never a refusal of
+// the grant, and never a notice.
+func TestGrantNotifyTokenOnRoute(t *testing.T) {
+	f := newGrantNotifyFixture(t)
+	enableArtifactsForTest(t, f.srv)
+	ctx := context.Background()
+	g, err := f.s.GetUser(ctx, f.granter)
+	require.NoError(t, err)
+	rec := userArtifactRequest(t, f.srv, g, http.MethodPost, "/api/v1/artifacts?name=uat.md&scope="+f.home, []byte("# uat\n"))
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	id := decodeArtifactID(t, rec)
+	user := NewAuthenticatedUser(g.ID, g.Email, g.DisplayName, g.Role, string(ClientTypeWeb))
+	token := artifactTestUAT(t, user, f.home, "artifact:read", "artifact:manage")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/artifacts/"+id+"/grants",
+		bytes.NewReader([]byte(`{"subjectKind":"principal","subjectRef":"user:`+f.reader+`","permission":"write","notify":true}`)))
+	req = req.WithContext(contextWithCredentialContext(contextWithIdentity(req.Context(), token), CredentialContext{Kind: CredentialKindUAT}))
+	rec = httptest.NewRecorder()
+	f.srv.mux.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var resp artifacts.GrantResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.False(t, resp.Notified)
+	assert.Equal(t, artifacts.NotifySkippedNotPermitted, resp.NotifySkipped)
+	assert.Equal(t, artifacts.GrantWrite, resp.Grant.Permission)
+	assert.Empty(t, f.notices(t, f.reader))
 }
 
 // TestInteractiveUserSessionMatchesScheduledSendCaller (condition F3, K33n):
@@ -445,6 +483,16 @@ func TestGrantNoticeLabelEmail(t *testing.T) {
 		f.st.getUserErr[f.granter] = errors.New("store down")
 		defer delete(f.st.getUserErr, f.granter)
 		assert.Equal(t, "a user", f.srv.grantNoticeLabel(ctx, f.reader, f.granter))
+		before := len(f.notices(t, f.reader))
+		id := uuid.NewString()
+		require.NoError(t, f.host.NotifyGrant(ctx, f.notice(id, f.reader, artifacts.GrantRead)), "the notice is never refused")
+		ns := f.notices(t, f.reader)
+		require.Len(t, ns, before+1)
+		found := false
+		for _, n := range ns {
+			found = found || n.Message == "a user shared an artifact with you (Can view): scion://artifact/"+id
+		}
+		assert.True(t, found, "a notice naming \"a user\"")
 	})
 
 	g.DisplayName = ""
@@ -469,19 +517,26 @@ func TestGrantNoticeLabelEmail(t *testing.T) {
 	assert.Equal(t, fits, f.srv.grantNoticeLabel(ctx, f.reader, f.granter), "no name, 79-rune email")
 
 	// An email that cleaning would change is left out, so it never displays
-	// as a different-looking address.
+	// as a different-looking address. The stored value is set through the
+	// store override: UpdateUser normalises emails (lower case, trimmed),
+	// but other write paths need not.
 	for _, odd := range []string{"gn-gr\u200banter@test.com", "gn-granter@test\u202e.com", " gn-granter@test.com"} {
-		g.Email = odd
-		require.NoError(t, f.s.UpdateUser(ctx, g))
+		f.st.mu.Lock()
+		f.st.email[f.granter] = odd
+		f.st.mu.Unlock()
 		assert.Equal(t, "a user", f.srv.grantNoticeLabel(ctx, f.reader, f.granter), "email %q", odd)
 	}
+	f.st.mu.Lock()
+	delete(f.st.email, f.granter)
+	f.st.mu.Unlock()
 }
 
 // TestNamedUserSubjectNeverEntersAContext (carry-forward C1, K29n): the
 // check-only identity namedUserSubject builds is called for only from the
-// allow-listed functions; in each, the identity is used at most once, as
-// the subject argument of CheckAccess, and no function of the files that
-// build or use it puts any identity into a context.
+// allow-listed functions; each binds it by a 3-name assignment, and when it
+// keeps the identity (not "_") it passes it exactly once, as the subject
+// argument of CheckAccess; no function of the files that build or use it
+// puts any identity into a context.
 func TestNamedUserSubjectNeverEntersAContext(t *testing.T) {
 	allowed := map[string]bool{
 		"artifacts_review_subject.go:ReviewSubjectAuthorize": true,
@@ -511,25 +566,28 @@ func TestNamedUserSubjectNeverEntersAContext(t *testing.T) {
 				continue
 			}
 			key := name + ":" + fd.Name.Name
-			// The identity is the second result of namedUserSubject.
+			// The identity is the second result of namedUserSubject. Every
+			// call must be the single right-hand side of a 3-name := or =
+			// assignment, so the scanner always knows the identity's name
+			// ("_" when it is discarded); any other form fails.
 			var identity string
+			bound := map[*ast.CallExpr]bool{}
 			ast.Inspect(fd.Body, func(n ast.Node) bool {
-				var lhs []ast.Expr
-				var rhs []ast.Expr
-				switch st := n.(type) {
-				case *ast.AssignStmt:
-					lhs, rhs = st.Lhs, st.Rhs
-				default:
-					if call, ok := n.(*ast.CallExpr); ok && extractCallSymbol(call) == "namedUserSubject" {
-						callers[key] = true
-					}
-					return true
-				}
-				if len(rhs) == 1 && len(lhs) == 3 {
-					if call, ok := rhs[0].(*ast.CallExpr); ok && extractCallSymbol(call) == "namedUserSubject" {
-						if id, ok := lhs[1].(*ast.Ident); ok && id.Name != "_" {
+				if st, ok := n.(*ast.AssignStmt); ok && len(st.Rhs) == 1 && len(st.Lhs) == 3 {
+					if call, ok := st.Rhs[0].(*ast.CallExpr); ok && extractCallSymbol(call) == "namedUserSubject" {
+						bound[call] = true
+						if id, ok := st.Lhs[1].(*ast.Ident); ok && id.Name != "_" {
 							identity = id.Name
 						}
+					}
+				}
+				return true
+			})
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				if call, ok := n.(*ast.CallExpr); ok && extractCallSymbol(call) == "namedUserSubject" {
+					callers[key] = true
+					if !bound[call] {
+						t.Errorf("%s calls namedUserSubject outside a 3-name assignment; the C1 scanner cannot follow the identity", key)
 					}
 				}
 				return true
@@ -561,8 +619,8 @@ func TestNamedUserSubjectNeverEntersAContext(t *testing.T) {
 				}
 				return true
 			})
-			if uses > 1 {
-				t.Errorf("%s passes the subject identity to %d calls, want at most 1 (CheckAccess)", key, uses)
+			if uses != 1 {
+				t.Errorf("%s passes the subject identity to %d calls, want exactly 1 (CheckAccess)", key, uses)
 			}
 		}
 	})
