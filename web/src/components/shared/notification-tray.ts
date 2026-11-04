@@ -1046,7 +1046,7 @@ export class ScionNotificationTray extends LitElement {
           <sl-tooltip content=${n.message} hoist>
             <span class="truncation-badge" style="display:none">...</span>
           </sl-tooltip>
-          ${excerpt ? html`<div class="notif-excerpt">\u201c${excerpt}\u201d</div>` : nothing}
+          ${excerpt ? html`<div class="notif-excerpt">“${excerpt}”</div>` : nothing}
           <div class="notif-meta">
             <span>${this.relativeTime(n.createdAt)}</span>
             ${artifactLink
