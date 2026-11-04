@@ -19,6 +19,7 @@ package entadapter
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
@@ -59,4 +60,36 @@ func TestNotificationStore_ExcerptRoundTrip(t *testing.T) {
 	require.Len(t, byID, 2)
 	assert.Equal(t, summary.Excerpt, byID[summary.ID].Excerpt)
 	assert.Empty(t, byID[plain.ID].Excerpt, "a writer that sets no excerpt stores an empty one")
+}
+
+// TestNotificationStore_ReviewSummaryNotSwept pins that a review summary
+// row is never handed to the dispatch sweep (the path that retries
+// delivery to agents and plugins) and never expired by it: the sweep reads
+// agent-subscriber rows only, and this kind is always a user row.
+func TestNotificationStore_ReviewSummaryNotSwept(t *testing.T) {
+	ctx := context.Background()
+	s := newTestNotificationStore(t)
+
+	n := newResourceNotification("user-1")
+	n.Kind = store.NotificationKindArtifactReviewSummary
+	n.Status = store.NotificationStatusArtifactReviewSubmitted
+	n.Excerpt = "Looks good."
+	n.CreatedAt = time.Now().Add(-48 * time.Hour)
+	require.NoError(t, s.CreateNotification(ctx, n))
+
+	for _, broker := range []string{"", "broker-1"} {
+		undispatched, err := s.GetUndispatchedAgentNotifications(ctx, broker)
+		require.NoError(t, err)
+		for _, u := range undispatched {
+			assert.NotEqual(t, n.ID, u.ID, "the sweep must not see a review summary row")
+		}
+	}
+	expired, err := s.ExpireStaleAgentNotifications(ctx, time.Now())
+	require.NoError(t, err)
+	assert.Zero(t, expired)
+	got, err := s.GetNotification(ctx, n.ID)
+	require.NoError(t, err)
+	assert.False(t, got.Dispatched)
+	assert.Empty(t, got.DispatchOutcome)
+	assert.Equal(t, "Looks good.", got.Excerpt)
 }

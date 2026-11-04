@@ -34,8 +34,8 @@ import (
 // in the artifacts metadata key, which is admitted only under a sender's
 // credential). Whether the owner may read the version is decided when it
 // runs the command, as for every reference. A user owner gets an in-app
-// notification instead, for a review made under a review grant
-// (notifyArtifactReviewSummary); the artifact page shows the
+// notification instead, for a review by an authorized reviewer other than
+// the owner (notifyArtifactReviewSummary); the artifact page shows the
 // review-pending state as well.
 
 // artifactReviewNoticeTimeout bounds the background delivery of one notice.

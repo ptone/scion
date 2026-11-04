@@ -65,7 +65,7 @@ const NIL_UUID = '00000000-0000-0000-0000-000000000000';
 const HOSTILE_EXCERPT =
   '[31mRED[0m ]8;;https://evil.example/click]8;; 2Jgnp.exe iso zerowidth nulbel line2 line3 ' +
   'line4 line5 **bold** [link](https://evil.example/a) <img src=x onerror=alert(1)> ' +
-  '<script>x</script> @channel <@U012345> @here https://evil.example/pro…';
+  '<script>x</script> @channel <!channel> <@U012345> @here https://evil.…';
 
 function summary(overrides: Partial<Notification> = {}): Notification {
   return {
@@ -199,6 +199,23 @@ describe('notification tray: review summary', () => {
     popups = [];
     tray.dispatchBrowserNotification(summary({ kind: 'artifact_grant' }));
     expect(popups[0].options.body).toBe(n.message);
+  });
+
+  it('strips controls and breaks a raw excerpt still carries, in the tray and the push body', () => {
+    const raw = 'Ship\u202e it\x1b[2J\nnow\u2028<!channel> @here <b>x</b>\u200b';
+    const shown = 'Ship it[2J now <!channel> @here <b>x</b>';
+    const n = summary({ excerpt: raw });
+    expect(reviewSummaryExcerpt(n)).toBe(shown);
+    const host = renderRow(n);
+    expect(host.querySelector('.notif-excerpt')?.textContent).toBe(`“${shown}”`);
+    expect(host.querySelector('.notif-excerpt')?.children).toHaveLength(0);
+    const tray: any = document.createElement('scion-notification-tray');
+    tray.dispatchBrowserNotification(n);
+    expect(popups[0].options.body).toBe(`${n.message}\n“${shown}”`);
+    for (const bad of ['\u202e', '\x1b', '\u2028', '\u200b']) {
+      expect(host.textContent).not.toContain(bad);
+      expect(popups[0].options.body).not.toContain(bad);
+    }
   });
 
   it('keeps the kind, resource fields and excerpt of a user event', () => {

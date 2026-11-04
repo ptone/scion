@@ -197,42 +197,87 @@ func TestReviewAccepted(t *testing.T) {
 		n.ReviewerKind != userU.kind || n.ReviewerRef != userU.ref || n.Ref() != FormatRef(f.id, 2) {
 		t.Fatalf("notice %+v", n)
 	}
-	// userU reviews under a write grant, not a review grant, and left no
-	// note.
-	if n.ViaReviewGrant || n.Note != "" || n.ScopeKind != ScopeKindProject || n.ScopeRef != "project-1" {
+	// userU reviews under a write grant and left no note.
+	if !n.SubmitAuthorized || n.Note != "" || n.ScopeKind != ScopeKindProject || n.ScopeRef != "project-1" {
 		t.Fatalf("notice %+v", n)
 	}
 }
 
-// TestReviewNoticeCarriesNoteAndReviewGrant: a review finalized by a
-// caller whose only write access is a review grant is announced with
-// ViaReviewGrant set and the review's summary note as written
-// (ptone/scion#6853).
-func TestReviewNoticeCarriesNoteAndReviewGrant(t *testing.T) {
-	f := newReviewFixture(t)
-	f.host.allow(reviewer, "project-1", PermissionRead)
-	f.grant(reviewer, GrantReview)
-	const note = "Ship it.\nOne question on the chart."
+// startNotedReview starts a review version by p with the given note and
+// uploads its files. It returns the review's seq and its base.
+func (f *reviewFixture) startNotedReview(p principal, note string) (seq, base int) {
+	f.t.Helper()
 	files := with(f.v1, "plan.md", reviewMarked)
 	req := files.manifest("plan.md")
 	req.Kind = VersionKindReview
 	req.Note = note
-	base := f.current()
-	pend := f.createPending(reviewer, "/api/v1/artifacts/"+f.id+"/versions", req)
+	base = f.current()
+	pend := f.createPending(p, "/api/v1/artifacts/"+f.id+"/versions", req)
 	for _, path := range pend.Upload.Required {
-		if rec := f.put(reviewer, f.id, pend.Version.Seq, path, files[path]); rec.Code != http.StatusNoContent {
-			t.Fatalf("PUT %s: %d %s", path, rec.Code, rec.Body.String())
+		if rec := f.put(p, f.id, pend.Version.Seq, path, files[path]); rec.Code != http.StatusNoContent {
+			f.t.Fatalf("PUT %s: %d %s", path, rec.Code, rec.Body.String())
 		}
 	}
-	if r := f.result(f.finalizeReview(reviewer, pend.Version.Seq, base)); r.code != http.StatusOK {
-		t.Fatalf("finalize: %d %s", r.code, r.body)
+	return pend.Version.Seq, base
+}
+
+// TestReviewNoticeSubmitAuthorized: a review finalized by a non-owner whom
+// the finalize request admits to submit a review (a review, write or admin
+// grant) is announced with SubmitAuthorized set and the review's summary
+// note as written (ptone/scion#6853).
+func TestReviewNoticeSubmitAuthorized(t *testing.T) {
+	const note = "Ship it.\nOne question on the chart."
+	for _, c := range []struct {
+		name string
+		p    principal
+		perm string
+	}{
+		{"review grant", reviewer, GrantReview},
+		{"write grant", member, GrantWrite},
+		{"admin grant", projAdmin, GrantAdmin},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newReviewFixture(t)
+			f.host.allow(c.p, "project-1", PermissionRead)
+			f.grant(c.p, c.perm)
+			seq, base := f.startNotedReview(c.p, note)
+			if r := f.result(f.finalizeReview(c.p, seq, base)); r.code != http.StatusOK {
+				t.Fatalf("finalize: %d %s", r.code, r.body)
+			}
+			if len(f.notices) != 1 {
+				t.Fatalf("notices %+v", f.notices)
+			}
+			n := f.notices[0]
+			if !n.SubmitAuthorized || n.Note != note || n.ReviewerRef != c.p.ref || n.OwnerRef != agentA.ref {
+				t.Fatalf("notice %+v", n)
+			}
+		})
 	}
-	if len(f.notices) != 1 {
-		t.Fatalf("notices %+v", f.notices)
+}
+
+// TestReviewNoticeUnauthorizedRefused: authorization is decided by the
+// finalize request itself. A reviewer whose review grant is removed after
+// starting the review is refused at finalize and nothing is announced; a
+// reader with no grant cannot start a review at all.
+func TestReviewNoticeUnauthorizedRefused(t *testing.T) {
+	f := newReviewFixture(t)
+	f.host.allow(reviewer, "project-1", PermissionRead)
+	f.grant(reviewer, GrantReview)
+	seq, base := f.startNotedReview(reviewer, "late")
+	if _, err := f.db.Exec("DELETE FROM artifact_grant WHERE id = ?", "g-"+reviewer.ref); err != nil {
+		t.Fatal(err)
 	}
-	n := f.notices[0]
-	if !n.ViaReviewGrant || n.Note != note || n.ReviewerRef != reviewer.ref || n.OwnerRef != agentA.ref {
-		t.Fatalf("notice %+v", n)
+	if r := f.result(f.finalizeReview(reviewer, seq, base)); r.code != http.StatusForbidden && r.code != http.StatusNotFound {
+		t.Fatalf("finalize without access: %d %s", r.code, r.body)
+	}
+	f.host.allow(member, "project-1", PermissionRead)
+	req := with(f.v1, "plan.md", reviewMarked).manifest("plan.md")
+	req.Kind = VersionKindReview
+	if rec := f.postJSON(&member, "/api/v1/artifacts/"+f.id+"/versions", req); rec.Code != http.StatusForbidden && rec.Code != http.StatusNotFound {
+		t.Fatalf("start without access: %d %s", rec.Code, rec.Body.String())
+	}
+	if f.current() != base || len(f.notices) != 0 {
+		t.Fatalf("current %d notices %+v", f.current(), f.notices)
 	}
 }
 

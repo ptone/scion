@@ -172,10 +172,12 @@ type ReviewNotice struct {
 	// (at most maxNoteRunes runes). It is the reviewer's text: the host
 	// must clean it before showing it anywhere.
 	Note string
-	// ViaReviewGrant is true when the reviewer finalized the review under
-	// a review grant, checked by the finalize request itself, and held no
-	// write access (ptone/scion#6853).
-	ViaReviewGrant bool
+	// SubmitAuthorized is true when the finalize request that made the
+	// review current admitted the reviewer to append a review version
+	// (writeAccess.allowsKind: a review, write or admin grant), decided by
+	// that request itself, and the reviewer is not the owner
+	// (ptone/scion#6853).
+	SubmitAuthorized bool
 }
 
 // Ref is the notice's versioned reference.
@@ -204,7 +206,8 @@ func (s *Service) notifyReview(ctx context.Context, a *Artifact, v *Version, acc
 		ArtifactID: a.ID, Seq: v.Seq, ScopeKind: a.ScopeKind, ScopeRef: a.ScopeRef,
 		OwnerKind: a.OwnerKind, OwnerRef: a.OwnerRef,
 		ReviewerKind: v.CreatedByKind, ReviewerRef: v.CreatedByRef,
-		Note: v.Note, ViaReviewGrant: access == accessReviewGrant,
+		Note:             v.Note,
+		SubmitAuthorized: access.allowsKind(VersionKindReview) && access != accessOwner,
 	})
 }
 

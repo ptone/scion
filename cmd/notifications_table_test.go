@@ -163,7 +163,12 @@ func TestWriteNotificationsTable_SanitisesOtherPrincipalsText(t *testing.T) {
 func TestWriteNotificationsTable_ReviewSummaryExcerpt(t *testing.T) {
 	const otherID = "deadbeef-0000-4000-8000-000000000666"
 	msg := "Review summary from Alice (v3 of your artifact):"
-	excerpt := "Ship it\x1b[2J\n\u202egnp.exe scion://artifact/" + otherID + " <b>x</b> @channel"
+	// A raw hostile excerpt (the hub cleans it when the row is built; the
+	// CLI does not rely on that): ESC, a newline, an RTL override, a
+	// reference to another artifact, HTML and Markdown, mention tokens and
+	// more than the 240-rune cap.
+	excerpt := "Ship it\x1b[2J\n\u202egnp.exe scion://artifact/" + otherID + " <b>x</b> **y** [z](https://evil.example/) <!channel> @here @channel " +
+		strings.Repeat("long ", 60)
 	n := hubclient.Notification{
 		ID:           "0123456789abcdef",
 		AgentID:      tableTestNilUUID,
@@ -185,6 +190,9 @@ func TestWriteNotificationsTable_ReviewSummaryExcerpt(t *testing.T) {
 	wantExcerpt := tableLine("", "", "", "", "\u201c"+safeText(excerpt)+"\u201d")
 	if lines[3]+"\n" != wantExcerpt {
 		t.Errorf("excerpt line:\n got %q\nwant %q", lines[3], wantExcerpt)
+	}
+	if !strings.Contains(lines[3], "<!channel> @here") || !strings.Contains(lines[3], "<b>x</b> **y**") {
+		t.Errorf("mentions and markup must stay literal text: %q", lines[3])
 	}
 	for _, bad := range []string{"\x1b", "\u202e"} {
 		if strings.Contains(out, bad) {

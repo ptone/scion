@@ -2531,8 +2531,8 @@ const (
 	// (ptone/scion#5145). ResourceType is NotificationResourceArtifact.
 	NotificationKindArtifactGrant = "artifact_grant"
 	// NotificationKindArtifactReviewSummary: a review of a user's artifact
-	// was finalized by a reviewer holding a review grant
-	// (ptone/scion#6853). The artifact's owner is the only recipient.
+	// was finalized by a reviewer other than the owner whom the finalize
+	// request admitted to submit it (ptone/scion#6853). The artifact's owner is the only recipient.
 	// ResourceType is NotificationResourceArtifact, and Excerpt holds the
 	// cleaned start of the review's summary note, or is empty when the
 	// review has none.

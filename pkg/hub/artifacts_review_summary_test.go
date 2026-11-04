@@ -19,15 +19,19 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/plaintext"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -52,7 +56,7 @@ var hostileReviewNote = "\x1b[31mRED\x1b[0m \x1b]8;;https://evil.example/\x07cli
 	"\u202egnp.exe\u202c \u2066iso\u2069 zero\u200bwidth\ufeff nul\x00bel\x07\r\n" +
 	"line2\u2028line3\u2029line4\u0085line5\t\v\f " +
 	"**bold** [link](https://evil.example/a) <img src=x onerror=alert(1)> <script>x</script> " +
-	"@channel <@U012345> @here " +
+	"@channel <!channel> <@U012345> @here " +
 	"https://evil.example/projects/" + otherProjectID + "/artifacts/" + otherArtifactID + " " +
 	"scion://artifact/" + otherArtifactID + " /projects/" + otherProjectID + "/artifacts/" + otherArtifactID + " " +
 	"bad\xff\xfeutf8 " + strings.Repeat("filler ", 80) + "TAIL-NOT-SHOWN"
@@ -62,7 +66,7 @@ var hostileReviewNote = "\x1b[31mRED\x1b[0m \x1b]8;;https://evil.example/\x07cli
 // exact string, so the two stay on one fixture.
 const hostileReviewExcerpt = "[31mRED[0m ]8;;https://evil.example/click]8;; 2Jgnp.exe iso zerowidth nulbel line2 line3 " +
 	"line4 line5 **bold** [link](https://evil.example/a) <img src=x onerror=alert(1)> " +
-	"<script>x</script> @channel <@U012345> @here https://evil.example/pro…"
+	"<script>x</script> @channel <!channel> <@U012345> @here https://evil.…"
 
 // assertCleanText fails when s holds a rune cleanNotificationText must
 // remove, or more than maxRunes runes.
@@ -79,63 +83,14 @@ func assertCleanText(t *testing.T, s string, maxRunes int) {
 	assert.Equal(t, strings.TrimSpace(s), s, "trimmed")
 }
 
-func TestCleanNotificationText(t *testing.T) {
-	for _, c := range []struct {
-		name, in, want string
-		max            int
-	}{
-		{"plain", "Looks good.", "Looks good.", 240},
-		{"trim and collapse", "  a \t\n\r b  \u2028\u2029 c  ", "a b c", 240},
-		{"ESC sequence", "\x1b[31mred\x1b[0m", "[31mred[0m", 240},
-		{"bidi override", "a\u202eb\u202cc", "abc", 240},
-		{"isolates and zero width", "\u2066a\u2069\u200bb\ufeffc\u200d", "abc", 240},
-		{"NUL BEL DEL C1", "a\x00b\x07c\x7fd\u0085e\u009bf", "abcd ef", 240},
-		{"invalid UTF-8", "a\xffb\xc3", "ab", 240},
-		{"markdown and HTML kept as text", "**b** <i>x</i>", "**b** <i>x</i>", 240},
-		{"mention kept as text", "@channel <@U1>", "@channel <@U1>", 240},
-		{"only unsafe runes", "\x1b\u202e\u200b\x00", "", 240},
-		{"only whitespace", " \n\t\u2028 ", "", 240},
-		{"at cap", "abcde", "abcde", 5},
-		{"over cap", "abcdef", "abcd…", 5},
-		{"over cap trims space before ellipsis", "abc defgh", "abc…", 5},
-		{"cap counts runes not bytes", "ééééééé", "éééé…", 5},
-		{"zero cap", "abc", "", 0},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			got := cleanNotificationText(c.in, c.max)
-			assert.Equal(t, c.want, got)
-			assertCleanText(t, got, max(c.max, 0))
-		})
+// TestCleanNotificationText_UsesPlaintextClean pins the hub's strip to
+// plaintext.Clean, whose own tests (pkg/util/plaintext) hold the table,
+// the every-code-point kill test and the mutant set.
+func TestCleanNotificationText_UsesPlaintextClean(t *testing.T) {
+	for _, in := range []string{hostileReviewNote, "", "  a\u2028b\u202ec  ", strings.Repeat("x", 300)} {
+		assert.Equal(t, plaintext.Clean(in, reviewExcerptMaxRunes), cleanNotificationText(in, reviewExcerptMaxRunes))
 	}
-}
-
-// TestCleanNotificationText_StripsEveryUnsafeRune is the kill test for the
-// build-time strip: for every code point that is a control, format or
-// separator character, or whitespace, a note holding it between two
-// letters comes out with the letters and without it.
-func TestCleanNotificationText_StripsEveryUnsafeRune(t *testing.T) {
-	checked := 0
-	for r := rune(0); r <= unicode.MaxRune; r++ {
-		if r >= 0xD800 && r <= 0xDFFF {
-			continue // surrogates are not encodable
-		}
-		ws := unicode.IsSpace(r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r)
-		if !ws && !isDisplayUnsafeRune(r) {
-			continue
-		}
-		checked++
-		got := cleanNotificationText("a"+string(r)+"b", reviewExcerptMaxRunes)
-		want := "ab"
-		if ws {
-			want = "a b"
-		}
-		if got != want {
-			t.Errorf("%U: got %q, want %q", r, got, want)
-		}
-	}
-	// Cc alone has 65 code points and Cf more than 150; a filter that
-	// matched nothing must not pass.
-	assert.Greater(t, checked, 250, "unsafe code points checked")
+	assert.Equal(t, hostileReviewExcerpt, cleanNotificationText(hostileReviewNote, reviewExcerptMaxRunes))
 }
 
 func summaryNotice(note string) artifacts.ReviewNotice {
@@ -144,7 +99,7 @@ func summaryNotice(note string) artifacts.ReviewNotice {
 		ScopeKind: artifacts.ScopeKindProject, ScopeRef: summaryProjectID,
 		OwnerKind: artifacts.PrincipalKindUser, OwnerRef: "owner",
 		ReviewerKind: artifacts.PrincipalKindUser, ReviewerRef: "reviewer",
-		Note: note, ViaReviewGrant: true,
+		Note: note, SubmitAuthorized: true,
 	}
 }
 
@@ -162,7 +117,7 @@ func TestBuildReviewSummaryNotification_HostileNote(t *testing.T) {
 	assert.True(t, strings.HasPrefix(n.Excerpt, "[31mRED[0m "), "%q", n.Excerpt)
 	assert.Contains(t, n.Excerpt, "line2 line3 line4 line5", "line breaks become single spaces")
 	assert.Contains(t, n.Excerpt, "<img src=x onerror=alert(1)>", "markup is kept as literal text; clients render it as text")
-	assert.Contains(t, n.Excerpt, "@channel <@U012345>", "mentions are kept as literal text")
+	assert.Contains(t, n.Excerpt, "@channel <!channel> <@U012345> @here", "mentions are kept as literal text")
 
 	assert.Equal(t, "Review summary from Alice (v3 of your artifact):", n.Message)
 	assert.Equal(t, store.NotificationKindArtifactReviewSummary, n.Kind)
@@ -325,14 +280,69 @@ func TestNotifyArtifactReviewSummary_OwnerOnly(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), n.ID)
 }
 
+// summaryRecordingChannel is a notification channel (the path chat
+// integrations such as Slack, Telegram, Discord or email use without a
+// message broker) that records what it is given.
+type summaryRecordingChannel struct {
+	mu   sync.Mutex
+	msgs []*messages.StructuredMessage
+}
+
+func (c *summaryRecordingChannel) Name() string    { return "recording" }
+func (c *summaryRecordingChannel) Validate() error { return nil }
+func (c *summaryRecordingChannel) Deliver(_ context.Context, msg *messages.StructuredMessage) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.msgs = append(c.msgs, msg)
+	return nil
+}
+
+func (c *summaryRecordingChannel) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.msgs)
+}
+
+// TestNotifyArtifactReviewSummary_NoExternalDelivery: with a message broker
+// (whose bus feeds the chat plugins) and a notification channel registry
+// both configured on the server, a review summary reaches neither; only the
+// owner's in-app row and subject carry it. The control at the end shows
+// both spies are wired: a direct publish and dispatch reach them.
+func TestNotifyArtifactReviewSummary_NoExternalDelivery(t *testing.T) {
+	f := newSummaryFixture(t)
+	bus := &spyBrokerBus{}
+	f.srv.SetMessageBrokerProxy(NewMessageBrokerProxy(bus, f.st, f.srv.events,
+		func() AgentDispatcher { return f.dispatcher }, slog.Default()))
+	ch := &summaryRecordingChannel{}
+	reg := &ChannelRegistry{entries: []channelEntry{{channel: ch, config: ChannelConfig{Type: "recording"}}}, log: slog.Default()}
+	f.srv.SetChannelRegistry(reg)
+
+	f.srv.notifyArtifactReview(context.Background(), f.notice(hostileReviewNote))
+	require.Len(t, f.notifications(t, f.owner), 1, "the in-app row is written")
+	time.Sleep(50 * time.Millisecond)
+	assert.Empty(t, bus.getEvents(), "nothing is published on the message broker bus")
+	assert.Zero(t, ch.count(), "nothing is handed to a notification channel")
+	assert.Empty(t, f.dispatcher.getCalls(), "nothing is dispatched to an agent")
+	for _, e := range f.published() {
+		assert.Equal(t, "user."+f.owner.ID+".notification", e.Subject)
+	}
+
+	// Control: the spies receive what is sent to them directly.
+	probe := messages.NewSystemMessage("system", "user:"+f.owner.ID, "probe", "")
+	require.NoError(t, f.srv.GetMessageBrokerProxy().PublishUserMessage(context.Background(), summaryProjectID, f.owner.ID, probe))
+	f.srv.currentChannelRegistry().Dispatch(context.Background(), probe)
+	assert.Len(t, bus.getEvents(), 1)
+	assert.Equal(t, 1, ch.count())
+}
+
 // TestNotifyArtifactReviewSummary_Skipped: no summary is written for a
-// review made without a review grant, by the owner, of an agent's artifact,
+// review the finalize request did not authorize, by the owner, of an agent's artifact,
 // for an owner that does not exist, or for an artifact id that is not a
 // canonical UUID.
 func TestNotifyArtifactReviewSummary_Skipped(t *testing.T) {
 	f := newSummaryFixture(t)
 	for name, mutate := range map[string]func(*artifacts.ReviewNotice){
-		"no review grant": func(n *artifacts.ReviewNotice) { n.ViaReviewGrant = false },
+		"not authorized at submit": func(n *artifacts.ReviewNotice) { n.SubmitAuthorized = false },
 		"owner's own review": func(n *artifacts.ReviewNotice) {
 			n.ReviewerKind, n.ReviewerRef = n.OwnerKind, n.OwnerRef
 		},

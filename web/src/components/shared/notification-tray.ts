@@ -49,8 +49,8 @@ import { visibleInterval } from '../../client/visible-interval.js';
 export const SCHEDULE_BLOCKED_STATUS = 'SCHEDULE_BLOCKED';
 
 /**
- * A review of one of the user's artifacts was finalized by a reviewer with a
- * review grant (ptone/scion#6853). The row's `excerpt` is the start of the
+ * A review of one of the user's artifacts was finalized by another principal
+ * allowed to review it (ptone/scion#6853). The row's `excerpt` is the start of the
  * reviewer's summary note, attributed by `message`; its artifact comes from
  * `resourceId` and `projectId` only.
  */
@@ -74,18 +74,30 @@ function hasAgentLink(agentId: string | undefined): boolean {
 /** A lowercase canonical UUID, as the hub writes ids. */
 const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
+/** Line breaks the excerpt shows as a space. */
+const EXCERPT_BREAKS = /[\t\n\v\f\r\u0085\u2028\u2029]+/g;
+/** Control and format characters, removed from the excerpt. */
+const EXCERPT_UNSAFE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+
 /**
  * The excerpt of a review summary row, or '' for any other row: no other
- * kind shows one.
+ * kind shows one. The hub already cleans it; line breaks and control or
+ * format characters are removed here again so a row from anywhere else
+ * still shows as one line of plain text.
  */
 export function reviewSummaryExcerpt(n: Notification): string {
-  return n.kind === ARTIFACT_REVIEW_SUMMARY_KIND && typeof n.excerpt === 'string' ? n.excerpt : '';
+  if (n.kind !== ARTIFACT_REVIEW_SUMMARY_KIND || typeof n.excerpt !== 'string') return '';
+  return n.excerpt.replace(EXCERPT_BREAKS, ' ').replace(EXCERPT_UNSAFE, '');
 }
 
 /**
  * The artifact page path of a review summary row, built from its project and
  * resource fields alone (both canonical UUIDs, the project not the nil
- * UUID), or null. The message and excerpt are never read.
+ * UUID), or null. The message and excerpt are never read. It is the path
+ * artifactPagePath (client/artifacts.ts) builds, written out here so the
+ * tray does not load the artifacts client. An artifact not homed in a
+ * project (the hub writes the nil UUID) deliberately gets no link; the CLI
+ * still prints its scion://artifact/ reference.
  */
 export function reviewSummaryLink(n: Notification): string | null {
   if (n.kind !== ARTIFACT_REVIEW_SUMMARY_KIND || n.resourceType !== 'artifact') return null;
