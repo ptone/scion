@@ -643,6 +643,7 @@ func compileSchemas() {
 				"remote_image_max_bytes":       map[string]interface{}{"type": "integer", "minimum": 1},
 				"remote_image_fetch_timeout_s": map[string]interface{}{"type": "integer", "minimum": 1, "maximum": ArtifactsMaxRemoteImageTotalBudgetS},
 				"remote_image_total_budget_s":  map[string]interface{}{"type": "integer", "minimum": 1, "maximum": ArtifactsMaxRemoteImageTotalBudgetS},
+				"link_origin":                  map[string]interface{}{"type": "string"},
 			},
 			"additionalProperties": false,
 		},
@@ -1108,6 +1109,9 @@ func validateCrossField(section string, doc json.RawMessage) []config.Validation
 	}
 	if cfg.RemoteImagesInvalid != "" {
 		return []config.ValidationError{{Message: "artifacts settings: " + cfg.RemoteImagesInvalid}}
+	}
+	if cfg.LinkOriginInvalid != "" {
+		return []config.ValidationError{{Path: "link_origin", Message: cfg.LinkOriginInvalid}}
 	}
 	return nil
 }
