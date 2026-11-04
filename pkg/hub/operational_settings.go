@@ -309,6 +309,9 @@ type OperationalSettings struct {
 	// remoteImagesWarnedRev is the artifacts revision whose invalid remote
 	// image setting was last logged.
 	remoteImagesWarnedRev atomic.Int64
+	// linkOriginWarnedRev is the artifacts revision whose invalid
+	// link_origin was last logged.
+	linkOriginWarnedRev atomic.Int64
 
 	// Event publisher for cross-replica propagation: LISTEN/NOTIFY on
 	// postgres, in-process channel on SQLite; nil until SetEventPublisher.
@@ -2393,6 +2396,12 @@ func (o *OperationalSettings) Artifacts() opsettings.ArtifactsConfig {
 		// check existed) turns remote images off. Say so once per revision.
 		slog.Warn("artifacts settings: remote images are off because a remote image setting is invalid",
 			"problem", cfg.RemoteImagesInvalid, "revision", state.Revision)
+	}
+	if cfg.LinkOriginInvalid != "" && o.linkOriginWarnedRev.Swap(state.Revision) != state.Revision {
+		// Writes refuse such a value; a stored one is ignored and share
+		// links stay on the hub origin. Say so once per revision.
+		slog.Warn("artifacts settings: link_origin is ignored because it is invalid; share links stay on the hub origin",
+			"problem", cfg.LinkOriginInvalid, "revision", state.Revision)
 	}
 	return cfg
 }

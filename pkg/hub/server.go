@@ -2407,6 +2407,11 @@ type Server struct {
 	// Dedicated artifact decision logger (nil = entries are discarded)
 	artifactDecisionLog *slog.Logger
 
+	// artifactLinkOriginWarned is the artifacts.link_origin value whose
+	// conflict with the hub's public origin was last logged
+	// (artifactLinkOrigin), so each value is warned about once.
+	artifactLinkOriginWarned atomic.Value
+
 	// missingAgents and lifecycleOps back the heartbeat missing-container
 	// reconcile (broker_heartbeat_reconcile.go). Zero values are ready to use.
 	missingAgents missingAgentTracker
@@ -8030,6 +8035,13 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	// tokens, artifact view capabilities) are not traced, so the path
 	// never reaches a span attribute.
 	h = otelhttp.NewHandler(h, "hub", otelhttp.WithFilter(traceableRequest))
+
+	// Outermost of all: the secondary link origin's guard (ptone/scion#7107
+	// phase 2b). On a request whose Host is artifacts.link_origin it serves
+	// only the share and view routes and removes every credential header,
+	// before any other middleware, authentication included, sees the
+	// request. It must stay the last wrap here.
+	h = s.LinkOriginGuard(h)
 
 	return h
 }
