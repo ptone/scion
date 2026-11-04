@@ -1926,10 +1926,11 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			// report of the current run (or of none) comes from the run
 			// being replaced. The store drops its status fields on the
 			// locked row; this mirror drops them before the reservation
-			// reconcile below as well. The reconcile does not depend on
-			// it: a heartbeat cannot move a stopped, error, halted or
-			// suspended row to a counted phase, and the releases it calls
-			// refuse a row that holds a restart claim (NoStartKindClaim).
+			// reconcile below as well, as defence in depth. The reconcile
+			// does not depend on it: a heartbeat cannot move a stopped,
+			// error, halted or suspended row to a counted phase, and the
+			// releases it calls refuse a row that holds a restart claim
+			// (NoStartKindClaim).
 			guardRestartWindowReport(agent, &statusUpdate, statusUpdate)
 
 			// Reconcile the max_agents_per_broker reservation against the

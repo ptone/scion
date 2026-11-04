@@ -236,9 +236,10 @@ func TestRestartWindow_SelfReportMarksAgentTokenForStore(t *testing.T) {
 // TestRestartWindow_OldRunHeartbeatTakesNoSlotDuringRestart: on a row whose
 // stored phase is uncounted (stopped) during a restart's stop leg, the
 // replaced run's "running" heartbeat does not re-reserve a broker slot, and
-// the store keeps the phase stopped. A heartbeat only confirms a terminal
-// stored phase, so the reported phase never reaches the reservation
-// reconcile; the handler's restart-window drop does not decide this case.
+// the store keeps the phase stopped. A heartbeat never moves a terminal
+// stored phase to a counted one (its running here is not applied), so the
+// reported phase never reaches the reservation reconcile; the handler's
+// restart-window drop does not decide this case.
 func TestRestartWindow_OldRunHeartbeatTakesNoSlotDuringRestart(t *testing.T) {
 	f := newHaltFixture(t)
 	setBrokerAgentCeiling(t, f.s, 2)
