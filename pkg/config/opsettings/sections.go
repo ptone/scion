@@ -169,6 +169,12 @@ type ArtifactsSettings struct {
 	// one version, in seconds. At least RemoteImageFetchTimeoutS and at most
 	// ArtifactsMaxRemoteImageTotalBudgetS.
 	RemoteImageTotalBudgetS *int `json:"remote_image_total_budget_s,omitempty"`
+	// LinkOrigin is the operator's secondary origin for share links, an
+	// https://host[:port] origin that routes back to this hub (see
+	// ValidateLinkOrigin). Empty, the default, keeps every link on the hub
+	// origin. When set, new links are offered on it and the hub confines
+	// requests on it to the share and view routes.
+	LinkOrigin *string `json:"link_origin,omitempty"`
 }
 
 // Compiled defaults for ArtifactsSettings.
@@ -218,6 +224,13 @@ type ArtifactsConfig struct {
 	// RemoteImagesInvalid names the problem when a remote image value is
 	// invalid; remote images are then off and the rest of the service runs.
 	RemoteImagesInvalid string
+	// LinkOrigin is the normalized secondary link origin, or "" when none
+	// is set or the stored value is invalid.
+	LinkOrigin string
+	// LinkOriginInvalid names the problem when the stored link_origin is
+	// invalid; links then stay on the hub origin and the rest of the
+	// service runs.
+	LinkOriginInvalid string
 	// Malformed is true when the stored document could not be used. The
 	// service is then disabled and the limits are the compiled defaults.
 	Malformed bool
@@ -259,7 +272,8 @@ func MalformedArtifactsConfig() ArtifactsConfig {
 // returns MalformedArtifactsConfig and an error naming the problem, so the
 // service fails closed rather than running with a limit nobody set. An
 // invalid remote image value only turns remote images off
-// (RemoteImagesEnabled false, RemoteImagesInvalid set).
+// (RemoteImagesEnabled false, RemoteImagesInvalid set), and an invalid
+// link_origin is ignored (LinkOrigin "", LinkOriginInvalid set).
 //
 // Omitted remote image caps default to the smaller of their compiled
 // default and the file limits.
@@ -369,6 +383,17 @@ func (a ArtifactsSettings) Resolve() (ArtifactsConfig, error) {
 	if remoteErr != nil {
 		c.RemoteImagesEnabled = false
 		c.RemoteImagesInvalid = remoteErr.Error()
+	}
+
+	// An invalid link origin is ignored: links stay on the hub origin and
+	// the rest of the service runs.
+	if a.LinkOrigin != nil {
+		lo, err := ValidateLinkOrigin(*a.LinkOrigin)
+		if err != nil {
+			c.LinkOriginInvalid = err.Error()
+		} else {
+			c.LinkOrigin = lo
+		}
 	}
 	return c, nil
 }
